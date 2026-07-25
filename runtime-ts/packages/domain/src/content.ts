@@ -188,6 +188,33 @@ export function releaseWorkspaceLease(input: {
   return sealEntity("Workspace", { ...data, updatedAt: input.now });
 }
 
+/**
+ * 仅供恢复协调器在数据库时钟确认租约已过期后清理写入者；普通 Worker 不能用它绕过栅栏。
+ * Repository 仍必须以 rootRunId、epoch、expiresAt 和当前数据库时钟做原子条件写。
+ */
+export function expireWorkspaceLease(input: {
+  readonly workspace: Workspace;
+  readonly rootRun: Run;
+  readonly epoch: number;
+  readonly now: IsoTimestamp;
+}): Workspace {
+  assertRunOwnsWorkspace(input.workspace, input.rootRun);
+  domainInvariant(
+    input.workspace.writerLease !== undefined &&
+      input.workspace.writerLease.rootRunId === input.rootRun.id &&
+      input.workspace.writerLease.epoch === input.epoch,
+    "OWNERSHIP_MISMATCH",
+    "恢复目标不是当前工作区写租约",
+  );
+  domainInvariant(
+    timestampMillis(input.workspace.writerLease.expiresAt) <= timestampMillis(input.now),
+    "INVALID_STATE_TRANSITION",
+    "仍有效的工作区写租约不能由恢复协调器清理",
+  );
+  const { writerLease: _expired, ...data } = input.workspace;
+  return sealEntity("Workspace", { ...data, updatedAt: input.now });
+}
+
 function assertWorkspaceLease(
   workspace: Workspace,
   rootRun: Run,

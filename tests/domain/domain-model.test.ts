@@ -19,6 +19,7 @@ import {
   createUser,
   createWorkspace,
   DomainError,
+  expireWorkspaceLease,
   isoTimestamp,
   membershipId,
   planId,
@@ -549,6 +550,27 @@ describe("不可变版本与 Agent Tree", () => {
       now: later,
     });
     expect(workspace.writerLease?.epoch).toBe(2);
+  });
+
+  it("只有恢复协调器确认 DB 时钟已过期后才能清理 Workspace lease", () => {
+    const { thread } = fixture("lease_recovery");
+    const run = runningRun("lease_recovery");
+    const workspace = acquireWorkspaceLease({
+      workspace: createWorkspace({ id: workspaceId("workspace_lease_recovery"), thread, now }),
+      rootRun: run,
+      epoch: 1,
+      expiresAt: leaseExpiry,
+      now: later,
+    });
+
+    expectDomainError(
+      () => expireWorkspaceLease({ workspace, rootRun: run, epoch: 1, now: later }),
+      "INVALID_STATE_TRANSITION",
+    );
+    expect(
+      expireWorkspaceLease({ workspace, rootRun: run, epoch: 1, now: afterLeaseExpiry })
+        .writerLease,
+    ).toBeUndefined();
   });
 
   it("Workspace 恢复强制零版本与 currentRevisionId 同时为空", () => {

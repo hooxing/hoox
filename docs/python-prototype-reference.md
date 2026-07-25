@@ -20,7 +20,7 @@
 | Shell、单次写入、工具输出和事件内容有硬上限 | 重新设计 | 限额归入 Tool Policy；模型可见截断与完整 Trace Blob 分离 | 大输出、Blob 完整性测试 |
 | 用户取消会在规划和工具边界检查，并尝试 kill Sandbox | 重新设计 | Pi abort + Tool Call 状态 + Sandbox kill；取消幂等且区分结果未知 | 调用前/中/后取消故障注入 |
 | 事件对 Worker 异常只暴露安全化错误 | 保留 | 公开错误码与内部 Trace 分开，日志清除密钥和环境变量 | API 错误一致性测试 |
-| 非终态 Run 在进程重启后统一标记 interrupted | 重新设计 | 使用持久 Lease/心跳进入 interrupted/recovering，再按工具和检查点判断 | 双 Worker 接管测试 |
+| 非终态 Run 在进程重启后统一标记 interrupted | 放弃 | Run 保持 Domain 六态；独立 ExecutionAttempt 结合双 Lease 和 checkpoint 进入 recovery_required，由恢复协调器决策 | 双 Worker、模型副作用 checkpoint 与恢复测试 |
 | 取消 queued Run 不启动 Worker；重复取消幂等 | 保留 | 通过条件状态迁移和请求幂等键保证 | 并发取消测试 |
 | Run 状态和事件写到本地 JSON/JSONL | 放弃 | PostgreSQL 保存状态、索引和追加式 Rollout；不提供兼容读取 | 依赖/格式扫描 |
 | 以 Run ID 目录作为全部数据顶层 | 放弃 | Tenant → Thread → Run/Workspace 的领域所有权 | 所有权契约测试 |

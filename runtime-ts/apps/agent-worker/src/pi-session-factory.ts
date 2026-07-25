@@ -5,7 +5,8 @@ import type { AgentSessionFactoryPort, AgentTurnOutcome, WorkerAgentSessionPort 
 
 /**
  * Worker 的生产 Pi 绑定只返回应用层窄接口；原始 AgentSession 和 compact() 从未跨越适配层。
- * waiting 由后续 request_user_input 工具适配器产生，本绑定当前把正常 Pi settle 视为 completed。
+ * waiting 由 request_user_input 工具适配器产生；恢复时由持久 RolloutProjection 构造新 Session，
+ * 再用 prompt 真正启动模型，绝不对空 Session 调 followUp。
  */
 export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
   constructor(
@@ -20,11 +21,11 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       model: this.model,
       modelRuntime: this.modelRuntime,
       sandbox: input.sandbox,
+      rolloutProjection: input.rolloutProjection,
     });
     return {
-      run: async (turn): Promise<AgentTurnOutcome> => {
-        if (turn.mode === "follow_up") await controller.followUp(turn.text);
-        else await controller.prompt(turn.text);
+      runPrompt: async (text): Promise<AgentTurnOutcome> => {
+        await controller.prompt(text);
         return { kind: "completed" };
       },
       abort: () => controller.abort(),

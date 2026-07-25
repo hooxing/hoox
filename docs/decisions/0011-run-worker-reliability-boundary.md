@@ -1,112 +1,130 @@
-# ADR-0009：Run Worker 状态机、栅栏租约与恢复边界
+# ADR-0009：Run Worker 双栅栏、ExecutionAttempt 与恢复 Saga
 
-- 状态：已接受
+- 状态：已接受（2026-07-26 审查后重写）
 - 日期：2026-07-26
 - 决策者：项目架构审阅
 - 关联任务：M1-05、M2-05、M5-01、M5-02、M5-03
-- 替代关系：无
+- 替代关系：替代本 ADR 早期将基础设施中断加入 Run 状态机的方案
 
 ## 背景
 
-Run Worker 需要把 Pi 的易失活动会话、CubeSandbox 的外部副作用、Workspace 不可变版本和持久 Run 状态组合成一个可以崩溃恢复的执行单元。本阶段不绑定 PostgreSQL 实现，但端口必须提前固定原子性、幂等和租约丢失语义，否则内存 Fake 验证通过后仍会在多 Worker 部署中产生双写。
+Run Worker 组合了数据库状态、Pi 模型执行、CubeSandbox 外部副作用、Workspace 不可变版本和 Artifact 完成门。队列只能提供至少一次通知，进程可能在任意 `await` 后消失，外部调用也可能“已生效但响应丢失”。因此，Run 不能承担执行器内部恢复细节，单独的 Run claim 或 Workspace lease 也不足以阻止旧 Worker 双写。
 
-## 决策驱动因素
+## 决策
 
-- 同一 Run 和 Workspace 在任意时刻只能有一个有效写入者；
-- 流式事件可增量持久化，但 Run 终态、终态事件与 Outbox 必须原子提交；
-- Sandbox 或其他外部副作用结果未知时不能自动重试或伪装成功；
-- Worker 崩溃后只能从持久事实和已验证 WorkspaceRevision 恢复，不能使用 Pi 本地 Session 文件或 Sandbox 内存作为事实源；
-- waiting、取消和超时必须在安全点释放 Workspace 写租约。
+### Run 与 ExecutionAttempt 分层
 
-## 备选方案
-
-### 方案 A：队列保证单消费者，Worker 直接更新状态
-
-实现最少，但队列重新投递、网络分区和进程暂停仍会产生双消费者；没有数据库栅栏时旧 Worker 可以在租约过期后继续提交。
-
-### 方案 B：Run claim 与 Workspace lease 使用独立栅栏，所有持久提交带条件版本
-
-实现端口较多，但可以把队列视为至少一次通知；旧 Worker 的 claim token 或 lease epoch 一旦失效，事件、状态和 Revision 提交都会被拒绝。
-
-### 方案 C：为整个 Run 持有数据库事务或互斥锁
-
-表面原子，但模型调用和工具执行持续时间不可控，长事务会占连接、阻塞维护并放大故障恢复成本。
-
-## 选择
-
-采用方案 B，并固定以下细化规则。
-
-### 状态机
-
-应用层状态为：
+Run 严格复用 Domain 已有六态，不新增 `interrupted` 或其他基础设施状态：
 
 ```text
-queued ─┐
-waiting ├─→ running ─→ waiting
-interrupted ┘          ├→ succeeded
-                       ├→ failed
-                       ├→ cancelled
-                       └→ interrupted
+queued → running → waiting → running
+                 ├→ succeeded
+                 ├→ failed
+                 └→ cancelled
 ```
 
-终态不可重新领取。过期的 running 先由恢复协调器标记为 interrupted，再由新 Worker 领取；Worker Core 不把过期 claim 直接改回 running。单 Agent 阶段要求 `rootRunId === runId`，但所有端口仍显式携带 tenant/thread/run/rootRun，防止未来 Agent Tree 引入隐式换根。
+每次领取创建独立 `ExecutionAttempt`，状态为：
 
-### 幂等键与栅栏
+```text
+claimed → running → waiting
+                  └→ finalizing → succeeded | failed | cancelled
+claimed/running/finalizing → recovery_required → abandoned | failed
+```
 
-- Run claim 返回不可猜测的 `claimToken`、单调 `claimEpoch` 和状态版本；后续所有 Run 事件/状态提交必须同时比较三者。
-- Workspace lease 返回独立单调 `leaseEpoch`；Revision 提交比较 Tenant、Thread、Workspace、rootRun、base revision 和 epoch。
-- 事件键使用 `runId/event/sequence`，sequence 从持久高水位继续分配；Outbox 使用业务事实键，而不是随机重试 ID。
-- WorkspaceRevision 只接受 Workspace 验证端口产生的 `VerifiedWorkspaceRevision`，提交幂等键由 run、base revision 和内容摘要决定。
+Attempt 同时记录阶段 checkpoint：`claimed`、`sandbox_acquired`、`cleanup_intent_persisted`、`model_execution_started`、`model_settled`、`workspace_verified`、`sandbox_settled`、`finalizing`、`finished`。
 
-### 租约丢失
+基础设施不可用、栅栏丢失、Sandbox UNKNOWN 和事件协议拒绝只影响 Attempt；不能把业务 Run 伪造为 failed。普通 Worker 永远不能直接重领 running Run。恢复协调器必须等双租约过期，再根据 Attempt checkpoint 决定安全失败、人工恢复或放弃；一旦到达 `model_execution_started`，不得自动重跑可能含工具副作用的模型轮次。
 
-Run claim 或 Workspace lease 的心跳任一失败，当前 Worker 立即请求中止 Pi，并停止新的事件、Revision 和终态写入。旧 Worker只做 best-effort 资源释放；它没有权限把 Run 标记为失败。新 Worker 在旧 claim 过期并完成 interrupted 协调后接管。
+### 统一双栅栏事务能力
 
-### 事件、状态与 Outbox 原子性
+所有持久副作用统一经过 `ExecutionPersistencePort.mutate`，每个命令都携带：
 
-同一个 `RunPersistencePort.commit` 必须在一个持久化事务中完成条件检查、事件追加、Outbox 追加、状态迁移和事件高水位推进。流式事件可以逐条提交；最终 succeeded/failed/cancelled/waiting 事件与对应状态必须在同一提交中发生。事件存储不可用时 Worker 中止 Pi，不提交 WorkspaceRevision，也不猜测终态。
+- tenant、thread、run、rootRun、workspace、baseRevision 的完整复合 scope；
+- Run claim token、单调 epoch、expiresAt；
+- Workspace writer rootRunId、单调 epoch、expiresAt；
+- Attempt expected version、操作幂等键、事件 sequence 高水位。
 
-### 恢复策略
+生产实现必须在同一个数据库事务中，用数据库时钟校验两组租约仍有效，再原子写入事件、Outbox、Attempt、RolloutProjection、WorkspaceRevision 和 Run 状态。应用进程计算的时间不能作为租约有效性的依据；应用只提交 lease duration，deadline 由数据库计算。
 
-- 重复投递遇到活跃 claim 或终态直接返回，不执行模型或 Sandbox。
-- crash 后重入从事件高水位继续分配序号；已经提交的 Revision 和 Outbox 依靠幂等键返回 `already_applied`。
-- Sandbox registry 可以 connect 已登记 Session 或 create 新 Session；`UNKNOWN` 必须作为 Outbox 事实并使本次执行失败/中断，不能自动重试创建。
-- 完成顺序为：Pi 安全终态 → Workspace 内容验证 → Revision 条件提交 → Artifact 就绪端口检查 → Run succeeded 原子提交。Artifact 端口本阶段只表达完成前置条件，不实现发布。
-- waiting 前先验证并提交 Workspace 安全点、记录恢复上下文、暂停或释放 Sandbox、原子进入 waiting，再释放 Workspace lease。恢复时以 follow-up 驱动全新内存 Pi 投影；本阶段端口预留 Rollout 恢复输入，不读取 Pi 本地 Session。
+heartbeat interval 必须小于 lease TTL 的一半。任一栅栏失效后，旧 Worker 只能中止内存 Session 和做不带业务写入的 best-effort 清理，不能写事件、Revision 或 Run 终态。
+
+### WorkspaceRevision 与 Run 终态
+
+Workspace verifier 只返回 revisionId、objectKey 和 SHA-256 digest 候选，不返回可伪造的 `verified: true`。Worker 使用 Domain `prepareWorkspaceRevision` 生成不可变 Revision 和 CAS 条件；持久层再次比较完整 scope、base revision、lease epoch 与数据库时钟。
+
+waiting checkpoint 和 success checkpoint 均由一次 `mutate` 原子完成：
+
+- WorkspaceRevision（若内容有变化）；
+- Run `waiting` 或 `succeeded`；
+- Attempt 对应状态和阶段；
+- 事件高水位、RolloutProjection 和双栅栏释放。
+
+因此不存在“Revision 已提交但 Run success 丢失”的可见半状态。若事务已经提交但响应丢失，Worker 用操作幂等键调用 `readMutation` 读回结果，禁止盲目重提 Revision。
+
+### Sandbox cleanup Outbox / Saga
+
+Sandbox acquire 返回已登记实例后，Worker 在创建 Pi Session 或启动模型前，必须首先持久化 `sandbox_cleanup` pending intent。清理 Outbox 是事实源：
+
+1. 调用 settle 前持久化 `started`；
+2. settle 成功后持久化 `completed`；
+3. 结果不确定时持久化 `unknown` 与稳定告警；
+4. 调用抛异常时恢复为 `pending` 并保留重试码，不能删除 intent；
+5. worker 可在 intent 提交后做同进程低延迟 dispatch，但崩溃恢复和重复消费仍以同一个 Outbox 幂等键为准。
+
+UNKNOWN 不能自动再次 settle 或创建替代 Sandbox。生产 Outbox consumer 通过 registryId 重新取得句柄并执行同一 Saga。create 期间取消或丢栅栏时，返回后绝不启动模型；registry 必须保留创建请求事实，旧 Worker只做 best-effort close。
+
+### Pi waiting 恢复
+
+Pi 的本地 Session 文件不是事实源。Runtime 持久化版本化、限长的 `ControlledRolloutProjection`，其中只允许经过审核的 user/assistant 文本和 checkpointId，不允许 Pi 内部 entry、宿主路径或任意工具结果。
+
+waiting 回答到达后创建全新的内存 Pi Session，把 RolloutProjection 注入受控上下文，再用 `prompt(answer)` 真正启动模型。禁止对空 Session 调 `followUp`。Linux Faux Provider 测试必须证明历史投影和用户回答同时进入真实模型上下文，且只发起一次新模型调用。
+
+### stop / fence 检查规则
+
+每个外部副作用前后都设置 stop point，包括 Sandbox create/connect、Pi Session 创建、模型 prompt、Workspace verify、Artifact 完成门和 Sandbox settle。持久事务本身在 DB 内检查双栅栏；流式事件转换或持久化一旦拒绝，Worker 立即 abort Pi。
+
+取消和超时可以在双栅栏仍有效、Sandbox 已安全收尾后进入 Domain `cancelled`/`failed`。scope mismatch 或基础设施不可用优先释放 claim、写稳定告警并重试；如果持久层本身不可用，则保留 claim 到期，由恢复协调器接管，绝不猜测业务终态。
+
+### 协议、错误和清理
+
+事件和 Outbox 使用 `schemaVersion: 1` 的联合类型，分别限制为 64 KiB。事件 sequence 来自持久高水位；Outbox 使用业务幂等键。上游异常只映射为稳定错误码，不持久化 Provider、SDK 或数据库私有消息。
+
+`finally` 使用独立 Promise 和 `Promise.allSettled` 停止 heartbeat、保留 pending cleanup、取消订阅和 dispose Session，任一步失败不得跳过其他步骤。
+
+## 放弃的方案
+
+### 在 Run 中加入 interrupted
+
+这会把基础设施恢复细节泄漏到产品状态、API 和领域迁移，并绕过 Domain 转移表，因此禁止。
+
+### 队列单消费者或单 claim
+
+无法处理重复投递、租约过期后的旧 Worker 和 Workspace 双写，因此禁止。
+
+### `verified: true` DTO 与分开的 Revision/Run 更新
+
+布尔值没有领域证明能力，分开事务会产生半提交。改为 Domain prepare 命令和统一双栅栏事务。
+
+### 复用 Pi 内存 Session 并调用 followUp
+
+进程重启后 Session 不存在，空 Session 的 followUp 也不会可靠启动模型。改为持久投影和新 Session prompt。
 
 ## 影响
 
-### 正面影响
+- PostgreSQL 适配器必须同时实现 claim、双租约、Attempt、事件、Outbox、Revision 和 Run 状态事务，不能拆成无事务 Repository。
+- Sandbox registry/outbox consumer、完整 request_user_input 工具和 PostgreSQL Schema 属于后续实现，但本阶段端口已固定它们的原子性与幂等契约。
+- 流式事件逐条事务会产生写放大；后续可以批量，但不能改变 sequence、大小上限和双栅栏边界。
+- `expireWorkspaceLease` 只供恢复协调器在 DB 时钟确认过期后使用，生产 Repository 仍需 CAS。
 
-- 队列可采用至少一次投递而不产生并发双写；
-- PostgreSQL、内存 Fake 或其他事务存储可以实现同一应用端口；
-- 外部结果未知、事件故障和 Worker 崩溃都有明确的保守结果。
+## 验证与实施记录
 
-### 负面影响与成本
+- 双 Worker 重复投递、Run/Workspace lease 分别到期和跨 Tenant scope；
+- Sandbox create 期间双栅栏丢失，确保不启动模型；
+- verify 调用前和返回后丢栅栏、Artifact 返回后丢 claim；
+- Revision+Run final 事务响应丢失按幂等键读回；
+- settle 调用前事务失败、调用后丢 claim、异常和 UNKNOWN；
+- 事件持久化不可用、超大 adapter event、Provider 失败、取消和超时；
+- waiting checkpoint/resume、受控 RolloutProjection 和 Linux Faux 真模型序列；
+- `model_execution_started` 后 crash 只能进入 recovery_required，普通 Worker不能重领。
 
-- Run 状态、事件和 Outbox 必须由同一个事务适配器实现，不能分别调用三个无事务 Repository；
-- 流式事件逐条提交会增加写放大，后续可在不改变序号和原子边界的前提下安全批量；
-- 当前恢复只固定应用边界，完整 Pi Rollout 投影和对象存储物化仍属于后续任务。
-
-### 安全与运维影响
-
-所有端口命令都携带完整所有权范围，错误不应泄漏其他 Tenant 的实体是否存在。必须监控 claim/lease 丢失、UNKNOWN Outbox、恢复次数、事件提交延迟和 Revision 冲突。UNKNOWN Outbox 消费失败时宁可保留 Sandbox 到短 TTL 回收，也不能自动创建第二个实例。
-
-## 验证
-
-- 双 Worker 重复领取和重复投递测试证明只有一个模型会话启动；
-- 在模型调用、事件写入、Revision 提交前后注入 claim/lease 丢失，证明旧 Worker不能提交终态或 Revision；
-- 取消迟到、超时、Provider 失败、事件写失败和 Sandbox UNKNOWN 均得到稳定状态与 Outbox；
-- crash 后重新领取从持久 sequence 继续，Revision/Outbox 幂等键不双提交；
-- Linux 专项使用 Pi Faux Provider 验证窄 Controller，Windows 继续在创建 Pi Session 前 fail-fast。
-
-## 可逆性
-
-在 PostgreSQL Schema 和生产事件写入前，可以调整端口命名和批量方式。claim epoch、事件 sequence、Outbox 幂等键和 Workspace lease epoch 一旦进入生产数据即成为恢复协议，修改需要版本化迁移；不能回退到依赖队列单消费者或 Worker 本地 Session 的方案。
-
-## 实施记录
-
-- 2026-07-26：已由不依赖具体 PostgreSQL 的 Worker Core、Pi 窄接口工厂、事务型内存 Fake 和故障注入测试落实。
-- 已覆盖成功检查点、重复投递、Workspace 租约丢失、迟到取消、流式事件不可用、Sandbox 创建/收尾 UNKNOWN、Provider/Pi Session 创建失败、waiting/follow-up、超时和 crash 重入；这些测试均断言不会重复提交 WorkspaceRevision。
-- `@cube-runtime/pi-adapter` 补齐源码 types export，保证应用包在干净安装且尚未构建依赖产物时也能独立 typecheck；运行时入口仍指向 `dist`。
-- PostgreSQL 事务适配器、完整 Rollout 重建、Artifact 发布和 API 不属于本次实现。
+PG、对象存储、真实 Outbox consumer 和 API 不在本次实现范围；它们必须遵守本 ADR，不能重新引入 Run 基础设施状态或 Pi Session 事实源。

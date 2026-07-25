@@ -1,298 +1,462 @@
 import {
-  type RunId,
-  type WorkspaceId,
-  type WorkspaceRevisionId,
+  acquireWorkspaceLease,
+  createPersonalTenant,
+  createRun,
+  createThread,
+  createUser,
+  createWorkspace,
+  expireWorkspaceLease,
+  isoTimestamp,
+  membershipId,
+  releaseWorkspaceLease,
+  renewWorkspaceLease,
+  runId,
+  sha256Digest,
+  tenantId,
+  threadId,
+  transitionRun,
+  userId,
+  workspaceId,
   workspaceRevisionId,
+  type IsoTimestamp,
+  type Run,
+  type Workspace,
+  type WorkspaceRevisionId,
 } from "@cube-runtime/domain";
-import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
+import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import { FakeSandboxHandle } from "@cube-runtime/sandbox";
 import type {
   AgentSessionFactoryPort,
   AgentTurnOutcome,
   ArtifactPublicationPort,
   CancellationPort,
+  ClaimExecutionResult,
   ClockPort,
+  ExecutionAttemptSnapshot,
+  ExecutionAttemptStatus,
+  ExecutionFence,
+  ExecutionPersistencePort,
+  ExecutionScope,
+  FenceInspectionResult,
   HeartbeatTask,
-  OutboxMessage,
-  PersistedRunEvent,
-  RunClaim,
-  RunClaimResult,
-  RunCommitCommand,
-  RunCommitResult,
-  RunPersistencePort,
-  RunScope,
-  RunSnapshot,
+  RuntimeEventV1,
+  RuntimeMutation,
+  RuntimeMutationResult,
+  RuntimeOutboxV1,
   SandboxAcquireResult,
   SandboxSessionRef,
   SandboxSessionRegistryPort,
   SandboxSettlementResult,
   ScheduledTask,
-  VerifiedWorkspaceRevision,
   WorkerAgentSessionPort,
-  WorkspaceLease,
-  WorkspaceLeaseResult,
-  WorkspacePort,
+  WorkspaceRevisionCandidate,
   WorkspaceRevisionVerifierPort,
 } from "../ports.js";
 
-function sameScope(left: RunScope, right: RunScope): boolean {
-  return (
-    left.tenantId === right.tenantId &&
-    left.threadId === right.threadId &&
-    left.runId === right.runId &&
-    left.rootRunId === right.rootRunId
-  );
+interface FakeRecord {
+  run: Run;
+  workspace: Workspace;
+  readonly input: string;
+  answer?: string;
+  rolloutProjection: ControlledRolloutProjection;
+  attempt: ExecutionAttemptSnapshot | undefined;
+  fence: ExecutionFence | undefined;
+  readonly events: RuntimeEventV1[];
+  readonly outbox: RuntimeOutboxV1[];
+  readonly mutations: Map<string, AppliedFakeMutation>;
 }
 
-interface ActiveClaim {
-  readonly token: string;
-  readonly epoch: number;
-  expiresAt: Date;
-}
+type AppliedFakeMutation = {
+  readonly outcome: "applied" | "already_applied";
+  readonly attemptVersion: number;
+  readonly nextEventSequence: number;
+  readonly databaseNow: IsoTimestamp;
+};
 
-/** 事务型 Fake：故意把事件、Outbox、状态和 claim 栅栏放在同一个内存对象中。 */
-export class FakeRunPersistence implements RunPersistencePort {
-  snapshot: RunSnapshot;
-  readonly events: PersistedRunEvent[] = [];
-  readonly outbox: OutboxMessage[] = [];
-  commitCount = 0;
-  claimCount = 0;
-  failNextCommit = false;
+const attemptTransitions: Readonly<
+  Record<ExecutionAttemptStatus, readonly ExecutionAttemptStatus[]>
+> = {
+  claimed: ["running", "cancelled", "failed", "recovery_required", "abandoned"],
+  running: ["running", "waiting", "finalizing", "failed", "cancelled", "recovery_required"],
+  waiting: [],
+  finalizing: ["finalizing", "waiting", "succeeded", "failed", "cancelled", "recovery_required"],
+  succeeded: [],
+  failed: [],
+  cancelled: [],
+  recovery_required: ["abandoned", "failed"],
+  abandoned: [],
+};
+
+/** 多记录、复合 scope、数据库时钟和严格栅栏都在同一个 Fake 事务中模拟。 */
+export class FakeExecutionPersistence implements ExecutionPersistencePort {
+  readonly records = new Map<string, FakeRecord>();
+  responseUnknownNextMutation = false;
+  responseUnknownKeyIncludes: string | undefined;
+  unavailableNextMutation = false;
+  forceInspectUnavailable = false;
   forceFenceLost = false;
+  afterMutation?: (command: RuntimeMutation) => void;
+  private databaseMillis = Date.parse("2026-07-26T00:00:00.000Z");
   private claimEpoch = 0;
-  private activeClaim: ActiveClaim | undefined;
+  private attemptSequence = 0;
 
-  constructor(snapshot: RunSnapshot) {
-    this.snapshot = { ...snapshot };
+  addSeed(seed: FakeSeed = fakeSeed()): ExecutionScope {
+    const scope = scopeFrom(seed.run, seed.workspace);
+    this.records.set(scopeKey(scope), {
+      run: seed.run,
+      workspace: seed.workspace,
+      input: seed.input,
+      ...(seed.answer === undefined ? {} : { answer: seed.answer }),
+      rolloutProjection: seed.rolloutProjection,
+      attempt: undefined,
+      fence: undefined,
+      events: [],
+      outbox: [],
+      mutations: new Map(),
+    });
+    return scope;
   }
 
   async claim(input: {
-    readonly scope: RunScope;
+    readonly scope: ExecutionScope;
     readonly workerId: string;
-    readonly now: Date;
-    readonly leaseUntil: Date;
-  }): Promise<RunClaimResult> {
-    this.claimCount += 1;
-    if (!sameScope(input.scope, this.snapshot)) return { outcome: "scope_mismatch" };
-    if (["succeeded", "failed", "cancelled"].includes(this.snapshot.status)) {
+    readonly leaseDurationMs: number;
+  }): Promise<ClaimExecutionResult> {
+    const record = this.find(input.scope);
+    if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
+    if (!record) return { outcome: "not_found" };
+    if (["succeeded", "failed", "cancelled"].includes(record.run.status)) {
       return { outcome: "terminal" };
     }
-    if (this.snapshot.status === "waiting" && this.snapshot.followUp === undefined) {
-      return { outcome: "busy" };
+    if (record.run.status === "running") {
+      return { outcome: this.isExpired(record) ? "recovery_required" : "busy" };
     }
-    if (this.activeClaim && this.activeClaim.expiresAt > input.now) return { outcome: "busy" };
-    const epoch = ++this.claimEpoch;
-    const token = `${input.workerId}-${epoch}`;
-    this.activeClaim = { token, epoch, expiresAt: input.leaseUntil };
-    this.snapshot = {
-      ...this.snapshot,
-      status: "running",
-      stateVersion: this.snapshot.stateVersion + 1,
+    if (record.run.status === "waiting" && record.answer === undefined) {
+      return { outcome: "waiting_for_answer" };
+    }
+    const now = this.databaseNow();
+    const expiresAt = this.after(input.leaseDurationMs);
+    record.run = transitionRun(record.run, "running", now);
+    const leaseEpoch = record.workspace.leaseEpoch + 1;
+    record.workspace = acquireWorkspaceLease({
+      workspace: record.workspace,
+      rootRun: record.run,
+      epoch: leaseEpoch,
+      expiresAt,
+      now,
+    });
+    const attempt: ExecutionAttemptSnapshot = {
+      attemptId: `attempt-${++this.attemptSequence}`,
+      status: "claimed",
+      stage: "claimed",
+      version: 0,
+      nextEventSequence: record.events.length,
+      modelExecutionStarted: false,
     };
+    const epoch = ++this.claimEpoch;
+    const fence: ExecutionFence = {
+      scope: input.scope,
+      runClaim: { token: `${input.workerId}-${epoch}`, epoch, expiresAt },
+      workspaceLease: { rootRunId: input.scope.rootRunId, epoch: leaseEpoch, expiresAt },
+    };
+    record.attempt = attempt;
+    record.fence = fence;
     return {
       outcome: "claimed",
-      claim: {
-        token,
-        epoch,
-        expiresAt: input.leaseUntil,
-        snapshot: { ...this.snapshot },
+      snapshot: {
+        run: record.run,
+        workspace: record.workspace,
+        attempt,
+        input: record.input,
+        ...(record.answer === undefined ? {} : { answer: record.answer }),
+        rolloutProjection: record.rolloutProjection,
       },
+      fence,
+      databaseNow: now,
     };
   }
 
-  async renewClaim(input: {
-    readonly scope: RunScope;
-    readonly claimToken: string;
-    readonly claimEpoch: number;
-    readonly now: Date;
-    readonly leaseUntil: Date;
-  }): Promise<"renewed" | "fence_lost" | "unavailable"> {
-    if (this.forceFenceLost || !sameScope(input.scope, this.snapshot)) return "fence_lost";
-    const claim = this.activeClaim;
-    if (
-      !claim ||
-      !this.matchesClaim(input.claimToken, input.claimEpoch) ||
-      claim.expiresAt < input.now
-    ) {
-      return "fence_lost";
-    }
-    claim.expiresAt = input.leaseUntil;
-    return "renewed";
-  }
-
-  async commit(command: RunCommitCommand): Promise<RunCommitResult> {
-    if (this.failNextCommit) {
-      this.failNextCommit = false;
-      return { outcome: "unavailable" };
-    }
-    if (
-      this.forceFenceLost ||
-      !sameScope(command.scope, this.snapshot) ||
-      !this.matchesClaim(command.claimToken, command.claimEpoch)
-    ) {
+  async inspectAndRenew(input: {
+    readonly fence: ExecutionFence;
+    readonly leaseDurationMs: number;
+  }): Promise<FenceInspectionResult> {
+    if (this.forceInspectUnavailable) return { outcome: "unavailable" };
+    const record = this.find(input.fence.scope);
+    if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
+    if (!record || this.forceFenceLost || !this.validFence(record, input.fence)) {
       return { outcome: "fence_lost" };
     }
-    if (command.expectedStateVersion !== this.snapshot.stateVersion) return { outcome: "conflict" };
+    const now = this.databaseNow();
+    if (record.fence === undefined || expired(record.fence, now)) return { outcome: "fence_lost" };
+    const expiresAt = this.after(input.leaseDurationMs);
+    record.workspace = renewWorkspaceLease({
+      workspace: record.workspace,
+      rootRun: record.run,
+      epoch: record.fence.workspaceLease.epoch,
+      expiresAt,
+      now,
+    });
+    record.fence = {
+      ...record.fence,
+      runClaim: { ...record.fence.runClaim, expiresAt },
+      workspaceLease: { ...record.fence.workspaceLease, expiresAt },
+    };
+    return {
+      outcome: "active",
+      fence: record.fence,
+      databaseNow: now,
+      run: record.run,
+      workspace: record.workspace,
+    };
+  }
 
-    const newEvents = command.events.filter(
-      (candidate) =>
-        !this.events.some((event) => event.idempotencyKey === candidate.idempotencyKey),
-    );
-    const newOutbox = command.outbox.filter(
-      (candidate) =>
-        !this.outbox.some((event) => event.idempotencyKey === candidate.idempotencyKey),
-    );
-    for (const event of newEvents) {
+  async mutate(command: RuntimeMutation): Promise<RuntimeMutationResult> {
+    if (this.unavailableNextMutation) {
+      this.unavailableNextMutation = false;
+      return { outcome: "unavailable" };
+    }
+    const record = this.find(command.fence.scope);
+    if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
+    if (!record || this.forceFenceLost || !this.validFence(record, command.fence)) {
+      return { outcome: "fence_lost" };
+    }
+    const previous = record.mutations.get(command.idempotencyKey);
+    if (previous) return { ...previous, outcome: "already_applied" };
+    const now = this.databaseNow();
+    if (record.fence === undefined || expired(record.fence, now)) return { outcome: "fence_lost" };
+    const attempt = record.attempt;
+    if (!attempt || attempt.version !== command.expectedAttemptVersion)
+      return { outcome: "conflict" };
+    if (command.nextAttemptStatus && command.nextAttemptStatus !== attempt.status) {
+      if (!attemptTransitions[attempt.status].includes(command.nextAttemptStatus)) {
+        return { outcome: "conflict" };
+      }
+    }
+    for (const [index, event] of command.events.entries()) {
+      if (event.sequence !== attempt.nextEventSequence + index) return { outcome: "conflict" };
+    }
+    if (command.workspaceRevision) {
+      const revision = command.workspaceRevision;
       if (
-        event.sequence !==
-        this.snapshot.nextEventSequence + this.eventsSinceSnapshot(newEvents, event)
+        revision.workspace.id !== command.fence.scope.workspaceId ||
+        revision.revision.tenantId !== command.fence.scope.tenantId ||
+        revision.revision.threadId !== command.fence.scope.threadId ||
+        revision.revision.createdByRunId !== command.fence.scope.rootRunId ||
+        revision.expectedLeaseEpoch !== command.fence.workspaceLease.epoch ||
+        revision.expectedCurrentRevisionNumber !== record.workspace.currentRevisionNumber ||
+        revision.revision.parentRevisionId !== command.fence.scope.baseRevisionId
       ) {
         return { outcome: "conflict" };
       }
     }
 
-    this.events.push(...newEvents);
-    this.outbox.push(...newOutbox);
-    this.commitCount += 1;
-    this.snapshot = {
-      ...this.snapshot,
-      ...(command.nextStatus === undefined ? {} : { status: command.nextStatus }),
-      stateVersion: this.snapshot.stateVersion + 1,
-      nextEventSequence: this.snapshot.nextEventSequence + newEvents.length,
+    record.events.push(...command.events);
+    for (const item of command.outbox) {
+      const index = record.outbox.findIndex(
+        (existing) => existing.idempotencyKey === item.idempotencyKey,
+      );
+      if (index < 0) record.outbox.push(item);
+      else record.outbox[index] = item;
+    }
+    if (command.workspaceRevision) record.workspace = command.workspaceRevision.workspace;
+    if (command.nextRunStatus) record.run = transitionRun(record.run, command.nextRunStatus, now);
+    if (command.rolloutProjection) record.rolloutProjection = command.rolloutProjection;
+    record.attempt = {
+      ...attempt,
+      status: command.nextAttemptStatus ?? attempt.status,
+      stage: command.nextStage ?? attempt.stage,
+      version: attempt.version + 1,
+      nextEventSequence: attempt.nextEventSequence + command.events.length,
+      modelExecutionStarted:
+        attempt.modelExecutionStarted || command.nextStage === "model_execution_started",
     };
-    if (command.releaseClaim) this.activeClaim = undefined;
-    return {
-      outcome: newEvents.length === 0 && newOutbox.length === 0 ? "already_applied" : "committed",
-      stateVersion: this.snapshot.stateVersion,
-      nextEventSequence: this.snapshot.nextEventSequence,
+    if (command.releaseFences) {
+      record.workspace = releaseWorkspaceLease({
+        workspace: record.workspace,
+        rootRun: record.run,
+        epoch: command.fence.workspaceLease.epoch,
+        now,
+      });
+      record.fence = undefined;
+    }
+    const result: AppliedFakeMutation = {
+      outcome: "applied",
+      attemptVersion: record.attempt.version,
+      nextEventSequence: record.attempt.nextEventSequence,
+      databaseNow: now,
+    };
+    record.mutations.set(command.idempotencyKey, result);
+    if (command.workspaceRevision) {
+      const previousKey = scopeKey(command.fence.scope);
+      const nextScope: ExecutionScope = {
+        ...command.fence.scope,
+        baseRevisionId: command.workspaceRevision.revision.id,
+      };
+      this.records.delete(previousKey);
+      this.records.set(scopeKey(nextScope), record);
+    }
+    this.afterMutation?.(command);
+    if (
+      this.responseUnknownNextMutation ||
+      (this.responseUnknownKeyIncludes !== undefined &&
+        command.idempotencyKey.includes(this.responseUnknownKeyIncludes))
+    ) {
+      this.responseUnknownNextMutation = false;
+      this.responseUnknownKeyIncludes = undefined;
+      return { outcome: "response_unknown" };
+    }
+    return result;
+  }
+
+  async readMutation(input: {
+    readonly scope: ExecutionScope;
+    readonly idempotencyKey: string;
+  }): Promise<RuntimeMutationResult | { readonly outcome: "not_found" }> {
+    const exact = this.records.get(scopeKey(input.scope));
+    const advanced = [...this.records.values()].find(
+      (record) =>
+        record.run.id === input.scope.runId &&
+        record.run.tenantId === input.scope.tenantId &&
+        record.run.threadId === input.scope.threadId &&
+        record.workspace.id === input.scope.workspaceId,
+    );
+    const record = exact ?? advanced;
+    if (!record) {
+      return [...this.records.values()].some((candidate) => candidate.run.id === input.scope.runId)
+        ? { outcome: "scope_mismatch" }
+        : { outcome: "not_found" };
+    }
+    return record.mutations.get(input.idempotencyKey) ?? { outcome: "not_found" };
+  }
+
+  async recoverExpiredAttempt(input: {
+    readonly scope: ExecutionScope;
+    readonly decision: "safe_fail" | "require_manual_recovery" | "abandon";
+  }): Promise<"recovered" | "not_expired" | "not_found" | "scope_mismatch" | "unavailable"> {
+    const record = this.find(input.scope);
+    if (record === "scope_mismatch") return "scope_mismatch";
+    if (!record?.attempt || !record.fence) return "not_found";
+    if (!this.isExpired(record)) return "not_expired";
+    const now = this.databaseNow();
+    if (input.decision === "require_manual_recovery" || record.attempt.modelExecutionStarted) {
+      record.attempt = {
+        ...record.attempt,
+        status: "recovery_required",
+        version: record.attempt.version + 1,
+      };
+    } else if (input.decision === "safe_fail") {
+      record.run = transitionRun(record.run, "failed", now);
+      record.attempt = { ...record.attempt, status: "failed", version: record.attempt.version + 1 };
+    } else {
+      record.attempt = {
+        ...record.attempt,
+        status: "abandoned",
+        version: record.attempt.version + 1,
+      };
+    }
+    record.workspace = expireWorkspaceLease({
+      workspace: record.workspace,
+      rootRun: record.run,
+      epoch: record.fence.workspaceLease.epoch,
+      now,
+    });
+    record.fence = undefined;
+    return "recovered";
+  }
+
+  advanceDatabase(milliseconds: number): void {
+    this.databaseMillis += milliseconds;
+  }
+
+  setAnswer(scope: ExecutionScope, answer: string): void {
+    const record = this.requireRecord(scope);
+    if (record.run.status !== "waiting") throw new Error("Run 不是 waiting");
+    record.answer = answer;
+  }
+
+  scopeForRun(id: string): ExecutionScope {
+    for (const record of this.records.values()) {
+      if (record.run.id === id) return scopeFrom(record.run, record.workspace);
+    }
+    throw new Error("Fake Run 不存在");
+  }
+
+  expireRunLease(scope: ExecutionScope): void {
+    const record = this.requireRecord(scope);
+    if (!record.fence) throw new Error("没有活动栅栏");
+    record.fence = {
+      ...record.fence,
+      runClaim: { ...record.fence.runClaim, expiresAt: this.databaseNow() },
     };
   }
 
-  /** 模拟进程在提交部分事件后消失，调度器确认超时后才允许下一次领取。 */
-  markInterruptedAfterCrash(): void {
-    this.activeClaim = undefined;
-    this.snapshot = {
-      ...this.snapshot,
-      status: "interrupted",
-      stateVersion: this.snapshot.stateVersion + 1,
+  expireWorkspaceLease(scope: ExecutionScope): void {
+    const record = this.requireRecord(scope);
+    if (!record.fence) throw new Error("没有活动栅栏");
+    record.fence = {
+      ...record.fence,
+      workspaceLease: { ...record.fence.workspaceLease, expiresAt: this.databaseNow() },
     };
   }
 
-  resume(followUp: string): void {
-    if (this.snapshot.status !== "waiting") throw new Error("只有 waiting Run 可以恢复");
-    this.snapshot = {
-      ...this.snapshot,
-      followUp,
-      status: "queued",
-      stateVersion: this.snapshot.stateVersion + 1,
-    };
+  record(scope: ExecutionScope): FakeRecord {
+    return this.requireRecord(scope);
   }
 
-  activeClaimForTest(): RunClaim | undefined {
-    if (!this.activeClaim) return undefined;
-    return { ...this.activeClaim, snapshot: { ...this.snapshot } };
+  private databaseNow(): IsoTimestamp {
+    return isoTimestamp(new Date(this.databaseMillis).toISOString());
   }
 
-  private matchesClaim(token: string, epoch: number): boolean {
-    return this.activeClaim?.token === token && this.activeClaim.epoch === epoch;
+  private after(milliseconds: number): IsoTimestamp {
+    return isoTimestamp(new Date(this.databaseMillis + milliseconds).toISOString());
   }
 
-  private eventsSinceSnapshot(
-    batch: readonly PersistedRunEvent[],
-    candidate: PersistedRunEvent,
-  ): number {
-    return batch.indexOf(candidate);
-  }
-}
-
-export class FakeWorkspacePort implements WorkspacePort {
-  commitCount = 0;
-  forceLeaseLost = false;
-  forceCommitResult?: "lease_lost" | "revision_conflict" | "unavailable";
-  currentRevisionId?: WorkspaceRevisionId;
-  private epoch = 0;
-  private activeLease: WorkspaceLease | undefined;
-  private readonly committedKeys = new Set<string>();
-
-  async acquireLease(input: {
-    readonly scope: RunScope;
-    readonly workspaceId: WorkspaceId;
-    readonly now: Date;
-    readonly leaseUntil: Date;
-  }): Promise<WorkspaceLeaseResult> {
-    if (this.activeLease && this.activeLease.expiresAt > input.now) return { outcome: "busy" };
-    this.activeLease = {
-      token: `workspace-${++this.epoch}`,
-      epoch: this.epoch,
-      expiresAt: input.leaseUntil,
-      ...(this.currentRevisionId === undefined ? {} : { baseRevisionId: this.currentRevisionId }),
-    };
-    return { outcome: "acquired", lease: this.activeLease };
+  private validFence(record: FakeRecord, fence: ExecutionFence): boolean {
+    return (
+      record.fence?.runClaim.token === fence.runClaim.token &&
+      record.fence.runClaim.epoch === fence.runClaim.epoch &&
+      record.fence.workspaceLease.rootRunId === fence.workspaceLease.rootRunId &&
+      record.fence.workspaceLease.epoch === fence.workspaceLease.epoch &&
+      sameScope(record.fence.scope, fence.scope)
+    );
   }
 
-  async renewLease(input: {
-    readonly scope: RunScope;
-    readonly workspaceId: WorkspaceId;
-    readonly lease: WorkspaceLease;
-    readonly now: Date;
-    readonly leaseUntil: Date;
-  }): Promise<"renewed" | "lease_lost" | "unavailable"> {
-    const lease = this.activeLease;
-    if (this.forceLeaseLost || !lease || !this.matches(input.lease)) return "lease_lost";
-    this.activeLease = { ...lease, expiresAt: input.leaseUntil };
-    return "renewed";
+  private isExpired(record: FakeRecord): boolean {
+    return record.fence === undefined || expired(record.fence, this.databaseNow());
   }
 
-  async commitVerifiedRevision(input: {
-    readonly scope: RunScope;
-    readonly workspaceId: WorkspaceId;
-    readonly lease: WorkspaceLease;
-    readonly revision: VerifiedWorkspaceRevision;
-  }): Promise<
-    "committed" | "already_applied" | "lease_lost" | "revision_conflict" | "unavailable"
-  > {
-    if (this.forceCommitResult) return this.forceCommitResult;
-    if (this.forceLeaseLost || !this.matches(input.lease)) return "lease_lost";
-    if (this.committedKeys.has(input.revision.idempotencyKey)) return "already_applied";
-    if (input.revision.baseRevisionId !== this.currentRevisionId) return "revision_conflict";
-    this.committedKeys.add(input.revision.idempotencyKey);
-    this.currentRevisionId = input.revision.revisionId;
-    this.commitCount += 1;
-    return "committed";
+  private find(scope: ExecutionScope): FakeRecord | "scope_mismatch" | undefined {
+    const exact = this.records.get(scopeKey(scope));
+    if (exact) return exact;
+    return [...this.records.entries()].some(([, value]) => value.run.id === scope.runId)
+      ? "scope_mismatch"
+      : undefined;
   }
 
-  async releaseLease(input: {
-    readonly scope: RunScope;
-    readonly workspaceId: WorkspaceId;
-    readonly lease: WorkspaceLease;
-  }): Promise<void> {
-    if (this.matches(input.lease)) this.activeLease = undefined;
-  }
-
-  private matches(lease: WorkspaceLease): boolean {
-    return this.activeLease?.token === lease.token && this.activeLease.epoch === lease.epoch;
+  private requireRecord(scope: ExecutionScope): FakeRecord {
+    const record = this.find(scope);
+    if (!record || record === "scope_mismatch") throw new Error("Fake record 不存在");
+    return record;
   }
 }
 
 export class FakeRevisionVerifier implements WorkspaceRevisionVerifierPort {
   verifyCount = 0;
   nextRevisionId: WorkspaceRevisionId | undefined;
+  beforeReturn?: () => void | Promise<void>;
 
-  async verify(
-    input: Parameters<WorkspaceRevisionVerifierPort["verify"]>[0],
-  ): Promise<VerifiedWorkspaceRevision | undefined> {
+  async verify(): Promise<WorkspaceRevisionCandidate | undefined> {
     this.verifyCount += 1;
+    await this.beforeReturn?.();
     const revisionId = this.nextRevisionId;
     this.nextRevisionId = undefined;
-    if (revisionId === undefined) return undefined;
-    return {
-      verified: true,
-      ...(input.baseRevisionId === undefined ? {} : { baseRevisionId: input.baseRevisionId }),
-      revisionId,
-      objectKey: `workspaces/${input.workspaceId}/${revisionId}`,
-      digest: `sha256:${revisionId}`,
-      idempotencyKey: `${input.scope.runId}/revision/${revisionId}`,
-    };
+    return revisionId === undefined
+      ? undefined
+      : {
+          revisionId,
+          objectKey: `workspace/${revisionId}.tar`,
+          digest: sha256Digest("a".repeat(64)),
+        };
   }
 }
 
@@ -301,27 +465,38 @@ export class FakeSandboxRegistry implements SandboxSessionRegistryPort {
   settleCount = 0;
   nextAcquire: SandboxAcquireResult | undefined;
   nextSettlement: SandboxSettlementResult | undefined;
+  throwOnSettle = false;
+  readonly cleanupIntentIds: string[] = [];
+  beforeAcquireReturn?: () => void | Promise<void>;
+  beforeSettleReturn?: () => void | Promise<void>;
   readonly handle = new FakeSandboxHandle("worker-fake");
-  private session: SandboxSessionRef | undefined;
+  private known = false;
 
   async acquire(): Promise<SandboxAcquireResult> {
     this.acquireCount += 1;
+    await this.beforeAcquireReturn?.();
     if (this.nextAcquire) {
       const result = this.nextAcquire;
       this.nextAcquire = undefined;
       return result;
     }
-    this.session = {
-      registryId: "registry-1",
+    const session: SandboxSessionRef = {
+      registryId: "registry-test",
       providerSandboxId: this.handle.id,
-      mode: this.session === undefined ? "created" : "connected",
+      mode: this.known ? "connected" : "created",
       sandbox: this.handle,
     };
-    return { outcome: "ready", session: this.session };
+    this.known = true;
+    return { outcome: "ready", session };
   }
 
-  async settle(): Promise<SandboxSettlementResult> {
+  async settle(
+    input: Parameters<SandboxSessionRegistryPort["settle"]>[0],
+  ): Promise<SandboxSettlementResult> {
     this.settleCount += 1;
+    this.cleanupIntentIds.push(input.cleanupIntentId);
+    await this.beforeSettleReturn?.();
+    if (this.throwOnSettle) throw new Error("上游私有 settle 失败");
     if (this.nextSettlement) {
       const result = this.nextSettlement;
       this.nextSettlement = undefined;
@@ -332,7 +507,7 @@ export class FakeSandboxRegistry implements SandboxSessionRegistryPort {
 }
 
 export class ScriptedAgentSession implements WorkerAgentSessionPort {
-  readonly turns: Array<{ readonly mode: "prompt" | "follow_up"; readonly text: string }> = [];
+  readonly prompts: string[] = [];
   abortCount = 0;
   disposeCount = 0;
   private readonly listeners = new Set<(event: RuntimeAgentEvent) => void>();
@@ -342,14 +517,9 @@ export class ScriptedAgentSession implements WorkerAgentSessionPort {
     private readonly outcome: AgentTurnOutcome = { kind: "completed" },
   ) {}
 
-  async run(input: {
-    readonly mode: "prompt" | "follow_up";
-    readonly text: string;
-  }): Promise<AgentTurnOutcome> {
-    this.turns.push(input);
-    for (const event of this.events) {
-      for (const listener of this.listeners) listener(event);
-    }
+  async runPrompt(text: string): Promise<AgentTurnOutcome> {
+    this.prompts.push(text);
+    for (const event of this.events) for (const listener of this.listeners) listener(event);
     return this.outcome;
   }
 
@@ -370,21 +540,15 @@ export class ScriptedAgentSession implements WorkerAgentSessionPort {
 export class BlockingAgentSession implements WorkerAgentSessionPort {
   abortCount = 0;
   disposeCount = 0;
-  private resolve?: (outcome: AgentTurnOutcome) => void;
+  private resolve: ((outcome: AgentTurnOutcome) => void) | undefined;
 
-  run(): Promise<AgentTurnOutcome> {
-    return new Promise((resolve) => {
-      this.resolve = resolve;
-    });
+  runPrompt(): Promise<AgentTurnOutcome> {
+    return new Promise((resolve) => (this.resolve = resolve));
   }
 
   async abort(): Promise<void> {
     this.abortCount += 1;
     this.resolve?.({ kind: "completed" });
-  }
-
-  complete(outcome: AgentTurnOutcome = { kind: "completed" }): void {
-    this.resolve?.(outcome);
   }
 
   subscribe(): () => void {
@@ -398,73 +562,50 @@ export class BlockingAgentSession implements WorkerAgentSessionPort {
 
 export class FakeSessionFactory implements AgentSessionFactoryPort {
   createCount = 0;
-  failNextCreate = false;
-  readonly created: WorkerAgentSessionPort[] = [];
+  readonly projections: ControlledRolloutProjection[] = [];
 
   constructor(private readonly queue: WorkerAgentSessionPort[]) {}
 
-  async create(): Promise<WorkerAgentSessionPort> {
-    if (this.failNextCreate) {
-      this.failNextCreate = false;
-      throw new Error("Fake Session 创建失败");
-    }
+  async create(
+    input: Parameters<AgentSessionFactoryPort["create"]>[0],
+  ): Promise<WorkerAgentSessionPort> {
     const session = this.queue.shift();
-    if (!session) throw new Error("FakeSessionFactory 没有可用 Session");
+    if (!session) throw new Error("Fake Session 不存在");
     this.createCount += 1;
-    this.created.push(session);
+    this.projections.push(input.rolloutProjection);
     return session;
   }
 }
 
 export class FakeCancellationPort implements CancellationPort {
-  private readonly signals = new Map<RunId, AbortController>();
+  private readonly controllers = new Map<string, AbortController>();
 
-  signalFor(scope: RunScope): AbortSignal {
+  signalFor(scope: ExecutionScope): AbortSignal {
     return this.controller(scope.runId).signal;
   }
 
-  cancel(runId: RunId): void {
-    this.controller(runId).abort("test_cancelled");
+  cancel(scope: ExecutionScope): void {
+    this.controller(scope.runId).abort("test_cancel");
   }
 
-  private controller(runId: RunId): AbortController {
-    let controller = this.signals.get(runId);
+  private controller(run: string): AbortController {
+    let controller = this.controllers.get(run);
     if (!controller) {
       controller = new AbortController();
-      this.signals.set(runId, controller);
+      this.controllers.set(run, controller);
     }
     return controller;
   }
 }
 
-interface FakeHeartbeat {
-  active: boolean;
-  readonly callback: () => Promise<void>;
-}
-
-interface FakeSchedule {
-  active: boolean;
-  readonly dueAt: number;
-  readonly callback: () => void;
-}
-
 export class FakeClock implements ClockPort {
-  private current: number;
-  private readonly heartbeats: FakeHeartbeat[] = [];
-  private readonly schedules: FakeSchedule[] = [];
+  private readonly heartbeats: Array<{ active: boolean; callback: () => Promise<void> }> = [];
+  private readonly scheduled: Array<{ active: boolean; callback: () => void }> = [];
 
-  constructor(now = new Date("2026-07-26T00:00:00.000Z")) {
-    this.current = now.valueOf();
-  }
-
-  now(): Date {
-    return new Date(this.current);
-  }
-
-  schedule(delayMs: number, callback: () => void): ScheduledTask {
-    const scheduled = { active: true, dueAt: this.current + delayMs, callback };
-    this.schedules.push(scheduled);
-    return { cancel: () => (scheduled.active = false) };
+  schedule(_delayMs: number, callback: () => void): ScheduledTask {
+    const task = { active: true, callback };
+    this.scheduled.push(task);
+    return { cancel: () => (task.active = false) };
   }
 
   startHeartbeat(_intervalMs: number, callback: () => Promise<void>): HeartbeatTask {
@@ -477,18 +618,15 @@ export class FakeClock implements ClockPort {
     };
   }
 
-  async tickHeartbeats(): Promise<void> {
-    for (const heartbeat of this.heartbeats) {
-      if (heartbeat.active) await heartbeat.callback();
-    }
+  async tickHeartbeat(): Promise<void> {
+    for (const heartbeat of this.heartbeats) if (heartbeat.active) await heartbeat.callback();
   }
 
-  advance(milliseconds: number): void {
-    this.current += milliseconds;
-    for (const scheduled of this.schedules) {
-      if (scheduled.active && scheduled.dueAt <= this.current) {
-        scheduled.active = false;
-        scheduled.callback();
+  fireTimeout(): void {
+    for (const task of this.scheduled) {
+      if (task.active) {
+        task.active = false;
+        task.callback();
       }
     }
   }
@@ -496,14 +634,83 @@ export class FakeClock implements ClockPort {
 
 export class FakeArtifactPublication implements ArtifactPublicationPort {
   calls = 0;
-  onAssert?: () => void | Promise<void>;
+  beforeReturn?: () => void | Promise<void>;
 
   async assertReadyForCompletion(): Promise<void> {
     this.calls += 1;
-    await this.onAssert?.();
+    await this.beforeReturn?.();
   }
 }
 
-export function fakeVerifiedRevision(value = "revision-next"): WorkspaceRevisionId {
+export interface FakeSeed {
+  readonly run: Run;
+  readonly workspace: Workspace;
+  readonly input: string;
+  readonly answer?: string;
+  readonly rolloutProjection: ControlledRolloutProjection;
+}
+
+export function fakeSeed(prefix = "worker"): FakeSeed {
+  const now = isoTimestamp("2026-07-26T00:00:00.000Z");
+  const user = createUser(userId(`user-${prefix}`), now);
+  const { tenant, ownerMembership } = createPersonalTenant({
+    id: tenantId(`tenant-${prefix}`),
+    ownerMembershipId: membershipId(`member-${prefix}`),
+    owner: user,
+    createdAt: now,
+  });
+  const thread = createThread({
+    id: threadId(`thread-${prefix}`),
+    tenant,
+    user,
+    membership: ownerMembership,
+    title: "Worker 测试",
+    now,
+  });
+  return {
+    run: createRun({ id: runId(`run-${prefix}`), thread, now }),
+    workspace: createWorkspace({ id: workspaceId(`workspace-${prefix}`), thread, now }),
+    input: "执行任务",
+    rolloutProjection: { schemaVersion: 1, checkpointId: `checkpoint-${prefix}`, turns: [] },
+  };
+}
+
+export function fakeRevision(value = "revision-worker"): WorkspaceRevisionId {
   return workspaceRevisionId(value);
+}
+
+function scopeFrom(run: Run, workspace: Workspace): ExecutionScope {
+  return {
+    tenantId: run.tenantId,
+    threadId: run.threadId,
+    runId: run.id,
+    rootRunId: run.id,
+    workspaceId: workspace.id,
+    ...(workspace.currentRevisionId === undefined
+      ? {}
+      : { baseRevisionId: workspace.currentRevisionId }),
+  };
+}
+
+function scopeKey(scope: ExecutionScope): string {
+  return [
+    scope.tenantId,
+    scope.threadId,
+    scope.runId,
+    scope.rootRunId,
+    scope.workspaceId,
+    scope.baseRevisionId ?? "none",
+  ].join("|");
+}
+
+function sameScope(left: ExecutionScope, right: ExecutionScope): boolean {
+  return scopeKey(left) === scopeKey(right);
+}
+
+function expired(fence: ExecutionFence, now: IsoTimestamp): boolean {
+  const current = Date.parse(now);
+  return (
+    Date.parse(fence.runClaim.expiresAt) <= current ||
+    Date.parse(fence.workspaceLease.expiresAt) <= current
+  );
 }

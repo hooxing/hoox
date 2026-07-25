@@ -124,7 +124,7 @@ export class S3BlobStore implements BlobStore {
     const key = this.keyFor(blob);
     const existing = await this.client.head(key);
     if (existing !== undefined) {
-      this.assertWithinSizeLimit(existing.size);
+      assertProviderBlobSizeWithin(existing.size, this.maxBlobSizeBytes);
       assertStoredDescriptor(existing, descriptor, "BLOB_IDEMPOTENCY_CONFLICT");
       return blob;
     }
@@ -150,7 +150,7 @@ export class S3BlobStore implements BlobStore {
     if (stagedHead === undefined) {
       throw new BlobStoreError("BLOB_NOT_FOUND", "待提交的 staging 对象不存在");
     }
-    this.assertWithinSizeLimit(stagedHead.size);
+    assertProviderBlobSizeWithin(stagedHead.size, this.maxBlobSizeBytes);
     assertStoredDescriptor(stagedHead, staged);
 
     const stable: StableBlobRef = {
@@ -164,7 +164,7 @@ export class S3BlobStore implements BlobStore {
     const destinationKey = this.keyFor(stable);
     const existing = await this.client.head(destinationKey);
     if (existing !== undefined) {
-      this.assertWithinSizeLimit(existing.size);
+      assertProviderBlobSizeWithin(existing.size, this.maxBlobSizeBytes);
       assertStoredDescriptor(existing, stable);
       return stable;
     }
@@ -188,7 +188,7 @@ export class S3BlobStore implements BlobStore {
     if (metadata === undefined) {
       return undefined;
     }
-    this.assertWithinSizeLimit(metadata.size);
+    assertProviderBlobSizeWithin(metadata.size, this.maxBlobSizeBytes);
     assertStoredDescriptor(metadata, blob);
     return metadata.etag === undefined ? { blob } : { blob, etag: metadata.etag };
   }
@@ -207,6 +207,7 @@ export class S3BlobStore implements BlobStore {
 
     const hash = createHash("sha256");
     let received = 0;
+    const verifiedChunks: Uint8Array[] = [];
     for await (const chunk of response.body) {
       received += chunk.byteLength;
       assertProviderBlobSizeWithin(received, this.maxBlobSizeBytes);
@@ -214,10 +215,14 @@ export class S3BlobStore implements BlobStore {
         throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "读取内容超过固定大小");
       }
       hash.update(chunk);
-      yield chunk;
+      // 当前绝对上限为 16 MiB，先缓冲并完成全量校验，避免消费者在最终哈希失败前提交外部效果。
+      verifiedChunks.push(chunk.slice());
     }
     if (received !== blob.size || hash.digest("hex") !== blob.sha256) {
       throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "对象内容与固定哈希或大小不一致");
+    }
+    for (const chunk of verifiedChunks) {
+      yield chunk;
     }
   }
 
@@ -270,7 +275,7 @@ export class S3BlobStore implements BlobStore {
     if (metadata === undefined) {
       throw new BlobStoreError("BLOB_NOT_FOUND", "待下载对象不存在");
     }
-    this.assertWithinSizeLimit(metadata.size);
+    assertProviderBlobSizeWithin(metadata.size, this.maxBlobSizeBytes);
     assertStoredDescriptor(metadata, input.blob);
     return this.client.presignGet({
       key,
@@ -367,26 +372,33 @@ export class S3StableBlobGarbageCollector implements StableBlobGcPort {
   async collectIfUnreachable(
     scope: TenantBlobScope,
     blob: StableBlobRef,
-  ): Promise<"deleted" | "still_referenced"> {
+  ): Promise<"deleted" | "still_referenced" | "in_progress"> {
     assertBlobRef(scope, blob);
     assertBlobSizeWithin(blob.size, this.maxBlobSizeBytes);
     const result = await this.claims.claimUnreachable({ scope, blob });
-    if (result.status === "still_referenced") {
-      return "still_referenced";
+    if (result.status === "already_deleted") {
+      return "deleted";
+    }
+    if (result.status !== "claimed") {
+      return result.status;
     }
     assertGcClaim(scope, blob, result.claim);
-    try {
-      await deleteAndResolve(this.client, keyFor(this.prefix, blob));
-    } catch (error) {
-      // UNKNOWN 时对象可能已经删除，claim 必须留在 deleting，由恢复任务按 generation 接管。
-      if (error instanceof BlobStoreError && error.result === "unknown") {
-        throw error;
+    let deletingClaim = result.claim;
+    if (deletingClaim.phase === "pre_delete") {
+      const begin = await this.claims.beginDeletion({ scope, blob, claim: deletingClaim });
+      if (begin.status === "claim_lost") {
+        return "in_progress";
       }
-      await this.claims.releaseClaim({ scope, blob, claim: result.claim });
-      throw error;
+      deletingClaim = begin.claim;
+      assertGcClaim(scope, blob, deletingClaim);
+      if (deletingClaim.phase !== "deleting") {
+        throw new BlobStoreError("BLOB_PROVIDER_ERROR", "GC beginDeletion 未返回 deleting claim");
+      }
     }
+    // 一旦取得 deleting intent，任何 DELETE 失败/UNKNOWN 都不能恢复 active：旧 DELETE 仍可能延迟成功。
+    await deleteAndResolve(this.client, keyFor(this.prefix, blob));
     // 删除已确认后才完成 claim；完成失败也不能释放，否则新引用可能指向已删除对象。
-    await this.claims.completeDeletion({ scope, blob, claim: result.claim });
+    await this.claims.completeDeletion({ scope, blob, claim: deletingClaim });
     return "deleted";
   }
 }
@@ -689,6 +701,7 @@ function assertGcClaim(
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(claim.claimId) ||
     !Number.isSafeInteger(claim.generation) ||
     claim.generation < 1 ||
+    (claim.phase !== "pre_delete" && claim.phase !== "deleting") ||
     claim.tenantId !== scope.tenantId ||
     claim.purpose !== blob.purpose ||
     claim.sha256 !== blob.sha256 ||

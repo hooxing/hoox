@@ -57,6 +57,7 @@ integration("MinIO Blob Store 集成", () => {
           claim: {
             claimId: `integration-claim-${unique}`,
             generation: 1,
+            phase: "pre_delete",
             tenantId: claimScope.tenantId,
             purpose: blob.purpose,
             sha256: blob.sha256,
@@ -65,8 +66,14 @@ integration("MinIO Blob Store 集成", () => {
           },
         };
       },
+      async beginDeletion({ claim }) {
+        return { status: "started", claim: { ...claim, phase: "deleting" } };
+      },
       async completeDeletion() {},
-      async releaseClaim() {},
+      async releasePreDeleteClaim() {},
+      async resolveLifecycle() {
+        return "active";
+      },
     });
     const cleanupClient = new S3Client({
       endpoint: config.endpoint,

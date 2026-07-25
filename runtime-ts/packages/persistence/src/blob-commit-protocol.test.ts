@@ -71,6 +71,22 @@ describe("Blob 补偿状态协议", () => {
     expect(blocked.status).toBe("stable_mark_gc_blocked");
     expect(blocked.version).toBe(state.version + 1);
     expect(blocked.referenceId).toBe("ref-1");
+    expect(() => transitionBlobCommit(blocked, { type: "promotion_succeeded", stable })).toThrow(
+      BlobCommitTransitionError,
+    );
+    const stillDeleting = transitionBlobCommit(blocked, {
+      type: "stable_gc_lifecycle_resolved",
+      status: "deleting",
+    });
+    expect(stillDeleting.status).toBe("stable_mark_gc_blocked");
+    const deleted = transitionBlobCommit(stillDeleting, {
+      type: "stable_gc_lifecycle_resolved",
+      status: "deleted",
+    });
+    expect(deleted.status).toBe("reference_committed");
+    expect(transitionBlobCommit(deleted, { type: "promotion_succeeded", stable }).status).toBe(
+      "stable_object_ready",
+    );
 
     const unknown = transitionBlobCommit(state, { type: "stable_mark_result_unknown" });
     const resolvedBlocked = transitionBlobCommit(unknown, {

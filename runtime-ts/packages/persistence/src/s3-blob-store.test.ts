@@ -331,9 +331,84 @@ describe("S3BlobStore", () => {
     });
     client.contentLengthOverride = undefined;
     client.extraReadChunk = bytes("56");
-    await expect(store.getBytes({ tenantId: "tenant_a" }, staged)).rejects.toMatchObject({
+    const delivered: Uint8Array[] = [];
+    await expect(
+      (async () => {
+        for await (const chunk of store.read({ tenantId: "tenant_a" }, staged)) {
+          delivered.push(chunk);
+        }
+      })(),
+    ).rejects.toMatchObject({ code: "BLOB_INTEGRITY_MISMATCH" });
+    expect(delivered).toEqual([]);
+
+    client.extraReadChunk = undefined;
+    const key = client.putKeys.at(-1);
+    const stored = key === undefined ? undefined : client.objects.get(key);
+    if (key === undefined || stored === undefined) {
+      throw new Error("测试前置对象不存在");
+    }
+    client.objects.set(key, { ...stored, body: bytes("zzzz") });
+    const deliveredBeforeHash: Uint8Array[] = [];
+    await expect(
+      (async () => {
+        for await (const chunk of store.read({ tenantId: "tenant_a" }, staged)) {
+          deliveredBeforeHash.push(chunk);
+        }
+      })(),
+    ).rejects.toMatchObject({ code: "BLOB_INTEGRITY_MISMATCH" });
+    expect(deliveredBeforeHash).toEqual([]);
+  });
+
+  it("HEAD 返回的 metadata.size 超限统一视为存储完整性错误", async () => {
+    const scope = { tenantId: "tenant_a" };
+
+    const headClient = new FakeS3ObjectClient();
+    const headStore = new S3BlobStore(headClient, { ...config, maxBlobSizeBytes: 8 });
+    const headStaged = await headStore.putStaging({
+      scope,
+      purpose: "preview",
+      uploadId: "head-size",
+      body: bytes("1234"),
+      mediaType: "text/plain",
+    });
+    headClient.headSizeOverride = 9;
+    await expect(headStore.head(scope, headStaged)).rejects.toMatchObject({
       code: "BLOB_INTEGRITY_MISMATCH",
     });
+
+    const promoteClient = new FakeS3ObjectClient();
+    const promoteStore = new S3BlobStore(promoteClient, { ...config, maxBlobSizeBytes: 8 });
+    const promoteStaged = await promoteStore.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "promote-size",
+      body: bytes("1234"),
+      mediaType: "text/plain",
+    });
+    promoteClient.headSizeOverride = 9;
+    await expect(promoteStore.promote(scope, promoteStaged)).rejects.toMatchObject({
+      code: "BLOB_INTEGRITY_MISMATCH",
+    });
+
+    const presignClient = new FakeS3ObjectClient();
+    const presignStore = new S3BlobStore(presignClient, { ...config, maxBlobSizeBytes: 8 });
+    const presignStaged = await presignStore.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "presign-size",
+      body: bytes("1234"),
+      mediaType: "text/plain",
+    });
+    const stable = await presignStore.promote(scope, presignStaged);
+    presignClient.headSizeOverride = 9;
+    await expect(
+      presignStore.presignDownload({
+        scope,
+        blob: stable,
+        ttlSeconds: 30,
+        responseMediaType: "text/plain",
+      }),
+    ).rejects.toMatchObject({ code: "BLOB_INTEGRITY_MISMATCH" });
   });
 
   it("删除响应未知时通过 HEAD 区分已删除与仍存在", async () => {
@@ -456,7 +531,7 @@ describe("S3BlobStore", () => {
     expect(lifecycle.addVerifiedReference()).toBe("gc_in_progress");
   });
 
-  it("stable 删除明确失败时释放同 generation claim", async () => {
+  it("stable 远端删除明确失败后仍保持不可逆 deleting", async () => {
     const client = new FakeS3ObjectClient();
     const store = new S3BlobStore(client, { ...config, prefix: "gc-known-failure" });
     const scope = { tenantId: "tenant_a" };
@@ -481,8 +556,9 @@ describe("S3BlobStore", () => {
       code: "BLOB_PROVIDER_ERROR",
       result: "known",
     });
-    expect(lifecycle.state).toBe("active");
-    expect(lifecycle.releaseCount).toBe(1);
+    expect(lifecycle.state).toBe("deleting");
+    expect(lifecycle.releaseCount).toBe(0);
+    expect(lifecycle.addVerifiedReference()).toBe("gc_in_progress");
     await expect(store.head(scope, stable)).resolves.toBeDefined();
   });
 
@@ -502,13 +578,71 @@ describe("S3BlobStore", () => {
     if (first.status !== "claimed") {
       throw new Error("测试前置条件错误");
     }
-    await lifecycle.releaseClaim({ scope, blob: stable, claim: first.claim });
+    await lifecycle.releasePreDeleteClaim({ scope, blob: stable, claim: first.claim });
     const second = await lifecycle.claimUnreachable({ scope, blob: stable });
     expect(second.status).toBe("claimed");
 
     await expect(
       lifecycle.completeDeletion({ scope, blob: stable, claim: first.claim }),
     ).rejects.toThrow("generation 已失效");
+  });
+
+  it("旧 DELETE 在途时 lease 过期，gen2 失败也不能恢复引用，最终由 gen3 收敛", async () => {
+    const client = new FakeS3ObjectClient();
+    const store = new S3BlobStore(client, { ...config, prefix: "gc-delayed-delete" });
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "gc-delayed-delete-1",
+      body: bytes("stable"),
+      mediaType: "text/plain",
+    });
+    const stable = await store.promote(scope, staged);
+    const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable, 0);
+    const gc = new S3StableBlobGarbageCollector(
+      client,
+      lifecycle,
+      "gc-delayed-delete",
+      config.maxBlobSizeBytes,
+    );
+
+    const delayed = controlledDeleteHook();
+    client.deleteHooks.push(delayed.hook);
+    const oldWorkerOutcome = gc.collectIfUnreachable(scope, stable).then(
+      (value) => ({ status: "fulfilled" as const, value }),
+      (error: unknown) => ({ status: "rejected" as const, error }),
+    );
+    await delayed.started;
+    expect(lifecycle.state).toBe("deleting");
+
+    // lease 未到期时不能签发第二个 claim，也不能再次触发远端 DELETE。
+    await expect(gc.collectIfUnreachable(scope, stable)).resolves.toBe("in_progress");
+    expect(client.deleteHooks).toHaveLength(0);
+
+    lifecycle.advancePastLease();
+    client.deleteHooks.push(async () => {
+      throw new BlobStoreError("BLOB_PROVIDER_ERROR", "gen2 明确删除失败");
+    });
+    await expect(gc.collectIfUnreachable(scope, stable)).rejects.toMatchObject({
+      code: "BLOB_PROVIDER_ERROR",
+      result: "known",
+    });
+    expect(lifecycle.state).toBe("deleting");
+    expect(lifecycle.addVerifiedReference()).toBe("gc_in_progress");
+
+    // gen1 的旧 DELETE 随后成功，但旧 generation 无权完成 PG 状态。
+    delayed.succeed();
+    const oldOutcome = await oldWorkerOutcome;
+    expect(oldOutcome.status).toBe("rejected");
+    expect(lifecycle.state).toBe("deleting");
+    await expect(store.head(scope, stable)).resolves.toBeUndefined();
+    expect(lifecycle.addVerifiedReference()).toBe("gc_in_progress");
+
+    lifecycle.advancePastLease();
+    await expect(gc.collectIfUnreachable(scope, stable)).resolves.toBe("deleted");
+    expect(lifecycle.state).toBe("deleted");
+    expect(lifecycle.completedGeneration).toBe(3);
   });
 
   it("RFC 5987 编码覆盖中文与 encodeURIComponent 保留字符", () => {
@@ -526,6 +660,7 @@ class FakeS3ObjectClient implements S3ObjectClient {
   readonly putKeys: string[] = [];
   readonly copyKeys: S3CopyObjectInput[] = [];
   readonly presignInputs: S3PresignInput[] = [];
+  readonly deleteHooks: Array<() => Promise<void>> = [];
   putUnknownAfterWrite = false;
   putUnknownWithoutWrite = false;
   deleteUnknownAfterDelete = false;
@@ -534,6 +669,7 @@ class FakeS3ObjectClient implements S3ObjectClient {
   successfulPuts = 0;
   contentLengthOverride: number | undefined;
   extraReadChunk: Uint8Array | undefined;
+  headSizeOverride: number | undefined;
   failVerificationHeadAfterUnknownWrite = false;
   failVerificationHeadAfterUnknownDelete = false;
   private failNextHead = false;
@@ -566,7 +702,10 @@ class FakeS3ObjectClient implements S3ObjectClient {
       this.failNextHead = false;
       throw new BlobStoreError("BLOB_PROVIDER_ERROR", "fake head failure");
     }
-    return this.objects.get(key)?.metadata;
+    const metadata = this.objects.get(key)?.metadata;
+    return metadata === undefined || this.headSizeOverride === undefined
+      ? metadata
+      : { ...metadata, size: this.headSizeOverride };
   }
 
   async get(key: string): Promise<S3GetObjectResult | undefined> {
@@ -600,6 +739,10 @@ class FakeS3ObjectClient implements S3ObjectClient {
   }
 
   async delete(key: string): Promise<void> {
+    const hook = this.deleteHooks.shift();
+    if (hook !== undefined) {
+      await hook();
+    }
     if (this.deleteKnownFailure) {
       throw new BlobStoreError("BLOB_PROVIDER_ERROR", "fake known delete failure");
     }
@@ -619,11 +762,13 @@ class FakeS3ObjectClient implements S3ObjectClient {
 }
 
 class InMemoryStableLifecycle implements StableBlobGcClaimPort {
-  state: "active" | "deleting" | "deleted" = "active";
+  state: "active" | "pre_delete" | "deleting" | "deleted" = "active";
   completedGeneration: number | undefined;
   releaseCount = 0;
   onClaim: (() => Promise<void>) | undefined;
   private generation = 0;
+  private logicalNow = Date.now();
+  private leaseDeadline = 0;
 
   constructor(
     private readonly tenantId: string,
@@ -632,7 +777,7 @@ class InMemoryStableLifecycle implements StableBlobGcClaimPort {
   ) {}
 
   addVerifiedReference(): "added" | "gc_in_progress" {
-    if (this.state === "deleting") {
+    if (this.state === "pre_delete" || this.state === "deleting") {
       return "gc_in_progress";
     }
     // 测试端口模拟 markReferenceStable 已完成 promote + HEAD；deleted 可原子恢复 active。
@@ -647,16 +792,49 @@ class InMemoryStableLifecycle implements StableBlobGcClaimPort {
     this.references -= 1;
   }
 
+  advancePastLease(): void {
+    this.logicalNow = this.leaseDeadline + 1;
+  }
+
   async claimUnreachable(input: { readonly scope: TenantBlobScope; readonly blob: StableBlobRef }) {
     this.assertTarget(input.scope, input.blob);
+    if (this.state === "deleted") {
+      return { status: "already_deleted" as const };
+    }
     if (this.references > 0) {
       return { status: "still_referenced" as const };
     }
-    this.state = "deleting";
+    if (
+      (this.state === "pre_delete" || this.state === "deleting") &&
+      this.logicalNow <= this.leaseDeadline
+    ) {
+      return { status: "in_progress" as const };
+    }
+    if (this.state === "active") {
+      this.state = "pre_delete";
+    }
     this.generation += 1;
+    this.leaseDeadline = this.logicalNow + 60_000;
     const claim = this.claim();
     await this.onClaim?.();
     return { status: "claimed" as const, claim };
+  }
+
+  async beginDeletion(input: {
+    readonly scope: TenantBlobScope;
+    readonly blob: StableBlobRef;
+    readonly claim: StableBlobGcClaim;
+  }) {
+    this.assertTarget(input.scope, input.blob);
+    if (
+      this.state !== "pre_delete" ||
+      input.claim.phase !== "pre_delete" ||
+      input.claim.generation !== this.generation
+    ) {
+      return { status: "claim_lost" as const };
+    }
+    this.state = "deleting";
+    return { status: "started" as const, claim: this.claim() };
   }
 
   async completeDeletion(input: {
@@ -665,27 +843,39 @@ class InMemoryStableLifecycle implements StableBlobGcClaimPort {
     readonly claim: StableBlobGcClaim;
   }) {
     this.assertTarget(input.scope, input.blob);
-    this.assertGeneration(input.claim.generation);
+    this.assertDeletingGeneration(input.claim);
     this.state = "deleted";
     this.completedGeneration = input.claim.generation;
   }
 
-  async releaseClaim(input: {
+  async releasePreDeleteClaim(input: {
     readonly scope: TenantBlobScope;
     readonly blob: StableBlobRef;
     readonly claim: StableBlobGcClaim;
   }) {
     this.assertTarget(input.scope, input.blob);
-    this.assertGeneration(input.claim.generation);
+    if (
+      this.state !== "pre_delete" ||
+      input.claim.phase !== "pre_delete" ||
+      input.claim.generation !== this.generation
+    ) {
+      throw new Error("GC pre-delete claim 已失效");
+    }
     this.state = "active";
     this.releaseCount += 1;
+  }
+
+  async resolveLifecycle(input: { readonly scope: TenantBlobScope; readonly blob: StableBlobRef }) {
+    this.assertTarget(input.scope, input.blob);
+    return this.state;
   }
 
   private claim() {
     return {
       claimId: `claim-${this.generation}`,
       generation: this.generation,
-      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      leaseExpiresAt: new Date(this.leaseDeadline).toISOString(),
+      phase: this.state === "pre_delete" ? ("pre_delete" as const) : ("deleting" as const),
       tenantId: this.tenantId,
       purpose: this.blob.purpose,
       sha256: this.blob.sha256,
@@ -693,8 +883,12 @@ class InMemoryStableLifecycle implements StableBlobGcClaimPort {
     };
   }
 
-  private assertGeneration(generation: number): void {
-    if (this.state !== "deleting" || generation !== this.generation) {
+  private assertDeletingGeneration(claim: StableBlobGcClaim): void {
+    if (
+      this.state !== "deleting" ||
+      claim.phase !== "deleting" ||
+      claim.generation !== this.generation
+    ) {
       throw new Error("GC claim generation 已失效");
     }
   }
@@ -718,4 +912,27 @@ function bytes(value: string): Uint8Array {
 
 function unknownResult(): BlobStoreError {
   return new BlobStoreError("BLOB_RESULT_UNKNOWN", "fake unknown", { result: "unknown" });
+}
+
+function controlledDeleteHook(): {
+  readonly hook: () => Promise<void>;
+  readonly started: Promise<void>;
+  readonly succeed: () => void;
+} {
+  let markStarted: (() => void) | undefined;
+  let finish: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  const completion = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  return {
+    hook: async () => {
+      markStarted?.();
+      await completion;
+    },
+    started,
+    succeed: () => finish?.(),
+  };
 }

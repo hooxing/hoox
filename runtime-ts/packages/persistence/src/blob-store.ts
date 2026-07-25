@@ -69,6 +69,7 @@ export interface StableBlobGcClaim {
   readonly claimId: string;
   readonly generation: number;
   readonly leaseExpiresAt: string;
+  readonly phase: "pre_delete" | "deleting";
   readonly tenantId: string;
   readonly purpose: BlobPurpose;
   readonly sha256: string;
@@ -76,11 +77,12 @@ export interface StableBlobGcClaim {
 }
 
 /**
- * 由 PostgreSQL 事务实现。claimUnreachable 必须在同一事务中检查零引用并把对象置为 deleting；
- * 新增 stable 引用也必须锁定并读取同一生命周期行，deleting 状态下一律拒绝新增引用。
+ * 由 PostgreSQL 事务实现。claimUnreachable 必须在同一事务中检查零引用并签发租约；
+ * beginDeletion 必须把 pre_delete 原子推进为不可逆 deleting，再允许发起远端 DELETE。
+ * 新增 stable 引用也必须锁定并读取同一生命周期行，pre_delete/deleting 状态下一律拒绝。
  * deleted 对象只有在重新 promote 并经 HEAD 校验后，才能由引用事务原子恢复为 active。
  * lease 只控制恢复 Worker 的执行权，过期不能自动把 deleting 改回 active；接管时递增 generation。
- * completeDeletion/releaseClaim 必须以 claimId + generation 做 compare-and-set，拒绝过期 Worker。
+ * begin/complete/pre-delete release 必须以 claimId + generation 做 compare-and-set，拒绝过期 Worker。
  */
 export interface StableBlobGcClaimPort {
   claimUnreachable(input: {
@@ -89,24 +91,39 @@ export interface StableBlobGcClaimPort {
   }): Promise<
     | { readonly status: "claimed"; readonly claim: StableBlobGcClaim }
     | { readonly status: "still_referenced" }
+    | { readonly status: "in_progress" }
+    | { readonly status: "already_deleted" }
+  >;
+  beginDeletion(input: {
+    readonly scope: TenantBlobScope;
+    readonly blob: StableBlobRef;
+    readonly claim: StableBlobGcClaim;
+  }): Promise<
+    | { readonly status: "started"; readonly claim: StableBlobGcClaim }
+    | { readonly status: "claim_lost" }
   >;
   completeDeletion(input: {
     readonly scope: TenantBlobScope;
     readonly blob: StableBlobRef;
     readonly claim: StableBlobGcClaim;
   }): Promise<void>;
-  releaseClaim(input: {
+  /** 仅能释放尚未调用 beginDeletion 的 pre_delete claim；deleting 永远不能恢复 active。 */
+  releasePreDeleteClaim(input: {
     readonly scope: TenantBlobScope;
     readonly blob: StableBlobRef;
     readonly claim: StableBlobGcClaim;
   }): Promise<void>;
+  resolveLifecycle(input: {
+    readonly scope: TenantBlobScope;
+    readonly blob: StableBlobRef;
+  }): Promise<"active" | "pre_delete" | "deleting" | "deleted">;
 }
 
 export interface StableBlobGcPort {
   collectIfUnreachable(
     scope: TenantBlobScope,
     blob: StableBlobRef,
-  ): Promise<"deleted" | "still_referenced">;
+  ): Promise<"deleted" | "still_referenced" | "in_progress">;
 }
 
 export type BlobStoreErrorCode =

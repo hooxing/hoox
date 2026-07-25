@@ -65,6 +65,9 @@ interface MigrationContextSafetyRow {
   readonly migrator_can_create_database_object: boolean;
   readonly migrator_owns_other_schema: boolean;
   readonly migrator_owns_cross_schema_relation: boolean;
+  readonly target_schema_has_routine: boolean;
+  readonly migrator_owns_cross_schema_routine: boolean;
+  readonly migrator_owns_cross_schema_object: boolean;
   readonly schema_missing: boolean;
   readonly migrator_is_not_schema_owner: boolean;
   readonly current_schema_mismatch: boolean;
@@ -145,6 +148,39 @@ async function inspectMigrationContext(
             AND schema_state.nspname <> 'information_schema'
             AND schema_state.nspname !~ '^pg_'
        ) AS migrator_owns_cross_schema_relation,
+       EXISTS (
+         SELECT 1 FROM pg_proc routine
+          WHERE routine.pronamespace = (SELECT oid FROM target_schema)
+       ) AS target_schema_has_routine,
+       EXISTS (
+         SELECT 1 FROM pg_proc routine
+         JOIN pg_namespace schema_state ON schema_state.oid = routine.pronamespace
+          WHERE routine.proowner = (SELECT oid FROM migrator)
+            AND schema_state.nspname <> $3
+            AND schema_state.nspname <> 'information_schema'
+            AND schema_state.nspname !~ '^pg_'
+       ) AS migrator_owns_cross_schema_routine,
+       EXISTS (
+         SELECT 1
+           FROM (
+             SELECT typnamespace AS namespace_oid, typowner AS owner_oid FROM pg_type
+             UNION ALL
+             SELECT oprnamespace, oprowner FROM pg_operator
+             UNION ALL
+             SELECT connamespace, conowner FROM pg_conversion
+             UNION ALL
+             SELECT collnamespace, collowner FROM pg_collation
+             UNION ALL
+             SELECT cfgnamespace, cfgowner FROM pg_ts_config
+             UNION ALL
+             SELECT dictnamespace, dictowner FROM pg_ts_dict
+           ) owned_object
+           JOIN pg_namespace schema_state ON schema_state.oid = owned_object.namespace_oid
+          WHERE owned_object.owner_oid = (SELECT oid FROM migrator)
+            AND schema_state.nspname <> $3
+            AND schema_state.nspname <> 'information_schema'
+            AND schema_state.nspname !~ '^pg_'
+       ) AS migrator_owns_cross_schema_object,
        NOT EXISTS (SELECT 1 FROM target_schema) AS schema_missing,
        NOT EXISTS (
          SELECT 1 FROM target_schema WHERE nspowner = (SELECT oid FROM migrator)
@@ -258,6 +294,82 @@ async function assertNoPublicSchemaPrivileges(client: PoolClient): Promise<void>
   }
 }
 
+async function assertRoutinePrivilegeBoundary(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<void> {
+  const runtimePrivileges = await client.query<{ count: string }>(
+    `SELECT count(*)::text AS count
+       FROM pg_proc routine
+      WHERE routine.pronamespace = current_schema()::regnamespace
+        AND has_function_privilege($1, routine.oid, 'EXECUTE')`,
+    [context.runtimeRole],
+  );
+  const publicPrivileges = await client.query<{ count: string }>(
+    `SELECT count(*)::text AS count
+       FROM pg_proc routine
+       CROSS JOIN LATERAL aclexplode(
+         COALESCE(routine.proacl, acldefault('f'::"char", routine.proowner))
+       ) acl
+      WHERE routine.pronamespace = current_schema()::regnamespace
+        AND acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'`,
+  );
+  const unsafeDefaults = await client.query<{ count: string }>(
+    `SELECT count(*)::text AS count
+       FROM pg_default_acl defaults
+       CROSS JOIN LATERAL aclexplode(defaults.defaclacl) acl
+      WHERE defaults.defaclrole = $1::regrole
+        AND defaults.defaclnamespace = 0
+        AND defaults.defaclobjtype = 'f'
+        AND (acl.grantee = 0 OR acl.grantee = $2::regrole)
+        AND acl.privilege_type = 'EXECUTE'`,
+    [context.migratorRole, context.runtimeRole],
+  );
+  if (
+    runtimePrivileges.rows[0]?.count !== "0" ||
+    publicPrivileges.rows[0]?.count !== "0" ||
+    unsafeDefaults.rows[0]?.count !== "0"
+  ) {
+    throw new PersistenceError("CONSTRAINT_VIOLATION", "Routine 执行权限偏离空白名单");
+  }
+}
+
+/** 在任何业务 DDL 前固化空 routine manifest 的默认权限；未来放行前必须另做安全评审。 */
+export async function hardenRoutinePrivilegesOnClient(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<void> {
+  const role = quoteIdentifier(context.runtimeRole);
+  const migrator = quoteIdentifier(context.migratorRole);
+  const schema = quoteIdentifier(context.schema);
+  await client.query(
+    `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator}
+       REVOKE EXECUTE ON ROUTINES FROM PUBLIC, ${role}`,
+  );
+  await client.query(`REVOKE EXECUTE ON ALL ROUTINES IN SCHEMA ${schema} FROM PUBLIC, ${role}`);
+  await assertRoutinePrivilegeBoundary(client, context);
+}
+
+async function resetRoutineDefaultPrivilegesOnClient(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<void> {
+  const migrator = quoteIdentifier(context.migratorRole);
+  // down 已先撤销 Schema USAGE；恢复 PostgreSQL 内建默认值可删除角色级 pg_default_acl 残留。
+  await client.query(
+    `ALTER DEFAULT PRIVILEGES FOR ROLE ${migrator}
+       GRANT EXECUTE ON ROUTINES TO PUBLIC`,
+  );
+  const result = await client.query<{ count: string }>(
+    `SELECT count(*)::text AS count FROM pg_default_acl
+      WHERE defaclrole = $1::regrole AND defaclobjtype = 'f'`,
+    [context.migratorRole],
+  );
+  if (result.rows[0]?.count !== "0") {
+    throw new PersistenceError("CONSTRAINT_VIOLATION", "down 后仍残留 routine 默认 ACL");
+  }
+}
+
 async function assertActiveRuntimeWhitelist(
   client: PoolClient,
   context: MigrationSecurityContext,
@@ -305,6 +417,7 @@ async function assertActiveRuntimeWhitelist(
   await assertDatabaseAndSchemaBoundary(client, context, true);
   await assertNoPublicRelationPrivileges(client);
   await assertNoPublicSchemaPrivileges(client);
+  await assertRoutinePrivilegeBoundary(client, context);
 }
 
 async function assertRuntimeAccessRemoved(
@@ -352,6 +465,7 @@ async function assertRuntimeAccessRemoved(
   await assertDatabaseAndSchemaBoundary(client, context, false);
   await assertNoPublicRelationPrivileges(client);
   await assertNoPublicSchemaPrivileges(client);
+  await assertRoutinePrivilegeBoundary(client, context);
 }
 
 /** 在既有迁移事务中收敛 ACL，供 down 保证 DDL 与权限回收原子提交。 */
@@ -362,6 +476,7 @@ export async function bootstrapRuntimeAccessOnClient(
   await assertBootstrapContextSafe(client, context);
   const role = quoteIdentifier(context.runtimeRole);
   const schema = quoteIdentifier(context.schema);
+  await hardenRoutinePrivilegesOnClient(client, context);
   await client.query(`REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM PUBLIC, ${role}`);
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema} FROM PUBLIC, ${role}`,
@@ -402,6 +517,7 @@ export async function teardownRuntimeSchemaAccessOnClient(
 ): Promise<void> {
   const role = quoteIdentifier(context.runtimeRole);
   const schema = quoteIdentifier(context.schema);
+  await hardenRoutinePrivilegesOnClient(client, context);
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema} FROM PUBLIC, ${role}`,
   );
@@ -409,5 +525,6 @@ export async function teardownRuntimeSchemaAccessOnClient(
     `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema} FROM PUBLIC, ${role}`,
   );
   await client.query(`REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM PUBLIC, ${role}`);
+  await resetRoutineDefaultPrivilegesOnClient(client, context);
   await assertRuntimeAccessRemoved(client, context);
 }

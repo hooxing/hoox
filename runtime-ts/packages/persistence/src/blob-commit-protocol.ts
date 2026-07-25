@@ -20,7 +20,6 @@ export type BlobCommitStatus =
   | "reference_committed"
   | "allocation_reserved"
   | "promotion_started"
-  | "promotion_unknown"
   | "stable_object_ready"
   | "stable_mark_gc_blocked"
   | "stable_mark_unknown"
@@ -65,9 +64,7 @@ export type BlobCommitEvent =
       readonly authorization: PromotionAuthorizationRef;
     }
   | { readonly type: "promotion_succeeded"; readonly stable: StableBlobRef }
-  | { readonly type: "promotion_failed" }
-  | { readonly type: "promotion_result_unknown" }
-  | { readonly type: "promotion_resolved"; readonly promoted: boolean }
+  | { readonly type: "promotion_proven_not_copied" }
   | { readonly type: "stable_mark_succeeded" }
   | { readonly type: "stable_mark_failed" }
   | { readonly type: "stable_mark_gc_blocked" }
@@ -146,7 +143,8 @@ export interface BlobCommitStatePort {
   /**
    * 调用方只提供不含 mode/target/auth 的最小命令。Repository 必须在同一 PG 事务中读取
    * 当前 snapshot、allocation、lifecycle 与永久 retired 历史，自行派生 canonical target/auth，
-   * 再 CAS 到 promotion_started。普通 compareAndSet 必须拒绝 next.status=promotion_started。
+   * 再 CAS 到 promotion_started。普通 compareAndSet 必须拒绝签发 promotion_started，也必须拒绝
+   * promotion_started 回到 allocation_reserved；后者只能走 provePromotionNotCopied。
    */
   startPromotion(input: {
     readonly scope: TenantBlobScope;
@@ -160,6 +158,26 @@ export interface BlobCommitStatePort {
         readonly snapshotVersion: number;
       }
     | { readonly status: "version_conflict" | "invalid_state" | "allocation_unavailable" }
+  >;
+  /**
+   * 唯一允许 promotion_started 回到 allocation_reserved 的入口。Repository 必须在同一事务中
+   * 锁定 snapshot、authorization 与 execution，且仅当 execution 仍是 pre-intent、PG 能证明从未
+   * 写入 copy-issued 时，才撤销该授权并返回 proven_not_copied。响应未知不得视为已证明。
+   */
+  provePromotionNotCopied(input: {
+    readonly scope: TenantBlobScope;
+    readonly operationId: string;
+    readonly expectedSnapshotVersion: number;
+    readonly authorizationId: string;
+  }): Promise<
+    | { readonly status: "proven_not_copied"; readonly snapshotVersion: number }
+    | {
+        readonly status:
+          | "version_conflict"
+          | "invalid_state"
+          | "authorization_mismatch"
+          | "copy_may_have_been_issued";
+      }
   >;
 }
 
@@ -276,20 +294,8 @@ function applyTransition(
         assertStableEqualsTarget(current, event.stable);
         return copyPromotion(current, "stable_object_ready");
       }
-      if (event.type === "promotion_result_unknown") {
-        return copyPromotion(current, "promotion_unknown");
-      }
-      if (event.type === "promotion_failed") {
+      if (event.type === "promotion_proven_not_copied") {
         return copyPromotion(current, "allocation_reserved", null);
-      }
-      break;
-    case "promotion_unknown":
-      if (event.type === "promotion_resolved") {
-        return copyPromotion(
-          current,
-          event.promoted ? "stable_object_ready" : "allocation_reserved",
-          event.promoted ? current.promotionAuthorization : null,
-        );
       }
       break;
     case "stable_object_ready":
@@ -425,7 +431,7 @@ function copyStable(
 
 function copyPromotion(
   current: BlobCommitSnapshot,
-  status: "allocation_reserved" | "promotion_started" | "promotion_unknown" | "stable_object_ready",
+  status: "allocation_reserved" | "promotion_started" | "stable_object_ready",
   authorization: PromotionAuthorizationRef | null | undefined = current.promotionAuthorization,
 ): Omit<BlobCommitSnapshot, "version"> {
   return {

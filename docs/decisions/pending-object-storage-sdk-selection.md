@@ -61,14 +61,14 @@
 - S3 删除明确成功后用 claimId + generation 联合 CAS 调用 `completeDeletion`；lease 到期与 claim 是否有效完全由 PG 事务/端口判定，S3 executor 不读取应用进程 `Date.now()`。接管保持物理身份与 phase，只递增 generation/claimId；
 - 不依赖 S3 bucket versioning。安全性来自不可复用物理键：旧 Worker即使在新 incarnation 激活后才完成 DELETE，也只能作用旧 physicalObjectKey。
 - commit 协调状态在 COPY 前依次持久化 `allocation_reserved` 与 `promotion_started`。`StatePort.startPromotion` 只接收 scope、operationId、expectedSnapshotVersion、allocationId 最小命令；Repository 在同一事务读取并锁定 snapshot、allocation/lifecycle/retired 历史，自行派生全部 canonical 字段与授权。公开 API 不接收完整 allocation/auth，调用方附带的结构与 getter 均不能影响派生结果。
-- 每次 promote 生成随机 UUID attemptId。`claimPromotionExecution` 一次性 CAS 并绑定 executionId、generation、attemptId、incarnation/key：只有一个 attempt 得到 copy_allowed；其他新并发为 in_progress，executing/unknown 返回 reconcile，接管只能由 PG lease/generation 决定。COPY 前 `markPromotionCopyIssued` 写不可撤销 intent。intent 前确定失败才能 not_copied；intent 后只允许 executing/unknown/succeeded。
+- 每次 promote 生成随机 UUID attemptId。`claimPromotionExecution` 一次性 CAS 并绑定 executionId、generation、attemptId、incarnation/key：只有一个 attempt 得到 copy_allowed；其他新并发为 in_progress，executing/unknown 返回 reconcile，接管只能由 PG lease/generation 决定。COPY 前 `markPromotionCopyIssued` 写不可撤销 intent。BlobStore 的 intent 前确定失败只能把 execution 记为 not_copied；commit 必须再由 `StatePort.provePromotionNotCopied` 在同一 PG 事务证明 execution 仍为 pre-intent 且无 copy-issued，才能撤销授权回到 allocation_reserved。响应未知不能当成证明。
 - GC lifecycle 明确 deleted 时，completeDeletion 原子写 deleted 并把旧 incarnation/key 放入永久 retired 历史。allocation mode 只由可信 PG 事务读取全局 lifecycle/retired 历史决定；协调器不从当前 operation 的局部 retired 信息推断 mode，只在确有旧 target 时校验新 incarnation/key 不同。因此新 operation 首次看到全局 deleted 逻辑 Blob 时也可以合法接收 `new_after_deleted`。
 
 ### 影响
 
 - PG Repository 必须把新增引用、引用计数和生命周期状态纳入同一事务，不能把生命周期检查放到事务外；
 - 每个 ReferenceVersion、生命周期记录、恢复任务和 GC claim 都必须保存 incarnationId + physicalObjectKey；只存 sha256 不足以安全读取或删除；
-- allocation reserve、promotion authorization、execution claim 与 commit snapshot 都要持久化 lifecycleId、allocationId、generation、mode。executing/UNKNOWN 只能 HEAD 同一 destination；正确即 succeeded，NotFound/HEAD 或 resolve 异常保持 reconcile，禁止 source 检查和重复 COPY。完成 CAS 明确区分 succeeded、intent 前 not_copied、intent 后 unknown/reconcile；
+- allocation reserve、promotion authorization、execution claim 与 commit snapshot 都要持久化 lifecycleId、allocationId、generation、mode。UNKNOWN 时 commit snapshot 仍为 promotion_started 并保留同一 authorization，不再存在可回退的独立 UNKNOWN commit 状态。executing/UNKNOWN 只能 HEAD 同一 destination；正确即 succeeded，NotFound/HEAD 或 resolve 异常保持 reconcile，禁止 source 检查和重复 COPY。完成 CAS 明确区分 succeeded、经 PG 证明的 intent 前 not_copied、intent 后 unknown/reconcile；
 - stable GC 需要持久化恢复扫描、`pre_delete → deleting` 意图日志和租约接管，而不是普通定时 DELETE；
 - GC 期间新增引用会被显式阻止。调用方应等待 claim 收敛；若对象最终删除，则利用仍保留的 staging 重新 promote、HEAD 验证，再由引用事务恢复 active，而不能把阻止结果当成已经完成 stable 标记；
 - 当前任务只定义端口、状态语义和 S3 执行器；PG 表与事务实现由后续持久层任务交付。

@@ -185,15 +185,15 @@ export class S3BlobStore implements BlobStore {
         this.prefix,
       );
       const completedStable = stableFromAuthorization(staged, claim.authorization);
-      const completedHead = await this.client.head(this.keyFor(completedStable));
-      if (completedHead === undefined) {
-        throw new BlobStoreError(
-          "BLOB_RESULT_UNKNOWN",
-          "已完成 promotion 的物理对象缺失，必须由恢复流程收敛",
-          { result: "unknown" },
-        );
+      try {
+        const completedHead = await this.client.head(this.keyFor(completedStable));
+        if (completedHead === undefined) {
+          throw new Error("已完成 promotion 的物理对象缺失");
+        }
+        assertStoredDescriptor(completedHead, completedStable);
+      } catch (error) {
+        throw promotionResultUnknown("已完成 promotion 的 HEAD 未确认对象正确", error);
       }
-      assertStoredDescriptor(completedHead, completedStable);
       return completedStable;
     }
     if (claim.status === "reconcile") {
@@ -230,9 +230,19 @@ export class S3BlobStore implements BlobStore {
       );
     }
     const persisted = resolution.authorization;
-    assertExecutionMatchesAuthorization(execution, persisted);
+    try {
+      assertExecutionMatchesAuthorization(execution, persisted);
+    } catch (error) {
+      await this.bestEffortPromotionReconcile(scope, execution);
+      throw promotionProtocolError("resolved canonical authorization 与 execution 不连续", error);
+    }
     try {
       assertPromotionAuthorizationMatches(scope, staged, authorizationRef, persisted, this.prefix);
+    } catch (error) {
+      await this.bestEffortPromotionReconcile(scope, execution);
+      throw promotionProtocolError("resolved canonical authorization 未保持协议连续", error);
+    }
+    try {
       this.assertWithinSizeLimit(staged.size);
     } catch (error) {
       await this.completePromotionOutcome(scope, execution, "not_copied");
@@ -295,25 +305,34 @@ export class S3BlobStore implements BlobStore {
         result: "unknown",
       });
     }
-    assertExecutionContinuation(execution, issued.execution, "executing");
+    try {
+      assertExecutionContinuation(execution, issued.execution, "executing");
+    } catch (error) {
+      await this.bestEffortPromotionReconcile(scope, execution);
+      throw promotionResultUnknown("markPromotionCopyIssued 响应未保持 execution 连续", error);
+    }
     execution = issued.execution;
 
     try {
       await this.client.copy({ sourceKey, destinationKey });
     } catch (error) {
       await this.completePromotionOutcome(scope, execution, "unknown");
-      if (await this.resolveWriteResult(destinationKey, stable, error)) {
-        await this.completePromotionOutcome(scope, execution, "succeeded");
-        return stable;
+      try {
+        if (await this.resolveWriteResult(destinationKey, stable, error)) {
+          await this.completePromotionOutcome(scope, execution, "succeeded");
+          return stable;
+        }
+      } catch (verificationError) {
+        throw promotionResultUnknown("COPY 后无法确认固定 destination 正确", verificationError);
       }
-      throw normalizeWriteError(error, "稳定对象复制失败，结果可能未知");
+      throw promotionResultUnknown("COPY 已签发但固定 destination 尚未确认", error);
     }
 
     try {
       await this.assertWritten(destinationKey, stable);
     } catch (error) {
       await this.completePromotionOutcome(scope, execution, "unknown");
-      throw error;
+      throw promotionResultUnknown("COPY 返回成功但固定 destination 未确认", error);
     }
     await this.completePromotionOutcome(scope, execution, "succeeded");
     return stable;
@@ -494,6 +513,21 @@ export class S3BlobStore implements BlobStore {
     }
   }
 
+  private async bestEffortPromotionReconcile(
+    scope: TenantBlobScope,
+    execution: PromotionExecutionClaim,
+  ): Promise<void> {
+    try {
+      await this.authorizations.completePromotionExecution({
+        scope,
+        execution,
+        outcome: "reconcile",
+      });
+    } catch {
+      // 已经要抛出稳定协议/完整性错误；持久层失败不能掩盖原始连续性错误。
+    }
+  }
+
   private async reconcilePromotion(
     scope: TenantBlobScope,
     staged: StagedBlobRef,
@@ -516,14 +550,19 @@ export class S3BlobStore implements BlobStore {
         result: "unknown",
       });
     }
-    assertExecutionMatchesAuthorization(execution, resolution.authorization);
-    assertPromotionAuthorizationMatches(
-      scope,
-      staged,
-      authorizationRef,
-      resolution.authorization,
-      this.prefix,
-    );
+    try {
+      assertExecutionMatchesAuthorization(execution, resolution.authorization);
+      assertPromotionAuthorizationMatches(
+        scope,
+        staged,
+        authorizationRef,
+        resolution.authorization,
+        this.prefix,
+      );
+    } catch (error) {
+      await this.bestEffortPromotionReconcile(scope, execution);
+      throw promotionProtocolError("reconcile canonical authorization 未保持协议连续", error);
+    }
     const stable = stableFromAuthorization(staged, resolution.authorization);
     let metadata: S3ObjectMetadata | undefined;
     try {
@@ -546,7 +585,7 @@ export class S3BlobStore implements BlobStore {
       assertStoredDescriptor(metadata, stable);
     } catch (error) {
       await this.completePromotionOutcome(scope, execution, "reconcile");
-      throw error;
+      throw promotionResultUnknown("reconcile HEAD 未确认固定 destination 正确", error);
     }
     await this.completePromotionOutcome(scope, execution, "succeeded");
     return stable;
@@ -1226,6 +1265,15 @@ function sdkBodyAsAsyncIterable(body: unknown): AsyncIterable<Uint8Array> {
 
 function unknownAfterVerificationFailure(message: string, cause: unknown): BlobStoreError {
   return new BlobStoreError("BLOB_RESULT_UNKNOWN", message, { result: "unknown", cause });
+}
+
+/** COPY intent 之后，任何未被固定 destination HEAD 证实成功的结果都统一保持 UNKNOWN。 */
+function promotionResultUnknown(message: string, cause: unknown): BlobStoreError {
+  return new BlobStoreError("BLOB_RESULT_UNKNOWN", message, { result: "unknown", cause });
+}
+
+function promotionProtocolError(message: string, cause: unknown): BlobStoreError {
+  return new BlobStoreError("BLOB_INTEGRITY_MISMATCH", message, { result: "unknown", cause });
 }
 
 function encodeKey(key: string): string {

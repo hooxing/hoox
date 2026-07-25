@@ -324,6 +324,37 @@ class IntegrationPersistenceFake
     };
   }
 
+  async provePromotionNotCopied(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly operationId: string;
+    readonly expectedSnapshotVersion: number;
+    readonly authorizationId: string;
+  }) {
+    const current = this.snapshot;
+    if (current === undefined || current.version !== input.expectedSnapshotVersion) {
+      return { status: "version_conflict" as const };
+    }
+    if (current.status !== "promotion_started") return { status: "invalid_state" as const };
+    if (
+      current.scope.tenantId !== input.scope.tenantId ||
+      current.operationId !== input.operationId ||
+      current.promotionAuthorization?.authorizationId !== input.authorizationId
+    ) {
+      return { status: "authorization_mismatch" as const };
+    }
+    if (this.execution?.phase === "executing" || this.execution?.phase === "unknown") {
+      return { status: "copy_may_have_been_issued" as const };
+    }
+    this.snapshot = transitionBlobCommit(current, { type: "promotion_proven_not_copied" });
+    this.status = "inactive";
+    this.execution = undefined;
+    this.authorization = undefined;
+    return {
+      status: "proven_not_copied" as const,
+      snapshotVersion: this.snapshot.version,
+    };
+  }
+
   async claimPromotionExecution(input: {
     readonly scope: { readonly tenantId: string };
     readonly authorization: PromotionAuthorizationRef;

@@ -599,6 +599,166 @@ describe("S3BlobStore", () => {
     ).resolves.toMatchObject({ status: "reconcile", execution: { phase: "unknown" } });
   });
 
+  it("claim 的动态 status 翻转或字段 getter 抛错都在 COPY 前稳定失败", async () => {
+    const scope = { tenantId: "tenant_a" };
+
+    const statusClient = new FakeS3ObjectClient();
+    const statusState = new InMemoryPromotionAuthorizations();
+    const statusStore = new S3BlobStore(statusClient, statusState, config);
+    const statusStaged = await statusStore.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "claim-status-flips",
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
+    });
+    const statusPrepared = statusState.preparePromotion(statusStaged);
+    let statusReads = 0;
+    statusState.claimResolutionMutation = (result) => ({
+      get status() {
+        statusReads += 1;
+        return statusReads === 1 ? "invalid" : result.status;
+      },
+      execution: result.status === "copy_allowed" ? result.execution : undefined,
+    });
+    await expect(
+      statusStore.promote(scope, statusStaged, statusPrepared.ref),
+    ).rejects.toMatchObject({ code: "BLOB_INTEGRITY_MISMATCH", result: "unknown" });
+    expect(statusReads).toBe(1);
+    expect(statusClient.copyKeys).toEqual([]);
+
+    const fieldClient = new FakeS3ObjectClient();
+    const fieldState = new InMemoryPromotionAuthorizations();
+    const fieldStore = new S3BlobStore(fieldClient, fieldState, config);
+    const fieldStaged = await fieldStore.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "claim-field-throws",
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
+    });
+    const fieldPrepared = fieldState.preparePromotion(fieldStaged);
+    fieldState.claimResultMutation = (claim) =>
+      Object.defineProperty({ ...claim }, "physicalObjectKey", {
+        enumerable: true,
+        get() {
+          throw new Error("dynamic physical key getter failed");
+        },
+      }) as PromotionExecutionClaim;
+    await expect(fieldStore.promote(scope, fieldStaged, fieldPrepared.ref)).rejects.toMatchObject({
+      code: "BLOB_INTEGRITY_MISMATCH",
+      result: "unknown",
+    });
+    expect(fieldClient.copyKeys).toEqual([]);
+  });
+
+  it("resolution 与 mark 的动态 status 翻转只转入 reconcile，绝不 COPY", async () => {
+    const scope = { tenantId: "tenant_a" };
+
+    const resolutionClient = new FakeS3ObjectClient();
+    const resolutionState = new InMemoryPromotionAuthorizations();
+    const resolutionStore = new S3BlobStore(resolutionClient, resolutionState, config);
+    const resolutionStaged = await resolutionStore.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "resolution-status-flips",
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
+    });
+    const resolutionPrepared = resolutionState.preparePromotion(resolutionStaged);
+    let resolutionStatusReads = 0;
+    resolutionState.authorizationResolutionMutation = (result) => ({
+      get status() {
+        resolutionStatusReads += 1;
+        return resolutionStatusReads === 1 ? "invalid" : result.status;
+      },
+      authorization: result.status === "authorized" ? result.authorization : undefined,
+    });
+    await expect(
+      resolutionStore.promote(scope, resolutionStaged, resolutionPrepared.ref),
+    ).rejects.toMatchObject({ code: "BLOB_INTEGRITY_MISMATCH", result: "unknown" });
+    resolutionState.authorizationResolutionMutation = undefined;
+    await expect(
+      resolutionStore.promote(scope, resolutionStaged, resolutionPrepared.ref),
+    ).rejects.toMatchObject({ code: "BLOB_RESULT_UNKNOWN", result: "unknown" });
+    expect(resolutionStatusReads).toBe(1);
+    expect(resolutionClient.copyKeys).toEqual([]);
+
+    const markClient = new FakeS3ObjectClient();
+    const markState = new InMemoryPromotionAuthorizations();
+    const markStore = new S3BlobStore(markClient, markState, config);
+    const markStaged = await markStore.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "mark-status-flips",
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
+    });
+    const markPrepared = markState.preparePromotion(markStaged);
+    let markStatusReads = 0;
+    markState.markResolutionMutation = (result) => ({
+      get status() {
+        markStatusReads += 1;
+        return markStatusReads === 1 ? "invalid" : result.status;
+      },
+      execution: result.execution,
+    });
+    await expect(markStore.promote(scope, markStaged, markPrepared.ref)).rejects.toMatchObject({
+      code: "BLOB_INTEGRITY_MISMATCH",
+      result: "unknown",
+    });
+    markState.markResolutionMutation = undefined;
+    await expect(markStore.promote(scope, markStaged, markPrepared.ref)).rejects.toMatchObject({
+      code: "BLOB_RESULT_UNKNOWN",
+      result: "unknown",
+    });
+    expect(markStatusReads).toBe(1);
+    expect(markClient.copyKeys).toEqual([]);
+  });
+
+  it.each([
+    [
+      "phase",
+      "phase",
+      (claim: PromotionExecutionClaim) => ({ ...claim, phase: "executing" as const }),
+    ],
+    [
+      "target",
+      "target",
+      (claim: PromotionExecutionClaim) => ({
+        ...claim,
+        physicalObjectKey: `${claim.physicalObjectKey}-bad`,
+      }),
+    ],
+  ])(
+    "copy_allowed 的 %s 畸形时以可信 identity 转 reconcile，绝不 COPY",
+    async (_, uploadSuffix, mutate) => {
+      const client = new FakeS3ObjectClient();
+      const state = new InMemoryPromotionAuthorizations();
+      const store = new S3BlobStore(client, state, config);
+      const scope = { tenantId: "tenant_a" };
+      const staged = await store.putStaging({
+        scope,
+        purpose: "artifact",
+        uploadId: `copy-allowed-malformed-${uploadSuffix}`,
+        body: bytes("deliverable"),
+        mediaType: "text/plain",
+      });
+      const prepared = state.preparePromotion(staged);
+      state.claimResultMutation = mutate;
+      await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+        code: "BLOB_INTEGRITY_MISMATCH",
+        result: "unknown",
+      });
+      state.claimResultMutation = undefined;
+      await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+        code: "BLOB_RESULT_UNKNOWN",
+        result: "unknown",
+      });
+      expect(client.copyKeys).toEqual([]);
+    },
+  );
+
   it("claim/mark 畸形返回与 resolve reject 都在 COPY 前稳定失败并转入安全恢复", async () => {
     const scope = { tenantId: "tenant_a" };
 
@@ -636,7 +796,7 @@ describe("S3BlobStore", () => {
       physicalObjectKey: `${claim.physicalObjectKey}-bad`,
     });
     await expect(markStore.promote(scope, markStaged, markPrepared.ref)).rejects.toMatchObject({
-      code: "BLOB_RESULT_UNKNOWN",
+      code: "BLOB_INTEGRITY_MISMATCH",
       result: "unknown",
     });
     markState.markResultMutation = undefined;
@@ -1596,13 +1756,23 @@ class InMemoryPromotionAuthorizations
   implements StableBlobLifecycleAllocationPort, StableBlobPromotionAuthorizationPort
 {
   claimResultMutation: ((claim: PromotionExecutionClaim) => PromotionExecutionClaim) | undefined;
+  claimResolutionMutation: ((result: PromotionExecutionClaimResolution) => unknown) | undefined;
   markResultMutation: ((claim: PromotionExecutionClaim) => PromotionExecutionClaim) | undefined;
+  markResolutionMutation:
+    | ((result: {
+        readonly status: "marked";
+        readonly execution: PromotionExecutionClaim;
+      }) => unknown)
+    | undefined;
   reconcileClaimMutation: ((claim: PromotionExecutionClaim) => PromotionExecutionClaim) | undefined;
   completedResultMutation:
     | ((authorization: StableBlobPromotionAuthorization) => StableBlobPromotionAuthorization)
     | undefined;
   resolveResultMutation:
     | ((authorization: StableBlobPromotionAuthorization) => StableBlobPromotionAuthorization)
+    | undefined;
+  authorizationResolutionMutation:
+    | ((result: PromotionAuthorizationResolution) => unknown)
     | undefined;
   rejectResolve = false;
   successfulCompletionCount = 0;
@@ -1848,10 +2018,11 @@ class InMemoryPromotionAuthorizations
     };
     record.execution = execution;
     record.proof = "pre_intent";
-    return {
+    const result: PromotionExecutionClaimResolution = {
       status: "copy_allowed",
       execution: this.claimResultMutation?.(execution) ?? execution,
     };
+    return (this.claimResolutionMutation?.(result) ?? result) as PromotionExecutionClaimResolution;
   }
 
   async resolveAuthorizedForCopy(input: {
@@ -1873,10 +2044,12 @@ class InMemoryPromotionAuthorizations
     if (!sameExecutionAuthorizationIdentity(resolved.record.execution, input.execution)) {
       return { status: "inactive" };
     }
-    return {
+    const result: PromotionAuthorizationResolution = {
       status: "authorized",
       authorization: this.resolveResultMutation?.(resolved.record.value) ?? resolved.record.value,
     };
+    return (this.authorizationResolutionMutation?.(result) ??
+      result) as PromotionAuthorizationResolution;
   }
 
   async markPromotionCopyIssued(input: {
@@ -1896,10 +2069,11 @@ class InMemoryPromotionAuthorizations
     }
     record.proof = "copy_issued";
     const execution = record.execution as PromotionExecutionClaim;
-    return {
+    const result = {
       status: "marked" as const,
       execution: this.markResultMutation?.(execution) ?? execution,
     };
+    return (this.markResolutionMutation?.(result) ?? result) as typeof result;
   }
 
   async completePromotionExecution(input: {
@@ -1911,10 +2085,14 @@ class InMemoryPromotionAuthorizations
     if (record?.status === "succeeded" && input.outcome === "succeeded") {
       return;
     }
+    const executionMatches =
+      input.outcome === "reconcile"
+        ? sameExecutionAuthorizationIdentity(record?.execution, input.execution)
+        : sameExecutionIdentity(record?.execution, input.execution);
     if (
       record === undefined ||
       input.scope.tenantId !== record.value.tenantId ||
-      !sameExecutionIdentity(record.execution, input.execution)
+      !executionMatches
     ) {
       throw new Error("promotion execution CAS 已失效");
     }
@@ -1935,7 +2113,8 @@ class InMemoryPromotionAuthorizations
       return;
     }
     if (input.outcome === "reconcile") {
-      record.execution = { ...input.execution, phase: "unknown" };
+      if (record.execution === undefined) throw new Error("reconcile execution 不存在");
+      record.execution = { ...record.execution, phase: "unknown" };
       record.proof = record.proof === "copy_issued" ? "copy_issued" : "mark_unknown";
       return;
     }

@@ -54,6 +54,10 @@ export type BlobCommitEvent =
   | { readonly type: "stable_mark_succeeded" }
   | { readonly type: "stable_mark_failed" }
   | { readonly type: "stable_mark_gc_blocked" }
+  | {
+      readonly type: "stable_gc_lifecycle_resolved";
+      readonly status: "active" | "pre_delete" | "deleting" | "deleted";
+    }
   | { readonly type: "stable_mark_result_unknown" }
   | {
       readonly type: "stable_mark_resolved";
@@ -263,12 +267,23 @@ function applyTransition(
       }
       break;
     case "stable_mark_gc_blocked":
-      if (event.type === "promotion_succeeded") {
-        assertStableMatchesStaged(current, event.stable);
-        return { ...copyStable(current, "stable_object_ready"), stable: event.stable };
-      }
       if (event.type === "stable_mark_succeeded") {
         return copyStable(current, "stable");
+      }
+      if (event.type === "stable_gc_lifecycle_resolved") {
+        if (event.status === "active") {
+          return copyStable(current, "stable_object_ready");
+        }
+        if (event.status === "deleted") {
+          // 只有明确 deleted 才允许退回复制步骤；staging 在 stable 标记成功前始终保留。
+          return {
+            ...base(current),
+            status: "reference_committed",
+            staged: requireStaged(current),
+            referenceId: requireReferenceId(current),
+          };
+        }
+        return copyStable(current, "stable_mark_gc_blocked");
       }
       break;
     case "stable_mark_unknown":

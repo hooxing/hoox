@@ -8,8 +8,8 @@
 - 调用方只传 `uploadId` 或不可变 `BlobRef`，不能传完整对象键；
 - staging key 与 stable key 均由包内派生，stable key 使用 SHA-256 内容寻址；
 - `putStaging` 使用条件写入消除 HEAD→PUT 竞态；`putStaging`、`promote` 和 `deleteStaging` 可用相同引用幂等重试；
-- 普通业务端口只能删除 staging。stable 删除必须经过 `StableBlobGcPort`；PostgreSQL 必须用事务 claim 同时确认零引用并把生命周期置为 `deleting`，从而阻止删除期间新增引用；
-- 所有读取都会校验 ContentLength、流式累计大小和 SHA-256；S3 ETag 不作为内容哈希；
+- 普通业务端口只能删除 staging。stable 删除必须经过 `StableBlobGcPort`；PostgreSQL 必须先以事务 claim 确认零引用并置 `pre_delete`，再用 `beginDeletion` 原子写入不可逆 `deleting` 意图，之后才能发起 S3 DELETE；
+- 所有读取都会校验 ContentLength、累计大小和 SHA-256；当前 16 MiB 上限内会先完整缓冲并验证，验证成功前不向消费者交付 chunk；S3 ETag 不作为内容哈希；
 - `mediaType` 是业务引用的展示元数据，不参与内容身份。同一 SHA-256 和大小可以被不同 `mediaType` 引用；
 - 预签名必须传当前引用的 `responseMediaType`，由 S3 `ResponseContentType` 覆盖首次对象元数据。交付物默认 `attachment`；预览必须显式选择 `inline-preview`；
 - Bucket 必须保持私有，预签名下载 TTL 由服务端配置限制；
@@ -38,9 +38,11 @@
 
 PUT、COPY 或 DELETE 返回不确定结果后，只能通过后续 HEAD 的明确存在/不存在收敛；HEAD 自身失败时仍保持 `BLOB_RESULT_UNKNOWN`，由恢复任务重试，不能误判为成功或失败。stable GC 也遵守同一规则。
 
-stable GC 的 `claimUnreachable` 必须在 PG 事务中检查零引用并写入 `deleting + generation + lease`。所有新增 stable 引用必须在自己的 PG 事务中读取同一生命周期行，`deleting` 时返回 `gc_in_progress`；`deleted` 只有在重新 promote 并 HEAD 验证后才能由引用事务原子恢复 active。DELETE 成功后按 generation 完成 claim；明确失败且对象仍存在时释放；UNKNOWN 或删除后数据库完成失败均保留 claim 给恢复任务。lease 过期只允许新 Worker 递增 generation 后接管，不能自动恢复 active。
+stable GC 的 `claimUnreachable` 必须在 PG 事务中检查零引用并写入 `pre_delete + generation + lease`；租约未过期稳定返回 `in_progress`。`beginDeletion` 用 generation CAS 写入不可逆 deleting 意图。只有从未 begin 的 pre-delete claim 可以释放；进入 deleting 后，即使 DELETE 明确失败、UNKNOWN、lease 到期或旧 Worker失去 generation，都不能恢复 active，因为旧 DELETE 仍可能延迟成功。恢复 Worker 保持 phase、递增 generation，重试幂等 DELETE 并收敛 deleted。所有新增 stable 引用在 `pre_delete/deleting` 时返回 `gc_in_progress`。
 
-来自调用参数的非法大小返回 `INVALID_BLOB_ARGUMENT`；来自 S3 ContentLength 或流式响应的超限属于存储响应完整性问题，返回 `BLOB_INTEGRITY_MISMATCH`。
+`stable_mark_gc_blocked` 必须先解析生命周期：active 可重试标记，pre-delete/deleting 继续等待，只有明确 deleted 才能退回复制步骤并使用仍保留的 staging 重新 promote，不能从阻塞状态直接复制。
+
+来自调用参数的非法大小返回 `INVALID_BLOB_ARGUMENT`；来自 S3 HEAD metadata.size、GET ContentLength 或响应正文的超限属于存储响应完整性问题，返回 `BLOB_INTEGRITY_MISMATCH`。
 
 ## 测试
 

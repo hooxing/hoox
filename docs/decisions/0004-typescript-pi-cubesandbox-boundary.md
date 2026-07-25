@@ -45,6 +45,10 @@ Pi 已提供成熟的 Provider、流式输出、工具循环和会话控制，Cu
 
 Pi `AgentSession` 是 Worker 内的活动模型投影，不是生产事实源。Pi 本地 Session 文件不进入生产恢复链路。Pi 自带宿主机 Bash/read/write/edit 工具不注册；租户 Skill 不能作为 Pi Extension 在 Worker 加载。模型密钥、数据库密钥和 S3 密钥只存在于可信控制面，不进入 Sandbox。
 
+生产 Agent Worker 明确只支持 Linux。Pi 0.82.1 会通过宿主平台的 `path.resolve` 处理 cwd，Windows 会把逻辑 `/workspace` 改写为带宿主盘符的路径；适配层必须在创建 Session 前 fail-fast。Linux 下逻辑 cwd 固定为 `/workspace`，并使用无文件系统发现能力的 `EmptyResourceLoader`，禁止模型上下文出现 Worker 项目路径。
+
+CubeSandbox 适配层显式固定 create/connect TTL，任何路径都不得超过 120 秒，不能回落到 SDK 的 300 秒默认值。无法确认创建或清理结果时发布带 request ID、Sandbox ID（若已知）、实际 TTL 和失败阶段的 `UNKNOWN` 生命周期事件。不可远端取消的调用等待 settle，并按 `CANCELLED > TIMEOUT > UPSTREAM` 选择稳定结果。
+
 API、Agent Worker、Scheduler 和 Web 可以起步时共同部署，但保持独立入口与包边界。所有新代码只在本仓库 `runtime-ts/` 内实现，不调用 Python。
 
 ## 理由
@@ -73,6 +77,7 @@ Worker 是可信高权限进程，必须以最小权限运行并限制出站网�
 
 - Fake Provider/Fake Sandbox 完成流式、多工具、abort、超时和协议错误契约；
 - 真实纵向冒烟完成“Pi 自定义工具 → CubeSandbox 执行 → Observation 回到模型”；
+- 纵向冒烟使用 Pi 官方 Faux Provider，不调用外部模型；必须在 Linux Worker/容器运行，Windows 明确拒绝创建 Pi Session；
 - 测试断言 Pi 默认宿主机工具为空、Compaction 关闭、没有本地 Session 依赖；
 - 凭据扫描证明 Sandbox 环境和事件中没有控制面秘密；
 - 删除 Python 环境后仍可构建和运行新 Runtime。
@@ -89,4 +94,5 @@ Worker 是可信高权限进程，必须以最小权限运行并限制出站网�
 
 ## 实施记录
 
-- Monorepo 空骨架和版本锁已建立；业务适配尚未实施。
+- M0-05 已实现 Pi 0.82.1 窄 Session Controller、零发现资源加载器、Linux 平台保护和 CubeSandbox v0.6 受控适配层。
+- Fake/Faux 契约测试覆盖工具循环、abort/steer/follow-up、稳定错误、TTL 与未知生命周期；真实冒烟脚本覆盖 Cube 生命周期及“Faux Provider → Pi → 真实 CubeSandbox → Observation → Faux Provider”的无外部模型纵向链路。

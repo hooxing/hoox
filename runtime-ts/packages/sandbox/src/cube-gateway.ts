@@ -22,19 +22,9 @@ import {
 export interface CubeSdkSandbox {
   sandboxId: string;
   commands: {
-    run(
-      command: string,
-      options?: { timeoutMs?: number },
-    ): Promise<{ stdout: string; stderr: string; exitCode: number }>;
+    run(command: string, options?: { timeoutMs?: number }): Promise<unknown>;
   };
-  runCode(
-    code: string,
-    options?: { language?: string; timeoutMs?: number },
-  ): Promise<{
-    text: string | undefined;
-    logs: { stdout: string[]; stderr: string[] };
-    error: null | { name: string; value: string; traceback: string };
-  }>;
+  runCode(code: string, options?: { language?: string; timeoutMs?: number }): Promise<unknown>;
   files: {
     read(path: string): Promise<string>;
     write(path: string, data: string | Uint8Array): Promise<void>;
@@ -57,25 +47,31 @@ const DEFAULT_SDK: CubeSdkFacade = {
 
 export interface UncertainLifecycleEvent {
   kind: "sandbox_create_outcome_unknown";
+  stage: "create_response" | "cleanup_after_create" | "cleanup_after_reconcile";
   requestId: string;
-  maxTtlSeconds: number;
+  sandboxId?: string;
+  actualTtlSeconds: number;
   occurredAt: string;
 }
 
 export interface CubeGatewayOptions extends ConfigOptions {
   defaultOperationTimeoutMs?: number;
   maxCreateTtlSeconds?: number;
-  onUncertainLifecycle?: (event: UncertainLifecycleEvent) => void;
+  onUncertainLifecycle?: (event: UncertainLifecycleEvent) => void | Promise<void>;
 }
 
 const CREATE_REQUEST_METADATA = "agentRuntimeCreateRequestId";
+const MAX_SAFE_SANDBOX_TTL_SECONDS = 120;
 type EffectiveOperationControl = Omit<OperationControl, "timeoutMs"> & { timeoutMs: number };
 
 export class CubeSandboxGateway implements SandboxGateway {
   private readonly baseConfig: ConfigOptions;
   private readonly defaultOperationTimeoutMs: number;
   private readonly maxCreateTtlSeconds: number;
-  private readonly onUncertainLifecycle: ((event: UncertainLifecycleEvent) => void) | undefined;
+  private readonly connectTtlSeconds: number;
+  private readonly onUncertainLifecycle:
+    | ((event: UncertainLifecycleEvent) => void | Promise<void>)
+    | undefined;
 
   constructor(
     options: CubeGatewayOptions,
@@ -84,10 +80,18 @@ export class CubeSandboxGateway implements SandboxGateway {
     this.defaultOperationTimeoutMs = options.defaultOperationTimeoutMs ?? 60_000;
     this.maxCreateTtlSeconds = options.maxCreateTtlSeconds ?? 120;
     validateTimeout(this.defaultOperationTimeoutMs, "defaultOperationTimeoutMs");
-    validateTtl(this.maxCreateTtlSeconds, 86_400);
+    validateTtl(this.maxCreateTtlSeconds, MAX_SAFE_SANDBOX_TTL_SECONDS);
+    this.connectTtlSeconds = validateTtl(
+      options.timeout ?? this.maxCreateTtlSeconds,
+      this.maxCreateTtlSeconds,
+    );
     validateConfigOptions(options);
     this.onUncertainLifecycle = options.onUncertainLifecycle;
-    this.baseConfig = copyConfigOptions(options, this.defaultOperationTimeoutMs);
+    this.baseConfig = copyConfigOptions(
+      options,
+      this.defaultOperationTimeoutMs,
+      this.connectTtlSeconds,
+    );
   }
 
   async create(input: SandboxCreateInput, control: OperationControl = {}): Promise<SandboxHandle> {
@@ -117,8 +121,13 @@ export class CubeSandboxGateway implements SandboxGateway {
     } catch (error) {
       const mapped = mapSandboxError(error, "创建 Sandbox");
       if (mapped.code === "AUTHENTICATION" || mapped.code === "NOT_FOUND") throw mapped;
-      if (await this.reconcileFailedCreate(requestId, effectiveControl.timeoutMs)) throw mapped;
-      this.recordUnknownCreate(requestId);
+      if (await this.reconcileFailedCreate(requestId, ttlSeconds, effectiveControl.timeoutMs))
+        throw mapped;
+      await this.recordUnknownCreate({
+        stage: "create_response",
+        requestId,
+        actualTtlSeconds: ttlSeconds,
+      });
       throw new SandboxRuntimeError(
         "UNKNOWN",
         `创建 Sandbox 的结果未知；已登记泄漏指标，最长 TTL 为 ${ttlSeconds} 秒`,
@@ -130,7 +139,7 @@ export class CubeSandboxGateway implements SandboxGateway {
 
     if (cancellationRequested) {
       // create 已获得确定 ID，先清理再在安全点返回取消；绝不丢弃迟到的成功结果。
-      await this.cleanupCreatedSandbox(sandbox);
+      await this.cleanupCreatedSandbox(sandbox, requestId, ttlSeconds);
       throw new SandboxRuntimeError("CANCELLED", "创建 Sandbox 已完成并清理，执行期间收到取消请求");
     }
     return new CubeSandboxHandle(sandbox, this.defaultOperationTimeoutMs);
@@ -143,50 +152,71 @@ export class CubeSandboxGateway implements SandboxGateway {
       "连接 Sandbox",
       () => this.sdk.connect(id, { config: this.config(effectiveControl.timeoutMs) }),
       effectiveControl,
-      "native",
     );
     return new CubeSandboxHandle(sandbox, this.defaultOperationTimeoutMs);
   }
 
   private async reconcileFailedCreate(
     requestId: string,
+    actualTtlSeconds: number,
     timeoutMs: number | undefined,
   ): Promise<boolean> {
     // 请求超时可能发生在服务端已创建、客户端未收到响应之后。用 metadata 做有限轮询对账。
     for (const delayMs of [0, 100, 300]) {
       if (delayMs) await delay(delayMs);
+      let entries: Record<string, unknown>[];
       try {
-        const entries = await this.sdk.listV2(this.config(timeoutMs));
-        const match = entries.find(
-          (entry) => metadataValue(entry, CREATE_REQUEST_METADATA) === requestId,
-        );
-        const id = match ? sandboxId(match) : undefined;
-        if (!id) continue;
+        entries = await this.sdk.listV2(this.config(timeoutMs));
+      } catch {
+        continue;
+      }
+      const match = entries.find(
+        (entry) => metadataValue(entry, CREATE_REQUEST_METADATA) === requestId,
+      );
+      const id = match ? sandboxId(match) : undefined;
+      if (!id) continue;
+      try {
         const sandbox = await this.sdk.connect(id, { config: this.config(timeoutMs) });
         await sandbox.kill();
         return true;
-      } catch {
-        // 对账本身失败时继续有限重试；最终进入 UNKNOWN，由 TTL 和回收指标兜底。
+      } catch (error) {
+        await this.recordUnknownCreate({
+          stage: "cleanup_after_reconcile",
+          requestId,
+          sandboxId: id,
+          actualTtlSeconds,
+        });
+        throw new SandboxRuntimeError("UNKNOWN", "对账找到 Sandbox，但清理结果未知", error);
       }
     }
     return false;
   }
 
-  private async cleanupCreatedSandbox(sandbox: CubeSdkSandbox): Promise<void> {
+  private async cleanupCreatedSandbox(
+    sandbox: CubeSdkSandbox,
+    requestId: string,
+    actualTtlSeconds: number,
+  ): Promise<void> {
     try {
       await sandbox.kill();
     } catch (error) {
-      this.recordUnknownCreate(sandbox.sandboxId);
+      await this.recordUnknownCreate({
+        stage: "cleanup_after_create",
+        requestId,
+        sandboxId: sandbox.sandboxId,
+        actualTtlSeconds,
+      });
       throw new SandboxRuntimeError("UNKNOWN", "Sandbox 创建后清理失败，资源状态未知", error);
     }
   }
 
-  private recordUnknownCreate(requestId: string): void {
+  private async recordUnknownCreate(
+    event: Omit<UncertainLifecycleEvent, "kind" | "occurredAt">,
+  ): Promise<void> {
     try {
-      this.onUncertainLifecycle?.({
+      await this.onUncertainLifecycle?.({
         kind: "sandbox_create_outcome_unknown",
-        requestId,
-        maxTtlSeconds: this.maxCreateTtlSeconds,
+        ...event,
         occurredAt: new Date().toISOString(),
       });
     } catch {
@@ -195,7 +225,8 @@ export class CubeSandboxGateway implements SandboxGateway {
   }
 
   private config(requestTimeoutMs = this.defaultOperationTimeoutMs): Config {
-    return new Config({ ...this.baseConfig, requestTimeoutMs });
+    // 显式传递 timeout，禁止 SDK 从环境变量或 300 秒默认值恢复 Sandbox。
+    return new Config({ ...this.baseConfig, timeout: this.connectTtlSeconds, requestTimeoutMs });
   }
 
   private control(control: OperationControl): EffectiveOperationControl {
@@ -217,12 +248,12 @@ class CubeSandboxHandle implements SandboxHandle {
   async command(command: string, control: OperationControl = {}) {
     validateText(command, "命令");
     const effective = this.control(control);
-    return settledOperation(
+    const response = await settledOperation(
       "执行 Sandbox 命令",
       () => this.sandbox.commands.run(command, { timeoutMs: effective.timeoutMs }),
       effective,
-      "native",
     );
+    return validateCommandResponse(response);
   }
 
   async runCode(
@@ -240,18 +271,18 @@ class CubeSandboxHandle implements SandboxHandle {
           timeoutMs: effective.timeoutMs,
         }),
       effective,
-      "native",
     );
+    const validated = validateRunCodeResponse(execution);
     return {
-      ...(execution.text === undefined ? {} : { text: execution.text }),
-      stdout: [...execution.logs.stdout],
-      stderr: [...execution.logs.stderr],
-      ...(execution.error
+      ...(validated.text === undefined ? {} : { text: validated.text }),
+      stdout: [...validated.logs.stdout],
+      stderr: [...validated.logs.stderr],
+      ...(validated.error
         ? {
             error: {
-              name: execution.error.name,
-              value: execution.error.value,
-              traceback: execution.error.traceback,
+              name: validated.error.name,
+              value: validated.error.value,
+              traceback: validated.error.traceback,
             },
           }
         : {}),
@@ -286,7 +317,6 @@ class CubeSandboxHandle implements SandboxHandle {
       "暂停 Sandbox",
       () => this.sandbox.pause({ timeoutMs: effective.timeoutMs }),
       effective,
-      "native",
     );
   }
 
@@ -326,7 +356,6 @@ export async function usingSandbox<T>(
 function validateConfigOptions(options: CubeGatewayOptions): void {
   validateBaseUrl(options.apiUrl);
   validateTimeout(options.requestTimeoutMs, "requestTimeoutMs");
-  if (options.timeout !== undefined) validateTtl(options.timeout, 86_400);
   if (
     options.proxyPort !== undefined &&
     (!Number.isInteger(options.proxyPort) || options.proxyPort <= 0 || options.proxyPort > 65_535)
@@ -363,7 +392,11 @@ function validateConfigOptions(options: CubeGatewayOptions): void {
   }
 }
 
-function copyConfigOptions(options: CubeGatewayOptions, requestTimeoutMs: number): ConfigOptions {
+function copyConfigOptions(
+  options: CubeGatewayOptions,
+  requestTimeoutMs: number,
+  timeout: number,
+): ConfigOptions {
   return {
     apiUrl: validateBaseUrl(options.apiUrl),
     requestTimeoutMs,
@@ -373,8 +406,67 @@ function copyConfigOptions(options: CubeGatewayOptions, requestTimeoutMs: number
     ...(options.proxyPort === undefined ? {} : { proxyPort: options.proxyPort }),
     ...(options.proxyScheme === undefined ? {} : { proxyScheme: options.proxyScheme }),
     ...(options.sandboxDomain === undefined ? {} : { sandboxDomain: options.sandboxDomain }),
-    ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
+    timeout,
   };
+}
+
+interface ValidCommandResponse {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+function validateCommandResponse(value: unknown): ValidCommandResponse {
+  if (!isRecord(value)) throw protocolError("命令响应不是对象");
+  if (
+    typeof value.stdout !== "string" ||
+    typeof value.stderr !== "string" ||
+    !Number.isInteger(value.exitCode)
+  ) {
+    throw protocolError("命令响应字段非法");
+  }
+  return { stdout: value.stdout, stderr: value.stderr, exitCode: value.exitCode as number };
+}
+
+interface ValidRunCodeResponse {
+  text: string | undefined;
+  logs: { stdout: string[]; stderr: string[] };
+  error: null | { name: string; value: string; traceback: string };
+}
+
+function validateRunCodeResponse(value: unknown): ValidRunCodeResponse {
+  if (!isRecord(value) || !isRecord(value.logs)) throw protocolError("代码执行响应不是对象");
+  if (value.text !== undefined && typeof value.text !== "string")
+    throw protocolError("代码执行 text 字段非法");
+  if (!isStringArray(value.logs.stdout) || !isStringArray(value.logs.stderr))
+    throw protocolError("代码执行日志字段非法");
+  if (value.error !== null) {
+    if (
+      !isRecord(value.error) ||
+      typeof value.error.name !== "string" ||
+      typeof value.error.value !== "string" ||
+      typeof value.error.traceback !== "string"
+    ) {
+      throw protocolError("代码执行 error 字段非法");
+    }
+  }
+  return {
+    text: value.text as string | undefined,
+    logs: { stdout: [...value.logs.stdout], stderr: [...value.logs.stderr] },
+    error: value.error as ValidRunCodeResponse["error"],
+  };
+}
+
+function protocolError(reason: string): SandboxRuntimeError {
+  return new SandboxRuntimeError("PROTOCOL", `CubeSandbox ${reason}`);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
 function metadataValue(entry: Record<string, unknown>, key: string): unknown {

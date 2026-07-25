@@ -12,6 +12,7 @@
 - 业务代码只依赖 `@cube-runtime/sandbox`，不直接依赖厂商 SDK。
 - Pi 不加载宿主机 `bash/read/write/edit/grep/find/ls`；模型只看到四个自定义 Sandbox 工具。
 - Pi 的扩展、Skill、Prompt、主题和 AGENTS 文件自动发现全部关闭，避免加载宿主机或租户未审查代码。
+- 生产 Agent Worker 仅支持 Linux；Windows 会因 Pi 的平台路径解析把 `/workspace` 改成宿主盘符路径，因此在创建 Session 前 fail-fast。
 - `SessionManager`、`SettingsManager` 均使用内存实现；Pi Session 不是持久化真相。
 - `compaction.enabled=false`；生产 API 只返回使用 `#private` 保存会话的窄 Controller，不暴露 `AgentSession`，因此调用方无法取得或调用 `compact()`。若仍出现 Pi compaction 事件，适配层上报 `compaction.forbidden`。
 - 创建方在 `finally` 中销毁 Sandbox。取消或业务异常不能绕过清理。
@@ -47,9 +48,9 @@ CubeSandbox Node SDK 未跟随 `master`：
 适配层不再使用 `Promise.race` 模拟远端取消：
 
 - `commands.run` 和 `runCode` 使用 SDK 原生 timeout 语义。
-- files、connect、pause、kill 等没有完整原生 AbortSignal 的调用，一旦开始便等待上游 settle。期间 AbortSignal 只记录 `cancellation_requested`，完成后在安全点返回 `CANCELLED`；调用方不会先收到取消再被迟到写入覆盖。
+- files、connect、pause、kill 等没有完整原生 AbortSignal 的调用，一旦开始便等待上游 settle。期间 AbortSignal 只记录 `cancellation_requested`，完成后按 `CANCELLED > TIMEOUT > UPSTREAM` 选取结果；即使 action 最终失败，也不能绕过先发生的取消或期限事实。
 - 对没有原生硬超时的文件调用，调用方 timeout 只能在 settle 后转换成 `TIMEOUT`。这不是快速中断，优点是副作用边界确定；真正中断需要上游 SDK 支持 signal。
-- create 请求超时可能是“服务端已创建、客户端丢失响应”。每次 create 注入随机 metadata request ID；失败后通过 `listV2` 有限轮询对账，找到后 connect/kill。无法确认时返回 `UNKNOWN`，调用泄漏指标回调，并依靠最长 120 秒的短 TTL 兜底。生产回收器仍是后续必需项。
+- create 请求超时可能是“服务端已创建、客户端丢失响应”。每次 create 注入随机 metadata request ID；失败后通过 `listV2` 有限轮询对账，找到后 connect/kill。无法确认时返回 `UNKNOWN`，同步等待可异步的泄漏指标回调，并记录 request ID、已知 Sandbox ID、实际 TTL 与失败阶段。create 和 connect 的 `Config.timeout` 均显式固定且不超过 120 秒，绝不使用 SDK 的 300 秒默认值。生产回收器仍是后续必需项。
 - create 已取得 Sandbox ID 后若收到取消，会先 kill 再返回 `CANCELLED`；清理失败则返回 `UNKNOWN`。
 
 备选方案是 fork SDK 给所有数据面和控制面加入 AbortSignal，或使用自有 HTTP 客户端；M0 不修改 vendor，先选择“等待 settle＋显式 UNKNOWN”，避免伪造已经取消的语义。
@@ -60,10 +61,11 @@ Pi 负责 Provider、Tool Call、流式事件、abort、steer 和 follow-up 的�
 
 - 使用显式注入的 `ModelRuntime`，不让库代码自行读取用户目录中的认证文件。
 - 使用自有 `EmptyResourceLoader`：它没有宿主路径和 PackageManager，不扫描扩展、Skill、Prompt、主题或 AGENTS 文件；逻辑 cwd 恒定为 `/workspace`。
+- Linux 测试断言模型上下文保留逻辑 `/workspace` 且不含 Worker cwd；Windows 测试断言在 Pi Session 创建前明确拒绝运行。
 - 同时使用 `noTools: "all"`、自定义工具白名单和内置工具黑名单。这样 Pi 新增默认工具时也不会自动获得宿主机权限。
 - Pi 原始事件转换为 Runtime 事件；只有 assistant 成功终态生成 `message.completed`，provider error 和 aborted 分别生成稳定 `PROVIDER/ABORTED`，user/toolResult 不会被重复当成交付消息。
 - Fake Provider 使用 Pi 官方 Faux Provider，配合内存 CredentialStore 和运行时测试密钥，不调用外部模型。
-- 本阶段没有调用真实模型：CubeSandbox 生命周期与 Pi Tool Call 已分别由真实 Cube 和 Faux Provider 验证，额外真实模型调用不会提升 M0-05 的边界置信度，只会引入费用和密钥暴露面。
+- 本阶段没有调用外部模型：除分别验证真实 Cube 和 Faux Provider 外，Linux 纵向脚本还让 Faux Provider 通过 Pi 对真实 CubeSandbox 连续执行写入、读取，并验证两次 Observation 回到模型。它覆盖 Kernel/Tool/Sandbox 边界，同时不产生模型费用或密钥暴露面。
 
 ## 5. 验证结果
 
@@ -80,7 +82,7 @@ create
 → finally kill
 ```
 
-全部通过，清理调用成功。自动测试结果：3 个测试文件、14 项测试全部通过，包括 Fake/直接 SDK Gateway 生命周期、非法输入、迟到副作用、create 对账与 UNKNOWN、Fake Provider Tool Call、assistant-only 终态、Provider 失败、真实 abort/steer/follow-up 队列、零宿主资源发现、工具白名单和无 compaction 入口/事件。
+全部通过，清理调用成功。Linux 自动测试结果为 3 个测试文件、18 项测试全部通过；Windows 为 14 项通过、4 项 Linux Pi 会话测试按平台跳过，并额外验证 Windows fail-fast。覆盖 Fake/直接 SDK Gateway 生命周期、非法输入、迟到副作用、取消/超时优先级、create 对账与 UNKNOWN、响应协议校验、Fake Provider Tool Call、assistant-only 终态、Provider 失败、真实 abort/steer/follow-up 队列、零宿主资源发现、工具白名单和无 compaction 入口/事件。Linux 容器中的无外部模型真实纵向冒烟也已通过并完成 Sandbox 清理。
 
 ### 安全复现
 
@@ -98,6 +100,12 @@ PowerShell 中显式开启真实测试：
 $env:REAL_CUBE_SMOKE = "1"
 pnpm test:cube:real
 Remove-Item Env:REAL_CUBE_SMOKE
+```
+
+完整 Pi + Cube 纵向脚本只能在 Linux Worker/容器执行：
+
+```bash
+REAL_PI_CUBE_SMOKE=1 pnpm test:pi-cube:real
 ```
 
 脚本默认拒绝运行，不输出配置值，并在 `finally` 执行 kill。执行者应从本机 Secret/.env 安全注入进程环境，不要使用会把密钥留在 shell history 的赋值命令。

@@ -11,7 +11,11 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import type { RuntimeAgentEvent } from "./events.js";
-import { createSafePiSession, type PiSessionController } from "./pi-session.js";
+import {
+  assertLinuxWorkerPlatform,
+  createSafePiSession,
+  type PiSessionController,
+} from "./pi-session.js";
 import { SANDBOX_TOOL_NAMES } from "./tools.js";
 
 const disposers: Array<() => void> = [];
@@ -20,112 +24,144 @@ afterEach(() => {
 });
 
 describe("Pi 安全适配", () => {
-  it("只发布 assistant 成功终态，不把 user/toolResult 误报 completed", async () => {
-    const sandbox = new FakeSandboxHandle("pi-fake");
-    let modelContext = "";
-    const { controller, events } = await harness(
-      [
-        (context) => {
-          modelContext = JSON.stringify(context);
-          return fauxAssistantMessage(
-            fauxToolCall("sandbox_write_file", { path: "/tmp/pi.txt", content: "pi-safe" }),
-            { stopReason: "toolUse" },
-          );
-        },
-        fauxAssistantMessage("完成"),
-      ],
-      sandbox,
-    );
+  it.runIf(process.platform === "linux")(
+    "Linux 下只发布 assistant 成功终态，并保持模型逻辑 cwd 为 /workspace",
+    async () => {
+      const sandbox = new FakeSandboxHandle("pi-fake");
+      let modelContext = "";
+      const { controller, events } = await harness(
+        [
+          (context) => {
+            modelContext = JSON.stringify(context);
+            return fauxAssistantMessage(
+              fauxToolCall("sandbox_write_file", { path: "/tmp/pi.txt", content: "pi-safe" }),
+              { stopReason: "toolUse" },
+            );
+          },
+          fauxAssistantMessage("完成"),
+        ],
+        sandbox,
+      );
 
-    await controller.prompt("把内容写入隔离环境");
+      await controller.prompt("把内容写入隔离环境");
 
-    expect(sandbox.files.get("/tmp/pi.txt")).toBe("pi-safe");
-    expect(events.filter((event) => event.type === "message.completed")).toEqual([
-      { type: "message.completed", stopReason: "toolUse" },
-      { type: "message.completed", stopReason: "stop" },
-    ]);
-    expect(events.some((event) => event.type === "tool.completed")).toBe(true);
-    expect(events.some((event) => event.type === "compaction.forbidden")).toBe(false);
-    expect(controller.getDiagnostics()).toEqual({
-      logicalCwd: "/workspace",
-      activeToolNames: expect.arrayContaining([...SANDBOX_TOOL_NAMES]),
-      compactionEnabled: false,
-      hasCompactionEntry: false,
-    });
-    expect("compact" in controller).toBe(false);
-    expect("session" in controller).toBe(false);
-    expect(modelContext).toContain("你是受控 Agent");
-    expect(modelContext).not.toContain(process.cwd());
-    expect(modelContext).not.toContain(process.cwd().replaceAll("\\", "/"));
-  });
-
-  it("把 Faux Provider 真实失败映射为稳定 PROVIDER，且不发布 completed", async () => {
-    const { controller, events } = await harness([
-      fauxAssistantMessage("", { stopReason: "error", errorMessage: "测试 Provider 私有错误" }),
-    ]);
-    await controller.prompt("触发失败");
-    expect(events).toContainEqual({
-      type: "error",
-      code: "PROVIDER",
-      message: "模型 Provider 调用失败",
-    });
-    expect(events.some((event) => event.type === "message.completed")).toBe(false);
-    expect(JSON.stringify(events)).not.toContain("测试 Provider 私有错误");
-    expect(events.findIndex((event) => event.type === "agent.started")).toBeLessThan(
-      events.findIndex((event) => event.type === "error"),
-    );
-    expect(events.findIndex((event) => event.type === "error")).toBeLessThan(
-      events.findIndex((event) => event.type === "agent.settled"),
-    );
-  });
-
-  it("Faux Provider 流式处理中 abort 产生 ABORTED 终态", async () => {
-    const delayedAbort: FauxResponseStep = async (_context, options) =>
-      new Promise((resolve) => {
-        const finish = () => resolve(fauxAssistantMessage("", { stopReason: "aborted" }));
-        if (options?.signal?.aborted) finish();
-        else options?.signal?.addEventListener("abort", finish, { once: true });
+      expect(sandbox.files.get("/tmp/pi.txt")).toBe("pi-safe");
+      expect(events.filter((event) => event.type === "message.completed")).toEqual([
+        { type: "message.completed", stopReason: "toolUse" },
+        { type: "message.completed", stopReason: "stop" },
+      ]);
+      expect(events.some((event) => event.type === "tool.completed")).toBe(true);
+      expect(events.some((event) => event.type === "compaction.forbidden")).toBe(false);
+      expect(controller.getDiagnostics()).toEqual({
+        logicalCwd: "/workspace",
+        activeToolNames: expect.arrayContaining([...SANDBOX_TOOL_NAMES]),
+        compactionEnabled: false,
+        hasCompactionEntry: false,
       });
-    const { controller, events, started } = await harness([delayedAbort]);
-    const prompting = controller.prompt("等待中止");
-    await started;
-    await controller.abort();
-    await prompting;
-    expect(events).toContainEqual({ type: "error", code: "ABORTED", message: "模型调用已中止" });
-    expect(events.some((event) => event.type === "message.completed")).toBe(false);
-    expect(events.findIndex((event) => event.type === "agent.started")).toBeLessThan(
-      events.findIndex((event) => event.type === "error"),
-    );
-    expect(events.findIndex((event) => event.type === "error")).toBeLessThan(
-      events.findIndex((event) => event.type === "agent.settled"),
-    );
-  });
+      expect("compact" in controller).toBe(false);
+      expect("session" in controller).toBe(false);
+      expect(modelContext).toContain("你是受控 Agent");
+      expect(modelContext).toContain("/workspace");
+      expect(modelContext).not.toMatch(hostPathPattern(process.cwd()));
+      expect(modelContext).not.toMatch(hostPathPattern(process.cwd().replaceAll("\\", "/")));
+    },
+  );
 
-  it("Faux Provider 真实验证 steer/follow-up 队列和事件顺序", async () => {
-    let queuedContext = "";
-    const first: FauxResponseStep = async () => {
-      await delay(40);
-      return fauxAssistantMessage("第一步");
-    };
-    const queued: FauxResponseStep = (context) => {
-      queuedContext = JSON.stringify(context.messages);
-      return fauxAssistantMessage("队列消息已处理");
-    };
-    const { controller, events, started, faux } = await harness([first, queued]);
-    const prompting = controller.prompt("开始");
-    await started;
-    await controller.steer("转向消息");
-    await controller.followUp("追问消息");
-    await prompting;
+  it.runIf(process.platform === "linux")(
+    "把 Faux Provider 真实失败映射为稳定 PROVIDER，且不发布 completed",
+    async () => {
+      const { controller, events } = await harness([
+        fauxAssistantMessage("", { stopReason: "error", errorMessage: "测试 Provider 私有错误" }),
+      ]);
+      await controller.prompt("触发失败");
+      expect(events).toContainEqual({
+        type: "error",
+        code: "PROVIDER",
+        message: "模型 Provider 调用失败",
+      });
+      expect(events.some((event) => event.type === "message.completed")).toBe(false);
+      expect(JSON.stringify(events)).not.toContain("测试 Provider 私有错误");
+      expect(events.findIndex((event) => event.type === "agent.started")).toBeLessThan(
+        events.findIndex((event) => event.type === "error"),
+      );
+      expect(events.findIndex((event) => event.type === "error")).toBeLessThan(
+        events.findIndex((event) => event.type === "agent.settled"),
+      );
+    },
+  );
 
-    const queueEvents = events.filter((event) => event.type === "queue.updated");
-    expect(queueEvents.some((event) => event.steering.includes("转向消息"))).toBe(true);
-    expect(queueEvents.some((event) => event.followUp.includes("追问消息"))).toBe(true);
-    // Pi 会把同一安全点的 steer/follow-up 合并进下一次模型上下文，而不是强制各发一次请求。
-    expect(faux.state.callCount).toBe(2);
-    expect(queuedContext).toContain("转向消息");
-    expect(queuedContext).toContain("追问消息");
-    expect(events.at(-1)?.type).toBe("agent.settled");
+  it.runIf(process.platform === "linux")(
+    "Faux Provider 流式处理中 abort 产生 ABORTED 终态",
+    async () => {
+      const delayedAbort: FauxResponseStep = async (_context, options) =>
+        new Promise((resolve) => {
+          const finish = () => resolve(fauxAssistantMessage("", { stopReason: "aborted" }));
+          if (options?.signal?.aborted) finish();
+          else options?.signal?.addEventListener("abort", finish, { once: true });
+        });
+      const { controller, events, started } = await harness([delayedAbort]);
+      const prompting = controller.prompt("等待中止");
+      await started;
+      await controller.abort();
+      await prompting;
+      expect(events).toContainEqual({ type: "error", code: "ABORTED", message: "模型调用已中止" });
+      expect(events.some((event) => event.type === "message.completed")).toBe(false);
+      expect(events.findIndex((event) => event.type === "agent.started")).toBeLessThan(
+        events.findIndex((event) => event.type === "error"),
+      );
+      expect(events.findIndex((event) => event.type === "error")).toBeLessThan(
+        events.findIndex((event) => event.type === "agent.settled"),
+      );
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "Faux Provider 真实验证 steer/follow-up 队列和事件顺序",
+    async () => {
+      let queuedContext = "";
+      const first: FauxResponseStep = async () => {
+        await delay(40);
+        return fauxAssistantMessage("第一步");
+      };
+      const queued: FauxResponseStep = (context) => {
+        queuedContext = JSON.stringify(context.messages);
+        return fauxAssistantMessage("队列消息已处理");
+      };
+      const { controller, events, started, faux } = await harness([first, queued]);
+      const prompting = controller.prompt("开始");
+      await started;
+      await controller.steer("转向消息");
+      await controller.followUp("追问消息");
+      await prompting;
+
+      const queueEvents = events.filter((event) => event.type === "queue.updated");
+      expect(queueEvents.some((event) => event.steering.includes("转向消息"))).toBe(true);
+      expect(queueEvents.some((event) => event.followUp.includes("追问消息"))).toBe(true);
+      // Pi 会把同一安全点的 steer/follow-up 合并进下一次模型上下文，而不是强制各发一次请求。
+      expect(faux.state.callCount).toBe(2);
+      expect(queuedContext).toContain("转向消息");
+      expect(queuedContext).toContain("追问消息");
+      expect(events.at(-1)?.type).toBe("agent.settled");
+    },
+  );
+
+  it("Windows Worker 在创建 Pi Session 前明确失败", async () => {
+    expect(() => assertLinuxWorkerPlatform("win32")).toThrow("仅支持 Linux");
+    if (process.platform !== "linux") {
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      const faux = fauxProvider({ api: "faux-platform", provider: "faux-platform" });
+      modelRuntime.registerNativeProvider(faux.provider);
+      await expect(
+        createSafePiSession({
+          model: faux.getModel(),
+          modelRuntime,
+          sandbox: new FakeSandboxHandle("platform-guard"),
+        }),
+      ).rejects.toThrow("仅支持 Linux");
+    }
   });
 
   it("零发现 ResourceLoader 不接受宿主路径或扩展资源", async () => {
@@ -185,4 +221,10 @@ async function harness(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function hostPathPattern(path: string): RegExp {
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // 以边界匹配宿主 cwd，避免 Linux 测试目录 /work 与逻辑路径 /workspace 的前缀误判。
+  return new RegExp(`${escaped}(?:[/\\\\"]|$)`);
 }

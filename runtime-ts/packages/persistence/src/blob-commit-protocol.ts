@@ -267,9 +267,6 @@ function applyTransition(
       }
       break;
     case "stable_mark_gc_blocked":
-      if (event.type === "stable_mark_succeeded") {
-        return copyStable(current, "stable");
-      }
       if (event.type === "stable_gc_lifecycle_resolved") {
         if (event.status === "active") {
           return copyStable(current, "stable_object_ready");

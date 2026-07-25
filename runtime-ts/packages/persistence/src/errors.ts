@@ -25,7 +25,17 @@ function pgCode(error: unknown): string | undefined {
   return typeof code === "string" ? code : undefined;
 }
 
-const unavailableSystemCodes = new Set(["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ECONNRESET"]);
+const unavailableSystemCodes = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ECONNRESET",
+  "ECONNABORTED",
+  "EPIPE",
+]);
 
 /** 将驱动细节收敛为稳定错误码，避免把 SQL、连接串或约束名暴露到上层。 */
 export function mapPersistenceError(error: unknown, operation: string): PersistenceError {

@@ -4,6 +4,7 @@ export const expectedEnvironmentKeys = Object.freeze([
   "DATABASE_BOOTSTRAP_URL",
   "MIGRATION_DATABASE_URL",
   "DATABASE_RUNTIME_ROLE",
+  "DATABASE_MIGRATOR_ROLE",
   "DATABASE_SCHEMA",
   "RUNTIME_ENV",
   "MINIO_ROOT_USER",

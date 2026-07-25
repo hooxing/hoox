@@ -65,7 +65,8 @@ export function createPostgresPool(options: PostgresPoolOptions): Pool {
       600_000,
       "statementTimeoutMs",
     ),
-    ...(options.schema === undefined ? {} : { options: `-c search_path=${options.schema},public` }),
+    // 不把 public 放入业务连接的解析路径，避免同名对象劫持；pg_catalog 仍由 PostgreSQL 隐式提供。
+    ...(options.schema === undefined ? {} : { options: `-c search_path=${options.schema}` }),
   };
   const pool = new Pool(config);
   // pg 的空闲连接错误若没有监听器会变成进程级未捕获错误；回调仍只收到脱敏后的稳定错误。

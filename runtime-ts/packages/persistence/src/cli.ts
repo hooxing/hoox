@@ -11,12 +11,16 @@ if (direction !== "up" && direction !== "down") {
 } else {
   const connectionString = process.env.MIGRATION_DATABASE_URL;
   const runtimeRole = process.env.DATABASE_RUNTIME_ROLE;
+  const migratorRole = process.env.DATABASE_MIGRATOR_ROLE;
   const schema = process.env.DATABASE_SCHEMA;
   if (connectionString === undefined || connectionString.length === 0) {
     console.error("迁移失败：缺少 MIGRATION_DATABASE_URL");
     process.exitCode = 2;
   } else if (runtimeRole === undefined || runtimeRole.length === 0) {
     console.error("迁移失败：缺少 DATABASE_RUNTIME_ROLE");
+    process.exitCode = 2;
+  } else if (migratorRole === undefined || migratorRole.length === 0) {
+    console.error("迁移失败：缺少 DATABASE_MIGRATOR_ROLE");
     process.exitCode = 2;
   } else if (schema === undefined || schema.length === 0) {
     console.error("迁移失败：缺少 DATABASE_SCHEMA");
@@ -29,17 +33,18 @@ if (direction !== "up" && direction !== "down") {
     });
     try {
       await probePostgres(pool);
+      const security = { runtimeRole, migratorRole, schema } as const;
       let records: Awaited<ReturnType<typeof migrateUp>>;
       if (direction === "up") {
-        records = await migrateUp(pool, { runtimeRole });
-        await bootstrapRuntimeAccess(pool, runtimeRole);
+        records = await migrateUp(pool, security);
+        await bootstrapRuntimeAccess(pool, security);
       } else {
         const environment = process.env.RUNTIME_ENV;
         assertDestructiveMigrationAllowed(process.argv, environment);
         records = await migrateDown(pool, {
           allowDestructive: true,
           environment,
-          runtimeRole,
+          ...security,
         });
       }
       const current = records.at(-1)?.version ?? 0;

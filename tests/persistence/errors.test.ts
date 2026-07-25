@@ -10,15 +10,22 @@ describe("持久层公开错误脱敏", () => {
     expect(mapped.message).not.toContain(original.message);
   });
 
-  it.each(["ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ECONNRESET"])(
-    "将系统连接错误 %s 映射为脱敏 UNAVAILABLE",
-    (code) => {
-      const mapped = mapPersistenceError(
-        Object.assign(new Error("包含主机、端口和连接串"), { code }),
-        "启动探针",
-      );
-      expect(mapped).toMatchObject({ code: "UNAVAILABLE", message: "启动探针暂时不可用" });
-      expect("cause" in mapped).toBe(false);
-    },
-  );
+  it.each([
+    "ECONNREFUSED",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+    "ETIMEDOUT",
+    "EHOSTUNREACH",
+    "ENETUNREACH",
+    "ECONNRESET",
+    "ECONNABORTED",
+    "EPIPE",
+  ])("将系统连接错误 %s 映射为脱敏 UNAVAILABLE", (code) => {
+    const mapped = mapPersistenceError(
+      Object.assign(new Error("包含主机、端口和连接串"), { code }),
+      "启动探针",
+    );
+    expect(mapped).toMatchObject({ code: "UNAVAILABLE", message: "启动探针暂时不可用" });
+    expect("cause" in mapped).toBe(false);
+  });
 });

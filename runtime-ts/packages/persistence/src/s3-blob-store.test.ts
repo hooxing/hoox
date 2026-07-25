@@ -2,17 +2,22 @@ import { describe, expect, it } from "vitest";
 import { BlobStoreError } from "./index.js";
 import {
   S3BlobStore,
+  S3StableBlobGarbageCollector,
   type S3CopyObjectInput,
+  type S3GetObjectResult,
   type S3ObjectClient,
   type S3ObjectMetadata,
   type S3PresignInput,
   type S3PutObjectInput,
+  encodeRfc5987Value,
 } from "./s3-blob-store.js";
+
+const config = { bucket: "agent-runtime-dev", maxBlobSizeBytes: 1_024 } as const;
 
 describe("S3BlobStore", () => {
   it("只使用派生键，并隔离 Tenant 与用途", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, { bucket: "agent-runtime-dev", prefix: "test" });
+    const store = new S3BlobStore(client, { ...config, prefix: "test" });
     const staged = await store.putStaging({
       scope: { tenantId: "tenant_a" },
       purpose: "workspace",
@@ -56,7 +61,7 @@ describe("S3BlobStore", () => {
 
   it("相同 uploadId 和内容幂等，内容变化时拒绝覆盖", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, { bucket: "agent-runtime-dev" });
+    const store = new S3BlobStore(client, config);
     const input = {
       scope: { tenantId: "tenant_a" },
       purpose: "resource" as const,
@@ -74,8 +79,68 @@ describe("S3BlobStore", () => {
     });
   });
 
+  it("条件写消除 HEAD 到 PUT 的并发覆盖", async () => {
+    const sameClient = new FakeS3ObjectClient();
+    const sameStore = new S3BlobStore(sameClient, config);
+    const sameInput = {
+      scope: { tenantId: "tenant_a" },
+      purpose: "resource" as const,
+      uploadId: "concurrent-same",
+      body: bytes("same"),
+      mediaType: "text/plain",
+    };
+    const sameResults = await Promise.all([
+      sameStore.putStaging(sameInput),
+      sameStore.putStaging(sameInput),
+    ]);
+    expect(sameResults[0]).toEqual(sameResults[1]);
+    expect(sameClient.successfulPuts).toBe(1);
+
+    const conflictClient = new FakeS3ObjectClient();
+    const conflictStore = new S3BlobStore(conflictClient, config);
+    const conflictResults = await Promise.allSettled([
+      conflictStore.putStaging({ ...sameInput, uploadId: "concurrent-conflict" }),
+      conflictStore.putStaging({
+        ...sameInput,
+        uploadId: "concurrent-conflict",
+        body: bytes("different"),
+      }),
+    ]);
+    expect(conflictResults.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejection = conflictResults.find((result) => result.status === "rejected");
+    expect(rejection).toMatchObject({
+      status: "rejected",
+      reason: { code: "BLOB_IDEMPOTENCY_CONFLICT" },
+    });
+    expect(conflictClient.successfulPuts).toBe(1);
+  });
+
+  it("mediaType 是业务引用元数据，不参与内容身份", async () => {
+    const client = new FakeS3ObjectClient();
+    const store = new S3BlobStore(client, config);
+    const base = {
+      scope: { tenantId: "tenant_a" },
+      purpose: "resource" as const,
+      uploadId: "media-concurrent",
+      body: bytes("same-content"),
+    };
+    const [text, binary] = await Promise.all([
+      store.putStaging({ ...base, mediaType: "text/plain" }),
+      store.putStaging({ ...base, mediaType: "application/octet-stream" }),
+    ]);
+    expect(client.successfulPuts).toBe(1);
+    expect(text.mediaType).not.toBe(binary.mediaType);
+
+    const [textStable, binaryStable] = await Promise.all([
+      store.promote(base.scope, text),
+      store.promote(base.scope, binary),
+    ]);
+    expect(textStable.sha256).toBe(binaryStable.sha256);
+    await expect(store.head(base.scope, binaryStable)).resolves.toBeDefined();
+  });
+
   it("校验调用方声明的哈希和大小", async () => {
-    const store = new S3BlobStore(new FakeS3ObjectClient(), { bucket: "agent-runtime-dev" });
+    const store = new S3BlobStore(new FakeS3ObjectClient(), config);
     await expect(
       store.putStaging({
         scope: { tenantId: "tenant_a" },
@@ -101,7 +166,7 @@ describe("S3BlobStore", () => {
   it("写响应未知但对象已落盘时通过 HEAD 收敛为成功", async () => {
     const client = new FakeS3ObjectClient();
     client.putUnknownAfterWrite = true;
-    const store = new S3BlobStore(client, { bucket: "agent-runtime-dev" });
+    const store = new S3BlobStore(client, config);
 
     const staged = await store.putStaging({
       scope: { tenantId: "tenant_a" },
@@ -116,7 +181,7 @@ describe("S3BlobStore", () => {
   it("写响应未知且对象不存在时保留未知结果", async () => {
     const client = new FakeS3ObjectClient();
     client.putUnknownWithoutWrite = true;
-    const store = new S3BlobStore(client, { bucket: "agent-runtime-dev" });
+    const store = new S3BlobStore(client, config);
 
     await expect(
       store.putStaging({
@@ -129,9 +194,25 @@ describe("S3BlobStore", () => {
     ).rejects.toMatchObject({ code: "BLOB_RESULT_UNKNOWN", result: "unknown" });
   });
 
+  it("写响应与后续 HEAD 都失败时不能收敛成明确失败", async () => {
+    const client = new FakeS3ObjectClient();
+    client.putUnknownAfterWrite = true;
+    client.failVerificationHeadAfterUnknownWrite = true;
+    const store = new S3BlobStore(client, config);
+    await expect(
+      store.putStaging({
+        scope: { tenantId: "tenant_a" },
+        purpose: "trace",
+        uploadId: "unknown-head-failed",
+        body: bytes("trace"),
+        mediaType: "application/json",
+      }),
+    ).rejects.toMatchObject({ code: "BLOB_RESULT_UNKNOWN", result: "unknown" });
+  });
+
   it("提升为内容寻址稳定对象，并校验读取内容", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, { bucket: "agent-runtime-dev", prefix: "test" });
+    const store = new S3BlobStore(client, { ...config, prefix: "test" });
     const scope = { tenantId: "tenant_a" };
     const staged = await store.putStaging({
       scope,
@@ -148,7 +229,7 @@ describe("S3BlobStore", () => {
         destinationKey: `test/tenants/tenant_a/stable/artifact/sha256/${stable.sha256}`,
       },
     ]);
-    expect(new TextDecoder().decode(await store.get(scope, stable))).toBe("deliverable");
+    expect(new TextDecoder().decode(await store.getBytes(scope, stable))).toBe("deliverable");
     expect(await store.promote(scope, staged)).toEqual(stable);
     expect(client.copyKeys).toHaveLength(1);
   });
@@ -156,7 +237,7 @@ describe("S3BlobStore", () => {
   it("限制预签名 TTL 和下载文件名", async () => {
     const client = new FakeS3ObjectClient();
     const store = new S3BlobStore(client, {
-      bucket: "agent-runtime-dev",
+      ...config,
       maxPresignTtlSeconds: 120,
     });
     const scope = { tenantId: "tenant_a" };
@@ -182,9 +263,41 @@ describe("S3BlobStore", () => {
     ).resolves.toContain("ttl=60");
   });
 
+  it("上传前、GET ContentLength 和流式读取过程都执行大小上限", async () => {
+    const client = new FakeS3ObjectClient();
+    const store = new S3BlobStore(client, { ...config, maxBlobSizeBytes: 5 });
+    await expect(
+      store.putStaging({
+        scope: { tenantId: "tenant_a" },
+        purpose: "preview",
+        uploadId: "too-large",
+        body: bytes("123456"),
+        mediaType: "text/plain",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_BLOB_ARGUMENT" });
+    expect(client.putKeys).toHaveLength(0);
+
+    const staged = await store.putStaging({
+      scope: { tenantId: "tenant_a" },
+      purpose: "preview",
+      uploadId: "read-limit",
+      body: bytes("1234"),
+      mediaType: "text/plain",
+    });
+    client.contentLengthOverride = 6;
+    await expect(store.getBytes({ tenantId: "tenant_a" }, staged)).rejects.toMatchObject({
+      code: "INVALID_BLOB_ARGUMENT",
+    });
+    client.contentLengthOverride = undefined;
+    client.extraReadChunk = bytes("56");
+    await expect(store.getBytes({ tenantId: "tenant_a" }, staged)).rejects.toMatchObject({
+      code: "INVALID_BLOB_ARGUMENT",
+    });
+  });
+
   it("删除响应未知时通过 HEAD 区分已删除与仍存在", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, { bucket: "agent-runtime-dev" });
+    const store = new S3BlobStore(client, config);
     const scope = { tenantId: "tenant_a" };
     const staged = await store.putStaging({
       scope,
@@ -195,7 +308,7 @@ describe("S3BlobStore", () => {
     });
 
     client.deleteUnknownAfterDelete = true;
-    await expect(store.delete(scope, staged)).resolves.toBeUndefined();
+    await expect(store.deleteStaging(scope, staged)).resolves.toBeUndefined();
 
     const stagedAgain = await store.putStaging({
       scope,
@@ -205,10 +318,70 @@ describe("S3BlobStore", () => {
       mediaType: "text/plain",
     });
     client.deleteUnknownWithoutDelete = true;
-    await expect(store.delete(scope, stagedAgain)).rejects.toMatchObject({
+    await expect(store.deleteStaging(scope, stagedAgain)).rejects.toMatchObject({
       code: "BLOB_RESULT_UNKNOWN",
       result: "unknown",
     });
+
+    const headFailureClient = new FakeS3ObjectClient();
+    const headFailureStore = new S3BlobStore(headFailureClient, config);
+    const stagedWithHeadFailure = await headFailureStore.putStaging({
+      scope,
+      purpose: "preview",
+      uploadId: "delete-3",
+      body: bytes("preview"),
+      mediaType: "text/plain",
+    });
+    headFailureClient.deleteUnknownWithoutDelete = true;
+    headFailureClient.failVerificationHeadAfterUnknownDelete = true;
+    await expect(
+      headFailureStore.deleteStaging(scope, stagedWithHeadFailure),
+    ).rejects.toMatchObject({
+      code: "BLOB_RESULT_UNKNOWN",
+      result: "unknown",
+    });
+  });
+
+  it("stable 对象只能经过可达性证明的 GC 端口删除", async () => {
+    const client = new FakeS3ObjectClient();
+    const store = new S3BlobStore(client, { ...config, prefix: "gc-test" });
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "gc-1",
+      body: bytes("stable"),
+      mediaType: "text/plain",
+    });
+    const stable = await store.promote(scope, staged);
+    let allowGc = false;
+    const gc = new S3StableBlobGarbageCollector(
+      client,
+      {
+        async proveUnreachable() {
+          return allowGc
+            ? {
+                proofId: "proof-1",
+                tenantId: scope.tenantId,
+                purpose: stable.purpose,
+                sha256: stable.sha256,
+                checkedAt: new Date().toISOString(),
+              }
+            : undefined;
+        },
+      },
+      "gc-test",
+      config.maxBlobSizeBytes,
+    );
+    await expect(gc.collectIfUnreachable(scope, stable)).resolves.toBe("still_referenced");
+    await expect(store.head(scope, stable)).resolves.toBeDefined();
+    allowGc = true;
+    await expect(gc.collectIfUnreachable(scope, stable)).resolves.toBe("deleted");
+    await expect(store.head(scope, stable)).resolves.toBeUndefined();
+  });
+
+  it("RFC 5987 编码覆盖中文与 encodeURIComponent 保留字符", () => {
+    expect(encodeRfc5987Value("报告'()*!.txt")).toBe("%E6%8A%A5%E5%91%8A%27%28%29%2A%21.txt");
   });
 });
 
@@ -225,9 +398,18 @@ class FakeS3ObjectClient implements S3ObjectClient {
   putUnknownWithoutWrite = false;
   deleteUnknownAfterDelete = false;
   deleteUnknownWithoutDelete = false;
+  successfulPuts = 0;
+  contentLengthOverride: number | undefined;
+  extraReadChunk: Uint8Array | undefined;
+  failVerificationHeadAfterUnknownWrite = false;
+  failVerificationHeadAfterUnknownDelete = false;
+  private failNextHead = false;
 
   async put(input: S3PutObjectInput): Promise<void> {
     this.putKeys.push(input.key);
+    if (this.objects.has(input.key)) {
+      throw new BlobStoreError("BLOB_PRECONDITION_FAILED", "fake conditional conflict");
+    }
     if (!this.putUnknownWithoutWrite) {
       this.objects.set(input.key, {
         body: input.body.slice(),
@@ -238,18 +420,38 @@ class FakeS3ObjectClient implements S3ObjectClient {
           etag: "fake-etag",
         },
       });
+      this.successfulPuts += 1;
     }
     if (this.putUnknownAfterWrite || this.putUnknownWithoutWrite) {
+      this.failNextHead = this.failVerificationHeadAfterUnknownWrite;
       throw unknownResult();
     }
   }
 
   async head(key: string): Promise<S3ObjectMetadata | undefined> {
+    if (this.failNextHead) {
+      this.failNextHead = false;
+      throw new BlobStoreError("BLOB_PROVIDER_ERROR", "fake head failure");
+    }
     return this.objects.get(key)?.metadata;
   }
 
-  async get(key: string): Promise<Uint8Array | undefined> {
-    return this.objects.get(key)?.body.slice();
+  async get(key: string): Promise<S3GetObjectResult | undefined> {
+    const object = this.objects.get(key);
+    if (object === undefined) {
+      return undefined;
+    }
+    const body = object.body.slice();
+    const extra = this.extraReadChunk;
+    return {
+      contentLength: this.contentLengthOverride ?? body.byteLength,
+      body: (async function* () {
+        yield body;
+        if (extra !== undefined) {
+          yield extra;
+        }
+      })(),
+    };
   }
 
   async copy(input: S3CopyObjectInput): Promise<void> {
@@ -269,6 +471,7 @@ class FakeS3ObjectClient implements S3ObjectClient {
       this.objects.delete(key);
     }
     if (this.deleteUnknownAfterDelete || this.deleteUnknownWithoutDelete) {
+      this.failNextHead = this.failVerificationHeadAfterUnknownDelete;
       throw unknownResult();
     }
   }

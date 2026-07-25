@@ -55,9 +55,33 @@ export interface BlobStore {
   putStaging(input: PutStagingBlobInput): Promise<StagedBlobRef>;
   promote(scope: TenantBlobScope, staged: StagedBlobRef): Promise<StableBlobRef>;
   head(scope: TenantBlobScope, blob: BlobRef): Promise<BlobObjectHead | undefined>;
-  get(scope: TenantBlobScope, blob: BlobRef): Promise<Uint8Array>;
-  delete(scope: TenantBlobScope, blob: BlobRef): Promise<void>;
+  read(scope: TenantBlobScope, blob: BlobRef): AsyncIterable<Uint8Array>;
+  getBytes(scope: TenantBlobScope, blob: BlobRef): Promise<Uint8Array>;
+  deleteStaging(scope: TenantBlobScope, blob: StagedBlobRef): Promise<void>;
   presignDownload(input: PresignBlobDownloadInput): Promise<string>;
+}
+
+export interface StableBlobGcProof {
+  readonly proofId: string;
+  readonly tenantId: string;
+  readonly purpose: BlobPurpose;
+  readonly sha256: string;
+  readonly checkedAt: string;
+}
+
+/** 该端口由 PostgreSQL 引用图实现；返回证明前必须完成可达性与引用计数检查。 */
+export interface StableBlobReachabilityPort {
+  proveUnreachable(input: {
+    readonly scope: TenantBlobScope;
+    readonly blob: StableBlobRef;
+  }): Promise<StableBlobGcProof | undefined>;
+}
+
+export interface StableBlobGcPort {
+  collectIfUnreachable(
+    scope: TenantBlobScope,
+    blob: StableBlobRef,
+  ): Promise<"deleted" | "still_referenced">;
 }
 
 export type BlobStoreErrorCode =
@@ -66,6 +90,7 @@ export type BlobStoreErrorCode =
   | "BLOB_NOT_FOUND"
   | "BLOB_INTEGRITY_MISMATCH"
   | "BLOB_IDEMPOTENCY_CONFLICT"
+  | "BLOB_PRECONDITION_FAILED"
   | "BLOB_RESULT_UNKNOWN"
   | "BLOB_PROVIDER_ERROR";
 

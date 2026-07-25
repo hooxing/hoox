@@ -7,11 +7,13 @@
 - 调用必须携带可信 `TenantBlobScope` 和固定 `BlobPurpose`；
 - 调用方只传 `uploadId` 或不可变 `BlobRef`，不能传完整对象键；
 - staging key 与 stable key 均由包内派生，stable key 使用 SHA-256 内容寻址；
-- `putStaging`、`promote` 和 `delete` 可用相同引用幂等重试；
-- 所有读取都会校验大小和 SHA-256；S3 ETag 不作为内容哈希；
+- `putStaging` 使用条件写入消除 HEAD→PUT 竞态；`putStaging`、`promote` 和 `deleteStaging` 可用相同引用幂等重试；
+- 普通业务端口只能删除 staging。stable 删除必须经过 `StableBlobGcPort`，并由持久层按 Tenant、用途和哈希证明当前不可达；
+- 所有读取都会校验 ContentLength、流式累计大小和 SHA-256；S3 ETag 不作为内容哈希；
+- `mediaType` 是业务引用的展示元数据，不参与内容身份。同一 SHA-256 和大小可以被不同 `mediaType` 引用；
 - Bucket 必须保持私有，预签名下载 TTL 由服务端配置限制；
 - 容器内访问地址和浏览器下载地址不同时，分别配置 `endpoint` 与 `publicEndpoint`，签名 URL 只使用后者；
-- 单次 `putStaging` 当前接收内存 `Uint8Array`。大文件分片/流式上传需要另立任务，不能绕过同一完整性和补偿协议。
+- 单次 `putStaging` 当前接收内存 `Uint8Array`，配置上限不得超过 16 MiB；读取接口提供 `AsyncIterable` 流，并在消费过程中继续执行上限和完整性校验。大文件 multipart/流式上传明确延后，不能通过调高配置绕过内存上限或补偿协议。
 
 对象键形态只用于运维说明，不属于公开 API：
 
@@ -25,13 +27,15 @@
 对象存储和 PostgreSQL 不做分布式事务。协调器必须持久化 `BlobCommitSnapshot`，按以下顺序推进：
 
 1. 上传并 HEAD 校验 staging；
-2. 使用 `operationId` 幂等提交业务引用；
+2. 使用 `(TenantBlobScope, operationId)` 幂等提交业务引用；
 3. 引用提交明确成功后，复制并校验 stable 对象；
 4. 把业务引用切换为 stable；
 5. 最后删除 staging；
-6. 引用提交前失败的 staging 进入孤儿清理；结果未知时先通过对应 resolve 接口查明，不允许猜测后继续。
+6. 引用提交前失败的 staging 进入孤儿清理；补偿事件明确记录目标为 staging；结果未知时先通过同一 Tenant scope 下的对应 resolve 接口查明，不允许猜测后继续。
 
-`BlobReferenceCommitPort` 和 `BlobCommitStatePort` 是协调契约，本包不实现具体业务表。关键状态迁移由 `transitionBlobCommit` 校验，非法跨越会失败。
+`BlobReferenceCommitPort` 和 `BlobCommitStatePort` 是协调契约，本包不实现具体业务表。PostgreSQL 实现必须以 `(tenant_id, operation_id)` 建立复合唯一约束，所有 load/CAS/resolve 都必须同时校验 Tenant scope；不同 Tenant 可以使用相同 `operationId`。关键状态迁移由 `transitionBlobCommit` 校验，非法跨越会失败。
+
+PUT、COPY 或 DELETE 返回不确定结果后，只能通过后续 HEAD 的明确存在/不存在收敛；HEAD 自身失败时仍保持 `BLOB_RESULT_UNKNOWN`，由恢复任务重试，不能误判为成功或失败。stable GC 也遵守同一规则。
 
 ## 测试
 
@@ -48,4 +52,4 @@ $env:RUN_MINIO_INTEGRATION='true'
 node --env-file-if-exists=.env node_modules/vitest/vitest.mjs run runtime-ts/packages/persistence/src/s3-minio.integration.test.ts
 ```
 
-集成测试使用唯一前缀并在 `finally` 删除自己创建的对象。若未设置 `RUN_MINIO_INTEGRATION=true`，用例会跳过。
+集成测试预先固定引用和键，使用唯一前缀，并在 `finally` 独立执行 staging 与 stable GC 两条清理路径；若正常清理失败，测试会按唯一前缀兜底清理并确认无残留。若未设置 `RUN_MINIO_INTEGRATION=true`，用例会跳过。

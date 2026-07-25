@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   BlobCommitTransitionError,
   type BlobCommitSnapshot,
+  type BlobCommitStatePort,
   type StableBlobRef,
   type StagedBlobRef,
   transitionBlobCommit,
@@ -18,8 +19,8 @@ describe("Blob 补偿状态协议", () => {
     });
     state = transitionBlobCommit(state, { type: "promotion_succeeded", stable });
     state = transitionBlobCommit(state, { type: "stable_mark_succeeded" });
-    state = transitionBlobCommit(state, { type: "cleanup_requested" });
-    state = transitionBlobCommit(state, { type: "cleanup_succeeded" });
+    state = transitionBlobCommit(state, { type: "cleanup_requested", target: "staging" });
+    state = transitionBlobCommit(state, { type: "cleanup_succeeded", target: "staging" });
 
     expect(state).toMatchObject({ status: "completed", version: 7, referenceId: "ref-1" });
   });
@@ -46,7 +47,7 @@ describe("Blob 补偿状态协议", () => {
     state = transitionBlobCommit(state, { type: "reference_commit_result_unknown" });
     state = transitionBlobCommit(state, { type: "reference_commit_resolved", committed: false });
     expect(state.status).toBe("cleanup_pending");
-    state = transitionBlobCommit(state, { type: "cleanup_succeeded" });
+    state = transitionBlobCommit(state, { type: "cleanup_succeeded", target: "staging" });
     expect(state.status).toBe("abandoned");
   });
 
@@ -55,9 +56,9 @@ describe("Blob 补偿状态协议", () => {
     state = transitionBlobCommit(state, { type: "promotion_succeeded", stable });
     state = transitionBlobCommit(state, { type: "stable_mark_result_unknown" });
     expect(state.status).toBe("stable_mark_unknown");
-    expect(() => transitionBlobCommit(state, { type: "cleanup_requested" })).toThrow(
-      BlobCommitTransitionError,
-    );
+    expect(() =>
+      transitionBlobCommit(state, { type: "cleanup_requested", target: "staging" }),
+    ).toThrow(BlobCommitTransitionError);
     state = transitionBlobCommit(state, { type: "stable_mark_resolved", marked: true });
     expect(state.status).toBe("stable");
   });
@@ -75,6 +76,30 @@ describe("Blob 补偿状态协议", () => {
         stable: changedStable,
       }),
     ).toThrow(BlobCommitTransitionError);
+  });
+
+  it("相同 operationId 在不同 Tenant 下互不覆盖", async () => {
+    const port = new InMemoryCommitStatePort();
+    const tenantA = initialState();
+    const tenantB = { ...initialState(), scope: { tenantId: "tenant_b" } };
+    await port.create(tenantA);
+    await port.create(tenantB);
+
+    await expect(port.load(tenantA.scope, tenantA.operationId)).resolves.toEqual(tenantA);
+    await expect(port.load(tenantB.scope, tenantB.operationId)).resolves.toEqual(tenantB);
+    await expect(port.load({ tenantId: "tenant_c" }, tenantA.operationId)).resolves.toBeUndefined();
+
+    const tenantANext = transitionBlobCommit(tenantA, { type: "stage_verified", staged });
+    await expect(
+      port.compareAndSet({
+        scope: tenantB.scope,
+        operationId: tenantA.operationId,
+        expectedVersion: tenantA.version,
+        next: tenantANext,
+      }),
+    ).resolves.toBe(false);
+    await expect(port.load(tenantA.scope, tenantA.operationId)).resolves.toEqual(tenantA);
+    await expect(port.load(tenantB.scope, tenantB.operationId)).resolves.toEqual(tenantB);
   });
 });
 
@@ -115,4 +140,44 @@ function referenceCommittedState(): BlobCommitSnapshot {
     staged,
     referenceId: "ref-1",
   };
+}
+
+class InMemoryCommitStatePort implements BlobCommitStatePort {
+  private readonly tenants = new Map<string, Map<string, BlobCommitSnapshot>>();
+
+  async load(
+    scope: { readonly tenantId: string },
+    operationId: string,
+  ): Promise<BlobCommitSnapshot | undefined> {
+    return this.tenants.get(scope.tenantId)?.get(operationId);
+  }
+
+  async create(snapshot: BlobCommitSnapshot): Promise<void> {
+    const operations = this.tenants.get(snapshot.scope.tenantId) ?? new Map();
+    if (operations.has(snapshot.operationId)) {
+      throw new Error("联合唯一冲突");
+    }
+    operations.set(snapshot.operationId, snapshot);
+    this.tenants.set(snapshot.scope.tenantId, operations);
+  }
+
+  async compareAndSet(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly operationId: string;
+    readonly expectedVersion: number;
+    readonly next: BlobCommitSnapshot;
+  }): Promise<boolean> {
+    const operations = this.tenants.get(input.scope.tenantId);
+    const current = operations?.get(input.operationId);
+    if (
+      current === undefined ||
+      current.version !== input.expectedVersion ||
+      input.next.scope.tenantId !== input.scope.tenantId ||
+      input.next.operationId !== input.operationId
+    ) {
+      return false;
+    }
+    operations?.set(input.operationId, input.next);
+    return true;
+  }
 }

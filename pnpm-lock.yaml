@@ -18,6 +18,9 @@ importers:
         specifier: 1.1.38
         version: 1.1.38
     devDependencies:
+      '@aws-sdk/client-s3':
+        specifier: 3.1095.0
+        version: 3.1095.0
       '@biomejs/biome':
         specifier: 2.5.5
         version: 2.5.5

@@ -163,9 +163,9 @@ export class S3BlobStore implements BlobStore {
     assertBlobRef(scope, staged);
     assertPromotionAuthorizationRef(scope, authorizationRef);
     const attemptId = randomUUID();
-    let claim: PromotionExecutionClaimResolution;
+    let rawClaim: unknown;
     try {
-      claim = await this.authorizations.claimPromotionExecution({
+      rawClaim = await this.authorizations.claimPromotionExecution({
         scope,
         authorization: authorizationRef,
         attemptId,
@@ -175,6 +175,12 @@ export class S3BlobStore implements BlobStore {
         result: "unknown",
         cause: error,
       });
+    }
+    let claim: PromotionExecutionClaimResolution;
+    try {
+      claim = snapshotPromotionExecutionResolution(rawClaim);
+    } catch (error) {
+      throw promotionProtocolError("promotion execution claim 返回结构无效", error);
     }
     if (claim.status === "completed") {
       let completedAuthorization: StableBlobPromotionAuthorization;
@@ -211,7 +217,10 @@ export class S3BlobStore implements BlobStore {
           "unknown",
         ]);
       } catch (error) {
-        if (hasTrustedExecutionIdentity(scope, authorizationRef, reconcileExecution)) {
+        if (
+          reconcileExecution !== undefined &&
+          hasTrustedExecutionIdentity(scope, authorizationRef, reconcileExecution)
+        ) {
           await this.bestEffortPromotionReconcile(scope, reconcileExecution);
         }
         throw promotionProtocolError("reconcile execution 身份或固定 target 不连续", error);
@@ -225,16 +234,30 @@ export class S3BlobStore implements BlobStore {
       );
     }
     let execution = claim.execution;
-    assertExecutionClaim(scope, authorizationRef, execution, attemptId, ["claimed"]);
-    let resolution: PromotionAuthorizationResolution;
     try {
-      resolution = await this.authorizations.resolveAuthorizedForCopy({ scope, execution });
+      assertExecutionClaim(scope, authorizationRef, execution, attemptId, ["claimed"]);
+    } catch (error) {
+      if (hasTrustedExecutionIdentity(scope, authorizationRef, execution)) {
+        await this.bestEffortPromotionReconcile(scope, execution);
+      }
+      throw promotionProtocolError("copy_allowed execution 身份、target 或 phase 不连续", error);
+    }
+    let rawResolution: unknown;
+    try {
+      rawResolution = await this.authorizations.resolveAuthorizedForCopy({ scope, execution });
     } catch (error) {
       await this.completePromotionOutcome(scope, execution, "reconcile");
       throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "promotion 授权解析失败，已转入 reconcile", {
         result: "unknown",
         cause: error,
       });
+    }
+    let resolution: PromotionAuthorizationResolution;
+    try {
+      resolution = snapshotPromotionAuthorizationResolution(rawResolution);
+    } catch (error) {
+      await this.bestEffortPromotionReconcile(scope, execution);
+      throw promotionProtocolError("promotion 授权解析返回结构无效", error);
     }
     if (resolution.status !== "authorized") {
       await this.completePromotionOutcome(scope, execution, "reconcile");
@@ -304,16 +327,23 @@ export class S3BlobStore implements BlobStore {
       return stable;
     }
 
-    let issued: Awaited<
-      ReturnType<StableBlobPromotionAuthorizationPort["markPromotionCopyIssued"]>
-    >;
+    let rawIssued: unknown;
     try {
-      issued = await this.authorizations.markPromotionCopyIssued({ scope, execution });
+      rawIssued = await this.authorizations.markPromotionCopyIssued({ scope, execution });
     } catch (error) {
       throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "promotion COPY intent 结果未知", {
         result: "unknown",
         cause: error,
       });
+    }
+    let issued: Awaited<
+      ReturnType<StableBlobPromotionAuthorizationPort["markPromotionCopyIssued"]>
+    >;
+    try {
+      issued = snapshotMarkPromotionCopyIssuedResult(rawIssued);
+    } catch (error) {
+      await this.bestEffortPromotionReconcile(scope, execution);
+      throw promotionProtocolError("markPromotionCopyIssued 返回结构无效", error);
     }
     if (issued.status !== "marked") {
       throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "promotion execution claim 已失效", {
@@ -324,7 +354,7 @@ export class S3BlobStore implements BlobStore {
       assertExecutionContinuation(execution, issued.execution, "executing");
     } catch (error) {
       await this.bestEffortPromotionReconcile(scope, execution);
-      throw promotionResultUnknown("markPromotionCopyIssued 响应未保持 execution 连续", error);
+      throw promotionProtocolError("markPromotionCopyIssued 响应未保持 execution 连续", error);
     }
     execution = issued.execution;
 
@@ -549,15 +579,22 @@ export class S3BlobStore implements BlobStore {
     authorizationRef: PromotionAuthorizationRef,
     execution: PromotionExecutionClaim,
   ): Promise<StableBlobRef> {
-    let resolution: PromotionAuthorizationResolution;
+    let rawResolution: unknown;
     try {
-      resolution = await this.authorizations.resolveAuthorizedForCopy({ scope, execution });
+      rawResolution = await this.authorizations.resolveAuthorizedForCopy({ scope, execution });
     } catch (error) {
       await this.completePromotionOutcome(scope, execution, "reconcile");
       throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "reconcile 授权解析失败", {
         result: "unknown",
         cause: error,
       });
+    }
+    let resolution: PromotionAuthorizationResolution;
+    try {
+      resolution = snapshotPromotionAuthorizationResolution(rawResolution);
+    } catch (error) {
+      await this.bestEffortPromotionReconcile(scope, execution);
+      throw promotionProtocolError("reconcile 授权解析返回结构无效", error);
     }
     if (resolution.status !== "authorized") {
       await this.completePromotionOutcome(scope, execution, "reconcile");
@@ -1129,6 +1166,137 @@ function assertPromotionAuthorizationMatches(
   }
 }
 
+/**
+ * Persistence 返回值一律先按字段白名单快照成普通对象。这里禁止 spread/clone，
+ * 确保动态 getter 每个字段最多观察一次，后续校验和恢复不再接触端口原对象。
+ */
+function snapshotPromotionExecutionResolution(value: unknown): PromotionExecutionClaimResolution {
+  const record = snapshotRecord(value, "promotion execution resolution");
+  const status = record.status;
+  if (status === "copy_allowed" || status === "reconcile") {
+    const rawExecution = record.execution;
+    return { status, execution: snapshotPromotionExecution(rawExecution) };
+  }
+  if (status === "completed") {
+    const rawAuthorization = record.authorization;
+    return { status, authorization: snapshotPromotionAuthorization(rawAuthorization) };
+  }
+  if (
+    status === "not_started" ||
+    status === "wrong_operation" ||
+    status === "retired" ||
+    status === "consumed" ||
+    status === "inactive" ||
+    status === "not_found" ||
+    status === "in_progress"
+  ) {
+    return { status };
+  }
+  throw new TypeError("promotion execution resolution status 无效");
+}
+
+function snapshotPromotionAuthorizationResolution(
+  value: unknown,
+): PromotionAuthorizationResolution {
+  const record = snapshotRecord(value, "promotion authorization resolution");
+  const status = record.status;
+  if (status === "authorized") {
+    const rawAuthorization = record.authorization;
+    return { status, authorization: snapshotPromotionAuthorization(rawAuthorization) };
+  }
+  if (
+    status === "not_started" ||
+    status === "wrong_operation" ||
+    status === "retired" ||
+    status === "consumed" ||
+    status === "inactive" ||
+    status === "not_found"
+  ) {
+    return { status };
+  }
+  throw new TypeError("promotion authorization resolution status 无效");
+}
+
+function snapshotMarkPromotionCopyIssuedResult(
+  value: unknown,
+): Awaited<ReturnType<StableBlobPromotionAuthorizationPort["markPromotionCopyIssued"]>> {
+  const record = snapshotRecord(value, "markPromotionCopyIssued result");
+  const status = record.status;
+  if (status === "marked") {
+    const rawExecution = record.execution;
+    return { status, execution: snapshotPromotionExecution(rawExecution) };
+  }
+  if (status === "claim_lost") return { status };
+  throw new TypeError("markPromotionCopyIssued status 无效");
+}
+
+function snapshotPromotionExecution(value: unknown): PromotionExecutionClaim {
+  const record = snapshotRecord(value, "promotion execution");
+  const tenantId = record.tenantId;
+  const operationId = record.operationId;
+  const authorizationId = record.authorizationId;
+  const executionId = record.executionId;
+  const attemptId = record.attemptId;
+  const generation = record.generation;
+  const phase = record.phase;
+  const incarnationId = record.incarnationId;
+  const physicalObjectKey = record.physicalObjectKey;
+  return {
+    tenantId,
+    operationId,
+    authorizationId,
+    executionId,
+    attemptId,
+    generation,
+    phase,
+    incarnationId,
+    physicalObjectKey,
+  } as PromotionExecutionClaim;
+}
+
+function snapshotPromotionAuthorization(value: unknown): StableBlobPromotionAuthorization {
+  const record = snapshotRecord(value, "promotion authorization");
+  const tenantId = record.tenantId;
+  const purpose = record.purpose;
+  const sha256 = record.sha256;
+  const size = record.size;
+  const incarnationId = record.incarnationId;
+  const physicalObjectKey = record.physicalObjectKey;
+  const lifecycleId = record.lifecycleId;
+  const allocationId = record.allocationId;
+  const generation = record.generation;
+  const mode = record.mode;
+  const authorizationId = record.authorizationId;
+  const operationId = record.operationId;
+  const referenceId = record.referenceId;
+  const stagingUploadId = record.stagingUploadId;
+  const stagingObjectKey = record.stagingObjectKey;
+  return {
+    tenantId,
+    purpose,
+    sha256,
+    size,
+    incarnationId,
+    physicalObjectKey,
+    lifecycleId,
+    allocationId,
+    generation,
+    mode,
+    authorizationId,
+    operationId,
+    referenceId,
+    stagingUploadId,
+    stagingObjectKey,
+  } as StableBlobPromotionAuthorization;
+}
+
+function snapshotRecord(value: unknown, label: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null) {
+    throw new TypeError(`${label} 必须是对象`);
+  }
+  return value as Record<string, unknown>;
+}
+
 function assertExecutionClaim(
   scope: TenantBlobScope,
   authorization: PromotionAuthorizationRef,
@@ -1162,22 +1330,20 @@ function assertExecutionClaim(
 function hasTrustedExecutionIdentity(
   scope: TenantBlobScope,
   authorization: PromotionAuthorizationRef,
-  execution: unknown,
-): execution is PromotionExecutionClaim {
-  if (typeof execution !== "object" || execution === null) return false;
-  const candidate = execution as Partial<PromotionExecutionClaim>;
+  execution: PromotionExecutionClaim,
+): boolean {
   return (
-    candidate.tenantId === scope.tenantId &&
-    candidate.tenantId === authorization.tenantId &&
-    candidate.operationId === authorization.operationId &&
-    candidate.authorizationId === authorization.authorizationId &&
-    typeof candidate.executionId === "string" &&
-    UUID_V4_PATTERN.test(candidate.executionId) &&
-    typeof candidate.attemptId === "string" &&
-    UUID_V4_PATTERN.test(candidate.attemptId) &&
-    typeof candidate.generation === "number" &&
-    Number.isSafeInteger(candidate.generation) &&
-    candidate.generation >= 1
+    execution.tenantId === scope.tenantId &&
+    execution.tenantId === authorization.tenantId &&
+    execution.operationId === authorization.operationId &&
+    execution.authorizationId === authorization.authorizationId &&
+    typeof execution.executionId === "string" &&
+    UUID_V4_PATTERN.test(execution.executionId) &&
+    typeof execution.attemptId === "string" &&
+    UUID_V4_PATTERN.test(execution.attemptId) &&
+    typeof execution.generation === "number" &&
+    Number.isSafeInteger(execution.generation) &&
+    execution.generation >= 1
   );
 }
 

@@ -49,6 +49,8 @@ stable GC 的 `claimUnreachable` 必须在 PG 事务中检查零引用并写入 
 
 COPY 返回 UNKNOWN 时，commit snapshot 继续保持 `promotion_started` 与同一授权，execution 行保存 unknown/reconcile 及原 generation/attempt；不存在可被协调器解析成“未复制”的独立 UNKNOWN commit 状态。恢复只 HEAD 固定 destination：正确即 succeeded；NotFound、HEAD 异常或授权解析异常均保持同一授权与 unknown/reconcile，绝不能检查 source 后重发 COPY，也不能降为 not_copied。started/executing/unknown 存在时生命周期/GC 事务禁止退休该 incarnation。allocation mode 完全由可信 PG 生命周期事务依据全局永久历史决定；协调器不得由本 operation 是否见过 retired 反推 mode。
 
+Promotion Persistence 端口的 claim、authorization resolution 与 mark 返回值必须先经字段白名单快照：status 及每个 execution/authorization 字段只读取一次到普通对象，禁止 spread、structuredClone 或在分支/日志/恢复中再次观察端口原对象。动态 getter、字段缺失、格式或连续性异常统一为 `BLOB_INTEGRITY_MISMATCH(result=unknown)`，且只有已快照并验证的最小 execution identity 可以用于 best-effort reconcile。
+
 远端请求一旦签发就无法撤销。即使缓存的旧 COPY 在授权收敛并发布新 incarnation 后迟到，它也只能写入永不复用的 retired physical key，不能覆盖新对象。retired key 的 tombstone 永久保留，GC scrub 必须可重复删除该精确键，使迟到写入收敛为可恢复孤儿。
 
 来自调用参数的非法大小返回 `INVALID_BLOB_ARGUMENT`；来自 S3 HEAD metadata.size、GET ContentLength 或响应正文的超限属于存储响应完整性问题，返回 `BLOB_INTEGRITY_MISMATCH`。

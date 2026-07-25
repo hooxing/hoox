@@ -1,4 +1,10 @@
-import type { IsoTimestamp, Run, Workspace, WorkspaceRevisionId } from "@cube-runtime/domain";
+import type {
+  IsoTimestamp,
+  Run,
+  Sha256Digest,
+  Workspace,
+  WorkspaceRevisionId,
+} from "@cube-runtime/domain";
 import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type {
   AgentSessionFactoryPort,
@@ -19,6 +25,7 @@ import type {
   RuntimeMutation,
   RuntimeMutationResult,
   RuntimeOutboxV1,
+  RuntimeOutboxReceiptV1,
   SandboxSessionRef,
   SandboxSessionRegistryPort,
   StableWorkerErrorCode,
@@ -28,11 +35,13 @@ import type {
   WorkspaceRevisionVerifierPort,
 } from "./ports.js";
 import { assertProtocolSize } from "./ports.js";
+import { DurableOperationLane } from "./durable-operation-lane.js";
 import {
   digestCanonical,
   outboxPayloadDigest,
   rolloutProjectionDigest,
   runtimeMutationDigest,
+  sandboxCleanupIdentityDigest,
   workspaceChangeDigest,
 } from "./mutation-protocol.js";
 
@@ -84,6 +93,9 @@ interface ExecutionContext {
   actualCommittedStage: ExecutionStage;
   actualAttemptStatus: ExecutionAttemptStatus;
   projectionVersion: number;
+  readonly durableLane: DurableOperationLane;
+  readonly toolStartedGates: Map<string, ToolStartedGate>;
+  readonly cleanupFacts: Map<string, CleanupReceiptFacts>;
   stopped?: "cancelled" | "timeout" | "fence_lost" | "unavailable" | "scope_mismatch";
   agentFailure?: StableWorkerErrorCode;
   modelCompleted: boolean;
@@ -91,6 +103,18 @@ interface ExecutionContext {
   adapterRejected: boolean;
   abortPromise?: Promise<void>;
   abortSession?: () => Promise<void>;
+}
+
+interface ToolStartedGate {
+  readonly name: string;
+  readonly committed: Promise<void>;
+  resolve(): void;
+}
+
+interface CleanupReceiptFacts {
+  readonly armedAt: IsoTimestamp;
+  readonly identityDigest: Sha256Digest;
+  readonly disposition?: "pause" | "close";
 }
 
 type AppliedMutation = Extract<RuntimeMutationResult, { outcome: "applied" | "already_applied" }>;
@@ -134,6 +158,7 @@ export class RunWorker {
       }
       return { outcome: "ignored", reason: claim.outcome };
     }
+    const durableLane = new DurableOperationLane();
     if (
       !snapshotMatches(
         scope,
@@ -160,10 +185,12 @@ export class RunWorker {
         outbox: [rawAlertOutbox(claim.snapshot.attempt.attemptId, "PROTOCOL")],
         releaseFences: true,
       };
-      const released = await this.dependencies.persistence.mutate({
-        ...unsigned,
-        commandDigest: runtimeMutationDigest(unsigned),
-      });
+      const released = await durableLane.run(() =>
+        this.dependencies.persistence.mutate({
+          ...unsigned,
+          commandDigest: runtimeMutationDigest(unsigned),
+        }),
+      );
       return isApplied(released)
         ? { outcome: "ignored", reason: "scope_mismatch" }
         : { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" };
@@ -184,6 +211,9 @@ export class RunWorker {
       actualCommittedStage: claim.snapshot.attempt.stage,
       actualAttemptStatus: claim.snapshot.attempt.status,
       projectionVersion: claim.snapshot.attempt.projectionVersion,
+      durableLane,
+      toolStartedGates: new Map(),
+      cleanupFacts: new Map(),
       modelCompleted: false,
       eventAcceptanceOpen: true,
       adapterRejected: false,
@@ -219,24 +249,27 @@ export class RunWorker {
       if (heartbeatInFlight) return heartbeatInFlight;
       const task = (async () => {
         try {
-          const inspected = await this.dependencies.persistence.inspectAndRenew({
-            fence: context.fence,
-            leaseDurationMs: this.#leaseDurationMs,
+          await context.durableLane.run(async () => {
+            if (context.stopped) return;
+            const inspected = await this.dependencies.persistence.inspectAndRenew({
+              fence: context.fence,
+              leaseDurationMs: this.#leaseDurationMs,
+            });
+            if (inspected.outcome === "active" && inspectionMatches(context, inspected)) {
+              acceptInspection(context, inspected);
+              return;
+            }
+            context.stopped =
+              inspected.outcome === "active"
+                ? "scope_mismatch"
+                : inspected.outcome === "cancelled"
+                  ? "cancelled"
+                  : inspected.outcome;
           });
-          if (inspected.outcome === "active" && inspectionMatches(context, inspected)) {
-            acceptInspection(context, inspected);
-            return;
-          }
-          context.stopped =
-            inspected.outcome === "active"
-              ? "scope_mismatch"
-              : inspected.outcome === "cancelled"
-                ? "cancelled"
-                : inspected.outcome;
         } catch {
           context.stopped = "unavailable";
         }
-        await requestAbort().catch(() => undefined);
+        if (context.stopped) await requestAbort().catch(() => undefined);
       })();
       heartbeatInFlight = task;
       const clearHeartbeat = () => {
@@ -273,7 +306,7 @@ export class RunWorker {
             nextAttemptStatus: "running",
             nextStage: "cleanup_intent_persisted",
             events: [attemptEvent(context, "running", "cleanup_intent_persisted")],
-            outbox: [cleanupOutbox(context, sandbox, "pending", "close")],
+            outbox: [cleanupOutbox(context, sandbox, "pending")],
           });
           if (isApplied(intent)) return await this.finishStopped(context, postAcquire, sandbox);
           await this.bestEffortOrphanCleanup(scope, sandbox, intent.outcome);
@@ -298,7 +331,7 @@ export class RunWorker {
         nextAttemptStatus: "running",
         nextStage: "cleanup_intent_persisted",
         events: [attemptEvent(context, "running", "cleanup_intent_persisted")],
-        outbox: [cleanupOutbox(context, sandbox, "pending", "close")],
+        outbox: [cleanupOutbox(context, sandbox, "pending")],
       });
       if (!isApplied(intent)) {
         // intent 未被 receipt 证明提交，不能假设 Outbox 存在；registry 事实独立驱动孤儿清理。
@@ -313,7 +346,7 @@ export class RunWorker {
         sandbox: sandbox.sandbox,
         rolloutProjection: claim.snapshot.rolloutProjection,
         authorizeToolEffect: (call) =>
-          this.authorizeEffect(context, cancellation, "tool_execution", call),
+          this.authorizeToolEffectAfterStarted(context, cancellation, call),
       });
       context.abortSession = () => session?.abort().catch(() => undefined) ?? Promise.resolve();
       const postSession = await this.stopPoint(context, cancellation);
@@ -321,9 +354,14 @@ export class RunWorker {
 
       unsubscribe = session.subscribe((event) => {
         if (!context.eventAcceptanceOpen) return;
+        const toolStartedGate =
+          event.type === "tool.started" ? registerToolStarted(context, event) : undefined;
         eventChain = eventChain.then(async () => {
           // 协议拒绝或持久化失败会原子关闭入口；已排队事件只 drain。
-          if (!context.eventAcceptanceOpen) return;
+          if (!context.eventAcceptanceOpen) {
+            toolStartedGate?.resolve();
+            return;
+          }
           try {
             const encoded = agentEvent(context, event);
             const persisted = await this.applyMutation(context, {
@@ -347,6 +385,8 @@ export class RunWorker {
             context.agentFailure = "EVENT_REJECTED";
             closeEventAcceptance(context);
             await requestAbort();
+          } finally {
+            toolStartedGate?.resolve();
           }
         });
       });
@@ -501,8 +541,10 @@ export class RunWorker {
       cancellation.removeEventListener("abort", onCancel);
       closeEventAcceptance(context);
       // abort 完成后才允许取消订阅、释放 Session；cleanup 已由持久 Outbox/Saga 接管。
-      await Promise.allSettled([heartbeat.stop(), context.abortPromise ?? Promise.resolve()]);
+      await Promise.allSettled([heartbeat.stop()]);
       if (heartbeatInFlight) await Promise.allSettled([heartbeatInFlight]);
+      await context.durableLane.drain();
+      await Promise.allSettled([context.abortPromise ?? Promise.resolve()]);
       await Promise.allSettled([
         Promise.resolve().then(() => unsubscribe?.()),
         Promise.resolve().then(() => session?.dispose()),
@@ -514,48 +556,82 @@ export class RunWorker {
     context: ExecutionContext,
     cancellation: AbortSignal,
   ): Promise<ExecutionContext["stopped"]> {
-    if (cancellation.aborted) context.stopped = "cancelled";
-    if (context.stopped) return context.stopped;
-    try {
-      const inspected = await this.dependencies.persistence.inspectAndRenew({
-        fence: context.fence,
-        leaseDurationMs: this.#leaseDurationMs,
-      });
-      if (inspected.outcome === "active") {
-        if (!inspectionMatches(context, inspected)) {
-          context.stopped = "scope_mismatch";
+    return await context.durableLane.run(async () => {
+      if (cancellation.aborted) context.stopped = "cancelled";
+      if (context.stopped) return context.stopped;
+      try {
+        const inspected = await this.dependencies.persistence.inspectAndRenew({
+          fence: context.fence,
+          leaseDurationMs: this.#leaseDurationMs,
+        });
+        if (inspected.outcome === "active") {
+          if (!inspectionMatches(context, inspected)) {
+            context.stopped = "scope_mismatch";
+            return context.stopped;
+          }
+          acceptInspection(context, inspected);
+          if (cancellation.aborted) context.stopped = "cancelled";
           return context.stopped;
         }
-        acceptInspection(context, inspected);
-        if (cancellation.aborted) context.stopped = "cancelled";
-        return context.stopped;
+        context.stopped = inspected.outcome === "cancelled" ? "cancelled" : inspected.outcome;
+      } catch {
+        context.stopped = "unavailable";
       }
-      context.stopped = inspected.outcome === "cancelled" ? "cancelled" : inspected.outcome;
-    } catch {
-      context.stopped = "unavailable";
-    }
-    return context.stopped;
+      return context.stopped;
+    });
   }
 
   /** 清理状态推进忽略业务取消，但仍严格校验双栅栏与 scope/head checkpoint。 */
   private async fencePoint(
     context: ExecutionContext,
   ): Promise<"fence_lost" | "unavailable" | "scope_mismatch" | undefined> {
-    try {
-      const inspected = await this.dependencies.persistence.inspectAndRenew({
-        fence: context.fence,
-        leaseDurationMs: this.#leaseDurationMs,
-      });
-      if (inspected.outcome === "active") {
-        if (!inspectionMatches(context, inspected)) return "scope_mismatch";
-        acceptInspection(context, inspected);
-        return undefined;
+    return await context.durableLane.run(async () => {
+      if (
+        context.stopped === "fence_lost" ||
+        context.stopped === "unavailable" ||
+        context.stopped === "scope_mismatch"
+      ) {
+        return context.stopped;
       }
-      if (inspected.outcome === "cancelled") return undefined;
-      return inspected.outcome;
-    } catch {
-      return "unavailable";
+      try {
+        const inspected = await this.dependencies.persistence.inspectAndRenew({
+          fence: context.fence,
+          leaseDurationMs: this.#leaseDurationMs,
+        });
+        if (inspected.outcome === "active") {
+          if (!inspectionMatches(context, inspected)) return "scope_mismatch";
+          acceptInspection(context, inspected);
+          return undefined;
+        }
+        if (inspected.outcome === "cancelled") return undefined;
+        return inspected.outcome;
+      } catch {
+        return "unavailable";
+      }
+    });
+  }
+
+  /** Pi 必须先发布并持久化同一 callId 的 tool.started，之后才允许领取工具许可。 */
+  private async authorizeToolEffectAfterStarted(
+    context: ExecutionContext,
+    cancellation: AbortSignal,
+    call: ExternalEffectCall,
+  ): Promise<ConsumedExternalEffectAuthorization> {
+    const gate = context.toolStartedGates.get(call.callId);
+    if (gate === undefined || gate.name !== call.toolName) {
+      context.adapterRejected = true;
+      context.agentFailure = "PROTOCOL";
+      closeEventAcceptance(context);
+      if (!context.abortPromise)
+        context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+      throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     }
+    await gate.committed;
+    context.toolStartedGates.delete(call.callId);
+    if (context.adapterRejected || !context.eventAcceptanceOpen) {
+      throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+    }
+    return await this.authorizeEffect(context, cancellation, "tool_execution", call);
   }
 
   private async authorizeEffect(
@@ -566,71 +642,88 @@ export class RunWorker {
   ): Promise<ConsumedExternalEffectAuthorization> {
     if (cancellation.aborted) context.stopped = "cancelled";
     if (context.stopped) throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
-    const monotonicStarted = performance.now();
-    let result: Awaited<ReturnType<ExecutionPersistencePort["issueExternalEffectPermit"]>>;
-    try {
-      result = await this.dependencies.persistence.issueExternalEffectPermit({
-        fence: context.fence,
-        expectedAttemptVersion: context.attemptVersion,
-        effect,
-        call,
-        permitDurationMs: this.#externalEffectPermitMs,
-      });
-    } catch {
-      result = { outcome: "unavailable" };
-    }
-    if (result.outcome !== "authorized" || !permitMatches(context, result.permit, effect, call)) {
-      context.stopped =
-        result.outcome === "authorized" || result.outcome === "scope_mismatch"
-          ? "scope_mismatch"
-          : result.outcome === "cancelled"
+    const authorization = await context.durableLane.run(async () => {
+      if (cancellation.aborted) context.stopped = "cancelled";
+      if (context.stopped) throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+      const monotonicStarted = performance.now();
+      let result: Awaited<ReturnType<ExecutionPersistencePort["issueExternalEffectPermit"]>>;
+      try {
+        result = await this.dependencies.persistence.issueExternalEffectPermit({
+          fence: context.fence,
+          expectedAttemptVersion: context.attemptVersion,
+          effect,
+          call,
+          permitDurationMs: this.#externalEffectPermitMs,
+        });
+      } catch {
+        result = { outcome: "unavailable" };
+      }
+      if (result.outcome !== "authorized" || !permitMatches(context, result.permit, effect, call)) {
+        context.stopped =
+          result.outcome === "authorized" || result.outcome === "scope_mismatch"
+            ? "scope_mismatch"
+            : result.outcome === "cancelled"
+              ? "cancelled"
+              : result.outcome === "conflict" || result.outcome === "fence_lost"
+                ? "fence_lost"
+                : "unavailable";
+        closeEventAcceptance(context);
+        if (!context.abortPromise)
+          context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+        throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+      }
+      if (cancellation.aborted) {
+        context.stopped = "cancelled";
+        closeEventAcceptance(context);
+        if (!context.abortPromise)
+          context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+        throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+      }
+      let consumed: Awaited<ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]>>;
+      try {
+        // issue 与 consume 位于同一 lane 回调，中间不允许 event/heartbeat mutation 插入。
+        consumed = await this.dependencies.persistence.consumeExternalEffectPermit({
+          fence: context.fence,
+          expectedAttemptVersion: context.attemptVersion,
+          permit: result.permit,
+        });
+      } catch {
+        consumed = { outcome: "unavailable" };
+      }
+      const consumedAtMonotonicMs = performance.now();
+      if (
+        consumed.outcome !== "consumed" ||
+        cancellation.aborted ||
+        consumedAtMonotonicMs - monotonicStarted >= this.#externalEffectPermitMs
+      ) {
+        context.stopped =
+          cancellation.aborted || consumed.outcome === "cancelled"
             ? "cancelled"
-            : result.outcome === "conflict" || result.outcome === "fence_lost"
-              ? "fence_lost"
-              : "unavailable";
-      closeEventAcceptance(context);
-      if (!context.abortPromise)
-        context.abortPromise = context.abortSession?.() ?? Promise.resolve();
-      throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
-    }
-    let consumed: Awaited<ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]>>;
-    try {
-      consumed = await this.dependencies.persistence.consumeExternalEffectPermit({
-        fence: context.fence,
-        expectedAttemptVersion: context.attemptVersion,
+            : consumed.outcome === "unavailable"
+              ? "unavailable"
+              : consumed.outcome === "scope_mismatch"
+                ? "scope_mismatch"
+                : "fence_lost";
+        closeEventAcceptance(context);
+        if (!context.abortPromise)
+          context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+        throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+      }
+      return {
         permit: result.permit,
-      });
-    } catch {
-      consumed = { outcome: "unavailable" };
-    }
-    const consumedAtMonotonicMs = performance.now();
-    if (
-      consumed.outcome !== "consumed" ||
-      cancellation.aborted ||
-      consumedAtMonotonicMs - monotonicStarted >= this.#externalEffectPermitMs
-    ) {
-      context.stopped =
-        cancellation.aborted || consumed.outcome === "cancelled"
-          ? "cancelled"
-          : consumed.outcome === "unavailable"
-            ? "unavailable"
-            : consumed.outcome === "scope_mismatch"
-              ? "scope_mismatch"
-              : "fence_lost";
-      closeEventAcceptance(context);
-      if (!context.abortPromise)
-        context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+        consumedAt: consumed.databaseNow,
+        consumedAtMonotonicMs,
+        maxContinuationDelayMs: Math.max(
+          1,
+          Math.min(250, Math.floor(this.#externalEffectPermitMs / 4)),
+        ),
+      };
+    });
+    if (cancellation.aborted) {
+      context.stopped = "cancelled";
       throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     }
-    return {
-      permit: result.permit,
-      consumedAt: consumed.databaseNow,
-      consumedAtMonotonicMs,
-      maxContinuationDelayMs: Math.max(
-        1,
-        Math.min(250, Math.floor(this.#externalEffectPermitMs / 4)),
-      ),
-    };
+    return authorization;
   }
 
   private async applyMutation(
@@ -646,45 +739,48 @@ export class RunWorker {
   ): Promise<RuntimeMutationResult> {
     for (const event of input.events) assertProtocolSize(event);
     for (const outbox of input.outbox) assertProtocolSize(outbox);
-    const unsigned: Omit<RuntimeMutation, "commandDigest"> = {
-      schemaVersion: 1,
-      ...input,
-      fence: context.fence,
-      expectedAttemptVersion: context.attemptVersion,
-      ...(input.rolloutProjection === undefined
-        ? {}
-        : { expectedProjectionVersion: context.projectionVersion }),
-    };
-    const command: RuntimeMutation = {
-      ...unsigned,
-      commandDigest: runtimeMutationDigest(unsigned),
-    };
-    let result = await this.dependencies.persistence.mutate(command);
-    if (result.outcome === "response_unknown") {
-      // readback 必须使用原始完整 scope；Revision head 推进不能放宽查询。
-      const recovered = await this.dependencies.persistence.readMutation({
-        scope: context.scope,
-        idempotencyKey: input.idempotencyKey,
-      });
-      // not_found 不能证明事务未提交，保留 response_unknown 供孤儿清理和恢复指标分类。
-      if (recovered.outcome === "not_found") return { outcome: "response_unknown" };
-      result = recovered;
-    }
-    if (isApplied(result)) {
-      if (!receiptMatches(context, result, command)) return { outcome: "idempotency_conflict" };
-      if (!appliedSnapshotMatches(context, result, input)) return { outcome: "scope_mismatch" };
-      context.attemptVersion = result.attemptVersion;
-      context.nextEventSequence = result.nextEventSequence;
-      context.databaseNow = result.databaseNow;
-      context.run = result.run;
-      context.workspace = result.workspace;
-      context.actualCommittedStage = result.attempt.stage;
-      context.actualAttemptStatus = result.attempt.status;
-      context.projectionVersion = result.attempt.projectionVersion;
-      if (result.attempt.currentRevisionId === undefined) delete context.currentRevisionId;
-      else context.currentRevisionId = result.attempt.currentRevisionId;
-    }
-    return result;
+    return await context.durableLane.run(async () => {
+      const unsigned: Omit<RuntimeMutation, "commandDigest"> = {
+        schemaVersion: 1,
+        ...input,
+        fence: context.fence,
+        expectedAttemptVersion: context.attemptVersion,
+        ...(input.rolloutProjection === undefined
+          ? {}
+          : { expectedProjectionVersion: context.projectionVersion }),
+      };
+      const command: RuntimeMutation = {
+        ...unsigned,
+        commandDigest: runtimeMutationDigest(unsigned),
+      };
+      let result = await this.dependencies.persistence.mutate(command);
+      if (result.outcome === "response_unknown") {
+        // readback 必须使用原始完整 scope；Revision head 推进不能放宽查询。
+        const recovered = await this.dependencies.persistence.readMutation({
+          scope: context.scope,
+          idempotencyKey: input.idempotencyKey,
+        });
+        // not_found 不能证明事务未提交，保留 response_unknown 供孤儿清理和恢复指标分类。
+        if (recovered.outcome === "not_found") return { outcome: "response_unknown" };
+        result = recovered;
+      }
+      if (isApplied(result)) {
+        if (!receiptMatches(context, result, command)) return { outcome: "idempotency_conflict" };
+        if (!appliedSnapshotMatches(context, result, input)) return { outcome: "scope_mismatch" };
+        context.attemptVersion = result.attemptVersion;
+        context.nextEventSequence = result.nextEventSequence;
+        context.databaseNow = result.databaseNow;
+        context.run = result.run;
+        context.workspace = result.workspace;
+        context.actualCommittedStage = result.attempt.stage;
+        context.actualAttemptStatus = result.attempt.status;
+        context.projectionVersion = result.attempt.projectionVersion;
+        acceptOutboxReceipts(context, result.receipt.outbox);
+        if (result.attempt.currentRevisionId === undefined) delete context.currentRevisionId;
+        else context.currentRevisionId = result.attempt.currentRevisionId;
+      }
+      return result;
+    });
   }
 
   private async settleSandbox(
@@ -952,19 +1048,21 @@ function cleanupOutbox(
   context: ExecutionContext,
   sandbox: SandboxSessionRef,
   state: "pending" | "started" | "completed",
-  disposition: "pause" | "close",
+  disposition?: "pause" | "close",
 ): RuntimeOutboxV1 {
   const base = {
     schemaVersion: 1,
     kind: "sandbox_cleanup",
     idempotencyKey: cleanupIntentKey(context, sandbox),
+    armed: true,
     payload: {
       registryId: sandbox.registryId,
       providerSandboxId: sandbox.providerSandboxId,
-      disposition,
     },
   } as const;
-  return state === "pending" ? { ...base, state, armed: true } : { ...base, state };
+  if (state === "pending") return { ...base, state };
+  if (disposition === undefined) throw new Error("started 后必须一次性决定 cleanup disposition");
+  return { ...base, state, payload: { ...base.payload, disposition } };
 }
 
 function cleanupIntentKey(context: ExecutionContext, sandbox: SandboxSessionRef): string {
@@ -982,16 +1080,29 @@ function cleanupUnknownOutbox(
   sandbox?: SandboxSessionRef,
   disposition: "pause" | "close" = "close",
 ): RuntimeOutboxV1 {
+  if (sandbox === undefined) {
+    return {
+      schemaVersion: 1,
+      kind: "sandbox_lifecycle_unknown",
+      idempotencyKey: `${context.attemptId}/sandbox/unknown/${event.requestId}`,
+      state: "unknown",
+      payload: {
+        registryId: `acquire:${event.requestId}`,
+        providerSandboxId: event.sandboxId ?? "unknown",
+        uncertainEvent: event,
+        retryCode: "SANDBOX_UNKNOWN",
+      },
+    };
+  }
   return {
     schemaVersion: 1,
     kind: "sandbox_cleanup",
-    idempotencyKey: sandbox
-      ? cleanupIntentKey(context, sandbox)
-      : `${context.attemptId}/sandbox/unknown/${event.requestId}`,
+    idempotencyKey: cleanupIntentKey(context, sandbox),
     state: "unknown",
+    armed: true,
     payload: {
-      registryId: sandbox?.registryId ?? `acquire:${event.requestId}`,
-      providerSandboxId: sandbox?.providerSandboxId ?? event.sandboxId ?? "unknown",
+      registryId: sandbox.registryId,
+      providerSandboxId: sandbox.providerSandboxId,
       disposition,
       uncertainEvent: event,
       retryCode: "SANDBOX_UNKNOWN",
@@ -1068,6 +1179,27 @@ function updateAgentState(context: ExecutionContext, event: RuntimeAgentEvent): 
     context.agentFailure = event.code === "ABORTED" ? "CANCELLED" : event.code;
   }
   if (event.type === "compaction.forbidden") context.agentFailure = "PROTOCOL";
+}
+
+function registerToolStarted(
+  context: ExecutionContext,
+  event: Extract<RuntimeAgentEvent, { type: "tool.started" }>,
+): ToolStartedGate {
+  const existing = context.toolStartedGates.get(event.callId);
+  if (existing !== undefined) {
+    context.adapterRejected = true;
+    context.agentFailure = "PROTOCOL";
+    closeEventAcceptance(context);
+    existing.resolve();
+    return existing;
+  }
+  let resolve: () => void = () => undefined;
+  const committed = new Promise<void>((done) => {
+    resolve = done;
+  });
+  const gate = { name: event.name, committed, resolve };
+  context.toolStartedGates.set(event.callId, gate);
+  return gate;
 }
 
 function closeEventAcceptance(context: ExecutionContext): void {
@@ -1204,11 +1336,31 @@ function receiptMatches(
     receipt.outbox.length === command.outbox.length &&
     receipt.outbox.every((item, index) => {
       const expected = command.outbox[index];
+      if (
+        expected === undefined ||
+        item.kind !== expected.kind ||
+        item.idempotencyKey !== expected.idempotencyKey ||
+        item.state !== expected.state
+      ) {
+        return false;
+      }
+      if (expected.kind !== "sandbox_cleanup") {
+        return item.payloadDigest === outboxPayloadDigest(expected);
+      }
+      if (item.kind !== "sandbox_cleanup") return false;
+      const previous = context.cleanupFacts.get(expected.idempotencyKey);
+      const expectedArmedAt = previous?.armedAt ?? result.databaseNow;
+      const expectedDisposition =
+        "disposition" in expected.payload ? expected.payload.disposition : undefined;
       return (
-        expected !== undefined &&
-        item.idempotencyKey === expected.idempotencyKey &&
-        item.state === expected.state &&
-        item.payloadDigest === outboxPayloadDigest(expected)
+        item.armed === true &&
+        item.armedAt === expectedArmedAt &&
+        item.identity.registryId === expected.payload.registryId &&
+        item.identity.providerSandboxId === expected.payload.providerSandboxId &&
+        item.identityDigest === sandboxCleanupIdentityDigest(expected) &&
+        item.identityDigest === (previous?.identityDigest ?? item.identityDigest) &&
+        item.disposition === expectedDisposition &&
+        item.payloadDigest === outboxPayloadDigest(expected, expectedArmedAt)
       );
     });
   const projectionMatches =
@@ -1239,6 +1391,20 @@ function receiptMatches(
     projectionMatches &&
     workspaceMatches
   );
+}
+
+function acceptOutboxReceipts(
+  context: ExecutionContext,
+  receipts: readonly RuntimeOutboxReceiptV1[],
+): void {
+  for (const receipt of receipts) {
+    if (receipt.kind !== "sandbox_cleanup") continue;
+    context.cleanupFacts.set(receipt.idempotencyKey, {
+      armedAt: receipt.armedAt,
+      identityDigest: receipt.identityDigest,
+      ...(receipt.disposition === undefined ? {} : { disposition: receipt.disposition }),
+    });
+  }
 }
 
 function permitMatches(

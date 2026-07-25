@@ -7,6 +7,7 @@ import {
   outboxPayloadDigest,
   rolloutProjectionDigest,
   runtimeMutationDigest,
+  sandboxCleanupIdentityDigest,
   workspaceChangeDigest,
 } from "./mutation-protocol.js";
 import { RunWorker } from "./run-worker.js";
@@ -94,18 +95,40 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       mutations.indexOf("attempt-1/stage/model-execution-started"),
     );
     const intent = record.mutations.get("attempt-1/sandbox/cleanup-intent");
-    expect(intent?.receipt.outbox[0]?.payloadDigest).toBe(
-      outboxPayloadDigest({
+    const intentReceipt = intent?.receipt.outbox[0];
+    expect(intentReceipt).toMatchObject({
+      kind: "sandbox_cleanup",
+      state: "pending",
+      armed: true,
+      identity: { registryId: "registry-test", providerSandboxId: "worker-fake" },
+    });
+    expect(intentReceipt === undefined ? true : "disposition" in intentReceipt).toBe(false);
+    expect(intentReceipt?.payloadDigest).toBe(
+      outboxPayloadDigest(
+        {
+          schemaVersion: 1,
+          kind: "sandbox_cleanup",
+          idempotencyKey: "attempt-1/sandbox/registry-test/cleanup",
+          state: "pending",
+          armed: true,
+          payload: {
+            registryId: "registry-test",
+            providerSandboxId: "worker-fake",
+          },
+        },
+        intentReceipt?.kind === "sandbox_cleanup" ? intentReceipt.armedAt : undefined,
+      ),
+    );
+    expect(
+      intentReceipt?.kind === "sandbox_cleanup" ? intentReceipt.identityDigest : undefined,
+    ).toBe(
+      sandboxCleanupIdentityDigest({
         schemaVersion: 1,
         kind: "sandbox_cleanup",
         idempotencyKey: "attempt-1/sandbox/registry-test/cleanup",
         state: "pending",
         armed: true,
-        payload: {
-          registryId: "registry-test",
-          providerSandboxId: "worker-fake",
-          disposition: "close",
-        },
+        payload: { registryId: "registry-test", providerSandboxId: "worker-fake" },
       }),
     );
     const final = record.mutations.get("attempt-1/final/succeeded");
@@ -340,6 +363,11 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     });
 
     h.persistence.rejectNextPermit = true;
+    session.emit({
+      type: "tool.started",
+      callId: "tool-call-test",
+      name: "sandbox_write_file",
+    });
     await expect(
       h.factory.toolAuthorizers[0]?.({
         callId: "tool-call-test",
@@ -349,6 +377,136 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     ).rejects.toThrow("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     await expect(execution).resolves.toEqual({ outcome: "fence_lost" });
     expect(session.abortCount).toBeGreaterThan(0);
+  });
+
+  it("tool.started 与后续事件、许可共用单 lane，issue/consume 之间不会插入 mutation", async () => {
+    const session = new BlockingAgentSession();
+    const h = harness([session]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.toolAuthorizers.length === 1);
+    const call = {
+      callId: "tool-call-lane",
+      toolName: "sandbox_write_file",
+      argsDigest: sha256Digest("c".repeat(64)),
+    };
+    session.emit({ type: "tool.started", callId: call.callId, name: call.toolName });
+    h.persistence.beforePermitIssueReturn = (input) => {
+      if (input.call.callId === call.callId) {
+        session.emit({ type: "message.delta", delta: "许可间事件" });
+      }
+    };
+
+    await expect(h.factory.toolAuthorizers[0]?.(call)).resolves.toMatchObject({
+      permit: { callId: call.callId, attemptVersion: expect.any(Number) },
+    });
+    await eventually(() =>
+      h.persistence
+        .record(h.scope)
+        .events.some(
+          (event) => event.kind === "agent_event" && event.payload.type === "message.delta",
+        ),
+    );
+    const operations = h.persistence.durableOperations;
+    const startedEvent = h.persistence
+      .record(h.scope)
+      .events.find(
+        (event) => event.kind === "agent_event" && event.payload.type === "tool.started",
+      );
+    const deltaEvent = h.persistence
+      .record(h.scope)
+      .events.find(
+        (event) => event.kind === "agent_event" && event.payload.type === "message.delta",
+      );
+    if (startedEvent === undefined || deltaEvent === undefined) throw new Error("测试事件不存在");
+    const startedIndex = operations.indexOf(`mutate:attempt-1/event/${startedEvent.sequence}`);
+    const issueIndex = operations.indexOf(`permit:issue:${call.callId}`);
+    const consumeIndex = operations.indexOf(`permit:consume:${call.callId}`);
+    const deltaIndex = operations.indexOf(`mutate:attempt-1/event/${deltaEvent.sequence}`);
+    expect(startedIndex).toBeLessThan(issueIndex);
+    expect(issueIndex).toBeLessThan(consumeIndex);
+    expect(consumeIndex).toBeLessThan(deltaIndex);
+
+    h.cancellation.cancel(h.scope);
+    await expect(execution).resolves.toEqual({ outcome: "cancelled" });
+  });
+
+  it("取消在已排队 tool.started 后优先阻止许可，不签发也不消费", async () => {
+    const session = new BlockingAgentSession();
+    const h = harness([session]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.toolAuthorizers.length === 1);
+    const call = {
+      callId: "tool-call-cancel-priority",
+      toolName: "sandbox_write_file",
+      argsDigest: sha256Digest("d".repeat(64)),
+    };
+    session.emit({ type: "tool.started", callId: call.callId, name: call.toolName });
+    h.cancellation.cancel(h.scope);
+
+    await expect(h.factory.toolAuthorizers[0]?.(call)).rejects.toThrow(
+      "EXTERNAL_EFFECT_NOT_AUTHORIZED",
+    );
+    await expect(execution).resolves.toEqual({ outcome: "cancelled" });
+    expect(
+      h.persistence.durableOperations.some((item) => item === `permit:issue:${call.callId}`),
+    ).toBe(false);
+    expect(
+      h.persistence.durableOperations.some((item) => item === `permit:consume:${call.callId}`),
+    ).toBe(false);
+  });
+
+  it("issue 返回前发生取消时，同一 lane 在 consume 前重新检查并拒绝", async () => {
+    const session = new BlockingAgentSession();
+    const h = harness([session]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.toolAuthorizers.length === 1);
+    const call = {
+      callId: "tool-call-cancel-after-issue",
+      toolName: "sandbox_write_file",
+      argsDigest: sha256Digest("f".repeat(64)),
+    };
+    session.emit({ type: "tool.started", callId: call.callId, name: call.toolName });
+    h.persistence.beforePermitIssueReturn = (input) => {
+      if (input.call.callId === call.callId) h.cancellation.cancel(h.scope);
+    };
+
+    await expect(h.factory.toolAuthorizers[0]?.(call)).rejects.toThrow(
+      "EXTERNAL_EFFECT_NOT_AUTHORIZED",
+    );
+    await expect(execution).resolves.toEqual({ outcome: "cancelled" });
+    expect(h.persistence.durableOperations).toContain(`permit:issue:${call.callId}`);
+    expect(h.persistence.durableOperations).not.toContain(`permit:consume:${call.callId}`);
+  });
+
+  it("lease 检查先入 lane 时优先于后续工具许可，旧 Worker 不消费许可", async () => {
+    const session = new BlockingAgentSession();
+    const h = harness([session]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.toolAuthorizers.length === 1);
+    const call = {
+      callId: "tool-call-lease-priority",
+      toolName: "sandbox_write_file",
+      argsDigest: sha256Digest("e".repeat(64)),
+    };
+    session.emit({ type: "tool.started", callId: call.callId, name: call.toolName });
+    await eventually(() =>
+      h.persistence
+        .record(h.scope)
+        .events.some(
+          (event) => event.kind === "agent_event" && event.payload.type === "tool.started",
+        ),
+    );
+    h.persistence.forceFenceLost = true;
+    const heartbeat = h.clock.tickHeartbeat();
+
+    await expect(h.factory.toolAuthorizers[0]?.(call)).rejects.toThrow(
+      "EXTERNAL_EFFECT_NOT_AUTHORIZED",
+    );
+    await heartbeat;
+    await expect(execution).resolves.toEqual({ outcome: "fence_lost" });
+    expect(
+      h.persistence.durableOperations.some((item) => item === `permit:consume:${call.callId}`),
+    ).toBe(false);
   });
 
   it("settle 抛异常时保留 started cleanup checkpoint，禁止回退 pending", async () => {
@@ -400,6 +558,10 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(record.attempt?.status).toBe("recovery_required");
     expect(record.attempt?.stage).toBe("claimed");
     expect(h.factory.createCount).toBe(0);
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({ kind: "sandbox_lifecycle_unknown", state: "unknown" }),
+    );
+    expect(record.outbox.some((item) => item.kind === "sandbox_cleanup")).toBe(false);
   });
 
   it("settle 调用前 started 事务失败，不调用外部 settle，也不写业务终态", async () => {
@@ -931,7 +1093,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.persistence.revisionCreatedAt).toEqual(["2026-07-26T00:00:01.234Z"]);
   });
 
-  it("cleanup Outbox 严格单调，started 不能回退 pending", async () => {
+  it("cleanup armed 永久不可逆，pending 不含处置，started 一次决定后不可更换", async () => {
     const h = harness([]);
     const claimed = await h.persistence.claim({
       scope: h.scope,
@@ -943,10 +1105,10 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       schemaVersion: 1 as const,
       kind: "sandbox_cleanup" as const,
       idempotencyKey: "cleanup-monotonic",
+      armed: true as const,
       payload: {
         registryId: "registry-test",
         providerSandboxId: "sandbox-test",
-        disposition: "close" as const,
       },
     };
     const pending = await h.persistence.mutate(
@@ -955,7 +1117,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         fence: claimed.fence,
         expectedAttemptVersion: 0,
         events: [],
-        outbox: [{ ...base, state: "pending", armed: true }],
+        outbox: [{ ...base, state: "pending" }],
       }),
     );
     expect(pending.outcome).toBe("applied");
@@ -973,6 +1135,40 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(
       h.persistence.mutate(
         signedMutation({
+          idempotencyKey: "mutation-forged-armed-at",
+          fence: claimed.fence,
+          expectedAttemptVersion: 1,
+          events: [],
+          outbox: [
+            {
+              ...base,
+              state: "pending",
+              armedAt: "2020-01-01T00:00:00.000Z",
+            } as never,
+          ],
+        }),
+      ),
+    ).resolves.toEqual({ outcome: "conflict" });
+    await expect(
+      h.persistence.mutate(
+        signedMutation({
+          idempotencyKey: "mutation-pending-with-disposition",
+          fence: claimed.fence,
+          expectedAttemptVersion: 1,
+          events: [],
+          outbox: [
+            {
+              ...base,
+              state: "pending",
+              payload: { ...base.payload, disposition: "close" },
+            } as never,
+          ],
+        }),
+      ),
+    ).resolves.toEqual({ outcome: "conflict" });
+    await expect(
+      h.persistence.mutate(
+        signedMutation({
           idempotencyKey: "mutation-changed-identity",
           fence: claimed.fence,
           expectedAttemptVersion: 1,
@@ -981,22 +1177,81 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
             {
               ...base,
               state: "started",
-              payload: { ...base.payload, providerSandboxId: "sandbox-forged" },
+              payload: {
+                ...base.payload,
+                providerSandboxId: "sandbox-forged",
+                disposition: "close",
+              },
             },
           ],
         }),
       ),
     ).resolves.toEqual({ outcome: "conflict" });
+    h.persistence.advanceDatabase(1_000);
     const started = await h.persistence.mutate(
       signedMutation({
         idempotencyKey: "mutation-started",
         fence: claimed.fence,
         expectedAttemptVersion: 1,
         events: [],
-        outbox: [{ ...base, state: "started" }],
+        outbox: [{ ...base, state: "started", payload: { ...base.payload, disposition: "close" } }],
       }),
     );
     expect(started.outcome).toBe("applied");
+    if (pending.outcome !== "applied" || started.outcome !== "applied") {
+      throw new Error("cleanup 测试 mutation 失败");
+    }
+    expect(started.receipt.outbox[0]).toMatchObject({
+      armed: true,
+      armedAt:
+        pending.receipt.outbox[0]?.kind === "sandbox_cleanup"
+          ? pending.receipt.outbox[0].armedAt
+          : undefined,
+      disposition: "close",
+    });
+    const startedReceipt = started.receipt.outbox[0];
+    if (startedReceipt?.kind !== "sandbox_cleanup") throw new Error("started receipt 缺失");
+    expect(startedReceipt.payloadDigest).toBe(
+      outboxPayloadDigest(
+        {
+          ...base,
+          state: "started",
+          payload: { ...base.payload, disposition: "close" },
+        },
+        startedReceipt.armedAt,
+      ),
+    );
+    await expect(
+      h.persistence.mutate(
+        signedMutation({
+          idempotencyKey: "mutation-change-disposition",
+          fence: claimed.fence,
+          expectedAttemptVersion: 2,
+          events: [],
+          outbox: [
+            { ...base, state: "started", payload: { ...base.payload, disposition: "pause" } },
+          ],
+        }),
+      ),
+    ).resolves.toEqual({ outcome: "conflict" });
+    await expect(
+      h.persistence.mutate(
+        signedMutation({
+          idempotencyKey: "mutation-disarm-started",
+          fence: claimed.fence,
+          expectedAttemptVersion: 2,
+          events: [],
+          outbox: [
+            {
+              ...base,
+              armed: false as true,
+              state: "started",
+              payload: { ...base.payload, disposition: "close" },
+            },
+          ],
+        }),
+      ),
+    ).resolves.toEqual({ outcome: "conflict" });
     await expect(
       h.persistence.mutate(
         signedMutation({
@@ -1004,7 +1259,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
           fence: claimed.fence,
           expectedAttemptVersion: 2,
           events: [],
-          outbox: [{ ...base, state: "pending", armed: true }],
+          outbox: [{ ...base, state: "pending" }],
         }),
       ),
     ).resolves.toEqual({ outcome: "conflict" });

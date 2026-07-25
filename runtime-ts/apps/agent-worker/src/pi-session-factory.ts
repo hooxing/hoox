@@ -18,13 +18,31 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
   async create(
     input: Parameters<AgentSessionFactoryPort["create"]>[0],
   ): Promise<WorkerAgentSessionPort> {
+    const startedToolCalls = new Map<string, string>();
+    const invalidToolCalls = new Set<string>();
     const controller = await createSafePiSession({
       model: this.model,
       modelRuntime: this.modelRuntime,
       sandbox: input.sandbox,
       rolloutProjection: input.rolloutProjection,
-      authorizeToolEffect: (call) =>
-        input.authorizeToolEffect({ ...call, argsDigest: sha256Digest(call.argsDigest) }),
+      authorizeToolEffect: (call) => {
+        const startedName = startedToolCalls.get(call.callId);
+        if (invalidToolCalls.has(call.callId) || startedName !== call.toolName) {
+          throw new Error("Pi 工具许可缺少匹配的 tool.started");
+        }
+        startedToolCalls.delete(call.callId);
+        invalidToolCalls.delete(call.callId);
+        return input.authorizeToolEffect({ ...call, argsDigest: sha256Digest(call.argsDigest) });
+      },
+    });
+    // 该订阅先于 RunWorker 的持久订阅注册，只负责证明 Pi 已真实发布 tool.started。
+    const unsubscribeToolGate = controller.subscribe((event) => {
+      if (event.type !== "tool.started") return;
+      if (startedToolCalls.has(event.callId)) {
+        invalidToolCalls.add(event.callId);
+        return;
+      }
+      startedToolCalls.set(event.callId, event.name);
     });
     return {
       runPrompt: async (text, authorization): Promise<AgentTurnOutcome> => {
@@ -52,7 +70,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       },
       abort: () => controller.abort(),
       subscribe: (listener) => controller.subscribe(listener),
-      dispose: () => controller.dispose(),
+      dispose: () => {
+        unsubscribeToolGate();
+        startedToolCalls.clear();
+        invalidToolCalls.clear();
+        controller.dispose();
+      },
     };
   }
 }

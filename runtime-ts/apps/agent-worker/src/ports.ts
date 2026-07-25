@@ -177,9 +177,16 @@ interface SandboxCleanupOutboxBase {
   readonly schemaVersion: 1;
   readonly kind: "sandbox_cleanup";
   readonly idempotencyKey: string;
+  /** armed 是行级永久事实，进入 started/completed/unknown 后也不得撤销。 */
+  readonly armed: true;
   readonly payload: {
     readonly registryId: string;
     readonly providerSandboxId: string;
+  };
+}
+
+interface DecidedSandboxCleanupOutboxBase extends SandboxCleanupOutboxBase {
+  readonly payload: SandboxCleanupOutboxBase["payload"] & {
     readonly disposition: "pause" | "close";
   };
 }
@@ -188,26 +195,35 @@ interface SandboxCleanupOutboxBase {
 export type RuntimeOutboxV1 =
   | (SandboxCleanupOutboxBase & {
       readonly state: "pending";
-      readonly armed: true;
       readonly payload: SandboxCleanupOutboxBase["payload"] & {
         readonly retryCode?: StableWorkerErrorCode;
       };
     })
-  | (SandboxCleanupOutboxBase & {
+  | (DecidedSandboxCleanupOutboxBase & {
       readonly state: "started";
-      readonly payload: SandboxCleanupOutboxBase["payload"];
     })
-  | (SandboxCleanupOutboxBase & {
+  | (DecidedSandboxCleanupOutboxBase & {
       readonly state: "completed";
-      readonly payload: SandboxCleanupOutboxBase["payload"];
     })
-  | (SandboxCleanupOutboxBase & {
+  | (DecidedSandboxCleanupOutboxBase & {
       readonly state: "unknown";
-      readonly payload: SandboxCleanupOutboxBase["payload"] & {
+      readonly payload: DecidedSandboxCleanupOutboxBase["payload"] & {
         readonly uncertainEvent: UncertainLifecycleEvent;
         readonly retryCode: "SANDBOX_UNKNOWN";
       };
     })
+  | {
+      readonly schemaVersion: 1;
+      readonly kind: "sandbox_lifecycle_unknown";
+      readonly idempotencyKey: string;
+      readonly state: "unknown";
+      readonly payload: {
+        readonly registryId: string;
+        readonly providerSandboxId: string;
+        readonly uncertainEvent: UncertainLifecycleEvent;
+        readonly retryCode: "SANDBOX_UNKNOWN";
+      };
+    }
   | {
       readonly schemaVersion: 1;
       readonly kind: "runtime_alert";
@@ -219,7 +235,14 @@ export type RuntimeOutboxV1 =
       };
     };
 
-export type PersistedRuntimeOutboxV1 = RuntimeOutboxV1 & { readonly occurredAt: IsoTimestamp };
+export type PersistedRuntimeOutboxV1 =
+  | (Extract<RuntimeOutboxV1, { kind: "sandbox_cleanup" }> & {
+      readonly armedAt: IsoTimestamp;
+      readonly occurredAt: IsoTimestamp;
+    })
+  | (Exclude<RuntimeOutboxV1, { kind: "sandbox_cleanup" }> & {
+      readonly occurredAt: IsoTimestamp;
+    });
 
 export interface RuntimeMutation {
   readonly schemaVersion: 1;
@@ -248,11 +271,7 @@ export interface RuntimeMutationReceiptV1 {
   readonly attemptVersion: number;
   readonly eventSequenceStart: number;
   readonly eventSequenceEnd: number;
-  readonly outbox: readonly {
-    readonly idempotencyKey: string;
-    readonly payloadDigest: Sha256Digest;
-    readonly state: RuntimeOutboxV1["state"];
-  }[];
+  readonly outbox: readonly RuntimeOutboxReceiptV1[];
   readonly projection?: {
     readonly schemaVersion: 1;
     readonly previousVersion: number;
@@ -265,6 +284,34 @@ export interface RuntimeMutationReceiptV1 {
     readonly currentHead: WorkspaceRevisionId;
   };
 }
+
+export type RuntimeOutboxReceiptV1 =
+  | {
+      readonly kind: "sandbox_cleanup";
+      readonly idempotencyKey: string;
+      readonly payloadDigest: Sha256Digest;
+      readonly state: Extract<RuntimeOutboxV1, { kind: "sandbox_cleanup" }>["state"];
+      readonly armed: true;
+      readonly armedAt: IsoTimestamp;
+      readonly identity: {
+        readonly registryId: string;
+        readonly providerSandboxId: string;
+      };
+      readonly identityDigest: Sha256Digest;
+      readonly disposition?: "pause" | "close";
+    }
+  | {
+      readonly kind: "sandbox_lifecycle_unknown";
+      readonly idempotencyKey: string;
+      readonly payloadDigest: Sha256Digest;
+      readonly state: "unknown";
+    }
+  | {
+      readonly kind: "runtime_alert";
+      readonly idempotencyKey: string;
+      readonly payloadDigest: Sha256Digest;
+      readonly state: "pending";
+    };
 
 export type RuntimeMutationResult =
   | {

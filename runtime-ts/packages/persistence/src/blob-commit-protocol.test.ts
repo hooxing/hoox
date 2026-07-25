@@ -74,6 +74,9 @@ describe("Blob 补偿状态协议", () => {
     expect(() => transitionBlobCommit(blocked, { type: "promotion_succeeded", stable })).toThrow(
       BlobCommitTransitionError,
     );
+    expect(() => transitionBlobCommit(blocked, { type: "stable_mark_succeeded" })).toThrow(
+      BlobCommitTransitionError,
+    );
     const stillDeleting = transitionBlobCommit(blocked, {
       type: "stable_gc_lifecycle_resolved",
       status: "deleting",

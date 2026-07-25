@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS workspace_write_leases;
+ALTER TABLE IF EXISTS workspaces DROP CONSTRAINT IF EXISTS workspaces_current_revision_fk;
+DROP TABLE IF EXISTS workspace_revisions;
+DROP TABLE IF EXISTS workspaces;
+DROP TABLE IF EXISTS runs;
+DROP TABLE IF EXISTS threads;
+DROP TABLE IF EXISTS memberships;
+DROP TABLE IF EXISTS tenants;
+DROP TABLE IF EXISTS app_users;

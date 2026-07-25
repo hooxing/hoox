@@ -3,12 +3,10 @@ import {
   BlobCommitTransitionError,
   type BlobCommitSnapshot,
   type BlobCommitStatePort,
-  type PreparedPromotionStart,
   type StableBlobLifecycleAllocation,
   type StableBlobPromotionAuthorization,
   type StableBlobRef,
   type StagedBlobRef,
-  preparePromotionStart,
   transitionBlobCommit,
 } from "./index.js";
 
@@ -198,78 +196,46 @@ describe("Blob 补偿状态协议", () => {
     await expect(port.load(tenantB.scope, tenantB.operationId)).resolves.toEqual(tenantB);
   });
 
-  it("PreparedPromotionStart 完整绑定 snapshot 与规范授权，任一字段篡改都不能落库", async () => {
+  it("startPromotion 只读取最小命令，Repository 自行派生规范授权并抵抗 getter TOCTOU", async () => {
     const current = transitionBlobCommit(referenceCommittedState(), {
       type: "allocation_reserved",
       allocation,
       stable,
     });
-    const next = transitionBlobCommit(current, {
-      type: "promotion_started",
-      authorization,
-    });
-    const prepared = preparePromotionStart(current, canonicalAuthorization, next);
-    expect(Object.isFrozen(prepared)).toBe(true);
-    expect(Object.isFrozen(prepared.next.allocation)).toBe(true);
-    const mutableNext = { ...next };
-    const isolated = preparePromotionStart(current, canonicalAuthorization, mutableNext);
-    mutableNext.version += 1;
-    expect(isolated.next.version).toBe(next.version);
     const port = new InMemoryCommitStatePort();
     await port.create(current);
-    await expect(
-      port.compareAndSet({
-        scope: current.scope,
-        operationId: current.operationId,
-        expectedVersion: current.version,
-        next,
-      }),
-    ).rejects.toThrow("同事务入口");
-    await expect(port.startPromotion(prepared)).resolves.toBe(true);
-    await expect(port.load(current.scope, current.operationId)).resolves.toEqual(next);
-
-    const authorizationMutations: ReadonlyArray<Partial<StableBlobPromotionAuthorization>> = [
-      { tenantId: "tenant_b" },
-      { operationId: "other-operation" },
-      { authorizationId: "30000000-0000-4000-8000-000000000099" },
-      { referenceId: "ref-other" },
-      { stagingUploadId: "upload-other" },
-      { stagingObjectKey: `${canonicalAuthorization.stagingObjectKey}-other` },
-      { purpose: "resource" },
-      { sha256: "b".repeat(64) },
-      { size: 5 },
-      { incarnationId: "00000000-0000-4000-8000-000000000099" },
-      { physicalObjectKey: `${canonicalAuthorization.physicalObjectKey}-other` },
-      { lifecycleId: "10000000-0000-4000-8000-000000000099" },
-      { allocationId: "20000000-0000-4000-8000-000000000099" },
-      { generation: 2 },
-      { mode: "new_after_deleted" },
-    ];
-    for (const mutation of authorizationMutations) {
-      expect(() =>
-        preparePromotionStart(current, { ...canonicalAuthorization, ...mutation }, next),
-      ).toThrow(BlobCommitTransitionError);
-    }
-
-    for (const mutation of [
-      { operationId: "other-operation" },
-      { scope: { tenantId: "tenant_b" } },
-      { version: next.version + 1 },
-      { referenceId: "ref-other" },
-      { staged: { ...staged, uploadId: "upload-other" } },
-      { stable: { ...stable, physicalObjectKey: `${stable.physicalObjectKey}-other` } },
-      { allocation: { ...allocation, generation: allocation.generation + 1 } },
-      {
-        promotionAuthorization: {
-          ...authorization,
-          authorizationId: newAuthorization.authorizationId,
-        },
+    const reads = { scope: 0, operationId: 0, version: 0, allocationId: 0 };
+    const command = {
+      get scope() {
+        reads.scope += 1;
+        return { tenantId: reads.scope === 1 ? "tenant_a" : "tenant_b" };
       },
-    ]) {
-      expect(() =>
-        preparePromotionStart(current, canonicalAuthorization, { ...next, ...mutation }),
-      ).toThrow(BlobCommitTransitionError);
-    }
+      get operationId() {
+        reads.operationId += 1;
+        return reads.operationId === 1 ? "operation-1" : "other-operation";
+      },
+      get expectedSnapshotVersion() {
+        reads.version += 1;
+        return reads.version === 1 ? current.version : 999;
+      },
+      get allocationId() {
+        reads.allocationId += 1;
+        return reads.allocationId === 1 ? allocation.allocationId : newAllocation.allocationId;
+      },
+      // 即使调用方附带整套伪造结构，Repository 也不会读取或信任它们。
+      allocation: { ...allocation, mode: "new_after_deleted" as const },
+      authorization: { ...canonicalAuthorization, tenantId: "tenant_b" },
+    };
+    const result = await port.startPromotion(command);
+    expect(result).toMatchObject({ status: "started", snapshotVersion: current.version + 1 });
+    expect(reads).toEqual({ scope: 1, operationId: 1, version: 1, allocationId: 1 });
+    const stored = await port.load(current.scope, current.operationId);
+    expect(stored).toMatchObject({
+      status: "promotion_started",
+      allocation,
+      stable,
+      promotionAuthorization: result.status === "started" ? result.authorization : undefined,
+    });
   });
 
   it("新 operation 首次看到已 deleted 的逻辑 Blob 时接受 PG 决定的 new_after_deleted", () => {
@@ -383,6 +349,8 @@ function promotionReadyState(): BlobCommitSnapshot {
 
 class InMemoryCommitStatePort implements BlobCommitStatePort {
   private readonly tenants = new Map<string, Map<string, BlobCommitSnapshot>>();
+  private readonly authorizations = new Map<string, StableBlobPromotionAuthorization>();
+  private authorizationSequence = 0;
 
   async load(
     scope: { readonly tenantId: string },
@@ -423,20 +391,59 @@ class InMemoryCommitStatePort implements BlobCommitStatePort {
     return true;
   }
 
-  async startPromotion(input: PreparedPromotionStart): Promise<boolean> {
+  async startPromotion(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly operationId: string;
+    readonly expectedSnapshotVersion: number;
+    readonly allocationId: string;
+  }) {
+    // 每个 getter 只取一次，再以 plain local 值执行整个事务判断，避免 getter TOCTOU。
+    const suppliedScope = input.scope;
+    const scope = { tenantId: suppliedScope.tenantId };
+    const operationId = input.operationId;
+    const expectedSnapshotVersion = input.expectedSnapshotVersion;
+    const allocationId = input.allocationId;
+    const operations = this.tenants.get(scope.tenantId);
+    const current = operations?.get(operationId);
+    if (current === undefined || current.version !== expectedSnapshotVersion) {
+      return { status: "version_conflict" as const };
+    }
+    if (current.status !== "allocation_reserved") {
+      return { status: "invalid_state" as const };
+    }
+    const allocation = current.allocation;
+    const staged = current.staged;
     if (
-      input.authorization.authorizationId !== input.next.promotionAuthorization.authorizationId ||
-      input.authorization.operationId !== input.current.operationId ||
-      input.authorization.tenantId !== input.current.scope.tenantId
+      allocation === undefined ||
+      staged === undefined ||
+      current.stable === undefined ||
+      current.referenceId === undefined ||
+      allocation.allocationId !== allocationId
     ) {
-      return false;
+      return { status: "allocation_unavailable" as const };
     }
-    const operations = this.tenants.get(input.current.scope.tenantId);
-    const current = operations?.get(input.current.operationId);
-    if (current === undefined || current.version !== input.current.version) {
-      return false;
-    }
-    operations?.set(input.current.operationId, input.next);
-    return true;
+    this.authorizationSequence += 1;
+    const suffix = this.authorizationSequence.toString().padStart(12, "0");
+    const authorizationId = `30000000-0000-4000-8000-${suffix}`;
+    const authorization: StableBlobPromotionAuthorization = {
+      ...allocation,
+      authorizationId,
+      operationId,
+      referenceId: current.referenceId,
+      stagingUploadId: staged.uploadId,
+      stagingObjectKey: `agent-runtime/tenants/${scope.tenantId}/staging/${staged.purpose}/${staged.uploadId}`,
+    };
+    const authorizationRef = { tenantId: scope.tenantId, operationId, authorizationId };
+    const next = transitionBlobCommit(current, {
+      type: "promotion_started",
+      authorization: authorizationRef,
+    });
+    operations?.set(operationId, next);
+    this.authorizations.set(authorizationId, authorization);
+    return {
+      status: "started" as const,
+      authorization: authorizationRef,
+      snapshotVersion: next.version,
+    };
   }
 }

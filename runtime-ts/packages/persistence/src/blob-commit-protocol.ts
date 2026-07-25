@@ -1,15 +1,11 @@
-import { isDeepStrictEqual } from "node:util";
 import {
   type StableBlobRef,
   type StableBlobLifecycleAllocation,
-  type StableBlobPromotionAuthorization,
   type PromotionAuthorizationRef,
   type StagedBlobRef,
   type TenantBlobScope,
   assertBlobRef,
-  assertPhysicalObjectKey,
   assertTenantScope,
-  assertUploadId,
 } from "./blob-store.js";
 
 /**
@@ -93,22 +89,6 @@ export type BlobCommitEvent =
   | { readonly type: "cleanup_requested"; readonly target: "staging" }
   | { readonly type: "cleanup_succeeded"; readonly target: "staging" };
 
-const PREPARED_PROMOTION_START: unique symbol = Symbol("PreparedPromotionStart");
-
-/**
- * 只能由 preparePromotionStart 产生的名义能力。它证明 snapshot CAS 与规范授权已完整绑定，
- * StatePort 不再接收两份可被调用方分别拼装的普通对象。
- */
-export interface PreparedPromotionStart {
-  readonly [PREPARED_PROMOTION_START]: true;
-  readonly current: BlobCommitSnapshot;
-  readonly next: BlobCommitSnapshot & {
-    readonly status: "promotion_started";
-    readonly promotionAuthorization: PromotionAuthorizationRef;
-  };
-  readonly authorization: StableBlobPromotionAuthorization;
-}
-
 export class BlobCommitTransitionError extends Error {
   constructor(message: string) {
     super(message);
@@ -164,10 +144,23 @@ export interface BlobCommitStatePort {
     readonly next: BlobCommitSnapshot;
   }): Promise<boolean>;
   /**
-   * 唯一允许持久化 promotion_started 的入口：实现必须在同一事务中完成 snapshot CAS
-   * 与规范授权行 INSERT。普通 compareAndSet 必须拒绝 next.status=promotion_started。
+   * 调用方只提供不含 mode/target/auth 的最小命令。Repository 必须在同一 PG 事务中读取
+   * 当前 snapshot、allocation、lifecycle 与永久 retired 历史，自行派生 canonical target/auth，
+   * 再 CAS 到 promotion_started。普通 compareAndSet 必须拒绝 next.status=promotion_started。
    */
-  startPromotion(prepared: PreparedPromotionStart): Promise<boolean>;
+  startPromotion(input: {
+    readonly scope: TenantBlobScope;
+    readonly operationId: string;
+    readonly expectedSnapshotVersion: number;
+    readonly allocationId: string;
+  }): Promise<
+    | {
+        readonly status: "started";
+        readonly authorization: PromotionAuthorizationRef;
+        readonly snapshotVersion: number;
+      }
+    | { readonly status: "version_conflict" | "invalid_state" | "allocation_unavailable" }
+  >;
 }
 
 export function transitionBlobCommit(
@@ -178,55 +171,6 @@ export function transitionBlobCommit(
   assertTenantScope(current.scope);
   const next = applyTransition(current, event);
   return { ...next, version: current.version + 1 };
-}
-
-export function preparePromotionStart(
-  current: BlobCommitSnapshot,
-  authorization: StableBlobPromotionAuthorization,
-  next: BlobCommitSnapshot,
-): PreparedPromotionStart {
-  if (current.status !== "allocation_reserved") {
-    throw new BlobCommitTransitionError("只有 allocation_reserved 可以准备 promotion_started");
-  }
-  const authorizationRef: PromotionAuthorizationRef = {
-    tenantId: authorization.tenantId,
-    operationId: authorization.operationId,
-    authorizationId: authorization.authorizationId,
-  };
-  const expected = transitionBlobCommit(current, {
-    type: "promotion_started",
-    authorization: authorizationRef,
-  });
-  assertExactPromotionStartedSnapshot(expected, next);
-  assertCanonicalPromotionAuthorization(current, authorization);
-  return deepFreeze(
-    brandPreparedPromotionStart(
-      structuredClone({
-        current,
-        next: next as PreparedPromotionStart["next"],
-        authorization,
-      }),
-    ),
-  );
-}
-
-function deepFreeze<T>(value: T): Readonly<T> {
-  if (typeof value !== "object" || value === null || Object.isFrozen(value)) {
-    return value;
-  }
-  for (const nested of Object.values(value)) {
-    deepFreeze(nested);
-  }
-  return Object.freeze(value);
-}
-
-function brandPreparedPromotionStart(
-  prepared: Omit<PreparedPromotionStart, typeof PREPARED_PROMOTION_START>,
-): PreparedPromotionStart {
-  return {
-    [PREPARED_PROMOTION_START]: true,
-    ...prepared,
-  };
 }
 
 function applyTransition(
@@ -511,62 +455,6 @@ function assertPromotionAuthorization(
     !UUID_V4_PATTERN.test(authorization.authorizationId)
   ) {
     throw new BlobCommitTransitionError("promotion 授权与 Tenant、operation 或授权格式不一致");
-  }
-}
-
-function assertExactPromotionStartedSnapshot(
-  expected: BlobCommitSnapshot,
-  supplied: BlobCommitSnapshot,
-): void {
-  if (!isDeepStrictEqual(expected, supplied)) {
-    throw new BlobCommitTransitionError(
-      "promotion_started snapshot 未保持 scope、operation、version、引用、staging、allocation 或 target 连续",
-    );
-  }
-}
-
-function assertCanonicalPromotionAuthorization(
-  current: BlobCommitSnapshot,
-  authorization: StableBlobPromotionAuthorization,
-): void {
-  const staged = requireStaged(current);
-  const stable = requireStable(current);
-  const allocation = requireAllocation(current);
-  assertPromotionAuthorization(current, authorization);
-  try {
-    assertUploadId(authorization.stagingUploadId);
-    assertPhysicalObjectKey(authorization.stagingObjectKey);
-  } catch (error) {
-    throw new BlobCommitTransitionError(
-      `promotion 规范授权格式无效：${error instanceof Error ? error.message : "未知错误"}`,
-    );
-  }
-  if (
-    authorization.referenceId !== requireReferenceId(current) ||
-    authorization.stagingUploadId !== staged.uploadId ||
-    !authorization.stagingObjectKey.endsWith(
-      `/tenants/${staged.tenantId}/staging/${staged.purpose}/${staged.uploadId}`,
-    ) ||
-    authorization.tenantId !== allocation.tenantId ||
-    authorization.purpose !== allocation.purpose ||
-    authorization.sha256 !== allocation.sha256 ||
-    authorization.size !== allocation.size ||
-    authorization.incarnationId !== allocation.incarnationId ||
-    authorization.physicalObjectKey !== allocation.physicalObjectKey ||
-    authorization.lifecycleId !== allocation.lifecycleId ||
-    authorization.allocationId !== allocation.allocationId ||
-    authorization.generation !== allocation.generation ||
-    authorization.mode !== allocation.mode ||
-    authorization.tenantId !== stable.tenantId ||
-    authorization.purpose !== stable.purpose ||
-    authorization.sha256 !== stable.sha256 ||
-    authorization.size !== stable.size ||
-    authorization.incarnationId !== stable.incarnationId ||
-    authorization.physicalObjectKey !== stable.physicalObjectKey
-  ) {
-    throw new BlobCommitTransitionError(
-      "promotion 规范授权未完整绑定 reference、staging、allocation、lifecycle 或 target",
-    );
   }
 }
 

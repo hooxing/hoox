@@ -307,15 +307,34 @@ export class PgRunRepository implements RunRepository {
     if (scope.tenantId !== run.tenantId) return { outcome: "not_found" };
     try {
       return await withTenantTransaction(this.pool, scope, async (client) => {
-        // 所有父子写固定先锁 Thread，再由 UPDATE 锁 Run。
+        // 先按 tenant+runId 只读发现数据库中的真实父级；thread_id 对业务不可变。
+        const discovered = await client.query<{ thread_id: string }>(
+          `SELECT r.thread_id FROM runs r
+            WHERE r.tenant_id = $1 AND r.id = $2
+              AND EXISTS (SELECT 1 FROM memberships m
+                WHERE m.tenant_id = r.tenant_id AND m.user_id = $3 AND m.status = 'active')`,
+          [scope.tenantId, run.id, scope.userId],
+        );
+        const actualThreadId = discovered.rows[0]?.thread_id;
+        if (actualThreadId === undefined) return { outcome: "not_found" };
+
+        // 所有父子写固定按数据库真实关系锁 Thread→Run，不能让调用方伪造 threadId 改变锁序。
         const parent = await client.query(
           "SELECT 1 FROM threads WHERE tenant_id = $1 AND id = $2 FOR UPDATE",
-          [scope.tenantId, run.threadId],
+          [scope.tenantId, actualThreadId],
         );
         if (parent.rowCount !== 1) return { outcome: "not_found" };
+        const locked = await client.query<{ thread_id: string }>(
+          `SELECT thread_id FROM runs
+            WHERE tenant_id = $1 AND id = $2 AND thread_id = $3
+            FOR UPDATE`,
+          [scope.tenantId, run.id, actualThreadId],
+        );
+        if (locked.rows[0]?.thread_id !== actualThreadId) return { outcome: "conflict" };
+        if (run.threadId !== actualThreadId) return { outcome: "conflict" };
         const result = await client.query<{ version: string }>(
-          `UPDATE runs r SET status = $4, updated_at = $5, version = version + 1
-            WHERE r.tenant_id = $1 AND r.id = $3 AND r.version = $6
+          `UPDATE runs r SET status = $5, updated_at = $6, version = version + 1
+            WHERE r.tenant_id = $1 AND r.id = $3 AND r.thread_id = $4 AND r.version = $7
               AND EXISTS (SELECT 1 FROM memberships m
                 WHERE m.tenant_id = r.tenant_id AND m.user_id = $2 AND m.status = 'active')
             RETURNING version`,
@@ -323,6 +342,7 @@ export class PgRunRepository implements RunRepository {
             scope.tenantId,
             scope.userId,
             run.id,
+            actualThreadId,
             run.status,
             run.updatedAt,
             expectedVersion.toString(),

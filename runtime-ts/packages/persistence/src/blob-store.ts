@@ -29,9 +29,34 @@ export interface StableBlobRef extends BlobDescriptor {
   readonly physicalObjectKey: string;
 }
 
-export interface StableBlobIncarnationAllocation {
-  /** 由 PostgreSQL 生命周期事务使用安全随机 UUID 分配并持久化。 */
+export interface StableBlobLifecycleAllocation {
+  readonly tenantId: string;
+  readonly purpose: BlobPurpose;
+  readonly sha256: string;
+  readonly size: number;
   readonly incarnationId: string;
+  readonly physicalObjectKey: string;
+  readonly lifecycleId: string;
+  readonly allocationId: string;
+  readonly generation: number;
+  readonly mode: "active_reuse" | "new_after_deleted";
+}
+
+/**
+ * 由 PostgreSQL 生命周期事务实现。incarnationId 与 physicalObjectKey 必须永久唯一；
+ * retired 历史永久保留，不能重新分配。resolveForPromotion 只返回已持久化的 reserved/started allocation。
+ */
+export interface StableBlobLifecycleAllocationPort {
+  reserve(input: {
+    readonly scope: TenantBlobScope;
+    readonly staged: StagedBlobRef;
+    readonly mode: "active_reuse" | "new_after_deleted";
+  }): Promise<StableBlobLifecycleAllocation>;
+  resolveForPromotion(input: {
+    readonly scope: TenantBlobScope;
+    readonly staged: StagedBlobRef;
+    readonly allocation: StableBlobLifecycleAllocation;
+  }): Promise<StableBlobLifecycleAllocation | undefined>;
 }
 
 export type BlobRef = StagedBlobRef | StableBlobRef;
@@ -67,7 +92,7 @@ export interface BlobStore {
   promote(
     scope: TenantBlobScope,
     staged: StagedBlobRef,
-    allocation: StableBlobIncarnationAllocation,
+    allocation: StableBlobLifecycleAllocation,
   ): Promise<StableBlobRef>;
   head(scope: TenantBlobScope, blob: BlobRef): Promise<BlobObjectHead | undefined>;
   read(scope: TenantBlobScope, blob: BlobRef): AsyncIterable<Uint8Array>;
@@ -115,6 +140,7 @@ export interface StableBlobGcClaimPort {
     | { readonly status: "started"; readonly claim: StableBlobGcClaim }
     | { readonly status: "claim_lost" }
   >;
+  /** 原子置 deleted，并把 claim 绑定的 incarnation/physical key 永久写入 retired 历史。 */
   completeDeletion(input: {
     readonly scope: TenantBlobScope;
     readonly blob: StableBlobRef;
@@ -129,7 +155,14 @@ export interface StableBlobGcClaimPort {
   resolveLifecycle(input: {
     readonly scope: TenantBlobScope;
     readonly blob: StableBlobRef;
-  }): Promise<"active" | "pre_delete" | "deleting" | "deleted">;
+  }): Promise<
+    | { readonly status: "active" | "pre_delete" | "deleting" }
+    | {
+        readonly status: "deleted";
+        readonly retiredIncarnationId: string;
+        readonly retiredPhysicalObjectKey: string;
+      }
+  >;
 }
 
 export interface StableBlobGcPort {
@@ -236,7 +269,14 @@ export function assertIncarnationId(incarnationId: string): void {
 }
 
 export function assertPhysicalObjectKey(key: string): void {
-  if (key.length < 1 || key.length > 1_024 || key.startsWith("/") || containsAsciiControl(key)) {
+  if (
+    key.length < 1 ||
+    key.length > 1_024 ||
+    key.startsWith("/") ||
+    key.includes("\\") ||
+    containsAsciiControl(key) ||
+    key.split("/").some((segment) => segment.length === 0 || segment === "." || segment === "..")
+  ) {
     throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "physicalObjectKey 格式无效");
   }
 }

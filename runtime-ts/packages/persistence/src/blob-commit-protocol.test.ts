@@ -3,6 +3,7 @@ import {
   BlobCommitTransitionError,
   type BlobCommitSnapshot,
   type BlobCommitStatePort,
+  type StableBlobLifecycleAllocation,
   type StableBlobRef,
   type StagedBlobRef,
   transitionBlobCommit,
@@ -17,12 +18,14 @@ describe("Blob 补偿状态协议", () => {
       type: "reference_commit_succeeded",
       referenceId: "ref-1",
     });
+    state = transitionBlobCommit(state, { type: "allocation_reserved", allocation, stable });
+    state = transitionBlobCommit(state, { type: "promotion_started" });
     state = transitionBlobCommit(state, { type: "promotion_succeeded", stable });
     state = transitionBlobCommit(state, { type: "stable_mark_succeeded" });
     state = transitionBlobCommit(state, { type: "cleanup_requested", target: "staging" });
     state = transitionBlobCommit(state, { type: "cleanup_succeeded", target: "staging" });
 
-    expect(state).toMatchObject({ status: "completed", version: 7, referenceId: "ref-1" });
+    expect(state).toMatchObject({ status: "completed", version: 9, referenceId: "ref-1" });
   });
 
   it("引用提交结果未知时必须先解析，不能直接复制", () => {
@@ -52,8 +55,7 @@ describe("Blob 补偿状态协议", () => {
   });
 
   it("stable 标记未知时保留对象与引用并等待解析", () => {
-    let state = referenceCommittedState();
-    state = transitionBlobCommit(state, { type: "promotion_succeeded", stable });
+    let state = promotionReadyState();
     state = transitionBlobCommit(state, { type: "stable_mark_result_unknown" });
     expect(state.status).toBe("stable_mark_unknown");
     expect(() =>
@@ -63,9 +65,34 @@ describe("Blob 补偿状态协议", () => {
     expect(state.status).toBe("stable");
   });
 
-  it("stable 正在被 GC claim 时记录阻塞且不新增引用", () => {
+  it("COPY 结果 UNKNOWN 时保留同一 allocation 与物理 target 并围绕它恢复", () => {
     let state = referenceCommittedState();
-    state = transitionBlobCommit(state, { type: "promotion_succeeded", stable });
+    state = transitionBlobCommit(state, { type: "allocation_reserved", allocation, stable });
+    state = transitionBlobCommit(state, { type: "promotion_started" });
+    state = transitionBlobCommit(state, { type: "promotion_result_unknown" });
+
+    expect(state).toMatchObject({
+      status: "promotion_unknown",
+      allocation,
+      stable,
+    });
+    expect(() =>
+      transitionBlobCommit(state, {
+        type: "allocation_reserved",
+        allocation: newAllocation,
+        stable: newStable,
+      }),
+    ).toThrow(BlobCommitTransitionError);
+    const retrySame = transitionBlobCommit(state, { type: "promotion_resolved", promoted: false });
+    expect(retrySame).toMatchObject({ status: "allocation_reserved", allocation, stable });
+    const started = transitionBlobCommit(retrySame, { type: "promotion_started" });
+    expect(transitionBlobCommit(started, { type: "promotion_succeeded", stable }).status).toBe(
+      "stable_object_ready",
+    );
+  });
+
+  it("stable 正在被 GC claim 时记录阻塞且不新增引用", () => {
+    const state = promotionReadyState();
     const blocked = transitionBlobCommit(state, { type: "stable_mark_gc_blocked" });
 
     expect(blocked.status).toBe("stable_mark_gc_blocked");
@@ -85,11 +112,22 @@ describe("Blob 补偿状态协议", () => {
     const deleted = transitionBlobCommit(stillDeleting, {
       type: "stable_gc_lifecycle_resolved",
       status: "deleted",
+      retiredIncarnationId: stable.incarnationId,
+      retiredPhysicalObjectKey: stable.physicalObjectKey,
     });
     expect(deleted.status).toBe("reference_committed");
-    expect(transitionBlobCommit(deleted, { type: "promotion_succeeded", stable }).status).toBe(
-      "stable_object_ready",
-    );
+    expect(() =>
+      transitionBlobCommit(deleted, { type: "allocation_reserved", allocation, stable }),
+    ).toThrow(BlobCommitTransitionError);
+    const reservedNew = transitionBlobCommit(deleted, {
+      type: "allocation_reserved",
+      allocation: newAllocation,
+      stable: newStable,
+    });
+    const startedNew = transitionBlobCommit(reservedNew, { type: "promotion_started" });
+    expect(
+      transitionBlobCommit(startedNew, { type: "promotion_succeeded", stable: newStable }).status,
+    ).toBe("stable_object_ready");
 
     const unknown = transitionBlobCommit(state, { type: "stable_mark_result_unknown" });
     const resolvedBlocked = transitionBlobCommit(unknown, {
@@ -108,7 +146,8 @@ describe("Blob 补偿状态协议", () => {
     const changedStable = { ...stable, sha256: "b".repeat(64) };
     expect(() =>
       transitionBlobCommit(referenceCommittedState(), {
-        type: "promotion_succeeded",
+        type: "allocation_reserved",
+        allocation,
         stable: changedStable,
       }),
     ).toThrow(BlobCommitTransitionError);
@@ -160,6 +199,34 @@ const stable: StableBlobRef = {
   physicalObjectKey: `agent-runtime/stable/tenant_a/artifact/sha256/${staged.sha256}/incarnations/00000000-0000-4000-8000-000000000001`,
 };
 
+const allocation: StableBlobLifecycleAllocation = {
+  tenantId: stable.tenantId,
+  purpose: stable.purpose,
+  sha256: stable.sha256,
+  size: stable.size,
+  incarnationId: stable.incarnationId,
+  physicalObjectKey: stable.physicalObjectKey,
+  lifecycleId: "10000000-0000-4000-8000-000000000001",
+  allocationId: "20000000-0000-4000-8000-000000000001",
+  generation: 1,
+  mode: "active_reuse",
+};
+
+const newStable: StableBlobRef = {
+  ...stable,
+  incarnationId: "00000000-0000-4000-8000-000000000002",
+  physicalObjectKey: `agent-runtime/stable/tenant_a/artifact/sha256/${staged.sha256}/incarnations/00000000-0000-4000-8000-000000000002`,
+};
+
+const newAllocation: StableBlobLifecycleAllocation = {
+  ...allocation,
+  incarnationId: newStable.incarnationId,
+  physicalObjectKey: newStable.physicalObjectKey,
+  allocationId: "20000000-0000-4000-8000-000000000002",
+  generation: 2,
+  mode: "new_after_deleted",
+};
+
 function initialState(): BlobCommitSnapshot {
   return {
     operationId: "operation-1",
@@ -178,6 +245,13 @@ function referenceCommittedState(): BlobCommitSnapshot {
     staged,
     referenceId: "ref-1",
   };
+}
+
+function promotionReadyState(): BlobCommitSnapshot {
+  let state = referenceCommittedState();
+  state = transitionBlobCommit(state, { type: "allocation_reserved", allocation, stable });
+  state = transitionBlobCommit(state, { type: "promotion_started" });
+  return transitionBlobCommit(state, { type: "promotion_succeeded", stable });
 }
 
 class InMemoryCommitStatePort implements BlobCommitStatePort {

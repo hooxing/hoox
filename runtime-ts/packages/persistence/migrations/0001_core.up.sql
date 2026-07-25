@@ -34,6 +34,7 @@ CREATE TABLE threads (
   created_by_user_id text NOT NULL,
   title text NOT NULL CHECK (length(btrim(title)) BETWEEN 1 AND 200),
   status text NOT NULL CHECK (status IN ('active', 'archived')),
+  version bigint NOT NULL DEFAULT 0 CHECK (version >= 0),
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
   PRIMARY KEY (tenant_id, id),
@@ -48,6 +49,7 @@ CREATE TABLE runs (
   id text NOT NULL,
   thread_id text NOT NULL,
   status text NOT NULL CHECK (status IN ('queued', 'running', 'waiting', 'succeeded', 'failed', 'cancelled')),
+  version bigint NOT NULL DEFAULT 0 CHECK (version >= 0),
   created_at timestamptz NOT NULL,
   updated_at timestamptz NOT NULL,
   PRIMARY KEY (tenant_id, id),
@@ -125,3 +127,58 @@ CREATE TABLE workspace_write_leases (
 );
 
 CREATE INDEX workspace_write_leases_expiry_idx ON workspace_write_leases (expires_at);
+
+ALTER TABLE app_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app_users FORCE ROW LEVEL SECURITY;
+CREATE POLICY app_users_tenant_policy ON app_users
+  USING (
+    id = NULLIF(current_setting('app.user_id', true), '')
+    OR EXISTS (
+      SELECT 1 FROM memberships m
+       WHERE m.tenant_id = NULLIF(current_setting('app.tenant_id', true), '')
+         AND m.user_id = app_users.id
+    )
+  )
+  WITH CHECK (id = NULLIF(current_setting('app.user_id', true), ''));
+
+ALTER TABLE tenants ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenants FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenants_isolation_policy ON tenants
+  USING (id = NULLIF(current_setting('app.tenant_id', true), ''))
+  WITH CHECK (id = NULLIF(current_setting('app.tenant_id', true), ''));
+
+ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+ALTER TABLE memberships FORCE ROW LEVEL SECURITY;
+CREATE POLICY memberships_isolation_policy ON memberships
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''))
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''));
+
+ALTER TABLE threads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE threads FORCE ROW LEVEL SECURITY;
+CREATE POLICY threads_isolation_policy ON threads
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''))
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''));
+
+ALTER TABLE runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE runs FORCE ROW LEVEL SECURITY;
+CREATE POLICY runs_isolation_policy ON runs
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''))
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''));
+
+ALTER TABLE workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspaces FORCE ROW LEVEL SECURITY;
+CREATE POLICY workspaces_isolation_policy ON workspaces
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''))
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''));
+
+ALTER TABLE workspace_revisions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspace_revisions FORCE ROW LEVEL SECURITY;
+CREATE POLICY workspace_revisions_isolation_policy ON workspace_revisions
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''))
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''));
+
+ALTER TABLE workspace_write_leases ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspace_write_leases FORCE ROW LEVEL SECURITY;
+CREATE POLICY workspace_write_leases_isolation_policy ON workspace_write_leases
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''))
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''));

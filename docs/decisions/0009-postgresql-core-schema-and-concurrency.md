@@ -17,19 +17,25 @@ M1 需要把 Tenant、Thread、Run 与 Workspace 从内存领域对象落到 Pos
 
 首版采用文本 ID、`timestamptz`、文本状态加 `CHECK` 约束。相较 PostgreSQL enum，文本约束更容易在后续迁移中扩展和回退；相较任意文本，它能在写入边界阻止非法状态。
 
+代码审查进一步比较了“只依赖 Repository 过滤”“每租户独立数据库”“共享表加数据库 RLS”。只靠过滤无法抵御漏写 `tenant_id` 条件；独立数据库隔离最强但首版连接池、迁移和成本过高。因此共享业务表除迁移记录外全部启用并 `FORCE ROW LEVEL SECURITY`。租户 Repository 必须在事务中通过参数化 `set_config(..., true)` 写入可信 `tenant_id/user_id`，策略再同时约束 `USING` 与 `WITH CHECK`。全局 User 表使用单独策略：只允许当前用户或当前租户成员可见，不把 User 强行改成租户实体。
+
+迁移连接和运行连接采用不同 URL/角色。Migrator 拥有 Schema 和 DDL 权限；Runtime 必须不是数据库、Schema 或表 owner，没有 `CREATE`/DDL，仅获得所需表 DML。Repository 包不公开原始 Pool 和任意事务函数，防止应用层绕过 TenantScope 与 RLS。开发/测试环境也使用相同角色边界。
+
 ### Workspace 并发与数据库时钟
 
 比较过无锁单条 CAS、事务级 advisory lock、Workspace 行锁。选择短事务内 `SELECT ... FOR UPDATE` 锁定单个 Workspace，再检查 revision、lease epoch、root Run 和 `clock_timestamp()`。它的等待范围只覆盖同一个 Workspace，错误分类也能稳定区分 `revision_conflict` 与 `lease_lost`。提交 Revision 与推进 Workspace head 必须在同一个事务中；业务 Run 全程不得持有数据库锁。
+
+所有涉及父状态的写入采用固定锁序 `Thread → Run → Workspace`。创建 Run/Workspace 在插入前锁定并重验 Thread 仍为 `active`；Lease 获取、续租、释放和 Revision 提交锁定并重验 Root Run 仍为 `running`。Thread/Run 普通更新使用独立 bigint version token，而不是可能相同的 wall-clock 时间，单条条件更新原子执行 `version = version + 1`。Revision 提交还必须重验 `parentRevisionId` 等于数据库当前 head。
 
 Lease 使用独立表保存当前持有者，Workspace 的 `lease_epoch` 保存单调递增高水位。释放租约删除当前 Lease，但不回退 epoch；接管只能在数据库时钟确认旧 Lease 过期后以更高 epoch 完成。
 
 ### 错误映射
 
-比较过直接抛出 `pg` 错误、全部映射为通用内部错误、定义稳定持久层错误码。选择第三种：Repository 对外只暴露 `PersistenceError` 的稳定代码或显式结果联合，不包含 SQL、连接串和驱动消息。跨租户读取统一返回不存在，避免存在性侧信道。
+比较过直接抛出 `pg` 错误、全部映射为通用内部错误、定义稳定持久层错误码。选择第三种：Repository 对外只暴露 `PersistenceError` 的稳定代码或显式结果联合，不保留原始 `pg` error 作为 cause，也不包含 SQL、连接串和驱动消息。内部诊断只允许记录操作名与 SQLSTATE 分类。跨租户读取统一返回不存在，避免存在性侧信道。
 
 ### 迁移策略
 
-比较过 ORM 自动同步、引入完整迁移框架、仓库内有序 SQL 加小型 runner。当前只有一个初始 Schema，且 Workspace CAS 需要精确 SQL，因此选择最后一种，不引入 ORM。Runner 按版本读取成对的 `up/down.sql`，在事务 advisory lock 下执行，记录 SHA-256；再次执行会跳过已应用版本，历史文件被改写会失败。下迁移按逆序执行。
+比较过 ORM 自动同步、引入完整迁移框架、仓库内有序 SQL 加小型 runner。当前只有一个初始 Schema，且 Workspace CAS 需要精确 SQL，因此选择最后一种，不引入 ORM。Runner 按版本严格读取一一配对的 `up/down.sql`，拒绝重复版本、孤立方向和异常文件，并对 `version + name + up + down` 共同计算 SHA-256；再次执行会跳过已应用版本，任一方向被改写都会失败。下迁移按逆序执行，但默认关闭；只有调用方同时传入显式破坏开关且环境明确为 development/test 才执行，生产环境不能通过 CLI 回退。
 
 依赖固定为 `pg@8.22.0` 与 `@types/pg@8.20.0`：前者是成熟的 PostgreSQL 驱动并提供连接池/事务原语，后者只提供编译期类型。当前范围不引入 ORM、Redis 或 JSON Repository。
 
@@ -38,6 +44,8 @@ Lease 使用独立表保存当前持有者，Workspace 的 `lease_epoch` 保存�
 - 所有跨租户外键由数据库复合键兜底，查询仍需显式 TenantScope；
 - 同 Workspace 并发写串行化，不同 Workspace 可以并行；
 - 行锁事务必须保持短小，等待用户或模型时必须在事务之外；
+- 归档 Thread、终结 Run 与 Workspace 写入会在相同父行锁上串行化，避免检查后状态变化；
+- RLS 是 Repository 条件之外的第二道边界，连接复用时必须使用事务级设置，禁止会话级残留；
 - 文本 ID 比 UUID 列占用更多索引空间，等 ID 生成规则稳定后可另立迁移评估；
 - SQL runner 功能刻意有限，出现多分支迁移、数据回填编排需求时再评估成熟迁移框架。
 
@@ -45,11 +53,15 @@ Lease 使用独立表保存当前持有者，Workspace 的 `lease_epoch` 保存�
 
 - 初始迁移连续执行两次，版本表只有一条记录；执行 down 后业务表不可见，再次 up 可恢复；
 - 两个租户互查 Thread/Run/Workspace 均返回不存在；
+- Runtime 角色跨租户直接写入被 RLS 拒绝，且不能建表或创建 Schema；
 - 两个并发提交相同 revision/epoch 时恰好一个成功；
+- 两个相同时间戳、相同 version 的 Thread/Run 更新恰好一个成功；
 - 已过期、错误 root Run 或错误 epoch 的 Lease 提交均返回 `lease_lost`；
+- Thread 归档或 Run 终态与创建/Lease/Revision 竞争时，父锁重验决定唯一合法结果；
 - 事务中途失败后不残留部分数据，Revision 插入失败不能推进 Workspace head；
+- 并发迁移只有一个执行者，篡改 down SQL 会触发 checksum 失败，CLI 缺少安全门不能回退；
 - 启动探针和错误日志不得输出连接串。
 
 ## 可逆性与回退
 
-首个迁移提供严格逆序的 down SQL，开发环境可完整回退。生产已有数据后，不允许直接 down；应先备份、停止写入并用新的前向迁移修正。Repository 接口与错误联合不依赖 `pg` 类型，未来可以替换驱动或迁移框架，但必须保持 TenantScope、原子 head 更新和数据库时钟 Lease 语义。
+首个迁移提供严格逆序的 down SQL，只有隔离的 development/test 数据库可显式回退。生产已有数据后禁止 down；应先备份、停止写入并用新的前向迁移修正。RLS 可以在迁移窗口内由 Migrator 回退，但取消强制租户边界属于安全降级，必须新增 ADR。Repository 接口与错误联合不依赖 `pg` 类型，未来可以替换驱动或迁移框架，但必须保持 TenantScope、角色分离、原子 head 更新和数据库时钟 Lease 语义。

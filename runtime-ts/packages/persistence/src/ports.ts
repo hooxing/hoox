@@ -1,5 +1,4 @@
 import type {
-  IsoTimestamp,
   Membership,
   Run,
   Tenant,
@@ -11,6 +10,7 @@ import type {
   Workspace,
   WorkspaceId,
   WorkspaceRevisionCommitPort,
+  WorkspaceWriteScope,
 } from "@cube-runtime/domain";
 
 /** 由认证/授权层构造；Repository 不接受裸 tenantId 作为业务查询上下文。 */
@@ -25,10 +25,19 @@ export interface TenantBundle {
   readonly membership: Membership;
 }
 
+export interface Versioned<T> {
+  readonly entity: T;
+  readonly version: bigint;
+}
+
 export type CreateResult = { readonly outcome: "created" } | { readonly outcome: "conflict" };
 
-export type UpdateResult =
-  | { readonly outcome: "updated" }
+export type VersionedCreateResult =
+  | { readonly outcome: "created"; readonly version: bigint }
+  | { readonly outcome: "conflict" };
+
+export type VersionedUpdateResult =
+  | { readonly outcome: "updated"; readonly version: bigint }
   | { readonly outcome: "conflict" }
   | { readonly outcome: "not_found" };
 
@@ -38,19 +47,19 @@ export interface TenantRepository {
 }
 
 export interface ThreadRepository {
-  create(scope: TenantScope, thread: Thread): Promise<CreateResult>;
-  get(scope: TenantScope, id: ThreadId): Promise<Thread | undefined>;
+  create(scope: TenantScope, thread: Thread): Promise<VersionedCreateResult>;
+  get(scope: TenantScope, id: ThreadId): Promise<Versioned<Thread> | undefined>;
   update(
     scope: TenantScope,
     thread: Thread,
-    expectedUpdatedAt: IsoTimestamp,
-  ): Promise<UpdateResult>;
+    expectedVersion: bigint,
+  ): Promise<VersionedUpdateResult>;
 }
 
 export interface RunRepository {
-  create(scope: TenantScope, run: Run): Promise<CreateResult>;
-  get(scope: TenantScope, id: Run["id"]): Promise<Run | undefined>;
-  update(scope: TenantScope, run: Run, expectedUpdatedAt: IsoTimestamp): Promise<UpdateResult>;
+  create(scope: TenantScope, run: Run): Promise<VersionedCreateResult>;
+  get(scope: TenantScope, id: Run["id"]): Promise<Versioned<Run> | undefined>;
+  update(scope: TenantScope, run: Run, expectedVersion: bigint): Promise<VersionedUpdateResult>;
 }
 
 export interface WorkspaceRepository extends WorkspaceRevisionCommitPort {
@@ -65,3 +74,5 @@ export interface CoreRepositories {
   readonly runs: RunRepository;
   readonly workspaces: WorkspaceRepository;
 }
+
+export type { WorkspaceWriteScope };

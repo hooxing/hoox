@@ -21,9 +21,33 @@ function iso(value: unknown): string {
   throw new TypeError("数据库时间字段无效");
 }
 
-export function mapTenantBundle(row: QueryResultRow): TenantBundle {
-  const user = rehydrateUser({ id: row.user_id, createdAt: iso(row.user_created_at) });
-  const tenant = rehydrateTenant(
+function mapUser(row: QueryResultRow, prefix: string): User {
+  return rehydrateUser({ id: row[`${prefix}_id`], createdAt: iso(row[`${prefix}_created_at`]) });
+}
+
+function mapMembership(
+  row: QueryResultRow,
+  prefix: string,
+  tenant: Tenant,
+  user: User,
+): Membership {
+  return rehydrateMembership(
+    {
+      id: row[`${prefix}_id`],
+      tenantId: row.tenant_id,
+      userId: user.id,
+      role: row[`${prefix}_role`],
+      status: row[`${prefix}_status`],
+      createdAt: iso(row[`${prefix}_created_at`]),
+    },
+    tenant,
+    user,
+  );
+}
+
+export function mapTenant(row: QueryResultRow): Tenant {
+  const actor = mapUser(row, "tenant_actor");
+  return rehydrateTenant(
     {
       id: row.tenant_id,
       kind: row.tenant_kind,
@@ -32,29 +56,20 @@ export function mapTenantBundle(row: QueryResultRow): TenantBundle {
       ...(row.created_by_user_id === null ? {} : { createdByUserId: row.created_by_user_id }),
       createdAt: iso(row.tenant_created_at),
     },
-    user,
+    actor,
   );
-  const membership = rehydrateMembership(
-    {
-      id: row.membership_id,
-      tenantId: row.tenant_id,
-      userId: row.user_id,
-      role: row.membership_role,
-      status: row.membership_status,
-      createdAt: iso(row.membership_created_at),
-    },
-    tenant,
-    user,
-  );
+}
+
+export function mapTenantBundle(row: QueryResultRow): TenantBundle {
+  const tenant = mapTenant(row);
+  const user = mapUser(row, "auth_user");
+  const membership = mapMembership(row, "auth_membership", tenant, user);
   return Object.freeze({ user, tenant, membership });
 }
 
-export function mapThread(
-  row: QueryResultRow,
-  tenant: Tenant,
-  user: User,
-  membership: Membership,
-): Thread {
+export function mapThread(row: QueryResultRow, tenant: Tenant): Thread {
+  const creator = mapUser(row, "thread_creator");
+  const membership = mapMembership(row, "thread_creator_membership", tenant, creator);
   return rehydrateThread(
     {
       id: row.thread_id,
@@ -66,7 +81,7 @@ export function mapThread(
       updatedAt: iso(row.thread_updated_at),
     },
     tenant,
-    user,
+    creator,
     membership,
   );
 }

@@ -4,6 +4,7 @@ DROP TABLE IF EXISTS workspace_revisions;
 DROP TABLE IF EXISTS workspaces;
 DROP TABLE IF EXISTS runs;
 DROP TABLE IF EXISTS threads;
+DROP POLICY IF EXISTS app_users_tenant_policy ON app_users;
 DROP TABLE IF EXISTS memberships;
 DROP TABLE IF EXISTS tenants;
 DROP TABLE IF EXISTS app_users;

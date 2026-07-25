@@ -389,6 +389,131 @@ describe("S3BlobStore", () => {
     expect(state.successfulCompletionCount).toBe(1);
   });
 
+  it("source HEAD 后消失导致 COPY 明确失败，仍保持 UNKNOWN 且绝不发第二次 COPY", async () => {
+    const client = new FakeS3ObjectClient();
+    const state = new InMemoryPromotionAuthorizations();
+    const store = new S3BlobStore(client, state, config);
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "source-disappears-after-head",
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
+    });
+    const prepared = state.preparePromotion(staged);
+    client.deleteSourceBeforeCopy = true;
+
+    await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+      code: "BLOB_RESULT_UNKNOWN",
+      result: "unknown",
+    });
+    client.deleteSourceBeforeCopy = false;
+    await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+      code: "BLOB_RESULT_UNKNOWN",
+      result: "unknown",
+    });
+    expect(client.copyKeys).toHaveLength(1);
+    await expect(
+      state.claimPromotionExecution({
+        scope,
+        authorization: prepared.ref,
+        attemptId: "50000000-0000-4000-8000-000000000021",
+      }),
+    ).resolves.toMatchObject({ status: "reconcile", execution: { phase: "unknown" } });
+  });
+
+  it("COPY 成功后的首次验证失败只进入 reconcile，恢复时不再 COPY", async () => {
+    const client = new FakeS3ObjectClient();
+    const state = new InMemoryPromotionAuthorizations();
+    const store = new S3BlobStore(client, state, config);
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "copy-verification-fails",
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
+    });
+    const prepared = state.preparePromotion(staged);
+    client.failHeadAfterCopySuccess = true;
+
+    await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+      code: "BLOB_RESULT_UNKNOWN",
+      result: "unknown",
+    });
+    client.failHeadAfterCopySuccess = false;
+    await expect(store.promote(scope, staged, prepared.ref)).resolves.toMatchObject({
+      physicalObjectKey: prepared.authorization.physicalObjectKey,
+    });
+    expect(client.copyKeys).toHaveLength(1);
+    expect(state.successfulCompletionCount).toBe(1);
+  });
+
+  it("completed 授权的 HEAD 失败仍保持授权可重试，且不会再次 COPY", async () => {
+    const client = new FakeS3ObjectClient();
+    const state = new InMemoryPromotionAuthorizations();
+    const store = new S3BlobStore(client, state, config);
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "completed-head-fails",
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
+    });
+    const prepared = state.preparePromotion(staged);
+    await store.promote(scope, staged, prepared.ref);
+    client.failNextHeadOnce();
+
+    await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+      code: "BLOB_RESULT_UNKNOWN",
+      result: "unknown",
+    });
+    await expect(store.promote(scope, staged, prepared.ref)).resolves.toMatchObject({
+      physicalObjectKey: prepared.authorization.physicalObjectKey,
+    });
+    expect(client.copyKeys).toHaveLength(1);
+    expect(state.successfulCompletionCount).toBe(1);
+  });
+
+  it("resolve 返回畸形 canonical 时先转 reconcile，再抛稳定完整性错误", async () => {
+    const client = new FakeS3ObjectClient();
+    const state = new InMemoryPromotionAuthorizations();
+    const store = new S3BlobStore(client, state, config);
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "malformed-resolve",
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
+    });
+    const prepared = state.preparePromotion(staged);
+    state.resolveResultMutation = (authorization) => ({
+      ...authorization,
+      physicalObjectKey: `${authorization.physicalObjectKey}-bad`,
+    });
+
+    await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+      code: "BLOB_INTEGRITY_MISMATCH",
+      result: "unknown",
+    });
+    state.resolveResultMutation = undefined;
+    await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+      code: "BLOB_RESULT_UNKNOWN",
+      result: "unknown",
+    });
+    expect(client.copyKeys).toEqual([]);
+    await expect(
+      state.claimPromotionExecution({
+        scope,
+        authorization: prepared.ref,
+        attemptId: "50000000-0000-4000-8000-000000000022",
+      }),
+    ).resolves.toMatchObject({ status: "reconcile", execution: { phase: "unknown" } });
+  });
+
   it("claim/mark 畸形返回与 resolve reject 都在 COPY 前稳定失败并转入安全恢复", async () => {
     const scope = { tenantId: "tenant_a" };
 
@@ -426,7 +551,12 @@ describe("S3BlobStore", () => {
       physicalObjectKey: `${claim.physicalObjectKey}-bad`,
     });
     await expect(markStore.promote(scope, markStaged, markPrepared.ref)).rejects.toMatchObject({
-      code: "BLOB_INTEGRITY_MISMATCH",
+      code: "BLOB_RESULT_UNKNOWN",
+      result: "unknown",
+    });
+    markState.markResultMutation = undefined;
+    await expect(markStore.promote(scope, markStaged, markPrepared.ref)).rejects.toMatchObject({
+      code: "BLOB_RESULT_UNKNOWN",
       result: "unknown",
     });
     expect(markClient.copyKeys).toEqual([]);
@@ -1382,6 +1512,9 @@ class InMemoryPromotionAuthorizations
 {
   claimResultMutation: ((claim: PromotionExecutionClaim) => PromotionExecutionClaim) | undefined;
   markResultMutation: ((claim: PromotionExecutionClaim) => PromotionExecutionClaim) | undefined;
+  resolveResultMutation:
+    | ((authorization: StableBlobPromotionAuthorization) => StableBlobPromotionAuthorization)
+    | undefined;
   rejectResolve = false;
   successfulCompletionCount = 0;
   private sequence = 0;
@@ -1635,7 +1768,10 @@ class InMemoryPromotionAuthorizations
     if (!sameExecution(resolved.record.execution, input.execution)) {
       return { status: "inactive" };
     }
-    return { status: "authorized", authorization: resolved.record.value };
+    return {
+      status: "authorized",
+      authorization: this.resolveResultMutation?.(resolved.record.value) ?? resolved.record.value,
+    };
   }
 
   async markPromotionCopyIssued(input: {
@@ -1777,6 +1913,8 @@ class FakeS3ObjectClient implements S3ObjectClient {
   putUnknownWithoutWrite = false;
   copyUnknownAfterWrite = false;
   copyUnknownWithoutWrite = false;
+  deleteSourceBeforeCopy = false;
+  failHeadAfterCopySuccess = false;
   deleteUnknownAfterDelete = false;
   deleteUnknownWithoutDelete = false;
   deleteKnownFailure = false;
@@ -1787,6 +1925,10 @@ class FakeS3ObjectClient implements S3ObjectClient {
   failVerificationHeadAfterUnknownWrite = false;
   failVerificationHeadAfterUnknownDelete = false;
   private failNextHead = false;
+
+  failNextHeadOnce(): void {
+    this.failNextHead = true;
+  }
 
   async put(input: S3PutObjectInput): Promise<void> {
     this.putKeys.push(input.key);
@@ -1842,6 +1984,9 @@ class FakeS3ObjectClient implements S3ObjectClient {
 
   async copy(input: S3CopyObjectInput): Promise<void> {
     this.copyKeys.push(input);
+    if (this.deleteSourceBeforeCopy) {
+      this.objects.delete(input.sourceKey);
+    }
     const source = this.objects.get(input.sourceKey);
     if (source === undefined) {
       throw new BlobStoreError("BLOB_NOT_FOUND", "fake source missing");
@@ -1851,6 +1996,7 @@ class FakeS3ObjectClient implements S3ObjectClient {
         body: source.body.slice(),
         metadata: { ...source.metadata },
       });
+      this.failNextHead = this.failHeadAfterCopySuccess;
     }
     if (this.copyUnknownAfterWrite || this.copyUnknownWithoutWrite) {
       throw unknownResult();

@@ -66,14 +66,13 @@ describe("Blob 补偿状态协议", () => {
     expect(state.status).toBe("stable");
   });
 
-  it("COPY 结果 UNKNOWN 时保留同一 allocation 与物理 target 并围绕它恢复", () => {
+  it("COPY 结果 UNKNOWN 不产生可回退状态，只能保留同一授权等待成功收敛", () => {
     let state = referenceCommittedState();
     state = transitionBlobCommit(state, { type: "allocation_reserved", allocation, stable });
     state = transitionBlobCommit(state, { type: "promotion_started", authorization });
-    state = transitionBlobCommit(state, { type: "promotion_result_unknown" });
 
     expect(state).toMatchObject({
-      status: "promotion_unknown",
+      status: "promotion_started",
       allocation,
       stable,
       promotionAuthorization: authorization,
@@ -85,13 +84,74 @@ describe("Blob 补偿状态协议", () => {
         stable: newStable,
       }),
     ).toThrow(BlobCommitTransitionError);
-    const retrySame = transitionBlobCommit(state, { type: "promotion_resolved", promoted: false });
-    expect(retrySame).toMatchObject({ status: "allocation_reserved", allocation, stable });
-    expect(retrySame.promotionAuthorization).toBeUndefined();
-    const started = transitionBlobCommit(retrySame, { type: "promotion_started", authorization });
-    expect(transitionBlobCommit(started, { type: "promotion_succeeded", stable }).status).toBe(
+    expect(transitionBlobCommit(state, { type: "promotion_succeeded", stable }).status).toBe(
       "stable_object_ready",
     );
+  });
+
+  it("只有持久层证明 execution 仍为 pre-intent 才能撤销 promotion 授权", async () => {
+    const reserved = transitionBlobCommit(referenceCommittedState(), {
+      type: "allocation_reserved",
+      allocation,
+      stable,
+    });
+    const port = new InMemoryCommitStatePort();
+    await port.create(reserved);
+    const started = await port.startPromotion({
+      scope: reserved.scope,
+      operationId: reserved.operationId,
+      expectedSnapshotVersion: reserved.version,
+      allocationId: allocation.allocationId,
+    });
+    if (started.status !== "started") throw new Error("测试 promotion 启动失败");
+    const startedSnapshot = await port.load(reserved.scope, reserved.operationId);
+    if (startedSnapshot === undefined) throw new Error("测试 snapshot 丢失");
+    const forgedRollback = transitionBlobCommit(startedSnapshot, {
+      type: "promotion_proven_not_copied",
+    });
+    await expect(
+      port.compareAndSet({
+        scope: reserved.scope,
+        operationId: reserved.operationId,
+        expectedVersion: startedSnapshot.version,
+        next: forgedRollback,
+      }),
+    ).rejects.toThrow("受控事务入口");
+    await expect(
+      port.provePromotionNotCopied({
+        scope: reserved.scope,
+        operationId: reserved.operationId,
+        expectedSnapshotVersion: startedSnapshot.version,
+        authorizationId: started.authorization.authorizationId,
+      }),
+    ).resolves.toMatchObject({
+      status: "proven_not_copied",
+      snapshotVersion: startedSnapshot.version + 1,
+    });
+    const rolledBack = await port.load(reserved.scope, reserved.operationId);
+    expect(rolledBack?.status).toBe("allocation_reserved");
+    expect(rolledBack?.promotionAuthorization).toBeUndefined();
+
+    const restarted = await port.startPromotion({
+      scope: reserved.scope,
+      operationId: reserved.operationId,
+      expectedSnapshotVersion: startedSnapshot.version + 1,
+      allocationId: allocation.allocationId,
+    });
+    if (restarted.status !== "started") throw new Error("测试 promotion 重启失败");
+    port.markCopyIssued(restarted.authorization.authorizationId);
+    await expect(
+      port.provePromotionNotCopied({
+        scope: reserved.scope,
+        operationId: reserved.operationId,
+        expectedSnapshotVersion: restarted.snapshotVersion,
+        authorizationId: restarted.authorization.authorizationId,
+      }),
+    ).resolves.toEqual({ status: "copy_may_have_been_issued" });
+    await expect(port.load(reserved.scope, reserved.operationId)).resolves.toMatchObject({
+      status: "promotion_started",
+      promotionAuthorization: restarted.authorization,
+    });
   });
 
   it("stable 正在被 GC claim 时记录阻塞且不新增引用", () => {
@@ -350,7 +410,12 @@ function promotionReadyState(): BlobCommitSnapshot {
 class InMemoryCommitStatePort implements BlobCommitStatePort {
   private readonly tenants = new Map<string, Map<string, BlobCommitSnapshot>>();
   private readonly authorizations = new Map<string, StableBlobPromotionAuthorization>();
+  private readonly copyIssuedAuthorizations = new Set<string>();
   private authorizationSequence = 0;
+
+  markCopyIssued(authorizationId: string): void {
+    this.copyIssuedAuthorizations.add(authorizationId);
+  }
 
   async load(
     scope: { readonly tenantId: string },
@@ -374,11 +439,14 @@ class InMemoryCommitStatePort implements BlobCommitStatePort {
     readonly expectedVersion: number;
     readonly next: BlobCommitSnapshot;
   }): Promise<boolean> {
-    if (input.next.status === "promotion_started") {
-      throw new Error("promotion_started 必须使用同事务入口");
-    }
     const operations = this.tenants.get(input.scope.tenantId);
     const current = operations?.get(input.operationId);
+    if (
+      input.next.status === "promotion_started" ||
+      (current?.status === "promotion_started" && input.next.status === "allocation_reserved")
+    ) {
+      throw new Error("promotion 授权变更必须使用受控事务入口");
+    }
     if (
       current === undefined ||
       current.version !== input.expectedVersion ||
@@ -443,6 +511,39 @@ class InMemoryCommitStatePort implements BlobCommitStatePort {
     return {
       status: "started" as const,
       authorization: authorizationRef,
+      snapshotVersion: next.version,
+    };
+  }
+
+  async provePromotionNotCopied(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly operationId: string;
+    readonly expectedSnapshotVersion: number;
+    readonly authorizationId: string;
+  }) {
+    const scope = { tenantId: input.scope.tenantId };
+    const operationId = input.operationId;
+    const expectedVersion = input.expectedSnapshotVersion;
+    const authorizationId = input.authorizationId;
+    const operations = this.tenants.get(scope.tenantId);
+    const current = operations?.get(operationId);
+    if (current === undefined || current.version !== expectedVersion) {
+      return { status: "version_conflict" as const };
+    }
+    if (current.status !== "promotion_started") {
+      return { status: "invalid_state" as const };
+    }
+    if (current.promotionAuthorization?.authorizationId !== authorizationId) {
+      return { status: "authorization_mismatch" as const };
+    }
+    if (this.copyIssuedAuthorizations.has(authorizationId)) {
+      return { status: "copy_may_have_been_issued" as const };
+    }
+    const next = transitionBlobCommit(current, { type: "promotion_proven_not_copied" });
+    operations?.set(operationId, next);
+    this.authorizations.delete(authorizationId);
+    return {
+      status: "proven_not_copied" as const,
       snapshotVersion: next.version,
     };
   }

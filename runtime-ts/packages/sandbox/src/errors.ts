@@ -13,6 +13,7 @@ export type SandboxErrorCode =
   | "NOT_FOUND"
   | "AUTHENTICATION"
   | "INVALID_ARGUMENT"
+  | "UNKNOWN"
   | "PROTOCOL"
   | "UPSTREAM";
 
@@ -60,46 +61,59 @@ export function mapSandboxError(error: unknown, operation: string): SandboxRunti
   return new SandboxRuntimeError("UPSTREAM", `${operation} 发生未知上游错误`, error);
 }
 
-export async function guardedOperation<T>(
+/**
+ * 不可远端取消操作的安全包装：AbortSignal 只记录取消请求，操作一旦开始就等待上游 settle。
+ * 这样调用方不会在文件写入仍可能迟到时误以为操作已经停止。
+ */
+export async function settledOperation<T>(
   operation: string,
   action: () => Promise<T>,
   options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  timeoutMode: "native" | "after-settle" = "after-settle",
 ): Promise<T> {
+  assertPositiveInteger(options.timeoutMs, `${operation} timeoutMs`);
   if (options.signal?.aborted) {
-    throw new SandboxRuntimeError("CANCELLED", `${operation} 已取消`, options.signal.reason);
+    throw new SandboxRuntimeError(
+      "CANCELLED",
+      `${operation} 未开始：已请求取消`,
+      options.signal.reason,
+    );
   }
 
-  let timer: NodeJS.Timeout | undefined;
-  let removeAbort: (() => void) | undefined;
+  let cancellationRequested = false;
+  const onAbort = () => {
+    cancellationRequested = true;
+  };
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  const startedAt = Date.now();
+  let result: T;
   try {
-    const guards: Promise<never>[] = [];
-    if (options.timeoutMs !== undefined) {
-      guards.push(
-        new Promise((_, reject) => {
-          timer = setTimeout(
-            () => reject(new SandboxRuntimeError("TIMEOUT", `${operation} 超时`)),
-            options.timeoutMs,
-          );
-        }),
-      );
-    }
-    if (options.signal) {
-      guards.push(
-        new Promise((_, reject) => {
-          const listener = () =>
-            reject(
-              new SandboxRuntimeError("CANCELLED", `${operation} 已取消`, options.signal?.reason),
-            );
-          options.signal?.addEventListener("abort", listener, { once: true });
-          removeAbort = () => options.signal?.removeEventListener("abort", listener);
-        }),
-      );
-    }
-    return await Promise.race([action(), ...guards]);
+    result = await action();
   } catch (error) {
     throw mapSandboxError(error, operation);
   } finally {
-    if (timer) clearTimeout(timer);
-    removeAbort?.();
+    options.signal?.removeEventListener("abort", onAbort);
+  }
+
+  if (cancellationRequested) {
+    throw new SandboxRuntimeError(
+      "CANCELLED",
+      `${operation} 已安全结束，但执行期间收到取消请求`,
+      options.signal?.reason,
+    );
+  }
+  if (
+    timeoutMode === "after-settle" &&
+    options.timeoutMs !== undefined &&
+    Date.now() - startedAt >= options.timeoutMs
+  ) {
+    throw new SandboxRuntimeError("TIMEOUT", `${operation} 已安全结束，但超过调用方期限`);
+  }
+  return result;
+}
+
+export function assertPositiveInteger(value: number | undefined, label: string): void {
+  if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
+    throw new SandboxRuntimeError("INVALID_ARGUMENT", `${label} 必须是正整数`);
   }
 }

@@ -1,5 +1,6 @@
 import type { CubeGatewayOptions } from "./cube-gateway.js";
 import { SandboxRuntimeError } from "./errors.js";
+import { validateBaseUrl, validateTemplateId } from "./validation.js";
 
 export function cubeConfigFromEnv(
   env: NodeJS.ProcessEnv,
@@ -9,10 +10,12 @@ export function cubeConfigFromEnv(
   if (!apiUrl || !templateId) {
     throw new SandboxRuntimeError("INVALID_ARGUMENT", "缺少 CubeSandbox API URL 或模板 ID");
   }
-  const parsed = new URL(apiUrl);
+  const normalizedApiUrl = validateBaseUrl(apiUrl);
+  validateTemplateId(templateId);
+  const parsed = new URL(normalizedApiUrl);
   const proxyPort = parseOptionalInt(env.CUBESANDBOX_PROXY_PORT ?? env.CUBE_PROXY_PORT_HTTP);
   return {
-    apiUrl,
+    apiUrl: normalizedApiUrl,
     templateId,
     apiKey: env.CUBESANDBOX_API_KEY ?? env.CUBE_API_KEY ?? null,
     // 当前自托管部署的 CubeAPI 与 CubeProxy 同机；未显式配置时从 API URL 安全推导节点 IP。

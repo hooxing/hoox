@@ -1,4 +1,4 @@
-import { SandboxRuntimeError } from "./errors.js";
+import { SandboxRuntimeError, settledOperation } from "./errors.js";
 import type {
   CodeOutput,
   CommandOutput,
@@ -7,20 +7,34 @@ import type {
   SandboxGateway,
   SandboxHandle,
 } from "./types.js";
+import {
+  validateAbsolutePath,
+  validateEnvironment,
+  validateSandboxId,
+  validateTemplateId,
+  validateText,
+  validateTtl,
+} from "./validation.js";
 
 export class FakeSandboxGateway implements SandboxGateway {
   readonly sandboxes = new Map<string, FakeSandboxHandle>();
   private sequence = 0;
 
-  async create(_input: SandboxCreateInput, control: OperationControl = {}): Promise<SandboxHandle> {
-    assertNotAborted(control.signal);
-    const handle = new FakeSandboxHandle(`fake-${++this.sequence}`);
+  constructor(private readonly operationDelayMs = 0) {}
+
+  async create(input: SandboxCreateInput, control: OperationControl = {}): Promise<SandboxHandle> {
+    validateTemplateId(input.templateId);
+    validateTtl(input.ttlSeconds, 120);
+    validateEnvironment(input.env);
+    if (control.signal?.aborted) throw new SandboxRuntimeError("CANCELLED", "创建已取消");
+    const handle = new FakeSandboxHandle(`fake-${++this.sequence}`, this.operationDelayMs);
     this.sandboxes.set(handle.id, handle);
     return handle;
   }
 
   async connect(id: string, control: OperationControl = {}): Promise<SandboxHandle> {
-    assertNotAborted(control.signal);
+    validateSandboxId(id);
+    if (control.signal?.aborted) throw new SandboxRuntimeError("CANCELLED", "连接已取消");
     const handle = this.sandboxes.get(id);
     if (!handle || handle.killed)
       throw new SandboxRuntimeError("NOT_FOUND", "连接的 Fake Sandbox 不存在");
@@ -34,23 +48,36 @@ export class FakeSandboxHandle implements SandboxHandle {
   paused = false;
   killed = false;
 
-  constructor(readonly id: string) {}
+  constructor(
+    readonly id: string,
+    private readonly operationDelayMs = 0,
+  ) {}
 
   async command(command: string, control: OperationControl = {}): Promise<CommandOutput> {
-    this.assertUsable(control);
-    return { stdout: `${command}\n`, stderr: "", exitCode: 0 };
+    validateText(command, "命令");
+    return this.execute("Fake 命令", control, async () => ({
+      stdout: `${command}\n`,
+      stderr: "",
+      exitCode: 0,
+    }));
   }
 
-  async runCode(code: string, control: OperationControl = {}): Promise<CodeOutput> {
-    this.assertUsable(control);
-    return { text: code, stdout: [], stderr: [] };
+  async runCode(
+    code: string,
+    control: OperationControl & { language?: string } = {},
+  ): Promise<CodeOutput> {
+    validateText(code, "代码");
+    if (control.language !== undefined) validateText(control.language, "language");
+    return this.execute("Fake 代码", control, async () => ({ text: code, stdout: [], stderr: [] }));
   }
 
   async readFile(path: string, control: OperationControl = {}): Promise<string> {
-    this.assertUsable(control);
-    const content = this.files.get(path);
-    if (content === undefined) throw new SandboxRuntimeError("NOT_FOUND", "Fake 文件不存在");
-    return content;
+    validateAbsolutePath(path);
+    return this.execute("Fake 文件读取", control, async () => {
+      const content = this.files.get(path);
+      if (content === undefined) throw new SandboxRuntimeError("NOT_FOUND", "Fake 文件不存在");
+      return content;
+    });
   }
 
   async writeFile(
@@ -58,29 +85,46 @@ export class FakeSandboxHandle implements SandboxHandle {
     data: string | Uint8Array,
     control: OperationControl = {},
   ): Promise<void> {
-    this.assertUsable(control);
-    this.files.set(path, typeof data === "string" ? data : new TextDecoder().decode(data));
+    validateAbsolutePath(path);
+    await this.execute("Fake 文件写入", control, async () => {
+      this.files.set(path, typeof data === "string" ? data : new TextDecoder().decode(data));
+    });
   }
 
   async pause(control: OperationControl = {}): Promise<void> {
-    this.assertUsable(control);
-    this.paused = true;
+    await this.execute("Fake 暂停", control, async () => {
+      this.paused = true;
+    });
   }
 
   async kill(control: OperationControl & { ignoreNotFound?: boolean } = {}): Promise<void> {
-    assertNotAborted(control.signal);
     if (this.killed && !control.ignoreNotFound)
       throw new SandboxRuntimeError("NOT_FOUND", "Fake Sandbox 已销毁");
     this.killed = true;
   }
 
-  private assertUsable(control: OperationControl): void {
-    assertNotAborted(control.signal);
+  private async execute<T>(
+    operation: string,
+    control: OperationControl,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    this.assertUsable();
+    return settledOperation(
+      operation,
+      async () => {
+        if (this.operationDelayMs) await delay(this.operationDelayMs);
+        return action();
+      },
+      control,
+    );
+  }
+
+  private assertUsable(): void {
     if (this.killed) throw new SandboxRuntimeError("NOT_FOUND", "Fake Sandbox 已销毁");
     if (this.paused) throw new SandboxRuntimeError("UPSTREAM", "Fake Sandbox 已暂停");
   }
 }
 
-function assertNotAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new SandboxRuntimeError("CANCELLED", "Fake 操作已取消", signal.reason);
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

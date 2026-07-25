@@ -2,17 +2,16 @@ import type { SandboxHandle } from "@cube-runtime/sandbox";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import {
   createAgentSession,
-  DefaultResourceLoader,
   SessionManager,
   SettingsManager,
-  type ModelRuntime,
-  type AgentSession,
   type AgentSessionEvent,
+  type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
+import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
 import { createSandboxTools, SANDBOX_TOOL_NAMES } from "./tools.js";
 
-export interface PiSessionPort {
+interface PiSessionPort {
   prompt(text: string): Promise<void>;
   steer(text: string): Promise<void>;
   followUp(text: string): Promise<void>;
@@ -21,30 +20,61 @@ export interface PiSessionPort {
   dispose(): void;
 }
 
-export class PiSessionController {
-  constructor(private readonly session: PiSessionPort) {}
+export interface PiSessionDiagnostics {
+  logicalCwd: "/workspace";
+  activeToolNames: string[];
+  compactionEnabled: false;
+  hasCompactionEntry: boolean;
+}
+
+export interface PiSessionController {
+  prompt(text: string): Promise<void>;
+  steer(text: string): Promise<void>;
+  followUp(text: string): Promise<void>;
+  abort(): Promise<void>;
+  dispose(): void;
+  subscribe(listener: (event: RuntimeAgentEvent) => void): () => void;
+  getDiagnostics(): Readonly<PiSessionDiagnostics>;
+}
+
+class PiSessionControllerImpl implements PiSessionController {
+  readonly #session: PiSessionPort;
+  readonly #diagnostics: () => PiSessionDiagnostics;
+
+  constructor(session: PiSessionPort, diagnostics: () => PiSessionDiagnostics) {
+    this.#session = session;
+    this.#diagnostics = diagnostics;
+  }
 
   prompt(text: string): Promise<void> {
-    return this.session.prompt(text);
+    return this.#session.prompt(text);
   }
+
   steer(text: string): Promise<void> {
-    return this.session.steer(text);
+    return this.#session.steer(text);
   }
+
   followUp(text: string): Promise<void> {
-    return this.session.followUp(text);
+    return this.#session.followUp(text);
   }
+
   abort(): Promise<void> {
-    return this.session.abort();
+    return this.#session.abort();
   }
+
   dispose(): void {
-    this.session.dispose();
+    this.#session.dispose();
   }
 
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void {
-    return this.session.subscribe((event) => {
+    return this.#session.subscribe((event) => {
       const mapped = mapPiEvent(event);
       if (mapped) listener(mapped);
     });
+  }
+
+  getDiagnostics(): Readonly<PiSessionDiagnostics> {
+    return Object.freeze(this.#diagnostics());
   }
 }
 
@@ -53,20 +83,13 @@ export interface CreateSafePiSessionOptions {
   modelRuntime: ModelRuntime;
   sandbox: SandboxHandle;
   systemPrompt?: string;
-  cwd?: string;
 }
 
-export interface SafePiSession {
-  controller: PiSessionController;
-  /** 仅供启动检查与测试，不作为持久化真相。 */
-  piSession: AgentSession;
-  settingsManager: SettingsManager;
-}
+const LOGICAL_WORKSPACE = "/workspace" as const;
 
 export async function createSafePiSession(
   options: CreateSafePiSessionOptions,
-): Promise<SafePiSession> {
-  const cwd = options.cwd ?? process.cwd();
+): Promise<PiSessionController> {
   const settingsManager = SettingsManager.inMemory(
     {
       compaction: { enabled: false },
@@ -75,29 +98,18 @@ export async function createSafePiSession(
     { projectTrusted: false },
   );
 
-  const resourceLoader = new DefaultResourceLoader({
-    cwd,
-    agentDir: cwd,
-    settingsManager,
-    noExtensions: true,
-    noSkills: true,
-    noPromptTemplates: true,
-    noThemes: true,
-    noContextFiles: true,
-    systemPrompt:
-      options.systemPrompt ??
-      "你是受控 Agent，只能通过已注册的 CubeSandbox 工具操作文件与执行代码。",
-    appendSystemPrompt: [],
-  });
+  const resourceLoader = new EmptyResourceLoader(
+    options.systemPrompt ?? "你是受控 Agent，只能通过已注册的 CubeSandbox 工具操作文件与执行代码。",
+  );
   await resourceLoader.reload();
 
   const customTools = createSandboxTools(options.sandbox);
   const { session } = await createAgentSession({
-    cwd,
+    cwd: LOGICAL_WORKSPACE,
     model: options.model,
     modelRuntime: options.modelRuntime,
     thinkingLevel: "off",
-    sessionManager: SessionManager.inMemory(cwd),
+    sessionManager: SessionManager.inMemory(LOGICAL_WORKSPACE),
     settingsManager,
     resourceLoader,
     customTools,
@@ -107,5 +119,13 @@ export async function createSafePiSession(
     excludeTools: ["bash", "read", "write", "edit", "grep", "find", "ls"],
   });
 
-  return { controller: new PiSessionController(session), piSession: session, settingsManager };
+  // 对外只返回窄能力对象；AgentSession（含 compact）保留在闭包和 #private 字段内。
+  return new PiSessionControllerImpl(session, () => ({
+    logicalCwd: LOGICAL_WORKSPACE,
+    activeToolNames: session.agent.state.tools.map((tool) => tool.name),
+    compactionEnabled: false,
+    hasCompactionEntry: session.sessionManager
+      .getEntries()
+      .some((entry) => entry.type === "compaction"),
+  }));
 }

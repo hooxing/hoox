@@ -6,4 +6,4 @@
 
 ## Pi Coding Agent
 
-`@earendil-works/pi-coding-agent` 通过 pnpm 安装，并由 lockfile 固定其完整依赖图。许可证文本保留在安装包中。
+`@earendil-works/pi-coding-agent@0.82.1` 来源于 `earendil-works/pi` 的 `v0.82.1` 标签（提交 `b4f293684bba718d59cc1157679bcf6157b3a7f5`），上游采用 MIT License，版权人为 Mario Zechner。仓库保留的完整许可证和来源记录见 `third_party/pi/`；依赖图由 pnpm lockfile 固定。

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -208,8 +208,6 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
       await pool.end();
       await administrativePool.query(
         `DROP SCHEMA "${isolatedSchema}" CASCADE;
-         ALTER DEFAULT PRIVILEGES FOR ROLE "${isolatedRole}"
-           GRANT EXECUTE ON ROUTINES TO PUBLIC;
          REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}";
          DROP ROLE "${isolatedRole}"`,
       );
@@ -257,9 +255,7 @@ afterAll(async () => {
   if (schemaCreated) await administrativePool.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (migratorCreated) {
     await administrativePool.query(
-      `ALTER DEFAULT PRIVILEGES FOR ROLE "${migratorRole}"
-         GRANT EXECUTE ON ROUTINES TO PUBLIC;
-       REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}";
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}";
        DROP ROLE "${migratorRole}"`,
     );
   }
@@ -367,21 +363,17 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(downPrivileges.rows.every((entry) => !entry.allowed)).toBe(true);
     const routineState = await migratorPool.query<{
       routine_count: string;
-      unsafe_default_count: string;
+      default_acl_count: string;
     }>(
       `SELECT (SELECT count(*)::text FROM pg_proc
                 WHERE pronamespace = current_schema()::regnamespace) AS routine_count,
               (SELECT count(*)::text
                  FROM pg_default_acl defaults
-                 CROSS JOIN LATERAL aclexplode(defaults.defaclacl) acl
                 WHERE defaults.defaclrole = $1::regrole
-                  AND defaults.defaclnamespace = 0
-                  AND defaults.defaclobjtype = 'f'
-                  AND (acl.grantee = 0 OR acl.grantee = $2::regrole)
-                  AND acl.privilege_type = 'EXECUTE') AS unsafe_default_count`,
-      [migratorRole, runtimeRole],
+                  AND defaults.defaclobjtype = 'f') AS default_acl_count`,
+      [migratorRole],
     );
-    expect(routineState.rows[0]).toEqual({ routine_count: "0", unsafe_default_count: "0" });
+    expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
     expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(1);
   });
 
@@ -541,6 +533,45 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("migration SQL 创建 routine 时整次 up 回滚", async () => {
+    const target = await createIsolatedMigrationTarget("migration_routine");
+    const temporary = await mkdtemp(join(tmpdir(), "cube-pg-routine-migration-"));
+    try {
+      const originalUp = await readFile(join(sourceMigrationDirectory, "0001_core.up.sql"), "utf8");
+      await Promise.all([
+        writeFile(
+          join(temporary, "0001_core.up.sql"),
+          `${originalUp}\nCREATE FUNCTION forbidden_migration() RETURNS integer LANGUAGE sql AS 'SELECT 1';\n`,
+          "utf8",
+        ),
+        copyFile(
+          join(sourceMigrationDirectory, "0001_core.down.sql"),
+          join(temporary, "0001_core.down.sql"),
+        ),
+      ]);
+      await expect(
+        migrateUp(target.pool, { ...target.context, directory: temporary }),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      const objects = await target.pool.query<{
+        migration_table: string | null;
+        business_table: string | null;
+        routine: string | null;
+      }>(
+        `SELECT to_regclass('runtime_schema_migrations')::text AS migration_table,
+                to_regclass('threads')::text AS business_table,
+                to_regprocedure('forbidden_migration()')::text AS routine`,
+      );
+      expect(objects.rows[0]).toEqual({
+        migration_table: null,
+        business_table: null,
+        routine: null,
+      });
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+      await target.close();
+    }
+  });
+
   it("Migrator 不得拥有目标以外 Schema 或跨 Schema 对象", async () => {
     const target = await createIsolatedMigrationTarget("migrator_ownership");
     const extraSchema = `${target.context.schema}_extra`;
@@ -612,6 +643,131 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     } finally {
       await administrativePool.query(`DROP SCHEMA "${extraSchema}" CASCADE`);
       await crossRoutine.close();
+    }
+  });
+
+  it("目标与跨 Schema 的 Migrator-owned 独立 type 均在首个 DDL 前拒绝", async () => {
+    const targetType = await createIsolatedMigrationTarget("target_type");
+    try {
+      await targetType.pool.query("CREATE TYPE forbidden_target_type AS ENUM ('blocked')");
+      await expect(migrateUp(targetType.pool, targetType.context)).rejects.toMatchObject({
+        code: "CONSTRAINT_VIOLATION",
+      });
+      expect(
+        (
+          await targetType.pool.query<{ name: string | null }>(
+            "SELECT to_regclass('runtime_schema_migrations')::text AS name",
+          )
+        ).rows[0]?.name,
+      ).toBeNull();
+    } finally {
+      await targetType.close();
+    }
+
+    const crossType = await createIsolatedMigrationTarget("cross_type");
+    const extraSchema = `${crossType.context.schema}_extra`;
+    await administrativePool.query(
+      `CREATE SCHEMA "${extraSchema}" AUTHORIZATION "${databaseOwnerRole}";
+       CREATE TYPE "${extraSchema}".forbidden_cross_type AS ENUM ('blocked');
+       ALTER TYPE "${extraSchema}".forbidden_cross_type
+         OWNER TO "${crossType.context.migratorRole}"`,
+    );
+    try {
+      await expect(migrateUp(crossType.pool, crossType.context)).rejects.toMatchObject({
+        code: "CONSTRAINT_VIOLATION",
+      });
+      expect(
+        (
+          await crossType.pool.query<{ name: string | null }>(
+            "SELECT to_regclass('runtime_schema_migrations')::text AS name",
+          )
+        ).rows[0]?.name,
+      ).toBeNull();
+    } finally {
+      await administrativePool.query(`DROP SCHEMA "${extraSchema}" CASCADE`);
+      await crossType.close();
+    }
+  });
+
+  it("任意 routine 默认 ACL 记录都在首个 DDL 前拒绝", async () => {
+    const localTarget = await createIsolatedMigrationTarget("local_default_acl");
+    try {
+      await localTarget.pool.query(
+        `ALTER DEFAULT PRIVILEGES IN SCHEMA "${localTarget.context.schema}"
+           GRANT EXECUTE ON ROUTINES TO PUBLIC, "${runtimeRole}"`,
+      );
+      await expect(migrateUp(localTarget.pool, localTarget.context)).rejects.toMatchObject({
+        code: "CONSTRAINT_VIOLATION",
+      });
+      expect(
+        (
+          await localTarget.pool.query<{ name: string | null }>(
+            "SELECT to_regclass('runtime_schema_migrations')::text AS name",
+          )
+        ).rows[0]?.name,
+      ).toBeNull();
+    } finally {
+      await localTarget.close();
+    }
+
+    const thirdPartyRole = `it_acl_grantee_${process.pid}`;
+    const thirdPartyTarget = await createIsolatedMigrationTarget("third_default_acl");
+    await administrativePool.query(`CREATE ROLE "${thirdPartyRole}" NOLOGIN`);
+    try {
+      await thirdPartyTarget.pool.query(
+        `ALTER DEFAULT PRIVILEGES IN SCHEMA "${thirdPartyTarget.context.schema}"
+           GRANT EXECUTE ON ROUTINES TO "${thirdPartyRole}"`,
+      );
+      await expect(
+        migrateUp(thirdPartyTarget.pool, thirdPartyTarget.context),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+    } finally {
+      await thirdPartyTarget.close();
+      await administrativePool.query(`DROP ROLE "${thirdPartyRole}"`);
+    }
+
+    const globalTarget = await createIsolatedMigrationTarget("global_default_acl");
+    try {
+      await globalTarget.pool.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE "${globalTarget.context.migratorRole}"
+           REVOKE EXECUTE ON ROUTINES FROM PUBLIC`,
+      );
+      await expect(migrateUp(globalTarget.pool, globalTarget.context)).rejects.toMatchObject({
+        code: "CONSTRAINT_VIOLATION",
+      });
+    } finally {
+      await globalTarget.pool.query(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE "${globalTarget.context.migratorRole}"
+           GRANT EXECUTE ON ROUTINES TO PUBLIC`,
+      );
+      await globalTarget.close();
+    }
+  });
+
+  it("Migrator 对无关 Schema 的有效 CREATE 在首个 DDL 前拒绝", async () => {
+    const target = await createIsolatedMigrationTarget("foreign_schema_create");
+    const extraSchema = `${target.context.schema}_extra`;
+    await administrativePool.query(
+      `CREATE SCHEMA "${extraSchema}" AUTHORIZATION "${databaseOwnerRole}";
+       GRANT CREATE ON SCHEMA "${extraSchema}" TO "${target.context.migratorRole}"`,
+    );
+    try {
+      await expect(migrateUp(target.pool, target.context)).rejects.toMatchObject({
+        code: "CONSTRAINT_VIOLATION",
+      });
+      expect(
+        (
+          await target.pool.query<{ name: string | null }>(
+            "SELECT to_regclass('runtime_schema_migrations')::text AS name",
+          )
+        ).rows[0]?.name,
+      ).toBeNull();
+    } finally {
+      await administrativePool.query(
+        `REVOKE CREATE ON SCHEMA "${extraSchema}" FROM "${target.context.migratorRole}";
+         DROP SCHEMA "${extraSchema}" CASCADE`,
+      );
+      await target.close();
     }
   });
 
@@ -712,39 +868,33 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     expect(publicAfter.rows[0]?.count).toBe("0");
   });
 
-  it("默认权限保证 Runtime 与 PUBLIC 均不能执行新增 routine", async () => {
-    await migratorPool.query(
-      `CREATE FUNCTION runtime_forbidden() RETURNS integer
-         LANGUAGE sql SECURITY DEFINER AS 'SELECT 1'`,
+  it("空 routine manifest 令 Runtime 与 PUBLIC 的 EXECUTE 集合自然为空", async () => {
+    const privileges = await migratorPool.query<{
+      routine_count: string;
+      runtime_execute_count: string;
+      public_execute_count: string;
+    }>(
+      `SELECT count(*)::text AS routine_count,
+              count(*) FILTER (
+                WHERE has_function_privilege($1, routine.oid, 'EXECUTE')
+              )::text AS runtime_execute_count,
+              count(*) FILTER (
+                WHERE EXISTS (
+                  SELECT 1 FROM aclexplode(
+                    COALESCE(routine.proacl, acldefault('f'::"char", routine.proowner))
+                  ) acl
+                   WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+                )
+              )::text AS public_execute_count
+         FROM pg_proc routine
+        WHERE routine.pronamespace = current_schema()::regnamespace`,
+      [runtimeRole],
     );
-    try {
-      const privileges = await migratorPool.query<{
-        runtime_execute: boolean;
-        public_execute_count: string;
-      }>(
-        `SELECT has_function_privilege(
-                  $1, format('%I.runtime_forbidden()', current_schema()::text), 'EXECUTE'
-                ) AS runtime_execute,
-                (SELECT count(*)::text
-                   FROM pg_proc routine
-                   CROSS JOIN LATERAL aclexplode(
-                     COALESCE(routine.proacl, acldefault('f'::"char", routine.proowner))
-                   ) acl
-                  WHERE routine.oid = 'runtime_forbidden()'::regprocedure
-                    AND acl.grantee = 0 AND acl.privilege_type = 'EXECUTE')
-                  AS public_execute_count`,
-        [runtimeRole],
-      );
-      expect(privileges.rows[0]).toEqual({
-        runtime_execute: false,
-        public_execute_count: "0",
-      });
-      await expect(runtimePool.query("SELECT runtime_forbidden()")).rejects.toMatchObject({
-        code: "42501",
-      });
-    } finally {
-      await migratorPool.query("DROP FUNCTION runtime_forbidden()");
-    }
+    expect(privileges.rows[0]).toEqual({
+      routine_count: "0",
+      runtime_execute_count: "0",
+      public_execute_count: "0",
+    });
   });
 
   it("Runtime 角色不能 DDL、创建 Schema 或绕过 RLS 跨租户写", async () => {

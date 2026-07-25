@@ -1,0 +1,321 @@
+import {
+  type StableBlobRef,
+  type StagedBlobRef,
+  type TenantBlobScope,
+  assertBlobRef,
+} from "./blob-store.js";
+
+/**
+ * 此状态必须持久化在 PostgreSQL。BlobStore 本身无法证明业务引用已经提交，
+ * 因此稳定对象和 staging 清理都只能由持有该状态的协调器驱动。
+ */
+export type BlobCommitStatus =
+  | "upload_pending"
+  | "staged"
+  | "reference_commit_pending"
+  | "reference_commit_unknown"
+  | "reference_committed"
+  | "promotion_unknown"
+  | "stable_object_ready"
+  | "stable_mark_unknown"
+  | "stable"
+  | "cleanup_pending"
+  | "completed"
+  | "abandoned";
+
+export interface BlobCommitSnapshot {
+  readonly operationId: string;
+  readonly scope: TenantBlobScope;
+  readonly status: BlobCommitStatus;
+  readonly version: number;
+  readonly staged?: StagedBlobRef;
+  readonly stable?: StableBlobRef;
+  readonly referenceId?: string;
+}
+
+export type BlobCommitEvent =
+  | { readonly type: "stage_verified"; readonly staged: StagedBlobRef }
+  | { readonly type: "reference_commit_started" }
+  | { readonly type: "reference_commit_succeeded"; readonly referenceId: string }
+  | { readonly type: "reference_commit_failed" }
+  | { readonly type: "reference_commit_result_unknown" }
+  | {
+      readonly type: "reference_commit_resolved";
+      readonly committed: boolean;
+      readonly referenceId?: string;
+    }
+  | { readonly type: "promotion_succeeded"; readonly stable: StableBlobRef }
+  | { readonly type: "promotion_failed" }
+  | { readonly type: "promotion_result_unknown" }
+  | { readonly type: "promotion_resolved"; readonly stable?: StableBlobRef }
+  | { readonly type: "stable_mark_succeeded" }
+  | { readonly type: "stable_mark_failed" }
+  | { readonly type: "stable_mark_result_unknown" }
+  | { readonly type: "stable_mark_resolved"; readonly marked: boolean }
+  | { readonly type: "cleanup_requested" }
+  | { readonly type: "cleanup_succeeded" };
+
+export class BlobCommitTransitionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BlobCommitTransitionError";
+  }
+}
+
+export interface BlobReferenceCommitPort {
+  /** operationId 是幂等键；超时不能被调用方当成未提交。 */
+  commitStagedReference(input: {
+    readonly operationId: string;
+    readonly scope: TenantBlobScope;
+    readonly staged: StagedBlobRef;
+  }): Promise<{ readonly referenceId: string }>;
+
+  resolveReferenceCommit(
+    operationId: string,
+  ): Promise<
+    { readonly status: "committed"; readonly referenceId: string } | { readonly status: "absent" }
+  >;
+
+  /** 只有 stable 对象经 HEAD 校验后才能把业务引用切换到 stable。 */
+  markReferenceStable(input: {
+    readonly operationId: string;
+    readonly referenceId: string;
+    readonly stable: StableBlobRef;
+  }): Promise<void>;
+
+  resolveStableMark(operationId: string): Promise<"marked" | "not_marked">;
+}
+
+export interface BlobCommitStatePort {
+  load(operationId: string): Promise<BlobCommitSnapshot | undefined>;
+  create(snapshot: BlobCommitSnapshot): Promise<void>;
+  compareAndSet(input: {
+    readonly operationId: string;
+    readonly expectedVersion: number;
+    readonly next: BlobCommitSnapshot;
+  }): Promise<boolean>;
+}
+
+export function transitionBlobCommit(
+  current: BlobCommitSnapshot,
+  event: BlobCommitEvent,
+): BlobCommitSnapshot {
+  const next = applyTransition(current, event);
+  return { ...next, version: current.version + 1 };
+}
+
+function applyTransition(
+  current: BlobCommitSnapshot,
+  event: BlobCommitEvent,
+): Omit<BlobCommitSnapshot, "version"> {
+  switch (current.status) {
+    case "upload_pending":
+      if (event.type === "stage_verified") {
+        assertStagedMatchesScope(current, event.staged);
+        return { ...base(current), status: "staged", staged: event.staged };
+      }
+      break;
+    case "staged":
+      if (event.type === "reference_commit_started") {
+        return {
+          ...base(current),
+          status: "reference_commit_pending",
+          staged: requireStaged(current),
+        };
+      }
+      if (event.type === "cleanup_requested") {
+        return { ...base(current), status: "cleanup_pending", staged: requireStaged(current) };
+      }
+      break;
+    case "reference_commit_pending":
+      if (event.type === "reference_commit_succeeded") {
+        return {
+          ...base(current),
+          status: "reference_committed",
+          staged: requireStaged(current),
+          referenceId: event.referenceId,
+        };
+      }
+      if (event.type === "reference_commit_result_unknown") {
+        return {
+          ...base(current),
+          status: "reference_commit_unknown",
+          staged: requireStaged(current),
+        };
+      }
+      if (event.type === "reference_commit_failed") {
+        return { ...base(current), status: "cleanup_pending", staged: requireStaged(current) };
+      }
+      break;
+    case "reference_commit_unknown":
+      if (event.type === "reference_commit_resolved") {
+        if (event.committed && event.referenceId !== undefined) {
+          return {
+            ...base(current),
+            status: "reference_committed",
+            staged: requireStaged(current),
+            referenceId: event.referenceId,
+          };
+        }
+        if (!event.committed) {
+          return { ...base(current), status: "cleanup_pending", staged: requireStaged(current) };
+        }
+      }
+      break;
+    case "reference_committed":
+      if (event.type === "promotion_succeeded") {
+        assertStableMatchesStaged(current, event.stable);
+        return {
+          ...base(current),
+          status: "stable_object_ready",
+          staged: requireStaged(current),
+          stable: event.stable,
+          referenceId: requireReferenceId(current),
+        };
+      }
+      if (event.type === "promotion_result_unknown") {
+        return {
+          ...base(current),
+          status: "promotion_unknown",
+          staged: requireStaged(current),
+          referenceId: requireReferenceId(current),
+        };
+      }
+      if (event.type === "promotion_failed") {
+        // 明确失败可以安全重试复制；业务引用已经提交，不能退回并清理 staging。
+        return {
+          ...base(current),
+          status: "reference_committed",
+          staged: requireStaged(current),
+          referenceId: requireReferenceId(current),
+        };
+      }
+      break;
+    case "promotion_unknown":
+      if (event.type === "promotion_resolved") {
+        if (event.stable !== undefined) {
+          assertStableMatchesStaged(current, event.stable);
+        }
+        return event.stable === undefined
+          ? {
+              ...base(current),
+              status: "reference_committed",
+              staged: requireStaged(current),
+              referenceId: requireReferenceId(current),
+            }
+          : {
+              ...base(current),
+              status: "stable_object_ready",
+              staged: requireStaged(current),
+              stable: event.stable,
+              referenceId: requireReferenceId(current),
+            };
+      }
+      break;
+    case "stable_object_ready":
+      if (event.type === "stable_mark_succeeded") {
+        return copyStable(current, "stable");
+      }
+      if (event.type === "stable_mark_result_unknown") {
+        return copyStable(current, "stable_mark_unknown");
+      }
+      if (event.type === "stable_mark_failed") {
+        return copyStable(current, "stable_object_ready");
+      }
+      break;
+    case "stable_mark_unknown":
+      if (event.type === "stable_mark_resolved") {
+        return copyStable(current, event.marked ? "stable" : "stable_object_ready");
+      }
+      break;
+    case "stable":
+      if (event.type === "cleanup_requested") {
+        return copyStable(current, "cleanup_pending");
+      }
+      break;
+    case "cleanup_pending":
+      if (event.type === "cleanup_succeeded") {
+        return current.stable === undefined
+          ? { ...base(current), status: "abandoned" }
+          : copyStable(current, "completed");
+      }
+      break;
+    case "completed":
+    case "abandoned":
+      break;
+  }
+  throw new BlobCommitTransitionError(`不允许从 ${current.status} 应用事件 ${event.type}`);
+}
+
+function base(current: BlobCommitSnapshot): Pick<BlobCommitSnapshot, "operationId" | "scope"> {
+  return { operationId: current.operationId, scope: current.scope };
+}
+
+function requireStaged(current: BlobCommitSnapshot): StagedBlobRef {
+  if (current.staged === undefined) {
+    throw new BlobCommitTransitionError("状态缺少 staging 引用");
+  }
+  return current.staged;
+}
+
+function requireStable(current: BlobCommitSnapshot): StableBlobRef {
+  if (current.stable === undefined) {
+    throw new BlobCommitTransitionError("状态缺少 stable 引用");
+  }
+  return current.stable;
+}
+
+function requireReferenceId(current: BlobCommitSnapshot): string {
+  if (current.referenceId === undefined) {
+    throw new BlobCommitTransitionError("状态缺少业务引用 ID");
+  }
+  return current.referenceId;
+}
+
+function copyStable(
+  current: BlobCommitSnapshot,
+  status:
+    | "stable_object_ready"
+    | "stable_mark_unknown"
+    | "stable"
+    | "cleanup_pending"
+    | "completed",
+): Omit<BlobCommitSnapshot, "version"> {
+  return {
+    ...base(current),
+    status,
+    staged: requireStaged(current),
+    stable: requireStable(current),
+    referenceId: requireReferenceId(current),
+  };
+}
+
+function assertStagedMatchesScope(current: BlobCommitSnapshot, staged: StagedBlobRef): void {
+  try {
+    assertBlobRef(current.scope, staged);
+  } catch (error) {
+    throw new BlobCommitTransitionError(
+      `staging 引用与协调状态不一致：${error instanceof Error ? error.message : "未知错误"}`,
+    );
+  }
+}
+
+function assertStableMatchesStaged(current: BlobCommitSnapshot, stable: StableBlobRef): void {
+  const staged = requireStaged(current);
+  try {
+    assertBlobRef(current.scope, stable);
+  } catch (error) {
+    throw new BlobCommitTransitionError(
+      `stable 引用与协调状态不一致：${error instanceof Error ? error.message : "未知错误"}`,
+    );
+  }
+  if (
+    stable.tenantId !== staged.tenantId ||
+    stable.purpose !== staged.purpose ||
+    stable.sha256 !== staged.sha256 ||
+    stable.size !== staged.size ||
+    stable.mediaType !== staged.mediaType
+  ) {
+    throw new BlobCommitTransitionError("stable 引用与 staging 内容描述不一致");
+  }
+}

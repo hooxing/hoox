@@ -24,6 +24,15 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspace_revisions", new Set(["SELECT", "INSERT"])],
   ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
+  ["blob_lifecycles", new Set(["SELECT", "INSERT", "UPDATE"])],
+  ["blob_incarnations", new Set(["SELECT", "INSERT", "UPDATE"])],
+  ["blob_allocations", new Set(["SELECT", "INSERT"])],
+  ["blob_commits", new Set(["SELECT", "INSERT", "UPDATE"])],
+  ["promotion_authorizations", new Set(["SELECT", "INSERT", "UPDATE"])],
+  ["promotion_executions", new Set(["SELECT", "INSERT", "UPDATE"])],
+  ["blob_gc_claims", new Set(["SELECT", "INSERT", "UPDATE"])],
+  ["retired_blob_tombstones", new Set(["SELECT", "INSERT", "UPDATE"])],
+  ["blob_references", new Set(["SELECT", "INSERT", "UPDATE"])],
   [migrationTable, new Set()],
 ]);
 
@@ -489,6 +498,20 @@ export async function bootstrapRuntimeAccessOnClient(
   await client.query(
     `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE ${schema}.workspace_write_leases TO ${role}`,
   );
+  // 生命周期历史与副作用证明只允许追加或状态推进，Runtime 永远不能物理删除审计事实。
+  await client.query(
+    `GRANT SELECT, INSERT, UPDATE ON TABLE
+       ${schema}.blob_lifecycles,
+       ${schema}.blob_incarnations,
+       ${schema}.blob_commits,
+       ${schema}.promotion_authorizations,
+       ${schema}.promotion_executions,
+       ${schema}.blob_gc_claims,
+       ${schema}.retired_blob_tombstones,
+       ${schema}.blob_references
+     TO ${role}`,
+  );
+  await client.query(`GRANT SELECT, INSERT ON TABLE ${schema}.blob_allocations TO ${role}`);
   await assertActiveRuntimeWhitelist(client, context);
 }
 

@@ -40,12 +40,15 @@ import {
   withTenantTransaction,
   type Pool,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
 
 const runtimeDatabaseUrl = process.env.DATABASE_URL;
+const bootstrapDatabaseUrl = process.env.DATABASE_BOOTSTRAP_URL;
 const migrationDatabaseUrl = process.env.MIGRATION_DATABASE_URL;
 const runtimeRole = process.env.DATABASE_RUNTIME_ROLE;
 if (
   runtimeDatabaseUrl === undefined ||
+  bootstrapDatabaseUrl === undefined ||
   migrationDatabaseUrl === undefined ||
   runtimeRole === undefined
 ) {
@@ -53,6 +56,9 @@ if (
 }
 
 const schema = `it_${process.pid}_${Date.now()}`;
+const migratorRole = new URL(migrationDatabaseUrl).username;
+const databaseOwnerRole = new URL(bootstrapDatabaseUrl).username;
+if (!/^[a-z_][a-z0-9_]{0,62}$/.test(migratorRole)) throw new Error("Migrator 角色名称无效");
 const sourceMigrationDirectory = fileURLToPath(
   new URL("../../runtime-ts/packages/persistence/migrations/", import.meta.url),
 );
@@ -137,10 +143,10 @@ async function acquireLease(fixture: Fixture): Promise<Workspace> {
 
 beforeAll(async () => {
   administrativePool = createPostgresPool({
-    connectionString: migrationDatabaseUrl,
+    connectionString: bootstrapDatabaseUrl,
     maxConnections: 2,
   });
-  await administrativePool.query(`CREATE SCHEMA "${schema}"`);
+  await administrativePool.query(`CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`);
   schemaCreated = true;
   migratorPool = createPostgresPool({
     connectionString: migrationDatabaseUrl,
@@ -159,6 +165,7 @@ beforeAll(async () => {
   concurrentMigrationVersions = concurrent.flatMap((records) =>
     records.map((record) => record.version),
   );
+  await bootstrapRuntimeAccess(migratorPool, runtimeRole);
   repositories = new PgCoreRepositories(runtimePool);
 });
 
@@ -223,38 +230,162 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       migrateDown(migratorPool, {
         allowDestructive: false as true,
         environment: "test",
+        runtimeRole,
       }),
     ).rejects.toThrow("禁止破坏性");
     expect(
-      await migrateDown(migratorPool, { allowDestructive: true, environment: "test" }),
+      await migrateDown(migratorPool, {
+        allowDestructive: true,
+        environment: "test",
+        runtimeRole,
+      }),
     ).toEqual([]);
+    const usageAfterDown = await migratorPool.query<{ allowed: boolean }>(
+      "SELECT has_schema_privilege($1, current_schema(), 'USAGE') AS allowed",
+      [runtimeRole],
+    );
+    expect(usageAfterDown.rows[0]?.allowed).toBe(false);
     expect(await migrateUp(migratorPool, { runtimeRole })).toHaveLength(1);
+    await bootstrapRuntimeAccess(migratorPool, runtimeRole);
+  });
+
+  it("Runtime 角色不安全时在任何迁移 DDL 之前失败", async () => {
+    const unsafeParentRole = `it_unsafe_parent_${process.pid}`;
+    const unsafeChildRole = `it_unsafe_child_${process.pid}`;
+    const unsafeTableOwnerRole = `it_unsafe_table_${process.pid}`;
+    await administrativePool.query(
+      `CREATE ROLE "${unsafeParentRole}" NOLOGIN CREATEDB;
+       CREATE ROLE "${unsafeChildRole}" NOLOGIN;
+       CREATE ROLE "${unsafeTableOwnerRole}" NOLOGIN;
+       GRANT "${unsafeParentRole}" TO "${unsafeChildRole}"`,
+    );
+    try {
+      const cases = [
+        { suffix: "inherited", role: unsafeChildRole },
+        { suffix: "schema_owner", role: migratorRole },
+        { suffix: "database_owner", role: databaseOwnerRole },
+        { suffix: "table_owner", role: unsafeTableOwnerRole },
+      ] as const;
+      for (const unsafe of cases) {
+        const unsafeSchema = `${schema}_${unsafe.suffix}`;
+        await administrativePool.query(
+          `CREATE SCHEMA "${unsafeSchema}" AUTHORIZATION "${migratorRole}"`,
+        );
+        if (unsafe.suffix === "table_owner") {
+          await administrativePool.query(
+            `CREATE TABLE "${unsafeSchema}".owned_seed(id integer);
+             ALTER TABLE "${unsafeSchema}".owned_seed OWNER TO "${unsafeTableOwnerRole}"`,
+          );
+        }
+        const unsafePool = createPostgresPool({
+          connectionString: migrationDatabaseUrl,
+          schema: unsafeSchema,
+          maxConnections: 2,
+        });
+        try {
+          await expect(migrateUp(unsafePool, { runtimeRole: unsafe.role })).rejects.toMatchObject({
+            code: "CONSTRAINT_VIOLATION",
+          });
+          const migrationTable = await unsafePool.query<{ name: string | null }>(
+            "SELECT to_regclass('runtime_schema_migrations')::text AS name",
+          );
+          expect(migrationTable.rows[0]?.name).toBeNull();
+        } finally {
+          await unsafePool.end();
+          await administrativePool.query(`DROP SCHEMA "${unsafeSchema}" CASCADE`);
+        }
+      }
+    } finally {
+      await administrativePool.query(
+        `REVOKE "${unsafeParentRole}" FROM "${unsafeChildRole}";
+         DROP ROLE "${unsafeChildRole}";
+         DROP ROLE "${unsafeParentRole}";
+         DROP ROLE "${unsafeTableOwnerRole}"`,
+      );
+    }
   });
 
   it("Runtime 角色不能 DDL、创建 Schema 或绕过 RLS 跨租户写", async () => {
     const roles = await administrativePool.query<{
-      migrator: string;
+      migrator_schema_owner: string;
       database_owner: string;
       runtime_super: boolean;
       runtime_bypass_rls: boolean;
       runtime_can_create_database: boolean;
     }>(
-      `SELECT current_user AS migrator,
+      `SELECT pg_get_userbyid(n.nspowner) AS migrator_schema_owner,
               pg_get_userbyid(d.datdba) AS database_owner,
               r.rolsuper AS runtime_super,
               r.rolbypassrls AS runtime_bypass_rls,
               has_database_privilege($1, current_database(), 'CREATE') AS runtime_can_create_database
-         FROM pg_database d CROSS JOIN pg_roles r
-        WHERE d.datname = current_database() AND r.rolname = $1`,
-      [runtimeRole],
+         FROM pg_database d CROSS JOIN pg_roles r CROSS JOIN pg_namespace n
+        WHERE d.datname = current_database() AND r.rolname = $1 AND n.nspname = $2`,
+      [runtimeRole, schema],
     );
     expect(roles.rows[0]).toMatchObject({
-      database_owner: roles.rows[0]?.migrator,
+      migrator_schema_owner: migratorRole,
+      database_owner: databaseOwnerRole,
       runtime_super: false,
       runtime_bypass_rls: false,
       runtime_can_create_database: false,
     });
-    expect(roles.rows[0]?.migrator).not.toBe(runtimeRole);
+    expect(roles.rows[0]?.database_owner).not.toBe(migratorRole);
+    expect(roles.rows[0]?.migrator_schema_owner).not.toBe(runtimeRole);
+    const privilegeMatrix = await migratorPool.query<{
+      table_name: string;
+      privilege: string;
+      allowed: boolean;
+    }>(
+      `SELECT requested.table_name, requested.privilege,
+              has_table_privilege($1, requested.table_name, requested.privilege) AS allowed
+         FROM (VALUES
+           ('app_users','SELECT'), ('app_users','INSERT'), ('app_users','UPDATE'),
+           ('tenants','SELECT'), ('tenants','INSERT'), ('tenants','DELETE'),
+           ('memberships','SELECT'), ('memberships','INSERT'), ('memberships','UPDATE'),
+           ('threads','SELECT'), ('threads','INSERT'), ('threads','UPDATE'), ('threads','DELETE'),
+           ('runs','SELECT'), ('runs','INSERT'), ('runs','UPDATE'), ('runs','DELETE'),
+           ('workspaces','SELECT'), ('workspaces','INSERT'), ('workspaces','UPDATE'), ('workspaces','DELETE'),
+           ('workspace_revisions','SELECT'), ('workspace_revisions','INSERT'),
+           ('workspace_revisions','UPDATE'), ('workspace_revisions','DELETE'),
+           ('workspace_write_leases','SELECT'), ('workspace_write_leases','INSERT'),
+           ('workspace_write_leases','UPDATE'), ('workspace_write_leases','DELETE')
+         ) AS requested(table_name, privilege)`,
+      [runtimeRole],
+    );
+    const allowed = new Set(
+      privilegeMatrix.rows
+        .filter((entry) => entry.allowed)
+        .map((entry) => `${entry.table_name}:${entry.privilege}`),
+    );
+    expect(allowed).toEqual(
+      new Set([
+        "app_users:SELECT",
+        "app_users:INSERT",
+        "tenants:SELECT",
+        "tenants:INSERT",
+        "memberships:SELECT",
+        "memberships:INSERT",
+        "threads:SELECT",
+        "threads:INSERT",
+        "threads:UPDATE",
+        "runs:SELECT",
+        "runs:INSERT",
+        "runs:UPDATE",
+        "workspaces:SELECT",
+        "workspaces:INSERT",
+        "workspaces:UPDATE",
+        "workspace_revisions:SELECT",
+        "workspace_revisions:INSERT",
+        "workspace_write_leases:SELECT",
+        "workspace_write_leases:INSERT",
+        "workspace_write_leases:UPDATE",
+        "workspace_write_leases:DELETE",
+      ]),
+    );
+    const sequenceCount = await migratorPool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relkind = 'S'",
+    );
+    expect(sequenceCount.rows[0]?.count).toBe("0");
     await expect(
       runtimePool.query("CREATE TABLE forbidden_runtime_ddl(id integer)"),
     ).rejects.toMatchObject({
@@ -278,7 +409,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 });
 
 describe("PostgreSQL Repository 与并发条件", () => {
-  it("团队 Tenant 创建者与 Thread 创建者不同也能正确恢复聚合", async () => {
+  it("双方 Membership 活动时可恢复不同 Tenant/Thread 创建者", async () => {
     const teamTenantId = tenantId("tenant_team_mapping");
     const tenantCreatorId = userId("user_team_creator");
     const threadCreatorId = userId("user_thread_creator");
@@ -509,6 +640,21 @@ describe("PostgreSQL Repository 与并发条件", () => {
       ),
     );
     expect(rows.rows[0]?.count).toBe("1");
+    await expect(
+      withTenantTransaction(runtimePool, fixture.writeScope, (client) =>
+        client.query(
+          "UPDATE workspace_revisions SET object_key = 'forbidden' WHERE workspace_id = $1",
+          [fixture.workspace.id],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      withTenantTransaction(runtimePool, fixture.writeScope, (client) =>
+        client.query("DELETE FROM workspace_revisions WHERE workspace_id = $1", [
+          fixture.workspace.id,
+        ]),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
   });
 
   it("数据库时钟拒绝过期、错误 root Run 和错误 epoch", async () => {

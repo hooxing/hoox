@@ -1,8 +1,10 @@
 export const expectedEnvironmentKeys = Object.freeze([
   "DATABASE_URL",
   "DATABASE_DOCKER_URL",
+  "DATABASE_BOOTSTRAP_URL",
   "MIGRATION_DATABASE_URL",
   "DATABASE_RUNTIME_ROLE",
+  "DATABASE_SCHEMA",
   "RUNTIME_ENV",
   "MINIO_ROOT_USER",
   "MINIO_ROOT_PASSWORD",
@@ -32,6 +34,7 @@ export const expectedEnvironmentKeys = Object.freeze([
 const placeholderOnlyKeys = new Set([
   "DATABASE_URL",
   "DATABASE_DOCKER_URL",
+  "DATABASE_BOOTSTRAP_URL",
   "MIGRATION_DATABASE_URL",
   "MINIO_ROOT_USER",
   "MINIO_ROOT_PASSWORD",
@@ -44,7 +47,12 @@ const placeholderOnlyKeys = new Set([
 ]);
 
 function looksLikePlaceholder(key, value) {
-  if (key === "DATABASE_URL" || key === "DATABASE_DOCKER_URL" || key === "MIGRATION_DATABASE_URL") {
+  if (
+    key === "DATABASE_URL" ||
+    key === "DATABASE_DOCKER_URL" ||
+    key === "DATABASE_BOOTSTRAP_URL" ||
+    key === "MIGRATION_DATABASE_URL"
+  ) {
     try {
       return new URL(value).password === "replace-me";
     } catch {

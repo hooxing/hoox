@@ -51,15 +51,22 @@ integration("MinIO Blob Store 集成", () => {
     } as const;
     const store = createS3BlobStore(common);
     const gc = createS3StableBlobGarbageCollector(common, {
-      async proveUnreachable({ scope: proofScope, blob }) {
+      async claimUnreachable({ scope: claimScope, blob }) {
         return {
-          proofId: `integration-proof-${unique}`,
-          tenantId: proofScope.tenantId,
-          purpose: blob.purpose,
-          sha256: blob.sha256,
-          checkedAt: new Date().toISOString(),
+          status: "claimed",
+          claim: {
+            claimId: `integration-claim-${unique}`,
+            generation: 1,
+            tenantId: claimScope.tenantId,
+            purpose: blob.purpose,
+            sha256: blob.sha256,
+            size: blob.size,
+            leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
         };
       },
+      async completeDeletion() {},
+      async releaseClaim() {},
     });
     const cleanupClient = new S3Client({
       endpoint: config.endpoint,
@@ -85,13 +92,31 @@ integration("MinIO Blob Store 集成", () => {
       expect(await store.getBytes(scope, stable)).toEqual(body);
       const downloadUrl = await store.presignDownload({
         scope,
-        blob: stable,
+        blob: { ...stable, mediaType: "application/pdf" },
         ttlSeconds: 30,
+        responseMediaType: "application/pdf",
         downloadName: "集成'()*.txt",
       });
       const response = await fetch(downloadUrl);
       expect(response.ok).toBe(true);
+      expect(response.headers.get("content-type")).toBe("application/pdf");
+      expect(response.headers.get("content-disposition")).toBe(
+        "attachment; filename*=UTF-8''%E9%9B%86%E6%88%90%27%28%29%2A.txt",
+      );
       expect(new Uint8Array(await response.arrayBuffer())).toEqual(body);
+
+      const previewUrl = await store.presignDownload({
+        scope,
+        blob: { ...stable, mediaType: "text/markdown" },
+        ttlSeconds: 30,
+        responseMediaType: "text/markdown",
+        delivery: "inline-preview",
+      });
+      const previewResponse = await fetch(previewUrl);
+      expect(previewResponse.ok).toBe(true);
+      expect(previewResponse.headers.get("content-type")).toBe("text/markdown");
+      expect(previewResponse.headers.get("content-disposition")).toBe("inline");
+      expect(new Uint8Array(await previewResponse.arrayBuffer())).toEqual(body);
     } finally {
       // 两条清理互不依赖；即使其中一个结果未知，另一条仍会执行。
       const cleanupResults = await Promise.allSettled([

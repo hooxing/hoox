@@ -16,6 +16,8 @@ integration("MinIO Blob Store 集成", () => {
     const config = requiredConfig();
     const unique = randomUUID();
     const incarnationId = randomUUID();
+    const lifecycleId = randomUUID();
+    const allocationId = randomUUID();
     const prefix = `integration-test/${unique}`;
     const scope = { tenantId: `integration_${unique.replaceAll("-", "_")}` };
     const body = new TextEncoder().encode(`minio-${unique}`);
@@ -40,6 +42,18 @@ integration("MinIO Blob Store 集成", () => {
       physicalObjectKey: `${prefix}/stable/${scope.tenantId}/artifact/sha256/${descriptor.sha256}/incarnations/${incarnationId}`,
       ...descriptor,
     };
+    const allocation = {
+      tenantId: scope.tenantId,
+      purpose: staged.purpose,
+      sha256: staged.sha256,
+      size: staged.size,
+      incarnationId,
+      physicalObjectKey: stable.physicalObjectKey,
+      lifecycleId,
+      allocationId,
+      generation: 1,
+      mode: "active_reuse" as const,
+    };
     const common = {
       bucket: config.bucket,
       endpoint: config.endpoint,
@@ -52,7 +66,14 @@ integration("MinIO Blob Store 集成", () => {
       maxPresignTtlSeconds: 60,
       maxBlobSizeBytes: 1_024 * 1_024,
     } as const;
-    const store = createS3BlobStore(common);
+    const store = createS3BlobStore(common, {
+      async reserve() {
+        return allocation;
+      },
+      async resolveForPromotion({ allocation: candidate }) {
+        return candidate.allocationId === allocation.allocationId ? allocation : undefined;
+      },
+    });
     const gc = createS3StableBlobGarbageCollector(common, {
       async claimUnreachable({ scope: claimScope, blob }) {
         return {
@@ -77,7 +98,7 @@ integration("MinIO Blob Store 集成", () => {
       async completeDeletion() {},
       async releasePreDeleteClaim() {},
       async resolveLifecycle() {
-        return "active";
+        return { status: "active" };
       },
     });
     const cleanupClient = new S3Client({
@@ -100,7 +121,7 @@ integration("MinIO Blob Store 集成", () => {
       expect((await store.head(scope, staged))?.blob).toEqual(staged);
       expect(await store.getBytes(scope, staged)).toEqual(body);
 
-      expect(await store.promote(scope, staged, { incarnationId })).toEqual(stable);
+      expect(await store.promote(scope, staged, allocation)).toEqual(stable);
       expect(await store.getBytes(scope, stable)).toEqual(body);
       const downloadUrl = await store.presignDownload({
         scope,

@@ -52,6 +52,7 @@
 
 - PostgreSQL 为每个 `(tenant_id, purpose, sha256, size)` 保存逻辑内容生命周期；当前 incarnation 记录至少包含安全随机 UUID `incarnation_id`、完整 `physical_object_key`、`active | pre_delete | deleting | deleted`、`generation`、`claim_id` 和 `lease_expires_at`；
 - stable 物理键固定为 `<prefix>/stable/<tenant>/<purpose>/sha256/<hash>/incarnations/<incarnation-id>`。SHA-256 继续用于逻辑去重；incarnationId 由 PG 生命周期事务分配并持久化，active 时复用当前 incarnation，deleted 后重新发布必须分配新 UUID；
+- 引入可信 `StableBlobLifecycleAllocationPort`。PG 事务返回的 allocation 至少包含 tenantId、purpose、sha256、size、incarnationId、physicalObjectKey、lifecycleId、allocationId、generation 和 `active_reuse | new_after_deleted` mode；S3 promote 必须经端口回查 persisted allocation 并全字段比对，不能只接受调用方提供的 UUID；
 - `claimUnreachable` 在一个数据库事务中锁定生命周期行并检查引用计数。零引用的 active 行进入 `pre_delete` 并签发租约；租约未到期的 `pre_delete/deleting` 稳定返回 `in_progress`，不能并发签发 claim；
 - Worker 必须调用 `beginDeletion`，以 claimId + generation CAS 把 `pre_delete` 原子推进到不可逆 `deleting`，只有收到 `started + deleting claim` 后才能发起 S3 DELETE；
 - 所有新增 stable 引用路径必须在同一数据库事务中锁定并读取该生命周期行。`pre_delete/deleting` 返回 `gc_in_progress`；active 引用必须复用并持久化当前 incarnationId/physicalObjectKey；deleted 重新发布时先分配新 incarnation，promote+HEAD 后再由引用事务激活并写入精确物理身份；
@@ -59,11 +60,14 @@
 - GC claim 必须绑定被 claim 时的 incarnationId 与完整 physicalObjectKey，执行器只删除该精确键；禁止仅凭 sha256 解析“当前 incarnation”；
 - S3 删除明确成功后用 claimId + generation 联合 CAS 调用 `completeDeletion`；lease 到期与 claim 是否有效完全由 PG 事务/端口判定，S3 executor 不读取应用进程 `Date.now()`。接管保持物理身份与 phase，只递增 generation/claimId；
 - 不依赖 S3 bucket versioning。安全性来自不可复用物理键：旧 Worker即使在新 incarnation 激活后才完成 DELETE，也只能作用旧 physicalObjectKey。
+- commit 协调状态在 COPY 前依次持久化 `allocation_reserved`（完整 allocation + target StableBlobRef）与 `promotion_started`。COPY UNKNOWN 的 snapshot 保留两者，恢复只能对同一 physicalObjectKey 执行 HEAD/COPY；禁止在 UNKNOWN 分支换 allocation。
+- GC lifecycle 明确 deleted 时，completeDeletion 原子写 deleted 并把旧 incarnation/key 放入永久 retired 历史。`stable_mark_gc_blocked` 解析 deleted 后清除旧 target，只有持久化 mode=`new_after_deleted` 且物理身份不同的新 allocation 才能再次进入 promotion。
 
 ### 影响
 
 - PG Repository 必须把新增引用、引用计数和生命周期状态纳入同一事务，不能把生命周期检查放到事务外；
 - 每个 ReferenceVersion、生命周期记录、恢复任务和 GC claim 都必须保存 incarnationId + physicalObjectKey；只存 sha256 不足以安全读取或删除；
+- allocation reserve/resolve 与 commit snapshot 都要持久化 lifecycleId、allocationId、generation、mode，便于 UNKNOWN 恢复证明使用的是同一预留；
 - stable GC 需要持久化恢复扫描、`pre_delete → deleting` 意图日志和租约接管，而不是普通定时 DELETE；
 - GC 期间新增引用会被显式阻止。调用方应等待 claim 收敛；若对象最终删除，则利用仍保留的 staging 重新 promote、HEAD 验证，再由引用事务恢复 active，而不能把阻止结果当成已经完成 stable 标记；
 - 当前任务只定义端口、状态语义和 S3 执行器；PG 表与事务实现由后续持久层任务交付。
@@ -92,6 +96,8 @@ stable 对象可被多个引用以不同 `mediaType` 使用，因此首次上传
 - stable 生命周期表增加 `incarnation_id uuid`、`physical_object_key text`，二者非空；建议 `(tenant_id, purpose, sha256, size, incarnation_id)` 唯一，当前 active incarnation 另设部分唯一约束；
 - ReferenceVersion 的 stable 指针和 GC/恢复任务载荷必须同时增加 `incarnation_id`、`physical_object_key`，外键/事务检查保证它们指向同一生命周期 incarnation；
 - claimId 与 generation 是联合 CAS 条件；begin、complete、pre-delete release 任一字段不匹配都拒绝；
+- `stable_blob_incarnations` 至少建立 `UNIQUE (tenant_id, purpose, incarnation_id)` 与 `UNIQUE (tenant_id, purpose, physical_object_key)`；建议 physical_object_key 再做全局唯一。retired 行永久保留，不能被 GC/归档物理删除，也不能被 reserve 再次选中；
+- allocation 记录以 allocation_id 唯一，并关联 lifecycle_id、generation 和 incarnation 外键；ReferenceVersion/commit snapshot 保存相同身份。数据库约束或事务触发器禁止 retired incarnation 重新进入 active；
 - 本项目是全新实现，不迁移旧 Python 原型。此前开发 MinIO 中不含 incarnation 的 stable key 只视为测试数据，应清理后重新发布；不提供旧 key 只读兼容，也不通过启用 bucket versioning 兜底；
 - 若未来已有生产对象，必须另做离线迁移：冻结写入、为每个旧对象分配 incarnation、复制到新键、回填所有 ReferenceVersion 后再启用 GC，不能原地把旧键当新 incarnation。
 

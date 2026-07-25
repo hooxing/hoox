@@ -1,5 +1,6 @@
 import {
   type StableBlobRef,
+  type StableBlobLifecycleAllocation,
   type StagedBlobRef,
   type TenantBlobScope,
   assertBlobRef,
@@ -16,6 +17,8 @@ export type BlobCommitStatus =
   | "reference_commit_pending"
   | "reference_commit_unknown"
   | "reference_committed"
+  | "allocation_reserved"
+  | "promotion_started"
   | "promotion_unknown"
   | "stable_object_ready"
   | "stable_mark_gc_blocked"
@@ -32,6 +35,9 @@ export interface BlobCommitSnapshot {
   readonly version: number;
   readonly staged?: StagedBlobRef;
   readonly stable?: StableBlobRef;
+  readonly allocation?: StableBlobLifecycleAllocation;
+  readonly retiredIncarnationId?: string;
+  readonly retiredPhysicalObjectKey?: string;
   readonly referenceId?: string;
   readonly cleanupTarget?: "staging";
 }
@@ -47,16 +53,28 @@ export type BlobCommitEvent =
       readonly committed: boolean;
       readonly referenceId?: string;
     }
+  | {
+      readonly type: "allocation_reserved";
+      readonly allocation: StableBlobLifecycleAllocation;
+      readonly stable: StableBlobRef;
+    }
+  | { readonly type: "promotion_started" }
   | { readonly type: "promotion_succeeded"; readonly stable: StableBlobRef }
   | { readonly type: "promotion_failed" }
   | { readonly type: "promotion_result_unknown" }
-  | { readonly type: "promotion_resolved"; readonly stable?: StableBlobRef }
+  | { readonly type: "promotion_resolved"; readonly promoted: boolean }
   | { readonly type: "stable_mark_succeeded" }
   | { readonly type: "stable_mark_failed" }
   | { readonly type: "stable_mark_gc_blocked" }
   | {
       readonly type: "stable_gc_lifecycle_resolved";
-      readonly status: "active" | "pre_delete" | "deleting" | "deleted";
+      readonly status: "active" | "pre_delete" | "deleting";
+    }
+  | {
+      readonly type: "stable_gc_lifecycle_resolved";
+      readonly status: "deleted";
+      readonly retiredIncarnationId: string;
+      readonly retiredPhysicalObjectKey: string;
     }
   | { readonly type: "stable_mark_result_unknown" }
   | {
@@ -202,53 +220,47 @@ function applyTransition(
       }
       break;
     case "reference_committed":
-      if (event.type === "promotion_succeeded") {
-        assertStableMatchesStaged(current, event.stable);
+      if (event.type === "allocation_reserved") {
+        assertAllocationTarget(current, event.allocation, event.stable);
         return {
           ...base(current),
-          status: "stable_object_ready",
+          status: "allocation_reserved",
           staged: requireStaged(current),
           stable: event.stable,
+          allocation: event.allocation,
           referenceId: requireReferenceId(current),
+          ...(current.retiredIncarnationId === undefined
+            ? {}
+            : {
+                retiredIncarnationId: current.retiredIncarnationId,
+                retiredPhysicalObjectKey: current.retiredPhysicalObjectKey,
+              }),
         };
+      }
+      break;
+    case "allocation_reserved":
+      if (event.type === "promotion_started") {
+        return copyPromotion(current, "promotion_started");
+      }
+      break;
+    case "promotion_started":
+      if (event.type === "promotion_succeeded") {
+        assertStableEqualsTarget(current, event.stable);
+        return copyPromotion(current, "stable_object_ready");
       }
       if (event.type === "promotion_result_unknown") {
-        return {
-          ...base(current),
-          status: "promotion_unknown",
-          staged: requireStaged(current),
-          referenceId: requireReferenceId(current),
-        };
+        return copyPromotion(current, "promotion_unknown");
       }
       if (event.type === "promotion_failed") {
-        // 明确失败可以安全重试复制；业务引用已经提交，不能退回并清理 staging。
-        return {
-          ...base(current),
-          status: "reference_committed",
-          staged: requireStaged(current),
-          referenceId: requireReferenceId(current),
-        };
+        return copyPromotion(current, "allocation_reserved");
       }
       break;
     case "promotion_unknown":
       if (event.type === "promotion_resolved") {
-        if (event.stable !== undefined) {
-          assertStableMatchesStaged(current, event.stable);
-        }
-        return event.stable === undefined
-          ? {
-              ...base(current),
-              status: "reference_committed",
-              staged: requireStaged(current),
-              referenceId: requireReferenceId(current),
-            }
-          : {
-              ...base(current),
-              status: "stable_object_ready",
-              staged: requireStaged(current),
-              stable: event.stable,
-              referenceId: requireReferenceId(current),
-            };
+        return copyPromotion(
+          current,
+          event.promoted ? "stable_object_ready" : "allocation_reserved",
+        );
       }
       break;
     case "stable_object_ready":
@@ -272,12 +284,21 @@ function applyTransition(
           return copyStable(current, "stable_object_ready");
         }
         if (event.status === "deleted") {
-          // 只有明确 deleted 才允许退回复制步骤；staging 在 stable 标记成功前始终保留。
+          const stable = requireStable(current);
+          if (
+            event.retiredIncarnationId !== stable.incarnationId ||
+            event.retiredPhysicalObjectKey !== stable.physicalObjectKey
+          ) {
+            throw new BlobCommitTransitionError("retired incarnation 与被 GC 阻塞的物理对象不一致");
+          }
+          // 旧 incarnation retired 后丢弃旧 target；必须先持久化新 allocation 才能再次 promote。
           return {
             ...base(current),
             status: "reference_committed",
             staged: requireStaged(current),
             referenceId: requireReferenceId(current),
+            retiredIncarnationId: event.retiredIncarnationId,
+            retiredPhysicalObjectKey: event.retiredPhysicalObjectKey,
           };
         }
         return copyStable(current, "stable_mark_gc_blocked");
@@ -336,6 +357,13 @@ function requireStable(current: BlobCommitSnapshot): StableBlobRef {
   return current.stable;
 }
 
+function requireAllocation(current: BlobCommitSnapshot): StableBlobLifecycleAllocation {
+  if (current.allocation === undefined) {
+    throw new BlobCommitTransitionError("状态缺少 stable allocation");
+  }
+  return current.allocation;
+}
+
 function requireReferenceId(current: BlobCommitSnapshot): string {
   if (current.referenceId === undefined) {
     throw new BlobCommitTransitionError("状态缺少业务引用 ID");
@@ -358,7 +386,28 @@ function copyStable(
     status,
     staged: requireStaged(current),
     stable: requireStable(current),
+    allocation: requireAllocation(current),
     referenceId: requireReferenceId(current),
+  };
+}
+
+function copyPromotion(
+  current: BlobCommitSnapshot,
+  status: "allocation_reserved" | "promotion_started" | "promotion_unknown" | "stable_object_ready",
+): Omit<BlobCommitSnapshot, "version"> {
+  return {
+    ...base(current),
+    status,
+    staged: requireStaged(current),
+    stable: requireStable(current),
+    allocation: requireAllocation(current),
+    referenceId: requireReferenceId(current),
+    ...(current.retiredIncarnationId === undefined
+      ? {}
+      : {
+          retiredIncarnationId: current.retiredIncarnationId,
+          retiredPhysicalObjectKey: current.retiredPhysicalObjectKey,
+        }),
   };
 }
 
@@ -392,8 +441,52 @@ function assertStableMatchesStaged(current: BlobCommitSnapshot, stable: StableBl
   }
 }
 
+function assertAllocationTarget(
+  current: BlobCommitSnapshot,
+  allocation: StableBlobLifecycleAllocation,
+  stable: StableBlobRef,
+): void {
+  assertStableMatchesStaged(current, stable);
+  const retired = current.retiredIncarnationId;
+  if (
+    !UUID_V4_PATTERN.test(allocation.lifecycleId) ||
+    !UUID_V4_PATTERN.test(allocation.allocationId) ||
+    !Number.isSafeInteger(allocation.generation) ||
+    allocation.generation < 1 ||
+    allocation.tenantId !== stable.tenantId ||
+    allocation.purpose !== stable.purpose ||
+    allocation.sha256 !== stable.sha256 ||
+    allocation.size !== stable.size ||
+    allocation.incarnationId !== stable.incarnationId ||
+    allocation.physicalObjectKey !== stable.physicalObjectKey ||
+    (retired === undefined && allocation.mode !== "active_reuse") ||
+    (retired !== undefined &&
+      (allocation.mode !== "new_after_deleted" ||
+        allocation.incarnationId === retired ||
+        allocation.physicalObjectKey === current.retiredPhysicalObjectKey))
+  ) {
+    throw new BlobCommitTransitionError("allocation 与 stable target 或 retired 历史不一致");
+  }
+}
+
+function assertStableEqualsTarget(current: BlobCommitSnapshot, stable: StableBlobRef): void {
+  const target = requireStable(current);
+  if (
+    stable.tenantId !== target.tenantId ||
+    stable.purpose !== target.purpose ||
+    stable.sha256 !== target.sha256 ||
+    stable.size !== target.size ||
+    stable.incarnationId !== target.incarnationId ||
+    stable.physicalObjectKey !== target.physicalObjectKey
+  ) {
+    throw new BlobCommitTransitionError("promotion 结果不是已持久化的精确物理 target");
+  }
+}
+
 export function assertBlobOperationId(operationId: string): void {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(operationId)) {
     throw new BlobCommitTransitionError("operationId 格式无效");
   }
 }
+
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;

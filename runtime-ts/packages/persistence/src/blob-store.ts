@@ -43,6 +43,10 @@ export interface PresignBlobDownloadInput {
   readonly scope: TenantBlobScope;
   readonly blob: StableBlobRef;
   readonly ttlSeconds: number;
+  /** 来自当前 Artifact/Resource 引用，不能使用 stable 对象首次上传时的 Content-Type。 */
+  readonly responseMediaType: string;
+  /** 默认是交付物下载；预览必须由上层明确选择独立策略。 */
+  readonly delivery?: "artifact-download" | "inline-preview";
   readonly downloadName?: string;
 }
 
@@ -61,20 +65,41 @@ export interface BlobStore {
   presignDownload(input: PresignBlobDownloadInput): Promise<string>;
 }
 
-export interface StableBlobGcProof {
-  readonly proofId: string;
+export interface StableBlobGcClaim {
+  readonly claimId: string;
+  readonly generation: number;
+  readonly leaseExpiresAt: string;
   readonly tenantId: string;
   readonly purpose: BlobPurpose;
   readonly sha256: string;
-  readonly checkedAt: string;
+  readonly size: number;
 }
 
-/** 该端口由 PostgreSQL 引用图实现；返回证明前必须完成可达性与引用计数检查。 */
-export interface StableBlobReachabilityPort {
-  proveUnreachable(input: {
+/**
+ * 由 PostgreSQL 事务实现。claimUnreachable 必须在同一事务中检查零引用并把对象置为 deleting；
+ * 新增 stable 引用也必须锁定并读取同一生命周期行，deleting 状态下一律拒绝新增引用。
+ * deleted 对象只有在重新 promote 并经 HEAD 校验后，才能由引用事务原子恢复为 active。
+ * lease 只控制恢复 Worker 的执行权，过期不能自动把 deleting 改回 active；接管时递增 generation。
+ * completeDeletion/releaseClaim 必须以 claimId + generation 做 compare-and-set，拒绝过期 Worker。
+ */
+export interface StableBlobGcClaimPort {
+  claimUnreachable(input: {
     readonly scope: TenantBlobScope;
     readonly blob: StableBlobRef;
-  }): Promise<StableBlobGcProof | undefined>;
+  }): Promise<
+    | { readonly status: "claimed"; readonly claim: StableBlobGcClaim }
+    | { readonly status: "still_referenced" }
+  >;
+  completeDeletion(input: {
+    readonly scope: TenantBlobScope;
+    readonly blob: StableBlobRef;
+    readonly claim: StableBlobGcClaim;
+  }): Promise<void>;
+  releaseClaim(input: {
+    readonly scope: TenantBlobScope;
+    readonly blob: StableBlobRef;
+    readonly claim: StableBlobGcClaim;
+  }): Promise<void>;
 }
 
 export interface StableBlobGcPort {
@@ -176,7 +201,7 @@ export function assertDownloadName(downloadName: string): void {
   }
 }
 
-function assertMediaType(mediaType: string): void {
+export function assertMediaType(mediaType: string): void {
   if (
     mediaType.length < 1 ||
     mediaType.length > 255 ||

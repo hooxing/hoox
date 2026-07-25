@@ -18,14 +18,15 @@ import {
   type PresignBlobDownloadInput,
   type PutStagingBlobInput,
   type StableBlobRef,
+  type StableBlobGcClaim,
+  type StableBlobGcClaimPort,
   type StableBlobGcPort,
-  type StableBlobGcProof,
-  type StableBlobReachabilityPort,
   type StagedBlobRef,
   type TenantBlobScope,
   assertBlobPurpose,
   assertBlobRef,
   assertDownloadName,
+  assertMediaType,
   assertTenantScope,
   assertUploadId,
   descriptorFor,
@@ -73,6 +74,8 @@ export interface S3CopyObjectInput {
 export interface S3PresignInput {
   readonly key: string;
   readonly ttlSeconds: number;
+  readonly responseMediaType: string;
+  readonly delivery: "artifact-download" | "inline-preview";
   readonly downloadName?: string;
 }
 
@@ -197,7 +200,7 @@ export class S3BlobStore implements BlobStore {
     if (response === undefined) {
       throw new BlobStoreError("BLOB_NOT_FOUND", "对象不存在");
     }
-    this.assertWithinSizeLimit(response.contentLength);
+    assertProviderBlobSizeWithin(response.contentLength, this.maxBlobSizeBytes);
     if (response.contentLength !== blob.size) {
       throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "GET ContentLength 与固定大小不一致");
     }
@@ -206,7 +209,7 @@ export class S3BlobStore implements BlobStore {
     let received = 0;
     for await (const chunk of response.body) {
       received += chunk.byteLength;
-      this.assertWithinSizeLimit(received);
+      assertProviderBlobSizeWithin(received, this.maxBlobSizeBytes);
       if (received > blob.size) {
         throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "读取内容超过固定大小");
       }
@@ -245,6 +248,14 @@ export class S3BlobStore implements BlobStore {
 
   async presignDownload(input: PresignBlobDownloadInput): Promise<string> {
     assertBlobRef(input.scope, input.blob);
+    assertMediaType(input.responseMediaType);
+    const delivery = input.delivery ?? "artifact-download";
+    if (delivery !== "artifact-download" && delivery !== "inline-preview") {
+      throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "预签名交付策略无效");
+    }
+    if (delivery === "inline-preview" && input.downloadName !== undefined) {
+      throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "预览策略不能携带下载文件名");
+    }
     if (!Number.isInteger(input.ttlSeconds) || input.ttlSeconds < 1) {
       throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "预签名 TTL 必须是正整数");
     }
@@ -264,6 +275,8 @@ export class S3BlobStore implements BlobStore {
     return this.client.presignGet({
       key,
       ttlSeconds: input.ttlSeconds,
+      responseMediaType: input.responseMediaType,
+      delivery,
       ...(input.downloadName === undefined ? {} : { downloadName: input.downloadName }),
     });
   }
@@ -331,13 +344,13 @@ export function createS3BlobStore(config: CreateS3BlobStoreConfig): S3BlobStore 
 
 export function createS3StableBlobGarbageCollector(
   config: CreateS3BlobStoreConfig,
-  reachability: StableBlobReachabilityPort,
+  claims: StableBlobGcClaimPort,
 ): StableBlobGcPort {
   const maxBlobSizeBytes = assertMaxBlobSize(config.maxBlobSizeBytes);
   const prefix = normalizePrefix(config.prefix ?? "agent-runtime");
   return new S3StableBlobGarbageCollector(
     createAwsObjectClient(config),
-    reachability,
+    claims,
     prefix,
     maxBlobSizeBytes,
   );
@@ -346,7 +359,7 @@ export function createS3StableBlobGarbageCollector(
 export class S3StableBlobGarbageCollector implements StableBlobGcPort {
   constructor(
     private readonly client: S3ObjectClient,
-    private readonly reachability: StableBlobReachabilityPort,
+    private readonly claims: StableBlobGcClaimPort,
     private readonly prefix: string,
     private readonly maxBlobSizeBytes: number,
   ) {}
@@ -357,12 +370,23 @@ export class S3StableBlobGarbageCollector implements StableBlobGcPort {
   ): Promise<"deleted" | "still_referenced"> {
     assertBlobRef(scope, blob);
     assertBlobSizeWithin(blob.size, this.maxBlobSizeBytes);
-    const proof = await this.reachability.proveUnreachable({ scope, blob });
-    if (proof === undefined) {
+    const result = await this.claims.claimUnreachable({ scope, blob });
+    if (result.status === "still_referenced") {
       return "still_referenced";
     }
-    assertGcProof(scope, blob, proof);
-    await deleteAndResolve(this.client, keyFor(this.prefix, blob));
+    assertGcClaim(scope, blob, result.claim);
+    try {
+      await deleteAndResolve(this.client, keyFor(this.prefix, blob));
+    } catch (error) {
+      // UNKNOWN 时对象可能已经删除，claim 必须留在 deleting，由恢复任务按 generation 接管。
+      if (error instanceof BlobStoreError && error.result === "unknown") {
+        throw error;
+      }
+      await this.claims.releaseClaim({ scope, blob, claim: result.claim });
+      throw error;
+    }
+    // 删除已确认后才完成 claim；完成失败也不能释放，否则新引用可能指向已删除对象。
+    await this.claims.completeDeletion({ scope, blob, claim: result.claim });
     return "deleted";
   }
 }
@@ -492,9 +516,8 @@ class AwsS3ObjectClient implements S3ObjectClient {
       const command = new GetObjectCommand({
         Bucket: this.bucket,
         Key: input.key,
-        ...(input.downloadName === undefined
-          ? {}
-          : { ResponseContentDisposition: contentDisposition(input.downloadName) }),
+        ResponseContentType: input.responseMediaType,
+        ResponseContentDisposition: contentDisposition(input.delivery, input.downloadName),
       });
       return await getSignedUrl(this.presignClient, command, { expiresIn: input.ttlSeconds });
     } catch (error) {
@@ -620,6 +643,15 @@ function assertBlobSizeWithin(size: number, maximum: number): void {
   }
 }
 
+function assertProviderBlobSizeWithin(size: number, maximum: number): void {
+  if (!Number.isSafeInteger(size) || size < 0 || size > maximum) {
+    throw new BlobStoreError(
+      "BLOB_INTEGRITY_MISMATCH",
+      "对象存储响应的 Blob 大小超过当前小对象上限",
+    );
+  }
+}
+
 async function deleteAndResolve(client: S3ObjectClient, key: string): Promise<void> {
   try {
     await client.delete(key);
@@ -648,19 +680,23 @@ function keyFor(prefix: string, blob: BlobRef): string {
   return `${prefix}/tenants/${blob.tenantId}/${suffix}`;
 }
 
-function assertGcProof(
+function assertGcClaim(
   scope: TenantBlobScope,
   blob: StableBlobRef,
-  proof: StableBlobGcProof,
+  claim: StableBlobGcClaim,
 ): void {
   if (
-    proof.proofId.length < 1 ||
-    proof.tenantId !== scope.tenantId ||
-    proof.purpose !== blob.purpose ||
-    proof.sha256 !== blob.sha256 ||
-    Number.isNaN(Date.parse(proof.checkedAt))
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(claim.claimId) ||
+    !Number.isSafeInteger(claim.generation) ||
+    claim.generation < 1 ||
+    claim.tenantId !== scope.tenantId ||
+    claim.purpose !== blob.purpose ||
+    claim.sha256 !== blob.sha256 ||
+    claim.size !== blob.size ||
+    Number.isNaN(Date.parse(claim.leaseExpiresAt)) ||
+    Date.parse(claim.leaseExpiresAt) <= Date.now()
   ) {
-    throw new BlobStoreError("TENANT_SCOPE_MISMATCH", "stable GC 可达性证明与目标对象不一致");
+    throw new BlobStoreError("TENANT_SCOPE_MISMATCH", "stable GC claim 与目标对象不一致");
   }
 }
 
@@ -684,8 +720,16 @@ function encodeKey(key: string): string {
   return key.split("/").map(encodeURIComponent).join("/");
 }
 
-function contentDisposition(downloadName: string): string {
-  return `attachment; filename*=UTF-8''${encodeRfc5987Value(downloadName)}`;
+function contentDisposition(
+  delivery: "artifact-download" | "inline-preview",
+  downloadName: string | undefined,
+): string {
+  if (delivery === "inline-preview") {
+    return "inline";
+  }
+  return downloadName === undefined
+    ? "attachment"
+    : `attachment; filename*=UTF-8''${encodeRfc5987Value(downloadName)}`;
 }
 
 export function encodeRfc5987Value(value: string): string {

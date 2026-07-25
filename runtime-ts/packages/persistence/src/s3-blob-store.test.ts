@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { BlobStoreError } from "./index.js";
+import {
+  type BlobReferenceCommitPort,
+  BlobStoreError,
+  type StableBlobGcClaim,
+  type StableBlobGcClaimPort,
+  type StableBlobRef,
+  type TenantBlobScope,
+} from "./index.js";
 import {
   S3BlobStore,
   S3StableBlobGarbageCollector,
@@ -251,16 +258,50 @@ describe("S3BlobStore", () => {
     const stable = await store.promote(scope, staged);
 
     await expect(
-      store.presignDownload({ scope, blob: stable, ttlSeconds: 121 }),
+      store.presignDownload({
+        scope,
+        blob: stable,
+        ttlSeconds: 121,
+        responseMediaType: "application/pdf",
+      }),
     ).rejects.toMatchObject({
       code: "INVALID_BLOB_ARGUMENT",
     });
     await expect(
-      store.presignDownload({ scope, blob: stable, ttlSeconds: 60, downloadName: "bad\r\nname" }),
+      store.presignDownload({
+        scope,
+        blob: stable,
+        ttlSeconds: 60,
+        responseMediaType: "application/pdf",
+        downloadName: "bad\r\nname",
+      }),
     ).rejects.toMatchObject({ code: "INVALID_BLOB_ARGUMENT" });
     await expect(
-      store.presignDownload({ scope, blob: stable, ttlSeconds: 60, downloadName: "报告.txt" }),
+      store.presignDownload({
+        scope,
+        blob: stable,
+        ttlSeconds: 60,
+        responseMediaType: "application/pdf",
+        downloadName: "报告.txt",
+      }),
     ).resolves.toContain("ttl=60");
+    expect(client.presignInputs.at(-1)).toMatchObject({
+      responseMediaType: "application/pdf",
+      delivery: "artifact-download",
+      downloadName: "报告.txt",
+    });
+
+    await store.presignDownload({
+      scope,
+      blob: { ...stable, mediaType: "image/png" },
+      ttlSeconds: 60,
+      responseMediaType: "text/markdown",
+      delivery: "inline-preview",
+    });
+    expect(client.presignInputs.at(-1)).toMatchObject({
+      responseMediaType: "text/markdown",
+      delivery: "inline-preview",
+    });
   });
 
   it("上传前、GET ContentLength 和流式读取过程都执行大小上限", async () => {
@@ -286,12 +327,12 @@ describe("S3BlobStore", () => {
     });
     client.contentLengthOverride = 6;
     await expect(store.getBytes({ tenantId: "tenant_a" }, staged)).rejects.toMatchObject({
-      code: "INVALID_BLOB_ARGUMENT",
+      code: "BLOB_INTEGRITY_MISMATCH",
     });
     client.contentLengthOverride = undefined;
     client.extraReadChunk = bytes("56");
     await expect(store.getBytes({ tenantId: "tenant_a" }, staged)).rejects.toMatchObject({
-      code: "INVALID_BLOB_ARGUMENT",
+      code: "BLOB_INTEGRITY_MISMATCH",
     });
   });
 
@@ -342,7 +383,7 @@ describe("S3BlobStore", () => {
     });
   });
 
-  it("stable 对象只能经过可达性证明的 GC 端口删除", async () => {
+  it("stable GC 事务 claim 阻止并发新增引用，删除完成后按 generation 完成", async () => {
     const client = new FakeS3ObjectClient();
     const store = new S3BlobStore(client, { ...config, prefix: "gc-test" });
     const scope = { tenantId: "tenant_a" };
@@ -354,30 +395,120 @@ describe("S3BlobStore", () => {
       mediaType: "text/plain",
     });
     const stable = await store.promote(scope, staged);
-    let allowGc = false;
+    const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable);
     const gc = new S3StableBlobGarbageCollector(
       client,
-      {
-        async proveUnreachable() {
-          return allowGc
-            ? {
-                proofId: "proof-1",
-                tenantId: scope.tenantId,
-                purpose: stable.purpose,
-                sha256: stable.sha256,
-                checkedAt: new Date().toISOString(),
-              }
-            : undefined;
-        },
-      },
+      lifecycle,
       "gc-test",
       config.maxBlobSizeBytes,
     );
     await expect(gc.collectIfUnreachable(scope, stable)).resolves.toBe("still_referenced");
     await expect(store.head(scope, stable)).resolves.toBeDefined();
-    allowGc = true;
+    lifecycle.removeReference();
+    const referencePort: Pick<BlobReferenceCommitPort, "markReferenceStable"> = {
+      async markReferenceStable() {
+        return lifecycle.addVerifiedReference() === "added" ? "marked" : "gc_in_progress";
+      },
+    };
+    lifecycle.onClaim = async () => {
+      await expect(
+        referencePort.markReferenceStable({
+          scope,
+          operationId: "concurrent-reference",
+          referenceId: "reference-2",
+          stable,
+        }),
+      ).resolves.toBe("gc_in_progress");
+    };
     await expect(gc.collectIfUnreachable(scope, stable)).resolves.toBe("deleted");
+    expect(lifecycle.state).toBe("deleted");
+    expect(lifecycle.completedGeneration).toBe(1);
     await expect(store.head(scope, stable)).resolves.toBeUndefined();
+  });
+
+  it("stable 删除结果 UNKNOWN 时保留 deleting claim 交给恢复任务", async () => {
+    const client = new FakeS3ObjectClient();
+    const store = new S3BlobStore(client, { ...config, prefix: "gc-unknown" });
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "gc-unknown-1",
+      body: bytes("stable"),
+      mediaType: "text/plain",
+    });
+    const stable = await store.promote(scope, staged);
+    const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable, 0);
+    const gc = new S3StableBlobGarbageCollector(
+      client,
+      lifecycle,
+      "gc-unknown",
+      config.maxBlobSizeBytes,
+    );
+    client.deleteUnknownWithoutDelete = true;
+
+    await expect(gc.collectIfUnreachable(scope, stable)).rejects.toMatchObject({
+      code: "BLOB_RESULT_UNKNOWN",
+      result: "unknown",
+    });
+    expect(lifecycle.state).toBe("deleting");
+    expect(lifecycle.releaseCount).toBe(0);
+    expect(lifecycle.addVerifiedReference()).toBe("gc_in_progress");
+  });
+
+  it("stable 删除明确失败时释放同 generation claim", async () => {
+    const client = new FakeS3ObjectClient();
+    const store = new S3BlobStore(client, { ...config, prefix: "gc-known-failure" });
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "gc-known-failure-1",
+      body: bytes("stable"),
+      mediaType: "text/plain",
+    });
+    const stable = await store.promote(scope, staged);
+    const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable, 0);
+    const gc = new S3StableBlobGarbageCollector(
+      client,
+      lifecycle,
+      "gc-known-failure",
+      config.maxBlobSizeBytes,
+    );
+    client.deleteKnownFailure = true;
+
+    await expect(gc.collectIfUnreachable(scope, stable)).rejects.toMatchObject({
+      code: "BLOB_PROVIDER_ERROR",
+      result: "known",
+    });
+    expect(lifecycle.state).toBe("active");
+    expect(lifecycle.releaseCount).toBe(1);
+    await expect(store.head(scope, stable)).resolves.toBeDefined();
+  });
+
+  it("stable GC 端口拒绝过期 generation 的 Worker 完成新 claim", async () => {
+    const scope = { tenantId: "tenant_a" };
+    const stable: StableBlobRef = {
+      kind: "stable",
+      tenantId: scope.tenantId,
+      purpose: "artifact",
+      sha256: "a".repeat(64),
+      size: 1,
+      mediaType: "text/plain",
+    };
+    const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable, 0);
+    const first = await lifecycle.claimUnreachable({ scope, blob: stable });
+    expect(first.status).toBe("claimed");
+    if (first.status !== "claimed") {
+      throw new Error("测试前置条件错误");
+    }
+    await lifecycle.releaseClaim({ scope, blob: stable, claim: first.claim });
+    const second = await lifecycle.claimUnreachable({ scope, blob: stable });
+    expect(second.status).toBe("claimed");
+
+    await expect(
+      lifecycle.completeDeletion({ scope, blob: stable, claim: first.claim }),
+    ).rejects.toThrow("generation 已失效");
   });
 
   it("RFC 5987 编码覆盖中文与 encodeURIComponent 保留字符", () => {
@@ -394,10 +525,12 @@ class FakeS3ObjectClient implements S3ObjectClient {
   readonly objects = new Map<string, StoredObject>();
   readonly putKeys: string[] = [];
   readonly copyKeys: S3CopyObjectInput[] = [];
+  readonly presignInputs: S3PresignInput[] = [];
   putUnknownAfterWrite = false;
   putUnknownWithoutWrite = false;
   deleteUnknownAfterDelete = false;
   deleteUnknownWithoutDelete = false;
+  deleteKnownFailure = false;
   successfulPuts = 0;
   contentLengthOverride: number | undefined;
   extraReadChunk: Uint8Array | undefined;
@@ -467,6 +600,9 @@ class FakeS3ObjectClient implements S3ObjectClient {
   }
 
   async delete(key: string): Promise<void> {
+    if (this.deleteKnownFailure) {
+      throw new BlobStoreError("BLOB_PROVIDER_ERROR", "fake known delete failure");
+    }
     if (!this.deleteUnknownWithoutDelete) {
       this.objects.delete(key);
     }
@@ -477,7 +613,102 @@ class FakeS3ObjectClient implements S3ObjectClient {
   }
 
   async presignGet(input: S3PresignInput): Promise<string> {
+    this.presignInputs.push(input);
     return `https://example.invalid/private?ttl=${input.ttlSeconds}`;
+  }
+}
+
+class InMemoryStableLifecycle implements StableBlobGcClaimPort {
+  state: "active" | "deleting" | "deleted" = "active";
+  completedGeneration: number | undefined;
+  releaseCount = 0;
+  onClaim: (() => Promise<void>) | undefined;
+  private generation = 0;
+
+  constructor(
+    private readonly tenantId: string,
+    private readonly blob: StableBlobRef,
+    private references = 1,
+  ) {}
+
+  addVerifiedReference(): "added" | "gc_in_progress" {
+    if (this.state === "deleting") {
+      return "gc_in_progress";
+    }
+    // 测试端口模拟 markReferenceStable 已完成 promote + HEAD；deleted 可原子恢复 active。
+    if (this.state === "deleted") {
+      this.state = "active";
+    }
+    this.references += 1;
+    return "added";
+  }
+
+  removeReference(): void {
+    this.references -= 1;
+  }
+
+  async claimUnreachable(input: { readonly scope: TenantBlobScope; readonly blob: StableBlobRef }) {
+    this.assertTarget(input.scope, input.blob);
+    if (this.references > 0) {
+      return { status: "still_referenced" as const };
+    }
+    this.state = "deleting";
+    this.generation += 1;
+    const claim = this.claim();
+    await this.onClaim?.();
+    return { status: "claimed" as const, claim };
+  }
+
+  async completeDeletion(input: {
+    readonly scope: TenantBlobScope;
+    readonly blob: StableBlobRef;
+    readonly claim: StableBlobGcClaim;
+  }) {
+    this.assertTarget(input.scope, input.blob);
+    this.assertGeneration(input.claim.generation);
+    this.state = "deleted";
+    this.completedGeneration = input.claim.generation;
+  }
+
+  async releaseClaim(input: {
+    readonly scope: TenantBlobScope;
+    readonly blob: StableBlobRef;
+    readonly claim: StableBlobGcClaim;
+  }) {
+    this.assertTarget(input.scope, input.blob);
+    this.assertGeneration(input.claim.generation);
+    this.state = "active";
+    this.releaseCount += 1;
+  }
+
+  private claim() {
+    return {
+      claimId: `claim-${this.generation}`,
+      generation: this.generation,
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      tenantId: this.tenantId,
+      purpose: this.blob.purpose,
+      sha256: this.blob.sha256,
+      size: this.blob.size,
+    };
+  }
+
+  private assertGeneration(generation: number): void {
+    if (this.state !== "deleting" || generation !== this.generation) {
+      throw new Error("GC claim generation 已失效");
+    }
+  }
+
+  private assertTarget(scope: TenantBlobScope, blob: StableBlobRef): void {
+    if (
+      scope.tenantId !== this.tenantId ||
+      blob.tenantId !== this.blob.tenantId ||
+      blob.purpose !== this.blob.purpose ||
+      blob.sha256 !== this.blob.sha256 ||
+      blob.size !== this.blob.size
+    ) {
+      throw new Error("GC claim 目标不匹配");
+    }
   }
 }
 

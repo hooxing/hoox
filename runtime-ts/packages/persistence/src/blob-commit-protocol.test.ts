@@ -59,8 +59,25 @@ describe("Blob 补偿状态协议", () => {
     expect(() =>
       transitionBlobCommit(state, { type: "cleanup_requested", target: "staging" }),
     ).toThrow(BlobCommitTransitionError);
-    state = transitionBlobCommit(state, { type: "stable_mark_resolved", marked: true });
+    state = transitionBlobCommit(state, { type: "stable_mark_resolved", status: "marked" });
     expect(state.status).toBe("stable");
+  });
+
+  it("stable 正在被 GC claim 时记录阻塞且不新增引用", () => {
+    let state = referenceCommittedState();
+    state = transitionBlobCommit(state, { type: "promotion_succeeded", stable });
+    const blocked = transitionBlobCommit(state, { type: "stable_mark_gc_blocked" });
+
+    expect(blocked.status).toBe("stable_mark_gc_blocked");
+    expect(blocked.version).toBe(state.version + 1);
+    expect(blocked.referenceId).toBe("ref-1");
+
+    const unknown = transitionBlobCommit(state, { type: "stable_mark_result_unknown" });
+    const resolvedBlocked = transitionBlobCommit(unknown, {
+      type: "stable_mark_resolved",
+      status: "gc_in_progress",
+    });
+    expect(resolvedBlocked.status).toBe("stable_mark_gc_blocked");
   });
 
   it("拒绝把其他 Tenant 或不同内容的对象接入状态链", () => {

@@ -18,6 +18,7 @@ export type BlobCommitStatus =
   | "reference_committed"
   | "promotion_unknown"
   | "stable_object_ready"
+  | "stable_mark_gc_blocked"
   | "stable_mark_unknown"
   | "stable"
   | "cleanup_pending"
@@ -52,8 +53,12 @@ export type BlobCommitEvent =
   | { readonly type: "promotion_resolved"; readonly stable?: StableBlobRef }
   | { readonly type: "stable_mark_succeeded" }
   | { readonly type: "stable_mark_failed" }
+  | { readonly type: "stable_mark_gc_blocked" }
   | { readonly type: "stable_mark_result_unknown" }
-  | { readonly type: "stable_mark_resolved"; readonly marked: boolean }
+  | {
+      readonly type: "stable_mark_resolved";
+      readonly status: "marked" | "not_marked" | "gc_in_progress";
+    }
   | { readonly type: "cleanup_requested"; readonly target: "staging" }
   | { readonly type: "cleanup_succeeded"; readonly target: "staging" };
 
@@ -79,15 +84,22 @@ export interface BlobReferenceCommitPort {
     { readonly status: "committed"; readonly referenceId: string } | { readonly status: "absent" }
   >;
 
-  /** 只有 stable 对象经 HEAD 校验后才能把业务引用切换到 stable。 */
+  /**
+   * 只有 stable 对象经 HEAD 校验后才能切换引用。实现必须在 PG 事务中读取 stable
+   * 生命周期行；若 GC 已 claim 为 deleting，必须返回 gc_in_progress，不能新增引用。
+   * 若生命周期为 deleted，只有 stable 已重新 promote 且 HEAD 验证后，才能原子恢复 active 并新增引用。
+   */
   markReferenceStable(input: {
     readonly operationId: string;
     readonly scope: TenantBlobScope;
     readonly referenceId: string;
     readonly stable: StableBlobRef;
-  }): Promise<void>;
+  }): Promise<"marked" | "gc_in_progress">;
 
-  resolveStableMark(scope: TenantBlobScope, operationId: string): Promise<"marked" | "not_marked">;
+  resolveStableMark(
+    scope: TenantBlobScope,
+    operationId: string,
+  ): Promise<"marked" | "not_marked" | "gc_in_progress">;
 }
 
 export interface BlobCommitStatePort {
@@ -239,6 +251,10 @@ function applyTransition(
       if (event.type === "stable_mark_succeeded") {
         return copyStable(current, "stable");
       }
+      if (event.type === "stable_mark_gc_blocked") {
+        // GC 的 deleting claim 会阻止新增引用；保留独立状态供恢复扫描识别。
+        return copyStable(current, "stable_mark_gc_blocked");
+      }
       if (event.type === "stable_mark_result_unknown") {
         return copyStable(current, "stable_mark_unknown");
       }
@@ -246,9 +262,25 @@ function applyTransition(
         return copyStable(current, "stable_object_ready");
       }
       break;
+    case "stable_mark_gc_blocked":
+      if (event.type === "promotion_succeeded") {
+        assertStableMatchesStaged(current, event.stable);
+        return { ...copyStable(current, "stable_object_ready"), stable: event.stable };
+      }
+      if (event.type === "stable_mark_succeeded") {
+        return copyStable(current, "stable");
+      }
+      break;
     case "stable_mark_unknown":
       if (event.type === "stable_mark_resolved") {
-        return copyStable(current, event.marked ? "stable" : "stable_object_ready");
+        return copyStable(
+          current,
+          event.status === "marked"
+            ? "stable"
+            : event.status === "gc_in_progress"
+              ? "stable_mark_gc_blocked"
+              : "stable_object_ready",
+        );
       }
       break;
     case "stable":
@@ -303,6 +335,7 @@ function copyStable(
   current: BlobCommitSnapshot,
   status:
     | "stable_object_ready"
+    | "stable_mark_gc_blocked"
     | "stable_mark_unknown"
     | "stable"
     | "cleanup_pending"

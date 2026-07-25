@@ -322,11 +322,7 @@ describe("S3BlobStore", () => {
       code: "INVALID_BLOB_ARGUMENT",
     });
     await expect(
-      store.promote(
-        scope,
-        staged,
-        allocationFor(staged) as unknown as PromotionAuthorizationRef,
-      ),
+      store.promote(scope, staged, allocationFor(staged) as unknown as PromotionAuthorizationRef),
     ).rejects.toMatchObject({ code: "INVALID_BLOB_ARGUMENT" });
     expect(client.copyKeys).toEqual([]);
   });

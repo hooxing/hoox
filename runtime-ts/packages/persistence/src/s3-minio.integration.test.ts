@@ -4,8 +4,13 @@ import { describe, expect, it } from "vitest";
 import {
   createS3BlobStore,
   createS3StableBlobGarbageCollector,
+  preparePromotionStart,
   sha256Hex,
+  transitionBlobCommit,
+  type BlobCommitSnapshot,
+  type PreparedPromotionStart,
   type PromotionAuthorizationRef,
+  type PromotionExecutionClaim,
   type StableBlobPromotionAuthorization,
   type StableBlobPromotionAuthorizationPort,
   type StableBlobRef,
@@ -71,6 +76,28 @@ integration("MinIO Blob Store 集成", () => {
       operationId: authorization.operationId,
       authorizationId,
     };
+    const referenceCommitted: BlobCommitSnapshot = {
+      operationId: authorization.operationId,
+      scope,
+      status: "reference_committed",
+      version: 3,
+      staged,
+      referenceId: authorization.referenceId,
+    };
+    const allocationReserved = transitionBlobCommit(referenceCommitted, {
+      type: "allocation_reserved",
+      allocation,
+      stable,
+    });
+    const promotionStarted = transitionBlobCommit(allocationReserved, {
+      type: "promotion_started",
+      authorization: authorizationRef,
+    });
+    const preparedStart = preparePromotionStart(
+      allocationReserved,
+      authorization,
+      promotionStarted,
+    );
     const common = {
       bucket: config.bucket,
       endpoint: config.endpoint,
@@ -83,10 +110,7 @@ integration("MinIO Blob Store 集成", () => {
       maxPresignTtlSeconds: 60,
       maxBlobSizeBytes: 1_024 * 1_024,
     } as const;
-    const store = createS3BlobStore(
-      common,
-      new IntegrationPromotionAuthorizations(authorization, "started"),
-    );
+    const store = createS3BlobStore(common, new IntegrationPromotionAuthorizations(preparedStart));
     const gc = createS3StableBlobGarbageCollector(common, {
       async claimUnreachable({ scope: claimScope, blob }) {
         return {
@@ -192,21 +216,50 @@ integration("MinIO Blob Store 集成", () => {
 
 /** 真实 MinIO 也通过与单元测试相同的状态化授权解析契约，不允许回显调用参数。 */
 class IntegrationPromotionAuthorizations implements StableBlobPromotionAuthorizationPort {
-  constructor(
-    private readonly authorization: StableBlobPromotionAuthorization,
-    private status: "reserved" | "started" | "retired" | "consumed" | "inactive",
-  ) {}
+  private execution: PromotionExecutionClaim | undefined;
+  private readonly authorization: StableBlobPromotionAuthorization;
+  private status: "reserved" | "started" | "retired" | "consumed" | "inactive" = "started";
+
+  constructor(prepared: PreparedPromotionStart) {
+    // 集成 Fake 只接受统一校验器产生的名义能力，模拟 PG 同事务落 snapshot 与授权行。
+    this.authorization = prepared.authorization;
+  }
+
+  async claimPromotionExecution(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly authorization: PromotionAuthorizationRef;
+    readonly workerId: string;
+  }) {
+    if (!this.matchesAuthorization(input.scope, input.authorization)) {
+      return { status: "wrong_operation" as const };
+    }
+    if (this.status === "reserved") return { status: "not_started" as const };
+    if (this.status === "consumed") {
+      return { status: "completed" as const, authorization: this.authorization };
+    }
+    if (this.status !== "started") return { status: this.status };
+    if (this.execution !== undefined && this.execution.workerId !== input.workerId) {
+      return { status: "in_progress" as const };
+    }
+    this.execution ??= {
+      tenantId: this.authorization.tenantId,
+      operationId: this.authorization.operationId,
+      authorizationId: this.authorization.authorizationId,
+      executionId: randomUUID(),
+      generation: 1,
+      workerId: input.workerId,
+      phase: "claimed",
+      incarnationId: this.authorization.incarnationId,
+      physicalObjectKey: this.authorization.physicalObjectKey,
+    };
+    return { status: "claimed" as const, execution: this.execution };
+  }
 
   async resolveAuthorizedForCopy(input: {
     readonly scope: { readonly tenantId: string };
-    readonly authorization: PromotionAuthorizationRef;
+    readonly execution: PromotionExecutionClaim;
   }) {
-    if (
-      input.scope.tenantId !== this.authorization.tenantId ||
-      input.authorization.tenantId !== this.authorization.tenantId ||
-      input.authorization.operationId !== this.authorization.operationId ||
-      input.authorization.authorizationId !== this.authorization.authorizationId
-    ) {
+    if (!this.matchesExecution(input.scope, input.execution)) {
       return { status: "wrong_operation" as const };
     }
     if (this.status === "reserved") {
@@ -216,6 +269,72 @@ class IntegrationPromotionAuthorizations implements StableBlobPromotionAuthoriza
       return { status: this.status };
     }
     return { status: "authorized" as const, authorization: this.authorization };
+  }
+
+  async markPromotionCopyIssued(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly execution: PromotionExecutionClaim;
+  }) {
+    if (!this.matchesExecution(input.scope, input.execution)) {
+      return { status: "claim_lost" as const };
+    }
+    this.execution = { ...input.execution, phase: "executing" };
+    return { status: "marked" as const, execution: this.execution };
+  }
+
+  async completePromotionExecution(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly execution: PromotionExecutionClaim;
+    readonly outcome: "succeeded" | "not_copied" | "unknown";
+  }): Promise<void> {
+    if (!this.matchesExecutionIdentity(input.scope, input.execution)) {
+      throw new Error("MinIO 集成授权 execution CAS 失效");
+    }
+    if (input.outcome === "not_copied") {
+      if (this.execution?.phase !== "claimed") throw new Error("COPY intent 不可撤销");
+      this.status = "inactive";
+      this.execution = undefined;
+      return;
+    }
+    if (input.outcome === "unknown") {
+      this.execution = { ...input.execution, phase: "unknown" };
+      return;
+    }
+    this.status = "consumed";
+    this.execution = undefined;
+  }
+
+  private matchesAuthorization(
+    scope: { readonly tenantId: string },
+    ref: PromotionAuthorizationRef,
+  ): boolean {
+    return (
+      scope.tenantId === this.authorization.tenantId &&
+      ref.tenantId === this.authorization.tenantId &&
+      ref.operationId === this.authorization.operationId &&
+      ref.authorizationId === this.authorization.authorizationId
+    );
+  }
+
+  private matchesExecution(
+    scope: { readonly tenantId: string },
+    execution: PromotionExecutionClaim,
+  ): boolean {
+    return (
+      this.matchesExecutionIdentity(scope, execution) && this.execution?.phase === execution.phase
+    );
+  }
+
+  private matchesExecutionIdentity(
+    scope: { readonly tenantId: string },
+    execution: PromotionExecutionClaim,
+  ): boolean {
+    return (
+      scope.tenantId === this.authorization.tenantId &&
+      this.execution?.executionId === execution.executionId &&
+      this.execution.generation === execution.generation &&
+      this.execution.workerId === execution.workerId
+    );
   }
 }
 

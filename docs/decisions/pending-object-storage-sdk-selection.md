@@ -60,14 +60,15 @@
 - GC claim 必须绑定被 claim 时的 incarnationId 与完整 physicalObjectKey，执行器只删除该精确键；禁止仅凭 sha256 解析“当前 incarnation”；
 - S3 删除明确成功后用 claimId + generation 联合 CAS 调用 `completeDeletion`；lease 到期与 claim 是否有效完全由 PG 事务/端口判定，S3 executor 不读取应用进程 `Date.now()`。接管保持物理身份与 phase，只递增 generation/claimId；
 - 不依赖 S3 bucket versioning。安全性来自不可复用物理键：旧 Worker即使在新 incarnation 激活后才完成 DELETE，也只能作用旧 physicalObjectKey。
-- commit 协调状态在 COPY 前依次持久化 `allocation_reserved`（完整 allocation + target StableBlobRef）与 `promotion_started`。后者的 CAS 必须与规范授权行在同一 PG 事务提交；授权绑定 tenant、operation、reference、staging upload/key、allocation/lifecycle/generation/incarnation/key、hash 与 size。仅 reserved 状态不能授权。解析稳定返回 authorized/not_started/wrong_operation/retired/consumed/inactive/not_found；COPY UNKNOWN 保留同一授权引用并只围绕同一 physicalObjectKey 恢复。
-- GC lifecycle 明确 deleted 时，completeDeletion 原子写 deleted 并把旧 incarnation/key 放入永久 retired 历史。`stable_mark_gc_blocked` 解析 deleted 后清除旧 target，只有持久化 mode=`new_after_deleted` 且物理身份不同的新 allocation 才能再次进入 promotion。
+- commit 协调状态在 COPY 前依次持久化 `allocation_reserved` 与 `promotion_started`。统一 `preparePromotionStart` 校验器是 `PreparedPromotionStart` 名义能力的唯一生产者，完整核对 snapshot 状态/version 连续和 tenant、operation、reference、staging、allocation/lifecycle/generation/mode、incarnation/key、hash/size；StatePort 只接受该能力并把 CAS 与授权行同事务提交。
+- 授权 started 后先原子 `claimPromotionExecution`，绑定 executionId、generation、worker、incarnation/key；COPY 前 `markPromotionCopyIssued` 写不可撤销 intent。intent 前确定失败才能 `not_copied`；intent 后只允许 executing/unknown/succeeded。started/executing/unknown 不能 inactive/retired，GC/lifecycle retirement 必须在同一事务确认不存在这些授权。
+- GC lifecycle 明确 deleted 时，completeDeletion 原子写 deleted 并把旧 incarnation/key 放入永久 retired 历史。allocation mode 只由可信 PG 事务读取全局 lifecycle/retired 历史决定；协调器不从当前 operation 的局部 retired 信息推断 mode，只在确有旧 target 时校验新 incarnation/key 不同。因此新 operation 首次看到全局 deleted 逻辑 Blob 时也可以合法接收 `new_after_deleted`。
 
 ### 影响
 
 - PG Repository 必须把新增引用、引用计数和生命周期状态纳入同一事务，不能把生命周期检查放到事务外；
 - 每个 ReferenceVersion、生命周期记录、恢复任务和 GC claim 都必须保存 incarnationId + physicalObjectKey；只存 sha256 不足以安全读取或删除；
-- allocation reserve、promotion authorization 与 commit snapshot 都要持久化 lifecycleId、allocationId、generation、mode。UNKNOWN 可重复解析同一 active 授权；完成后授权收敛为 consumed/inactive，不能跨 operation 或 staging 重放；
+- allocation reserve、promotion authorization、execution claim 与 commit snapshot 都要持久化 lifecycleId、allocationId、generation、mode。UNKNOWN 只能以同一 execution HEAD 同一 physical key；其他 Worker 得到 in_progress。完成 CAS 明确区分 succeeded、intent 前 not_copied 与 intent 后 unknown；
 - stable GC 需要持久化恢复扫描、`pre_delete → deleting` 意图日志和租约接管，而不是普通定时 DELETE；
 - GC 期间新增引用会被显式阻止。调用方应等待 claim 收敛；若对象最终删除，则利用仍保留的 staging 重新 promote、HEAD 验证，再由引用事务恢复 active，而不能把阻止结果当成已经完成 stable 标记；
 - 当前任务只定义端口、状态语义和 S3 执行器；PG 表与事务实现由后续持久层任务交付。
@@ -98,7 +99,8 @@ stable 对象可被多个引用以不同 `mediaType` 使用，因此首次上传
 - claimId 与 generation 是联合 CAS 条件；begin、complete、pre-delete release 任一字段不匹配都拒绝；
 - `stable_blob_incarnations` 至少建立 `UNIQUE (tenant_id, purpose, incarnation_id)` 与 `UNIQUE (tenant_id, purpose, physical_object_key)`；建议 physical_object_key 再做全局唯一。retired 行永久保留，不能被 GC/归档物理删除，也不能被 reserve 再次选中；
 - allocation 记录以 allocation_id 唯一，并关联 lifecycle_id、generation 和 incarnation 外键；ReferenceVersion/commit snapshot 保存相同身份。数据库约束或事务触发器禁止 retired incarnation 重新进入 active；
-- promotion authorization 以 authorization_id 唯一，并关联 tenant_id、operation_id、reference_id、staging_upload_id/key、allocation_id 与完整目标描述；状态至少区分 reserved（不可解析）、started/unknown（可重复解析同一目标）、consumed/inactive 与 retired。`promotion_started` CAS 与授权写入必须同事务；
+- promotion authorization 以 authorization_id 唯一，并关联 tenant_id、operation_id、reference_id、staging_upload_id/key、allocation_id 与完整目标描述；execution 行以 authorization_id + generation 做 CAS，保存 worker_id、execution_id、phase 与精确 physical key。`promotion_started` CAS 与授权写入必须同事务；started/executing/unknown 受生命周期外键/事务守卫保护，禁止退休。
+- retired physical key 保留永久 tombstone 与 scrub 游标。已发出的旧 COPY 无法撤销，迟到时只会重新形成旧 key 孤儿；scrubber 幂等重复 DELETE 旧 key，绝不从逻辑 hash 解析“当前 key”。
 - 本项目是全新实现，不迁移旧 Python 原型。此前开发 MinIO 中不含 incarnation 的 stable key 只视为测试数据，应清理后重新发布；不提供旧 key 只读兼容，也不通过启用 bucket versioning 兜底；
 - 若未来已有生产对象，必须另做离线迁移：冻结写入、为每个旧对象分配 incarnation、复制到新键、回填所有 ReferenceVersion 后再启用 GC，不能原地把旧键当新 incarnation。
 

@@ -81,12 +81,60 @@ export type PromotionAuthorizationResolution =
         | "not_found";
     };
 
+export interface PromotionExecutionClaim {
+  readonly tenantId: string;
+  readonly operationId: string;
+  readonly authorizationId: string;
+  readonly executionId: string;
+  readonly generation: number;
+  readonly workerId: string;
+  readonly phase: "claimed" | "executing" | "unknown";
+  readonly incarnationId: string;
+  readonly physicalObjectKey: string;
+}
+
+export type PromotionExecutionClaimResolution =
+  | { readonly status: "claimed"; readonly execution: PromotionExecutionClaim }
+  | { readonly status: "completed"; readonly authorization: StableBlobPromotionAuthorization }
+  | {
+      readonly status:
+        | "not_started"
+        | "wrong_operation"
+        | "retired"
+        | "consumed"
+        | "inactive"
+        | "not_found"
+        | "in_progress";
+    };
+
 /** 只从 PG 的 promotion_started 授权行解析；允许 UNKNOWN 恢复重复读取同一规范授权。 */
 export interface StableBlobPromotionAuthorizationPort {
-  resolveAuthorizedForCopy(input: {
+  /** 原子 claim 已签发且尚未收敛的授权；其他 Worker 只能得到 in_progress。 */
+  claimPromotionExecution(input: {
     readonly scope: TenantBlobScope;
     readonly authorization: PromotionAuthorizationRef;
+    readonly workerId: string;
+  }): Promise<PromotionExecutionClaimResolution>;
+  resolveAuthorizedForCopy(input: {
+    readonly scope: TenantBlobScope;
+    readonly execution: PromotionExecutionClaim;
   }): Promise<PromotionAuthorizationResolution>;
+  /** 在发出远端 COPY 前原子记录不可撤销意图；UNKNOWN 恢复可重复返回同一 execution。 */
+  markPromotionCopyIssued(input: {
+    readonly scope: TenantBlobScope;
+    readonly execution: PromotionExecutionClaim;
+  }): Promise<
+    | { readonly status: "marked"; readonly execution: PromotionExecutionClaim }
+    | { readonly status: "claim_lost" }
+  >;
+  /**
+   * not_copied 只允许在 markPromotionCopyIssued 前完成；一旦已发 COPY，状态只能收敛为 unknown/succeeded。
+   */
+  completePromotionExecution(input: {
+    readonly scope: TenantBlobScope;
+    readonly execution: PromotionExecutionClaim;
+    readonly outcome: "succeeded" | "not_copied" | "unknown";
+  }): Promise<void>;
 }
 
 export type BlobRef = StagedBlobRef | StableBlobRef;
@@ -145,7 +193,8 @@ export interface StableBlobGcClaim {
 }
 
 /**
- * 由 PostgreSQL 事务实现。claimUnreachable 必须在同一事务中检查零引用并签发租约；
+ * 由 PostgreSQL 事务实现。claimUnreachable 必须在同一事务中检查零引用、确认不存在
+ * started/executing/unknown promotion 授权并签发租约；
  * beginDeletion 必须把 pre_delete 原子推进为不可逆 deleting，再允许发起远端 DELETE。
  * 新增 stable 引用也必须锁定并读取同一生命周期行，pre_delete/deleting 状态下一律拒绝。
  * deleted 对象只有在重新 promote 并经 HEAD 校验后，才能由引用事务原子恢复为 active。
@@ -200,6 +249,38 @@ export interface StableBlobGcPort {
     scope: TenantBlobScope,
     blob: StableBlobRef,
   ): Promise<"deleted" | "still_referenced" | "in_progress">;
+}
+
+export interface StableBlobRetiredTombstone {
+  readonly tombstoneId: string;
+  readonly generation: number;
+  readonly tenantId: string;
+  readonly purpose: BlobPurpose;
+  readonly sha256: string;
+  readonly size: number;
+  readonly incarnationId: string;
+  readonly physicalObjectKey: string;
+}
+
+/**
+ * retired tombstone 永久保留；completeScrub 只记录本轮完成时间/结果，绝不能删除 tombstone。
+ * PG claim 时必须确认 incarnation 已 retired，且 physical key 与永久历史完全一致。
+ */
+export interface StableBlobRetiredTombstonePort {
+  claimForScrub(input: {
+    readonly scope: TenantBlobScope;
+  }): Promise<
+    | { readonly status: "claimed"; readonly tombstone: StableBlobRetiredTombstone }
+    | { readonly status: "none" | "in_progress" }
+  >;
+  completeScrub(input: {
+    readonly scope: TenantBlobScope;
+    readonly tombstone: StableBlobRetiredTombstone;
+  }): Promise<void>;
+}
+
+export interface StableBlobRetiredTombstoneScrubber {
+  scrubNext(scope: TenantBlobScope): Promise<"scrubbed" | "none" | "in_progress">;
 }
 
 export type BlobStoreErrorCode =

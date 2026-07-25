@@ -17,6 +17,8 @@ import {
   type BlobStore,
   type PresignBlobDownloadInput,
   type PromotionAuthorizationRef,
+  type PromotionExecutionClaim,
+  type PromotionExecutionClaimResolution,
   type PutStagingBlobInput,
   type StableBlobRef,
   type StableBlobGcClaim,
@@ -24,6 +26,9 @@ import {
   type StableBlobGcPort,
   type StableBlobPromotionAuthorization,
   type StableBlobPromotionAuthorizationPort,
+  type StableBlobRetiredTombstone,
+  type StableBlobRetiredTombstonePort,
+  type StableBlobRetiredTombstoneScrubber,
   type StagedBlobRef,
   type TenantBlobScope,
   assertBlobPurpose,
@@ -42,6 +47,7 @@ export interface S3BlobStoreConfig {
   readonly prefix?: string;
   readonly maxPresignTtlSeconds?: number;
   readonly maxBlobSizeBytes: number;
+  readonly promotionWorkerId?: string;
 }
 
 export interface CreateS3BlobStoreConfig extends S3BlobStoreConfig {
@@ -101,6 +107,7 @@ export class S3BlobStore implements BlobStore {
   private readonly prefix: string;
   private readonly maxPresignTtlSeconds: number;
   private readonly maxBlobSizeBytes: number;
+  private readonly promotionWorkerId: string;
 
   constructor(
     private readonly client: S3ObjectClient,
@@ -111,6 +118,7 @@ export class S3BlobStore implements BlobStore {
     this.prefix = normalizePrefix(config.prefix ?? "agent-runtime");
     this.maxPresignTtlSeconds = assertMaxPresignTtl(config.maxPresignTtlSeconds ?? 600);
     this.maxBlobSizeBytes = assertMaxBlobSize(config.maxBlobSizeBytes);
+    this.promotionWorkerId = assertWorkerId(config.promotionWorkerId ?? "s3-blob-worker");
   }
 
   async putStaging(input: PutStagingBlobInput): Promise<StagedBlobRef> {
@@ -156,55 +164,142 @@ export class S3BlobStore implements BlobStore {
   ): Promise<StableBlobRef> {
     assertBlobRef(scope, staged);
     assertPromotionAuthorizationRef(scope, authorizationRef);
+    let claim: PromotionExecutionClaimResolution;
+    try {
+      claim = await this.authorizations.claimPromotionExecution({
+        scope,
+        authorization: authorizationRef,
+        workerId: this.promotionWorkerId,
+      });
+    } catch (error) {
+      throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "promotion execution claim 结果未知", {
+        result: "unknown",
+        cause: error,
+      });
+    }
+    if (claim.status === "completed") {
+      assertPromotionAuthorizationMatches(
+        scope,
+        staged,
+        authorizationRef,
+        claim.authorization,
+        this.prefix,
+      );
+      const completedStable = stableFromAuthorization(staged, claim.authorization);
+      const completedHead = await this.client.head(this.keyFor(completedStable));
+      if (completedHead === undefined) {
+        throw new BlobStoreError(
+          "BLOB_RESULT_UNKNOWN",
+          "已完成 promotion 的物理对象缺失，必须由恢复流程收敛",
+          { result: "unknown" },
+        );
+      }
+      assertStoredDescriptor(completedHead, completedStable);
+      return completedStable;
+    }
+    if (claim.status !== "claimed") {
+      throw new BlobStoreError(
+        "INVALID_BLOB_ARGUMENT",
+        `stable promote execution 不可用：${claim.status}`,
+      );
+    }
+    let execution = claim.execution;
     const resolution = await this.authorizations.resolveAuthorizedForCopy({
       scope,
-      authorization: authorizationRef,
+      execution,
     });
     if (resolution.status !== "authorized") {
+      await this.completePromotionOutcome(scope, execution, "not_copied");
       throw new BlobStoreError(
         "INVALID_BLOB_ARGUMENT",
         `stable promote 授权不可用：${resolution.status}`,
       );
     }
     const persisted = resolution.authorization;
-    assertPromotionAuthorizationMatches(scope, staged, authorizationRef, persisted, this.prefix);
-    this.assertWithinSizeLimit(staged.size);
+    try {
+      assertPromotionAuthorizationMatches(scope, staged, authorizationRef, persisted, this.prefix);
+      this.assertWithinSizeLimit(staged.size);
+    } catch (error) {
+      await this.completePromotionOutcome(scope, execution, "not_copied");
+      throw error;
+    }
     const sourceKey = this.keyFor(staged);
-    const stagedHead = await this.client.head(sourceKey);
+    let stagedHead: S3ObjectMetadata | undefined;
+    try {
+      stagedHead = await this.client.head(sourceKey);
+    } catch (error) {
+      await this.completePromotionOutcome(scope, execution, "not_copied");
+      throw error;
+    }
     if (stagedHead === undefined) {
+      await this.completePromotionOutcome(scope, execution, "not_copied");
       throw new BlobStoreError("BLOB_NOT_FOUND", "待提交的 staging 对象不存在");
     }
-    assertProviderBlobSizeWithin(stagedHead.size, this.maxBlobSizeBytes);
-    assertStoredDescriptor(stagedHead, staged);
+    try {
+      assertProviderBlobSizeWithin(stagedHead.size, this.maxBlobSizeBytes);
+      assertStoredDescriptor(stagedHead, staged);
+    } catch (error) {
+      await this.completePromotionOutcome(scope, execution, "not_copied");
+      throw error;
+    }
 
-    const stable: StableBlobRef = {
-      kind: "stable",
-      tenantId: staged.tenantId,
-      purpose: staged.purpose,
-      sha256: staged.sha256,
-      size: staged.size,
-      mediaType: staged.mediaType,
-      incarnationId: persisted.incarnationId,
-      physicalObjectKey: persisted.physicalObjectKey,
-    };
+    const stable = stableFromAuthorization(staged, persisted);
     const destinationKey = this.keyFor(stable);
-    const existing = await this.client.head(destinationKey);
+    let existing: S3ObjectMetadata | undefined;
+    try {
+      existing = await this.client.head(destinationKey);
+    } catch (error) {
+      await this.completePromotionOutcome(scope, execution, "not_copied");
+      throw error;
+    }
     if (existing !== undefined) {
-      assertProviderBlobSizeWithin(existing.size, this.maxBlobSizeBytes);
-      assertStoredDescriptor(existing, stable);
+      try {
+        assertProviderBlobSizeWithin(existing.size, this.maxBlobSizeBytes);
+        assertStoredDescriptor(existing, stable);
+      } catch (error) {
+        await this.completePromotionOutcome(scope, execution, "not_copied");
+        throw error;
+      }
+      await this.completePromotionOutcome(scope, execution, "succeeded");
       return stable;
     }
+
+    let issued: Awaited<
+      ReturnType<StableBlobPromotionAuthorizationPort["markPromotionCopyIssued"]>
+    >;
+    try {
+      issued = await this.authorizations.markPromotionCopyIssued({ scope, execution });
+    } catch (error) {
+      throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "promotion COPY intent 结果未知", {
+        result: "unknown",
+        cause: error,
+      });
+    }
+    if (issued.status !== "marked") {
+      throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "promotion execution claim 已失效", {
+        result: "unknown",
+      });
+    }
+    execution = issued.execution;
 
     try {
       await this.client.copy({ sourceKey, destinationKey });
     } catch (error) {
+      await this.completePromotionOutcome(scope, execution, "unknown");
       if (await this.resolveWriteResult(destinationKey, stable, error)) {
+        await this.completePromotionOutcome(scope, execution, "succeeded");
         return stable;
       }
       throw normalizeWriteError(error, "稳定对象复制失败，结果可能未知");
     }
 
-    await this.assertWritten(destinationKey, stable);
+    try {
+      await this.assertWritten(destinationKey, stable);
+    } catch (error) {
+      await this.completePromotionOutcome(scope, execution, "unknown");
+      throw error;
+    }
+    await this.completePromotionOutcome(scope, execution, "succeeded");
     return stable;
   }
 
@@ -367,6 +462,21 @@ export class S3BlobStore implements BlobStore {
   private assertWithinSizeLimit(size: number): void {
     assertBlobSizeWithin(size, this.maxBlobSizeBytes);
   }
+
+  private async completePromotionOutcome(
+    scope: TenantBlobScope,
+    execution: PromotionExecutionClaim,
+    outcome: "succeeded" | "not_copied" | "unknown",
+  ): Promise<void> {
+    try {
+      await this.authorizations.completePromotionExecution({ scope, execution, outcome });
+    } catch (error) {
+      throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "promotion execution 结果持久化失败", {
+        result: "unknown",
+        cause: error,
+      });
+    }
+  }
 }
 
 export function createS3BlobStore(
@@ -387,6 +497,18 @@ export function createS3StableBlobGarbageCollector(
     claims,
     prefix,
     maxBlobSizeBytes,
+  );
+}
+
+export function createS3RetiredBlobTombstoneScrubber(
+  config: CreateS3BlobStoreConfig,
+  tombstones: StableBlobRetiredTombstonePort,
+): StableBlobRetiredTombstoneScrubber {
+  return new S3RetiredBlobTombstoneScrubber(
+    createAwsObjectClient(config),
+    tombstones,
+    normalizePrefix(config.prefix ?? "agent-runtime"),
+    assertMaxBlobSize(config.maxBlobSizeBytes),
   );
 }
 
@@ -430,6 +552,28 @@ export class S3StableBlobGarbageCollector implements StableBlobGcPort {
     // 删除已确认后才完成 claim；完成失败也不能释放，否则新引用可能指向已删除对象。
     await this.claims.completeDeletion({ scope, blob, claim: deletingClaim });
     return "deleted";
+  }
+}
+
+export class S3RetiredBlobTombstoneScrubber implements StableBlobRetiredTombstoneScrubber {
+  constructor(
+    private readonly client: S3ObjectClient,
+    private readonly tombstones: StableBlobRetiredTombstonePort,
+    private readonly prefix: string,
+    private readonly maxBlobSizeBytes: number,
+  ) {}
+
+  async scrubNext(scope: TenantBlobScope): Promise<"scrubbed" | "none" | "in_progress"> {
+    assertTenantScope(scope);
+    const claimed = await this.tombstones.claimForScrub({ scope });
+    if (claimed.status !== "claimed") {
+      return claimed.status;
+    }
+    assertRetiredTombstone(scope, claimed.tombstone, this.prefix, this.maxBlobSizeBytes);
+    // tombstone 永久存在，因此每轮都精确 DELETE；迟到 COPY 会在后续轮次再次被清除。
+    await deleteAndResolve(this.client, claimed.tombstone.physicalObjectKey);
+    await this.tombstones.completeScrub({ scope, tombstone: claimed.tombstone });
+    return "scrubbed";
   }
 }
 
@@ -714,6 +858,13 @@ function assertMaxBlobSize(value: number): number {
   return value;
 }
 
+function assertWorkerId(workerId: string): string {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(workerId)) {
+    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "promotionWorkerId 格式无效");
+  }
+  return workerId;
+}
+
 function assertBlobSizeWithin(size: number, maximum: number): void {
   if (!Number.isSafeInteger(size) || size < 0 || size > maximum) {
     throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "Blob 大小超过当前小对象上限");
@@ -765,6 +916,22 @@ function stableKeyFor(
   incarnationId: string,
 ): string {
   return `${prefix}/stable/${blob.tenantId}/${blob.purpose}/sha256/${blob.sha256}/incarnations/${incarnationId}`;
+}
+
+function stableFromAuthorization(
+  staged: StagedBlobRef,
+  authorization: StableBlobPromotionAuthorization,
+): StableBlobRef {
+  return {
+    kind: "stable",
+    tenantId: staged.tenantId,
+    purpose: staged.purpose,
+    sha256: staged.sha256,
+    size: staged.size,
+    mediaType: staged.mediaType,
+    incarnationId: authorization.incarnationId,
+    physicalObjectKey: authorization.physicalObjectKey,
+  };
 }
 
 function assertPromotionAuthorizationRef(
@@ -874,6 +1041,34 @@ function assertGcClaim(
     blob.physicalObjectKey !== expectedPhysicalKey
   ) {
     throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "stable GC claim 与物理对象不一致");
+  }
+}
+
+function assertRetiredTombstone(
+  scope: TenantBlobScope,
+  tombstone: StableBlobRetiredTombstone,
+  prefix: string,
+  maxBlobSizeBytes: number,
+): void {
+  assertTenantScope({ tenantId: tombstone.tenantId });
+  assertBlobPurpose(tombstone.purpose);
+  assertIncarnationId(tombstone.incarnationId);
+  assertPhysicalObjectKey(tombstone.physicalObjectKey);
+  assertBlobSizeWithin(tombstone.size, maxBlobSizeBytes);
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(tombstone.tombstoneId) ||
+    !Number.isSafeInteger(tombstone.generation) ||
+    tombstone.generation < 1 ||
+    !/^[a-f0-9]{64}$/u.test(tombstone.sha256)
+  ) {
+    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "retired tombstone 格式无效");
+  }
+  if (tombstone.tenantId !== scope.tenantId) {
+    throw new BlobStoreError("TENANT_SCOPE_MISMATCH", "retired tombstone 不属于当前 Tenant");
+  }
+  const expected = stableKeyFor(prefix, tombstone, tombstone.incarnationId);
+  if (tombstone.physicalObjectKey !== expected) {
+    throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "retired tombstone 物理身份不一致");
   }
 }
 

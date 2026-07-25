@@ -31,10 +31,11 @@
 1. 上传并 HEAD 校验 staging；
 2. 使用 `(TenantBlobScope, operationId)` 幂等提交业务引用；
 3. 引用提交明确成功后，由 PG 生命周期事务预留并持久化完整 allocation；调用方不传 mode，由 PG 根据当前 lifecycle 与永久 retired 历史原子决定 `active_reuse | new_after_deleted`，状态进入 `allocation_reserved`；
-4. COPY 前在同一 PG 事务中 CAS 到 `promotion_started` 并签发规范授权行。授权绑定 tenant/operation/reference、staging upload/key、allocation/lifecycle/generation/incarnation/key、hash/size；随后只把最小授权引用传给 BlobStore；
-5. 把业务 ReferenceVersion 切换为携带 incarnationId 与 physicalObjectKey 的 stable 引用；
-6. 最后删除 staging；
-7. 引用提交前失败的 staging 进入孤儿清理；补偿事件明确记录目标为 staging；结果未知时先通过同一 Tenant scope 下的对应 resolve 接口查明，不允许猜测后继续。
+4. COPY 前先由 `preparePromotionStart` 产生不可结构伪造的 `PreparedPromotionStart`。它统一校验 snapshot 状态/version 连续及 tenant/operation/reference、staging upload/key、allocation/lifecycle/generation/mode/incarnation/key、hash/size 全绑定；StatePort 只接受该能力，并在同一 PG 事务中 CAS 到 `promotion_started`、签发规范授权行；
+5. BlobStore 以最小授权引用原子 `claimPromotionExecution`；远端 COPY 前调用 `markPromotionCopyIssued` 写入不可撤销 intent。intent 前确定失败可完成为 `not_copied`；intent 后只能是 `executing/unknown/succeeded`，不能撤销、inactive 或 retired；
+6. 把业务 ReferenceVersion 切换为携带 incarnationId 与 physicalObjectKey 的 stable 引用；
+7. 最后删除 staging；
+8. 引用提交前失败的 staging 进入孤儿清理；补偿事件明确记录目标为 staging；结果未知时先通过同一 Tenant scope 下的对应 resolve 接口查明，不允许猜测后继续。
 
 `BlobReferenceCommitPort` 和 `BlobCommitStatePort` 是协调契约，本包不实现具体业务表。PostgreSQL 实现必须以 `(tenant_id, operation_id)` 建立复合唯一约束，所有 load/CAS/resolve 都必须同时校验 Tenant scope；不同 Tenant 可以使用相同 `operationId`。关键状态迁移由 `transitionBlobCommit` 校验，非法跨越会失败。
 
@@ -46,7 +47,9 @@ stable GC 的 `claimUnreachable` 必须在 PG 事务中检查零引用并写入 
 
 `stable_mark_gc_blocked` 必须先解析生命周期：active 可重试标记，pre-delete/deleting 继续等待，只有明确 deleted 才能退回复制步骤并使用仍保留的 staging 重新 promote，不能从阻塞状态直接复制。
 
-COPY 返回 UNKNOWN 时，`promotion_unknown` 必须继续保存完整 allocation、目标 StableBlobRef 与同一最小授权引用；PG 可重复解析同一 active 授权，HEAD/COPY 重试只能围绕同一 physicalObjectKey 收敛，不能跨 operation/staging 或切换 incarnation。明确完成后授权收敛为 consumed/inactive。GC 明确 deleted 时旧 incarnation 同步写入永久 retired 历史；协调器回到 `reference_committed` 后必须取得 `new_after_deleted` 新 allocation 与新授权，旧授权和物理身份永久拒绝。
+COPY 返回 UNKNOWN 时，`promotion_unknown` 必须继续保存完整 allocation、目标 StableBlobRef、同一授权及 execution generation/worker；恢复只能 HEAD 同一 physicalObjectKey，再以同一 execution 收敛，不能跨 operation/staging 或切换 incarnation。started/executing/unknown 存在时生命周期/GC 事务禁止退休该 incarnation。allocation mode 完全由可信 PG 生命周期事务依据全局永久历史决定；协调器不得由本 operation 是否见过 retired 反推 mode，只在本 operation 确有旧 target 时要求新 target 不同。
+
+远端请求一旦签发就无法撤销。即使缓存的旧 COPY 在授权收敛并发布新 incarnation 后迟到，它也只能写入永不复用的 retired physical key，不能覆盖新对象。retired key 的 tombstone 永久保留，GC scrub 必须可重复删除该精确键，使迟到写入收敛为可恢复孤儿。
 
 来自调用参数的非法大小返回 `INVALID_BLOB_ARGUMENT`；来自 S3 HEAD metadata.size、GET ContentLength 或响应正文的超限属于存储响应完整性问题，返回 `BLOB_INTEGRITY_MISMATCH`。
 `expectedSha256/expectedSize` 先校验参数格式，格式错误返回 `INVALID_BLOB_ARGUMENT`；只有格式合法但与正文不一致时返回 `BLOB_INTEGRITY_MISMATCH`。

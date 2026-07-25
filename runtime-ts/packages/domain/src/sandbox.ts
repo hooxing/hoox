@@ -81,6 +81,11 @@ export function createReplacementSandboxSession(input: {
     "INVALID_STATE_TRANSITION",
     "只有终态沙箱才能被替换",
   );
+  domainInvariant(
+    input.id !== input.previous.id,
+    "INVALID_ARGUMENT",
+    "替换沙箱必须使用新的 Session ID",
+  );
   return createSession({
     id: input.id,
     thread: input.thread,
@@ -115,6 +120,13 @@ export function transitionSandboxSession(
       "沙箱厂商实例 ID 首次绑定后不可替换",
     );
   }
+  if (providerSandboxId !== undefined) {
+    domainInvariant(
+      providerSandboxId.trim().length > 0,
+      "INVALID_ARGUMENT",
+      "厂商实例 ID 不能为空",
+    );
+  }
   const resolvedProviderId = providerSandboxId ?? session.providerSandboxId;
   if (target === "ready") {
     domainInvariant(
@@ -137,6 +149,7 @@ export function rehydrateSandboxSession(
   replacedSession?: SandboxSession,
 ): SandboxSession {
   const raw = recordValue(snapshot, "SandboxSession");
+  const restoredSessionId = sandboxSessionId(stringValue(raw, "id"));
   const restoredTenantId = tenantId(stringValue(raw, "tenantId"));
   assertSameTenant(restoredTenantId, thread.tenantId);
   const restoredThreadId = threadId(stringValue(raw, "threadId"));
@@ -154,6 +167,11 @@ export function rehydrateSandboxSession(
       sandboxSessionId(replacesSession) === replacedSession.id,
       "OWNERSHIP_MISMATCH",
       "被替换沙箱关联无效",
+    );
+    domainInvariant(
+      restoredSessionId !== replacedSession.id,
+      "INVALID_ARGUMENT",
+      "替换沙箱必须使用新的 Session ID",
     );
     assertSameTenant(replacedSession.tenantId, restoredTenantId);
     domainInvariant(
@@ -189,7 +207,7 @@ export function rehydrateSandboxSession(
     );
   }
   return sealEntity("SandboxSession", {
-    id: sandboxSessionId(stringValue(raw, "id")),
+    id: restoredSessionId,
     tenantId: restoredTenantId,
     threadId: restoredThreadId,
     templateId,

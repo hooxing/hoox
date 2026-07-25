@@ -73,3 +73,31 @@
 ### 可逆性
 
 可以在读取模型中把修正链折叠成一个逻辑交付物，但底层不可变发布记录不能原地合并或覆盖。
+
+## 实体真实性、替换身份与协议时间
+
+### 背景与备选
+
+最初使用不可枚举 `unique symbol` 作为实体品牌。它能阻止从零构造对象，但 TypeScript 的对象展开在静态类型上仍会保留 symbol 品牌，导致 `{ ...valid, status: 非法值 }` 可能继续被视为实体。可选方案有：
+
+1. 保留 symbol，并在每个公开函数重复运行时真实性校验。
+2. 使用带 private/protected 成员的 class 名义品牌，让对象展开在编译期必然丢失身份。
+3. 把全部领域状态封装成行为 class，不再暴露只读数据字段。
+
+同时，替换 Artifact/Sandbox 若允许复用原 ID，会让一个 ID 对应两个不可变历史；协议时间只使用正则也会接受 2 月 30 日等不存在日期。
+
+### 选择与理由
+
+选择第二种，并继续保持“只读数据 + 纯转换函数”的领域风格。`sealEntity` 创建名义 class 实例，JSON 序列化仍只包含数据；任何展开或 JSON 恢复都会丢失身份，必须经过 `rehydrate*`。Artifact 和 Sandbox 替换同时要求新内容版本/厂商会话语义与新实体 ID。协议层为 UTC 时间注册 TypeBox 自定义 format，并与 Domain 一样通过规范化后的 `toISOString()` 回比验证真实日历。
+
+### 影响与验证
+
+- 业务代码不能通过对象展开修改聚合；必须调用公开状态转换函数。
+- 使用 TypeScript Compiler API 编译两个 spread 篡改用例，固定要求产生赋值错误；这比只测试从零对象字面量更接近真实误用。
+- create 与 rehydrate 都拒绝复用 Artifact ID 或 Sandbox Session ID，Workspace 恢复要求 `revisionNumber === 0` 当且仅当 `currentRevisionId` 缺失。
+- TypeBox Schema 测试和 Domain 测试使用同一组非法闰日、月末日期和 24:00 反例。
+- Domain、Protocol 与 Protocol Mapper 包的 `types` 和条件 `exports.types` 指向源码，运行时 `default` 指向 dist；干净安装后的 typecheck/build 验证依赖解析不依赖旧构建残留。
+
+### 可逆性
+
+未来可以升级为完整行为 class 或为高风险入口叠加运行时 `instanceof`，不会改变 JSON/DTO。替换 ID 与严格时间已经是持久化和公开协议不变量，若放宽必须新协议版本并迁移历史数据，不能静默回退。

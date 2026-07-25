@@ -39,6 +39,7 @@
 
 - API 或 Worker 在接收外部数据时必须先通过协议 Schema，再映射为带品牌 ID 和不变量的领域对象。
 - TypeBox 校验通过只代表数据形状合法，不代表 Tenant 所有权或状态转换合法；这些规则仍由 `domain` 执行。
+- UTC 时间使用注册的 `cube-iso-utc-timestamp-v1` 自定义 format 执行真实日历校验；其他语言实现 v1 Schema 时必须提供等价 format，而不能忽略它。
 - 新增字段必须先决定是 v1 的可选兼容字段还是新协议版本，不允许直接放宽 `additionalProperties`。
 - 公开错误只使用稳定错误码；跨 Tenant 的不存在与无权访问统一映射为 `NOT_FOUND`。
 

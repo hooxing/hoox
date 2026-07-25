@@ -46,11 +46,15 @@ export const sandboxSessionId = (value: string): SandboxSessionId =>
 export const agentThreadId = (value: string): AgentThreadId => toId(value, "AgentThreadId");
 
 export function isoTimestamp(value: string): IsoTimestamp {
+  const matched = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z$/u.exec(value);
+  domainInvariant(matched !== null, "INVALID_ARGUMENT", "时间戳必须是 UTC ISO 8601 格式");
+  const normalized = matched[7] === undefined ? value.replace(/Z$/u, ".000Z") : value;
+  const parsed = new Date(normalized);
+  // Date.parse 会把 2 月 30 日等值自动滚入下月，必须与规范化结果逐字比较。
   domainInvariant(
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u.test(value) &&
-      !Number.isNaN(Date.parse(value)),
+    !Number.isNaN(parsed.valueOf()) && parsed.toISOString() === normalized,
     "INVALID_ARGUMENT",
-    "时间戳必须是 UTC ISO 8601 格式",
+    "时间戳不是有效的 UTC 日历时间",
   );
   return value as IsoTimestamp;
 }

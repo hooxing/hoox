@@ -27,6 +27,7 @@ export function domainInvariant(
 }
 
 // 所有权错误故意不包含实体 ID，避免上层把跨 Tenant 的存在性带入公开错误。
-export function assertSameTenant(left: string, right: string): void {
+export function assertSameTenant(left: TenantId, right: TenantId): void {
   domainInvariant(left === right, "OWNERSHIP_MISMATCH", "资源不属于当前租户");
 }
+import type { TenantId } from "./ids.js";

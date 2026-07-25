@@ -2,14 +2,20 @@ import { Value } from "@sinclair/typebox/value";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import {
+  ArtifactDtoSchema,
   createNotFoundEnvelope,
   ErrorEnvelopeSchema,
   eventEnvelopeSchema,
   IdSchema,
+  MembershipDtoSchema,
   publicErrorCodes,
+  ResourceVersionDtoSchema,
   RunDtoSchema,
   successEnvelopeSchema,
+  TenantDtoSchema,
   ThreadDtoSchema,
+  UserDtoSchema,
+  WorkspaceRevisionDtoSchema,
 } from "../../runtime-ts/packages/protocol/src/index.js";
 
 const timestamp = "2026-07-26T00:00:00.000Z";
@@ -89,6 +95,102 @@ describe("协议 Schema", () => {
       retryable: false,
     });
     expect(JSON.stringify(envelope)).not.toContain("tenant");
+    expect(() => createNotFoundEnvelope("x")).toThrow("requestId 格式无效");
+  });
+
+  const strictDtoCases = [
+    [UserDtoSchema, { id: "user_one", createdAt: timestamp }],
+    [
+      TenantDtoSchema,
+      {
+        id: "tenant_one",
+        kind: "personal",
+        ownerUserId: "user_one",
+        createdAt: timestamp,
+      },
+    ],
+    [
+      MembershipDtoSchema,
+      {
+        id: "membership_one",
+        tenantId: "tenant_one",
+        userId: "user_one",
+        role: "owner",
+        status: "active",
+        createdAt: timestamp,
+      },
+    ],
+    [
+      ThreadDtoSchema,
+      {
+        id: "thread_one",
+        tenantId: "tenant_one",
+        createdByUserId: "user_one",
+        title: "任务",
+        status: "active",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+    ],
+    [
+      RunDtoSchema,
+      {
+        id: "run_one",
+        tenantId: "tenant_one",
+        threadId: "thread_one",
+        status: "running",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+    ],
+    [
+      WorkspaceRevisionDtoSchema,
+      {
+        id: "workspace_revision_one",
+        workspaceId: "workspace_one",
+        tenantId: "tenant_one",
+        threadId: "thread_one",
+        revisionNumber: 1,
+        createdByRunId: "run_one",
+        leaseEpoch: 1,
+        objectKey: "workspace/one.tar",
+        digest: "a".repeat(64),
+        createdAt: timestamp,
+      },
+    ],
+    [
+      ResourceVersionDtoSchema,
+      {
+        id: "resource_version_one",
+        resourceId: "resource_one",
+        tenantId: "tenant_one",
+        versionNumber: 1,
+        objectKey: "resource/one",
+        digest: "a".repeat(64),
+        mediaType: "text/plain",
+        sizeBytes: 1,
+        createdAt: timestamp,
+      },
+    ],
+    [
+      ArtifactDtoSchema,
+      {
+        id: "artifact_one",
+        tenantId: "tenant_one",
+        threadId: "thread_one",
+        runId: "run_one",
+        resourceVersionId: "resource_version_one",
+        name: "交付物",
+        status: "published",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+    ],
+  ] as const;
+
+  it.each(strictDtoCases)("所有 DTO 都拒绝额外字段 %#", (schema, value) => {
+    expect(Value.Check(schema, value)).toBe(true);
+    expect(Value.Check(schema, { ...value, unexpected: "不可接受" })).toBe(false);
   });
 
   it("品牌 ID 的运行时格式与领域格式保持同一公开契约", () => {

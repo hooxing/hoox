@@ -29,7 +29,7 @@
 
 ## 选择
 
-选择 `@sinclair/typebox` `0.34.52`。协议 Schema 以 `v1` 为首个明确版本，默认 `additionalProperties: false`。领域包不依赖 TypeBox；协议包也不导入领域包，二者只通过应用层 Mapper 连接。
+选择 `@sinclair/typebox` `0.34.52`。协议 Schema 以 `v1` 为首个明确版本，默认 `additionalProperties: false`。领域包不依赖 TypeBox；协议包也不导入领域包，二者只通过独立的 `@cube-runtime/protocol-mapper` 适配包连接。
 
 ## 理由
 

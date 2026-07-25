@@ -55,6 +55,18 @@ importers:
         specifier: 0.34.52
         version: 0.34.52
 
+  runtime-ts/packages/protocol-mapper:
+    dependencies:
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@cube-runtime/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@sinclair/typebox':
+        specifier: 0.34.52
+        version: 0.34.52
+
   runtime-ts/packages/resource: {}
 
   runtime-ts/packages/sandbox: {}

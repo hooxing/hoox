@@ -84,6 +84,7 @@ export const WorkspaceRevisionDtoSchema = Type.Object(
     revisionNumber: Type.Integer({ minimum: 1 }),
     parentRevisionId: Type.Optional(IdSchema),
     createdByRunId: IdSchema,
+    leaseEpoch: Type.Integer({ minimum: 1 }),
     objectKey: Type.String({ minLength: 1 }),
     digest: Sha256DigestSchema,
     createdAt: IsoTimestampSchema,
@@ -116,6 +117,7 @@ export const ArtifactDtoSchema = Type.Object(
     threadId: IdSchema,
     runId: IdSchema,
     resourceVersionId: IdSchema,
+    replacesArtifactId: Type.Optional(IdSchema),
     name: Type.String({ minLength: 1, maxLength: 255 }),
     status: Type.Union([
       Type.Literal("publishing"),

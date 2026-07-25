@@ -5,3 +5,4 @@ export * from "./execution.js";
 export * from "./identity.js";
 export * from "./ids.js";
 export * from "./sandbox.js";
+export * from "./workspace-commit-port.js";

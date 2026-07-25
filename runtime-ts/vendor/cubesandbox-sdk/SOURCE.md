@@ -1,6 +1,6 @@
 # CubeSandbox Node SDK 来源
 
-本项目不从 npm 的 `master` 浮动安装 CubeSandbox SDK。正式接入时只允许使用以下固定来源：
+本目录是上游 Node SDK 的原样快照，Runtime 通过 `packages/sandbox` 隔离其接口，禁止在此目录打补丁。
 
 - 上游仓库：`https://github.com/TencentCloud/CubeSandbox`
 - 上游版本：`v0.6.0`
@@ -9,4 +9,12 @@
 - SDK 包版本：`0.3.0`
 - 上游许可证：Apache-2.0
 
-当前目录只记录供应链来源，尚未复制 SDK 源码。执行正式 SDK 接入任务时，必须同时复制固定提交下的 `sdk/node` 与上游许可证，记录内容哈希，并通过代码审查后提交；不得从 `master` 更新。
+## 同步规则
+
+1. 克隆上游并检出上述固定提交，而不是浮动的 `master`。
+2. 机械复制 `sdk/node` 全部内容和仓库根 `LICENSE` 到本目录。
+3. 比较源目录与本目录；仅允许 `SOURCE.md` 是本地新增文件。
+4. 运行 `pnpm vendor:build`、类型检查、契约测试和显式真实冒烟。
+5. 更新固定提交时必须新增 ADR，说明行为差异及回退方式。
+
+本次导入已通过 `git ls-remote` 和本地 `rev-parse` 双重确认标签指向上述提交。

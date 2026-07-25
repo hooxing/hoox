@@ -23,7 +23,10 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.5",
+    "@cube-runtime/protocol-mapper": "workspace:*",
+    "@sinclair/typebox": "0.34.52",
     "@types/node": "24.10.0",
+    "fast-check": "4.9.0",
     "typescript": "5.9.3",
     "vitest": "4.1.10"
   }

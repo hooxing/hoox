@@ -299,6 +299,16 @@ describe("PostgreSQL stable blob 生命周期", () => {
   it("started 授权绑定完整目标，单一 COPY attempt 且 UNKNOWN 只进入同目标恢复", async () => {
     const staging = staged(scopeA, `authorization-${unique}`);
     const flow = await preparePromotion(scopeA, staging, `authorization-${unique}`);
+    const startedSnapshot = await repository.load(scopeA, flow.authorization.operationId);
+    if (startedSnapshot === undefined) throw new Error("promotion_started snapshot 缺失");
+    expect(
+      await repository.startPromotion({
+        scope: scopeA,
+        operationId: flow.authorization.operationId,
+        expectedSnapshotVersion: startedSnapshot.version - 1,
+        allocationId: flow.allocation.allocationId,
+      }),
+    ).toMatchObject({ status: "started", authorization: flow.authorization });
     const first = await repository.claimPromotionExecution({
       scope: scopeA,
       authorization: flow.authorization,
@@ -330,6 +340,9 @@ describe("PostgreSQL stable blob 生命周期", () => {
       execution: first.execution,
     });
     if (issued.status !== "marked") throw new Error("COPY intent 未写入");
+    expect(
+      await repository.markPromotionCopyIssued({ scope: scopeA, execution: first.execution }),
+    ).toMatchObject({ status: "marked", execution: { executionId: first.execution.executionId } });
     await repository.completePromotionExecution({
       scope: scopeA,
       execution: issued.execution,
@@ -373,6 +386,14 @@ describe("PostgreSQL stable blob 生命周期", () => {
       authorizationId: flow.authorization.authorizationId,
     });
     expect(proven).toMatchObject({ status: "proven_not_copied" });
+    expect(
+      await repository.provePromotionNotCopied({
+        scope: scopeA,
+        operationId: flow.authorization.operationId,
+        expectedSnapshotVersion: startedSnapshot.version,
+        authorizationId: flow.authorization.authorizationId,
+      }),
+    ).toEqual(proven);
     expect((await repository.load(scopeA, flow.authorization.operationId))?.status).toBe(
       "allocation_reserved",
     );
@@ -486,6 +507,9 @@ describe("PostgreSQL stable blob 生命周期", () => {
       claim: takeover.claim,
     });
     if (deleting.status !== "started") throw new Error("GC beginDeletion 失败");
+    expect(
+      await repository.beginDeletion({ scope: scopeA, blob: firstStable, claim: takeover.claim }),
+    ).toEqual(deleting);
     const client = s3Client();
     await client.send(
       new DeleteObjectCommand({ Bucket: config.bucket, Key: firstStable.physicalObjectKey }),

@@ -85,4 +85,6 @@ CI 校验 vendor 哈希、Lockfile 和 License。构建不得下载未锁定执�
 
 ## 实施记录
 
-- 当前仅有 `SOURCE.md`，尚未复制 SDK 源码；不得把“来源已记录”误认为“vendoring 已完成”。
+- CubeSandbox Node SDK 已按 `v0.6.0` 固定提交机械复制到 vendor；本次修复不改动任何上游文件。
+- clean checkout 暴露出 `packages/sandbox` 类型检查早于 vendor build 时无法解析 `@cubesandbox/sdk/dist`。备选方案包括修改上游 `package.json` 让类型直接指向源码，或在根类型检查前精确构建 vendor；选择后者，以保持 vendor 文件逐字一致和上游发布契约不变。
+- 根 `typecheck` 现在先构建 `@cubesandbox/sdk`，再执行仓库及工作区类型检查。CI 在冻结安装后主动删除 vendor `dist` 并运行完整 `check`，证明检查不依赖工作树残留。删除脚本使用仓库内固定绝对边界，不接受参数、通配符或环境变量目标。

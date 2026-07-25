@@ -9,7 +9,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
-import { createSandboxTools, SANDBOX_TOOL_NAMES } from "./tools.js";
+import {
+  createSandboxTools,
+  SANDBOX_TOOL_NAMES,
+  type SandboxToolEffectAuthorizer,
+} from "./tools.js";
 
 interface PiSessionPort {
   prompt(text: string): Promise<void>;
@@ -85,7 +89,7 @@ export interface CreateSafePiSessionOptions {
   systemPrompt?: string;
   rolloutProjection?: ControlledRolloutProjection;
   /** 生产 Tool Router 在每次 Sandbox 工具执行前回到 DB 重验双栅栏。 */
-  authorizeToolEffect: () => Promise<unknown>;
+  authorizeToolEffect: SandboxToolEffectAuthorizer["authorizeToolEffect"];
 }
 
 /**

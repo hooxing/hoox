@@ -5,6 +5,7 @@ import type {
   ArtifactPublicationPort,
   CancellationPort,
   ClockPort,
+  ConsumedExternalEffectAuthorization,
   ExecutionAttemptSnapshot,
   ExecutionAttemptStatus,
   ExecutionFence,
@@ -12,6 +13,8 @@ import type {
   ExecutionScope,
   ExecutionStage,
   ExternalEffectPermit,
+  ExternalEffectCall,
+  RecoveryMetricsPort,
   RuntimeEventV1,
   RuntimeMutation,
   RuntimeMutationResult,
@@ -25,6 +28,13 @@ import type {
   WorkspaceRevisionVerifierPort,
 } from "./ports.js";
 import { assertProtocolSize } from "./ports.js";
+import {
+  digestCanonical,
+  outboxPayloadDigest,
+  rolloutProjectionDigest,
+  runtimeMutationDigest,
+  workspaceChangeDigest,
+} from "./mutation-protocol.js";
 
 export interface RunWorkerOptions {
   readonly workerId: string;
@@ -58,6 +68,7 @@ interface WorkerDependencies {
   readonly cancellation: CancellationPort;
   readonly artifacts: ArtifactPublicationPort;
   readonly clock: ClockPort;
+  readonly metrics: RecoveryMetricsPort;
 }
 
 interface ExecutionContext {
@@ -72,6 +83,7 @@ interface ExecutionContext {
   currentRevisionId?: WorkspaceRevisionId;
   actualCommittedStage: ExecutionStage;
   actualAttemptStatus: ExecutionAttemptStatus;
+  projectionVersion: number;
   stopped?: "cancelled" | "timeout" | "fence_lost" | "unavailable" | "scope_mismatch";
   agentFailure?: StableWorkerErrorCode;
   modelCompleted: boolean;
@@ -131,7 +143,8 @@ export class RunWorker {
         claim.snapshot.attempt,
       )
     ) {
-      const released = await this.dependencies.persistence.mutate({
+      const unsigned: Omit<RuntimeMutation, "commandDigest"> = {
+        schemaVersion: 1,
         idempotencyKey: `${claim.snapshot.attempt.attemptId}/claim/scope-mismatch`,
         fence: claim.fence,
         expectedAttemptVersion: claim.snapshot.attempt.version,
@@ -146,6 +159,10 @@ export class RunWorker {
         ],
         outbox: [rawAlertOutbox(claim.snapshot.attempt.attemptId, "PROTOCOL")],
         releaseFences: true,
+      };
+      const released = await this.dependencies.persistence.mutate({
+        ...unsigned,
+        commandDigest: runtimeMutationDigest(unsigned),
       });
       return isApplied(released)
         ? { outcome: "ignored", reason: "scope_mismatch" }
@@ -166,6 +183,7 @@ export class RunWorker {
         : { currentRevisionId: claim.snapshot.attempt.currentRevisionId }),
       actualCommittedStage: claim.snapshot.attempt.stage,
       actualAttemptStatus: claim.snapshot.attempt.status,
+      projectionVersion: claim.snapshot.attempt.projectionVersion,
       modelCompleted: false,
       eventAcceptanceOpen: true,
       adapterRejected: false,
@@ -196,26 +214,36 @@ export class RunWorker {
       executionAbort.abort("run_timeout");
       void requestAbort();
     });
-    const heartbeat = this.dependencies.clock.startHeartbeat(this.#heartbeatMs, async () => {
-      try {
-        const inspected = await this.dependencies.persistence.inspectAndRenew({
-          fence: context.fence,
-          leaseDurationMs: this.#leaseDurationMs,
-        });
-        if (inspected.outcome === "active" && inspectionMatches(context, inspected)) {
-          acceptInspection(context, inspected);
-          return;
+    let heartbeatInFlight: Promise<void> | undefined;
+    const heartbeat = this.dependencies.clock.startHeartbeat(this.#heartbeatMs, () => {
+      if (heartbeatInFlight) return heartbeatInFlight;
+      const task = (async () => {
+        try {
+          const inspected = await this.dependencies.persistence.inspectAndRenew({
+            fence: context.fence,
+            leaseDurationMs: this.#leaseDurationMs,
+          });
+          if (inspected.outcome === "active" && inspectionMatches(context, inspected)) {
+            acceptInspection(context, inspected);
+            return;
+          }
+          context.stopped =
+            inspected.outcome === "active"
+              ? "scope_mismatch"
+              : inspected.outcome === "cancelled"
+                ? "cancelled"
+                : inspected.outcome;
+        } catch {
+          context.stopped = "unavailable";
         }
-        context.stopped =
-          inspected.outcome === "active"
-            ? "scope_mismatch"
-            : inspected.outcome === "cancelled"
-              ? "cancelled"
-              : inspected.outcome;
-      } catch {
-        context.stopped = "unavailable";
-      }
-      await requestAbort();
+        await requestAbort().catch(() => undefined);
+      })();
+      heartbeatInFlight = task;
+      const clearHeartbeat = () => {
+        if (heartbeatInFlight === task) heartbeatInFlight = undefined;
+      };
+      void task.then(clearHeartbeat, clearHeartbeat);
+      return task;
     });
 
     try {
@@ -227,10 +255,15 @@ export class RunWorker {
       const preAcquire = await this.stopPoint(context, cancellation);
       if (preAcquire) return await this.finishStopped(context, preAcquire);
 
-      const acquisition = await this.dependencies.sandboxes.acquire({
-        scope,
-        signal: executionAbort.signal,
-      });
+      let acquisition: Awaited<ReturnType<SandboxSessionRegistryPort["acquire"]>>;
+      try {
+        acquisition = await this.dependencies.sandboxes.acquire({
+          scope,
+          signal: executionAbort.signal,
+        });
+      } catch {
+        return await this.requireRecovery(context, "SANDBOX_FAILED", []);
+      }
       const postAcquire = await this.stopPoint(context, cancellation);
       if (acquisition.outcome === "ready") sandbox = acquisition.session;
       if (postAcquire) {
@@ -243,8 +276,10 @@ export class RunWorker {
             outbox: [cleanupOutbox(context, sandbox, "pending", "close")],
           });
           if (isApplied(intent)) return await this.finishStopped(context, postAcquire, sandbox);
+          await this.bestEffortOrphanCleanup(scope, sandbox, intent.outcome);
+          return await this.handleMutationFailure(intent);
         }
-        if (sandbox) await this.bestEffortOrphanCleanup(scope, sandbox);
+        if (sandbox) await this.bestEffortOrphanCleanup(scope, sandbox, postAcquire);
         return await this.finishStopped(context, postAcquire);
       }
       if (acquisition.outcome === "unknown") {
@@ -265,7 +300,11 @@ export class RunWorker {
         events: [attemptEvent(context, "running", "cleanup_intent_persisted")],
         outbox: [cleanupOutbox(context, sandbox, "pending", "close")],
       });
-      if (!isApplied(intent)) return await this.handleMutationFailure(intent);
+      if (!isApplied(intent)) {
+        // intent 未被 receipt 证明提交，不能假设 Outbox 存在；registry 事实独立驱动孤儿清理。
+        await this.bestEffortOrphanCleanup(scope, sandbox, intent.outcome);
+        return await this.handleMutationFailure(intent);
+      }
 
       const preSession = await this.stopPoint(context, cancellation);
       if (preSession) return await this.finishStopped(context, preSession, sandbox);
@@ -273,7 +312,8 @@ export class RunWorker {
         scope,
         sandbox: sandbox.sandbox,
         rolloutProjection: claim.snapshot.rolloutProjection,
-        authorizeToolEffect: () => this.authorizeEffect(context, cancellation, "tool_execution"),
+        authorizeToolEffect: (call) =>
+          this.authorizeEffect(context, cancellation, "tool_execution", call),
       });
       context.abortSession = () => session?.abort().catch(() => undefined) ?? Promise.resolve();
       const postSession = await this.stopPoint(context, cancellation);
@@ -323,9 +363,13 @@ export class RunWorker {
       // checkpoint 成功后仍必须同步重验；这是模型副作用窗口前最后一道 stop-point。
       const preModel = await this.stopPoint(context, cancellation);
       if (preModel) return await this.finishStopped(context, preModel, sandbox);
-      const modelPermit = await this.authorizeEffect(context, cancellation, "model_start");
       const promptText = claim.snapshot.answer ?? claim.snapshot.input;
-      const turn = await session.runPrompt(promptText, modelPermit);
+      const modelAuthorization = await this.authorizeEffect(context, cancellation, "model_start", {
+        callId: `${context.attemptId}/model/start`,
+        toolName: "pi_model",
+        argsDigest: digestCanonical({ prompt: promptText }),
+      });
+      const turn = await session.runPrompt(promptText, modelAuthorization);
       await eventChain;
       if (context.abortPromise) await context.abortPromise;
       const postModel = await this.stopPoint(context, cancellation);
@@ -356,16 +400,26 @@ export class RunWorker {
 
       const preVerify = await this.stopPoint(context, cancellation);
       if (preVerify) return await this.finishStopped(context, preVerify, sandbox);
-      const candidate = await this.dependencies.revisions.verify({
-        scope,
-        ...(context.currentRevisionId === undefined
-          ? {}
-          : { expectedCurrentRevisionId: context.currentRevisionId }),
-        sandbox: sandbox.sandbox,
-      });
+      let candidate: WorkspaceRevisionCandidate | undefined;
+      try {
+        candidate = await this.dependencies.revisions.verify({
+          scope,
+          ...(context.currentRevisionId === undefined
+            ? {}
+            : { expectedCurrentRevisionId: context.currentRevisionId }),
+          sandbox: sandbox.sandbox,
+        });
+      } catch {
+        return await this.recoverWithCleanup(context, sandbox, "WORKSPACE_CONFLICT", cancellation);
+      }
       const postVerify = await this.stopPoint(context, cancellation);
       if (postVerify) return await this.finishStopped(context, postVerify, sandbox);
-      const workspaceChange = validateWorkspaceCandidate(context, candidate);
+      let workspaceChange: ValidatedWorkspaceChange | undefined;
+      try {
+        workspaceChange = validateWorkspaceCandidate(context, candidate);
+      } catch {
+        return await this.recoverWithCleanup(context, sandbox, "WORKSPACE_CONFLICT", cancellation);
+      }
       const verified = await this.applyMutation(context, {
         idempotencyKey: `${context.attemptId}/stage/workspace-verified`,
         nextStage: "workspace_verified",
@@ -405,12 +459,16 @@ export class RunWorker {
 
       const preArtifact = await this.stopPoint(context, cancellation);
       if (preArtifact) return await this.finishStopped(context, preArtifact, sandbox);
-      await this.dependencies.artifacts.assertReadyForCompletion({
-        scope,
-        ...(workspaceChange === undefined
-          ? {}
-          : { workspaceRevisionId: workspaceChange.revisionId }),
-      });
+      try {
+        await this.dependencies.artifacts.assertReadyForCompletion({
+          scope,
+          ...(workspaceChange === undefined
+            ? {}
+            : { workspaceRevisionId: workspaceChange.revisionId }),
+        });
+      } catch {
+        return await this.recoverWithCleanup(context, sandbox, "ARTIFACT_NOT_READY", cancellation);
+      }
       const postArtifact = await this.stopPoint(context, cancellation);
       if (postArtifact) return await this.finishStopped(context, postArtifact, sandbox);
 
@@ -444,6 +502,7 @@ export class RunWorker {
       closeEventAcceptance(context);
       // abort 完成后才允许取消订阅、释放 Session；cleanup 已由持久 Outbox/Saga 接管。
       await Promise.allSettled([heartbeat.stop(), context.abortPromise ?? Promise.resolve()]);
+      if (heartbeatInFlight) await Promise.allSettled([heartbeatInFlight]);
       await Promise.allSettled([
         Promise.resolve().then(() => unsubscribe?.()),
         Promise.resolve().then(() => session?.dispose()),
@@ -503,16 +562,24 @@ export class RunWorker {
     context: ExecutionContext,
     cancellation: AbortSignal,
     effect: ExternalEffectPermit["effect"],
-  ): Promise<ExternalEffectPermit> {
+    call: ExternalEffectCall,
+  ): Promise<ConsumedExternalEffectAuthorization> {
     if (cancellation.aborted) context.stopped = "cancelled";
     if (context.stopped) throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
-    const result = await this.dependencies.persistence.issueExternalEffectPermit({
-      fence: context.fence,
-      expectedAttemptVersion: context.attemptVersion,
-      effect,
-      permitDurationMs: this.#externalEffectPermitMs,
-    });
-    if (result.outcome !== "authorized" || !permitMatches(context, result.permit, effect)) {
+    const monotonicStarted = performance.now();
+    let result: Awaited<ReturnType<ExecutionPersistencePort["issueExternalEffectPermit"]>>;
+    try {
+      result = await this.dependencies.persistence.issueExternalEffectPermit({
+        fence: context.fence,
+        expectedAttemptVersion: context.attemptVersion,
+        effect,
+        call,
+        permitDurationMs: this.#externalEffectPermitMs,
+      });
+    } catch {
+      result = { outcome: "unavailable" };
+    }
+    if (result.outcome !== "authorized" || !permitMatches(context, result.permit, effect, call)) {
       context.stopped =
         result.outcome === "authorized" || result.outcome === "scope_mismatch"
           ? "scope_mismatch"
@@ -526,19 +593,71 @@ export class RunWorker {
         context.abortPromise = context.abortSession?.() ?? Promise.resolve();
       throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     }
-    return result.permit;
+    let consumed: Awaited<ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]>>;
+    try {
+      consumed = await this.dependencies.persistence.consumeExternalEffectPermit({
+        fence: context.fence,
+        expectedAttemptVersion: context.attemptVersion,
+        permit: result.permit,
+      });
+    } catch {
+      consumed = { outcome: "unavailable" };
+    }
+    const consumedAtMonotonicMs = performance.now();
+    if (
+      consumed.outcome !== "consumed" ||
+      cancellation.aborted ||
+      consumedAtMonotonicMs - monotonicStarted >= this.#externalEffectPermitMs
+    ) {
+      context.stopped =
+        cancellation.aborted || consumed.outcome === "cancelled"
+          ? "cancelled"
+          : consumed.outcome === "unavailable"
+            ? "unavailable"
+            : consumed.outcome === "scope_mismatch"
+              ? "scope_mismatch"
+              : "fence_lost";
+      closeEventAcceptance(context);
+      if (!context.abortPromise)
+        context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+      throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+    }
+    return {
+      permit: result.permit,
+      consumedAt: consumed.databaseNow,
+      consumedAtMonotonicMs,
+      maxContinuationDelayMs: Math.max(
+        1,
+        Math.min(250, Math.floor(this.#externalEffectPermitMs / 4)),
+      ),
+    };
   }
 
   private async applyMutation(
     context: ExecutionContext,
-    input: Omit<RuntimeMutation, "fence" | "expectedAttemptVersion">,
+    input: Omit<
+      RuntimeMutation,
+      | "schemaVersion"
+      | "commandDigest"
+      | "fence"
+      | "expectedAttemptVersion"
+      | "expectedProjectionVersion"
+    >,
   ): Promise<RuntimeMutationResult> {
     for (const event of input.events) assertProtocolSize(event);
     for (const outbox of input.outbox) assertProtocolSize(outbox);
-    const command: RuntimeMutation = {
+    const unsigned: Omit<RuntimeMutation, "commandDigest"> = {
+      schemaVersion: 1,
       ...input,
       fence: context.fence,
       expectedAttemptVersion: context.attemptVersion,
+      ...(input.rolloutProjection === undefined
+        ? {}
+        : { expectedProjectionVersion: context.projectionVersion }),
+    };
+    const command: RuntimeMutation = {
+      ...unsigned,
+      commandDigest: runtimeMutationDigest(unsigned),
     };
     let result = await this.dependencies.persistence.mutate(command);
     if (result.outcome === "response_unknown") {
@@ -547,10 +666,12 @@ export class RunWorker {
         scope: context.scope,
         idempotencyKey: input.idempotencyKey,
       });
-      if (recovered.outcome === "not_found") return { outcome: "unavailable" };
+      // not_found 不能证明事务未提交，保留 response_unknown 供孤儿清理和恢复指标分类。
+      if (recovered.outcome === "not_found") return { outcome: "response_unknown" };
       result = recovered;
     }
     if (isApplied(result)) {
+      if (!receiptMatches(context, result, command)) return { outcome: "idempotency_conflict" };
       if (!appliedSnapshotMatches(context, result, input)) return { outcome: "scope_mismatch" };
       context.attemptVersion = result.attemptVersion;
       context.nextEventSequence = result.nextEventSequence;
@@ -559,6 +680,7 @@ export class RunWorker {
       context.workspace = result.workspace;
       context.actualCommittedStage = result.attempt.stage;
       context.actualAttemptStatus = result.attempt.status;
+      context.projectionVersion = result.attempt.projectionVersion;
       if (result.attempt.currentRevisionId === undefined) delete context.currentRevisionId;
       else context.currentRevisionId = result.attempt.currentRevisionId;
     }
@@ -622,7 +744,7 @@ export class RunWorker {
       // started 不能回退为 pending；保留 Saga checkpoint 交给恢复协调器处理。
       return {
         outcome: "recovery",
-        result: await this.requireRecovery(context, "INTERNAL", []),
+        result: await this.requireRecovery(context, "SANDBOX_FAILED", []),
       };
     }
   }
@@ -729,6 +851,9 @@ export class RunWorker {
   }
 
   private async handleMutationFailure(result: RuntimeMutationResult): Promise<RunWorkerResult> {
+    if (result.outcome === "idempotency_conflict") {
+      return { outcome: "recovery_required", code: "IDEMPOTENCY_CONFLICT" };
+    }
     if (
       result.outcome === "fence_lost" ||
       result.outcome === "conflict" ||
@@ -742,14 +867,22 @@ export class RunWorker {
   private async bestEffortOrphanCleanup(
     scope: ExecutionScope,
     sandbox: SandboxSessionRef,
+    reason: Parameters<RecoveryMetricsPort["recordOrphanCleanup"]>[0]["reason"],
   ): Promise<void> {
-    await this.dependencies.sandboxes
-      .settle({
+    let cleanupOutcome: "settled" | "unknown" | "failed" = "failed";
+    try {
+      const result = await this.dependencies.sandboxes.settle({
         scope,
         session: sandbox,
         cleanupIntentId: `registry:${sandbox.registryId}:orphan-cleanup`,
         disposition: "close",
-      })
+      });
+      cleanupOutcome = result.outcome;
+    } catch {
+      cleanupOutcome = "failed";
+    }
+    await this.dependencies.metrics
+      .recordOrphanCleanup({ scope, registryId: sandbox.registryId, reason, cleanupOutcome })
       .catch(() => undefined);
   }
 }
@@ -821,17 +954,17 @@ function cleanupOutbox(
   state: "pending" | "started" | "completed",
   disposition: "pause" | "close",
 ): RuntimeOutboxV1 {
-  return {
+  const base = {
     schemaVersion: 1,
     kind: "sandbox_cleanup",
     idempotencyKey: cleanupIntentKey(context, sandbox),
-    state,
     payload: {
       registryId: sandbox.registryId,
       providerSandboxId: sandbox.providerSandboxId,
       disposition,
     },
-  };
+  } as const;
+  return state === "pending" ? { ...base, state, armed: true } : { ...base, state };
 }
 
 function cleanupIntentKey(context: ExecutionContext, sandbox: SandboxSessionRef): string {
@@ -984,6 +1117,7 @@ function snapshotMatches(
     fence.workspaceLease.rootRunId === scope.rootRunId &&
     workspace.writerLease?.rootRunId === scope.rootRunId &&
     workspace.writerLease.epoch === fence.workspaceLease.epoch &&
+    workspace.writerLease.expiresAt === fence.workspaceLease.expiresAt &&
     workspace.currentRevisionId === attempt.currentRevisionId
   );
 }
@@ -998,7 +1132,17 @@ function inspectionMatches(
   return (
     sameScope(context.scope, inspected.fence.scope) &&
     entitiesMatch(context.scope, inspected.run, inspected.workspace) &&
+    inspected.run.status === "running" &&
+    inspected.fence.runClaim.token === context.fence.runClaim.token &&
+    inspected.fence.runClaim.epoch === context.fence.runClaim.epoch &&
     inspected.fence.workspaceLease.rootRunId === context.scope.rootRunId &&
+    inspected.fence.workspaceLease.epoch === context.fence.workspaceLease.epoch &&
+    Date.parse(inspected.fence.runClaim.expiresAt) > Date.parse(context.fence.runClaim.expiresAt) &&
+    Date.parse(inspected.fence.workspaceLease.expiresAt) >
+      Date.parse(context.fence.workspaceLease.expiresAt) &&
+    inspected.workspace.writerLease?.rootRunId === context.scope.rootRunId &&
+    inspected.workspace.writerLease.epoch === inspected.fence.workspaceLease.epoch &&
+    inspected.workspace.writerLease.expiresAt === inspected.fence.workspaceLease.expiresAt &&
     inspected.workspace.currentRevisionId === context.currentRevisionId
   );
 }
@@ -1019,7 +1163,14 @@ function acceptInspection(
 function appliedSnapshotMatches(
   context: ExecutionContext,
   result: AppliedMutation,
-  command: Omit<RuntimeMutation, "fence" | "expectedAttemptVersion">,
+  command: Omit<
+    RuntimeMutation,
+    | "schemaVersion"
+    | "commandDigest"
+    | "fence"
+    | "expectedAttemptVersion"
+    | "expectedProjectionVersion"
+  >,
 ): boolean {
   const expectedStage = command.nextStage ?? context.actualCommittedStage;
   const expectedStatus = command.nextAttemptStatus ?? context.actualAttemptStatus;
@@ -1030,11 +1181,63 @@ function appliedSnapshotMatches(
     result.attempt.attemptId === context.attemptId &&
     result.attempt.version === result.attemptVersion &&
     result.attempt.nextEventSequence === result.nextEventSequence &&
+    result.nextEventSequence === context.nextEventSequence + command.events.length &&
     result.attempt.stage === expectedStage &&
     result.attempt.status === expectedStatus &&
+    result.attempt.projectionVersion ===
+      (command.rolloutProjection === undefined
+        ? context.projectionVersion
+        : context.projectionVersion + 1) &&
     result.attempt.currentRevisionId === expectedRevision &&
     (command.nextRunStatus === undefined || result.run.status === command.nextRunStatus) &&
     result.workspace.currentRevisionId === result.attempt.currentRevisionId
+  );
+}
+
+function receiptMatches(
+  context: ExecutionContext,
+  result: AppliedMutation,
+  command: RuntimeMutation,
+): boolean {
+  const receipt = result.receipt;
+  const outboxMatches =
+    receipt.outbox.length === command.outbox.length &&
+    receipt.outbox.every((item, index) => {
+      const expected = command.outbox[index];
+      return (
+        expected !== undefined &&
+        item.idempotencyKey === expected.idempotencyKey &&
+        item.state === expected.state &&
+        item.payloadDigest === outboxPayloadDigest(expected)
+      );
+    });
+  const projectionMatches =
+    command.rolloutProjection === undefined
+      ? receipt.projection === undefined
+      : receipt.projection?.schemaVersion === 1 &&
+        receipt.projection.previousVersion === context.projectionVersion &&
+        receipt.projection.version === context.projectionVersion + 1 &&
+        receipt.projection.digest === rolloutProjectionDigest(command.rolloutProjection);
+  const workspaceMatches =
+    command.workspaceChange === undefined
+      ? receipt.workspace === undefined
+      : receipt.workspace?.changeDigest === workspaceChangeDigest(command.workspaceChange) &&
+        receipt.workspace.previousHead === context.currentRevisionId &&
+        receipt.workspace.currentHead === command.workspaceChange.revisionId;
+  return (
+    receipt.schemaVersion === 1 &&
+    receipt.idempotencyKey === command.idempotencyKey &&
+    receipt.commandDigest === command.commandDigest &&
+    receipt.previousAttemptVersion === context.attemptVersion &&
+    receipt.attemptVersion === context.attemptVersion + 1 &&
+    result.attemptVersion === context.attemptVersion + 1 &&
+    result.attemptVersion === receipt.attemptVersion &&
+    receipt.eventSequenceStart === context.nextEventSequence &&
+    receipt.eventSequenceEnd === context.nextEventSequence + command.events.length &&
+    result.nextEventSequence === receipt.eventSequenceEnd &&
+    outboxMatches &&
+    projectionMatches &&
+    workspaceMatches
   );
 }
 
@@ -1042,15 +1245,20 @@ function permitMatches(
   context: ExecutionContext,
   permit: ExternalEffectPermit,
   effect: ExternalEffectPermit["effect"],
+  call: ExternalEffectCall,
 ): boolean {
   return (
     permit.effect === effect &&
+    permit.callId === call.callId &&
+    permit.toolName === call.toolName &&
+    permit.argsDigest === call.argsDigest &&
     sameScope(permit.scope, context.scope) &&
     permit.runClaimToken === context.fence.runClaim.token &&
     permit.runClaimEpoch === context.fence.runClaim.epoch &&
     permit.workspaceRootRunId === context.fence.workspaceLease.rootRunId &&
     permit.workspaceLeaseEpoch === context.fence.workspaceLease.epoch &&
     permit.attemptVersion === context.attemptVersion &&
+    Date.parse(permit.issuedAt) < Date.parse(permit.expiresAt) &&
     Date.parse(permit.expiresAt) > Date.parse(context.databaseNow)
   );
 }

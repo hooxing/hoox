@@ -8,7 +8,6 @@ import type {
   ThreadId,
   Workspace,
   WorkspaceId,
-  WorkspaceRevisionCommit,
   WorkspaceRevisionId,
 } from "@cube-runtime/domain";
 import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
@@ -36,13 +35,12 @@ export type ExecutionAttemptStatus =
 
 export type ExecutionStage =
   | "claimed"
-  | "sandbox_acquired"
   | "cleanup_intent_persisted"
   | "model_execution_started"
   | "model_settled"
   | "workspace_verified"
-  | "sandbox_settled"
   | "finalizing"
+  | "sandbox_settled"
   | "finished";
 
 export interface ExecutionAttemptSnapshot {
@@ -52,6 +50,8 @@ export interface ExecutionAttemptSnapshot {
   readonly version: number;
   readonly nextEventSequence: number;
   readonly modelExecutionStarted: boolean;
+  /** Scope 的 baseRevisionId 永不改变；后续 head 只保存在 Attempt checkpoint。 */
+  readonly currentRevisionId?: WorkspaceRevisionId;
 }
 
 export interface ClaimedExecutionSnapshot {
@@ -80,6 +80,19 @@ export interface ExecutionFence {
   readonly scope: ExecutionScope;
   readonly runClaim: RunClaimFence;
   readonly workspaceLease: WorkspaceLeaseFence;
+}
+
+/** 数据库依据完整双栅栏和 Attempt version 签发的短时外部副作用许可。 */
+export interface ExternalEffectPermit {
+  readonly permitId: string;
+  readonly scope: ExecutionScope;
+  readonly runClaimToken: string;
+  readonly runClaimEpoch: number;
+  readonly workspaceRootRunId: RunId;
+  readonly workspaceLeaseEpoch: number;
+  readonly attemptVersion: number;
+  readonly effect: "model_start" | "tool_execution";
+  readonly expiresAt: IsoTimestamp;
 }
 
 export type ClaimExecutionResult =
@@ -119,14 +132,12 @@ export type RuntimeEventV1 =
       readonly schemaVersion: 1;
       readonly kind: "agent_event";
       readonly sequence: number;
-      readonly occurredAt: IsoTimestamp;
       readonly payload: RuntimeAgentEvent;
     }
   | {
       readonly schemaVersion: 1;
       readonly kind: "attempt_state_changed";
       readonly sequence: number;
-      readonly occurredAt: IsoTimestamp;
       readonly payload: {
         readonly status: ExecutionAttemptStatus;
         readonly stage: ExecutionStage;
@@ -137,36 +148,57 @@ export type RuntimeEventV1 =
       readonly schemaVersion: 1;
       readonly kind: "run_waiting";
       readonly sequence: number;
-      readonly occurredAt: IsoTimestamp;
       readonly payload: { readonly question: string; readonly checkpointId: string };
     };
 
+export type PersistedRuntimeEventV1 = RuntimeEventV1 & { readonly occurredAt: IsoTimestamp };
+
+interface SandboxCleanupOutboxBase {
+  readonly schemaVersion: 1;
+  readonly kind: "sandbox_cleanup";
+  readonly idempotencyKey: string;
+  readonly payload: {
+    readonly registryId: string;
+    readonly providerSandboxId: string;
+    readonly disposition: "pause" | "close";
+  };
+}
+
+/** cleanup Saga 使用判别状态；存储层必须强制 pending→started→completed/unknown。 */
 export type RuntimeOutboxV1 =
-  | {
-      readonly schemaVersion: 1;
-      readonly kind: "sandbox_cleanup";
-      readonly idempotencyKey: string;
-      readonly state: "pending" | "started" | "completed" | "unknown";
-      readonly occurredAt: IsoTimestamp;
-      readonly payload: {
-        readonly registryId: string;
-        readonly providerSandboxId: string;
-        readonly disposition: "pause" | "close";
-        readonly uncertainEvent?: UncertainLifecycleEvent;
+  | (SandboxCleanupOutboxBase & {
+      readonly state: "pending";
+      readonly payload: SandboxCleanupOutboxBase["payload"] & {
         readonly retryCode?: StableWorkerErrorCode;
       };
-    }
+    })
+  | (SandboxCleanupOutboxBase & {
+      readonly state: "started";
+      readonly payload: SandboxCleanupOutboxBase["payload"];
+    })
+  | (SandboxCleanupOutboxBase & {
+      readonly state: "completed";
+      readonly payload: SandboxCleanupOutboxBase["payload"];
+    })
+  | (SandboxCleanupOutboxBase & {
+      readonly state: "unknown";
+      readonly payload: SandboxCleanupOutboxBase["payload"] & {
+        readonly uncertainEvent: UncertainLifecycleEvent;
+        readonly retryCode: "SANDBOX_UNKNOWN";
+      };
+    })
   | {
       readonly schemaVersion: 1;
       readonly kind: "runtime_alert";
       readonly idempotencyKey: string;
       readonly state: "pending";
-      readonly occurredAt: IsoTimestamp;
       readonly payload: {
         readonly code: StableWorkerErrorCode;
         readonly attemptId: string;
       };
     };
+
+export type PersistedRuntimeOutboxV1 = RuntimeOutboxV1 & { readonly occurredAt: IsoTimestamp };
 
 export interface RuntimeMutation {
   readonly idempotencyKey: string;
@@ -178,7 +210,8 @@ export interface RuntimeMutation {
   /** 同一业务键以 upsert 推进 Saga 状态，禁止把 pending/started/completed 当成三条无关消息。 */
   readonly outbox: readonly RuntimeOutboxV1[];
   readonly rolloutProjection?: ControlledRolloutProjection;
-  readonly workspaceRevision?: WorkspaceRevisionCommit;
+  /** 只携带验证内容；Revision、Workspace 及时间均由事务内单次 DB now 构造。 */
+  readonly workspaceChange?: ValidatedWorkspaceChange;
   readonly nextRunStatus?: Extract<RunStatus, "waiting" | "succeeded" | "failed" | "cancelled">;
   readonly releaseFences?: boolean;
 }
@@ -189,6 +222,10 @@ export type RuntimeMutationResult =
       readonly attemptVersion: number;
       readonly nextEventSequence: number;
       readonly databaseNow: IsoTimestamp;
+      readonly scope: ExecutionScope;
+      readonly attempt: ExecutionAttemptSnapshot;
+      readonly run: Run;
+      readonly workspace: Workspace;
     }
   | {
       readonly outcome:
@@ -220,6 +257,22 @@ export interface ExecutionPersistencePort {
     readonly fence: ExecutionFence;
     readonly leaseDurationMs: number;
   }): Promise<FenceInspectionResult>;
+  issueExternalEffectPermit(input: {
+    readonly fence: ExecutionFence;
+    readonly expectedAttemptVersion: number;
+    readonly effect: ExternalEffectPermit["effect"];
+    readonly permitDurationMs: number;
+  }): Promise<
+    | { readonly outcome: "authorized"; readonly permit: ExternalEffectPermit }
+    | {
+        readonly outcome:
+          | "cancelled"
+          | "fence_lost"
+          | "conflict"
+          | "unavailable"
+          | "scope_mismatch";
+      }
+  >;
   mutate(command: RuntimeMutation): Promise<RuntimeMutationResult>;
   readMutation(input: {
     readonly scope: ExecutionScope;
@@ -233,14 +286,22 @@ export interface ExecutionPersistencePort {
 }
 
 export interface WorkspaceRevisionCandidate {
+  readonly tenantId: TenantId;
+  readonly threadId: ThreadId;
+  readonly workspaceId: WorkspaceId;
+  readonly rootRunId: RunId;
+  readonly parentRevisionId?: WorkspaceRevisionId;
   readonly revisionId: WorkspaceRevisionId;
   readonly objectKey: string;
   readonly digest: Sha256Digest;
 }
 
+export type ValidatedWorkspaceChange = WorkspaceRevisionCandidate;
+
 export interface WorkspaceRevisionVerifierPort {
   verify(input: {
     readonly scope: ExecutionScope;
+    readonly expectedCurrentRevisionId?: WorkspaceRevisionId;
     readonly sandbox: SandboxHandle;
   }): Promise<WorkspaceRevisionCandidate | undefined>;
 }
@@ -285,7 +346,7 @@ export type AgentTurnOutcome =
 
 export interface WorkerAgentSessionPort {
   /** 新 Session 无论首轮还是 waiting 恢复都用 prompt 启动模型；禁止对空 Session 调 followUp。 */
-  runPrompt(text: string): Promise<AgentTurnOutcome>;
+  runPrompt(text: string, permit: ExternalEffectPermit): Promise<AgentTurnOutcome>;
   abort(): Promise<void>;
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void;
   dispose(): void;
@@ -296,6 +357,7 @@ export interface AgentSessionFactoryPort {
     readonly scope: ExecutionScope;
     readonly sandbox: SandboxHandle;
     readonly rolloutProjection: ControlledRolloutProjection;
+    readonly authorizeToolEffect: () => Promise<ExternalEffectPermit>;
   }): Promise<WorkerAgentSessionPort>;
 }
 

@@ -29,7 +29,7 @@ describe("Pi 安全适配", () => {
     async () => {
       const sandbox = new FakeSandboxHandle("pi-fake");
       let modelContext = "";
-      const { controller, events } = await harness(
+      const { controller, events, toolAuthorizationCount } = await harness(
         [
           (context) => {
             modelContext = JSON.stringify(context);
@@ -46,6 +46,7 @@ describe("Pi 安全适配", () => {
       await controller.prompt("把内容写入隔离环境");
 
       expect(sandbox.files.get("/tmp/pi.txt")).toBe("pi-safe");
+      expect(toolAuthorizationCount()).toBe(1);
       expect(events.filter((event) => event.type === "message.completed")).toEqual([
         { type: "message.completed", stopReason: "toolUse" },
         { type: "message.completed", stopReason: "stop" },
@@ -66,6 +67,31 @@ describe("Pi 安全适配", () => {
       expect(modelContext).not.toMatch(hostPathPattern(process.cwd().replaceAll("\\", "/")));
     },
   );
+
+  it.runIf(process.platform === "linux")("Tool Router 在 DB 许可拒绝时不触碰 Sandbox", async () => {
+    const sandbox = new FakeSandboxHandle("pi-denied-tool");
+    const { controller, events } = await harness(
+      [
+        fauxAssistantMessage(
+          fauxToolCall("sandbox_write_file", { path: "/tmp/denied.txt", content: "no" }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("已处理"),
+      ],
+      sandbox,
+      undefined,
+      async () => {
+        throw new Error("DB 拒绝外部副作用许可");
+      },
+    );
+
+    await controller.prompt("尝试写入");
+
+    expect(sandbox.files.has("/tmp/denied.txt")).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "tool.completed", isError: true }),
+    );
+  });
 
   it.runIf(process.platform === "linux")(
     "把 Faux Provider 真实失败映射为稳定 PROVIDER，且不发布 completed",
@@ -177,6 +203,27 @@ describe("Pi 安全适配", () => {
     },
   );
 
+  it.runIf(process.platform === "linux")(
+    "拒绝非法 role、空文本和宿主绝对路径的 RolloutProjection",
+    async () => {
+      const invalidTurns = [
+        [{ role: "system", text: "越权" }],
+        [{ role: "user", text: "   " }],
+        [{ role: "assistant", text: "读取 C:\\Users\\host\\secret" }],
+        [{ role: "assistant", text: "读取 /var/lib/runtime/secret" }],
+      ] as const;
+      for (const turns of invalidTurns) {
+        await expect(
+          harness([], new FakeSandboxHandle("invalid-projection"), {
+            schemaVersion: 1,
+            checkpointId: "invalid",
+            turns: turns as never,
+          }),
+        ).rejects.toThrow("RolloutProjection");
+      }
+    },
+  );
+
   it("Windows Worker 在创建 Pi Session 前明确失败", async () => {
     expect(() => assertLinuxWorkerPlatform("win32")).toThrow("仅支持 Linux");
     if (process.platform !== "linux") {
@@ -191,6 +238,7 @@ describe("Pi 安全适配", () => {
           model: faux.getModel(),
           modelRuntime,
           sandbox: new FakeSandboxHandle("platform-guard"),
+          authorizeToolEffect: async () => undefined,
         }),
       ).rejects.toThrow("仅支持 Linux");
     }
@@ -219,11 +267,13 @@ async function harness(
   responses: FauxResponseStep[],
   sandbox = new FakeSandboxHandle("pi-fake"),
   rolloutProjection?: Parameters<typeof createSafePiSession>[0]["rolloutProjection"],
+  authorizeToolEffect?: () => Promise<unknown>,
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
   started: Promise<void>;
   faux: FauxProviderHandle;
+  toolAuthorizationCount: () => number;
 }> {
   const suffix = `${Date.now()}-${Math.random()}`;
   const faux = fauxProvider({
@@ -238,10 +288,15 @@ async function harness(
   });
   modelRuntime.registerNativeProvider(faux.provider);
   await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+  let authorizationCount = 0;
   const controller = await createSafePiSession({
     model: faux.getModel(),
     modelRuntime,
     sandbox,
+    authorizeToolEffect: async () => {
+      authorizationCount += 1;
+      return authorizeToolEffect?.();
+    },
     ...(rolloutProjection === undefined ? {} : { rolloutProjection }),
   });
   disposers.push(() => controller.dispose());
@@ -254,7 +309,7 @@ async function harness(
     events.push(event);
     if (event.type === "agent.started") resolveStarted?.();
   });
-  return { controller, events, started, faux };
+  return { controller, events, started, faux, toolAuthorizationCount: () => authorizationCount };
 }
 
 function delay(milliseconds: number): Promise<void> {

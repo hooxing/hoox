@@ -31,7 +31,7 @@ claimed → running → waiting
 claimed/running/finalizing → recovery_required → abandoned | failed
 ```
 
-Attempt 同时记录阶段 checkpoint：`claimed`、`sandbox_acquired`、`cleanup_intent_persisted`、`model_execution_started`、`model_settled`、`workspace_verified`、`sandbox_settled`、`finalizing`、`finished`。
+Attempt 同时记录阶段 checkpoint：`claimed`、`cleanup_intent_persisted`、`model_execution_started`、`model_settled`、`workspace_verified`、`finalizing`、`sandbox_settled`、`finished`。Sandbox 可见与 cleanup intent 在同一首笔事务中确认，不保留无法证明已提交的 `sandbox_acquired` 阶段。
 
 基础设施不可用、栅栏丢失、Sandbox UNKNOWN 和事件协议拒绝只影响 Attempt；不能把业务 Run 伪造为 failed。普通 Worker 永远不能直接重领 running Run。恢复协调器必须等双租约过期，再根据 Attempt checkpoint 决定安全失败、人工恢复或放弃；一旦到达 `model_execution_started`，不得自动重跑可能含工具副作用的模型轮次。
 
@@ -44,13 +44,17 @@ Attempt 同时记录阶段 checkpoint：`claimed`、`sandbox_acquired`、`cleanu
 - Workspace writer rootRunId、单调 epoch、expiresAt；
 - Attempt expected version、操作幂等键、事件 sequence 高水位。
 
-生产实现必须在同一个数据库事务中，用数据库时钟校验两组租约仍有效，再原子写入事件、Outbox、Attempt、RolloutProjection、WorkspaceRevision 和 Run 状态。应用进程计算的时间不能作为租约有效性的依据；应用只提交 lease duration，deadline 由数据库计算。
+生产实现必须在同一个数据库事务中，用单次数据库 `now` 校验两组租约仍有效，再原子写入事件、Outbox、Attempt、RolloutProjection、WorkspaceRevision 和 Run 状态。应用命令不携带 `occurredAt`、Revision `createdAt` 或终态时间，只提交 lease duration 和已验证内容，所有时间及 deadline 均由数据库生成。
 
-heartbeat interval 必须小于 lease TTL 的一半。任一栅栏失效后，旧 Worker 只能中止内存 Session 和做不带业务写入的 best-effort 清理，不能写事件、Revision 或 Run 终态。
+完整 scope 在 Attempt 生命周期内不可变，即使 Revision 已推进，`baseRevisionId` 也不能被 current head 替换。新的 current revision 单独保存在 Attempt checkpoint；claim、inspect、mutation result 与 readback 都必须逐字段校验 tenant/thread/run/rootRun/workspace/baseRevision、Run/Workspace 归属以及 checkpoint current head。禁止为了找回已提交事务而放宽复合键查询。
+
+heartbeat interval 必须小于 lease TTL 的一半。heartbeat Promise reject 也必须触发 stop 与 Session abort，不能形成未处理拒绝。任一栅栏失效后，旧 Worker 只能中止内存 Session 和做不带业务写入的 best-effort 清理，不能写事件、Revision 或 Run 终态。
+
+模型启动和每次工具调用还必须使用数据库签发的短时 `ExternalEffectPermit`。许可绑定完整双栅栏、Attempt version、effect 类型与 DB expiresAt；模型在 `model_execution_started` checkpoint 后同步 stop/renew，再领取并立即消费 `model_start` 许可。Tool Router 在每次 Sandbox 工具执行前单独领取 `tool_execution` 许可，取消、过期、版本冲突或任一栅栏丢失时不得触碰 Sandbox。
 
 ### WorkspaceRevision 与 Run 终态
 
-Workspace verifier 只返回 revisionId、objectKey 和 SHA-256 digest 候选，不返回可伪造的 `verified: true`。Worker 使用 Domain `prepareWorkspaceRevision` 生成不可变 Revision 和 CAS 条件；持久层再次比较完整 scope、base revision、lease epoch 与数据库时钟。
+Workspace verifier 返回带 tenant/thread/workspace/rootRun/parent head 的 revisionId、objectKey 和 SHA-256 digest 候选，不返回可伪造的 `verified: true`。Worker 只提交 `ValidatedWorkspaceChange` 内容；持久层比较完整 scope、Attempt current head 与 lease epoch，并在事务内调用 Domain `prepareWorkspaceRevision(dbNow)` 生成不可变 Revision 和 CAS 条件。
 
 waiting checkpoint 和 success checkpoint 均由一次 `mutate` 原子完成：
 
@@ -68,7 +72,7 @@ Sandbox acquire 返回已登记实例后，Worker 在创建 Pi Session 或启动
 1. 调用 settle 前持久化 `started`；
 2. settle 成功后持久化 `completed`；
 3. 结果不确定时持久化 `unknown` 与稳定告警；
-4. 调用抛异常时恢复为 `pending` 并保留重试码，不能删除 intent；
+4. 状态严格单调：`pending → started → completed | unknown`；调用抛异常时保留 `started`，禁止回退为 `pending`；
 5. worker 可在 intent 提交后做同进程低延迟 dispatch，但崩溃恢复和重复消费仍以同一个 Outbox 幂等键为准。
 
 UNKNOWN 不能自动再次 settle 或创建替代 Sandbox。生产 Outbox consumer 通过 registryId 重新取得句柄并执行同一 Saga。create 期间取消或丢栅栏时，返回后绝不启动模型；registry 必须保留创建请求事实，旧 Worker只做 best-effort close。
@@ -77,11 +81,11 @@ UNKNOWN 不能自动再次 settle 或创建替代 Sandbox。生产 Outbox consum
 
 Pi 的本地 Session 文件不是事实源。Runtime 持久化版本化、限长的 `ControlledRolloutProjection`，其中只允许经过审核的 user/assistant 文本和 checkpointId，不允许 Pi 内部 entry、宿主路径或任意工具结果。
 
-waiting 回答到达后创建全新的内存 Pi Session，把 RolloutProjection 注入受控上下文，再用 `prompt(answer)` 真正启动模型。禁止对空 Session 调 `followUp`。Linux Faux Provider 测试必须证明历史投影和用户回答同时进入真实模型上下文，且只发起一次新模型调用。
+waiting 回答到达后创建全新的内存 Pi Session，把 RolloutProjection 注入受控上下文，再用 `prompt(answer)` 真正启动模型。禁止对空 Session 调 `followUp`。Linux Faux Provider 测试必须证明历史投影和用户回答同时进入真实模型上下文，且只发起一次新模型调用。当前端口和测试只证明恢复机制；真实 `request_user_input` 工具生成 waiting、API 回答写入和调度唤醒仍是后续任务，本阶段不宣称产品链路完成。
 
 ### stop / fence 检查规则
 
-每个外部副作用前后都设置 stop point，包括 Sandbox create/connect、Pi Session 创建、模型 prompt、Workspace verify、Artifact 完成门和 Sandbox settle。持久事务本身在 DB 内检查双栅栏；流式事件转换或持久化一旦拒绝，Worker 立即 abort Pi。
+每个外部副作用前后都设置 stop point，包括 Sandbox create/connect、Pi Session 创建、模型 prompt、Workspace verify、Artifact 完成门和 Sandbox settle。特别地，`model_execution_started` 提交后、prompt 前，以及 settle 返回后、Run 终态事务前必须再次同步检查，后者以取消为优先。持久事务本身在 DB 内检查双栅栏；流式事件转换或持久化一旦拒绝，Worker 原子关闭 event acceptance，已排队事件只 drain、不再 mutation 或更新成功标志，并保存、等待 Session abort Promise 后才开始 Sandbox 清理。
 
 取消和超时可以在双栅栏仍有效、Sandbox 已安全收尾后进入 Domain `cancelled`/`failed`。scope mismatch 或基础设施不可用优先释放 claim、写稳定告警并重试；如果持久层本身不可用，则保留 claim 到期，由恢复协调器接管，绝不猜测业务终态。
 
@@ -89,7 +93,7 @@ waiting 回答到达后创建全新的内存 Pi Session，把 RolloutProjection 
 
 事件和 Outbox 使用 `schemaVersion: 1` 的联合类型，分别限制为 64 KiB。事件 sequence 来自持久高水位；Outbox 使用业务幂等键。上游异常只映射为稳定错误码，不持久化 Provider、SDK 或数据库私有消息。
 
-`finally` 使用独立 Promise 和 `Promise.allSettled` 停止 heartbeat、保留 pending cleanup、取消订阅和 dispose Session，任一步失败不得跳过其他步骤。
+`finally` 先用 `Promise.allSettled` 停止 heartbeat 并等待已保存的 abort Promise，再取消订阅和 dispose Session；cleanup intent 已由 Outbox 持久接管，finally 不得把 `started` 回退为 `pending`。
 
 ## 放弃的方案
 
@@ -112,7 +116,7 @@ waiting 回答到达后创建全新的内存 Pi Session，把 RolloutProjection 
 ## 影响
 
 - PostgreSQL 适配器必须同时实现 claim、双租约、Attempt、事件、Outbox、Revision 和 Run 状态事务，不能拆成无事务 Repository。
-- Sandbox registry/outbox consumer、完整 request_user_input 工具和 PostgreSQL Schema 属于后续实现，但本阶段端口已固定它们的原子性与幂等契约。
+- Sandbox registry/outbox consumer、真实 request_user_input waiting 链路和 PostgreSQL Schema 属于后续实现，但本阶段端口已固定它们的原子性与幂等契约。
 - 流式事件逐条事务会产生写放大；后续可以批量，但不能改变 sequence、大小上限和双栅栏边界。
 - `expireWorkspaceLease` 只供恢复协调器在 DB 时钟确认过期后使用，生产 Repository 仍需 CAS。
 
@@ -126,5 +130,7 @@ waiting 回答到达后创建全新的内存 Pi Session，把 RolloutProjection 
 - 事件持久化不可用、超大 adapter event、Provider 失败、取消和超时；
 - waiting checkpoint/resume、受控 RolloutProjection 和 Linux Faux 真模型序列；
 - `model_execution_started` 后 crash 只能进入 recovery_required，普通 Worker不能重领。
+- 原始 base scope 精确 readback、模型/settle 两个窄 stop 窗口与 ExternalEffectPermit；
+- 事件排队拒绝、await abort、heartbeat reject、DB 统一时间和 cleanup Outbox 回退拒绝。
 
 PG、对象存储、真实 Outbox consumer 和 API 不在本次实现范围；它们必须遵守本 ADR，不能重新引入 Run 基础设施状态或 Pi Session 事实源。

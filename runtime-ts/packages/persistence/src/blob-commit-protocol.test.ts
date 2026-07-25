@@ -156,6 +156,8 @@ const stable: StableBlobRef = {
   sha256: staged.sha256,
   size: staged.size,
   mediaType: staged.mediaType,
+  incarnationId: "00000000-0000-4000-8000-000000000001",
+  physicalObjectKey: `agent-runtime/stable/tenant_a/artifact/sha256/${staged.sha256}/incarnations/00000000-0000-4000-8000-000000000001`,
 };
 
 function initialState(): BlobCommitSnapshot {

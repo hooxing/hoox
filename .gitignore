@@ -1,0 +1,27 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+.turbo/
+*.tsbuildinfo
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+.tmp/
+tmp/
+
+# Vendored SDK working directories and archives
+runtime-ts/vendor/cubesandbox-sdk/source/
+runtime-ts/vendor/cubesandbox-sdk/*.zip
+runtime-ts/vendor/cubesandbox-sdk/*.tar.gz

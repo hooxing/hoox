@@ -32,7 +32,7 @@
 2. 使用 `(TenantBlobScope, operationId)` 幂等提交业务引用；
 3. 引用提交明确成功后，由 PG 生命周期事务预留并持久化完整 allocation；调用方不传 mode，由 PG 根据当前 lifecycle 与永久 retired 历史原子决定 `active_reuse | new_after_deleted`，状态进入 `allocation_reserved`；
 4. 协调器只用 scope、operationId、expectedSnapshotVersion、allocationId 调用 `StatePort.startPromotion`。Repository 在同一 PG 事务中读取 snapshot、allocation/lifecycle 与永久 retired 历史，自行派生 canonical target/auth，并 CAS 到 `promotion_started`；调用方不能传 mode、target 或完整 authorization；
-5. 每次 `promote` 生成不可碰撞 attemptId，并以最小授权引用原子 `claimPromotionExecution`。只有 `copy_allowed` attempt 可以继续；其他并发得到 `in_progress`，executing/unknown 只得到 `reconcile`。远端 COPY 前调用 `markPromotionCopyIssued` 写入不可撤销 intent；intent 前确定失败可完成为 `not_copied`，但 commit 只有通过 `StatePort.provePromotionNotCopied` 在同一 PG 事务证明 execution 仍为 pre-intent 且没有 copy-issued，才能撤销授权回到 `allocation_reserved`；
+5. 每次 `promote` 生成不可碰撞 attemptId，并以最小授权引用原子 `claimPromotionExecution`。只有 `copy_allowed` attempt 可以继续；其他并发得到 `in_progress`，executing/unknown 只得到 `reconcile`。claim 必须先持久化显式 `pre_intent` 证明记录，远端 COPY 前再由 `markPromotionCopyIssued` 写不可撤销 intent；intent 前确定失败可把证明记为 `not_copied`，但不能删除 execution/审计记录。commit 只有通过 `StatePort.provePromotionNotCopied` 在同一 PG 事务消费 pre_intent/not_copied 证明并留下永久 tombstone，才能撤销授权回到 `allocation_reserved`；证明缺失、copy-issued 或 mark 响应未知一律不能回退；
 6. 把业务 ReferenceVersion 切换为携带 incarnationId 与 physicalObjectKey 的 stable 引用；
 7. 最后删除 staging；
 8. 引用提交前失败的 staging 进入孤儿清理；补偿事件明确记录目标为 staging；结果未知时先通过同一 Tenant scope 下的对应 resolve 接口查明，不允许猜测后继续。

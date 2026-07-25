@@ -112,7 +112,8 @@ export type PromotionExecutionClaimResolution =
 export interface StableBlobPromotionAuthorizationPort {
   /**
    * 以不可碰撞 attemptId 一次性 CAS。只有 copy_allowed 可以发 COPY；executing/unknown 只返回 reconcile，
-   * 其他未取得 lease/generation 的并发 attempt 返回 in_progress。
+   * 其他未取得 lease/generation 的并发 attempt 返回 in_progress。签发 copy_allowed 必须同步持久化
+   * 可审计的 pre_intent 证明记录；仅有进程内 claim 对象不构成“未 COPY”证明。
    */
   claimPromotionExecution(input: {
     readonly scope: TenantBlobScope;
@@ -133,6 +134,7 @@ export interface StableBlobPromotionAuthorizationPort {
   >;
   /**
    * not_copied 只允许全新 copy_allowed attempt 在 markPromotionCopyIssued 前完成；
+   * 它必须把持久的 pre_intent 证明更新为 not_copied 并保留 execution/审计 tombstone，不能删除证据。
    * reconcile 用于协议/Repository 异常，安全保留 claim 等待 HEAD；一旦已发 COPY，只能 unknown/succeeded。
    */
   completePromotionExecution(input: {

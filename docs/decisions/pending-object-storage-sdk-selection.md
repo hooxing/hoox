@@ -61,7 +61,7 @@
 - S3 删除明确成功后用 claimId + generation 联合 CAS 调用 `completeDeletion`；lease 到期与 claim 是否有效完全由 PG 事务/端口判定，S3 executor 不读取应用进程 `Date.now()`。接管保持物理身份与 phase，只递增 generation/claimId；
 - 不依赖 S3 bucket versioning。安全性来自不可复用物理键：旧 Worker即使在新 incarnation 激活后才完成 DELETE，也只能作用旧 physicalObjectKey。
 - commit 协调状态在 COPY 前依次持久化 `allocation_reserved` 与 `promotion_started`。`StatePort.startPromotion` 只接收 scope、operationId、expectedSnapshotVersion、allocationId 最小命令；Repository 在同一事务读取并锁定 snapshot、allocation/lifecycle/retired 历史，自行派生全部 canonical 字段与授权。公开 API 不接收完整 allocation/auth，调用方附带的结构与 getter 均不能影响派生结果。
-- 每次 promote 生成随机 UUID attemptId。`claimPromotionExecution` 一次性 CAS 并绑定 executionId、generation、attemptId、incarnation/key：只有一个 attempt 得到 copy_allowed；其他新并发为 in_progress，executing/unknown 返回 reconcile，接管只能由 PG lease/generation 决定。COPY 前 `markPromotionCopyIssued` 写不可撤销 intent。BlobStore 的 intent 前确定失败只能把 execution 记为 not_copied；commit 必须再由 `StatePort.provePromotionNotCopied` 在同一 PG 事务证明 execution 仍为 pre-intent 且无 copy-issued，才能撤销授权回到 allocation_reserved。响应未知不能当成证明。
+- 每次 promote 生成随机 UUID attemptId。`claimPromotionExecution` 一次性 CAS 并绑定 executionId、generation、attemptId、incarnation/key，同时持久化显式 pre_intent 证明；只有一个 attempt 得到 copy_allowed，其他新并发为 in_progress，executing/unknown 返回 reconcile，接管只能由 PG lease/generation 决定。COPY 前 `markPromotionCopyIssued` 写不可撤销 intent。BlobStore 的 intent 前确定失败只能把证明更新为 not_copied，不能删除 execution/审计记录；commit 必须再由 `StatePort.provePromotionNotCopied` 在同一 PG 事务消费 pre_intent/not_copied 证明并留下永久 consumed_not_copied tombstone，才能撤销授权回到 allocation_reserved。证明不存在、copy-issued 或 mark 响应未知都不能回退。
 - GC lifecycle 明确 deleted 时，completeDeletion 原子写 deleted 并把旧 incarnation/key 放入永久 retired 历史。allocation mode 只由可信 PG 事务读取全局 lifecycle/retired 历史决定；协调器不从当前 operation 的局部 retired 信息推断 mode，只在确有旧 target 时校验新 incarnation/key 不同。因此新 operation 首次看到全局 deleted 逻辑 Blob 时也可以合法接收 `new_after_deleted`。
 
 ### 影响
@@ -99,7 +99,7 @@ stable 对象可被多个引用以不同 `mediaType` 使用，因此首次上传
 - claimId 与 generation 是联合 CAS 条件；begin、complete、pre-delete release 任一字段不匹配都拒绝；
 - `stable_blob_incarnations` 至少建立 `UNIQUE (tenant_id, purpose, incarnation_id)` 与 `UNIQUE (tenant_id, purpose, physical_object_key)`；建议 physical_object_key 再做全局唯一。retired 行永久保留，不能被 GC/归档物理删除，也不能被 reserve 再次选中；
 - allocation 记录以 allocation_id 唯一，并关联 lifecycle_id、generation 和 incarnation 外键；ReferenceVersion/commit snapshot 保存相同身份。数据库约束或事务触发器禁止 retired incarnation 重新进入 active；
-- promotion authorization 以 authorization_id 唯一，并关联 tenant_id、operation_id、reference_id、staging_upload_id/key、allocation_id 与完整目标描述；execution 行以 authorization_id + generation 做 CAS，保存 attempt_id、execution_id、lease、phase 与精确 physical key。`promotion_started` CAS 与授权写入必须同事务；started/executing/unknown 受生命周期外键/事务守卫保护，禁止退休。
+- promotion authorization 以 authorization_id 唯一，并关联 tenant_id、operation_id、reference_id、staging_upload_id/key、allocation_id 与完整目标描述；execution 行以 authorization_id + generation 做 CAS，保存 attempt_id、execution_id、lease、phase、proof_status 与精确 physical key。pre_intent/not_copied 证明被消费后更新为永久 consumed_not_copied tombstone，禁止物理删除 execution 审计行。`promotion_started` CAS 与授权写入必须同事务；started/executing/unknown 受生命周期外键/事务守卫保护，禁止退休。
 - retired physical key 保留永久 tombstone 与 scrub 游标。已发出的旧 COPY 无法撤销，迟到时只会重新形成旧 key 孤儿；scrubber 幂等重复 DELETE 旧 key，绝不从逻辑 hash 解析“当前 key”。
 - 本项目是全新实现，不迁移旧 Python 原型。此前开发 MinIO 中不含 incarnation 的 stable key 只视为测试数据，应清理后重新发布；不提供旧 key 只读兼容，也不通过启用 bucket versioning 兜底；
 - 若未来已有生产对象，必须另做离线迁移：冻结写入、为每个旧对象分配 incarnation、复制到新键、回填所有 ReferenceVersion 后再启用 GC，不能原地把旧键当新 incarnation。

@@ -161,8 +161,9 @@ export interface BlobCommitStatePort {
   >;
   /**
    * 唯一允许 promotion_started 回到 allocation_reserved 的入口。Repository 必须在同一事务中
-   * 锁定 snapshot、authorization 与 execution，且仅当 execution 仍是 pre-intent、PG 能证明从未
-   * 写入 copy-issued 时，才撤销该授权并返回 proven_not_copied。响应未知不得视为已证明。
+   * 锁定 snapshot、authorization 与持久的 execution 证明记录。只有显式 pre_intent/not_copied
+   * 记录能被原子消费为永久 consumed_not_copied tombstone；execution/证明记录不存在、copy-issued
+   * 或 mark 响应未知都不能证明。not_copied 不得删除审计证据。
    */
   provePromotionNotCopied(input: {
     readonly scope: TenantBlobScope;
@@ -176,6 +177,7 @@ export interface BlobCommitStatePort {
           | "version_conflict"
           | "invalid_state"
           | "authorization_mismatch"
+          | "proof_unavailable"
           | "copy_may_have_been_issued";
       }
   >;

@@ -198,7 +198,168 @@ integration("MinIO Blob Store 集成", () => {
       cleanupClient.destroy();
     }
   });
+
+  it("持久层 Fake 只消费显式 pre-intent/not-copied 证明并保留审计 tombstone", async () => {
+    const absent = await createStartedIntegrationPersistenceFake("proof-absent");
+    await expect(
+      absent.persistence.provePromotionNotCopied({
+        scope: absent.scope,
+        operationId: absent.operationId,
+        expectedSnapshotVersion: absent.snapshotVersion,
+        authorizationId: absent.authorization.authorizationId,
+      }),
+    ).resolves.toEqual({ status: "proof_unavailable" });
+
+    const preIntent = await createStartedIntegrationPersistenceFake("proof-pre-intent");
+    const preIntentClaim = await preIntent.persistence.claimPromotionExecution({
+      scope: preIntent.scope,
+      authorization: preIntent.authorization,
+      attemptId: randomUUID(),
+    });
+    if (preIntentClaim.status !== "copy_allowed") throw new Error("pre-intent claim 失败");
+    await expect(
+      preIntent.persistence.provePromotionNotCopied({
+        scope: preIntent.scope,
+        operationId: preIntent.operationId,
+        expectedSnapshotVersion: preIntent.snapshotVersion,
+        authorizationId: preIntent.authorization.authorizationId,
+      }),
+    ).resolves.toMatchObject({ status: "proven_not_copied" });
+    expect(preIntent.persistence.proofStatusForTest()).toBe("consumed_not_copied");
+
+    const notCopied = await createStartedIntegrationPersistenceFake("proof-not-copied");
+    const notCopiedClaim = await notCopied.persistence.claimPromotionExecution({
+      scope: notCopied.scope,
+      authorization: notCopied.authorization,
+      attemptId: randomUUID(),
+    });
+    if (notCopiedClaim.status !== "copy_allowed") throw new Error("not-copied claim 失败");
+    await notCopied.persistence.completePromotionExecution({
+      scope: notCopied.scope,
+      execution: notCopiedClaim.execution,
+      outcome: "not_copied",
+    });
+    await expect(
+      notCopied.persistence.provePromotionNotCopied({
+        scope: notCopied.scope,
+        operationId: notCopied.operationId,
+        expectedSnapshotVersion: notCopied.snapshotVersion,
+        authorizationId: notCopied.authorization.authorizationId,
+      }),
+    ).resolves.toMatchObject({ status: "proven_not_copied" });
+    expect(notCopied.persistence.proofStatusForTest()).toBe("consumed_not_copied");
+
+    const copyIssued = await createStartedIntegrationPersistenceFake("proof-copy-issued");
+    const copyIssuedClaim = await copyIssued.persistence.claimPromotionExecution({
+      scope: copyIssued.scope,
+      authorization: copyIssued.authorization,
+      attemptId: randomUUID(),
+    });
+    if (copyIssuedClaim.status !== "copy_allowed") throw new Error("copy-issued claim 失败");
+    await copyIssued.persistence.markPromotionCopyIssued({
+      scope: copyIssued.scope,
+      execution: copyIssuedClaim.execution,
+    });
+    await expect(
+      copyIssued.persistence.provePromotionNotCopied({
+        scope: copyIssued.scope,
+        operationId: copyIssued.operationId,
+        expectedSnapshotVersion: copyIssued.snapshotVersion,
+        authorizationId: copyIssued.authorization.authorizationId,
+      }),
+    ).resolves.toEqual({ status: "copy_may_have_been_issued" });
+
+    const markUnknown = await createStartedIntegrationPersistenceFake("proof-mark-unknown");
+    const markUnknownClaim = await markUnknown.persistence.claimPromotionExecution({
+      scope: markUnknown.scope,
+      authorization: markUnknown.authorization,
+      attemptId: randomUUID(),
+    });
+    if (markUnknownClaim.status !== "copy_allowed") throw new Error("mark-unknown claim 失败");
+    markUnknown.persistence.markResponseUnknownForTest = true;
+    await expect(
+      markUnknown.persistence.markPromotionCopyIssued({
+        scope: markUnknown.scope,
+        execution: markUnknownClaim.execution,
+      }),
+    ).rejects.toThrow("响应未知");
+    await expect(
+      markUnknown.persistence.provePromotionNotCopied({
+        scope: markUnknown.scope,
+        operationId: markUnknown.operationId,
+        expectedSnapshotVersion: markUnknown.snapshotVersion,
+        authorizationId: markUnknown.authorization.authorizationId,
+      }),
+    ).resolves.toEqual({ status: "copy_may_have_been_issued" });
+  });
 });
+
+async function createStartedIntegrationPersistenceFake(label: string) {
+  const tenantId = `integration_${label.replaceAll("-", "_")}`;
+  const scope = { tenantId };
+  const operationId = `operation-${label}`;
+  const referenceId = `reference-${label}`;
+  const prefix = `integration-proof/${label}`;
+  const staged: StagedBlobRef = {
+    kind: "staging",
+    tenantId,
+    purpose: "artifact",
+    uploadId: `upload-${label}`,
+    sha256: "a".repeat(64),
+    size: 1,
+    mediaType: "text/plain",
+  };
+  const persistence = new IntegrationPersistenceFake(prefix);
+  const referenceCommitted: BlobCommitSnapshot = {
+    operationId,
+    scope,
+    status: "reference_committed",
+    version: 3,
+    staged,
+    referenceId,
+  };
+  await persistence.create(referenceCommitted);
+  const allocation = await persistence.reserve({ scope, staged, operationId, referenceId });
+  const stable: StableBlobRef = {
+    kind: "stable",
+    tenantId,
+    purpose: staged.purpose,
+    sha256: staged.sha256,
+    size: staged.size,
+    mediaType: staged.mediaType,
+    incarnationId: allocation.incarnationId,
+    physicalObjectKey: allocation.physicalObjectKey,
+  };
+  const reserved = transitionBlobCommit(referenceCommitted, {
+    type: "allocation_reserved",
+    allocation,
+    stable,
+  });
+  if (
+    !(await persistence.compareAndSet({
+      scope,
+      operationId,
+      expectedVersion: referenceCommitted.version,
+      next: reserved,
+    }))
+  ) {
+    throw new Error("proof Fake allocation CAS 失败");
+  }
+  const started = await persistence.startPromotion({
+    scope,
+    operationId,
+    expectedSnapshotVersion: reserved.version,
+    allocationId: allocation.allocationId,
+  });
+  if (started.status !== "started") throw new Error("proof Fake startPromotion 失败");
+  return {
+    persistence,
+    scope,
+    operationId,
+    authorization: started.authorization,
+    snapshotVersion: started.snapshotVersion,
+  };
+}
 
 /** 真实 MinIO 走 reference→reserve→最小 startPromotion→execution claim 的状态化数据库 Fake。 */
 class IntegrationPersistenceFake
@@ -211,9 +372,21 @@ class IntegrationPersistenceFake
   private authorization: StableBlobPromotionAuthorization | undefined;
   private snapshot: BlobCommitSnapshot | undefined;
   private allocation: StableBlobLifecycleAllocation | undefined;
+  private promotionProof:
+    | "pre_intent"
+    | "not_copied"
+    | "copy_issued"
+    | "mark_unknown"
+    | "consumed_not_copied"
+    | undefined;
   private status: "reserved" | "started" | "retired" | "consumed" | "inactive" = "started";
+  markResponseUnknownForTest = false;
 
   constructor(private readonly prefix: string) {}
+
+  proofStatusForTest() {
+    return this.promotionProof;
+  }
 
   async load(scope: { readonly tenantId: string }, operationId: string) {
     return this.snapshot?.scope.tenantId === scope.tenantId &&
@@ -317,6 +490,7 @@ class IntegrationPersistenceFake
       authorization: ref,
     });
     this.status = "started";
+    this.promotionProof = undefined;
     return {
       status: "started" as const,
       authorization: ref,
@@ -342,13 +516,20 @@ class IntegrationPersistenceFake
     ) {
       return { status: "authorization_mismatch" as const };
     }
-    if (this.execution?.phase === "executing" || this.execution?.phase === "unknown") {
+    if (this.promotionProof === undefined) {
+      return { status: "proof_unavailable" as const };
+    }
+    if (
+      this.promotionProof === "copy_issued" ||
+      this.promotionProof === "mark_unknown" ||
+      this.promotionProof === "consumed_not_copied"
+    ) {
       return { status: "copy_may_have_been_issued" as const };
     }
     this.snapshot = transitionBlobCommit(current, { type: "promotion_proven_not_copied" });
     this.status = "inactive";
-    this.execution = undefined;
-    this.authorization = undefined;
+    // 消费后保留 execution、authorization 与永久 proof tombstone 作为审计证据。
+    this.promotionProof = "consumed_not_copied";
     return {
       status: "proven_not_copied" as const,
       snapshotVersion: this.snapshot.version,
@@ -385,6 +566,7 @@ class IntegrationPersistenceFake
       incarnationId: authorization.incarnationId,
       physicalObjectKey: authorization.physicalObjectKey,
     };
+    this.promotionProof ??= "pre_intent";
     return { status: "copy_allowed" as const, execution: this.execution };
   }
 
@@ -412,6 +594,10 @@ class IntegrationPersistenceFake
       return { status: "claim_lost" as const };
     }
     this.execution = { ...input.execution, phase: "executing" };
+    this.promotionProof = this.markResponseUnknownForTest ? "mark_unknown" : "copy_issued";
+    if (this.markResponseUnknownForTest) {
+      throw new Error("MinIO Fake mark 响应未知");
+    }
     return { status: "marked" as const, execution: this.execution };
   }
 
@@ -426,7 +612,7 @@ class IntegrationPersistenceFake
     if (input.outcome === "not_copied") {
       if (this.execution?.phase !== "claimed") throw new Error("COPY intent 不可撤销");
       this.status = "inactive";
-      this.execution = undefined;
+      this.promotionProof = "not_copied";
       return;
     }
     if (input.outcome === "unknown") {

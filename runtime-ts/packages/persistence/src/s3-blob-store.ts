@@ -177,14 +177,20 @@ export class S3BlobStore implements BlobStore {
       });
     }
     if (claim.status === "completed") {
-      assertPromotionAuthorizationMatches(
-        scope,
-        staged,
-        authorizationRef,
-        claim.authorization,
-        this.prefix,
-      );
-      const completedStable = stableFromAuthorization(staged, claim.authorization);
+      let completedAuthorization: StableBlobPromotionAuthorization;
+      try {
+        completedAuthorization = claim.authorization;
+        assertPromotionAuthorizationMatches(
+          scope,
+          staged,
+          authorizationRef,
+          completedAuthorization,
+          this.prefix,
+        );
+      } catch (error) {
+        throw promotionProtocolError("completed canonical authorization 未保持协议连续", error);
+      }
+      const completedStable = stableFromAuthorization(staged, completedAuthorization);
       try {
         const completedHead = await this.client.head(this.keyFor(completedStable));
         if (completedHead === undefined) {
@@ -197,11 +203,20 @@ export class S3BlobStore implements BlobStore {
       return completedStable;
     }
     if (claim.status === "reconcile") {
-      assertExecutionClaim(scope, authorizationRef, claim.execution, undefined, [
-        "executing",
-        "unknown",
-      ]);
-      return await this.reconcilePromotion(scope, staged, authorizationRef, claim.execution);
+      let reconcileExecution: PromotionExecutionClaim | undefined;
+      try {
+        reconcileExecution = claim.execution;
+        assertExecutionClaim(scope, authorizationRef, reconcileExecution, undefined, [
+          "executing",
+          "unknown",
+        ]);
+      } catch (error) {
+        if (hasTrustedExecutionIdentity(scope, authorizationRef, reconcileExecution)) {
+          await this.bestEffortPromotionReconcile(scope, reconcileExecution);
+        }
+        throw promotionProtocolError("reconcile execution 身份或固定 target 不连续", error);
+      }
+      return await this.reconcilePromotion(scope, staged, authorizationRef, reconcileExecution);
     }
     if (claim.status !== "copy_allowed") {
       throw new BlobStoreError(
@@ -550,20 +565,22 @@ export class S3BlobStore implements BlobStore {
         result: "unknown",
       });
     }
+    let canonicalAuthorization: StableBlobPromotionAuthorization;
     try {
-      assertExecutionMatchesAuthorization(execution, resolution.authorization);
+      canonicalAuthorization = resolution.authorization;
+      assertExecutionMatchesAuthorization(execution, canonicalAuthorization);
       assertPromotionAuthorizationMatches(
         scope,
         staged,
         authorizationRef,
-        resolution.authorization,
+        canonicalAuthorization,
         this.prefix,
       );
     } catch (error) {
       await this.bestEffortPromotionReconcile(scope, execution);
       throw promotionProtocolError("reconcile canonical authorization 未保持协议连续", error);
     }
-    const stable = stableFromAuthorization(staged, resolution.authorization);
+    const stable = stableFromAuthorization(staged, canonicalAuthorization);
     let metadata: S3ObjectMetadata | undefined;
     try {
       metadata = await this.client.head(this.keyFor(stable));
@@ -1140,6 +1157,28 @@ function assertExecutionClaim(
       { result: "unknown" },
     );
   }
+}
+
+function hasTrustedExecutionIdentity(
+  scope: TenantBlobScope,
+  authorization: PromotionAuthorizationRef,
+  execution: unknown,
+): execution is PromotionExecutionClaim {
+  if (typeof execution !== "object" || execution === null) return false;
+  const candidate = execution as Partial<PromotionExecutionClaim>;
+  return (
+    candidate.tenantId === scope.tenantId &&
+    candidate.tenantId === authorization.tenantId &&
+    candidate.operationId === authorization.operationId &&
+    candidate.authorizationId === authorization.authorizationId &&
+    typeof candidate.executionId === "string" &&
+    UUID_V4_PATTERN.test(candidate.executionId) &&
+    typeof candidate.attemptId === "string" &&
+    UUID_V4_PATTERN.test(candidate.attemptId) &&
+    typeof candidate.generation === "number" &&
+    Number.isSafeInteger(candidate.generation) &&
+    candidate.generation >= 1
+  );
 }
 
 function assertExecutionMatchesAuthorization(

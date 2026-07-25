@@ -14,7 +14,7 @@ export interface PersistenceRuntime {
 export interface MigrationRuntime {
   up(): Promise<readonly MigrationRecord[]>;
   down(
-    options: Omit<MigrationDownOptions, "directory" | "runtimeRole">,
+    options: Omit<MigrationDownOptions, "directory" | "runtimeRole" | "migratorRole" | "schema">,
   ): Promise<readonly MigrationRecord[]>;
   probe(): Promise<void>;
   close(): Promise<void>;
@@ -30,16 +30,25 @@ export function createPersistenceRuntime(options: PostgresPoolOptions): Persiste
 }
 
 export function createMigrationRuntime(
-  options: PostgresPoolOptions & { readonly runtimeRole: string },
+  options: PostgresPoolOptions & {
+    readonly runtimeRole: string;
+    readonly migratorRole: string;
+    readonly schema: string;
+  },
 ): MigrationRuntime {
   const pool = createPostgresPool(options);
+  const security = {
+    runtimeRole: options.runtimeRole,
+    migratorRole: options.migratorRole,
+    schema: options.schema,
+  } as const;
   return {
     up: async () => {
-      const records = await migrateUp(pool, { runtimeRole: options.runtimeRole });
-      await bootstrapRuntimeAccess(pool, options.runtimeRole);
+      const records = await migrateUp(pool, security);
+      await bootstrapRuntimeAccess(pool, security);
       return records;
     },
-    down: (downOptions) => migrateDown(pool, { ...downOptions, runtimeRole: options.runtimeRole }),
+    down: (downOptions) => migrateDown(pool, { ...downOptions, ...security }),
     probe: () => probePostgres(pool),
     close: () => pool.end(),
   };

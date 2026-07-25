@@ -4,7 +4,12 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Pool, PoolClient } from "pg";
 import { PersistenceError, mapPersistenceError } from "./errors.js";
 import { withTransaction } from "./postgres.js";
-import { assertRuntimeRoleSafe, teardownRuntimeSchemaAccess } from "./role-bootstrap.js";
+import {
+  assertMigrationContextSafe,
+  bootstrapRuntimeAccessOnClient,
+  type MigrationSecurityContext,
+  teardownRuntimeSchemaAccessOnClient,
+} from "./role-bootstrap.js";
 
 interface Migration {
   readonly version: number;
@@ -24,11 +29,9 @@ export interface MigrationSourceOptions {
   readonly directory?: string;
 }
 
-export interface MigrationUpOptions extends MigrationSourceOptions {
-  readonly runtimeRole: string;
-}
+export interface MigrationUpOptions extends MigrationSourceOptions, MigrationSecurityContext {}
 
-export interface MigrationDownOptions extends MigrationSourceOptions {
+export interface MigrationDownOptions extends MigrationSourceOptions, MigrationSecurityContext {
   readonly targetVersion?: number;
   readonly allowDestructive: true;
   readonly environment: "development" | "test";
@@ -122,7 +125,7 @@ export async function migrateUp(
         "SELECT pg_advisory_xact_lock(hashtext('cube_runtime_schema_migrations_v1'))",
       );
       // 安全检查必须早于迁移表和任何业务 DDL，失败时数据库保持原状。
-      await assertRuntimeRoleSafe(client, options.runtimeRole);
+      await assertMigrationContextSafe(client, options);
       await ensureMigrationTable(client);
       const applied = await appliedMigrations(client);
       for (const record of applied) {
@@ -171,6 +174,8 @@ export async function migrateDown(
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtext('cube_runtime_schema_migrations_v1'))",
       );
+      // 与 up 使用同一套 Runtime/Migrator/Schema preflight，且必须早于迁移表 DDL。
+      await assertMigrationContextSafe(client, options);
       await ensureMigrationTable(client);
       const applied = await appliedMigrations(client);
       for (const record of [...applied].reverse()) {
@@ -184,9 +189,15 @@ export async function migrateDown(
           record.version,
         ]);
       }
-      return appliedMigrations(client);
+      const records = await appliedMigrations(client);
+      if (targetVersion === 0) {
+        // down SQL 与 ACL 回收共用当前 client/事务，任一步失败都会整体回滚。
+        await teardownRuntimeSchemaAccessOnClient(client, options);
+      } else {
+        await bootstrapRuntimeAccessOnClient(client, options);
+      }
+      return records;
     });
-    if (targetVersion === 0) await teardownRuntimeSchemaAccess(pool, options.runtimeRole);
     return records;
   } catch (error) {
     throw mapPersistenceError(error, "执行回退迁移");

@@ -63,13 +63,13 @@ corepack pnpm config:check
 
 业务 Schema 迁移不能替代数据库级 bootstrap。首次准备专用数据库时，由不进入应用进程的 Database Admin 完成以下一次性操作：
 
-1. 创建无 `SUPERUSER/CREATEDB/CREATEROLE/BYPASSRLS/REPLICATION` 的 Migrator 与 Runtime 登录角色；
-2. 从 `PUBLIC`、Migrator 和 Runtime 撤销目标数据库的 `CREATE`，只保留必要的 `CONNECT`；
+1. 创建无 `SUPERUSER/CREATEDB/CREATEROLE/BYPASSRLS/REPLICATION` 的 Migrator 与 Runtime 登录角色，并保证两者都没有任何上游角色成员关系；Runtime 即使设置为 `NOINHERIT` 也不能保留可 `SET ROLE` 的成员关系；
+2. 从 `PUBLIC`、Migrator 和 Runtime 撤销目标数据库的全部权限，再只向 Migrator 和 Runtime 授予 `CONNECT`；Runtime 不得通过 `PUBLIC` 获得 `CREATE` 或 `TEMPORARY`；
 3. 创建专用业务 Schema，并只让 Migrator 成为该 Schema owner；Database Admin 继续作为数据库 owner；
-4. 确认 Runtime 不是数据库、Schema、表或序列 owner，也没有可继承或可 `SET ROLE` 到的高权限成员关系；
-5. 分别写入本机忽略文件中的 `DATABASE_BOOTSTRAP_URL`、`MIGRATION_DATABASE_URL`、`DATABASE_URL` 与 `DATABASE_RUNTIME_ROLE`。Bootstrap URL 只用于本地权限集成测试或受控运维，不能进入服务进程。
+4. 确认 Runtime 不是数据库、Schema、表或序列 owner；Migrator 不是数据库 owner，且只拥有配置的业务 Schema；
+5. 分别写入本机忽略文件中的 `DATABASE_BOOTSTRAP_URL`、`MIGRATION_DATABASE_URL`、`DATABASE_URL`、`DATABASE_RUNTIME_ROLE`、`DATABASE_MIGRATOR_ROLE` 与 `DATABASE_SCHEMA`。Bootstrap URL 只用于本地权限集成测试或受控运维，不能进入服务进程。
 
-`pnpm db:migrate:up` 会先验证完整 Runtime 角色闭包，再执行 Schema migration，最后单独运行可重复的最小 ACL bootstrap。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作，并撤销 Runtime 在当前 Schema 的动态 ACL；它不会删除角色、重新开放数据库 `CREATE` 或回滚 Database Admin bootstrap。
+`pnpm db:migrate:up` 会在任何 DDL 前同时验证 Runtime、当前 Migrator、Schema owner 与精确 `search_path`，再执行 Schema migration，最后单独运行可重复的最小 ACL bootstrap。该 bootstrap 先撤销 Runtime 和 `PUBLIC` 在业务 Schema、全部业务表、迁移表及 sequence 上的权限，再精确授权，并对逐表全部 DML/DDL 权限及数据库、Schema 有效权限执行白名单断言。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作；down SQL、ACL 回收和结束断言共用同一事务，任一步失败都整体回滚。它不会删除角色或回滚 Database Admin bootstrap。
 
 ## 提交前检查
 

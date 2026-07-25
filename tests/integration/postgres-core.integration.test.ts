@@ -46,19 +46,26 @@ const runtimeDatabaseUrl = process.env.DATABASE_URL;
 const bootstrapDatabaseUrl = process.env.DATABASE_BOOTSTRAP_URL;
 const migrationDatabaseUrl = process.env.MIGRATION_DATABASE_URL;
 const runtimeRole = process.env.DATABASE_RUNTIME_ROLE;
+const migratorRole = process.env.DATABASE_MIGRATOR_ROLE;
 if (
   runtimeDatabaseUrl === undefined ||
   bootstrapDatabaseUrl === undefined ||
   migrationDatabaseUrl === undefined ||
-  runtimeRole === undefined
+  runtimeRole === undefined ||
+  migratorRole === undefined
 ) {
   throw new Error("PostgreSQL 集成测试需要 Runtime/Migrator 双连接配置；不会输出配置值");
 }
 
 const schema = `it_${process.pid}_${Date.now()}`;
-const migratorRole = new URL(migrationDatabaseUrl).username;
 const databaseOwnerRole = new URL(bootstrapDatabaseUrl).username;
+const databaseName = new URL(bootstrapDatabaseUrl).pathname.slice(1);
 if (!/^[a-z_][a-z0-9_]{0,62}$/.test(migratorRole)) throw new Error("Migrator 角色名称无效");
+if (!/^[a-z_][a-z0-9_]{0,62}$/.test(databaseOwnerRole)) {
+  throw new Error("数据库 Owner 角色名称无效");
+}
+if (!/^[a-z_][a-z0-9_]{0,62}$/.test(databaseName)) throw new Error("测试数据库名称无效");
+const migrationSecurity = { runtimeRole, migratorRole, schema } as const;
 const sourceMigrationDirectory = fileURLToPath(
   new URL("../../runtime-ts/packages/persistence/migrations/", import.meta.url),
 );
@@ -159,13 +166,13 @@ beforeAll(async () => {
     maxConnections: 8,
   });
   const concurrent = await Promise.all([
-    migrateUp(migratorPool, { runtimeRole }),
-    migrateUp(migratorPool, { runtimeRole }),
+    migrateUp(migratorPool, migrationSecurity),
+    migrateUp(migratorPool, migrationSecurity),
   ]);
   concurrentMigrationVersions = concurrent.flatMap((records) =>
     records.map((record) => record.version),
   );
-  await bootstrapRuntimeAccess(migratorPool, runtimeRole);
+  await bootstrapRuntimeAccess(migratorPool, migrationSecurity);
   repositories = new PgCoreRepositories(runtimePool);
 });
 
@@ -180,7 +187,7 @@ afterAll(async () => {
 describe("PostgreSQL 迁移与强权限边界", () => {
   it("并发迁移串行化且重复执行结果一致", async () => {
     expect(concurrentMigrationVersions).toEqual([1, 1]);
-    expect(await migrateUp(migratorPool, { runtimeRole })).toHaveLength(1);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(1);
   });
 
   it("checksum 同时绑定 down SQL，并拒绝孤立和重复版本", async () => {
@@ -203,7 +210,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ]);
       await writeFile(join(temporary, "0001_core.down.sql"), "SELECT 'down 已被篡改';\n", "utf8");
       await expect(
-        migrateUp(migratorPool, { runtimeRole, directory: temporary }),
+        migrateUp(migratorPool, { ...migrationSecurity, directory: temporary }),
       ).rejects.toMatchObject({
         code: "MIGRATION_MISMATCH",
       });
@@ -225,19 +232,43 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("down 的 DDL 与 ACL 收敛失败时整体回滚", async () => {
+    await administrativePool.query(
+      `GRANT TEMPORARY ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
+    );
+    try {
+      await expect(
+        migrateDown(migratorPool, {
+          allowDestructive: true,
+          environment: "test",
+          ...migrationSecurity,
+        }),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      const state = await migratorPool.query<{ threads: string | null; migration_count: string }>(
+        `SELECT to_regclass('threads')::text AS threads,
+                (SELECT count(*)::text FROM runtime_schema_migrations) AS migration_count`,
+      );
+      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "1" });
+    } finally {
+      await administrativePool.query(
+        `REVOKE TEMPORARY ON DATABASE "${databaseName}" FROM "${runtimeRole}"`,
+      );
+    }
+  });
+
   it("down 只有显式 test 授权可执行并能再次向前", async () => {
     await expect(
       migrateDown(migratorPool, {
         allowDestructive: false as true,
         environment: "test",
-        runtimeRole,
+        ...migrationSecurity,
       }),
     ).rejects.toThrow("禁止破坏性");
     expect(
       await migrateDown(migratorPool, {
         allowDestructive: true,
         environment: "test",
-        runtimeRole,
+        ...migrationSecurity,
       }),
     ).toEqual([]);
     const usageAfterDown = await migratorPool.query<{ allowed: boolean }>(
@@ -245,8 +276,15 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       [runtimeRole],
     );
     expect(usageAfterDown.rows[0]?.allowed).toBe(false);
-    expect(await migrateUp(migratorPool, { runtimeRole })).toHaveLength(1);
-    await bootstrapRuntimeAccess(migratorPool, runtimeRole);
+    const downPrivileges = await migratorPool.query<{ privilege: string; allowed: boolean }>(
+      `SELECT requested.privilege,
+              has_table_privilege($1, 'runtime_schema_migrations', requested.privilege) AS allowed
+         FROM unnest($2::text[]) AS requested(privilege)`,
+      [runtimeRole, ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"]],
+    );
+    expect(downPrivileges.rows.every((entry) => !entry.allowed)).toBe(true);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(1);
+    await bootstrapRuntimeAccess(migratorPool, migrationSecurity);
   });
 
   it("Runtime 角色不安全时在任何迁移 DDL 之前失败", async () => {
@@ -255,7 +293,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     const unsafeTableOwnerRole = `it_unsafe_table_${process.pid}`;
     await administrativePool.query(
       `CREATE ROLE "${unsafeParentRole}" NOLOGIN CREATEDB;
-       CREATE ROLE "${unsafeChildRole}" NOLOGIN;
+       CREATE ROLE "${unsafeChildRole}" NOLOGIN NOINHERIT;
        CREATE ROLE "${unsafeTableOwnerRole}" NOLOGIN;
        GRANT "${unsafeParentRole}" TO "${unsafeChildRole}"`,
     );
@@ -283,13 +321,35 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           maxConnections: 2,
         });
         try {
-          await expect(migrateUp(unsafePool, { runtimeRole: unsafe.role })).rejects.toMatchObject({
-            code: "CONSTRAINT_VIOLATION",
-          });
+          await expect(
+            migrateUp(unsafePool, {
+              runtimeRole: unsafe.role,
+              migratorRole,
+              schema: unsafeSchema,
+            }),
+          ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
           const migrationTable = await unsafePool.query<{ name: string | null }>(
             "SELECT to_regclass('runtime_schema_migrations')::text AS name",
           );
           expect(migrationTable.rows[0]?.name).toBeNull();
+          if (unsafe.suffix === "inherited") {
+            await expect(
+              migrateDown(unsafePool, {
+                allowDestructive: true,
+                environment: "test",
+                runtimeRole: unsafe.role,
+                migratorRole,
+                schema: unsafeSchema,
+              }),
+            ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+            expect(
+              (
+                await unsafePool.query<{ name: string | null }>(
+                  "SELECT to_regclass('runtime_schema_migrations')::text AS name",
+                )
+              ).rows[0]?.name,
+            ).toBeNull();
+          }
         } finally {
           await unsafePool.end();
           await administrativePool.query(`DROP SCHEMA "${unsafeSchema}" CASCADE`);
@@ -303,6 +363,118 @@ describe("PostgreSQL 迁移与强权限边界", () => {
          DROP ROLE "${unsafeTableOwnerRole}"`,
       );
     }
+  });
+
+  it("Migrator 或 search_path 不安全时在任何迁移 DDL 之前失败", async () => {
+    const parentRole = `it_migrator_parent_${process.pid}`;
+    const parentSchema = `${schema}_migrator_parent`;
+    const ownerSchema = `${schema}_wrong_owner`;
+    await administrativePool.query(
+      `CREATE ROLE "${parentRole}" NOLOGIN;
+       CREATE SCHEMA "${parentSchema}" AUTHORIZATION "${migratorRole}";
+       CREATE SCHEMA "${ownerSchema}" AUTHORIZATION "${databaseOwnerRole}";
+       GRANT "${parentRole}" TO "${migratorRole}"`,
+    );
+    const parentPool = createPostgresPool({
+      connectionString: migrationDatabaseUrl,
+      schema: parentSchema,
+      maxConnections: 2,
+    });
+    const wrongOwnerPool = createPostgresPool({
+      connectionString: migrationDatabaseUrl,
+      schema: ownerSchema,
+      maxConnections: 2,
+    });
+    const wrongSearchPathPool = createPostgresPool({
+      connectionString: migrationDatabaseUrl,
+      maxConnections: 2,
+    });
+    const databaseOwnerPool = createPostgresPool({
+      connectionString: bootstrapDatabaseUrl,
+      schema: ownerSchema,
+      maxConnections: 2,
+    });
+    try {
+      await expect(
+        migrateUp(parentPool, { runtimeRole, migratorRole, schema: parentSchema }),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      await administrativePool.query(`REVOKE "${parentRole}" FROM "${migratorRole}"`);
+      await expect(
+        migrateUp(wrongOwnerPool, { runtimeRole, migratorRole, schema: ownerSchema }),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      await expect(
+        migrateUp(wrongSearchPathPool, { runtimeRole, migratorRole, schema: parentSchema }),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      await expect(
+        migrateUp(databaseOwnerPool, {
+          runtimeRole,
+          migratorRole: databaseOwnerRole,
+          schema: ownerSchema,
+        }),
+      ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
+      const migrationTables = await administrativePool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM pg_class relation JOIN pg_namespace schema_state
+             ON schema_state.oid = relation.relnamespace
+          WHERE schema_state.nspname IN ($1, $2)
+            AND relation.relname = 'runtime_schema_migrations'`,
+        [parentSchema, ownerSchema],
+      );
+      expect(migrationTables.rows[0]?.count).toBe("0");
+    } finally {
+      await parentPool.end();
+      await wrongOwnerPool.end();
+      await wrongSearchPathPool.end();
+      await databaseOwnerPool.end();
+      await administrativePool.query(
+        `REVOKE "${parentRole}" FROM "${migratorRole}";
+         DROP SCHEMA "${parentSchema}" CASCADE;
+         DROP SCHEMA "${ownerSchema}" CASCADE;
+         DROP ROLE "${parentRole}"`,
+      );
+    }
+  });
+
+  it("bootstrap 先拒绝上游角色，再清除 PUBLIC 残留授权", async () => {
+    const parentRole = `it_runtime_parent_${process.pid}`;
+    await administrativePool.query(`CREATE ROLE "${parentRole}" NOLOGIN`);
+    await migratorPool.query(
+      `GRANT ALL PRIVILEGES ON SCHEMA "${schema}" TO PUBLIC;
+       GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA "${schema}" TO PUBLIC;
+       GRANT ALL PRIVILEGES ON TABLE "${schema}".threads TO "${parentRole}"`,
+    );
+    await administrativePool.query(`GRANT "${parentRole}" TO "${runtimeRole}"`);
+    try {
+      await expect(bootstrapRuntimeAccess(migratorPool, migrationSecurity)).rejects.toMatchObject({
+        code: "CONSTRAINT_VIOLATION",
+      });
+      const publicBefore = await migratorPool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM pg_class relation
+           CROSS JOIN LATERAL aclexplode(relation.relacl) acl
+          WHERE relation.relnamespace = current_schema()::regnamespace
+            AND relation.relkind IN ('r', 'p') AND acl.grantee = 0`,
+      );
+      // 若 preflight 之后才检查成员关系，这里的 PUBLIC 攻击性授权会已被错误修改。
+      expect(Number(publicBefore.rows[0]?.count)).toBeGreaterThan(0);
+    } finally {
+      await administrativePool.query(`REVOKE "${parentRole}" FROM "${runtimeRole}"`);
+      await migratorPool.query(
+        `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA "${schema}" FROM "${parentRole}"`,
+      );
+      await administrativePool.query(`DROP ROLE "${parentRole}"`);
+    }
+    await bootstrapRuntimeAccess(migratorPool, migrationSecurity);
+    const publicAfter = await migratorPool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM pg_class relation
+         CROSS JOIN LATERAL aclexplode(
+           COALESCE(relation.relacl, acldefault('r'::"char", relation.relowner))
+         ) acl
+        WHERE relation.relnamespace = current_schema()::regnamespace
+          AND relation.relkind IN ('r', 'p') AND acl.grantee = 0`,
+    );
+    expect(publicAfter.rows[0]?.count).toBe("0");
   });
 
   it("Runtime 角色不能 DDL、创建 Schema 或绕过 RLS 跨租户写", async () => {
@@ -331,57 +503,66 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     });
     expect(roles.rows[0]?.database_owner).not.toBe(migratorRole);
     expect(roles.rows[0]?.migrator_schema_owner).not.toBe(runtimeRole);
+    const expectedPolicy = new Map<string, ReadonlySet<string>>([
+      ["app_users", new Set(["SELECT", "INSERT"])],
+      ["tenants", new Set(["SELECT", "INSERT"])],
+      ["memberships", new Set(["SELECT", "INSERT"])],
+      ["threads", new Set(["SELECT", "INSERT", "UPDATE"])],
+      ["runs", new Set(["SELECT", "INSERT", "UPDATE"])],
+      ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
+      ["workspace_revisions", new Set(["SELECT", "INSERT"])],
+      ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
+      ["runtime_schema_migrations", new Set()],
+    ]);
+    const allPrivileges = [
+      "SELECT",
+      "INSERT",
+      "UPDATE",
+      "DELETE",
+      "TRUNCATE",
+      "REFERENCES",
+      "TRIGGER",
+    ];
     const privilegeMatrix = await migratorPool.query<{
       table_name: string;
       privilege: string;
       allowed: boolean;
     }>(
-      `SELECT requested.table_name, requested.privilege,
-              has_table_privilege($1, requested.table_name, requested.privilege) AS allowed
-         FROM (VALUES
-           ('app_users','SELECT'), ('app_users','INSERT'), ('app_users','UPDATE'),
-           ('tenants','SELECT'), ('tenants','INSERT'), ('tenants','DELETE'),
-           ('memberships','SELECT'), ('memberships','INSERT'), ('memberships','UPDATE'),
-           ('threads','SELECT'), ('threads','INSERT'), ('threads','UPDATE'), ('threads','DELETE'),
-           ('runs','SELECT'), ('runs','INSERT'), ('runs','UPDATE'), ('runs','DELETE'),
-           ('workspaces','SELECT'), ('workspaces','INSERT'), ('workspaces','UPDATE'), ('workspaces','DELETE'),
-           ('workspace_revisions','SELECT'), ('workspace_revisions','INSERT'),
-           ('workspace_revisions','UPDATE'), ('workspace_revisions','DELETE'),
-           ('workspace_write_leases','SELECT'), ('workspace_write_leases','INSERT'),
-           ('workspace_write_leases','UPDATE'), ('workspace_write_leases','DELETE')
-         ) AS requested(table_name, privilege)`,
+      `SELECT target.table_name, requested.privilege,
+              has_table_privilege(
+                $1, format('%I.%I', current_schema()::text, target.table_name), requested.privilege
+              ) AS allowed
+         FROM unnest($2::text[]) AS target(table_name)
+         CROSS JOIN unnest($3::text[]) AS requested(privilege)`,
+      [runtimeRole, [...expectedPolicy.keys()], allPrivileges],
+    );
+    expect(privilegeMatrix.rows).toHaveLength(expectedPolicy.size * allPrivileges.length);
+    for (const entry of privilegeMatrix.rows) {
+      expect(entry.allowed, `${entry.table_name}:${entry.privilege}`).toBe(
+        expectedPolicy.get(entry.table_name)?.has(entry.privilege),
+      );
+    }
+    const effectiveBoundary = await migratorPool.query<{
+      schema_usage: boolean;
+      schema_create: boolean;
+      database_connect: boolean;
+      database_create: boolean;
+      database_temporary: boolean;
+    }>(
+      `SELECT has_schema_privilege($1, current_schema(), 'USAGE') AS schema_usage,
+              has_schema_privilege($1, current_schema(), 'CREATE') AS schema_create,
+              has_database_privilege($1, current_database(), 'CONNECT') AS database_connect,
+              has_database_privilege($1, current_database(), 'CREATE') AS database_create,
+              has_database_privilege($1, current_database(), 'TEMP') AS database_temporary`,
       [runtimeRole],
     );
-    const allowed = new Set(
-      privilegeMatrix.rows
-        .filter((entry) => entry.allowed)
-        .map((entry) => `${entry.table_name}:${entry.privilege}`),
-    );
-    expect(allowed).toEqual(
-      new Set([
-        "app_users:SELECT",
-        "app_users:INSERT",
-        "tenants:SELECT",
-        "tenants:INSERT",
-        "memberships:SELECT",
-        "memberships:INSERT",
-        "threads:SELECT",
-        "threads:INSERT",
-        "threads:UPDATE",
-        "runs:SELECT",
-        "runs:INSERT",
-        "runs:UPDATE",
-        "workspaces:SELECT",
-        "workspaces:INSERT",
-        "workspaces:UPDATE",
-        "workspace_revisions:SELECT",
-        "workspace_revisions:INSERT",
-        "workspace_write_leases:SELECT",
-        "workspace_write_leases:INSERT",
-        "workspace_write_leases:UPDATE",
-        "workspace_write_leases:DELETE",
-      ]),
-    );
+    expect(effectiveBoundary.rows[0]).toEqual({
+      schema_usage: true,
+      schema_create: false,
+      database_connect: true,
+      database_create: false,
+      database_temporary: false,
+    });
     const sequenceCount = await migratorPool.query<{ count: string }>(
       "SELECT count(*)::text AS count FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relkind = 'S'",
     );

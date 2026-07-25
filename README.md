@@ -43,3 +43,5 @@
 ## 目录边界
 
 `runtime-ts/apps` 保存可部署进程入口，`runtime-ts/packages` 保存运行时模块，`runtime-ts/vendor` 只保存经过版本固定和许可证审查的第三方源码。CubeSandbox SDK 的固定来源见 `runtime-ts/vendor/cubesandbox-sdk/SOURCE.md`。
+
+完整工程命令、包职责和配置安全规则见 [`docs/development.md`](docs/development.md)，工程基线决策见 [`docs/decisions/0001-typescript-engineering-baseline.md`](docs/decisions/0001-typescript-engineering-baseline.md)。

@@ -8,6 +8,7 @@ import {
   expireWorkspaceLease,
   isoTimestamp,
   membershipId,
+  prepareWorkspaceRevision,
   releaseWorkspaceLease,
   renewWorkspaceLease,
   runId,
@@ -39,10 +40,10 @@ import type {
   ExecutionScope,
   FenceInspectionResult,
   HeartbeatTask,
-  RuntimeEventV1,
+  PersistedRuntimeEventV1,
+  PersistedRuntimeOutboxV1,
   RuntimeMutation,
   RuntimeMutationResult,
-  RuntimeOutboxV1,
   SandboxAcquireResult,
   SandboxSessionRef,
   SandboxSessionRegistryPort,
@@ -54,6 +55,7 @@ import type {
 } from "../ports.js";
 
 interface FakeRecord {
+  readonly scope: ExecutionScope;
   run: Run;
   workspace: Workspace;
   readonly input: string;
@@ -61,17 +63,15 @@ interface FakeRecord {
   rolloutProjection: ControlledRolloutProjection;
   attempt: ExecutionAttemptSnapshot | undefined;
   fence: ExecutionFence | undefined;
-  readonly events: RuntimeEventV1[];
-  readonly outbox: RuntimeOutboxV1[];
+  readonly events: PersistedRuntimeEventV1[];
+  readonly outbox: PersistedRuntimeOutboxV1[];
   readonly mutations: Map<string, AppliedFakeMutation>;
 }
 
-type AppliedFakeMutation = {
-  readonly outcome: "applied" | "already_applied";
-  readonly attemptVersion: number;
-  readonly nextEventSequence: number;
-  readonly databaseNow: IsoTimestamp;
-};
+type AppliedFakeMutation = Extract<
+  RuntimeMutationResult,
+  { outcome: "applied" | "already_applied" }
+>;
 
 const attemptTransitions: Readonly<
   Record<ExecutionAttemptStatus, readonly ExecutionAttemptStatus[]>
@@ -94,7 +94,11 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   responseUnknownKeyIncludes: string | undefined;
   unavailableNextMutation = false;
   forceInspectUnavailable = false;
+  rejectInspectNext = false;
   forceFenceLost = false;
+  rejectNextPermit = false;
+  readonly permits: Array<{ readonly effect: "model_start" | "tool_execution" }> = [];
+  readonly revisionCreatedAt: IsoTimestamp[] = [];
   afterMutation?: (command: RuntimeMutation) => void;
   private databaseMillis = Date.parse("2026-07-26T00:00:00.000Z");
   private claimEpoch = 0;
@@ -103,6 +107,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   addSeed(seed: FakeSeed = fakeSeed()): ExecutionScope {
     const scope = scopeFrom(seed.run, seed.workspace);
     this.records.set(scopeKey(scope), {
+      scope,
       run: seed.run,
       workspace: seed.workspace,
       input: seed.input,
@@ -152,10 +157,13 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       version: 0,
       nextEventSequence: record.events.length,
       modelExecutionStarted: false,
+      ...(record.workspace.currentRevisionId === undefined
+        ? {}
+        : { currentRevisionId: record.workspace.currentRevisionId }),
     };
     const epoch = ++this.claimEpoch;
     const fence: ExecutionFence = {
-      scope: input.scope,
+      scope: record.scope,
       runClaim: { token: `${input.workerId}-${epoch}`, epoch, expiresAt },
       workspaceLease: { rootRunId: input.scope.rootRunId, epoch: leaseEpoch, expiresAt },
     };
@@ -180,6 +188,10 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     readonly fence: ExecutionFence;
     readonly leaseDurationMs: number;
   }): Promise<FenceInspectionResult> {
+    if (this.rejectInspectNext) {
+      this.rejectInspectNext = false;
+      throw new Error("模拟 heartbeat DB Promise reject");
+    }
     if (this.forceInspectUnavailable) return { outcome: "unavailable" };
     const record = this.find(input.fence.scope);
     if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
@@ -210,6 +222,35 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     };
   }
 
+  async issueExternalEffectPermit(
+    input: Parameters<ExecutionPersistencePort["issueExternalEffectPermit"]>[0],
+  ): ReturnType<ExecutionPersistencePort["issueExternalEffectPermit"]> {
+    const record = this.find(input.fence.scope);
+    if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
+    if (this.rejectNextPermit) {
+      this.rejectNextPermit = false;
+      return { outcome: "fence_lost" };
+    }
+    const now = this.databaseNow();
+    if (!record?.attempt || !this.validFence(record, input.fence) || expired(input.fence, now)) {
+      return { outcome: "fence_lost" };
+    }
+    if (record.attempt.version !== input.expectedAttemptVersion) return { outcome: "conflict" };
+    const permit = {
+      permitId: `${record.attempt.attemptId}/permit/${this.permits.length + 1}`,
+      scope: record.scope,
+      runClaimToken: input.fence.runClaim.token,
+      runClaimEpoch: input.fence.runClaim.epoch,
+      workspaceRootRunId: input.fence.workspaceLease.rootRunId,
+      workspaceLeaseEpoch: input.fence.workspaceLease.epoch,
+      attemptVersion: input.expectedAttemptVersion,
+      effect: input.effect,
+      expiresAt: this.after(input.permitDurationMs),
+    } as const;
+    this.permits.push({ effect: input.effect });
+    return { outcome: "authorized", permit };
+  }
+
   async mutate(command: RuntimeMutation): Promise<RuntimeMutationResult> {
     if (this.unavailableNextMutation) {
       this.unavailableNextMutation = false;
@@ -235,33 +276,54 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     for (const [index, event] of command.events.entries()) {
       if (event.sequence !== attempt.nextEventSequence + index) return { outcome: "conflict" };
     }
-    if (command.workspaceRevision) {
-      const revision = command.workspaceRevision;
+    if (command.workspaceChange) {
+      const revision = command.workspaceChange;
       if (
-        revision.workspace.id !== command.fence.scope.workspaceId ||
-        revision.revision.tenantId !== command.fence.scope.tenantId ||
-        revision.revision.threadId !== command.fence.scope.threadId ||
-        revision.revision.createdByRunId !== command.fence.scope.rootRunId ||
-        revision.expectedLeaseEpoch !== command.fence.workspaceLease.epoch ||
-        revision.expectedCurrentRevisionNumber !== record.workspace.currentRevisionNumber ||
-        revision.revision.parentRevisionId !== command.fence.scope.baseRevisionId
+        revision.workspaceId !== command.fence.scope.workspaceId ||
+        revision.tenantId !== command.fence.scope.tenantId ||
+        revision.threadId !== command.fence.scope.threadId ||
+        revision.rootRunId !== command.fence.scope.rootRunId ||
+        revision.parentRevisionId !== attempt.currentRevisionId ||
+        record.workspace.currentRevisionId !== attempt.currentRevisionId
       ) {
         return { outcome: "conflict" };
       }
     }
 
-    record.events.push(...command.events);
+    for (const item of command.outbox) {
+      if (item.kind !== "sandbox_cleanup") continue;
+      const existing = record.outbox.find(
+        (candidate) =>
+          candidate.kind === "sandbox_cleanup" && candidate.idempotencyKey === item.idempotencyKey,
+      );
+      if (!cleanupTransitionAllowed(existing?.state, item.state)) return { outcome: "conflict" };
+    }
+
+    record.events.push(...command.events.map((event) => ({ ...event, occurredAt: now })));
     for (const item of command.outbox) {
       const index = record.outbox.findIndex(
         (existing) => existing.idempotencyKey === item.idempotencyKey,
       );
-      if (index < 0) record.outbox.push(item);
-      else record.outbox[index] = item;
+      const persisted = { ...item, occurredAt: now } as PersistedRuntimeOutboxV1;
+      if (index < 0) record.outbox.push(persisted);
+      else record.outbox[index] = persisted;
     }
-    if (command.workspaceRevision) record.workspace = command.workspaceRevision.workspace;
+    if (command.workspaceChange) {
+      const commit = prepareWorkspaceRevision({
+        workspace: record.workspace,
+        rootRun: record.run,
+        leaseEpoch: command.fence.workspaceLease.epoch,
+        revisionId: command.workspaceChange.revisionId,
+        objectKey: command.workspaceChange.objectKey,
+        digest: command.workspaceChange.digest,
+        now,
+      });
+      record.workspace = commit.workspace;
+      this.revisionCreatedAt.push(commit.revision.createdAt);
+    }
     if (command.nextRunStatus) record.run = transitionRun(record.run, command.nextRunStatus, now);
     if (command.rolloutProjection) record.rolloutProjection = command.rolloutProjection;
-    record.attempt = {
+    const nextAttempt: ExecutionAttemptSnapshot = {
       ...attempt,
       status: command.nextAttemptStatus ?? attempt.status,
       stage: command.nextStage ?? attempt.stage,
@@ -269,7 +331,11 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       nextEventSequence: attempt.nextEventSequence + command.events.length,
       modelExecutionStarted:
         attempt.modelExecutionStarted || command.nextStage === "model_execution_started",
+      ...(record.workspace.currentRevisionId === undefined
+        ? {}
+        : { currentRevisionId: record.workspace.currentRevisionId }),
     };
+    record.attempt = nextAttempt;
     if (command.releaseFences) {
       record.workspace = releaseWorkspaceLease({
         workspace: record.workspace,
@@ -281,20 +347,15 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     }
     const result: AppliedFakeMutation = {
       outcome: "applied",
-      attemptVersion: record.attempt.version,
-      nextEventSequence: record.attempt.nextEventSequence,
+      attemptVersion: nextAttempt.version,
+      nextEventSequence: nextAttempt.nextEventSequence,
       databaseNow: now,
+      scope: record.scope,
+      attempt: nextAttempt,
+      run: record.run,
+      workspace: record.workspace,
     };
     record.mutations.set(command.idempotencyKey, result);
-    if (command.workspaceRevision) {
-      const previousKey = scopeKey(command.fence.scope);
-      const nextScope: ExecutionScope = {
-        ...command.fence.scope,
-        baseRevisionId: command.workspaceRevision.revision.id,
-      };
-      this.records.delete(previousKey);
-      this.records.set(scopeKey(nextScope), record);
-    }
     this.afterMutation?.(command);
     if (
       this.responseUnknownNextMutation ||
@@ -312,15 +373,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     readonly scope: ExecutionScope;
     readonly idempotencyKey: string;
   }): Promise<RuntimeMutationResult | { readonly outcome: "not_found" }> {
-    const exact = this.records.get(scopeKey(input.scope));
-    const advanced = [...this.records.values()].find(
-      (record) =>
-        record.run.id === input.scope.runId &&
-        record.run.tenantId === input.scope.tenantId &&
-        record.run.threadId === input.scope.threadId &&
-        record.workspace.id === input.scope.workspaceId,
-    );
-    const record = exact ?? advanced;
+    const record = this.records.get(scopeKey(input.scope));
     if (!record) {
       return [...this.records.values()].some((candidate) => candidate.run.id === input.scope.runId)
         ? { outcome: "scope_mismatch" }
@@ -376,7 +429,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
 
   scopeForRun(id: string): ExecutionScope {
     for (const record of this.records.values()) {
-      if (record.run.id === id) return scopeFrom(record.run, record.workspace);
+      if (record.run.id === id) return record.scope;
     }
     throw new Error("Fake Run 不存在");
   }
@@ -445,7 +498,9 @@ export class FakeRevisionVerifier implements WorkspaceRevisionVerifierPort {
   nextRevisionId: WorkspaceRevisionId | undefined;
   beforeReturn?: () => void | Promise<void>;
 
-  async verify(): Promise<WorkspaceRevisionCandidate | undefined> {
+  async verify(
+    input: Parameters<WorkspaceRevisionVerifierPort["verify"]>[0],
+  ): Promise<WorkspaceRevisionCandidate | undefined> {
     this.verifyCount += 1;
     await this.beforeReturn?.();
     const revisionId = this.nextRevisionId;
@@ -453,6 +508,13 @@ export class FakeRevisionVerifier implements WorkspaceRevisionVerifierPort {
     return revisionId === undefined
       ? undefined
       : {
+          tenantId: input.scope.tenantId,
+          threadId: input.scope.threadId,
+          workspaceId: input.scope.workspaceId,
+          rootRunId: input.scope.rootRunId,
+          ...(input.expectedCurrentRevisionId === undefined
+            ? {}
+            : { parentRevisionId: input.expectedCurrentRevisionId }),
           revisionId,
           objectKey: `workspace/${revisionId}.tar`,
           digest: sha256Digest("a".repeat(64)),
@@ -508,8 +570,11 @@ export class FakeSandboxRegistry implements SandboxSessionRegistryPort {
 
 export class ScriptedAgentSession implements WorkerAgentSessionPort {
   readonly prompts: string[] = [];
+  readonly modelPermits: string[] = [];
   abortCount = 0;
+  abortCompleted = false;
   disposeCount = 0;
+  beforeAbortReturn?: () => void | Promise<void>;
   private readonly listeners = new Set<(event: RuntimeAgentEvent) => void>();
 
   constructor(
@@ -517,14 +582,20 @@ export class ScriptedAgentSession implements WorkerAgentSessionPort {
     private readonly outcome: AgentTurnOutcome = { kind: "completed" },
   ) {}
 
-  async runPrompt(text: string): Promise<AgentTurnOutcome> {
+  async runPrompt(
+    text: string,
+    permit: Parameters<WorkerAgentSessionPort["runPrompt"]>[1],
+  ): Promise<AgentTurnOutcome> {
     this.prompts.push(text);
+    this.modelPermits.push(permit.permitId);
     for (const event of this.events) for (const listener of this.listeners) listener(event);
     return this.outcome;
   }
 
   async abort(): Promise<void> {
     this.abortCount += 1;
+    await this.beforeAbortReturn?.();
+    this.abortCompleted = true;
   }
 
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void {
@@ -563,6 +634,7 @@ export class BlockingAgentSession implements WorkerAgentSessionPort {
 export class FakeSessionFactory implements AgentSessionFactoryPort {
   createCount = 0;
   readonly projections: ControlledRolloutProjection[] = [];
+  readonly toolAuthorizers: Array<() => Promise<unknown>> = [];
 
   constructor(private readonly queue: WorkerAgentSessionPort[]) {}
 
@@ -573,6 +645,7 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
     if (!session) throw new Error("Fake Session 不存在");
     this.createCount += 1;
     this.projections.push(input.rolloutProjection);
+    this.toolAuthorizers.push(input.authorizeToolEffect);
     return session;
   }
 }
@@ -713,4 +786,15 @@ function expired(fence: ExecutionFence, now: IsoTimestamp): boolean {
     Date.parse(fence.runClaim.expiresAt) <= current ||
     Date.parse(fence.workspaceLease.expiresAt) <= current
   );
+}
+
+function cleanupTransitionAllowed(
+  previous: "pending" | "started" | "completed" | "unknown" | undefined,
+  next: "pending" | "started" | "completed" | "unknown",
+): boolean {
+  if (previous === undefined) return next === "pending" || next === "unknown";
+  if (previous === "pending") return next === "pending" || next === "started";
+  if (previous === "started")
+    return next === "started" || next === "completed" || next === "unknown";
+  return previous === next;
 }

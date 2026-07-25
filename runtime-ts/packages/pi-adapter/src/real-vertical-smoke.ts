@@ -53,7 +53,12 @@ try {
   });
   modelRuntime.registerNativeProvider(faux.provider);
   await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-  controller = await createSafePiSession({ model: faux.getModel(), modelRuntime, sandbox });
+  controller = await createSafePiSession({
+    model: faux.getModel(),
+    modelRuntime,
+    sandbox,
+    authorizeToolEffect: async () => undefined,
+  });
 
   console.log("[3/6] Faux Provider 发起 Pi Tool Call");
   const events: string[] = [];

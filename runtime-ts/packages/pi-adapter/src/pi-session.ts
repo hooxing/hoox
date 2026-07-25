@@ -84,6 +84,8 @@ export interface CreateSafePiSessionOptions {
   sandbox: SandboxHandle;
   systemPrompt?: string;
   rolloutProjection?: ControlledRolloutProjection;
+  /** 生产 Tool Router 在每次 Sandbox 工具执行前回到 DB 重验双栅栏。 */
+  authorizeToolEffect: () => Promise<unknown>;
 }
 
 /**
@@ -128,7 +130,9 @@ export async function createSafePiSession(
   );
   await resourceLoader.reload();
 
-  const customTools = createSandboxTools(options.sandbox);
+  const customTools = createSandboxTools(options.sandbox, {
+    authorizeToolEffect: options.authorizeToolEffect,
+  });
   const sessionManager = SessionManager.inMemory(LOGICAL_WORKSPACE);
   const projectedContext = formatRolloutProjection(options.rolloutProjection);
   if (projectedContext !== undefined) {
@@ -178,9 +182,12 @@ function formatRolloutProjection(
     throw new Error("RolloutProjection 版本或 checkpointId 无效");
   }
   const lines = projection.turns.map((turn) => {
+    if (turn.role !== "user" && turn.role !== "assistant") {
+      throw new Error("RolloutProjection role 无效");
+    }
     const text = turn.text.trim();
     if (!text || text.length > 16_000) throw new Error("RolloutProjection 文本长度无效");
-    if (/(?:[A-Za-z]:[\\/]|\/(?:home|Users)\/)/u.test(text)) {
+    if (/(?:[A-Za-z]:[\\/]|\/(?:home|Users|var\/lib|opt|srv)\/)/u.test(text)) {
       throw new Error("RolloutProjection 不能包含宿主机路径");
     }
     return `${turn.role === "user" ? "用户" : "助手"}：${text}`;

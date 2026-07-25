@@ -52,7 +52,23 @@ importers:
         specifier: 4.1.10
         version: 4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.10.0)(vite@8.1.5(@types/node@24.10.0)(esbuild@0.27.7)(jiti@2.7.0)(tsx@4.20.6)(yaml@2.9.0))
 
-  runtime-ts/apps/agent-worker: {}
+  runtime-ts/apps/agent-worker:
+    dependencies:
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@cube-runtime/pi-adapter':
+        specifier: workspace:*
+        version: link:../../packages/pi-adapter
+      '@cube-runtime/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
+      '@earendil-works/pi-ai':
+        specifier: 0.82.1
+        version: 0.82.1(ws@8.21.1)(zod@4.4.3)
+      '@earendil-works/pi-coding-agent':
+        specifier: 0.82.1
+        version: 0.82.1(ws@8.21.1)(zod@4.4.3)
 
   runtime-ts/apps/api: {}
 

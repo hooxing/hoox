@@ -16,6 +16,7 @@
 | [ADR-0008](0008-cubesandbox-sdk-supply-chain.md) | CubeSandbox Node SDK vendoring 与供应链 | 已接受 | 2026-07-26 |
 | [ADR-0009](0009-postgresql-core-schema-and-concurrency.md) | PostgreSQL 核心 Schema、迁移与并发写入 | 已接受 | 2026-07-26 |
 | [ADR-0010](0010-object-storage-sdk-selection.md) | 对象存储客户端 SDK 选择 | 已接受 | 2026-07-26 |
+| [ADR-0011](0011-run-worker-reliability-boundary.md) | Run Worker 状态机、栅栏租约与恢复边界 | 已接受 | 2026-07-26 |
 | [ADR-0012](0012-postgresql-blob-lifecycle.md) | PostgreSQL Stable Blob 生命周期与副作用证明 | 已接受 | 2026-07-26 |
 
 ## 何时必须记录

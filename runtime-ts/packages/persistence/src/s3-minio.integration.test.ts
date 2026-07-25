@@ -1,15 +1,43 @@
 import { randomUUID } from "node:crypto";
+import { DeleteObjectsCommand, ListObjectsV2Command, S3Client } from "@aws-sdk/client-s3";
 import { describe, expect, it } from "vitest";
-import { createS3BlobStore, type StableBlobRef, type StagedBlobRef } from "./index.js";
+import {
+  createS3BlobStore,
+  createS3StableBlobGarbageCollector,
+  sha256Hex,
+  type StableBlobRef,
+  type StagedBlobRef,
+} from "./index.js";
 
 const integration = process.env.RUN_MINIO_INTEGRATION === "true" ? describe : describe.skip;
 
 integration("MinIO Blob Store 集成", () => {
-  it("完成私有对象 staging、提升、读取、预签名与清理", async () => {
+  it("完成私有对象 staging、提升、读取、预签名与无残留清理", async () => {
     const config = requiredConfig();
     const unique = randomUUID();
+    const prefix = `integration-test/${unique}`;
     const scope = { tenantId: `integration_${unique.replaceAll("-", "_")}` };
-    const store = createS3BlobStore({
+    const body = new TextEncoder().encode(`minio-${unique}`);
+    const descriptor = {
+      sha256: sha256Hex(body),
+      size: body.byteLength,
+      mediaType: "text/plain",
+    };
+    // 引用在上传前即可确定，因此即使 PUT 响应未知，finally 仍有能力按精确引用和唯一前缀清理。
+    const staged: StagedBlobRef = {
+      kind: "staging",
+      tenantId: scope.tenantId,
+      purpose: "artifact",
+      uploadId: `upload-${unique}`,
+      ...descriptor,
+    };
+    const stable: StableBlobRef = {
+      kind: "stable",
+      tenantId: scope.tenantId,
+      purpose: "artifact",
+      ...descriptor,
+    };
+    const common = {
       bucket: config.bucket,
       endpoint: config.endpoint,
       publicEndpoint: config.publicEndpoint,
@@ -17,45 +45,87 @@ integration("MinIO Blob Store 集成", () => {
       accessKeyId: config.accessKeyId,
       secretAccessKey: config.secretAccessKey,
       forcePathStyle: true,
-      prefix: `integration-test/${unique}`,
+      prefix,
       maxPresignTtlSeconds: 60,
+      maxBlobSizeBytes: 1_024 * 1_024,
+    } as const;
+    const store = createS3BlobStore(common);
+    const gc = createS3StableBlobGarbageCollector(common, {
+      async proveUnreachable({ scope: proofScope, blob }) {
+        return {
+          proofId: `integration-proof-${unique}`,
+          tenantId: proofScope.tenantId,
+          purpose: blob.purpose,
+          sha256: blob.sha256,
+          checkedAt: new Date().toISOString(),
+        };
+      },
     });
-    let staged: StagedBlobRef | undefined;
-    let stable: StableBlobRef | undefined;
+    const cleanupClient = new S3Client({
+      endpoint: config.endpoint,
+      region: config.region,
+      forcePathStyle: true,
+      credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+    });
 
     try {
-      const body = new TextEncoder().encode(`minio-${unique}`);
-      staged = await store.putStaging({
-        scope,
-        purpose: "artifact",
-        uploadId: `upload-${unique}`,
-        body,
-        mediaType: "text/plain",
-      });
+      expect(
+        await store.putStaging({
+          scope,
+          purpose: staged.purpose,
+          uploadId: staged.uploadId,
+          body,
+          mediaType: staged.mediaType,
+        }),
+      ).toEqual(staged);
       expect((await store.head(scope, staged))?.blob).toEqual(staged);
-      expect(await store.get(scope, staged)).toEqual(body);
+      expect(await store.getBytes(scope, staged)).toEqual(body);
 
-      stable = await store.promote(scope, staged);
-      expect(await store.get(scope, stable)).toEqual(body);
+      expect(await store.promote(scope, staged)).toEqual(stable);
+      expect(await store.getBytes(scope, stable)).toEqual(body);
       const downloadUrl = await store.presignDownload({
         scope,
         blob: stable,
         ttlSeconds: 30,
-        downloadName: "integration.txt",
+        downloadName: "集成'()*.txt",
       });
       const response = await fetch(downloadUrl);
       expect(response.ok).toBe(true);
       expect(new Uint8Array(await response.arrayBuffer())).toEqual(body);
     } finally {
-      if (stable !== undefined) {
-        await store.delete(scope, stable);
+      // 两条清理互不依赖；即使其中一个结果未知，另一条仍会执行。
+      const cleanupResults = await Promise.allSettled([
+        store.deleteStaging(scope, staged),
+        gc.collectIfUnreachable(scope, stable),
+      ]);
+
+      // 唯一前缀是集成测试专属兜底，不属于生产 GC API。它处理未知写/删结果留下的对象。
+      const leakedKeys = await listKeys(cleanupClient, config.bucket, prefix);
+      if (leakedKeys.length > 0) {
+        await cleanupClient.send(
+          new DeleteObjectsCommand({
+            Bucket: config.bucket,
+            Delete: { Objects: leakedKeys.map((key) => ({ Key: key })), Quiet: true },
+          }),
+        );
       }
-      if (staged !== undefined) {
-        await store.delete(scope, staged);
-      }
+
+      expect(await listKeys(cleanupClient, config.bucket, prefix)).toEqual([]);
+      expect(await store.head(scope, staged)).toBeUndefined();
+      expect(await store.head(scope, stable)).toBeUndefined();
+      expect(cleanupResults.every((result) => result.status === "fulfilled")).toBe(true);
+      cleanupClient.destroy();
     }
   });
 });
+
+async function listKeys(client: S3Client, bucket: string, prefix: string): Promise<string[]> {
+  const result = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix }));
+  if (result.IsTruncated) {
+    throw new Error("集成测试唯一前缀出现超出单页的异常对象数量");
+  }
+  return (result.Contents ?? []).flatMap((item) => (item.Key === undefined ? [] : [item.Key]));
+}
 
 function requiredConfig(): {
   endpoint: string;

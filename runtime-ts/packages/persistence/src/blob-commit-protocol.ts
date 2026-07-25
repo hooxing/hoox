@@ -3,6 +3,7 @@ import {
   type StagedBlobRef,
   type TenantBlobScope,
   assertBlobRef,
+  assertTenantScope,
 } from "./blob-store.js";
 
 /**
@@ -31,6 +32,7 @@ export interface BlobCommitSnapshot {
   readonly staged?: StagedBlobRef;
   readonly stable?: StableBlobRef;
   readonly referenceId?: string;
+  readonly cleanupTarget?: "staging";
 }
 
 export type BlobCommitEvent =
@@ -52,8 +54,8 @@ export type BlobCommitEvent =
   | { readonly type: "stable_mark_failed" }
   | { readonly type: "stable_mark_result_unknown" }
   | { readonly type: "stable_mark_resolved"; readonly marked: boolean }
-  | { readonly type: "cleanup_requested" }
-  | { readonly type: "cleanup_succeeded" };
+  | { readonly type: "cleanup_requested"; readonly target: "staging" }
+  | { readonly type: "cleanup_succeeded"; readonly target: "staging" };
 
 export class BlobCommitTransitionError extends Error {
   constructor(message: string) {
@@ -71,6 +73,7 @@ export interface BlobReferenceCommitPort {
   }): Promise<{ readonly referenceId: string }>;
 
   resolveReferenceCommit(
+    scope: TenantBlobScope,
     operationId: string,
   ): Promise<
     { readonly status: "committed"; readonly referenceId: string } | { readonly status: "absent" }
@@ -79,17 +82,20 @@ export interface BlobReferenceCommitPort {
   /** 只有 stable 对象经 HEAD 校验后才能把业务引用切换到 stable。 */
   markReferenceStable(input: {
     readonly operationId: string;
+    readonly scope: TenantBlobScope;
     readonly referenceId: string;
     readonly stable: StableBlobRef;
   }): Promise<void>;
 
-  resolveStableMark(operationId: string): Promise<"marked" | "not_marked">;
+  resolveStableMark(scope: TenantBlobScope, operationId: string): Promise<"marked" | "not_marked">;
 }
 
 export interface BlobCommitStatePort {
-  load(operationId: string): Promise<BlobCommitSnapshot | undefined>;
+  /** 数据库必须以 (tenant_id, operation_id) 建立联合唯一约束和查询条件。 */
+  load(scope: TenantBlobScope, operationId: string): Promise<BlobCommitSnapshot | undefined>;
   create(snapshot: BlobCommitSnapshot): Promise<void>;
   compareAndSet(input: {
+    readonly scope: TenantBlobScope;
     readonly operationId: string;
     readonly expectedVersion: number;
     readonly next: BlobCommitSnapshot;
@@ -100,6 +106,8 @@ export function transitionBlobCommit(
   current: BlobCommitSnapshot,
   event: BlobCommitEvent,
 ): BlobCommitSnapshot {
+  assertBlobOperationId(current.operationId);
+  assertTenantScope(current.scope);
   const next = applyTransition(current, event);
   return { ...next, version: current.version + 1 };
 }
@@ -123,8 +131,13 @@ function applyTransition(
           staged: requireStaged(current),
         };
       }
-      if (event.type === "cleanup_requested") {
-        return { ...base(current), status: "cleanup_pending", staged: requireStaged(current) };
+      if (event.type === "cleanup_requested" && event.target === "staging") {
+        return {
+          ...base(current),
+          status: "cleanup_pending",
+          staged: requireStaged(current),
+          cleanupTarget: "staging",
+        };
       }
       break;
     case "reference_commit_pending":
@@ -144,7 +157,12 @@ function applyTransition(
         };
       }
       if (event.type === "reference_commit_failed") {
-        return { ...base(current), status: "cleanup_pending", staged: requireStaged(current) };
+        return {
+          ...base(current),
+          status: "cleanup_pending",
+          staged: requireStaged(current),
+          cleanupTarget: "staging",
+        };
       }
       break;
     case "reference_commit_unknown":
@@ -158,7 +176,12 @@ function applyTransition(
           };
         }
         if (!event.committed) {
-          return { ...base(current), status: "cleanup_pending", staged: requireStaged(current) };
+          return {
+            ...base(current),
+            status: "cleanup_pending",
+            staged: requireStaged(current),
+            cleanupTarget: "staging",
+          };
         }
       }
       break;
@@ -229,12 +252,16 @@ function applyTransition(
       }
       break;
     case "stable":
-      if (event.type === "cleanup_requested") {
-        return copyStable(current, "cleanup_pending");
+      if (event.type === "cleanup_requested" && event.target === "staging") {
+        return { ...copyStable(current, "cleanup_pending"), cleanupTarget: "staging" };
       }
       break;
     case "cleanup_pending":
-      if (event.type === "cleanup_succeeded") {
+      if (
+        event.type === "cleanup_succeeded" &&
+        event.target === "staging" &&
+        current.cleanupTarget === "staging"
+      ) {
         return current.stable === undefined
           ? { ...base(current), status: "abandoned" }
           : copyStable(current, "completed");
@@ -317,5 +344,11 @@ function assertStableMatchesStaged(current: BlobCommitSnapshot, stable: StableBl
     stable.mediaType !== staged.mediaType
   ) {
     throw new BlobCommitTransitionError("stable 引用与 staging 内容描述不一致");
+  }
+}
+
+export function assertBlobOperationId(operationId: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(operationId)) {
+    throw new BlobCommitTransitionError("operationId 格式无效");
   }
 }

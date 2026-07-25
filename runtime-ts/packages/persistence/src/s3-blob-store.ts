@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CopyObjectCommand,
   DeleteObjectCommand,
@@ -17,6 +18,9 @@ import {
   type PresignBlobDownloadInput,
   type PutStagingBlobInput,
   type StableBlobRef,
+  type StableBlobGcPort,
+  type StableBlobGcProof,
+  type StableBlobReachabilityPort,
   type StagedBlobRef,
   type TenantBlobScope,
   assertBlobPurpose,
@@ -25,13 +29,13 @@ import {
   assertTenantScope,
   assertUploadId,
   descriptorFor,
-  sha256Hex,
 } from "./blob-store.js";
 
 export interface S3BlobStoreConfig {
   readonly bucket: string;
   readonly prefix?: string;
   readonly maxPresignTtlSeconds?: number;
+  readonly maxBlobSizeBytes: number;
 }
 
 export interface CreateS3BlobStoreConfig extends S3BlobStoreConfig {
@@ -56,6 +60,11 @@ export interface S3PutObjectInput {
   readonly descriptor: BlobDescriptor;
 }
 
+export interface S3GetObjectResult {
+  readonly body: AsyncIterable<Uint8Array>;
+  readonly contentLength: number;
+}
+
 export interface S3CopyObjectInput {
   readonly sourceKey: string;
   readonly destinationKey: string;
@@ -74,7 +83,7 @@ export interface S3PresignInput {
 export interface S3ObjectClient {
   put(input: S3PutObjectInput): Promise<void>;
   head(key: string): Promise<S3ObjectMetadata | undefined>;
-  get(key: string): Promise<Uint8Array | undefined>;
+  get(key: string): Promise<S3GetObjectResult | undefined>;
   copy(input: S3CopyObjectInput): Promise<void>;
   delete(key: string): Promise<void>;
   presignGet(input: S3PresignInput): Promise<string>;
@@ -83,6 +92,7 @@ export interface S3ObjectClient {
 export class S3BlobStore implements BlobStore {
   private readonly prefix: string;
   private readonly maxPresignTtlSeconds: number;
+  private readonly maxBlobSizeBytes: number;
 
   constructor(
     private readonly client: S3ObjectClient,
@@ -91,12 +101,14 @@ export class S3BlobStore implements BlobStore {
     assertBucket(config.bucket);
     this.prefix = normalizePrefix(config.prefix ?? "agent-runtime");
     this.maxPresignTtlSeconds = assertMaxPresignTtl(config.maxPresignTtlSeconds ?? 600);
+    this.maxBlobSizeBytes = assertMaxBlobSize(config.maxBlobSizeBytes);
   }
 
   async putStaging(input: PutStagingBlobInput): Promise<StagedBlobRef> {
     assertTenantScope(input.scope);
     assertBlobPurpose(input.purpose);
     assertUploadId(input.uploadId);
+    this.assertWithinSizeLimit(input.body.byteLength);
     const descriptor = descriptorFor(input.body, input.mediaType);
     assertExpectedDescriptor(input, descriptor);
     const blob: StagedBlobRef = {
@@ -109,6 +121,7 @@ export class S3BlobStore implements BlobStore {
     const key = this.keyFor(blob);
     const existing = await this.client.head(key);
     if (existing !== undefined) {
+      this.assertWithinSizeLimit(existing.size);
       assertStoredDescriptor(existing, descriptor, "BLOB_IDEMPOTENCY_CONFLICT");
       return blob;
     }
@@ -116,7 +129,7 @@ export class S3BlobStore implements BlobStore {
     try {
       await this.client.put({ key, body: input.body, descriptor });
     } catch (error) {
-      if (await this.writeActuallySucceeded(key, descriptor)) {
+      if (await this.resolveWriteResult(key, descriptor, error)) {
         return blob;
       }
       throw normalizeWriteError(error, "staging 对象上传失败，结果可能未知");
@@ -128,11 +141,13 @@ export class S3BlobStore implements BlobStore {
 
   async promote(scope: TenantBlobScope, staged: StagedBlobRef): Promise<StableBlobRef> {
     assertBlobRef(scope, staged);
+    this.assertWithinSizeLimit(staged.size);
     const sourceKey = this.keyFor(staged);
     const stagedHead = await this.client.head(sourceKey);
     if (stagedHead === undefined) {
       throw new BlobStoreError("BLOB_NOT_FOUND", "待提交的 staging 对象不存在");
     }
+    this.assertWithinSizeLimit(stagedHead.size);
     assertStoredDescriptor(stagedHead, staged);
 
     const stable: StableBlobRef = {
@@ -146,6 +161,7 @@ export class S3BlobStore implements BlobStore {
     const destinationKey = this.keyFor(stable);
     const existing = await this.client.head(destinationKey);
     if (existing !== undefined) {
+      this.assertWithinSizeLimit(existing.size);
       assertStoredDescriptor(existing, stable);
       return stable;
     }
@@ -153,7 +169,7 @@ export class S3BlobStore implements BlobStore {
     try {
       await this.client.copy({ sourceKey, destinationKey });
     } catch (error) {
-      if (await this.writeActuallySucceeded(destinationKey, stable)) {
+      if (await this.resolveWriteResult(destinationKey, stable, error)) {
         return stable;
       }
       throw normalizeWriteError(error, "稳定对象复制失败，结果可能未知");
@@ -169,34 +185,62 @@ export class S3BlobStore implements BlobStore {
     if (metadata === undefined) {
       return undefined;
     }
+    this.assertWithinSizeLimit(metadata.size);
     assertStoredDescriptor(metadata, blob);
     return metadata.etag === undefined ? { blob } : { blob, etag: metadata.etag };
   }
 
-  async get(scope: TenantBlobScope, blob: BlobRef): Promise<Uint8Array> {
+  async *read(scope: TenantBlobScope, blob: BlobRef): AsyncIterable<Uint8Array> {
     assertBlobRef(scope, blob);
-    const body = await this.client.get(this.keyFor(blob));
-    if (body === undefined) {
+    this.assertWithinSizeLimit(blob.size);
+    const response = await this.client.get(this.keyFor(blob));
+    if (response === undefined) {
       throw new BlobStoreError("BLOB_NOT_FOUND", "对象不存在");
     }
-    if (body.byteLength !== blob.size || sha256Hex(body) !== blob.sha256) {
+    this.assertWithinSizeLimit(response.contentLength);
+    if (response.contentLength !== blob.size) {
+      throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "GET ContentLength 与固定大小不一致");
+    }
+
+    const hash = createHash("sha256");
+    let received = 0;
+    for await (const chunk of response.body) {
+      received += chunk.byteLength;
+      this.assertWithinSizeLimit(received);
+      if (received > blob.size) {
+        throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "读取内容超过固定大小");
+      }
+      hash.update(chunk);
+      yield chunk;
+    }
+    if (received !== blob.size || hash.digest("hex") !== blob.sha256) {
       throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "对象内容与固定哈希或大小不一致");
     }
-    return body;
   }
 
-  async delete(scope: TenantBlobScope, blob: BlobRef): Promise<void> {
-    assertBlobRef(scope, blob);
-    const key = this.keyFor(blob);
-    try {
-      await this.client.delete(key);
-    } catch (error) {
-      // 删除响应丢失时先 HEAD；不存在即视为幂等成功，存在则必须保留“结果未知”。
-      if ((await this.client.head(key)) === undefined) {
-        return;
-      }
-      throw normalizeWriteError(error, "对象删除失败，结果可能未知");
+  async getBytes(scope: TenantBlobScope, blob: BlobRef): Promise<Uint8Array> {
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    for await (const chunk of this.read(scope, blob)) {
+      chunks.push(chunk);
+      size += chunk.byteLength;
     }
+    const result = new Uint8Array(size);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return result;
+  }
+
+  async deleteStaging(scope: TenantBlobScope, blob: StagedBlobRef): Promise<void> {
+    assertBlobRef(scope, blob);
+    if (blob.kind !== "staging") {
+      throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "普通 BlobStore 只能删除 staging 对象");
+    }
+    const key = this.keyFor(blob);
+    await deleteAndResolve(this.client, key);
   }
 
   async presignDownload(input: PresignBlobDownloadInput): Promise<string> {
@@ -215,6 +259,7 @@ export class S3BlobStore implements BlobStore {
     if (metadata === undefined) {
       throw new BlobStoreError("BLOB_NOT_FOUND", "待下载对象不存在");
     }
+    this.assertWithinSizeLimit(metadata.size);
     assertStoredDescriptor(metadata, input.blob);
     return this.client.presignGet({
       key,
@@ -224,16 +269,16 @@ export class S3BlobStore implements BlobStore {
   }
 
   private keyFor(blob: BlobRef): string {
-    // 对象键只由已验证的 Tenant、用途和不透明 ID/哈希派生；调用方没有传完整 key 的入口。
-    const suffix =
-      blob.kind === "staging"
-        ? `staging/${blob.purpose}/${blob.uploadId}`
-        : `stable/${blob.purpose}/sha256/${blob.sha256}`;
-    return `${this.prefix}/tenants/${blob.tenantId}/${suffix}`;
+    return keyFor(this.prefix, blob);
   }
 
   private async assertWritten(key: string, descriptor: BlobDescriptor): Promise<void> {
-    const metadata = await this.client.head(key);
+    let metadata: S3ObjectMetadata | undefined;
+    try {
+      metadata = await this.client.head(key);
+    } catch (error) {
+      throw unknownAfterVerificationFailure("写操作返回成功，但 HEAD 校验失败", error);
+    }
     if (metadata === undefined) {
       throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "写操作返回成功但对象不可见", {
         result: "unknown",
@@ -242,24 +287,87 @@ export class S3BlobStore implements BlobStore {
     assertStoredDescriptor(metadata, descriptor);
   }
 
-  private async writeActuallySucceeded(key: string, descriptor: BlobDescriptor): Promise<boolean> {
+  private async resolveWriteResult(
+    key: string,
+    descriptor: BlobDescriptor,
+    originalError: unknown,
+  ): Promise<boolean> {
     try {
       const metadata = await this.client.head(key);
       if (metadata === undefined) {
         return false;
       }
-      assertStoredDescriptor(metadata, descriptor);
+      assertStoredDescriptor(
+        metadata,
+        descriptor,
+        originalError instanceof BlobStoreError && originalError.code === "BLOB_PRECONDITION_FAILED"
+          ? "BLOB_IDEMPOTENCY_CONFLICT"
+          : "BLOB_INTEGRITY_MISMATCH",
+      );
       return true;
-    } catch (error) {
-      if (error instanceof BlobStoreError && error.code === "BLOB_INTEGRITY_MISMATCH") {
-        throw error;
+    } catch (headError) {
+      if (
+        headError instanceof BlobStoreError &&
+        (headError.code === "BLOB_INTEGRITY_MISMATCH" ||
+          headError.code === "BLOB_IDEMPOTENCY_CONFLICT")
+      ) {
+        throw headError;
       }
-      return false;
+      throw unknownAfterVerificationFailure(
+        "写操作失败后无法通过 HEAD 确认结果",
+        new AggregateError([originalError, headError]),
+      );
     }
+  }
+
+  private assertWithinSizeLimit(size: number): void {
+    assertBlobSizeWithin(size, this.maxBlobSizeBytes);
   }
 }
 
 export function createS3BlobStore(config: CreateS3BlobStoreConfig): S3BlobStore {
+  return new S3BlobStore(createAwsObjectClient(config), config);
+}
+
+export function createS3StableBlobGarbageCollector(
+  config: CreateS3BlobStoreConfig,
+  reachability: StableBlobReachabilityPort,
+): StableBlobGcPort {
+  const maxBlobSizeBytes = assertMaxBlobSize(config.maxBlobSizeBytes);
+  const prefix = normalizePrefix(config.prefix ?? "agent-runtime");
+  return new S3StableBlobGarbageCollector(
+    createAwsObjectClient(config),
+    reachability,
+    prefix,
+    maxBlobSizeBytes,
+  );
+}
+
+export class S3StableBlobGarbageCollector implements StableBlobGcPort {
+  constructor(
+    private readonly client: S3ObjectClient,
+    private readonly reachability: StableBlobReachabilityPort,
+    private readonly prefix: string,
+    private readonly maxBlobSizeBytes: number,
+  ) {}
+
+  async collectIfUnreachable(
+    scope: TenantBlobScope,
+    blob: StableBlobRef,
+  ): Promise<"deleted" | "still_referenced"> {
+    assertBlobRef(scope, blob);
+    assertBlobSizeWithin(blob.size, this.maxBlobSizeBytes);
+    const proof = await this.reachability.proveUnreachable({ scope, blob });
+    if (proof === undefined) {
+      return "still_referenced";
+    }
+    assertGcProof(scope, blob, proof);
+    await deleteAndResolve(this.client, keyFor(this.prefix, blob));
+    return "deleted";
+  }
+}
+
+function createAwsObjectClient(config: CreateS3BlobStoreConfig): S3ObjectClient {
   const credentials = credentialsFrom(config);
   const clientConfig: S3ClientConfig = {
     region: config.region,
@@ -273,7 +381,7 @@ export function createS3BlobStore(config: CreateS3BlobStoreConfig): S3BlobStore 
     config.publicEndpoint === undefined
       ? client
       : new S3Client({ ...clientConfig, endpoint: config.publicEndpoint });
-  return new S3BlobStore(new AwsS3ObjectClient(client, presignClient, config.bucket), config);
+  return new AwsS3ObjectClient(client, presignClient, config.bucket);
 }
 
 class AwsS3ObjectClient implements S3ObjectClient {
@@ -294,6 +402,7 @@ class AwsS3ObjectClient implements S3ObjectClient {
           ContentType: input.descriptor.mediaType,
           Metadata: { sha256: input.descriptor.sha256 },
           CacheControl: "private, no-store",
+          IfNoneMatch: "*",
         }),
       );
     } catch (error) {
@@ -331,15 +440,18 @@ class AwsS3ObjectClient implements S3ObjectClient {
     }
   }
 
-  async get(key: string): Promise<Uint8Array | undefined> {
+  async get(key: string): Promise<S3GetObjectResult | undefined> {
     try {
       const result = await this.client.send(
         new GetObjectCommand({ Bucket: this.bucket, Key: key }),
       );
-      if (result.Body === undefined) {
-        throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "对象响应没有内容");
+      if (result.Body === undefined || result.ContentLength === undefined) {
+        throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "对象响应缺少内容或 ContentLength");
       }
-      return result.Body.transformToByteArray();
+      return {
+        body: sdkBodyAsAsyncIterable(result.Body),
+        contentLength: result.ContentLength,
+      };
     } catch (error) {
       if (isNotFound(error)) {
         return undefined;
@@ -405,12 +517,9 @@ function assertStoredDescriptor(
   expected: BlobDescriptor,
   code: "BLOB_INTEGRITY_MISMATCH" | "BLOB_IDEMPOTENCY_CONFLICT" = "BLOB_INTEGRITY_MISMATCH",
 ): void {
-  if (
-    stored.sha256 !== expected.sha256 ||
-    stored.size !== expected.size ||
-    stored.mediaType !== expected.mediaType
-  ) {
-    throw new BlobStoreError(code, "对象键已经存在，但内容描述不一致");
+  // mediaType 属于业务引用展示元数据，不参与内容身份；同一内容可以被不同业务类型引用。
+  if (stored.sha256 !== expected.sha256 || stored.size !== expected.size) {
+    throw new BlobStoreError(code, "对象键已经存在，但内容哈希或大小不一致");
   }
 }
 
@@ -423,6 +532,12 @@ function normalizeWriteError(error: unknown, message: string): BlobStoreError {
 
 function awsOperationError(error: unknown, mutating: boolean): BlobStoreError {
   const statusCode = awsStatusCode(error);
+  if (statusCode === 412) {
+    return new BlobStoreError("BLOB_PRECONDITION_FAILED", "对象条件写入未满足", {
+      result: "known",
+      cause: error,
+    });
+  }
   const result = mutating && statusCode === undefined ? "unknown" : "known";
   return new BlobStoreError(
     result === "unknown" ? "BLOB_RESULT_UNKNOWN" : "BLOB_PROVIDER_ERROR",
@@ -489,10 +604,95 @@ function assertMaxPresignTtl(value: number): number {
   return value;
 }
 
+function assertMaxBlobSize(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_IN_MEMORY_BLOB_SIZE_BYTES) {
+    throw new BlobStoreError(
+      "INVALID_BLOB_ARGUMENT",
+      `小对象上限必须在 1 到 ${MAX_IN_MEMORY_BLOB_SIZE_BYTES} 字节之间`,
+    );
+  }
+  return value;
+}
+
+function assertBlobSizeWithin(size: number, maximum: number): void {
+  if (!Number.isSafeInteger(size) || size < 0 || size > maximum) {
+    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "Blob 大小超过当前小对象上限");
+  }
+}
+
+async function deleteAndResolve(client: S3ObjectClient, key: string): Promise<void> {
+  try {
+    await client.delete(key);
+  } catch (error) {
+    try {
+      // 只有明确 NotFound 才能把删除收敛为成功；HEAD 故障仍表示删除结果未知。
+      if ((await client.head(key)) === undefined) {
+        return;
+      }
+    } catch (headError) {
+      throw unknownAfterVerificationFailure(
+        "删除失败后无法通过 HEAD 确认结果",
+        new AggregateError([error, headError]),
+      );
+    }
+    throw normalizeWriteError(error, "对象删除失败，结果可能未知");
+  }
+}
+
+function keyFor(prefix: string, blob: BlobRef): string {
+  // 对象键只由已验证的 Tenant、用途和不透明 ID/哈希派生；调用方没有传完整 key 的入口。
+  const suffix =
+    blob.kind === "staging"
+      ? `staging/${blob.purpose}/${blob.uploadId}`
+      : `stable/${blob.purpose}/sha256/${blob.sha256}`;
+  return `${prefix}/tenants/${blob.tenantId}/${suffix}`;
+}
+
+function assertGcProof(
+  scope: TenantBlobScope,
+  blob: StableBlobRef,
+  proof: StableBlobGcProof,
+): void {
+  if (
+    proof.proofId.length < 1 ||
+    proof.tenantId !== scope.tenantId ||
+    proof.purpose !== blob.purpose ||
+    proof.sha256 !== blob.sha256 ||
+    Number.isNaN(Date.parse(proof.checkedAt))
+  ) {
+    throw new BlobStoreError("TENANT_SCOPE_MISMATCH", "stable GC 可达性证明与目标对象不一致");
+  }
+}
+
+function sdkBodyAsAsyncIterable(body: unknown): AsyncIterable<Uint8Array> {
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    !(Symbol.asyncIterator in body) ||
+    typeof body[Symbol.asyncIterator] !== "function"
+  ) {
+    throw new BlobStoreError("BLOB_PROVIDER_ERROR", "S3 响应体不支持流式读取");
+  }
+  return body as AsyncIterable<Uint8Array>;
+}
+
+function unknownAfterVerificationFailure(message: string, cause: unknown): BlobStoreError {
+  return new BlobStoreError("BLOB_RESULT_UNKNOWN", message, { result: "unknown", cause });
+}
+
 function encodeKey(key: string): string {
   return key.split("/").map(encodeURIComponent).join("/");
 }
 
 function contentDisposition(downloadName: string): string {
-  return `attachment; filename*=UTF-8''${encodeURIComponent(downloadName)}`;
+  return `attachment; filename*=UTF-8''${encodeRfc5987Value(downloadName)}`;
 }
+
+export function encodeRfc5987Value(value: string): string {
+  return encodeURIComponent(value).replace(
+    /[!'()*]/gu,
+    (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+const MAX_IN_MEMORY_BLOB_SIZE_BYTES = 16 * 1024 * 1024;

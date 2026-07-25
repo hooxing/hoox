@@ -14,11 +14,14 @@ export default defineConfig({
       "@cube-runtime/protocol-mapper": fileURLToPath(
         new URL("./runtime-ts/packages/protocol-mapper/src/index.ts", import.meta.url),
       ),
+      "@cube-runtime/persistence": fileURLToPath(
+        new URL("./runtime-ts/packages/persistence/src/index.ts", import.meta.url),
+      ),
     },
   },
   test: {
     include: ["tests/**/*.test.ts", "runtime-ts/**/*.test.ts"],
-    exclude: ["runtime-ts/vendor/**", "**/dist/**", "**/node_modules/**"],
+    exclude: ["tests/integration/**", "runtime-ts/vendor/**", "**/dist/**", "**/node_modules/**"],
     passWithNoTests: false,
     reporters: ["default"],
   },

@@ -55,12 +55,16 @@ interface MigrationContextSafetyRow {
   readonly runtime_owns_schema: boolean;
   readonly runtime_owns_relation: boolean;
   readonly runtime_can_create_database_object: boolean;
+  readonly runtime_can_create_schema_object: boolean;
+  readonly runtime_can_create_temporary_object: boolean;
   readonly migrator_missing: boolean;
   readonly migrator_is_not_current_user: boolean;
   readonly migrator_has_parent: boolean;
   readonly migrator_dangerous: boolean;
   readonly migrator_owns_database: boolean;
   readonly migrator_can_create_database_object: boolean;
+  readonly migrator_owns_other_schema: boolean;
+  readonly migrator_owns_cross_schema_relation: boolean;
   readonly schema_missing: boolean;
   readonly migrator_is_not_schema_owner: boolean;
   readonly current_schema_mismatch: boolean;
@@ -71,10 +75,10 @@ interface MigrationContextSafetyRow {
  * Runtime 禁止任何上游成员关系，包括 NOINHERIT 但仍可 SET ROLE 的成员关系。
  * Migrator 必须是当前专用 Schema 的直接 owner，且不能借成员关系或数据库权限扩大边界。
  */
-export async function assertMigrationContextSafe(
+async function inspectMigrationContext(
   client: PoolClient,
   context: MigrationSecurityContext,
-): Promise<void> {
+): Promise<MigrationContextSafetyRow | undefined> {
   validateContext(context);
   const result = await client.query<MigrationContextSafetyRow>(
     `WITH runtime AS (
@@ -107,6 +111,12 @@ export async function assertMigrationContextSafe(
        COALESCE(has_database_privilege(
          (SELECT oid FROM runtime), current_database(), 'CREATE'
        ), false) AS runtime_can_create_database_object,
+       COALESCE(has_schema_privilege(
+         (SELECT oid FROM runtime), $3, 'CREATE'
+       ), false) AS runtime_can_create_schema_object,
+       COALESCE(has_database_privilege(
+         (SELECT oid FROM runtime), current_database(), 'TEMP'
+       ), false) AS runtime_can_create_temporary_object,
        NOT EXISTS (SELECT 1 FROM migrator) AS migrator_missing,
        current_user <> $2 AS migrator_is_not_current_user,
        EXISTS (SELECT 1 FROM pg_auth_members WHERE member = (SELECT oid FROM migrator))
@@ -122,6 +132,19 @@ export async function assertMigrationContextSafe(
        COALESCE(has_database_privilege(
          (SELECT oid FROM migrator), current_database(), 'CREATE'
        ), false) AS migrator_can_create_database_object,
+       EXISTS (
+         SELECT 1 FROM pg_namespace
+          WHERE nspowner = (SELECT oid FROM migrator) AND nspname <> $3
+            AND nspname <> 'information_schema' AND nspname !~ '^pg_'
+       ) AS migrator_owns_other_schema,
+       EXISTS (
+         SELECT 1 FROM pg_class relation
+         JOIN pg_namespace schema_state ON schema_state.oid = relation.relnamespace
+          WHERE relation.relowner = (SELECT oid FROM migrator)
+            AND schema_state.nspname <> $3
+            AND schema_state.nspname <> 'information_schema'
+            AND schema_state.nspname !~ '^pg_'
+       ) AS migrator_owns_cross_schema_relation,
        NOT EXISTS (SELECT 1 FROM target_schema) AS schema_missing,
        NOT EXISTS (
          SELECT 1 FROM target_schema WHERE nspowner = (SELECT oid FROM migrator)
@@ -130,10 +153,37 @@ export async function assertMigrationContextSafe(
        current_setting('search_path') IS DISTINCT FROM $3 AS search_path_mismatch`,
     [context.runtimeRole, context.migratorRole, context.schema],
   );
-  const state = result.rows[0];
-  if (state === undefined || Object.values(state).some((unsafe) => unsafe)) {
+  return result.rows[0];
+}
+
+function assertInspectedContextSafe(
+  state: MigrationContextSafetyRow | undefined,
+  allowRuntimeSchemaCreate: boolean,
+): void {
+  if (
+    state === undefined ||
+    Object.entries(state).some(
+      ([name, unsafe]) =>
+        unsafe && !(allowRuntimeSchemaCreate && name === "runtime_can_create_schema_object"),
+    )
+  ) {
     throw new PersistenceError("CONSTRAINT_VIOLATION", "数据库迁移角色或 Schema 边界不安全");
   }
+}
+
+export async function assertMigrationContextSafe(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<void> {
+  assertInspectedContextSafe(await inspectMigrationContext(client, context), false);
+}
+
+async function assertBootstrapContextSafe(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<void> {
+  // 独立修复 ACL 时允许先清理来自 PUBLIC/直接授权的目标 Schema CREATE；其余边界不放宽。
+  assertInspectedContextSafe(await inspectMigrationContext(client, context), true);
 }
 
 interface PrivilegeRow {
@@ -309,7 +359,7 @@ export async function bootstrapRuntimeAccessOnClient(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<void> {
-  await assertMigrationContextSafe(client, context);
+  await assertBootstrapContextSafe(client, context);
   const role = quoteIdentifier(context.runtimeRole);
   const schema = quoteIdentifier(context.schema);
   await client.query(`REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM PUBLIC, ${role}`);

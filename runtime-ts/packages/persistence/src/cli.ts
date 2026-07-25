@@ -2,7 +2,6 @@ import { PersistenceError } from "./errors.js";
 import { migrateDown, migrateUp } from "./migrations.js";
 import { assertDestructiveMigrationAllowed } from "./migration-safety.js";
 import { createPostgresPool, probePostgres } from "./postgres.js";
-import { bootstrapRuntimeAccess } from "./role-bootstrap.js";
 
 const direction = process.argv[2];
 if (direction !== "up" && direction !== "down") {
@@ -37,7 +36,6 @@ if (direction !== "up" && direction !== "down") {
       let records: Awaited<ReturnType<typeof migrateUp>>;
       if (direction === "up") {
         records = await migrateUp(pool, security);
-        await bootstrapRuntimeAccess(pool, security);
       } else {
         const environment = process.env.RUNTIME_ENV;
         assertDestructiveMigrationAllowed(process.argv, environment);

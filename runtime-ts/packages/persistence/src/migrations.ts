@@ -149,6 +149,8 @@ export async function migrateUp(
           [migration.version, migration.name, migration.checksum],
         );
       }
+      // 业务 DDL、迁移记录与 Runtime ACL 必须原子提交，白名单断言失败会回滚首次建表。
+      await bootstrapRuntimeAccessOnClient(client, options);
       return appliedMigrations(client);
     });
     return records;

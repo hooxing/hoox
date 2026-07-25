@@ -477,6 +477,91 @@ describe("S3BlobStore", () => {
     expect(state.successfulCompletionCount).toBe(1);
   });
 
+  it("completed 返回畸形 canonical 时稳定报协议错误，保留授权且不再次 COPY", async () => {
+    const client = new FakeS3ObjectClient();
+    const state = new InMemoryPromotionAuthorizations();
+    const store = new S3BlobStore(client, state, config);
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "completed-malformed-canonical",
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
+    });
+    const prepared = state.preparePromotion(staged);
+    await store.promote(scope, staged, prepared.ref);
+    state.completedResultMutation = (authorization) => ({
+      ...authorization,
+      generation: 0,
+    });
+
+    await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+      code: "BLOB_INTEGRITY_MISMATCH",
+      result: "unknown",
+    });
+    state.completedResultMutation = undefined;
+    await expect(store.promote(scope, staged, prepared.ref)).resolves.toMatchObject({
+      physicalObjectKey: prepared.authorization.physicalObjectKey,
+    });
+    expect(client.copyKeys).toHaveLength(1);
+    expect(state.successfulCompletionCount).toBe(1);
+  });
+
+  it.each([
+    ["tenant", "tenant", (claim: PromotionExecutionClaim) => ({ ...claim, tenantId: "tenant_b" })],
+    [
+      "incarnation",
+      "incarnation",
+      (claim: PromotionExecutionClaim) => ({
+        ...claim,
+        incarnationId: "00000000-0000-4000-8000-000000009999",
+      }),
+    ],
+    [
+      "physical key",
+      "physical-key",
+      (claim: PromotionExecutionClaim) => ({
+        ...claim,
+        physicalObjectKey: `${claim.physicalObjectKey}-bad`,
+      }),
+    ],
+  ])(
+    "reconcile 返回畸形 %s 时稳定报协议错误且绝不发第二次 COPY",
+    async (_, uploadSuffix, mutate) => {
+      const client = new FakeS3ObjectClient();
+      const state = new InMemoryPromotionAuthorizations();
+      const store = new S3BlobStore(client, state, config);
+      const scope = { tenantId: "tenant_a" };
+      const staged = await store.putStaging({
+        scope,
+        purpose: "artifact",
+        uploadId: `reconcile-malformed-${uploadSuffix}`,
+        body: bytes("deliverable"),
+        mediaType: "text/plain",
+      });
+      const prepared = state.preparePromotion(staged);
+      client.copyUnknownWithoutWrite = true;
+      await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+        code: "BLOB_RESULT_UNKNOWN",
+        result: "unknown",
+      });
+      client.copyUnknownWithoutWrite = false;
+      state.reconcileClaimMutation = mutate;
+
+      await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+        code: "BLOB_INTEGRITY_MISMATCH",
+        result: "unknown",
+      });
+      state.reconcileClaimMutation = undefined;
+      await expect(store.promote(scope, staged, prepared.ref)).rejects.toMatchObject({
+        code: "BLOB_RESULT_UNKNOWN",
+        result: "unknown",
+      });
+      expect(client.copyKeys).toHaveLength(1);
+    },
+  );
+
   it("resolve 返回畸形 canonical 时先转 reconcile，再抛稳定完整性错误", async () => {
     const client = new FakeS3ObjectClient();
     const state = new InMemoryPromotionAuthorizations();
@@ -1512,6 +1597,10 @@ class InMemoryPromotionAuthorizations
 {
   claimResultMutation: ((claim: PromotionExecutionClaim) => PromotionExecutionClaim) | undefined;
   markResultMutation: ((claim: PromotionExecutionClaim) => PromotionExecutionClaim) | undefined;
+  reconcileClaimMutation: ((claim: PromotionExecutionClaim) => PromotionExecutionClaim) | undefined;
+  completedResultMutation:
+    | ((authorization: StableBlobPromotionAuthorization) => StableBlobPromotionAuthorization)
+    | undefined;
   resolveResultMutation:
     | ((authorization: StableBlobPromotionAuthorization) => StableBlobPromotionAuthorization)
     | undefined;
@@ -1524,6 +1613,13 @@ class InMemoryPromotionAuthorizations
       status: "reserved" | "started" | "succeeded" | "retired" | "consumed" | "inactive";
       value: StableBlobPromotionAuthorization;
       execution: PromotionExecutionClaim | undefined;
+      proof:
+        | "pre_intent"
+        | "not_copied"
+        | "copy_issued"
+        | "mark_unknown"
+        | "consumed_not_copied"
+        | undefined;
     }
   >();
   private readonly retiredLogicalKeys = new Set<string>();
@@ -1623,6 +1719,7 @@ class InMemoryPromotionAuthorizations
       status: "reserved",
       value: authorization,
       execution: undefined,
+      proof: undefined,
     });
     return {
       ref: { tenantId: staged.tenantId, operationId, authorizationId },
@@ -1676,6 +1773,7 @@ class InMemoryPromotionAuthorizations
       status: "started",
       value: authorization,
       execution: undefined,
+      proof: undefined,
     });
     return { ref, authorization, allocation };
   }
@@ -1719,7 +1817,10 @@ class InMemoryPromotionAuthorizations
       completed.value.tenantId === input.authorization.tenantId &&
       completed.value.operationId === input.authorization.operationId
     ) {
-      return { status: "completed", authorization: completed.value };
+      return {
+        status: "completed",
+        authorization: this.completedResultMutation?.(completed.value) ?? completed.value,
+      };
     }
     const resolved = this.resolveRecord(input.scope, input.authorization);
     if (resolved.status !== "authorized") {
@@ -1729,7 +1830,10 @@ class InMemoryPromotionAuthorizations
     if (record.execution !== undefined) {
       return record.execution.phase === "claimed"
         ? { status: "in_progress" }
-        : { status: "reconcile", execution: record.execution };
+        : {
+            status: "reconcile",
+            execution: this.reconcileClaimMutation?.(record.execution) ?? record.execution,
+          };
     }
     const execution: PromotionExecutionClaim = {
       tenantId: record.value.tenantId,
@@ -1743,6 +1847,7 @@ class InMemoryPromotionAuthorizations
       physicalObjectKey: record.value.physicalObjectKey,
     };
     record.execution = execution;
+    record.proof = "pre_intent";
     return {
       status: "copy_allowed",
       execution: this.claimResultMutation?.(execution) ?? execution,
@@ -1765,7 +1870,7 @@ class InMemoryPromotionAuthorizations
     if (resolved.status !== "authorized") {
       return resolved;
     }
-    if (!sameExecution(resolved.record.execution, input.execution)) {
+    if (!sameExecutionAuthorizationIdentity(resolved.record.execution, input.execution)) {
       return { status: "inactive" };
     }
     return {
@@ -1789,6 +1894,7 @@ class InMemoryPromotionAuthorizations
     if (record.execution?.phase === "claimed") {
       record.execution = { ...record.execution, phase: "executing" };
     }
+    record.proof = "copy_issued";
     const execution = record.execution as PromotionExecutionClaim;
     return {
       status: "marked" as const,
@@ -1817,7 +1923,8 @@ class InMemoryPromotionAuthorizations
         throw new Error("已发出 COPY 的 intent 不能撤销为 not_copied");
       }
       record.status = "inactive";
-      record.execution = undefined;
+      // not_copied 是持久审计证据；不能因结束 active execution 就物理删除。
+      record.proof = "not_copied";
       return;
     }
     if (input.outcome === "unknown") {
@@ -1829,6 +1936,7 @@ class InMemoryPromotionAuthorizations
     }
     if (input.outcome === "reconcile") {
       record.execution = { ...input.execution, phase: "unknown" };
+      record.proof = record.proof === "copy_issued" ? "copy_issued" : "mark_unknown";
       return;
     }
     record.status = "succeeded";
@@ -1846,6 +1954,13 @@ class InMemoryPromotionAuthorizations
           status: "reserved" | "started" | "succeeded" | "retired" | "consumed" | "inactive";
           value: StableBlobPromotionAuthorization;
           execution: PromotionExecutionClaim | undefined;
+          proof:
+            | "pre_intent"
+            | "not_copied"
+            | "copy_issued"
+            | "mark_unknown"
+            | "consumed_not_copied"
+            | undefined;
         };
       }
     | Exclude<PromotionAuthorizationResolution, { readonly status: "authorized" }> {
@@ -1865,24 +1980,6 @@ class InMemoryPromotionAuthorizations
   }
 }
 
-function sameExecution(
-  current: PromotionExecutionClaim | undefined,
-  supplied: PromotionExecutionClaim,
-): boolean {
-  return (
-    current !== undefined &&
-    current.tenantId === supplied.tenantId &&
-    current.operationId === supplied.operationId &&
-    current.authorizationId === supplied.authorizationId &&
-    current.executionId === supplied.executionId &&
-    current.generation === supplied.generation &&
-    current.attemptId === supplied.attemptId &&
-    current.phase === supplied.phase &&
-    current.incarnationId === supplied.incarnationId &&
-    current.physicalObjectKey === supplied.physicalObjectKey
-  );
-}
-
 function sameExecutionIdentity(
   current: PromotionExecutionClaim | undefined,
   supplied: PromotionExecutionClaim,
@@ -1897,6 +1994,22 @@ function sameExecutionIdentity(
     current.attemptId === supplied.attemptId &&
     current.incarnationId === supplied.incarnationId &&
     current.physicalObjectKey === supplied.physicalObjectKey
+  );
+}
+
+/** Repository 仅用数据库 execution 身份查 canonical target，不信任调用方回传的 target。 */
+function sameExecutionAuthorizationIdentity(
+  current: PromotionExecutionClaim | undefined,
+  supplied: PromotionExecutionClaim,
+): boolean {
+  return (
+    current !== undefined &&
+    current.tenantId === supplied.tenantId &&
+    current.operationId === supplied.operationId &&
+    current.authorizationId === supplied.authorizationId &&
+    current.executionId === supplied.executionId &&
+    current.generation === supplied.generation &&
+    current.attemptId === supplied.attemptId
   );
 }
 

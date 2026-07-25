@@ -124,34 +124,86 @@ describe("Blob 补偿状态协议", () => {
         expectedSnapshotVersion: startedSnapshot.version,
         authorizationId: started.authorization.authorizationId,
       }),
+    ).resolves.toEqual({ status: "proof_unavailable" });
+    port.recordPreIntent(started.authorization.authorizationId);
+    await expect(
+      port.provePromotionNotCopied({
+        scope: reserved.scope,
+        operationId: reserved.operationId,
+        expectedSnapshotVersion: startedSnapshot.version,
+        authorizationId: started.authorization.authorizationId,
+      }),
     ).resolves.toMatchObject({
       status: "proven_not_copied",
       snapshotVersion: startedSnapshot.version + 1,
     });
+    expect(port.proofStatus(started.authorization.authorizationId)).toBe("consumed_not_copied");
     const rolledBack = await port.load(reserved.scope, reserved.operationId);
     expect(rolledBack?.status).toBe("allocation_reserved");
     expect(rolledBack?.promotionAuthorization).toBeUndefined();
 
-    const restarted = await port.startPromotion({
+    const notCopiedStarted = await port.startPromotion({
       scope: reserved.scope,
       operationId: reserved.operationId,
       expectedSnapshotVersion: startedSnapshot.version + 1,
       allocationId: allocation.allocationId,
     });
-    if (restarted.status !== "started") throw new Error("测试 promotion 重启失败");
-    port.markCopyIssued(restarted.authorization.authorizationId);
+    if (notCopiedStarted.status !== "started") throw new Error("测试 promotion 重启失败");
+    port.recordPreIntent(notCopiedStarted.authorization.authorizationId);
+    port.recordNotCopied(notCopiedStarted.authorization.authorizationId);
     await expect(
       port.provePromotionNotCopied({
         scope: reserved.scope,
         operationId: reserved.operationId,
-        expectedSnapshotVersion: restarted.snapshotVersion,
-        authorizationId: restarted.authorization.authorizationId,
+        expectedSnapshotVersion: notCopiedStarted.snapshotVersion,
+        authorizationId: notCopiedStarted.authorization.authorizationId,
+      }),
+    ).resolves.toMatchObject({ status: "proven_not_copied" });
+    expect(port.proofStatus(notCopiedStarted.authorization.authorizationId)).toBe(
+      "consumed_not_copied",
+    );
+
+    const copyIssuedStarted = await port.startPromotion({
+      scope: reserved.scope,
+      operationId: reserved.operationId,
+      expectedSnapshotVersion: notCopiedStarted.snapshotVersion + 1,
+      allocationId: allocation.allocationId,
+    });
+    if (copyIssuedStarted.status !== "started") throw new Error("测试 promotion 再次启动失败");
+    port.recordPreIntent(copyIssuedStarted.authorization.authorizationId);
+    port.markCopyIssued(copyIssuedStarted.authorization.authorizationId);
+    await expect(
+      port.provePromotionNotCopied({
+        scope: reserved.scope,
+        operationId: reserved.operationId,
+        expectedSnapshotVersion: copyIssuedStarted.snapshotVersion,
+        authorizationId: copyIssuedStarted.authorization.authorizationId,
       }),
     ).resolves.toEqual({ status: "copy_may_have_been_issued" });
     await expect(port.load(reserved.scope, reserved.operationId)).resolves.toMatchObject({
       status: "promotion_started",
-      promotionAuthorization: restarted.authorization,
+      promotionAuthorization: copyIssuedStarted.authorization,
     });
+
+    const unknownPort = new InMemoryCommitStatePort();
+    await unknownPort.create(reserved);
+    const markUnknownStarted = await unknownPort.startPromotion({
+      scope: reserved.scope,
+      operationId: reserved.operationId,
+      expectedSnapshotVersion: reserved.version,
+      allocationId: allocation.allocationId,
+    });
+    if (markUnknownStarted.status !== "started") throw new Error("测试 mark UNKNOWN 启动失败");
+    unknownPort.recordPreIntent(markUnknownStarted.authorization.authorizationId);
+    unknownPort.recordMarkResponseUnknown(markUnknownStarted.authorization.authorizationId);
+    await expect(
+      unknownPort.provePromotionNotCopied({
+        scope: reserved.scope,
+        operationId: reserved.operationId,
+        expectedSnapshotVersion: markUnknownStarted.snapshotVersion,
+        authorizationId: markUnknownStarted.authorization.authorizationId,
+      }),
+    ).resolves.toEqual({ status: "copy_may_have_been_issued" });
   });
 
   it("stable 正在被 GC claim 时记录阻塞且不新增引用", () => {
@@ -410,11 +462,33 @@ function promotionReadyState(): BlobCommitSnapshot {
 class InMemoryCommitStatePort implements BlobCommitStatePort {
   private readonly tenants = new Map<string, Map<string, BlobCommitSnapshot>>();
   private readonly authorizations = new Map<string, StableBlobPromotionAuthorization>();
-  private readonly copyIssuedAuthorizations = new Set<string>();
+  private readonly promotionProofs = new Map<
+    string,
+    "pre_intent" | "not_copied" | "copy_issued" | "mark_unknown" | "consumed_not_copied"
+  >();
   private authorizationSequence = 0;
 
+  recordPreIntent(authorizationId: string): void {
+    this.promotionProofs.set(authorizationId, "pre_intent");
+  }
+
+  recordNotCopied(authorizationId: string): void {
+    if (this.promotionProofs.get(authorizationId) !== "pre_intent") {
+      throw new Error("缺少 pre_intent，不能写 not_copied 证明");
+    }
+    this.promotionProofs.set(authorizationId, "not_copied");
+  }
+
   markCopyIssued(authorizationId: string): void {
-    this.copyIssuedAuthorizations.add(authorizationId);
+    this.promotionProofs.set(authorizationId, "copy_issued");
+  }
+
+  recordMarkResponseUnknown(authorizationId: string): void {
+    this.promotionProofs.set(authorizationId, "mark_unknown");
+  }
+
+  proofStatus(authorizationId: string) {
+    return this.promotionProofs.get(authorizationId);
   }
 
   async load(
@@ -536,12 +610,17 @@ class InMemoryCommitStatePort implements BlobCommitStatePort {
     if (current.promotionAuthorization?.authorizationId !== authorizationId) {
       return { status: "authorization_mismatch" as const };
     }
-    if (this.copyIssuedAuthorizations.has(authorizationId)) {
+    const proof = this.promotionProofs.get(authorizationId);
+    if (proof === undefined) {
+      return { status: "proof_unavailable" as const };
+    }
+    if (proof === "copy_issued" || proof === "mark_unknown" || proof === "consumed_not_copied") {
       return { status: "copy_may_have_been_issued" as const };
     }
     const next = transitionBlobCommit(current, { type: "promotion_proven_not_copied" });
     operations?.set(operationId, next);
-    this.authorizations.delete(authorizationId);
+    // 消费证明但永久保留审计 tombstone；授权行也只失活，不做物理删除。
+    this.promotionProofs.set(authorizationId, "consumed_not_copied");
     return {
       status: "proven_not_copied" as const,
       snapshotVersion: next.version,

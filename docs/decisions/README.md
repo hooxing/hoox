@@ -15,6 +15,7 @@
 | [ADR-0007](0007-first-release-scope.md) | 首个可发布版本范围与后置能力 | 已接受 | 2026-07-26 |
 | [ADR-0008](0008-cubesandbox-sdk-supply-chain.md) | CubeSandbox Node SDK vendoring 与供应链 | 已接受 | 2026-07-26 |
 | [ADR-0009](0009-postgresql-core-schema-and-concurrency.md) | PostgreSQL 核心 Schema、迁移与并发写入 | 已接受 | 2026-07-26 |
+| [ADR-0010](0010-object-storage-sdk-selection.md) | 对象存储客户端 SDK 选择 | 已接受 | 2026-07-26 |
 
 ## 何时必须记录
 

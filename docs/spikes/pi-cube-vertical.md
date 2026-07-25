@@ -82,7 +82,7 @@ create
 → finally kill
 ```
 
-全部通过，清理调用成功。Linux 自动测试结果为 3 个测试文件、18 项测试全部通过；Windows 为 14 项通过、4 项 Linux Pi 会话测试按平台跳过，并额外验证 Windows fail-fast。覆盖 Fake/直接 SDK Gateway 生命周期、非法输入、迟到副作用、取消/超时优先级、create 对账与 UNKNOWN、响应协议校验、Fake Provider Tool Call、assistant-only 终态、Provider 失败、真实 abort/steer/follow-up 队列、零宿主资源发现、工具白名单和无 compaction 入口/事件。Linux 容器中的无外部模型真实纵向冒烟也已通过并完成 Sandbox 清理。
+全部通过，清理调用成功。M0-05 相关自动测试在 Linux 为 18 项全部通过；合入领域与协议基线后的仓库全量 Linux 测试为 7 个文件、74 项全部通过。Windows 全量测试为 70 项通过、4 项 Linux Pi 会话测试按平台跳过，并额外验证 Windows fail-fast。覆盖 Fake/直接 SDK Gateway 生命周期、非法输入、迟到副作用、取消/超时优先级、create 对账与 UNKNOWN、响应协议校验、Fake Provider Tool Call、assistant-only 终态、Provider 失败、真实 abort/steer/follow-up 队列、零宿主资源发现、工具白名单和无 compaction 入口/事件。Linux 容器中的无外部模型真实纵向冒烟也已通过并完成 Sandbox 清理。
 
 ### 安全复现
 

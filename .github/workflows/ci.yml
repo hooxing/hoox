@@ -1,0 +1,52 @@
+name: 持续集成
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: 工程基线校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+          run_install: false
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+
+      - name: 冻结安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 检查格式
+        run: pnpm format:check
+
+      - name: 静态检查
+        run: pnpm lint
+
+      - name: 类型检查
+        run: pnpm typecheck
+
+      - name: 执行测试
+        run: pnpm test
+
+      - name: 构建全部工作区
+        run: pnpm build
+
+      - name: 校验示例配置与 Compose
+        # 只使用仓库内的占位配置，不读取开发者或 CI Secret。
+        run: pnpm config:check

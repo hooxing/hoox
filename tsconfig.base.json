@@ -10,7 +10,15 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
     "declaration": true,
+    "declarationMap": true,
     "sourceMap": true,
-    "outDir": "dist"
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "useUnknownInCatchVariables": true
   }
 }

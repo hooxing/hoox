@@ -1,3 +1,4 @@
 packages:
   - runtime-ts/apps/*
   - runtime-ts/packages/*
+  - runtime-ts/vendor/*

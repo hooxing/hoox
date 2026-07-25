@@ -1,7 +1,8 @@
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
-    "noEmit": true
+    "noEmit": true,
+    "types": ["node", "vitest/globals"]
   },
-  "include": ["runtime-ts/**/*.ts"]
+  "include": ["scripts/**/*.d.mts", "tests/**/*.ts", "vitest.config.ts"]
 }

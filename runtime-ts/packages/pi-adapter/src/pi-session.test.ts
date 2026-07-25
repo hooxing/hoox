@@ -145,6 +145,38 @@ describe("Pi 安全适配", () => {
     },
   );
 
+  it.runIf(process.platform === "linux")(
+    "waiting 恢复把受控 RolloutProjection 投影到新 Session，并用 prompt 真正启动模型",
+    async () => {
+      let resumedContext = "";
+      const { controller, faux } = await harness(
+        [
+          (context) => {
+            resumedContext = JSON.stringify(context.messages);
+            return fauxAssistantMessage("已按补充信息继续");
+          },
+        ],
+        new FakeSandboxHandle("pi-resume-fake"),
+        {
+          schemaVersion: 1,
+          checkpointId: "checkpoint-waiting-1",
+          turns: [
+            { role: "user", text: "生成报告" },
+            { role: "assistant", text: "请补充报告范围" },
+          ],
+        },
+      );
+
+      await controller.prompt("只处理 Markdown");
+
+      expect(faux.state.callCount).toBe(1);
+      expect(resumedContext).toContain("checkpoint-waiting-1");
+      expect(resumedContext).toContain("生成报告");
+      expect(resumedContext).toContain("请补充报告范围");
+      expect(resumedContext).toContain("只处理 Markdown");
+    },
+  );
+
   it("Windows Worker 在创建 Pi Session 前明确失败", async () => {
     expect(() => assertLinuxWorkerPlatform("win32")).toThrow("仅支持 Linux");
     if (process.platform !== "linux") {
@@ -186,6 +218,7 @@ describe("Pi 安全适配", () => {
 async function harness(
   responses: FauxResponseStep[],
   sandbox = new FakeSandboxHandle("pi-fake"),
+  rolloutProjection?: Parameters<typeof createSafePiSession>[0]["rolloutProjection"],
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
@@ -205,7 +238,12 @@ async function harness(
   });
   modelRuntime.registerNativeProvider(faux.provider);
   await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-  const controller = await createSafePiSession({ model: faux.getModel(), modelRuntime, sandbox });
+  const controller = await createSafePiSession({
+    model: faux.getModel(),
+    modelRuntime,
+    sandbox,
+    ...(rolloutProjection === undefined ? {} : { rolloutProjection }),
+  });
   disposers.push(() => controller.dispose());
   const events: RuntimeAgentEvent[] = [];
   let resolveStarted: (() => void) | undefined;

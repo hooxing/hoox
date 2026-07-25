@@ -1,51 +1,33 @@
-import { runId, tenantId, threadId, workspaceId, workspaceRevisionId } from "@cube-runtime/domain";
+import { tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
 import { describe, expect, it } from "vitest";
-import type { RunScope, RunSnapshot } from "./ports.js";
+import type { ExecutionScope, RuntimeEventV1 } from "./ports.js";
 import { RunWorker } from "./run-worker.js";
 import {
   BlockingAgentSession,
   FakeArtifactPublication,
   FakeCancellationPort,
   FakeClock,
+  FakeExecutionPersistence,
   FakeRevisionVerifier,
-  FakeRunPersistence,
   FakeSandboxRegistry,
   FakeSessionFactory,
-  FakeWorkspacePort,
   ScriptedAgentSession,
+  fakeRevision,
+  fakeSeed,
 } from "./testing/fakes.js";
 
-const scope: RunScope = {
-  tenantId: tenantId("tenant-test"),
-  threadId: threadId("thread-test"),
-  runId: runId("run-test"),
-  rootRunId: runId("run-test"),
-};
-
-const successEvents: readonly RuntimeAgentEvent[] = [
+const successfulEvents: readonly RuntimeAgentEvent[] = [
   { type: "agent.started" },
   { type: "message.delta", delta: "完成" },
   { type: "message.completed", stopReason: "stop" },
   { type: "agent.settled" },
 ];
 
-function snapshot(overrides: Partial<RunSnapshot> = {}): RunSnapshot {
-  return {
-    ...scope,
-    workspaceId: workspaceId("workspace-test"),
-    status: "queued",
-    input: "完成任务",
-    stateVersion: 0,
-    nextEventSequence: 0,
-    ...overrides,
-  };
-}
-
-function harness(sessions: ScriptedAgentSession[] | BlockingAgentSession[]) {
-  const runs = new FakeRunPersistence(snapshot());
-  const workspaces = new FakeWorkspacePort();
+function harness(sessions: Array<ScriptedAgentSession | BlockingAgentSession>) {
+  const persistence = new FakeExecutionPersistence();
+  const scope = persistence.addSeed(fakeSeed());
   const revisions = new FakeRevisionVerifier();
   const sandboxes = new FakeSandboxRegistry();
   const factory = new FakeSessionFactory(sessions);
@@ -53,19 +35,13 @@ function harness(sessions: ScriptedAgentSession[] | BlockingAgentSession[]) {
   const artifacts = new FakeArtifactPublication();
   const clock = new FakeClock();
   const worker = new RunWorker(
-    { runs, workspaces, revisions, sandboxes, sessions: factory, cancellation, artifacts, clock },
-    {
-      workerId: "worker-test",
-      claimLeaseMs: 30_000,
-      workspaceLeaseMs: 30_000,
-      heartbeatMs: 10_000,
-      runTimeoutMs: 60_000,
-    },
+    { persistence, revisions, sandboxes, sessions: factory, cancellation, artifacts, clock },
+    { workerId: "worker-test", leaseDurationMs: 30_000, heartbeatMs: 10_000, runTimeoutMs: 60_000 },
   );
   return {
     worker,
-    runs,
-    workspaces,
+    persistence,
+    scope,
     revisions,
     sandboxes,
     factory,
@@ -75,217 +51,386 @@ function harness(sessions: ScriptedAgentSession[] | BlockingAgentSession[]) {
   };
 }
 
-describe("Run Worker 可靠性核心", () => {
-  it("成功执行时按稳定序号持久化事件，仅提交一次已验证 Workspace，并经过 Artifact 完成门", async () => {
-    const session = new ScriptedAgentSession(successEvents);
-    const h = harness([session]);
-    h.revisions.nextRevisionId = workspaceRevisionId("revision-success");
+describe("Run Worker 双栅栏与恢复状态机", () => {
+  it("Revision、Run succeeded、Attempt 终态和双栅栏释放在同一幂等事务完成", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.revisions.nextRevisionId = fakeRevision("revision-success");
 
-    await expect(h.worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
 
-    expect(h.runs.snapshot.status).toBe("succeeded");
-    expect(h.runs.events.map((event) => event.sequence)).toEqual([0, 1, 2, 3, 4]);
-    expect(h.runs.events.map((event) => event.type)).toEqual([
-      "agent.started",
-      "message.delta",
-      "message.completed",
-      "agent.settled",
-      "run.succeeded",
-    ]);
-    expect(new Set(h.runs.events.map((event) => event.idempotencyKey)).size).toBe(5);
-    expect(h.workspaces.commitCount).toBe(1);
-    expect(h.artifacts.calls).toBe(1);
-    expect(h.sandboxes.settleCount).toBe(1);
+    const currentScope = h.persistence.scopeForRun(h.scope.runId);
+    const record = h.persistence.record(currentScope);
+    expect(record.run.status).toBe("succeeded");
+    expect(record.workspace.currentRevisionId).toBe(fakeRevision("revision-success"));
+    expect(record.attempt).toMatchObject({ status: "succeeded", stage: "finished" });
+    expect(record.fence).toBeUndefined();
+    expect(record.events.map((event) => event.sequence)).toEqual(
+      Array.from({ length: record.events.length }, (_, index) => index),
+    );
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({ kind: "sandbox_cleanup", state: "completed" }),
+    );
+    const mutations = [...record.mutations.keys()];
+    expect(mutations.indexOf("attempt-1/sandbox/cleanup-intent")).toBeLessThan(
+      mutations.indexOf("attempt-1/stage/model-execution-started"),
+    );
   });
 
-  it("重复投递只允许一个 Worker 获得 claim，不会创建第二个 Sandbox 或 Session", async () => {
+  it("重复投递不能重领 running Run，也不会创建第二个 Sandbox 或模型 Session", async () => {
     const blocked = new BlockingAgentSession();
     const h = harness([blocked]);
-
-    const first = h.worker.execute(scope);
+    const first = h.worker.execute(h.scope);
     await eventually(() => h.factory.createCount === 1);
-    await expect(h.worker.execute(scope)).resolves.toEqual({ outcome: "ignored", reason: "busy" });
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "ignored",
+      reason: "busy",
+    });
     expect(h.sandboxes.acquireCount).toBe(1);
     expect(h.factory.createCount).toBe(1);
 
-    h.cancellation.cancel(scope.runId);
+    h.cancellation.cancel(h.scope);
     await expect(first).resolves.toEqual({ outcome: "cancelled" });
   });
 
-  it("Workspace 租约在心跳中丢失时立即中止 Agent，旧 Worker 不提交事件、版本或终态", async () => {
-    const blocked = new BlockingAgentSession();
-    const h = harness([blocked]);
-    const execution = h.worker.execute(scope);
-    await eventually(() => h.factory.createCount === 1);
+  it.each(["run", "workspace"] as const)(
+    "%s lease 到期都会使旧 Worker 丢失写权限，不写 Revision 或业务终态",
+    async (lease) => {
+      const blocked = new BlockingAgentSession();
+      const h = harness([blocked]);
+      const execution = h.worker.execute(h.scope);
+      await eventually(() => h.factory.createCount === 1);
+      if (lease === "run") h.persistence.expireRunLease(h.scope);
+      else h.persistence.expireWorkspaceLease(h.scope);
 
-    h.workspaces.forceLeaseLost = true;
-    await h.clock.tickHeartbeats();
+      await h.clock.tickHeartbeat();
+      await expect(execution).resolves.toEqual({ outcome: "fence_lost" });
 
-    await expect(execution).resolves.toEqual({ outcome: "fence_lost" });
-    expect(blocked.abortCount).toBe(1);
-    expect(h.workspaces.commitCount).toBe(0);
-    expect(h.runs.events).toEqual([]);
-    expect(h.runs.snapshot.status).toBe("running");
+      const record = h.persistence.record(h.scope);
+      expect(record.run.status).toBe("running");
+      expect(record.workspace.currentRevisionId).toBeUndefined();
+      expect(blocked.abortCount).toBeGreaterThanOrEqual(1);
+    },
+  );
+
+  it.each(["run", "workspace"] as const)(
+    "Sandbox create 期间 %s lease 丢失，返回后只清理 Sandbox，绝不启动模型",
+    async (lease) => {
+      const h = harness([new ScriptedAgentSession(successfulEvents)]);
+      h.sandboxes.beforeAcquireReturn = () => {
+        if (lease === "run") h.persistence.expireRunLease(h.scope);
+        else h.persistence.expireWorkspaceLease(h.scope);
+      };
+
+      await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "fence_lost" });
+
+      expect(h.sandboxes.acquireCount).toBe(1);
+      expect(h.sandboxes.settleCount).toBe(1);
+      expect(h.factory.createCount).toBe(0);
+      expect(h.persistence.record(h.scope).run.status).toBe("running");
+    },
+  );
+
+  it("Workspace verify 返回前丢租约，不执行 prepare/Revision 提交", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.revisions.nextRevisionId = fakeRevision("revision-never-commit");
+    h.revisions.beforeReturn = () => h.persistence.expireWorkspaceLease(h.scope);
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "fence_lost" });
+
+    const record = h.persistence.record(h.scope);
+    expect(h.revisions.verifyCount).toBe(1);
+    expect(record.workspace.currentRevisionId).toBeUndefined();
+    expect(record.run.status).toBe("running");
   });
 
-  it("Workspace 已校验提交后才到达的取消仍以 cancelled 完成，且不会重复提交版本", async () => {
-    const h = harness([new ScriptedAgentSession(successEvents)]);
-    h.revisions.nextRevisionId = workspaceRevisionId("revision-late-cancel");
-    h.artifacts.onAssert = () => h.cancellation.cancel(scope.runId);
+  it("verify 调用前丢 Workspace lease，Verifier 完全不会被调用", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.persistence.afterMutation = (command) => {
+      if (command.idempotencyKey.includes("/stage/model-settled")) {
+        h.persistence.expireWorkspaceLease(h.scope);
+      }
+    };
 
-    await expect(h.worker.execute(scope)).resolves.toEqual({ outcome: "cancelled" });
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "fence_lost" });
 
-    expect(h.runs.snapshot.status).toBe("cancelled");
-    expect(h.runs.events.at(-1)?.type).toBe("run.cancelled_after_checkpoint");
-    expect(h.workspaces.commitCount).toBe(1);
+    expect(h.revisions.verifyCount).toBe(0);
+    expect(h.persistence.record(h.scope).workspace.currentRevisionId).toBeUndefined();
+  });
+
+  it("verify 完成后、Artifact 外部调用返回时丢 claim，Revision 仍未提交", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.revisions.nextRevisionId = fakeRevision("revision-after-verify");
+    h.artifacts.beforeReturn = () => h.persistence.expireRunLease(h.scope);
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "fence_lost" });
+
+    const record = h.persistence.record(h.scope);
     expect(h.artifacts.calls).toBe(1);
+    expect(record.workspace.currentRevisionId).toBeUndefined();
+    expect(record.run.status).toBe("running");
   });
 
-  it("流式事件写入失败时中止执行，不伪造成功，也不推进 Workspace", async () => {
-    const session = new ScriptedAgentSession(successEvents);
-    const h = harness([session]);
-    h.runs.failNextCommit = true;
-    h.revisions.nextRevisionId = workspaceRevisionId("revision-must-not-commit");
+  it("Revision+终态事务响应丢失时按幂等键读回，不重复提交 Revision", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.revisions.nextRevisionId = fakeRevision("revision-response-lost");
+    h.persistence.responseUnknownKeyIncludes = "/final/succeeded";
 
-    await expect(h.worker.execute(scope)).resolves.toEqual({ outcome: "persistence_unavailable" });
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    const scope = h.persistence.scopeForRun(h.scope.runId);
+    const record = h.persistence.record(scope);
+    expect(record.workspace.currentRevisionNumber).toBe(1);
+    expect(record.run.status).toBe("succeeded");
+    expect(
+      [...record.mutations.keys()].filter((key) => key.includes("/final/succeeded")),
+    ).toHaveLength(1);
+  });
+
+  it("settle 抛异常时保留 pending cleanup Outbox，Attempt 进入 recovery_required，Run 不伪失败", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.sandboxes.throwOnSettle = true;
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "INTERNAL",
+    });
+
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("running");
+    expect(record.attempt?.status).toBe("recovery_required");
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({ kind: "sandbox_cleanup", state: "pending" }),
+    );
+    expect(JSON.stringify(record.outbox)).not.toContain("上游私有");
+  });
+
+  it("settle 返回 UNKNOWN 时持久化 unknown cleanup 与告警，不自动再次 settle", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.sandboxes.nextSettlement = { outcome: "unknown", event: uncertain("cleanup_after_create") };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "SANDBOX_UNKNOWN",
+    });
+
+    const record = h.persistence.record(h.scope);
+    expect(h.sandboxes.settleCount).toBe(1);
+    expect(record.run.status).toBe("running");
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({ kind: "sandbox_cleanup", state: "unknown" }),
+    );
+  });
+
+  it("Sandbox acquire UNKNOWN 只进入 Attempt recovery_required，不伪造 Run failed", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.sandboxes.nextAcquire = { outcome: "unknown", event: uncertain("create_response") };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "SANDBOX_UNKNOWN",
+    });
+
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("running");
+    expect(record.attempt?.status).toBe("recovery_required");
+    expect(h.factory.createCount).toBe(0);
+  });
+
+  it("settle 调用前 started 事务失败，不调用外部 settle，也不写业务终态", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.artifacts.beforeReturn = () => {
+      h.persistence.unavailableNextMutation = true;
+    };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "retryable",
+      code: "PERSISTENCE_UNAVAILABLE",
+    });
+
+    expect(h.sandboxes.settleCount).toBe(0);
+    expect(h.persistence.record(h.scope).run.status).toBe("running");
+  });
+
+  it("外部 settle 完成后 claim 丢失，旧 Worker 不写 completed 或 Run succeeded", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.sandboxes.beforeSettleReturn = () => h.persistence.expireRunLease(h.scope);
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "fence_lost" });
+
+    const record = h.persistence.record(h.scope);
+    expect(h.sandboxes.settleCount).toBe(1);
+    expect(record.run.status).toBe("running");
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({ kind: "sandbox_cleanup", state: "started" }),
+    );
+  });
+
+  it("流式事件持久化不可用时立即 abort，保留 cleanup intent 并等待 Attempt 恢复", async () => {
+    const session = new ScriptedAgentSession(successfulEvents);
+    const h = harness([session]);
+    h.persistence.responseUnknownKeyIncludes = "/stage/model-execution-started";
+    // 先让 checkpoint 以读回方式成功，再让第一个 agent event 失败。
+    const originalRead = h.persistence.readMutation.bind(h.persistence);
+    let checkpointRead = false;
+    h.persistence.readMutation = async (input) => {
+      const result = await originalRead(input);
+      if (input.idempotencyKey.includes("model-execution-started")) {
+        checkpointRead = true;
+        h.persistence.unavailableNextMutation = true;
+      }
+      return result;
+    };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "PERSISTENCE_UNAVAILABLE",
+    });
+
+    const record = h.persistence.record(h.scope);
+    expect(checkpointRead).toBe(true);
+    expect(session.abortCount).toBeGreaterThanOrEqual(1);
+    expect(record.run.status).toBe("running");
+    expect(record.workspace.currentRevisionId).toBeUndefined();
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({ kind: "sandbox_cleanup", state: "pending" }),
+    );
+  });
+
+  it("超大 adapter event 被版本协议拒绝后立即 abort，Attempt recovery_required", async () => {
+    const huge = "x".repeat(70 * 1024);
+    const session = new ScriptedAgentSession([
+      { type: "agent.started" },
+      { type: "message.delta", delta: huge },
+    ]);
+    const h = harness([session]);
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "EVENT_REJECTED",
+    });
 
     expect(session.abortCount).toBeGreaterThanOrEqual(1);
-    expect(h.runs.snapshot.status).toBe("running");
-    expect(h.runs.events).toEqual([]);
-    expect(h.workspaces.commitCount).toBe(0);
-    expect(h.artifacts.calls).toBe(0);
+    expect(h.persistence.record(h.scope).run.status).toBe("running");
   });
 
-  it("Sandbox 创建结果为 UNKNOWN 时失败并在同一提交写入恢复 Outbox", async () => {
-    const h = harness([new ScriptedAgentSession(successEvents)]);
-    h.sandboxes.nextAcquire = { outcome: "unknown", event: uncertainEvent("create_response") };
-
-    await expect(h.worker.execute(scope)).resolves.toEqual({ outcome: "failed" });
-
-    expect(h.factory.createCount).toBe(0);
-    expect(h.runs.snapshot.status).toBe("failed");
-    expect(h.runs.events.at(-1)?.type).toBe("sandbox.lifecycle_unknown");
-    expect(h.runs.outbox).toHaveLength(1);
-    expect(h.runs.outbox[0]?.topic).toBe("sandbox.lifecycle.unknown");
-  });
-
-  it("Provider 失败事件优先于 Pi settle，Run 失败且不提交 Workspace", async () => {
+  it("经过稳定净化的 Provider 失败属于模型业务失败，可安全收尾为 Domain failed", async () => {
     const h = harness([
       new ScriptedAgentSession([
         { type: "agent.started" },
-        { type: "error", code: "PROVIDER", message: "上游失败" },
+        { type: "error", code: "PROVIDER", message: "上游私有请求和密钥信息" },
         { type: "agent.settled" },
       ]),
     ]);
 
-    await expect(h.worker.execute(scope)).resolves.toEqual({ outcome: "failed" });
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "failed" });
 
-    expect(h.runs.events.at(-1)?.type).toBe("agent.failed");
-    expect(h.workspaces.commitCount).toBe(0);
-    expect(h.artifacts.calls).toBe(0);
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("failed");
+    expect(record.attempt?.status).toBe("failed");
+    expect(record.workspace.currentRevisionId).toBeUndefined();
+    expect(JSON.stringify(record.events)).not.toContain("上游私有");
   });
 
-  it("Pi Session 创建失败时仍关闭已取得的 Sandbox，再提交失败终态", async () => {
-    const h = harness([new ScriptedAgentSession(successEvents)]);
-    h.factory.failNextCreate = true;
-
-    await expect(h.worker.execute(scope)).resolves.toEqual({ outcome: "failed" });
-
-    expect(h.sandboxes.acquireCount).toBe(1);
-    expect(h.sandboxes.settleCount).toBe(1);
-    expect(h.runs.snapshot.status).toBe("failed");
-    expect(h.workspaces.commitCount).toBe(0);
-  });
-
-  it("waiting 提交检查点并释放 claim，追问恢复后复用 Sandbox 且调用 follow_up", async () => {
+  it("waiting 原子提交 checkpoint 与 RolloutProjection，回答后新 Session 用 prompt 启动模型", async () => {
+    const projection = {
+      schemaVersion: 1 as const,
+      checkpointId: "checkpoint-waiting",
+      turns: [
+        { role: "user" as const, text: "生成报告" },
+        { role: "assistant" as const, text: "请补充范围" },
+      ],
+    };
     const waiting = new ScriptedAgentSession([{ type: "agent.started" }], {
       kind: "waiting",
       question: "请补充范围",
+      rolloutProjection: projection,
     });
-    const resumed = new ScriptedAgentSession(successEvents);
+    const resumed = new ScriptedAgentSession(successfulEvents);
     const h = harness([waiting, resumed]);
-    h.revisions.nextRevisionId = workspaceRevisionId("revision-waiting");
+    h.revisions.nextRevisionId = fakeRevision("revision-waiting");
 
-    await expect(h.worker.execute(scope)).resolves.toEqual({ outcome: "waiting" });
-    expect(h.runs.snapshot.status).toBe("waiting");
-    expect(h.workspaces.commitCount).toBe(1);
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "waiting" });
+    const resumedScope = h.persistence.scopeForRun(h.scope.runId);
+    h.persistence.setAnswer(resumedScope, "只处理 Markdown");
+    await expect(h.worker.execute(resumedScope)).resolves.toEqual({ outcome: "succeeded" });
 
-    h.runs.resume("只处理 Markdown");
-    await expect(h.worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
-
-    expect(resumed.turns).toEqual([{ mode: "follow_up", text: "只处理 Markdown" }]);
-    expect(h.sandboxes.acquireCount).toBe(2);
-    expect(h.workspaces.commitCount).toBe(1);
-    expect(h.runs.snapshot.status).toBe("succeeded");
+    expect(resumed.prompts).toEqual(["只处理 Markdown"]);
+    expect(h.factory.projections[1]).toEqual(projection);
+    expect(h.persistence.record(resumedScope).run.status).toBe("succeeded");
   });
 
-  it("崩溃后保留已提交事件高水位，重入从下一序号继续且 Workspace 只提交一次", async () => {
-    const h = harness([new ScriptedAgentSession(successEvents)]);
-    const now = h.clock.now();
-    const claim = await h.runs.claim({
-      scope,
+  it("model_execution_started 后崩溃不会自动重跑，恢复协调器强制 recovery_required", async () => {
+    const h = harness([]);
+    const claimed = await h.persistence.claim({
+      scope: h.scope,
       workerId: "crashed-worker",
-      now,
-      leaseUntil: new Date(now.valueOf() + 30_000),
+      leaseDurationMs: 30_000,
     });
-    if (claim.outcome !== "claimed") throw new Error("测试前置 claim 失败");
-    const partial = await h.runs.commit({
-      scope,
-      claimToken: claim.claim.token,
-      claimEpoch: claim.claim.epoch,
-      expectedStateVersion: claim.claim.snapshot.stateVersion,
-      events: [
-        {
-          sequence: 0,
-          idempotencyKey: `${scope.runId}/event/0`,
-          type: "message.delta",
-          occurredAt: now,
-          payload: { type: "message.delta", delta: "已落盘" },
-        },
-      ],
+    if (claimed.outcome !== "claimed") throw new Error("测试 claim 失败");
+    const event: RuntimeEventV1 = {
+      schemaVersion: 1,
+      kind: "attempt_state_changed",
+      sequence: 0,
+      occurredAt: claimed.databaseNow,
+      payload: { status: "running", stage: "model_execution_started" },
+    };
+    await h.persistence.mutate({
+      idempotencyKey: `${claimed.snapshot.attempt.attemptId}/stage/model-execution-started`,
+      fence: claimed.fence,
+      expectedAttemptVersion: 0,
+      nextAttemptStatus: "running",
+      nextStage: "model_execution_started",
+      events: [event],
       outbox: [],
     });
-    expect(partial.outcome).toBe("committed");
-    h.runs.markInterruptedAfterCrash();
-    h.revisions.nextRevisionId = workspaceRevisionId("revision-after-crash");
+    h.persistence.advanceDatabase(31_000);
 
-    await expect(h.worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
-
-    expect(h.runs.events.map((event) => event.sequence)).toEqual([0, 1, 2, 3, 4, 5]);
-    expect(new Set(h.runs.events.map((event) => event.idempotencyKey)).size).toBe(6);
-    expect(h.workspaces.commitCount).toBe(1);
+    await expect(
+      h.persistence.recoverExpiredAttempt({ scope: h.scope, decision: "safe_fail" }),
+    ).resolves.toBe("recovered");
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "ignored",
+      reason: "recovery_required",
+    });
+    const record = h.persistence.record(h.scope);
+    expect(record.attempt?.status).toBe("recovery_required");
+    expect(record.run.status).toBe("running");
+    expect(h.factory.createCount).toBe(0);
   });
 
-  it("执行超时会在安全点中止 Session 并以 failed 收敛", async () => {
+  it("跨 Tenant scope 被拒绝且不泄漏或改写原记录", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const attacker: ExecutionScope = { ...h.scope, tenantId: tenantId("tenant-attacker") };
+
+    await expect(h.worker.execute(attacker)).resolves.toEqual({
+      outcome: "ignored",
+      reason: "scope_mismatch",
+    });
+
+    expect(h.persistence.record(h.scope).run.status).toBe("queued");
+    expect(h.sandboxes.acquireCount).toBe(0);
+  });
+
+  it("超时在安全点清理 Sandbox 后只使用 Domain failed 终态", async () => {
     const blocked = new BlockingAgentSession();
     const h = harness([blocked]);
-    const execution = h.worker.execute(scope);
+    const execution = h.worker.execute(h.scope);
     await eventually(() => h.factory.createCount === 1);
-
-    h.clock.advance(60_000);
+    h.clock.fireTimeout();
 
     await expect(execution).resolves.toEqual({ outcome: "failed" });
-    expect(blocked.abortCount).toBe(1);
-    expect(h.runs.events.at(-1)?.type).toBe("run.timed_out");
-    expect(h.workspaces.commitCount).toBe(0);
-  });
 
-  it("Sandbox 收尾结果 UNKNOWN 会覆盖成功并进入恢复 Outbox", async () => {
-    const h = harness([new ScriptedAgentSession(successEvents)]);
-    h.sandboxes.nextSettlement = {
-      outcome: "unknown",
-      event: uncertainEvent("cleanup_after_create"),
-    };
-
-    await expect(h.worker.execute(scope)).resolves.toEqual({ outcome: "failed" });
-
-    expect(h.runs.snapshot.status).toBe("failed");
-    expect(h.runs.outbox).toHaveLength(1);
-    expect(h.runs.events.at(-1)?.type).toBe("sandbox.lifecycle_unknown");
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("failed");
+    expect(record.attempt?.status).toBe("failed");
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({ kind: "sandbox_cleanup", state: "completed" }),
+    );
   });
 });
 
-function uncertainEvent(stage: UncertainLifecycleEvent["stage"]): UncertainLifecycleEvent {
+function uncertain(stage: UncertainLifecycleEvent["stage"]): UncertainLifecycleEvent {
   return {
     kind: "sandbox_create_outcome_unknown",
     stage,

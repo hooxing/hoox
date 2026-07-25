@@ -317,8 +317,7 @@ export class PgBlobLifecycleRepository
         { isolationLevel: "READ COMMITTED" },
       );
     } catch (error) {
-      if (error instanceof BlobStoreError) throw error;
-      throw mapPersistenceError(error, "预留 stable blob 生命周期");
+      throw mapBlobPersistenceError(error, "预留 stable blob 生命周期");
     }
   }
 
@@ -331,7 +330,7 @@ export class PgBlobLifecycleRepository
         return row === undefined ? undefined : mapCommit(row);
       });
     } catch (error) {
-      throw mapPersistenceError(error, "读取 blob commit");
+      throw mapBlobPersistenceError(error, "读取 blob commit");
     }
   }
 
@@ -352,7 +351,7 @@ export class PgBlobLifecycleRepository
         );
       });
     } catch (error) {
-      throw mapPersistenceError(error, "创建 blob commit");
+      throw mapBlobPersistenceError(error, "创建 blob commit");
     }
   }
 
@@ -396,7 +395,7 @@ export class PgBlobLifecycleRepository
       });
     } catch (error) {
       if (error instanceof TypeError) throw error;
-      throw mapPersistenceError(error, "推进 blob commit");
+      throw mapBlobPersistenceError(error, "推进 blob commit");
     }
   }
 
@@ -538,7 +537,7 @@ export class PgBlobLifecycleRepository
         return { status: "started" as const, authorization, snapshotVersion: next.version };
       });
     } catch (error) {
-      throw mapPersistenceError(error, "签发 promotion 授权");
+      throw mapBlobPersistenceError(error, "签发 promotion 授权");
     }
   }
 
@@ -563,6 +562,15 @@ export class PgBlobLifecycleRepository
     assertUuid(input.authorizationId, "authorizationId");
     try {
       return await withTenantTransaction(this.pool, input.scope, async (client) => {
+        // Promotion 事务统一先锁 authorization，再锁其 current execution。
+        const auth = await findAuthorization(
+          client,
+          input.scope.tenantId,
+          input.authorizationId,
+          true,
+        );
+        const execution =
+          auth === undefined ? undefined : await findBoundCurrentExecution(client, auth, true);
         const commitRow = await findCommit(client, input.scope.tenantId, input.operationId, true);
         if (commitRow === undefined) {
           return { status: "version_conflict" as const };
@@ -573,25 +581,10 @@ export class PgBlobLifecycleRepository
             current.version === input.expectedSnapshotVersion + 1 &&
             current.status === "allocation_reserved"
           ) {
-            const consumed = await findAuthorization(
-              client,
-              input.scope.tenantId,
-              input.authorizationId,
-              true,
-            );
-            const proof =
-              consumed === undefined || consumed.current_execution_id === null
-                ? undefined
-                : await findExecution(
-                    client,
-                    input.scope.tenantId,
-                    consumed.current_execution_id,
-                    true,
-                  );
             if (
-              consumed?.operation_id === input.operationId &&
-              consumed.authorization_state === "consumed_not_copied" &&
-              proof?.proof_status === "consumed_not_copied"
+              auth?.operation_id === input.operationId &&
+              auth.authorization_state === "consumed_not_copied" &&
+              execution?.proof_status === "consumed_not_copied"
             ) {
               return { status: "proven_not_copied" as const, snapshotVersion: current.version };
             }
@@ -602,12 +595,6 @@ export class PgBlobLifecycleRepository
         if (current.promotionAuthorization?.authorizationId !== input.authorizationId) {
           return { status: "authorization_mismatch" as const };
         }
-        const auth = await findAuthorization(
-          client,
-          input.scope.tenantId,
-          input.authorizationId,
-          true,
-        );
         if (
           auth === undefined ||
           auth.operation_id !== input.operationId ||
@@ -615,13 +602,6 @@ export class PgBlobLifecycleRepository
         ) {
           return { status: "authorization_mismatch" as const };
         }
-        if (auth.current_execution_id === null) return { status: "proof_unavailable" as const };
-        const execution = await findExecution(
-          client,
-          input.scope.tenantId,
-          auth.current_execution_id,
-          true,
-        );
         if (execution === undefined) return { status: "proof_unavailable" as const };
         if (["copy_issued", "succeeded"].includes(execution.proof_status)) {
           return { status: "copy_may_have_been_issued" as const };
@@ -658,7 +638,7 @@ export class PgBlobLifecycleRepository
         return { status: "proven_not_copied" as const, snapshotVersion: next.version };
       });
     } catch (error) {
-      throw mapPersistenceError(error, "证明 promotion 未 COPY");
+      throw mapBlobPersistenceError(error, "证明 promotion 未 COPY");
     }
   }
 
@@ -703,7 +683,7 @@ export class PgBlobLifecycleRepository
         return { referenceId };
       });
     } catch (error) {
-      throw mapPersistenceError(error, "提交 staging 引用");
+      throw mapBlobPersistenceError(error, "提交 staging 引用");
     }
   }
 
@@ -727,7 +707,7 @@ export class PgBlobLifecycleRepository
           : { status: "committed" as const, referenceId };
       });
     } catch (error) {
-      throw mapPersistenceError(error, "解析 staging 引用提交");
+      throw mapBlobPersistenceError(error, "解析 staging 引用提交");
     }
   }
 
@@ -828,7 +808,7 @@ export class PgBlobLifecycleRepository
         return "marked";
       });
     } catch (error) {
-      throw mapPersistenceError(error, "标记 stable 引用");
+      throw mapBlobPersistenceError(error, "标记 stable 引用");
     }
   }
 
@@ -860,7 +840,7 @@ export class PgBlobLifecycleRepository
         return "not_marked";
       });
     } catch (error) {
-      throw mapPersistenceError(error, "解析 stable 引用标记");
+      throw mapBlobPersistenceError(error, "解析 stable 引用标记");
     }
   }
 
@@ -885,14 +865,9 @@ export class PgBlobLifecycleRepository
         if (auth.authorization_state === "succeeded") {
           return { status: "completed", authorization: mapAuthorization(auth) };
         }
-        if (auth.current_execution_id !== null) {
-          const execution = await findExecution(
-            client,
-            input.scope.tenantId,
-            auth.current_execution_id,
-            true,
-          );
-          if (execution === undefined) throw new Error("authorization 当前 execution 缺失");
+        const currentExecution = await findBoundCurrentExecution(client, auth, true);
+        if (currentExecution !== undefined) {
+          const execution = currentExecution;
           if (execution.phase === "succeeded") {
             return { status: "completed", authorization: mapAuthorization(auth) };
           }
@@ -941,11 +916,19 @@ export class PgBlobLifecycleRepository
           [input.scope.tenantId, auth.authorization_id, executionId, generation],
         );
         const execution = await findExecution(client, input.scope.tenantId, executionId, false);
-        if (execution === undefined) throw new Error("execution 创建后无法读回");
+        if (
+          execution === undefined ||
+          execution.authorization_id !== auth.authorization_id ||
+          execution.operation_id !== auth.operation_id ||
+          execution.execution_id !== executionId ||
+          safeInteger(execution.generation, "execution generation") !== generation
+        ) {
+          throw executionBindingMismatch("新建 execution 与 authorization 身份不连续");
+        }
         return { status: "copy_allowed", execution: mapExecution(execution) };
       });
     } catch (error) {
-      throw mapPersistenceError(error, "取得 promotion execution");
+      throw mapBlobPersistenceError(error, "取得 promotion execution");
     }
   }
 
@@ -971,12 +954,15 @@ export class PgBlobLifecycleRepository
           false,
         );
         const unavailable = classifyAuthorization(auth, execution.operation_id);
+        if (unavailable === undefined && auth !== undefined) {
+          assertExecutionBoundToAuthorization(auth, execution);
+        }
         return unavailable === undefined && auth !== undefined
           ? { status: "authorized", authorization: mapAuthorization(auth) }
           : { status: unavailable ?? "not_found" };
       });
     } catch (error) {
-      throw mapPersistenceError(error, "解析 promotion 授权");
+      throw mapBlobPersistenceError(error, "解析 promotion 授权");
     }
   }
 
@@ -990,6 +976,25 @@ export class PgBlobLifecycleRepository
     assertTenantScope(input.scope);
     try {
       return await withTenantTransaction(this.pool, input.scope, async (client) => {
+        const authorization = await findAuthorization(
+          client,
+          input.scope.tenantId,
+          input.execution.authorizationId,
+          true,
+        );
+        if (authorization === undefined || authorization.authorization_state !== "started") {
+          return { status: "claim_lost" as const };
+        }
+        const execution = await findBoundCurrentExecution(client, authorization, true);
+        if (execution === undefined || !executionMatches(execution, input.execution)) {
+          return { status: "claim_lost" as const };
+        }
+        if (execution.phase === "executing" && execution.proof_status === "copy_issued") {
+          return { status: "marked" as const, execution: mapExecution(execution) };
+        }
+        if (execution.phase !== "claimed" || execution.proof_status !== "pre_intent") {
+          return { status: "claim_lost" as const };
+        }
         const result = await client.query<ExecutionRow>(
           `UPDATE promotion_executions
               SET phase = 'executing', proof_status = 'copy_issued', updated_at = clock_timestamp()
@@ -997,11 +1002,6 @@ export class PgBlobLifecycleRepository
               AND operation_id = $4 AND attempt_id = $5 AND generation = $6
               AND incarnation_id = $7 AND physical_object_key = $8
               AND phase = 'claimed' AND proof_status = 'pre_intent'
-              AND EXISTS (
-                SELECT 1 FROM promotion_authorizations auth
-                 WHERE auth.tenant_id = $1 AND auth.authorization_id = $3
-                   AND auth.current_execution_id = $2 AND auth.state = 'started'
-              )
             RETURNING *`,
           [
             input.scope.tenantId,
@@ -1015,25 +1015,12 @@ export class PgBlobLifecycleRepository
           ],
         );
         const row = result.rows[0];
-        if (row !== undefined) return { status: "marked" as const, execution: mapExecution(row) };
-        const readback = await findExecution(
-          client,
-          input.scope.tenantId,
-          input.execution.executionId,
-          false,
-        );
-        if (
-          readback !== undefined &&
-          executionMatches(readback, input.execution) &&
-          readback.phase === "executing" &&
-          readback.proof_status === "copy_issued"
-        ) {
-          return { status: "marked" as const, execution: mapExecution(readback) };
-        }
-        return { status: "claim_lost" as const };
+        return row === undefined
+          ? { status: "claim_lost" as const }
+          : { status: "marked" as const, execution: mapExecution(row) };
       });
     } catch (error) {
-      throw mapPersistenceError(error, "记录 promotion COPY 意图");
+      throw mapBlobPersistenceError(error, "记录 promotion COPY 意图");
     }
   }
 
@@ -1045,26 +1032,16 @@ export class PgBlobLifecycleRepository
     assertTenantScope(input.scope);
     try {
       await withTenantTransaction(this.pool, input.scope, async (client) => {
-        const execution = await findExecution(
-          client,
-          input.scope.tenantId,
-          input.execution.executionId,
-          true,
-        );
-        if (execution === undefined || !executionMatches(execution, input.execution)) {
-          throw casConflict("promotion execution 已失效");
-        }
         const authorization = await findAuthorization(
           client,
           input.scope.tenantId,
-          execution.authorization_id,
+          input.execution.authorizationId,
           true,
         );
-        if (
-          authorization === undefined ||
-          authorization.current_execution_id !== execution.execution_id
-        ) {
-          throw casConflict("promotion execution 已被接管");
+        if (authorization === undefined) throw casConflict("promotion authorization 已失效");
+        const execution = await findBoundCurrentExecution(client, authorization, true);
+        if (execution === undefined || !executionMatches(execution, input.execution)) {
+          throw casConflict("promotion execution 已失效");
         }
         if (input.outcome === "succeeded") {
           if (execution.phase === "not_copied") {
@@ -1107,7 +1084,7 @@ export class PgBlobLifecycleRepository
         );
       });
     } catch (error) {
-      throw mapPersistenceError(error, "完成 promotion execution");
+      throw mapBlobPersistenceError(error, "完成 promotion execution");
     }
   }
 
@@ -1213,7 +1190,7 @@ export class PgBlobLifecycleRepository
         };
       });
     } catch (error) {
-      throw mapPersistenceError(error, "取得 stable GC claim");
+      throw mapBlobPersistenceError(error, "取得 stable GC claim");
     }
   }
 
@@ -1301,7 +1278,7 @@ export class PgBlobLifecycleRepository
         };
       });
     } catch (error) {
-      throw mapPersistenceError(error, "开始 stable 删除");
+      throw mapBlobPersistenceError(error, "开始 stable 删除");
     }
   }
 
@@ -1394,7 +1371,7 @@ export class PgBlobLifecycleRepository
         );
       });
     } catch (error) {
-      throw mapPersistenceError(error, "完成 stable 删除");
+      throw mapBlobPersistenceError(error, "完成 stable 删除");
     }
   }
 
@@ -1469,7 +1446,7 @@ export class PgBlobLifecycleRepository
         throw casConflict("pre-delete claim 已失效或已进入 deleting");
       });
     } catch (error) {
-      throw mapPersistenceError(error, "释放 stable pre-delete claim");
+      throw mapBlobPersistenceError(error, "释放 stable pre-delete claim");
     }
   }
 
@@ -1510,7 +1487,7 @@ export class PgBlobLifecycleRepository
         return { status: lifecycle.state };
       });
     } catch (error) {
-      throw mapPersistenceError(error, "解析 stable lifecycle");
+      throw mapBlobPersistenceError(error, "解析 stable lifecycle");
     }
   }
 
@@ -1589,7 +1566,7 @@ export class PgBlobLifecycleRepository
         };
       });
     } catch (error) {
-      throw mapPersistenceError(error, "取得 retired tombstone scrub claim");
+      throw mapBlobPersistenceError(error, "取得 retired tombstone scrub claim");
     }
   }
 
@@ -1622,7 +1599,7 @@ export class PgBlobLifecycleRepository
         if (completed.rowCount !== 1) throw casConflict("tombstone scrub claim 已失效");
       });
     } catch (error) {
-      throw mapPersistenceError(error, "完成 retired tombstone scrub");
+      throw mapBlobPersistenceError(error, "完成 retired tombstone scrub");
     }
   }
 }
@@ -1649,6 +1626,27 @@ function boundedSeconds(value: number | undefined, fallback: number, name: strin
 
 function casConflict(message: string): PersistenceError {
   return new PersistenceError("CONFLICT", message);
+}
+
+/** 把公开 Blob 契约错误收敛为 Persistence 稳定码，禁止误包成 UNEXPECTED。 */
+function mapBlobPersistenceError(error: unknown, operation: string): PersistenceError {
+  if (!(error instanceof BlobStoreError)) return mapPersistenceError(error, operation);
+  switch (error.code) {
+    case "BLOB_IDEMPOTENCY_CONFLICT":
+    case "BLOB_PRECONDITION_FAILED":
+    case "BLOB_NOT_FOUND":
+      return new PersistenceError("CONFLICT", `${operation}发生幂等或状态冲突`);
+    case "INVALID_BLOB_ARGUMENT":
+    case "TENANT_SCOPE_MISMATCH":
+      return new PersistenceError("CONSTRAINT_VIOLATION", `${operation}违反 Blob 身份约束`);
+    case "BLOB_INTEGRITY_MISMATCH":
+      return error.result === "unknown"
+        ? new PersistenceError("UNAVAILABLE", `${operation}读取到无法确认的 Blob 身份连续性`)
+        : new PersistenceError("CONSTRAINT_VIOLATION", `${operation}违反 Blob 身份约束`);
+    case "BLOB_RESULT_UNKNOWN":
+    case "BLOB_PROVIDER_ERROR":
+      return new PersistenceError("UNAVAILABLE", `${operation}结果暂不可确认`);
+  }
 }
 
 function stableKey(
@@ -1949,6 +1947,50 @@ async function findExecution(
     [tenantId, executionId],
   );
   return result.rows[0];
+}
+
+async function findBoundCurrentExecution(
+  client: PoolClient,
+  authorization: AuthorizationRow,
+  lock: boolean,
+): Promise<ExecutionRow | undefined> {
+  if (authorization.current_execution_id === null) {
+    if (safeInteger(authorization.execution_generation, "execution generation") !== 0) {
+      throw executionBindingMismatch("authorization 缺少 current execution 但 generation 非零");
+    }
+    return undefined;
+  }
+  const execution = await findExecution(
+    client,
+    authorization.tenant_id,
+    authorization.current_execution_id,
+    lock,
+  );
+  if (execution === undefined) {
+    throw executionBindingMismatch("authorization 的 current execution 不存在");
+  }
+  assertExecutionBoundToAuthorization(authorization, execution);
+  return execution;
+}
+
+function assertExecutionBoundToAuthorization(
+  authorization: AuthorizationRow,
+  execution: ExecutionRow,
+): void {
+  if (
+    execution.tenant_id !== authorization.tenant_id ||
+    execution.authorization_id !== authorization.authorization_id ||
+    execution.operation_id !== authorization.operation_id ||
+    execution.execution_id !== authorization.current_execution_id ||
+    safeInteger(execution.generation, "execution generation") !==
+      safeInteger(authorization.execution_generation, "authorization execution generation")
+  ) {
+    throw executionBindingMismatch("authorization 与 current execution 完整身份不连续");
+  }
+}
+
+function executionBindingMismatch(message: string): BlobStoreError {
+  return new BlobStoreError("BLOB_INTEGRITY_MISMATCH", message, { result: "unknown" });
 }
 
 function mapExecution(row: ExecutionRow): PromotionExecutionClaim {

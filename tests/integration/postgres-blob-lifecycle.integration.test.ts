@@ -205,7 +205,44 @@ function stableFrom(
   };
 }
 
-async function preparePromotion(
+function repositoryWithOneLostCommitResponse(): PgBlobLifecycleRepository {
+  const originalConnect = runtimePool.connect.bind(runtimePool);
+  let inject = true;
+  const lossyPool = new Proxy(runtimePool, {
+    get(target, property, receiver) {
+      if (property !== "connect") return Reflect.get(target, property, receiver);
+      return async () => {
+        const client = await originalConnect();
+        const originalMethod = client.query;
+        const originalQuery = client.query.bind(client);
+        client.query = (async (...args: unknown[]) => {
+          const result = await (originalQuery as (...queryArgs: unknown[]) => Promise<unknown>)(
+            ...args,
+          );
+          if (inject && args[0] === "COMMIT") {
+            // COMMIT 已在服务端生效，只丢失调用方响应；先恢复方法，避免污染归还连接。
+            inject = false;
+            client.query = originalMethod;
+            throw Object.assign(new Error("模拟 COMMIT 成功后的响应丢失"), {
+              code: "ECONNRESET",
+            });
+          }
+          return result;
+        }) as typeof client.query;
+        return client;
+      };
+    },
+  }) as Pool;
+  return new PgBlobLifecycleRepository(lossyPool, {
+    objectPrefix: prefix,
+    gcLeaseSeconds: 1,
+    promotionLeaseSeconds: 1,
+    scrubLeaseSeconds: 1,
+    scrubIntervalSeconds: 1,
+  });
+}
+
+async function prepareAllocation(
   scope: TenantBlobScope,
   staging: StagedBlobRef,
   operationId: string,
@@ -213,7 +250,7 @@ async function preparePromotion(
   readonly referenceId: string;
   readonly allocation: StableBlobLifecycleAllocation;
   readonly stable: StableBlobRef;
-  readonly authorization: { tenantId: string; operationId: string; authorizationId: string };
+  readonly snapshotVersion: number;
 }> {
   let snapshot: BlobCommitSnapshot = {
     operationId,
@@ -248,10 +285,28 @@ async function preparePromotion(
   expect(
     await repository.compareAndSet({ scope, operationId, expectedVersion: snapshot.version, next }),
   ).toBe(true);
+  return { referenceId, allocation, stable, snapshotVersion: next.version };
+}
+
+async function preparePromotion(
+  scope: TenantBlobScope,
+  staging: StagedBlobRef,
+  operationId: string,
+): Promise<{
+  readonly referenceId: string;
+  readonly allocation: StableBlobLifecycleAllocation;
+  readonly stable: StableBlobRef;
+  readonly authorization: { tenantId: string; operationId: string; authorizationId: string };
+}> {
+  const { referenceId, allocation, stable, snapshotVersion } = await prepareAllocation(
+    scope,
+    staging,
+    operationId,
+  );
   const started = await repository.startPromotion({
     scope,
     operationId,
-    expectedSnapshotVersion: next.version,
+    expectedSnapshotVersion: snapshotVersion,
     allocationId: allocation.allocationId,
   });
   if (started.status !== "started") throw new Error(`startPromotion 失败：${started.status}`);
@@ -286,6 +341,14 @@ describe("PostgreSQL stable blob 生命周期", () => {
       referenceId: `ref-left-${unique}`,
     });
     expect(replay).toEqual(left);
+    await expect(
+      repository.reserve({
+        scope: scopeA,
+        staged: staged(scopeA, `reserve-conflict-${unique}`),
+        operationId: `reserve-left-${unique}`,
+        referenceId: `ref-left-${unique}`,
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
     const otherTenant = await repository.reserve({
       scope: scopeB,
       staged: { ...stagedA1, tenantId: scopeB.tenantId, uploadId: `upload-reserve-b-${unique}` },
@@ -417,29 +480,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
   it("事务响应丢失后重复 reserve 从 PostgreSQL 读回同一结果", async () => {
     const staging = staged(scopeA, `response-loss-${unique}`);
     const operationId = `response-loss-${unique}`;
-    const originalConnect = runtimePool.connect.bind(runtimePool);
-    let inject = true;
-    const lossyPool = new Proxy(runtimePool, {
-      get(target, property, receiver) {
-        if (property !== "connect") return Reflect.get(target, property, receiver);
-        return async () => {
-          const client = await originalConnect();
-          const originalQuery = client.query.bind(client);
-          client.query = (async (...args: unknown[]) => {
-            const result = await (originalQuery as (...queryArgs: unknown[]) => Promise<unknown>)(
-              ...args,
-            );
-            if (inject && typeof args[0] === "string" && args[0] === "COMMIT") {
-              inject = false;
-              throw Object.assign(new Error("模拟 COMMIT 响应丢失"), { code: "ECONNRESET" });
-            }
-            return result;
-          }) as typeof client.query;
-          return client;
-        };
-      },
-    }) as Pool;
-    const lossy = new PgBlobLifecycleRepository(lossyPool, { objectPrefix: prefix });
+    const lossy = repositoryWithOneLostCommitResponse();
     await expect(
       lossy.reserve({
         scope: scopeA,
@@ -455,6 +496,196 @@ describe("PostgreSQL stable blob 生命周期", () => {
       referenceId: `ref-${operationId}`,
     });
     expect(readback.physicalObjectKey).toContain(`/incarnations/${readback.incarnationId}`);
+  });
+
+  it("关键状态变更在 COMMIT 成功但响应丢失后可由幂等重试读回", async () => {
+    const startOperation = `loss-start-${unique}`;
+    const startFlow = await prepareAllocation(
+      scopeA,
+      staged(scopeA, startOperation),
+      startOperation,
+    );
+    const startInput = {
+      scope: scopeA,
+      operationId: startOperation,
+      expectedSnapshotVersion: startFlow.snapshotVersion,
+      allocationId: startFlow.allocation.allocationId,
+    } as const;
+    await expect(
+      repositoryWithOneLostCommitResponse().startPromotion(startInput),
+    ).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    const started = await repository.startPromotion(startInput);
+    expect(started).toMatchObject({ status: "started" });
+
+    const proofOperation = `loss-proof-${unique}`;
+    const proofFlow = await preparePromotion(
+      scopeA,
+      staged(scopeA, proofOperation),
+      proofOperation,
+    );
+    const proofClaim = await repository.claimPromotionExecution({
+      scope: scopeA,
+      authorization: proofFlow.authorization,
+      attemptId: randomUUID(),
+    });
+    if (proofClaim.status !== "copy_allowed") throw new Error("proof execution 未取得");
+    await repository.completePromotionExecution({
+      scope: scopeA,
+      execution: proofClaim.execution,
+      outcome: "not_copied",
+    });
+    const proofSnapshot = await repository.load(scopeA, proofOperation);
+    if (proofSnapshot === undefined) throw new Error("proof commit 缺失");
+    const proofInput = {
+      scope: scopeA,
+      operationId: proofOperation,
+      expectedSnapshotVersion: proofSnapshot.version,
+      authorizationId: proofFlow.authorization.authorizationId,
+    } as const;
+    await expect(
+      repositoryWithOneLostCommitResponse().provePromotionNotCopied(proofInput),
+    ).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    expect(await repository.provePromotionNotCopied(proofInput)).toMatchObject({
+      status: "proven_not_copied",
+    });
+
+    const copyOperation = `loss-copy-${unique}`;
+    const copyFlow = await preparePromotion(scopeA, staged(scopeA, copyOperation), copyOperation);
+    const copyClaim = await repository.claimPromotionExecution({
+      scope: scopeA,
+      authorization: copyFlow.authorization,
+      attemptId: randomUUID(),
+    });
+    if (copyClaim.status !== "copy_allowed") throw new Error("copy execution 未取得");
+    const copyInput = { scope: scopeA, execution: copyClaim.execution } as const;
+    await expect(
+      repositoryWithOneLostCommitResponse().markPromotionCopyIssued(copyInput),
+    ).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    expect(await repository.markPromotionCopyIssued(copyInput)).toMatchObject({ status: "marked" });
+
+    const deletionOperation = `loss-delete-${unique}`;
+    const deletionFlow = await preparePromotion(
+      scopeA,
+      staged(scopeA, deletionOperation),
+      deletionOperation,
+    );
+    const deletionClaim = await repository.claimPromotionExecution({
+      scope: scopeA,
+      authorization: deletionFlow.authorization,
+      attemptId: randomUUID(),
+    });
+    if (deletionClaim.status !== "copy_allowed") throw new Error("deletion execution 未取得");
+    const deletionIssued = await repository.markPromotionCopyIssued({
+      scope: scopeA,
+      execution: deletionClaim.execution,
+    });
+    if (deletionIssued.status !== "marked") throw new Error("deletion COPY intent 未写入");
+    await repository.completePromotionExecution({
+      scope: scopeA,
+      execution: deletionIssued.execution,
+      outcome: "succeeded",
+    });
+    await repository.markReferenceStable({
+      scope: scopeA,
+      operationId: deletionOperation,
+      referenceId: deletionFlow.referenceId,
+      stable: deletionFlow.stable,
+    });
+    await migrationTenantQuery(
+      scopeA,
+      "DELETE FROM blob_references WHERE tenant_id = $1 AND reference_id = $2",
+      [scopeA.tenantId, deletionFlow.referenceId],
+    );
+    const gcClaim = await repository.claimUnreachable({
+      scope: scopeA,
+      blob: deletionFlow.stable,
+    });
+    if (gcClaim.status !== "claimed") throw new Error(`GC claim 失败：${gcClaim.status}`);
+    const deletionInput = {
+      scope: scopeA,
+      blob: deletionFlow.stable,
+      claim: gcClaim.claim,
+    } as const;
+    await expect(
+      repositoryWithOneLostCommitResponse().beginDeletion(deletionInput),
+    ).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    expect(await repository.beginDeletion(deletionInput)).toMatchObject({ status: "started" });
+  });
+
+  it("promotion 并发路径统一 authorization→execution 锁序且最终收敛", async () => {
+    for (let index = 0; index < 8; index += 1) {
+      const operationId = `lock-order-${index}-${unique}`;
+      const flow = await preparePromotion(scopeA, staged(scopeA, operationId), operationId);
+      const claim = await repository.claimPromotionExecution({
+        scope: scopeA,
+        authorization: flow.authorization,
+        attemptId: randomUUID(),
+      });
+      if (claim.status !== "copy_allowed") throw new Error(`未取得并发 execution：${claim.status}`);
+      const [mark, complete] = await Promise.allSettled([
+        repository.markPromotionCopyIssued({ scope: scopeA, execution: claim.execution }),
+        repository.completePromotionExecution({
+          scope: scopeA,
+          execution: claim.execution,
+          outcome: "reconcile",
+        }),
+      ]);
+      expect(mark.status).toBe("fulfilled");
+      expect(complete.status).toBe("fulfilled");
+      const converged = await repository.claimPromotionExecution({
+        scope: scopeA,
+        authorization: flow.authorization,
+        attemptId: randomUUID(),
+      });
+      expect(converged).toMatchObject({
+        status: "reconcile",
+        execution: { executionId: claim.execution.executionId },
+      });
+    }
+  });
+
+  it("数据库拒绝错绑 current execution，Runtime 不能改写审计身份列", async () => {
+    const operationA = `binding-a-${unique}`;
+    const operationB = `binding-b-${unique}`;
+    const flowA = await preparePromotion(scopeA, staged(scopeA, operationA), operationA);
+    const flowB = await preparePromotion(scopeA, staged(scopeA, operationB), operationB);
+    const claimA = await repository.claimPromotionExecution({
+      scope: scopeA,
+      authorization: flowA.authorization,
+      attemptId: randomUUID(),
+    });
+    const claimB = await repository.claimPromotionExecution({
+      scope: scopeA,
+      authorization: flowB.authorization,
+      attemptId: randomUUID(),
+    });
+    if (claimA.status !== "copy_allowed" || claimB.status !== "copy_allowed") {
+      throw new Error("绑定约束测试未取得 execution");
+    }
+    await expect(
+      withTenantTransaction(runtimePool, scopeA, (client) =>
+        client.query(
+          `UPDATE promotion_executions SET attempt_id = $3
+            WHERE tenant_id = $1 AND execution_id = $2`,
+          [scopeA.tenantId, claimA.execution.executionId, randomUUID()],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      withTenantTransaction(migratorPool, scopeA, (client) =>
+        client.query(
+          `UPDATE promotion_authorizations
+              SET current_execution_id = $3, execution_generation = $4
+            WHERE tenant_id = $1 AND authorization_id = $2`,
+          [
+            scopeA.tenantId,
+            flowA.authorization.authorizationId,
+            claimB.execution.executionId,
+            claimB.execution.generation,
+          ],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "23503" });
   });
 
   it("真实 MinIO 完成新 incarnation、GC 接管与 tombstone scrub，迟到旧操作不伤新对象", async () => {

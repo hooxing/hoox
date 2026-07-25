@@ -3,6 +3,7 @@ import { migrateDown, migrateUp } from "./migrations.js";
 import { PgCoreRepositories } from "./pg-core-repositories.js";
 import type { CoreRepositories } from "./ports.js";
 import { createPostgresPool, probePostgres, type PostgresPoolOptions } from "./postgres.js";
+import { bootstrapRuntimeAccess } from "./role-bootstrap.js";
 
 export interface PersistenceRuntime {
   readonly repositories: CoreRepositories;
@@ -12,7 +13,9 @@ export interface PersistenceRuntime {
 
 export interface MigrationRuntime {
   up(): Promise<readonly MigrationRecord[]>;
-  down(options: Omit<MigrationDownOptions, "directory">): Promise<readonly MigrationRecord[]>;
+  down(
+    options: Omit<MigrationDownOptions, "directory" | "runtimeRole">,
+  ): Promise<readonly MigrationRecord[]>;
   probe(): Promise<void>;
   close(): Promise<void>;
 }
@@ -31,8 +34,12 @@ export function createMigrationRuntime(
 ): MigrationRuntime {
   const pool = createPostgresPool(options);
   return {
-    up: () => migrateUp(pool, { runtimeRole: options.runtimeRole }),
-    down: (downOptions) => migrateDown(pool, downOptions),
+    up: async () => {
+      const records = await migrateUp(pool, { runtimeRole: options.runtimeRole });
+      await bootstrapRuntimeAccess(pool, options.runtimeRole);
+      return records;
+    },
+    down: (downOptions) => migrateDown(pool, { ...downOptions, runtimeRole: options.runtimeRole }),
     probe: () => probePostgres(pool),
     close: () => pool.end(),
   };

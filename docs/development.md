@@ -59,6 +59,18 @@ corepack pnpm config:check
 - 示例中的数据库密码、访问密钥、模板 ID、模型地址和模型 ID 必须保持为明显占位值。
 - CI 只使用 `.env.example` 执行静态 Compose 展开，不连接 PostgreSQL、MinIO、CubeSandbox 或模型服务。
 
+## PostgreSQL 角色 bootstrap
+
+业务 Schema 迁移不能替代数据库级 bootstrap。首次准备专用数据库时，由不进入应用进程的 Database Admin 完成以下一次性操作：
+
+1. 创建无 `SUPERUSER/CREATEDB/CREATEROLE/BYPASSRLS/REPLICATION` 的 Migrator 与 Runtime 登录角色；
+2. 从 `PUBLIC`、Migrator 和 Runtime 撤销目标数据库的 `CREATE`，只保留必要的 `CONNECT`；
+3. 创建专用业务 Schema，并只让 Migrator 成为该 Schema owner；Database Admin 继续作为数据库 owner；
+4. 确认 Runtime 不是数据库、Schema、表或序列 owner，也没有可继承或可 `SET ROLE` 到的高权限成员关系；
+5. 分别写入本机忽略文件中的 `DATABASE_BOOTSTRAP_URL`、`MIGRATION_DATABASE_URL`、`DATABASE_URL` 与 `DATABASE_RUNTIME_ROLE`。Bootstrap URL 只用于本地权限集成测试或受控运维，不能进入服务进程。
+
+`pnpm db:migrate:up` 会先验证完整 Runtime 角色闭包，再执行 Schema migration，最后单独运行可重复的最小 ACL bootstrap。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作，并撤销 Runtime 在当前 Schema 的动态 ACL；它不会删除角色、重新开放数据库 `CREATE` 或回滚 Database Admin bootstrap。
+
 ## 提交前检查
 
 1. 行为变化有测试。

@@ -4,7 +4,11 @@ import { expectedEnvironmentKeys, validateEnvironmentExample } from "../scripts/
 function validExample(): string {
   return expectedEnvironmentKeys
     .map((key) => {
-      if (key === "DATABASE_URL" || key === "MIGRATION_DATABASE_URL") {
+      if (
+        key === "DATABASE_URL" ||
+        key === "DATABASE_BOOTSTRAP_URL" ||
+        key === "MIGRATION_DATABASE_URL"
+      ) {
         return `${key}=postgresql://user:replace-me@localhost/db`;
       }
       if (key === "DATABASE_DOCKER_URL") {

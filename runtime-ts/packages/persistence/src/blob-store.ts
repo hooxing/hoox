@@ -44,19 +44,49 @@ export interface StableBlobLifecycleAllocation {
 
 /**
  * 由 PostgreSQL 生命周期事务实现。incarnationId 与 physicalObjectKey 必须永久唯一；
- * retired 历史永久保留，不能重新分配。resolveForPromotion 只返回已持久化的 reserved/started allocation。
+ * retired 历史永久保留，不能重新分配。调用方不能指定 mode；由 PG 根据当前生命周期与永久历史原子决定。
  */
 export interface StableBlobLifecycleAllocationPort {
   reserve(input: {
     readonly scope: TenantBlobScope;
     readonly staged: StagedBlobRef;
-    readonly mode: "active_reuse" | "new_after_deleted";
+    readonly operationId: string;
+    readonly referenceId: string;
   }): Promise<StableBlobLifecycleAllocation>;
-  resolveForPromotion(input: {
+}
+
+export interface PromotionAuthorizationRef {
+  readonly tenantId: string;
+  readonly operationId: string;
+  readonly authorizationId: string;
+}
+
+export interface StableBlobPromotionAuthorization extends StableBlobLifecycleAllocation {
+  readonly authorizationId: string;
+  readonly operationId: string;
+  readonly referenceId: string;
+  readonly stagingUploadId: string;
+  readonly stagingObjectKey: string;
+}
+
+export type PromotionAuthorizationResolution =
+  | { readonly status: "authorized"; readonly authorization: StableBlobPromotionAuthorization }
+  | {
+      readonly status:
+        | "not_started"
+        | "wrong_operation"
+        | "retired"
+        | "consumed"
+        | "inactive"
+        | "not_found";
+    };
+
+/** 只从 PG 的 promotion_started 授权行解析；允许 UNKNOWN 恢复重复读取同一规范授权。 */
+export interface StableBlobPromotionAuthorizationPort {
+  resolveAuthorizedForCopy(input: {
     readonly scope: TenantBlobScope;
-    readonly staged: StagedBlobRef;
-    readonly allocation: StableBlobLifecycleAllocation;
-  }): Promise<StableBlobLifecycleAllocation | undefined>;
+    readonly authorization: PromotionAuthorizationRef;
+  }): Promise<PromotionAuthorizationResolution>;
 }
 
 export type BlobRef = StagedBlobRef | StableBlobRef;
@@ -92,7 +122,7 @@ export interface BlobStore {
   promote(
     scope: TenantBlobScope,
     staged: StagedBlobRef,
-    allocation: StableBlobLifecycleAllocation,
+    authorization: PromotionAuthorizationRef,
   ): Promise<StableBlobRef>;
   head(scope: TenantBlobScope, blob: BlobRef): Promise<BlobObjectHead | undefined>;
   read(scope: TenantBlobScope, blob: BlobRef): AsyncIterable<Uint8Array>;

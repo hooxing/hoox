@@ -4,6 +4,7 @@ import {
   type BlobCommitSnapshot,
   type BlobCommitStatePort,
   type StableBlobLifecycleAllocation,
+  type StableBlobPromotionAuthorization,
   type StableBlobRef,
   type StagedBlobRef,
   transitionBlobCommit,
@@ -19,7 +20,7 @@ describe("Blob 补偿状态协议", () => {
       referenceId: "ref-1",
     });
     state = transitionBlobCommit(state, { type: "allocation_reserved", allocation, stable });
-    state = transitionBlobCommit(state, { type: "promotion_started" });
+    state = transitionBlobCommit(state, { type: "promotion_started", authorization });
     state = transitionBlobCommit(state, { type: "promotion_succeeded", stable });
     state = transitionBlobCommit(state, { type: "stable_mark_succeeded" });
     state = transitionBlobCommit(state, { type: "cleanup_requested", target: "staging" });
@@ -68,13 +69,14 @@ describe("Blob 补偿状态协议", () => {
   it("COPY 结果 UNKNOWN 时保留同一 allocation 与物理 target 并围绕它恢复", () => {
     let state = referenceCommittedState();
     state = transitionBlobCommit(state, { type: "allocation_reserved", allocation, stable });
-    state = transitionBlobCommit(state, { type: "promotion_started" });
+    state = transitionBlobCommit(state, { type: "promotion_started", authorization });
     state = transitionBlobCommit(state, { type: "promotion_result_unknown" });
 
     expect(state).toMatchObject({
       status: "promotion_unknown",
       allocation,
       stable,
+      promotionAuthorization: authorization,
     });
     expect(() =>
       transitionBlobCommit(state, {
@@ -85,7 +87,8 @@ describe("Blob 补偿状态协议", () => {
     ).toThrow(BlobCommitTransitionError);
     const retrySame = transitionBlobCommit(state, { type: "promotion_resolved", promoted: false });
     expect(retrySame).toMatchObject({ status: "allocation_reserved", allocation, stable });
-    const started = transitionBlobCommit(retrySame, { type: "promotion_started" });
+    expect(retrySame.promotionAuthorization).toBeUndefined();
+    const started = transitionBlobCommit(retrySame, { type: "promotion_started", authorization });
     expect(transitionBlobCommit(started, { type: "promotion_succeeded", stable }).status).toBe(
       "stable_object_ready",
     );
@@ -124,7 +127,10 @@ describe("Blob 补偿状态协议", () => {
       allocation: newAllocation,
       stable: newStable,
     });
-    const startedNew = transitionBlobCommit(reservedNew, { type: "promotion_started" });
+    const startedNew = transitionBlobCommit(reservedNew, {
+      type: "promotion_started",
+      authorization: newAuthorization,
+    });
     expect(
       transitionBlobCommit(startedNew, { type: "promotion_succeeded", stable: newStable }).status,
     ).toBe("stable_object_ready");
@@ -149,6 +155,19 @@ describe("Blob 补偿状态协议", () => {
         type: "allocation_reserved",
         allocation,
         stable: changedStable,
+      }),
+    ).toThrow(BlobCommitTransitionError);
+
+    const reserved = transitionBlobCommit(referenceCommittedState(), {
+      type: "allocation_reserved",
+      allocation,
+      stable,
+    });
+    expect(reserved.promotionAuthorization).toBeUndefined();
+    expect(() =>
+      transitionBlobCommit(reserved, {
+        type: "promotion_started",
+        authorization: { ...authorization, operationId: "other-operation" },
       }),
     ).toThrow(BlobCommitTransitionError);
   });
@@ -212,6 +231,17 @@ const allocation: StableBlobLifecycleAllocation = {
   mode: "active_reuse",
 };
 
+const authorization = {
+  tenantId: "tenant_a",
+  operationId: "operation-1",
+  authorizationId: "30000000-0000-4000-8000-000000000001",
+} as const;
+
+const newAuthorization = {
+  ...authorization,
+  authorizationId: "30000000-0000-4000-8000-000000000002",
+} as const;
+
 const newStable: StableBlobRef = {
   ...stable,
   incarnationId: "00000000-0000-4000-8000-000000000002",
@@ -250,7 +280,7 @@ function referenceCommittedState(): BlobCommitSnapshot {
 function promotionReadyState(): BlobCommitSnapshot {
   let state = referenceCommittedState();
   state = transitionBlobCommit(state, { type: "allocation_reserved", allocation, stable });
-  state = transitionBlobCommit(state, { type: "promotion_started" });
+  state = transitionBlobCommit(state, { type: "promotion_started", authorization });
   return transitionBlobCommit(state, { type: "promotion_succeeded", stable });
 }
 
@@ -279,6 +309,9 @@ class InMemoryCommitStatePort implements BlobCommitStatePort {
     readonly expectedVersion: number;
     readonly next: BlobCommitSnapshot;
   }): Promise<boolean> {
+    if (input.next.status === "promotion_started") {
+      throw new Error("promotion_started 必须使用同事务入口");
+    }
     const operations = this.tenants.get(input.scope.tenantId);
     const current = operations?.get(input.operationId);
     if (
@@ -287,6 +320,32 @@ class InMemoryCommitStatePort implements BlobCommitStatePort {
       input.next.scope.tenantId !== input.scope.tenantId ||
       input.next.operationId !== input.operationId
     ) {
+      return false;
+    }
+    operations?.set(input.operationId, input.next);
+    return true;
+  }
+
+  async startPromotion(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly operationId: string;
+    readonly expectedVersion: number;
+    readonly next: BlobCommitSnapshot & {
+      readonly status: "promotion_started";
+      readonly promotionAuthorization: typeof authorization;
+    };
+    readonly authorization: StableBlobPromotionAuthorization;
+  }): Promise<boolean> {
+    if (
+      input.authorization.authorizationId !== input.next.promotionAuthorization.authorizationId ||
+      input.authorization.operationId !== input.operationId ||
+      input.authorization.tenantId !== input.scope.tenantId
+    ) {
+      return false;
+    }
+    const operations = this.tenants.get(input.scope.tenantId);
+    const current = operations?.get(input.operationId);
+    if (current === undefined || current.version !== input.expectedVersion) {
       return false;
     }
     operations?.set(input.operationId, input.next);

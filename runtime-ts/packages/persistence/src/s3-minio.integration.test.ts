@@ -5,6 +5,9 @@ import {
   createS3BlobStore,
   createS3StableBlobGarbageCollector,
   sha256Hex,
+  type PromotionAuthorizationRef,
+  type StableBlobPromotionAuthorization,
+  type StableBlobPromotionAuthorizationPort,
   type StableBlobRef,
   type StagedBlobRef,
 } from "./index.js";
@@ -18,6 +21,7 @@ integration("MinIO Blob Store 集成", () => {
     const incarnationId = randomUUID();
     const lifecycleId = randomUUID();
     const allocationId = randomUUID();
+    const authorizationId = randomUUID();
     const prefix = `integration-test/${unique}`;
     const scope = { tenantId: `integration_${unique.replaceAll("-", "_")}` };
     const body = new TextEncoder().encode(`minio-${unique}`);
@@ -54,6 +58,19 @@ integration("MinIO Blob Store 集成", () => {
       generation: 1,
       mode: "active_reuse" as const,
     };
+    const authorization: StableBlobPromotionAuthorization = {
+      ...allocation,
+      authorizationId,
+      operationId: `operation-${unique}`,
+      referenceId: `reference-${unique}`,
+      stagingUploadId: staged.uploadId,
+      stagingObjectKey: `${prefix}/tenants/${scope.tenantId}/staging/artifact/${staged.uploadId}`,
+    };
+    const authorizationRef: PromotionAuthorizationRef = {
+      tenantId: scope.tenantId,
+      operationId: authorization.operationId,
+      authorizationId,
+    };
     const common = {
       bucket: config.bucket,
       endpoint: config.endpoint,
@@ -66,14 +83,10 @@ integration("MinIO Blob Store 集成", () => {
       maxPresignTtlSeconds: 60,
       maxBlobSizeBytes: 1_024 * 1_024,
     } as const;
-    const store = createS3BlobStore(common, {
-      async reserve() {
-        return allocation;
-      },
-      async resolveForPromotion({ allocation: candidate }) {
-        return candidate.allocationId === allocation.allocationId ? allocation : undefined;
-      },
-    });
+    const store = createS3BlobStore(
+      common,
+      new IntegrationPromotionAuthorizations(authorization, "started"),
+    );
     const gc = createS3StableBlobGarbageCollector(common, {
       async claimUnreachable({ scope: claimScope, blob }) {
         return {
@@ -121,7 +134,7 @@ integration("MinIO Blob Store 集成", () => {
       expect((await store.head(scope, staged))?.blob).toEqual(staged);
       expect(await store.getBytes(scope, staged)).toEqual(body);
 
-      expect(await store.promote(scope, staged, allocation)).toEqual(stable);
+      expect(await store.promote(scope, staged, authorizationRef)).toEqual(stable);
       expect(await store.getBytes(scope, stable)).toEqual(body);
       const downloadUrl = await store.presignDownload({
         scope,
@@ -176,6 +189,35 @@ integration("MinIO Blob Store 集成", () => {
     }
   });
 });
+
+/** 真实 MinIO 也通过与单元测试相同的状态化授权解析契约，不允许回显调用参数。 */
+class IntegrationPromotionAuthorizations implements StableBlobPromotionAuthorizationPort {
+  constructor(
+    private readonly authorization: StableBlobPromotionAuthorization,
+    private status: "reserved" | "started" | "retired" | "consumed" | "inactive",
+  ) {}
+
+  async resolveAuthorizedForCopy(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly authorization: PromotionAuthorizationRef;
+  }) {
+    if (
+      input.scope.tenantId !== this.authorization.tenantId ||
+      input.authorization.tenantId !== this.authorization.tenantId ||
+      input.authorization.operationId !== this.authorization.operationId ||
+      input.authorization.authorizationId !== this.authorization.authorizationId
+    ) {
+      return { status: "wrong_operation" as const };
+    }
+    if (this.status === "reserved") {
+      return { status: "not_started" as const };
+    }
+    if (this.status !== "started") {
+      return { status: this.status };
+    }
+    return { status: "authorized" as const, authorization: this.authorization };
+  }
+}
 
 async function listKeys(client: S3Client, bucket: string, prefix: string): Promise<string[]> {
   const result = await client.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix }));

@@ -15,6 +15,7 @@ integration("MinIO Blob Store 集成", () => {
   it("完成私有对象 staging、提升、读取、预签名与无残留清理", async () => {
     const config = requiredConfig();
     const unique = randomUUID();
+    const incarnationId = randomUUID();
     const prefix = `integration-test/${unique}`;
     const scope = { tenantId: `integration_${unique.replaceAll("-", "_")}` };
     const body = new TextEncoder().encode(`minio-${unique}`);
@@ -35,6 +36,8 @@ integration("MinIO Blob Store 集成", () => {
       kind: "stable",
       tenantId: scope.tenantId,
       purpose: "artifact",
+      incarnationId,
+      physicalObjectKey: `${prefix}/stable/${scope.tenantId}/artifact/sha256/${descriptor.sha256}/incarnations/${incarnationId}`,
       ...descriptor,
     };
     const common = {
@@ -62,6 +65,8 @@ integration("MinIO Blob Store 集成", () => {
             purpose: blob.purpose,
             sha256: blob.sha256,
             size: blob.size,
+            incarnationId: blob.incarnationId,
+            physicalObjectKey: blob.physicalObjectKey,
             leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
           },
         };
@@ -95,7 +100,7 @@ integration("MinIO Blob Store 集成", () => {
       expect((await store.head(scope, staged))?.blob).toEqual(staged);
       expect(await store.getBytes(scope, staged)).toEqual(body);
 
-      expect(await store.promote(scope, staged)).toEqual(stable);
+      expect(await store.promote(scope, staged, { incarnationId })).toEqual(stable);
       expect(await store.getBytes(scope, stable)).toEqual(body);
       const downloadUrl = await store.presignDownload({
         scope,

@@ -35,7 +35,7 @@
 
 - staging 使用 `If-None-Match: *` 条件写入；条件冲突后通过 HEAD 比较固定描述符，消除先 HEAD、后 PUT 的覆盖竞态；
 - stable 对象不暴露通用删除方法，只能由专用 GC 端口持有 PostgreSQL 事务 claim 后回收；
-- 内容身份由 Tenant、用途、SHA-256 和大小决定；`mediaType` 属于业务引用的展示元数据，不参与 stable 内容身份；
+- 逻辑内容身份由 Tenant、用途、SHA-256 和大小决定；物理对象身份额外包含不可复用 incarnation；`mediaType` 属于业务引用展示元数据；
 - 当前上传 API 只接收 `Uint8Array`，运行时配置不得超过 16 MiB；读取采用流式接口并同时校验 ContentLength、累计大小和 SHA-256；multipart/流式上传延后单独设计；
 - PUT、COPY、DELETE 返回未知后，仅在 HEAD 得到明确结果时收敛。HEAD 失败仍为未知，由恢复任务重试，不能把协议异常当成 NotFound；
 - 非事务提交与恢复状态按 `(tenant_id, operation_id)` 寻址，数据库实现必须建立复合唯一约束并校验 Tenant scope。
@@ -46,18 +46,24 @@
 
 “先查询零引用、再删除对象”的快照证明存在 TOCTOU：查询完成后、S3 删除前可能并发新增引用，导致数据库出现指向已删除对象的引用。`checkedAt` 只能说明过去某一时刻不可达，不能作为删除授权。
 
+即使使用不可逆 deleting 和 generation，generation 也只能阻止旧 Worker 写 PostgreSQL，无法撤销已经发给 S3 的 DELETE。若 deleted 后重新发布仍复用 `sha256` 物理键，旧 DELETE 可以在新对象发布后延迟落地并删除新内容。因此不能让逻辑去重键同时承担可复用物理地址。
+
 ### 方案
 
-- PostgreSQL 为每个 `(tenant_id, purpose, sha256, size)` 保存 stable 生命周期行，至少包含 `active | pre_delete | deleting | deleted`、`generation`、`claim_id` 和 `lease_expires_at`；
+- PostgreSQL 为每个 `(tenant_id, purpose, sha256, size)` 保存逻辑内容生命周期；当前 incarnation 记录至少包含安全随机 UUID `incarnation_id`、完整 `physical_object_key`、`active | pre_delete | deleting | deleted`、`generation`、`claim_id` 和 `lease_expires_at`；
+- stable 物理键固定为 `<prefix>/stable/<tenant>/<purpose>/sha256/<hash>/incarnations/<incarnation-id>`。SHA-256 继续用于逻辑去重；incarnationId 由 PG 生命周期事务分配并持久化，active 时复用当前 incarnation，deleted 后重新发布必须分配新 UUID；
 - `claimUnreachable` 在一个数据库事务中锁定生命周期行并检查引用计数。零引用的 active 行进入 `pre_delete` 并签发租约；租约未到期的 `pre_delete/deleting` 稳定返回 `in_progress`，不能并发签发 claim；
 - Worker 必须调用 `beginDeletion`，以 claimId + generation CAS 把 `pre_delete` 原子推进到不可逆 `deleting`，只有收到 `started + deleting claim` 后才能发起 S3 DELETE；
-- 所有新增 stable 引用路径必须在同一数据库事务中锁定并读取该生命周期行。`pre_delete/deleting` 返回 `gc_in_progress`，不得写入引用；`deleted` 只有在重新 promote 且 HEAD 验证后，才能由引用事务原子恢复为 `active` 并新增引用；
+- 所有新增 stable 引用路径必须在同一数据库事务中锁定并读取该生命周期行。`pre_delete/deleting` 返回 `gc_in_progress`；active 引用必须复用并持久化当前 incarnationId/physicalObjectKey；deleted 重新发布时先分配新 incarnation，promote+HEAD 后再由引用事务激活并写入精确物理身份；
 - 只有从未调用 `beginDeletion` 的 `pre_delete` claim 才允许 `releasePreDeleteClaim`。一旦进入 `deleting`，DELETE 明确失败、UNKNOWN、lease 到期和 Worker 接管均不得恢复 active；
-- S3 删除明确成功后用 claimId + generation CAS 调用 `completeDeletion`；lease 到期时恢复 Worker递增 generation 并保持原 phase 接管。旧 Worker 会失去 PG 写权限，但旧 S3 DELETE 仍可能延迟成功，因此生命周期必须保持 deleting 直至某一代 Worker确认远端不存在并完成 deleted。
+- GC claim 必须绑定被 claim 时的 incarnationId 与完整 physicalObjectKey，执行器只删除该精确键；禁止仅凭 sha256 解析“当前 incarnation”；
+- S3 删除明确成功后用 claimId + generation 联合 CAS 调用 `completeDeletion`；lease 到期与 claim 是否有效完全由 PG 事务/端口判定，S3 executor 不读取应用进程 `Date.now()`。接管保持物理身份与 phase，只递增 generation/claimId；
+- 不依赖 S3 bucket versioning。安全性来自不可复用物理键：旧 Worker即使在新 incarnation 激活后才完成 DELETE，也只能作用旧 physicalObjectKey。
 
 ### 影响
 
 - PG Repository 必须把新增引用、引用计数和生命周期状态纳入同一事务，不能把生命周期检查放到事务外；
+- 每个 ReferenceVersion、生命周期记录、恢复任务和 GC claim 都必须保存 incarnationId + physicalObjectKey；只存 sha256 不足以安全读取或删除；
 - stable GC 需要持久化恢复扫描、`pre_delete → deleting` 意图日志和租约接管，而不是普通定时 DELETE；
 - GC 期间新增引用会被显式阻止。调用方应等待 claim 收敛；若对象最终删除，则利用仍保留的 staging 重新 promote、HEAD 验证，再由引用事务恢复 active，而不能把阻止结果当成已经完成 stable 标记；
 - 当前任务只定义端口、状态语义和 S3 执行器；PG 表与事务实现由后续持久层任务交付。
@@ -69,14 +75,25 @@
 - DELETE 已确认而 `completeDeletion` 失败：仍保持 `deleting`，因为此时允许新增引用会指向缺失对象；恢复 Worker完成数据库状态；
 - 旧 DELETE 在 lease 到期后延迟成功：继任 Worker即使先遇到明确失败也保持 deleting；待租约再次到期后重试 DELETE/HEAD，并由当前 generation 完成 deleted；
 - 过期 Worker 的 complete/begin/pre-delete release 会因 generation 不匹配被拒绝。
+- 若 gen2 已完成旧 incarnation 的 deleted，可以分配并发布新 incarnation；随后落地的 gen1 DELETE 仍只命中 claim 绑定的旧物理键，新对象与新引用不受影响。
 
 读取仍采用 `AsyncIterable` API，但在当前 16 MiB 上限内先缓冲全部响应并完成大小和 SHA-256 校验，再向消费者产生第一个 chunk，避免最终哈希失败前产生可提交的外部效果。S3 HEAD/GET 返回的 metadata.size 或 ContentLength 超限属于 `BLOB_INTEGRITY_MISMATCH`，只有调用参数和配置非法才是 `INVALID_BLOB_ARGUMENT`。
+
+`expectedSha256` 和 `expectedSize` 在内容比较前先做调用参数校验：哈希格式、整数范围错误属于 `INVALID_BLOB_ARGUMENT`；参数合法但与实际正文不同才属于 `BLOB_INTEGRITY_MISMATCH`。GC claim 的格式错误同样是 `INVALID_BLOB_ARGUMENT`，Tenant 错配是 `TENANT_SCOPE_MISMATCH`，与目标 incarnation/physical key 错配是 `BLOB_INTEGRITY_MISMATCH`。lease 的时间有效性由 PG 决定，executor 只验证时间字段可解析。
 
 `stable_mark_gc_blocked` 不能直接重新 promote。协调器必须先调用生命周期解析端口：`pre_delete/deleting` 继续阻塞，`active` 回到标记重试，只有明确 `deleted` 才退回复制步骤并使用保留的 staging 重新 promote。
 
 ## 引用级媒体类型与交付策略
 
 stable 对象可被多个引用以不同 `mediaType` 使用，因此首次上传到 S3 的 Content-Type 不能决定后续响应。预签名端口必须携带当前 Artifact/Resource 引用的 `responseMediaType`，并通过 `ResponseContentType` 覆盖对象元数据。交付物下载默认生成 `attachment`；只有上层明确选择 `inline-preview` 才生成 `inline`。两条策略都由服务端签名，客户端不能传任意响应头。
+
+## 数据模型与迁移要求
+
+- stable 生命周期表增加 `incarnation_id uuid`、`physical_object_key text`，二者非空；建议 `(tenant_id, purpose, sha256, size, incarnation_id)` 唯一，当前 active incarnation 另设部分唯一约束；
+- ReferenceVersion 的 stable 指针和 GC/恢复任务载荷必须同时增加 `incarnation_id`、`physical_object_key`，外键/事务检查保证它们指向同一生命周期 incarnation；
+- claimId 与 generation 是联合 CAS 条件；begin、complete、pre-delete release 任一字段不匹配都拒绝；
+- 本项目是全新实现，不迁移旧 Python 原型。此前开发 MinIO 中不含 incarnation 的 stable key 只视为测试数据，应清理后重新发布；不提供旧 key 只读兼容，也不通过启用 bucket versioning 兜底；
+- 若未来已有生产对象，必须另做离线迁移：冻结写入、为每个旧对象分配 incarnation、复制到新键、回填所有 ReferenceVersion 后再启用 GC，不能原地把旧键当新 incarnation。
 
 ## 理由
 
@@ -95,11 +112,11 @@ stable 对象可被多个引用以不同 `mediaType` 使用，因此首次上传
 
 ## 验证
 
-- Fake Client 单测覆盖派生键、Tenant 隔离、受控并发条件写、跨 Tenant 同 operation ID、不同 mediaType 复用内容、HEAD/读取端超限、校验前零 chunk 交付、GC busy/租约接管、旧 DELETE 延迟成功、不可逆 deleting 和 generation 栅栏；
+- Fake Client 单测覆盖派生 incarnation 键、Tenant 隔离、受控并发条件写、不同 mediaType 复用逻辑内容、参数/响应分类、校验前零 chunk 交付、claimId+generation 联合 CAS、GC busy/租约接管、旧 DELETE 延迟成功后新 incarnation 仍可读且 GC 只删旧物理键；
 - 真实 MinIO 完成 put、head、流式 get、promote、引用级 Content-Type、attachment/inline Content-Disposition、staging 删除与 stable GC，并确认唯一测试前缀无残留；
 - Clean install 和供应链检查确认依赖版本没有范围漂移；
 - 未来生产对象存储加入同一契约套件。
 
 ## 可逆性
 
-`BlobStore` 和 `S3ObjectClient` 隔离了 SDK。只要对象键、元数据和错误契约保持不变，可以在包内改用 MinIO SDK或其他 S3 客户端；生产已经存在的对象无需迁移。若发现目标服务不兼容 CopyObject，可改为受校验的读取后写入，但需记录新决策和性能影响。
+`BlobStore` 和 `S3ObjectClient` 隔离了 SDK。保持 incarnation 键、元数据和错误契约即可在包内更换 S3 客户端；更换 SDK不需要对象迁移。旧版无 incarnation 的对象键与本决策不兼容，迁移要求见上节。若目标服务不兼容 CopyObject，可改为受校验的读取后写入，但需记录新决策和性能影响。

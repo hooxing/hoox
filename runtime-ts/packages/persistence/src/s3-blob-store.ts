@@ -18,6 +18,7 @@ import {
   type PresignBlobDownloadInput,
   type PutStagingBlobInput,
   type StableBlobRef,
+  type StableBlobIncarnationAllocation,
   type StableBlobGcClaim,
   type StableBlobGcClaimPort,
   type StableBlobGcPort,
@@ -26,6 +27,7 @@ import {
   assertBlobPurpose,
   assertBlobRef,
   assertDownloadName,
+  assertIncarnationId,
   assertMediaType,
   assertTenantScope,
   assertUploadId,
@@ -112,8 +114,9 @@ export class S3BlobStore implements BlobStore {
     assertBlobPurpose(input.purpose);
     assertUploadId(input.uploadId);
     this.assertWithinSizeLimit(input.body.byteLength);
+    assertExpectedDeclaration(input);
     const descriptor = descriptorFor(input.body, input.mediaType);
-    assertExpectedDescriptor(input, descriptor);
+    assertExpectedContent(input, descriptor);
     const blob: StagedBlobRef = {
       kind: "staging",
       tenantId: input.scope.tenantId,
@@ -142,8 +145,13 @@ export class S3BlobStore implements BlobStore {
     return blob;
   }
 
-  async promote(scope: TenantBlobScope, staged: StagedBlobRef): Promise<StableBlobRef> {
+  async promote(
+    scope: TenantBlobScope,
+    staged: StagedBlobRef,
+    allocation: StableBlobIncarnationAllocation,
+  ): Promise<StableBlobRef> {
     assertBlobRef(scope, staged);
+    assertIncarnationId(allocation.incarnationId);
     this.assertWithinSizeLimit(staged.size);
     const sourceKey = this.keyFor(staged);
     const stagedHead = await this.client.head(sourceKey);
@@ -160,6 +168,8 @@ export class S3BlobStore implements BlobStore {
       sha256: staged.sha256,
       size: staged.size,
       mediaType: staged.mediaType,
+      incarnationId: allocation.incarnationId,
+      physicalObjectKey: stableKeyFor(this.prefix, staged, allocation.incarnationId),
     };
     const destinationKey = this.keyFor(stable);
     const existing = await this.client.head(destinationKey);
@@ -382,7 +392,7 @@ export class S3StableBlobGarbageCollector implements StableBlobGcPort {
     if (result.status !== "claimed") {
       return result.status;
     }
-    assertGcClaim(scope, blob, result.claim);
+    assertGcClaim(scope, blob, result.claim, this.prefix);
     let deletingClaim = result.claim;
     if (deletingClaim.phase === "pre_delete") {
       const begin = await this.claims.beginDeletion({ scope, blob, claim: deletingClaim });
@@ -390,13 +400,13 @@ export class S3StableBlobGarbageCollector implements StableBlobGcPort {
         return "in_progress";
       }
       deletingClaim = begin.claim;
-      assertGcClaim(scope, blob, deletingClaim);
+      assertGcClaim(scope, blob, deletingClaim, this.prefix);
       if (deletingClaim.phase !== "deleting") {
         throw new BlobStoreError("BLOB_PROVIDER_ERROR", "GC beginDeletion 未返回 deleting claim");
       }
     }
     // 一旦取得 deleting intent，任何 DELETE 失败/UNKNOWN 都不能恢复 active：旧 DELETE 仍可能延迟成功。
-    await deleteAndResolve(this.client, keyFor(this.prefix, blob));
+    await deleteAndResolve(this.client, deletingClaim.physicalObjectKey);
     // 删除已确认后才完成 claim；完成失败也不能释放，否则新引用可能指向已删除对象。
     await this.claims.completeDeletion({ scope, blob, claim: deletingClaim });
     return "deleted";
@@ -538,7 +548,19 @@ class AwsS3ObjectClient implements S3ObjectClient {
   }
 }
 
-function assertExpectedDescriptor(input: PutStagingBlobInput, actual: BlobDescriptor): void {
+function assertExpectedDeclaration(input: PutStagingBlobInput): void {
+  if (input.expectedSha256 !== undefined && !/^[a-f0-9]{64}$/u.test(input.expectedSha256)) {
+    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "expectedSha256 格式无效");
+  }
+  if (
+    input.expectedSize !== undefined &&
+    (!Number.isSafeInteger(input.expectedSize) || input.expectedSize < 0)
+  ) {
+    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "expectedSize 格式无效");
+  }
+}
+
+function assertExpectedContent(input: PutStagingBlobInput, actual: BlobDescriptor): void {
   if (input.expectedSha256 !== undefined && input.expectedSha256 !== actual.sha256) {
     throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "上传内容 SHA-256 与调用方声明不一致");
   }
@@ -684,32 +706,57 @@ async function deleteAndResolve(client: S3ObjectClient, key: string): Promise<vo
 }
 
 function keyFor(prefix: string, blob: BlobRef): string {
-  // 对象键只由已验证的 Tenant、用途和不透明 ID/哈希派生；调用方没有传完整 key 的入口。
-  const suffix =
-    blob.kind === "staging"
-      ? `staging/${blob.purpose}/${blob.uploadId}`
-      : `stable/${blob.purpose}/sha256/${blob.sha256}`;
-  return `${prefix}/tenants/${blob.tenantId}/${suffix}`;
+  if (blob.kind === "staging") {
+    return `${prefix}/tenants/${blob.tenantId}/staging/${blob.purpose}/${blob.uploadId}`;
+  }
+  const expected = stableKeyFor(prefix, blob, blob.incarnationId);
+  if (blob.physicalObjectKey !== expected) {
+    throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "stable 物理对象键与 incarnation 不一致");
+  }
+  return expected;
+}
+
+function stableKeyFor(
+  prefix: string,
+  blob: Pick<StableBlobRef, "tenantId" | "purpose" | "sha256">,
+  incarnationId: string,
+): string {
+  return `${prefix}/stable/${blob.tenantId}/${blob.purpose}/sha256/${blob.sha256}/incarnations/${incarnationId}`;
 }
 
 function assertGcClaim(
   scope: TenantBlobScope,
   blob: StableBlobRef,
   claim: StableBlobGcClaim,
+  prefix: string,
 ): void {
   if (
     !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(claim.claimId) ||
     !Number.isSafeInteger(claim.generation) ||
     claim.generation < 1 ||
     (claim.phase !== "pre_delete" && claim.phase !== "deleting") ||
-    claim.tenantId !== scope.tenantId ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(
+      claim.incarnationId,
+    ) ||
+    claim.physicalObjectKey.length < 1 ||
+    claim.physicalObjectKey.length > 1_024 ||
+    Number.isNaN(Date.parse(claim.leaseExpiresAt))
+  ) {
+    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "stable GC claim 格式无效");
+  }
+  if (claim.tenantId !== scope.tenantId) {
+    throw new BlobStoreError("TENANT_SCOPE_MISMATCH", "stable GC claim 不属于当前 Tenant");
+  }
+  const expectedPhysicalKey = stableKeyFor(prefix, blob, blob.incarnationId);
+  if (
     claim.purpose !== blob.purpose ||
     claim.sha256 !== blob.sha256 ||
     claim.size !== blob.size ||
-    Number.isNaN(Date.parse(claim.leaseExpiresAt)) ||
-    Date.parse(claim.leaseExpiresAt) <= Date.now()
+    claim.incarnationId !== blob.incarnationId ||
+    claim.physicalObjectKey !== blob.physicalObjectKey ||
+    blob.physicalObjectKey !== expectedPhysicalKey
   ) {
-    throw new BlobStoreError("TENANT_SCOPE_MISMATCH", "stable GC claim 与目标对象不一致");
+    throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "stable GC claim 与物理对象不一致");
   }
 }
 

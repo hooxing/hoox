@@ -25,6 +25,13 @@ export interface StableBlobRef extends BlobDescriptor {
   readonly kind: "stable";
   readonly tenantId: string;
   readonly purpose: BlobPurpose;
+  readonly incarnationId: string;
+  readonly physicalObjectKey: string;
+}
+
+export interface StableBlobIncarnationAllocation {
+  /** 由 PostgreSQL 生命周期事务使用安全随机 UUID 分配并持久化。 */
+  readonly incarnationId: string;
 }
 
 export type BlobRef = StagedBlobRef | StableBlobRef;
@@ -57,7 +64,11 @@ export interface BlobObjectHead {
 
 export interface BlobStore {
   putStaging(input: PutStagingBlobInput): Promise<StagedBlobRef>;
-  promote(scope: TenantBlobScope, staged: StagedBlobRef): Promise<StableBlobRef>;
+  promote(
+    scope: TenantBlobScope,
+    staged: StagedBlobRef,
+    allocation: StableBlobIncarnationAllocation,
+  ): Promise<StableBlobRef>;
   head(scope: TenantBlobScope, blob: BlobRef): Promise<BlobObjectHead | undefined>;
   read(scope: TenantBlobScope, blob: BlobRef): AsyncIterable<Uint8Array>;
   getBytes(scope: TenantBlobScope, blob: BlobRef): Promise<Uint8Array>;
@@ -74,6 +85,8 @@ export interface StableBlobGcClaim {
   readonly purpose: BlobPurpose;
   readonly sha256: string;
   readonly size: number;
+  readonly incarnationId: string;
+  readonly physicalObjectKey: string;
 }
 
 /**
@@ -187,6 +200,16 @@ export function assertBlobRef(scope: TenantBlobScope, blob: BlobRef): void {
   }
   if (blob.kind === "staging") {
     assertUploadId(blob.uploadId);
+  } else {
+    assertIncarnationId(blob.incarnationId);
+    assertPhysicalObjectKey(blob.physicalObjectKey);
+    const expectedSuffix = `/stable/${blob.tenantId}/${blob.purpose}/sha256/${blob.sha256}/incarnations/${blob.incarnationId}`;
+    if (!blob.physicalObjectKey.endsWith(expectedSuffix)) {
+      throw new BlobStoreError(
+        "BLOB_INTEGRITY_MISMATCH",
+        "stable physicalObjectKey 与逻辑身份或 incarnation 不一致",
+      );
+    }
   }
 }
 
@@ -203,6 +226,18 @@ export function assertDescriptor(descriptor: BlobDescriptor): void {
 export function assertUploadId(uploadId: string): void {
   if (!UPLOAD_ID_PATTERN.test(uploadId)) {
     throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "uploadId 格式无效");
+  }
+}
+
+export function assertIncarnationId(incarnationId: string): void {
+  if (!INCARNATION_ID_PATTERN.test(incarnationId)) {
+    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "incarnationId 必须是规范 UUID");
+  }
+}
+
+export function assertPhysicalObjectKey(key: string): void {
+  if (key.length < 1 || key.length > 1_024 || key.startsWith("/") || containsAsciiControl(key)) {
+    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "physicalObjectKey 格式无效");
   }
 }
 
@@ -232,6 +267,8 @@ export function assertMediaType(mediaType: string): void {
 const TENANT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const UPLOAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const INCARNATION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 function containsAsciiControl(value: string): boolean {
   return Array.from(value).some((character) => {

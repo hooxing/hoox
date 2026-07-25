@@ -1,11 +1,13 @@
 import type { MigrationDownOptions, MigrationRecord } from "./migrations.js";
 import { migrateDown, migrateUp } from "./migrations.js";
 import { PgCoreRepositories } from "./pg-core-repositories.js";
+import { PgBlobLifecycleRepository, type PgBlobLifecycleOptions } from "./pg-blob-lifecycle.js";
 import type { CoreRepositories } from "./ports.js";
 import { createPostgresPool, probePostgres, type PostgresPoolOptions } from "./postgres.js";
 
 export interface PersistenceRuntime {
   readonly repositories: CoreRepositories;
+  readonly blobLifecycle: PgBlobLifecycleRepository;
   probe(): Promise<void>;
   close(): Promise<void>;
 }
@@ -19,10 +21,13 @@ export interface MigrationRuntime {
   close(): Promise<void>;
 }
 
-export function createPersistenceRuntime(options: PostgresPoolOptions): PersistenceRuntime {
+export function createPersistenceRuntime(
+  options: PostgresPoolOptions & { readonly blobLifecycle?: PgBlobLifecycleOptions },
+): PersistenceRuntime {
   const pool = createPostgresPool(options);
   return {
     repositories: new PgCoreRepositories(pool),
+    blobLifecycle: new PgBlobLifecycleRepository(pool, options.blobLifecycle),
     probe: () => probePostgres(pool),
     close: () => pool.end(),
   };

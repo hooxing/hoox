@@ -1,32 +1,45 @@
+import { sealEntity, type Entity } from "./entity.js";
 import { assertSameTenant, domainInvariant } from "./errors.js";
-import type { IsoTimestamp, MembershipId, TenantId, UserId } from "./ids.js";
+import {
+  isoTimestamp,
+  membershipId,
+  tenantId,
+  userId,
+  type IsoTimestamp,
+  type MembershipId,
+  type TenantId,
+  type UserId,
+} from "./ids.js";
+import { enumValue, recordValue, stringValue } from "./validation.js";
 
-export interface User {
+interface UserData {
   readonly id: UserId;
   readonly createdAt: IsoTimestamp;
 }
+export type User = Entity<"User", UserData>;
 
-export interface PersonalTenant {
+interface PersonalTenantData {
   readonly id: TenantId;
   readonly kind: "personal";
   readonly ownerUserId: UserId;
   readonly createdAt: IsoTimestamp;
 }
+export type PersonalTenant = Entity<"PersonalTenant", PersonalTenantData>;
 
 // 团队 Tenant 只保留领域形态，首版不开放创建入口和团队权限策略。
-export interface TeamTenant {
+interface TeamTenantData {
   readonly id: TenantId;
   readonly kind: "team";
   readonly displayName: string;
   readonly createdByUserId: UserId;
   readonly createdAt: IsoTimestamp;
 }
-
+export type TeamTenant = Entity<"TeamTenant", TeamTenantData>;
 export type Tenant = PersonalTenant | TeamTenant;
+
 export type MembershipRole = "owner" | "admin" | "member";
 export type MembershipStatus = "active" | "revoked";
-
-export interface Membership {
+interface MembershipData {
   readonly id: MembershipId;
   readonly tenantId: TenantId;
   readonly userId: UserId;
@@ -34,9 +47,15 @@ export interface Membership {
   readonly status: MembershipStatus;
   readonly createdAt: IsoTimestamp;
 }
+export type Membership = Entity<"Membership", MembershipData>;
 
 export function createUser(id: UserId, createdAt: IsoTimestamp): User {
-  return Object.freeze({ id, createdAt });
+  return sealEntity("User", { id, createdAt });
+}
+
+export function rehydrateUser(snapshot: unknown): User {
+  const raw = recordValue(snapshot, "User");
+  return createUser(userId(stringValue(raw, "id")), isoTimestamp(stringValue(raw, "createdAt")));
 }
 
 export function createPersonalTenant(input: {
@@ -45,21 +64,42 @@ export function createPersonalTenant(input: {
   readonly owner: User;
   readonly createdAt: IsoTimestamp;
 }): { readonly tenant: PersonalTenant; readonly ownerMembership: Membership } {
-  const tenant = Object.freeze<PersonalTenant>({
+  const tenant = sealEntity("PersonalTenant", {
     id: input.id,
-    kind: "personal",
+    kind: "personal" as const,
     ownerUserId: input.owner.id,
     createdAt: input.createdAt,
   });
-  const ownerMembership = Object.freeze<Membership>({
+  const ownerMembership = sealEntity("Membership", {
     id: input.ownerMembershipId,
     tenantId: tenant.id,
     userId: input.owner.id,
-    role: "owner",
-    status: "active",
+    role: "owner" as const,
+    status: "active" as const,
     createdAt: input.createdAt,
   });
   return Object.freeze({ tenant, ownerMembership });
+}
+
+export function rehydrateTenant(snapshot: unknown, relatedUser: User): Tenant {
+  const raw = recordValue(snapshot, "Tenant");
+  const kind = enumValue(raw, "kind", ["personal", "team"] as const);
+  const id = tenantId(stringValue(raw, "id"));
+  const createdAt = isoTimestamp(stringValue(raw, "createdAt"));
+  if (kind === "personal") {
+    const ownerUserId = userId(stringValue(raw, "ownerUserId"));
+    domainInvariant(ownerUserId === relatedUser.id, "OWNERSHIP_MISMATCH", "租户所有者关联无效");
+    return sealEntity("PersonalTenant", { id, kind, ownerUserId, createdAt });
+  }
+  const createdByUserId = userId(stringValue(raw, "createdByUserId"));
+  domainInvariant(createdByUserId === relatedUser.id, "OWNERSHIP_MISMATCH", "租户创建者关联无效");
+  const displayName = stringValue(raw, "displayName").trim();
+  domainInvariant(
+    displayName.length > 0 && displayName.length <= 200,
+    "INVALID_ARGUMENT",
+    "团队名称长度无效",
+  );
+  return sealEntity("TeamTenant", { id, kind, displayName, createdByUserId, createdAt });
 }
 
 export function createMembership(input: {
@@ -76,13 +116,38 @@ export function createMembership(input: {
       "个人租户只允许其所有者加入",
     );
   }
-  return Object.freeze({
+  return sealEntity("Membership", {
     id: input.id,
     tenantId: input.tenant.id,
     userId: input.user.id,
     role: input.role,
     status: "active",
     createdAt: input.createdAt,
+  });
+}
+
+export function rehydrateMembership(snapshot: unknown, tenant: Tenant, user: User): Membership {
+  const raw = recordValue(snapshot, "Membership");
+  const restoredTenantId = tenantId(stringValue(raw, "tenantId"));
+  assertSameTenant(restoredTenantId, tenant.id);
+  const restoredUserId = userId(stringValue(raw, "userId"));
+  domainInvariant(restoredUserId === user.id, "OWNERSHIP_MISMATCH", "成员用户关联无效");
+  const role = enumValue(raw, "role", ["owner", "admin", "member"] as const);
+  const status = enumValue(raw, "status", ["active", "revoked"] as const);
+  if (tenant.kind === "personal") {
+    domainInvariant(
+      user.id === tenant.ownerUserId && role === "owner" && status === "active",
+      "INVALID_ARGUMENT",
+      "个人租户成员快照无效",
+    );
+  }
+  return sealEntity("Membership", {
+    id: membershipId(stringValue(raw, "id")),
+    tenantId: restoredTenantId,
+    userId: restoredUserId,
+    role,
+    status,
+    createdAt: isoTimestamp(stringValue(raw, "createdAt")),
   });
 }
 
@@ -102,5 +167,5 @@ export function revokeMembership(membership: Membership): Membership {
     "不能撤销租户所有者的成员资格",
   );
   domainInvariant(membership.status === "active", "INVALID_STATE_TRANSITION", "成员资格已经失效");
-  return Object.freeze({ ...membership, status: "revoked" });
+  return sealEntity("Membership", { ...membership, status: "revoked" as const });
 }

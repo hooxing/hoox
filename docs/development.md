@@ -39,6 +39,7 @@ corepack pnpm config:check
 | --- | --- |
 | `domain` | Tenant、Thread、Run 等领域实体与不变量 |
 | `protocol` | API、事件和进程间消息契约 |
+| `protocol-mapper` | Domain 与 Protocol 的显式映射及公共错误归一化 |
 | `persistence` | PostgreSQL 仓储、事务与迁移适配 |
 | `prompt-builder` | 可审计、可复现的系统提示词组装 |
 | `context-policy` | 上下文选择、截断和压缩策略 |

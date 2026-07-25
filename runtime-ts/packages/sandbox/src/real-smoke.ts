@@ -12,7 +12,7 @@ let active: SandboxHandle | undefined;
 
 try {
   console.log("[1/8] 创建 Sandbox");
-  active = await gateway.create({ templateId: config.templateId, ttlSeconds: 300 });
+  active = await gateway.create({ templateId: config.templateId, ttlSeconds: 120 });
 
   console.log("[2/8] 执行命令");
   const command = await active.command("printf cube-command-ok");

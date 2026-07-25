@@ -1,8 +1,14 @@
-import { tenantId } from "@cube-runtime/domain";
+import { sha256Digest, tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
 import { describe, expect, it } from "vitest";
-import type { ExecutionScope, RuntimeEventV1 } from "./ports.js";
+import type { ExecutionScope, RuntimeEventV1, RuntimeMutation } from "./ports.js";
+import {
+  outboxPayloadDigest,
+  rolloutProjectionDigest,
+  runtimeMutationDigest,
+  workspaceChangeDigest,
+} from "./mutation-protocol.js";
 import { RunWorker } from "./run-worker.js";
 import {
   BlockingAgentSession,
@@ -11,6 +17,7 @@ import {
   FakeClock,
   FakeExecutionPersistence,
   FakeRevisionVerifier,
+  FakeRecoveryMetrics,
   FakeSandboxRegistry,
   FakeSessionFactory,
   ScriptedAgentSession,
@@ -34,8 +41,18 @@ function harness(sessions: Array<ScriptedAgentSession | BlockingAgentSession>) {
   const cancellation = new FakeCancellationPort();
   const artifacts = new FakeArtifactPublication();
   const clock = new FakeClock();
+  const metrics = new FakeRecoveryMetrics();
   const worker = new RunWorker(
-    { persistence, revisions, sandboxes, sessions: factory, cancellation, artifacts, clock },
+    {
+      persistence,
+      revisions,
+      sandboxes,
+      sessions: factory,
+      cancellation,
+      artifacts,
+      clock,
+      metrics,
+    },
     { workerId: "worker-test", leaseDurationMs: 30_000, heartbeatMs: 10_000, runTimeoutMs: 60_000 },
   );
   return {
@@ -48,6 +65,7 @@ function harness(sessions: Array<ScriptedAgentSession | BlockingAgentSession>) {
     cancellation,
     artifacts,
     clock,
+    metrics,
   };
 }
 
@@ -75,6 +93,34 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(mutations.indexOf("attempt-1/sandbox/cleanup-intent")).toBeLessThan(
       mutations.indexOf("attempt-1/stage/model-execution-started"),
     );
+    const intent = record.mutations.get("attempt-1/sandbox/cleanup-intent");
+    expect(intent?.receipt.outbox[0]?.payloadDigest).toBe(
+      outboxPayloadDigest({
+        schemaVersion: 1,
+        kind: "sandbox_cleanup",
+        idempotencyKey: "attempt-1/sandbox/registry-test/cleanup",
+        state: "pending",
+        armed: true,
+        payload: {
+          registryId: "registry-test",
+          providerSandboxId: "worker-fake",
+          disposition: "close",
+        },
+      }),
+    );
+    const final = record.mutations.get("attempt-1/final/succeeded");
+    expect(final?.receipt.workspace).toEqual({
+      changeDigest: workspaceChangeDigest({
+        tenantId: h.scope.tenantId,
+        threadId: h.scope.threadId,
+        workspaceId: h.scope.workspaceId,
+        rootRunId: h.scope.rootRunId,
+        revisionId: fakeRevision("revision-success"),
+        objectKey: "workspace/revision-success.tar",
+        digest: sha256Digest("a".repeat(64)),
+      }),
+      currentHead: fakeRevision("revision-success"),
+    });
   });
 
   it("重复投递不能重领 running Run，也不会创建第二个 Sandbox 或模型 Session", async () => {
@@ -129,8 +175,66 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       expect(h.sandboxes.settleCount).toBe(1);
       expect(h.factory.createCount).toBe(0);
       expect(h.persistence.record(h.scope).run.status).toBe("running");
+      expect(h.sandboxes.cleanupIntentIds).toEqual(["registry:registry-test:orphan-cleanup"]);
+      expect(h.metrics.orphanCleanups).toEqual([
+        expect.objectContaining({ reason: "fence_lost", cleanupOutcome: "settled" }),
+      ]);
     },
   );
+
+  it.each([
+    { failure: "unavailable" as const, expected: "unavailable" as const },
+    { failure: "response_unknown" as const, expected: "response_unknown" as const },
+    { failure: "fence_lost" as const, expected: "fence_lost" as const },
+  ])(
+    "Sandbox 已登记但 cleanup intent 返回 $failure 时，使用 registry 事实独立清理",
+    async ({ failure, expected }) => {
+      const h = harness([new ScriptedAgentSession(successfulEvents)]);
+      h.sandboxes.beforeAcquireReturn = () => {
+        if (failure === "unavailable") h.persistence.unavailableNextMutation = true;
+        if (failure === "response_unknown") {
+          h.persistence.responseUnknownWithoutCommitKeyIncludes = "/sandbox/cleanup-intent";
+        }
+        if (failure === "fence_lost") {
+          h.persistence.fenceLostMutationKeyIncludes = "/sandbox/cleanup-intent";
+        }
+      };
+
+      const result = await h.worker.execute(h.scope);
+
+      expect(result).toEqual(
+        failure === "fence_lost"
+          ? { outcome: "fence_lost" }
+          : { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" },
+      );
+      expect(h.factory.createCount).toBe(0);
+      expect(h.sandboxes.cleanupIntentIds).toEqual(["registry:registry-test:orphan-cleanup"]);
+      expect(h.metrics.orphanCleanups).toEqual([
+        expect.objectContaining({
+          registryId: "registry-test",
+          reason: expected,
+          cleanupOutcome: "settled",
+        }),
+      ]);
+      expect(h.persistence.record(h.scope).outbox).toHaveLength(0);
+    },
+  );
+
+  it("cleanup intent 幂等摘要冲突映射稳定错误码，同时仍清理已登记 Sandbox", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.sandboxes.beforeAcquireReturn = () => {
+      h.persistence.idempotencyConflictKeyIncludes = "/sandbox/cleanup-intent";
+    };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "IDEMPOTENCY_CONFLICT",
+    });
+    expect(h.sandboxes.cleanupIntentIds).toEqual(["registry:registry-test:orphan-cleanup"]);
+    expect(h.metrics.orphanCleanups).toEqual([
+      expect.objectContaining({ reason: "idempotency_conflict", cleanupOutcome: "settled" }),
+    ]);
+  });
 
   it("Workspace verify 返回前丢租约，不执行 prepare/Revision 提交", async () => {
     const h = harness([new ScriptedAgentSession(successfulEvents)]);
@@ -219,7 +323,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "fence_lost" });
 
     expect(session.prompts).toEqual([]);
-    expect(h.persistence.permits.some((permit) => permit.effect === "model_start")).toBe(false);
+    expect(h.persistence.permits.some(({ permit }) => permit.effect === "model_start")).toBe(false);
   });
 
   it("每次工具执行都重新领取 DB 许可，许可拒绝时中止 Session 且工具调用方失败", async () => {
@@ -229,12 +333,20 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await eventually(
       () => h.factory.toolAuthorizers.length === 1 && h.persistence.permits.length === 1,
     );
-    expect(h.persistence.permits).toEqual([{ effect: "model_start" }]);
+    expect(h.persistence.permits).toHaveLength(1);
+    expect(h.persistence.permits[0]).toMatchObject({
+      permit: { effect: "model_start" },
+      consumed: true,
+    });
 
     h.persistence.rejectNextPermit = true;
-    await expect(h.factory.toolAuthorizers[0]?.()).rejects.toThrow(
-      "EXTERNAL_EFFECT_NOT_AUTHORIZED",
-    );
+    await expect(
+      h.factory.toolAuthorizers[0]?.({
+        callId: "tool-call-test",
+        toolName: "sandbox_write_file",
+        argsDigest: sha256Digest("a".repeat(64)),
+      }),
+    ).rejects.toThrow("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     await expect(execution).resolves.toEqual({ outcome: "fence_lost" });
     expect(session.abortCount).toBeGreaterThan(0);
   });
@@ -245,7 +357,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({
       outcome: "recovery_required",
-      code: "INTERNAL",
+      code: "SANDBOX_FAILED",
     });
 
     const record = h.persistence.record(h.scope);
@@ -483,15 +595,17 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       sequence: 0,
       payload: { status: "running", stage: "model_execution_started" },
     };
-    await h.persistence.mutate({
-      idempotencyKey: `${claimed.snapshot.attempt.attemptId}/stage/model-execution-started`,
-      fence: claimed.fence,
-      expectedAttemptVersion: 0,
-      nextAttemptStatus: "running",
-      nextStage: "model_execution_started",
-      events: [event],
-      outbox: [],
-    });
+    await h.persistence.mutate(
+      signedMutation({
+        idempotencyKey: `${claimed.snapshot.attempt.attemptId}/stage/model-execution-started`,
+        fence: claimed.fence,
+        expectedAttemptVersion: 0,
+        nextAttemptStatus: "running",
+        nextStage: "model_execution_started",
+        events: [event],
+        outbox: [],
+      }),
+    );
     h.persistence.advanceDatabase(31_000);
 
     await expect(
@@ -505,6 +619,285 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(record.attempt?.status).toBe("recovery_required");
     expect(record.run.status).toBe("running");
     expect(h.factory.createCount).toBe(0);
+  });
+
+  it("inspect/renew 只延长过期时间，不更换 claim、Workspace lease 或运行态", async () => {
+    const h = harness([]);
+    const claimed = await h.persistence.claim({
+      scope: h.scope,
+      workerId: "renew-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("测试 claim 失败");
+
+    const first = await h.persistence.inspectAndRenew({
+      fence: claimed.fence,
+      leaseDurationMs: 30_000,
+    });
+    if (first.outcome !== "active") throw new Error("第一次续租失败");
+    const second = await h.persistence.inspectAndRenew({
+      fence: first.fence,
+      leaseDurationMs: 30_000,
+    });
+    if (second.outcome !== "active") throw new Error("第二次续租失败");
+
+    expect(second.run.status).toBe("running");
+    expect(second.fence.runClaim).toMatchObject({
+      token: claimed.fence.runClaim.token,
+      epoch: claimed.fence.runClaim.epoch,
+    });
+    expect(second.fence.workspaceLease).toMatchObject({
+      rootRunId: claimed.fence.workspaceLease.rootRunId,
+      epoch: claimed.fence.workspaceLease.epoch,
+    });
+    expect(Date.parse(first.fence.runClaim.expiresAt)).toBeGreaterThan(
+      Date.parse(claimed.fence.runClaim.expiresAt),
+    );
+    expect(Date.parse(second.fence.runClaim.expiresAt)).toBeGreaterThan(
+      Date.parse(first.fence.runClaim.expiresAt),
+    );
+    expect(second.workspace.writerLease).toEqual(second.fence.workspaceLease);
+  });
+
+  it("副作用许可绑定调用内容且只能消费一次，Attempt 版本推进后旧许可失效", async () => {
+    const h = harness([]);
+    const claimed = await h.persistence.claim({
+      scope: h.scope,
+      workerId: "permit-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("测试 claim 失败");
+    const call = {
+      callId: "call-1",
+      toolName: "sandbox_write_file",
+      argsDigest: sha256Digest("b".repeat(64)),
+    };
+    const issued = await h.persistence.issueExternalEffectPermit({
+      fence: claimed.fence,
+      expectedAttemptVersion: 0,
+      effect: "tool_execution",
+      call,
+      permitDurationMs: 1_000,
+    });
+    if (issued.outcome !== "authorized") throw new Error("测试许可签发失败");
+    expect(issued.permit).toMatchObject({
+      scope: h.scope,
+      attemptVersion: 0,
+      effect: "tool_execution",
+      ...call,
+    });
+    await expect(
+      h.persistence.consumeExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 0,
+        permit: issued.permit,
+      }),
+    ).resolves.toMatchObject({ outcome: "consumed" });
+    await expect(
+      h.persistence.consumeExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 0,
+        permit: issued.permit,
+      }),
+    ).resolves.toEqual({ outcome: "already_consumed" });
+
+    const stale = await h.persistence.issueExternalEffectPermit({
+      fence: claimed.fence,
+      expectedAttemptVersion: 0,
+      effect: "tool_execution",
+      call: { ...call, callId: "call-stale" },
+      permitDurationMs: 1_000,
+    });
+    if (stale.outcome !== "authorized") throw new Error("测试旧许可签发失败");
+    await h.persistence.mutate(
+      signedMutation({
+        idempotencyKey: "advance-attempt-version",
+        fence: claimed.fence,
+        expectedAttemptVersion: 0,
+        events: [],
+        outbox: [],
+      }),
+    );
+    await expect(
+      h.persistence.consumeExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 0,
+        permit: stale.permit,
+      }),
+    ).resolves.toEqual({ outcome: "conflict" });
+
+    const expiring = await h.persistence.issueExternalEffectPermit({
+      fence: claimed.fence,
+      expectedAttemptVersion: 1,
+      effect: "tool_execution",
+      call: { ...call, callId: "call-expiring" },
+      permitDurationMs: 1_000,
+    });
+    if (expiring.outcome !== "authorized") throw new Error("测试过期许可签发失败");
+    expect(Date.parse(expiring.permit.expiresAt)).toBeGreaterThan(
+      Date.parse(expiring.permit.issuedAt),
+    );
+    h.persistence.advanceDatabase(1_001);
+    await expect(
+      h.persistence.consumeExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 1,
+        permit: expiring.permit,
+      }),
+    ).resolves.toEqual({ outcome: "expired" });
+  });
+
+  it("mutation receipt 固定命令摘要与推进量，同一幂等键不同摘要稳定冲突", async () => {
+    const h = harness([]);
+    const claimed = await h.persistence.claim({
+      scope: h.scope,
+      workerId: "receipt-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("测试 claim 失败");
+    const command = signedMutation({
+      idempotencyKey: "receipt-key",
+      fence: claimed.fence,
+      expectedAttemptVersion: 0,
+      events: [],
+      outbox: [],
+    });
+    const first = await h.persistence.mutate(command);
+    if (first.outcome !== "applied") throw new Error("首次 mutation 失败");
+    expect(first.receipt).toEqual({
+      schemaVersion: 1,
+      idempotencyKey: "receipt-key",
+      commandDigest: command.commandDigest,
+      previousAttemptVersion: 0,
+      attemptVersion: 1,
+      eventSequenceStart: 0,
+      eventSequenceEnd: 0,
+      outbox: [],
+    });
+    await expect(h.persistence.mutate(command)).resolves.toMatchObject({
+      outcome: "already_applied",
+      receipt: first.receipt,
+    });
+    await expect(
+      h.persistence.mutate(
+        signedMutation({
+          idempotencyKey: command.idempotencyKey,
+          fence: command.fence,
+          expectedAttemptVersion: command.expectedAttemptVersion,
+          events: command.events,
+          outbox: command.outbox,
+          nextStage: "workspace_verified",
+        }),
+      ),
+    ).resolves.toEqual({ outcome: "idempotency_conflict" });
+  });
+
+  it("RolloutProjection 使用独立版本 CAS，并在 receipt 中返回版本与摘要", async () => {
+    const h = harness([]);
+    const claimed = await h.persistence.claim({
+      scope: h.scope,
+      workerId: "projection-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("测试 claim 失败");
+    const projection = {
+      schemaVersion: 1 as const,
+      checkpointId: "projection-receipt",
+      turns: [{ role: "user" as const, text: "继续" }],
+    };
+    const applied = await h.persistence.mutate(
+      signedMutation({
+        idempotencyKey: "projection-first",
+        fence: claimed.fence,
+        expectedAttemptVersion: 0,
+        expectedProjectionVersion: 0,
+        events: [],
+        outbox: [],
+        rolloutProjection: projection,
+      }),
+    );
+    if (applied.outcome !== "applied") throw new Error("投影 mutation 失败");
+    expect(applied.receipt.projection).toMatchObject({
+      previousVersion: 0,
+      version: 1,
+      digest: rolloutProjectionDigest(projection),
+    });
+    expect(applied.attempt.projectionVersion).toBe(1);
+    await expect(
+      h.persistence.mutate(
+        signedMutation({
+          idempotencyKey: "projection-stale",
+          fence: claimed.fence,
+          expectedAttemptVersion: 1,
+          expectedProjectionVersion: 0,
+          events: [],
+          outbox: [],
+          rolloutProjection: { ...projection, checkpointId: "projection-stale" },
+        }),
+      ),
+    ).resolves.toEqual({ outcome: "conflict" });
+  });
+
+  it("heartbeat 非重入，stop 会等待唯一在途续租结束", async () => {
+    const blocked = new BlockingAgentSession();
+    const h = harness([blocked]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.createCount === 1);
+    const originalInspect = h.persistence.inspectAndRenew.bind(h.persistence);
+    let releaseInspect: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => (releaseInspect = resolve));
+    let concurrent = 0;
+    let maximumConcurrent = 0;
+    h.persistence.inspectAndRenew = async (input) => {
+      concurrent += 1;
+      maximumConcurrent = Math.max(maximumConcurrent, concurrent);
+      await gate;
+      try {
+        return await originalInspect(input);
+      } finally {
+        concurrent -= 1;
+      }
+    };
+
+    const firstTick = h.clock.tickHeartbeat();
+    await eventually(() => concurrent === 1);
+    const secondTick = h.clock.tickHeartbeat();
+    await Promise.resolve();
+    expect(maximumConcurrent).toBe(1);
+    h.cancellation.cancel(h.scope);
+    releaseInspect?.();
+    await Promise.all([firstTick, secondTick]);
+    await expect(execution).resolves.toEqual({ outcome: "cancelled" });
+    expect(maximumConcurrent).toBe(1);
+  });
+
+  it("Sandbox、Workspace 与 Artifact 异常分别映射稳定错误码", async () => {
+    const acquire = harness([new ScriptedAgentSession(successfulEvents)]);
+    acquire.sandboxes.beforeAcquireReturn = () => {
+      throw new Error("私有 Sandbox 异常");
+    };
+    await expect(acquire.worker.execute(acquire.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "SANDBOX_FAILED",
+    });
+
+    const workspace = harness([new ScriptedAgentSession(successfulEvents)]);
+    workspace.revisions.beforeReturn = () => {
+      throw new Error("私有 Workspace 异常");
+    };
+    await expect(workspace.worker.execute(workspace.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "WORKSPACE_CONFLICT",
+    });
+
+    const artifact = harness([new ScriptedAgentSession(successfulEvents)]);
+    artifact.artifacts.beforeReturn = () => {
+      throw new Error("私有 Artifact 异常");
+    };
+    await expect(artifact.worker.execute(artifact.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "ARTIFACT_NOT_READY",
+    });
   });
 
   it("跨 Tenant scope 被拒绝且不泄漏或改写原记录", async () => {
@@ -556,30 +949,64 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         disposition: "close" as const,
       },
     };
-    const pending = await h.persistence.mutate({
-      idempotencyKey: "mutation-pending",
-      fence: claimed.fence,
-      expectedAttemptVersion: 0,
-      events: [],
-      outbox: [{ ...base, state: "pending" }],
-    });
+    const pending = await h.persistence.mutate(
+      signedMutation({
+        idempotencyKey: "mutation-pending",
+        fence: claimed.fence,
+        expectedAttemptVersion: 0,
+        events: [],
+        outbox: [{ ...base, state: "pending", armed: true }],
+      }),
+    );
     expect(pending.outcome).toBe("applied");
-    const started = await h.persistence.mutate({
-      idempotencyKey: "mutation-started",
-      fence: claimed.fence,
-      expectedAttemptVersion: 1,
-      events: [],
-      outbox: [{ ...base, state: "started" }],
-    });
+    await expect(
+      h.persistence.mutate(
+        signedMutation({
+          idempotencyKey: "mutation-unarmed",
+          fence: claimed.fence,
+          expectedAttemptVersion: 1,
+          events: [],
+          outbox: [{ ...base, state: "pending", armed: false as true }],
+        }),
+      ),
+    ).resolves.toEqual({ outcome: "conflict" });
+    await expect(
+      h.persistence.mutate(
+        signedMutation({
+          idempotencyKey: "mutation-changed-identity",
+          fence: claimed.fence,
+          expectedAttemptVersion: 1,
+          events: [],
+          outbox: [
+            {
+              ...base,
+              state: "started",
+              payload: { ...base.payload, providerSandboxId: "sandbox-forged" },
+            },
+          ],
+        }),
+      ),
+    ).resolves.toEqual({ outcome: "conflict" });
+    const started = await h.persistence.mutate(
+      signedMutation({
+        idempotencyKey: "mutation-started",
+        fence: claimed.fence,
+        expectedAttemptVersion: 1,
+        events: [],
+        outbox: [{ ...base, state: "started" }],
+      }),
+    );
     expect(started.outcome).toBe("applied");
     await expect(
-      h.persistence.mutate({
-        idempotencyKey: "mutation-regression",
-        fence: claimed.fence,
-        expectedAttemptVersion: 2,
-        events: [],
-        outbox: [{ ...base, state: "pending" }],
-      }),
+      h.persistence.mutate(
+        signedMutation({
+          idempotencyKey: "mutation-regression",
+          fence: claimed.fence,
+          expectedAttemptVersion: 2,
+          events: [],
+          outbox: [{ ...base, state: "pending", armed: true }],
+        }),
+      ),
     ).resolves.toEqual({ outcome: "conflict" });
   });
 
@@ -618,4 +1045,11 @@ async function eventually(predicate: () => boolean): Promise<void> {
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
   }
   throw new Error("等待测试条件超时");
+}
+
+function signedMutation(
+  input: Omit<RuntimeMutation, "schemaVersion" | "commandDigest">,
+): RuntimeMutation {
+  const unsigned = { ...input, schemaVersion: 1 as const };
+  return { ...unsigned, commandDigest: runtimeMutationDigest(unsigned) };
 }

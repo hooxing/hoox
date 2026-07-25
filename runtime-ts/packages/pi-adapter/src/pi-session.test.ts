@@ -29,7 +29,7 @@ describe("Pi 安全适配", () => {
     async () => {
       const sandbox = new FakeSandboxHandle("pi-fake");
       let modelContext = "";
-      const { controller, events, toolAuthorizationCount } = await harness(
+      const { controller, events, toolAuthorizationCount, authorizedCalls } = await harness(
         [
           (context) => {
             modelContext = JSON.stringify(context);
@@ -38,6 +38,9 @@ describe("Pi 安全适配", () => {
               { stopReason: "toolUse" },
             );
           },
+          fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path: "/tmp/pi.txt" }), {
+            stopReason: "toolUse",
+          }),
           fauxAssistantMessage("完成"),
         ],
         sandbox,
@@ -46,8 +49,15 @@ describe("Pi 安全适配", () => {
       await controller.prompt("把内容写入隔离环境");
 
       expect(sandbox.files.get("/tmp/pi.txt")).toBe("pi-safe");
-      expect(toolAuthorizationCount()).toBe(1);
+      expect(toolAuthorizationCount()).toBe(2);
+      expect(authorizedCalls.map((call) => call.toolName)).toEqual([
+        "sandbox_write_file",
+        "sandbox_read_file",
+      ]);
+      expect(new Set(authorizedCalls.map((call) => call.callId)).size).toBe(2);
+      expect(authorizedCalls.every((call) => /^[a-f0-9]{64}$/u.test(call.argsDigest))).toBe(true);
       expect(events.filter((event) => event.type === "message.completed")).toEqual([
+        { type: "message.completed", stopReason: "toolUse" },
         { type: "message.completed", stopReason: "toolUse" },
         { type: "message.completed", stopReason: "stop" },
       ]);
@@ -92,6 +102,35 @@ describe("Pi 安全适配", () => {
       expect.objectContaining({ type: "tool.completed", isError: true }),
     );
   });
+
+  it.runIf(process.platform === "linux")(
+    "Tool Router 用单调时钟拒绝迟到 continuation，且不触碰 Sandbox",
+    async () => {
+      const sandbox = new FakeSandboxHandle("pi-expired-tool");
+      const { controller, events } = await harness(
+        [
+          fauxAssistantMessage(
+            fauxToolCall("sandbox_write_file", { path: "/tmp/expired.txt", content: "no" }),
+            { stopReason: "toolUse" },
+          ),
+          fauxAssistantMessage("已处理"),
+        ],
+        sandbox,
+        undefined,
+        async () => ({
+          consumedAtMonotonicMs: performance.now() - 1_000,
+          maxContinuationDelayMs: 1,
+        }),
+      );
+
+      await controller.prompt("尝试使用迟到许可写入");
+
+      expect(sandbox.files.has("/tmp/expired.txt")).toBe(false);
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "tool.completed", isError: true }),
+      );
+    },
+  );
 
   it.runIf(process.platform === "linux")(
     "把 Faux Provider 真实失败映射为稳定 PROVIDER，且不发布 completed",
@@ -238,7 +277,7 @@ describe("Pi 安全适配", () => {
           model: faux.getModel(),
           modelRuntime,
           sandbox: new FakeSandboxHandle("platform-guard"),
-          authorizeToolEffect: async () => undefined,
+          authorizeToolEffect: async () => immediateAuthorization(),
         }),
       ).rejects.toThrow("仅支持 Linux");
     }
@@ -267,13 +306,14 @@ async function harness(
   responses: FauxResponseStep[],
   sandbox = new FakeSandboxHandle("pi-fake"),
   rolloutProjection?: Parameters<typeof createSafePiSession>[0]["rolloutProjection"],
-  authorizeToolEffect?: () => Promise<unknown>,
+  authorizeToolEffect?: Parameters<typeof createSafePiSession>[0]["authorizeToolEffect"],
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
   started: Promise<void>;
   faux: FauxProviderHandle;
   toolAuthorizationCount: () => number;
+  authorizedCalls: Array<{ callId: string; toolName: string; argsDigest: string }>;
 }> {
   const suffix = `${Date.now()}-${Math.random()}`;
   const faux = fauxProvider({
@@ -289,13 +329,15 @@ async function harness(
   modelRuntime.registerNativeProvider(faux.provider);
   await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
   let authorizationCount = 0;
+  const authorizedCalls: Array<{ callId: string; toolName: string; argsDigest: string }> = [];
   const controller = await createSafePiSession({
     model: faux.getModel(),
     modelRuntime,
     sandbox,
-    authorizeToolEffect: async () => {
+    authorizeToolEffect: async (input) => {
       authorizationCount += 1;
-      return authorizeToolEffect?.();
+      authorizedCalls.push(input);
+      return (await authorizeToolEffect?.(input)) ?? immediateAuthorization();
     },
     ...(rolloutProjection === undefined ? {} : { rolloutProjection }),
   });
@@ -309,11 +351,22 @@ async function harness(
     events.push(event);
     if (event.type === "agent.started") resolveStarted?.();
   });
-  return { controller, events, started, faux, toolAuthorizationCount: () => authorizationCount };
+  return {
+    controller,
+    events,
+    started,
+    faux,
+    toolAuthorizationCount: () => authorizationCount,
+    authorizedCalls,
+  };
 }
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function immediateAuthorization() {
+  return { consumedAtMonotonicMs: performance.now(), maxContinuationDelayMs: 250 };
 }
 
 function hostPathPattern(path: string): RegExp {

@@ -36,6 +36,7 @@ import type {
   ExecutionAttemptSnapshot,
   ExecutionAttemptStatus,
   ExecutionFence,
+  ExternalEffectPermit,
   ExecutionPersistencePort,
   ExecutionScope,
   FenceInspectionResult,
@@ -44,6 +45,7 @@ import type {
   PersistedRuntimeOutboxV1,
   RuntimeMutation,
   RuntimeMutationResult,
+  RuntimeMutationReceiptV1,
   SandboxAcquireResult,
   SandboxSessionRef,
   SandboxSessionRegistryPort,
@@ -52,7 +54,14 @@ import type {
   WorkerAgentSessionPort,
   WorkspaceRevisionCandidate,
   WorkspaceRevisionVerifierPort,
+  RecoveryMetricsPort,
 } from "../ports.js";
+import {
+  outboxPayloadDigest,
+  rolloutProjectionDigest,
+  runtimeMutationDigest,
+  workspaceChangeDigest,
+} from "../mutation-protocol.js";
 
 interface FakeRecord {
   readonly scope: ExecutionScope;
@@ -61,6 +70,7 @@ interface FakeRecord {
   readonly input: string;
   answer?: string;
   rolloutProjection: ControlledRolloutProjection;
+  projectionVersion: number;
   attempt: ExecutionAttemptSnapshot | undefined;
   fence: ExecutionFence | undefined;
   readonly events: PersistedRuntimeEventV1[];
@@ -92,12 +102,16 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   readonly records = new Map<string, FakeRecord>();
   responseUnknownNextMutation = false;
   responseUnknownKeyIncludes: string | undefined;
+  /** 模拟数据库连接在事务是否提交前断开，readback 也找不到 receipt。 */
+  responseUnknownWithoutCommitKeyIncludes: string | undefined;
   unavailableNextMutation = false;
+  fenceLostMutationKeyIncludes: string | undefined;
+  idempotencyConflictKeyIncludes: string | undefined;
   forceInspectUnavailable = false;
   rejectInspectNext = false;
   forceFenceLost = false;
   rejectNextPermit = false;
-  readonly permits: Array<{ readonly effect: "model_start" | "tool_execution" }> = [];
+  readonly permits: Array<{ readonly permit: ExternalEffectPermit; consumed: boolean }> = [];
   readonly revisionCreatedAt: IsoTimestamp[] = [];
   afterMutation?: (command: RuntimeMutation) => void;
   private databaseMillis = Date.parse("2026-07-26T00:00:00.000Z");
@@ -113,6 +127,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       input: seed.input,
       ...(seed.answer === undefined ? {} : { answer: seed.answer }),
       rolloutProjection: seed.rolloutProjection,
+      projectionVersion: 0,
       attempt: undefined,
       fence: undefined,
       events: [],
@@ -157,6 +172,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       version: 0,
       nextEventSequence: record.events.length,
       modelExecutionStarted: false,
+      projectionVersion: record.projectionVersion,
       ...(record.workspace.currentRevisionId === undefined
         ? {}
         : { currentRevisionId: record.workspace.currentRevisionId }),
@@ -199,8 +215,17 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       return { outcome: "fence_lost" };
     }
     const now = this.databaseNow();
-    if (record.fence === undefined || expired(record.fence, now)) return { outcome: "fence_lost" };
-    const expiresAt = this.after(input.leaseDurationMs);
+    if (
+      record.fence === undefined ||
+      record.run.status !== "running" ||
+      expired(record.fence, now) ||
+      record.workspace.writerLease?.rootRunId !== record.fence.workspaceLease.rootRunId ||
+      record.workspace.writerLease.epoch !== record.fence.workspaceLease.epoch ||
+      record.workspace.writerLease.expiresAt !== record.fence.workspaceLease.expiresAt
+    ) {
+      return { outcome: "fence_lost" };
+    }
+    const expiresAt = this.nextExpiry(record.fence, input.leaseDurationMs);
     record.workspace = renewWorkspaceLease({
       workspace: record.workspace,
       rootRun: record.run,
@@ -245,10 +270,40 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       workspaceLeaseEpoch: input.fence.workspaceLease.epoch,
       attemptVersion: input.expectedAttemptVersion,
       effect: input.effect,
+      callId: input.call.callId,
+      toolName: input.call.toolName,
+      argsDigest: input.call.argsDigest,
+      issuedAt: now,
       expiresAt: this.after(input.permitDurationMs),
     } as const;
-    this.permits.push({ effect: input.effect });
+    this.permits.push({ permit, consumed: false });
     return { outcome: "authorized", permit };
+  }
+
+  async consumeExternalEffectPermit(
+    input: Parameters<ExecutionPersistencePort["consumeExternalEffectPermit"]>[0],
+  ): ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]> {
+    const record = this.find(input.fence.scope);
+    if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
+    const now = this.databaseNow();
+    const stored = this.permits.find(
+      (candidate) => candidate.permit.permitId === input.permit.permitId,
+    );
+    if (!record?.attempt || !stored || !samePermit(stored.permit, input.permit)) {
+      return { outcome: "fence_lost" };
+    }
+    if (stored.consumed) return { outcome: "already_consumed" };
+    if (
+      !this.validFence(record, input.fence) ||
+      expired(input.fence, now) ||
+      record.attempt.version !== input.expectedAttemptVersion ||
+      input.permit.attemptVersion !== input.expectedAttemptVersion
+    ) {
+      return { outcome: "conflict" };
+    }
+    if (Date.parse(input.permit.expiresAt) <= Date.parse(now)) return { outcome: "expired" };
+    stored.consumed = true;
+    return { outcome: "consumed", databaseNow: now };
   }
 
   async mutate(command: RuntimeMutation): Promise<RuntimeMutationResult> {
@@ -256,15 +311,52 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       this.unavailableNextMutation = false;
       return { outcome: "unavailable" };
     }
+    if (
+      this.fenceLostMutationKeyIncludes !== undefined &&
+      command.idempotencyKey.includes(this.fenceLostMutationKeyIncludes)
+    ) {
+      this.fenceLostMutationKeyIncludes = undefined;
+      return { outcome: "fence_lost" };
+    }
+    if (
+      this.idempotencyConflictKeyIncludes !== undefined &&
+      command.idempotencyKey.includes(this.idempotencyConflictKeyIncludes)
+    ) {
+      this.idempotencyConflictKeyIncludes = undefined;
+      return { outcome: "idempotency_conflict" };
+    }
+    const { commandDigest: suppliedDigest, ...unsigned } = command;
+    if (command.schemaVersion !== 1 || runtimeMutationDigest(unsigned) !== suppliedDigest) {
+      return { outcome: "idempotency_conflict" };
+    }
     const record = this.find(command.fence.scope);
     if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
     if (!record || this.forceFenceLost || !this.validFence(record, command.fence)) {
       return { outcome: "fence_lost" };
     }
     const previous = record.mutations.get(command.idempotencyKey);
-    if (previous) return { ...previous, outcome: "already_applied" };
+    if (previous) {
+      return previous.receipt.commandDigest === command.commandDigest
+        ? { ...previous, outcome: "already_applied" }
+        : { outcome: "idempotency_conflict" };
+    }
+    if (
+      this.responseUnknownWithoutCommitKeyIncludes !== undefined &&
+      command.idempotencyKey.includes(this.responseUnknownWithoutCommitKeyIncludes)
+    ) {
+      this.responseUnknownWithoutCommitKeyIncludes = undefined;
+      return { outcome: "response_unknown" };
+    }
     const now = this.databaseNow();
-    if (record.fence === undefined || expired(record.fence, now)) return { outcome: "fence_lost" };
+    if (
+      record.fence === undefined ||
+      record.run.status !== "running" ||
+      expired(record.fence, now) ||
+      record.workspace.writerLease?.rootRunId !== record.fence.workspaceLease.rootRunId ||
+      record.workspace.writerLease.epoch !== record.fence.workspaceLease.epoch
+    ) {
+      return { outcome: "fence_lost" };
+    }
     const attempt = record.attempt;
     if (!attempt || attempt.version !== command.expectedAttemptVersion)
       return { outcome: "conflict" };
@@ -275,6 +367,13 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     }
     for (const [index, event] of command.events.entries()) {
       if (event.sequence !== attempt.nextEventSequence + index) return { outcome: "conflict" };
+    }
+    if (
+      command.rolloutProjection !== undefined
+        ? command.expectedProjectionVersion !== record.projectionVersion
+        : command.expectedProjectionVersion !== undefined
+    ) {
+      return { outcome: "conflict" };
     }
     if (command.workspaceChange) {
       const revision = command.workspaceChange;
@@ -292,13 +391,29 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
 
     for (const item of command.outbox) {
       if (item.kind !== "sandbox_cleanup") continue;
+      const keyedExisting = record.outbox.find(
+        (candidate) => candidate.idempotencyKey === item.idempotencyKey,
+      );
+      if (keyedExisting !== undefined && keyedExisting.kind !== "sandbox_cleanup") {
+        return { outcome: "conflict" };
+      }
       const existing = record.outbox.find(
         (candidate) =>
           candidate.kind === "sandbox_cleanup" && candidate.idempotencyKey === item.idempotencyKey,
       );
       if (!cleanupTransitionAllowed(existing?.state, item.state)) return { outcome: "conflict" };
+      if (item.state === "pending" && item.armed !== true) return { outcome: "conflict" };
+      if (
+        existing?.kind === "sandbox_cleanup" &&
+        (existing.payload.registryId !== item.payload.registryId ||
+          existing.payload.providerSandboxId !== item.payload.providerSandboxId)
+      ) {
+        return { outcome: "conflict" };
+      }
     }
 
+    const previousHead = record.workspace.currentRevisionId;
+    const previousProjectionVersion = record.projectionVersion;
     record.events.push(...command.events.map((event) => ({ ...event, occurredAt: now })));
     for (const item of command.outbox) {
       const index = record.outbox.findIndex(
@@ -322,7 +437,10 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       this.revisionCreatedAt.push(commit.revision.createdAt);
     }
     if (command.nextRunStatus) record.run = transitionRun(record.run, command.nextRunStatus, now);
-    if (command.rolloutProjection) record.rolloutProjection = command.rolloutProjection;
+    if (command.rolloutProjection) {
+      record.rolloutProjection = command.rolloutProjection;
+      record.projectionVersion += 1;
+    }
     const nextAttempt: ExecutionAttemptSnapshot = {
       ...attempt,
       status: command.nextAttemptStatus ?? attempt.status,
@@ -331,6 +449,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       nextEventSequence: attempt.nextEventSequence + command.events.length,
       modelExecutionStarted:
         attempt.modelExecutionStarted || command.nextStage === "model_execution_started",
+      projectionVersion: record.projectionVersion,
       ...(record.workspace.currentRevisionId === undefined
         ? {}
         : { currentRevisionId: record.workspace.currentRevisionId }),
@@ -345,6 +464,39 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       });
       record.fence = undefined;
     }
+    const receipt: RuntimeMutationReceiptV1 = {
+      schemaVersion: 1,
+      idempotencyKey: command.idempotencyKey,
+      commandDigest: command.commandDigest,
+      previousAttemptVersion: attempt.version,
+      attemptVersion: nextAttempt.version,
+      eventSequenceStart: attempt.nextEventSequence,
+      eventSequenceEnd: nextAttempt.nextEventSequence,
+      outbox: command.outbox.map((item) => ({
+        idempotencyKey: item.idempotencyKey,
+        payloadDigest: outboxPayloadDigest(item),
+        state: item.state,
+      })),
+      ...(command.rolloutProjection === undefined
+        ? {}
+        : {
+            projection: {
+              schemaVersion: 1,
+              previousVersion: previousProjectionVersion,
+              version: record.projectionVersion,
+              digest: rolloutProjectionDigest(command.rolloutProjection),
+            },
+          }),
+      ...(command.workspaceChange === undefined
+        ? {}
+        : {
+            workspace: {
+              changeDigest: workspaceChangeDigest(command.workspaceChange),
+              ...(previousHead === undefined ? {} : { previousHead }),
+              currentHead: command.workspaceChange.revisionId,
+            },
+          }),
+    };
     const result: AppliedFakeMutation = {
       outcome: "applied",
       attemptVersion: nextAttempt.version,
@@ -354,6 +506,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       attempt: nextAttempt,
       run: record.run,
       workspace: record.workspace,
+      receipt,
     };
     record.mutations.set(command.idempotencyKey, result);
     this.afterMutation?.(command);
@@ -462,6 +615,15 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
 
   private after(milliseconds: number): IsoTimestamp {
     return isoTimestamp(new Date(this.databaseMillis + milliseconds).toISOString());
+  }
+
+  private nextExpiry(fence: ExecutionFence, milliseconds: number): IsoTimestamp {
+    const minimum = Math.max(
+      this.databaseMillis + milliseconds,
+      Date.parse(fence.runClaim.expiresAt) + 1,
+      Date.parse(fence.workspaceLease.expiresAt) + 1,
+    );
+    return isoTimestamp(new Date(minimum).toISOString());
   }
 
   private validFence(record: FakeRecord, fence: ExecutionFence): boolean {
@@ -584,10 +746,10 @@ export class ScriptedAgentSession implements WorkerAgentSessionPort {
 
   async runPrompt(
     text: string,
-    permit: Parameters<WorkerAgentSessionPort["runPrompt"]>[1],
+    authorization: Parameters<WorkerAgentSessionPort["runPrompt"]>[1],
   ): Promise<AgentTurnOutcome> {
     this.prompts.push(text);
-    this.modelPermits.push(permit.permitId);
+    this.modelPermits.push(authorization.permit.permitId);
     for (const event of this.events) for (const listener of this.listeners) listener(event);
     return this.outcome;
   }
@@ -634,7 +796,9 @@ export class BlockingAgentSession implements WorkerAgentSessionPort {
 export class FakeSessionFactory implements AgentSessionFactoryPort {
   createCount = 0;
   readonly projections: ControlledRolloutProjection[] = [];
-  readonly toolAuthorizers: Array<() => Promise<unknown>> = [];
+  readonly toolAuthorizers: Array<
+    Parameters<AgentSessionFactoryPort["create"]>[0]["authorizeToolEffect"]
+  > = [];
 
   constructor(private readonly queue: WorkerAgentSessionPort[]) {}
 
@@ -672,7 +836,11 @@ export class FakeCancellationPort implements CancellationPort {
 }
 
 export class FakeClock implements ClockPort {
-  private readonly heartbeats: Array<{ active: boolean; callback: () => Promise<void> }> = [];
+  private readonly heartbeats: Array<{
+    active: boolean;
+    callback: () => Promise<void>;
+    inFlight: Set<Promise<void>>;
+  }> = [];
   private readonly scheduled: Array<{ active: boolean; callback: () => void }> = [];
 
   schedule(_delayMs: number, callback: () => void): ScheduledTask {
@@ -682,17 +850,27 @@ export class FakeClock implements ClockPort {
   }
 
   startHeartbeat(_intervalMs: number, callback: () => Promise<void>): HeartbeatTask {
-    const heartbeat = { active: true, callback };
+    const heartbeat = { active: true, callback, inFlight: new Set<Promise<void>>() };
     this.heartbeats.push(heartbeat);
     return {
       stop: async () => {
         heartbeat.active = false;
+        await Promise.allSettled([...heartbeat.inFlight]);
       },
     };
   }
 
   async tickHeartbeat(): Promise<void> {
-    for (const heartbeat of this.heartbeats) if (heartbeat.active) await heartbeat.callback();
+    for (const heartbeat of this.heartbeats) {
+      if (!heartbeat.active) continue;
+      const task = heartbeat.callback();
+      heartbeat.inFlight.add(task);
+      try {
+        await task;
+      } finally {
+        heartbeat.inFlight.delete(task);
+      }
+    }
   }
 
   fireTimeout(): void {
@@ -712,6 +890,16 @@ export class FakeArtifactPublication implements ArtifactPublicationPort {
   async assertReadyForCompletion(): Promise<void> {
     this.calls += 1;
     await this.beforeReturn?.();
+  }
+}
+
+export class FakeRecoveryMetrics implements RecoveryMetricsPort {
+  readonly orphanCleanups: Array<Parameters<RecoveryMetricsPort["recordOrphanCleanup"]>[0]> = [];
+
+  async recordOrphanCleanup(
+    input: Parameters<RecoveryMetricsPort["recordOrphanCleanup"]>[0],
+  ): Promise<void> {
+    this.orphanCleanups.push(input);
   }
 }
 
@@ -797,4 +985,22 @@ function cleanupTransitionAllowed(
   if (previous === "started")
     return next === "started" || next === "completed" || next === "unknown";
   return previous === next;
+}
+
+function samePermit(left: ExternalEffectPermit, right: ExternalEffectPermit): boolean {
+  return (
+    left.permitId === right.permitId &&
+    sameScope(left.scope, right.scope) &&
+    left.runClaimToken === right.runClaimToken &&
+    left.runClaimEpoch === right.runClaimEpoch &&
+    left.workspaceRootRunId === right.workspaceRootRunId &&
+    left.workspaceLeaseEpoch === right.workspaceLeaseEpoch &&
+    left.attemptVersion === right.attemptVersion &&
+    left.effect === right.effect &&
+    left.callId === right.callId &&
+    left.toolName === right.toolName &&
+    left.argsDigest === right.argsDigest &&
+    left.issuedAt === right.issuedAt &&
+    left.expiresAt === right.expiresAt
+  );
 }

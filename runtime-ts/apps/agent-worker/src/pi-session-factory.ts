@@ -1,4 +1,5 @@
 import { createSafePiSession } from "@cube-runtime/pi-adapter";
+import { sha256Digest } from "@cube-runtime/domain";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionFactoryPort, AgentTurnOutcome, WorkerAgentSessionPort } from "./ports.js";
@@ -22,10 +23,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       modelRuntime: this.modelRuntime,
       sandbox: input.sandbox,
       rolloutProjection: input.rolloutProjection,
-      authorizeToolEffect: input.authorizeToolEffect,
+      authorizeToolEffect: (call) =>
+        input.authorizeToolEffect({ ...call, argsDigest: sha256Digest(call.argsDigest) }),
     });
     return {
-      runPrompt: async (text, permit): Promise<AgentTurnOutcome> => {
+      runPrompt: async (text, authorization): Promise<AgentTurnOutcome> => {
+        const { permit } = authorization;
         if (
           permit.effect !== "model_start" ||
           permit.scope.tenantId !== input.scope.tenantId ||
@@ -37,7 +40,13 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         ) {
           throw new Error("模型启动许可与 ExecutionScope 不匹配");
         }
-        // 许可刚由 DB 签发；校验后立即消费，中间不再插入异步窗口。
+        if (
+          performance.now() - authorization.consumedAtMonotonicMs >=
+          authorization.maxContinuationDelayMs
+        ) {
+          throw new Error("模型启动许可在本地 continuation 前已过期");
+        }
+        // 许可刚由 DB 一次性消费；校验后立即进入 prompt，中间不再插入异步窗口。
         await controller.prompt(text);
         return { kind: "completed" };
       },

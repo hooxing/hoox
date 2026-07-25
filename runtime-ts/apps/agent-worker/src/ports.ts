@@ -50,6 +50,7 @@ export interface ExecutionAttemptSnapshot {
   readonly version: number;
   readonly nextEventSequence: number;
   readonly modelExecutionStarted: boolean;
+  readonly projectionVersion: number;
   /** Scope 的 baseRevisionId 永不改变；后续 head 只保存在 Attempt checkpoint。 */
   readonly currentRevisionId?: WorkspaceRevisionId;
 }
@@ -92,7 +93,25 @@ export interface ExternalEffectPermit {
   readonly workspaceLeaseEpoch: number;
   readonly attemptVersion: number;
   readonly effect: "model_start" | "tool_execution";
+  readonly callId: string;
+  readonly toolName: string;
+  readonly argsDigest: Sha256Digest;
+  readonly issuedAt: IsoTimestamp;
   readonly expiresAt: IsoTimestamp;
+}
+
+export interface ExternalEffectCall {
+  readonly callId: string;
+  readonly toolName: string;
+  readonly argsDigest: Sha256Digest;
+}
+
+export interface ConsumedExternalEffectAuthorization {
+  readonly permit: ExternalEffectPermit;
+  readonly consumedAt: IsoTimestamp;
+  /** 只用于限制 DB consume 返回后的本地 continuation 延迟，不代替 DB expiresAt。 */
+  readonly consumedAtMonotonicMs: number;
+  readonly maxContinuationDelayMs: number;
 }
 
 export type ClaimExecutionResult =
@@ -125,6 +144,7 @@ export type StableWorkerErrorCode =
   | "SANDBOX_FAILED"
   | "WORKSPACE_CONFLICT"
   | "ARTIFACT_NOT_READY"
+  | "IDEMPOTENCY_CONFLICT"
   | "INTERNAL";
 
 export type RuntimeEventV1 =
@@ -168,6 +188,7 @@ interface SandboxCleanupOutboxBase {
 export type RuntimeOutboxV1 =
   | (SandboxCleanupOutboxBase & {
       readonly state: "pending";
+      readonly armed: true;
       readonly payload: SandboxCleanupOutboxBase["payload"] & {
         readonly retryCode?: StableWorkerErrorCode;
       };
@@ -201,6 +222,8 @@ export type RuntimeOutboxV1 =
 export type PersistedRuntimeOutboxV1 = RuntimeOutboxV1 & { readonly occurredAt: IsoTimestamp };
 
 export interface RuntimeMutation {
+  readonly schemaVersion: 1;
+  readonly commandDigest: Sha256Digest;
   readonly idempotencyKey: string;
   readonly fence: ExecutionFence;
   readonly expectedAttemptVersion: number;
@@ -210,10 +233,37 @@ export interface RuntimeMutation {
   /** 同一业务键以 upsert 推进 Saga 状态，禁止把 pending/started/completed 当成三条无关消息。 */
   readonly outbox: readonly RuntimeOutboxV1[];
   readonly rolloutProjection?: ControlledRolloutProjection;
+  readonly expectedProjectionVersion?: number;
   /** 只携带验证内容；Revision、Workspace 及时间均由事务内单次 DB now 构造。 */
   readonly workspaceChange?: ValidatedWorkspaceChange;
   readonly nextRunStatus?: Extract<RunStatus, "waiting" | "succeeded" | "failed" | "cancelled">;
   readonly releaseFences?: boolean;
+}
+
+export interface RuntimeMutationReceiptV1 {
+  readonly schemaVersion: 1;
+  readonly idempotencyKey: string;
+  readonly commandDigest: Sha256Digest;
+  readonly previousAttemptVersion: number;
+  readonly attemptVersion: number;
+  readonly eventSequenceStart: number;
+  readonly eventSequenceEnd: number;
+  readonly outbox: readonly {
+    readonly idempotencyKey: string;
+    readonly payloadDigest: Sha256Digest;
+    readonly state: RuntimeOutboxV1["state"];
+  }[];
+  readonly projection?: {
+    readonly schemaVersion: 1;
+    readonly previousVersion: number;
+    readonly version: number;
+    readonly digest: Sha256Digest;
+  };
+  readonly workspace?: {
+    readonly changeDigest: Sha256Digest;
+    readonly previousHead?: WorkspaceRevisionId;
+    readonly currentHead: WorkspaceRevisionId;
+  };
 }
 
 export type RuntimeMutationResult =
@@ -226,6 +276,7 @@ export type RuntimeMutationResult =
       readonly attempt: ExecutionAttemptSnapshot;
       readonly run: Run;
       readonly workspace: Workspace;
+      readonly receipt: RuntimeMutationReceiptV1;
     }
   | {
       readonly outcome:
@@ -233,6 +284,7 @@ export type RuntimeMutationResult =
         | "conflict"
         | "unavailable"
         | "response_unknown"
+        | "idempotency_conflict"
         | "scope_mismatch";
     };
 
@@ -261,11 +313,29 @@ export interface ExecutionPersistencePort {
     readonly fence: ExecutionFence;
     readonly expectedAttemptVersion: number;
     readonly effect: ExternalEffectPermit["effect"];
+    readonly call: ExternalEffectCall;
     readonly permitDurationMs: number;
   }): Promise<
     | { readonly outcome: "authorized"; readonly permit: ExternalEffectPermit }
     | {
         readonly outcome:
+          | "cancelled"
+          | "fence_lost"
+          | "conflict"
+          | "unavailable"
+          | "scope_mismatch";
+      }
+  >;
+  consumeExternalEffectPermit(input: {
+    readonly fence: ExecutionFence;
+    readonly expectedAttemptVersion: number;
+    readonly permit: ExternalEffectPermit;
+  }): Promise<
+    | { readonly outcome: "consumed"; readonly databaseNow: IsoTimestamp }
+    | {
+        readonly outcome:
+          | "already_consumed"
+          | "expired"
           | "cancelled"
           | "fence_lost"
           | "conflict"
@@ -346,7 +416,10 @@ export type AgentTurnOutcome =
 
 export interface WorkerAgentSessionPort {
   /** 新 Session 无论首轮还是 waiting 恢复都用 prompt 启动模型；禁止对空 Session 调 followUp。 */
-  runPrompt(text: string, permit: ExternalEffectPermit): Promise<AgentTurnOutcome>;
+  runPrompt(
+    text: string,
+    authorization: ConsumedExternalEffectAuthorization,
+  ): Promise<AgentTurnOutcome>;
   abort(): Promise<void>;
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void;
   dispose(): void;
@@ -357,8 +430,19 @@ export interface AgentSessionFactoryPort {
     readonly scope: ExecutionScope;
     readonly sandbox: SandboxHandle;
     readonly rolloutProjection: ControlledRolloutProjection;
-    readonly authorizeToolEffect: () => Promise<ExternalEffectPermit>;
+    readonly authorizeToolEffect: (
+      call: ExternalEffectCall,
+    ) => Promise<ConsumedExternalEffectAuthorization>;
   }): Promise<WorkerAgentSessionPort>;
+}
+
+export interface RecoveryMetricsPort {
+  recordOrphanCleanup(input: {
+    readonly scope: ExecutionScope;
+    readonly registryId: string;
+    readonly reason: RuntimeMutationResult["outcome"] | "cancelled" | "timeout";
+    readonly cleanupOutcome: "settled" | "unknown" | "failed";
+  }): Promise<void>;
 }
 
 export interface CancellationPort {

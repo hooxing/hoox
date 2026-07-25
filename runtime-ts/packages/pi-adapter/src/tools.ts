@@ -2,6 +2,7 @@ import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { SandboxRuntimeError } from "@cube-runtime/sandbox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { createHash } from "node:crypto";
 
 export const SANDBOX_TOOL_NAMES = [
   "sandbox_command",
@@ -12,7 +13,14 @@ export const SANDBOX_TOOL_NAMES = [
 
 export interface SandboxToolEffectAuthorizer {
   /** 每次工具副作用前都向 Runtime DB 重新领取短时许可。 */
-  authorizeToolEffect(): Promise<unknown>;
+  authorizeToolEffect(input: {
+    readonly callId: string;
+    readonly toolName: string;
+    readonly argsDigest: string;
+  }): Promise<{
+    readonly consumedAtMonotonicMs: number;
+    readonly maxContinuationDelayMs: number;
+  }>;
 }
 
 export function createSandboxTools(
@@ -26,7 +34,8 @@ export function createSandboxTools(
       description: "只在隔离的 CubeSandbox 中执行命令，不访问 Agent Worker 宿主机。",
       parameters: Type.Object({ command: Type.String({ minLength: 1 }) }),
       execute: async (_id, params, signal) => {
-        await authorizeTool(authorizer);
+        const authorization = await authorizeTool(authorizer, _id, "sandbox_command", params);
+        assertImmediateContinuation(authorization, signal);
         return toolResult(() => sandbox.command(params.command, signalControl(signal)));
       },
     }),
@@ -39,7 +48,8 @@ export function createSandboxTools(
         language: Type.Optional(Type.String()),
       }),
       execute: async (_id, params, signal) => {
-        await authorizeTool(authorizer);
+        const authorization = await authorizeTool(authorizer, _id, "sandbox_run_code", params);
+        assertImmediateContinuation(authorization, signal);
         return toolResult(() =>
           sandbox.runCode(params.code, {
             ...signalControl(signal),
@@ -54,7 +64,8 @@ export function createSandboxTools(
       description: "读取 CubeSandbox 中的绝对路径文件；不能读取 Worker 宿主机。",
       parameters: Type.Object({ path: Type.String({ pattern: "^/" }) }),
       execute: async (_id, params, signal) => {
-        await authorizeTool(authorizer);
+        const authorization = await authorizeTool(authorizer, _id, "sandbox_read_file", params);
+        assertImmediateContinuation(authorization, signal);
         return toolResult(() => sandbox.readFile(params.path, signalControl(signal)));
       },
     }),
@@ -67,7 +78,8 @@ export function createSandboxTools(
         content: Type.String(),
       }),
       execute: async (_id, params, signal) => {
-        await authorizeTool(authorizer);
+        const authorization = await authorizeTool(authorizer, _id, "sandbox_write_file", params);
+        assertImmediateContinuation(authorization, signal);
         return toolResult(async () => {
           await sandbox.writeFile(params.path, params.content, signalControl(signal));
           return { written: true };
@@ -77,13 +89,49 @@ export function createSandboxTools(
   ];
 }
 
-async function authorizeTool(authorizer: SandboxToolEffectAuthorizer): Promise<void> {
+async function authorizeTool(
+  authorizer: SandboxToolEffectAuthorizer,
+  callId: string,
+  toolName: string,
+  args: unknown,
+): ReturnType<SandboxToolEffectAuthorizer["authorizeToolEffect"]> {
   try {
-    await authorizer.authorizeToolEffect();
+    return await authorizer.authorizeToolEffect({
+      callId,
+      toolName,
+      argsDigest: createHash("sha256").update(canonicalJson(args)).digest("hex"),
+    });
   } catch {
     // 不泄漏 DB/栅栏细节；抛错让 Pi 将工具调用标记为失败，同时保证 Sandbox 尚未被触碰。
     throw new Error("Runtime 已拒绝本次工具副作用");
   }
+}
+
+/** authorize 返回后的 continuation 不再 await；检查后下一条语句必须直接调用 Sandbox。 */
+function assertImmediateContinuation(
+  authorization: Awaited<ReturnType<SandboxToolEffectAuthorizer["authorizeToolEffect"]>>,
+  signal: AbortSignal | undefined,
+): void {
+  if (
+    signal?.aborted ||
+    performance.now() - authorization.consumedAtMonotonicMs >= authorization.maxContinuationDelayMs
+  ) {
+    throw new Error("Runtime 工具副作用许可已过期或调用已取消");
+  }
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonical(value));
+}
+
+function canonical(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(canonical);
+  return Object.fromEntries(
+    Object.entries(value)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, item]) => [key, canonical(item)]),
+  );
 }
 
 function signalControl(signal: AbortSignal | undefined): { signal?: AbortSignal } {

@@ -932,15 +932,15 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
       ["workspace_revisions", new Set(["SELECT", "INSERT"])],
       ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
-      ["blob_lifecycles", new Set(["SELECT", "INSERT", "UPDATE"])],
-      ["blob_incarnations", new Set(["SELECT", "INSERT", "UPDATE"])],
+      ["blob_lifecycles", new Set(["SELECT", "INSERT"])],
+      ["blob_incarnations", new Set(["SELECT", "INSERT"])],
       ["blob_allocations", new Set(["SELECT", "INSERT"])],
-      ["blob_commits", new Set(["SELECT", "INSERT", "UPDATE"])],
-      ["promotion_authorizations", new Set(["SELECT", "INSERT", "UPDATE"])],
-      ["promotion_executions", new Set(["SELECT", "INSERT", "UPDATE"])],
-      ["blob_gc_claims", new Set(["SELECT", "INSERT", "UPDATE"])],
-      ["retired_blob_tombstones", new Set(["SELECT", "INSERT", "UPDATE"])],
-      ["blob_references", new Set(["SELECT", "INSERT", "UPDATE"])],
+      ["blob_commits", new Set(["SELECT", "INSERT"])],
+      ["promotion_authorizations", new Set(["SELECT", "INSERT"])],
+      ["promotion_executions", new Set(["SELECT", "INSERT"])],
+      ["blob_gc_claims", new Set(["SELECT", "INSERT"])],
+      ["retired_blob_tombstones", new Set(["SELECT", "INSERT"])],
+      ["blob_references", new Set(["SELECT", "INSERT"])],
       ["runtime_schema_migrations", new Set()],
     ]);
     const allPrivileges = [
@@ -969,6 +969,57 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     for (const entry of privilegeMatrix.rows) {
       expect(entry.allowed, `${entry.table_name}:${entry.privilege}`).toBe(
         expectedPolicy.get(entry.table_name)?.has(entry.privilege),
+      );
+    }
+    const expectedColumnUpdates = new Map<string, ReadonlySet<string>>([
+      [
+        "blob_lifecycles",
+        new Set([
+          "state",
+          "current_incarnation_id",
+          "generation",
+          "current_claim_id",
+          "lease_expires_at",
+          "updated_at",
+        ]),
+      ],
+      ["blob_incarnations", new Set(["state", "retired_at"])],
+      ["blob_commits", new Set(["status", "version", "snapshot", "updated_at"])],
+      [
+        "promotion_authorizations",
+        new Set(["state", "current_execution_id", "execution_generation", "updated_at"]),
+      ],
+      ["promotion_executions", new Set(["phase", "proof_status", "updated_at"])],
+      ["blob_gc_claims", new Set(["phase", "updated_at"])],
+      [
+        "retired_blob_tombstones",
+        new Set(["generation", "scrub_lease_expires_at", "next_scrub_at", "last_scrubbed_at"]),
+      ],
+      [
+        "blob_references",
+        new Set(["state", "lifecycle_id", "incarnation_id", "physical_object_key", "updated_at"]),
+      ],
+    ]);
+    const columnMatrix = await migratorPool.query<{
+      table_name: string;
+      column_name: string;
+      allowed: boolean;
+    }>(
+      `SELECT column_state.table_name, column_state.column_name,
+              has_column_privilege(
+                $1,
+                format('%I.%I', current_schema()::text, column_state.table_name),
+                column_state.column_name,
+                'UPDATE'
+              ) AS allowed
+         FROM information_schema.columns column_state
+        WHERE column_state.table_schema = current_schema()
+          AND column_state.table_name = ANY($2::text[])`,
+      [runtimeRole, [...expectedColumnUpdates.keys()]],
+    );
+    for (const entry of columnMatrix.rows) {
+      expect(entry.allowed, `${entry.table_name}.${entry.column_name}:UPDATE`).toBe(
+        expectedColumnUpdates.get(entry.table_name)?.has(entry.column_name),
       );
     }
     const effectiveBoundary = await migratorPool.query<{

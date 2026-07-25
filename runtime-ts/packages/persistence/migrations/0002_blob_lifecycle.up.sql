@@ -141,6 +141,7 @@ CREATE TABLE promotion_executions (
   UNIQUE (execution_id),
   UNIQUE (tenant_id, authorization_id, generation),
   UNIQUE (tenant_id, authorization_id, attempt_id),
+  UNIQUE (tenant_id, authorization_id, execution_id, generation),
   FOREIGN KEY (tenant_id, operation_id, authorization_id)
     REFERENCES promotion_authorizations(tenant_id, operation_id, authorization_id) ON DELETE RESTRICT,
   FOREIGN KEY (tenant_id, authorization_id, lifecycle_id, incarnation_id, physical_object_key)
@@ -148,9 +149,15 @@ CREATE TABLE promotion_executions (
 );
 
 ALTER TABLE promotion_authorizations ADD CONSTRAINT promotion_authorization_current_execution_fk
-  FOREIGN KEY (tenant_id, current_execution_id)
-  REFERENCES promotion_executions(tenant_id, execution_id)
+  FOREIGN KEY (tenant_id, authorization_id, current_execution_id, execution_generation)
+  REFERENCES promotion_executions(tenant_id, authorization_id, execution_id, generation)
   DEFERRABLE INITIALLY DEFERRED;
+
+ALTER TABLE promotion_authorizations ADD CONSTRAINT promotion_authorization_execution_shape_check
+  CHECK (
+    (current_execution_id IS NULL AND execution_generation = 0)
+    OR (current_execution_id IS NOT NULL AND execution_generation > 0)
+  );
 
 CREATE TABLE blob_gc_claims (
   tenant_id text NOT NULL,

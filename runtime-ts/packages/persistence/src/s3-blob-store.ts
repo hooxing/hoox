@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   CopyObjectCommand,
   DeleteObjectCommand,
@@ -17,6 +17,7 @@ import {
   type BlobStore,
   type PresignBlobDownloadInput,
   type PromotionAuthorizationRef,
+  type PromotionAuthorizationResolution,
   type PromotionExecutionClaim,
   type PromotionExecutionClaimResolution,
   type PutStagingBlobInput,
@@ -47,7 +48,6 @@ export interface S3BlobStoreConfig {
   readonly prefix?: string;
   readonly maxPresignTtlSeconds?: number;
   readonly maxBlobSizeBytes: number;
-  readonly promotionWorkerId?: string;
 }
 
 export interface CreateS3BlobStoreConfig extends S3BlobStoreConfig {
@@ -107,7 +107,6 @@ export class S3BlobStore implements BlobStore {
   private readonly prefix: string;
   private readonly maxPresignTtlSeconds: number;
   private readonly maxBlobSizeBytes: number;
-  private readonly promotionWorkerId: string;
 
   constructor(
     private readonly client: S3ObjectClient,
@@ -118,7 +117,6 @@ export class S3BlobStore implements BlobStore {
     this.prefix = normalizePrefix(config.prefix ?? "agent-runtime");
     this.maxPresignTtlSeconds = assertMaxPresignTtl(config.maxPresignTtlSeconds ?? 600);
     this.maxBlobSizeBytes = assertMaxBlobSize(config.maxBlobSizeBytes);
-    this.promotionWorkerId = assertWorkerId(config.promotionWorkerId ?? "s3-blob-worker");
   }
 
   async putStaging(input: PutStagingBlobInput): Promise<StagedBlobRef> {
@@ -164,12 +162,13 @@ export class S3BlobStore implements BlobStore {
   ): Promise<StableBlobRef> {
     assertBlobRef(scope, staged);
     assertPromotionAuthorizationRef(scope, authorizationRef);
+    const attemptId = randomUUID();
     let claim: PromotionExecutionClaimResolution;
     try {
       claim = await this.authorizations.claimPromotionExecution({
         scope,
         authorization: authorizationRef,
-        workerId: this.promotionWorkerId,
+        attemptId,
       });
     } catch (error) {
       throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "promotion execution claim 结果未知", {
@@ -197,25 +196,41 @@ export class S3BlobStore implements BlobStore {
       assertStoredDescriptor(completedHead, completedStable);
       return completedStable;
     }
-    if (claim.status !== "claimed") {
+    if (claim.status === "reconcile") {
+      assertExecutionClaim(scope, authorizationRef, claim.execution, undefined, [
+        "executing",
+        "unknown",
+      ]);
+      return await this.reconcilePromotion(scope, staged, authorizationRef, claim.execution);
+    }
+    if (claim.status !== "copy_allowed") {
       throw new BlobStoreError(
         "INVALID_BLOB_ARGUMENT",
         `stable promote execution 不可用：${claim.status}`,
       );
     }
     let execution = claim.execution;
-    const resolution = await this.authorizations.resolveAuthorizedForCopy({
-      scope,
-      execution,
-    });
+    assertExecutionClaim(scope, authorizationRef, execution, attemptId, ["claimed"]);
+    let resolution: PromotionAuthorizationResolution;
+    try {
+      resolution = await this.authorizations.resolveAuthorizedForCopy({ scope, execution });
+    } catch (error) {
+      await this.completePromotionOutcome(scope, execution, "reconcile");
+      throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "promotion 授权解析失败，已转入 reconcile", {
+        result: "unknown",
+        cause: error,
+      });
+    }
     if (resolution.status !== "authorized") {
-      await this.completePromotionOutcome(scope, execution, "not_copied");
+      await this.completePromotionOutcome(scope, execution, "reconcile");
       throw new BlobStoreError(
-        "INVALID_BLOB_ARGUMENT",
-        `stable promote 授权不可用：${resolution.status}`,
+        "BLOB_RESULT_UNKNOWN",
+        `stable promote 授权解析未收敛：${resolution.status}`,
+        { result: "unknown" },
       );
     }
     const persisted = resolution.authorization;
+    assertExecutionMatchesAuthorization(execution, persisted);
     try {
       assertPromotionAuthorizationMatches(scope, staged, authorizationRef, persisted, this.prefix);
       this.assertWithinSizeLimit(staged.size);
@@ -280,6 +295,7 @@ export class S3BlobStore implements BlobStore {
         result: "unknown",
       });
     }
+    assertExecutionContinuation(execution, issued.execution, "executing");
     execution = issued.execution;
 
     try {
@@ -466,7 +482,7 @@ export class S3BlobStore implements BlobStore {
   private async completePromotionOutcome(
     scope: TenantBlobScope,
     execution: PromotionExecutionClaim,
-    outcome: "succeeded" | "not_copied" | "unknown",
+    outcome: "succeeded" | "not_copied" | "unknown" | "reconcile",
   ): Promise<void> {
     try {
       await this.authorizations.completePromotionExecution({ scope, execution, outcome });
@@ -476,6 +492,64 @@ export class S3BlobStore implements BlobStore {
         cause: error,
       });
     }
+  }
+
+  private async reconcilePromotion(
+    scope: TenantBlobScope,
+    staged: StagedBlobRef,
+    authorizationRef: PromotionAuthorizationRef,
+    execution: PromotionExecutionClaim,
+  ): Promise<StableBlobRef> {
+    let resolution: PromotionAuthorizationResolution;
+    try {
+      resolution = await this.authorizations.resolveAuthorizedForCopy({ scope, execution });
+    } catch (error) {
+      await this.completePromotionOutcome(scope, execution, "reconcile");
+      throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "reconcile 授权解析失败", {
+        result: "unknown",
+        cause: error,
+      });
+    }
+    if (resolution.status !== "authorized") {
+      await this.completePromotionOutcome(scope, execution, "reconcile");
+      throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "reconcile 授权状态未收敛", {
+        result: "unknown",
+      });
+    }
+    assertExecutionMatchesAuthorization(execution, resolution.authorization);
+    assertPromotionAuthorizationMatches(
+      scope,
+      staged,
+      authorizationRef,
+      resolution.authorization,
+      this.prefix,
+    );
+    const stable = stableFromAuthorization(staged, resolution.authorization);
+    let metadata: S3ObjectMetadata | undefined;
+    try {
+      metadata = await this.client.head(this.keyFor(stable));
+    } catch (error) {
+      await this.completePromotionOutcome(scope, execution, "reconcile");
+      throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "reconcile HEAD 失败", {
+        result: "unknown",
+        cause: error,
+      });
+    }
+    if (metadata === undefined) {
+      await this.completePromotionOutcome(scope, execution, "reconcile");
+      throw new BlobStoreError("BLOB_RESULT_UNKNOWN", "reconcile 目标尚不存在", {
+        result: "unknown",
+      });
+    }
+    try {
+      assertProviderBlobSizeWithin(metadata.size, this.maxBlobSizeBytes);
+      assertStoredDescriptor(metadata, stable);
+    } catch (error) {
+      await this.completePromotionOutcome(scope, execution, "reconcile");
+      throw error;
+    }
+    await this.completePromotionOutcome(scope, execution, "succeeded");
+    return stable;
   }
 }
 
@@ -858,13 +932,6 @@ function assertMaxBlobSize(value: number): number {
   return value;
 }
 
-function assertWorkerId(workerId: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(workerId)) {
-    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "promotionWorkerId 格式无效");
-  }
-  return workerId;
-}
-
 function assertBlobSizeWithin(size: number, maximum: number): void {
   if (!Number.isSafeInteger(size) || size < 0 || size > maximum) {
     throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "Blob 大小超过当前小对象上限");
@@ -1002,6 +1069,79 @@ function assertPromotionAuthorizationMatches(
     throw new BlobStoreError(
       "BLOB_INTEGRITY_MISMATCH",
       "stable promote 规范授权与授权引用、staging 或派生物理目标不一致",
+    );
+  }
+}
+
+function assertExecutionClaim(
+  scope: TenantBlobScope,
+  authorization: PromotionAuthorizationRef,
+  execution: PromotionExecutionClaim,
+  expectedAttemptId: string | undefined,
+  allowedPhases: ReadonlyArray<PromotionExecutionClaim["phase"]>,
+): void {
+  assertTenantScope({ tenantId: execution.tenantId });
+  assertIncarnationId(execution.incarnationId);
+  assertPhysicalObjectKey(execution.physicalObjectKey);
+  if (
+    execution.tenantId !== scope.tenantId ||
+    execution.tenantId !== authorization.tenantId ||
+    execution.operationId !== authorization.operationId ||
+    execution.authorizationId !== authorization.authorizationId ||
+    !UUID_V4_PATTERN.test(execution.executionId) ||
+    !UUID_V4_PATTERN.test(execution.attemptId) ||
+    (expectedAttemptId !== undefined && execution.attemptId !== expectedAttemptId) ||
+    !Number.isSafeInteger(execution.generation) ||
+    execution.generation < 1 ||
+    !allowedPhases.includes(execution.phase)
+  ) {
+    throw new BlobStoreError(
+      "BLOB_INTEGRITY_MISMATCH",
+      "promotion execution claim 的 scope、operation、attempt、generation 或 phase 不连续",
+      { result: "unknown" },
+    );
+  }
+}
+
+function assertExecutionMatchesAuthorization(
+  execution: PromotionExecutionClaim,
+  authorization: StableBlobPromotionAuthorization,
+): void {
+  if (
+    execution.tenantId !== authorization.tenantId ||
+    execution.operationId !== authorization.operationId ||
+    execution.authorizationId !== authorization.authorizationId ||
+    execution.incarnationId !== authorization.incarnationId ||
+    execution.physicalObjectKey !== authorization.physicalObjectKey
+  ) {
+    throw new BlobStoreError(
+      "BLOB_INTEGRITY_MISMATCH",
+      "promotion execution claim 与 canonical authorization target 不一致",
+      { result: "unknown" },
+    );
+  }
+}
+
+function assertExecutionContinuation(
+  claimed: PromotionExecutionClaim,
+  marked: PromotionExecutionClaim,
+  phase: PromotionExecutionClaim["phase"],
+): void {
+  if (
+    claimed.tenantId !== marked.tenantId ||
+    claimed.operationId !== marked.operationId ||
+    claimed.authorizationId !== marked.authorizationId ||
+    claimed.executionId !== marked.executionId ||
+    claimed.attemptId !== marked.attemptId ||
+    claimed.generation !== marked.generation ||
+    claimed.incarnationId !== marked.incarnationId ||
+    claimed.physicalObjectKey !== marked.physicalObjectKey ||
+    marked.phase !== phase
+  ) {
+    throw new BlobStoreError(
+      "BLOB_INTEGRITY_MISMATCH",
+      "markPromotionCopyIssued 未保持 execution 完整连续",
+      { result: "unknown" },
     );
   }
 }

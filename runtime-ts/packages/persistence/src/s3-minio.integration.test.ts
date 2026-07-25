@@ -4,13 +4,14 @@ import { describe, expect, it } from "vitest";
 import {
   createS3BlobStore,
   createS3StableBlobGarbageCollector,
-  preparePromotionStart,
   sha256Hex,
   transitionBlobCommit,
   type BlobCommitSnapshot,
-  type PreparedPromotionStart,
+  type BlobCommitStatePort,
   type PromotionAuthorizationRef,
   type PromotionExecutionClaim,
+  type StableBlobLifecycleAllocation,
+  type StableBlobLifecycleAllocationPort,
   type StableBlobPromotionAuthorization,
   type StableBlobPromotionAuthorizationPort,
   type StableBlobRef,
@@ -23,10 +24,6 @@ integration("MinIO Blob Store 集成", () => {
   it("完成私有对象 staging、提升、读取、预签名与无残留清理", async () => {
     const config = requiredConfig();
     const unique = randomUUID();
-    const incarnationId = randomUUID();
-    const lifecycleId = randomUUID();
-    const allocationId = randomUUID();
-    const authorizationId = randomUUID();
     const prefix = `integration-test/${unique}`;
     const scope = { tenantId: `integration_${unique.replaceAll("-", "_")}` };
     const body = new TextEncoder().encode(`minio-${unique}`);
@@ -43,61 +40,50 @@ integration("MinIO Blob Store 集成", () => {
       uploadId: `upload-${unique}`,
       ...descriptor,
     };
-    const stable: StableBlobRef = {
-      kind: "stable",
-      tenantId: scope.tenantId,
-      purpose: "artifact",
-      incarnationId,
-      physicalObjectKey: `${prefix}/stable/${scope.tenantId}/artifact/sha256/${descriptor.sha256}/incarnations/${incarnationId}`,
-      ...descriptor,
-    };
-    const allocation = {
-      tenantId: scope.tenantId,
-      purpose: staged.purpose,
-      sha256: staged.sha256,
-      size: staged.size,
-      incarnationId,
-      physicalObjectKey: stable.physicalObjectKey,
-      lifecycleId,
-      allocationId,
-      generation: 1,
-      mode: "active_reuse" as const,
-    };
-    const authorization: StableBlobPromotionAuthorization = {
-      ...allocation,
-      authorizationId,
-      operationId: `operation-${unique}`,
-      referenceId: `reference-${unique}`,
-      stagingUploadId: staged.uploadId,
-      stagingObjectKey: `${prefix}/tenants/${scope.tenantId}/staging/artifact/${staged.uploadId}`,
-    };
-    const authorizationRef: PromotionAuthorizationRef = {
-      tenantId: scope.tenantId,
-      operationId: authorization.operationId,
-      authorizationId,
-    };
+    const operationId = `operation-${unique}`;
+    const referenceId = `reference-${unique}`;
+    const persistence = new IntegrationPersistenceFake(prefix);
     const referenceCommitted: BlobCommitSnapshot = {
-      operationId: authorization.operationId,
+      operationId,
       scope,
       status: "reference_committed",
       version: 3,
       staged,
-      referenceId: authorization.referenceId,
+      referenceId,
+    };
+    await persistence.create(referenceCommitted);
+    const allocation = await persistence.reserve({ scope, staged, operationId, referenceId });
+    const stable: StableBlobRef = {
+      kind: "stable",
+      tenantId: allocation.tenantId,
+      purpose: allocation.purpose,
+      sha256: allocation.sha256,
+      size: allocation.size,
+      mediaType: staged.mediaType,
+      incarnationId: allocation.incarnationId,
+      physicalObjectKey: allocation.physicalObjectKey,
     };
     const allocationReserved = transitionBlobCommit(referenceCommitted, {
       type: "allocation_reserved",
       allocation,
       stable,
     });
-    const promotionStarted = transitionBlobCommit(allocationReserved, {
-      type: "promotion_started",
-      authorization: authorizationRef,
+    expect(
+      await persistence.compareAndSet({
+        scope,
+        operationId,
+        expectedVersion: referenceCommitted.version,
+        next: allocationReserved,
+      }),
+    ).toBe(true);
+    const started = await persistence.startPromotion({
+      scope,
+      operationId,
+      expectedSnapshotVersion: allocationReserved.version,
+      allocationId: allocation.allocationId,
     });
-    const preparedStart = preparePromotionStart(
-      allocationReserved,
-      authorization,
-      promotionStarted,
-    );
+    if (started.status !== "started") throw new Error("MinIO startPromotion 事务失败");
+    const authorizationRef = started.authorization;
     const common = {
       bucket: config.bucket,
       endpoint: config.endpoint,
@@ -110,7 +96,7 @@ integration("MinIO Blob Store 集成", () => {
       maxPresignTtlSeconds: 60,
       maxBlobSizeBytes: 1_024 * 1_024,
     } as const;
-    const store = createS3BlobStore(common, new IntegrationPromotionAuthorizations(preparedStart));
+    const store = createS3BlobStore(common, persistence);
     const gc = createS3StableBlobGarbageCollector(common, {
       async claimUnreachable({ scope: claimScope, blob }) {
         return {
@@ -214,45 +200,161 @@ integration("MinIO Blob Store 集成", () => {
   });
 });
 
-/** 真实 MinIO 也通过与单元测试相同的状态化授权解析契约，不允许回显调用参数。 */
-class IntegrationPromotionAuthorizations implements StableBlobPromotionAuthorizationPort {
+/** 真实 MinIO 走 reference→reserve→最小 startPromotion→execution claim 的状态化数据库 Fake。 */
+class IntegrationPersistenceFake
+  implements
+    BlobCommitStatePort,
+    StableBlobLifecycleAllocationPort,
+    StableBlobPromotionAuthorizationPort
+{
   private execution: PromotionExecutionClaim | undefined;
-  private readonly authorization: StableBlobPromotionAuthorization;
+  private authorization: StableBlobPromotionAuthorization | undefined;
+  private snapshot: BlobCommitSnapshot | undefined;
+  private allocation: StableBlobLifecycleAllocation | undefined;
   private status: "reserved" | "started" | "retired" | "consumed" | "inactive" = "started";
 
-  constructor(prepared: PreparedPromotionStart) {
-    // 集成 Fake 只接受统一校验器产生的名义能力，模拟 PG 同事务落 snapshot 与授权行。
-    this.authorization = prepared.authorization;
+  constructor(private readonly prefix: string) {}
+
+  async load(scope: { readonly tenantId: string }, operationId: string) {
+    return this.snapshot?.scope.tenantId === scope.tenantId &&
+      this.snapshot.operationId === operationId
+      ? this.snapshot
+      : undefined;
+  }
+
+  async create(snapshot: BlobCommitSnapshot): Promise<void> {
+    if (this.snapshot !== undefined) throw new Error("MinIO Fake snapshot 已存在");
+    this.snapshot = snapshot;
+  }
+
+  async compareAndSet(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly operationId: string;
+    readonly expectedVersion: number;
+    readonly next: BlobCommitSnapshot;
+  }): Promise<boolean> {
+    if (
+      this.snapshot === undefined ||
+      this.snapshot.scope.tenantId !== input.scope.tenantId ||
+      this.snapshot.operationId !== input.operationId ||
+      this.snapshot.version !== input.expectedVersion ||
+      input.next.status === "promotion_started"
+    ) {
+      return false;
+    }
+    this.snapshot = input.next;
+    return true;
+  }
+
+  async reserve(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly staged: StagedBlobRef;
+    readonly operationId: string;
+    readonly referenceId: string;
+  }): Promise<StableBlobLifecycleAllocation> {
+    if (
+      this.snapshot?.operationId !== input.operationId ||
+      this.snapshot.scope.tenantId !== input.scope.tenantId ||
+      this.snapshot.referenceId !== input.referenceId
+    ) {
+      throw new Error("MinIO reserve 与 reference 状态不一致");
+    }
+    const incarnationId = randomUUID();
+    this.allocation = {
+      tenantId: input.scope.tenantId,
+      purpose: input.staged.purpose,
+      sha256: input.staged.sha256,
+      size: input.staged.size,
+      incarnationId,
+      physicalObjectKey: `${this.prefix}/stable/${input.scope.tenantId}/${input.staged.purpose}/sha256/${input.staged.sha256}/incarnations/${incarnationId}`,
+      lifecycleId: randomUUID(),
+      allocationId: randomUUID(),
+      generation: 1,
+      // Fake 由自身生命周期状态决定，调用方没有 mode 参数。
+      mode: "active_reuse",
+    };
+    return this.allocation;
+  }
+
+  async startPromotion(input: {
+    readonly scope: { readonly tenantId: string };
+    readonly operationId: string;
+    readonly expectedSnapshotVersion: number;
+    readonly allocationId: string;
+  }) {
+    const scope = { tenantId: input.scope.tenantId };
+    const operationId = input.operationId;
+    const expectedVersion = input.expectedSnapshotVersion;
+    const allocationId = input.allocationId;
+    const current = this.snapshot;
+    const allocation = this.allocation;
+    if (current === undefined || current.version !== expectedVersion) {
+      return { status: "version_conflict" as const };
+    }
+    if (current.status !== "allocation_reserved") return { status: "invalid_state" as const };
+    if (
+      allocation === undefined ||
+      allocation.allocationId !== allocationId ||
+      current.staged === undefined ||
+      current.referenceId === undefined ||
+      current.scope.tenantId !== scope.tenantId ||
+      current.operationId !== operationId
+    ) {
+      return { status: "allocation_unavailable" as const };
+    }
+    const authorizationId = randomUUID();
+    this.authorization = {
+      ...allocation,
+      authorizationId,
+      operationId,
+      referenceId: current.referenceId,
+      stagingUploadId: current.staged.uploadId,
+      stagingObjectKey: `${this.prefix}/tenants/${scope.tenantId}/staging/${current.staged.purpose}/${current.staged.uploadId}`,
+    };
+    const ref = { tenantId: scope.tenantId, operationId, authorizationId };
+    this.snapshot = transitionBlobCommit(current, {
+      type: "promotion_started",
+      authorization: ref,
+    });
+    this.status = "started";
+    return {
+      status: "started" as const,
+      authorization: ref,
+      snapshotVersion: this.snapshot.version,
+    };
   }
 
   async claimPromotionExecution(input: {
     readonly scope: { readonly tenantId: string };
     readonly authorization: PromotionAuthorizationRef;
-    readonly workerId: string;
+    readonly attemptId: string;
   }) {
     if (!this.matchesAuthorization(input.scope, input.authorization)) {
       return { status: "wrong_operation" as const };
     }
     if (this.status === "reserved") return { status: "not_started" as const };
     if (this.status === "consumed") {
-      return { status: "completed" as const, authorization: this.authorization };
+      return { status: "completed" as const, authorization: this.requireAuthorization() };
     }
     if (this.status !== "started") return { status: this.status };
-    if (this.execution !== undefined && this.execution.workerId !== input.workerId) {
-      return { status: "in_progress" as const };
+    if (this.execution !== undefined) {
+      return this.execution.phase === "claimed"
+        ? { status: "in_progress" as const }
+        : { status: "reconcile" as const, execution: this.execution };
     }
+    const authorization = this.requireAuthorization();
     this.execution ??= {
-      tenantId: this.authorization.tenantId,
-      operationId: this.authorization.operationId,
-      authorizationId: this.authorization.authorizationId,
+      tenantId: authorization.tenantId,
+      operationId: authorization.operationId,
+      authorizationId: authorization.authorizationId,
       executionId: randomUUID(),
+      attemptId: input.attemptId,
       generation: 1,
-      workerId: input.workerId,
       phase: "claimed",
-      incarnationId: this.authorization.incarnationId,
-      physicalObjectKey: this.authorization.physicalObjectKey,
+      incarnationId: authorization.incarnationId,
+      physicalObjectKey: authorization.physicalObjectKey,
     };
-    return { status: "claimed" as const, execution: this.execution };
+    return { status: "copy_allowed" as const, execution: this.execution };
   }
 
   async resolveAuthorizedForCopy(input: {
@@ -268,7 +370,7 @@ class IntegrationPromotionAuthorizations implements StableBlobPromotionAuthoriza
     if (this.status !== "started") {
       return { status: this.status };
     }
-    return { status: "authorized" as const, authorization: this.authorization };
+    return { status: "authorized" as const, authorization: this.requireAuthorization() };
   }
 
   async markPromotionCopyIssued(input: {
@@ -285,7 +387,7 @@ class IntegrationPromotionAuthorizations implements StableBlobPromotionAuthoriza
   async completePromotionExecution(input: {
     readonly scope: { readonly tenantId: string };
     readonly execution: PromotionExecutionClaim;
-    readonly outcome: "succeeded" | "not_copied" | "unknown";
+    readonly outcome: "succeeded" | "not_copied" | "unknown" | "reconcile";
   }): Promise<void> {
     if (!this.matchesExecutionIdentity(input.scope, input.execution)) {
       throw new Error("MinIO 集成授权 execution CAS 失效");
@@ -300,6 +402,10 @@ class IntegrationPromotionAuthorizations implements StableBlobPromotionAuthoriza
       this.execution = { ...input.execution, phase: "unknown" };
       return;
     }
+    if (input.outcome === "reconcile") {
+      this.execution = { ...input.execution, phase: "unknown" };
+      return;
+    }
     this.status = "consumed";
     this.execution = undefined;
   }
@@ -308,11 +414,13 @@ class IntegrationPromotionAuthorizations implements StableBlobPromotionAuthoriza
     scope: { readonly tenantId: string },
     ref: PromotionAuthorizationRef,
   ): boolean {
+    const authorization = this.authorization;
+    if (authorization === undefined) return false;
     return (
-      scope.tenantId === this.authorization.tenantId &&
-      ref.tenantId === this.authorization.tenantId &&
-      ref.operationId === this.authorization.operationId &&
-      ref.authorizationId === this.authorization.authorizationId
+      scope.tenantId === authorization.tenantId &&
+      ref.tenantId === authorization.tenantId &&
+      ref.operationId === authorization.operationId &&
+      ref.authorizationId === authorization.authorizationId
     );
   }
 
@@ -329,12 +437,19 @@ class IntegrationPromotionAuthorizations implements StableBlobPromotionAuthoriza
     scope: { readonly tenantId: string },
     execution: PromotionExecutionClaim,
   ): boolean {
+    const authorization = this.authorization;
     return (
-      scope.tenantId === this.authorization.tenantId &&
+      authorization !== undefined &&
+      scope.tenantId === authorization.tenantId &&
       this.execution?.executionId === execution.executionId &&
       this.execution.generation === execution.generation &&
-      this.execution.workerId === execution.workerId
+      this.execution.attemptId === execution.attemptId
     );
+  }
+
+  private requireAuthorization(): StableBlobPromotionAuthorization {
+    if (this.authorization === undefined) throw new Error("MinIO canonical authorization 尚未落库");
+    return this.authorization;
   }
 }
 

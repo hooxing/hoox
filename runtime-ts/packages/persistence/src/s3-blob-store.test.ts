@@ -1,21 +1,28 @@
 import { describe, expect, it } from "vitest";
 import {
   type BlobReferenceCommitPort,
+  type BlobCommitSnapshot,
   BlobStoreError,
   type PromotionAuthorizationRef,
   type PromotionAuthorizationResolution,
+  type PromotionExecutionClaim,
+  type PromotionExecutionClaimResolution,
   type StableBlobGcClaim,
   type StableBlobGcClaimPort,
   type StableBlobLifecycleAllocation,
   type StableBlobLifecycleAllocationPort,
   type StableBlobPromotionAuthorization,
   type StableBlobPromotionAuthorizationPort,
+  type StableBlobRetiredTombstonePort,
   type StableBlobRef,
   type StagedBlobRef,
   type TenantBlobScope,
+  preparePromotionStart,
+  transitionBlobCommit,
 } from "./index.js";
 import {
   S3BlobStore,
+  S3RetiredBlobTombstoneScrubber,
   S3StableBlobGarbageCollector,
   type S3CopyObjectInput,
   type S3GetObjectResult,
@@ -146,7 +153,7 @@ describe("S3BlobStore", () => {
     ]);
     expect(client.successfulPuts).toBe(1);
     expect(text.mediaType).not.toBe(binary.mediaType);
-    const { ref: authorization } = promotionAuthorizations.issue(text);
+    const { ref: authorization } = promotionAuthorizations.preparePromotion(text);
 
     const [textStable, binaryStable] = await Promise.all([
       store.promote(base.scope, text, authorization),
@@ -260,7 +267,10 @@ describe("S3BlobStore", () => {
       body: bytes("deliverable"),
       mediaType: "text/plain",
     });
-    const { ref: authorization, allocation } = promotionAuthorizations.issue(staged, "test");
+    const { ref: authorization, allocation } = promotionAuthorizations.preparePromotion(
+      staged,
+      "test",
+    );
     const stable = await store.promote(scope, staged, authorization);
 
     expect(client.copyKeys).toEqual([
@@ -286,7 +296,7 @@ describe("S3BlobStore", () => {
       body: bytes("deliverable"),
       mediaType: "text/plain",
     });
-    const issued = promotionAuthorizations.issue(staged);
+    const issued = promotionAuthorizations.preparePromotion(staged);
 
     await expect(store.promote(scope, staged, issued.ref)).rejects.toMatchObject({
       code: "BLOB_RESULT_UNKNOWN",
@@ -299,6 +309,30 @@ describe("S3BlobStore", () => {
     expect(client.copyKeys.map((copy) => copy.destinationKey)).toEqual([
       issued.authorization.physicalObjectKey,
       issued.authorization.physicalObjectKey,
+    ]);
+  });
+
+  it("COPY 已落盘但响应 UNKNOWN 时只 HEAD 授权绑定的物理键并收敛成功", async () => {
+    const client = new FakeS3ObjectClient();
+    client.copyUnknownAfterWrite = true;
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "copy-unknown-after-write",
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
+    });
+    const prepared = promotionAuthorizations.preparePromotion(staged);
+
+    const stable = await store.promote(scope, staged, prepared.ref);
+    expect(stable.physicalObjectKey).toBe(prepared.authorization.physicalObjectKey);
+    expect(client.copyKeys).toEqual([
+      {
+        sourceKey: prepared.authorization.stagingObjectKey,
+        destinationKey: prepared.authorization.physicalObjectKey,
+      },
     ]);
   });
 
@@ -342,10 +376,26 @@ describe("S3BlobStore", () => {
       body: bytes("deliverable"),
       mediaType: "text/plain",
     });
-    const issued = promotionAuthorizations.issue(staged, "agent-runtime", {
+    const issued = promotionAuthorizations.preparePromotion(staged, "agent-runtime", {
       status: condition === "not_started" ? "reserved" : "started",
     });
     if (condition === "retired") {
+      const claimed = await promotionAuthorizations.claimPromotionExecution({
+        scope,
+        authorization: issued.ref,
+        workerId: "retired-test-worker",
+      });
+      if (claimed.status !== "claimed") throw new Error("retired 测试 claim 失败");
+      const marked = await promotionAuthorizations.markPromotionCopyIssued({
+        scope,
+        execution: claimed.execution,
+      });
+      if (marked.status !== "marked") throw new Error("retired 测试 intent 失败");
+      await promotionAuthorizations.completePromotionExecution({
+        scope,
+        execution: marked.execution,
+        outcome: "succeeded",
+      });
       promotionAuthorizations.retire(issued.ref);
     }
     const ref =
@@ -377,12 +427,64 @@ describe("S3BlobStore", () => {
       body: bytes("same"),
       mediaType: "text/plain",
     });
-    const issued = promotionAuthorizations.issue(first);
+    const issued = promotionAuthorizations.preparePromotion(first);
 
     await expect(store.promote(scope, other, issued.ref)).rejects.toMatchObject({
       code: "BLOB_INTEGRITY_MISMATCH",
     });
     expect(client.copyKeys).toEqual([]);
+  });
+
+  it("execution claim 后禁止并发撤销或退休，UNKNOWN 只能围绕同一 claim 收敛", async () => {
+    const staged = stagedRefForTest("execution-intent", "f".repeat(64));
+    const prepared = promotionAuthorizations.preparePromotion(staged);
+    const scope = { tenantId: staged.tenantId };
+    const claimed = await promotionAuthorizations.claimPromotionExecution({
+      scope,
+      authorization: prepared.ref,
+      workerId: "worker-a",
+    });
+    if (claimed.status !== "claimed") throw new Error("测试 execution claim 失败");
+
+    expect(() => promotionAuthorizations.retire(prepared.ref)).toThrow("禁止 retired");
+    expect(() => promotionAuthorizations.setStatus(prepared.ref, "inactive")).toThrow("不能撤销");
+    await expect(
+      promotionAuthorizations.claimPromotionExecution({
+        scope,
+        authorization: prepared.ref,
+        workerId: "worker-b",
+      }),
+    ).resolves.toEqual({ status: "in_progress" });
+
+    const issued = await promotionAuthorizations.markPromotionCopyIssued({
+      scope,
+      execution: claimed.execution,
+    });
+    if (issued.status !== "marked") throw new Error("测试 COPY intent 失败");
+    await promotionAuthorizations.completePromotionExecution({
+      scope,
+      execution: issued.execution,
+      outcome: "unknown",
+    });
+    expect(() => promotionAuthorizations.retire(prepared.ref)).toThrow("禁止 retired");
+
+    const recovery = await promotionAuthorizations.claimPromotionExecution({
+      scope,
+      authorization: prepared.ref,
+      workerId: "worker-a",
+    });
+    if (recovery.status !== "claimed") throw new Error("测试 UNKNOWN 恢复 claim 失败");
+    expect(recovery.execution).toMatchObject({
+      executionId: claimed.execution.executionId,
+      phase: "unknown",
+      physicalObjectKey: prepared.authorization.physicalObjectKey,
+    });
+    await promotionAuthorizations.completePromotionExecution({
+      scope,
+      execution: recovery.execution,
+      outcome: "succeeded",
+    });
+    expect(() => promotionAuthorizations.retire(prepared.ref)).not.toThrow();
   });
 
   it("限制预签名 TTL 和下载文件名", async () => {
@@ -399,7 +501,11 @@ describe("S3BlobStore", () => {
       body: bytes("download"),
       mediaType: "text/plain",
     });
-    const stable = await store.promote(scope, staged, promotionAuthorizations.issue(staged).ref);
+    const stable = await store.promote(
+      scope,
+      staged,
+      promotionAuthorizations.preparePromotion(staged).ref,
+    );
 
     await expect(
       store.presignDownload({
@@ -540,7 +646,11 @@ describe("S3BlobStore", () => {
     });
     promoteClient.headSizeOverride = 9;
     await expect(
-      promoteStore.promote(scope, promoteStaged, promotionAuthorizations.issue(promoteStaged).ref),
+      promoteStore.promote(
+        scope,
+        promoteStaged,
+        promotionAuthorizations.preparePromotion(promoteStaged).ref,
+      ),
     ).rejects.toMatchObject({
       code: "BLOB_INTEGRITY_MISMATCH",
     });
@@ -560,7 +670,7 @@ describe("S3BlobStore", () => {
     const stable = await presignStore.promote(
       scope,
       presignStaged,
-      promotionAuthorizations.issue(presignStaged).ref,
+      promotionAuthorizations.preparePromotion(presignStaged).ref,
     );
     presignClient.headSizeOverride = 9;
     await expect(
@@ -637,7 +747,7 @@ describe("S3BlobStore", () => {
     const stable = await store.promote(
       scope,
       staged,
-      promotionAuthorizations.issue(staged, "gc-test").ref,
+      promotionAuthorizations.preparePromotion(staged, "gc-test").ref,
     );
     const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable);
     const gc = new S3StableBlobGarbageCollector(
@@ -687,7 +797,7 @@ describe("S3BlobStore", () => {
     const stable = await store.promote(
       scope,
       staged,
-      promotionAuthorizations.issue(staged, "gc-unknown").ref,
+      promotionAuthorizations.preparePromotion(staged, "gc-unknown").ref,
     );
     const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable, 0);
     const gc = new S3StableBlobGarbageCollector(
@@ -724,7 +834,7 @@ describe("S3BlobStore", () => {
     const stable = await store.promote(
       scope,
       staged,
-      promotionAuthorizations.issue(staged, "gc-known-failure").ref,
+      promotionAuthorizations.preparePromotion(staged, "gc-known-failure").ref,
     );
     const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable, 0);
     const gc = new S3StableBlobGarbageCollector(
@@ -960,7 +1070,7 @@ describe("S3BlobStore", () => {
     const stable = await store.promote(
       scope,
       staged,
-      promotionAuthorizations.issue(staged, "gc-delayed-delete").ref,
+      promotionAuthorizations.preparePromotion(staged, "gc-delayed-delete").ref,
     );
     const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable, 0);
     const gc = new S3StableBlobGarbageCollector(
@@ -1022,7 +1132,10 @@ describe("S3BlobStore", () => {
       body: bytes("stable"),
       mediaType: "text/plain",
     });
-    const oldAuthorization = promotionAuthorizations.issue(staged, "gc-incarnation-race");
+    const oldAuthorization = promotionAuthorizations.preparePromotion(
+      staged,
+      "gc-incarnation-race",
+    );
     const oldStable = await store.promote(scope, staged, oldAuthorization.ref);
     const lifecycle = new InMemoryStableLifecycle(scope.tenantId, oldStable, 0);
     const gc = new S3StableBlobGarbageCollector(
@@ -1050,13 +1163,17 @@ describe("S3BlobStore", () => {
       message: expect.stringContaining("retired"),
     });
 
-    const newAuthorization = promotionAuthorizations.issue(staged, "gc-incarnation-race", {
-      allocation: {
-        incarnationId: "00000000-0000-4000-8000-000000000002",
-        allocationId: "20000000-0000-4000-8000-000000000002",
-        generation: 3,
+    const newAuthorization = promotionAuthorizations.preparePromotion(
+      staged,
+      "gc-incarnation-race",
+      {
+        allocation: {
+          incarnationId: "00000000-0000-4000-8000-000000000002",
+          allocationId: "20000000-0000-4000-8000-000000000002",
+          generation: 3,
+        },
       },
-    });
+    );
     expect(newAuthorization.allocation.mode).toBe("new_after_deleted");
     const newStable = await store.promote(scope, staged, newAuthorization.ref);
     expect(newStable.sha256).toBe(oldStable.sha256);
@@ -1070,6 +1187,56 @@ describe("S3BlobStore", () => {
     await expect(store.getBytes(scope, newStable)).resolves.toEqual(bytes("stable"));
     expect(client.deleteKeys).toEqual([oldStable.physicalObjectKey, oldStable.physicalObjectKey]);
     expect(client.deleteKeys).not.toContain(newStable.physicalObjectKey);
+  });
+
+  it("已签发的旧 COPY 即使迟到也只命中 retired key，并由 tombstone scrub 收敛", async () => {
+    const client = new FakeS3ObjectClient();
+    const prefix = "promotion-late-copy";
+    const store = new S3BlobStore(client, promotionAuthorizations, { ...config, prefix });
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "late-copy",
+      body: bytes("stable"),
+      mediaType: "text/plain",
+    });
+    const oldAuthorization = promotionAuthorizations.preparePromotion(staged, prefix);
+    const oldStable = await store.promote(scope, staged, oldAuthorization.ref);
+    const lifecycle = new InMemoryStableLifecycle(scope.tenantId, oldStable, 0);
+    const gc = new S3StableBlobGarbageCollector(client, lifecycle, prefix, config.maxBlobSizeBytes);
+    await expect(gc.collectIfUnreachable(scope, oldStable)).resolves.toBe("deleted");
+    promotionAuthorizations.retire(oldAuthorization.ref);
+
+    const newAuthorization = promotionAuthorizations.preparePromotion(staged, prefix);
+    expect(newAuthorization.allocation.mode).toBe("new_after_deleted");
+    const newStable = await store.promote(scope, staged, newAuthorization.ref);
+
+    // 模拟已经离开进程、无法撤销的旧网络请求在新 incarnation 发布后才抵达对象存储。
+    await client.copy({
+      sourceKey: `${prefix}/tenants/${scope.tenantId}/staging/artifact/${staged.uploadId}`,
+      destinationKey: oldStable.physicalObjectKey,
+    });
+    await expect(store.head(scope, oldStable)).resolves.toBeDefined();
+    await expect(store.getBytes(scope, newStable)).resolves.toEqual(bytes("stable"));
+
+    const tombstones = new InMemoryRetiredTombstones(oldStable);
+    const scrubber = new S3RetiredBlobTombstoneScrubber(
+      client,
+      tombstones,
+      prefix,
+      config.maxBlobSizeBytes,
+    );
+    await expect(scrubber.scrubNext(scope)).resolves.toBe("scrubbed");
+    // tombstone 不因完成一轮 scrub 被删除；再次迟到仍由下一轮精确清除。
+    await client.copy({
+      sourceKey: `${prefix}/tenants/${scope.tenantId}/staging/artifact/${staged.uploadId}`,
+      destinationKey: oldStable.physicalObjectKey,
+    });
+    await expect(scrubber.scrubNext(scope)).resolves.toBe("scrubbed");
+    expect(tombstones.completeCount).toBe(2);
+    await expect(store.head(scope, oldStable)).resolves.toBeUndefined();
+    await expect(store.getBytes(scope, newStable)).resolves.toEqual(bytes("stable"));
   });
 
   it("RFC 5987 编码覆盖中文与 encodeURIComponent 保留字符", () => {
@@ -1093,8 +1260,9 @@ class InMemoryPromotionAuthorizations
   private readonly records = new Map<
     string,
     {
-      status: "reserved" | "started" | "retired" | "consumed" | "inactive";
+      status: "reserved" | "started" | "succeeded" | "retired" | "consumed" | "inactive";
       value: StableBlobPromotionAuthorization;
+      execution: PromotionExecutionClaim | undefined;
     }
   >();
   private readonly retiredLogicalKeys = new Set<string>();
@@ -1105,14 +1273,14 @@ class InMemoryPromotionAuthorizations
     readonly operationId: string;
     readonly referenceId: string;
   }): Promise<StableBlobLifecycleAllocation> {
-    return this.issue(input.staged, "agent-runtime", {
+    return this.preparePromotion(input.staged, "agent-runtime", {
       operationId: input.operationId,
       referenceId: input.referenceId,
       status: "reserved",
     }).allocation;
   }
 
-  issue(
+  preparePromotion(
     staged: StagedBlobRef,
     prefix = "agent-runtime",
     options: {
@@ -1152,9 +1320,41 @@ class InMemoryPromotionAuthorizations
       stagingUploadId: staged.uploadId,
       stagingObjectKey: `${prefix}/tenants/${staged.tenantId}/staging/${staged.purpose}/${staged.uploadId}`,
     };
+    if ((options.status ?? "started") === "started") {
+      const referenceCommitted: BlobCommitSnapshot = {
+        operationId,
+        scope: { tenantId: staged.tenantId },
+        status: "reference_committed",
+        version: 3,
+        staged,
+        referenceId: authorization.referenceId,
+      };
+      const stable: StableBlobRef = {
+        kind: "stable",
+        tenantId: staged.tenantId,
+        purpose: staged.purpose,
+        sha256: staged.sha256,
+        size: staged.size,
+        mediaType: staged.mediaType,
+        incarnationId: allocation.incarnationId,
+        physicalObjectKey: allocation.physicalObjectKey,
+      };
+      const reserved = transitionBlobCommit(referenceCommitted, {
+        type: "allocation_reserved",
+        allocation,
+        stable,
+      });
+      const next = transitionBlobCommit(reserved, {
+        type: "promotion_started",
+        authorization: { tenantId: staged.tenantId, operationId, authorizationId },
+      });
+      // 测试 Fake 与未来 PG adapter 复用同一不可伪造准备能力，而不是直接插入 started 行。
+      preparePromotionStart(reserved, authorization, next);
+    }
     this.records.set(authorizationId, {
       status: options.status ?? "started",
       value: authorization,
+      execution: undefined,
     });
     return {
       ref: { tenantId: staged.tenantId, operationId, authorizationId },
@@ -1167,6 +1367,9 @@ class InMemoryPromotionAuthorizations
     const record = this.records.get(ref.authorizationId);
     if (record === undefined) {
       throw new Error("测试授权不存在");
+    }
+    if (record.status === "started") {
+      throw new Error("started/executing/unknown promotion 未收敛前禁止 retired");
     }
     record.status = "retired";
     const value = record.value;
@@ -1181,32 +1384,185 @@ class InMemoryPromotionAuthorizations
     if (record === undefined) {
       throw new Error("测试授权不存在");
     }
+    if (record.status === "started" && status !== "started") {
+      throw new Error("在途 promotion 授权不能撤销或退休");
+    }
     record.status = status;
+  }
+
+  async claimPromotionExecution(input: {
+    readonly scope: TenantBlobScope;
+    readonly authorization: PromotionAuthorizationRef;
+    readonly workerId: string;
+  }): Promise<PromotionExecutionClaimResolution> {
+    const completed = this.records.get(input.authorization.authorizationId);
+    if (
+      completed?.status === "succeeded" &&
+      completed.value.tenantId === input.scope.tenantId &&
+      completed.value.tenantId === input.authorization.tenantId &&
+      completed.value.operationId === input.authorization.operationId
+    ) {
+      return { status: "completed", authorization: completed.value };
+    }
+    const resolved = this.resolveRecord(input.scope, input.authorization);
+    if (resolved.status !== "authorized") {
+      return resolved;
+    }
+    const record = resolved.record;
+    if (record.execution !== undefined) {
+      return record.execution.workerId === input.workerId
+        ? { status: "claimed", execution: record.execution }
+        : { status: "in_progress" };
+    }
+    const execution: PromotionExecutionClaim = {
+      tenantId: record.value.tenantId,
+      operationId: record.value.operationId,
+      authorizationId: record.value.authorizationId,
+      executionId: `40000000-0000-4000-8000-${this.sequence.toString().padStart(12, "0")}`,
+      generation: 1,
+      workerId: input.workerId,
+      phase: "claimed",
+      incarnationId: record.value.incarnationId,
+      physicalObjectKey: record.value.physicalObjectKey,
+    };
+    record.execution = execution;
+    return { status: "claimed", execution };
   }
 
   async resolveAuthorizedForCopy(input: {
     readonly scope: TenantBlobScope;
-    readonly authorization: PromotionAuthorizationRef;
+    readonly execution: PromotionExecutionClaim;
   }): Promise<PromotionAuthorizationResolution> {
-    const record = this.records.get(input.authorization.authorizationId);
-    if (record === undefined) {
-      return { status: "not_found" };
+    const ref = {
+      tenantId: input.execution.tenantId,
+      operationId: input.execution.operationId,
+      authorizationId: input.execution.authorizationId,
+    };
+    const resolved = this.resolveRecord(input.scope, ref);
+    if (resolved.status !== "authorized") {
+      return resolved;
+    }
+    if (!sameExecution(resolved.record.execution, input.execution)) {
+      return { status: "inactive" };
+    }
+    return { status: "authorized", authorization: resolved.record.value };
+  }
+
+  async markPromotionCopyIssued(input: {
+    readonly scope: TenantBlobScope;
+    readonly execution: PromotionExecutionClaim;
+  }) {
+    const record = this.records.get(input.execution.authorizationId);
+    if (
+      record === undefined ||
+      input.scope.tenantId !== record.value.tenantId ||
+      !sameExecutionIdentity(record.execution, input.execution)
+    ) {
+      return { status: "claim_lost" as const };
+    }
+    if (record.execution?.phase === "claimed") {
+      record.execution = { ...record.execution, phase: "executing" };
+    }
+    return { status: "marked" as const, execution: record.execution as PromotionExecutionClaim };
+  }
+
+  async completePromotionExecution(input: {
+    readonly scope: TenantBlobScope;
+    readonly execution: PromotionExecutionClaim;
+    readonly outcome: "succeeded" | "not_copied" | "unknown";
+  }): Promise<void> {
+    const record = this.records.get(input.execution.authorizationId);
+    if (record?.status === "succeeded" && input.outcome === "succeeded") {
+      return;
     }
     if (
-      record.value.operationId !== input.authorization.operationId ||
-      record.value.tenantId !== input.scope.tenantId ||
-      record.value.tenantId !== input.authorization.tenantId
+      record === undefined ||
+      input.scope.tenantId !== record.value.tenantId ||
+      !sameExecutionIdentity(record.execution, input.execution)
+    ) {
+      throw new Error("promotion execution CAS 已失效");
+    }
+    if (input.outcome === "not_copied") {
+      if (record.execution?.phase !== "claimed") {
+        throw new Error("已发出 COPY 的 intent 不能撤销为 not_copied");
+      }
+      record.status = "inactive";
+      record.execution = undefined;
+      return;
+    }
+    if (input.outcome === "unknown") {
+      if (record.execution?.phase !== "executing" && record.execution?.phase !== "unknown") {
+        throw new Error("未发出 COPY 不能记为 unknown");
+      }
+      record.execution = { ...record.execution, phase: "unknown" };
+      return;
+    }
+    record.status = "succeeded";
+    record.execution = undefined;
+  }
+
+  private resolveRecord(
+    scope: TenantBlobScope,
+    authorization: PromotionAuthorizationRef,
+  ):
+    | {
+        readonly status: "authorized";
+        readonly record: {
+          status: "reserved" | "started" | "succeeded" | "retired" | "consumed" | "inactive";
+          value: StableBlobPromotionAuthorization;
+          execution: PromotionExecutionClaim | undefined;
+        };
+      }
+    | Exclude<PromotionAuthorizationResolution, { readonly status: "authorized" }> {
+    const record = this.records.get(authorization.authorizationId);
+    if (record === undefined) return { status: "not_found" };
+    if (
+      record.value.operationId !== authorization.operationId ||
+      record.value.tenantId !== scope.tenantId ||
+      record.value.tenantId !== authorization.tenantId
     ) {
       return { status: "wrong_operation" };
     }
-    if (record.status === "reserved") {
-      return { status: "not_started" };
-    }
-    if (record.status !== "started") {
-      return { status: record.status };
-    }
-    return { status: "authorized", authorization: record.value };
+    if (record.status === "reserved") return { status: "not_started" };
+    if (record.status === "succeeded") return { status: "consumed" };
+    if (record.status !== "started") return { status: record.status };
+    return { status: "authorized", record };
   }
+}
+
+function sameExecution(
+  current: PromotionExecutionClaim | undefined,
+  supplied: PromotionExecutionClaim,
+): boolean {
+  return (
+    current !== undefined &&
+    current.tenantId === supplied.tenantId &&
+    current.operationId === supplied.operationId &&
+    current.authorizationId === supplied.authorizationId &&
+    current.executionId === supplied.executionId &&
+    current.generation === supplied.generation &&
+    current.workerId === supplied.workerId &&
+    current.phase === supplied.phase &&
+    current.incarnationId === supplied.incarnationId &&
+    current.physicalObjectKey === supplied.physicalObjectKey
+  );
+}
+
+function sameExecutionIdentity(
+  current: PromotionExecutionClaim | undefined,
+  supplied: PromotionExecutionClaim,
+): boolean {
+  return (
+    current !== undefined &&
+    current.tenantId === supplied.tenantId &&
+    current.operationId === supplied.operationId &&
+    current.authorizationId === supplied.authorizationId &&
+    current.executionId === supplied.executionId &&
+    current.generation === supplied.generation &&
+    current.workerId === supplied.workerId &&
+    current.incarnationId === supplied.incarnationId &&
+    current.physicalObjectKey === supplied.physicalObjectKey
+  );
 }
 
 const promotionAuthorizations = new InMemoryPromotionAuthorizations();
@@ -1323,6 +1679,36 @@ class FakeS3ObjectClient implements S3ObjectClient {
   async presignGet(input: S3PresignInput): Promise<string> {
     this.presignInputs.push(input);
     return `https://example.invalid/private?ttl=${input.ttlSeconds}`;
+  }
+}
+
+class InMemoryRetiredTombstones implements StableBlobRetiredTombstonePort {
+  completeCount = 0;
+
+  constructor(private readonly blob: StableBlobRef) {}
+
+  async claimForScrub(input: { readonly scope: TenantBlobScope }) {
+    if (input.scope.tenantId !== this.blob.tenantId) {
+      throw new Error("tombstone Tenant 不匹配");
+    }
+    return {
+      status: "claimed" as const,
+      tombstone: {
+        tombstoneId: `tombstone-${this.blob.incarnationId}`,
+        generation: this.completeCount + 1,
+        tenantId: this.blob.tenantId,
+        purpose: this.blob.purpose,
+        sha256: this.blob.sha256,
+        size: this.blob.size,
+        incarnationId: this.blob.incarnationId,
+        physicalObjectKey: this.blob.physicalObjectKey,
+      },
+    };
+  }
+
+  async completeScrub(): Promise<void> {
+    // 永久 tombstone 只更新 scrub 进度，不从 Fake 中移除。
+    this.completeCount += 1;
   }
 }
 
@@ -1517,6 +1903,18 @@ class InMemoryStableLifecycle implements StableBlobGcClaimPort {
 
 function bytes(value: string): Uint8Array {
   return new TextEncoder().encode(value);
+}
+
+function stagedRefForTest(uploadId: string, sha256: string): StagedBlobRef {
+  return {
+    kind: "staging",
+    tenantId: "tenant_a",
+    purpose: "artifact",
+    uploadId,
+    sha256,
+    size: 1,
+    mediaType: "text/plain",
+  };
 }
 
 function allocationFor(

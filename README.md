@@ -16,6 +16,15 @@
 
 当前仓库只包含开发环境和 TypeScript Monorepo 空骨架，尚未实现 Tenant、Thread、Run、Workspace、Resource 或 Artifact 等业务功能。
 
+## 设计与决策文档
+
+- [实施路线与阶段 Gate](docs/roadmap.md)
+- [架构决策索引与记录规则](docs/decisions/README.md)
+- [架构决策记录模板](docs/decisions/adr-template.md)
+- [Python 原型参考行为清单](docs/python-prototype-reference.md)
+
+新实现遇到架构边界、数据语义、失败处理或供应链方面的不确定性时，必须先按决策记录规则留下背景、备选、选择和验证证据，再进入不可逆实现。旧 Python 仓库不属于本仓库的构建、运行或数据兼容边界。
+
 ## 本地启动
 
 1. 确认根目录存在本地 `.env`。该文件包含真实凭据，已被 Git 忽略。

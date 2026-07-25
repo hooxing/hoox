@@ -87,9 +87,20 @@ export interface CreateSafePiSessionOptions {
 
 const LOGICAL_WORKSPACE = "/workspace" as const;
 
+/**
+ * Pi 0.82.1 会对 cwd 使用宿主平台 path.resolve；Windows 会把 /workspace 改写为宿主盘符路径。
+ * 当前生产 Worker 因此明确只支持 Linux，并在创建任何 Session 前失败，避免宿主路径进入模型上下文。
+ */
+export function assertLinuxWorkerPlatform(platform: NodeJS.Platform = process.platform): void {
+  if (platform !== "linux") {
+    throw new Error(`Pi Runtime Worker 仅支持 Linux；当前平台为 ${platform}`);
+  }
+}
+
 export async function createSafePiSession(
   options: CreateSafePiSessionOptions,
 ): Promise<PiSessionController> {
+  assertLinuxWorkerPlatform();
   const settingsManager = SettingsManager.inMemory(
     {
       compaction: { enabled: false },

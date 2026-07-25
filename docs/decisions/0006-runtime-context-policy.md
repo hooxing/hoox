@@ -36,7 +36,8 @@ Pi 的默认 Compaction 面向其自身产品会话，无法直接表达 Tenant 
 采用方案 C：
 
 - 创建每个 Pi Session 时使用内存 SettingsManager，明确设置 `compaction.enabled = false`；
-- Runtime 不调用 `session.compact()`，并把任何 Pi `compaction_start/end` 事件视为测试失败；
+- Runtime 对外只返回窄 Controller，不暴露 `AgentSession` 或任何 `compact()` 入口；任何 Pi `compaction_start/end` 事件都映射为 `compaction.forbidden` 并视为不变量违规；
+- Pi Session 使用固定逻辑 cwd `/workspace` 和零发现 `EmptyResourceLoader`；生产 Worker 仅支持 Linux，Windows 在 Session 创建前失败，防止平台路径改写把宿主盘符带入上下文；
 - `prompt-builder` 负责分层系统提示词和规范上下文；`context-policy` 负责 Token 预算、工具输出截断、压缩触发和 `replacement_history`；
 - Rollout 是追加式事实流，区分 `PiSessionEntry` 与 `RuntimeEntry`；压缩只追加带窗口链和兼容哈希的检查点，不删除旧事实；
 - 恢复时从最新有效检查点加后续 Rollout 重建活动历史，再创建新的内存 Pi Session；
@@ -84,4 +85,5 @@ Pi 的默认 Compaction 面向其自身产品会话，无法直接表达 Tenant 
 
 ## 实施记录
 
-- 仅完成决策；设置断言和真实会话验证待 M0-05。
+- M0-05 已通过内存 SettingsManager 关闭 Pi Compaction，并用窄 Controller 隐藏原始 Session 与手工 compact 入口。
+- Linux Faux Provider 测试验证逻辑 `/workspace`、零宿主路径、无 Compaction 入口/事件；Windows 测试验证平台保护在 Session 创建前失败。后续 M5 仍需实现 Runtime 自有检查点与恢复策略。

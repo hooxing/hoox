@@ -69,7 +69,6 @@ export async function settledOperation<T>(
   operation: string,
   action: () => Promise<T>,
   options: { signal?: AbortSignal; timeoutMs?: number } = {},
-  timeoutMode: "native" | "after-settle" = "after-settle",
 ): Promise<T> {
   assertPositiveInteger(options.timeoutMs, `${operation} timeoutMs`);
   if (options.signal?.aborted) {
@@ -86,15 +85,20 @@ export async function settledOperation<T>(
   };
   options.signal?.addEventListener("abort", onAbort, { once: true });
   const startedAt = Date.now();
-  let result: T;
+  let result: T | undefined;
+  let actionError: unknown;
+  let actionFailed = false;
   try {
     result = await action();
   } catch (error) {
-    throw mapSandboxError(error, operation);
+    actionFailed = true;
+    actionError = error;
   } finally {
     options.signal?.removeEventListener("abort", onAbort);
   }
 
+  // 安全点采用固定优先级：CANCELLED > TIMEOUT > action 结果（含 UPSTREAM）。
+  // 即使远端最终失败，也不能覆盖执行期间已经发生的本地取消或期限事实。
   if (cancellationRequested) {
     throw new SandboxRuntimeError(
       "CANCELLED",
@@ -102,14 +106,11 @@ export async function settledOperation<T>(
       options.signal?.reason,
     );
   }
-  if (
-    timeoutMode === "after-settle" &&
-    options.timeoutMs !== undefined &&
-    Date.now() - startedAt >= options.timeoutMs
-  ) {
+  if (options.timeoutMs !== undefined && Date.now() - startedAt >= options.timeoutMs) {
     throw new SandboxRuntimeError("TIMEOUT", `${operation} 已安全结束，但超过调用方期限`);
   }
-  return result;
+  if (actionFailed) throw mapSandboxError(actionError, operation);
+  return result as T;
 }
 
 export function assertPositiveInteger(value: number | undefined, label: string): void {

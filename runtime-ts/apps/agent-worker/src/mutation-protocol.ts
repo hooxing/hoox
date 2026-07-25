@@ -1,4 +1,4 @@
-import { sha256Digest, type Sha256Digest } from "@cube-runtime/domain";
+import { sha256Digest, type IsoTimestamp, type Sha256Digest } from "@cube-runtime/domain";
 import type { RuntimeMutation, RuntimeOutboxV1, ValidatedWorkspaceChange } from "./ports.js";
 import type { ControlledRolloutProjection } from "@cube-runtime/pi-adapter";
 import { createHash } from "node:crypto";
@@ -26,16 +26,26 @@ export function runtimeMutationDigest(
   });
 }
 
-export function outboxPayloadDigest(outbox: RuntimeOutboxV1): Sha256Digest {
+export function outboxPayloadDigest(outbox: RuntimeOutboxV1, armedAt?: IsoTimestamp): Sha256Digest {
+  if (outbox.kind === "sandbox_cleanup" && armedAt === undefined) {
+    throw new Error("cleanup receipt digest 必须包含 armedAt");
+  }
   return digest({
     schemaVersion: outbox.schemaVersion,
     kind: outbox.kind,
     idempotencyKey: outbox.idempotencyKey,
     state: outbox.state,
-    ...(outbox.kind === "sandbox_cleanup" && outbox.state === "pending"
-      ? { armed: outbox.armed }
-      : {}),
+    ...(outbox.kind === "sandbox_cleanup" ? { armed: outbox.armed, armedAt } : {}),
     payload: outbox.payload,
+  });
+}
+
+export function sandboxCleanupIdentityDigest(
+  outbox: Extract<RuntimeOutboxV1, { kind: "sandbox_cleanup" }>,
+): Sha256Digest {
+  return digest({
+    registryId: outbox.payload.registryId,
+    providerSandboxId: outbox.payload.providerSandboxId,
   });
 }
 

@@ -46,6 +46,8 @@ import type {
   RuntimeMutation,
   RuntimeMutationResult,
   RuntimeMutationReceiptV1,
+  RuntimeOutboxReceiptV1,
+  RuntimeOutboxV1,
   SandboxAcquireResult,
   SandboxSessionRef,
   SandboxSessionRegistryPort,
@@ -60,6 +62,7 @@ import {
   outboxPayloadDigest,
   rolloutProjectionDigest,
   runtimeMutationDigest,
+  sandboxCleanupIdentityDigest,
   workspaceChangeDigest,
 } from "../mutation-protocol.js";
 
@@ -111,6 +114,10 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   rejectInspectNext = false;
   forceFenceLost = false;
   rejectNextPermit = false;
+  beforePermitIssueReturn?: (
+    input: Parameters<ExecutionPersistencePort["issueExternalEffectPermit"]>[0],
+  ) => void | Promise<void>;
+  readonly durableOperations: string[] = [];
   readonly permits: Array<{ readonly permit: ExternalEffectPermit; consumed: boolean }> = [];
   readonly revisionCreatedAt: IsoTimestamp[] = [];
   afterMutation?: (command: RuntimeMutation) => void;
@@ -204,6 +211,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     readonly fence: ExecutionFence;
     readonly leaseDurationMs: number;
   }): Promise<FenceInspectionResult> {
+    this.durableOperations.push("inspect");
     if (this.rejectInspectNext) {
       this.rejectInspectNext = false;
       throw new Error("模拟 heartbeat DB Promise reject");
@@ -250,6 +258,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   async issueExternalEffectPermit(
     input: Parameters<ExecutionPersistencePort["issueExternalEffectPermit"]>[0],
   ): ReturnType<ExecutionPersistencePort["issueExternalEffectPermit"]> {
+    this.durableOperations.push(`permit:issue:${input.call.callId}`);
     const record = this.find(input.fence.scope);
     if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
     if (this.rejectNextPermit) {
@@ -277,12 +286,14 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       expiresAt: this.after(input.permitDurationMs),
     } as const;
     this.permits.push({ permit, consumed: false });
+    await this.beforePermitIssueReturn?.(input);
     return { outcome: "authorized", permit };
   }
 
   async consumeExternalEffectPermit(
     input: Parameters<ExecutionPersistencePort["consumeExternalEffectPermit"]>[0],
   ): ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]> {
+    this.durableOperations.push(`permit:consume:${input.permit.callId}`);
     const record = this.find(input.fence.scope);
     if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
     const now = this.databaseNow();
@@ -307,6 +318,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   }
 
   async mutate(command: RuntimeMutation): Promise<RuntimeMutationResult> {
+    this.durableOperations.push(`mutate:${command.idempotencyKey}`);
     if (this.unavailableNextMutation) {
       this.unavailableNextMutation = false;
       return { outcome: "unavailable" };
@@ -391,6 +403,11 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
 
     for (const item of command.outbox) {
       if (item.kind !== "sandbox_cleanup") continue;
+      if (item.armed !== true) return { outcome: "conflict" };
+      if ("armedAt" in item) return { outcome: "conflict" };
+      if (item.state === "pending" && "disposition" in item.payload) {
+        return { outcome: "conflict" };
+      }
       const keyedExisting = record.outbox.find(
         (candidate) => candidate.idempotencyKey === item.idempotencyKey,
       );
@@ -402,13 +419,22 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
           candidate.kind === "sandbox_cleanup" && candidate.idempotencyKey === item.idempotencyKey,
       );
       if (!cleanupTransitionAllowed(existing?.state, item.state)) return { outcome: "conflict" };
-      if (item.state === "pending" && item.armed !== true) return { outcome: "conflict" };
       if (
         existing?.kind === "sandbox_cleanup" &&
         (existing.payload.registryId !== item.payload.registryId ||
           existing.payload.providerSandboxId !== item.payload.providerSandboxId)
       ) {
         return { outcome: "conflict" };
+      }
+      if (existing?.kind === "sandbox_cleanup") {
+        if (existing.armed !== true) return { outcome: "conflict" };
+        const previousDisposition =
+          "disposition" in existing.payload ? existing.payload.disposition : undefined;
+        const nextDisposition =
+          "disposition" in item.payload ? item.payload.disposition : undefined;
+        if (previousDisposition !== undefined && previousDisposition !== nextDisposition) {
+          return { outcome: "conflict" };
+        }
       }
     }
 
@@ -419,7 +445,15 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       const index = record.outbox.findIndex(
         (existing) => existing.idempotencyKey === item.idempotencyKey,
       );
-      const persisted = { ...item, occurredAt: now } as PersistedRuntimeOutboxV1;
+      const previous = index < 0 ? undefined : record.outbox[index];
+      const persisted: PersistedRuntimeOutboxV1 =
+        item.kind === "sandbox_cleanup"
+          ? {
+              ...item,
+              armedAt: previous?.kind === "sandbox_cleanup" ? previous.armedAt : now,
+              occurredAt: now,
+            }
+          : { ...item, occurredAt: now };
       if (index < 0) record.outbox.push(persisted);
       else record.outbox[index] = persisted;
     }
@@ -472,11 +506,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       attemptVersion: nextAttempt.version,
       eventSequenceStart: attempt.nextEventSequence,
       eventSequenceEnd: nextAttempt.nextEventSequence,
-      outbox: command.outbox.map((item) => ({
-        idempotencyKey: item.idempotencyKey,
-        payloadDigest: outboxPayloadDigest(item),
-        state: item.state,
-      })),
+      outbox: command.outbox.map((item) => fakeOutboxReceipt(record, item)),
       ...(command.rolloutProjection === undefined
         ? {}
         : {
@@ -774,6 +804,7 @@ export class BlockingAgentSession implements WorkerAgentSessionPort {
   abortCount = 0;
   disposeCount = 0;
   private resolve: ((outcome: AgentTurnOutcome) => void) | undefined;
+  private readonly listeners = new Set<(event: RuntimeAgentEvent) => void>();
 
   runPrompt(): Promise<AgentTurnOutcome> {
     return new Promise((resolve) => (this.resolve = resolve));
@@ -784,8 +815,13 @@ export class BlockingAgentSession implements WorkerAgentSessionPort {
     this.resolve?.({ kind: "completed" });
   }
 
-  subscribe(): () => void {
-    return () => undefined;
+  emit(event: RuntimeAgentEvent): void {
+    for (const listener of this.listeners) listener(event);
+  }
+
+  subscribe(listener: (event: RuntimeAgentEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   dispose(): void {
@@ -974,6 +1010,45 @@ function expired(fence: ExecutionFence, now: IsoTimestamp): boolean {
     Date.parse(fence.runClaim.expiresAt) <= current ||
     Date.parse(fence.workspaceLease.expiresAt) <= current
   );
+}
+
+function fakeOutboxReceipt(record: FakeRecord, item: RuntimeOutboxV1): RuntimeOutboxReceiptV1 {
+  const persisted = record.outbox.find(
+    (candidate) => candidate.idempotencyKey === item.idempotencyKey,
+  );
+  if (item.kind === "sandbox_cleanup") {
+    if (persisted?.kind !== "sandbox_cleanup") throw new Error("cleanup receipt 缺少持久行");
+    const disposition =
+      "disposition" in persisted.payload ? persisted.payload.disposition : undefined;
+    return {
+      kind: item.kind,
+      idempotencyKey: item.idempotencyKey,
+      payloadDigest: outboxPayloadDigest(item, persisted.armedAt),
+      state: item.state,
+      armed: true,
+      armedAt: persisted.armedAt,
+      identity: {
+        registryId: item.payload.registryId,
+        providerSandboxId: item.payload.providerSandboxId,
+      },
+      identityDigest: sandboxCleanupIdentityDigest(item),
+      ...(disposition === undefined ? {} : { disposition }),
+    };
+  }
+  if (item.kind === "sandbox_lifecycle_unknown") {
+    return {
+      kind: item.kind,
+      idempotencyKey: item.idempotencyKey,
+      payloadDigest: outboxPayloadDigest(item),
+      state: item.state,
+    };
+  }
+  return {
+    kind: item.kind,
+    idempotencyKey: item.idempotencyKey,
+    payloadDigest: outboxPayloadDigest(item),
+    state: item.state,
+  };
 }
 
 function cleanupTransitionAllowed(

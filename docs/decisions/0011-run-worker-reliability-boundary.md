@@ -48,6 +48,10 @@ Mutation 是版本化命令（当前 `schemaVersion: 1`），使用键排序、�
 
 Receipt 必须逐项证明 Attempt version 恰好 `+1`、事件 sequence 推进量、Outbox 业务键/状态/payload digest、Projection 前后版本/digest，以及 Workspace change digest/前后 head。Worker 只有在 receipt 与本地命令、当前 checkpoint 完全一致时才推进内存状态。RolloutProjection 使用独立 version CAS，不能只依赖 Attempt version 防止旧投影覆盖新投影。
 
+每个 Attempt 只有一条进程内 `DurableOperationLane`。所有 agent event mutation、普通 mutation/readback、permit issue/consume、stop/fence inspect/renew，以及任何读取或推进 Attempt version 的事务，都按进入 lane 的顺序串行执行。命令及 expected version 必须在 lane 回调开始后从最新 context 构造，不能在排队前捕获旧版本。heartbeat 不得绕过 lane；重复 tick 可以复用在途任务或排队，停止时必须先停止生产者，再 drain lane。
+
+真实 Pi 工具调用还增加一层顺序门：PiWorkerSessionFactory 必须先观察到匹配 `callId + toolName` 的 `tool.started`，RunWorker 再把该事件经 lane 提交并取得 receipt，之后工具 authorizer 才能进入 lane。permit issue 与 consume 位于同一个 lane 回调，中间禁止 agent event、heartbeat 或其他 mutation 插入；这避免 `tool.started` 推进 Attempt version 后旧许可在 consume 时误判 fence_lost。取消信号在每个排队操作实际开始时重新检查；排在工具许可前的 lease 检查一旦判定失效，后续许可不得签发或消费。
+
 生产实现必须在同一个数据库事务中，用单次数据库 `now` 校验两组租约仍有效，再原子写入事件、Outbox、Attempt、RolloutProjection、WorkspaceRevision 和 Run 状态。应用命令不携带 `occurredAt`、Revision `createdAt` 或终态时间，只提交 lease duration 和已验证内容，所有时间及 deadline 均由数据库生成。
 
 完整 scope 在 Attempt 生命周期内不可变，即使 Revision 已推进，`baseRevisionId` 也不能被 current head 替换。新的 current revision 单独保存在 Attempt checkpoint；claim、inspect、mutation result 与 readback 都必须逐字段校验 tenant/thread/run/rootRun/workspace/baseRevision、Run/Workspace 归属以及 checkpoint current head。禁止为了找回已提交事务而放宽复合键查询。
@@ -73,17 +77,18 @@ waiting checkpoint 和 success checkpoint 均由一次 `mutate` 原子完成：
 
 ### Sandbox cleanup Outbox / Saga
 
-Sandbox acquire 返回已登记实例后，Worker 在创建 Pi Session 或启动模型前，必须首先持久化带 `armed: true` 的 `sandbox_cleanup` pending intent。清理 Outbox 是已证明提交后的事实源：
+Sandbox acquire 返回已登记实例后，Worker 在创建 Pi Session 或启动模型前，必须首先持久化带 `armed: true` 的 `sandbox_cleanup` pending intent。`armed` 是 cleanup 行永久且不可逆的事实，不是 pending 状态的临时字段；清理 Outbox 是已证明提交后的事实源：
 
-1. 调用 settle 前持久化 `started`；
-2. settle 成功后持久化 `completed`；
-3. 结果不确定时持久化 `unknown` 与稳定告警；
-4. 状态严格单调：`pending → started → completed | unknown`；调用抛异常时保留 `started`，禁止回退为 `pending`；
-5. worker 可在 intent 提交后做同进程低延迟 dispatch，但崩溃恢复和重复消费仍以同一个 Outbox 幂等键为准。
+1. pending 只表示实例已武装，但 consumer 必须等待当前 lease/Attempt 终止；pending payload 不携带 `pause | close`；
+2. 调用 settle 前在同一事务把 armed pending 推进为 `started`，并且只在这一步一次性决定 `pause | close`；
+3. settle 成功后持久化 `completed`；
+4. 结果不确定时持久化 `unknown` 与稳定告警；
+5. 状态严格单调：`pending → started → completed | unknown`；调用抛异常时保留 `started`，禁止回退为 `pending`；
+6. worker 可在 intent 提交后做同进程低延迟 dispatch，但崩溃恢复和重复消费仍以同一个 Outbox 幂等键为准。
 
-同一个 cleanup 业务键的 `registryId`、`providerSandboxId` 是不可变身份，不能在状态推进时替换。若 acquire 已成功登记，但 cleanup-intent mutation 返回 unavailable、response_unknown 且 readback 无法证明 receipt，或 fence_lost，Worker 不能假设 Outbox 已存在；registry 仍必须保留创建事实，Worker 用独立 registry 恢复键执行 best-effort orphan close，并记录原因和 settled/unknown/failed 结果指标。该路径不写业务终态，也不依赖 Outbox consumer。
+同一个 cleanup 业务键的 `registryId`、`providerSandboxId`、`armedAt` 是不可变身份事实；进入 started 后 disposition 也不可变，任何撤销 armed、伪造 armedAt、pending 预填 disposition 或 started 换 disposition 都必须事务冲突。Receipt 的 cleanup 项和 payload digest 同时包含 armedAt、原始 identity 与 identity digest，并在 started 后包含 disposition，使 Worker 能验证数据库没有改写这些事实。acquire 自身的 UNKNOWN 使用独立 lifecycle-unknown 记录，不伪装成一条已经 armed 的 cleanup 行。若 acquire 已成功登记，但 cleanup-intent mutation 返回 unavailable、response_unknown 且 readback 无法证明 receipt，或 fence_lost，Worker 不能假设 Outbox 已存在；registry 仍必须保留创建事实，Worker 用独立 registry 恢复键执行 best-effort orphan close，并记录原因和 settled/unknown/failed 结果指标。该路径不写业务终态，也不依赖 Outbox consumer。
 
-UNKNOWN 不能自动再次 settle 或创建替代 Sandbox。生产 Outbox consumer 通过 registryId 重新取得句柄并执行同一 Saga。create 期间取消或丢栅栏时，返回后绝不启动模型；registry 必须保留创建请求事实，旧 Worker只做 best-effort close。
+UNKNOWN 不能自动再次 settle 或创建替代 Sandbox。生产 Outbox consumer 通过 registryId 重新取得句柄并执行同一 Saga。create 期间取消或丢栅栏时，返回后绝不启动模型；registry 必须保留创建请求事实，旧 Worker 只做 best-effort close。
 
 ### Pi waiting 恢复
 
@@ -145,5 +150,8 @@ waiting 回答到达后创建全新的内存 Pi Session，把 RolloutProjection 
 - acquire 后 intent 不可证明时的 registry 孤儿清理与恢复指标、cleanup 身份不可变；
 - inspect/renew 身份不变与 expiry 严格推进、heartbeat 非重入并等待在途任务；
 - Workspace、Artifact、Sandbox 和幂等冲突的稳定错误码映射。
+- per-Attempt lane 下 tool.started→issue→consume→后续事件的严格顺序，以及取消/lease 检查优先级；
+- Linux Faux + PiWorkerSessionFactory 真实写文件链路，heartbeat 只能排在 permit consume 之后；
+- cleanup pending 无 disposition、armed/armedAt/identity 永久、started disposition 一次决定与 receipt digest。
 
 PG、对象存储、真实 Outbox consumer 和 API 不在本次实现范围；它们必须遵守本 ADR，不能重新引入 Run 基础设施状态或 Pi Session 事实源。

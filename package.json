@@ -11,13 +11,14 @@
     "build": "pnpm --recursive --if-present build",
     "clean": "pnpm --recursive --if-present clean",
     "config:check": "node scripts/validate-env-example.mjs && docker compose --env-file .env.example -f docker-compose.dev.yml config --quiet",
+    "check:clean-vendor": "node scripts/remove-vendor-dist.mjs && pnpm check",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",
     "test": "pnpm build && vitest run",
     "test:cube:real": "pnpm --filter @cubesandbox/sdk build && tsx runtime-ts/packages/sandbox/src/real-smoke.ts",
     "test:pi-cube:real": "pnpm build && tsx runtime-ts/packages/pi-adapter/src/real-vertical-smoke.ts",
-    "typecheck": "tsc -p tsconfig.json && pnpm --recursive --if-present typecheck",
+    "typecheck": "pnpm --filter @cubesandbox/sdk build && tsc -p tsconfig.json && pnpm --recursive --if-present typecheck",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm config:check"
   },
   "dependencies": {

@@ -1,6 +1,6 @@
 # `@cube-runtime/persistence`
 
-本包保存 Runtime 的持久化边界。目前已实现 S3/MinIO Blob Store 基础；业务 Repository 和 PostgreSQL 表由后续任务实现。
+本包保存 Runtime 的持久化边界。目前已实现核心业务 Repository、S3/MinIO Blob Store，以及 ADR-0012 定义的 PostgreSQL stable blob 生命周期、提交、授权、GC 与 tombstone 适配器。
 
 ## Blob Store 约束
 
@@ -37,7 +37,7 @@
 7. 最后删除 staging；
 8. 引用提交前失败的 staging 进入孤儿清理；补偿事件明确记录目标为 staging；结果未知时先通过同一 Tenant scope 下的对应 resolve 接口查明，不允许猜测后继续。
 
-`BlobReferenceCommitPort` 和 `BlobCommitStatePort` 是协调契约，本包不实现具体业务表。PostgreSQL 实现必须以 `(tenant_id, operation_id)` 建立复合唯一约束，所有 load/CAS/resolve 都必须同时校验 Tenant scope；不同 Tenant 可以使用相同 `operationId`。关键状态迁移由 `transitionBlobCommit` 校验，非法跨越会失败。
+`BlobReferenceCommitPort` 和 `BlobCommitStatePort` 由 `PgBlobLifecycleRepository` 实现，并以 `(tenant_id, operation_id)` 建立复合唯一约束；所有 load/CAS/resolve 都同时校验 Tenant scope，不同 Tenant 可以使用相同 `operationId`。规范 lifecycle/incarnation/allocation/authorization/execution 是物理身份事实源，JSON commit snapshot 只承担协调状态。关键状态迁移由 `transitionBlobCommit` 校验，普通 CAS 不能签发 promotion 授权或撤销已开始授权。
 
 PUT、COPY 或 DELETE 返回不确定结果后，只能通过后续 HEAD 的明确存在/不存在收敛；HEAD 自身失败时仍保持 `BLOB_RESULT_UNKNOWN`，由恢复任务重试，不能误判为成功或失败。stable GC 也遵守同一规则。
 

@@ -24,7 +24,46 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspace_revisions", new Set(["SELECT", "INSERT"])],
   ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
+  ["blob_lifecycles", new Set(["SELECT", "INSERT"])],
+  ["blob_incarnations", new Set(["SELECT", "INSERT"])],
+  ["blob_allocations", new Set(["SELECT", "INSERT"])],
+  ["blob_commits", new Set(["SELECT", "INSERT"])],
+  ["promotion_authorizations", new Set(["SELECT", "INSERT"])],
+  ["promotion_executions", new Set(["SELECT", "INSERT"])],
+  ["blob_gc_claims", new Set(["SELECT", "INSERT"])],
+  ["retired_blob_tombstones", new Set(["SELECT", "INSERT"])],
+  ["blob_references", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
+]);
+
+const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
+  [
+    "blob_lifecycles",
+    new Set([
+      "state",
+      "current_incarnation_id",
+      "generation",
+      "current_claim_id",
+      "lease_expires_at",
+      "updated_at",
+    ]),
+  ],
+  ["blob_incarnations", new Set(["state", "retired_at"])],
+  ["blob_commits", new Set(["status", "version", "snapshot", "updated_at"])],
+  [
+    "promotion_authorizations",
+    new Set(["state", "current_execution_id", "execution_generation", "updated_at"]),
+  ],
+  ["promotion_executions", new Set(["phase", "proof_status", "updated_at"])],
+  ["blob_gc_claims", new Set(["phase", "updated_at"])],
+  [
+    "retired_blob_tombstones",
+    new Set(["generation", "scrub_lease_expires_at", "next_scrub_at", "last_scrubbed_at"]),
+  ],
+  [
+    "blob_references",
+    new Set(["state", "lifecycle_id", "incarnation_id", "physical_object_key", "updated_at"]),
+  ],
 ]);
 
 export interface MigrationSecurityContext {
@@ -396,6 +435,30 @@ async function assertActiveRuntimeWhitelist(
     }
   }
 
+  const columnUpdates = await client.query<{
+    table_name: string;
+    column_name: string;
+    allowed: boolean;
+  }>(
+    `SELECT column_state.table_name, column_state.column_name,
+            has_column_privilege(
+              $1,
+              format('%I.%I', $2::text, column_state.table_name),
+              column_state.column_name,
+              'UPDATE'
+            ) AS allowed
+       FROM information_schema.columns column_state
+      WHERE column_state.table_schema = $2
+        AND column_state.table_name = ANY($3::text[])
+      ORDER BY column_state.table_name, column_state.ordinal_position`,
+    [context.runtimeRole, context.schema, [...runtimeColumnUpdatePolicy.keys()]],
+  );
+  for (const row of columnUpdates.rows) {
+    if (row.allowed !== runtimeColumnUpdatePolicy.get(row.table_name)?.has(row.column_name)) {
+      throw new PersistenceError("CONSTRAINT_VIOLATION", "Runtime 列级 UPDATE 权限偏离白名单");
+    }
+  }
+
   const sequences = await client.query<PrivilegeRow>(
     `SELECT relation.relname AS table_name, requested.privilege,
             has_sequence_privilege(
@@ -488,6 +551,38 @@ export async function bootstrapRuntimeAccessOnClient(
   await client.query(`GRANT SELECT, INSERT ON TABLE ${schema}.workspace_revisions TO ${role}`);
   await client.query(
     `GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE ${schema}.workspace_write_leases TO ${role}`,
+  );
+  // 生命周期历史与副作用证明只允许追加或状态推进，Runtime 永远不能物理删除审计事实。
+  await client.query(
+    `GRANT SELECT, INSERT ON TABLE
+       ${schema}.blob_lifecycles,
+       ${schema}.blob_incarnations,
+       ${schema}.blob_commits,
+       ${schema}.promotion_authorizations,
+       ${schema}.promotion_executions,
+       ${schema}.blob_gc_claims,
+       ${schema}.retired_blob_tombstones,
+       ${schema}.blob_references
+     TO ${role}`,
+  );
+  await client.query(`GRANT SELECT, INSERT ON TABLE ${schema}.blob_allocations TO ${role}`);
+  await client.query(
+    `GRANT UPDATE(state, current_incarnation_id, generation, current_claim_id, lease_expires_at, updated_at)
+       ON TABLE ${schema}.blob_lifecycles TO ${role};
+     GRANT UPDATE(state, retired_at)
+       ON TABLE ${schema}.blob_incarnations TO ${role};
+     GRANT UPDATE(status, version, snapshot, updated_at)
+       ON TABLE ${schema}.blob_commits TO ${role};
+     GRANT UPDATE(state, current_execution_id, execution_generation, updated_at)
+       ON TABLE ${schema}.promotion_authorizations TO ${role};
+     GRANT UPDATE(phase, proof_status, updated_at)
+       ON TABLE ${schema}.promotion_executions TO ${role};
+     GRANT UPDATE(phase, updated_at)
+       ON TABLE ${schema}.blob_gc_claims TO ${role};
+     GRANT UPDATE(generation, scrub_lease_expires_at, next_scrub_at, last_scrubbed_at)
+       ON TABLE ${schema}.retired_blob_tombstones TO ${role};
+     GRANT UPDATE(state, lifecycle_id, incarnation_id, physical_object_key, updated_at)
+       ON TABLE ${schema}.blob_references TO ${role}`,
   );
   await assertActiveRuntimeWhitelist(client, context);
 }

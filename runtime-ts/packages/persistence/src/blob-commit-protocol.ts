@@ -1,6 +1,8 @@
 import {
   type StableBlobRef,
   type StableBlobLifecycleAllocation,
+  type StableBlobPromotionAuthorization,
+  type PromotionAuthorizationRef,
   type StagedBlobRef,
   type TenantBlobScope,
   assertBlobRef,
@@ -36,6 +38,7 @@ export interface BlobCommitSnapshot {
   readonly staged?: StagedBlobRef;
   readonly stable?: StableBlobRef;
   readonly allocation?: StableBlobLifecycleAllocation;
+  readonly promotionAuthorization?: PromotionAuthorizationRef;
   readonly retiredIncarnationId?: string;
   readonly retiredPhysicalObjectKey?: string;
   readonly referenceId?: string;
@@ -58,7 +61,10 @@ export type BlobCommitEvent =
       readonly allocation: StableBlobLifecycleAllocation;
       readonly stable: StableBlobRef;
     }
-  | { readonly type: "promotion_started" }
+  | {
+      readonly type: "promotion_started";
+      readonly authorization: PromotionAuthorizationRef;
+    }
   | { readonly type: "promotion_succeeded"; readonly stable: StableBlobRef }
   | { readonly type: "promotion_failed" }
   | { readonly type: "promotion_result_unknown" }
@@ -125,7 +131,11 @@ export interface BlobReferenceCommitPort {
 }
 
 export interface BlobCommitStatePort {
-  /** 数据库必须以 (tenant_id, operation_id) 建立联合唯一约束和查询条件。 */
+  /**
+   * 数据库必须以 (tenant_id, operation_id) 建立联合唯一约束和查询条件。
+   * `promotion_started` 的状态 CAS 与完整规范授权行必须在同一 PostgreSQL 事务中签发；
+   * 仅预留 allocation、但尚未提交该事务的状态不能被 BlobStore 解析为授权。
+   */
   load(scope: TenantBlobScope, operationId: string): Promise<BlobCommitSnapshot | undefined>;
   create(snapshot: BlobCommitSnapshot): Promise<void>;
   compareAndSet(input: {
@@ -133,6 +143,20 @@ export interface BlobCommitStatePort {
     readonly operationId: string;
     readonly expectedVersion: number;
     readonly next: BlobCommitSnapshot;
+  }): Promise<boolean>;
+  /**
+   * 唯一允许持久化 promotion_started 的入口：实现必须在同一事务中完成 snapshot CAS
+   * 与规范授权行 INSERT。普通 compareAndSet 必须拒绝 next.status=promotion_started。
+   */
+  startPromotion(input: {
+    readonly scope: TenantBlobScope;
+    readonly operationId: string;
+    readonly expectedVersion: number;
+    readonly next: BlobCommitSnapshot & {
+      readonly status: "promotion_started";
+      readonly promotionAuthorization: PromotionAuthorizationRef;
+    };
+    readonly authorization: StableBlobPromotionAuthorization;
   }): Promise<boolean>;
 }
 
@@ -240,7 +264,8 @@ function applyTransition(
       break;
     case "allocation_reserved":
       if (event.type === "promotion_started") {
-        return copyPromotion(current, "promotion_started");
+        assertPromotionAuthorization(current, event.authorization);
+        return copyPromotion(current, "promotion_started", event.authorization);
       }
       break;
     case "promotion_started":
@@ -252,7 +277,7 @@ function applyTransition(
         return copyPromotion(current, "promotion_unknown");
       }
       if (event.type === "promotion_failed") {
-        return copyPromotion(current, "allocation_reserved");
+        return copyPromotion(current, "allocation_reserved", null);
       }
       break;
     case "promotion_unknown":
@@ -260,6 +285,7 @@ function applyTransition(
         return copyPromotion(
           current,
           event.promoted ? "stable_object_ready" : "allocation_reserved",
+          event.promoted ? current.promotionAuthorization : null,
         );
       }
       break;
@@ -387,6 +413,9 @@ function copyStable(
     staged: requireStaged(current),
     stable: requireStable(current),
     allocation: requireAllocation(current),
+    ...(current.promotionAuthorization === undefined
+      ? {}
+      : { promotionAuthorization: current.promotionAuthorization }),
     referenceId: requireReferenceId(current),
   };
 }
@@ -394,6 +423,7 @@ function copyStable(
 function copyPromotion(
   current: BlobCommitSnapshot,
   status: "allocation_reserved" | "promotion_started" | "promotion_unknown" | "stable_object_ready",
+  authorization: PromotionAuthorizationRef | null | undefined = current.promotionAuthorization,
 ): Omit<BlobCommitSnapshot, "version"> {
   return {
     ...base(current),
@@ -401,6 +431,7 @@ function copyPromotion(
     staged: requireStaged(current),
     stable: requireStable(current),
     allocation: requireAllocation(current),
+    ...(authorization == null ? {} : { promotionAuthorization: authorization }),
     referenceId: requireReferenceId(current),
     ...(current.retiredIncarnationId === undefined
       ? {}
@@ -409,6 +440,19 @@ function copyPromotion(
           retiredPhysicalObjectKey: current.retiredPhysicalObjectKey,
         }),
   };
+}
+
+function assertPromotionAuthorization(
+  current: BlobCommitSnapshot,
+  authorization: PromotionAuthorizationRef,
+): void {
+  if (
+    authorization.tenantId !== current.scope.tenantId ||
+    authorization.operationId !== current.operationId ||
+    !UUID_V4_PATTERN.test(authorization.authorizationId)
+  ) {
+    throw new BlobCommitTransitionError("promotion 授权与 Tenant、operation 或授权格式不一致");
+  }
 }
 
 function assertStagedMatchesScope(current: BlobCommitSnapshot, staged: StagedBlobRef): void {

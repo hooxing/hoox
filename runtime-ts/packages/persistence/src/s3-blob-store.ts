@@ -16,13 +16,14 @@ import {
   type BlobRef,
   type BlobStore,
   type PresignBlobDownloadInput,
+  type PromotionAuthorizationRef,
   type PutStagingBlobInput,
   type StableBlobRef,
-  type StableBlobLifecycleAllocation,
-  type StableBlobLifecycleAllocationPort,
   type StableBlobGcClaim,
   type StableBlobGcClaimPort,
   type StableBlobGcPort,
+  type StableBlobPromotionAuthorization,
+  type StableBlobPromotionAuthorizationPort,
   type StagedBlobRef,
   type TenantBlobScope,
   assertBlobPurpose,
@@ -103,7 +104,7 @@ export class S3BlobStore implements BlobStore {
 
   constructor(
     private readonly client: S3ObjectClient,
-    private readonly allocations: StableBlobLifecycleAllocationPort,
+    private readonly authorizations: StableBlobPromotionAuthorizationPort,
     config: S3BlobStoreConfig,
   ) {
     assertBucket(config.bucket);
@@ -151,22 +152,22 @@ export class S3BlobStore implements BlobStore {
   async promote(
     scope: TenantBlobScope,
     staged: StagedBlobRef,
-    allocation: StableBlobLifecycleAllocation,
+    authorizationRef: PromotionAuthorizationRef,
   ): Promise<StableBlobRef> {
     assertBlobRef(scope, staged);
-    assertAllocationFormat(allocation);
-    const persisted = await this.allocations.resolveForPromotion({
+    assertPromotionAuthorizationRef(scope, authorizationRef);
+    const resolution = await this.authorizations.resolveAuthorizedForCopy({
       scope,
-      staged,
-      allocation,
+      authorization: authorizationRef,
     });
-    if (persisted === undefined) {
+    if (resolution.status !== "authorized") {
       throw new BlobStoreError(
         "INVALID_BLOB_ARGUMENT",
-        "stable allocation 未持久化或不可用于 promote",
+        `stable promote 授权不可用：${resolution.status}`,
       );
     }
-    assertAllocationMatches(scope, staged, allocation, persisted, this.prefix);
+    const persisted = resolution.authorization;
+    assertPromotionAuthorizationMatches(scope, staged, authorizationRef, persisted, this.prefix);
     this.assertWithinSizeLimit(staged.size);
     const sourceKey = this.keyFor(staged);
     const stagedHead = await this.client.head(sourceKey);
@@ -370,9 +371,9 @@ export class S3BlobStore implements BlobStore {
 
 export function createS3BlobStore(
   config: CreateS3BlobStoreConfig,
-  allocations: StableBlobLifecycleAllocationPort,
+  authorizations: StableBlobPromotionAuthorizationPort,
 ): S3BlobStore {
-  return new S3BlobStore(createAwsObjectClient(config), allocations, config);
+  return new S3BlobStore(createAwsObjectClient(config), authorizations, config);
 }
 
 export function createS3StableBlobGarbageCollector(
@@ -766,57 +767,74 @@ function stableKeyFor(
   return `${prefix}/stable/${blob.tenantId}/${blob.purpose}/sha256/${blob.sha256}/incarnations/${incarnationId}`;
 }
 
-function assertAllocationFormat(allocation: StableBlobLifecycleAllocation): void {
-  assertTenantScope({ tenantId: allocation.tenantId });
-  assertBlobPurpose(allocation.purpose);
-  assertIncarnationId(allocation.incarnationId);
-  assertPhysicalObjectKey(allocation.physicalObjectKey);
+function assertPromotionAuthorizationRef(
+  scope: TenantBlobScope,
+  authorization: PromotionAuthorizationRef,
+): void {
+  assertTenantScope({ tenantId: authorization.tenantId });
   if (
-    !/^[a-f0-9]{64}$/u.test(allocation.sha256) ||
-    !Number.isSafeInteger(allocation.size) ||
-    allocation.size < 0 ||
-    !UUID_V4_PATTERN.test(allocation.lifecycleId) ||
-    !UUID_V4_PATTERN.test(allocation.allocationId) ||
-    !Number.isSafeInteger(allocation.generation) ||
-    allocation.generation < 1 ||
-    (allocation.mode !== "active_reuse" && allocation.mode !== "new_after_deleted")
+    !OPERATION_ID_PATTERN.test(authorization.operationId) ||
+    !UUID_V4_PATTERN.test(authorization.authorizationId)
   ) {
-    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "stable allocation 格式无效");
+    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "stable promote 授权引用格式无效");
+  }
+  if (authorization.tenantId !== scope.tenantId) {
+    throw new BlobStoreError("TENANT_SCOPE_MISMATCH", "stable promote 授权不属于当前 Tenant");
   }
 }
 
-function assertAllocationMatches(
+function assertPromotionAuthorizationFormat(authorization: StableBlobPromotionAuthorization): void {
+  assertTenantScope({ tenantId: authorization.tenantId });
+  assertBlobPurpose(authorization.purpose);
+  assertUploadId(authorization.stagingUploadId);
+  assertIncarnationId(authorization.incarnationId);
+  assertPhysicalObjectKey(authorization.stagingObjectKey);
+  assertPhysicalObjectKey(authorization.physicalObjectKey);
+  if (
+    !/^[a-f0-9]{64}$/u.test(authorization.sha256) ||
+    !Number.isSafeInteger(authorization.size) ||
+    authorization.size < 0 ||
+    !UUID_V4_PATTERN.test(authorization.authorizationId) ||
+    !OPERATION_ID_PATTERN.test(authorization.operationId) ||
+    !REFERENCE_ID_PATTERN.test(authorization.referenceId) ||
+    !UUID_V4_PATTERN.test(authorization.lifecycleId) ||
+    !UUID_V4_PATTERN.test(authorization.allocationId) ||
+    !Number.isSafeInteger(authorization.generation) ||
+    authorization.generation < 1 ||
+    (authorization.mode !== "active_reuse" && authorization.mode !== "new_after_deleted")
+  ) {
+    throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "stable promote 规范授权格式无效");
+  }
+}
+
+function assertPromotionAuthorizationMatches(
   scope: TenantBlobScope,
   staged: StagedBlobRef,
-  supplied: StableBlobLifecycleAllocation,
-  persisted: StableBlobLifecycleAllocation,
+  supplied: PromotionAuthorizationRef,
+  persisted: StableBlobPromotionAuthorization,
   prefix: string,
 ): void {
-  assertAllocationFormat(persisted);
-  if (persisted.tenantId !== scope.tenantId || supplied.tenantId !== scope.tenantId) {
-    throw new BlobStoreError("TENANT_SCOPE_MISMATCH", "stable allocation 不属于当前 Tenant");
+  assertPromotionAuthorizationFormat(persisted);
+  if (persisted.tenantId !== scope.tenantId) {
+    throw new BlobStoreError("TENANT_SCOPE_MISMATCH", "stable promote 规范授权不属于当前 Tenant");
   }
+  const expectedStagingKey = keyFor(prefix, staged);
   const expectedKey = stableKeyFor(prefix, staged, persisted.incarnationId);
   if (
+    supplied.tenantId !== persisted.tenantId ||
+    supplied.operationId !== persisted.operationId ||
+    supplied.authorizationId !== persisted.authorizationId ||
     persisted.tenantId !== staged.tenantId ||
+    persisted.stagingUploadId !== staged.uploadId ||
+    persisted.stagingObjectKey !== expectedStagingKey ||
     persisted.purpose !== staged.purpose ||
     persisted.sha256 !== staged.sha256 ||
     persisted.size !== staged.size ||
-    persisted.physicalObjectKey !== expectedKey ||
-    supplied.tenantId !== persisted.tenantId ||
-    supplied.purpose !== persisted.purpose ||
-    supplied.sha256 !== persisted.sha256 ||
-    supplied.size !== persisted.size ||
-    supplied.incarnationId !== persisted.incarnationId ||
-    supplied.physicalObjectKey !== persisted.physicalObjectKey ||
-    supplied.lifecycleId !== persisted.lifecycleId ||
-    supplied.allocationId !== persisted.allocationId ||
-    supplied.generation !== persisted.generation ||
-    supplied.mode !== persisted.mode
+    persisted.physicalObjectKey !== expectedKey
   ) {
     throw new BlobStoreError(
       "BLOB_INTEGRITY_MISMATCH",
-      "stable allocation 与持久化状态或 staging 不一致",
+      "stable promote 规范授权与授权引用、staging 或派生物理目标不一致",
     );
   }
 }
@@ -839,7 +857,7 @@ function assertGcClaim(
     !/^[a-f0-9]{64}$/u.test(claim.sha256) ||
     !Number.isSafeInteger(claim.size) ||
     claim.size < 0 ||
-    Number.isNaN(Date.parse(claim.leaseExpiresAt))
+    !isCanonicalUtcIso(claim.leaseExpiresAt)
   ) {
     throw new BlobStoreError("INVALID_BLOB_ARGUMENT", "stable GC claim 格式无效");
   }
@@ -900,3 +918,10 @@ export function encodeRfc5987Value(value: string): string {
 
 const MAX_IN_MEMORY_BLOB_SIZE_BYTES = 16 * 1024 * 1024;
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const OPERATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const REFERENCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+
+function isCanonicalUtcIso(value: string): boolean {
+  const epochMilliseconds = Date.parse(value);
+  return !Number.isNaN(epochMilliseconds) && new Date(epochMilliseconds).toISOString() === value;
+}

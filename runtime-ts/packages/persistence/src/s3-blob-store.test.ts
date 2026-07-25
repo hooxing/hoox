@@ -2,10 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   type BlobReferenceCommitPort,
   BlobStoreError,
+  type PromotionAuthorizationRef,
+  type PromotionAuthorizationResolution,
   type StableBlobGcClaim,
   type StableBlobGcClaimPort,
   type StableBlobLifecycleAllocation,
   type StableBlobLifecycleAllocationPort,
+  type StableBlobPromotionAuthorization,
+  type StableBlobPromotionAuthorizationPort,
   type StableBlobRef,
   type StagedBlobRef,
   type TenantBlobScope,
@@ -26,19 +30,10 @@ const config = { bucket: "agent-runtime-dev", maxBlobSizeBytes: 1_024 } as const
 const defaultIncarnationId = "00000000-0000-4000-8000-000000000001";
 const defaultLifecycleId = "10000000-0000-4000-8000-000000000001";
 const defaultAllocationId = "20000000-0000-4000-8000-000000000001";
-const echoAllocations: StableBlobLifecycleAllocationPort = {
-  async reserve() {
-    throw new Error("测试必须显式构造 allocation");
-  },
-  async resolveForPromotion({ allocation }) {
-    return allocation;
-  },
-};
-
 describe("S3BlobStore", () => {
   it("只使用派生键，并隔离 Tenant 与用途", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, { ...config, prefix: "test" });
+    const store = new S3BlobStore(client, promotionAuthorizations, { ...config, prefix: "test" });
     const staged = await store.putStaging({
       scope: { tenantId: "tenant_a" },
       purpose: "workspace",
@@ -82,7 +77,7 @@ describe("S3BlobStore", () => {
 
   it("相同 uploadId 和内容幂等，内容变化时拒绝覆盖", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, config);
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
     const input = {
       scope: { tenantId: "tenant_a" },
       purpose: "resource" as const,
@@ -102,7 +97,7 @@ describe("S3BlobStore", () => {
 
   it("条件写消除 HEAD 到 PUT 的并发覆盖", async () => {
     const sameClient = new FakeS3ObjectClient();
-    const sameStore = new S3BlobStore(sameClient, echoAllocations, config);
+    const sameStore = new S3BlobStore(sameClient, promotionAuthorizations, config);
     const sameInput = {
       scope: { tenantId: "tenant_a" },
       purpose: "resource" as const,
@@ -118,7 +113,7 @@ describe("S3BlobStore", () => {
     expect(sameClient.successfulPuts).toBe(1);
 
     const conflictClient = new FakeS3ObjectClient();
-    const conflictStore = new S3BlobStore(conflictClient, echoAllocations, config);
+    const conflictStore = new S3BlobStore(conflictClient, promotionAuthorizations, config);
     const conflictResults = await Promise.allSettled([
       conflictStore.putStaging({ ...sameInput, uploadId: "concurrent-conflict" }),
       conflictStore.putStaging({
@@ -138,7 +133,7 @@ describe("S3BlobStore", () => {
 
   it("mediaType 是业务引用元数据，不参与内容身份", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, config);
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
     const base = {
       scope: { tenantId: "tenant_a" },
       purpose: "resource" as const,
@@ -151,11 +146,11 @@ describe("S3BlobStore", () => {
     ]);
     expect(client.successfulPuts).toBe(1);
     expect(text.mediaType).not.toBe(binary.mediaType);
-    const allocation = allocationFor(text);
+    const { ref: authorization } = promotionAuthorizations.issue(text);
 
     const [textStable, binaryStable] = await Promise.all([
-      store.promote(base.scope, text, allocation),
-      store.promote(base.scope, binary, allocation),
+      store.promote(base.scope, text, authorization),
+      store.promote(base.scope, binary, authorization),
     ]);
     expect(textStable.sha256).toBe(binaryStable.sha256);
     await expect(store.head(base.scope, binaryStable)).resolves.toBeDefined();
@@ -163,7 +158,7 @@ describe("S3BlobStore", () => {
 
   it("校验调用方声明的哈希和大小", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, config);
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
     await expect(
       store.putStaging({
         scope: { tenantId: "tenant_a" },
@@ -210,7 +205,7 @@ describe("S3BlobStore", () => {
   it("写响应未知但对象已落盘时通过 HEAD 收敛为成功", async () => {
     const client = new FakeS3ObjectClient();
     client.putUnknownAfterWrite = true;
-    const store = new S3BlobStore(client, echoAllocations, config);
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
 
     const staged = await store.putStaging({
       scope: { tenantId: "tenant_a" },
@@ -225,7 +220,7 @@ describe("S3BlobStore", () => {
   it("写响应未知且对象不存在时保留未知结果", async () => {
     const client = new FakeS3ObjectClient();
     client.putUnknownWithoutWrite = true;
-    const store = new S3BlobStore(client, echoAllocations, config);
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
 
     await expect(
       store.putStaging({
@@ -242,7 +237,7 @@ describe("S3BlobStore", () => {
     const client = new FakeS3ObjectClient();
     client.putUnknownAfterWrite = true;
     client.failVerificationHeadAfterUnknownWrite = true;
-    const store = new S3BlobStore(client, echoAllocations, config);
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
     await expect(
       store.putStaging({
         scope: { tenantId: "tenant_a" },
@@ -256,7 +251,7 @@ describe("S3BlobStore", () => {
 
   it("提升为内容寻址稳定对象，并校验读取内容", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, { ...config, prefix: "test" });
+    const store = new S3BlobStore(client, promotionAuthorizations, { ...config, prefix: "test" });
     const scope = { tenantId: "tenant_a" };
     const staged = await store.putStaging({
       scope,
@@ -265,8 +260,8 @@ describe("S3BlobStore", () => {
       body: bytes("deliverable"),
       mediaType: "text/plain",
     });
-    const allocation = allocationFor(staged, "test");
-    const stable = await store.promote(scope, staged, allocation);
+    const { ref: authorization, allocation } = promotionAuthorizations.issue(staged, "test");
+    const stable = await store.promote(scope, staged, authorization);
 
     expect(client.copyKeys).toEqual([
       {
@@ -275,49 +270,113 @@ describe("S3BlobStore", () => {
       },
     ]);
     expect(new TextDecoder().decode(await store.getBytes(scope, stable))).toBe("deliverable");
-    expect(await store.promote(scope, staged, allocation)).toEqual(stable);
+    expect(await store.promote(scope, staged, authorization)).toEqual(stable);
     expect(client.copyKeys).toHaveLength(1);
   });
 
-  it("拒绝未经过 PG allocation 状态机持久化或被调用方篡改的 incarnation", async () => {
+  it("COPY 结果 UNKNOWN 后以同一授权恢复到同一物理目标", async () => {
+    const client = new FakeS3ObjectClient();
+    client.copyUnknownWithoutWrite = true;
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
+    const scope = { tenantId: "tenant_a" };
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "copy-unknown-same-authorization",
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
+    });
+    const issued = promotionAuthorizations.issue(staged);
+
+    await expect(store.promote(scope, staged, issued.ref)).rejects.toMatchObject({
+      code: "BLOB_RESULT_UNKNOWN",
+      result: "unknown",
+    });
+    client.copyUnknownWithoutWrite = false;
+    const stable = await store.promote(scope, staged, issued.ref);
+
+    expect(stable.physicalObjectKey).toBe(issued.authorization.physicalObjectKey);
+    expect(client.copyKeys.map((copy) => copy.destinationKey)).toEqual([
+      issued.authorization.physicalObjectKey,
+      issued.authorization.physicalObjectKey,
+    ]);
+  });
+
+  it("拒绝调用方自造的授权引用，且不会触发 COPY", async () => {
     const client = new FakeS3ObjectClient();
     const scope = { tenantId: "tenant_a" };
-    const stagingStore = new S3BlobStore(client, echoAllocations, config);
-    const staged = await stagingStore.putStaging({
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
+    const staged = await store.putStaging({
       scope,
       purpose: "artifact",
       uploadId: "untrusted-allocation",
       body: bytes("deliverable"),
       mediaType: "text/plain",
     });
-    const persisted = allocationFor(staged);
-    const rejectingPort: StableBlobLifecycleAllocationPort = {
-      async reserve() {
-        return persisted;
-      },
-      async resolveForPromotion() {
-        return undefined;
-      },
+    const selfMade = {
+      tenantId: scope.tenantId,
+      operationId: "operation-forged",
+      authorizationId: "30000000-0000-4000-8000-000000009999",
     };
-    const rejectingStore = new S3BlobStore(client, rejectingPort, config);
-    await expect(rejectingStore.promote(scope, staged, persisted)).rejects.toMatchObject({
+    await expect(store.promote(scope, staged, selfMade)).rejects.toMatchObject({
       code: "INVALID_BLOB_ARGUMENT",
     });
+    expect(client.copyKeys).toEqual([]);
+  });
 
-    const verifyingPort: StableBlobLifecycleAllocationPort = {
-      async reserve() {
-        return persisted;
-      },
-      async resolveForPromotion() {
-        return persisted;
-      },
-    };
-    const verifyingStore = new S3BlobStore(client, verifyingPort, config);
-    const forged = allocationFor(staged, "agent-runtime", {
-      incarnationId: "00000000-0000-4000-8000-000000000099",
-      allocationId: persisted.allocationId,
+  it.each([
+    ["其他 operation", "wrong_operation"],
+    ["仅预留但未开始", "not_started"],
+    ["已永久 retired", "retired"],
+  ] as const)("拒绝%s的授权状态", async (_name, condition) => {
+    const client = new FakeS3ObjectClient();
+    const scope = { tenantId: "tenant_a" };
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
+    const staged = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: `authorization-${condition}`,
+      body: bytes("deliverable"),
+      mediaType: "text/plain",
     });
-    await expect(verifyingStore.promote(scope, staged, forged)).rejects.toMatchObject({
+    const issued = promotionAuthorizations.issue(staged, "agent-runtime", {
+      status: condition === "not_started" ? "reserved" : "started",
+    });
+    if (condition === "retired") {
+      promotionAuthorizations.retire(issued.ref);
+    }
+    const ref =
+      condition === "wrong_operation"
+        ? { ...issued.ref, operationId: `${issued.ref.operationId}-other` }
+        : issued.ref;
+    await expect(store.promote(scope, staged, ref)).rejects.toMatchObject({
+      code: "INVALID_BLOB_ARGUMENT",
+      message: expect.stringContaining(condition),
+    });
+    expect(client.copyKeys).toEqual([]);
+  });
+
+  it("同一授权不能跨 staging upload 重放", async () => {
+    const client = new FakeS3ObjectClient();
+    const scope = { tenantId: "tenant_a" };
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
+    const first = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "authorized-staging",
+      body: bytes("same"),
+      mediaType: "text/plain",
+    });
+    const other = await store.putStaging({
+      scope,
+      purpose: "artifact",
+      uploadId: "other-staging",
+      body: bytes("same"),
+      mediaType: "text/plain",
+    });
+    const issued = promotionAuthorizations.issue(first);
+
+    await expect(store.promote(scope, other, issued.ref)).rejects.toMatchObject({
       code: "BLOB_INTEGRITY_MISMATCH",
     });
     expect(client.copyKeys).toEqual([]);
@@ -325,7 +384,7 @@ describe("S3BlobStore", () => {
 
   it("限制预签名 TTL 和下载文件名", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, {
+    const store = new S3BlobStore(client, promotionAuthorizations, {
       ...config,
       maxPresignTtlSeconds: 120,
     });
@@ -337,7 +396,7 @@ describe("S3BlobStore", () => {
       body: bytes("download"),
       mediaType: "text/plain",
     });
-    const stable = await store.promote(scope, staged, allocationFor(staged));
+    const stable = await store.promote(scope, staged, promotionAuthorizations.issue(staged).ref);
 
     await expect(
       store.presignDownload({
@@ -388,7 +447,7 @@ describe("S3BlobStore", () => {
 
   it("上传前、GET ContentLength 和流式读取过程都执行大小上限", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, {
+    const store = new S3BlobStore(client, promotionAuthorizations, {
       ...config,
       maxBlobSizeBytes: 5,
     });
@@ -448,7 +507,7 @@ describe("S3BlobStore", () => {
     const scope = { tenantId: "tenant_a" };
 
     const headClient = new FakeS3ObjectClient();
-    const headStore = new S3BlobStore(headClient, echoAllocations, {
+    const headStore = new S3BlobStore(headClient, promotionAuthorizations, {
       ...config,
       maxBlobSizeBytes: 8,
     });
@@ -465,7 +524,7 @@ describe("S3BlobStore", () => {
     });
 
     const promoteClient = new FakeS3ObjectClient();
-    const promoteStore = new S3BlobStore(promoteClient, echoAllocations, {
+    const promoteStore = new S3BlobStore(promoteClient, promotionAuthorizations, {
       ...config,
       maxBlobSizeBytes: 8,
     });
@@ -478,13 +537,13 @@ describe("S3BlobStore", () => {
     });
     promoteClient.headSizeOverride = 9;
     await expect(
-      promoteStore.promote(scope, promoteStaged, allocationFor(promoteStaged)),
+      promoteStore.promote(scope, promoteStaged, promotionAuthorizations.issue(promoteStaged).ref),
     ).rejects.toMatchObject({
       code: "BLOB_INTEGRITY_MISMATCH",
     });
 
     const presignClient = new FakeS3ObjectClient();
-    const presignStore = new S3BlobStore(presignClient, echoAllocations, {
+    const presignStore = new S3BlobStore(presignClient, promotionAuthorizations, {
       ...config,
       maxBlobSizeBytes: 8,
     });
@@ -495,7 +554,11 @@ describe("S3BlobStore", () => {
       body: bytes("1234"),
       mediaType: "text/plain",
     });
-    const stable = await presignStore.promote(scope, presignStaged, allocationFor(presignStaged));
+    const stable = await presignStore.promote(
+      scope,
+      presignStaged,
+      promotionAuthorizations.issue(presignStaged).ref,
+    );
     presignClient.headSizeOverride = 9;
     await expect(
       presignStore.presignDownload({
@@ -509,7 +572,7 @@ describe("S3BlobStore", () => {
 
   it("删除响应未知时通过 HEAD 区分已删除与仍存在", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, config);
+    const store = new S3BlobStore(client, promotionAuthorizations, config);
     const scope = { tenantId: "tenant_a" };
     const staged = await store.putStaging({
       scope,
@@ -536,7 +599,7 @@ describe("S3BlobStore", () => {
     });
 
     const headFailureClient = new FakeS3ObjectClient();
-    const headFailureStore = new S3BlobStore(headFailureClient, echoAllocations, config);
+    const headFailureStore = new S3BlobStore(headFailureClient, promotionAuthorizations, config);
     const stagedWithHeadFailure = await headFailureStore.putStaging({
       scope,
       purpose: "preview",
@@ -556,7 +619,10 @@ describe("S3BlobStore", () => {
 
   it("stable GC 事务 claim 阻止并发新增引用，删除完成后按 generation 完成", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, { ...config, prefix: "gc-test" });
+    const store = new S3BlobStore(client, promotionAuthorizations, {
+      ...config,
+      prefix: "gc-test",
+    });
     const scope = { tenantId: "tenant_a" };
     const staged = await store.putStaging({
       scope,
@@ -565,7 +631,11 @@ describe("S3BlobStore", () => {
       body: bytes("stable"),
       mediaType: "text/plain",
     });
-    const stable = await store.promote(scope, staged, allocationFor(staged, "gc-test"));
+    const stable = await store.promote(
+      scope,
+      staged,
+      promotionAuthorizations.issue(staged, "gc-test").ref,
+    );
     const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable);
     const gc = new S3StableBlobGarbageCollector(
       client,
@@ -599,7 +669,7 @@ describe("S3BlobStore", () => {
 
   it("stable 删除结果 UNKNOWN 时保留 deleting claim 交给恢复任务", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, {
+    const store = new S3BlobStore(client, promotionAuthorizations, {
       ...config,
       prefix: "gc-unknown",
     });
@@ -611,7 +681,11 @@ describe("S3BlobStore", () => {
       body: bytes("stable"),
       mediaType: "text/plain",
     });
-    const stable = await store.promote(scope, staged, allocationFor(staged, "gc-unknown"));
+    const stable = await store.promote(
+      scope,
+      staged,
+      promotionAuthorizations.issue(staged, "gc-unknown").ref,
+    );
     const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable, 0);
     const gc = new S3StableBlobGarbageCollector(
       client,
@@ -632,7 +706,7 @@ describe("S3BlobStore", () => {
 
   it("stable 远端删除明确失败后仍保持不可逆 deleting", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, {
+    const store = new S3BlobStore(client, promotionAuthorizations, {
       ...config,
       prefix: "gc-known-failure",
     });
@@ -644,7 +718,11 @@ describe("S3BlobStore", () => {
       body: bytes("stable"),
       mediaType: "text/plain",
     });
-    const stable = await store.promote(scope, staged, allocationFor(staged, "gc-known-failure"));
+    const stable = await store.promote(
+      scope,
+      staged,
+      promotionAuthorizations.issue(staged, "gc-known-failure").ref,
+    );
     const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable, 0);
     const gc = new S3StableBlobGarbageCollector(
       client,
@@ -745,7 +823,7 @@ describe("S3BlobStore", () => {
       claimId: "claim-valid",
       generation: 1,
       phase: "pre_delete",
-      // 是否仍有效由 PG claim 结果决定；executor 只验证可解析格式，不读取应用进程时钟。
+      // 是否仍有效由 PG claim 结果决定；executor 只验证规范 UTC ISO 格式，不读取应用进程时钟。
       leaseExpiresAt: "2000-01-01T00:00:00.000Z",
       tenantId: scope.tenantId,
       purpose: stable.purpose,
@@ -771,6 +849,9 @@ describe("S3BlobStore", () => {
       { ...validClaim, purpose: "unknown" as "artifact" },
       { ...validClaim, sha256: "bad-hash" },
       { ...validClaim, size: -1 },
+      { ...validClaim, leaseExpiresAt: "2000-01-01T00:00:00Z" },
+      { ...validClaim, leaseExpiresAt: "2000-01-01T08:00:00.000+08:00" },
+      { ...validClaim, leaseExpiresAt: "not-a-date" },
       { ...validClaim, physicalObjectKey: "/absolute/key" },
       { ...validClaim, physicalObjectKey: "prefix/stable/../escape" },
       { ...validClaim, physicalObjectKey: "prefix/stable/control\nkey" },
@@ -807,7 +888,7 @@ describe("S3BlobStore", () => {
     });
   });
 
-  it("beginDeletion 若改变 claimId、generation 或物理身份，在 DELETE 前拒绝", async () => {
+  it("beginDeletion 除 phase 外改变任一 claim 字段都在 DELETE 前拒绝", async () => {
     const scope = { tenantId: "tenant_a" };
     const staged: StagedBlobRef = {
       kind: "staging",
@@ -836,6 +917,12 @@ describe("S3BlobStore", () => {
     for (const mutation of [
       { claimId: "changed-claim" },
       { generation: 8 },
+      { leaseExpiresAt: "2000-01-01T00:00:01.000Z" },
+      { tenantId: "tenant_b" },
+      { purpose: "resource" as const },
+      { sha256: "e".repeat(64) },
+      { size: 2 },
+      { incarnationId: "00000000-0000-4000-8000-000000000099" },
       { physicalObjectKey: `${stable.physicalObjectKey}-changed` },
     ]) {
       const client = new FakeS3ObjectClient();
@@ -855,7 +942,7 @@ describe("S3BlobStore", () => {
 
   it("旧 DELETE 在途时 lease 过期，gen2 失败也不能恢复引用，最终由 gen3 收敛", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, {
+    const store = new S3BlobStore(client, promotionAuthorizations, {
       ...config,
       prefix: "gc-delayed-delete",
     });
@@ -867,7 +954,11 @@ describe("S3BlobStore", () => {
       body: bytes("stable"),
       mediaType: "text/plain",
     });
-    const stable = await store.promote(scope, staged, allocationFor(staged, "gc-delayed-delete"));
+    const stable = await store.promote(
+      scope,
+      staged,
+      promotionAuthorizations.issue(staged, "gc-delayed-delete").ref,
+    );
     const lifecycle = new InMemoryStableLifecycle(scope.tenantId, stable, 0);
     const gc = new S3StableBlobGarbageCollector(
       client,
@@ -916,7 +1007,7 @@ describe("S3BlobStore", () => {
 
   it("旧 incarnation 的在途 DELETE 不会删除 deleted 后发布的新 incarnation", async () => {
     const client = new FakeS3ObjectClient();
-    const store = new S3BlobStore(client, echoAllocations, {
+    const store = new S3BlobStore(client, promotionAuthorizations, {
       ...config,
       prefix: "gc-incarnation-race",
     });
@@ -928,11 +1019,8 @@ describe("S3BlobStore", () => {
       body: bytes("stable"),
       mediaType: "text/plain",
     });
-    const oldStable = await store.promote(
-      scope,
-      staged,
-      allocationFor(staged, "gc-incarnation-race"),
-    );
+    const oldAuthorization = promotionAuthorizations.issue(staged, "gc-incarnation-race");
+    const oldStable = await store.promote(scope, staged, oldAuthorization.ref);
     const lifecycle = new InMemoryStableLifecycle(scope.tenantId, oldStable, 0);
     const gc = new S3StableBlobGarbageCollector(
       client,
@@ -954,14 +1042,20 @@ describe("S3BlobStore", () => {
     expect(lifecycle.completedGeneration).toBe(2);
     await expect(store.head(scope, oldStable)).resolves.toBeUndefined();
     expect(() => lifecycle.publishNewIncarnation(oldStable)).toThrow("retired incarnation");
-
-    const newAllocation = allocationFor(staged, "gc-incarnation-race", {
-      incarnationId: "00000000-0000-4000-8000-000000000002",
-      allocationId: "20000000-0000-4000-8000-000000000002",
-      generation: 3,
-      mode: "new_after_deleted",
+    promotionAuthorizations.retire(oldAuthorization.ref);
+    await expect(store.promote(scope, staged, oldAuthorization.ref)).rejects.toMatchObject({
+      message: expect.stringContaining("retired"),
     });
-    const newStable = await store.promote(scope, staged, newAllocation);
+
+    const newAuthorization = promotionAuthorizations.issue(staged, "gc-incarnation-race", {
+      allocation: {
+        incarnationId: "00000000-0000-4000-8000-000000000002",
+        allocationId: "20000000-0000-4000-8000-000000000002",
+        generation: 3,
+      },
+    });
+    expect(newAuthorization.allocation.mode).toBe("new_after_deleted");
+    const newStable = await store.promote(scope, staged, newAuthorization.ref);
     expect(newStable.sha256).toBe(oldStable.sha256);
     expect(newStable.physicalObjectKey).not.toBe(oldStable.physicalObjectKey);
     lifecycle.publishNewIncarnation(newStable);
@@ -985,6 +1079,135 @@ interface StoredObject {
   readonly metadata: S3ObjectMetadata;
 }
 
+/**
+ * 模拟 PostgreSQL 的生命周期事务与 promotion_started 授权行。
+ * BlobStore 只能拿 authorizationId 反查规范记录，不能回显调用方拼出的 allocation。
+ */
+class InMemoryPromotionAuthorizations
+  implements StableBlobLifecycleAllocationPort, StableBlobPromotionAuthorizationPort
+{
+  private sequence = 0;
+  private readonly records = new Map<
+    string,
+    {
+      status: "reserved" | "started" | "retired" | "consumed" | "inactive";
+      value: StableBlobPromotionAuthorization;
+    }
+  >();
+  private readonly retiredLogicalKeys = new Set<string>();
+
+  async reserve(input: {
+    readonly scope: TenantBlobScope;
+    readonly staged: StagedBlobRef;
+    readonly operationId: string;
+    readonly referenceId: string;
+  }): Promise<StableBlobLifecycleAllocation> {
+    return this.issue(input.staged, "agent-runtime", {
+      operationId: input.operationId,
+      referenceId: input.referenceId,
+      status: "reserved",
+    }).allocation;
+  }
+
+  issue(
+    staged: StagedBlobRef,
+    prefix = "agent-runtime",
+    options: {
+      readonly operationId?: string;
+      readonly referenceId?: string;
+      readonly status?: "reserved" | "started";
+      readonly allocation?: Partial<
+        Pick<
+          StableBlobLifecycleAllocation,
+          "incarnationId" | "lifecycleId" | "allocationId" | "generation"
+        >
+      >;
+    } = {},
+  ): {
+    readonly ref: PromotionAuthorizationRef;
+    readonly authorization: StableBlobPromotionAuthorization;
+    readonly allocation: StableBlobLifecycleAllocation;
+  } {
+    this.sequence += 1;
+    const suffix = this.sequence.toString().padStart(12, "0");
+    const logicalKey = `${staged.tenantId}/${staged.purpose}/${staged.sha256}/${staged.size}`;
+    const mode = this.retiredLogicalKeys.has(logicalKey) ? "new_after_deleted" : "active_reuse";
+    const allocation = allocationFor(staged, prefix, {
+      incarnationId: options.allocation?.incarnationId ?? `00000000-0000-4000-8000-${suffix}`,
+      lifecycleId: options.allocation?.lifecycleId ?? `10000000-0000-4000-8000-${suffix}`,
+      allocationId: options.allocation?.allocationId ?? `20000000-0000-4000-8000-${suffix}`,
+      generation: options.allocation?.generation ?? this.sequence,
+      mode,
+    });
+    const authorizationId = `30000000-0000-4000-8000-${suffix}`;
+    const operationId = options.operationId ?? `operation-${this.sequence}`;
+    const authorization: StableBlobPromotionAuthorization = {
+      ...allocation,
+      authorizationId,
+      operationId,
+      referenceId: options.referenceId ?? `reference-${this.sequence}`,
+      stagingUploadId: staged.uploadId,
+      stagingObjectKey: `${prefix}/tenants/${staged.tenantId}/staging/${staged.purpose}/${staged.uploadId}`,
+    };
+    this.records.set(authorizationId, {
+      status: options.status ?? "started",
+      value: authorization,
+    });
+    return {
+      ref: { tenantId: staged.tenantId, operationId, authorizationId },
+      authorization,
+      allocation,
+    };
+  }
+
+  retire(ref: PromotionAuthorizationRef): void {
+    const record = this.records.get(ref.authorizationId);
+    if (record === undefined) {
+      throw new Error("测试授权不存在");
+    }
+    record.status = "retired";
+    const value = record.value;
+    this.retiredLogicalKeys.add(`${value.tenantId}/${value.purpose}/${value.sha256}/${value.size}`);
+  }
+
+  setStatus(
+    ref: PromotionAuthorizationRef,
+    status: "reserved" | "started" | "retired" | "consumed" | "inactive",
+  ): void {
+    const record = this.records.get(ref.authorizationId);
+    if (record === undefined) {
+      throw new Error("测试授权不存在");
+    }
+    record.status = status;
+  }
+
+  async resolveAuthorizedForCopy(input: {
+    readonly scope: TenantBlobScope;
+    readonly authorization: PromotionAuthorizationRef;
+  }): Promise<PromotionAuthorizationResolution> {
+    const record = this.records.get(input.authorization.authorizationId);
+    if (record === undefined) {
+      return { status: "not_found" };
+    }
+    if (
+      record.value.operationId !== input.authorization.operationId ||
+      record.value.tenantId !== input.scope.tenantId ||
+      record.value.tenantId !== input.authorization.tenantId
+    ) {
+      return { status: "wrong_operation" };
+    }
+    if (record.status === "reserved") {
+      return { status: "not_started" };
+    }
+    if (record.status !== "started") {
+      return { status: record.status };
+    }
+    return { status: "authorized", authorization: record.value };
+  }
+}
+
+const promotionAuthorizations = new InMemoryPromotionAuthorizations();
+
 class FakeS3ObjectClient implements S3ObjectClient {
   readonly objects = new Map<string, StoredObject>();
   readonly putKeys: string[] = [];
@@ -994,6 +1217,8 @@ class FakeS3ObjectClient implements S3ObjectClient {
   readonly deleteKeys: string[] = [];
   putUnknownAfterWrite = false;
   putUnknownWithoutWrite = false;
+  copyUnknownAfterWrite = false;
+  copyUnknownWithoutWrite = false;
   deleteUnknownAfterDelete = false;
   deleteUnknownWithoutDelete = false;
   deleteKnownFailure = false;
@@ -1063,10 +1288,15 @@ class FakeS3ObjectClient implements S3ObjectClient {
     if (source === undefined) {
       throw new BlobStoreError("BLOB_NOT_FOUND", "fake source missing");
     }
-    this.objects.set(input.destinationKey, {
-      body: source.body.slice(),
-      metadata: { ...source.metadata },
-    });
+    if (!this.copyUnknownWithoutWrite) {
+      this.objects.set(input.destinationKey, {
+        body: source.body.slice(),
+        metadata: { ...source.metadata },
+      });
+    }
+    if (this.copyUnknownAfterWrite || this.copyUnknownWithoutWrite) {
+      throw unknownResult();
+    }
   }
 
   async delete(key: string): Promise<void> {

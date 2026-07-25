@@ -269,6 +269,11 @@ export function rehydrateWorkspace(snapshot: unknown, thread: Thread, writerRun?
     "工作区版本无效",
   );
   const currentRevision = optionalStringValue(raw, "currentRevisionId");
+  domainInvariant(
+    (currentRevisionNumber === 0) === (currentRevision === undefined),
+    "INVALID_ARGUMENT",
+    "工作区当前版本关联无效",
+  );
   const writerRaw = raw.writerLease;
   let writerLease: WorkspaceWriterLease | undefined;
   if (writerRaw !== undefined) {
@@ -571,6 +576,11 @@ export function createArtifact(input: {
       "被替换交付物不属于当前运行",
     );
     domainInvariant(
+      input.id !== input.replaces.id,
+      "INVALID_ARGUMENT",
+      "修正发布必须使用新的 Artifact ID",
+    );
+    domainInvariant(
       input.replaces.status === "failed",
       "INVALID_STATE_TRANSITION",
       "只能修正失败的交付物发布",
@@ -622,6 +632,7 @@ export function rehydrateArtifact(
   replaces?: Artifact,
 ): Artifact {
   const raw = recordValue(snapshot, "Artifact");
+  const restoredArtifactId = artifactId(stringValue(raw, "id"));
   const restoredTenantId = tenantId(stringValue(raw, "tenantId"));
   assertSameTenant(restoredTenantId, run.tenantId);
   assertSameTenant(resourceVersion.tenantId, run.tenantId);
@@ -648,6 +659,11 @@ export function rehydrateArtifact(
       "OWNERSHIP_MISMATCH",
       "被替换交付物关联无效",
     );
+    domainInvariant(
+      restoredArtifactId !== replaces.id,
+      "INVALID_ARGUMENT",
+      "修正发布必须使用新的 Artifact ID",
+    );
     assertSameTenant(replaces.tenantId, restoredTenantId);
     domainInvariant(
       replaces.runId === restoredRunId,
@@ -664,7 +680,7 @@ export function rehydrateArtifact(
   const name = stringValue(raw, "name").trim();
   domainInvariant(name.length > 0 && name.length <= 255, "INVALID_ARGUMENT", "交付物名称长度无效");
   return sealEntity("Artifact", {
-    id: artifactId(stringValue(raw, "id")),
+    id: restoredArtifactId,
     tenantId: restoredTenantId,
     threadId: restoredThreadId,
     runId: restoredRunId,

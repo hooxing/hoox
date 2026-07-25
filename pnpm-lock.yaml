@@ -15,6 +15,9 @@ importers:
       '@biomejs/biome':
         specifier: 2.5.5
         version: 2.5.5
+      '@cube-runtime/protocol-mapper':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/protocol-mapper
       '@sinclair/typebox':
         specifier: 0.34.52
         version: 0.34.52

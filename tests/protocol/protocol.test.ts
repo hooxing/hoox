@@ -7,6 +7,7 @@ import {
   ErrorEnvelopeSchema,
   eventEnvelopeSchema,
   IdSchema,
+  IsoTimestampSchema,
   MembershipDtoSchema,
   publicErrorCodes,
   ResourceVersionDtoSchema,
@@ -202,5 +203,14 @@ describe("协议 Schema", () => {
     for (const invalid of ["", "ab", "has space", "slash/value"]) {
       expect(Value.Check(IdSchema, invalid)).toBe(false);
     }
+  });
+
+  it.each([
+    "2026-02-29T00:00:00.000Z",
+    "2026-04-31T00:00:00.000Z",
+    "2026-13-01T00:00:00.000Z",
+    "2026-01-01T24:00:00.000Z",
+  ])("协议时间 Schema 拒绝非法日历时间：%s", (value) => {
+    expect(Value.Check(IsoTimestampSchema, value)).toBe(false);
   });
 });

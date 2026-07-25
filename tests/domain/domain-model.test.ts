@@ -25,6 +25,7 @@ import {
   planStepId,
   prepareWorkspaceRevision,
   rehydrateAgentTree,
+  rehydrateArtifact,
   rehydratePlan,
   rehydrateResource,
   rehydrateRun,
@@ -338,6 +339,33 @@ describe("状态机", () => {
       sizeBytes: 12,
       now: later,
     }).version;
+    expectDomainError(
+      () =>
+        createArtifact({
+          id: artifact.id,
+          run,
+          resourceVersion: corrected,
+          replaces: artifact,
+          name: "复用 ID 的错误修正",
+          now: later,
+        }),
+      "INVALID_ARGUMENT",
+    );
+    expectDomainError(
+      () =>
+        rehydrateArtifact(
+          {
+            ...artifact,
+            resourceVersionId: corrected.id,
+            replacesArtifactId: artifact.id,
+            status: "publishing",
+          },
+          run,
+          corrected,
+          artifact,
+        ),
+      "INVALID_ARGUMENT",
+    );
     let correctedArtifact = createArtifact({
       id: artifactId("art_corrected"),
       run,
@@ -362,6 +390,10 @@ describe("状态机", () => {
       now,
     });
     expectDomainError(() => transitionSandboxSession(session, "ready", later), "INVALID_ARGUMENT");
+    expectDomainError(
+      () => transitionSandboxSession(session, "failed", later, "   "),
+      "INVALID_ARGUMENT",
+    );
     session = transitionSandboxSession(session, "ready", later, "provider-sandbox-one");
     session = transitionSandboxSession(session, "paused", later);
     expectDomainError(
@@ -381,6 +413,21 @@ describe("状态机", () => {
       now: later,
     });
     expect(replacement.replacesSessionId).toBe(session.id);
+    expectDomainError(
+      () =>
+        createReplacementSandboxSession({
+          previous: session,
+          id: session.id,
+          thread: fixture().thread,
+          templateId: "tpl_one",
+          now: later,
+        }),
+      "INVALID_ARGUMENT",
+    );
+    expectDomainError(
+      () => rehydrateSandboxSession({ ...replacement, id: session.id }, fixture().thread, session),
+      "INVALID_ARGUMENT",
+    );
   });
 });
 
@@ -502,6 +549,19 @@ describe("不可变版本与 Agent Tree", () => {
       now: later,
     });
     expect(workspace.writerLease?.epoch).toBe(2);
+  });
+
+  it("Workspace 恢复强制零版本与 currentRevisionId 同时为空", () => {
+    const { thread } = fixture("workspace_zero");
+    const workspace = createWorkspace({ id: workspaceId("workspace_zero"), thread, now });
+    expectDomainError(
+      () => rehydrateWorkspace({ ...workspace, currentRevisionId: "revision_impossible" }, thread),
+      "INVALID_ARGUMENT",
+    );
+    expectDomainError(
+      () => rehydrateWorkspace({ ...workspace, currentRevisionNumber: 1 }, thread),
+      "INVALID_ARGUMENT",
+    );
   });
 
   it("JSON 恢复会复验 Plan、Workspace、Resource、Sandbox 和 AgentTree 关联", () => {

@@ -13,6 +13,7 @@ import {
   type StableBlobLifecycleAllocationPort,
   type StableBlobPromotionAuthorization,
   type StableBlobPromotionAuthorizationPort,
+  type StableBlobRetiredTombstone,
   type StableBlobRetiredTombstonePort,
   type StableBlobRef,
   type StagedBlobRef,
@@ -1475,7 +1476,8 @@ describe("S3BlobStore", () => {
         config.maxBlobSizeBytes,
       );
       await expect(gc.collectIfUnreachable(scope, stable)).rejects.toMatchObject({
-        code: "INVALID_BLOB_ARGUMENT",
+        code: "BLOB_INTEGRITY_MISMATCH",
+        result: "unknown",
       });
     }
 
@@ -1486,7 +1488,8 @@ describe("S3BlobStore", () => {
       config.maxBlobSizeBytes,
     );
     await expect(tenantGc.collectIfUnreachable(scope, stable)).rejects.toMatchObject({
-      code: "TENANT_SCOPE_MISMATCH",
+      code: "BLOB_INTEGRITY_MISMATCH",
+      result: "unknown",
     });
 
     const physicalGc = new S3StableBlobGarbageCollector(
@@ -1497,6 +1500,7 @@ describe("S3BlobStore", () => {
     );
     await expect(physicalGc.collectIfUnreachable(scope, stable)).rejects.toMatchObject({
       code: "BLOB_INTEGRITY_MISMATCH",
+      result: "unknown",
     });
   });
 
@@ -1550,6 +1554,179 @@ describe("S3BlobStore", () => {
       });
       expect(client.deleteKeys).toEqual([]);
     }
+  });
+
+  it("GC claim 与 beginDeletion 的动态 key 只快照一次，不会删除翻转后的 victim", async () => {
+    const prefix = "gc-getter-snapshot";
+    const scope = { tenantId: "tenant_a" };
+    const staged = stagedRefForTest("gc-getter-snapshot", "1".repeat(64));
+    const allocation = allocationFor(staged, prefix);
+    const stable: StableBlobRef = { kind: "stable", mediaType: staged.mediaType, ...allocation };
+    const victimKey = `${stable.physicalObjectKey}-victim`;
+    const baseClaim: StableBlobGcClaim = {
+      claimId: "claim-getter-snapshot",
+      generation: 1,
+      leaseExpiresAt: "2030-01-01T00:00:00.000Z",
+      phase: "deleting",
+      tenantId: scope.tenantId,
+      purpose: stable.purpose,
+      sha256: stable.sha256,
+      size: stable.size,
+      incarnationId: stable.incarnationId,
+      physicalObjectKey: stable.physicalObjectKey,
+    };
+
+    let claimKeyReads = 0;
+    const flippingClaim = Object.defineProperty({ ...baseClaim }, "physicalObjectKey", {
+      enumerable: true,
+      get() {
+        claimKeyReads += 1;
+        return claimKeyReads === 1 ? stable.physicalObjectKey : victimKey;
+      },
+    }) as StableBlobGcClaim;
+    let claimCompletedKey: string | undefined;
+    const claimClient = new FakeS3ObjectClient();
+    const claimGc = new S3StableBlobGarbageCollector(
+      claimClient,
+      {
+        async claimUnreachable() {
+          return { status: "claimed" as const, claim: flippingClaim };
+        },
+        async beginDeletion() {
+          throw new Error("deleting claim 不应再次 begin");
+        },
+        async completeDeletion({ claim }) {
+          claimCompletedKey = claim.physicalObjectKey;
+        },
+        async releasePreDeleteClaim() {},
+        async resolveLifecycle() {
+          return { status: "deleting" as const };
+        },
+      },
+      prefix,
+      config.maxBlobSizeBytes,
+    );
+    await expect(claimGc.collectIfUnreachable(scope, stable)).resolves.toBe("deleted");
+    expect(claimKeyReads).toBe(1);
+    expect(claimClient.deleteKeys).toEqual([stable.physicalObjectKey]);
+    expect(claimClient.deleteKeys).not.toContain(victimKey);
+    expect(claimCompletedKey).toBe(stable.physicalObjectKey);
+
+    const preDeleteClaim = { ...baseClaim, phase: "pre_delete" as const };
+    let beginKeyReads = 0;
+    const flippingBeginClaim = Object.defineProperty(
+      { ...baseClaim, phase: "deleting" as const },
+      "physicalObjectKey",
+      {
+        enumerable: true,
+        get() {
+          beginKeyReads += 1;
+          return beginKeyReads === 1 ? stable.physicalObjectKey : victimKey;
+        },
+      },
+    ) as StableBlobGcClaim;
+    let beginCompletedKey: string | undefined;
+    const beginClient = new FakeS3ObjectClient();
+    const beginGc = new S3StableBlobGarbageCollector(
+      beginClient,
+      {
+        async claimUnreachable() {
+          return { status: "claimed" as const, claim: preDeleteClaim };
+        },
+        async beginDeletion() {
+          return { status: "started" as const, claim: flippingBeginClaim };
+        },
+        async completeDeletion({ claim }) {
+          beginCompletedKey = claim.physicalObjectKey;
+        },
+        async releasePreDeleteClaim() {},
+        async resolveLifecycle() {
+          return { status: "deleting" as const };
+        },
+      },
+      prefix,
+      config.maxBlobSizeBytes,
+    );
+    await expect(beginGc.collectIfUnreachable(scope, stable)).resolves.toBe("deleted");
+    expect(beginKeyReads).toBe(1);
+    expect(beginClient.deleteKeys).toEqual([stable.physicalObjectKey]);
+    expect(beginClient.deleteKeys).not.toContain(victimKey);
+    expect(beginCompletedKey).toBe(stable.physicalObjectKey);
+  });
+
+  it("tombstone 动态 key 翻转只删除快照目标，getter 抛错时不 DELETE、不 complete", async () => {
+    const prefix = "tombstone-getter-snapshot";
+    const scope = { tenantId: "tenant_a" };
+    const staged = stagedRefForTest("tombstone-getter-snapshot", "2".repeat(64));
+    const allocation = allocationFor(staged, prefix);
+    const stable: StableBlobRef = { kind: "stable", mediaType: staged.mediaType, ...allocation };
+    const victimKey = `${stable.physicalObjectKey}-victim`;
+    const baseTombstone: StableBlobRetiredTombstone = {
+      tombstoneId: "tombstone-getter-snapshot",
+      generation: 1,
+      tenantId: scope.tenantId,
+      purpose: stable.purpose,
+      sha256: stable.sha256,
+      size: stable.size,
+      incarnationId: stable.incarnationId,
+      physicalObjectKey: stable.physicalObjectKey,
+    };
+    let keyReads = 0;
+    const flippingTombstone = Object.defineProperty({ ...baseTombstone }, "physicalObjectKey", {
+      enumerable: true,
+      get() {
+        keyReads += 1;
+        return keyReads === 1 ? stable.physicalObjectKey : victimKey;
+      },
+    }) as StableBlobRetiredTombstone;
+    let completedKey: string | undefined;
+    const flipClient = new FakeS3ObjectClient();
+    const flipScrubber = new S3RetiredBlobTombstoneScrubber(
+      flipClient,
+      {
+        async claimForScrub() {
+          return { status: "claimed" as const, tombstone: flippingTombstone };
+        },
+        async completeScrub({ tombstone }) {
+          completedKey = tombstone.physicalObjectKey;
+        },
+      },
+      prefix,
+      config.maxBlobSizeBytes,
+    );
+    await expect(flipScrubber.scrubNext(scope)).resolves.toBe("scrubbed");
+    expect(keyReads).toBe(1);
+    expect(flipClient.deleteKeys).toEqual([stable.physicalObjectKey]);
+    expect(flipClient.deleteKeys).not.toContain(victimKey);
+    expect(completedKey).toBe(stable.physicalObjectKey);
+
+    const throwingTombstone = Object.defineProperty({ ...baseTombstone }, "physicalObjectKey", {
+      enumerable: true,
+      get() {
+        throw new Error("tombstone key getter failed");
+      },
+    }) as StableBlobRetiredTombstone;
+    let completeCount = 0;
+    const throwClient = new FakeS3ObjectClient();
+    const throwScrubber = new S3RetiredBlobTombstoneScrubber(
+      throwClient,
+      {
+        async claimForScrub() {
+          return { status: "claimed" as const, tombstone: throwingTombstone };
+        },
+        async completeScrub() {
+          completeCount += 1;
+        },
+      },
+      prefix,
+      config.maxBlobSizeBytes,
+    );
+    await expect(throwScrubber.scrubNext(scope)).rejects.toMatchObject({
+      code: "BLOB_INTEGRITY_MISMATCH",
+      result: "unknown",
+    });
+    expect(throwClient.deleteKeys).toEqual([]);
+    expect(completeCount).toBe(0);
   });
 
   it("旧 DELETE 在途时 lease 过期，gen2 失败也不能恢复引用，最终由 gen3 收敛", async () => {

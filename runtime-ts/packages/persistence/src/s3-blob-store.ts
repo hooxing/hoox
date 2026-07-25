@@ -693,31 +693,65 @@ export class S3StableBlobGarbageCollector implements StableBlobGcPort {
   ): Promise<"deleted" | "still_referenced" | "in_progress"> {
     assertBlobRef(scope, blob);
     assertBlobSizeWithin(blob.size, this.maxBlobSizeBytes);
-    const result = await this.claims.claimUnreachable({ scope, blob });
+    let rawResult: unknown;
+    try {
+      rawResult = await this.claims.claimUnreachable({ scope, blob });
+    } catch (error) {
+      throw persistenceResultUnknown("GC claimUnreachable 结果未知", error);
+    }
+    let result: Awaited<ReturnType<StableBlobGcClaimPort["claimUnreachable"]>>;
+    try {
+      result = snapshotGcClaimResolution(rawResult);
+    } catch (error) {
+      throw persistenceProtocolError("GC claimUnreachable 返回结构无效", error);
+    }
     if (result.status === "already_deleted") {
       return "deleted";
     }
     if (result.status !== "claimed") {
       return result.status;
     }
-    assertGcClaim(scope, blob, result.claim, this.prefix);
+    try {
+      assertGcClaim(scope, blob, result.claim, this.prefix);
+    } catch (error) {
+      throw persistenceProtocolError("GC claim 与固定 Blob 身份不连续", error);
+    }
     let deletingClaim = result.claim;
     if (deletingClaim.phase === "pre_delete") {
-      const begin = await this.claims.beginDeletion({ scope, blob, claim: deletingClaim });
+      let rawBegin: unknown;
+      try {
+        rawBegin = await this.claims.beginDeletion({ scope, blob, claim: deletingClaim });
+      } catch (error) {
+        throw persistenceResultUnknown("GC beginDeletion 结果未知", error);
+      }
+      let begin: Awaited<ReturnType<StableBlobGcClaimPort["beginDeletion"]>>;
+      try {
+        begin = snapshotBeginDeletionResolution(rawBegin);
+      } catch (error) {
+        throw persistenceProtocolError("GC beginDeletion 返回结构无效", error);
+      }
       if (begin.status === "claim_lost") {
         return "in_progress";
       }
-      assertDeletionContinuation(deletingClaim, begin.claim);
-      deletingClaim = begin.claim;
-      assertGcClaim(scope, blob, deletingClaim, this.prefix);
-      if (deletingClaim.phase !== "deleting") {
-        throw new BlobStoreError("BLOB_PROVIDER_ERROR", "GC beginDeletion 未返回 deleting claim");
+      try {
+        assertDeletionContinuation(deletingClaim, begin.claim);
+        deletingClaim = begin.claim;
+        assertGcClaim(scope, blob, deletingClaim, this.prefix);
+        if (deletingClaim.phase !== "deleting") {
+          throw new Error("GC beginDeletion 未返回 deleting claim");
+        }
+      } catch (error) {
+        throw persistenceProtocolError("GC beginDeletion 未保持 claim 连续", error);
       }
     }
     // 一旦取得 deleting intent，任何 DELETE 失败/UNKNOWN 都不能恢复 active：旧 DELETE 仍可能延迟成功。
     await deleteAndResolve(this.client, deletingClaim.physicalObjectKey);
     // 删除已确认后才完成 claim；完成失败也不能释放，否则新引用可能指向已删除对象。
-    await this.claims.completeDeletion({ scope, blob, claim: deletingClaim });
+    try {
+      await this.claims.completeDeletion({ scope, blob, claim: deletingClaim });
+    } catch (error) {
+      throw persistenceResultUnknown("GC completeDeletion 结果未知", error);
+    }
     return "deleted";
   }
 }
@@ -732,14 +766,33 @@ export class S3RetiredBlobTombstoneScrubber implements StableBlobRetiredTombston
 
   async scrubNext(scope: TenantBlobScope): Promise<"scrubbed" | "none" | "in_progress"> {
     assertTenantScope(scope);
-    const claimed = await this.tombstones.claimForScrub({ scope });
+    let rawClaimed: unknown;
+    try {
+      rawClaimed = await this.tombstones.claimForScrub({ scope });
+    } catch (error) {
+      throw persistenceResultUnknown("tombstone claimForScrub 结果未知", error);
+    }
+    let claimed: Awaited<ReturnType<StableBlobRetiredTombstonePort["claimForScrub"]>>;
+    try {
+      claimed = snapshotRetiredTombstoneResolution(rawClaimed);
+    } catch (error) {
+      throw persistenceProtocolError("tombstone claimForScrub 返回结构无效", error);
+    }
     if (claimed.status !== "claimed") {
       return claimed.status;
     }
-    assertRetiredTombstone(scope, claimed.tombstone, this.prefix, this.maxBlobSizeBytes);
+    try {
+      assertRetiredTombstone(scope, claimed.tombstone, this.prefix, this.maxBlobSizeBytes);
+    } catch (error) {
+      throw persistenceProtocolError("retired tombstone 身份无效", error);
+    }
     // tombstone 永久存在，因此每轮都精确 DELETE；迟到 COPY 会在后续轮次再次被清除。
     await deleteAndResolve(this.client, claimed.tombstone.physicalObjectKey);
-    await this.tombstones.completeScrub({ scope, tombstone: claimed.tombstone });
+    try {
+      await this.tombstones.completeScrub({ scope, tombstone: claimed.tombstone });
+    } catch (error) {
+      throw persistenceResultUnknown("tombstone completeScrub 结果未知", error);
+    }
     return "scrubbed";
   }
 }
@@ -1290,6 +1343,95 @@ function snapshotPromotionAuthorization(value: unknown): StableBlobPromotionAuth
   } as StableBlobPromotionAuthorization;
 }
 
+function snapshotGcClaimResolution(
+  value: unknown,
+): Awaited<ReturnType<StableBlobGcClaimPort["claimUnreachable"]>> {
+  const record = snapshotRecord(value, "GC claim resolution");
+  const status = record.status;
+  if (status === "claimed") {
+    const rawClaim = record.claim;
+    return { status, claim: snapshotGcClaim(rawClaim) };
+  }
+  if (status === "still_referenced" || status === "in_progress" || status === "already_deleted") {
+    return { status };
+  }
+  throw new TypeError("GC claim resolution status 无效");
+}
+
+function snapshotBeginDeletionResolution(
+  value: unknown,
+): Awaited<ReturnType<StableBlobGcClaimPort["beginDeletion"]>> {
+  const record = snapshotRecord(value, "GC beginDeletion resolution");
+  const status = record.status;
+  if (status === "started") {
+    const rawClaim = record.claim;
+    return { status, claim: snapshotGcClaim(rawClaim) };
+  }
+  if (status === "claim_lost") return { status };
+  throw new TypeError("GC beginDeletion resolution status 无效");
+}
+
+function snapshotGcClaim(value: unknown): StableBlobGcClaim {
+  const record = snapshotRecord(value, "GC claim");
+  const claimId = record.claimId;
+  const generation = record.generation;
+  const leaseExpiresAt = record.leaseExpiresAt;
+  const phase = record.phase;
+  const tenantId = record.tenantId;
+  const purpose = record.purpose;
+  const sha256 = record.sha256;
+  const size = record.size;
+  const incarnationId = record.incarnationId;
+  const physicalObjectKey = record.physicalObjectKey;
+  return {
+    claimId,
+    generation,
+    leaseExpiresAt,
+    phase,
+    tenantId,
+    purpose,
+    sha256,
+    size,
+    incarnationId,
+    physicalObjectKey,
+  } as StableBlobGcClaim;
+}
+
+function snapshotRetiredTombstoneResolution(
+  value: unknown,
+): Awaited<ReturnType<StableBlobRetiredTombstonePort["claimForScrub"]>> {
+  const record = snapshotRecord(value, "retired tombstone resolution");
+  const status = record.status;
+  if (status === "claimed") {
+    const rawTombstone = record.tombstone;
+    return { status, tombstone: snapshotRetiredTombstone(rawTombstone) };
+  }
+  if (status === "none" || status === "in_progress") return { status };
+  throw new TypeError("retired tombstone resolution status 无效");
+}
+
+function snapshotRetiredTombstone(value: unknown): StableBlobRetiredTombstone {
+  const record = snapshotRecord(value, "retired tombstone");
+  const tombstoneId = record.tombstoneId;
+  const generation = record.generation;
+  const tenantId = record.tenantId;
+  const purpose = record.purpose;
+  const sha256 = record.sha256;
+  const size = record.size;
+  const incarnationId = record.incarnationId;
+  const physicalObjectKey = record.physicalObjectKey;
+  return {
+    tombstoneId,
+    generation,
+    tenantId,
+    purpose,
+    sha256,
+    size,
+    incarnationId,
+    physicalObjectKey,
+  } as StableBlobRetiredTombstone;
+}
+
 function snapshotRecord(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null) {
     throw new TypeError(`${label} 必须是对象`);
@@ -1478,7 +1620,15 @@ function promotionResultUnknown(message: string, cause: unknown): BlobStoreError
 }
 
 function promotionProtocolError(message: string, cause: unknown): BlobStoreError {
+  return persistenceProtocolError(message, cause);
+}
+
+function persistenceProtocolError(message: string, cause: unknown): BlobStoreError {
   return new BlobStoreError("BLOB_INTEGRITY_MISMATCH", message, { result: "unknown", cause });
+}
+
+function persistenceResultUnknown(message: string, cause: unknown): BlobStoreError {
+  return new BlobStoreError("BLOB_RESULT_UNKNOWN", message, { result: "unknown", cause });
 }
 
 function encodeKey(key: string): string {

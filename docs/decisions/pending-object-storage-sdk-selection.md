@@ -69,7 +69,7 @@
 - PG Repository 必须把新增引用、引用计数和生命周期状态纳入同一事务，不能把生命周期检查放到事务外；
 - 每个 ReferenceVersion、生命周期记录、恢复任务和 GC claim 都必须保存 incarnationId + physicalObjectKey；只存 sha256 不足以安全读取或删除；
 - allocation reserve、promotion authorization、execution claim 与 commit snapshot 都要持久化 lifecycleId、allocationId、generation、mode。UNKNOWN 时 commit snapshot 仍为 promotion_started 并保留同一 authorization，不再存在可回退的独立 UNKNOWN commit 状态。executing/UNKNOWN 只能 HEAD 同一 destination；正确即 succeeded，NotFound/HEAD 或 resolve 异常保持 reconcile，禁止 source 检查和重复 COPY。完成 CAS 明确区分 succeeded、经 PG 证明的 intent 前 not_copied、intent 后 unknown/reconcile；
-- Promotion Persistence 端口返回先按显式字段白名单快照为普通对象，status 与每个嵌套字段只观察一次；分支、校验、日志和 reconcile 禁止再次读取端口原对象。getter/协议结构异常稳定归类为完整性 UNKNOWN；只有快照后通过 tenant/operation/authorization/execution/attempt/generation 最小身份校验的对象可 best-effort reconcile；
+- 所有会决定 S3 远端副作用的 Persistence 带值返回先按显式字段白名单快照为普通对象，包括 Promotion、GC claim/beginDeletion 与 retired tombstone claim；status 和每个嵌套字段只观察一次，分支、校验、日志、DELETE/COPY、complete 和 reconcile 禁止再次读取端口原对象。getter/协议结构异常稳定归类为完整性 UNKNOWN；只有快照后通过最小身份校验的对象可进入 best-effort reconcile 或远端副作用；
 - stable GC 需要持久化恢复扫描、`pre_delete → deleting` 意图日志和租约接管，而不是普通定时 DELETE；
 - GC 期间新增引用会被显式阻止。调用方应等待 claim 收敛；若对象最终删除，则利用仍保留的 staging 重新 promote、HEAD 验证，再由引用事务恢复 active，而不能把阻止结果当成已经完成 stable 标记；
 - 当前任务只定义端口、状态语义和 S3 执行器；PG 表与事务实现由后续持久层任务交付。

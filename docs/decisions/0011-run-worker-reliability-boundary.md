@@ -106,5 +106,7 @@ Run claim 或 Workspace lease 的心跳任一失败，当前 Worker 立即请求
 
 ## 实施记录
 
-- 本 ADR 首先由不依赖具体 PostgreSQL 的 Worker Core、内存 Fake 和故障注入测试落实。
+- 2026-07-26：已由不依赖具体 PostgreSQL 的 Worker Core、Pi 窄接口工厂、事务型内存 Fake 和故障注入测试落实。
+- 已覆盖成功检查点、重复投递、Workspace 租约丢失、迟到取消、流式事件不可用、Sandbox 创建/收尾 UNKNOWN、Provider/Pi Session 创建失败、waiting/follow-up、超时和 crash 重入；这些测试均断言不会重复提交 WorkspaceRevision。
+- `@cube-runtime/pi-adapter` 补齐源码 types export，保证应用包在干净安装且尚未构建依赖产物时也能独立 typecheck；运行时入口仍指向 `dist`。
 - PostgreSQL 事务适配器、完整 Rollout 重建、Artifact 发布和 API 不属于本次实现。

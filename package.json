@@ -13,7 +13,7 @@
     "config:check": "node scripts/validate-env-example.mjs && docker compose --env-file .env.example -f docker-compose.dev.yml config --quiet",
     "check:clean-vendor": "node scripts/remove-vendor-dist.mjs && pnpm check",
     "db:migrate:up": "pnpm --filter @cube-runtime/persistence build && node --env-file-if-exists=.env runtime-ts/packages/persistence/dist/cli.js up",
-    "db:migrate:down": "pnpm --filter @cube-runtime/persistence build && node --env-file-if-exists=.env runtime-ts/packages/persistence/dist/cli.js down",
+    "db:migrate:down": "pnpm --filter @cube-runtime/persistence build && node --env-file-if-exists=.env runtime-ts/packages/persistence/dist/cli.js down --allow-destructive",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",

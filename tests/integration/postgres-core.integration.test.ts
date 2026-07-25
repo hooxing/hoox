@@ -1,3 +1,7 @@
+import { copyFile, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   acquireWorkspaceLease,
   archiveThread,
@@ -9,6 +13,7 @@ import {
   isoTimestamp,
   membershipId,
   prepareWorkspaceRevision,
+  releaseWorkspaceLease,
   renewWorkspaceLease,
   runId,
   sha256Digest,
@@ -22,30 +27,45 @@ import {
   type Thread,
   type Workspace,
 } from "@cube-runtime/domain";
+import type { CoreRepositories, TenantScope, WorkspaceWriteScope } from "@cube-runtime/persistence";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
-  createPostgresPool,
+  loadMigrations,
   migrateDown,
   migrateUp,
-  PgCoreRepositories,
-  withTransaction,
+} from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { PgCoreRepositories } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
+import {
+  createPostgresPool,
+  withTenantTransaction,
   type Pool,
-  type TenantScope,
-} from "@cube-runtime/persistence";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+} from "../../runtime-ts/packages/persistence/src/postgres.js";
 
-const databaseUrl = process.env.DATABASE_URL;
-if (databaseUrl === undefined || databaseUrl.length === 0) {
-  throw new Error("PostgreSQL 集成测试需要 DATABASE_URL；连接信息不会写入测试日志");
+const runtimeDatabaseUrl = process.env.DATABASE_URL;
+const migrationDatabaseUrl = process.env.MIGRATION_DATABASE_URL;
+const runtimeRole = process.env.DATABASE_RUNTIME_ROLE;
+if (
+  runtimeDatabaseUrl === undefined ||
+  migrationDatabaseUrl === undefined ||
+  runtimeRole === undefined
+) {
+  throw new Error("PostgreSQL 集成测试需要 Runtime/Migrator 双连接配置；不会输出配置值");
 }
 
 const schema = `it_${process.pid}_${Date.now()}`;
+const sourceMigrationDirectory = fileURLToPath(
+  new URL("../../runtime-ts/packages/persistence/migrations/", import.meta.url),
+);
 let administrativePool!: Pool;
-let pool!: Pool;
-let repositories!: PgCoreRepositories;
+let migratorPool!: Pool;
+let runtimePool!: Pool;
+let repositories!: CoreRepositories;
 let schemaCreated = false;
+let concurrentMigrationVersions: readonly number[] = [];
 
 interface Fixture {
   readonly scope: TenantScope;
+  readonly writeScope: WorkspaceWriteScope;
   readonly thread: Thread;
   readonly run: Run;
   readonly workspace: Workspace;
@@ -79,225 +99,466 @@ async function createFixture(suffix: string): Promise<Fixture> {
     title: `任务 ${suffix}`,
     now: timestamp(1),
   });
-  expect(await repositories.threads.create(scope, thread)).toEqual({ outcome: "created" });
+  expect(await repositories.threads.create(scope, thread)).toEqual({
+    outcome: "created",
+    version: 0n,
+  });
   const queued = createRun({ id: runId(`run_${suffix}`), thread, now: timestamp(2) });
   const run = transitionRun(queued, "running", timestamp(3));
-  expect(await repositories.runs.create(scope, run)).toEqual({ outcome: "created" });
+  expect(await repositories.runs.create(scope, run)).toEqual({ outcome: "created", version: 0n });
   const workspace = createWorkspace({
     id: workspaceId(`workspace_${suffix}`),
     thread,
     now: timestamp(4),
   });
   expect(await repositories.workspaces.create(scope, workspace)).toEqual({ outcome: "created" });
-  return { scope, thread, run, workspace };
+  return {
+    scope,
+    writeScope: { tenantId: scope.tenantId, rootRunId: run.id },
+    thread,
+    run,
+    workspace,
+  };
 }
 
-async function acquireLease(fixture: Fixture, second = 5): Promise<Workspace> {
+async function acquireLease(fixture: Fixture): Promise<Workspace> {
   const leased = acquireWorkspaceLease({
     workspace: fixture.workspace,
     rootRun: fixture.run,
     epoch: 1,
     expiresAt: timestamp(50),
-    now: timestamp(second),
+    now: timestamp(5),
   });
-  expect(await repositories.workspaces.compareAndSetLease(fixture.workspace, leased)).toEqual({
-    outcome: "committed",
-  });
+  expect(
+    await repositories.workspaces.compareAndSetLease(fixture.writeScope, fixture.workspace, leased),
+  ).toEqual({ outcome: "committed" });
   return leased;
 }
 
 beforeAll(async () => {
-  administrativePool = createPostgresPool({ connectionString: databaseUrl, maxConnections: 2 });
+  administrativePool = createPostgresPool({
+    connectionString: migrationDatabaseUrl,
+    maxConnections: 2,
+  });
   await administrativePool.query(`CREATE SCHEMA "${schema}"`);
   schemaCreated = true;
-  pool = createPostgresPool({ connectionString: databaseUrl, schema, maxConnections: 8 });
-  repositories = new PgCoreRepositories(pool);
-  await migrateUp(pool);
+  migratorPool = createPostgresPool({
+    connectionString: migrationDatabaseUrl,
+    schema,
+    maxConnections: 4,
+  });
+  runtimePool = createPostgresPool({
+    connectionString: runtimeDatabaseUrl,
+    schema,
+    maxConnections: 8,
+  });
+  const concurrent = await Promise.all([
+    migrateUp(migratorPool, { runtimeRole }),
+    migrateUp(migratorPool, { runtimeRole }),
+  ]);
+  concurrentMigrationVersions = concurrent.flatMap((records) =>
+    records.map((record) => record.version),
+  );
+  repositories = new PgCoreRepositories(runtimePool);
 });
 
 afterAll(async () => {
-  if (pool !== undefined) await pool.end();
-  // 测试只删除本进程创建且通过固定前缀验证的隔离 Schema。
+  if (runtimePool !== undefined) await runtimePool.end();
+  if (migratorPool !== undefined) await migratorPool.end();
   if (!schema.startsWith(`it_${process.pid}_`)) throw new Error("拒绝删除非测试 Schema");
   if (schemaCreated) await administrativePool.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (administrativePool !== undefined) await administrativePool.end();
 });
 
-describe("PostgreSQL 核心持久化", () => {
-  it("迁移可重复执行、可完整回退并再次向前执行", async () => {
-    const first = await migrateUp(pool);
-    const second = await migrateUp(pool);
-    expect(first).toEqual(second);
-    expect(first).toHaveLength(1);
-
-    expect(await migrateDown(pool)).toEqual([]);
-    const absent = await pool.query<{ table_name: string | null }>(
-      "SELECT to_regclass('workspaces')::text AS table_name",
-    );
-    expect(absent.rows[0]?.table_name).toBeNull();
-    expect(await migrateUp(pool)).toHaveLength(1);
+describe("PostgreSQL 迁移与强权限边界", () => {
+  it("并发迁移串行化且重复执行结果一致", async () => {
+    expect(concurrentMigrationVersions).toEqual([1, 1]);
+    expect(await migrateUp(migratorPool, { runtimeRole })).toHaveLength(1);
   });
 
-  it("TenantScope 让跨租户实体对调用者不可见", async () => {
+  it("checksum 同时绑定 down SQL，并拒绝孤立和重复版本", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "cube-pg-migration-"));
+    const orphan = await mkdtemp(join(tmpdir(), "cube-pg-orphan-"));
+    try {
+      await Promise.all([
+        copyFile(
+          join(sourceMigrationDirectory, "0001_core.up.sql"),
+          join(temporary, "0001_core.up.sql"),
+        ),
+        copyFile(
+          join(sourceMigrationDirectory, "0001_core.down.sql"),
+          join(temporary, "0001_core.down.sql"),
+        ),
+        copyFile(
+          join(sourceMigrationDirectory, "0001_core.up.sql"),
+          join(orphan, "0001_core.up.sql"),
+        ),
+      ]);
+      await writeFile(join(temporary, "0001_core.down.sql"), "SELECT 'down 已被篡改';\n", "utf8");
+      await expect(
+        migrateUp(migratorPool, { runtimeRole, directory: temporary }),
+      ).rejects.toMatchObject({
+        code: "MIGRATION_MISMATCH",
+      });
+      await expect(loadMigrations({ directory: orphan })).rejects.toThrow("未成对");
+      await Promise.all([
+        copyFile(
+          join(sourceMigrationDirectory, "0001_core.up.sql"),
+          join(orphan, "0001_other.up.sql"),
+        ),
+        copyFile(
+          join(sourceMigrationDirectory, "0001_core.down.sql"),
+          join(orphan, "0001_other.down.sql"),
+        ),
+      ]);
+      await expect(loadMigrations({ directory: orphan })).rejects.toThrow("版本 1 重复");
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+      await rm(orphan, { recursive: true, force: true });
+    }
+  });
+
+  it("down 只有显式 test 授权可执行并能再次向前", async () => {
+    await expect(
+      migrateDown(migratorPool, {
+        allowDestructive: false as true,
+        environment: "test",
+      }),
+    ).rejects.toThrow("禁止破坏性");
+    expect(
+      await migrateDown(migratorPool, { allowDestructive: true, environment: "test" }),
+    ).toEqual([]);
+    expect(await migrateUp(migratorPool, { runtimeRole })).toHaveLength(1);
+  });
+
+  it("Runtime 角色不能 DDL、创建 Schema 或绕过 RLS 跨租户写", async () => {
+    const roles = await administrativePool.query<{
+      migrator: string;
+      database_owner: string;
+      runtime_super: boolean;
+      runtime_bypass_rls: boolean;
+      runtime_can_create_database: boolean;
+    }>(
+      `SELECT current_user AS migrator,
+              pg_get_userbyid(d.datdba) AS database_owner,
+              r.rolsuper AS runtime_super,
+              r.rolbypassrls AS runtime_bypass_rls,
+              has_database_privilege($1, current_database(), 'CREATE') AS runtime_can_create_database
+         FROM pg_database d CROSS JOIN pg_roles r
+        WHERE d.datname = current_database() AND r.rolname = $1`,
+      [runtimeRole],
+    );
+    expect(roles.rows[0]).toMatchObject({
+      database_owner: roles.rows[0]?.migrator,
+      runtime_super: false,
+      runtime_bypass_rls: false,
+      runtime_can_create_database: false,
+    });
+    expect(roles.rows[0]?.migrator).not.toBe(runtimeRole);
+    await expect(
+      runtimePool.query("CREATE TABLE forbidden_runtime_ddl(id integer)"),
+    ).rejects.toMatchObject({
+      code: "42501",
+    });
+    await expect(runtimePool.query(`CREATE SCHEMA "${schema}_forbidden"`)).rejects.toMatchObject({
+      code: "42501",
+    });
+    const left = await createFixture("rls_left");
+    const right = await createFixture("rls_right");
+    await expect(
+      withTenantTransaction(runtimePool, left.scope, (client) =>
+        client.query(
+          `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
+           VALUES ($1,'cross_tenant_write',$2,'越权','active',clock_timestamp(),clock_timestamp())`,
+          [right.scope.tenantId, right.scope.userId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+  });
+});
+
+describe("PostgreSQL Repository 与并发条件", () => {
+  it("团队 Tenant 创建者与 Thread 创建者不同也能正确恢复聚合", async () => {
+    const teamTenantId = tenantId("tenant_team_mapping");
+    const tenantCreatorId = userId("user_team_creator");
+    const threadCreatorId = userId("user_thread_creator");
+    await withTenantTransaction(
+      runtimePool,
+      { tenantId: teamTenantId, userId: tenantCreatorId },
+      async (client) => {
+        await client.query("INSERT INTO app_users(id, created_at) VALUES ($1, $2)", [
+          tenantCreatorId,
+          timestamp(0),
+        ]);
+        await client.query(
+          `INSERT INTO tenants(id,kind,display_name,created_by_user_id,created_at)
+           VALUES ($1,'team','映射测试团队',$2,$3)`,
+          [teamTenantId, tenantCreatorId, timestamp(0)],
+        );
+        await client.query(
+          `INSERT INTO memberships(tenant_id,id,user_id,role,status,created_at)
+           VALUES ($1,'membership_team_creator',$2,'owner','active',$3)`,
+          [teamTenantId, tenantCreatorId, timestamp(0)],
+        );
+      },
+    );
+    await withTenantTransaction(
+      runtimePool,
+      { tenantId: teamTenantId, userId: threadCreatorId },
+      async (client) => {
+        await client.query("INSERT INTO app_users(id, created_at) VALUES ($1, $2)", [
+          threadCreatorId,
+          timestamp(1),
+        ]);
+        await client.query(
+          `INSERT INTO memberships(tenant_id,id,user_id,role,status,created_at)
+           VALUES ($1,'membership_thread_creator',$2,'member','active',$3)`,
+          [teamTenantId, threadCreatorId, timestamp(1)],
+        );
+        await client.query(
+          `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
+           VALUES ($1,'thread_team_mapping',$2,'团队任务','active',$3,$3)`,
+          [teamTenantId, threadCreatorId, timestamp(2)],
+        );
+      },
+    );
+    const restored = await repositories.threads.get(
+      { tenantId: teamTenantId, userId: threadCreatorId },
+      threadId("thread_team_mapping"),
+    );
+    expect(restored?.entity).toMatchObject({
+      tenantId: teamTenantId,
+      createdByUserId: threadCreatorId,
+      title: "团队任务",
+    });
+  });
+
+  it("TenantScope 让跨租户实体不可见", async () => {
     const left = await createFixture("scope_left");
     const right = await createFixture("scope_right");
-
     expect(await repositories.threads.get(left.scope, right.thread.id)).toBeUndefined();
     expect(await repositories.runs.get(left.scope, right.run.id)).toBeUndefined();
     expect(await repositories.workspaces.getById(left.scope, right.workspace.id)).toBeUndefined();
-    expect(await repositories.workspaces.getById(right.scope, right.workspace.id)).toMatchObject({
-      id: right.workspace.id,
-      tenantId: right.scope.tenantId,
-    });
+    expect((await repositories.workspaces.getById(right.scope, right.workspace.id))?.id).toBe(
+      right.workspace.id,
+    );
   });
 
-  it("Thread 与 Run 更新使用 updatedAt 乐观条件并可重新装载", async () => {
-    const fixture = await createFixture("updates");
-    const archived = archiveThread(fixture.thread, timestamp(10));
+  it("相同时间戳和 version 的 Thread/Run CAS 都只有一个更新成功", async () => {
+    const threadFixture = await createFixture("thread_version");
+    const archived = archiveThread(threadFixture.thread, timestamp(10));
+    const threadResults = await Promise.all([
+      repositories.threads.update(threadFixture.scope, archived, 0n),
+      repositories.threads.update(threadFixture.scope, archived, 0n),
+    ]);
+    expect(threadResults.map((result) => result.outcome).sort()).toEqual(["conflict", "updated"]);
     expect(
-      await repositories.threads.update(fixture.scope, archived, fixture.thread.updatedAt),
-    ).toEqual({ outcome: "updated" });
-    expect(
-      await repositories.threads.update(fixture.scope, archived, fixture.thread.updatedAt),
-    ).toEqual({ outcome: "conflict" });
-    expect(await repositories.threads.get(fixture.scope, fixture.thread.id)).toMatchObject({
-      status: "archived",
-      updatedAt: timestamp(10),
-    });
+      (await repositories.threads.get(threadFixture.scope, threadFixture.thread.id))?.version,
+    ).toBe(1n);
 
-    const waiting = transitionRun(fixture.run, "waiting", timestamp(11));
-    expect(await repositories.runs.update(fixture.scope, waiting, fixture.run.updatedAt)).toEqual({
+    const runFixture = await createFixture("run_version");
+    const waiting = transitionRun(runFixture.run, "waiting", timestamp(10));
+    const runResults = await Promise.all([
+      repositories.runs.update(runFixture.scope, waiting, 0n),
+      repositories.runs.update(runFixture.scope, waiting, 0n),
+    ]);
+    expect(runResults.map((result) => result.outcome).sort()).toEqual(["conflict", "updated"]);
+    expect((await repositories.runs.get(runFixture.scope, runFixture.run.id))?.version).toBe(1n);
+  });
+
+  it("Thread 归档后拒绝创建 Run 和 Workspace", async () => {
+    const fixture = await createFixture("archived_parent");
+    const archived = archiveThread(fixture.thread, timestamp(12));
+    expect(await repositories.threads.update(fixture.scope, archived, 0n)).toMatchObject({
       outcome: "updated",
     });
-    expect(await repositories.runs.get(fixture.scope, fixture.run.id)).toMatchObject({
-      status: "waiting",
-      updatedAt: timestamp(11),
+    const queued = createRun({
+      id: runId("run_after_archive"),
+      thread: fixture.thread,
+      now: timestamp(13),
+    });
+    expect(await repositories.runs.create(fixture.scope, queued)).toEqual({ outcome: "conflict" });
+    const workspace = createWorkspace({
+      id: workspaceId("workspace_after_archive"),
+      thread: fixture.thread,
+      now: timestamp(13),
+    });
+    expect(await repositories.workspaces.create(fixture.scope, workspace)).toEqual({
+      outcome: "conflict",
     });
   });
 
-  it("相同 revision 与 lease epoch 的并发 CAS 恰好一个成功", async () => {
-    const fixture = await createFixture("cas");
-    const leased = await acquireLease(fixture);
-    const left = prepareWorkspaceRevision({
-      workspace: leased,
-      rootRun: fixture.run,
-      leaseEpoch: 1,
-      revisionId: workspaceRevisionId("revision_cas_left"),
-      objectKey: "tenant_cas/workspaces/1-left.tar.zst",
-      digest: sha256Digest("a".repeat(64)),
-      now: timestamp(6),
+  it("Thread 归档与 Run 创建竞态按父行锁串行化", async () => {
+    const fixture = await createFixture("archive_race");
+    const archived = archiveThread(fixture.thread, timestamp(19));
+    const candidate = createRun({
+      id: runId("run_archive_race_candidate"),
+      thread: fixture.thread,
+      now: timestamp(19),
     });
-    const right = prepareWorkspaceRevision({
-      workspace: leased,
-      rootRun: fixture.run,
-      leaseEpoch: 1,
-      revisionId: workspaceRevisionId("revision_cas_right"),
-      objectKey: "tenant_cas/workspaces/1-right.tar.zst",
-      digest: sha256Digest("b".repeat(64)),
-      now: timestamp(6),
-    });
+    const [archiveResult, createResult] = await Promise.all([
+      repositories.threads.update(fixture.scope, archived, 0n),
+      repositories.runs.create(fixture.scope, candidate),
+    ]);
+    expect(archiveResult.outcome).toBe("updated");
+    expect(["created", "conflict"]).toContain(createResult.outcome);
+    expect((await repositories.threads.get(fixture.scope, fixture.thread.id))?.entity.status).toBe(
+      "archived",
+    );
+  });
 
+  it("Run 终态后拒绝 Lease、Revision 与 Release", async () => {
+    const beforeLease = await createFixture("terminal_before_lease");
+    const failed = transitionRun(beforeLease.run, "failed", timestamp(14));
+    expect(await repositories.runs.update(beforeLease.scope, failed, 0n)).toMatchObject({
+      outcome: "updated",
+    });
+    const staleLease = acquireWorkspaceLease({
+      workspace: beforeLease.workspace,
+      rootRun: beforeLease.run,
+      epoch: 1,
+      expiresAt: timestamp(50),
+      now: timestamp(15),
+    });
+    expect(
+      await repositories.workspaces.compareAndSetLease(
+        beforeLease.writeScope,
+        beforeLease.workspace,
+        staleLease,
+      ),
+    ).toEqual({ outcome: "lease_lost" });
+
+    const afterLease = await createFixture("terminal_after_lease");
+    const leased = await acquireLease(afterLease);
+    const failedAfterLease = transitionRun(afterLease.run, "failed", timestamp(16));
+    expect(await repositories.runs.update(afterLease.scope, failedAfterLease, 0n)).toMatchObject({
+      outcome: "updated",
+    });
+    const revision = prepareWorkspaceRevision({
+      workspace: leased,
+      rootRun: afterLease.run,
+      leaseEpoch: 1,
+      revisionId: workspaceRevisionId("revision_terminal"),
+      objectKey: "terminal/revision.tar.zst",
+      digest: sha256Digest("c".repeat(64)),
+      now: timestamp(17),
+    });
+    expect(await repositories.workspaces.commitRevision(afterLease.writeScope, revision)).toEqual({
+      outcome: "lease_lost",
+    });
+    const released = releaseWorkspaceLease({
+      workspace: leased,
+      rootRun: afterLease.run,
+      epoch: 1,
+      now: timestamp(18),
+    });
+    expect(
+      await repositories.workspaces.compareAndSetLease(afterLease.writeScope, leased, released),
+    ).toEqual({ outcome: "lease_lost" });
+  });
+
+  it("Run 终态与 Revision 提交竞态按 Run 行锁串行化", async () => {
+    const fixture = await createFixture("run_revision_race");
+    const leased = await acquireLease(fixture);
+    const revision = prepareWorkspaceRevision({
+      workspace: leased,
+      rootRun: fixture.run,
+      leaseEpoch: 1,
+      revisionId: workspaceRevisionId("revision_run_race"),
+      objectKey: "race/revision.tar.zst",
+      digest: sha256Digest("d".repeat(64)),
+      now: timestamp(20),
+    });
+    const failed = transitionRun(fixture.run, "failed", timestamp(20));
+    const [runResult, revisionResult] = await Promise.all([
+      repositories.runs.update(fixture.scope, failed, 0n),
+      repositories.workspaces.commitRevision(fixture.writeScope, revision),
+    ]);
+    expect(runResult.outcome).toBe("updated");
+    expect(["committed", "lease_lost"]).toContain(revisionResult.outcome);
+  });
+
+  it("相同 parent/revision/epoch 并发提交恰好一个成功", async () => {
+    const fixture = await createFixture("revision_cas");
+    const leased = await acquireLease(fixture);
+    const commands = ["left", "right"].map((side) =>
+      prepareWorkspaceRevision({
+        workspace: leased,
+        rootRun: fixture.run,
+        leaseEpoch: 1,
+        revisionId: workspaceRevisionId(`revision_${side}`),
+        objectKey: `revision/${side}.tar.zst`,
+        digest: sha256Digest(side === "left" ? "a".repeat(64) : "b".repeat(64)),
+        now: timestamp(18),
+      }),
+    );
+    const [left, right] = commands;
+    if (left === undefined || right === undefined) throw new Error("测试命令构造失败");
     const outcomes = await Promise.all([
-      repositories.workspaces.commitRevision(left),
-      repositories.workspaces.commitRevision(right),
+      repositories.workspaces.commitRevision(fixture.writeScope, left),
+      repositories.workspaces.commitRevision(fixture.writeScope, right),
     ]);
     expect(outcomes.map((result) => result.outcome).sort()).toEqual([
       "committed",
       "revision_conflict",
     ]);
-    const rows = await pool.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM workspace_revisions WHERE tenant_id = $1 AND workspace_id = $2",
-      [fixture.scope.tenantId, fixture.workspace.id],
+    const rows = await withTenantTransaction(runtimePool, fixture.writeScope, (client) =>
+      client.query<{ count: string }>(
+        "SELECT count(*)::text AS count FROM workspace_revisions WHERE workspace_id = $1",
+        [fixture.workspace.id],
+      ),
     );
     expect(rows.rows[0]?.count).toBe("1");
   });
 
-  it("数据库时钟拒绝已过期和错误持有者的租约", async () => {
-    const expiredFixture = await createFixture("expired");
-    const expiredLease = await acquireLease(expiredFixture);
+  it("数据库时钟拒绝过期、错误 root Run 和错误 epoch", async () => {
+    const fixture = await createFixture("lease_checks");
+    const leased = await acquireLease(fixture);
     const renewal = renewWorkspaceLease({
-      workspace: expiredLease,
-      rootRun: expiredFixture.run,
+      workspace: leased,
+      rootRun: fixture.run,
       epoch: 1,
       expiresAt: timestamp(55),
       now: timestamp(6),
     });
-    await pool.query(
-      `UPDATE workspace_write_leases SET expires_at = clock_timestamp() - interval '1 second'
-        WHERE tenant_id = $1 AND workspace_id = $2`,
-      [expiredFixture.scope.tenantId, expiredFixture.workspace.id],
+    await withTenantTransaction(runtimePool, fixture.writeScope, (client) =>
+      client.query(
+        "UPDATE workspace_write_leases SET expires_at = clock_timestamp() - interval '1 second' WHERE workspace_id = $1",
+        [fixture.workspace.id],
+      ),
     );
-    expect(await repositories.workspaces.compareAndSetLease(expiredLease, renewal)).toEqual({
-      outcome: "lease_lost",
-    });
-    const takeoverQueued = createRun({
-      id: runId("run_expired_takeover"),
-      thread: expiredFixture.thread,
-      now: timestamp(7),
-    });
-    const takeoverRun = transitionRun(takeoverQueued, "running", timestamp(8));
-    expect(await repositories.runs.create(expiredFixture.scope, takeoverRun)).toEqual({
-      outcome: "created",
-    });
-    const takeover = acquireWorkspaceLease({
-      workspace: expiredLease,
-      rootRun: takeoverRun,
-      epoch: 2,
-      expiresAt: timestamp(59),
-      now: timestamp(51),
-    });
-    expect(await repositories.workspaces.compareAndSetLease(expiredLease, takeover)).toEqual({
-      outcome: "committed",
-    });
-
-    const wrongFixture = await createFixture("wrong_owner");
-    const wrongLease = await acquireLease(wrongFixture);
-    const otherQueued = createRun({
-      id: runId("run_wrong_owner_other"),
-      thread: wrongFixture.thread,
-      now: timestamp(7),
-    });
-    const other = transitionRun(otherQueued, "running", timestamp(8));
-    expect(await repositories.runs.create(wrongFixture.scope, other)).toEqual({
-      outcome: "created",
-    });
-    await pool.query(
-      `UPDATE workspace_write_leases SET root_run_id = $3
-        WHERE tenant_id = $1 AND workspace_id = $2`,
-      [wrongFixture.scope.tenantId, wrongFixture.workspace.id, other.id],
+    expect(
+      await repositories.workspaces.compareAndSetLease(fixture.writeScope, leased, renewal),
+    ).toEqual({ outcome: "lease_lost" });
+    expect(
+      await repositories.workspaces.compareAndSetLease(
+        { tenantId: fixture.scope.tenantId, rootRunId: runId("wrong_root") },
+        leased,
+        renewal,
+      ),
+    ).toEqual({ outcome: "lease_lost" });
+    await withTenantTransaction(runtimePool, fixture.writeScope, (client) =>
+      client.query("UPDATE workspace_write_leases SET epoch = 2 WHERE workspace_id = $1", [
+        fixture.workspace.id,
+      ]),
     );
-    const wrongRenewal = renewWorkspaceLease({
-      workspace: wrongLease,
-      rootRun: wrongFixture.run,
-      epoch: 1,
-      expiresAt: timestamp(55),
-      now: timestamp(9),
-    });
-    expect(await repositories.workspaces.compareAndSetLease(wrongLease, wrongRenewal)).toEqual({
-      outcome: "lease_lost",
-    });
-    await pool.query(
-      `UPDATE workspace_write_leases SET root_run_id = $3, epoch = 2
-        WHERE tenant_id = $1 AND workspace_id = $2`,
-      [wrongFixture.scope.tenantId, wrongFixture.workspace.id, wrongFixture.run.id],
-    );
-    expect(await repositories.workspaces.compareAndSetLease(wrongLease, wrongRenewal)).toEqual({
-      outcome: "lease_lost",
-    });
+    expect(
+      await repositories.workspaces.compareAndSetLease(fixture.writeScope, leased, renewal),
+    ).toEqual({ outcome: "lease_lost" });
   });
 
-  it("事务失败会完整回滚且不会留下半条数据", async () => {
+  it("事务中途失败完整回滚", async () => {
+    const fixture = await createFixture("rollback");
     await expect(
-      withTransaction(pool, async (client) => {
-        await client.query("INSERT INTO app_users(id, created_at) VALUES ($1, clock_timestamp())", [
-          "rollback_user",
+      withTenantTransaction(runtimePool, fixture.scope, async (client) => {
+        await client.query("UPDATE threads SET title = '不应提交' WHERE id = $1", [
+          fixture.thread.id,
         ]);
-        throw new Error("注入事务中途失败");
+        throw new Error("注入事务失败");
       }),
-    ).rejects.toThrow("注入事务中途失败");
-    const result = await pool.query<{ count: string }>(
-      "SELECT count(*)::text AS count FROM app_users WHERE id = 'rollback_user'",
+    ).rejects.toThrow("注入事务失败");
+    expect((await repositories.threads.get(fixture.scope, fixture.thread.id))?.entity.title).toBe(
+      fixture.thread.title,
     );
-    expect(result.rows[0]?.count).toBe("0");
   });
 });

@@ -8,10 +8,26 @@ export interface PostgresPoolOptions {
   readonly maxConnections?: number;
   readonly idleTimeoutMs?: number;
   readonly connectionTimeoutMs?: number;
+  readonly statementTimeoutMs?: number;
   readonly onBackgroundError?: (error: ReturnType<typeof mapPersistenceError>) => void;
 }
 
 const schemaPattern = /^[a-z][a-z0-9_]{0,62}$/;
+const isolationLevels = new Set(["READ COMMITTED", "REPEATABLE READ", "SERIALIZABLE"]);
+
+function boundedInteger(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved < minimum || resolved > maximum) {
+    throw new TypeError(`${name} 必须是 ${minimum} 到 ${maximum} 之间的整数`);
+  }
+  return resolved;
+}
 
 export function assertSafeSchemaName(schema: string): void {
   if (!schemaPattern.test(schema)) {
@@ -27,9 +43,28 @@ export function createPostgresPool(options: PostgresPoolOptions): Pool {
   const config: PoolConfig = {
     connectionString: options.connectionString,
     application_name: options.applicationName ?? "cube-agent-runtime",
-    max: options.maxConnections ?? 10,
-    idleTimeoutMillis: options.idleTimeoutMs ?? 30_000,
-    connectionTimeoutMillis: options.connectionTimeoutMs ?? 5_000,
+    max: boundedInteger(options.maxConnections, 10, 1, 100, "maxConnections"),
+    idleTimeoutMillis: boundedInteger(
+      options.idleTimeoutMs,
+      30_000,
+      1_000,
+      600_000,
+      "idleTimeoutMs",
+    ),
+    connectionTimeoutMillis: boundedInteger(
+      options.connectionTimeoutMs,
+      5_000,
+      100,
+      60_000,
+      "connectionTimeoutMs",
+    ),
+    statement_timeout: boundedInteger(
+      options.statementTimeoutMs,
+      30_000,
+      100,
+      600_000,
+      "statementTimeoutMs",
+    ),
     ...(options.schema === undefined ? {} : { options: `-c search_path=${options.schema},public` }),
   };
   const pool = new Pool(config);
@@ -58,10 +93,11 @@ export async function withTransaction<T>(
   operation: (client: PoolClient) => Promise<T>,
   options: TransactionOptions = {},
 ): Promise<T> {
+  const isolation = options.isolationLevel ?? "READ COMMITTED";
+  if (!isolationLevels.has(isolation)) throw new TypeError("事务隔离级别不在运行时白名单中");
   const client = await pool.connect().catch((error: unknown) => {
     throw mapPersistenceError(error, "取得数据库连接");
   });
-  const isolation = options.isolationLevel ?? "READ COMMITTED";
   let releaseError: Error | undefined;
   try {
     await client.query(
@@ -81,6 +117,31 @@ export async function withTransaction<T>(
   } finally {
     client.release(releaseError);
   }
+}
+
+export interface DatabaseTenantContext {
+  readonly tenantId: string;
+  readonly userId?: string;
+}
+
+export async function withTenantTransaction<T>(
+  pool: Pool,
+  context: DatabaseTenantContext,
+  operation: (client: PoolClient) => Promise<T>,
+  options: TransactionOptions = {},
+): Promise<T> {
+  return withTransaction(
+    pool,
+    async (client) => {
+      // true 表示事务级配置，连接归还池中后不会遗留上一个租户的上下文。
+      await client.query(
+        "SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $2, true)",
+        [context.tenantId, context.userId ?? ""],
+      );
+      return operation(client);
+    },
+    options,
+  );
 }
 
 export type { Pool, PoolClient } from "pg";

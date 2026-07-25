@@ -8,8 +8,8 @@ export type PersistenceErrorCode =
 export class PersistenceError extends Error {
   readonly code: PersistenceErrorCode;
 
-  constructor(code: PersistenceErrorCode, message: string, options?: ErrorOptions) {
-    super(message, options);
+  constructor(code: PersistenceErrorCode, message: string) {
+    super(message);
     this.name = "PersistenceError";
     this.code = code;
   }
@@ -30,15 +30,13 @@ export function mapPersistenceError(error: unknown, operation: string): Persiste
   if (error instanceof PersistenceError) return error;
   const code = pgCode(error);
   if (code === "23505") {
-    return new PersistenceError("CONFLICT", `${operation}发生并发冲突`, { cause: error });
+    return new PersistenceError("CONFLICT", `${operation}发生并发冲突`);
   }
   if (code?.startsWith("23") === true) {
-    return new PersistenceError("CONSTRAINT_VIOLATION", `${operation}违反数据约束`, {
-      cause: error,
-    });
+    return new PersistenceError("CONSTRAINT_VIOLATION", `${operation}违反数据约束`);
   }
   if (code?.startsWith("08") === true || code === "57P01") {
-    return new PersistenceError("UNAVAILABLE", `${operation}暂时不可用`, { cause: error });
+    return new PersistenceError("UNAVAILABLE", `${operation}暂时不可用`);
   }
-  return new PersistenceError("UNEXPECTED", `${operation}失败`, { cause: error });
+  return new PersistenceError("UNEXPECTED", `${operation}失败`);
 }

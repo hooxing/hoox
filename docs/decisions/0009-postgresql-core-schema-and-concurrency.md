@@ -21,11 +21,13 @@ M1 需要把 Tenant、Thread、Run 与 Workspace 从内存领域对象落到 Pos
 
 数据库 bootstrap、迁移和运行采用三个边界：Database Admin 只负责建库、建角色、从 `PUBLIC` 撤销数据库全部权限、按需授予 `CONNECT` 和创建 Migrator 所有的专用 Schema；Migrator 是专用 Schema owner，但不是数据库 owner，也没有 `CREATEDB/CREATEROLE/SUPERUSER/BYPASSRLS/REPLICATION` 或任何上游角色成员关系；Runtime 使用独立 URL，不能是数据库、Schema、表或序列 owner，也禁止任何上游角色成员关系。这里不区分 `INHERIT/NOINHERIT`，因为后者仍可能允许 `SET ROLE` 并继承上游 ACL。
 
-每次 up/down 在任何迁移表或业务 DDL 前执行同一生产 preflight：`current_user` 必须等于显式配置的专用 Migrator；Migrator 必须恰好是已存在配置 Schema 的 owner，不得拥有其他非系统 Schema 或目标 Schema 外的 relation、routine、type、operator、conversion、collation 或全文检索对象；`current_schema` 和 `search_path` 必须精确落在该 Schema；Runtime 与 Migrator 的角色属性、成员关系和 owner 边界必须合规；Runtime 对目标 Schema 的有效 `CREATE` 和数据库 `TEMPORARY` 必须为 false，即使权限来自 `PUBLIC` 或直接 ACL 也拒绝。当前迁移 manifest 明确不包含函数、过程或聚合，因而目标 Schema 的 routine 集合必须为空，预置 `SECURITY DEFINER` 也在首个 DDL 前拒绝。任一条件不满足时不创建迁移表或业务对象。
+每次 up/down 在任何迁移表或业务 DDL 前执行同一生产 preflight：`current_user` 必须等于显式配置的专用 Migrator；Migrator 必须恰好是已存在配置 Schema 的 owner，不得拥有其他非系统 Schema、对任何非系统非目标 Schema 具有有效 `CREATE`，也不得拥有目标 Schema 外的 relation、routine、type、operator、conversion、collation 或全文检索对象；`current_schema` 和 `search_path` 必须精确落在该 Schema；Runtime 与 Migrator 的角色属性、成员关系和 owner 边界必须合规；Runtime 对目标 Schema 的有效 `CREATE` 和数据库 `TEMPORARY` 必须为 false，即使权限来自 `PUBLIC` 或直接 ACL 也拒绝。当前迁移 manifest 明确不包含函数、过程或聚合：目标 Schema 的 routine 集合、Migrator 的全局或局部 routine `pg_default_acl` 记录必须均为空，目标 Schema 也不允许 Migrator-owned 独立 type 等 manifest 外对象；预置 `SECURITY DEFINER` 也在首个 DDL 前拒绝。任一条件不满足时不创建迁移表或业务对象。
 
-Runtime ACL bootstrap 在业务 DDL 前先设置 Migrator 的 routine 默认权限，从 Runtime 和 `PUBLIC` 撤销未来 routine 的 `EXECUTE`，并对目标 Schema 现存 routine 执行相同撤销。PostgreSQL 内建的 `PUBLIC EXECUTE` 是角色级全局默认，带 `IN SCHEMA` 的局部 `REVOKE` 无法覆盖它；因此这里对专用 Migrator 设置全局默认。前置 ownership 约束保证该角色只服务一个业务 Schema，使实际作用域仍等价于目标 Schema。随后撤销业务 Schema、全部业务表、`runtime_schema_migrations` 及 sequence 的全部权限，再精确授权：User/Tenant/Membership 仅 `SELECT/INSERT`；Thread/Run/Workspace 仅 `SELECT/INSERT/UPDATE`；WorkspaceRevision 仅 `SELECT/INSERT`；Lease 使用 `SELECT/INSERT/UPDATE/DELETE`；迁移表、sequence 和 routine 零权限。提交前以 `has_*_privilege` 与 ACL 检查对每张表的 `SELECT/INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER`、routine `EXECUTE`、Schema 的 `USAGE/CREATE` 以及数据库的 `CONNECT/CREATE/TEMPORARY` 执行有效权限白名单断言，防止 `PUBLIC` 或间接 ACL 绕过。up 将建表/变更 DDL、迁移记录、ACL bootstrap 与白名单断言放入同一 client 事务，首次 up 的 ACL 失败不会留下任何业务表。未来若要允许 routine，必须先加入显式 manifest，逐项审查 owner、参数类型、`search_path` 与 `SECURITY DEFINER`，并更新权限矩阵。Repository 包不公开原始 Pool 和任意事务函数，防止应用层绕过 TenantScope 与 RLS。开发/测试环境也使用相同角色边界。
+首版完全禁止数据库 routine，因此 runner 不执行任何 `ALTER DEFAULT PRIVILEGES`，也不改写现存 routine ACL；这避免用全局默认 ACL 影响其他 Schema，也避免 down 猜测并覆盖迁移前的安全基线。preflight 以“空 routine manifest + 无 routine default ACL”作为输入前提；执行所有迁移 SQL 和写入迁移记录后、事务提交前再次检查，任何 migration 新建的函数、过程或聚合都使整次迁移回滚。Runtime/`PUBLIC` 对目标 routine 的 `EXECUTE` 集合由空 manifest 自然为空，并在结束白名单断言中验证。
 
-角色和数据库级 ACL 属于不可由 Schema down 回滚的运维 bootstrap。Schema migration 之后也可单独、重复执行 Runtime ACL bootstrap；显式 down 的业务对象删除、Runtime/`PUBLIC` 动态 ACL 回收和结束白名单断言使用同一 client 与事务，失败时全部回滚，但不会重新开放数据库权限。down 在撤销 Runtime Schema `USAGE` 后把专用 Migrator 的 routine 默认权限恢复为 PostgreSQL 内建值，从而删除全局 `pg_default_acl` 记录；此时 Schema 不可访问，下一次 up 又会在任何业务 DDL 前重新加固默认权限。
+Runtime ACL bootstrap 撤销业务 Schema、全部业务表、`runtime_schema_migrations` 及 sequence 的全部权限，再精确授权：User/Tenant/Membership 仅 `SELECT/INSERT`；Thread/Run/Workspace 仅 `SELECT/INSERT/UPDATE`；WorkspaceRevision 仅 `SELECT/INSERT`；Lease 使用 `SELECT/INSERT/UPDATE/DELETE`；迁移表、sequence 和 routine 零权限。提交前以 `has_*_privilege` 与 ACL 检查对每张表的 `SELECT/INSERT/UPDATE/DELETE/TRUNCATE/REFERENCES/TRIGGER`、routine `EXECUTE`、Schema 的 `USAGE/CREATE` 以及数据库的 `CONNECT/CREATE/TEMPORARY` 执行有效权限白名单断言，防止 `PUBLIC` 或间接 ACL 绕过。up 将建表/变更 DDL、迁移记录、ACL bootstrap 与白名单断言放入同一 client 事务，首次 up 的 ACL 失败不会留下任何业务表。未来若要允许 routine，必须新增独立 manifest 和安全设计，逐项审查 owner、参数类型、固定 `search_path`、`SECURITY DEFINER` 与调用权限，不得在普通 migration 中直接引入。Repository 包不公开原始 Pool 和任意事务函数，防止应用层绕过 TenantScope 与 RLS。开发/测试环境也使用相同角色边界。
+
+角色和数据库级 ACL 属于不可由 Schema down 回滚的运维 bootstrap。Schema migration 之后也可单独、重复执行 Runtime ACL bootstrap；显式 down 的业务对象删除、Runtime/`PUBLIC` 动态 ACL 回收和结束白名单断言使用同一 client 与事务，失败时全部回滚，但不会重新开放数据库权限。down 不创建、删除或恢复任何 routine default ACL；它和重复 up 一样，要求 Migrator 事先不存在任何 routine `pg_default_acl` 记录。
 
 ### Workspace 并发与数据库时钟
 
@@ -63,7 +65,7 @@ Lease 使用独立表保存当前持有者，Workspace 的 `lease_epoch` 保存�
 - Runtime 角色跨租户直接写入被 RLS 拒绝，且不能建表或创建 Schema；
 - Runtime 与 Migrator 任意上游成员关系、owner/高权限、当前用户和精确 `search_path` 检查发生在首条迁移 DDL 前；权限矩阵参数化验证全部表乘全部七类表权限，包含迁移表零权限、`PUBLIC` 残留授权和 NOINHERIT/SET ROLE 对抗；
 - Runtime 的目标 Schema `CREATE` 与数据库 `TEMPORARY` 分别在 up/down 前置对抗中证明零 DDL；Migrator 额外 Schema ownership 与跨 Schema object ownership 均被拒绝；首次 up 的 ACL 断言失败证明迁移 DDL 整体回滚；
-- 目标 Schema 预置 `SECURITY DEFINER` 与跨 Schema Migrator-owned routine 都在首个 DDL 前拒绝；默认权限、现存 routine ACL 和 down 结束状态均证明 Runtime/`PUBLIC` 无 `EXECUTE`；
+- 目标 Schema 预置 `SECURITY DEFINER`、目标或跨 Schema Migrator-owned 独立 type、跨 Schema Migrator-owned routine、全局或局部 routine default ACL（包含 `PUBLIC`、Runtime、第三方 grantee 或仅 owner 记录）均在首个 DDL 前拒绝；migration 尝试创建 routine 时整次回滚；空 manifest 保证 Runtime/`PUBLIC` 的 `EXECUTE` 集合为空；
 - 两个并发提交相同 revision/epoch 时恰好一个成功；
 - 两个相同时间戳、相同 version 的 Thread/Run 更新恰好一个成功；
 - 已过期、错误 root Run 或错误 epoch 的 Lease 提交均返回 `lease_lost`；
@@ -74,6 +76,6 @@ Lease 使用独立表保存当前持有者，Workspace 的 `lease_epoch` 保存�
 
 ## 可逆性与回退
 
-首个迁移提供严格逆序的 down SQL，只有隔离的 development/test 数据库可显式回退。down 在同一事务中撤销当前 Schema 的 Runtime 与 `PUBLIC` 动态 ACL、清除 routine 默认 ACL 记录并执行结束断言；Database Admin 创建的角色、数据库 `CONNECT`、`PUBLIC` 数据库权限撤销和 Schema 本身不随业务表回滚，避免 down 意外扩大权限。生产已有数据后禁止 down；应先备份、停止写入并用新的前向迁移修正。RLS 可以在迁移窗口内由 Migrator 回退，但取消强制租户边界属于安全降级，必须新增 ADR。Repository 接口与错误联合不依赖 `pg` 类型，未来可以替换驱动或迁移框架，但必须保持 TenantScope、角色分离、原子 head 更新和数据库时钟 Lease 语义。
+首个迁移提供严格逆序的 down SQL，只有隔离的 development/test 数据库可显式回退。down 在同一事务中撤销当前 Schema 的 Runtime 与 `PUBLIC` 动态 ACL 并执行结束断言，但绝不修改 routine default ACL；preflight 保证迁移前本就不存在这类记录。Database Admin 创建的角色、数据库 `CONNECT`、`PUBLIC` 数据库权限撤销和 Schema 本身不随业务表回滚，避免 down 意外扩大权限。生产已有数据后禁止 down；应先备份、停止写入并用新的前向迁移修正。RLS 可以在迁移窗口内由 Migrator 回退，但取消强制租户边界属于安全降级，必须新增 ADR。Repository 接口与错误联合不依赖 `pg` 类型，未来可以替换驱动或迁移框架，但必须保持 TenantScope、角色分离、原子 head 更新和数据库时钟 Lease 语义。
 
 Run 更新不能信任调用方传入的 `threadId` 来决定锁顺序。Repository 先按数据库 `tenant_id + run_id` 发现真实父 Thread，再固定锁真实 Thread、锁真实 Run，随后校验输入父级并在 `UPDATE WHERE` 中同时绑定 `thread_id`。因此合法领域对象制造的 wrong-parent RunId 碰撞不会更新另一父级的 Run，Thread 归档竞态也保持统一的 Thread→Run 锁序。

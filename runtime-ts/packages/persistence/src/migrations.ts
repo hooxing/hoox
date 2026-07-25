@@ -7,7 +7,6 @@ import { withTransaction } from "./postgres.js";
 import {
   assertMigrationContextSafe,
   bootstrapRuntimeAccessOnClient,
-  hardenRoutinePrivilegesOnClient,
   type MigrationSecurityContext,
   teardownRuntimeSchemaAccessOnClient,
 } from "./role-bootstrap.js";
@@ -127,7 +126,6 @@ export async function migrateUp(
       );
       // 安全检查必须早于迁移表和任何业务 DDL，失败时数据库保持原状。
       await assertMigrationContextSafe(client, options);
-      await hardenRoutinePrivilegesOnClient(client, options);
       await ensureMigrationTable(client);
       const applied = await appliedMigrations(client);
       for (const record of applied) {
@@ -151,6 +149,8 @@ export async function migrateUp(
           [migration.version, migration.name, migration.checksum],
         );
       }
+      // 首版 manifest 禁止 routine；迁移 SQL 若创建函数/过程/聚合，必须在提交前整体回滚。
+      await assertMigrationContextSafe(client, options);
       // 业务 DDL、迁移记录与 Runtime ACL 必须原子提交，白名单断言失败会回滚首次建表。
       await bootstrapRuntimeAccessOnClient(client, options);
       return appliedMigrations(client);
@@ -180,7 +180,6 @@ export async function migrateDown(
       );
       // 与 up 使用同一套 Runtime/Migrator/Schema preflight，且必须早于迁移表 DDL。
       await assertMigrationContextSafe(client, options);
-      await hardenRoutinePrivilegesOnClient(client, options);
       await ensureMigrationTable(client);
       const applied = await appliedMigrations(client);
       for (const record of [...applied].reverse()) {
@@ -194,6 +193,7 @@ export async function migrateDown(
           record.version,
         ]);
       }
+      await assertMigrationContextSafe(client, options);
       const records = await appliedMigrations(client);
       if (targetVersion === 0) {
         // down SQL 与 ACL 回收共用当前 client/事务，任一步失败都会整体回滚。

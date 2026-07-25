@@ -1654,6 +1654,74 @@ describe("S3BlobStore", () => {
     expect(beginCompletedKey).toBe(stable.physicalObjectKey);
   });
 
+  it.each(["claim", "beginDeletion"] as const)(
+    "GC %s claim 的 key getter 抛错时不 DELETE、不 complete",
+    async (failureStage) => {
+      const prefix = `gc-getter-throws-${failureStage}`;
+      const scope = { tenantId: "tenant_a" };
+      const staged = stagedRefForTest(`gc-getter-throws-${failureStage}`, "3".repeat(64));
+      const allocation = allocationFor(staged, prefix);
+      const stable: StableBlobRef = { kind: "stable", mediaType: staged.mediaType, ...allocation };
+      const preDeleteClaim: StableBlobGcClaim = {
+        claimId: `claim-getter-throws-${failureStage}`,
+        generation: 1,
+        leaseExpiresAt: "2030-01-01T00:00:00.000Z",
+        phase: "pre_delete",
+        tenantId: scope.tenantId,
+        purpose: stable.purpose,
+        sha256: stable.sha256,
+        size: stable.size,
+        incarnationId: stable.incarnationId,
+        physicalObjectKey: stable.physicalObjectKey,
+      };
+      const throwingClaim = Object.defineProperty(
+        { ...preDeleteClaim, phase: "deleting" as const },
+        "physicalObjectKey",
+        {
+          enumerable: true,
+          get() {
+            throw new Error(`${failureStage} key getter failed`);
+          },
+        },
+      ) as StableBlobGcClaim;
+      let completeCount = 0;
+      const client = new FakeS3ObjectClient();
+      const gc = new S3StableBlobGarbageCollector(
+        client,
+        {
+          async claimUnreachable() {
+            return {
+              status: "claimed" as const,
+              claim: failureStage === "claim" ? throwingClaim : preDeleteClaim,
+            };
+          },
+          async beginDeletion() {
+            if (failureStage !== "beginDeletion") {
+              throw new Error("claim getter 抛错后不应 beginDeletion");
+            }
+            return { status: "started" as const, claim: throwingClaim };
+          },
+          async completeDeletion() {
+            completeCount += 1;
+          },
+          async releasePreDeleteClaim() {},
+          async resolveLifecycle() {
+            return { status: "deleting" as const };
+          },
+        },
+        prefix,
+        config.maxBlobSizeBytes,
+      );
+
+      await expect(gc.collectIfUnreachable(scope, stable)).rejects.toMatchObject({
+        code: "BLOB_INTEGRITY_MISMATCH",
+        result: "unknown",
+      });
+      expect(client.deleteKeys).toEqual([]);
+      expect(completeCount).toBe(0);
+    },
+  );
+
   it("tombstone 动态 key 翻转只删除快照目标，getter 抛错时不 DELETE、不 complete", async () => {
     const prefix = "tombstone-getter-snapshot";
     const scope = { tenantId: "tenant_a" };

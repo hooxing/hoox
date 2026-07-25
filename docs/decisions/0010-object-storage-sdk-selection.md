@@ -85,7 +85,7 @@
 
 读取仍采用 `AsyncIterable` API，但在当前 16 MiB 上限内先缓冲全部响应并完成大小和 SHA-256 校验，再向消费者产生第一个 chunk，避免最终哈希失败前产生可提交的外部效果。S3 HEAD/GET 返回的 metadata.size 或 ContentLength 超限属于 `BLOB_INTEGRITY_MISMATCH`，只有调用参数和配置非法才是 `INVALID_BLOB_ARGUMENT`。
 
-`expectedSha256` 和 `expectedSize` 在内容比较前先做调用参数校验：哈希格式、整数范围错误属于 `INVALID_BLOB_ARGUMENT`；参数合法但与实际正文不同才属于 `BLOB_INTEGRITY_MISMATCH`。GC claim 的格式错误同样是 `INVALID_BLOB_ARGUMENT`，Tenant 错配是 `TENANT_SCOPE_MISMATCH`，与目标 incarnation/physical key 错配是 `BLOB_INTEGRITY_MISMATCH`。lease 的时间有效性由 PG 决定，executor 只接受规范 UTC ISO（毫秒精度 `Z`）并验证 beginDeletion 除 phase 外全部字段连续。
+`expectedSha256` 和 `expectedSize` 在内容比较前先做调用参数校验：哈希格式、整数范围错误属于 `INVALID_BLOB_ARGUMENT`；参数合法但与实际正文不同才属于 `BLOB_INTEGRITY_MISMATCH`。外部调用方传入的 Blob、Tenant 或配置非法仍分别归类为 `INVALID_BLOB_ARGUMENT` / `TENANT_SCOPE_MISMATCH`；Persistence 返回的 GC claim/beginDeletion claim 若格式、Tenant、incarnation、physical key 或连续性异常，则统一归类为 `BLOB_INTEGRITY_MISMATCH(result=unknown)`，因为执行器不能把事实源协议错误误判为调用方错误。lease 的时间有效性由 PG 决定，executor 只接受规范 UTC ISO（毫秒精度 `Z`）并验证 beginDeletion 除 phase 外全部字段连续。
 
 `stable_mark_gc_blocked` 不能直接重新 promote。协调器必须先调用生命周期解析端口：`pre_delete/deleting` 继续阻塞，`active` 回到标记重试，只有明确 `deleted` 才退回复制步骤并使用保留的 staging 重新 promote。
 

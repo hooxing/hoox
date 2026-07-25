@@ -419,13 +419,37 @@ export class PgBlobLifecycleRepository
     try {
       return await withTenantTransaction(this.pool, input.scope, async (client) => {
         const currentRow = await findCommit(client, input.scope.tenantId, input.operationId, true);
-        if (
-          currentRow === undefined ||
-          safeInteger(currentRow.version, "commit version") !== input.expectedSnapshotVersion
-        ) {
+        if (currentRow === undefined) {
           return { status: "version_conflict" as const };
         }
         const current = mapCommit(currentRow);
+        if (current.version !== input.expectedSnapshotVersion) {
+          if (
+            current.version === input.expectedSnapshotVersion + 1 &&
+            current.status === "promotion_started" &&
+            current.allocation?.allocationId === input.allocationId &&
+            current.promotionAuthorization !== undefined
+          ) {
+            const readback = await findAuthorization(
+              client,
+              input.scope.tenantId,
+              current.promotionAuthorization.authorizationId,
+              false,
+            );
+            if (
+              readback !== undefined &&
+              readback.operation_id === input.operationId &&
+              readback.allocation_id === input.allocationId
+            ) {
+              return {
+                status: "started" as const,
+                authorization: current.promotionAuthorization,
+                snapshotVersion: current.version,
+              };
+            }
+          }
+          return { status: "version_conflict" as const };
+        }
         if (current.status !== "allocation_reserved") return { status: "invalid_state" as const };
         const allocation = await findAllocationById(
           client,
@@ -540,13 +564,40 @@ export class PgBlobLifecycleRepository
     try {
       return await withTenantTransaction(this.pool, input.scope, async (client) => {
         const commitRow = await findCommit(client, input.scope.tenantId, input.operationId, true);
-        if (
-          commitRow === undefined ||
-          safeInteger(commitRow.version, "commit version") !== input.expectedSnapshotVersion
-        ) {
+        if (commitRow === undefined) {
           return { status: "version_conflict" as const };
         }
         const current = mapCommit(commitRow);
+        if (current.version !== input.expectedSnapshotVersion) {
+          if (
+            current.version === input.expectedSnapshotVersion + 1 &&
+            current.status === "allocation_reserved"
+          ) {
+            const consumed = await findAuthorization(
+              client,
+              input.scope.tenantId,
+              input.authorizationId,
+              true,
+            );
+            const proof =
+              consumed === undefined || consumed.current_execution_id === null
+                ? undefined
+                : await findExecution(
+                    client,
+                    input.scope.tenantId,
+                    consumed.current_execution_id,
+                    true,
+                  );
+            if (
+              consumed?.operation_id === input.operationId &&
+              consumed.authorization_state === "consumed_not_copied" &&
+              proof?.proof_status === "consumed_not_copied"
+            ) {
+              return { status: "proven_not_copied" as const, snapshotVersion: current.version };
+            }
+          }
+          return { status: "version_conflict" as const };
+        }
         if (current.status !== "promotion_started") return { status: "invalid_state" as const };
         if (current.promotionAuthorization?.authorizationId !== input.authorizationId) {
           return { status: "authorization_mismatch" as const };
@@ -964,9 +1015,22 @@ export class PgBlobLifecycleRepository
           ],
         );
         const row = result.rows[0];
-        return row === undefined
-          ? { status: "claim_lost" as const }
-          : { status: "marked" as const, execution: mapExecution(row) };
+        if (row !== undefined) return { status: "marked" as const, execution: mapExecution(row) };
+        const readback = await findExecution(
+          client,
+          input.scope.tenantId,
+          input.execution.executionId,
+          false,
+        );
+        if (
+          readback !== undefined &&
+          executionMatches(readback, input.execution) &&
+          readback.phase === "executing" &&
+          readback.proof_status === "copy_issued"
+        ) {
+          return { status: "marked" as const, execution: mapExecution(readback) };
+        }
+        return { status: "claim_lost" as const };
       });
     } catch (error) {
       throw mapPersistenceError(error, "记录 promotion COPY 意图");
@@ -1194,7 +1258,38 @@ export class PgBlobLifecycleRepository
           ],
         );
         const lifecycle = result.rows[0];
-        if (lifecycle === undefined) return { status: "claim_lost" as const };
+        if (lifecycle === undefined) {
+          const readback = await client.query<{ one: number }>(
+            `SELECT 1 AS one
+               FROM blob_lifecycles lifecycle
+               JOIN blob_gc_claims claim
+                 ON claim.tenant_id = lifecycle.tenant_id
+                AND claim.lifecycle_id = lifecycle.lifecycle_id
+              WHERE lifecycle.tenant_id = $1 AND lifecycle.purpose = $2
+                AND lifecycle.sha256 = $3 AND lifecycle.size = $4
+                AND lifecycle.state = 'deleting' AND lifecycle.current_incarnation_id = $5
+                AND lifecycle.current_claim_id = $6 AND lifecycle.generation = $7
+                AND claim.claim_id = $6 AND claim.generation = $7
+                AND claim.phase = 'deleting' AND claim.incarnation_id = $5
+                AND claim.physical_object_key = $8`,
+            [
+              input.scope.tenantId,
+              input.blob.purpose,
+              input.blob.sha256,
+              input.blob.size,
+              input.claim.incarnationId,
+              input.claim.claimId,
+              input.claim.generation,
+              input.claim.physicalObjectKey,
+            ],
+          );
+          return readback.rows[0] === undefined
+            ? { status: "claim_lost" as const }
+            : {
+                status: "started" as const,
+                claim: { ...input.claim, phase: "deleting" as const },
+              };
+        }
         await client.query(
           `UPDATE blob_gc_claims SET phase = 'deleting', updated_at = clock_timestamp()
             WHERE tenant_id = $1 AND claim_id = $2 AND generation = $3`,
@@ -1347,6 +1442,30 @@ export class PgBlobLifecycleRepository
           );
           return;
         }
+        const readback = await client.query<{ one: number }>(
+          `SELECT 1 AS one
+             FROM blob_lifecycles lifecycle
+             JOIN blob_gc_claims claim
+               ON claim.tenant_id = lifecycle.tenant_id
+              AND claim.lifecycle_id = lifecycle.lifecycle_id
+            WHERE lifecycle.tenant_id = $1 AND lifecycle.purpose = $2
+              AND lifecycle.sha256 = $3 AND lifecycle.size = $4
+              AND lifecycle.state = 'active' AND lifecycle.current_incarnation_id = $5
+              AND claim.claim_id = $6 AND claim.generation = $7
+              AND claim.phase = 'released' AND claim.incarnation_id = $5
+              AND claim.physical_object_key = $8`,
+          [
+            input.scope.tenantId,
+            input.blob.purpose,
+            input.blob.sha256,
+            input.blob.size,
+            input.claim.incarnationId,
+            input.claim.claimId,
+            input.claim.generation,
+            input.claim.physicalObjectKey,
+          ],
+        );
+        if (readback.rows[0] !== undefined) return;
         throw casConflict("pre-delete claim 已失效或已进入 deleting");
       });
     } catch (error) {

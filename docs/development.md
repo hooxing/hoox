@@ -59,6 +59,18 @@ corepack pnpm config:check
 - 示例中的数据库密码、访问密钥、模板 ID、模型地址和模型 ID 必须保持为明显占位值。
 - CI 只使用 `.env.example` 执行静态 Compose 展开，不连接 PostgreSQL、MinIO、CubeSandbox 或模型服务。
 
+## PostgreSQL 角色 bootstrap
+
+业务 Schema 迁移不能替代数据库级 bootstrap。首次准备专用数据库时，由不进入应用进程的 Database Admin 完成以下一次性操作：
+
+1. 创建无 `SUPERUSER/CREATEDB/CREATEROLE/BYPASSRLS/REPLICATION` 的 Migrator 与 Runtime 登录角色，并保证两者都没有任何上游角色成员关系；Runtime 即使设置为 `NOINHERIT` 也不能保留可 `SET ROLE` 的成员关系；
+2. 从 `PUBLIC`、Migrator 和 Runtime 撤销目标数据库的全部权限，再只向 Migrator 和 Runtime 授予 `CONNECT`；Runtime 不得通过 `PUBLIC` 获得 `CREATE` 或 `TEMPORARY`；
+3. 创建专用业务 Schema，并只让 Migrator 成为该 Schema owner；Database Admin 继续作为数据库 owner；
+4. 确认 Runtime 不是数据库、Schema、表或序列 owner；Migrator 不是数据库 owner，且只拥有配置的业务 Schema；
+5. 分别写入本机忽略文件中的 `DATABASE_BOOTSTRAP_URL`、`MIGRATION_DATABASE_URL`、`DATABASE_URL`、`DATABASE_RUNTIME_ROLE`、`DATABASE_MIGRATOR_ROLE` 与 `DATABASE_SCHEMA`。Bootstrap URL 只用于本地权限集成测试或受控运维，不能进入服务进程。
+
+`pnpm db:migrate:up` 会在任何 DDL 前同时验证 Runtime、当前 Migrator、Schema owner 与精确 `search_path`，并拒绝 Runtime 的目标 Schema `CREATE`、数据库 `TEMPORARY`、Migrator 对无关 Schema 的有效 `CREATE`、额外非系统 ownership、任何 routine default ACL 记录及任何目标 Schema routine。Schema migration、迁移记录、最小 ACL bootstrap 和结束白名单断言共用同一事务。首版 routine manifest 为空；runner 完全不修改 routine 的全局或局部 default ACL，并在迁移 SQL 后、提交前再次断言目标 routine 集合仍为空，任何 migration 创建 routine 都会整体回滚。bootstrap 撤销 Runtime 和 `PUBLIC` 在业务 Schema、全部业务表、迁移表及 sequence 上的权限，并对逐表全部 DML/DDL、routine `EXECUTE` 及数据库、Schema 有效权限执行白名单断言。未来引入函数、过程或聚合前，必须单独设计 manifest 并显式审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 和调用权限。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作；down SQL、ACL 回收和结束断言同样共用一个事务，任一步失败都整体回滚。down 不修改 routine default ACL，也不会删除角色或回滚 Database Admin bootstrap。
+
 ## 提交前检查
 
 1. 行为变化有测试。

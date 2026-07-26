@@ -26,12 +26,6 @@ export interface ServiceAssemblyFactory<TConfiguration> {
   assemble(configuration: TConfiguration): Promise<ServiceAssembly>;
 }
 
-/**
- * 生产 capability 由服务自身模块保留，不能由通用进程框架或测试 Fake 凭资源名称伪造。
- * 仍会先执行结构校验和冻结快照，capability 只解决“该装配确实来自受审生产组合”的问题。
- */
-export type ProductionAssemblyVerifier = (assembly: ServiceAssembly) => boolean;
-
 export class ServiceAssemblyError extends Error {
   constructor(
     readonly serviceName: string,
@@ -175,7 +169,6 @@ export async function startServiceProcess<
   readonly configuration: TConfiguration;
   readonly shutdownTimeoutMilliseconds: number;
   readonly assembler?: ServiceAssemblyFactory<TConfiguration>;
-  readonly productionAssemblyVerifier?: ProductionAssemblyVerifier;
   readonly signalSource?: ProcessSignalSource;
   readonly onShutdownFailure?: (error: Error) => void;
 }): Promise<RunningServiceProcess> {
@@ -183,10 +176,9 @@ export async function startServiceProcess<
   if (input.assembler === undefined) {
     throw new ServiceAssemblyError(input.serviceName, "ASSEMBLER_MISSING");
   }
-  if (
-    input.configuration.runtimeEnvironment === "production" &&
-    input.productionAssemblyVerifier === undefined
-  ) {
+  // 通用入口永远不能由调用方提供“我可信”的回调解锁生产环境。
+  // 只有服务自己的封闭包装器可以在验证真实依赖后调用其受审启动路径。
+  if (input.configuration.runtimeEnvironment === "production") {
     throw new ServiceAssemblyError(input.serviceName, "PRODUCTION_ASSEMBLY_UNAVAILABLE");
   }
   const startupSignals = installStartupSafeSignalHandlers({
@@ -199,14 +191,6 @@ export async function startServiceProcess<
   try {
     assembly = await input.assembler.assemble(input.configuration);
     validateAssembly(assembly);
-    if (
-      input.configuration.runtimeEnvironment === "production" &&
-      !input.productionAssemblyVerifier?.(assembly)
-    ) {
-      await closePartiallyAssembledResources(assembly);
-      assembly = undefined;
-      throw new ServiceAssemblyError(input.serviceName, "PRODUCTION_ASSEMBLY_UNAVAILABLE");
-    }
     // assembler/最外层日志只可记录稳定 serviceName 和错误码，禁止序列化 configuration。
     const probeNames = new Set<string>();
     for (const probe of assembly.readiness) {

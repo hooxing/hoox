@@ -21,7 +21,9 @@
     "test:cube:real": "pnpm --filter @cubesandbox/sdk build && tsx runtime-ts/packages/sandbox/src/real-smoke.ts",
     "test:pi-cube:real": "pnpm build && tsx runtime-ts/packages/pi-adapter/src/real-vertical-smoke.ts",
     "test:integration:pg": "node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",
-    "test:process-runtime": "pnpm --filter @cube-runtime/process-runtime build && vitest run runtime-ts/packages/process-runtime/src runtime-ts/apps/api/src/process-entry.test.ts runtime-ts/apps/agent-worker/src/process-entry.test.ts runtime-ts/apps/scheduler/src/process-entry.test.ts",
+    "build:process-runtime-dependencies": "pnpm --filter \"@cube-runtime/api^...\" --filter \"@cube-runtime/agent-worker^...\" --filter \"@cube-runtime/scheduler^...\" build",
+    "test:process-runtime": "pnpm build:process-runtime-dependencies && vitest run runtime-ts/packages/process-runtime/src runtime-ts/apps/api/src/process-entry.test.ts runtime-ts/apps/agent-worker/src/process-entry.test.ts runtime-ts/apps/scheduler/src/process-entry.test.ts",
+    "test:process-runtime:clean": "node scripts/remove-workspace-dist.mjs && pnpm test:process-runtime",
     "test:process:container": "pnpm --filter @cube-runtime/process-runtime build && node scripts/run-process-container-gate.mjs",
     "typecheck": "pnpm --filter @cubesandbox/sdk build && tsc -p tsconfig.json && pnpm --recursive --if-present typecheck",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm config:check"

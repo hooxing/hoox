@@ -211,6 +211,8 @@ class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThre
   async createQueuedRun(input: {
     readonly scope: TenantScope;
     readonly run: Run;
+    readonly thread: Thread;
+    readonly inputText: string;
     readonly idempotency: IdempotentCommand;
   }): Promise<IdempotentCreateResult<Run>> {
     await this.beforeRunCreate?.();
@@ -546,7 +548,7 @@ describe("Fastify API 契约", () => {
       method: "POST" as const,
       url: "/v1/threads/thread_1/runs",
       headers: { authorization: "Bearer token-a", "idempotency-key": "run-key-0001" },
-      payload: {},
+      payload: { input: "请生成执行结果" },
     };
     state.idempotencyFirstObservations.length = 0;
     state.idempotencyOutcomes.length = 0;
@@ -557,6 +559,12 @@ describe("Fastify API 契约", () => {
     expect(state.runs).toHaveLength(1);
     expect(state.idempotencyFirstObservations).toEqual([false, false]);
     expect([...state.idempotencyOutcomes].sort()).toEqual(["created", "replayed"]);
+
+    const conflict = await app.inject({
+      ...request,
+      payload: { input: "相同幂等键但不同输入" },
+    });
+    expect(conflict.statusCode).toBe(409);
 
     const loaded = await app.inject({
       method: "GET",
@@ -594,11 +602,31 @@ describe("Fastify API 契约", () => {
       method: "POST",
       url: "/v1/threads/thread_1/runs",
       headers: { authorization: "Bearer token-a", "idempotency-key": "run-race-key" },
-      payload: {},
+      payload: { input: "归档竞态输入" },
     });
     expect(response.statusCode).toBe(422);
     expect(response.json().error.code).toBe("INVALID_STATE");
     expect(state.runs).toHaveLength(0);
+  });
+
+  it("Run 输入按 UTF-8 字节而非 UTF-16 字符数限制", async () => {
+    const { app } = fixture();
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-input-limit" },
+      payload: { title: "输入边界任务" },
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-input-limit-key" },
+      // 单个 emoji 为 4 字节；字符数远小于 1 MiB，字节数却超过边界。
+      payload: { input: "😀".repeat(262_145) },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("INVALID_REQUEST");
   });
 
   it("超限请求体和无效游标只返回固定 ErrorEnvelope", async () => {
@@ -727,7 +755,7 @@ describe("Fastify API 契约", () => {
       method: "POST",
       url: "/v1/threads/thread_1/runs",
       headers: { authorization: "Bearer token-a", "idempotency-key": "revoke-run-key" },
-      payload: {},
+      payload: { input: "撤权竞态输入" },
     });
     expect(deniedRun.statusCode).toBe(404);
     expect(runFixture.state.runs.size).toBe(0);

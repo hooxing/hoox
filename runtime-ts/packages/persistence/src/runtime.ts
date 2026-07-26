@@ -3,6 +3,7 @@ import { migrateDown, migrateUp } from "./migrations.js";
 import { PgArchiveThreadCommand, PgCoreRepositories } from "./pg-core-repositories.js";
 import { PgBlobLifecycleRepository, type PgBlobLifecycleOptions } from "./pg-blob-lifecycle.js";
 import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-state.js";
+import { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 import type { ArchiveThreadCommandPort, CoreRepositories } from "./ports.js";
 import { createPostgresPool, probePostgres, type PostgresPoolOptions } from "./postgres.js";
 
@@ -12,6 +13,8 @@ export interface PersistenceRuntime {
   readonly archiveThread: ArchiveThreadCommandPort;
   readonly execution: PgExecutionPersistence;
   readonly runSetup: PgRunExecutionSetup;
+  readonly runDispatchCreation: PgRunDispatchCreation;
+  readonly runDispatchOutbox: PgRunDispatchOutbox;
   probe(): Promise<void>;
   close(): Promise<void>;
 }
@@ -35,6 +38,8 @@ export function createPersistenceRuntime(
     archiveThread: new PgArchiveThreadCommand(pool),
     execution: new PgExecutionPersistence(pool),
     runSetup: new PgRunExecutionSetup(pool),
+    runDispatchCreation: new PgRunDispatchCreation(pool),
+    runDispatchOutbox: new PgRunDispatchOutbox(pool),
     probe: () => probePostgres(pool),
     close: () => pool.end(),
   };

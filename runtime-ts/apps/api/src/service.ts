@@ -16,6 +16,7 @@ import type {
 } from "@cube-runtime/persistence";
 import { toRunDto, toThreadDto } from "@cube-runtime/protocol-mapper";
 import type { RunDto, ThreadDto, ThreadPageDto } from "@cube-runtime/protocol";
+import { MAX_RUN_INPUT_UTF8_BYTES } from "@cube-runtime/protocol";
 import type {
   ApiClock,
   ApiIdGenerator,
@@ -186,10 +187,22 @@ export class ApiService {
     }
   }
 
-  async createRun(auth: AuthContext, rawThreadId: string, idempotencyKey: string): Promise<RunDto> {
+  async createRun(
+    auth: AuthContext,
+    rawThreadId: string,
+    inputText: string,
+    idempotencyKey: string,
+  ): Promise<RunDto> {
     try {
       const capability = this.dependencies.createCapability;
       if (capability === undefined) throw new ApiFailure("not_found");
+      // JavaScript 字符串长度是 UTF-16 code unit，不能作为持久输入的配额依据。
+      if (
+        inputText.trim().length === 0 ||
+        Buffer.byteLength(inputText, "utf8") > MAX_RUN_INPUT_UTF8_BYTES
+      ) {
+        throw new ApiFailure("bad_request");
+      }
       const thread = await this.dependencies.repositories.threads.get(
         auth.scope,
         threadId(rawThreadId),
@@ -203,9 +216,11 @@ export class ApiService {
       const result = await capability.enqueueOutbox.createQueuedRun({
         scope: auth.scope,
         run,
+        thread: thread.entity,
+        inputText,
         idempotency: {
           key: idempotencyKey,
-          requestHash: commandHash("run.create", { threadId: thread.entity.id }),
+          requestHash: commandHash("run.create", { threadId: thread.entity.id, inputText }),
         },
       });
       if (result.outcome === "key_conflict") throw new ApiFailure("conflict");

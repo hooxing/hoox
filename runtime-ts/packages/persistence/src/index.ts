@@ -4,6 +4,7 @@ export * from "./errors.js";
 export * from "./ports.js";
 export * from "./pg-blob-lifecycle.js";
 export { PgArchiveThreadCommand } from "./pg-core-repositories.js";
+export { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 export * from "./pg-run-worker-state.js";
 export * from "./runtime.js";
 export {

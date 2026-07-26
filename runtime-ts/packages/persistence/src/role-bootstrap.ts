@@ -29,6 +29,7 @@ const runWorkerTables = new Set([
   "external_effect_permits",
   "mutation_receipts",
 ]);
+const runDispatchTables = new Set(["api_idempotency_records", "run_dispatch_outbox"]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -61,6 +62,8 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["effect_invocations", new Set(["SELECT", "INSERT"])],
   ["external_effect_permits", new Set(["SELECT", "INSERT"])],
   ["mutation_receipts", new Set(["SELECT", "INSERT"])],
+  ["api_idempotency_records", new Set(["SELECT", "INSERT"])],
+  ["run_dispatch_outbox", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -112,6 +115,20 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ["sandbox_registry", new Set(["state", "actual_ttl_seconds", "updated_at"])],
   ["cleanup_outbox", new Set(["state", "disposition", "payload", "payload_digest", "updated_at"])],
   ["external_effect_permits", new Set(["consumed_at"])],
+  [
+    "run_dispatch_outbox",
+    new Set([
+      "state",
+      "generation",
+      "claim_token",
+      "claimed_by",
+      "lease_expires_at",
+      "next_attempt_at",
+      "dispatch_attempts",
+      "last_error_code",
+      "updated_at",
+    ]),
+  ],
 ]);
 
 async function hasMembershipLockMarker(client: PoolClient): Promise<boolean> {
@@ -132,12 +149,26 @@ async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
   return result.rows[0]?.present === true;
 }
 
+async function hasRunDispatchState(client: PoolClient): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_class
+        WHERE relnamespace=current_schema()::regnamespace
+          AND relname='run_dispatch_outbox' AND relkind IN ('r','p')
+     ) AS present`,
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function activeTablePolicy(
   client: PoolClient,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
   if (!(await hasRunWorkerState(client))) {
     for (const table of runWorkerTables) policy.delete(table);
+  }
+  if (!(await hasRunDispatchState(client))) {
+    for (const table of runDispatchTables) policy.delete(table);
   }
   return policy;
 }
@@ -153,6 +184,9 @@ async function activeColumnUpdatePolicy(
   );
   if (!(await hasRunWorkerState(client))) {
     for (const table of runWorkerTables) policy.delete(table);
+  }
+  if (!(await hasRunDispatchState(client))) {
+    for (const table of runDispatchTables) policy.delete(table);
   }
   return policy;
 }
@@ -681,6 +715,14 @@ export async function bootstrapRuntimeAccessOnClient(
        TO ${role}`,
     );
   }
+  if (await hasRunDispatchState(client)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.api_idempotency_records,
+         ${schema}.run_dispatch_outbox
+       TO ${role}`,
+    );
+  }
   await client.query(
     `GRANT UPDATE(state, current_incarnation_id, generation, current_claim_id, lease_expires_at, updated_at)
        ON TABLE ${schema}.blob_lifecycles TO ${role};
@@ -717,6 +759,14 @@ export async function bootstrapRuntimeAccessOnClient(
        ON TABLE ${schema}.cleanup_outbox TO ${role};
        GRANT UPDATE(consumed_at)
          ON TABLE ${schema}.external_effect_permits TO ${role}`,
+    );
+  }
+  if (await hasRunDispatchState(client)) {
+    await client.query(
+      `GRANT UPDATE(
+         state, generation, claim_token, claimed_by, lease_expires_at, next_attempt_at,
+         dispatch_attempts, last_error_code, updated_at
+       ) ON TABLE ${schema}.run_dispatch_outbox TO ${role}`,
     );
   }
   await assertActiveRuntimeWhitelist(client, context);

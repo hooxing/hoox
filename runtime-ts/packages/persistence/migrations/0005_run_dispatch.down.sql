@@ -1,0 +1,3 @@
+DROP TABLE run_dispatch_outbox;
+DROP TABLE api_idempotency_records;
+ALTER TABLE run_execution_inputs DROP CONSTRAINT run_execution_inputs_nonblank_input_check;

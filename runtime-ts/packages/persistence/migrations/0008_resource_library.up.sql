@@ -78,6 +78,11 @@ ALTER TABLE resources ADD CONSTRAINT resources_latest_version_fk
 CREATE INDEX resources_search_idx
   ON resources (tenant_id, visibility, updated_at DESC, id DESC);
 
+-- 第一阶段搜索是规范名称的字面前缀匹配；text_pattern_ops 让固定前缀可走索引，
+-- 同时避免为尚未采用的模糊搜索提前安装 pg_trgm 扩展。
+CREATE INDEX resources_name_prefix_idx
+  ON resources (tenant_id, visibility, normalized_name text_pattern_ops);
+
 CREATE TABLE resource_promotion_authorizations (
   tenant_id text NOT NULL,
   authorization_id text NOT NULL CHECK (

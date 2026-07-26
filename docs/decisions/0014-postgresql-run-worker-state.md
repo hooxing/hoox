@@ -42,6 +42,7 @@ ADR-0011 已固定双栅栏、ExecutionAttempt、不可变 receipt、Projection 
 - claim、renew、permit 和 mutation 使用数据库时钟；claim/mutation 使用 `SERIALIZABLE`，并对聚合根与栅栏行加锁；
 - 初始化发生唯一键冲突后必须锁定已有输入并比较完整 scope、文本、回答、Projection 与摘要；只有逐字段相同才是幂等重放，否则返回显式 conflict；waiting 回答使用 Run version 与旧回答 CAS，禁止无条件覆盖；
 - mutation receipt 保存完整不可变结果快照。COMMIT 后响应未知时只返回 `response_unknown`，调用方按原 scope 与幂等键读回，不重构或猜测结果；
+- 事务框架区分 body 与 COMMIT 阶段：约束、序列化和死锁等明确拒绝仍按确定失败处理；COMMIT 已发出后的连接/协议异常标记专用 unknown 错误、淘汰连接且不再发送 ROLLBACK；
 - Revision、Workspace head、Run/Attempt 终态、事件、Projection、Outbox 和 receipt 在同一事务中提交；
 - cleanup 只允许 `pending → started → completed|unknown`，`armed` 和身份永久不变，disposition 只能在 started 首次决定；
 - EffectInvocation 以 Attempt+callId 永久唯一；permit 同时绑定双栅栏、Attempt version、调用参数摘要与数据库有效期，并且只能消费一次；

@@ -112,6 +112,33 @@ function signed(input: Omit<RuntimeMutation, "schemaVersion" | "commandDigest">)
   return { ...unsigned, commandDigest: runtimeMutationDigest(unsigned) };
 }
 
+/** 在真实 COMMIT 已成功后丢弃客户端响应，覆盖事务框架而非业务 afterCommit hook。 */
+function withLostCommitResponse(upstream: Pool): Pool {
+  return {
+    connect: async () => {
+      const client = await upstream.connect();
+      const originalQuery = client.query.bind(client) as (
+        ...args: readonly unknown[]
+      ) => Promise<unknown>;
+      client.query = (async (...args: readonly unknown[]) => {
+        const result = await originalQuery(...args);
+        const first = args[0];
+        const sql =
+          typeof first === "string"
+            ? first
+            : typeof first === "object" && first !== null && "text" in first
+              ? String(first.text)
+              : "";
+        if (sql.trim().toUpperCase() === "COMMIT") {
+          throw Object.assign(new Error("模拟 COMMIT 响应丢失"), { code: "ECONNRESET" });
+        }
+        return result;
+      }) as typeof client.query;
+      return client;
+    },
+  } as unknown as Pool;
+}
+
 describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
   beforeAll(async () => {
     if (!bootstrapUrl) throw new Error("缺少 DATABASE_BOOTSTRAP_URL");
@@ -439,15 +466,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       leaseDurationMs: 30_000,
     });
     if (claimed.outcome !== "claimed") throw new Error("claim 失败");
-    let failOnce = true;
-    const lossy = new PgExecutionPersistence(runtime, {
-      afterCommit: () => {
-        if (failOnce) {
-          failOnce = false;
-          throw new Error("模拟 COMMIT 响应丢失");
-        }
-      },
-    });
+    const lossy = new PgExecutionPersistence(withLostCommitResponse(runtime));
     const command = signed({
       idempotencyKey: `${claimed.snapshot.attempt.attemptId}/checkpoint`,
       fence: claimed.fence,

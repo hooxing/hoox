@@ -232,9 +232,10 @@ describe("WorkspaceManifest canonical 契约", () => {
     );
   });
 
-  it("maxFiles 在遍历不可信 entries 前失败，不读取元素或枚举全部键", () => {
+  it("拒绝伪造 length 的 Proxy，普通数组超限时也不读取元素", () => {
     const base = [file("a", "1")];
     let elementDescriptorReads = 0;
+    let lengthDescriptorReads = 0;
     let ownKeysCalls = 0;
     let directReads = 0;
     const oversized = new Proxy(base, {
@@ -247,19 +248,34 @@ describe("WorkspaceManifest canonical 契约", () => {
         throw new Error("超限前不应枚举元素");
       },
       getOwnPropertyDescriptor(target, property) {
-        if (property !== "length") {
-          elementDescriptorReads += 1;
-          throw new Error("超限前不应读取元素 descriptor");
+        if (property === "length") {
+          lengthDescriptorReads += 1;
+          return { ...Reflect.getOwnPropertyDescriptor(target, property), value: 0 };
         }
-        return Reflect.getOwnPropertyDescriptor(target, property);
+        elementDescriptorReads += 1;
+        throw new Error("拒绝 Proxy 前不应读取元素 descriptor");
       },
     });
-    expectCode(() => manifest(oversized, { ...POLICY, maxFiles: 0 }), "LIMIT_EXCEEDED");
-    expect({ directReads, ownKeysCalls, elementDescriptorReads }).toEqual({
+    expectCode(() => manifest(oversized, { ...POLICY, maxFiles: 0 }), "INVALID_MANIFEST");
+    expect({ directReads, ownKeysCalls, elementDescriptorReads, lengthDescriptorReads }).toEqual({
       directReads: 0,
       ownKeysCalls: 0,
       elementDescriptorReads: 0,
+      lengthDescriptorReads: 0,
     });
+
+    let ordinaryGetterCalls = 0;
+    const ordinaryOversized: unknown[] = [];
+    Object.defineProperty(ordinaryOversized, "0", {
+      enumerable: true,
+      get() {
+        ordinaryGetterCalls += 1;
+        return file("ordinary.txt", "x");
+      },
+    });
+    ordinaryOversized.length = 1;
+    expectCode(() => manifest(ordinaryOversized, { ...POLICY, maxFiles: 0 }), "LIMIT_EXCEEDED");
+    expect(ordinaryGetterCalls).toBe(0);
   });
 
   it("同一 Tenant/purpose/incarnation 不能绑定不同内容或物理键", () => {
@@ -271,7 +287,7 @@ describe("WorkspaceManifest canonical 契约", () => {
     expect(manifest([same, { ...same, path: "b" }]).entries).toHaveLength(2);
   });
 
-  it("拒绝 accessor，且不执行 getter；Proxy 数据字段只快照一次", () => {
+  it("拒绝 accessor 和所有 Proxy，且不执行动态字段", () => {
     let getterCalls = 0;
     const accessorEntry = { ...file("a", "x") } as Record<string, unknown>;
     Object.defineProperty(accessorEntry, "path", {
@@ -308,9 +324,9 @@ describe("WorkspaceManifest canonical 契约", () => {
         return Reflect.getOwnPropertyDescriptor(target, property);
       },
     });
-    expect(manifest([proxyEntry]).entries[0]?.path).toBe("proxy.txt");
+    expectCode(() => manifest([proxyEntry]), "INVALID_MANIFEST");
     expect(directReads).toBe(0);
-    expect([...descriptorCalls.values()].every((count) => count === 1)).toBe(true);
+    expect(descriptorCalls.size).toBe(0);
 
     const revoked = Proxy.revocable(file("revoked.txt", "x"), {});
     revoked.revoke();

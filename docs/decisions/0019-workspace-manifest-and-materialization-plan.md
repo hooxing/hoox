@@ -43,7 +43,7 @@ WorkspaceRevision 已经是不可变领域对象，但此前只有整体 `object
 - schemaVersion 1 的大小写碰撞键精确定义为“只把 ASCII `A-Z` 映射到 `a-z`，其他 NFC code point 原样保留”。它拒绝精确重复、ASCII 大小写碰撞及双向目录/文件前缀冲突，但不宣称实现完整 Unicode case folding；Sandbox 目标仍是大小写敏感 POSIX。未来若扩大折叠表必须提升 schemaVersion，不能依赖会随 Node.js 变化的 Unicode 数据表；
 - canonical payload 使用固定字段顺序、JSON 字符串转义、非负且非 `-0` 的十进制安全整数，entry 按合法 Unicode 路径的 UTF-8 字节序排列，再对 UTF-8 bytes 计算小写 SHA-256。拒绝未配对 surrogate 后，UTF-8 comparator 对允许路径构成全序；清单自身的 `digest` 不进入摘要，并以固定 Unicode golden vector 防止实现漂移；
 - 清单根绑定 `tenantId` 并纳入 canonical digest；解析时必须与调用方可信 Tenant 一致，所有 entry 也必须属于该 Tenant。每个 entry 同时绑定 `sha256 + size` 与 `tenantId + purpose=workspace + incarnationId + physicalObjectKey`。物理键必须与 ADR-0010 stable key 后缀逐字段一致；同 `(tenantId, purpose, incarnationId)` 在一个清单中只能绑定相同 `sha256 + size + physicalObjectKey`，同 SHA-256 仍不代表同物理对象；
-- 所有 unknown 对象和数组先通过 data descriptor 单次快照；accessor、稀疏数组、额外数组字段、Symbol 字段和非普通对象失败关闭。后续校验与组装只读取快照，Proxy 的普通 `get` 不能在校验后替换字段；
+- Node.js unknown 边界先用运行时原生检测拒绝所有 Proxy（含 revoked Proxy），再对普通对象和原生 Array 做 data descriptor 单次快照；accessor、稀疏数组、额外数组字段、Symbol 字段和非普通对象失败关闭。`maxFiles` 在枚举或读取数组元素前只读取原生 Array 的不可伪造 length descriptor并提前拒绝超限输入，后续校验与组装只读取快照；
 - 调用方每次创建/解析清单必须显式提供 `maxFiles`、`maxTotalBytes`，可选提供单文件和路径 UTF-8 字节限制。核心不提供产品默认值；
 - 物化计划只接受完整性通过的不可变清单和规范 POSIX 绝对根目录。输出路径均由安全相对路径解析得到；计划可从空目录或前一清单生成，目录创建按浅到深、删除按深到浅、文件按 UTF-8 字节序；
 - 相同路径且 `sha256 + size` 相同可作为保留候选，即使目标清单已切换到另一个合法 incarnation；跨路径复用不在 schemaVersion 1 计划中提供，避免来源在删除后失效。计划编码固定阶段 `verify_existing → remove_files → remove_directories → ensure_directories → materialize_files`，执行器不得在验证候选前删除来源；目标清单的每个文件始终保留 fallback stable 对象身份，候选授权或实际内容校验失败时必须写入 fallback。

@@ -17,6 +17,7 @@ import type {
   ExternalEffectCall,
   ExternalEffectPermit,
   FenceInspectionResult,
+  OrphanSandboxCleanupPort,
   RuntimeMutation,
   RuntimeMutationReceiptV1,
   RuntimeMutationResult,
@@ -36,7 +37,9 @@ type AppliedMutation = Extract<
 >;
 
 class RuntimeWriteAbort extends Error {
-  constructor(readonly outcome: "conflict" | "idempotency_conflict" | "fence_lost") {
+  constructor(
+    readonly outcome: "conflict" | "idempotency_conflict" | "protocol_invalid" | "fence_lost",
+  ) {
     super(outcome);
   }
 }
@@ -165,12 +168,27 @@ function boundedIdentifier(value: string, maxBytes = 200): boolean {
   return value.trim().length > 0 && bytes <= maxBytes;
 }
 
-function boundedJson(value: unknown, maxBytes = MAX_PROTOCOL_BYTES): boolean {
+function serializedJson(value: unknown): string | undefined {
   try {
-    return Buffer.byteLength(JSON.stringify(value), "utf8") <= maxBytes;
+    const encoded = JSON.stringify(value);
+    return typeof encoded === "string" ? encoded : undefined;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+/** 与数据库 CHECK 使用同一个 jsonb 规范化表达，避免紧凑 JSON 与 jsonb::text 的字节差异。 */
+async function jsonValuesFitStorage(
+  client: PoolClient,
+  encodedValues: readonly string[],
+  maxBytes = MAX_PROTOCOL_BYTES,
+): Promise<boolean> {
+  const result = await client.query<{ fits: boolean }>(
+    `SELECT COALESCE(bool_and(octet_length(value::jsonb::text) <= $2), true) AS fits
+       FROM unnest($1::text[]) AS encoded(value)`,
+    [encodedValues, maxBytes],
+  );
+  return result.rows[0]?.fits === true;
 }
 
 /** 应用层先拒绝，数据库 CHECK 再防止其他受限 SQL 调用方绕过端口。 */
@@ -179,11 +197,16 @@ function mutationStorageShapeValid(command: RuntimeMutation): boolean {
     !boundedIdentifier(command.idempotencyKey, 512) ||
     !boundedIdentifier(command.fence.runClaim.token) ||
     !/^[0-9a-f]{64}$/.test(command.commandDigest) ||
-    !command.events.every((event) => boundedJson(event)) ||
+    !command.events.every((event) => serializedJson(event.payload) !== undefined) ||
     !command.outbox.every(
-      (item) => boundedIdentifier(item.idempotencyKey, 512) && boundedJson(item),
+      (item) =>
+        boundedIdentifier(item.idempotencyKey, 512) &&
+        serializedJson(
+          item.kind === "sandbox_lifecycle_unknown" ? item.payload.uncertainEvent : item.payload,
+        ) !== undefined,
     ) ||
-    (command.rolloutProjection !== undefined && !boundedJson(command.rolloutProjection))
+    (command.rolloutProjection !== undefined &&
+      serializedJson(command.rolloutProjection) === undefined)
   ) {
     return false;
   }
@@ -235,9 +258,13 @@ export class PgRunExecutionSetup {
     ) {
       throw new TypeError("Run 初始回答长度无效");
     }
-    if (!boundedJson(input.rolloutProjection)) throw new TypeError("初始 Projection 超过 64KiB");
+    const projectionJson = serializedJson(input.rolloutProjection);
+    if (projectionJson === undefined) throw new TypeError("初始 Projection 不是合法 JSON");
     const digest = rolloutProjectionDigest(input.rolloutProjection);
     return withTenantTransaction(this.pool, { tenantId: input.scope.tenantId }, async (client) => {
+      if (!(await jsonValuesFitStorage(client, [projectionJson]))) {
+        throw new TypeError("初始 Projection 超过 PostgreSQL 规范化 64KiB 上限");
+      }
       const result = await client.query(
         `INSERT INTO run_execution_inputs(
            tenant_id, run_id, thread_id, workspace_id, root_run_id, base_revision_id,
@@ -253,7 +280,7 @@ export class PgRunExecutionSetup {
           input.scope.baseRevisionId ?? null,
           prompt,
           answer ?? null,
-          JSON.stringify(input.rolloutProjection),
+          projectionJson,
           digest,
         ],
       );
@@ -274,7 +301,7 @@ export class PgRunExecutionSetup {
            FROM run_execution_inputs
           WHERE tenant_id=$1 AND run_id=$2
           FOR UPDATE`,
-        [input.scope.tenantId, input.scope.runId, JSON.stringify(input.rolloutProjection)],
+        [input.scope.tenantId, input.scope.runId, projectionJson],
       );
       const row = existing.rows[0];
       return row !== undefined &&
@@ -363,7 +390,12 @@ export class PgRunExecutionSetup {
  * 给 CubeSandbox 驱动增加 PostgreSQL registry 事实源。它不消费 cleanup Outbox；
  * settle 仍由当前 Worker 低延迟调用，崩溃恢复由后续 Outbox consumer 接管。
  */
-export class PgBackedSandboxSessionRegistry implements SandboxSessionRegistryPort {
+export class PgBackedSandboxSessionRegistry
+  implements SandboxSessionRegistryPort, OrphanSandboxCleanupPort
+{
+  /** 只有本实例成功登记后返回的同一个 session 对象才持有孤儿关闭 capability。 */
+  private readonly orphanCapabilities = new WeakSet<object>();
+
   constructor(
     private readonly pool: Pool,
     private readonly upstream: SandboxSessionRegistryPort,
@@ -441,7 +473,10 @@ export class PgBackedSandboxSessionRegistry implements SandboxSessionRegistryPor
         },
         { isolationLevel: "SERIALIZABLE" },
       );
-      if (registered) return result;
+      if (registered) {
+        this.orphanCapabilities.add(result.session);
+        return result;
+      }
     } catch {
       // registry 没有提交时不能把 Sandbox 暴露给 Worker；用 registry 恢复键尽力关闭。
     }
@@ -464,7 +499,6 @@ export class PgBackedSandboxSessionRegistry implements SandboxSessionRegistryPor
       this.pool,
       { tenantId: input.scope.tenantId },
       async (client) => {
-        if (input.cleanupIntentId.startsWith("registry:")) return true;
         const result = await client.query(
           `SELECT 1
              FROM cleanup_outbox cleanup
@@ -523,6 +557,72 @@ export class PgBackedSandboxSessionRegistry implements SandboxSessionRegistryPor
     });
     return result;
   }
+
+  async closeOrphan(
+    input: Parameters<OrphanSandboxCleanupPort["closeOrphan"]>[0],
+  ): Promise<SandboxSettlementResult> {
+    if (!this.orphanCapabilities.has(input.session)) {
+      throw new Error("Sandbox orphan cleanup capability 无效");
+    }
+    const cleanupIntentId = `registry:${input.session.registryId}:orphan-cleanup`;
+    const valid = await withTenantTransaction(
+      this.pool,
+      { tenantId: input.scope.tenantId },
+      async (client) => {
+        const result = await client.query(
+          `SELECT 1
+             FROM sandbox_registry registry
+             JOIN execution_attempts attempt
+               ON attempt.tenant_id=registry.tenant_id
+              AND attempt.attempt_id=registry.attempt_id
+            WHERE registry.tenant_id=$1 AND registry.registry_id=$2
+              AND registry.provider_sandbox_id=$3
+              AND attempt.run_id=$4 AND attempt.thread_id=$5
+              AND attempt.workspace_id=$6 AND attempt.root_run_id=$7
+              AND attempt.base_revision_id IS NOT DISTINCT FROM $8
+            FOR UPDATE OF registry`,
+          [
+            input.scope.tenantId,
+            input.session.registryId,
+            input.session.providerSandboxId,
+            input.scope.runId,
+            input.scope.threadId,
+            input.scope.workspaceId,
+            input.scope.rootRunId,
+            input.scope.baseRevisionId ?? null,
+          ],
+        );
+        if (result.rowCount !== 1) return false;
+        await client.query(
+          `UPDATE sandbox_registry SET state='closing',updated_at=clock_timestamp()
+            WHERE tenant_id=$1 AND registry_id=$2 AND provider_sandbox_id=$3`,
+          [input.scope.tenantId, input.session.registryId, input.session.providerSandboxId],
+        );
+        return true;
+      },
+      { isolationLevel: "SERIALIZABLE" },
+    );
+    if (!valid) throw new Error("Sandbox orphan cleanup scope 或身份不匹配");
+    const result = await this.upstream.settle({
+      scope: input.scope,
+      session: input.session,
+      cleanupIntentId,
+      disposition: "close",
+    });
+    await withTenantTransaction(this.pool, { tenantId: input.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state=$4,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND registry_id=$2 AND provider_sandbox_id=$3`,
+        [
+          input.scope.tenantId,
+          input.session.registryId,
+          input.session.providerSandboxId,
+          result.outcome === "unknown" ? "unknown" : "closed",
+        ],
+      ),
+    );
+    return result;
+  }
 }
 
 export class PgExecutionPersistence implements ExecutionPersistencePort {
@@ -538,8 +638,8 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
   }): Promise<ClaimExecutionResult> {
     const leaseDurationMs = boundedDuration(input.leaseDurationMs, "leaseDurationMs");
     const workerId = input.workerId.trim();
-    if (workerId.length === 0 || workerId.length > 200) {
-      throw new TypeError("workerId 长度必须在 1 到 200 之间");
+    if (!boundedIdentifier(workerId)) {
+      throw new TypeError("workerId 的 UTF-8 字节长度必须在 1 到 200 之间");
     }
     try {
       return await withTenantTransaction(
@@ -971,7 +1071,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
   }
 
   async mutate(command: RuntimeMutation): Promise<RuntimeMutationResult> {
-    if (!mutationStorageShapeValid(command)) return { outcome: "idempotency_conflict" };
+    if (!mutationStorageShapeValid(command)) return { outcome: "protocol_invalid" };
     const { commandDigest: suppliedDigest, ...unsigned } = command;
     if (runtimeMutationDigest(unsigned) !== suppliedDigest) {
       return { outcome: "idempotency_conflict" };
@@ -987,7 +1087,8 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     } catch (error) {
       if (error instanceof TransactionCommitUnknownError) return { outcome: "response_unknown" };
       if (error instanceof RuntimeWriteAbort) return { outcome: error.outcome };
-      if (isPgCode(error, "23505") || isPgCode(error, "23514") || isPgCode(error, "23503")) {
+      if (isPgCode(error, "23514")) return { outcome: "protocol_invalid" };
+      if (isPgCode(error, "23505") || isPgCode(error, "23503")) {
         return { outcome: "idempotency_conflict" };
       }
       return { outcome: "unavailable" };
@@ -1125,6 +1226,23 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     client: PoolClient,
     command: RuntimeMutation,
   ): Promise<RuntimeMutationResult> {
+    const encodedPayloads = [
+      ...command.events.map((event) => serializedJson(event.payload)),
+      ...command.outbox.map((item) =>
+        serializedJson(
+          item.kind === "sandbox_lifecycle_unknown" ? item.payload.uncertainEvent : item.payload,
+        ),
+      ),
+      ...(command.rolloutProjection === undefined
+        ? []
+        : [serializedJson(command.rolloutProjection)]),
+    ];
+    if (
+      encodedPayloads.some((value) => value === undefined) ||
+      !(await jsonValuesFitStorage(client, encodedPayloads as string[]))
+    ) {
+      throw new RuntimeWriteAbort("protocol_invalid");
+    }
     const row = await this.lockFenceState(client, command.fence.scope);
     if (row === undefined) return { outcome: "fence_lost" };
     if (!scopeMatches(row, command.fence.scope)) return { outcome: "scope_mismatch" };
@@ -1723,16 +1841,25 @@ function storedPermitMatches(
   if (stateRow === undefined) return false;
   const permit = input.permit;
   return (
+    scopeMatches(stateRow, permit.scope) &&
+    scopeMatches(stateRow, input.fence.scope) &&
+    permitRow.permit_id === permit.permitId &&
     permitRow.attempt_id === stateRow.attempt_id &&
     permitRow.effect === permit.effect &&
     permitRow.call_id === permit.callId &&
     permitRow.tool_name === permit.toolName &&
     permitRow.args_digest === permit.argsDigest &&
     Number(permitRow.attempt_version) === input.expectedAttemptVersion &&
+    permit.attemptVersion === input.expectedAttemptVersion &&
+    Number(stateRow.attempt_version) === input.expectedAttemptVersion &&
     permitRow.run_claim_token === input.fence.runClaim.token &&
+    permit.runClaimToken === input.fence.runClaim.token &&
     Number(permitRow.run_claim_epoch) === input.fence.runClaim.epoch &&
+    permit.runClaimEpoch === input.fence.runClaim.epoch &&
     permitRow.workspace_root_run_id === input.fence.workspaceLease.rootRunId &&
+    permit.workspaceRootRunId === input.fence.workspaceLease.rootRunId &&
     Number(permitRow.workspace_lease_epoch) === input.fence.workspaceLease.epoch &&
+    permit.workspaceLeaseEpoch === input.fence.workspaceLease.epoch &&
     dbTimestamp(permitRow.issued_at) === permit.issuedAt &&
     dbTimestamp(permitRow.expires_at) === permit.expiresAt
   );

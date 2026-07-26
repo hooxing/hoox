@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { mapPersistenceError } from "../../runtime-ts/packages/persistence/src/errors.js";
+import { TransactionCommitUnknownError } from "../../runtime-ts/packages/persistence/src/postgres.js";
 
 describe("持久层公开错误脱敏", () => {
   it("不保留原始 pg error、SQL 或连接信息", () => {
@@ -27,5 +28,16 @@ describe("持久层公开错误脱敏", () => {
     );
     expect(mapped).toMatchObject({ code: "UNAVAILABLE", message: "启动探针暂时不可用" });
     expect("cause" in mapped).toBe(false);
+  });
+
+  it("将 COMMIT 结果未知通过共享错误边界映射为脱敏 UNAVAILABLE", () => {
+    const original = new TransactionCommitUnknownError({
+      cause: new Error("包含数据库地址的驱动错误"),
+    });
+    const mapped = mapPersistenceError(original, "预留 Blob");
+
+    expect(mapped).toMatchObject({ code: "UNAVAILABLE", message: "预留 Blob暂时不可用" });
+    expect("cause" in mapped).toBe(false);
+    expect(mapped.message).not.toContain("数据库地址");
   });
 });

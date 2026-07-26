@@ -25,6 +25,7 @@ import type {
   RuntimeOutboxV1,
   SandboxSessionRegistryPort,
 } from "@cube-runtime/run-contracts";
+import { assertProtocolSize } from "@cube-runtime/run-contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgCoreRepositories } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
@@ -60,7 +61,10 @@ interface Fixture {
   readonly user: ReturnType<typeof createUser>;
 }
 
-async function fixture(label: string): Promise<Fixture> {
+async function fixture(
+  label: string,
+  rolloutProjection = { schemaVersion: 1 as const, checkpointId: `cp-${label}`, turns: [] },
+): Promise<Fixture> {
   const now = isoTimestamp("2099-07-26T00:00:00.000Z");
   const user = createUser(userId(`rw-user-${label}`), now);
   const personal = createPersonalTenant({
@@ -101,10 +105,27 @@ async function fixture(label: string): Promise<Fixture> {
     await setup.initialize({
       scope,
       input: "执行 PostgreSQL Run Worker 集成任务",
-      rolloutProjection: { schemaVersion: 1, checkpointId: `cp-${label}`, turns: [] },
+      rolloutProjection,
     }),
   ).toBe("created");
   return { scope, user };
+}
+
+/** 用真实 PostgreSQL 的 jsonb::text 计算边界，避免测试复制一套不等价序列化规则。 */
+async function projectionAtStoredBytes(targetBytes: number) {
+  const empty = { schemaVersion: 1 as const, checkpointId: "", turns: [] };
+  const measured = await migrator.query<{ bytes: number }>(
+    "SELECT octet_length($1::jsonb::text) AS bytes",
+    [JSON.stringify(empty)],
+  );
+  const baseBytes = Number(measured.rows[0]?.bytes);
+  const projection = { ...empty, checkpointId: "x".repeat(targetBytes - baseBytes) };
+  const verified = await migrator.query<{ bytes: number }>(
+    "SELECT octet_length($1::jsonb::text) AS bytes",
+    [JSON.stringify(projection)],
+  );
+  expect(Number(verified.rows[0]?.bytes)).toBe(targetBytes);
+  return projection;
 }
 
 function signed(input: Omit<RuntimeMutation, "schemaVersion" | "commandDigest">): RuntimeMutation {
@@ -226,6 +247,24 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     ).resolves.toEqual({ outcome: "fence_lost" });
   });
 
+  it("workerId 按 UTF-8 字节边界拒绝多字节超限且不泄漏数据库约束", async () => {
+    const f = await fixture(`worker-id-${suffix}`);
+    await expect(
+      persistence.claim({
+        scope: f.scope,
+        workerId: "中".repeat(67),
+        leaseDurationMs: 30_000,
+      }),
+    ).rejects.toThrow("UTF-8 字节长度");
+    await expect(
+      persistence.claim({
+        scope: f.scope,
+        workerId: "中".repeat(66),
+        leaseDurationMs: 30_000,
+      }),
+    ).resolves.toMatchObject({ outcome: "claimed" });
+  });
+
   it("执行初始化逐字段幂等，冲突输入不会被 ON CONFLICT 吞掉", async () => {
     const f = await fixture(`setup-${suffix}`);
     const original = {
@@ -261,6 +300,16 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         rolloutProjection: stored.rows[0]?.initial_projection ?? original.rolloutProjection,
       }),
     ).resolves.toBe("conflict");
+  });
+
+  it("初始化与数据库按同一 jsonb 规范化字节边界接受 64KiB 并确定拒绝超限", async () => {
+    const maximum = await projectionAtStoredBytes(65_536);
+    await expect(fixture(`projection-max-${suffix}`, maximum)).resolves.toBeDefined();
+
+    const oversized = await projectionAtStoredBytes(65_537);
+    await expect(fixture(`projection-over-${suffix}`, oversized)).rejects.toThrow(
+      "PostgreSQL 规范化 64KiB 上限",
+    );
   });
 
   it("model_start 只在持久 checkpoint 后签发且每 Attempt 永久一次", async () => {
@@ -428,6 +477,26 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     });
     expect(permit.outcome).toBe("authorized");
     if (permit.outcome !== "authorized") throw new Error("permit 失败");
+    const tamperedPermits = [
+      {
+        ...permit.permit,
+        scope: { ...permit.permit.scope, threadId: threadId("forged-permit-thread") },
+      },
+      { ...permit.permit, runClaimToken: "forged-claim-token" },
+      { ...permit.permit, runClaimEpoch: permit.permit.runClaimEpoch + 1 },
+      { ...permit.permit, workspaceRootRunId: runId("forged-permit-root") },
+      { ...permit.permit, workspaceLeaseEpoch: permit.permit.workspaceLeaseEpoch + 1 },
+      { ...permit.permit, attemptVersion: permit.permit.attemptVersion + 1 },
+    ];
+    for (const tampered of tamperedPermits) {
+      await expect(
+        persistence.consumeExternalEffectPermit({
+          fence: claimed.fence,
+          expectedAttemptVersion: 1,
+          permit: tampered,
+        }),
+      ).resolves.toEqual({ outcome: "conflict" });
+    }
     await expect(
       persistence.consumeExternalEffectPermit({
         fence: claimed.fence,
@@ -602,6 +671,33 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       signal: new AbortController().signal,
     });
     if (acquired.outcome !== "ready") throw new Error("registry acquire 失败");
+    const orphanKey = `registry:${acquired.session.registryId}:orphan-cleanup`;
+    await expect(
+      registry.settle({
+        scope: f.scope,
+        session: acquired.session,
+        cleanupIntentId: `${orphanKey}:forged`,
+        disposition: "close",
+      }),
+    ).rejects.toThrow("cleanup intent");
+    await expect(
+      registry.settle({
+        scope: f.scope,
+        session: acquired.session,
+        cleanupIntentId: orphanKey,
+        disposition: "pause",
+      }),
+    ).rejects.toThrow("cleanup intent");
+    await expect(
+      registry.closeOrphan({ scope: f.scope, session: { ...acquired.session } }),
+    ).rejects.toThrow("capability");
+    await expect(
+      registry.closeOrphan({
+        scope: { ...f.scope, threadId: threadId("forged-orphan-thread") },
+        session: acquired.session,
+      }),
+    ).rejects.toThrow("scope 或身份不匹配");
+    expect(settleCount).toBe(0);
     const cleanupKey = `${claimed.snapshot.attempt.attemptId}/registry-cleanup`;
     const pending: Extract<RuntimeOutboxV1, { kind: "sandbox_cleanup" }> = {
       schemaVersion: 1,
@@ -669,6 +765,49 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       { readOnly: true },
     );
     expect(state).toBe("closed");
+  });
+
+  it("孤儿关闭仅接受成功登记返回的 session capability 并固定使用 close", async () => {
+    const f = await fixture(`orphan-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "orphan-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("claim 失败");
+    const upstreamCalls: Array<Parameters<SandboxSessionRegistryPort["settle"]>[0]> = [];
+    const upstream: SandboxSessionRegistryPort = {
+      acquire: async () => ({
+        outcome: "ready",
+        session: {
+          registryId: "registry-orphan-pg",
+          providerSandboxId: "sandbox-orphan-pg",
+          mode: "created",
+          sandbox: {} as never,
+        },
+      }),
+      settle: async (input) => {
+        upstreamCalls.push(input);
+        return { outcome: "settled" };
+      },
+    };
+    const registry = new PgBackedSandboxSessionRegistry(runtime, upstream, 120);
+    const acquired = await registry.acquire({
+      scope: f.scope,
+      signal: new AbortController().signal,
+    });
+    if (acquired.outcome !== "ready") throw new Error("registry acquire 失败");
+
+    await expect(
+      registry.closeOrphan({ scope: f.scope, session: acquired.session }),
+    ).resolves.toEqual({ outcome: "settled" });
+    expect(upstreamCalls).toEqual([
+      expect.objectContaining({
+        cleanupIntentId: `registry:${acquired.session.registryId}:orphan-cleanup`,
+        disposition: "close",
+        session: acquired.session,
+      }),
+    ]);
   });
 
   it("cleanup armed/disposition、Projection CAS 与 Revision+Run 终态同事务", async () => {
@@ -942,7 +1081,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           ],
         }),
       ),
-    ).resolves.toEqual({ outcome: "idempotency_conflict" });
+    ).resolves.toEqual({ outcome: "protocol_invalid" });
     await expect(
       withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
         client.query(
@@ -952,6 +1091,48 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         ),
       ),
     ).rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("紧凑 JSON 不再伪造 64KiB 上限，持久化以 jsonb::text 作为唯一事实", async () => {
+    const f = await fixture(`canonical-size-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "canonical-size-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("claim 失败");
+    // 数组元素在 jsonb::text 中会增加分隔空白；紧凑 JSON 小于 64KiB 仍可能超限。
+    const payload = {
+      type: "queue.updated" as const,
+      steering: Array.from({ length: 20_000 }, () => ""),
+      followUp: [],
+    };
+    const compact = Buffer.byteLength(JSON.stringify(payload), "utf8");
+    const canonical = await migrator.query<{ bytes: number }>(
+      "SELECT octet_length($1::jsonb::text) AS bytes",
+      [JSON.stringify(payload)],
+    );
+    expect(compact).toBeLessThanOrEqual(65_536);
+    expect(Number(canonical.rows[0]?.bytes)).toBeGreaterThan(65_536);
+    const event = {
+      schemaVersion: 1 as const,
+      kind: "agent_event" as const,
+      sequence: 0,
+      payload,
+    };
+    // 应用层不再以紧凑 JSON 误判；真正的 64KiB 由同一 PG 事务收敛。
+    expect(() => assertProtocolSize(event)).not.toThrow();
+    await expect(
+      persistence.mutate(
+        signed({
+          idempotencyKey: `${claimed.snapshot.attempt.attemptId}/canonical-size`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 0,
+          events: [event],
+          outbox: [],
+        }),
+      ),
+    ).resolves.toEqual({ outcome: "protocol_invalid" });
   });
 
   it("Runtime 最小权限、FORCE RLS 与无 routine 均生效", async () => {

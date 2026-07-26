@@ -1,5 +1,5 @@
 import { Pool, type PoolClient, type PoolConfig } from "pg";
-import { mapPersistenceError } from "./errors.js";
+import { mapPersistenceError, PersistenceUnavailableCause } from "./errors.js";
 
 export interface PostgresPoolOptions {
   readonly connectionString: string;
@@ -93,7 +93,7 @@ export interface TransactionOptions {
  * COMMIT 已发出但客户端没有取得可判定响应。此时禁止把它降格为普通 unavailable，
  * 调用方必须按业务幂等键读回事实；该错误不暴露驱动原始消息。
  */
-export class TransactionCommitUnknownError extends Error {
+export class TransactionCommitUnknownError extends PersistenceUnavailableCause {
   constructor(options?: { readonly cause?: unknown }) {
     super("PostgreSQL COMMIT 结果未知", options);
     this.name = "TransactionCommitUnknownError";

@@ -1,2 +1,23 @@
-// Thread 私有工作目录及版本快照的生命周期边界。
-export {};
+export { WorkspaceManifestError, type WorkspaceManifestErrorCode } from "./errors.js";
+export {
+  createWorkspaceManifest,
+  parseWorkspaceManifest,
+  WORKSPACE_MANIFEST_SCHEMA_VERSION,
+  type WorkspaceContentIdentity,
+  type WorkspaceFileEntry,
+  type WorkspaceManifest,
+  type WorkspaceManifestPolicy,
+  type WorkspaceStableObjectIdentity,
+} from "./manifest.js";
+export {
+  type PlannedPath,
+  type PlannedWorkspaceFile,
+  planWorkspaceMaterialization,
+  type WorkspaceMaterializationPlan,
+  type WorkspaceReuseCandidate,
+} from "./materialization-plan.js";
+export {
+  assertMaterializationRoot,
+  resolveWorkspaceTargetPath,
+  workspaceRelativePath,
+} from "./path.js";

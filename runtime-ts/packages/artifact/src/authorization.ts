@@ -7,6 +7,14 @@ import { type ArtifactDeliveryError, artifactError } from "./errors.js";
 
 const issuedAuthorizations = new WeakSet<object>();
 
+export interface MonotonicClockPort {
+  now(): number;
+}
+
+export const systemMonotonicClock: MonotonicClockPort = Object.freeze({
+  now: () => performance.now(),
+});
+
 /**
  * 只能由已消费的 tool_execution permit 收窄得到。私有构造器与 WeakSet 共同确保普通 HTTP JSON
  * 不能靠复制同形字段成为写能力；持久层仍必须逐字段重验数据库中的 permit/consume/fence 事实。
@@ -53,8 +61,10 @@ export class ArtifactExecutionAuthorization {
 
   static fromConsumed(
     authorization: ConsumedExternalEffectAuthorization,
+    clock: MonotonicClockPort = systemMonotonicClock,
   ): ArtifactExecutionAuthorization {
     assertConsumedAuthorizationShape(authorization);
+    assertContinuationWindow(authorization, clock);
     return new ArtifactExecutionAuthorization(authorization);
   }
 }
@@ -62,6 +72,7 @@ export class ArtifactExecutionAuthorization {
 export function assertArtifactExecutionAuthorization(
   authorization: ArtifactExecutionAuthorization,
   expected: { readonly toolName: string; readonly argsDigest: Sha256Digest },
+  clock: MonotonicClockPort = systemMonotonicClock,
 ): void {
   if (
     !issuedAuthorizations.has(authorization) ||
@@ -85,6 +96,27 @@ export function assertArtifactExecutionAuthorization(
       authorization.consumedAt,
       authorization.expiresAt,
     )
+  ) {
+    throw invalidAuthorization();
+  }
+  assertContinuationWindow(authorization, clock);
+}
+
+function assertContinuationWindow(
+  authorization: Pick<
+    ConsumedExternalEffectAuthorization,
+    "consumedAtMonotonicMs" | "maxContinuationDelayMs"
+  >,
+  clock: MonotonicClockPort,
+): void {
+  const now = clock.now();
+  const elapsed = now - authorization.consumedAtMonotonicMs;
+  // 等于上限时许可已经失效；负 elapsed 表示时钟来源/进程边界不连续，必须 fail-closed。
+  if (
+    !Number.isFinite(now) ||
+    !Number.isFinite(elapsed) ||
+    elapsed < 0 ||
+    elapsed >= authorization.maxContinuationDelayMs
   ) {
     throw invalidAuthorization();
   }

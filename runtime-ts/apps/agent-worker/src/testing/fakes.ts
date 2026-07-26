@@ -79,6 +79,8 @@ interface FakeRecord {
   readonly events: PersistedRuntimeEventV1[];
   readonly outbox: PersistedRuntimeOutboxV1[];
   readonly mutations: Map<string, AppliedFakeMutation>;
+  /** 模拟数据库永久唯一表；mutation receipt 读取也不能删除这条事实。 */
+  readonly effectInvocations: Map<string, string>;
 }
 
 type AppliedFakeMutation = Extract<
@@ -118,8 +120,18 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     input: Parameters<ExecutionPersistencePort["issueExternalEffectPermit"]>[0],
   ) => void | Promise<void>;
   readonly durableOperations: string[] = [];
-  readonly permits: Array<{ readonly permit: ExternalEffectPermit; consumed: boolean }> = [];
+  readonly permits: Array<{
+    readonly attemptId: string;
+    readonly permit: ExternalEffectPermit;
+    consumed: boolean;
+  }> = [];
   readonly revisionCreatedAt: IsoTimestamp[] = [];
+  rewriteNextCleanupReceiptDisposition:
+    | {
+        readonly state: "started" | "completed" | "unknown";
+        readonly disposition: "pause" | "close";
+      }
+    | undefined;
   afterMutation?: (command: RuntimeMutation) => void;
   private databaseMillis = Date.parse("2026-07-26T00:00:00.000Z");
   private claimEpoch = 0;
@@ -140,6 +152,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       events: [],
       outbox: [],
       mutations: new Map(),
+      effectInvocations: new Map(),
     });
     return scope;
   }
@@ -270,6 +283,19 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       return { outcome: "fence_lost" };
     }
     if (record.attempt.version !== input.expectedAttemptVersion) return { outcome: "conflict" };
+    if (
+      input.effect === "tool_execution" &&
+      (record.effectInvocations.get(invocationKey(record.attempt.attemptId, input.call.callId)) !==
+        input.call.toolName ||
+        this.permits.some(
+          ({ attemptId, permit }) =>
+            attemptId === record.attempt?.attemptId &&
+            permit.effect === "tool_execution" &&
+            permit.callId === input.call.callId,
+        ))
+    ) {
+      return { outcome: "conflict" };
+    }
     const permit = {
       permitId: `${record.attempt.attemptId}/permit/${this.permits.length + 1}`,
       scope: record.scope,
@@ -285,7 +311,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       issuedAt: now,
       expiresAt: this.after(input.permitDurationMs),
     } as const;
-    this.permits.push({ permit, consumed: false });
+    this.permits.push({ attemptId: record.attempt.attemptId, permit, consumed: false });
     await this.beforePermitIssueReturn?.(input);
     return { outcome: "authorized", permit };
   }
@@ -346,6 +372,15 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     if (!record || this.forceFenceLost || !this.validFence(record, command.fence)) {
       return { outcome: "fence_lost" };
     }
+    if (
+      command.effectInvocation !== undefined &&
+      record.attempt !== undefined &&
+      record.effectInvocations.has(
+        invocationKey(record.attempt.attemptId, command.effectInvocation.callId),
+      )
+    ) {
+      return { outcome: "idempotency_conflict" };
+    }
     const previous = record.mutations.get(command.idempotencyKey);
     if (previous) {
       return previous.receipt.commandDigest === command.commandDigest
@@ -379,6 +414,30 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     }
     for (const [index, event] of command.events.entries()) {
       if (event.sequence !== attempt.nextEventSequence + index) return { outcome: "conflict" };
+    }
+    if (command.effectInvocation !== undefined) {
+      const matchingStarted = command.events.filter(
+        (event) =>
+          event.kind === "agent_event" &&
+          event.payload.type === "tool.started" &&
+          event.payload.callId === command.effectInvocation?.callId &&
+          event.payload.name === command.effectInvocation.toolName,
+      );
+      if (matchingStarted.length !== 1) return { outcome: "conflict" };
+      // 唯一键冲突永远不是 already_applied：callId 是一次性协议身份，不是可重放命令。
+      if (
+        record.effectInvocations.has(
+          invocationKey(attempt.attemptId, command.effectInvocation.callId),
+        )
+      ) {
+        return { outcome: "idempotency_conflict" };
+      }
+    } else if (
+      command.events.some(
+        (event) => event.kind === "agent_event" && event.payload.type === "tool.started",
+      )
+    ) {
+      return { outcome: "conflict" };
     }
     if (
       command.rolloutProjection !== undefined
@@ -441,6 +500,12 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     const previousHead = record.workspace.currentRevisionId;
     const previousProjectionVersion = record.projectionVersion;
     record.events.push(...command.events.map((event) => ({ ...event, occurredAt: now })));
+    if (command.effectInvocation !== undefined) {
+      record.effectInvocations.set(
+        invocationKey(attempt.attemptId, command.effectInvocation.callId),
+        command.effectInvocation.toolName,
+      );
+    }
     for (const item of command.outbox) {
       const index = record.outbox.findIndex(
         (existing) => existing.idempotencyKey === item.idempotencyKey,
@@ -506,7 +571,22 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       attemptVersion: nextAttempt.version,
       eventSequenceStart: attempt.nextEventSequence,
       eventSequenceEnd: nextAttempt.nextEventSequence,
-      outbox: command.outbox.map((item) => fakeOutboxReceipt(record, item)),
+      outbox: command.outbox.map((item) => {
+        const receipt = fakeOutboxReceipt(record, item);
+        if (
+          receipt.kind === "sandbox_cleanup" &&
+          receipt.disposition !== undefined &&
+          this.rewriteNextCleanupReceiptDisposition?.state === receipt.state
+        ) {
+          const { disposition } = this.rewriteNextCleanupReceiptDisposition;
+          this.rewriteNextCleanupReceiptDisposition = undefined;
+          return { ...receipt, disposition };
+        }
+        return receipt;
+      }),
+      ...(command.effectInvocation === undefined
+        ? {}
+        : { effectInvocation: command.effectInvocation }),
       ...(command.rolloutProjection === undefined
         ? {}
         : {
@@ -998,6 +1078,10 @@ function scopeKey(scope: ExecutionScope): string {
     scope.workspaceId,
     scope.baseRevisionId ?? "none",
   ].join("|");
+}
+
+function invocationKey(attemptId: string, callId: string): string {
+  return `${attemptId}\u0000${callId}`;
 }
 
 function sameScope(left: ExecutionScope, right: ExecutionScope): boolean {

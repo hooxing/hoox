@@ -73,4 +73,5 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: 运行进程生命周期与入口测试
-        run: pnpm test:process-runtime
+        # 先删除全部工作区构建产物，防止专项测试被前序或缓存中的 dist 偶然托底。
+        run: pnpm test:process-runtime:clean

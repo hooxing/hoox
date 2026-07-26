@@ -5,17 +5,18 @@ import type {
   WorkspaceRevisionId,
 } from "@cube-runtime/domain";
 import type {
-  AgentResourceAccessScope,
   PromoteResourceRequest,
   PromoteResourceRequestResult,
-  ResourceAccessScope,
+  PromotionCapabilityVerifier,
   ResourceCatalog,
+  ResourceCatalogItem,
   ResourceContentReader,
   ResourceCursorCodec,
   ResourceImportPlanResult,
   ResourcePreviewResult,
   ResourceSearchItem,
   ResourceSearchResult,
+  TrustedResourceContext,
   WorkspaceImportTargetInspector,
   WorkspacePromotionAuthorizer,
 } from "./contracts.js";
@@ -39,6 +40,7 @@ export interface ResourceLibraryDependencies {
   readonly cursorCodec: ResourceCursorCodec;
   readonly importTargets: WorkspaceImportTargetInspector;
   readonly promotionAuthorizer: WorkspacePromotionAuthorizer;
+  readonly promotionCapabilities: PromotionCapabilityVerifier;
 }
 
 const DEFAULT_PREVIEW_MEDIA_TYPES = [
@@ -117,52 +119,62 @@ export class ResourceLibraryService {
   }
 
   async search(input: {
-    readonly scope: ResourceAccessScope;
+    readonly context: TrustedResourceContext;
     readonly query?: string;
     readonly pageSize?: number;
     readonly cursor?: string;
   }): Promise<ResourceSearchResult> {
-    assertScope(input.scope);
+    assertTrustedContext(input.context);
     const normalizedQuery = normalizeSearchQuery(input.query ?? "", this.maxQueryBytes);
     const limit = normalizePageSize(input.pageSize, this.defaultPageSize, this.maxPageSize);
     const after =
       input.cursor === undefined
         ? undefined
         : this.dependencies.cursorCodec.decode({
-            scope: input.scope,
+            context: input.context,
             normalizedQuery,
             cursor: input.cursor,
           });
-    const page = await this.dependencies.catalog.search({
-      scope: input.scope,
-      normalizedQuery,
-      limit,
-      ...(after === undefined ? {} : { after }),
+    const page = await callExternalPort(() =>
+      this.dependencies.catalog.search({
+        context: input.context,
+        normalizedQuery,
+        limit,
+        ...(after === undefined ? {} : { after }),
+      }),
+    );
+    const validatedPage = validateExternalResult(() => {
+      validateCatalogPage(page.items, page.nextPosition, limit, after, input.context);
+      return Object.freeze({
+        items: Object.freeze(page.items.map(projectSearchItem)),
+        nextPosition: page.nextPosition,
+      });
     });
-    validateCatalogPage(page.items, page.nextPosition, limit);
     const nextCursor =
-      page.nextPosition === undefined
+      validatedPage.nextPosition === undefined
         ? undefined
         : this.dependencies.cursorCodec.encode({
-            scope: input.scope,
+            context: input.context,
             normalizedQuery,
-            position: page.nextPosition,
+            position: validatedPage.nextPosition,
           });
     return Object.freeze({
       // 显式投影白名单字段，防止目录适配器意外把 objectKey 等内部字段带到公开结果。
-      items: Object.freeze(page.items.map(projectSearchItem)),
+      items: validatedPage.items,
       ...(nextCursor === undefined ? {} : { nextCursor }),
     });
   }
 
   async preview(input: {
-    readonly scope: ResourceAccessScope;
+    readonly context: TrustedResourceContext;
     readonly resourceId: ResourceId;
     readonly versionId: ResourceVersionId;
     readonly offset?: number;
     readonly length?: number;
   }): Promise<ResourcePreviewResult> {
-    assertScope(input.scope);
+    assertTrustedContext(input.context);
+    assertId(input.resourceId);
+    assertId(input.versionId);
     const resolved = await this.resolveCanonicalVersion(input);
     if (resolved.status === "not_found") return Object.freeze({ status: "not_found" });
     const mediaType = normalizeMediaType(resolved.version.mediaType);
@@ -194,15 +206,17 @@ export class ResourceLibraryService {
       });
     }
     const boundedLength = Math.min(length, resolved.version.sizeBytes - offset);
-    const bytes = await this.dependencies.contentReader.readRange({
-      scope: input.scope,
-      version: resolved.version,
-      range: { offset, length: boundedLength },
-    });
+    const bytes = await callExternalPort(() =>
+      this.dependencies.contentReader.readRange({
+        context: input.context,
+        version: resolved.version,
+        range: { offset, length: boundedLength },
+      }),
+    );
     resourceInvariant(
-      bytes instanceof Uint8Array && bytes.byteLength <= boundedLength,
+      bytes instanceof Uint8Array && bytes.byteLength === boundedLength,
       "CONTENT_INTEGRITY_ERROR",
-      "Resource 内容读取超过授权字节范围",
+      "Resource 内容读取未完整满足授权字节范围",
     );
     return Object.freeze({
       status: "available",
@@ -217,14 +231,17 @@ export class ResourceLibraryService {
   }
 
   async planImport(input: {
-    readonly scope: ResourceAccessScope;
+    readonly context: TrustedResourceContext;
     readonly resourceId: ResourceId;
     readonly versionId: ResourceVersionId;
     readonly targetWorkspaceId: WorkspaceId;
     readonly targetPath: string;
     readonly conflictPolicy?: "reject";
   }): Promise<ResourceImportPlanResult> {
-    assertScope(input.scope);
+    assertTrustedContext(input.context);
+    assertId(input.resourceId);
+    assertId(input.versionId);
+    assertId(input.targetWorkspaceId);
     resourceInvariant(
       input.conflictPolicy === undefined || input.conflictPolicy === "reject",
       "INVALID_REQUEST",
@@ -233,15 +250,18 @@ export class ResourceLibraryService {
     const safeRelativePath = normalizeWorkspaceRelativePath(input.targetPath);
     const resolved = await this.resolveCanonicalVersion(input);
     if (resolved.status === "not_found") return Object.freeze({ status: "not_found" });
-    const target = await this.dependencies.importTargets.inspect({
-      scope: input.scope,
-      workspaceId: input.targetWorkspaceId,
-      safeRelativePath,
-    });
-    if (target.status === "not_found") return Object.freeze({ status: "not_found" });
-    if (target.status === "occupied") return Object.freeze({ status: "target_conflict" });
+    const target = await callExternalPort(() =>
+      this.dependencies.importTargets.inspect({
+        context: input.context,
+        workspaceId: input.targetWorkspaceId,
+        safeRelativePath,
+      }),
+    );
+    const targetStatus = validateExternalResult(() => target.status);
+    if (targetStatus === "not_found") return Object.freeze({ status: "not_found" });
+    if (targetStatus === "occupied") return Object.freeze({ status: "target_conflict" });
     resourceInvariant(
-      target.status === "available",
+      targetStatus === "available",
       "CONTENT_INTEGRITY_ERROR",
       "Workspace 导入目标检查结果无效",
     );
@@ -271,23 +291,36 @@ export class ResourceLibraryService {
   }
 
   async requestPromotion(input: {
-    readonly scope: AgentResourceAccessScope;
+    readonly context: TrustedResourceContext;
+    readonly capability: unknown;
     readonly command: PromoteResourceRequest;
   }): Promise<PromoteResourceRequestResult> {
-    assertScope(input.scope);
-    if (input.scope.actor?.kind !== "agent") {
+    assertTrustedContext(input.context);
+    assertId(input.command.workspaceId);
+    assertId(input.command.revisionId);
+    const agentContext = await callExternalPort(() =>
+      this.dependencies.promotionCapabilities.verify(input.capability),
+    );
+    if (
+      agentContext === undefined ||
+      agentContext.tenantId !== input.context.tenantId ||
+      agentContext.userId !== input.context.userId
+    ) {
       return Object.freeze({ status: "not_authorized" });
     }
     const resourceName = assertResourceName(input.command.resourceName);
     const safeRelativePath = normalizeWorkspaceRelativePath(input.command.relativePath);
-    const outcome = await this.dependencies.promotionAuthorizer.authorizeSnapshot({
-      scope: input.scope,
-      workspaceId: input.command.workspaceId,
-      revisionId: input.command.revisionId,
-      safeRelativePath,
-    });
-    if (outcome.status === "not_found" || outcome.status === "not_authorized") {
-      return Object.freeze({ status: outcome.status });
+    const outcome = await callExternalPort(() =>
+      this.dependencies.promotionAuthorizer.authorizeSnapshot({
+        context: agentContext,
+        workspaceId: input.command.workspaceId,
+        revisionId: input.command.revisionId,
+        safeRelativePath,
+      }),
+    );
+    const outcomeStatus = validateExternalResult(() => outcome.status);
+    if (outcomeStatus === "not_found" || outcomeStatus === "not_authorized") {
+      return Object.freeze({ status: outcomeStatus });
     }
     resourceInvariant(
       outcome.status === "authorized",
@@ -296,7 +329,7 @@ export class ResourceLibraryService {
     );
     const authorization = outcome.authorization;
     resourceInvariant(
-      authorization.tenantId === input.scope.tenantId &&
+      authorization.tenantId === input.context.tenantId &&
         authorization.workspaceId === input.command.workspaceId &&
         authorization.revisionId === input.command.revisionId &&
         authorization.relativePath === safeRelativePath,
@@ -346,42 +379,49 @@ export class ResourceLibraryService {
   }
 
   private async resolveCanonicalVersion(input: {
-    readonly scope: ResourceAccessScope;
+    readonly context: TrustedResourceContext;
     readonly resourceId: ResourceId;
     readonly versionId: ResourceVersionId;
   }) {
-    const resolved = await this.dependencies.catalog.resolveVersion(input);
-    if (resolved.status === "not_found") return resolved;
-    resourceInvariant(
-      resolved.status === "found",
-      "CONTENT_INTEGRITY_ERROR",
-      "Resource 版本解析结果格式无效",
-    );
-    resourceInvariant(
-      resolved.resource.tenantId === input.scope.tenantId &&
-        resolved.version.tenantId === input.scope.tenantId &&
-        resolved.resource.id === input.resourceId &&
-        resolved.version.resourceId === input.resourceId &&
-        resolved.version.id === input.versionId,
-      "NOT_AUTHORIZED",
-      "Resource 版本授权结果与请求不一致",
-    );
-    resourceInvariant(
-      Number.isSafeInteger(resolved.version.versionNumber) &&
-        resolved.version.versionNumber >= 1 &&
-        Number.isSafeInteger(resolved.version.sizeBytes) &&
-        resolved.version.sizeBytes >= 0 &&
-        /^[a-f0-9]{64}$/u.test(resolved.version.digest) &&
-        resolved.version.objectKey.trim().length > 0,
-      "CONTENT_INTEGRITY_ERROR",
-      "Resource 版本元数据无效",
-    );
-    return resolved;
+    const resolved = await callExternalPort(() => this.dependencies.catalog.resolveVersion(input));
+    return validateExternalResult(() => {
+      if (resolved.status === "not_found") return resolved;
+      resourceInvariant(
+        resolved.status === "found",
+        "CONTENT_INTEGRITY_ERROR",
+        "Resource 版本解析结果格式无效",
+      );
+      resourceInvariant(
+        resolved.resource.tenantId === input.context.tenantId &&
+          resolved.version.tenantId === input.context.tenantId &&
+          resolved.resource.id === input.resourceId &&
+          resolved.version.resourceId === input.resourceId &&
+          resolved.version.id === input.versionId,
+        "NOT_AUTHORIZED",
+        "Resource 版本授权结果与请求不一致",
+      );
+      resourceInvariant(
+        Number.isSafeInteger(resolved.version.versionNumber) &&
+          resolved.version.versionNumber >= 1 &&
+          Number.isSafeInteger(resolved.version.sizeBytes) &&
+          resolved.version.sizeBytes >= 0 &&
+          /^[a-f0-9]{64}$/u.test(resolved.version.digest) &&
+          resolved.version.objectKey.trim().length > 0,
+        "CONTENT_INTEGRITY_ERROR",
+        "Resource 版本元数据无效",
+      );
+      return resolved;
+    });
   }
 }
 
 export function normalizeSearchQuery(value: string, maxBytes = 256): string {
   resourceInvariant(typeof value === "string", "INVALID_REQUEST", "Resource 查询格式无效");
+  resourceInvariant(
+    !containsForbiddenUnicode(value),
+    "INVALID_REQUEST",
+    "Resource 查询包含非法字符",
+  );
   const normalized = value.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase();
   resourceInvariant(
     !containsControl(normalized) && Buffer.byteLength(normalized, "utf8") <= maxBytes,
@@ -402,18 +442,46 @@ function normalizePageSize(value: number | undefined, fallback: number, maximum:
 }
 
 function validateCatalogPage(
-  items: readonly ResourceSearchItem[],
+  items: readonly ResourceCatalogItem[],
   nextPosition: { readonly updatedAt: string; readonly resourceId: string } | undefined,
   limit: number,
+  after: { readonly updatedAt: string; readonly resourceId: string } | undefined,
+  context: TrustedResourceContext,
 ): void {
   resourceInvariant(
     items.length <= limit,
     "CONTENT_INTEGRITY_ERROR",
     "Resource 目录返回超出页大小",
   );
-  for (let index = 1; index < items.length; index += 1) {
+  const resourceIds = new Set<string>();
+  const versionIds = new Set<string>();
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    resourceInvariant(item !== undefined, "CONTENT_INTEGRITY_ERROR", "Resource 目录页无效");
+    resourceInvariant(
+      item.tenantId === context.tenantId && item.visibility === "searchable",
+      "NOT_AUTHORIZED",
+      "Resource 目录返回越权或不可见记录",
+    );
+    assertReturnedId(item.resourceId);
+    assertReturnedId(item.versionId);
+    resourceInvariant(
+      !resourceIds.has(item.resourceId) && !versionIds.has(item.versionId),
+      "CONTENT_INTEGRITY_ERROR",
+      "Resource 目录返回重复记录",
+    );
+    resourceIds.add(item.resourceId);
+    versionIds.add(item.versionId);
+    if (after !== undefined) {
+      resourceInvariant(
+        isStrictlyAfterPosition(item, after),
+        "CONTENT_INTEGRITY_ERROR",
+        "Resource 目录记录没有位于游标之后",
+      );
+    }
+    if (index === 0) continue;
     const previous = items[index - 1];
-    const current = items[index];
+    const current = item;
     resourceInvariant(
       previous !== undefined && current !== undefined,
       "CONTENT_INTEGRITY_ERROR",
@@ -443,7 +511,7 @@ function validateCatalogPage(
   }
 }
 
-function projectSearchItem(item: ResourceSearchItem): ResourceSearchItem {
+function projectSearchItem(item: ResourceCatalogItem): ResourceSearchItem {
   const normalizedName = item.name.normalize("NFKC").trim();
   resourceInvariant(
     Number.isSafeInteger(item.versionNumber) &&
@@ -496,23 +564,30 @@ function normalizeMediaType(value: string): string {
   return mediaType;
 }
 
-function assertScope(scope: ResourceAccessScope): void {
+function assertTrustedContext(context: TrustedResourceContext): void {
   resourceInvariant(
-    typeof scope === "object" &&
-      scope !== null &&
-      typeof scope.tenantId === "string" &&
-      scope.tenantId.length >= 3 &&
-      typeof scope.userId === "string" &&
-      scope.userId.length >= 3,
+    typeof context === "object" &&
+      context !== null &&
+      validId(context.tenantId) &&
+      validId(context.userId),
     "NOT_AUTHORIZED",
-    "缺少可信 Resource 访问范围",
+    "缺少有效的 Resource 认证上下文",
   );
 }
 
 function containsControl(value: string): boolean {
+  return /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value);
+}
+
+function containsForbiddenUnicode(value: string): boolean {
+  // 查询允许会被折叠的 TAB/CR/LF；其他控制、格式控制和未配对 surrogate 均拒绝。
+  if (/[\p{Cf}\p{Cs}]/u.test(value)) return true;
   return Array.from(value).some((character) => {
     const point = character.codePointAt(0);
-    return point !== undefined && (point <= 31 || point === 127);
+    return (
+      point !== undefined &&
+      ((point >= 0 && point <= 31 && point !== 9 && point !== 10 && point !== 13) || point === 127)
+    );
   });
 }
 
@@ -534,3 +609,43 @@ export type ResourceLibraryIdentifiers = {
   readonly workspaceId: WorkspaceId;
   readonly revisionId: WorkspaceRevisionId;
 };
+
+function validId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(value);
+}
+
+function assertId(value: unknown): asserts value is string {
+  resourceInvariant(validId(value), "INVALID_REQUEST", "Resource 命令 ID 格式无效");
+}
+
+function assertReturnedId(value: unknown): asserts value is string {
+  resourceInvariant(validId(value), "CONTENT_INTEGRITY_ERROR", "Resource 目录 ID 格式无效");
+}
+
+function isStrictlyAfterPosition(
+  item: { readonly updatedAt: string; readonly resourceId: string },
+  after: { readonly updatedAt: string; readonly resourceId: string },
+): boolean {
+  const itemTime = Date.parse(item.updatedAt);
+  const afterTime = Date.parse(after.updatedAt);
+  if (Number.isNaN(itemTime) || Number.isNaN(afterTime)) return false;
+  return itemTime < afterTime || (itemTime === afterTime && item.resourceId < after.resourceId);
+}
+
+async function callExternalPort<T>(operation: () => T | Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch {
+    // 不保留 cause，避免 SQL、对象键、签名 URL 或供应商响应进入日志/HTTP。
+    throw new ResourceServiceError("DEPENDENCY_FAILURE", "Resource 依赖操作失败");
+  }
+}
+
+function validateExternalResult<T>(operation: () => T): T {
+  try {
+    return operation();
+  } catch (error) {
+    if (error instanceof ResourceServiceError) throw error;
+    throw new ResourceServiceError("DEPENDENCY_FAILURE", "Resource 依赖操作失败");
+  }
+}

@@ -2,6 +2,7 @@ import { ResourceServiceError, resourceInvariant } from "./errors.js";
 
 const MAX_PATH_BYTES = 1_024;
 const MAX_SEGMENT_BYTES = 255;
+const WINDOWS_RESERVED_BASENAME = /^(?:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9]|LPT[1-9])$/iu;
 
 /**
  * Workspace 的逻辑路径统一使用 POSIX 相对路径。这里仅做平台无关的词法安全检查；
@@ -15,7 +16,8 @@ export function normalizeWorkspaceRelativePath(value: string): string {
       normalized.length > 0 &&
       !normalized.startsWith("/") &&
       !normalized.includes("\\") &&
-      !containsControl(normalized) &&
+      !normalized.includes(":") &&
+      !containsForbiddenUnicode(normalized) &&
       Buffer.byteLength(normalized, "utf8") <= MAX_PATH_BYTES,
     "INVALID_REQUEST",
     "目标路径必须是规范的 Workspace 相对路径",
@@ -27,6 +29,9 @@ export function normalizeWorkspaceRelativePath(value: string): string {
         segment.length > 0 &&
         segment !== "." &&
         segment !== ".." &&
+        !segment.endsWith(".") &&
+        !segment.endsWith(" ") &&
+        !isWindowsReservedName(segment) &&
         Buffer.byteLength(segment, "utf8") <= MAX_SEGMENT_BYTES,
     ),
     "INVALID_REQUEST",
@@ -35,11 +40,13 @@ export function normalizeWorkspaceRelativePath(value: string): string {
   return normalized;
 }
 
-function containsControl(value: string): boolean {
-  return Array.from(value).some((character) => {
-    const point = character.codePointAt(0);
-    return point !== undefined && (point <= 31 || point === 127);
-  });
+function containsForbiddenUnicode(value: string): boolean {
+  return /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value);
+}
+
+function isWindowsReservedName(segment: string): boolean {
+  const basename = segment.split(".", 1)[0] ?? "";
+  return WINDOWS_RESERVED_BASENAME.test(basename);
 }
 
 export function assertResourceName(value: string): string {
@@ -48,7 +55,7 @@ export function assertResourceName(value: string): string {
     normalized.length === 0 ||
     normalized !== value.trim() ||
     Buffer.byteLength(normalized, "utf8") > 255 ||
-    containsControl(normalized)
+    containsForbiddenUnicode(normalized)
   ) {
     throw new ResourceServiceError("INVALID_REQUEST", "Resource 名称格式无效");
   }

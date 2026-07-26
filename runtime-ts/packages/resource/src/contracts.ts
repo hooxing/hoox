@@ -15,20 +15,37 @@ import type {
   WorkspaceRevisionId,
 } from "@cube-runtime/domain";
 
-/** 只能由认证层在重验 Membership 后构造；业务操作不能只接收裸 tenantId。 */
-export interface ResourceAccessScope {
+/**
+ * 只能接收认证层在重验 Membership 后提供的上下文；运行时格式校验是纵深防御，
+ * 本结构本身不是不可伪造 capability，也不能证明调用者已经完成认证。
+ */
+export interface TrustedResourceContext {
   readonly tenantId: TenantId;
   readonly userId: UserId;
 }
 
-/** Agent 工具路由器补充的可信执行主体；user 请求不能伪装为 promote_resource。 */
-export interface AgentResourceAccessScope extends ResourceAccessScope {
+/** 只由已签发 promote capability 的 verifier 恢复，公开请求不能直接提交本结构。 */
+export interface AuthorizedAgentResourceContext extends TrustedResourceContext {
   readonly actor: {
     readonly kind: "agent";
     readonly agentThreadId: AgentThreadId;
     readonly threadId: ThreadId;
     readonly runId: RunId;
   };
+}
+
+/** JSON 序列化后会丢失 registry 身份；服务只把它作为 unknown 交给 verifier。 */
+export interface PromoteResourceCapability {
+  readonly kind: "promote_resource_capability";
+}
+
+/** issuer 只交给受控 Tool Router；Resource 服务装配只持有 verifier。 */
+export interface PromotionCapabilityIssuer {
+  issue(context: AuthorizedAgentResourceContext): PromoteResourceCapability;
+}
+
+export interface PromotionCapabilityVerifier {
+  verify(capability: unknown): AuthorizedAgentResourceContext | undefined;
 }
 
 export interface ResourceSearchPosition {
@@ -48,8 +65,14 @@ export interface ResourceSearchItem {
   readonly updatedAt: IsoTimestamp;
 }
 
+/** Repository 内部行；tenantId 和 visibility 在公开投影前必须再次校验。 */
+export interface ResourceCatalogItem extends ResourceSearchItem {
+  readonly tenantId: TenantId;
+  readonly visibility: "searchable" | "pending_explicit_commit";
+}
+
 export interface ResourceCatalogPage {
-  readonly items: readonly ResourceSearchItem[];
+  readonly items: readonly ResourceCatalogItem[];
   readonly nextPosition?: ResourceSearchPosition;
 }
 
@@ -59,18 +82,18 @@ export interface ResourceSearchResult {
 }
 
 /**
- * 持久化实现必须先按 scope 授权，并按 updatedAt DESC、resourceId DESC 排序。
+ * 持久化实现必须先按认证上下文授权，并按 updatedAt DESC、resourceId DESC 排序。
  * searchable=false 的过程文件根本不能进入本端口的结果集合。
  */
 export interface ResourceCatalog {
   search(input: {
-    readonly scope: ResourceAccessScope;
+    readonly context: TrustedResourceContext;
     readonly normalizedQuery: string;
     readonly limit: number;
     readonly after?: ResourceSearchPosition;
   }): Promise<ResourceCatalogPage>;
   resolveVersion(input: {
-    readonly scope: ResourceAccessScope;
+    readonly context: TrustedResourceContext;
     readonly resourceId: ResourceId;
     readonly versionId: ResourceVersionId;
   }): Promise<
@@ -81,12 +104,12 @@ export interface ResourceCatalog {
 
 export interface ResourceCursorCodec {
   encode(input: {
-    readonly scope: ResourceAccessScope;
+    readonly context: TrustedResourceContext;
     readonly normalizedQuery: string;
     readonly position: ResourceSearchPosition;
   }): string;
   decode(input: {
-    readonly scope: ResourceAccessScope;
+    readonly context: TrustedResourceContext;
     readonly normalizedQuery: string;
     readonly cursor: string;
   }): ResourceSearchPosition;
@@ -103,7 +126,7 @@ export interface ResourceByteRange {
  */
 export interface ResourceContentReader {
   readRange(input: {
-    readonly scope: ResourceAccessScope;
+    readonly context: TrustedResourceContext;
     readonly version: ResourceVersion;
     readonly range: ResourceByteRange;
   }): Promise<Uint8Array>;
@@ -135,7 +158,7 @@ export type WorkspaceImportTargetInspection =
 /** M2 Workspace 集成点：未来实现必须重验 Tenant、Workspace 与目标路径当前状态。 */
 export interface WorkspaceImportTargetInspector {
   inspect(input: {
-    readonly scope: ResourceAccessScope;
+    readonly context: TrustedResourceContext;
     readonly workspaceId: WorkspaceId;
     readonly safeRelativePath: string;
   }): Promise<WorkspaceImportTargetInspection>;
@@ -186,7 +209,7 @@ export interface WorkspacePromotionSnapshotAuthorization {
  */
 export interface WorkspacePromotionAuthorizer {
   authorizeSnapshot(input: {
-    readonly scope: AgentResourceAccessScope;
+    readonly context: AuthorizedAgentResourceContext;
     readonly workspaceId: WorkspaceId;
     readonly revisionId: WorkspaceRevisionId;
     readonly safeRelativePath: string;

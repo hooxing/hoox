@@ -27,7 +27,7 @@ ADR-0005 已把 Resource Library 定义为 Tenant 内跨 Thread 的发现和复�
 
 实现表面简单，但会扩大 Prompt、泄露无关历史、让 Thread 相互污染，并把“发现”“授权”和“写入”混为一体，不符合 ADR-0005。
 
-### 方案 B：Resource 应用核心只接受可信 Scope，通过窄端口解析规范版本和 Workspace 目标
+### 方案 B：Resource 应用核心只接受认证上下文，通过窄端口解析规范版本和 Workspace 目标
 
 核心可以先独立验证查询、游标、预算和快照语义；PG、S3 与 Workspace 适配器随后实现同一契约。代价是需要额外端口和生产装配 Gate。
 
@@ -39,13 +39,15 @@ ADR-0005 已把 Resource Library 定义为 Tenant 内跨 Thread 的发现和复�
 
 采用方案 B，并确认以下边界：
 
-1. 所有公开应用操作接收 `ResourceAccessScope { tenantId, userId }`；`promote_resource` 还要求带 Agent Thread、Thread 和 Run 的可信 Agent 主体。身份验证及 Membership 重验在上游完成，Resource 核心不接受裸 `tenantId` 作为完整授权。
-2. 搜索词依次执行 NFKC、首尾清理、空白折叠和小写化，按 UTF-8 字节限制；页大小严格限制而非静默扩大。目录固定使用 `updatedAt DESC, resourceId DESC`，返回结果由应用层按白名单字段重新投影。
-3. 游标为 HMAC-SHA256 签名的不透明值，绑定版本、`kid`、Tenant、User、规范查询、排序位置、签发时间和过期时间；拒绝篡改、过期、未来签发、跨主体或跨查询重放。密钥使用 32 至 64 字节并支持读取期轮换。
-4. 预览命令只接收 Resource ID、Version ID 和字节范围。目录端口先在 Scope 内解析规范的不可变 `ResourceVersion`，内容端口才可读取；公开输入没有 `objectKey`、响应头或预签名参数。类型不支持、范围不可满足和不存在分别返回稳定结果；单次读取不能超过服务端预算。
-5. 导入只生成版本为 1 的 `resource_import_plan`：固定 ResourceVersion ID、版本号、摘要、类型与大小，目标为安全 POSIX 相对路径，首版冲突策略只有 `reject`。结果必须明确 `materialization=not_started` 和 `workspaceWriterLease=not_acquired`。未来物化器仍需在 Writer Lease 下重验目标不存在，不能把旧计划当写入能力。
-6. 路径核心执行平台无关的词法检查：拒绝绝对路径、反斜线、控制字符、空片段、`.`、`..`、非 NFKC 形式以及超长路径。符号链接和 Sandbox 根目录逃逸必须由后续 Workspace 物化器再次检查。
-7. `promote_resource` 当前只向 Workspace 事实源申请固定 Revision/路径的短期授权，并产出 `pending_explicit_commit` 请求；它不会直接创建可搜索 Resource。普通 Workspace 过程文件不进入 `ResourceCatalog`。用户手动提升和真实 FileSource 按 ADR-0007 后置。
+1. 所有公开应用操作接收 `TrustedResourceContext { tenantId, userId }`。这个名称表示调用约束：身份验证及 Membership 重验必须在上游完成；普通结构本身不具备不可伪造性，核心的 ID 格式重验只是纵深防御，不能替代认证。Resource 核心不接受裸 `tenantId` 作为完整授权。
+2. `promote_resource` 不接收请求提供的 Agent 主体结构。受控 Tool Router 持有进程内 capability issuer，Resource 服务只持有同一 registry 的 verifier；WeakMap 对象身份不能由 JSON 构造或序列化复制。verifier 恢复的 Agent Thread、Thread、Run、Tenant 与 User 还必须和当前认证上下文一致。进程重启后旧 capability 自动失效，再由恢复后的可信工具路由重新签发。
+3. 搜索词依次执行 NFKC、首尾清理、空白折叠和小写化，按 UTF-8 字节限制；页大小严格限制而非静默扩大。目录固定使用 `updatedAt DESC, resourceId DESC`，每页所有记录必须严格位于输入游标之后，且 Resource ID 与 Version ID 都不能重复。Repository 内部行强制携带 `tenantId` 与 `visibility`，核心复核后才按公开白名单投影。
+4. 游标为 HMAC-SHA256 签名的不透明值，绑定版本、`kid`、Tenant、User、规范查询、排序位置、签发时间和过期时间；拒绝篡改、非规范 base64url、未知 `kid`、过期、未来签发、跨主体或跨查询重放。密钥使用 32 至 64 字节并支持读取期轮换。
+5. 预览命令只接收 Resource ID、Version ID 和字节范围。目录端口先在认证上下文内解析规范的不可变 `ResourceVersion`，内容端口才可读取；公开输入没有 `objectKey`、响应头或预签名参数。类型不支持、范围不可满足和不存在分别返回稳定结果；正长度范围必须完整返回，短读、超读或超预算均失败；零字节文件只允许 offset 0 的明确空结果。
+6. 导入只生成版本为 1 的 `resource_import_plan`：固定 ResourceVersion ID、版本号、摘要、类型与大小，目标为安全 POSIX 相对路径，首版冲突策略只有 `reject`。结果必须明确 `materialization=not_started` 和 `workspaceWriterLease=not_acquired`。未来物化器仍需在 Writer Lease 下重验目标不存在，不能把旧计划当写入能力。
+7. 路径核心执行跨平台保守词法检查：拒绝绝对路径、反斜线、驱动器/冒号/ADS、Windows 保留别名、尾随点或空格、Unicode Cc/Cf、未配对 surrogate、空片段、`.`、`..`、非 NFKC 形式以及超长路径。首版物化器只允许 ADR-0004 规定的 Linux Sandbox，在固定 `/workspace` 根下用目录句柄/等价的无符号链接跟随策略逐段创建；不能用 Node `path.resolve` 后的字符串前缀比较代替。Windows 规则仍保留，避免离线工具或未来平台切换产生不同解释。
+8. `promote_resource` 当前只向 Workspace 事实源申请固定 Revision/路径的短期授权，并产出 `pending_explicit_commit` 请求；它不会直接创建可搜索 Resource。内部目录行只有 `visibility=searchable` 才能投影，普通 Workspace 过程文件与 pending 提升都会 fail closed。用户手动提升和真实 FileSource 按 ADR-0007 后置。
+9. Catalog 搜索/版本解析、ContentReader、Workspace 目标检查和提升授权端口的任何异常统一映射为无 cause 的 `DEPENDENCY_FAILURE`，不回传 SQL、对象键、签名 URL或供应商消息。已知的不存在、冲突和不支持类型仍使用稳定业务结果。
 
 ## 理由
 
@@ -72,7 +74,7 @@ ADR-0005 已把 Resource Library 定义为 Tenant 内跨 Thread 的发现和复�
 
 ### 安全、数据与运维影响
 
-- 目录适配器不得返回未提升过程文件；应用层仍会对白名单字段投影，避免内部对象键意外外泄；
+- 目录适配器不得返回未提升过程文件；内部行必须带 Tenant 与 visibility，应用层复核并按白名单字段投影，避免内部对象键意外外泄；
 - ContentReader 只能接收本次授权解析得到的 ResourceVersion，并必须限制返回字节数；
 - 不支持的媒体类型不会触发内容读取；跨 Tenant 和猜 ID 的公开结果不得泄漏对象是否存在；
 - 本切片没有创建数据库表、RLS 策略、Bucket 对象、签名 URL 或生产凭据，也不新增网络出口。
@@ -80,9 +82,10 @@ ADR-0005 已把 Resource Library 定义为 Tenant 内跨 Thread 的发现和复�
 ## 验证
 
 - 包级单元测试覆盖查询规范化、页大小、稳定排序、游标篡改、跨 Tenant/User/查询重放；
-- 覆盖猜 ID、伪造对象键/响应头、不支持媒体类型、范围不可满足、超预算及 Reader 越界响应；
+- 覆盖猜 ID、伪造对象键/响应头、不支持媒体类型、范围不可满足、空范围、超预算及 Reader 短读/越界响应；
 - 覆盖旧 ResourceVersion 快照在 latest 漂移后仍固定、目标冲突默认拒绝、路径穿越和 Unicode 规范化逃逸；
-- 覆盖用户主体伪造 Agent 提升、跨租户授权响应和提交前不可搜索状态；
+- 覆盖完整伪造 Agent 结构、JSON 复制 capability、跨租户授权响应、内部 Tenant/visibility 误返回和提交前不可搜索状态；
+- 覆盖外部端口抛出含 SQL 与对象键的异常，断言统一错误没有 cause 或敏感原文；
 - 执行 Resource 包 test/typecheck/build、根质量门禁与 `git diff --check`。
 
 生产接入前还必须新增 PostgreSQL/RLS 双租户集成、真实私有 S3 范围读取或受控衍生预览、Workspace Writer Lease 下物化、HTTP 授权与审计测试。

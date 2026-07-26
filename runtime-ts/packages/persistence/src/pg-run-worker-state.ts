@@ -565,7 +565,12 @@ export class PgBackedSandboxSessionRegistry
             WHERE tenant_id=$1 AND registry_id=$2 AND state IN ('ready','paused')`,
           [input.scope.tenantId, input.session.registryId, expectedState],
         );
-        return registryUpdate.rowCount === 1;
+        // marker 已写入而 registry 未能同步时，绝不能提交半个状态机；
+        // 抛错让同一事务回滚，避免没有远端调用却留下不可逆 remote marker。
+        if (registryUpdate.rowCount !== 1) {
+          throw new Error("Sandbox cleanup 开始态未能原子同步");
+        }
+        return true;
       },
       { isolationLevel: "SERIALIZABLE" },
     );

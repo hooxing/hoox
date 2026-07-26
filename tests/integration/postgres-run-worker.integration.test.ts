@@ -1134,6 +1134,37 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         )
       ).outcome,
     ).toBe("applied");
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state='closed' WHERE tenant_id=$1 AND registry_id=$2`,
+        [f.scope.tenantId, acquired.session.registryId],
+      ),
+    );
+    await expect(
+      registry.settle({
+        scope: f.scope,
+        session: acquired.session,
+        cleanupIntentId: cleanupKey,
+        disposition: "close",
+      }),
+    ).rejects.toThrow("开始态未能原子同步");
+    const unchanged = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      (client) =>
+        client.query<{ state: string; remote_call_started_at: Date | null }>(
+          `SELECT state,remote_call_started_at FROM cleanup_outbox
+          WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key=$3`,
+          [f.scope.tenantId, claimed.snapshot.attempt.attemptId, cleanupKey],
+        ),
+    );
+    expect(unchanged.rows[0]).toEqual({ state: "started", remote_call_started_at: null });
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state='ready' WHERE tenant_id=$1 AND registry_id=$2`,
+        [f.scope.tenantId, acquired.session.registryId],
+      ),
+    );
     await expect(
       registry.settle({
         scope: f.scope,

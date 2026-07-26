@@ -28,7 +28,7 @@ import {
   runtimeMutationDigest,
 } from "@cube-runtime/run-contracts/mutation-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import {
   PgArchiveThreadCommand,
   PgCoreRepositories,
@@ -1397,5 +1397,28 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       [schema],
     );
     expect(routines.rows[0]?.count).toBe("0");
+  });
+
+  it("0005 可回退至 0004 并重新授予最小 Dispatch ACL", async () => {
+    const down = await migrateDown(migrator, {
+      runtimeRole,
+      migratorRole,
+      schema,
+      targetVersion: 4,
+      allowDestructive: true,
+      environment: "test",
+    });
+    expect(down.at(-1)?.version).toBe(4);
+    const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
+    expect(restored.at(-1)?.version).toBe(5);
+    const acl = await admin.query<{
+      readonly select_allowed: boolean;
+      readonly update_allowed: boolean;
+    }>(
+      `SELECT has_table_privilege($1::text, format('%I.api_idempotency_records', $2::text), 'SELECT') AS select_allowed,
+              has_table_privilege($1::text, format('%I.api_idempotency_records', $2::text), 'UPDATE') AS update_allowed`,
+      [runtimeRole, schema],
+    );
+    expect(acl.rows[0]).toEqual({ select_allowed: true, update_allowed: false });
   });
 });

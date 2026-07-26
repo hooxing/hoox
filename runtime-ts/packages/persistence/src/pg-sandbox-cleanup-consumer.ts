@@ -56,7 +56,17 @@ export class PgSandboxCleanupConsumerStore {
             AND registry.state IN ('closing','pausing')`,
           [input.tenantId],
         );
-        const candidate = await client.query<any>(
+        const candidate = await client.query<{
+          attempt_id: string;
+          registry_id: string;
+          provider_sandbox_id: string;
+          idempotency_key: string;
+          state: "pending" | "started";
+          disposition: "close" | "pause" | null;
+          claim_generation: string;
+          status: string;
+          workspace_id: string;
+        }>(
           `SELECT c.*,a.status,a.workspace_id FROM cleanup_outbox c
           JOIN execution_attempts a ON a.tenant_id=c.tenant_id AND a.attempt_id=c.attempt_id
           LEFT JOIN run_claims rc ON rc.tenant_id=a.tenant_id AND rc.attempt_id=a.attempt_id AND rc.released_at IS NULL

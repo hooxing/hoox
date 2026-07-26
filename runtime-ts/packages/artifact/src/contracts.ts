@@ -2,6 +2,7 @@ import type {
   ArtifactId,
   ResourceVersionId,
   RunId,
+  Sha256Digest,
   TenantId,
   ThreadId,
   UserId,
@@ -9,6 +10,7 @@ import type {
 } from "@cube-runtime/domain";
 import type { StableBlobRef } from "@cube-runtime/persistence";
 import type { ExecutionScope } from "@cube-runtime/run-contracts";
+import type { ArtifactExecutionAuthorization } from "./authorization.js";
 
 export type ArtifactPurpose = "deliverable" | "diagnostic" | "trace";
 export type DeliverableRequirement = "required" | "optional";
@@ -90,14 +92,14 @@ export type FinishArtifactPublicationResult =
 export type ReadArtifactPublicationResult =
   | {
       readonly outcome: "found";
-      readonly commandDigest: string;
+      readonly commandDigest: Sha256Digest;
       readonly publication: ArtifactPublicationSnapshot;
       readonly binding: ArtifactBlobBinding;
     }
   | { readonly outcome: "not_found" | "scope_mismatch" | "unavailable" };
 
 export type DeclareDeliverablesResult =
-  | { readonly outcome: "applied" | "already_applied"; readonly commandDigest: string }
+  | { readonly outcome: "applied" | "already_applied"; readonly commandDigest: Sha256Digest }
   | {
       readonly outcome:
         | "response_unknown"
@@ -130,15 +132,18 @@ export type AuthorizeArtifactDownloadResult =
   | { readonly outcome: "not_found" | "unavailable" };
 
 export interface ArtifactDeliveryRepositoryPort {
-  /** scope 只能来自持有双栅栏的可信 Worker 组合根；本接口不把普通对象当作认证能力。 */
+  /**
+   * 写端口必须逐字段重验 authorization 对应的已消费 permit、完整双栅栏、Attempt version、
+   * toolName 与 argsDigest；类实例只阻断普通请求结构伪造，不能替代数据库事实。
+   */
   declareDeliverables(input: {
-    readonly scope: ExecutionScope;
+    readonly authorization: ArtifactExecutionAuthorization;
     readonly idempotencyKey: string;
-    readonly commandDigest: string;
+    readonly commandDigest: Sha256Digest;
     readonly declarations: readonly DeliverableDeclaration[];
   }): Promise<DeclareDeliverablesResult>;
   readDeliverableDeclarationCommand(input: {
-    readonly scope: ExecutionScope;
+    readonly authorization: ArtifactExecutionAuthorization;
     readonly idempotencyKey: string;
   }): Promise<DeclareDeliverablesResult | { readonly outcome: "not_found" }>;
   /**
@@ -146,9 +151,9 @@ export interface ArtifactDeliveryRepositoryPort {
    * replacement 链和幂等摘要，并把 Artifact→ResourceVersion→stable Blob 身份固定下来。
    */
   beginPublication(input: {
-    readonly scope: ExecutionScope;
+    readonly authorization: ArtifactExecutionAuthorization;
     readonly idempotencyKey: string;
-    readonly commandDigest: string;
+    readonly commandDigest: Sha256Digest;
     readonly artifactId: ArtifactId;
     readonly resourceVersionId: ResourceVersionId;
     readonly replacesArtifactId?: ArtifactId;
@@ -157,14 +162,14 @@ export interface ArtifactDeliveryRepositoryPort {
     readonly deliverableKey?: string;
   }): Promise<BeginArtifactPublicationResult>;
   finishPublication(input: {
-    readonly scope: ExecutionScope;
+    readonly authorization: ArtifactExecutionAuthorization;
     readonly idempotencyKey: string;
-    readonly commandDigest: string;
+    readonly commandDigest: Sha256Digest;
     readonly artifactId: ArtifactId;
     readonly target: "published" | "failed";
   }): Promise<FinishArtifactPublicationResult>;
   readPublicationCommand(input: {
-    readonly scope: ExecutionScope;
+    readonly authorization: ArtifactExecutionAuthorization;
     readonly idempotencyKey: string;
   }): Promise<ReadArtifactPublicationResult>;
   inspectCompletion(input: {

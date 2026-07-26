@@ -45,14 +45,16 @@ Agent 先显式声明结构化交付要求，再调用 `publish_artifact` 绑定
 
 采用方案 B，并明确以下边界：
 
-1. `declareDeliverables` 按 Run 记录稳定键、名称和 `required | optional`；命令使用幂等键和服务端规范摘要。required 的缺失、publishing 或 failed 都返回稳定 `ARTIFACT_NOT_READY`，optional 不阻止完成。
-2. `publishArtifact` 只接受可信执行组合根传入的 scope、Artifact/ResourceVersion ID、名称、用途和声明键。Repository 必须在单个事实源事务中重新验证 running Run、完整 scope 归属、不可变 ResourceVersion、replacement 链、幂等摘要，并固定 `Artifact → ResourceVersion → stable Blob incarnation/physical key/hash/size/media type`。
-3. 发布对象验证失败后，本 Artifact 只能进入 failed；同一记录不能重启发布。修正必须使用新 ResourceVersion、新 Artifact ID，并显式 `replacesArtifactId` 指向当前 Run 的 failed Artifact。事务响应未知时只允许按原幂等键和摘要 readback，不重新创建记录。
-4. 用途区分 `deliverable | diagnostic | trace`。用户列表由 Repository 授权后，应用层仍只投影 `published deliverable`，作为纵深防御；界面不能从文件扩展名或路径猜用途。
-5. 用户请求 scope 只承载上游认证结果。Repository 每次列表、下载都必须重新校验 active Membership 和所有权链，并对裸 ID 猜测统一返回不泄漏存在性的结果。
-6. 下载请求公开输入只有 Artifact ID。Repository 原子解析已发布 Deliverable 的固定绑定并返回授权修订；应用层生成安全 attachment 文件名、使用存储媒体类型、固定 `artifact-download`，并把部署配置限制在 1 至 900 秒。客户端不能传 objectKey、响应头、Content-Disposition、media type 或 TTL。
-7. 预签名后必须用原授权修订和完整绑定再次确认；状态、版本、Membership 或 Blob 身份发生变化时丢弃 URL。默认只接受 HTTPS 签名 URL，本地开发必须显式允许 HTTP。
-8. 所有未知依赖异常统一映射为不含 cause 的稳定错误。完成门额外统一为 `ARTIFACT_NOT_READY`，使 Worker 保持既有稳定错误语义。
+1. `declareDeliverables` 按 Run 记录稳定键、名称和 `required | optional`。required 的缺失、publishing 或 failed 都返回稳定 `ARTIFACT_NOT_READY`，optional 不阻止完成。
+2. Agent 写路径不能只携带普通 `ExecutionScope`。应用核心以私有构造器、冻结对象和进程内签发登记，把既有 `ConsumedExternalEffectAuthorization` 收窄为 `ArtifactExecutionAuthorization`；同形 HTTP JSON 不能伪造该能力。授权携带 permit ID、完整 scope、Run claim token/epoch、Workspace root/lease epoch、Attempt version、`tool_execution`、call/tool/args digest 和签发/消费时间。服务逐字段检查工具名和原始工具参数摘要；Repository 在 declare、begin、finish 与响应未知 readback 中都收到同一授权，并必须对照数据库 permit、consume、双栅栏和 Attempt 事实重新校验。类实例只阻断普通结构伪造，不替代持久授权。
+3. 所有写命令使用项目共享的键排序、数组保序 canonical JSON 摘要。摘要包含版本、kind、完整稳定 scope、幂等键及全部规范化业务输入；不包含随机 permit ID、expiresAt 等易变授权字段，授权由上一条独立验证。相同键的任一稳定字段变化都必须冲突。
+4. `publishArtifact` 接受 Artifact/ResourceVersion ID、名称、用途和声明键。Repository 必须在单个事实源事务中重新验证 running Run、授权 scope 归属、不可变 ResourceVersion、replacement 链、幂等摘要，并固定 `Artifact → ResourceVersion → stable Blob incarnation/physical key/hash/size/media type`。
+5. 发布对象验证失败后，本 Artifact 只能进入 failed；同一记录不能重启发布。修正必须使用新 ResourceVersion、新 Artifact ID，并显式 `replacesArtifactId` 指向当前 Run 的 failed Artifact。事务响应未知时只允许按原幂等键、摘要和执行授权 readback，不重新创建记录。
+6. 用途区分 `deliverable | diagnostic | trace`。用户列表由 Repository 授权后，应用层仍只投影 `published deliverable`，作为纵深防御；界面不能从文件扩展名或路径猜用途。
+7. 用户请求 scope 只承载上游认证结果。Repository 每次列表、下载都必须重新校验 active Membership 和所有权链，并对裸 ID 猜测统一返回不泄漏存在性的结果。
+8. 下载请求公开输入只有 Artifact ID。Repository 原子解析已发布 Deliverable 的固定绑定并返回授权修订；应用层生成安全 attachment 文件名、使用存储媒体类型、固定 `artifact-download`，并把部署配置限制在 1 至 900 秒。Artifact 名称与下载文件名拒绝 Unicode `Cc/Cf`，包括双向覆盖/隔离和零宽格式字符；下载名额外防御 Windows 保留设备名。客户端不能传 objectKey、响应头、Content-Disposition、media type 或 TTL。
+9. 预签名后必须用原授权修订和完整绑定再次确认；状态、版本、Membership 或 Blob 身份发生变化时丢弃 URL。默认只接受 HTTPS 签名 URL，本地开发必须显式允许 HTTP。
+10. 所有未知依赖异常统一映射为不含 cause 的稳定错误。完成门额外统一为 `ARTIFACT_NOT_READY`，使 Worker 保持既有稳定错误语义；现有只读 `ArtifactPublicationPort` 保持兼容。
 
 ## 理由
 
@@ -76,6 +78,7 @@ Agent 先显式声明结构化交付要求，再调用 `publish_artifact` 绑定
 ### 安全、数据与运维影响
 
 - Repository 是认证状态和所有权重检的安全边界，内存 Fake 不能被作为生产证明；
+- `ArtifactExecutionAuthorization` 的进程内名义身份不能替代数据库重验；生产 Repository 缺失时写路径必须继续 fail-closed；
 - 日志不得记录预签名 URL、对象键、Provider/数据库私有消息；
 - HTTP 下载仅供显式本地开发，生产装配必须保持默认 HTTPS；
 - Blob 身份或授权修订异常应计入安全/一致性指标，但公开响应只使用稳定脱敏码。
@@ -85,9 +88,12 @@ Agent 先显式声明结构化交付要求，再调用 `publish_artifact` 绑定
 - 单元测试覆盖成功发布、幂等重放、摘要/绑定冲突、发布响应丢失 readback、Blob 缺失与依赖异常终结 failed；
 - 单元测试覆盖新 ResourceVersion + 新 Artifact + replaces 修正链，以及原记录不能重试；
 - 单元测试覆盖 required 三种阻断状态、optional 不参与完成阻断、声明响应丢失和重复声明键；
+- 单元测试覆盖同形对象伪造、错误 effect/scope/双栅栏/Attempt/toolName/argsDigest，以及四个写阶段传递同一授权；
+- 表驱动测试证明 declare/publish 的 kind、完整 scope、幂等键和每个规范化业务字段参与 canonical 摘要，而 permit ID/过期时间不参与；
 - 单元测试覆盖跨 Tenant/用户错配/猜 ID、Diagnostic/Trace 过滤、下载授权变化和 ResourceVersion 漂移；
 - 单元测试断言签名端口只收到服务端固定 Blob、media type、安全文件名、短 TTL 和 `artifact-download`；
 - 单元测试覆盖畸形签名 URL、签名异常、TLS 默认策略和未知异常脱敏；
+- 单元测试覆盖 U+202E、U+2066 至 U+2069、零宽格式字符、ASCII 控制字符和 Windows 保留设备名；
 - 包级 typecheck/test/build、根 `check:clean-vendor` 与 `git diff --check` 通过。
 
 ## 可逆性与回退

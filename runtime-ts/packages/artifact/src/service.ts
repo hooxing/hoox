@@ -1,7 +1,11 @@
-import { createHash } from "node:crypto";
-import type { ArtifactId, ResourceVersionId, RunId } from "@cube-runtime/domain";
+import type { ArtifactId, ResourceVersionId, RunId, Sha256Digest } from "@cube-runtime/domain";
 import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
 import type { ArtifactPublicationPort, ExecutionScope } from "@cube-runtime/run-contracts";
+import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+import {
+  type ArtifactExecutionAuthorization,
+  assertArtifactExecutionAuthorization,
+} from "./authorization.js";
 import type {
   ArtifactBlobBinding,
   ArtifactDeliveryRepositoryPort,
@@ -24,7 +28,7 @@ export interface ArtifactDeliveryServiceOptions {
 }
 
 export interface PublishArtifactCommand {
-  readonly scope: ExecutionScope;
+  readonly authorization: ArtifactExecutionAuthorization;
   readonly idempotencyKey: string;
   readonly artifactId: ArtifactId;
   readonly resourceVersionId: ResourceVersionId;
@@ -70,16 +74,29 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
   }
 
   async declareDeliverables(input: {
-    readonly scope: ExecutionScope;
+    readonly authorization: ArtifactExecutionAuthorization;
     readonly idempotencyKey: string;
     readonly declarations: readonly DeliverableDeclaration[];
   }): Promise<void> {
     validateIdempotencyKey(input.idempotencyKey);
+    assertArtifactExecutionAuthorization(input.authorization, {
+      toolName: "declare_deliverables",
+      argsDigest: digestCanonical({
+        idempotencyKey: input.idempotencyKey,
+        declarations: input.declarations,
+      }),
+    });
     const declarations = normalizeDeclarations(input.declarations);
-    const commandDigest = digest({ kind: "declare_deliverables", declarations });
+    const commandDigest = digestCanonical({
+      schemaVersion: 1,
+      kind: "declare_deliverables",
+      scope: stableScope(input.authorization.scope),
+      idempotencyKey: input.idempotencyKey,
+      declarations,
+    });
     try {
       const result = await this.repository.declareDeliverables({
-        scope: input.scope,
+        authorization: input.authorization,
         idempotencyKey: input.idempotencyKey,
         commandDigest,
         declarations,
@@ -90,7 +107,7 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
       }
       if (result.outcome === "response_unknown") {
         const readback = await this.repository.readDeliverableDeclarationCommand({
-          scope: input.scope,
+          authorization: input.authorization,
           idempotencyKey: input.idempotencyKey,
         });
         if (
@@ -122,10 +139,25 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
 
   async publishArtifact(command: PublishArtifactCommand): Promise<ArtifactPublicationSnapshot> {
     validateIdempotencyKey(command.idempotencyKey);
+    assertArtifactExecutionAuthorization(command.authorization, {
+      toolName: "publish_artifact",
+      argsDigest: digestCanonical({
+        idempotencyKey: command.idempotencyKey,
+        artifactId: command.artifactId,
+        resourceVersionId: command.resourceVersionId,
+        replacesArtifactId: command.replacesArtifactId,
+        name: command.name,
+        purpose: command.purpose,
+        deliverableKey: command.deliverableKey,
+      }),
+    });
     const name = normalizeName(command.name);
     const deliverableKey = normalizePublicationPurpose(command.purpose, command.deliverableKey);
-    const commandDigest = digest({
+    const commandDigest = digestCanonical({
+      schemaVersion: 1,
       kind: "publish_artifact",
+      scope: stableScope(command.authorization.scope),
+      idempotencyKey: command.idempotencyKey,
       artifactId: command.artifactId,
       resourceVersionId: command.resourceVersionId,
       replacesArtifactId: command.replacesArtifactId,
@@ -136,7 +168,7 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
 
     try {
       const begun = await this.repository.beginPublication({
-        scope: command.scope,
+        authorization: command.authorization,
         idempotencyKey: command.idempotencyKey,
         commandDigest,
         artifactId: command.artifactId,
@@ -173,10 +205,10 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
       if (begun.publication.status === "published") return begun.publication;
       if (begun.publication.status === "failed") throw publicationFailed();
 
-      const blobReady = await this.#verifyBlob(command.scope, begun.binding);
+      const blobReady = await this.#verifyBlob(command.authorization.scope, begun.binding);
       const target = blobReady ? "published" : "failed";
       const settled = await this.#finishPublication(
-        command.scope,
+        command.authorization,
         command.idempotencyKey,
         commandDigest,
         command.artifactId,
@@ -286,15 +318,15 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
   }
 
   async #finishPublication(
-    scope: ExecutionScope,
+    authorization: ArtifactExecutionAuthorization,
     idempotencyKey: string,
-    commandDigest: string,
+    commandDigest: Sha256Digest,
     artifactId: ArtifactId,
     target: "published" | "failed",
     expectedBinding: ArtifactBlobBinding,
   ): Promise<ArtifactPublicationSnapshot> {
     const result = await this.repository.finishPublication({
-      scope,
+      authorization,
       idempotencyKey,
       commandDigest,
       artifactId,
@@ -304,7 +336,10 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
       return result.publication;
     }
     if (result.outcome === "response_unknown") {
-      const readback = await this.repository.readPublicationCommand({ scope, idempotencyKey });
+      const readback = await this.repository.readPublicationCommand({
+        authorization,
+        idempotencyKey,
+      });
       if (readback.outcome === "found") {
         if (readback.commandDigest !== commandDigest) throw idempotencyConflict();
         if (!sameBindingIdentity(readback.binding, expectedBinding)) throw idempotencyConflict();
@@ -327,9 +362,9 @@ function validatePublicationIdentity(
 ): void {
   if (
     publication.artifactId !== command.artifactId ||
-    publication.tenantId !== command.scope.tenantId ||
-    publication.threadId !== command.scope.threadId ||
-    publication.runId !== command.scope.runId ||
+    publication.tenantId !== command.authorization.scope.tenantId ||
+    publication.threadId !== command.authorization.scope.threadId ||
+    publication.runId !== command.authorization.scope.runId ||
     publication.resourceVersionId !== command.resourceVersionId ||
     publication.replacesArtifactId !== command.replacesArtifactId ||
     publication.name !== name ||
@@ -438,7 +473,9 @@ function normalizePublicationPurpose(
 function normalizeName(value: string): string {
   const name = value.trim();
   if (name.length < 1 || name.length > 255) throw invalidArgument("Artifact 名称长度无效");
-  if (containsControl(name)) throw invalidArgument("Artifact 名称包含控制字符");
+  if (containsUnicodeControlOrFormat(name)) {
+    throw invalidArgument("Artifact 名称包含控制或格式字符");
+  }
   return name;
 }
 
@@ -469,6 +506,7 @@ function validateMediaType(mediaType: string): string {
 }
 
 function safeDownloadName(name: string, artifactId: ArtifactId): string {
+  if (containsUnicodeControlOrFormat(name)) throw dependencyUnavailable();
   const normalized = Array.from(name.normalize("NFKC"))
     .map((character) =>
       containsControl(character) || '/\\"*:<>?|'.includes(character) ? "_" : character,
@@ -477,13 +515,18 @@ function safeDownloadName(name: string, artifactId: ArtifactId): string {
     .replace(/[. ]+$/gu, "")
     .trim();
   const fallback = `artifact-${artifactId}`;
-  const candidate = normalized.length === 0 ? fallback : normalized;
+  const candidate = protectWindowsDeviceName(normalized.length === 0 ? fallback : normalized);
   let safe = "";
   for (const character of candidate) {
     if (safe.length + character.length > 180) break;
     safe += character;
   }
   return safe;
+}
+
+function protectWindowsDeviceName(value: string): string {
+  const baseName = value.split(".", 1)[0]?.trim().toUpperCase() ?? "";
+  return /^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(baseName) ? `_${value}` : value;
 }
 
 function validateDownloadUrl(value: string, allowInsecureHttp: boolean): void {
@@ -512,8 +555,15 @@ function validateTtl(value: number, upperBound: number, label: string): number {
   return value;
 }
 
-function digest(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+function stableScope(scope: ExecutionScope): ExecutionScope {
+  return {
+    tenantId: scope.tenantId,
+    threadId: scope.threadId,
+    runId: scope.runId,
+    rootRunId: scope.rootRunId,
+    workspaceId: scope.workspaceId,
+    ...(scope.baseRevisionId === undefined ? {} : { baseRevisionId: scope.baseRevisionId }),
+  };
 }
 
 function containsControl(value: string): boolean {
@@ -521,6 +571,10 @@ function containsControl(value: string): boolean {
     const point = character.codePointAt(0);
     return point !== undefined && (point <= 31 || point === 127);
   });
+}
+
+function containsUnicodeControlOrFormat(value: string): boolean {
+  return /[\p{Cc}\p{Cf}]/u.test(value);
 }
 
 function invalidArgument(message: string): ArtifactDeliveryError {

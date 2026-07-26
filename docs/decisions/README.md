@@ -19,6 +19,7 @@
 | [ADR-0011](0011-run-worker-reliability-boundary.md) | Run Worker 双栅栏、ExecutionAttempt 与恢复 Saga | 已接受 | 2026-07-26 |
 | [ADR-0012](0012-postgresql-blob-lifecycle.md) | PostgreSQL Stable Blob 生命周期与副作用证明 | 已接受 | 2026-07-26 |
 | [ADR-0013](0013-fastify-http-api-and-trusted-context.md) | Fastify HTTP API 与可信 Tenant Context | 已接受 | 2026-07-26 |
+| [ADR-0015](0015-process-lifecycle-and-strict-configuration.md) | 进程生命周期、严格配置与薄装配入口 | 已接受 | 2026-07-26 |
 
 ## 何时必须记录
 

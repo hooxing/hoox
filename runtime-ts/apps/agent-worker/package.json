@@ -11,6 +11,7 @@
   "dependencies": {
     "@cube-runtime/domain": "workspace:*",
     "@cube-runtime/pi-adapter": "workspace:*",
+    "@cube-runtime/process-runtime": "workspace:*",
     "@cube-runtime/sandbox": "workspace:*",
     "@earendil-works/pi-ai": "0.82.1",
     "@earendil-works/pi-coding-agent": "0.82.1"

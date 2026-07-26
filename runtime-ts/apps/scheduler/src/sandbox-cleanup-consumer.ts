@@ -79,13 +79,13 @@ export class SandboxCleanupConsumer {
     if (!(await this.store.markRemoteStarted(claim))) return 0;
     try {
       const settled = await this.resolver.settle(claim);
-      if (settled === "settled") await this.store.complete(claim);
-      else await this.store.unknown(claim);
+      // 返回值代表已持久化完成，而不是仅尝试过远端调用；状态写回 CAS 失败不能记为成功。
+      if (settled === "settled") return (await this.store.complete(claim)) ? 1 : 0;
+      return (await this.store.unknown(claim)) ? 1 : 0;
     } catch {
       // Store 的异常不能触发第二次远端调用；下次 recovery 看到 started 会收敛 unknown。
-      await this.store.unknown(claim).catch(() => undefined);
+      return (await this.store.unknown(claim).catch(() => false)) ? 1 : 0;
     }
-    return 1;
   }
 
   async close(): Promise<void> {

@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import { types as utilTypes } from "node:util";
 import { manifestError, WorkspaceManifestError } from "./errors.js";
 import {
   containsForbiddenCodePoint,
@@ -52,6 +53,7 @@ const INCARNATION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 function record(value: unknown, label: string): Record<string, unknown> {
+  manifestError(!utilTypes.isProxy(value), "INVALID_MANIFEST", `${label} 不能是 Proxy`);
   let isArray: boolean;
   try {
     isArray = Array.isArray(value);
@@ -91,6 +93,7 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function array(value: unknown, label: string, maxLength?: number): readonly unknown[] {
+  manifestError(!utilTypes.isProxy(value), "INVALID_MANIFEST", `${label} 不能是 Proxy`);
   let isArray: boolean;
   let lengthDescriptor: PropertyDescriptor | undefined;
   try {

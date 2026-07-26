@@ -52,13 +52,16 @@ API、Agent Worker 和 Scheduler 已有不同程度的业务能力，但没有�
 1. 首次关闭立即切换为 draining 并执行 `stopAccepting`，之后等待已登记的在途操作落定。
 2. 在途操作成功或失败都可排空；调用方仍收到原始操作结果，生命周期不吞掉业务失败。
 3. 资源按装配器声明顺序串行关闭。单个资源失败后继续关闭后续资源，最终只暴露稳定的资源名级错误。
-4. 整体关闭受 1 毫秒到 10 分钟的稳定超时约束。超时后迟到的清理完成或失败不能覆盖已确定的超时结果。
-5. `SIGTERM`、`SIGINT` 和显式 `close()` 共用同一个记忆化关闭 Promise；重复调用幂等。库不调用 `process.exit`，退出码和宿主策略由真正的最外层部署入口决定。
-6. `/live` 语义只反映进程仍在运行或正在停止，不访问外部依赖；`/ready` 在 draining 后立即失败，并对已注入的依赖探针逐项安全归一化。
+4. 装配结果通过校验后立即浅拷贝并冻结资源和探针列表，同时绑定当时的 `close`/`probe` 函数；装配器后续替换数组、名称或方法不能改变进程计划。
+5. 整体关闭受 1 毫秒到 10 分钟的稳定超时约束。超时后迟到的清理完成或失败不能覆盖已确定的超时结果。
+6. `SIGTERM`、`SIGINT` 和显式 `close()` 共用同一个记忆化关闭 Promise；重复调用幂等。库不调用 `process.exit`，退出码和宿主策略由真正的最外层部署入口决定。
+7. `/live` 语义只反映进程仍在运行或正在停止，不访问外部依赖；`/ready` 在 draining 后立即失败，并对已注入的依赖探针逐项安全归一化。
 
 ### 薄入口与生产拒绝
 
-API、Agent Worker 和 Scheduler 分别公开类型化配置解析及 `start*Process`。启动必须注入 `ServiceAssemblyFactory`；缺失装配器固定返回 `ASSEMBLER_MISSING`，装配异常固定返回 `ASSEMBLY_FAILED`。本阶段不提供默认装配器、内存生产回退或自动网络监听，因此“配置可解析”不等于“服务可部署”。
+API、Agent Worker 和 Scheduler 分别公开类型化配置解析及 `start*Process`。启动必须注入 `ServiceAssemblyFactory`；缺失装配器固定返回 `ASSEMBLER_MISSING`，装配异常固定返回 `ASSEMBLY_FAILED`。本阶段没有可审计的真实生产装配器，故 `RUNTIME_ENV=production` 即使传入测试 Fake 也固定返回 `PRODUCTION_ASSEMBLY_UNAVAILABLE`，不能由空资源或 Fake 探针宣称 ready。装配期间先登记信号，若收到停止信号则在真实资源出现后立即转入 draining；装配结果校验失败时，已返回的可关闭资源按声明顺序尽力释放。
+
+装配器和最外层启动日志只可记录稳定 `serviceName`、错误码和资源/探针名称，禁止序列化 configuration、环境对象、异常 cause 或任意连接配置；这些对象可能含密钥或连接串。关闭失败回调也只能接收已归一化错误，不能观察配置秘密；即使 JavaScript 调用方违规返回 rejected Promise，运行时也必须吸收，不能形成未处理 rejection。
 
 ## 理由
 
@@ -90,7 +93,8 @@ API、Agent Worker 和 Scheduler 分别公开类型化配置解析及 `start*Pro
 - 配置表测试覆盖三种环境、未知/缺失/非法变量、生产开发身份拒绝和秘密不泄漏；
 - 生命周期故障注入覆盖停止接收、在途成功/失败、串行关闭、资源失败继续、超时、重复信号和重复关闭；
 - 三个应用入口覆盖配置成功但装配器缺失时拒绝启动；
-- GitHub Actions 在 Ubuntu 与 Windows 执行同一组进程测试，Ubuntu 额外构建最小非 root 容器并执行启动/关闭门禁；
+- GitHub Actions 在 Ubuntu 与 Windows 执行同一组进程测试，Ubuntu 额外构建最小的数字非 root UID 容器，并验证 Config.User、`process.getuid()` 与启动/关闭门禁；
+- 容器门禁只创建此前不存在的临时 `.env.process-context-canary`（不读取或改写用户 `.env.local`），专用 `COPY` 构建必须失败，且运行镜像必须找不到该文件与环境中的秘密 canary；
 - 全量 clean-vendor、依赖审计和敏感信息扫描。
 
 ## 可逆性与回退
@@ -107,3 +111,4 @@ API、Agent Worker 和 Scheduler 分别公开类型化配置解析及 `start*Pro
 ## 实施记录
 
 - 2026-07-26：建立严格配置、共享生命周期、三个薄入口、跨平台测试和 Linux 最小容器门禁。
+- 2026-07-26：复审修正 readiness/close 竞态、装配校验后的资源回收、装配窗口信号接收，以及生产 Fake 就绪的 fail-closed 边界。

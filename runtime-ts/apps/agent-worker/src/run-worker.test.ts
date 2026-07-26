@@ -2,7 +2,6 @@ import { sha256Digest, tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
 import { describe, expect, it } from "vitest";
-import type { ExecutionScope, RuntimeEventV1, RuntimeMutation } from "./ports.js";
 import {
   outboxPayloadDigest,
   rolloutProjectionDigest,
@@ -10,6 +9,7 @@ import {
   sandboxCleanupIdentityDigest,
   workspaceChangeDigest,
 } from "./mutation-protocol.js";
+import type { ExecutionScope, RuntimeEventV1, RuntimeMutation } from "./ports.js";
 import { RunWorker } from "./run-worker.js";
 import {
   BlockingAgentSession,
@@ -17,13 +17,13 @@ import {
   FakeCancellationPort,
   FakeClock,
   FakeExecutionPersistence,
-  FakeRevisionVerifier,
   FakeRecoveryMetrics,
+  FakeRevisionVerifier,
   FakeSandboxRegistry,
   FakeSessionFactory,
-  ScriptedAgentSession,
   fakeRevision,
   fakeSeed,
+  ScriptedAgentSession,
 } from "./testing/fakes.js";
 
 const successfulEvents: readonly RuntimeAgentEvent[] = [
@@ -33,9 +33,9 @@ const successfulEvents: readonly RuntimeAgentEvent[] = [
   { type: "agent.settled" },
 ];
 
-function harness(sessions: Array<ScriptedAgentSession | BlockingAgentSession>) {
+function harness(sessions: Array<ScriptedAgentSession | BlockingAgentSession>, seed = fakeSeed()) {
   const persistence = new FakeExecutionPersistence();
-  const scope = persistence.addSeed(fakeSeed());
+  const scope = persistence.addSeed(seed);
   const revisions = new FakeRevisionVerifier();
   const sandboxes = new FakeSandboxRegistry();
   const factory = new FakeSessionFactory(sessions);
@@ -72,6 +72,26 @@ function harness(sessions: Array<ScriptedAgentSession | BlockingAgentSession>) {
 }
 
 describe("Run Worker 双栅栏与恢复状态机", () => {
+  it("初始 Projection 按 UTF-8 字节拒绝 emoji 超限，不能先启动 Sandbox 或 Session", async () => {
+    const seed = fakeSeed("emoji-projection");
+    const oversized = "😀".repeat(5_000);
+    const h = harness([new ScriptedAgentSession(successfulEvents)], {
+      ...seed,
+      rolloutProjection: {
+        schemaVersion: 1,
+        checkpointId: "emoji-byte-boundary",
+        // JS code unit 小于旧 16,000 限制，但 UTF-8 字节为 20,000，必须统一拒绝。
+        turns: [{ role: "user", text: oversized }],
+      },
+    });
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "EVENT_REJECTED",
+    });
+    expect(h.sandboxes.acquireCount).toBe(0);
+    expect(h.factory.createCount).toBe(0);
+  });
+
   it("Revision、Run succeeded、Attempt 终态和双栅栏释放在同一幂等事务完成", async () => {
     const h = harness([new ScriptedAgentSession(successfulEvents)]);
     h.revisions.nextRevisionId = fakeRevision("revision-success");

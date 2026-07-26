@@ -221,6 +221,18 @@ class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThre
     });
   }
 
+  async replayQueuedRun(input: {
+    readonly scope: TenantScope;
+    readonly thread: Thread;
+    readonly idempotency: IdempotentCommand;
+  }): Promise<IdempotentCreateResult<Run> | { readonly outcome: "not_found" }> {
+    const commandKey = `${input.scope.tenantId}:${input.scope.userId}:run:${input.idempotency.key}`;
+    const existing = this.idempotency.get(commandKey);
+    if (existing === undefined) return { outcome: "not_found" };
+    if (existing.hash !== input.idempotency.requestHash) return { outcome: "key_conflict" };
+    return { outcome: "replayed", entity: existing.entity as Run };
+  }
+
   async archiveThread(
     input: Parameters<ArchiveThreadCommandPort["archiveThread"]>[0],
   ): ReturnType<ArchiveThreadCommandPort["archiveThread"]> {
@@ -607,6 +619,35 @@ describe("Fastify API 契约", () => {
     expect(response.statusCode).toBe(422);
     expect(response.json().error.code).toBe("INVALID_STATE");
     expect(state.runs).toHaveLength(0);
+  });
+
+  it("Thread 归档后同键同载荷先重放原 Run，不同载荷固定冲突", async () => {
+    const { app } = fixture();
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-replay-archived" },
+      payload: { title: "归档后回放" },
+    });
+    const request = {
+      method: "POST" as const,
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-replay-archived" },
+      payload: { input: "同键原始输入" },
+    };
+    const first = await app.inject(request);
+    expect(first.statusCode).toBe(200);
+    await app.inject({
+      method: "DELETE",
+      url: "/v1/threads/thread_1",
+      headers: { authorization: "Bearer token-a" },
+    });
+    const replay = await app.inject(request);
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json().data).toEqual(first.json().data);
+    const conflict = await app.inject({ ...request, payload: { input: "归档后的不同输入" } });
+    expect(conflict.statusCode).toBe(409);
   });
 
   it("Run 输入按 UTF-8 字节而非 UTF-16 字符数限制", async () => {

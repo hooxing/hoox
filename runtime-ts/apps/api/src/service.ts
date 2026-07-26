@@ -14,9 +14,11 @@ import type {
   TenantScope,
   ThreadListCursor,
 } from "@cube-runtime/persistence";
-import { toRunDto, toThreadDto } from "@cube-runtime/protocol-mapper";
 import type { RunDto, ThreadDto, ThreadPageDto } from "@cube-runtime/protocol";
 import { MAX_RUN_INPUT_UTF8_BYTES } from "@cube-runtime/protocol";
+import { toRunDto, toThreadDto } from "@cube-runtime/protocol-mapper";
+import type { ApiCreateCapability } from "./capabilities.js";
+import { InvalidThreadCursorError } from "./cursor.js";
 import type {
   ApiClock,
   ApiIdGenerator,
@@ -25,8 +27,6 @@ import type {
   AuthPrincipal,
   ThreadCursorCodec,
 } from "./ports.js";
-import type { ApiCreateCapability } from "./capabilities.js";
-import { InvalidThreadCursorError } from "./cursor.js";
 
 export type ApiFailureKind =
   | "bad_request"
@@ -208,6 +208,21 @@ export class ApiService {
         threadId(rawThreadId),
       );
       if (thread === undefined) throw new ApiFailure("not_found");
+      const idempotency = {
+        key: idempotencyKey,
+        requestHash: commandHash("run.create", { threadId: thread.entity.id, inputText }),
+      } as const;
+      // 回放先于 createRun 的 active Thread 领域约束；归档不改变已经提交命令的 HTTP 结果。
+      const replay = await capability.enqueueOutbox.replayQueuedRun({
+        scope: auth.scope,
+        thread: thread.entity,
+        idempotency,
+      });
+      if (replay.outcome === "key_conflict") throw new ApiFailure("conflict");
+      if (replay.outcome === "not_authorized") throw new ApiFailure("not_found");
+      if (replay.outcome === "created" || replay.outcome === "replayed") {
+        return toRunDto(replay.entity);
+      }
       const run = createRun({
         id: this.dependencies.ids.run(),
         thread: thread.entity,
@@ -218,10 +233,7 @@ export class ApiService {
         run,
         thread: thread.entity,
         inputText,
-        idempotency: {
-          key: idempotencyKey,
-          requestHash: commandHash("run.create", { threadId: thread.entity.id, inputText }),
-        },
+        idempotency,
       });
       if (result.outcome === "key_conflict") throw new ApiFailure("conflict");
       if (result.outcome === "parent_inactive") throw new ApiFailure("invalid_state");

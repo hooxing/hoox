@@ -17,6 +17,8 @@
 5. Scheduler 用短事务 `FOR UPDATE SKIP LOCKED` 领取 Outbox，以 `generation + claimToken + 未过期 DB lease` 作为确认栅栏；事务返回后才调用 `RunExecutionStarterPort.execute`。确认时锁定 Run 并验证 outcome 与状态一致，迟到 ack 是 no-op。失败、busy 和异常 defer；waiting/terminal/取消安全终结投递。Worker 本身仍负责 Attempt 级幂等。
 6. Scheduler 的 Outbox 端口每次必须携带可信 Tenant scope。首版不引入跨租户 BypassRLS 扫描器；租户枚举/全局调度是后续有单独安全设计的能力。
 7. 本 ADR **不**签发可部署的 production Scheduler。仓库尚没有受信的 `RunExecutionStarterPort` 具体实现；`startServiceProcess` 因而继续在 production 环境拒绝任意注入的 assembler、Fake 或空消费者。后续纵向 composition 必须封闭构造真实 PG Outbox、可信 Worker dispatch client 及其不可伪造 capability，才可解除该合并门禁。
+8. HTTP Service 在读取到 Thread 后先委托原始命令端口按 `tenant + user + operation + key + requestHash` 查询回放，再执行 `createRun` 的 active Thread 校验：同键同载荷永远返回既有 Run，归档不改变其结果；同键异载荷固定为 409。该查询仅限可信 scope 的同一用户记录，不能作为跨租户或枚举接口。
+9. Worker、持久化和 Pi 共享同一 `ControlledRolloutProjection` UTF-8 校验；不得在 Worker 再维护按 JavaScript code unit 计量的副本。数据库同时用 POSIX `[:space:]` 拒绝 tab/newline 等受限 SQL 直写空白，Unicode 空白的精确产品语义继续由 JavaScript `trim` 在端口边界收敛。
 
 ## 取舍
 

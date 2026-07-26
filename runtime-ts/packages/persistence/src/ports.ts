@@ -74,6 +74,15 @@ export interface ThreadCreationPort {
 
 /** queued Run、enqueue outbox、幂等记录和有效 Membership 重验必须共用事务。 */
 export interface EnqueueOutboxPort {
+  /**
+   * 在创建候选 Run 前按原始幂等键读回。父 Thread 可以已归档，但同键同载荷仍必须返回
+   * 已提交的 Run；不同摘要只返回冲突，不泄漏任何其他用户或租户的记录。
+   */
+  replayQueuedRun(input: {
+    readonly scope: TenantScope;
+    readonly thread: Thread;
+    readonly idempotency: IdempotentCommand;
+  }): Promise<IdempotentCreateResult<Run> | { readonly outcome: "not_found" }>;
   createQueuedRun(input: {
     readonly scope: TenantScope;
     readonly run: Run;

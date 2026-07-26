@@ -1017,4 +1017,31 @@ describe("Thread 游标签名密钥轮换", () => {
       }),
     ).toThrow("当前签名密钥不存在");
   });
+
+  it("协议允许的最大 ID 可往返，超过推导载荷上限的输入被拒绝", () => {
+    now = baseTime;
+    const maximumScope = {
+      tenantId: tenantId(`t${"a".repeat(127)}`),
+      userId: userId(`u${"b".repeat(127)}`),
+    };
+    const maximumCursor = {
+      updatedAt: baseTime,
+      id: threadId(`i${"c".repeat(127)}`),
+    };
+    const codec = createThreadCursorCodec({
+      activeKid: "k".repeat(32),
+      keys: [{ kid: "k".repeat(32), secret: oldSecret }],
+      ...timing,
+    });
+    const token = codec.encode(maximumScope, maximumCursor);
+    expect(token.length).toBeGreaterThan(512);
+    expect(codec.decode(maximumScope, token)).toEqual(maximumCursor);
+
+    const oversizedScope = {
+      ...maximumScope,
+      tenantId: `t${"a".repeat(128)}` as typeof maximumScope.tenantId,
+    };
+    expect(() => codec.encode(oversizedScope, maximumCursor)).toThrow("任务分页游标无效");
+    expect(() => codec.decode(maximumScope, "a".repeat(2_000))).toThrow("任务分页游标无效");
+  });
 });

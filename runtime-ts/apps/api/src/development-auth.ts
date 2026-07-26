@@ -21,6 +21,10 @@ export function createDevelopmentAuthResolver(input: {
   ) {
     throw new TypeError("开发身份不能为空");
   }
+  if (first.userId === second.userId && first.tenantId === second.tenantId) {
+    // 两个测试主体必须对应两条独立隔离路径；相同 principal 会把越权测试伪装成通过。
+    throw new TypeError("开发身份 A 与 B 不能是同一 principal");
+  }
   // Token 只是本地 fixture 选择器，不是可部署认证协议；调用方只能传入白名单中的两个值。
   const accepted = new Map<string, AuthPrincipal>([
     ["Bearer dev-user-a", Object.freeze({ ...first })],

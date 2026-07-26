@@ -1,4 +1,4 @@
-import { SandboxRuntimeError, assertPositiveInteger } from "./errors.js";
+import { assertPositiveInteger, SandboxRuntimeError } from "./errors.js";
 
 export function validateBaseUrl(value: string | undefined): string {
   if (typeof value !== "string" || !value.trim()) invalid("CubeSandbox API URL 不能为空");

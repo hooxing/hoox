@@ -2,7 +2,12 @@ import { rehydrateThread, type Thread } from "@cube-runtime/domain";
 import type { QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type { IdempotentCreateResult, ThreadCreationPort } from "./ports.js";
-import { type Pool, type PoolClient, withTenantTransaction } from "./postgres.js";
+import {
+  type Pool,
+  type PoolClient,
+  TransactionCommitUnknownError,
+  withTenantTransaction,
+} from "./postgres.js";
 
 function storedTimestamp(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
@@ -14,8 +19,16 @@ function storedTimestamp(value: unknown): string {
  * API 的唯一 Thread 创建能力：Thread、空 Workspace、幂等记录与成员资格重验共用一个事务。
  * 该实现不复用普通 Repository，避免看似成功但只写入一半父实体。
  */
+export interface PgThreadCreationOptions {
+  /** 故障测试可模拟 COMMIT 成功但调用方未获得响应；实现必须按幂等键精确读回。 */
+  readonly afterCommit?: (operation: "create_thread") => void | Promise<void>;
+}
+
 export class PgThreadCreation implements ThreadCreationPort {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly options: PgThreadCreationOptions = {},
+  ) {}
 
   async createThread(
     input: Parameters<ThreadCreationPort["createThread"]>[0],
@@ -28,8 +41,9 @@ export class PgThreadCreation implements ThreadCreationPort {
     ) {
       return { outcome: "not_authorized" };
     }
+    let committed = false;
     try {
-      return await withTenantTransaction(this.pool, input.scope, async (client) => {
+      const result = await withTenantTransaction(this.pool, input.scope, async (client) => {
         const membership = await client.query<{ readonly status: string }>(
           `SELECT status FROM memberships WHERE tenant_id=$1 AND user_id=$2 FOR SHARE`,
           [input.scope.tenantId, input.scope.userId],
@@ -86,9 +100,25 @@ export class PgThreadCreation implements ThreadCreationPort {
         );
         return { outcome: "created", entity: input.thread } as const;
       });
+      committed = true;
+      await this.options.afterCommit?.("create_thread");
+      return result;
     } catch (error) {
+      // COMMIT 响应未知或提交后回调失败时，绝不能尝试再次 INSERT；只按同一 scope+key 精确读回。
+      if (error instanceof TransactionCommitUnknownError || committed) {
+        const replay = await this.readReplayAfterCommit(input);
+        if (replay !== undefined) return replay;
+      }
       throw mapPersistenceError(error, "原子创建 Thread 与 Workspace");
     }
+  }
+
+  private async readReplayAfterCommit(
+    input: Parameters<ThreadCreationPort["createThread"]>[0],
+  ): Promise<IdempotentCreateResult<Thread> | undefined> {
+    return withTenantTransaction(this.pool, input.scope, (client) =>
+      this.readReplay(client, input),
+    );
   }
 
   private async readReplay(

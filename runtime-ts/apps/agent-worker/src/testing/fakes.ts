@@ -6,9 +6,11 @@ import {
   createUser,
   createWorkspace,
   expireWorkspaceLease,
+  type IsoTimestamp,
   isoTimestamp,
   membershipId,
   prepareWorkspaceRevision,
+  type Run,
   releaseWorkspaceLease,
   renewWorkspaceLease,
   runId,
@@ -17,15 +19,20 @@ import {
   threadId,
   transitionRun,
   userId,
-  workspaceId,
-  workspaceRevisionId,
-  type IsoTimestamp,
-  type Run,
   type Workspace,
   type WorkspaceRevisionId,
+  workspaceId,
+  workspaceRevisionId,
 } from "@cube-runtime/domain";
 import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
-import { FakeSandboxHandle } from "@cube-runtime/sandbox";
+import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
+import {
+  outboxPayloadDigest,
+  rolloutProjectionDigest,
+  runtimeMutationDigest,
+  sandboxCleanupIdentityDigest,
+  workspaceChangeDigest,
+} from "../mutation-protocol.js";
 import type {
   AgentSessionFactoryPort,
   AgentTurnOutcome,
@@ -36,17 +43,18 @@ import type {
   ExecutionAttemptSnapshot,
   ExecutionAttemptStatus,
   ExecutionFence,
-  ExternalEffectPermit,
   ExecutionPersistencePort,
   ExecutionScope,
+  ExternalEffectPermit,
   FenceInspectionResult,
   HeartbeatTask,
   OrphanSandboxCleanupPort,
   PersistedRuntimeEventV1,
   PersistedRuntimeOutboxV1,
+  RecoveryMetricsPort,
   RuntimeMutation,
-  RuntimeMutationResult,
   RuntimeMutationReceiptV1,
+  RuntimeMutationResult,
   RuntimeOutboxReceiptV1,
   RuntimeOutboxV1,
   SandboxAcquireResult,
@@ -57,15 +65,7 @@ import type {
   WorkerAgentSessionPort,
   WorkspaceRevisionCandidate,
   WorkspaceRevisionVerifierPort,
-  RecoveryMetricsPort,
 } from "../ports.js";
-import {
-  outboxPayloadDigest,
-  rolloutProjectionDigest,
-  runtimeMutationDigest,
-  sandboxCleanupIdentityDigest,
-  workspaceChangeDigest,
-} from "../mutation-protocol.js";
 
 interface FakeRecord {
   readonly scope: ExecutionScope;

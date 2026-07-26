@@ -1631,9 +1631,41 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       left.claimNext({ tenantId: f.scope.tenantId, workerId: "cleanup-left", leaseMs: 210_000 }),
       right.claimNext({ tenantId: f.scope.tenantId, workerId: "cleanup-right", leaseMs: 210_000 }),
     ]);
-    const winner = races.find((value) => value !== undefined);
+    let winner = races.find((value) => value !== undefined);
     expect(races.filter((value) => value !== undefined)).toHaveLength(1);
     if (winner === undefined) throw new Error("Cleanup Store 没有唯一领取者");
+    // 未越过远端边界的过期 claim 可重领，generation 递增，旧 token/generation 立即失效。
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE cleanup_outbox SET claim_lease_expires_at=clock_timestamp()-interval '1 millisecond'
+          WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key='cleanup-store-key'`,
+        [f.scope.tenantId, attemptId],
+      ),
+    );
+    const previous = winner;
+    winner = await right.claimNext({
+      tenantId: f.scope.tenantId,
+      workerId: "cleanup-right",
+      leaseMs: 210_000,
+    });
+    if (winner === undefined) throw new Error("过期 Cleanup claim 未能重领");
+    expect(winner.generation).toBe(previous.generation + 1);
+    expect(await left.markRemoteStarted(previous)).toBe(false);
+    // lease 已过期时即使 token 正确也不能跨远端边界。
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE cleanup_outbox SET claim_lease_expires_at=clock_timestamp()-interval '1 millisecond'
+          WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key='cleanup-store-key'`,
+        [f.scope.tenantId, attemptId],
+      ),
+    );
+    expect(await left.markRemoteStarted(winner)).toBe(false);
+    winner = await left.claimNext({
+      tenantId: f.scope.tenantId,
+      workerId: "cleanup-left",
+      leaseMs: 210_000,
+    });
+    if (winner === undefined) throw new Error("过期租约后未能取得下一代 claim");
     // 完整身份、generation、token 任一篡改都不能跨越远端边界。
     expect(await left.markRemoteStarted({ ...winner, token: `${winner.token}-forged` })).toBe(
       false,

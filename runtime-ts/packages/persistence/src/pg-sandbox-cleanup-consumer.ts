@@ -26,7 +26,9 @@ export class PgSandboxCleanupConsumerStore {
   }): Promise<CleanupClaim | undefined> {
     if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1 || input.leaseMs > 600_000)
       throw new TypeError("cleanup leaseMs 无效");
-    if (!boundedText(input.workerId, 200)) throw new TypeError("cleanup workerId 无效");
+    if (input.workerId.trim() !== input.workerId || !boundedText(input.workerId, 200)) {
+      throw new TypeError("cleanup workerId 无效");
+    }
     return withTenantTransaction(
       this.pool,
       { tenantId: input.tenantId },

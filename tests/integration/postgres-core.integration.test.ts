@@ -525,7 +525,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 
   it("并发迁移串行化且重复执行结果一致", async () => {
     expect(concurrentMigrationVersions).toEqual([1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6]);
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(4);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(6);
   });
 
   it("checksum 同时绑定 down SQL，并拒绝孤立和重复版本", async () => {

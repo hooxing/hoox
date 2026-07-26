@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { WorkspaceDependencyError } from "./application-errors.js";
+import { WorkspaceApplicationError, WorkspaceDependencyError } from "./application-errors.js";
 import type {
   SandboxSessionIdentity,
   SandboxWorkspaceEntry,
@@ -48,9 +48,13 @@ class Journal implements WorkspaceOperationJournalPort {
   readonly failures: { code: string; disposition: WorkspaceKnownFailureDisposition }[] = [];
   readonly facts: WorkspaceUnknownFact[] = [];
   beginOverride: unknown | undefined;
+  beginError: unknown | undefined;
   recordUnknownError: WorkspaceDependencyError | undefined;
+  completeAfterStoreUnknown = false;
+  completeErrorBeforeStore: unknown | undefined;
 
   async begin(identity: WorkspaceOperationIdentity): Promise<unknown> {
+    if (this.beginError !== undefined) throw this.beginError;
     if (this.beginOverride !== undefined) return this.beginOverride;
     const row = this.rows.get(identity.operationKey);
     if (row === undefined) {
@@ -66,7 +70,11 @@ class Journal implements WorkspaceOperationJournalPort {
     return { status: row.state };
   }
   async complete(identity: WorkspaceOperationIdentity, result: WorkspaceOperationResult) {
+    if (this.completeErrorBeforeStore !== undefined) throw this.completeErrorBeforeStore;
     this.rows.set(identity.operationKey, { identity, state: "completed", result });
+    if (this.completeAfterStoreUnknown) {
+      throw new WorkspaceDependencyError("unknown", "JOURNAL_COMMIT_UNKNOWN");
+    }
   }
   async failKnown(input: {
     identity: WorkspaceOperationIdentity;
@@ -124,7 +132,7 @@ class SnapshotSandbox implements SandboxWorkspacePort {
     };
     this.byOperation.set(input.operationKey, {
       identity,
-      entries: this.liveEntries.map((entry) => ({ ...entry })),
+      entries: [...this.liveEntries],
       bodies: new Map([...this.liveBodies].map(([path, body]) => [path, Uint8Array.from(body)])),
     });
     return identity;
@@ -174,8 +182,12 @@ class Blobs implements WorkspaceCandidateBlobWritePort {
   afterPut: (() => void) | undefined;
   afterHead: (() => void) | undefined;
   tenantSideEffects = 0;
+  putError: unknown | undefined;
+  candidateOverride: WorkspaceCandidateBlob | undefined;
+  headOverride: Awaited<ReturnType<WorkspaceCandidateBlobWritePort["headCandidate"]>> | undefined;
 
   async putCandidate(input: Parameters<WorkspaceCandidateBlobWritePort["putCandidate"]>[0]) {
+    if (this.putError !== undefined) throw this.putError;
     this.tenantSideEffects += 1;
     const chunks: Uint8Array[] = [];
     for await (const chunk of input.body) chunks.push(chunk);
@@ -203,10 +215,11 @@ class Blobs implements WorkspaceCandidateBlobWritePort {
     this.afterPut?.();
     if (this.unknownAfterPut) throw new WorkspaceDependencyError("unknown", "PUT_TIMEOUT");
     if (this.knownAfterPut) throw new WorkspaceDependencyError("known", "PUT_UNAVAILABLE");
-    return blob;
+    return this.candidateOverride ?? blob;
   }
   async headCandidate(input: Parameters<WorkspaceCandidateBlobWritePort["headCandidate"]>[0]) {
     this.afterHead?.();
+    if (this.headOverride !== undefined) return this.headOverride;
     return { status: "exists" as const, blob: input.blob };
   }
 }
@@ -364,6 +377,126 @@ describe("Workspace publisher 可靠边界", () => {
         code: "DEPENDENCY_FAILED",
       });
     }
+  });
+
+  it("list 条目 getter 试图从目录切换成文件时立即拒绝，不 PUT 且不绕过条目配额", async () => {
+    const state = setup({ ...POLICY, maxEntries: 1, maxFiles: 1 });
+    let getterCalls = 0;
+    const switching = {
+      relativePath: "switch",
+      size: POLICY.maxSingleFileBytes + 1,
+    } as Record<string, unknown>;
+    Object.defineProperty(switching, "kind", {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return getterCalls === 1 ? "directory" : "file";
+      },
+    });
+    state.sandbox.liveEntries.push(switching as unknown as SandboxWorkspaceEntry);
+    await expect(state.publisher.publish(request("list-getter"))).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILED",
+    });
+    expect(getterCalls).toBe(0);
+    expect(state.blobs.tenantSideEffects).toBe(0);
+    expect(state.journal.rows.get("list-getter")?.state).toBe("retryable");
+  });
+
+  it("candidate 与 HEAD 返回值拒绝 getter/额外字段，后续不使用切换后的对象", async () => {
+    const candidate = setup();
+    candidate.sandbox.addFile("a", "a");
+    const body = Buffer.from("a");
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    const incarnationId = randomUUID();
+    const switching = { content: { sha256, size: 1 } } as Record<string, unknown>;
+    Object.defineProperty(switching, "object", {
+      enumerable: true,
+      get: () => ({
+        tenantId: SCOPE.tenantId,
+        purpose: "workspace",
+        incarnationId,
+        physicalObjectKey: `runtime/stable/${SCOPE.tenantId}/workspace/sha256/${sha256}/incarnations/${incarnationId}`,
+      }),
+    });
+    candidate.blobs.candidateOverride = switching as unknown as WorkspaceCandidateBlob;
+    await expect(candidate.publisher.publish(request("candidate-getter"))).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILED",
+    });
+
+    const head = setup();
+    head.sandbox.addFile("a", "a");
+    head.blobs.headOverride = {
+      status: "exists",
+      blob: {
+        content: { sha256, size: 1 },
+        object: {
+          tenantId: SCOPE.tenantId,
+          purpose: "workspace",
+          incarnationId,
+          physicalObjectKey: `runtime/stable/${SCOPE.tenantId}/workspace/sha256/${sha256}/incarnations/${incarnationId}`,
+        },
+      },
+      providerPath: "/private/object",
+    } as unknown as Awaited<ReturnType<WorkspaceCandidateBlobWritePort["headCandidate"]>>;
+    await expect(head.publisher.publish(request("head-extra"))).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILED",
+    });
+  });
+
+  it("适配器伪造公开 WorkspaceApplicationError 仍统一脱敏且无 cause", async () => {
+    const state = setup();
+    state.sandbox.addFile("a", "a");
+    state.blobs.putError = new WorkspaceApplicationError(
+      "ACCESS_DENIED",
+      "secret provider /private/object/path",
+    );
+    await expect(state.publisher.publish(request("forged-provider-error"))).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof WorkspaceApplicationError &&
+        error.code === "DEPENDENCY_FAILED" &&
+        !error.message.includes("secret") &&
+        !error.message.includes("path") &&
+        !("cause" in error),
+    );
+  });
+
+  it("complete 已提交但响应 UNKNOWN 时 completed 不降级，重入不重复上传", async () => {
+    const state = setup();
+    state.sandbox.addFile("a", "a");
+    state.journal.completeAfterStoreUnknown = true;
+    await expect(state.publisher.publish(request("complete-unknown"))).rejects.toMatchObject({
+      code: "RESULT_UNKNOWN",
+    });
+    expect(state.journal.rows.get("complete-unknown")?.state).toBe("completed");
+    state.journal.completeAfterStoreUnknown = false;
+    await state.publisher.publish(request("complete-unknown"));
+    expect(state.blobs.effects).toBe(1);
+  });
+
+  it("journal begin/complete 自身异常不泄漏 provider secret/path", async () => {
+    const begin = setup();
+    begin.journal.beginError = new WorkspaceDependencyError("known", "secret/provider/path");
+    await expect(begin.publisher.publish(request("begin-secret"))).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof WorkspaceApplicationError &&
+        error.code === "DEPENDENCY_FAILED" &&
+        !error.message.includes("secret") &&
+        !error.message.includes("path"),
+    );
+
+    const complete = setup();
+    complete.sandbox.addFile("a", "a");
+    complete.journal.completeErrorBeforeStore = new WorkspaceDependencyError(
+      "known",
+      "secret/provider/path",
+    );
+    await expect(complete.publisher.publish(request("complete-secret"))).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof WorkspaceApplicationError &&
+        error.code === "DEPENDENCY_FAILED" &&
+        !error.message.includes("secret") &&
+        !error.message.includes("path"),
+    );
   });
 
   it("completed 完整重验 scope/snapshot/base/candidate digest/identity/verifiedAt 与当前配额", async () => {

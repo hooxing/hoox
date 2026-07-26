@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { types as utilTypes } from "node:util";
-import { WorkspaceApplicationError, WorkspaceDependencyError } from "./application-errors.js";
+import {
+  WorkspaceCoreApplicationError as WorkspaceApplicationError,
+  WorkspaceDependencyError,
+} from "./application-errors.js";
 import type {
   SandboxSessionIdentity,
   SandboxWorkspaceSnapshot,
@@ -12,11 +15,15 @@ import type {
   WorkspaceUnknownFact,
 } from "./application-ports.js";
 import type { WorkspaceContentIdentity } from "./manifest.js";
+import type { WorkspaceStableObjectIdentity } from "./manifest.js";
 
 const OPERATION_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u;
 const SCOPED_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u;
 const SNAPSHOT_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
+const INCARNATION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 export function validateOperationKey(value: string): string {
   if (!OPERATION_KEY_PATTERN.test(value)) {
@@ -302,6 +309,69 @@ export function exactKeys(
   if (actual.length !== sorted.length || actual.some((key, index) => key !== sorted[index])) {
     throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 字段不符合契约`);
   }
+}
+
+export function parseContentIdentity(value: unknown): WorkspaceContentIdentity {
+  const input = plainDataRecord(value, "WorkspaceContentIdentity");
+  exactKeys(input, ["sha256", "size"], "WorkspaceContentIdentity");
+  if (
+    typeof input.sha256 !== "string" ||
+    !SHA256_PATTERN.test(input.sha256) ||
+    !Number.isSafeInteger(input.size) ||
+    (input.size as number) < 0
+  ) {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace 内容身份字段无效");
+  }
+  return Object.freeze({ sha256: input.sha256, size: input.size as number });
+}
+
+export function parseStableObjectIdentity(value: unknown): WorkspaceStableObjectIdentity {
+  const input = plainDataRecord(value, "WorkspaceStableObjectIdentity");
+  exactKeys(
+    input,
+    ["tenantId", "purpose", "incarnationId", "physicalObjectKey"],
+    "WorkspaceStableObjectIdentity",
+  );
+  if (
+    typeof input.tenantId !== "string" ||
+    !SCOPED_ID_PATTERN.test(input.tenantId) ||
+    input.purpose !== "workspace" ||
+    typeof input.incarnationId !== "string" ||
+    !INCARNATION_ID_PATTERN.test(input.incarnationId) ||
+    typeof input.physicalObjectKey !== "string"
+  ) {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace stable 对象身份字段无效");
+  }
+  return Object.freeze({
+    tenantId: input.tenantId,
+    purpose: "workspace",
+    incarnationId: input.incarnationId,
+    physicalObjectKey: input.physicalObjectKey,
+  });
+}
+
+export function parseExternalAsyncIterable<T>(value: unknown, label: string): AsyncIterable<T> {
+  if (
+    utilTypes.isProxy(value) ||
+    (typeof value !== "object" && typeof value !== "function") ||
+    value === null
+  ) {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 必须是可信流对象`);
+  }
+  let iterator: unknown;
+  try {
+    iterator = (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator];
+  } catch {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 不可安全读取`);
+  }
+  if (typeof iterator !== "function") {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 缺少异步迭代协议`);
+  }
+  return Object.freeze(value) as AsyncIterable<T>;
+}
+
+export function parseExternalStream(value: unknown, label: string): AsyncIterable<Uint8Array> {
+  return parseExternalAsyncIterable<Uint8Array>(value, label);
 }
 
 export interface StreamVerification {

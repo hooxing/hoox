@@ -1,6 +1,9 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { WorkspaceApplicationError, WorkspaceDependencyError } from "./application-errors.js";
+import {
+  WorkspaceCoreApplicationError as WorkspaceApplicationError,
+  WorkspaceDependencyError,
+} from "./application-errors.js";
 import type {
   SandboxWorkspaceEntry,
   SandboxWorkspacePort,
@@ -19,7 +22,11 @@ import {
   exactKeys,
   isWorkspaceJournalError,
   mapDependencyFailure,
+  parseContentIdentity,
+  parseExternalAsyncIterable,
+  parseExternalStream,
   parseSandboxSnapshot,
+  parseStableObjectIdentity,
   plainDataRecord,
   recordKnownFailure,
   stopPoint,
@@ -104,10 +111,13 @@ export class WorkspacePublisher {
         phase = "hash_snapshot_file";
         stopPoint(input.signal);
         const content = await digestStream({
-          source: this.options.sandbox.readRegularFile(
-            snapshot,
-            relativePath,
-            signalControl(input.signal),
+          source: parseExternalStream(
+            this.options.sandbox.readRegularFile(
+              snapshot,
+              relativePath,
+              signalControl(input.signal),
+            ),
+            "Sandbox 快照文件流",
           ),
           policy: this.policy,
           ...(input.signal === undefined ? {} : { signal: input.signal }),
@@ -119,25 +129,30 @@ export class WorkspacePublisher {
         phase = "upload_candidate";
         stopPoint(input.signal);
         const verified = verifyingStream({
-          source: this.options.sandbox.readRegularFile(
-            snapshot,
-            relativePath,
-            signalControl(input.signal),
+          source: parseExternalStream(
+            this.options.sandbox.readRegularFile(
+              snapshot,
+              relativePath,
+              signalControl(input.signal),
+            ),
+            "Sandbox 快照文件流",
           ),
           policy: this.policy,
           ...(input.signal === undefined ? {} : { signal: input.signal }),
           expected: content,
         });
-        const blob = await this.callDependency(identity, phase, () =>
-          this.options.blobs.putCandidate({
-            scope,
-            purpose: "workspace",
-            operationKey: candidateOperationKey(identity, relativePath, content),
-            relativePath,
-            expectedContent: content,
-            body: verified.body,
-            ...(input.signal === undefined ? {} : { signal: input.signal }),
-          }),
+        const blob = parseCandidateBlob(
+          await this.callDependency(identity, phase, () =>
+            this.options.blobs.putCandidate({
+              scope,
+              purpose: "workspace",
+              operationKey: candidateOperationKey(identity, relativePath, content),
+              relativePath,
+              expectedContent: content,
+              body: verified.body,
+              ...(input.signal === undefined ? {} : { signal: input.signal }),
+            }),
+          ),
         );
         if (verified.status() === "pending") {
           throw new WorkspaceApplicationError(
@@ -156,8 +171,10 @@ export class WorkspacePublisher {
         );
         stopPoint(input.signal);
         phase = "verify_candidate";
-        const head = await this.callDependency(identity, phase, () =>
-          this.options.blobs.headCandidate({ scope, blob }),
+        const head = parseCandidateHeadResult(
+          await this.callDependency(identity, phase, () =>
+            this.options.blobs.headCandidate({ scope, blob }),
+          ),
         );
         if (head.status !== "exists" || !sameCandidate(head.blob, blob)) {
           throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "候选 Blob HEAD 校验失败");
@@ -230,12 +247,17 @@ export class WorkspacePublisher {
       const result: SandboxWorkspaceEntry[] = [];
       const paths = new Set<string>();
       let fileCount = 0;
-      for await (const raw of this.options.sandbox.listWorkspace(snapshot, signalControl(signal))) {
+      const listed = parseExternalAsyncIterable<unknown>(
+        this.options.sandbox.listWorkspace(snapshot, signalControl(signal)),
+        "Sandbox Workspace 清单流",
+      );
+      for await (const raw of listed) {
         stopPoint(signal);
         if (result.length >= this.policy.maxEntries) {
           throw new WorkspaceApplicationError("LIMIT_EXCEEDED", "Workspace 条目数量超过配额");
         }
-        const relativePath = workspaceRelativePath(raw.relativePath);
+        const entry = parseSandboxEntry(raw);
+        const relativePath = workspaceRelativePath(entry.relativePath);
         if (Buffer.byteLength(relativePath, "utf8") > this.policy.maxPathUtf8Bytes) {
           throw new WorkspaceApplicationError("LIMIT_EXCEEDED", "Workspace 路径超过配额");
         }
@@ -243,19 +265,25 @@ export class WorkspacePublisher {
           throw new WorkspaceApplicationError("UNSAFE_SANDBOX_ENTRY", "Sandbox 清单包含重复路径");
         }
         paths.add(relativePath);
-        if (raw.kind === "symlink" || raw.kind === "special") {
+        if (entry.kind === "symlink" || entry.kind === "special") {
           throw new WorkspaceApplicationError(
             "UNSAFE_SANDBOX_ENTRY",
             "Sandbox Workspace 包含不允许的文件类型",
           );
         }
-        if (raw.kind === "file") {
+        if (entry.kind === "file") {
           fileCount += 1;
           if (fileCount > this.policy.maxFiles) {
             throw new WorkspaceApplicationError("LIMIT_EXCEEDED", "Workspace 文件数量超过配额");
           }
         }
-        result.push(Object.freeze({ ...raw, relativePath }));
+        result.push(
+          Object.freeze({
+            relativePath,
+            kind: entry.kind,
+            ...(entry.size === undefined ? {} : { size: entry.size }),
+          }),
+        );
       }
       assertDirectoryFileShape(result);
       return Object.freeze(result);
@@ -486,4 +514,57 @@ function canonicalIsoTimestamp(value: string): boolean {
 
 function signalControl(signal: AbortSignal | undefined): { readonly signal?: AbortSignal } {
   return signal === undefined ? {} : { signal };
+}
+
+function parseSandboxEntry(value: unknown): SandboxWorkspaceEntry {
+  const input = plainDataRecord(value, "Sandbox Workspace 条目");
+  if (input.kind === "file") {
+    exactKeys(input, ["relativePath", "kind", "size"], "Sandbox Workspace 条目");
+    if (
+      typeof input.relativePath !== "string" ||
+      !Number.isSafeInteger(input.size) ||
+      (input.size as number) < 0
+    ) {
+      throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Sandbox 文件条目字段无效");
+    }
+    return Object.freeze({
+      relativePath: input.relativePath,
+      kind: "file",
+      size: input.size as number,
+    });
+  }
+  if (input.kind === "directory" || input.kind === "symlink" || input.kind === "special") {
+    exactKeys(input, ["relativePath", "kind"], "Sandbox Workspace 条目");
+    if (typeof input.relativePath !== "string") {
+      throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Sandbox 条目路径字段无效");
+    }
+    return Object.freeze({ relativePath: input.relativePath, kind: input.kind });
+  }
+  throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Sandbox 条目类型无效");
+}
+
+function parseCandidateBlob(value: unknown): WorkspaceCandidateBlob {
+  const input = plainDataRecord(value, "Workspace candidate Blob");
+  exactKeys(input, ["content", "object"], "Workspace candidate Blob");
+  return Object.freeze({
+    content: parseContentIdentity(input.content),
+    object: parseStableObjectIdentity(input.object),
+  });
+}
+
+type ParsedCandidateHeadResult =
+  | { readonly status: "not_found" }
+  | { readonly status: "exists"; readonly blob: WorkspaceCandidateBlob };
+
+function parseCandidateHeadResult(value: unknown): ParsedCandidateHeadResult {
+  const input = plainDataRecord(value, "Workspace candidate HEAD 结果");
+  if (input.status === "not_found") {
+    exactKeys(input, ["status"], "Workspace candidate HEAD 结果");
+    return Object.freeze({ status: "not_found" });
+  }
+  if (input.status !== "exists") {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace candidate HEAD 状态无效");
+  }
+  exactKeys(input, ["status", "blob"], "Workspace candidate HEAD 结果");
+  return Object.freeze({ status: "exists", blob: parseCandidateBlob(input.blob) });
 }

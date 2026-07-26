@@ -185,7 +185,11 @@ importers:
         specifier: 0.34.52
         version: 0.34.52
 
-  runtime-ts/packages/resource: {}
+  runtime-ts/packages/resource:
+    dependencies:
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   runtime-ts/packages/run-contracts:
     dependencies:

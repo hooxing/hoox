@@ -1,4 +1,9 @@
-import { cubeConfigFromEnv, CubeSandboxGateway, SandboxRuntimeError, type SandboxHandle } from "@cube-runtime/sandbox";
+import {
+  cubeConfigFromEnv,
+  CubeSandboxGateway,
+  SandboxRuntimeError,
+  type SandboxHandle,
+} from "@cube-runtime/sandbox";
 import { CubeSandboxCleanupResolver } from "./sandbox-cleanup-consumer.js";
 
 if (process.env.REAL_CUBE_CLEANUP_SMOKE !== "1") {
@@ -16,16 +21,31 @@ try {
   const id = active.id;
 
   console.log("[2/5] 通过 Cleanup resolver pause");
-  assertSettled(await resolver.settle({ registryId: "smoke-pause", providerSandboxId: id, disposition: "pause" }));
+  assertSettled(
+    await resolver.settle({
+      registryId: "smoke-pause",
+      providerSandboxId: id,
+      disposition: "pause",
+    }),
+  );
 
   console.log("[3/5] 重新连接确认 pause 已实际生效且可恢复");
   active = await gateway.connect(id, { timeoutMs: 90_000 });
-  if ((await active.command("printf cleanup-pause-resumed", { timeoutMs: 90_000 })).stdout !== "cleanup-pause-resumed") {
+  if (
+    (await active.command("printf cleanup-pause-resumed", { timeoutMs: 90_000 })).stdout !==
+    "cleanup-pause-resumed"
+  ) {
     throw new Error("暂停恢复后的 CubeSandbox 不可用");
   }
 
   console.log("[4/5] 通过 Cleanup resolver close");
-  assertSettled(await resolver.settle({ registryId: "smoke-close", providerSandboxId: id, disposition: "close" }));
+  assertSettled(
+    await resolver.settle({
+      registryId: "smoke-close",
+      providerSandboxId: id,
+      disposition: "close",
+    }),
+  );
   active = undefined;
 
   console.log("[5/5] 验证 close 后无残留 Sandbox");

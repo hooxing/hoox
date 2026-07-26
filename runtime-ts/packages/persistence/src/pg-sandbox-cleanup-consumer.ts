@@ -19,13 +19,21 @@ export interface CleanupClaim {
 export class PgSandboxCleanupConsumerStore {
   constructor(private readonly pool: Pool) {}
 
-  async claimNext(input: { readonly tenantId: string; readonly workerId: string; readonly leaseMs: number }): Promise<CleanupClaim | undefined> {
-    if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1 || input.leaseMs > 600_000) throw new TypeError("cleanup leaseMs 无效");
+  async claimNext(input: {
+    readonly tenantId: string;
+    readonly workerId: string;
+    readonly leaseMs: number;
+  }): Promise<CleanupClaim | undefined> {
+    if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1 || input.leaseMs > 600_000)
+      throw new TypeError("cleanup leaseMs 无效");
     if (!boundedText(input.workerId, 200)) throw new TypeError("cleanup workerId 无效");
-    return withTenantTransaction(this.pool, { tenantId: input.tenantId }, async (client) => {
-      // 已跨越远端调用边界的过期 claim 只能变 unknown；不能再次派发 close。
-      await client.query(
-        `UPDATE cleanup_outbox SET state='unknown',claim_token=NULL,claimed_by=NULL,claim_lease_expires_at=NULL,updated_at=clock_timestamp()
+    return withTenantTransaction(
+      this.pool,
+      { tenantId: input.tenantId },
+      async (client) => {
+        // 已跨越远端调用边界的过期 claim 只能变 unknown；不能再次派发 close。
+        await client.query(
+          `UPDATE cleanup_outbox SET state='unknown',claim_token=NULL,claimed_by=NULL,claim_lease_expires_at=NULL,updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND state='started' AND remote_call_started_at IS NOT NULL
             AND (claim_lease_expires_at IS NULL OR claim_lease_expires_at <= clock_timestamp())
             AND NOT EXISTS (
@@ -37,17 +45,19 @@ export class PgSandboxCleanupConsumerStore {
                 AND workspace_lease.epoch=run_claim.workspace_lease_epoch AND workspace_lease.expires_at > clock_timestamp()
               WHERE attempt.tenant_id=cleanup_outbox.tenant_id AND attempt.attempt_id=cleanup_outbox.attempt_id
                 AND attempt.status IN ('claimed','running','finalizing')
-            )`, [input.tenantId],
-      );
-      await client.query(
-        `UPDATE sandbox_registry registry SET state='unknown',updated_at=clock_timestamp()
+            )`,
+          [input.tenantId],
+        );
+        await client.query(
+          `UPDATE sandbox_registry registry SET state='unknown',updated_at=clock_timestamp()
            FROM cleanup_outbox cleanup
           WHERE cleanup.tenant_id=$1 AND cleanup.state='unknown' AND cleanup.remote_call_started_at IS NOT NULL
             AND cleanup.tenant_id=registry.tenant_id AND cleanup.registry_id=registry.registry_id
-            AND registry.state IN ('closing','pausing')`, [input.tenantId],
-      );
-      const candidate = await client.query<any>(
-        `SELECT c.*,a.status,a.workspace_id FROM cleanup_outbox c
+            AND registry.state IN ('closing','pausing')`,
+          [input.tenantId],
+        );
+        const candidate = await client.query<any>(
+          `SELECT c.*,a.status,a.workspace_id FROM cleanup_outbox c
           JOIN execution_attempts a ON a.tenant_id=c.tenant_id AND a.attempt_id=c.attempt_id
           LEFT JOIN run_claims rc ON rc.tenant_id=a.tenant_id AND rc.attempt_id=a.attempt_id AND rc.released_at IS NULL
           LEFT JOIN workspace_write_leases wl ON wl.tenant_id=a.tenant_id AND wl.workspace_id=a.workspace_id AND wl.root_run_id=a.root_run_id AND wl.epoch=rc.workspace_lease_epoch
@@ -57,71 +67,122 @@ export class PgSandboxCleanupConsumerStore {
            AND NOT COALESCE((a.status IN ('claimed','running','finalizing') AND rc.expires_at > clock_timestamp() AND wl.expires_at > clock_timestamp()), false)
            -- started 的 disposition 是第一次领取时决定的事实，恢复只能沿用，绝不能改写。
            AND (c.state='pending' OR (c.disposition IS NOT NULL AND c.remote_call_started_at IS NULL))
-         ORDER BY c.updated_at FOR UPDATE OF c,a SKIP LOCKED LIMIT 1`, [input.tenantId],
-      );
-      const row = candidate.rows[0]; if (row === undefined) return undefined;
-      // 候选筛选后的二次锁定避免 SERIALIZABLE 快照落在 heartbeat 续租之前。
-      // 锁顺序固定为 cleanup/attempt → run claim → workspace lease，所有 consumer 一致。
-      const currentClaim = await client.query<{ expires_at: Date }>(
-        `SELECT expires_at FROM run_claims WHERE tenant_id=$1 AND attempt_id=$2 AND released_at IS NULL FOR UPDATE`,
-        [input.tenantId, row.attempt_id],
-      );
-      const currentLease = await client.query<{ expires_at: Date }>(
-        `SELECT expires_at FROM workspace_write_leases WHERE tenant_id=$1 AND workspace_id=$2 FOR UPDATE`,
-        [input.tenantId, row.workspace_id],
-      );
-      const now = await client.query<{ now: Date }>("SELECT clock_timestamp() AS now");
-      const databaseNow = now.rows[0]?.now.getTime();
-      if (databaseNow === undefined) throw new Error("cleanup 数据库时钟缺失");
-      if (
-        ["claimed", "running", "finalizing"].includes(row.status) &&
-        currentClaim.rows[0] !== undefined && currentLease.rows[0] !== undefined &&
-        currentClaim.rows[0].expires_at.getTime() > databaseNow &&
-        currentLease.rows[0].expires_at.getTime() > databaseNow
-      ) return undefined;
-      const token = `cleanup-${randomUUID()}`;
-      const disposition = row.state === 'started' ? row.disposition : 'close';
-      const claimed = await client.query(
-        `UPDATE cleanup_outbox SET state='started',
+         ORDER BY c.updated_at FOR UPDATE OF c,a SKIP LOCKED LIMIT 1`,
+          [input.tenantId],
+        );
+        const row = candidate.rows[0];
+        if (row === undefined) return undefined;
+        // 候选筛选后的二次锁定避免 SERIALIZABLE 快照落在 heartbeat 续租之前。
+        // 锁顺序固定为 cleanup/attempt → run claim → workspace lease，所有 consumer 一致。
+        const currentClaim = await client.query<{ expires_at: Date }>(
+          `SELECT expires_at FROM run_claims WHERE tenant_id=$1 AND attempt_id=$2 AND released_at IS NULL FOR UPDATE`,
+          [input.tenantId, row.attempt_id],
+        );
+        const currentLease = await client.query<{ expires_at: Date }>(
+          `SELECT expires_at FROM workspace_write_leases WHERE tenant_id=$1 AND workspace_id=$2 FOR UPDATE`,
+          [input.tenantId, row.workspace_id],
+        );
+        const now = await client.query<{ now: Date }>("SELECT clock_timestamp() AS now");
+        const databaseNow = now.rows[0]?.now.getTime();
+        if (databaseNow === undefined) throw new Error("cleanup 数据库时钟缺失");
+        if (
+          ["claimed", "running", "finalizing"].includes(row.status) &&
+          currentClaim.rows[0] !== undefined &&
+          currentLease.rows[0] !== undefined &&
+          currentClaim.rows[0].expires_at.getTime() > databaseNow &&
+          currentLease.rows[0].expires_at.getTime() > databaseNow
+        )
+          return undefined;
+        const token = `cleanup-${randomUUID()}`;
+        const disposition = row.state === "started" ? row.disposition : "close";
+        const claimed = await client.query(
+          `UPDATE cleanup_outbox SET state='started',
            disposition=CASE WHEN state='pending' THEN 'close' ELSE disposition END,claim_token=$4,claimed_by=$5,
            claim_generation=claim_generation+1,claim_lease_expires_at=clock_timestamp()+($6::bigint*interval '1 millisecond'),
            attempt_count=attempt_count+1,updated_at=clock_timestamp()
          WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key=$3
            AND (state='pending' OR (state='started' AND disposition IS NOT NULL AND remote_call_started_at IS NULL))`,
-        [input.tenantId,row.attempt_id,row.idempotency_key,token,input.workerId,input.leaseMs],
-      );
-      if (claimed.rowCount !== 1) return undefined;
-      return { tenantId: input.tenantId,attemptId:row.attempt_id,registryId:row.registry_id,providerSandboxId:row.provider_sandbox_id,idempotencyKey:row.idempotency_key,disposition,token,generation:Number(row.claim_generation)+1 } as CleanupClaim;
-    }, { isolationLevel: "SERIALIZABLE" });
+          [
+            input.tenantId,
+            row.attempt_id,
+            row.idempotency_key,
+            token,
+            input.workerId,
+            input.leaseMs,
+          ],
+        );
+        if (claimed.rowCount !== 1) return undefined;
+        return {
+          tenantId: input.tenantId,
+          attemptId: row.attempt_id,
+          registryId: row.registry_id,
+          providerSandboxId: row.provider_sandbox_id,
+          idempotencyKey: row.idempotency_key,
+          disposition,
+          token,
+          generation: Number(row.claim_generation) + 1,
+        } as CleanupClaim;
+      },
+      { isolationLevel: "SERIALIZABLE" },
+    );
   }
 
-  async markRemoteStarted(claim: CleanupClaim): Promise<boolean> { return this.transition(claim, "remote"); }
-  async complete(claim: CleanupClaim): Promise<boolean> { return this.transition(claim, "completed"); }
-  async unknown(claim: CleanupClaim): Promise<boolean> { return this.transition(claim, "unknown"); }
-  private async transition(claim: CleanupClaim, next: "remote" | "completed" | "unknown"): Promise<boolean> {
-    return withTenantTransaction(this.pool,{tenantId:claim.tenantId},async client => {
-      const result=await client.query<{ registry_id: string; disposition: "close" | "pause" }>(
-        `UPDATE cleanup_outbox SET ${next === 'remote' ? "remote_call_started_at=clock_timestamp()" : `state='${next}',claim_token=NULL,claimed_by=NULL,claim_lease_expires_at=NULL`},updated_at=clock_timestamp()
+  async markRemoteStarted(claim: CleanupClaim): Promise<boolean> {
+    return this.transition(claim, "remote");
+  }
+  async complete(claim: CleanupClaim): Promise<boolean> {
+    return this.transition(claim, "completed");
+  }
+  async unknown(claim: CleanupClaim): Promise<boolean> {
+    return this.transition(claim, "unknown");
+  }
+  private async transition(
+    claim: CleanupClaim,
+    next: "remote" | "completed" | "unknown",
+  ): Promise<boolean> {
+    return withTenantTransaction(
+      this.pool,
+      { tenantId: claim.tenantId },
+      async (client) => {
+        const result = await client.query<{ registry_id: string; disposition: "close" | "pause" }>(
+          `UPDATE cleanup_outbox SET ${next === "remote" ? "remote_call_started_at=clock_timestamp()" : `state='${next}',claim_token=NULL,claimed_by=NULL,claim_lease_expires_at=NULL`},updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key=$3 AND state='started' AND claim_token=$4 AND claim_generation=$5
             AND registry_id=$6 AND provider_sandbox_id=$7 AND disposition=$8
             ${next === "remote" ? "AND claim_lease_expires_at > clock_timestamp()" : ""}
           RETURNING registry_id,disposition`,
-        [claim.tenantId,claim.attemptId,claim.idempotencyKey,claim.token,claim.generation,claim.registryId,claim.providerSandboxId,claim.disposition]);
-      const row = result.rows[0];
-      if (row === undefined) return false;
-      const registryState = next === "remote"
-        ? row.disposition === "pause" ? "pausing" : "closing"
-        : next === "completed"
-          ? row.disposition === "pause" ? "paused" : "closed"
-          : "unknown";
-      const registry = await client.query(
-        `UPDATE sandbox_registry SET state=$3,updated_at=clock_timestamp()
+          [
+            claim.tenantId,
+            claim.attemptId,
+            claim.idempotencyKey,
+            claim.token,
+            claim.generation,
+            claim.registryId,
+            claim.providerSandboxId,
+            claim.disposition,
+          ],
+        );
+        const row = result.rows[0];
+        if (row === undefined) return false;
+        const registryState =
+          next === "remote"
+            ? row.disposition === "pause"
+              ? "pausing"
+              : "closing"
+            : next === "completed"
+              ? row.disposition === "pause"
+                ? "paused"
+                : "closed"
+              : "unknown";
+        const registry = await client.query(
+          `UPDATE sandbox_registry SET state=$3,updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND registry_id=$2
             AND state ${next === "remote" ? "IN ('ready','paused')" : "IN ('closing','pausing')"}`,
-        [claim.tenantId, row.registry_id, registryState],
-      );
-      return registry.rowCount === 1;
-    },{isolationLevel:"SERIALIZABLE"});
+          [claim.tenantId, row.registry_id, registryState],
+        );
+        return registry.rowCount === 1;
+      },
+      { isolationLevel: "SERIALIZABLE" },
+    );
   }
 }
 

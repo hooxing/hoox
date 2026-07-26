@@ -536,7 +536,13 @@ export class PgBackedSandboxSessionRegistry
           `UPDATE cleanup_outbox SET remote_call_started_at=clock_timestamp(),updated_at=clock_timestamp()
             WHERE tenant_id=$1 AND idempotency_key=$2 AND registry_id=$3 AND provider_sandbox_id=$4
               AND state='started' AND disposition=$5 AND remote_call_started_at IS NULL`,
-          [input.scope.tenantId, input.cleanupIntentId, input.session.registryId, input.session.providerSandboxId, input.disposition],
+          [
+            input.scope.tenantId,
+            input.cleanupIntentId,
+            input.session.registryId,
+            input.session.providerSandboxId,
+            input.disposition,
+          ],
         );
         if (started.rowCount !== 1) return false;
         const registryUpdate = await client.query(
@@ -552,19 +558,31 @@ export class PgBackedSandboxSessionRegistry
     const result = await this.upstream.settle(input);
     await withTenantTransaction(this.pool, { tenantId: input.scope.tenantId }, async (client) => {
       const terminal = result.outcome === "unknown" ? "unknown" : "completed";
-      const registryTerminal = result.outcome === "unknown" ? "unknown" : input.disposition === "pause" ? "paused" : "closed";
+      const registryTerminal =
+        result.outcome === "unknown"
+          ? "unknown"
+          : input.disposition === "pause"
+            ? "paused"
+            : "closed";
       const cleanup = await client.query(
         `UPDATE cleanup_outbox SET state=$5,updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND idempotency_key=$2 AND registry_id=$3 AND provider_sandbox_id=$4
             AND state='started' AND remote_call_started_at IS NOT NULL`,
-        [input.scope.tenantId, input.cleanupIntentId, input.session.registryId, input.session.providerSandboxId, terminal],
+        [
+          input.scope.tenantId,
+          input.cleanupIntentId,
+          input.session.registryId,
+          input.session.providerSandboxId,
+          terminal,
+        ],
       );
       const registry = await client.query(
         `UPDATE sandbox_registry SET state=$3,updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND registry_id=$2 AND state=$4`,
         [input.scope.tenantId, input.session.registryId, registryTerminal, expectedState],
       );
-      if (cleanup.rowCount !== 1 || registry.rowCount !== 1) throw new Error("Sandbox cleanup 终态未能原子同步");
+      if (cleanup.rowCount !== 1 || registry.rowCount !== 1)
+        throw new Error("Sandbox cleanup 终态未能原子同步");
     });
     return result;
   }

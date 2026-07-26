@@ -3,21 +3,21 @@ import {
   createMembership,
   createPersonalTenant,
   createUser,
+  type IsoTimestamp,
   isoTimestamp,
+  type MembershipRole,
   membershipId,
+  type Run,
   rehydrateTenant,
   runId,
-  tenantId,
-  threadId,
-  userId,
-  workspaceId,
-  type IsoTimestamp,
-  type MembershipRole,
-  type Run,
   type Tenant,
   type Thread,
+  tenantId,
+  threadId,
   type User,
+  userId,
   type Workspace,
+  workspaceId,
 } from "@cube-runtime/domain";
 import type {
   ArchiveThreadCommandPort,
@@ -28,7 +28,9 @@ import type {
   Versioned,
 } from "@cube-runtime/persistence";
 import { afterEach, describe, expect, it } from "vitest";
-import { createApiApp, type ApiDependencies } from "./app.js";
+import { type ApiDependencies, createApiApp } from "./app.js";
+import { createApiCreateCapability } from "./capabilities.js";
+import { createThreadCursorCodec } from "./cursor.js";
 import type {
   AuthPrincipal,
   EnqueueOutboxPort,
@@ -36,8 +38,6 @@ import type {
   IdempotentCreateResult,
   ThreadCreationPort,
 } from "./ports.js";
-import { createApiCreateCapability } from "./capabilities.js";
-import { createThreadCursorCodec } from "./cursor.js";
 
 class AsyncBarrier {
   private arrived = 0;
@@ -627,6 +627,50 @@ describe("Fastify API 契约", () => {
     });
     expect(response.statusCode).toBe(400);
     expect(response.json().error.code).toBe("INVALID_REQUEST");
+  });
+
+  it("拒绝 trim 后为空的 Run 输入", async () => {
+    const { app } = fixture();
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-blank-input" },
+      payload: { title: "空白输入任务" },
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-blank-input-key" },
+      payload: { input: " \n\t " },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("INVALID_REQUEST");
+  });
+
+  it("HTTP body 上限覆盖 1 MiB 解码输入的 JSON 转义，不以 wire 字节误拒绝", async () => {
+    const { app } = fixture();
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-escaped-input" },
+      payload: { title: "转义输入任务" },
+    });
+    // 每个 \u0001 在网络上占六字节，解析后仅占一个 UTF-8 字节。
+    const escaped = "\\u0001".repeat(1_048_576);
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: {
+        authorization: "Bearer token-a",
+        "idempotency-key": "run-escaped-input-key",
+        "content-type": "application/json",
+      },
+      payload: `{"input":"${escaped}"}`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.status).toBe("queued");
   });
 
   it("超限请求体和无效游标只返回固定 ErrorEnvelope", async () => {

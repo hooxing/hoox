@@ -106,6 +106,15 @@ export interface ExternalEffectCall {
   readonly argsDigest: Sha256Digest;
 }
 
+/** Worker 从私有 ExecutionContext 投影出的稳定工具执行范围；模型和 HTTP 请求不能提供。 */
+export interface TrustedToolExecutionContext {
+  readonly scope: ExecutionScope;
+  readonly runClaimToken: string;
+  readonly runClaimEpoch: number;
+  readonly workspaceRootRunId: RunId;
+  readonly workspaceLeaseEpoch: number;
+}
+
 /**
  * 首次 tool.started 必须和事件在同一事务中登记。
  * 存储层以 (scope, attemptId, callId) 建永久唯一约束；即使名称完全相同也禁止再次登记。
@@ -506,6 +515,7 @@ export interface WorkerAgentSessionPort {
 export interface AgentSessionFactoryPort {
   create(input: {
     readonly scope: ExecutionScope;
+    readonly trustedToolContext: TrustedToolExecutionContext;
     readonly sandbox: SandboxHandle;
     readonly rolloutProjection: ControlledRolloutProjection;
     readonly authorizeToolEffect: (

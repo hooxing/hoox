@@ -354,6 +354,13 @@ export class RunWorker {
       if (preSession) return await this.finishStopped(context, preSession, sandbox);
       session = await this.dependencies.sessions.create({
         scope,
+        trustedToolContext: {
+          scope,
+          runClaimToken: context.fence.runClaim.token,
+          runClaimEpoch: context.fence.runClaim.epoch,
+          workspaceRootRunId: context.fence.workspaceLease.rootRunId,
+          workspaceLeaseEpoch: context.fence.workspaceLease.epoch,
+        },
         sandbox: sandbox.sandbox,
         rolloutProjection: claim.snapshot.rolloutProjection,
         authorizeToolEffect: (call) =>

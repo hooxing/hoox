@@ -120,7 +120,17 @@ importers:
 
   runtime-ts/apps/web: {}
 
-  runtime-ts/packages/artifact: {}
+  runtime-ts/packages/artifact:
+    dependencies:
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@cube-runtime/persistence':
+        specifier: workspace:*
+        version: link:../persistence
+      '@cube-runtime/run-contracts':
+        specifier: workspace:*
+        version: link:../run-contracts
 
   runtime-ts/packages/context-policy: {}
 
@@ -185,7 +195,11 @@ importers:
         specifier: 0.34.52
         version: 0.34.52
 
-  runtime-ts/packages/resource: {}
+  runtime-ts/packages/resource:
+    dependencies:
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   runtime-ts/packages/run-contracts:
     dependencies:

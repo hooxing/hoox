@@ -73,12 +73,20 @@ import {
 
 const enabled = process.env.RUN_PG_RUN_WORKER_INTEGRATION === "true";
 const bootstrapUrl = process.env.DATABASE_BOOTSTRAP_URL ?? "";
+const preprovisionedDatabase = process.env.M4_PREPROVISIONED_DATABASE === "true";
+const adminUrl = preprovisionedDatabase ? (process.env.M4_DATABASE_ADMIN_URL ?? "") : bootstrapUrl;
+const configuredRuntimeUrl = process.env.DATABASE_URL ?? "";
 const suffix = `${process.pid}_${Date.now().toString(36)}`;
-const schema = `it_rw_${suffix}`;
-const runtimeRole = `it_rw_rt_${suffix}`;
-const migratorRole = `it_rw_mg_${suffix}`;
+const schema = preprovisionedDatabase ? (process.env.DATABASE_SCHEMA ?? "") : `it_rw_${suffix}`;
+const runtimeRole = preprovisionedDatabase
+  ? (process.env.DATABASE_RUNTIME_ROLE ?? "")
+  : `it_rw_rt_${suffix}`;
+const migratorRole = preprovisionedDatabase
+  ? (process.env.DATABASE_MIGRATOR_ROLE ?? "")
+  : `it_rw_mg_${suffix}`;
 const runtimePassword = randomBytes(24).toString("hex");
 const migratorPassword = randomBytes(24).toString("hex");
+const safePgIdentifier = /^[a-z][a-z0-9_]{0,62}$/u;
 let admin!: Pool;
 let migrator!: Pool;
 let runtime!: Pool;
@@ -231,22 +239,41 @@ function withLostCommitResponse(
 describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
   beforeAll(async () => {
     if (!bootstrapUrl) throw new Error("缺少 DATABASE_BOOTSTRAP_URL");
-    admin = createPostgresPool({ connectionString: bootstrapUrl, maxConnections: 2 });
-    databaseName = new URL(bootstrapUrl).pathname.slice(1);
-    await admin.query(
-      `CREATE ROLE "${runtimeRole}" LOGIN PASSWORD '${runtimePassword}'
+    if (!adminUrl) throw new Error("缺少 M4 数据库管理连接");
+    admin = createPostgresPool({ connectionString: adminUrl, maxConnections: 2 });
+    databaseName = new URL(adminUrl).pathname.slice(1);
+    if (!preprovisionedDatabase) {
+      await admin.query(
+        `CREATE ROLE "${runtimeRole}" LOGIN PASSWORD '${runtimePassword}'
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${migratorRole}" LOGIN PASSWORD '${migratorPassword}'
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
        GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}", "${migratorRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
-    );
+      );
+    }
     const migratorUrl = new URL(bootstrapUrl);
-    migratorUrl.username = migratorRole;
-    migratorUrl.password = migratorPassword;
-    const runtimeUrl = new URL(bootstrapUrl);
-    runtimeUrl.username = runtimeRole;
-    runtimeUrl.password = runtimePassword;
+    const runtimeUrl = new URL(preprovisionedDatabase ? configuredRuntimeUrl : bootstrapUrl);
+    if (preprovisionedDatabase) {
+      if (
+        !schema.startsWith("m4_ci_") ||
+        !runtimeRole.startsWith("m4_ci_") ||
+        !migratorRole.startsWith("m4_ci_") ||
+        !safePgIdentifier.test(schema) ||
+        !safePgIdentifier.test(runtimeRole) ||
+        !safePgIdentifier.test(migratorRole) ||
+        migratorUrl.username !== migratorRole ||
+        runtimeUrl.username !== runtimeRole ||
+        schema.length === 0
+      ) {
+        throw new Error("M4 预置数据库角色、连接或 Schema 配置不一致");
+      }
+    } else {
+      migratorUrl.username = migratorRole;
+      migratorUrl.password = migratorPassword;
+      runtimeUrl.username = runtimeRole;
+      runtimeUrl.password = runtimePassword;
+    }
     runtimeConnectionString = runtimeUrl.toString();
     migrator = createPostgresPool({ connectionString: migratorUrl.toString(), schema });
     runtime = createPostgresPool({ connectionString: runtimeConnectionString, schema });
@@ -273,7 +300,9 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
   afterAll(async () => {
     await runtime?.end();
     await migrator?.end();
-    if (!schema.startsWith("it_rw_")) throw new Error("拒绝清理非测试 Schema");
+    if (!(schema.startsWith("it_rw_") || schema.startsWith("m4_ci_"))) {
+      throw new Error("拒绝清理非测试 Schema");
+    }
     await admin
       ?.query(
         `DROP SCHEMA IF EXISTS "${schema}" CASCADE;

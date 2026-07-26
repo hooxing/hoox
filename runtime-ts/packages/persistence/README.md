@@ -2,6 +2,8 @@
 
 本包保存 Runtime 的持久化边界。目前已实现核心业务 Repository、S3/MinIO Blob Store、ADR-0012 定义的 PostgreSQL stable blob 生命周期，以及 ADR-0014 定义的 Run Worker 执行事实与事务适配器。
 
+Resource Library 已增加 PostgreSQL 目录与显式提升提交：生产装配只暴露窄的 `ResourceCatalog` 和 verifier-gated `ResourcePromotionCommitPort`，创建运行时必须注入与受控 Tool Router 配对的 `PromotionCapabilityVerifier`，没有默认绕过。ResourceVersion 复合绑定 stable Blob 完整物理身份，pending 不可搜索；授权签发仍等待 Workspace 逐文件 Manifest 持久化，不在本包伪造完成。
+
 ## Run Worker PostgreSQL 约束
 
 - API/调度器先用 `PgRunExecutionSetup` 写入不可变执行 scope、输入和初始 RolloutProjection；Worker 只能通过 `PgExecutionPersistence` claim；

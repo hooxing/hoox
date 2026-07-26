@@ -48,6 +48,7 @@ function harness(sessions: Array<ScriptedAgentSession | BlockingAgentSession>) {
       persistence,
       revisions,
       sandboxes,
+      orphanSandboxes: sandboxes,
       sessions: factory,
       cancellation,
       artifacts,

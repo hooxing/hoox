@@ -347,6 +347,7 @@ export type RuntimeMutationResult =
         | "unavailable"
         | "response_unknown"
         | "idempotency_conflict"
+        | "protocol_invalid"
         | "scope_mismatch";
     };
 
@@ -472,6 +473,17 @@ export interface SandboxSessionRegistryPort {
   }): Promise<SandboxSettlementResult>;
 }
 
+/**
+ * 失去执行栅栏后的孤儿 Sandbox 只能通过独立端口关闭。实现必须把成功 acquire 返回的
+ * session 对象身份当作进程内 capability，拒绝复制或伪造的 session。
+ */
+export interface OrphanSandboxCleanupPort {
+  closeOrphan(input: {
+    readonly scope: ExecutionScope;
+    readonly session: SandboxSessionRef;
+  }): Promise<SandboxSettlementResult>;
+}
+
 export type AgentTurnOutcome =
   | { readonly kind: "completed" }
   | {
@@ -535,15 +547,23 @@ export interface ArtifactPublicationPort {
   }): Promise<void>;
 }
 
-export const MAX_RUNTIME_EVENT_BYTES = 64 * 1024;
-export const MAX_RUNTIME_OUTBOX_BYTES = 64 * 1024;
+/**
+ * 进程内 64KiB 只是一道传输/内存安全上限，而非持久化大小的事实来源。
+ * JSON.stringify 的紧凑表示不能复刻 PostgreSQL jsonb::text 的键排序和空白；小于本阈值
+ * 的值仍必须由 PgExecutionPersistence 在同一事务按 jsonb::text 实测，迁移 CHECK 最终兜底。
+ */
+export const MAX_RUNTIME_TRANSPORT_BYTES = 64 * 1024;
 
 export function assertProtocolSize(value: RuntimeEventV1 | RuntimeOutboxV1): void {
-  const limit =
-    value.kind === "sandbox_cleanup" || value.kind === "runtime_alert"
-      ? MAX_RUNTIME_OUTBOX_BYTES
-      : MAX_RUNTIME_EVENT_BYTES;
-  if (new TextEncoder().encode(JSON.stringify(value)).byteLength > limit) {
+  try {
+    const encoded = JSON.stringify(value);
+    if (
+      typeof encoded !== "string" ||
+      new TextEncoder().encode(encoded).byteLength > MAX_RUNTIME_TRANSPORT_BYTES
+    ) {
+      throw new Error("不可序列化或超过传输上限");
+    }
+  } catch {
     throw new Error("EVENT_REJECTED");
   }
 }

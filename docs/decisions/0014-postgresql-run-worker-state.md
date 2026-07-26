@@ -52,6 +52,12 @@ ADR-0011 已固定双栅栏、ExecutionAttempt、不可变 receipt、Projection 
 - Runtime 角色不拥有 Schema，不可 BYPASSRLS；事实表启用 FORCE RLS，追加事实不授予 UPDATE/DELETE，只对状态列授予最小 UPDATE；目标 Schema 不创建 routine；
 - 普通 Worker 不越过 running Run。双租约过期后只能由恢复协调器调用恢复端口。
 
+复审后进一步明确三个边界：
+
+- `TransactionCommitUnknownError` 是基础设施内部异常。一般 Repository 经过共享错误映射后只向外给出脱敏的 `UNAVAILABLE`；只有 Run Worker mutation 端口因具备按幂等键读回的恢复协议，才把它保留为 `response_unknown`。Blob reserve/promotion 的真实 PG 故障注入回归必须继续断言前一种语义；
+- 64KiB 的唯一**持久化**事实规范是 PostgreSQL `octet_length(jsonb::text)`。应用层保留等值的紧凑 JSON 传输/内存安全上限，但不得把其当作存储容量证明；所有未被早拒绝的值仍由持久化事务实测 jsonb 规范化长度，迁移 CHECK 作最终防线；
+- 孤儿 Sandbox 关闭不用字符串前缀当授权。成功登记后返回的同一个 session 对象才是进程内 capability；关闭端口固定为 `close`，并在数据库锁内逐字段核验完整 scope、registryId 与 providerSandboxId。登记事务本身失败时，该 session 从未交给 Worker，仅允许 registry 私有的补偿路径直接关闭。
+
 共享执行端口从 `agent-worker` 应用目录移到 `@cube-runtime/run-contracts`，避免 persistence 反向依赖应用。原应用路径只保留兼容导出。
 
 ## 理由
@@ -84,6 +90,9 @@ ADR-0011 已固定双栅栏、ExecutionAttempt、不可变 receipt、Projection 
 - mutation 同事务验证版本、事件序列、Projection CAS、Revision+Run 终态和完整 receipt；
 - COMMIT 后故障注入返回 `response_unknown`，原 scope+key 读回相同结果；
 - 同幂等键不同摘要、重复 callId、重复 permit 签发/消费均 fail closed；
+- 以真实 PostgreSQL 生成恰好 64KiB 与超出 1 字节的 jsonb 规范化 Projection；紧凑 JSON 的传输上限不作为存储容量证明，mutation 仍以数据库规范拒绝其余超限值；
+- workerId 按 UTF-8 字节而非 JavaScript 字符数检查；permit consume 逐字段比对 scope、双栅栏、Attempt version、许可身份和数据库时间；
+- 伪造 cleanup 前缀、复制 session 对象或篡改 scope/provider 均不能触发孤儿关闭；
 - 相同初始化命令返回 already_exists，不同输入返回 conflict；waiting 回答的错误 Run version 或旧值返回 conflict；
 - cleanup 身份、armedAt、disposition 与状态迁移不可回退；
 - 租约过期前普通 claim 返回 busy，过期后仍只返回 recovery_required；恢复协调器收敛状态并释放 lease；

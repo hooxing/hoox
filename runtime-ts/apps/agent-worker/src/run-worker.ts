@@ -20,6 +20,7 @@ import type {
   ExecutionStage,
   ExternalEffectPermit,
   ExternalEffectCall,
+  OrphanSandboxCleanupPort,
   RecoveryMetricsPort,
   RuntimeEventV1,
   RuntimeMutation,
@@ -73,6 +74,7 @@ interface WorkerDependencies {
   readonly persistence: ExecutionPersistencePort;
   readonly revisions: WorkspaceRevisionVerifierPort;
   readonly sandboxes: SandboxSessionRegistryPort;
+  readonly orphanSandboxes: OrphanSandboxCleanupPort;
   readonly sessions: AgentSessionFactoryPort;
   readonly cancellation: CancellationPort;
   readonly artifacts: ArtifactPublicationPort;
@@ -972,6 +974,9 @@ export class RunWorker {
     if (result.outcome === "idempotency_conflict") {
       return { outcome: "recovery_required", code: "IDEMPOTENCY_CONFLICT" };
     }
+    if (result.outcome === "protocol_invalid") {
+      return { outcome: "recovery_required", code: "PROTOCOL" };
+    }
     if (
       result.outcome === "fence_lost" ||
       result.outcome === "conflict" ||
@@ -989,11 +994,9 @@ export class RunWorker {
   ): Promise<void> {
     let cleanupOutcome: "settled" | "unknown" | "failed" = "failed";
     try {
-      const result = await this.dependencies.sandboxes.settle({
+      const result = await this.dependencies.orphanSandboxes.closeOrphan({
         scope,
         session: sandbox,
-        cleanupIntentId: `registry:${sandbox.registryId}:orphan-cleanup`,
-        disposition: "close",
       });
       cleanupOutcome = result.outcome;
     } catch {

@@ -13,6 +13,8 @@ Scheduler 使用独立 consumer 实例和可关闭边界，不与 dispatch 共�
 
 生产启动只为 Scheduler 的 Cleanup 装配开放一个不可伪造的服务级 capability：它必须同时包含真实 PostgreSQL store、真实 CubeSandbox gateway、单租户 polling loop、PostgreSQL readiness 和“先停轮询、再关连接池”的资源顺序。通用 `process-runtime` 仍拒绝 API 与 Agent Worker 的任意 production assembler；它们在各自的受审生产组合完成前保持 `PRODUCTION_ASSEMBLY_UNAVAILABLE`。这避免为了开放一个后台消费者而放宽所有服务的 production Fake 边界。
 
+CubeSandbox 在线健康探针、熔断器及其告警阈值不属于本阶段 readiness；当前 readiness 只证明 PostgreSQL 事实源可用，Cube 的真实连通性由 opt-in smoke 及每次 cleanup 调用的结果收敛。后续引入 Cube readiness 前必须先定义探针预算、熔断状态和对已领取 cleanup 的恢复影响。
+
 ## 影响
 
 0006 不占用 dispatch 预留的 0005。迁移保持 FORCE RLS、既有复合外键与最小列 UPDATE ACL；down 仅允许既有测试环境破坏性回退。真实 CubeSandbox 冒烟必须 opt-in，并在 finally 中清理，不把 unknown 当作可安全重试。

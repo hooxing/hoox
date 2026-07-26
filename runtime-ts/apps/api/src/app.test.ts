@@ -1,4 +1,5 @@
 import {
+  archiveThread,
   createMembership,
   createPersonalTenant,
   createUser,
@@ -19,6 +20,7 @@ import {
   type Workspace,
 } from "@cube-runtime/domain";
 import type {
+  ArchiveThreadCommandPort,
   CoreRepositories,
   TenantBundle,
   TenantScope,
@@ -34,6 +36,42 @@ import type {
   IdempotentCreateResult,
   ThreadCreationPort,
 } from "./ports.js";
+import { createApiCreateCapability } from "./capabilities.js";
+import { createThreadCursorCodec } from "./cursor.js";
+
+class AsyncBarrier {
+  private arrived = 0;
+  private release!: () => void;
+  private readonly promise = new Promise<void>((resolve) => {
+    this.release = resolve;
+  });
+
+  constructor(private readonly parties: number) {}
+
+  async wait(): Promise<void> {
+    this.arrived += 1;
+    if (this.arrived === this.parties) this.release();
+    await this.promise;
+  }
+}
+
+class AsyncMutex {
+  private tail = Promise.resolve();
+
+  async run<T>(operation: () => Promise<T> | T): Promise<T> {
+    const previous = this.tail;
+    let release!: () => void;
+    this.tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+}
 
 const baseTime = isoTimestamp("2099-07-26T08:00:00.000Z");
 
@@ -41,7 +79,7 @@ function key(scope: TenantScope, id: string): string {
   return `${scope.tenantId}:${id}`;
 }
 
-class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort {
+class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThreadCommandPort {
   readonly tenants = new Map<string, TenantBundle>();
   readonly principals = new Map<string, AuthPrincipal>();
   readonly threads = new Map<string, Versioned<Thread>>();
@@ -52,6 +90,15 @@ class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort {
     { readonly hash: string; readonly entity: Thread | Run }
   >();
   enqueueParentInactive = false;
+  readonly revokedScopes = new Set<string>();
+  readonly roleOverrides = new Map<string, MembershipRole>();
+  readonly idempotencyFirstObservations: boolean[] = [];
+  readonly idempotencyOutcomes: ("created" | "replayed")[] = [];
+  idempotencyBarrier: AsyncBarrier | undefined;
+  beforeThreadCreate: (() => Promise<void> | void) | undefined;
+  beforeRunCreate: (() => Promise<void> | void) | undefined;
+  beforeArchive: (() => Promise<void> | void) | undefined;
+  private readonly mutex = new AsyncMutex();
 
   readonly repositories: CoreRepositories = {
     tenants: {
@@ -132,12 +179,29 @@ class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort {
     this.tenants.set(key(scope, scope.userId), bundle);
   }
 
+  revokeCommands(scope: TenantScope): void {
+    this.revokedScopes.add(key(scope, scope.userId));
+  }
+
+  overrideRole(scope: TenantScope, role: MembershipRole): void {
+    this.roleOverrides.set(key(scope, scope.userId), role);
+  }
+
+  private activeRole(scope: TenantScope): MembershipRole | undefined {
+    const scopeKey = key(scope, scope.userId);
+    if (this.revokedScopes.has(scopeKey)) return undefined;
+    const membership = this.tenants.get(scopeKey)?.membership;
+    if (membership?.status !== "active") return undefined;
+    return this.roleOverrides.get(scopeKey) ?? membership.role;
+  }
+
   async createThread(input: {
     readonly scope: TenantScope;
     readonly thread: Thread;
     readonly workspace: Workspace;
     readonly idempotency: IdempotentCommand;
   }): Promise<IdempotentCreateResult<Thread>> {
+    await this.beforeThreadCreate?.();
     return this.idempotent(input.scope, "thread", input.idempotency, input.thread, () => {
       this.threads.set(key(input.scope, input.thread.id), { entity: input.thread, version: 0n });
       this.workspaces.set(key(input.scope, input.workspace.id), input.workspace);
@@ -149,31 +213,60 @@ class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort {
     readonly run: Run;
     readonly idempotency: IdempotentCommand;
   }): Promise<IdempotentCreateResult<Run>> {
-    if (this.enqueueParentInactive) return { outcome: "parent_inactive" };
-    const parent = this.threads.get(key(input.scope, input.run.threadId));
-    if (parent?.entity.status !== "active") return { outcome: "parent_inactive" };
+    await this.beforeRunCreate?.();
     return this.idempotent(input.scope, "run", input.idempotency, input.run, () => {
       this.runs.set(key(input.scope, input.run.id), { entity: input.run, version: 0n });
     });
   }
 
-  private idempotent<T extends Thread | Run>(
+  async archiveThread(
+    input: Parameters<ArchiveThreadCommandPort["archiveThread"]>[0],
+  ): ReturnType<ArchiveThreadCommandPort["archiveThread"]> {
+    await this.beforeArchive?.();
+    return this.mutex.run(() => {
+      const role = this.activeRole(input.scope);
+      if (role !== "owner" && role !== "admin") return { outcome: "not_authorized" };
+      const storedKey = key(input.scope, input.threadId);
+      const current = this.threads.get(storedKey);
+      if (current === undefined) return { outcome: "not_found" };
+      if (current.entity.status === "archived") {
+        return { outcome: "already_archived", entity: current.entity };
+      }
+      const entity = archiveThread(current.entity, input.now);
+      this.threads.set(storedKey, { entity, version: current.version + 1n });
+      return { outcome: "archived", entity };
+    });
+  }
+
+  private async idempotent<T extends Thread | Run>(
     scope: TenantScope,
     operation: string,
     command: IdempotentCommand,
     entity: T,
     commit: () => void,
-  ): IdempotentCreateResult<T> {
+  ): Promise<IdempotentCreateResult<T>> {
     const commandKey = `${scope.tenantId}:${scope.userId}:${operation}:${command.key}`;
-    const existing = this.idempotency.get(commandKey);
-    if (existing !== undefined) {
-      return existing.hash === command.requestHash
-        ? { outcome: "replayed", entity: existing.entity as T }
-        : { outcome: "key_conflict" };
-    }
-    commit();
-    this.idempotency.set(commandKey, { hash: command.requestHash, entity });
-    return { outcome: "created", entity };
+    this.idempotencyFirstObservations.push(this.idempotency.has(commandKey));
+    await this.idempotencyBarrier?.wait();
+    return this.mutex.run(() => {
+      if (this.activeRole(scope) === undefined) return { outcome: "not_authorized" };
+      if (operation === "run") {
+        if (this.enqueueParentInactive) return { outcome: "parent_inactive" };
+        const run = entity as Run;
+        const parent = this.threads.get(key(scope, run.threadId));
+        if (parent?.entity.status !== "active") return { outcome: "parent_inactive" };
+      }
+      const existing = this.idempotency.get(commandKey);
+      if (existing !== undefined) {
+        if (existing.hash !== command.requestHash) return { outcome: "key_conflict" };
+        this.idempotencyOutcomes.push("replayed");
+        return { outcome: "replayed", entity: existing.entity as T };
+      }
+      commit();
+      this.idempotency.set(commandKey, { hash: command.requestHash, entity });
+      this.idempotencyOutcomes.push("created");
+      return { outcome: "created", entity };
+    });
   }
 }
 
@@ -217,7 +310,7 @@ function teamBundle(input: {
   };
 }
 
-function fixture() {
+function fixture(options: { readonly enableCreate?: boolean } = {}) {
   const state = new FakeApiState();
   const ownerA = personalBundle("owner_a");
   const ownerB = personalBundle("owner_b");
@@ -232,8 +325,19 @@ function fixture() {
         authorization === undefined ? undefined : state.principals.get(authorization),
     },
     repositories: state.repositories,
-    threadCreation: state,
-    enqueueOutbox: state,
+    ...(options.enableCreate === false
+      ? {}
+      : {
+          createCapability: createApiCreateCapability({
+            threadCreation: state,
+            enqueueOutbox: state,
+          }),
+        }),
+    archiveThread: state,
+    cursorCodec: createThreadCursorCodec({
+      activeKid: "test-key",
+      keys: [{ kid: "test-key", secret: Buffer.alloc(32, 7).toString("base64url") }],
+    }),
     readiness: { probe: async () => undefined },
     clock: new FakeClock(),
     ids: {
@@ -437,10 +541,15 @@ describe("Fastify API 契约", () => {
       headers: { authorization: "Bearer token-a", "idempotency-key": "run-key-0001" },
       payload: {},
     };
+    state.idempotencyFirstObservations.length = 0;
+    state.idempotencyOutcomes.length = 0;
+    state.idempotencyBarrier = new AsyncBarrier(2);
     const [first, second] = await Promise.all([app.inject(request), app.inject(request)]);
     expect(first.json().data).toMatchObject({ id: "run_1", status: "queued" });
     expect(second.json().data.id).toBe("run_1");
     expect(state.runs).toHaveLength(1);
+    expect(state.idempotencyFirstObservations).toEqual([false, false]);
+    expect([...state.idempotencyOutcomes].sort()).toEqual(["created", "replayed"]);
 
     const loaded = await app.inject({
       method: "GET",
@@ -511,9 +620,309 @@ describe("Fastify API 契约", () => {
     });
     expect(cursor.statusCode).toBe(400);
     expect(cursor.json().error).toEqual({
-      code: "BAD_REQUEST",
+      code: "INVALID_REQUEST",
       message: "请求参数无效",
       retryable: false,
     });
+  });
+
+  it("创建能力必须显式签发，缺失时服务仍就绪且创建路由不存在", async () => {
+    const { app, dependencies } = fixture({ enableCreate: false });
+    openApps.push(app);
+    expect((await app.inject({ method: "GET", url: "/ready" })).statusCode).toBe(200);
+    expect(
+      (
+        await app.inject({
+          method: "POST",
+          url: "/v1/threads",
+          headers: { authorization: "Bearer token-a", "idempotency-key": "disabled-key" },
+          payload: { title: "不会创建" },
+        })
+      ).statusCode,
+    ).toBe(404);
+    expect(() =>
+      createApiApp(
+        {
+          ...dependencies,
+          createCapability: {
+            threadCreation: {} as ThreadCreationPort,
+            enqueueOutbox: {} as EnqueueOutboxPort,
+          } as unknown as NonNullable<ApiDependencies["createCapability"]>,
+        },
+        { logger: false },
+      ),
+    ).toThrow("必须由 createApiCreateCapability 签发");
+  });
+
+  it("命令端在事务边界重验成员资格，认证后的撤权不能产生 Thread 或 Run", async () => {
+    const threadFixture = fixture();
+    openApps.push(threadFixture.app);
+    const scope = {
+      tenantId: threadFixture.ownerA.tenant.id,
+      userId: threadFixture.ownerA.user.id,
+    };
+    threadFixture.state.beforeThreadCreate = () => threadFixture.state.revokeCommands(scope);
+    const deniedThread = await threadFixture.app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "revoke-thread-key" },
+      payload: { title: "撤权竞态" },
+    });
+    expect(deniedThread.statusCode).toBe(404);
+    expect(threadFixture.state.threads.size).toBe(0);
+
+    const runFixture = fixture();
+    openApps.push(runFixture.app);
+    await runFixture.app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-parent-key" },
+      payload: { title: "Run 父任务" },
+    });
+    const runScope = { tenantId: runFixture.ownerA.tenant.id, userId: runFixture.ownerA.user.id };
+    runFixture.state.beforeRunCreate = () => runFixture.state.revokeCommands(runScope);
+    const deniedRun = await runFixture.app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "revoke-run-key" },
+      payload: {},
+    });
+    expect(deniedRun.statusCode).toBe(404);
+    expect(runFixture.state.runs.size).toBe(0);
+  });
+
+  it("归档命令在锁内重验角色，认证后的降权不能归档", async () => {
+    const { app, state } = fixture();
+    openApps.push(app);
+    const ownerUser = createUser(userId("user_race_owner"), baseTime);
+    const raceTenant = rehydrateTenant(
+      {
+        id: "tenant_race",
+        kind: "team",
+        displayName: "竞态测试团队",
+        createdByUserId: ownerUser.id,
+        createdAt: baseTime,
+      },
+      ownerUser,
+    );
+    const owner = teamBundle({
+      suffix: "race_owner",
+      tenant: raceTenant,
+      user: ownerUser,
+      role: "owner",
+    });
+    const adminUser = createUser(userId("user_race_admin"), baseTime);
+    const admin = teamBundle({
+      suffix: "race_admin",
+      tenant: owner.tenant,
+      user: adminUser,
+      role: "admin",
+    });
+    state.register("Bearer race-owner", owner);
+    state.register("Bearer race-admin", admin);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer race-owner", "idempotency-key": "archive-race-parent" },
+      payload: { title: "归档竞态" },
+    });
+    const adminScope = { tenantId: admin.tenant.id, userId: admin.user.id };
+    state.beforeArchive = () => state.overrideRole(adminScope, "member");
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/v1/threads/thread_1",
+      headers: { authorization: "Bearer race-admin" },
+    });
+    expect(response.statusCode).toBe(404);
+    expect(state.threads.get(`${owner.tenant.id}:thread_1`)?.entity.status).toBe("active");
+  });
+
+  it("畸形 JSON、错误媒体类型和原型污染键均返回固定错误信封", async () => {
+    const { app } = fixture();
+    openApps.push(app);
+    const headers = {
+      authorization: "Bearer token-a",
+      "idempotency-key": "raw-payload-key",
+      "content-type": "application/json",
+    };
+    for (const payload of [
+      '{"title":',
+      '{"title":"原型键","__proto__":{"polluted":true}}',
+      '{"title":"构造器键","constructor":{"prototype":{"polluted":true}}}',
+    ]) {
+      const response = await app.inject({ method: "POST", url: "/v1/threads", headers, payload });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error.code).toBe("INVALID_REQUEST");
+      expect(Object.keys(response.json())).toEqual(["version", "requestId", "error"]);
+    }
+    expect((Object.prototype as { polluted?: unknown }).polluted).toBeUndefined();
+
+    const media = await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: {
+        authorization: "Bearer token-a",
+        "idempotency-key": "media-type-key",
+        "content-type": "text/plain",
+      },
+      payload: "plain text",
+    });
+    expect(media.statusCode).toBe(415);
+    expect(media.json().error).toEqual({
+      code: "UNSUPPORTED_MEDIA_TYPE",
+      message: "不支持的媒体类型",
+      retryable: false,
+    });
+  });
+
+  it("签名游标拒绝篡改、跨租户和同租户跨用户重放", async () => {
+    const { app, state } = fixture();
+    openApps.push(app);
+    for (const [keyValue, title] of [
+      ["cursor-bind-key-1", "第一页"],
+      ["cursor-bind-key-2", "第二页"],
+    ]) {
+      await app.inject({
+        method: "POST",
+        url: "/v1/threads",
+        headers: { authorization: "Bearer token-a", "idempotency-key": keyValue },
+        payload: { title },
+      });
+    }
+    const page = await app.inject({
+      method: "GET",
+      url: "/v1/threads?limit=1",
+      headers: { authorization: "Bearer token-a" },
+    });
+    const cursorValue = page.json().data.nextCursor as string;
+    const tampered = `${cursorValue.slice(0, -1)}${cursorValue.endsWith("A") ? "B" : "A"}`;
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/v1/threads?cursor=${encodeURIComponent(tampered)}`,
+          headers: { authorization: "Bearer token-a" },
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/v1/threads?cursor=${encodeURIComponent(cursorValue)}`,
+          headers: { authorization: "Bearer token-b" },
+        })
+      ).statusCode,
+    ).toBe(400);
+
+    const teamCreator = createUser(userId("user_cursor_team_owner"), baseTime);
+    const teamTenant = rehydrateTenant(
+      {
+        id: "tenant_cursor_team",
+        kind: "team",
+        displayName: "游标绑定团队",
+        createdByUserId: teamCreator.id,
+        createdAt: baseTime,
+      },
+      teamCreator,
+    );
+    const teamOwner = teamBundle({
+      suffix: "cursor_team_owner",
+      tenant: teamTenant,
+      user: teamCreator,
+      role: "owner",
+    });
+    state.register("Bearer cursor-team-owner", teamOwner);
+    for (const [keyValue, title] of [
+      ["cursor-team-key-1", "团队第一页"],
+      ["cursor-team-key-2", "团队第二页"],
+    ]) {
+      await app.inject({
+        method: "POST",
+        url: "/v1/threads",
+        headers: { authorization: "Bearer cursor-team-owner", "idempotency-key": keyValue },
+        payload: { title },
+      });
+    }
+    const teamPage = await app.inject({
+      method: "GET",
+      url: "/v1/threads?limit=1",
+      headers: { authorization: "Bearer cursor-team-owner" },
+    });
+    const teamCursor = teamPage.json().data.nextCursor as string;
+    const secondUser = createUser(userId("user_same_tenant"), baseTime);
+    const member = teamBundle({
+      suffix: "same_tenant",
+      tenant: teamTenant,
+      user: secondUser,
+      role: "member",
+    });
+    state.register("Bearer same-tenant", member);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: `/v1/threads?cursor=${encodeURIComponent(teamCursor)}`,
+          headers: { authorization: "Bearer same-tenant" },
+        })
+      ).statusCode,
+    ).toBe(400);
+  });
+});
+
+describe("Thread 游标签名密钥轮换", () => {
+  const oldSecret = Buffer.alloc(32, 1).toString("base64url");
+  const newSecret = Buffer.alloc(32, 2).toString("base64url");
+  const scope = { tenantId: tenantId("tenant_cursor"), userId: userId("user_cursor") };
+  const cursor = { updatedAt: baseTime, id: threadId("thread_cursor") };
+
+  it("轮换期读取旧 kid、新写入使用 active kid，移除旧 key 后拒绝旧游标", () => {
+    const oldCodec = createThreadCursorCodec({
+      activeKid: "key-old",
+      keys: [{ kid: "key-old", secret: oldSecret }],
+    });
+    const oldToken = oldCodec.encode(scope, cursor);
+    const rotated = createThreadCursorCodec({
+      activeKid: "key-new",
+      keys: [
+        { kid: "key-old", secret: oldSecret },
+        { kid: "key-new", secret: newSecret },
+      ],
+    });
+    expect(rotated.decode(scope, oldToken)).toEqual(cursor);
+    const newToken = rotated.encode(scope, cursor);
+    const encodedPayload = newToken.split(".")[0];
+    if (encodedPayload === undefined) throw new Error("测试游标缺少载荷");
+    const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
+    expect(payload).toMatchObject({ v: 1, kid: "key-new", ...scope, ...cursor });
+    const retired = createThreadCursorCodec({
+      activeKid: "key-new",
+      keys: [{ kid: "key-new", secret: newSecret }],
+    });
+    expect(() => retired.decode(scope, oldToken)).toThrow("任务分页游标无效");
+  });
+
+  it("拒绝弱密钥、重复 kid 和不存在的 active kid", () => {
+    expect(() =>
+      createThreadCursorCodec({
+        activeKid: "key-old",
+        keys: [{ kid: "key-old", secret: Buffer.alloc(16).toString("base64url") }],
+      }),
+    ).toThrow("32 到 64 字节");
+    expect(() =>
+      createThreadCursorCodec({
+        activeKid: "key-old",
+        keys: [
+          { kid: "key-old", secret: oldSecret },
+          { kid: "key-old", secret: newSecret },
+        ],
+      }),
+    ).toThrow("无效或重复");
+    expect(() =>
+      createThreadCursorCodec({
+        activeKid: "key-new",
+        keys: [{ kid: "key-old", secret: oldSecret }],
+      }),
+    ).toThrow("当前签名密钥不存在");
   });
 });

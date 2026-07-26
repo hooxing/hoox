@@ -6,10 +6,13 @@ import type {
   WorkspaceRevisionCommit,
   WorkspaceWriteScope,
 } from "@cube-runtime/domain";
+import { archiveThread } from "@cube-runtime/domain";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {
   CoreRepositories,
+  ArchiveThreadCommandPort,
+  ArchiveThreadResult,
   CreateResult,
   RunRepository,
   TenantBundle,
@@ -765,5 +768,59 @@ export class PgCoreRepositories implements CoreRepositories {
     this.threads = new PgThreadRepository(pool);
     this.runs = new PgRunRepository(pool);
     this.workspaces = new PgWorkspaceRepository(pool);
+  }
+}
+
+/**
+ * 归档是一个授权命令而非 Repository 的读改写组合。
+ * 锁序固定为 Membership→Thread，使成员降权和归档之间存在明确串行化点。
+ */
+export class PgArchiveThreadCommand implements ArchiveThreadCommandPort {
+  constructor(private readonly pool: Pool) {}
+
+  async archiveThread(
+    input: Parameters<ArchiveThreadCommandPort["archiveThread"]>[0],
+  ): Promise<ArchiveThreadResult> {
+    try {
+      return await withTenantTransaction(this.pool, input.scope, async (client) => {
+        const membership = await client.query<{ readonly role: string; readonly status: string }>(
+          `SELECT role, status FROM memberships
+            WHERE tenant_id = $1 AND user_id = $2
+            FOR UPDATE`,
+          [input.scope.tenantId, input.scope.userId],
+        );
+        const authorization = membership.rows[0];
+        if (
+          authorization?.status !== "active" ||
+          (authorization.role !== "owner" && authorization.role !== "admin")
+        ) {
+          return { outcome: "not_authorized" };
+        }
+
+        const locked = await client.query<{ readonly status: string }>(
+          `SELECT status FROM threads
+            WHERE tenant_id = $1 AND id = $2
+            FOR UPDATE`,
+          [input.scope.tenantId, input.threadId],
+        );
+        const status = locked.rows[0]?.status;
+        if (status === undefined) return { outcome: "not_found" };
+        const current = await findThread(client, input.scope, input.threadId);
+        if (current === undefined) return { outcome: "not_found" };
+        if (status === "archived") return { outcome: "already_archived", entity: current.entity };
+
+        const archived = archiveThread(current.entity, input.now);
+        const updated = await client.query(
+          `UPDATE threads
+              SET status = 'archived', updated_at = $3, version = version + 1
+            WHERE tenant_id = $1 AND id = $2 AND status = 'active'`,
+          [input.scope.tenantId, input.threadId, input.now],
+        );
+        if (updated.rowCount !== 1) return { outcome: "not_found" };
+        return { outcome: "archived", entity: archived };
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "归档任务");
+    }
   }
 }

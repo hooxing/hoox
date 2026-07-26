@@ -38,7 +38,10 @@ import {
   migrateDown,
   migrateUp,
 } from "../../runtime-ts/packages/persistence/src/migrations.js";
-import { PgCoreRepositories } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
+import {
+  PgArchiveThreadCommand,
+  PgCoreRepositories,
+} from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
 import {
   createPostgresPool,
   withTenantTransaction,
@@ -46,6 +49,7 @@ import {
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
+import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -271,9 +275,6 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ["Bearer pg-left", left.scope],
       ["Bearer pg-right", right.scope],
     ]);
-    const unsupportedCommand = async () => {
-      throw new Error("真实 PG Run+Outbox 原子适配属于后续任务");
-    };
     const app = createApiApp(
       {
         auth: {
@@ -281,8 +282,16 @@ describe("PostgreSQL 迁移与强权限边界", () => {
             authorization === undefined ? undefined : principals.get(authorization),
         },
         repositories,
-        threadCreation: { createThread: unsupportedCommand },
-        enqueueOutbox: { createQueuedRun: unsupportedCommand },
+        archiveThread: new PgArchiveThreadCommand(runtimePool),
+        cursorCodec: createThreadCursorCodec({
+          activeKid: "integration-key",
+          keys: [
+            {
+              kid: "integration-key",
+              secret: Buffer.alloc(32, 11).toString("base64url"),
+            },
+          ],
+        }),
         readiness: { probe: () => runtimePool.query("SELECT 1").then(() => undefined) },
         clock: { now: () => timestamp(20) },
         ids: {
@@ -338,6 +347,46 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(archived.json().data.status).toBe("archived");
     } finally {
       await app.close();
+    }
+  });
+
+  it("归档命令等待 Membership 行锁，并在降权提交后拒绝归档", async () => {
+    const fixture = await createFixture("archive_membership_race");
+    const command = new PgArchiveThreadCommand(runtimePool);
+    const blocker = await administrativePool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query(
+        `SELECT role FROM "${schema}".memberships
+          WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE`,
+        [fixture.scope.tenantId, fixture.scope.userId],
+      );
+      const pending = command.archiveThread({
+        scope: fixture.scope,
+        threadId: fixture.thread.id,
+        now: timestamp(20),
+      });
+      // 先持有 Membership 锁，再提交降权，确保命令必须读取锁后的授权事实。
+      await blocker.query(
+        `UPDATE "${schema}".memberships SET role = 'member'
+          WHERE tenant_id = $1 AND user_id = $2`,
+        [fixture.scope.tenantId, fixture.scope.userId],
+      );
+      await blocker.query("COMMIT");
+      expect(await pending).toEqual({ outcome: "not_authorized" });
+      const stored = await withTenantTransaction(runtimePool, fixture.scope, (client) =>
+        client.query<{ status: string }>(
+          "SELECT status FROM threads WHERE tenant_id = $1 AND id = $2",
+          [fixture.scope.tenantId, fixture.thread.id],
+        ),
+      );
+      expect(stored.rows[0]?.status).toBe("active");
+    } finally {
+      try {
+        await blocker.query("ROLLBACK");
+      } finally {
+        blocker.release();
+      }
     }
   });
 

@@ -73,9 +73,13 @@ corepack pnpm config:check
 
 ## HTTP API 开发边界
 
-`runtime-ts/apps/api` 使用 `createApiApp` 显式注入身份、Repository、时钟、ID 和探针等端口。测试用 `Fastify.inject` 而不监听网络端口。`AuthContextResolver` 只返回已验证 principal，之后仍必须用 PostgreSQL Membership 解析 `TenantScope`；不得读取 `x-tenant-id` 构造 scope。
+`runtime-ts/apps/api` 使用 `createApiApp` 显式注入身份、Repository、时钟、ID、HMAC 游标密钥环和探针等端口。测试用 `Fastify.inject` 而不监听网络端口。`AuthContextResolver` 只返回已验证 principal，之后仍必须用 PostgreSQL Membership 解析 `TenantScope`；不得读取 `x-tenant-id` 构造 scope。游标密钥必须来自密钥管理配置，不能使用仓库内常量；最短 32 字节，轮换按“先同时读取新旧 key、再切换 active、等待旧游标失效、最后移除旧 key”进行。
 
-当前 `ThreadCreationPort` 和 `EnqueueOutboxPort` 只有契约与测试 Fake。在后续 PostgreSQL idempotency/outbox 事务适配完成前，禁止用“Thread 后写 Workspace”或“Run 后发队列”的顺序调用装配生产 create 路由。真实 PostgreSQL API 集成测试当前覆盖 RLS 读取、列表、归档和取消；create 的 PostgreSQL 端到端验证属于该后续任务。
+当前 `ThreadCreationPort` 和 `EnqueueOutboxPort` 只有契约与测试 Fake。在后续 PostgreSQL idempotency/outbox 事务适配完成前，禁止用“Thread 后写 Workspace”或“Run 后发队列”的顺序调用装配生产 create 路由。只有 `createApiCreateCapability` 同时签发两个原子端口时才注册 POST；不注入能力时服务保持可读、可归档、可取消且 `/ready` 正常。`ArchiveThreadCommandPort` 已有 PostgreSQL 适配，必须保持 Membership→Thread 锁序和事务内角色重验，禁止退化为 API 层 Repository 读改写。
+
+Runtime 对 Membership 只有 SELECT、INSERT 和 `status` 单列 UPDATE；单列 UPDATE 是 PostgreSQL 取得 Membership 行锁所需的最小权限，不代表允许通用调用方直接修改状态。不得把 `role` 或表级 UPDATE 加入 Runtime ACL，也不得绕过受控命令端口执行 Membership 更新。
+
+公开错误中，Schema、超限、畸形 JSON、危险原型键和游标错误统一为 400 `INVALID_REQUEST`；非 `application/json` 的创建请求为 415 `UNSUPPORTED_MEDIA_TYPE`。不能把 Fastify/AJV 的内部错误消息直接返回给客户端。
 
 ## 提交前检查
 

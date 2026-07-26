@@ -189,7 +189,12 @@ export class PgSandboxCleanupConsumerStore {
             AND state ${next === "remote" ? "IN ('ready','paused')" : "IN ('closing','pausing')"}`,
           [claim.tenantId, row.registry_id, registryState],
         );
-        return registry.rowCount === 1;
+        // cleanup 已经推进后，registry 未同步意味着两个持久事实源分叉。
+        // 必须抛出使整个事务回滚，绝不能以 false 提交半个状态机。
+        if (registry.rowCount !== 1) {
+          throw new Error("Cleanup 与 Sandbox registry 状态同步失败");
+        }
+        return true;
       },
       { isolationLevel: "SERIALIZABLE" },
     );

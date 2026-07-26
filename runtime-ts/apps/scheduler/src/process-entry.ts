@@ -63,7 +63,7 @@ const schedulerEnvironmentSchema = Object.freeze({
   SCHEDULER_TENANT_ID: stringEnvironmentField({ maxLength: 200 }),
   SCHEDULER_WORKER_ID: stringEnvironmentField({ maxLength: 200 }),
   CLEANUP_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 50, maximum: 600_000 }),
-  CLEANUP_LEASE_MS: integerEnvironmentField({ minimum: 120_000, maximum: 600_000 }),
+  CLEANUP_LEASE_MS: integerEnvironmentField({ minimum: 210_000, maximum: 600_000 }),
   PROCESS_SHUTDOWN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1, maximum: 600_000 }),
 });
 

@@ -21,7 +21,7 @@ function productionEnvironment(): Record<string, string> {
     SCHEDULER_TENANT_ID: "tenant-test",
     SCHEDULER_WORKER_ID: "scheduler-test",
     CLEANUP_POLL_INTERVAL_MS: "1000",
-    CLEANUP_LEASE_MS: "120000",
+    CLEANUP_LEASE_MS: "210000",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
   };
 }

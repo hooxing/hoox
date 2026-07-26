@@ -59,10 +59,10 @@ export class SandboxCleanupConsumer {
     private readonly store: SandboxCleanupStore,
     private readonly resolver: SandboxCleanupResolver,
     private readonly workerId: string,
-    private readonly leaseMs = 120_000,
+    private readonly leaseMs = 210_000,
   ) {
-    // Cube connect/settle 默认最多 90 秒，额外 30 秒覆盖连接抖动和状态写回；不能用 30 秒 lease 包裹 90 秒远端调用。
-    if (!Number.isSafeInteger(leaseMs) || leaseMs < 120_000 || leaseMs > 600_000)
+    // connect 和 pause/kill 各自都可能等待 90 秒；以 210 秒总 lease 留出 30 秒状态写回余量。
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 210_000 || leaseMs > 600_000)
       throw new TypeError("cleanup lease 必须覆盖远端操作和安全余量");
   }
 

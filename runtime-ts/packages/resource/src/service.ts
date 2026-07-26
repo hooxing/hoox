@@ -20,7 +20,7 @@ import type {
   WorkspaceImportTargetInspector,
   WorkspacePromotionAuthorizer,
 } from "./contracts.js";
-import { ResourceServiceError, resourceInvariant } from "./errors.js";
+import { type ResourceErrorCode, ResourceServiceError, resourceInvariant } from "./errors.js";
 import { assertResourceName, normalizeWorkspaceRelativePath } from "./path.js";
 
 export interface ResourceLibraryConfig {
@@ -144,10 +144,18 @@ export class ResourceLibraryService {
       }),
     );
     const validatedPage = validateExternalResult(() => {
-      validateCatalogPage(page.items, page.nextPosition, limit, after, input.context);
+      const items = page.items;
+      const nextPosition = page.nextPosition;
+      validateCatalogPage(items, nextPosition, limit, after, input.context);
       return Object.freeze({
-        items: Object.freeze(page.items.map(projectSearchItem)),
-        nextPosition: page.nextPosition,
+        items: Object.freeze(items.map(projectSearchItem)),
+        nextPosition:
+          nextPosition === undefined
+            ? undefined
+            : Object.freeze({
+                updatedAt: nextPosition.updatedAt,
+                resourceId: nextPosition.resourceId,
+              }),
       });
     });
     const nextCursor =
@@ -209,24 +217,27 @@ export class ResourceLibraryService {
     const bytes = await callExternalPort(() =>
       this.dependencies.contentReader.readRange({
         context: input.context,
-        version: resolved.version,
+        version: resolved.authorizedReadVersion,
         range: { offset, length: boundedLength },
       }),
     );
-    resourceInvariant(
-      bytes instanceof Uint8Array && bytes.byteLength === boundedLength,
-      "CONTENT_INTEGRITY_ERROR",
-      "Resource 内容读取未完整满足授权字节范围",
-    );
+    const validatedBytes = validateExternalResult(() => {
+      externalResultInvariant(
+        bytes instanceof Uint8Array && bytes.byteLength === boundedLength,
+        "CONTENT_INTEGRITY_ERROR",
+        "Resource 内容读取未完整满足授权字节范围",
+      );
+      return new Uint8Array(bytes);
+    });
     return Object.freeze({
       status: "available",
       resourceId: resolved.resource.id,
       versionId: resolved.version.id,
       mediaType,
-      range: Object.freeze({ offset, length: bytes.byteLength }),
+      range: Object.freeze({ offset, length: validatedBytes.byteLength }),
       totalSizeBytes: resolved.version.sizeBytes,
-      truncated: offset + bytes.byteLength < resolved.version.sizeBytes,
-      bytes: new Uint8Array(bytes),
+      truncated: offset + validatedBytes.byteLength < resolved.version.sizeBytes,
+      bytes: validatedBytes,
     });
   }
 
@@ -298,9 +309,23 @@ export class ResourceLibraryService {
     assertTrustedContext(input.context);
     assertId(input.command.workspaceId);
     assertId(input.command.revisionId);
-    const agentContext = await callExternalPort(() =>
+    const verifiedAgentContext = await callExternalPort(() =>
       this.dependencies.promotionCapabilities.verify(input.capability),
     );
+    const agentContext = validateExternalResult(() => {
+      if (verifiedAgentContext === undefined) return undefined;
+      const actor = verifiedAgentContext.actor;
+      return Object.freeze({
+        tenantId: verifiedAgentContext.tenantId,
+        userId: verifiedAgentContext.userId,
+        actor: Object.freeze({
+          kind: actor.kind,
+          agentThreadId: actor.agentThreadId,
+          threadId: actor.threadId,
+          runId: actor.runId,
+        }),
+      });
+    });
     if (
       agentContext === undefined ||
       agentContext.tenantId !== input.context.tenantId ||
@@ -318,33 +343,62 @@ export class ResourceLibraryService {
         safeRelativePath,
       }),
     );
-    const outcomeStatus = validateExternalResult(() => outcome.status);
-    if (outcomeStatus === "not_found" || outcomeStatus === "not_authorized") {
-      return Object.freeze({ status: outcomeStatus });
+    const validatedOutcome = validateExternalResult(() => {
+      const status = outcome.status;
+      if (status === "not_found" || status === "not_authorized") {
+        return Object.freeze({ status });
+      }
+      externalResultInvariant(
+        status === "authorized",
+        "CONTENT_INTEGRITY_ERROR",
+        "提升授权结果格式无效",
+      );
+      const authorization = outcome.authorization;
+      const authorizationId = authorization.authorizationId;
+      const tenantId = authorization.tenantId;
+      const workspaceId = authorization.workspaceId;
+      const revisionId = authorization.revisionId;
+      const relativePath = authorization.relativePath;
+      const digest = authorization.digest;
+      const mediaType = authorization.mediaType;
+      const sizeBytes = authorization.sizeBytes;
+      const expiresAt = authorization.expiresAt;
+      externalResultInvariant(
+        tenantId === input.context.tenantId &&
+          workspaceId === input.command.workspaceId &&
+          revisionId === input.command.revisionId &&
+          relativePath === safeRelativePath,
+        "NOT_AUTHORIZED",
+        "提升授权与可信执行范围不一致",
+      );
+      externalResultInvariant(
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{15,254}$/u.test(authorizationId) &&
+          /^[a-f0-9]{64}$/u.test(digest) &&
+          Number.isSafeInteger(sizeBytes) &&
+          sizeBytes >= 0 &&
+          isCanonicalIsoTimestamp(expiresAt),
+        "CONTENT_INTEGRITY_ERROR",
+        "提升授权快照格式无效",
+      );
+      return Object.freeze({
+        status,
+        authorization: Object.freeze({
+          authorizationId,
+          tenantId,
+          workspaceId,
+          revisionId,
+          relativePath,
+          digest,
+          mediaType: normalizeMediaType(mediaType),
+          sizeBytes,
+          expiresAt,
+        }),
+      });
+    });
+    if (validatedOutcome.status !== "authorized") {
+      return Object.freeze({ status: validatedOutcome.status });
     }
-    resourceInvariant(
-      outcome.status === "authorized",
-      "CONTENT_INTEGRITY_ERROR",
-      "提升授权结果格式无效",
-    );
-    const authorization = outcome.authorization;
-    resourceInvariant(
-      authorization.tenantId === input.context.tenantId &&
-        authorization.workspaceId === input.command.workspaceId &&
-        authorization.revisionId === input.command.revisionId &&
-        authorization.relativePath === safeRelativePath,
-      "NOT_AUTHORIZED",
-      "提升授权与可信执行范围不一致",
-    );
-    resourceInvariant(
-      /^[A-Za-z0-9][A-Za-z0-9._:-]{15,254}$/u.test(authorization.authorizationId) &&
-        /^[a-f0-9]{64}$/u.test(authorization.digest) &&
-        Number.isSafeInteger(authorization.sizeBytes) &&
-        authorization.sizeBytes >= 0 &&
-        isCanonicalIsoTimestamp(authorization.expiresAt),
-      "CONTENT_INTEGRITY_ERROR",
-      "提升授权快照格式无效",
-    );
+    const authorization = validatedOutcome.authorization;
     const currentTime = this.now();
     const expirationTime = new Date(authorization.expiresAt);
     resourceInvariant(
@@ -355,24 +409,13 @@ export class ResourceLibraryService {
       "NOT_AUTHORIZED",
       "提升授权已过期或有效期过长",
     );
-    const normalizedAuthorization = Object.freeze({
-      authorizationId: authorization.authorizationId,
-      tenantId: authorization.tenantId,
-      workspaceId: authorization.workspaceId,
-      revisionId: authorization.revisionId,
-      relativePath: authorization.relativePath,
-      digest: authorization.digest,
-      mediaType: normalizeMediaType(authorization.mediaType),
-      sizeBytes: authorization.sizeBytes,
-      expiresAt: authorization.expiresAt,
-    });
     return Object.freeze({
       status: "authorized",
       request: Object.freeze({
         kind: "promote_resource",
         resourceName,
         origin: "promoted_workspace",
-        source: normalizedAuthorization,
+        source: authorization,
         catalogVisibility: "pending_explicit_commit",
       }),
     });
@@ -385,32 +428,61 @@ export class ResourceLibraryService {
   }) {
     const resolved = await callExternalPort(() => this.dependencies.catalog.resolveVersion(input));
     return validateExternalResult(() => {
-      if (resolved.status === "not_found") return resolved;
-      resourceInvariant(
-        resolved.status === "found",
+      const status = resolved.status;
+      if (status === "not_found") return Object.freeze({ status });
+      externalResultInvariant(
+        status === "found",
         "CONTENT_INTEGRITY_ERROR",
         "Resource 版本解析结果格式无效",
       );
-      resourceInvariant(
-        resolved.resource.tenantId === input.context.tenantId &&
-          resolved.version.tenantId === input.context.tenantId &&
-          resolved.resource.id === input.resourceId &&
-          resolved.version.resourceId === input.resourceId &&
-          resolved.version.id === input.versionId,
+      const resource = resolved.resource;
+      const version = resolved.version;
+      const resourceId = resource.id;
+      const resourceTenantId = resource.tenantId;
+      const versionId = version.id;
+      const versionResourceId = version.resourceId;
+      const versionTenantId = version.tenantId;
+      const versionNumber = version.versionNumber;
+      const objectKey = version.objectKey;
+      const digest = version.digest;
+      const mediaType = version.mediaType;
+      const sizeBytes = version.sizeBytes;
+      externalResultInvariant(
+        resourceTenantId === input.context.tenantId &&
+          versionTenantId === input.context.tenantId &&
+          resourceId === input.resourceId &&
+          versionResourceId === input.resourceId &&
+          versionId === input.versionId,
         "NOT_AUTHORIZED",
         "Resource 版本授权结果与请求不一致",
       );
-      resourceInvariant(
-        Number.isSafeInteger(resolved.version.versionNumber) &&
-          resolved.version.versionNumber >= 1 &&
-          Number.isSafeInteger(resolved.version.sizeBytes) &&
-          resolved.version.sizeBytes >= 0 &&
-          /^[a-f0-9]{64}$/u.test(resolved.version.digest) &&
-          resolved.version.objectKey.trim().length > 0,
+      externalResultInvariant(
+        Number.isSafeInteger(versionNumber) &&
+          versionNumber >= 1 &&
+          Number.isSafeInteger(sizeBytes) &&
+          sizeBytes >= 0 &&
+          /^[a-f0-9]{64}$/u.test(digest) &&
+          objectKey.trim().length > 0,
         "CONTENT_INTEGRITY_ERROR",
         "Resource 版本元数据无效",
       );
-      return resolved;
+      return Object.freeze({
+        status,
+        resource: Object.freeze({ id: resourceId }),
+        version: Object.freeze({
+          id: versionId,
+          resourceId: versionResourceId,
+          tenantId: versionTenantId,
+          versionNumber,
+          objectKey,
+          digest,
+          mediaType,
+          sizeBytes,
+        }),
+        // 只在受 callExternalPort 包裹的 reader 调用中传递名义领域实体；
+        // 服务后续判断全部使用上面的纯值快照，不再触发外部 Getter/Proxy。
+        authorizedReadVersion: version,
+      });
     });
   }
 }
@@ -448,7 +520,7 @@ function validateCatalogPage(
   after: { readonly updatedAt: string; readonly resourceId: string } | undefined,
   context: TrustedResourceContext,
 ): void {
-  resourceInvariant(
+  externalResultInvariant(
     items.length <= limit,
     "CONTENT_INTEGRITY_ERROR",
     "Resource 目录返回超出页大小",
@@ -457,15 +529,15 @@ function validateCatalogPage(
   const versionIds = new Set<string>();
   for (let index = 0; index < items.length; index += 1) {
     const item = items[index];
-    resourceInvariant(item !== undefined, "CONTENT_INTEGRITY_ERROR", "Resource 目录页无效");
-    resourceInvariant(
+    externalResultInvariant(item !== undefined, "CONTENT_INTEGRITY_ERROR", "Resource 目录页无效");
+    externalResultInvariant(
       item.tenantId === context.tenantId && item.visibility === "searchable",
       "NOT_AUTHORIZED",
       "Resource 目录返回越权或不可见记录",
     );
     assertReturnedId(item.resourceId);
     assertReturnedId(item.versionId);
-    resourceInvariant(
+    externalResultInvariant(
       !resourceIds.has(item.resourceId) && !versionIds.has(item.versionId),
       "CONTENT_INTEGRITY_ERROR",
       "Resource 目录返回重复记录",
@@ -473,7 +545,7 @@ function validateCatalogPage(
     resourceIds.add(item.resourceId);
     versionIds.add(item.versionId);
     if (after !== undefined) {
-      resourceInvariant(
+      externalResultInvariant(
         isStrictlyAfterPosition(item, after),
         "CONTENT_INTEGRITY_ERROR",
         "Resource 目录记录没有位于游标之后",
@@ -482,14 +554,14 @@ function validateCatalogPage(
     if (index === 0) continue;
     const previous = items[index - 1];
     const current = item;
-    resourceInvariant(
+    externalResultInvariant(
       previous !== undefined && current !== undefined,
       "CONTENT_INTEGRITY_ERROR",
       "Resource 目录页无效",
     );
     const previousTime = Date.parse(previous.updatedAt);
     const currentTime = Date.parse(current.updatedAt);
-    resourceInvariant(
+    externalResultInvariant(
       !Number.isNaN(previousTime) && !Number.isNaN(currentTime),
       "CONTENT_INTEGRITY_ERROR",
       "Resource 目录时间格式无效",
@@ -497,11 +569,11 @@ function validateCatalogPage(
     const ordered =
       previousTime > currentTime ||
       (previousTime === currentTime && previous.resourceId > current.resourceId);
-    resourceInvariant(ordered, "CONTENT_INTEGRITY_ERROR", "Resource 目录排序不稳定");
+    externalResultInvariant(ordered, "CONTENT_INTEGRITY_ERROR", "Resource 目录排序不稳定");
   }
   if (nextPosition !== undefined) {
     const last = items.at(-1);
-    resourceInvariant(
+    externalResultInvariant(
       last !== undefined &&
         last.updatedAt === nextPosition.updatedAt &&
         last.resourceId === nextPosition.resourceId,
@@ -513,7 +585,7 @@ function validateCatalogPage(
 
 function projectSearchItem(item: ResourceCatalogItem): ResourceSearchItem {
   const normalizedName = item.name.normalize("NFKC").trim();
-  resourceInvariant(
+  externalResultInvariant(
     Number.isSafeInteger(item.versionNumber) &&
       item.versionNumber >= 1 &&
       Number.isSafeInteger(item.sizeBytes) &&
@@ -556,7 +628,7 @@ function assertByteRange(offset: number, length: number, maximum: number): void 
 
 function normalizeMediaType(value: string): string {
   const mediaType = value.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-  resourceInvariant(
+  externalResultInvariant(
     /^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/u.test(mediaType),
     "CONTENT_INTEGRITY_ERROR",
     "Resource 媒体类型无效",
@@ -619,7 +691,7 @@ function assertId(value: unknown): asserts value is string {
 }
 
 function assertReturnedId(value: unknown): asserts value is string {
-  resourceInvariant(validId(value), "CONTENT_INTEGRITY_ERROR", "Resource 目录 ID 格式无效");
+  externalResultInvariant(validId(value), "CONTENT_INTEGRITY_ERROR", "Resource 目录 ID 格式无效");
 }
 
 function isStrictlyAfterPosition(
@@ -645,7 +717,28 @@ function validateExternalResult<T>(operation: () => T): T {
   try {
     return operation();
   } catch (error) {
-    if (error instanceof ResourceServiceError) throw error;
+    // 只保留本服务在校验过程中亲自创建的错误。外部 Getter/Proxy 即使抛出
+    // ResourceServiceError，也不能借此穿透 SQL、objectKey 或供应商响应。
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      internalExternalResultValidationErrors.has(error)
+    ) {
+      throw error;
+    }
     throw new ResourceServiceError("DEPENDENCY_FAILURE", "Resource 依赖操作失败");
   }
+}
+
+const internalExternalResultValidationErrors = new WeakSet<object>();
+
+function externalResultInvariant(
+  condition: unknown,
+  code: ResourceErrorCode,
+  message: string,
+): asserts condition {
+  if (condition) return;
+  const error = new ResourceServiceError(code, message);
+  internalExternalResultValidationErrors.add(error);
+  throw error;
 }

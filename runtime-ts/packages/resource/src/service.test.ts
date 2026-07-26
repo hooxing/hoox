@@ -27,6 +27,7 @@ import type {
   WorkspacePromotionAuthorizer,
 } from "./contracts.js";
 import { createResourceCursorCodec } from "./cursor.js";
+import { ResourceServiceError } from "./errors.js";
 import { ResourceLibraryService } from "./service.js";
 
 const scopeA: TrustedResourceContext = {
@@ -855,6 +856,74 @@ describe("Resource 端口失败与运行时输入", () => {
         expect(String(error)).not.toContain("top-secret");
       }
     }
+  });
+
+  it("外部结果 Getter 或 Proxy 抛出领域错误时仍统一脱敏", async () => {
+    const getterSecret = "SQL SELECT objectKey=private/tenant-a/getter-secret";
+    const getterFixture = fixture();
+    const poisonedVersion = Object.create(getterFixture.versionTwo) as ResourceVersion;
+    Object.defineProperty(poisonedVersion, "objectKey", {
+      enumerable: true,
+      get() {
+        throw new ResourceServiceError("CONTENT_INTEGRITY_ERROR", getterSecret);
+      },
+    });
+    const getterFailure = setup(undefined, [getterFixture.versionOne, poisonedVersion]);
+
+    const proxySecret = "SQL SELECT objectKey=private/tenant-a/proxy-secret";
+    const proxyFixture = setup();
+    const baseItem = proxyFixture.catalog.searchItems[0] as ResourceCatalogItem;
+    const poisonedItem = new Proxy(baseItem, {
+      get(target, property, receiver) {
+        if (property === "name") {
+          throw new ResourceServiceError("NOT_AUTHORIZED", proxySecret);
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const proxyFailure = setup([poisonedItem]);
+
+    const runs = [
+      () =>
+        getterFailure.service.preview({
+          context: scopeA,
+          resourceId: resourceAId,
+          versionId: versionTwoId,
+        }),
+      () => proxyFailure.service.search({ context: scopeA }),
+    ];
+    for (const run of runs) {
+      try {
+        await run();
+        expect.unreachable("外部结果延迟异常必须失败");
+      } catch (error) {
+        expect(error).toMatchObject({
+          code: "DEPENDENCY_FAILURE",
+          message: "Resource 依赖操作失败",
+        });
+        expect(error).not.toHaveProperty("cause");
+        expect(String(error)).not.toContain("SQL SELECT");
+        expect(String(error)).not.toContain("objectKey");
+        expect(String(error)).not.toContain("getter-secret");
+        expect(String(error)).not.toContain("proxy-secret");
+      }
+    }
+  });
+
+  it("正常外部结果可用且服务自身校验错误保留语义", async () => {
+    const normal = setup();
+    await expect(normal.service.search({ context: scopeA })).resolves.toMatchObject({
+      items: [{ resourceId: resourceAId, versionId: versionTwoId }],
+    });
+
+    const invalid = setup();
+    const baseItem = invalid.catalog.searchItems[0] as ResourceCatalogItem;
+    await expect(
+      setup([{ ...baseItem, tenantId: scopeB.tenantId }]).service.search({ context: scopeA }),
+    ).rejects.toMatchObject({
+      code: "NOT_AUTHORIZED",
+      message: "Resource 目录返回越权或不可见记录",
+    });
   });
 
   it("运行时重验认证上下文和所有命令 ID", async () => {

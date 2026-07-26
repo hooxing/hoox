@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { parseSchedulerProcessEnvironment, startSchedulerProcess } from "./process-entry.js";
+import {
+  parseSchedulerProcessEnvironment,
+  type SchedulerProcessConfiguration,
+  startSchedulerProcess,
+} from "./process-entry.js";
 
 function productionEnvironment(): Record<string, string> {
   return {
@@ -30,5 +34,22 @@ describe("Scheduler 进程入口", () => {
     expect(() =>
       parseSchedulerProcessEnvironment({ ...productionEnvironment(), UNUSED_FLAG: "true" }),
     ).toThrow("UNKNOWN:UNUSED_FLAG");
+  });
+
+  it("production 继续拒绝可伪造的 assembler，不能把 Fake 调度器变成可部署服务", async () => {
+    await expect(
+      startSchedulerProcess({
+        environment: productionEnvironment(),
+        assembler: {
+          async assemble(_configuration: SchedulerProcessConfiguration) {
+            return {
+              stopAccepting: async () => undefined,
+              resources: [],
+              readiness: [],
+            };
+          },
+        },
+      }),
+    ).rejects.toThrow("PRODUCTION_ASSEMBLY_UNAVAILABLE:scheduler");
   });
 });

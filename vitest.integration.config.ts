@@ -10,6 +10,12 @@ export default defineConfig({
       "@cube-runtime/persistence": fileURLToPath(
         new URL("./runtime-ts/packages/persistence/src/index.ts", import.meta.url),
       ),
+      "@cube-runtime/protocol": fileURLToPath(
+        new URL("./runtime-ts/packages/protocol/src/index.ts", import.meta.url),
+      ),
+      "@cube-runtime/protocol-mapper": fileURLToPath(
+        new URL("./runtime-ts/packages/protocol-mapper/src/index.ts", import.meta.url),
+      ),
     },
   },
   test: {

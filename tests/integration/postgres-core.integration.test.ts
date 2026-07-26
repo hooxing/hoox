@@ -45,6 +45,7 @@ import {
   type Pool,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
+import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -263,6 +264,83 @@ afterAll(async () => {
 });
 
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("HTTP API 经真实 PostgreSQL RLS 隔离 Thread/Run 并完成取消", async () => {
+    const left = await createFixture("api_left");
+    const right = await createFixture("api_right");
+    const principals = new Map([
+      ["Bearer pg-left", left.scope],
+      ["Bearer pg-right", right.scope],
+    ]);
+    const unsupportedCommand = async () => {
+      throw new Error("真实 PG Run+Outbox 原子适配属于后续任务");
+    };
+    const app = createApiApp(
+      {
+        auth: {
+          resolve: async ({ authorization }) =>
+            authorization === undefined ? undefined : principals.get(authorization),
+        },
+        repositories,
+        threadCreation: { createThread: unsupportedCommand },
+        enqueueOutbox: { createQueuedRun: unsupportedCommand },
+        readiness: { probe: () => runtimePool.query("SELECT 1").then(() => undefined) },
+        clock: { now: () => timestamp(20) },
+        ids: {
+          thread: () => threadId("thread_api_unused"),
+          run: () => runId("run_api_unused"),
+          workspace: () => workspaceId("workspace_api_unused"),
+        },
+      },
+      { logger: false },
+    );
+    try {
+      const ready = await app.inject({ method: "GET", url: "/ready" });
+      expect(ready.statusCode).toBe(200);
+      const ownThread = await app.inject({
+        method: "GET",
+        url: `/v1/threads/${left.thread.id}`,
+        headers: { authorization: "Bearer pg-left" },
+      });
+      expect(ownThread.statusCode).toBe(200);
+      expect(ownThread.json().data.id).toBe(left.thread.id);
+      const page = await app.inject({
+        method: "GET",
+        url: "/v1/threads?limit=10",
+        headers: { authorization: "Bearer pg-left" },
+      });
+      expect(page.json().data.items.map((item: { id: string }) => item.id)).toEqual([
+        left.thread.id,
+      ]);
+      const crossTenant = await app.inject({
+        method: "GET",
+        url: `/v1/threads/${left.thread.id}/runs/${left.run.id}`,
+        headers: {
+          authorization: "Bearer pg-right",
+          "x-tenant-id": left.scope.tenantId,
+        },
+      });
+      expect(crossTenant.statusCode).toBe(404);
+      expect(crossTenant.json().error.code).toBe("NOT_FOUND");
+
+      const cancelled = await app.inject({
+        method: "DELETE",
+        url: `/v1/threads/${left.thread.id}/runs/${left.run.id}`,
+        headers: { authorization: "Bearer pg-left" },
+      });
+      expect(cancelled.statusCode).toBe(200);
+      expect(cancelled.json().data.status).toBe("cancelled");
+      const archived = await app.inject({
+        method: "DELETE",
+        url: `/v1/threads/${left.thread.id}`,
+        headers: { authorization: "Bearer pg-left" },
+      });
+      expect(archived.statusCode).toBe(200);
+      expect(archived.json().data.status).toBe("archived");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("并发迁移串行化且重复执行结果一致", async () => {
     expect(concurrentMigrationVersions).toEqual([1, 2, 1, 2]);
     expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(2);

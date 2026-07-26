@@ -30,6 +30,16 @@ export interface Versioned<T> {
   readonly version: bigint;
 }
 
+export interface ThreadListCursor {
+  readonly updatedAt: Thread["updatedAt"];
+  readonly id: ThreadId;
+}
+
+export interface ThreadListPage {
+  readonly items: readonly Versioned<Thread>[];
+  readonly nextCursor?: ThreadListCursor;
+}
+
 export type CreateResult = { readonly outcome: "created" } | { readonly outcome: "conflict" };
 
 export type VersionedCreateResult =
@@ -49,6 +59,10 @@ export interface TenantRepository {
 export interface ThreadRepository {
   create(scope: TenantScope, thread: Thread): Promise<VersionedCreateResult>;
   get(scope: TenantScope, id: ThreadId): Promise<Versioned<Thread> | undefined>;
+  list(
+    scope: TenantScope,
+    input: { readonly limit: number; readonly cursor?: ThreadListCursor },
+  ): Promise<ThreadListPage>;
   update(
     scope: TenantScope,
     thread: Thread,

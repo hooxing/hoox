@@ -100,6 +100,14 @@ export function parseSchedulerProcessEnvironment(
   if (Buffer.byteLength(configuredWorkerId, "utf8") > 200) {
     throw new TypeError("SCHEDULER_WORKER_ID UTF-8 字节长度不能超过 200");
   }
+  const configuredProxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
+  if (
+    configuredProxyScheme !== undefined &&
+    configuredProxyScheme !== "http" &&
+    configuredProxyScheme !== "https"
+  ) {
+    throw new TypeError("CUBESANDBOX_PROXY_SCHEME 只能是 http 或 https");
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
@@ -123,9 +131,7 @@ export function parseSchedulerProcessEnvironment(
       ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined
         ? {}
         : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
-      ...(parsed.values.CUBESANDBOX_PROXY_SCHEME === undefined
-        ? {}
-        : { proxyScheme: parsed.values.CUBESANDBOX_PROXY_SCHEME as "http" | "https" }),
+      ...(configuredProxyScheme === undefined ? {} : { proxyScheme: configuredProxyScheme }),
     }),
     cleanup: Object.freeze({
       tenantId: configuredTenantId,

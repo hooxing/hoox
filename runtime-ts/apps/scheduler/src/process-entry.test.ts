@@ -57,5 +57,11 @@ describe("Scheduler 进程入口", () => {
         SCHEDULER_TENANT_ID: "bad tenant",
       }),
     ).toThrow("ID 格式无效");
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        CUBESANDBOX_PROXY_SCHEME: "ftp",
+      }),
+    ).toThrow("CUBESANDBOX_PROXY_SCHEME");
   });
 });

@@ -99,6 +99,16 @@ describe("Sandbox Cleanup Consumer 崩溃窗口", () => {
     expect(resolver.dispositions).toEqual(["pause"]);
   });
 
+  it("终态写回 CAS 失败不把仅尝试过的调用计为成功", async () => {
+    const store = new FakeStore();
+    store.completeResult = false;
+    const resolver = new FakeResolver();
+    expect(
+      await new SandboxCleanupConsumer(store, resolver, "worker-a").drainTenant("tenant-a"),
+    ).toBe(0);
+    expect(store.calls).toEqual(["claim", "started", "complete"]);
+  });
+
   it("关闭先阻止新领取", async () => {
     const store = new FakeStore();
     const resolver = new FakeResolver();

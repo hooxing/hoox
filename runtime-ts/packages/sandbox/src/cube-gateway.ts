@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { Config, Sandbox, type ConfigOptions, type CreateOptions } from "@cubesandbox/sdk";
+import { Config, type ConfigOptions, type CreateOptions, Sandbox } from "@cubesandbox/sdk";
 import { mapSandboxError, SandboxRuntimeError, settledOperation } from "./errors.js";
 import type {
   CodeOutput,

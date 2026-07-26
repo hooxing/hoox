@@ -430,6 +430,79 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(execution).resolves.toEqual({ outcome: "cancelled" });
   });
 
+  it.each([
+    { replayName: "sandbox_write_file", label: "同名" },
+    { replayName: "sandbox_read_file", label: "异名" },
+  ])(
+    "Attempt 内 $label 重放 tool.started callId 时永久拒绝且不签发许可",
+    async ({ replayName }) => {
+      const session = new BlockingAgentSession();
+      const h = harness([session]);
+      const execution = h.worker.execute(h.scope);
+      await eventually(() => h.factory.toolAuthorizers.length === 1);
+      const callId = "tool-call-replayed-start";
+      session.emit({ type: "tool.started", callId, name: "sandbox_write_file" });
+      await eventually(() => {
+        const mutation = [...h.persistence.record(h.scope).mutations.values()].find(
+          (candidate) => candidate.receipt.effectInvocation?.callId === callId,
+        );
+        return mutation?.receipt.effectInvocation?.toolName === "sandbox_write_file";
+      });
+
+      session.emit({ type: "tool.started", callId, name: replayName });
+      await expect(
+        h.factory.toolAuthorizers[0]?.({
+          callId,
+          toolName: "sandbox_write_file",
+          argsDigest: sha256Digest("1".repeat(64)),
+        }),
+      ).rejects.toThrow("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+      await expect(execution).resolves.toEqual({
+        outcome: "recovery_required",
+        code: "PROTOCOL",
+      });
+      expect(
+        h.persistence.durableOperations.filter((item) => item === `permit:issue:${callId}`),
+      ).toHaveLength(0);
+    },
+  );
+
+  it.each([
+    { replayDigest: "2", label: "相同参数" },
+    { replayDigest: "3", label: "不同参数" },
+  ])("同一 callId 已请求授权后以$label重放也永久拒绝", async ({ replayDigest }) => {
+    const session = new BlockingAgentSession();
+    const h = harness([session]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.toolAuthorizers.length === 1);
+    const call = {
+      callId: "tool-call-replayed-args",
+      toolName: "sandbox_write_file",
+      argsDigest: sha256Digest("2".repeat(64)),
+    };
+    session.emit({ type: "tool.started", callId: call.callId, name: call.toolName });
+
+    await expect(h.factory.toolAuthorizers[0]?.(call)).resolves.toMatchObject({
+      permit: { callId: call.callId },
+    });
+    await expect(
+      h.factory.toolAuthorizers[0]?.({
+        ...call,
+        argsDigest: sha256Digest(replayDigest.repeat(64)),
+      }),
+    ).rejects.toThrow("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+    await expect(execution).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "PROTOCOL",
+    });
+    expect(
+      h.persistence.durableOperations.filter((item) => item === `permit:issue:${call.callId}`),
+    ).toHaveLength(1);
+    expect(
+      h.persistence.durableOperations.filter((item) => item === `permit:consume:${call.callId}`),
+    ).toHaveLength(1);
+  });
+
   it("取消在已排队 tool.started 后优先阻止许可，不签发也不消费", async () => {
     const session = new BlockingAgentSession();
     const h = harness([session]);
@@ -544,6 +617,30 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
   });
 
+  it("cleanup started 已决定 close 后，completed receipt 伪造成 pause 必须失败关闭", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.persistence.rewriteNextCleanupReceiptDisposition = {
+      state: "completed",
+      disposition: "pause",
+    };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "IDEMPOTENCY_CONFLICT",
+    });
+
+    expect(h.sandboxes.settleCount).toBe(1);
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("running");
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({
+        kind: "sandbox_cleanup",
+        state: "completed",
+        payload: expect.objectContaining({ disposition: "close" }),
+      }),
+    );
+  });
+
   it("Sandbox acquire UNKNOWN 只进入 Attempt recovery_required，不伪造 Run failed", async () => {
     const h = harness([new ScriptedAgentSession(successfulEvents)]);
     h.sandboxes.nextAcquire = { outcome: "unknown", event: uncertain("create_response") };
@@ -559,9 +656,86 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(record.attempt?.stage).toBe("claimed");
     expect(h.factory.createCount).toBe(0);
     expect(record.outbox).toContainEqual(
-      expect.objectContaining({ kind: "sandbox_lifecycle_unknown", state: "unknown" }),
+      expect.objectContaining({
+        kind: "sandbox_lifecycle_unknown",
+        state: "unknown",
+        payload: expect.objectContaining({
+          requestId: "request-test",
+          sandboxId: "sandbox-test",
+          actualTtlSeconds: 120,
+          stage: "create_response",
+        }),
+      }),
     );
     expect(record.outbox.some((item) => item.kind === "sandbox_cleanup")).toBe(false);
+  });
+
+  it.each([
+    {
+      race: "cancel" as const,
+      expectedResult: { outcome: "cancelled" } as const,
+      expectedRun: "cancelled" as const,
+    },
+    {
+      race: "timeout" as const,
+      expectedResult: { outcome: "failed" } as const,
+      expectedRun: "failed" as const,
+    },
+  ])(
+    "acquire UNKNOWN 返回前发生 $race 时，先持久化恢复事实再写业务终态",
+    async ({ race, expectedResult, expectedRun }) => {
+      const h = harness([new ScriptedAgentSession(successfulEvents)]);
+      h.sandboxes.nextAcquire = { outcome: "unknown", event: uncertain("create_response") };
+      h.sandboxes.beforeAcquireReturn = () => {
+        if (race === "cancel") h.cancellation.cancel(h.scope);
+        else h.clock.fireTimeout();
+      };
+
+      await expect(h.worker.execute(h.scope)).resolves.toEqual(expectedResult);
+
+      const record = h.persistence.record(h.scope);
+      expect(record.run.status).toBe(expectedRun);
+      expect(record.outbox).toContainEqual(
+        expect.objectContaining({
+          kind: "sandbox_lifecycle_unknown",
+          payload: expect.objectContaining({
+            requestId: "request-test",
+            sandboxId: "sandbox-test",
+            actualTtlSeconds: 120,
+            stage: "create_response",
+          }),
+        }),
+      );
+      const mutations = [...record.mutations.keys()];
+      expect(mutations[0]).toBe("attempt-1/sandbox/acquire-unknown/request-test");
+      expect(mutations.at(-1)).toBe(`attempt-1/final/${expectedRun}`);
+      expect(h.factory.createCount).toBe(0);
+    },
+  );
+
+  it("acquire UNKNOWN 没有 sandboxId/ref 时仍保留 requestId、TTL 与阶段", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const { sandboxId: _sandboxId, ...eventWithoutSandboxId } = uncertain("create_response");
+    h.sandboxes.nextAcquire = { outcome: "unknown", event: eventWithoutSandboxId };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "SANDBOX_UNKNOWN",
+    });
+
+    const unknownFact = h.persistence
+      .record(h.scope)
+      .outbox.find((item) => item.kind === "sandbox_lifecycle_unknown");
+    expect(unknownFact).toMatchObject({
+      payload: {
+        requestId: "request-test",
+        actualTtlSeconds: 120,
+        stage: "create_response",
+      },
+    });
+    expect(
+      unknownFact?.kind === "sandbox_lifecycle_unknown" && "sandboxId" in unknownFact.payload,
+    ).toBe(false);
   });
 
   it("settle 调用前 started 事务失败，不调用外部 settle，也不写业务终态", async () => {
@@ -834,9 +1008,36 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       toolName: "sandbox_write_file",
       argsDigest: sha256Digest("b".repeat(64)),
     };
+    const registerInvocation = async (
+      invocation: typeof call,
+      expectedAttemptVersion: number,
+      sequence: number,
+    ) =>
+      await h.persistence.mutate(
+        signedMutation({
+          idempotencyKey: `register-${invocation.callId}`,
+          fence: claimed.fence,
+          expectedAttemptVersion,
+          events: [
+            {
+              schemaVersion: 1,
+              kind: "agent_event",
+              sequence,
+              payload: {
+                type: "tool.started",
+                callId: invocation.callId,
+                name: invocation.toolName,
+              },
+            },
+          ],
+          outbox: [],
+          effectInvocation: { callId: invocation.callId, toolName: invocation.toolName },
+        }),
+      );
+    await expect(registerInvocation(call, 0, 0)).resolves.toMatchObject({ outcome: "applied" });
     const issued = await h.persistence.issueExternalEffectPermit({
       fence: claimed.fence,
-      expectedAttemptVersion: 0,
+      expectedAttemptVersion: 1,
       effect: "tool_execution",
       call,
       permitDurationMs: 1_000,
@@ -844,30 +1045,34 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     if (issued.outcome !== "authorized") throw new Error("测试许可签发失败");
     expect(issued.permit).toMatchObject({
       scope: h.scope,
-      attemptVersion: 0,
+      attemptVersion: 1,
       effect: "tool_execution",
       ...call,
     });
     await expect(
       h.persistence.consumeExternalEffectPermit({
         fence: claimed.fence,
-        expectedAttemptVersion: 0,
+        expectedAttemptVersion: 1,
         permit: issued.permit,
       }),
     ).resolves.toMatchObject({ outcome: "consumed" });
     await expect(
       h.persistence.consumeExternalEffectPermit({
         fence: claimed.fence,
-        expectedAttemptVersion: 0,
+        expectedAttemptVersion: 1,
         permit: issued.permit,
       }),
     ).resolves.toEqual({ outcome: "already_consumed" });
 
+    const staleCall = { ...call, callId: "call-stale" };
+    await expect(registerInvocation(staleCall, 1, 1)).resolves.toMatchObject({
+      outcome: "applied",
+    });
     const stale = await h.persistence.issueExternalEffectPermit({
       fence: claimed.fence,
-      expectedAttemptVersion: 0,
+      expectedAttemptVersion: 2,
       effect: "tool_execution",
-      call: { ...call, callId: "call-stale" },
+      call: staleCall,
       permitDurationMs: 1_000,
     });
     if (stale.outcome !== "authorized") throw new Error("测试旧许可签发失败");
@@ -875,7 +1080,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       signedMutation({
         idempotencyKey: "advance-attempt-version",
         fence: claimed.fence,
-        expectedAttemptVersion: 0,
+        expectedAttemptVersion: 2,
         events: [],
         outbox: [],
       }),
@@ -883,16 +1088,20 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(
       h.persistence.consumeExternalEffectPermit({
         fence: claimed.fence,
-        expectedAttemptVersion: 0,
+        expectedAttemptVersion: 2,
         permit: stale.permit,
       }),
     ).resolves.toEqual({ outcome: "conflict" });
 
+    const expiringCall = { ...call, callId: "call-expiring" };
+    await expect(registerInvocation(expiringCall, 3, 2)).resolves.toMatchObject({
+      outcome: "applied",
+    });
     const expiring = await h.persistence.issueExternalEffectPermit({
       fence: claimed.fence,
-      expectedAttemptVersion: 1,
+      expectedAttemptVersion: 4,
       effect: "tool_execution",
-      call: { ...call, callId: "call-expiring" },
+      call: expiringCall,
       permitDurationMs: 1_000,
     });
     if (expiring.outcome !== "authorized") throw new Error("测试过期许可签发失败");
@@ -903,11 +1112,78 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(
       h.persistence.consumeExternalEffectPermit({
         fence: claimed.fence,
-        expectedAttemptVersion: 1,
+        expectedAttemptVersion: 4,
         permit: expiring.permit,
       }),
     ).resolves.toEqual({ outcome: "expired" });
   });
+
+  it.each(["sandbox_write_file", "sandbox_read_file"])(
+    "持久层对 Attempt+callId 永久唯一，重放为 %s 也返回幂等冲突",
+    async (replayedToolName) => {
+      const h = harness([]);
+      const claimed = await h.persistence.claim({
+        scope: h.scope,
+        workerId: "invocation-worker",
+        leaseDurationMs: 30_000,
+      });
+      if (claimed.outcome !== "claimed") throw new Error("测试 claim 失败");
+      const firstCommand = signedMutation({
+        idempotencyKey: "invocation-first",
+        fence: claimed.fence,
+        expectedAttemptVersion: 0,
+        effectInvocation: { callId: "permanent-call", toolName: "sandbox_write_file" },
+        events: [
+          {
+            schemaVersion: 1,
+            kind: "agent_event",
+            sequence: 0,
+            payload: {
+              type: "tool.started",
+              callId: "permanent-call",
+              name: "sandbox_write_file",
+            },
+          },
+        ],
+        outbox: [],
+      });
+      const first = await h.persistence.mutate(firstCommand);
+      expect(first).toMatchObject({
+        outcome: "applied",
+        receipt: {
+          effectInvocation: { callId: "permanent-call", toolName: "sandbox_write_file" },
+        },
+      });
+      await expect(h.persistence.mutate(firstCommand)).resolves.toEqual({
+        outcome: "idempotency_conflict",
+      });
+
+      await expect(
+        h.persistence.mutate(
+          signedMutation({
+            idempotencyKey: `invocation-replay-${replayedToolName}`,
+            fence: claimed.fence,
+            expectedAttemptVersion: 1,
+            effectInvocation: { callId: "permanent-call", toolName: replayedToolName },
+            events: [
+              {
+                schemaVersion: 1,
+                kind: "agent_event",
+                sequence: 1,
+                payload: {
+                  type: "tool.started",
+                  callId: "permanent-call",
+                  name: replayedToolName,
+                },
+              },
+            ],
+            outbox: [],
+          }),
+        ),
+      ).resolves.toEqual({ outcome: "idempotency_conflict" });
+      expect(h.persistence.record(h.scope).events).toHaveLength(1);
+    },
+  );
 
   it("mutation receipt 固定命令摘要与推进量，同一幂等键不同摘要稳定冲突", async () => {
     const h = harness([]);

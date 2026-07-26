@@ -108,6 +108,7 @@ interface ExecutionContext {
 interface ToolStartedGate {
   readonly name: string;
   readonly committed: Promise<void>;
+  authorizationRequested: boolean;
   resolve(): void;
 }
 
@@ -297,8 +298,17 @@ export class RunWorker {
       } catch {
         return await this.requireRecovery(context, "SANDBOX_FAILED", []);
       }
-      const postAcquire = await this.stopPoint(context, cancellation);
       if (acquisition.outcome === "ready") sandbox = acquisition.session;
+      // UNKNOWN 是 acquire 已发生但结果不确定的独立恢复事实；必须先提交，再响应并发取消/超时。
+      if (acquisition.outcome === "unknown") {
+        const unknownFact = await this.applyMutation(context, {
+          idempotencyKey: `${context.attemptId}/sandbox/acquire-unknown/${acquisition.event.requestId}`,
+          events: [],
+          outbox: [cleanupUnknownOutbox(context, acquisition.event)],
+        });
+        if (!isApplied(unknownFact)) return await this.handleMutationFailure(unknownFact);
+      }
+      const postAcquire = await this.stopPoint(context, cancellation);
       if (postAcquire) {
         if (sandbox && (postAcquire === "cancelled" || postAcquire === "timeout")) {
           const intent = await this.applyMutation(context, {
@@ -316,9 +326,7 @@ export class RunWorker {
         return await this.finishStopped(context, postAcquire);
       }
       if (acquisition.outcome === "unknown") {
-        return await this.requireRecovery(context, "SANDBOX_UNKNOWN", [
-          cleanupUnknownOutbox(context, acquisition.event),
-        ]);
+        return await this.requireRecovery(context, "SANDBOX_UNKNOWN", []);
       }
       if (acquisition.outcome === "failed") {
         return await this.requireRecovery(context, acquisition.code, []);
@@ -368,6 +376,9 @@ export class RunWorker {
               idempotencyKey: `${context.attemptId}/event/${encoded.sequence}`,
               events: [encoded],
               outbox: [],
+              ...(event.type === "tool.started"
+                ? { effectInvocation: { callId: event.callId, toolName: event.name } }
+                : {}),
             });
             if (!isApplied(persisted)) {
               closeEventAcceptance(context);
@@ -415,7 +426,12 @@ export class RunWorker {
       const postModel = await this.stopPoint(context, cancellation);
       if (postModel) return await this.finishStopped(context, postModel, sandbox);
       if (context.adapterRejected) {
-        return await this.recoverWithCleanup(context, sandbox, "EVENT_REJECTED", cancellation);
+        return await this.recoverWithCleanup(
+          context,
+          sandbox,
+          context.agentFailure ?? "EVENT_REJECTED",
+          cancellation,
+        );
       }
       if (context.agentFailure) {
         return await this.finalizeWithCleanup(
@@ -627,10 +643,16 @@ export class RunWorker {
       throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     }
     await gate.committed;
-    context.toolStartedGates.delete(call.callId);
-    if (context.adapterRejected || !context.eventAcceptanceOpen) {
+    if (gate.authorizationRequested || context.adapterRejected || !context.eventAcceptanceOpen) {
+      context.adapterRejected = true;
+      context.agentFailure = "PROTOCOL";
+      closeEventAcceptance(context);
+      if (!context.abortPromise)
+        context.abortPromise = context.abortSession?.() ?? Promise.resolve();
       throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     }
+    // callId 在 Attempt 内永久一次性；即使后续授权失败，也不能重新领取许可。
+    gate.authorizationRequested = true;
     return await this.authorizeEffect(context, cancellation, "tool_execution", call);
   }
 
@@ -1087,8 +1109,10 @@ function cleanupUnknownOutbox(
       idempotencyKey: `${context.attemptId}/sandbox/unknown/${event.requestId}`,
       state: "unknown",
       payload: {
-        registryId: `acquire:${event.requestId}`,
-        providerSandboxId: event.sandboxId ?? "unknown",
+        requestId: event.requestId,
+        ...(event.sandboxId === undefined ? {} : { sandboxId: event.sandboxId }),
+        actualTtlSeconds: event.actualTtlSeconds,
+        stage: event.stage,
         uncertainEvent: event,
         retryCode: "SANDBOX_UNKNOWN",
       },
@@ -1197,7 +1221,7 @@ function registerToolStarted(
   const committed = new Promise<void>((done) => {
     resolve = done;
   });
-  const gate = { name: event.name, committed, resolve };
+  const gate = { name: event.name, committed, authorizationRequested: false, resolve };
   context.toolStartedGates.set(event.callId, gate);
   return gate;
 }
@@ -1359,6 +1383,7 @@ function receiptMatches(
         item.identity.providerSandboxId === expected.payload.providerSandboxId &&
         item.identityDigest === sandboxCleanupIdentityDigest(expected) &&
         item.identityDigest === (previous?.identityDigest ?? item.identityDigest) &&
+        (previous?.disposition === undefined || item.disposition === previous.disposition) &&
         item.disposition === expectedDisposition &&
         item.payloadDigest === outboxPayloadDigest(expected, expectedArmedAt)
       );
@@ -1376,6 +1401,11 @@ function receiptMatches(
       : receipt.workspace?.changeDigest === workspaceChangeDigest(command.workspaceChange) &&
         receipt.workspace.previousHead === context.currentRevisionId &&
         receipt.workspace.currentHead === command.workspaceChange.revisionId;
+  const effectInvocationMatches =
+    command.effectInvocation === undefined
+      ? receipt.effectInvocation === undefined
+      : receipt.effectInvocation?.callId === command.effectInvocation.callId &&
+        receipt.effectInvocation.toolName === command.effectInvocation.toolName;
   return (
     receipt.schemaVersion === 1 &&
     receipt.idempotencyKey === command.idempotencyKey &&
@@ -1388,6 +1418,7 @@ function receiptMatches(
     receipt.eventSequenceEnd === context.nextEventSequence + command.events.length &&
     result.nextEventSequence === receipt.eventSequenceEnd &&
     outboxMatches &&
+    effectInvocationMatches &&
     projectionMatches &&
     workspaceMatches
   );

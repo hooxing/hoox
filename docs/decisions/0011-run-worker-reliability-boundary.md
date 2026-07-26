@@ -50,7 +50,9 @@ Receipt 必须逐项证明 Attempt version 恰好 `+1`、事件 sequence 推进�
 
 每个 Attempt 只有一条进程内 `DurableOperationLane`。所有 agent event mutation、普通 mutation/readback、permit issue/consume、stop/fence inspect/renew，以及任何读取或推进 Attempt version 的事务，都按进入 lane 的顺序串行执行。命令及 expected version 必须在 lane 回调开始后从最新 context 构造，不能在排队前捕获旧版本。heartbeat 不得绕过 lane；重复 tick 可以复用在途任务或排队，停止时必须先停止生产者，再 drain lane。
 
-真实 Pi 工具调用还增加一层顺序门：PiWorkerSessionFactory 必须先观察到匹配 `callId + toolName` 的 `tool.started`，RunWorker 再把该事件经 lane 提交并取得 receipt，之后工具 authorizer 才能进入 lane。permit issue 与 consume 位于同一个 lane 回调，中间禁止 agent event、heartbeat 或其他 mutation 插入；这避免 `tool.started` 推进 Attempt version 后旧许可在 consume 时误判 fence_lost。取消信号在每个排队操作实际开始时重新检查；排在工具许可前的 lease 检查一旦判定失效，后续许可不得签发或消费。
+真实 Pi 工具调用还增加一层顺序门：PiWorkerSessionFactory 必须先观察到匹配 `callId + toolName` 的 `tool.started`，RunWorker 再把该事件经 lane 提交并取得 receipt，之后工具 authorizer 才能进入 lane。首次 `tool.started` 事件必须在同一事务登记永久 `EffectInvocation`，数据库以 `(ExecutionScope, attemptId, callId)` 建唯一约束并在 receipt 返回原始 callId/toolName；同一 Attempt 内的 callId 绝不释放或复用，重复事件、重复授权或重复签发无论 toolName/argsDigest 相同或不同，都稳定关闭为 `PROTOCOL` 或 `IDEMPOTENCY_CONFLICT`，绝不再次访问 Sandbox。Pi 和 Worker 的内存 gate 只做低延迟前置拒绝，不能删除数据库事实。
+
+permit issue 与 consume 位于同一个 lane 回调，中间禁止 agent event、heartbeat 或其他 mutation 插入；这避免 `tool.started` 推进 Attempt version 后旧许可在 consume 时误判 fence_lost。取消信号在每个排队操作实际开始时重新检查；排在工具许可前的 lease 检查一旦判定失效，后续许可不得签发或消费。
 
 生产实现必须在同一个数据库事务中，用单次数据库 `now` 校验两组租约仍有效，再原子写入事件、Outbox、Attempt、RolloutProjection、WorkspaceRevision 和 Run 状态。应用命令不携带 `occurredAt`、Revision `createdAt` 或终态时间，只提交 lease duration 和已验证内容，所有时间及 deadline 均由数据库生成。
 
@@ -86,7 +88,9 @@ Sandbox acquire 返回已登记实例后，Worker 在创建 Pi Session 或启动
 5. 状态严格单调：`pending → started → completed | unknown`；调用抛异常时保留 `started`，禁止回退为 `pending`；
 6. worker 可在 intent 提交后做同进程低延迟 dispatch，但崩溃恢复和重复消费仍以同一个 Outbox 幂等键为准。
 
-同一个 cleanup 业务键的 `registryId`、`providerSandboxId`、`armedAt` 是不可变身份事实；进入 started 后 disposition 也不可变，任何撤销 armed、伪造 armedAt、pending 预填 disposition 或 started 换 disposition 都必须事务冲突。Receipt 的 cleanup 项和 payload digest 同时包含 armedAt、原始 identity 与 identity digest，并在 started 后包含 disposition，使 Worker 能验证数据库没有改写这些事实。acquire 自身的 UNKNOWN 使用独立 lifecycle-unknown 记录，不伪装成一条已经 armed 的 cleanup 行。若 acquire 已成功登记，但 cleanup-intent mutation 返回 unavailable、response_unknown 且 readback 无法证明 receipt，或 fence_lost，Worker 不能假设 Outbox 已存在；registry 仍必须保留创建事实，Worker 用独立 registry 恢复键执行 best-effort orphan close，并记录原因和 settled/unknown/failed 结果指标。该路径不写业务终态，也不依赖 Outbox consumer。
+同一个 cleanup 业务键的 `registryId`、`providerSandboxId`、`armedAt` 是不可变身份事实；进入 started 后 disposition 也不可变，任何撤销 armed、伪造 armedAt、pending 预填 disposition 或 started 换 disposition 都必须事务冲突。Receipt 的 cleanup 项和 payload digest 同时包含 armedAt、原始 identity 与 identity digest，并在 started 后包含 disposition；Worker 除核对当前命令外，还必须核对上一份 receipt 的 disposition，防止存储层把已决定的 close 改写为 pause（或反向改写）。
+
+acquire 自身的 UNKNOWN 使用独立 lifecycle-unknown 记录，不伪装成一条已经 armed 的 cleanup 行。该事实直接保存 requestId、可用 sandboxId、实际 TTL、发生阶段和原始不确定事件；即使没有可连接的 Sandbox ref 也不能丢弃。acquire 返回前若取消或超时已经发生，Worker 必须先证明 lifecycle-unknown 事实提交，再决定 Run cancelled/failed；事实无法证明提交时不得抢先写业务终态。若 acquire 已成功登记，但 cleanup-intent mutation 返回 unavailable、response_unknown 且 readback 无法证明 receipt，或 fence_lost，Worker 不能假设 Outbox 已存在；registry 仍必须保留创建事实，Worker 用独立 registry 恢复键执行 best-effort orphan close，并记录原因和 settled/unknown/failed 结果指标。该路径不写业务终态，也不依赖 Outbox consumer。
 
 UNKNOWN 不能自动再次 settle 或创建替代 Sandbox。生产 Outbox consumer 通过 registryId 重新取得句柄并执行同一 Saga。create 期间取消或丢栅栏时，返回后绝不启动模型；registry 必须保留创建请求事实，旧 Worker 只做 best-effort close。
 
@@ -153,5 +157,8 @@ waiting 回答到达后创建全新的内存 Pi Session，把 RolloutProjection 
 - per-Attempt lane 下 tool.started→issue→consume→后续事件的严格顺序，以及取消/lease 检查优先级；
 - Linux Faux + PiWorkerSessionFactory 真实写文件链路，heartbeat 只能排在 permit consume 之后；
 - cleanup pending 无 disposition、armed/armedAt/identity 永久、started disposition 一次决定与 receipt digest。
+- acquire UNKNOWN 与取消/超时竞争时事实优先，含/不含 sandboxId 均可恢复；
+- EffectInvocation 原子登记、Attempt 级 callId 永久唯一，以及同名/异名/同参/异参重放拒绝；
+- cleanup completed/unknown receipt 必须延续 started disposition，伪造 close→pause 时失败关闭。
 
 PG、对象存储、真实 Outbox consumer 和 API 不在本次实现范围；它们必须遵守本 ADR，不能重新引入 Run 基础设施状态或 Pi Session 事实源。

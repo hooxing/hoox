@@ -106,6 +106,15 @@ export interface ExternalEffectCall {
   readonly argsDigest: Sha256Digest;
 }
 
+/**
+ * 首次 tool.started 必须和事件在同一事务中登记。
+ * 存储层以 (scope, attemptId, callId) 建永久唯一约束；即使名称完全相同也禁止再次登记。
+ */
+export interface EffectInvocationRegistration {
+  readonly callId: string;
+  readonly toolName: string;
+}
+
 export interface ConsumedExternalEffectAuthorization {
   readonly permit: ExternalEffectPermit;
   readonly consumedAt: IsoTimestamp;
@@ -218,8 +227,10 @@ export type RuntimeOutboxV1 =
       readonly idempotencyKey: string;
       readonly state: "unknown";
       readonly payload: {
-        readonly registryId: string;
-        readonly providerSandboxId: string;
+        readonly requestId: string;
+        readonly sandboxId?: string;
+        readonly actualTtlSeconds: number;
+        readonly stage: UncertainLifecycleEvent["stage"];
         readonly uncertainEvent: UncertainLifecycleEvent;
         readonly retryCode: "SANDBOX_UNKNOWN";
       };
@@ -253,6 +264,8 @@ export interface RuntimeMutation {
   readonly nextAttemptStatus?: ExecutionAttemptStatus;
   readonly nextStage?: ExecutionStage;
   readonly events: readonly RuntimeEventV1[];
+  /** 与本事务中的唯一 tool.started 事件原子登记；登记过的 callId 在 Attempt 内永久不可复用。 */
+  readonly effectInvocation?: EffectInvocationRegistration;
   /** 同一业务键以 upsert 推进 Saga 状态，禁止把 pending/started/completed 当成三条无关消息。 */
   readonly outbox: readonly RuntimeOutboxV1[];
   readonly rolloutProjection?: ControlledRolloutProjection;
@@ -272,6 +285,8 @@ export interface RuntimeMutationReceiptV1 {
   readonly eventSequenceStart: number;
   readonly eventSequenceEnd: number;
   readonly outbox: readonly RuntimeOutboxReceiptV1[];
+  /** 存储层返回已写入永久唯一表的原始身份，Worker 必须逐字段核对。 */
+  readonly effectInvocation?: EffectInvocationRegistration;
   readonly projection?: {
     readonly schemaVersion: 1;
     readonly previousVersion: number;
@@ -356,6 +371,10 @@ export interface ExecutionPersistencePort {
     readonly fence: ExecutionFence;
     readonly leaseDurationMs: number;
   }): Promise<FenceInspectionResult>;
+  /**
+   * tool_execution 必须引用本 Attempt 已登记且尚未签发过许可的 EffectInvocation。
+   * 同一 callId 的重复签发（无论 toolName/argsDigest 是否相同）必须返回 conflict。
+   */
   issueExternalEffectPermit(input: {
     readonly fence: ExecutionFence;
     readonly expectedAttemptVersion: number;

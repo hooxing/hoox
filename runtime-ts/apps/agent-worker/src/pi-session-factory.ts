@@ -20,6 +20,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
   ): Promise<WorkerAgentSessionPort> {
     const startedToolCalls = new Map<string, string>();
     const invalidToolCalls = new Set<string>();
+    const authorizationRequested = new Set<string>();
     const controller = await createSafePiSession({
       model: this.model,
       modelRuntime: this.modelRuntime,
@@ -27,11 +28,15 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       rolloutProjection: input.rolloutProjection,
       authorizeToolEffect: (call) => {
         const startedName = startedToolCalls.get(call.callId);
-        if (invalidToolCalls.has(call.callId) || startedName !== call.toolName) {
+        if (
+          invalidToolCalls.has(call.callId) ||
+          authorizationRequested.has(call.callId) ||
+          startedName !== call.toolName
+        ) {
           throw new Error("Pi 工具许可缺少匹配的 tool.started");
         }
-        startedToolCalls.delete(call.callId);
-        invalidToolCalls.delete(call.callId);
+        // 不删除 gate：callId 在整个 Attempt 内永久一次性，失败后的相同调用也不可重试。
+        authorizationRequested.add(call.callId);
         return input.authorizeToolEffect({ ...call, argsDigest: sha256Digest(call.argsDigest) });
       },
     });
@@ -74,6 +79,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         unsubscribeToolGate();
         startedToolCalls.clear();
         invalidToolCalls.clear();
+        authorizationRequested.clear();
         controller.dispose();
       },
     };

@@ -166,6 +166,13 @@ async function hasRunDispatchState(client: PoolClient, schema: string): Promise<
   return result.rows[0]?.present === true;
 }
 
+async function hasCleanupConsumerState(client: PoolClient): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='cleanup_outbox' AND column_name='claim_token') AS present",
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function activeTablePolicy(
   client: PoolClient,
   schema: string,
@@ -176,6 +183,9 @@ async function activeTablePolicy(
   }
   if (!(await hasRunDispatchState(client, schema))) {
     for (const table of runDispatchTables) policy.delete(table);
+  }
+  if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
+    policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
   }
   return policy;
 }
@@ -195,6 +205,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasRunDispatchState(client, schema))) {
     for (const table of runDispatchTables) policy.delete(table);
+  }
+  if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
+    policy.set("cleanup_outbox", new Set(["state", "disposition", "payload", "payload_digest", "updated_at"]));
   }
   return policy;
 }
@@ -722,6 +735,9 @@ export async function bootstrapRuntimeAccessOnClient(
        ${schema}.mutation_receipts
        TO ${role}`,
     );
+    if (await hasCleanupConsumerState(client)) {
+      await client.query(`GRANT UPDATE(claim_token, claim_generation, claimed_by, claim_lease_expires_at, retry_at, attempt_count, remote_call_started_at) ON TABLE ${schema}.cleanup_outbox TO ${role}`);
+    }
   }
   if (await hasRunDispatchState(client, context.schema)) {
     await client.query(
@@ -763,9 +779,7 @@ export async function bootstrapRuntimeAccessOnClient(
        ON TABLE ${schema}.rollout_projections TO ${role};
      GRANT UPDATE(state, actual_ttl_seconds, updated_at)
        ON TABLE ${schema}.sandbox_registry TO ${role};
-     GRANT UPDATE(state, disposition, payload, payload_digest, updated_at, claim_token,
-       claim_generation, claimed_by, claim_lease_expires_at, retry_at, attempt_count,
-       remote_call_started_at)
+     GRANT UPDATE(state, disposition, payload, payload_digest, updated_at)
        ON TABLE ${schema}.cleanup_outbox TO ${role};
        GRANT UPDATE(consumed_at)
          ON TABLE ${schema}.external_effect_permits TO ${role}`,

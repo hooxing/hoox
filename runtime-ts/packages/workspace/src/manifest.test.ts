@@ -21,8 +21,13 @@ function sha(body: string): string {
   return createHash("sha256").update(body).digest("hex");
 }
 
-function file(path: string, body: string, incarnationId = INCARNATION_A) {
+function incarnationFor(digest: string): string {
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+function file(path: string, body: string, requestedIncarnationId?: string) {
   const digest = sha(body);
+  const incarnationId = requestedIncarnationId ?? incarnationFor(digest);
   return {
     type: "file",
     path,
@@ -62,6 +67,21 @@ describe("WorkspaceManifest canonical 契约", () => {
     expect(left.entries.map((entry) => entry.path)).toEqual(["a.txt", "文档/甲.txt"]);
   });
 
+  it("Unicode canonical golden vector 固定，反转输入不改变结果", () => {
+    const entries = [file("文档/甲.txt", "甲"), file("emoji/😀.txt", "ok")];
+    const forward = manifest(entries);
+    const reversed = manifest([...entries].reverse());
+    expect(forward.digest).toBe("7190cedbff708b8be6c0062708f4b353693fe8a260336dafc5bd2f558f8feae6");
+    expect(reversed.digest).toBe(forward.digest);
+    expect(forward.entries.map((entry) => entry.path)).toEqual(["emoji/😀.txt", "文档/甲.txt"]);
+  });
+
+  it("空清单 canonical golden vector 固定", () => {
+    expect(manifest([], { maxFiles: 0, maxTotalBytes: 0 }).digest).toBe(
+      "8070fd9fe52237051cca75466470615590c22969b82d6a14a2e786765e120647",
+    );
+  });
+
   it("任意安全路径排列都产生相同摘要", () => {
     fc.assert(
       fc.property(
@@ -96,6 +116,19 @@ describe("WorkspaceManifest canonical 契约", () => {
       },
     };
     expectCode(() => manifest([forged]), "INVALID_OBJECT_IDENTITY");
+
+    const firstEntry = first.entries[0];
+    if (firstEntry === undefined) {
+      throw new Error("测试清单缺少文件");
+    }
+    const malformedUnicodeKey = {
+      ...firstEntry,
+      object: {
+        ...firstEntry.object,
+        physicalObjectKey: `bad\ud800/${firstEntry.object.physicalObjectKey}`,
+      },
+    };
+    expectCode(() => manifest([malformedUnicodeKey]), "INVALID_OBJECT_IDENTITY");
   });
 
   it.each([
@@ -106,6 +139,10 @@ describe("WorkspaceManifest canonical 契约", () => {
     ["a//b", "INVALID_PATH"],
     ["a\\b", "INVALID_PATH"],
     ["a\0b", "INVALID_PATH"],
+    [`a${String.fromCharCode(0x0085)}b`, "INVALID_PATH"],
+    ["a\u200db", "INVALID_PATH"],
+    ["bad\ud800.txt", "INVALID_PATH"],
+    ["bad\udc00.txt", "INVALID_PATH"],
     ["e\u0301.txt", "PATH_NOT_CANONICAL"],
   ] as const)("拒绝越界或非规范路径 %s", (path, code) => {
     expectCode(() => manifest([file(path, "x")]), code);
@@ -115,7 +152,35 @@ describe("WorkspaceManifest canonical 契约", () => {
     expectCode(() => manifest([file("a", "1"), file("a", "2")]), "DUPLICATE_PATH");
     expectCode(() => manifest([file("Readme", "1"), file("README", "2")]), "DUPLICATE_PATH");
     expectCode(() => manifest([file("A", "1"), file("a/b", "2")]), "PATH_CONFLICT");
+    expectCode(() => manifest([file("A/b", "1"), file("a", "2")]), "PATH_CONFLICT");
+    expectCode(() => manifest([file("a", "2"), file("A/b", "1")]), "PATH_CONFLICT");
     expectCode(() => manifest([file("dir", "1"), file("dir/a", "2")]), "PATH_CONFLICT");
+  });
+
+  it("schema v1 大小写键只折叠 ASCII，非 ASCII 大小写保持不同路径", () => {
+    const value = manifest([file("Ä.txt", "1"), file("ä.txt", "2")]);
+    expect(value.entries).toHaveLength(2);
+  });
+
+  it.each([
+    "CON",
+    "con.txt",
+    "dir/LpT1.log",
+    "AUX.json",
+    "COM9",
+    "nul",
+    "conin$",
+    "name.",
+    "name ",
+    "a<b",
+    "a>b",
+    'a"b',
+    "a:b",
+    "a|b",
+    "a?b",
+    "a*b",
+  ])("拒绝 Windows 保留或歧义路径 %s", (path) => {
+    expectCode(() => manifest([file(path, "x")]), "INVALID_PATH");
   });
 
   it("首版拒绝 symlink、目录和特殊文件 entry", () => {
@@ -145,6 +210,75 @@ describe("WorkspaceManifest canonical 契约", () => {
       () => manifest([file("中文", "x")], { ...POLICY, maxPathUtf8Bytes: 5 }),
       "LIMIT_EXCEEDED",
     );
+    expectCode(
+      () => manifest([file("a", "x")], { ...POLICY, maxTotalBytes: -0 }),
+      "INVALID_MANIFEST",
+    );
+    expectCode(
+      () =>
+        manifest([
+          {
+            ...file("a", ""),
+            content: { ...file("a", "").content, size: -0 },
+          },
+        ]),
+      "INVALID_MANIFEST",
+    );
+  });
+
+  it("同一 Tenant/purpose/incarnation 不能绑定不同内容或物理键", () => {
+    expectCode(
+      () => manifest([file("a", "one", INCARNATION_A), file("b", "two", INCARNATION_A)]),
+      "INVALID_OBJECT_IDENTITY",
+    );
+    const same = file("a", "one", INCARNATION_A);
+    expect(manifest([same, { ...same, path: "b" }]).entries).toHaveLength(2);
+  });
+
+  it("拒绝 accessor，且不执行 getter；Proxy 数据字段只快照一次", () => {
+    let getterCalls = 0;
+    const accessorEntry = { ...file("a", "x") } as Record<string, unknown>;
+    Object.defineProperty(accessorEntry, "path", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return "a";
+      },
+    });
+    expectCode(() => manifest([accessorEntry]), "INVALID_MANIFEST");
+    expect(getterCalls).toBe(0);
+
+    const accessorEntries: unknown[] = [];
+    Object.defineProperty(accessorEntries, "0", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return file("array.txt", "x");
+      },
+    });
+    accessorEntries.length = 1;
+    expectCode(() => manifest(accessorEntries), "INVALID_MANIFEST");
+    expect(getterCalls).toBe(0);
+
+    const descriptorCalls = new Map<PropertyKey, number>();
+    let directReads = 0;
+    const proxyEntry = new Proxy(file("proxy.txt", "safe"), {
+      get() {
+        directReads += 1;
+        throw new Error("不应直接读取 Proxy 字段");
+      },
+      getOwnPropertyDescriptor(target, property) {
+        descriptorCalls.set(property, (descriptorCalls.get(property) ?? 0) + 1);
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+    expect(manifest([proxyEntry]).entries[0]?.path).toBe("proxy.txt");
+    expect(directReads).toBe(0);
+    expect([...descriptorCalls.values()].every((count) => count === 1)).toBe(true);
+
+    const revoked = Proxy.revocable(file("revoked.txt", "x"), {});
+    revoked.revoke();
+    expectCode(() => manifest([revoked.proxy]), "INVALID_MANIFEST");
   });
 
   it("网络/持久化边界拒绝未知字段、篡改 digest 与超限既有清单", () => {

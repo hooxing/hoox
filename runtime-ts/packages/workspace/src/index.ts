@@ -13,8 +13,9 @@ export {
   type PlannedPath,
   type PlannedWorkspaceFile,
   planWorkspaceMaterialization,
+  type WorkspaceExistingTargetCandidate,
+  type WorkspaceMaterializationPhases,
   type WorkspaceMaterializationPlan,
-  type WorkspaceReuseCandidate,
 } from "./materialization-plan.js";
 export {
   assertMaterializationRoot,

@@ -13,29 +13,41 @@ export interface PlannedPath {
   readonly targetPath: string;
 }
 
-export interface WorkspaceReuseCandidate extends PlannedPath {
-  /** 候选只证明摘要与大小相同；执行器仍须验证来源授权和实际内容。 */
+export interface WorkspaceExistingTargetCandidate extends PlannedPath {
+  /** 候选只证明前一清单声明了相同内容；执行器仍须验证当前字节和来源授权。 */
   readonly requiresAuthorizationAndIntegrityCheck: true;
+  readonly content: WorkspaceContentIdentity;
 }
 
 export interface PlannedWorkspaceFile extends PlannedPath {
   readonly content: WorkspaceContentIdentity;
   readonly object: WorkspaceStableObjectIdentity;
   /** 同路径工作副本也只是候选；校验失败时必须回退到 object，而不是信任现有字节。 */
-  readonly existingTargetCandidate?: WorkspaceReuseCandidate;
-  readonly reuseCandidates: readonly WorkspaceReuseCandidate[];
+  readonly existingTargetCandidate?: WorkspaceExistingTargetCandidate;
 }
+
+export type WorkspaceMaterializationPhases = readonly [
+  {
+    readonly kind: "verify_existing";
+    readonly candidates: readonly WorkspaceExistingTargetCandidate[];
+  },
+  { readonly kind: "remove_files"; readonly paths: readonly PlannedPath[] },
+  { readonly kind: "remove_directories"; readonly paths: readonly PlannedPath[] },
+  { readonly kind: "ensure_directories"; readonly paths: readonly PlannedPath[] },
+  {
+    readonly kind: "materialize_files";
+    /** 每项都绑定 stable fallback；verify_existing 未通过时必须写入 fallback。 */
+    readonly files: readonly PlannedWorkspaceFile[];
+  },
+];
 
 export interface WorkspaceMaterializationPlan {
   readonly schemaVersion: 1;
   readonly root: string;
   readonly targetManifestDigest: string;
   readonly previousManifestDigest?: string;
-  readonly removeFiles: readonly PlannedPath[];
-  readonly removeDirectories: readonly PlannedPath[];
-  readonly ensureDirectories: readonly PlannedPath[];
-  /** 包含目标清单中的每个文件；候选不可用时一律从该项绑定的 stable object 物化。 */
-  readonly materializeFiles: readonly PlannedWorkspaceFile[];
+  /** 数组顺序就是执行依赖，执行器不得在 verify_existing 完成前进入任何删除阶段。 */
+  readonly phases: WorkspaceMaterializationPhases;
 }
 
 function compareUtf8(left: string, right: string): number {
@@ -84,17 +96,20 @@ function sameContent(left: WorkspaceContentIdentity, right: WorkspaceContentIden
 
 /**
  * 从空目录或前一不可变清单生成确定性差异计划。本函数不访问宿主文件系统、不下载 Blob，
- * reuseCandidates 也绝不代表 Tenant 授权已经通过。
+ * 同路径保留候选也绝不代表 Tenant 授权或实际内容校验已经通过。
  */
 export function planWorkspaceMaterialization(input: {
   readonly root: string;
   readonly target: WorkspaceManifest;
   readonly previous?: WorkspaceManifest;
 }): WorkspaceMaterializationPlan {
-  const root = assertMaterializationRoot(input.root);
-  const target = assertWorkspaceManifestIntegrity(input.target);
+  const rootInput = input.root;
+  const targetInput = input.target;
+  const previousInput = input.previous;
+  const root = assertMaterializationRoot(rootInput);
+  const target = assertWorkspaceManifestIntegrity(targetInput);
   const previous =
-    input.previous === undefined ? undefined : assertWorkspaceManifestIntegrity(input.previous);
+    previousInput === undefined ? undefined : assertWorkspaceManifestIntegrity(previousInput);
   manifestError(
     previous === undefined || previous.tenantId === target.tenantId,
     "TENANT_SCOPE_MISMATCH",
@@ -102,7 +117,6 @@ export function planWorkspaceMaterialization(input: {
   );
   const previousEntries = previous?.entries ?? [];
   const previousByPath = new Map(previousEntries.map((entry) => [entry.path, entry]));
-  const targetByPath = new Map(target.entries.map((entry) => [entry.path, entry]));
 
   const retained = new Set(
     target.entries
@@ -126,16 +140,6 @@ export function planWorkspaceMaterialization(input: {
   ).map((path) => plannedPath(root, path));
 
   const materializeFiles = target.entries.map((entry): PlannedWorkspaceFile => {
-    const reuseCandidates = previousEntries
-      .filter((candidate) => sameContent(candidate.content, entry.content))
-      .map((candidate) => candidate.path)
-      .sort(compareUtf8)
-      .map((path) =>
-        Object.freeze({
-          ...plannedPath(root, path),
-          requiresAuthorizationAndIntegrityCheck: true as const,
-        }),
-      );
     return Object.freeze({
       ...plannedPath(root, entry.path),
       content: entry.content,
@@ -145,25 +149,28 @@ export function planWorkspaceMaterialization(input: {
             existingTargetCandidate: Object.freeze({
               ...plannedPath(root, entry.path),
               requiresAuthorizationAndIntegrityCheck: true as const,
+              content: entry.content,
             }),
           }
         : {}),
-      reuseCandidates: Object.freeze(reuseCandidates),
     });
   });
+  const verifyExisting = materializeFiles.flatMap((file) =>
+    file.existingTargetCandidate === undefined ? [] : [file.existingTargetCandidate],
+  );
 
-  // targetByPath 参与防御性完整性验证，避免后续重构误把重复路径静默覆盖。
-  if (targetByPath.size !== target.entries.length) {
-    throw new Error("已验证清单出现不可达的重复路径");
-  }
+  const phases: WorkspaceMaterializationPhases = Object.freeze([
+    Object.freeze({ kind: "verify_existing", candidates: Object.freeze(verifyExisting) }),
+    Object.freeze({ kind: "remove_files", paths: Object.freeze(removeFiles) }),
+    Object.freeze({ kind: "remove_directories", paths: Object.freeze(removeDirectories) }),
+    Object.freeze({ kind: "ensure_directories", paths: Object.freeze(ensureDirectories) }),
+    Object.freeze({ kind: "materialize_files", files: Object.freeze(materializeFiles) }),
+  ]);
   return Object.freeze({
     schemaVersion: 1,
     root,
     targetManifestDigest: target.digest,
     ...(previous === undefined ? {} : { previousManifestDigest: previous.digest }),
-    removeFiles: Object.freeze(removeFiles),
-    removeDirectories: Object.freeze(removeDirectories),
-    ensureDirectories: Object.freeze(ensureDirectories),
-    materializeFiles: Object.freeze(materializeFiles),
+    phases,
   });
 }

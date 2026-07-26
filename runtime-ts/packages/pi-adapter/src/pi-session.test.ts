@@ -1,11 +1,11 @@
-import { FakeSandboxHandle } from "@cube-runtime/sandbox";
+import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import {
+  type FauxProviderHandle,
+  type FauxResponseStep,
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
   InMemoryCredentialStore,
-  type FauxProviderHandle,
-  type FauxResponseStep,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";

@@ -6,7 +6,7 @@ import {
   usingSandbox,
 } from "./cube-gateway.js";
 import { SandboxRuntimeError, settledOperation } from "./errors.js";
-import { FakeSandboxGateway } from "./fake.js";
+import { FakeSandboxGateway } from "./testing/fake.js";
 
 describe("Sandbox 稳定适配契约", () => {
   it("无论业务是否失败都清理创建的 Sandbox", async () => {

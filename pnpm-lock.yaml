@@ -36,6 +36,9 @@ importers:
       '@cube-runtime/run-contracts':
         specifier: workspace:*
         version: link:runtime-ts/packages/run-contracts
+      '@cube-runtime/sandbox':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/sandbox
       '@sinclair/typebox':
         specifier: 0.34.52
         version: 0.34.52

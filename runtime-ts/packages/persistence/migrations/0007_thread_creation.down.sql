@@ -1,0 +1,1 @@
+DROP TABLE api_thread_idempotency_records;

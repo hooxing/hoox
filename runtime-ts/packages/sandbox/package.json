@@ -7,6 +7,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./src/testing/fake.ts",
+      "default": "./dist/testing/fake.js"
     }
   },
   "types": "./src/index.ts",

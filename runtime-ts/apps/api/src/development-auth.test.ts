@@ -26,4 +26,13 @@ describe("开发身份解析器", () => {
       createDevelopmentAuthResolver({ runtimeEnvironment: "production", principals }),
     ).toThrow("DEVELOPMENT_AUTH_FORBIDDEN_IN_PRODUCTION");
   });
+
+  it("拒绝把两个隔离测试身份配置为同一 principal", () => {
+    expect(() =>
+      createDevelopmentAuthResolver({
+        runtimeEnvironment: "test",
+        principals: [principals[0], principals[0]],
+      }),
+    ).toThrow("不能是同一 principal");
+  });
 });

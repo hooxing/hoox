@@ -4,6 +4,9 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   resolve: {
     alias: {
+      "@cube-runtime/sandbox/testing": fileURLToPath(
+        new URL("./runtime-ts/packages/sandbox/src/testing/fake.ts", import.meta.url),
+      ),
       "@cube-runtime/domain": fileURLToPath(
         new URL("./runtime-ts/packages/domain/src/index.ts", import.meta.url),
       ),

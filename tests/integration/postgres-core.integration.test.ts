@@ -12,27 +12,29 @@ import {
   createUser,
   createWorkspace,
   isoTimestamp,
+  type Membership,
   membershipId,
   prepareWorkspaceRevision,
+  type Run,
   releaseWorkspaceLease,
   renewWorkspaceLease,
   runId,
   sha256Digest,
+  type Tenant,
+  type Thread,
   tenantId,
   threadId,
   transitionRun,
+  type User,
   userId,
+  type Workspace,
   workspaceId,
   workspaceRevisionId,
-  type Run,
-  type Membership,
-  type Tenant,
-  type Thread,
-  type User,
-  type Workspace,
 } from "@cube-runtime/domain";
 import type { CoreRepositories, TenantScope, WorkspaceWriteScope } from "@cube-runtime/persistence";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
+import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
 import {
   loadMigrations,
   migrateDown,
@@ -44,12 +46,10 @@ import {
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
 import {
   createPostgresPool,
-  withTenantTransaction,
   type Pool,
+  withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
-import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
-import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -524,8 +524,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("并发迁移串行化且重复执行结果一致", async () => {
-    expect(concurrentMigrationVersions).toEqual([1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6]);
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(6);
+    expect(concurrentMigrationVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 1, 2, 3, 4, 5, 6, 7]);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(7);
   });
 
   it("checksum 同时绑定 down SQL，并拒绝孤立和重复版本", async () => {
@@ -586,7 +586,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         `SELECT to_regclass('threads')::text AS threads,
                 (SELECT count(*)::text FROM runtime_schema_migrations) AS migration_count`,
       );
-      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "6" });
+      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "7" });
     } finally {
       await administrativePool.query(
         `GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
@@ -634,15 +634,15 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       [migratorRole],
     );
     expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(6);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(7);
   });
 
-  it("partial down 6→2 后按旧 Schema 收敛 ACL，并可再次迁移到 6", async () => {
+  it("partial down 7→2 后按旧 Schema 收敛 ACL，并可再次迁移到 7", async () => {
     const target = await createIsolatedMigrationTarget("partial_down");
     try {
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4, 5, 6]);
+      ).toEqual([1, 2, 3, 4, 5, 6, 7]);
       expect(
         (
           await migrateDown(target.pool, {
@@ -673,7 +673,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4, 5, 6]);
+      ).toEqual([1, 2, 3, 4, 5, 6, 7]);
       const restored = await target.pool.query<{ present: boolean; allowed: boolean }>(
         `SELECT EXISTS (
            SELECT 1 FROM information_schema.columns
@@ -689,12 +689,59 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
-  it("partial down 6→3 只移除 Run Worker、Dispatch 与 Cleanup 事实，并可再次迁移到 6", async () => {
+  it("0007→0006→0007 定向收敛 Thread 幂等表的 FORCE RLS 与最小 ACL", async () => {
+    const target = await createIsolatedMigrationTarget("thread_creation_roundtrip");
+    try {
+      await migrateUp(target.pool, target.context);
+      const beforeDown = await target.pool.query<{
+        readonly force_rls: boolean;
+        readonly select_allowed: boolean;
+        readonly insert_allowed: boolean;
+        readonly update_allowed: boolean;
+      }>(
+        `SELECT relation.relforcerowsecurity AS force_rls,
+                has_table_privilege($1,'api_thread_idempotency_records','SELECT') AS select_allowed,
+                has_table_privilege($1,'api_thread_idempotency_records','INSERT') AS insert_allowed,
+                has_table_privilege($1,'api_thread_idempotency_records','UPDATE') AS update_allowed
+           FROM pg_class relation
+          WHERE relation.oid='api_thread_idempotency_records'::regclass`,
+        [runtimeRole],
+      );
+      expect(beforeDown.rows[0]).toEqual({
+        force_rls: true,
+        select_allowed: true,
+        insert_allowed: true,
+        update_allowed: false,
+      });
+      expect(
+        (
+          await migrateDown(target.pool, {
+            ...target.context,
+            allowDestructive: true,
+            environment: "test",
+            targetVersion: 6,
+          })
+        ).map((record) => record.version),
+      ).toEqual([1, 2, 3, 4, 5, 6]);
+      expect(
+        (
+          await target.pool.query<{ readonly present: boolean }>(
+            "SELECT to_regclass('api_thread_idempotency_records') IS NOT NULL AS present",
+          )
+        ).rows[0]?.present,
+      ).toBe(false);
+      expect((await migrateUp(target.pool, target.context)).at(-1)?.version).toBe(7);
+    } finally {
+      await target.close();
+    }
+  });
+
+  it("partial down 7→3 只移除 Thread 创建、Run Worker、Dispatch 与 Cleanup 事实，并可再次迁移到 7", async () => {
     const target = await createIsolatedMigrationTarget("run_worker_partial_down");
     try {
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4, 5, 6]);
+      ).toEqual([1, 2, 3, 4, 5, 6, 7]);
       expect(
         (
           await migrateDown(target.pool, {
@@ -720,7 +767,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       });
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4, 5, 6]);
+      ).toEqual([1, 2, 3, 4, 5, 6, 7]);
       const restored = await target.pool.query<{
         table_present: boolean;
         runtime_can_select: boolean;
@@ -1312,6 +1359,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ["effect_invocations", new Set(["SELECT", "INSERT"])],
       ["external_effect_permits", new Set(["SELECT", "INSERT"])],
       ["mutation_receipts", new Set(["SELECT", "INSERT"])],
+      ["api_idempotency_records", new Set(["SELECT", "INSERT"])],
+      ["api_thread_idempotency_records", new Set(["SELECT", "INSERT"])],
+      ["run_dispatch_outbox", new Set(["SELECT", "INSERT"])],
       ["runtime_schema_migrations", new Set()],
     ]);
     const allPrivileges = [

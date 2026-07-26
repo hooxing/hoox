@@ -1,4 +1,4 @@
-import { SandboxRuntimeError, settledOperation } from "./errors.js";
+import { SandboxRuntimeError, settledOperation } from "../errors.js";
 import type {
   CodeOutput,
   CommandOutput,
@@ -6,7 +6,7 @@ import type {
   SandboxCreateInput,
   SandboxGateway,
   SandboxHandle,
-} from "./types.js";
+} from "../types.js";
 import {
   validateAbsolutePath,
   validateEnvironment,
@@ -14,7 +14,7 @@ import {
   validateTemplateId,
   validateText,
   validateTtl,
-} from "./validation.js";
+} from "../validation.js";
 
 export class FakeSandboxGateway implements SandboxGateway {
   readonly sandboxes = new Map<string, FakeSandboxHandle>();

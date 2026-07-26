@@ -75,3 +75,67 @@ jobs:
       - name: 运行进程生命周期与入口测试
         # 先删除全部工作区构建产物，防止专项测试被前序或缓存中的 dist 偶然托底。
         run: pnpm test:process-runtime:clean
+
+  m4-development-blackbox:
+    name: M4 开发黑盒（Linux PostgreSQL）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16.10-alpine
+        env:
+          POSTGRES_DB: agent_runtime_ci
+          POSTGRES_USER: hooxing
+          POSTGRES_PASSWORD: ci-placeholder-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hooxing -d agent_runtime_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - name: 检出代码
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: 安装 pnpm
+        # pnpm/action-setup v4.1.0
+        uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d
+        with:
+          version: 10.15.1
+          run_install: false
+
+      - name: 安装 Node.js
+        # actions/setup-node v4.4.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+
+      - name: 冻结安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 准备 M4 受限数据库角色
+        env:
+          M4_ALLOW_EPHEMERAL_DATABASE_PREPARE: "true"
+          M4_DATABASE_ADMIN_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_RUNTIME_ROLE: m4_ci_runtime
+          DATABASE_MIGRATOR_ROLE: m4_ci_migrator
+          DATABASE_SCHEMA: m4_ci_runtime_schema
+          M4_DATABASE_RUNTIME_PASSWORD: ci-runtime-placeholder-password
+          M4_DATABASE_MIGRATOR_PASSWORD: ci-migrator-placeholder-password
+        # 超级用户凭据只在本步骤创建受限角色；迁移与黑盒测试均不再使用它。
+        run: pnpm --filter @cube-runtime/persistence prepare:ci:m4
+
+      - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
+        env:
+          RUN_PG_RUN_WORKER_INTEGRATION: "true"
+          M4_PREPROVISIONED_DATABASE: "true"
+          M4_DATABASE_ADMIN_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_BOOTSTRAP_URL: postgresql://m4_ci_migrator:ci-migrator-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_URL: postgresql://m4_ci_runtime:ci-runtime-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_RUNTIME_ROLE: m4_ci_runtime
+          DATABASE_MIGRATOR_ROLE: m4_ci_migrator
+          DATABASE_SCHEMA: m4_ci_runtime_schema
+        run: pnpm test:integration:m4

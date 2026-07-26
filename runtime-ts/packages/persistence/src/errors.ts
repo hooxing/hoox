@@ -15,6 +15,14 @@ export class PersistenceError extends Error {
   }
 }
 
+/**
+ * 需要被共享错误边界稳定收敛为 UNAVAILABLE 的内部异常基类。
+ *
+ * 该类型放在 errors 模块中，避免事务实现与错误映射相互导入；具体基础设施异常通过继承
+ * 表达映射语义，上层仍只会看到脱敏后的 PersistenceError。
+ */
+export abstract class PersistenceUnavailableCause extends Error {}
+
 interface PgLikeError {
   readonly code?: unknown;
 }
@@ -40,6 +48,9 @@ const unavailableSystemCodes = new Set([
 /** 将驱动细节收敛为稳定错误码，避免把 SQL、连接串或约束名暴露到上层。 */
 export function mapPersistenceError(error: unknown, operation: string): PersistenceError {
   if (error instanceof PersistenceError) return error;
+  if (error instanceof PersistenceUnavailableCause) {
+    return new PersistenceError("UNAVAILABLE", `${operation}暂时不可用`);
+  }
   const code = pgCode(error);
   if (code === "23505") {
     return new PersistenceError("CONFLICT", `${operation}发生并发冲突`);

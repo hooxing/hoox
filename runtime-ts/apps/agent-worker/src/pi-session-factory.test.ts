@@ -57,6 +57,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
           persistence,
           revisions: new FakeRevisionVerifier(),
           sandboxes,
+          orphanSandboxes: sandboxes,
           sessions,
           cancellation: new FakeCancellationPort(),
           artifacts: new FakeArtifactPublication(),

@@ -14,6 +14,21 @@ const tablePrivileges = [
 ] as const;
 const sequencePrivileges = ["USAGE", "SELECT", "UPDATE"] as const;
 const migrationTable = "runtime_schema_migrations";
+const runWorkerTables = new Set([
+  "run_execution_inputs",
+  "execution_attempts",
+  "execution_workspace_fences",
+  "run_claims",
+  "rollout_projections",
+  "run_events",
+  "sandbox_registry",
+  "cleanup_outbox",
+  "sandbox_lifecycle_unknown",
+  "runtime_alert_outbox",
+  "effect_invocations",
+  "external_effect_permits",
+  "mutation_receipts",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -33,6 +48,19 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["blob_gc_claims", new Set(["SELECT", "INSERT"])],
   ["retired_blob_tombstones", new Set(["SELECT", "INSERT"])],
   ["blob_references", new Set(["SELECT", "INSERT"])],
+  ["run_execution_inputs", new Set(["SELECT", "INSERT"])],
+  ["execution_attempts", new Set(["SELECT", "INSERT"])],
+  ["execution_workspace_fences", new Set(["SELECT", "INSERT"])],
+  ["run_claims", new Set(["SELECT", "INSERT"])],
+  ["rollout_projections", new Set(["SELECT", "INSERT"])],
+  ["run_events", new Set(["SELECT", "INSERT"])],
+  ["sandbox_registry", new Set(["SELECT", "INSERT"])],
+  ["cleanup_outbox", new Set(["SELECT", "INSERT"])],
+  ["sandbox_lifecycle_unknown", new Set(["SELECT", "INSERT"])],
+  ["runtime_alert_outbox", new Set(["SELECT", "INSERT"])],
+  ["effect_invocations", new Set(["SELECT", "INSERT"])],
+  ["external_effect_permits", new Set(["SELECT", "INSERT"])],
+  ["mutation_receipts", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -64,6 +92,26 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
     "blob_references",
     new Set(["state", "lifecycle_id", "incarnation_id", "physical_object_key", "updated_at"]),
   ],
+  ["run_execution_inputs", new Set(["answer_text", "updated_at"])],
+  [
+    "execution_attempts",
+    new Set([
+      "current_revision_id",
+      "status",
+      "stage",
+      "version",
+      "next_event_sequence",
+      "projection_version",
+      "model_execution_started",
+      "updated_at",
+      "finished_at",
+    ]),
+  ],
+  ["run_claims", new Set(["expires_at", "updated_at", "released_at"])],
+  ["rollout_projections", new Set(["attempt_id", "version", "projection", "digest", "updated_at"])],
+  ["sandbox_registry", new Set(["state", "actual_ttl_seconds", "updated_at"])],
+  ["cleanup_outbox", new Set(["state", "disposition", "payload", "payload_digest", "updated_at"])],
+  ["external_effect_permits", new Set(["consumed_at"])],
 ]);
 
 async function hasMembershipLockMarker(client: PoolClient): Promise<boolean> {
@@ -77,6 +125,23 @@ async function hasMembershipLockMarker(client: PoolClient): Promise<boolean> {
   return result.rows[0]?.present === true;
 }
 
+async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.run_execution_inputs', current_schema())) IS NOT NULL AS present",
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function activeTablePolicy(
+  client: PoolClient,
+): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
+  const policy = new Map(runtimeTablePolicy);
+  if (!(await hasRunWorkerState(client))) {
+    for (const table of runWorkerTables) policy.delete(table);
+  }
+  return policy;
+}
+
 async function activeColumnUpdatePolicy(
   client: PoolClient,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
@@ -86,6 +151,9 @@ async function activeColumnUpdatePolicy(
     "memberships",
     (await hasMembershipLockMarker(client)) ? new Set(["lock_marker"]) : new Set(),
   );
+  if (!(await hasRunWorkerState(client))) {
+    for (const table of runWorkerTables) policy.delete(table);
+  }
   return policy;
 }
 
@@ -431,6 +499,7 @@ async function assertActiveRuntimeWhitelist(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<void> {
+  const tablePolicy = await activeTablePolicy(client);
   const columnUpdatePolicy = await activeColumnUpdatePolicy(client);
   const relationResult = await client.query<{ table_name: string }>(
     `SELECT relname AS table_name
@@ -439,7 +508,7 @@ async function assertActiveRuntimeWhitelist(
       ORDER BY relname`,
   );
   const actualTables = relationResult.rows.map((row) => row.table_name);
-  const expectedTables = [...runtimeTablePolicy.keys()].sort();
+  const expectedTables = [...tablePolicy.keys()].sort();
   if (JSON.stringify(actualTables) !== JSON.stringify(expectedTables)) {
     throw new PersistenceError("CONSTRAINT_VIOLATION", "业务表集合与 Runtime 权限策略不一致");
   }
@@ -454,7 +523,7 @@ async function assertActiveRuntimeWhitelist(
     [context.runtimeRole, context.schema, expectedTables, tablePrivileges],
   );
   for (const row of privileges.rows) {
-    if (row.allowed !== runtimeTablePolicy.get(row.table_name)?.has(row.privilege)) {
+    if (row.allowed !== tablePolicy.get(row.table_name)?.has(row.privilege)) {
       throw new PersistenceError("CONSTRAINT_VIOLATION", "Runtime 表权限偏离白名单");
     }
   }
@@ -593,6 +662,25 @@ export async function bootstrapRuntimeAccessOnClient(
      TO ${role}`,
   );
   await client.query(`GRANT SELECT, INSERT ON TABLE ${schema}.blob_allocations TO ${role}`);
+  if (await hasRunWorkerState(client)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+       ${schema}.run_execution_inputs,
+       ${schema}.execution_attempts,
+       ${schema}.execution_workspace_fences,
+       ${schema}.run_claims,
+       ${schema}.rollout_projections,
+       ${schema}.run_events,
+       ${schema}.sandbox_registry,
+       ${schema}.cleanup_outbox,
+       ${schema}.sandbox_lifecycle_unknown,
+       ${schema}.runtime_alert_outbox,
+       ${schema}.effect_invocations,
+       ${schema}.external_effect_permits,
+       ${schema}.mutation_receipts
+       TO ${role}`,
+    );
+  }
   await client.query(
     `GRANT UPDATE(state, current_incarnation_id, generation, current_claim_id, lease_expires_at, updated_at)
        ON TABLE ${schema}.blob_lifecycles TO ${role};
@@ -611,6 +699,26 @@ export async function bootstrapRuntimeAccessOnClient(
      GRANT UPDATE(state, lifecycle_id, incarnation_id, physical_object_key, updated_at)
        ON TABLE ${schema}.blob_references TO ${role}`,
   );
+  if (await hasRunWorkerState(client)) {
+    await client.query(
+      `GRANT UPDATE(answer_text, updated_at)
+       ON TABLE ${schema}.run_execution_inputs TO ${role};
+     GRANT UPDATE(
+       current_revision_id, status, stage, version, next_event_sequence, projection_version,
+       model_execution_started, updated_at, finished_at
+     ) ON TABLE ${schema}.execution_attempts TO ${role};
+     GRANT UPDATE(expires_at, updated_at, released_at)
+       ON TABLE ${schema}.run_claims TO ${role};
+     GRANT UPDATE(attempt_id, version, projection, digest, updated_at)
+       ON TABLE ${schema}.rollout_projections TO ${role};
+     GRANT UPDATE(state, actual_ttl_seconds, updated_at)
+       ON TABLE ${schema}.sandbox_registry TO ${role};
+     GRANT UPDATE(state, disposition, payload, payload_digest, updated_at)
+       ON TABLE ${schema}.cleanup_outbox TO ${role};
+       GRANT UPDATE(consumed_at)
+         ON TABLE ${schema}.external_effect_permits TO ${role}`,
+    );
+  }
   await assertActiveRuntimeWhitelist(client, context);
 }
 

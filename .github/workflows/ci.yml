@@ -35,3 +35,36 @@ jobs:
       - name: 从无 vendor dist 状态执行完整检查
         # 回归脚本先删除生成物；typecheck 必须自行构建固定版本 SDK，不能依赖前次任务残留。
         run: pnpm check:clean-vendor
+
+      - name: Linux 最小容器启动门禁
+        run: pnpm test:process:container
+
+  process-portability:
+    name: 进程骨架（${{ matrix.os }}）
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.1
+          run_install: false
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.18.0
+          cache: pnpm
+
+      - name: 冻结安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 运行进程生命周期与入口测试
+        run: pnpm test:process-runtime

@@ -6,6 +6,7 @@
   "dependencies": {
     "@cube-runtime/domain": "workspace:*",
     "@cube-runtime/persistence": "workspace:*",
+    "@cube-runtime/process-runtime": "workspace:*",
     "@cube-runtime/protocol": "workspace:*",
     "@cube-runtime/protocol-mapper": "workspace:*",
     "fastify": "5.10.0"

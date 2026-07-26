@@ -41,6 +41,7 @@ corepack pnpm config:check
 | `protocol` | API、事件和进程间消息契约 |
 | `protocol-mapper` | Domain 与 Protocol 的显式映射及公共错误归一化 |
 | `persistence` | PostgreSQL 仓储、事务与迁移适配 |
+| `process-runtime` | 严格进程配置、信号、排空、关闭和健康状态语义 |
 | `prompt-builder` | 可审计、可复现的系统提示词组装 |
 | `context-policy` | 上下文选择、截断和压缩策略 |
 | `tool-router` | 工具鉴权、路由、审计和错误归一化 |
@@ -50,7 +51,7 @@ corepack pnpm config:check
 | `artifact` | Agent 明确发布的最终交付物 |
 | `testing` | Fake、夹具和跨包测试工具，仅供测试使用 |
 
-共享包目前只声明编译和发布边界，不包含业务实现。`pi-adapter` 由独立任务建立，但已被 Workspace 通配规则覆盖。应用将来依赖共享包时，必须通过 pnpm Workspace 依赖显式声明，不能使用跨目录相对导入。
+应用依赖共享包时，必须通过 pnpm Workspace 依赖显式声明，不能使用跨目录相对导入。共享进程包不拥有业务依赖，也不提供测试 Fake 作为生产默认值。
 
 ## 配置安全
 
@@ -58,6 +59,23 @@ corepack pnpm config:check
 - 新增或删除环境变量时，必须同步修改 `.env.example` 和 `scripts/env-contract.mjs`。
 - 示例中的数据库密码、访问密钥、模板 ID、模型地址和模型 ID 必须保持为明显占位值。
 - CI 只使用 `.env.example` 执行静态 Compose 展开，不连接 PostgreSQL、MinIO、CubeSandbox 或模型服务。
+
+服务进程先用各应用的 `select*ProcessEnvironment` 从 `process.env` 投影声明键，再严格解析。禁止把完整宿主环境直接交给解析器，也禁止为缺失的 `RUNTIME_ENV` 回退到 development。API 的 `DEV_AUTH_ENABLED=true` 只允许 development/test；生产环境必须使用真实身份装配器。配置错误只记录变量名与稳定分类，不能记录值。
+
+## 进程启动与关闭
+
+`runtime-ts/apps/api`、`agent-worker` 和 `scheduler` 只提供类型化配置与薄启动入口。没有真实 `ServiceAssemblyFactory` 时固定拒绝启动；当前骨架不代表 PG Worker Repository、Run dispatch、清理消费者、生产身份或真实模型已经完成。
+
+装配器按业务接收顺序实现 `stopAccepting`，将数据库连接池、HTTP listener、消费者和遥测等资源按确定顺序登记。关闭时先停止接收，再等待 `lifecycle.track()` 登记的在途操作，最后串行关闭资源。资源错误只上报稳定名称；库不调用 `process.exit`。部署平台的强制终止宽限期必须大于 `PROCESS_SHUTDOWN_TIMEOUT_MS`。
+
+进程骨架专项校验：
+
+```powershell
+corepack pnpm test:process-runtime
+corepack pnpm test:process:container
+```
+
+第一条在 Windows/Linux 运行相同单元与入口测试；第二条需要 Docker，构建 Linux 非 root 最小镜像并验证配置、就绪和关闭顺序。
 
 ## PostgreSQL 角色 bootstrap
 

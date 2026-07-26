@@ -1,5 +1,6 @@
 import type {
   Membership,
+  IsoTimestamp,
   Run,
   Tenant,
   TenantId,
@@ -50,6 +51,49 @@ export type VersionedUpdateResult =
   | { readonly outcome: "updated"; readonly version: bigint }
   | { readonly outcome: "conflict" }
   | { readonly outcome: "not_found" };
+
+export interface IdempotentCommand {
+  readonly key: string;
+  readonly requestHash: string;
+}
+
+export type IdempotentCreateResult<T> =
+  | { readonly outcome: "created" | "replayed"; readonly entity: T }
+  | { readonly outcome: "key_conflict" }
+  | { readonly outcome: "parent_inactive" }
+  | { readonly outcome: "not_authorized" };
+
+/** Thread、空 Workspace、幂等记录和有效 Membership 重验必须共用事务。 */
+export interface ThreadCreationPort {
+  createThread(input: {
+    readonly scope: TenantScope;
+    readonly thread: Thread;
+    readonly workspace: Workspace;
+    readonly idempotency: IdempotentCommand;
+  }): Promise<IdempotentCreateResult<Thread>>;
+}
+
+/** queued Run、enqueue outbox、幂等记录和有效 Membership 重验必须共用事务。 */
+export interface EnqueueOutboxPort {
+  createQueuedRun(input: {
+    readonly scope: TenantScope;
+    readonly run: Run;
+    readonly idempotency: IdempotentCommand;
+  }): Promise<IdempotentCreateResult<Run>>;
+}
+
+export type ArchiveThreadResult =
+  | { readonly outcome: "archived" | "already_archived"; readonly entity: Thread }
+  | { readonly outcome: "not_authorized" | "not_found" };
+
+/** 归档必须在同一事务中锁定 Membership→Thread，再重验角色与 active 状态。 */
+export interface ArchiveThreadCommandPort {
+  archiveThread(input: {
+    readonly scope: TenantScope;
+    readonly threadId: ThreadId;
+    readonly now: IsoTimestamp;
+  }): Promise<ArchiveThreadResult>;
+}
 
 export interface TenantRepository {
   createPersonal(bundle: TenantBundle): Promise<CreateResult>;

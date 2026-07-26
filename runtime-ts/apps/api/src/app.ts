@@ -19,23 +19,25 @@ import {
   type ThreadPath,
 } from "@cube-runtime/protocol";
 import { PersistenceError } from "@cube-runtime/persistence";
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest, LogController } from "fastify";
 import type {
   ApiClock,
   ApiIdGenerator,
+  ArchiveThreadCommandPort,
   AuthContextResolver,
-  EnqueueOutboxPort,
   ReadinessPort,
-  ThreadCreationPort,
+  ThreadCursorCodec,
 } from "./ports.js";
+import { isApiCreateCapability, type ApiCreateCapability } from "./capabilities.js";
 import { ApiFailure, type ApiFailureKind, ApiService } from "./service.js";
 import type { CoreRepositories } from "@cube-runtime/persistence";
 
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
   readonly repositories: CoreRepositories;
-  readonly threadCreation: ThreadCreationPort;
-  readonly enqueueOutbox: EnqueueOutboxPort;
+  readonly createCapability?: ApiCreateCapability;
+  readonly archiveThread: ArchiveThreadCommandPort;
+  readonly cursorCodec: ThreadCursorCodec;
   readonly readiness: ReadinessPort;
   readonly clock: ApiClock;
   readonly ids: ApiIdGenerator;
@@ -55,6 +57,7 @@ const statusByFailure: Readonly<Record<ApiFailureKind, number>> = {
   not_found: 404,
   conflict: 409,
   invalid_state: 422,
+  unsupported_media_type: 415,
   dependency_unavailable: 503,
   internal: 500,
 };
@@ -74,6 +77,16 @@ function requireIdempotencyKey(request: FastifyRequest): string {
     throw new ApiFailure("bad_request");
   }
   return value;
+}
+
+function requireJsonContentType(request: FastifyRequest): void {
+  const value = request.headers["content-type"];
+  if (
+    typeof value !== "string" ||
+    value.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+  ) {
+    throw new ApiFailure("unsupported_media_type");
+  }
 }
 
 function success<T>(request: FastifyRequest, data: T) {
@@ -101,12 +114,20 @@ export function createApiApp(
   dependencies: ApiDependencies,
   options: ApiAppOptions = {},
 ): FastifyInstance {
+  if (
+    dependencies.createCapability !== undefined &&
+    !isApiCreateCapability(dependencies.createCapability)
+  ) {
+    throw new TypeError("API 创建能力必须由 createApiCreateCapability 签发");
+  }
   const app = Fastify({
     bodyLimit: options.bodyLimitBytes ?? 64 * 1024,
     requestTimeout: options.requestTimeoutMs ?? 15_000,
     handlerTimeout: options.requestTimeoutMs ?? 15_000,
     connectionTimeout: 5_000,
-    disableRequestLogging: true,
+    onProtoPoisoning: "error",
+    onConstructorPoisoning: "error",
+    logController: new LogController({ disableRequestLogging: true }),
     genReqId: () => randomUUID(),
     ajv: {
       customOptions: { removeAdditional: false },
@@ -152,8 +173,17 @@ export function createApiApp(
       typeof error === "object" && error !== null
         ? (error as { readonly validation?: unknown; readonly code?: unknown })
         : {};
-    if (errorShape.validation !== undefined || errorShape.code === "FST_ERR_CTP_BODY_TOO_LARGE") {
+    if (
+      errorShape.validation !== undefined ||
+      new Set([
+        "FST_ERR_CTP_BODY_TOO_LARGE",
+        "FST_ERR_CTP_INVALID_JSON_BODY",
+        "FST_ERR_CTP_EMPTY_JSON_BODY",
+      ]).has(String(errorShape.code))
+    ) {
       kind = "bad_request";
+    } else if (errorShape.code === "FST_ERR_CTP_INVALID_MEDIA_TYPE") {
+      kind = "unsupported_media_type";
     } else if (errorShape.code === "FST_ERR_HANDLER_TIMEOUT") {
       kind = "dependency_unavailable";
     } else if (error instanceof ApiFailure) {
@@ -189,30 +219,61 @@ export function createApiApp(
     return success(request, { status: "ok" as const, checkedAt: dependencies.clock.now() });
   });
 
-  app.post<{ Body: CreateThreadRequest }>(
-    "/v1/threads",
-    {
-      schema: {
-        body: CreateThreadRequestSchema,
-        response: {
-          200: ThreadSuccessEnvelopeSchema,
-          400: ErrorEnvelopeSchema,
-          401: ErrorEnvelopeSchema,
-          404: ErrorEnvelopeSchema,
-          409: ErrorEnvelopeSchema,
-          500: ErrorEnvelopeSchema,
-          503: ErrorEnvelopeSchema,
+  if (dependencies.createCapability !== undefined) {
+    app.post<{ Body: CreateThreadRequest }>(
+      "/v1/threads",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: {
+          body: CreateThreadRequestSchema,
+          response: {
+            200: ThreadSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
         },
       },
-    },
-    async (request) => {
-      const auth = await service.authenticate(authorization(request), requestId(request));
-      return success(
-        request,
-        await service.createThread(auth, request.body.title, requireIdempotencyKey(request)),
-      );
-    },
-  );
+      async (request) => {
+        const auth = await service.authenticate(authorization(request), requestId(request));
+        return success(
+          request,
+          await service.createThread(auth, request.body.title, requireIdempotencyKey(request)),
+        );
+      },
+    );
+
+    app.post<{ Params: ThreadPath; Body: CreateRunRequest }>(
+      "/v1/threads/:threadId/runs",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: {
+          params: ThreadPathSchema,
+          body: CreateRunRequestSchema,
+          response: {
+            200: RunSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            422: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await service.authenticate(authorization(request), requestId(request));
+        return success(
+          request,
+          await service.createRun(auth, request.params.threadId, requireIdempotencyKey(request)),
+        );
+      },
+    );
+  }
 
   app.get<{ Querystring: ThreadListQuery }>(
     "/v1/threads",
@@ -275,33 +336,6 @@ export function createApiApp(
     async (request) => {
       const auth = await service.authenticate(authorization(request), requestId(request));
       return success(request, await service.archiveThread(auth, request.params.threadId));
-    },
-  );
-
-  app.post<{ Params: ThreadPath; Body: CreateRunRequest }>(
-    "/v1/threads/:threadId/runs",
-    {
-      schema: {
-        params: ThreadPathSchema,
-        body: CreateRunRequestSchema,
-        response: {
-          200: RunSuccessEnvelopeSchema,
-          400: ErrorEnvelopeSchema,
-          401: ErrorEnvelopeSchema,
-          404: ErrorEnvelopeSchema,
-          409: ErrorEnvelopeSchema,
-          422: ErrorEnvelopeSchema,
-          500: ErrorEnvelopeSchema,
-          503: ErrorEnvelopeSchema,
-        },
-      },
-    },
-    async (request) => {
-      const auth = await service.authenticate(authorization(request), requestId(request));
-      return success(
-        request,
-        await service.createRun(auth, request.params.threadId, requireIdempotencyKey(request)),
-      );
     },
   );
 

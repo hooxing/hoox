@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import {
-  archiveThread,
   createRun,
   createThread,
   createWorkspace,
@@ -8,7 +7,6 @@ import {
   runId,
   threadId,
   transitionRun,
-  type MembershipRole,
 } from "@cube-runtime/domain";
 import type {
   CoreRepositories,
@@ -21,11 +19,13 @@ import type { RunDto, ThreadDto, ThreadPageDto } from "@cube-runtime/protocol";
 import type {
   ApiClock,
   ApiIdGenerator,
+  ArchiveThreadCommandPort,
   AuthContextResolver,
   AuthPrincipal,
-  EnqueueOutboxPort,
-  ThreadCreationPort,
+  ThreadCursorCodec,
 } from "./ports.js";
+import type { ApiCreateCapability } from "./capabilities.js";
+import { InvalidThreadCursorError } from "./cursor.js";
 
 export type ApiFailureKind =
   | "bad_request"
@@ -33,6 +33,7 @@ export type ApiFailureKind =
   | "not_found"
   | "conflict"
   | "invalid_state"
+  | "unsupported_media_type"
   | "dependency_unavailable"
   | "internal";
 
@@ -52,8 +53,9 @@ interface AuthContext {
 interface ServiceDependencies {
   readonly auth: AuthContextResolver;
   readonly repositories: CoreRepositories;
-  readonly threadCreation: ThreadCreationPort;
-  readonly enqueueOutbox: EnqueueOutboxPort;
+  readonly createCapability?: ApiCreateCapability;
+  readonly archiveThread: ArchiveThreadCommandPort;
+  readonly cursorCodec: ThreadCursorCodec;
   readonly clock: ApiClock;
   readonly ids: ApiIdGenerator;
 }
@@ -62,10 +64,6 @@ function commandHash(operation: string, value: unknown): string {
   return createHash("sha256")
     .update(JSON.stringify([operation, value]))
     .digest("hex");
-}
-
-function roleCanArchive(role: MembershipRole): boolean {
-  return role === "owner" || role === "admin";
 }
 
 function mapDomainFailure(error: unknown): never {
@@ -83,36 +81,6 @@ function mapDomainFailure(error: unknown): never {
   }
 }
 
-function decodeCursor(value: string | undefined): ThreadListCursor | undefined {
-  if (value === undefined) return undefined;
-  try {
-    const decoded: unknown = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-    if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
-      throw new Error("cursor shape");
-    }
-    const record = decoded as Record<string, unknown>;
-    if (
-      Object.keys(record).length !== 2 ||
-      typeof record.updatedAt !== "string" ||
-      typeof record.id !== "string"
-    ) {
-      throw new Error("cursor fields");
-    }
-    return {
-      updatedAt: new Date(record.updatedAt).toISOString() as ThreadListCursor["updatedAt"],
-      id: threadId(record.id),
-    };
-  } catch {
-    throw new ApiFailure("bad_request");
-  }
-}
-
-function encodeCursor(cursor: ThreadListCursor | undefined): string | undefined {
-  return cursor === undefined
-    ? undefined
-    : Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
-}
-
 export class ApiService {
   constructor(private readonly dependencies: ServiceDependencies) {}
 
@@ -128,6 +96,8 @@ export class ApiService {
 
   async createThread(auth: AuthContext, title: string, idempotencyKey: string): Promise<ThreadDto> {
     try {
+      const capability = this.dependencies.createCapability;
+      if (capability === undefined) throw new ApiFailure("not_found");
       const now = this.dependencies.clock.now();
       const thread = createThread({
         id: this.dependencies.ids.thread(),
@@ -142,7 +112,7 @@ export class ApiService {
         thread,
         now,
       });
-      const result = await this.dependencies.threadCreation.createThread({
+      const result = await capability.threadCreation.createThread({
         scope: auth.scope,
         thread,
         workspace,
@@ -152,7 +122,9 @@ export class ApiService {
         },
       });
       if (result.outcome === "key_conflict") throw new ApiFailure("conflict");
-      if (result.outcome === "parent_inactive") throw new ApiFailure("not_found");
+      if (result.outcome === "parent_inactive" || result.outcome === "not_authorized") {
+        throw new ApiFailure("not_found");
+      }
       return toThreadDto(result.entity);
     } catch (error) {
       return mapDomainFailure(error);
@@ -172,12 +144,24 @@ export class ApiService {
     auth: AuthContext,
     input: { readonly cursor?: string; readonly limit?: number },
   ): Promise<ThreadPageDto> {
-    const cursor = decodeCursor(input.cursor);
+    let cursor: ThreadListCursor | undefined;
+    try {
+      cursor =
+        input.cursor === undefined
+          ? undefined
+          : this.dependencies.cursorCodec.decode(auth.scope, input.cursor);
+    } catch (error) {
+      if (error instanceof InvalidThreadCursorError) throw new ApiFailure("bad_request");
+      throw error;
+    }
     const page = await this.dependencies.repositories.threads.list(auth.scope, {
       limit: input.limit ?? 20,
       ...(cursor === undefined ? {} : { cursor }),
     });
-    const nextCursor = encodeCursor(page.nextCursor);
+    const nextCursor =
+      page.nextCursor === undefined
+        ? undefined
+        : this.dependencies.cursorCodec.encode(auth.scope, page.nextCursor);
     return {
       items: page.items.map(({ entity }) => toThreadDto(entity)),
       ...(nextCursor === undefined ? {} : { nextCursor }),
@@ -185,25 +169,19 @@ export class ApiService {
   }
 
   async archiveThread(auth: AuthContext, rawThreadId: string): Promise<ThreadDto> {
-    if (!roleCanArchive(auth.tenant.membership.role)) throw new ApiFailure("not_found");
-    const id = threadId(rawThreadId);
-    const current = await this.dependencies.repositories.threads.get(auth.scope, id);
-    if (current === undefined) throw new ApiFailure("not_found");
-    if (current.entity.status === "archived") return toThreadDto(current.entity);
     try {
-      const archived = archiveThread(current.entity, this.dependencies.clock.now());
-      const result = await this.dependencies.repositories.threads.update(
-        auth.scope,
-        archived,
-        current.version,
-      );
-      if (result.outcome === "not_found") throw new ApiFailure("not_found");
-      if (result.outcome === "conflict") {
-        const latest = await this.dependencies.repositories.threads.get(auth.scope, id);
-        if (latest?.entity.status === "archived") return toThreadDto(latest.entity);
-        throw new ApiFailure("conflict");
+      const result = await this.dependencies.archiveThread.archiveThread({
+        scope: auth.scope,
+        threadId: threadId(rawThreadId),
+        now: this.dependencies.clock.now(),
+      });
+      if (result.outcome === "not_authorized" || result.outcome === "not_found") {
+        throw new ApiFailure("not_found");
       }
-      return toThreadDto(archived);
+      if (result.outcome !== "archived" && result.outcome !== "already_archived") {
+        throw new ApiFailure("internal");
+      }
+      return toThreadDto(result.entity);
     } catch (error) {
       return mapDomainFailure(error);
     }
@@ -211,6 +189,8 @@ export class ApiService {
 
   async createRun(auth: AuthContext, rawThreadId: string, idempotencyKey: string): Promise<RunDto> {
     try {
+      const capability = this.dependencies.createCapability;
+      if (capability === undefined) throw new ApiFailure("not_found");
       const thread = await this.dependencies.repositories.threads.get(
         auth.scope,
         threadId(rawThreadId),
@@ -221,7 +201,7 @@ export class ApiService {
         thread: thread.entity,
         now: this.dependencies.clock.now(),
       });
-      const result = await this.dependencies.enqueueOutbox.createQueuedRun({
+      const result = await capability.enqueueOutbox.createQueuedRun({
         scope: auth.scope,
         run,
         idempotency: {
@@ -231,6 +211,7 @@ export class ApiService {
       });
       if (result.outcome === "key_conflict") throw new ApiFailure("conflict");
       if (result.outcome === "parent_inactive") throw new ApiFailure("invalid_state");
+      if (result.outcome === "not_authorized") throw new ApiFailure("not_found");
       return toRunDto(result.entity);
     } catch (error) {
       return mapDomainFailure(error);

@@ -232,7 +232,10 @@ class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThre
       if (current.entity.status === "archived") {
         return { outcome: "already_archived", entity: current.entity };
       }
-      const entity = archiveThread(current.entity, input.now);
+      const entity = archiveThread(
+        current.entity,
+        isoTimestamp(new Date(Date.parse(current.entity.updatedAt) + 1_000).toISOString()),
+      );
       this.threads.set(storedKey, { entity, version: current.version + 1n });
       return { outcome: "archived", entity };
     });
@@ -319,6 +322,7 @@ function fixture(options: { readonly enableCreate?: boolean } = {}) {
   let threadSequence = 0;
   let runSequence = 0;
   let workspaceSequence = 0;
+  const clock = new FakeClock();
   const dependencies: ApiDependencies = {
     auth: {
       resolve: async ({ authorization }) =>
@@ -337,9 +341,12 @@ function fixture(options: { readonly enableCreate?: boolean } = {}) {
     cursorCodec: createThreadCursorCodec({
       activeKid: "test-key",
       keys: [{ kid: "test-key", secret: Buffer.alloc(32, 7).toString("base64url") }],
+      clock,
+      ttlMilliseconds: 60_000,
+      maximumTtlMilliseconds: 60_000,
     }),
     readiness: { probe: async () => undefined },
-    clock: new FakeClock(),
+    clock,
     ids: {
       thread: () => threadId(`thread_${++threadSequence}`),
       run: () => runId(`run_${++runSequence}`),
@@ -654,6 +661,41 @@ describe("Fastify API 契约", () => {
     ).toThrow("必须由 createApiCreateCapability 签发");
   });
 
+  it("App 创建后替换依赖或能力端口，不会改变已注册路由使用的能力快照", async () => {
+    const { dependencies, state } = fixture();
+    const replacement = new FakeApiState();
+    const mutableDependencies = { ...dependencies };
+    let capabilityReads = 0;
+    let issued = mutableDependencies.createCapability;
+    Object.defineProperty(mutableDependencies, "createCapability", {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        capabilityReads += 1;
+        return issued;
+      },
+      set: (value) => {
+        issued = value;
+      },
+    });
+    const app = createApiApp(mutableDependencies, { logger: false });
+    openApps.push(app);
+    mutableDependencies.createCapability = createApiCreateCapability({
+      threadCreation: replacement,
+      enqueueOutbox: replacement,
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "snapshot-key" },
+      payload: { title: "能力快照" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(capabilityReads).toBe(1);
+    expect(state.threads.size).toBe(1);
+    expect(replacement.threads.size).toBe(0);
+  });
+
   it("命令端在事务边界重验成员资格，认证后的撤权不能产生 Thread 或 Run", async () => {
     const threadFixture = fixture();
     openApps.push(threadFixture.app);
@@ -875,11 +917,15 @@ describe("Thread 游标签名密钥轮换", () => {
   const newSecret = Buffer.alloc(32, 2).toString("base64url");
   const scope = { tenantId: tenantId("tenant_cursor"), userId: userId("user_cursor") };
   const cursor = { updatedAt: baseTime, id: threadId("thread_cursor") };
+  let now = baseTime;
+  const clock = { now: () => now };
+  const timing = { clock, ttlMilliseconds: 10_000, maximumTtlMilliseconds: 10_000 };
 
   it("轮换期读取旧 kid、新写入使用 active kid，移除旧 key 后拒绝旧游标", () => {
     const oldCodec = createThreadCursorCodec({
       activeKid: "key-old",
       keys: [{ kid: "key-old", secret: oldSecret }],
+      ...timing,
     });
     const oldToken = oldCodec.encode(scope, cursor);
     const rotated = createThreadCursorCodec({
@@ -888,18 +934,61 @@ describe("Thread 游标签名密钥轮换", () => {
         { kid: "key-old", secret: oldSecret },
         { kid: "key-new", secret: newSecret },
       ],
+      ...timing,
     });
+    now = isoTimestamp("2099-07-26T08:00:05.000Z");
     expect(rotated.decode(scope, oldToken)).toEqual(cursor);
     const newToken = rotated.encode(scope, cursor);
     const encodedPayload = newToken.split(".")[0];
     if (encodedPayload === undefined) throw new Error("测试游标缺少载荷");
     const payload = JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8"));
-    expect(payload).toMatchObject({ v: 1, kid: "key-new", ...scope, ...cursor });
+    expect(payload).toMatchObject({
+      v: 1,
+      kid: "key-new",
+      ...scope,
+      issuedAt: now,
+      expiresAt: "2099-07-26T08:00:15.000Z",
+      ...cursor,
+    });
+    now = isoTimestamp("2099-07-26T08:00:10.000Z");
+    expect(() => rotated.decode(scope, oldToken)).toThrow("任务分页游标无效");
     const retired = createThreadCursorCodec({
       activeKid: "key-new",
       keys: [{ kid: "key-new", secret: newSecret }],
+      ...timing,
     });
     expect(() => retired.decode(scope, oldToken)).toThrow("任务分页游标无效");
+  });
+
+  it("拒绝未来签发时间和超过本地最大寿命的有效签名游标", () => {
+    now = baseTime;
+    const futureClock = { now: () => isoTimestamp("2099-07-26T08:00:01.000Z") };
+    const futureSigner = createThreadCursorCodec({
+      activeKid: "key-old",
+      keys: [{ kid: "key-old", secret: oldSecret }],
+      clock: futureClock,
+      ttlMilliseconds: 10_000,
+      maximumTtlMilliseconds: 20_000,
+    });
+    const verifier = createThreadCursorCodec({
+      activeKid: "key-old",
+      keys: [{ kid: "key-old", secret: oldSecret }],
+      ...timing,
+    });
+    expect(() => verifier.decode(scope, futureSigner.encode(scope, cursor))).toThrow(
+      "任务分页游标无效",
+    );
+
+    const longLivedSigner = createThreadCursorCodec({
+      activeKid: "key-old",
+      keys: [{ kid: "key-old", secret: oldSecret }],
+      clock,
+      ttlMilliseconds: 20_000,
+      maximumTtlMilliseconds: 20_000,
+    });
+    expect(() => verifier.decode(scope, longLivedSigner.encode(scope, cursor))).toThrow(
+      "任务分页游标无效",
+    );
   });
 
   it("拒绝弱密钥、重复 kid 和不存在的 active kid", () => {
@@ -907,6 +996,7 @@ describe("Thread 游标签名密钥轮换", () => {
       createThreadCursorCodec({
         activeKid: "key-old",
         keys: [{ kid: "key-old", secret: Buffer.alloc(16).toString("base64url") }],
+        ...timing,
       }),
     ).toThrow("32 到 64 字节");
     expect(() =>
@@ -916,12 +1006,14 @@ describe("Thread 游标签名密钥轮换", () => {
           { kid: "key-old", secret: oldSecret },
           { kid: "key-old", secret: newSecret },
         ],
+        ...timing,
       }),
     ).toThrow("无效或重复");
     expect(() =>
       createThreadCursorCodec({
         activeKid: "key-new",
         keys: [{ kid: "key-old", secret: oldSecret }],
+        ...timing,
       }),
     ).toThrow("当前签名密钥不存在");
   });

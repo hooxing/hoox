@@ -291,6 +291,9 @@ describe("PostgreSQL 迁移与强权限边界", () => {
               secret: Buffer.alloc(32, 11).toString("base64url"),
             },
           ],
+          clock: { now: () => timestamp(20) },
+          ttlMilliseconds: 60_000,
+          maximumTtlMilliseconds: 60_000,
         }),
         readiness: { probe: () => runtimePool.query("SELECT 1").then(() => undefined) },
         clock: { now: () => timestamp(20) },
@@ -364,7 +367,6 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       const pending = command.archiveThread({
         scope: fixture.scope,
         threadId: fixture.thread.id,
-        now: timestamp(20),
       });
       // 先持有 Membership 锁，再提交降权，确保命令必须读取锁后的授权事实。
       await blocker.query(
@@ -390,9 +392,81 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("Runtime 不能修改 Membership 的 status、role 或其他授权字段", async () => {
+    const fixture = await createFixture("membership_acl");
+    for (const statement of [
+      "UPDATE memberships SET status = 'revoked' WHERE tenant_id = $1 AND user_id = $2",
+      "UPDATE memberships SET role = 'member' WHERE tenant_id = $1 AND user_id = $2",
+      "UPDATE memberships SET id = id || '_changed' WHERE tenant_id = $1 AND user_id = $2",
+      "UPDATE memberships SET user_id = user_id || '_changed' WHERE tenant_id = $1 AND user_id = $2",
+      "UPDATE memberships SET tenant_id = tenant_id || '_changed' WHERE tenant_id = $1 AND user_id = $2",
+      "UPDATE memberships SET created_at = clock_timestamp() WHERE tenant_id = $1 AND user_id = $2",
+    ]) {
+      await expect(
+        withTenantTransaction(runtimePool, fixture.scope, (client) =>
+          client.query(statement, [fixture.scope.tenantId, fixture.scope.userId]),
+        ),
+      ).rejects.toMatchObject({ code: "42501" });
+    }
+  });
+
+  it("归档等待 Thread 锁后使用数据库时间，并保持 updated_at 单调", async () => {
+    const fixture = await createFixture("archive_database_time");
+    const command = new PgArchiveThreadCommand(runtimePool);
+    const blocker = await administrativePool.connect();
+    let pendingSettled = false;
+    try {
+      await blocker.query(
+        `UPDATE "${schema}".threads
+            SET updated_at = clock_timestamp() - interval '1 day'
+          WHERE tenant_id = $1 AND id = $2`,
+        [fixture.scope.tenantId, fixture.thread.id],
+      );
+      await blocker.query("BEGIN");
+      await blocker.query(
+        `SELECT status FROM "${schema}".threads
+          WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+        [fixture.scope.tenantId, fixture.thread.id],
+      );
+      const pending = command
+        .archiveThread({ scope: fixture.scope, threadId: fixture.thread.id })
+        .finally(() => {
+          pendingSettled = true;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(pendingSettled).toBe(false);
+      const lowerBound = await blocker.query<{ current_time: Date }>(
+        "SELECT clock_timestamp() AS current_time",
+      );
+      await blocker.query("COMMIT");
+      const result = await pending;
+      expect(result.outcome).toBe("archived");
+      const stored = await withTenantTransaction(runtimePool, fixture.scope, (client) =>
+        client.query<{ status: string; updated_at: Date }>(
+          "SELECT status, updated_at FROM threads WHERE tenant_id = $1 AND id = $2",
+          [fixture.scope.tenantId, fixture.thread.id],
+        ),
+      );
+      const updatedAt = stored.rows[0]?.updated_at;
+      const releasedAt = lowerBound.rows[0]?.current_time;
+      if (updatedAt === undefined || releasedAt === undefined)
+        throw new Error("测试数据库时间缺失");
+      expect(stored.rows[0]?.status).toBe("archived");
+      expect(updatedAt.valueOf()).toBeGreaterThanOrEqual(releasedAt.valueOf());
+      if (result.outcome === "archived")
+        expect(result.entity.updatedAt).toBe(updatedAt.toISOString());
+    } finally {
+      try {
+        await blocker.query("ROLLBACK");
+      } finally {
+        blocker.release();
+      }
+    }
+  });
+
   it("并发迁移串行化且重复执行结果一致", async () => {
-    expect(concurrentMigrationVersions).toEqual([1, 2, 1, 2]);
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(2);
+    expect(concurrentMigrationVersions).toEqual([1, 2, 3, 1, 2, 3]);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(3);
   });
 
   it("checksum 同时绑定 down SQL，并拒绝孤立和重复版本", async () => {
@@ -453,7 +527,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         `SELECT to_regclass('threads')::text AS threads,
                 (SELECT count(*)::text FROM runtime_schema_migrations) AS migration_count`,
       );
-      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "2" });
+      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "3" });
     } finally {
       await administrativePool.query(
         `GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
@@ -501,7 +575,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       [migratorRole],
     );
     expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(2);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(3);
   });
 
   it("Runtime 角色不安全时在任何迁移 DDL 之前失败", async () => {

@@ -6,7 +6,7 @@ import type {
   WorkspaceRevisionCommit,
   WorkspaceWriteScope,
 } from "@cube-runtime/domain";
-import { archiveThread } from "@cube-runtime/domain";
+import { archiveThread, isoTimestamp } from "@cube-runtime/domain";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {
@@ -318,7 +318,7 @@ export class PgRunRepository implements RunRepository {
             WHERE th.tenant_id = $1 AND th.id = $2 AND th.status = 'active'
               AND EXISTS (SELECT 1 FROM memberships m
                 WHERE m.tenant_id = th.tenant_id AND m.user_id = $3 AND m.status = 'active')
-            FOR UPDATE`,
+            FOR SHARE`,
           [scope.tenantId, run.threadId, scope.userId],
         );
         if (parent.rowCount !== 1) return { outcome: "conflict" };
@@ -809,14 +809,26 @@ export class PgArchiveThreadCommand implements ArchiveThreadCommandPort {
         if (current === undefined) return { outcome: "not_found" };
         if (status === "archived") return { outcome: "already_archived", entity: current.entity };
 
-        const archived = archiveThread(current.entity, input.now);
-        const updated = await client.query(
+        const updated = await client.query<{ readonly updated_at: Date | string }>(
           `UPDATE threads
-              SET status = 'archived', updated_at = $3, version = version + 1
-            WHERE tenant_id = $1 AND id = $2 AND status = 'active'`,
-          [input.scope.tenantId, input.threadId, input.now],
+              SET status = 'archived',
+                  updated_at = GREATEST(updated_at, clock_timestamp()),
+                  version = version + 1
+            WHERE tenant_id = $1 AND id = $2 AND status = 'active'
+            RETURNING updated_at`,
+          [input.scope.tenantId, input.threadId],
         );
         if (updated.rowCount !== 1) return { outcome: "not_found" };
+        const databaseTimestamp = updated.rows[0]?.updated_at;
+        if (databaseTimestamp === undefined) throw new TypeError("归档任务未返回数据库时间");
+        const archived = archiveThread(
+          current.entity,
+          isoTimestamp(
+            databaseTimestamp instanceof Date
+              ? databaseTimestamp.toISOString()
+              : new Date(databaseTimestamp).toISOString(),
+          ),
+        );
         return { outcome: "archived", entity: archived };
       });
     } catch (error) {

@@ -114,10 +114,10 @@ export function createApiApp(
   dependencies: ApiDependencies,
   options: ApiAppOptions = {},
 ): FastifyInstance {
-  if (
-    dependencies.createCapability !== undefined &&
-    !isApiCreateCapability(dependencies.createCapability)
-  ) {
+  // 只读取调用方依赖一次；后续路由注册和 Service 必须共享同一个不可变快照。
+  const normalizedDependencies = Object.freeze({ ...dependencies });
+  const createCapability = normalizedDependencies.createCapability;
+  if (createCapability !== undefined && !isApiCreateCapability(createCapability)) {
     throw new TypeError("API 创建能力必须由 createApiCreateCapability 签发");
   }
   const app = Fastify({
@@ -149,7 +149,7 @@ export function createApiApp(
             },
           },
   });
-  const service = new ApiService(dependencies);
+  const service = new ApiService(normalizedDependencies);
 
   app.addHook("onSend", async (request, reply) => {
     void reply.header("x-request-id", requestId(request));
@@ -208,18 +208,21 @@ export function createApiApp(
     response: { 200: HealthSuccessEnvelopeSchema, 503: ErrorEnvelopeSchema },
   } as const;
   app.get("/live", { schema: healthSchema }, async (request) =>
-    success(request, { status: "ok" as const, checkedAt: dependencies.clock.now() }),
+    success(request, { status: "ok" as const, checkedAt: normalizedDependencies.clock.now() }),
   );
   app.get("/ready", { schema: healthSchema }, async (request) => {
     try {
-      await dependencies.readiness.probe();
+      await normalizedDependencies.readiness.probe();
     } catch {
       throw new ApiFailure("dependency_unavailable");
     }
-    return success(request, { status: "ok" as const, checkedAt: dependencies.clock.now() });
+    return success(request, {
+      status: "ok" as const,
+      checkedAt: normalizedDependencies.clock.now(),
+    });
   });
 
-  if (dependencies.createCapability !== undefined) {
+  if (createCapability !== undefined) {
     app.post<{ Body: CreateThreadRequest }>(
       "/v1/threads",
       {
@@ -232,6 +235,7 @@ export function createApiApp(
             401: ErrorEnvelopeSchema,
             404: ErrorEnvelopeSchema,
             409: ErrorEnvelopeSchema,
+            415: ErrorEnvelopeSchema,
             500: ErrorEnvelopeSchema,
             503: ErrorEnvelopeSchema,
           },
@@ -259,6 +263,7 @@ export function createApiApp(
             401: ErrorEnvelopeSchema,
             404: ErrorEnvelopeSchema,
             409: ErrorEnvelopeSchema,
+            415: ErrorEnvelopeSchema,
             422: ErrorEnvelopeSchema,
             500: ErrorEnvelopeSchema,
             503: ErrorEnvelopeSchema,

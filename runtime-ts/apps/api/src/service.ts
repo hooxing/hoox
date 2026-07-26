@@ -173,7 +173,6 @@ export class ApiService {
       const result = await this.dependencies.archiveThread.archiveThread({
         scope: auth.scope,
         threadId: threadId(rawThreadId),
-        now: this.dependencies.clock.now(),
       });
       if (result.outcome === "not_authorized" || result.outcome === "not_found") {
         throw new ApiFailure("not_found");

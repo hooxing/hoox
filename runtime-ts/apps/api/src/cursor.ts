@@ -1,11 +1,18 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
-import { isoTimestamp, threadId, type TenantId, type UserId } from "@cube-runtime/domain";
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import {
+  isoTimestamp,
+  threadId,
+  type IsoTimestamp,
+  type TenantId,
+  type UserId,
+} from "@cube-runtime/domain";
 import type { ThreadListCursor } from "@cube-runtime/persistence";
 import type { ThreadCursorCodec } from "./ports.js";
 
 const kidPattern = /^[A-Za-z0-9_-]{3,32}$/u;
 const base64UrlPattern = /^[A-Za-z0-9_-]+$/u;
 const maximumCursorLength = 512;
+const absoluteMaximumTtlMilliseconds = 30 * 24 * 60 * 60 * 1_000;
 
 export interface ThreadCursorSigningKey {
   readonly kid: string;
@@ -16,6 +23,9 @@ export interface ThreadCursorSigningKey {
 export interface ThreadCursorKeyRing {
   readonly activeKid: string;
   readonly keys: readonly ThreadCursorSigningKey[];
+  readonly clock: { now(): IsoTimestamp };
+  readonly ttlMilliseconds: number;
+  readonly maximumTtlMilliseconds: number;
 }
 
 interface CursorPayload {
@@ -23,6 +33,8 @@ interface CursorPayload {
   readonly kid: string;
   readonly tenantId: TenantId;
   readonly userId: UserId;
+  readonly issuedAt: IsoTimestamp;
+  readonly expiresAt: IsoTimestamp;
   readonly updatedAt: ThreadListCursor["updatedAt"];
   readonly id: ThreadListCursor["id"];
 }
@@ -56,11 +68,14 @@ function parsePayload(raw: unknown): CursorPayload {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) invalidCursor();
   const value = raw as Record<string, unknown>;
   if (
-    Object.keys(value).sort().join(",") !== "id,kid,tenantId,updatedAt,userId,v" ||
+    Object.keys(value).sort().join(",") !==
+      "expiresAt,id,issuedAt,kid,tenantId,updatedAt,userId,v" ||
     value.v !== 1 ||
     typeof value.kid !== "string" ||
     typeof value.tenantId !== "string" ||
     typeof value.userId !== "string" ||
+    typeof value.issuedAt !== "string" ||
+    typeof value.expiresAt !== "string" ||
     typeof value.updatedAt !== "string" ||
     typeof value.id !== "string"
   ) {
@@ -72,6 +87,8 @@ function parsePayload(raw: unknown): CursorPayload {
       kid: value.kid,
       tenantId: value.tenantId as TenantId,
       userId: value.userId as UserId,
+      issuedAt: isoTimestamp(value.issuedAt),
+      expiresAt: isoTimestamp(value.expiresAt),
       updatedAt: isoTimestamp(value.updatedAt),
       id: threadId(value.id),
     };
@@ -93,14 +110,32 @@ export function createThreadCursorCodec(config: ThreadCursorKeyRing): ThreadCurs
   }
   const activeSecret = keys.get(config.activeKid);
   if (activeSecret === undefined) throw new TypeError("分页游标当前签名密钥不存在");
+  if (
+    !Number.isSafeInteger(config.ttlMilliseconds) ||
+    !Number.isSafeInteger(config.maximumTtlMilliseconds) ||
+    config.ttlMilliseconds < 1 ||
+    config.maximumTtlMilliseconds < 1 ||
+    config.maximumTtlMilliseconds > absoluteMaximumTtlMilliseconds ||
+    config.ttlMilliseconds > config.maximumTtlMilliseconds
+  ) {
+    throw new TypeError("分页游标 TTL 配置无效");
+  }
+  // 未知 kid 仍完成一次同长度 HMAC，公开响应和主要验签路径不形成密钥枚举接口。
+  const rejectionSecret = randomBytes(32);
 
   return {
     encode(scope, cursor) {
+      const issuedAt = config.clock.now();
+      const expiresAt = isoTimestamp(
+        new Date(Date.parse(issuedAt) + config.ttlMilliseconds).toISOString(),
+      );
       const payload: CursorPayload = {
         v: 1,
         kid: config.activeKid,
         tenantId: scope.tenantId,
         userId: scope.userId,
+        issuedAt,
+        expiresAt,
         updatedAt: cursor.updatedAt,
         id: cursor.id,
       };
@@ -129,15 +164,26 @@ export function createThreadCursorCodec(config: ThreadCursorKeyRing): ThreadCurs
         return invalidCursor();
       }
       const secret = keys.get(payload.kid);
-      if (secret === undefined) invalidCursor();
-      const expectedSignature = sign(encodedPayload, secret);
+      const expectedSignature = sign(encodedPayload, secret ?? rejectionSecret);
       if (
+        secret === undefined ||
         actualSignature.length !== expectedSignature.length ||
         !timingSafeEqual(actualSignature, expectedSignature)
       ) {
         invalidCursor();
       }
       if (payload.tenantId !== scope.tenantId || payload.userId !== scope.userId) invalidCursor();
+      const nowMilliseconds = Date.parse(config.clock.now());
+      const issuedMilliseconds = Date.parse(payload.issuedAt);
+      const expiresMilliseconds = Date.parse(payload.expiresAt);
+      if (
+        issuedMilliseconds > nowMilliseconds ||
+        expiresMilliseconds <= nowMilliseconds ||
+        expiresMilliseconds <= issuedMilliseconds ||
+        expiresMilliseconds - issuedMilliseconds > config.maximumTtlMilliseconds
+      ) {
+        invalidCursor();
+      }
       return { updatedAt: payload.updatedAt, id: payload.id };
     },
   };

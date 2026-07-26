@@ -1,6 +1,5 @@
 import type {
   Membership,
-  IsoTimestamp,
   Run,
   Tenant,
   TenantId,
@@ -91,7 +90,6 @@ export interface ArchiveThreadCommandPort {
   archiveThread(input: {
     readonly scope: TenantScope;
     readonly threadId: ThreadId;
-    readonly now: IsoTimestamp;
   }): Promise<ArchiveThreadResult>;
 }
 

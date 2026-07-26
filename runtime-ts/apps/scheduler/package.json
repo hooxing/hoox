@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@cube-runtime/process-runtime": "workspace:*"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -b tsconfig.json --clean",

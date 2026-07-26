@@ -2,6 +2,8 @@
 .env
 node_modules
 dist
+!runtime-ts/packages/process-runtime/dist
+!runtime-ts/packages/process-runtime/dist/**
 coverage
 .tmp
 runtime-ts/vendor/cubesandbox-sdk/source

@@ -512,6 +512,21 @@ export class PgBackedSandboxSessionRegistry
             WHERE cleanup.tenant_id=$1 AND cleanup.idempotency_key=$2
               AND cleanup.registry_id=$3 AND cleanup.provider_sandbox_id=$4
               AND cleanup.state='started' AND cleanup.disposition=$5
+              -- 正常 Worker 只能推进自己尚未被 Scheduler claim 的 cleanup，并在同一事务重验双栅栏。
+              AND cleanup.claim_token IS NULL
+              AND EXISTS (
+                SELECT 1 FROM run_claims worker_claim
+                JOIN workspace_write_leases worker_lease
+                  ON worker_lease.tenant_id=worker_claim.tenant_id
+                 AND worker_lease.workspace_id=attempt.workspace_id
+                 AND worker_lease.root_run_id=attempt.root_run_id
+                 AND worker_lease.epoch=worker_claim.workspace_lease_epoch
+                WHERE worker_claim.tenant_id=attempt.tenant_id
+                  AND worker_claim.attempt_id=attempt.attempt_id
+                  AND worker_claim.released_at IS NULL
+                  AND worker_claim.expires_at > clock_timestamp()
+                  AND worker_lease.expires_at > clock_timestamp()
+              )
               AND attempt.run_id=$6 AND attempt.thread_id=$7
               AND attempt.workspace_id=$8 AND attempt.root_run_id=$9
               AND attempt.base_revision_id IS NOT DISTINCT FROM $10

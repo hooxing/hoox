@@ -73,8 +73,12 @@ describe("Pi 安全适配", () => {
       expect("session" in controller).toBe(false);
       expect(modelContext).toContain("你是受控 Agent");
       expect(modelContext).toContain("/workspace");
-      expect(modelContext).not.toMatch(hostPathPattern(process.cwd()));
-      expect(modelContext).not.toMatch(hostPathPattern(process.cwd().replaceAll("\\", "/")));
+      // Linux CI 的仓库挂载点也可能恰好叫 /workspace；此时它与 Sandbox 的固定逻辑 cwd
+      // 同名，不能据字符串本身判断泄漏。非同名宿主路径仍必须完全不进入模型上下文。
+      if (process.cwd() !== "/workspace") {
+        expect(modelContext).not.toMatch(hostPathPattern(process.cwd()));
+        expect(modelContext).not.toMatch(hostPathPattern(process.cwd().replaceAll("\\", "/")));
+      }
     },
   );
 

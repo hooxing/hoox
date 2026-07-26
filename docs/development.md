@@ -71,6 +71,12 @@ corepack pnpm config:check
 
 `pnpm db:migrate:up` 会在任何 DDL 前同时验证 Runtime、当前 Migrator、Schema owner 与精确 `search_path`，并拒绝 Runtime 的目标 Schema `CREATE`、数据库 `TEMPORARY`、Migrator 对无关 Schema 的有效 `CREATE`、额外非系统 ownership、任何 routine default ACL 记录及任何目标 Schema routine。Schema migration、迁移记录、最小 ACL bootstrap 和结束白名单断言共用同一事务。首版 routine manifest 为空；runner 完全不修改 routine 的全局或局部 default ACL，并在迁移 SQL 后、提交前再次断言目标 routine 集合仍为空，任何 migration 创建 routine 都会整体回滚。bootstrap 撤销 Runtime 和 `PUBLIC` 在业务 Schema、全部业务表、迁移表及 sequence 上的权限，并对逐表全部 DML/DDL、routine `EXECUTE` 及数据库、Schema 有效权限执行白名单断言。未来引入函数、过程或聚合前，必须单独设计 manifest 并显式审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 和调用权限。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作；down SQL、ACL 回收和结束断言同样共用一个事务，任一步失败都整体回滚。down 不修改 routine default ACL，也不会删除角色或回滚 Database Admin bootstrap。
 
+## HTTP API 开发边界
+
+`runtime-ts/apps/api` 使用 `createApiApp` 显式注入身份、Repository、时钟、ID 和探针等端口。测试用 `Fastify.inject` 而不监听网络端口。`AuthContextResolver` 只返回已验证 principal，之后仍必须用 PostgreSQL Membership 解析 `TenantScope`；不得读取 `x-tenant-id` 构造 scope。
+
+当前 `ThreadCreationPort` 和 `EnqueueOutboxPort` 只有契约与测试 Fake。在后续 PostgreSQL idempotency/outbox 事务适配完成前，禁止用“Thread 后写 Workspace”或“Run 后发队列”的顺序调用装配生产 create 路由。真实 PostgreSQL API 集成测试当前覆盖 RLS 读取、列表、归档和取消；create 的 PostgreSQL 端到端验证属于该后续任务。
+
 ## 提交前检查
 
 1. 行为变化有测试。

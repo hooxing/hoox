@@ -15,6 +15,7 @@ import type {
   TenantBundle,
   TenantRepository,
   TenantScope,
+  ThreadListPage,
   ThreadRepository,
   Versioned,
   VersionedCreateResult,
@@ -219,6 +220,49 @@ export class PgThreadRepository implements ThreadRepository {
       );
     } catch (error) {
       throw mapPersistenceError(error, "读取任务");
+    }
+  }
+
+  async list(
+    scope: TenantScope,
+    input: Parameters<ThreadRepository["list"]>[1],
+  ): Promise<ThreadListPage> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+      throw new TypeError("任务分页大小必须在 1 到 100 之间");
+    }
+    try {
+      return await withTenantTransaction(this.pool, scope, async (client) => {
+        const result = await client.query(
+          `SELECT ${tenantColumns}, ${authColumns}, ${threadColumns}
+             FROM threads th ${threadJoins}
+            WHERE th.tenant_id = $1
+              AND ($3::timestamptz IS NULL OR (th.updated_at, th.id) < ($3::timestamptz, $4))
+            ORDER BY th.updated_at DESC, th.id DESC
+            LIMIT $5`,
+          [
+            scope.tenantId,
+            scope.userId,
+            input.cursor?.updatedAt ?? null,
+            input.cursor?.id ?? "",
+            input.limit + 1,
+          ],
+        );
+        const pageRows = result.rows.slice(0, input.limit);
+        const items = pageRows.map((row) => ({
+          entity: mapThread(row, mapTenant(row)),
+          version: BigInt(row.thread_version),
+        }));
+        const last = items.at(-1);
+        if (result.rows.length > input.limit && last !== undefined) {
+          return {
+            items,
+            nextCursor: { updatedAt: last.entity.updatedAt, id: last.entity.id },
+          };
+        }
+        return { items };
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "列出任务");
     }
   }
 

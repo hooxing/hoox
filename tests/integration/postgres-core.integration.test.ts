@@ -524,7 +524,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("并发迁移串行化且重复执行结果一致", async () => {
-    expect(concurrentMigrationVersions).toEqual([1, 2, 3, 4, 1, 2, 3, 4]);
+    expect(concurrentMigrationVersions).toEqual([1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6]);
     expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(4);
   });
 
@@ -586,7 +586,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         `SELECT to_regclass('threads')::text AS threads,
                 (SELECT count(*)::text FROM runtime_schema_migrations) AS migration_count`,
       );
-      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "4" });
+      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "6" });
     } finally {
       await administrativePool.query(
         `GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
@@ -634,15 +634,15 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       [migratorRole],
     );
     expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(4);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(6);
   });
 
-  it("partial down 4→2 后按旧 Schema 收敛 ACL，并可再次迁移到 4", async () => {
+  it("partial down 6→2 后按旧 Schema 收敛 ACL，并可再次迁移到 6", async () => {
     const target = await createIsolatedMigrationTarget("partial_down");
     try {
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4]);
+      ).toEqual([1, 2, 3, 4, 5, 6]);
       expect(
         (
           await migrateDown(target.pool, {
@@ -673,7 +673,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4]);
+      ).toEqual([1, 2, 3, 4, 5, 6]);
       const restored = await target.pool.query<{ present: boolean; allowed: boolean }>(
         `SELECT EXISTS (
            SELECT 1 FROM information_schema.columns
@@ -689,12 +689,12 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
-  it("partial down 4→3 只移除 Run Worker 事实与权限，并可再次迁移到 4", async () => {
+  it("partial down 6→3 只移除 Run Worker、Dispatch 与 Cleanup 事实，并可再次迁移到 6", async () => {
     const target = await createIsolatedMigrationTarget("run_worker_partial_down");
     try {
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4]);
+      ).toEqual([1, 2, 3, 4, 5, 6]);
       expect(
         (
           await migrateDown(target.pool, {
@@ -720,7 +720,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       });
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4]);
+      ).toEqual([1, 2, 3, 4, 5, 6]);
       const restored = await target.pool.query<{
         table_present: boolean;
         runtime_can_select: boolean;
@@ -1394,7 +1394,20 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ["sandbox_registry", new Set(["state", "actual_ttl_seconds", "updated_at"])],
       [
         "cleanup_outbox",
-        new Set(["state", "disposition", "payload", "payload_digest", "updated_at"]),
+        new Set([
+          "state",
+          "disposition",
+          "payload",
+          "payload_digest",
+          "updated_at",
+          "claim_token",
+          "claim_generation",
+          "claimed_by",
+          "claim_lease_expires_at",
+          "retry_at",
+          "attempt_count",
+          "remote_call_started_at",
+        ]),
       ],
       ["external_effect_permits", new Set(["consumed_at"])],
     ]);

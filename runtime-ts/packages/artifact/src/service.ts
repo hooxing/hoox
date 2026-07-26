@@ -5,6 +5,8 @@ import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import {
   type ArtifactExecutionAuthorization,
   assertArtifactExecutionAuthorization,
+  type MonotonicClockPort,
+  systemMonotonicClock,
 } from "./authorization.js";
 import type {
   ArtifactBlobBinding,
@@ -23,6 +25,7 @@ export interface ArtifactDeliveryServiceOptions {
   readonly defaultDownloadTtlSeconds?: number;
   readonly maxDownloadTtlSeconds?: number;
   readonly runtimeMode?: "development" | "test" | "production";
+  readonly monotonicClock?: MonotonicClockPort;
   /** 只供显式本地开发/测试配置；production 构造时会强制拒绝。 */
   readonly allowInsecureHttpDownload?: boolean;
 }
@@ -50,6 +53,7 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
   readonly #defaultDownloadTtlSeconds: number;
   readonly #maxDownloadTtlSeconds: number;
   readonly #allowInsecureHttpDownload: boolean;
+  readonly #monotonicClock: MonotonicClockPort;
 
   constructor(
     private readonly repository: ArtifactDeliveryRepositoryPort,
@@ -71,6 +75,7 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
       throw invalidArgument("production 不允许明文 HTTP 下载 URL");
     }
     this.#allowInsecureHttpDownload = options.allowInsecureHttpDownload ?? false;
+    this.#monotonicClock = options.monotonicClock ?? systemMonotonicClock;
   }
 
   async declareDeliverables(input: {
@@ -79,13 +84,14 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
     readonly declarations: readonly DeliverableDeclaration[];
   }): Promise<void> {
     validateIdempotencyKey(input.idempotencyKey);
-    assertArtifactExecutionAuthorization(input.authorization, {
+    const authorizationExpectation = {
       toolName: "declare_deliverables",
       argsDigest: digestCanonical({
         idempotencyKey: input.idempotencyKey,
         declarations: input.declarations,
       }),
-    });
+    } as const;
+    this.#assertAuthorization(input.authorization, authorizationExpectation);
     const declarations = normalizeDeclarations(input.declarations);
     const commandDigest = digestCanonical({
       schemaVersion: 1,
@@ -106,6 +112,7 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
         return;
       }
       if (result.outcome === "response_unknown") {
+        this.#assertAuthorization(input.authorization, authorizationExpectation);
         const readback = await this.repository.readDeliverableDeclarationCommand({
           authorization: input.authorization,
           idempotencyKey: input.idempotencyKey,
@@ -139,7 +146,7 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
 
   async publishArtifact(command: PublishArtifactCommand): Promise<ArtifactPublicationSnapshot> {
     validateIdempotencyKey(command.idempotencyKey);
-    assertArtifactExecutionAuthorization(command.authorization, {
+    const authorizationExpectation = {
       toolName: "publish_artifact",
       argsDigest: digestCanonical({
         idempotencyKey: command.idempotencyKey,
@@ -150,7 +157,8 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
         purpose: command.purpose,
         deliverableKey: command.deliverableKey,
       }),
-    });
+    } as const;
+    this.#assertAuthorization(command.authorization, authorizationExpectation);
     const name = normalizeName(command.name);
     const deliverableKey = normalizePublicationPurpose(command.purpose, command.deliverableKey);
     const commandDigest = digestCanonical({
@@ -214,6 +222,7 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
         command.artifactId,
         target,
         begun.binding,
+        authorizationExpectation,
       );
       validatePublicationIdentity(settled, command, name, deliverableKey);
       if (settled.status !== target) throw dependencyUnavailable();
@@ -324,7 +333,9 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
     artifactId: ArtifactId,
     target: "published" | "failed",
     expectedBinding: ArtifactBlobBinding,
+    authorizationExpectation: { readonly toolName: string; readonly argsDigest: Sha256Digest },
   ): Promise<ArtifactPublicationSnapshot> {
+    this.#assertAuthorization(authorization, authorizationExpectation);
     const result = await this.repository.finishPublication({
       authorization,
       idempotencyKey,
@@ -336,6 +347,7 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
       return result.publication;
     }
     if (result.outcome === "response_unknown") {
+      this.#assertAuthorization(authorization, authorizationExpectation);
       const readback = await this.repository.readPublicationCommand({
         authorization,
         idempotencyKey,
@@ -351,6 +363,13 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
       throw artifactNotFound();
     }
     throw dependencyUnavailable();
+  }
+
+  #assertAuthorization(
+    authorization: ArtifactExecutionAuthorization,
+    expected: { readonly toolName: string; readonly argsDigest: Sha256Digest },
+  ): void {
+    assertArtifactExecutionAuthorization(authorization, expected, this.#monotonicClock);
   }
 }
 

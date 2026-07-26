@@ -14,7 +14,7 @@ import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
 import type { ExecutionScope } from "@cube-runtime/run-contracts";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ArtifactExecutionAuthorization } from "./authorization.js";
+import { ArtifactExecutionAuthorization, type MonotonicClockPort } from "./authorization.js";
 import type {
   ArtifactBlobBinding,
   ArtifactDeliveryRepositoryPort,
@@ -44,6 +44,14 @@ const request: UserRequestScope = Object.freeze({
 const artifactOne = artifactId("artifact_one");
 const versionOne = resourceVersionId("resource_version_one");
 const placeholderDigest = sha256Digest("0".repeat(64));
+const immediateMonotonicClock: MonotonicClockPort = Object.freeze({ now: () => 100 });
+
+class MutableMonotonicClock implements MonotonicClockPort {
+  constructor(public value: number) {}
+  now(): number {
+    return this.value;
+  }
+}
 
 function executionAuthorization(input: {
   readonly toolName: "declare_deliverables" | "publish_artifact";
@@ -51,6 +59,9 @@ function executionAuthorization(input: {
   readonly executionScope?: ExecutionScope;
   readonly permitId?: string;
   readonly expiresAt?: string;
+  readonly clock?: MonotonicClockPort;
+  readonly consumedAtMonotonicMs?: number;
+  readonly maxContinuationDelayMs?: number;
   readonly overrides?: Partial<{
     effect: "model_start" | "tool_execution";
     runClaimToken: string;
@@ -64,27 +75,30 @@ function executionAuthorization(input: {
   }>;
 }): ArtifactExecutionAuthorization {
   const executionScope = input.executionScope ?? scope;
-  return ArtifactExecutionAuthorization.fromConsumed({
-    permit: {
-      permitId: input.permitId ?? "permit-artifact-1",
-      scope: executionScope,
-      runClaimToken: "run-claim-token-1",
-      runClaimEpoch: 7,
-      workspaceRootRunId: executionScope.rootRunId,
-      workspaceLeaseEpoch: 11,
-      attemptVersion: 13,
-      effect: "tool_execution",
-      callId: "call-artifact-1",
-      toolName: input.toolName,
-      argsDigest: digestCanonical(input.args),
-      issuedAt: isoTimestamp("2026-07-26T08:00:00.000Z"),
-      expiresAt: isoTimestamp(input.expiresAt ?? "2026-07-26T08:01:00.000Z"),
-      ...input.overrides,
+  return ArtifactExecutionAuthorization.fromConsumed(
+    {
+      permit: {
+        permitId: input.permitId ?? "permit-artifact-1",
+        scope: executionScope,
+        runClaimToken: "run-claim-token-1",
+        runClaimEpoch: 7,
+        workspaceRootRunId: executionScope.rootRunId,
+        workspaceLeaseEpoch: 11,
+        attemptVersion: 13,
+        effect: "tool_execution",
+        callId: "call-artifact-1",
+        toolName: input.toolName,
+        argsDigest: digestCanonical(input.args),
+        issuedAt: isoTimestamp("2026-07-26T08:00:00.000Z"),
+        expiresAt: isoTimestamp(input.expiresAt ?? "2026-07-26T08:01:00.000Z"),
+        ...input.overrides,
+      },
+      consumedAt: isoTimestamp("2026-07-26T08:00:01.000Z"),
+      consumedAtMonotonicMs: input.consumedAtMonotonicMs ?? 100,
+      maxContinuationDelayMs: input.maxContinuationDelayMs ?? 1_000,
     },
-    consumedAt: isoTimestamp("2026-07-26T08:00:01.000Z"),
-    consumedAtMonotonicMs: 100,
-    maxContinuationDelayMs: 1_000,
-  });
+    input.clock ?? immediateMonotonicClock,
+  );
 }
 
 function stableBlob(overrides: Partial<StableBlobRef> = {}): StableBlobRef {
@@ -331,7 +345,9 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
   beforeEach(() => {
     repository = new FakeRepository();
     blobs = fakeBlobStore();
-    service = new ArtifactDeliveryService(repository, blobs);
+    service = new ArtifactDeliveryService(repository, blobs, {
+      monotonicClock: immediateMonotonicClock,
+    });
   });
 
   it("固定 running Run、ResourceVersion 与 Blob 身份后发布，并允许同摘要幂等读回", async () => {
@@ -432,6 +448,176 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
       );
     }
     expect(repository.beginInputs).toHaveLength(0);
+  });
+
+  it("Consumed permit 收窄使用单调时钟，刚消费和窗口内通过，边界、超时及负 elapsed 拒绝", () => {
+    const business = publishCommand();
+    const args = {
+      idempotencyKey: business.idempotencyKey,
+      artifactId: business.artifactId,
+      resourceVersionId: business.resourceVersionId,
+      replacesArtifactId: business.replacesArtifactId,
+      name: business.name,
+      purpose: business.purpose,
+      deliverableKey: business.deliverableKey,
+    };
+    for (const now of [100, 101, 1_099]) {
+      expect(
+        executionAuthorization({
+          toolName: "publish_artifact",
+          args,
+          clock: { now: () => now },
+        }),
+      ).toBeInstanceOf(ArtifactExecutionAuthorization);
+    }
+    for (const now of [99, 1_100, 1_101]) {
+      expect(() =>
+        executionAuthorization({
+          toolName: "publish_artifact",
+          args,
+          clock: { now: () => now },
+        }),
+      ).toThrowError(expect.objectContaining({ code: "ARTIFACT_NOT_AUTHORIZED" }));
+    }
+  });
+
+  it("授权创建后闲置不能绕过，declare 与 publish 每次入口重新检查单调窗口", async () => {
+    const clock = new MutableMonotonicClock(100);
+    const commandAtConsumption = publishCommand();
+    const command = publishCommand({
+      authorization: executionAuthorization({
+        toolName: "publish_artifact",
+        args: {
+          idempotencyKey: commandAtConsumption.idempotencyKey,
+          artifactId: commandAtConsumption.artifactId,
+          resourceVersionId: commandAtConsumption.resourceVersionId,
+          replacesArtifactId: commandAtConsumption.replacesArtifactId,
+          name: commandAtConsumption.name,
+          purpose: commandAtConsumption.purpose,
+          deliverableKey: commandAtConsumption.deliverableKey,
+        },
+        clock,
+      }),
+    });
+    const declarations = [{ key: "report", name: "报告", requirement: "required" as const }];
+    const declaration = {
+      idempotencyKey: "declare:run_alpha:idle",
+      declarations,
+      authorization: executionAuthorization({
+        toolName: "declare_deliverables",
+        args: { idempotencyKey: "declare:run_alpha:idle", declarations },
+        clock,
+      }),
+    };
+    const clockedService = new ArtifactDeliveryService(repository, blobs, {
+      monotonicClock: clock,
+    });
+    clock.value = 1_100;
+    await expect(clockedService.publishArtifact(command)).rejects.toSatisfy((error) =>
+      expectCode(error, "ARTIFACT_NOT_AUTHORIZED"),
+    );
+    await expect(clockedService.declareDeliverables(declaration)).rejects.toSatisfy((error) =>
+      expectCode(error, "ARTIFACT_NOT_AUTHORIZED"),
+    );
+    expect(repository.beginInputs).toHaveLength(0);
+    expect(repository.declareInputs).toHaveLength(0);
+  });
+
+  it("begin 后远端检查耗尽窗口时不允许 finish，响应未知后过期也不允许 readback", async () => {
+    const clock = new MutableMonotonicClock(100);
+    const base = publishCommand();
+    const args = {
+      idempotencyKey: base.idempotencyKey,
+      artifactId: base.artifactId,
+      resourceVersionId: base.resourceVersionId,
+      replacesArtifactId: base.replacesArtifactId,
+      name: base.name,
+      purpose: base.purpose,
+      deliverableKey: base.deliverableKey,
+    };
+    const clockedService = new ArtifactDeliveryService(repository, blobs, {
+      monotonicClock: clock,
+    });
+    const command = {
+      ...base,
+      authorization: executionAuthorization({ toolName: "publish_artifact", args, clock }),
+    };
+    vi.mocked(blobs.head).mockImplementationOnce(async () => {
+      clock.value = 1_100;
+      return { blob: stableBlob() };
+    });
+    await expect(clockedService.publishArtifact(command)).rejects.toSatisfy((error) =>
+      expectCode(error, "ARTIFACT_NOT_AUTHORIZED"),
+    );
+    expect(repository.beginInputs).toHaveLength(1);
+    expect(repository.finishInputs).toHaveLength(0);
+
+    clock.value = 100;
+    const second = publishCommand({
+      idempotencyKey: "publish:run_alpha:response-unknown",
+    });
+    const secondArgs = {
+      idempotencyKey: second.idempotencyKey,
+      artifactId: second.artifactId,
+      resourceVersionId: second.resourceVersionId,
+      replacesArtifactId: second.replacesArtifactId,
+      name: second.name,
+      purpose: second.purpose,
+      deliverableKey: second.deliverableKey,
+    };
+    vi.mocked(blobs.head).mockResolvedValueOnce({ blob: stableBlob() });
+    repository.finishPublication = async (input) => {
+      repository.finishInputs.push(input);
+      clock.value = 1_100;
+      return { outcome: "response_unknown" };
+    };
+    let readCalled = false;
+    repository.readPublicationCommand = async () => {
+      readCalled = true;
+      return { outcome: "not_found" };
+    };
+    await expect(
+      clockedService.publishArtifact({
+        ...second,
+        authorization: executionAuthorization({
+          toolName: "publish_artifact",
+          args: secondArgs,
+          clock,
+        }),
+      }),
+    ).rejects.toSatisfy((error) => expectCode(error, "ARTIFACT_NOT_AUTHORIZED"));
+    expect(readCalled).toBe(false);
+  });
+
+  it("declare 响应未知后窗口耗尽时不允许 readback", async () => {
+    const clock = new MutableMonotonicClock(100);
+    const declarations = [{ key: "report", name: "报告", requirement: "required" as const }];
+    const input = {
+      idempotencyKey: "declare:run_alpha:response-unknown",
+      declarations,
+      authorization: executionAuthorization({
+        toolName: "declare_deliverables",
+        args: { idempotencyKey: "declare:run_alpha:response-unknown", declarations },
+        clock,
+      }),
+    };
+    repository.declareDeliverables = async (command) => {
+      repository.declareInputs.push(command);
+      clock.value = 1_100;
+      return { outcome: "response_unknown" };
+    };
+    let readCalled = false;
+    repository.readDeliverableDeclarationCommand = async () => {
+      readCalled = true;
+      return { outcome: "not_found" };
+    };
+    const clockedService = new ArtifactDeliveryService(repository, blobs, {
+      monotonicClock: clock,
+    });
+    await expect(clockedService.declareDeliverables(input)).rejects.toSatisfy((error) =>
+      expectCode(error, "ARTIFACT_NOT_AUTHORIZED"),
+    );
+    expect(readCalled).toBe(false);
   });
 
   it("canonical command digest 绑定 kind、完整稳定 scope、幂等键与每个规范化业务字段", async () => {
@@ -890,6 +1076,7 @@ describe("ArtifactDeliveryService 用户投影与授权下载", () => {
     service = new ArtifactDeliveryService(repository, blobs, {
       defaultDownloadTtlSeconds: 120,
       maxDownloadTtlSeconds: 300,
+      monotonicClock: immediateMonotonicClock,
     });
   });
 
@@ -1025,10 +1212,18 @@ describe("ArtifactDeliveryService 用户投影与授权下载", () => {
 
   it("下载 TTL 配置有硬上限，本地 HTTP 必须显式开启", async () => {
     expect(
-      () => new ArtifactDeliveryService(repository, blobs, { maxDownloadTtlSeconds: 901 }),
+      () =>
+        new ArtifactDeliveryService(repository, blobs, {
+          maxDownloadTtlSeconds: 901,
+          monotonicClock: immediateMonotonicClock,
+        }),
     ).toThrowError(expect.objectContaining({ code: "ARTIFACT_INVALID_ARGUMENT" }));
     expect(
-      () => new ArtifactDeliveryService(repository, blobs, { allowInsecureHttpDownload: true }),
+      () =>
+        new ArtifactDeliveryService(repository, blobs, {
+          allowInsecureHttpDownload: true,
+          monotonicClock: immediateMonotonicClock,
+        }),
     ).toThrowError(expect.objectContaining({ code: "ARTIFACT_INVALID_ARGUMENT" }));
 
     vi.mocked(blobs.presignDownload).mockResolvedValueOnce("http://127.0.0.1:9000/signed");
@@ -1036,6 +1231,7 @@ describe("ArtifactDeliveryService 用户投影与授权下载", () => {
       defaultDownloadTtlSeconds: 60,
       runtimeMode: "development",
       allowInsecureHttpDownload: true,
+      monotonicClock: immediateMonotonicClock,
     });
     await expect(
       localService.createDownload({ request, artifactId: artifactOne }),

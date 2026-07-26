@@ -9,7 +9,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
-import { createSandboxTools, SANDBOX_TOOL_NAMES } from "./tools.js";
+import {
+  createSandboxTools,
+  SANDBOX_TOOL_NAMES,
+  type SandboxToolEffectAuthorizer,
+} from "./tools.js";
 
 interface PiSessionPort {
   prompt(text: string): Promise<void>;
@@ -83,6 +87,22 @@ export interface CreateSafePiSessionOptions {
   modelRuntime: ModelRuntime;
   sandbox: SandboxHandle;
   systemPrompt?: string;
+  rolloutProjection?: ControlledRolloutProjection;
+  /** 生产 Tool Router 在每次 Sandbox 工具执行前回到 DB 重验双栅栏。 */
+  authorizeToolEffect: SandboxToolEffectAuthorizer["authorizeToolEffect"];
+}
+
+/**
+ * Runtime 持久化并审计的受控上下文投影。它不是 Pi Session 文件，也不允许携带工具结果、
+ * 宿主路径或任意 Pi 内部 entry；恢复时只把经过裁剪的文本上下文重新投影给新 Session。
+ */
+export interface ControlledRolloutProjection {
+  readonly schemaVersion: 1;
+  readonly checkpointId: string;
+  readonly turns: readonly {
+    readonly role: "user" | "assistant";
+    readonly text: string;
+  }[];
 }
 
 const LOGICAL_WORKSPACE = "/workspace" as const;
@@ -114,13 +134,25 @@ export async function createSafePiSession(
   );
   await resourceLoader.reload();
 
-  const customTools = createSandboxTools(options.sandbox);
+  const customTools = createSandboxTools(options.sandbox, {
+    authorizeToolEffect: options.authorizeToolEffect,
+  });
+  const sessionManager = SessionManager.inMemory(LOGICAL_WORKSPACE);
+  const projectedContext = formatRolloutProjection(options.rolloutProjection);
+  if (projectedContext !== undefined) {
+    sessionManager.appendCustomMessageEntry(
+      "runtime.controlled_rollout_projection.v1",
+      projectedContext,
+      false,
+      { checkpointId: options.rolloutProjection?.checkpointId },
+    );
+  }
   const { session } = await createAgentSession({
     cwd: LOGICAL_WORKSPACE,
     model: options.model,
     modelRuntime: options.modelRuntime,
     thinkingLevel: "off",
-    sessionManager: SessionManager.inMemory(LOGICAL_WORKSPACE),
+    sessionManager,
     settingsManager,
     resourceLoader,
     customTools,
@@ -139,4 +171,34 @@ export async function createSafePiSession(
       .getEntries()
       .some((entry) => entry.type === "compaction"),
   }));
+}
+
+function formatRolloutProjection(
+  projection: ControlledRolloutProjection | undefined,
+): string | undefined {
+  if (projection === undefined || projection.turns.length === 0) return undefined;
+  if (
+    projection.schemaVersion !== 1 ||
+    !projection.checkpointId.trim() ||
+    projection.checkpointId.length > 200 ||
+    projection.turns.length > 200
+  ) {
+    throw new Error("RolloutProjection 版本或 checkpointId 无效");
+  }
+  const lines = projection.turns.map((turn) => {
+    if (turn.role !== "user" && turn.role !== "assistant") {
+      throw new Error("RolloutProjection role 无效");
+    }
+    const text = turn.text.trim();
+    if (!text || text.length > 16_000) throw new Error("RolloutProjection 文本长度无效");
+    if (/(?:[A-Za-z]:[\\/]|\/(?:home|Users|var\/lib|opt|srv)\/)/u.test(text)) {
+      throw new Error("RolloutProjection 不能包含宿主机路径");
+    }
+    return `${turn.role === "user" ? "用户" : "助手"}：${text}`;
+  });
+  const rendered = `以下是 Runtime 审核并持久化的历史上下文投影（checkpoint=${projection.checkpointId}）：\n${lines.join("\n")}`;
+  if (new TextEncoder().encode(rendered).byteLength > 64 * 1024) {
+    throw new Error("RolloutProjection 超过 64 KiB 上限");
+  }
+  return rendered;
 }

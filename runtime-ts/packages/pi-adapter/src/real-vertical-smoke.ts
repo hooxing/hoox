@@ -53,7 +53,19 @@ try {
   });
   modelRuntime.registerNativeProvider(faux.provider);
   await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-  controller = await createSafePiSession({ model: faux.getModel(), modelRuntime, sandbox });
+  const authorizedCalls: Array<{ callId: string; toolName: string; argsDigest: string }> = [];
+  controller = await createSafePiSession({
+    model: faux.getModel(),
+    modelRuntime,
+    sandbox,
+    authorizeToolEffect: async (call) => {
+      authorizedCalls.push(call);
+      return {
+        consumedAtMonotonicMs: performance.now(),
+        maxContinuationDelayMs: 250,
+      };
+    },
+  });
 
   console.log("[3/6] Faux Provider 发起 Pi Tool Call");
   const events: string[] = [];
@@ -64,6 +76,16 @@ try {
   assert(writeObservationSeen, "模型没有收到写入 Observation");
   assert(readObservationSeen, "模型没有收到读取 Observation");
   assert(events.filter((event) => event === "tool.completed").length === 2, "工具终态数量错误");
+  assert(
+    authorizedCalls.map((call) => call.toolName).join(",") ===
+      "sandbox_write_file,sandbox_read_file",
+    "工具许可没有逐调用绑定真实工具名",
+  );
+  assert(new Set(authorizedCalls.map((call) => call.callId)).size === 2, "工具许可 callId 未隔离");
+  assert(
+    authorizedCalls.every((call) => /^[a-f0-9]{64}$/u.test(call.argsDigest)),
+    "工具许可参数摘要格式错误",
+  );
   assert(events.at(-1) === "agent.settled", "Agent 未进入 settled");
 
   console.log("[5/6] 旁路验证真实 Sandbox 文件结果");

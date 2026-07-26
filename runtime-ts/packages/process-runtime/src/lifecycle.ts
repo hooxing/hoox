@@ -30,13 +30,16 @@ const resourceNamePattern = /^[a-z][a-z0-9_-]{0,63}$/u;
 
 export class ProcessLifecycle {
   private currentState: ProcessLifecycleState = "accepting";
+  private readonly stopAccepting: () => Promise<void>;
+  private readonly resources: readonly ShutdownResource[];
+  private readonly shutdownTimeoutMilliseconds: number;
   private readonly inFlight = new Set<Promise<unknown>>();
   private drainPromise: Promise<void> | undefined;
   private releaseDrain: (() => void) | undefined;
   private closePromise: Promise<void> | undefined;
   private shutdownTimedOut = false;
 
-  constructor(private readonly options: ProcessLifecycleOptions) {
+  constructor(options: ProcessLifecycleOptions) {
     if (
       !Number.isSafeInteger(options.shutdownTimeoutMilliseconds) ||
       options.shutdownTimeoutMilliseconds < 1 ||
@@ -44,13 +47,25 @@ export class ProcessLifecycle {
     ) {
       throw new TypeError("进程关闭超时必须在 1 毫秒到 10 分钟之间");
     }
+    this.shutdownTimeoutMilliseconds = options.shutdownTimeoutMilliseconds;
+    if (typeof options.stopAccepting !== "function") throw new TypeError("停止接收函数无效");
+    this.stopAccepting = options.stopAccepting.bind(options);
     const names = new Set<string>();
+    const resources: ShutdownResource[] = [];
     for (const resource of options.resources) {
-      if (!resourceNamePattern.test(resource.name) || names.has(resource.name)) {
+      if (
+        typeof resource?.name !== "string" ||
+        typeof resource.close !== "function" ||
+        !resourceNamePattern.test(resource.name) ||
+        names.has(resource.name)
+      ) {
         throw new TypeError("关闭资源名称无效或重复");
       }
       names.add(resource.name);
+      // 捕获名称与函数本身，调用方后续替换数组、对象字段都不能改变关闭计划。
+      resources.push(Object.freeze({ name: resource.name, close: resource.close.bind(resource) }));
     }
+    this.resources = Object.freeze(resources);
   }
 
   get state(): ProcessLifecycleState {
@@ -94,7 +109,7 @@ export class ProcessLifecycle {
   private async runCleanup(): Promise<void> {
     let failure: ProcessLifecycleError | undefined;
     try {
-      await this.options.stopAccepting();
+      await this.stopAccepting();
     } catch {
       failure = new ProcessLifecycleError("STOP_ACCEPTING_FAILED");
     }
@@ -107,7 +122,7 @@ export class ProcessLifecycle {
     }
 
     if (!this.shutdownTimedOut) this.currentState = "closing";
-    for (const resource of this.options.resources) {
+    for (const resource of this.resources) {
       try {
         await resource.close();
       } catch {
@@ -125,7 +140,7 @@ export class ProcessLifecycle {
         this.shutdownTimedOut = true;
         this.currentState = "failed";
         reject(new ProcessLifecycleError("SHUTDOWN_TIMEOUT"));
-      }, this.options.shutdownTimeoutMilliseconds);
+      }, this.shutdownTimeoutMilliseconds);
     });
     try {
       await Promise.race([cleanup, timeout]);
@@ -142,6 +157,18 @@ export interface ProcessSignalSource {
 
 export interface ProcessSignalRegistration {
   dispose(): void;
+}
+
+function reportShutdownFailure(
+  callback: ((error: ProcessLifecycleError) => void) | undefined,
+  error: ProcessLifecycleError,
+): void {
+  try {
+    // void 类型回调在 JavaScript 中仍可能返回被拒绝的 Promise；必须主动吸收。
+    void Promise.resolve(callback?.(error)).catch(() => undefined);
+  } catch {
+    // 同步日志器异常同样不能制造未处理 rejection 或打断资源清理。
+  }
 }
 
 /** 信号只触发同一个幂等 close；失败交给调用方记录，不调用 process.exit 截断清理。 */
@@ -162,17 +189,13 @@ export function installProcessSignalHandlers(
   };
   const listener = () => {
     void lifecycle.close().then(dispose, (error: unknown) => {
-      try {
-        options.onFailure?.(
-          error instanceof ProcessLifecycleError
-            ? error
-            : new ProcessLifecycleError("RESOURCE_CLOSE_FAILED"),
-        );
-      } catch {
-        // 关闭失败回调通常是日志器；它自身失败也不能制造未处理 Promise rejection。
-      } finally {
-        dispose();
-      }
+      reportShutdownFailure(
+        options.onFailure,
+        error instanceof ProcessLifecycleError
+          ? error
+          : new ProcessLifecycleError("RESOURCE_CLOSE_FAILED"),
+      );
+      dispose();
     });
   };
   source.on("SIGTERM", listener);

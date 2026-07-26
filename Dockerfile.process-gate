@@ -9,6 +9,7 @@ COPY runtime-ts/packages/process-runtime/dist/service-process.js ./process-runti
 COPY runtime-ts/packages/process-runtime/package.json ./process-runtime/package.json
 COPY scripts/process-container-gate.mjs ./process-container-gate.mjs
 
-USER node
+# Node 官方镜像中的 node 用户固定为 1000；显式数字 UID 防止镜像配置漂移回 root。
+USER 1000:1000
 
 CMD ["node", "process-container-gate.mjs"]

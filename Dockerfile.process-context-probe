@@ -1,0 +1,3 @@
+# 此 Dockerfile 只由门禁使用：临时 .env* canary 正确被 .dockerignore 排除时，COPY 必然失败。
+FROM scratch
+COPY .env.process-context-canary /proof/.env.process-context-canary

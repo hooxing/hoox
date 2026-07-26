@@ -145,4 +145,37 @@ describe("进程生命周期", () => {
     expect(nestedClose).toBe(firstClose);
     expect(stopCount).toBe(1);
   });
+
+  it("信号失败回调即使异步拒绝也不会产生 unhandledRejection", async () => {
+    const source = new EventEmitter();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const lifecycle = new ProcessLifecycle({
+        stopAccepting: async () => undefined,
+        resources: [
+          {
+            name: "resource",
+            close: async () => {
+              throw new Error("close-failure");
+            },
+          },
+        ],
+        shutdownTimeoutMilliseconds: 1_000,
+      });
+      installProcessSignalHandlers(lifecycle, {
+        source,
+        onFailure: async () => {
+          throw new Error("async-logger-rejection");
+        },
+      });
+      source.emit("SIGTERM");
+      await expect(lifecycle.close()).rejects.toMatchObject({ code: "RESOURCE_CLOSE_FAILED" });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
 });

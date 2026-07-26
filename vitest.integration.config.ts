@@ -13,6 +13,9 @@ export default defineConfig({
       "@cube-runtime/persistence": fileURLToPath(
         new URL("./runtime-ts/packages/persistence/src/index.ts", import.meta.url),
       ),
+      "@cube-runtime/resource": fileURLToPath(
+        new URL("./runtime-ts/packages/resource/src/index.ts", import.meta.url),
+      ),
       "@cube-runtime/protocol": fileURLToPath(
         new URL("./runtime-ts/packages/protocol/src/index.ts", import.meta.url),
       ),

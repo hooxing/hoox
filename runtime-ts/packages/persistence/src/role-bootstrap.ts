@@ -31,6 +31,12 @@ const runWorkerTables = new Set([
 ]);
 const runDispatchTables = new Set(["api_idempotency_records", "run_dispatch_outbox"]);
 const threadCreationTables = new Set(["api_thread_idempotency_records"]);
+const resourceLibraryTables = new Set([
+  "resources",
+  "resource_versions",
+  "resource_promotion_authorizations",
+  "resource_promotion_idempotency",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -66,6 +72,10 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["api_idempotency_records", new Set(["SELECT", "INSERT"])],
   ["api_thread_idempotency_records", new Set(["SELECT", "INSERT"])],
   ["run_dispatch_outbox", new Set(["SELECT", "INSERT"])],
+  ["resources", new Set(["SELECT", "INSERT"])],
+  ["resource_versions", new Set(["SELECT", "INSERT"])],
+  ["resource_promotion_authorizations", new Set(["SELECT", "INSERT"])],
+  ["resource_promotion_idempotency", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -147,6 +157,11 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
       "updated_at",
     ]),
   ],
+  [
+    "resources",
+    new Set(["visibility", "latest_version_number", "latest_version_id", "updated_at"]),
+  ],
+  ["resource_promotion_authorizations", new Set(["state", "consumed_at"])],
 ]);
 
 async function hasMembershipLockMarker(client: PoolClient): Promise<boolean> {
@@ -199,6 +214,18 @@ async function hasCleanupConsumerState(client: PoolClient): Promise<boolean> {
   return result.rows[0]?.present === true;
 }
 
+async function hasResourceLibraryState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.resources', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.resource_versions', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.resource_promotion_authorizations', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.resource_promotion_idempotency', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function activeTablePolicy(
   client: PoolClient,
   schema: string,
@@ -212,6 +239,9 @@ async function activeTablePolicy(
   }
   if (!(await hasThreadCreationState(client, schema))) {
     for (const table of threadCreationTables) policy.delete(table);
+  }
+  if (!(await hasResourceLibraryState(client, schema))) {
+    for (const table of resourceLibraryTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
@@ -237,6 +267,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasThreadCreationState(client, schema))) {
     for (const table of threadCreationTables) policy.delete(table);
+  }
+  if (!(await hasResourceLibraryState(client, schema))) {
+    for (const table of resourceLibraryTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -789,6 +822,16 @@ export async function bootstrapRuntimeAccessOnClient(
       `GRANT SELECT, INSERT ON TABLE ${schema}.api_thread_idempotency_records TO ${role}`,
     );
   }
+  if (await hasResourceLibraryState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.resources,
+         ${schema}.resource_versions,
+         ${schema}.resource_promotion_authorizations,
+         ${schema}.resource_promotion_idempotency
+       TO ${role}`,
+    );
+  }
   await client.query(
     `GRANT UPDATE(state, current_incarnation_id, generation, current_claim_id, lease_expires_at, updated_at)
        ON TABLE ${schema}.blob_lifecycles TO ${role};
@@ -833,6 +876,14 @@ export async function bootstrapRuntimeAccessOnClient(
          state, generation, claim_token, claimed_by, lease_expires_at, next_attempt_at,
          dispatch_attempts, last_error_code, updated_at
        ) ON TABLE ${schema}.run_dispatch_outbox TO ${role}`,
+    );
+  }
+  if (await hasResourceLibraryState(client, context.schema)) {
+    await client.query(
+      `GRANT UPDATE(visibility, latest_version_number, latest_version_id, updated_at)
+         ON TABLE ${schema}.resources TO ${role};
+       GRANT UPDATE(state, consumed_at)
+         ON TABLE ${schema}.resource_promotion_authorizations TO ${role}`,
     );
   }
   await assertActiveRuntimeWhitelist(client, context);

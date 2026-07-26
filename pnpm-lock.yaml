@@ -33,6 +33,9 @@ importers:
       '@cube-runtime/protocol-mapper':
         specifier: workspace:*
         version: link:runtime-ts/packages/protocol-mapper
+      '@cube-runtime/resource':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/resource
       '@cube-runtime/run-contracts':
         specifier: workspace:*
         version: link:runtime-ts/packages/run-contracts
@@ -147,6 +150,9 @@ importers:
       '@cube-runtime/domain':
         specifier: workspace:*
         version: link:../domain
+      '@cube-runtime/resource':
+        specifier: workspace:*
+        version: link:../resource
       '@cube-runtime/run-contracts':
         specifier: workspace:*
         version: link:../run-contracts

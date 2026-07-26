@@ -28,7 +28,7 @@ import type {
 } from "@cube-runtime/run-contracts";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
-import { withTenantTransaction } from "./postgres.js";
+import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 
 type AppliedMutation = Extract<
   RuntimeMutationResult,
@@ -225,11 +225,17 @@ export class PgRunExecutionSetup {
     input: InitializeRunExecutionInput,
   ): Promise<"created" | "already_exists" | "conflict"> {
     const prompt = input.input.trim();
-    if (prompt.length === 0 || prompt.length > 1_048_576) throw new TypeError("Run 输入长度无效");
+    if (prompt.length === 0 || Buffer.byteLength(prompt, "utf8") > 1_048_576) {
+      throw new TypeError("Run 输入长度无效");
+    }
     const answer = input.answer?.trim();
-    if (answer !== undefined && (answer.length === 0 || answer.length > 1_048_576)) {
+    if (
+      answer !== undefined &&
+      (answer.length === 0 || Buffer.byteLength(answer, "utf8") > 1_048_576)
+    ) {
       throw new TypeError("Run 初始回答长度无效");
     }
+    if (!boundedJson(input.rolloutProjection)) throw new TypeError("初始 Projection 超过 64KiB");
     const digest = rolloutProjectionDigest(input.rolloutProjection);
     return withTenantTransaction(this.pool, { tenantId: input.scope.tenantId }, async (client) => {
       const result = await client.query(
@@ -292,13 +298,14 @@ export class PgRunExecutionSetup {
     readonly expectedPreviousAnswer?: string;
   }): Promise<"updated" | "not_found" | "conflict"> {
     const normalized = input.answer.trim();
-    if (normalized.length === 0 || normalized.length > 1_048_576) {
+    if (normalized.length === 0 || Buffer.byteLength(normalized, "utf8") > 1_048_576) {
       throw new TypeError("Run 回答长度无效");
     }
     const expectedPreviousAnswer = input.expectedPreviousAnswer?.trim();
     if (
       expectedPreviousAnswer !== undefined &&
-      (expectedPreviousAnswer.length === 0 || expectedPreviousAnswer.length > 1_048_576)
+      (expectedPreviousAnswer.length === 0 ||
+        Buffer.byteLength(expectedPreviousAnswer, "utf8") > 1_048_576)
     ) {
       throw new TypeError("预期旧回答长度无效");
     }
@@ -978,6 +985,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         { isolationLevel: "SERIALIZABLE" },
       );
     } catch (error) {
+      if (error instanceof TransactionCommitUnknownError) return { outcome: "response_unknown" };
       if (error instanceof RuntimeWriteAbort) return { outcome: error.outcome };
       if (isPgCode(error, "23505") || isPgCode(error, "23514") || isPgCode(error, "23503")) {
         return { outcome: "idempotency_conflict" };

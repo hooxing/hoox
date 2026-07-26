@@ -89,6 +89,36 @@ export interface TransactionOptions {
   readonly readOnly?: boolean;
 }
 
+/**
+ * COMMIT 已发出但客户端没有取得可判定响应。此时禁止把它降格为普通 unavailable，
+ * 调用方必须按业务幂等键读回事实；该错误不暴露驱动原始消息。
+ */
+export class TransactionCommitUnknownError extends Error {
+  constructor(options?: { readonly cause?: unknown }) {
+    super("PostgreSQL COMMIT 结果未知", options);
+    this.name = "TransactionCommitUnknownError";
+  }
+}
+
+function postgresCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String(error.code)
+    : undefined;
+}
+
+/** 这些 SQLSTATE 明确表示数据库拒绝提交；连接/协议/超时错误一律保守视为结果未知。 */
+function commitWasDefinitelyRejected(error: unknown): boolean {
+  const code = postgresCode(error);
+  return (
+    code !== undefined &&
+    (/^23/u.test(code) || /^25/u.test(code) || code === "40001" || code === "40P01")
+  );
+}
+
+function asReleaseError(error: unknown, fallback: string): Error {
+  return error instanceof Error ? error : new Error(fallback);
+}
+
 export async function withTransaction<T>(
   pool: Pool,
   operation: (client: PoolClient) => Promise<T>,
@@ -104,17 +134,34 @@ export async function withTransaction<T>(
     await client.query(
       `BEGIN ISOLATION LEVEL ${isolation}${options.readOnly === true ? " READ ONLY" : ""}`,
     );
-    const result = await operation(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (error) {
+    let result: T;
     try {
-      await client.query("ROLLBACK");
-    } catch (rollbackError) {
-      // 原始失败比回滚失败更有诊断价值，但坏连接必须显式从连接池淘汰。
-      releaseError = rollbackError instanceof Error ? rollbackError : new Error("数据库回滚失败");
+      result = await operation(client);
+    } catch (operationError) {
+      try {
+        await client.query("ROLLBACK");
+      } catch (rollbackError) {
+        // 原始失败比回滚失败更有诊断价值，但坏连接必须显式从连接池淘汰。
+        releaseError = asReleaseError(rollbackError, "数据库回滚失败");
+      }
+      throw operationError;
     }
-    throw error;
+    try {
+      await client.query("COMMIT");
+      return result;
+    } catch (commitError) {
+      if (commitWasDefinitelyRejected(commitError)) {
+        try {
+          await client.query("ROLLBACK");
+        } catch (rollbackError) {
+          releaseError = asReleaseError(rollbackError, "提交失败后的回滚失败");
+        }
+        throw commitError;
+      }
+      // 不能在未知连接上再发 ROLLBACK；COMMIT 可能已经成功，坏连接直接淘汰。
+      releaseError = asReleaseError(commitError, "数据库 COMMIT 响应未知");
+      throw new TransactionCommitUnknownError({ cause: commitError });
+    }
   } finally {
     client.release(releaseError);
   }

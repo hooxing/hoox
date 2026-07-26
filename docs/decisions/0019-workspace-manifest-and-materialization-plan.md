@@ -39,13 +39,14 @@ WorkspaceRevision 已经是不可变领域对象，但此前只有整体 `object
 采用方案 B，并固定 schemaVersion 1：
 
 - 首版 entry 只允许 `type: file` 的普通文件；directory 由路径前缀推导，symlink、hardlink、socket、FIFO、device 与其他特殊类型全部拒绝。未来支持任何新类型必须提升 schemaVersion 并单独审查；
-- 路径必须是非空、已是 Unicode NFC 的 POSIX 相对路径；拒绝 `/` 绝对路径、Windows 盘符、反斜杠、ASCII 控制字符、空段、`.` 和 `..`。核心不做静默 Unicode 或 Windows 路径转换；
-- 清单保留原始 NFC 大小写，但使用 Node.js 固定版本的 Unicode `toLowerCase()` 结果作为便携碰撞键，拒绝精确重复、大小写碰撞及目录/文件前缀冲突。它不是通用语言学 case folding；若未来需要更宽字符兼容，必须升级 schema；
-- canonical payload 使用固定字段顺序、JSON 字符串转义、十进制安全整数，entry 按路径 UTF-8 字节序排列，再对 UTF-8 bytes 计算小写 SHA-256。清单自身的 `digest` 不进入摘要；
-- 清单根绑定 `tenantId` 并纳入 canonical digest；解析时必须与调用方可信 Tenant 一致，所有 entry 也必须属于该 Tenant。每个 entry 同时绑定 `sha256 + size` 与 `tenantId + purpose=workspace + incarnationId + physicalObjectKey`。物理键必须与 ADR-0010 stable key 后缀逐字段一致；同 SHA-256 不代表同物理对象；
+- 路径必须是非空、已是 Unicode NFC 的 POSIX 相对路径；拒绝未配对 surrogate、C0/C1 与 Unicode `Cf` 格式控制字符、`/` 绝对路径、Windows 盘符/ADS、反斜杠、Windows 非法字符 `< > : " | ? *`、保留设备名（忽略 ASCII 大小写且含扩展名）、尾点/尾空格、空段、`.` 和 `..`。核心不做静默 Unicode 或 Windows 路径转换；
+- schemaVersion 1 的大小写碰撞键精确定义为“只把 ASCII `A-Z` 映射到 `a-z`，其他 NFC code point 原样保留”。它拒绝精确重复、ASCII 大小写碰撞及双向目录/文件前缀冲突，但不宣称实现完整 Unicode case folding；Sandbox 目标仍是大小写敏感 POSIX。未来若扩大折叠表必须提升 schemaVersion，不能依赖会随 Node.js 变化的 Unicode 数据表；
+- canonical payload 使用固定字段顺序、JSON 字符串转义、非负且非 `-0` 的十进制安全整数，entry 按合法 Unicode 路径的 UTF-8 字节序排列，再对 UTF-8 bytes 计算小写 SHA-256。拒绝未配对 surrogate 后，UTF-8 comparator 对允许路径构成全序；清单自身的 `digest` 不进入摘要，并以固定 Unicode golden vector 防止实现漂移；
+- 清单根绑定 `tenantId` 并纳入 canonical digest；解析时必须与调用方可信 Tenant 一致，所有 entry 也必须属于该 Tenant。每个 entry 同时绑定 `sha256 + size` 与 `tenantId + purpose=workspace + incarnationId + physicalObjectKey`。物理键必须与 ADR-0010 stable key 后缀逐字段一致；同 `(tenantId, purpose, incarnationId)` 在一个清单中只能绑定相同 `sha256 + size + physicalObjectKey`，同 SHA-256 仍不代表同物理对象；
+- 所有 unknown 对象和数组先通过 data descriptor 单次快照；accessor、稀疏数组、额外数组字段、Symbol 字段和非普通对象失败关闭。后续校验与组装只读取快照，Proxy 的普通 `get` 不能在校验后替换字段；
 - 调用方每次创建/解析清单必须显式提供 `maxFiles`、`maxTotalBytes`，可选提供单文件和路径 UTF-8 字节限制。核心不提供产品默认值；
 - 物化计划只接受完整性通过的不可变清单和规范 POSIX 绝对根目录。输出路径均由安全相对路径解析得到；计划可从空目录或前一清单生成，目录创建按浅到深、删除按深到浅、文件按 UTF-8 字节序；
-- 相同路径且 `sha256 + size` 相同可作为保留候选，即使目标清单已切换到另一个合法 incarnation；它和其他同内容旧路径都显式标记仍需授权与实际内容校验。计划始终为目标清单的每个文件保留 fallback stable 对象身份，候选验证失败时不能留下旧字节或省略该文件。
+- 相同路径且 `sha256 + size` 相同可作为保留候选，即使目标清单已切换到另一个合法 incarnation；跨路径复用不在 schemaVersion 1 计划中提供，避免来源在删除后失效。计划编码固定阶段 `verify_existing → remove_files → remove_directories → ensure_directories → materialize_files`，执行器不得在验证候选前删除来源；目标清单的每个文件始终保留 fallback stable 对象身份，候选授权或实际内容校验失败时必须写入 fallback。
 
 ## 理由
 
@@ -76,10 +77,10 @@ WorkspaceRevision 已经是不可变领域对象，但此前只有整体 `object
 ## 验证
 
 - 排列属性测试证明 entry 顺序不改变 digest；单字节、路径和 incarnation 改变会改变 digest；
-- Unicode NFC、大小写、重复路径、目录/文件前缀、绝对路径、盘符、反斜杠、NUL/控制字符与 `.`/`..` 对抗测试失败关闭；
+- Unicode NFC/未配对 surrogate/C1/Cf、明确的 ASCII case-fold、重复路径、双向目录/文件前缀、绝对路径、Windows 保留名/非法字符/盘符/ADS、反斜杠、NUL 与 `.`/`..` 对抗测试失败关闭；
 - symlink、目录与特殊文件 entry 被 schemaVersion 1 拒绝；
 - 文件数、总字节、单文件和 UTF-8 路径限制均由测试传入不同策略验证；
-- 空目录与前一清单的物化计划逐字段确定，目录替换顺序和同内容复用候选可断言；
+- 空目录与前一清单的物化计划逐字段确定，验证必须先于删除，目录替换顺序和 stable fallback 可断言；
 - 包级 test、typecheck、build、根 `check:clean-vendor` 与 `git diff --check` 通过。
 
 ## 可逆性与回退

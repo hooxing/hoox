@@ -1,7 +1,12 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
-import { manifestError } from "./errors.js";
-import { workspaceCaseCollisionKey, workspaceRelativePath } from "./path.js";
+import { manifestError, WorkspaceManifestError } from "./errors.js";
+import {
+  containsForbiddenCodePoint,
+  hasUnpairedSurrogate,
+  workspaceCaseCollisionKey,
+  workspaceRelativePath,
+} from "./path.js";
 
 export const WORKSPACE_MANIFEST_SCHEMA_VERSION = 1 as const;
 
@@ -47,12 +52,94 @@ const INCARNATION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 function record(value: unknown, label: string): Record<string, unknown> {
+  let isArray: boolean;
+  try {
+    isArray = Array.isArray(value);
+  } catch {
+    throw new WorkspaceManifestError("INVALID_MANIFEST", `${label} 元数据不可安全读取`);
+  }
   manifestError(
-    typeof value === "object" && value !== null && !Array.isArray(value),
+    typeof value === "object" && value !== null && !isArray,
     "INVALID_MANIFEST",
     `${label} 必须是对象`,
   );
-  return value as Record<string, unknown>;
+  let prototype: object | null;
+  let descriptors: PropertyDescriptorMap;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw new WorkspaceManifestError("INVALID_MANIFEST", `${label} 元数据不可安全读取`);
+  }
+  manifestError(
+    prototype === Object.prototype || prototype === null,
+    "INVALID_MANIFEST",
+    `${label} 必须是普通数据对象`,
+  );
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(descriptors)) {
+    manifestError(typeof key === "string", "INVALID_MANIFEST", `${label} 不能包含 Symbol 字段`);
+    const descriptor = descriptors[key];
+    manifestError(
+      descriptor !== undefined && "value" in descriptor && descriptor.enumerable === true,
+      "INVALID_MANIFEST",
+      `${label} 不能包含 accessor 或非枚举字段`,
+    );
+    snapshot[key] = descriptor.value;
+  }
+  return Object.freeze(snapshot);
+}
+
+function array(value: unknown, label: string): readonly unknown[] {
+  let isArray: boolean;
+  let descriptors: PropertyDescriptorMap;
+  try {
+    isArray = Array.isArray(value);
+    descriptors = isArray ? Object.getOwnPropertyDescriptors(value) : {};
+  } catch {
+    throw new WorkspaceManifestError("INVALID_MANIFEST", `${label} 元数据不可安全读取`);
+  }
+  manifestError(isArray, "INVALID_MANIFEST", `${label} 必须是数组`);
+  const lengthDescriptor = descriptors.length;
+  manifestError(
+    lengthDescriptor !== undefined && "value" in lengthDescriptor,
+    "INVALID_MANIFEST",
+    `${label} length 无效`,
+  );
+  const length = lengthDescriptor.value;
+  manifestError(
+    typeof length === "number" && Number.isSafeInteger(length) && length >= 0,
+    "INVALID_MANIFEST",
+    `${label} length 无效`,
+  );
+  const descriptorKeys = Reflect.ownKeys(descriptors);
+  manifestError(
+    descriptorKeys.length === length + 1,
+    "INVALID_MANIFEST",
+    `${label} 不能包含空洞或额外字段`,
+  );
+  const snapshot: unknown[] = [];
+  for (const key of descriptorKeys) {
+    manifestError(
+      typeof key === "string" &&
+        (key === "length" ||
+          (/^(?:0|[1-9][0-9]*)$/u.test(key) &&
+            Number(key) < length &&
+            String(Number(key)) === key)),
+      "INVALID_MANIFEST",
+      `${label} 不能包含额外字段或 Symbol`,
+    );
+  }
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    manifestError(
+      descriptor !== undefined && "value" in descriptor && descriptor.enumerable === true,
+      "INVALID_MANIFEST",
+      `${label} 不能包含空洞或 accessor`,
+    );
+    snapshot.push(descriptor.value);
+  }
+  return Object.freeze(snapshot);
 }
 
 function assertExactKeys(
@@ -71,7 +158,7 @@ function assertExactKeys(
 
 function safeLimit(value: number, name: string, allowZero: boolean): number {
   manifestError(
-    Number.isSafeInteger(value) && (allowZero ? value >= 0 : value > 0),
+    Number.isSafeInteger(value) && !Object.is(value, -0) && (allowZero ? value >= 0 : value > 0),
     "INVALID_MANIFEST",
     `${name} 必须是安全整数`,
   );
@@ -79,15 +166,47 @@ function safeLimit(value: number, name: string, allowZero: boolean): number {
 }
 
 function validatePolicy(policy: WorkspaceManifestPolicy): WorkspaceManifestPolicy {
-  safeLimit(policy.maxFiles, "maxFiles", true);
-  safeLimit(policy.maxTotalBytes, "maxTotalBytes", true);
-  if (policy.maxSingleFileBytes !== undefined) {
-    safeLimit(policy.maxSingleFileBytes, "maxSingleFileBytes", true);
+  const input = record(policy, "WorkspaceManifestPolicy");
+  const allowedKeys = ["maxFiles", "maxTotalBytes", "maxSingleFileBytes", "maxPathUtf8Bytes"];
+  manifestError(
+    Object.keys(input).every((key) => allowedKeys.includes(key)) &&
+      Object.hasOwn(input, "maxFiles") &&
+      Object.hasOwn(input, "maxTotalBytes"),
+    "INVALID_MANIFEST",
+    "WorkspaceManifestPolicy 字段无效",
+  );
+  manifestError(typeof input.maxFiles === "number", "INVALID_MANIFEST", "maxFiles 类型无效");
+  manifestError(
+    typeof input.maxTotalBytes === "number",
+    "INVALID_MANIFEST",
+    "maxTotalBytes 类型无效",
+  );
+  const maxFiles = safeLimit(input.maxFiles, "maxFiles", true);
+  const maxTotalBytes = safeLimit(input.maxTotalBytes, "maxTotalBytes", true);
+  const maxSingleFileBytes = input.maxSingleFileBytes;
+  const maxPathUtf8Bytes = input.maxPathUtf8Bytes;
+  if (maxSingleFileBytes !== undefined) {
+    manifestError(
+      typeof maxSingleFileBytes === "number",
+      "INVALID_MANIFEST",
+      "maxSingleFileBytes 类型无效",
+    );
+    safeLimit(maxSingleFileBytes, "maxSingleFileBytes", true);
   }
-  if (policy.maxPathUtf8Bytes !== undefined) {
-    safeLimit(policy.maxPathUtf8Bytes, "maxPathUtf8Bytes", false);
+  if (maxPathUtf8Bytes !== undefined) {
+    manifestError(
+      typeof maxPathUtf8Bytes === "number",
+      "INVALID_MANIFEST",
+      "maxPathUtf8Bytes 类型无效",
+    );
+    safeLimit(maxPathUtf8Bytes, "maxPathUtf8Bytes", false);
   }
-  return policy;
+  return Object.freeze({
+    maxFiles,
+    maxTotalBytes,
+    ...(maxSingleFileBytes === undefined ? {} : { maxSingleFileBytes }),
+    ...(maxPathUtf8Bytes === undefined ? {} : { maxPathUtf8Bytes }),
+  });
 }
 
 function validatePhysicalObjectKey(
@@ -96,6 +215,11 @@ function validatePhysicalObjectKey(
   identity: Omit<WorkspaceStableObjectIdentity, "physicalObjectKey">,
 ): string {
   manifestError(typeof key === "string", "INVALID_OBJECT_IDENTITY", "物理对象键必须是字符串");
+  manifestError(
+    !hasUnpairedSurrogate(key) && !containsForbiddenCodePoint(key),
+    "INVALID_OBJECT_IDENTITY",
+    "物理对象键包含非法 Unicode 或控制字符",
+  );
   const segments = key.split("/");
   manifestError(
     key.length > 0 &&
@@ -140,6 +264,7 @@ function parseEntry(value: unknown): WorkspaceFileEntry {
   manifestError(
     typeof contentInput.size === "number" &&
       Number.isSafeInteger(contentInput.size) &&
+      !Object.is(contentInput.size, -0) &&
       contentInput.size >= 0,
     "INVALID_MANIFEST",
     "文件大小必须是非负安全整数",
@@ -193,20 +318,29 @@ function validateEntries(
   tenantId: string,
   policy?: WorkspaceManifestPolicy,
 ): readonly WorkspaceFileEntry[] {
+  const snapshotValues = array(values, "WorkspaceManifest entries");
   const checkedPolicy = policy === undefined ? undefined : validatePolicy(policy);
   if (checkedPolicy !== undefined) {
     manifestError(
-      values.length <= checkedPolicy.maxFiles,
+      snapshotValues.length <= checkedPolicy.maxFiles,
       "LIMIT_EXCEEDED",
       "文件数量超过调用方策略",
     );
   }
 
-  const entries = Array.from(values, (value) => parseEntry(value)).sort((left, right) =>
-    compareUtf8(left.path, right.path),
-  );
+  const entries = snapshotValues
+    .map(parseEntry)
+    .sort((left, right) => compareUtf8(left.path, right.path));
   const exact = new Set<string>();
   const folded = new Map<string, string>();
+  const foldedDirectories = new Set<string>();
+  for (const entry of entries) {
+    const segments = entry.path.split("/");
+    for (let index = 1; index < segments.length; index += 1) {
+      foldedDirectories.add(workspaceCaseCollisionKey(segments.slice(0, index).join("/")));
+    }
+  }
+  const incarnationBindings = new Map<string, string>();
   let totalBytes = 0;
   for (const entry of entries) {
     manifestError(
@@ -224,16 +358,20 @@ function validateEntries(
       "Workspace 清单包含大小写不敏感冲突",
     );
     folded.set(collisionKey, entry.path);
-
-    const segments = entry.path.split("/");
-    for (let index = 1; index < segments.length; index += 1) {
-      const prefix = segments.slice(0, index).join("/");
-      manifestError(
-        !exact.has(prefix) && !folded.has(workspaceCaseCollisionKey(prefix)),
-        "PATH_CONFLICT",
-        "Workspace 清单包含目录与文件冲突",
-      );
-    }
+    manifestError(
+      !foldedDirectories.has(collisionKey),
+      "PATH_CONFLICT",
+      "Workspace 清单包含目录与文件冲突",
+    );
+    const incarnationKey = `${entry.object.tenantId}\0${entry.object.purpose}\0${entry.object.incarnationId}`;
+    const incarnationBinding = `${entry.content.sha256}\0${entry.content.size}\0${entry.object.physicalObjectKey}`;
+    const existingBinding = incarnationBindings.get(incarnationKey);
+    manifestError(
+      existingBinding === undefined || existingBinding === incarnationBinding,
+      "INVALID_OBJECT_IDENTITY",
+      "同一 incarnation 被绑定到不同内容或物理对象键",
+    );
+    incarnationBindings.set(incarnationKey, incarnationBinding);
     if (checkedPolicy?.maxPathUtf8Bytes !== undefined) {
       manifestError(
         Buffer.byteLength(entry.path, "utf8") <= checkedPolicy.maxPathUtf8Bytes,
@@ -294,17 +432,19 @@ export function createWorkspaceManifest(
   input: { readonly tenantId: string; readonly entries: readonly unknown[] },
   policy: WorkspaceManifestPolicy,
 ): WorkspaceManifest {
+  const snapshot = record(input, "WorkspaceManifestInput");
+  assertExactKeys(snapshot, ["tenantId", "entries"], "WorkspaceManifestInput");
   manifestError(
-    TENANT_ID_PATTERN.test(input.tenantId),
+    typeof snapshot.tenantId === "string" && TENANT_ID_PATTERN.test(snapshot.tenantId),
     "INVALID_MANIFEST",
     "清单 Tenant ID 格式无效",
   );
-  manifestError(Array.isArray(input.entries), "INVALID_MANIFEST", "entries 必须是数组");
-  const parsedEntries = validateEntries(input.entries, input.tenantId, policy);
+  const entries = array(snapshot.entries, "WorkspaceManifest entries");
+  const parsedEntries = validateEntries(entries, snapshot.tenantId, policy);
   return Object.freeze({
     schemaVersion: WORKSPACE_MANIFEST_SCHEMA_VERSION,
-    tenantId: input.tenantId,
-    digest: digestWorkspaceManifestEntries(input.tenantId, parsedEntries),
+    tenantId: snapshot.tenantId,
+    digest: digestWorkspaceManifestEntries(snapshot.tenantId, parsedEntries),
     entries: parsedEntries,
   });
 }
@@ -315,6 +455,11 @@ export function parseWorkspaceManifest(
   expectedTenantId: string,
   policy: WorkspaceManifestPolicy,
 ): WorkspaceManifest {
+  manifestError(
+    typeof expectedTenantId === "string" && TENANT_ID_PATTERN.test(expectedTenantId),
+    "INVALID_MANIFEST",
+    "可信 Tenant ID 格式无效",
+  );
   const input = record(value, "WorkspaceManifest");
   assertExactKeys(input, ["schemaVersion", "tenantId", "digest", "entries"], "WorkspaceManifest");
   manifestError(

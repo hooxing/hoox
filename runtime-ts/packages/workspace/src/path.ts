@@ -4,7 +4,7 @@ import { manifestError } from "./errors.js";
 const WINDOWS_DRIVE_PREFIX = /^[A-Za-z]:/u;
 const WINDOWS_ILLEGAL_CHARACTER = /[<>:"|?*]/u;
 const WINDOWS_RESERVED_DEVICE =
-  /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9]|lpt[1-9])(?:\.|$)/iu;
+  /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/iu;
 
 export function containsForbiddenCodePoint(value: string): boolean {
   return Array.from(value).some((character) => {

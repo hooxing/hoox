@@ -168,6 +168,12 @@ describe("WorkspaceManifest canonical 契约", () => {
     "dir/LpT1.log",
     "AUX.json",
     "COM9",
+    "COM¹",
+    "com².txt",
+    "CoM³.log",
+    "LPT¹",
+    "lpt².txt",
+    "LpT³.log",
     "nul",
     "conin$",
     "name.",
@@ -224,6 +230,36 @@ describe("WorkspaceManifest canonical 契约", () => {
         ]),
       "INVALID_MANIFEST",
     );
+  });
+
+  it("maxFiles 在遍历不可信 entries 前失败，不读取元素或枚举全部键", () => {
+    const base = [file("a", "1")];
+    let elementDescriptorReads = 0;
+    let ownKeysCalls = 0;
+    let directReads = 0;
+    const oversized = new Proxy(base, {
+      get() {
+        directReads += 1;
+        throw new Error("不应直接读取数组字段");
+      },
+      ownKeys() {
+        ownKeysCalls += 1;
+        throw new Error("超限前不应枚举元素");
+      },
+      getOwnPropertyDescriptor(target, property) {
+        if (property !== "length") {
+          elementDescriptorReads += 1;
+          throw new Error("超限前不应读取元素 descriptor");
+        }
+        return Reflect.getOwnPropertyDescriptor(target, property);
+      },
+    });
+    expectCode(() => manifest(oversized, { ...POLICY, maxFiles: 0 }), "LIMIT_EXCEEDED");
+    expect({ directReads, ownKeysCalls, elementDescriptorReads }).toEqual({
+      directReads: 0,
+      ownKeysCalls: 0,
+      elementDescriptorReads: 0,
+    });
   });
 
   it("同一 Tenant/purpose/incarnation 不能绑定不同内容或物理键", () => {

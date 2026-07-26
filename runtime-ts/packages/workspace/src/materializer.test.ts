@@ -140,6 +140,7 @@ class StableBlobs implements WorkspaceStableBlobReadPort {
   authorizeCalls = 0;
   authorizationOverride: Awaited<ReturnType<WorkspaceStableBlobReadPort["authorize"]>> | undefined;
   headOverride: Awaited<ReturnType<WorkspaceStableBlobReadPort["head"]>> | undefined;
+  readOverride: AsyncIterable<Uint8Array> | undefined;
 
   seed(value: ReturnType<typeof item>) {
     this.bodies.set(value.entry.object.physicalObjectKey, value.body);
@@ -170,10 +171,11 @@ class StableBlobs implements WorkspaceStableBlobReadPort {
       : { status: "not_found" as const };
   }
 
-  async *read(receipt: WorkspaceStableAuthorizationReceipt) {
+  read(receipt: WorkspaceStableAuthorizationReceipt): AsyncIterable<Uint8Array> {
+    if (this.readOverride !== undefined) return this.readOverride;
     const body = this.bodies.get(receipt.object.physicalObjectKey);
     if (body === undefined) throw new Error("fake missing");
-    yield this.corruptRead ? Buffer.from("corrupt") : body;
+    return one(this.corruptRead ? Buffer.from("corrupt") : body);
   }
 }
 
@@ -269,6 +271,47 @@ function one(body: Uint8Array): AsyncIterable<Uint8Array> {
   })();
 }
 
+function switchingIterable<T>(
+  value: T,
+  switched: T,
+  calls: { safe: number; switched: number },
+): AsyncIterable<T> {
+  const source = {} as AsyncIterable<T>;
+  const switchedFactory = () => {
+    calls.switched += 1;
+    return oneValue(switched)[Symbol.asyncIterator]();
+  };
+  const safeFactory = () => {
+    calls.safe += 1;
+    Object.defineProperty(source, Symbol.asyncIterator, {
+      configurable: true,
+      value: switchedFactory,
+    });
+    return oneValue(value)[Symbol.asyncIterator]();
+  };
+  Object.defineProperty(source, Symbol.asyncIterator, {
+    configurable: true,
+    value: safeFactory,
+  });
+  return source;
+}
+
+function accessorIterable<T>(value: T, calls: { getter: number }): AsyncIterable<T> {
+  return Object.defineProperty({}, Symbol.asyncIterator, {
+    configurable: true,
+    get: () => {
+      calls.getter += 1;
+      return () => oneValue(value)[Symbol.asyncIterator]();
+    },
+  }) as AsyncIterable<T>;
+}
+
+function oneValue<T>(value: T): AsyncIterable<T> {
+  return (async function* () {
+    yield value;
+  })();
+}
+
 function setup(values: ReturnType<typeof item>[]) {
   const journal = new Journal();
   const blobs = new StableBlobs();
@@ -288,6 +331,53 @@ function request(operationKey: string, target: WorkspaceManifest, previous?: Wor
 }
 
 describe("Workspace materializer 可靠边界", () => {
+  it("stable read 流拒绝协议 getter，捕获 data method 后不受 provider 切换影响", async () => {
+    const value = item("file", "body");
+    const accessor = setup([value]);
+    const getterCalls = { getter: 0 };
+    accessor.blobs.readOverride = accessorIterable(value.body, getterCalls);
+    await expect(
+      accessor.service.materialize(request("stable-accessor", manifest([value]))),
+    ).rejects.toMatchObject({ code: "DEPENDENCY_FAILED" });
+    expect(getterCalls.getter).toBe(0);
+    expect(accessor.sandbox.writeEffects).toBe(0);
+
+    const captured = setup([value]);
+    const factoryCalls = { safe: 0, switched: 0 };
+    captured.blobs.readOverride = switchingIterable(value.body, Buffer.from("evil"), factoryCalls);
+    await captured.service.materialize(request("stable-captured", manifest([value])));
+    expect(factoryCalls).toEqual({ safe: 1, switched: 0 });
+    expect(captured.sandbox.files.get("file")).toEqual(value.body);
+  });
+
+  it("inspect body 流拒绝协议 getter，捕获 data method 后不受 provider 切换影响", async () => {
+    const value = item("file", "body");
+    const accessor = setup([value]);
+    const getterCalls = { getter: 0 };
+    accessor.sandbox.inspectOverride = {
+      status: "regular",
+      body: accessorIterable(value.body, getterCalls),
+    };
+    await expect(
+      accessor.service.materialize(
+        request("inspect-body-accessor", manifest([value]), manifest([value])),
+      ),
+    ).rejects.toMatchObject({ code: "DEPENDENCY_FAILED" });
+    expect(getterCalls.getter).toBe(0);
+
+    const captured = setup([value]);
+    const factoryCalls = { safe: 0, switched: 0 };
+    captured.sandbox.inspectOverride = {
+      status: "regular",
+      body: switchingIterable(value.body, Buffer.from("evil"), factoryCalls),
+    };
+    await captured.service.materialize(
+      request("inspect-body-captured", manifest([value]), manifest([value])),
+    );
+    expect(factoryCalls).toEqual({ safe: 1, switched: 0 });
+    expect(captured.sandbox.writeEffects).toBe(0);
+  });
+
   it("授权先于删除并严格执行计划阶段，结果绑定 scope 与 sandbox generation", async () => {
     const keep = item("a/keep", "same");
     const old = item("old/deep", "old");

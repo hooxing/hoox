@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { PersistenceError, mapPersistenceError } from "./errors.js";
+import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { assertSafeSchemaName, withTransaction } from "./postgres.js";
 
 const rolePattern = /^[a-z_][a-z0-9_]{0,62}$/;
@@ -29,6 +29,7 @@ const runWorkerTables = new Set([
   "external_effect_permits",
   "mutation_receipts",
 ]);
+const runDispatchTables = new Set(["api_idempotency_records", "run_dispatch_outbox"]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -61,6 +62,8 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["effect_invocations", new Set(["SELECT", "INSERT"])],
   ["external_effect_permits", new Set(["SELECT", "INSERT"])],
   ["mutation_receipts", new Set(["SELECT", "INSERT"])],
+  ["api_idempotency_records", new Set(["SELECT", "INSERT"])],
+  ["run_dispatch_outbox", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -112,6 +115,20 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ["sandbox_registry", new Set(["state", "actual_ttl_seconds", "updated_at"])],
   ["cleanup_outbox", new Set(["state", "disposition", "payload", "payload_digest", "updated_at"])],
   ["external_effect_permits", new Set(["consumed_at"])],
+  [
+    "run_dispatch_outbox",
+    new Set([
+      "state",
+      "generation",
+      "claim_token",
+      "claimed_by",
+      "lease_expires_at",
+      "next_attempt_at",
+      "dispatch_attempts",
+      "last_error_code",
+      "updated_at",
+    ]),
+  ],
 ]);
 
 async function hasMembershipLockMarker(client: PoolClient): Promise<boolean> {
@@ -132,18 +149,40 @@ async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
   return result.rows[0]?.present === true;
 }
 
+async function hasRunDispatchState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    // 允许迁移序号留孔，因此 ACL 以实际表及关键列为准，而不是“版本 >= 5”的猜测。
+    `SELECT EXISTS (
+       SELECT 1
+         FROM pg_class relation
+         JOIN pg_attribute column_state ON column_state.attrelid=relation.oid
+        WHERE relation.relnamespace=$1::regnamespace
+          AND relation.relname='run_dispatch_outbox' AND relation.relkind='r'
+          AND column_state.attname='outbox_id' AND column_state.attnum > 0
+          AND NOT column_state.attisdropped
+     ) AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function activeTablePolicy(
   client: PoolClient,
+  schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeTablePolicy);
   if (!(await hasRunWorkerState(client))) {
     for (const table of runWorkerTables) policy.delete(table);
+  }
+  if (!(await hasRunDispatchState(client, schema))) {
+    for (const table of runDispatchTables) policy.delete(table);
   }
   return policy;
 }
 
 async function activeColumnUpdatePolicy(
   client: PoolClient,
+  schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
@@ -153,6 +192,9 @@ async function activeColumnUpdatePolicy(
   );
   if (!(await hasRunWorkerState(client))) {
     for (const table of runWorkerTables) policy.delete(table);
+  }
+  if (!(await hasRunDispatchState(client, schema))) {
+    for (const table of runDispatchTables) policy.delete(table);
   }
   return policy;
 }
@@ -499,8 +541,8 @@ async function assertActiveRuntimeWhitelist(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<void> {
-  const tablePolicy = await activeTablePolicy(client);
-  const columnUpdatePolicy = await activeColumnUpdatePolicy(client);
+  const tablePolicy = await activeTablePolicy(client, context.schema);
+  const columnUpdatePolicy = await activeColumnUpdatePolicy(client, context.schema);
   const relationResult = await client.query<{ table_name: string }>(
     `SELECT relname AS table_name
        FROM pg_class
@@ -681,6 +723,14 @@ export async function bootstrapRuntimeAccessOnClient(
        TO ${role}`,
     );
   }
+  if (await hasRunDispatchState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.api_idempotency_records,
+         ${schema}.run_dispatch_outbox
+       TO ${role}`,
+    );
+  }
   await client.query(
     `GRANT UPDATE(state, current_incarnation_id, generation, current_claim_id, lease_expires_at, updated_at)
        ON TABLE ${schema}.blob_lifecycles TO ${role};
@@ -717,6 +767,14 @@ export async function bootstrapRuntimeAccessOnClient(
        ON TABLE ${schema}.cleanup_outbox TO ${role};
        GRANT UPDATE(consumed_at)
          ON TABLE ${schema}.external_effect_permits TO ${role}`,
+    );
+  }
+  if (await hasRunDispatchState(client, context.schema)) {
+    await client.query(
+      `GRANT UPDATE(
+         state, generation, claim_token, claimed_by, lease_expires_at, next_attempt_at,
+         dispatch_attempts, last_error_code, updated_at
+       ) ON TABLE ${schema}.run_dispatch_outbox TO ${role}`,
     );
   }
   await assertActiveRuntimeWhitelist(client, context);

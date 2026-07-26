@@ -1,25 +1,28 @@
 import { randomUUID } from "node:crypto";
+import type { CoreRepositories } from "@cube-runtime/persistence";
+import { PersistenceError } from "@cube-runtime/persistence";
 import {
+  type CreateRunRequest,
   CreateRunRequestSchema,
+  type CreateThreadRequest,
   CreateThreadRequestSchema,
+  createErrorEnvelope,
+  type ErrorEnvelope,
   ErrorEnvelopeSchema,
   HealthSuccessEnvelopeSchema,
+  MAX_RUN_INPUT_UTF8_BYTES,
+  type RunPath,
   RunPathSchema,
   RunSuccessEnvelopeSchema,
+  type ThreadListQuery,
   ThreadListQuerySchema,
   ThreadPageSuccessEnvelopeSchema,
+  type ThreadPath,
   ThreadPathSchema,
   ThreadSuccessEnvelopeSchema,
-  createErrorEnvelope,
-  type CreateRunRequest,
-  type CreateThreadRequest,
-  type ErrorEnvelope,
-  type RunPath,
-  type ThreadListQuery,
-  type ThreadPath,
 } from "@cube-runtime/protocol";
-import { PersistenceError } from "@cube-runtime/persistence";
 import Fastify, { type FastifyInstance, type FastifyRequest, LogController } from "fastify";
+import { type ApiCreateCapability, isApiCreateCapability } from "./capabilities.js";
 import type {
   ApiClock,
   ApiIdGenerator,
@@ -28,9 +31,7 @@ import type {
   ReadinessPort,
   ThreadCursorCodec,
 } from "./ports.js";
-import { isApiCreateCapability, type ApiCreateCapability } from "./capabilities.js";
 import { ApiFailure, type ApiFailureKind, ApiService } from "./service.js";
-import type { CoreRepositories } from "@cube-runtime/persistence";
 
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
@@ -121,7 +122,9 @@ export function createApiApp(
     throw new TypeError("API 创建能力必须由 createApiCreateCapability 签发");
   }
   const app = Fastify({
-    bodyLimit: options.bodyLimitBytes ?? 64 * 1024,
+    // 输入以解码后的 UTF-8 字节计量。JSON 的 \u0000 等转义最多占六倍 wire 字节，
+    // 因此 HTTP 上限不能错误地把合法的 1 MiB 解码输入挡在解析器之前。
+    bodyLimit: options.bodyLimitBytes ?? MAX_RUN_INPUT_UTF8_BYTES * 6 + 16 * 1024,
     requestTimeout: options.requestTimeoutMs ?? 15_000,
     handlerTimeout: options.requestTimeoutMs ?? 15_000,
     connectionTimeout: 5_000,
@@ -274,7 +277,12 @@ export function createApiApp(
         const auth = await service.authenticate(authorization(request), requestId(request));
         return success(
           request,
-          await service.createRun(auth, request.params.threadId, requireIdempotencyKey(request)),
+          await service.createRun(
+            auth,
+            request.params.threadId,
+            request.body.input,
+            requireIdempotencyKey(request),
+          ),
         );
       },
     );

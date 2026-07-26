@@ -3,21 +3,21 @@ import {
   createMembership,
   createPersonalTenant,
   createUser,
+  type IsoTimestamp,
   isoTimestamp,
+  type MembershipRole,
   membershipId,
+  type Run,
   rehydrateTenant,
   runId,
-  tenantId,
-  threadId,
-  userId,
-  workspaceId,
-  type IsoTimestamp,
-  type MembershipRole,
-  type Run,
   type Tenant,
   type Thread,
+  tenantId,
+  threadId,
   type User,
+  userId,
   type Workspace,
+  workspaceId,
 } from "@cube-runtime/domain";
 import type {
   ArchiveThreadCommandPort,
@@ -28,7 +28,9 @@ import type {
   Versioned,
 } from "@cube-runtime/persistence";
 import { afterEach, describe, expect, it } from "vitest";
-import { createApiApp, type ApiDependencies } from "./app.js";
+import { type ApiDependencies, createApiApp } from "./app.js";
+import { createApiCreateCapability } from "./capabilities.js";
+import { createThreadCursorCodec } from "./cursor.js";
 import type {
   AuthPrincipal,
   EnqueueOutboxPort,
@@ -36,8 +38,6 @@ import type {
   IdempotentCreateResult,
   ThreadCreationPort,
 } from "./ports.js";
-import { createApiCreateCapability } from "./capabilities.js";
-import { createThreadCursorCodec } from "./cursor.js";
 
 class AsyncBarrier {
   private arrived = 0;
@@ -211,12 +211,26 @@ class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThre
   async createQueuedRun(input: {
     readonly scope: TenantScope;
     readonly run: Run;
+    readonly thread: Thread;
+    readonly inputText: string;
     readonly idempotency: IdempotentCommand;
   }): Promise<IdempotentCreateResult<Run>> {
     await this.beforeRunCreate?.();
     return this.idempotent(input.scope, "run", input.idempotency, input.run, () => {
       this.runs.set(key(input.scope, input.run.id), { entity: input.run, version: 0n });
     });
+  }
+
+  async replayQueuedRun(input: {
+    readonly scope: TenantScope;
+    readonly thread: Thread;
+    readonly idempotency: IdempotentCommand;
+  }): Promise<IdempotentCreateResult<Run> | { readonly outcome: "not_found" }> {
+    const commandKey = `${input.scope.tenantId}:${input.scope.userId}:run:${input.idempotency.key}`;
+    const existing = this.idempotency.get(commandKey);
+    if (existing === undefined) return { outcome: "not_found" };
+    if (existing.hash !== input.idempotency.requestHash) return { outcome: "key_conflict" };
+    return { outcome: "replayed", entity: existing.entity as Run };
   }
 
   async archiveThread(
@@ -546,7 +560,7 @@ describe("Fastify API 契约", () => {
       method: "POST" as const,
       url: "/v1/threads/thread_1/runs",
       headers: { authorization: "Bearer token-a", "idempotency-key": "run-key-0001" },
-      payload: {},
+      payload: { input: "请生成执行结果" },
     };
     state.idempotencyFirstObservations.length = 0;
     state.idempotencyOutcomes.length = 0;
@@ -557,6 +571,12 @@ describe("Fastify API 契约", () => {
     expect(state.runs).toHaveLength(1);
     expect(state.idempotencyFirstObservations).toEqual([false, false]);
     expect([...state.idempotencyOutcomes].sort()).toEqual(["created", "replayed"]);
+
+    const conflict = await app.inject({
+      ...request,
+      payload: { input: "相同幂等键但不同输入" },
+    });
+    expect(conflict.statusCode).toBe(409);
 
     const loaded = await app.inject({
       method: "GET",
@@ -594,11 +614,104 @@ describe("Fastify API 契约", () => {
       method: "POST",
       url: "/v1/threads/thread_1/runs",
       headers: { authorization: "Bearer token-a", "idempotency-key": "run-race-key" },
-      payload: {},
+      payload: { input: "归档竞态输入" },
     });
     expect(response.statusCode).toBe(422);
     expect(response.json().error.code).toBe("INVALID_STATE");
     expect(state.runs).toHaveLength(0);
+  });
+
+  it("Thread 归档后同键同载荷先重放原 Run，不同载荷固定冲突", async () => {
+    const { app } = fixture();
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-replay-archived" },
+      payload: { title: "归档后回放" },
+    });
+    const request = {
+      method: "POST" as const,
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-replay-archived" },
+      payload: { input: "同键原始输入" },
+    };
+    const first = await app.inject(request);
+    expect(first.statusCode).toBe(200);
+    await app.inject({
+      method: "DELETE",
+      url: "/v1/threads/thread_1",
+      headers: { authorization: "Bearer token-a" },
+    });
+    const replay = await app.inject(request);
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json().data).toEqual(first.json().data);
+    const conflict = await app.inject({ ...request, payload: { input: "归档后的不同输入" } });
+    expect(conflict.statusCode).toBe(409);
+  });
+
+  it("Run 输入按 UTF-8 字节而非 UTF-16 字符数限制", async () => {
+    const { app } = fixture();
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-input-limit" },
+      payload: { title: "输入边界任务" },
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-input-limit-key" },
+      // 单个 emoji 为 4 字节；字符数远小于 1 MiB，字节数却超过边界。
+      payload: { input: "😀".repeat(262_145) },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("INVALID_REQUEST");
+  });
+
+  it("拒绝 trim 后为空的 Run 输入", async () => {
+    const { app } = fixture();
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-blank-input" },
+      payload: { title: "空白输入任务" },
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-blank-input-key" },
+      payload: { input: " \n\t " },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe("INVALID_REQUEST");
+  });
+
+  it("HTTP body 上限覆盖 1 MiB 解码输入的 JSON 转义，不以 wire 字节误拒绝", async () => {
+    const { app } = fixture();
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-escaped-input" },
+      payload: { title: "转义输入任务" },
+    });
+    // 每个 \u0001 在网络上占六字节，解析后仅占一个 UTF-8 字节。
+    const escaped = "\\u0001".repeat(1_048_576);
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: {
+        authorization: "Bearer token-a",
+        "idempotency-key": "run-escaped-input-key",
+        "content-type": "application/json",
+      },
+      payload: `{"input":"${escaped}"}`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.status).toBe("queued");
   });
 
   it("超限请求体和无效游标只返回固定 ErrorEnvelope", async () => {
@@ -727,7 +840,7 @@ describe("Fastify API 契约", () => {
       method: "POST",
       url: "/v1/threads/thread_1/runs",
       headers: { authorization: "Bearer token-a", "idempotency-key": "revoke-run-key" },
-      payload: {},
+      payload: { input: "撤权竞态输入" },
     });
     expect(deniedRun.statusCode).toBe(404);
     expect(runFixture.state.runs.size).toBe(0);

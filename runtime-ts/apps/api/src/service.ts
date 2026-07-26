@@ -14,8 +14,11 @@ import type {
   TenantScope,
   ThreadListCursor,
 } from "@cube-runtime/persistence";
-import { toRunDto, toThreadDto } from "@cube-runtime/protocol-mapper";
 import type { RunDto, ThreadDto, ThreadPageDto } from "@cube-runtime/protocol";
+import { MAX_RUN_INPUT_UTF8_BYTES } from "@cube-runtime/protocol";
+import { toRunDto, toThreadDto } from "@cube-runtime/protocol-mapper";
+import type { ApiCreateCapability } from "./capabilities.js";
+import { InvalidThreadCursorError } from "./cursor.js";
 import type {
   ApiClock,
   ApiIdGenerator,
@@ -24,8 +27,6 @@ import type {
   AuthPrincipal,
   ThreadCursorCodec,
 } from "./ports.js";
-import type { ApiCreateCapability } from "./capabilities.js";
-import { InvalidThreadCursorError } from "./cursor.js";
 
 export type ApiFailureKind =
   | "bad_request"
@@ -186,15 +187,42 @@ export class ApiService {
     }
   }
 
-  async createRun(auth: AuthContext, rawThreadId: string, idempotencyKey: string): Promise<RunDto> {
+  async createRun(
+    auth: AuthContext,
+    rawThreadId: string,
+    inputText: string,
+    idempotencyKey: string,
+  ): Promise<RunDto> {
     try {
       const capability = this.dependencies.createCapability;
       if (capability === undefined) throw new ApiFailure("not_found");
+      // JavaScript 字符串长度是 UTF-16 code unit，不能作为持久输入的配额依据。
+      if (
+        inputText.trim().length === 0 ||
+        Buffer.byteLength(inputText, "utf8") > MAX_RUN_INPUT_UTF8_BYTES
+      ) {
+        throw new ApiFailure("bad_request");
+      }
       const thread = await this.dependencies.repositories.threads.get(
         auth.scope,
         threadId(rawThreadId),
       );
       if (thread === undefined) throw new ApiFailure("not_found");
+      const idempotency = {
+        key: idempotencyKey,
+        requestHash: commandHash("run.create", { threadId: thread.entity.id, inputText }),
+      } as const;
+      // 回放先于 createRun 的 active Thread 领域约束；归档不改变已经提交命令的 HTTP 结果。
+      const replay = await capability.enqueueOutbox.replayQueuedRun({
+        scope: auth.scope,
+        thread: thread.entity,
+        idempotency,
+      });
+      if (replay.outcome === "key_conflict") throw new ApiFailure("conflict");
+      if (replay.outcome === "not_authorized") throw new ApiFailure("not_found");
+      if (replay.outcome === "created" || replay.outcome === "replayed") {
+        return toRunDto(replay.entity);
+      }
       const run = createRun({
         id: this.dependencies.ids.run(),
         thread: thread.entity,
@@ -203,10 +231,9 @@ export class ApiService {
       const result = await capability.enqueueOutbox.createQueuedRun({
         scope: auth.scope,
         run,
-        idempotency: {
-          key: idempotencyKey,
-          requestHash: commandHash("run.create", { threadId: thread.entity.id }),
-        },
+        thread: thread.entity,
+        inputText,
+        idempotency,
       });
       if (result.outcome === "key_conflict") throw new ApiFailure("conflict");
       if (result.outcome === "parent_inactive") throw new ApiFailure("invalid_state");

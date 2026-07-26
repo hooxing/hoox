@@ -1,7 +1,7 @@
-import { sha256Digest, type IsoTimestamp, type Sha256Digest } from "@cube-runtime/domain";
-import type { RuntimeMutation, RuntimeOutboxV1, ValidatedWorkspaceChange } from "./ports.js";
-import type { ControlledRolloutProjection } from "@cube-runtime/pi-adapter";
 import { createHash } from "node:crypto";
+import { type IsoTimestamp, type Sha256Digest, sha256Digest } from "@cube-runtime/domain";
+import type { ControlledRolloutProjection } from "@cube-runtime/pi-adapter";
+import type { RuntimeMutation, RuntimeOutboxV1, ValidatedWorkspaceChange } from "./ports.js";
 
 /**
  * 幂等 digest 排除会随续租变化的 expiresAt，只绑定 scope、栅栏身份、版本和业务 payload。
@@ -50,7 +50,42 @@ export function sandboxCleanupIdentityDigest(
 }
 
 export function rolloutProjectionDigest(projection: ControlledRolloutProjection): Sha256Digest {
+  assertControlledRolloutProjection(projection);
   return digest(projection);
+}
+
+/**
+ * Projection 是跨 API、持久化和 Worker 的不可信边界；三处必须使用同一套规则，
+ * 否则持久化的恢复快照可能在 Worker 启动后才被拒绝。
+ */
+export function assertControlledRolloutProjection(projection: ControlledRolloutProjection): void {
+  if (
+    projection.schemaVersion !== 1 ||
+    !projection.checkpointId.trim() ||
+    Buffer.byteLength(projection.checkpointId, "utf8") > 200 ||
+    projection.turns.length > 200
+  ) {
+    throw new Error("受控上下文投影无效");
+  }
+  let totalBytes = 0;
+  for (const turn of projection.turns) {
+    if (turn.role !== "user" && turn.role !== "assistant") {
+      throw new Error("受控上下文投影无效");
+    }
+    const text = turn.text.trim();
+    const textBytes = Buffer.byteLength(text, "utf8");
+    if (
+      !text ||
+      textBytes > 16 * 1024 ||
+      /(?:[A-Za-z]:[\\/]|\/(?:home|Users|var\/lib|opt|srv)\/)/u.test(text)
+    ) {
+      throw new Error("受控上下文投影无效");
+    }
+    totalBytes += textBytes;
+  }
+  if (totalBytes > 64 * 1024 || Buffer.byteLength(JSON.stringify(projection), "utf8") > 64 * 1024) {
+    throw new Error("受控上下文投影无效");
+  }
 }
 
 export function workspaceChangeDigest(change: ValidatedWorkspaceChange): Sha256Digest {

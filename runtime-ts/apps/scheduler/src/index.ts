@@ -2,3 +2,4 @@
 export const serviceName = "scheduler" as const;
 
 export * from "./process-entry.js";
+export * from "./run-dispatch.js";

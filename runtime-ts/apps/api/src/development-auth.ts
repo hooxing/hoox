@@ -1,0 +1,33 @@
+import type { RuntimeEnvironment } from "@cube-runtime/process-runtime";
+import type { AuthContextResolver, AuthPrincipal } from "./ports.js";
+
+/**
+ * 仅供开发/测试黑盒 Gate 使用的固定身份解析器。
+ * 它不读取客户端声称的租户 Header，且生产环境在构造阶段直接拒绝。
+ */
+export function createDevelopmentAuthResolver(input: {
+  readonly runtimeEnvironment: RuntimeEnvironment;
+  readonly principals: readonly [AuthPrincipal, AuthPrincipal];
+}): AuthContextResolver {
+  if (input.runtimeEnvironment === "production") {
+    throw new Error("DEVELOPMENT_AUTH_FORBIDDEN_IN_PRODUCTION");
+  }
+  const [first, second] = input.principals;
+  if (
+    first.userId.trim().length === 0 ||
+    first.tenantId.trim().length === 0 ||
+    second.userId.trim().length === 0 ||
+    second.tenantId.trim().length === 0
+  ) {
+    throw new TypeError("开发身份不能为空");
+  }
+  // Token 只是本地 fixture 选择器，不是可部署认证协议；调用方只能传入白名单中的两个值。
+  const accepted = new Map<string, AuthPrincipal>([
+    ["Bearer dev-user-a", Object.freeze({ ...first })],
+    ["Bearer dev-user-b", Object.freeze({ ...second })],
+  ]);
+  return Object.freeze({
+    resolve: async (input: { readonly authorization: string | undefined }) =>
+      accepted.get(input.authorization ?? ""),
+  });
+}

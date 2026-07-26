@@ -29,7 +29,7 @@ describe("Pi 安全适配", () => {
     async () => {
       const sandbox = new FakeSandboxHandle("pi-fake");
       let modelContext = "";
-      const { controller, events } = await harness(
+      const { controller, events, toolAuthorizationCount, authorizedCalls } = await harness(
         [
           (context) => {
             modelContext = JSON.stringify(context);
@@ -38,6 +38,9 @@ describe("Pi 安全适配", () => {
               { stopReason: "toolUse" },
             );
           },
+          fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path: "/tmp/pi.txt" }), {
+            stopReason: "toolUse",
+          }),
           fauxAssistantMessage("完成"),
         ],
         sandbox,
@@ -46,7 +49,15 @@ describe("Pi 安全适配", () => {
       await controller.prompt("把内容写入隔离环境");
 
       expect(sandbox.files.get("/tmp/pi.txt")).toBe("pi-safe");
+      expect(toolAuthorizationCount()).toBe(2);
+      expect(authorizedCalls.map((call) => call.toolName)).toEqual([
+        "sandbox_write_file",
+        "sandbox_read_file",
+      ]);
+      expect(new Set(authorizedCalls.map((call) => call.callId)).size).toBe(2);
+      expect(authorizedCalls.every((call) => /^[a-f0-9]{64}$/u.test(call.argsDigest))).toBe(true);
       expect(events.filter((event) => event.type === "message.completed")).toEqual([
+        { type: "message.completed", stopReason: "toolUse" },
         { type: "message.completed", stopReason: "toolUse" },
         { type: "message.completed", stopReason: "stop" },
       ]);
@@ -64,6 +75,60 @@ describe("Pi 安全适配", () => {
       expect(modelContext).toContain("/workspace");
       expect(modelContext).not.toMatch(hostPathPattern(process.cwd()));
       expect(modelContext).not.toMatch(hostPathPattern(process.cwd().replaceAll("\\", "/")));
+    },
+  );
+
+  it.runIf(process.platform === "linux")("Tool Router 在 DB 许可拒绝时不触碰 Sandbox", async () => {
+    const sandbox = new FakeSandboxHandle("pi-denied-tool");
+    const { controller, events } = await harness(
+      [
+        fauxAssistantMessage(
+          fauxToolCall("sandbox_write_file", { path: "/tmp/denied.txt", content: "no" }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("已处理"),
+      ],
+      sandbox,
+      undefined,
+      async () => {
+        throw new Error("DB 拒绝外部副作用许可");
+      },
+    );
+
+    await controller.prompt("尝试写入");
+
+    expect(sandbox.files.has("/tmp/denied.txt")).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "tool.completed", isError: true }),
+    );
+  });
+
+  it.runIf(process.platform === "linux")(
+    "Tool Router 用单调时钟拒绝迟到 continuation，且不触碰 Sandbox",
+    async () => {
+      const sandbox = new FakeSandboxHandle("pi-expired-tool");
+      const { controller, events } = await harness(
+        [
+          fauxAssistantMessage(
+            fauxToolCall("sandbox_write_file", { path: "/tmp/expired.txt", content: "no" }),
+            { stopReason: "toolUse" },
+          ),
+          fauxAssistantMessage("已处理"),
+        ],
+        sandbox,
+        undefined,
+        async () => ({
+          consumedAtMonotonicMs: performance.now() - 1_000,
+          maxContinuationDelayMs: 1,
+        }),
+      );
+
+      await controller.prompt("尝试使用迟到许可写入");
+
+      expect(sandbox.files.has("/tmp/expired.txt")).toBe(false);
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "tool.completed", isError: true }),
+      );
     },
   );
 
@@ -145,6 +210,59 @@ describe("Pi 安全适配", () => {
     },
   );
 
+  it.runIf(process.platform === "linux")(
+    "waiting 恢复把受控 RolloutProjection 投影到新 Session，并用 prompt 真正启动模型",
+    async () => {
+      let resumedContext = "";
+      const { controller, faux } = await harness(
+        [
+          (context) => {
+            resumedContext = JSON.stringify(context.messages);
+            return fauxAssistantMessage("已按补充信息继续");
+          },
+        ],
+        new FakeSandboxHandle("pi-resume-fake"),
+        {
+          schemaVersion: 1,
+          checkpointId: "checkpoint-waiting-1",
+          turns: [
+            { role: "user", text: "生成报告" },
+            { role: "assistant", text: "请补充报告范围" },
+          ],
+        },
+      );
+
+      await controller.prompt("只处理 Markdown");
+
+      expect(faux.state.callCount).toBe(1);
+      expect(resumedContext).toContain("checkpoint-waiting-1");
+      expect(resumedContext).toContain("生成报告");
+      expect(resumedContext).toContain("请补充报告范围");
+      expect(resumedContext).toContain("只处理 Markdown");
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "拒绝非法 role、空文本和宿主绝对路径的 RolloutProjection",
+    async () => {
+      const invalidTurns = [
+        [{ role: "system", text: "越权" }],
+        [{ role: "user", text: "   " }],
+        [{ role: "assistant", text: "读取 C:\\Users\\host\\secret" }],
+        [{ role: "assistant", text: "读取 /var/lib/runtime/secret" }],
+      ] as const;
+      for (const turns of invalidTurns) {
+        await expect(
+          harness([], new FakeSandboxHandle("invalid-projection"), {
+            schemaVersion: 1,
+            checkpointId: "invalid",
+            turns: turns as never,
+          }),
+        ).rejects.toThrow("RolloutProjection");
+      }
+    },
+  );
+
   it("Windows Worker 在创建 Pi Session 前明确失败", async () => {
     expect(() => assertLinuxWorkerPlatform("win32")).toThrow("仅支持 Linux");
     if (process.platform !== "linux") {
@@ -159,6 +277,7 @@ describe("Pi 安全适配", () => {
           model: faux.getModel(),
           modelRuntime,
           sandbox: new FakeSandboxHandle("platform-guard"),
+          authorizeToolEffect: async () => immediateAuthorization(),
         }),
       ).rejects.toThrow("仅支持 Linux");
     }
@@ -186,11 +305,15 @@ describe("Pi 安全适配", () => {
 async function harness(
   responses: FauxResponseStep[],
   sandbox = new FakeSandboxHandle("pi-fake"),
+  rolloutProjection?: Parameters<typeof createSafePiSession>[0]["rolloutProjection"],
+  authorizeToolEffect?: Parameters<typeof createSafePiSession>[0]["authorizeToolEffect"],
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
   started: Promise<void>;
   faux: FauxProviderHandle;
+  toolAuthorizationCount: () => number;
+  authorizedCalls: Array<{ callId: string; toolName: string; argsDigest: string }>;
 }> {
   const suffix = `${Date.now()}-${Math.random()}`;
   const faux = fauxProvider({
@@ -205,7 +328,19 @@ async function harness(
   });
   modelRuntime.registerNativeProvider(faux.provider);
   await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-  const controller = await createSafePiSession({ model: faux.getModel(), modelRuntime, sandbox });
+  let authorizationCount = 0;
+  const authorizedCalls: Array<{ callId: string; toolName: string; argsDigest: string }> = [];
+  const controller = await createSafePiSession({
+    model: faux.getModel(),
+    modelRuntime,
+    sandbox,
+    authorizeToolEffect: async (input) => {
+      authorizationCount += 1;
+      authorizedCalls.push(input);
+      return (await authorizeToolEffect?.(input)) ?? immediateAuthorization();
+    },
+    ...(rolloutProjection === undefined ? {} : { rolloutProjection }),
+  });
   disposers.push(() => controller.dispose());
   const events: RuntimeAgentEvent[] = [];
   let resolveStarted: (() => void) | undefined;
@@ -216,11 +351,22 @@ async function harness(
     events.push(event);
     if (event.type === "agent.started") resolveStarted?.();
   });
-  return { controller, events, started, faux };
+  return {
+    controller,
+    events,
+    started,
+    faux,
+    toolAuthorizationCount: () => authorizationCount,
+    authorizedCalls,
+  };
 }
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function immediateAuthorization() {
+  return { consumedAtMonotonicMs: performance.now(), maxContinuationDelayMs: 250 };
 }
 
 function hostPathPattern(path: string): RegExp {

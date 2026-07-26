@@ -57,6 +57,15 @@ class FakeResolver implements SandboxCleanupResolver {
 }
 
 describe("Sandbox Cleanup Consumer 崩溃窗口", () => {
+  it("租约必须覆盖连接与远端 settle 的总最坏时间", () => {
+    const store = new FakeStore();
+    const resolver = new FakeResolver();
+    expect(() => new SandboxCleanupConsumer(store, resolver, "worker-a", 209_999)).toThrow(
+      "cleanup lease 必须覆盖远端操作和安全余量",
+    );
+    expect(() => new SandboxCleanupConsumer(store, resolver, "worker-a", 210_000)).not.toThrow();
+  });
+
   it("领取未能写入 remote_call_started 时绝不调用远端", async () => {
     const store = new FakeStore();
     store.begin = false;

@@ -3,6 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@cube-runtime/domain": "workspace:*",
+    "@cube-runtime/persistence": "workspace:*",
+    "@cube-runtime/protocol": "workspace:*",
+    "@cube-runtime/protocol-mapper": "workspace:*",
+    "fastify": "5.10.0"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -b tsconfig.json --clean",

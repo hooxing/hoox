@@ -198,7 +198,7 @@ describe("Domain 与 Protocol 显式 Mapper", () => {
   });
 
   it.each([
-    ["INVALID_ARGUMENT", "BAD_REQUEST"],
+    ["INVALID_ARGUMENT", "INVALID_REQUEST"],
     ["NOT_AUTHORIZED", "NOT_FOUND"],
     ["OWNERSHIP_MISMATCH", "NOT_FOUND"],
     ["INVALID_STATE_TRANSITION", "INVALID_STATE"],

@@ -6,15 +6,19 @@ import type {
   WorkspaceRevisionCommit,
   WorkspaceWriteScope,
 } from "@cube-runtime/domain";
+import { archiveThread, isoTimestamp } from "@cube-runtime/domain";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {
   CoreRepositories,
+  ArchiveThreadCommandPort,
+  ArchiveThreadResult,
   CreateResult,
   RunRepository,
   TenantBundle,
   TenantRepository,
   TenantScope,
+  ThreadListPage,
   ThreadRepository,
   Versioned,
   VersionedCreateResult,
@@ -222,6 +226,49 @@ export class PgThreadRepository implements ThreadRepository {
     }
   }
 
+  async list(
+    scope: TenantScope,
+    input: Parameters<ThreadRepository["list"]>[1],
+  ): Promise<ThreadListPage> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+      throw new TypeError("任务分页大小必须在 1 到 100 之间");
+    }
+    try {
+      return await withTenantTransaction(this.pool, scope, async (client) => {
+        const result = await client.query(
+          `SELECT ${tenantColumns}, ${authColumns}, ${threadColumns}
+             FROM threads th ${threadJoins}
+            WHERE th.tenant_id = $1
+              AND ($3::timestamptz IS NULL OR (th.updated_at, th.id) < ($3::timestamptz, $4))
+            ORDER BY th.updated_at DESC, th.id DESC
+            LIMIT $5`,
+          [
+            scope.tenantId,
+            scope.userId,
+            input.cursor?.updatedAt ?? null,
+            input.cursor?.id ?? "",
+            input.limit + 1,
+          ],
+        );
+        const pageRows = result.rows.slice(0, input.limit);
+        const items = pageRows.map((row) => ({
+          entity: mapThread(row, mapTenant(row)),
+          version: BigInt(row.thread_version),
+        }));
+        const last = items.at(-1);
+        if (result.rows.length > input.limit && last !== undefined) {
+          return {
+            items,
+            nextCursor: { updatedAt: last.entity.updatedAt, id: last.entity.id },
+          };
+        }
+        return { items };
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "列出任务");
+    }
+  }
+
   async update(
     scope: TenantScope,
     thread: Thread,
@@ -271,7 +318,7 @@ export class PgRunRepository implements RunRepository {
             WHERE th.tenant_id = $1 AND th.id = $2 AND th.status = 'active'
               AND EXISTS (SELECT 1 FROM memberships m
                 WHERE m.tenant_id = th.tenant_id AND m.user_id = $3 AND m.status = 'active')
-            FOR UPDATE`,
+            FOR SHARE`,
           [scope.tenantId, run.threadId, scope.userId],
         );
         if (parent.rowCount !== 1) return { outcome: "conflict" };
@@ -721,5 +768,72 @@ export class PgCoreRepositories implements CoreRepositories {
     this.threads = new PgThreadRepository(pool);
     this.runs = new PgRunRepository(pool);
     this.workspaces = new PgWorkspaceRepository(pool);
+  }
+}
+
+/**
+ * 归档是一个授权命令而非 Repository 的读改写组合。
+ * 锁序固定为 Membership→Thread，使成员降权和归档之间存在明确串行化点。
+ */
+export class PgArchiveThreadCommand implements ArchiveThreadCommandPort {
+  constructor(private readonly pool: Pool) {}
+
+  async archiveThread(
+    input: Parameters<ArchiveThreadCommandPort["archiveThread"]>[0],
+  ): Promise<ArchiveThreadResult> {
+    try {
+      return await withTenantTransaction(this.pool, input.scope, async (client) => {
+        const membership = await client.query<{ readonly role: string; readonly status: string }>(
+          `SELECT membership.role, membership.status
+             FROM memberships AS membership
+            WHERE membership.tenant_id = $1 AND membership.user_id = $2
+            FOR SHARE OF membership`,
+          [input.scope.tenantId, input.scope.userId],
+        );
+        const authorization = membership.rows[0];
+        if (
+          authorization?.status !== "active" ||
+          (authorization.role !== "owner" && authorization.role !== "admin")
+        ) {
+          return { outcome: "not_authorized" };
+        }
+
+        const locked = await client.query<{ readonly status: string }>(
+          `SELECT status FROM threads
+            WHERE tenant_id = $1 AND id = $2
+            FOR UPDATE`,
+          [input.scope.tenantId, input.threadId],
+        );
+        const status = locked.rows[0]?.status;
+        if (status === undefined) return { outcome: "not_found" };
+        const current = await findThread(client, input.scope, input.threadId);
+        if (current === undefined) return { outcome: "not_found" };
+        if (status === "archived") return { outcome: "already_archived", entity: current.entity };
+
+        const updated = await client.query<{ readonly updated_at: Date | string }>(
+          `UPDATE threads
+              SET status = 'archived',
+                  updated_at = GREATEST(updated_at, clock_timestamp()),
+                  version = version + 1
+            WHERE tenant_id = $1 AND id = $2 AND status = 'active'
+            RETURNING updated_at`,
+          [input.scope.tenantId, input.threadId],
+        );
+        if (updated.rowCount !== 1) return { outcome: "not_found" };
+        const databaseTimestamp = updated.rows[0]?.updated_at;
+        if (databaseTimestamp === undefined) throw new TypeError("归档任务未返回数据库时间");
+        const archived = archiveThread(
+          current.entity,
+          isoTimestamp(
+            databaseTimestamp instanceof Date
+              ? databaseTimestamp.toISOString()
+              : new Date(databaseTimestamp).toISOString(),
+          ),
+        );
+        return { outcome: "archived", entity: archived };
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "归档任务");
+    }
   }
 }

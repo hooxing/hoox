@@ -30,6 +30,16 @@ export interface Versioned<T> {
   readonly version: bigint;
 }
 
+export interface ThreadListCursor {
+  readonly updatedAt: Thread["updatedAt"];
+  readonly id: ThreadId;
+}
+
+export interface ThreadListPage {
+  readonly items: readonly Versioned<Thread>[];
+  readonly nextCursor?: ThreadListCursor;
+}
+
 export type CreateResult = { readonly outcome: "created" } | { readonly outcome: "conflict" };
 
 export type VersionedCreateResult =
@@ -41,6 +51,48 @@ export type VersionedUpdateResult =
   | { readonly outcome: "conflict" }
   | { readonly outcome: "not_found" };
 
+export interface IdempotentCommand {
+  readonly key: string;
+  readonly requestHash: string;
+}
+
+export type IdempotentCreateResult<T> =
+  | { readonly outcome: "created" | "replayed"; readonly entity: T }
+  | { readonly outcome: "key_conflict" }
+  | { readonly outcome: "parent_inactive" }
+  | { readonly outcome: "not_authorized" };
+
+/** Thread、空 Workspace、幂等记录和有效 Membership 重验必须共用事务。 */
+export interface ThreadCreationPort {
+  createThread(input: {
+    readonly scope: TenantScope;
+    readonly thread: Thread;
+    readonly workspace: Workspace;
+    readonly idempotency: IdempotentCommand;
+  }): Promise<IdempotentCreateResult<Thread>>;
+}
+
+/** queued Run、enqueue outbox、幂等记录和有效 Membership 重验必须共用事务。 */
+export interface EnqueueOutboxPort {
+  createQueuedRun(input: {
+    readonly scope: TenantScope;
+    readonly run: Run;
+    readonly idempotency: IdempotentCommand;
+  }): Promise<IdempotentCreateResult<Run>>;
+}
+
+export type ArchiveThreadResult =
+  | { readonly outcome: "archived" | "already_archived"; readonly entity: Thread }
+  | { readonly outcome: "not_authorized" | "not_found" };
+
+/** 归档必须在同一事务中锁定 Membership→Thread，再重验角色与 active 状态。 */
+export interface ArchiveThreadCommandPort {
+  archiveThread(input: {
+    readonly scope: TenantScope;
+    readonly threadId: ThreadId;
+  }): Promise<ArchiveThreadResult>;
+}
+
 export interface TenantRepository {
   createPersonal(bundle: TenantBundle): Promise<CreateResult>;
   get(scope: TenantScope): Promise<TenantBundle | undefined>;
@@ -49,6 +101,10 @@ export interface TenantRepository {
 export interface ThreadRepository {
   create(scope: TenantScope, thread: Thread): Promise<VersionedCreateResult>;
   get(scope: TenantScope, id: ThreadId): Promise<Versioned<Thread> | undefined>;
+  list(
+    scope: TenantScope,
+    input: { readonly limit: number; readonly cursor?: ThreadListCursor },
+  ): Promise<ThreadListPage>;
   update(
     scope: TenantScope,
     thread: Thread,

@@ -38,13 +38,18 @@ import {
   migrateDown,
   migrateUp,
 } from "../../runtime-ts/packages/persistence/src/migrations.js";
-import { PgCoreRepositories } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
+import {
+  PgArchiveThreadCommand,
+  PgCoreRepositories,
+} from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
 import {
   createPostgresPool,
   withTenantTransaction,
   type Pool,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { bootstrapRuntimeAccess } from "../../runtime-ts/packages/persistence/src/role-bootstrap.js";
+import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
+import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -263,9 +268,264 @@ afterAll(async () => {
 });
 
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("HTTP API 经真实 PostgreSQL RLS 隔离 Thread/Run 并完成取消", async () => {
+    const left = await createFixture("api_left");
+    const right = await createFixture("api_right");
+    const principals = new Map([
+      ["Bearer pg-left", left.scope],
+      ["Bearer pg-right", right.scope],
+    ]);
+    const app = createApiApp(
+      {
+        auth: {
+          resolve: async ({ authorization }) =>
+            authorization === undefined ? undefined : principals.get(authorization),
+        },
+        repositories,
+        archiveThread: new PgArchiveThreadCommand(runtimePool),
+        cursorCodec: createThreadCursorCodec({
+          activeKid: "integration-key",
+          keys: [
+            {
+              kid: "integration-key",
+              secret: Buffer.alloc(32, 11).toString("base64url"),
+            },
+          ],
+          clock: { now: () => timestamp(20) },
+          ttlMilliseconds: 60_000,
+          maximumTtlMilliseconds: 60_000,
+        }),
+        readiness: { probe: () => runtimePool.query("SELECT 1").then(() => undefined) },
+        clock: { now: () => timestamp(20) },
+        ids: {
+          thread: () => threadId("thread_api_unused"),
+          run: () => runId("run_api_unused"),
+          workspace: () => workspaceId("workspace_api_unused"),
+        },
+      },
+      { logger: false },
+    );
+    try {
+      const ready = await app.inject({ method: "GET", url: "/ready" });
+      expect(ready.statusCode).toBe(200);
+      const ownThread = await app.inject({
+        method: "GET",
+        url: `/v1/threads/${left.thread.id}`,
+        headers: { authorization: "Bearer pg-left" },
+      });
+      expect(ownThread.statusCode).toBe(200);
+      expect(ownThread.json().data.id).toBe(left.thread.id);
+      const page = await app.inject({
+        method: "GET",
+        url: "/v1/threads?limit=10",
+        headers: { authorization: "Bearer pg-left" },
+      });
+      expect(page.json().data.items.map((item: { id: string }) => item.id)).toEqual([
+        left.thread.id,
+      ]);
+      const crossTenant = await app.inject({
+        method: "GET",
+        url: `/v1/threads/${left.thread.id}/runs/${left.run.id}`,
+        headers: {
+          authorization: "Bearer pg-right",
+          "x-tenant-id": left.scope.tenantId,
+        },
+      });
+      expect(crossTenant.statusCode).toBe(404);
+      expect(crossTenant.json().error.code).toBe("NOT_FOUND");
+
+      const cancelled = await app.inject({
+        method: "DELETE",
+        url: `/v1/threads/${left.thread.id}/runs/${left.run.id}`,
+        headers: { authorization: "Bearer pg-left" },
+      });
+      expect(cancelled.statusCode).toBe(200);
+      expect(cancelled.json().data.status).toBe("cancelled");
+      const archived = await app.inject({
+        method: "DELETE",
+        url: `/v1/threads/${left.thread.id}`,
+        headers: { authorization: "Bearer pg-left" },
+      });
+      expect(archived.statusCode).toBe(200);
+      expect(archived.json().data.status).toBe("archived");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("归档命令等待 Membership 行锁，并在降权提交后拒绝归档", async () => {
+    const fixture = await createFixture("archive_membership_race");
+    const command = new PgArchiveThreadCommand(runtimePool);
+    const blocker = await administrativePool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query(
+        `SELECT role FROM "${schema}".memberships
+          WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE`,
+        [fixture.scope.tenantId, fixture.scope.userId],
+      );
+      const pending = command.archiveThread({
+        scope: fixture.scope,
+        threadId: fixture.thread.id,
+      });
+      // 先持有 Membership 锁，再提交降权，确保命令必须读取锁后的授权事实。
+      await blocker.query(
+        `UPDATE "${schema}".memberships SET role = 'member'
+          WHERE tenant_id = $1 AND user_id = $2`,
+        [fixture.scope.tenantId, fixture.scope.userId],
+      );
+      await blocker.query("COMMIT");
+      expect(await pending).toEqual({ outcome: "not_authorized" });
+      const stored = await withTenantTransaction(runtimePool, fixture.scope, (client) =>
+        client.query<{ status: string }>(
+          "SELECT status FROM threads WHERE tenant_id = $1 AND id = $2",
+          [fixture.scope.tenantId, fixture.thread.id],
+        ),
+      );
+      expect(stored.rows[0]?.status).toBe("active");
+    } finally {
+      try {
+        await blocker.query("ROLLBACK");
+      } finally {
+        blocker.release();
+      }
+    }
+  });
+
+  it("Runtime 不能修改 Membership 的 status、role 或其他授权字段", async () => {
+    const fixture = await createFixture("membership_acl");
+    for (const statement of [
+      "UPDATE memberships SET status = 'revoked' WHERE tenant_id = $1 AND user_id = $2",
+      "UPDATE memberships SET role = 'member' WHERE tenant_id = $1 AND user_id = $2",
+      "UPDATE memberships SET id = id || '_changed' WHERE tenant_id = $1 AND user_id = $2",
+      "UPDATE memberships SET user_id = user_id || '_changed' WHERE tenant_id = $1 AND user_id = $2",
+      "UPDATE memberships SET tenant_id = tenant_id || '_changed' WHERE tenant_id = $1 AND user_id = $2",
+      "UPDATE memberships SET created_at = clock_timestamp() WHERE tenant_id = $1 AND user_id = $2",
+    ]) {
+      await expect(
+        withTenantTransaction(runtimePool, fixture.scope, (client) =>
+          client.query(statement, [fixture.scope.tenantId, fixture.scope.userId]),
+        ),
+      ).rejects.toMatchObject({ code: "42501" });
+    }
+  });
+
+  it("归档等待 Thread 锁后使用数据库时间，并保持 updated_at 单调", async () => {
+    const fixture = await createFixture("archive_database_time");
+    const command = new PgArchiveThreadCommand(runtimePool);
+    const blocker = await administrativePool.connect();
+    let pendingSettled = false;
+    try {
+      await blocker.query(
+        `UPDATE "${schema}".threads
+            SET updated_at = clock_timestamp() - interval '1 day'
+          WHERE tenant_id = $1 AND id = $2`,
+        [fixture.scope.tenantId, fixture.thread.id],
+      );
+      await blocker.query("BEGIN");
+      await blocker.query(
+        `SELECT status FROM "${schema}".threads
+          WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+        [fixture.scope.tenantId, fixture.thread.id],
+      );
+      const pending = command
+        .archiveThread({ scope: fixture.scope, threadId: fixture.thread.id })
+        .finally(() => {
+          pendingSettled = true;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(pendingSettled).toBe(false);
+      const lowerBound = await blocker.query<{ current_time: Date }>(
+        "SELECT clock_timestamp() AS current_time",
+      );
+      await blocker.query("COMMIT");
+      const result = await pending;
+      expect(result.outcome).toBe("archived");
+      const stored = await withTenantTransaction(runtimePool, fixture.scope, (client) =>
+        client.query<{ status: string; updated_at: Date }>(
+          "SELECT status, updated_at FROM threads WHERE tenant_id = $1 AND id = $2",
+          [fixture.scope.tenantId, fixture.thread.id],
+        ),
+      );
+      const updatedAt = stored.rows[0]?.updated_at;
+      const releasedAt = lowerBound.rows[0]?.current_time;
+      if (updatedAt === undefined || releasedAt === undefined)
+        throw new Error("测试数据库时间缺失");
+      expect(stored.rows[0]?.status).toBe("archived");
+      expect(updatedAt.valueOf()).toBeGreaterThanOrEqual(releasedAt.valueOf());
+      if (result.outcome === "archived")
+        expect(result.entity.updatedAt).toBe(updatedAt.toISOString());
+    } finally {
+      try {
+        await blocker.query("ROLLBACK");
+      } finally {
+        blocker.release();
+      }
+    }
+  });
+
+  it("同一 Membership 的共享锁不阻塞另一 Thread 归档", async () => {
+    const fixture = await createFixture("archive_share_lock");
+    const secondThread = createThread({
+      id: threadId("thread_archive_share_second"),
+      tenant: fixture.tenant,
+      user: fixture.user,
+      membership: fixture.membership,
+      title: "共享成员锁的第二个任务",
+      now: timestamp(5),
+    });
+    expect(await repositories.threads.create(fixture.scope, secondThread)).toEqual({
+      outcome: "created",
+      version: 0n,
+    });
+    const command = new PgArchiveThreadCommand(runtimePool);
+    const blocker = await administrativePool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query(
+        `SELECT status FROM "${schema}".threads
+          WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+        [fixture.scope.tenantId, fixture.thread.id],
+      );
+      const first = command.archiveThread({
+        scope: fixture.scope,
+        threadId: fixture.thread.id,
+      });
+      let waitingOnThread = false;
+      for (let attempt = 0; attempt < 50 && !waitingOnThread; attempt += 1) {
+        const activity = await administrativePool.query<{ waiting: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+              WHERE wait_event_type = 'Lock' AND query LIKE '%FROM threads%'
+           ) AS waiting`,
+        );
+        waitingOnThread = activity.rows[0]?.waiting === true;
+        if (!waitingOnThread) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waitingOnThread).toBe(true);
+
+      const second = command.archiveThread({ scope: fixture.scope, threadId: secondThread.id });
+      const raced = await Promise.race([
+        second.then(() => "completed" as const),
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
+      ]);
+      await blocker.query("COMMIT");
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(raced).toBe("completed");
+      expect(firstResult.outcome).toBe("archived");
+      expect(secondResult.outcome).toBe("archived");
+    } finally {
+      try {
+        await blocker.query("ROLLBACK");
+      } finally {
+        blocker.release();
+      }
+    }
+  });
+
   it("并发迁移串行化且重复执行结果一致", async () => {
-    expect(concurrentMigrationVersions).toEqual([1, 2, 1, 2]);
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(2);
+    expect(concurrentMigrationVersions).toEqual([1, 2, 3, 1, 2, 3]);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(3);
   });
 
   it("checksum 同时绑定 down SQL，并拒绝孤立和重复版本", async () => {
@@ -326,7 +586,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         `SELECT to_regclass('threads')::text AS threads,
                 (SELECT count(*)::text FROM runtime_schema_migrations) AS migration_count`,
       );
-      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "2" });
+      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "3" });
     } finally {
       await administrativePool.query(
         `GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
@@ -374,7 +634,59 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       [migratorRole],
     );
     expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(2);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(3);
+  });
+
+  it("partial down 3→2 后按旧 Schema 收敛 ACL，并可再次迁移到 3", async () => {
+    const target = await createIsolatedMigrationTarget("partial_down");
+    try {
+      expect(
+        (await migrateUp(target.pool, target.context)).map((record) => record.version),
+      ).toEqual([1, 2, 3]);
+      expect(
+        (
+          await migrateDown(target.pool, {
+            ...target.context,
+            allowDestructive: true,
+            environment: "test",
+            targetVersion: 2,
+          })
+        ).map((record) => record.version),
+      ).toEqual([1, 2]);
+      const downState = await target.pool.query<{ lock_marker: string | null }>(
+        "SELECT column_name AS lock_marker FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'memberships' AND column_name = 'lock_marker'",
+      );
+      expect(downState.rows).toEqual([]);
+      const downColumnPrivileges = await target.pool.query<{
+        column_name: string;
+        allowed: boolean;
+      }>(
+        `SELECT column_name,
+                has_column_privilege($1, 'memberships', column_name, 'UPDATE') AS allowed
+           FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'memberships'
+          ORDER BY ordinal_position`,
+        [runtimeRole],
+      );
+      expect(downColumnPrivileges.rows.length).toBeGreaterThan(0);
+      expect(downColumnPrivileges.rows.every((column) => !column.allowed)).toBe(true);
+
+      expect(
+        (await migrateUp(target.pool, target.context)).map((record) => record.version),
+      ).toEqual([1, 2, 3]);
+      const restored = await target.pool.query<{ present: boolean; allowed: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'memberships' AND column_name = 'lock_marker'
+         ) AS present,
+         has_column_privilege($1, 'memberships', 'lock_marker', 'UPDATE') AS allowed`,
+        [runtimeRole],
+      );
+      expect(restored.rows[0]).toEqual({ present: true, allowed: true });
+    } finally {
+      await target.close();
+    }
   });
 
   it("Runtime 角色不安全时在任何迁移 DDL 之前失败", async () => {
@@ -972,6 +1284,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       );
     }
     const expectedColumnUpdates = new Map<string, ReadonlySet<string>>([
+      ["memberships", new Set(["lock_marker"])],
       [
         "blob_lifecycles",
         new Set([
@@ -1057,6 +1370,31 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     });
     const left = await createFixture("rls_left");
     const right = await createFixture("rls_right");
+    const ownLockMarker = await withTenantTransaction(runtimePool, left.scope, (client) =>
+      client.query(
+        `UPDATE memberships SET lock_marker = false
+          WHERE tenant_id = $1 AND user_id = $2`,
+        [left.scope.tenantId, left.scope.userId],
+      ),
+    );
+    expect(ownLockMarker.rowCount).toBe(1);
+    await expect(
+      withTenantTransaction(runtimePool, left.scope, (client) =>
+        client.query(
+          `UPDATE memberships SET lock_marker = true
+            WHERE tenant_id = $1 AND user_id = $2`,
+          [left.scope.tenantId, left.scope.userId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+    const crossTenantLockMarker = await withTenantTransaction(runtimePool, left.scope, (client) =>
+      client.query(
+        `UPDATE memberships SET lock_marker = false
+          WHERE tenant_id = $1 AND user_id = $2`,
+        [right.scope.tenantId, right.scope.userId],
+      ),
+    );
+    expect(crossTenantLockMarker.rowCount).toBe(0);
     await expect(
       withTenantTransaction(runtimePool, left.scope, (client) =>
         client.query(

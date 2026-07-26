@@ -24,6 +24,8 @@
 | [ADR-0016](0016-run-input-and-dispatch-outbox.md) | Run 输入与 Dispatch Outbox | 已接受 | 2026-07-26 |
 | [ADR-0017](0017-sandbox-cleanup-outbox-consumer.md) | Sandbox Cleanup Outbox 消费与恢复协调 | 已接受 | 2026-07-26 |
 | [ADR-0018](0018-development-blackbox-e2e-gate.md) | 开发黑盒纵向 Gate 与 Thread 原子创建 | 已接受 | 2026-07-26 |
+| [ADR-0019](0019-workspace-manifest-and-materialization-plan.md) | Workspace 清单与安全物化计划核心 | 已接受 | 2026-07-26 |
+| [ADR-0020](0020-resource-library-discovery-preview-import-core.md) | Resource Library 发现、局部预览与显式导入核心 | 已接受 | 2026-07-26 |
 | [ADR-0021](0021-artifact-publication-completion-and-download.md) | Artifact 发布、完成门与授权下载核心 | 已接受 | 2026-07-26 |
 
 ## 何时必须记录

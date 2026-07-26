@@ -4,8 +4,14 @@ import { PgArchiveThreadCommand, PgCoreRepositories } from "./pg-core-repositori
 import { PgBlobLifecycleRepository, type PgBlobLifecycleOptions } from "./pg-blob-lifecycle.js";
 import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-state.js";
 import { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
+import {
+  PgResourceCatalog,
+  PgResourcePromotionRepository,
+  type ResourcePromotionCommitPort,
+} from "./pg-resource-library.js";
 import type { ArchiveThreadCommandPort, CoreRepositories } from "./ports.js";
 import { createPostgresPool, probePostgres, type PostgresPoolOptions } from "./postgres.js";
+import type { ResourceCatalog } from "@cube-runtime/resource";
 
 export interface PersistenceRuntime {
   readonly repositories: CoreRepositories;
@@ -15,6 +21,8 @@ export interface PersistenceRuntime {
   readonly runSetup: PgRunExecutionSetup;
   readonly runDispatchCreation: PgRunDispatchCreation;
   readonly runDispatchOutbox: PgRunDispatchOutbox;
+  readonly resourceCatalog: ResourceCatalog;
+  readonly resourcePromotions: ResourcePromotionCommitPort;
   probe(): Promise<void>;
   close(): Promise<void>;
 }
@@ -40,6 +48,8 @@ export function createPersistenceRuntime(
     runSetup: new PgRunExecutionSetup(pool),
     runDispatchCreation: new PgRunDispatchCreation(pool),
     runDispatchOutbox: new PgRunDispatchOutbox(pool),
+    resourceCatalog: new PgResourceCatalog(pool),
+    resourcePromotions: new PgResourcePromotionRepository(pool),
     probe: () => probePostgres(pool),
     close: () => pool.end(),
   };

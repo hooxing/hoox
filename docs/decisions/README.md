@@ -26,6 +26,7 @@
 | [ADR-0018](0018-development-blackbox-e2e-gate.md) | 开发黑盒纵向 Gate 与 Thread 原子创建 | 已接受 | 2026-07-26 |
 | [ADR-0019](0019-workspace-manifest-and-materialization-plan.md) | Workspace 清单与安全物化计划核心 | 已接受 | 2026-07-26 |
 | [ADR-0020](0020-resource-library-discovery-preview-import-core.md) | Resource Library 发现、局部预览与显式导入核心 | 已接受 | 2026-07-26 |
+| [ADR-0023](0023-resource-library-postgresql-persistence.md) | Resource Library PostgreSQL 目录与显式提升提交 | 已接受 | 2026-07-26 |
 
 ## 何时必须记录
 

@@ -40,6 +40,7 @@
     "@cube-runtime/domain": "workspace:*",
     "@cube-runtime/protocol-mapper": "workspace:*",
     "@cube-runtime/persistence": "workspace:*",
+    "@cube-runtime/resource": "workspace:*",
     "@cube-runtime/run-contracts": "workspace:*",
     "@cube-runtime/sandbox": "workspace:*",
     "@sinclair/typebox": "0.34.52",

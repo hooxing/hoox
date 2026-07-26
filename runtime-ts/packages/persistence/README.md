@@ -1,6 +1,20 @@
 # `@cube-runtime/persistence`
 
-本包保存 Runtime 的持久化边界。目前已实现核心业务 Repository、S3/MinIO Blob Store，以及 ADR-0012 定义的 PostgreSQL stable blob 生命周期、提交、授权、GC 与 tombstone 适配器。
+本包保存 Runtime 的持久化边界。目前已实现核心业务 Repository、S3/MinIO Blob Store、ADR-0012 定义的 PostgreSQL stable blob 生命周期，以及 ADR-0014 定义的 Run Worker 执行事实与事务适配器。
+
+## Run Worker PostgreSQL 约束
+
+- API/调度器先用 `PgRunExecutionSetup` 写入不可变执行 scope、输入和初始 RolloutProjection；Worker 只能通过 `PgExecutionPersistence` claim；
+- 初始化重放会锁行并逐字段核对，不同内容返回 `conflict`；waiting 回答必须同时提供预期 Run version 与旧回答；
+- claim 同时创建 ExecutionAttempt、Run claim 与 Workspace lease，租约和所有发生时间只使用数据库时钟；
+- `mutate` 在一个 SERIALIZABLE 事务内处理事件、EffectInvocation、Outbox、Projection、WorkspaceRevision、Run/Attempt 与不可变 receipt；
+- COMMIT 响应未知返回 `response_unknown`，调用方必须按原始完整 scope 与幂等键调用 `readMutation`；
+- 相同幂等键只接受相同 command digest；Attempt 内 callId 永久唯一，外部副作用 permit 一次性签发并消费；
+- `model_start` 还要求已提交 `model_execution_started` checkpoint，并由数据库保证每个 Attempt 永久最多签发一次；
+- 普通 Worker 不能重领 running Run，双租约过期后由恢复协调器调用 `recoverExpiredAttempt`；
+- `PgBackedSandboxSessionRegistry` 负责把已取得的 Sandbox 先登记为数据库事实，再暴露给 Worker；本阶段不包含 cleanup Outbox consumer 和周期恢复扫描器。
+
+执行端口和协议位于 `@cube-runtime/run-contracts`，应用目录只保留兼容导出。生产表全部 FORCE RLS，Runtime 角色使用表/列白名单且没有 routine 权限。
 
 ## Blob Store 约束
 

@@ -1,4 +1,5 @@
 ALTER TABLE cleanup_outbox DROP CONSTRAINT cleanup_outbox_remote_call_shape_check;
+ALTER TABLE cleanup_outbox DROP CONSTRAINT cleanup_outbox_consumer_value_size_check;
 ALTER TABLE cleanup_outbox DROP CONSTRAINT cleanup_outbox_consumer_claim_shape_check;
 DROP INDEX cleanup_outbox_consumer_claim_idx;
 ALTER TABLE cleanup_outbox

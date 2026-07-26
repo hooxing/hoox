@@ -17,16 +17,23 @@ function productionEnvironment(): Record<string, string> {
     S3_ACCESS_KEY_ID: "local-access-key",
     S3_SECRET_ACCESS_KEY: "opaque-test-value",
     S3_FORCE_PATH_STYLE: "true",
+    CUBESANDBOX_API_URL: "http://cube-api:3000",
+    SCHEDULER_TENANT_ID: "tenant-test",
+    SCHEDULER_WORKER_ID: "scheduler-test",
+    CLEANUP_POLL_INTERVAL_MS: "1000",
+    CLEANUP_LEASE_MS: "120000",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
   };
 }
 
 describe("Scheduler 进程入口", () => {
-  it("配置可验证，但不以空消费者伪装为生产进程", async () => {
+  it("配置可验证，传入 Fake assembler 不能冒充受审生产装配", async () => {
     const configuration = parseSchedulerProcessEnvironment(productionEnvironment());
     expect(configuration.objectStorage.bucket).toBe("runtime-artifacts");
-    await expect(startSchedulerProcess({ environment: productionEnvironment() })).rejects.toThrow(
-      "ASSEMBLER_MISSING:scheduler",
+    await expect(startSchedulerProcess({ environment: productionEnvironment(), assembler: {
+      async assemble() { return { stopAccepting: async () => undefined, resources: [], readiness: [] }; },
+    } })).rejects.toThrow(
+      "PRODUCTION_ASSEMBLY_UNAVAILABLE:scheduler",
     );
   });
 

@@ -108,6 +108,9 @@ importers:
       '@cube-runtime/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
+      '@cube-runtime/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
 
   runtime-ts/apps/web: {}
 

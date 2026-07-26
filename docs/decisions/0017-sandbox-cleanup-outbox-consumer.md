@@ -11,6 +11,8 @@ Cleanup 的 `pending` 只代表已武装且不可逆的业务事实，不代表�
 
 Scheduler 使用独立 consumer 实例和可关闭边界，不与 dispatch 共用可变单例。它只依赖按 registryId 解析并执行 pause/close 的适配器；lifecycle_unknown 与正式 cleanup 不共用消费路径，orphan capability 也不参与正式 armed cleanup。
 
+生产启动只为 Scheduler 的 Cleanup 装配开放一个不可伪造的服务级 capability：它必须同时包含真实 PostgreSQL store、真实 CubeSandbox gateway、单租户 polling loop、PostgreSQL readiness 和“先停轮询、再关连接池”的资源顺序。通用 `process-runtime` 仍拒绝 API 与 Agent Worker 的任意 production assembler；它们在各自的受审生产组合完成前保持 `PRODUCTION_ASSEMBLY_UNAVAILABLE`。这避免为了开放一个后台消费者而放宽所有服务的 production Fake 边界。
+
 ## 影响
 
 0006 不占用 dispatch 预留的 0005。迁移保持 FORCE RLS、既有复合外键与最小列 UPDATE ACL；down 仅允许既有测试环境破坏性回退。真实 CubeSandbox 冒烟必须 opt-in，并在 finally 中清理，不把 unknown 当作可安全重试。

@@ -26,6 +26,12 @@ export interface ServiceAssemblyFactory<TConfiguration> {
   assemble(configuration: TConfiguration): Promise<ServiceAssembly>;
 }
 
+/**
+ * 生产 capability 由服务自身模块保留，不能由通用进程框架或测试 Fake 凭资源名称伪造。
+ * 仍会先执行结构校验和冻结快照，capability 只解决“该装配确实来自受审生产组合”的问题。
+ */
+export type ProductionAssemblyVerifier = (assembly: ServiceAssembly) => boolean;
+
 export class ServiceAssemblyError extends Error {
   constructor(
     readonly serviceName: string,
@@ -169,6 +175,7 @@ export async function startServiceProcess<
   readonly configuration: TConfiguration;
   readonly shutdownTimeoutMilliseconds: number;
   readonly assembler?: ServiceAssemblyFactory<TConfiguration>;
+  readonly productionAssemblyVerifier?: ProductionAssemblyVerifier;
   readonly signalSource?: ProcessSignalSource;
   readonly onShutdownFailure?: (error: Error) => void;
 }): Promise<RunningServiceProcess> {
@@ -176,8 +183,10 @@ export async function startServiceProcess<
   if (input.assembler === undefined) {
     throw new ServiceAssemblyError(input.serviceName, "ASSEMBLER_MISSING");
   }
-  // 真实生产 assembler 尚不存在，故不接受任何测试 Fake 冒充生产服务。
-  if (input.configuration.runtimeEnvironment === "production") {
+  if (
+    input.configuration.runtimeEnvironment === "production" &&
+    input.productionAssemblyVerifier === undefined
+  ) {
     throw new ServiceAssemblyError(input.serviceName, "PRODUCTION_ASSEMBLY_UNAVAILABLE");
   }
   const startupSignals = installStartupSafeSignalHandlers({
@@ -190,6 +199,14 @@ export async function startServiceProcess<
   try {
     assembly = await input.assembler.assemble(input.configuration);
     validateAssembly(assembly);
+    if (
+      input.configuration.runtimeEnvironment === "production" &&
+      !input.productionAssemblyVerifier?.(assembly)
+    ) {
+      await closePartiallyAssembledResources(assembly);
+      assembly = undefined;
+      throw new ServiceAssemblyError(input.serviceName, "PRODUCTION_ASSEMBLY_UNAVAILABLE");
+    }
     // assembler/最外层日志只可记录稳定 serviceName 和错误码，禁止序列化 configuration。
     const probeNames = new Set<string>();
     for (const probe of assembly.readiness) {
@@ -204,9 +221,12 @@ export async function startServiceProcess<
       resources: normalizedAssembly.resources,
       shutdownTimeoutMilliseconds: input.shutdownTimeoutMilliseconds,
     });
-  } catch {
+  } catch (error) {
     await closePartiallyAssembledResources(assembly);
     startupSignals.registration.dispose();
+    if (error instanceof ServiceAssemblyError && error.code === "PRODUCTION_ASSEMBLY_UNAVAILABLE") {
+      throw error;
+    }
     throw new ServiceAssemblyError(input.serviceName, "ASSEMBLY_FAILED");
   }
   startupSignals.bind(lifecycle);

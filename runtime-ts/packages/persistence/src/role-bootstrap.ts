@@ -66,6 +66,29 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ],
 ]);
 
+async function hasMembershipLockMarker(client: PoolClient): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_attribute
+        WHERE attrelid = to_regclass(format('%I.memberships', current_schema()))
+          AND attname = 'lock_marker' AND attnum > 0 AND NOT attisdropped
+     ) AS present`,
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function activeColumnUpdatePolicy(
+  client: PoolClient,
+): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
+  const policy = new Map(runtimeColumnUpdatePolicy);
+  // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
+  policy.set(
+    "memberships",
+    (await hasMembershipLockMarker(client)) ? new Set(["lock_marker"]) : new Set(),
+  );
+  return policy;
+}
+
 export interface MigrationSecurityContext {
   readonly runtimeRole: string;
   readonly migratorRole: string;
@@ -408,6 +431,7 @@ async function assertActiveRuntimeWhitelist(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<void> {
+  const columnUpdatePolicy = await activeColumnUpdatePolicy(client);
   const relationResult = await client.query<{ table_name: string }>(
     `SELECT relname AS table_name
        FROM pg_class
@@ -451,10 +475,10 @@ async function assertActiveRuntimeWhitelist(
       WHERE column_state.table_schema = $2
         AND column_state.table_name = ANY($3::text[])
       ORDER BY column_state.table_name, column_state.ordinal_position`,
-    [context.runtimeRole, context.schema, [...runtimeColumnUpdatePolicy.keys()]],
+    [context.runtimeRole, context.schema, [...columnUpdatePolicy.keys()]],
   );
   for (const row of columnUpdates.rows) {
-    if (row.allowed !== runtimeColumnUpdatePolicy.get(row.table_name)?.has(row.column_name)) {
+    if (row.allowed !== columnUpdatePolicy.get(row.table_name)?.has(row.column_name)) {
       throw new PersistenceError("CONSTRAINT_VIOLATION", "Runtime 列级 UPDATE 权限偏离白名单");
     }
   }
@@ -545,6 +569,9 @@ export async function bootstrapRuntimeAccessOnClient(
   await client.query(
     `GRANT SELECT, INSERT ON TABLE ${schema}.app_users, ${schema}.tenants, ${schema}.memberships TO ${role}`,
   );
+  if (await hasMembershipLockMarker(client)) {
+    await client.query(`GRANT UPDATE(lock_marker) ON TABLE ${schema}.memberships TO ${role}`);
+  }
   await client.query(
     `GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}.threads, ${schema}.runs, ${schema}.workspaces TO ${role}`,
   );

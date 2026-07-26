@@ -3,7 +3,8 @@ import { Value } from "@sinclair/typebox/value";
 import { IdSchema, IsoTimestampSchema, ProtocolVersionSchema } from "./schemas.js";
 
 export const publicErrorCodes = [
-  "BAD_REQUEST",
+  "INVALID_REQUEST",
+  "UNSUPPORTED_MEDIA_TYPE",
   "UNAUTHORIZED",
   "NOT_FOUND",
   "CONFLICT",
@@ -35,6 +36,7 @@ export type ErrorEnvelope = Static<typeof ErrorEnvelopeSchema>;
 
 export type PublicFailure =
   | { readonly kind: "bad_request" }
+  | { readonly kind: "unsupported_media_type" }
   | { readonly kind: "unauthorized" }
   | { readonly kind: "not_found" }
   | { readonly kind: "conflict" }
@@ -44,7 +46,16 @@ export type PublicFailure =
   | { readonly kind: "internal" };
 
 const fixedErrors: Readonly<Record<PublicFailure["kind"], ErrorEnvelope["error"]>> = Object.freeze({
-  bad_request: Object.freeze({ code: "BAD_REQUEST", message: "请求参数无效", retryable: false }),
+  bad_request: Object.freeze({
+    code: "INVALID_REQUEST",
+    message: "请求参数无效",
+    retryable: false,
+  }),
+  unsupported_media_type: Object.freeze({
+    code: "UNSUPPORTED_MEDIA_TYPE",
+    message: "不支持的媒体类型",
+    retryable: false,
+  }),
   unauthorized: Object.freeze({ code: "UNAUTHORIZED", message: "身份认证失败", retryable: false }),
   not_found: Object.freeze({ code: "NOT_FOUND", message: "请求的资源不存在", retryable: false }),
   conflict: Object.freeze({ code: "CONFLICT", message: "资源状态已经变化", retryable: true }),

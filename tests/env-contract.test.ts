@@ -61,4 +61,20 @@ describe("环境变量示例契约", () => {
     expect(issues).toContain("示例配置疑似包含真实凭据：MODEL_API_KEY");
     expect(issues.join(" ")).not.toContain(liveLikeValue);
   });
+
+  it("CubeSandbox API Key 可以为空但不能在示例中填写真实值", () => {
+    expect(
+      validateEnvironmentExample(
+        validExample().replace("CUBESANDBOX_API_KEY=replace-with-value", "CUBESANDBOX_API_KEY="),
+      ),
+    ).toEqual([]);
+    expect(
+      validateEnvironmentExample(
+        validExample().replace(
+          "CUBESANDBOX_API_KEY=replace-with-value",
+          "CUBESANDBOX_API_KEY=live-cube-key",
+        ),
+      ),
+    ).toContain("示例配置疑似包含真实凭据：CUBESANDBOX_API_KEY");
+  });
 });

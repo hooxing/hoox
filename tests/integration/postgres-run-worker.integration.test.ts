@@ -45,6 +45,7 @@ import {
   PgExecutionPersistence,
   PgRunExecutionSetup,
 } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
+import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-sandbox-cleanup-consumer.js";
 import {
   createPostgresPool,
   type Pool,
@@ -219,7 +220,8 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
               (SELECT max(version) FROM "${schema}".runtime_schema_migrations)::int AS version`,
       [runtimeRole, schema],
     );
-    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 5 });
+    // Cleanup 0006 在 Dispatch 0005 后叠加，Dispatch ACL 仍须存在而 schema 已前进至最新版本。
+    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 6 });
     const runtimeSchema = await runtime.query<{
       readonly schema: string;
       readonly current_user: string;
@@ -1133,6 +1135,37 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         )
       ).outcome,
     ).toBe("applied");
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state='closed' WHERE tenant_id=$1 AND registry_id=$2`,
+        [f.scope.tenantId, acquired.session.registryId],
+      ),
+    );
+    await expect(
+      registry.settle({
+        scope: f.scope,
+        session: acquired.session,
+        cleanupIntentId: cleanupKey,
+        disposition: "close",
+      }),
+    ).rejects.toThrow("开始态未能原子同步");
+    const unchanged = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      (client) =>
+        client.query<{ state: string; remote_call_started_at: Date | null }>(
+          `SELECT state,remote_call_started_at FROM cleanup_outbox
+          WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key=$3`,
+          [f.scope.tenantId, claimed.snapshot.attempt.attemptId, cleanupKey],
+        ),
+    );
+    expect(unchanged.rows[0]).toEqual({ state: "started", remote_call_started_at: null });
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state='ready' WHERE tenant_id=$1 AND registry_id=$2`,
+        [f.scope.tenantId, acquired.session.registryId],
+      ),
+    );
     await expect(
       registry.settle({
         scope: f.scope,
@@ -1540,6 +1573,414 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     expect(routines.rows[0]?.count).toBe("0");
   });
 
+  it("Cleanup Store 在真实 PostgreSQL 保持领取、栅栏、RLS 与恢复事实", async () => {
+    const f = await fixture(`cleanup-store-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "cleanup-seed",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("Cleanup Store fixture 未能取得 Attempt");
+    const attemptId = claimed.snapshot.attempt.attemptId;
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      await client.query(
+        `INSERT INTO sandbox_registry(tenant_id,registry_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,provider_sandbox_id,request_id,state,actual_ttl_seconds)
+         VALUES ($1,'cleanup-store-registry',$2,$3,$4,$5,$6,'cleanup-store-sandbox','cleanup-store-request','ready',120)`,
+        [
+          f.scope.tenantId,
+          attemptId,
+          f.scope.runId,
+          f.scope.threadId,
+          f.scope.workspaceId,
+          f.scope.rootRunId,
+        ],
+      );
+      await client.query(
+        `INSERT INTO cleanup_outbox(tenant_id,attempt_id,idempotency_key,registry_id,provider_sandbox_id,state,armed,identity_digest,payload,payload_digest)
+         VALUES ($1,$2,'cleanup-store-key','cleanup-store-registry','cleanup-store-sandbox','pending',true,$3,$4::jsonb,$5)`,
+        [
+          f.scope.tenantId,
+          attemptId,
+          "a".repeat(64),
+          JSON.stringify({ schemaVersion: 1 }),
+          "b".repeat(64),
+        ],
+      );
+    });
+    const left = new PgSandboxCleanupConsumerStore(runtime);
+    const right = new PgSandboxCleanupConsumerStore(runtime);
+    // 两条真实 PG 连接并发时，heartbeat 续租和 Cleanup 必须遵守同一把 Attempt 栅栏。
+    // 无论调度顺序如何，续租成功后 Cleanup 都不能越过仍在使用 Sandbox 的 Attempt。
+    const [renewedFence, blockedCleanup] = await Promise.all([
+      persistence.inspectAndRenew({ fence: claimed.fence, leaseDurationMs: 30_000 }),
+      left.claimNext({
+        tenantId: f.scope.tenantId,
+        workerId: "cleanup-left",
+        leaseMs: 210_000,
+      }),
+    ]);
+    expect(renewedFence.outcome).toBe("active");
+    expect(blockedCleanup).toBeUndefined();
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      await client.query(
+        `UPDATE run_claims SET released_at=clock_timestamp() WHERE tenant_id=$1 AND attempt_id=$2`,
+        [f.scope.tenantId, attemptId],
+      );
+      await client.query(
+        `UPDATE workspace_write_leases SET expires_at=clock_timestamp()-interval '1 millisecond' WHERE tenant_id=$1 AND workspace_id=$2`,
+        [f.scope.tenantId, f.scope.workspaceId],
+      );
+    });
+    const races = await Promise.all([
+      left.claimNext({ tenantId: f.scope.tenantId, workerId: "cleanup-left", leaseMs: 210_000 }),
+      right.claimNext({ tenantId: f.scope.tenantId, workerId: "cleanup-right", leaseMs: 210_000 }),
+    ]);
+    let winner = races.find((value) => value !== undefined);
+    expect(races.filter((value) => value !== undefined)).toHaveLength(1);
+    if (winner === undefined) throw new Error("Cleanup Store 没有唯一领取者");
+    // 未越过远端边界的过期 claim 可重领，generation 递增，旧 token/generation 立即失效。
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE cleanup_outbox SET claim_lease_expires_at=clock_timestamp()-interval '1 millisecond'
+          WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key='cleanup-store-key'`,
+        [f.scope.tenantId, attemptId],
+      ),
+    );
+    const previous = winner;
+    winner = await right.claimNext({
+      tenantId: f.scope.tenantId,
+      workerId: "cleanup-right",
+      leaseMs: 210_000,
+    });
+    if (winner === undefined) throw new Error("过期 Cleanup claim 未能重领");
+    expect(winner.generation).toBe(previous.generation + 1);
+    expect(await left.markRemoteStarted(previous)).toBe(false);
+    // lease 已过期时即使 token 正确也不能跨远端边界。
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE cleanup_outbox SET claim_lease_expires_at=clock_timestamp()-interval '1 millisecond'
+          WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key='cleanup-store-key'`,
+        [f.scope.tenantId, attemptId],
+      ),
+    );
+    expect(await left.markRemoteStarted(winner)).toBe(false);
+    winner = await left.claimNext({
+      tenantId: f.scope.tenantId,
+      workerId: "cleanup-left",
+      leaseMs: 210_000,
+    });
+    if (winner === undefined) throw new Error("过期租约后未能取得下一代 claim");
+    // 完整身份、generation、token 任一篡改都不能跨越远端边界。
+    expect(await left.markRemoteStarted({ ...winner, token: `${winner.token}-forged` })).toBe(
+      false,
+    );
+    expect(await left.markRemoteStarted({ ...winner, registryId: "forged-registry" })).toBe(false);
+    // token 与完整身份都正确但 generation 不正确，仍不能跨越远端边界或结束 Cleanup。
+    // 这防止旧 Worker 在同一 token 被新一代领取后写回状态。
+    const wrongGeneration = { ...winner, generation: winner.generation + 1 };
+    expect(await left.markRemoteStarted(wrongGeneration)).toBe(false);
+    expect(await left.unknown(wrongGeneration)).toBe(false);
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state='closed' WHERE tenant_id=$1 AND registry_id=$2`,
+        [f.scope.tenantId, winner.registryId],
+      ),
+    );
+    await expect(left.markRemoteStarted(winner)).rejects.toThrow("状态同步失败");
+    const beforeRetry = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      (client) =>
+        client.query<{ state: string; remote_call_started_at: Date | null }>(
+          `SELECT state,remote_call_started_at FROM cleanup_outbox WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key='cleanup-store-key'`,
+          [f.scope.tenantId, attemptId],
+        ),
+    );
+    expect(beforeRetry.rows[0]).toEqual({ state: "started", remote_call_started_at: null });
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state='ready' WHERE tenant_id=$1 AND registry_id=$2`,
+        [f.scope.tenantId, winner.registryId],
+      ),
+    );
+    expect(await left.markRemoteStarted(winner)).toBe(true);
+    // marker 之后租约过期只会 unknown；不会再次 claim 或重复远端调用。
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE cleanup_outbox SET claim_lease_expires_at=clock_timestamp()-interval '1 millisecond' WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key='cleanup-store-key'`,
+        [f.scope.tenantId, attemptId],
+      ),
+    );
+    expect(
+      await right.claimNext({
+        tenantId: f.scope.tenantId,
+        workerId: "cleanup-right",
+        leaseMs: 210_000,
+      }),
+    ).toBeUndefined();
+    const recovered = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      (client) =>
+        client.query<{ state: string }>(
+          `SELECT state FROM cleanup_outbox WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key='cleanup-store-key'`,
+          [f.scope.tenantId, attemptId],
+        ),
+    );
+    expect(recovered.rows[0]?.state).toBe("unknown");
+    // 已决定的 pause 在过期恢复时必须保持，不得被默认 close 覆盖；完成后 registry 同步 paused。
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      await client.query(
+        `UPDATE sandbox_registry SET state='ready' WHERE tenant_id=$1 AND registry_id='cleanup-store-registry'`,
+        [f.scope.tenantId],
+      );
+      await client.query(
+        `INSERT INTO cleanup_outbox(tenant_id,attempt_id,idempotency_key,registry_id,provider_sandbox_id,state,armed,identity_digest,disposition,payload,payload_digest,claim_token,claim_generation,claimed_by,claim_lease_expires_at)
+         VALUES ($1,$2,'cleanup-store-pause','cleanup-store-registry','cleanup-store-sandbox','started',true,$3,'pause',$4::jsonb,$5,'old-pause',1,'old-worker',clock_timestamp()-interval '1 millisecond')`,
+        [
+          f.scope.tenantId,
+          attemptId,
+          "c".repeat(64),
+          JSON.stringify({ schemaVersion: 1, disposition: "pause" }),
+          "d".repeat(64),
+        ],
+      );
+    });
+    const paused = await left.claimNext({
+      tenantId: f.scope.tenantId,
+      workerId: "cleanup-left",
+      leaseMs: 210_000,
+    });
+    if (paused === undefined) throw new Error("pause Cleanup 未能重领");
+    expect(paused.disposition).toBe("pause");
+    expect(await left.markRemoteStarted(paused)).toBe(true);
+    // complete 先更新 cleanup 再更新 registry；registry 不匹配时两个事实必须一起回滚。
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state='closed' WHERE tenant_id=$1 AND registry_id=$2`,
+        [f.scope.tenantId, paused.registryId],
+      ),
+    );
+    await expect(left.complete(paused)).rejects.toThrow("状态同步失败");
+    const completeRollback = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      (client) =>
+        client.query<{ state: string; claim_token: string | null }>(
+          `SELECT state,claim_token FROM cleanup_outbox
+            WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key='cleanup-store-pause'`,
+          [f.scope.tenantId, attemptId],
+        ),
+    );
+    expect(completeRollback.rows[0]).toEqual({ state: "started", claim_token: paused.token });
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state='pausing' WHERE tenant_id=$1 AND registry_id=$2`,
+        [f.scope.tenantId, paused.registryId],
+      ),
+    );
+    expect(await left.complete(paused)).toBe(true);
+    const pausedRegistry = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      (client) =>
+        client.query<{ state: string }>(
+          `SELECT state FROM sandbox_registry WHERE tenant_id=$1 AND registry_id='cleanup-store-registry'`,
+          [f.scope.tenantId],
+        ),
+    );
+    expect(pausedRegistry.rows[0]?.state).toBe("paused");
+    // unknown 同样必须与 registry 原子同步，避免远端结果未知时留下半完成 Cleanup。
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      await client.query(
+        `UPDATE sandbox_registry SET state='ready' WHERE tenant_id=$1 AND registry_id=$2`,
+        [f.scope.tenantId, paused.registryId],
+      );
+      await client.query(
+        `INSERT INTO cleanup_outbox(tenant_id,attempt_id,idempotency_key,registry_id,provider_sandbox_id,state,armed,identity_digest,disposition,payload,payload_digest,claim_token,claim_generation,claimed_by,claim_lease_expires_at)
+         VALUES ($1,$2,'cleanup-store-unknown','cleanup-store-registry','cleanup-store-sandbox','started',true,$3,'close',$4::jsonb,$5,'old-unknown',1,'old-worker',clock_timestamp()-interval '1 millisecond')`,
+        [
+          f.scope.tenantId,
+          attemptId,
+          "e".repeat(64),
+          JSON.stringify({ schemaVersion: 1, disposition: "close" }),
+          "f".repeat(64),
+        ],
+      );
+    });
+    const unknownClaim = await left.claimNext({
+      tenantId: f.scope.tenantId,
+      workerId: "cleanup-left",
+      leaseMs: 210_000,
+    });
+    if (unknownClaim === undefined) throw new Error("unknown Cleanup 未能重领");
+    expect(await left.markRemoteStarted(unknownClaim)).toBe(true);
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state='closed' WHERE tenant_id=$1 AND registry_id=$2`,
+        [f.scope.tenantId, unknownClaim.registryId],
+      ),
+    );
+    await expect(left.unknown(unknownClaim)).rejects.toThrow("状态同步失败");
+    const unknownRollback = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      (client) =>
+        client.query<{ state: string; claim_token: string | null }>(
+          `SELECT state,claim_token FROM cleanup_outbox
+            WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key='cleanup-store-unknown'`,
+          [f.scope.tenantId, attemptId],
+        ),
+    );
+    expect(unknownRollback.rows[0]).toEqual({ state: "started", claim_token: unknownClaim.token });
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state='closing' WHERE tenant_id=$1 AND registry_id=$2`,
+        [f.scope.tenantId, unknownClaim.registryId],
+      ),
+    );
+    expect(await left.unknown(unknownClaim)).toBe(true);
+    const unknownRegistry = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      (client) =>
+        client.query<{ state: string }>(
+          `SELECT state FROM sandbox_registry WHERE tenant_id=$1 AND registry_id=$2`,
+          [f.scope.tenantId, unknownClaim.registryId],
+        ),
+    );
+    expect(unknownRegistry.rows[0]?.state).toBe("unknown");
+    // Runtime 连接也受 FORCE RLS 约束：即使猜中同一个 registry id，错误 Tenant 直接 SELECT
+    // 仍不可见；不能只依赖 claimNext 的 tenant_id 参数作为隔离证明。
+    const otherTenant = tenantId("other-cleanup-tenant");
+    const hiddenRegistry = await withTenantTransaction(
+      runtime,
+      { tenantId: otherTenant },
+      (client) =>
+        client.query<{ registry_id: string }>(
+          `SELECT registry_id FROM sandbox_registry WHERE registry_id=$1`,
+          [unknownClaim.registryId],
+        ),
+    );
+    expect(hiddenRegistry.rowCount).toBe(0);
+    // 明确 Tenant scope 下，其他 Tenant 不能看到或领取此事实。
+    expect(
+      await left.claimNext({
+        tenantId: otherTenant,
+        workerId: "cleanup-other",
+        leaseMs: 210_000,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("Cleanup 在数据库时钟的短租约边界与 heartbeat 交错后不领取", async () => {
+    const f = await fixture(`cleanup-heartbeat-edge-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "cleanup-heartbeat-seed",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("短租约 Cleanup fixture 未能取得 Attempt");
+    const attemptId = claimed.snapshot.attempt.attemptId;
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      await client.query(
+        `INSERT INTO sandbox_registry(tenant_id,registry_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,provider_sandbox_id,request_id,state,actual_ttl_seconds)
+         VALUES ($1,'cleanup-heartbeat-registry',$2,$3,$4,$5,$6,'cleanup-heartbeat-sandbox','cleanup-heartbeat-request','ready',120)`,
+        [
+          f.scope.tenantId,
+          attemptId,
+          f.scope.runId,
+          f.scope.threadId,
+          f.scope.workspaceId,
+          f.scope.rootRunId,
+        ],
+      );
+      await client.query(
+        `INSERT INTO cleanup_outbox(tenant_id,attempt_id,idempotency_key,registry_id,provider_sandbox_id,state,armed,identity_digest,payload,payload_digest)
+         VALUES ($1,$2,'cleanup-heartbeat-key','cleanup-heartbeat-registry','cleanup-heartbeat-sandbox','pending',true,$3,$4::jsonb,$5)`,
+        [
+          f.scope.tenantId,
+          attemptId,
+          "1".repeat(64),
+          JSON.stringify({ schemaVersion: 1 }),
+          "2".repeat(64),
+        ],
+      );
+    });
+    // 不使用 claim 的默认 30 秒租约：以 PostgreSQL 时钟收紧至 250ms，之后跨过“旧租约”边界。
+    const edge = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      async (client) => {
+        const claimExpiry = await client.query<{ expires_at: Date }>(
+          `UPDATE run_claims SET expires_at=clock_timestamp()+interval '250 milliseconds'
+            WHERE tenant_id=$1 AND attempt_id=$2 RETURNING expires_at`,
+          [f.scope.tenantId, attemptId],
+        );
+        await client.query(
+          `UPDATE workspace_write_leases SET expires_at=$3
+            WHERE tenant_id=$1 AND workspace_id=$2`,
+          [f.scope.tenantId, f.scope.workspaceId, claimExpiry.rows[0]?.expires_at],
+        );
+        const expiresAt = claimExpiry.rows[0]?.expires_at;
+        if (expiresAt === undefined) throw new Error("短租约边界未写入");
+        return expiresAt;
+      },
+    );
+    const blocker = await runtime.connect();
+    let blockerCommitted = false;
+    try {
+      // 第三条连接只承担 barrier：它先锁住 run claim，使 heartbeat 与 Cleanup 必须按
+      // attempt → run claim → workspace lease 的既定顺序交错，避免把普通 active 路径冒充竞态。
+      await blocker.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      await blocker.query("SELECT set_config('app.tenant_id',$1,true)", [f.scope.tenantId]);
+      await blocker.query(
+        `SELECT 1 FROM run_claims WHERE tenant_id=$1 AND attempt_id=$2 FOR UPDATE`,
+        [f.scope.tenantId, attemptId],
+      );
+      const heartbeat = persistence.inspectAndRenew({
+        fence: claimed.fence,
+        leaseDurationMs: 30_000,
+      });
+      const cleanupDuringBarrier = new PgSandboxCleanupConsumerStore(runtime).claimNext({
+        tenantId: f.scope.tenantId,
+        workerId: "cleanup-heartbeat-worker",
+        leaseMs: 210_000,
+      });
+      // 给两条业务连接进入各自的锁等待点；时钟仍远早于 250ms 短租约到期。
+      await blocker.query("SELECT pg_sleep(0.03)");
+      await blocker.query("COMMIT");
+      blockerCommitted = true;
+      const [renewed, duringBarrier] = await Promise.all([heartbeat, cleanupDuringBarrier]);
+      expect(renewed.outcome).toBe("active");
+      expect(duringBarrier).toBeUndefined();
+    } finally {
+      if (!blockerCommitted) await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
+    // 以数据库时钟等待旧短租约真正到期。若 heartbeat 没有胜出，这里会成为 Cleanup 候选。
+    const afterEdge = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      async (client) =>
+        client.query<{ database_now: Date }>(
+          `SELECT clock_timestamp() AS database_now
+             FROM pg_sleep(GREATEST(0,EXTRACT(EPOCH FROM ($1::timestamptz-clock_timestamp()))+0.01))`,
+          [edge],
+        ),
+    );
+    expect(afterEdge.rows[0]?.database_now.getTime()).toBeGreaterThan(
+      Date.parse(edge.toISOString()),
+    );
+    expect(
+      await new PgSandboxCleanupConsumerStore(runtime).claimNext({
+        tenantId: f.scope.tenantId,
+        workerId: "cleanup-heartbeat-worker",
+        leaseMs: 210_000,
+      }),
+    ).toBeUndefined();
+  });
+
   it("0005 可回退至 0004 并重新授予最小 Dispatch ACL", async () => {
     const down = await migrateDown(migrator, {
       runtimeRole,
@@ -1551,7 +1992,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     });
     expect(down.at(-1)?.version).toBe(4);
     const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
-    expect(restored.at(-1)?.version).toBe(5);
+    expect(restored.at(-1)?.version).toBe(6);
     const acl = await admin.query<{
       readonly select_allowed: boolean;
       readonly update_allowed: boolean;

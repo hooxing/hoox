@@ -102,9 +102,18 @@ importers:
 
   runtime-ts/apps/scheduler:
     dependencies:
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@cube-runtime/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
       '@cube-runtime/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
+      '@cube-runtime/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
 
   runtime-ts/apps/web: {}
 

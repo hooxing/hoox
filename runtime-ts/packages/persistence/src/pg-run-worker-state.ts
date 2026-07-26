@@ -512,6 +512,21 @@ export class PgBackedSandboxSessionRegistry
             WHERE cleanup.tenant_id=$1 AND cleanup.idempotency_key=$2
               AND cleanup.registry_id=$3 AND cleanup.provider_sandbox_id=$4
               AND cleanup.state='started' AND cleanup.disposition=$5
+              -- 正常 Worker 只能推进自己尚未被 Scheduler claim 的 cleanup，并在同一事务重验双栅栏。
+              AND cleanup.claim_token IS NULL
+              AND EXISTS (
+                SELECT 1 FROM run_claims worker_claim
+                JOIN workspace_write_leases worker_lease
+                  ON worker_lease.tenant_id=worker_claim.tenant_id
+                 AND worker_lease.workspace_id=attempt.workspace_id
+                 AND worker_lease.root_run_id=attempt.root_run_id
+                 AND worker_lease.epoch=worker_claim.workspace_lease_epoch
+                WHERE worker_claim.tenant_id=attempt.tenant_id
+                  AND worker_claim.attempt_id=attempt.attempt_id
+                  AND worker_claim.released_at IS NULL
+                  AND worker_claim.expires_at > clock_timestamp()
+                  AND worker_lease.expires_at > clock_timestamp()
+              )
               AND attempt.run_id=$6 AND attempt.thread_id=$7
               AND attempt.workspace_id=$8 AND attempt.root_run_id=$9
               AND attempt.base_revision_id IS NOT DISTINCT FROM $10
@@ -530,11 +545,31 @@ export class PgBackedSandboxSessionRegistry
           ],
         );
         if (result.rowCount !== 1) return false;
-        await client.query(
+        // 正常 Worker 与 Scheduler Consumer 共用 remote_call_started_at 这个不可逆边界。
+        // Worker 仍持有双栅栏，且登记/状态推进在同一事务，避免两个表各自讲不同故事。
+        const started = await client.query(
+          `UPDATE cleanup_outbox SET remote_call_started_at=clock_timestamp(),updated_at=clock_timestamp()
+            WHERE tenant_id=$1 AND idempotency_key=$2 AND registry_id=$3 AND provider_sandbox_id=$4
+              AND state='started' AND disposition=$5 AND remote_call_started_at IS NULL`,
+          [
+            input.scope.tenantId,
+            input.cleanupIntentId,
+            input.session.registryId,
+            input.session.providerSandboxId,
+            input.disposition,
+          ],
+        );
+        if (started.rowCount !== 1) return false;
+        const registryUpdate = await client.query(
           `UPDATE sandbox_registry SET state=$3,updated_at=clock_timestamp()
-            WHERE tenant_id=$1 AND registry_id=$2`,
+            WHERE tenant_id=$1 AND registry_id=$2 AND state IN ('ready','paused')`,
           [input.scope.tenantId, input.session.registryId, expectedState],
         );
+        // marker 已写入而 registry 未能同步时，绝不能提交半个状态机；
+        // 抛错让同一事务回滚，避免没有远端调用却留下不可逆 remote marker。
+        if (registryUpdate.rowCount !== 1) {
+          throw new Error("Sandbox cleanup 开始态未能原子同步");
+        }
         return true;
       },
       { isolationLevel: "SERIALIZABLE" },
@@ -542,19 +577,32 @@ export class PgBackedSandboxSessionRegistry
     if (!valid) throw new Error("Sandbox cleanup intent 未持久化或身份不匹配");
     const result = await this.upstream.settle(input);
     await withTenantTransaction(this.pool, { tenantId: input.scope.tenantId }, async (client) => {
-      await client.query(
-        `UPDATE sandbox_registry SET state=$3,updated_at=clock_timestamp()
-          WHERE tenant_id=$1 AND registry_id=$2`,
+      const terminal = result.outcome === "unknown" ? "unknown" : "completed";
+      const registryTerminal =
+        result.outcome === "unknown"
+          ? "unknown"
+          : input.disposition === "pause"
+            ? "paused"
+            : "closed";
+      const cleanup = await client.query(
+        `UPDATE cleanup_outbox SET state=$5,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND idempotency_key=$2 AND registry_id=$3 AND provider_sandbox_id=$4
+            AND state='started' AND remote_call_started_at IS NOT NULL`,
         [
           input.scope.tenantId,
+          input.cleanupIntentId,
           input.session.registryId,
-          result.outcome === "unknown"
-            ? "unknown"
-            : input.disposition === "pause"
-              ? "paused"
-              : "closed",
+          input.session.providerSandboxId,
+          terminal,
         ],
       );
+      const registry = await client.query(
+        `UPDATE sandbox_registry SET state=$3,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND registry_id=$2 AND state=$4`,
+        [input.scope.tenantId, input.session.registryId, registryTerminal, expectedState],
+      );
+      if (cleanup.rowCount !== 1 || registry.rowCount !== 1)
+        throw new Error("Sandbox cleanup 终态未能原子同步");
     });
     return result;
   }

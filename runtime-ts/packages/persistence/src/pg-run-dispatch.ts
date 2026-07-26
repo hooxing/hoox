@@ -1,12 +1,18 @@
 import { createHash, randomUUID } from "node:crypto";
-import { isoTimestamp, rehydrateRun, type Run } from "@cube-runtime/domain";
+import { isoTimestamp, type Run, rehydrateRun } from "@cube-runtime/domain";
+import { rolloutProjectionDigest } from "@cube-runtime/run-contracts/mutation-protocol";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type { EnqueueOutboxPort, IdempotentCreateResult } from "./ports.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 
 const maxInputBytes = 1_048_576;
-const emptyProjectionDigest = createHash("sha256").update("{}").digest("hex");
+const initialProjection = Object.freeze({
+  schemaVersion: 1 as const,
+  checkpointId: "initial",
+  turns: Object.freeze([]),
+});
+const initialProjectionDigest = rolloutProjectionDigest(initialProjection);
 
 function timestamp(value: unknown) {
   if (value instanceof Date) return isoTimestamp(value.toISOString());
@@ -65,6 +71,7 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
       return { outcome: "not_authorized" };
     }
     const digest = inputDigest(input.inputText);
+    let committed = false;
     try {
       const result = await withTenantTransaction(this.pool, input.scope, async (client) => {
         const membership = await client.query<{ readonly status: string }>(
@@ -73,8 +80,13 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
           [input.scope.tenantId, input.scope.userId],
         );
         if (membership.rows[0]?.status !== "active") return { outcome: "not_authorized" } as const;
-        // Membership 锁是创建命令的串行化起点；在其后检查幂等键，避免并发首请求双写。
-        const existing = await this.lockIdempotency(client, input);
+        // 已提交记录先读回，归档后的同键重试不应再触碰已失活的父 Thread。
+        const replay = await this.readIdempotency(client, input);
+        if (replay !== undefined) return replay;
+        // 幂等记录没有 UPDATE 权限；用事务 advisory lock 串行化首个相同键请求，
+        // 避免为了行锁而扩大 api_idempotency_records 的最小 ACL。
+        await this.lockIdempotencyKey(client, input);
+        const existing = await this.readIdempotency(client, input);
         if (existing !== undefined) return existing;
 
         const thread = await client.query<{ readonly status: string }>(
@@ -108,7 +120,7 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
           `INSERT INTO run_execution_inputs(
              tenant_id,run_id,thread_id,workspace_id,root_run_id,base_revision_id,
              input_text,initial_projection,initial_projection_digest
-           ) VALUES ($1,$2,$3,$4,$2,$5,$6,'{}'::jsonb,$7)`,
+           ) VALUES ($1,$2,$3,$4,$2,$5,$6,$7::jsonb,$8)`,
           [
             input.scope.tenantId,
             input.run.id,
@@ -116,7 +128,8 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
             workspaceRow.id,
             workspaceRow.current_revision_id,
             input.inputText,
-            emptyProjectionDigest,
+            JSON.stringify(initialProjection),
+            initialProjectionDigest,
           ],
         );
         await client.query(
@@ -146,10 +159,12 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
         );
         return { outcome: "created", entity: restoreRun(runRow, input.thread) } as const;
       });
+      committed = true;
       await this.options.afterCommit?.("create_run");
       return result;
     } catch (error) {
-      if (error instanceof TransactionCommitUnknownError) {
+      // 已离开事务后连接断开与测试注入的响应丢失都不能重写；只按原键读回。
+      if (error instanceof TransactionCommitUnknownError || committed) {
         const replay = await this.readReplay(input);
         if (replay !== undefined) return replay;
       }
@@ -157,14 +172,22 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
     }
   }
 
-  private async lockIdempotency(
+  private async lockIdempotencyKey(
+    client: PoolClient,
+    input: Parameters<EnqueueOutboxPort["createQueuedRun"]>[0],
+  ): Promise<void> {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [
+      `${input.scope.tenantId}\u001f${input.scope.userId}\u001frun.create\u001f${input.idempotency.key}`,
+    ]);
+  }
+
+  private async readIdempotency(
     client: PoolClient,
     input: Parameters<EnqueueOutboxPort["createQueuedRun"]>[0],
   ): Promise<IdempotentCreateResult<Run> | undefined> {
     const record = await client.query<QueryResultRow>(
       `SELECT request_hash,run_id FROM api_idempotency_records
-        WHERE tenant_id=$1 AND user_id=$2 AND operation='run.create' AND idempotency_key=$3
-        FOR UPDATE`,
+        WHERE tenant_id=$1 AND user_id=$2 AND operation='run.create' AND idempotency_key=$3`,
       [input.scope.tenantId, input.scope.userId, input.idempotency.key],
     );
     const row = record.rows[0];
@@ -185,7 +208,7 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
     input: Parameters<EnqueueOutboxPort["createQueuedRun"]>[0],
   ): Promise<IdempotentCreateResult<Run> | undefined> {
     return withTenantTransaction(this.pool, input.scope, (client) =>
-      this.lockIdempotency(client, input),
+      this.readIdempotency(client, input),
     );
   }
 }
@@ -277,11 +300,15 @@ export class PgRunDispatchOutbox {
     readonly outcome: "dispatched" | "terminal" | "waiting" | "defer";
     readonly retryAfterMilliseconds?: number;
   }): Promise<void> {
-    if (
-      input.outcome === "defer" &&
-      (!Number.isSafeInteger(input.retryAfterMilliseconds) || input.retryAfterMilliseconds! < 1_000)
-    ) {
-      throw new TypeError("Outbox defer 延迟无效");
+    const retryAfterMilliseconds = input.retryAfterMilliseconds;
+    if (input.outcome === "defer") {
+      if (
+        retryAfterMilliseconds === undefined ||
+        !Number.isSafeInteger(retryAfterMilliseconds) ||
+        retryAfterMilliseconds < 1_000
+      ) {
+        throw new TypeError("Outbox defer 延迟无效");
+      }
     }
     await withTenantTransaction(
       this.pool,
@@ -321,7 +348,8 @@ export class PgRunDispatchOutbox {
                   next_attempt_at=clock_timestamp()+($3::bigint * interval '1 millisecond'),
                   last_error_code='retryable',updated_at=clock_timestamp()
             WHERE tenant_id=$1 AND outbox_id=$2`,
-            [input.claim.scope.tenantId, input.claim.outboxId, input.retryAfterMilliseconds],
+            // defer 分支已经完成严格验证；默认值仅帮助 TypeScript 穿过异步回调边界。
+            [input.claim.scope.tenantId, input.claim.outboxId, retryAfterMilliseconds ?? 0],
           );
           return;
         }

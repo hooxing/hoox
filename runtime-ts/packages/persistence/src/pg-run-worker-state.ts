@@ -1,12 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isoTimestamp, workspaceRevisionId, type Run, type Workspace } from "@cube-runtime/domain";
-import {
-  outboxPayloadDigest,
-  rolloutProjectionDigest,
-  runtimeMutationDigest,
-  sandboxCleanupIdentityDigest,
-  workspaceChangeDigest,
-} from "@cube-runtime/run-contracts/mutation-protocol";
+import { isoTimestamp, type Run, type Workspace, workspaceRevisionId } from "@cube-runtime/domain";
 import type {
   ClaimExecutionResult,
   ControlledRolloutProjection,
@@ -27,9 +20,17 @@ import type {
   SandboxSessionRegistryPort,
   SandboxSettlementResult,
 } from "@cube-runtime/run-contracts";
+import {
+  assertControlledRolloutProjection,
+  outboxPayloadDigest,
+  rolloutProjectionDigest,
+  runtimeMutationDigest,
+  sandboxCleanupIdentityDigest,
+  workspaceChangeDigest,
+} from "@cube-runtime/run-contracts/mutation-protocol";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
-import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
+import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
 
 type AppliedMutation = Extract<
   RuntimeMutationResult,
@@ -736,6 +737,16 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             jsonValue<ControlledRolloutProjection>(row.initial_projection);
           const projectionDigest =
             previousProjection.rows[0]?.digest ?? String(row.initial_projection_digest);
+
+          // 领取前验证值与摘要；数据库可被受限 SQL 写入，不能只相信 API 的初始化路径。
+          try {
+            assertControlledRolloutProjection(projection);
+            if (rolloutProjectionDigest(projection) !== projectionDigest) {
+              return { outcome: "recovery_required" } as const;
+            }
+          } catch {
+            return { outcome: "recovery_required" } as const;
+          }
 
           await client.query(
             `UPDATE runs SET status='running', version=version+1, updated_at=$3

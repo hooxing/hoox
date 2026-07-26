@@ -694,12 +694,14 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     try {
       await migrateUp(target.pool, target.context);
       const beforeDown = await target.pool.query<{
+        readonly enabled_rls: boolean;
         readonly force_rls: boolean;
         readonly select_allowed: boolean;
         readonly insert_allowed: boolean;
         readonly update_allowed: boolean;
       }>(
-        `SELECT relation.relforcerowsecurity AS force_rls,
+        `SELECT relation.relrowsecurity AS enabled_rls,
+                relation.relforcerowsecurity AS force_rls,
                 has_table_privilege($1,'api_thread_idempotency_records','SELECT') AS select_allowed,
                 has_table_privilege($1,'api_thread_idempotency_records','INSERT') AS insert_allowed,
                 has_table_privilege($1,'api_thread_idempotency_records','UPDATE') AS update_allowed
@@ -708,11 +710,101 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         [runtimeRole],
       );
       expect(beforeDown.rows[0]).toEqual({
+        enabled_rls: true,
         force_rls: true,
         select_allowed: true,
         insert_allowed: true,
         update_allowed: false,
       });
+
+      const targetRuntime = createPostgresPool({
+        connectionString: runtimeDatabaseUrl,
+        schema: target.context.schema,
+        maxConnections: 2,
+      });
+      try {
+        expect(
+          (await targetRuntime.query<{ readonly current_user: string }>("SELECT current_user"))
+            .rows[0]?.current_user,
+        ).toBe(runtimeRole);
+        const seedTenant = async (label: string) => {
+          const tenant = `rls_tenant_${label}_${isolatedMigrationCounter}`;
+          const user = `rls_user_${label}_${isolatedMigrationCounter}`;
+          const thread = `rls_thread_${label}_${isolatedMigrationCounter}`;
+          const key = `rls-thread-key-${label}-${isolatedMigrationCounter}`;
+          await withTenantTransaction(
+            targetRuntime,
+            { tenantId: tenant, userId: user },
+            async (client) => {
+              await client.query("INSERT INTO app_users(id,created_at) VALUES ($1,$2)", [
+                user,
+                timestamp(0),
+              ]);
+              await client.query(
+                `INSERT INTO tenants(id,kind,owner_user_id,created_at)
+               VALUES ($1,'personal',$2,$3)`,
+                [tenant, user, timestamp(0)],
+              );
+              await client.query(
+                `INSERT INTO memberships(tenant_id,id,user_id,role,status,created_at)
+               VALUES ($1,$2,$3,'owner','active',$4)`,
+                [tenant, `rls_membership_${label}_${isolatedMigrationCounter}`, user, timestamp(0)],
+              );
+              await client.query(
+                `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
+               VALUES ($1,$2,$3,$4,'active',$5,$5)`,
+                [tenant, thread, user, `RLS ${label}`, timestamp(0)],
+              );
+              await client.query(
+                `INSERT INTO api_thread_idempotency_records(
+                 tenant_id,user_id,idempotency_key,request_hash,thread_id
+               ) VALUES ($1,$2,$3,$4,$5)`,
+                [tenant, user, key, label.repeat(64).slice(0, 64), thread],
+              );
+            },
+          );
+          return { tenant, user, thread, key };
+        };
+        const left = await seedTenant("a");
+        const right = await seedTenant("b");
+        const crossTenantRows = await withTenantTransaction(
+          targetRuntime,
+          { tenantId: left.tenant, userId: left.user },
+          (client) =>
+            client.query<{ readonly count: string }>(
+              `SELECT count(*)::text AS count FROM api_thread_idempotency_records
+                WHERE tenant_id=$1`,
+              [right.tenant],
+            ),
+        );
+        expect(crossTenantRows.rows[0]?.count).toBe("0");
+        await expect(
+          withTenantTransaction(
+            targetRuntime,
+            { tenantId: left.tenant, userId: left.user },
+            (client) =>
+              client.query(
+                `INSERT INTO api_thread_idempotency_records(
+                   tenant_id,user_id,idempotency_key,request_hash,thread_id
+                 ) VALUES ($1,$2,$3,$4,$5)`,
+                [right.tenant, right.user, `${right.key}-cross`, "c".repeat(64), right.thread],
+              ),
+          ),
+        ).rejects.toMatchObject({ code: "42501" });
+        const rightRows = await withTenantTransaction(
+          targetRuntime,
+          { tenantId: right.tenant, userId: right.user },
+          (client) =>
+            client.query<{ readonly count: string }>(
+              `SELECT count(*)::text AS count FROM api_thread_idempotency_records
+                WHERE tenant_id=$1`,
+              [right.tenant],
+            ),
+        );
+        expect(rightRows.rows[0]?.count).toBe("1");
+      } finally {
+        await targetRuntime.end();
+      }
       expect(
         (
           await migrateDown(target.pool, {

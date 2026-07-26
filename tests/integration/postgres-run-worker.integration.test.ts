@@ -187,7 +187,12 @@ function signed(input: Omit<RuntimeMutation, "schemaVersion" | "commandDigest">)
 }
 
 /** 在真实 COMMIT 已成功后丢弃客户端响应，覆盖事务框架而非业务 afterCommit hook。 */
-function withLostCommitResponse(upstream: Pool): Pool {
+function withLostCommitResponse(
+  upstream: Pool,
+  options: { readonly failReadback?: boolean } = {},
+): Pool {
+  let responseDiscarded = false;
+  let readbackFailed = false;
   return {
     connect: async () => {
       const client = await upstream.connect();
@@ -203,7 +208,17 @@ function withLostCommitResponse(upstream: Pool): Pool {
             : typeof first === "object" && first !== null && "text" in first
               ? String(first.text)
               : "";
-        if (sql.trim().toUpperCase() === "COMMIT") {
+        if (
+          responseDiscarded &&
+          options.failReadback === true &&
+          !readbackFailed &&
+          sql.includes("FROM api_thread_idempotency_records")
+        ) {
+          readbackFailed = true;
+          throw Object.assign(new Error("不得泄漏的恢复查询连接错误"), { code: "ECONNRESET" });
+        }
+        if (!responseDiscarded && sql.trim().toUpperCase() === "COMMIT") {
+          responseDiscarded = true;
           throw Object.assign(new Error("模拟 COMMIT 响应丢失"), { code: "ECONNRESET" });
         }
         return result;
@@ -632,6 +647,213 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       return { threads: threads.rows[0]?.count, workspaces: workspaces.rows[0]?.count };
     });
     expect(facts).toEqual({ threads: "1", workspaces: "1" });
+  });
+
+  it("Thread 创建直接命中 TransactionCommitUnknownError 后按原键精确读回", async () => {
+    const label = `thread-transaction-unknown-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`thread-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`thread-tenant-${label}`),
+      ownerMembershipId: membershipId(`thread-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const thread = createThread({
+      id: threadId(`thread-id-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "事务 COMMIT 结果未知",
+      now,
+    });
+    const workspace = createWorkspace({
+      id: workspaceId(`thread-workspace-${label}`),
+      thread,
+      now,
+    });
+    const command = {
+      scope,
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      thread,
+      workspace,
+      idempotency: { key: `thread-key-${label}`, requestHash: "e".repeat(64) },
+    } as const;
+
+    await expect(
+      new PgThreadCreation(withLostCommitResponse(runtime)).createThread(command),
+    ).resolves.toMatchObject({ outcome: "replayed", entity: { id: thread.id } });
+
+    const facts = await withTenantTransaction(runtime, scope, async (client) => {
+      const [threads, workspaces, idempotency] = await Promise.all([
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM threads WHERE tenant_id=$1 AND id=$2",
+          [scope.tenantId, thread.id],
+        ),
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM workspaces WHERE tenant_id=$1 AND id=$2",
+          [scope.tenantId, workspace.id],
+        ),
+        client.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM api_thread_idempotency_records
+            WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3`,
+          [scope.tenantId, scope.userId, command.idempotency.key],
+        ),
+      ]);
+      return {
+        threads: threads.rows[0]?.count,
+        workspaces: workspaces.rows[0]?.count,
+        idempotency: idempotency.rows[0]?.count,
+      };
+    });
+    expect(facts).toEqual({ threads: "1", workspaces: "1", idempotency: "1" });
+  });
+
+  it("Thread 提交结果未知且恢复查询失败时返回稳定脱敏错误，事实仍可重放", async () => {
+    const label = `thread-readback-failure-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`thread-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`thread-tenant-${label}`),
+      ownerMembershipId: membershipId(`thread-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const thread = createThread({
+      id: threadId(`thread-id-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "恢复查询也失败",
+      now,
+    });
+    const command = {
+      scope,
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      thread,
+      workspace: createWorkspace({ id: workspaceId(`thread-workspace-${label}`), thread, now }),
+      idempotency: { key: `thread-key-${label}`, requestHash: "d".repeat(64) },
+    } as const;
+
+    const unknownResult = new PgThreadCreation(
+      withLostCommitResponse(runtime, { failReadback: true }),
+    ).createThread(command);
+    await expect(unknownResult).rejects.toMatchObject({
+      name: "PersistenceError",
+      code: "UNAVAILABLE",
+      message: "读取 Thread 创建恢复结果暂时不可用",
+    });
+    await expect(unknownResult).rejects.not.toThrow("不得泄漏的恢复查询连接错误");
+    await expect(new PgThreadCreation(runtime).createThread(command)).resolves.toMatchObject({
+      outcome: "replayed",
+      entity: { id: thread.id },
+    });
+  });
+
+  it("Thread 创建中途 Workspace 写入失败时完整回滚 Thread 与幂等事实", async () => {
+    const label = `thread-rollback-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`thread-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`thread-tenant-${label}`),
+      ownerMembershipId: membershipId(`thread-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const existingThread = createThread({
+      id: threadId(`thread-existing-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "已有 Thread",
+      now,
+    });
+    const existingWorkspace = createWorkspace({
+      id: workspaceId(`thread-shared-workspace-${label}`),
+      thread: existingThread,
+      now,
+    });
+    await repositories.threads.create(scope, existingThread);
+    await repositories.workspaces.create(scope, existingWorkspace);
+
+    const targetThread = createThread({
+      id: threadId(`thread-target-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "必须整体回滚的 Thread",
+      now,
+    });
+    const idempotencyKey = `thread-key-${label}`;
+    await expect(
+      new PgThreadCreation(runtime).createThread({
+        scope,
+        tenant: personal.tenant,
+        user,
+        membership: personal.ownerMembership,
+        thread: targetThread,
+        // 复用已存在的 Workspace ID，确保 Thread INSERT 后的第二次写入在真实 PG 中失败。
+        workspace: createWorkspace({ id: existingWorkspace.id, thread: targetThread, now }),
+        idempotency: { key: idempotencyKey, requestHash: "f".repeat(64) },
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    const facts = await withTenantTransaction(runtime, scope, async (client) => {
+      const [threads, targetWorkspaces, idempotency, existingWorkspaces] = await Promise.all([
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM threads WHERE tenant_id=$1 AND id=$2",
+          [scope.tenantId, targetThread.id],
+        ),
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM workspaces WHERE tenant_id=$1 AND thread_id=$2",
+          [scope.tenantId, targetThread.id],
+        ),
+        client.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM api_thread_idempotency_records
+            WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3`,
+          [scope.tenantId, scope.userId, idempotencyKey],
+        ),
+        client.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM workspaces
+            WHERE tenant_id=$1 AND id=$2 AND thread_id=$3`,
+          [scope.tenantId, existingWorkspace.id, existingThread.id],
+        ),
+      ]);
+      return {
+        threads: threads.rows[0]?.count,
+        targetWorkspaces: targetWorkspaces.rows[0]?.count,
+        idempotency: idempotency.rows[0]?.count,
+        existingWorkspaces: existingWorkspaces.rows[0]?.count,
+      };
+    });
+    expect(facts).toEqual({
+      threads: "0",
+      targetWorkspaces: "0",
+      idempotency: "0",
+      existingWorkspaces: "1",
+    });
   });
 
   it("两个独立 PostgreSQL 连接首次并发创建 Thread 只会产生 created 与 replayed", async () => {

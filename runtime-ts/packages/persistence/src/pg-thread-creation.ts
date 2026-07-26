@@ -106,8 +106,13 @@ export class PgThreadCreation implements ThreadCreationPort {
     } catch (error) {
       // COMMIT 响应未知或提交后回调失败时，绝不能尝试再次 INSERT；只按同一 scope+key 精确读回。
       if (error instanceof TransactionCommitUnknownError || committed) {
-        const replay = await this.readReplayAfterCommit(input);
-        if (replay !== undefined) return replay;
+        try {
+          const replay = await this.readReplayAfterCommit(input);
+          if (replay !== undefined) return replay;
+        } catch (readbackError) {
+          // 恢复查询本身也可能断线；仍须收敛为稳定错误，不能泄漏驱动或 SQL 细节。
+          throw mapPersistenceError(readbackError, "读取 Thread 创建恢复结果");
+        }
       }
       throw mapPersistenceError(error, "原子创建 Thread 与 Workspace");
     }

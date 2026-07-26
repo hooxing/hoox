@@ -58,7 +58,7 @@ corepack pnpm config:check
 - 真实 `.env` 只保存在开发者机器并由 Git 忽略。
 - 新增或删除环境变量时，必须同步修改 `.env.example` 和 `scripts/env-contract.mjs`。
 - 示例中的数据库密码、访问密钥、模板 ID、模型地址和模型 ID 必须保持为明显占位值。
-- CI 只使用 `.env.example` 执行静态 Compose 展开，不连接 PostgreSQL、MinIO、CubeSandbox 或模型服务。
+- CI 的工程基线任务只使用 `.env.example` 执行静态 Compose 展开；独立的 Ubuntu M4 黑盒 Gate 会连接 CI PostgreSQL service，运行真实 HTTP、RLS、Dispatch、Worker 与 Pi adapter（Faux Provider）纵向链路。该 Gate 不连接 MinIO、真实 CubeSandbox 或外部模型服务。
 
 服务进程先用各应用的 `select*ProcessEnvironment` 从 `process.env` 投影声明键，再严格解析。禁止把完整宿主环境直接交给解析器，也禁止为缺失的 `RUNTIME_ENV` 回退到 development。API 的 `DEV_AUTH_ENABLED=true` 只允许 development/test；生产环境必须使用真实身份装配器。配置错误只记录变量名与稳定分类，不能记录值。
 

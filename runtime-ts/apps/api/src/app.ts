@@ -6,6 +6,7 @@ import {
   HealthSuccessEnvelopeSchema,
   RunPathSchema,
   RunSuccessEnvelopeSchema,
+  MAX_RUN_INPUT_UTF8_BYTES,
   ThreadListQuerySchema,
   ThreadPageSuccessEnvelopeSchema,
   ThreadPathSchema,
@@ -121,7 +122,8 @@ export function createApiApp(
     throw new TypeError("API 创建能力必须由 createApiCreateCapability 签发");
   }
   const app = Fastify({
-    bodyLimit: options.bodyLimitBytes ?? 64 * 1024,
+    // Run input 可达 1 MiB UTF-8；保留少量 JSON 包装余量，实际字段仍由 Service 精确核验。
+    bodyLimit: options.bodyLimitBytes ?? MAX_RUN_INPUT_UTF8_BYTES + 8 * 1024,
     requestTimeout: options.requestTimeoutMs ?? 15_000,
     handlerTimeout: options.requestTimeoutMs ?? 15_000,
     connectionTimeout: 5_000,
@@ -274,7 +276,12 @@ export function createApiApp(
         const auth = await service.authenticate(authorization(request), requestId(request));
         return success(
           request,
-          await service.createRun(auth, request.params.threadId, requireIdempotencyKey(request)),
+          await service.createRun(
+            auth,
+            request.params.threadId,
+            request.body.input,
+            requireIdempotencyKey(request),
+          ),
         );
       },
     );

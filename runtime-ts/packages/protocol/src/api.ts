@@ -17,7 +17,16 @@ export const CreateThreadRequestSchema = Type.Object(
 );
 export type CreateThreadRequest = Static<typeof CreateThreadRequestSchema>;
 
-export const CreateRunRequestSchema = Type.Object({}, strict);
+/** API 与数据库共同遵守的 UTF-8 字节上限；字符数不能替代此边界。 */
+export const MAX_RUN_INPUT_UTF8_BYTES = 1_048_576;
+
+export const CreateRunRequestSchema = Type.Object(
+  {
+    // maxLength 仅限制 JSON/校验器工作量；运行时会再按 UTF-8 字节数精确验证。
+    input: Type.String({ minLength: 1, maxLength: MAX_RUN_INPUT_UTF8_BYTES }),
+  },
+  strict,
+);
 export type CreateRunRequest = Static<typeof CreateRunRequestSchema>;
 
 export const ThreadListQuerySchema = Type.Object(

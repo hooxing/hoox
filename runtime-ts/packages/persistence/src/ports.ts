@@ -77,6 +77,10 @@ export interface EnqueueOutboxPort {
   createQueuedRun(input: {
     readonly scope: TenantScope;
     readonly run: Run;
+    /** 用于回放时以经过领域校验的父 Thread 重建 Run，不接受裸 threadId。 */
+    readonly thread: Thread;
+    /** 已由 API 按 UTF-8 字节上限验证，持久层仍必须以数据库约束兜底。 */
+    readonly inputText: string;
     readonly idempotency: IdempotentCommand;
   }): Promise<IdempotentCreateResult<Run>>;
 }

@@ -1,0 +1,27 @@
+{
+  "name": "@cube-runtime/run-contracts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./mutation-protocol": {
+      "types": "./src/mutation-protocol.ts",
+      "default": "./dist/mutation-protocol.js"
+    }
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "tsc -b tsconfig.json --clean",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@cube-runtime/domain": "workspace:*",
+    "@cube-runtime/pi-adapter": "workspace:*",
+    "@cube-runtime/sandbox": "workspace:*"
+  }
+}

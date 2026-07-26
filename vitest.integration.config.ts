@@ -16,6 +16,18 @@ export default defineConfig({
       "@cube-runtime/protocol-mapper": fileURLToPath(
         new URL("./runtime-ts/packages/protocol-mapper/src/index.ts", import.meta.url),
       ),
+      "@cube-runtime/run-contracts/mutation-protocol": fileURLToPath(
+        new URL("./runtime-ts/packages/run-contracts/src/mutation-protocol.ts", import.meta.url),
+      ),
+      "@cube-runtime/run-contracts": fileURLToPath(
+        new URL("./runtime-ts/packages/run-contracts/src/index.ts", import.meta.url),
+      ),
+      "@cube-runtime/pi-adapter": fileURLToPath(
+        new URL("./runtime-ts/packages/pi-adapter/src/index.ts", import.meta.url),
+      ),
+      "@cube-runtime/sandbox": fileURLToPath(
+        new URL("./runtime-ts/packages/sandbox/src/index.ts", import.meta.url),
+      ),
     },
   },
   test: {

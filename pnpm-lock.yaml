@@ -33,6 +33,9 @@ importers:
       '@cube-runtime/protocol-mapper':
         specifier: workspace:*
         version: link:runtime-ts/packages/protocol-mapper
+      '@cube-runtime/run-contracts':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/run-contracts
       '@sinclair/typebox':
         specifier: 0.34.52
         version: 0.34.52
@@ -63,6 +66,9 @@ importers:
       '@cube-runtime/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
+      '@cube-runtime/run-contracts':
+        specifier: workspace:*
+        version: link:../../packages/run-contracts
       '@cube-runtime/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
@@ -119,6 +125,9 @@ importers:
       '@cube-runtime/domain':
         specifier: workspace:*
         version: link:../domain
+      '@cube-runtime/run-contracts':
+        specifier: workspace:*
+        version: link:../run-contracts
       pg:
         specifier: 8.22.0
         version: 8.22.0
@@ -165,6 +174,18 @@ importers:
         version: 0.34.52
 
   runtime-ts/packages/resource: {}
+
+  runtime-ts/packages/run-contracts:
+    dependencies:
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@cube-runtime/pi-adapter':
+        specifier: workspace:*
+        version: link:../pi-adapter
+      '@cube-runtime/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
 
   runtime-ts/packages/sandbox:
     dependencies:

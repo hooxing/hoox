@@ -524,8 +524,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("并发迁移串行化且重复执行结果一致", async () => {
-    expect(concurrentMigrationVersions).toEqual([1, 2, 3, 1, 2, 3]);
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(3);
+    expect(concurrentMigrationVersions).toEqual([1, 2, 3, 4, 1, 2, 3, 4]);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(4);
   });
 
   it("checksum 同时绑定 down SQL，并拒绝孤立和重复版本", async () => {
@@ -586,7 +586,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         `SELECT to_regclass('threads')::text AS threads,
                 (SELECT count(*)::text FROM runtime_schema_migrations) AS migration_count`,
       );
-      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "3" });
+      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "4" });
     } finally {
       await administrativePool.query(
         `GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
@@ -634,15 +634,15 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       [migratorRole],
     );
     expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(3);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(4);
   });
 
-  it("partial down 3→2 后按旧 Schema 收敛 ACL，并可再次迁移到 3", async () => {
+  it("partial down 4→2 后按旧 Schema 收敛 ACL，并可再次迁移到 4", async () => {
     const target = await createIsolatedMigrationTarget("partial_down");
     try {
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3]);
+      ).toEqual([1, 2, 3, 4]);
       expect(
         (
           await migrateDown(target.pool, {
@@ -673,7 +673,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3]);
+      ).toEqual([1, 2, 3, 4]);
       const restored = await target.pool.query<{ present: boolean; allowed: boolean }>(
         `SELECT EXISTS (
            SELECT 1 FROM information_schema.columns
@@ -684,6 +684,52 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         [runtimeRole],
       );
       expect(restored.rows[0]).toEqual({ present: true, allowed: true });
+    } finally {
+      await target.close();
+    }
+  });
+
+  it("partial down 4→3 只移除 Run Worker 事实与权限，并可再次迁移到 4", async () => {
+    const target = await createIsolatedMigrationTarget("run_worker_partial_down");
+    try {
+      expect(
+        (await migrateUp(target.pool, target.context)).map((record) => record.version),
+      ).toEqual([1, 2, 3, 4]);
+      expect(
+        (
+          await migrateDown(target.pool, {
+            ...target.context,
+            allowDestructive: true,
+            environment: "test",
+            targetVersion: 3,
+          })
+        ).map((record) => record.version),
+      ).toEqual([1, 2, 3]);
+      const downState = await target.pool.query<{
+        execution_inputs: string | null;
+        membership_lock_marker: string | null;
+      }>(
+        `SELECT to_regclass('run_execution_inputs')::text AS execution_inputs,
+                (SELECT column_name FROM information_schema.columns
+                  WHERE table_schema=current_schema() AND table_name='memberships'
+                    AND column_name='lock_marker') AS membership_lock_marker`,
+      );
+      expect(downState.rows[0]).toEqual({
+        execution_inputs: null,
+        membership_lock_marker: "lock_marker",
+      });
+      expect(
+        (await migrateUp(target.pool, target.context)).map((record) => record.version),
+      ).toEqual([1, 2, 3, 4]);
+      const restored = await target.pool.query<{
+        table_present: boolean;
+        runtime_can_select: boolean;
+      }>(
+        `SELECT to_regclass('run_execution_inputs') IS NOT NULL AS table_present,
+                has_table_privilege($1,'run_execution_inputs','SELECT') AS runtime_can_select`,
+        [runtimeRole],
+      );
+      expect(restored.rows[0]).toEqual({ table_present: true, runtime_can_select: true });
     } finally {
       await target.close();
     }
@@ -1253,6 +1299,19 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ["blob_gc_claims", new Set(["SELECT", "INSERT"])],
       ["retired_blob_tombstones", new Set(["SELECT", "INSERT"])],
       ["blob_references", new Set(["SELECT", "INSERT"])],
+      ["run_execution_inputs", new Set(["SELECT", "INSERT"])],
+      ["execution_attempts", new Set(["SELECT", "INSERT"])],
+      ["execution_workspace_fences", new Set(["SELECT", "INSERT"])],
+      ["run_claims", new Set(["SELECT", "INSERT"])],
+      ["rollout_projections", new Set(["SELECT", "INSERT"])],
+      ["run_events", new Set(["SELECT", "INSERT"])],
+      ["sandbox_registry", new Set(["SELECT", "INSERT"])],
+      ["cleanup_outbox", new Set(["SELECT", "INSERT"])],
+      ["sandbox_lifecycle_unknown", new Set(["SELECT", "INSERT"])],
+      ["runtime_alert_outbox", new Set(["SELECT", "INSERT"])],
+      ["effect_invocations", new Set(["SELECT", "INSERT"])],
+      ["external_effect_permits", new Set(["SELECT", "INSERT"])],
+      ["mutation_receipts", new Set(["SELECT", "INSERT"])],
       ["runtime_schema_migrations", new Set()],
     ]);
     const allPrivileges = [
@@ -1312,6 +1371,32 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         "blob_references",
         new Set(["state", "lifecycle_id", "incarnation_id", "physical_object_key", "updated_at"]),
       ],
+      ["run_execution_inputs", new Set(["answer_text", "updated_at"])],
+      [
+        "execution_attempts",
+        new Set([
+          "current_revision_id",
+          "status",
+          "stage",
+          "version",
+          "next_event_sequence",
+          "projection_version",
+          "model_execution_started",
+          "updated_at",
+          "finished_at",
+        ]),
+      ],
+      ["run_claims", new Set(["expires_at", "updated_at", "released_at"])],
+      [
+        "rollout_projections",
+        new Set(["attempt_id", "version", "projection", "digest", "updated_at"]),
+      ],
+      ["sandbox_registry", new Set(["state", "actual_ttl_seconds", "updated_at"])],
+      [
+        "cleanup_outbox",
+        new Set(["state", "disposition", "payload", "payload_digest", "updated_at"]),
+      ],
+      ["external_effect_permits", new Set(["consumed_at"])],
     ]);
     const columnMatrix = await migratorPool.query<{
       table_name: string;

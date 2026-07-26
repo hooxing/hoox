@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@cube-runtime/domain": "workspace:*",
+    "@cube-runtime/run-contracts": "workspace:*",
     "@aws-sdk/client-s3": "3.1095.0",
     "@aws-sdk/s3-request-presigner": "3.1095.0",
     "pg": "8.22.0"

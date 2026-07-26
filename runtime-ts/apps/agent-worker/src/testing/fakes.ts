@@ -41,6 +41,7 @@ import type {
   ExecutionScope,
   FenceInspectionResult,
   HeartbeatTask,
+  OrphanSandboxCleanupPort,
   PersistedRuntimeEventV1,
   PersistedRuntimeOutboxV1,
   RuntimeMutation,
@@ -794,7 +795,7 @@ export class FakeRevisionVerifier implements WorkspaceRevisionVerifierPort {
   }
 }
 
-export class FakeSandboxRegistry implements SandboxSessionRegistryPort {
+export class FakeSandboxRegistry implements SandboxSessionRegistryPort, OrphanSandboxCleanupPort {
   acquireCount = 0;
   settleCount = 0;
   nextAcquire: SandboxAcquireResult | undefined;
@@ -837,6 +838,14 @@ export class FakeSandboxRegistry implements SandboxSessionRegistryPort {
       return result;
     }
     return { outcome: "settled" };
+  }
+
+  async closeOrphan(input: Parameters<OrphanSandboxCleanupPort["closeOrphan"]>[0]) {
+    return this.settle({
+      ...input,
+      cleanupIntentId: `registry:${input.session.registryId}:orphan-cleanup`,
+      disposition: "close",
+    });
   }
 }
 

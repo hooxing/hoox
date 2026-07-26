@@ -113,7 +113,23 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ["run_claims", new Set(["expires_at", "updated_at", "released_at"])],
   ["rollout_projections", new Set(["attempt_id", "version", "projection", "digest", "updated_at"])],
   ["sandbox_registry", new Set(["state", "actual_ttl_seconds", "updated_at"])],
-  ["cleanup_outbox", new Set(["state", "disposition", "payload", "payload_digest", "updated_at", "claim_token", "claim_generation", "claimed_by", "claim_lease_expires_at", "retry_at", "attempt_count", "remote_call_started_at"])],
+  [
+    "cleanup_outbox",
+    new Set([
+      "state",
+      "disposition",
+      "payload",
+      "payload_digest",
+      "updated_at",
+      "claim_token",
+      "claim_generation",
+      "claimed_by",
+      "claim_lease_expires_at",
+      "retry_at",
+      "attempt_count",
+      "remote_call_started_at",
+    ]),
+  ],
   ["external_effect_permits", new Set(["consumed_at"])],
   [
     "run_dispatch_outbox",
@@ -207,7 +223,10 @@ async function activeColumnUpdatePolicy(
     for (const table of runDispatchTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
-    policy.set("cleanup_outbox", new Set(["state", "disposition", "payload", "payload_digest", "updated_at"]));
+    policy.set(
+      "cleanup_outbox",
+      new Set(["state", "disposition", "payload", "payload_digest", "updated_at"]),
+    );
   }
   return policy;
 }
@@ -736,7 +755,9 @@ export async function bootstrapRuntimeAccessOnClient(
        TO ${role}`,
     );
     if (await hasCleanupConsumerState(client)) {
-      await client.query(`GRANT UPDATE(claim_token, claim_generation, claimed_by, claim_lease_expires_at, retry_at, attempt_count, remote_call_started_at) ON TABLE ${schema}.cleanup_outbox TO ${role}`);
+      await client.query(
+        `GRANT UPDATE(claim_token, claim_generation, claimed_by, claim_lease_expires_at, retry_at, attempt_count, remote_call_started_at) ON TABLE ${schema}.cleanup_outbox TO ${role}`,
+      );
     }
   }
   if (await hasRunDispatchState(client, context.schema)) {

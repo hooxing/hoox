@@ -2,12 +2,18 @@ import type { CleanupClaim } from "@cube-runtime/persistence";
 import { SandboxRuntimeError, type SandboxGateway } from "@cube-runtime/sandbox";
 
 export interface SandboxCleanupResolver {
-  settle(input: Pick<CleanupClaim, "registryId" | "providerSandboxId" | "disposition">): Promise<"settled" | "unknown">;
+  settle(
+    input: Pick<CleanupClaim, "registryId" | "providerSandboxId" | "disposition">,
+  ): Promise<"settled" | "unknown">;
 }
 
 /** 消费器只依赖原子领取/栅栏协议，便于完整模拟每个崩溃窗口而不伪造 PostgreSQL SQL。 */
 export interface SandboxCleanupStore {
-  claimNext(input: { readonly tenantId: string; readonly workerId: string; readonly leaseMs: number }): Promise<CleanupClaim | undefined>;
+  claimNext(input: {
+    readonly tenantId: string;
+    readonly workerId: string;
+    readonly leaseMs: number;
+  }): Promise<CleanupClaim | undefined>;
   markRemoteStarted(claim: CleanupClaim): Promise<boolean>;
   complete(claim: CleanupClaim): Promise<boolean>;
   unknown(claim: CleanupClaim): Promise<boolean>;
@@ -18,17 +24,29 @@ export interface SandboxCleanupStore {
  * 若上游明确返回不存在，资源已经不需要清理；任何其他错误都保持 unknown，交给人工核对。
  */
 export class CubeSandboxCleanupResolver implements SandboxCleanupResolver {
-  constructor(private readonly gateway: SandboxGateway, private readonly timeoutMs = 90_000) {}
+  constructor(
+    private readonly gateway: SandboxGateway,
+    private readonly timeoutMs = 90_000,
+  ) {}
 
-  async settle(input: Pick<CleanupClaim, "registryId" | "providerSandboxId" | "disposition">): Promise<"settled" | "unknown"> {
+  async settle(
+    input: Pick<CleanupClaim, "registryId" | "providerSandboxId" | "disposition">,
+  ): Promise<"settled" | "unknown"> {
     try {
-      const sandbox = await this.gateway.connect(input.providerSandboxId, { timeoutMs: this.timeoutMs });
+      const sandbox = await this.gateway.connect(input.providerSandboxId, {
+        timeoutMs: this.timeoutMs,
+      });
       if (input.disposition === "pause") await sandbox.pause({ timeoutMs: this.timeoutMs });
       else await sandbox.kill({ timeoutMs: this.timeoutMs, ignoreNotFound: true });
       return "settled";
     } catch (error) {
       // close 的“不存在”意味着目标已不再占用资源；pause 不存在无法推断为已暂停。
-      if (input.disposition === "close" && error instanceof SandboxRuntimeError && error.code === "NOT_FOUND") return "settled";
+      if (
+        input.disposition === "close" &&
+        error instanceof SandboxRuntimeError &&
+        error.code === "NOT_FOUND"
+      )
+        return "settled";
       return "unknown";
     }
   }
@@ -44,13 +62,18 @@ export class SandboxCleanupConsumer {
     private readonly leaseMs = 120_000,
   ) {
     // Cube connect/settle 默认最多 90 秒，额外 30 秒覆盖连接抖动和状态写回；不能用 30 秒 lease 包裹 90 秒远端调用。
-    if (!Number.isSafeInteger(leaseMs) || leaseMs < 120_000 || leaseMs > 600_000) throw new TypeError("cleanup lease 必须覆盖远端操作和安全余量");
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 120_000 || leaseMs > 600_000)
+      throw new TypeError("cleanup lease 必须覆盖远端操作和安全余量");
   }
 
   /** 一次只领取一条，调用方以其自身生命周期调度下一次，避免关闭后又开始新的远端调用。 */
   async drainTenant(tenantId: string): Promise<number> {
     if (this.stopping) return 0;
-    const claim = await this.store.claimNext({ tenantId, workerId: this.workerId, leaseMs: this.leaseMs });
+    const claim = await this.store.claimNext({
+      tenantId,
+      workerId: this.workerId,
+      leaseMs: this.leaseMs,
+    });
     if (claim === undefined || this.stopping) return 0;
     // 这条写入是不可逆远端边界；之后任意崩溃都只能收敛 unknown，禁止重复 settle。
     if (!(await this.store.markRemoteStarted(claim))) return 0;
@@ -93,12 +116,15 @@ export class SandboxCleanupPollingLoop {
     if (this.timer !== undefined || this.stopping) return;
     const tick = () => {
       if (this.stopping || this.inFlight !== undefined) return;
-      this.inFlight = this.consumer.drainTenant(this.tenantId).then(
-        () => undefined,
-        () => undefined,
-      ).finally(() => {
-        this.inFlight = undefined;
-      });
+      this.inFlight = this.consumer
+        .drainTenant(this.tenantId)
+        .then(
+          () => undefined,
+          () => undefined,
+        )
+        .finally(() => {
+          this.inFlight = undefined;
+        });
     };
     tick();
     this.timer = setInterval(tick, this.intervalMs);

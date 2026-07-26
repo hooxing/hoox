@@ -30,11 +30,16 @@ describe("Scheduler 进程入口", () => {
   it("配置可验证，传入 Fake assembler 不能冒充受审生产装配", async () => {
     const configuration = parseSchedulerProcessEnvironment(productionEnvironment());
     expect(configuration.objectStorage.bucket).toBe("runtime-artifacts");
-    await expect(startSchedulerProcess({ environment: productionEnvironment(), assembler: {
-      async assemble() { return { stopAccepting: async () => undefined, resources: [], readiness: [] }; },
-    } })).rejects.toThrow(
-      "PRODUCTION_ASSEMBLY_UNAVAILABLE:scheduler",
-    );
+    await expect(
+      startSchedulerProcess({
+        environment: productionEnvironment(),
+        assembler: {
+          async assemble() {
+            return { stopAccepting: async () => undefined, resources: [], readiness: [] };
+          },
+        },
+      }),
+    ).rejects.toThrow("PRODUCTION_ASSEMBLY_UNAVAILABLE:scheduler");
   });
 
   it("未知变量严格失败", () => {

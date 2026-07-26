@@ -12,16 +12,27 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
-import { createPostgresPool, PgSandboxCleanupConsumerStore, probePostgres } from "@cube-runtime/persistence";
+import {
+  createPostgresPool,
+  PgSandboxCleanupConsumerStore,
+  probePostgres,
+} from "@cube-runtime/persistence";
 import { CubeSandboxGateway } from "@cube-runtime/sandbox";
-import { CubeSandboxCleanupResolver, SandboxCleanupConsumer, SandboxCleanupPollingLoop } from "./sandbox-cleanup-consumer.js";
+import {
+  CubeSandboxCleanupResolver,
+  SandboxCleanupConsumer,
+  SandboxCleanupPollingLoop,
+} from "./sandbox-cleanup-consumer.js";
 
 /** 只由下方受审装配器登记；外部传入的任意 ServiceAssembly 都不能在生产环境冒充它。 */
 const trustedProductionAssemblies = new WeakSet<object>();
 
 function isTrustedProductionSchedulerAssembly(assembly: object): boolean {
   if (!trustedProductionAssemblies.has(assembly)) return false;
-  const candidate = assembly as { readonly resources?: readonly { readonly name: string }[]; readonly readiness?: readonly { readonly name: string }[] };
+  const candidate = assembly as {
+    readonly resources?: readonly { readonly name: string }[];
+    readonly readiness?: readonly { readonly name: string }[];
+  };
   return (
     candidate.resources?.length === 1 &&
     candidate.resources[0]?.name === "postgres" &&
@@ -112,10 +123,18 @@ export function parseSchedulerProcessEnvironment(
     }),
     sandbox: Object.freeze({
       apiUrl: readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL"),
-      ...(parsed.values.CUBESANDBOX_API_KEY === undefined ? {} : { apiKey: parsed.values.CUBESANDBOX_API_KEY }),
-      ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined ? {} : { proxyNodeIp: parsed.values.CUBESANDBOX_PROXY_NODE_IP }),
-      ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined ? {} : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
-      ...(parsed.values.CUBESANDBOX_PROXY_SCHEME === undefined ? {} : { proxyScheme: parsed.values.CUBESANDBOX_PROXY_SCHEME as "http" | "https" }),
+      ...(parsed.values.CUBESANDBOX_API_KEY === undefined
+        ? {}
+        : { apiKey: parsed.values.CUBESANDBOX_API_KEY }),
+      ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
+        ? {}
+        : { proxyNodeIp: parsed.values.CUBESANDBOX_PROXY_NODE_IP }),
+      ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined
+        ? {}
+        : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
+      ...(parsed.values.CUBESANDBOX_PROXY_SCHEME === undefined
+        ? {}
+        : { proxyScheme: parsed.values.CUBESANDBOX_PROXY_SCHEME as "http" | "https" }),
     }),
     cleanup: Object.freeze({
       tenantId: readRequiredEnvironmentValue(parsed, "SCHEDULER_TENANT_ID"),
@@ -141,10 +160,18 @@ export const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProce
     try {
       const gateway = new CubeSandboxGateway({
         apiUrl: configuration.sandbox.apiUrl,
-        ...(configuration.sandbox.apiKey === undefined ? {} : { apiKey: configuration.sandbox.apiKey }),
-        ...(configuration.sandbox.proxyNodeIp === undefined ? {} : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
-        ...(configuration.sandbox.proxyPort === undefined ? {} : { proxyPort: configuration.sandbox.proxyPort }),
-        ...(configuration.sandbox.proxyScheme === undefined ? {} : { proxyScheme: configuration.sandbox.proxyScheme }),
+        ...(configuration.sandbox.apiKey === undefined
+          ? {}
+          : { apiKey: configuration.sandbox.apiKey }),
+        ...(configuration.sandbox.proxyNodeIp === undefined
+          ? {}
+          : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
+        ...(configuration.sandbox.proxyPort === undefined
+          ? {}
+          : { proxyPort: configuration.sandbox.proxyPort }),
+        ...(configuration.sandbox.proxyScheme === undefined
+          ? {}
+          : { proxyScheme: configuration.sandbox.proxyScheme }),
       });
       const consumer = new SandboxCleanupConsumer(
         new PgSandboxCleanupConsumerStore(pool),

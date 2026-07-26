@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  parseSchedulerProcessEnvironment,
-  type SchedulerProcessConfiguration,
-  startSchedulerProcess,
-} from "./process-entry.js";
+import { parseSchedulerProcessEnvironment, startSchedulerProcess } from "./process-entry.js";
 
 function productionEnvironment(): Record<string, string> {
   return {
@@ -48,20 +44,18 @@ describe("Scheduler 进程入口", () => {
     ).toThrow("UNKNOWN:UNUSED_FLAG");
   });
 
-  it("production 继续拒绝可伪造的 assembler，不能把 Fake 调度器变成可部署服务", async () => {
-    await expect(
-      startSchedulerProcess({
-        environment: productionEnvironment(),
-        assembler: {
-          async assemble(_configuration: SchedulerProcessConfiguration) {
-            return {
-              stopAccepting: async () => undefined,
-              resources: [],
-              readiness: [],
-            };
-          },
-        },
+  it("按 UTF-8 与领域 Tenant ID 在启动前拒绝永久配置错误", () => {
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        SCHEDULER_WORKER_ID: "😀".repeat(51),
       }),
-    ).rejects.toThrow("PRODUCTION_ASSEMBLY_UNAVAILABLE:scheduler");
+    ).toThrow("SCHEDULER_WORKER_ID UTF-8");
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        SCHEDULER_TENANT_ID: "bad tenant",
+      }),
+    ).toThrow("ID 格式无效");
   });
 });

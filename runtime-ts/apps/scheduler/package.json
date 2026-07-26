@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
+    "@cube-runtime/domain": "workspace:*",
     "@cube-runtime/persistence": "workspace:*",
     "@cube-runtime/process-runtime": "workspace:*",
     "@cube-runtime/sandbox": "workspace:*"

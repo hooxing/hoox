@@ -102,6 +102,9 @@ importers:
 
   runtime-ts/apps/scheduler:
     dependencies:
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@cube-runtime/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence

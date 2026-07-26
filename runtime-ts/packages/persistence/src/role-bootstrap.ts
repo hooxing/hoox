@@ -37,8 +37,8 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
 ]);
 
 const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
-  // 仅授予 status 列 UPDATE 以取得 Membership 行锁；角色变更仍不属于 Runtime 权限。
-  ["memberships", new Set(["status"])],
+  // PostgreSQL 行锁要求至少一个 UPDATE 列权限；常量列不能承载任何授权事实。
+  ["memberships", new Set(["lock_marker"])],
   [
     "blob_lifecycles",
     new Set([
@@ -547,7 +547,7 @@ export async function bootstrapRuntimeAccessOnClient(
   await client.query(
     `GRANT SELECT, INSERT ON TABLE ${schema}.app_users, ${schema}.tenants, ${schema}.memberships TO ${role}`,
   );
-  await client.query(`GRANT UPDATE(status) ON TABLE ${schema}.memberships TO ${role}`);
+  await client.query(`GRANT UPDATE(lock_marker) ON TABLE ${schema}.memberships TO ${role}`);
   await client.query(
     `GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}.threads, ${schema}.runs, ${schema}.workspaces TO ${role}`,
   );

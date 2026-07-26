@@ -51,7 +51,7 @@
 
 DELETE 表示可重复的逻辑 archive/cancel，不物理删除记录。两个 create POST 强制 8–128 字符 `Idempotency-Key`；同 scope、操作和 key 且请求哈希相同时返回原实体，哈希不同返回 `CONFLICT`。Thread 列表使用 `updated_at DESC, id DESC` 键集游标，默认 20、上限 100；游标只影响当前已授权 scope 的查询位置。
 
-分页游标不是客户端可编辑的 base64 JSON。游标使用版本 `v=1`、`kid` 和 HMAC-SHA256 签名，签名载荷同时绑定 `tenantId`、`userId`、`updatedAt` 与 `id`。密钥环要求每个密钥为 32–64 字节规范 base64url，写入只使用 `activeKid`，读取可在轮换窗口接受旧 `kid`；验签使用常量时间比较。篡改、未知 `kid`、错误载荷、跨 Tenant 或同 Tenant 跨 User 重放统一返回 `INVALID_REQUEST`，不能成为密钥或授权探针。
+分页游标不是客户端可编辑的 base64 JSON。游标使用版本 `v=1`、`kid` 和 HMAC-SHA256 签名，签名载荷同时绑定 `tenantId`、`userId`、`issuedAt`、`expiresAt`、数据库列表位置 `updatedAt` 与 `id`；签发时间和列表位置是两个独立字段，不能相互替代。密钥环要求每个密钥为 32–64 字节规范 base64url，写入只使用 `activeKid`，读取可在轮换窗口接受旧 `kid`；codec 注入可信时钟、签发 TTL 和允许的最大 TTL，拒绝未来签发、过期、倒置时间及超过本地最大寿命的游标。验签使用常量时间比较，未知 kid 也执行等长 HMAC 路径。篡改、未知 `kid`、错误载荷、跨 Tenant 或同 Tenant 跨 User 重放统一返回 `INVALID_REQUEST`，不能成为密钥或授权探针。
 
 所有 request body/query/path 用 `additionalProperties: false` 的 TypeBox Schema，AJV 禁止 `removeAdditional`，即额外字段必须拒绝而不是静默删除。默认 body 上限 64 KiB，请求接收和 handler 超时 15 秒。requestId 由服务端生成，同时写入 `x-request-id` 和 v1 Envelope。错误只返回固定 `ErrorEnvelope`，不包含异常消息、SQL、ID 或驱动细节。
 
@@ -63,11 +63,15 @@ JSON 解析显式拒绝 `__proto__` 与 `constructor` 污染键。Schema、超�
 
 `ThreadCreationPort` 规定 Thread、空 Workspace、幂等记录与 active Membership 重验原子提交。`EnqueueOutboxPort` 规定 `queued` Run、enqueue outbox、幂等记录与 active Membership 重验原子提交，且在事务锁内重验 Thread 仍为 active。当前 PG Repository 不支持这两个组合事务；本任务只提供契约和并发屏障 Fake。不提供“先写 Run 再发队列”或“先写 Thread 再写 Workspace”的生产默认适配。
 
-创建端口不能作为普通可选字段直接装配。调用方必须同时提供两个端口并经 `createApiCreateCapability` 运行时工厂签发；只有签发对象存在时才注册两个 POST 路由。无创建能力时 `/ready` 可正常通过，两个 POST 返回 404，读取、归档和取消仍可部署。运行时用签发集合校验对象，TypeScript `as` 断言不能伪造能力。
+创建端口不能作为普通可选字段直接装配。调用方必须同时提供两个端口并经 `createApiCreateCapability` 运行时工厂签发；签发时快照并绑定两个方法，`createApiApp` 只读取一次调用方依赖并冻结自己的浅快照，路由注册与 `ApiService` 共用同一 capability。应用创建后替换依赖对象、getter 返回值或端口方法都不能改变已开放路由。只有签发对象存在时才注册两个 POST 路由。无创建能力时 `/ready` 可正常通过，两个 POST 返回 404，读取、归档和取消仍可部署。运行时用签发集合校验对象，TypeScript `as` 断言不能伪造能力。
 
-Thread 归档使用独立 `ArchiveThreadCommandPort`。PostgreSQL 实现必须在一个事务中固定按 Membership→Thread 取行锁，在锁内重验 Membership 为 active 且角色为 Owner/Admin，再做幂等逻辑归档。API 层先读 Membership 仅用于建立请求上下文，不能替代命令事务内的授权重验；认证后发生撤权或降权时必须返回 `NOT_FOUND` 且不能归档。
+Thread 归档使用独立 `ArchiveThreadCommandPort`。PostgreSQL 实现必须在一个事务中固定按 Membership `FOR SHARE`→Thread `FOR UPDATE` 取行锁，在锁内重验 Membership 为 active 且角色为 Owner/Admin，再做幂等逻辑归档。API 层先读 Membership 仅用于建立请求上下文，不能替代命令事务内的授权重验；认证后发生撤权或降权时必须返回 `NOT_FOUND` 且不能归档。
 
-PostgreSQL 的行级锁语法除 SELECT 外还要求目标表至少一个可更新列。Runtime 因此只获得 Membership `status` 列的 UPDATE 权限，不获得 `role` 或其他列的 UPDATE，也不获得表级 UPDATE。该最小列权限既允许归档命令锁定 Membership，也为后续受控撤权命令保留边界；任何 status 修改仍必须通过单独的事务命令端口，不能向通用 Repository 开放。
+PostgreSQL 对 `FOR SHARE` 仍要求目标表至少有一个可更新列，因此迁移新增恒为 `false` 且有 CHECK 约束的 `lock_marker`，Runtime 只获得该无业务语义列的 UPDATE。Runtime 不获得 Membership 表级 UPDATE，也不能更新 `status`、`role`、`tenant_id`、`user_id`、`id` 或 `created_at` 等授权与审计事实。真实降权由拥有独立权限的管理事务完成，归档命令的共享锁与该写事务互斥；常量锁列仅满足 PostgreSQL 权限模型，不能承载状态。
+
+归档端口不接受 API 时钟。取得 Thread 锁后，`updated_at` 由事务内 `clock_timestamp()` 产生，并用 `GREATEST(旧值, 数据库时间)` 保证不会倒退；锁等待期间 API 预先取得的时间不能进入持久化结果。重复归档返回数据库中既有实体。
+
+本阶段的 Thread/Run 创建能力仍只有进程内 Fake，没有 PostgreSQL 生产适配。生产适配进入主干的强制条件是：用两个独立 PG 连接证明双方首次观察均无幂等记录时仍只有一个创建、另一个重放；并证明事务 COMMIT 成功但 HTTP 成功响应丢失后，同一 key 重试能读回原实体且不产生第二个 Thread/Workspace、Run/outbox。未满足这些真实数据库测试前不得签发生产 capability。
 
 ## 理由
 
@@ -79,7 +83,7 @@ Fastify 将 Schema 验证、序列化、生命周期和 inject 测试收敛在�
 
 - HTTP 边界复用已有 Domain、Protocol Mapper、PG Repository 和 RLS；
 - 跨 Tenant、跨 Thread 和角色失败具有统一且脱敏的行为；
-- create 的幂等和入队原子性被显式定义，后续 PG 实现有可复用的双参与者并发屏障目标契约；
+- create 的幂等和入队原子性被显式定义；内存双参与者屏障只验证端口契约，不代表生产 PostgreSQL 能力已经完成；
 - 已签名且绑定授权主体的游标不能被编辑或跨主体重放。
 
 ### 负面影响与成本
@@ -93,14 +97,14 @@ Fastify 将 Schema 验证、序列化、生命周期和 inject 测试收敛在�
 
 - 反向代理必须完整传递 Authorization 且不能覆盖服务端 requestId；
 - handler 超时不能证明已发出的持久化写入失败，create 调用方必须用同一 Idempotency-Key 重试；
-- 游标密钥轮换时必须先发布同时含新旧 key 的读取密钥环，再切换 `activeKid`，最后等待既有游标过期后移除旧 key；
+- 游标密钥轮换时必须先发布同时含新旧 key 的读取密钥环，再切换 `activeKid`，最后等待 `expiresAt` 和最大 TTL 确认所有旧游标过期后移除旧 key；
 - ready 只表示已注入依赖的探针通过，live 不访问外部服务。
 
 ## 验证
 
 - Fastify inject：严格字段、body 上限、畸形 JSON、原型污染键、415 媒体类型、handler 超时、requestId、固定 ErrorEnvelope 和脱敏错误；
-- 契约测试：Thread create/get/list/archive、Run queued create/get/cancel、游标签名/轮换/跨主体拒绝、双方首次观察为空的并发幂等、认证后撤权重验和未签发创建能力不注册路由；
-- 真实 PostgreSQL：API 使用 Runtime 角色经 RLS 读取/列表/归档/取消，证明裸 Tenant Header 不能跨租户读取，并以真实 Membership 行锁屏障证明降权先提交时归档被拒绝；
+- 契约测试：Thread create/get/list/archive、Run queued create/get/cancel、游标签名/过期/最大 TTL/轮换/跨主体拒绝、双方首次观察为空的内存并发幂等、能力替换无效、认证后撤权重验和未签发创建能力不注册路由；
+- 真实 PostgreSQL：API 使用 Runtime 角色经 RLS 读取/列表/归档/取消，证明裸 Tenant Header 不能跨租户读取；以真实 Membership 行锁屏障证明降权先提交时归档被拒绝；断言 Runtime 不能更新任何 Membership 授权字段；证明 Thread 锁等待后归档使用单调数据库时间；
 - 全量 format/lint/typecheck/test/build、clean-vendor 和敏感信息扫描。
 
 ## 可逆性与回退

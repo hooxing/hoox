@@ -39,7 +39,7 @@ WorkspaceRevision 已经是不可变领域对象，但此前只有整体 `object
 采用方案 B，并固定 schemaVersion 1：
 
 - 首版 entry 只允许 `type: file` 的普通文件；directory 由路径前缀推导，symlink、hardlink、socket、FIFO、device 与其他特殊类型全部拒绝。未来支持任何新类型必须提升 schemaVersion 并单独审查；
-- 路径必须是非空、已是 Unicode NFC 的 POSIX 相对路径；拒绝未配对 surrogate、C0/C1 与 Unicode `Cf` 格式控制字符、`/` 绝对路径、Windows 盘符/ADS、反斜杠、Windows 非法字符 `< > : " | ? *`、保留设备名（忽略 ASCII 大小写且含扩展名）、尾点/尾空格、空段、`.` 和 `..`。核心不做静默 Unicode 或 Windows 路径转换；
+- 路径必须是非空、已是 Unicode NFC 的 POSIX 相对路径；拒绝未配对 surrogate、C0/C1 与 Unicode `Cf` 格式控制字符、`/` 绝对路径、Windows 盘符/ADS、反斜杠、Windows 非法字符 `< > : " | ? *`、保留设备名（忽略 ASCII 大小写、含扩展名，并覆盖官方 `COM¹/²/³` 与 `LPT¹/²/³`）、尾点/尾空格、空段、`.` 和 `..`。核心不做静默 Unicode 或 Windows 路径转换；
 - schemaVersion 1 的大小写碰撞键精确定义为“只把 ASCII `A-Z` 映射到 `a-z`，其他 NFC code point 原样保留”。它拒绝精确重复、ASCII 大小写碰撞及双向目录/文件前缀冲突，但不宣称实现完整 Unicode case folding；Sandbox 目标仍是大小写敏感 POSIX。未来若扩大折叠表必须提升 schemaVersion，不能依赖会随 Node.js 变化的 Unicode 数据表；
 - canonical payload 使用固定字段顺序、JSON 字符串转义、非负且非 `-0` 的十进制安全整数，entry 按合法 Unicode 路径的 UTF-8 字节序排列，再对 UTF-8 bytes 计算小写 SHA-256。拒绝未配对 surrogate 后，UTF-8 comparator 对允许路径构成全序；清单自身的 `digest` 不进入摘要，并以固定 Unicode golden vector 防止实现漂移；
 - 清单根绑定 `tenantId` 并纳入 canonical digest；解析时必须与调用方可信 Tenant 一致，所有 entry 也必须属于该 Tenant。每个 entry 同时绑定 `sha256 + size` 与 `tenantId + purpose=workspace + incarnationId + physicalObjectKey`。物理键必须与 ADR-0010 stable key 后缀逐字段一致；同 `(tenantId, purpose, incarnationId)` 在一个清单中只能绑定相同 `sha256 + size + physicalObjectKey`，同 SHA-256 仍不代表同物理对象；
@@ -50,7 +50,7 @@ WorkspaceRevision 已经是不可变领域对象，但此前只有整体 `object
 
 ## 理由
 
-逐文件清单让路径安全、内容完整性和 Blob 生命周期成为可验证数据，而不是解包时的隐含约定。严格拒绝而非转换能避免同一输入在 Windows、Linux 和 Sandbox 中映射到不同文件。纯计划保留了未来执行器选择批量下载、Sandbox 内复制或重建的空间，同时不把尚未实现的授权、HEAD/GET 验证包装成完成状态。
+逐文件清单让路径安全、内容完整性和 Blob 生命周期成为可验证数据，而不是解包时的隐含约定。严格拒绝而非转换保证本物化目标——大小写敏感 POSIX Sandbox——具有唯一解释；ASCII-only fold 只额外消除最常见的便携歧义，并不保证任意 Unicode 路径在 Windows、Linux 与 Sandbox 上映射一致。未来提供 Windows 下载、解压或导出前必须新增命名兼容与冲突处理策略。纯计划保留了未来执行器选择批量下载、Sandbox 内复制或重建的空间，同时不把尚未实现的授权、HEAD/GET 验证包装成完成状态。
 
 ## 影响
 

@@ -90,17 +90,18 @@ function record(value: unknown, label: string): Record<string, unknown> {
   return Object.freeze(snapshot);
 }
 
-function array(value: unknown, label: string): readonly unknown[] {
+function array(value: unknown, label: string, maxLength?: number): readonly unknown[] {
   let isArray: boolean;
-  let descriptors: PropertyDescriptorMap;
+  let lengthDescriptor: PropertyDescriptor | undefined;
   try {
     isArray = Array.isArray(value);
-    descriptors = isArray ? Object.getOwnPropertyDescriptors(value) : {};
+    lengthDescriptor = isArray
+      ? Reflect.getOwnPropertyDescriptor(value as object, "length")
+      : undefined;
   } catch {
     throw new WorkspaceManifestError("INVALID_MANIFEST", `${label} 元数据不可安全读取`);
   }
   manifestError(isArray, "INVALID_MANIFEST", `${label} 必须是数组`);
-  const lengthDescriptor = descriptors.length;
   manifestError(
     lengthDescriptor !== undefined && "value" in lengthDescriptor,
     "INVALID_MANIFEST",
@@ -112,14 +113,18 @@ function array(value: unknown, label: string): readonly unknown[] {
     "INVALID_MANIFEST",
     `${label} length 无效`,
   );
-  const descriptorKeys = Reflect.ownKeys(descriptors);
-  manifestError(
-    descriptorKeys.length === length + 1,
-    "INVALID_MANIFEST",
-    `${label} 不能包含空洞或额外字段`,
-  );
+  if (maxLength !== undefined) {
+    manifestError(length <= maxLength, "LIMIT_EXCEEDED", "文件数量超过调用方策略");
+  }
+  let keys: readonly PropertyKey[];
+  try {
+    keys = Reflect.ownKeys(value as object);
+  } catch {
+    throw new WorkspaceManifestError("INVALID_MANIFEST", `${label} 元数据不可安全读取`);
+  }
+  manifestError(keys.length === length + 1, "INVALID_MANIFEST", `${label} 不能包含空洞或额外字段`);
   const snapshot: unknown[] = [];
-  for (const key of descriptorKeys) {
+  for (const key of keys) {
     manifestError(
       typeof key === "string" &&
         (key === "length" ||
@@ -131,7 +136,12 @@ function array(value: unknown, label: string): readonly unknown[] {
     );
   }
   for (let index = 0; index < length; index += 1) {
-    const descriptor = descriptors[String(index)];
+    let descriptor: PropertyDescriptor | undefined;
+    try {
+      descriptor = Reflect.getOwnPropertyDescriptor(value as object, String(index));
+    } catch {
+      throw new WorkspaceManifestError("INVALID_MANIFEST", `${label} 元数据不可安全读取`);
+    }
     manifestError(
       descriptor !== undefined && "value" in descriptor && descriptor.enumerable === true,
       "INVALID_MANIFEST",
@@ -314,19 +324,12 @@ function compareUtf8(left: string, right: string): number {
 }
 
 function validateEntries(
-  values: readonly unknown[],
+  values: unknown,
   tenantId: string,
   policy?: WorkspaceManifestPolicy,
 ): readonly WorkspaceFileEntry[] {
-  const snapshotValues = array(values, "WorkspaceManifest entries");
   const checkedPolicy = policy === undefined ? undefined : validatePolicy(policy);
-  if (checkedPolicy !== undefined) {
-    manifestError(
-      snapshotValues.length <= checkedPolicy.maxFiles,
-      "LIMIT_EXCEEDED",
-      "文件数量超过调用方策略",
-    );
-  }
+  const snapshotValues = array(values, "WorkspaceManifest entries", checkedPolicy?.maxFiles);
 
   const entries = snapshotValues
     .map(parseEntry)
@@ -439,8 +442,7 @@ export function createWorkspaceManifest(
     "INVALID_MANIFEST",
     "清单 Tenant ID 格式无效",
   );
-  const entries = array(snapshot.entries, "WorkspaceManifest entries");
-  const parsedEntries = validateEntries(entries, snapshot.tenantId, policy);
+  const parsedEntries = validateEntries(snapshot.entries, snapshot.tenantId, policy);
   return Object.freeze({
     schemaVersion: WORKSPACE_MANIFEST_SCHEMA_VERSION,
     tenantId: snapshot.tenantId,
@@ -466,11 +468,6 @@ export function parseWorkspaceManifest(
     input.schemaVersion === WORKSPACE_MANIFEST_SCHEMA_VERSION,
     "INVALID_MANIFEST",
     "WorkspaceManifest schemaVersion 不受支持",
-  );
-  manifestError(
-    Array.isArray(input.entries),
-    "INVALID_MANIFEST",
-    "WorkspaceManifest entries 必须是数组",
   );
   manifestError(
     typeof input.digest === "string" && SHA256_PATTERN.test(input.digest),
@@ -502,11 +499,6 @@ export function parseWorkspaceManifest(
 export function assertWorkspaceManifestIntegrity(value: WorkspaceManifest): WorkspaceManifest {
   const input = record(value, "WorkspaceManifest");
   assertExactKeys(input, ["schemaVersion", "tenantId", "digest", "entries"], "WorkspaceManifest");
-  manifestError(
-    Array.isArray(input.entries),
-    "INVALID_MANIFEST",
-    "WorkspaceManifest entries 必须是数组",
-  );
   manifestError(
     typeof input.tenantId === "string" && TENANT_ID_PATTERN.test(input.tenantId),
     "INVALID_MANIFEST",

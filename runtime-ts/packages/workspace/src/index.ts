@@ -22,3 +22,41 @@ export {
   resolveWorkspaceTargetPath,
   workspaceRelativePath,
 } from "./path.js";
+export {
+  WorkspaceApplicationError,
+  type WorkspaceApplicationErrorCode,
+  WorkspaceDependencyError,
+  type WorkspaceDependencyResult,
+} from "./application-errors.js";
+export type {
+  SandboxSessionIdentity,
+  SandboxWorkspaceEntry,
+  SandboxWorkspaceEntryKind,
+  SandboxWorkspacePort,
+  SandboxWorkspaceSnapshot,
+  ValidatedWorkspaceChange,
+  WorkspaceCandidateBlob,
+  WorkspaceCandidateBlobWritePort,
+  WorkspaceExecutionPolicy,
+  WorkspaceKnownFailureDisposition,
+  WorkspaceOperationBeginResult,
+  WorkspaceOperationIdentity,
+  WorkspaceOperationJournalPort,
+  WorkspaceOperationResult,
+  WorkspaceStableAuthorizationReceipt,
+  WorkspaceStableBlobReadPort,
+  WorkspaceTrustedScope,
+  WorkspaceUnknownFact,
+} from "./application-ports.js";
+export {
+  type MaterializedWorkspace,
+  type MaterializeWorkspaceInput,
+  SANDBOX_WORKSPACE_ROOT,
+  WorkspaceMaterializer,
+  type WorkspaceMaterializerOptions,
+} from "./materializer.js";
+export {
+  type PublishWorkspaceInput,
+  WorkspacePublisher,
+  type WorkspacePublisherOptions,
+} from "./publisher.js";

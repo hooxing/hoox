@@ -27,6 +27,7 @@
 | [ADR-0019](0019-workspace-manifest-and-materialization-plan.md) | Workspace 清单与安全物化计划核心 | 已接受 | 2026-07-26 |
 | [ADR-0020](0020-resource-library-discovery-preview-import-core.md) | Resource Library 发现、局部预览与显式导入核心 | 已接受 | 2026-07-26 |
 | [ADR-0021](0021-artifact-publication-completion-and-download.md) | Artifact 发布、完成门与授权下载核心 | 已接受 | 2026-07-26 |
+| [ADR-0022](0022-workspace-materialization-and-publication-orchestration.md) | Workspace 安全物化与可验证发布编排 | 已接受 | 2026-07-26 |
 | [ADR-0023](0023-resource-library-postgresql-persistence.md) | Resource Library PostgreSQL 目录与显式提升提交 | 已接受 | 2026-07-26 |
 
 ## 何时必须记录

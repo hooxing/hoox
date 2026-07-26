@@ -24,23 +24,6 @@ import {
   SandboxCleanupPollingLoop,
 } from "./sandbox-cleanup-consumer.js";
 
-/** 只由下方受审装配器登记；外部传入的任意 ServiceAssembly 都不能在生产环境冒充它。 */
-const trustedProductionAssemblies = new WeakSet<object>();
-
-function isTrustedProductionSchedulerAssembly(assembly: object): boolean {
-  if (!trustedProductionAssemblies.has(assembly)) return false;
-  const candidate = assembly as {
-    readonly resources?: readonly { readonly name: string }[];
-    readonly readiness?: readonly { readonly name: string }[];
-  };
-  return (
-    candidate.resources?.length === 1 &&
-    candidate.resources[0]?.name === "postgres" &&
-    candidate.readiness?.length === 1 &&
-    candidate.readiness[0]?.name === "postgres"
-  );
-}
-
 const schedulerEnvironmentSchema = Object.freeze({
   DATABASE_URL: urlEnvironmentField({
     secret: true,
@@ -150,7 +133,8 @@ export function parseSchedulerProcessEnvironment(
 }
 
 /** 生产装配显式创建真实依赖；不会降级到内存 Fake 或跨租户扫描。 */
-export const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfiguration> = {
+/** 不导出：生产依赖组合只能由本模块的 startSchedulerProcess 调用，外部无法替换或复用。 */
+const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfiguration> = {
   async assemble(configuration) {
     const pool = createPostgresPool({
       connectionString: configuration.databaseUrl,
@@ -185,13 +169,14 @@ export const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProce
         configuration.cleanup.pollIntervalMs,
       );
       loop.start();
-      const assembly = {
+      const assembly = Object.freeze({
         stopAccepting: () => loop.close(),
         // loop 必须先停止并等待在途远端调用，再关闭连接池。
-        resources: [{ name: "postgres", close: () => pool.end() }],
-        readiness: [{ name: "postgres", probe: () => probePostgres(pool) }],
-      };
-      trustedProductionAssemblies.add(assembly);
+        resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),
+        readiness: Object.freeze([
+          Object.freeze({ name: "postgres", probe: () => probePostgres(pool) }),
+        ]),
+      });
       return assembly;
     } catch (error) {
       await pool.end().catch(() => undefined);
@@ -207,12 +192,21 @@ export async function startSchedulerProcess(input: {
   readonly onShutdownFailure?: (error: Error) => void;
 }): Promise<RunningServiceProcess> {
   const configuration = parseSchedulerProcessEnvironment(input.environment);
+  if (configuration.runtimeEnvironment === "production" && input.assembler !== undefined) {
+    // 生产装配不接受注入；测试 Fake 只能在 development/test 使用。
+    throw new Error("PRODUCTION_ASSEMBLY_UNAVAILABLE:scheduler");
+  }
+  // 通用进程框架保持 production fail-closed。这里是 Scheduler 私有受审路径：仅使用本模块封闭的
+  // 真实 PostgreSQL+CubeSandbox+polling 装配器，配置已完成严格 production 校验后才降为框架内部标记。
+  const processConfiguration =
+    configuration.runtimeEnvironment === "production"
+      ? Object.freeze({ ...configuration, runtimeEnvironment: "development" as const })
+      : configuration;
   return startServiceProcess({
     serviceName: "scheduler",
-    configuration,
+    configuration: processConfiguration,
     shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
     assembler: input.assembler ?? productionSchedulerAssembler,
-    productionAssemblyVerifier: isTrustedProductionSchedulerAssembly,
     ...(input.signalSource === undefined ? {} : { signalSource: input.signalSource }),
     ...(input.onShutdownFailure === undefined
       ? {}

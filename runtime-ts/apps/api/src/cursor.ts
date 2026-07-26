@@ -11,7 +11,25 @@ import type { ThreadCursorCodec } from "./ports.js";
 
 const kidPattern = /^[A-Za-z0-9_-]{3,32}$/u;
 const base64UrlPattern = /^[A-Za-z0-9_-]+$/u;
-const maximumCursorLength = 512;
+const maximumIdLength = 128;
+const maximumKidLength = 32;
+const maximumIsoTimestampLength = 24;
+const maximumSignatureLength = 43;
+const maximumCursorPayloadBytes = Buffer.byteLength(
+  JSON.stringify({
+    v: 1,
+    kid: "k".repeat(maximumKidLength),
+    tenantId: "t".repeat(maximumIdLength),
+    userId: "u".repeat(maximumIdLength),
+    issuedAt: "0".repeat(maximumIsoTimestampLength),
+    expiresAt: "0".repeat(maximumIsoTimestampLength),
+    updatedAt: "0".repeat(maximumIsoTimestampLength),
+    id: "i".repeat(maximumIdLength),
+  }),
+  "utf8",
+);
+const maximumEncodedPayloadLength = Math.ceil(maximumCursorPayloadBytes / 3) * 4;
+const maximumCursorLength = maximumEncodedPayloadLength + 1 + maximumSignatureLength;
 const absoluteMaximumTtlMilliseconds = 30 * 24 * 60 * 60 * 1_000;
 
 export interface ThreadCursorSigningKey {
@@ -139,7 +157,9 @@ export function createThreadCursorCodec(config: ThreadCursorKeyRing): ThreadCurs
         updatedAt: cursor.updatedAt,
         id: cursor.id,
       };
-      const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+      const payloadBuffer = Buffer.from(JSON.stringify(payload), "utf8");
+      if (payloadBuffer.length > maximumCursorPayloadBytes) invalidCursor();
+      const encodedPayload = payloadBuffer.toString("base64url");
       const signature = sign(encodedPayload, activeSecret);
       return `${encodedPayload}.${signature.toString("base64url")}`;
     },
@@ -156,6 +176,7 @@ export function createThreadCursorCodec(config: ThreadCursorKeyRing): ThreadCurs
       try {
         const payloadBuffer = Buffer.from(encodedPayload, "base64url");
         if (payloadBuffer.toString("base64url") !== encodedPayload) invalidCursor();
+        if (payloadBuffer.length > maximumCursorPayloadBytes) invalidCursor();
         payload = parsePayload(JSON.parse(payloadBuffer.toString("utf8")));
         actualSignature = Buffer.from(encodedSignature, "base64url");
         if (actualSignature.toString("base64url") !== encodedSignature) invalidCursor();

@@ -464,6 +464,65 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("同一 Membership 的共享锁不阻塞另一 Thread 归档", async () => {
+    const fixture = await createFixture("archive_share_lock");
+    const secondThread = createThread({
+      id: threadId("thread_archive_share_second"),
+      tenant: fixture.tenant,
+      user: fixture.user,
+      membership: fixture.membership,
+      title: "共享成员锁的第二个任务",
+      now: timestamp(5),
+    });
+    expect(await repositories.threads.create(fixture.scope, secondThread)).toEqual({
+      outcome: "created",
+      version: 0n,
+    });
+    const command = new PgArchiveThreadCommand(runtimePool);
+    const blocker = await administrativePool.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query(
+        `SELECT status FROM "${schema}".threads
+          WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+        [fixture.scope.tenantId, fixture.thread.id],
+      );
+      const first = command.archiveThread({
+        scope: fixture.scope,
+        threadId: fixture.thread.id,
+      });
+      let waitingOnThread = false;
+      for (let attempt = 0; attempt < 50 && !waitingOnThread; attempt += 1) {
+        const activity = await administrativePool.query<{ waiting: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+              WHERE wait_event_type = 'Lock' AND query LIKE '%FROM threads%'
+           ) AS waiting`,
+        );
+        waitingOnThread = activity.rows[0]?.waiting === true;
+        if (!waitingOnThread) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waitingOnThread).toBe(true);
+
+      const second = command.archiveThread({ scope: fixture.scope, threadId: secondThread.id });
+      const raced = await Promise.race([
+        second.then(() => "completed" as const),
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
+      ]);
+      await blocker.query("COMMIT");
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(raced).toBe("completed");
+      expect(firstResult.outcome).toBe("archived");
+      expect(secondResult.outcome).toBe("archived");
+    } finally {
+      try {
+        await blocker.query("ROLLBACK");
+      } finally {
+        blocker.release();
+      }
+    }
+  });
+
   it("并发迁移串行化且重复执行结果一致", async () => {
     expect(concurrentMigrationVersions).toEqual([1, 2, 3, 1, 2, 3]);
     expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(3);
@@ -576,6 +635,58 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     );
     expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
     expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(3);
+  });
+
+  it("partial down 3→2 后按旧 Schema 收敛 ACL，并可再次迁移到 3", async () => {
+    const target = await createIsolatedMigrationTarget("partial_down");
+    try {
+      expect(
+        (await migrateUp(target.pool, target.context)).map((record) => record.version),
+      ).toEqual([1, 2, 3]);
+      expect(
+        (
+          await migrateDown(target.pool, {
+            ...target.context,
+            allowDestructive: true,
+            environment: "test",
+            targetVersion: 2,
+          })
+        ).map((record) => record.version),
+      ).toEqual([1, 2]);
+      const downState = await target.pool.query<{ lock_marker: string | null }>(
+        "SELECT column_name AS lock_marker FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'memberships' AND column_name = 'lock_marker'",
+      );
+      expect(downState.rows).toEqual([]);
+      const downColumnPrivileges = await target.pool.query<{
+        column_name: string;
+        allowed: boolean;
+      }>(
+        `SELECT column_name,
+                has_column_privilege($1, 'memberships', column_name, 'UPDATE') AS allowed
+           FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = 'memberships'
+          ORDER BY ordinal_position`,
+        [runtimeRole],
+      );
+      expect(downColumnPrivileges.rows.length).toBeGreaterThan(0);
+      expect(downColumnPrivileges.rows.every((column) => !column.allowed)).toBe(true);
+
+      expect(
+        (await migrateUp(target.pool, target.context)).map((record) => record.version),
+      ).toEqual([1, 2, 3]);
+      const restored = await target.pool.query<{ present: boolean; allowed: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'memberships' AND column_name = 'lock_marker'
+         ) AS present,
+         has_column_privilege($1, 'memberships', 'lock_marker', 'UPDATE') AS allowed`,
+        [runtimeRole],
+      );
+      expect(restored.rows[0]).toEqual({ present: true, allowed: true });
+    } finally {
+      await target.close();
+    }
   });
 
   it("Runtime 角色不安全时在任何迁移 DDL 之前失败", async () => {
@@ -1173,6 +1284,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       );
     }
     const expectedColumnUpdates = new Map<string, ReadonlySet<string>>([
+      ["memberships", new Set(["lock_marker"])],
       [
         "blob_lifecycles",
         new Set([
@@ -1258,6 +1370,31 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     });
     const left = await createFixture("rls_left");
     const right = await createFixture("rls_right");
+    const ownLockMarker = await withTenantTransaction(runtimePool, left.scope, (client) =>
+      client.query(
+        `UPDATE memberships SET lock_marker = false
+          WHERE tenant_id = $1 AND user_id = $2`,
+        [left.scope.tenantId, left.scope.userId],
+      ),
+    );
+    expect(ownLockMarker.rowCount).toBe(1);
+    await expect(
+      withTenantTransaction(runtimePool, left.scope, (client) =>
+        client.query(
+          `UPDATE memberships SET lock_marker = true
+            WHERE tenant_id = $1 AND user_id = $2`,
+          [left.scope.tenantId, left.scope.userId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
+    const crossTenantLockMarker = await withTenantTransaction(runtimePool, left.scope, (client) =>
+      client.query(
+        `UPDATE memberships SET lock_marker = false
+          WHERE tenant_id = $1 AND user_id = $2`,
+        [right.scope.tenantId, right.scope.userId],
+      ),
+    );
+    expect(crossTenantLockMarker.rowCount).toBe(0);
     await expect(
       withTenantTransaction(runtimePool, left.scope, (client) =>
         client.query(

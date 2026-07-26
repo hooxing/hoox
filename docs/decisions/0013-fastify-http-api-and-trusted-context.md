@@ -51,7 +51,7 @@
 
 DELETE 表示可重复的逻辑 archive/cancel，不物理删除记录。两个 create POST 强制 8–128 字符 `Idempotency-Key`；同 scope、操作和 key 且请求哈希相同时返回原实体，哈希不同返回 `CONFLICT`。Thread 列表使用 `updated_at DESC, id DESC` 键集游标，默认 20、上限 100；游标只影响当前已授权 scope 的查询位置。
 
-分页游标不是客户端可编辑的 base64 JSON。游标使用版本 `v=1`、`kid` 和 HMAC-SHA256 签名，签名载荷同时绑定 `tenantId`、`userId`、`issuedAt`、`expiresAt`、数据库列表位置 `updatedAt` 与 `id`；签发时间和列表位置是两个独立字段，不能相互替代。密钥环要求每个密钥为 32–64 字节规范 base64url，写入只使用 `activeKid`，读取可在轮换窗口接受旧 `kid`；codec 注入可信时钟、签发 TTL 和允许的最大 TTL，拒绝未来签发、过期、倒置时间及超过本地最大寿命的游标。验签使用常量时间比较，未知 kid 也执行等长 HMAC 路径。篡改、未知 `kid`、错误载荷、跨 Tenant 或同 Tenant 跨 User 重放统一返回 `INVALID_REQUEST`，不能成为密钥或授权探针。
+分页游标不是客户端可编辑的 base64 JSON。游标使用版本 `v=1`、`kid` 和 HMAC-SHA256 签名，签名载荷同时绑定 `tenantId`、`userId`、`issuedAt`、`expiresAt`、数据库列表位置 `updatedAt` 与 `id`；签发时间和列表位置是两个独立字段，不能相互替代。密钥环要求每个密钥为 32–64 字节规范 base64url，写入只使用 `activeKid`，读取可在轮换窗口接受旧 `kid`；codec 注入可信时钟、签发 TTL 和允许的最大 TTL，拒绝未来签发、过期、倒置时间及超过本地最大寿命的游标。游标总长度上限由协议中的三个 128 字符 ID、32 字符 kid、三个 ISO 时间、JSON 字段、base64url 膨胀和固定 HMAC 长度计算，不能使用低于合法最坏情况的经验常量；编码和解码都检查同一载荷上限。验签使用常量时间比较，未知 kid 也执行等长 HMAC 路径。篡改、未知 `kid`、错误载荷、跨 Tenant 或同 Tenant 跨 User 重放统一返回 `INVALID_REQUEST`，不能成为密钥或授权探针。
 
 所有 request body/query/path 用 `additionalProperties: false` 的 TypeBox Schema，AJV 禁止 `removeAdditional`，即额外字段必须拒绝而不是静默删除。默认 body 上限 64 KiB，请求接收和 handler 超时 15 秒。requestId 由服务端生成，同时写入 `x-request-id` 和 v1 Envelope。错误只返回固定 `ErrorEnvelope`，不包含异常消息、SQL、ID 或驱动细节。
 
@@ -67,7 +67,9 @@ JSON 解析显式拒绝 `__proto__` 与 `constructor` 污染键。Schema、超�
 
 Thread 归档使用独立 `ArchiveThreadCommandPort`。PostgreSQL 实现必须在一个事务中固定按 Membership `FOR SHARE`→Thread `FOR UPDATE` 取行锁，在锁内重验 Membership 为 active 且角色为 Owner/Admin，再做幂等逻辑归档。API 层先读 Membership 仅用于建立请求上下文，不能替代命令事务内的授权重验；认证后发生撤权或降权时必须返回 `NOT_FOUND` 且不能归档。
 
-PostgreSQL 对 `FOR SHARE` 仍要求目标表至少有一个可更新列，因此迁移新增恒为 `false` 且有 CHECK 约束的 `lock_marker`，Runtime 只获得该无业务语义列的 UPDATE。Runtime 不获得 Membership 表级 UPDATE，也不能更新 `status`、`role`、`tenant_id`、`user_id`、`id` 或 `created_at` 等授权与审计事实。真实降权由拥有独立权限的管理事务完成，归档命令的共享锁与该写事务互斥；常量锁列仅满足 PostgreSQL 权限模型，不能承载状态。
+PostgreSQL 对 `FOR SHARE OF membership` 仍要求目标表至少有一个可更新列，因此迁移新增恒为 `false` 且有 CHECK 约束的 `lock_marker`，Runtime 只获得该无业务语义列的 UPDATE。Runtime 不获得 Membership 表级 UPDATE，也不能更新 `status`、`role`、`tenant_id`、`user_id`、`id` 或 `created_at` 等授权与审计事实。真实降权由拥有独立权限的管理事务完成，归档命令的共享锁与该写事务互斥；两个共享锁可以并行，使同一成员的不同 Thread 归档不会在 Membership 上无谓串行。常量锁列仅满足 PostgreSQL 权限模型，不能承载状态。
+
+`lock_marker` 属于 0003 Schema。Runtime ACL manifest 和 bootstrap 必须先检查当前 Schema 是否存在该列：3→2 partial down 删除列后不得继续 GRANT 或断言未来列，但仍要扫描 Membership 当时存在的全部列并断言 UPDATE 全为 false；2→3 再迁移后重新授予并逐列校验只有 `lock_marker` 为 true。真实测试还要证明写 false 可用、写 true 被 CHECK 拒绝、跨 Tenant 更新受 RLS 影响 0 行。完整 down 0 和 partial down 都必须覆盖，防止 ACL 代码只适配最新版本。
 
 归档端口不接受 API 时钟。取得 Thread 锁后，`updated_at` 由事务内 `clock_timestamp()` 产生，并用 `GREATEST(旧值, 数据库时间)` 保证不会倒退；锁等待期间 API 预先取得的时间不能进入持久化结果。重复归档返回数据库中既有实体。
 
@@ -104,7 +106,7 @@ Fastify 将 Schema 验证、序列化、生命周期和 inject 测试收敛在�
 
 - Fastify inject：严格字段、body 上限、畸形 JSON、原型污染键、415 媒体类型、handler 超时、requestId、固定 ErrorEnvelope 和脱敏错误；
 - 契约测试：Thread create/get/list/archive、Run queued create/get/cancel、游标签名/过期/最大 TTL/轮换/跨主体拒绝、双方首次观察为空的内存并发幂等、能力替换无效、认证后撤权重验和未签发创建能力不注册路由；
-- 真实 PostgreSQL：API 使用 Runtime 角色经 RLS 读取/列表/归档/取消，证明裸 Tenant Header 不能跨租户读取；以真实 Membership 行锁屏障证明降权先提交时归档被拒绝；断言 Runtime 不能更新任何 Membership 授权字段；证明 Thread 锁等待后归档使用单调数据库时间；
+- 真实 PostgreSQL：API 使用 Runtime 角色经 RLS 读取/列表/归档/取消，证明裸 Tenant Header 不能跨租户读取；以真实 Membership 行锁屏障证明降权先提交时归档被拒绝，并证明共享锁不阻塞同一成员的其他 Thread；断言 Runtime 不能更新任何 Membership 授权字段；证明 Thread 锁等待后归档使用单调数据库时间；覆盖迁移 3→2→3 的 Schema 感知 ACL；
 - 全量 format/lint/typecheck/test/build、clean-vendor 和敏感信息扫描。
 
 ## 可逆性与回退

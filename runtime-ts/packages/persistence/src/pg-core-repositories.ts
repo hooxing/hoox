@@ -784,9 +784,10 @@ export class PgArchiveThreadCommand implements ArchiveThreadCommandPort {
     try {
       return await withTenantTransaction(this.pool, input.scope, async (client) => {
         const membership = await client.query<{ readonly role: string; readonly status: string }>(
-          `SELECT role, status FROM memberships
-            WHERE tenant_id = $1 AND user_id = $2
-            FOR UPDATE`,
+          `SELECT membership.role, membership.status
+             FROM memberships AS membership
+            WHERE membership.tenant_id = $1 AND membership.user_id = $2
+            FOR SHARE OF membership`,
           [input.scope.tenantId, input.scope.userId],
         );
         const authorization = membership.rows[0];

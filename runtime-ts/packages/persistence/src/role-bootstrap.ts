@@ -113,7 +113,7 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ["run_claims", new Set(["expires_at", "updated_at", "released_at"])],
   ["rollout_projections", new Set(["attempt_id", "version", "projection", "digest", "updated_at"])],
   ["sandbox_registry", new Set(["state", "actual_ttl_seconds", "updated_at"])],
-  ["cleanup_outbox", new Set(["state", "disposition", "payload", "payload_digest", "updated_at"])],
+  ["cleanup_outbox", new Set(["state", "disposition", "payload", "payload_digest", "updated_at", "claim_token", "claim_generation", "claimed_by", "claim_lease_expires_at", "retry_at", "attempt_count", "remote_call_started_at"])],
   ["external_effect_permits", new Set(["consumed_at"])],
   [
     "run_dispatch_outbox",
@@ -763,7 +763,9 @@ export async function bootstrapRuntimeAccessOnClient(
        ON TABLE ${schema}.rollout_projections TO ${role};
      GRANT UPDATE(state, actual_ttl_seconds, updated_at)
        ON TABLE ${schema}.sandbox_registry TO ${role};
-     GRANT UPDATE(state, disposition, payload, payload_digest, updated_at)
+     GRANT UPDATE(state, disposition, payload, payload_digest, updated_at, claim_token,
+       claim_generation, claimed_by, claim_lease_expires_at, retry_at, attempt_count,
+       remote_call_started_at)
        ON TABLE ${schema}.cleanup_outbox TO ${role};
        GRANT UPDATE(consumed_at)
          ON TABLE ${schema}.external_effect_permits TO ${role}`,

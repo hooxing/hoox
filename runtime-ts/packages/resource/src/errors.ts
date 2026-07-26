@@ -4,6 +4,7 @@ export const resourceErrorCodes = [
   "NOT_AUTHORIZED",
   "PREVIEW_BUDGET_EXCEEDED",
   "CONTENT_INTEGRITY_ERROR",
+  "DEPENDENCY_FAILURE",
 ] as const;
 
 export type ResourceErrorCode = (typeof resourceErrorCodes)[number];

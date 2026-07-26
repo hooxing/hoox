@@ -80,8 +80,8 @@ export function createResourceCursorCodec(config: ResourceCursorKeyRing): Resour
       const payload: CursorPayload = {
         v: 1,
         kid: config.activeKid,
-        tenantId: input.scope.tenantId,
-        userId: input.scope.userId,
+        tenantId: input.context.tenantId,
+        userId: input.context.userId,
         queryHash: hashQuery(input.normalizedQuery),
         updatedAt: input.position.updatedAt,
         resourceId: input.position.resourceId,
@@ -119,8 +119,8 @@ export function createResourceCursorCodec(config: ResourceCursorKeyRing): Resour
           "Resource 游标无效",
         );
         resourceInvariant(
-          payload.tenantId === input.scope.tenantId &&
-            payload.userId === input.scope.userId &&
+          payload.tenantId === input.context.tenantId &&
+            payload.userId === input.context.userId &&
             payload.queryHash === hashQuery(input.normalizedQuery),
           "INVALID_REQUEST",
           "Resource 游标无效",

@@ -1,3 +1,4 @@
+export * from "./capability.js";
 export * from "./contracts.js";
 export * from "./cursor.js";
 export * from "./errors.js";

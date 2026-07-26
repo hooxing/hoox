@@ -3,3 +3,4 @@ export const serviceName = "scheduler" as const;
 
 export * from "./process-entry.js";
 export * from "./run-dispatch.js";
+export * from "./sandbox-cleanup-consumer.js";

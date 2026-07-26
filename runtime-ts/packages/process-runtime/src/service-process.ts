@@ -176,7 +176,8 @@ export async function startServiceProcess<
   if (input.assembler === undefined) {
     throw new ServiceAssemblyError(input.serviceName, "ASSEMBLER_MISSING");
   }
-  // 真实生产 assembler 尚不存在，故不接受任何测试 Fake 冒充生产服务。
+  // 通用入口永远不能由调用方提供“我可信”的回调解锁生产环境。
+  // 只有服务自己的封闭包装器可以在验证真实依赖后调用其受审启动路径。
   if (input.configuration.runtimeEnvironment === "production") {
     throw new ServiceAssemblyError(input.serviceName, "PRODUCTION_ASSEMBLY_UNAVAILABLE");
   }
@@ -204,9 +205,12 @@ export async function startServiceProcess<
       resources: normalizedAssembly.resources,
       shutdownTimeoutMilliseconds: input.shutdownTimeoutMilliseconds,
     });
-  } catch {
+  } catch (error) {
     await closePartiallyAssembledResources(assembly);
     startupSignals.registration.dispose();
+    if (error instanceof ServiceAssemblyError && error.code === "PRODUCTION_ASSEMBLY_UNAVAILABLE") {
+      throw error;
+    }
     throw new ServiceAssemblyError(input.serviceName, "ASSEMBLY_FAILED");
   }
   startupSignals.bind(lifecycle);

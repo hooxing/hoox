@@ -6,7 +6,10 @@ export * from "./pg-blob-lifecycle.js";
 export { PgArchiveThreadCommand } from "./pg-core-repositories.js";
 export { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 export * from "./pg-run-worker-state.js";
+export * from "./pg-sandbox-cleanup-consumer.js";
 export * from "./runtime.js";
+export { createPostgresPool, probePostgres } from "./postgres.js";
+export type { Pool, PoolClient, PostgresPoolOptions } from "./postgres.js";
 export {
   createS3BlobStore,
   createS3RetiredBlobTombstoneScrubber,

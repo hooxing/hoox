@@ -25,6 +25,14 @@ export const expectedEnvironmentKeys = Object.freeze([
   "CUBESANDBOX_API_URL",
   "CUBESANDBOX_WEB_URL",
   "CUBESANDBOX_TEMPLATE_ID",
+  "CUBESANDBOX_API_KEY",
+  "CUBESANDBOX_PROXY_NODE_IP",
+  "CUBESANDBOX_PROXY_PORT",
+  "CUBESANDBOX_PROXY_SCHEME",
+  "SCHEDULER_TENANT_ID",
+  "SCHEDULER_WORKER_ID",
+  "CLEANUP_POLL_INTERVAL_MS",
+  "CLEANUP_LEASE_MS",
   "MODEL_BASE_URL",
   "MODEL_API_KEY",
   "MODEL_ID",
@@ -45,11 +53,13 @@ const placeholderOnlyKeys = new Set([
   "S3_ACCESS_KEY_ID",
   "S3_SECRET_ACCESS_KEY",
   "CUBESANDBOX_TEMPLATE_ID",
+  "CUBESANDBOX_API_KEY",
   "MODEL_BASE_URL",
   "MODEL_API_KEY",
   "MODEL_ID",
   "THREAD_CURSOR_SIGNING_KEYS",
 ]);
+const nullablePlaceholderKeys = new Set(["CUBESANDBOX_API_KEY"]);
 
 function looksLikePlaceholder(key, value) {
   if (
@@ -110,7 +120,11 @@ export function validateEnvironmentExample(source) {
   }
   for (const key of placeholderOnlyKeys) {
     const value = values.get(key);
-    if (value !== undefined && !looksLikePlaceholder(key, value)) {
+    if (
+      value !== undefined &&
+      !(nullablePlaceholderKeys.has(key) && value === "") &&
+      !looksLikePlaceholder(key, value)
+    ) {
       issues.push(`示例配置疑似包含真实凭据：${key}`);
     }
   }

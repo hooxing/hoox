@@ -28,6 +28,9 @@ import {
   runtimeMutationDigest,
 } from "@cube-runtime/run-contracts/mutation-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
+import { createApiCreateCapability } from "../../runtime-ts/apps/api/src/capabilities.js";
+import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import {
   PgArchiveThreadCommand,
@@ -69,6 +72,8 @@ let databaseName = "";
 interface Fixture {
   readonly scope: ExecutionScope;
   readonly user: ReturnType<typeof createUser>;
+  readonly thread: ReturnType<typeof createThread>;
+  readonly workspace: ReturnType<typeof createWorkspace>;
 }
 
 async function fixture(
@@ -122,7 +127,7 @@ async function fixture(
       rolloutProjection,
     }),
   ).toBe("created");
-  return { scope, user };
+  return { scope, user, thread, workspace };
 }
 
 /** 用真实 PostgreSQL 的 jsonb::text 计算边界，避免测试复制一套不等价序列化规则。 */
@@ -382,6 +387,22 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
 
   it("过期 ack 不能覆盖重领，两个连接只会产生一个下一代 claim", async () => {
     const f = await fixture(`dispatch-reclaim-${suffix}`);
+    await expect(
+      runDispatchOutbox.claim({
+        tenantId: f.scope.tenantId,
+        dispatcherId: " \t ",
+        limit: 1,
+        leaseMilliseconds: 30_000,
+      }),
+    ).rejects.toThrow("dispatcherId");
+    await expect(
+      runDispatchOutbox.claim({
+        tenantId: f.scope.tenantId,
+        dispatcherId: "too-long-dispatcher",
+        limit: 1,
+        leaseMilliseconds: 300_001,
+      }),
+    ).rejects.toThrow("Outbox lease");
     const outboxId = `outbox-reclaim-${suffix}`;
     await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
       client.query(
@@ -435,6 +456,13 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     expect(next[0]).toMatchObject({ outboxId, generation: first.generation + 1 });
     const winner = next[0];
     if (winner === undefined) throw new Error("重领 winner 缺失");
+    await expect(
+      runDispatchOutbox.acknowledge({
+        claim: winner,
+        outcome: "defer",
+        retryAfterMilliseconds: 86_400_001,
+      }),
+    ).rejects.toThrow("Outbox defer");
     await runDispatchOutbox.acknowledge({ claim: winner, outcome: "dispatched" });
   });
 
@@ -496,6 +524,90 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     ).resolves.toEqual({ outcome: "key_conflict" });
   });
 
+  it("真实 PG HTTP API：归档 Thread 后同键 Run 重放优先，不同载荷冲突", async () => {
+    const label = `dispatch-http-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`dispatch-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`dispatch-tenant-${label}`),
+      ownerMembershipId: membershipId(`dispatch-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const thread = createThread({
+      id: threadId(`dispatch-thread-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "HTTP 幂等回放",
+      now,
+    });
+    await repositories.threads.create(scope, thread);
+    await repositories.workspaces.create(
+      scope,
+      createWorkspace({ id: workspaceId(`dispatch-workspace-${label}`), thread, now }),
+    );
+    const app = createApiApp(
+      {
+        auth: { resolve: async () => ({ tenantId: scope.tenantId, userId: scope.userId }) },
+        repositories,
+        createCapability: createApiCreateCapability({
+          // 此用例只覆盖已存在 Thread 的 Run 路由；Thread 创建仍由单独的原子端口负责。
+          threadCreation: { createThread: async () => ({ outcome: "not_authorized" }) },
+          enqueueOutbox: runDispatchCreation,
+        }),
+        archiveThread: new PgArchiveThreadCommand(runtime),
+        cursorCodec: createThreadCursorCodec({
+          activeKid: "integration-key",
+          keys: [{ kid: "integration-key", secret: randomBytes(32).toString("base64url") }],
+          clock: { now: () => now },
+          ttlMilliseconds: 60_000,
+          maximumTtlMilliseconds: 60_000,
+        }),
+        readiness: { probe: async () => runtime.query("SELECT 1").then(() => undefined) },
+        clock: { now: () => now },
+        ids: {
+          thread: () => threadId(`unused-thread-${label}`),
+          run: () => runId(`dispatch-run-${label}`),
+          workspace: () => workspaceId(`unused-workspace-${label}`),
+        },
+      },
+      { logger: false },
+    );
+    try {
+      const request = {
+        method: "POST" as const,
+        url: `/v1/threads/${thread.id}/runs`,
+        headers: { authorization: "Bearer integration", "idempotency-key": `http-key-${label}` },
+        payload: { input: "HTTP 原始输入" },
+      };
+      const first = await app.inject(request);
+      expect(first.statusCode).toBe(200);
+      const archived = await app.inject({
+        method: "DELETE",
+        url: `/v1/threads/${thread.id}`,
+        headers: { authorization: "Bearer integration" },
+      });
+      expect(archived.statusCode).toBe(200);
+      const replay = await app.inject(request);
+      expect(replay.statusCode).toBe(200);
+      expect(replay.json().data).toEqual(first.json().data);
+      const conflict = await app.inject({
+        ...request,
+        payload: { input: "HTTP 不同输入" },
+      });
+      expect(conflict.statusCode).toBe(409);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("workerId 按 UTF-8 字节边界拒绝多字节超限且不泄漏数据库约束", async () => {
     const f = await fixture(`worker-id-${suffix}`);
     await expect(
@@ -512,6 +624,35 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         leaseDurationMs: 30_000,
       }),
     ).resolves.toMatchObject({ outcome: "claimed" });
+  });
+
+  it("Runtime 受限 SQL 直写也拒绝只含 tab/newline 的输入", async () => {
+    const f = await fixture(`dispatch-blank-db-${suffix}`);
+    const run = createRun({
+      id: runId(`blank-run-${suffix}`),
+      thread: f.thread,
+      now: f.thread.createdAt,
+    });
+    await repositories.runs.create({ tenantId: f.scope.tenantId, userId: f.user.id }, run);
+    await expect(
+      withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+        client.query(
+          `INSERT INTO run_execution_inputs(
+             tenant_id,run_id,thread_id,workspace_id,root_run_id,base_revision_id,
+             input_text,initial_projection,initial_projection_digest
+           ) VALUES ($1,$2,$3,$4,$2,NULL,$5,$6::jsonb,$7)`,
+          [
+            f.scope.tenantId,
+            run.id,
+            f.scope.threadId,
+            f.scope.workspaceId,
+            "\t\n\r ",
+            JSON.stringify({ schemaVersion: 1, checkpointId: "db-check", turns: [] }),
+            "f".repeat(64),
+          ],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
   });
 
   it("执行初始化逐字段幂等，冲突输入不会被 ON CONFLICT 吞掉", async () => {

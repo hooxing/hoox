@@ -151,11 +151,17 @@ async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
 
 async function hasRunDispatchState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
-    // ACL 的版本事实以迁移记录为准；不能让连接 search_path 或刚完成的 DDL 可见性决定授权。
+    // 允许迁移序号留孔，因此 ACL 以实际表及关键列为准，而不是“版本 >= 5”的猜测。
     `SELECT EXISTS (
-       SELECT 1 FROM ${quoteIdentifier(schema)}.runtime_schema_migrations
-        WHERE version >= 5
+       SELECT 1
+         FROM pg_class relation
+         JOIN pg_attribute column_state ON column_state.attrelid=relation.oid
+        WHERE relation.relnamespace=$1::regnamespace
+          AND relation.relname='run_dispatch_outbox' AND relation.relkind='r'
+          AND column_state.attname='outbox_id' AND column_state.attnum > 0
+          AND NOT column_state.attisdropped
      ) AS present`,
+    [schema],
   );
   return result.rows[0]?.present === true;
 }

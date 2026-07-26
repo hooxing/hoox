@@ -13,6 +13,8 @@ const initialProjection = Object.freeze({
   turns: Object.freeze([]),
 });
 const initialProjectionDigest = rolloutProjectionDigest(initialProjection);
+const maxOutboxLeaseMilliseconds = 300_000;
+const maxOutboxRetryMilliseconds = 86_400_000;
 
 function timestamp(value: unknown) {
   if (value instanceof Date) return isoTimestamp(value.toISOString());
@@ -29,6 +31,14 @@ function inputDigest(value: string): string {
     throw new TypeError("Run 输入 UTF-8 字节数无效");
   }
   return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function dispatcherIdentity(value: string): string {
+  const normalized = value.trim();
+  if (normalized.length === 0 || Buffer.byteLength(normalized, "utf8") > 200) {
+    throw new TypeError("dispatcherId 的 UTF-8 字节长度必须在 1 到 200 之间");
+  }
+  return normalized;
 }
 
 function restoreRun(row: QueryResultRow, thread: Parameters<typeof rehydrateRun>[1]): Run {
@@ -172,6 +182,25 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
     }
   }
 
+  async replayQueuedRun(
+    input: Parameters<EnqueueOutboxPort["replayQueuedRun"]>[0],
+  ): Promise<IdempotentCreateResult<Run> | { readonly outcome: "not_found" }> {
+    try {
+      return await withTenantTransaction(this.pool, input.scope, async (client) => {
+        const membership = await client.query<{ readonly status: string }>(
+          `SELECT status FROM memberships
+            WHERE tenant_id=$1 AND user_id=$2 FOR SHARE`,
+          [input.scope.tenantId, input.scope.userId],
+        );
+        if (membership.rows[0]?.status !== "active") return { outcome: "not_authorized" } as const;
+        const replay = await this.readIdempotency(client, input);
+        return replay ?? { outcome: "not_found" };
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "读取 Run 创建幂等记录");
+    }
+  }
+
   private async lockIdempotencyKey(
     client: PoolClient,
     input: Parameters<EnqueueOutboxPort["createQueuedRun"]>[0],
@@ -183,7 +212,10 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
 
   private async readIdempotency(
     client: PoolClient,
-    input: Parameters<EnqueueOutboxPort["createQueuedRun"]>[0],
+    input: Pick<
+      Parameters<EnqueueOutboxPort["createQueuedRun"]>[0],
+      "scope" | "thread" | "idempotency"
+    >,
   ): Promise<IdempotentCreateResult<Run> | undefined> {
     const record = await client.query<QueryResultRow>(
       `SELECT request_hash,run_id FROM api_idempotency_records
@@ -240,9 +272,14 @@ export class PgRunDispatchOutbox {
     if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
       throw new TypeError("Outbox claim limit 无效");
     }
-    if (!Number.isSafeInteger(input.leaseMilliseconds) || input.leaseMilliseconds < 1_000) {
+    if (
+      !Number.isSafeInteger(input.leaseMilliseconds) ||
+      input.leaseMilliseconds < 1_000 ||
+      input.leaseMilliseconds > maxOutboxLeaseMilliseconds
+    ) {
       throw new TypeError("Outbox lease 无效");
     }
+    const dispatcherId = dispatcherIdentity(input.dispatcherId);
     return withTenantTransaction(this.pool, { tenantId: input.tenantId }, async (client) => {
       const rows = await client.query<QueryResultRow>(
         `SELECT outbox.outbox_id,outbox.run_id,outbox.thread_id,outbox.workspace_id,
@@ -269,7 +306,7 @@ export class PgRunDispatchOutbox {
                   dispatch_attempts=dispatch_attempts+1,last_error_code=NULL,updated_at=clock_timestamp()
             WHERE tenant_id=$1 AND outbox_id=$2
             RETURNING generation`,
-          [input.tenantId, row.outbox_id, token, input.dispatcherId, input.leaseMilliseconds],
+          [input.tenantId, row.outbox_id, token, dispatcherId, input.leaseMilliseconds],
         );
         const generation = Number(updated.rows[0]?.generation);
         if (!Number.isSafeInteger(generation)) throw new TypeError("Outbox claim generation 无效");
@@ -305,7 +342,8 @@ export class PgRunDispatchOutbox {
       if (
         retryAfterMilliseconds === undefined ||
         !Number.isSafeInteger(retryAfterMilliseconds) ||
-        retryAfterMilliseconds < 1_000
+        retryAfterMilliseconds < 1_000 ||
+        retryAfterMilliseconds > maxOutboxRetryMilliseconds
       ) {
         throw new TypeError("Outbox defer 延迟无效");
       }

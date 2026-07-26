@@ -24,7 +24,7 @@ CREATE TABLE run_dispatch_outbox (
   state text NOT NULL CHECK (state IN ('ready', 'claimed', 'dispatched', 'cancelled')),
   generation bigint NOT NULL DEFAULT 0 CHECK (generation >= 0 AND generation <= 9007199254740991),
   claim_token text,
-  claimed_by text,
+  claimed_by text CHECK (claimed_by IS NULL OR octet_length(claimed_by) BETWEEN 1 AND 200),
   lease_expires_at timestamptz,
   next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   dispatch_attempts integer NOT NULL DEFAULT 0 CHECK (dispatch_attempts >= 0),
@@ -58,6 +58,7 @@ CREATE POLICY run_dispatch_outbox_tenant_policy ON run_dispatch_outbox
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''))
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''));
 
--- 0004 的长度约束允许空白；用户输入必须与 Worker 初始化语义一致，拒绝 trim 后为空。
+-- JS trim 与 PostgreSQL 的 Unicode 空白语义不完全相同；数据库最少拒绝 ASCII/POSIX 空白，
+-- 其余 Unicode 边界仍由 API/端口的 JavaScript trim 精确收敛，避免受限 SQL 直写 tab/newline。
 ALTER TABLE run_execution_inputs
-  ADD CONSTRAINT run_execution_inputs_nonblank_input_check CHECK (length(btrim(input_text)) > 0);
+  ADD CONSTRAINT run_execution_inputs_nonblank_input_check CHECK (input_text ~ '[^[:space:]]');

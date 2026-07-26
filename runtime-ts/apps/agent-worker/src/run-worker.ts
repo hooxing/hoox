@@ -5,7 +5,17 @@ import type {
   Workspace,
   WorkspaceRevisionId,
 } from "@cube-runtime/domain";
-import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
+import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
+import { DurableOperationLane } from "./durable-operation-lane.js";
+import {
+  assertControlledRolloutProjection,
+  digestCanonical,
+  outboxPayloadDigest,
+  rolloutProjectionDigest,
+  runtimeMutationDigest,
+  sandboxCleanupIdentityDigest,
+  workspaceChangeDigest,
+} from "./mutation-protocol.js";
 import type {
   AgentSessionFactoryPort,
   ArtifactPublicationPort,
@@ -18,15 +28,15 @@ import type {
   ExecutionPersistencePort,
   ExecutionScope,
   ExecutionStage,
-  ExternalEffectPermit,
   ExternalEffectCall,
+  ExternalEffectPermit,
   OrphanSandboxCleanupPort,
   RecoveryMetricsPort,
   RuntimeEventV1,
   RuntimeMutation,
   RuntimeMutationResult,
-  RuntimeOutboxV1,
   RuntimeOutboxReceiptV1,
+  RuntimeOutboxV1,
   SandboxSessionRef,
   SandboxSessionRegistryPort,
   StableWorkerErrorCode,
@@ -36,15 +46,6 @@ import type {
   WorkspaceRevisionVerifierPort,
 } from "./ports.js";
 import { assertProtocolSize } from "./ports.js";
-import { DurableOperationLane } from "./durable-operation-lane.js";
-import {
-  digestCanonical,
-  outboxPayloadDigest,
-  rolloutProjectionDigest,
-  runtimeMutationDigest,
-  sandboxCleanupIdentityDigest,
-  workspaceChangeDigest,
-} from "./mutation-protocol.js";
 
 export interface RunWorkerOptions {
   readonly workerId: string;
@@ -284,7 +285,7 @@ export class RunWorker {
 
     try {
       try {
-        assertRolloutProjection(claim.snapshot.rolloutProjection);
+        assertControlledRolloutProjection(claim.snapshot.rolloutProjection);
       } catch {
         return await this.requireRecovery(context, "EVENT_REJECTED", []);
       }
@@ -488,7 +489,7 @@ export class RunWorker {
 
       if (turn.kind === "waiting") {
         try {
-          assertRolloutProjection(turn.rolloutProjection);
+          assertControlledRolloutProjection(turn.rolloutProjection);
         } catch {
           return await this.recoverWithCleanup(context, sandbox, "EVENT_REJECTED", cancellation);
         }
@@ -1149,36 +1150,6 @@ function rawAlertOutbox(attemptId: string, code: StableWorkerErrorCode): Runtime
 
 function alertOutbox(context: ExecutionContext, code: StableWorkerErrorCode): RuntimeOutboxV1 {
   return rawAlertOutbox(context.attemptId, code);
-}
-
-function assertRolloutProjection(projection: ControlledRolloutProjection): void {
-  if (
-    projection.schemaVersion !== 1 ||
-    !projection.checkpointId.trim() ||
-    projection.checkpointId.length > 200 ||
-    projection.turns.length > 200
-  ) {
-    throw new Error("EVENT_REJECTED");
-  }
-  let totalBytes = 0;
-  for (const turn of projection.turns) {
-    if (turn.role !== "user" && turn.role !== "assistant") throw new Error("EVENT_REJECTED");
-    const text = turn.text.trim();
-    if (!text || text.length > 16_000 || hasHostAbsolutePath(text)) {
-      throw new Error("EVENT_REJECTED");
-    }
-    totalBytes += new TextEncoder().encode(text).byteLength;
-  }
-  if (
-    totalBytes > 64 * 1024 ||
-    new TextEncoder().encode(JSON.stringify(projection)).byteLength > 64 * 1024
-  ) {
-    throw new Error("EVENT_REJECTED");
-  }
-}
-
-function hasHostAbsolutePath(text: string): boolean {
-  return /(?:[A-Za-z]:[\\/]|\/(?:home|Users|var\/lib|opt|srv)\/)/u.test(text);
 }
 
 function validateWorkspaceCandidate(

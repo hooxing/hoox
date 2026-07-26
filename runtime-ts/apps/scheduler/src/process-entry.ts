@@ -12,6 +12,7 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
+import { tenantId } from "@cube-runtime/domain";
 import {
   createPostgresPool,
   PgSandboxCleanupConsumerStore,
@@ -92,6 +93,13 @@ export function parseSchedulerProcessEnvironment(
   source: Readonly<Record<string, string | undefined>>,
 ): SchedulerProcessConfiguration {
   const parsed = parseStrictEnvironment(source, schedulerEnvironmentSchema);
+  const configuredTenantId = readRequiredEnvironmentValue(parsed, "SCHEDULER_TENANT_ID");
+  // Scheduler 仅接受领域 Tenant ID；避免把任意数据库文本带入 RLS 上下文。
+  tenantId(configuredTenantId);
+  const configuredWorkerId = readRequiredEnvironmentValue(parsed, "SCHEDULER_WORKER_ID");
+  if (Buffer.byteLength(configuredWorkerId, "utf8") > 200) {
+    throw new TypeError("SCHEDULER_WORKER_ID UTF-8 字节长度不能超过 200");
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
@@ -120,8 +128,8 @@ export function parseSchedulerProcessEnvironment(
         : { proxyScheme: parsed.values.CUBESANDBOX_PROXY_SCHEME as "http" | "https" }),
     }),
     cleanup: Object.freeze({
-      tenantId: readRequiredEnvironmentValue(parsed, "SCHEDULER_TENANT_ID"),
-      workerId: readRequiredEnvironmentValue(parsed, "SCHEDULER_WORKER_ID"),
+      tenantId: configuredTenantId,
+      workerId: configuredWorkerId,
       pollIntervalMs: readRequiredEnvironmentValue(parsed, "CLEANUP_POLL_INTERVAL_MS"),
       leaseMs: readRequiredEnvironmentValue(parsed, "CLEANUP_LEASE_MS"),
     }),

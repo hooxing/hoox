@@ -115,6 +115,9 @@ export class ApiService {
       });
       const result = await capability.threadCreation.createThread({
         scope: auth.scope,
+        tenant: auth.tenant.tenant,
+        user: auth.tenant.user,
+        membership: auth.tenant.membership,
         thread,
         workspace,
         idempotency: {

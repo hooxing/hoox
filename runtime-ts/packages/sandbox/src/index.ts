@@ -2,6 +2,5 @@
 export * from "./config.js";
 export * from "./cube-gateway.js";
 export * from "./errors.js";
-export * from "./fake.js";
 export type * from "./types.js";
 export * from "./validation.js";

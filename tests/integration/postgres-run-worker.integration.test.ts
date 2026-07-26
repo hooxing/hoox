@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   createPersonalTenant,
   createRun,
@@ -27,10 +27,28 @@ import {
   outboxPayloadDigest,
   runtimeMutationDigest,
 } from "@cube-runtime/run-contracts/mutation-protocol";
+import { FakeSandboxGateway } from "@cube-runtime/sandbox/testing";
+import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { PiWorkerSessionFactory } from "../../runtime-ts/apps/agent-worker/src/pi-session-factory.js";
+import { RunWorker } from "../../runtime-ts/apps/agent-worker/src/run-worker.js";
+import {
+  FakeArtifactPublication,
+  FakeCancellationPort,
+  FakeClock,
+  FakeRecoveryMetrics,
+  FakeRevisionVerifier,
+} from "../../runtime-ts/apps/agent-worker/src/testing/fakes.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createApiCreateCapability } from "../../runtime-ts/apps/api/src/capabilities.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
+import { createDevelopmentAuthResolver } from "../../runtime-ts/apps/api/src/development-auth.js";
+import { RunDispatchScheduler } from "../../runtime-ts/apps/scheduler/src/run-dispatch.js";
+import {
+  CubeSandboxCleanupResolver,
+  SandboxCleanupConsumer,
+} from "../../runtime-ts/apps/scheduler/src/sandbox-cleanup-consumer.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import {
   PgArchiveThreadCommand,
@@ -46,6 +64,7 @@ import {
   PgRunExecutionSetup,
 } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
 import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-sandbox-cleanup-consumer.js";
+import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import {
   createPostgresPool,
   type Pool,
@@ -63,6 +82,7 @@ const migratorPassword = randomBytes(24).toString("hex");
 let admin!: Pool;
 let migrator!: Pool;
 let runtime!: Pool;
+let runtimeConnectionString = "";
 let repositories!: PgCoreRepositories;
 let setup!: PgRunExecutionSetup;
 let persistence!: PgExecutionPersistence;
@@ -167,7 +187,12 @@ function signed(input: Omit<RuntimeMutation, "schemaVersion" | "commandDigest">)
 }
 
 /** 在真实 COMMIT 已成功后丢弃客户端响应，覆盖事务框架而非业务 afterCommit hook。 */
-function withLostCommitResponse(upstream: Pool): Pool {
+function withLostCommitResponse(
+  upstream: Pool,
+  options: { readonly failReadback?: boolean } = {},
+): Pool {
+  let responseDiscarded = false;
+  let readbackFailed = false;
   return {
     connect: async () => {
       const client = await upstream.connect();
@@ -183,7 +208,17 @@ function withLostCommitResponse(upstream: Pool): Pool {
             : typeof first === "object" && first !== null && "text" in first
               ? String(first.text)
               : "";
-        if (sql.trim().toUpperCase() === "COMMIT") {
+        if (
+          responseDiscarded &&
+          options.failReadback === true &&
+          !readbackFailed &&
+          sql.includes("FROM api_thread_idempotency_records")
+        ) {
+          readbackFailed = true;
+          throw Object.assign(new Error("不得泄漏的恢复查询连接错误"), { code: "ECONNRESET" });
+        }
+        if (!responseDiscarded && sql.trim().toUpperCase() === "COMMIT") {
+          responseDiscarded = true;
           throw Object.assign(new Error("模拟 COMMIT 响应丢失"), { code: "ECONNRESET" });
         }
         return result;
@@ -212,16 +247,17 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     const runtimeUrl = new URL(bootstrapUrl);
     runtimeUrl.username = runtimeRole;
     runtimeUrl.password = runtimePassword;
+    runtimeConnectionString = runtimeUrl.toString();
     migrator = createPostgresPool({ connectionString: migratorUrl.toString(), schema });
-    runtime = createPostgresPool({ connectionString: runtimeUrl.toString(), schema });
+    runtime = createPostgresPool({ connectionString: runtimeConnectionString, schema });
     await migrateUp(migrator, { runtimeRole, migratorRole, schema });
     const dispatchAcl = await admin.query<{ readonly allowed: boolean; readonly version: number }>(
       `SELECT has_table_privilege($1::text, format('%I.api_idempotency_records', $2::text), 'SELECT') AS allowed,
               (SELECT max(version) FROM "${schema}".runtime_schema_migrations)::int AS version`,
       [runtimeRole, schema],
     );
-    // Cleanup 0006 在 Dispatch 0005 后叠加，Dispatch ACL 仍须存在而 schema 已前进至最新版本。
-    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 6 });
+    // Thread 创建 0007 在 Cleanup 0006 后叠加，既有 Dispatch ACL 仍须存在。
+    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 7 });
     const runtimeSchema = await runtime.query<{
       readonly schema: string;
       readonly current_user: string;
@@ -526,6 +562,422 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     ).resolves.toEqual({ outcome: "key_conflict" });
   });
 
+  it("Thread 创建在 COMMIT 响应丢失后精确重放，且不会留下第二个 Workspace", async () => {
+    const label = `thread-unknown-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`thread-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`thread-tenant-${label}`),
+      ownerMembershipId: membershipId(`thread-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const thread = createThread({
+      id: threadId(`thread-id-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "Thread 提交响应丢失",
+      now,
+    });
+    const workspace = createWorkspace({
+      id: workspaceId(`thread-workspace-${label}`),
+      thread,
+      now,
+    });
+    const command = {
+      scope,
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      thread,
+      workspace,
+      idempotency: { key: `thread-key-${label}`, requestHash: "a".repeat(64) },
+    } as const;
+    const lossy = new PgThreadCreation(runtime, {
+      afterCommit: () => {
+        throw new Error("模拟 Thread 提交响应丢失");
+      },
+    });
+    await expect(lossy.createThread(command)).resolves.toMatchObject({
+      outcome: "replayed",
+      entity: { id: thread.id },
+    });
+    await expect(new PgThreadCreation(runtime).createThread(command)).resolves.toMatchObject({
+      outcome: "replayed",
+      entity: { id: thread.id },
+    });
+    const conflictingThread = createThread({
+      id: threadId(`thread-conflict-id-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "同键不同标题",
+      now,
+    });
+    await expect(
+      new PgThreadCreation(runtime).createThread({
+        ...command,
+        thread: conflictingThread,
+        workspace: createWorkspace({
+          id: workspaceId(`thread-conflict-workspace-${label}`),
+          thread: conflictingThread,
+          now,
+        }),
+        idempotency: { ...command.idempotency, requestHash: "b".repeat(64) },
+      }),
+    ).resolves.toEqual({ outcome: "key_conflict" });
+    const facts = await withTenantTransaction(runtime, scope, async (client) => {
+      const [threads, workspaces] = await Promise.all([
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM threads WHERE tenant_id=$1",
+          [scope.tenantId],
+        ),
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM workspaces WHERE tenant_id=$1",
+          [scope.tenantId],
+        ),
+      ]);
+      return { threads: threads.rows[0]?.count, workspaces: workspaces.rows[0]?.count };
+    });
+    expect(facts).toEqual({ threads: "1", workspaces: "1" });
+  });
+
+  it("Thread 创建直接命中 TransactionCommitUnknownError 后按原键精确读回", async () => {
+    const label = `thread-transaction-unknown-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`thread-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`thread-tenant-${label}`),
+      ownerMembershipId: membershipId(`thread-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const thread = createThread({
+      id: threadId(`thread-id-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "事务 COMMIT 结果未知",
+      now,
+    });
+    const workspace = createWorkspace({
+      id: workspaceId(`thread-workspace-${label}`),
+      thread,
+      now,
+    });
+    const command = {
+      scope,
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      thread,
+      workspace,
+      idempotency: { key: `thread-key-${label}`, requestHash: "e".repeat(64) },
+    } as const;
+
+    await expect(
+      new PgThreadCreation(withLostCommitResponse(runtime)).createThread(command),
+    ).resolves.toMatchObject({ outcome: "replayed", entity: { id: thread.id } });
+
+    const facts = await withTenantTransaction(runtime, scope, async (client) => {
+      const [threads, workspaces, idempotency] = await Promise.all([
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM threads WHERE tenant_id=$1 AND id=$2",
+          [scope.tenantId, thread.id],
+        ),
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM workspaces WHERE tenant_id=$1 AND id=$2",
+          [scope.tenantId, workspace.id],
+        ),
+        client.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM api_thread_idempotency_records
+            WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3`,
+          [scope.tenantId, scope.userId, command.idempotency.key],
+        ),
+      ]);
+      return {
+        threads: threads.rows[0]?.count,
+        workspaces: workspaces.rows[0]?.count,
+        idempotency: idempotency.rows[0]?.count,
+      };
+    });
+    expect(facts).toEqual({ threads: "1", workspaces: "1", idempotency: "1" });
+  });
+
+  it("Thread 提交结果未知且恢复查询失败时返回稳定脱敏错误，事实仍可重放", async () => {
+    const label = `thread-readback-failure-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`thread-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`thread-tenant-${label}`),
+      ownerMembershipId: membershipId(`thread-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const thread = createThread({
+      id: threadId(`thread-id-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "恢复查询也失败",
+      now,
+    });
+    const command = {
+      scope,
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      thread,
+      workspace: createWorkspace({ id: workspaceId(`thread-workspace-${label}`), thread, now }),
+      idempotency: { key: `thread-key-${label}`, requestHash: "d".repeat(64) },
+    } as const;
+
+    const unknownResult = new PgThreadCreation(
+      withLostCommitResponse(runtime, { failReadback: true }),
+    ).createThread(command);
+    await expect(unknownResult).rejects.toMatchObject({
+      name: "PersistenceError",
+      code: "UNAVAILABLE",
+      message: "读取 Thread 创建恢复结果暂时不可用",
+    });
+    await expect(unknownResult).rejects.not.toThrow("不得泄漏的恢复查询连接错误");
+    await expect(new PgThreadCreation(runtime).createThread(command)).resolves.toMatchObject({
+      outcome: "replayed",
+      entity: { id: thread.id },
+    });
+  });
+
+  it("Thread 创建中途 Workspace 写入失败时完整回滚 Thread 与幂等事实", async () => {
+    const label = `thread-rollback-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`thread-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`thread-tenant-${label}`),
+      ownerMembershipId: membershipId(`thread-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const existingThread = createThread({
+      id: threadId(`thread-existing-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "已有 Thread",
+      now,
+    });
+    const existingWorkspace = createWorkspace({
+      id: workspaceId(`thread-shared-workspace-${label}`),
+      thread: existingThread,
+      now,
+    });
+    await repositories.threads.create(scope, existingThread);
+    await repositories.workspaces.create(scope, existingWorkspace);
+
+    const targetThread = createThread({
+      id: threadId(`thread-target-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "必须整体回滚的 Thread",
+      now,
+    });
+    const idempotencyKey = `thread-key-${label}`;
+    await expect(
+      new PgThreadCreation(runtime).createThread({
+        scope,
+        tenant: personal.tenant,
+        user,
+        membership: personal.ownerMembership,
+        thread: targetThread,
+        // 复用已存在的 Workspace ID，确保 Thread INSERT 后的第二次写入在真实 PG 中失败。
+        workspace: createWorkspace({ id: existingWorkspace.id, thread: targetThread, now }),
+        idempotency: { key: idempotencyKey, requestHash: "f".repeat(64) },
+      }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    const facts = await withTenantTransaction(runtime, scope, async (client) => {
+      const [threads, targetWorkspaces, idempotency, existingWorkspaces] = await Promise.all([
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM threads WHERE tenant_id=$1 AND id=$2",
+          [scope.tenantId, targetThread.id],
+        ),
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM workspaces WHERE tenant_id=$1 AND thread_id=$2",
+          [scope.tenantId, targetThread.id],
+        ),
+        client.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM api_thread_idempotency_records
+            WHERE tenant_id=$1 AND user_id=$2 AND idempotency_key=$3`,
+          [scope.tenantId, scope.userId, idempotencyKey],
+        ),
+        client.query<{ count: string }>(
+          `SELECT count(*)::text AS count FROM workspaces
+            WHERE tenant_id=$1 AND id=$2 AND thread_id=$3`,
+          [scope.tenantId, existingWorkspace.id, existingThread.id],
+        ),
+      ]);
+      return {
+        threads: threads.rows[0]?.count,
+        targetWorkspaces: targetWorkspaces.rows[0]?.count,
+        idempotency: idempotency.rows[0]?.count,
+        existingWorkspaces: existingWorkspaces.rows[0]?.count,
+      };
+    });
+    expect(facts).toEqual({
+      threads: "0",
+      targetWorkspaces: "0",
+      idempotency: "0",
+      existingWorkspaces: "1",
+    });
+  });
+
+  it("两个独立 PostgreSQL 连接首次并发创建 Thread 只会产生 created 与 replayed", async () => {
+    const label = `thread-race-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`thread-race-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`thread-race-tenant-${label}`),
+      ownerMembershipId: membershipId(`thread-race-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const thread = createThread({
+      id: threadId(`thread-race-id-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "并发 Thread 创建",
+      now,
+    });
+    const command = {
+      scope,
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      thread,
+      workspace: createWorkspace({
+        id: workspaceId(`thread-race-workspace-${label}`),
+        thread,
+        now,
+      }),
+      idempotency: { key: `thread-race-key-${label}`, requestHash: "c".repeat(64) },
+    } as const;
+    // 两个独立 Pool 强制走不同物理连接；advisory lock 不能依赖单例或对象内存。
+    const firstConnection = createPostgresPool({
+      connectionString: runtimeConnectionString,
+      schema,
+      maxConnections: 1,
+    });
+    const secondConnection = createPostgresPool({
+      connectionString: runtimeConnectionString,
+      schema,
+      maxConnections: 1,
+    });
+    let outcomes: readonly [
+      Awaited<ReturnType<PgThreadCreation["createThread"]>>,
+      Awaited<ReturnType<PgThreadCreation["createThread"]>>,
+    ];
+    try {
+      outcomes = await Promise.all([
+        new PgThreadCreation(firstConnection).createThread(command),
+        new PgThreadCreation(secondConnection).createThread(command),
+      ]);
+    } finally {
+      await Promise.all([firstConnection.end(), secondConnection.end()]);
+    }
+    const [left, right] = outcomes;
+    expect([left.outcome, right.outcome].sort()).toEqual(["created", "replayed"]);
+    const facts = await withTenantTransaction(runtime, scope, async (client) => {
+      const [threads, workspaces] = await Promise.all([
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM threads WHERE tenant_id=$1",
+          [scope.tenantId],
+        ),
+        client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM workspaces WHERE tenant_id=$1",
+          [scope.tenantId],
+        ),
+      ]);
+      return { threads: threads.rows[0]?.count, workspaces: workspaces.rows[0]?.count };
+    });
+    expect(facts).toEqual({ threads: "1", workspaces: "1" });
+  });
+
+  it("Thread 幂等键按 Tenant 隔离，相同键不会跨租户读回", async () => {
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const key = `thread-isolation-key-${suffix}`;
+    const createFor = async (suffixPart: string) => {
+      const user = createUser(userId(`thread-isolation-user-${suffixPart}-${suffix}`), now);
+      const personal = createPersonalTenant({
+        id: tenantId(`thread-isolation-tenant-${suffixPart}-${suffix}`),
+        ownerMembershipId: membershipId(`thread-isolation-member-${suffixPart}-${suffix}`),
+        owner: user,
+        createdAt: now,
+      });
+      const scope = { tenantId: personal.tenant.id, userId: user.id };
+      await repositories.tenants.createPersonal({
+        user,
+        tenant: personal.tenant,
+        membership: personal.ownerMembership,
+      });
+      const thread = createThread({
+        id: threadId(`thread-isolation-id-${suffixPart}-${suffix}`),
+        tenant: personal.tenant,
+        user,
+        membership: personal.ownerMembership,
+        title: "同键隔离",
+        now,
+      });
+      return new PgThreadCreation(runtime).createThread({
+        scope,
+        tenant: personal.tenant,
+        user,
+        membership: personal.ownerMembership,
+        thread,
+        workspace: createWorkspace({
+          id: workspaceId(`thread-isolation-workspace-${suffixPart}-${suffix}`),
+          thread,
+          now,
+        }),
+        idempotency: { key, requestHash: "d".repeat(64) },
+      });
+    };
+    const [left, right] = await Promise.all([createFor("a"), createFor("b")]);
+    expect(left.outcome).toBe("created");
+    expect(right.outcome).toBe("created");
+  });
+
   it("真实 PG HTTP API：归档 Thread 后同键 Run 重放优先，不同载荷冲突", async () => {
     const label = `dispatch-http-${suffix}`;
     const now = isoTimestamp("2099-07-26T00:00:00.000Z");
@@ -609,6 +1061,274 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       await app.close();
     }
   });
+
+  it.runIf(process.platform === "linux")(
+    "开发黑盒 Gate：真实 HTTP、PG 原子创建、投递、Faux Pi 执行与 Sandbox 收敛",
+    async () => {
+      const label = `m4-e2e-${randomUUID()}`;
+      const now = isoTimestamp(new Date().toISOString());
+      const userA = createUser(userId(`m4-user-a-${label}`), now);
+      const tenantA = createPersonalTenant({
+        id: tenantId(`m4-tenant-a-${label}`),
+        ownerMembershipId: membershipId(`m4-member-a-${label}`),
+        owner: userA,
+        createdAt: now,
+      });
+      const userB = createUser(userId(`m4-user-b-${label}`), now);
+      const tenantB = createPersonalTenant({
+        id: tenantId(`m4-tenant-b-${label}`),
+        ownerMembershipId: membershipId(`m4-member-b-${label}`),
+        owner: userB,
+        createdAt: now,
+      });
+      await repositories.tenants.createPersonal({
+        user: userA,
+        tenant: tenantA.tenant,
+        membership: tenantA.ownerMembership,
+      });
+      await repositories.tenants.createPersonal({
+        user: userB,
+        tenant: tenantB.tenant,
+        membership: tenantB.ownerMembership,
+      });
+
+      let readinessAvailable = true;
+      const generatedThreadId = threadId(`m4-thread-${label}`);
+      const generatedWorkspaceId = workspaceId(`m4-workspace-${label}`);
+      const generatedRunId = runId(`m4-run-${label}`);
+      const app = createApiApp(
+        {
+          auth: createDevelopmentAuthResolver({
+            runtimeEnvironment: "test",
+            principals: [
+              { tenantId: tenantA.tenant.id, userId: userA.id },
+              { tenantId: tenantB.tenant.id, userId: userB.id },
+            ],
+          }),
+          repositories,
+          createCapability: createApiCreateCapability({
+            threadCreation: new PgThreadCreation(runtime),
+            enqueueOutbox: runDispatchCreation,
+          }),
+          archiveThread: new PgArchiveThreadCommand(runtime),
+          cursorCodec: createThreadCursorCodec({
+            activeKid: "m4-e2e-key",
+            keys: [{ kid: "m4-e2e-key", secret: randomBytes(32).toString("base64url") }],
+            clock: { now: () => isoTimestamp(new Date().toISOString()) },
+            ttlMilliseconds: 60_000,
+            maximumTtlMilliseconds: 60_000,
+          }),
+          readiness: {
+            probe: async () => {
+              if (!readinessAvailable) throw new Error("postgres-private-detail");
+              await runtime.query("SELECT 1");
+            },
+          },
+          clock: { now: () => isoTimestamp(new Date().toISOString()) },
+          ids: {
+            thread: () => generatedThreadId,
+            workspace: () => generatedWorkspaceId,
+            run: () => generatedRunId,
+          },
+        },
+        { logger: false },
+      );
+      const address = await app.listen({ host: "127.0.0.1", port: 0 });
+      const baseUrl = new URL(address).origin;
+      const request = async (path: string, init: RequestInit) => fetch(`${baseUrl}${path}`, init);
+      const responseJson = async (
+        response: Response,
+      ): Promise<{
+        readonly data?: { readonly id?: string; readonly status?: string };
+        readonly error?: { readonly code?: string };
+      }> =>
+        (await response.json()) as {
+          readonly data?: { readonly id?: string; readonly status?: string };
+          readonly error?: { readonly code?: string };
+        };
+      try {
+        const threadRequest = {
+          method: "POST",
+          headers: {
+            authorization: "Bearer dev-user-a",
+            "content-type": "application/json",
+            "idempotency-key": `m4-thread-key-${label}`,
+          },
+          body: JSON.stringify({ title: "M4 开发黑盒任务" }),
+        } as const;
+        const createdThread = await request("/v1/threads", threadRequest);
+        expect(createdThread.status).toBe(200);
+        const replayedThread = await request("/v1/threads", threadRequest);
+        expect(replayedThread.status).toBe(200);
+        expect((await responseJson(replayedThread)).data?.id).toBe(
+          (await responseJson(createdThread.clone())).data?.id,
+        );
+
+        const runRequest = {
+          method: "POST",
+          headers: {
+            authorization: "Bearer dev-user-a",
+            "content-type": "application/json",
+            "idempotency-key": `m4-run-key-${label}`,
+          },
+          body: JSON.stringify({ input: "仅完成这个没有交付物的任务" }),
+        } as const;
+        const createdRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
+        expect(createdRun.status).toBe(200);
+        const replayedRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
+        expect(replayedRun.status).toBe(200);
+        expect((await responseJson(replayedRun)).data?.id).toBe(generatedRunId);
+        const guessedByOtherTenant = await request(`/v1/threads/${generatedThreadId}`, {
+          headers: { authorization: "Bearer dev-user-b" },
+        });
+        expect(guessedByOtherTenant.status).toBe(404);
+        expect((await responseJson(guessedByOtherTenant)).error?.code).toBe("NOT_FOUND");
+
+        readinessAvailable = false;
+        const unavailable = await request("/ready", { method: "GET" });
+        expect(unavailable.status).toBe(503);
+        expect(JSON.stringify(await responseJson(unavailable))).not.toContain(
+          "postgres-private-detail",
+        );
+        readinessAvailable = true;
+
+        const gateway = new FakeSandboxGateway();
+        let sandboxSequence = 0;
+        const upstream: SandboxSessionRegistryPort = {
+          acquire: async () => {
+            const sandbox = await gateway.create({
+              templateId: "m4-faux-template",
+              ttlSeconds: 120,
+            });
+            sandboxSequence += 1;
+            return {
+              outcome: "ready",
+              session: {
+                registryId: `m4-registry-${label}-${sandboxSequence}`,
+                providerSandboxId: sandbox.id,
+                mode: "created",
+                sandbox,
+              },
+            };
+          },
+          settle: async ({ session, disposition }) => {
+            if (disposition === "pause") await session.sandbox.pause();
+            else await session.sandbox.kill({ ignoreNotFound: true });
+            return { outcome: "settled" };
+          },
+        };
+        const faux = fauxProvider({
+          api: `m4-faux-pi-${label}`,
+          provider: `m4-faux-pi-${label}`,
+          tokensPerSecond: 10_000,
+        });
+        faux.setResponses([fauxAssistantMessage("M4 Faux Pi 执行完成")]);
+        const modelRuntime = await ModelRuntime.create({
+          credentials: new InMemoryCredentialStore(),
+          modelsPath: null,
+        });
+        modelRuntime.registerNativeProvider(faux.provider);
+        await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+        const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime);
+        const registeredSandboxes = new PgBackedSandboxSessionRegistry(runtime, upstream, 120);
+        const worker = new RunWorker(
+          {
+            persistence: new PgExecutionPersistence(runtime),
+            revisions: new FakeRevisionVerifier(),
+            sandboxes: registeredSandboxes,
+            orphanSandboxes: registeredSandboxes,
+            sessions,
+            cancellation: new FakeCancellationPort(),
+            artifacts: new FakeArtifactPublication(),
+            clock: new FakeClock(),
+            metrics: new FakeRecoveryMetrics(),
+          },
+          { workerId: "m4-development-worker", leaseDurationMs: 30_000, heartbeatMs: 10_000 },
+        );
+        const createDispatcher = () =>
+          new RunDispatchScheduler(new PgRunDispatchOutbox(runtime), {
+            execute: async (scope) => {
+              const result = await worker.execute(scope as ExecutionScope);
+              // Gate 注入的 Worker 同步执行到终态；不能把已经 succeeded 的 Run 当作异步已投递。
+              if (result.outcome === "succeeded") return { kind: "terminal" };
+              if (result.outcome === "waiting")
+                return { kind: "waiting", retryAfterMilliseconds: 5_000 };
+              if (result.outcome === "ignored") {
+                return result.reason === "terminal"
+                  ? { kind: "terminal" }
+                  : { kind: "busy", retryAfterMilliseconds: 5_000 };
+              }
+              return { kind: "retryable", retryAfterMilliseconds: 5_000 };
+            },
+          });
+        const firstDispatcher = createDispatcher();
+        expect(
+          await firstDispatcher.tick({
+            tenantId: tenantA.tenant.id,
+            dispatcherId: "m4-development-dispatcher",
+            limit: 1,
+            leaseMilliseconds: 30_000,
+          }),
+        ).toBe(1);
+        // 模拟进程重启：必须重新构造 scheduler 与 outbox 端口，不能只在同一个实例换 ID。
+        const restartedDispatcher = createDispatcher();
+        expect(
+          await restartedDispatcher.tick({
+            tenantId: tenantA.tenant.id,
+            dispatcherId: "m4-development-dispatcher-restart",
+            limit: 1,
+            leaseMilliseconds: 30_000,
+          }),
+        ).toBe(0);
+        expect(faux.state.callCount).toBe(1);
+        const modelPermit = await withTenantTransaction(
+          runtime,
+          { tenantId: tenantA.tenant.id },
+          async (client) =>
+            client.query<{ readonly count: string }>(
+              `SELECT count(*)::text AS count FROM external_effect_permits
+            WHERE tenant_id=$1 AND effect='model_start' AND consumed_at IS NOT NULL`,
+              [tenantA.tenant.id],
+            ),
+        );
+        expect(modelPermit.rows[0]?.count).toBe("1");
+        const releasedFences = await withTenantTransaction(
+          runtime,
+          { tenantId: tenantA.tenant.id },
+          async (client) => {
+            const [claims, leases] = await Promise.all([
+              client.query<{ readonly count: string }>(
+                `SELECT count(*)::text AS count FROM run_claims
+                WHERE tenant_id=$1 AND released_at IS NULL`,
+                [tenantA.tenant.id],
+              ),
+              client.query<{ readonly count: string }>(
+                `SELECT count(*)::text AS count FROM workspace_write_leases WHERE tenant_id=$1`,
+                [tenantA.tenant.id],
+              ),
+            ]);
+            return { claims: claims.rows[0]?.count, leases: leases.rows[0]?.count };
+          },
+        );
+        expect(releasedFences).toEqual({ claims: "0", leases: "0" });
+        const cleanup = new SandboxCleanupConsumer(
+          new PgSandboxCleanupConsumerStore(runtime),
+          new CubeSandboxCleanupResolver(gateway),
+          "m4-development-cleanup",
+        );
+        expect(await cleanup.drainTenant(tenantA.tenant.id)).toBe(0);
+        await cleanup.close();
+        expect([...gateway.sandboxes.values()].every((sandbox) => sandbox.killed)).toBe(true);
+        const succeeded = await request(`/v1/threads/${generatedThreadId}/runs/${generatedRunId}`, {
+          headers: { authorization: "Bearer dev-user-a" },
+        });
+        expect(succeeded.status).toBe(200);
+        expect((await responseJson(succeeded)).data?.status).toBe("succeeded");
+      } finally {
+        await app.close();
+      }
+    },
+  );
 
   it("workerId 按 UTF-8 字节边界拒绝多字节超限且不泄漏数据库约束", async () => {
     const f = await fixture(`worker-id-${suffix}`);
@@ -1981,7 +2701,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     ).toBeUndefined();
   });
 
-  it("0005 可回退至 0004 并重新授予最小 Dispatch ACL", async () => {
+  it("0007 可回退至 0004 并重新授予最小 Dispatch ACL", async () => {
     const down = await migrateDown(migrator, {
       runtimeRole,
       migratorRole,
@@ -1992,7 +2712,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     });
     expect(down.at(-1)?.version).toBe(4);
     const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
-    expect(restored.at(-1)?.version).toBe(6);
+    expect(restored.at(-1)?.version).toBe(7);
     const acl = await admin.query<{
       readonly select_allowed: boolean;
       readonly update_allowed: boolean;

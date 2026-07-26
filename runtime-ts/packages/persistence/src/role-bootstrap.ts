@@ -30,6 +30,7 @@ const runWorkerTables = new Set([
   "mutation_receipts",
 ]);
 const runDispatchTables = new Set(["api_idempotency_records", "run_dispatch_outbox"]);
+const threadCreationTables = new Set(["api_thread_idempotency_records"]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -63,6 +64,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["external_effect_permits", new Set(["SELECT", "INSERT"])],
   ["mutation_receipts", new Set(["SELECT", "INSERT"])],
   ["api_idempotency_records", new Set(["SELECT", "INSERT"])],
+  ["api_thread_idempotency_records", new Set(["SELECT", "INSERT"])],
   ["run_dispatch_outbox", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
@@ -182,6 +184,14 @@ async function hasRunDispatchState(client: PoolClient, schema: string): Promise<
   return result.rows[0]?.present === true;
 }
 
+async function hasThreadCreationState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.api_thread_idempotency_records', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasCleanupConsumerState(client: PoolClient): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='cleanup_outbox' AND column_name='claim_token') AS present",
@@ -199,6 +209,9 @@ async function activeTablePolicy(
   }
   if (!(await hasRunDispatchState(client, schema))) {
     for (const table of runDispatchTables) policy.delete(table);
+  }
+  if (!(await hasThreadCreationState(client, schema))) {
+    for (const table of threadCreationTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
@@ -221,6 +234,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasRunDispatchState(client, schema))) {
     for (const table of runDispatchTables) policy.delete(table);
+  }
+  if (!(await hasThreadCreationState(client, schema))) {
+    for (const table of threadCreationTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -766,6 +782,11 @@ export async function bootstrapRuntimeAccessOnClient(
          ${schema}.api_idempotency_records,
          ${schema}.run_dispatch_outbox
        TO ${role}`,
+    );
+  }
+  if (await hasThreadCreationState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.api_thread_idempotency_records TO ${role}`,
     );
   }
   await client.query(

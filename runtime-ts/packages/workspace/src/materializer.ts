@@ -1,24 +1,31 @@
 import { createHash } from "node:crypto";
-import { WorkspaceApplicationError } from "./application-errors.js";
+import { WorkspaceApplicationError, WorkspaceDependencyError } from "./application-errors.js";
 import type {
+  SandboxSessionIdentity,
   SandboxWorkspacePort,
   WorkspaceExecutionPolicy,
   WorkspaceOperationIdentity,
   WorkspaceOperationJournalPort,
   WorkspaceStableAuthorizationReceipt,
   WorkspaceStableBlobReadPort,
+  WorkspaceTrustedScope,
 } from "./application-ports.js";
 import {
   beginOperation,
   digestStream,
+  exactKeys,
+  isWorkspaceJournalError,
   mapDependencyFailure,
+  parseSandboxSession,
+  plainDataRecord,
+  recordKnownFailure,
   stopPoint,
   validateOperationKey,
   validatePolicy,
+  validateTrustedScope,
   verifyingStream,
 } from "./application-support.js";
 import {
-  assertWorkspaceManifestIntegrity,
   parseWorkspaceManifest,
   type WorkspaceFileEntry,
   type WorkspaceManifest,
@@ -27,6 +34,8 @@ import { planWorkspaceMaterialization } from "./materialization-plan.js";
 import { workspaceRelativePath } from "./path.js";
 
 export const SANDBOX_WORKSPACE_ROOT = "/workspace" as const;
+const OPERATION_DIGEST_VERSION = "workspace-operation-v2";
+const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 
 export interface WorkspaceMaterializerOptions {
   readonly journal: WorkspaceOperationJournalPort;
@@ -38,7 +47,7 @@ export interface WorkspaceMaterializerOptions {
 
 export interface MaterializeWorkspaceInput {
   readonly operationKey: string;
-  readonly tenantId: string;
+  readonly scope: WorkspaceTrustedScope;
   readonly target: WorkspaceManifest;
   readonly previous?: WorkspaceManifest;
   readonly signal?: AbortSignal;
@@ -47,12 +56,11 @@ export interface MaterializeWorkspaceInput {
 export interface MaterializedWorkspace {
   readonly kind: "materialized";
   readonly operationKey: string;
+  readonly scope: WorkspaceTrustedScope;
+  readonly sandbox: SandboxSessionIdentity;
   readonly targetManifestDigest: string;
 }
 
-/**
- * 应用核心只向 Sandbox 窄端口传相对路径。固定根目录、授权预检和 plan 顺序均不能由调用者覆盖。
- */
 export class WorkspaceMaterializer {
   private readonly policy: WorkspaceExecutionPolicy;
   private readonly now: () => Date;
@@ -64,45 +72,41 @@ export class WorkspaceMaterializer {
 
   async materialize(input: MaterializeWorkspaceInput): Promise<MaterializedWorkspace> {
     const operationKey = validateOperationKey(input.operationKey);
-    const target = parseWorkspaceManifest(input.target, input.tenantId, {
-      maxFiles: this.policy.maxFiles,
-      maxTotalBytes: this.policy.maxTotalBytes,
-      maxSingleFileBytes: this.policy.maxSingleFileBytes,
-      maxPathUtf8Bytes: this.policy.maxPathUtf8Bytes,
-    });
+    const scope = validateTrustedScope(input.scope);
+    const target = parseWorkspaceManifest(
+      input.target,
+      scope.tenantId,
+      currentManifestPolicy(this.policy),
+    );
     const previous =
-      input.previous === undefined ? undefined : assertWorkspaceManifestIntegrity(input.previous);
-    if (target.tenantId !== input.tenantId) {
-      throw new WorkspaceApplicationError("ACCESS_DENIED", "Workspace 不属于可信 Tenant");
-    }
-    const plan = planWorkspaceMaterialization({
-      root: SANDBOX_WORKSPACE_ROOT,
+      input.previous === undefined
+        ? undefined
+        : parseWorkspaceManifest(input.previous, scope.tenantId, this.policy.historicalManifest);
+    const sandbox = await this.currentSandbox();
+    const identity = materializeIdentity({
+      operationKey,
+      scope,
+      sandbox,
       target,
       ...(previous === undefined ? {} : { previous }),
     });
-    const identity: WorkspaceOperationIdentity = Object.freeze({
-      operationKey,
-      kind: "materialize",
-      inputDigest: createHash("sha256")
-        .update(`${target.tenantId}\0${previous?.digest ?? ""}\0${target.digest}`)
-        .digest("hex"),
-    });
     const begun = await beginOperation(this.options.journal, identity);
     if (begun.status === "completed") {
-      if (
-        begun.result.kind !== "materialized" ||
-        begun.result.targetManifestDigest !== target.digest
-      ) {
-        throw new WorkspaceApplicationError("OPERATION_CONFLICT", "已完成结果与当前物化输入不一致");
-      }
-      return Object.freeze({ ...begun.result });
+      return parseMaterializedResult(begun.result, identity, target, this.policy);
     }
 
     let phase = "preflight";
     try {
       stopPoint(input.signal);
-      const receipts = await this.authorizeAll(target, identity, input.signal);
+      const plan = planWorkspaceMaterialization({
+        root: SANDBOX_WORKSPACE_ROOT,
+        target,
+        ...(previous === undefined ? {} : { previous }),
+      });
+      const receipts = await this.authorizeAll(scope, target, identity, input.signal);
       const validExisting = new Set<string>();
+      const driftDirectories = new Set<string>();
+      const driftNonDirectories = new Set<string>();
       const filesByPath = new Map(target.entries.map((entry) => [entry.path, entry]));
 
       for (const plannedPhase of plan.phases) {
@@ -115,29 +119,34 @@ export class WorkspaceMaterializer {
             if (entry === undefined || receipts.get(candidate.relativePath) === undefined) {
               throw new WorkspaceApplicationError("INVALID_INPUT", "物化计划与目标清单不一致");
             }
+            const relativePath = workspaceRelativePath(candidate.relativePath);
             const inspected = await this.callDependency(identity, phase, () =>
               this.options.sandbox.inspectRegularFile(
-                workspaceRelativePath(candidate.relativePath),
+                sandbox,
+                relativePath,
                 signalControl(input.signal),
               ),
             );
+            if (inspected.status === "unsafe") {
+              (inspected.kind === "directory" ? driftDirectories : driftNonDirectories).add(
+                relativePath,
+              );
+              continue;
+            }
             if (inspected.status !== "regular") continue;
             try {
-              const actual = await digestStream({
+              await digestStream({
                 source: inspected.body,
                 policy: this.policy,
                 ...(input.signal === undefined ? {} : { signal: input.signal }),
                 expected: entry.content,
               });
-              if (actual.sha256 === entry.content.sha256 && actual.size === entry.content.size) {
-                validExisting.add(entry.path);
-              }
+              validExisting.add(entry.path);
             } catch (error) {
               if (
                 error instanceof WorkspaceApplicationError &&
                 (error.code === "INTEGRITY_MISMATCH" || error.code === "LIMIT_EXCEEDED")
               ) {
-                // 现有副本只是候选，损坏或过大时安全回退到已授权 stable Blob。
                 continue;
               }
               throw error;
@@ -146,9 +155,41 @@ export class WorkspaceMaterializer {
         } else if (plannedPhase.kind === "remove_files") {
           for (const item of plannedPhase.paths) {
             stopPoint(input.signal);
+            const relativePath = workspaceRelativePath(item.relativePath);
+            const actual = await this.callDependency(identity, phase, () =>
+              this.options.sandbox.inspectRegularFile(
+                sandbox,
+                relativePath,
+                signalControl(input.signal),
+              ),
+            );
+            stopPoint(input.signal);
             await this.callDependency(identity, phase, () =>
-              this.options.sandbox.removeFile(
-                workspaceRelativePath(item.relativePath),
+              actual.status === "unsafe" && actual.kind === "directory"
+                ? this.options.sandbox.removeUnexpectedDirectory(
+                    sandbox,
+                    relativePath,
+                    signalControl(input.signal),
+                  )
+                : this.options.sandbox.removeFile(
+                    sandbox,
+                    relativePath,
+                    signalControl(input.signal),
+                  ),
+            );
+          }
+          for (const relativePath of [...driftNonDirectories].sort()) {
+            stopPoint(input.signal);
+            await this.callDependency(identity, phase, () =>
+              this.options.sandbox.removeFile(sandbox, relativePath, signalControl(input.signal)),
+            );
+          }
+          for (const relativePath of [...driftDirectories].sort()) {
+            stopPoint(input.signal);
+            await this.callDependency(identity, phase, () =>
+              this.options.sandbox.removeUnexpectedDirectory(
+                sandbox,
+                relativePath,
                 signalControl(input.signal),
               ),
             );
@@ -158,6 +199,7 @@ export class WorkspaceMaterializer {
             stopPoint(input.signal);
             await this.callDependency(identity, phase, () =>
               this.options.sandbox.removeDirectory(
+                sandbox,
                 workspaceRelativePath(item.relativePath),
                 signalControl(input.signal),
               ),
@@ -168,6 +210,7 @@ export class WorkspaceMaterializer {
             stopPoint(input.signal);
             await this.callDependency(identity, phase, () =>
               this.options.sandbox.ensureDirectory(
+                sandbox,
                 workspaceRelativePath(item.relativePath),
                 signalControl(input.signal),
               ),
@@ -189,8 +232,9 @@ export class WorkspaceMaterializer {
             });
             await this.callDependency(identity, phase, () =>
               this.options.sandbox.writeFileAtomically({
+                sandbox,
                 relativePath: workspaceRelativePath(file.relativePath),
-                operationKey: childOperationKey(operationKey, file.relativePath),
+                operationKey: materializeChildKey(identity, file),
                 body: verified.body,
                 ...(input.signal === undefined ? {} : { signal: input.signal }),
               }),
@@ -206,9 +250,12 @@ export class WorkspaceMaterializer {
         }
       }
 
-      const result = Object.freeze({
-        kind: "materialized" as const,
+      stopPoint(input.signal);
+      const result: MaterializedWorkspace = Object.freeze({
+        kind: "materialized",
         operationKey,
+        scope,
+        sandbox,
         targetManifestDigest: target.digest,
       });
       phase = "complete";
@@ -217,19 +264,33 @@ export class WorkspaceMaterializer {
       );
       return result;
     } catch (error) {
-      if (error instanceof WorkspaceApplicationError) {
-        if (error.code !== "RESULT_UNKNOWN") {
-          await this.options.journal.failKnown(identity, phase, error.code);
-        }
-        throw error;
+      const mapped =
+        error instanceof WorkspaceApplicationError
+          ? error
+          : new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace 物化失败");
+      if (mapped.code !== "RESULT_UNKNOWN" && !isWorkspaceJournalError(mapped)) {
+        await recordKnownFailure(this.options.journal, identity, phase, mapped);
       }
-      return this.callDependency(identity, phase, async () => {
-        throw error;
-      });
+      throw mapped;
+    }
+  }
+
+  private async currentSandbox(): Promise<SandboxSessionIdentity> {
+    try {
+      return parseSandboxSession(await this.options.sandbox.currentSession());
+    } catch (error) {
+      if (error instanceof WorkspaceApplicationError) throw error;
+      throw new WorkspaceApplicationError(
+        error instanceof WorkspaceDependencyError && error.result === "unknown"
+          ? "RESULT_UNKNOWN"
+          : "DEPENDENCY_FAILED",
+        "读取 Sandbox 身份失败",
+      );
     }
   }
 
   private async authorizeAll(
+    scope: WorkspaceTrustedScope,
     target: WorkspaceManifest,
     identity: WorkspaceOperationIdentity,
     signal: AbortSignal | undefined,
@@ -239,7 +300,7 @@ export class WorkspaceMaterializer {
       stopPoint(signal);
       const authorization = await this.callDependency(identity, "authorize_stable", () =>
         this.options.stableBlobs.authorize({
-          tenantId: target.tenantId,
+          scope,
           purpose: "workspace_materialization",
           content: entry.content,
           object: entry.object,
@@ -248,34 +309,20 @@ export class WorkspaceMaterializer {
       if (authorization.status !== "authorized") {
         throw new WorkspaceApplicationError("ACCESS_DENIED", "Workspace Blob 不可用于当前 Tenant");
       }
-      this.assertReceipt(entry, target.tenantId, authorization.receipt);
+      assertReceipt(entry, scope.tenantId, authorization.receipt);
       const head = await this.callDependency(identity, "head_stable", () =>
         this.options.stableBlobs.head(authorization.receipt),
       );
-      if (head.status !== "exists") {
-        throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "Workspace Blob 不存在");
-      }
-      if (!sameContent(head.content, entry.content) || !sameObject(head.object, entry.object)) {
+      if (
+        head.status !== "exists" ||
+        !sameContent(head.content, entry.content) ||
+        !sameObject(head.object, entry.object)
+      ) {
         throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "Workspace Blob HEAD 身份不匹配");
       }
       result.set(entry.path, authorization.receipt);
     }
     return result;
-  }
-
-  private assertReceipt(
-    entry: WorkspaceFileEntry,
-    tenantId: string,
-    receipt: WorkspaceStableAuthorizationReceipt,
-  ): void {
-    if (
-      receipt.tenantId !== tenantId ||
-      receipt.purpose !== "workspace" ||
-      !sameContent(receipt.content, entry.content) ||
-      !sameObject(receipt.object, entry.object)
-    ) {
-      throw new WorkspaceApplicationError("ACCESS_DENIED", "Workspace Blob 授权回执身份不匹配");
-    }
   }
 
   private async callDependency<T>(
@@ -296,6 +343,117 @@ export class WorkspaceMaterializer {
   }
 }
 
+function materializeIdentity(input: {
+  readonly operationKey: string;
+  readonly scope: WorkspaceTrustedScope;
+  readonly sandbox: SandboxSessionIdentity;
+  readonly target: WorkspaceManifest;
+  readonly previous?: WorkspaceManifest;
+}): WorkspaceOperationIdentity {
+  const payload = [
+    OPERATION_DIGEST_VERSION,
+    "materialize",
+    input.scope.tenantId,
+    input.scope.threadId,
+    input.scope.workspaceId,
+    input.sandbox.sessionId,
+    String(input.sandbox.generation),
+    input.previous?.digest ?? "",
+    input.target.digest,
+  ].join("\0");
+  return Object.freeze({
+    schemaVersion: 1,
+    digestAlgorithm: OPERATION_DIGEST_VERSION,
+    operationKey: input.operationKey,
+    kind: "materialize",
+    inputDigest: createHash("sha256").update(payload).digest("hex"),
+    ...input.scope,
+    sandbox: input.sandbox,
+  });
+}
+
+function parseMaterializedResult(
+  value: unknown,
+  identity: WorkspaceOperationIdentity,
+  target: WorkspaceManifest,
+  policy: WorkspaceExecutionPolicy,
+): MaterializedWorkspace {
+  const input = plainDataRecord(value, "MaterializedWorkspace");
+  exactKeys(
+    input,
+    ["kind", "operationKey", "scope", "sandbox", "targetManifestDigest"],
+    "MaterializedWorkspace",
+  );
+  const scope = validateTrustedScope(input.scope as WorkspaceTrustedScope);
+  const sandbox = parseSandboxSession(input.sandbox);
+  if (
+    input.kind !== "materialized" ||
+    input.operationKey !== identity.operationKey ||
+    !sameScope(scope, identity) ||
+    !sameSession(sandbox, identity.sandbox) ||
+    typeof input.targetManifestDigest !== "string" ||
+    !SHA256_PATTERN.test(input.targetManifestDigest) ||
+    input.targetManifestDigest !== target.digest
+  ) {
+    throw new WorkspaceApplicationError("OPERATION_CONFLICT", "已完成物化结果与当前输入不一致");
+  }
+  // 当前配额已在调用本解析器之前重新解析 target；显式引用避免 completed 绕过策略语义。
+  void policy;
+  return Object.freeze({
+    kind: "materialized",
+    operationKey: identity.operationKey,
+    scope,
+    sandbox,
+    targetManifestDigest: input.targetManifestDigest,
+  });
+}
+
+function materializeChildKey(
+  identity: WorkspaceOperationIdentity,
+  file: {
+    readonly relativePath: string;
+    readonly content: WorkspaceFileEntry["content"];
+    readonly object: WorkspaceFileEntry["object"];
+  },
+): string {
+  const payload = [
+    "workspace-materialize-child-v1",
+    identity.inputDigest,
+    file.relativePath,
+    file.content.sha256,
+    String(file.content.size),
+    file.object.tenantId,
+    file.object.purpose,
+    file.object.incarnationId,
+    file.object.physicalObjectKey,
+  ].join("\0");
+  return `workspace-write:${createHash("sha256").update(payload).digest("hex")}`;
+}
+
+function currentManifestPolicy(policy: WorkspaceExecutionPolicy) {
+  return {
+    maxFiles: policy.maxFiles,
+    maxTotalBytes: policy.maxTotalBytes,
+    maxSingleFileBytes: policy.maxSingleFileBytes,
+    maxPathUtf8Bytes: policy.maxPathUtf8Bytes,
+  };
+}
+
+function assertReceipt(
+  entry: WorkspaceFileEntry,
+  tenantId: string,
+  receipt: WorkspaceStableAuthorizationReceipt,
+): void {
+  if (
+    receipt.tenantId !== tenantId ||
+    receipt.purpose !== "workspace" ||
+    !sameContent(receipt.content, entry.content) ||
+    !sameObject(receipt.object, entry.object)
+  ) {
+    throw new WorkspaceApplicationError("ACCESS_DENIED", "Workspace Blob 授权回执身份不匹配");
+  }
+}
+
 function signalControl(signal: AbortSignal | undefined): { readonly signal?: AbortSignal } {
   return signal === undefined ? {} : { signal };
 }
@@ -305,12 +463,6 @@ function sameContent(
   right: { readonly sha256: string; readonly size: number },
 ): boolean {
   return left.sha256 === right.sha256 && left.size === right.size;
-}
-
-function childOperationKey(operationKey: string, relativePath: string): string {
-  return `workspace-write:${createHash("sha256")
-    .update(`${operationKey}\0${relativePath}`)
-    .digest("hex")}`;
 }
 
 function sameObject(
@@ -323,4 +475,16 @@ function sameObject(
     left.incarnationId === right.incarnationId &&
     left.physicalObjectKey === right.physicalObjectKey
   );
+}
+
+function sameScope(left: WorkspaceTrustedScope, right: WorkspaceTrustedScope): boolean {
+  return (
+    left.tenantId === right.tenantId &&
+    left.threadId === right.threadId &&
+    left.workspaceId === right.workspaceId
+  );
+}
+
+function sameSession(left: SandboxSessionIdentity, right: SandboxSessionIdentity): boolean {
+  return left.sessionId === right.sessionId && left.generation === right.generation;
 }

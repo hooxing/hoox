@@ -2,393 +2,491 @@ import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { WorkspaceDependencyError } from "./application-errors.js";
 import type {
+  SandboxSessionIdentity,
   SandboxWorkspaceEntry,
   SandboxWorkspacePort,
+  SandboxWorkspaceSnapshot,
   WorkspaceCandidateBlob,
   WorkspaceCandidateBlobWritePort,
   WorkspaceExecutionPolicy,
-  WorkspaceOperationBeginResult,
+  WorkspaceKnownFailureDisposition,
   WorkspaceOperationIdentity,
   WorkspaceOperationJournalPort,
   WorkspaceOperationResult,
+  WorkspaceTrustedScope,
   WorkspaceUnknownFact,
 } from "./application-ports.js";
-import type { WorkspaceManifest } from "./manifest.js";
+import { createWorkspaceManifest, type WorkspaceManifest } from "./manifest.js";
 import { WorkspacePublisher } from "./publisher.js";
 
+const SCOPE: WorkspaceTrustedScope = {
+  tenantId: "tenant-a",
+  threadId: "thread-a",
+  workspaceId: "workspace-a",
+};
 const POLICY: WorkspaceExecutionPolicy = {
+  maxEntries: 8,
   maxFiles: 5,
   maxTotalBytes: 200,
   maxSingleFileBytes: 100,
   maxChunkBytes: 32,
   maxPathUtf8Bytes: 80,
+  historicalManifest: {
+    maxFiles: 10,
+    maxTotalBytes: 400,
+    maxSingleFileBytes: 200,
+    maxPathUtf8Bytes: 120,
+  },
 };
 
+type State = "running" | "retryable" | "terminal" | "unknown" | "completed";
 class Journal implements WorkspaceOperationJournalPort {
   readonly rows = new Map<
     string,
-    { identity: WorkspaceOperationIdentity; result?: WorkspaceOperationResult; unknown?: true }
+    { identity: WorkspaceOperationIdentity; state: State; result?: WorkspaceOperationResult }
   >();
+  readonly failures: { code: string; disposition: WorkspaceKnownFailureDisposition }[] = [];
   readonly facts: WorkspaceUnknownFact[] = [];
+  beginOverride: unknown | undefined;
+  recordUnknownError: WorkspaceDependencyError | undefined;
 
-  async begin(identity: WorkspaceOperationIdentity): Promise<WorkspaceOperationBeginResult> {
+  async begin(identity: WorkspaceOperationIdentity): Promise<unknown> {
+    if (this.beginOverride !== undefined) return this.beginOverride;
     const row = this.rows.get(identity.operationKey);
     if (row === undefined) {
-      this.rows.set(identity.operationKey, { identity });
+      this.rows.set(identity.operationKey, { identity, state: "running" });
       return { status: "started" };
     }
-    if (row.identity.kind !== identity.kind || row.identity.inputDigest !== identity.inputDigest) {
-      return { status: "conflict" };
+    if (row.identity.inputDigest !== identity.inputDigest) return { status: "conflict" };
+    if (row.state === "retryable") {
+      row.state = "running";
+      return { status: "started" };
     }
-    if (row.result !== undefined) return { status: "completed", result: row.result };
-    return { status: row.unknown ? "unknown" : "in_progress" };
+    if (row.state === "completed") return { status: "completed", result: row.result };
+    return { status: row.state };
   }
-
   async complete(identity: WorkspaceOperationIdentity, result: WorkspaceOperationResult) {
-    this.rows.set(identity.operationKey, { identity, result });
+    this.rows.set(identity.operationKey, { identity, state: "completed", result });
   }
-
-  async failKnown(identity: WorkspaceOperationIdentity) {
-    this.rows.delete(identity.operationKey);
+  async failKnown(input: {
+    identity: WorkspaceOperationIdentity;
+    code: string;
+    disposition: WorkspaceKnownFailureDisposition;
+  }) {
+    this.failures.push({ code: input.code, disposition: input.disposition });
+    const row = this.rows.get(input.identity.operationKey);
+    if (row?.state === "completed" || row?.state === "unknown") return;
+    this.rows.set(input.identity.operationKey, {
+      identity: input.identity,
+      state: input.disposition,
+    });
   }
-
   async recordUnknown(identity: WorkspaceOperationIdentity, fact: WorkspaceUnknownFact) {
+    if (this.recordUnknownError !== undefined) throw this.recordUnknownError;
     this.facts.push(fact);
-    if (this.rows.get(identity.operationKey)?.result !== undefined) return;
-    this.rows.set(identity.operationKey, { identity, unknown: true });
+    if (this.rows.get(identity.operationKey)?.state === "completed") return;
+    this.rows.set(identity.operationKey, { identity, state: "unknown" });
   }
 }
 
+interface CapturedSnapshot {
+  identity: SandboxWorkspaceSnapshot;
+  entries: SandboxWorkspaceEntry[];
+  bodies: Map<string, Uint8Array>;
+}
 class SnapshotSandbox implements SandboxWorkspacePort {
-  entries: SandboxWorkspaceEntry[] = [];
-  readonly bodies = new Map<string, Uint8Array>();
+  session: SandboxSessionIdentity = { sessionId: "sandbox-a", generation: 1 };
+  tokenSerial = 1;
+  readonly liveEntries: SandboxWorkspaceEntry[] = [];
+  readonly liveBodies = new Map<string, Uint8Array>();
+  readonly byOperation = new Map<string, CapturedSnapshot>();
+  captureCalls = 0;
   reads = 0;
-  listFailure?: WorkspaceDependencyError;
-  onRead?: (path: string) => void;
+  listFailure: WorkspaceDependencyError | undefined;
+  onList: (() => void) | undefined;
+  onRead: (() => void) | undefined;
 
-  async *listWorkspace(): AsyncIterable<SandboxWorkspaceEntry> {
+  addFile(path: string, text: string, size?: number) {
+    const body = Buffer.from(text);
+    this.liveEntries.push({ relativePath: path, kind: "file", size: size ?? body.byteLength });
+    this.liveBodies.set(path, body);
+  }
+  async currentSession() {
+    return { ...this.session };
+  }
+  async captureSnapshot(input: { operationKey: string }): Promise<SandboxWorkspaceSnapshot> {
+    this.captureCalls += 1;
+    const existing = this.byOperation.get(input.operationKey);
+    if (existing !== undefined) return existing.identity;
+    const identity = {
+      ...this.session,
+      snapshotToken: `snapshot-${this.tokenSerial++}`,
+    };
+    this.byOperation.set(input.operationKey, {
+      identity,
+      entries: this.liveEntries.map((entry) => ({ ...entry })),
+      bodies: new Map([...this.liveBodies].map(([path, body]) => [path, Uint8Array.from(body)])),
+    });
+    return identity;
+  }
+  async *listWorkspace(snapshot: SandboxWorkspaceSnapshot): AsyncIterable<SandboxWorkspaceEntry> {
     if (this.listFailure !== undefined) throw this.listFailure;
-    yield* this.entries;
+    const stored = this.snapshot(snapshot);
+    for (const entry of stored.entries) {
+      this.onList?.();
+      yield entry;
+    }
   }
-
-  readRegularFile(relativePath: string): AsyncIterable<Uint8Array> {
+  readRegularFile(snapshot: SandboxWorkspaceSnapshot, path: string): AsyncIterable<Uint8Array> {
     this.reads += 1;
-    const body = this.bodies.get(relativePath);
-    if (body === undefined) throw new Error("fake missing");
-    this.onRead?.(relativePath);
-    return stream(body);
+    this.onRead?.();
+    const body = this.snapshot(snapshot).bodies.get(path);
+    if (body === undefined) throw new WorkspaceDependencyError("known", "SNAPSHOT_FILE_MISSING");
+    return one(body);
   }
-
   async inspectRegularFile(): Promise<{ status: "missing" }> {
     return { status: "missing" };
   }
   async removeFile(): Promise<void> {}
   async removeDirectory(): Promise<void> {}
+  async removeUnexpectedDirectory(): Promise<void> {}
   async ensureDirectory(): Promise<void> {}
   async writeFileAtomically(): Promise<void> {}
+
+  private snapshot(identity: SandboxWorkspaceSnapshot): CapturedSnapshot {
+    const value = [...this.byOperation.values()].find(
+      (entry) =>
+        entry.identity.snapshotToken === identity.snapshotToken &&
+        entry.identity.sessionId === identity.sessionId &&
+        entry.identity.generation === identity.generation,
+    );
+    if (value === undefined) throw new WorkspaceDependencyError("known", "SNAPSHOT_MISMATCH");
+    return value;
+  }
 }
 
-class BlobWriter implements WorkspaceCandidateBlobWritePort {
-  readonly byOperation = new Map<string, WorkspaceCandidateBlob>();
-  puts = 0;
+class Blobs implements WorkspaceCandidateBlobWritePort {
+  readonly byKey = new Map<string, WorkspaceCandidateBlob>();
+  readonly keys: string[] = [];
+  effects = 0;
   unknownAfterPut = false;
-  corruptHead = false;
-  crossTenant = false;
-  onPut?: () => void;
-  returnBeforeConsume = false;
+  knownAfterPut = false;
+  afterPut: (() => void) | undefined;
+  afterHead: (() => void) | undefined;
+  tenantSideEffects = 0;
 
   async putCandidate(input: Parameters<WorkspaceCandidateBlobWritePort["putCandidate"]>[0]) {
-    const existing = this.byOperation.get(input.operationKey);
-    if (existing !== undefined) return existing;
-    if (this.returnBeforeConsume) {
-      const sha256 = createHash("sha256").update("").digest("hex");
+    this.tenantSideEffects += 1;
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of input.body) chunks.push(chunk);
+    const body = Buffer.concat(chunks);
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    if (sha256 !== input.expectedContent.sha256 || body.byteLength !== input.expectedContent.size) {
+      throw new WorkspaceDependencyError("known", "EXPECTED_CONTENT_MISMATCH");
+    }
+    let blob = this.byKey.get(input.operationKey);
+    if (blob === undefined) {
       const incarnationId = randomUUID();
-      return {
-        content: { sha256, size: 0 },
+      blob = {
+        content: input.expectedContent,
         object: {
-          tenantId: input.tenantId,
-          purpose: "workspace" as const,
+          tenantId: input.scope.tenantId,
+          purpose: "workspace",
           incarnationId,
-          physicalObjectKey: `runtime/stable/${input.tenantId}/workspace/sha256/${sha256}/incarnations/${incarnationId}`,
+          physicalObjectKey: `runtime/stable/${input.scope.tenantId}/workspace/sha256/${sha256}/incarnations/${incarnationId}`,
         },
       };
+      this.byKey.set(input.operationKey, blob);
+      this.effects += 1;
     }
-    const parts: Uint8Array[] = [];
-    for await (const chunk of input.body) parts.push(chunk);
-    const body = Buffer.concat(parts);
-    const sha256 = createHash("sha256").update(body).digest("hex");
-    const tenantId = this.crossTenant ? "tenant-b" : input.tenantId;
-    const incarnationId = randomUUID();
-    const blob: WorkspaceCandidateBlob = {
-      content: { sha256, size: body.byteLength },
-      object: {
-        tenantId,
-        purpose: "workspace",
-        incarnationId,
-        physicalObjectKey: `runtime/stable/${tenantId}/workspace/sha256/${sha256}/incarnations/${incarnationId}`,
-      },
-    };
-    this.byOperation.set(input.operationKey, blob);
-    this.puts += 1;
-    this.onPut?.();
+    this.keys.push(input.operationKey);
+    this.afterPut?.();
     if (this.unknownAfterPut) throw new WorkspaceDependencyError("unknown", "PUT_TIMEOUT");
+    if (this.knownAfterPut) throw new WorkspaceDependencyError("known", "PUT_UNAVAILABLE");
     return blob;
   }
-
   async headCandidate(input: Parameters<WorkspaceCandidateBlobWritePort["headCandidate"]>[0]) {
-    if (!this.corruptHead) return { status: "exists" as const, blob: input.blob };
-    return {
-      status: "exists" as const,
-      blob: {
-        ...input.blob,
-        content: { ...input.blob.content, size: input.blob.content.size + 1 },
-      },
-    };
+    this.afterHead?.();
+    return { status: "exists" as const, blob: input.blob };
   }
 }
 
-function stream(body: Uint8Array): AsyncIterable<Uint8Array> {
+function one(body: Uint8Array): AsyncIterable<Uint8Array> {
   return (async function* () {
     yield body;
   })();
 }
 
-function addFile(
-  sandbox: SnapshotSandbox,
-  path: string,
-  body: string,
-  declaredSize?: number,
-): void {
-  const content = Buffer.from(body);
-  sandbox.entries.push({
-    relativePath: path,
-    kind: "file",
-    size: declaredSize ?? content.byteLength,
-  });
-  sandbox.bodies.set(path, content);
-}
-
-function setup() {
+function setup(policy = POLICY) {
   const journal = new Journal();
   const sandbox = new SnapshotSandbox();
-  const blobs = new BlobWriter();
+  const blobs = new Blobs();
   const publisher = new WorkspacePublisher({
     journal,
     sandbox,
     blobs,
-    policy: POLICY,
+    policy,
     now: () => new Date("2026-07-26T10:00:00.000Z"),
   });
   return { journal, sandbox, blobs, publisher };
 }
 
-describe("Workspace 可验证发布编排", () => {
-  it("流式上传普通文件，全部 HEAD 可证实后只返回候选变更", async () => {
-    const state = setup();
-    addFile(state.sandbox, "docs/a.txt", "alpha");
-    addFile(state.sandbox, "z.txt", "z");
-    state.sandbox.entries.push({ relativePath: "docs", kind: "directory" });
+function request(operationKey: string, base?: WorkspaceManifest) {
+  return { operationKey, scope: SCOPE, ...(base === undefined ? {} : { base }) };
+}
 
-    const change = await state.publisher.publish({ operationKey: "pub-1", tenantId: "tenant-a" });
-    expect(change.kind).toBe("validated_workspace_change");
-    expect(change.verifiedAt).toBe("2026-07-26T10:00:00.000Z");
-    expect(change.candidateManifest.entries.map((item) => item.path)).toEqual([
-      "docs/a.txt",
-      "z.txt",
-    ]);
-    expect(state.blobs.puts).toBe(2);
+describe("Workspace publisher 可靠边界", () => {
+  it("先取得不可变 snapshot 身份再 begin，双遍流式验真后只返回候选", async () => {
+    const state = setup();
+    state.sandbox.addFile("a", "alpha");
+    const change = await state.publisher.publish(request("publish"));
+    const row = state.journal.rows.get("publish");
+    expect(row?.identity).toMatchObject({
+      tenantId: SCOPE.tenantId,
+      threadId: SCOPE.threadId,
+      workspaceId: SCOPE.workspaceId,
+      sandbox: state.sandbox.session,
+      snapshotToken: "snapshot-1",
+    });
+    expect(change).toMatchObject({ ...SCOPE, sandboxSnapshot: expect.any(Object) });
+    expect(state.sandbox.reads).toBe(2);
     expect(Object.keys(change)).not.toContain("revisionId");
   });
 
-  it("相同 operationKey 完成后不二次读取或上传", async () => {
+  it("非法 tenant/scope 在 snapshot 与任何 Blob 副作用前拒绝", async () => {
     const state = setup();
-    addFile(state.sandbox, "a.txt", "a");
-    const first = await state.publisher.publish({
-      operationKey: "pub-repeat",
-      tenantId: "tenant-a",
-    });
-    const second = await state.publisher.publish({
-      operationKey: "pub-repeat",
-      tenantId: "tenant-a",
-    });
-    expect(second).toEqual(first);
-    expect(state.sandbox.reads).toBe(1);
-    expect(state.blobs.puts).toBe(1);
-  });
-
-  it("operationKey 绑定不同 base 时冲突", async () => {
-    const state = setup();
-    const first = await state.publisher.publish({
-      operationKey: "pub-conflict",
-      tenantId: "tenant-a",
-    });
-    const forgedBase = { ...first.candidateManifest, digest: "0".repeat(64) } as WorkspaceManifest;
+    state.sandbox.addFile("a", "a");
     await expect(
       state.publisher.publish({
-        operationKey: "pub-conflict",
-        tenantId: "tenant-a",
-        base: forgedBase,
+        operationKey: "bad-scope",
+        scope: { ...SCOPE, tenantId: "../bad" },
       }),
-    ).rejects.toBeTruthy();
+    ).rejects.toMatchObject({ code: "INVALID_INPUT" });
+    expect(state.sandbox.captureCalls).toBe(0);
+    expect(state.blobs.tenantSideEffects).toBe(0);
   });
 
-  it("拒绝路径逃逸、symlink、特殊文件和重复清单路径", async () => {
-    for (const unsafe of [
-      { relativePath: "../escape", kind: "file" as const, size: 1 },
-      { relativePath: "link", kind: "symlink" as const },
-      { relativePath: "socket", kind: "special" as const },
-    ]) {
-      const state = setup();
-      state.sandbox.entries = [unsafe];
-      await expect(
-        state.publisher.publish({
-          operationKey: `unsafe-${unsafe.kind}-${unsafe.relativePath.length}`,
-          tenantId: "tenant-a",
-        }),
-      ).rejects.toBeTruthy();
-      expect(state.blobs.puts).toBe(0);
-    }
-    const duplicate = setup();
-    duplicate.sandbox.entries = [
-      { relativePath: "a", kind: "file", size: 1 },
-      { relativePath: "a", kind: "file", size: 1 },
-    ];
-    duplicate.sandbox.bodies.set("a", Buffer.from("a"));
-    await expect(
-      duplicate.publisher.publish({ operationKey: "duplicate", tenantId: "tenant-a" }),
-    ).rejects.toMatchObject({ code: "UNSAFE_SANDBOX_ENTRY" });
-
-    const conflict = setup();
-    conflict.sandbox.entries = [
-      { relativePath: "a", kind: "file", size: 1 },
-      { relativePath: "a/child", kind: "directory" },
-    ];
-    conflict.sandbox.bodies.set("a", Buffer.from("a"));
-    await expect(
-      conflict.publisher.publish({ operationKey: "directory-conflict", tenantId: "tenant-a" }),
-    ).rejects.toMatchObject({ code: "UNSAFE_SANDBOX_ENTRY" });
-  });
-
-  it.each([
-    ["短读", "abc", 4],
-    ["长读", "abcd", 3],
-  ])("%s 不返回候选提交事实", async (_label, body, declaredSize) => {
+  it("abort/部分上传后以同 snapshot 和子key恢复，不双写 candidate", async () => {
     const state = setup();
-    addFile(state.sandbox, "a.txt", body, declaredSize);
-    await expect(
-      state.publisher.publish({ operationKey: `size-${declaredSize}`, tenantId: "tenant-a" }),
-    ).rejects.toMatchObject({ code: "INTEGRITY_MISMATCH" });
-    expect(state.journal.rows.has(`size-${declaredSize}`)).toBe(false);
-  });
-
-  it("拒绝跨 Tenant 候选对象和 HEAD 身份损坏", async () => {
-    const cross = setup();
-    addFile(cross.sandbox, "a", "a");
-    cross.blobs.crossTenant = true;
-    await expect(
-      cross.publisher.publish({ operationKey: "cross", tenantId: "tenant-a" }),
-    ).rejects.toBeTruthy();
-
-    const head = setup();
-    addFile(head.sandbox, "a", "a");
-    head.blobs.corruptHead = true;
-    await expect(
-      head.publisher.publish({ operationKey: "head", tenantId: "tenant-a" }),
-    ).rejects.toMatchObject({ code: "INTEGRITY_MISMATCH" });
-  });
-
-  it("写后响应未知登记稳定事实，重复调用不盲目再次上传", async () => {
-    const state = setup();
-    addFile(state.sandbox, "a", "a");
-    state.blobs.unknownAfterPut = true;
-    await expect(
-      state.publisher.publish({ operationKey: "put-unknown", tenantId: "tenant-a" }),
-    ).rejects.toMatchObject({ code: "RESULT_UNKNOWN" });
-    expect(state.journal.facts).toEqual([
-      expect.objectContaining({ phase: "upload_candidate", dependencyCode: "PUT_TIMEOUT" }),
-    ]);
-    state.blobs.unknownAfterPut = false;
-    await expect(
-      state.publisher.publish({ operationKey: "put-unknown", tenantId: "tenant-a" }),
-    ).rejects.toMatchObject({ code: "RESULT_UNKNOWN" });
-    expect(state.blobs.puts).toBe(1);
-  });
-
-  it("Blob 端口提前返回且未消费 EOF 时按协议失败", async () => {
-    const state = setup();
-    addFile(state.sandbox, "a", "a");
-    state.blobs.returnBeforeConsume = true;
-    await expect(
-      state.publisher.publish({ operationKey: "early-put", tenantId: "tenant-a" }),
-    ).rejects.toMatchObject({ code: "DEPENDENCY_FAILED" });
-    expect(state.journal.rows.has("early-put")).toBe(false);
-  });
-
-  it("列表依赖未知只记录脱敏代码，不泄漏底层消息", async () => {
-    const state = setup();
-    state.sandbox.listFailure = new WorkspaceDependencyError("unknown", "bad secret/path");
-    await expect(
-      state.publisher.publish({ operationKey: "list-unknown", tenantId: "tenant-a" }),
-    ).rejects.toMatchObject({ code: "RESULT_UNKNOWN" });
-    expect(state.journal.facts[0]).toMatchObject({ dependencyCode: "UNCLASSIFIED" });
-    expect(JSON.stringify(state.journal.facts)).not.toContain("secret");
-  });
-
-  it("执行前 abort 不列举、不读取、不上传", async () => {
-    const state = setup();
-    addFile(state.sandbox, "a", "a");
+    state.sandbox.addFile("a", "a");
     const controller = new AbortController();
-    controller.abort();
+    state.blobs.afterPut = () => controller.abort();
+    await expect(
+      state.publisher.publish({ ...request("resume"), signal: controller.signal }),
+    ).rejects.toMatchObject({ code: "CANCELLED" });
+    state.blobs.afterPut = undefined;
+    await state.publisher.publish(request("resume"));
+    expect(state.sandbox.captureCalls).toBe(2);
+    expect(state.blobs.effects).toBe(1);
+    expect(new Set(state.blobs.keys).size).toBe(1);
+  });
+
+  it.each(["before", "list", "hash", "head"])("%s 阶段 abort 不宣称候选完成", async (stage) => {
+    const state = setup();
+    state.sandbox.addFile("a", "a");
+    const controller = new AbortController();
+    if (stage === "before") controller.abort();
+    if (stage === "list") state.sandbox.onList = () => controller.abort();
+    if (stage === "hash") state.sandbox.onRead = () => controller.abort();
+    if (stage === "head") state.blobs.afterHead = () => controller.abort();
     await expect(
       state.publisher.publish({
-        operationKey: "abort-pub",
-        tenantId: "tenant-a",
+        ...request(`abort-${stage}`),
         signal: controller.signal,
       }),
     ).rejects.toMatchObject({ code: "CANCELLED" });
-    expect(state.sandbox.reads).toBe(0);
-    expect(state.blobs.puts).toBe(0);
+    expect(state.journal.rows.get(`abort-${stage}`)?.state).toBe("retryable");
   });
 
-  it("读取中及上传后安全点 abort，不进入 HEAD 或完成事实", async () => {
-    const duringRead = setup();
-    addFile(duringRead.sandbox, "a", "a");
-    const readController = new AbortController();
-    duringRead.sandbox.onRead = () => readController.abort();
-    await expect(
-      duringRead.publisher.publish({
-        operationKey: "abort-read",
-        tenantId: "tenant-a",
-        signal: readController.signal,
-      }),
-    ).rejects.toMatchObject({ code: "CANCELLED" });
-
-    const afterPut = setup();
-    addFile(afterPut.sandbox, "a", "a");
-    const putController = new AbortController();
-    afterPut.blobs.onPut = () => putController.abort();
-    await expect(
-      afterPut.publisher.publish({
-        operationKey: "abort-after-put",
-        tenantId: "tenant-a",
-        signal: putController.signal,
-      }),
-    ).rejects.toMatchObject({ code: "CANCELLED" });
-    expect(afterPut.blobs.puts).toBe(1);
-    expect(afterPut.journal.rows.has("abort-after-put")).toBe(false);
+  it("同 operationKey 不能在 Sandbox generation/snapshot 变化后重绑", async () => {
+    const state = setup();
+    state.sandbox.addFile("a", "a");
+    state.blobs.knownAfterPut = true;
+    await expect(state.publisher.publish(request("cross-sandbox"))).rejects.toBeTruthy();
+    state.blobs.knownAfterPut = false;
+    state.sandbox.byOperation.delete("cross-sandbox");
+    state.sandbox.session = { sessionId: "sandbox-b", generation: 2 };
+    await expect(state.publisher.publish(request("cross-sandbox"))).rejects.toMatchObject({
+      code: "OPERATION_CONFLICT",
+    });
   });
 
-  it("文件、总量、chunk 和路径配额在核心层强制执行", async () => {
-    const chunk = setup();
-    addFile(chunk.sandbox, "a", "x".repeat(33));
-    await expect(
-      chunk.publisher.publish({ operationKey: "chunk-limit", tenantId: "tenant-a" }),
-    ).rejects.toMatchObject({ code: "LIMIT_EXCEEDED" });
+  it("known failure 保留父identity：同快照可恢复，不同base永久冲突且单次CAS", async () => {
+    const state = setup();
+    state.sandbox.addFile("a", "a");
+    state.blobs.knownAfterPut = true;
+    await expect(state.publisher.publish(request("known"))).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILED",
+    });
+    expect(state.journal.failures).toEqual([
+      { code: "DEPENDENCY_FAILED", disposition: "retryable" },
+    ]);
+    const otherBase = createWorkspaceManifest(
+      { tenantId: SCOPE.tenantId, entries: [] },
+      POLICY.historicalManifest,
+    );
+    await expect(state.publisher.publish(request("known", otherBase))).rejects.toMatchObject({
+      code: "OPERATION_CONFLICT",
+    });
+    state.blobs.knownAfterPut = false;
+    await state.publisher.publish(request("known"));
+    expect(state.blobs.effects).toBe(1);
+  });
 
-    const count = setup();
-    for (let index = 0; index < 6; index += 1) addFile(count.sandbox, `${index}`, "a");
-    await expect(
-      count.publisher.publish({ operationKey: "count-limit", tenantId: "tenant-a" }),
-    ).rejects.toMatchObject({ code: "LIMIT_EXCEEDED" });
+  it("上传响应未知登记一次，重入不发第二次副作用", async () => {
+    const state = setup();
+    state.sandbox.addFile("a", "a");
+    state.blobs.unknownAfterPut = true;
+    await expect(state.publisher.publish(request("unknown"))).rejects.toMatchObject({
+      code: "RESULT_UNKNOWN",
+    });
+    expect(state.journal.facts).toHaveLength(1);
+    state.blobs.unknownAfterPut = false;
+    await expect(state.publisher.publish(request("unknown"))).rejects.toMatchObject({
+      code: "RESULT_UNKNOWN",
+    });
+    expect(state.blobs.effects).toBe(1);
+    expect(state.journal.failures).toHaveLength(0);
+  });
+
+  it("completed 是 unknown 边界：拒绝 Proxy/getter/额外字段", async () => {
+    for (const malicious of [
+      new Proxy({ status: "completed", result: {} }, {}),
+      Object.defineProperty({ status: "completed" }, "result", {
+        enumerable: true,
+        get: () => ({}),
+      }),
+      { status: "completed", result: {}, extra: true },
+    ]) {
+      const state = setup();
+      state.journal.beginOverride = malicious;
+      await expect(state.publisher.publish(request(`mal-${Math.random()}`))).rejects.toMatchObject({
+        code: "DEPENDENCY_FAILED",
+      });
+    }
+  });
+
+  it("completed 完整重验 scope/snapshot/base/candidate digest/identity/verifiedAt 与当前配额", async () => {
+    const state = setup();
+    state.sandbox.addFile("a", "a");
+    await state.publisher.publish(request("complete"));
+    const row = state.journal.rows.get("complete");
+    if (row?.result?.kind !== "published") throw new Error("fake result missing");
+    row.result = {
+      ...row.result,
+      change: { ...row.result.change, verifiedAt: "not-a-time" },
+    };
+    await expect(state.publisher.publish(request("complete"))).rejects.toMatchObject({
+      code: "OPERATION_CONFLICT",
+    });
+
+    const oversized = setup({ ...POLICY, maxTotalBytes: 1, maxSingleFileBytes: 1 });
+    oversized.sandbox.addFile("a", "a");
+    const candidate = await oversized.publisher.publish(request("quota-complete"));
+    const quotaRow = oversized.journal.rows.get("quota-complete");
+    if (quotaRow?.result?.kind !== "published") throw new Error("fake result missing");
+    const largeBody = Buffer.from("xx");
+    const sha256 = createHash("sha256").update(largeBody).digest("hex");
+    const incarnationId = randomUUID();
+    const largeManifest = createWorkspaceManifest(
+      {
+        tenantId: SCOPE.tenantId,
+        entries: [
+          {
+            type: "file",
+            path: "x",
+            content: { sha256, size: 2 },
+            object: {
+              tenantId: SCOPE.tenantId,
+              purpose: "workspace",
+              incarnationId,
+              physicalObjectKey: `runtime/stable/${SCOPE.tenantId}/workspace/sha256/${sha256}/incarnations/${incarnationId}`,
+            },
+          },
+        ],
+      },
+      { maxFiles: 2, maxTotalBytes: 10 },
+    );
+    quotaRow.result = {
+      ...quotaRow.result,
+      change: { ...candidate, candidateManifest: largeManifest },
+    };
+    await expect(oversized.publisher.publish(request("quota-complete"))).rejects.toMatchObject({
+      code: "LIMIT_EXCEEDED",
+    });
+  });
+
+  it("base 使用明确历史策略有界解析，在 snapshot/Blob 前拒绝超限", async () => {
+    const body = Buffer.from("xx");
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    const incarnationId = randomUUID();
+    const base = createWorkspaceManifest(
+      {
+        tenantId: SCOPE.tenantId,
+        entries: [
+          {
+            type: "file",
+            path: "x",
+            content: { sha256, size: 2 },
+            object: {
+              tenantId: SCOPE.tenantId,
+              purpose: "workspace",
+              incarnationId,
+              physicalObjectKey: `runtime/stable/${SCOPE.tenantId}/workspace/sha256/${sha256}/incarnations/${incarnationId}`,
+            },
+          },
+        ],
+      },
+      { maxFiles: 2, maxTotalBytes: 10 },
+    );
+    const state = setup({
+      ...POLICY,
+      historicalManifest: { maxFiles: 1, maxTotalBytes: 1, maxSingleFileBytes: 1 },
+    });
+    await expect(state.publisher.publish(request("base-limit", base))).rejects.toMatchObject({
+      code: "LIMIT_EXCEEDED",
+    });
+    expect(state.sandbox.captureCalls).toBe(0);
+  });
+
+  it("maxEntries 与 maxFiles 分离：目录计 entry 不计 file，分别失败", async () => {
+    const entries = setup({ ...POLICY, maxEntries: 2, maxFiles: 1 });
+    entries.sandbox.liveEntries.push(
+      { relativePath: "a", kind: "directory" },
+      { relativePath: "b", kind: "directory" },
+      { relativePath: "c", kind: "directory" },
+    );
+    await expect(entries.publisher.publish(request("entry-limit"))).rejects.toMatchObject({
+      code: "LIMIT_EXCEEDED",
+    });
+
+    const files = setup({ ...POLICY, maxEntries: 4, maxFiles: 1 });
+    files.sandbox.addFile("a", "a");
+    files.sandbox.addFile("b", "b");
+    await expect(files.publisher.publish(request("file-limit"))).rejects.toMatchObject({
+      code: "LIMIT_EXCEEDED",
+    });
+  });
+
+  it("子key绑定父digest、snapshot、路径和内容；内容变化产生新key", async () => {
+    const first = setup();
+    first.sandbox.addFile("a", "a");
+    await first.publisher.publish(request("child-a"));
+    const second = setup();
+    second.sandbox.addFile("a", "b");
+    await second.publisher.publish(request("child-a"));
+    expect(first.blobs.keys[0]).not.toBe(second.blobs.keys[0]);
+  });
+
+  it("recordUnknown journal 故障统一脱敏且不追加第二类 known CAS", async () => {
+    const state = setup();
+    state.sandbox.addFile("a", "a");
+    state.blobs.unknownAfterPut = true;
+    state.journal.recordUnknownError = new WorkspaceDependencyError("known", "secret/path");
+    await expect(state.publisher.publish(request("journal-unknown-fail"))).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILED",
+      message: expect.not.stringContaining("secret"),
+    });
+    expect(state.journal.failures).toHaveLength(0);
   });
 });

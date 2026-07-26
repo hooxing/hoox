@@ -219,7 +219,8 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
               (SELECT max(version) FROM "${schema}".runtime_schema_migrations)::int AS version`,
       [runtimeRole, schema],
     );
-    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 5 });
+    // Cleanup 0006 在 Dispatch 0005 后叠加，Dispatch ACL 仍须存在而 schema 已前进至最新版本。
+    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 6 });
     const runtimeSchema = await runtime.query<{
       readonly schema: string;
       readonly current_user: string;
@@ -1551,7 +1552,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     });
     expect(down.at(-1)?.version).toBe(4);
     const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
-    expect(restored.at(-1)?.version).toBe(5);
+    expect(restored.at(-1)?.version).toBe(6);
     const acl = await admin.query<{
       readonly select_allowed: boolean;
       readonly update_allowed: boolean;

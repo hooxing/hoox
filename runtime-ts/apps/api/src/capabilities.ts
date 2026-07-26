@@ -19,10 +19,11 @@ export function createApiCreateCapability(input: {
 }): ApiCreateCapability {
   // 签发时同时快照并绑定方法，调用方之后替换端口对象或方法都不能改变已开放路由的能力。
   const createThread = input.threadCreation.createThread.bind(input.threadCreation);
+  const replayQueuedRun = input.enqueueOutbox.replayQueuedRun.bind(input.enqueueOutbox);
   const createQueuedRun = input.enqueueOutbox.createQueuedRun.bind(input.enqueueOutbox);
   const capability = Object.freeze({
     threadCreation: Object.freeze({ createThread }),
-    enqueueOutbox: Object.freeze({ createQueuedRun }),
+    enqueueOutbox: Object.freeze({ replayQueuedRun, createQueuedRun }),
     [createCapabilityBrand]: true as const,
   });
   issuedCapabilities.add(capability);

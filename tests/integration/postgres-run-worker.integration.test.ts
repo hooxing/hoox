@@ -15,20 +15,31 @@ import {
   workspaceId,
   workspaceRevisionId,
 } from "@cube-runtime/domain";
-import {
-  outboxPayloadDigest,
-  runtimeMutationDigest,
-} from "@cube-runtime/run-contracts/mutation-protocol";
 import type {
+  ControlledRolloutProjection,
   ExecutionScope,
   RuntimeMutation,
   RuntimeOutboxV1,
   SandboxSessionRegistryPort,
 } from "@cube-runtime/run-contracts";
 import { assertProtocolSize } from "@cube-runtime/run-contracts";
+import {
+  outboxPayloadDigest,
+  runtimeMutationDigest,
+} from "@cube-runtime/run-contracts/mutation-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
-import { PgCoreRepositories } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
+import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
+import { createApiCreateCapability } from "../../runtime-ts/apps/api/src/capabilities.js";
+import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
+import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import {
+  PgArchiveThreadCommand,
+  PgCoreRepositories,
+} from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
+import {
+  PgRunDispatchCreation,
+  PgRunDispatchOutbox,
+} from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
 import {
   PgBackedSandboxSessionRegistry,
   PgExecutionPersistence,
@@ -36,8 +47,8 @@ import {
 } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
 import {
   createPostgresPool,
-  withTenantTransaction,
   type Pool,
+  withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 
 const enabled = process.env.RUN_PG_RUN_WORKER_INTEGRATION === "true";
@@ -54,16 +65,24 @@ let runtime!: Pool;
 let repositories!: PgCoreRepositories;
 let setup!: PgRunExecutionSetup;
 let persistence!: PgExecutionPersistence;
+let runDispatchCreation!: PgRunDispatchCreation;
+let runDispatchOutbox!: PgRunDispatchOutbox;
 let databaseName = "";
 
 interface Fixture {
   readonly scope: ExecutionScope;
   readonly user: ReturnType<typeof createUser>;
+  readonly thread: ReturnType<typeof createThread>;
+  readonly workspace: ReturnType<typeof createWorkspace>;
 }
 
 async function fixture(
   label: string,
-  rolloutProjection = { schemaVersion: 1 as const, checkpointId: `cp-${label}`, turns: [] },
+  rolloutProjection: ControlledRolloutProjection = {
+    schemaVersion: 1,
+    checkpointId: `cp-${label}`,
+    turns: [],
+  },
 ): Promise<Fixture> {
   const now = isoTimestamp("2099-07-26T00:00:00.000Z");
   const user = createUser(userId(`rw-user-${label}`), now);
@@ -108,18 +127,31 @@ async function fixture(
       rolloutProjection,
     }),
   ).toBe("created");
-  return { scope, user };
+  return { scope, user, thread, workspace };
 }
 
 /** 用真实 PostgreSQL 的 jsonb::text 计算边界，避免测试复制一套不等价序列化规则。 */
 async function projectionAtStoredBytes(targetBytes: number) {
-  const empty = { schemaVersion: 1 as const, checkpointId: "", turns: [] };
+  // 用多个合法 turn 填充字节：checkpoint 受 200 字节限制，单个 turn 受 16KiB 限制。
+  const empty = {
+    schemaVersion: 1 as const,
+    checkpointId: "projection-boundary",
+    turns: Array.from({ length: 5 }, () => ({ role: "user" as const, text: "" })),
+  };
   const measured = await migrator.query<{ bytes: number }>(
     "SELECT octet_length($1::jsonb::text) AS bytes",
     [JSON.stringify(empty)],
   );
   const baseBytes = Number(measured.rows[0]?.bytes);
-  const projection = { ...empty, checkpointId: "x".repeat(targetBytes - baseBytes) };
+  let remaining = targetBytes - baseBytes;
+  const turns = empty.turns.map((turn, index) => {
+    const slots = empty.turns.length - index;
+    const bytes = Math.min(16 * 1024, Math.floor(remaining / slots));
+    remaining -= bytes;
+    return { ...turn, text: "x".repeat(bytes) };
+  });
+  if (remaining !== 0) throw new Error("无法构造受控 Projection 边界");
+  const projection = { ...empty, turns };
   const verified = await migrator.query<{ bytes: number }>(
     "SELECT octet_length($1::jsonb::text) AS bytes",
     [JSON.stringify(projection)],
@@ -182,9 +214,22 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     migrator = createPostgresPool({ connectionString: migratorUrl.toString(), schema });
     runtime = createPostgresPool({ connectionString: runtimeUrl.toString(), schema });
     await migrateUp(migrator, { runtimeRole, migratorRole, schema });
+    const dispatchAcl = await admin.query<{ readonly allowed: boolean; readonly version: number }>(
+      `SELECT has_table_privilege($1::text, format('%I.api_idempotency_records', $2::text), 'SELECT') AS allowed,
+              (SELECT max(version) FROM "${schema}".runtime_schema_migrations)::int AS version`,
+      [runtimeRole, schema],
+    );
+    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 5 });
+    const runtimeSchema = await runtime.query<{
+      readonly schema: string;
+      readonly current_user: string;
+    }>("SELECT current_schema() AS schema,current_user");
+    expect(runtimeSchema.rows[0]).toEqual({ schema, current_user: runtimeRole });
     repositories = new PgCoreRepositories(runtime);
     setup = new PgRunExecutionSetup(runtime);
     persistence = new PgExecutionPersistence(runtime);
+    runDispatchCreation = new PgRunDispatchCreation(runtime);
+    runDispatchOutbox = new PgRunDispatchOutbox(runtime);
   });
 
   afterAll(async () => {
@@ -247,6 +292,322 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     ).resolves.toEqual({ outcome: "fence_lost" });
   });
 
+  it("同键 Run 创建原子重放，并由 Outbox 至少一次领取", async () => {
+    const label = `dispatch-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`dispatch-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`dispatch-tenant-${label}`),
+      ownerMembershipId: membershipId(`dispatch-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const thread = createThread({
+      id: threadId(`dispatch-thread-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "Dispatch PG 集成任务",
+      now,
+    });
+    await repositories.threads.create(scope, thread);
+    await repositories.workspaces.create(
+      scope,
+      createWorkspace({ id: workspaceId(`dispatch-workspace-${label}`), thread, now }),
+    );
+    const run = createRun({ id: runId(`dispatch-run-${label}`), thread, now });
+    const command = {
+      scope,
+      run,
+      thread,
+      inputText: "可靠 Dispatch 输入",
+      idempotency: {
+        key: `dispatch-key-${label}`,
+        requestHash: "a".repeat(64),
+      },
+    } as const;
+    const created = await Promise.all([
+      runDispatchCreation.createQueuedRun(command),
+      runDispatchCreation.createQueuedRun(command),
+    ]);
+    expect(created.map((value) => value.outcome).sort()).toEqual(["created", "replayed"]);
+    await expect(
+      runDispatchCreation.createQueuedRun({
+        ...command,
+        inputText: "不同输入",
+        idempotency: { ...command.idempotency, requestHash: "b".repeat(64) },
+      }),
+    ).resolves.toEqual({ outcome: "key_conflict" });
+
+    const claims = await Promise.all([
+      runDispatchOutbox.claim({
+        tenantId: scope.tenantId,
+        dispatcherId: "dispatch-a",
+        limit: 1,
+        leaseMilliseconds: 30_000,
+      }),
+      runDispatchOutbox.claim({
+        tenantId: scope.tenantId,
+        dispatcherId: "dispatch-b",
+        limit: 1,
+        leaseMilliseconds: 30_000,
+      }),
+    ]);
+    expect(claims.flat()).toHaveLength(1);
+    const claim = claims.flat()[0];
+    if (claim === undefined) throw new Error("没有 Outbox claim 胜者");
+    const execution = await persistence.claim({
+      scope: claim.scope as ExecutionScope,
+      workerId: "dispatch-worker",
+      leaseDurationMs: 30_000,
+    });
+    expect(execution).toMatchObject({
+      outcome: "claimed",
+      snapshot: {
+        input: command.inputText,
+        rolloutProjection: { schemaVersion: 1, checkpointId: "initial", turns: [] },
+      },
+    });
+    await runDispatchOutbox.acknowledge({ claim, outcome: "dispatched" });
+    await expect(
+      runDispatchOutbox.claim({
+        tenantId: scope.tenantId,
+        dispatcherId: "dispatch-c",
+        limit: 1,
+        leaseMilliseconds: 30_000,
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("过期 ack 不能覆盖重领，两个连接只会产生一个下一代 claim", async () => {
+    const f = await fixture(`dispatch-reclaim-${suffix}`);
+    await expect(
+      runDispatchOutbox.claim({
+        tenantId: f.scope.tenantId,
+        dispatcherId: " \t ",
+        limit: 1,
+        leaseMilliseconds: 30_000,
+      }),
+    ).rejects.toThrow("dispatcherId");
+    await expect(
+      runDispatchOutbox.claim({
+        tenantId: f.scope.tenantId,
+        dispatcherId: "too-long-dispatcher",
+        limit: 1,
+        leaseMilliseconds: 300_001,
+      }),
+    ).rejects.toThrow("Outbox lease");
+    const outboxId = `outbox-reclaim-${suffix}`;
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+      client.query(
+        `INSERT INTO run_dispatch_outbox(
+           tenant_id,outbox_id,run_id,thread_id,workspace_id,root_run_id,input_digest,state
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,'ready')`,
+        [
+          f.scope.tenantId,
+          outboxId,
+          f.scope.runId,
+          f.scope.threadId,
+          f.scope.workspaceId,
+          f.scope.rootRunId,
+          "e".repeat(64),
+        ],
+      ),
+    );
+    const first = (
+      await runDispatchOutbox.claim({
+        tenantId: f.scope.tenantId,
+        dispatcherId: "first-dispatcher",
+        limit: 1,
+        leaseMilliseconds: 1_000,
+      })
+    )[0];
+    if (first === undefined) throw new Error("首次 claim 缺失");
+    await admin.query(
+      `UPDATE "${schema}".run_dispatch_outbox
+          SET lease_expires_at=clock_timestamp()-interval '1 second'
+        WHERE tenant_id=$1 AND outbox_id=$2`,
+      [f.scope.tenantId, outboxId],
+    );
+    const [lateAck, reclaimLeft, reclaimRight] = await Promise.all([
+      runDispatchOutbox.acknowledge({ claim: first, outcome: "dispatched" }),
+      runDispatchOutbox.claim({
+        tenantId: f.scope.tenantId,
+        dispatcherId: "second-dispatcher-left",
+        limit: 1,
+        leaseMilliseconds: 30_000,
+      }),
+      runDispatchOutbox.claim({
+        tenantId: f.scope.tenantId,
+        dispatcherId: "second-dispatcher-right",
+        limit: 1,
+        leaseMilliseconds: 30_000,
+      }),
+    ]);
+    await lateAck;
+    const next = [...reclaimLeft, ...reclaimRight];
+    expect(next).toHaveLength(1);
+    expect(next[0]).toMatchObject({ outboxId, generation: first.generation + 1 });
+    const winner = next[0];
+    if (winner === undefined) throw new Error("重领 winner 缺失");
+    await expect(
+      runDispatchOutbox.acknowledge({
+        claim: winner,
+        outcome: "defer",
+        retryAfterMilliseconds: 86_400_001,
+      }),
+    ).rejects.toThrow("Outbox defer");
+    await runDispatchOutbox.acknowledge({ claim: winner, outcome: "dispatched" });
+  });
+
+  it("COMMIT 响应丢失后，即使 Thread 已归档仍先按同键读回", async () => {
+    const label = `dispatch-unknown-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`dispatch-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`dispatch-tenant-${label}`),
+      ownerMembershipId: membershipId(`dispatch-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const thread = createThread({
+      id: threadId(`dispatch-thread-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "响应丢失后归档",
+      now,
+    });
+    await repositories.threads.create(scope, thread);
+    await repositories.workspaces.create(
+      scope,
+      createWorkspace({ id: workspaceId(`dispatch-workspace-${label}`), thread, now }),
+    );
+    const command = {
+      scope,
+      run: createRun({ id: runId(`dispatch-run-${label}`), thread, now }),
+      thread,
+      inputText: "提交成功但响应丢失",
+      idempotency: { key: `dispatch-key-${label}`, requestHash: "c".repeat(64) },
+    } as const;
+    const lossy = new PgRunDispatchCreation(runtime, {
+      afterCommit: () => {
+        throw new Error("模拟响应丢失");
+      },
+    });
+    await expect(lossy.createQueuedRun(command)).resolves.toMatchObject({ outcome: "replayed" });
+    await expect(
+      new PgArchiveThreadCommand(runtime).archiveThread({ scope, threadId: thread.id }),
+    ).resolves.toMatchObject({ outcome: "archived" });
+    await expect(runDispatchCreation.createQueuedRun(command)).resolves.toMatchObject({
+      outcome: "replayed",
+      entity: { id: command.run.id },
+    });
+    await expect(
+      runDispatchCreation.createQueuedRun({
+        ...command,
+        inputText: "同键不同载荷",
+        idempotency: { ...command.idempotency, requestHash: "d".repeat(64) },
+      }),
+    ).resolves.toEqual({ outcome: "key_conflict" });
+  });
+
+  it("真实 PG HTTP API：归档 Thread 后同键 Run 重放优先，不同载荷冲突", async () => {
+    const label = `dispatch-http-${suffix}`;
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const user = createUser(userId(`dispatch-user-${label}`), now);
+    const personal = createPersonalTenant({
+      id: tenantId(`dispatch-tenant-${label}`),
+      ownerMembershipId: membershipId(`dispatch-member-${label}`),
+      owner: user,
+      createdAt: now,
+    });
+    const scope = { tenantId: personal.tenant.id, userId: user.id };
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    });
+    const thread = createThread({
+      id: threadId(`dispatch-thread-${label}`),
+      tenant: personal.tenant,
+      user,
+      membership: personal.ownerMembership,
+      title: "HTTP 幂等回放",
+      now,
+    });
+    await repositories.threads.create(scope, thread);
+    await repositories.workspaces.create(
+      scope,
+      createWorkspace({ id: workspaceId(`dispatch-workspace-${label}`), thread, now }),
+    );
+    const app = createApiApp(
+      {
+        auth: { resolve: async () => ({ tenantId: scope.tenantId, userId: scope.userId }) },
+        repositories,
+        createCapability: createApiCreateCapability({
+          // 此用例只覆盖已存在 Thread 的 Run 路由；Thread 创建仍由单独的原子端口负责。
+          threadCreation: { createThread: async () => ({ outcome: "not_authorized" }) },
+          enqueueOutbox: runDispatchCreation,
+        }),
+        archiveThread: new PgArchiveThreadCommand(runtime),
+        cursorCodec: createThreadCursorCodec({
+          activeKid: "integration-key",
+          keys: [{ kid: "integration-key", secret: randomBytes(32).toString("base64url") }],
+          clock: { now: () => now },
+          ttlMilliseconds: 60_000,
+          maximumTtlMilliseconds: 60_000,
+        }),
+        readiness: { probe: async () => runtime.query("SELECT 1").then(() => undefined) },
+        clock: { now: () => now },
+        ids: {
+          thread: () => threadId(`unused-thread-${label}`),
+          run: () => runId(`dispatch-run-${label}`),
+          workspace: () => workspaceId(`unused-workspace-${label}`),
+        },
+      },
+      { logger: false },
+    );
+    try {
+      const request = {
+        method: "POST" as const,
+        url: `/v1/threads/${thread.id}/runs`,
+        headers: { authorization: "Bearer integration", "idempotency-key": `http-key-${label}` },
+        payload: { input: "HTTP 原始输入" },
+      };
+      const first = await app.inject(request);
+      expect(first.statusCode).toBe(200);
+      const archived = await app.inject({
+        method: "DELETE",
+        url: `/v1/threads/${thread.id}`,
+        headers: { authorization: "Bearer integration" },
+      });
+      expect(archived.statusCode).toBe(200);
+      const replay = await app.inject(request);
+      expect(replay.statusCode).toBe(200);
+      expect(replay.json().data).toEqual(first.json().data);
+      const conflict = await app.inject({
+        ...request,
+        payload: { input: "HTTP 不同输入" },
+      });
+      expect(conflict.statusCode).toBe(409);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("workerId 按 UTF-8 字节边界拒绝多字节超限且不泄漏数据库约束", async () => {
     const f = await fixture(`worker-id-${suffix}`);
     await expect(
@@ -263,6 +624,35 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         leaseDurationMs: 30_000,
       }),
     ).resolves.toMatchObject({ outcome: "claimed" });
+  });
+
+  it("Runtime 受限 SQL 直写也拒绝只含 tab/newline 的输入", async () => {
+    const f = await fixture(`dispatch-blank-db-${suffix}`);
+    const run = createRun({
+      id: runId(`blank-run-${suffix}`),
+      thread: f.thread,
+      now: f.thread.createdAt,
+    });
+    await repositories.runs.create({ tenantId: f.scope.tenantId, userId: f.user.id }, run);
+    await expect(
+      withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+        client.query(
+          `INSERT INTO run_execution_inputs(
+             tenant_id,run_id,thread_id,workspace_id,root_run_id,base_revision_id,
+             input_text,initial_projection,initial_projection_digest
+           ) VALUES ($1,$2,$3,$4,$2,NULL,$5,$6::jsonb,$7)`,
+          [
+            f.scope.tenantId,
+            run.id,
+            f.scope.threadId,
+            f.scope.workspaceId,
+            "\t\n\r ",
+            JSON.stringify({ schemaVersion: 1, checkpointId: "db-check", turns: [] }),
+            "f".repeat(64),
+          ],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "23514" });
   });
 
   it("执行初始化逐字段幂等，冲突输入不会被 ON CONFLICT 吞掉", async () => {
@@ -1148,5 +1538,28 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       [schema],
     );
     expect(routines.rows[0]?.count).toBe("0");
+  });
+
+  it("0005 可回退至 0004 并重新授予最小 Dispatch ACL", async () => {
+    const down = await migrateDown(migrator, {
+      runtimeRole,
+      migratorRole,
+      schema,
+      targetVersion: 4,
+      allowDestructive: true,
+      environment: "test",
+    });
+    expect(down.at(-1)?.version).toBe(4);
+    const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
+    expect(restored.at(-1)?.version).toBe(5);
+    const acl = await admin.query<{
+      readonly select_allowed: boolean;
+      readonly update_allowed: boolean;
+    }>(
+      `SELECT has_table_privilege($1::text, format('%I.api_idempotency_records', $2::text), 'SELECT') AS select_allowed,
+              has_table_privilege($1::text, format('%I.api_idempotency_records', $2::text), 'UPDATE') AS update_allowed`,
+      [runtimeRole, schema],
+    );
+    expect(acl.rows[0]).toEqual({ select_allowed: true, update_allowed: false });
   });
 });

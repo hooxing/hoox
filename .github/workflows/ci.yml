@@ -116,8 +116,26 @@ jobs:
       - name: 冻结安装依赖
         run: pnpm install --frozen-lockfile
 
+      - name: 准备 M4 受限数据库角色
+        env:
+          M4_ALLOW_EPHEMERAL_DATABASE_PREPARE: "true"
+          M4_DATABASE_ADMIN_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_RUNTIME_ROLE: m4_ci_runtime
+          DATABASE_MIGRATOR_ROLE: m4_ci_migrator
+          DATABASE_SCHEMA: m4_ci_runtime_schema
+          M4_DATABASE_RUNTIME_PASSWORD: ci-runtime-placeholder-password
+          M4_DATABASE_MIGRATOR_PASSWORD: ci-migrator-placeholder-password
+        # 超级用户凭据只在本步骤创建受限角色；迁移与黑盒测试均不再使用它。
+        run: pnpm --filter @cube-runtime/persistence prepare:ci:m4
+
       - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
         env:
           RUN_PG_RUN_WORKER_INTEGRATION: "true"
-          DATABASE_BOOTSTRAP_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          M4_PREPROVISIONED_DATABASE: "true"
+          M4_DATABASE_ADMIN_URL: postgresql://hooxing:ci-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_BOOTSTRAP_URL: postgresql://m4_ci_migrator:ci-migrator-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_URL: postgresql://m4_ci_runtime:ci-runtime-placeholder-password@127.0.0.1:5432/agent_runtime_ci
+          DATABASE_RUNTIME_ROLE: m4_ci_runtime
+          DATABASE_MIGRATOR_ROLE: m4_ci_migrator
+          DATABASE_SCHEMA: m4_ci_runtime_schema
         run: pnpm test:integration:m4

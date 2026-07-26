@@ -3,11 +3,15 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "dependencies": {
+    "@cube-runtime/domain": "workspace:*"
+  },
   "exports": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -b tsconfig.json --clean",
+    "test": "vitest run --root ../../.. runtime-ts/packages/resource/src",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }
 }

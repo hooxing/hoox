@@ -19,9 +19,13 @@
 | [ADR-0011](0011-run-worker-reliability-boundary.md) | Run Worker 双栅栏、ExecutionAttempt 与恢复 Saga | 已接受 | 2026-07-26 |
 | [ADR-0012](0012-postgresql-blob-lifecycle.md) | PostgreSQL Stable Blob 生命周期与副作用证明 | 已接受 | 2026-07-26 |
 | [ADR-0013](0013-fastify-http-api-and-trusted-context.md) | Fastify HTTP API 与可信 Tenant Context | 已接受 | 2026-07-26 |
-| [ADR-0015](0015-process-lifecycle-and-strict-configuration.md) | 进程生命周期、严格配置与薄装配入口 | 已接受 | 2026-07-26 |
 | [ADR-0014](0014-postgresql-run-worker-state.md) | PostgreSQL Run Worker 事实源与事务实现 | 已接受 | 2026-07-26 |
+| [ADR-0015](0015-process-lifecycle-and-strict-configuration.md) | 进程生命周期、严格配置与薄装配入口 | 已接受 | 2026-07-26 |
+| [ADR-0016](0016-run-input-and-dispatch-outbox.md) | Run 输入与 Dispatch Outbox | 已接受 | 2026-07-26 |
+| [ADR-0017](0017-sandbox-cleanup-outbox-consumer.md) | Sandbox Cleanup Outbox 消费与恢复协调 | 已接受 | 2026-07-26 |
+| [ADR-0018](0018-development-blackbox-e2e-gate.md) | 开发黑盒纵向 Gate 与 Thread 原子创建 | 已接受 | 2026-07-26 |
 | [ADR-0019](0019-workspace-manifest-and-materialization-plan.md) | Workspace 清单与安全物化计划核心 | 已接受 | 2026-07-26 |
+| [ADR-0020](0020-resource-library-discovery-preview-import-core.md) | Resource Library 发现、局部预览与显式导入核心 | 已接受 | 2026-07-26 |
 
 ## 何时必须记录
 

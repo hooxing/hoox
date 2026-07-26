@@ -14,6 +14,8 @@ import {
   SANDBOX_TOOL_NAMES,
   type SandboxToolEffectAuthorizer,
 } from "./tools.js";
+import { createArtifactPiTools, PI_ARTIFACT_TOOL_NAMES } from "./artifact-tools.js";
+import type { ArtifactPiToolExecutorPort } from "./artifact-tools.js";
 
 interface PiSessionPort {
   prompt(text: string): Promise<void>;
@@ -90,6 +92,8 @@ export interface CreateSafePiSessionOptions {
   rolloutProjection?: ControlledRolloutProjection;
   /** 生产 Tool Router 在每次 Sandbox 工具执行前回到 DB 重验双栅栏。 */
   authorizeToolEffect: SandboxToolEffectAuthorizer["authorizeToolEffect"];
+  /** 只有生产装配显式提供真实 Artifact/Resource 依赖时才注册，缺失时不伪造发布能力。 */
+  artifactToolRouter?: ArtifactPiToolExecutorPort;
 }
 
 /**
@@ -134,9 +138,14 @@ export async function createSafePiSession(
   );
   await resourceLoader.reload();
 
-  const customTools = createSandboxTools(options.sandbox, {
-    authorizeToolEffect: options.authorizeToolEffect,
-  });
+  const customTools = [
+    ...createSandboxTools(options.sandbox, {
+      authorizeToolEffect: options.authorizeToolEffect,
+    }),
+    ...(options.artifactToolRouter === undefined
+      ? []
+      : createArtifactPiTools(options.artifactToolRouter)),
+  ];
   const sessionManager = SessionManager.inMemory(LOGICAL_WORKSPACE);
   const projectedContext = formatRolloutProjection(options.rolloutProjection);
   if (projectedContext !== undefined) {
@@ -158,7 +167,10 @@ export async function createSafePiSession(
     customTools,
     // 双重白名单：即便 Pi 将来新增默认工具，也不会把宿主机工具暴露给模型。
     noTools: "all",
-    tools: [...SANDBOX_TOOL_NAMES],
+    tools: [
+      ...SANDBOX_TOOL_NAMES,
+      ...(options.artifactToolRouter === undefined ? [] : PI_ARTIFACT_TOOL_NAMES),
+    ],
     excludeTools: ["bash", "read", "write", "edit", "grep", "find", "ls"],
   });
 

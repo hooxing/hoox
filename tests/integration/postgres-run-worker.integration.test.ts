@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   createPersonalTenant,
   createRun,
@@ -27,10 +27,27 @@ import {
   outboxPayloadDigest,
   runtimeMutationDigest,
 } from "@cube-runtime/run-contracts/mutation-protocol";
+import { FakeSandboxGateway } from "@cube-runtime/sandbox";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { RunWorker } from "../../runtime-ts/apps/agent-worker/src/run-worker.js";
+import {
+  FakeArtifactPublication,
+  FakeCancellationPort,
+  FakeClock,
+  FakeRecoveryMetrics,
+  FakeRevisionVerifier,
+  FakeSessionFactory,
+  ScriptedAgentSession,
+} from "../../runtime-ts/apps/agent-worker/src/testing/fakes.js";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createApiCreateCapability } from "../../runtime-ts/apps/api/src/capabilities.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
+import { createDevelopmentAuthResolver } from "../../runtime-ts/apps/api/src/development-auth.js";
+import { RunDispatchScheduler } from "../../runtime-ts/apps/scheduler/src/run-dispatch.js";
+import {
+  CubeSandboxCleanupResolver,
+  SandboxCleanupConsumer,
+} from "../../runtime-ts/apps/scheduler/src/sandbox-cleanup-consumer.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import {
   PgArchiveThreadCommand,
@@ -46,6 +63,7 @@ import {
   PgRunExecutionSetup,
 } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
 import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-sandbox-cleanup-consumer.js";
+import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import {
   createPostgresPool,
   type Pool,
@@ -220,8 +238,8 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
               (SELECT max(version) FROM "${schema}".runtime_schema_migrations)::int AS version`,
       [runtimeRole, schema],
     );
-    // Cleanup 0006 在 Dispatch 0005 后叠加，Dispatch ACL 仍须存在而 schema 已前进至最新版本。
-    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 6 });
+    // Thread 创建 0007 在 Cleanup 0006 后叠加，既有 Dispatch ACL 仍须存在。
+    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 7 });
     const runtimeSchema = await runtime.query<{
       readonly schema: string;
       readonly current_user: string;
@@ -605,6 +623,229 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         payload: { input: "HTTP 不同输入" },
       });
       expect(conflict.statusCode).toBe(409);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("开发黑盒 Gate：真实 HTTP、PG 原子创建、投递、Faux 执行与 Sandbox 收敛", async () => {
+    const label = `m4-e2e-${randomUUID()}`;
+    const now = isoTimestamp(new Date().toISOString());
+    const userA = createUser(userId(`m4-user-a-${label}`), now);
+    const tenantA = createPersonalTenant({
+      id: tenantId(`m4-tenant-a-${label}`),
+      ownerMembershipId: membershipId(`m4-member-a-${label}`),
+      owner: userA,
+      createdAt: now,
+    });
+    const userB = createUser(userId(`m4-user-b-${label}`), now);
+    const tenantB = createPersonalTenant({
+      id: tenantId(`m4-tenant-b-${label}`),
+      ownerMembershipId: membershipId(`m4-member-b-${label}`),
+      owner: userB,
+      createdAt: now,
+    });
+    await repositories.tenants.createPersonal({
+      user: userA,
+      tenant: tenantA.tenant,
+      membership: tenantA.ownerMembership,
+    });
+    await repositories.tenants.createPersonal({
+      user: userB,
+      tenant: tenantB.tenant,
+      membership: tenantB.ownerMembership,
+    });
+
+    let readinessAvailable = true;
+    const generatedThreadId = threadId(`m4-thread-${label}`);
+    const generatedWorkspaceId = workspaceId(`m4-workspace-${label}`);
+    const generatedRunId = runId(`m4-run-${label}`);
+    const app = createApiApp(
+      {
+        auth: createDevelopmentAuthResolver({
+          runtimeEnvironment: "test",
+          principals: [
+            { tenantId: tenantA.tenant.id, userId: userA.id },
+            { tenantId: tenantB.tenant.id, userId: userB.id },
+          ],
+        }),
+        repositories,
+        createCapability: createApiCreateCapability({
+          threadCreation: new PgThreadCreation(runtime),
+          enqueueOutbox: runDispatchCreation,
+        }),
+        archiveThread: new PgArchiveThreadCommand(runtime),
+        cursorCodec: createThreadCursorCodec({
+          activeKid: "m4-e2e-key",
+          keys: [{ kid: "m4-e2e-key", secret: randomBytes(32).toString("base64url") }],
+          clock: { now: () => isoTimestamp(new Date().toISOString()) },
+          ttlMilliseconds: 60_000,
+          maximumTtlMilliseconds: 60_000,
+        }),
+        readiness: {
+          probe: async () => {
+            if (!readinessAvailable) throw new Error("postgres-private-detail");
+            await runtime.query("SELECT 1");
+          },
+        },
+        clock: { now: () => isoTimestamp(new Date().toISOString()) },
+        ids: {
+          thread: () => generatedThreadId,
+          workspace: () => generatedWorkspaceId,
+          run: () => generatedRunId,
+        },
+      },
+      { logger: false },
+    );
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const baseUrl = new URL(address).origin;
+    const request = async (path: string, init: RequestInit) => fetch(`${baseUrl}${path}`, init);
+    const responseJson = async (
+      response: Response,
+    ): Promise<{
+      readonly data?: { readonly id?: string; readonly status?: string };
+      readonly error?: { readonly code?: string };
+    }> =>
+      (await response.json()) as {
+        readonly data?: { readonly id?: string; readonly status?: string };
+        readonly error?: { readonly kind?: string };
+      };
+    try {
+      const threadRequest = {
+        method: "POST",
+        headers: {
+          authorization: "Bearer dev-user-a",
+          "content-type": "application/json",
+          "idempotency-key": `m4-thread-key-${label}`,
+        },
+        body: JSON.stringify({ title: "M4 开发黑盒任务" }),
+      } as const;
+      const createdThread = await request("/v1/threads", threadRequest);
+      expect(createdThread.status).toBe(200);
+      const replayedThread = await request("/v1/threads", threadRequest);
+      expect(replayedThread.status).toBe(200);
+      expect((await responseJson(replayedThread)).data?.id).toBe(
+        (await responseJson(createdThread.clone())).data?.id,
+      );
+
+      const runRequest = {
+        method: "POST",
+        headers: {
+          authorization: "Bearer dev-user-a",
+          "content-type": "application/json",
+          "idempotency-key": `m4-run-key-${label}`,
+        },
+        body: JSON.stringify({ input: "仅完成这个没有交付物的任务" }),
+      } as const;
+      const createdRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
+      expect(createdRun.status).toBe(200);
+      const replayedRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
+      expect(replayedRun.status).toBe(200);
+      expect((await responseJson(replayedRun)).data?.id).toBe(generatedRunId);
+      const guessedByOtherTenant = await request(`/v1/threads/${generatedThreadId}`, {
+        headers: { authorization: "Bearer dev-user-b" },
+      });
+      expect(guessedByOtherTenant.status).toBe(404);
+      expect((await responseJson(guessedByOtherTenant)).error?.code).toBe("NOT_FOUND");
+
+      readinessAvailable = false;
+      const unavailable = await request("/ready", { method: "GET" });
+      expect(unavailable.status).toBe(503);
+      expect(JSON.stringify(await responseJson(unavailable))).not.toContain(
+        "postgres-private-detail",
+      );
+      readinessAvailable = true;
+
+      const gateway = new FakeSandboxGateway();
+      let sandboxSequence = 0;
+      const upstream: SandboxSessionRegistryPort = {
+        acquire: async () => {
+          const sandbox = await gateway.create({ templateId: "m4-faux-template", ttlSeconds: 120 });
+          sandboxSequence += 1;
+          return {
+            outcome: "ready",
+            session: {
+              registryId: `m4-registry-${label}-${sandboxSequence}`,
+              providerSandboxId: sandbox.id,
+              mode: "created",
+              sandbox,
+            },
+          };
+        },
+        settle: async ({ session, disposition }) => {
+          if (disposition === "pause") await session.sandbox.pause();
+          else await session.sandbox.kill({ ignoreNotFound: true });
+          return { outcome: "settled" };
+        },
+      };
+      const sessions = new FakeSessionFactory([
+        new ScriptedAgentSession([
+          { type: "agent.started" },
+          { type: "message.completed", stopReason: "stop" },
+          { type: "agent.settled" },
+        ]),
+      ]);
+      const registeredSandboxes = new PgBackedSandboxSessionRegistry(runtime, upstream, 120);
+      const worker = new RunWorker(
+        {
+          persistence: new PgExecutionPersistence(runtime),
+          revisions: new FakeRevisionVerifier(),
+          sandboxes: registeredSandboxes,
+          orphanSandboxes: registeredSandboxes,
+          sessions,
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        { workerId: "m4-development-worker", leaseDurationMs: 30_000, heartbeatMs: 10_000 },
+      );
+      const dispatch = new RunDispatchScheduler(new PgRunDispatchOutbox(runtime), {
+        execute: async (scope) => {
+          const result = await worker.execute(scope as ExecutionScope);
+          // Gate 注入的 Worker 同步执行到终态；不能把已经 succeeded 的 Run 当作异步已投递。
+          if (result.outcome === "succeeded") return { kind: "terminal" };
+          if (result.outcome === "waiting")
+            return { kind: "waiting", retryAfterMilliseconds: 5_000 };
+          if (result.outcome === "ignored") {
+            return result.reason === "terminal"
+              ? { kind: "terminal" }
+              : { kind: "busy", retryAfterMilliseconds: 5_000 };
+          }
+          return { kind: "retryable", retryAfterMilliseconds: 5_000 };
+        },
+      });
+      expect(
+        await dispatch.tick({
+          tenantId: tenantA.tenant.id,
+          dispatcherId: "m4-development-dispatcher",
+          limit: 1,
+          leaseMilliseconds: 30_000,
+        }),
+      ).toBe(1);
+      // 重启后的 dispatcher 不得第二次执行已经终态的 Run，也不得再次消费模型许可。
+      expect(
+        await dispatch.tick({
+          tenantId: tenantA.tenant.id,
+          dispatcherId: "m4-development-dispatcher-restart",
+          limit: 1,
+          leaseMilliseconds: 30_000,
+        }),
+      ).toBe(0);
+      expect(sessions.createCount).toBe(1);
+      const cleanup = new SandboxCleanupConsumer(
+        new PgSandboxCleanupConsumerStore(runtime),
+        new CubeSandboxCleanupResolver(gateway),
+        "m4-development-cleanup",
+      );
+      expect(await cleanup.drainTenant(tenantA.tenant.id)).toBe(0);
+      await cleanup.close();
+      expect([...gateway.sandboxes.values()].every((sandbox) => sandbox.killed)).toBe(true);
+      const succeeded = await request(`/v1/threads/${generatedThreadId}/runs/${generatedRunId}`, {
+        headers: { authorization: "Bearer dev-user-a" },
+      });
+      expect(succeeded.status).toBe(200);
+      expect((await responseJson(succeeded)).data?.status).toBe("succeeded");
     } finally {
       await app.close();
     }
@@ -1981,7 +2222,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     ).toBeUndefined();
   });
 
-  it("0005 可回退至 0004 并重新授予最小 Dispatch ACL", async () => {
+  it("0007 可回退至 0004 并重新授予最小 Dispatch ACL", async () => {
     const down = await migrateDown(migrator, {
       runtimeRole,
       migratorRole,
@@ -1992,7 +2233,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     });
     expect(down.at(-1)?.version).toBe(4);
     const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
-    expect(restored.at(-1)?.version).toBe(6);
+    expect(restored.at(-1)?.version).toBe(7);
     const acl = await admin.query<{
       readonly select_allowed: boolean;
       readonly update_allowed: boolean;

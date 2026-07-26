@@ -66,6 +66,10 @@ export type IdempotentCreateResult<T> =
 export interface ThreadCreationPort {
   createThread(input: {
     readonly scope: TenantScope;
+    /** 重放时必须从已验证的认证上下文重建领域实体，不能相信数据库裸文本。 */
+    readonly tenant: Tenant;
+    readonly user: User;
+    readonly membership: Membership;
     readonly thread: Thread;
     readonly workspace: Workspace;
     readonly idempotency: IdempotentCommand;

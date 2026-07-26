@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
-import { WorkspaceApplicationError, WorkspaceDependencyError } from "./application-errors.js";
+import {
+  WorkspaceCoreApplicationError as WorkspaceApplicationError,
+  WorkspaceDependencyError,
+} from "./application-errors.js";
 import type {
   SandboxSessionIdentity,
   SandboxWorkspacePort,
@@ -16,7 +19,10 @@ import {
   exactKeys,
   isWorkspaceJournalError,
   mapDependencyFailure,
+  parseContentIdentity,
+  parseExternalStream,
   parseSandboxSession,
+  parseStableObjectIdentity,
   plainDataRecord,
   recordKnownFailure,
   stopPoint,
@@ -27,8 +33,10 @@ import {
 } from "./application-support.js";
 import {
   parseWorkspaceManifest,
+  type WorkspaceContentIdentity,
   type WorkspaceFileEntry,
   type WorkspaceManifest,
+  type WorkspaceStableObjectIdentity,
 } from "./manifest.js";
 import { planWorkspaceMaterialization } from "./materialization-plan.js";
 import { workspaceRelativePath } from "./path.js";
@@ -120,11 +128,13 @@ export class WorkspaceMaterializer {
               throw new WorkspaceApplicationError("INVALID_INPUT", "物化计划与目标清单不一致");
             }
             const relativePath = workspaceRelativePath(candidate.relativePath);
-            const inspected = await this.callDependency(identity, phase, () =>
-              this.options.sandbox.inspectRegularFile(
-                sandbox,
-                relativePath,
-                signalControl(input.signal),
+            const inspected = parseInspectionResult(
+              await this.callDependency(identity, phase, () =>
+                this.options.sandbox.inspectRegularFile(
+                  sandbox,
+                  relativePath,
+                  signalControl(input.signal),
+                ),
               ),
             );
             if (inspected.status === "unsafe") {
@@ -156,11 +166,13 @@ export class WorkspaceMaterializer {
           for (const item of plannedPhase.paths) {
             stopPoint(input.signal);
             const relativePath = workspaceRelativePath(item.relativePath);
-            const actual = await this.callDependency(identity, phase, () =>
-              this.options.sandbox.inspectRegularFile(
-                sandbox,
-                relativePath,
-                signalControl(input.signal),
+            const actual = parseInspectionResult(
+              await this.callDependency(identity, phase, () =>
+                this.options.sandbox.inspectRegularFile(
+                  sandbox,
+                  relativePath,
+                  signalControl(input.signal),
+                ),
               ),
             );
             stopPoint(input.signal);
@@ -225,7 +237,10 @@ export class WorkspaceMaterializer {
               throw new WorkspaceApplicationError("ACCESS_DENIED", "Workspace Blob 未获得授权");
             }
             const verified = verifyingStream({
-              source: this.options.stableBlobs.read(receipt, signalControl(input.signal)),
+              source: parseExternalStream(
+                this.options.stableBlobs.read(receipt, signalControl(input.signal)),
+                "Workspace stable Blob 流",
+              ),
               policy: this.policy,
               ...(input.signal === undefined ? {} : { signal: input.signal }),
               expected: file.content,
@@ -298,20 +313,24 @@ export class WorkspaceMaterializer {
     const result = new Map<string, WorkspaceStableAuthorizationReceipt>();
     for (const entry of target.entries) {
       stopPoint(signal);
-      const authorization = await this.callDependency(identity, "authorize_stable", () =>
-        this.options.stableBlobs.authorize({
-          scope,
-          purpose: "workspace_materialization",
-          content: entry.content,
-          object: entry.object,
-        }),
+      const authorization = parseAuthorizationResult(
+        await this.callDependency(identity, "authorize_stable", () =>
+          this.options.stableBlobs.authorize({
+            scope,
+            purpose: "workspace_materialization",
+            content: entry.content,
+            object: entry.object,
+          }),
+        ),
       );
       if (authorization.status !== "authorized") {
         throw new WorkspaceApplicationError("ACCESS_DENIED", "Workspace Blob 不可用于当前 Tenant");
       }
       assertReceipt(entry, scope.tenantId, authorization.receipt);
-      const head = await this.callDependency(identity, "head_stable", () =>
-        this.options.stableBlobs.head(authorization.receipt),
+      const head = parseStableHeadResult(
+        await this.callDependency(identity, "head_stable", () =>
+          this.options.stableBlobs.head(authorization.receipt),
+        ),
       );
       if (
         head.status !== "exists" ||
@@ -487,4 +506,100 @@ function sameScope(left: WorkspaceTrustedScope, right: WorkspaceTrustedScope): b
 
 function sameSession(left: SandboxSessionIdentity, right: SandboxSessionIdentity): boolean {
   return left.sessionId === right.sessionId && left.generation === right.generation;
+}
+
+type ParsedInspectionResult =
+  | { readonly status: "missing" }
+  | { readonly status: "regular"; readonly body: AsyncIterable<Uint8Array> }
+  | { readonly status: "unsafe"; readonly kind: "directory" | "symlink" | "special" };
+
+function parseInspectionResult(value: unknown): ParsedInspectionResult {
+  const input = plainDataRecord(value, "Sandbox inspect 结果");
+  if (input.status === "missing") {
+    exactKeys(input, ["status"], "Sandbox inspect 结果");
+    return Object.freeze({ status: "missing" });
+  }
+  if (input.status === "regular") {
+    exactKeys(input, ["status", "body"], "Sandbox inspect 结果");
+    return Object.freeze({
+      status: "regular",
+      body: parseExternalStream(input.body, "Sandbox 普通文件流"),
+    });
+  }
+  if (input.status === "unsafe") {
+    exactKeys(input, ["status", "kind"], "Sandbox inspect 结果");
+    if (!(["directory", "symlink", "special"] as const).includes(input.kind as never)) {
+      throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Sandbox inspect 类型无效");
+    }
+    return Object.freeze({
+      status: "unsafe",
+      kind: input.kind as "directory" | "symlink" | "special",
+    });
+  }
+  throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Sandbox inspect 状态无效");
+}
+
+type ParsedAuthorizationResult =
+  | { readonly status: "authorized"; readonly receipt: WorkspaceStableAuthorizationReceipt }
+  | { readonly status: "denied" | "not_found" };
+
+function parseAuthorizationResult(value: unknown): ParsedAuthorizationResult {
+  const input = plainDataRecord(value, "Workspace Blob 授权结果");
+  if (input.status === "denied" || input.status === "not_found") {
+    exactKeys(input, ["status"], "Workspace Blob 授权结果");
+    return Object.freeze({ status: input.status });
+  }
+  if (input.status !== "authorized") {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace Blob 授权状态无效");
+  }
+  exactKeys(input, ["status", "receipt"], "Workspace Blob 授权结果");
+  const receipt = plainDataRecord(input.receipt, "Workspace Blob 授权回执");
+  exactKeys(
+    receipt,
+    ["authorizationId", "tenantId", "purpose", "content", "object"],
+    "Workspace Blob 授权回执",
+  );
+  if (
+    typeof receipt.authorizationId !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(receipt.authorizationId) ||
+    typeof receipt.tenantId !== "string" ||
+    receipt.purpose !== "workspace"
+  ) {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace Blob 授权回执字段无效");
+  }
+  return Object.freeze({
+    status: "authorized",
+    receipt: Object.freeze({
+      authorizationId: receipt.authorizationId,
+      tenantId: receipt.tenantId,
+      purpose: "workspace",
+      content: parseContentIdentity(receipt.content),
+      object: parseStableObjectIdentity(receipt.object),
+    }),
+  });
+}
+
+type ParsedStableHeadResult =
+  | { readonly status: "not_found" }
+  | {
+      readonly status: "exists";
+      readonly content: WorkspaceContentIdentity;
+      readonly object: WorkspaceStableObjectIdentity;
+    };
+
+function parseStableHeadResult(value: unknown): ParsedStableHeadResult {
+  const input = plainDataRecord(value, "Workspace Blob HEAD 结果");
+  if (input.status === "not_found") {
+    exactKeys(input, ["status"], "Workspace Blob HEAD 结果");
+    return Object.freeze({ status: "not_found" });
+  }
+  if (input.status !== "exists") {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace Blob HEAD 状态无效");
+  }
+  exactKeys(input, ["status", "content", "object"], "Workspace Blob HEAD 结果");
+  return Object.freeze({
+    status: "exists",
+    content: parseContentIdentity(input.content),
+    object: parseStableObjectIdentity(input.object),
+  });
 }

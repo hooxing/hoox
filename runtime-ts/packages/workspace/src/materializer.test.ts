@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { WorkspaceDependencyError } from "./application-errors.js";
+import { WorkspaceApplicationError, WorkspaceDependencyError } from "./application-errors.js";
 import type {
   SandboxSessionIdentity,
   SandboxWorkspaceEntry,
@@ -83,9 +83,12 @@ class Journal implements WorkspaceOperationJournalPort {
   readonly failures: { code: string; disposition: WorkspaceKnownFailureDisposition }[] = [];
   readonly unknownFacts: WorkspaceUnknownFact[] = [];
   beginOverride: unknown | undefined;
+  beginError: unknown | undefined;
   failKnownError: WorkspaceDependencyError | undefined;
+  completeAfterStoreUnknown = false;
 
   async begin(identity: WorkspaceOperationIdentity): Promise<unknown> {
+    if (this.beginError !== undefined) throw this.beginError;
     if (this.beginOverride !== undefined) return this.beginOverride;
     const row = this.rows.get(identity.operationKey);
     if (row === undefined) {
@@ -103,6 +106,9 @@ class Journal implements WorkspaceOperationJournalPort {
 
   async complete(identity: WorkspaceOperationIdentity, result: WorkspaceOperationResult) {
     this.rows.set(identity.operationKey, { identity, state: "completed", result });
+    if (this.completeAfterStoreUnknown) {
+      throw new WorkspaceDependencyError("unknown", "JOURNAL_COMMIT_UNKNOWN");
+    }
   }
 
   async failKnown(input: {
@@ -132,6 +138,8 @@ class StableBlobs implements WorkspaceStableBlobReadPort {
   deny = false;
   corruptRead = false;
   authorizeCalls = 0;
+  authorizationOverride: Awaited<ReturnType<WorkspaceStableBlobReadPort["authorize"]>> | undefined;
+  headOverride: Awaited<ReturnType<WorkspaceStableBlobReadPort["head"]>> | undefined;
 
   seed(value: ReturnType<typeof item>) {
     this.bodies.set(value.entry.object.physicalObjectKey, value.body);
@@ -139,6 +147,7 @@ class StableBlobs implements WorkspaceStableBlobReadPort {
 
   async authorize(input: Parameters<WorkspaceStableBlobReadPort["authorize"]>[0]) {
     this.authorizeCalls += 1;
+    if (this.authorizationOverride !== undefined) return this.authorizationOverride;
     if (this.deny || input.scope.tenantId !== input.object.tenantId) {
       return { status: "denied" as const };
     }
@@ -155,6 +164,7 @@ class StableBlobs implements WorkspaceStableBlobReadPort {
   }
 
   async head(receipt: WorkspaceStableAuthorizationReceipt) {
+    if (this.headOverride !== undefined) return this.headOverride;
     return this.bodies.has(receipt.object.physicalObjectKey)
       ? { status: "exists" as const, content: receipt.content, object: receipt.object }
       : { status: "not_found" as const };
@@ -179,6 +189,8 @@ class Sandbox implements SandboxWorkspacePort {
   knownEvent: string | undefined;
   afterWrite: (() => void) | undefined;
   onEvent: ((event: string) => void) | undefined;
+  inspectOverride: Awaited<ReturnType<SandboxWorkspacePort["inspectRegularFile"]>> | undefined;
+  inspectError: unknown | undefined;
 
   async currentSession() {
     return { ...this.session };
@@ -189,6 +201,8 @@ class Sandbox implements SandboxWorkspacePort {
   async inspectRegularFile(sandbox: SandboxSessionIdentity, path: string) {
     this.assertSession(sandbox);
     this.event(`inspect:${path}`);
+    if (this.inspectError !== undefined) throw this.inspectError;
+    if (this.inspectOverride !== undefined) return this.inspectOverride;
     const kind = this.unsafe.get(path);
     if (kind !== undefined) return { status: "unsafe" as const, kind };
     const body = this.files.get(path);
@@ -458,6 +472,109 @@ describe("Workspace materializer 可靠边界", () => {
     await expect(
       state.service.materialize(request("complete", manifest([value]))),
     ).rejects.toMatchObject({ code: "OPERATION_CONFLICT" });
+  });
+
+  it("inspect、授权回执与 HEAD 都立即快照精确字段，getter/额外字段不产生删除或写入", async () => {
+    const value = item("file", "body");
+    let getterCalls = 0;
+    const inspect = setup([value]);
+    inspect.sandbox.inspectOverride = Object.defineProperty({}, "status", {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return getterCalls === 1 ? "directory" : "regular";
+      },
+    }) as Awaited<ReturnType<SandboxWorkspacePort["inspectRegularFile"]>>;
+    await expect(
+      inspect.service.materialize(request("inspect-getter", manifest([value]), manifest([value]))),
+    ).rejects.toMatchObject({ code: "DEPENDENCY_FAILED" });
+    expect(getterCalls).toBe(0);
+    expect(inspect.sandbox.writeEffects).toBe(0);
+    expect(inspect.sandbox.events.some((event) => event.startsWith("remove"))).toBe(false);
+
+    const authorization = setup([value]);
+    const receipt = {
+      authorizationId: "auth-x",
+      tenantId: SCOPE.tenantId,
+      purpose: "workspace" as const,
+      content: value.entry.content,
+    };
+    Object.defineProperty(receipt, "object", {
+      enumerable: true,
+      get: () => {
+        getterCalls += 1;
+        return value.entry.object;
+      },
+    });
+    authorization.blobs.authorizationOverride = {
+      status: "authorized",
+      receipt: receipt as WorkspaceStableAuthorizationReceipt,
+    };
+    await expect(
+      authorization.service.materialize(request("receipt-getter", manifest([value]))),
+    ).rejects.toMatchObject({ code: "DEPENDENCY_FAILED" });
+    expect(authorization.sandbox.events).toEqual([]);
+
+    const head = setup([value]);
+    head.blobs.headOverride = {
+      status: "exists",
+      content: value.entry.content,
+      object: value.entry.object,
+      extra: "provider-path",
+    } as Awaited<ReturnType<WorkspaceStableBlobReadPort["head"]>>;
+    await expect(
+      head.service.materialize(request("head-extra", manifest([value]))),
+    ).rejects.toMatchObject({ code: "DEPENDENCY_FAILED" });
+    expect(head.sandbox.events).toEqual([]);
+  });
+
+  it("适配器伪造公开 WorkspaceApplicationError 仍按不可信依赖脱敏，无 cause/secret/path", async () => {
+    const value = item("file", "body");
+    const state = setup([value]);
+    state.sandbox.inspectError = new WorkspaceApplicationError(
+      "ACCESS_DENIED",
+      "secret provider /var/private/path",
+    );
+    await expect(
+      state.service.materialize(request("forged-error", manifest([value]), manifest([value]))),
+    ).rejects.toSatisfy((error: unknown) => {
+      return (
+        error instanceof WorkspaceApplicationError &&
+        error.code === "DEPENDENCY_FAILED" &&
+        !error.message.includes("secret") &&
+        !error.message.includes("path") &&
+        !("cause" in error)
+      );
+    });
+  });
+
+  it("complete 已提交但响应 UNKNOWN 时不降级 completed，重入读回且不重复 Sandbox 写", async () => {
+    const value = item("file", "body");
+    const state = setup([value]);
+    state.journal.completeAfterStoreUnknown = true;
+    await expect(
+      state.service.materialize(request("complete-unknown", manifest([value]))),
+    ).rejects.toMatchObject({ code: "RESULT_UNKNOWN" });
+    expect(state.journal.rows.get("complete-unknown")?.state).toBe("completed");
+    state.journal.completeAfterStoreUnknown = false;
+    await state.service.materialize(request("complete-unknown", manifest([value])));
+    expect(state.sandbox.writeEffects).toBe(1);
+  });
+
+  it("journal begin 异常统一脱敏，不泄漏 provider secret/path", async () => {
+    const value = item("file", "body");
+    const state = setup([value]);
+    state.journal.beginError = new WorkspaceDependencyError("known", "secret/provider/path");
+    await expect(
+      state.service.materialize(request("begin-error", manifest([value]))),
+    ).rejects.toSatisfy((error: unknown) => {
+      return (
+        error instanceof WorkspaceApplicationError &&
+        error.code === "DEPENDENCY_FAILED" &&
+        !error.message.includes("secret") &&
+        !error.message.includes("path")
+      );
+    });
   });
 
   it("previous 使用独立有界历史策略解析，超限在 journal 与 Blob 前拒绝", async () => {

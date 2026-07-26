@@ -21,6 +21,9 @@ export class WorkspaceApplicationError extends Error {
   }
 }
 
+/** 仅供本包内部模块使用，不从 package 主入口导出；外部适配器无法伪造核心错误身份。 */
+export class WorkspaceCoreApplicationError extends WorkspaceApplicationError {}
+
 export type WorkspaceDependencyResult = "known" | "unknown";
 
 /** 窄端口适配器用它标记远端结果是否确定；cause 只供适配器内部诊断，不向上复制。 */

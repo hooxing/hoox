@@ -21,6 +21,8 @@
     "test:cube:real": "pnpm --filter @cubesandbox/sdk build && tsx runtime-ts/packages/sandbox/src/real-smoke.ts",
     "test:pi-cube:real": "pnpm build && tsx runtime-ts/packages/pi-adapter/src/real-vertical-smoke.ts",
     "test:integration:pg": "node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",
+    "test:process-runtime": "pnpm --filter @cube-runtime/process-runtime build && vitest run runtime-ts/packages/process-runtime/src runtime-ts/apps/api/src/process-entry.test.ts runtime-ts/apps/agent-worker/src/process-entry.test.ts runtime-ts/apps/scheduler/src/process-entry.test.ts",
+    "test:process:container": "pnpm --filter @cube-runtime/process-runtime build && node scripts/run-process-container-gate.mjs",
     "typecheck": "pnpm --filter @cubesandbox/sdk build && tsc -p tsconfig.json && pnpm --recursive --if-present typecheck",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm config:check"
   },

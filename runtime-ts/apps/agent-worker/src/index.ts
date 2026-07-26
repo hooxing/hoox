@@ -3,4 +3,5 @@ export const serviceName = "agent-worker" as const;
 
 export * from "./pi-session-factory.js";
 export type * from "./ports.js";
+export * from "./process-entry.js";
 export * from "./run-worker.js";

@@ -1,0 +1,113 @@
+import {
+  booleanEnvironmentField,
+  integerEnvironmentField,
+  type ProcessSignalSource,
+  parseStrictEnvironment,
+  type RunningServiceProcess,
+  type RuntimeEnvironment,
+  readRequiredEnvironmentValue,
+  type ServiceAssemblyFactory,
+  selectDeclaredEnvironment,
+  startServiceProcess,
+  stringEnvironmentField,
+  urlEnvironmentField,
+} from "@cube-runtime/process-runtime";
+
+const optionalEnvironments = [] as const;
+const apiEnvironmentSchema = Object.freeze({
+  DATABASE_URL: urlEnvironmentField({
+    secret: true,
+    protocols: ["postgres:", "postgresql:"],
+    allowCredentials: true,
+    maxLength: 8_192,
+  }),
+  DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
+  THREAD_CURSOR_ACTIVE_KID: stringEnvironmentField({ maxLength: 128 }),
+  THREAD_CURSOR_SIGNING_KEYS: stringEnvironmentField({ secret: true, maxLength: 16_384 }),
+  DEV_AUTH_ENABLED: booleanEnvironmentField(),
+  DEV_AUTH_USER_A_ID: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 128 }),
+  DEV_AUTH_USER_A_TENANT_ID: stringEnvironmentField({
+    requiredIn: optionalEnvironments,
+    maxLength: 128,
+  }),
+  DEV_AUTH_USER_B_ID: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 128 }),
+  DEV_AUTH_USER_B_TENANT_ID: stringEnvironmentField({
+    requiredIn: optionalEnvironments,
+    maxLength: 128,
+  }),
+  PROCESS_SHUTDOWN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1, maximum: 600_000 }),
+});
+
+export const apiProcessEnvironmentKeys = Object.freeze(Object.keys(apiEnvironmentSchema));
+
+export interface ApiDevelopmentPrincipal {
+  readonly userId: string;
+  readonly tenantId: string;
+}
+
+export interface ApiProcessConfiguration {
+  readonly runtimeEnvironment: RuntimeEnvironment;
+  readonly databaseUrl: string;
+  readonly databaseSchema: string;
+  readonly cursorActiveKeyId: string;
+  readonly cursorSigningKeys: string;
+  readonly developmentPrincipals?: readonly [ApiDevelopmentPrincipal, ApiDevelopmentPrincipal];
+  readonly shutdownTimeoutMilliseconds: number;
+}
+
+export function selectApiProcessEnvironment(
+  source: NodeJS.ProcessEnv,
+): Readonly<Record<string, string | undefined>> {
+  return selectDeclaredEnvironment(source, apiProcessEnvironmentKeys);
+}
+
+export function parseApiProcessEnvironment(
+  source: Readonly<Record<string, string | undefined>>,
+): ApiProcessConfiguration {
+  const parsed = parseStrictEnvironment(source, apiEnvironmentSchema);
+  const developmentAuthEnabled = readRequiredEnvironmentValue(parsed, "DEV_AUTH_ENABLED");
+  // 开发身份只有明确开启时才进入配置对象；生产环境由共享解析器直接拒绝。
+  const developmentPrincipals = developmentAuthEnabled
+    ? Object.freeze([
+        Object.freeze({
+          userId: readRequiredEnvironmentValue(parsed, "DEV_AUTH_USER_A_ID"),
+          tenantId: readRequiredEnvironmentValue(parsed, "DEV_AUTH_USER_A_TENANT_ID"),
+        }),
+        Object.freeze({
+          userId: readRequiredEnvironmentValue(parsed, "DEV_AUTH_USER_B_ID"),
+          tenantId: readRequiredEnvironmentValue(parsed, "DEV_AUTH_USER_B_TENANT_ID"),
+        }),
+      ] as const)
+    : undefined;
+  return Object.freeze({
+    runtimeEnvironment: parsed.runtimeEnvironment,
+    databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
+    databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
+    cursorActiveKeyId: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_ACTIVE_KID"),
+    cursorSigningKeys: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_SIGNING_KEYS"),
+    ...(developmentPrincipals === undefined ? {} : { developmentPrincipals }),
+    shutdownTimeoutMilliseconds: readRequiredEnvironmentValue(
+      parsed,
+      "PROCESS_SHUTDOWN_TIMEOUT_MS",
+    ),
+  });
+}
+
+export async function startApiProcess(input: {
+  readonly environment: Readonly<Record<string, string | undefined>>;
+  readonly assembler?: ServiceAssemblyFactory<ApiProcessConfiguration>;
+  readonly signalSource?: ProcessSignalSource;
+  readonly onShutdownFailure?: (error: Error) => void;
+}): Promise<RunningServiceProcess> {
+  const configuration = parseApiProcessEnvironment(input.environment);
+  return startServiceProcess({
+    serviceName: "api",
+    configuration,
+    shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
+    ...(input.assembler === undefined ? {} : { assembler: input.assembler }),
+    ...(input.signalSource === undefined ? {} : { signalSource: input.signalSource }),
+    ...(input.onShutdownFailure === undefined
+      ? {}
+      : { onShutdownFailure: input.onShutdownFailure }),
+  });
+}

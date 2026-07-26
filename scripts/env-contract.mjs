@@ -7,6 +7,9 @@ export const expectedEnvironmentKeys = Object.freeze([
   "DATABASE_MIGRATOR_ROLE",
   "DATABASE_SCHEMA",
   "RUNTIME_ENV",
+  "PROCESS_SHUTDOWN_TIMEOUT_MS",
+  "THREAD_CURSOR_ACTIVE_KID",
+  "THREAD_CURSOR_SIGNING_KEYS",
   "MINIO_ROOT_USER",
   "MINIO_ROOT_PASSWORD",
   "MINIO_HOST_PORT",
@@ -45,6 +48,7 @@ const placeholderOnlyKeys = new Set([
   "MODEL_BASE_URL",
   "MODEL_API_KEY",
   "MODEL_ID",
+  "THREAD_CURSOR_SIGNING_KEYS",
 ]);
 
 function looksLikePlaceholder(key, value) {

@@ -20,6 +20,7 @@ function validExample(): string {
         key.endsWith("SECRET_ACCESS_KEY") ||
         key.endsWith("ACCESS_KEY_ID") ||
         key.endsWith("API_KEY") ||
+        key.endsWith("SIGNING_KEYS") ||
         key.endsWith("TEMPLATE_ID") ||
         key === "MINIO_ROOT_USER" ||
         key === "MODEL_ID"

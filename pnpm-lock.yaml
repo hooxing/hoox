@@ -60,6 +60,9 @@ importers:
       '@cube-runtime/pi-adapter':
         specifier: workspace:*
         version: link:../../packages/pi-adapter
+      '@cube-runtime/process-runtime':
+        specifier: workspace:*
+        version: link:../../packages/process-runtime
       '@cube-runtime/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
@@ -78,6 +81,9 @@ importers:
       '@cube-runtime/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
+      '@cube-runtime/process-runtime':
+        specifier: workspace:*
+        version: link:../../packages/process-runtime
       '@cube-runtime/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
@@ -88,7 +94,11 @@ importers:
         specifier: 5.10.0
         version: 5.10.0
 
-  runtime-ts/apps/scheduler: {}
+  runtime-ts/apps/scheduler:
+    dependencies:
+      '@cube-runtime/process-runtime':
+        specifier: workspace:*
+        version: link:../../packages/process-runtime
 
   runtime-ts/apps/web: {}
 
@@ -131,6 +141,8 @@ importers:
       typebox:
         specifier: 1.1.38
         version: 1.1.38
+
+  runtime-ts/packages/process-runtime: {}
 
   runtime-ts/packages/prompt-builder: {}
 

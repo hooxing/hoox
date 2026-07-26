@@ -1,15 +1,20 @@
 import {
   artifactId,
+  isoTimestamp,
   resourceVersionId,
   runId,
+  sha256Digest,
   tenantId,
   threadId,
   userId,
   workspaceId,
+  workspaceRevisionId,
 } from "@cube-runtime/domain";
 import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
 import type { ExecutionScope } from "@cube-runtime/run-contracts";
+import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { ArtifactExecutionAuthorization } from "./authorization.js";
 import type {
   ArtifactBlobBinding,
   ArtifactDeliveryRepositoryPort,
@@ -38,6 +43,49 @@ const request: UserRequestScope = Object.freeze({
 });
 const artifactOne = artifactId("artifact_one");
 const versionOne = resourceVersionId("resource_version_one");
+const placeholderDigest = sha256Digest("0".repeat(64));
+
+function executionAuthorization(input: {
+  readonly toolName: "declare_deliverables" | "publish_artifact";
+  readonly args: unknown;
+  readonly executionScope?: ExecutionScope;
+  readonly permitId?: string;
+  readonly expiresAt?: string;
+  readonly overrides?: Partial<{
+    effect: "model_start" | "tool_execution";
+    runClaimToken: string;
+    runClaimEpoch: number;
+    workspaceRootRunId: typeof scope.rootRunId;
+    workspaceLeaseEpoch: number;
+    attemptVersion: number;
+    callId: string;
+    toolName: string;
+    argsDigest: ReturnType<typeof digestCanonical>;
+  }>;
+}): ArtifactExecutionAuthorization {
+  const executionScope = input.executionScope ?? scope;
+  return ArtifactExecutionAuthorization.fromConsumed({
+    permit: {
+      permitId: input.permitId ?? "permit-artifact-1",
+      scope: executionScope,
+      runClaimToken: "run-claim-token-1",
+      runClaimEpoch: 7,
+      workspaceRootRunId: executionScope.rootRunId,
+      workspaceLeaseEpoch: 11,
+      attemptVersion: 13,
+      effect: "tool_execution",
+      callId: "call-artifact-1",
+      toolName: input.toolName,
+      argsDigest: digestCanonical(input.args),
+      issuedAt: isoTimestamp("2026-07-26T08:00:00.000Z"),
+      expiresAt: isoTimestamp(input.expiresAt ?? "2026-07-26T08:01:00.000Z"),
+      ...input.overrides,
+    },
+    consumedAt: isoTimestamp("2026-07-26T08:00:01.000Z"),
+    consumedAtMonotonicMs: 100,
+    maxContinuationDelayMs: 1_000,
+  });
+}
 
 function stableBlob(overrides: Partial<StableBlobRef> = {}): StableBlobRef {
   return {
@@ -88,22 +136,60 @@ function binding(overrides: Partial<ArtifactBlobBinding> = {}): ArtifactBlobBind
 }
 
 function publishCommand(overrides: Partial<PublishArtifactCommand> = {}): PublishArtifactCommand {
-  return {
-    scope,
+  const { authorization: overrideAuthorization, ...businessOverrides } = overrides;
+  const business: Omit<PublishArtifactCommand, "authorization"> = {
     idempotencyKey: "publish:run_alpha:report:1",
     artifactId: artifactOne,
     resourceVersionId: versionOne,
     name: "最终报告.txt",
     purpose: "deliverable",
     deliverableKey: "report",
-    ...overrides,
+    ...businessOverrides,
+  };
+  const authorization =
+    overrideAuthorization ??
+    executionAuthorization({
+      toolName: "publish_artifact",
+      args: {
+        idempotencyKey: business.idempotencyKey,
+        artifactId: business.artifactId,
+        resourceVersionId: business.resourceVersionId,
+        replacesArtifactId: business.replacesArtifactId,
+        name: business.name,
+        purpose: business.purpose,
+        deliverableKey: business.deliverableKey,
+      },
+    });
+  return { ...business, authorization };
+}
+
+function declarationInput(input: {
+  readonly idempotencyKey: string;
+  readonly declarations: readonly {
+    readonly key: string;
+    readonly name: string;
+    readonly requirement: "required" | "optional";
+  }[];
+  readonly executionScope?: ExecutionScope;
+}): Parameters<ArtifactDeliveryService["declareDeliverables"]>[0] {
+  return {
+    idempotencyKey: input.idempotencyKey,
+    declarations: input.declarations,
+    authorization: executionAuthorization({
+      toolName: "declare_deliverables",
+      args: {
+        idempotencyKey: input.idempotencyKey,
+        declarations: input.declarations,
+      },
+      ...(input.executionScope === undefined ? {} : { executionScope: input.executionScope }),
+    }),
   };
 }
 
 class FakeRepository implements ArtifactDeliveryRepositoryPort {
   declarationResult: DeclareDeliverablesResult = {
     outcome: "applied",
-    commandDigest: "由调用时填写",
+    commandDigest: placeholderDigest,
   };
   declarationReadback: DeclareDeliverablesResult | { readonly outcome: "not_found" } = {
     outcome: "not_found",
@@ -131,6 +217,9 @@ class FakeRepository implements ArtifactDeliveryRepositoryPort {
   beginInputs: Parameters<ArtifactDeliveryRepositoryPort["beginPublication"]>[0][] = [];
   finishInputs: Parameters<ArtifactDeliveryRepositoryPort["finishPublication"]>[0][] = [];
   declareInputs: Parameters<ArtifactDeliveryRepositoryPort["declareDeliverables"]>[0][] = [];
+  declarationReadInputs: Parameters<
+    ArtifactDeliveryRepositoryPort["readDeliverableDeclarationCommand"]
+  >[0][] = [];
 
   async declareDeliverables(
     input: Parameters<ArtifactDeliveryRepositoryPort["declareDeliverables"]>[0],
@@ -145,9 +234,10 @@ class FakeRepository implements ArtifactDeliveryRepositoryPort {
     return this.declarationResult;
   }
 
-  async readDeliverableDeclarationCommand(): Promise<
-    DeclareDeliverablesResult | { readonly outcome: "not_found" }
-  > {
+  async readDeliverableDeclarationCommand(
+    input: Parameters<ArtifactDeliveryRepositoryPort["readDeliverableDeclarationCommand"]>[0],
+  ): Promise<DeclareDeliverablesResult | { readonly outcome: "not_found" }> {
+    this.declarationReadInputs.push(input);
     if (
       this.declarationReadback.outcome === "applied" ||
       this.declarationReadback.outcome === "already_applied"
@@ -156,8 +246,8 @@ class FakeRepository implements ArtifactDeliveryRepositoryPort {
       return {
         ...this.declarationReadback,
         commandDigest:
-          this.declarationReadback.commandDigest === "由调用时填写"
-            ? (last?.commandDigest ?? "missing")
+          this.declarationReadback.commandDigest === placeholderDigest
+            ? (last?.commandDigest ?? placeholderDigest)
             : this.declarationReadback.commandDigest,
       };
     }
@@ -250,7 +340,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
       status: "published",
     });
     expect(repository.beginInputs[0]).toMatchObject({
-      scope,
+      authorization: expect.objectContaining({ scope }),
       artifactId: artifactOne,
       resourceVersionId: versionOne,
       purpose: "deliverable",
@@ -270,23 +360,266 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
     expect(repository.finishInputs).toHaveLength(1);
   });
 
+  it("普通同形请求对象不能伪造 Artifact 写授权，Repository 收到可重验的窄授权", async () => {
+    const command = publishCommand();
+    const forged = { ...command.authorization } as ArtifactExecutionAuthorization;
+    await expect(service.publishArtifact({ ...command, authorization: forged })).rejects.toSatisfy(
+      (error) => expectCode(error, "ARTIFACT_NOT_AUTHORIZED"),
+    );
+    expect(repository.beginInputs).toHaveLength(0);
+
+    await service.publishArtifact(command);
+    expect(repository.beginInputs[0]?.authorization).toBe(command.authorization);
+    expect(repository.finishInputs[0]?.authorization).toBe(command.authorization);
+    expect(repository.beginInputs[0]?.authorization).toMatchObject({
+      permitId: "permit-artifact-1",
+      scope,
+      runClaimToken: "run-claim-token-1",
+      runClaimEpoch: 7,
+      workspaceRootRunId: scope.rootRunId,
+      workspaceLeaseEpoch: 11,
+      attemptVersion: 13,
+      effect: "tool_execution",
+      callId: "call-artifact-1",
+      toolName: "publish_artifact",
+    });
+  });
+
+  it("授权逐字段拒绝错误 effect、双栅栏、Attempt、toolName 与 argsDigest", async () => {
+    const business = publishCommand();
+    const rawArgs = {
+      idempotencyKey: business.idempotencyKey,
+      artifactId: business.artifactId,
+      resourceVersionId: business.resourceVersionId,
+      replacesArtifactId: business.replacesArtifactId,
+      name: business.name,
+      purpose: business.purpose,
+      deliverableKey: business.deliverableKey,
+    };
+    const invalidAtMint = [
+      { effect: "model_start" as const },
+      { runClaimToken: "" },
+      { runClaimEpoch: -1 },
+      { workspaceRootRunId: runId("run_wrong_root") },
+      { workspaceLeaseEpoch: -1 },
+      { attemptVersion: -1 },
+      { callId: "" },
+    ];
+    for (const overrides of invalidAtMint) {
+      expect(() =>
+        executionAuthorization({
+          toolName: "publish_artifact",
+          args: rawArgs,
+          overrides,
+        }),
+      ).toThrowError(expect.objectContaining({ code: "ARTIFACT_NOT_AUTHORIZED" }));
+    }
+
+    for (const authorization of [
+      executionAuthorization({
+        toolName: "publish_artifact",
+        args: rawArgs,
+        overrides: { toolName: "declare_deliverables" },
+      }),
+      executionAuthorization({
+        toolName: "publish_artifact",
+        args: rawArgs,
+        overrides: { argsDigest: digestCanonical({ changed: true }) },
+      }),
+    ]) {
+      await expect(service.publishArtifact({ ...business, authorization })).rejects.toSatisfy(
+        (error) => expectCode(error, "ARTIFACT_NOT_AUTHORIZED"),
+      );
+    }
+    expect(repository.beginInputs).toHaveLength(0);
+  });
+
+  it("canonical command digest 绑定 kind、完整稳定 scope、幂等键与每个规范化业务字段", async () => {
+    repository.beginResult = { outcome: "conflict" };
+    const capturePublishDigest = async (
+      overrides: Partial<PublishArtifactCommand> = {},
+      executionScope: ExecutionScope = scope,
+    ) => {
+      const raw = publishCommand({ ...overrides });
+      const authorization = executionAuthorization({
+        toolName: "publish_artifact",
+        args: {
+          idempotencyKey: raw.idempotencyKey,
+          artifactId: raw.artifactId,
+          resourceVersionId: raw.resourceVersionId,
+          replacesArtifactId: raw.replacesArtifactId,
+          name: raw.name,
+          purpose: raw.purpose,
+          deliverableKey: raw.deliverableKey,
+        },
+        executionScope,
+      });
+      await service.publishArtifact({ ...raw, authorization }).catch(() => undefined);
+      const digest = repository.beginInputs.at(-1)?.commandDigest;
+      expect(digest).toBeDefined();
+      return digest;
+    };
+    const baseDigest = await capturePublishDigest();
+    const scopeCases: readonly ExecutionScope[] = [
+      { ...scope, tenantId: tenantId("tenant_beta") },
+      { ...scope, threadId: threadId("thread_beta") },
+      { ...scope, runId: runId("run_beta") },
+      { ...scope, rootRunId: runId("root_run_beta") },
+      { ...scope, workspaceId: workspaceId("workspace_beta") },
+      { ...scope, baseRevisionId: workspaceRevisionId("revision_beta") },
+    ];
+    for (const changedScope of scopeCases) {
+      expect(await capturePublishDigest({}, changedScope)).not.toBe(baseDigest);
+    }
+
+    const businessCases: readonly Partial<PublishArtifactCommand>[] = [
+      { idempotencyKey: "publish:run_alpha:report:other" },
+      { artifactId: artifactId("artifact_other") },
+      { resourceVersionId: resourceVersionId("resource_version_other") },
+      { replacesArtifactId: artifactId("artifact_failed_parent") },
+      { name: "其他报告.txt" },
+      { deliverableKey: "other-report" },
+    ];
+    for (const changedBusiness of businessCases) {
+      expect(await capturePublishDigest(changedBusiness)).not.toBe(baseDigest);
+    }
+    const deliverable = publishCommand();
+    const {
+      authorization: _authorization,
+      deliverableKey: _deliverableKey,
+      ...processBusiness
+    } = deliverable;
+    const processCommand = { ...processBusiness, purpose: "diagnostic" as const };
+    const processAuthorization = executionAuthorization({
+      toolName: "publish_artifact",
+      args: processCommand,
+    });
+    await service
+      .publishArtifact({ ...processCommand, authorization: processAuthorization })
+      .catch(() => undefined);
+    expect(repository.beginInputs.at(-1)?.commandDigest).not.toBe(baseDigest);
+
+    const normalizedDigest = await capturePublishDigest({ name: "  最终报告.txt  " });
+    expect(normalizedDigest).toBe(baseDigest);
+
+    repository.declarationResult = { outcome: "conflict" };
+    const captureDeclarationDigest = async (
+      idempotencyKey: string,
+      declarations: readonly {
+        readonly key: string;
+        readonly name: string;
+        readonly requirement: "required" | "optional";
+      }[],
+      executionScope: ExecutionScope = scope,
+    ) => {
+      await service
+        .declareDeliverables(declarationInput({ idempotencyKey, declarations, executionScope }))
+        .catch(() => undefined);
+      const digest = repository.declareInputs.at(-1)?.commandDigest;
+      expect(digest).toBeDefined();
+      return digest;
+    };
+    const baseDeclarationDigest = await captureDeclarationDigest("declare:run_alpha:1", [
+      { key: "report", name: "最终报告.txt", requirement: "required" },
+    ]);
+    expect(baseDeclarationDigest).not.toBe(baseDigest);
+    for (const changedScope of scopeCases) {
+      expect(
+        await captureDeclarationDigest(
+          "declare:run_alpha:1",
+          [{ key: "report", name: "最终报告.txt", requirement: "required" }],
+          changedScope,
+        ),
+      ).not.toBe(baseDeclarationDigest);
+    }
+    const declarationCases = [
+      {
+        idempotencyKey: "declare:run_alpha:other",
+        declarations: [{ key: "report", name: "最终报告.txt", requirement: "required" as const }],
+      },
+      {
+        idempotencyKey: "declare:run_alpha:1",
+        declarations: [{ key: "other", name: "最终报告.txt", requirement: "required" as const }],
+      },
+      {
+        idempotencyKey: "declare:run_alpha:1",
+        declarations: [{ key: "report", name: "其他报告.txt", requirement: "required" as const }],
+      },
+      {
+        idempotencyKey: "declare:run_alpha:1",
+        declarations: [{ key: "report", name: "最终报告.txt", requirement: "optional" as const }],
+      },
+      {
+        idempotencyKey: "declare:run_alpha:1",
+        declarations: [
+          { key: "report", name: "最终报告.txt", requirement: "required" as const },
+          { key: "appendix", name: "附录.txt", requirement: "optional" as const },
+        ],
+      },
+    ];
+    for (const changed of declarationCases) {
+      expect(await captureDeclarationDigest(changed.idempotencyKey, changed.declarations)).not.toBe(
+        baseDeclarationDigest,
+      );
+    }
+    expect(
+      await captureDeclarationDigest("declare:run_alpha:1", [
+        { key: "  report  ", name: "  最终报告.txt  ", requirement: "required" },
+      ]),
+    ).toBe(baseDeclarationDigest);
+  });
+
+  it("permitId 与 expiresAt 不进入幂等摘要，授权仍作为独立事实下传", async () => {
+    repository.beginResult = { outcome: "conflict" };
+    const base = publishCommand();
+    const args = {
+      idempotencyKey: base.idempotencyKey,
+      artifactId: base.artifactId,
+      resourceVersionId: base.resourceVersionId,
+      replacesArtifactId: base.replacesArtifactId,
+      name: base.name,
+      purpose: base.purpose,
+      deliverableKey: base.deliverableKey,
+    };
+    for (const authorization of [
+      executionAuthorization({ toolName: "publish_artifact", args, permitId: "permit-a" }),
+      executionAuthorization({
+        toolName: "publish_artifact",
+        args,
+        permitId: "permit-b",
+        expiresAt: "2026-07-26T08:02:00.000Z",
+      }),
+    ]) {
+      await service.publishArtifact({ ...base, authorization }).catch(() => undefined);
+    }
+    expect(repository.beginInputs.at(-2)?.commandDigest).toBe(
+      repository.beginInputs.at(-1)?.commandDigest,
+    );
+    expect(repository.beginInputs.at(-2)?.authorization.permitId).not.toBe(
+      repository.beginInputs.at(-1)?.authorization.permitId,
+    );
+  });
+
   it("发布响应丢失时只按相同命令摘要 readback，不重复制造 Artifact", async () => {
     repository.finishResult = { outcome: "response_unknown" };
     repository.readResult = {
       outcome: "found",
-      commandDigest: "稍后替换",
+      commandDigest: placeholderDigest,
       publication: publication({ status: "published" }),
       binding: binding(),
     };
     repository.readPublicationCommand = async (
       input: Parameters<ArtifactDeliveryRepositoryPort["readPublicationCommand"]>[0],
-    ) => ({
-      ...(repository.readResult as Extract<ReadArtifactPublicationResult, { outcome: "found" }>),
-      commandDigest:
-        repository.finishInputs.find(
-          (candidate) => candidate.idempotencyKey === input.idempotencyKey,
-        )?.commandDigest ?? "missing",
-    });
+    ) => {
+      expect(input.authorization).toBe(repository.finishInputs[0]?.authorization);
+      return {
+        ...(repository.readResult as Extract<ReadArtifactPublicationResult, { outcome: "found" }>),
+        commandDigest:
+          repository.finishInputs.find(
+            (candidate) => candidate.idempotencyKey === input.idempotencyKey,
+          )?.commandDigest ?? placeholderDigest,
+      };
+    };
 
     await expect(service.publishArtifact(publishCommand())).resolves.toMatchObject({
       status: "published",
@@ -302,7 +635,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
       commandDigest:
         repository.finishInputs.find(
           (candidate) => candidate.idempotencyKey === input.idempotencyKey,
-        )?.commandDigest ?? "missing",
+        )?.commandDigest ?? placeholderDigest,
       publication: publication({ status: "published" }),
       binding: binding({
         blob: stableBlob({ incarnationId: "22222222-2222-4222-8222-222222222222" }),
@@ -446,14 +779,15 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
   });
 
   it("声明 required/optional 后，只有 required 的缺失、publishing 或 failed 阻止完成", async () => {
-    await service.declareDeliverables({
-      scope,
-      idempotencyKey: "declare:run_alpha:1",
-      declarations: [
-        { key: "report", name: "报告", requirement: "required" },
-        { key: "appendix", name: "附录", requirement: "optional" },
-      ],
-    });
+    await service.declareDeliverables(
+      declarationInput({
+        idempotencyKey: "declare:run_alpha:1",
+        declarations: [
+          { key: "report", name: "报告", requirement: "required" },
+          { key: "appendix", name: "附录", requirement: "optional" },
+        ],
+      }),
+    );
     expect(repository.declareInputs[0]?.declarations).toEqual([
       { key: "report", name: "报告", requirement: "required" },
       { key: "appendix", name: "附录", requirement: "optional" },
@@ -474,28 +808,53 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
 
   it("声明响应丢失按摘要 readback；重复键和非法用途在访问 Repository 前拒绝", async () => {
     repository.declarationResult = { outcome: "response_unknown" };
-    repository.declarationReadback = { outcome: "already_applied", commandDigest: "由调用时填写" };
+    repository.declarationReadback = {
+      outcome: "already_applied",
+      commandDigest: placeholderDigest,
+    };
     await expect(
-      service.declareDeliverables({
-        scope,
-        idempotencyKey: "declare:run_alpha:2",
-        declarations: [{ key: "report", name: "报告", requirement: "required" }],
-      }),
+      service.declareDeliverables(
+        declarationInput({
+          idempotencyKey: "declare:run_alpha:2",
+          declarations: [{ key: "report", name: "报告", requirement: "required" }],
+        }),
+      ),
     ).resolves.toBeUndefined();
+    expect(repository.declarationReadInputs[0]?.authorization).toBe(
+      repository.declareInputs[0]?.authorization,
+    );
 
     await expect(
-      service.declareDeliverables({
-        scope,
-        idempotencyKey: "declare:run_alpha:3",
-        declarations: [
-          { key: "report", name: "甲", requirement: "required" },
-          { key: "report", name: "乙", requirement: "optional" },
-        ],
-      }),
+      service.declareDeliverables(
+        declarationInput({
+          idempotencyKey: "declare:run_alpha:3",
+          declarations: [
+            { key: "report", name: "甲", requirement: "required" },
+            { key: "report", name: "乙", requirement: "optional" },
+          ],
+        }),
+      ),
     ).rejects.toSatisfy((error) => expectCode(error, "ARTIFACT_INVALID_ARGUMENT"));
     await expect(
       service.publishArtifact(publishCommand({ purpose: "diagnostic" })),
     ).rejects.toSatisfy((error) => expectCode(error, "ARTIFACT_INVALID_ARGUMENT"));
+  });
+
+  it("Artifact 名称拒绝 Cc/Cf，包括双向覆盖、隔离符和零宽格式字符", async () => {
+    for (const character of [
+      "\u0000",
+      "\u202E",
+      "\u2066",
+      "\u2067",
+      "\u2068",
+      "\u2069",
+      "\u200B",
+    ]) {
+      await expect(
+        service.publishArtifact(publishCommand({ name: `报告${character}.txt` })),
+      ).rejects.toSatisfy((error) => expectCode(error, "ARTIFACT_INVALID_ARGUMENT"));
+    }
+    expect(repository.beginInputs).toHaveLength(0);
   });
 
   it("未知 Repository 异常统一脱敏，完成门固定为 ARTIFACT_NOT_READY", async () => {
@@ -582,6 +941,32 @@ describe("ArtifactDeliveryService 用户投影与授权下载", () => {
       delivery: "artifact-download",
       downloadName: result.fileName,
     });
+  });
+
+  it("下载拒绝持久快照中的 Cc/Cf，并防御 Windows 保留设备名", async () => {
+    for (const character of ["\u0000", "\u202E", "\u2066", "\u2069", "\u200B"]) {
+      repository.download = {
+        ...repository.download,
+        publication: publication({ name: `报告${character}.txt`, status: "published" }),
+      };
+      await expect(service.createDownload({ request, artifactId: artifactOne })).rejects.toSatisfy(
+        (error) => expectCode(error, "ARTIFACT_DEPENDENCY_UNAVAILABLE"),
+      );
+    }
+    expect(blobs.presignDownload).not.toHaveBeenCalled();
+
+    repository.download = {
+      ...repository.download,
+      publication: publication({ name: "CON.txt", status: "published" }),
+    };
+    await expect(
+      service.createDownload({ request, artifactId: artifactOne }),
+    ).resolves.toMatchObject({
+      fileName: "_CON.txt",
+    });
+    expect(blobs.presignDownload).toHaveBeenLastCalledWith(
+      expect.objectContaining({ downloadName: "_CON.txt" }),
+    );
   });
 
   it("猜 ID、跨 Tenant、用户错配都返回同一不泄漏存在性的错误", async () => {

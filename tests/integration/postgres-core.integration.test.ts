@@ -689,6 +689,52 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("partial down 4→3 只移除 Run Worker 事实与权限，并可再次迁移到 4", async () => {
+    const target = await createIsolatedMigrationTarget("run_worker_partial_down");
+    try {
+      expect(
+        (await migrateUp(target.pool, target.context)).map((record) => record.version),
+      ).toEqual([1, 2, 3, 4]);
+      expect(
+        (
+          await migrateDown(target.pool, {
+            ...target.context,
+            allowDestructive: true,
+            environment: "test",
+            targetVersion: 3,
+          })
+        ).map((record) => record.version),
+      ).toEqual([1, 2, 3]);
+      const downState = await target.pool.query<{
+        execution_inputs: string | null;
+        membership_lock_marker: string | null;
+      }>(
+        `SELECT to_regclass('run_execution_inputs')::text AS execution_inputs,
+                (SELECT column_name FROM information_schema.columns
+                  WHERE table_schema=current_schema() AND table_name='memberships'
+                    AND column_name='lock_marker') AS membership_lock_marker`,
+      );
+      expect(downState.rows[0]).toEqual({
+        execution_inputs: null,
+        membership_lock_marker: "lock_marker",
+      });
+      expect(
+        (await migrateUp(target.pool, target.context)).map((record) => record.version),
+      ).toEqual([1, 2, 3, 4]);
+      const restored = await target.pool.query<{
+        table_present: boolean;
+        runtime_can_select: boolean;
+      }>(
+        `SELECT to_regclass('run_execution_inputs') IS NOT NULL AS table_present,
+                has_table_privilege($1,'run_execution_inputs','SELECT') AS runtime_can_select`,
+        [runtimeRole],
+      );
+      expect(restored.rows[0]).toEqual({ table_present: true, runtime_can_select: true });
+    } finally {
+      await target.close();
+    }
+  });
+
   it("Runtime 角色不安全时在任何迁移 DDL 之前失败", async () => {
     const unsafeParentRole = `it_unsafe_parent_${process.pid}`;
     const unsafeChildRole = `it_unsafe_child_${process.pid}`;

@@ -29,7 +29,7 @@ ADR-0020 已固定 Resource 搜索、局部预览、显式导入计划和 Agent-
 
 ### 方案 B：版本复合外键绑定 stable blob reference，并消费 Workspace 持久授权
 
-ResourceVersion 保存完整 Blob 身份并复合外键到 `blob_references`。Workspace 事实源以后在自己的可信事务边界写入短期、一次性授权；Resource 提交只消费授权并重验 Membership、Agent、Thread、Run、Revision 和 Writer Lease。当前不公开授权写入 API。
+ResourceVersion 保存完整 Blob 身份并复合外键到 `blob_references`。Workspace 事实源以后在自己的可信事务边界写入短期、一次性授权；Resource 提交只消费授权并重验 Membership、能力恢复出的 Agent 身份、Thread、Run、Revision 和 Writer Lease。当前不公开授权写入 API。
 
 ### 方案 C：Resource Repository 读取 Workspace 对象或 S3 Manifest 后自行判断路径
 
@@ -39,15 +39,16 @@ ResourceVersion 保存完整 Blob 身份并复合外键到 `blob_references`。W
 
 采用方案 B：
 
-1. `resources` 以 `(tenant_id, id)` 为主键，保存 `pending_explicit_commit | searchable`、latest version number/id 和规范搜索名；搜索固定按 `updated_at DESC, id DESC`，after 条件使用严格小于位置。
+1. `resources` 以 `(tenant_id, id)` 为主键，保存 `pending_explicit_commit | searchable`、latest version number/id 和规范搜索名；第一阶段搜索语义是规范名称的字面前缀匹配，用 `text_pattern_ops` 索引而不安装 `pg_trgm`，结果固定按 `updated_at DESC, id DESC`，after 条件使用严格小于位置。
 2. `resource_versions` 以 Tenant + Resource + Version 为复合身份，版本号和父版本形成不可变链；Runtime 只有 `SELECT/INSERT`，没有任何 UPDATE/DELETE 权限。
 3. 每个版本同时保存并复合外键绑定 `blob_reference_id + purpose + lifecycleId + incarnationId + physicalObjectKey + sha256 + size`。提交事务只接受 `state=stable`、`purpose=resource`、active lifecycle/current active incarnation，且与授权摘要、大小、媒体类型相同的引用。
 4. 新 Resource 在事务内可以短暂处于 pending/head=0；同一事务插入 Version、推进 latest、切换 searchable、消费授权并写幂等记录。事务提交前没有其他连接可见，任一失败整体回滚。
-5. `resource_promotion_authorizations` 绑定 Tenant、User、AgentThread、Thread、Run、Workspace、Revision、Writer Lease epoch、规范路径、内容描述符和数据库 TTL。提交固定锁序为幂等 advisory lock → Resource advisory lock → Membership → authorization/Run/lease → stable reference/lifecycle/incarnation → Resource head。
-6. 提交端口只接受 `AuthorizedAgentResourceContext`。同一用户的其他 Agent/Run 不能消费授权；active Membership、active Thread、running Run、未过期 Writer Lease 与授权 TTL 都在当前事务用数据库时钟重验。
-7. 当前没有逐文件 Workspace PG Manifest，因此本包不提供授权签发方法。未来 Workspace Repository 必须在 Writer Lease 下验证 Revision 中的路径和完整 Blob 描述符后写入授权；普通 HTTP、Tool 参数和 Resource 包调用方不能创建授权。迁移表与消费端口是集成点，不代表 Workspace 实际物化或提升端到端已经完成。
-8. 幂等记录按 Tenant + User + key 唯一，Repository 对规范输入自行计算 SHA-256 请求摘要。同键同摘要读回精确 Resource/Version；异摘要返回 `key_conflict`。COMMIT 响应未知只按同一键读回，不存在时继续返回脱敏 `UNAVAILABLE`。
-9. 四张新业务表全部 ENABLE/FORCE RLS。Runtime 只取得明确的 SELECT/INSERT 与 `resources` head/visibility、authorization state/consumedAt 的列级 UPDATE；没有 DELETE、TRUNCATE、REFERENCES、TRIGGER 或任意 SQL 端口。生产装配只暴露 `ResourceCatalog` 和 `ResourcePromotionCommitPort`。
+5. `resource_promotion_authorizations` 绑定 Tenant、User、AgentThread、Thread、Run、Workspace、Revision、Writer Lease epoch、规范路径、内容描述符和数据库 TTL。提交固定锁序为幂等 advisory lock → Resource advisory lock → Membership → authorization/Thread/Run/Workspace/lease → stable reference/lifecycle/incarnation → Resource head；取得全部可能阻塞的锁后重新读取数据库时钟，最终消费 UPDATE 还在 SQL 条件中复核授权与 lease TTL。
+6. 持久层不接受调用方提交的 `AuthorizedAgentResourceContext`，而是要求普通 Tenant/User context 加进程内不可伪造 capability。生产装配必须注入与受控 Tool Router 配对的 verifier，由 verifier 恢复 AgentThread/Thread/Run 身份并与持久授权逐项匹配；不存在默认 verifier 或裸端口绕过。进程重启会使旧 capability 失效，恢复流程须在重验数据库 Thread/Run 状态后重新签发。
+7. 当前模型没有独立的持久化 AgentThread 状态事实，因此本实现不声称在数据库内重验“active AgentThread”。数据库实际重验 active Membership、active Thread、running Run、Revision、未过期 Writer Lease 与授权 TTL；AgentThread 身份可信度来自不可伪造 capability，并与授权中的 `agent_thread_id` 精确匹配。
+8. 当前没有逐文件 Workspace PG Manifest，因此本包不提供授权签发方法。未来 Workspace Repository 必须在 Writer Lease 下验证 Revision 中的路径和完整 Blob 描述符后写入授权；普通 HTTP、Tool 参数和 Resource 包调用方不能创建授权。迁移表与消费端口是集成点，不代表 Workspace 实际物化或提升端到端已经完成。
+9. 幂等记录按 Tenant + User + key 唯一，Repository 对规范输入自行计算 SHA-256 请求摘要。同键同摘要读回精确 Resource/Version；异摘要返回 `key_conflict`。COMMIT 响应未知只按同一键读回，不存在时继续返回脱敏 `UNAVAILABLE`。
+10. 四张新业务表全部 ENABLE/FORCE RLS。Runtime 只取得明确的 SELECT/INSERT 与 `resources` head/visibility、authorization state/consumedAt 的列级 UPDATE；没有 DELETE、TRUNCATE、REFERENCES、TRIGGER 或任意 SQL 端口。生产装配只暴露 `ResourceCatalog` 和 verifier-gated `ResourcePromotionCommitPort`。
 
 ## 理由
 
@@ -79,7 +80,7 @@ ResourceVersion 保存完整 Blob 身份并复合外键到 `blob_references`。W
 - 真实 PostgreSQL 双租户目录、resolve 和直接 Runtime SQL 越权矩阵；
 - 四张表 ENABLE/FORCE RLS 与完整表级/列级 ACL 白名单；
 - pending 隐藏、稳定分页、并发 latest CAS、不可变 Version；
-- active Membership、AgentThread/Run、Thread、数据库时钟 Writer Lease 与授权 TTL 重验；
+- active Membership、能力恢复出的 AgentThread/Run 身份匹配、Thread、锁后数据库时钟 Writer Lease 与授权 TTL 重验；
 - stable Blob 完整身份、失败事务回滚、同键重放、异摘要冲突和 COMMIT unknown 读回；
 - 0008 down/up、现有迁移总版本断言、partial down 与根工程质量门禁。
 
@@ -99,3 +100,4 @@ ResourceVersion 保存完整 Blob 身份并复合外键到 `blob_references`。W
 ## 实施记录
 
 - 2026-07-26：新增 0008 migration、`PgResourceCatalog`、`PgResourcePromotionRepository`、生产窄装配端口和真实 PostgreSQL 集成验证。
+- 2026-07-26：安全审阅后将提升端口改为 verifier-gated capability，明确 AgentThread 非数据库活跃事实；所有外部输入采用拒绝 Proxy/访问器的单次快照，锁后重读数据库时钟并在消费 SQL 中复核 TTL；搜索收敛为带 `text_pattern_ops` 索引的字面前缀语义，不提前引入 `pg_trgm`。

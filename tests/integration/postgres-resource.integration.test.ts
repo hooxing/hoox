@@ -1,12 +1,15 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { resourceId, resourceVersionId, tenantId, userId } from "@cube-runtime/domain";
 import {
-  normalizeSearchQuery,
   type AuthorizedAgentResourceContext,
+  createPromotionCapabilityRegistry,
+  normalizeSearchQuery,
+  type PromoteResourceCapability,
   type TrustedResourceContext,
 } from "@cube-runtime/resource";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
 import {
   PgResourceCatalog,
   PgResourcePromotionRepository,
@@ -59,12 +62,18 @@ interface TenantFixture {
   readonly runId: string;
   readonly workspaceId: string;
   readonly revisionId: string;
+  readonly promotionCapability: PromoteResourceCapability;
 }
 
 interface PromotionFixture {
   readonly authorizationId: string;
+  readonly operationId?: string;
   readonly blobReferenceId: string;
   readonly digest: string;
+  readonly lifecycleId?: string;
+  readonly incarnationId?: string;
+  readonly physicalObjectKey?: string;
+  readonly size?: number;
 }
 
 let admin!: Pool;
@@ -76,6 +85,24 @@ let tenantA!: TenantFixture;
 let tenantB!: TenantFixture;
 let schemaCreated = false;
 let migratorCreated = false;
+const promotionCapabilities = createPromotionCapabilityRegistry();
+
+function authorizedContext(
+  scope: TrustedResourceContext,
+  agentThreadId: string,
+  threadId: string,
+  runId: string,
+): AuthorizedAgentResourceContext {
+  return Object.freeze({
+    ...scope,
+    actor: Object.freeze({
+      kind: "agent" as const,
+      agentThreadId: agentThreadId as AuthorizedAgentResourceContext["actor"]["agentThreadId"],
+      threadId: threadId as AuthorizedAgentResourceContext["actor"]["threadId"],
+      runId: runId as AuthorizedAgentResourceContext["actor"]["runId"],
+    }),
+  });
+}
 
 async function seedTenant(scope: TrustedResourceContext, label: string): Promise<TenantFixture> {
   const threadId = `resource_thread_${label}_${unique}`;
@@ -140,7 +167,17 @@ async function seedTenant(scope: TrustedResourceContext, label: string): Promise
       [scope.tenantId, workspaceId, threadId, runId],
     );
   });
-  return { scope, agentThreadId, threadId, runId, workspaceId, revisionId };
+  return {
+    scope,
+    agentThreadId,
+    threadId,
+    runId,
+    workspaceId,
+    revisionId,
+    promotionCapability: promotionCapabilities.issuer.issue(
+      authorizedContext(scope, agentThreadId, threadId, runId),
+    ),
+  };
 }
 
 async function seedPromotion(
@@ -215,7 +252,16 @@ async function seedPromotion(
       ],
     );
   });
-  return { authorizationId, blobReferenceId, digest };
+  return {
+    authorizationId,
+    operationId,
+    blobReferenceId,
+    digest,
+    lifecycleId,
+    incarnationId,
+    physicalObjectKey,
+    size,
+  };
 }
 
 async function seedAuthorizationOnly(
@@ -260,18 +306,9 @@ function command(
     readonly name?: string;
   },
 ) {
-  const agentScope: AuthorizedAgentResourceContext = {
-    ...fixture.scope,
-    actor: {
-      kind: "agent",
-      agentThreadId:
-        fixture.agentThreadId as AuthorizedAgentResourceContext["actor"]["agentThreadId"],
-      threadId: fixture.threadId as AuthorizedAgentResourceContext["actor"]["threadId"],
-      runId: fixture.runId as AuthorizedAgentResourceContext["actor"]["runId"],
-    },
-  };
   return {
-    scope: agentScope,
+    context: fixture.scope,
+    capability: fixture.promotionCapability,
     authorizationId: promotion.authorizationId,
     idempotencyKey: input.key,
     resourceId: resourceId(input.resource),
@@ -309,7 +346,7 @@ function repositoryWithOneLostCommitResponse(): PgResourcePromotionRepository {
       };
     },
   }) as Pool;
-  return new PgResourcePromotionRepository(lossyPool);
+  return new PgResourcePromotionRepository(lossyPool, promotionCapabilities.verifier);
 }
 
 beforeAll(async () => {
@@ -336,7 +373,7 @@ beforeAll(async () => {
     1, 2, 3, 4, 5, 6, 7, 8,
   ]);
   catalog = new PgResourceCatalog(runtime);
-  promotions = new PgResourcePromotionRepository(runtime);
+  promotions = new PgResourcePromotionRepository(runtime, promotionCapabilities.verifier);
   tenantA = await seedTenant(scopeA, "a");
   tenantB = await seedTenant(scopeB, "b");
 });
@@ -368,6 +405,138 @@ afterAll(async () => {
 });
 
 describe("Resource Library PostgreSQL 与 RLS", () => {
+  it("不读取访问器或 Proxy，并拒绝多余字段与伪造 capability", async () => {
+    let contextReads = 0;
+    const alternatingContext = Object.create(null) as Record<string, unknown>;
+    Object.defineProperties(alternatingContext, {
+      tenantId: {
+        enumerable: true,
+        get() {
+          contextReads += 1;
+          return contextReads === 1 ? tenantA.scope.tenantId : tenantB.scope.tenantId;
+        },
+      },
+      userId: { enumerable: true, value: tenantA.scope.userId },
+    });
+    await expect(
+      catalog.search({
+        context: alternatingContext as unknown as TrustedResourceContext,
+        normalizedQuery: "",
+        limit: 10,
+      }),
+    ).rejects.toThrow("无访问器");
+    expect(contextReads).toBe(0);
+
+    let limitReads = 0;
+    const accessorCommand = {
+      context: tenantA.scope,
+      normalizedQuery: "",
+      get limit() {
+        limitReads += 1;
+        return limitReads === 1 ? 10 : 1_000;
+      },
+    };
+    await expect(catalog.search(accessorCommand)).rejects.toThrow("无访问器");
+    expect(limitReads).toBe(0);
+
+    const secret = "不应泄漏的 getter 内容";
+    const proxyContext = new Proxy(tenantA.scope, {
+      get() {
+        throw new Error(secret);
+      },
+    });
+    let proxyMessage = "";
+    try {
+      await catalog.search({ context: proxyContext, normalizedQuery: "", limit: 10 });
+    } catch (error) {
+      proxyMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(proxyMessage).toContain("无访问器");
+    expect(proxyMessage).not.toContain(secret);
+
+    await expect(
+      catalog.search({
+        context: { ...tenantA.scope, extra: "禁止" } as TrustedResourceContext,
+        normalizedQuery: "",
+        limit: 10,
+      }),
+    ).rejects.toThrow("无访问器");
+
+    const promotion = await seedPromotion(tenantA, "input-snapshot");
+    const input = command(tenantA, promotion, {
+      key: `idem-input-snapshot-${unique}`,
+      resource: `resource_input_snapshot_${unique}`,
+      version: `resource_version_input_snapshot_${unique}`,
+    });
+    await expect(
+      promotions.commitPromotedVersion({
+        ...input,
+        capability: { kind: "promote_resource_capability" },
+      }),
+    ).rejects.toThrow("无访问器");
+
+    let actorReads = 0;
+    const maliciousVerifier = {
+      verify() {
+        const restored = Object.create(null) as Record<string, unknown>;
+        Object.defineProperties(restored, {
+          tenantId: { enumerable: true, value: tenantA.scope.tenantId },
+          userId: { enumerable: true, value: tenantA.scope.userId },
+          actor: {
+            enumerable: true,
+            get() {
+              actorReads += 1;
+              throw new Error(secret);
+            },
+          },
+        });
+        return restored as unknown as AuthorizedAgentResourceContext;
+      },
+    };
+    const guardedRepository = new PgResourcePromotionRepository(runtime, maliciousVerifier);
+    let verifierMessage = "";
+    try {
+      await guardedRepository.commitPromotedVersion(input);
+    } catch (error) {
+      verifierMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(actorReads).toBe(0);
+    expect(verifierMessage).toContain("无访问器");
+    expect(verifierMessage).not.toContain(secret);
+
+    const throwingRepository = new PgResourcePromotionRepository(runtime, {
+      verify() {
+        throw new Error(secret);
+      },
+    });
+    let throwingVerifierMessage = "";
+    try {
+      await throwingRepository.commitPromotedVersion(input);
+    } catch (error) {
+      throwingVerifierMessage = error instanceof Error ? error.message : String(error);
+    }
+    expect(throwingVerifierMessage).toContain("能力验证失败");
+    expect(throwingVerifierMessage).not.toContain(secret);
+
+    let verifierReads = 0;
+    const accessorVerifier = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(accessorVerifier, "verify", {
+      enumerable: true,
+      get() {
+        verifierReads += 1;
+        throw new Error(secret);
+      },
+    });
+    expect(
+      () =>
+        new PgResourcePromotionRepository(
+          runtime,
+          accessorVerifier as unknown as typeof promotionCapabilities.verifier,
+        ),
+    ).toThrow("无访问器");
+    expect(verifierReads).toBe(0);
+  });
+
   it("原子提交显式提升、精确重放，并隐藏 pending 记录", async () => {
     const promotion = await seedPromotion(tenantA, "first");
     const input = command(tenantA, promotion, {
@@ -407,6 +576,24 @@ describe("Resource Library PostgreSQL 与 RLS", () => {
       limit: 20,
     });
     expect(page.items.map((item) => item.resourceId)).toContain(input.resourceId);
+    expect(
+      (
+        await catalog.search({
+          context: tenantA.scope,
+          normalizedQuery: normalizeSearchQuery("说明"),
+          limit: 20,
+        })
+      ).items,
+    ).toEqual([]);
+    expect(
+      (
+        await catalog.search({
+          context: tenantA.scope,
+          normalizedQuery: "%",
+          limit: 20,
+        })
+      ).items,
+    ).toEqual([]);
     const pending = await catalog.search({
       context: tenantA.scope,
       normalizedQuery: normalizeSearchQuery("scratch.tmp"),
@@ -525,6 +712,153 @@ describe("Resource Library PostgreSQL 与 RLS", () => {
     ]);
   });
 
+  it("等待最后业务锁跨过 TTL 后按新数据库时钟拒绝并保持授权未消费", async () => {
+    const initialPromotion = await seedPromotion(tenantA, "fresh-clock-initial");
+    const resource = `resource_fresh_clock_${unique}`;
+    const initial = command(tenantA, initialPromotion, {
+      key: `idem-fresh-clock-initial-${unique}`,
+      resource,
+      version: `resource_version_fresh_clock_1_${unique}`,
+      name: "锁后时钟.txt",
+    });
+    expect((await promotions.commitPromotedVersion(initial)).outcome).toBe("committed");
+
+    const nextPromotion = await seedPromotion(tenantA, "fresh-clock-next");
+    await withTenantTransaction(migrator, tenantA.scope, (client) =>
+      client.query(
+        `UPDATE resource_promotion_authorizations
+            SET expires_at=clock_timestamp() + interval '300 milliseconds'
+          WHERE tenant_id=$1 AND authorization_id=$2`,
+        [tenantA.scope.tenantId, nextPromotion.authorizationId],
+      ),
+    );
+    const next = command(tenantA, nextPromotion, {
+      key: `idem-fresh-clock-next-${unique}`,
+      resource,
+      version: `resource_version_fresh_clock_2_${unique}`,
+      expected: 1,
+      name: "锁后时钟.txt",
+    });
+
+    const blocker = await migrator.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query(
+        "SELECT set_config('app.tenant_id',$1,true), set_config('app.user_id',$2,true)",
+        [tenantA.scope.tenantId, tenantA.scope.userId],
+      );
+      await blocker.query("SELECT id FROM resources WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [
+        tenantA.scope.tenantId,
+        resource,
+      ]);
+      const pending = promotions.commitPromotedVersion(next);
+      await new Promise((resolve) => setTimeout(resolve, 550));
+      await blocker.query("COMMIT");
+      expect(await pending).toEqual({ outcome: "not_authorized" });
+    } finally {
+      try {
+        await blocker.query("ROLLBACK");
+      } finally {
+        blocker.release();
+      }
+    }
+
+    const facts = await withTenantTransaction(runtime, tenantA.scope, (client) =>
+      client.query<{ auth_state: string; version_count: string }>(
+        `SELECT
+           (SELECT state FROM resource_promotion_authorizations
+             WHERE tenant_id=$1 AND authorization_id=$2) AS auth_state,
+           (SELECT count(*)::text FROM resource_versions
+             WHERE tenant_id=$1 AND id=$3) AS version_count`,
+        [tenantA.scope.tenantId, nextPromotion.authorizationId, next.resourceVersionId],
+      ),
+    );
+    expect(facts.rows[0]).toEqual({ auth_state: "active", version_count: "0" });
+  });
+
+  it("Resource 提升与 Blob 标记/GC 并发遵循无环锁序并保留可达引用", async () => {
+    const initialPromotion = await seedPromotion(tenantA, "blob-lock-initial");
+    const resource = `resource_blob_lock_${unique}`;
+    expect(
+      (
+        await promotions.commitPromotedVersion(
+          command(tenantA, initialPromotion, {
+            key: `idem-blob-lock-initial-${unique}`,
+            resource,
+            version: `resource_version_blob_lock_1_${unique}`,
+            name: "Blob 锁序.txt",
+          }),
+        )
+      ).outcome,
+    ).toBe("committed");
+
+    const nextPromotion = await seedPromotion(tenantA, "blob-lock-next");
+    if (
+      nextPromotion.incarnationId === undefined ||
+      nextPromotion.physicalObjectKey === undefined ||
+      nextPromotion.size === undefined ||
+      nextPromotion.operationId === undefined
+    ) {
+      throw new Error("Blob 并发夹具不完整");
+    }
+    const next = command(tenantA, nextPromotion, {
+      key: `idem-blob-lock-next-${unique}`,
+      resource,
+      version: `resource_version_blob_lock_2_${unique}`,
+      expected: 1,
+      name: "Blob 锁序.txt",
+    });
+    const blob = Object.freeze({
+      kind: "stable" as const,
+      tenantId: tenantA.scope.tenantId,
+      purpose: "resource" as const,
+      sha256: nextPromotion.digest,
+      size: nextPromotion.size,
+      mediaType: "text/plain",
+      incarnationId: nextPromotion.incarnationId,
+      physicalObjectKey: nextPromotion.physicalObjectKey,
+    });
+    const lifecycle = new PgBlobLifecycleRepository(runtime);
+
+    const blocker = await migrator.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query(
+        "SELECT set_config('app.tenant_id',$1,true), set_config('app.user_id',$2,true)",
+        [tenantA.scope.tenantId, tenantA.scope.userId],
+      );
+      await blocker.query("SELECT id FROM resources WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [
+        tenantA.scope.tenantId,
+        resource,
+      ]);
+      const committing = promotions.commitPromotedVersion(next);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const marking = lifecycle.markReferenceStable({
+        scope: tenantA.scope,
+        operationId: nextPromotion.operationId,
+        referenceId: nextPromotion.blobReferenceId,
+        stable: blob,
+      });
+      const collecting = lifecycle.claimUnreachable({ scope: tenantA.scope, blob });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await blocker.query("COMMIT");
+      const [commitResult, markResult, gcResult] = await Promise.all([
+        committing,
+        marking,
+        collecting,
+      ]);
+      expect(commitResult.outcome).toBe("committed");
+      expect(markResult).toBe("marked");
+      expect(gcResult).toEqual({ status: "still_referenced" });
+    } finally {
+      try {
+        await blocker.query("ROLLBACK");
+      } finally {
+        blocker.release();
+      }
+    }
+  });
+
   it("重验 active Membership、Agent 执行身份与数据库时钟 Writer Lease", async () => {
     await withTenantTransaction(migrator, tenantB.scope, (client) =>
       client.query("UPDATE memberships SET status='revoked' WHERE tenant_id=$1 AND user_id=$2", [
@@ -557,13 +891,9 @@ describe("Resource Library PostgreSQL 与 RLS", () => {
     });
     const wrongAgent = {
       ...input,
-      scope: {
-        ...input.scope,
-        actor: {
-          ...input.scope.actor,
-          agentThreadId: `wrong_agent_${unique}` as typeof input.scope.actor.agentThreadId,
-        },
-      },
+      capability: promotionCapabilities.issuer.issue(
+        authorizedContext(tenantA.scope, `wrong_agent_${unique}`, tenantA.threadId, tenantA.runId),
+      ),
     };
     expect(await promotions.commitPromotedVersion(wrongAgent)).toEqual({
       outcome: "not_authorized",

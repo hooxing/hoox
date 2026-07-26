@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
+import { types as utilTypes } from "node:util";
 import {
   isoTimestamp,
+  type Resource,
+  type ResourceId,
+  type ResourceVersion,
+  type ResourceVersionId,
   rehydrateResource,
   rehydrateResourceVersion,
   resourceId,
@@ -8,16 +13,13 @@ import {
   sha256Digest,
   tenantId,
   userId,
-  type Resource,
-  type ResourceId,
-  type ResourceVersion,
-  type ResourceVersionId,
 } from "@cube-runtime/domain";
 import {
+  type AuthorizedAgentResourceContext,
   assertResourceName,
   normalizeSearchQuery,
   normalizeWorkspaceRelativePath,
-  type AuthorizedAgentResourceContext,
+  type PromotionCapabilityVerifier,
   type ResourceCatalog,
   type ResourceCatalogItem,
   type ResourceCatalogPage,
@@ -79,7 +81,6 @@ interface PromotionExecutionBoundary {
   readonly lease_root_run_id: string | null;
   readonly lease_epoch: string | null;
   readonly lease_expires_at: Date | null;
-  readonly database_now: Date;
 }
 
 interface StableReferenceRow extends QueryResultRow {
@@ -116,7 +117,8 @@ export type ResourcePromotionCommitResult =
 
 export interface ResourcePromotionCommitPort {
   commitPromotedVersion(input: {
-    readonly scope: AuthorizedAgentResourceContext;
+    readonly context: TrustedResourceContext;
+    readonly capability: unknown;
     readonly authorizationId: string;
     readonly idempotencyKey: string;
     readonly resourceId: ResourceId;
@@ -152,20 +154,18 @@ export class PgResourceCatalog implements ResourceCatalog {
       readonly resourceId: ResourceId;
     };
   }): Promise<ResourceCatalogPage> {
-    assertScope(input.context);
-    const query = normalizeSearchQuery(input.normalizedQuery);
-    if (query !== input.normalizedQuery) throw new TypeError("Resource 查询必须已经规范化");
-    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 1_000) {
+    const command = snapshotSearchCommand(input);
+    const query = normalizeSearchQuery(command.normalizedQuery);
+    if (query !== command.normalizedQuery) throw new TypeError("Resource 查询必须已经规范化");
+    if (!Number.isSafeInteger(command.limit) || command.limit < 1 || command.limit > 1_000) {
       throw new TypeError("Resource 查询页大小无效");
     }
-    if (input.after !== undefined) {
-      isoTimestamp(input.after.updatedAt);
-      resourceId(input.after.resourceId);
-    }
+    const after = command.after;
+    const escapedQuery = escapeLikePrefix(query);
     try {
       return await withTenantTransaction(
         this.pool,
-        input.context,
+        command.context,
         async (client) => {
           const result = await client.query<ResourceRow>(
             `SELECT ${resourceColumns}
@@ -182,7 +182,7 @@ export class PgResourceCatalog implements ResourceCatalog {
                      AND membership.user_id = $6
                      AND membership.status = 'active'
                 )
-                AND ($2::text = '' OR strpos(r.normalized_name, $2) > 0)
+                AND ($2::text = '' OR r.normalized_name LIKE ($2 || '%') ESCAPE E'\\\\')
                 AND (
                   $3::timestamptz IS NULL
                   OR r.updated_at < $3::timestamptz
@@ -191,12 +191,12 @@ export class PgResourceCatalog implements ResourceCatalog {
               ORDER BY r.updated_at DESC, r.id DESC
               LIMIT $5`,
             [
-              input.context.tenantId,
-              query,
-              input.after?.updatedAt ?? null,
-              input.after?.resourceId ?? null,
-              input.limit,
-              input.context.userId,
+              command.context.tenantId,
+              escapedQuery,
+              after?.updatedAt ?? null,
+              after?.resourceId ?? null,
+              command.limit,
+              command.context.userId,
             ],
           );
           const items = Object.freeze(result.rows.map(mapCatalogItem));
@@ -229,21 +229,19 @@ export class PgResourceCatalog implements ResourceCatalog {
     | { readonly status: "found"; readonly resource: Resource; readonly version: ResourceVersion }
     | { readonly status: "not_found" }
   > {
-    assertScope(input.context);
-    resourceId(input.resourceId);
-    resourceVersionId(input.versionId);
+    const command = snapshotResolveCommand(input);
     try {
       return await withTenantTransaction(
         this.pool,
-        input.context,
+        command.context,
         async (client) => {
           const row = await findResourceVersion(
             client,
-            input.context.tenantId,
-            input.resourceId,
-            input.versionId,
+            command.context.tenantId,
+            command.resourceId,
+            command.versionId,
             true,
-            input.context.userId,
+            command.context.userId,
           );
           if (row === undefined) return { status: "not_found" as const };
           const mapped = mapResourceAndVersion(row);
@@ -262,12 +260,19 @@ export class PgResourceCatalog implements ResourceCatalog {
  * 在逐文件 Workspace Manifest 尚未落库前，公开调用不能凭路径或摘要自行伪造授权。
  */
 export class PgResourcePromotionRepository implements ResourcePromotionCommitPort {
-  constructor(private readonly pool: Pool) {}
+  private readonly verifyCapability: PromotionCapabilityVerifier["verify"];
+
+  constructor(
+    private readonly pool: Pool,
+    promotionCapabilities: PromotionCapabilityVerifier,
+  ) {
+    this.verifyCapability = snapshotPromotionCapabilityVerifier(promotionCapabilities);
+  }
 
   async commitPromotedVersion(
     input: Parameters<ResourcePromotionCommitPort["commitPromotedVersion"]>[0],
   ): Promise<ResourcePromotionCommitResult> {
-    const canonical = validatePromotionInput(input);
+    const canonical = validatePromotionInput(input, this.verifyCapability);
     const requestDigest = promotionRequestDigest(canonical);
     try {
       return await withTenantTransaction(this.pool, canonical.scope, async (client) => {
@@ -300,6 +305,7 @@ export class PgResourcePromotionRepository implements ResourcePromotionCommitPor
           canonical.scope.tenantId,
           authorizationSnapshot,
         );
+        if (boundary === undefined) return { outcome: "not_authorized" as const };
         const authorization = await findAuthorization(
           client,
           canonical.scope,
@@ -328,9 +334,33 @@ export class PgResourcePromotionRepository implements ResourcePromotionCommitPor
              FROM resources WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
           [canonical.scope.tenantId, canonical.resourceId],
         );
-        const current = existing.rows[0];
+        const current = snapshotResourceHeadRow(existing.rows[0]);
         if (canonical.expectedLatestVersionNumber === 0) {
           if (current !== undefined) return { outcome: "version_conflict" as const };
+        } else if (
+          current === undefined ||
+          current.latest_version_number !== canonical.expectedLatestVersionNumber ||
+          current.name !== canonical.resourceName ||
+          current.origin !== "promoted_workspace" ||
+          current.visibility !== "searchable"
+        ) {
+          return { outcome: "version_conflict" as const };
+        }
+
+        // Resource head 是最后一个可能阻塞的业务锁。重新读取数据库时钟后，TTL 与 lease
+        // 不能再使用锁等待前的快照；最终消费 UPDATE 还会在 SQL 内用更晚的时钟复核。
+        const freshNow = await readDatabaseClock(client);
+        if (!authorizationWithinFreshTime(authorization, boundary, freshNow)) {
+          return { outcome: "not_authorized" as const };
+        }
+        const consumed = await consumePromotionAuthorization(
+          client,
+          canonical.scope,
+          authorization,
+        );
+        if (!consumed) return { outcome: "not_authorized" as const };
+
+        if (canonical.expectedLatestVersionNumber === 0) {
           await client.query(
             `INSERT INTO resources(
                tenant_id, id, name, normalized_name, origin, visibility,
@@ -344,14 +374,6 @@ export class PgResourcePromotionRepository implements ResourcePromotionCommitPor
               normalizeSearchQuery(canonical.resourceName),
             ],
           );
-        } else if (
-          current === undefined ||
-          current.latest_version_number !== canonical.expectedLatestVersionNumber ||
-          current.name !== canonical.resourceName ||
-          current.origin !== "promoted_workspace" ||
-          current.visibility !== "searchable"
-        ) {
-          return { outcome: "version_conflict" as const };
         }
 
         const nextVersionNumber = canonical.expectedLatestVersionNumber + 1;
@@ -398,13 +420,6 @@ export class PgResourcePromotionRepository implements ResourcePromotionCommitPor
         );
         // 前面已经持有 Resource 行锁；若 CAS 仍失败，事实源已不连续，必须回滚刚插入的版本。
         if (advanced.rowCount !== 1) throw new Error("Resource head CAS 未推进");
-        const consumed = await client.query(
-          `UPDATE resource_promotion_authorizations
-              SET state = 'consumed', consumed_at = clock_timestamp()
-            WHERE tenant_id = $1 AND authorization_id = $2 AND state = 'active'`,
-          [canonical.scope.tenantId, canonical.authorizationId],
-        );
-        if (consumed.rowCount !== 1) throw new Error("Resource 提升授权消费失败");
         await client.query(
           `INSERT INTO resource_promotion_idempotency(
              tenant_id, user_id, idempotency_key, request_digest,
@@ -473,27 +488,42 @@ interface CanonicalPromotionInput {
 
 function validatePromotionInput(
   input: Parameters<ResourcePromotionCommitPort["commitPromotedVersion"]>[0],
+  verifyCapability: PromotionCapabilityVerifier["verify"],
 ): CanonicalPromotionInput {
-  assertScope(input.scope);
-  assertAgentScope(input.scope);
-  resourceId(input.resourceId);
-  resourceVersionId(input.resourceVersionId);
-  if (!AUTHORIZATION_ID_PATTERN.test(input.authorizationId)) {
+  const snapshot = snapshotPromotionCommand(input);
+  const context = snapshotTrustedContext(snapshot.context);
+  const verified = safelyVerifyCapability(verifyCapability, snapshot.capability);
+  const scope = snapshotAuthorizedAgentContext(verified);
+  if (scope.tenantId !== context.tenantId || scope.userId !== context.userId) {
+    throw new TypeError("Resource 提升能力与认证上下文不一致");
+  }
+  resourceId(snapshot.resourceId);
+  resourceVersionId(snapshot.resourceVersionId);
+  if (!AUTHORIZATION_ID_PATTERN.test(snapshot.authorizationId)) {
     throw new TypeError("Resource 提升授权 ID 格式无效");
   }
-  if (!OPERATION_KEY_PATTERN.test(input.idempotencyKey)) {
+  if (!OPERATION_KEY_PATTERN.test(snapshot.idempotencyKey)) {
     throw new TypeError("Resource 提升幂等键格式无效");
   }
-  if (!ID_PATTERN.test(input.blobReferenceId) && !isUuid(input.blobReferenceId)) {
+  if (!ID_PATTERN.test(snapshot.blobReferenceId) && !isUuid(snapshot.blobReferenceId)) {
     throw new TypeError("Resource Blob 引用 ID 格式无效");
   }
   if (
-    !Number.isSafeInteger(input.expectedLatestVersionNumber) ||
-    input.expectedLatestVersionNumber < 0
+    !Number.isSafeInteger(snapshot.expectedLatestVersionNumber) ||
+    snapshot.expectedLatestVersionNumber < 0
   ) {
     throw new TypeError("Resource 预期版本号无效");
   }
-  return Object.freeze({ ...input, resourceName: assertResourceName(input.resourceName) });
+  return Object.freeze({
+    scope,
+    authorizationId: snapshot.authorizationId,
+    idempotencyKey: snapshot.idempotencyKey,
+    resourceId: resourceId(snapshot.resourceId),
+    resourceVersionId: resourceVersionId(snapshot.resourceVersionId),
+    expectedLatestVersionNumber: snapshot.expectedLatestVersionNumber,
+    resourceName: assertResourceName(snapshot.resourceName),
+    blobReferenceId: snapshot.blobReferenceId,
+  });
 }
 
 function promotionRequestDigest(input: CanonicalPromotionInput): string {
@@ -515,32 +545,6 @@ function promotionRequestDigest(input: CanonicalPromotionInput): string {
       "utf8",
     )
     .digest("hex");
-}
-
-function assertScope(scope: TrustedResourceContext): void {
-  if (
-    typeof scope !== "object" ||
-    scope === null ||
-    !ID_PATTERN.test(scope.tenantId) ||
-    !ID_PATTERN.test(scope.userId)
-  ) {
-    throw new TypeError("Resource TenantScope 格式无效");
-  }
-  tenantId(scope.tenantId);
-  userId(scope.userId);
-}
-
-function assertAgentScope(scope: AuthorizedAgentResourceContext): void {
-  if (
-    typeof scope.actor !== "object" ||
-    scope.actor === null ||
-    scope.actor.kind !== "agent" ||
-    !ID_PATTERN.test(scope.actor.agentThreadId) ||
-    !ID_PATTERN.test(scope.actor.threadId) ||
-    !ID_PATTERN.test(scope.actor.runId)
-  ) {
-    throw new TypeError("Resource Agent 执行上下文格式无效");
-  }
 }
 
 async function lockActiveMembership(
@@ -572,7 +576,7 @@ async function findAuthorization(
       ${forUpdate ? "FOR UPDATE" : ""}`,
     [scope.tenantId, authorizationId, scope.userId],
   );
-  return result.rows[0];
+  return snapshotAuthorizationRow(result.rows[0]);
 }
 
 async function lockPromotionExecutionBoundary(
@@ -605,22 +609,22 @@ async function lockPromotionExecutionBoundary(
     root_run_id: string;
     epoch: string;
     expires_at: Date;
-    database_now: Date;
   }>(
-    `SELECT root_run_id, epoch, expires_at, clock_timestamp() AS database_now
+    `SELECT root_run_id, epoch, expires_at
        FROM workspace_write_leases
       WHERE tenant_id=$1 AND workspace_id=$2 AND thread_id=$3 FOR UPDATE`,
     [tenant, authorization.workspace_id, authorization.thread_id],
   );
-  const threadRow = thread.rows[0];
-  const runRow = run.rows[0];
-  const workspaceRow = workspace.rows[0];
-  const leaseRow = lease.rows[0];
+  const threadRow = snapshotStatusRow(thread.rows[0]);
+  const runRow = snapshotStatusRow(run.rows[0]);
+  const workspaceRow = snapshotThreadRow(workspace.rows[0]);
+  const revisionRow = snapshotExistenceRow(revision.rows[0]);
+  const leaseRow = snapshotLeaseRow(lease.rows[0]);
   if (
     threadRow === undefined ||
     runRow === undefined ||
     workspaceRow === undefined ||
-    revision.rows[0]?.one !== 1 ||
+    revisionRow?.one !== 1 ||
     leaseRow === undefined
   ) {
     return undefined;
@@ -635,7 +639,6 @@ async function lockPromotionExecutionBoundary(
     lease_root_run_id: leaseRow.root_run_id,
     lease_epoch: leaseRow.epoch,
     lease_expires_at: leaseRow.expires_at,
-    database_now: leaseRow.database_now,
   });
 }
 
@@ -663,9 +666,6 @@ function authorizationAllowsCommit(
     boundary.threadStatus === "active" &&
     boundary.lease_root_run_id === row.run_id &&
     leaseEpoch === epoch &&
-    boundary.lease_expires_at !== null &&
-    boundary.lease_expires_at.valueOf() > boundary.database_now.valueOf() &&
-    row.expires_at.valueOf() > boundary.database_now.valueOf() &&
     normalizeWorkspaceRelativePath(row.relative_path) === row.relative_path &&
     /^[a-f0-9]{64}$/u.test(row.digest) &&
     size >= 0 &&
@@ -673,32 +673,119 @@ function authorizationAllowsCommit(
   );
 }
 
+async function readDatabaseClock(client: PoolClient): Promise<Date> {
+  const result = await client.query<{ database_now: Date }>(
+    "SELECT clock_timestamp() AS database_now",
+  );
+  const row = snapshotDatabaseClockRow(result.rows[0]);
+  if (row === undefined) throw new Error("数据库时钟读回为空");
+  return row.databaseNow;
+}
+
+function authorizationWithinFreshTime(
+  authorization: AuthorizationRow,
+  boundary: PromotionExecutionBoundary,
+  freshNow: Date,
+): boolean {
+  return (
+    boundary.lease_expires_at !== null &&
+    boundary.lease_expires_at.valueOf() > freshNow.valueOf() &&
+    authorization.expires_at.valueOf() > freshNow.valueOf()
+  );
+}
+
+async function consumePromotionAuthorization(
+  client: PoolClient,
+  scope: AuthorizedAgentResourceContext,
+  authorization: AuthorizationRow,
+): Promise<boolean> {
+  const result = await client.query(
+    `UPDATE resource_promotion_authorizations AS auth
+        SET state='consumed', consumed_at=clock_timestamp()
+      WHERE auth.tenant_id=$1
+        AND auth.authorization_id=$2
+        AND auth.user_id=$3
+        AND auth.agent_thread_id=$4
+        AND auth.thread_id=$5
+        AND auth.run_id=$6
+        AND auth.workspace_id=$7
+        AND auth.revision_id=$8
+        AND auth.writer_lease_epoch=$9
+        AND auth.state='active'
+        AND auth.expires_at > clock_timestamp()
+        AND EXISTS (
+          SELECT 1 FROM workspace_write_leases lease
+           WHERE lease.tenant_id=auth.tenant_id
+             AND lease.workspace_id=auth.workspace_id
+             AND lease.thread_id=auth.thread_id
+             AND lease.root_run_id=auth.run_id
+             AND lease.epoch=auth.writer_lease_epoch
+             AND lease.expires_at > clock_timestamp()
+        )`,
+    [
+      scope.tenantId,
+      authorization.authorization_id,
+      scope.userId,
+      scope.actor.agentThreadId,
+      scope.actor.threadId,
+      scope.actor.runId,
+      authorization.workspace_id,
+      authorization.revision_id,
+      authorization.writer_lease_epoch,
+    ],
+  );
+  return result.rowCount === 1;
+}
+
 async function findStableReferenceForUpdate(
   client: PoolClient,
   tenant: string,
   referenceIdValue: string,
 ): Promise<StableReferenceRow | undefined> {
-  const result = await client.query<StableReferenceRow>(
+  // 与 ADR-0012 的 markReferenceStable 保持相同锁序：reference → lifecycle → incarnation。
+  // GC 虽先锁 lifecycle，但只统计 reference 而不锁 reference，因此不会形成反向等待环。
+  const referenceResult = await client.query<StableReferenceRow>(
     `SELECT reference.reference_id, reference.state, reference.purpose,
             reference.sha256, reference.size, reference.media_type,
-            reference.lifecycle_id, reference.incarnation_id, reference.physical_object_key,
-            lifecycle.state AS lifecycle_state,
-            lifecycle.current_incarnation_id,
-            incarnation.state AS incarnation_state
+            reference.lifecycle_id, reference.incarnation_id, reference.physical_object_key
        FROM blob_references reference
-       JOIN blob_lifecycles lifecycle
-         ON lifecycle.tenant_id = reference.tenant_id
-        AND lifecycle.lifecycle_id = reference.lifecycle_id
-       JOIN blob_incarnations incarnation
-         ON incarnation.tenant_id = reference.tenant_id
-        AND incarnation.lifecycle_id = reference.lifecycle_id
-        AND incarnation.incarnation_id = reference.incarnation_id
-        AND incarnation.physical_object_key = reference.physical_object_key
       WHERE reference.tenant_id = $1 AND reference.reference_id = $2
-      FOR UPDATE OF reference, lifecycle, incarnation`,
+      FOR UPDATE`,
     [tenant, referenceIdValue],
   );
-  return result.rows[0];
+  const reference = snapshotStableReferenceRow(referenceResult.rows[0]);
+  if (
+    reference === undefined ||
+    reference.lifecycle_id === null ||
+    reference.incarnation_id === null ||
+    reference.physical_object_key === null
+  ) {
+    return reference;
+  }
+  const lifecycleResult = await client.query<{
+    state: string;
+    current_incarnation_id: string | null;
+  }>(
+    `SELECT state, current_incarnation_id FROM blob_lifecycles
+      WHERE tenant_id=$1 AND lifecycle_id=$2 AND purpose=$3 AND sha256=$4 AND size=$5
+      FOR UPDATE`,
+    [tenant, reference.lifecycle_id, reference.purpose, reference.sha256, reference.size],
+  );
+  const lifecycle = snapshotLifecycleRow(lifecycleResult.rows[0]);
+  if (lifecycle === undefined) return reference;
+  const incarnationResult = await client.query<{ state: string }>(
+    `SELECT state FROM blob_incarnations
+      WHERE tenant_id=$1 AND lifecycle_id=$2 AND incarnation_id=$3 AND physical_object_key=$4
+      FOR UPDATE`,
+    [tenant, reference.lifecycle_id, reference.incarnation_id, reference.physical_object_key],
+  );
+  const incarnation = snapshotIncarnationRow(incarnationResult.rows[0]);
+  return Object.freeze({
+    ...reference,
+    lifecycle_state: lifecycle.state,
+    current_incarnation_id: lifecycle.current_incarnation_id,
+    incarnation_state: incarnation?.state ?? null,
+  });
 }
 
 function stableMatchesAuthorization(
@@ -736,7 +823,7 @@ async function findIdempotency(
       WHERE tenant_id = $1 AND user_id = $2 AND idempotency_key = $3`,
     [scope.tenantId, scope.userId, key],
   );
-  return result.rows[0];
+  return snapshotIdempotencyRow(result.rows[0]);
 }
 
 async function replayCommitted(
@@ -773,7 +860,8 @@ async function currentHeadId(
     "SELECT latest_version_id FROM resources WHERE tenant_id = $1 AND id = $2",
     [tenant, id],
   );
-  return result.rows[0]?.latest_version_id ?? undefined;
+  const row = snapshotCurrentHeadRow(result.rows[0]);
+  return row?.latest_version_id ?? undefined;
 }
 
 async function findResourceVersion(
@@ -802,23 +890,25 @@ async function findResourceVersion(
         )`,
     [tenant, id, versionIdValue, searchableOnly, authorizedUserId ?? null],
   );
-  return result.rows[0];
+  return snapshotResourceRow(result.rows[0]);
 }
 
 function mapCatalogItem(row: ResourceRow): ResourceCatalogItem {
-  const versionNumber = safeInteger(row.version_number, "Resource 版本号");
-  const size = safeInteger(row.size, "Resource 大小");
+  const safe = snapshotResourceRow(row);
+  if (safe === undefined) throw new DatabaseProtocolError();
+  const versionNumber = safeInteger(safe.version_number, "Resource 版本号");
+  const size = safeInteger(safe.size, "Resource 大小");
   return Object.freeze({
-    tenantId: tenantId(row.tenant_id),
-    visibility: row.resource_visibility,
-    resourceId: resourceId(row.resource_id),
-    versionId: resourceVersionId(row.version_id),
+    tenantId: tenantId(safe.tenant_id),
+    visibility: safe.resource_visibility,
+    resourceId: resourceId(safe.resource_id),
+    versionId: resourceVersionId(safe.version_id),
     versionNumber,
-    name: row.resource_name,
-    origin: row.resource_origin,
-    mediaType: row.media_type,
+    name: safe.resource_name,
+    origin: safe.resource_origin,
+    mediaType: safe.media_type,
     sizeBytes: size,
-    updatedAt: isoTimestamp(row.resource_updated_at.toISOString()),
+    updatedAt: isoTimestamp(safe.resource_updated_at.toISOString()),
   });
 }
 
@@ -826,36 +916,274 @@ function mapResourceAndVersion(row: ResourceRow): {
   readonly resource: Resource;
   readonly version: ResourceVersion;
 } {
-  const expectedTenantId = tenantId(row.tenant_id);
+  const safe = snapshotResourceRow(row);
+  if (safe === undefined) throw new DatabaseProtocolError();
+  const expectedTenantId = tenantId(safe.tenant_id);
   const resource = rehydrateResource(
     {
-      id: row.resource_id,
-      tenantId: row.tenant_id,
-      name: row.resource_name,
-      origin: row.resource_origin,
-      latestVersionNumber: safeInteger(row.latest_version_number, "Resource latest 版本号"),
-      latestVersionId: row.latest_version_id ?? undefined,
-      createdAt: row.resource_created_at.toISOString(),
-      updatedAt: row.resource_updated_at.toISOString(),
+      id: safe.resource_id,
+      tenantId: safe.tenant_id,
+      name: safe.resource_name,
+      origin: safe.resource_origin,
+      latestVersionNumber: safeInteger(safe.latest_version_number, "Resource latest 版本号"),
+      latestVersionId: safe.latest_version_id ?? undefined,
+      createdAt: safe.resource_created_at.toISOString(),
+      updatedAt: safe.resource_updated_at.toISOString(),
     },
     expectedTenantId,
   );
   const version = rehydrateResourceVersion(
     {
-      id: row.version_id,
-      resourceId: row.resource_id,
-      tenantId: row.tenant_id,
-      versionNumber: safeInteger(row.version_number, "Resource 版本号"),
-      parentVersionId: row.parent_version_id ?? undefined,
-      objectKey: row.physical_object_key,
-      digest: sha256Digest(row.digest),
-      mediaType: row.media_type,
-      sizeBytes: safeInteger(row.size, "Resource 大小"),
-      createdAt: row.version_created_at.toISOString(),
+      id: safe.version_id,
+      resourceId: safe.resource_id,
+      tenantId: safe.tenant_id,
+      versionNumber: safeInteger(safe.version_number, "Resource 版本号"),
+      parentVersionId: safe.parent_version_id ?? undefined,
+      objectKey: safe.physical_object_key,
+      digest: sha256Digest(safe.digest),
+      mediaType: safe.media_type,
+      sizeBytes: safeInteger(safe.size, "Resource 大小"),
+      createdAt: safe.version_created_at.toISOString(),
     },
     resource,
   );
   return Object.freeze({ resource, version });
+}
+
+function databaseString(value: unknown): string {
+  if (typeof value !== "string") throw new DatabaseProtocolError();
+  return value;
+}
+
+function databaseNullableString(value: unknown): string | null {
+  if (value === null) return null;
+  return databaseString(value);
+}
+
+function databaseNumber(value: unknown): number {
+  if (typeof value !== "number") throw new DatabaseProtocolError();
+  return value;
+}
+
+function databaseDate(value: unknown): Date {
+  if (!(value instanceof Date)) throw new DatabaseProtocolError();
+  try {
+    // 不调用未知对象可覆写的 valueOf；Date 内部槽不合法时统一转成稳定协议错误。
+    const milliseconds = Date.prototype.getTime.call(value);
+    if (Number.isNaN(milliseconds)) throw new DatabaseProtocolError();
+    return new Date(milliseconds);
+  } catch (error) {
+    if (error instanceof DatabaseProtocolError) throw error;
+    throw new DatabaseProtocolError();
+  }
+}
+
+function snapshotIdempotencyRow(value: unknown): IdempotencyRow | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, [
+    "request_digest",
+    "authorization_id",
+    "resource_id",
+    "resource_version_id",
+  ]);
+  return Object.freeze({
+    request_digest: databaseString(row.request_digest),
+    authorization_id: databaseString(row.authorization_id),
+    resource_id: databaseString(row.resource_id),
+    resource_version_id: databaseString(row.resource_version_id),
+  });
+}
+
+function snapshotStatusRow(value: unknown): { readonly status: string } | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, ["status"]);
+  return Object.freeze({ status: databaseString(row.status) });
+}
+
+function snapshotThreadRow(value: unknown): { readonly thread_id: string } | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, ["thread_id"]);
+  return Object.freeze({ thread_id: databaseString(row.thread_id) });
+}
+
+function snapshotExistenceRow(value: unknown): { readonly one: number } | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, ["one"]);
+  return Object.freeze({ one: databaseNumber(row.one) });
+}
+
+function snapshotLeaseRow(value: unknown):
+  | {
+      readonly root_run_id: string;
+      readonly epoch: string;
+      readonly expires_at: Date;
+    }
+  | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, ["root_run_id", "epoch", "expires_at"]);
+  return Object.freeze({
+    root_run_id: databaseString(row.root_run_id),
+    epoch: databaseString(row.epoch),
+    expires_at: databaseDate(row.expires_at),
+  });
+}
+
+function snapshotResourceHeadRow(value: unknown):
+  | {
+      readonly latest_version_number: number;
+      readonly name: string;
+      readonly origin: string;
+      readonly visibility: string;
+    }
+  | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, ["latest_version_number", "name", "origin", "visibility"]);
+  return Object.freeze({
+    latest_version_number: databaseNumber(row.latest_version_number),
+    name: databaseString(row.name),
+    origin: databaseString(row.origin),
+    visibility: databaseString(row.visibility),
+  });
+}
+
+function snapshotCurrentHeadRow(
+  value: unknown,
+): { readonly latest_version_id: string | null } | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, ["latest_version_id"]);
+  return Object.freeze({ latest_version_id: databaseNullableString(row.latest_version_id) });
+}
+
+function snapshotAuthorizationRow(value: unknown): AuthorizationRow | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, [
+    "authorization_id",
+    "user_id",
+    "agent_thread_id",
+    "thread_id",
+    "run_id",
+    "workspace_id",
+    "revision_id",
+    "writer_lease_epoch",
+    "relative_path",
+    "digest",
+    "media_type",
+    "size",
+    "state",
+    "expires_at",
+  ]);
+  return Object.freeze({
+    authorization_id: databaseString(row.authorization_id),
+    user_id: databaseString(row.user_id),
+    agent_thread_id: databaseString(row.agent_thread_id),
+    thread_id: databaseString(row.thread_id),
+    run_id: databaseString(row.run_id),
+    workspace_id: databaseString(row.workspace_id),
+    revision_id: databaseString(row.revision_id),
+    writer_lease_epoch: databaseString(row.writer_lease_epoch),
+    relative_path: databaseString(row.relative_path),
+    digest: databaseString(row.digest),
+    media_type: databaseString(row.media_type),
+    size: databaseString(row.size),
+    state: databaseString(row.state) as AuthorizationRow["state"],
+    expires_at: databaseDate(row.expires_at),
+  });
+}
+
+function snapshotStableReferenceRow(value: unknown): StableReferenceRow | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, [
+    "reference_id",
+    "state",
+    "purpose",
+    "sha256",
+    "size",
+    "media_type",
+    "lifecycle_id",
+    "incarnation_id",
+    "physical_object_key",
+  ]);
+  return Object.freeze({
+    reference_id: databaseString(row.reference_id),
+    state: databaseString(row.state) as StableReferenceRow["state"],
+    purpose: databaseString(row.purpose),
+    sha256: databaseString(row.sha256),
+    size: databaseString(row.size),
+    media_type: databaseString(row.media_type),
+    lifecycle_id: databaseNullableString(row.lifecycle_id),
+    incarnation_id: databaseNullableString(row.incarnation_id),
+    physical_object_key: databaseNullableString(row.physical_object_key),
+    lifecycle_state: null,
+    current_incarnation_id: null,
+    incarnation_state: null,
+  });
+}
+
+function snapshotLifecycleRow(
+  value: unknown,
+): { readonly state: string; readonly current_incarnation_id: string | null } | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, ["state", "current_incarnation_id"]);
+  return Object.freeze({
+    state: databaseString(row.state),
+    current_incarnation_id: databaseNullableString(row.current_incarnation_id),
+  });
+}
+
+function snapshotIncarnationRow(value: unknown): { readonly state: string } | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, ["state"]);
+  return Object.freeze({ state: databaseString(row.state) });
+}
+
+function snapshotDatabaseClockRow(value: unknown): { readonly databaseNow: Date } | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, ["database_now"]);
+  return Object.freeze({ databaseNow: databaseDate(row.database_now) });
+}
+
+function snapshotResourceRow(value: unknown): ResourceRow | undefined {
+  if (value === undefined) return undefined;
+  const row = databaseRecord(value, [
+    "tenant_id",
+    "resource_id",
+    "resource_name",
+    "resource_origin",
+    "resource_visibility",
+    "latest_version_number",
+    "latest_version_id",
+    "resource_created_at",
+    "resource_updated_at",
+    "version_id",
+    "version_number",
+    "parent_version_id",
+    "physical_object_key",
+    "digest",
+    "media_type",
+    "size",
+    "version_created_at",
+  ]);
+  return Object.freeze({
+    tenant_id: databaseString(row.tenant_id),
+    resource_id: databaseString(row.resource_id),
+    resource_name: databaseString(row.resource_name),
+    resource_origin: databaseString(row.resource_origin) as ResourceRow["resource_origin"],
+    resource_visibility: databaseString(
+      row.resource_visibility,
+    ) as ResourceRow["resource_visibility"],
+    latest_version_number: databaseNumber(row.latest_version_number),
+    latest_version_id: databaseNullableString(row.latest_version_id),
+    resource_created_at: databaseDate(row.resource_created_at),
+    resource_updated_at: databaseDate(row.resource_updated_at),
+    version_id: databaseString(row.version_id),
+    version_number: databaseNumber(row.version_number),
+    parent_version_id: databaseNullableString(row.parent_version_id),
+    physical_object_key: databaseString(row.physical_object_key),
+    digest: databaseString(row.digest),
+    media_type: databaseString(row.media_type),
+    size: databaseString(row.size),
+    version_created_at: databaseDate(row.version_created_at),
+  });
 }
 
 function normalizeMediaType(value: string): string {
@@ -872,4 +1200,226 @@ function safeInteger(value: string | number, label: string): number {
 
 function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value);
+}
+
+class InputSnapshotError extends TypeError {
+  constructor(message: string) {
+    super(message);
+    this.name = "InputSnapshotError";
+  }
+}
+
+class DatabaseProtocolError extends Error {
+  constructor() {
+    super("PostgreSQL Resource 结果格式无效");
+    this.name = "DatabaseProtocolError";
+  }
+}
+
+function dataRecord(
+  value: unknown,
+  requiredKeys: readonly string[],
+  optionalKeys: readonly string[],
+  failure: () => Error,
+): Readonly<Record<string, unknown>> {
+  try {
+    if (utilTypes.isProxy(value) || typeof value !== "object" || value === null) throw failure();
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) throw failure();
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(descriptors);
+    if (keys.some((key) => typeof key !== "string")) throw failure();
+    const allowed = new Set([...requiredKeys, ...optionalKeys]);
+    if (
+      requiredKeys.some((key) => !Object.hasOwn(descriptors, key)) ||
+      keys.some((key) => typeof key !== "string" || !allowed.has(key))
+    ) {
+      throw failure();
+    }
+    const snapshot = Object.create(null) as Record<string, unknown>;
+    for (const key of keys as string[]) {
+      const descriptor = descriptors[key];
+      if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) {
+        throw failure();
+      }
+      snapshot[key] = descriptor.value;
+    }
+    return Object.freeze(snapshot);
+  } catch (error) {
+    if (error instanceof InputSnapshotError || error instanceof DatabaseProtocolError) throw error;
+    throw failure();
+  }
+}
+
+function inputRecord(
+  value: unknown,
+  requiredKeys: readonly string[],
+  optionalKeys: readonly string[] = [],
+): Readonly<Record<string, unknown>> {
+  return dataRecord(
+    value,
+    requiredKeys,
+    optionalKeys,
+    () => new InputSnapshotError("Resource 输入必须是无访问器的精确普通对象"),
+  );
+}
+
+function databaseRecord(
+  value: unknown,
+  requiredKeys: readonly string[],
+): Readonly<Record<string, unknown>> {
+  return dataRecord(value, requiredKeys, [], () => new DatabaseProtocolError());
+}
+
+function inputString(value: unknown): string {
+  if (typeof value !== "string") throw new InputSnapshotError("Resource 输入字符串格式无效");
+  return value;
+}
+
+function inputNumber(value: unknown): number {
+  if (typeof value !== "number") throw new InputSnapshotError("Resource 输入数字格式无效");
+  return value;
+}
+
+function snapshotTrustedContext(value: unknown): TrustedResourceContext {
+  const record = inputRecord(value, ["tenantId", "userId"]);
+  const tenant = inputString(record.tenantId);
+  const user = inputString(record.userId);
+  if (!ID_PATTERN.test(tenant) || !ID_PATTERN.test(user)) {
+    throw new InputSnapshotError("Resource 认证上下文格式无效");
+  }
+  return Object.freeze({ tenantId: tenantId(tenant), userId: userId(user) });
+}
+
+function snapshotAuthorizedAgentContext(value: unknown): AuthorizedAgentResourceContext {
+  const record = inputRecord(value, ["tenantId", "userId", "actor"]);
+  const context = snapshotTrustedContext({
+    tenantId: record.tenantId,
+    userId: record.userId,
+  });
+  const actor = inputRecord(record.actor, ["kind", "agentThreadId", "threadId", "runId"]);
+  const kind = inputString(actor.kind);
+  const agentThread = inputString(actor.agentThreadId);
+  const thread = inputString(actor.threadId);
+  const run = inputString(actor.runId);
+  if (
+    kind !== "agent" ||
+    !ID_PATTERN.test(agentThread) ||
+    !ID_PATTERN.test(thread) ||
+    !ID_PATTERN.test(run)
+  ) {
+    throw new InputSnapshotError("Resource Agent 执行上下文格式无效");
+  }
+  return Object.freeze({
+    ...context,
+    actor: Object.freeze({
+      kind: "agent",
+      agentThreadId: agentThread as AuthorizedAgentResourceContext["actor"]["agentThreadId"],
+      threadId: thread as AuthorizedAgentResourceContext["actor"]["threadId"],
+      runId: run as AuthorizedAgentResourceContext["actor"]["runId"],
+    }),
+  });
+}
+
+function snapshotPromotionCapabilityVerifier(
+  value: PromotionCapabilityVerifier,
+): PromotionCapabilityVerifier["verify"] {
+  const record = inputRecord(value, ["verify"]);
+  if (typeof record.verify !== "function") {
+    throw new InputSnapshotError("Resource 提升能力 verifier 格式无效");
+  }
+  return record.verify as PromotionCapabilityVerifier["verify"];
+}
+
+function safelyVerifyCapability(
+  verify: PromotionCapabilityVerifier["verify"],
+  capability: unknown,
+): AuthorizedAgentResourceContext | undefined {
+  try {
+    return Reflect.apply(verify, undefined, [capability]);
+  } catch {
+    throw new InputSnapshotError("Resource 提升能力验证失败");
+  }
+}
+
+function snapshotSearchPosition(value: unknown): {
+  readonly updatedAt: ReturnType<typeof isoTimestamp>;
+  readonly resourceId: ResourceId;
+} {
+  const record = inputRecord(value, ["updatedAt", "resourceId"]);
+  return Object.freeze({
+    updatedAt: isoTimestamp(inputString(record.updatedAt)),
+    resourceId: resourceId(inputString(record.resourceId)),
+  });
+}
+
+function snapshotSearchCommand(value: unknown): {
+  readonly context: TrustedResourceContext;
+  readonly normalizedQuery: string;
+  readonly limit: number;
+  readonly after?: {
+    readonly updatedAt: ReturnType<typeof isoTimestamp>;
+    readonly resourceId: ResourceId;
+  };
+} {
+  const record = inputRecord(value, ["context", "normalizedQuery", "limit"], ["after"]);
+  const after = record.after;
+  return Object.freeze({
+    context: snapshotTrustedContext(record.context),
+    normalizedQuery: inputString(record.normalizedQuery),
+    limit: inputNumber(record.limit),
+    ...(after === undefined ? {} : { after: snapshotSearchPosition(after) }),
+  });
+}
+
+function snapshotResolveCommand(value: unknown): {
+  readonly context: TrustedResourceContext;
+  readonly resourceId: ResourceId;
+  readonly versionId: ResourceVersionId;
+} {
+  const record = inputRecord(value, ["context", "resourceId", "versionId"]);
+  return Object.freeze({
+    context: snapshotTrustedContext(record.context),
+    resourceId: resourceId(inputString(record.resourceId)),
+    versionId: resourceVersionId(inputString(record.versionId)),
+  });
+}
+
+function snapshotPromotionCommand(value: unknown): {
+  readonly context: TrustedResourceContext;
+  readonly capability: unknown;
+  readonly authorizationId: string;
+  readonly idempotencyKey: string;
+  readonly resourceId: string;
+  readonly resourceVersionId: string;
+  readonly expectedLatestVersionNumber: number;
+  readonly resourceName: string;
+  readonly blobReferenceId: string;
+} {
+  const record = inputRecord(value, [
+    "context",
+    "capability",
+    "authorizationId",
+    "idempotencyKey",
+    "resourceId",
+    "resourceVersionId",
+    "expectedLatestVersionNumber",
+    "resourceName",
+    "blobReferenceId",
+  ]);
+  return Object.freeze({
+    context: snapshotTrustedContext(record.context),
+    capability: record.capability,
+    authorizationId: inputString(record.authorizationId),
+    idempotencyKey: inputString(record.idempotencyKey),
+    resourceId: inputString(record.resourceId),
+    resourceVersionId: inputString(record.resourceVersionId),
+    expectedLatestVersionNumber: inputNumber(record.expectedLatestVersionNumber),
+    resourceName: inputString(record.resourceName),
+    blobReferenceId: inputString(record.blobReferenceId),
+  });
+}
+
+function escapeLikePrefix(value: string): string {
+  return value.replace(/[\\%_]/gu, (character) => `\\${character}`);
 }

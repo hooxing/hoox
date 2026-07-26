@@ -113,6 +113,8 @@ class SnapshotSandbox implements SandboxWorkspacePort {
   listFailure: WorkspaceDependencyError | undefined;
   onList: (() => void) | undefined;
   onRead: (() => void) | undefined;
+  listOverride: AsyncIterable<SandboxWorkspaceEntry> | undefined;
+  readOverride: (() => AsyncIterable<Uint8Array>) | undefined;
 
   addFile(path: string, text: string, size?: number) {
     const body = Buffer.from(text);
@@ -137,17 +139,22 @@ class SnapshotSandbox implements SandboxWorkspacePort {
     });
     return identity;
   }
-  async *listWorkspace(snapshot: SandboxWorkspaceSnapshot): AsyncIterable<SandboxWorkspaceEntry> {
-    if (this.listFailure !== undefined) throw this.listFailure;
-    const stored = this.snapshot(snapshot);
-    for (const entry of stored.entries) {
-      this.onList?.();
-      yield entry;
-    }
+  listWorkspace(snapshot: SandboxWorkspaceSnapshot): AsyncIterable<SandboxWorkspaceEntry> {
+    if (this.listOverride !== undefined) return this.listOverride;
+    const self = this;
+    return (async function* () {
+      if (self.listFailure !== undefined) throw self.listFailure;
+      const stored = self.snapshot(snapshot);
+      for (const entry of stored.entries) {
+        self.onList?.();
+        yield entry;
+      }
+    })();
   }
   readRegularFile(snapshot: SandboxWorkspaceSnapshot, path: string): AsyncIterable<Uint8Array> {
     this.reads += 1;
     this.onRead?.();
+    if (this.readOverride !== undefined) return this.readOverride();
     const body = this.snapshot(snapshot).bodies.get(path);
     if (body === undefined) throw new WorkspaceDependencyError("known", "SNAPSHOT_FILE_MISSING");
     return one(body);
@@ -230,6 +237,77 @@ function one(body: Uint8Array): AsyncIterable<Uint8Array> {
   })();
 }
 
+function switchingIterable<T>(
+  value: T,
+  switched: T,
+  calls: { safe: number; switched: number },
+): AsyncIterable<T> {
+  const source = {} as AsyncIterable<T>;
+  const switchedFactory = () => {
+    calls.switched += 1;
+    return oneValue(switched)[Symbol.asyncIterator]();
+  };
+  const safeFactory = () => {
+    calls.safe += 1;
+    Object.defineProperty(source, Symbol.asyncIterator, {
+      configurable: true,
+      value: switchedFactory,
+    });
+    return oneValue(value)[Symbol.asyncIterator]();
+  };
+  Object.defineProperty(source, Symbol.asyncIterator, {
+    configurable: true,
+    value: safeFactory,
+  });
+  return source;
+}
+
+function accessorIterable<T>(value: T, calls: { getter: number }): AsyncIterable<T> {
+  return Object.defineProperty({}, Symbol.asyncIterator, {
+    configurable: true,
+    get: () => {
+      calls.getter += 1;
+      return () => oneValue(value)[Symbol.asyncIterator]();
+    },
+  }) as AsyncIterable<T>;
+}
+
+function nextAccessorIterable<T>(value: T, calls: { getter: number }): AsyncIterable<T> {
+  return {
+    [Symbol.asyncIterator]: () =>
+      Object.defineProperty({}, "next", {
+        get: () => {
+          calls.getter += 1;
+          return async () => ({ done: false, value });
+        },
+      }) as AsyncIterator<T>,
+  };
+}
+
+function resultAccessorIterable<T>(value: T, calls: { getter: number }): AsyncIterable<T> {
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next: async () => {
+        const result = { value } as Record<string, unknown>;
+        Object.defineProperty(result, "done", {
+          enumerable: true,
+          get: () => {
+            calls.getter += 1;
+            return false;
+          },
+        });
+        return result as unknown as IteratorResult<T>;
+      },
+    }),
+  };
+}
+
+function oneValue<T>(value: T): AsyncIterable<T> {
+  return (async function* () {
+    yield value;
+  })();
+}
+
 function setup(policy = POLICY) {
   const journal = new Journal();
   const sandbox = new SnapshotSandbox();
@@ -249,6 +327,64 @@ function request(operationKey: string, base?: WorkspaceManifest) {
 }
 
 describe("Workspace publisher 可靠边界", () => {
+  it("list 流拒绝协议 getter，捕获 data method 后条目不可切换", async () => {
+    const accessor = setup();
+    const entry = { relativePath: "a", kind: "directory" as const };
+    const getterCalls = { getter: 0 };
+    accessor.sandbox.listOverride = accessorIterable(entry, getterCalls);
+    await expect(accessor.publisher.publish(request("list-accessor"))).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILED",
+    });
+    expect(getterCalls.getter).toBe(0);
+    expect(accessor.blobs.tenantSideEffects).toBe(0);
+
+    const captured = setup();
+    const factoryCalls = { safe: 0, switched: 0 };
+    captured.sandbox.listOverride = switchingIterable<SandboxWorkspaceEntry>(
+      entry,
+      { relativePath: "evil", kind: "file", size: 1 },
+      factoryCalls,
+    );
+    await captured.publisher.publish(request("list-captured"));
+    expect(factoryCalls).toEqual({ safe: 1, switched: 0 });
+    expect(captured.blobs.tenantSideEffects).toBe(0);
+  });
+
+  it("list 迭代器 next 与 IteratorResult 都拒绝 accessor 且不执行 getter", async () => {
+    const entry = { relativePath: "a", kind: "directory" as const };
+    for (const build of [nextAccessorIterable, resultAccessorIterable]) {
+      const state = setup();
+      const calls = { getter: 0 };
+      state.sandbox.listOverride = build(entry, calls);
+      await expect(
+        state.publisher.publish(request(`iterator-accessor-${build.name}`)),
+      ).rejects.toMatchObject({ code: "DEPENDENCY_FAILED" });
+      expect(calls.getter).toBe(0);
+      expect(state.blobs.tenantSideEffects).toBe(0);
+    }
+  });
+
+  it("snapshot read 流拒绝协议 getter，双遍各自捕获 method 且内容不可切换", async () => {
+    const accessor = setup();
+    accessor.sandbox.addFile("a", "a");
+    const getterCalls = { getter: 0 };
+    accessor.sandbox.readOverride = () => accessorIterable(Buffer.from("a"), getterCalls);
+    await expect(accessor.publisher.publish(request("read-accessor"))).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILED",
+    });
+    expect(getterCalls.getter).toBe(0);
+    expect(accessor.blobs.tenantSideEffects).toBe(0);
+
+    const captured = setup();
+    captured.sandbox.addFile("a", "a");
+    const factoryCalls = { safe: 0, switched: 0 };
+    captured.sandbox.readOverride = () =>
+      switchingIterable(Buffer.from("a"), Buffer.from("evil"), factoryCalls);
+    await captured.publisher.publish(request("read-captured"));
+    expect(factoryCalls).toEqual({ safe: 2, switched: 0 });
+    expect(captured.blobs.effects).toBe(1);
+  });
+
   it("先取得不可变 snapshot 身份再 begin，双遍流式验真后只返回候选", async () => {
     const state = setup();
     state.sandbox.addFile("a", "alpha");

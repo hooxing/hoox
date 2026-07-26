@@ -24,6 +24,7 @@ const SNAPSHOT_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const INCARNATION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+type UnknownMethod = (...args: unknown[]) => unknown;
 
 export function validateOperationKey(value: string): string {
   if (!OPERATION_KEY_PATTERN.test(value)) {
@@ -358,16 +359,142 @@ export function parseExternalAsyncIterable<T>(value: unknown, label: string): As
   ) {
     throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 必须是可信流对象`);
   }
-  let iterator: unknown;
+  const source = value as object;
+  // 只从属性描述符捕获一次协议函数。后续消费核心包装器时，不再读取适配器对象，
+  // 既阻断 getter 切换，也避免 freeze 破坏有内部状态的 provider 流。
+  const iteratorFactory = captureDataMethod(source, Symbol.asyncIterator, label, true);
+  return Object.freeze({
+    [Symbol.asyncIterator](): AsyncIterator<T> {
+      const externalIterator: unknown = Reflect.apply(iteratorFactory, source, []);
+      if (
+        utilTypes.isProxy(externalIterator) ||
+        (typeof externalIterator !== "object" && typeof externalIterator !== "function") ||
+        externalIterator === null
+      ) {
+        throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 返回了非法异步迭代器`);
+      }
+      const next = captureDataMethod(externalIterator, "next", `${label} 迭代器`, true);
+      const returnMethod = captureDataMethod(externalIterator, "return", `${label} 迭代器`, false);
+      const throwMethod = captureDataMethod(externalIterator, "throw", `${label} 迭代器`, false);
+
+      const wrapper: AsyncIterableIterator<T> = {
+        next: () => invokeExternalIteratorMethod<T>(externalIterator, next, [], label),
+        return: (result?: unknown) =>
+          returnMethod === undefined
+            ? Promise.resolve(Object.freeze({ done: true, value: result as T }))
+            : invokeExternalIteratorMethod<T>(externalIterator, returnMethod, [result], label),
+        throw: (error?: unknown) =>
+          throwMethod === undefined
+            ? Promise.reject(error)
+            : invokeExternalIteratorMethod<T>(externalIterator, throwMethod, [error], label),
+        [Symbol.asyncIterator]() {
+          return this;
+        },
+      };
+      return Object.freeze(wrapper);
+    },
+  });
+}
+
+function captureDataMethod(
+  source: object,
+  key: PropertyKey,
+  label: string,
+  required: true,
+): UnknownMethod;
+function captureDataMethod(
+  source: object,
+  key: PropertyKey,
+  label: string,
+  required: false,
+): UnknownMethod | undefined;
+function captureDataMethod(
+  source: object,
+  key: PropertyKey,
+  label: string,
+  required: boolean,
+): UnknownMethod | undefined {
+  let current: object | null = source;
   try {
-    iterator = (value as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator];
-  } catch {
+    while (current !== null) {
+      if (utilTypes.isProxy(current)) {
+        throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 必须是可信流对象`);
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(current, key);
+      if (descriptor !== undefined) {
+        if (!("value" in descriptor) || typeof descriptor.value !== "function") {
+          throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 协议方法不安全`);
+        }
+        return descriptor.value as UnknownMethod;
+      }
+      current = Object.getPrototypeOf(current);
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceApplicationError) throw error;
     throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 不可安全读取`);
   }
-  if (typeof iterator !== "function") {
+  if (required) {
     throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 缺少异步迭代协议`);
   }
-  return Object.freeze(value) as AsyncIterable<T>;
+  return undefined;
+}
+
+function invokeExternalIteratorMethod<T>(
+  iterator: object,
+  method: UnknownMethod,
+  args: readonly unknown[],
+  label: string,
+): Promise<IteratorResult<T>> {
+  let pending: unknown;
+  try {
+    pending = Reflect.apply(method, iterator, args);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  if (utilTypes.isProxy(pending)) {
+    return Promise.reject(
+      new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 迭代结果不安全`),
+    );
+  }
+  if (utilTypes.isPromise(pending)) {
+    // 绕过外部 Promise 子类可能覆盖的 then 属性，直接使用原生内部槽完成解析。
+    return new Promise<IteratorResult<T>>((resolve, reject) => {
+      try {
+        Reflect.apply(Promise.prototype.then, pending, [
+          (result: unknown) => {
+            try {
+              resolve(parseExternalIteratorResult<T>(result, label));
+            } catch (error) {
+              reject(error);
+            }
+          },
+          reject,
+        ]);
+      } catch {
+        reject(new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 迭代结果不安全`));
+      }
+    });
+  }
+  try {
+    return Promise.resolve(parseExternalIteratorResult<T>(pending, label));
+  } catch (error) {
+    return Promise.reject(error);
+  }
+}
+
+function parseExternalIteratorResult<T>(value: unknown, label: string): IteratorResult<T> {
+  const input = plainDataRecord(value, `${label} 迭代结果`);
+  const keys = Object.keys(input).sort();
+  if (
+    !Object.hasOwn(input, "done") ||
+    typeof input.done !== "boolean" ||
+    keys.some((key) => key !== "done" && key !== "value") ||
+    keys.length > 2 ||
+    (input.done === false && !Object.hasOwn(input, "value"))
+  ) {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 迭代结果字段无效`);
+  }
+  return Object.freeze({ done: input.done, value: input.value as T }) as IteratorResult<T>;
 }
 
 export function parseExternalStream(value: unknown, label: string): AsyncIterable<Uint8Array> {

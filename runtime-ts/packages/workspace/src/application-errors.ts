@@ -1,0 +1,35 @@
+export type WorkspaceApplicationErrorCode =
+  | "INVALID_INPUT"
+  | "OPERATION_CONFLICT"
+  | "OPERATION_IN_PROGRESS"
+  | "ACCESS_DENIED"
+  | "INTEGRITY_MISMATCH"
+  | "LIMIT_EXCEEDED"
+  | "CANCELLED"
+  | "UNSAFE_SANDBOX_ENTRY"
+  | "DEPENDENCY_FAILED"
+  | "RESULT_UNKNOWN";
+
+/** 应用核心只暴露稳定分类；底层路径、对象键和 Provider 消息不得跨边界泄漏。 */
+export class WorkspaceApplicationError extends Error {
+  constructor(
+    readonly code: WorkspaceApplicationErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = "WorkspaceApplicationError";
+  }
+}
+
+export type WorkspaceDependencyResult = "known" | "unknown";
+
+/** 窄端口适配器用它标记远端结果是否确定；cause 只供适配器内部诊断，不向上复制。 */
+export class WorkspaceDependencyError extends Error {
+  constructor(
+    readonly result: WorkspaceDependencyResult,
+    readonly dependencyCode: string,
+  ) {
+    super("Workspace 外部依赖调用失败");
+    this.name = "WorkspaceDependencyError";
+  }
+}

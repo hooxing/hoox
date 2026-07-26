@@ -1,14 +1,22 @@
 import { createHash } from "node:crypto";
+import { types as utilTypes } from "node:util";
 import { WorkspaceApplicationError, WorkspaceDependencyError } from "./application-errors.js";
 import type {
+  SandboxSessionIdentity,
+  SandboxWorkspaceSnapshot,
   WorkspaceExecutionPolicy,
+  WorkspaceKnownFailureDisposition,
   WorkspaceOperationIdentity,
   WorkspaceOperationJournalPort,
+  WorkspaceTrustedScope,
   WorkspaceUnknownFact,
 } from "./application-ports.js";
 import type { WorkspaceContentIdentity } from "./manifest.js";
 
 const OPERATION_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u;
+const SCOPED_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u;
+const SNAPSHOT_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u;
 
 export function validateOperationKey(value: string): string {
   if (!OPERATION_KEY_PATTERN.test(value)) {
@@ -17,16 +25,115 @@ export function validateOperationKey(value: string): string {
   return value;
 }
 
+export function validateTrustedScope(value: WorkspaceTrustedScope): WorkspaceTrustedScope {
+  const input = plainDataRecord(value, "WorkspaceTrustedScope");
+  exactKeys(input, ["tenantId", "threadId", "workspaceId"], "WorkspaceTrustedScope");
+  for (const name of ["tenantId", "threadId", "workspaceId"] as const) {
+    if (typeof input[name] !== "string" || !SCOPED_ID_PATTERN.test(input[name])) {
+      throw new WorkspaceApplicationError("INVALID_INPUT", `${name} 格式无效`);
+    }
+  }
+  return Object.freeze({
+    tenantId: input.tenantId as string,
+    threadId: input.threadId as string,
+    workspaceId: input.workspaceId as string,
+  });
+}
+
+export function parseSandboxSession(value: unknown): SandboxSessionIdentity {
+  const input = plainDataRecord(value, "SandboxSessionIdentity");
+  exactKeys(input, ["sessionId", "generation"], "SandboxSessionIdentity");
+  if (typeof input.sessionId !== "string" || !SESSION_ID_PATTERN.test(input.sessionId)) {
+    throw new WorkspaceApplicationError("INVALID_INPUT", "Sandbox sessionId 格式无效");
+  }
+  if (!Number.isSafeInteger(input.generation) || (input.generation as number) < 1) {
+    throw new WorkspaceApplicationError("INVALID_INPUT", "Sandbox generation 格式无效");
+  }
+  return Object.freeze({ sessionId: input.sessionId, generation: input.generation as number });
+}
+
+export function parseSandboxSnapshot(value: unknown): SandboxWorkspaceSnapshot {
+  const input = plainDataRecord(value, "SandboxWorkspaceSnapshot");
+  exactKeys(input, ["sessionId", "generation", "snapshotToken"], "SandboxWorkspaceSnapshot");
+  const session = parseSandboxSession({
+    sessionId: input.sessionId,
+    generation: input.generation,
+  });
+  if (
+    typeof input.snapshotToken !== "string" ||
+    !SNAPSHOT_TOKEN_PATTERN.test(input.snapshotToken)
+  ) {
+    throw new WorkspaceApplicationError("INVALID_INPUT", "Sandbox snapshotToken 格式无效");
+  }
+  return Object.freeze({ ...session, snapshotToken: input.snapshotToken });
+}
+
 export function validatePolicy(policy: WorkspaceExecutionPolicy): WorkspaceExecutionPolicy {
-  for (const [name, value] of Object.entries(policy)) {
-    if (!Number.isSafeInteger(value) || value < 1) {
+  const input = plainDataRecord(policy, "WorkspaceExecutionPolicy");
+  exactKeys(
+    input,
+    [
+      "maxEntries",
+      "maxFiles",
+      "maxTotalBytes",
+      "maxSingleFileBytes",
+      "maxChunkBytes",
+      "maxPathUtf8Bytes",
+      "historicalManifest",
+    ],
+    "WorkspaceExecutionPolicy",
+  );
+  for (const name of [
+    "maxEntries",
+    "maxFiles",
+    "maxTotalBytes",
+    "maxSingleFileBytes",
+    "maxChunkBytes",
+    "maxPathUtf8Bytes",
+  ] as const) {
+    const value = input[name];
+    if (!Number.isSafeInteger(value) || (value as number) < 1) {
       throw new WorkspaceApplicationError("INVALID_INPUT", `${name} 必须是正安全整数`);
     }
   }
-  if (policy.maxSingleFileBytes > policy.maxTotalBytes) {
+  if ((input.maxFiles as number) > (input.maxEntries as number)) {
+    throw new WorkspaceApplicationError("INVALID_INPUT", "maxFiles 不能超过 maxEntries");
+  }
+  if ((input.maxSingleFileBytes as number) > (input.maxTotalBytes as number)) {
     throw new WorkspaceApplicationError("INVALID_INPUT", "单文件配额不能超过总配额");
   }
-  return Object.freeze({ ...policy });
+  const historical = plainDataRecord(input.historicalManifest, "historicalManifest");
+  const allowed = ["maxFiles", "maxTotalBytes", "maxSingleFileBytes", "maxPathUtf8Bytes"];
+  if (
+    !Object.hasOwn(historical, "maxFiles") ||
+    !Object.hasOwn(historical, "maxTotalBytes") ||
+    Object.keys(historical).some((key) => !allowed.includes(key))
+  ) {
+    throw new WorkspaceApplicationError("INVALID_INPUT", "historicalManifest 策略字段无效");
+  }
+  for (const [name, value] of Object.entries(historical)) {
+    if (!Number.isSafeInteger(value) || (value as number) < 1) {
+      throw new WorkspaceApplicationError("INVALID_INPUT", `historicalManifest.${name} 无效`);
+    }
+  }
+  return Object.freeze({
+    maxEntries: input.maxEntries as number,
+    maxFiles: input.maxFiles as number,
+    maxTotalBytes: input.maxTotalBytes as number,
+    maxSingleFileBytes: input.maxSingleFileBytes as number,
+    maxChunkBytes: input.maxChunkBytes as number,
+    maxPathUtf8Bytes: input.maxPathUtf8Bytes as number,
+    historicalManifest: Object.freeze({
+      maxFiles: historical.maxFiles as number,
+      maxTotalBytes: historical.maxTotalBytes as number,
+      ...(historical.maxSingleFileBytes === undefined
+        ? {}
+        : { maxSingleFileBytes: historical.maxSingleFileBytes as number }),
+      ...(historical.maxPathUtf8Bytes === undefined
+        ? {}
+        : { maxPathUtf8Bytes: historical.maxPathUtf8Bytes as number }),
+    }),
+  });
 }
 
 export function stopPoint(signal: AbortSignal | undefined): void {
@@ -38,10 +145,27 @@ export function stopPoint(signal: AbortSignal | undefined): void {
 export async function beginOperation(
   journal: WorkspaceOperationJournalPort,
   identity: WorkspaceOperationIdentity,
-) {
-  const state = await journal.begin(identity);
+): Promise<
+  { readonly status: "started" } | { readonly status: "completed"; readonly result: unknown }
+> {
+  let raw: unknown;
+  try {
+    raw = await journal.begin(identity);
+  } catch (error) {
+    throw journalError(error, "读取 Workspace operation journal 失败");
+  }
+  const state = plainDataRecord(raw, "WorkspaceOperationBeginResult");
+  if (state.status === "started") {
+    exactKeys(state, ["status"], "WorkspaceOperationBeginResult");
+    return { status: "started" };
+  }
+  if (state.status === "completed") {
+    exactKeys(state, ["status", "result"], "WorkspaceOperationBeginResult");
+    return { status: "completed", result: state.result };
+  }
+  exactKeys(state, ["status"], "WorkspaceOperationBeginResult");
   if (state.status === "conflict") {
-    throw new WorkspaceApplicationError("OPERATION_CONFLICT", "operationKey 已绑定其他输入");
+    throw new WorkspaceApplicationError("OPERATION_CONFLICT", "operationKey 已永久绑定其他输入");
   }
   if (state.status === "in_progress") {
     throw new WorkspaceApplicationError("OPERATION_IN_PROGRESS", "Workspace 操作正在执行");
@@ -49,7 +173,10 @@ export async function beginOperation(
   if (state.status === "unknown") {
     throw new WorkspaceApplicationError("RESULT_UNKNOWN", "Workspace 操作等待外部结果对账");
   }
-  return state;
+  if (state.status === "terminal") {
+    throw new WorkspaceApplicationError("OPERATION_CONFLICT", "Workspace 操作已终态失败");
+  }
+  throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace journal 返回非法状态");
 }
 
 export async function mapDependencyFailure(
@@ -62,27 +189,119 @@ export async function mapDependencyFailure(
   },
 ): Promise<never> {
   if (error instanceof WorkspaceApplicationError) throw error;
-  const dependencyCode =
-    error instanceof WorkspaceDependencyError
-      ? safeDependencyCode(error.dependencyCode)
-      : "UNCLASSIFIED";
+  const dependencyCode = dependencyCodeFor(error);
   if (error instanceof WorkspaceDependencyError && error.result === "unknown") {
     const fact: WorkspaceUnknownFact = Object.freeze({
       operationKey: input.identity.operationKey,
       kind: input.identity.kind,
+      inputDigest: input.identity.inputDigest,
       phase: input.phase,
       dependencyCode,
       occurredAt: input.now().toISOString(),
     });
-    await input.journal.recordUnknown(input.identity, fact);
+    try {
+      await input.journal.recordUnknown(input.identity, fact);
+    } catch (journalFailure) {
+      throw journalError(journalFailure, "Workspace UNKNOWN 事实写入失败");
+    }
     throw new WorkspaceApplicationError("RESULT_UNKNOWN", "外部副作用结果未知，已登记等待对账");
   }
-  await input.journal.failKnown(input.identity, input.phase, dependencyCode);
   throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace 外部依赖调用失败");
 }
 
-function safeDependencyCode(value: string): string {
-  return /^[A-Z0-9_]{1,64}$/u.test(value) ? value : "UNCLASSIFIED";
+export async function recordKnownFailure(
+  journal: WorkspaceOperationJournalPort,
+  identity: WorkspaceOperationIdentity,
+  phase: string,
+  error: WorkspaceApplicationError,
+): Promise<void> {
+  const disposition: WorkspaceKnownFailureDisposition = isRetryable(error.code)
+    ? "retryable"
+    : "terminal";
+  try {
+    await journal.failKnown({
+      identity,
+      phase,
+      code: error.code,
+      disposition,
+    });
+  } catch (journalFailure) {
+    throw journalError(journalFailure, "Workspace known failure 写入失败");
+  }
+}
+
+function isRetryable(code: WorkspaceApplicationError["code"]): boolean {
+  return code === "CANCELLED" || code === "DEPENDENCY_FAILED";
+}
+
+function dependencyCodeFor(error: unknown): string {
+  return error instanceof WorkspaceDependencyError &&
+    /^[A-Z0-9_]{1,64}$/u.test(error.dependencyCode)
+    ? error.dependencyCode
+    : "UNCLASSIFIED";
+}
+
+function journalError(error: unknown, message: string): WorkspaceApplicationError {
+  return new WorkspaceJournalError(
+    error instanceof WorkspaceDependencyError && error.result === "unknown"
+      ? "RESULT_UNKNOWN"
+      : "DEPENDENCY_FAILED",
+    message,
+  );
+}
+
+class WorkspaceJournalError extends WorkspaceApplicationError {}
+
+export function isWorkspaceJournalError(error: WorkspaceApplicationError): boolean {
+  return error instanceof WorkspaceJournalError;
+}
+
+export function plainDataRecord(value: unknown, label: string): Record<string, unknown> {
+  if (
+    utilTypes.isProxy(value) ||
+    typeof value !== "object" ||
+    value === null ||
+    Array.isArray(value)
+  ) {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 必须是普通数据对象`);
+  }
+  let prototype: object | null;
+  let descriptors: PropertyDescriptorMap;
+  try {
+    prototype = Object.getPrototypeOf(value);
+    descriptors = Object.getOwnPropertyDescriptors(value);
+  } catch {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 不可安全读取`);
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 必须是普通数据对象`);
+  }
+  const snapshot = Object.create(null) as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor = descriptors[key];
+    if (
+      typeof key !== "string" ||
+      descriptor === undefined ||
+      !("value" in descriptor) ||
+      descriptor.enumerable !== true
+    ) {
+      throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 含非法字段`);
+    }
+    snapshot[key] = descriptor.value;
+  }
+  return Object.freeze(snapshot);
+}
+
+export function exactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  label: string,
+): void {
+  const actual = Object.keys(value).sort();
+  const sorted = [...expected].sort();
+  if (actual.length !== sorted.length || actual.some((key, index) => key !== sorted[index])) {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", `${label} 字段不符合契约`);
+  }
 }
 
 export interface StreamVerification {
@@ -91,7 +310,6 @@ export interface StreamVerification {
   readonly status: () => "pending" | "completed" | "failed";
 }
 
-/** 逐块校验并复制 chunk，调用方永远不会持有整个文件。result 仅在消费者读到 EOF 后完成。 */
 export function verifyingStream(input: {
   readonly source: AsyncIterable<Uint8Array>;
   readonly policy: WorkspaceExecutionPolicy;
@@ -105,7 +323,6 @@ export function verifyingStream(input: {
     resolveResult = resolve;
     rejectResult = reject;
   });
-  // 防止端口在首块前抛错时产生未处理 rejection；调用方仍会 await 原 promise。
   void result.catch(() => undefined);
   const body = (async function* () {
     const hash = createHash("sha256");

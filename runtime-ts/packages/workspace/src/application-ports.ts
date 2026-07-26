@@ -1,19 +1,39 @@
 import type {
   WorkspaceContentIdentity,
   WorkspaceManifest,
+  WorkspaceManifestPolicy,
   WorkspaceStableObjectIdentity,
 } from "./manifest.js";
 
-export interface WorkspaceOperationIdentity {
+export interface WorkspaceTrustedScope {
+  readonly tenantId: string;
+  readonly threadId: string;
+  readonly workspaceId: string;
+}
+
+export interface SandboxSessionIdentity {
+  readonly sessionId: string;
+  readonly generation: number;
+}
+
+export interface SandboxWorkspaceSnapshot extends SandboxSessionIdentity {
+  readonly snapshotToken: string;
+}
+
+export interface WorkspaceOperationIdentity extends WorkspaceTrustedScope {
+  readonly schemaVersion: 1;
+  readonly digestAlgorithm: "workspace-operation-v2";
   readonly operationKey: string;
   readonly kind: "materialize" | "publish";
   readonly inputDigest: string;
+  readonly sandbox: SandboxSessionIdentity;
+  readonly snapshotToken?: string;
 }
 
-export interface ValidatedWorkspaceChange {
+export interface ValidatedWorkspaceChange extends WorkspaceTrustedScope {
   readonly kind: "validated_workspace_change";
   readonly operationKey: string;
-  readonly tenantId: string;
+  readonly sandboxSnapshot: SandboxWorkspaceSnapshot;
   readonly baseManifestDigest?: string;
   readonly candidateManifest: WorkspaceManifest;
   readonly verifiedAt: string;
@@ -23,6 +43,8 @@ export type WorkspaceOperationResult =
   | {
       readonly kind: "materialized";
       readonly operationKey: string;
+      readonly scope: WorkspaceTrustedScope;
+      readonly sandbox: SandboxSessionIdentity;
       readonly targetManifestDigest: string;
     }
   | {
@@ -31,27 +53,34 @@ export type WorkspaceOperationResult =
       readonly change: ValidatedWorkspaceChange;
     };
 
-export type WorkspaceOperationBeginResult =
-  | { readonly status: "started" }
-  | { readonly status: "completed"; readonly result: WorkspaceOperationResult }
-  | { readonly status: "in_progress" | "unknown" | "conflict" };
+/** Journal 属于 unknown 边界，端口实现返回值必须由应用核心完整解析。 */
+export type WorkspaceOperationBeginResult = unknown;
 
 export interface WorkspaceUnknownFact {
   readonly operationKey: string;
   readonly kind: "materialize" | "publish";
+  readonly inputDigest: string;
   readonly phase: string;
   readonly dependencyCode: string;
   readonly occurredAt: string;
 }
 
-/** 生产实现必须持久化 operationKey、输入摘要和 UNKNOWN 事实。 */
+export type WorkspaceKnownFailureDisposition = "retryable" | "terminal";
+
+/**
+ * operationKey 首次 begin 后必须永久绑定完整 identity。known failure 只改变状态，不删除绑定；
+ * retryable 可由同 digest 重入，terminal 永久失败；任何不同 digest 永久 conflict。
+ */
 export interface WorkspaceOperationJournalPort {
   begin(identity: WorkspaceOperationIdentity): Promise<WorkspaceOperationBeginResult>;
-  /** 幂等完成；响应未知时后续 begin 必须能读回已提交结果或 unknown，不能回到可重发的 started。 */
   complete(identity: WorkspaceOperationIdentity, result: WorkspaceOperationResult): Promise<void>;
-  /** 只允许清理仍为 running 的同一输入；不得删除 completed 或 unknown 事实。 */
-  failKnown(identity: WorkspaceOperationIdentity, phase: string, code: string): Promise<void>;
-  /** 以 CAS 记录 running→unknown；若 complete 已提交，必须保留 completed，绝不能降级覆盖。 */
+  failKnown(input: {
+    readonly identity: WorkspaceOperationIdentity;
+    readonly phase: string;
+    readonly code: string;
+    readonly disposition: WorkspaceKnownFailureDisposition;
+  }): Promise<void>;
+  /** CAS running→unknown；若 complete 已提交，必须保留 completed，绝不能降级。 */
   recordUnknown(identity: WorkspaceOperationIdentity, fact: WorkspaceUnknownFact): Promise<void>;
 }
 
@@ -63,10 +92,9 @@ export interface WorkspaceStableAuthorizationReceipt {
   readonly object: WorkspaceStableObjectIdentity;
 }
 
-/** 授权必须来自当前事实源，物理键中的 tenant 字符串本身不构成授权。 */
 export interface WorkspaceStableBlobReadPort {
   authorize(input: {
-    readonly tenantId: string;
+    readonly scope: WorkspaceTrustedScope;
     readonly purpose: "workspace_materialization";
     readonly content: WorkspaceContentIdentity;
     readonly object: WorkspaceStableObjectIdentity;
@@ -96,12 +124,16 @@ export interface SandboxWorkspaceEntry {
   readonly size?: number;
 }
 
-/**
- * 适配器只能操作自身 Sandbox 中固定的 /workspace。所有参数都是经 schema 校验的相对路径，
- * 禁止实现为宿主 fs 或 shell 拼接；原子写必须采用同目录临时文件、fsync（若支持）和 rename。
- */
+/** 所有相对路径都绑定端口返回的 session/generation；适配器必须在每次调用时拒绝代际漂移。 */
 export interface SandboxWorkspacePort {
+  currentSession(): Promise<SandboxSessionIdentity>;
+  /** 同 operationKey 必须返回同一不可变快照，便于 abort/部分上传后恢复。 */
+  captureSnapshot(input: {
+    readonly operationKey: string;
+    readonly scope: WorkspaceTrustedScope;
+  }): Promise<SandboxWorkspaceSnapshot>;
   inspectRegularFile(
+    sandbox: SandboxSessionIdentity,
     relativePath: string,
     control?: { readonly signal?: AbortSignal },
   ): Promise<
@@ -109,18 +141,41 @@ export interface SandboxWorkspacePort {
     | { readonly status: "regular"; readonly body: AsyncIterable<Uint8Array> }
     | { readonly status: "unsafe"; readonly kind: "directory" | "symlink" | "special" }
   >;
-  removeFile(relativePath: string, control?: { readonly signal?: AbortSignal }): Promise<void>;
-  removeDirectory(relativePath: string, control?: { readonly signal?: AbortSignal }): Promise<void>;
-  ensureDirectory(relativePath: string, control?: { readonly signal?: AbortSignal }): Promise<void>;
-  /** 返回成功前必须消费 body 到 EOF，并完成同目录临时普通文件到目标的原子 rename。 */
+  removeFile(
+    sandbox: SandboxSessionIdentity,
+    relativePath: string,
+    control?: { readonly signal?: AbortSignal },
+  ): Promise<void>;
+  removeDirectory(
+    sandbox: SandboxSessionIdentity,
+    relativePath: string,
+    control?: { readonly signal?: AbortSignal },
+  ): Promise<void>;
+  /** 只用于验证阶段发现的目录类型漂移；递归删除不得跟随 symlink。 */
+  removeUnexpectedDirectory(
+    sandbox: SandboxSessionIdentity,
+    relativePath: string,
+    control?: { readonly signal?: AbortSignal },
+  ): Promise<void>;
+  ensureDirectory(
+    sandbox: SandboxSessionIdentity,
+    relativePath: string,
+    control?: { readonly signal?: AbortSignal },
+  ): Promise<void>;
+  /** 同目录临时普通文件写完并校验 EOF 后，以 POSIX rename 原子替换文件或 symlink；目录须先删除。 */
   writeFileAtomically(input: {
+    readonly sandbox: SandboxSessionIdentity;
     readonly relativePath: string;
     readonly operationKey: string;
     readonly body: AsyncIterable<Uint8Array>;
     readonly signal?: AbortSignal;
   }): Promise<void>;
-  listWorkspace(control?: { readonly signal?: AbortSignal }): AsyncIterable<SandboxWorkspaceEntry>;
+  listWorkspace(
+    snapshot: SandboxWorkspaceSnapshot,
+    control?: { readonly signal?: AbortSignal },
+  ): AsyncIterable<SandboxWorkspaceEntry>;
   readRegularFile(
+    snapshot: SandboxWorkspaceSnapshot,
     relativePath: string,
     control?: { readonly signal?: AbortSignal },
   ): AsyncIterable<Uint8Array>;
@@ -131,19 +186,18 @@ export interface WorkspaceCandidateBlob {
   readonly object: WorkspaceStableObjectIdentity;
 }
 
-/** 上传端口内部负责 staging、stable lifecycle 授权与响应未知对账；应用层不会盲目重放。 */
 export interface WorkspaceCandidateBlobWritePort {
-  /** 返回成功前必须把 body 消费到 EOF；提前返回属于协议错误，不能宣称对象完整。 */
   putCandidate(input: {
-    readonly tenantId: string;
+    readonly scope: WorkspaceTrustedScope;
     readonly purpose: "workspace";
     readonly operationKey: string;
     readonly relativePath: string;
+    readonly expectedContent: WorkspaceContentIdentity;
     readonly body: AsyncIterable<Uint8Array>;
     readonly signal?: AbortSignal;
   }): Promise<WorkspaceCandidateBlob>;
   headCandidate(input: {
-    readonly tenantId: string;
+    readonly scope: WorkspaceTrustedScope;
     readonly blob: WorkspaceCandidateBlob;
   }): Promise<
     | { readonly status: "exists"; readonly blob: WorkspaceCandidateBlob }
@@ -152,9 +206,11 @@ export interface WorkspaceCandidateBlobWritePort {
 }
 
 export interface WorkspaceExecutionPolicy {
+  readonly maxEntries: number;
   readonly maxFiles: number;
   readonly maxTotalBytes: number;
   readonly maxSingleFileBytes: number;
   readonly maxChunkBytes: number;
   readonly maxPathUtf8Bytes: number;
+  readonly historicalManifest: WorkspaceManifestPolicy;
 }

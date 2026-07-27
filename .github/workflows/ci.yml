@@ -35,9 +35,9 @@ jobs:
       - name: 冻结安装依赖
         run: pnpm install --frozen-lockfile
 
-      - name: 从无 vendor dist 状态执行完整检查
-        # 回归脚本先删除生成物；typecheck 必须自行构建固定版本 SDK，不能依赖前次任务残留。
-        run: pnpm check:clean-vendor
+      - name: 从无工作区 dist 状态执行完整检查
+        # 回归脚本清除所有 workspace 生成物；typecheck 必须按依赖拓扑自行构建，不能依赖缓存或前序任务残留。
+        run: pnpm check:clean-workspace
 
       - name: Linux 最小容器启动门禁
         run: pnpm test:process:container

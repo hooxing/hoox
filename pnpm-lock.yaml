@@ -179,6 +179,9 @@ importers:
 
   runtime-ts/packages/pi-adapter:
     dependencies:
+      '@cube-runtime/prompt-builder':
+        specifier: workspace:*
+        version: link:../prompt-builder
       '@cube-runtime/sandbox':
         specifier: workspace:*
         version: link:../sandbox

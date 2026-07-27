@@ -408,7 +408,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
     });
   });
 
-  it("new、Reflect、any、JSON、原型与其他 authority 都不能伪造当前服务能力", async () => {
+  it("static monkey-patch、new、Reflect、JSON、原型与其他 authority 都不能伪造能力", async () => {
     const command = publishCommand();
     const AuthorizationConstructor = ArtifactExecutionAuthorization as unknown as new (
       ...arguments_: unknown[]
@@ -421,6 +421,67 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
     );
 
     const sameShape = { ...command.authorization } as ArtifactExecutionAuthorization;
+    const patchedAuthority = createArtifactExecutionAuthorizationAuthority(immediateMonotonicClock);
+    const staticSurface = ArtifactExecutionAuthorization as unknown as {
+      createForAuthority?: (...arguments_: unknown[]) => ArtifactExecutionAuthorization;
+    };
+    const originalFactory = Object.getOwnPropertyDescriptor(staticSurface, "createForAuthority");
+    const patched = Reflect.defineProperty(staticSurface, "createForAuthority", {
+      configurable: true,
+      writable: true,
+      value: () => sameShape,
+    });
+    let patchedIssued: ArtifactExecutionAuthorization;
+    try {
+      patchedIssued = patchedAuthority.issuer.issue({
+        consumed: {
+          permit: {
+            permitId: "permit-static-monkey-patch",
+            scope,
+            runClaimToken: "run-claim-token-static-patch",
+            runClaimEpoch: 2,
+            workspaceRootRunId: scope.rootRunId,
+            workspaceLeaseEpoch: 3,
+            attemptVersion: 4,
+            effect: "tool_execution",
+            callId: command.authorization.callId,
+            toolName: "publish_artifact",
+            argsDigest: command.toolArgsDigest,
+            issuedAt: isoTimestamp("2026-07-26T08:00:00.000Z"),
+            expiresAt: isoTimestamp("2026-07-26T08:01:00.000Z"),
+          },
+          consumedAt: isoTimestamp("2026-07-26T08:00:01.000Z"),
+          consumedAtMonotonicMs: 100,
+          maxContinuationDelayMs: 1_000,
+        },
+        attemptId: "attempt-artifact-1",
+      });
+    } finally {
+      if (patched) {
+        if (originalFactory === undefined)
+          Reflect.deleteProperty(staticSurface, "createForAuthority");
+        else Reflect.defineProperty(staticSurface, "createForAuthority", originalFactory);
+      }
+    }
+    expect(patched).toBe(false);
+    expect(Object.isFrozen(ArtifactExecutionAuthorization)).toBe(true);
+    expect(Object.hasOwn(ArtifactExecutionAuthorization, "createForAuthority")).toBe(false);
+    expect(patchedIssued).not.toBe(sameShape);
+    expect(() =>
+      patchedAuthority.verifier.assert(patchedIssued, {
+        toolName: "publish_artifact",
+        argsDigest: command.toolArgsDigest,
+        attemptId: "attempt-artifact-1",
+        scope,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      patchedAuthority.verifier.assert(sameShape, {
+        toolName: "publish_artifact",
+        argsDigest: command.toolArgsDigest,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "ARTIFACT_NOT_AUTHORIZED" }));
+
     const fromJson = JSON.parse(
       JSON.stringify(command.authorization),
     ) as ArtifactExecutionAuthorization;

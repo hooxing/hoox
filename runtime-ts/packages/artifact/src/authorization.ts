@@ -92,14 +92,25 @@ export class ArtifactExecutionAuthorization {
     this.maxContinuationDelayMs = authorization.maxContinuationDelayMs;
     Object.freeze(this);
   }
+}
 
-  static createForAuthority(
-    token: object,
-    authorization: ConsumedExternalEffectAuthorization,
-    attemptId: string,
-  ): ArtifactExecutionAuthorization {
-    return new ArtifactExecutionAuthorization(token, authorization, attemptId);
-  }
+type PrivateAuthorizationConstructor = new (
+  token: object,
+  authorization: ConsumedExternalEffectAuthorization,
+  attemptId: string,
+) => ArtifactExecutionAuthorization;
+
+// 通过模块词法绑定捕获真实 [[Construct]]；issuer 不读取导出 class 上可被补写的 static 属性。
+const PrivateAuthorization =
+  ArtifactExecutionAuthorization as unknown as PrivateAuthorizationConstructor;
+Object.freeze(ArtifactExecutionAuthorization.prototype);
+Object.freeze(ArtifactExecutionAuthorization);
+
+function constructAuthorization(
+  authorization: ConsumedExternalEffectAuthorization,
+  attemptId: string,
+): ArtifactExecutionAuthorization {
+  return new PrivateAuthorization(constructionToken, authorization, attemptId);
 }
 
 /**
@@ -118,11 +129,7 @@ export function createArtifactExecutionAuthorizationAuthority(
       assertConsumedAuthorizationShape(input.consumed);
       if (!validOpaqueId(input.attemptId)) throw invalidAuthorization();
       assertContinuationWindow(input.consumed, clock);
-      const authorization = ArtifactExecutionAuthorization.createForAuthority(
-        constructionToken,
-        input.consumed,
-        input.attemptId,
-      );
+      const authorization = constructAuthorization(input.consumed, input.attemptId);
       issued.add(authorization);
       return authorization;
     },

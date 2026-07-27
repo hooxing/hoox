@@ -65,6 +65,25 @@ describe("显式开发身份初始化", () => {
     expect(parsed.principals).toEqual(principals);
   });
 
+  it.each([
+    { DEV_AUTH_USER_B_ID: principals[0].userId },
+    { DEV_AUTH_USER_B_TENANT_ID: principals[0].tenantId },
+  ])("配置解析与 API 启动共用 A/B 隔离约束：%o", (overrides) => {
+    expect(() =>
+      parseDevelopmentIdentityEnvironment({
+        RUNTIME_ENV: "development",
+        DATABASE_URL: "postgresql://runtime:credential@database/runtime",
+        DATABASE_SCHEMA: "runtime",
+        DEV_AUTH_ENABLED: "true",
+        DEV_AUTH_USER_A_ID: principals[0].userId,
+        DEV_AUTH_USER_A_TENANT_ID: principals[0].tenantId,
+        DEV_AUTH_USER_B_ID: principals[1].userId,
+        DEV_AUTH_USER_B_TENANT_ID: principals[1].tenantId,
+        ...overrides,
+      }),
+    ).toThrow("DEVELOPMENT_IDENTITIES_MUST_BE_ISOLATED");
+  });
+
   it("首次创建两个隔离聚合，再次执行保持不变", async () => {
     const repository = inMemoryRepository();
     await expect(

@@ -1,23 +1,26 @@
 import {
   createPersonalTenant,
   createUser,
+  type IsoTimestamp,
   isoTimestamp,
   membershipId,
   tenantId,
   userId,
-  type IsoTimestamp,
 } from "@cube-runtime/domain";
 import type { TenantBundle, TenantRepository } from "@cube-runtime/persistence";
 import {
   booleanEnvironmentField,
   parseStrictEnvironment,
+  type RuntimeEnvironment,
   readRequiredEnvironmentValue,
   selectDeclaredEnvironment,
   stringEnvironmentField,
   urlEnvironmentField,
-  type RuntimeEnvironment,
 } from "@cube-runtime/process-runtime";
-import type { ApiDevelopmentPrincipal } from "./process-entry.js";
+import {
+  type ApiDevelopmentPrincipal,
+  assertDevelopmentPrincipalsIsolated,
+} from "./development-boundary.js";
 
 const optionalEnvironments = [] as const;
 const developmentIdentityEnvironmentSchema = Object.freeze({
@@ -76,6 +79,7 @@ export function parseDevelopmentIdentityEnvironment(
         }),
       ] as const)
     : undefined;
+  if (principals !== undefined) assertDevelopmentPrincipalsIsolated(principals);
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
@@ -134,10 +138,8 @@ export async function provisionDevelopmentIdentities(input: {
   if (input.runtimeEnvironment !== "development") {
     throw new Error("DEVELOPMENT_IDENTITY_PROVISIONING_FORBIDDEN");
   }
+  assertDevelopmentPrincipalsIsolated(input.principals);
   const [first, second] = input.principals;
-  if (first.userId === second.userId || first.tenantId === second.tenantId) {
-    throw new Error("DEVELOPMENT_IDENTITIES_MUST_BE_ISOLATED");
-  }
 
   const results: DevelopmentIdentityProvisioningResult[] = [];
   for (const [label, principal] of [

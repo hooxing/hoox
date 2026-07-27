@@ -183,6 +183,7 @@ describe("Pi Faux Artifact 纵向链路", () => {
             }),
         },
       });
+      let initialContext = "";
       let correctionContext = "";
       let completionContext = "";
       const faux = fauxProvider({
@@ -191,10 +192,13 @@ describe("Pi Faux Artifact 纵向链路", () => {
         tokensPerSecond: 10_000,
       });
       faux.setResponses([
-        fauxAssistantMessage(
-          fauxToolCall("declare_deliverables", declaration, { id: "call-faux-declare" }),
-          { stopReason: "toolUse" },
-        ),
+        (context) => {
+          initialContext = JSON.stringify(context);
+          return fauxAssistantMessage(
+            fauxToolCall("declare_deliverables", declaration, { id: "call-faux-declare" }),
+            { stopReason: "toolUse" },
+          );
+        },
         fauxAssistantMessage(
           fauxToolCall("publish_artifact", brokenPublication, { id: "call-faux-broken" }),
           { stopReason: "toolUse" },
@@ -229,6 +233,11 @@ describe("Pi Faux Artifact 纵向链路", () => {
       });
       const events: RuntimeAgentEvent[] = [];
       controller.subscribe((event) => events.push(event));
+      const diagnostics = controller.getDiagnostics();
+      expect(diagnostics.activeToolNames).toEqual(
+        expect.arrayContaining(["declare_deliverables", "publish_artifact"]),
+      );
+      expect(diagnostics.capabilityManifestDigest).toMatch(/^sha256:[a-f0-9]{64}$/u);
       try {
         await controller.prompt("生成并发布报告");
       } finally {
@@ -239,6 +248,9 @@ describe("Pi Faux Artifact 纵向链路", () => {
       await expect(gate.assertReadyForCompletion({ scope })).resolves.toBeUndefined();
       expect(service.failedArtifacts).toContain("artifact_faux_broken");
       expect(service.published).toContain("report");
+      expect(initialContext).toContain("declare_deliverables");
+      expect(initialContext).toContain("publish_artifact");
+      expect(initialContext).not.toContain("request_user_input");
       expect(correctionContext).toContain("ARTIFACT_PUBLICATION_FAILED");
       expect(correctionContext).toContain("correctable");
       expect(completionContext).toContain("ARTIFACT_PUBLISHED");

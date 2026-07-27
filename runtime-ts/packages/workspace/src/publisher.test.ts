@@ -53,6 +53,24 @@ class Journal implements WorkspaceOperationJournalPort {
   completeAfterStoreUnknown = false;
   completeErrorBeforeStore: unknown | undefined;
 
+  async lookupCompleted(input: {
+    operationKey: string;
+    scope: WorkspaceTrustedScope;
+    kind: "materialize" | "publish";
+  }): Promise<unknown> {
+    const row = this.rows.get(input.operationKey);
+    if (
+      row?.state !== "completed" ||
+      row.identity.kind !== input.kind ||
+      row.identity.tenantId !== input.scope.tenantId ||
+      row.identity.threadId !== input.scope.threadId ||
+      row.identity.workspaceId !== input.scope.workspaceId
+    ) {
+      return { status: "not_found" };
+    }
+    return { status: "completed", identity: row.identity, result: row.result };
+  }
+
   async begin(identity: WorkspaceOperationIdentity): Promise<unknown> {
     if (this.beginError !== undefined) throw this.beginError;
     if (this.beginOverride !== undefined) return this.beginOverride;
@@ -104,13 +122,14 @@ interface CapturedSnapshot {
 }
 class SnapshotSandbox implements SandboxWorkspacePort {
   session: SandboxSessionIdentity = { sessionId: "sandbox-a", generation: 1 };
-  tokenSerial = 1;
   readonly liveEntries: SandboxWorkspaceEntry[] = [];
   readonly liveBodies = new Map<string, Uint8Array>();
   readonly byOperation = new Map<string, CapturedSnapshot>();
   captureCalls = 0;
+  releaseCalls = 0;
   reads = 0;
   listFailure: WorkspaceDependencyError | undefined;
+  captureFailure: WorkspaceDependencyError | undefined;
   onList: (() => void) | undefined;
   onRead: (() => void) | undefined;
   listOverride: AsyncIterable<SandboxWorkspaceEntry> | undefined;
@@ -126,11 +145,12 @@ class SnapshotSandbox implements SandboxWorkspacePort {
   }
   async captureSnapshot(input: { operationKey: string }): Promise<SandboxWorkspaceSnapshot> {
     this.captureCalls += 1;
+    if (this.captureFailure !== undefined) throw this.captureFailure;
     const existing = this.byOperation.get(input.operationKey);
     if (existing !== undefined) return existing.identity;
     const identity = {
       ...this.session,
-      snapshotToken: `snapshot-${this.tokenSerial++}`,
+      snapshotToken: `snapshot-${input.operationKey}`,
     };
     this.byOperation.set(input.operationKey, {
       identity,
@@ -138,6 +158,10 @@ class SnapshotSandbox implements SandboxWorkspacePort {
       bodies: new Map([...this.liveBodies].map(([path, body]) => [path, Uint8Array.from(body)])),
     });
     return identity;
+  }
+  async releaseSnapshots(input: { operationKey: string }): Promise<void> {
+    this.releaseCalls += 1;
+    this.byOperation.delete(input.operationKey);
   }
   listWorkspace(snapshot: SandboxWorkspaceSnapshot): AsyncIterable<SandboxWorkspaceEntry> {
     if (this.listOverride !== undefined) return this.listOverride;
@@ -395,11 +419,43 @@ describe("Workspace publisher 可靠边界", () => {
       threadId: SCOPE.threadId,
       workspaceId: SCOPE.workspaceId,
       sandbox: state.sandbox.session,
-      snapshotToken: "snapshot-1",
+      snapshotToken: "snapshot-publish",
     });
     expect(change).toMatchObject({ ...SCOPE, sandboxSnapshot: expect.any(Object) });
     expect(state.sandbox.reads).toBe(2);
     expect(Object.keys(change)).not.toContain("revisionId");
+    expect(state.sandbox.releaseCalls).toBe(1);
+  });
+
+  it("capture 或后续读取失败也在 finally 释放 operation 快照", async () => {
+    const capture = setup();
+    capture.sandbox.captureFailure = new WorkspaceDependencyError("known", "CAPTURE_FAILED");
+    await expect(capture.publisher.publish(request("capture-release"))).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILED",
+    });
+    expect(capture.sandbox.releaseCalls).toBe(1);
+
+    const listed = setup();
+    listed.sandbox.listFailure = new WorkspaceDependencyError("known", "LIST_FAILED");
+    await expect(listed.publisher.publish(request("list-release"))).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILED",
+    });
+    expect(listed.sandbox.releaseCalls).toBe(1);
+  });
+
+  it("完成后 Workspace 改变，同 operationKey 从 Journal 返回原结果且不重新 capture", async () => {
+    const state = setup();
+    state.sandbox.addFile("a", "original");
+    const completed = await state.publisher.publish(request("completed-stable"));
+    state.sandbox.liveEntries.length = 0;
+    state.sandbox.liveBodies.clear();
+    state.sandbox.addFile("changed", "new-content");
+
+    const repeated = await state.publisher.publish(request("completed-stable"));
+    expect(repeated).toEqual(completed);
+    expect(state.sandbox.captureCalls).toBe(1);
+    expect(state.sandbox.releaseCalls).toBe(1);
+    expect(repeated.candidateManifest.entries.map((entry) => entry.path)).toEqual(["a"]);
   });
 
   it("非法 tenant/scope 在 snapshot 与任何 Blob 副作用前拒绝", async () => {

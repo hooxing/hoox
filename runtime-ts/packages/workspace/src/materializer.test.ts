@@ -87,6 +87,10 @@ class Journal implements WorkspaceOperationJournalPort {
   failKnownError: WorkspaceDependencyError | undefined;
   completeAfterStoreUnknown = false;
 
+  async lookupCompleted(): Promise<unknown> {
+    return { status: "not_found" };
+  }
+
   async begin(identity: WorkspaceOperationIdentity): Promise<unknown> {
     if (this.beginError !== undefined) throw this.beginError;
     if (this.beginOverride !== undefined) return this.beginOverride;
@@ -187,6 +191,7 @@ class Sandbox implements SandboxWorkspacePort {
   readonly childKeys: string[] = [];
   readonly completedChildKeys = new Set<string>();
   writeEffects = 0;
+  releaseCalls = 0;
   unknownEvent: string | undefined;
   knownEvent: string | undefined;
   afterWrite: (() => void) | undefined;
@@ -199,6 +204,9 @@ class Sandbox implements SandboxWorkspacePort {
   }
   async captureSnapshot(): Promise<SandboxWorkspaceSnapshot> {
     return { ...this.session, snapshotToken: "snapshot-a" };
+  }
+  async releaseSnapshots(): Promise<void> {
+    this.releaseCalls += 1;
   }
   async inspectRegularFile(sandbox: SandboxSessionIdentity, path: string) {
     this.assertSession(sandbox);
@@ -398,6 +406,7 @@ describe("Workspace materializer 可靠边界", () => {
     ]);
     expect(state.blobs.authorizeCalls).toBe(2);
     expect(result).toMatchObject({ scope: SCOPE, sandbox: state.sandbox.session });
+    expect(state.sandbox.releaseCalls).toBe(1);
   });
 
   it("同路径目录类型漂移在 remove_files 阶段安全递归删除，再 stable fallback 原子 rename", async () => {
@@ -432,6 +441,7 @@ describe("Workspace materializer 可靠边界", () => {
       denied.service.materialize(request("denied", manifest([keep]))),
     ).rejects.toMatchObject({ code: "ACCESS_DENIED" });
     expect(denied.sandbox.events).toEqual([]);
+    expect(denied.sandbox.releaseCalls).toBe(1);
   });
 
   it("远端写结果未知只记录一次 UNKNOWN，重入不盲目重写", async () => {

@@ -20,6 +20,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@cube-runtime/workspace": "workspace:*",
     "@cubesandbox/sdk": "workspace:*"
   }
 }

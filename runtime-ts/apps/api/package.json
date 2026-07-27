@@ -15,6 +15,7 @@
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -b tsconfig.json --clean",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "dev": "node --env-file-if-exists=../../../.env dist/development-main.js"
+    "dev": "node --env-file-if-exists=../../../.env dist/development-main.js",
+    "dev:identity:provision": "node --env-file-if-exists=../../../.env dist/development-identity-main.js"
   }
 }

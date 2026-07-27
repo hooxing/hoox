@@ -70,6 +70,10 @@ import {
   type Pool,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import {
+  loadPostgreSqlMigrationContract,
+  type PostgreSqlMigrationContract,
+} from "./postgres-migration-contract.js";
 
 const enabled = process.env.RUN_PG_RUN_WORKER_INTEGRATION === "true";
 const bootstrapUrl = process.env.DATABASE_BOOTSTRAP_URL ?? "";
@@ -96,6 +100,7 @@ let setup!: PgRunExecutionSetup;
 let persistence!: PgExecutionPersistence;
 let runDispatchCreation!: PgRunDispatchCreation;
 let runDispatchOutbox!: PgRunDispatchOutbox;
+let migrationContract!: PostgreSqlMigrationContract;
 let databaseName = "";
 
 interface Fixture {
@@ -238,6 +243,7 @@ function withLostCommitResponse(
 
 describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
   beforeAll(async () => {
+    migrationContract = await loadPostgreSqlMigrationContract();
     if (!bootstrapUrl) throw new Error("缺少 DATABASE_BOOTSTRAP_URL");
     if (!adminUrl) throw new Error("缺少 M4 数据库管理连接");
     admin = createPostgresPool({ connectionString: adminUrl, maxConnections: 2 });
@@ -284,7 +290,10 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       [runtimeRole, schema],
     );
     // Thread 创建 0007 在 Cleanup 0006 后叠加，既有 Dispatch ACL 仍须存在。
-    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 10 });
+    expect(dispatchAcl.rows[0]).toEqual({
+      allowed: true,
+      version: migrationContract.latestVersion,
+    });
     const runtimeSchema = await runtime.query<{
       readonly schema: string;
       readonly current_user: string;
@@ -2907,7 +2916,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     });
     expect(down.at(-1)?.version).toBe(4);
     const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
-    expect(restored.at(-1)?.version).toBe(10);
+    expect(restored.at(-1)?.version).toBe(migrationContract.latestVersion);
     const acl = await admin.query<{
       readonly select_allowed: boolean;
       readonly update_allowed: boolean;

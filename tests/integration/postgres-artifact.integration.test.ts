@@ -19,6 +19,7 @@ import {
   type Pool,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { loadPostgreSqlMigrationContract } from "./postgres-migration-contract.js";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -231,7 +232,10 @@ beforeAll(async () => {
     maxConnections: 3,
   });
   runtime = createPostgresPool({ connectionString: runtimeUrl, schema, maxConnections: 6 });
-  expect((await migrateUp(migrator, migrationSecurity)).at(-1)?.version).toBe(10);
+  const migrationContract = await loadPostgreSqlMigrationContract();
+  expect((await migrateUp(migrator, migrationSecurity)).at(-1)?.version).toBe(
+    migrationContract.latestVersion,
+  );
   repository = new PgArtifactDeliveryRepository(runtime, { assert() {} });
 
   await withTenantTransaction(

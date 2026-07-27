@@ -317,6 +317,11 @@ function fakeSdkSandbox(): CubeSdkSandbox {
       write: async (path, data) => {
         files.set(path, String(data));
       },
+      list: async () => [],
+      stat: async () => ({ type: "FILE_TYPE_DIRECTORY" }),
+      remove: async () => undefined,
+      rename: async () => ({}),
+      makeDir: async () => ({ type: "FILE_TYPE_DIRECTORY" }),
     },
     pause: async () => undefined,
     kill: async () => undefined,

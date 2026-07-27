@@ -4,3 +4,9 @@ export * from "./cube-gateway.js";
 export * from "./errors.js";
 export type * from "./types.js";
 export * from "./validation.js";
+export {
+  CubeSandboxWorkspacePort,
+  type CubeWorkspaceAdapterOptions,
+  type TrustedSandboxSessionCapability,
+  type TrustedSandboxWorkspaceBinding,
+} from "./workspace-adapter.js";

@@ -72,6 +72,12 @@ export type WorkspaceKnownFailureDisposition = "retryable" | "terminal";
  * retryable 可由同 digest 重入，terminal 永久失败；任何不同 digest 永久 conflict。
  */
 export interface WorkspaceOperationJournalPort {
+  /** 只按可信 scope + kind + operationKey 查询已完成事实，供重入在外部快照已释放后直接返回。 */
+  lookupCompleted(input: {
+    readonly operationKey: string;
+    readonly scope: WorkspaceTrustedScope;
+    readonly kind: "materialize" | "publish";
+  }): Promise<unknown>;
   begin(identity: WorkspaceOperationIdentity): Promise<WorkspaceOperationBeginResult>;
   complete(identity: WorkspaceOperationIdentity, result: WorkspaceOperationResult): Promise<void>;
   failKnown(input: {
@@ -132,6 +138,11 @@ export interface SandboxWorkspacePort {
     readonly operationKey: string;
     readonly scope: WorkspaceTrustedScope;
   }): Promise<SandboxWorkspaceSnapshot>;
+  /** operation 进入任一终态后释放其进程内/远端快照；同 key capture 与 release 必须原子互斥。 */
+  releaseSnapshots(input: {
+    readonly sandbox: SandboxSessionIdentity;
+    readonly operationKey: string;
+  }): Promise<void>;
   inspectRegularFile(
     sandbox: SandboxSessionIdentity,
     relativePath: string,

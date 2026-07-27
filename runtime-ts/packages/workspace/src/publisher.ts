@@ -25,6 +25,7 @@ import {
   parseContentIdentity,
   parseExternalAsyncIterable,
   parseExternalStream,
+  parseSandboxSession,
   parseSandboxSnapshot,
   parseStableObjectIdentity,
   plainDataRecord,
@@ -80,143 +81,198 @@ export class WorkspacePublisher {
       input.base === undefined
         ? undefined
         : parseWorkspaceManifest(input.base, scope.tenantId, this.policy.historicalManifest);
-    const snapshot = await this.captureSnapshot(operationKey, scope);
-    const identity = publishIdentity({
-      operationKey,
-      scope,
-      snapshot,
-      ...(base === undefined ? {} : { base }),
-    });
-    const begun = await beginOperation(this.options.journal, identity);
-    if (begun.status === "completed") {
-      return parsePublishedResult(begun.result, identity, base, this.manifestPolicy);
-    }
-
-    let phase = "list_workspace";
+    const completed = await this.lookupCompleted(operationKey, scope, base);
+    if (completed !== undefined) return completed;
+    const sandbox = await this.currentSandbox();
     try {
-      stopPoint(input.signal);
-      const entries = await this.collectEntries(identity, snapshot, input.signal);
-      const manifestEntries: unknown[] = [];
-      let totalBytes = 0;
+      const snapshot = await this.captureSnapshot(operationKey, scope);
+      if (snapshot.sessionId !== sandbox.sessionId || snapshot.generation !== sandbox.generation) {
+        throw new WorkspaceApplicationError("INVALID_INPUT", "Sandbox snapshot 身份发生漂移");
+      }
+      const identity = publishIdentity({
+        operationKey,
+        scope,
+        snapshot,
+        ...(base === undefined ? {} : { base }),
+      });
+      const begun = await beginOperation(this.options.journal, identity);
+      if (begun.status === "completed") {
+        return parsePublishedResult(begun.result, identity, base, this.manifestPolicy);
+      }
 
-      for (const entry of entries) {
-        if (entry.kind !== "file") continue;
-        const relativePath = workspaceRelativePath(entry.relativePath);
-        const declaredSize = requireDeclaredSize(entry, this.policy);
-        if (totalBytes > this.policy.maxTotalBytes - declaredSize) {
-          throw new WorkspaceApplicationError("LIMIT_EXCEEDED", "Workspace 总字节数超过配额");
-        }
-        totalBytes += declaredSize;
-
-        phase = "hash_snapshot_file";
+      let phase = "list_workspace";
+      try {
         stopPoint(input.signal);
-        const content = await digestStream({
-          source: parseExternalStream(
-            this.options.sandbox.readRegularFile(
-              snapshot,
-              relativePath,
-              signalControl(input.signal),
-            ),
-            "Sandbox 快照文件流",
-          ),
-          policy: this.policy,
-          ...(input.signal === undefined ? {} : { signal: input.signal }),
-        });
-        if (content.size !== declaredSize) {
-          throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "Sandbox 快照文件长度不匹配");
-        }
+        const entries = await this.collectEntries(identity, snapshot, input.signal);
+        const manifestEntries: unknown[] = [];
+        let totalBytes = 0;
 
-        phase = "upload_candidate";
-        stopPoint(input.signal);
-        const verified = verifyingStream({
-          source: parseExternalStream(
-            this.options.sandbox.readRegularFile(
-              snapshot,
-              relativePath,
-              signalControl(input.signal),
+        for (const entry of entries) {
+          if (entry.kind !== "file") continue;
+          const relativePath = workspaceRelativePath(entry.relativePath);
+          const declaredSize = requireDeclaredSize(entry, this.policy);
+          if (totalBytes > this.policy.maxTotalBytes - declaredSize) {
+            throw new WorkspaceApplicationError("LIMIT_EXCEEDED", "Workspace 总字节数超过配额");
+          }
+          totalBytes += declaredSize;
+
+          phase = "hash_snapshot_file";
+          stopPoint(input.signal);
+          const content = await digestStream({
+            source: parseExternalStream(
+              this.options.sandbox.readRegularFile(
+                snapshot,
+                relativePath,
+                signalControl(input.signal),
+              ),
+              "Sandbox 快照文件流",
             ),
-            "Sandbox 快照文件流",
-          ),
-          policy: this.policy,
-          ...(input.signal === undefined ? {} : { signal: input.signal }),
-          expected: content,
-        });
-        const blob = parseCandidateBlob(
-          await this.callDependency(identity, phase, () =>
-            this.options.blobs.putCandidate({
-              scope,
-              purpose: "workspace",
-              operationKey: candidateOperationKey(identity, relativePath, content),
-              relativePath,
-              expectedContent: content,
-              body: verified.body,
-              ...(input.signal === undefined ? {} : { signal: input.signal }),
-            }),
-          ),
-        );
-        if (verified.status() === "pending") {
-          throw new WorkspaceApplicationError(
-            "DEPENDENCY_FAILED",
-            "候选 Blob 端口未消费完整文件流",
+            policy: this.policy,
+            ...(input.signal === undefined ? {} : { signal: input.signal }),
+          });
+          if (content.size !== declaredSize) {
+            throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "Sandbox 快照文件长度不匹配");
+          }
+
+          phase = "upload_candidate";
+          stopPoint(input.signal);
+          const verified = verifyingStream({
+            source: parseExternalStream(
+              this.options.sandbox.readRegularFile(
+                snapshot,
+                relativePath,
+                signalControl(input.signal),
+              ),
+              "Sandbox 快照文件流",
+            ),
+            policy: this.policy,
+            ...(input.signal === undefined ? {} : { signal: input.signal }),
+            expected: content,
+          });
+          const blob = parseCandidateBlob(
+            await this.callDependency(identity, phase, () =>
+              this.options.blobs.putCandidate({
+                scope,
+                purpose: "workspace",
+                operationKey: candidateOperationKey(identity, relativePath, content),
+                relativePath,
+                expectedContent: content,
+                body: verified.body,
+                ...(input.signal === undefined ? {} : { signal: input.signal }),
+              }),
+            ),
           );
-        }
-        await verified.result;
-        if (!sameCandidateContent(blob, content)) {
-          throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "上传结果与快照内容身份不一致");
+          if (verified.status() === "pending") {
+            throw new WorkspaceApplicationError(
+              "DEPENDENCY_FAILED",
+              "候选 Blob 端口未消费完整文件流",
+            );
+          }
+          await verified.result;
+          if (!sameCandidateContent(blob, content)) {
+            throw new WorkspaceApplicationError(
+              "INTEGRITY_MISMATCH",
+              "上传结果与快照内容身份不一致",
+            );
+          }
+
+          createWorkspaceManifest(
+            { tenantId: scope.tenantId, entries: [manifestEntry(relativePath, blob)] },
+            this.manifestPolicy,
+          );
+          stopPoint(input.signal);
+          phase = "verify_candidate";
+          const head = parseCandidateHeadResult(
+            await this.callDependency(identity, phase, () =>
+              this.options.blobs.headCandidate({ scope, blob }),
+            ),
+          );
+          if (head.status !== "exists" || !sameCandidate(head.blob, blob)) {
+            throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "候选 Blob HEAD 校验失败");
+          }
+          manifestEntries.push(manifestEntry(relativePath, blob));
         }
 
-        createWorkspaceManifest(
-          { tenantId: scope.tenantId, entries: [manifestEntry(relativePath, blob)] },
+        stopPoint(input.signal);
+        phase = "build_candidate";
+        const candidateManifest = createWorkspaceManifest(
+          { tenantId: scope.tenantId, entries: manifestEntries },
           this.manifestPolicy,
         );
-        stopPoint(input.signal);
-        phase = "verify_candidate";
-        const head = parseCandidateHeadResult(
-          await this.callDependency(identity, phase, () =>
-            this.options.blobs.headCandidate({ scope, blob }),
-          ),
-        );
-        if (head.status !== "exists" || !sameCandidate(head.blob, blob)) {
-          throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "候选 Blob HEAD 校验失败");
-        }
-        manifestEntries.push(manifestEntry(relativePath, blob));
-      }
-
-      stopPoint(input.signal);
-      phase = "build_candidate";
-      const candidateManifest = createWorkspaceManifest(
-        { tenantId: scope.tenantId, entries: manifestEntries },
-        this.manifestPolicy,
-      );
-      const change: ValidatedWorkspaceChange = Object.freeze({
-        kind: "validated_workspace_change",
-        operationKey,
-        ...scope,
-        sandboxSnapshot: snapshot,
-        ...(base === undefined ? {} : { baseManifestDigest: base.digest }),
-        candidateManifest,
-        verifiedAt: this.now().toISOString(),
-      });
-      stopPoint(input.signal);
-      phase = "complete";
-      await this.callDependency(identity, phase, () =>
-        this.options.journal.complete(identity, {
-          kind: "published",
+        const change: ValidatedWorkspaceChange = Object.freeze({
+          kind: "validated_workspace_change",
           operationKey,
-          change,
-        }),
-      );
-      return change;
-    } catch (error) {
-      const mapped =
-        error instanceof WorkspaceApplicationError
-          ? error
-          : new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace 发布失败");
-      if (mapped.code !== "RESULT_UNKNOWN" && !isWorkspaceJournalError(mapped)) {
-        await recordKnownFailure(this.options.journal, identity, phase, mapped);
+          ...scope,
+          sandboxSnapshot: snapshot,
+          ...(base === undefined ? {} : { baseManifestDigest: base.digest }),
+          candidateManifest,
+          verifiedAt: this.now().toISOString(),
+        });
+        stopPoint(input.signal);
+        phase = "complete";
+        await this.callDependency(identity, phase, () =>
+          this.options.journal.complete(identity, {
+            kind: "published",
+            operationKey,
+            change,
+          }),
+        );
+        return change;
+      } catch (error) {
+        const mapped =
+          error instanceof WorkspaceApplicationError
+            ? error
+            : new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace 发布失败");
+        if (mapped.code !== "RESULT_UNKNOWN" && !isWorkspaceJournalError(mapped)) {
+          await recordKnownFailure(this.options.journal, identity, phase, mapped);
+        }
+        throw mapped;
       }
-      throw mapped;
+    } finally {
+      await this.options.sandbox.releaseSnapshots({ sandbox, operationKey });
     }
+  }
+
+  private async currentSandbox() {
+    try {
+      return parseSandboxSession(await this.options.sandbox.currentSession());
+    } catch (error) {
+      if (error instanceof WorkspaceApplicationError) throw error;
+      throw new WorkspaceApplicationError(
+        error instanceof WorkspaceDependencyError && error.result === "unknown"
+          ? "RESULT_UNKNOWN"
+          : "DEPENDENCY_FAILED",
+        "读取 Sandbox 身份失败",
+      );
+    }
+  }
+
+  private async lookupCompleted(
+    operationKey: string,
+    scope: WorkspaceTrustedScope,
+    base: WorkspaceManifest | undefined,
+  ): Promise<ValidatedWorkspaceChange | undefined> {
+    let raw: unknown;
+    try {
+      raw = await this.options.journal.lookupCompleted({
+        operationKey,
+        scope,
+        kind: "publish",
+      });
+    } catch {
+      throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "查询 Workspace 完成事实失败");
+    }
+    const lookup = plainDataRecord(raw, "WorkspaceCompletedLookup");
+    if (lookup.status === "not_found") {
+      exactKeys(lookup, ["status"], "WorkspaceCompletedLookup");
+      return undefined;
+    }
+    exactKeys(lookup, ["status", "identity", "result"], "WorkspaceCompletedLookup");
+    if (lookup.status !== "completed") {
+      throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace 完成事实状态非法");
+    }
+    const identity = parseStoredPublishIdentity(lookup.identity, operationKey, scope, base);
+    return parsePublishedResult(lookup.result, identity, base, this.manifestPolicy);
   }
 
   private async captureSnapshot(
@@ -345,6 +401,57 @@ function publishIdentity(input: {
     }),
     snapshotToken: input.snapshot.snapshotToken,
   });
+}
+
+function parseStoredPublishIdentity(
+  value: unknown,
+  operationKey: string,
+  scope: WorkspaceTrustedScope,
+  base: WorkspaceManifest | undefined,
+): WorkspaceOperationIdentity {
+  const stored = plainDataRecord(value, "WorkspaceOperationIdentity");
+  exactKeys(
+    stored,
+    [
+      "schemaVersion",
+      "digestAlgorithm",
+      "operationKey",
+      "kind",
+      "inputDigest",
+      "tenantId",
+      "threadId",
+      "workspaceId",
+      "sandbox",
+      "snapshotToken",
+    ],
+    "WorkspaceOperationIdentity",
+  );
+  if (
+    stored.schemaVersion !== 1 ||
+    stored.digestAlgorithm !== OPERATION_DIGEST_VERSION ||
+    stored.operationKey !== operationKey ||
+    stored.kind !== "publish" ||
+    stored.tenantId !== scope.tenantId ||
+    stored.threadId !== scope.threadId ||
+    stored.workspaceId !== scope.workspaceId
+  ) {
+    throw new WorkspaceApplicationError("OPERATION_CONFLICT", "已完成发布身份与请求不一致");
+  }
+  const sandbox = parseSandboxSession(stored.sandbox);
+  const snapshot = parseSandboxSnapshot({
+    ...sandbox,
+    snapshotToken: stored.snapshotToken,
+  });
+  const expected = publishIdentity({
+    operationKey,
+    scope,
+    snapshot,
+    ...(base === undefined ? {} : { base }),
+  });
+  if (stored.inputDigest !== expected.inputDigest) {
+    throw new WorkspaceApplicationError("OPERATION_CONFLICT", "已完成发布输入摘要与请求不一致");
+  }
+  return expected;
 }
 
 function parsePublishedResult(

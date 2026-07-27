@@ -32,6 +32,11 @@ export interface ArtifactDeliveryServiceOptions {
 
 export interface PublishArtifactCommand {
   readonly authorization: ArtifactExecutionAuthorization;
+  /**
+   * Tool Router 对已经通过严格协议校验的模型原始参数计算的摘要。
+   * Workspace 路径可能先被提升成 ResourceVersion，因此该摘要不能由解析后的命令反推。
+   */
+  readonly toolArgsDigest: Sha256Digest;
   readonly idempotencyKey: string;
   readonly artifactId: ArtifactId;
   readonly resourceVersionId: ResourceVersionId;
@@ -148,15 +153,7 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
     validateIdempotencyKey(command.idempotencyKey);
     const authorizationExpectation = {
       toolName: "publish_artifact",
-      argsDigest: digestCanonical({
-        idempotencyKey: command.idempotencyKey,
-        artifactId: command.artifactId,
-        resourceVersionId: command.resourceVersionId,
-        replacesArtifactId: command.replacesArtifactId,
-        name: command.name,
-        purpose: command.purpose,
-        deliverableKey: command.deliverableKey,
-      }),
+      argsDigest: command.toolArgsDigest,
     } as const;
     this.#assertAuthorization(command.authorization, authorizationExpectation);
     const name = normalizeName(command.name);
@@ -166,6 +163,7 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
       kind: "publish_artifact",
       scope: stableScope(command.authorization.scope),
       idempotencyKey: command.idempotencyKey,
+      toolArgsDigest: command.toolArgsDigest,
       artifactId: command.artifactId,
       resourceVersionId: command.resourceVersionId,
       replacesArtifactId: command.replacesArtifactId,

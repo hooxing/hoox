@@ -2,6 +2,7 @@ import { createSafePiSession } from "@cube-runtime/pi-adapter";
 import { sha256Digest } from "@cube-runtime/domain";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { ArtifactToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import type { AgentSessionFactoryPort, AgentTurnOutcome, WorkerAgentSessionPort } from "./ports.js";
 
 /**
@@ -13,6 +14,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
   constructor(
     private readonly model: Model<Api>,
     private readonly modelRuntime: ModelRuntime,
+    private readonly artifactTools?: ArtifactToolRouterFactoryPort,
   ) {}
 
   async create(
@@ -21,24 +23,34 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     const startedToolCalls = new Map<string, string>();
     const invalidToolCalls = new Set<string>();
     const authorizationRequested = new Set<string>();
+    const authorizeStartedTool = (call: {
+      readonly callId: string;
+      readonly toolName: string;
+      readonly argsDigest: string;
+    }) => {
+      const startedName = startedToolCalls.get(call.callId);
+      if (
+        invalidToolCalls.has(call.callId) ||
+        authorizationRequested.has(call.callId) ||
+        startedName !== call.toolName
+      ) {
+        throw new Error("Pi 工具许可缺少匹配的 tool.started");
+      }
+      // 不删除 gate：callId 在整个 Attempt 内永久一次性，失败后的相同调用也不可重试。
+      authorizationRequested.add(call.callId);
+      return input.authorizeToolEffect({ ...call, argsDigest: sha256Digest(call.argsDigest) });
+    };
+    const artifactToolRouter = this.artifactTools?.create({
+      context: input.trustedToolContext,
+      authorizer: { authorizeToolEffect: authorizeStartedTool },
+    });
     const controller = await createSafePiSession({
       model: this.model,
       modelRuntime: this.modelRuntime,
       sandbox: input.sandbox,
       rolloutProjection: input.rolloutProjection,
-      authorizeToolEffect: (call) => {
-        const startedName = startedToolCalls.get(call.callId);
-        if (
-          invalidToolCalls.has(call.callId) ||
-          authorizationRequested.has(call.callId) ||
-          startedName !== call.toolName
-        ) {
-          throw new Error("Pi 工具许可缺少匹配的 tool.started");
-        }
-        // 不删除 gate：callId 在整个 Attempt 内永久一次性，失败后的相同调用也不可重试。
-        authorizationRequested.add(call.callId);
-        return input.authorizeToolEffect({ ...call, argsDigest: sha256Digest(call.argsDigest) });
-      },
+      authorizeToolEffect: authorizeStartedTool,
+      ...(artifactToolRouter === undefined ? {} : { artifactToolRouter }),
     });
     // 该订阅先于 RunWorker 的持久订阅注册，只负责证明 Pi 已真实发布 tool.started。
     const unsubscribeToolGate = controller.subscribe((event) => {

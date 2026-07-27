@@ -34,6 +34,7 @@
 | [ADR-0026](0026-development-api-persistent-assembly.md) | 开发 API 使用真实 PostgreSQL 的最小常驻装配 | 已接受 | 2026-07-28 |
 | [ADR-0027](0027-artifact-postgresql-persistence.md) | Artifact PostgreSQL 不可变发布与下载双重授权 | 已接受 | 2026-07-28 |
 | [ADR-0028](0028-cubesandbox-workspace-adapter-boundary.md) | CubeSandbox Workspace 可信适配边界 | 已接受 | 2026-07-28 |
+| [ADR-0029](0029-trusted-prompt-and-session-capability-manifest.md) | 可信 Prompt 分层与 Session 能力清单 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录
 

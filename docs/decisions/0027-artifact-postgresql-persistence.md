@@ -14,20 +14,24 @@ Artifact 应用核心已有声明、发布、修正链、完成门和下载授�
 
 ## 选择
 
-1. 新增 0010 migration，分别保存交付声明命令、声明、不可变发布事实和发布命令。
+1. 新增 0010 migration，分别保存交付声明命令、声明、不可变发布事实、仅追加结算和发布命令。
 2. Artifact 固定 ResourceVersion 及 stable Blob 的 incarnation、物理键、摘要、大小和媒体类型；
-   只有状态可从 `publishing` 单向进入 `published/failed`。
+   发布主记录永远保持 `publishing`，终态以唯一、仅追加的 settlement 表达；数据库因此强制
+   每个 Artifact 只能从 publishing 进入一次 `published/failed`，终态不能更新或逆转。
 3. 同一 Run 只接受一份声明集合；同一 Attempt 的幂等键绑定命令摘要和 Artifact，精确重放，
    摘要或 Artifact 不同均冲突。
 4. 修正必须创建新 Artifact，并只允许替换同 Run、同用途、同声明键的 failed Artifact。
-5. 写事务逐字段重验已消费 permit、Attempt version、Run claim、Workspace fence/lease、scope、
-   tool/call/digest 和数据库时钟有效期；TypeScript 能力验证器不能替代这些事实。
-6. 用户列表与下载每次重验 active Membership。下载授权修订绑定 Membership lock marker 和
-   Artifact 更新时间，预签名前后再次核对完整 Blob 身份。
+5. 写事务在同一事务锁定 Run、Attempt、Run claim、Workspace lease 和 permit，并逐字段重验
+   Workspace fence、scope、tool/call/digest、Attempt version 及数据库时钟有效期；TypeScript
+   能力验证器不能替代这些事实。
+6. 用户列表以单条带 Membership 行锁的 SQL 同时完成 active Membership、Run 和 Artifact
+   过滤，避免先授权后读取的 TOCTOU。下载授权修订绑定 Membership lock marker 和 Artifact
+   更新时间，预签名前后再次核对完整 Blob 身份。
 7. `PgArtifactDeliveryRepository` 位于 artifact 包并直接使用窄 PG 事务辅助器，避免包依赖环；
    migration 和 Runtime 最小权限仍由 persistence 管理。
-8. 四张表全部 ENABLE/FORCE RLS。Runtime 只拥有 SELECT/INSERT，且仅可更新 Artifact 的
-   `status/updated_at`，无 DELETE、TRUNCATE、REFERENCES 或 TRIGGER 权限。
+8. 五张表全部 ENABLE/FORCE RLS。Runtime 对 Artifact 表只拥有 SELECT/INSERT，不拥有任何
+   UPDATE、DELETE、TRUNCATE、REFERENCES 或 TRIGGER 权限；Membership 只沿用既有常量
+   `lock_marker` 列更新权来取得授权行锁。
 
 ## 影响与边界
 

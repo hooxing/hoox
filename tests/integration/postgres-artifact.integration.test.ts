@@ -63,7 +63,15 @@ let migrator!: Pool;
 let runtime!: Pool;
 let repository!: PgArtifactDeliveryRepository;
 
-function authorization(toolName: string, label: string): ArtifactExecutionAuthorization {
+function authorization(
+  toolName: string,
+  label: string,
+  timeline: { issuedAt: string; expiresAt: string; consumedAt: string } = {
+    issuedAt,
+    expiresAt,
+    consumedAt,
+  },
+): ArtifactExecutionAuthorization {
   return Object.freeze({
     permitId: `permit_${label}_${unique}`,
     attemptId: ids.attempt,
@@ -83,9 +91,9 @@ function authorization(toolName: string, label: string): ArtifactExecutionAuthor
     callId: `call_${label}_${unique}`,
     toolName,
     argsDigest: sha256Digest(createHash("sha256").update(label).digest("hex")),
-    issuedAt,
-    expiresAt,
-    consumedAt,
+    issuedAt: timeline.issuedAt,
+    expiresAt: timeline.expiresAt,
+    consumedAt: timeline.consumedAt,
     consumedAtMonotonicMs: 1,
     maxContinuationDelayMs: 60_000,
   }) as unknown as ArtifactExecutionAuthorization;
@@ -108,9 +116,9 @@ async function seedPermit(auth: ArtifactExecutionAuthorization): Promise<void> {
         auth.argsDigest,
         auth.runClaimToken,
         ids.run,
-        issuedAt,
-        expiresAt,
-        consumedAt,
+        auth.issuedAt,
+        auth.expiresAt,
+        auth.consumedAt,
       ],
     ),
   );
@@ -301,23 +309,17 @@ describe("Artifact PostgreSQL 持久化", () => {
     await seedPermit(declare);
     await seedPermit(publish);
     const commandDigest = sha256Digest("3".repeat(64));
-    const declared = await repository.declareDeliverables({
+    const declarationCommand = {
       authorization: declare,
       idempotencyKey: `declare-${unique}`,
       commandDigest,
-      declarations: [{ key: "report", name: "报告", requirement: "required" }],
-    });
-    expect(declared.outcome).toBe("applied");
-    expect(
-      (
-        await repository.declareDeliverables({
-          authorization: declare,
-          idempotencyKey: `declare-${unique}`,
-          commandDigest,
-          declarations: [{ key: "report", name: "报告", requirement: "required" }],
-        })
-      ).outcome,
-    ).toBe("already_applied");
+      declarations: [{ key: "report", name: "报告", requirement: "required" as const }],
+    };
+    const declared = await Promise.all([
+      repository.declareDeliverables(declarationCommand),
+      repository.declareDeliverables(declarationCommand),
+    ]);
+    expect(declared.map((result) => result.outcome).sort()).toEqual(["already_applied", "applied"]);
     expect(await repository.inspectCompletion({ scope: publish.scope })).toMatchObject({
       outcome: "not_ready",
       blockers: [{ deliverableKey: "report", status: "missing" }],
@@ -325,31 +327,21 @@ describe("Artifact PostgreSQL 持久化", () => {
 
     const publicationDigest = sha256Digest("4".repeat(64));
     const artifact = artifactId(`artifact_result_${unique}`);
-    const begun = await repository.beginPublication({
+    const publicationCommand = {
       authorization: publish,
       idempotencyKey: `publish-${unique}`,
       commandDigest: publicationDigest,
       artifactId: artifact,
       resourceVersionId: ids.version,
       name: "报告.txt",
-      purpose: "deliverable",
+      purpose: "deliverable" as const,
       deliverableKey: "report",
-    });
-    expect(begun.outcome).toBe("started");
-    expect(
-      (
-        await repository.beginPublication({
-          authorization: publish,
-          idempotencyKey: `publish-${unique}`,
-          commandDigest: publicationDigest,
-          artifactId: artifact,
-          resourceVersionId: ids.version,
-          name: "报告.txt",
-          purpose: "deliverable",
-          deliverableKey: "report",
-        })
-      ).outcome,
-    ).toBe("already_started");
+    };
+    const begun = await Promise.all([
+      repository.beginPublication(publicationCommand),
+      repository.beginPublication(publicationCommand),
+    ]);
+    expect(begun.map((result) => result.outcome).sort()).toEqual(["already_started", "started"]);
     expect(
       (
         await repository.beginPublication({
@@ -364,28 +356,18 @@ describe("Artifact PostgreSQL 持久化", () => {
         })
       ).outcome,
     ).toBe("conflict");
-    expect(
-      (
-        await repository.finishPublication({
-          authorization: publish,
-          idempotencyKey: `publish-${unique}`,
-          commandDigest: publicationDigest,
-          artifactId: artifact,
-          target: "published",
-        })
-      ).outcome,
-    ).toBe("applied");
-    expect(
-      (
-        await repository.finishPublication({
-          authorization: publish,
-          idempotencyKey: `publish-${unique}`,
-          commandDigest: publicationDigest,
-          artifactId: artifact,
-          target: "published",
-        })
-      ).outcome,
-    ).toBe("already_applied");
+    const finishCommand = {
+      authorization: publish,
+      idempotencyKey: `publish-${unique}`,
+      commandDigest: publicationDigest,
+      artifactId: artifact,
+      target: "published" as const,
+    };
+    const finished = await Promise.all([
+      repository.finishPublication(finishCommand),
+      repository.finishPublication(finishCommand),
+    ]);
+    expect(finished.map((result) => result.outcome).sort()).toEqual(["already_applied", "applied"]);
     expect(await repository.inspectCompletion({ scope: publish.scope })).toEqual({
       outcome: "ready",
     });
@@ -405,6 +387,20 @@ describe("Artifact PostgreSQL 持久化", () => {
         })
       ).outcome,
     ).toBe("not_found");
+    const emptyRun = runId(`artifact_empty_run_${unique}`);
+    await withTenantTransaction(runtime, { tenantId: ids.tenant }, (client) =>
+      client.query(
+        `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
+         VALUES($1,$2,$3,'running',clock_timestamp(),clock_timestamp())`,
+        [ids.tenant, emptyRun, ids.thread],
+      ),
+    );
+    expect(
+      await repository.listAuthorizedArtifacts({
+        request: { tenantId: ids.tenant, userId: ids.user },
+        runId: emptyRun,
+      }),
+    ).toEqual({ outcome: "authorized", artifacts: [] });
 
     const download = await repository.authorizeDownload({
       request: { tenantId: ids.tenant, userId: ids.user },
@@ -415,6 +411,160 @@ describe("Artifact PostgreSQL 持久化", () => {
       expect(await repository.confirmDownloadAuthorization(download.download)).toEqual({
         outcome: "confirmed",
       });
+    }
+  });
+
+  it("数据库拒绝终态逆转、重复结算与未失败 replacement", async () => {
+    await expect(
+      withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+        client.query("UPDATE artifact_publications SET status='published' WHERE tenant_id=$1", [
+          ids.tenant,
+        ]),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+        client.query(
+          `INSERT INTO artifact_publication_settlements(tenant_id,artifact_id,target)
+           VALUES($1,$2,'failed')`,
+          [ids.tenant, `artifact_result_${unique}`],
+        ),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+        client.query(
+          `INSERT INTO artifact_publications(
+             tenant_id,id,thread_id,run_id,attempt_id,workspace_id,root_run_id,
+             resource_id,resource_version_id,replaces_artifact_id,name,purpose,
+             deliverable_key,status,blob_reference_id,blob_purpose,blob_lifecycle_id,
+             blob_incarnation_id,physical_object_key,digest,media_type,size
+           )
+           SELECT tenant_id,$2,thread_id,run_id,attempt_id,workspace_id,root_run_id,
+                  resource_id,resource_version_id,id,name,purpose,deliverable_key,'publishing',
+                  blob_reference_id,blob_purpose,blob_lifecycle_id,blob_incarnation_id,
+                  physical_object_key,digest,media_type,size
+             FROM artifact_publications WHERE tenant_id=$1 AND id=$3`,
+          [ids.tenant, `artifact_invalid_replacement_${unique}`, `artifact_result_${unique}`],
+        ),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+        client.query(
+          `INSERT INTO artifact_deliverable_commands(
+             tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+             idempotency_key,command_digest
+           ) VALUES($1,$2,$3,$4,$5,$3,$6,$7)`,
+          [
+            ids.tenant,
+            ids.attempt,
+            `wrong_run_${unique}`,
+            ids.thread,
+            ids.workspace,
+            `wrong-composite-${unique}`,
+            "8".repeat(64),
+          ],
+        ),
+      ),
+    ).rejects.toThrow();
+  });
+
+  it("数据库时钟拒绝过期 permit，完成门拒绝错误 rootRunId", async () => {
+    const expired = authorization("publish_artifact", "expired", {
+      issuedAt: "2020-01-01T00:00:00.000Z",
+      consumedAt: "2020-01-01T00:00:01.000Z",
+      expiresAt: "2020-01-01T00:01:00.000Z",
+    });
+    await seedPermit(expired);
+    expect(
+      (
+        await repository.beginPublication({
+          authorization: expired,
+          idempotencyKey: `expired-${unique}`,
+          commandDigest: sha256Digest("6".repeat(64)),
+          artifactId: artifactId(`artifact_expired_${unique}`),
+          resourceVersionId: ids.version,
+          name: "过期.txt",
+          purpose: "diagnostic",
+        })
+      ).outcome,
+    ).toBe("scope_mismatch");
+    expect(
+      await repository.inspectCompletion({
+        scope: { ...expired.scope, rootRunId: runId(`wrong_root_${unique}`) },
+      }),
+    ).toEqual({ outcome: "scope_mismatch" });
+  });
+
+  it("Run 终态提交与发布按行锁串行化并在锁后拒绝", async () => {
+    const racing = authorization("publish_artifact", "terminal-race");
+    await seedPermit(racing);
+    const blocker = await migrator.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT set_config('app.tenant_id',$1,true)", [ids.tenant]);
+      await blocker.query("SELECT id FROM runs WHERE tenant_id=$1 AND id=$2 FOR UPDATE", [
+        ids.tenant,
+        ids.run,
+      ]);
+      const publishing = repository.beginPublication({
+        authorization: racing,
+        idempotencyKey: `terminal-race-${unique}`,
+        commandDigest: sha256Digest("7".repeat(64)),
+        artifactId: artifactId(`artifact_terminal_race_${unique}`),
+        resourceVersionId: ids.version,
+        name: "终态竞态.txt",
+        purpose: "diagnostic",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await blocker.query(
+        "UPDATE runs SET status='cancelled',version=version+1 WHERE tenant_id=$1 AND id=$2",
+        [ids.tenant, ids.run],
+      );
+      await blocker.query("COMMIT");
+      expect((await publishing).outcome).toBe("not_running");
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+      await withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+        client.query("UPDATE runs SET status='running' WHERE tenant_id=$1 AND id=$2", [
+          ids.tenant,
+          ids.run,
+        ]),
+      );
+    }
+  });
+
+  it("Membership 撤销与单 SQL 列表授权按成员行锁串行化", async () => {
+    const blocker = await migrator.connect();
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT set_config('app.tenant_id',$1,true)", [ids.tenant]);
+      await blocker.query(
+        "SELECT user_id FROM memberships WHERE tenant_id=$1 AND user_id=$2 FOR UPDATE",
+        [ids.tenant, ids.user],
+      );
+      const listing = repository.listAuthorizedArtifacts({
+        request: { tenantId: ids.tenant, userId: ids.user },
+        runId: ids.run,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await blocker.query(
+        "UPDATE memberships SET status='revoked' WHERE tenant_id=$1 AND user_id=$2",
+        [ids.tenant, ids.user],
+      );
+      await blocker.query("COMMIT");
+      expect((await listing).outcome).toBe("not_found");
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+      await withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+        client.query("UPDATE memberships SET status='active' WHERE tenant_id=$1 AND user_id=$2", [
+          ids.tenant,
+          ids.user,
+        ]),
+      );
     }
   });
 });

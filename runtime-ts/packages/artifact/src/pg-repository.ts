@@ -56,7 +56,8 @@ interface CommandRow extends PublicationRow {
 const publicationColumns = `
   publication.tenant_id, publication.id, publication.thread_id, publication.run_id,
   publication.resource_version_id, publication.replaces_artifact_id, publication.name,
-  publication.purpose, publication.deliverable_key, publication.status,
+  publication.purpose, publication.deliverable_key,
+  coalesce(settlement.target, publication.status) AS status,
   publication.blob_incarnation_id, publication.physical_object_key,
   publication.digest, publication.media_type, publication.size`;
 
@@ -108,13 +109,16 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
           if (runDeclaration.rowCount !== 0) return { outcome: "conflict" } as const;
           await client.query(
             `INSERT INTO artifact_deliverable_commands(
-             tenant_id,attempt_id,run_id,thread_id,idempotency_key,command_digest
-           ) VALUES($1,$2,$3,$4,$5,$6)`,
+             tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+             idempotency_key,command_digest
+           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
             [
               input.authorization.scope.tenantId,
               input.authorization.attemptId,
               input.authorization.scope.runId,
               input.authorization.scope.threadId,
+              input.authorization.scope.workspaceId,
+              input.authorization.scope.rootRunId,
               input.idempotencyKey,
               input.commandDigest,
             ],
@@ -138,7 +142,16 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
       );
     } catch (error) {
       if (error instanceof TransactionCommitUnknownError) return { outcome: "response_unknown" };
-      if (isUniqueViolation(error)) return { outcome: "conflict" };
+      if (isUniqueViolation(error)) {
+        const readback = await this.readDeliverableDeclarationCommand(input);
+        if (
+          (readback.outcome === "applied" || readback.outcome === "already_applied") &&
+          readback.commandDigest === input.commandDigest
+        ) {
+          return { outcome: "already_applied", commandDigest: input.commandDigest };
+        }
+        return { outcome: "conflict" };
+      }
       return { outcome: "unavailable" };
     }
   }
@@ -250,9 +263,12 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
           if (input.replacesArtifactId !== undefined) {
             const replaced = await client.query<{ valid: boolean }>(
               `SELECT EXISTS(
-               SELECT 1 FROM artifact_publications
-                WHERE tenant_id=$1 AND id=$2 AND run_id=$3 AND status='failed'
-                  AND purpose=$4 AND deliverable_key IS NOT DISTINCT FROM $5
+               SELECT 1 FROM artifact_publications publication
+               JOIN artifact_publication_settlements settlement
+                 ON settlement.tenant_id=publication.tenant_id
+                AND settlement.artifact_id=publication.id AND settlement.target='failed'
+                WHERE publication.tenant_id=$1 AND publication.id=$2 AND publication.run_id=$3
+                  AND publication.purpose=$4 AND publication.deliverable_key IS NOT DISTINCT FROM $5
              ) AS valid`,
               [
                 input.authorization.scope.tenantId,
@@ -267,18 +283,23 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
           }
           const inserted = await client.query<PublicationRow>(
             `INSERT INTO artifact_publications(
-             tenant_id,id,thread_id,run_id,attempt_id,resource_id,resource_version_id,
+             tenant_id,id,thread_id,run_id,attempt_id,workspace_id,root_run_id,
+             resource_id,resource_version_id,
              replaces_artifact_id,name,purpose,deliverable_key,status,blob_reference_id,
              blob_purpose,blob_lifecycle_id,blob_incarnation_id,physical_object_key,
              digest,media_type,size
-           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'publishing',$12,'resource',$13,$14,$15,$16,$17,$18)
-           RETURNING ${publicationColumns.replaceAll("publication.", "")}`,
+           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'publishing',$14,'resource',$15,$16,$17,$18,$19,$20)
+           RETURNING tenant_id,id,thread_id,run_id,resource_version_id,replaces_artifact_id,
+                     name,purpose,deliverable_key,status,blob_incarnation_id,
+                     physical_object_key,digest,media_type,size`,
             [
               input.authorization.scope.tenantId,
               input.artifactId,
               input.authorization.scope.threadId,
               input.authorization.scope.runId,
               input.authorization.attemptId,
+              input.authorization.scope.workspaceId,
+              input.authorization.scope.rootRunId,
               binding.resource_id,
               input.resourceVersionId,
               input.replacesArtifactId ?? null,
@@ -296,11 +317,16 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
           );
           await client.query(
             `INSERT INTO artifact_publication_commands(
-             tenant_id,attempt_id,idempotency_key,command_digest,artifact_id
-           ) VALUES($1,$2,$3,$4,$5)`,
+             tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+             idempotency_key,command_digest,artifact_id
+           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
             [
               input.authorization.scope.tenantId,
               input.authorization.attemptId,
+              input.authorization.scope.runId,
+              input.authorization.scope.threadId,
+              input.authorization.scope.workspaceId,
+              input.authorization.scope.rootRunId,
               input.idempotencyKey,
               input.commandDigest,
               input.artifactId,
@@ -327,7 +353,18 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
           };
         }
       }
-      if (isUniqueViolation(error)) return { outcome: "conflict" };
+      if (isUniqueViolation(error)) {
+        const readback = await this.readPublicationCommand(input);
+        if (readback.outcome === "found" && readback.commandDigest === input.commandDigest) {
+          return {
+            outcome:
+              readback.publication.status === "publishing" ? "already_started" : "already_finished",
+            publication: readback.publication,
+            binding: readback.binding,
+          };
+        }
+        return { outcome: "conflict" };
+      }
       return { outcome: "unavailable" };
     }
   }
@@ -357,27 +394,33 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
               ? { outcome: "already_applied", publication: mapPublication(row) }
               : { outcome: "conflict" };
           }
-          const result = await client.query<PublicationRow>(
-            `UPDATE artifact_publications publication SET status=$4, updated_at=clock_timestamp()
-            WHERE tenant_id=$1 AND id=$2 AND attempt_id=$3 AND status='publishing'
-            RETURNING ${publicationColumns}`,
-            [
-              input.authorization.scope.tenantId,
-              input.artifactId,
-              input.authorization.attemptId,
-              input.target,
-            ],
+          await client.query(
+            `INSERT INTO artifact_publication_settlements(tenant_id,artifact_id,target)
+           VALUES($1,$2,$3)`,
+            [input.authorization.scope.tenantId, input.artifactId, input.target],
           );
-          const updated = result.rows[0];
+          const updated = await readPublicationCommand(
+            client,
+            input.authorization,
+            input.idempotencyKey,
+          );
           return updated === undefined
             ? ({ outcome: "conflict" } as const)
             : ({ outcome: "applied", publication: mapPublication(updated) } as const);
         },
       );
     } catch (error) {
-      return error instanceof TransactionCommitUnknownError
-        ? { outcome: "response_unknown" }
-        : { outcome: "unavailable" };
+      if (error instanceof TransactionCommitUnknownError) return { outcome: "response_unknown" };
+      if (isUniqueViolation(error)) {
+        const readback = await this.readPublicationCommand(input);
+        if (readback.outcome === "found" && readback.commandDigest === input.commandDigest) {
+          return readback.publication.status === input.target
+            ? { outcome: "already_applied", publication: readback.publication }
+            : { outcome: "conflict" };
+        }
+        return { outcome: "conflict" };
+      }
+      return { outcome: "unavailable" };
     }
   }
 
@@ -425,15 +468,18 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
         async (client) => {
           const owned = await client.query<{ valid: boolean }>(
             `SELECT EXISTS(SELECT 1 FROM runs run
+              JOIN run_execution_inputs execution
+                ON execution.tenant_id=run.tenant_id AND execution.run_id=run.id
               JOIN workspaces workspace ON workspace.tenant_id=run.tenant_id
                                        AND workspace.thread_id=run.thread_id
              WHERE run.tenant_id=$1 AND run.id=$2 AND run.thread_id=$3
-               AND workspace.id=$4) AS valid`,
+               AND workspace.id=$4 AND execution.root_run_id=$5) AS valid`,
             [
               input.scope.tenantId,
               input.scope.runId,
               input.scope.threadId,
               input.scope.workspaceId,
+              input.scope.rootRunId,
             ],
           );
           if (owned.rows[0]?.valid !== true) return { outcome: "scope_mismatch" } as const;
@@ -444,7 +490,7 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
             `SELECT declaration.deliverable_key,
                     CASE
                       WHEN count(publication.id)=0 THEN 'missing'
-                      WHEN bool_or(publication.status='publishing') THEN 'publishing'
+                      WHEN bool_or(settlement.target IS NULL) THEN 'publishing'
                       ELSE 'failed'
                     END AS status
                FROM artifact_deliverable_declarations declaration
@@ -453,10 +499,13 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
                 AND publication.run_id=declaration.run_id
                 AND publication.deliverable_key=declaration.deliverable_key
                 AND publication.purpose='deliverable'
+               LEFT JOIN artifact_publication_settlements settlement
+                 ON settlement.tenant_id=publication.tenant_id
+                AND settlement.artifact_id=publication.id
               WHERE declaration.tenant_id=$1 AND declaration.run_id=$2
                 AND declaration.requirement='required'
               GROUP BY declaration.deliverable_key
-             HAVING NOT coalesce(bool_or(publication.status='published'), false)
+             HAVING NOT coalesce(bool_or(settlement.target='published'), false)
               ORDER BY declaration.deliverable_key`,
             [input.scope.tenantId, input.scope.runId],
           );
@@ -481,24 +530,40 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
     input: Parameters<ArtifactDeliveryRepositoryPort["listAuthorizedArtifacts"]>[0],
   ): ReturnType<ArtifactDeliveryRepositoryPort["listAuthorizedArtifacts"]> {
     try {
-      return await withTenantTransaction(
-        this.pool,
-        input.request,
-        async (client) => {
-          if (!(await activeMemberOwnsRun(client, input.request.userId, input.runId))) {
-            return { outcome: "not_found" } as const;
-          }
-          const rows = await client.query<PublicationRow>(
-            `SELECT ${publicationColumns} FROM artifact_publications publication
-              WHERE publication.tenant_id=$1 AND publication.run_id=$2
-                AND publication.purpose='deliverable' AND publication.status='published'
+      return await withTenantTransaction(this.pool, input.request, async (client) => {
+        const rows = await client.query<PublicationRow & { id: string | null }>(
+          `WITH locked_membership AS (
+               UPDATE memberships
+                  SET lock_marker=lock_marker
+                WHERE tenant_id=$1 AND user_id=$3 AND status='active'
+                RETURNING tenant_id,user_id
+             ), authorized_run AS (
+               SELECT run.tenant_id,run.id
+                 FROM runs run
+                 JOIN locked_membership membership ON membership.tenant_id=run.tenant_id
+                                                  AND membership.user_id=$3
+                WHERE run.tenant_id=$1 AND run.id=$2
+             )
+             SELECT ${publicationColumns}
+               FROM authorized_run run
+               LEFT JOIN artifact_publications publication
+                 ON publication.tenant_id=run.tenant_id AND publication.run_id=run.id
+                AND publication.purpose='deliverable'
+               LEFT JOIN artifact_publication_settlements settlement
+                 ON settlement.tenant_id=publication.tenant_id
+                AND settlement.artifact_id=publication.id AND settlement.target='published'
+              WHERE publication.id IS NULL OR settlement.artifact_id IS NOT NULL
               ORDER BY publication.created_at, publication.id`,
-            [input.request.tenantId, input.runId],
-          );
-          return { outcome: "authorized", artifacts: rows.rows.map(mapPublication) } as const;
-        },
-        { readOnly: true },
-      );
+          [input.request.tenantId, input.runId, input.request.userId],
+        );
+        if (rows.rowCount === 0) return { outcome: "not_found" } as const;
+        return {
+          outcome: "authorized",
+          artifacts: rows.rows
+            .filter((row): row is PublicationRow => row.id !== null)
+            .map(mapPublication),
+        } as const;
+      });
     } catch {
       return { outcome: "unavailable" };
     }
@@ -517,11 +582,14 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
                     membership.lock_marker::text || ':' || publication.updated_at::text AS authorization_revision,
                     ''::text AS command_digest
                FROM artifact_publications publication
+               JOIN artifact_publication_settlements settlement
+                 ON settlement.tenant_id=publication.tenant_id
+                AND settlement.artifact_id=publication.id AND settlement.target='published'
                JOIN memberships membership ON membership.tenant_id=publication.tenant_id
                                            AND membership.user_id=$2
                                            AND membership.status='active'
               WHERE publication.tenant_id=$1 AND publication.id=$3
-                AND publication.purpose='deliverable' AND publication.status='published'`,
+                AND publication.purpose='deliverable'`,
             [input.request.tenantId, input.request.userId, input.artifactId],
           );
           const row = result.rows[0];
@@ -585,11 +653,14 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
       `SELECT ${publicationColumns},
               membership.lock_marker::text || ':' || publication.updated_at::text AS authorization_revision
          FROM artifact_publications publication
+         JOIN artifact_publication_settlements settlement
+           ON settlement.tenant_id=publication.tenant_id
+          AND settlement.artifact_id=publication.id AND settlement.target='published'
          JOIN memberships membership ON membership.tenant_id=publication.tenant_id
                                      AND membership.user_id=$2
                                      AND membership.status='active'
         WHERE publication.tenant_id=$1 AND publication.id=$3
-          AND publication.purpose='deliverable' AND publication.status='published'`,
+          AND publication.purpose='deliverable'`,
       [
         input.authorization.scope.tenantId,
         input.authorization.scope.userId,
@@ -619,6 +690,8 @@ async function readExecutionBoundary(
   const result = await client.query<{ run_status: string; valid: boolean }>(
     `SELECT run.status AS run_status,
             permit.consumed_at IS NOT NULL
+            AND permit.expires_at>clock_timestamp()
+            AND permit.consumed_at<=permit.expires_at
             AND permit.effect='tool_execution'
             AND permit.call_id=$16 AND permit.tool_name=$17 AND permit.args_digest=$18
             AND permit.attempt_version=$11
@@ -630,7 +703,8 @@ async function readExecutionBoundary(
             AND attempt.version=$11
             AND attempt.status IN ('running','finalizing') AS valid
        FROM execution_attempts attempt
-       JOIN runs run ON run.tenant_id=attempt.tenant_id AND run.id=attempt.run_id
+       JOIN runs run ON run.tenant_id=attempt.tenant_id
+                    AND run.id=attempt.run_id AND run.thread_id=attempt.thread_id
        JOIN external_effect_permits permit ON permit.tenant_id=attempt.tenant_id
                                            AND permit.attempt_id=attempt.attempt_id
                                            AND permit.permit_id=$7
@@ -648,7 +722,7 @@ async function readExecutionBoundary(
         AND permit.run_claim_token=$8 AND permit.run_claim_epoch=$9
         AND permit.workspace_root_run_id=$6 AND permit.workspace_lease_epoch=$10
         AND permit.issued_at=$13 AND permit.expires_at=$14 AND permit.consumed_at=$15
-      ${lock ? "FOR UPDATE OF attempt, claim, lease" : ""}`,
+      ${lock ? "FOR UPDATE OF run, attempt, claim, lease, permit" : ""}`,
     [
       authorization.scope.tenantId,
       authorization.attemptId,
@@ -686,25 +760,13 @@ async function readPublicationCommand(
        FROM artifact_publication_commands command
        JOIN artifact_publications publication ON publication.tenant_id=command.tenant_id
                                              AND publication.id=command.artifact_id
+       LEFT JOIN artifact_publication_settlements settlement
+         ON settlement.tenant_id=publication.tenant_id
+        AND settlement.artifact_id=publication.id
       WHERE command.tenant_id=$1 AND command.attempt_id=$2 AND command.idempotency_key=$3`,
     [authorization.scope.tenantId, authorization.attemptId, idempotencyKey],
   );
   return result.rows[0];
-}
-
-async function activeMemberOwnsRun(
-  client: PoolClient,
-  user: string,
-  run: string,
-): Promise<boolean> {
-  const result = await client.query<{ valid: boolean }>(
-    `SELECT EXISTS(SELECT 1 FROM runs run
-       JOIN memberships membership ON membership.tenant_id=run.tenant_id
-                                  AND membership.user_id=$2 AND membership.status='active'
-      WHERE run.tenant_id=current_setting('app.tenant_id') AND run.id=$1) AS valid`,
-    [run, user],
-  );
-  return result.rows[0]?.valid === true;
 }
 
 function mapPublication(row: PublicationRow): ArtifactPublicationSnapshot {

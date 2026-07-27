@@ -8,4 +8,5 @@ export {
   CubeSandboxWorkspacePort,
   type CubeWorkspaceAdapterOptions,
   type TrustedSandboxSessionCapability,
+  type TrustedSandboxWorkspaceBinding,
 } from "./workspace-adapter.js";

@@ -43,6 +43,7 @@ Gateway 只接受可重验且支持 Abort 的 capability；适配器绑定首次
 - capability 每次读取都有硬超时与 AbortSignal；即使实现错误地忽略 Abort，适配器也不会无限等待；
 - 快照在开始 I/O 前按 operation key 原子绑定可信 scope 与共享 in-flight Promise，并保存排序条目、内容 SHA-256 和读取指纹；并发同 key 只扫描一次，不同 scope 失败；
 - `SandboxWorkspacePort` 把 operation 快照释放列为正式生命周期方法；Publisher 与 Materializer 对成功、known/unknown 失败、journal completed 和异常均在 `finally` 调用。release 与同 key capture 原子互斥；释放后内容缓存失效，再次扫描只有相同内容才能得到相同的确定性 token，从而保持 journal 重入身份；
+- Journal 另提供按可信 scope、kind 与 operationKey 查询 completed 事实的窄接口。Publisher 在读取当前 Session 或重新扫描 Workspace 前先严格解析已完成 identity/result；因此完成后的 Workspace 即使变化，同 key 重入仍返回原结果。未完成或失败 operation 不走该捷径，仍重新取得受限快照并由 `begin` 校验完整 input digest；
 - 文件数、单文件、总字节、路径 UTF-8、命令输出、chunk、快照数量和操作超时均要求显式正整数上限；
 - 所有调用方相对路径在任何 SDK/命令调用前执行 UTF-8 字节上限；helper 自身也限制扫描路径和输出；
 - SDK 只把随机临时正文写到 `/tmp`；helper 以 `O_NOFOLLOW` 重验普通文件、大小与 SHA-256，再在目标父 dirfd 内创建临时文件、fsync 并相对 rename。已知拒绝会清理 `/tmp` 文件；

@@ -18,6 +18,7 @@ describe("Workspace Sandbox 身份严格解析", () => {
       JSON.parse(JSON.stringify({ ...session, snapshotToken: "snapshot-operation-a" })),
     );
     const journal: WorkspaceOperationJournalPort = {
+      lookupCompleted: async () => ({ status: "not_found" }),
       begin: async () => JSON.parse(JSON.stringify({ status: "completed", result: { snapshot } })),
       complete: async () => undefined,
       failKnown: async () => undefined,

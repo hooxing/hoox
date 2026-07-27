@@ -21,6 +21,7 @@ import {
 import {
   CubeSandboxWorkspacePort,
   type CubeWorkspaceAdapterOptions,
+  resolveTrustedSandboxWorkspaceBinding,
   type TrustedSandboxSessionCapability,
 } from "./workspace-adapter.js";
 
@@ -179,18 +180,22 @@ export class CubeSandboxGateway implements SandboxGateway {
     control: OperationControl = {},
   ): Promise<CubeSandboxWorkspacePort> {
     const effectiveControl = this.control(control);
-    const identity = await capability.current();
+    const binding = await resolveTrustedSandboxWorkspaceBinding(
+      capability,
+      effectiveControl.timeoutMs,
+      effectiveControl.signal,
+    );
     const sandbox = await settledOperation(
       "连接 Workspace Sandbox",
       () =>
-        this.sdk.connect(identity.sessionId, {
+        this.sdk.connect(binding.sessionId, {
           config: this.config(effectiveControl.timeoutMs),
         }),
       effectiveControl,
     );
     return CubeSandboxWorkspacePort.open({
       capability,
-      identity,
+      binding,
       sandbox,
       options,
     });

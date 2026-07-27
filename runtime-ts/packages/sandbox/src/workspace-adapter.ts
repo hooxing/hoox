@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
 import { createHash, randomUUID } from "node:crypto";
-import { posix } from "node:path";
 import type {
   SandboxSessionIdentity,
   SandboxWorkspaceEntry,
@@ -9,7 +8,6 @@ import type {
   WorkspaceTrustedScope,
 } from "@cube-runtime/workspace";
 import {
-  resolveWorkspaceTargetPath,
   SANDBOX_WORKSPACE_ROOT,
   WorkspaceDependencyError,
   workspaceRelativePath,
@@ -22,9 +20,13 @@ const FILE_TYPE_DIRECTORY = "FILE_TYPE_DIRECTORY";
 const FILE_TYPE_SYMLINK = "FILE_TYPE_SYMLINK";
 const READ_PROTOCOL = "CUBEWS1";
 
-/** 由 Session registry / warm manager 提供；适配器不会接受裸 sessionId。 */
+export interface TrustedSandboxWorkspaceBinding extends SandboxSessionIdentity {
+  readonly scope: WorkspaceTrustedScope;
+}
+
+/** 由 Session registry / warm manager 提供；适配器不会接受裸 sessionId 或调用方 scope。 */
 export interface TrustedSandboxSessionCapability {
-  current(): Promise<SandboxSessionIdentity>;
+  current(control?: { readonly signal?: AbortSignal }): Promise<TrustedSandboxWorkspaceBinding>;
 }
 
 export interface CubeWorkspaceAdapterOptions {
@@ -40,7 +42,7 @@ export interface CubeWorkspaceAdapterOptions {
 
 interface AdapterOpenInput {
   readonly capability: TrustedSandboxSessionCapability;
-  readonly identity: SandboxSessionIdentity;
+  readonly binding: TrustedSandboxWorkspaceBinding;
   readonly sandbox: CubeSdkSandbox;
   readonly options: CubeWorkspaceAdapterOptions;
 }
@@ -56,6 +58,11 @@ interface CapturedSnapshot {
   readonly scopeDigest: string;
   readonly entries: readonly SandboxWorkspaceEntry[];
   readonly files: ReadonlyMap<string, CapturedFile>;
+}
+
+interface SnapshotOperation {
+  readonly scopeDigest: string;
+  readonly promise: Promise<CapturedSnapshot>;
 }
 
 interface LiveRead {
@@ -76,12 +83,12 @@ let constructWorkspaceAdapter!: AdapterConstructor;
  */
 export class CubeSandboxWorkspacePort implements WorkspacePort {
   private readonly options: CubeWorkspaceAdapterOptions;
-  private readonly snapshotsByOperation = new Map<string, CapturedSnapshot>();
+  private readonly snapshotsByOperation = new Map<string, SnapshotOperation>();
   private readonly snapshotsByToken = new Map<string, CapturedSnapshot>();
 
   private constructor(
     private readonly capability: TrustedSandboxSessionCapability,
-    private readonly bound: SandboxSessionIdentity,
+    private readonly bound: TrustedSandboxWorkspaceBinding,
     private readonly sandbox: CubeSdkSandbox,
     options: CubeWorkspaceAdapterOptions,
   ) {
@@ -90,13 +97,13 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
 
   static {
     constructWorkspaceAdapter = async (input) => {
-      if (!validIdentity(input.identity)) throw known("INVALID_SANDBOX_IDENTITY");
-      if (input.sandbox.sandboxId !== input.identity.sessionId) {
+      if (!validBinding(input.binding)) throw known("INVALID_SANDBOX_BINDING");
+      if (input.sandbox.sandboxId !== input.binding.sessionId) {
         throw known("SDK_SESSION_ID_MISMATCH");
       }
       const adapter = new CubeSandboxWorkspacePort(
         input.capability,
-        Object.freeze({ ...input.identity }),
+        freezeBinding(input.binding),
         input.sandbox,
         input.options,
       );
@@ -113,7 +120,7 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
         "CubeSandbox Workspace 生产适配器只允许在 Linux Worker 启动",
       );
     }
-    return openAdapter(input);
+    return constructWorkspaceAdapter(input);
   }
 
   async currentSession(): Promise<SandboxSessionIdentity> {
@@ -128,15 +135,44 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
     await this.assertBound("known");
     const operationKey = safeOperationKey(input.operationKey);
     const scopeDigest = digestScope(input.scope);
+    if (scopeDigest !== digestScope(this.bound.scope)) throw known("WORKSPACE_SCOPE_MISMATCH");
     const existing = this.snapshotsByOperation.get(operationKey);
     if (existing !== undefined) {
       if (existing.scopeDigest !== scopeDigest) throw known("SNAPSHOT_OPERATION_CONFLICT");
-      return existing.identity;
+      return (await existing.promise).identity;
     }
     if (this.snapshotsByOperation.size >= this.options.maxSnapshots) {
       throw known("SNAPSHOT_CAPACITY_EXCEEDED");
     }
 
+    const promise = this.captureSnapshotOnce(operationKey, scopeDigest);
+    this.snapshotsByOperation.set(operationKey, Object.freeze({ scopeDigest, promise }));
+    try {
+      return (await promise).identity;
+    } catch (error) {
+      if (this.snapshotsByOperation.get(operationKey)?.promise === promise) {
+        this.snapshotsByOperation.delete(operationKey);
+      }
+      throw error;
+    }
+  }
+
+  /** 调用方在 operation 完成或终止后释放进程内快照，避免 warm Session 长期占用内存。 */
+  async releaseSnapshot(snapshot: SandboxWorkspaceSnapshot): Promise<void> {
+    await this.assertCall(snapshot, "known");
+    const captured = this.snapshotsByToken.get(snapshot.snapshotToken);
+    if (captured === undefined) return;
+    this.snapshotsByToken.delete(snapshot.snapshotToken);
+    const operation = this.snapshotsByOperation.get(captured.operationKey);
+    if (operation !== undefined && (await operation.promise) === captured) {
+      this.snapshotsByOperation.delete(captured.operationKey);
+    }
+  }
+
+  private async captureSnapshotOnce(
+    operationKey: string,
+    scopeDigest: string,
+  ): Promise<CapturedSnapshot> {
     const entries = await this.scanWorkspace();
     const files = new Map<string, CapturedFile>();
     let totalBytes = 0;
@@ -163,9 +199,8 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
       entries,
       files,
     });
-    this.snapshotsByOperation.set(operationKey, captured);
     this.snapshotsByToken.set(token, captured);
-    return identity;
+    return captured;
   }
 
   async inspectRegularFile(
@@ -181,10 +216,10 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
       }
   > {
     await this.assertCall(sandbox, "known");
-    const path = safeTarget(relativePath);
+    const relative = this.safeRelative(relativePath);
     let entry: Record<string, unknown>;
     try {
-      entry = await this.readCall("inspect", () => this.sandbox.files.stat(path), control.signal);
+      entry = await this.secureStat(relative, control.signal);
     } catch (error) {
       if (isNotFound(error)) return Object.freeze({ status: "missing" });
       throw error;
@@ -199,8 +234,10 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
     return Object.freeze({
       status: "regular",
       body: (async function* () {
+        await self.assertCall(sandbox, "known", control.signal);
         const read = await self.readLiveRegularFile(relativePath, size, control.signal);
         yield* chunks(read.bytes, self.options.readChunkBytes);
+        await self.assertCall(sandbox, "known", control.signal);
       })(),
     });
   }
@@ -212,8 +249,8 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
   ): Promise<void> {
     await this.assertCall(sandbox, "known");
     await this.mutatingCommand(
-      REMOVE_FILE_SCRIPT,
-      { CUBE_WS_PATH_B64: encodePath(safeTarget(relativePath)) },
+      SECURE_FS_SCRIPT,
+      { CUBE_WS_OP: "remove_file", CUBE_WS_REL_B64: encodePath(this.safeRelative(relativePath)) },
       "remove_file",
       control.signal,
       // 解码失败和目标类型不符均发生在删除前；rm 自身失败则可能已产生副作用。
@@ -229,8 +266,11 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
   ): Promise<void> {
     await this.assertCall(sandbox, "known");
     await this.mutatingCommand(
-      REMOVE_DIRECTORY_SCRIPT,
-      { CUBE_WS_PATH_B64: encodePath(safeTarget(relativePath)) },
+      SECURE_FS_SCRIPT,
+      {
+        CUBE_WS_OP: "remove_directory",
+        CUBE_WS_REL_B64: encodePath(this.safeRelative(relativePath)),
+      },
       "remove_directory",
       control.signal,
       new Set([0, 40, 41, 42, 43]),
@@ -245,8 +285,8 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
   ): Promise<void> {
     await this.assertCall(sandbox, "known");
     await this.mutatingCommand(
-      REMOVE_TREE_SCRIPT,
-      { CUBE_WS_PATH_B64: encodePath(safeTarget(relativePath)) },
+      SECURE_FS_SCRIPT,
+      { CUBE_WS_OP: "remove_tree", CUBE_WS_REL_B64: encodePath(this.safeRelative(relativePath)) },
       "remove_tree",
       control.signal,
       // rm -rf 失败可能只删掉部分目录，因此故意不把 42 归为已知结果。
@@ -261,28 +301,14 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
     control: { readonly signal?: AbortSignal } = {},
   ): Promise<void> {
     await this.assertCall(sandbox, "known");
-    const relative = safeRelative(relativePath);
-    let current: string = SANDBOX_WORKSPACE_ROOT;
-    await this.requireDirectory(current, control.signal);
-    for (const segment of relative.split("/")) {
-      current = posix.join(current, segment);
-      try {
-        const entry = await this.readCall(
-          "stat_directory",
-          () => this.sandbox.files.stat(current),
-          control.signal,
-        );
-        if (entryKind(entry) !== "directory") throw known("DIRECTORY_TYPE_DRIFT");
-      } catch (error) {
-        if (!isNotFound(error)) throw error;
-        await this.mutateCall(
-          "make_directory",
-          () => this.sandbox.files.makeDir(current),
-          control.signal,
-        );
-        await this.requireDirectory(current, control.signal);
-      }
-    }
+    const relative = this.safeRelative(relativePath);
+    await this.mutatingCommand(
+      SECURE_FS_SCRIPT,
+      { CUBE_WS_OP: "ensure_directory", CUBE_WS_REL_B64: encodePath(relative) },
+      "ensure_directory",
+      control.signal,
+      new Set([0, 40, 41, 42]),
+    );
     await this.assertBound("unknown");
   }
 
@@ -294,16 +320,13 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
     readonly signal?: AbortSignal;
   }): Promise<void> {
     await this.assertCall(input.sandbox, "known");
-    const relative = safeRelative(input.relativePath);
-    const target = safeTarget(relative);
-    const parent = posix.dirname(target);
-    await this.requireDirectory(parent, input.signal);
+    const relative = this.safeRelative(input.relativePath);
     const body = await collectBody(input.body, this.options, input.signal);
     const suffix = createHash("sha256")
       .update(`${safeOperationKey(input.operationKey)}\0${relative}`)
       .digest("hex")
       .slice(0, 16);
-    const temporary = posix.join(parent, `.cube-runtime-${suffix}-${randomUUID()}.tmp`);
+    const temporary = `/tmp/cube-runtime-${suffix}-${randomUUID()}.tmp`;
 
     await this.mutateCall(
       "write_temporary_file",
@@ -311,16 +334,23 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
       input.signal,
     );
     await this.mutatingCommand(
-      FINALIZE_WRITE_SCRIPT,
+      SECURE_FS_SCRIPT,
       {
+        CUBE_WS_OP: "finalize_write",
         CUBE_WS_TEMP_B64: encodePath(temporary),
-        CUBE_WS_TARGET_B64: encodePath(target),
+        CUBE_WS_REL_B64: encodePath(relative),
         CUBE_WS_EXPECTED_SIZE: String(body.byteLength),
+        CUBE_WS_EXPECTED_SHA256: sha256(body),
       },
       "finalize_atomic_write",
       input.signal,
       new Set([0, 40, 41, 42, 43, 44]),
-    );
+    ).catch(async (error: unknown) => {
+      if (error instanceof WorkspaceDependencyError && error.result === "known") {
+        await this.cleanupExternalTemporary(temporary, input.signal);
+      }
+      throw error;
+    });
     await this.assertBound("unknown");
   }
 
@@ -343,7 +373,7 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
     control: { readonly signal?: AbortSignal } = {},
   ): AsyncIterable<Uint8Array> {
     const captured = await this.requireSnapshot(snapshot, "known");
-    const relative = safeRelative(relativePath);
+    const relative = this.safeRelative(relativePath);
     const entry = captured.entries.find(
       (candidate) => candidate.relativePath === relative && candidate.kind === "file",
     );
@@ -357,57 +387,43 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
       abortPoint(control.signal);
       yield chunk;
     }
-    await this.assertBound("known");
+    await this.assertBound("known", control.signal);
   }
 
   private async scanWorkspace(): Promise<readonly SandboxWorkspaceEntry[]> {
-    await this.requireDirectory(SANDBOX_WORKSPACE_ROOT);
+    const raw = await this.command(
+      SECURE_FS_SCRIPT,
+      {
+        CUBE_WS_OP: "scan",
+        CUBE_WS_MAX_ENTRIES: String(this.options.maxEntries),
+        CUBE_WS_MAX_FILE_BYTES: String(this.options.maxFileBytes),
+        CUBE_WS_MAX_TOTAL_BYTES: String(this.options.maxTotalBytes),
+        CUBE_WS_MAX_PATH_BYTES: String(this.options.maxPathUtf8Bytes),
+        CUBE_WS_MAX_OUTPUT_BYTES: String(this.options.maxCommandOutputBytes),
+      },
+      "scan_workspace",
+      undefined,
+      this.options.maxCommandOutputBytes,
+    );
+    if (raw.exitCode !== 0 || raw.stderr !== "") throw known("FILESYSTEM_SCAN_FAILED");
+    const parsed: unknown = JSON.parse(raw.stdout);
+    if (!Array.isArray(parsed)) throw known("FILESYSTEM_PROTOCOL");
     const result: SandboxWorkspaceEntry[] = [];
-    const pending = [""];
     let totalBytes = 0;
-    while (pending.length > 0) {
-      const parent = pending.shift() as string;
-      const absoluteParent = parent ? safeTarget(parent) : SANDBOX_WORKSPACE_ROOT;
-      const rawEntries = await this.readCall("list_workspace", () =>
-        this.sandbox.files.list(absoluteParent),
-      );
-      if (!Array.isArray(rawEntries)) throw known("FILESYSTEM_PROTOCOL");
-      for (const raw of rawEntries) {
-        if (result.length >= this.options.maxEntries) throw known("ENTRY_LIMIT_EXCEEDED");
-        const name = entryName(raw);
-        const relative = safeRelative(parent ? `${parent}/${name}` : name);
-        if (Buffer.byteLength(relative, "utf8") > this.options.maxPathUtf8Bytes) {
-          throw known("PATH_LIMIT_EXCEEDED");
-        }
-        const listedKind = entryKind(raw);
-        const absolute = safeTarget(relative);
-        let kind = listedKind;
-        let size: number | undefined;
-        if (listedKind === "file" || listedKind === "directory") {
-          const stat = await this.readCall("stat_workspace", () =>
-            this.sandbox.files.stat(absolute),
-          );
-          kind = entryKind(stat);
-          if (kind !== listedKind) throw known("FILESYSTEM_TYPE_DRIFT");
-          if (kind === "file") {
-            size = entrySize(stat);
-            const listedSize = optionalEntrySize(raw);
-            if (listedSize !== undefined && listedSize !== size) {
-              throw known("FILESYSTEM_SIZE_DRIFT");
-            }
-            if (size > this.options.maxFileBytes) throw known("FILE_LIMIT_EXCEEDED");
-            totalBytes = addBounded(totalBytes, size, this.options.maxTotalBytes);
-          }
-        }
-        result.push(
-          Object.freeze({
-            relativePath: relative,
-            kind,
-            ...(size === undefined ? {} : { size }),
-          }),
-        );
-        if (kind === "directory") pending.push(relative);
+    for (const rawEntry of parsed) {
+      if (result.length >= this.options.maxEntries || !plainRecord(rawEntry)) {
+        throw known("ENTRY_LIMIT_EXCEEDED");
       }
+      const relative = this.safeRelative(decodePathField(rawEntry.relativePathB64));
+      const kind = entryKind(rawEntry);
+      const size = kind === "file" ? entrySize(rawEntry) : undefined;
+      if (size !== undefined) {
+        if (size > this.options.maxFileBytes) throw known("FILE_LIMIT_EXCEEDED");
+        totalBytes = addBounded(totalBytes, size, this.options.maxTotalBytes);
+      }
+      result.push(
+        Object.freeze({ relativePath: relative, kind, ...(size === undefined ? {} : { size }) }),
+      );
     }
     result.sort((left, right) =>
       Buffer.compare(Buffer.from(left.relativePath), Buffer.from(right.relativePath)),
@@ -422,9 +438,10 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
   ): Promise<LiveRead> {
     if (expectedSize > this.options.maxFileBytes) throw known("FILE_LIMIT_EXCEEDED");
     const output = await this.command(
-      READ_FILE_SCRIPT,
+      SECURE_FS_SCRIPT,
       {
-        CUBE_WS_PATH_B64: encodePath(safeTarget(relativePath)),
+        CUBE_WS_OP: "read",
+        CUBE_WS_REL_B64: encodePath(this.safeRelative(relativePath)),
         CUBE_WS_MAX_BYTES: String(this.options.maxFileBytes),
       },
       "read_regular_file",
@@ -442,13 +459,45 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
     return parsed;
   }
 
-  private async requireDirectory(path: string, signal?: AbortSignal): Promise<void> {
-    const entry = await this.readCall(
-      "stat_directory",
-      () => this.sandbox.files.stat(path),
-      signal,
-    );
+  private async requireDirectory(_path: string, signal?: AbortSignal): Promise<void> {
+    const entry = await this.secureStat("", signal);
     if (entryKind(entry) !== "directory") throw known("DIRECTORY_TYPE_DRIFT");
+  }
+
+  private async secureStat(
+    relativePath: string,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const output = await this.command(
+      SECURE_FS_SCRIPT,
+      { CUBE_WS_OP: "stat", CUBE_WS_REL_B64: encodePath(relativePath) },
+      "stat_workspace",
+      signal,
+      512,
+    );
+    if (output.exitCode === 40) throw known("NOT_FOUND");
+    if (output.exitCode !== 0 || output.stderr !== "") throw known("FILESYSTEM_STAT_FAILED");
+    const parsed: unknown = JSON.parse(output.stdout);
+    if (!plainRecord(parsed)) throw known("FILESYSTEM_PROTOCOL");
+    return parsed;
+  }
+
+  private async cleanupExternalTemporary(path: string, signal?: AbortSignal): Promise<void> {
+    await this.mutatingCommand(
+      SECURE_FS_SCRIPT,
+      { CUBE_WS_OP: "cleanup_temporary", CUBE_WS_TEMP_B64: encodePath(path) },
+      "cleanup_temporary",
+      signal,
+      new Set([0, 40, 41]),
+    );
+  }
+
+  private safeRelative(value: string): string {
+    const relative = safeRelative(value);
+    if (Buffer.byteLength(relative, "utf8") > this.options.maxPathUtf8Bytes) {
+      throw known("PATH_LIMIT_EXCEEDED");
+    }
+    return relative;
   }
 
   private async requireSnapshot(
@@ -470,20 +519,31 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
   private async assertCall(
     identity: SandboxSessionIdentity,
     drift: "known" | "unknown",
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!sameSession(identity, this.bound)) throw known("SANDBOX_IDENTITY_MISMATCH");
-    await this.assertBound(drift);
+    await this.assertBound(drift, signal);
   }
 
-  private async assertBound(result: "known" | "unknown"): Promise<void> {
-    let current: SandboxSessionIdentity;
+  private async assertBound(result: "known" | "unknown", signal?: AbortSignal): Promise<void> {
+    let current: TrustedSandboxWorkspaceBinding;
     try {
-      current = await this.capability.current();
-    } catch {
+      current = await resolveTrustedSandboxWorkspaceBinding(
+        this.capability,
+        this.options.operationTimeoutMs,
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof WorkspaceDependencyError) {
+        throw new WorkspaceDependencyError(result, error.dependencyCode);
+      }
       throw new WorkspaceDependencyError(result, "SESSION_CAPABILITY_UNAVAILABLE");
     }
-    if (!validIdentity(current) || !sameSession(current, this.bound)) {
+    if (!validBinding(current) || !sameSession(current, this.bound)) {
       throw new WorkspaceDependencyError(result, "SANDBOX_GENERATION_CHANGED");
+    }
+    if (digestScope(current.scope) !== digestScope(this.bound.scope)) {
+      throw new WorkspaceDependencyError(result, "WORKSPACE_SCOPE_CHANGED");
     }
   }
 
@@ -593,17 +653,6 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
   }
 }
 
-/** 仅由同包 testing 子路径调用；生产主入口不导出此平台旁路。 */
-export async function openCubeWorkspaceAdapterForTesting(
-  input: AdapterOpenInput,
-): Promise<CubeSandboxWorkspacePort> {
-  return openAdapter(input);
-}
-
-async function openAdapter(input: AdapterOpenInput): Promise<CubeSandboxWorkspacePort> {
-  return constructWorkspaceAdapter(input);
-}
-
 function validateOptions(options: CubeWorkspaceAdapterOptions): CubeWorkspaceAdapterOptions {
   const values = Object.values(options);
   if (values.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
@@ -622,14 +671,6 @@ function validateOptions(options: CubeWorkspaceAdapterOptions): CubeWorkspaceAda
 function safeRelative(value: string): string {
   try {
     return workspaceRelativePath(value);
-  } catch {
-    throw known("UNSAFE_WORKSPACE_PATH");
-  }
-}
-
-function safeTarget(value: string): string {
-  try {
-    return resolveWorkspaceTargetPath(SANDBOX_WORKSPACE_ROOT, safeRelative(value));
   } catch {
     throw known("UNSAFE_WORKSPACE_PATH");
   }
@@ -667,8 +708,63 @@ function validIdentity(value: SandboxSessionIdentity): boolean {
   );
 }
 
+function validBinding(value: TrustedSandboxWorkspaceBinding): boolean {
+  if (!validIdentity(value) || !plainRecord(value.scope)) return false;
+  try {
+    digestScope(value.scope);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function freezeBinding(value: TrustedSandboxWorkspaceBinding): TrustedSandboxWorkspaceBinding {
+  return Object.freeze({
+    sessionId: value.sessionId,
+    generation: value.generation,
+    scope: Object.freeze({ ...value.scope }),
+  });
+}
+
 function sameSession(left: SandboxSessionIdentity, right: SandboxSessionIdentity): boolean {
   return left.sessionId === right.sessionId && left.generation === right.generation;
+}
+
+/** 同包 Gateway 复用的只读 capability 硬期限；不从 package 主入口导出。 */
+export async function resolveTrustedSandboxWorkspaceBinding(
+  capability: TrustedSandboxSessionCapability,
+  timeoutMs: number,
+  signal?: AbortSignal,
+): Promise<TrustedSandboxWorkspaceBinding> {
+  abortPoint(signal);
+  const controller = new AbortController();
+  let rejectAbort!: (error: WorkspaceDependencyError) => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const onAbort = () => {
+    controller.abort(signal?.reason);
+    rejectAbort(known("CANCELLED"));
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort(new Error("capability timeout"));
+      reject(known("SESSION_CAPABILITY_TIMEOUT"));
+    }, timeoutMs);
+  });
+  const current = capability.current({ signal: controller.signal }).catch((error: unknown) => {
+    throw error;
+  });
+  try {
+    const resolved = await Promise.race([current, timeout, aborted]);
+    if (!validBinding(resolved)) throw known("INVALID_SANDBOX_BINDING");
+    return freezeBinding(resolved);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 function plainRecord(value: unknown): value is Record<string, unknown> {
@@ -676,22 +772,6 @@ function plainRecord(value: unknown): value is Record<string, unknown> {
   const prototype = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) return false;
   return Object.getOwnPropertySymbols(value).length === 0;
-}
-
-function entryName(value: unknown): string {
-  if (!plainRecord(value)) throw known("FILESYSTEM_PROTOCOL");
-  const descriptor = Object.getOwnPropertyDescriptor(value, "name");
-  if (
-    descriptor === undefined ||
-    !("value" in descriptor) ||
-    typeof descriptor.value !== "string"
-  ) {
-    throw known("FILESYSTEM_PROTOCOL");
-  }
-  if (descriptor.value.includes("/") || descriptor.value.length === 0) {
-    throw known("UNSAFE_WORKSPACE_PATH");
-  }
-  return descriptor.value;
 }
 
 function entryKind(value: unknown): SandboxWorkspaceEntry["kind"] {
@@ -710,11 +790,6 @@ function entryKind(value: unknown): SandboxWorkspaceEntry["kind"] {
   return "special";
 }
 
-function optionalEntrySize(value: Record<string, unknown>): number | undefined {
-  if (!Object.hasOwn(value, "size")) return undefined;
-  return parseSize(value.size);
-}
-
 function entrySize(value: Record<string, unknown>): number {
   if (!Object.hasOwn(value, "size")) throw known("FILESYSTEM_PROTOCOL");
   return parseSize(value.size);
@@ -730,6 +805,19 @@ function parseSize(value: unknown): number {
 
 function encodePath(path: string): string {
   return Buffer.from(path, "utf8").toString("base64");
+}
+
+function decodePathField(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)
+  ) {
+    throw known("FILESYSTEM_PROTOCOL");
+  }
+  const bytes = Buffer.from(value, "base64");
+  const decoded = bytes.toString("utf8");
+  if (Buffer.from(decoded, "utf8").compare(bytes) !== 0) throw known("FILESYSTEM_PROTOCOL");
+  return decoded;
 }
 
 function parseReadOutput(stdout: string, maxBytes: number): LiveRead {
@@ -841,55 +929,276 @@ function unknown(code: string): WorkspaceDependencyError {
   return new WorkspaceDependencyError("unknown", code);
 }
 
-const READ_FILE_SCRIPT = String.raw`set -u
-p="$(printf '%s' "$CUBE_WS_PATH_B64" | base64 -d)" || exit 40
-max="$CUBE_WS_MAX_BYTES"
-[ ! -L "$p" ] || exit 41
-[ -f "$p" ] || exit 40
-before="$(stat -Lc '%s:%d:%i:%Y:%Z:%f' -- "$p")" || exit 40
-size="\${before%%:*}"
-[ "$size" -le "$max" ] || exit 42
-printf 'CUBEWS1:%s\n' "$before"
-head -c "$((max + 1))" -- "$p" | base64 -w0 || exit 43
-printf '\n'
-[ ! -L "$p" ] || exit 41
-after="$(stat -Lc '%s:%d:%i:%Y:%Z:%f' -- "$p")" || exit 40
-printf 'CUBEWS1:%s\n' "$after"`;
+/**
+ * 固定的 Linux dirfd helper。每一级祖先都以 O_NOFOLLOW 相对已打开的父 dirfd 打开；后续
+ * stat/read/unlink/mkdir/rename 也只使用 dirfd 相对原语，因此目录在检查后被替换成 symlink
+ * 不能把操作重定向到 `/workspace` 外。模板必须提供 Python 3；缺失时适配器启动即失败关闭。
+ */
+const SECURE_FS_SCRIPT = String.raw`set -u
+python3 - <<'PY'
+import base64, ctypes, hashlib, json, os, secrets, stat, sys
 
-const FINALIZE_WRITE_SCRIPT = String.raw`set -u
-tmp="$(printf '%s' "$CUBE_WS_TEMP_B64" | base64 -d)" || exit 40
-target="$(printf '%s' "$CUBE_WS_TARGET_B64" | base64 -d)" || exit 40
-expected="$CUBE_WS_EXPECTED_SIZE"
-[ ! -L "$tmp" ] && [ -f "$tmp" ] || exit 41
-[ "$(stat -Lc '%s' -- "$tmp")" = "$expected" ] || exit 42
-parent="\${target%/*}"
-[ ! -L "$parent" ] && [ -d "$parent" ] || exit 43
-[ ! -d "$target" ] || exit 44
-chmod 600 -- "$tmp" || exit 45
-sync -f -- "$tmp" || exit 45
-mv -T -- "$tmp" "$target" || exit 45
-sync -f -- "$parent" || exit 45
-printf 'OK\n'`;
+ROOT = "/workspace"
+OP = os.environ.get("CUBE_WS_OP", "")
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+RESOLVE_NO_XDEV = 0x01
+RESOLVE_NO_MAGICLINKS = 0x02
+RESOLVE_NO_SYMLINKS = 0x04
+RESOLVE_BENEATH = 0x08
+SYS_OPENAT2 = 437
 
-const REMOVE_FILE_SCRIPT = String.raw`set -u
-p="$(printf '%s' "$CUBE_WS_PATH_B64" | base64 -d)" || exit 40
-if [ -L "$p" ] || [ -f "$p" ]; then rm -f -- "$p" || exit 41
-elif [ -e "$p" ]; then exit 42
-fi
-printf 'OK\n'`;
+class OpenHow(ctypes.Structure):
+    _fields_ = [("flags", ctypes.c_uint64), ("mode", ctypes.c_uint64), ("resolve", ctypes.c_uint64)]
 
-const REMOVE_DIRECTORY_SCRIPT = String.raw`set -u
-p="$(printf '%s' "$CUBE_WS_PATH_B64" | base64 -d)" || exit 40
-if [ -L "$p" ]; then exit 41
-elif [ -d "$p" ]; then rmdir -- "$p" || exit 42
-elif [ -e "$p" ]; then exit 43
-fi
-printf 'OK\n'`;
+LIBC = ctypes.CDLL(None, use_errno=True)
 
-const REMOVE_TREE_SCRIPT = String.raw`set -u
-p="$(printf '%s' "$CUBE_WS_PATH_B64" | base64 -d)" || exit 40
-if [ -L "$p" ]; then exit 41
-elif [ -d "$p" ]; then rm -rf --one-file-system -- "$p" || exit 42
-elif [ -e "$p" ]; then exit 43
-fi
-printf 'OK\n'`;
+def open_beneath(root_fd, relative, flags, mode=0):
+    if relative == "": return os.dup(root_fd)
+    how = OpenHow(flags, mode, RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV)
+    path = ctypes.c_char_p(os.fsencode(relative))
+    result = LIBC.syscall(SYS_OPENAT2, root_fd, path, ctypes.byref(how), ctypes.sizeof(how))
+    if result < 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), relative)
+    return result
+
+def fail(code):
+    raise SystemExit(code)
+
+def decode_env(name, allow_empty=False):
+    try:
+        raw = base64.b64decode(os.environ.get(name, ""), validate=True)
+        value = raw.decode("utf-8", "strict")
+    except Exception:
+        fail(40)
+    if not allow_empty and not value:
+        fail(40)
+    return value
+
+def segments(value):
+    if value == "":
+        return []
+    parts = value.split("/")
+    if any(not part or part in (".", "..") or "/" in part or "\x00" in part for part in parts):
+        fail(40)
+    return parts
+
+def open_root():
+    try:
+        return os.open(ROOT, DIR_FLAGS)
+    except OSError:
+        fail(41)
+
+def open_parent(root_fd, parts):
+    try:
+        return open_beneath(root_fd, "/".join(parts[:-1]), DIR_FLAGS), (parts[-1] if parts else "")
+    except OSError: fail(41)
+
+def classify(mode):
+    if stat.S_ISREG(mode): return "FILE_TYPE_FILE"
+    if stat.S_ISDIR(mode): return "FILE_TYPE_DIRECTORY"
+    if stat.S_ISLNK(mode): return "FILE_TYPE_SYMLINK"
+    return "FILE_TYPE_SPECIAL"
+
+def stat_at(root_fd, parts):
+    if not parts:
+        return os.fstat(root_fd)
+    parent, name = open_parent(root_fd, parts)
+    try:
+        return os.stat(name, dir_fd=parent, follow_symlinks=False)
+    finally:
+        os.close(parent)
+
+def emit_ok():
+    sys.stdout.write("OK\n")
+
+def remove_tree_at(parent_fd, name):
+    child = os.open(name, DIR_FLAGS, dir_fd=parent_fd)
+    try:
+        with os.scandir(child) as entries:
+            for entry in entries:
+                item = os.stat(entry.name, dir_fd=child, follow_symlinks=False)
+                if stat.S_ISDIR(item.st_mode):
+                    remove_tree_at(child, entry.name)
+                else:
+                    os.unlink(entry.name, dir_fd=child)
+    finally:
+        os.close(child)
+    os.rmdir(name, dir_fd=parent_fd)
+
+try:
+    root = open_root()
+    try:
+        if OP == "stat":
+            rel = decode_env("CUBE_WS_REL_B64", allow_empty=True)
+            try:
+                value = stat_at(root, segments(rel))
+            except FileNotFoundError:
+                fail(40)
+            result = {"type": classify(value.st_mode)}
+            if stat.S_ISREG(value.st_mode): result["size"] = value.st_size
+            sys.stdout.write(json.dumps(result, separators=(",", ":")))
+
+        elif OP == "scan":
+            max_entries = int(os.environ["CUBE_WS_MAX_ENTRIES"])
+            max_file = int(os.environ["CUBE_WS_MAX_FILE_BYTES"])
+            max_total = int(os.environ["CUBE_WS_MAX_TOTAL_BYTES"])
+            max_path = int(os.environ["CUBE_WS_MAX_PATH_BYTES"])
+            max_output = int(os.environ["CUBE_WS_MAX_OUTPUT_BYTES"])
+            found, total = [], 0
+            def walk(fd, prefix):
+                with os.scandir(fd) as entries:
+                    names = sorted((entry.name for entry in entries), key=os.fsencode)
+                for name in names:
+                    try:
+                        encoded_name = name.encode("utf-8", "strict")
+                    except UnicodeError:
+                        fail(46)
+                    rel = name if not prefix else prefix + "/" + name
+                    rel_bytes = rel.encode("utf-8", "strict")
+                    if len(rel_bytes) > max_path: fail(46)
+                    value = os.stat(name, dir_fd=fd, follow_symlinks=False)
+                    kind = classify(value.st_mode)
+                    item = {"relativePathB64": base64.b64encode(rel_bytes).decode("ascii"), "type": kind}
+                    if kind == "FILE_TYPE_FILE":
+                        if value.st_size > max_file: fail(45)
+                        item["size"] = value.st_size
+                    found.append(item)
+                    if len(found) > max_entries: fail(44)
+                    if kind == "FILE_TYPE_DIRECTORY":
+                        child = open_beneath(fd, name, DIR_FLAGS)
+                        try: walk(child, rel)
+                        finally: os.close(child)
+            walk(root, "")
+            total = sum(item.get("size", 0) for item in found)
+            if total > max_total: fail(45)
+            payload = json.dumps(found, separators=(",", ":"), sort_keys=True)
+            if len(payload.encode("utf-8")) > max_output: fail(47)
+            sys.stdout.write(payload)
+
+        elif OP == "read":
+            rel = decode_env("CUBE_WS_REL_B64")
+            maximum = int(os.environ["CUBE_WS_MAX_BYTES"])
+            try:
+                fd = open_beneath(root, rel, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            except FileNotFoundError:
+                fail(40)
+            except OSError:
+                fail(41)
+            try:
+                before = os.fstat(fd)
+                if not stat.S_ISREG(before.st_mode): fail(41)
+                if before.st_size > maximum: fail(42)
+                body = bytearray()
+                while len(body) <= maximum:
+                    chunk = os.read(fd, min(65536, maximum + 1 - len(body)))
+                    if not chunk: break
+                    body.extend(chunk)
+                after = os.fstat(fd)
+            finally:
+                os.close(fd)
+            def fingerprint(value):
+                return f"{value.st_size}:{value.st_dev}:{value.st_ino}:{value.st_mtime_ns}:{value.st_ctime_ns}:{value.st_mode:x}"
+            first, last = fingerprint(before), fingerprint(after)
+            sys.stdout.write("CUBEWS1:" + first + "\n")
+            sys.stdout.write(base64.b64encode(body).decode("ascii") + "\n")
+            sys.stdout.write("CUBEWS1:" + last + "\n")
+
+        elif OP == "ensure_directory":
+            parts = segments(decode_env("CUBE_WS_REL_B64"))
+            for index, part in enumerate(parts):
+                prefix = "/".join(parts[:index + 1])
+                try:
+                    current = open_beneath(root, prefix, DIR_FLAGS)
+                except FileNotFoundError:
+                    parent = open_beneath(root, "/".join(parts[:index]), DIR_FLAGS)
+                    try: os.mkdir(part, 0o700, dir_fd=parent)
+                    finally: os.close(parent)
+                    current = open_beneath(root, prefix, DIR_FLAGS)
+                os.close(current)
+            emit_ok()
+
+        elif OP in ("remove_file", "remove_directory", "remove_tree"):
+            parent, name = open_parent(root, segments(decode_env("CUBE_WS_REL_B64")))
+            try:
+                try: value = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    emit_ok(); raise SystemExit(0)
+                if OP == "remove_file":
+                    if not (stat.S_ISREG(value.st_mode) or stat.S_ISLNK(value.st_mode)): fail(42)
+                    os.unlink(name, dir_fd=parent)
+                elif OP == "remove_directory":
+                    if stat.S_ISLNK(value.st_mode): fail(41)
+                    if not stat.S_ISDIR(value.st_mode): fail(43)
+                    os.rmdir(name, dir_fd=parent)
+                else:
+                    if stat.S_ISLNK(value.st_mode): fail(41)
+                    if not stat.S_ISDIR(value.st_mode): fail(43)
+                    remove_tree_at(parent, name)
+            finally:
+                os.close(parent)
+            emit_ok()
+
+        elif OP == "finalize_write":
+            tmp = decode_env("CUBE_WS_TEMP_B64")
+            if not tmp.startswith("/tmp/cube-runtime-") or "/" in tmp[len("/tmp/"):]: fail(40)
+            expected_size = int(os.environ["CUBE_WS_EXPECTED_SIZE"])
+            expected_sha = os.environ["CUBE_WS_EXPECTED_SHA256"]
+            try: source = os.open(tmp, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            except OSError: fail(41)
+            try:
+                source_stat = os.fstat(source)
+                if not stat.S_ISREG(source_stat.st_mode): fail(41)
+                body = bytearray()
+                while True:
+                    chunk = os.read(source, 65536)
+                    if not chunk: break
+                    body.extend(chunk)
+                    if len(body) > expected_size: fail(42)
+            finally:
+                os.close(source)
+            if len(body) != expected_size or hashlib.sha256(body).hexdigest() != expected_sha: fail(42)
+            parent, name = open_parent(root, segments(decode_env("CUBE_WS_REL_B64")))
+            inner = ".cube-runtime-" + expected_sha[:16] + "-" + secrets.token_hex(8) + ".tmp"
+            created = False
+            try:
+                try:
+                    target = os.stat(name, dir_fd=parent, follow_symlinks=False)
+                    if stat.S_ISDIR(target.st_mode): fail(44)
+                except FileNotFoundError: pass
+                output = os.open(inner, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=parent)
+                created = True
+                try:
+                    offset = 0
+                    while offset < len(body): offset += os.write(output, body[offset:])
+                    os.fsync(output)
+                finally: os.close(output)
+                os.replace(inner, name, src_dir_fd=parent, dst_dir_fd=parent)
+                created = False
+                os.fsync(parent)
+            finally:
+                if created:
+                    try: os.unlink(inner, dir_fd=parent)
+                    except OSError: pass
+                os.close(parent)
+            os.unlink(tmp)
+            emit_ok()
+
+        elif OP == "cleanup_temporary":
+            tmp = decode_env("CUBE_WS_TEMP_B64")
+            if not tmp.startswith("/tmp/cube-runtime-") or "/" in tmp[len("/tmp/"):]: fail(40)
+            try: value = os.lstat(tmp)
+            except FileNotFoundError:
+                emit_ok(); raise SystemExit(0)
+            if not (stat.S_ISREG(value.st_mode) or stat.S_ISLNK(value.st_mode)): fail(41)
+            os.unlink(tmp)
+            emit_ok()
+        else:
+            fail(40)
+    finally:
+        os.close(root)
+except SystemExit:
+    raise
+except Exception:
+    fail(70)
+PY`;

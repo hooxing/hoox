@@ -11,10 +11,6 @@
     "./testing": {
       "types": "./src/testing/fake.ts",
       "default": "./dist/testing/fake.js"
-    },
-    "./testing/workspace-adapter": {
-      "types": "./src/testing/workspace-adapter.ts",
-      "default": "./dist/testing/workspace-adapter.js"
     }
   },
   "types": "./src/index.ts",

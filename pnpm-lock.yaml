@@ -234,6 +234,9 @@ importers:
 
   runtime-ts/packages/sandbox:
     dependencies:
+      '@cube-runtime/workspace':
+        specifier: workspace:*
+        version: link:../workspace
       '@cubesandbox/sdk':
         specifier: workspace:*
         version: link:../../vendor/cubesandbox-sdk

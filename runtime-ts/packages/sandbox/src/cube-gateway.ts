@@ -18,16 +18,29 @@ import {
   validateTimeout,
   validateTtl,
 } from "./validation.js";
+import {
+  CubeSandboxWorkspacePort,
+  type CubeWorkspaceAdapterOptions,
+  type TrustedSandboxSessionCapability,
+} from "./workspace-adapter.js";
 
 export interface CubeSdkSandbox {
   sandboxId: string;
   commands: {
-    run(command: string, options?: { timeoutMs?: number }): Promise<unknown>;
+    run(
+      command: string,
+      options?: { timeoutMs?: number; envs?: Record<string, string> },
+    ): Promise<unknown>;
   };
   runCode(code: string, options?: { language?: string; timeoutMs?: number }): Promise<unknown>;
   files: {
     read(path: string): Promise<string>;
     write(path: string, data: string | Uint8Array): Promise<void>;
+    list(path: string): Promise<Record<string, unknown>[]>;
+    stat(path: string): Promise<Record<string, unknown>>;
+    remove(path: string): Promise<void>;
+    rename(oldPath: string, newPath: string): Promise<Record<string, unknown>>;
+    makeDir(path: string): Promise<Record<string, unknown>>;
   };
   pause(options?: { timeoutMs?: number }): Promise<void>;
   kill(): Promise<void>;
@@ -154,6 +167,33 @@ export class CubeSandboxGateway implements SandboxGateway {
       effectiveControl,
     );
     return new CubeSandboxHandle(sandbox, this.defaultOperationTimeoutMs);
+  }
+
+  /**
+   * 只有持有可信 Session capability 的装配层才能取得 Workspace 文件能力。
+   * 调用方不能注入根目录、Sandbox URL 或宿主路径。
+   */
+  async connectWorkspace(
+    capability: TrustedSandboxSessionCapability,
+    options: CubeWorkspaceAdapterOptions,
+    control: OperationControl = {},
+  ): Promise<CubeSandboxWorkspacePort> {
+    const effectiveControl = this.control(control);
+    const identity = await capability.current();
+    const sandbox = await settledOperation(
+      "连接 Workspace Sandbox",
+      () =>
+        this.sdk.connect(identity.sessionId, {
+          config: this.config(effectiveControl.timeoutMs),
+        }),
+      effectiveControl,
+    );
+    return CubeSandboxWorkspacePort.open({
+      capability,
+      identity,
+      sandbox,
+      options,
+    });
   }
 
   private async reconcileFailedCreate(

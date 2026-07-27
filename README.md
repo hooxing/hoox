@@ -4,9 +4,19 @@
 
 ## 当前状态
 
-仓库已实现并测试 Tenant、Thread、Run、Workspace、Resource、Artifact 等领域边界，以及 PostgreSQL 持久化与 RLS、HTTP API 协议、Run/Worker 状态机、CubeSandbox 适配、MinIO 对象存储和进程生命周期等能力。实现仍处于开发阶段：目前没有可供浏览器使用的产品 Web UI，API 与 Agent Worker 也尚未完成真实身份、模型、队列等完整生产装配，因此不能把应用骨架当作可长期运行的产品服务。
+仓库已实现并测试 Tenant、Thread、Run、Workspace、Resource、Artifact 等领域边界，以及 PostgreSQL 持久化与 RLS、HTTP API 协议、Run/Worker 状态机、CubeSandbox 适配、MinIO 对象存储和进程生命周期等能力。实现仍处于开发阶段：目前没有可供浏览器使用的产品 Web UI；API 已提供只面向本地 development 的真实 PostgreSQL 常驻装配，但固定开发身份不属于生产认证，Agent Worker 也尚未完成真实模型和队列等完整生产装配，因此不能把开发服务当作产品服务。
 
 当前最有价值的运行方式是执行工程 Gate、真实 CubeSandbox 冒烟和 PostgreSQL M4 黑盒测试，并通过 CubeSandbox、MinIO 自带的控制台观察外部资源。
+
+在迁移完成、`.env` 中两个开发身份已存在于数据库且游标签名密钥环有效后，可以启动开发 API：
+
+```powershell
+corepack pnpm dev:api
+Invoke-RestMethod "http://$($env:API_LISTEN_HOST):$($env:API_LISTEN_PORT)/live"
+Invoke-RestMethod "http://$($env:API_LISTEN_HOST):$($env:API_LISTEN_PORT)/ready"
+```
+
+`THREAD_CURSOR_SIGNING_KEYS` 格式为逗号分隔的 `kid:base64url-key`，每个 key 解码后必须为 32 到 64 字节。开发凭据只接受 `Bearer dev-user-a` 和 `Bearer dev-user-b`；它们是本机 fixture 选择器，不是认证方案。服务不会在启动时偷偷创建 Tenant 或 Membership，缺少开发身份数据时业务请求会返回 404。
 
 ## 开发基线
 

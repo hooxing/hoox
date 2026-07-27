@@ -1,0 +1,346 @@
+import { ArtifactDeliveryError, type PublishArtifactCommand } from "@cube-runtime/artifact";
+import {
+  artifactId,
+  isoTimestamp,
+  resourceVersionId,
+  runId,
+  sha256Digest,
+  tenantId,
+  threadId,
+  workspaceId,
+} from "@cube-runtime/domain";
+import type {
+  ConsumedExternalEffectAuthorization,
+  ExecutionScope,
+  ExternalEffectCall,
+} from "@cube-runtime/run-contracts";
+import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+import { describe, expect, it } from "vitest";
+import {
+  ArtifactToolError,
+  artifactToolErrorProjection,
+  ArtifactToolRouter,
+  ArtifactToolRouterFactory,
+  type ArtifactPublicationResourcePort,
+  type ArtifactToolServicePort,
+  type TrustedArtifactExecutionContext,
+} from "./artifact-tools.js";
+
+const scope: ExecutionScope = Object.freeze({
+  tenantId: tenantId("tenant_tool"),
+  threadId: threadId("thread_tool"),
+  runId: runId("run_tool"),
+  rootRunId: runId("run_tool"),
+  workspaceId: workspaceId("workspace_tool"),
+});
+const context: TrustedArtifactExecutionContext = Object.freeze({
+  scope,
+  runClaimToken: "claim-tool-1",
+  runClaimEpoch: 3,
+  workspaceRootRunId: scope.rootRunId,
+  workspaceLeaseEpoch: 5,
+});
+const versionOne = resourceVersionId("version_tool_one");
+
+class FakeArtifactService implements ArtifactToolServicePort {
+  readonly declarations: Parameters<ArtifactToolServicePort["declareDeliverables"]>[0][] = [];
+  readonly publications: PublishArtifactCommand[] = [];
+  publishError?: unknown;
+
+  async declareDeliverables(
+    input: Parameters<ArtifactToolServicePort["declareDeliverables"]>[0],
+  ): Promise<void> {
+    this.declarations.push(input);
+  }
+
+  async publishArtifact(command: PublishArtifactCommand) {
+    this.publications.push(command);
+    if (this.publishError) throw this.publishError;
+    return {
+      artifactId: command.artifactId,
+      tenantId: command.authorization.scope.tenantId,
+      threadId: command.authorization.scope.threadId,
+      runId: command.authorization.scope.runId,
+      resourceVersionId: command.resourceVersionId,
+      ...(command.replacesArtifactId === undefined
+        ? {}
+        : { replacesArtifactId: command.replacesArtifactId }),
+      name: command.name,
+      purpose: command.purpose,
+      ...(command.deliverableKey === undefined ? {} : { deliverableKey: command.deliverableKey }),
+      status: "published" as const,
+    };
+  }
+}
+
+class FakeResources implements ArtifactPublicationResourcePort {
+  readonly calls: Parameters<ArtifactPublicationResourcePort["prepareImmutableVersion"]>[0][] = [];
+  outcome: Awaited<ReturnType<ArtifactPublicationResourcePort["prepareImmutableVersion"]>> = {
+    outcome: "ready",
+    resourceVersionId: versionOne,
+  };
+
+  async prepareImmutableVersion(
+    input: Parameters<ArtifactPublicationResourcePort["prepareImmutableVersion"]>[0],
+  ) {
+    this.calls.push(input);
+    return this.outcome;
+  }
+}
+
+function consumed(
+  call: ExternalEffectCall,
+  overrides: Partial<ConsumedExternalEffectAuthorization["permit"]> = {},
+): ConsumedExternalEffectAuthorization {
+  return {
+    permit: {
+      permitId: `permit-${call.callId}`,
+      scope,
+      runClaimToken: context.runClaimToken,
+      runClaimEpoch: context.runClaimEpoch,
+      workspaceRootRunId: context.workspaceRootRunId,
+      workspaceLeaseEpoch: context.workspaceLeaseEpoch,
+      attemptVersion: 9,
+      effect: "tool_execution",
+      callId: call.callId,
+      toolName: call.toolName,
+      argsDigest: call.argsDigest,
+      issuedAt: isoTimestamp("2026-07-26T00:00:00.000Z"),
+      expiresAt: isoTimestamp("2026-07-26T00:01:00.000Z"),
+      ...overrides,
+    },
+    consumedAt: isoTimestamp("2026-07-26T00:00:01.000Z"),
+    consumedAtMonotonicMs: 100,
+    maxContinuationDelayMs: 1_000,
+  };
+}
+
+function harness(
+  authorization: (call: ExternalEffectCall) => ConsumedExternalEffectAuthorization = consumed,
+) {
+  const artifacts = new FakeArtifactService();
+  const resources = new FakeResources();
+  const calls: ExternalEffectCall[] = [];
+  const router = new ArtifactToolRouter({
+    context,
+    artifacts,
+    resources,
+    monotonicClock: { now: () => 100 },
+    authorizer: {
+      authorizeToolEffect: async (call) => {
+        calls.push(call);
+        return authorization(call);
+      },
+    },
+  });
+  return { router, artifacts, resources, calls };
+}
+
+const declareArgs = {
+  idempotencyKey: "declare:run_tool:1",
+  declarations: [
+    { key: "report", name: "最终报告", requirement: "required" as const },
+    { key: "appendix", name: "附录", requirement: "optional" as const },
+  ],
+};
+
+const publishArgs = {
+  idempotencyKey: "publish:run_tool:1",
+  artifactId: "artifact_tool_one",
+  name: "最终报告.md",
+  purpose: "deliverable" as const,
+  deliverableKey: "report",
+  source: {
+    kind: "workspace_file" as const,
+    relativePath: "reports/final.md",
+    resourceName: "最终报告源文件",
+  },
+};
+
+describe("Artifact Tool Router", () => {
+  it("严格协议只授权 canonical 实参，并从可信上下文收窄写能力", async () => {
+    const { router, artifacts, resources, calls } = harness();
+    await expect(
+      router.declareDeliverables({ callId: "call-declare-1", arguments: declareArgs }),
+    ).resolves.toEqual({
+      ok: true,
+      code: "DELIVERABLES_DECLARED",
+      requiredCount: 1,
+      optionalCount: 1,
+    });
+    await expect(
+      router.publishArtifact({ callId: "call-publish-1", arguments: publishArgs }),
+    ).resolves.toMatchObject({
+      ok: true,
+      code: "ARTIFACT_PUBLISHED",
+      artifactId: artifactId("artifact_tool_one"),
+      resourceVersionId: versionOne,
+    });
+
+    expect(calls).toEqual([
+      {
+        callId: "call-declare-1",
+        toolName: "declare_deliverables",
+        argsDigest: digestCanonical(declareArgs),
+      },
+      {
+        callId: "call-publish-1",
+        toolName: "publish_artifact",
+        argsDigest: digestCanonical(publishArgs),
+      },
+    ]);
+    expect(resources.calls[0]?.source).toEqual({
+      kind: "workspace_file",
+      relativePath: "reports/final.md",
+      resourceName: "最终报告源文件",
+    });
+    expect(artifacts.publications[0]?.toolArgsDigest).toBe(digestCanonical(publishArgs));
+    expect(artifacts.publications[0]?.authorization.scope).toEqual(scope);
+  });
+
+  it("固定 ResourceVersion 来源无需对象键，结果也不泄漏存储定位信息", async () => {
+    const { router, resources } = harness();
+    const result = await router.publishArtifact({
+      callId: "call-fixed-version",
+      arguments: {
+        ...publishArgs,
+        source: { kind: "resource_version", resourceVersionId: "version_tool_fixed" },
+      },
+    });
+    expect(resources.calls[0]?.source).toEqual({
+      kind: "resource_version",
+      resourceVersionId: resourceVersionId("version_tool_fixed"),
+    });
+    expect(JSON.stringify(result)).not.toMatch(/objectKey|physicalObjectKey|headers|url/iu);
+  });
+
+  it("不同 callId 重放同一业务参数时保持相同幂等键和工具摘要", async () => {
+    const { router, artifacts } = harness();
+    await router.publishArtifact({ callId: "call-replay-first", arguments: publishArgs });
+    await router.publishArtifact({ callId: "call-replay-second", arguments: publishArgs });
+    expect(artifacts.publications).toHaveLength(2);
+    expect(artifacts.publications[0]?.idempotencyKey).toBe(
+      artifacts.publications[1]?.idempotencyKey,
+    );
+    expect(artifacts.publications[0]?.toolArgsDigest).toBe(
+      artifacts.publications[1]?.toolArgsDigest,
+    );
+    expect(artifacts.publications[0]?.resourceVersionId).toBe(
+      artifacts.publications[1]?.resourceVersionId,
+    );
+  });
+
+  it("未知字段、越界路径、Unicode 歧义和访问器对象在消费许可前拒绝", async () => {
+    const cases: unknown[] = [
+      { ...declareArgs, tenantId: "tenant_attacker" },
+      { ...publishArgs, objectKey: "private/key" },
+      { ...publishArgs, source: { ...publishArgs.source, relativePath: "../secret" } },
+      { ...publishArgs, source: { ...publishArgs.source, relativePath: "e\u0301/report.md" } },
+      { ...publishArgs, source: { ...publishArgs.source, relativePath: "safe/\u202e.md" } },
+      { ...publishArgs, source: { ...publishArgs.source, headers: { authorization: "secret" } } },
+      { ...publishArgs, name: "报告\u202e.md" },
+      { ...publishArgs, name: "e\u0301.md" },
+      { ...publishArgs, name: " 报告.md" },
+      { ...publishArgs, purpose: "diagnostic", deliverableKey: "report" },
+      { ...publishArgs, deliverableKey: undefined },
+    ];
+    const poisoned = { ...publishArgs } as Record<string, unknown>;
+    Object.defineProperty(poisoned, "name", { enumerable: true, get: () => "secret" });
+    cases.push(poisoned);
+
+    for (const [index, args] of cases.entries()) {
+      const { router, calls } = harness();
+      const operation =
+        index === 0 ? router.declareDeliverables.bind(router) : router.publishArtifact.bind(router);
+      await expect(
+        operation({ callId: `call-invalid-${index}`, arguments: args }),
+      ).rejects.toMatchObject({
+        code: "ARTIFACT_TOOL_INVALID_ARGUMENT",
+      });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it("跨 Attempt 栅栏、同形 JSON、过期 continuation、取消和重复 permit 全部关闭", async () => {
+    const wrongAttempt = harness((call) =>
+      consumed(call, { runClaimToken: "other-attempt-token" }),
+    );
+    await expect(
+      wrongAttempt.router.declareDeliverables({
+        callId: "call-cross-attempt",
+        arguments: declareArgs,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_TOOL_NOT_AUTHORIZED" });
+    expect(wrongAttempt.artifacts.declarations).toHaveLength(0);
+
+    const wrongDigest = harness((call) =>
+      consumed(call, { argsDigest: sha256Digest("f".repeat(64)) }),
+    );
+    await expect(
+      wrongDigest.router.declareDeliverables({ callId: "call-same-shape", arguments: declareArgs }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_TOOL_NOT_AUTHORIZED" });
+
+    const expired = harness((call) => ({
+      ...consumed(call),
+      consumedAtMonotonicMs: 1,
+      maxContinuationDelayMs: 2,
+    }));
+    await expect(
+      expired.router.publishArtifact({ callId: "call-expired", arguments: publishArgs }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_TOOL_NOT_AUTHORIZED" });
+    expect(expired.resources.calls).toHaveLength(0);
+
+    const cancelled = harness();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      cancelled.router.publishArtifact({
+        callId: "call-cancelled",
+        arguments: publishArgs,
+        signal: controller.signal,
+      }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_TOOL_NOT_AUTHORIZED" });
+    expect(cancelled.calls).toHaveLength(0);
+
+    const duplicate = harness((call) => consumed(call, { permitId: "same-permit-id" }));
+    await duplicate.router.declareDeliverables({ callId: "call-first", arguments: declareArgs });
+    await expect(
+      duplicate.router.declareDeliverables({ callId: "call-second", arguments: declareArgs }),
+    ).rejects.toMatchObject({ code: "ARTIFACT_TOOL_NOT_AUTHORIZED" });
+    expect(duplicate.artifacts.declarations).toHaveLength(1);
+  });
+
+  it("发布失败给 Agent 稳定可修正结构，未知依赖异常完全脱敏", async () => {
+    const { router, artifacts } = harness();
+    artifacts.publishError = new ArtifactDeliveryError(
+      "ARTIFACT_PUBLICATION_FAILED",
+      "private object key",
+    );
+    const failed = await router
+      .publishArtifact({ callId: "call-failed", arguments: publishArgs })
+      .catch(artifactToolErrorProjection);
+    expect(failed).toEqual({
+      ok: false,
+      code: "ARTIFACT_PUBLICATION_FAILED",
+      message: "Artifact 发布失败，请修正文件后创建新版本和新 Artifact",
+      correctable: true,
+    });
+    expect(JSON.stringify(failed)).not.toContain("private object key");
+
+    const unknown = harness();
+    unknown.artifacts.publishError = new Error(
+      "s3://secret-bucket/private-key?X-Amz-Signature=secret",
+    );
+    const projection = await unknown.router
+      .publishArtifact({ callId: "call-upstream", arguments: publishArgs })
+      .catch(artifactToolErrorProjection);
+    expect(projection).toMatchObject({ code: "ARTIFACT_TOOL_UNAVAILABLE" });
+    expect(JSON.stringify(projection)).not.toMatch(/bucket|signature|private-key/iu);
+  });
+
+  it("没有 Resource/Artifact 真实依赖时生产 Factory 构造即失败", () => {
+    expect(
+      () => new ArtifactToolRouterFactory({ resources: undefined, artifacts: undefined } as never),
+    ).toThrowError(ArtifactToolError);
+  });
+});

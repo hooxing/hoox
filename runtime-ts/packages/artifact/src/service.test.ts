@@ -152,6 +152,7 @@ function binding(overrides: Partial<ArtifactBlobBinding> = {}): ArtifactBlobBind
 function publishCommand(overrides: Partial<PublishArtifactCommand> = {}): PublishArtifactCommand {
   const { authorization: overrideAuthorization, ...businessOverrides } = overrides;
   const business: Omit<PublishArtifactCommand, "authorization"> = {
+    toolArgsDigest: placeholderDigest,
     idempotencyKey: "publish:run_alpha:report:1",
     artifactId: artifactOne,
     resourceVersionId: versionOne,
@@ -164,15 +165,8 @@ function publishCommand(overrides: Partial<PublishArtifactCommand> = {}): Publis
     overrideAuthorization ??
     executionAuthorization({
       toolName: "publish_artifact",
-      args: {
-        idempotencyKey: business.idempotencyKey,
-        artifactId: business.artifactId,
-        resourceVersionId: business.resourceVersionId,
-        replacesArtifactId: business.replacesArtifactId,
-        name: business.name,
-        purpose: business.purpose,
-        deliverableKey: business.deliverableKey,
-      },
+      args: business.toolArgsDigest,
+      overrides: { argsDigest: business.toolArgsDigest },
     });
   return { ...business, authorization };
 }
@@ -435,7 +429,10 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
       executionAuthorization({
         toolName: "publish_artifact",
         args: rawArgs,
-        overrides: { toolName: "declare_deliverables" },
+        overrides: {
+          toolName: "declare_deliverables",
+          argsDigest: business.toolArgsDigest,
+        },
       }),
       executionAuthorization({
         toolName: "publish_artifact",
@@ -497,6 +494,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
           deliverableKey: commandAtConsumption.deliverableKey,
         },
         clock,
+        overrides: { argsDigest: commandAtConsumption.toolArgsDigest },
       }),
     });
     const declarations = [{ key: "report", name: "报告", requirement: "required" as const }];
@@ -540,7 +538,12 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
     });
     const command = {
       ...base,
-      authorization: executionAuthorization({ toolName: "publish_artifact", args, clock }),
+      authorization: executionAuthorization({
+        toolName: "publish_artifact",
+        args,
+        clock,
+        overrides: { argsDigest: base.toolArgsDigest },
+      }),
     };
     vi.mocked(blobs.head).mockImplementationOnce(async () => {
       clock.value = 1_100;
@@ -583,6 +586,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
           toolName: "publish_artifact",
           args: secondArgs,
           clock,
+          overrides: { argsDigest: second.toolArgsDigest },
         }),
       }),
     ).rejects.toSatisfy((error) => expectCode(error, "ARTIFACT_NOT_AUTHORIZED"));
@@ -629,15 +633,8 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
       const raw = publishCommand({ ...overrides });
       const authorization = executionAuthorization({
         toolName: "publish_artifact",
-        args: {
-          idempotencyKey: raw.idempotencyKey,
-          artifactId: raw.artifactId,
-          resourceVersionId: raw.resourceVersionId,
-          replacesArtifactId: raw.replacesArtifactId,
-          name: raw.name,
-          purpose: raw.purpose,
-          deliverableKey: raw.deliverableKey,
-        },
+        args: raw.toolArgsDigest,
+        overrides: { argsDigest: raw.toolArgsDigest },
         executionScope,
       });
       await service.publishArtifact({ ...raw, authorization }).catch(() => undefined);
@@ -659,6 +656,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
     }
 
     const businessCases: readonly Partial<PublishArtifactCommand>[] = [
+      { toolArgsDigest: sha256Digest("9".repeat(64)) },
       { idempotencyKey: "publish:run_alpha:report:other" },
       { artifactId: artifactId("artifact_other") },
       { resourceVersionId: resourceVersionId("resource_version_other") },
@@ -678,7 +676,8 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
     const processCommand = { ...processBusiness, purpose: "diagnostic" as const };
     const processAuthorization = executionAuthorization({
       toolName: "publish_artifact",
-      args: processCommand,
+      args: processCommand.toolArgsDigest,
+      overrides: { argsDigest: processCommand.toolArgsDigest },
     });
     await service
       .publishArtifact({ ...processCommand, authorization: processAuthorization })
@@ -759,21 +758,21 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
     repository.beginResult = { outcome: "conflict" };
     const base = publishCommand();
     const args = {
-      idempotencyKey: base.idempotencyKey,
-      artifactId: base.artifactId,
-      resourceVersionId: base.resourceVersionId,
-      replacesArtifactId: base.replacesArtifactId,
-      name: base.name,
-      purpose: base.purpose,
-      deliverableKey: base.deliverableKey,
+      toolArgsDigest: base.toolArgsDigest,
     };
     for (const authorization of [
-      executionAuthorization({ toolName: "publish_artifact", args, permitId: "permit-a" }),
+      executionAuthorization({
+        toolName: "publish_artifact",
+        args,
+        permitId: "permit-a",
+        overrides: { argsDigest: base.toolArgsDigest },
+      }),
       executionAuthorization({
         toolName: "publish_artifact",
         args,
         permitId: "permit-b",
         expiresAt: "2026-07-26T08:02:00.000Z",
+        overrides: { argsDigest: base.toolArgsDigest },
       }),
     ]) {
       await service.publishArtifact({ ...base, authorization }).catch(() => undefined);

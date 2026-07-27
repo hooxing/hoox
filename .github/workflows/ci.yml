@@ -42,6 +42,9 @@ jobs:
       - name: Linux 最小容器启动门禁
         run: pnpm test:process:container
 
+      - name: Linux Pi Prompt 与能力清单容器门禁
+        run: pnpm test:pi-prompt:container
+
   process-portability:
     name: 进程骨架（${{ matrix.os }}）
     runs-on: ${{ matrix.os }}

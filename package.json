@@ -23,6 +23,7 @@
     "test": "pnpm build && vitest run",
     "test:cube:real": "pnpm --filter @cubesandbox/sdk build && tsx runtime-ts/packages/sandbox/src/real-smoke.ts",
     "test:pi-cube:real": "pnpm build && tsx runtime-ts/packages/pi-adapter/src/real-vertical-smoke.ts",
+    "test:pi-prompt:container": "node scripts/run-pi-prompt-container-gate.mjs",
     "test:integration:pg": "node --env-file-if-exists=.env ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",
     "test:integration:m4": "pnpm --filter @cubesandbox/sdk build && vitest run --config vitest.integration.config.ts tests/integration/postgres-run-worker.integration.test.ts",
     "build:process-runtime-dependencies": "pnpm --filter \"@cube-runtime/api^...\" --filter \"@cube-runtime/agent-worker^...\" --filter \"@cube-runtime/scheduler^...\" build",

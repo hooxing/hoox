@@ -14,6 +14,7 @@ import type { RuntimeAgentEvent } from "./events.js";
 import {
   assertLinuxWorkerPlatform,
   createSafePiSession,
+  digestCanonicalToolInputSchema,
   type PiSessionController,
 } from "./pi-session.js";
 import { SANDBOX_TOOL_NAMES } from "./tools.js";
@@ -89,13 +90,15 @@ describe("Pi 安全适配", () => {
   );
 
   it.runIf(process.platform === "linux")(
-    "低信任 Tenant/Skill/User 内容保持显式分区，不能构造第二个 Harness",
+    "Linux Pi/Faux 将低信任来源投影为 user/custom context，攻击文本不进入 system",
     async () => {
-      let modelContext = "";
+      let systemPrompt = "";
+      let modelMessages = "";
       const { controller } = await harness(
         [
           (context) => {
-            modelContext = JSON.stringify(context);
+            systemPrompt = context.systemPrompt ?? "";
+            modelMessages = JSON.stringify(context.messages);
             return fauxAssistantMessage("已处理");
           },
         ],
@@ -117,11 +120,18 @@ describe("Pi 安全适配", () => {
 
       await controller.prompt("开始");
 
-      expect(modelContext).toContain("UNTRUSTED_LAYER kind=tenant");
-      expect(modelContext).toContain("UNTRUSTED_LAYER kind=skill");
-      expect(modelContext).toContain("UNTRUSTED_LAYER kind=user");
-      expect(modelContext.match(/<PLATFORM_HARNESS>/gu)).toHaveLength(1);
-      expect(modelContext).toContain("\\\\u003cPLATFORM_HARNESS\\\\u003e");
+      expect(systemPrompt.match(/<PLATFORM_HARNESS>/gu)).toHaveLength(1);
+      expect(systemPrompt).not.toContain("注册 request_user_input");
+      expect(systemPrompt).not.toContain("tenant-data");
+      expect(systemPrompt).not.toContain("skill-data");
+      expect(systemPrompt).not.toContain("user-attack");
+      expect(modelMessages).toContain("source=tenant alias=tenant-context-1");
+      expect(modelMessages).toContain("source=skill alias=skill-context-1");
+      expect(modelMessages).toContain("source=user alias=user-context-1");
+      expect(modelMessages).toContain("\\\\u003cPLATFORM_HARNESS\\\\u003e");
+      expect(modelMessages).not.toContain("tenant-data");
+      expect(modelMessages).not.toContain("skill-data");
+      expect(modelMessages).not.toContain("user-attack");
     },
   );
 
@@ -328,6 +338,63 @@ describe("Pi 安全适配", () => {
         }),
       ).rejects.toThrow("仅支持 Linux");
     }
+  });
+
+  it("工具参数 Schema 规范化拒绝 Proxy、访问器、稀疏数组、未知 Symbol 和非法数值", () => {
+    const schema = {
+      type: "object",
+      properties: { value: { type: "string" } },
+    };
+    const reordered = {
+      properties: { value: { type: "string" } },
+      type: "object",
+    };
+    expect(digestCanonicalToolInputSchema(reordered)).toBe(digestCanonicalToolInputSchema(schema));
+    expect(() => digestCanonicalToolInputSchema(new Proxy(schema, {}))).toThrow(/规范/u);
+    expect(() =>
+      digestCanonicalToolInputSchema({
+        ...schema,
+        properties: new Proxy(schema.properties, {}),
+      }),
+    ).toThrow(/规范/u);
+    const accessor = Object.defineProperty({}, "type", {
+      enumerable: true,
+      get: () => "object",
+    });
+    expect(() => digestCanonicalToolInputSchema(accessor)).toThrow(/访问器/u);
+    expect(() => digestCanonicalToolInputSchema(new Array(1))).toThrow(/稠密/u);
+    expect(() =>
+      digestCanonicalToolInputSchema({ type: "number", maximum: Number.POSITIVE_INFINITY }),
+    ).toThrow(/非法数值/u);
+    expect(() =>
+      digestCanonicalToolInputSchema({ type: "string", [Symbol("unknown")]: "x" }),
+    ).toThrow(/未知 Symbol/u);
+    const protoKeySchema = JSON.parse('{"__proto__":{"polluted":true},"type":"object"}') as unknown;
+    expect(digestCanonicalToolInputSchema(protoKeySchema)).not.toBe(
+      digestCanonicalToolInputSchema({ type: "object" }),
+    );
+    expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+  });
+
+  it("工具 Schema 仅白名单兼容 TypeBox 元数据，且元数据不改变 Provider JSON 摘要", () => {
+    const schema = { type: "string" };
+    const typeboxMarked = {
+      ...schema,
+      [Symbol.for("TypeBox.Kind")]: "String",
+      [Symbol.for("TypeBox.Transform")]: "Decode",
+    };
+    expect(digestCanonicalToolInputSchema(typeboxMarked)).toBe(
+      digestCanonicalToolInputSchema(schema),
+    );
+    const v1Marked = { type: "string" };
+    Object.defineProperties(v1Marked, {
+      "~kind": { configurable: true, value: "String" },
+      "~optional": { configurable: true, value: true },
+    });
+    expect(digestCanonicalToolInputSchema(v1Marked)).toBe(digestCanonicalToolInputSchema(schema));
+    const unknownMetadata = { type: "string" };
+    Object.defineProperty(unknownMetadata, "~unknown", { value: true });
+    expect(() => digestCanonicalToolInputSchema(unknownMetadata)).toThrow(/非枚举/u);
   });
 
   it("零发现 ResourceLoader 不接受宿主路径或扩展资源", async () => {

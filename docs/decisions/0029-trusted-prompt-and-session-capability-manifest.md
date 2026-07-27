@@ -26,32 +26,34 @@ Pi Session 已关闭扩展、Skill、AGENTS 和宿主目录自动发现，也只
 
 最灵活，但任何装配都能替换平台 Harness，低信任内容和能力说明也没有统一校验，无法证明信任层级。
 
-### 方案 B：Prompt Builder 固定 Harness，装配只注入结构化低信任层和真实工具描述
+### 方案 B：Prompt Builder 固定 Harness，低信任内容使用受控 custom/user 消息
 
-平台规范集中且可版本化；能力清单可从真实注册数组派生；代价是新增能力或信任层必须显式升级 Builder 契约。
+平台规范集中且可版本化，低信任内容不占用 system role；能力清单可从真实注册数组派生。代价是新增能力或来源类型必须显式升级 Builder 契约和 Session 投影。
 
 ### 方案 C：完全依赖 Provider 的 system/user 消息角色
 
-消息角色有帮助，但无法解决租户规范和 Skill 数据在同一 systemPrompt 内的边界，也不能防止能力文案与实际工具漂移。
+消息角色有帮助，但若没有来源元数据、严格解码和能力核对，仍不能防止内部 ID 泄漏、结构欺骗和工具文案漂移。
 
 ## 选择
 
 采用方案 B：
 
 1. `prompt-builder` 固定版本化 `PLATFORM_HARNESS`，调用方不能提交或覆盖 Harness 文本。
-2. Tenant、Skill、User 内容分别进入 `UNTRUSTED_LAYER`。每项以 JSON 字符串表示，并额外转义 `<`、`>`、`&`，使数据中的分隔符不能产生第二个结构分区。Harness 明确声明这些内容不能新增工具、授权、Tenant 身份或平台规范。
-3. `createSafePiSession` 先构造将要传给 Pi 的 `customTools`，再从同一数组的 `name + description + 参数 Schema 规范摘要` 生成 capability manifest 和系统提示。无 Artifact Router 时不出现 Artifact 能力；不存在的 `request_user_input` 等能力不得硬编码。Session 创建后还要逐项核对 Pi 实际活动工具与 manifest，不一致即释放 Session 并失败关闭。
-4. 输入只接受普通对象、普通稠密数组、精确字段和固定 `schemaVersion=1`；拒绝访问器、Symbol、非枚举字段、未知字段、附加数组属性、稀疏数组、重复或空 ID。
-5. ID 使用有限 ASCII 协议；文本必须非空且为 NFC。除换行外拒绝 Unicode `Cc/Cf/Cs`，覆盖控制字符、Bidi 控制、零宽格式字符和孤立代理项。
-6. 所有长度限制以 UTF-8 字节计数，遍历使用 Unicode code point，不做 UTF-16 截断。每项和三层总量分别有固定上限；上限不是可由低信任输入提交的数值。
-7. 能力和每层内容按 ID 排序并拒绝重复，manifest 和完整 Prompt 分别计算 SHA-256。输出携带 prompt schema/version、manifest version/digest 和 prompt digest，且深度冻结；相同输入在不同进程中应字节一致。
-8. Pi 设置仍固定 `compaction.enabled=false`；Controller 只暴露窄接口，不增加 `compact`，诊断同时公开 Prompt 版本和摘要用于测试与审计。
+2. system role 只包含固定 Harness 与本 Session 实际 capability manifest。Tenant、Skill、User 每项分别写为 `runtime.untrusted_context.v1` CustomMessage；Pi 将其转换成 Provider 的 user 消息。Session Entry 的受控 `details` 只保存来源类型、公开 alias、局部序号和内容摘要；模型可见 content 同样只出现公开 alias/局部序号和 JSON 字符串。内部 ID 只用于排序和完整投影摘要，不进入 system、custom content 或来源元数据。`<`、`>`、`&` 额外转义，数据不能产生第二个结构分区。
+3. Harness 准确区分两类效果：`sandbox_*` 只操作隔离 CubeSandbox，文件协议继续接受 Sandbox 内绝对路径；Artifact 工具若实际注册，则经 Tool Router、执行许可和业务校验固定 ResourceVersion、发布不可变交付物。不得笼统声称所有工具只作用于 `/workspace`。
+4. `createSafePiSession` 先从将要传给 Pi 的 `customTools` 的 `name + description + 参数 Schema 规范摘要` 生成 capability manifest。无 Artifact Router 时不出现 Artifact 能力；不存在的 `request_user_input` 等能力不得硬编码。Session 创建后必须重新读取 `session.agent.state.tools`，对三项完整重算并逐项比较；任何差异都先释放 Session 再失败关闭。
+5. Prompt 输入只接受普通对象、普通稠密数组、精确字段和固定 `schemaVersion=1`；通过 `node:util.types.isProxy` 在读取原型或描述符前拒绝根与任意嵌套 Proxy，并拒绝访问器、Symbol、非枚举字段、未知字段、附加数组属性、稀疏数组、重复或空 ID。
+6. Tool 参数 Schema 使用独立、基于 property descriptor 的规范化器，递归拒绝 Proxy、getter/accessor、非普通对象、稀疏/附加字段数组、循环、非有限数值和未知 Symbol/非枚举字段。只白名单兼容 TypeBox 历史协议的 `Symbol.for("TypeBox.Kind")`、`Symbol.for("TypeBox.Transform")`，以及当前固定版本使用的非枚举 `~kind`、`~optional`、`~readonly`；这些标记必须具有约定的字符串/布尔值，且不进入 Provider JSON 和 Schema 摘要。
+7. ID 使用有限 ASCII 协议；文本必须非空且为 NFC。除换行外拒绝 Unicode `Cc/Cf/Cs`，并额外拒绝 U+034F、Hangul/中日韩不可见填充、FE00–FE0D 和补充 Variation Selectors 等审计欺骗字符。FE0E/FE0F 明确保留，避免破坏常用 emoji 的文本/彩色呈现。
+8. 所有长度限制以 UTF-8 字节计数，遍历使用 Unicode code point，不做 UTF-16 截断。每项和三层总量分别有固定上限；上限不是可由低信任输入提交的数值。
+9. 能力和每层内容按内部 ID 排序并拒绝重复；内部 ID 只参与排序、受控元数据和完整投影摘要。manifest 与“systemPrompt + custom context entries”分别计算 SHA-256。输出携带 prompt schema/version、manifest version/digest 和 prompt digest，且深度冻结；相同输入在不同进程中应字节一致。
+10. Pi 设置仍固定 `compaction.enabled=false`；Controller 只暴露窄接口，不增加 `compact`，诊断同时公开 Prompt 版本和摘要用于测试与审计。
 
 ## 影响
 
 ### 正面影响
 
-- 低信任内容无法通过 Builder 获得平台 Harness 的结构位置；
+- 低信任内容不进入 system role，无法通过 Builder 获得平台 Harness 的结构位置；
 - 模型看到的能力与本次 Session 实际注册工具共享单一来源；
 - Prompt 可做 Golden 回归，能力变化和重启重建可通过摘要解释；
 - Unicode 审计欺骗和对象结构技巧在进入 Prompt 前失败关闭。
@@ -68,10 +70,12 @@ Prompt 摘要可记录用于重建核对，但不得记录完整低信任内容�
 
 ## 验证
 
-- Golden Prompt 固定 Harness、manifest 和三类低信任分区；
-- 注入分隔符、系统消息伪装、控制/Bidi/零宽/孤立代理项、非 NFC、超 UTF-8 上限和结构欺骗均失败关闭；
+- Golden Prompt 固定仅含 Harness 与 manifest 的 system，并固定三类低信任 custom/user context；攻击文本与内部来源 ID 不出现在 system 和模型可见元数据中；
+- 注入分隔符、系统消息伪装、控制/Bidi/U+034F/受限 Variation Selector/零宽/孤立代理项、非 NFC、超 UTF-8 上限和结构欺骗均失败关闭，常用 FE0F emoji 正常保留；
+- Prompt 根/嵌套 Proxy 和工具 Schema 根/嵌套 Proxy、访问器、稀疏数组、未知 Symbol/非枚举元数据均在读取内容前失败关闭；TypeBox 明确白名单的 Symbol 与非枚举标记不改变 Provider JSON 摘要；
 - 输入重排和进程式重建得到相同摘要，能力增删或同名工具参数 Schema 改变都会改变 manifest 与 Prompt 摘要；
-- Pi/Faux 上下文只出现实际 Sandbox 工具，无 `request_user_input`；Artifact Router 存在时才出现 Artifact 工具；
+- Linux Pi/Faux 上下文证明低信任内容位于 user 消息而非 system；能力只出现实际 Sandbox 工具，无 `request_user_input`，Artifact Router 存在时才出现 Artifact 工具；
+- 独立 Node 24 Linux 容器在无网络运行阶段执行 Prompt Builder、Pi Session、Artifact Faux 与 Worker PiFactory 测试，并验证镜像测试进程不是 root；
 - Pi 诊断继续断言 Compaction disabled、无 compaction entry、Controller 无 `compact`。
 
 ## 可逆性与回退

@@ -1,6 +1,11 @@
 import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { createHash } from "node:crypto";
-import { buildRuntimeSystemPrompt, type RuntimePromptInput } from "@cube-runtime/prompt-builder";
+import { types } from "node:util";
+import {
+  buildRuntimeSystemPrompt,
+  buildToolCapabilityManifest,
+  type RuntimePromptInput,
+} from "@cube-runtime/prompt-builder";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import {
   createAgentSession,
@@ -154,13 +159,16 @@ export async function createSafePiSession(
     capabilities: customTools.map((tool) => ({
       id: tool.name,
       description: tool.description,
-      inputSchemaDigest: digestToolInputSchema(tool.parameters),
+      inputSchemaDigest: digestCanonicalToolInputSchema(tool.parameters),
     })),
     untrusted: options.untrustedPromptContent ?? { tenant: [], skill: [], user: [] },
   });
   const resourceLoader = new EmptyResourceLoader(builtPrompt.systemPrompt);
   await resourceLoader.reload();
   const sessionManager = SessionManager.inMemory(LOGICAL_WORKSPACE);
+  for (const entry of builtPrompt.contextEntries) {
+    sessionManager.appendCustomMessageEntry(entry.customType, entry.content, false, entry.source);
+  }
   const projectedContext = formatRolloutProjection(options.rolloutProjection);
   if (projectedContext !== undefined) {
     sessionManager.appendCustomMessageEntry(
@@ -187,9 +195,18 @@ export async function createSafePiSession(
     ],
     excludeTools: ["bash", "read", "write", "edit", "grep", "find", "ls"],
   });
-  const activeToolNames = session.agent.state.tools.map((tool) => tool.name).sort();
-  const manifestedToolNames = builtPrompt.manifest.capabilities.map((tool) => tool.id).sort();
-  if (JSON.stringify(activeToolNames) !== JSON.stringify(manifestedToolNames)) {
+  const activeManifest = buildToolCapabilityManifest(
+    session.agent.state.tools.map((tool) => ({
+      id: tool.name,
+      description: tool.description,
+      inputSchemaDigest: digestCanonicalToolInputSchema(tool.parameters),
+    })),
+  );
+  if (
+    activeManifest.digest !== builtPrompt.manifest.digest ||
+    JSON.stringify(activeManifest.capabilities) !==
+      JSON.stringify(builtPrompt.manifest.capabilities)
+  ) {
     // Pi 升级或装配漂移时宁可拒绝 Session，也不能让模型依据虚假的能力清单继续执行。
     session.dispose();
     throw new Error("Pi 实际工具与 capability manifest 不一致");
@@ -241,25 +258,94 @@ function formatRolloutProjection(
 }
 
 /** 参数 Schema 摘要覆盖 Provider 可见的可枚举 JSON 结构；TypeBox 的内部 Symbol 标记不进入协议。 */
-function digestToolInputSchema(value: unknown): string {
+export function digestCanonicalToolInputSchema(value: unknown): string {
   return `sha256:${createHash("sha256")
-    .update(JSON.stringify(canonicalSchema(value)))
+    .update(JSON.stringify(canonicalSchema(value, new WeakSet<object>())))
     .digest("hex")}`;
 }
 
-function canonicalSchema(value: unknown): unknown {
+const TYPEBOX_SCHEMA_SYMBOLS = new Set([
+  Symbol.for("TypeBox.Kind"),
+  Symbol.for("TypeBox.Transform"),
+]);
+
+function canonicalSchema(value: unknown, ancestors: WeakSet<object>): unknown {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new Error("工具参数 Schema 含非法数值");
     return value;
   }
-  if (Array.isArray(value)) return value.map(canonicalSchema);
-  if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) {
+  if (typeof value !== "object" || types.isProxy(value)) {
     throw new Error("工具参数 Schema 不是规范 JSON 对象");
   }
-  return Object.fromEntries(
-    Object.entries(value)
-      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-      .map(([key, item]) => [key, canonicalSchema(item)]),
+  if (ancestors.has(value)) throw new Error("工具参数 Schema 不能循环引用");
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) return canonicalSchemaArray(value, ancestors);
+    if (Object.getPrototypeOf(value) !== Object.prototype) {
+      throw new Error("工具参数 Schema 不是普通 JSON 对象");
+    }
+    // null prototype 避免 JSON Schema 中的 "__proto__" 在规范化阶段改变临时对象原型。
+    const output: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    const stringKeys: string[] = [];
+    for (const key of Reflect.ownKeys(value)) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor === undefined || !("value" in descriptor)) {
+        throw new Error("工具参数 Schema 不能包含访问器");
+      }
+      if (typeof key === "symbol") {
+        // TypeBox 历史版本以这两个全局 Symbol 标记 Kind/Transform；Provider JSON 不传输它们。
+        if (!TYPEBOX_SCHEMA_SYMBOLS.has(key)) throw new Error("工具参数 Schema 含未知 Symbol");
+        continue;
+      }
+      if (!descriptor.enumerable) {
+        if (isAllowedTypeBoxMetadata(key, descriptor.value)) continue;
+        throw new Error("工具参数 Schema 含非枚举字段");
+      }
+      stringKeys.push(key);
+    }
+    for (const key of stringKeys.sort()) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor === undefined || !("value" in descriptor)) {
+        throw new Error("工具参数 Schema 不能包含访问器");
+      }
+      output[key] = canonicalSchema(descriptor.value, ancestors);
+    }
+    return output;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function isAllowedTypeBoxMetadata(key: string, value: unknown): boolean {
+  return (
+    (key === "~kind" && typeof value === "string" && value.length > 0) ||
+    ((key === "~optional" || key === "~readonly") && value === true)
   );
+}
+
+function canonicalSchemaArray(value: unknown[], ancestors: WeakSet<object>): unknown[] {
+  if (Object.getPrototypeOf(value) !== Array.prototype) {
+    throw new Error("工具参数 Schema 数组原型无效");
+  }
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.some(
+      (key) =>
+        typeof key === "symbol" ||
+        (key !== "length" && (!/^(?:0|[1-9]\d*)$/u.test(key) || Number(key) >= value.length)),
+    ) ||
+    Object.keys(value).length !== value.length
+  ) {
+    throw new Error("工具参数 Schema 必须使用稠密数组且不能含附加字段");
+  }
+  const result: unknown[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (descriptor === undefined || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new Error("工具参数 Schema 数组不能包含访问器或非枚举元素");
+    }
+    result.push(canonicalSchema(descriptor.value, ancestors));
+  }
+  return result;
 }

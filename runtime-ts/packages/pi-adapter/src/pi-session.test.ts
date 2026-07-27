@@ -1,4 +1,5 @@
 import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
+import { buildToolCapabilityManifest } from "@cube-runtime/prompt-builder";
 import {
   type FauxProviderHandle,
   type FauxResponseStep,
@@ -13,6 +14,7 @@ import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import type { RuntimeAgentEvent } from "./events.js";
 import {
   assertLinuxWorkerPlatform,
+  assertPiSessionCapabilityManifest,
   createSafePiSession,
   digestCanonicalToolInputSchema,
   type PiSessionController,
@@ -374,6 +376,36 @@ describe("Pi 安全适配", () => {
       digestCanonicalToolInputSchema({ type: "object" }),
     );
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined();
+  });
+
+  it("实际工具 Schema 规范化抛错时仍先 dispose，再抛稳定不一致错误", () => {
+    const validSchema = { type: "string" };
+    const expected = buildToolCapabilityManifest([
+      {
+        id: "sandbox_test",
+        description: "测试工具",
+        inputSchemaDigest: digestCanonicalToolInputSchema(validSchema),
+      },
+    ]);
+    let disposed = 0;
+
+    expect(() =>
+      assertPiSessionCapabilityManifest({
+        readTools: () => [
+          {
+            name: "sandbox_test",
+            description: "测试工具",
+            parameters: new Proxy(validSchema, {}),
+          },
+        ],
+        expected,
+        dispose: () => {
+          disposed += 1;
+          throw new Error("dispose dependency detail");
+        },
+      }),
+    ).toThrow("Pi 实际工具与 capability manifest 不一致");
+    expect(disposed).toBe(1);
   });
 
   it("工具 Schema 仅白名单兼容 TypeBox 元数据，且元数据不改变 Provider JSON 摘要", () => {

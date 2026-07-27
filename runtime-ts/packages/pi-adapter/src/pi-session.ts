@@ -5,6 +5,7 @@ import {
   buildRuntimeSystemPrompt,
   buildToolCapabilityManifest,
   type RuntimePromptInput,
+  type ToolCapabilityManifest,
 } from "@cube-runtime/prompt-builder";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import {
@@ -195,22 +196,11 @@ export async function createSafePiSession(
     ],
     excludeTools: ["bash", "read", "write", "edit", "grep", "find", "ls"],
   });
-  const activeManifest = buildToolCapabilityManifest(
-    session.agent.state.tools.map((tool) => ({
-      id: tool.name,
-      description: tool.description,
-      inputSchemaDigest: digestCanonicalToolInputSchema(tool.parameters),
-    })),
-  );
-  if (
-    activeManifest.digest !== builtPrompt.manifest.digest ||
-    JSON.stringify(activeManifest.capabilities) !==
-      JSON.stringify(builtPrompt.manifest.capabilities)
-  ) {
-    // Pi 升级或装配漂移时宁可拒绝 Session，也不能让模型依据虚假的能力清单继续执行。
-    session.dispose();
-    throw new Error("Pi 实际工具与 capability manifest 不一致");
-  }
+  assertPiSessionCapabilityManifest({
+    readTools: () => session.agent.state.tools,
+    expected: builtPrompt.manifest,
+    dispose: () => session.dispose(),
+  });
 
   // 对外只返回窄能力对象；AgentSession（含 compact）保留在闭包和 #private 字段内。
   return new PiSessionControllerImpl(session, () => ({
@@ -262,6 +252,40 @@ export function digestCanonicalToolInputSchema(value: unknown): string {
   return `sha256:${createHash("sha256")
     .update(JSON.stringify(canonicalSchema(value, new WeakSet<object>())))
     .digest("hex")}`;
+}
+
+export function assertPiSessionCapabilityManifest(input: {
+  readonly readTools: () => readonly {
+    readonly name: string;
+    readonly description: string;
+    readonly parameters: unknown;
+  }[];
+  readonly expected: ToolCapabilityManifest;
+  readonly dispose: () => void;
+}): void {
+  try {
+    // tools 属性读取、tuple 字段读取、Schema 规范化和 manifest 构造必须共享同一个释放边界。
+    const activeManifest = buildToolCapabilityManifest(
+      input.readTools().map((tool) => ({
+        id: tool.name,
+        description: tool.description,
+        inputSchemaDigest: digestCanonicalToolInputSchema(tool.parameters),
+      })),
+    );
+    if (
+      activeManifest.digest !== input.expected.digest ||
+      JSON.stringify(activeManifest.capabilities) !== JSON.stringify(input.expected.capabilities)
+    ) {
+      throw new Error("manifest mismatch");
+    }
+  } catch {
+    try {
+      input.dispose();
+    } catch {
+      // dispose 失败不能覆盖稳定的能力不一致错误；Session 已不再返回给调用方。
+    }
+    throw new Error("Pi 实际工具与 capability manifest 不一致");
+  }
 }
 
 const TYPEBOX_SCHEMA_SYMBOLS = new Set([

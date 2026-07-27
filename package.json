@@ -15,6 +15,7 @@
     "check:clean-vendor": "pnpm check:clean-workspace",
     "db:migrate:up": "pnpm --filter @cube-runtime/persistence build && node --env-file-if-exists=.env runtime-ts/packages/persistence/dist/cli.js up",
     "db:migrate:down": "pnpm --filter @cube-runtime/persistence build && node --env-file-if-exists=.env runtime-ts/packages/persistence/dist/cli.js down --allow-destructive",
+    "dev:identity:provision": "pnpm --filter @cube-runtime/api^... build && pnpm --filter @cube-runtime/api dev:identity:provision",
     "dev:api": "pnpm --filter @cube-runtime/api^... build && pnpm --filter @cube-runtime/api dev",
     "format": "biome format --write .",
     "format:check": "biome format .",

@@ -64,7 +64,7 @@ corepack pnpm config:check
 
 ## 进程启动与关闭
 
-`runtime-ts/apps/api` 在 `RUNTIME_ENV=development`、显式启用开发身份时可选择内建的开发装配：它打开真实 PostgreSQL Repository 和 HTTP listener，可用 `pnpm dev:api` 启动。该装配不支持 production，也不会退化到内存 Fake。`agent-worker` 仍只有类型化配置与薄启动入口；没有真实 `ServiceAssemblyFactory` 时固定拒绝启动。Scheduler 的受审装配边界单独维护。当前能力不代表生产身份、真实模型和完整队列装配已经完成。
+`runtime-ts/apps/api` 在 `RUNTIME_ENV=development`、显式启用开发身份时可选择内建的开发装配：它打开真实 PostgreSQL Repository 和 HTTP listener，可用 `pnpm dev:api` 启动。迁移后先显式执行 `pnpm dev:identity:provision`，该命令幂等创建配置的两个 User、个人 Tenant 和 owner Membership；服务启动本身绝不写入授权数据。该装配和初始化命令都不支持 production，也不会退化到内存 Fake。`agent-worker` 仍只有类型化配置与薄启动入口；没有真实 `ServiceAssemblyFactory` 时固定拒绝启动。Scheduler 的受审装配边界单独维护。当前能力不代表生产身份、真实模型和完整队列装配已经完成。
 
 装配器按业务接收顺序实现 `stopAccepting`，将数据库连接池、HTTP listener、消费者和遥测等资源按确定顺序登记。关闭时先停止接收，再等待 `lifecycle.track()` 登记的在途操作，最后串行关闭资源。资源错误只上报稳定名称；库不调用 `process.exit`。部署平台的强制终止宽限期必须大于 `PROCESS_SHUTDOWN_TIMEOUT_MS`。
 
@@ -91,7 +91,7 @@ corepack pnpm test:process:container
 
 ## HTTP API 开发边界
 
-开发 API 监听 `API_LISTEN_HOST`/`API_LISTEN_PORT`，未配置时分别为 `127.0.0.1`/`3001`；启动时先探测 PostgreSQL，再开始报告 ready。`/live` 只表示 HTTP 进程存活，`/ready` 会实时探测数据库。SIGINT/SIGTERM 先调用 Fastify close 停止接收并排空 handler，再关闭 PG pool；启动中任一步失败也会尽力回收两者。分页密钥环采用 `kid:base64url-key,kid:base64url-key`，每把 key 解码后必须为 32 到 64 字节。开发装配不会自动写入身份数据，避免“启动服务”隐式改变租户关系。
+开发 API 监听 `API_LISTEN_HOST`/`API_LISTEN_PORT`，未配置时分别为 `127.0.0.1`/`3001`；启动时先探测 PostgreSQL，再开始报告 ready。`/live` 只表示 HTTP 进程存活，`/ready` 会实时探测数据库。SIGINT/SIGTERM 先调用 Fastify close 停止接收并排空 handler，再关闭 PG pool；启动中任一步失败也会尽力回收两者。分页密钥环采用 `kid:base64url-key,kid:base64url-key`，每把 key 解码后必须为 32 到 64 字节。开发身份初始化命令复用 Runtime 角色、正式 Tenant Repository、租户事务和 RLS；每个个人租户聚合原子提交，重复执行只接受已存在且 owner/active 关系完全匹配的结果，冲突失败关闭。开发装配不会自动写入身份数据，避免“启动服务”隐式改变租户关系。
 
 `runtime-ts/apps/api` 使用 `createApiApp` 显式注入身份、Repository、时钟、ID、HMAC 游标密钥环和探针等端口。测试用 `Fastify.inject` 而不监听网络端口。`AuthContextResolver` 只返回已验证 principal，之后仍必须用 PostgreSQL Membership 解析 `TenantScope`；不得读取 `x-tenant-id` 构造 scope。游标密钥必须来自密钥管理配置，不能使用仓库内常量；最短 32 字节。codec 必须注入可信时钟、签发 TTL 和最大 TTL；轮换按“先同时读取新旧 key、再切换 active、等待旧 key 签发游标的 `expiresAt` 与最大 TTL 都失效、最后移除旧 key”进行。
 

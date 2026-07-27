@@ -48,6 +48,7 @@ const runtimeRolloutTables = new Set([
   "runtime_rollout_streams",
   "runtime_rollout_entries",
   "runtime_rollout_append_commands",
+  "runtime_rollout_replacements",
   "runtime_rollout_checkpoints",
   "runtime_rollout_checkpoint_commands",
 ]);
@@ -98,6 +99,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["runtime_rollout_streams", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_entries", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_append_commands", new Set(["SELECT", "INSERT"])],
+  ["runtime_rollout_replacements", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_checkpoints", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_checkpoint_commands", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
@@ -265,6 +267,7 @@ async function hasRuntimeRolloutState(client: PoolClient, schema: string): Promi
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.runtime_rollout_streams', $1::text)) IS NOT NULL
             AND to_regclass(format('%I.runtime_rollout_entries', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.runtime_rollout_replacements', $1::text)) IS NOT NULL
             AND to_regclass(format('%I.runtime_rollout_checkpoints', $1::text)) IS NOT NULL
             AS present`,
     [schema],
@@ -907,6 +910,7 @@ export async function bootstrapRuntimeAccessOnClient(
          ${schema}.runtime_rollout_streams,
          ${schema}.runtime_rollout_entries,
          ${schema}.runtime_rollout_append_commands,
+         ${schema}.runtime_rollout_replacements,
          ${schema}.runtime_rollout_checkpoints,
          ${schema}.runtime_rollout_checkpoint_commands
        TO ${role}`,

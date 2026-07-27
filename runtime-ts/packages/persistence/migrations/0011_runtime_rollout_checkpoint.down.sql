@@ -1,5 +1,6 @@
 DROP TABLE runtime_rollout_checkpoint_commands;
 DROP TABLE runtime_rollout_checkpoints;
+DROP TABLE runtime_rollout_replacements;
 DROP TABLE runtime_rollout_append_commands;
 DROP TABLE runtime_rollout_entries;
 DROP TABLE runtime_rollout_streams;

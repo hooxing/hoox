@@ -8,6 +8,7 @@ import {
   threadId,
   userId,
   workspaceId,
+  workspaceRevisionId,
 } from "@cube-runtime/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ArtifactExecutionAuthorization } from "../../runtime-ts/packages/artifact/src/authorization.js";
@@ -122,6 +123,98 @@ async function seedPermit(auth: ArtifactExecutionAuthorization): Promise<void> {
       ],
     ),
   );
+}
+
+async function seedAdditionalExecution(label: string): Promise<{
+  run: ReturnType<typeof runId>;
+  thread: ReturnType<typeof threadId>;
+  workspace: ReturnType<typeof workspaceId>;
+  attempt: string;
+}> {
+  const thread = threadId(`artifact_${label}_thread_${unique}`);
+  const run = runId(`artifact_${label}_run_${unique}`);
+  const workspace = workspaceId(`artifact_${label}_workspace_${unique}`);
+  const attempt = `artifact_${label}_attempt_${unique}`;
+  await withTenantTransaction(
+    runtime,
+    { tenantId: ids.tenant, userId: ids.user },
+    async (client) => {
+      await client.query(
+        `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
+         VALUES($1,$2,$3,$4,'active',clock_timestamp(),clock_timestamp())`,
+        [ids.tenant, thread, ids.user, `Artifact ${label}`],
+      );
+      await client.query(
+        `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
+         VALUES($1,$2,$3,'running',clock_timestamp(),clock_timestamp())`,
+        [ids.tenant, run, thread],
+      );
+      await client.query(
+        `INSERT INTO workspaces(tenant_id,id,thread_id,lease_epoch,created_at,updated_at)
+         VALUES($1,$2,$3,1,clock_timestamp(),clock_timestamp())`,
+        [ids.tenant, workspace, thread],
+      );
+      await client.query(
+        `INSERT INTO run_execution_inputs(
+           tenant_id,run_id,thread_id,workspace_id,root_run_id,input_text,
+           initial_projection,initial_projection_digest
+         ) VALUES($1,$2,$3,$4,$2,'artifact-extra','{}',$5)`,
+        [ids.tenant, run, thread, workspace, "9".repeat(64)],
+      );
+      await client.query(
+        `INSERT INTO execution_attempts(
+           tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,status,stage,version
+         ) VALUES($1,$2,$3,$4,$5,$3,'running','workspace_verified',0)`,
+        [ids.tenant, attempt, run, thread, workspace],
+      );
+      await client.query(
+        `INSERT INTO artifact_deliverable_declarations(
+           tenant_id,run_id,deliverable_key,name,requirement
+         ) VALUES($1,$2,'report','报告','required')`,
+        [ids.tenant, run],
+      );
+    },
+  );
+  return { run, thread, workspace, attempt };
+}
+
+async function cloneDeliverableForExecution(
+  execution: Awaited<ReturnType<typeof seedAdditionalExecution>>,
+  label: string,
+  target?: "published" | "failed",
+): Promise<string> {
+  const artifact = `artifact_${label}_${unique}`;
+  await withTenantTransaction(runtime, { tenantId: ids.tenant }, async (client) => {
+    await client.query(
+      `INSERT INTO artifact_publications(
+         tenant_id,id,thread_id,run_id,attempt_id,workspace_id,root_run_id,
+         resource_id,resource_version_id,name,purpose,deliverable_key,status,
+         blob_reference_id,blob_purpose,blob_lifecycle_id,blob_incarnation_id,
+         physical_object_key,digest,media_type,size
+       )
+       SELECT tenant_id,$2,$3,$4,$5,$6,$4,resource_id,resource_version_id,
+              name,'deliverable','report','publishing',blob_reference_id,blob_purpose,
+              blob_lifecycle_id,blob_incarnation_id,physical_object_key,digest,media_type,size
+         FROM artifact_publications WHERE tenant_id=$1 AND id=$7`,
+      [
+        ids.tenant,
+        artifact,
+        execution.thread,
+        execution.run,
+        execution.attempt,
+        execution.workspace,
+        `artifact_result_${unique}`,
+      ],
+    );
+    if (target !== undefined) {
+      await client.query(
+        `INSERT INTO artifact_publication_settlements(tenant_id,artifact_id,target)
+         VALUES($1,$2,$3)`,
+        [ids.tenant, artifact, target],
+      );
+    }
+  });
+  return artifact;
 }
 
 beforeAll(async () => {
@@ -470,6 +563,42 @@ describe("Artifact PostgreSQL 持久化", () => {
     ).rejects.toThrow();
   });
 
+  it("仅有 publishing 或 failed deliverable 时仍授权返回空列表，并拒绝交叉 Attempt 复合身份", async () => {
+    const publishing = await seedAdditionalExecution("publishing_only");
+    const failed = await seedAdditionalExecution("failed_only");
+    await cloneDeliverableForExecution(publishing, "publishing_only");
+    await cloneDeliverableForExecution(failed, "failed_only", "failed");
+
+    for (const execution of [publishing, failed]) {
+      expect(
+        await repository.listAuthorizedArtifacts({
+          request: { tenantId: ids.tenant, userId: ids.user },
+          runId: execution.run,
+        }),
+      ).toEqual({ outcome: "authorized", artifacts: [] });
+    }
+
+    await expect(
+      withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+        client.query(
+          `INSERT INTO artifact_deliverable_commands(
+             tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+             idempotency_key,command_digest
+           ) VALUES($1,$2,$3,$4,$5,$3,$6,$7)`,
+          [
+            ids.tenant,
+            publishing.attempt,
+            failed.run,
+            failed.thread,
+            failed.workspace,
+            `cross-attempt-${unique}`,
+            "a".repeat(64),
+          ],
+        ),
+      ),
+    ).rejects.toThrow();
+  });
+
   it("数据库时钟拒绝过期 permit，完成门拒绝错误 rootRunId", async () => {
     const expired = authorization("publish_artifact", "expired", {
       issuedAt: "2020-01-01T00:00:00.000Z",
@@ -493,6 +622,14 @@ describe("Artifact PostgreSQL 持久化", () => {
     expect(
       await repository.inspectCompletion({
         scope: { ...expired.scope, rootRunId: runId(`wrong_root_${unique}`) },
+      }),
+    ).toEqual({ outcome: "scope_mismatch" });
+    expect(
+      await repository.inspectCompletion({
+        scope: {
+          ...expired.scope,
+          baseRevisionId: workspaceRevisionId(`wrong_revision_${unique}`),
+        },
       }),
     ).toEqual({ outcome: "scope_mismatch" });
   });

@@ -473,13 +473,15 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
               JOIN workspaces workspace ON workspace.tenant_id=run.tenant_id
                                        AND workspace.thread_id=run.thread_id
              WHERE run.tenant_id=$1 AND run.id=$2 AND run.thread_id=$3
-               AND workspace.id=$4 AND execution.root_run_id=$5) AS valid`,
+               AND workspace.id=$4 AND execution.root_run_id=$5
+               AND execution.base_revision_id IS NOT DISTINCT FROM $6) AS valid`,
             [
               input.scope.tenantId,
               input.scope.runId,
               input.scope.threadId,
               input.scope.workspaceId,
               input.scope.rootRunId,
+              input.scope.baseRevisionId ?? null,
             ],
           );
           if (owned.rows[0]?.valid !== true) return { outcome: "scope_mismatch" } as const;
@@ -546,13 +548,20 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
              )
              SELECT ${publicationColumns}
                FROM authorized_run run
-               LEFT JOIN artifact_publications publication
-                 ON publication.tenant_id=run.tenant_id AND publication.run_id=run.id
-                AND publication.purpose='deliverable'
+               LEFT JOIN LATERAL (
+                 SELECT candidate.*
+                   FROM artifact_publications candidate
+                   JOIN artifact_publication_settlements completed
+                     ON completed.tenant_id=candidate.tenant_id
+                    AND completed.artifact_id=candidate.id
+                    AND completed.target='published'
+                  WHERE candidate.tenant_id=run.tenant_id
+                    AND candidate.run_id=run.id
+                    AND candidate.purpose='deliverable'
+               ) publication ON true
                LEFT JOIN artifact_publication_settlements settlement
                  ON settlement.tenant_id=publication.tenant_id
                 AND settlement.artifact_id=publication.id AND settlement.target='published'
-              WHERE publication.id IS NULL OR settlement.artifact_id IS NOT NULL
               ORDER BY publication.created_at, publication.id`,
           [input.request.tenantId, input.runId, input.request.userId],
         );

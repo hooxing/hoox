@@ -15,6 +15,7 @@ import {
   type Pool,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { loadPostgreSqlMigrationContract } from "./postgres-migration-contract.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -238,7 +239,10 @@ beforeAll(async () => {
     schema,
     maxConnections: 12,
   });
-  expect((await migrateUp(migrator, migrationSecurity)).at(-1)?.version).toBe(11);
+  const migrationContract = await loadPostgreSqlMigrationContract();
+  expect((await migrateUp(migrator, migrationSecurity)).at(-1)?.version).toBe(
+    migrationContract.latestVersion,
+  );
   repository = new PgRuntimeRolloutRepository(runtime);
   await seedExecution();
   expect(

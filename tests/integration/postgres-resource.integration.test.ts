@@ -19,6 +19,7 @@ import {
   type Pool,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { loadPostgreSqlMigrationContract } from "./postgres-migration-contract.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -369,9 +370,10 @@ beforeAll(async () => {
     schema,
     maxConnections: 12,
   });
-  expect((await migrateUp(migrator, migrationSecurity)).map((record) => record.version)).toEqual([
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
-  ]);
+  const migrationContract = await loadPostgreSqlMigrationContract();
+  expect((await migrateUp(migrator, migrationSecurity)).map((record) => record.version)).toEqual(
+    migrationContract.versions,
+  );
   catalog = new PgResourceCatalog(runtime);
   promotions = new PgResourcePromotionRepository(runtime, promotionCapabilities.verifier);
   tenantA = await seedTenant(scopeA, "a");

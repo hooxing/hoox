@@ -1,4 +1,15 @@
 import {
+  ArtifactCompletionGateAdapter,
+  createArtifactExecutionAuthorizationAuthority,
+  type PublishArtifactCommand,
+} from "@cube-runtime/artifact";
+import { resourceVersionId } from "@cube-runtime/domain";
+import {
+  type ArtifactPublicationResourcePort,
+  ArtifactToolRouterFactory,
+  type ArtifactToolServicePort,
+} from "@cube-runtime/tool-router";
+import {
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
@@ -97,6 +108,144 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       expect(eventIndex).toBeLessThan(issueIndex);
       expect(issueIndex).toBeLessThan(consumeIndex);
       expect(consumeIndex).toBeLessThan(inspectAfterIssue);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "RunWorker 经 PiFactory、Router 接收完成门反馈并发布后，在同一 Attempt 完成",
+    async () => {
+      class StatefulArtifacts implements ArtifactToolServicePort {
+        required = new Set<string>();
+        published = new Set<string>();
+
+        async declareDeliverables(
+          input: Parameters<ArtifactToolServicePort["declareDeliverables"]>[0],
+        ): Promise<void> {
+          this.required = new Set(
+            input.declarations
+              .filter((declaration) => declaration.requirement === "required")
+              .map((declaration) => declaration.key),
+          );
+        }
+
+        async publishArtifact(command: PublishArtifactCommand) {
+          if (command.deliverableKey) this.published.add(command.deliverableKey);
+          return {
+            artifactId: command.artifactId,
+            tenantId: command.authorization.scope.tenantId,
+            threadId: command.authorization.scope.threadId,
+            runId: command.authorization.scope.runId,
+            resourceVersionId: command.resourceVersionId,
+            name: command.name,
+            purpose: command.purpose,
+            ...(command.deliverableKey === undefined
+              ? {}
+              : { deliverableKey: command.deliverableKey }),
+            status: "published" as const,
+          };
+        }
+
+        async assertReadyForCompletion(): Promise<void> {
+          if ([...this.required].some((key) => !this.published.has(key))) {
+            throw new Error("required deliverable missing");
+          }
+        }
+      }
+
+      const persistence = new FakeExecutionPersistence();
+      const scope = persistence.addSeed(fakeSeed("pi-artifact-correction"));
+      const sandboxes = new FakeSandboxRegistry();
+      const artifacts = new StatefulArtifacts();
+      const resources: ArtifactPublicationResourcePort = {
+        prepareImmutableVersion: async () => ({
+          outcome: "ready",
+          resourceVersionId: resourceVersionId("version_pi_corrected"),
+        }),
+      };
+      const authority = createArtifactExecutionAuthorizationAuthority();
+      const routerFactory = new ArtifactToolRouterFactory({
+        artifacts,
+        resources,
+        authorizationVerifier: authority.verifier,
+      });
+      const faux = fauxProvider({
+        api: `faux-worker-artifact-${Date.now()}`,
+        provider: `faux-worker-artifact-${Date.now()}`,
+        tokensPerSecond: 10_000,
+      });
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall(
+            "declare_deliverables",
+            {
+              idempotencyKey: "declare:pi:report",
+              declarations: [{ key: "report", name: "最终报告", requirement: "required" }],
+            },
+            { id: "call-pi-declare" },
+          ),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("已声明交付物"),
+        fauxAssistantMessage(
+          fauxToolCall(
+            "publish_artifact",
+            {
+              idempotencyKey: "publish:pi:report",
+              artifactId: "artifact_pi_report",
+              name: "最终报告.md",
+              purpose: "deliverable",
+              deliverableKey: "report",
+              source: {
+                kind: "resource_version",
+                resourceVersionId: "version_pi_source",
+              },
+            },
+            { id: "call-pi-publish" },
+          ),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("交付物已经发布"),
+      ]);
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      modelRuntime.registerNativeProvider(faux.provider);
+      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const sessions = new PiWorkerSessionFactory(
+        faux.getModel(),
+        modelRuntime,
+        routerFactory,
+        authority.issuer,
+      );
+      const worker = new RunWorker(
+        {
+          persistence,
+          revisions: new FakeRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions,
+          cancellation: new FakeCancellationPort(),
+          artifacts: new ArtifactCompletionGateAdapter(artifacts),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        {
+          workerId: "pi-artifact-correction-worker",
+          leaseDurationMs: 30_000,
+          heartbeatMs: 10_000,
+          runTimeoutMs: 60_000,
+        },
+      );
+
+      await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+      expect(artifacts.published).toEqual(new Set(["report"]));
+      expect(
+        persistence
+          .record(scope)
+          .events.filter((event) => event.kind === "artifact_correction_requested"),
+      ).toHaveLength(1);
+      expect(persistence.permits.map(({ permit }) => permit.effect)).toContain("model_continue");
     },
   );
 });

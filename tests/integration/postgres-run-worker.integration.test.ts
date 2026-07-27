@@ -284,7 +284,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       [runtimeRole, schema],
     );
     // Thread 创建 0007 在 Cleanup 0006 后叠加，既有 Dispatch ACL 仍须存在。
-    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 8 });
+    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 9 });
     const runtimeSchema = await runtime.query<{
       readonly schema: string;
       readonly current_user: string;
@@ -1504,6 +1504,172 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         permitDurationMs: 3_000,
       }),
     ).resolves.toEqual({ outcome: "conflict" });
+  });
+
+  it("model_continue 只绑定已持久化的 Artifact 修正轮次与最新 Attempt version", async () => {
+    const f = await fixture(`model-continue-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "model-continue-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("claim 失败");
+    const attemptId = claimed.snapshot.attempt.attemptId;
+    const call = {
+      callId: `${attemptId}/model/correction/1`,
+      toolName: "pi_model",
+      argsDigest: sha256Digest("2".repeat(64)),
+    };
+    const checkpoint = await persistence.mutate(
+      signed({
+        idempotencyKey: `${attemptId}/model-checkpoint`,
+        fence: claimed.fence,
+        expectedAttemptVersion: 0,
+        nextAttemptStatus: "running",
+        nextStage: "model_execution_started",
+        events: [],
+        outbox: [],
+      }),
+    );
+    expect(checkpoint.outcome).toBe("applied");
+    await expect(
+      persistence.issueExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 1,
+        effect: "model_continue",
+        call,
+        permitDurationMs: 3_000,
+      }),
+    ).resolves.toEqual({ outcome: "conflict" });
+
+    const correction = await persistence.mutate(
+      signed({
+        idempotencyKey: `${attemptId}/correction/1/feedback`,
+        fence: claimed.fence,
+        expectedAttemptVersion: 1,
+        nextStage: "workspace_verified",
+        events: [
+          {
+            schemaVersion: 1,
+            kind: "artifact_correction_requested",
+            sequence: 0,
+            payload: {
+              round: 1,
+              maxRounds: 2,
+              code: "ARTIFACT_NOT_READY",
+              feedback: "请补齐必需交付物后继续。",
+            },
+          },
+        ],
+        outbox: [],
+      }),
+    );
+    expect(correction.outcome).toBe("applied");
+    await expect(
+      persistence.issueExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 1,
+        effect: "model_continue",
+        call,
+        permitDurationMs: 3_000,
+      }),
+    ).resolves.toEqual({ outcome: "conflict" });
+    await expect(
+      persistence.issueExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 2,
+        effect: "model_continue",
+        call: { ...call, callId: `${attemptId}/model/correction/2` },
+        permitDurationMs: 3_000,
+      }),
+    ).resolves.toEqual({ outcome: "conflict" });
+    const permit = await persistence.issueExternalEffectPermit({
+      fence: claimed.fence,
+      expectedAttemptVersion: 2,
+      effect: "model_continue",
+      call,
+      permitDurationMs: 3_000,
+    });
+    expect(permit.outcome).toBe("authorized");
+    await expect(
+      persistence.issueExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 2,
+        effect: "model_continue",
+        call,
+        permitDurationMs: 3_000,
+      }),
+    ).resolves.toEqual({ outcome: "conflict" });
+    if (permit.outcome !== "authorized") throw new Error("继续许可未签发");
+    await expect(
+      persistence.consumeExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 2,
+        permit: permit.permit,
+      }),
+    ).resolves.toMatchObject({ outcome: "consumed" });
+    await expect(
+      persistence.consumeExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 2,
+        permit: permit.permit,
+      }),
+    ).resolves.toEqual({ outcome: "already_consumed" });
+
+    const overBudget = await persistence.mutate(
+      signed({
+        idempotencyKey: `${attemptId}/correction/2/feedback`,
+        fence: claimed.fence,
+        expectedAttemptVersion: 2,
+        events: [
+          {
+            schemaVersion: 1,
+            kind: "artifact_correction_requested",
+            sequence: 1,
+            payload: {
+              round: 2,
+              maxRounds: 2,
+              code: "ARTIFACT_NOT_READY",
+              feedback: "x".repeat(8 * 1_024),
+            },
+          },
+        ],
+        outbox: [],
+      }),
+    );
+    expect(overBudget.outcome).toBe("applied");
+    await expect(
+      persistence.issueExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 3,
+        effect: "model_continue",
+        call: { ...call, callId: `${attemptId}/model/correction/2` },
+        permitDurationMs: 3_000,
+      }),
+    ).resolves.toEqual({ outcome: "conflict" });
+    await expect(
+      persistence.mutate(
+        signed({
+          idempotencyKey: `${attemptId}/correction/3/feedback`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 3,
+          events: [
+            {
+              schemaVersion: 1,
+              kind: "artifact_correction_requested",
+              sequence: 2,
+              payload: {
+                round: 3,
+                maxRounds: 3,
+                code: "ARTIFACT_NOT_READY",
+                feedback: "不得接受第三轮",
+              },
+            } as never,
+          ],
+          outbox: [],
+        }),
+      ),
+    ).resolves.toEqual({ outcome: "protocol_invalid" });
   });
 
   it("waiting 回答使用 Run version 与旧值 CAS，不能无条件覆盖", async () => {
@@ -2730,7 +2896,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     ).toBeUndefined();
   });
 
-  it("0007 可回退至 0004 并重新授予最小 Dispatch ACL", async () => {
+  it("最新迁移可回退至 0004 并重新授予最小 Dispatch ACL", async () => {
     const down = await migrateDown(migrator, {
       runtimeRole,
       migratorRole,
@@ -2741,7 +2907,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     });
     expect(down.at(-1)?.version).toBe(4);
     const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
-    expect(restored.at(-1)?.version).toBe(8);
+    expect(restored.at(-1)?.version).toBe(9);
     const acl = await admin.query<{
       readonly select_allowed: boolean;
       readonly update_allowed: boolean;

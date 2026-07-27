@@ -1,8 +1,9 @@
-import { createSafePiSession } from "@cube-runtime/pi-adapter";
+import type { ArtifactExecutionAuthorizationIssuerPort } from "@cube-runtime/artifact";
 import { sha256Digest } from "@cube-runtime/domain";
+import { createSafePiSession } from "@cube-runtime/pi-adapter";
+import type { ArtifactToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { ArtifactToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import type { AgentSessionFactoryPort, AgentTurnOutcome, WorkerAgentSessionPort } from "./ports.js";
 
 /**
@@ -15,6 +16,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     private readonly model: Model<Api>,
     private readonly modelRuntime: ModelRuntime,
     private readonly artifactTools?: ArtifactToolRouterFactoryPort,
+    private readonly artifactAuthorizationIssuer?: ArtifactExecutionAuthorizationIssuerPort,
   ) {}
 
   async create(
@@ -40,10 +42,24 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       authorizationRequested.add(call.callId);
       return input.authorizeToolEffect({ ...call, argsDigest: sha256Digest(call.argsDigest) });
     };
-    const artifactToolRouter = this.artifactTools?.create({
-      context: input.trustedToolContext,
-      authorizer: { authorizeToolEffect: authorizeStartedTool },
-    });
+    const artifactTools = this.artifactTools;
+    const artifactAuthorizationIssuer = this.artifactAuthorizationIssuer;
+    if (artifactTools && !artifactAuthorizationIssuer) {
+      throw new Error("Artifact 工具缺少动态授权 issuer");
+    }
+    const artifactToolRouter =
+      artifactTools && artifactAuthorizationIssuer
+        ? artifactTools.create({
+            binding: { scope: input.scope, attemptId: input.attemptId },
+            authorizer: {
+              authorizeToolEffect: async (call) =>
+                artifactAuthorizationIssuer.issue({
+                  consumed: await authorizeStartedTool(call),
+                  attemptId: input.attemptId,
+                }),
+            },
+          })
+        : undefined;
     const controller = await createSafePiSession({
       model: this.model,
       modelRuntime: this.modelRuntime,
@@ -65,7 +81,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       runPrompt: async (text, authorization): Promise<AgentTurnOutcome> => {
         const { permit } = authorization;
         if (
-          permit.effect !== "model_start" ||
+          (permit.effect !== "model_start" && permit.effect !== "model_continue") ||
           permit.scope.tenantId !== input.scope.tenantId ||
           permit.scope.threadId !== input.scope.threadId ||
           permit.scope.runId !== input.scope.runId ||

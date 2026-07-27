@@ -1017,6 +1017,41 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           ) {
             return { outcome: "conflict" } as const;
           }
+          if (input.effect === "model_continue") {
+            if (row?.attempt_stage !== "workspace_verified") {
+              return { outcome: "conflict" } as const;
+            }
+            const correction = await client.query(
+              `SELECT 1 FROM run_events
+                WHERE tenant_id=$1 AND attempt_id=$2
+                  AND kind='artifact_correction_requested'
+                  AND payload->>'code'='ARTIFACT_NOT_READY'
+                  AND $3 = attempt_id || '/model/correction/' || (payload->>'round')
+                LIMIT 1`,
+              [input.fence.scope.tenantId, row.attempt_id, input.call.callId],
+            );
+            if (correction.rowCount !== 1) return { outcome: "conflict" } as const;
+            const budget = await client.query<{ correction_count: string; feedback_bytes: string }>(
+              `SELECT count(*)::text AS correction_count,
+                      COALESCE(sum(octet_length(payload->>'feedback')), 0)::text AS feedback_bytes
+                 FROM run_events
+                WHERE tenant_id=$1 AND attempt_id=$2
+                  AND kind='artifact_correction_requested'`,
+              [input.fence.scope.tenantId, row.attempt_id],
+            );
+            const correctionCount = Number(budget.rows[0]?.correction_count);
+            const feedbackBytes = Number(budget.rows[0]?.feedback_bytes);
+            if (
+              !Number.isSafeInteger(correctionCount) ||
+              correctionCount < 1 ||
+              correctionCount > 2 ||
+              !Number.isSafeInteger(feedbackBytes) ||
+              feedbackBytes < 1 ||
+              feedbackBytes > 8 * 1_024
+            ) {
+              return { outcome: "conflict" } as const;
+            }
+          }
           if (input.effect === "tool_execution") {
             const invocation = await client.query<{ tool_name: string }>(
               `SELECT tool_name FROM effect_invocations

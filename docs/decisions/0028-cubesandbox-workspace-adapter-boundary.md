@@ -1,4 +1,4 @@
-# ADR-0027：CubeSandbox Workspace 可信适配边界
+# ADR-0028：CubeSandbox Workspace 可信适配边界
 
 - 状态：已接受
 - 日期：2026-07-28

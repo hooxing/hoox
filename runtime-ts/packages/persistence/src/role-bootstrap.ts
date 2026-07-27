@@ -37,6 +37,12 @@ const resourceLibraryTables = new Set([
   "resource_promotion_authorizations",
   "resource_promotion_idempotency",
 ]);
+const artifactDeliveryTables = new Set([
+  "artifact_deliverable_commands",
+  "artifact_deliverable_declarations",
+  "artifact_publications",
+  "artifact_publication_commands",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -76,6 +82,10 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["resource_versions", new Set(["SELECT", "INSERT"])],
   ["resource_promotion_authorizations", new Set(["SELECT", "INSERT"])],
   ["resource_promotion_idempotency", new Set(["SELECT", "INSERT"])],
+  ["artifact_deliverable_commands", new Set(["SELECT", "INSERT"])],
+  ["artifact_deliverable_declarations", new Set(["SELECT", "INSERT"])],
+  ["artifact_publications", new Set(["SELECT", "INSERT"])],
+  ["artifact_publication_commands", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -162,6 +172,7 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
     new Set(["visibility", "latest_version_number", "latest_version_id", "updated_at"]),
   ],
   ["resource_promotion_authorizations", new Set(["state", "consumed_at"])],
+  ["artifact_publications", new Set(["status", "updated_at"])],
 ]);
 
 async function hasMembershipLockMarker(client: PoolClient): Promise<boolean> {
@@ -226,6 +237,16 @@ async function hasResourceLibraryState(client: PoolClient, schema: string): Prom
   return result.rows[0]?.present === true;
 }
 
+async function hasArtifactDeliveryState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.artifact_publications', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.artifact_publication_commands', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function activeTablePolicy(
   client: PoolClient,
   schema: string,
@@ -242,6 +263,9 @@ async function activeTablePolicy(
   }
   if (!(await hasResourceLibraryState(client, schema))) {
     for (const table of resourceLibraryTables) policy.delete(table);
+  }
+  if (!(await hasArtifactDeliveryState(client, schema))) {
+    for (const table of artifactDeliveryTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
@@ -270,6 +294,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasResourceLibraryState(client, schema))) {
     for (const table of resourceLibraryTables) policy.delete(table);
+  }
+  if (!(await hasArtifactDeliveryState(client, schema))) {
+    for (const table of artifactDeliveryTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -832,6 +859,16 @@ export async function bootstrapRuntimeAccessOnClient(
        TO ${role}`,
     );
   }
+  if (await hasArtifactDeliveryState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.artifact_deliverable_commands,
+         ${schema}.artifact_deliverable_declarations,
+         ${schema}.artifact_publications,
+         ${schema}.artifact_publication_commands
+       TO ${role}`,
+    );
+  }
   await client.query(
     `GRANT UPDATE(state, current_incarnation_id, generation, current_claim_id, lease_expires_at, updated_at)
        ON TABLE ${schema}.blob_lifecycles TO ${role};
@@ -884,6 +921,12 @@ export async function bootstrapRuntimeAccessOnClient(
          ON TABLE ${schema}.resources TO ${role};
        GRANT UPDATE(state, consumed_at)
          ON TABLE ${schema}.resource_promotion_authorizations TO ${role}`,
+    );
+  }
+  if (await hasArtifactDeliveryState(client, context.schema)) {
+    await client.query(
+      `GRANT UPDATE(status, updated_at)
+         ON TABLE ${schema}.artifact_publications TO ${role}`,
     );
   }
   await assertActiveRuntimeWhitelist(client, context);

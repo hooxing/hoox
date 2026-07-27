@@ -1,0 +1,4 @@
+DROP TABLE artifact_publication_commands;
+DROP TABLE artifact_publications;
+DROP TABLE artifact_deliverable_declarations;
+DROP TABLE artifact_deliverable_commands;

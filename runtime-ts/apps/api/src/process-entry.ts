@@ -13,6 +13,11 @@ import {
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
 import { developmentApiAssembler } from "./development-assembly.js";
+import {
+  type ApiDevelopmentPrincipal,
+  assertDevelopmentPrincipalsIsolated,
+  normalizeDevelopmentLoopbackHost,
+} from "./development-boundary.js";
 
 const optionalEnvironments = [] as const;
 const apiEnvironmentSchema = Object.freeze({
@@ -47,10 +52,7 @@ const apiEnvironmentSchema = Object.freeze({
 
 export const apiProcessEnvironmentKeys = Object.freeze(Object.keys(apiEnvironmentSchema));
 
-export interface ApiDevelopmentPrincipal {
-  readonly userId: string;
-  readonly tenantId: string;
-}
+export type { ApiDevelopmentPrincipal } from "./development-boundary.js";
 
 export interface ApiProcessConfiguration {
   readonly runtimeEnvironment: RuntimeEnvironment;
@@ -88,6 +90,14 @@ export function parseApiProcessEnvironment(
         }),
       ] as const)
     : undefined;
+  const configuredListenHost = parsed.values.API_LISTEN_HOST ?? "127.0.0.1";
+  const listenHost =
+    developmentPrincipals === undefined
+      ? configuredListenHost
+      : normalizeDevelopmentLoopbackHost(configuredListenHost);
+  if (developmentPrincipals !== undefined) {
+    assertDevelopmentPrincipalsIsolated(developmentPrincipals);
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
@@ -99,7 +109,7 @@ export function parseApiProcessEnvironment(
       parsed,
       "PROCESS_SHUTDOWN_TIMEOUT_MS",
     ),
-    listenHost: parsed.values.API_LISTEN_HOST ?? "127.0.0.1",
+    listenHost,
     listenPort: parsed.values.API_LISTEN_PORT ?? 3001,
   });
 }

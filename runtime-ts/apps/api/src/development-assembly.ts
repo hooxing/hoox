@@ -6,6 +6,10 @@ import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec, type ThreadCursorSigningKey } from "./cursor.js";
 import { createDevelopmentAuthResolver } from "./development-auth.js";
+import {
+  assertDevelopmentPrincipalsIsolated,
+  normalizeDevelopmentLoopbackHost,
+} from "./development-boundary.js";
 import type { ApiProcessConfiguration } from "./process-entry.js";
 
 const cursorTtlMilliseconds = 15 * 60_000;
@@ -42,6 +46,9 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
     ) {
       throw new Error("DEVELOPMENT_API_ASSEMBLY_FORBIDDEN");
     }
+    // 即使调用方绕过进程配置解析直接调用装配器，也不能扩大固定凭据的网络与身份边界。
+    assertDevelopmentPrincipalsIsolated(configuration.developmentPrincipals);
+    const listenHost = normalizeDevelopmentLoopbackHost(configuration.listenHost);
     const persistence = createApiPersistenceRuntime({
       connectionString: configuration.databaseUrl,
       schema: configuration.databaseSchema,
@@ -92,7 +99,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
         { logger: true },
       );
       await persistence.probe();
-      await app.listen({ host: configuration.listenHost, port: configuration.listenPort });
+      await app.listen({ host: listenHost, port: configuration.listenPort });
       const listeningApp = app;
       return Object.freeze({
         // Fastify close 会先停止接收并等待已经进入 handler 的请求完成。

@@ -285,6 +285,37 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     }
     if (record.attempt.version !== input.expectedAttemptVersion) return { outcome: "conflict" };
     if (
+      this.permits.some(
+        ({ attemptId, permit }) =>
+          attemptId === record.attempt?.attemptId &&
+          permit.effect === input.effect &&
+          permit.callId === input.call.callId,
+      )
+    ) {
+      return { outcome: "conflict" };
+    }
+    if (
+      input.effect === "model_start" &&
+      (record.attempt.stage !== "model_execution_started" ||
+        this.permits.some(
+          ({ attemptId, permit }) =>
+            attemptId === record.attempt?.attemptId && permit.effect === "model_start",
+        ))
+    ) {
+      return { outcome: "conflict" };
+    }
+    if (input.effect === "model_continue") {
+      const correction = record.events.findLast(
+        (event) =>
+          event.kind === "artifact_correction_requested" &&
+          input.call.callId ===
+            `${record.attempt?.attemptId}/model/correction/${event.payload.round}`,
+      );
+      if (record.attempt.stage !== "workspace_verified" || correction === undefined) {
+        return { outcome: "conflict" };
+      }
+    }
+    if (
       input.effect === "tool_execution" &&
       (record.effectInvocations.get(invocationKey(record.attempt.attemptId, input.call.callId)) !==
         input.call.toolName ||

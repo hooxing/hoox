@@ -1,4 +1,8 @@
-import { ArtifactDeliveryError, ArtifactCompletionGateAdapter } from "@cube-runtime/artifact";
+import {
+  ArtifactCompletionGateAdapter,
+  ArtifactDeliveryError,
+  createArtifactExecutionAuthorizationAuthority,
+} from "@cube-runtime/artifact";
 import {
   isoTimestamp,
   resourceVersionId,
@@ -19,10 +23,10 @@ import {
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
-  ArtifactToolRouter,
   type ArtifactPublicationResourcePort,
+  ArtifactToolRouter,
   type ArtifactToolServicePort,
-  type TrustedArtifactExecutionContext,
+  type TrustedArtifactSessionBinding,
 } from "./artifact-tools.js";
 
 const scope = Object.freeze({
@@ -32,12 +36,9 @@ const scope = Object.freeze({
   rootRunId: runId("run_faux_artifact"),
   workspaceId: workspaceId("workspace_faux_artifact"),
 });
-const trustedContext: TrustedArtifactExecutionContext = Object.freeze({
+const binding: TrustedArtifactSessionBinding = Object.freeze({
   scope,
-  runClaimToken: "claim-faux-artifact",
-  runClaimEpoch: 1,
-  workspaceRootRunId: scope.rootRunId,
-  workspaceLeaseEpoch: 2,
+  attemptId: "attempt-faux-artifact",
 });
 
 class StatefulFauxArtifactService implements ArtifactToolServicePort {
@@ -115,10 +116,10 @@ function authorization(call: ExternalEffectCall) {
     permit: {
       permitId: `permit-${call.callId}`,
       scope,
-      runClaimToken: trustedContext.runClaimToken,
-      runClaimEpoch: trustedContext.runClaimEpoch,
-      workspaceRootRunId: trustedContext.workspaceRootRunId,
-      workspaceLeaseEpoch: trustedContext.workspaceLeaseEpoch,
+      runClaimToken: "claim-faux-artifact",
+      runClaimEpoch: 1,
+      workspaceRootRunId: scope.rootRunId,
+      workspaceLeaseEpoch: 2,
       attemptVersion: 12,
       effect: "tool_execution" as const,
       callId: call.callId,
@@ -168,12 +169,19 @@ describe("Pi Faux Artifact 纵向链路", () => {
     "模型声明、失败修正为新版本与新 Artifact 后通过完成门，公开上下文不泄漏存储信息",
     async () => {
       const service = new StatefulFauxArtifactService();
+      const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 100 });
       const router = new ArtifactToolRouter({
-        context: trustedContext,
+        binding,
         artifacts: service,
         resources: new FauxResources(),
-        monotonicClock: { now: () => 100 },
-        authorizer: { authorizeToolEffect: async (call) => authorization(call) },
+        authorizationVerifier: authority.verifier,
+        authorizer: {
+          authorizeToolEffect: async (call) =>
+            authority.issuer.issue({
+              consumed: authorization(call),
+              attemptId: binding.attemptId,
+            }),
+        },
       });
       let correctionContext = "";
       let completionContext = "";

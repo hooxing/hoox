@@ -63,6 +63,9 @@ importers:
 
   runtime-ts/apps/agent-worker:
     dependencies:
+      '@cube-runtime/artifact':
+        specifier: workspace:*
+        version: link:../../packages/artifact
       '@cube-runtime/domain':
         specifier: workspace:*
         version: link:../../packages/domain

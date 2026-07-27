@@ -14,7 +14,12 @@ import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
 import type { ExecutionScope } from "@cube-runtime/run-contracts";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ArtifactExecutionAuthorization, type MonotonicClockPort } from "./authorization.js";
+import {
+  ArtifactExecutionAuthorization,
+  type ArtifactExecutionAuthorizationAuthority,
+  createArtifactExecutionAuthorizationAuthority,
+  type MonotonicClockPort,
+} from "./authorization.js";
 import type {
   ArtifactBlobBinding,
   ArtifactDeliveryRepositoryPort,
@@ -45,6 +50,7 @@ const artifactOne = artifactId("artifact_one");
 const versionOne = resourceVersionId("resource_version_one");
 const placeholderDigest = sha256Digest("0".repeat(64));
 const immediateMonotonicClock: MonotonicClockPort = Object.freeze({ now: () => 100 });
+let authorizationAuthority = createArtifactExecutionAuthorizationAuthority(immediateMonotonicClock);
 
 class MutableMonotonicClock implements MonotonicClockPort {
   constructor(public value: number) {}
@@ -60,6 +66,7 @@ function executionAuthorization(input: {
   readonly permitId?: string;
   readonly expiresAt?: string;
   readonly clock?: MonotonicClockPort;
+  readonly authority?: ArtifactExecutionAuthorizationAuthority;
   readonly consumedAtMonotonicMs?: number;
   readonly maxContinuationDelayMs?: number;
   readonly overrides?: Partial<{
@@ -75,8 +82,13 @@ function executionAuthorization(input: {
   }>;
 }): ArtifactExecutionAuthorization {
   const executionScope = input.executionScope ?? scope;
-  return ArtifactExecutionAuthorization.fromConsumed(
-    {
+  const authority =
+    input.authority ??
+    (input.clock === undefined
+      ? authorizationAuthority
+      : createArtifactExecutionAuthorizationAuthority(input.clock));
+  return authority.issuer.issue({
+    consumed: {
       permit: {
         permitId: input.permitId ?? "permit-artifact-1",
         scope: executionScope,
@@ -97,8 +109,8 @@ function executionAuthorization(input: {
       consumedAtMonotonicMs: input.consumedAtMonotonicMs ?? 100,
       maxContinuationDelayMs: input.maxContinuationDelayMs ?? 1_000,
     },
-    input.clock ?? immediateMonotonicClock,
-  );
+    attemptId: "attempt-artifact-1",
+  });
 }
 
 function stableBlob(overrides: Partial<StableBlobRef> = {}): StableBlobRef {
@@ -337,10 +349,11 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
   let service: ArtifactDeliveryService;
 
   beforeEach(() => {
+    authorizationAuthority = createArtifactExecutionAuthorizationAuthority(immediateMonotonicClock);
     repository = new FakeRepository();
     blobs = fakeBlobStore();
     service = new ArtifactDeliveryService(repository, blobs, {
-      monotonicClock: immediateMonotonicClock,
+      executionAuthorizationVerifier: authorizationAuthority.verifier,
     });
   });
 
@@ -393,6 +406,59 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
       callId: "call-artifact-1",
       toolName: "publish_artifact",
     });
+  });
+
+  it("new、Reflect、any、JSON、原型与其他 authority 都不能伪造当前服务能力", async () => {
+    const command = publishCommand();
+    const AuthorizationConstructor = ArtifactExecutionAuthorization as unknown as new (
+      ...arguments_: unknown[]
+    ) => ArtifactExecutionAuthorization;
+    expect(() => new AuthorizationConstructor({}, {}, "attempt-forged")).toThrowError(
+      expect.objectContaining({ code: "ARTIFACT_NOT_AUTHORIZED" }),
+    );
+    expect(() => Reflect.construct(AuthorizationConstructor, [{}, {}, "attempt-forged"])).toThrow(
+      expect.objectContaining({ code: "ARTIFACT_NOT_AUTHORIZED" }),
+    );
+
+    const sameShape = { ...command.authorization } as ArtifactExecutionAuthorization;
+    const fromJson = JSON.parse(
+      JSON.stringify(command.authorization),
+    ) as ArtifactExecutionAuthorization;
+    const forgedPrototype = Object.assign(
+      Object.create(ArtifactExecutionAuthorization.prototype) as ArtifactExecutionAuthorization,
+      command.authorization,
+    );
+    const foreignAuthority = createArtifactExecutionAuthorizationAuthority(immediateMonotonicClock);
+    const foreign = foreignAuthority.issuer.issue({
+      consumed: {
+        permit: {
+          permitId: "permit-foreign-authority",
+          scope,
+          runClaimToken: "run-claim-token-foreign",
+          runClaimEpoch: 1,
+          workspaceRootRunId: scope.rootRunId,
+          workspaceLeaseEpoch: 1,
+          attemptVersion: 1,
+          effect: "tool_execution",
+          callId: command.authorization.callId,
+          toolName: "publish_artifact",
+          argsDigest: command.toolArgsDigest,
+          issuedAt: isoTimestamp("2026-07-26T08:00:00.000Z"),
+          expiresAt: isoTimestamp("2026-07-26T08:01:00.000Z"),
+        },
+        consumedAt: isoTimestamp("2026-07-26T08:00:01.000Z"),
+        consumedAtMonotonicMs: 100,
+        maxContinuationDelayMs: 1_000,
+      },
+      attemptId: "attempt-artifact-1",
+    });
+
+    for (const authorization of [sameShape, fromJson, forgedPrototype, foreign]) {
+      await expect(service.publishArtifact({ ...command, authorization })).rejects.toSatisfy(
+        (error) => expectCode(error, "ARTIFACT_NOT_AUTHORIZED"),
+      );
+    }
+    expect(repository.beginInputs).toHaveLength(0);
   });
 
   it("授权逐字段拒绝错误 effect、双栅栏、Attempt、toolName 与 argsDigest", async () => {
@@ -480,6 +546,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
 
   it("授权创建后闲置不能绕过，declare 与 publish 每次入口重新检查单调窗口", async () => {
     const clock = new MutableMonotonicClock(100);
+    const authority = createArtifactExecutionAuthorizationAuthority(clock);
     const commandAtConsumption = publishCommand();
     const command = publishCommand({
       authorization: executionAuthorization({
@@ -493,7 +560,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
           purpose: commandAtConsumption.purpose,
           deliverableKey: commandAtConsumption.deliverableKey,
         },
-        clock,
+        authority,
         overrides: { argsDigest: commandAtConsumption.toolArgsDigest },
       }),
     });
@@ -504,11 +571,11 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
       authorization: executionAuthorization({
         toolName: "declare_deliverables",
         args: { idempotencyKey: "declare:run_alpha:idle", declarations },
-        clock,
+        authority,
       }),
     };
     const clockedService = new ArtifactDeliveryService(repository, blobs, {
-      monotonicClock: clock,
+      executionAuthorizationVerifier: authority.verifier,
     });
     clock.value = 1_100;
     await expect(clockedService.publishArtifact(command)).rejects.toSatisfy((error) =>
@@ -523,6 +590,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
 
   it("begin 后远端检查耗尽窗口时不允许 finish，响应未知后过期也不允许 readback", async () => {
     const clock = new MutableMonotonicClock(100);
+    const authority = createArtifactExecutionAuthorizationAuthority(clock);
     const base = publishCommand();
     const args = {
       idempotencyKey: base.idempotencyKey,
@@ -534,14 +602,14 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
       deliverableKey: base.deliverableKey,
     };
     const clockedService = new ArtifactDeliveryService(repository, blobs, {
-      monotonicClock: clock,
+      executionAuthorizationVerifier: authority.verifier,
     });
     const command = {
       ...base,
       authorization: executionAuthorization({
         toolName: "publish_artifact",
         args,
-        clock,
+        authority,
         overrides: { argsDigest: base.toolArgsDigest },
       }),
     };
@@ -585,7 +653,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
         authorization: executionAuthorization({
           toolName: "publish_artifact",
           args: secondArgs,
-          clock,
+          authority,
           overrides: { argsDigest: second.toolArgsDigest },
         }),
       }),
@@ -595,6 +663,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
 
   it("declare 响应未知后窗口耗尽时不允许 readback", async () => {
     const clock = new MutableMonotonicClock(100);
+    const authority = createArtifactExecutionAuthorizationAuthority(clock);
     const declarations = [{ key: "report", name: "报告", requirement: "required" as const }];
     const input = {
       idempotencyKey: "declare:run_alpha:response-unknown",
@@ -602,7 +671,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
       authorization: executionAuthorization({
         toolName: "declare_deliverables",
         args: { idempotencyKey: "declare:run_alpha:response-unknown", declarations },
-        clock,
+        authority,
       }),
     };
     repository.declareDeliverables = async (command) => {
@@ -616,7 +685,7 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
       return { outcome: "not_found" };
     };
     const clockedService = new ArtifactDeliveryService(repository, blobs, {
-      monotonicClock: clock,
+      executionAuthorizationVerifier: authority.verifier,
     });
     await expect(clockedService.declareDeliverables(input)).rejects.toSatisfy((error) =>
       expectCode(error, "ARTIFACT_NOT_AUTHORIZED"),
@@ -1070,12 +1139,13 @@ describe("ArtifactDeliveryService 用户投影与授权下载", () => {
   let service: ArtifactDeliveryService;
 
   beforeEach(() => {
+    authorizationAuthority = createArtifactExecutionAuthorizationAuthority(immediateMonotonicClock);
     repository = new FakeRepository();
     blobs = fakeBlobStore();
     service = new ArtifactDeliveryService(repository, blobs, {
       defaultDownloadTtlSeconds: 120,
       maxDownloadTtlSeconds: 300,
-      monotonicClock: immediateMonotonicClock,
+      executionAuthorizationVerifier: authorizationAuthority.verifier,
     });
   });
 
@@ -1214,14 +1284,14 @@ describe("ArtifactDeliveryService 用户投影与授权下载", () => {
       () =>
         new ArtifactDeliveryService(repository, blobs, {
           maxDownloadTtlSeconds: 901,
-          monotonicClock: immediateMonotonicClock,
+          executionAuthorizationVerifier: authorizationAuthority.verifier,
         }),
     ).toThrowError(expect.objectContaining({ code: "ARTIFACT_INVALID_ARGUMENT" }));
     expect(
       () =>
         new ArtifactDeliveryService(repository, blobs, {
           allowInsecureHttpDownload: true,
-          monotonicClock: immediateMonotonicClock,
+          executionAuthorizationVerifier: authorizationAuthority.verifier,
         }),
     ).toThrowError(expect.objectContaining({ code: "ARTIFACT_INVALID_ARGUMENT" }));
 
@@ -1230,7 +1300,7 @@ describe("ArtifactDeliveryService 用户投影与授权下载", () => {
       defaultDownloadTtlSeconds: 60,
       runtimeMode: "development",
       allowInsecureHttpDownload: true,
-      monotonicClock: immediateMonotonicClock,
+      executionAuthorizationVerifier: authorizationAuthority.verifier,
     });
     await expect(
       localService.createDownload({ request, artifactId: artifactOne }),

@@ -2,11 +2,9 @@ import type { ArtifactId, ResourceVersionId, RunId, Sha256Digest } from "@cube-r
 import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
 import type { ArtifactPublicationPort, ExecutionScope } from "@cube-runtime/run-contracts";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
-import {
-  type ArtifactExecutionAuthorization,
-  assertArtifactExecutionAuthorization,
-  type MonotonicClockPort,
-  systemMonotonicClock,
+import type {
+  ArtifactExecutionAuthorization,
+  ArtifactExecutionAuthorizationVerifierPort,
 } from "./authorization.js";
 import type {
   ArtifactBlobBinding,
@@ -25,7 +23,8 @@ export interface ArtifactDeliveryServiceOptions {
   readonly defaultDownloadTtlSeconds?: number;
   readonly maxDownloadTtlSeconds?: number;
   readonly runtimeMode?: "development" | "test" | "production";
-  readonly monotonicClock?: MonotonicClockPort;
+  /** 与 Worker issuer 成对创建；缺失时 Artifact 写路径不得启动。 */
+  readonly executionAuthorizationVerifier: ArtifactExecutionAuthorizationVerifierPort;
   /** 只供显式本地开发/测试配置；production 构造时会强制拒绝。 */
   readonly allowInsecureHttpDownload?: boolean;
 }
@@ -58,12 +57,12 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
   readonly #defaultDownloadTtlSeconds: number;
   readonly #maxDownloadTtlSeconds: number;
   readonly #allowInsecureHttpDownload: boolean;
-  readonly #monotonicClock: MonotonicClockPort;
+  readonly #executionAuthorizationVerifier: ArtifactExecutionAuthorizationVerifierPort;
 
   constructor(
     private readonly repository: ArtifactDeliveryRepositoryPort,
     private readonly blobs: BlobStore,
-    options: ArtifactDeliveryServiceOptions = {},
+    options: ArtifactDeliveryServiceOptions,
   ) {
     this.#maxDownloadTtlSeconds = validateTtl(
       options.maxDownloadTtlSeconds ?? HARD_MAX_DOWNLOAD_TTL_SECONDS,
@@ -80,7 +79,10 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
       throw invalidArgument("production 不允许明文 HTTP 下载 URL");
     }
     this.#allowInsecureHttpDownload = options.allowInsecureHttpDownload ?? false;
-    this.#monotonicClock = options.monotonicClock ?? systemMonotonicClock;
+    if (!options.executionAuthorizationVerifier?.assert) {
+      throw invalidArgument("缺少 Artifact 写授权验证器");
+    }
+    this.#executionAuthorizationVerifier = options.executionAuthorizationVerifier;
   }
 
   async declareDeliverables(input: {
@@ -367,7 +369,7 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
     authorization: ArtifactExecutionAuthorization,
     expected: { readonly toolName: string; readonly argsDigest: Sha256Digest },
   ): void {
-    assertArtifactExecutionAuthorization(authorization, expected, this.#monotonicClock);
+    this.#executionAuthorizationVerifier.assert(authorization, expected);
   }
 }
 

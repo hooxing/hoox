@@ -53,6 +53,8 @@ export interface RunWorkerOptions {
   readonly heartbeatMs?: number;
   readonly runTimeoutMs?: number;
   readonly externalEffectPermitMs?: number;
+  readonly maxArtifactCorrectionRounds?: number;
+  readonly artifactCorrectionPromptBudgetBytes?: number;
 }
 
 export type RunWorkerResult =
@@ -128,6 +130,8 @@ export class RunWorker {
   readonly #heartbeatMs: number;
   readonly #runTimeoutMs: number;
   readonly #externalEffectPermitMs: number;
+  readonly #maxArtifactCorrectionRounds: number;
+  readonly #artifactCorrectionPromptBudgetBytes: number;
 
   constructor(
     private readonly dependencies: WorkerDependencies,
@@ -139,6 +143,16 @@ export class RunWorker {
     this.#externalEffectPermitMs = positive(
       options.externalEffectPermitMs ?? 3_000,
       "externalEffectPermitMs",
+    );
+    this.#maxArtifactCorrectionRounds = boundedNonNegativeInteger(
+      options.maxArtifactCorrectionRounds ?? 2,
+      2,
+      "maxArtifactCorrectionRounds",
+    );
+    this.#artifactCorrectionPromptBudgetBytes = boundedPositiveInteger(
+      options.artifactCorrectionPromptBudgetBytes ?? 8 * 1_024,
+      8 * 1_024,
+      "artifactCorrectionPromptBudgetBytes",
     );
     if (this.#heartbeatMs * 2 >= this.#leaseDurationMs) {
       throw new Error("heartbeatMs 必须小于 leaseDurationMs 的一半");
@@ -354,13 +368,7 @@ export class RunWorker {
       if (preSession) return await this.finishStopped(context, preSession, sandbox);
       session = await this.dependencies.sessions.create({
         scope,
-        trustedToolContext: {
-          scope,
-          runClaimToken: context.fence.runClaim.token,
-          runClaimEpoch: context.fence.runClaim.epoch,
-          workspaceRootRunId: context.fence.workspaceLease.rootRunId,
-          workspaceLeaseEpoch: context.fence.workspaceLease.epoch,
-        },
+        attemptId: context.attemptId,
         sandbox: sandbox.sandbox,
         rolloutProjection: claim.snapshot.rolloutProjection,
         authorizeToolEffect: (call) =>
@@ -421,122 +429,203 @@ export class RunWorker {
       });
       if (!isApplied(modelCheckpoint)) return await this.handleMutationFailure(modelCheckpoint);
 
-      // checkpoint 成功后仍必须同步重验；这是模型副作用窗口前最后一道 stop-point。
-      const preModel = await this.stopPoint(context, cancellation);
-      if (preModel) return await this.finishStopped(context, preModel, sandbox);
-      const promptText = claim.snapshot.answer ?? claim.snapshot.input;
-      const modelAuthorization = await this.authorizeEffect(context, cancellation, "model_start", {
-        callId: `${context.attemptId}/model/start`,
-        toolName: "pi_model",
-        argsDigest: digestCanonical({ prompt: promptText }),
-      });
-      const turn = await session.runPrompt(promptText, modelAuthorization);
-      await eventChain;
-      if (context.abortPromise) await context.abortPromise;
-      const postModel = await this.stopPoint(context, cancellation);
-      if (postModel) return await this.finishStopped(context, postModel, sandbox);
-      if (context.adapterRejected) {
-        return await this.recoverWithCleanup(
-          context,
-          sandbox,
-          context.agentFailure ?? "EVENT_REJECTED",
-          cancellation,
-        );
-      }
-      if (context.agentFailure) {
-        return await this.finalizeWithCleanup(
-          context,
-          sandbox,
-          "failed",
-          context.agentFailure,
-          cancellation,
-        );
-      }
-      if (turn.kind === "completed" && !context.modelCompleted) {
-        return await this.finalizeWithCleanup(context, sandbox, "failed", "PROTOCOL", cancellation);
-      }
-
-      const modelSettled = await this.applyMutation(context, {
-        idempotencyKey: `${context.attemptId}/stage/model-settled`,
-        nextStage: "model_settled",
-        events: [attemptEvent(context, "running", "model_settled")],
-        outbox: [],
-      });
-      if (!isApplied(modelSettled)) return await this.handleMutationFailure(modelSettled);
-
-      const preVerify = await this.stopPoint(context, cancellation);
-      if (preVerify) return await this.finishStopped(context, preVerify, sandbox);
-      let candidate: WorkspaceRevisionCandidate | undefined;
-      try {
-        candidate = await this.dependencies.revisions.verify({
-          scope,
-          ...(context.currentRevisionId === undefined
-            ? {}
-            : { expectedCurrentRevisionId: context.currentRevisionId }),
-          sandbox: sandbox.sandbox,
-        });
-      } catch {
-        return await this.recoverWithCleanup(context, sandbox, "WORKSPACE_CONFLICT", cancellation);
-      }
-      const postVerify = await this.stopPoint(context, cancellation);
-      if (postVerify) return await this.finishStopped(context, postVerify, sandbox);
+      let promptText = claim.snapshot.answer ?? claim.snapshot.input;
+      let correctionRound = 0;
+      let correctionPromptBytes = 0;
       let workspaceChange: ValidatedWorkspaceChange | undefined;
-      try {
-        workspaceChange = validateWorkspaceCandidate(context, candidate);
-      } catch {
-        return await this.recoverWithCleanup(context, sandbox, "WORKSPACE_CONFLICT", cancellation);
-      }
-      const verified = await this.applyMutation(context, {
-        idempotencyKey: `${context.attemptId}/stage/workspace-verified`,
-        nextStage: "workspace_verified",
-        events: [attemptEvent(context, "running", "workspace_verified")],
-        outbox: [],
-      });
-      if (!isApplied(verified)) return await this.handleMutationFailure(verified);
 
-      if (turn.kind === "waiting") {
-        try {
-          assertControlledRolloutProjection(turn.rolloutProjection);
-        } catch {
-          return await this.recoverWithCleanup(context, sandbox, "EVENT_REJECTED", cancellation);
+      // 必需交付物缺失属于可修正业务状态：保持同一 Session、双栅栏和 Attempt，持久化反馈后再启动模型。
+      for (;;) {
+        const preModel = await this.stopPoint(context, cancellation);
+        if (preModel) return await this.finishStopped(context, preModel, sandbox);
+        const modelEffect = correctionRound === 0 ? "model_start" : "model_continue";
+        const modelCallId =
+          correctionRound === 0
+            ? `${context.attemptId}/model/start`
+            : `${context.attemptId}/model/correction/${correctionRound}`;
+        const modelAuthorization = await this.authorizeEffect(context, cancellation, modelEffect, {
+          callId: modelCallId,
+          toolName: "pi_model",
+          argsDigest: digestCanonical({ prompt: promptText }),
+        });
+        context.modelCompleted = false;
+        const turn = await session.runPrompt(promptText, modelAuthorization);
+        await eventChain;
+        if (context.abortPromise) await context.abortPromise;
+        const postModel = await this.stopPoint(context, cancellation);
+        if (postModel) return await this.finishStopped(context, postModel, sandbox);
+        if (context.adapterRejected) {
+          return await this.recoverWithCleanup(
+            context,
+            sandbox,
+            context.agentFailure ?? "EVENT_REJECTED",
+            cancellation,
+          );
         }
-        const preSettle = await this.stopPoint(context, cancellation);
-        if (preSettle) return await this.finishStopped(context, preSettle, sandbox);
-        const settled = await this.settleSandbox(context, sandbox, "pause");
-        if (settled.outcome !== "settled") return settled.result;
-        // settle 返回后、终态事务前再次 stop；取消必须覆盖 waiting/success。
-        const postSettle = await this.stopPoint(context, cancellation);
-        if (postSettle) return await this.finishStopped(context, postSettle);
-        const waiting = await this.applyMutation(context, {
-          idempotencyKey: `${context.attemptId}/final/waiting`,
-          nextAttemptStatus: "waiting",
-          nextStage: "finished",
-          events: [waitingEvent(context, turn.question, turn.rolloutProjection.checkpointId)],
-          outbox: [],
-          rolloutProjection: turn.rolloutProjection,
-          ...(workspaceChange === undefined ? {} : { workspaceChange }),
-          nextRunStatus: "waiting",
-          releaseFences: true,
-        });
-        return isApplied(waiting)
-          ? { outcome: "waiting" }
-          : await this.handleMutationFailure(waiting);
-      }
+        if (context.agentFailure) {
+          return await this.finalizeWithCleanup(
+            context,
+            sandbox,
+            "failed",
+            context.agentFailure,
+            cancellation,
+          );
+        }
+        if (turn.kind === "completed" && !context.modelCompleted) {
+          return await this.finalizeWithCleanup(
+            context,
+            sandbox,
+            "failed",
+            "PROTOCOL",
+            cancellation,
+          );
+        }
 
-      const preArtifact = await this.stopPoint(context, cancellation);
-      if (preArtifact) return await this.finishStopped(context, preArtifact, sandbox);
-      try {
-        await this.dependencies.artifacts.assertReadyForCompletion({
-          scope,
-          ...(workspaceChange === undefined
-            ? {}
-            : { workspaceRevisionId: workspaceChange.revisionId }),
+        const modelSettled = await this.applyMutation(context, {
+          idempotencyKey:
+            correctionRound === 0
+              ? `${context.attemptId}/stage/model-settled`
+              : `${context.attemptId}/correction/${correctionRound}/model-settled`,
+          ...(correctionRound === 0 ? { nextStage: "model_settled" as const } : {}),
+          events: [
+            attemptEvent(
+              context,
+              "running",
+              correctionRound === 0 ? "model_settled" : "workspace_verified",
+            ),
+          ],
+          outbox: [],
         });
-      } catch {
-        return await this.recoverWithCleanup(context, sandbox, "ARTIFACT_NOT_READY", cancellation);
+        if (!isApplied(modelSettled)) return await this.handleMutationFailure(modelSettled);
+
+        const preVerify = await this.stopPoint(context, cancellation);
+        if (preVerify) return await this.finishStopped(context, preVerify, sandbox);
+        let candidate: WorkspaceRevisionCandidate | undefined;
+        try {
+          candidate = await this.dependencies.revisions.verify({
+            scope,
+            ...(context.currentRevisionId === undefined
+              ? {}
+              : { expectedCurrentRevisionId: context.currentRevisionId }),
+            sandbox: sandbox.sandbox,
+          });
+        } catch {
+          return await this.recoverWithCleanup(
+            context,
+            sandbox,
+            "WORKSPACE_CONFLICT",
+            cancellation,
+          );
+        }
+        const postVerify = await this.stopPoint(context, cancellation);
+        if (postVerify) return await this.finishStopped(context, postVerify, sandbox);
+        try {
+          workspaceChange = validateWorkspaceCandidate(context, candidate);
+        } catch {
+          return await this.recoverWithCleanup(
+            context,
+            sandbox,
+            "WORKSPACE_CONFLICT",
+            cancellation,
+          );
+        }
+        const verified = await this.applyMutation(context, {
+          idempotencyKey:
+            correctionRound === 0
+              ? `${context.attemptId}/stage/workspace-verified`
+              : `${context.attemptId}/correction/${correctionRound}/workspace-verified`,
+          ...(correctionRound === 0 ? { nextStage: "workspace_verified" as const } : {}),
+          events: [attemptEvent(context, "running", "workspace_verified")],
+          outbox: [],
+        });
+        if (!isApplied(verified)) return await this.handleMutationFailure(verified);
+
+        if (turn.kind === "waiting") {
+          try {
+            assertControlledRolloutProjection(turn.rolloutProjection);
+          } catch {
+            return await this.recoverWithCleanup(context, sandbox, "EVENT_REJECTED", cancellation);
+          }
+          const preSettle = await this.stopPoint(context, cancellation);
+          if (preSettle) return await this.finishStopped(context, preSettle, sandbox);
+          const settled = await this.settleSandbox(context, sandbox, "pause");
+          if (settled.outcome !== "settled") return settled.result;
+          const postSettle = await this.stopPoint(context, cancellation);
+          if (postSettle) return await this.finishStopped(context, postSettle);
+          const waiting = await this.applyMutation(context, {
+            idempotencyKey: `${context.attemptId}/final/waiting`,
+            nextAttemptStatus: "waiting",
+            nextStage: "finished",
+            events: [waitingEvent(context, turn.question, turn.rolloutProjection.checkpointId)],
+            outbox: [],
+            rolloutProjection: turn.rolloutProjection,
+            ...(workspaceChange === undefined ? {} : { workspaceChange }),
+            nextRunStatus: "waiting",
+            releaseFences: true,
+          });
+          return isApplied(waiting)
+            ? { outcome: "waiting" }
+            : await this.handleMutationFailure(waiting);
+        }
+
+        const preArtifact = await this.stopPoint(context, cancellation);
+        if (preArtifact) return await this.finishStopped(context, preArtifact, sandbox);
+        let artifactReady = true;
+        try {
+          await this.dependencies.artifacts.assertReadyForCompletion({
+            scope,
+            ...(workspaceChange === undefined
+              ? {}
+              : { workspaceRevisionId: workspaceChange.revisionId }),
+          });
+        } catch {
+          artifactReady = false;
+        }
+        // 完成门检查之后先重验取消/租约；取消始终高于修正和成功。
+        const postArtifact = await this.stopPoint(context, cancellation);
+        if (postArtifact) return await this.finishStopped(context, postArtifact, sandbox);
+        if (artifactReady) break;
+
+        if (correctionRound >= this.#maxArtifactCorrectionRounds) {
+          return await this.finalizeWithCleanup(
+            context,
+            sandbox,
+            "failed",
+            "ARTIFACT_NOT_READY",
+            cancellation,
+          );
+        }
+        const nextRound = correctionRound + 1;
+        const feedback = artifactCorrectionFeedback(nextRound, this.#maxArtifactCorrectionRounds);
+        const feedbackBytes = new TextEncoder().encode(feedback).byteLength;
+        if (correctionPromptBytes + feedbackBytes > this.#artifactCorrectionPromptBudgetBytes) {
+          return await this.finalizeWithCleanup(
+            context,
+            sandbox,
+            "failed",
+            "ARTIFACT_NOT_READY",
+            cancellation,
+          );
+        }
+        const feedbackPersisted = await this.applyMutation(context, {
+          idempotencyKey: `${context.attemptId}/correction/${nextRound}/feedback`,
+          events: [
+            artifactCorrectionEvent(
+              context,
+              nextRound,
+              this.#maxArtifactCorrectionRounds,
+              feedback,
+            ),
+          ],
+          outbox: [],
+        });
+        if (!isApplied(feedbackPersisted)) {
+          return await this.handleMutationFailure(feedbackPersisted);
+        }
+        correctionRound = nextRound;
+        correctionPromptBytes += feedbackBytes;
+        promptText = feedback;
       }
-      const postArtifact = await this.stopPoint(context, cancellation);
-      if (postArtifact) return await this.finishStopped(context, postArtifact, sandbox);
 
       const settled = await this.settleSandbox(context, sandbox, "close");
       if (settled.outcome !== "settled") return settled.result;
@@ -1056,6 +1145,31 @@ function waitingEvent(
   return event;
 }
 
+function artifactCorrectionFeedback(round: number, maxRounds: number): string {
+  return [
+    `Artifact 完成门未通过（修正轮次 ${round}/${maxRounds}）。`,
+    "必需交付物尚未全部发布成功。请检查已经声明的 required deliverable，修正对应文件，",
+    "并使用 publish_artifact 发布新的不可变 ResourceVersion；完成后再结束本轮。",
+    "不要回显对象键、签名 URL、租户或授权信息。",
+  ].join("");
+}
+
+function artifactCorrectionEvent(
+  context: ExecutionContext,
+  round: number,
+  maxRounds: number,
+  feedback: string,
+): RuntimeEventV1 {
+  const event: RuntimeEventV1 = {
+    schemaVersion: 1,
+    kind: "artifact_correction_requested",
+    sequence: context.nextEventSequence,
+    payload: { round, maxRounds, code: "ARTIFACT_NOT_READY", feedback },
+  };
+  assertProtocolSize(event);
+  return event;
+}
+
 function agentEvent(context: ExecutionContext, payload: RuntimeAgentEvent): RuntimeEventV1 {
   const event: RuntimeEventV1 = {
     schemaVersion: 1,
@@ -1447,5 +1561,19 @@ function assertScope(scope: ExecutionScope): void {
 
 function positive(value: number, name: string): number {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} 必须是正整数`);
+  return value;
+}
+
+function boundedNonNegativeInteger(value: number, maximum: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+    throw new Error(`${name} 必须是 0 到 ${maximum} 的安全整数`);
+  }
+  return value;
+}
+
+function boundedPositiveInteger(value: number, maximum: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+    throw new Error(`${name} 必须是 1 到 ${maximum} 的安全整数`);
+  }
   return value;
 }

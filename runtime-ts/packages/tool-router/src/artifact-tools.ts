@@ -1,41 +1,38 @@
 import {
   ArtifactDeliveryError,
-  ArtifactExecutionAuthorization,
+  type ArtifactExecutionAuthorization,
+  type ArtifactExecutionAuthorizationVerifierPort,
   type ArtifactPublicationSnapshot,
   type DeliverableDeclaration,
-  type MonotonicClockPort,
   type PublishArtifactCommand,
-  systemMonotonicClock,
 } from "@cube-runtime/artifact";
 import {
-  artifactId,
   type ArtifactId,
-  resourceVersionId,
+  artifactId,
   type ResourceVersionId,
+  resourceVersionId,
 } from "@cube-runtime/domain";
-import type {
-  ConsumedExternalEffectAuthorization,
-  ExecutionScope,
-  ExternalEffectCall,
-  TrustedToolExecutionContext,
-} from "@cube-runtime/run-contracts";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
-import { workspaceRelativePath } from "@cube-runtime/workspace";
-import { Value } from "typebox/value";
 import {
   DeclareDeliverablesToolArgumentsSchema,
   type PublishArtifactToolArguments,
   PublishArtifactToolArgumentsSchema,
 } from "@cube-runtime/pi-adapter";
+import type { ExecutionScope, ExternalEffectCall } from "@cube-runtime/run-contracts";
+import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+import { workspaceRelativePath } from "@cube-runtime/workspace";
 import type { Static, TSchema } from "typebox";
+import { Value } from "typebox/value";
 
 export const ARTIFACT_TOOL_NAMES = ["declare_deliverables", "publish_artifact"] as const;
 export type ArtifactToolName = (typeof ARTIFACT_TOOL_NAMES)[number];
 
-export type TrustedArtifactExecutionContext = TrustedToolExecutionContext;
+export interface TrustedArtifactSessionBinding {
+  readonly scope: ExecutionScope;
+  readonly attemptId: string;
+}
 
 export interface ArtifactToolEffectAuthorizer {
-  authorizeToolEffect(call: ExternalEffectCall): Promise<ConsumedExternalEffectAuthorization>;
+  authorizeToolEffect(call: ExternalEffectCall): Promise<ArtifactExecutionAuthorization>;
 }
 
 export type ArtifactPublicationSource =
@@ -113,11 +110,11 @@ export interface ArtifactToolErrorProjection {
 }
 
 export interface ArtifactToolRouterOptions {
-  readonly context: TrustedArtifactExecutionContext;
+  readonly binding: TrustedArtifactSessionBinding;
   readonly authorizer: ArtifactToolEffectAuthorizer;
+  readonly authorizationVerifier: ArtifactExecutionAuthorizationVerifierPort;
   readonly resources: ArtifactPublicationResourcePort;
   readonly artifacts: ArtifactToolServicePort;
-  readonly monotonicClock?: MonotonicClockPort;
 }
 
 export interface ArtifactToolRouterPort {
@@ -136,7 +133,7 @@ export interface ArtifactToolRouterPort {
 
 export interface ArtifactToolRouterFactoryPort {
   create(input: {
-    readonly context: TrustedArtifactExecutionContext;
+    readonly binding: TrustedArtifactSessionBinding;
     readonly authorizer: ArtifactToolEffectAuthorizer;
   }): ArtifactToolRouterPort;
 }
@@ -147,10 +144,14 @@ export class ArtifactToolRouterFactory implements ArtifactToolRouterFactoryPort 
     private readonly dependencies: {
       readonly resources: ArtifactPublicationResourcePort;
       readonly artifacts: ArtifactToolServicePort;
-      readonly monotonicClock?: MonotonicClockPort;
+      readonly authorizationVerifier: ArtifactExecutionAuthorizationVerifierPort;
     },
   ) {
-    if (!dependencies?.resources || !dependencies.artifacts) {
+    if (
+      !dependencies?.resources ||
+      !dependencies.artifacts ||
+      !dependencies.authorizationVerifier
+    ) {
       throw new ArtifactToolError(
         "ARTIFACT_TOOL_UNAVAILABLE",
         "Artifact 工具尚未完成生产装配",
@@ -160,12 +161,12 @@ export class ArtifactToolRouterFactory implements ArtifactToolRouterFactoryPort 
   }
 
   create(input: {
-    readonly context: TrustedArtifactExecutionContext;
+    readonly binding: TrustedArtifactSessionBinding;
     readonly authorizer: ArtifactToolEffectAuthorizer;
   }): ArtifactToolRouterPort {
     return new ArtifactToolRouter({
       ...this.dependencies,
-      context: input.context,
+      binding: input.binding,
       authorizer: input.authorizer,
     });
   }
@@ -173,17 +174,18 @@ export class ArtifactToolRouterFactory implements ArtifactToolRouterFactoryPort 
 
 /** 每个 Pi Session 创建独立 Router；permitId 的进程内一次性集合不会跨 Run 混用。 */
 export class ArtifactToolRouter {
-  readonly #context: TrustedArtifactExecutionContext;
+  readonly #binding: TrustedArtifactSessionBinding;
   readonly #authorizer: ArtifactToolEffectAuthorizer;
+  readonly #authorizationVerifier: ArtifactExecutionAuthorizationVerifierPort;
   readonly #resources: ArtifactPublicationResourcePort;
   readonly #artifacts: ArtifactToolServicePort;
-  readonly #clock: MonotonicClockPort;
   readonly #consumedPermitIds = new Set<string>();
 
   constructor(options: ArtifactToolRouterOptions) {
     if (
-      !options?.context ||
+      !options?.binding ||
       !options.authorizer ||
+      !options.authorizationVerifier ||
       !options.resources ||
       !options.artifacts ||
       typeof options.authorizer.authorizeToolEffect !== "function" ||
@@ -197,11 +199,11 @@ export class ArtifactToolRouter {
         false,
       );
     }
-    this.#context = freezeTrustedContext(options.context);
+    this.#binding = freezeTrustedBinding(options.binding);
     this.#authorizer = options.authorizer;
+    this.#authorizationVerifier = options.authorizationVerifier;
     this.#resources = options.resources;
     this.#artifacts = options.artifacts;
-    this.#clock = options.monotonicClock ?? systemMonotonicClock;
   }
 
   async declareDeliverables(input: {
@@ -305,9 +307,9 @@ export class ArtifactToolRouter {
   ): Promise<ArtifactExecutionAuthorization> {
     if (!validOpaqueId(callId) || signal?.aborted) throw notAuthorized();
     const argsDigest = digestCanonical(args);
-    let consumed: ConsumedExternalEffectAuthorization;
+    let authorization: ArtifactExecutionAuthorization;
     try {
-      consumed = await this.#authorizer.authorizeToolEffect({
+      authorization = await this.#authorizer.authorizeToolEffect({
         callId,
         toolName,
         argsDigest,
@@ -316,18 +318,23 @@ export class ArtifactToolRouter {
       throw notAuthorized();
     }
     if (
-      !matchesTrustedContext(consumed, this.#context) ||
-      consumed.permit.callId !== callId ||
-      consumed.permit.toolName !== toolName ||
-      consumed.permit.argsDigest !== argsDigest ||
+      authorization.callId !== callId ||
+      authorization.toolName !== toolName ||
+      authorization.argsDigest !== argsDigest ||
       signal?.aborted
     ) {
       throw notAuthorized();
     }
-    if (this.#consumedPermitIds.has(consumed.permit.permitId)) throw notAuthorized();
-    this.#consumedPermitIds.add(consumed.permit.permitId);
+    if (this.#consumedPermitIds.has(authorization.permitId)) throw notAuthorized();
     try {
-      return ArtifactExecutionAuthorization.fromConsumed(consumed, this.#clock);
+      this.#authorizationVerifier.assert(authorization, {
+        toolName,
+        argsDigest,
+        attemptId: this.#binding.attemptId,
+        scope: this.#binding.scope,
+      });
+      this.#consumedPermitIds.add(authorization.permitId);
+      return authorization;
     } catch {
       throw notAuthorized();
     }
@@ -346,7 +353,15 @@ export function artifactToolErrorProjection(error: unknown): ArtifactToolErrorPr
 
 function decodeArguments<T extends TSchema>(schema: T, value: unknown): Static<T> {
   try {
-    assertPlainJson(value, new Set(), 0);
+    const budget: JsonScanBudget = { nodes: 0, objectKeys: 0, utf8Bytes: 0 };
+    assertPlainJson(value, new Set(), 0, budget);
+    const encoded = JSON.stringify(value);
+    if (
+      typeof encoded !== "string" ||
+      new TextEncoder().encode(encoded).byteLength > MAX_ARGUMENT_UTF8_BYTES
+    ) {
+      throw invalidArguments();
+    }
     if (!Value.Check(schema, value)) throw invalidArguments();
     return Object.freeze(structuredClone(value)) as Static<T>;
   } catch (error) {
@@ -355,11 +370,35 @@ function decodeArguments<T extends TSchema>(schema: T, value: unknown): Static<T
   }
 }
 
-function assertPlainJson(value: unknown, seen: Set<object>, depth: number): void {
+interface JsonScanBudget {
+  nodes: number;
+  objectKeys: number;
+  utf8Bytes: number;
+}
+
+const MAX_ARGUMENT_NODES = 2_048;
+const MAX_ARGUMENT_OBJECT_KEYS = 1_024;
+const MAX_ARGUMENT_ARRAY_LENGTH = 256;
+const MAX_ARGUMENT_UTF8_BYTES = 64 * 1_024;
+
+function assertPlainJson(
+  value: unknown,
+  seen: Set<object>,
+  depth: number,
+  budget: JsonScanBudget,
+): void {
   if (depth > 12) throw invalidArguments();
-  if (value === null || typeof value === "string" || typeof value === "boolean") return;
+  budget.nodes += 1;
+  if (budget.nodes > MAX_ARGUMENT_NODES) throw invalidArguments();
+  if (value === null || typeof value === "boolean") return;
+  if (typeof value === "string") {
+    budget.utf8Bytes += new TextEncoder().encode(value).byteLength;
+    if (budget.utf8Bytes > MAX_ARGUMENT_UTF8_BYTES) throw invalidArguments();
+    return;
+  }
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw invalidArguments();
+    budget.utf8Bytes += String(value).length;
     return;
   }
   if (typeof value !== "object" || seen.has(value)) throw invalidArguments();
@@ -368,9 +407,36 @@ function assertPlainJson(value: unknown, seen: Set<object>, depth: number): void
     throw invalidArguments();
   }
   seen.add(value);
-  for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(value))) {
-    if (descriptor.get || descriptor.set) throw invalidArguments();
-    assertPlainJson(descriptor.value, seen, depth + 1);
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const ownKeys = Reflect.ownKeys(value);
+  if (Array.isArray(value)) {
+    if (value.length > MAX_ARGUMENT_ARRAY_LENGTH) throw invalidArguments();
+    budget.objectKeys += value.length;
+    if (budget.objectKeys > MAX_ARGUMENT_OBJECT_KEYS) throw invalidArguments();
+    if (ownKeys.length !== value.length + 1 || !ownKeys.includes("length")) {
+      throw invalidArguments();
+    }
+    for (let index = 0; index < value.length; index += 1) {
+      const key = String(index);
+      const descriptor = descriptors[key];
+      if (!descriptor?.enumerable || descriptor.get || descriptor.set) throw invalidArguments();
+      assertPlainJson(descriptor.value, seen, depth + 1, budget);
+    }
+  } else {
+    for (const key of ownKeys) {
+      if (typeof key === "symbol") throw invalidArguments();
+      const descriptor = descriptors[key];
+      if (!descriptor?.enumerable || descriptor.get || descriptor.set) throw invalidArguments();
+      budget.objectKeys += 1;
+      budget.utf8Bytes += new TextEncoder().encode(key).byteLength;
+      if (
+        budget.objectKeys > MAX_ARGUMENT_OBJECT_KEYS ||
+        budget.utf8Bytes > MAX_ARGUMENT_UTF8_BYTES
+      ) {
+        throw invalidArguments();
+      }
+      assertPlainJson(descriptor.value, seen, depth + 1, budget);
+    }
   }
   seen.delete(value);
 }
@@ -443,46 +509,14 @@ function hasUnpairedSurrogate(value: string): boolean {
   return false;
 }
 
-function matchesTrustedContext(
-  consumed: ConsumedExternalEffectAuthorization,
-  trusted: TrustedArtifactExecutionContext,
-): boolean {
-  const permit = consumed.permit;
-  return (
-    permit.effect === "tool_execution" &&
-    sameScope(permit.scope, trusted.scope) &&
-    permit.runClaimToken === trusted.runClaimToken &&
-    permit.runClaimEpoch === trusted.runClaimEpoch &&
-    permit.workspaceRootRunId === trusted.workspaceRootRunId &&
-    permit.workspaceLeaseEpoch === trusted.workspaceLeaseEpoch
-  );
-}
-
-function freezeTrustedContext(
-  context: TrustedArtifactExecutionContext,
-): TrustedArtifactExecutionContext {
-  if (
-    !validOpaqueId(context.runClaimToken) ||
-    !Number.isSafeInteger(context.runClaimEpoch) ||
-    context.runClaimEpoch < 0 ||
-    !Number.isSafeInteger(context.workspaceLeaseEpoch) ||
-    context.workspaceLeaseEpoch < 0 ||
-    context.workspaceRootRunId !== context.scope.rootRunId
-  ) {
-    throw notAuthorized();
-  }
-  return Object.freeze({ ...context, scope: Object.freeze({ ...context.scope }) });
-}
-
-function sameScope(left: ExecutionScope, right: ExecutionScope): boolean {
-  return (
-    left.tenantId === right.tenantId &&
-    left.threadId === right.threadId &&
-    left.runId === right.runId &&
-    left.rootRunId === right.rootRunId &&
-    left.workspaceId === right.workspaceId &&
-    left.baseRevisionId === right.baseRevisionId
-  );
+function freezeTrustedBinding(
+  binding: TrustedArtifactSessionBinding,
+): TrustedArtifactSessionBinding {
+  if (!validOpaqueId(binding.attemptId)) throw notAuthorized();
+  return Object.freeze({
+    attemptId: binding.attemptId,
+    scope: Object.freeze({ ...binding.scope }),
+  });
 }
 
 function validOpaqueId(value: string): boolean {

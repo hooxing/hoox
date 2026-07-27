@@ -1,4 +1,8 @@
-import { ArtifactDeliveryError, type PublishArtifactCommand } from "@cube-runtime/artifact";
+import {
+  ArtifactDeliveryError,
+  createArtifactExecutionAuthorizationAuthority,
+  type PublishArtifactCommand,
+} from "@cube-runtime/artifact";
 import {
   artifactId,
   isoTimestamp,
@@ -17,13 +21,13 @@ import type {
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import { describe, expect, it } from "vitest";
 import {
+  type ArtifactPublicationResourcePort,
   ArtifactToolError,
-  artifactToolErrorProjection,
   ArtifactToolRouter,
   ArtifactToolRouterFactory,
-  type ArtifactPublicationResourcePort,
   type ArtifactToolServicePort,
-  type TrustedArtifactExecutionContext,
+  artifactToolErrorProjection,
+  type TrustedArtifactSessionBinding,
 } from "./artifact-tools.js";
 
 const scope: ExecutionScope = Object.freeze({
@@ -33,12 +37,9 @@ const scope: ExecutionScope = Object.freeze({
   rootRunId: runId("run_tool"),
   workspaceId: workspaceId("workspace_tool"),
 });
-const context: TrustedArtifactExecutionContext = Object.freeze({
+const binding: TrustedArtifactSessionBinding = Object.freeze({
   scope,
-  runClaimToken: "claim-tool-1",
-  runClaimEpoch: 3,
-  workspaceRootRunId: scope.rootRunId,
-  workspaceLeaseEpoch: 5,
+  attemptId: "attempt-tool-1",
 });
 const versionOne = resourceVersionId("version_tool_one");
 
@@ -96,10 +97,10 @@ function consumed(
     permit: {
       permitId: `permit-${call.callId}`,
       scope,
-      runClaimToken: context.runClaimToken,
-      runClaimEpoch: context.runClaimEpoch,
-      workspaceRootRunId: context.workspaceRootRunId,
-      workspaceLeaseEpoch: context.workspaceLeaseEpoch,
+      runClaimToken: "claim-tool-1",
+      runClaimEpoch: 3,
+      workspaceRootRunId: scope.rootRunId,
+      workspaceLeaseEpoch: 5,
       attemptVersion: 9,
       effect: "tool_execution",
       callId: call.callId,
@@ -117,19 +118,24 @@ function consumed(
 
 function harness(
   authorization: (call: ExternalEffectCall) => ConsumedExternalEffectAuthorization = consumed,
+  authorizationAttemptId = binding.attemptId,
 ) {
   const artifacts = new FakeArtifactService();
   const resources = new FakeResources();
   const calls: ExternalEffectCall[] = [];
+  const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 100 });
   const router = new ArtifactToolRouter({
-    context,
+    binding,
     artifacts,
     resources,
-    monotonicClock: { now: () => 100 },
+    authorizationVerifier: authority.verifier,
     authorizer: {
       authorizeToolEffect: async (call) => {
         calls.push(call);
-        return authorization(call);
+        return authority.issuer.issue({
+          consumed: authorization(call),
+          attemptId: authorizationAttemptId,
+        });
       },
     },
   });
@@ -261,10 +267,51 @@ describe("Artifact Tool Router", () => {
     }
   });
 
-  it("跨 Attempt 栅栏、同形 JSON、过期 continuation、取消和重复 permit 全部关闭", async () => {
-    const wrongAttempt = harness((call) =>
-      consumed(call, { runClaimToken: "other-attempt-token" }),
+  it("参数预扫描限制节点、键、数组与 UTF-8 预算，并拒绝稀疏、额外属性和非枚举字段", async () => {
+    const wideUnknown = Object.fromEntries(
+      Array.from({ length: 1_025 }, (_, index) => [`unknown_${index}`, index]),
     );
+    const sparseDeclarations = new Array(2);
+    sparseDeclarations[0] = declareArgs.declarations[0];
+    const declarationsWithExtra = [...declareArgs.declarations] as Array<unknown> & {
+      extra?: string;
+    };
+    declarationsWithExtra.extra = "not-json-array";
+    const nonEnumerable = { ...publishArgs };
+    Object.defineProperty(nonEnumerable, "hidden", {
+      enumerable: false,
+      value: "must-be-rejected",
+    });
+    const symbolKey = { ...publishArgs } as Record<PropertyKey, unknown>;
+    symbolKey[Symbol("secret")] = "must-be-rejected";
+    const cases: unknown[] = [
+      { ...publishArgs, ...wideUnknown },
+      { ...publishArgs, unknownHuge: "😀".repeat(20_000) },
+      {
+        ...declareArgs,
+        declarations: Array.from({ length: 257 }, () => declareArgs.declarations[0]),
+      },
+      { ...declareArgs, declarations: sparseDeclarations },
+      { ...declareArgs, declarations: declarationsWithExtra },
+      nonEnumerable,
+      symbolKey,
+    ];
+
+    for (const [index, arguments_] of cases.entries()) {
+      const { router, calls } = harness();
+      const operation =
+        index >= 2 && index <= 4
+          ? router.declareDeliverables.bind(router)
+          : router.publishArtifact.bind(router);
+      await expect(
+        operation({ callId: `call-budget-${index}`, arguments: arguments_ }),
+      ).rejects.toMatchObject({ code: "ARTIFACT_TOOL_INVALID_ARGUMENT" });
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it("跨 Attempt 栅栏、同形 JSON、过期 continuation、取消和重复 permit 全部关闭", async () => {
+    const wrongAttempt = harness(consumed, "attempt-tool-other");
     await expect(
       wrongAttempt.router.declareDeliverables({
         callId: "call-cross-attempt",

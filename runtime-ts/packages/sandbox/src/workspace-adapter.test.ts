@@ -1,4 +1,8 @@
 import { Buffer } from "node:buffer";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { WorkspaceDependencyError } from "@cube-runtime/workspace";
 import { describe, expect, it } from "vitest";
 import type { CubeSdkSandbox } from "./cube-gateway.js";
@@ -47,6 +51,23 @@ describe("CubeSandbox Workspace 适配器契约", () => {
     expect(fake.operations.filter((value) => value === "scan")).toHaveLength(1);
   });
 
+  it("Session 与 Snapshot 只返回端口规定字段并可经严格 Journal JSON 往返", async () => {
+    const fake = fakeWorkspaceSandbox({ "a.txt": "hello" });
+    const adapter = await open(fake);
+    const session = await adapter.currentSession();
+    const snapshot = await adapter.captureSnapshot({
+      operationKey: "exact-identity",
+      scope: SCOPE,
+    });
+    expect(Object.keys(session).sort()).toEqual(["generation", "sessionId"]);
+    expect(Object.keys(snapshot).sort()).toEqual(["generation", "sessionId", "snapshotToken"]);
+    expect(JSON.parse(JSON.stringify({ sandbox: session, snapshot }))).toEqual({
+      sandbox: session,
+      snapshot,
+    });
+    expect(JSON.stringify({ sandbox: session, snapshot })).not.toContain("tenantId");
+  });
+
   it("并发相同 operationKey 只执行一次扫描并共享 in-flight 结果", async () => {
     const fake = fakeWorkspaceSandbox({ "a.txt": "hello" });
     let release!: () => void;
@@ -63,6 +84,35 @@ describe("CubeSandbox Workspace 适配器契约", () => {
     expect(fake.operations.filter((value) => value === "scan")).toHaveLength(1);
   });
 
+  it("release 与同 key capture 原子互斥，释放完成后才允许确定性重建", async () => {
+    const fake = fakeWorkspaceSandbox({ "a.txt": "hello" });
+    let releaseScan!: () => void;
+    let markScanStarted!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      releaseScan = resolve;
+    });
+    const scanStarted = new Promise<void>((resolve) => {
+      markScanStarted = resolve;
+    });
+    fake.beforeScan = () => {
+      markScanStarted();
+      return blocked;
+    };
+    const adapter = await open(fake);
+    const capturing = adapter.captureSnapshot({ operationKey: "release-race", scope: SCOPE });
+    await scanStarted;
+    const releasing = adapter.releaseSnapshots({ sandbox: IDENTITY, operationKey: "release-race" });
+    await expect(
+      adapter.captureSnapshot({ operationKey: "release-race", scope: SCOPE }),
+    ).rejects.toMatchObject({ result: "known", dependencyCode: "SNAPSHOT_RELEASING" });
+    releaseScan();
+    const first = await capturing;
+    await releasing;
+    fake.beforeScan = undefined;
+    const rebuilt = await adapter.captureSnapshot({ operationKey: "release-race", scope: SCOPE });
+    expect(rebuilt.snapshotToken).toBe(first.snapshotToken);
+  });
+
   it("operationKey 与可信 scope 原子绑定并拒绝跨 scope 复用", async () => {
     const fake = fakeWorkspaceSandbox({});
     const adapter = await open(fake);
@@ -75,7 +125,7 @@ describe("CubeSandbox Workspace 适配器契约", () => {
     expect(fake.operations.filter((value) => value === "scan")).toHaveLength(0);
   });
 
-  it("祖先 symlink 被 dirfd/O_NOFOLLOW 协议拒绝且不读取外部正文", async () => {
+  it("helper 拒绝响应时适配器不会回退 SDK 路径读取", async () => {
     const fake = fakeWorkspaceSandbox({});
     fake.unsafeAncestors.add("link/secret.txt");
     const adapter = await open(fake);
@@ -83,10 +133,6 @@ describe("CubeSandbox Workspace 适配器契约", () => {
       result: "known",
       dependencyCode: "FILESYSTEM_STAT_FAILED",
     });
-    expect(fake.lastScript).toContain("os.O_NOFOLLOW");
-    expect(fake.lastScript).toContain("RESOLVE_BENEATH");
-    expect(fake.lastScript).toContain("SYS_OPENAT2");
-    expect(fake.lastScript).toContain("dir_fd=");
     expect(fake.readPaths).toEqual([]);
   });
 
@@ -139,7 +185,7 @@ describe("CubeSandbox Workspace 适配器契约", () => {
       dependencyCode: "SNAPSHOT_NOT_FOUND",
     });
     const second = await adapter.captureSnapshot({ operationKey: "release", scope: SCOPE });
-    expect(second.snapshotToken).not.toBe(first.snapshotToken);
+    expect(second.snapshotToken).toBe(first.snapshotToken);
     expect(fake.operations.filter((value) => value === "scan")).toHaveLength(2);
   });
 
@@ -171,7 +217,7 @@ describe("CubeSandbox Workspace 适配器契约", () => {
       result: "known",
       dependencyCode: "PATH_LIMIT_EXCEEDED",
     });
-    expect(fake.operations).toEqual(["stat"]);
+    expect(fake.operations).toEqual(["probe", "stat"]);
   });
 
   it("capability 不响应 Abort 时仍受硬超时约束", async () => {
@@ -208,6 +254,61 @@ describe("CubeSandbox Workspace 适配器契约", () => {
       }),
     );
   });
+
+  it.runIf(process.platform === "linux")(
+    "Linux 真 helper 以 openat2 拒绝祖先 symlink，并在可挂载时拒绝跨文件系统",
+    async () => {
+      const fake = fakeWorkspaceSandbox({});
+      await open(fake);
+      const root = mkdtempSync(join(tmpdir(), "cube-workspace-helper-"));
+      const outside = mkdtempSync(join(tmpdir(), "cube-workspace-outside-"));
+      try {
+        writeFileSync(join(root, "inside.txt"), "inside");
+        writeFileSync(join(outside, "secret.txt"), "secret");
+        symlinkSync(outside, join(root, "escape"));
+        mkdirSync(join(root, "tree", "child"), { recursive: true });
+        writeFileSync(join(root, "tree", "child", "delete.txt"), "delete");
+        const script = fake.lastScript.replace(
+          'ROOT = "/workspace"',
+          `ROOT = ${JSON.stringify(root)}`,
+        );
+        const run = (operation: string, relativePath = "") =>
+          spawnSync("bash", [], {
+            input: script,
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              CUBE_WS_OP: operation,
+              CUBE_WS_REL_B64: Buffer.from(relativePath).toString("base64"),
+            },
+          });
+        expect(run("probe").status).toBe(0);
+        expect(run("stat", "inside.txt").status).toBe(0);
+        const escaped = run("stat", "escape/secret.txt");
+        expect(escaped.status).not.toBe(0);
+        expect(escaped.stdout).not.toContain("secret");
+
+        const mountpoint = join(root, "tree", "mounted");
+        mkdirSync(mountpoint);
+        const mounted = spawnSync("mount", ["--bind", outside, mountpoint]);
+        if (mounted.status === 0) {
+          try {
+            expect(run("stat", "tree/mounted/secret.txt").status).not.toBe(0);
+            expect(run("remove_tree", "tree").status).not.toBe(0);
+            expect(readFileSync(join(outside, "secret.txt"), "utf8")).toBe("secret");
+          } finally {
+            spawnSync("umount", [mountpoint]);
+          }
+        }
+        expect(run("remove_tree", "tree").status).toBe(0);
+        expect(readFileSync(join(outside, "secret.txt"), "utf8")).toBe("secret");
+        expect(readFileSync(join(root, "inside.txt"), "utf8")).toBe("inside");
+      } finally {
+        rmSync(root, { force: true, recursive: true });
+        rmSync(outside, { force: true, recursive: true });
+      }
+    },
+  );
 });
 
 function fixedCapability(binding: TrustedSandboxWorkspaceBinding) {

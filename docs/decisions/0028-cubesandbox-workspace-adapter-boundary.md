@@ -37,15 +37,17 @@ Gateway 只接受可重验且支持 Abort 的 capability；适配器绑定首次
 采用方案 B，并固定以下约束：
 
 - 生产入口只允许 Linux Worker，且 Sandbox 模板必须提供 Python 3 与所需 POSIX dirfd API；缺失时启动失败关闭；
+- 启动 probe 必须实际执行 `openat2`，不能只检查内核版本、Python 常量或脚本文本；`ENOSYS/EINVAL/EPERM` 等任一失败均禁止创建适配器；
 - 不提供 package testing 子路径或生产构建可导入的平台旁路；测试仅临时替换 Node 的只读平台描述符后调用同一生产入口，公开类构造器保持私有；
 - `/workspace` 根和规范相对路径由适配器内部解析，命令参数只通过 Base64 环境变量传递，不拼接用户路径；
 - capability 每次读取都有硬超时与 AbortSignal；即使实现错误地忽略 Abort，适配器也不会无限等待；
 - 快照在开始 I/O 前按 operation key 原子绑定可信 scope 与共享 in-flight Promise，并保存排序条目、内容 SHA-256 和读取指纹；并发同 key 只扫描一次，不同 scope 失败；
-- 快照提供显式 release；operation 完成或终止后必须释放 token 和内容缓存，释放后的旧 token 失败关闭；
+- `SandboxWorkspacePort` 把 operation 快照释放列为正式生命周期方法；Publisher 与 Materializer 对成功、known/unknown 失败、journal completed 和异常均在 `finally` 调用。release 与同 key capture 原子互斥；释放后内容缓存失效，再次扫描只有相同内容才能得到相同的确定性 token，从而保持 journal 重入身份；
 - 文件数、单文件、总字节、路径 UTF-8、命令输出、chunk、快照数量和操作超时均要求显式正整数上限；
 - 所有调用方相对路径在任何 SDK/命令调用前执行 UTF-8 字节上限；helper 自身也限制扫描路径和输出；
 - SDK 只把随机临时正文写到 `/tmp`；helper 以 `O_NOFOLLOW` 重验普通文件、大小与 SHA-256，再在目标父 dirfd 内创建临时文件、fsync 并相对 rename。已知拒绝会清理 `/tmp` 文件；
 - 扫描、读取、建目录、删除和递归删除全部使用逐级 dirfd，不使用 SDK 的绝对路径 `list/stat/remove/rename/makeDir`，因此祖先目录的 symlink/TOCTOU 不能逃逸根目录；
+- `openat2` 固定启用 `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_XDEV`；递归删除的每一级子目录也必须经同一 openat2 包装，禁止退回普通 `os.open`；
 - 变更脚本只有完整 `OK` 确认才视为成功。明确发生在副作用前的退出码归为 known；可能部分执行、超时或确认异常归为 unknown。
 
 ## 理由
@@ -63,7 +65,7 @@ Gateway 只接受可重验且支持 Abort 的 capability；适配器绑定首次
 ### 负面影响与成本
 
 - 首版读取会把受限单文件收集到内存并以 Base64 经过命令输出，性能不适合超大文件；
-- 快照缓存在 Worker 进程内，调用方必须在 operation 终态显式 release；Worker 重启后需重新建立 operation 恢复流程；
+- 快照缓存在 Worker 进程内，由 Workspace 应用核心在 operation 终态显式 release；Worker 重启后以 operation key、可信 scope 和内容确定性 token 重新建立 journal 身份；
 - 文件系统 helper 依赖 Linux Python 3 的 `dir_fd`、`O_NOFOLLOW`、`fsync` 与相对 `os.replace`，模板升级时必须重新跑真实 Cube 冒烟；
 - `/tmp` SDK 写入仍可能被同 Sandbox 内恶意进程制造拒绝服务，但随机名、helper 的 `O_NOFOLLOW` 和 SHA-256 复验阻止其把内容或路径引向 Workspace 外；最终目标操作仍只使用可信父 dirfd。
 
@@ -78,6 +80,8 @@ Gateway 只接受可重验且支持 Abort 的 capability；适配器绑定首次
 
 - package typecheck、build 和 Workspace 适配器契约测试通过；
 - 契约覆盖固定根扫描、并发快照 in-flight 共享、跨 scope、祖先 symlink、延迟读取换代、快照释放、路径配额、capability 硬超时、tmp 清理和变更确认异常；
+- Session/Snapshot 返回对象执行 exact-key 与 JSON journal 往返测试，禁止 capability 的 scope 混入端口身份；
+- Linux 集成测试必须真正执行 helper，在真实临时目录创建普通文件和祖先 symlink；环境允许 bind mount 时还要证明 `NO_XDEV` 拒绝挂载点，不能用 Faux 或字符串包含断言代替；
 - 合并前运行全工作区 `check:clean-workspace`；
 - 在 Linux Worker 对 CubeSandbox v0.6 执行真实 materialize/publish 冒烟，覆盖普通文件、目录、symlink、原子覆盖与清理；若环境不可用，不得用 Faux 结果宣称真实冒烟通过。
 

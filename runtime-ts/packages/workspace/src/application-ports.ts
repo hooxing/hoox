@@ -132,6 +132,11 @@ export interface SandboxWorkspacePort {
     readonly operationKey: string;
     readonly scope: WorkspaceTrustedScope;
   }): Promise<SandboxWorkspaceSnapshot>;
+  /** operation 进入任一终态后释放其进程内/远端快照；同 key capture 与 release 必须原子互斥。 */
+  releaseSnapshots(input: {
+    readonly sandbox: SandboxSessionIdentity;
+    readonly operationKey: string;
+  }): Promise<void>;
   inspectRegularFile(
     sandbox: SandboxSessionIdentity,
     relativePath: string,

@@ -63,6 +63,7 @@ interface CapturedSnapshot {
 interface SnapshotOperation {
   readonly scopeDigest: string;
   readonly promise: Promise<CapturedSnapshot>;
+  releasePromise?: Promise<void>;
 }
 
 interface LiveRead {
@@ -108,6 +109,7 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
         input.options,
       );
       await adapter.currentSession();
+      await adapter.probeSecureFilesystem();
       await adapter.requireDirectory(SANDBOX_WORKSPACE_ROOT);
       return adapter;
     };
@@ -125,7 +127,7 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
 
   async currentSession(): Promise<SandboxSessionIdentity> {
     await this.assertBound("known");
-    return Object.freeze({ ...this.bound });
+    return Object.freeze({ sessionId: this.bound.sessionId, generation: this.bound.generation });
   }
 
   async captureSnapshot(input: {
@@ -138,6 +140,7 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
     if (scopeDigest !== digestScope(this.bound.scope)) throw known("WORKSPACE_SCOPE_MISMATCH");
     const existing = this.snapshotsByOperation.get(operationKey);
     if (existing !== undefined) {
+      if (existing.releasePromise !== undefined) throw known("SNAPSHOT_RELEASING");
       if (existing.scopeDigest !== scopeDigest) throw known("SNAPSHOT_OPERATION_CONFLICT");
       return (await existing.promise).identity;
     }
@@ -146,7 +149,7 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
     }
 
     const promise = this.captureSnapshotOnce(operationKey, scopeDigest);
-    this.snapshotsByOperation.set(operationKey, Object.freeze({ scopeDigest, promise }));
+    this.snapshotsByOperation.set(operationKey, { scopeDigest, promise });
     try {
       return (await promise).identity;
     } catch (error) {
@@ -159,14 +162,33 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
 
   /** 调用方在 operation 完成或终止后释放进程内快照，避免 warm Session 长期占用内存。 */
   async releaseSnapshot(snapshot: SandboxWorkspaceSnapshot): Promise<void> {
-    await this.assertCall(snapshot, "known");
+    if (!sameSession(snapshot, this.bound)) throw known("SANDBOX_IDENTITY_MISMATCH");
     const captured = this.snapshotsByToken.get(snapshot.snapshotToken);
     if (captured === undefined) return;
-    this.snapshotsByToken.delete(snapshot.snapshotToken);
-    const operation = this.snapshotsByOperation.get(captured.operationKey);
-    if (operation !== undefined && (await operation.promise) === captured) {
-      this.snapshotsByOperation.delete(captured.operationKey);
+    await this.releaseSnapshots({ sandbox: snapshot, operationKey: captured.operationKey });
+  }
+
+  async releaseSnapshots(input: {
+    readonly sandbox: SandboxSessionIdentity;
+    readonly operationKey: string;
+  }): Promise<void> {
+    if (!sameSession(input.sandbox, this.bound)) throw known("SANDBOX_IDENTITY_MISMATCH");
+    const operationKey = safeOperationKey(input.operationKey);
+    const operation = this.snapshotsByOperation.get(operationKey);
+    if (operation === undefined) return;
+    if (operation.releasePromise === undefined) {
+      operation.releasePromise = (async () => {
+        try {
+          const captured = await operation.promise;
+          this.snapshotsByToken.delete(captured.identity.snapshotToken);
+        } finally {
+          if (this.snapshotsByOperation.get(operationKey) === operation) {
+            this.snapshotsByOperation.delete(operationKey);
+          }
+        }
+      })();
     }
+    await operation.releasePromise;
   }
 
   private async captureSnapshotOnce(
@@ -191,7 +213,11 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
     await this.assertBound("known");
 
     const token = snapshotDigest(this.bound, operationKey, scopeDigest, entries, files);
-    const identity = Object.freeze({ ...this.bound, snapshotToken: token });
+    const identity = Object.freeze({
+      sessionId: this.bound.sessionId,
+      generation: this.bound.generation,
+      snapshotToken: token,
+    });
     const captured: CapturedSnapshot = Object.freeze({
       identity,
       operationKey,
@@ -480,6 +506,19 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
     const parsed: unknown = JSON.parse(output.stdout);
     if (!plainRecord(parsed)) throw known("FILESYSTEM_PROTOCOL");
     return parsed;
+  }
+
+  private async probeSecureFilesystem(): Promise<void> {
+    const output = await this.command(
+      SECURE_FS_SCRIPT,
+      { CUBE_WS_OP: "probe" },
+      "probe_openat2",
+      undefined,
+      64,
+    );
+    if (output.exitCode !== 0 || output.stdout !== "OK\n" || output.stderr !== "") {
+      throw known("OPENAT2_UNAVAILABLE");
+    }
   }
 
   private async cleanupExternalTemporary(path: string, signal?: AbortSignal): Promise<void> {
@@ -886,8 +925,6 @@ function snapshotDigest(
       `${entry.relativePath}\0${entry.kind}\0${entry.size ?? ""}\0${file?.sha256 ?? ""}\0${file?.fingerprint ?? ""}\0`,
     );
   }
-  // 随机盐防止 token 反向泄露文件清单摘要，也把本次扫描实例与未来同内容扫描区分开。
-  hash.update(randomUUID());
   return hash.digest("hex");
 }
 
@@ -1013,7 +1050,7 @@ def emit_ok():
     sys.stdout.write("OK\n")
 
 def remove_tree_at(parent_fd, name):
-    child = os.open(name, DIR_FLAGS, dir_fd=parent_fd)
+    child = open_beneath(parent_fd, name, DIR_FLAGS)
     try:
         with os.scandir(child) as entries:
             for entry in entries:
@@ -1029,7 +1066,12 @@ def remove_tree_at(parent_fd, name):
 try:
     root = open_root()
     try:
-        if OP == "stat":
+        if OP == "probe":
+            probe = open_beneath(root, ".", DIR_FLAGS)
+            os.close(probe)
+            emit_ok()
+
+        elif OP == "stat":
             rel = decode_env("CUBE_WS_REL_B64", allow_empty=True)
             try:
                 value = stat_at(root, segments(rel))

@@ -91,202 +91,206 @@ export class WorkspaceMaterializer {
         ? undefined
         : parseWorkspaceManifest(input.previous, scope.tenantId, this.policy.historicalManifest);
     const sandbox = await this.currentSandbox();
-    const identity = materializeIdentity({
-      operationKey,
-      scope,
-      sandbox,
-      target,
-      ...(previous === undefined ? {} : { previous }),
-    });
-    const begun = await beginOperation(this.options.journal, identity);
-    if (begun.status === "completed") {
-      return parseMaterializedResult(begun.result, identity, target, this.policy);
-    }
-
-    let phase = "preflight";
     try {
-      stopPoint(input.signal);
-      const plan = planWorkspaceMaterialization({
-        root: SANDBOX_WORKSPACE_ROOT,
+      const identity = materializeIdentity({
+        operationKey,
+        scope,
+        sandbox,
         target,
         ...(previous === undefined ? {} : { previous }),
       });
-      const receipts = await this.authorizeAll(scope, target, identity, input.signal);
-      const validExisting = new Set<string>();
-      const driftDirectories = new Set<string>();
-      const driftNonDirectories = new Set<string>();
-      const filesByPath = new Map(target.entries.map((entry) => [entry.path, entry]));
+      const begun = await beginOperation(this.options.journal, identity);
+      if (begun.status === "completed") {
+        return parseMaterializedResult(begun.result, identity, target, this.policy);
+      }
 
-      for (const plannedPhase of plan.phases) {
-        phase = plannedPhase.kind;
+      let phase = "preflight";
+      try {
         stopPoint(input.signal);
-        if (plannedPhase.kind === "verify_existing") {
-          for (const candidate of plannedPhase.candidates) {
-            stopPoint(input.signal);
-            const entry = filesByPath.get(candidate.relativePath);
-            if (entry === undefined || receipts.get(candidate.relativePath) === undefined) {
-              throw new WorkspaceApplicationError("INVALID_INPUT", "物化计划与目标清单不一致");
-            }
-            const relativePath = workspaceRelativePath(candidate.relativePath);
-            const inspected = parseInspectionResult(
-              await this.callDependency(identity, phase, () =>
-                this.options.sandbox.inspectRegularFile(
-                  sandbox,
-                  relativePath,
-                  signalControl(input.signal),
-                ),
-              ),
-            );
-            if (inspected.status === "unsafe") {
-              (inspected.kind === "directory" ? driftDirectories : driftNonDirectories).add(
-                relativePath,
-              );
-              continue;
-            }
-            if (inspected.status !== "regular") continue;
-            try {
-              await digestStream({
-                source: inspected.body,
-                policy: this.policy,
-                ...(input.signal === undefined ? {} : { signal: input.signal }),
-                expected: entry.content,
-              });
-              validExisting.add(entry.path);
-            } catch (error) {
-              if (
-                error instanceof WorkspaceApplicationError &&
-                (error.code === "INTEGRITY_MISMATCH" || error.code === "LIMIT_EXCEEDED")
-              ) {
-                continue;
+        const plan = planWorkspaceMaterialization({
+          root: SANDBOX_WORKSPACE_ROOT,
+          target,
+          ...(previous === undefined ? {} : { previous }),
+        });
+        const receipts = await this.authorizeAll(scope, target, identity, input.signal);
+        const validExisting = new Set<string>();
+        const driftDirectories = new Set<string>();
+        const driftNonDirectories = new Set<string>();
+        const filesByPath = new Map(target.entries.map((entry) => [entry.path, entry]));
+
+        for (const plannedPhase of plan.phases) {
+          phase = plannedPhase.kind;
+          stopPoint(input.signal);
+          if (plannedPhase.kind === "verify_existing") {
+            for (const candidate of plannedPhase.candidates) {
+              stopPoint(input.signal);
+              const entry = filesByPath.get(candidate.relativePath);
+              if (entry === undefined || receipts.get(candidate.relativePath) === undefined) {
+                throw new WorkspaceApplicationError("INVALID_INPUT", "物化计划与目标清单不一致");
               }
-              throw error;
-            }
-          }
-        } else if (plannedPhase.kind === "remove_files") {
-          for (const item of plannedPhase.paths) {
-            stopPoint(input.signal);
-            const relativePath = workspaceRelativePath(item.relativePath);
-            const actual = parseInspectionResult(
-              await this.callDependency(identity, phase, () =>
-                this.options.sandbox.inspectRegularFile(
-                  sandbox,
-                  relativePath,
-                  signalControl(input.signal),
-                ),
-              ),
-            );
-            stopPoint(input.signal);
-            await this.callDependency(identity, phase, () =>
-              actual.status === "unsafe" && actual.kind === "directory"
-                ? this.options.sandbox.removeUnexpectedDirectory(
-                    sandbox,
-                    relativePath,
-                    signalControl(input.signal),
-                  )
-                : this.options.sandbox.removeFile(
+              const relativePath = workspaceRelativePath(candidate.relativePath);
+              const inspected = parseInspectionResult(
+                await this.callDependency(identity, phase, () =>
+                  this.options.sandbox.inspectRegularFile(
                     sandbox,
                     relativePath,
                     signalControl(input.signal),
                   ),
-            );
-          }
-          for (const relativePath of [...driftNonDirectories].sort()) {
-            stopPoint(input.signal);
-            await this.callDependency(identity, phase, () =>
-              this.options.sandbox.removeFile(sandbox, relativePath, signalControl(input.signal)),
-            );
-          }
-          for (const relativePath of [...driftDirectories].sort()) {
-            stopPoint(input.signal);
-            await this.callDependency(identity, phase, () =>
-              this.options.sandbox.removeUnexpectedDirectory(
-                sandbox,
-                relativePath,
-                signalControl(input.signal),
-              ),
-            );
-          }
-        } else if (plannedPhase.kind === "remove_directories") {
-          for (const item of plannedPhase.paths) {
-            stopPoint(input.signal);
-            await this.callDependency(identity, phase, () =>
-              this.options.sandbox.removeDirectory(
-                sandbox,
-                workspaceRelativePath(item.relativePath),
-                signalControl(input.signal),
-              ),
-            );
-          }
-        } else if (plannedPhase.kind === "ensure_directories") {
-          for (const item of plannedPhase.paths) {
-            stopPoint(input.signal);
-            await this.callDependency(identity, phase, () =>
-              this.options.sandbox.ensureDirectory(
-                sandbox,
-                workspaceRelativePath(item.relativePath),
-                signalControl(input.signal),
-              ),
-            );
-          }
-        } else {
-          for (const file of plannedPhase.files) {
-            stopPoint(input.signal);
-            if (validExisting.has(file.relativePath)) continue;
-            const receipt = receipts.get(file.relativePath);
-            if (receipt === undefined) {
-              throw new WorkspaceApplicationError("ACCESS_DENIED", "Workspace Blob 未获得授权");
+                ),
+              );
+              if (inspected.status === "unsafe") {
+                (inspected.kind === "directory" ? driftDirectories : driftNonDirectories).add(
+                  relativePath,
+                );
+                continue;
+              }
+              if (inspected.status !== "regular") continue;
+              try {
+                await digestStream({
+                  source: inspected.body,
+                  policy: this.policy,
+                  ...(input.signal === undefined ? {} : { signal: input.signal }),
+                  expected: entry.content,
+                });
+                validExisting.add(entry.path);
+              } catch (error) {
+                if (
+                  error instanceof WorkspaceApplicationError &&
+                  (error.code === "INTEGRITY_MISMATCH" || error.code === "LIMIT_EXCEEDED")
+                ) {
+                  continue;
+                }
+                throw error;
+              }
             }
-            const verified = verifyingStream({
-              source: parseExternalStream(
-                this.options.stableBlobs.read(receipt, signalControl(input.signal)),
-                "Workspace stable Blob 流",
-              ),
-              policy: this.policy,
-              ...(input.signal === undefined ? {} : { signal: input.signal }),
-              expected: file.content,
-            });
-            await this.callDependency(identity, phase, () =>
-              this.options.sandbox.writeFileAtomically({
-                sandbox,
-                relativePath: workspaceRelativePath(file.relativePath),
-                operationKey: materializeChildKey(identity, file),
-                body: verified.body,
-                ...(input.signal === undefined ? {} : { signal: input.signal }),
-              }),
-            );
-            if (verified.status() === "pending") {
-              throw new WorkspaceApplicationError(
-                "DEPENDENCY_FAILED",
-                "Sandbox 原子写端口未消费完整文件流",
+          } else if (plannedPhase.kind === "remove_files") {
+            for (const item of plannedPhase.paths) {
+              stopPoint(input.signal);
+              const relativePath = workspaceRelativePath(item.relativePath);
+              const actual = parseInspectionResult(
+                await this.callDependency(identity, phase, () =>
+                  this.options.sandbox.inspectRegularFile(
+                    sandbox,
+                    relativePath,
+                    signalControl(input.signal),
+                  ),
+                ),
+              );
+              stopPoint(input.signal);
+              await this.callDependency(identity, phase, () =>
+                actual.status === "unsafe" && actual.kind === "directory"
+                  ? this.options.sandbox.removeUnexpectedDirectory(
+                      sandbox,
+                      relativePath,
+                      signalControl(input.signal),
+                    )
+                  : this.options.sandbox.removeFile(
+                      sandbox,
+                      relativePath,
+                      signalControl(input.signal),
+                    ),
               );
             }
-            await verified.result;
+            for (const relativePath of [...driftNonDirectories].sort()) {
+              stopPoint(input.signal);
+              await this.callDependency(identity, phase, () =>
+                this.options.sandbox.removeFile(sandbox, relativePath, signalControl(input.signal)),
+              );
+            }
+            for (const relativePath of [...driftDirectories].sort()) {
+              stopPoint(input.signal);
+              await this.callDependency(identity, phase, () =>
+                this.options.sandbox.removeUnexpectedDirectory(
+                  sandbox,
+                  relativePath,
+                  signalControl(input.signal),
+                ),
+              );
+            }
+          } else if (plannedPhase.kind === "remove_directories") {
+            for (const item of plannedPhase.paths) {
+              stopPoint(input.signal);
+              await this.callDependency(identity, phase, () =>
+                this.options.sandbox.removeDirectory(
+                  sandbox,
+                  workspaceRelativePath(item.relativePath),
+                  signalControl(input.signal),
+                ),
+              );
+            }
+          } else if (plannedPhase.kind === "ensure_directories") {
+            for (const item of plannedPhase.paths) {
+              stopPoint(input.signal);
+              await this.callDependency(identity, phase, () =>
+                this.options.sandbox.ensureDirectory(
+                  sandbox,
+                  workspaceRelativePath(item.relativePath),
+                  signalControl(input.signal),
+                ),
+              );
+            }
+          } else {
+            for (const file of plannedPhase.files) {
+              stopPoint(input.signal);
+              if (validExisting.has(file.relativePath)) continue;
+              const receipt = receipts.get(file.relativePath);
+              if (receipt === undefined) {
+                throw new WorkspaceApplicationError("ACCESS_DENIED", "Workspace Blob 未获得授权");
+              }
+              const verified = verifyingStream({
+                source: parseExternalStream(
+                  this.options.stableBlobs.read(receipt, signalControl(input.signal)),
+                  "Workspace stable Blob 流",
+                ),
+                policy: this.policy,
+                ...(input.signal === undefined ? {} : { signal: input.signal }),
+                expected: file.content,
+              });
+              await this.callDependency(identity, phase, () =>
+                this.options.sandbox.writeFileAtomically({
+                  sandbox,
+                  relativePath: workspaceRelativePath(file.relativePath),
+                  operationKey: materializeChildKey(identity, file),
+                  body: verified.body,
+                  ...(input.signal === undefined ? {} : { signal: input.signal }),
+                }),
+              );
+              if (verified.status() === "pending") {
+                throw new WorkspaceApplicationError(
+                  "DEPENDENCY_FAILED",
+                  "Sandbox 原子写端口未消费完整文件流",
+                );
+              }
+              await verified.result;
+            }
           }
         }
-      }
 
-      stopPoint(input.signal);
-      const result: MaterializedWorkspace = Object.freeze({
-        kind: "materialized",
-        operationKey,
-        scope,
-        sandbox,
-        targetManifestDigest: target.digest,
-      });
-      phase = "complete";
-      await this.callDependency(identity, phase, () =>
-        this.options.journal.complete(identity, result),
-      );
-      return result;
-    } catch (error) {
-      const mapped =
-        error instanceof WorkspaceApplicationError
-          ? error
-          : new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace 物化失败");
-      if (mapped.code !== "RESULT_UNKNOWN" && !isWorkspaceJournalError(mapped)) {
-        await recordKnownFailure(this.options.journal, identity, phase, mapped);
+        stopPoint(input.signal);
+        const result: MaterializedWorkspace = Object.freeze({
+          kind: "materialized",
+          operationKey,
+          scope,
+          sandbox,
+          targetManifestDigest: target.digest,
+        });
+        phase = "complete";
+        await this.callDependency(identity, phase, () =>
+          this.options.journal.complete(identity, result),
+        );
+        return result;
+      } catch (error) {
+        const mapped =
+          error instanceof WorkspaceApplicationError
+            ? error
+            : new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace 物化失败");
+        if (mapped.code !== "RESULT_UNKNOWN" && !isWorkspaceJournalError(mapped)) {
+          await recordKnownFailure(this.options.journal, identity, phase, mapped);
+        }
+        throw mapped;
       }
-      throw mapped;
+    } finally {
+      await this.options.sandbox.releaseSnapshots({ sandbox, operationKey });
     }
   }
 

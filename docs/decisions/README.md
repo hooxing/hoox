@@ -33,6 +33,7 @@
 | [ADR-0025](0025-clean-workspace-topological-gate.md) | 全工作区清理与拓扑构建门禁 | 已接受 | 2026-07-27 |
 | [ADR-0026](0026-development-api-persistent-assembly.md) | 开发 API 使用真实 PostgreSQL 的最小常驻装配 | 已接受 | 2026-07-28 |
 | [ADR-0027](0027-artifact-postgresql-persistence.md) | Artifact PostgreSQL 不可变发布与下载双重授权 | 已接受 | 2026-07-28 |
+| [ADR-0030](0030-runtime-rollout-checkpoint-fact-source.md) | Runtime Rollout 与 Checkpoint 事实源 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录
 

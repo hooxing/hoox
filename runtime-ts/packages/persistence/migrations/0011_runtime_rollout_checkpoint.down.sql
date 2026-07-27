@@ -1,0 +1,6 @@
+DROP TABLE runtime_rollout_checkpoint_commands;
+DROP TABLE runtime_rollout_checkpoints;
+DROP TABLE runtime_rollout_append_commands;
+DROP TABLE runtime_rollout_entries;
+DROP TABLE runtime_rollout_streams;
+ALTER TABLE blob_references DROP CONSTRAINT blob_references_rollout_target_unique;

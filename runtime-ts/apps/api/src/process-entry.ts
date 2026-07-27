@@ -12,6 +12,7 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
+import { developmentApiAssembler } from "./development-assembly.js";
 
 const optionalEnvironments = [] as const;
 const apiEnvironmentSchema = Object.freeze({
@@ -36,6 +37,12 @@ const apiEnvironmentSchema = Object.freeze({
     maxLength: 128,
   }),
   PROCESS_SHUTDOWN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1, maximum: 600_000 }),
+  API_LISTEN_HOST: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 253 }),
+  API_LISTEN_PORT: integerEnvironmentField({
+    requiredIn: optionalEnvironments,
+    minimum: 1,
+    maximum: 65_535,
+  }),
 });
 
 export const apiProcessEnvironmentKeys = Object.freeze(Object.keys(apiEnvironmentSchema));
@@ -53,6 +60,8 @@ export interface ApiProcessConfiguration {
   readonly cursorSigningKeys: string;
   readonly developmentPrincipals?: readonly [ApiDevelopmentPrincipal, ApiDevelopmentPrincipal];
   readonly shutdownTimeoutMilliseconds: number;
+  readonly listenHost: string;
+  readonly listenPort: number;
 }
 
 export function selectApiProcessEnvironment(
@@ -90,6 +99,8 @@ export function parseApiProcessEnvironment(
       parsed,
       "PROCESS_SHUTDOWN_TIMEOUT_MS",
     ),
+    listenHost: parsed.values.API_LISTEN_HOST ?? "127.0.0.1",
+    listenPort: parsed.values.API_LISTEN_PORT ?? 3001,
   });
 }
 
@@ -100,11 +111,17 @@ export async function startApiProcess(input: {
   readonly onShutdownFailure?: (error: Error) => void;
 }): Promise<RunningServiceProcess> {
   const configuration = parseApiProcessEnvironment(input.environment);
+  const assembler =
+    input.assembler ??
+    (configuration.runtimeEnvironment === "development" &&
+    configuration.developmentPrincipals !== undefined
+      ? developmentApiAssembler
+      : undefined);
   return startServiceProcess({
     serviceName: "api",
     configuration,
     shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
-    ...(input.assembler === undefined ? {} : { assembler: input.assembler }),
+    ...(assembler === undefined ? {} : { assembler }),
     ...(input.signalSource === undefined ? {} : { signalSource: input.signalSource }),
     ...(input.onShutdownFailure === undefined
       ? {}

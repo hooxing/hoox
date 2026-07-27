@@ -31,6 +31,7 @@
 | [ADR-0023](0023-resource-library-postgresql-persistence.md) | Resource Library PostgreSQL 目录与显式提升提交 | 已接受 | 2026-07-26 |
 | [ADR-0024](0024-artifact-tool-authorization-and-production-gaps.md) | Artifact 工具授权、ResourceVersion 准备与生产缺口 | 已接受 | 2026-07-26 |
 | [ADR-0025](0025-clean-workspace-topological-gate.md) | 全工作区清理与拓扑构建门禁 | 已接受 | 2026-07-27 |
+| [ADR-0027](0027-artifact-postgresql-persistence.md) | Artifact PostgreSQL 不可变发布与下载双重授权 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录
 

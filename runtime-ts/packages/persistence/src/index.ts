@@ -14,6 +14,7 @@ export type {
 } from "./pg-resource-library.js";
 export * from "./runtime.js";
 export { createPostgresPool, probePostgres } from "./postgres.js";
+export { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 export type { Pool, PoolClient, PostgresPoolOptions } from "./postgres.js";
 export {
   createS3BlobStore,

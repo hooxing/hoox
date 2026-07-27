@@ -19,6 +19,8 @@ CREATE TABLE runtime_rollout_streams (
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (tenant_id, thread_id, run_id, attempt_id, agent_thread_id),
   UNIQUE (tenant_id, attempt_id, agent_thread_id),
+  -- 首版一个 Attempt 只能存在一个 root stream；Agent Thread 维度仍保留在事实主键中。
+  UNIQUE (tenant_id, attempt_id),
   FOREIGN KEY (tenant_id, attempt_id, run_id, thread_id, workspace_id, root_run_id)
     REFERENCES execution_attempts(
       tenant_id, attempt_id, run_id, thread_id, workspace_id, root_run_id
@@ -134,6 +136,53 @@ CREATE TABLE runtime_rollout_append_commands (
     ) ON DELETE RESTRICT
 );
 
+-- Replacement history 规范化为共享的仅追加前缀，checkpoint 只能引用其中一个长度。
+-- 因而后续 checkpoint 无法清空、改写或分叉已经提交的 replacement。
+CREATE TABLE runtime_rollout_replacements (
+  tenant_id text NOT NULL,
+  thread_id text NOT NULL,
+  run_id text NOT NULL,
+  attempt_id text NOT NULL,
+  agent_thread_id text NOT NULL,
+  replacement_sequence bigint NOT NULL CHECK (
+    replacement_sequence BETWEEN 0 AND 9007199254740991
+  ),
+  previous_replacement_sequence bigint,
+  previous_replacement_digest text,
+  replacement jsonb NOT NULL CHECK (jsonb_typeof(replacement) = 'object'),
+  replacement_digest text NOT NULL CHECK (replacement_digest ~ '^[0-9a-f]{64}$'),
+  created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  PRIMARY KEY (
+    tenant_id, thread_id, run_id, attempt_id, agent_thread_id, replacement_sequence
+  ),
+  UNIQUE (
+    tenant_id, thread_id, run_id, attempt_id, agent_thread_id,
+    replacement_sequence, replacement_digest
+  ),
+  FOREIGN KEY (tenant_id, thread_id, run_id, attempt_id, agent_thread_id)
+    REFERENCES runtime_rollout_streams(
+      tenant_id, thread_id, run_id, attempt_id, agent_thread_id
+    ) ON DELETE RESTRICT,
+  FOREIGN KEY (
+    tenant_id, thread_id, run_id, attempt_id, agent_thread_id,
+    previous_replacement_sequence, previous_replacement_digest
+  ) REFERENCES runtime_rollout_replacements(
+    tenant_id, thread_id, run_id, attempt_id, agent_thread_id,
+    replacement_sequence, replacement_digest
+  ) ON DELETE RESTRICT,
+  CONSTRAINT runtime_rollout_replacement_predecessor_check CHECK (
+    (replacement_sequence = 0
+      AND previous_replacement_sequence IS NULL AND previous_replacement_digest IS NULL)
+    OR
+    (replacement_sequence > 0
+      AND previous_replacement_sequence = replacement_sequence - 1
+      AND previous_replacement_digest ~ '^[0-9a-f]{64}$')
+  ),
+  CONSTRAINT runtime_rollout_replacement_size_check CHECK (
+    octet_length(replacement::text) <= 16384
+  )
+);
+
 CREATE TABLE runtime_rollout_checkpoints (
   tenant_id text NOT NULL,
   thread_id text NOT NULL,
@@ -144,22 +193,37 @@ CREATE TABLE runtime_rollout_checkpoints (
   checkpoint_sequence bigint NOT NULL CHECK (checkpoint_sequence BETWEEN 0 AND 9007199254740991),
   previous_checkpoint_sequence bigint,
   previous_through_sequence bigint,
+  previous_window_start_sequence bigint,
+  previous_replacement_history_length bigint,
   window_start_sequence bigint NOT NULL CHECK (window_start_sequence >= 0),
+  window_start_kind text NOT NULL CHECK (window_start_kind <> 'tool_result'),
+  window_start_tool_call_id text NOT NULL,
   through_sequence bigint NOT NULL CHECK (through_sequence >= window_start_sequence),
   through_kind text NOT NULL CHECK (through_kind <> 'tool_call'),
   through_tool_call_id text NOT NULL,
   projection jsonb NOT NULL CHECK (jsonb_typeof(projection) = 'object'),
   projection_digest text NOT NULL CHECK (projection_digest ~ '^[0-9a-f]{64}$'),
-  replacement_history jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (
-    jsonb_typeof(replacement_history) = 'array'
+  replacement_history_length bigint NOT NULL CHECK (
+    replacement_history_length BETWEEN 0 AND 9007199254740991
   ),
+  replacement_history_last_sequence bigint GENERATED ALWAYS AS (
+    CASE WHEN replacement_history_length = 0 THEN NULL ELSE replacement_history_length - 1 END
+  ) STORED,
+  replacement_history_tail_digest text,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   PRIMARY KEY (tenant_id, attempt_id, agent_thread_id, checkpoint_id),
   UNIQUE (tenant_id, attempt_id, agent_thread_id, through_sequence),
   UNIQUE (
     tenant_id, thread_id, run_id, attempt_id, agent_thread_id,
-    checkpoint_sequence, through_sequence
+    checkpoint_sequence, through_sequence, window_start_sequence, replacement_history_length
   ),
+  FOREIGN KEY (
+    tenant_id, thread_id, run_id, attempt_id, agent_thread_id,
+    window_start_sequence, window_start_kind, window_start_tool_call_id
+  ) REFERENCES runtime_rollout_entries(
+    tenant_id, thread_id, run_id, attempt_id, agent_thread_id,
+    sequence, kind, normalized_tool_call_id
+  ) ON DELETE RESTRICT,
   FOREIGN KEY (
     tenant_id, thread_id, run_id, attempt_id, agent_thread_id,
     through_sequence, through_kind, through_tool_call_id
@@ -169,23 +233,41 @@ CREATE TABLE runtime_rollout_checkpoints (
   ) ON DELETE RESTRICT,
   FOREIGN KEY (
     tenant_id, thread_id, run_id, attempt_id, agent_thread_id,
-    previous_checkpoint_sequence, previous_through_sequence
+    previous_checkpoint_sequence, previous_through_sequence,
+    previous_window_start_sequence, previous_replacement_history_length
   ) REFERENCES runtime_rollout_checkpoints(
     tenant_id, thread_id, run_id, attempt_id, agent_thread_id,
-    checkpoint_sequence, through_sequence
+    checkpoint_sequence, through_sequence, window_start_sequence, replacement_history_length
+  ) ON DELETE RESTRICT,
+  FOREIGN KEY (
+    tenant_id, thread_id, run_id, attempt_id, agent_thread_id,
+    replacement_history_last_sequence, replacement_history_tail_digest
+  ) REFERENCES runtime_rollout_replacements(
+    tenant_id, thread_id, run_id, attempt_id, agent_thread_id,
+    replacement_sequence, replacement_digest
   ) ON DELETE RESTRICT,
   CONSTRAINT runtime_rollout_checkpoint_predecessor_check CHECK (
     (checkpoint_sequence = 0
-      AND previous_checkpoint_sequence IS NULL AND previous_through_sequence IS NULL)
+      AND previous_checkpoint_sequence IS NULL AND previous_through_sequence IS NULL
+      AND previous_window_start_sequence IS NULL
+      AND previous_replacement_history_length IS NULL)
     OR
     (checkpoint_sequence > 0
       AND previous_checkpoint_sequence = checkpoint_sequence - 1
       AND previous_through_sequence IS NOT NULL
-      AND through_sequence > previous_through_sequence)
+      AND previous_window_start_sequence IS NOT NULL
+      AND previous_replacement_history_length IS NOT NULL
+      AND through_sequence > previous_through_sequence
+      AND window_start_sequence >= previous_window_start_sequence
+      AND replacement_history_length >= previous_replacement_history_length)
+  ),
+  CONSTRAINT runtime_rollout_checkpoint_replacement_shape_check CHECK (
+    (replacement_history_length = 0 AND replacement_history_tail_digest IS NULL)
+    OR
+    (replacement_history_length > 0 AND replacement_history_tail_digest ~ '^[0-9a-f]{64}$')
   ),
   CONSTRAINT runtime_rollout_checkpoint_size_check CHECK (
     octet_length(projection::text) <= 65536
-    AND octet_length(replacement_history::text) <= 65536
   )
 );
 CREATE INDEX runtime_rollout_checkpoints_latest_idx ON runtime_rollout_checkpoints(
@@ -221,6 +303,11 @@ CREATE POLICY runtime_rollout_entries_tenant_policy ON runtime_rollout_entries
 ALTER TABLE runtime_rollout_append_commands ENABLE ROW LEVEL SECURITY;
 ALTER TABLE runtime_rollout_append_commands FORCE ROW LEVEL SECURITY;
 CREATE POLICY runtime_rollout_append_commands_tenant_policy ON runtime_rollout_append_commands
+  USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''))
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''));
+ALTER TABLE runtime_rollout_replacements ENABLE ROW LEVEL SECURITY;
+ALTER TABLE runtime_rollout_replacements FORCE ROW LEVEL SECURITY;
+CREATE POLICY runtime_rollout_replacements_tenant_policy ON runtime_rollout_replacements
   USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''))
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), ''));
 ALTER TABLE runtime_rollout_checkpoints ENABLE ROW LEVEL SECURITY;

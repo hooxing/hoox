@@ -29,11 +29,13 @@ Runtime entry 永不更新或删除。Checkpoint 保存模型投影、窗口边�
 1. PostgreSQL `runtime_rollout_entries` 是 Rollout 唯一事实源；Pi Session 文件不参与恢复判定。
 2. 事实主键包含 Tenant/Thread/Run/Attempt/Agent Thread/sequence。首版通过 `agent_kind = root` 明确限制，而不是删除 Agent 维度。
 3. entry 通过自引用复合外键声明真实前驱：sequence 从 0 开始且无间隙；Tool Call 后只能紧跟同 call ID 的 Tool Result；Terminal 后不能再追加。允许事务结束时保留未配对 Tool Call，供外部副作用恢复后补齐结果。
-4. Repository 以 scope advisory transaction lock 串行分配 sequence。每次 append 和 checkpoint 都保存幂等键、命令摘要和结果范围；同键异摘要返回冲突。
+4. Repository 以 scope advisory transaction lock 串行分配 sequence。append/checkpoint 的命令摘要必须由 Repository 对规范化实际 payload 重算，调用方不能提交摘要；同键异正文返回冲突。
 5. Stream 固化 model identity、model compatibility、prompt policy、tool schema 与 skill manifest 的 SHA-256 兼容身份。恢复时不允许静默改用不兼容策略。
-6. Checkpoint 是仅追加投影。`replacement_history` 只描述模型窗口中被摘要替换的范围；entry 不删除。Checkpoint 不得落在未配对 Tool Call 上。
+6. Checkpoint 是仅追加投影。`replacement_history` 规范化成每个 Stream 唯一的仅追加前缀，Checkpoint 只能推进前缀长度，不能清空或改写历史；entry 不删除。Window 起点不能是 Tool Result，through 不能是 Tool Call，且连续 Checkpoint 的 window/through 只能单调前进。
 7. body 上限 16 KiB。完整大 Tool Result 使用 `stable/trace` Blob reference；截断摘要必须带完整 Blob 引用。
-8. 所有表强制 Tenant RLS。Repository 每次操作还需重验 active Membership 与 Thread/Run 归属；Runtime 角色只有 SELECT/INSERT，没有 UPDATE/DELETE/TRUNCATE。
+8. 所有表强制 Tenant RLS。写 Repository 在事务内对 active Membership 持有 `FOR SHARE` 行锁到提交，使 revoke 的 UPDATE 必须在线性化点之后生效；恢复读取使用带 Membership 条件的单 SQL snapshot，避免只读流量制造 row-lock WAL。Runtime 角色只有 SELECT/INSERT，没有 UPDATE/DELETE/TRUNCATE。
+9. 恢复调用必须提交期望的 model、model compatibility、prompt policy、tool schema 和 skill manifest 身份；任一不匹配均返回 `compatibility_mismatch/rebuild_attempt`，禁止静默恢复。
+10. 首版数据库以 `(tenant_id, attempt_id)` 唯一约束保证每个 Attempt 只有一个 root Stream；Agent Thread ID 仍进入复合事实主键，为未来子 Agent 保留位置。
 
 ## 影响
 

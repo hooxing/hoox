@@ -92,7 +92,7 @@ export interface ExternalEffectPermit {
   readonly workspaceRootRunId: RunId;
   readonly workspaceLeaseEpoch: number;
   readonly attemptVersion: number;
-  readonly effect: "model_start" | "tool_execution";
+  readonly effect: "model_start" | "model_continue" | "tool_execution";
   readonly callId: string;
   readonly toolName: string;
   readonly argsDigest: Sha256Digest;
@@ -104,15 +104,6 @@ export interface ExternalEffectCall {
   readonly callId: string;
   readonly toolName: string;
   readonly argsDigest: Sha256Digest;
-}
-
-/** Worker 从私有 ExecutionContext 投影出的稳定工具执行范围；模型和 HTTP 请求不能提供。 */
-export interface TrustedToolExecutionContext {
-  readonly scope: ExecutionScope;
-  readonly runClaimToken: string;
-  readonly runClaimEpoch: number;
-  readonly workspaceRootRunId: RunId;
-  readonly workspaceLeaseEpoch: number;
 }
 
 /**
@@ -187,6 +178,17 @@ export type RuntimeEventV1 =
       readonly kind: "run_waiting";
       readonly sequence: number;
       readonly payload: { readonly question: string; readonly checkpointId: string };
+    }
+  | {
+      readonly schemaVersion: 1;
+      readonly kind: "artifact_correction_requested";
+      readonly sequence: number;
+      readonly payload: {
+        readonly round: number;
+        readonly maxRounds: number;
+        readonly code: "ARTIFACT_NOT_READY";
+        readonly feedback: string;
+      };
     };
 
 export type PersistedRuntimeEventV1 = RuntimeEventV1 & { readonly occurredAt: IsoTimestamp };
@@ -382,8 +384,9 @@ export interface ExecutionPersistencePort {
     readonly leaseDurationMs: number;
   }): Promise<FenceInspectionResult>;
   /**
-   * tool_execution 必须引用本 Attempt 已登记且尚未签发过许可的 EffectInvocation。
-   * 同一 callId 的重复签发（无论 toolName/argsDigest 是否相同）必须返回 conflict。
+   * model_start 只能在首次模型 checkpoint 后签发；model_continue 只能引用已持久化的
+   * Artifact 修正轮次；tool_execution 必须引用本 Attempt 已登记且尚未签发过许可的
+   * EffectInvocation。同一 effect+callId 的重复签发必须返回 conflict。
    */
   issueExternalEffectPermit(input: {
     readonly fence: ExecutionFence;
@@ -515,7 +518,7 @@ export interface WorkerAgentSessionPort {
 export interface AgentSessionFactoryPort {
   create(input: {
     readonly scope: ExecutionScope;
-    readonly trustedToolContext: TrustedToolExecutionContext;
+    readonly attemptId: string;
     readonly sandbox: SandboxHandle;
     readonly rolloutProjection: ControlledRolloutProjection;
     readonly authorizeToolEffect: (

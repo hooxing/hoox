@@ -524,8 +524,10 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("并发迁移串行化且重复执行结果一致", async () => {
-    expect(concurrentMigrationVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8]);
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(8);
+    expect(concurrentMigrationVersions).toEqual([
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+    ]);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(9);
   });
 
   it("checksum 同时绑定 down SQL，并拒绝孤立和重复版本", async () => {
@@ -586,7 +588,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         `SELECT to_regclass('threads')::text AS threads,
                 (SELECT count(*)::text FROM runtime_schema_migrations) AS migration_count`,
       );
-      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "8" });
+      expect(state.rows[0]).toMatchObject({ threads: "threads", migration_count: "9" });
     } finally {
       await administrativePool.query(
         `GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}"`,
@@ -634,15 +636,15 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       [migratorRole],
     );
     expect(routineState.rows[0]).toEqual({ routine_count: "0", default_acl_count: "0" });
-    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(8);
+    expect(await migrateUp(migratorPool, migrationSecurity)).toHaveLength(9);
   });
 
-  it("partial down 8→2 后按旧 Schema 收敛 ACL，并可再次迁移到 8", async () => {
+  it("partial down 9→2 后按旧 Schema 收敛 ACL，并可再次迁移到 9", async () => {
     const target = await createIsolatedMigrationTarget("partial_down");
     try {
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      ).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
       expect(
         (
           await migrateDown(target.pool, {
@@ -673,7 +675,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      ).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
       const restored = await target.pool.query<{ present: boolean; allowed: boolean }>(
         `SELECT EXISTS (
            SELECT 1 FROM information_schema.columns
@@ -822,18 +824,18 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           )
         ).rows[0]?.present,
       ).toBe(false);
-      expect((await migrateUp(target.pool, target.context)).at(-1)?.version).toBe(8);
+      expect((await migrateUp(target.pool, target.context)).at(-1)?.version).toBe(9);
     } finally {
       await target.close();
     }
   });
 
-  it("partial down 8→3 只移除 Resource、Thread 创建、Run Worker、Dispatch 与 Cleanup 事实，并可再次迁移到 8", async () => {
+  it("partial down 9→3 只移除 Artifact 修正、Resource、Thread 创建、Run Worker、Dispatch 与 Cleanup 事实，并可再次迁移到 9", async () => {
     const target = await createIsolatedMigrationTarget("run_worker_partial_down");
     try {
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      ).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
       expect(
         (
           await migrateDown(target.pool, {
@@ -859,7 +861,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       });
       expect(
         (await migrateUp(target.pool, target.context)).map((record) => record.version),
-      ).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      ).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
       const restored = await target.pool.query<{
         table_present: boolean;
         runtime_can_select: boolean;

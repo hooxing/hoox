@@ -9,6 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@cube-runtime/artifact": "workspace:*",
     "@cube-runtime/domain": "workspace:*",
     "@cube-runtime/pi-adapter": "workspace:*",
     "@cube-runtime/process-runtime": "workspace:*",

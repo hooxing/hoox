@@ -17,7 +17,7 @@ Invoke-RestMethod "http://$($env:API_LISTEN_HOST):$($env:API_LISTEN_PORT)/live"
 Invoke-RestMethod "http://$($env:API_LISTEN_HOST):$($env:API_LISTEN_PORT)/ready"
 ```
 
-`dev:identity:provision` 仅允许 `RUNTIME_ENV=development` 且 `DEV_AUTH_ENABLED=true`，通过 Runtime 数据库角色、正式 Tenant Repository、事务和 RLS 创建两个个人 Tenant 及 owner Membership；重复执行会验证并保留完全匹配的聚合，发现占用或关系冲突会失败关闭。`THREAD_CURSOR_SIGNING_KEYS` 格式为逗号分隔的 `kid:base64url-key`，每个 key 解码后必须为 32 到 64 字节。开发凭据只接受 `Bearer dev-user-a` 和 `Bearer dev-user-b`；它们是本机 fixture 选择器，不是认证方案。服务不会在启动时偷偷创建 Tenant 或 Membership，缺少开发身份数据时业务请求会返回 404。
+`dev:identity:provision` 仅允许 `RUNTIME_ENV=development` 且 `DEV_AUTH_ENABLED=true`，通过 Runtime 数据库角色、正式 Tenant Repository、事务和 RLS 创建两个个人 Tenant 及 owner Membership；A/B 必须同时使用不同 User 和不同 Tenant，重复执行会验证并保留完全匹配的聚合，发现占用或关系冲突会失败关闭。`THREAD_CURSOR_SIGNING_KEYS` 格式为逗号分隔的 `kid:base64url-key`，每个 key 解码后必须为 32 到 64 字节。开发凭据只接受 `Bearer dev-user-a` 和 `Bearer dev-user-b`；它们是本机 fixture 选择器，不是认证方案，因此 API 只允许监听字面回环地址 `127.0.0.1`、`::1` 或 `localhost`，其中 `localhost` 会直接规范化为 `127.0.0.1`，不会经过 DNS 或接受其他 hostname。服务不会在启动时偷偷创建 Tenant 或 Membership，缺少开发身份数据时业务请求会返回 404。
 
 ## 开发基线
 

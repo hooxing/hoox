@@ -1,7 +1,6 @@
-import { describe, expect, it } from "vitest";
-
-import { parseApiProcessEnvironment, startApiProcess } from "./process-entry.js";
+import { describe, expect, it, vi } from "vitest";
 import { parseThreadCursorSigningKeys } from "./development-assembly.js";
+import { parseApiProcessEnvironment, startApiProcess } from "./process-entry.js";
 
 function productionEnvironment(): Record<string, string> {
   return {
@@ -12,6 +11,19 @@ function productionEnvironment(): Record<string, string> {
     THREAD_CURSOR_SIGNING_KEYS: "current:opaque-test-value",
     DEV_AUTH_ENABLED: "false",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
+  };
+}
+
+function developmentEnvironment(overrides: Record<string, string> = {}): Record<string, string> {
+  return {
+    ...productionEnvironment(),
+    RUNTIME_ENV: "development",
+    DEV_AUTH_ENABLED: "true",
+    DEV_AUTH_USER_A_ID: "user-a-local",
+    DEV_AUTH_USER_A_TENANT_ID: "tenant-a-local",
+    DEV_AUTH_USER_B_ID: "user-b-local",
+    DEV_AUTH_USER_B_TENANT_ID: "tenant-b-local",
+    ...overrides,
   };
 }
 
@@ -55,6 +67,41 @@ describe("API 进程入口", () => {
     await expect(startApiProcess({ environment: productionEnvironment() })).rejects.toThrow(
       "ASSEMBLER_MISSING:api",
     );
+  });
+
+  it.each(["127.0.0.1", "::1", "localhost", "LOCALHOST"])(
+    "固定开发身份接受字面回环监听地址 %s",
+    (listenHost) => {
+      expect(
+        parseApiProcessEnvironment(developmentEnvironment({ API_LISTEN_HOST: listenHost }))
+          .listenHost,
+      ).toBe(listenHost === "::1" ? "::1" : "127.0.0.1");
+    },
+  );
+
+  it.each(["0.0.0.0", "::", "192.168.53.128", "127.0.0.2", "localhost.example", "devbox"])(
+    "固定开发身份拒绝非白名单监听地址 %s",
+    async (listenHost) => {
+      const assembler = Object.freeze({ assemble: vi.fn() });
+      await expect(
+        startApiProcess({
+          environment: developmentEnvironment({ API_LISTEN_HOST: listenHost }),
+          assembler,
+        }),
+      ).rejects.toThrow("DEVELOPMENT_API_REQUIRES_LOOPBACK_LISTENER");
+      expect(assembler.assemble).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { DEV_AUTH_USER_B_ID: "user-a-local" },
+    { DEV_AUTH_USER_B_TENANT_ID: "tenant-a-local" },
+  ])("API 启动在装配前拒绝未隔离的 A/B 身份：%o", async (overrides) => {
+    const assembler = Object.freeze({ assemble: vi.fn() });
+    await expect(
+      startApiProcess({ environment: developmentEnvironment(overrides), assembler }),
+    ).rejects.toThrow("DEVELOPMENT_IDENTITIES_MUST_BE_ISOLATED");
+    expect(assembler.assemble).not.toHaveBeenCalled();
   });
 
   it("密钥环只接受不泄漏原值的明确结构", () => {

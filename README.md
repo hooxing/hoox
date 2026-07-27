@@ -69,7 +69,7 @@ corepack pnpm test:integration:m4
 Remove-Item Env:RUN_PG_RUN_WORKER_INTEGRATION
 ```
 
-Pi + Cube 的真实纵向冒烟同样默认关闭，并且目前只支持 Linux；不要在 Windows 上运行。Linux 上准备好真实模型与 Cube 配置后可执行：
+Pi + Cube 的真实纵向冒烟同样默认关闭，并且目前只支持 Linux；不要在 Windows 上运行。这里的“真实”是指连接真实 CubeSandbox 的纵向链路，模型侧使用 Pi Faux Provider，不调用外部模型，也不需要真实模型凭据。Linux 上准备好 Cube 配置后可执行：
 
 ```bash
 REAL_PI_CUBE_SMOKE=1 pnpm test:pi-cube:real

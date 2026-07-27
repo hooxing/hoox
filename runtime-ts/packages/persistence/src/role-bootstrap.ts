@@ -41,6 +41,7 @@ const artifactDeliveryTables = new Set([
   "artifact_deliverable_commands",
   "artifact_deliverable_declarations",
   "artifact_publications",
+  "artifact_publication_settlements",
   "artifact_publication_commands",
 ]);
 
@@ -85,6 +86,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["artifact_deliverable_commands", new Set(["SELECT", "INSERT"])],
   ["artifact_deliverable_declarations", new Set(["SELECT", "INSERT"])],
   ["artifact_publications", new Set(["SELECT", "INSERT"])],
+  ["artifact_publication_settlements", new Set(["SELECT", "INSERT"])],
   ["artifact_publication_commands", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
@@ -172,7 +174,6 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
     new Set(["visibility", "latest_version_number", "latest_version_id", "updated_at"]),
   ],
   ["resource_promotion_authorizations", new Set(["state", "consumed_at"])],
-  ["artifact_publications", new Set(["status", "updated_at"])],
 ]);
 
 async function hasMembershipLockMarker(client: PoolClient): Promise<boolean> {
@@ -241,6 +242,7 @@ async function hasArtifactDeliveryState(client: PoolClient, schema: string): Pro
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.artifact_publications', $1::text)) IS NOT NULL
             AND to_regclass(format('%I.artifact_publication_commands', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.artifact_publication_settlements', $1::text)) IS NOT NULL
             AS present`,
     [schema],
   );
@@ -865,6 +867,7 @@ export async function bootstrapRuntimeAccessOnClient(
          ${schema}.artifact_deliverable_commands,
          ${schema}.artifact_deliverable_declarations,
          ${schema}.artifact_publications,
+         ${schema}.artifact_publication_settlements,
          ${schema}.artifact_publication_commands
        TO ${role}`,
     );
@@ -921,12 +924,6 @@ export async function bootstrapRuntimeAccessOnClient(
          ON TABLE ${schema}.resources TO ${role};
        GRANT UPDATE(state, consumed_at)
          ON TABLE ${schema}.resource_promotion_authorizations TO ${role}`,
-    );
-  }
-  if (await hasArtifactDeliveryState(client, context.schema)) {
-    await client.query(
-      `GRANT UPDATE(status, updated_at)
-         ON TABLE ${schema}.artifact_publications TO ${role}`,
     );
   }
   await assertActiveRuntimeWhitelist(client, context);

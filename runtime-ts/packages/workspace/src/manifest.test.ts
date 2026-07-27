@@ -7,6 +7,7 @@ import {
   parseWorkspaceManifest,
   type WorkspaceManifestPolicy,
 } from "./manifest.js";
+import { workspaceRelativePath } from "./path.js";
 
 const POLICY: WorkspaceManifestPolicy = {
   maxFiles: 100,
@@ -16,6 +17,19 @@ const POLICY: WorkspaceManifestPolicy = {
 };
 const INCARNATION_A = "11111111-1111-4111-8111-111111111111";
 const INCARNATION_B = "22222222-2222-4222-8222-222222222222";
+
+function isSafeGeneratedTextPath(path: string): boolean {
+  try {
+    workspaceRelativePath(path);
+    return true;
+  } catch (error) {
+    if (error instanceof WorkspaceManifestError) return false;
+    throw error;
+  }
+}
+
+// 生成器必须先满足生产路径契约；否则 fast-check 会把拒绝输入误标为安全样本。
+const SAFE_TEXT_PATH = fc.stringMatching(/^[a-z]{1,8}\.txt$/u).filter(isSafeGeneratedTextPath);
 
 function sha(body: string): string {
   return createHash("sha256").update(body).digest("hex");
@@ -85,7 +99,7 @@ describe("WorkspaceManifest canonical 契约", () => {
   it("任意安全路径排列都产生相同摘要", () => {
     fc.assert(
       fc.property(
-        fc.uniqueArray(fc.stringMatching(/^[a-z]{1,8}\.txt$/u), { minLength: 1, maxLength: 20 }),
+        fc.uniqueArray(SAFE_TEXT_PATH, { minLength: 1, maxLength: 20 }),
         fc.integer({ min: 0, max: 10_000 }),
         (paths, seed) => {
           const entries = paths.map((path, index) => file(path, `${seed}-${index}`));
@@ -95,6 +109,14 @@ describe("WorkspaceManifest canonical 契约", () => {
       ),
     );
   });
+
+  it.each(["con.txt", "prn.txt", "aux.txt", "nul.txt"])(
+    "安全路径生成器排除 Windows 保留设备名 %s",
+    (path) => {
+      expect(/^[a-z]{1,8}\.txt$/u.test(path)).toBe(true);
+      expect(isSafeGeneratedTextPath(path)).toBe(false);
+    },
+  );
 
   it("内容改一字节或路径变化都会改变摘要", () => {
     const base = manifest([file("a.txt", "abc")]);

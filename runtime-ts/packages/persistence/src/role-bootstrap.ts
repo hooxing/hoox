@@ -44,6 +44,14 @@ const artifactDeliveryTables = new Set([
   "artifact_publication_settlements",
   "artifact_publication_commands",
 ]);
+const runtimeRolloutTables = new Set([
+  "runtime_rollout_streams",
+  "runtime_rollout_entries",
+  "runtime_rollout_append_commands",
+  "runtime_rollout_replacements",
+  "runtime_rollout_checkpoints",
+  "runtime_rollout_checkpoint_commands",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -88,6 +96,12 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["artifact_publications", new Set(["SELECT", "INSERT"])],
   ["artifact_publication_settlements", new Set(["SELECT", "INSERT"])],
   ["artifact_publication_commands", new Set(["SELECT", "INSERT"])],
+  ["runtime_rollout_streams", new Set(["SELECT", "INSERT"])],
+  ["runtime_rollout_entries", new Set(["SELECT", "INSERT"])],
+  ["runtime_rollout_append_commands", new Set(["SELECT", "INSERT"])],
+  ["runtime_rollout_replacements", new Set(["SELECT", "INSERT"])],
+  ["runtime_rollout_checkpoints", new Set(["SELECT", "INSERT"])],
+  ["runtime_rollout_checkpoint_commands", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -249,6 +263,18 @@ async function hasArtifactDeliveryState(client: PoolClient, schema: string): Pro
   return result.rows[0]?.present === true;
 }
 
+async function hasRuntimeRolloutState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.runtime_rollout_streams', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.runtime_rollout_entries', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.runtime_rollout_replacements', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.runtime_rollout_checkpoints', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function activeTablePolicy(
   client: PoolClient,
   schema: string,
@@ -268,6 +294,9 @@ async function activeTablePolicy(
   }
   if (!(await hasArtifactDeliveryState(client, schema))) {
     for (const table of artifactDeliveryTables) policy.delete(table);
+  }
+  if (!(await hasRuntimeRolloutState(client, schema))) {
+    for (const table of runtimeRolloutTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
@@ -299,6 +328,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasArtifactDeliveryState(client, schema))) {
     for (const table of artifactDeliveryTables) policy.delete(table);
+  }
+  if (!(await hasRuntimeRolloutState(client, schema))) {
+    for (const table of runtimeRolloutTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -869,6 +901,18 @@ export async function bootstrapRuntimeAccessOnClient(
          ${schema}.artifact_publications,
          ${schema}.artifact_publication_settlements,
          ${schema}.artifact_publication_commands
+       TO ${role}`,
+    );
+  }
+  if (await hasRuntimeRolloutState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.runtime_rollout_streams,
+         ${schema}.runtime_rollout_entries,
+         ${schema}.runtime_rollout_append_commands,
+         ${schema}.runtime_rollout_replacements,
+         ${schema}.runtime_rollout_checkpoints,
+         ${schema}.runtime_rollout_checkpoint_commands
        TO ${role}`,
     );
   }

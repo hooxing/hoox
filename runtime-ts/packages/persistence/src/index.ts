@@ -7,6 +7,7 @@ export { PgArchiveThreadCommand } from "./pg-core-repositories.js";
 export { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 export { PgThreadCreation } from "./pg-thread-creation.js";
 export * from "./pg-run-worker-state.js";
+export * from "./pg-runtime-rollout.js";
 export * from "./pg-sandbox-cleanup-consumer.js";
 export type {
   ResourcePromotionCommitPort,

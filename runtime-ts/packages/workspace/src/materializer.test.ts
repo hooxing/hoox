@@ -87,6 +87,10 @@ class Journal implements WorkspaceOperationJournalPort {
   failKnownError: WorkspaceDependencyError | undefined;
   completeAfterStoreUnknown = false;
 
+  async lookupCompleted(): Promise<unknown> {
+    return { status: "not_found" };
+  }
+
   async begin(identity: WorkspaceOperationIdentity): Promise<unknown> {
     if (this.beginError !== undefined) throw this.beginError;
     if (this.beginOverride !== undefined) return this.beginOverride;

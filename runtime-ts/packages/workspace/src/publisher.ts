@@ -81,6 +81,8 @@ export class WorkspacePublisher {
       input.base === undefined
         ? undefined
         : parseWorkspaceManifest(input.base, scope.tenantId, this.policy.historicalManifest);
+    const completed = await this.lookupCompleted(operationKey, scope, base);
+    if (completed !== undefined) return completed;
     const sandbox = await this.currentSandbox();
     try {
       const snapshot = await this.captureSnapshot(operationKey, scope);
@@ -245,6 +247,34 @@ export class WorkspacePublisher {
     }
   }
 
+  private async lookupCompleted(
+    operationKey: string,
+    scope: WorkspaceTrustedScope,
+    base: WorkspaceManifest | undefined,
+  ): Promise<ValidatedWorkspaceChange | undefined> {
+    let raw: unknown;
+    try {
+      raw = await this.options.journal.lookupCompleted({
+        operationKey,
+        scope,
+        kind: "publish",
+      });
+    } catch {
+      throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "查询 Workspace 完成事实失败");
+    }
+    const lookup = plainDataRecord(raw, "WorkspaceCompletedLookup");
+    if (lookup.status === "not_found") {
+      exactKeys(lookup, ["status"], "WorkspaceCompletedLookup");
+      return undefined;
+    }
+    exactKeys(lookup, ["status", "identity", "result"], "WorkspaceCompletedLookup");
+    if (lookup.status !== "completed") {
+      throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace 完成事实状态非法");
+    }
+    const identity = parseStoredPublishIdentity(lookup.identity, operationKey, scope, base);
+    return parsePublishedResult(lookup.result, identity, base, this.manifestPolicy);
+  }
+
   private async captureSnapshot(
     operationKey: string,
     scope: WorkspaceTrustedScope,
@@ -371,6 +401,57 @@ function publishIdentity(input: {
     }),
     snapshotToken: input.snapshot.snapshotToken,
   });
+}
+
+function parseStoredPublishIdentity(
+  value: unknown,
+  operationKey: string,
+  scope: WorkspaceTrustedScope,
+  base: WorkspaceManifest | undefined,
+): WorkspaceOperationIdentity {
+  const stored = plainDataRecord(value, "WorkspaceOperationIdentity");
+  exactKeys(
+    stored,
+    [
+      "schemaVersion",
+      "digestAlgorithm",
+      "operationKey",
+      "kind",
+      "inputDigest",
+      "tenantId",
+      "threadId",
+      "workspaceId",
+      "sandbox",
+      "snapshotToken",
+    ],
+    "WorkspaceOperationIdentity",
+  );
+  if (
+    stored.schemaVersion !== 1 ||
+    stored.digestAlgorithm !== OPERATION_DIGEST_VERSION ||
+    stored.operationKey !== operationKey ||
+    stored.kind !== "publish" ||
+    stored.tenantId !== scope.tenantId ||
+    stored.threadId !== scope.threadId ||
+    stored.workspaceId !== scope.workspaceId
+  ) {
+    throw new WorkspaceApplicationError("OPERATION_CONFLICT", "已完成发布身份与请求不一致");
+  }
+  const sandbox = parseSandboxSession(stored.sandbox);
+  const snapshot = parseSandboxSnapshot({
+    ...sandbox,
+    snapshotToken: stored.snapshotToken,
+  });
+  const expected = publishIdentity({
+    operationKey,
+    scope,
+    snapshot,
+    ...(base === undefined ? {} : { base }),
+  });
+  if (stored.inputDigest !== expected.inputDigest) {
+    throw new WorkspaceApplicationError("OPERATION_CONFLICT", "已完成发布输入摘要与请求不一致");
+  }
+  return expected;
 }
 
 function parsePublishedResult(

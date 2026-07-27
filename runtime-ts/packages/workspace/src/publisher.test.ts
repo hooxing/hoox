@@ -53,6 +53,24 @@ class Journal implements WorkspaceOperationJournalPort {
   completeAfterStoreUnknown = false;
   completeErrorBeforeStore: unknown | undefined;
 
+  async lookupCompleted(input: {
+    operationKey: string;
+    scope: WorkspaceTrustedScope;
+    kind: "materialize" | "publish";
+  }): Promise<unknown> {
+    const row = this.rows.get(input.operationKey);
+    if (
+      row?.state !== "completed" ||
+      row.identity.kind !== input.kind ||
+      row.identity.tenantId !== input.scope.tenantId ||
+      row.identity.threadId !== input.scope.threadId ||
+      row.identity.workspaceId !== input.scope.workspaceId
+    ) {
+      return { status: "not_found" };
+    }
+    return { status: "completed", identity: row.identity, result: row.result };
+  }
+
   async begin(identity: WorkspaceOperationIdentity): Promise<unknown> {
     if (this.beginError !== undefined) throw this.beginError;
     if (this.beginOverride !== undefined) return this.beginOverride;
@@ -423,6 +441,21 @@ describe("Workspace publisher 可靠边界", () => {
       code: "DEPENDENCY_FAILED",
     });
     expect(listed.sandbox.releaseCalls).toBe(1);
+  });
+
+  it("完成后 Workspace 改变，同 operationKey 从 Journal 返回原结果且不重新 capture", async () => {
+    const state = setup();
+    state.sandbox.addFile("a", "original");
+    const completed = await state.publisher.publish(request("completed-stable"));
+    state.sandbox.liveEntries.length = 0;
+    state.sandbox.liveBodies.clear();
+    state.sandbox.addFile("changed", "new-content");
+
+    const repeated = await state.publisher.publish(request("completed-stable"));
+    expect(repeated).toEqual(completed);
+    expect(state.sandbox.captureCalls).toBe(1);
+    expect(state.sandbox.releaseCalls).toBe(1);
+    expect(repeated.candidateManifest.entries.map((entry) => entry.path)).toEqual(["a"]);
   });
 
   it("非法 tenant/scope 在 snapshot 与任何 Blob 副作用前拒绝", async () => {

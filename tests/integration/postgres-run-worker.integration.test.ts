@@ -284,7 +284,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       [runtimeRole, schema],
     );
     // Thread 创建 0007 在 Cleanup 0006 后叠加，既有 Dispatch ACL 仍须存在。
-    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 9 });
+    expect(dispatchAcl.rows[0]).toEqual({ allowed: true, version: 10 });
     const runtimeSchema = await runtime.query<{
       readonly schema: string;
       readonly current_user: string;
@@ -2907,7 +2907,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     });
     expect(down.at(-1)?.version).toBe(4);
     const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
-    expect(restored.at(-1)?.version).toBe(9);
+    expect(restored.at(-1)?.version).toBe(10);
     const acl = await admin.query<{
       readonly select_allowed: boolean;
       readonly update_allowed: boolean;

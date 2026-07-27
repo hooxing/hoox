@@ -37,6 +37,13 @@ const resourceLibraryTables = new Set([
   "resource_promotion_authorizations",
   "resource_promotion_idempotency",
 ]);
+const artifactDeliveryTables = new Set([
+  "artifact_deliverable_commands",
+  "artifact_deliverable_declarations",
+  "artifact_publications",
+  "artifact_publication_settlements",
+  "artifact_publication_commands",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -76,6 +83,11 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["resource_versions", new Set(["SELECT", "INSERT"])],
   ["resource_promotion_authorizations", new Set(["SELECT", "INSERT"])],
   ["resource_promotion_idempotency", new Set(["SELECT", "INSERT"])],
+  ["artifact_deliverable_commands", new Set(["SELECT", "INSERT"])],
+  ["artifact_deliverable_declarations", new Set(["SELECT", "INSERT"])],
+  ["artifact_publications", new Set(["SELECT", "INSERT"])],
+  ["artifact_publication_settlements", new Set(["SELECT", "INSERT"])],
+  ["artifact_publication_commands", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -226,6 +238,17 @@ async function hasResourceLibraryState(client: PoolClient, schema: string): Prom
   return result.rows[0]?.present === true;
 }
 
+async function hasArtifactDeliveryState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.artifact_publications', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.artifact_publication_commands', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.artifact_publication_settlements', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function activeTablePolicy(
   client: PoolClient,
   schema: string,
@@ -242,6 +265,9 @@ async function activeTablePolicy(
   }
   if (!(await hasResourceLibraryState(client, schema))) {
     for (const table of resourceLibraryTables) policy.delete(table);
+  }
+  if (!(await hasArtifactDeliveryState(client, schema))) {
+    for (const table of artifactDeliveryTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
@@ -270,6 +296,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasResourceLibraryState(client, schema))) {
     for (const table of resourceLibraryTables) policy.delete(table);
+  }
+  if (!(await hasArtifactDeliveryState(client, schema))) {
+    for (const table of artifactDeliveryTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -829,6 +858,17 @@ export async function bootstrapRuntimeAccessOnClient(
          ${schema}.resource_versions,
          ${schema}.resource_promotion_authorizations,
          ${schema}.resource_promotion_idempotency
+       TO ${role}`,
+    );
+  }
+  if (await hasArtifactDeliveryState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.artifact_deliverable_commands,
+         ${schema}.artifact_deliverable_declarations,
+         ${schema}.artifact_publications,
+         ${schema}.artifact_publication_settlements,
+         ${schema}.artifact_publication_commands
        TO ${role}`,
     );
   }

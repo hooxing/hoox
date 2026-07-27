@@ -370,7 +370,7 @@ beforeAll(async () => {
     maxConnections: 12,
   });
   expect((await migrateUp(migrator, migrationSecurity)).map((record) => record.version)).toEqual([
-    1, 2, 3, 4, 5, 6, 7, 8,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
   ]);
   catalog = new PgResourceCatalog(runtime);
   promotions = new PgResourcePromotionRepository(runtime, promotionCapabilities.verifier);

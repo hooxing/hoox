@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { parseWorkerProcessEnvironment, startWorkerProcess } from "./process-entry.js";
+import {
+  parseWorkerProcessEnvironment,
+  probeOpenAiCompatibleModel,
+  startWorkerProcess,
+} from "./process-entry.js";
 
 function productionEnvironment(): Record<string, string> {
   return {
@@ -18,17 +22,37 @@ function productionEnvironment(): Record<string, string> {
     MODEL_BASE_URL: "https://model.invalid/v1",
     MODEL_API_KEY: "opaque-model-value",
     MODEL_ID: "test-model",
+    MODEL_CONTEXT_WINDOW: "128000",
+    MODEL_MAX_OUTPUT_TOKENS: "16384",
+    AGENT_WORKER_TENANT_ID: "tenant-test-worker",
+    AGENT_WORKER_ID: "worker-test",
+    AGENT_WORKER_POLL_INTERVAL_MS: "100",
+    AGENT_WORKER_DISPATCH_LEASE_MS: "30000",
+    AGENT_WORKER_RUN_LEASE_MS: "30000",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
   };
 }
 
 describe("Agent Worker 进程入口", () => {
-  it("解析生产依赖，但没有真实装配器时拒绝启动", async () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("生产入口固定使用内建真实装配器，拒绝调用方注入 Fake", async () => {
     const configuration = parseWorkerProcessEnvironment(productionEnvironment());
     expect(configuration.sandbox.templateId).toBe("tpl-test");
-    await expect(startWorkerProcess({ environment: productionEnvironment() })).rejects.toThrow(
-      "ASSEMBLER_MISSING:agent-worker",
-    );
+    await expect(
+      startWorkerProcess({
+        environment: productionEnvironment(),
+        assembler: {
+          assemble: async () => ({
+            stopAccepting: async () => undefined,
+            resources: [],
+            readiness: [],
+          }),
+        },
+      }),
+    ).rejects.toThrow("PRODUCTION_ASSEMBLY_UNAVAILABLE:agent-worker");
   });
 
   it("缺少模型依赖时在装配前失败且不泄漏其他秘密", () => {
@@ -42,5 +66,70 @@ describe("Agent Worker 进程入口", () => {
       expect(String(error)).toContain("MISSING:MODEL_API_KEY");
       expect(String(error)).not.toContain(secret);
     }
+  });
+
+  it("模型预算元数据是严格必填配置", () => {
+    const source = productionEnvironment();
+    delete source.MODEL_CONTEXT_WINDOW;
+    expect(() => parseWorkerProcessEnvironment(source)).toThrow("MISSING:MODEL_CONTEXT_WINDOW");
+  });
+
+  it("模型最大输出预算不能超过上下文窗口", () => {
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        MODEL_CONTEXT_WINDOW: "4096",
+        MODEL_MAX_OUTPUT_TOKENS: "4097",
+      }),
+    ).toThrow("MODEL_MAX_OUTPUT_TOKENS 不能大于 MODEL_CONTEXT_WINDOW");
+    expect(
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        MODEL_CONTEXT_WINDOW: "4096",
+        MODEL_MAX_OUTPUT_TOKENS: "4096",
+      }).model,
+    ).toMatchObject({ contextWindow: 4096, maxOutputTokens: 4096 });
+  });
+
+  it("开发 Worker 强制消费 dev-user-a 的同一租户", () => {
+    const source = {
+      ...productionEnvironment(),
+      RUNTIME_ENV: "development",
+      AGENT_WORKER_TENANT_ID: "tenant-dev-user-a",
+      DEV_AUTH_ENABLED: "true",
+      DEV_AUTH_USER_A_TENANT_ID: "tenant-dev-user-a",
+    };
+    expect(parseWorkerProcessEnvironment(source).development?.userATenantId).toBe(
+      "tenant-dev-user-a",
+    );
+    expect(() =>
+      parseWorkerProcessEnvironment({ ...source, AGENT_WORKER_TENANT_ID: "other-tenant" }),
+    ).toThrow("AGENT_WORKER_TENANT_ID 必须与 DEV_AUTH_USER_A_TENANT_ID 一致");
+  });
+
+  it("开发 readiness 只要求 /models 返回已配置 model id", async () => {
+    const model = parseWorkerProcessEnvironment({
+      ...productionEnvironment(),
+      RUNTIME_ENV: "development",
+      AGENT_WORKER_TENANT_ID: "tenant-dev-user-a",
+      DEV_AUTH_ENABLED: "true",
+      DEV_AUTH_USER_A_TENANT_ID: "tenant-dev-user-a",
+    }).model;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [{ id: model.modelId }] }))),
+    );
+    await expect(probeOpenAiCompatibleModel(model, "development")).resolves.toBeUndefined();
+  });
+
+  it("生产 readiness 不因 development 的 id-only Provider 放宽模型预算元数据", async () => {
+    const model = parseWorkerProcessEnvironment(productionEnvironment()).model;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: [{ id: model.modelId }] }))),
+    );
+    await expect(probeOpenAiCompatibleModel(model, "production")).rejects.toThrow(
+      "模型 provider 元数据与配置不一致",
+    );
   });
 });

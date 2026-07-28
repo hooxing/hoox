@@ -8,9 +8,9 @@ import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres
 
 const maxInputBytes = 1_048_576;
 const initialProjection = Object.freeze({
-  schemaVersion: 1 as const,
+  schemaVersion: 2 as const,
   checkpointId: "initial",
-  turns: Object.freeze([]),
+  items: Object.freeze([]),
 });
 const initialProjectionDigest = rolloutProjectionDigest(initialProjection);
 const maxOutboxLeaseMilliseconds = 300_000;

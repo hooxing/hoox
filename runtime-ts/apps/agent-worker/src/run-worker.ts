@@ -80,6 +80,8 @@ interface WorkerDependencies {
   readonly orphanSandboxes: OrphanSandboxCleanupPort;
   readonly sessions: AgentSessionFactoryPort;
   readonly cancellation: CancellationPort;
+  /** 进程停机只中止当前执行，不代表用户取消 Run。 */
+  readonly shutdownSignal?: AbortSignal;
   readonly artifacts: ArtifactPublicationPort;
   readonly clock: ClockPort;
   readonly metrics: RecoveryMetricsPort;
@@ -101,7 +103,7 @@ interface ExecutionContext {
   readonly durableLane: DurableOperationLane;
   readonly toolStartedGates: Map<string, ToolStartedGate>;
   readonly cleanupFacts: Map<string, CleanupReceiptFacts>;
-  stopped?: "cancelled" | "timeout" | "fence_lost" | "unavailable" | "scope_mismatch";
+  stopped?: "cancelled" | "shutdown" | "timeout" | "fence_lost" | "unavailable" | "scope_mismatch";
   agentFailure?: StableWorkerErrorCode;
   modelCompleted: boolean;
   eventAcceptanceOpen: boolean;
@@ -237,6 +239,7 @@ export class RunWorker {
       adapterRejected: false,
     };
     const cancellation = this.dependencies.cancellation.signalFor(scope);
+    const shutdown = this.dependencies.shutdownSignal;
     let session: WorkerAgentSessionPort | undefined;
     let sandbox: SandboxSessionRef | undefined;
     let unsubscribe: (() => void) | undefined;
@@ -251,13 +254,23 @@ export class RunWorker {
       return context.abortPromise;
     };
     const onCancel = () => {
+      if (context.stopped === "shutdown") return;
       context.stopped = "cancelled";
       executionAbort.abort("run_cancelled");
       void requestAbort();
     };
+    const onShutdown = () => {
+      // 运维停止优先于同一时刻的本地取消信号，绝不能提交用户 cancelled 事实。
+      context.stopped = "shutdown";
+      executionAbort.abort("worker_shutdown");
+      void requestAbort();
+    };
     cancellation.addEventListener("abort", onCancel, { once: true });
     if (cancellation.aborted) onCancel();
+    shutdown?.addEventListener("abort", onShutdown, { once: true });
+    if (shutdown?.aborted) onShutdown();
     const timeout = this.dependencies.clock.schedule(this.#runTimeoutMs, () => {
+      if (context.stopped === "shutdown") return;
       context.stopped = "timeout";
       executionAbort.abort("run_timeout");
       void requestAbort();
@@ -369,12 +382,16 @@ export class RunWorker {
       session = await this.dependencies.sessions.create({
         scope,
         attemptId: context.attemptId,
+        fence: context.fence,
         sandbox: sandbox.sandbox,
         rolloutProjection: claim.snapshot.rolloutProjection,
         authorizeToolEffect: (call) =>
           this.authorizeToolEffectAfterStarted(context, cancellation, call),
       });
-      context.abortSession = () => session?.abort().catch(() => undefined) ?? Promise.resolve();
+      context.abortSession = async () => {
+        await session?.drainRejectedToolReceipts?.();
+        await session?.abort().catch(() => undefined);
+      };
       const postSession = await this.stopPoint(context, cancellation);
       if (postSession) return await this.finishStopped(context, postSession, sandbox);
 
@@ -464,6 +481,9 @@ export class RunWorker {
             context.agentFailure ?? "EVENT_REJECTED",
             cancellation,
           );
+        }
+        if (turn.kind === "recovery_required") {
+          return await this.recoverWithCleanup(context, sandbox, turn.code, cancellation);
         }
         if (context.agentFailure) {
           return await this.finalizeWithCleanup(
@@ -657,6 +677,7 @@ export class RunWorker {
     } finally {
       timeout.cancel();
       cancellation.removeEventListener("abort", onCancel);
+      shutdown?.removeEventListener("abort", onShutdown);
       closeEventAcceptance(context);
       // abort 完成后才允许取消订阅、释放 Session；cleanup 已由持久 Outbox/Saga 接管。
       await Promise.allSettled([heartbeat.stop()]);
@@ -675,7 +696,7 @@ export class RunWorker {
     cancellation: AbortSignal,
   ): Promise<ExecutionContext["stopped"]> {
     return await context.durableLane.run(async () => {
-      if (cancellation.aborted) context.stopped = "cancelled";
+      refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
       if (context.stopped) return context.stopped;
       try {
         const inspected = await this.dependencies.persistence.inspectAndRenew({
@@ -688,12 +709,14 @@ export class RunWorker {
             return context.stopped;
           }
           acceptInspection(context, inspected);
-          if (cancellation.aborted) context.stopped = "cancelled";
+          refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
           return context.stopped;
         }
         context.stopped = inspected.outcome === "cancelled" ? "cancelled" : inspected.outcome;
+        refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
       } catch {
         context.stopped = "unavailable";
+        refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
       }
       return context.stopped;
     });
@@ -702,9 +725,11 @@ export class RunWorker {
   /** 清理状态推进忽略业务取消，但仍严格校验双栅栏与 scope/head checkpoint。 */
   private async fencePoint(
     context: ExecutionContext,
-  ): Promise<"fence_lost" | "unavailable" | "scope_mismatch" | undefined> {
+  ): Promise<"shutdown" | "fence_lost" | "unavailable" | "scope_mismatch" | undefined> {
     return await context.durableLane.run(async () => {
+      if (this.dependencies.shutdownSignal?.aborted) context.stopped = "shutdown";
       if (
+        context.stopped === "shutdown" ||
         context.stopped === "fence_lost" ||
         context.stopped === "unavailable" ||
         context.stopped === "scope_mismatch"
@@ -716,6 +741,10 @@ export class RunWorker {
           fence: context.fence,
           leaseDurationMs: this.#leaseDurationMs,
         });
+        if (this.dependencies.shutdownSignal?.aborted) {
+          context.stopped = "shutdown";
+          return "shutdown";
+        }
         if (inspected.outcome === "active") {
           if (!inspectionMatches(context, inspected)) return "scope_mismatch";
           acceptInspection(context, inspected);
@@ -740,8 +769,7 @@ export class RunWorker {
       context.adapterRejected = true;
       context.agentFailure = "PROTOCOL";
       closeEventAcceptance(context);
-      if (!context.abortPromise)
-        context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+      this.abortAuthorizationFailure(context, "tool_execution");
       throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     }
     await gate.committed;
@@ -749,8 +777,7 @@ export class RunWorker {
       context.adapterRejected = true;
       context.agentFailure = "PROTOCOL";
       closeEventAcceptance(context);
-      if (!context.abortPromise)
-        context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+      this.abortAuthorizationFailure(context, "tool_execution");
       throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     }
     // callId 在 Attempt 内永久一次性；即使后续授权失败，也不能重新领取许可。
@@ -764,10 +791,10 @@ export class RunWorker {
     effect: ExternalEffectPermit["effect"],
     call: ExternalEffectCall,
   ): Promise<ConsumedExternalEffectAuthorization> {
-    if (cancellation.aborted) context.stopped = "cancelled";
+    refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
     if (context.stopped) throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     const authorization = await context.durableLane.run(async () => {
-      if (cancellation.aborted) context.stopped = "cancelled";
+      refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
       if (context.stopped) throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
       const monotonicStarted = performance.now();
       let result: Awaited<ReturnType<ExecutionPersistencePort["issueExternalEffectPermit"]>>;
@@ -782,6 +809,12 @@ export class RunWorker {
       } catch {
         result = { outcome: "unavailable" };
       }
+      refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
+      if (context.stopped) {
+        closeEventAcceptance(context);
+        this.abortAuthorizationFailure(context, effect);
+        throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
+      }
       if (result.outcome !== "authorized" || !permitMatches(context, result.permit, effect, call)) {
         context.stopped =
           result.outcome === "authorized" || result.outcome === "scope_mismatch"
@@ -792,15 +825,13 @@ export class RunWorker {
                 ? "fence_lost"
                 : "unavailable";
         closeEventAcceptance(context);
-        if (!context.abortPromise)
-          context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+        this.abortAuthorizationFailure(context, effect);
         throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
       }
-      if (cancellation.aborted) {
-        context.stopped = "cancelled";
+      refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
+      if (context.stopped) {
         closeEventAcceptance(context);
-        if (!context.abortPromise)
-          context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+        this.abortAuthorizationFailure(context, effect);
         throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
       }
       let consumed: Awaited<ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]>>;
@@ -815,22 +846,24 @@ export class RunWorker {
         consumed = { outcome: "unavailable" };
       }
       const consumedAtMonotonicMs = performance.now();
+      refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
       if (
         consumed.outcome !== "consumed" ||
-        cancellation.aborted ||
+        context.stopped !== undefined ||
         consumedAtMonotonicMs - monotonicStarted >= this.#externalEffectPermitMs
       ) {
-        context.stopped =
-          cancellation.aborted || consumed.outcome === "cancelled"
-            ? "cancelled"
-            : consumed.outcome === "unavailable"
-              ? "unavailable"
-              : consumed.outcome === "scope_mismatch"
-                ? "scope_mismatch"
-                : "fence_lost";
+        if (context.stopped === undefined) {
+          context.stopped =
+            consumed.outcome === "cancelled"
+              ? "cancelled"
+              : consumed.outcome === "unavailable"
+                ? "unavailable"
+                : consumed.outcome === "scope_mismatch"
+                  ? "scope_mismatch"
+                  : "fence_lost";
+        }
         closeEventAcceptance(context);
-        if (!context.abortPromise)
-          context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+        this.abortAuthorizationFailure(context, effect);
         throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
       }
       return {
@@ -843,11 +876,27 @@ export class RunWorker {
         ),
       };
     });
-    if (cancellation.aborted) {
-      context.stopped = "cancelled";
+    refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
+    if (context.stopped) {
       throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     }
     return authorization;
+  }
+
+  private abortAuthorizationFailure(
+    context: ExecutionContext,
+    effect: ExternalEffectPermit["effect"],
+  ): void {
+    // PiFactory 的屏障必须先持久化固定失败回执，再同步阻断下一 Provider 请求；提前 abort
+    // 会让 Pi 丢弃仍在执行的 Tool Promise。其他 Session 实现没有该保证，仍立即中止。
+    if (
+      effect === "tool_execution" &&
+      this.dependencies.sessions.toolRejectionReceiptBarrier === "durable"
+    )
+      return;
+    if (!context.abortPromise) {
+      context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+    }
   }
 
   private async applyMutation(
@@ -1046,6 +1095,9 @@ export class RunWorker {
             this.dependencies.cancellation.signalFor(context.scope),
           )
         : await this.finalizeWithoutRevision(context, "failed", "TIMEOUT");
+    }
+    if (stopped === "shutdown") {
+      return await this.requireRecovery(context, "WORKER_SHUTDOWN", []);
     }
     if (stopped === "fence_lost" || stopped === "scope_mismatch") return { outcome: "fence_lost" };
     return await this.requireRecovery(context, "PERSISTENCE_UNAVAILABLE", []);
@@ -1327,6 +1379,18 @@ function registerToolStarted(
 
 function closeEventAcceptance(context: ExecutionContext): void {
   context.eventAcceptanceOpen = false;
+}
+
+function refreshLocalStop(
+  context: ExecutionContext,
+  cancellation: AbortSignal,
+  shutdown: AbortSignal | undefined,
+): void {
+  if (shutdown?.aborted) {
+    context.stopped = "shutdown";
+  } else if (cancellation.aborted && context.stopped !== "shutdown") {
+    context.stopped = "cancelled";
+  }
 }
 
 function isApplied(result: RuntimeMutationResult): result is AppliedMutation {

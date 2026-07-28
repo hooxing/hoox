@@ -17,7 +17,10 @@ import {
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { PiWorkerSessionFactory } from "./pi-session-factory.js";
+import {
+  createDurableObservationRecorderFactory,
+  PiWorkerSessionFactory,
+} from "./pi-session-factory.js";
 import { RunWorker } from "./run-worker.js";
 import {
   FakeArtifactPublication,
@@ -31,6 +34,32 @@ import {
 } from "./testing/fakes.js";
 
 describe("PiWorkerSessionFactory 持久操作门控", () => {
+  it("durable Observation 工厂拒绝错接 Tenant、Run 或 Attempt 的端口", () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("observation-binding"));
+    const otherScope = persistence.addSeed(fakeSeed("observation-binding-other"));
+    const input = { scope, attemptId: "attempt-1" } as Parameters<
+      Parameters<typeof createDurableObservationRecorderFactory>[0]
+    >[0];
+    const factory = createDurableObservationRecorderFactory((current) => ({
+      binding: {
+        scope: otherScope,
+        attemptId: current.attemptId,
+        agentThreadId: "agent_observation_other",
+      },
+      traces: { persistTrace: async () => ({ outcome: "unavailable" as const }) },
+      rollout: {
+        appendToolCall: async () => ({ outcome: "unavailable" as const }),
+        appendToolResult: async () => ({ outcome: "unavailable" as const }),
+      },
+      policy: { maxModelObservationBytes: 100 },
+    }));
+
+    expect(() => factory(input, { readControlledReceipt: async () => "受控 Observation" })).toThrow(
+      "ExecutionScope 不匹配",
+    );
+  });
+
   it.runIf(process.platform === "linux")(
     "内部工具循环预算拒绝映射为 Worker CONTEXT_TOO_LARGE/rebuild_context",
     async () => {
@@ -61,7 +90,14 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
           revisions: new FakeRevisionVerifier(),
           sandboxes,
           orphanSandboxes: sandboxes,
-          sessions: new PiWorkerSessionFactory(faux.getModel(), modelRuntime),
+          sessions: new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
+            recordStarted: async () => "recorded" as const,
+            record: async () => ({
+              outcome: "recorded" as const,
+              observation: "大".repeat(130_000),
+              isTruncated: false,
+            }),
+          })),
           cancellation: new FakeCancellationPort(),
           artifacts: new FakeArtifactPublication(),
           clock: new FakeClock(),
@@ -116,8 +152,32 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       });
       modelRuntime.registerNativeProvider(faux.provider);
       await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-      const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime);
+      const observationOperations: string[] = [];
+      const sessions = new PiWorkerSessionFactory(
+        faux.getModel(),
+        modelRuntime,
+        (_input, outputs) => ({
+          recordStarted: async (call) => {
+            observationOperations.push(`call:${call.toolCallId}:${call.toolName}`);
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            expect(
+              persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
+            ).toHaveLength(0);
+            return "recorded" as const;
+          },
+          record: async (call) => {
+            observationOperations.push(`result:${call.toolCallId}:${call.toolName}`);
+            const observation = await outputs.readControlledReceipt(call);
+            return observation === undefined
+              ? { outcome: "conflict" as const }
+              : { outcome: "recorded" as const, observation, isTruncated: false };
+          },
+        }),
+      );
       persistence.beforePermitIssueReturn = (input) => {
+        if (input.effect === "tool_execution") {
+          expect(observationOperations[0]).toMatch(/^call:/u);
+        }
         if (input.effect === "tool_execution") void clock.tickHeartbeat();
       };
       const worker = new RunWorker(
@@ -165,6 +225,230 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       expect(eventIndex).toBeLessThan(issueIndex);
       expect(issueIndex).toBeLessThan(consumeIndex);
       expect(consumeIndex).toBeLessThan(inspectAfterIssue);
+      expect(observationOperations).toHaveLength(2);
+      expect(observationOperations[0]).toMatch(/^call:/u);
+      expect(observationOperations[1]).toMatch(/^result:/u);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "tool_call 前驱 UNKNOWN 时不签发也不消费一次性工具许可",
+    async () => {
+      const persistence = new FakeExecutionPersistence();
+      const scope = persistence.addSeed(fakeSeed("pi-predecessor-unknown"));
+      const sandboxes = new FakeSandboxRegistry();
+      const faux = fauxProvider({
+        api: `faux-worker-predecessor-unknown-${Date.now()}`,
+        provider: `faux-worker-predecessor-unknown-${Date.now()}`,
+        tokensPerSecond: 10_000,
+      });
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall("sandbox_write_file", {
+            path: "/tmp/must-not-exist.txt",
+            content: "forbidden",
+          }),
+          { stopReason: "toolUse" },
+        ),
+      ]);
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      modelRuntime.registerNativeProvider(faux.provider);
+      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
+        recordStarted: async () => "unknown" as const,
+        record: async () => ({ outcome: "unknown" as const }),
+      }));
+      const worker = new RunWorker(
+        {
+          persistence,
+          revisions: new FakeRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions,
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        { workerId: "pi-predecessor-unknown-worker" },
+      );
+
+      await expect(worker.execute(scope)).resolves.toEqual({
+        outcome: "recovery_required",
+        code: "PERSISTENCE_UNAVAILABLE",
+      });
+      expect(
+        persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
+      ).toHaveLength(0);
+      expect(sandboxes.handle.files.has("/tmp/must-not-exist.txt")).toBe(false);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "Tool result 持久化持续 UNKNOWN 时中止 Pi，Attempt 只能进入 recovery_required",
+    async () => {
+      const persistence = new FakeExecutionPersistence();
+      const scope = persistence.addSeed(fakeSeed("pi-observation-unknown"));
+      const sandboxes = new FakeSandboxRegistry();
+      const faux = fauxProvider({
+        api: `faux-worker-observation-unknown-${Date.now()}`,
+        provider: `faux-worker-observation-unknown-${Date.now()}`,
+        tokensPerSecond: 10_000,
+      });
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall("sandbox_write_file", {
+            path: "/tmp/unknown.txt",
+            content: "side-effect-issued",
+          }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("不得到达成功终态"),
+      ]);
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      modelRuntime.registerNativeProvider(faux.provider);
+      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
+        recordStarted: async () => "recorded" as const,
+        record: async () => ({ outcome: "unknown" as const }),
+      }));
+      const worker = new RunWorker(
+        {
+          persistence,
+          revisions: new FakeRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions,
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        {
+          workerId: "pi-observation-unknown-worker",
+          leaseDurationMs: 30_000,
+          heartbeatMs: 10_000,
+          runTimeoutMs: 60_000,
+        },
+      );
+
+      await expect(worker.execute(scope)).resolves.toEqual({
+        outcome: "recovery_required",
+        code: "PERSISTENCE_UNAVAILABLE",
+      });
+      expect(persistence.record(scope).run.status).toBe("running");
+      expect(persistence.record(scope).attempt?.status).toBe("recovery_required");
+      expect(faux.state.callCount).toBe(1);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "Artifact 工具授权拒绝在失败回执后关闭续轮，只调用一次 Provider",
+    async () => {
+      let artifactCalls = 0;
+      const artifacts: ArtifactToolServicePort = {
+        declareDeliverables: async () => {
+          artifactCalls += 1;
+        },
+        publishArtifact: async () => {
+          artifactCalls += 1;
+          throw new Error("授权拒绝时不得调用 Artifact 服务");
+        },
+      };
+      const resources: ArtifactPublicationResourcePort = {
+        prepareImmutableVersion: async () => {
+          throw new Error("授权拒绝时不得准备 ResourceVersion");
+        },
+      };
+      const authority = createArtifactExecutionAuthorizationAuthority();
+      const routerFactory = new ArtifactToolRouterFactory({
+        artifacts,
+        resources,
+        authorizationVerifier: authority.verifier,
+      });
+      const persistence = new FakeExecutionPersistence();
+      const scope = persistence.addSeed(fakeSeed("pi-artifact-authorization-rejected"));
+      persistence.beforePermitIssueReturn = (input) => {
+        if (input.effect === "model_start") persistence.rejectNextPermit = true;
+      };
+      const sandboxes = new FakeSandboxRegistry();
+      const faux = fauxProvider({
+        api: `faux-worker-artifact-rejected-${Date.now()}`,
+        provider: `faux-worker-artifact-rejected-${Date.now()}`,
+        tokensPerSecond: 10_000,
+      });
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall(
+            "declare_deliverables",
+            {
+              idempotencyKey: "declare:rejected:report",
+              declarations: [{ key: "report", name: "最终报告", requirement: "required" }],
+            },
+            { id: "call-artifact-rejected" },
+          ),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("授权拒绝后不得到达此轮"),
+      ]);
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      modelRuntime.registerNativeProvider(faux.provider);
+      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const operations: string[] = [];
+      const receipts: string[] = [];
+      const sessions = new PiWorkerSessionFactory(
+        faux.getModel(),
+        modelRuntime,
+        (_input, outputs) => ({
+          recordStarted: async (call) => {
+            operations.push(`call:${call.toolCallId}:${call.toolName}`);
+            return "recorded" as const;
+          },
+          record: async (call) => {
+            operations.push(`result:${call.toolCallId}:${call.toolName}`);
+            const observation = await outputs.readControlledReceipt(call);
+            if (observation === undefined) return { outcome: "conflict" as const };
+            receipts.push(observation);
+            return { outcome: "recorded" as const, observation, isTruncated: false };
+          },
+        }),
+        routerFactory,
+        authority.issuer,
+      );
+      const worker = new RunWorker(
+        {
+          persistence,
+          revisions: new FakeRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions,
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        { workerId: "pi-artifact-rejected-worker", runTimeoutMs: 60_000 },
+      );
+
+      await expect(worker.execute(scope)).resolves.toEqual({ outcome: "fence_lost" });
+      expect(faux.state.callCount).toBe(1);
+      expect(artifactCalls).toBe(0);
+      expect(operations).toEqual([
+        "call:call-artifact-rejected:declare_deliverables",
+        "result:call-artifact-rejected:declare_deliverables",
+      ]);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toContain('"toolName":"declare_deliverables"');
+      expect(receipts[0]).toContain('"outcome":"failed"');
     },
   );
 
@@ -269,9 +553,23 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       });
       modelRuntime.registerNativeProvider(faux.provider);
       await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const artifactObservationOperations: string[] = [];
       const sessions = new PiWorkerSessionFactory(
         faux.getModel(),
         modelRuntime,
+        (_input, outputs) => ({
+          recordStarted: async (call) => {
+            artifactObservationOperations.push(`call:${call.toolCallId}:${call.toolName}`);
+            return "recorded" as const;
+          },
+          record: async (call) => {
+            artifactObservationOperations.push(`result:${call.toolCallId}:${call.toolName}`);
+            const observation = await outputs.readControlledReceipt(call);
+            return observation === undefined
+              ? { outcome: "conflict" as const }
+              : { outcome: "recorded" as const, observation, isTruncated: false };
+          },
+        }),
         routerFactory,
         authority.issuer,
       );
@@ -303,6 +601,12 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
           .events.filter((event) => event.kind === "artifact_correction_requested"),
       ).toHaveLength(1);
       expect(persistence.permits.map(({ permit }) => permit.effect)).toContain("model_continue");
+      expect(artifactObservationOperations).toEqual([
+        "call:call-pi-declare:declare_deliverables",
+        "result:call-pi-declare:declare_deliverables",
+        "call:call-pi-publish:publish_artifact",
+        "result:call-pi-publish:publish_artifact",
+      ]);
     },
   );
 });

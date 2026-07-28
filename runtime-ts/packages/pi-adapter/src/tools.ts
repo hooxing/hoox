@@ -1,8 +1,12 @@
+import { createHash } from "node:crypto";
+import type {
+  ControlledToolReceiptSource,
+  ToolObservationResult,
+} from "@cube-runtime/context-policy";
+import { encodeControlledToolReceipt } from "@cube-runtime/context-policy";
 import type { SandboxHandle } from "@cube-runtime/sandbox";
-import { SandboxRuntimeError } from "@cube-runtime/sandbox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { createHash } from "node:crypto";
 
 export const SANDBOX_TOOL_NAMES = [
   "sandbox_command",
@@ -27,17 +31,87 @@ export function createSandboxTools(
   sandbox: SandboxHandle,
   authorizer: SandboxToolEffectAuthorizer,
 ) {
+  return createSandboxToolsInternal(sandbox, authorizer);
+}
+
+/** 原始 Tool 结果只存在于闭包；对外只暴露完成统一脱敏后的只读 Observation source。 */
+export function createObservedSandboxTools(
+  sandbox: SandboxHandle,
+  authorizer: SandboxToolEffectAuthorizer,
+  createRecorder: (outputs: ControlledToolReceiptSource) => {
+    record(input: {
+      readonly toolCallId: string;
+      readonly toolName: string;
+    }): Promise<ToolObservationResult>;
+  },
+  rejectModelContinuation: () => void = () => undefined,
+): {
+  readonly tools: ReturnType<typeof createSandboxTools>;
+  readonly outputs: ControlledToolReceiptSource;
+  /** 仅供同一 Pi Session 内的其他受审工具写入相同固定回执与 durable result。 */
+  readonly recordControlledReceipt: (
+    callId: string,
+    toolName: string,
+    outcome: "succeeded" | "failed",
+  ) => Promise<ToolObservationResult>;
+} {
+  const outputs = new Map<string, { readonly name: string; readonly text: string }>();
+  const source: ControlledToolReceiptSource = {
+    async readControlledReceipt(input) {
+      const found = outputs.get(input.toolCallId);
+      if (found === undefined || found.name !== input.toolName) return undefined;
+      return found.text;
+    },
+  };
+  const recorder = createRecorder(source);
+  const capture = async (callId: string, name: string, text: string) => {
+    outputs.set(callId, { name, text });
+    try {
+      const result = await recorder.record({
+        toolCallId: callId,
+        toolName: name,
+      });
+      if (result.outcome !== "recorded" && result.outcome !== "replayed") {
+        rejectModelContinuation();
+      }
+      return result;
+    } catch (error) {
+      rejectModelContinuation();
+      throw error;
+    }
+  };
+  return {
+    tools: createSandboxToolsInternal(sandbox, authorizer, capture, rejectModelContinuation),
+    outputs: source,
+    recordControlledReceipt: (callId, toolName, outcome) =>
+      capture(callId, toolName, controlledObservation(toolName, outcome)),
+  };
+}
+
+function createSandboxToolsInternal(
+  sandbox: SandboxHandle,
+  authorizer: SandboxToolEffectAuthorizer,
+  capture?: (callId: string, name: string, text: string) => Promise<ToolObservationResult>,
+  rejectModelContinuation: () => void = () => undefined,
+) {
   return [
     defineTool({
       name: "sandbox_command",
       label: "Sandbox 命令",
       description: "只在隔离的 CubeSandbox 中执行命令，不访问 Agent Worker 宿主机。",
       parameters: Type.Object({ command: Type.String({ minLength: 1 }) }),
-      execute: async (_id, params, signal) => {
-        const authorization = await authorizeTool(authorizer, _id, "sandbox_command", params);
-        assertImmediateContinuation(authorization, signal);
-        return toolResult(() => sandbox.command(params.command, signalControl(signal)));
-      },
+      execute: async (_id, params, signal) =>
+        toolResult(
+          _id,
+          "sandbox_command",
+          capture,
+          async () => {
+            const authorization = await authorizeTool(authorizer, _id, "sandbox_command", params);
+            assertImmediateContinuation(authorization, signal);
+            return sandbox.command(params.command, signalControl(signal));
+          },
+          rejectModelContinuation,
+        ),
     }),
     defineTool({
       name: "sandbox_run_code",
@@ -47,27 +121,39 @@ export function createSandboxTools(
         code: Type.String({ minLength: 1 }),
         language: Type.Optional(Type.String()),
       }),
-      execute: async (_id, params, signal) => {
-        const authorization = await authorizeTool(authorizer, _id, "sandbox_run_code", params);
-        assertImmediateContinuation(authorization, signal);
-        return toolResult(() =>
-          sandbox.runCode(params.code, {
-            ...signalControl(signal),
-            ...(params.language ? { language: params.language } : {}),
-          }),
-        );
-      },
+      execute: async (_id, params, signal) =>
+        toolResult(
+          _id,
+          "sandbox_run_code",
+          capture,
+          async () => {
+            const authorization = await authorizeTool(authorizer, _id, "sandbox_run_code", params);
+            assertImmediateContinuation(authorization, signal);
+            return sandbox.runCode(params.code, {
+              ...signalControl(signal),
+              ...(params.language ? { language: params.language } : {}),
+            });
+          },
+          rejectModelContinuation,
+        ),
     }),
     defineTool({
       name: "sandbox_read_file",
       label: "读取 Sandbox 文件",
       description: "读取 CubeSandbox 中的绝对路径文件；不能读取 Worker 宿主机。",
       parameters: Type.Object({ path: Type.String({ pattern: "^/" }) }),
-      execute: async (_id, params, signal) => {
-        const authorization = await authorizeTool(authorizer, _id, "sandbox_read_file", params);
-        assertImmediateContinuation(authorization, signal);
-        return toolResult(() => sandbox.readFile(params.path, signalControl(signal)));
-      },
+      execute: async (_id, params, signal) =>
+        toolResult(
+          _id,
+          "sandbox_read_file",
+          capture,
+          async () => {
+            const authorization = await authorizeTool(authorizer, _id, "sandbox_read_file", params);
+            assertImmediateContinuation(authorization, signal);
+            return sandbox.readFile(params.path, signalControl(signal));
+          },
+          rejectModelContinuation,
+        ),
     }),
     defineTool({
       name: "sandbox_write_file",
@@ -77,14 +163,24 @@ export function createSandboxTools(
         path: Type.String({ pattern: "^/" }),
         content: Type.String(),
       }),
-      execute: async (_id, params, signal) => {
-        const authorization = await authorizeTool(authorizer, _id, "sandbox_write_file", params);
-        assertImmediateContinuation(authorization, signal);
-        return toolResult(async () => {
-          await sandbox.writeFile(params.path, params.content, signalControl(signal));
-          return { written: true };
-        });
-      },
+      execute: async (_id, params, signal) =>
+        toolResult(
+          _id,
+          "sandbox_write_file",
+          capture,
+          async () => {
+            const authorization = await authorizeTool(
+              authorizer,
+              _id,
+              "sandbox_write_file",
+              params,
+            );
+            assertImmediateContinuation(authorization, signal);
+            await sandbox.writeFile(params.path, params.content, signalControl(signal));
+            return { written: true };
+          },
+          rejectModelContinuation,
+        ),
     }),
   ];
 }
@@ -103,7 +199,7 @@ async function authorizeTool(
     });
   } catch {
     // 不泄漏 DB/栅栏细节；抛错让 Pi 将工具调用标记为失败，同时保证 Sandbox 尚未被触碰。
-    throw new Error("Runtime 已拒绝本次工具副作用");
+    throw new ToolEffectRejectedError("Runtime 已拒绝本次工具副作用");
   }
 }
 
@@ -116,7 +212,7 @@ function assertImmediateContinuation(
     signal?.aborted ||
     performance.now() - authorization.consumedAtMonotonicMs >= authorization.maxContinuationDelayMs
   ) {
-    throw new Error("Runtime 工具副作用许可已过期或调用已取消");
+    throw new ToolEffectRejectedError("Runtime 工具副作用许可已过期或调用已取消");
   }
 }
 
@@ -138,20 +234,61 @@ function signalControl(signal: AbortSignal | undefined): { signal?: AbortSignal 
   return signal ? { signal } : {};
 }
 
-async function toolResult(action: () => Promise<unknown>) {
+/**
+ * Sandbox 返回的 stdout、文件内容和异常 message 都属于低信任原始数据：其中既可能有密钥，
+ * 也可能含有提示注入。当前策略只持久化固定结构的观察事实，原始值不进入模型、Rollout 或 Blob。
+ */
+function controlledObservation(toolName: string, outcome: "succeeded" | "failed"): string {
+  return encodeControlledToolReceipt(toolName, outcome);
+}
+
+async function toolResult(
+  callId: string,
+  toolName: string,
+  capture:
+    | ((callId: string, name: string, text: string) => Promise<ToolObservationResult>)
+    | undefined,
+  action: () => Promise<unknown>,
+  rejectModelContinuation: () => void = () => undefined,
+) {
+  let outcome: "succeeded" | "failed" = "succeeded";
+  let effectRejected = false;
   try {
-    const value = await action();
-    return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: {} };
+    await action();
   } catch (error) {
-    // 工具结果不回传上游 cause，避免把网络地址、认证头或 SDK 内部响应泄漏给模型。
-    const safe =
-      error instanceof SandboxRuntimeError
-        ? { code: error.code, message: error.message }
-        : { code: "UPSTREAM", message: "Sandbox 工具执行失败" };
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(safe) }],
-      details: {},
-      isError: true,
-    };
+    // SandboxRuntimeError.message/code 同样来自上游，不能作为安全分类或模型文本使用。
+    effectRejected = error instanceof ToolEffectRejectedError;
+    outcome = "failed";
+  }
+  const text = controlledObservation(toolName, outcome);
+  // capture 位于 Sandbox try/catch 之外：持久化异常绝不能被误分类成普通 Tool 失败。
+  const observation = await capture?.(callId, toolName, text);
+  if (
+    observation !== undefined &&
+    observation.outcome !== "recorded" &&
+    observation.outcome !== "replayed"
+  ) {
+    throw new ToolObservationPersistenceError(observation.outcome);
+  }
+  // 许可拒绝已经形成配对 durable 回执；在抛给 Pi 前关闭下一模型轮次，不能以普通 Tool error 继续。
+  if (effectRejected) rejectModelContinuation();
+  if (outcome === "failed") {
+    // 只抛固定回执，Pi 才会产生 isError=true；原始 Sandbox 异常已在闭包内丢弃。
+    throw new Error(observation?.observation ?? text);
+  }
+  return {
+    content: [{ type: "text" as const, text: observation?.observation ?? text }],
+    details: {},
+  };
+}
+
+class ToolEffectRejectedError extends Error {
+  override readonly name = "ToolEffectRejectedError";
+}
+
+class ToolObservationPersistenceError extends Error {
+  constructor(readonly outcome: "conflict" | "unavailable" | "unknown") {
+    super("Tool Observation 未能形成 durable 事实");
+    this.name = "ToolObservationPersistenceError";
   }
 }

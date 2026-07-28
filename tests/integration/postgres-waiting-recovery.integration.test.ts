@@ -8,6 +8,7 @@ import {
   userId,
   workspaceId,
 } from "@cube-runtime/domain";
+import type { ExecutionFence } from "@cube-runtime/run-contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   decideWaitingRecovery,
@@ -65,6 +66,19 @@ const checkpointId = `wait_checkpoint_${unique}`;
 const changedRevision = `wait_revision_${unique}`;
 const actorId = userId(`wait_user_${unique}`);
 const databaseContext = { tenantId: scope.tenantId, userId: actorId };
+const fence = Object.freeze({
+  scope,
+  runClaim: Object.freeze({
+    token: "waiting-test-claim",
+    epoch: 1,
+    expiresAt: "2099-01-01T00:00:00.000Z" as never,
+  }),
+  workspaceLease: Object.freeze({
+    rootRunId: scope.rootRunId,
+    epoch: 1,
+    expiresAt: "2099-01-01T00:00:00.000Z" as never,
+  }),
+}) satisfies ExecutionFence;
 const rolloutContext = {
   scope: {
     tenantId: scope.tenantId,
@@ -74,6 +88,7 @@ const rolloutContext = {
     agentThreadId: agentThreadId(`wait_agent_${unique}`),
   },
   userId: actorId,
+  fence,
 };
 const hash = (value: string) => sha256Digest(value.repeat(64));
 const compatibility = {
@@ -308,6 +323,12 @@ beforeAll(async () => {
          tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,status,stage
        ) VALUES($1,$2,$3,$4,$5,$3,'running','model_settled')`,
       [scope.tenantId, attemptId, scope.runId, scope.threadId, scope.workspaceId],
+    );
+    await client.query(
+      `INSERT INTO workspace_write_leases(
+         tenant_id,workspace_id,thread_id,root_run_id,epoch,expires_at)
+       VALUES($1,$2,$3,$4,1,clock_timestamp()+interval '1 hour')`,
+      [scope.tenantId, scope.workspaceId, scope.threadId, scope.rootRunId],
     );
     await client.query(
       `INSERT INTO execution_workspace_fences(

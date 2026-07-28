@@ -27,7 +27,7 @@ try {
   console.log("[1/6] 创建真实 CubeSandbox");
   sandbox = await gateway.create({ templateId: config.templateId, ttlSeconds: 120 });
 
-  console.log("[2/6] 创建 Linux Pi Session 与 Faux Provider");
+  console.log("[2/6] 创建 Pi Session 与 Faux Provider（工具在 Linux CubeSandbox 执行）");
   const faux = fauxProvider({
     api: "faux-real-cube-smoke",
     provider: "faux-real-cube-smoke",
@@ -41,13 +41,15 @@ try {
     }),
     (context) => {
       const messages = JSON.stringify(context.messages);
-      writeObservationSeen = messages.includes("written") && messages.includes("true");
+      writeObservationSeen =
+        messages.includes("sandbox_untrusted") && !messages.includes('"written":true');
       return fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path }), {
         stopReason: "toolUse",
       });
     },
     (context) => {
-      readObservationSeen = JSON.stringify(context.messages).includes(content);
+      const messages = JSON.stringify(context.messages);
+      readObservationSeen = messages.includes("sandbox_untrusted") && !messages.includes(content);
       return fauxAssistantMessage("真实纵向链路完成");
     },
   ]);
@@ -71,6 +73,14 @@ try {
         maxContinuationDelayMs: 250,
       };
     },
+    createToolObservationRecorder: (outputs) => ({
+      record: async (call) => {
+        const observation = await outputs.readControlledReceipt(call);
+        return observation === undefined
+          ? { outcome: "conflict" as const }
+          : { outcome: "recorded" as const, observation, isTruncated: false };
+      },
+    }),
   });
 
   console.log("[3/6] Faux Provider 发起 Pi Tool Call");

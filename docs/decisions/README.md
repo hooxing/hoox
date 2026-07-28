@@ -36,13 +36,17 @@
 | [ADR-0028](0028-cubesandbox-workspace-adapter-boundary.md) | CubeSandbox Workspace 可信适配边界 | 已接受 | 2026-07-28 |
 | [ADR-0029](0029-trusted-prompt-and-session-capability-manifest.md) | 可信 Prompt 分层与 Session 能力清单 | 已接受 | 2026-07-28 |
 | [ADR-0030](0030-runtime-rollout-checkpoint-fact-source.md) | Runtime Rollout 与 Checkpoint 事实源 | 已接受 | 2026-07-28 |
+| [ADR-0031](0031-blob-backed-tool-observation.md) | Blob-backed Tool Observation 截断切片 | 已接受 | 2026-07-28 |
 | [ADR-0032](0032-runtime-rollout-pi-recovery-projection.md) | Runtime Rollout 到 Pi 的恢复投影 | 已接受 | 2026-07-28 |
 | [ADR-0033](0033-waiting-sandbox-recovery.md) | waiting 与 SandboxSession 恢复安全边界 | 已接受 | 2026-07-28 |
 | [ADR-0034](0034-m4-runtime-dependency-build-gate.md) | M4 黑盒运行时依赖构建门禁 | 已接受 | 2026-07-28 |
 | [ADR-0035](0035-model-aware-context-budget.md) | 模型感知的 Context Budget | 已接受 | 2026-07-28 |
 | [ADR-0036](0036-waiting-recovery-proof-derived-facts.md) | waiting 恢复事实由已完成副作用证明推导 | 已替代 | 2026-07-28 |
 | [ADR-0037](0037-waiting-recovery-capability-and-append-only-rollback.md) | waiting 恢复能力回执与只追加回退边界 | 已接受 | 2026-07-28 |
+| [ADR-0038](0038-production-worker-fail-closed-workspace-boundary.md) | 生产 Worker 的 Workspace 失败关闭边界 | 已接受 | 2026-07-28 |
 | [ADR-0039](0039-web-local-agent-workbench.md) | 本地 Agent 工作台与公开 API 边界 | 已接受 | 2026-07-28 |
+| [ADR-0040](0040-development-worker-windows-and-model-readiness.md) | 开发 Worker 的 Windows 运行与模型就绪边界 | 已接受 | 2026-07-28 |
+| [ADR-0041](0041-worker-stop-and-tool-rejection-fail-closed.md) | Worker 停机与工具拒绝的失败关闭边界 | 已接受 | 2026-07-28 |
 | [ADR-0042](0042-local-web-experience-read-contract.md) | 本地 Web 体验的 Run 事件与 Artifact 读取契约 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录

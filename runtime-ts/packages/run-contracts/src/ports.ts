@@ -148,6 +148,7 @@ export type StableWorkerErrorCode =
   | "PROVIDER"
   | "PROTOCOL"
   | "EVENT_REJECTED"
+  | "WORKER_SHUTDOWN"
   | "PERSISTENCE_UNAVAILABLE"
   | "FENCE_LOST"
   | "SANDBOX_UNKNOWN"
@@ -523,6 +524,11 @@ export type AgentTurnOutcome =
   | { readonly kind: "completed" }
   | { readonly kind: "context_too_large"; readonly action: "rebuild_context" }
   | {
+      /** Tool Observation 未形成可恢复的 durable 事实；本 Attempt 不能继续成功。 */
+      readonly kind: "recovery_required";
+      readonly code: "PERSISTENCE_UNAVAILABLE" | "IDEMPOTENCY_CONFLICT";
+    }
+  | {
       readonly kind: "waiting";
       readonly question: string;
       readonly rolloutProjection: ControlledRolloutProjection;
@@ -535,14 +541,20 @@ export interface WorkerAgentSessionPort {
     authorization: ConsumedExternalEffectAuthorization,
   ): Promise<AgentTurnOutcome>;
   abort(): Promise<void>;
+  /** durable 工具拒绝回执在 abort 前完成；未声明能力的 Session 不得延迟拒绝中止。 */
+  drainRejectedToolReceipts?(): Promise<void>;
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void;
   dispose(): void;
 }
 
 export interface AgentSessionFactoryPort {
+  /** 工具许可拒绝会先形成 durable 失败回执，并在下一 Provider 轮次前失败关闭。 */
+  readonly toolRejectionReceiptBarrier?: "durable";
   create(input: {
     readonly scope: ExecutionScope;
     readonly attemptId: string;
+    /** 当前 claim 的完整双栅栏；生产 Rollout 装配只从该能力回到 PG 推导 actor。 */
+    readonly fence: ExecutionFence;
     readonly sandbox: SandboxHandle;
     readonly rolloutProjection: ControlledRolloutProjection;
     readonly authorizeToolEffect: (
@@ -555,7 +567,7 @@ export interface RecoveryMetricsPort {
   recordOrphanCleanup(input: {
     readonly scope: ExecutionScope;
     readonly registryId: string;
-    readonly reason: RuntimeMutationResult["outcome"] | "cancelled" | "timeout";
+    readonly reason: RuntimeMutationResult["outcome"] | "cancelled" | "timeout" | "shutdown";
     readonly cleanupOutcome: "settled" | "unknown" | "failed";
   }): Promise<void>;
 }

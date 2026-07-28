@@ -2,6 +2,26 @@ import { describe, expect, it, vi } from "vitest";
 import { canPreviewArtifact, normalizeRunEvent, RuntimeApi } from "./api.js";
 
 describe("RuntimeApi", () => {
+  it("默认 fetch 保留浏览器全局 receiver，不会以 RuntimeApi 实例调用", async () => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(function (
+      this: typeof globalThis,
+    ) {
+      if (this !== globalThis) throw new TypeError("Illegal invocation");
+      return Promise.resolve(
+        new Response(JSON.stringify({ version: "v1", requestId: "req_1", data: { items: [] } }), {
+          status: 200,
+        }),
+      );
+    } as typeof fetch);
+    try {
+      await expect(new RuntimeApi().listThreads()).resolves.toEqual([]);
+      expect(fetcher).toHaveBeenCalledOnce();
+      expect(fetcher.mock.contexts[0]).toBe(globalThis);
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
+
   it("创建请求携带开发身份和幂等键", async () => {
     const fetcher = vi
       .fn()

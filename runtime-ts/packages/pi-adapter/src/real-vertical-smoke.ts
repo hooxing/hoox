@@ -61,7 +61,7 @@ try {
   const model = faux.getModel();
   controller = await createSafePiSession({
     model,
-    modelContext: bindTrustedPiModelContextCapability(model),
+    modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
     modelRuntime,
     sandbox,
     authorizeToolEffect: async (call) => {

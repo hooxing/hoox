@@ -14,7 +14,7 @@ import {
   type ToolCapabilityManifest,
 } from "@cube-runtime/prompt-builder";
 import type { SandboxHandle } from "@cube-runtime/sandbox";
-import type { Api, Model } from "@earendil-works/pi-ai/compat";
+import type { Api, Context, Model } from "@earendil-works/pi-ai/compat";
 import {
   type AgentSessionEvent,
   createAgentSession,
@@ -122,7 +122,14 @@ class PiSessionControllerImpl implements PiSessionController {
   }
 }
 
-const TRUSTED_MODEL_CAPABILITIES = new WeakSet<object>();
+const UTF8_BYTE_TOKENIZER = Object.freeze<TokenizerPort>({
+  identity: "utf8-byte-upper-bound-v1",
+  countTokens: Object.freeze((text: string) => new TextEncoder().encode(text).byteLength),
+});
+const TRUSTED_MODEL_CAPABILITIES = new WeakMap<
+  object,
+  Readonly<{ modelRuntime: ModelRuntime; registeredModel: Model<Api> }>
+>();
 export interface TrustedPiModelContextCapability {
   readonly model: Model<Api>;
   readonly descriptor: ModelBudgetDescriptor;
@@ -132,16 +139,35 @@ export interface TrustedPiModelContextCapability {
 
 /** Provider/model registry 的唯一绑定入口；Session 不接受独立 descriptor 或裸 tokenizer。 */
 export function bindTrustedPiModelContextCapability(
+  modelRuntime: ModelRuntime,
   model: Model<Api>,
-  tokenizer?: TokenizerPort,
+  ...unsupported: never[]
 ): TrustedPiModelContextCapability {
-  const selected = tokenizer ?? {
-    identity: "utf8-byte-upper-bound-v1",
-    countTokens: (text: string) => new TextEncoder().encode(text).byteLength,
-  };
+  if (unsupported.length !== 0) throw new TypeError("公开绑定入口不接受外部 tokenizer");
+  return bindModelContextCapability(modelRuntime, model, UTF8_BYTE_TOKENIZER);
+}
+
+/** @internal 仅供本包测试构造极端预算；未从包入口导出。 */
+export function bindTestingPiModelContextCapability(
+  modelRuntime: ModelRuntime,
+  model: Model<Api>,
+  tokenizer: TokenizerPort,
+): TrustedPiModelContextCapability {
+  return bindModelContextCapability(modelRuntime, model, tokenizer);
+}
+
+function bindModelContextCapability(
+  modelRuntime: ModelRuntime,
+  model: Model<Api>,
+  selected: TokenizerPort,
+): TrustedPiModelContextCapability {
+  const registeredModel = modelRuntime.getModel(model.provider, model.id);
+  if (registeredModel === undefined || registeredModel !== model)
+    throw new TypeError("模型未绑定当前 Provider registry");
   const probe = selected.countTokens("可信探针🙂 entropy-0123456789");
   if (!selected.identity.trim() || !Number.isSafeInteger(probe) || probe <= 0)
     throw new TypeError("Provider tokenizer capability 无效");
+  const modelSnapshot = freezeModelSnapshot(model);
   const descriptor = Object.freeze({
     modelId: model.id,
     contextWindow: model.contextWindow,
@@ -150,12 +176,12 @@ export function bindTrustedPiModelContextCapability(
   });
   // 保存探针结果而非只在绑定时检查；Provider 注册表若在运行中替换 tokenizer，必须失败关闭。
   const capability = Object.freeze({
-    model,
+    model: modelSnapshot,
     descriptor,
     tokenizer: selected,
     tokenizerProbe: probe,
   });
-  TRUSTED_MODEL_CAPABILITIES.add(capability);
+  TRUSTED_MODEL_CAPABILITIES.set(capability, Object.freeze({ modelRuntime, registeredModel }));
   return capability;
 }
 
@@ -234,8 +260,8 @@ export async function createSafePiSession(
   }
   const { session } = await createAgentSession({
     cwd: LOGICAL_WORKSPACE,
-    model: options.model,
-    modelRuntime: options.modelRuntime,
+    model: options.modelContext.model,
+    modelRuntime: providerGatedRuntime(options),
     thinkingLevel: "off",
     sessionManager,
     settingsManager,
@@ -270,14 +296,7 @@ export async function createSafePiSession(
         .getEntries()
         .some((entry) => entry.type === "compaction"),
     }),
-    (() => {
-      const admittedInputs: string[] = [];
-      return (text: string) => {
-        assertCurrentInputFits(options, material, activeProjection, admittedInputs, text);
-        // 只有 Pi 接受输入后才把它纳入后续 Provider 请求；失败调用不得污染会话预算。
-        admittedInputs.push(text);
-      };
-    })(),
+    (text) => assertCurrentInputFits(options, material, activeProjection, [], text),
   );
 }
 
@@ -384,6 +403,8 @@ function modelCompatibilityHash(model: Model<Api>) {
     id: model.id,
     provider: model.provider,
     api: model.api,
+    baseUrl: model.baseUrl,
+    headers: model.headers,
     reasoning: model.reasoning,
     thinkingLevelMap: model.thinkingLevelMap,
     input: model.input,
@@ -393,14 +414,64 @@ function modelCompatibilityHash(model: Model<Api>) {
   });
 }
 
+/** 每次 Pi 真正请求 Provider 前按最终 Context 计量，覆盖同一 prompt 内的工具循环。 */
+function providerGatedRuntime(options: CreateSafePiSessionOptions): ModelRuntime {
+  const runtime = options.modelRuntime;
+  return new Proxy(runtime, {
+    get(target, property, receiver) {
+      if (property === "streamSimple") {
+        return (model: Model<Api>, context: Context, streamOptions?: unknown) => {
+          assertTrustedModelCapability(options);
+          if (model !== options.modelContext.model)
+            throw new TypeError("Provider 调用未使用冻结模型快照");
+          const decision = decideModelAwareContextBudget({
+            model: options.modelContext.descriptor,
+            trustedSystemPrompt: context.systemPrompt ?? "",
+            toolSchema: JSON.stringify(context.tools ?? []),
+            additionalFixedInputs: context.messages.map((message) => JSON.stringify(message)),
+            entries: [],
+            tokenizer: options.modelContext.tokenizer,
+          });
+          if (decision.outcome !== "ready") {
+            throw new ContextBudgetAdmissionError("reserved_context_exceeds_window");
+          }
+          return runtime.streamSimple(model, context, streamOptions as never);
+        };
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+function freezeModelSnapshot(model: Model<Api>): Model<Api> {
+  const clone = structuredClone(model);
+  const freeze = (value: unknown): void => {
+    if (value === null || typeof value !== "object" || Object.isFrozen(value)) return;
+    for (const child of Object.values(value)) freeze(child);
+    Object.freeze(value);
+  };
+  freeze(clone);
+  return clone;
+}
+
 function assertTrustedModelCapability(options: CreateSafePiSessionOptions): void {
+  const binding = TRUSTED_MODEL_CAPABILITIES.get(options.modelContext);
+  const liveRegisteredModel = options.modelRuntime.getModel(
+    options.model.provider,
+    options.model.id,
+  );
   if (
-    !TRUSTED_MODEL_CAPABILITIES.has(options.modelContext) ||
-    options.modelContext.model !== options.model ||
+    binding === undefined ||
+    binding.modelRuntime !== options.modelRuntime ||
+    binding.registeredModel !== liveRegisteredModel ||
     options.modelContext.descriptor.modelId !== options.model.id ||
     options.modelContext.descriptor.contextWindow !== options.model.contextWindow ||
     options.modelContext.descriptor.maxOutputTokens !== options.model.maxTokens ||
     options.modelContext.descriptor.compatibilityHash !== modelCompatibilityHash(options.model) ||
+    liveRegisteredModel === undefined ||
+    options.modelContext.descriptor.compatibilityHash !==
+      modelCompatibilityHash(liveRegisteredModel) ||
     options.modelContext.tokenizer.countTokens("可信探针🙂 entropy-0123456789") !==
       options.modelContext.tokenizerProbe
   )

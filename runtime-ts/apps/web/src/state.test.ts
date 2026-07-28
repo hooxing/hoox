@@ -36,4 +36,43 @@ describe("mergeEvents", () => {
     });
     expect(afterRecovery).toMatchObject({ eventAttemptId: "attempt_2", events: [newEvent] });
   });
+
+  it("startRun 原子清空上一 Run 的事件、Attempt 和产物", () => {
+    const run = {
+      id: "run_2",
+      threadId: "thread_1",
+      status: "queued" as const,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+    const dirty = {
+      ...initialWorkspaceState,
+      eventAttemptId: "attempt_1",
+      events: [
+        {
+          eventId: "event-9",
+          sequence: 9,
+          occurredAt: "",
+          kind: "agent_event",
+          type: "message.delta",
+          payload: { delta: "旧" },
+        },
+      ],
+      artifacts: [
+        {
+          id: "artifact_1",
+          name: "旧产物",
+          status: "published" as const,
+          createdAt: "",
+          updatedAt: "",
+        },
+      ],
+    };
+    expect(workspaceReducer(dirty, { type: "startRun", run })).toMatchObject({
+      run,
+      eventAttemptId: undefined,
+      events: [],
+      artifacts: [],
+    });
+  });
 });

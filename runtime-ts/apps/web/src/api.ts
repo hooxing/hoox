@@ -27,7 +27,10 @@ export type RunEvent = {
 export type RunEventPage = {
   readonly attemptId: string | undefined;
   readonly items: readonly RunEvent[];
+  readonly hasMore?: boolean;
 };
+
+export const EVENT_PAGE_LIMIT = 100;
 
 export type Artifact = {
   readonly id: string;
@@ -173,16 +176,23 @@ export class RuntimeApi {
       },
     );
   }
-  async listEvents(threadId: string, runId: string, after = -1): Promise<RunEventPage> {
+  async listEvents(
+    threadId: string,
+    runId: string,
+    after = -1,
+    limit = EVENT_PAGE_LIMIT,
+  ): Promise<RunEventPage> {
     const data = await this.request<unknown>(
-      `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/events?after=${after}&limit=100`,
+      `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/events?after=${after}&limit=${limit}`,
     );
     const page = record(data);
+    const hasMore = typeof page?.hasMore === "boolean" ? page.hasMore : undefined;
     return {
       attemptId: typeof page?.attemptId === "string" ? page.attemptId : undefined,
       items: asArray(data)
         .map(normalizeRunEvent)
         .filter((event): event is RunEvent => event !== undefined),
+      ...(hasMore === undefined ? {} : { hasMore }),
     };
   }
   async listArtifacts(threadId: string, runId: string): Promise<readonly Artifact[]> {

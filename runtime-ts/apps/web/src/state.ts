@@ -32,6 +32,7 @@ export function workspaceReducer(
   action:
     | { readonly type: "threads"; readonly threads: readonly Thread[] }
     | { readonly type: "select"; readonly threadId: string }
+    | { readonly type: "startRun"; readonly run: Run }
     | { readonly type: "run"; readonly run: Run }
     | { readonly type: "events"; readonly page: RunEventPage }
     | { readonly type: "artifacts"; readonly artifacts: readonly Artifact[] },
@@ -50,6 +51,14 @@ export function workspaceReducer(
       };
     case "run":
       return { ...state, run: action.run };
+    case "startRun":
+      return {
+        ...state,
+        run: action.run,
+        eventAttemptId: undefined,
+        events: [],
+        artifacts: [],
+      };
     case "events":
       return action.page.attemptId !== state.eventAttemptId
         ? { ...state, eventAttemptId: action.page.attemptId, events: action.page.items }

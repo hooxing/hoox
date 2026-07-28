@@ -12,6 +12,8 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ApiError, canPreviewArtifact, type RunEvent, RuntimeApi } from "./api.js";
 import { buildTimeline, eventSummary } from "./event-view.js";
+import { drainEventPages } from "./polling.js";
+import { openResolvedUrl, PopupBlockedError } from "./popup.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
 import "./styles.css";
 
@@ -82,14 +84,20 @@ function App() {
       try {
         const latest = await api.getRun(threadId, runId);
         const [eventPage, artifacts] = await Promise.all([
-          api.listEvents(threadId, runId, eventAfterRef.current),
+          drainEventPages(
+            (after, limit) => api.listEvents(threadId, runId, after, limit),
+            eventAfterRef.current,
+            eventAttemptRef.current,
+          ),
           api.listArtifacts(threadId, runId),
         ]);
         if (!stopped) {
-          if (eventPage.attemptId !== eventAttemptRef.current) {
-            eventAttemptRef.current = eventPage.attemptId;
+          const attemptChanged = eventPage.attemptId !== eventAttemptRef.current;
+          eventAttemptRef.current = eventPage.attemptId;
+          if (attemptChanged) {
             eventAfterRef.current = -1;
           }
+          eventAfterRef.current = eventPage.items.at(-1)?.sequence ?? eventAfterRef.current;
           dispatch({ type: "run", run: latest });
           dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
@@ -131,7 +139,11 @@ function App() {
     setActionLoading(true);
     try {
       const request = input.trim();
-      dispatch({ type: "run", run: await api.createRun(state.selectedThreadId, request) });
+      const run = await api.createRun(state.selectedThreadId, request);
+      // 新 Run 不能继承上一 Run 的 Attempt 或 sequence 游标。
+      eventAfterRef.current = -1;
+      eventAttemptRef.current = undefined;
+      dispatch({ type: "startRun", run });
       setCurrentRequest(request);
       setInput("");
       setError(undefined);
@@ -168,23 +180,28 @@ function App() {
       setActionLoading(false);
     }
   };
+  const openArtifact = async (resolveUrl: () => Promise<string>, fallbackMessage: string) => {
+    try {
+      await openResolvedUrl(() => window.open("about:blank", "_blank"), resolveUrl);
+    } catch (reason) {
+      if (reason instanceof PopupBlockedError) {
+        setError(new ApiError(reason.message, 0, false));
+      } else {
+        setError(reason instanceof ApiError ? reason : new ApiError(fallbackMessage, 0, true));
+      }
+    }
+  };
   const download = async (artifactId: string) => {
     if (!state.selectedThreadId || !state.run) return;
-    try {
-      const url = await api.downloadArtifact(state.selectedThreadId, state.run.id, artifactId);
-      window.open(url, "_blank", "noopener");
-    } catch (reason) {
-      setError(reason instanceof ApiError ? reason : new ApiError("获取下载地址失败", 0, true));
-    }
+    const threadId = state.selectedThreadId;
+    const runId = state.run.id;
+    await openArtifact(() => api.downloadArtifact(threadId, runId, artifactId), "获取下载地址失败");
   };
   const preview = async (artifactId: string) => {
     if (!state.selectedThreadId || !state.run) return;
-    try {
-      const url = await api.previewArtifact(state.selectedThreadId, state.run.id, artifactId);
-      window.open(url, "_blank", "noopener");
-    } catch (reason) {
-      setError(reason instanceof ApiError ? reason : new ApiError("获取预览地址失败", 0, true));
-    }
+    const threadId = state.selectedThreadId;
+    const runId = state.run.id;
+    await openArtifact(() => api.previewArtifact(threadId, runId, artifactId), "获取预览地址失败");
   };
 
   const selected = state.threads.find((thread) => thread.id === state.selectedThreadId);

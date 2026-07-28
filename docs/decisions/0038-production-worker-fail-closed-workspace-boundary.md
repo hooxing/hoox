@@ -27,6 +27,8 @@ Artifact Router 也尚未在该入口启用；当前 Session 能力清单不注�
 
 同时，恢复清理指标写入租户隔离的 PostgreSQL 表；模型 context window 和最大输出 token 必须由
 严格环境配置提供，并与 provider `/models` 元数据一致，否则 readiness 失败关闭。
+恢复指标属于只追加审计事实，Runtime 对该表只持有 `SELECT` 与 `INSERT`；迁移必须在同一事务中
+收敛这项最小权限，不能让新增表沿用 Owner 或 PUBLIC 的隐式权限。
 
 ## 影响
 
@@ -41,6 +43,7 @@ Artifact Router 也尚未在该入口启用；当前 Session 能力清单不注�
 - polling loop 测试覆盖 claim 阻塞期间关闭，关闭后返回的 claim 只 defer、不执行。
 - 进程配置测试覆盖模型预算必填。
 - 生产集成 Gate 必须增加写文件导致 `recovery_required`；完整发布上线时再替换为跨 Run 恢复 E2E。
+- PostgreSQL 迁移测试覆盖从版本 11 升级 0012/0013，并断言恢复指标表仅有 `SELECT/INSERT` 白名单。
 
 ## 可逆性
 

@@ -701,6 +701,62 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("从版本 11 升级 0012 与 0013 时原子收敛恢复指标最小权限", async () => {
+    const target = await createIsolatedMigrationTarget("workspace_runtime_acl_upgrade");
+    try {
+      expect(
+        (await migrateUp(target.pool, target.context)).map((record) => record.version),
+      ).toEqual(migrationContract.versions);
+      expect(
+        (
+          await migrateDown(target.pool, {
+            ...target.context,
+            allowDestructive: true,
+            environment: "test",
+            targetVersion: 11,
+          })
+        ).map((record) => record.version),
+      ).toEqual(migrationContract.versions.filter((version) => version <= 11));
+      expect(
+        (
+          await target.pool.query<{ present: boolean }>(
+            "SELECT to_regclass('runtime_recovery_metrics') IS NOT NULL AS present",
+          )
+        ).rows[0]?.present,
+      ).toBe(false);
+
+      expect(
+        (await migrateUp(target.pool, target.context)).map((record) => record.version),
+      ).toEqual(migrationContract.versions);
+      const privileges = await target.pool.query<{
+        privilege: string;
+        allowed: boolean;
+      }>(
+        `SELECT requested.privilege,
+                has_table_privilege(
+                  $1, 'runtime_recovery_metrics', requested.privilege
+                ) AS allowed
+           FROM unnest($2::text[]) AS requested(privilege)
+          ORDER BY requested.privilege`,
+        [
+          runtimeRole,
+          ["SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER"],
+        ],
+      );
+      expect(privileges.rows).toEqual([
+        { privilege: "DELETE", allowed: false },
+        { privilege: "INSERT", allowed: true },
+        { privilege: "REFERENCES", allowed: false },
+        { privilege: "SELECT", allowed: true },
+        { privilege: "TRIGGER", allowed: false },
+        { privilege: "TRUNCATE", allowed: false },
+        { privilege: "UPDATE", allowed: false },
+      ]);
+    } finally {
+      await target.close();
+    }
+  });
+
   it("0007→0006→0007 定向收敛 Thread 幂等表的 FORCE RLS 与最小 ACL", async () => {
     const target = await createIsolatedMigrationTarget("thread_creation_roundtrip");
     try {

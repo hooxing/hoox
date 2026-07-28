@@ -974,6 +974,12 @@ export async function bootstrapRuntimeAccessOnClient(
        TO ${role}`,
     );
   }
+  if (await hasWorkspaceRuntimeState(client, context.schema)) {
+    // 恢复指标是只追加审计事实；Runtime 只能读取和新增，不能更新或删除。
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.runtime_recovery_metrics TO ${role}`,
+    );
+  }
   await client.query(
     `GRANT UPDATE(state, current_incarnation_id, generation, current_claim_id, lease_expires_at, updated_at)
        ON TABLE ${schema}.blob_lifecycles TO ${role};

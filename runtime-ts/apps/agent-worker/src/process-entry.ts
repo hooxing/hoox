@@ -1,4 +1,16 @@
 import {
+  createPostgresPool,
+  createS3BlobStore,
+  PgBackedSandboxSessionRegistry,
+  PgBlobLifecycleRepository,
+  PgExecutionPersistence,
+  PgRecoveryMetrics,
+  PgRunDispatchOutbox,
+  PgRuntimeRolloutRepository,
+  probePostgres,
+  probeS3BlobStore,
+} from "@cube-runtime/persistence";
+import {
   booleanEnvironmentField,
   integerEnvironmentField,
   type ProcessSignalSource,
@@ -12,22 +24,10 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
-import {
-  createPostgresPool,
-  createS3BlobStore,
-  PgBackedSandboxSessionRegistry,
-  PgBlobLifecycleRepository,
-  PgExecutionPersistence,
-  PgRecoveryMetrics,
-  PgRunDispatchOutbox,
-  PgRuntimeRolloutRepository,
-  probeS3BlobStore,
-  probePostgres,
-} from "@cube-runtime/persistence";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { PiWorkerSessionFactory } from "./pi-session-factory.js";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
+import { PiWorkerSessionFactory } from "./pi-session-factory.js";
 import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
@@ -152,6 +152,11 @@ export function parseWorkerProcessEnvironment(
       throw new TypeError("AGENT_WORKER_TENANT_ID 必须与 DEV_AUTH_USER_A_TENANT_ID 一致");
     }
   }
+  const contextWindow = readRequiredEnvironmentValue(parsed, "MODEL_CONTEXT_WINDOW");
+  const maxOutputTokens = readRequiredEnvironmentValue(parsed, "MODEL_MAX_OUTPUT_TOKENS");
+  if (maxOutputTokens > contextWindow) {
+    throw new TypeError("MODEL_MAX_OUTPUT_TOKENS 不能大于 MODEL_CONTEXT_WINDOW");
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
@@ -182,8 +187,8 @@ export function parseWorkerProcessEnvironment(
       baseUrl: readRequiredEnvironmentValue(parsed, "MODEL_BASE_URL"),
       apiKey: readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),
       modelId: readRequiredEnvironmentValue(parsed, "MODEL_ID"),
-      contextWindow: readRequiredEnvironmentValue(parsed, "MODEL_CONTEXT_WINDOW"),
-      maxOutputTokens: readRequiredEnvironmentValue(parsed, "MODEL_MAX_OUTPUT_TOKENS"),
+      contextWindow,
+      maxOutputTokens,
     }),
     worker: Object.freeze({
       tenantId: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_TENANT_ID"),

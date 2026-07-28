@@ -1,12 +1,12 @@
-import type { SandboxHandle } from "@cube-runtime/sandbox";
+import { createHash } from "node:crypto";
 import type {
   ControlledToolReceiptSource,
   ToolObservationResult,
 } from "@cube-runtime/context-policy";
 import { encodeControlledToolReceipt } from "@cube-runtime/context-policy";
+import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { createHash } from "node:crypto";
 
 export const SANDBOX_TOOL_NAMES = [
   "sandbox_command",
@@ -89,13 +89,12 @@ function createSandboxToolsInternal(
       label: "Sandbox 命令",
       description: "只在隔离的 CubeSandbox 中执行命令，不访问 Agent Worker 宿主机。",
       parameters: Type.Object({ command: Type.String({ minLength: 1 }) }),
-      execute: async (_id, params, signal) => {
-        const authorization = await authorizeTool(authorizer, _id, "sandbox_command", params);
-        assertImmediateContinuation(authorization, signal);
-        return toolResult(_id, "sandbox_command", capture, () =>
-          sandbox.command(params.command, signalControl(signal)),
-        );
-      },
+      execute: async (_id, params, signal) =>
+        toolResult(_id, "sandbox_command", capture, async () => {
+          const authorization = await authorizeTool(authorizer, _id, "sandbox_command", params);
+          assertImmediateContinuation(authorization, signal);
+          return sandbox.command(params.command, signalControl(signal));
+        }),
     }),
     defineTool({
       name: "sandbox_run_code",
@@ -105,29 +104,27 @@ function createSandboxToolsInternal(
         code: Type.String({ minLength: 1 }),
         language: Type.Optional(Type.String()),
       }),
-      execute: async (_id, params, signal) => {
-        const authorization = await authorizeTool(authorizer, _id, "sandbox_run_code", params);
-        assertImmediateContinuation(authorization, signal);
-        return toolResult(_id, "sandbox_run_code", capture, () =>
-          sandbox.runCode(params.code, {
+      execute: async (_id, params, signal) =>
+        toolResult(_id, "sandbox_run_code", capture, async () => {
+          const authorization = await authorizeTool(authorizer, _id, "sandbox_run_code", params);
+          assertImmediateContinuation(authorization, signal);
+          return sandbox.runCode(params.code, {
             ...signalControl(signal),
             ...(params.language ? { language: params.language } : {}),
-          }),
-        );
-      },
+          });
+        }),
     }),
     defineTool({
       name: "sandbox_read_file",
       label: "读取 Sandbox 文件",
       description: "读取 CubeSandbox 中的绝对路径文件；不能读取 Worker 宿主机。",
       parameters: Type.Object({ path: Type.String({ pattern: "^/" }) }),
-      execute: async (_id, params, signal) => {
-        const authorization = await authorizeTool(authorizer, _id, "sandbox_read_file", params);
-        assertImmediateContinuation(authorization, signal);
-        return toolResult(_id, "sandbox_read_file", capture, () =>
-          sandbox.readFile(params.path, signalControl(signal)),
-        );
-      },
+      execute: async (_id, params, signal) =>
+        toolResult(_id, "sandbox_read_file", capture, async () => {
+          const authorization = await authorizeTool(authorizer, _id, "sandbox_read_file", params);
+          assertImmediateContinuation(authorization, signal);
+          return sandbox.readFile(params.path, signalControl(signal));
+        }),
     }),
     defineTool({
       name: "sandbox_write_file",
@@ -137,14 +134,13 @@ function createSandboxToolsInternal(
         path: Type.String({ pattern: "^/" }),
         content: Type.String(),
       }),
-      execute: async (_id, params, signal) => {
-        const authorization = await authorizeTool(authorizer, _id, "sandbox_write_file", params);
-        assertImmediateContinuation(authorization, signal);
-        return toolResult(_id, "sandbox_write_file", capture, async () => {
+      execute: async (_id, params, signal) =>
+        toolResult(_id, "sandbox_write_file", capture, async () => {
+          const authorization = await authorizeTool(authorizer, _id, "sandbox_write_file", params);
+          assertImmediateContinuation(authorization, signal);
           await sandbox.writeFile(params.path, params.content, signalControl(signal));
           return { written: true };
-        });
-      },
+        }),
     }),
   ];
 }

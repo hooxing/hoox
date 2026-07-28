@@ -74,6 +74,23 @@ describe("Agent Worker 进程入口", () => {
     expect(() => parseWorkerProcessEnvironment(source)).toThrow("MISSING:MODEL_CONTEXT_WINDOW");
   });
 
+  it("模型最大输出预算不能超过上下文窗口", () => {
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        MODEL_CONTEXT_WINDOW: "4096",
+        MODEL_MAX_OUTPUT_TOKENS: "4097",
+      }),
+    ).toThrow("MODEL_MAX_OUTPUT_TOKENS 不能大于 MODEL_CONTEXT_WINDOW");
+    expect(
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        MODEL_CONTEXT_WINDOW: "4096",
+        MODEL_MAX_OUTPUT_TOKENS: "4096",
+      }).model,
+    ).toMatchObject({ contextWindow: 4096, maxOutputTokens: 4096 });
+  });
+
   it("开发 Worker 强制消费 dev-user-a 的同一租户", () => {
     const source = {
       ...productionEnvironment(),

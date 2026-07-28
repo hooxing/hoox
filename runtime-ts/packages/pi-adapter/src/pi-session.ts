@@ -1,14 +1,12 @@
 import { createHash } from "node:crypto";
-import {
-  assertControlledToolObservation,
-  encodeControlledToolReceipt,
-  parseControlledToolReceipt,
-} from "@cube-runtime/context-policy";
 import { types } from "node:util";
 import {
+  assertControlledToolObservation,
   type ContextBudgetDecision,
   decideModelAwareContextBudget,
+  encodeControlledToolReceipt,
   type ModelBudgetDescriptor,
+  parseControlledToolReceipt,
   type TokenizerPort,
 } from "@cube-runtime/context-policy";
 import { type RolloutCompatibilityIdentity, sha256Digest } from "@cube-runtime/domain";
@@ -340,6 +338,8 @@ export interface CreateSafePiSessionOptions {
   artifactToolRouter?: ArtifactPiToolExecutorPort;
   /** 必须绑定当前 Tenant/Attempt 的 durable Observation recorder；生产缺失时拒绝创建 Session。 */
   createToolObservationRecorder: Parameters<typeof createObservedSandboxTools>[2];
+  /** durable Tool 配对失败后，在 Pi 发起下一次 Provider 请求前同步失败关闭。 */
+  assertModelRequestAllowed?: () => void;
 }
 
 /**
@@ -678,6 +678,9 @@ function providerGatedRuntime(
         ) =>
           lazyStream(model, async () => {
             try {
+              // Tool executor 内不能 await 当前 Session 的 abort，否则会与本轮完成屏障互相等待；
+              // 因此在下一模型轮次的同步入口再次检查 durable Observation 恢复闩锁。
+              options.assertModelRequestAllowed?.();
               assertTrustedModelCapability(options);
               if (model !== options.modelContext.model) throw new ProviderBindingDriftError();
               const { transformHeaders, apiKey, headers, env, ...dynamicOptions } =

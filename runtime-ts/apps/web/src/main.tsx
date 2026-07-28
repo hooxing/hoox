@@ -12,7 +12,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ApiError, canPreviewArtifact, type RunEvent, RuntimeApi } from "./api.js";
 import { buildTimeline, eventSummary } from "./event-view.js";
-import { drainEventPages } from "./polling.js";
+import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
 import "./styles.css";
@@ -52,6 +52,7 @@ function App() {
   const [error, setError] = useState<ApiError | undefined>();
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
+  const currentRunPollRef = useRef(new CurrentRunPoll());
 
   useEffect(() => {
     eventAfterRef.current = state.events.at(-1)?.sequence ?? -1;
@@ -78,9 +79,11 @@ function App() {
     const threadId = state.selectedThreadId;
     const runId = state.run?.id;
     if (runId === undefined || threadId === undefined) return;
+    const pollGeneration = currentRunPollRef.current.activate(threadId, runId);
     let stopped = false;
     let timer: number | undefined;
     const poll = async (): Promise<void> => {
+      if (!currentRunPollRef.current.isCurrent(pollGeneration)) return;
       try {
         const latest = await api.getRun(threadId, runId);
         const [eventPage, artifacts] = await Promise.all([
@@ -91,21 +94,19 @@ function App() {
           ),
           api.listArtifacts(threadId, runId),
         ]);
-        if (!stopped) {
-          const attemptChanged = eventPage.attemptId !== eventAttemptRef.current;
+        if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           eventAttemptRef.current = eventPage.attemptId;
-          if (attemptChanged) {
-            eventAfterRef.current = -1;
-          }
-          eventAfterRef.current = eventPage.items.at(-1)?.sequence ?? eventAfterRef.current;
+          eventAfterRef.current = eventPage.nextAfter;
           dispatch({ type: "run", run: latest });
           dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
           // 单次完成后再调度，状态更新不会重新创建计时器或导致紧密轮询。
-          if (active.has(latest.status)) timer = window.setTimeout(() => void poll(), 1200);
+          if (eventPage.hasMore || active.has(latest.status)) {
+            timer = window.setTimeout(() => void poll(), 1200);
+          }
         }
       } catch (reason) {
-        if (!stopped) {
+        if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           setError(reason instanceof ApiError ? reason : new ApiError("轮询运行状态失败", 0, true));
           timer = window.setTimeout(() => void poll(), 1200);
         }
@@ -114,6 +115,7 @@ function App() {
     void poll();
     return () => {
       stopped = true;
+      currentRunPollRef.current.invalidate(pollGeneration);
       if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [state.run?.id, state.selectedThreadId]);
@@ -123,6 +125,7 @@ function App() {
     setActionLoading(true);
     try {
       const thread = await api.createThread(title.trim());
+      currentRunPollRef.current.invalidate();
       dispatch({ type: "threads", threads: [thread, ...state.threads] });
       dispatch({ type: "select", threadId: thread.id });
       setCurrentRequest(undefined);
@@ -141,6 +144,7 @@ function App() {
       const request = input.trim();
       const run = await api.createRun(state.selectedThreadId, request);
       // 新 Run 不能继承上一 Run 的 Attempt 或 sequence 游标。
+      currentRunPollRef.current.activate(state.selectedThreadId, run.id);
       eventAfterRef.current = -1;
       eventAttemptRef.current = undefined;
       dispatch({ type: "startRun", run });
@@ -158,6 +162,7 @@ function App() {
     setActionLoading(true);
     try {
       await api.archiveThread(state.selectedThreadId);
+      currentRunPollRef.current.invalidate();
       dispatch({
         type: "threads",
         threads: state.threads.filter((thread) => thread.id !== state.selectedThreadId),
@@ -243,6 +248,7 @@ function App() {
                 className={thread.id === state.selectedThreadId ? "thread selected" : "thread"}
                 key={thread.id}
                 onClick={() => {
+                  currentRunPollRef.current.invalidate();
                   dispatch({ type: "select", threadId: thread.id });
                   setCurrentRequest(undefined);
                 }}

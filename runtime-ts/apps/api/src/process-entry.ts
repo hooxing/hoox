@@ -15,9 +15,9 @@ import {
 import { developmentApiAssembler } from "./development-assembly.js";
 import {
   type ApiDevelopmentPrincipal,
-  DEVELOPMENT_API_DEFAULT_PORT,
   assertDevelopmentPrincipalsIsolated,
   assertDevelopmentPublicObjectStorageEndpoint,
+  DEVELOPMENT_API_DEFAULT_PORT,
   normalizeDevelopmentLoopbackHost,
 } from "./development-boundary.js";
 

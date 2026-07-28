@@ -30,6 +30,7 @@ function checkpoint(
 ): WaitingRecoveryCheckpoint {
   return {
     attemptId: "attempt-1",
+    attemptGeneration: 1,
     checkpointId: "checkpoint-waiting-1",
     scope,
     workspaceHeadAtWait: { outcome: "found", revisionId: revisionOne },
@@ -55,6 +56,7 @@ function observation(patch: Partial<WaitingRecoveryObservation> = {}): WaitingRe
     now: isoTimestamp("2026-07-28T00:09:59.999Z"),
     currentWorkspaceHead: { outcome: "found", revisionId: revisionOne },
     canReplanWorkspaceChange: false,
+    workspaceManifestDigest: "a".repeat(64),
     ...patch,
   };
 }
@@ -176,26 +178,15 @@ describe("waiting + Sandbox 恢复决策", () => {
         return "resolved";
       },
       async beginEffect() {
-        return { outcome: "authorized", intentId: "intent-1", completionCapability: "cap-1" };
+        return { outcome: "authorized", intentId: "intent-1", requestDigest: "b".repeat(64) };
       },
       async markUnknown() {
         return "unknown";
       },
-      async completeEffect() {
-        return "completed";
-      },
     };
     const effects = {
       async execute() {
-        return {
-          outcome: "succeeded" as const,
-          receipt: {
-            registryId: "registry-1",
-            providerSandboxId: "cube-1",
-            generation: 3,
-            completionCapability: "cap-1",
-          },
-        };
+        return { outcome: "completed" as const };
       },
     };
     const recover = (workerId: string) =>
@@ -222,6 +213,12 @@ describe("waiting + Sandbox 恢复决策", () => {
     ).toThrow("最多十分钟");
   });
 
+  it("Attempt generation 必须是正的安全整数", () => {
+    expect(() =>
+      decideWaitingRecovery({ ...checkpoint(), attemptGeneration: 0 }, observation()),
+    ).toThrow("attemptGeneration 无效");
+  });
+
   it("Store 返回错误 Scope 时协调器在副作用前拒绝", async () => {
     let effectCalls = 0;
     const foreign = checkpoint();
@@ -246,9 +243,6 @@ describe("waiting + Sandbox 恢复决策", () => {
       async markUnknown() {
         throw new Error("不应调用");
       },
-      async completeEffect() {
-        throw new Error("不应调用");
-      },
       async resolve() {
         throw new Error("不应调用");
       },
@@ -263,20 +257,52 @@ describe("waiting + Sandbox 恢复决策", () => {
       effects: {
         async execute() {
           effectCalls += 1;
-          return {
-            outcome: "succeeded",
-            receipt: {
-              registryId: "registry-1",
-              providerSandboxId: "cube-1",
-              generation: 3,
-              completionCapability: "unused",
-            },
-          };
+          return { outcome: "completed" };
         },
       },
     });
     expect(result).toEqual({ outcome: "claim_lost" });
     expect(effectCalls).toBe(0);
+  });
+
+  it("Store 返回其他 Attempt 时协调器在副作用前拒绝", async () => {
+    const store: WaitingRecoveryStorePort = {
+      async claim() {
+        return {
+          outcome: "claimed",
+          claim: {
+            claimToken: "foreign-attempt",
+            claimEpoch: 1,
+            databaseNow: observation().now,
+            checkpoint: { ...checkpoint(), attemptId: "attempt-other" },
+          },
+        };
+      },
+      async beginEffect() {
+        throw new Error("不应调用");
+      },
+      async markUnknown() {
+        throw new Error("不应调用");
+      },
+      async resolve() {
+        throw new Error("不应调用");
+      },
+    };
+    await expect(
+      coordinateWaitingRecovery({
+        store,
+        scope,
+        checkpointId: "checkpoint-waiting-1",
+        attemptId: "attempt-1",
+        workerId: "worker",
+        observation: observation(),
+        effects: {
+          async execute() {
+            throw new Error("不应调用");
+          },
+        },
+      }),
+    ).resolves.toEqual({ outcome: "claim_lost" });
   });
 
   it("先提交 intent 再执行副作用，结果不明时只落 UNKNOWN", async () => {
@@ -298,16 +324,12 @@ describe("waiting + Sandbox 恢复决策", () => {
         return {
           outcome: "authorized",
           intentId: "intent-unknown",
-          completionCapability: "cap-unknown",
+          requestDigest: "c".repeat(64),
         };
       },
       async markUnknown(input) {
         order.push(`unknown:${input.effect}`);
         return "unknown";
-      },
-      async completeEffect() {
-        order.push("complete");
-        return "completed";
       },
       async resolve() {
         order.push("resolve");
@@ -343,6 +365,7 @@ describe("waiting + Sandbox 恢复决策", () => {
     };
     const rebuiltCheckpoint: WaitingRecoveryCheckpoint = {
       attemptId: "attempt-1",
+      attemptGeneration: 1,
       checkpointId: "checkpoint-waiting-1",
       scope,
       workspaceHeadAtWait: { outcome: "found", revisionId: revisionOne },
@@ -367,20 +390,17 @@ describe("waiting + Sandbox 恢复决策", () => {
           ? {
               outcome: "authorized",
               intentId: "create-intent",
-              completionCapability: "cap-create",
+              requestDigest: "d".repeat(64),
             }
           : {
               outcome: "authorized",
               intentId: "materialize-intent",
-              completionCapability: "cap-materialize",
+              requestDigest: "e".repeat(64),
               priorProof: createProof,
             };
       },
       async markUnknown() {
         throw new Error("不应进入 UNKNOWN");
-      },
-      async completeEffect() {
-        return "completed";
       },
       async resolve() {
         return "resolved";
@@ -400,17 +420,11 @@ describe("waiting + Sandbox 恢复决策", () => {
             ...(input.priorProof === undefined ? {} : { priorProof: input.priorProof }),
           });
           if (input.effect === "create") {
-            return {
-              outcome: "succeeded",
-              receipt: { ...createProof, completionCapability: input.completionCapability },
-            };
+            return { outcome: "completed" };
           }
           const priorProof = input.priorProof;
           if (priorProof === undefined) throw new Error("materialize 必须收到 create proof");
-          return {
-            outcome: "succeeded",
-            receipt: { ...priorProof, completionCapability: input.completionCapability },
-          };
+          return { outcome: "completed" };
         },
       },
     });
@@ -442,15 +456,12 @@ describe("waiting + Sandbox 恢复决策", () => {
         return {
           outcome: "authorized",
           intentId: `intent-${input.effect}`,
-          completionCapability: `cap-${input.effect}`,
+          requestDigest: input.effect === "connect" ? "f".repeat(64) : "1".repeat(64),
           ...(input.effect === "materialize" ? { priorProof: proof } : {}),
         };
       },
       async markUnknown() {
         throw new Error("不应进入 UNKNOWN");
-      },
-      async completeEffect() {
-        return "completed";
       },
       async resolve() {
         return "resolved";
@@ -472,10 +483,7 @@ describe("waiting + Sandbox 恢复决策", () => {
       effects: {
         async execute(input) {
           executed.push(input.effect);
-          return {
-            outcome: "succeeded",
-            receipt: { ...proof, completionCapability: input.completionCapability },
-          };
+          return { outcome: "completed" };
         },
       },
     });

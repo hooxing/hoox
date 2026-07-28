@@ -31,10 +31,14 @@ CREATE UNIQUE INDEX runtime_rollout_waiting_recovery_checkpoint_idx
   ON runtime_rollout_entries(tenant_id,attempt_id,agent_thread_id,(body->>'checkpointId'))
   WHERE kind='sandbox_recovery';
 
+ALTER TABLE run_claims ADD CONSTRAINT run_claims_attempt_generation_unique
+  UNIQUE (tenant_id,run_id,attempt_id,claim_epoch);
+
 CREATE TABLE waiting_recovery_checkpoints (
   tenant_id text NOT NULL,
   checkpoint_id text NOT NULL CHECK (octet_length(checkpoint_id) BETWEEN 1 AND 200),
   attempt_id text NOT NULL,
+  attempt_generation bigint NOT NULL CHECK (attempt_generation BETWEEN 1 AND 9007199254740991),
   run_id text NOT NULL,
   thread_id text NOT NULL,
   workspace_id text NOT NULL,
@@ -64,6 +68,8 @@ CREATE TABLE waiting_recovery_checkpoints (
   FOREIGN KEY (tenant_id, attempt_id, run_id, thread_id, workspace_id, root_run_id)
     REFERENCES execution_attempts(tenant_id, attempt_id, run_id, thread_id, workspace_id, root_run_id)
     ON DELETE RESTRICT,
+  FOREIGN KEY (tenant_id,run_id,attempt_id,attempt_generation)
+    REFERENCES run_claims(tenant_id,run_id,attempt_id,claim_epoch) ON DELETE RESTRICT,
   FOREIGN KEY (tenant_id, workspace_id, workspace_head_revision_id)
     REFERENCES workspace_revisions(tenant_id, workspace_id, id) ON DELETE RESTRICT,
   FOREIGN KEY (tenant_id, attempt_id, registry_id, provider_sandbox_id)
@@ -132,8 +138,8 @@ CREATE TABLE waiting_recovery_effect_outbox (
   FOREIGN KEY (tenant_id, checkpoint_id) REFERENCES waiting_recovery_checkpoints(tenant_id, checkpoint_id)
     ON DELETE RESTRICT,
   CONSTRAINT waiting_recovery_effect_payload_shape CHECK (
-    (state='pending' AND payload ? 'plan'
-      AND payload->>'capabilityDigest' ~ '^[0-9a-f]{64}$')
+    (state='pending' AND payload ?& ARRAY['plan','decision']
+      AND payload->>'requestDigest' ~ '^[0-9a-f]{64}$')
     OR (state='completed' AND payload ? 'plan' AND payload ? 'proof'
       AND octet_length(payload->'proof'->>'registryId') BETWEEN 1 AND 200
       AND octet_length(payload->'proof'->>'providerSandboxId') BETWEEN 1 AND 200

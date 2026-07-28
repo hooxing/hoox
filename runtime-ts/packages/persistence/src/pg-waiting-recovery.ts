@@ -26,6 +26,7 @@ interface RecoveryRow {
   tenant_id: string;
   checkpoint_id: string;
   attempt_id: string;
+  attempt_generation: string;
   run_id: string;
   thread_id: string;
   workspace_id: string;
@@ -47,11 +48,32 @@ interface RecoveryRow {
   decision: unknown;
 }
 
-type RecoveryEffect = "connect" | "create" | "materialize";
-interface SandboxProof {
+export type RecoveryEffect = "connect" | "create" | "materialize";
+export interface SandboxProof {
   readonly registryId: string;
   readonly providerSandboxId: string;
   readonly generation: number;
+}
+export interface AttestedSandboxEffectReceipt extends SandboxProof {
+  readonly requestDigest: string;
+  readonly responseDigest: string;
+  readonly attestation: string;
+}
+
+export interface PgWaitingRecoveryEffectAdapter {
+  execute(input: {
+    readonly intentId: string;
+    readonly requestDigest: string;
+    readonly effect: RecoveryEffect;
+    readonly priorProof?: SandboxProof;
+  }): Promise<
+    | { readonly outcome: "succeeded"; readonly receipt: AttestedSandboxEffectReceipt }
+    | { readonly outcome: "unknown" }
+  >;
+}
+
+export interface PgWaitingRecoveryReceiptVerifier {
+  verify(receipt: AttestedSandboxEffectReceipt): boolean;
 }
 type SandboxRecoveryFact =
   | { readonly kind: "sandbox_reused"; readonly registryId: string; readonly generation: number }
@@ -226,6 +248,7 @@ export interface PgWaitingRecoveryClaim {
   readonly databaseNow: ReturnType<typeof isoTimestamp>;
   readonly checkpoint: {
     readonly attemptId: string;
+    readonly attemptGeneration: number;
     readonly checkpointId: string;
     readonly scope: ExecutionScope;
     readonly workspaceHeadAtWait:
@@ -256,6 +279,8 @@ export interface PgWaitingRecoveryClaim {
 export class PgWaitingRecoveryStore {
   constructor(
     private readonly pool: Pool,
+    private readonly effectAdapter: PgWaitingRecoveryEffectAdapter,
+    private readonly receiptVerifier: PgWaitingRecoveryReceiptVerifier,
     private readonly leaseSeconds = 30,
   ) {
     if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 1 || leaseSeconds > 300) {
@@ -269,21 +294,26 @@ export class PgWaitingRecoveryStore {
     return withTenantTransaction(this.pool, { tenantId: input.scope.tenantId }, async (client) => {
       const result = await client.query(
         `INSERT INTO waiting_recovery_checkpoints(
-           tenant_id,checkpoint_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+           tenant_id,checkpoint_id,attempt_id,attempt_generation,run_id,thread_id,workspace_id,root_run_id,
            base_revision_id,workspace_head_state,workspace_head_revision_id,
            registry_id,provider_sandbox_id,sandbox_generation,sandbox_expected_generation,
            sandbox_lifecycle,sandbox_paused_at,sandbox_expires_at
-         ) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
+         ) SELECT $1,$2,$3,attempt_claim.claim_epoch,$4,$5,$6,$7,$8,$9,$10,
                   warm.registry_id,warm.provider_sandbox_id,warm.generation,warm.generation,
-                  CASE WHEN warm.registry_id IS NULL THEN NULL ELSE 'paused' END,
+                  warm.lifecycle,
                   warm.paused_at,warm.expires_at
            FROM execution_attempts attempt JOIN runs run
              ON run.tenant_id=attempt.tenant_id AND run.id=attempt.run_id
+           JOIN run_claims attempt_claim
+             ON attempt_claim.tenant_id=attempt.tenant_id
+            AND attempt_claim.run_id=attempt.run_id AND attempt_claim.attempt_id=attempt.attempt_id
            JOIN workspaces workspace
             ON workspace.tenant_id=attempt.tenant_id AND workspace.id=attempt.workspace_id
             AND workspace.thread_id=attempt.thread_id
            LEFT JOIN LATERAL (
              SELECT registry.registry_id,registry.provider_sandbox_id,registry.generation,
+                    CASE WHEN cleanup.state='completed' AND registry.state='paused'
+                      THEN 'paused' ELSE 'pause_unknown' END AS lifecycle,
                     cleanup.updated_at AS paused_at,
                     LEAST(cleanup.updated_at+make_interval(secs=>registry.actual_ttl_seconds),
                           cleanup.updated_at+interval '10 minutes') AS expires_at
@@ -292,7 +322,8 @@ export class PgWaitingRecoveryStore {
                 AND cleanup.registry_id=registry.registry_id
                 AND cleanup.provider_sandbox_id=registry.provider_sandbox_id
               WHERE registry.tenant_id=attempt.tenant_id AND registry.attempt_id=attempt.attempt_id
-                AND registry.state='paused' AND cleanup.state='completed'
+                AND registry.state IN ('pausing','paused','unknown')
+                AND cleanup.state IN ('started','completed','unknown')
                 AND cleanup.disposition='pause' AND cleanup.updated_at<=clock_timestamp()
               ORDER BY cleanup.updated_at DESC LIMIT 1
            ) warm ON true
@@ -300,11 +331,8 @@ export class PgWaitingRecoveryStore {
             AND attempt.thread_id=$5 AND attempt.workspace_id=$6 AND attempt.root_run_id=$7
             AND attempt.base_revision_id IS NOT DISTINCT FROM $8
             AND attempt.status='waiting' AND run.status='waiting'
-            AND attempt.attempt_id=(
-              SELECT latest.attempt_id FROM execution_attempts latest
-               WHERE latest.tenant_id=attempt.tenant_id AND latest.run_id=attempt.run_id
-               ORDER BY latest.created_at DESC,latest.attempt_id DESC LIMIT 1
-            )
+            AND attempt_claim.claim_epoch=(SELECT max(latest.claim_epoch) FROM run_claims latest
+              WHERE latest.tenant_id=attempt.tenant_id AND latest.run_id=attempt.run_id)
             AND (($9='found' AND workspace.current_revision_id=$10)
               OR ($9='empty' AND workspace.current_revision_id IS NULL))
             AND EXISTS (
@@ -360,7 +388,8 @@ export class PgWaitingRecoveryStore {
         (existing.workspace_head_revision_id ?? undefined) ===
           (input.workspaceHeadAtWait.outcome === "found"
             ? input.workspaceHeadAtWait.revisionId
-            : undefined);
+            : undefined) &&
+        (await this.isCurrentWaitingAttempt(client, existing));
       return same ? "already_exists" : "conflict";
     });
   }
@@ -418,6 +447,15 @@ export class PgWaitingRecoveryStore {
             ON attempt.tenant_id=run.tenant_id AND attempt.run_id=run.id
            WHERE run.tenant_id=$1 AND run.id=$2 AND run.status='waiting'
              AND attempt.attempt_id=$3 AND attempt.status='waiting'
+             AND EXISTS(SELECT 1 FROM run_claims attempt_claim
+               WHERE attempt_claim.tenant_id=attempt.tenant_id
+                 AND attempt_claim.run_id=attempt.run_id AND attempt_claim.attempt_id=attempt.attempt_id
+                 AND attempt_claim.claim_epoch=$5
+                 AND attempt_claim.claim_epoch=(SELECT max(latest.claim_epoch) FROM run_claims latest
+                   WHERE latest.tenant_id=attempt.tenant_id AND latest.run_id=attempt.run_id))
+             AND 1=(SELECT count(*) FROM execution_attempts waiting_attempt
+               WHERE waiting_attempt.tenant_id=attempt.tenant_id
+                 AND waiting_attempt.run_id=attempt.run_id AND waiting_attempt.status='waiting')
              AND EXISTS(SELECT 1 FROM run_events event
                WHERE event.tenant_id=attempt.tenant_id AND event.attempt_id=attempt.attempt_id
                  AND event.kind='run_waiting' AND event.payload->>'checkpointId'=$4
@@ -437,7 +475,13 @@ export class PgWaitingRecoveryStore {
                   FROM runtime_rollout_entries entry WHERE entry.tenant_id=rollout_tail.tenant_id
                     AND entry.attempt_id=rollout_tail.attempt_id
                     AND entry.agent_thread_id=rollout_tail.agent_thread_id))) AS waiting`,
-        [existing.tenant_id, existing.run_id, existing.attempt_id, existing.checkpoint_id],
+        [
+          existing.tenant_id,
+          existing.run_id,
+          existing.attempt_id,
+          existing.checkpoint_id,
+          existing.attempt_generation,
+        ],
       );
       const databaseNow = state.rows[0]?.database_now;
       if (databaseNow === undefined || state.rows[0]?.waiting !== true) {
@@ -483,6 +527,7 @@ export class PgWaitingRecoveryStore {
     readonly observedWorkspaceHead:
       | { readonly outcome: "found"; readonly revisionId: string }
       | { readonly outcome: "empty" };
+    readonly workspaceManifestDigest: string;
     readonly effect: RecoveryEffect;
   }) {
     return withTenantTransaction(
@@ -491,6 +536,12 @@ export class PgWaitingRecoveryStore {
       async (client) => {
         const row = await this.lockClaim(client, input.claim);
         if (row === undefined) return { outcome: "claim_lost" as const };
+        if (!(await this.isCurrentWaitingAttempt(client, row))) {
+          return { outcome: "claim_lost" as const };
+        }
+        if (!/^[0-9a-f]{64}$/u.test(input.workspaceManifestDigest)) {
+          throw new TypeError("Workspace manifest digest 无效");
+        }
         const decision = assertStrictDecision(input.decision);
         if (decision.outcome !== "resume") {
           throw new TypeError("非 resume 决策不能授权 Sandbox 副作用");
@@ -530,6 +581,25 @@ export class PgWaitingRecoveryStore {
           input.observedWorkspaceHead,
           databaseNow,
         );
+        const effectPlan = {
+          schemaVersion: 1,
+          attemptId: row.attempt_id,
+          attemptGeneration: Number(row.attempt_generation),
+          effect: input.effect,
+          sandbox: decision.sandbox,
+          ...(input.effect === "materialize"
+            ? {
+                workspace: {
+                  head:
+                    input.observedWorkspaceHead.outcome === "found"
+                      ? input.observedWorkspaceHead.revisionId
+                      : null,
+                  manifestDigest: input.workspaceManifestDigest,
+                },
+              }
+            : {}),
+        };
+        const requestDigest = digestCanonical(effectPlan);
         const prior = await client.query<{ state: string; payload: unknown }>(
           `SELECT state,payload FROM waiting_recovery_effect_outbox
             WHERE tenant_id=$1 AND checkpoint_id=$2 AND effect=$3 FOR UPDATE`,
@@ -538,6 +608,12 @@ export class PgWaitingRecoveryStore {
         const priorRow = prior.rows[0];
         // 完成证明优先于 registry 当前状态；connect 成功后 registry 已是 ready，崩溃接管仍须可收尾。
         if (priorRow?.state === "completed") {
+          if (
+            !isPlainRecord(priorRow.payload) ||
+            priorRow.payload.requestDigest !== requestDigest
+          ) {
+            return { outcome: "claim_lost" as const };
+          }
           return {
             outcome: "already_completed" as const,
             proof: parseStoredProof(priorRow.payload),
@@ -574,10 +650,8 @@ export class PgWaitingRecoveryStore {
           if (create.rows[0] === undefined) return { outcome: "claim_lost" as const };
           priorProof = parseStoredProof(create.rows[0].payload);
         }
-        const intentKey = createHash("sha256").update(row.checkpoint_id).digest("hex").slice(0, 32);
-        const intentId = `waiting:${intentKey}:${row.claim_epoch}:${input.effect}`;
-        const completionCapability = randomUUID();
-        const capabilityDigest = createHash("sha256").update(completionCapability).digest("hex");
+        const intentKey = createHash("sha256").update(row.checkpoint_id).digest("hex").slice(0, 24);
+        const intentId = `waiting:${intentKey}:${requestDigest.slice(0, 16)}:${row.claim_epoch}:${input.effect}`;
         const inserted = await client.query(
           `INSERT INTO waiting_recovery_effect_outbox(
            tenant_id,checkpoint_id,intent_id,claim_epoch,effect,state,payload
@@ -589,7 +663,7 @@ export class PgWaitingRecoveryStore {
             intentId,
             row.claim_epoch,
             input.effect,
-            JSON.stringify({ plan: decision, capabilityDigest }),
+            JSON.stringify({ plan: effectPlan, decision, requestDigest }),
           ],
         );
         if (inserted.rowCount !== 1) return { outcome: "already_started" as const };
@@ -601,7 +675,7 @@ export class PgWaitingRecoveryStore {
         return {
           outcome: "authorized" as const,
           intentId,
-          completionCapability,
+          requestDigest,
           ...(priorProof === undefined ? {} : { priorProof }),
         };
       },
@@ -619,6 +693,7 @@ export class PgWaitingRecoveryStore {
       async (client) => {
         const row = await this.lockClaim(client, input.claim, false);
         if (row === undefined) return "claim_lost" as const;
+        if (!(await this.isCurrentWaitingAttempt(client, row))) return "claim_lost" as const;
         const decision = {
           outcome: "external_effect_unknown",
           effect: input.effect,
@@ -642,11 +717,43 @@ export class PgWaitingRecoveryStore {
     );
   }
 
-  async completeEffect(input: {
+  /** 受控执行器封闭 provider 调用与仓储完成提交；协调器只能观察最终状态，拿不到签发权。 */
+  async execute(input: {
     readonly claim: PgWaitingRecoveryClaim;
     readonly intentId: string;
+    readonly requestDigest: string;
     readonly effect: RecoveryEffect;
-    readonly receipt: SandboxProof & { readonly completionCapability: string };
+    readonly priorProof?: SandboxProof;
+  }) {
+    const external = await this.effectAdapter.execute({
+      intentId: input.intentId,
+      requestDigest: input.requestDigest,
+      effect: input.effect,
+      ...(input.priorProof === undefined ? {} : { priorProof: input.priorProof }),
+    });
+    if (external.outcome === "unknown") {
+      return { outcome: "unknown" as const, effect: input.effect };
+    }
+    const completed = await this.#completeEffect({
+      claim: input.claim,
+      intentId: input.intentId,
+      requestDigest: input.requestDigest,
+      effect: input.effect,
+      receipt: external.receipt,
+    });
+    return completed === "completed"
+      ? { outcome: "completed" as const }
+      : completed === "unknown"
+        ? { outcome: "unknown" as const, effect: input.effect }
+        : { outcome: "claim_lost" as const };
+  }
+
+  async #completeEffect(input: {
+    readonly claim: PgWaitingRecoveryClaim;
+    readonly intentId: string;
+    readonly requestDigest: string;
+    readonly effect: RecoveryEffect;
+    readonly receipt: AttestedSandboxEffectReceipt;
   }) {
     return withTenantTransaction(
       this.pool,
@@ -654,22 +761,30 @@ export class PgWaitingRecoveryStore {
       async (client) => {
         const row = await this.lockClaim(client, input.claim);
         if (row === undefined) return "claim_lost" as const;
+        if (!(await this.isCurrentWaitingAttempt(client, row))) return "claim_lost" as const;
         assertSandboxProof(input.receipt);
-        if (!isNonEmptyIdentifier(input.receipt.completionCapability)) {
+        if (
+          input.receipt.requestDigest !== input.requestDigest ||
+          input.receipt.responseDigest !==
+            digestCanonical({
+              requestDigest: input.requestDigest,
+              registryId: input.receipt.registryId,
+              providerSandboxId: input.receipt.providerSandboxId,
+              generation: input.receipt.generation,
+            }) ||
+          !this.receiptVerifier.verify(input.receipt)
+        ) {
           return "claim_lost" as const;
         }
-        const capabilityDigest = createHash("sha256")
-          .update(input.receipt.completionCapability)
-          .digest("hex");
         const authorized = await client.query<{ payload: unknown }>(
           `SELECT payload FROM waiting_recovery_effect_outbox
             WHERE tenant_id=$1 AND checkpoint_id=$2 AND intent_id=$3 AND effect=$4
-              AND state='pending' AND payload->>'capabilityDigest'=$5 FOR UPDATE`,
-          [row.tenant_id, row.checkpoint_id, input.intentId, input.effect, capabilityDigest],
+              AND state='pending' AND payload->>'requestDigest'=$5 FOR UPDATE`,
+          [row.tenant_id, row.checkpoint_id, input.intentId, input.effect, input.requestDigest],
         );
         const authorizedPayload = authorized.rows[0]?.payload;
         if (!isPlainRecord(authorizedPayload)) return "claim_lost" as const;
-        const boundDecision = assertStrictDecision(authorizedPayload.plan as object);
+        const boundDecision = assertStrictDecision(authorizedPayload.decision as object);
         if (input.effect === "connect") {
           // 先把 provider 回执绑定到 checkpoint 的可信身份，再允许改变 registry 状态。
           // 不能让持有本 checkpoint claim 的调用者借错误 proof 修改同 Attempt 的其他 Sandbox。
@@ -754,7 +869,7 @@ export class PgWaitingRecoveryStore {
           `UPDATE waiting_recovery_effect_outbox SET state='completed',
              payload=payload||jsonb_build_object('proof',$5::jsonb),updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND checkpoint_id=$2 AND intent_id=$3 AND effect=$4
-            AND state='pending' AND payload->>'capabilityDigest'=$6`,
+            AND state='pending' AND payload->>'requestDigest'=$6`,
           [
             row.tenant_id,
             row.checkpoint_id,
@@ -765,7 +880,7 @@ export class PgWaitingRecoveryStore {
               providerSandboxId: input.receipt.providerSandboxId,
               generation: input.receipt.generation,
             }),
-            capabilityDigest,
+            input.requestDigest,
           ],
         );
         return updated.rowCount === 1 ? ("completed" as const) : ("claim_lost" as const);
@@ -780,6 +895,7 @@ export class PgWaitingRecoveryStore {
       if (row === undefined || row.state !== "effect_pending" || row.claim_token === null) {
         return "unchanged" as const;
       }
+      if (!(await this.isCurrentWaitingAttempt(client, row))) return "unchanged" as const;
       const expired = await client.query<{
         expired: boolean;
         effect: "connect" | "create" | "materialize";
@@ -829,11 +945,13 @@ export class PgWaitingRecoveryStore {
             input.claim.checkpoint.checkpointId,
           );
           return existing?.state === "resolved" &&
+            (await this.isCurrentWaitingAttempt(client, existing)) &&
             digestCanonical(existing.decision) === digestCanonical(decision)
             ? ("already_resolved" as const)
             : ("claim_lost" as const);
         }
         const row = claimed;
+        if (!(await this.isCurrentWaitingAttempt(client, row))) return "claim_lost" as const;
         if (decision.outcome === "resume") {
           const plans = await client.query<{ payload: unknown }>(
             `SELECT payload FROM waiting_recovery_effect_outbox
@@ -842,13 +960,38 @@ export class PgWaitingRecoveryStore {
           );
           if (
             plans.rows.length === 0 ||
-            plans.rows.some(
-              ({ payload }) =>
-                !isPlainRecord(payload) ||
-                digestCanonical(payload.plan) !== digestCanonical(decision),
-            )
+            plans.rows.some(({ payload }) => {
+              if (!isPlainRecord(payload) || !isPlainRecord(payload.plan)) return true;
+              if (digestCanonical(payload.plan.sandbox) !== digestCanonical(decision.sandbox)) {
+                return true;
+              }
+              return (
+                payload.plan.effect === "materialize" &&
+                digestCanonical(payload.decision) !== digestCanonical(decision)
+              );
+            })
           ) {
             return "claim_lost" as const;
+          }
+          const materialize = plans.rows.find(
+            ({ payload }) =>
+              isPlainRecord(payload) &&
+              isPlainRecord(payload.plan) &&
+              payload.plan.effect === "materialize",
+          );
+          if (materialize !== undefined) {
+            const payload = materialize.payload;
+            if (!isPlainRecord(payload) || !isPlainRecord(payload.plan))
+              return "claim_lost" as const;
+            const planWorkspace = payload.plan.workspace;
+            if (!isPlainRecord(planWorkspace)) return "claim_lost" as const;
+            const current = await client.query<{ matches: boolean }>(
+              `SELECT CASE WHEN $4::text IS NULL THEN current_revision_id IS NULL
+                           ELSE current_revision_id=$4 END AS matches
+                 FROM workspaces WHERE tenant_id=$1 AND id=$2 AND thread_id=$3 FOR UPDATE`,
+              [row.tenant_id, row.workspace_id, row.thread_id, planWorkspace.head ?? null],
+            );
+            if (current.rows[0]?.matches !== true) return "claim_lost" as const;
           }
         }
         const fact = await this.recoveryFactForDecision(client, row, decision);
@@ -1058,6 +1201,29 @@ export class PgWaitingRecoveryStore {
     );
   }
 
+  /** 每个可产生副作用或公开事实的阶段都重新验证单调 Attempt generation。 */
+  private async isCurrentWaitingAttempt(client: PoolClient, row: RecoveryRow): Promise<boolean> {
+    const current = await client.query<{ valid: boolean }>(
+      `SELECT EXISTS(
+         SELECT 1 FROM execution_attempts attempt JOIN runs run
+           ON run.tenant_id=attempt.tenant_id AND run.id=attempt.run_id
+         JOIN run_claims attempt_claim
+           ON attempt_claim.tenant_id=attempt.tenant_id AND attempt_claim.run_id=attempt.run_id
+          AND attempt_claim.attempt_id=attempt.attempt_id
+        WHERE attempt.tenant_id=$1 AND attempt.attempt_id=$2 AND attempt.run_id=$3
+          AND attempt.status='waiting' AND run.status='waiting'
+          AND attempt_claim.claim_epoch=$4
+          AND attempt_claim.claim_epoch=(SELECT max(latest.claim_epoch) FROM run_claims latest
+            WHERE latest.tenant_id=attempt.tenant_id AND latest.run_id=attempt.run_id)
+          AND 1=(SELECT count(*) FROM execution_attempts waiting_attempt
+            WHERE waiting_attempt.tenant_id=attempt.tenant_id
+              AND waiting_attempt.run_id=attempt.run_id AND waiting_attempt.status='waiting')
+       ) AS valid`,
+      [row.tenant_id, row.attempt_id, row.run_id, row.attempt_generation],
+    );
+    return current.rows[0]?.valid === true;
+  }
+
   private async lockByScope(
     client: PoolClient,
     scope: ExecutionScope,
@@ -1123,6 +1289,7 @@ export class PgWaitingRecoveryStore {
       databaseNow: isoTimestamp(new Date(row.database_now).toISOString()),
       checkpoint: {
         attemptId: row.attempt_id,
+        attemptGeneration: Number(row.attempt_generation),
         checkpointId: row.checkpoint_id,
         scope,
         workspaceHeadAtWait:

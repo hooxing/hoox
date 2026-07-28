@@ -7,6 +7,7 @@ import type { ExecutionScope } from "./ports.js";
  */
 export interface WaitingRecoveryCheckpoint {
   readonly attemptId: string;
+  readonly attemptGeneration: number;
   readonly checkpointId: string;
   readonly scope: ExecutionScope;
   readonly workspaceHeadAtWait: Exclude<WorkspaceHeadObservation, { outcome: "unavailable" }>;
@@ -37,6 +38,8 @@ export interface WaitingRecoveryObservation {
   readonly currentWorkspaceHead: WorkspaceHeadObservation;
   /** 用户提交与 waiting 基线是否可由上层重新计算计划；false 时必须暴露结构化冲突。 */
   readonly canReplanWorkspaceChange: boolean;
+  /** Stable Blob 中目标 Workspace manifest 的 canonical SHA-256。 */
+  readonly workspaceManifestDigest: string;
 }
 
 export type WorkspaceHeadObservation =
@@ -100,12 +103,13 @@ export interface WaitingRecoveryStorePort {
     readonly claim: WaitingRecoveryClaim;
     readonly decision: Extract<WaitingRecoveryDecision, { outcome: "resume" }>;
     readonly observedWorkspaceHead: Exclude<WorkspaceHeadObservation, { outcome: "unavailable" }>;
+    readonly workspaceManifestDigest: string;
     readonly effect: "connect" | "create" | "materialize";
   }): Promise<
     | {
         readonly outcome: "authorized";
         readonly intentId: string;
-        readonly completionCapability: string;
+        readonly requestDigest: string;
         readonly priorProof?: SandboxEffectProof;
       }
     | { readonly outcome: "already_completed"; readonly proof: SandboxEffectProof }
@@ -117,26 +121,21 @@ export interface WaitingRecoveryStorePort {
     readonly effect: "connect" | "create" | "materialize";
     readonly priorProof?: SandboxEffectProof;
   }): Promise<"unknown" | "claim_lost">;
-  completeEffect(input: {
-    readonly claim: WaitingRecoveryClaim;
-    readonly intentId: string;
-    readonly effect: "connect" | "create" | "materialize";
-    readonly receipt: SandboxEffectReceipt;
-  }): Promise<"completed" | "unknown" | "claim_lost">;
 }
 
 export interface WaitingRecoveryEffectPort {
   execute(input: {
     readonly intentId: string;
+    readonly requestDigest: string;
+    readonly claim: WaitingRecoveryClaim;
     readonly decision: Extract<WaitingRecoveryDecision, { outcome: "resume" }>;
     readonly effect: "connect" | "create" | "materialize";
     /** materialize 只能消费已由数据库确认的 create 证明，不能从本地推断 Sandbox 身份。 */
     readonly priorProof?: SandboxEffectProof;
-    /** beginEffect 产生的一次性能力；外部适配器必须原样写入成功回执。 */
-    readonly completionCapability: string;
   }): Promise<
-    | { readonly outcome: "succeeded"; readonly receipt: SandboxEffectReceipt }
+    | { readonly outcome: "completed" }
     | { readonly outcome: "unknown"; readonly effect: "connect" | "create" | "materialize" }
+    | { readonly outcome: "claim_lost" }
   >;
 }
 
@@ -144,10 +143,6 @@ export interface SandboxEffectProof {
   readonly registryId: string;
   readonly providerSandboxId: string;
   readonly generation: number;
-}
-
-export interface SandboxEffectReceipt extends SandboxEffectProof {
-  readonly completionCapability: string;
 }
 
 export type WaitingRecoveryCoordinatorResult =
@@ -169,7 +164,12 @@ export async function coordinateWaitingRecovery(input: {
 }): Promise<WaitingRecoveryCoordinatorResult> {
   const claimed = await input.store.claim(input);
   if (claimed.outcome !== "claimed") return { outcome: claimed.outcome };
-  if (!sameScope(claimed.claim.checkpoint.scope, input.scope)) {
+  if (
+    !sameScope(claimed.claim.checkpoint.scope, input.scope) ||
+    claimed.claim.checkpoint.attemptId !== input.attemptId ||
+    !Number.isSafeInteger(claimed.claim.checkpoint.attemptGeneration) ||
+    claimed.claim.checkpoint.attemptGeneration < 1
+  ) {
     return { outcome: "claim_lost" };
   }
   const decision = decideWaitingRecovery(claimed.claim.checkpoint, {
@@ -198,6 +198,7 @@ export async function coordinateWaitingRecovery(input: {
           WorkspaceHeadObservation,
           { outcome: "unavailable" }
         >,
+        workspaceManifestDigest: input.observation.workspaceManifestDigest,
         effect: effectKind,
       });
       if (started.outcome !== "authorized") {
@@ -205,10 +206,11 @@ export async function coordinateWaitingRecovery(input: {
         return { outcome: started.outcome === "claim_lost" ? "claim_lost" : "busy" };
       }
       const effect = await input.effects.execute({
+        claim: claimed.claim,
         intentId: started.intentId,
+        requestDigest: started.requestDigest,
         decision,
         effect: effectKind,
-        completionCapability: started.completionCapability,
         ...(started.priorProof === undefined ? {} : { priorProof: started.priorProof }),
       });
       if (effect.outcome === "unknown") {
@@ -228,39 +230,7 @@ export async function coordinateWaitingRecovery(input: {
             }
           : { outcome: "claim_lost" };
       }
-      const completed = await input.store.completeEffect({
-        claim: claimed.claim,
-        intentId: started.intentId,
-        effect: effectKind,
-        receipt: effect.receipt,
-      });
-      if (completed === "unknown") {
-        return {
-          outcome: "decided",
-          decision: {
-            outcome: "external_effect_unknown",
-            effect: effectKind,
-            requestAutomaticRetry: false,
-          },
-        };
-      }
-      if (completed !== "completed") {
-        const marked = await input.store.markUnknown({
-          claim: claimed.claim,
-          intentId: started.intentId,
-          effect: effectKind,
-        });
-        return marked === "unknown"
-          ? {
-              outcome: "decided",
-              decision: {
-                outcome: "external_effect_unknown",
-                effect: effectKind,
-                requestAutomaticRetry: false,
-              },
-            }
-          : { outcome: "claim_lost" };
-      }
+      if (effect.outcome === "claim_lost") return { outcome: "claim_lost" };
     }
   }
   const resolved = await input.store.resolve({
@@ -380,6 +350,10 @@ function headRevision(
 
 function assertCheckpoint(checkpoint: WaitingRecoveryCheckpoint): void {
   if (!checkpoint.checkpointId.trim()) throw new TypeError("waiting checkpointId 不能为空");
+  if (!checkpoint.attemptId.trim()) throw new TypeError("waiting attemptId 不能为空");
+  if (!Number.isSafeInteger(checkpoint.attemptGeneration) || checkpoint.attemptGeneration < 1) {
+    throw new TypeError("waiting attemptGeneration 无效");
+  }
   const candidate = checkpoint.sandbox;
   if (candidate === undefined) return;
   if (!Number.isSafeInteger(candidate.generation) || candidate.generation < 1) {

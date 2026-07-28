@@ -36,6 +36,7 @@
 | [ADR-0028](0028-cubesandbox-workspace-adapter-boundary.md) | CubeSandbox Workspace 可信适配边界 | 已接受 | 2026-07-28 |
 | [ADR-0029](0029-trusted-prompt-and-session-capability-manifest.md) | 可信 Prompt 分层与 Session 能力清单 | 已接受 | 2026-07-28 |
 | [ADR-0030](0030-runtime-rollout-checkpoint-fact-source.md) | Runtime Rollout 与 Checkpoint 事实源 | 已接受 | 2026-07-28 |
+| [ADR-0031](0031-blob-backed-tool-observation.md) | Blob-backed Tool Observation 截断切片 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录
 

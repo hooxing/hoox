@@ -12,7 +12,7 @@
 
 - `GET /v1/threads/:threadId/runs/:runId/events?after=-1&limit=100`：按持久化 sequence 严格递增返回当前 Run 最新 Attempt 的事件；`after` 为排他游标，范围为 `-1` 到安全整数，`limit` 为 1 到 200。每项同时提供 Web 所需的 `{ eventId, sequence, occurredAt, type, payload }`，其中 `eventId` 为 `<attemptId>-<sequence>`，并保留兼容字段 `kind`。当 `kind=agent_event` 且 `payload.type` 是 Runtime 声明的类型（如 `message.delta`、`tool.started`）时，`type` 使用该值；其他情况 `type=kind`。cursor 只在响应的 `attemptId` 内有效，发生变化时客户端必须重置或分区去重。
 - `GET /v1/threads/:threadId/runs/:runId/artifacts`：只列出已发布的 deliverable Artifact，不包含 diagnostic/trace。
-- `GET /v1/threads/:threadId/runs/:runId/artifacts/:artifactId/preview` 与 `/download`：使用短期 S3 预签名 URL；两者均重验租户成员关系、Run/Thread 归属、已发布状态和固定 Blob 身份。preview 采用 inline 响应，download 带净化后的下载名。
+- `GET /v1/threads/:threadId/runs/:runId/artifacts/:artifactId/preview` 与 `/download`：使用短期 S3 预签名 URL；两者均在签名前后重验租户成员关系、Run/Thread 归属、授权修订和完整固定 Blob 身份。preview 仅允许纯文本、安全图片和 PDF inline；HTML/SVG/XML 等主动内容只能使用带净化文件名的 attachment 下载。
 
 所有接口复用 `Authorization: Bearer dev-user-a|dev-user-b` 的本地 fixture 身份，运行时从已认证身份重建 TenantScope，忽略任何客户端声明的 tenant。API 仍只监听回环地址。
 
@@ -25,7 +25,7 @@ Invoke-RestMethod "http://$($env:API_LISTEN_HOST):$($env:API_LISTEN_PORT)/live"
 Invoke-RestMethod "http://$($env:API_LISTEN_HOST):$($env:API_LISTEN_PORT)/ready"
 ```
 
-`dev:identity:provision` 仅允许 `RUNTIME_ENV=development` 且 `DEV_AUTH_ENABLED=true`，通过 Runtime 数据库角色、正式 Tenant Repository、事务和 RLS 创建两个个人 Tenant 及 owner Membership；A/B 必须同时使用不同 User 和不同 Tenant，重复执行会验证并保留完全匹配的聚合，发现占用或关系冲突会失败关闭。`THREAD_CURSOR_SIGNING_KEYS` 格式为逗号分隔的 `kid:base64url-key`，每个 key 解码后必须为 32 到 64 字节。开发凭据只接受 `Bearer dev-user-a` 和 `Bearer dev-user-b`；它们是本机 fixture 选择器，不是认证方案，因此 API 只允许监听字面回环地址 `127.0.0.1`、`::1` 或 `localhost`，其中 `localhost` 会直接规范化为 `127.0.0.1`，不会经过 DNS 或接受其他 hostname。服务不会在启动时偷偷创建 Tenant 或 Membership，缺少开发身份数据时业务请求会返回 404。
+`dev:identity:provision` 仅允许 `RUNTIME_ENV=development` 且 `DEV_AUTH_ENABLED=true`，通过 Runtime 数据库角色、正式 Tenant Repository、事务和 RLS 创建两个个人 Tenant 及 owner Membership；A/B 必须同时使用不同 User 和不同 Tenant，重复执行会验证并保留完全匹配的聚合，发现占用或关系冲突会失败关闭。`THREAD_CURSOR_SIGNING_KEYS` 格式为逗号分隔的 `kid:base64url-key`，每个 key 解码后必须为 32 到 64 字节。开发凭据只接受 `Bearer dev-user-a` 和 `Bearer dev-user-b`；它们是本机 fixture 选择器，不是认证方案，因此 API 只允许监听字面回环地址 `127.0.0.1`、`::1` 或 `localhost`，其中 `localhost` 会直接规范化为 `127.0.0.1`，不会经过 DNS 或接受其他 hostname。`S3_PUBLIC_ENDPOINT` 同样必须为字面回环 origin，并与 API 和 Web（默认 `127.0.0.1:4173`）分离，推荐使用 `127.0.0.1:19000`。服务不会在启动时偷偷创建 Tenant 或 Membership，缺少开发身份数据时业务请求会返回 404。
 
 ## 开发基线
 

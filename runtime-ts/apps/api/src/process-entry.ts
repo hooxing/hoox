@@ -15,7 +15,9 @@ import {
 import { developmentApiAssembler } from "./development-assembly.js";
 import {
   type ApiDevelopmentPrincipal,
+  DEVELOPMENT_API_DEFAULT_PORT,
   assertDevelopmentPrincipalsIsolated,
+  assertDevelopmentPublicObjectStorageEndpoint,
   normalizeDevelopmentLoopbackHost,
 } from "./development-boundary.js";
 
@@ -114,6 +116,23 @@ export function parseApiProcessEnvironment(
   if (developmentPrincipals !== undefined) {
     assertDevelopmentPrincipalsIsolated(developmentPrincipals);
   }
+  const listenPort = parsed.values.API_LISTEN_PORT ?? DEVELOPMENT_API_DEFAULT_PORT;
+  const objectStorage = Object.freeze({
+    endpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
+    publicEndpoint: readRequiredEnvironmentValue(parsed, "S3_PUBLIC_ENDPOINT"),
+    bucket: readRequiredEnvironmentValue(parsed, "S3_BUCKET"),
+    region: readRequiredEnvironmentValue(parsed, "S3_REGION"),
+    accessKeyId: readRequiredEnvironmentValue(parsed, "S3_ACCESS_KEY_ID"),
+    secretAccessKey: readRequiredEnvironmentValue(parsed, "S3_SECRET_ACCESS_KEY"),
+    forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
+  });
+  if (developmentPrincipals !== undefined) {
+    assertDevelopmentPublicObjectStorageEndpoint(
+      objectStorage.publicEndpoint,
+      listenHost,
+      listenPort,
+    );
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
@@ -126,16 +145,8 @@ export function parseApiProcessEnvironment(
       "PROCESS_SHUTDOWN_TIMEOUT_MS",
     ),
     listenHost,
-    listenPort: parsed.values.API_LISTEN_PORT ?? 3001,
-    objectStorage: Object.freeze({
-      endpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
-      publicEndpoint: readRequiredEnvironmentValue(parsed, "S3_PUBLIC_ENDPOINT"),
-      bucket: readRequiredEnvironmentValue(parsed, "S3_BUCKET"),
-      region: readRequiredEnvironmentValue(parsed, "S3_REGION"),
-      accessKeyId: readRequiredEnvironmentValue(parsed, "S3_ACCESS_KEY_ID"),
-      secretAccessKey: readRequiredEnvironmentValue(parsed, "S3_SECRET_ACCESS_KEY"),
-      forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
-    }),
+    listenPort,
+    objectStorage,
   });
 }
 

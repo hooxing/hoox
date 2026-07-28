@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { runId } from "@cube-runtime/domain";
-import type { BlobStore, CoreRepositories, RunExperienceReadPort } from "@cube-runtime/persistence";
-import { PersistenceError } from "@cube-runtime/persistence";
+import type {
+  BlobStore,
+  CoreRepositories,
+  RunExperienceArtifact,
+  RunExperienceReadPort,
+} from "@cube-runtime/persistence";
+import { BlobStoreError, PersistenceError } from "@cube-runtime/persistence";
 import {
   ArtifactDeliverySuccessEnvelopeSchema,
   ArtifactListSuccessEnvelopeSchema,
@@ -215,6 +220,9 @@ export function createApiApp(
       kind = error.kind;
     } else if (error instanceof PersistenceError) {
       kind = persistenceFailure(error);
+    } else if (error instanceof BlobStoreError) {
+      // 对象已经通过业务授权后，签名、完整性或 provider 失败都是依赖异常，不能泄漏内部对象状态。
+      kind = "dependency_unavailable";
     } else {
       kind = "internal";
     }
@@ -518,6 +526,7 @@ export function createApiApp(
         400: ErrorEnvelopeSchema,
         401: ErrorEnvelopeSchema,
         404: ErrorEnvelopeSchema,
+        422: ErrorEnvelopeSchema,
         500: ErrorEnvelopeSchema,
         503: ErrorEnvelopeSchema,
       },
@@ -539,6 +548,12 @@ export function createApiApp(
           });
           if (artifact === undefined || artifact.outcome === "not_found")
             throw new ApiFailure("not_found");
+          if (
+            disposition === "preview" &&
+            !isPassivePreviewMediaType(artifact.artifact.mediaType)
+          ) {
+            throw new ApiFailure("invalid_state");
+          }
           const delivery = await normalizedDependencies.blobs?.presignDownload({
             scope: { tenantId: auth.scope.tenantId },
             blob: artifact.artifact.blob,
@@ -563,7 +578,8 @@ export function createApiApp(
           if (
             delivery === undefined ||
             confirmed === undefined ||
-            confirmed.outcome === "not_found"
+            confirmed.outcome === "not_found" ||
+            !sameArtifactAuthorization(artifact.artifact, confirmed.artifact)
           ) {
             throw new ApiFailure("not_found");
           }
@@ -591,6 +607,50 @@ export function createApiApp(
   }
 
   return app;
+}
+
+function sameArtifactAuthorization(
+  expected: RunExperienceArtifact,
+  confirmed: RunExperienceArtifact,
+): boolean {
+  return (
+    expected.authorizationRevision === confirmed.authorizationRevision &&
+    expected.tenantId === confirmed.tenantId &&
+    expected.threadId === confirmed.threadId &&
+    expected.runId === confirmed.runId &&
+    expected.id === confirmed.id &&
+    expected.resourceVersionId === confirmed.resourceVersionId &&
+    expected.name === confirmed.name &&
+    expected.mediaType === confirmed.mediaType &&
+    expected.sizeBytes === confirmed.sizeBytes &&
+    expected.createdAt === confirmed.createdAt &&
+    expected.updatedAt === confirmed.updatedAt &&
+    expected.blob.tenantId === confirmed.blob.tenantId &&
+    expected.blob.purpose === confirmed.blob.purpose &&
+    expected.blob.sha256 === confirmed.blob.sha256 &&
+    expected.blob.size === confirmed.blob.size &&
+    expected.blob.mediaType === confirmed.blob.mediaType &&
+    expected.blob.incarnationId === confirmed.blob.incarnationId &&
+    expected.blob.physicalObjectKey === confirmed.blob.physicalObjectKey
+  );
+}
+
+function isPassivePreviewMediaType(value: string): boolean {
+  const [rawBase, ...rawParameters] = value.split(";");
+  const base = rawBase?.trim().toLowerCase();
+  if (base === "text/plain") {
+    return rawParameters.every((parameter) =>
+      /^charset\s*=\s*(?:"(?:utf-8|us-ascii|iso-8859-1|windows-1252)"|(?:utf-8|us-ascii|iso-8859-1|windows-1252))$/iu.test(
+        parameter.trim(),
+      ),
+    );
+  }
+  return (
+    rawParameters.length === 0 &&
+    new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"]).has(
+      base ?? "",
+    )
+  );
 }
 
 /** 仅透传已由 RuntimeAgentEvent 协议声明的 agent 子类型，未知 payload 不能伪造公开事件类型。 */

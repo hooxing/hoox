@@ -8,6 +8,7 @@ import { createThreadCursorCodec, type ThreadCursorSigningKey } from "./cursor.j
 import { createDevelopmentAuthResolver } from "./development-auth.js";
 import {
   assertDevelopmentPrincipalsIsolated,
+  assertDevelopmentPublicObjectStorageEndpoint,
   normalizeDevelopmentLoopbackHost,
 } from "./development-boundary.js";
 import type { ApiProcessConfiguration } from "./process-entry.js";
@@ -49,6 +50,11 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
     // 即使调用方绕过进程配置解析直接调用装配器，也不能扩大固定凭据的网络与身份边界。
     assertDevelopmentPrincipalsIsolated(configuration.developmentPrincipals);
     const listenHost = normalizeDevelopmentLoopbackHost(configuration.listenHost);
+    assertDevelopmentPublicObjectStorageEndpoint(
+      configuration.objectStorage.publicEndpoint,
+      listenHost,
+      configuration.listenPort,
+    );
     const persistence = createApiPersistenceRuntime({
       connectionString: configuration.databaseUrl,
       schema: configuration.databaseSchema,

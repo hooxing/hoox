@@ -70,7 +70,7 @@ export function createApiPersistenceRuntime(options: PostgresPoolOptions): ApiPe
   });
 }
 
-class PgRunExperienceReadRepository implements RunExperienceReadPort {
+export class PgRunExperienceReadRepository implements RunExperienceReadPort {
   constructor(private readonly pool: Pool) {}
 
   async listEvents(
@@ -164,6 +164,7 @@ class PgRunExperienceReadRepository implements RunExperienceReadPort {
             size: string;
             created_at: Date | string;
             updated_at: Date | string;
+            authorization_revision: string;
             blob_incarnation_id: string;
             physical_object_key: string;
             digest: string;
@@ -175,13 +176,27 @@ class PgRunExperienceReadRepository implements RunExperienceReadPort {
            )
            SELECT publication.id,publication.run_id,publication.thread_id,publication.resource_version_id,publication.name,publication.media_type,
                   publication.size,publication.created_at,publication.updated_at,publication.blob_incarnation_id,
-                  publication.physical_object_key,publication.digest
-             FROM authorized_run run LEFT JOIN artifact_publications publication
-               ON publication.tenant_id=$1 AND publication.run_id=run.id AND publication.purpose='deliverable'
-             LEFT JOIN artifact_publication_settlements settlement
-               ON settlement.tenant_id=publication.tenant_id AND settlement.artifact_id=publication.id
-                  AND settlement.target='published'
-            WHERE publication.id IS NULL OR settlement.artifact_id IS NOT NULL
+                  publication.physical_object_key,publication.digest,publication.authorization_revision
+             FROM authorized_run run
+             LEFT JOIN LATERAL (
+               SELECT candidate.*,
+                      jsonb_build_array(
+                        membership.id,membership.user_id,membership.role,membership.status,
+                        extract(epoch FROM membership.created_at),
+                        extract(epoch FROM candidate.updated_at),
+                        settlement.target,extract(epoch FROM settlement.settled_at)
+                      )::text AS authorization_revision
+                 FROM artifact_publications candidate
+                 JOIN artifact_publication_settlements settlement
+                   ON settlement.tenant_id=candidate.tenant_id AND settlement.artifact_id=candidate.id
+                      AND settlement.target='published'
+                 JOIN memberships membership
+                   ON membership.tenant_id=candidate.tenant_id AND membership.user_id=$2
+                      AND membership.status='active'
+                WHERE candidate.tenant_id=$1 AND candidate.run_id=run.id
+                  AND candidate.purpose='deliverable'
+                ORDER BY candidate.created_at,candidate.id
+             ) publication ON true
             ORDER BY publication.created_at,publication.id`,
             [input.scope.tenantId, input.scope.userId, input.runId],
           );
@@ -190,6 +205,7 @@ class PgRunExperienceReadRepository implements RunExperienceReadPort {
             .filter((row): row is typeof row & { id: string } => row.id !== null)
             .map((row) => ({
               id: row.id,
+              tenantId: input.scope.tenantId,
               runId: row.run_id as import("@cube-runtime/domain").RunId,
               threadId: row.thread_id as import("@cube-runtime/domain").ThreadId,
               resourceVersionId: row.resource_version_id,
@@ -204,6 +220,7 @@ class PgRunExperienceReadRepository implements RunExperienceReadPort {
                 row.updated_at instanceof Date
                   ? row.updated_at.toISOString()
                   : new Date(row.updated_at).toISOString(),
+              authorizationRevision: row.authorization_revision,
               blob: {
                 kind: "stable" as const,
                 tenantId: input.scope.tenantId,

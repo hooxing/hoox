@@ -5,13 +5,15 @@ import {
   Eye,
   FileText,
   LoaderCircle,
+  MessageSquarePlus,
+  PanelLeftClose,
   PanelRightClose,
   PanelRightOpen,
   Send,
   Square,
   Wrench,
 } from "lucide-react";
-import type { FormEventHandler, ReactNode } from "react";
+import { type FormEventHandler, type ReactNode, type RefObject, useEffect, useRef } from "react";
 import {
   type Artifact,
   canPreviewArtifact,
@@ -23,6 +25,15 @@ import {
 import { buildTimeline, eventSummary } from "./event-view.js";
 
 export const activeRunStatuses = new Set<RunStatus>(["queued", "running", "waiting"]);
+export const compactWorkspaceMedia = "(max-width: 820px)";
+
+export function canCreateThread(title: string, actionLoading: boolean): boolean {
+  return title.trim().length > 0 && !actionLoading;
+}
+
+export function shouldOpenActivityPanel(isCompact: boolean): boolean {
+  return !isCompact;
+}
 
 const statusLabel: Record<RunStatus, string> = {
   queued: "排队中",
@@ -251,6 +262,131 @@ export function ThreadNavigation({ children }: { readonly children: ReactNode })
     <nav className="thread-list" aria-label="会话列表">
       {children}
     </nav>
+  );
+}
+
+export function ThreadCreate({
+  title,
+  actionLoading,
+  onChange,
+  onCreate,
+}: {
+  readonly title: string;
+  readonly actionLoading: boolean;
+  readonly onChange: (value: string) => void;
+  readonly onCreate: () => void;
+}) {
+  const canCreate = canCreateThread(title, actionLoading);
+  const submissionInFlightRef = useRef(actionLoading);
+  useEffect(() => {
+    submissionInFlightRef.current = actionLoading;
+  }, [actionLoading]);
+  const requestCreate = () => {
+    if (!canCreate || submissionInFlightRef.current) return;
+    // React 提交状态写回前也可能连续收到键盘事件，本地栅栏同步阻止同一标题重入。
+    submissionInFlightRef.current = true;
+    onCreate();
+  };
+  return (
+    <div className="thread-create">
+      <label className="sr-only" htmlFor="thread-title">
+        新建会话标题
+      </label>
+      <input
+        id="thread-title"
+        data-navigation-initial-focus
+        value={title}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && canCreate) {
+            event.preventDefault();
+            requestCreate();
+          }
+        }}
+        placeholder="新建会话标题"
+        disabled={actionLoading}
+      />
+      <button
+        type="button"
+        className="icon-button"
+        title="创建会话"
+        aria-label="创建会话"
+        onClick={requestCreate}
+        disabled={!canCreate}
+      >
+        <MessageSquarePlus size={17} />
+      </button>
+    </div>
+  );
+}
+
+export function NavigationSidebar({
+  isCompact,
+  isOpen,
+  returnFocusRef,
+  onClose,
+  children,
+}: {
+  readonly isCompact: boolean;
+  readonly isOpen: boolean;
+  readonly returnFocusRef: RefObject<HTMLButtonElement | null>;
+  readonly onClose: () => void;
+  readonly children: ReactNode;
+}) {
+  const sidebarRef = useRef<HTMLElement>(null);
+  const wasOpenRef = useRef(false);
+
+  useEffect(() => {
+    if (!isCompact) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (isOpen) {
+      wasOpenRef.current = true;
+      const initialFocus =
+        sidebarRef.current?.querySelector<HTMLElement>(
+          "[data-navigation-initial-focus]:not(:disabled)",
+        ) ?? sidebarRef.current?.querySelector<HTMLElement>("button:not(:disabled)");
+      initialFocus?.focus();
+    } else if (wasOpenRef.current) {
+      wasOpenRef.current = false;
+      returnFocusRef.current?.focus();
+    }
+  }, [isCompact, isOpen, returnFocusRef]);
+
+  const hidden = isCompact && !isOpen;
+  return (
+    <aside
+      ref={sidebarRef}
+      className="sidebar"
+      aria-label="会话导航"
+      aria-hidden={hidden || undefined}
+      inert={hidden || undefined}
+      onKeyDown={(event) => {
+        if (isCompact && isOpen && event.key === "Escape") {
+          event.preventDefault();
+          onClose();
+        }
+      }}
+    >
+      <div className="brand-row">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true">
+            C
+          </span>
+          <span>Cube Agent</span>
+        </div>
+        <button
+          className="mobile-only icon-button"
+          type="button"
+          onClick={onClose}
+          aria-label="关闭会话导航"
+        >
+          <PanelLeftClose size={18} />
+        </button>
+      </div>
+      {children}
+    </aside>
   );
 }
 

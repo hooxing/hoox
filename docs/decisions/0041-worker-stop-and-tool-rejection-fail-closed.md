@@ -63,4 +63,3 @@ conflict/unavailable/unknown 时，Worker Session 设置恢复码，并在任何
 代码和配置检查可在未部署时直接回退，不涉及数据库迁移。部署后已写入的恢复 Attempt、Trace Blob 与
 Rollout 事实都是只追加审计记录，不得删除或改写；回退只能让恢复协调器按原协议收敛。若未来引入显式
 draining/requeue 状态，可新增 ADR 和迁移替代 `WORKER_SHUTDOWN`，不能重新把停机映射为业务取消。
-

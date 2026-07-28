@@ -1,8 +1,8 @@
 import { LoaderCircle, PanelLeftOpen, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ApiError, RuntimeApi } from "./api.js";
-import { WorkspaceNavigation } from "./navigation.js";
+import { ApiError, RuntimeApi, type Thread } from "./api.js";
+import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
@@ -15,6 +15,7 @@ import {
   compactWorkspaceMedia,
   EmptyConversation,
   NavigationSidebar,
+  RunRecoveryLoading,
   RunTimeline,
   shouldOpenActivityPanel,
   ThreadCreate,
@@ -23,7 +24,35 @@ import {
 } from "./workspace-view.js";
 
 const api = new RuntimeApi();
-function App() {
+type WorkspaceApi = Pick<
+  RuntimeApi,
+  | "archiveThread"
+  | "cancelRun"
+  | "createRun"
+  | "createThread"
+  | "downloadArtifact"
+  | "getRun"
+  | "listArtifacts"
+  | "listEvents"
+  | "listLatestRuns"
+  | "listThreads"
+  | "previewArtifact"
+>;
+
+type RecoveryUiState = {
+  readonly threadId: string;
+  readonly selectionGeneration: number;
+  readonly requestVersion: number;
+  readonly status: "loading" | "error";
+  readonly error?: ApiError;
+};
+
+/** Thread 列表由服务端稳定排序；刷新时选择其中第一个活跃会话。 */
+export function chooseInitialThread(threads: readonly Thread[]): string | undefined {
+  return threads.find((thread) => thread.status === "active")?.id;
+}
+
+export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) {
   const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [title, setTitle] = useState("");
@@ -32,6 +61,8 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<ApiError | undefined>();
+  const [recoveryUi, setRecoveryUi] = useState<RecoveryUiState | undefined>();
+  const [recoveryNonce, setRecoveryNonce] = useState(0);
   const [isCompact, setIsCompact] = useState(initialCompact);
   const [activityOpen, setActivityOpen] = useState(() => shouldOpenActivityPanel(initialCompact));
   const [navigationOpen, setNavigationOpen] = useState(false);
@@ -41,6 +72,16 @@ function App() {
   const navigationRef = useRef(new WorkspaceNavigation());
   const mobileNavigationToggleRef = useRef<HTMLButtonElement>(null);
   const createThreadInFlightRef = useRef(false);
+  const initialSelectionAppliedRef = useRef(false);
+
+  const selectThread = useCallback((threadId: string | undefined) => {
+    navigationRef.current.navigate(threadId);
+    currentRunPollRef.current.invalidate();
+    dispatch({ type: "select", threadId });
+    setCurrentRequest(undefined);
+    setError(undefined);
+    setNavigationOpen(false);
+  }, []);
 
   useEffect(() => {
     const media = window.matchMedia(compactWorkspaceMedia);
@@ -61,20 +102,84 @@ function App() {
   }, [state.eventAttemptId, state.events]);
 
   const refreshThreads = useCallback(async () => {
+    const expectedNavigation = navigationRef.current.capture();
     setLoading(true);
     try {
-      dispatch({ type: "threads", threads: await api.listThreads() });
-      setError(undefined);
+      const threads = await apiClient.listThreads();
+      dispatch({ type: "threads", threads });
+      if (!initialSelectionAppliedRef.current) {
+        initialSelectionAppliedRef.current = true;
+        const initialThreadId = chooseInitialThread(threads);
+        if (
+          initialThreadId !== undefined &&
+          expectedNavigation.selectedThreadId === undefined &&
+          navigationRef.current.isCurrent(expectedNavigation)
+        ) {
+          selectThread(initialThreadId);
+        }
+      }
+      if (navigationRef.current.isCurrent(expectedNavigation)) setError(undefined);
     } catch (reason) {
-      setError(reason instanceof ApiError ? reason : new ApiError("加载线程失败", 0, true));
+      if (navigationRef.current.isCurrent(expectedNavigation)) {
+        setError(reason instanceof ApiError ? reason : new ApiError("加载线程失败", 0, true));
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [apiClient, selectThread]);
 
   useEffect(() => {
     void refreshThreads();
   }, [refreshThreads]);
+
+  useEffect(() => {
+    const threadId = state.selectedThreadId;
+    if (threadId === undefined) {
+      setRecoveryUi(undefined);
+      return;
+    }
+    const expectedNavigation = navigationRef.current.capture();
+    const selectionGeneration = state.selectionGeneration;
+    let stopped = false;
+    setRecoveryUi({
+      threadId,
+      selectionGeneration,
+      requestVersion: recoveryNonce,
+      status: "loading",
+    });
+
+    void recoverLatestRunForNavigation(navigationRef.current, expectedNavigation, () =>
+      apiClient.listLatestRuns(threadId, 1),
+    )
+      .then((runs) => {
+        if (stopped || runs === undefined) return;
+        dispatch({
+          type: "recoverLatestRun",
+          threadId,
+          selectionGeneration,
+          run: runs[0],
+        });
+        setRecoveryUi((current) =>
+          current?.threadId === threadId && current.selectionGeneration === selectionGeneration
+            ? undefined
+            : current,
+        );
+      })
+      .catch((reason: unknown) => {
+        if (stopped || !navigationRef.current.isCurrent(expectedNavigation)) return;
+        setRecoveryUi({
+          threadId,
+          selectionGeneration,
+          requestVersion: recoveryNonce,
+          status: "error",
+          error: reason instanceof ApiError ? reason : new ApiError("恢复最新运行失败", 0, true),
+        });
+      });
+
+    return () => {
+      stopped = true;
+    };
+  }, [apiClient, recoveryNonce, state.selectedThreadId, state.selectionGeneration]);
 
   useEffect(() => {
     const threadId = state.selectedThreadId;
@@ -86,14 +191,14 @@ function App() {
     const poll = async (): Promise<void> => {
       if (!currentRunPollRef.current.isCurrent(pollGeneration)) return;
       try {
-        const latest = await api.getRun(threadId, runId);
+        const latest = await apiClient.getRun(threadId, runId);
         const [eventPage, artifacts] = await Promise.all([
           drainEventPages(
-            (after, limit) => api.listEvents(threadId, runId, after, limit),
+            (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
             eventAfterRef.current,
             eventAttemptRef.current,
           ),
-          api.listArtifacts(threadId, runId),
+          apiClient.listArtifacts(threadId, runId),
         ]);
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           eventAttemptRef.current = eventPage.attemptId;
@@ -119,7 +224,7 @@ function App() {
       currentRunPollRef.current.invalidate(pollGeneration);
       if (timer !== undefined) window.clearTimeout(timer);
     };
-  }, [state.run?.id, state.selectedThreadId]);
+  }, [apiClient, state.run?.id, state.selectedThreadId]);
 
   const createThread = async () => {
     if (!canCreateThread(title, actionLoading) || createThreadInFlightRef.current) return;
@@ -127,15 +232,10 @@ function App() {
     const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
-      const thread = await api.createThread(title.trim());
+      const thread = await apiClient.createThread(title.trim());
       dispatch({ type: "threadCreated", thread });
       if (navigationRef.current.isCurrent(expectedNavigation)) {
-        navigationRef.current.navigate(thread.id);
-        currentRunPollRef.current.invalidate();
-        dispatch({ type: "select", threadId: thread.id });
-        setCurrentRequest(undefined);
-        setError(undefined);
-        setNavigationOpen(false);
+        selectThread(thread.id);
       }
       setTitle("");
     } catch (reason) {
@@ -151,8 +251,11 @@ function App() {
     setActionLoading(true);
     try {
       const request = input.trim();
-      const run = await api.createRun(state.selectedThreadId, request);
+      const run = await apiClient.createRun(state.selectedThreadId, request);
       if (!navigationRef.current.isCurrent(expectedNavigation)) return;
+      // 新 Run 已成为当前事实时同步推进导航代次，使同 Thread 在途恢复响应立即失效。
+      navigationRef.current.navigate(state.selectedThreadId);
+      setRecoveryUi(undefined);
       // 新 Run 不能继承上一 Run 的 Attempt 或 sequence 游标。
       currentRunPollRef.current.activate(state.selectedThreadId, run.id);
       eventAfterRef.current = -1;
@@ -173,15 +276,13 @@ function App() {
     const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
-      await api.archiveThread(archivedThreadId);
+      await apiClient.archiveThread(archivedThreadId);
       dispatch({ type: "threadArchived", threadId: archivedThreadId });
       if (
         navigationRef.current.isCurrent(expectedNavigation) ||
         navigationRef.current.isSelected(archivedThreadId)
       ) {
-        navigationRef.current.navigate(undefined);
-        currentRunPollRef.current.invalidate();
-        dispatch({ type: "select", threadId: undefined });
+        selectThread(undefined);
       }
     } catch (reason) {
       if (navigationRef.current.isCurrent(expectedNavigation)) setError(reason as ApiError);
@@ -195,7 +296,7 @@ function App() {
     const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
-      const run = await api.cancelRun(state.selectedThreadId, cancelledRun.id);
+      const run = await apiClient.cancelRun(state.selectedThreadId, cancelledRun.id);
       if (navigationRef.current.isCurrent(expectedNavigation) && run.id === cancelledRun.id) {
         dispatch({ type: "run", run });
       }
@@ -220,16 +321,29 @@ function App() {
     if (!state.selectedThreadId || !state.run) return;
     const threadId = state.selectedThreadId;
     const runId = state.run.id;
-    await openArtifact(() => api.downloadArtifact(threadId, runId, artifactId), "获取下载地址失败");
+    await openArtifact(
+      () => apiClient.downloadArtifact(threadId, runId, artifactId),
+      "获取下载地址失败",
+    );
   };
   const preview = async (artifactId: string) => {
     if (!state.selectedThreadId || !state.run) return;
     const threadId = state.selectedThreadId;
     const runId = state.run.id;
-    await openArtifact(() => api.previewArtifact(threadId, runId, artifactId), "获取预览地址失败");
+    await openArtifact(
+      () => apiClient.previewArtifact(threadId, runId, artifactId),
+      "获取预览地址失败",
+    );
   };
 
   const selected = state.threads.find((thread) => thread.id === state.selectedThreadId);
+  const currentRecovery =
+    recoveryUi !== undefined &&
+    recoveryUi.threadId === state.selectedThreadId &&
+    recoveryUi.selectionGeneration === state.selectionGeneration
+      ? recoveryUi
+      : undefined;
+  const visibleError = currentRecovery?.status === "error" ? currentRecovery.error : error;
   return (
     <main className={`workspace ${navigationOpen ? "navigation-open" : ""}`}>
       <NavigationSidebar
@@ -263,13 +377,7 @@ function App() {
                 type="button"
                 className={thread.id === state.selectedThreadId ? "thread selected" : "thread"}
                 key={thread.id}
-                onClick={() => {
-                  navigationRef.current.navigate(thread.id);
-                  currentRunPollRef.current.invalidate();
-                  dispatch({ type: "select", threadId: thread.id });
-                  setCurrentRequest(undefined);
-                  setNavigationOpen(false);
-                }}
+                onClick={() => selectThread(thread.id)}
               >
                 <span>{thread.title}</span>
                 <small>
@@ -292,17 +400,23 @@ function App() {
         >
           <PanelLeftOpen size={18} />
         </button>
-        {error && (
+        {visibleError && (
           <div role="alert" className="error" aria-live="assertive">
             <span>
               <strong>操作未完成。</strong>
-              {error.message}
+              {visibleError.message}
             </span>
-            {error.retryable && (
+            {visibleError.retryable && (
               <button
                 type="button"
                 className="icon-button"
-                onClick={() => void refreshThreads()}
+                onClick={() => {
+                  if (currentRecovery?.status === "error") {
+                    setRecoveryNonce((nonce) => nonce + 1);
+                  } else {
+                    void refreshThreads();
+                  }
+                }}
                 title="重试"
                 aria-label="重试加载"
               >
@@ -340,7 +454,13 @@ function App() {
                   </div>
                 </div>
               )}
-              {state.run ? <RunTimeline events={state.events} /> : <EmptyConversation />}
+              {state.run ? (
+                <RunTimeline events={state.events} />
+              ) : currentRecovery?.status === "loading" ? (
+                <RunRecoveryLoading />
+              ) : (
+                <EmptyConversation />
+              )}
             </section>
             <ConversationComposer
               input={input}
@@ -367,5 +487,4 @@ function App() {
 }
 
 const rootElement = document.getElementById("root");
-if (rootElement === null) throw new Error("未找到应用挂载节点");
-createRoot(rootElement).render(<App />);
+if (rootElement !== null) createRoot(rootElement).render(<App />);

@@ -105,6 +105,15 @@ export function EmptyConversation() {
   );
 }
 
+export function RunRecoveryLoading() {
+  return (
+    <div className="conversation-empty" aria-live="polite">
+      <LoaderCircle className="spin" size={18} aria-hidden="true" />
+      <span>正在恢复最新运行…</span>
+    </div>
+  );
+}
+
 export function ActivityPanel({
   isOpen,
   events,

@@ -40,13 +40,16 @@
 
 Run 事件读取使用只读 `REPEATABLE READ` 事务，在同一个 MVCC 快照中完成 Run 授权、最新 Attempt 选择和事件读取，并以 `limit + 1` 计算 `hasMore`。仅标记只读而保留 PostgreSQL 默认 `READ COMMITTED` 不足以满足该承诺，因为并发 Attempt 切换或旧 Attempt 追加可能被后续语句的新快照观察到。响应中的 `attemptId` 是该 cursor 的边界：客户端遇到变更必须从 `-1` 重新读取，不能把旧 Attempt 的 cursor 带入新 Attempt。
 
-Web client 提供 `listLatestRuns`，状态机的 `recoverLatestRun` 动作携带 Thread 与 `selectionGeneration`。Reducer 对 Thread 或代次不匹配的迟到响应保持原状态；导航辅助函数也在响应前复验导航代次。这些是供主界面接入的恢复基础，当前 `main.tsx` 尚未调用它们，因此本 ADR 此阶段不宣称刷新或切回 Thread 已在实际页面中恢复内容。
+Web client 提供 `listLatestRuns`，状态机的 `recoverLatestRun` 动作携带 Thread 与 `selectionGeneration`。Reducer 对 Thread 或代次不匹配的迟到响应保持原状态；导航辅助函数也在响应前复验导航代次。主界面在初次稳定选择、切换和切回 Thread 时以 `limit=1` 发起恢复，恢复成功后沿用既有轮询拉取事件与 Artifact。
+
+同一 Thread 创建新 Run 时不改变选择代次，单靠 reducer 的 `selectionGeneration` 无法拒绝更早发起的恢复响应。因此创建成功在写入 `startRun` 前同步推进 `WorkspaceNavigation` 代次，并清除该选择的恢复加载态；旧恢复会在导航闩锁处失效，不能用旧 Run 或空列表覆盖新 Run。
 
 ## 当前实施范围
 
 - 已实现并验证 API、PostgreSQL 查询、Web client、Reducer 与导航代次闩锁；
-- 已保持现有主界面代码不变，避免与并行 UI 重构产生冲突；
-- 实际页面的加载态、恢复调用、Run 轮询激活以及事件和 Artifact 回填仍待 UI 分支合并后接入。
+- 主界面初次加载时选择服务端稳定顺序中的第一个活跃 Thread；若没有活跃 Thread 则保持空选择；
+- 主界面展示只归属于当前 Thread 和选择代次的恢复加载/错误，空 Run 恢复后显示就绪态；
+- 恢复出的 Run 会触发现有轮询，继续读取最新 Attempt 事件与 Artifact。
 
 ## 影响
 
@@ -59,13 +62,14 @@ Web client 提供 `listLatestRuns`，状态机的 `recoverLatestRun` 动作携�
 ### 负面影响与成本
 
 - 该端点不是完整历史 API；
-- 当前主界面尚未接入恢复动作，刷新或切回 Thread 仍可能显示空白；
-- 完成 UI 接入后的恢复过程至少需要 Run、事件和 Artifact 三次读取，页面应显示加载态而非把空快照当终态。
+- 恢复过程至少需要 Run、事件和 Artifact 三次读取，会增加一次页面进入时的网络往返；
+- 最新 Run 窗口与新 Run 创建存在并发边界，主界面必须持续保留独立导航闩锁。
 
 ## 验证
 
 - API 契约测试覆盖稳定最新窗口与跨租户 404；
-- Web API、Reducer 与导航测试覆盖可供 UI 接入的恢复基础和迟到响应丢弃，但不作为主界面已接入的证明；
+- Web API、Reducer 与导航测试覆盖恢复基础和迟到响应丢弃；
+- `main.test.tsx` 覆盖刷新自动选择并恢复、切换/切回、空 Thread、迟到错误隔离，以及同 Thread 新 Run 拒绝在途恢复覆盖；
 - 持久层在同一受 RLS 约束的事务中查询 Run，并以 `limit + 1` 验证最新 Attempt 的 `hasMore` 边界；
 - 运行定向测试、类型检查、Biome 与 `git diff --check`。
 
@@ -75,11 +79,11 @@ Web client 提供 `listLatestRuns`，状态机的 `recoverLatestRun` 动作携�
 
 ## 后续工作
 
-- UI 分支合并后，在 `main.tsx` 的初次加载与 Thread 选择路径调用 `listLatestRuns(limit=1)`；
-- 仅在导航代次仍匹配时分发 `recoverLatestRun`，随后激活该 Run 的事件和 Artifact 轮询；
-- 补主界面级测试，覆盖刷新、切回、空 Thread、切走再切回及迟到恢复响应。
+- 评估完整 Run 历史浏览所需的签名游标契约；
+- 在端到端环境持续观察恢复查询与新 Run 创建的并发行为。
 
 ## 实施记录
 
 - 2026-07-28：完成最新 Run API、PG 查询以及 Web client/reducer/navigation 基础。
 - 2026-07-29：独立审查确认主界面尚未接入，收窄本 ADR 的完成声明；事件读取明确升级为只读 `REPEATABLE READ`，并补并发 Attempt 切换、`limit` 与 `hasMore` 集成覆盖。
+- 2026-07-29：主界面接入初次选择与最新 Run 恢复；恢复加载和错误按选择代次隔离，新 Run 创建通过同步导航闩锁拒绝同 Thread 的迟到恢复覆盖。

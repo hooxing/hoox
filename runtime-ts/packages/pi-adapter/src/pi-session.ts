@@ -5,6 +5,12 @@ import {
   parseControlledToolReceipt,
 } from "@cube-runtime/context-policy";
 import { types } from "node:util";
+import {
+  type ContextBudgetDecision,
+  decideModelAwareContextBudget,
+  type ModelBudgetDescriptor,
+  type TokenizerPort,
+} from "@cube-runtime/context-policy";
 import { type RolloutCompatibilityIdentity, sha256Digest } from "@cube-runtime/domain";
 import {
   buildRuntimeSystemPrompt,
@@ -13,7 +19,14 @@ import {
   type ToolCapabilityManifest,
 } from "@cube-runtime/prompt-builder";
 import type { SandboxHandle } from "@cube-runtime/sandbox";
-import type { Api, Model } from "@earendil-works/pi-ai/compat";
+import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
+import type {
+  Api,
+  Context,
+  Model,
+  Provider,
+  SimpleStreamOptions,
+} from "@earendil-works/pi-ai/compat";
 import {
   type AgentSessionEvent,
   createAgentSession,
@@ -32,6 +45,7 @@ import {
 } from "./tools.js";
 
 interface PiSessionPort {
+  readonly isStreaming: boolean;
   prompt(text: string): Promise<void>;
   steer(text: string): Promise<void>;
   followUp(text: string): Promise<void>;
@@ -49,6 +63,9 @@ export interface PiSessionDiagnostics {
   promptDigest: string;
   compactionEnabled: false;
   hasCompactionEntry: boolean;
+  activeAgentMessageCount: number;
+  activeSessionEntryCount: number;
+  pendingMessageCount: number;
 }
 
 export interface PiSessionController {
@@ -61,29 +78,163 @@ export interface PiSessionController {
   getDiagnostics(): Readonly<PiSessionDiagnostics>;
 }
 
+export class ContextBudgetAdmissionError extends Error {
+  readonly code = "CONTEXT_TOO_LARGE" as const;
+  readonly outcome = "context_too_large" as const;
+  readonly action = "rebuild_context" as const;
+
+  constructor(readonly reason: "reserved_context_exceeds_window" | "active_history_would_change") {
+    super("CONTEXT_TOO_LARGE");
+    this.name = "ContextBudgetAdmissionError";
+  }
+}
+
+class ProviderBindingDriftError extends Error {
+  readonly code = "PROVIDER_BINDING_DRIFT" as const;
+
+  constructor() {
+    super("PROVIDER_BINDING_DRIFT");
+    this.name = "ProviderBindingDriftError";
+  }
+}
+
+class DeferredProviderFailure {
+  readonly #failures = new Map<number, ContextBudgetAdmissionError | ProviderBindingDriftError>();
+  #activeGeneration: number | undefined;
+
+  begin(generation: number): void {
+    if (this.#activeGeneration !== undefined) throw new Error("PI_SESSION_TRANSACTION_ACTIVE");
+    this.#activeGeneration = generation;
+  }
+
+  reject<T>(failure: ContextBudgetAdmissionError | ProviderBindingDriftError): T {
+    const generation = this.#activeGeneration;
+    if (generation === undefined) throw new ProviderBindingDriftError();
+    if (!this.#failures.has(generation)) this.#failures.set(generation, failure);
+    throw failure;
+  }
+
+  consume(generation: number): ContextBudgetAdmissionError | ProviderBindingDriftError | undefined {
+    const failure = this.#failures.get(generation);
+    this.#failures.delete(generation);
+    return failure;
+  }
+
+  end(generation: number): void {
+    this.#failures.delete(generation);
+    if (this.#activeGeneration === generation) this.#activeGeneration = undefined;
+  }
+}
+
 class PiSessionControllerImpl implements PiSessionController {
   readonly #session: PiSessionPort;
   readonly #diagnostics: () => PiSessionDiagnostics;
+  readonly #admitInput: (text: string) => void;
+  readonly #providerFailure: DeferredProviderFailure;
+  readonly #checkpoint: () => {
+    readonly leafId: string | null;
+    readonly messages: readonly unknown[];
+  };
+  readonly #rollback: (checkpoint: {
+    readonly leafId: string | null;
+    readonly messages: readonly unknown[];
+  }) => void;
+  #activeGeneration: number | undefined;
+  #activeTransaction:
+    | {
+        readonly generation: number;
+        readonly completion: Promise<void>;
+        readonly resolve: () => void;
+      }
+    | undefined;
+  #nextGeneration = 1;
 
-  constructor(session: PiSessionPort, diagnostics: () => PiSessionDiagnostics) {
+  constructor(
+    session: PiSessionPort,
+    diagnostics: () => PiSessionDiagnostics,
+    admitInput: (text: string) => void,
+    providerFailure: DeferredProviderFailure,
+    checkpoint: () => { readonly leafId: string | null; readonly messages: readonly unknown[] },
+    rollback: (checkpoint: {
+      readonly leafId: string | null;
+      readonly messages: readonly unknown[];
+    }) => void,
+  ) {
     this.#session = session;
     this.#diagnostics = diagnostics;
+    this.#admitInput = admitInput;
+    this.#providerFailure = providerFailure;
+    this.#checkpoint = checkpoint;
+    this.#rollback = rollback;
   }
 
-  prompt(text: string): Promise<void> {
-    return this.#session.prompt(text);
+  async prompt(text: string): Promise<void> {
+    if (this.#activeGeneration !== undefined) throw new Error("PI_SESSION_TRANSACTION_ACTIVE");
+    this.#admitInput(text);
+    await this.#runTransactional(() => this.#session.prompt(text));
   }
 
-  steer(text: string): Promise<void> {
-    return this.#session.steer(text);
+  async steer(text: string): Promise<void> {
+    if (!this.#session.isStreaming) throw new Error("PI_SESSION_NOT_ACTIVE");
+    this.#admitInput(text);
+    await this.#session.steer(text);
   }
 
-  followUp(text: string): Promise<void> {
-    return this.#session.followUp(text);
+  async followUp(text: string): Promise<void> {
+    if (!this.#session.isStreaming) throw new Error("PI_SESSION_NOT_ACTIVE");
+    this.#admitInput(text);
+    await this.#session.followUp(text);
   }
 
-  abort(): Promise<void> {
-    return this.#session.abort();
+  async #runTransactional(action: () => Promise<void>): Promise<void> {
+    const generation = this.#nextGeneration++;
+    this.#providerFailure.begin(generation);
+    this.#activeGeneration = generation;
+    let resolveCompletion: () => void = () => undefined;
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    this.#activeTransaction = {
+      generation,
+      completion,
+      resolve: resolveCompletion,
+    };
+    try {
+      const checkpoint = this.#checkpoint();
+      try {
+        await action();
+      } catch (error) {
+        const providerFailure = this.#providerFailure.consume(generation);
+        if (providerFailure) {
+          this.#rollback(checkpoint);
+          throw providerFailure;
+        }
+        throw error;
+      }
+      const providerFailure = this.#providerFailure.consume(generation);
+      if (providerFailure) {
+        this.#rollback(checkpoint);
+        throw providerFailure;
+      }
+    } finally {
+      this.#providerFailure.end(generation);
+      if (this.#activeGeneration === generation) this.#activeGeneration = undefined;
+      if (this.#activeTransaction?.generation === generation) {
+        const transaction = this.#activeTransaction;
+        this.#activeTransaction = undefined;
+        transaction.resolve();
+      }
+    }
+  }
+
+  async abort(): Promise<void> {
+    // 只捕获调用 abort 时的 transaction；之后启动的新事务不属于本次同步屏障。
+    const transaction = this.#activeTransaction;
+    try {
+      await this.#session.abort();
+    } finally {
+      await transaction?.completion;
+    }
   }
 
   dispose(): void {
@@ -102,8 +253,72 @@ class PiSessionControllerImpl implements PiSessionController {
   }
 }
 
+const UTF8_BYTE_TOKENIZER = Object.freeze<TokenizerPort>({
+  identity: "utf8-byte-upper-bound-v1",
+  countTokens: Object.freeze((text: string) => new TextEncoder().encode(text).byteLength),
+});
+const TRUSTED_MODEL_CAPABILITIES = new WeakMap<
+  object,
+  Readonly<{ modelRuntime: ModelRuntime; registeredModel: Model<Api> }>
+>();
+export interface TrustedPiModelContextCapability {
+  readonly model: Model<Api>;
+  readonly descriptor: ModelBudgetDescriptor;
+  readonly tokenizer: TokenizerPort;
+  readonly tokenizerProbe: number;
+}
+
+/** Provider/model registry 的唯一绑定入口；Session 不接受独立 descriptor 或裸 tokenizer。 */
+export function bindTrustedPiModelContextCapability(
+  modelRuntime: ModelRuntime,
+  model: Model<Api>,
+  ...unsupported: never[]
+): TrustedPiModelContextCapability {
+  if (unsupported.length !== 0) throw new TypeError("公开绑定入口不接受外部 tokenizer");
+  return bindModelContextCapability(modelRuntime, model, UTF8_BYTE_TOKENIZER);
+}
+
+/** @internal 仅供本包测试构造极端预算；未从包入口导出。 */
+export function bindTestingPiModelContextCapability(
+  modelRuntime: ModelRuntime,
+  model: Model<Api>,
+  tokenizer: TokenizerPort,
+): TrustedPiModelContextCapability {
+  return bindModelContextCapability(modelRuntime, model, tokenizer);
+}
+
+function bindModelContextCapability(
+  modelRuntime: ModelRuntime,
+  model: Model<Api>,
+  selected: TokenizerPort,
+): TrustedPiModelContextCapability {
+  const registeredModel = modelRuntime.getModel(model.provider, model.id);
+  if (registeredModel === undefined || registeredModel !== model)
+    throw new TypeError("模型未绑定当前 Provider registry");
+  const probe = selected.countTokens("可信探针🙂 entropy-0123456789");
+  if (!selected.identity.trim() || !Number.isSafeInteger(probe) || probe <= 0)
+    throw new TypeError("Provider tokenizer capability 无效");
+  const modelSnapshot = freezeModelSnapshot(model);
+  const descriptor = Object.freeze({
+    modelId: model.id,
+    contextWindow: model.contextWindow,
+    maxOutputTokens: model.maxTokens,
+    compatibilityHash: modelCompatibilityHash(model),
+  });
+  // 保存探针结果而非只在绑定时检查；Provider 注册表若在运行中替换 tokenizer，必须失败关闭。
+  const capability = Object.freeze({
+    model: modelSnapshot,
+    descriptor,
+    tokenizer: selected,
+    tokenizerProbe: probe,
+  });
+  TRUSTED_MODEL_CAPABILITIES.set(capability, Object.freeze({ modelRuntime, registeredModel }));
+  return capability;
+}
+
 export interface CreateSafePiSessionOptions {
   model: Model<Api>;
+  modelContext: TrustedPiModelContextCapability;
   modelRuntime: ModelRuntime;
   sandbox: SandboxHandle;
   /** Tenant/Skill/User 只能进入低信任数据分区，不能直接替换系统 Harness。 */
@@ -166,26 +381,34 @@ export async function createSafePiSession(
     { projectTrusted: false },
   );
 
-  const { customTools, builtPrompt } = buildSafeSessionMaterial(options);
+  const material = buildSafeSessionMaterial(options);
+  const { customTools, builtPrompt } = material;
+  const budget = assessSafePiSessionContext(options, material);
+  if (budget.outcome !== "ready") {
+    throw new ContextBudgetAdmissionError("reserved_context_exceeds_window");
+  }
+  const activeProjection = selectActiveProjection(options.rolloutProjection, budget.activeEntries);
   const resourceLoader = new EmptyResourceLoader(builtPrompt.systemPrompt);
   await resourceLoader.reload();
   const sessionManager = SessionManager.inMemory(LOGICAL_WORKSPACE);
   for (const entry of builtPrompt.contextEntries) {
     sessionManager.appendCustomMessageEntry(entry.customType, entry.content, false, entry.source);
   }
-  const projectedContext = formatRolloutProjection(options.rolloutProjection);
+  const projectedContext = formatRolloutProjection(activeProjection);
   if (projectedContext !== undefined) {
     sessionManager.appendCustomMessageEntry(
       "runtime.controlled_rollout_projection.v1",
       projectedContext,
       false,
-      { checkpointId: options.rolloutProjection?.checkpointId },
+      { checkpointId: activeProjection?.checkpointId },
     );
   }
+  const providerFailure = new DeferredProviderFailure();
+  const providerBinding = await resolveProviderBinding(options);
   const { session } = await createAgentSession({
     cwd: LOGICAL_WORKSPACE,
-    model: options.model,
-    modelRuntime: options.modelRuntime,
+    model: options.modelContext.model,
+    modelRuntime: providerGatedRuntime(options, providerBinding, providerFailure),
     thinkingLevel: "off",
     sessionManager,
     settingsManager,
@@ -206,18 +429,38 @@ export async function createSafePiSession(
   });
 
   // 对外只返回窄能力对象；AgentSession（含 compact）保留在闭包和 #private 字段内。
-  return new PiSessionControllerImpl(session, () => ({
-    logicalCwd: LOGICAL_WORKSPACE,
-    activeToolNames: session.agent.state.tools.map((tool) => tool.name),
-    promptSchemaVersion: builtPrompt.schemaVersion,
-    promptVersion: builtPrompt.version,
-    capabilityManifestDigest: builtPrompt.manifest.digest,
-    promptDigest: builtPrompt.promptDigest,
-    compactionEnabled: false,
-    hasCompactionEntry: session.sessionManager
-      .getEntries()
-      .some((entry) => entry.type === "compaction"),
-  }));
+  return new PiSessionControllerImpl(
+    session,
+    () => ({
+      logicalCwd: LOGICAL_WORKSPACE,
+      activeToolNames: session.agent.state.tools.map((tool) => tool.name),
+      promptSchemaVersion: builtPrompt.schemaVersion,
+      promptVersion: builtPrompt.version,
+      capabilityManifestDigest: builtPrompt.manifest.digest,
+      promptDigest: builtPrompt.promptDigest,
+      compactionEnabled: false,
+      hasCompactionEntry: session.sessionManager
+        .getEntries()
+        .some((entry) => entry.type === "compaction"),
+      activeAgentMessageCount: session.agent.state.messages.length,
+      activeSessionEntryCount: session.sessionManager.buildContextEntries().length,
+      pendingMessageCount: session.pendingMessageCount,
+    }),
+    (text) => assertCurrentInputFits(options, material, activeProjection, [], text),
+    providerFailure,
+    () => ({
+      leafId: session.sessionManager.getLeafId(),
+      messages: session.agent.state.messages.slice(),
+    }),
+    (checkpoint) => {
+      session.clearQueue();
+      session.agent.state.messages = [
+        ...checkpoint.messages,
+      ] as typeof session.agent.state.messages;
+      if (checkpoint.leafId === null) session.sessionManager.resetLeaf();
+      else session.sessionManager.branch(checkpoint.leafId);
+    },
+  );
 }
 
 /**
@@ -227,25 +470,19 @@ export async function createSafePiSession(
 export function deriveSafePiSessionCompatibility(
   options: CreateSafePiSessionOptions,
 ): RolloutCompatibilityIdentity {
-  const { builtPrompt } = buildSafeSessionMaterial(options);
+  const material = buildSafeSessionMaterial(options);
+  const { builtPrompt } = material;
+  const budget = assessSafePiSessionContext(options, material);
   const model = options.model;
   return Object.freeze({
     modelId: model.id,
-    modelCompatibilityHash: digestProtocolValue({
-      id: model.id,
-      provider: model.provider,
-      api: model.api,
-      reasoning: model.reasoning,
-      thinkingLevelMap: model.thinkingLevelMap,
-      input: model.input,
-      contextWindow: model.contextWindow,
-      maxTokens: model.maxTokens,
-      compat: model.compat,
-    }),
+    modelCompatibilityHash: modelCompatibilityHash(model),
+    // 预算策略是 prompt 可见历史窗口的协议组成部分，必须进入恢复兼容身份。
     promptPolicyHash: digestProtocolValue({
       schemaVersion: builtPrompt.schemaVersion,
       version: builtPrompt.version,
       systemPrompt: builtPrompt.systemPrompt,
+      contextBudgetPolicyHash: budget.policy.policyHash,
     }),
     toolSchemaHash: digestProtocolValue(builtPrompt.manifest),
     skillManifestHash: digestProtocolValue({
@@ -258,6 +495,43 @@ export function deriveSafePiSessionCompatibility(
           contentDigest: entry.source.contentDigest,
         })),
     }),
+  });
+}
+
+/**
+ * 在创建 Pi Session 前评估模型实际 metadata 与可信 prompt/tool schema；纯决策不改变事实。
+ * Projection 已被恢复器验证过工具配对；预算按最终格式化文本逐项计入，不能漏算低信任工具回执。
+ */
+export function assessSafePiSessionContext(
+  options: CreateSafePiSessionOptions,
+  material = buildSafeSessionMaterial(options),
+  sessionInputs: readonly string[] = [],
+  priorOutputReserveTokens = 0,
+): ContextBudgetDecision {
+  assertTrustedModelCapability(options);
+  const { builtPrompt } = material;
+  const projectionHeader = projectionProtocolHeader(options.rolloutProjection);
+  return decideModelAwareContextBudget({
+    model: options.modelContext.descriptor,
+    trustedSystemPrompt: builtPrompt.systemPrompt,
+    toolSchema: material.serializedToolDefinitions,
+    additionalFixedInputs: [
+      ...builtPrompt.contextEntries.map((entry) =>
+        JSON.stringify({ type: entry.customType, content: entry.content, source: entry.source }),
+      ),
+      ...(projectionHeader === undefined ? [] : [projectionHeader]),
+      ...sessionInputs.map((input) => JSON.stringify({ role: "user", content: input })),
+    ],
+    entries: (options.rolloutProjection?.items ?? []).map((item, sequence) => ({
+      sequence,
+      kind: item.kind === "turn" ? item.role : "assistant",
+      text:
+        item.kind === "turn"
+          ? `${item.role === "user" ? "用户" : "助手"}：${item.text}\n`
+          : `工具 ${item.toolCallId} 的低信任观察：${item.observation}\n`,
+    })),
+    tokenizer: options.modelContext.tokenizer,
+    providerOverheadTokens: 256 + priorOutputReserveTokens,
   });
 }
 
@@ -288,7 +562,259 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     })),
     untrusted: options.untrustedPromptContent ?? { tenant: [], skill: [], user: [] },
   });
-  return { customTools, builtPrompt };
+  const serializedToolDefinitions = JSON.stringify(
+    customTools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: canonicalSchema(tool.parameters, new WeakSet<object>()),
+    })),
+  );
+  return { customTools, builtPrompt, serializedToolDefinitions };
+}
+
+function modelCompatibilityHash(model: Model<Api>) {
+  return digestProtocolValue({
+    id: model.id,
+    provider: model.provider,
+    api: model.api,
+    baseUrl: model.baseUrl,
+    headers: model.headers,
+    reasoning: model.reasoning,
+    thinkingLevelMap: model.thinkingLevelMap,
+    input: model.input,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    compat: model.compat,
+  });
+}
+
+interface ProviderBinding {
+  readonly provider: Provider;
+  readonly streamSimple: Provider["streamSimple"];
+  readonly model: Model<Api>;
+  readonly routeDigest: string;
+  readonly auth: Readonly<{
+    apiKey?: string;
+    headers?: Readonly<Record<string, string | null>>;
+    env?: Readonly<Record<string, string>>;
+  }>;
+}
+
+async function resolveProviderBinding(
+  options: CreateSafePiSessionOptions,
+): Promise<ProviderBinding> {
+  assertTrustedModelCapability(options);
+  const provider = options.modelRuntime.getProvider(options.model.provider);
+  const resolution = await options.modelRuntime.getAuth(options.modelContext.model);
+  if (provider === undefined || resolution === undefined) throw new ProviderBindingDriftError();
+  const model = freezeModelSnapshot(
+    resolution.auth.baseUrl === undefined
+      ? options.modelContext.model
+      : { ...options.modelContext.model, baseUrl: resolution.auth.baseUrl },
+  );
+  const auth = Object.freeze({
+    ...(resolution.auth.apiKey === undefined ? {} : { apiKey: resolution.auth.apiKey }),
+    ...(resolution.auth.headers === undefined
+      ? {}
+      : { headers: freezeProtocolRecord(resolution.auth.headers) }),
+    ...(resolution.env === undefined ? {} : { env: freezeProtocolRecord(resolution.env) }),
+  });
+  return Object.freeze({
+    provider,
+    streamSimple: provider.streamSimple,
+    model,
+    routeDigest: resolvedRouteDigest(provider, model, auth),
+    auth,
+  });
+}
+
+function resolvedRouteDigest(
+  provider: Provider,
+  model: Model<Api>,
+  auth: ProviderBinding["auth"],
+): string {
+  return digestProtocolValue({
+    providerId: provider.id,
+    model: modelCompatibilityHash(model),
+    apiKey: auth.apiKey,
+    headers: auth.headers,
+    env: auth.env,
+  });
+}
+
+function freezeProtocolRecord<T extends Record<string, unknown>>(value: T): Readonly<T> {
+  return Object.freeze(structuredClone(value));
+}
+
+function assertResolvedProviderBinding(expected: ProviderBinding, current: ProviderBinding): void {
+  if (
+    current.provider !== expected.provider ||
+    current.streamSimple !== expected.streamSimple ||
+    current.routeDigest !== expected.routeDigest
+  )
+    throw new ProviderBindingDriftError();
+}
+
+/** 每次 Pi 真正请求 Provider 前解析并冻结路由，再按最终 Context 计量。 */
+function providerGatedRuntime(
+  options: CreateSafePiSessionOptions,
+  binding: ProviderBinding,
+  providerFailure: DeferredProviderFailure,
+): ModelRuntime {
+  const runtime = options.modelRuntime;
+  return new Proxy(runtime, {
+    get(target, property, receiver) {
+      if (property === "streamSimple") {
+        return (
+          model: Model<Api>,
+          context: Context,
+          streamOptions?: SimpleStreamOptions & {
+            transformHeaders?: (
+              headers: Record<string, string | null>,
+            ) => Promise<Record<string, string | null>>;
+            env?: Record<string, string>;
+          },
+        ) =>
+          lazyStream(model, async () => {
+            try {
+              assertTrustedModelCapability(options);
+              if (model !== options.modelContext.model) throw new ProviderBindingDriftError();
+              const { transformHeaders, apiKey, headers, env, ...dynamicOptions } =
+                streamOptions ?? {};
+              if (apiKey !== undefined || headers !== undefined || env !== undefined)
+                throw new ProviderBindingDriftError();
+              const beforeTransform = await resolveProviderBinding(options);
+              assertResolvedProviderBinding(binding, beforeTransform);
+              const transformedHeaders = transformHeaders
+                ? await transformHeaders({ ...(beforeTransform.auth.headers ?? {}) })
+                : beforeTransform.auth.headers;
+              // transformHeaders 是唯一异步窗口；其后重新解析，再同步调用已捕获的实现。
+              const finalBinding = await resolveProviderBinding(options);
+              assertResolvedProviderBinding(binding, finalBinding);
+              const decision = decideModelAwareContextBudget({
+                model: options.modelContext.descriptor,
+                trustedSystemPrompt: context.systemPrompt ?? "",
+                toolSchema: JSON.stringify(context.tools ?? []),
+                additionalFixedInputs: context.messages.map((message) => JSON.stringify(message)),
+                entries: [],
+                tokenizer: options.modelContext.tokenizer,
+              });
+              if (decision.outcome !== "ready")
+                return providerFailure.reject(
+                  new ContextBudgetAdmissionError("reserved_context_exceeds_window"),
+                );
+              const preparedOptions = Object.freeze({
+                ...dynamicOptions,
+                ...(binding.auth.apiKey === undefined ? {} : { apiKey: binding.auth.apiKey }),
+                ...(transformedHeaders === undefined
+                  ? {}
+                  : { headers: freezeProtocolRecord(transformedHeaders) }),
+                ...(binding.auth.env === undefined ? {} : { env: binding.auth.env }),
+              });
+              return binding.streamSimple.call(
+                binding.provider,
+                binding.model,
+                context,
+                preparedOptions,
+              );
+            } catch (error) {
+              if (error instanceof ContextBudgetAdmissionError) throw error;
+              return providerFailure.reject(
+                error instanceof ProviderBindingDriftError
+                  ? error
+                  : new ProviderBindingDriftError(),
+              );
+            }
+          });
+      }
+      if (property === "hasConfiguredAuth")
+        return (providerId: string) =>
+          providerId === binding.model.provider || runtime.hasConfiguredAuth(providerId);
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
+function freezeModelSnapshot(model: Model<Api>): Model<Api> {
+  const clone = structuredClone(model);
+  const freeze = (value: unknown): void => {
+    if (value === null || typeof value !== "object" || Object.isFrozen(value)) return;
+    for (const child of Object.values(value)) freeze(child);
+    Object.freeze(value);
+  };
+  freeze(clone);
+  return clone;
+}
+
+function assertTrustedModelCapability(options: CreateSafePiSessionOptions): void {
+  const binding = TRUSTED_MODEL_CAPABILITIES.get(options.modelContext);
+  const liveRegisteredModel = options.modelRuntime.getModel(
+    options.model.provider,
+    options.model.id,
+  );
+  if (
+    binding === undefined ||
+    binding.modelRuntime !== options.modelRuntime ||
+    binding.registeredModel !== liveRegisteredModel ||
+    options.modelContext.descriptor.modelId !== options.model.id ||
+    options.modelContext.descriptor.contextWindow !== options.model.contextWindow ||
+    options.modelContext.descriptor.maxOutputTokens !== options.model.maxTokens ||
+    options.modelContext.descriptor.compatibilityHash !== modelCompatibilityHash(options.model) ||
+    liveRegisteredModel === undefined ||
+    options.modelContext.descriptor.compatibilityHash !==
+      modelCompatibilityHash(liveRegisteredModel) ||
+    options.modelContext.tokenizer.countTokens("可信探针🙂 entropy-0123456789") !==
+      options.modelContext.tokenizerProbe
+  )
+    throw new TypeError("Model Context capability 未绑定当前可信 Provider model");
+}
+
+function selectActiveProjection(
+  projection: ControlledRolloutProjection | undefined,
+  entries: readonly { sequence: number }[],
+): ControlledRolloutProjection | undefined {
+  if (projection === undefined) return undefined;
+  const items = entries
+    .map((entry) => projection.items[entry.sequence])
+    .filter((item) => item !== undefined);
+  return Object.freeze({ ...projection, items: Object.freeze(items) });
+}
+
+function assertCurrentInputFits(
+  options: CreateSafePiSessionOptions,
+  material: ReturnType<typeof buildSafeSessionMaterial>,
+  activeProjection: ControlledRolloutProjection | undefined,
+  admittedInputs: readonly string[],
+  text: string,
+): void {
+  // Pi 会保留此前每轮 user 输入和 assistant 输出。assistant 文本无法在窄控制器上读取，
+  // 因而为每个已接受输入额外保留一次最大输出，宁可提前拒绝也不能低估最终 Provider 请求。
+  const priorOutputReserve =
+    admittedInputs.length * options.modelContext.descriptor.maxOutputTokens;
+  const assessed = assessSafePiSessionContext(
+    activeProjection === undefined ? options : { ...options, rolloutProjection: activeProjection },
+    material,
+    [...admittedInputs, text],
+    priorOutputReserve,
+  );
+  if (
+    assessed.outcome !== "ready" ||
+    assessed.activeEntries.length !== (activeProjection?.items.length ?? 0)
+  )
+    throw new ContextBudgetAdmissionError(
+      assessed.outcome === "ready"
+        ? "active_history_would_change"
+        : "reserved_context_exceeds_window",
+    );
+}
+
+function projectionProtocolHeader(
+  projection: ControlledRolloutProjection | undefined,
+): string | undefined {
+  return projection === undefined || projection.items.length === 0
+    ? undefined
+    : `以下是 Runtime 审核并持久化的历史上下文投影（checkpoint=${projection.checkpointId}）：\n`;
 }
 
 function digestProtocolValue(value: unknown) {

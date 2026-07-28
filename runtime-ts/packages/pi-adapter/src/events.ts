@@ -10,6 +10,12 @@ export type RuntimeAgentEvent =
   | { type: "tool.completed"; callId: string; name: string; isError: boolean }
   | { type: "queue.updated"; steering: readonly string[]; followUp: readonly string[] }
   | { type: "compaction.forbidden"; source: "pi" }
+  | {
+      type: "error";
+      code: "CONTEXT_TOO_LARGE";
+      message: "上下文超出模型窗口";
+      action: "rebuild_context";
+    }
   | { type: "error"; code: "ABORTED" | "PROVIDER" | "PROTOCOL"; message: string };
 
 /** Pi 事件属于可替换内核协议；此处转换后，上层不需要依赖 Pi 的事件结构。 */
@@ -30,6 +36,14 @@ export function mapPiEvent(event: AgentSessionEvent): RuntimeAgentEvent | undefi
         return { type: "error", code: "ABORTED", message: "模型调用已中止" };
       }
       if (event.message.stopReason === "error" || event.message.errorMessage) {
+        if (event.message.errorMessage === "CONTEXT_TOO_LARGE") {
+          return {
+            type: "error",
+            code: "CONTEXT_TOO_LARGE",
+            message: "上下文超出模型窗口",
+            action: "rebuild_context",
+          };
+        }
         return { type: "error", code: "PROVIDER", message: "模型 Provider 调用失败" };
       }
       return {

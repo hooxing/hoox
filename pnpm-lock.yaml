@@ -154,7 +154,11 @@ importers:
         specifier: 8.20.0
         version: 8.20.0
 
-  runtime-ts/packages/context-policy: {}
+  runtime-ts/packages/context-policy:
+    dependencies:
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   runtime-ts/packages/domain: {}
 

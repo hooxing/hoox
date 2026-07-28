@@ -58,6 +58,9 @@ export interface PiSessionDiagnostics {
   promptDigest: string;
   compactionEnabled: false;
   hasCompactionEntry: boolean;
+  activeAgentMessageCount: number;
+  activeSessionEntryCount: number;
+  pendingMessageCount: number;
 }
 
 export interface PiSessionController {
@@ -91,17 +94,30 @@ class ProviderBindingDriftError extends Error {
 }
 
 class DeferredProviderFailure {
-  #failure: ContextBudgetAdmissionError | ProviderBindingDriftError | undefined;
+  readonly #failures = new Map<number, ContextBudgetAdmissionError | ProviderBindingDriftError>();
+  #activeGeneration: number | undefined;
+
+  begin(generation: number): void {
+    if (this.#activeGeneration !== undefined) throw new Error("PI_SESSION_TRANSACTION_ACTIVE");
+    this.#activeGeneration = generation;
+  }
 
   reject<T>(failure: ContextBudgetAdmissionError | ProviderBindingDriftError): T {
-    this.#failure ??= failure;
+    const generation = this.#activeGeneration;
+    if (generation === undefined) throw new ProviderBindingDriftError();
+    if (!this.#failures.has(generation)) this.#failures.set(generation, failure);
     throw failure;
   }
 
-  consume(): ContextBudgetAdmissionError | ProviderBindingDriftError | undefined {
-    const failure = this.#failure;
-    this.#failure = undefined;
+  consume(generation: number): ContextBudgetAdmissionError | ProviderBindingDriftError | undefined {
+    const failure = this.#failures.get(generation);
+    this.#failures.delete(generation);
     return failure;
+  }
+
+  end(generation: number): void {
+    this.#failures.delete(generation);
+    if (this.#activeGeneration === generation) this.#activeGeneration = undefined;
   }
 }
 
@@ -118,6 +134,8 @@ class PiSessionControllerImpl implements PiSessionController {
     readonly leafId: string | null;
     readonly messages: readonly unknown[];
   }) => void;
+  #activeGeneration: number | undefined;
+  #nextGeneration = 1;
 
   constructor(
     session: PiSessionPort,
@@ -139,6 +157,7 @@ class PiSessionControllerImpl implements PiSessionController {
   }
 
   async prompt(text: string): Promise<void> {
+    if (this.#activeGeneration !== undefined) throw new Error("PI_SESSION_TRANSACTION_ACTIVE");
     this.#admitInput(text);
     await this.#runTransactional(() => this.#session.prompt(text));
   }
@@ -156,21 +175,29 @@ class PiSessionControllerImpl implements PiSessionController {
   }
 
   async #runTransactional(action: () => Promise<void>): Promise<void> {
-    const checkpoint = this.#checkpoint();
+    const generation = this.#nextGeneration++;
+    this.#providerFailure.begin(generation);
+    this.#activeGeneration = generation;
     try {
-      await action();
-    } catch (error) {
-      const providerFailure = this.#providerFailure.consume();
+      const checkpoint = this.#checkpoint();
+      try {
+        await action();
+      } catch (error) {
+        const providerFailure = this.#providerFailure.consume(generation);
+        if (providerFailure) {
+          this.#rollback(checkpoint);
+          throw providerFailure;
+        }
+        throw error;
+      }
+      const providerFailure = this.#providerFailure.consume(generation);
       if (providerFailure) {
         this.#rollback(checkpoint);
         throw providerFailure;
       }
-      throw error;
-    }
-    const providerFailure = this.#providerFailure.consume();
-    if (providerFailure) {
-      this.#rollback(checkpoint);
-      throw providerFailure;
+    } finally {
+      this.#providerFailure.end(generation);
+      if (this.#activeGeneration === generation) this.#activeGeneration = undefined;
     }
   }
 
@@ -369,6 +396,9 @@ export async function createSafePiSession(
       hasCompactionEntry: session.sessionManager
         .getEntries()
         .some((entry) => entry.type === "compaction"),
+      activeAgentMessageCount: session.agent.state.messages.length,
+      activeSessionEntryCount: session.sessionManager.buildContextEntries().length,
+      pendingMessageCount: session.pendingMessageCount,
     }),
     (text) => assertCurrentInputFits(options, material, activeProjection, [], text),
     providerFailure,

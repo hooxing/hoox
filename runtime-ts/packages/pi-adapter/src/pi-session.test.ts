@@ -79,6 +79,9 @@ describe("Pi 安全适配", () => {
         promptDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
         compactionEnabled: false,
         hasCompactionEntry: false,
+        activeAgentMessageCount: expect.any(Number),
+        activeSessionEntryCount: expect.any(Number),
+        pendingMessageCount: 0,
       });
       expect("compact" in controller).toBe(false);
       expect("session" in controller).toBe(false);
@@ -254,10 +257,42 @@ describe("Pi 安全适配", () => {
         undefined,
         tokenizer,
       );
-      await expect(controller.prompt("执行工具")).rejects.toMatchObject({
+      const before = controller.getDiagnostics();
+      const reentrantResults: Array<Promise<unknown>> = [];
+      let errorReentryStarted = false;
+      let settledReentryStarted = false;
+      controller.subscribe((event) => {
+        if (event.type === "error" && event.code === "CONTEXT_TOO_LARGE" && !errorReentryStarted) {
+          errorReentryStarted = true;
+          reentrantResults.push(
+            controller.prompt("error 回调重入").then(
+              () => undefined,
+              (error: unknown) => error,
+            ),
+          );
+        }
+        if (event.type === "agent.settled" && !settledReentryStarted) {
+          settledReentryStarted = true;
+          reentrantResults.push(
+            controller.prompt("settled 回调重入").then(
+              () => undefined,
+              (error: unknown) => error,
+            ),
+          );
+        }
+      });
+      const prompting = controller.prompt("执行工具");
+      await expect(controller.prompt("并发 prompt")).rejects.toThrow(
+        "PI_SESSION_TRANSACTION_ACTIVE",
+      );
+      await expect(prompting).rejects.toMatchObject({
         code: "CONTEXT_TOO_LARGE",
         action: "rebuild_context",
       });
+      const reentrantErrors = await Promise.all(reentrantResults);
+      expect(reentrantErrors).toHaveLength(2);
+      for (const error of reentrantErrors)
+        expect(error).toMatchObject({ message: "PI_SESSION_TRANSACTION_ACTIVE" });
       expect(faux.state.callCount).toBe(1);
       expect(events).toContainEqual({
         type: "error",
@@ -265,6 +300,10 @@ describe("Pi 安全适配", () => {
         message: "上下文超出模型窗口",
         action: "rebuild_context",
       });
+      const after = controller.getDiagnostics();
+      expect(after.activeAgentMessageCount).toBe(before.activeAgentMessageCount);
+      expect(after.activeSessionEntryCount).toBe(before.activeSessionEntryCount);
+      expect(after.pendingMessageCount).toBe(0);
       let nextContext = "";
       faux.setResponses([
         (context) => {
@@ -276,6 +315,9 @@ describe("Pi 安全适配", () => {
       expect(faux.state.callCount).toBe(2);
       expect(nextContext).not.toContain("大工具结果");
       expect(nextContext).not.toContain("执行工具");
+      expect(nextContext).not.toContain("并发 prompt");
+      expect(nextContext).not.toContain("error 回调重入");
+      expect(nextContext).not.toContain("settled 回调重入");
     },
   );
 

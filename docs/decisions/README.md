@@ -37,7 +37,11 @@
 | [ADR-0029](0029-trusted-prompt-and-session-capability-manifest.md) | 可信 Prompt 分层与 Session 能力清单 | 已接受 | 2026-07-28 |
 | [ADR-0030](0030-runtime-rollout-checkpoint-fact-source.md) | Runtime Rollout 与 Checkpoint 事实源 | 已接受 | 2026-07-28 |
 | [ADR-0032](0032-runtime-rollout-pi-recovery-projection.md) | Runtime Rollout 到 Pi 的恢复投影 | 已接受 | 2026-07-28 |
+| [ADR-0033](0033-waiting-sandbox-recovery.md) | waiting 与 SandboxSession 恢复安全边界 | 已接受 | 2026-07-28 |
 | [ADR-0034](0034-m4-runtime-dependency-build-gate.md) | M4 黑盒运行时依赖构建门禁 | 已接受 | 2026-07-28 |
+| [ADR-0035](0035-model-aware-context-budget.md) | 模型感知的 Context Budget | 已接受 | 2026-07-28 |
+| [ADR-0036](0036-waiting-recovery-proof-derived-facts.md) | waiting 恢复事实由已完成副作用证明推导 | 已替代 | 2026-07-28 |
+| [ADR-0037](0037-waiting-recovery-capability-and-append-only-rollback.md) | waiting 恢复能力回执与只追加回退边界 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录
 

@@ -22,6 +22,11 @@ ALTER TABLE runtime_rollout_entries DROP CONSTRAINT runtime_rollout_entries_kind
 ALTER TABLE runtime_rollout_entries ADD CONSTRAINT runtime_rollout_entries_kind_check CHECK (
   kind IN ('user','assistant','tool_call','tool_result','waiting','terminal','sandbox_recovery')
 );
+
+ALTER TABLE sandbox_registry ADD COLUMN generation bigint NOT NULL DEFAULT 1;
+ALTER TABLE sandbox_registry ADD CONSTRAINT sandbox_registry_generation_check CHECK (
+  generation BETWEEN 1 AND 9007199254740991
+);
 CREATE UNIQUE INDEX runtime_rollout_waiting_recovery_checkpoint_idx
   ON runtime_rollout_entries(tenant_id,attempt_id,agent_thread_id,(body->>'checkpointId'))
   WHERE kind='sandbox_recovery';
@@ -84,6 +89,31 @@ CREATE TABLE waiting_recovery_checkpoints (
     OR (state IN ('claimed','effect_pending') AND claim_owner IS NOT NULL
       AND claim_token IS NOT NULL AND claim_expires_at IS NOT NULL)
     OR (state IN ('resolved','unknown') AND decision IS NOT NULL)
+  ),
+  CONSTRAINT waiting_recovery_decision_shape CHECK (
+    decision IS NULL OR (
+      jsonb_typeof(decision)='object'
+      AND (
+        (decision->>'outcome'='external_effect_unknown'
+          AND decision->>'effect' IN ('pause','connect','create','materialize')
+          AND decision->'requestAutomaticRetry'='false'::jsonb)
+        OR (decision->>'outcome'='workspace_head_unavailable'
+          AND decision->'requestAutomaticRetry'='false'::jsonb)
+        OR decision->>'outcome'='workspace_conflict'
+        OR (decision->>'outcome'='resume'
+          AND decision->>'workspace' IN ('unchanged','replan')
+          AND decision->'sandbox'->>'kind' IN ('sandbox_reused','sandbox_rebuilt')
+          AND (decision->'sandbox'->>'kind'<>'sandbox_reused'
+            OR (octet_length(decision->'sandbox'->>'registryId') BETWEEN 1 AND 200
+              AND jsonb_typeof(decision->'sandbox'->'generation')='number'
+              AND (decision->'sandbox'->>'generation')::numeric BETWEEN 1 AND 9007199254740991
+              AND (decision->'sandbox'->>'generation')::numeric=trunc((decision->'sandbox'->>'generation')::numeric)))
+          AND (decision->'sandbox'->>'kind'<>'sandbox_rebuilt'
+            OR decision->'sandbox'->>'reason' IN (
+              'missing','ttl_expired','generation_mismatch','scope_mismatch','base_revision_mismatch'
+            )))
+      )
+    )
   )
 );
 
@@ -100,7 +130,17 @@ CREATE TABLE waiting_recovery_effect_outbox (
   PRIMARY KEY (tenant_id, checkpoint_id, intent_id),
   UNIQUE (tenant_id, checkpoint_id, effect),
   FOREIGN KEY (tenant_id, checkpoint_id) REFERENCES waiting_recovery_checkpoints(tenant_id, checkpoint_id)
-    ON DELETE RESTRICT
+    ON DELETE RESTRICT,
+  CONSTRAINT waiting_recovery_effect_payload_shape CHECK (
+    (state='pending' AND payload ? 'plan')
+    OR (state='completed' AND payload ? 'plan' AND payload ? 'proof'
+      AND octet_length(payload->'proof'->>'registryId') BETWEEN 1 AND 200
+      AND octet_length(payload->'proof'->>'providerSandboxId') BETWEEN 1 AND 200
+      AND jsonb_typeof(payload->'proof'->'generation')='number'
+      AND (payload->'proof'->>'generation')::numeric BETWEEN 1 AND 9007199254740991
+      AND (payload->'proof'->>'generation')::numeric=trunc((payload->'proof'->>'generation')::numeric))
+    OR (state='unknown' AND payload->>'unknownEffect' IN ('connect','create','materialize'))
+  )
 );
 
 CREATE INDEX waiting_recovery_claim_idx ON waiting_recovery_checkpoints(tenant_id,state,claim_expires_at);

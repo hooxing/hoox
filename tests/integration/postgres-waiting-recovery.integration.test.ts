@@ -275,7 +275,11 @@ describe("waiting recovery PostgreSQL 事实源", () => {
       (
         await store.beginEffect({
           claim: old.claim,
-          decision: { outcome: "resume", sandbox: { kind: "sandbox_rebuilt" } },
+          decision: {
+            outcome: "resume",
+            workspace: "unchanged",
+            sandbox: { kind: "sandbox_rebuilt", reason: "missing" },
+          },
           observedWorkspaceHead: { outcome: "empty" },
           effect: "create",
         })
@@ -310,6 +314,11 @@ describe("waiting recovery PostgreSQL 事实源", () => {
           claim: acquired.claim,
           intentId: intent.intentId,
           effect,
+          proof: {
+            registryId: `rebuilt_registry_${unique}`,
+            providerSandboxId: `rebuilt_sandbox_${unique}`,
+            generation: 1,
+          },
         }),
       ).toBe("completed");
     }
@@ -317,26 +326,135 @@ describe("waiting recovery PostgreSQL 事实源", () => {
       await store.resolve({
         claim: acquired.claim,
         decision,
-        sandboxFact: { kind: "sandbox_rebuilt", reason: "missing" },
       }),
     ).toBe("resolved");
     const facts = await withTenantTransaction(runtime, databaseContext, (client) =>
-      client.query<{ run_count: string; rollout_count: string }>(
+      client.query<{ run_count: string; rollout_count: string; decision: string; reason: string }>(
         `SELECT
           (SELECT count(*) FROM run_events WHERE tenant_id=$1 AND attempt_id=$2
             AND kind='sandbox_recovery_decided')::text AS run_count,
           (SELECT count(*) FROM runtime_rollout_entries WHERE tenant_id=$1 AND attempt_id=$2
-            AND kind='sandbox_recovery')::text AS rollout_count`,
+            AND kind='sandbox_recovery')::text AS rollout_count,
+          (SELECT payload->>'decision' FROM run_events WHERE tenant_id=$1 AND attempt_id=$2
+            AND kind='sandbox_recovery_decided') AS decision,
+          (SELECT payload->>'reason' FROM run_events WHERE tenant_id=$1 AND attempt_id=$2
+            AND kind='sandbox_recovery_decided') AS reason`,
         [scope.tenantId, attemptId],
       ),
     );
-    expect(facts.rows[0]).toEqual({ run_count: "1", rollout_count: "1" });
+    expect(facts.rows[0]).toEqual({
+      run_count: "1",
+      rollout_count: "1",
+      decision: "sandbox_rebuilt",
+      reason: "missing",
+    });
     expect(
       await store.resolve({
         claim: acquired.claim,
         decision,
-        sandboxFact: { kind: "sandbox_rebuilt", reason: "missing" },
       }),
     ).not.toBe("resolved");
+  });
+
+  it("effect_pending 租约过期时由后续 claim 收敛 UNKNOWN，绝不重发 create", async () => {
+    const abandonedCheckpointId = `wait_abandoned_${unique}`;
+    const rollout = new PgRuntimeRolloutRepository(runtime);
+    const appended = await rollout.append({
+      context: rolloutContext,
+      idempotencyKey: `wait-abandoned-entry-${unique}`,
+      entries: [{ kind: "waiting", body: { checkpointId: abandonedCheckpointId } }],
+    });
+    if (appended.outcome !== "created") throw new Error("测试 waiting Rollout 写入失败");
+    const sequence = appended.value[0]?.sequence;
+    if (sequence === undefined) throw new Error("测试 waiting Rollout 缺少序号");
+    expect(
+      (
+        await rollout.writeCheckpoint({
+          context: rolloutContext,
+          idempotencyKey: `wait-abandoned-checkpoint-${unique}`,
+          checkpointId: abandonedCheckpointId,
+          windowStartSequence: sequence,
+          throughSequence: sequence,
+          projection: { turns: [] },
+          replacementHistory: [],
+        })
+      ).outcome,
+    ).toBe("created");
+    await withTenantTransaction(runtime, databaseContext, async (client) => {
+      const next = await client.query<{ sequence: string }>(
+        `UPDATE execution_attempts SET next_event_sequence=next_event_sequence+1
+          WHERE tenant_id=$1 AND attempt_id=$2 RETURNING (next_event_sequence-1)::text AS sequence`,
+        [scope.tenantId, attemptId],
+      );
+      const eventSequence = next.rows[0]?.sequence;
+      if (eventSequence === undefined) throw new Error("测试 waiting event 缺少序号");
+      await client.query(
+        `INSERT INTO run_events(tenant_id,attempt_id,sequence,schema_version,kind,payload)
+         VALUES($1,$2,$3,1,'run_waiting',$4::jsonb)`,
+        [
+          scope.tenantId,
+          attemptId,
+          eventSequence,
+          JSON.stringify({ question: "继续？", checkpointId: abandonedCheckpointId }),
+        ],
+      );
+    });
+    expect(
+      await store.record({
+        scope,
+        attemptId,
+        checkpointId: abandonedCheckpointId,
+        workspaceHeadAtWait: { outcome: "empty" },
+      }),
+    ).toBe("created");
+    const acquired = await store.claim({
+      scope,
+      checkpointId: abandonedCheckpointId,
+      workerId: "crashed-worker",
+    });
+    if (acquired.outcome !== "claimed") throw new Error("测试需要 effect_pending claim");
+    const intent = await store.beginEffect({
+      claim: acquired.claim,
+      decision: {
+        outcome: "resume",
+        workspace: "unchanged",
+        sandbox: { kind: "sandbox_rebuilt", reason: "missing" },
+      },
+      observedWorkspaceHead: { outcome: "empty" },
+      effect: "create",
+    });
+    if (intent.outcome !== "authorized") throw new Error("测试需要 create intent");
+    await withTenantTransaction(migrator, databaseContext, (client) =>
+      client.query(
+        `UPDATE waiting_recovery_checkpoints
+          SET claim_expires_at=clock_timestamp()-interval '1 second'
+          WHERE tenant_id=$1 AND checkpoint_id=$2`,
+        [scope.tenantId, abandonedCheckpointId],
+      ),
+    );
+    expect(
+      (
+        await store.claim({
+          scope,
+          checkpointId: abandonedCheckpointId,
+          workerId: "recovery-worker",
+        })
+      ).outcome,
+    ).toBe("resolved");
+    const state = await withTenantTransaction(runtime, databaseContext, (client) =>
+      client.query<{ checkpoint_state: string; effect_state: string; unknown_effect: string }>(
+        `SELECT checkpoint.state AS checkpoint_state,effect.state AS effect_state,
+                effect.payload->>'unknownEffect' AS unknown_effect
+           FROM waiting_recovery_checkpoints checkpoint
+           JOIN waiting_recovery_effect_outbox effect USING(tenant_id,checkpoint_id)
+          WHERE checkpoint.tenant_id=$1 AND checkpoint.checkpoint_id=$2`,
+        [scope.tenantId, abandonedCheckpointId],
+      ),
+    );
+    expect(state.rows[0]).toEqual({
+      checkpoint_state: "unknown",
+      effect_state: "unknown",
+      unknown_effect: "create",
+    });
   });
 });

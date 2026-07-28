@@ -87,6 +87,7 @@ export function projectLoadedRuntimeRecovery(
 ): RuntimeRecoveryProjectionResult {
   const checkpoint = loaded.checkpoint;
   const turns = checkpoint === undefined ? [] : checkpointTurns(checkpoint);
+  const toolObservations: Array<{ toolCallId: string; observation: string }> = [];
   let expectedSequence = checkpoint === undefined ? 0 : checkpoint.throughSequence + 1;
   let pendingToolCall: { readonly id: string; readonly sequence: number } | undefined;
   let terminalSeen = false;
@@ -103,6 +104,7 @@ export function projectLoadedRuntimeRecovery(
     expectedSequence += 1;
     if (pendingToolCall !== undefined) {
       if (entry.kind !== "tool_result" || entry.toolCallId !== pendingToolCall.id) malformed();
+      toolObservations.push(recoverToolObservation(entry));
       pendingToolCall = undefined;
       continue;
     }
@@ -133,6 +135,7 @@ export function projectLoadedRuntimeRecovery(
       schemaVersion: 1,
       checkpointId: checkpoint?.checkpointId ?? "rollout-origin",
       turns: Object.freeze(turns.map((turn) => Object.freeze({ ...turn }))),
+      toolObservations: Object.freeze(toolObservations.map((item) => Object.freeze({ ...item }))),
     }),
   });
 }
@@ -147,6 +150,7 @@ function safeSessionOptions(
     modelRuntime: options.modelRuntime,
     sandbox: options.sandbox,
     authorizeToolEffect: options.authorizeToolEffect,
+    createToolObservationRecorder: options.createToolObservationRecorder,
     ...(options.untrustedPromptContent === undefined
       ? {}
       : { untrustedPromptContent: options.untrustedPromptContent }),
@@ -154,6 +158,31 @@ function safeSessionOptions(
       ? {}
       : { artifactToolRouter: options.artifactToolRouter }),
   };
+}
+
+function recoverToolObservation(entry: RuntimeRolloutEntry): {
+  toolCallId: string;
+  observation: string;
+} {
+  if (
+    !validCallId(entry.toolCallId) ||
+    entry.blob === undefined ||
+    (!entry.isTruncated && entry.isTruncated !== false) ||
+    !isRecord(entry.body) ||
+    entry.body.schemaVersion !== 1 ||
+    typeof entry.body.toolName !== "string" ||
+    typeof entry.body.observation !== "string" ||
+    !isRecord(entry.body.traceBlob) ||
+    entry.body.traceBlob.referenceId !== entry.blob.referenceId ||
+    typeof entry.body.rawOutputSha256 !== "string" ||
+    entry.body.rawOutputSha256 !== entry.blob.sha256 ||
+    typeof entry.body.rawOutputBytes !== "number" ||
+    entry.body.rawOutputBytes !== entry.blob.size ||
+    !isRecord(entry.body.truncation) ||
+    entry.body.truncation.isTruncated !== entry.isTruncated
+  )
+    malformed();
+  return { toolCallId: entry.toolCallId, observation: boundedText(entry.body.observation) };
 }
 
 function checkpointTurns(

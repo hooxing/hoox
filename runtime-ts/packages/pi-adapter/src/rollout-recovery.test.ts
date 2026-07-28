@@ -105,7 +105,23 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
       ...loaded([
         entry(4, "user", { text: "新的问题" }),
         entry(5, "tool_call", { name: "sandbox_read_file" }, "call-5"),
-        entry(6, "tool_result", { text: "工具事实" }, "call-5"),
+        {
+          ...entry(
+            6,
+            "tool_result",
+            {
+              schemaVersion: 1,
+              toolName: "sandbox_read_file",
+              observation: '{"trust":"sandbox_untrusted"}',
+              rawOutputSha256: "b".repeat(64),
+              rawOutputBytes: 12,
+              traceBlob: { referenceId: "trace-5" },
+              truncation: { isTruncated: false },
+            },
+            "call-5",
+          ),
+          blob: { referenceId: "trace-5", sha256: sha256Digest("b".repeat(64)), size: 12 },
+        },
         entry(7, "assistant", { text: "新的回答" }),
       ]),
       checkpoint: {
@@ -129,6 +145,7 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
           { role: "user", text: "新的问题" },
           { role: "assistant", text: "新的回答" },
         ],
+        toolObservations: [{ toolCallId: "call-5", observation: '{"trust":"sandbox_untrusted"}' }],
       },
     });
     expect(() =>
@@ -234,6 +251,19 @@ async function sessionHarness() {
       authorizeToolEffect: async () => ({
         consumedAtMonotonicMs: performance.now(),
         maxContinuationDelayMs: 100,
+      }),
+      createToolObservationRecorder: (outputs: {
+        readSanitizedOutput(call: {
+          toolCallId: string;
+          toolName: string;
+        }): Promise<string | undefined>;
+      }) => ({
+        record: async (call: { toolCallId: string; toolName: string }) => {
+          const observation = await outputs.readSanitizedOutput(call);
+          return observation === undefined
+            ? { outcome: "conflict" as const }
+            : { outcome: "recorded" as const, observation, isTruncated: false };
+        },
       }),
       untrustedPromptContent: {
         tenant: [],

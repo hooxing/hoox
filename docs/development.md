@@ -109,7 +109,9 @@ Runtime 对 Membership 只有 SELECT、INSERT 和恒定 `lock_marker` 的单列 
 
 `GET /v1/threads/:threadId/runs/:runId/events?after=-1&limit=100` 从 PostgreSQL 的 `run_events` 按 `(attempt_id, sequence)` 读取。`after` 是排他 sequence 游标，响应只包含当前 Run 最新 Attempt 中 sequence 更大的持久化事件，按升序返回，最大 200 条。每项以 `<attemptId>-<sequence>` 形成稳定 `eventId`。当 `kind=agent_event` 且 `payload.type` 位于 RuntimeAgentEvent 的受支持白名单时，`type` 使用该子类型；其他事件或未知 payload 一律令 `type=kind`，并始终保留原始 `kind`。Run 不存在、Thread 不匹配、跨租户或成员关系失效一律为 404；数据库异常为 503，不泄漏 SQL 或事件内部错误。
 
-`GET /v1/threads/:threadId/runs/:runId/artifacts` 只返回已 settled 为 published 的 deliverable。预览和下载端点仅对该列表中的 Artifact 签发最长 300 秒的 S3 URL；签发后再次读取授权投影，以缩小成员撤销和发布状态变化的竞态窗口。`preview` 明确要求对象存储生成 inline 响应，`download` 使用已净化的文件名。URL、对象键和签名不写入 API 日志或持久化事实。Artifact DTO 在该投影中补充可选 `mediaType` 与 `sizeBytes`，旧的领域 DTO 映射不要求提供它们。
+`GET /v1/threads/:threadId/runs/:runId/artifacts` 只返回已 settled 为 published 的 deliverable；授权 Run 没有发布记录、只有 publishing 或只有 failed 记录时返回 200 空列表。预览和下载端点仅对该列表中的 Artifact 签发最长 300 秒的 S3 URL；签发后再次读取并逐字段确认授权修订及完整固定 Blob 绑定，任一漂移都按 404 失败关闭。BlobStore 适配错误统一返回不泄漏内部消息的 503。`preview` 只为安全 charset 的纯文本、PNG/JPEG/GIF/WebP 和 PDF 生成 inline 响应；HTML、SVG、XML 等主动内容返回 422，但 `download` 仍可使用已净化文件名以 attachment 方式签发。URL、对象键和签名不写入 API 日志或持久化事实。Artifact DTO 在该投影中补充可选 `mediaType` 与 `sizeBytes`，旧的领域 DTO 映射不要求提供它们。
+
+固定开发身份启用时，`S3_PUBLIC_ENDPOINT` 必须使用字面回环地址，并与 API origin 和 Web 的 `http://127.0.0.1:4173` origin 不同；推荐 MinIO 使用 `http://127.0.0.1:19000`。LAN 地址、`localhost`、携带凭据/路径/查询的 public endpoint 均在装配前失败。
 
 ## 提交前检查
 

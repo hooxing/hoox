@@ -189,6 +189,7 @@ export interface RunExperienceReadPort {
 /** 仅暴露已完成的用户交付物和它已固定的 stable Blob 身份。 */
 export interface RunExperienceArtifact {
   readonly id: string;
+  readonly tenantId: TenantId;
   readonly runId: Run["id"];
   readonly threadId: ThreadId;
   readonly resourceVersionId: string;
@@ -197,6 +198,8 @@ export interface RunExperienceArtifact {
   readonly sizeBytes: number;
   readonly createdAt: string;
   readonly updatedAt: string;
+  /** Membership 与发布终态的组合修订，用于预签名后的二次确认。 */
+  readonly authorizationRevision: string;
   readonly blob: StableBlobRef;
 }
 

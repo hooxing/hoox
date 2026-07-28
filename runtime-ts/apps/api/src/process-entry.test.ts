@@ -102,6 +102,44 @@ describe("API 进程入口", () => {
   );
 
   it.each([
+    ["http://127.0.0.1:3001", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_MUST_BE_ISOLATED"],
+    ["http://127.0.0.1:4173", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_MUST_BE_ISOLATED"],
+    ["http://192.168.53.128:19000", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_REQUIRES_LOOPBACK_ORIGIN"],
+    ["http://localhost:19000", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_REQUIRES_LOOPBACK_ORIGIN"],
+    ["http://127.1:19000", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_REQUIRES_LOOPBACK_ORIGIN"],
+    ["http://2130706433:19000", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_REQUIRES_LOOPBACK_ORIGIN"],
+    ["http://127.0.0.1:19000/minio", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_REQUIRES_LOOPBACK_ORIGIN"],
+  ])("固定开发身份拒绝不安全的对象存储公开 origin %s", (publicEndpoint, errorCode) => {
+    expect(() =>
+      parseApiProcessEnvironment(developmentEnvironment({ S3_PUBLIC_ENDPOINT: publicEndpoint })),
+    ).toThrow(errorCode);
+  });
+
+  it("对象存储隔离按实际 API 和明确 Web origin 判断，不把端口当成隐式身份", () => {
+    expect(
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          API_LISTEN_PORT: "3301",
+          S3_PUBLIC_ENDPOINT: "http://127.0.0.1:3001",
+        }),
+      ).objectStorage.publicEndpoint,
+    ).toBe("http://127.0.0.1:3001");
+    expect(
+      parseApiProcessEnvironment(
+        developmentEnvironment({ S3_PUBLIC_ENDPOINT: "http://[::1]:4173" }),
+      ).objectStorage.publicEndpoint,
+    ).toBe("http://[::1]:4173");
+    expect(() =>
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          API_LISTEN_PORT: "80",
+          S3_PUBLIC_ENDPOINT: "http://127.0.0.1",
+        }),
+      ),
+    ).toThrow("DEVELOPMENT_S3_PUBLIC_ENDPOINT_MUST_BE_ISOLATED");
+  });
+
+  it.each([
     { DEV_AUTH_USER_B_ID: "user-a-local" },
     { DEV_AUTH_USER_B_TENANT_ID: "tenant-a-local" },
   ])("API 启动在装配前拒绝未隔离的 A/B 身份：%o", async (overrides) => {

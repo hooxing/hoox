@@ -1,4 +1,4 @@
-# ADR-0041：本地 Web 体验的 Run 事件与 Artifact 读取契约
+# ADR-0042：本地 Web 体验的 Run 事件与 Artifact 读取契约
 
 - 状态：已接受
 - 日期：2026-07-28
@@ -35,6 +35,10 @@ API 在每次读取中以 `TenantScope` 重验 Membership，事件只读取 Run 
 
 采用方案 A。Web 本地开发服务器把 `/v1` 反向代理到 API，浏览器保持同源；API 不启用 CORS。事件接口使用 `after` 排他 sequence 游标和有限 `limit`，Artifact 预览/下载使用最长 300 秒的 S3 URL。事件 cursor 只在响应所示 `attemptId` 内有效；客户端发现 `attemptId` 改变时必须重置或按 Attempt 分区去重，不能把旧 cursor 用于新 Attempt。
 
+Artifact 列表先确认 Run 与 Membership，再以 LATERAL 子查询筛选 published deliverable，因而授权 Run 没有 Artifact、只有 publishing 或只有 failed Artifact 时均返回 200 空列表，不会被误判为 404。预签名前后必须逐字段比较授权修订、Tenant/Thread/Run/Artifact/ResourceVersion、摘要、大小、媒体类型、incarnation 与物理对象键；任一漂移都按 404 失败关闭。BlobStore 的已知适配错误统一映射为不泄漏内部消息的 503。
+
+inline 预览只允许被动媒体：带安全 charset 的 `text/plain`、PNG、JPEG、GIF、WebP 与 PDF。HTML、SVG、XML 等主动内容返回 422，但相同 Artifact 仍可通过 attachment 下载。开发 `S3_PUBLIC_ENDPOINT` 必须是与 API、Web 均不同的字面回环 origin，例如 MinIO 使用 `127.0.0.1:19000`、Web 使用 `127.0.0.1:4173`；不接受 LAN 地址或 `localhost` DNS 名称。
+
 ## 理由
 
 该方案复用已经受审计的认证、RLS、成员关系和 Blob 预签名能力，以最小新状态建立完整纵向链路。轮询可由 sequence 去重并安全续读，后续可在同一语义上增加 SSE。
@@ -54,14 +58,16 @@ API 在每次读取中以 `TenantScope` 重验 Membership，事件只读取 Run 
 
 ### 安全、数据与运维影响
 
-- URL 仅能来自经校验的 S3 endpoint，不能记录到日志；
+- URL 仅能来自经校验的独立回环 S3 public origin，不能记录到日志；
 - 开发环境仍只能监听回环地址，Web 必须使用同源代理；
 - 成员撤销与预签名 URL 的残余时间上限为 300 秒。
 
 ## 验证
 
 - Fastify 契约测试验证 sequence 增量读取、Run/Thread 边界和跨租户 404；
-- 进程配置测试验证对象存储配置作为受控环境字段解析；
+- 真实 PostgreSQL 集成测试覆盖无发布记录、publishing、failed 与 published 四种投影；
+- API 测试覆盖签名前后绑定漂移、BlobStore 503、被动预览白名单和主动内容下载回退；
+- 进程配置测试验证对象存储 public origin 与 API/Web 隔离；
 - 运行 API 单元测试、类型检查和格式检查。
 
 ## 可逆性与回退
@@ -71,8 +77,9 @@ API 在每次读取中以 `TenantScope` 重验 Membership，事件只读取 Run 
 ## 后续工作
 
 - 在 Web 接入完成后评估 SSE 的背压、断线和多 Attempt 展示语义；
-- 为真实 PostgreSQL + MinIO 增加端到端授权回归测试。
+- 为真实 MinIO 增加端到端签名与响应头回归测试。
 
 ## 实施记录
 
 - 2026-07-28：新增 Run 体验读取端口、API 端点与开发 S3 装配。
+- 2026-07-28：补齐空 Artifact 投影、双读固定绑定、被动预览白名单与独立对象存储 origin。

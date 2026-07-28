@@ -1,10 +1,14 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { CopyObjectCommand, DeleteObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { ToolObservationPipeline } from "@cube-runtime/context-policy";
 import {
-  ToolObservationPipeline,
-  trustedToolOutputFromSanitizedAdapter,
-} from "@cube-runtime/context-policy";
-import { agentThreadId, runId, sha256Digest, threadId, userId } from "@cube-runtime/domain";
+  agentThreadId,
+  runId,
+  sha256Digest,
+  tenantId,
+  threadId,
+  userId,
+} from "@cube-runtime/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createS3BlobStore,
@@ -325,7 +329,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
   it("真实 PG + MinIO 持久化 Trace 后追加 Rollout，并可在重启后幂等重放", async () => {
     const suffix = `observation_${unique}`;
     const rolloutScope = {
-      tenantId: scopeA.tenantId,
+      tenantId: tenantId(scopeA.tenantId),
       threadId: threadId(`thread_${suffix}`),
       runId: runId(`run_${suffix}`),
       attemptId: `attempt_${suffix}`,
@@ -406,9 +410,12 @@ describe("PostgreSQL stable blob 生命周期", () => {
     ).toBe("created");
 
     const blobs = createS3BlobStore(minioConfig(), repository);
+    let observedOutput = "😀".repeat(1000);
+    const rolloutAdapter = new PgToolObservationRolloutAdapter(rollout, context);
     const pipeline = new ToolObservationPipeline(
       createDurableTraceBlobPersistence(repository, blobs),
-      new PgToolObservationRolloutAdapter(rollout, context),
+      { appendToolResult: async () => ({ outcome: "unknown" }) },
+      { readSanitizedOutput: async () => observedOutput },
       { maxModelObservationBytes: 64 },
     );
     const command = {
@@ -416,12 +423,17 @@ describe("PostgreSQL stable blob 生命周期", () => {
       idempotencyKey: `result.${suffix}`,
       toolCallId: `call_${suffix}`,
       toolName: "sandbox_command",
-      trustedOutput: trustedToolOutputFromSanitizedAdapter("😀".repeat(1000)),
     };
     await expect(pipeline.record(command)).resolves.toMatchObject({
-      outcome: "recorded",
-      isTruncated: true,
+      outcome: "unknown",
     });
+    const traceOperationId = `trace-${createHash("sha256").update(`${command.idempotencyKey}.trace`, "utf8").digest("hex")}`;
+    const traceSnapshot = await repository.load(scopeA, traceOperationId);
+    if (traceSnapshot?.stable === undefined) throw new Error("真实 Trace stable identity 缺失");
+    await expect(blobs.getBytes(scopeA, traceSnapshot.stable)).resolves.toEqual(
+      new TextEncoder().encode(observedOutput),
+    );
+    await expect(blobs.getBytes(scopeB, traceSnapshot.stable)).rejects.toBeDefined();
     const restarted = new ToolObservationPipeline(
       createDurableTraceBlobPersistence(
         new PgBlobLifecycleRepository(runtimePool, { objectPrefix: prefix }),
@@ -430,10 +442,15 @@ describe("PostgreSQL stable blob 生命周期", () => {
           new PgBlobLifecycleRepository(runtimePool, { objectPrefix: prefix }),
         ),
       ),
-      new PgToolObservationRolloutAdapter(new PgRuntimeRolloutRepository(runtimePool), context),
+      rolloutAdapter,
+      { readSanitizedOutput: async () => observedOutput },
       { maxModelObservationBytes: 64 },
     );
+    await expect(restarted.record(command)).resolves.toMatchObject({ outcome: "recorded" });
     await expect(restarted.record(command)).resolves.toMatchObject({ outcome: "replayed" });
+    observedOutput = "同一个幂等键但正文不同";
+    await expect(restarted.record(command)).resolves.toEqual({ outcome: "conflict" });
+    observedOutput = "😀".repeat(1000);
     const restored = await rollout.loadRecovery({
       context,
       compatibility: {
@@ -451,6 +468,50 @@ describe("PostgreSQL stable blob 生命周期", () => {
         { kind: "tool_result", toolCallId: `call_${suffix}`, isTruncated: true },
       ],
     });
+
+    const boundaryCallId = `boundary_${suffix}`;
+    expect(
+      (
+        await rollout.append({
+          context,
+          idempotencyKey: `boundary.call.${suffix}`,
+          entries: [
+            {
+              kind: "tool_call",
+              toolCallId: boundaryCallId,
+              body: { toolName: "sandbox_command" },
+            },
+          ],
+        })
+      ).outcome,
+    ).toBe("created");
+    const boundary = new ToolObservationPipeline(
+      createDurableTraceBlobPersistence(repository, blobs),
+      new PgToolObservationRolloutAdapter(rollout, context),
+      { readSanitizedOutput: async () => "x".repeat(30_000) },
+      { maxModelObservationBytes: 30_000, maxRolloutBodyBytes: 16 * 1024 },
+    );
+    await expect(
+      boundary.record({
+        tenantId: scopeA.tenantId,
+        idempotencyKey: `boundary.result.${suffix}`,
+        toolCallId: boundaryCallId,
+        toolName: "sandbox_command",
+      }),
+    ).resolves.toMatchObject({ outcome: "recorded", isTruncated: true });
+    const bodySize = await withTenantTransaction(
+      runtimePool,
+      { tenantId: scopeA.tenantId, userId: context.userId },
+      (client) =>
+        client.query<{ bytes: number }>(
+          `SELECT octet_length(body::text)::integer AS bytes
+             FROM runtime_rollout_entries
+            WHERE tenant_id=$1 AND attempt_id=$2 AND tool_call_id=$3 AND kind='tool_result'`,
+          [scopeA.tenantId, rolloutScope.attemptId, boundaryCallId],
+        ),
+    );
+    expect(bodySize.rows[0]?.bytes).toBeLessThanOrEqual(16 * 1024);
+    expect(bodySize.rows[0]?.bytes).toBeGreaterThan(16_000);
   });
 
   it("并发 reserve 原子去重，同 operation 可读回且跨 Tenant 隔离", async () => {

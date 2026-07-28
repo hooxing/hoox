@@ -42,6 +42,9 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
             scope,
             status: "upload_pending",
             version: 0,
+            expectedPurpose: "trace",
+            expectedSha256: input.sha256,
+            expectedSize: input.body.byteLength,
           });
         } catch {
           // 并发 create 可能由另一执行者获胜；只允许从 PG 读回继续。
@@ -50,6 +53,9 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
         if (snapshot === undefined) return { outcome: "unknown" };
       }
       for (let step = 0; step < 32; step += 1) {
+        if (!matchesTraceCommand(snapshot, input.tenantId, input.sha256, input.body.byteLength)) {
+          return { outcome: "conflict" };
+        }
         const result = await this.advance(snapshot, input.body, input.sha256, uploadId);
         if ("outcome" in result) return result;
         snapshot = result;
@@ -234,6 +240,39 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
       return next;
     return (await this.repository.load(current.scope, current.operationId)) ?? current;
   }
+}
+
+function matchesTraceCommand(
+  snapshot: BlobCommitSnapshot,
+  tenantId: string,
+  sha256: string,
+  size: number,
+): boolean {
+  if (
+    snapshot.scope.tenantId !== tenantId ||
+    snapshot.expectedPurpose !== "trace" ||
+    snapshot.expectedSha256 !== sha256 ||
+    snapshot.expectedSize !== size
+  )
+    return false;
+  for (const blob of [snapshot.staged, snapshot.stable]) {
+    if (
+      blob !== undefined &&
+      (blob.tenantId !== tenantId ||
+        blob.purpose !== "trace" ||
+        blob.sha256 !== sha256 ||
+        blob.size !== size)
+    )
+      return false;
+  }
+  const allocation = snapshot.allocation;
+  return (
+    allocation === undefined ||
+    (allocation.tenantId === tenantId &&
+      allocation.purpose === "trace" &&
+      allocation.sha256 === sha256 &&
+      allocation.size === size)
+  );
 }
 
 function completed(snapshot: BlobCommitSnapshot): TraceBlobPersistenceResult {

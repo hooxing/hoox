@@ -182,6 +182,9 @@ importers:
 
   runtime-ts/packages/pi-adapter:
     dependencies:
+      '@cube-runtime/context-policy':
+        specifier: workspace:*
+        version: link:../context-policy
       '@cube-runtime/prompt-builder':
         specifier: workspace:*
         version: link:../prompt-builder

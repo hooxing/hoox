@@ -49,17 +49,14 @@ export interface ToolObservationInput {
   readonly idempotencyKey: string;
   readonly toolCallId: string;
   readonly toolName: string;
-  /** 只能由实际 Tool adapter 在完成错误脱敏后构造。 */
-  readonly trustedOutput: TrustedToolOutput;
 }
 
-declare const trustedToolOutputBrand: unique symbol;
-export type TrustedToolOutput = string & { readonly [trustedToolOutputBrand]: true };
-
-/** 这是进入 Observation 管线的显式信任边界；调用点必须先完成错误脱敏。 */
-export function trustedToolOutputFromSanitizedAdapter(output: string): TrustedToolOutput {
-  if (typeof output !== "string") throw new TypeError("Tool 输出必须是字符串");
-  return output as TrustedToolOutput;
+/** 生产实现由实际 Tool adapter 持有原始结果，并在此端口之前完成错误脱敏。 */
+export interface SanitizedToolOutputSource {
+  readSanitizedOutput(input: {
+    readonly toolCallId: string;
+    readonly toolName: string;
+  }): Promise<string | undefined>;
 }
 
 export interface ToolObservationPolicy {
@@ -93,6 +90,7 @@ export class ToolObservationPipeline {
   constructor(
     private readonly traces: TraceBlobPersistencePort,
     private readonly rollout: ToolObservationRolloutPort,
+    private readonly outputs: SanitizedToolOutputSource,
     policy: ToolObservationPolicy,
   ) {
     if (
@@ -107,7 +105,12 @@ export class ToolObservationPipeline {
 
   async record(input: ToolObservationInput): Promise<ToolObservationResult> {
     assertInput(input);
-    const bytes = Buffer.from(input.trustedOutput, "utf8");
+    const sanitizedOutput = await this.outputs.readSanitizedOutput({
+      toolCallId: input.toolCallId,
+      toolName: input.toolName,
+    });
+    if (sanitizedOutput === undefined) return { outcome: "conflict" };
+    const bytes = Buffer.from(sanitizedOutput, "utf8");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const persisted = await this.traces.persistTrace({
       tenantId: input.tenantId,
@@ -139,7 +142,7 @@ export class ToolObservationPipeline {
         observation: rendered.observation,
       });
     const rendered = fitObservationToBothBudgets(
-      input.trustedOutput,
+      sanitizedOutput,
       this.#maxModelObservationBytes,
       this.#maxRolloutBodyBytes,
       buildBody,
@@ -174,7 +177,6 @@ function assertInput(input: ToolObservationInput): void {
   ] as const) {
     if (!SAFE_ID.test(value)) throw new TypeError(`${label}格式无效`);
   }
-  if (typeof input.trustedOutput !== "string") throw new TypeError("Tool 输出必须来自受信适配边界");
 }
 
 function assertPersistedTrace(
@@ -232,13 +234,20 @@ function fitObservationToBothBudgets(
     readonly isTruncated: boolean;
   }) => Readonly<Record<string, unknown>>,
 ): { readonly observation: string; readonly isTruncated: boolean } {
+  const full = { observation: output, isTruncated: false } as const;
+  if (
+    Buffer.byteLength(output, "utf8") <= modelBudget &&
+    postgresJsonbTextUpperBound(bodyFor(full)) <= rolloutBudget
+  ) {
+    return full;
+  }
   let low = 0;
   let high = modelBudget;
   let best = renderObservation(output, 0);
   while (low <= high) {
     const candidateBudget = Math.floor((low + high) / 2);
     const candidate = renderObservation(output, candidateBudget);
-    const size = Buffer.byteLength(JSON.stringify(bodyFor(candidate)), "utf8");
+    const size = postgresJsonbTextUpperBound(bodyFor(candidate));
     if (size <= rolloutBudget) {
       best = candidate;
       low = candidateBudget + 1;
@@ -246,10 +255,27 @@ function fitObservationToBothBudgets(
       high = candidateBudget - 1;
     }
   }
-  if (Buffer.byteLength(JSON.stringify(bodyFor(best)), "utf8") > rolloutBudget) {
+  if (postgresJsonbTextUpperBound(bodyFor(best)) > rolloutBudget) {
     throw new Error("Tool result metadata 无法装入 Rollout body 硬上限");
   }
   return best;
+}
+
+/** PostgreSQL jsonb::text 在结构分隔符后加入空格；这里按同等或更大的字节数保守估算。 */
+function postgresJsonbTextUpperBound(body: Readonly<Record<string, unknown>>): number {
+  const compact = JSON.stringify(body);
+  let structuralSeparators = 0;
+  let inString = false;
+  let escaped = false;
+  for (const character of compact) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+    } else if (character === '"') inString = true;
+    else if (character === ":" || character === ",") structuralSeparators += 1;
+  }
+  return Buffer.byteLength(compact, "utf8") + structuralSeparators;
 }
 
 /** 按 Unicode code point 逐个加入，绝不切开 emoji 或其他 UTF-8 多字节字符。 */

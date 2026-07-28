@@ -12,6 +12,8 @@
 
 `ToolObservationPipeline` 采用严格顺序：先将 UTF-8 原始输出经 `TraceBlobPersistencePort` 持久化为同租户 `stable/trace` Blob，校验 reference、摘要、大小、incarnation 与物理键，再生成 observation 并通过 `ToolObservationRolloutPort` 写入 `tool_result`。两个端口均使用派生的固定幂等键，因此进程重启/重放不改变事实。
 
+Pipeline 不公开创建“受信输出”的函数。`createObservedSandboxTools` 在实际 Tool adapter 的闭包内统一脱敏并只暴露只读 `SanitizedToolOutputSource`；原始异常既不能作为 Pipeline 参数，也不会写入 Trace 或日志。Blob commit 的首个 `upload_pending` snapshot 已绑定 expected purpose、SHA-256 与 size，之后每次加载和重启都核验 staged/stable/allocation 的同一身份，同键异文稳定冲突。
+
 模型可见 payload 与 Rollout body 使用两套独立硬预算；后者不超过数据库的 16 KiB 约束。模型可见内容按 UTF-8 字节预算截断，并按 Unicode code point 迭代，不能切开多字节字符；这不是 grapheme cluster 契约，组合字符可能在 code point 边界分开。占位符必须完整装入，否则返回空字符串，绝不生成半个标记。完整的工具调用配对、工具名、原始字节摘要、大小、截断原因及受限 Blob ref 写入 Rollout body；不持久化不可信的物理对象键。
 
 Blob 返回 `unavailable`、`unknown` 或 `conflict` 时，不写 Rollout，不回传完整输出，也不显示“已保存”。Rollout 失败/未知时完整输出仍只保留在 Blob，调用方必须进行同一命令的幂等恢复，不能另造 observation。

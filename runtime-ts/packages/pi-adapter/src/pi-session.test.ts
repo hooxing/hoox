@@ -17,6 +17,7 @@ import {
   assertLinuxWorkerPlatform,
   assertPiSessionCapabilityManifest,
   bindTrustedPiModelContextCapability,
+  assessSafePiSessionContext,
   createSafePiSession,
   digestCanonicalToolInputSchema,
   type PiSessionController,
@@ -164,6 +165,28 @@ describe("Pi 安全适配", () => {
     },
   );
 
+  it.runIf(process.platform === "linux")(
+    "第二轮累计的用户与已预留助手输出超窗时在 Provider 前失败关闭",
+    async () => {
+      const tokenizer: TokenizerPort = {
+        identity: "多轮累计-tokenizer",
+        countTokens: (text) =>
+          text.includes("轮次输入") ? 50_000 : new TextEncoder().encode(text).byteLength,
+      };
+      const { controller, faux } = await harness(
+        [fauxAssistantMessage("第一轮完成"), fauxAssistantMessage("不应调用")],
+        new FakeSandboxHandle("budget-multi-turn"),
+        undefined,
+        undefined,
+        undefined,
+        tokenizer,
+      );
+      await controller.prompt("第一轮次输入");
+      await expect(controller.followUp("第二轮次输入")).rejects.toThrow("CONTEXT_TOO_LARGE");
+      expect(faux.state.callCount).toBe(1);
+    },
+  );
+
   it("拒绝返回零的恶意 tokenizer capability", () => {
     const faux = fauxProvider({ api: "bad-tokenizer", provider: "bad-tokenizer" });
     expect(() =>
@@ -172,6 +195,38 @@ describe("Pi 安全适配", () => {
         countTokens: () => 0,
       }),
     ).toThrow("tokenizer capability 无效");
+  });
+
+  it("绑定后 tokenizer 探针或模型窗口漂移时失败关闭", () => {
+    const faux = fauxProvider({ api: "mutable-context", provider: "mutable-context" });
+    const model = faux.getModel();
+    let probeTokens = 17;
+    const context = bindTrustedPiModelContextCapability(model, {
+      identity: "可变探针测试",
+      countTokens: () => probeTokens,
+    });
+    const options = {
+      model,
+      modelContext: context,
+      modelRuntime: {} as ModelRuntime,
+      sandbox: new FakeSandboxHandle("mutable-context"),
+      authorizeToolEffect: async () => ({
+        consumedAtMonotonicMs: performance.now(),
+        maxContinuationDelayMs: 100,
+      }),
+    };
+    expect(assessSafePiSessionContext(options).outcome).toBeDefined();
+    probeTokens = 1;
+    expect(() => assessSafePiSessionContext(options)).toThrow("未绑定当前可信");
+    const fresh = bindTrustedPiModelContextCapability(model, {
+      identity: "模型漂移测试",
+      countTokens: () => 17,
+    });
+    const mutable = model as { contextWindow: number };
+    mutable.contextWindow += 1;
+    expect(() => assessSafePiSessionContext({ ...options, modelContext: fresh })).toThrow(
+      "未绑定当前可信",
+    );
   });
 
   it.runIf(process.platform === "linux")(

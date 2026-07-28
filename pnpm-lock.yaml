@@ -72,6 +72,9 @@ importers:
       '@cube-runtime/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@cube-runtime/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
       '@cube-runtime/pi-adapter':
         specifier: workspace:*
         version: link:../../packages/pi-adapter
@@ -237,6 +240,9 @@ importers:
 
   runtime-ts/packages/run-contracts:
     dependencies:
+      '@cube-runtime/context-policy':
+        specifier: workspace:*
+        version: link:../context-policy
       '@cube-runtime/domain':
         specifier: workspace:*
         version: link:../domain

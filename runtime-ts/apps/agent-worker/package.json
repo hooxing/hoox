@@ -13,6 +13,7 @@
     "@cube-runtime/artifact": "workspace:*",
     "@cube-runtime/domain": "workspace:*",
     "@cube-runtime/pi-adapter": "workspace:*",
+    "@cube-runtime/persistence": "workspace:*",
     "@cube-runtime/process-runtime": "workspace:*",
     "@cube-runtime/run-contracts": "workspace:*",
     "@cube-runtime/sandbox": "workspace:*",

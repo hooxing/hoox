@@ -232,7 +232,7 @@ describe("Pi Faux Artifact 纵向链路", () => {
         }),
         createToolObservationRecorder: (outputs) => ({
           record: async (call) => {
-            const observation = await outputs.readSanitizedOutput(call);
+            const observation = await outputs.readControlledReceipt(call);
             return observation === undefined
               ? { outcome: "conflict" as const }
               : { outcome: "recorded" as const, observation, isTruncated: false };

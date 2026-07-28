@@ -282,11 +282,11 @@ describe("Pi 安全适配", () => {
         ],
         new FakeSandboxHandle("pi-resume-fake"),
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           checkpointId: "checkpoint-waiting-1",
-          turns: [
-            { role: "user", text: "生成报告" },
-            { role: "assistant", text: "请补充报告范围" },
+          items: [
+            { kind: "turn", role: "user", text: "生成报告" },
+            { kind: "turn", role: "assistant", text: "请补充报告范围" },
           ],
         },
       );
@@ -313,9 +313,9 @@ describe("Pi 安全适配", () => {
       for (const turns of invalidTurns) {
         await expect(
           harness([], new FakeSandboxHandle("invalid-projection"), {
-            schemaVersion: 1,
+            schemaVersion: 2,
             checkpointId: "invalid",
-            turns: turns as never,
+            items: turns.map((turn) => ({ kind: "turn", ...turn })) as never,
           }),
         ).rejects.toThrow("RolloutProjection");
       }
@@ -518,7 +518,7 @@ function fakeObservationRecorder(
 ) {
   return {
     async record(input: { readonly toolCallId: string; readonly toolName: string }) {
-      const observation = await outputs.readSanitizedOutput(input);
+      const observation = await outputs.readControlledReceipt(input);
       return observation === undefined
         ? ({ outcome: "conflict" } as const)
         : ({ outcome: "recorded", observation, isTruncated: false } as const);

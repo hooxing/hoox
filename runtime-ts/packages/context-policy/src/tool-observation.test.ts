@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  encodeControlledToolReceipt,
   ToolObservationPipeline,
   type StableTraceBlobIdentity,
   type ToolObservationRolloutPort,
@@ -42,6 +43,9 @@ class Traces implements TraceBlobPersistencePort {
 class Rollout implements ToolObservationRolloutPort {
   readonly calls: Parameters<ToolObservationRolloutPort["appendToolResult"]>[0][] = [];
   outcome: "created" | "replayed" | "conflict" | "unavailable" | "unknown" = "created";
+  async appendToolCall() {
+    return { outcome: this.outcome } as const;
+  }
   async appendToolResult(input: Parameters<ToolObservationRolloutPort["appendToolResult"]>[0]) {
     this.calls.push(input);
     return { outcome: this.outcome } as const;
@@ -56,16 +60,22 @@ function pipeline(max = 80) {
     subject: new ToolObservationPipeline(
       traces,
       rollout,
-      { readSanitizedOutput: async () => currentOutput },
+      { readControlledReceipt: async () => currentOutput },
       { maxModelObservationBytes: max },
     ),
   };
 }
-let currentOutput = "";
-function input(output: string) {
-  currentOutput = output;
+let currentOutput = encodeControlledToolReceipt("sandbox_command", "succeeded");
+function input(_output: string) {
+  currentOutput = encodeControlledToolReceipt("sandbox_command", "succeeded");
   return {
-    tenantId,
+    binding: {
+      tenantId,
+      threadId: "thread_observation",
+      runId: "run_observation",
+      attemptId: "attempt_observation",
+      agentThreadId: "agent_observation",
+    },
     idempotencyKey: "observation_command",
     toolCallId: callId,
     toolName: "sandbox_command",
@@ -78,12 +88,12 @@ function recorded(result: Awaited<ReturnType<ToolObservationPipeline["record"]>>
 }
 
 describe("Tool Observation Blob 截断切片", () => {
-  it("先保存完整 Unicode 输出，再将严格有界 observation 与 trace Blob 写入 Rollout", async () => {
+  it("先保存固定受控回执，再将严格有界 observation 与 trace Blob 写入 Rollout", async () => {
     const { subject, traces, rollout } = pipeline(30);
     const result = await subject.record(input("😀😀😀😀😀😀😀😀😀😀😀😀"));
     expect(result).toMatchObject({ outcome: "recorded", isTruncated: true });
     expect(Buffer.byteLength(recorded(result).observation, "utf8")).toBeLessThanOrEqual(30);
-    expect(traces.calls[0]?.body).toEqual(Buffer.from("😀😀😀😀😀😀😀😀😀😀😀😀", "utf8"));
+    expect(traces.calls[0]?.body).toEqual(Buffer.from(currentOutput, "utf8"));
     expect(rollout.calls[0]).toMatchObject({
       toolCallId: callId,
       isTruncated: true,
@@ -91,7 +101,7 @@ describe("Tool Observation Blob 截断切片", () => {
     });
     expect(rollout.calls[0]?.body).toMatchObject({
       toolName: "sandbox_command",
-      rawOutputSha256: digest(traces.calls[0]?.body ?? new Uint8Array()),
+      receiptSha256: digest(traces.calls[0]?.body ?? new Uint8Array()),
       truncation: { reason: "model_utf8_budget_or_rollout_body_budget" },
     });
   });
@@ -99,8 +109,8 @@ describe("Tool Observation Blob 截断切片", () => {
   it("极小预算也不超字节上限，且不会切开 Unicode", async () => {
     const { subject } = pipeline(1);
     const result = await subject.record(input("😀x"));
-    expect(result).toMatchObject({ outcome: "recorded", isTruncated: true, observation: "" });
-    expect(Buffer.byteLength(recorded(result).observation, "utf8")).toBe(0);
+    expect(result).toMatchObject({ outcome: "recorded", isTruncated: true, observation: "{" });
+    expect(Buffer.byteLength(recorded(result).observation, "utf8")).toBe(1);
   });
 
   it("Blob 失败或未知时不写 Rollout，也不返回已保存的 observation", async () => {
@@ -116,7 +126,7 @@ describe("Tool Observation Blob 截断切片", () => {
     rollout.outcome = "replayed";
     await expect(subject.record(input("ok"))).resolves.toMatchObject({
       outcome: "replayed",
-      observation: "ok",
+      isTruncated: true,
     });
     expect(traces.calls[0]?.idempotencyKey).toBe("observation_command.trace");
     expect(rollout.calls[0]?.idempotencyKey).toBe("observation_command.rollout");

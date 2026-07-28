@@ -1,4 +1,7 @@
-import type { ToolObservationRolloutPort } from "@cube-runtime/context-policy";
+import type {
+  ToolObservationBinding,
+  ToolObservationRolloutPort,
+} from "@cube-runtime/context-policy";
 import { sha256Digest } from "@cube-runtime/domain";
 import { PersistenceError } from "./errors.js";
 import type { RolloutEntryDraft } from "./pg-runtime-rollout.js";
@@ -14,9 +17,21 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
     private readonly context: TrustedRolloutContext,
   ) {}
 
+  async appendToolCall(
+    input: Parameters<ToolObservationRolloutPort["appendToolCall"]>[0],
+  ): Promise<Awaited<ReturnType<ToolObservationRolloutPort["appendToolCall"]>>> {
+    if (!sameBinding(input.binding, this.context)) return { outcome: "conflict" };
+    return this.append(input.idempotencyKey, {
+      kind: "tool_call",
+      toolCallId: input.toolCallId,
+      body: Object.freeze({ toolName: input.toolName }),
+    });
+  }
+
   async appendToolResult(
     input: Parameters<ToolObservationRolloutPort["appendToolResult"]>[0],
   ): Promise<Awaited<ReturnType<ToolObservationRolloutPort["appendToolResult"]>>> {
+    if (!sameBinding(input.binding, this.context)) return { outcome: "conflict" };
     const draft: RolloutEntryDraft = {
       kind: "tool_result",
       toolCallId: input.toolCallId,
@@ -24,22 +39,36 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
       isTruncated: input.isTruncated,
       blob: { ...input.blob, sha256: sha256Digest(input.blob.sha256) },
     };
-    let result: Awaited<ReturnType<PgRuntimeRolloutRepository["append"]>>;
-    try {
-      result = await this.repository.append({
-        context: this.context,
-        idempotencyKey: input.idempotencyKey,
-        entries: [draft],
-      });
-    } catch (error) {
-      // 不向模型泄漏 SQL、约束名或连接信息；unknown 允许同幂等键安全读回。
-      if (
-        error instanceof PersistenceError &&
-        (error.code === "CONFLICT" || error.code === "CONSTRAINT_VIOLATION")
-      )
-        return { outcome: "conflict" };
-      return { outcome: "unknown" };
+    return this.append(input.idempotencyKey, draft);
+  }
+
+  private async append(
+    idempotencyKey: string,
+    draft: RolloutEntryDraft,
+  ): Promise<Awaited<ReturnType<ToolObservationRolloutPort["appendToolResult"]>>> {
+    // 克隆后递归冻结，避免第一次请求等待/UNKNOWN 期间调用方改写嵌套 body，确保重放逐字同义。
+    const frozenDraft = deepFreeze(structuredClone(draft));
+    const command = Object.freeze({
+      context: this.context,
+      idempotencyKey,
+      entries: Object.freeze([frozenDraft]),
+    });
+    let result: Awaited<ReturnType<PgRuntimeRolloutRepository["append"]>> | undefined;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        // 首次 committed-but-unknown 后必须用完全相同的幂等键与正文读回收敛，不能另造结果。
+        result = await this.repository.append(command);
+        break;
+      } catch (error) {
+        if (
+          error instanceof PersistenceError &&
+          (error.code === "CONFLICT" || error.code === "CONSTRAINT_VIOLATION")
+        )
+          return { outcome: "conflict" };
+        if (attempt === 1) return { outcome: "unknown" };
+      }
     }
+    if (result === undefined) return { outcome: "unknown" };
     switch (result.outcome) {
       case "created":
       case "replayed":
@@ -53,4 +82,23 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
         return { outcome: "unavailable" };
     }
   }
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function sameBinding(binding: ToolObservationBinding, context: TrustedRolloutContext): boolean {
+  const scope = context.scope;
+  return (
+    binding.tenantId === scope.tenantId &&
+    binding.threadId === scope.threadId &&
+    binding.runId === scope.runId &&
+    binding.attemptId === scope.attemptId &&
+    binding.agentThreadId === scope.agentThreadId
+  );
 }

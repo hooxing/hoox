@@ -113,9 +113,9 @@ interface Fixture {
 async function fixture(
   label: string,
   rolloutProjection: ControlledRolloutProjection = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     checkpointId: `cp-${label}`,
-    turns: [],
+    items: [],
   },
 ): Promise<Fixture> {
   const now = isoTimestamp("2099-07-26T00:00:00.000Z");
@@ -168,9 +168,13 @@ async function fixture(
 async function projectionAtStoredBytes(targetBytes: number) {
   // 用多个合法 turn 填充字节：checkpoint 受 200 字节限制，单个 turn 受 16KiB 限制。
   const empty = {
-    schemaVersion: 1 as const,
+    schemaVersion: 2 as const,
     checkpointId: "projection-boundary",
-    turns: Array.from({ length: 5 }, () => ({ role: "user" as const, text: "" })),
+    items: Array.from({ length: 5 }, () => ({
+      kind: "turn" as const,
+      role: "user" as const,
+      text: "",
+    })),
   };
   const measured = await migrator.query<{ bytes: number }>(
     "SELECT octet_length($1::jsonb::text) AS bytes",
@@ -178,14 +182,14 @@ async function projectionAtStoredBytes(targetBytes: number) {
   );
   const baseBytes = Number(measured.rows[0]?.bytes);
   let remaining = targetBytes - baseBytes;
-  const turns = empty.turns.map((turn, index) => {
-    const slots = empty.turns.length - index;
+  const items = empty.items.map((turn, index) => {
+    const slots = empty.items.length - index;
     const bytes = Math.min(16 * 1024, Math.floor(remaining / slots));
     remaining -= bytes;
     return { ...turn, text: "x".repeat(bytes) };
   });
   if (remaining !== 0) throw new Error("无法构造受控 Projection 边界");
-  const projection = { ...empty, turns };
+  const projection = { ...empty, items };
   const verified = await migrator.query<{ bytes: number }>(
     "SELECT octet_length($1::jsonb::text) AS bytes",
     [JSON.stringify(projection)],
@@ -447,7 +451,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       outcome: "claimed",
       snapshot: {
         input: command.inputText,
-        rolloutProjection: { schemaVersion: 1, checkpointId: "initial", turns: [] },
+        rolloutProjection: { schemaVersion: 2, checkpointId: "initial", items: [] },
       },
     });
     await runDispatchOutbox.acknowledge({ claim, outcome: "dispatched" });
@@ -1271,8 +1275,9 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           faux.getModel(),
           modelRuntime,
           (_input, outputs) => ({
+            recordStarted: async () => "recorded" as const,
             record: async (call) => {
-              const observation = await outputs.readSanitizedOutput(call);
+              const observation = await outputs.readControlledReceipt(call);
               return observation === undefined
                 ? { outcome: "conflict" as const }
                 : { outcome: "recorded" as const, observation, isTruncated: false };
@@ -1418,7 +1423,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
             f.scope.threadId,
             f.scope.workspaceId,
             "\t\n\r ",
-            JSON.stringify({ schemaVersion: 1, checkpointId: "db-check", turns: [] }),
+            JSON.stringify({ schemaVersion: 2, checkpointId: "db-check", items: [] }),
             "f".repeat(64),
           ],
         ),
@@ -1432,9 +1437,9 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       scope: f.scope,
       input: "执行 PostgreSQL Run Worker 集成任务",
       rolloutProjection: {
-        schemaVersion: 1 as const,
+        schemaVersion: 2 as const,
         checkpointId: `cp-setup-${suffix}`,
-        turns: [],
+        items: [],
       },
     };
     // fixture 的 checkpointId 含完整 label；用数据库事实读出后验证原命令重放与异命令冲突。
@@ -2209,7 +2214,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         events: [],
         outbox: [pending],
         nextAttemptStatus: "running",
-        rolloutProjection: { schemaVersion: 1, checkpointId: "projection-updated", turns: [] },
+        rolloutProjection: { schemaVersion: 2, checkpointId: "projection-updated", items: [] },
       }),
     );
     expect(first).toMatchObject({

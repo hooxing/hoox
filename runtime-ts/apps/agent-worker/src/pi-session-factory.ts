@@ -1,14 +1,15 @@
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@cube-runtime/artifact";
 import {
   ToolObservationPipeline,
-  type SanitizedToolOutputSource,
+  type ControlledToolReceiptSource,
   type ToolObservationPolicy,
+  type ToolObservationBinding,
   type ToolObservationResult,
   type ToolObservationRolloutPort,
   type TraceBlobPersistencePort,
 } from "@cube-runtime/context-policy";
 import { sha256Digest } from "@cube-runtime/domain";
-import { createSafePiSession } from "@cube-runtime/pi-adapter";
+import { createSafePiSession, type PiSessionController } from "@cube-runtime/pi-adapter";
 import type { ArtifactToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -25,8 +26,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     private readonly modelRuntime: ModelRuntime,
     private readonly createObservationRecorder: (
       input: Parameters<AgentSessionFactoryPort["create"]>[0],
-      outputs: SanitizedToolOutputSource,
+      outputs: ControlledToolReceiptSource,
     ) => {
+      recordStarted(call: {
+        readonly toolCallId: string;
+        readonly toolName: string;
+      }): Promise<ToolObservationResult["outcome"]>;
       record(call: {
         readonly toolCallId: string;
         readonly toolName: string;
@@ -42,7 +47,18 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     const startedToolCalls = new Map<string, string>();
     const invalidToolCalls = new Set<string>();
     const authorizationRequested = new Set<string>();
-    const authorizeStartedTool = (call: {
+    let observationRecorder:
+      | ReturnType<PiWorkerSessionFactory["createObservationRecorder"]>
+      | undefined;
+    let controller: PiSessionController | undefined;
+    let observationRecoveryCode: "PERSISTENCE_UNAVAILABLE" | "IDEMPOTENCY_CONFLICT" | undefined;
+    const requireObservationRecovery = (outcome?: ToolObservationResult["outcome"]) => {
+      observationRecoveryCode =
+        outcome === "conflict" ? "IDEMPOTENCY_CONFLICT" : "PERSISTENCE_UNAVAILABLE";
+      // 立即停止本轮，避免模型在缺失 durable Tool 事实后继续发起其他副作用。
+      void controller?.abort().catch(() => undefined);
+    };
+    const authorizeStartedTool = async (call: {
       readonly callId: string;
       readonly toolName: string;
       readonly argsDigest: string;
@@ -57,7 +73,25 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       }
       // 不删除 gate：callId 在整个 Attempt 内永久一次性，失败后的相同调用也不可重试。
       authorizationRequested.add(call.callId);
-      return input.authorizeToolEffect({ ...call, argsDigest: sha256Digest(call.argsDigest) });
+      const consumed = await input.authorizeToolEffect({
+        ...call,
+        argsDigest: sha256Digest(call.argsDigest),
+      });
+      let recorded: ToolObservationResult["outcome"] | undefined;
+      try {
+        recorded = await observationRecorder?.recordStarted({
+          toolCallId: call.callId,
+          toolName: call.toolName,
+        });
+      } catch {
+        requireObservationRecovery();
+        throw new Error("Tool Rollout 前驱持久化状态未知");
+      }
+      if (recorded !== "recorded" && recorded !== "replayed") {
+        requireObservationRecovery(recorded);
+        throw new Error("Tool Rollout 前驱未能持久化");
+      }
+      return consumed;
     };
     const artifactTools = this.artifactTools;
     const artifactAuthorizationIssuer = this.artifactAuthorizationIssuer;
@@ -77,13 +111,30 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             },
           })
         : undefined;
-    const controller = await createSafePiSession({
+    controller = await createSafePiSession({
       model: this.model,
       modelRuntime: this.modelRuntime,
       sandbox: input.sandbox,
       rolloutProjection: input.rolloutProjection,
       authorizeToolEffect: authorizeStartedTool,
-      createToolObservationRecorder: (outputs) => this.createObservationRecorder(input, outputs),
+      createToolObservationRecorder: (outputs) => {
+        const recorder = this.createObservationRecorder(input, outputs);
+        observationRecorder = recorder;
+        return {
+          record: async (call) => {
+            try {
+              const result = await recorder.record(call);
+              if (result.outcome !== "recorded" && result.outcome !== "replayed") {
+                requireObservationRecovery(result.outcome);
+              }
+              return result;
+            } catch (error) {
+              requireObservationRecovery();
+              throw error;
+            }
+          },
+        };
+      },
       ...(artifactToolRouter === undefined ? {} : { artifactToolRouter }),
     });
     // 该订阅先于 RunWorker 的持久订阅注册，只负责证明 Pi 已真实发布 tool.started。
@@ -116,7 +167,17 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           throw new Error("模型启动许可在本地 continuation 前已过期");
         }
         // 许可刚由 DB 一次性消费；校验后立即进入 prompt，中间不再插入异步窗口。
-        await controller.prompt(text);
+        try {
+          await controller.prompt(text);
+        } catch (error) {
+          if (observationRecoveryCode !== undefined) {
+            return { kind: "recovery_required", code: observationRecoveryCode };
+          }
+          throw error;
+        }
+        if (observationRecoveryCode !== undefined) {
+          return { kind: "recovery_required", code: observationRecoveryCode };
+        }
         return { kind: "completed" };
       },
       abort: () => controller.abort(),
@@ -139,6 +200,7 @@ export function createDurableObservationRecorderFactory(
     readonly binding: {
       readonly scope: Parameters<AgentSessionFactoryPort["create"]>[0]["scope"];
       readonly attemptId: string;
+      readonly agentThreadId: string;
     };
     readonly traces: TraceBlobPersistencePort;
     readonly rollout: ToolObservationRolloutPort;
@@ -147,7 +209,7 @@ export function createDurableObservationRecorderFactory(
 ) {
   return (
     input: Parameters<AgentSessionFactoryPort["create"]>[0],
-    outputs: SanitizedToolOutputSource,
+    outputs: ControlledToolReceiptSource,
   ) => {
     const dependencies = createDependencies(input);
     const binding = dependencies.binding;
@@ -158,10 +220,18 @@ export function createDurableObservationRecorderFactory(
       binding.scope.runId !== input.scope.runId ||
       binding.scope.rootRunId !== input.scope.rootRunId ||
       binding.scope.workspaceId !== input.scope.workspaceId ||
-      binding.scope.baseRevisionId !== input.scope.baseRevisionId
+      binding.scope.baseRevisionId !== input.scope.baseRevisionId ||
+      !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(binding.agentThreadId)
     ) {
       throw new Error("durable Tool Observation 端口与当前 ExecutionScope 不匹配");
     }
+    const rolloutBinding: ToolObservationBinding = Object.freeze({
+      tenantId: binding.scope.tenantId,
+      threadId: binding.scope.threadId,
+      runId: binding.scope.runId,
+      attemptId: binding.attemptId,
+      agentThreadId: binding.agentThreadId,
+    });
     const pipeline = new ToolObservationPipeline(
       dependencies.traces,
       dependencies.rollout,
@@ -169,9 +239,18 @@ export function createDurableObservationRecorderFactory(
       dependencies.policy,
     );
     return {
+      recordStarted: async (call: { readonly toolCallId: string; readonly toolName: string }) => {
+        const result = await dependencies.rollout.appendToolCall({
+          binding: rolloutBinding,
+          idempotencyKey: `attempt.${input.attemptId}.tool.${call.toolCallId}.call`,
+          toolCallId: call.toolCallId,
+          toolName: call.toolName,
+        });
+        return result.outcome === "created" ? "recorded" : result.outcome;
+      },
       record: (call: { readonly toolCallId: string; readonly toolName: string }) =>
         pipeline.record({
-          tenantId: input.scope.tenantId,
+          binding: rolloutBinding,
           idempotencyKey: `attempt.${input.attemptId}.tool.${call.toolCallId}`,
           toolCallId: call.toolCallId,
           toolName: call.toolName,

@@ -260,7 +260,7 @@ function normalizeDraft(draft: RolloutEntryDraft): NormalizedRolloutEntryDraft {
   if (needsCallId) assertIdentifier(draft.toolCallId ?? "", "Tool call ID");
   else if (draft.toolCallId !== undefined) throw new TypeError("非工具 entry 不允许 Tool call ID");
   if (draft.blob !== undefined) {
-    if (draft.kind !== "tool_result") throw new TypeError("只有 Tool result 可以引用完整输出 Blob");
+    if (draft.kind !== "tool_result") throw new TypeError("只有 Tool result 可以引用受控回执 Blob");
     assertIdentifier(draft.blob.referenceId, "Blob reference ID");
     assertHash(draft.blob.sha256, "Blob digest");
     if (!Number.isSafeInteger(draft.blob.size) || draft.blob.size < 0) {

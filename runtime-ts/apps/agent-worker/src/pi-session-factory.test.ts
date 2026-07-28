@@ -36,14 +36,15 @@ import {
 const fakeObservationRecorder = (
   _input: unknown,
   outputs: {
-    readSanitizedOutput(call: {
+    readControlledReceipt(call: {
       toolCallId: string;
       toolName: string;
     }): Promise<string | undefined>;
   },
 ) => ({
+  recordStarted: async () => "recorded" as const,
   record: async (call: { toolCallId: string; toolName: string }) => {
-    const observation = await outputs.readSanitizedOutput(call);
+    const observation = await outputs.readControlledReceipt(call);
     return observation === undefined
       ? ({ outcome: "conflict" } as const)
       : ({ outcome: "recorded", observation, isTruncated: false } as const);
@@ -59,13 +60,20 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       Parameters<typeof createDurableObservationRecorderFactory>[0]
     >[0];
     const factory = createDurableObservationRecorderFactory((current) => ({
-      binding: { scope: otherScope, attemptId: current.attemptId },
+      binding: {
+        scope: otherScope,
+        attemptId: current.attemptId,
+        agentThreadId: "agent_observation_other",
+      },
       traces: { persistTrace: async () => ({ outcome: "unavailable" as const }) },
-      rollout: { appendToolResult: async () => ({ outcome: "unavailable" as const }) },
+      rollout: {
+        appendToolCall: async () => ({ outcome: "unavailable" as const }),
+        appendToolResult: async () => ({ outcome: "unavailable" as const }),
+      },
       policy: { maxModelObservationBytes: 100 },
     }));
 
-    expect(() => factory(input, { readSanitizedOutput: async () => "受控 Observation" })).toThrow(
+    expect(() => factory(input, { readControlledReceipt: async () => "受控 Observation" })).toThrow(
       "ExecutionScope 不匹配",
     );
   });
@@ -98,10 +106,23 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       });
       modelRuntime.registerNativeProvider(faux.provider);
       await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const observationOperations: string[] = [];
       const sessions = new PiWorkerSessionFactory(
         faux.getModel(),
         modelRuntime,
-        fakeObservationRecorder,
+        (_input, outputs) => ({
+          recordStarted: async (call) => {
+            observationOperations.push(`call:${call.toolCallId}:${call.toolName}`);
+            return "recorded" as const;
+          },
+          record: async (call) => {
+            observationOperations.push(`result:${call.toolCallId}:${call.toolName}`);
+            const observation = await outputs.readControlledReceipt(call);
+            return observation === undefined
+              ? { outcome: "conflict" as const }
+              : { outcome: "recorded" as const, observation, isTruncated: false };
+          },
+        }),
       );
       persistence.beforePermitIssueReturn = (input) => {
         if (input.effect === "tool_execution") void clock.tickHeartbeat();
@@ -151,6 +172,69 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       expect(eventIndex).toBeLessThan(issueIndex);
       expect(issueIndex).toBeLessThan(consumeIndex);
       expect(consumeIndex).toBeLessThan(inspectAfterIssue);
+      expect(observationOperations).toHaveLength(2);
+      expect(observationOperations[0]).toMatch(/^call:/u);
+      expect(observationOperations[1]).toMatch(/^result:/u);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "Tool result 持久化持续 UNKNOWN 时中止 Pi，Attempt 只能进入 recovery_required",
+    async () => {
+      const persistence = new FakeExecutionPersistence();
+      const scope = persistence.addSeed(fakeSeed("pi-observation-unknown"));
+      const sandboxes = new FakeSandboxRegistry();
+      const faux = fauxProvider({
+        api: `faux-worker-observation-unknown-${Date.now()}`,
+        provider: `faux-worker-observation-unknown-${Date.now()}`,
+        tokensPerSecond: 10_000,
+      });
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall("sandbox_write_file", {
+            path: "/tmp/unknown.txt",
+            content: "side-effect-issued",
+          }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("不得到达成功终态"),
+      ]);
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      modelRuntime.registerNativeProvider(faux.provider);
+      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
+        recordStarted: async () => "recorded" as const,
+        record: async () => ({ outcome: "unknown" as const }),
+      }));
+      const worker = new RunWorker(
+        {
+          persistence,
+          revisions: new FakeRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions,
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        {
+          workerId: "pi-observation-unknown-worker",
+          leaseDurationMs: 30_000,
+          heartbeatMs: 10_000,
+          runTimeoutMs: 60_000,
+        },
+      );
+
+      await expect(worker.execute(scope)).resolves.toEqual({
+        outcome: "recovery_required",
+        code: "PERSISTENCE_UNAVAILABLE",
+      });
+      expect(persistence.record(scope).run.status).toBe("running");
+      expect(persistence.record(scope).attempt?.status).toBe("recovery_required");
     },
   );
 

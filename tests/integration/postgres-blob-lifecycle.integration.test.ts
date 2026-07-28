@@ -590,14 +590,25 @@ describe("PostgreSQL stable blob 生命周期", () => {
         runtimePool,
         { tenantId: scopeA.tenantId, userId: actorUserId },
         async (client) =>
-          client.query<{ kind: string; blob_reference_id: string | null }>(
-            `SELECT kind,blob_reference_id FROM runtime_rollout_entries
-              WHERE tenant_id=$1 AND run_id=$2 ORDER BY sequence`,
+          client.query<{
+            kind: string;
+            blob_reference_id: string | null;
+            blob_state: string | null;
+            blob_purpose: string | null;
+          }>(
+            `SELECT entry.kind,entry.blob_reference_id,
+                    reference.state AS blob_state,reference.purpose AS blob_purpose
+               FROM runtime_rollout_entries entry
+               LEFT JOIN blob_references reference
+                 ON reference.tenant_id=entry.tenant_id
+                AND reference.reference_id=entry.blob_reference_id
+              WHERE entry.tenant_id=$1 AND entry.run_id=$2 ORDER BY entry.sequence`,
             [scopeA.tenantId, executionScope.runId],
           ),
       );
       expect(facts.rows.map((row) => row.kind)).toEqual(["tool_call", "tool_result"]);
-      expect(facts.rows[1]?.blob_reference_id).toMatch(/^trace-/u);
+      expect(facts.rows[1]).toMatchObject({ blob_state: "stable", blob_purpose: "trace" });
+      expect(facts.rows[1]?.blob_reference_id).toBeTypeOf("string");
     },
   );
 

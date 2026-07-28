@@ -354,7 +354,11 @@ describe("Pi 安全适配", () => {
       modelRuntime: runtime,
       sandbox: new FakeSandboxHandle("mutable-context"),
       createToolObservationRecorder: () => ({
-        record: async () => ({ outcome: "recorded" as const }),
+        record: async () => ({
+          outcome: "recorded" as const,
+          observation: "受控测试回执",
+          isTruncated: false,
+        }),
       }),
       authorizeToolEffect: async () => ({
         consumedAtMonotonicMs: performance.now(),
@@ -390,7 +394,11 @@ describe("Pi 安全适配", () => {
       modelRuntime: runtime,
       sandbox: new FakeSandboxHandle("route-snapshot"),
       createToolObservationRecorder: () => ({
-        record: async () => ({ outcome: "recorded" as const }),
+        record: async () => ({
+          outcome: "recorded" as const,
+          observation: "受控测试回执",
+          isTruncated: false,
+        }),
       }),
       authorizeToolEffect: async () => ({
         consumedAtMonotonicMs: performance.now(),

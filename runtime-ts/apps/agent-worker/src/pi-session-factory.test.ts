@@ -90,7 +90,14 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
           revisions: new FakeRevisionVerifier(),
           sandboxes,
           orphanSandboxes: sandboxes,
-          sessions: new PiWorkerSessionFactory(faux.getModel(), modelRuntime),
+          sessions: new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
+            recordStarted: async () => "recorded" as const,
+            record: async () => ({
+              outcome: "recorded" as const,
+              observation: "大".repeat(130_000),
+              isTruncated: false,
+            }),
+          })),
           cancellation: new FakeCancellationPort(),
           artifacts: new FakeArtifactPublication(),
           clock: new FakeClock(),

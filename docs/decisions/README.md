@@ -42,6 +42,7 @@
 | [ADR-0035](0035-model-aware-context-budget.md) | 模型感知的 Context Budget | 已接受 | 2026-07-28 |
 | [ADR-0036](0036-waiting-recovery-proof-derived-facts.md) | waiting 恢复事实由已完成副作用证明推导 | 已替代 | 2026-07-28 |
 | [ADR-0037](0037-waiting-recovery-capability-and-append-only-rollback.md) | waiting 恢复能力回执与只追加回退边界 | 已接受 | 2026-07-28 |
+| [ADR-0039](0039-web-local-agent-workbench.md) | 本地 Agent 工作台与公开 API 边界 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录
 

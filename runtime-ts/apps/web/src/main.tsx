@@ -1,10 +1,4 @@
-import {
-  LoaderCircle,
-  MessageSquarePlus,
-  PanelLeftClose,
-  PanelLeftOpen,
-  RotateCw,
-} from "lucide-react";
+import { LoaderCircle, PanelLeftOpen, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ApiError, RuntimeApi } from "./api.js";
@@ -17,14 +11,20 @@ import {
   ActivityPanel,
   activeRunStatuses,
   ConversationComposer,
+  canCreateThread,
+  compactWorkspaceMedia,
   EmptyConversation,
+  NavigationSidebar,
   RunTimeline,
+  shouldOpenActivityPanel,
+  ThreadCreate,
   ThreadHeader,
   ThreadNavigation,
 } from "./workspace-view.js";
 
 const api = new RuntimeApi();
 function App() {
+  const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [title, setTitle] = useState("");
   const [input, setInput] = useState("");
@@ -32,12 +32,28 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<ApiError | undefined>();
-  const [activityOpen, setActivityOpen] = useState(true);
+  const [isCompact, setIsCompact] = useState(initialCompact);
+  const [activityOpen, setActivityOpen] = useState(() => shouldOpenActivityPanel(initialCompact));
   const [navigationOpen, setNavigationOpen] = useState(false);
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
   const currentRunPollRef = useRef(new CurrentRunPoll());
   const navigationRef = useRef(new WorkspaceNavigation());
+  const mobileNavigationToggleRef = useRef<HTMLButtonElement>(null);
+  const createThreadInFlightRef = useRef(false);
+
+  useEffect(() => {
+    const media = window.matchMedia(compactWorkspaceMedia);
+    const updateLayout = (event: MediaQueryListEvent) => {
+      setIsCompact(event.matches);
+      if (event.matches) {
+        setActivityOpen(false);
+        setNavigationOpen(false);
+      }
+    };
+    media.addEventListener("change", updateLayout);
+    return () => media.removeEventListener("change", updateLayout);
+  }, []);
 
   useEffect(() => {
     eventAfterRef.current = state.events.at(-1)?.sequence ?? -1;
@@ -106,7 +122,8 @@ function App() {
   }, [state.run?.id, state.selectedThreadId]);
 
   const createThread = async () => {
-    if (!title.trim()) return;
+    if (!canCreateThread(title, actionLoading) || createThreadInFlightRef.current) return;
+    createThreadInFlightRef.current = true;
     const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
@@ -124,6 +141,7 @@ function App() {
     } catch (reason) {
       if (navigationRef.current.isCurrent(expectedNavigation)) setError(reason as ApiError);
     } finally {
+      createThreadInFlightRef.current = false;
       setActionLoading(false);
     }
   };
@@ -214,48 +232,19 @@ function App() {
   const selected = state.threads.find((thread) => thread.id === state.selectedThreadId);
   return (
     <main className={`workspace ${navigationOpen ? "navigation-open" : ""}`}>
-      <aside className="sidebar" aria-label="会话导航">
-        <div className="brand-row">
-          <div className="brand">
-            <span className="brand-mark" aria-hidden="true">
-              C
-            </span>
-            <span>Cube Agent</span>
-          </div>
-          <button
-            className="mobile-only icon-button"
-            type="button"
-            onClick={() => setNavigationOpen(false)}
-            aria-label="关闭会话导航"
-          >
-            <PanelLeftClose size={18} />
-          </button>
-        </div>
+      <NavigationSidebar
+        isCompact={isCompact}
+        isOpen={navigationOpen}
+        returnFocusRef={mobileNavigationToggleRef}
+        onClose={() => setNavigationOpen(false)}
+      >
         <p className="identity-note">本地开发身份 · dev-user-a</p>
-        <div className="thread-create">
-          <label className="sr-only" htmlFor="thread-title">
-            新建会话标题
-          </label>
-          <input
-            id="thread-title"
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") void createThread();
-            }}
-            placeholder="新建会话标题"
-          />
-          <button
-            type="button"
-            className="icon-button"
-            title="创建会话"
-            aria-label="创建会话"
-            onClick={() => void createThread()}
-            disabled={actionLoading || !title.trim()}
-          >
-            <MessageSquarePlus size={17} />
-          </button>
-        </div>
+        <ThreadCreate
+          title={title}
+          actionLoading={actionLoading}
+          onChange={setTitle}
+          onCreate={() => void createThread()}
+        />
         <div className="thread-heading">
           <span>会话</span>
           <span>{state.threads.length}</span>
@@ -292,9 +281,10 @@ function App() {
             ))
           )}
         </ThreadNavigation>
-      </aside>
+      </NavigationSidebar>
       <section className="content" aria-label="对话工作区">
         <button
+          ref={mobileNavigationToggleRef}
           className="mobile-nav-toggle icon-button"
           type="button"
           onClick={() => setNavigationOpen(true)}

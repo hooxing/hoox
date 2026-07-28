@@ -52,6 +52,10 @@ const runtimeRolloutTables = new Set([
   "runtime_rollout_checkpoints",
   "runtime_rollout_checkpoint_commands",
 ]);
+const waitingRecoveryTables = new Set([
+  "waiting_recovery_checkpoints",
+  "waiting_recovery_effect_outbox",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -102,6 +106,8 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["runtime_rollout_replacements", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_checkpoints", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_checkpoint_commands", new Set(["SELECT", "INSERT"])],
+  ["waiting_recovery_checkpoints", new Set(["SELECT", "INSERT"])],
+  ["waiting_recovery_effect_outbox", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -188,7 +194,29 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
     new Set(["visibility", "latest_version_number", "latest_version_id", "updated_at"]),
   ],
   ["resource_promotion_authorizations", new Set(["state", "consumed_at"])],
+  [
+    "waiting_recovery_checkpoints",
+    new Set([
+      "state",
+      "claim_owner",
+      "claim_token",
+      "claim_epoch",
+      "claim_expires_at",
+      "decision",
+      "updated_at",
+    ]),
+  ],
+  ["waiting_recovery_effect_outbox", new Set(["state", "payload", "updated_at"])],
 ]);
+
+async function hasWaitingRecoveryState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.waiting_recovery_checkpoints', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.waiting_recovery_effect_outbox', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
 
 async function hasMembershipLockMarker(client: PoolClient): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
@@ -298,6 +326,9 @@ async function activeTablePolicy(
   if (!(await hasRuntimeRolloutState(client, schema))) {
     for (const table of runtimeRolloutTables) policy.delete(table);
   }
+  if (!(await hasWaitingRecoveryState(client, schema))) {
+    for (const table of waitingRecoveryTables) policy.delete(table);
+  }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
   }
@@ -331,6 +362,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasRuntimeRolloutState(client, schema))) {
     for (const table of runtimeRolloutTables) policy.delete(table);
+  }
+  if (!(await hasWaitingRecoveryState(client, schema))) {
+    for (const table of waitingRecoveryTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -916,6 +950,14 @@ export async function bootstrapRuntimeAccessOnClient(
        TO ${role}`,
     );
   }
+  if (await hasWaitingRecoveryState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.waiting_recovery_checkpoints,
+         ${schema}.waiting_recovery_effect_outbox
+       TO ${role}`,
+    );
+  }
   await client.query(
     `GRANT UPDATE(state, current_incarnation_id, generation, current_claim_id, lease_expires_at, updated_at)
        ON TABLE ${schema}.blob_lifecycles TO ${role};
@@ -960,6 +1002,14 @@ export async function bootstrapRuntimeAccessOnClient(
          state, generation, claim_token, claimed_by, lease_expires_at, next_attempt_at,
          dispatch_attempts, last_error_code, updated_at
        ) ON TABLE ${schema}.run_dispatch_outbox TO ${role}`,
+    );
+  }
+  if (await hasWaitingRecoveryState(client, context.schema)) {
+    await client.query(
+      `GRANT UPDATE(state,claim_owner,claim_token,claim_epoch,claim_expires_at,decision,updated_at)
+         ON TABLE ${schema}.waiting_recovery_checkpoints TO ${role};
+       GRANT UPDATE(state,payload,updated_at)
+         ON TABLE ${schema}.waiting_recovery_effect_outbox TO ${role}`,
     );
   }
   if (await hasResourceLibraryState(client, context.schema)) {

@@ -64,7 +64,9 @@ corepack pnpm config:check
 
 ## 进程启动与关闭
 
-`runtime-ts/apps/api` 在 `RUNTIME_ENV=development`、显式启用开发身份时可选择内建的开发装配：它打开真实 PostgreSQL Repository 和 HTTP listener，可用 `pnpm dev:api` 启动。迁移后先显式执行 `pnpm dev:identity:provision`，该命令幂等创建配置的两个 User、个人 Tenant 和 owner Membership；服务启动本身绝不写入授权数据。该装配和初始化命令都不支持 production，也不会退化到内存 Fake。`agent-worker` 仍只有类型化配置与薄启动入口；没有真实 `ServiceAssemblyFactory` 时固定拒绝启动。Scheduler 的受审装配边界单独维护。当前能力不代表生产身份、真实模型和完整队列装配已经完成。
+`runtime-ts/apps/api` 在 `RUNTIME_ENV=development`、显式启用开发身份时可选择内建的开发装配：它打开真实 PostgreSQL Repository 和 HTTP listener，可用 `pnpm dev:api` 启动。迁移后先显式执行 `pnpm dev:identity:provision`，该命令幂等创建配置的两个 User、个人 Tenant 和 owner Membership；服务启动本身绝不写入授权数据。该装配和初始化命令都不支持 production，也不会退化到内存 Fake。
+
+`agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 必须严格等于 `DEV_AUTH_USER_A_TENANT_ID`，保证 `dev-user-a` 的 Web/API 创建结果由同一 Worker 消费。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。生产不会继承这项放宽：其 readiness 仍要求 Provider 元数据精确匹配预算，且 Worker 入口保持 fail-closed。当前未接入 Workspace revision/Artifact 发布，非空 `/workspace` 会使 Run 失败关闭；开发 UI 只能承诺纯聊天 Run 成功。
 
 装配器按业务接收顺序实现 `stopAccepting`，将数据库连接池、HTTP listener、消费者和遥测等资源按确定顺序登记。关闭时先停止接收，再等待 `lifecycle.track()` 登记的在途操作，最后串行关闭资源。资源错误只上报稳定名称；库不调用 `process.exit`。部署平台的强制终止宽限期必须大于 `PROCESS_SHUTDOWN_TIMEOUT_MS`。
 

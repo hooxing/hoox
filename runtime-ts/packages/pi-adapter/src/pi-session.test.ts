@@ -14,11 +14,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import type { RuntimeAgentEvent } from "./events.js";
 import {
-  assertLinuxWorkerPlatform,
   assertPiSessionCapabilityManifest,
-  bindTrustedPiModelContextCapability,
-  bindTestingPiModelContextCapability,
   assessSafePiSessionContext,
+  bindTestingPiModelContextCapability,
+  bindTrustedPiModelContextCapability,
   createSafePiSession,
   digestCanonicalToolInputSchema,
   type PiSessionController,
@@ -31,72 +30,73 @@ afterEach(() => {
 });
 
 describe("Pi 安全适配", () => {
-  it.runIf(process.platform === "linux")(
-    "Linux 下只发布 assistant 成功终态，并保持模型逻辑 cwd 为 /workspace",
-    async () => {
-      const sandbox = new FakeSandboxHandle("pi-fake");
-      let modelContext = "";
-      const { controller, events, toolAuthorizationCount, authorizedCalls } = await harness(
-        [
-          (context) => {
-            modelContext = JSON.stringify(context);
-            return fauxAssistantMessage(
-              fauxToolCall("sandbox_write_file", { path: "/tmp/pi.txt", content: "pi-safe" }),
-              { stopReason: "toolUse" },
-            );
-          },
-          fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path: "/tmp/pi.txt" }), {
-            stopReason: "toolUse",
-          }),
-          fauxAssistantMessage("完成"),
-        ],
-        sandbox,
-      );
+  it("跨平台只发布 assistant 成功终态，工具只进入 Sandbox", async () => {
+    const sandbox = new FakeSandboxHandle("pi-fake");
+    let modelContext = "";
+    const { controller, events, toolAuthorizationCount, authorizedCalls } = await harness(
+      [
+        (context) => {
+          modelContext = JSON.stringify(context);
+          return fauxAssistantMessage(
+            fauxToolCall("sandbox_write_file", { path: "/tmp/pi.txt", content: "pi-safe" }),
+            { stopReason: "toolUse" },
+          );
+        },
+        fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path: "/tmp/pi.txt" }), {
+          stopReason: "toolUse",
+        }),
+        fauxAssistantMessage("完成"),
+      ],
+      sandbox,
+    );
 
-      await controller.prompt("把内容写入隔离环境");
+    await controller.prompt("把内容写入隔离环境");
 
-      expect(sandbox.files.get("/tmp/pi.txt")).toBe("pi-safe");
-      expect(toolAuthorizationCount()).toBe(2);
-      expect(authorizedCalls.map((call) => call.toolName)).toEqual([
-        "sandbox_write_file",
-        "sandbox_read_file",
-      ]);
-      expect(new Set(authorizedCalls.map((call) => call.callId)).size).toBe(2);
-      expect(authorizedCalls.every((call) => /^[a-f0-9]{64}$/u.test(call.argsDigest))).toBe(true);
-      expect(events.filter((event) => event.type === "message.completed")).toEqual([
-        { type: "message.completed", stopReason: "toolUse" },
-        { type: "message.completed", stopReason: "toolUse" },
-        { type: "message.completed", stopReason: "stop" },
-      ]);
-      expect(events.some((event) => event.type === "tool.completed")).toBe(true);
-      expect(events.some((event) => event.type === "compaction.forbidden")).toBe(false);
-      expect(controller.getDiagnostics()).toEqual({
-        logicalCwd: "/workspace",
-        activeToolNames: expect.arrayContaining([...SANDBOX_TOOL_NAMES]),
-        promptSchemaVersion: 1,
-        promptVersion: "runtime-system-prompt.v1",
-        capabilityManifestDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
-        promptDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
-        compactionEnabled: false,
-        hasCompactionEntry: false,
-        activeAgentMessageCount: expect.any(Number),
-        activeSessionEntryCount: expect.any(Number),
-        pendingMessageCount: 0,
-      });
-      expect("compact" in controller).toBe(false);
-      expect("session" in controller).toBe(false);
-      expect(modelContext).toContain("Cube Runtime 托管的受控 Agent");
-      expect(modelContext).toContain("/workspace");
-      expect(modelContext).toContain("sandbox_write_file");
-      expect(modelContext).not.toContain("request_user_input");
-      // Linux CI 的仓库挂载点也可能恰好叫 /workspace；此时它与 Sandbox 的固定逻辑 cwd
-      // 同名，不能据字符串本身判断泄漏。非同名宿主路径仍必须完全不进入模型上下文。
-      if (process.cwd() !== "/workspace") {
-        expect(modelContext).not.toMatch(hostPathPattern(process.cwd()));
-        expect(modelContext).not.toMatch(hostPathPattern(process.cwd().replaceAll("\\", "/")));
-      }
-    },
-  );
+    expect(sandbox.files.get("/tmp/pi.txt")).toBe("pi-safe");
+    expect(toolAuthorizationCount()).toBe(2);
+    expect(authorizedCalls.map((call) => call.toolName)).toEqual([
+      "sandbox_write_file",
+      "sandbox_read_file",
+    ]);
+    expect(new Set(authorizedCalls.map((call) => call.callId)).size).toBe(2);
+    expect(authorizedCalls.every((call) => /^[a-f0-9]{64}$/u.test(call.argsDigest))).toBe(true);
+    expect(events.filter((event) => event.type === "message.completed")).toEqual([
+      { type: "message.completed", stopReason: "toolUse" },
+      { type: "message.completed", stopReason: "toolUse" },
+      { type: "message.completed", stopReason: "stop" },
+    ]);
+    expect(events.some((event) => event.type === "tool.completed")).toBe(true);
+    expect(events.some((event) => event.type === "compaction.forbidden")).toBe(false);
+    expect(controller.getDiagnostics()).toEqual({
+      logicalCwd: "/workspace",
+      activeToolNames: expect.arrayContaining([...SANDBOX_TOOL_NAMES]),
+      promptSchemaVersion: 1,
+      promptVersion: "runtime-system-prompt.v1",
+      capabilityManifestDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      promptDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
+      compactionEnabled: false,
+      hasCompactionEntry: false,
+      activeAgentMessageCount: expect.any(Number),
+      activeSessionEntryCount: expect.any(Number),
+      pendingMessageCount: 0,
+    });
+    expect([...controller.getDiagnostics().activeToolNames].sort()).toEqual(
+      [...SANDBOX_TOOL_NAMES].sort(),
+    );
+    expect("compact" in controller).toBe(false);
+    expect("session" in controller).toBe(false);
+    expect(modelContext).toContain("Cube Runtime 托管的受控 Agent");
+    expect(modelContext).toContain("/workspace");
+    expect(modelContext).toContain("sandbox_write_file");
+    expect(modelContext).not.toContain("request_user_input");
+    expect(modelContext).not.toMatch(/[A-Za-z]:\\\\workspace/iu);
+    // CI 的仓库挂载点也可能恰好叫 /workspace；此时它与 Sandbox 的固定逻辑 cwd
+    // 同名，不能据字符串本身判断泄漏。非同名宿主路径仍必须完全不进入模型上下文。
+    if (process.cwd() !== "/workspace") {
+      expect(modelContext).not.toMatch(hostPathPattern(process.cwd()));
+      expect(modelContext).not.toMatch(hostPathPattern(process.cwd().replaceAll("\\", "/")));
+    }
+  });
 
   it.runIf(process.platform === "linux")(
     "预算选出的活动历史才进入 Pi，旧历史仍保留在 Rollout 但不进入 Provider 消息",
@@ -118,11 +118,11 @@ describe("Pi 安全适配", () => {
         ],
         new FakeSandboxHandle("budget-active-history"),
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           checkpointId: "checkpoint-budget-window",
-          turns: [
-            { role: "user", text: "旧历史必须留在事实源" },
-            { role: "assistant", text: "最近回复" },
+          items: [
+            { kind: "turn", role: "user", text: "旧历史必须留在事实源" },
+            { kind: "turn", role: "assistant", text: "最近回复" },
           ],
         },
         undefined,
@@ -353,6 +353,13 @@ describe("Pi 安全适配", () => {
       modelContext: context,
       modelRuntime: runtime,
       sandbox: new FakeSandboxHandle("mutable-context"),
+      createToolObservationRecorder: () => ({
+        record: async () => ({
+          outcome: "recorded" as const,
+          observation: "受控测试回执",
+          isTruncated: false,
+        }),
+      }),
       authorizeToolEffect: async () => ({
         consumedAtMonotonicMs: performance.now(),
         maxContinuationDelayMs: 100,
@@ -386,6 +393,13 @@ describe("Pi 安全适配", () => {
       modelContext: context,
       modelRuntime: runtime,
       sandbox: new FakeSandboxHandle("route-snapshot"),
+      createToolObservationRecorder: () => ({
+        record: async () => ({
+          outcome: "recorded" as const,
+          observation: "受控测试回执",
+          isTruncated: false,
+        }),
+      }),
       authorizeToolEffect: async () => ({
         consumedAtMonotonicMs: performance.now(),
         maxContinuationDelayMs: 100,
@@ -513,7 +527,7 @@ describe("Pi 安全适配", () => {
 
   it.runIf(process.platform === "linux")("Tool Router 在 DB 许可拒绝时不触碰 Sandbox", async () => {
     const sandbox = new FakeSandboxHandle("pi-denied-tool");
-    const { controller, events } = await harness(
+    const { controller, events, faux } = await harness(
       [
         fauxAssistantMessage(
           fauxToolCall("sandbox_write_file", { path: "/tmp/denied.txt", content: "no" }),
@@ -528,9 +542,13 @@ describe("Pi 安全适配", () => {
       },
     );
 
-    await controller.prompt("尝试写入");
+    await expect(controller.prompt("尝试写入")).rejects.toThrow();
 
     expect(sandbox.files.has("/tmp/denied.txt")).toBe(false);
+    expect(faux.state.callCount).toBe(1);
+    expect(
+      events.some((event) => event.type === "message.completed" && event.stopReason === "stop"),
+    ).toBe(false);
     expect(events).toContainEqual(
       expect.objectContaining({ type: "tool.completed", isError: true }),
     );
@@ -540,7 +558,7 @@ describe("Pi 安全适配", () => {
     "Tool Router 用单调时钟拒绝迟到 continuation，且不触碰 Sandbox",
     async () => {
       const sandbox = new FakeSandboxHandle("pi-expired-tool");
-      const { controller, events } = await harness(
+      const { controller, events, faux } = await harness(
         [
           fauxAssistantMessage(
             fauxToolCall("sandbox_write_file", { path: "/tmp/expired.txt", content: "no" }),
@@ -556,9 +574,13 @@ describe("Pi 安全适配", () => {
         }),
       );
 
-      await controller.prompt("尝试使用迟到许可写入");
+      await expect(controller.prompt("尝试使用迟到许可写入")).rejects.toThrow();
 
       expect(sandbox.files.has("/tmp/expired.txt")).toBe(false);
+      expect(faux.state.callCount).toBe(1);
+      expect(
+        events.some((event) => event.type === "message.completed" && event.stopReason === "stop"),
+      ).toBe(false);
       expect(events).toContainEqual(
         expect.objectContaining({ type: "tool.completed", isError: true }),
       );
@@ -690,11 +712,11 @@ describe("Pi 安全适配", () => {
         ],
         new FakeSandboxHandle("pi-resume-fake"),
         {
-          schemaVersion: 1,
+          schemaVersion: 2,
           checkpointId: "checkpoint-waiting-1",
-          turns: [
-            { role: "user", text: "生成报告" },
-            { role: "assistant", text: "请补充报告范围" },
+          items: [
+            { kind: "turn", role: "user", text: "生成报告" },
+            { kind: "turn", role: "assistant", text: "请补充报告范围" },
           ],
         },
       );
@@ -721,36 +743,14 @@ describe("Pi 安全适配", () => {
       for (const turns of invalidTurns) {
         await expect(
           harness([], new FakeSandboxHandle("invalid-projection"), {
-            schemaVersion: 1,
+            schemaVersion: 2,
             checkpointId: "invalid",
-            turns: turns as never,
+            items: turns.map((turn) => ({ kind: "turn", ...turn })) as never,
           }),
         ).rejects.toThrow("RolloutProjection");
       }
     },
   );
-
-  it("Windows Worker 在创建 Pi Session 前明确失败", async () => {
-    expect(() => assertLinuxWorkerPlatform("win32")).toThrow("仅支持 Linux");
-    if (process.platform !== "linux") {
-      const modelRuntime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsPath: null,
-      });
-      const faux = fauxProvider({ api: "faux-platform", provider: "faux-platform" });
-      modelRuntime.registerNativeProvider(faux.provider);
-      const model = faux.getModel();
-      await expect(
-        createSafePiSession({
-          model,
-          modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
-          modelRuntime,
-          sandbox: new FakeSandboxHandle("platform-guard"),
-          authorizeToolEffect: async () => immediateAuthorization(),
-        }),
-      ).rejects.toThrow("仅支持 Linux");
-    }
-  });
 
   it("工具参数 Schema 规范化拒绝 Proxy、访问器、稀疏数组、未知 Symbol 和非法数值", () => {
     const schema = {
@@ -913,6 +913,7 @@ async function harness(
       authorizedCalls.push(input);
       return (await authorizeToolEffect?.(input)) ?? immediateAuthorization();
     },
+    createToolObservationRecorder: fakeObservationRecorder,
     ...(rolloutProjection === undefined ? {} : { rolloutProjection }),
     ...(untrustedPromptContent === undefined ? {} : { untrustedPromptContent }),
   });
@@ -935,6 +936,21 @@ async function harness(
     modelRuntime,
     toolAuthorizationCount: () => authorizationCount,
     authorizedCalls,
+  };
+}
+
+function fakeObservationRecorder(
+  outputs: Parameters<
+    Parameters<typeof createSafePiSession>[0]["createToolObservationRecorder"]
+  >[0],
+) {
+  return {
+    async record(input: { readonly toolCallId: string; readonly toolName: string }) {
+      const observation = await outputs.readControlledReceipt(input);
+      return observation === undefined
+        ? ({ outcome: "conflict" } as const)
+        : ({ outcome: "recorded", observation, isTruncated: false } as const);
+    },
   };
 }
 

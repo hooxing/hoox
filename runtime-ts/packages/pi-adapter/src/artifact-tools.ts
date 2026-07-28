@@ -1,5 +1,6 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
+import type { ToolObservationResult } from "@cube-runtime/context-policy";
 
 const strict = { additionalProperties: false } as const;
 const id = Type.String({ minLength: 3, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]+$" });
@@ -99,7 +100,14 @@ export interface ArtifactPiToolExecutorPort {
 }
 
 /** Pi 只负责工具循环；参数校验、许可消费、业务错误和审计边界全部留在 Tool Router。 */
-export function createArtifactPiTools(router: ArtifactPiToolExecutorPort) {
+export function createArtifactPiTools(
+  router: ArtifactPiToolExecutorPort,
+  recordControlledReceipt: (
+    callId: string,
+    toolName: (typeof PI_ARTIFACT_TOOL_NAMES)[number],
+    outcome: "succeeded" | "failed",
+  ) => Promise<ToolObservationResult>,
+) {
   return [
     defineTool({
       name: "declare_deliverables",
@@ -108,6 +116,8 @@ export function createArtifactPiTools(router: ArtifactPiToolExecutorPort) {
       parameters: DeclareDeliverablesToolArgumentsSchema,
       execute: async (callId, args, signal) =>
         artifactToolResult(
+          callId,
+          "declare_deliverables",
           () =>
             router.declareDeliverables({
               callId,
@@ -115,6 +125,7 @@ export function createArtifactPiTools(router: ArtifactPiToolExecutorPort) {
               ...(signal === undefined ? {} : { signal }),
             }),
           router,
+          recordControlledReceipt,
         ),
     }),
     defineTool({
@@ -125,6 +136,8 @@ export function createArtifactPiTools(router: ArtifactPiToolExecutorPort) {
       parameters: PublishArtifactToolArgumentsSchema,
       execute: async (callId, args, signal) =>
         artifactToolResult(
+          callId,
+          "publish_artifact",
           () =>
             router.publishArtifact({
               callId,
@@ -132,25 +145,41 @@ export function createArtifactPiTools(router: ArtifactPiToolExecutorPort) {
               ...(signal === undefined ? {} : { signal }),
             }),
           router,
+          recordControlledReceipt,
         ),
     }),
   ];
 }
 
 async function artifactToolResult(
+  callId: string,
+  toolName: (typeof PI_ARTIFACT_TOOL_NAMES)[number],
   action: () => Promise<unknown>,
   projector: Pick<ArtifactPiToolExecutorPort, "projectError">,
+  recordControlledReceipt: (
+    callId: string,
+    toolName: (typeof PI_ARTIFACT_TOOL_NAMES)[number],
+    outcome: "succeeded" | "failed",
+  ) => Promise<ToolObservationResult>,
 ) {
+  let outcome: "succeeded" | "failed" = "succeeded";
   try {
-    const result = await action();
-    return {
-      content: [{ type: "text" as const, text: JSON.stringify(result) }],
-      details: {},
-    };
+    await action();
   } catch (error) {
-    // 投影只含稳定码、可修正性和公开消息；对象键、签名 URL 与依赖 cause 不进入模型上下文。
-    // Pi 0.82.1 不读取自定义 ToolResult 的 isError 字段；抛出仅含安全 JSON 的新错误，
-    // 由 Pi 生成 isError=true 的 toolResult，不能把原始 cause 直接抛回模型。
-    throw new Error(JSON.stringify(projector.projectError(error)));
+    // 只调用 projector 证明原异常可在受审边界内归类，但 Artifact 原始结果/错误都不进入模型。
+    void projector.projectError(error);
+    outcome = "failed";
   }
+  const observation = await recordControlledReceipt(callId, toolName, outcome);
+  if (observation.outcome !== "recorded" && observation.outcome !== "replayed") {
+    throw new Error("Artifact Tool Observation 未能形成 durable 事实");
+  }
+  if (outcome === "failed") {
+    // Pi 只把异常执行标为 tool error；异常正文仍是已经持久化的固定受控回执。
+    throw new Error(observation.observation);
+  }
+  return {
+    content: [{ type: "text" as const, text: observation.observation }],
+    details: {},
+  };
 }

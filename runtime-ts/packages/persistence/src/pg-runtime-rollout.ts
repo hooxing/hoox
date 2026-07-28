@@ -7,8 +7,10 @@ import type {
   Sha256Digest,
   UserId,
 } from "@cube-runtime/domain";
-import { isoTimestamp, sha256Digest } from "@cube-runtime/domain";
+import { agentThreadId, isoTimestamp, sha256Digest, userId } from "@cube-runtime/domain";
+import type { ExecutionFence } from "@cube-runtime/run-contracts";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+import { createHash } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";
@@ -20,6 +22,8 @@ const KEY = /^[\x21-\x7e]{1,512}$/u;
 export interface TrustedRolloutContext {
   readonly scope: RolloutScope;
   readonly userId: UserId;
+  /** 每次读写都会在同一事务重新验证；对象本身不是绕过 PG 的授权证明。 */
+  readonly fence: ExecutionFence;
 }
 
 export interface OpenRootRolloutInput {
@@ -28,6 +32,16 @@ export interface OpenRootRolloutInput {
   readonly rootRunId: string;
   readonly compatibility: RolloutCompatibilityIdentity;
 }
+
+export interface OpenRootRolloutFromClaimInput {
+  readonly fence: ExecutionFence;
+  readonly attemptId: string;
+  readonly compatibility: RolloutCompatibilityIdentity;
+}
+
+export type OpenRootRolloutFromClaimResult =
+  | { readonly outcome: "ready"; readonly context: TrustedRolloutContext }
+  | { readonly outcome: "conflict" | "not_authorized" | "not_found" };
 
 export interface RolloutEntryDraft {
   readonly kind: RuntimeRolloutEntryKind;
@@ -135,6 +149,18 @@ function assertHash(value: string, label: string): void {
   if (!HASH.test(value)) throw new TypeError(`${label}必须是 SHA-256`);
 }
 
+function assertCompatibility(compatibility: RolloutCompatibilityIdentity): void {
+  assertBoundedText(compatibility.modelId, "Model ID", 255);
+  for (const [label, hash] of [
+    ["Model compatibility hash", compatibility.modelCompatibilityHash],
+    ["Prompt policy hash", compatibility.promptPolicyHash],
+    ["Tool schema hash", compatibility.toolSchemaHash],
+    ["Skill manifest hash", compatibility.skillManifestHash],
+  ] as const) {
+    assertHash(hash, label);
+  }
+}
+
 function assertJsonRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError(`${label}必须是 JSON 对象`);
@@ -160,6 +186,30 @@ function assertContext(context: TrustedRolloutContext): void {
   ] as const) {
     assertIdentifier(value, label);
   }
+  const execution = context.fence.scope;
+  for (const [label, value] of [
+    ["Workspace ID", execution.workspaceId],
+    ["Root Run ID", execution.rootRunId],
+    ["Run claim token", context.fence.runClaim.token],
+    ["Workspace lease root Run ID", context.fence.workspaceLease.rootRunId],
+  ] as const) {
+    assertIdentifier(value, label);
+  }
+  if (execution.baseRevisionId !== undefined) {
+    assertIdentifier(execution.baseRevisionId, "Base revision ID");
+  }
+  if (
+    execution.tenantId !== scope.tenantId ||
+    execution.threadId !== scope.threadId ||
+    execution.runId !== scope.runId ||
+    execution.rootRunId !== context.fence.workspaceLease.rootRunId ||
+    !Number.isSafeInteger(context.fence.runClaim.epoch) ||
+    context.fence.runClaim.epoch < 0 ||
+    !Number.isSafeInteger(context.fence.workspaceLease.epoch) ||
+    context.fence.workspaceLease.epoch < 0
+  ) {
+    throw new TypeError("Rollout 双栅栏与执行 scope 不匹配");
+  }
 }
 
 function scopeParams(context: TrustedRolloutContext): string[] {
@@ -171,25 +221,52 @@ function scopeParams(context: TrustedRolloutContext): string[] {
  * 写事务持有 SHARE row lock 到 COMMIT；Membership revoke 的 UPDATE 必须等待，
  * 从而写入的授权判定与事实提交不可交错。读恢复改用单 SQL snapshot，避免只读请求制造 row-lock WAL。
  */
-async function lockActiveMembership(
+async function lockActiveExecutionFence(
   client: PoolClient,
   context: TrustedRolloutContext,
 ): Promise<boolean> {
   const result = await client.query(
     `SELECT membership.user_id
-       FROM memberships membership
-         JOIN threads thread_state
-           ON thread_state.tenant_id=membership.tenant_id
-          AND thread_state.id=$2
-         JOIN runs run_state
-           ON run_state.tenant_id=thread_state.tenant_id
-          AND run_state.thread_id=thread_state.id
-          AND run_state.id=$3
-        WHERE membership.tenant_id=$1 AND membership.user_id=$4
-          AND membership.status='active'
-        FOR SHARE OF membership
+       FROM execution_attempts attempt
+       JOIN run_claims claim
+         ON claim.tenant_id=attempt.tenant_id AND claim.attempt_id=attempt.attempt_id
+       JOIN workspace_write_leases lease
+         ON lease.tenant_id=attempt.tenant_id AND lease.workspace_id=attempt.workspace_id
+        AND lease.root_run_id=attempt.root_run_id AND lease.epoch=claim.workspace_lease_epoch
+       JOIN threads thread_state
+         ON thread_state.tenant_id=attempt.tenant_id AND thread_state.id=attempt.thread_id
+       JOIN memberships membership
+         ON membership.tenant_id=thread_state.tenant_id
+        AND membership.user_id=thread_state.created_by_user_id
+        AND membership.status='active'
+      WHERE attempt.tenant_id=$1 AND attempt.attempt_id=$2
+        AND attempt.thread_id=$3 AND attempt.run_id=$4
+        AND attempt.workspace_id=$5 AND attempt.root_run_id=$6
+        AND attempt.base_revision_id IS NOT DISTINCT FROM $7
+        AND attempt.status IN ('claimed','running','finalizing','waiting')
+        AND thread_state.created_by_user_id=$8
+        AND claim.run_id=attempt.run_id AND claim.thread_id=attempt.thread_id
+        AND claim.workspace_id=attempt.workspace_id AND claim.root_run_id=attempt.root_run_id
+        AND claim.claim_token=$9 AND claim.claim_epoch=$10
+        AND claim.workspace_lease_epoch=$11 AND claim.released_at IS NULL
+        AND claim.expires_at > clock_timestamp()
+        AND lease.thread_id=attempt.thread_id
+        AND lease.expires_at > clock_timestamp()
+      FOR SHARE OF attempt,claim,lease,membership
     `,
-    [context.scope.tenantId, context.scope.threadId, context.scope.runId, context.userId],
+    [
+      context.scope.tenantId,
+      context.scope.attemptId,
+      context.scope.threadId,
+      context.scope.runId,
+      context.fence.scope.workspaceId,
+      context.fence.scope.rootRunId,
+      context.fence.scope.baseRevisionId ?? null,
+      context.userId,
+      context.fence.runClaim.token,
+      context.fence.runClaim.epoch,
+      context.fence.workspaceLease.epoch,
+    ],
   );
   return result.rowCount === 1;
 }
@@ -260,7 +337,7 @@ function normalizeDraft(draft: RolloutEntryDraft): NormalizedRolloutEntryDraft {
   if (needsCallId) assertIdentifier(draft.toolCallId ?? "", "Tool call ID");
   else if (draft.toolCallId !== undefined) throw new TypeError("非工具 entry 不允许 Tool call ID");
   if (draft.blob !== undefined) {
-    if (draft.kind !== "tool_result") throw new TypeError("只有 Tool result 可以引用完整输出 Blob");
+    if (draft.kind !== "tool_result") throw new TypeError("只有 Tool result 可以引用受控回执 Blob");
     assertIdentifier(draft.blob.referenceId, "Blob reference ID");
     assertHash(draft.blob.sha256, "Blob digest");
     if (!Number.isSafeInteger(draft.blob.size) || draft.blob.size < 0) {
@@ -286,87 +363,212 @@ function normalizeDraft(draft: RolloutEntryDraft): NormalizedRolloutEntryDraft {
 export class PgRuntimeRolloutRepository {
   constructor(private readonly pool: Pool) {}
 
+  /**
+   * 生产 Worker 的唯一 root stream 入口：调用方只持有当前双栅栏，userId 与 AgentThread
+   * 均由同一 PG 事务中的 claim、Thread owner 和 active Membership 事实推导。
+   */
+  async openRootStreamFromClaim(
+    input: OpenRootRolloutFromClaimInput,
+  ): Promise<OpenRootRolloutFromClaimResult> {
+    const { fence } = input;
+    for (const [label, value] of [
+      ["Tenant ID", fence.scope.tenantId],
+      ["Thread ID", fence.scope.threadId],
+      ["Run ID", fence.scope.runId],
+      ["Attempt ID", input.attemptId],
+      ["Workspace ID", fence.scope.workspaceId],
+      ["Root Run ID", fence.scope.rootRunId],
+      ["Run claim token", fence.runClaim.token],
+    ] as const) {
+      assertIdentifier(value, label);
+    }
+    if (fence.scope.baseRevisionId !== undefined) {
+      assertIdentifier(fence.scope.baseRevisionId, "Base revision ID");
+    }
+    if (
+      !Number.isSafeInteger(fence.runClaim.epoch) ||
+      fence.runClaim.epoch < 0 ||
+      !Number.isSafeInteger(fence.workspaceLease.epoch) ||
+      fence.workspaceLease.epoch < 0 ||
+      fence.workspaceLease.rootRunId !== fence.scope.rootRunId
+    ) {
+      throw new TypeError("执行栅栏 epoch 格式无效");
+    }
+    const rootAgentThreadId = agentThreadId(
+      `root_${createHash("sha256").update(input.attemptId, "utf8").digest("hex")}`,
+    );
+    assertIdentifier(rootAgentThreadId, "Agent Thread ID");
+    assertCompatibility(input.compatibility);
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        { tenantId: fence.scope.tenantId },
+        async (client) => {
+          const actor = await client.query<{ created_by_user_id: string }>(
+            `SELECT thread_state.created_by_user_id
+               FROM execution_attempts attempt
+               JOIN run_claims claim
+                 ON claim.tenant_id=attempt.tenant_id AND claim.attempt_id=attempt.attempt_id
+               JOIN threads thread_state
+                 ON thread_state.tenant_id=attempt.tenant_id AND thread_state.id=attempt.thread_id
+               JOIN workspace_write_leases lease
+                 ON lease.tenant_id=attempt.tenant_id
+                AND lease.workspace_id=attempt.workspace_id
+                AND lease.root_run_id=attempt.root_run_id
+                AND lease.epoch=claim.workspace_lease_epoch
+               JOIN memberships membership
+                 ON membership.tenant_id=thread_state.tenant_id
+                AND membership.user_id=thread_state.created_by_user_id
+                AND membership.status='active'
+              WHERE attempt.tenant_id=$1 AND attempt.attempt_id=$2
+                AND attempt.run_id=$3 AND attempt.thread_id=$4
+                AND attempt.workspace_id=$5 AND attempt.root_run_id=$6
+                AND attempt.base_revision_id IS NOT DISTINCT FROM $7
+                AND attempt.status IN ('claimed','running','finalizing','waiting')
+                AND claim.run_id=attempt.run_id AND claim.thread_id=attempt.thread_id
+                AND claim.workspace_id=attempt.workspace_id
+                AND claim.root_run_id=attempt.root_run_id
+                AND claim.claim_token=$8 AND claim.claim_epoch=$9
+                AND claim.workspace_lease_epoch=$10
+                AND claim.released_at IS NULL
+                AND claim.expires_at > clock_timestamp()
+                AND lease.thread_id=attempt.thread_id
+                AND lease.expires_at > clock_timestamp()
+              FOR SHARE OF attempt,claim,lease,membership`,
+            [
+              fence.scope.tenantId,
+              input.attemptId,
+              fence.scope.runId,
+              fence.scope.threadId,
+              fence.scope.workspaceId,
+              fence.scope.rootRunId,
+              fence.scope.baseRevisionId ?? null,
+              fence.runClaim.token,
+              fence.runClaim.epoch,
+              fence.workspaceLease.epoch,
+            ],
+          );
+          const actorUserId = actor.rows[0]?.created_by_user_id;
+          if (actorUserId === undefined) return { outcome: "not_authorized" } as const;
+          await client.query("SELECT set_config('app.user_id',$1,true)", [actorUserId]);
+          const context: TrustedRolloutContext = Object.freeze({
+            scope: Object.freeze({
+              tenantId: fence.scope.tenantId,
+              threadId: fence.scope.threadId,
+              runId: fence.scope.runId,
+              attemptId: input.attemptId,
+              agentThreadId: rootAgentThreadId,
+            }),
+            userId: userId(actorUserId),
+            fence: Object.freeze({
+              scope: Object.freeze({ ...fence.scope }),
+              runClaim: Object.freeze({ ...fence.runClaim }),
+              workspaceLease: Object.freeze({ ...fence.workspaceLease }),
+            }),
+          });
+          const opened = await this.openRootStreamLocked(client, {
+            context,
+            workspaceId: fence.scope.workspaceId,
+            rootRunId: fence.scope.rootRunId,
+            compatibility: input.compatibility,
+          });
+          return opened === "created" || opened === "already_exists"
+            ? ({ outcome: "ready", context } as const)
+            : ({ outcome: opened } as const);
+        },
+        { isolationLevel: "SERIALIZABLE" },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "从执行 claim 打开 Runtime Rollout stream");
+    }
+  }
+
   async openRootStream(
     input: OpenRootRolloutInput,
   ): Promise<"created" | "already_exists" | "conflict" | "not_authorized" | "not_found"> {
     assertContext(input.context);
     assertIdentifier(input.workspaceId, "Workspace ID");
     assertIdentifier(input.rootRunId, "Root Run ID");
-    assertBoundedText(input.compatibility.modelId, "Model ID", 255);
-    for (const [label, hash] of [
-      ["Model compatibility hash", input.compatibility.modelCompatibilityHash],
-      ["Prompt policy hash", input.compatibility.promptPolicyHash],
-      ["Tool schema hash", input.compatibility.toolSchemaHash],
-      ["Skill manifest hash", input.compatibility.skillManifestHash],
-    ] as const) {
-      assertHash(hash, label);
+    if (
+      input.workspaceId !== input.context.fence.scope.workspaceId ||
+      input.rootRunId !== input.context.fence.scope.rootRunId
+    ) {
+      throw new TypeError("Rollout stream 与执行 scope 不匹配");
     }
+    assertCompatibility(input.compatibility);
     try {
       return await withTenantTransaction(
         this.pool,
         { tenantId: input.context.scope.tenantId, userId: input.context.userId },
         async (client) => {
-          if (!(await lockActiveMembership(client, input.context))) return "not_authorized";
-          const params = scopeParams(input.context);
-          const inserted = await client.query(
-            `INSERT INTO runtime_rollout_streams(
-               tenant_id, thread_id, run_id, attempt_id, workspace_id, root_run_id,
-               agent_thread_id, agent_kind, model_id, model_compatibility_hash,
-               prompt_policy_hash, tool_schema_hash, skill_manifest_hash
-             ) VALUES ($1,$2,$3,$4,$6,$7,$5,'root',$8,$9,$10,$11,$12)
-             ON CONFLICT DO NOTHING`,
-            [
-              ...params,
-              input.workspaceId,
-              input.rootRunId,
-              input.compatibility.modelId,
-              input.compatibility.modelCompatibilityHash,
-              input.compatibility.promptPolicyHash,
-              input.compatibility.toolSchemaHash,
-              input.compatibility.skillManifestHash,
-            ],
-          );
-          if (inserted.rowCount === 1) return "created";
-          const existing = await client.query<{
-            thread_id: string;
-            run_id: string;
-            agent_thread_id: string;
-            workspace_id: string;
-            root_run_id: string;
-            agent_kind: string;
-            model_id: string;
-            model_compatibility_hash: string;
-            prompt_policy_hash: string;
-            tool_schema_hash: string;
-            skill_manifest_hash: string;
-          }>(
-            `SELECT thread_id, run_id, agent_thread_id, workspace_id, root_run_id,
-                    agent_kind, model_id, model_compatibility_hash,
-                    prompt_policy_hash, tool_schema_hash, skill_manifest_hash
-               FROM runtime_rollout_streams
-              WHERE tenant_id=$1 AND attempt_id=$2`,
-            [input.context.scope.tenantId, input.context.scope.attemptId],
-          );
-          const row = existing.rows[0];
-          if (row === undefined) return "not_found";
-          return row.thread_id === input.context.scope.threadId &&
-            row.run_id === input.context.scope.runId &&
-            row.agent_thread_id === input.context.scope.agentThreadId &&
-            row.workspace_id === input.workspaceId &&
-            row.root_run_id === input.rootRunId &&
-            row.agent_kind === "root" &&
-            row.model_id === input.compatibility.modelId &&
-            row.model_compatibility_hash === input.compatibility.modelCompatibilityHash &&
-            row.prompt_policy_hash === input.compatibility.promptPolicyHash &&
-            row.tool_schema_hash === input.compatibility.toolSchemaHash &&
-            row.skill_manifest_hash === input.compatibility.skillManifestHash
-            ? "already_exists"
-            : "conflict";
+          if (!(await lockActiveExecutionFence(client, input.context))) return "not_authorized";
+          return await this.openRootStreamLocked(client, input);
         },
       );
     } catch (error) {
       throw mapPersistenceError(error, "打开 Runtime Rollout stream");
     }
+  }
+
+  private async openRootStreamLocked(
+    client: PoolClient,
+    input: OpenRootRolloutInput,
+  ): Promise<"created" | "already_exists" | "conflict" | "not_found"> {
+    const params = scopeParams(input.context);
+    const inserted = await client.query(
+      `INSERT INTO runtime_rollout_streams(
+               tenant_id, thread_id, run_id, attempt_id, workspace_id, root_run_id,
+               agent_thread_id, agent_kind, model_id, model_compatibility_hash,
+               prompt_policy_hash, tool_schema_hash, skill_manifest_hash
+             ) VALUES ($1,$2,$3,$4,$6,$7,$5,'root',$8,$9,$10,$11,$12)
+             ON CONFLICT DO NOTHING`,
+      [
+        ...params,
+        input.workspaceId,
+        input.rootRunId,
+        input.compatibility.modelId,
+        input.compatibility.modelCompatibilityHash,
+        input.compatibility.promptPolicyHash,
+        input.compatibility.toolSchemaHash,
+        input.compatibility.skillManifestHash,
+      ],
+    );
+    if (inserted.rowCount === 1) return "created";
+    const existing = await client.query<{
+      thread_id: string;
+      run_id: string;
+      agent_thread_id: string;
+      workspace_id: string;
+      root_run_id: string;
+      agent_kind: string;
+      model_id: string;
+      model_compatibility_hash: string;
+      prompt_policy_hash: string;
+      tool_schema_hash: string;
+      skill_manifest_hash: string;
+    }>(
+      `SELECT thread_id, run_id, agent_thread_id, workspace_id, root_run_id,
+                    agent_kind, model_id, model_compatibility_hash,
+                    prompt_policy_hash, tool_schema_hash, skill_manifest_hash
+               FROM runtime_rollout_streams
+              WHERE tenant_id=$1 AND attempt_id=$2`,
+      [input.context.scope.tenantId, input.context.scope.attemptId],
+    );
+    const row = existing.rows[0];
+    if (row === undefined) return "not_found";
+    return row.thread_id === input.context.scope.threadId &&
+      row.run_id === input.context.scope.runId &&
+      row.agent_thread_id === input.context.scope.agentThreadId &&
+      row.workspace_id === input.workspaceId &&
+      row.root_run_id === input.rootRunId &&
+      row.agent_kind === "root" &&
+      row.model_id === input.compatibility.modelId &&
+      row.model_compatibility_hash === input.compatibility.modelCompatibilityHash &&
+      row.prompt_policy_hash === input.compatibility.promptPolicyHash &&
+      row.tool_schema_hash === input.compatibility.toolSchemaHash &&
+      row.skill_manifest_hash === input.compatibility.skillManifestHash
+      ? "already_exists"
+      : "conflict";
   }
 
   async append(
@@ -384,7 +586,7 @@ export class PgRuntimeRolloutRepository {
         this.pool,
         { tenantId: input.context.scope.tenantId, userId: input.context.userId },
         async (client) => {
-          if (!(await lockActiveMembership(client, input.context))) {
+          if (!(await lockActiveExecutionFence(client, input.context))) {
             return { outcome: "not_authorized" };
           }
           const params = scopeParams(input.context);
@@ -530,7 +732,7 @@ export class PgRuntimeRolloutRepository {
         this.pool,
         { tenantId: input.context.scope.tenantId, userId: input.context.userId },
         async (client) => {
-          if (!(await lockActiveMembership(client, input.context))) {
+          if (!(await lockActiveExecutionFence(client, input.context))) {
             return { outcome: "not_authorized" };
           }
           const params = scopeParams(input.context);
@@ -752,14 +954,44 @@ export class PgRuntimeRolloutRepository {
         async (client) => {
           const params = scopeParams(input.context);
           const result = await client.query<RecoveryRow>(
-            `WITH authorized_stream AS (
+            `WITH authorized_stream AS MATERIALIZED (
                SELECT stream.*
                  FROM runtime_rollout_streams stream
+                 JOIN execution_attempts attempt
+                   ON attempt.tenant_id=stream.tenant_id
+                  AND attempt.attempt_id=stream.attempt_id
+                 JOIN run_claims claim
+                   ON claim.tenant_id=attempt.tenant_id
+                  AND claim.attempt_id=attempt.attempt_id
+                 JOIN workspace_write_leases lease
+                   ON lease.tenant_id=attempt.tenant_id
+                  AND lease.workspace_id=attempt.workspace_id
+                  AND lease.root_run_id=attempt.root_run_id
+                  AND lease.epoch=claim.workspace_lease_epoch
+                 JOIN threads thread_state
+                   ON thread_state.tenant_id=attempt.tenant_id
+                  AND thread_state.id=attempt.thread_id
                  JOIN memberships membership
                    ON membership.tenant_id=stream.tenant_id
-                  AND membership.user_id=$6 AND membership.status='active'
+                  AND membership.user_id=thread_state.created_by_user_id
+                  AND membership.status='active'
                 WHERE stream.tenant_id=$1 AND stream.thread_id=$2 AND stream.run_id=$3
                   AND stream.attempt_id=$4 AND stream.agent_thread_id=$5
+                  AND stream.workspace_id=$7 AND stream.root_run_id=$8
+                  AND attempt.thread_id=$2 AND attempt.run_id=$3
+                  AND attempt.workspace_id=$7 AND attempt.root_run_id=$8
+                  AND attempt.base_revision_id IS NOT DISTINCT FROM $9
+                  AND attempt.status IN ('claimed','running','finalizing','waiting')
+                  AND thread_state.created_by_user_id=$6
+                  AND claim.run_id=attempt.run_id AND claim.thread_id=attempt.thread_id
+                  AND claim.workspace_id=attempt.workspace_id
+                  AND claim.root_run_id=attempt.root_run_id
+                  AND claim.claim_token=$10 AND claim.claim_epoch=$11
+                  AND claim.workspace_lease_epoch=$12 AND claim.released_at IS NULL
+                  AND claim.expires_at > clock_timestamp()
+                  AND lease.thread_id=attempt.thread_id
+                  AND lease.expires_at > clock_timestamp()
+                FOR SHARE OF attempt,claim,lease,membership
              ), latest_checkpoint AS (
                SELECT checkpoint.*
                  FROM runtime_rollout_checkpoints checkpoint
@@ -810,7 +1042,16 @@ export class PgRuntimeRolloutRepository {
                     ), '[]'::jsonb) AS tail_entries
                FROM authorized_stream stream
                LEFT JOIN latest_checkpoint checkpoint ON true`,
-            [...params, input.context.userId],
+            [
+              ...params,
+              input.context.userId,
+              input.context.fence.scope.workspaceId,
+              input.context.fence.scope.rootRunId,
+              input.context.fence.scope.baseRevisionId ?? null,
+              input.context.fence.runClaim.token,
+              input.context.fence.runClaim.epoch,
+              input.context.fence.workspaceLease.epoch,
+            ],
           );
           const row = result.rows[0];
           if (row === undefined) return { outcome: "not_found" };
@@ -853,7 +1094,7 @@ export class PgRuntimeRolloutRepository {
             tail: Object.freeze(row.tail_entries.map((entry) => mapEntry(entry as EntryRow))),
           });
         },
-        { readOnly: true },
+        { isolationLevel: "REPEATABLE READ" },
       );
     } catch (error) {
       throw mapPersistenceError(error, "恢复 Runtime Rollout");

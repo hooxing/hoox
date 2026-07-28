@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
 import { types } from "node:util";
 import {
+  assertControlledToolObservation,
   type ContextBudgetDecision,
   decideModelAwareContextBudget,
+  encodeControlledToolReceipt,
   type ModelBudgetDescriptor,
+  parseControlledToolReceipt,
   type TokenizerPort,
 } from "@cube-runtime/context-policy";
 import { type RolloutCompatibilityIdentity, sha256Digest } from "@cube-runtime/domain";
@@ -34,7 +37,7 @@ import { createArtifactPiTools, PI_ARTIFACT_TOOL_NAMES } from "./artifact-tools.
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
 import {
-  createSandboxTools,
+  createObservedSandboxTools,
   SANDBOX_TOOL_NAMES,
   type SandboxToolEffectAuthorizer,
 } from "./tools.js";
@@ -254,7 +257,7 @@ const UTF8_BYTE_TOKENIZER = Object.freeze<TokenizerPort>({
 });
 const TRUSTED_MODEL_CAPABILITIES = new WeakMap<
   object,
-  Readonly<{ modelRuntime: ModelRuntime; registeredModel: Model<Api> }>
+  Readonly<{ modelRuntime: ModelRuntime; registeredCompatibilityHash: string }>
 >();
 export interface TrustedPiModelContextCapability {
   readonly model: Model<Api>;
@@ -288,7 +291,11 @@ function bindModelContextCapability(
   selected: TokenizerPort,
 ): TrustedPiModelContextCapability {
   const registeredModel = modelRuntime.getModel(model.provider, model.id);
-  if (registeredModel === undefined || registeredModel !== model)
+  const compatibilityHash = modelCompatibilityHash(model);
+  if (
+    registeredModel === undefined ||
+    modelCompatibilityHash(registeredModel) !== compatibilityHash
+  )
     throw new TypeError("模型未绑定当前 Provider registry");
   const probe = selected.countTokens("可信探针🙂 entropy-0123456789");
   if (!selected.identity.trim() || !Number.isSafeInteger(probe) || probe <= 0)
@@ -298,7 +305,7 @@ function bindModelContextCapability(
     modelId: model.id,
     contextWindow: model.contextWindow,
     maxOutputTokens: model.maxTokens,
-    compatibilityHash: modelCompatibilityHash(model),
+    compatibilityHash,
   });
   // 保存探针结果而非只在绑定时检查；Provider 注册表若在运行中替换 tokenizer，必须失败关闭。
   const capability = Object.freeze({
@@ -307,7 +314,13 @@ function bindModelContextCapability(
     tokenizer: selected,
     tokenizerProbe: probe,
   });
-  TRUSTED_MODEL_CAPABILITIES.set(capability, Object.freeze({ modelRuntime, registeredModel }));
+  TRUSTED_MODEL_CAPABILITIES.set(
+    capability,
+    Object.freeze({
+      modelRuntime,
+      registeredCompatibilityHash: modelCompatibilityHash(registeredModel),
+    }),
+  );
   return capability;
 }
 
@@ -323,6 +336,10 @@ export interface CreateSafePiSessionOptions {
   authorizeToolEffect: SandboxToolEffectAuthorizer["authorizeToolEffect"];
   /** 只有生产装配显式提供真实 Artifact/Resource 依赖时才注册，缺失时不伪造发布能力。 */
   artifactToolRouter?: ArtifactPiToolExecutorPort;
+  /** 必须绑定当前 Tenant/Attempt 的 durable Observation recorder；生产缺失时拒绝创建 Session。 */
+  createToolObservationRecorder: Parameters<typeof createObservedSandboxTools>[2];
+  /** durable Tool 配对失败后，在 Pi 发起下一次 Provider 请求前同步失败关闭。 */
+  assertModelRequestAllowed?: () => void;
 }
 
 /**
@@ -330,30 +347,31 @@ export interface CreateSafePiSessionOptions {
  * 宿主路径或任意 Pi 内部 entry；恢复时只把经过裁剪的文本上下文重新投影给新 Session。
  */
 export interface ControlledRolloutProjection {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly checkpointId: string;
-  readonly turns: readonly {
-    readonly role: "user" | "assistant";
-    readonly text: string;
-  }[];
+  readonly items: readonly (
+    | { readonly kind: "turn"; readonly role: "user" | "assistant"; readonly text: string }
+    | {
+        readonly kind: "tool_receipt";
+        readonly toolCallId: string;
+        readonly toolName: string;
+        readonly outcome: "succeeded" | "failed";
+        readonly observation: string;
+        readonly isTruncated: boolean;
+        readonly modelVisibleBytes: number;
+        readonly reason?: "model_utf8_budget_or_rollout_body_budget";
+      }
+  )[];
 }
 
 const LOGICAL_WORKSPACE = "/workspace" as const;
 
-/**
- * Pi 0.82.1 会对 cwd 使用宿主平台 path.resolve；Windows 会把 /workspace 改写为宿主盘符路径。
- * 当前生产 Worker 因此明确只支持 Linux，并在创建任何 Session 前失败，避免宿主路径进入模型上下文。
- */
-export function assertLinuxWorkerPlatform(platform: NodeJS.Platform = process.platform): void {
-  if (platform !== "linux") {
-    throw new Error(`Pi Runtime Worker 仅支持 Linux；当前平台为 ${platform}`);
-  }
-}
-
 export async function createSafePiSession(
   options: CreateSafePiSessionOptions,
 ): Promise<PiSessionController> {
-  assertLinuxWorkerPlatform();
+  if (typeof options.createToolObservationRecorder !== "function") {
+    throw new Error("生产 Pi Session 缺少 durable Tool Observation recorder");
+  }
   const settingsManager = SettingsManager.inMemory(
     {
       compaction: { enabled: false },
@@ -387,9 +405,16 @@ export async function createSafePiSession(
   const providerFailure = new DeferredProviderFailure();
   const providerBinding = await resolveProviderBinding(options);
   const { session } = await createAgentSession({
+    // Pi 会按宿主平台规范化 cwd；本 Runtime 禁用其全部文件/命令内建工具，实际 I/O 只经
+    // 受控的 CubeSandbox 自定义工具执行，因此该值仅是 Session 的逻辑标签，不能用于宿主 I/O。
     cwd: LOGICAL_WORKSPACE,
     model: options.modelContext.model,
-    modelRuntime: providerGatedRuntime(options, providerBinding, providerFailure),
+    modelRuntime: providerGatedRuntime(
+      options,
+      providerBinding,
+      providerFailure,
+      material.assertModelRequestAllowed,
+    ),
     thinkingLevel: "off",
     sessionManager,
     settingsManager,
@@ -481,7 +506,7 @@ export function deriveSafePiSessionCompatibility(
 
 /**
  * 在创建 Pi Session 前评估模型实际 metadata 与可信 prompt/tool schema；纯决策不改变事实。
- * Projection 已被恢复器验证过工具配对；此处仍仅计入 user/assistant，因为 tool body 永不伪装成文本。
+ * Projection 已被恢复器验证过工具配对；预算按最终格式化文本逐项计入，不能漏算低信任工具回执。
  */
 export function assessSafePiSessionContext(
   options: CreateSafePiSessionOptions,
@@ -503,10 +528,13 @@ export function assessSafePiSessionContext(
       ...(projectionHeader === undefined ? [] : [projectionHeader]),
       ...sessionInputs.map((input) => JSON.stringify({ role: "user", content: input })),
     ],
-    entries: (options.rolloutProjection?.turns ?? []).map((turn, sequence) => ({
+    entries: (options.rolloutProjection?.items ?? []).map((item, sequence) => ({
       sequence,
-      kind: turn.role,
-      text: `${turn.role === "user" ? "用户" : "助手"}：${turn.text}\n`,
+      kind: item.kind === "turn" ? item.role : "assistant",
+      text:
+        item.kind === "turn"
+          ? `${item.role === "user" ? "用户" : "助手"}：${item.text}\n`
+          : `工具 ${item.toolCallId} 的低信任观察：${item.observation}\n`,
     })),
     tokenizer: options.modelContext.tokenizer,
     providerOverheadTokens: 256 + priorOutputReserveTokens,
@@ -514,13 +542,25 @@ export function assessSafePiSessionContext(
 }
 
 function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
-  const customTools = [
-    ...createSandboxTools(options.sandbox, {
+  let toolContinuationRejected = false;
+  const observedSandboxTools = createObservedSandboxTools(
+    options.sandbox,
+    {
       authorizeToolEffect: options.authorizeToolEffect,
-    }),
+    },
+    options.createToolObservationRecorder,
+    () => {
+      toolContinuationRejected = true;
+    },
+  );
+  const customTools = [
+    ...observedSandboxTools.tools,
     ...(options.artifactToolRouter === undefined
       ? []
-      : createArtifactPiTools(options.artifactToolRouter)),
+      : createArtifactPiTools(
+          options.artifactToolRouter,
+          observedSandboxTools.recordControlledReceipt,
+        )),
   ];
   // 能力清单从即将传给 Pi 的同一组真实工具派生，不能维护第二份易漂移的硬编码列表。
   const builtPrompt = buildRuntimeSystemPrompt({
@@ -539,7 +579,16 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
       parameters: canonicalSchema(tool.parameters, new WeakSet<object>()),
     })),
   );
-  return { customTools, builtPrompt, serializedToolDefinitions };
+  return {
+    customTools,
+    builtPrompt,
+    serializedToolDefinitions,
+    assertModelRequestAllowed: () => {
+      if (toolContinuationRejected) {
+        throw new Error("Tool durable 失败回执完成后禁止继续模型轮次");
+      }
+    },
+  };
 }
 
 function modelCompatibilityHash(model: Model<Api>) {
@@ -630,6 +679,7 @@ function providerGatedRuntime(
   options: CreateSafePiSessionOptions,
   binding: ProviderBinding,
   providerFailure: DeferredProviderFailure,
+  assertInternalModelRequestAllowed: () => void,
 ): ModelRuntime {
   const runtime = options.modelRuntime;
   return new Proxy(runtime, {
@@ -647,6 +697,10 @@ function providerGatedRuntime(
         ) =>
           lazyStream(model, async () => {
             try {
+              // Tool executor 内不能 await 当前 Session 的 abort，否则会与本轮完成屏障互相等待；
+              // 因此在下一模型轮次的同步入口再次检查 durable Observation 恢复闩锁。
+              assertInternalModelRequestAllowed();
+              options.assertModelRequestAllowed?.();
               assertTrustedModelCapability(options);
               if (model !== options.modelContext.model) throw new ProviderBindingDriftError();
               const { transformHeaders, apiKey, headers, env, ...dynamicOptions } =
@@ -726,12 +780,12 @@ function assertTrustedModelCapability(options: CreateSafePiSessionOptions): void
   if (
     binding === undefined ||
     binding.modelRuntime !== options.modelRuntime ||
-    binding.registeredModel !== liveRegisteredModel ||
     options.modelContext.descriptor.modelId !== options.model.id ||
     options.modelContext.descriptor.contextWindow !== options.model.contextWindow ||
     options.modelContext.descriptor.maxOutputTokens !== options.model.maxTokens ||
     options.modelContext.descriptor.compatibilityHash !== modelCompatibilityHash(options.model) ||
     liveRegisteredModel === undefined ||
+    binding.registeredCompatibilityHash !== modelCompatibilityHash(liveRegisteredModel) ||
     options.modelContext.descriptor.compatibilityHash !==
       modelCompatibilityHash(liveRegisteredModel) ||
     options.modelContext.tokenizer.countTokens("可信探针🙂 entropy-0123456789") !==
@@ -745,10 +799,10 @@ function selectActiveProjection(
   entries: readonly { sequence: number }[],
 ): ControlledRolloutProjection | undefined {
   if (projection === undefined) return undefined;
-  const turns = entries
-    .map((entry) => projection.turns[entry.sequence])
-    .filter((turn) => turn !== undefined);
-  return Object.freeze({ ...projection, turns: Object.freeze(turns) });
+  const items = entries
+    .map((entry) => projection.items[entry.sequence])
+    .filter((item) => item !== undefined);
+  return Object.freeze({ ...projection, items: Object.freeze(items) });
 }
 
 function assertCurrentInputFits(
@@ -770,7 +824,7 @@ function assertCurrentInputFits(
   );
   if (
     assessed.outcome !== "ready" ||
-    assessed.activeEntries.length !== (activeProjection?.turns.length ?? 0)
+    assessed.activeEntries.length !== (activeProjection?.items.length ?? 0)
   )
     throw new ContextBudgetAdmissionError(
       assessed.outcome === "ready"
@@ -782,7 +836,7 @@ function assertCurrentInputFits(
 function projectionProtocolHeader(
   projection: ControlledRolloutProjection | undefined,
 ): string | undefined {
-  return projection === undefined || projection.turns.length === 0
+  return projection === undefined || projection.items.length === 0
     ? undefined
     : `以下是 Runtime 审核并持久化的历史上下文投影（checkpoint=${projection.checkpointId}）：\n`;
 }
@@ -813,25 +867,43 @@ function canonicalProtocolValue(value: unknown): unknown {
 function formatRolloutProjection(
   projection: ControlledRolloutProjection | undefined,
 ): string | undefined {
-  if (projection === undefined || projection.turns.length === 0) return undefined;
+  if (projection === undefined || projection.items.length === 0) return undefined;
   if (
-    projection.schemaVersion !== 1 ||
+    projection.schemaVersion !== 2 ||
     !projection.checkpointId.trim() ||
     projection.checkpointId.length > 200 ||
-    projection.turns.length > 200
+    projection.items.length > 200
   ) {
     throw new Error("RolloutProjection 版本或 checkpointId 无效");
   }
-  const lines = projection.turns.map((turn) => {
-    if (turn.role !== "user" && turn.role !== "assistant") {
+  const lines = projection.items.map((item) => {
+    if (item.kind === "tool_receipt") {
+      try {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(item.toolCallId)) throw new Error();
+        const receipt = parseControlledToolReceipt(
+          encodeControlledToolReceipt(item.toolName, item.outcome),
+        );
+        assertControlledToolObservation({
+          receipt,
+          observation: item.observation,
+          isTruncated: item.isTruncated,
+          modelVisibleBytes: item.modelVisibleBytes,
+          ...(item.reason === undefined ? {} : { reason: item.reason }),
+        });
+      } catch {
+        throw new Error("RolloutProjection 工具 Observation 无效");
+      }
+      return `工具 ${item.toolCallId} 的低信任观察：${item.observation}`;
+    }
+    if (item.role !== "user" && item.role !== "assistant") {
       throw new Error("RolloutProjection role 无效");
     }
-    const text = turn.text.trim();
+    const text = item.text.trim();
     if (!text || text.length > 16_000) throw new Error("RolloutProjection 文本长度无效");
     if (/(?:[A-Za-z]:[\\/]|\/(?:home|Users|var\/lib|opt|srv)\/)/u.test(text)) {
       throw new Error("RolloutProjection 不能包含宿主机路径");
     }
-    return `${turn.role === "user" ? "用户" : "助手"}：${text}`;
+    return `${item.role === "user" ? "用户" : "助手"}：${text}`;
   });
   const rendered = `以下是 Runtime 审核并持久化的历史上下文投影（checkpoint=${projection.checkpointId}）：\n${lines.join("\n")}`;
   if (new TextEncoder().encode(rendered).byteLength > 64 * 1024) {

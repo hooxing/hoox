@@ -41,6 +41,9 @@ export interface BlobCommitSnapshot {
   readonly retiredPhysicalObjectKey?: string;
   readonly referenceId?: string;
   readonly cleanupTarget?: "staging";
+  readonly expectedPurpose?: "workspace" | "resource" | "artifact" | "trace" | "preview";
+  readonly expectedSha256?: string;
+  readonly expectedSize?: number;
 }
 
 export type BlobCommitEvent =
@@ -376,8 +379,17 @@ function applyTransition(
   throw new BlobCommitTransitionError(`不允许从 ${current.status} 应用事件 ${event.type}`);
 }
 
-function base(current: BlobCommitSnapshot): Pick<BlobCommitSnapshot, "operationId" | "scope"> {
-  return { operationId: current.operationId, scope: current.scope };
+function base(
+  current: BlobCommitSnapshot,
+): Pick<BlobCommitSnapshot, "operationId" | "scope"> &
+  Partial<Pick<BlobCommitSnapshot, "expectedPurpose" | "expectedSha256" | "expectedSize">> {
+  return {
+    operationId: current.operationId,
+    scope: current.scope,
+    ...(current.expectedPurpose === undefined ? {} : { expectedPurpose: current.expectedPurpose }),
+    ...(current.expectedSha256 === undefined ? {} : { expectedSha256: current.expectedSha256 }),
+    ...(current.expectedSize === undefined ? {} : { expectedSize: current.expectedSize }),
+  };
 }
 
 function requireStaged(current: BlobCommitSnapshot): StagedBlobRef {

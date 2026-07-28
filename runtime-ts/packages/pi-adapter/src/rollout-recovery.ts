@@ -1,8 +1,12 @@
 import { createHash } from "node:crypto";
 import {
+  assertControlledToolObservation,
   type ContextBudgetCompatibilityDecision,
   type ContextBudgetDecision,
+  type ControlledToolReceipt,
   compareRecordedContextBudget,
+  encodeControlledToolReceipt,
+  parseControlledToolReceipt,
   type RecordedContextBudgetIdentity,
 } from "@cube-runtime/context-policy";
 import {
@@ -108,9 +112,11 @@ export function projectLoadedRuntimeRecovery(
   loaded: Extract<RuntimeRolloutLoadRecoveryResult, { readonly outcome: "loaded" }>,
 ): RuntimeRecoveryProjectionResult {
   const checkpoint = loaded.checkpoint;
-  const turns = checkpoint === undefined ? [] : checkpointTurns(checkpoint);
+  const items = checkpoint === undefined ? [] : checkpointItems(checkpoint);
   let expectedSequence = checkpoint === undefined ? 0 : checkpoint.throughSequence + 1;
-  let pendingToolCall: { readonly id: string; readonly sequence: number } | undefined;
+  let pendingToolCall:
+    | { readonly id: string; readonly sequence: number; readonly toolName: string }
+    | undefined;
   let terminalSeen = false;
   // 不排序：数据库结果的顺序本身属于恢复协议，乱序输入必须失败关闭。
   for (const entry of loaded.tail) {
@@ -125,17 +131,19 @@ export function projectLoadedRuntimeRecovery(
     expectedSequence += 1;
     if (pendingToolCall !== undefined) {
       if (entry.kind !== "tool_result" || entry.toolCallId !== pendingToolCall.id) malformed();
+      items.push(recoverToolObservation(entry, pendingToolCall.toolName));
       pendingToolCall = undefined;
       continue;
     }
     if (entry.kind === "tool_call") {
       if (!validCallId(entry.toolCallId)) malformed();
-      pendingToolCall = { id: entry.toolCallId, sequence: entry.sequence };
+      const toolName = toolCallName(entry);
+      pendingToolCall = { id: entry.toolCallId, sequence: entry.sequence, toolName };
       continue;
     }
     if (entry.kind === "tool_result") malformed();
     if (entry.kind === "user" || entry.kind === "assistant") {
-      turns.push({ role: entry.kind, text: entryText(entry) });
+      items.push({ kind: "turn", role: entry.kind, text: entryText(entry) });
       continue;
     }
     if (entry.kind !== "waiting" && entry.kind !== "terminal") malformed();
@@ -152,9 +160,9 @@ export function projectLoadedRuntimeRecovery(
   return Object.freeze({
     outcome: "ready",
     projection: Object.freeze({
-      schemaVersion: 1,
+      schemaVersion: 2,
       checkpointId: checkpoint?.checkpointId ?? "rollout-origin",
-      turns: Object.freeze(turns.map((turn) => Object.freeze({ ...turn }))),
+      items: Object.freeze(items.map((item) => Object.freeze({ ...item }))),
     }),
   });
 }
@@ -170,6 +178,7 @@ function safeSessionOptions(
     modelRuntime: options.modelRuntime,
     sandbox: options.sandbox,
     authorizeToolEffect: options.authorizeToolEffect,
+    createToolObservationRecorder: options.createToolObservationRecorder,
     ...(options.untrustedPromptContent === undefined
       ? {}
       : { untrustedPromptContent: options.untrustedPromptContent }),
@@ -179,9 +188,117 @@ function safeSessionOptions(
   };
 }
 
-function checkpointTurns(
+function recoverToolObservation(
+  entry: RuntimeRolloutEntry,
+  predecessorToolName: string,
+): Extract<ControlledRolloutProjection["items"][number], { kind: "tool_receipt" }> {
+  if (
+    !validCallId(entry.toolCallId) ||
+    entry.blob === undefined ||
+    (!entry.isTruncated && entry.isTruncated !== false) ||
+    !isRecord(entry.body) ||
+    entry.body.schemaVersion !== 2 ||
+    !hasExactKeys(entry.body, [
+      "observation",
+      "receipt",
+      "receiptBytes",
+      "receiptSha256",
+      "schemaVersion",
+      "toolName",
+      "traceBlob",
+      "truncation",
+    ]) ||
+    entry.body.toolName !== predecessorToolName ||
+    typeof entry.body.observation !== "string" ||
+    !isRecord(entry.body.traceBlob) ||
+    !hasExactKeys(entry.body.traceBlob, ["referenceId"]) ||
+    entry.body.traceBlob.referenceId !== entry.blob.referenceId ||
+    entry.body.receiptSha256 !== entry.blob.sha256 ||
+    entry.body.receiptBytes !== entry.blob.size ||
+    !isRecord(entry.body.receipt) ||
+    !hasExactKeys(entry.body.receipt, [
+      "message",
+      "outcome",
+      "schemaVersion",
+      "toolName",
+      "trust",
+    ]) ||
+    !isRecord(entry.body.truncation) ||
+    !hasExactKeys(
+      entry.body.truncation,
+      entry.isTruncated
+        ? ["isTruncated", "modelVisibleBytes", "reason"]
+        : ["isTruncated", "modelVisibleBytes"],
+    ) ||
+    typeof entry.body.truncation.modelVisibleBytes !== "number" ||
+    !Number.isSafeInteger(entry.body.truncation.modelVisibleBytes) ||
+    entry.body.truncation.modelVisibleBytes < 0 ||
+    entry.body.truncation.isTruncated !== entry.isTruncated
+  )
+    malformed();
+  // PostgreSQL jsonb 不保留对象键顺序；先逐键白名单，再按协议顺序重建固定编码。
+  const receiptText = JSON.stringify({
+    schemaVersion: entry.body.receipt.schemaVersion,
+    trust: entry.body.receipt.trust,
+    toolName: entry.body.receipt.toolName,
+    outcome: entry.body.receipt.outcome,
+    message: entry.body.receipt.message,
+  });
+  let receipt: ControlledToolReceipt;
+  try {
+    receipt = parseControlledToolReceipt(receiptText);
+    const receiptBytes = Buffer.byteLength(receiptText, "utf8");
+    const receiptSha256 = createHash("sha256").update(receiptText, "utf8").digest("hex");
+    if (receiptBytes !== entry.blob.size || receiptSha256 !== entry.blob.sha256) malformed();
+    assertControlledToolObservation({
+      receipt,
+      observation: entry.body.observation,
+      isTruncated: entry.isTruncated,
+      modelVisibleBytes: entry.body.truncation.modelVisibleBytes,
+      ...(typeof entry.body.truncation.reason === "string"
+        ? { reason: entry.body.truncation.reason }
+        : {}),
+    });
+  } catch {
+    malformed();
+  }
+  if (receipt.toolName !== predecessorToolName) malformed();
+  return {
+    kind: "tool_receipt",
+    toolCallId: entry.toolCallId,
+    toolName: predecessorToolName,
+    outcome: receipt.outcome,
+    // 恢复内容从固定 schema 重建，不信任 Rollout 中可被篡改的任意正文。
+    observation: entry.isTruncated
+      ? entry.body.observation
+      : encodeControlledToolReceipt(receipt.toolName, receipt.outcome),
+    isTruncated: entry.isTruncated,
+    modelVisibleBytes: entry.body.truncation.modelVisibleBytes,
+    ...(typeof entry.body.truncation.reason === "string"
+      ? { reason: "model_utf8_budget_or_rollout_body_budget" as const }
+      : {}),
+  };
+}
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function toolCallName(entry: RuntimeRolloutEntry): string {
+  if (
+    !isRecord(entry.body) ||
+    !hasExactKeys(entry.body, ["toolName"]) ||
+    typeof entry.body.toolName !== "string"
+  )
+    malformed();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(entry.body.toolName)) malformed();
+  return entry.body.toolName;
+}
+
+function checkpointItems(
   checkpoint: RuntimeRolloutCheckpoint,
-): Array<{ role: "user" | "assistant"; text: string }> {
+): ControlledRolloutProjection["items"][number][] {
   if (
     !Number.isSafeInteger(checkpoint.windowStartSequence) ||
     !Number.isSafeInteger(checkpoint.throughSequence) ||
@@ -194,21 +311,22 @@ function checkpointTurns(
   validateReplacementHistory(checkpoint);
   const projection = checkpoint.projection;
   if (
-    projection.schemaVersion !== 1 ||
+    projection.schemaVersion !== 2 ||
     projection.checkpointId !== checkpoint.checkpointId ||
-    !Array.isArray(projection.turns)
+    !Array.isArray(projection.items)
   ) {
     malformed();
   }
-  return projection.turns.map((turn) => {
+  return projection.items.map((item) => {
     if (
-      !isRecord(turn) ||
-      (turn.role !== "user" && turn.role !== "assistant") ||
-      typeof turn.text !== "string"
+      !isRecord(item) ||
+      item.kind !== "turn" ||
+      (item.role !== "user" && item.role !== "assistant") ||
+      typeof item.text !== "string"
     ) {
       malformed();
     }
-    return { role: turn.role, text: boundedText(turn.text) };
+    return { kind: "turn", role: item.role, text: boundedText(item.text) };
   });
 }
 

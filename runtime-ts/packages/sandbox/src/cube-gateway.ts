@@ -170,6 +170,15 @@ export class CubeSandboxGateway implements SandboxGateway {
     return new CubeSandboxHandle(sandbox, this.defaultOperationTimeoutMs);
   }
 
+  /** 生产 readiness 使用真实鉴权调用；不创建 Sandbox，也不返回上游响应正文。 */
+  async probe(): Promise<void> {
+    await settledOperation(
+      "探测 CubeSandbox",
+      () => this.sdk.listV2(this.config(this.defaultOperationTimeoutMs)),
+      { timeoutMs: this.defaultOperationTimeoutMs },
+    );
+  }
+
   /**
    * 只有持有可信 Session capability 的装配层才能取得 Workspace 文件能力。
    * 调用方不能注入根目录、Sandbox URL 或宿主路径。

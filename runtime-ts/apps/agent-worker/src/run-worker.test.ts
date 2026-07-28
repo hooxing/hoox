@@ -44,6 +44,7 @@ function harness(
   const sandboxes = new FakeSandboxRegistry();
   const factory = new FakeSessionFactory(sessions);
   const cancellation = new FakeCancellationPort();
+  const shutdown = new AbortController();
   const artifacts = new FakeArtifactPublication();
   const clock = new FakeClock();
   const metrics = new FakeRecoveryMetrics();
@@ -55,6 +56,7 @@ function harness(
       orphanSandboxes: sandboxes,
       sessions: factory,
       cancellation,
+      shutdownSignal: shutdown.signal,
       artifacts,
       clock,
       metrics,
@@ -75,6 +77,7 @@ function harness(
     sandboxes,
     factory,
     cancellation,
+    shutdown,
     artifacts,
     clock,
     metrics,
@@ -99,10 +102,10 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     const h = harness([new ScriptedAgentSession(successfulEvents)], {
       ...seed,
       rolloutProjection: {
-        schemaVersion: 1,
+        schemaVersion: 2,
         checkpointId: "emoji-byte-boundary",
         // JS code unit 小于旧 16,000 限制，但 UTF-8 字节为 20,000，必须统一拒绝。
-        turns: [{ role: "user", text: oversized }],
+        items: [{ kind: "turn", role: "user", text: oversized }],
       },
     });
     await expect(h.worker.execute(h.scope)).resolves.toEqual({
@@ -111,6 +114,23 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     });
     expect(h.sandboxes.acquireCount).toBe(0);
     expect(h.factory.createCount).toBe(0);
+  });
+
+  it("Session 报告 Tool Observation 未收敛时，不能进入 Run succeeded", async () => {
+    const session = new ScriptedAgentSession([{ type: "agent.started" }], {
+      kind: "recovery_required",
+      code: "PERSISTENCE_UNAVAILABLE",
+    });
+    const h = harness([session], fakeSeed("tool-observation-recovery"));
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "PERSISTENCE_UNAVAILABLE",
+    });
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("running");
+    expect(record.attempt).toMatchObject({ status: "recovery_required" });
+    expect(record.mutations.has("attempt-1/final/succeeded")).toBe(false);
   });
 
   it("Revision、Run succeeded、Attempt 终态和双栅栏释放在同一幂等事务完成", async () => {
@@ -203,6 +223,28 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
     h.cancellation.cancel(h.scope);
     await expect(first).resolves.toEqual({ outcome: "cancelled" });
+  });
+
+  it("进程停机中止在途 Session，但只提交恢复事实而不伪造用户 cancelled", async () => {
+    const blocked = new BlockingAgentSession();
+    const h = harness([blocked], fakeSeed("worker-shutdown"));
+    const commands: RuntimeMutation[] = [];
+    h.persistence.afterMutation = (command) => commands.push(command);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.createCount === 1);
+
+    h.shutdown.abort("test_worker_shutdown");
+
+    await expect(execution).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "WORKER_SHUTDOWN",
+    });
+    const record = h.persistence.record(h.scope);
+    expect(blocked.abortCount).toBeGreaterThanOrEqual(1);
+    expect(record.run.status).toBe("running");
+    expect(record.attempt).toMatchObject({ status: "recovery_required" });
+    expect(commands.some((command) => command.nextRunStatus === "cancelled")).toBe(false);
+    expect(record.mutations.has("attempt-1/final/cancelled")).toBe(false);
   });
 
   it.each(["run", "workspace"] as const)(
@@ -933,11 +975,11 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
   it("waiting 原子提交 checkpoint 与 RolloutProjection，回答后新 Session 用 prompt 启动模型", async () => {
     const projection = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       checkpointId: "checkpoint-waiting",
-      turns: [
-        { role: "user" as const, text: "生成报告" },
-        { role: "assistant" as const, text: "请补充范围" },
+      items: [
+        { kind: "turn" as const, role: "user" as const, text: "生成报告" },
+        { kind: "turn" as const, role: "assistant" as const, text: "请补充范围" },
       ],
     };
     const waiting = new ScriptedAgentSession([{ type: "agent.started" }], {
@@ -1281,9 +1323,9 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     });
     if (claimed.outcome !== "claimed") throw new Error("测试 claim 失败");
     const projection = {
-      schemaVersion: 1 as const,
+      schemaVersion: 2 as const,
       checkpointId: "projection-receipt",
-      turns: [{ role: "user" as const, text: "继续" }],
+      items: [{ kind: "turn" as const, role: "user" as const, text: "继续" }],
     };
     const applied = await h.persistence.mutate(
       signedMutation({

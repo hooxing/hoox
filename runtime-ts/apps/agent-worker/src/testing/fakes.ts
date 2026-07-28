@@ -1088,7 +1088,7 @@ export function fakeSeed(prefix = "worker"): FakeSeed {
     run: createRun({ id: runId(`run-${prefix}`), thread, now }),
     workspace: createWorkspace({ id: workspaceId(`workspace-${prefix}`), thread, now }),
     input: "执行任务",
-    rolloutProjection: { schemaVersion: 1, checkpointId: `checkpoint-${prefix}`, turns: [] },
+    rolloutProjection: { schemaVersion: 2, checkpointId: `checkpoint-${prefix}`, items: [] },
   };
 }
 

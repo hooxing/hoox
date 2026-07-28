@@ -36,6 +36,7 @@
 | [ADR-0028](0028-cubesandbox-workspace-adapter-boundary.md) | CubeSandbox Workspace 可信适配边界 | 已接受 | 2026-07-28 |
 | [ADR-0029](0029-trusted-prompt-and-session-capability-manifest.md) | 可信 Prompt 分层与 Session 能力清单 | 已接受 | 2026-07-28 |
 | [ADR-0030](0030-runtime-rollout-checkpoint-fact-source.md) | Runtime Rollout 与 Checkpoint 事实源 | 已接受 | 2026-07-28 |
+| [ADR-0033](0033-waiting-sandbox-recovery.md) | waiting 与 SandboxSession 恢复安全边界 | 已接受 | 2026-07-28 |
 | [ADR-0034](0034-m4-runtime-dependency-build-gate.md) | M4 黑盒运行时依赖构建门禁 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录

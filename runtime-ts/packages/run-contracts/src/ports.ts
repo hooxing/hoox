@@ -181,6 +181,26 @@ export type RuntimeEventV1 =
     }
   | {
       readonly schemaVersion: 1;
+      readonly kind: "sandbox_recovery_decided";
+      readonly sequence: number;
+      readonly payload:
+        | {
+            readonly decision: "sandbox_reused";
+            readonly registryId: string;
+            readonly generation: number;
+          }
+        | {
+            readonly decision: "sandbox_rebuilt";
+            readonly reason:
+              | "missing"
+              | "ttl_expired"
+              | "generation_mismatch"
+              | "scope_mismatch"
+              | "base_revision_mismatch";
+          };
+    }
+  | {
+      readonly schemaVersion: 1;
       readonly kind: "artifact_correction_requested";
       readonly sequence: number;
       readonly payload: {

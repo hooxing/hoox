@@ -11,12 +11,13 @@
 ## 决策
 
 1. Budget 仅由实际 Pi Model metadata 投影或受信 `ModelBudgetDescriptor` 派生：`modelId`、`contextWindow`、`maxOutputTokens`、`compatibilityHash`。窗口、最大输出必须是正安全整数，最大输出不可大于窗口。
-2. 使用可注入的模型 tokenizer；没有精确 tokenizer 时采用 UTF-8 字节上界估计。该估计会保守拒绝部分可执行请求，但不会对多字节文本低估。
-3. 每次决策显式保留可信 system prompt、实际将注册的 tool schema、模型待输出、恢复 margin 和安全 margin。所有比率均限制为 `[0, 1]` 的有限数值。
-4. 历史选择是纯函数：从最新事实向前选取，`tool_call/tool_result` 作为不可拆分原子组；事实不删除、不改写、不静默截断。未配对工具事实是协议错误，由恢复协调流程处理。
+2. tokenizer 必须由可信 Provider/model registry 与同一个 Pi Model 对象绑定，Session 不接受独立窗口、descriptor 或裸 tokenizer。没有精确 tokenizer 时采用 UTF-8 字节上界估计；返回零、非法整数或运行中异常的 tokenizer 失败关闭。
+3. 每次决策计量最终 Provider 可见表示：可信 system prompt、全部低信任 custom entries、带 description/parameters 的完整实际 tool definitions、checkpoint/role/换行包装、当前用户输入、模型待输出、恢复 margin、安全 margin 和固定 Provider 协议开销。所有比率均限制为 `[0, 1]` 的有限数值，聚合使用 checked safe integer。
+4. 历史选择是纯函数：从最新事实向前选取，随后只用 `activeEntries` 构造实际 Pi custom message。事实不删除、不改写。Rollout 恢复器仍严格验证 `tool_call/tool_result` 配对；依据 ADR-0032，工具 body 不恢复进 Pi 投影，因此它们也不计入 Provider 可见预算。通用预算端口仍将显式工具 entry 作为不可拆分原子组，避免未来扩展时拆半。
 5. 每个策略生成稳定 SHA-256 `policyHash`，其输入包含模型描述符、tokenizer identity、各预留 token 数和可信 prompt/tool 的摘要。该 hash 纳入 Pi 的 `promptPolicyHash`，因此进入 Rollout 恢复兼容检查。
-6. 模型切换、兼容 hash 变化、模型缩窗或策略 hash 变化返回结构化 `rebuild_required`；可信保留项或单个原子组无法放入窗口返回 `context_too_large`。两者都不能创建 Pi Session 或调用 `session.compact()`。
-7. Pi 仍固定 `compaction.enabled=false`，Controller 不暴露 compact。未来摘要只能作为新的、可审计 checkpoint/replacement history 写入，不能绕过本决策。
+6. 模型切换、兼容 hash 变化、模型缩窗或策略 hash 变化只与持久层返回的 recorded budget identity 比较并返回结构化 `rebuild_required`；请求不能提交 `previous`。可信保留项或单个原子组无法放入窗口返回 `context_too_large`。
+7. Session 建立时先裁剪恢复投影；`prompt/steer/followUp` 前再次计量当前输入。如果当前输入要求进一步移除已经写入 Session 的历史，则拒绝本次输入，绝不在创建后绕过预算。
+8. Pi 仍固定 `compaction.enabled=false`，Controller 不暴露 compact。未来摘要只能作为新的、可审计 checkpoint/replacement history 写入，不能绕过本决策。
 
 ## 影响
 

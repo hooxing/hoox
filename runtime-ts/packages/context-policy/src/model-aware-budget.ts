@@ -26,19 +26,14 @@ export interface ContextBudgetPolicyInput {
   readonly model: ModelBudgetDescriptor;
   readonly trustedSystemPrompt: string;
   readonly toolSchema: string;
+  readonly additionalFixedInputs?: readonly string[];
   readonly entries: readonly ContextBudgetEntry[];
   readonly tokenizer?: TokenizerPort;
   /** 模型最大输出的保留比例；默认 1，避免响应占用把输入窗口顶穿。 */
   readonly outputReserveRatio?: number;
   readonly recoveryMarginRatio?: number;
   readonly safetyMarginRatio?: number;
-  /** 已持久化身份只用于恢复前的显式换模/缩窗判断。 */
-  readonly previous?: Readonly<{
-    modelId: string;
-    compatibilityHash: Sha256Digest;
-    contextWindow: number;
-    policyHash: Sha256Digest;
-  }>;
+  readonly providerOverheadTokens?: number;
 }
 
 export interface ContextBudgetPolicy {
@@ -50,6 +45,8 @@ export interface ContextBudgetPolicy {
   readonly outputReserveTokens: number;
   readonly recoveryMarginTokens: number;
   readonly safetyMarginTokens: number;
+  readonly additionalFixedInputTokens: number;
+  readonly providerOverheadTokens: number;
   readonly availableHistoryTokens: number;
   readonly policyHash: Sha256Digest;
 }
@@ -62,15 +59,28 @@ export type ContextBudgetDecision =
       activeEntryTokens: number;
     }>
   | Readonly<{
-      outcome: "rebuild_required";
-      reason: "model_changed" | "context_window_shrunk" | "policy_changed";
-      policy: ContextBudgetPolicy;
-    }>
-  | Readonly<{
       outcome: "context_too_large";
       reason: "reserved_context_exceeds_window" | "single_atomic_entry_exceeds_budget";
       policy: ContextBudgetPolicy;
       requiredTokens: number;
+    }>;
+
+export interface RecordedContextBudgetIdentity {
+  readonly modelId: string;
+  readonly compatibilityHash: Sha256Digest;
+  readonly contextWindow: number;
+  readonly policyHash: Sha256Digest;
+}
+
+export type ContextBudgetCompatibilityDecision =
+  | Readonly<{ outcome: "compatible" }>
+  | Readonly<{
+      outcome: "rebuild_required";
+      reason:
+        | "model_changed"
+        | "context_window_shrunk"
+        | "model_compatibility_changed"
+        | "policy_changed";
     }>;
 
 const FALLBACK_TOKENIZER: TokenizerPort = Object.freeze({
@@ -86,30 +96,18 @@ export function decideModelAwareContextBudget(
   input: ContextBudgetPolicyInput,
 ): ContextBudgetDecision {
   const policy = deriveModelAwareContextBudgetPolicy(input);
-  if (input.previous !== undefined) {
-    if (
-      input.previous.modelId !== policy.model.modelId ||
-      input.previous.compatibilityHash !== policy.model.compatibilityHash
-    ) {
-      return Object.freeze({ outcome: "rebuild_required", reason: "model_changed", policy });
-    }
-    if (policy.model.contextWindow < input.previous.contextWindow) {
-      return Object.freeze({
-        outcome: "rebuild_required",
-        reason: "context_window_shrunk",
-        policy,
-      });
-    }
-    if (input.previous.policyHash !== policy.policyHash) {
-      return Object.freeze({ outcome: "rebuild_required", reason: "policy_changed", policy });
-    }
-  }
-  const reserved =
-    policy.systemPromptTokens +
-    policy.toolSchemaTokens +
-    policy.outputReserveTokens +
-    policy.recoveryMarginTokens +
-    policy.safetyMarginTokens;
+  const reserved = checkedSum(
+    [
+      policy.systemPromptTokens,
+      policy.toolSchemaTokens,
+      policy.outputReserveTokens,
+      policy.recoveryMarginTokens,
+      policy.safetyMarginTokens,
+      policy.additionalFixedInputTokens,
+      policy.providerOverheadTokens,
+    ],
+    "上下文保留项",
+  );
   if (reserved > policy.model.contextWindow) {
     return Object.freeze({
       outcome: "context_too_large",
@@ -132,9 +130,10 @@ export function decideModelAwareContextBudget(
         requiredTokens: group.tokens,
       });
     }
-    if (used + group.tokens > policy.availableHistoryTokens) break;
+    const nextUsed = checkedSum([used, group.tokens], "活动历史");
+    if (nextUsed > policy.availableHistoryTokens) break;
     selected.push(group);
-    used += group.tokens;
+    used = nextUsed;
   }
   const activeEntries = selected.reverse().flatMap((group) => group.entries);
   return Object.freeze({
@@ -146,7 +145,7 @@ export function decideModelAwareContextBudget(
 }
 
 export function deriveModelAwareContextBudgetPolicy(
-  input: Omit<ContextBudgetPolicyInput, "entries" | "previous">,
+  input: Omit<ContextBudgetPolicyInput, "entries">,
 ): ContextBudgetPolicy {
   validateDescriptor(input.model);
   if (typeof input.trustedSystemPrompt !== "string" || typeof input.toolSchema !== "string")
@@ -163,13 +162,27 @@ export function deriveModelAwareContextBudgetPolicy(
   const outputReserveTokens = Math.ceil(input.model.maxOutputTokens * ratios.output);
   const recoveryMarginTokens = Math.ceil(input.model.contextWindow * ratios.recovery);
   const safetyMarginTokens = Math.ceil(input.model.contextWindow * ratios.safety);
-  const availableHistoryTokens =
-    input.model.contextWindow -
-    systemPromptTokens -
-    toolSchemaTokens -
-    outputReserveTokens -
-    recoveryMarginTokens -
-    safetyMarginTokens;
+  const additionalFixedInputTokens = checkedSum(
+    (input.additionalFixedInputs ?? []).map((text) => count(tokenizer, text, "Provider 固定输入")),
+    "Provider 固定输入",
+  );
+  const providerOverheadTokens = safeNonNegativeInteger(
+    input.providerOverheadTokens ?? 256,
+    "providerOverheadTokens",
+  );
+  const fixedTokens = checkedSum(
+    [
+      systemPromptTokens,
+      toolSchemaTokens,
+      outputReserveTokens,
+      recoveryMarginTokens,
+      safetyMarginTokens,
+      additionalFixedInputTokens,
+      providerOverheadTokens,
+    ],
+    "上下文保留项",
+  );
+  const availableHistoryTokens = input.model.contextWindow - fixedTokens;
   const policyWithoutHash = {
     version: 1 as const,
     model: input.model,
@@ -179,11 +192,34 @@ export function deriveModelAwareContextBudgetPolicy(
     outputReserveTokens,
     recoveryMarginTokens,
     safetyMarginTokens,
+    additionalFixedInputTokens,
+    providerOverheadTokens,
     availableHistoryTokens,
     trustedSystemPromptDigest: digest(input.trustedSystemPrompt),
     toolSchemaDigest: digest(input.toolSchema),
   };
   return Object.freeze({ ...policyWithoutHash, policyHash: digestCanonical(policyWithoutHash) });
+}
+
+/** recorded 只能来自持久恢复记录，普通预算输入不再接受可伪造 previous。 */
+export function compareRecordedContextBudget(
+  recorded: RecordedContextBudgetIdentity,
+  current: ContextBudgetPolicy,
+): ContextBudgetCompatibilityDecision {
+  if (!Number.isSafeInteger(recorded.contextWindow) || recorded.contextWindow <= 0)
+    throw new TypeError("持久模型窗口无效");
+  if (recorded.modelId !== current.model.modelId)
+    return Object.freeze({ outcome: "rebuild_required", reason: "model_changed" });
+  if (current.model.contextWindow < recorded.contextWindow)
+    return Object.freeze({ outcome: "rebuild_required", reason: "context_window_shrunk" });
+  if (recorded.compatibilityHash !== current.model.compatibilityHash)
+    return Object.freeze({
+      outcome: "rebuild_required",
+      reason: "model_compatibility_changed",
+    });
+  if (recorded.policyHash !== current.policyHash)
+    return Object.freeze({ outcome: "rebuild_required", reason: "policy_changed" });
+  return Object.freeze({ outcome: "compatible" });
 }
 
 interface AtomicGroup {
@@ -218,7 +254,10 @@ function atomicGroups(
   return Object.freeze(groups);
 }
 function entryTokens(entries: readonly ContextBudgetEntry[], tokenizer: TokenizerPort): number {
-  return entries.reduce((total, entry) => total + count(tokenizer, entry.text, "上下文 entry"), 0);
+  return checkedSum(
+    entries.map((entry) => count(tokenizer, entry.text, "上下文 entry")),
+    "上下文 entry",
+  );
 }
 function validateEntry(entry: ContextBudgetEntry): void {
   if (
@@ -245,8 +284,21 @@ function ratio(value: number, name: string): number {
 }
 function count(tokenizer: TokenizerPort, text: string, name: string): number {
   const result = tokenizer.countTokens(text);
-  if (!Number.isSafeInteger(result) || result < 0) throw new TypeError(`${name} token 计数无效`);
+  if (!Number.isSafeInteger(result) || result < 0 || (text.length > 0 && result === 0))
+    throw new TypeError(`${name} token 计数无效`);
   return result;
+}
+function safeNonNegativeInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${name} 必须是非负安全整数`);
+  return value;
+}
+function checkedSum(values: readonly number[], name: string): number {
+  let total = 0;
+  for (const value of values) {
+    total += value;
+    if (!Number.isSafeInteger(total)) throw new TypeError(`${name} token 聚合溢出`);
+  }
+  return total;
 }
 function digest(value: string): Sha256Digest {
   return sha256Digest(createHash("sha256").update(value, "utf8").digest("hex"));

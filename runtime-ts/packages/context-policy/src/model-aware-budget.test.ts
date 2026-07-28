@@ -1,6 +1,9 @@
 import { sha256Digest } from "@cube-runtime/domain";
 import { describe, expect, it } from "vitest";
-import { decideModelAwareContextBudget } from "./model-aware-budget.js";
+import {
+  compareRecordedContextBudget,
+  decideModelAwareContextBudget,
+} from "./model-aware-budget.js";
 
 const MODEL = Object.freeze({
   modelId: "pi-test",
@@ -82,22 +85,46 @@ describe("模型感知 Context Budget", () => {
       contextWindow: MODEL.contextWindow,
       policyHash: first.policy.policyHash,
     };
-    expect(decideModelAwareContextBudget({ ...base(), previous })).toMatchObject({
-      outcome: "ready",
-      policy: { policyHash: first.policy.policyHash },
+    expect(compareRecordedContextBudget(previous, first.policy)).toEqual({ outcome: "compatible" });
+    const shrunk = decideModelAwareContextBudget({
+      ...base(),
+      model: { ...MODEL, contextWindow: 9_000 },
+    });
+    if (shrunk.outcome !== "ready") throw new Error("测试模型预算未就绪");
+    expect(compareRecordedContextBudget(previous, shrunk.policy)).toMatchObject({
+      outcome: "rebuild_required",
+      reason: "context_window_shrunk",
     });
     expect(
+      compareRecordedContextBudget({ ...previous, modelId: "other" }, first.policy),
+    ).toMatchObject({
+      outcome: "rebuild_required",
+      reason: "model_changed",
+    });
+    const changed = decideModelAwareContextBudget({ ...base(), recoveryMarginRatio: 0.1 });
+    if (changed.outcome !== "ready") throw new Error("测试策略预算未就绪");
+    expect(compareRecordedContextBudget(previous, changed.policy)).toMatchObject({
+      outcome: "rebuild_required",
+      reason: "policy_changed",
+    });
+  });
+
+  it("固定输入、协议开销和聚合溢出全部进入预算", () => {
+    const withFixed = decideModelAwareContextBudget({
+      ...base(),
+      additionalFixedInputs: ["低信任内容".repeat(200)],
+      providerOverheadTokens: 512,
+    });
+    expect(withFixed.outcome).toBe("ready");
+    if (withFixed.outcome === "ready") {
+      expect(withFixed.policy.additionalFixedInputTokens).toBeGreaterThan(1_000);
+      expect(withFixed.policy.providerOverheadTokens).toBe(512);
+    }
+    expect(() =>
       decideModelAwareContextBudget({
         ...base(),
-        model: { ...MODEL, contextWindow: 9_000 },
-        previous,
+        providerOverheadTokens: Number.MAX_SAFE_INTEGER + 1,
       }),
-    ).toMatchObject({ outcome: "rebuild_required", reason: "context_window_shrunk" });
-    expect(
-      decideModelAwareContextBudget({ ...base(), model: { ...MODEL, modelId: "other" }, previous }),
-    ).toMatchObject({ outcome: "rebuild_required", reason: "model_changed" });
-    expect(
-      decideModelAwareContextBudget({ ...base(), recoveryMarginRatio: 0.1, previous }),
-    ).toMatchObject({ outcome: "rebuild_required", reason: "policy_changed" });
+    ).toThrow("安全整数");
   });
 });

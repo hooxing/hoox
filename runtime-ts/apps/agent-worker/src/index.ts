@@ -5,3 +5,4 @@ export * from "./pi-session-factory.js";
 export type * from "./ports.js";
 export * from "./process-entry.js";
 export * from "./run-worker.js";
+export * from "./waiting-recovery.js";

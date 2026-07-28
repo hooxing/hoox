@@ -14,7 +14,14 @@ import {
   type ToolCapabilityManifest,
 } from "@cube-runtime/prompt-builder";
 import type { SandboxHandle } from "@cube-runtime/sandbox";
-import type { Api, Context, Model } from "@earendil-works/pi-ai/compat";
+import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
+import type {
+  Api,
+  Context,
+  Model,
+  Provider,
+  SimpleStreamOptions,
+} from "@earendil-works/pi-ai/compat";
 import {
   type AgentSessionEvent,
   createAgentSession,
@@ -33,6 +40,7 @@ import {
 } from "./tools.js";
 
 interface PiSessionPort {
+  readonly isStreaming: boolean;
   prompt(text: string): Promise<void>;
   steer(text: string): Promise<void>;
   followUp(text: string): Promise<void>;
@@ -63,6 +71,7 @@ export interface PiSessionController {
 }
 
 export class ContextBudgetAdmissionError extends Error {
+  readonly code = "CONTEXT_TOO_LARGE" as const;
   readonly outcome = "context_too_large" as const;
   readonly action = "rebuild_context" as const;
 
@@ -72,34 +81,97 @@ export class ContextBudgetAdmissionError extends Error {
   }
 }
 
+class ProviderBindingDriftError extends Error {
+  readonly code = "PROVIDER_BINDING_DRIFT" as const;
+
+  constructor() {
+    super("PROVIDER_BINDING_DRIFT");
+    this.name = "ProviderBindingDriftError";
+  }
+}
+
+class DeferredProviderFailure {
+  #failure: ContextBudgetAdmissionError | ProviderBindingDriftError | undefined;
+
+  reject<T>(failure: ContextBudgetAdmissionError | ProviderBindingDriftError): T {
+    this.#failure ??= failure;
+    throw failure;
+  }
+
+  consume(): ContextBudgetAdmissionError | ProviderBindingDriftError | undefined {
+    const failure = this.#failure;
+    this.#failure = undefined;
+    return failure;
+  }
+}
+
 class PiSessionControllerImpl implements PiSessionController {
   readonly #session: PiSessionPort;
   readonly #diagnostics: () => PiSessionDiagnostics;
   readonly #admitInput: (text: string) => void;
+  readonly #providerFailure: DeferredProviderFailure;
+  readonly #checkpoint: () => {
+    readonly leafId: string | null;
+    readonly messages: readonly unknown[];
+  };
+  readonly #rollback: (checkpoint: {
+    readonly leafId: string | null;
+    readonly messages: readonly unknown[];
+  }) => void;
 
   constructor(
     session: PiSessionPort,
     diagnostics: () => PiSessionDiagnostics,
     admitInput: (text: string) => void,
+    providerFailure: DeferredProviderFailure,
+    checkpoint: () => { readonly leafId: string | null; readonly messages: readonly unknown[] },
+    rollback: (checkpoint: {
+      readonly leafId: string | null;
+      readonly messages: readonly unknown[];
+    }) => void,
   ) {
     this.#session = session;
     this.#diagnostics = diagnostics;
     this.#admitInput = admitInput;
+    this.#providerFailure = providerFailure;
+    this.#checkpoint = checkpoint;
+    this.#rollback = rollback;
   }
 
   async prompt(text: string): Promise<void> {
     this.#admitInput(text);
-    await this.#session.prompt(text);
+    await this.#runTransactional(() => this.#session.prompt(text));
   }
 
   async steer(text: string): Promise<void> {
+    if (!this.#session.isStreaming) throw new Error("PI_SESSION_NOT_ACTIVE");
     this.#admitInput(text);
     await this.#session.steer(text);
   }
 
   async followUp(text: string): Promise<void> {
+    if (!this.#session.isStreaming) throw new Error("PI_SESSION_NOT_ACTIVE");
     this.#admitInput(text);
     await this.#session.followUp(text);
+  }
+
+  async #runTransactional(action: () => Promise<void>): Promise<void> {
+    const checkpoint = this.#checkpoint();
+    try {
+      await action();
+    } catch (error) {
+      const providerFailure = this.#providerFailure.consume();
+      if (providerFailure) {
+        this.#rollback(checkpoint);
+        throw providerFailure;
+      }
+      throw error;
+    }
+    const providerFailure = this.#providerFailure.consume();
+    if (providerFailure) {
+      this.#rollback(checkpoint);
+      throw providerFailure;
+    }
   }
 
   abort(): Promise<void> {
@@ -258,10 +330,12 @@ export async function createSafePiSession(
       { checkpointId: activeProjection?.checkpointId },
     );
   }
+  const providerFailure = new DeferredProviderFailure();
+  const providerBinding = await resolveProviderBinding(options);
   const { session } = await createAgentSession({
     cwd: LOGICAL_WORKSPACE,
     model: options.modelContext.model,
-    modelRuntime: providerGatedRuntime(options),
+    modelRuntime: providerGatedRuntime(options, providerBinding, providerFailure),
     thinkingLevel: "off",
     sessionManager,
     settingsManager,
@@ -297,6 +371,19 @@ export async function createSafePiSession(
         .some((entry) => entry.type === "compaction"),
     }),
     (text) => assertCurrentInputFits(options, material, activeProjection, [], text),
+    providerFailure,
+    () => ({
+      leafId: session.sessionManager.getLeafId(),
+      messages: session.agent.state.messages.slice(),
+    }),
+    (checkpoint) => {
+      session.clearQueue();
+      session.agent.state.messages = [
+        ...checkpoint.messages,
+      ] as typeof session.agent.state.messages;
+      if (checkpoint.leafId === null) session.sessionManager.resetLeaf();
+      else session.sessionManager.branch(checkpoint.leafId);
+    },
   );
 }
 
@@ -414,30 +501,148 @@ function modelCompatibilityHash(model: Model<Api>) {
   });
 }
 
-/** 每次 Pi 真正请求 Provider 前按最终 Context 计量，覆盖同一 prompt 内的工具循环。 */
-function providerGatedRuntime(options: CreateSafePiSessionOptions): ModelRuntime {
+interface ProviderBinding {
+  readonly provider: Provider;
+  readonly streamSimple: Provider["streamSimple"];
+  readonly model: Model<Api>;
+  readonly routeDigest: string;
+  readonly auth: Readonly<{
+    apiKey?: string;
+    headers?: Readonly<Record<string, string | null>>;
+    env?: Readonly<Record<string, string>>;
+  }>;
+}
+
+async function resolveProviderBinding(
+  options: CreateSafePiSessionOptions,
+): Promise<ProviderBinding> {
+  assertTrustedModelCapability(options);
+  const provider = options.modelRuntime.getProvider(options.model.provider);
+  const resolution = await options.modelRuntime.getAuth(options.modelContext.model);
+  if (provider === undefined || resolution === undefined) throw new ProviderBindingDriftError();
+  const model = freezeModelSnapshot(
+    resolution.auth.baseUrl === undefined
+      ? options.modelContext.model
+      : { ...options.modelContext.model, baseUrl: resolution.auth.baseUrl },
+  );
+  const auth = Object.freeze({
+    ...(resolution.auth.apiKey === undefined ? {} : { apiKey: resolution.auth.apiKey }),
+    ...(resolution.auth.headers === undefined
+      ? {}
+      : { headers: freezeProtocolRecord(resolution.auth.headers) }),
+    ...(resolution.env === undefined ? {} : { env: freezeProtocolRecord(resolution.env) }),
+  });
+  return Object.freeze({
+    provider,
+    streamSimple: provider.streamSimple,
+    model,
+    routeDigest: resolvedRouteDigest(provider, model, auth),
+    auth,
+  });
+}
+
+function resolvedRouteDigest(
+  provider: Provider,
+  model: Model<Api>,
+  auth: ProviderBinding["auth"],
+): string {
+  return digestProtocolValue({
+    providerId: provider.id,
+    model: modelCompatibilityHash(model),
+    apiKey: auth.apiKey,
+    headers: auth.headers,
+    env: auth.env,
+  });
+}
+
+function freezeProtocolRecord<T extends Record<string, unknown>>(value: T): Readonly<T> {
+  return Object.freeze(structuredClone(value));
+}
+
+function assertResolvedProviderBinding(expected: ProviderBinding, current: ProviderBinding): void {
+  if (
+    current.provider !== expected.provider ||
+    current.streamSimple !== expected.streamSimple ||
+    current.routeDigest !== expected.routeDigest
+  )
+    throw new ProviderBindingDriftError();
+}
+
+/** 每次 Pi 真正请求 Provider 前解析并冻结路由，再按最终 Context 计量。 */
+function providerGatedRuntime(
+  options: CreateSafePiSessionOptions,
+  binding: ProviderBinding,
+  providerFailure: DeferredProviderFailure,
+): ModelRuntime {
   const runtime = options.modelRuntime;
   return new Proxy(runtime, {
     get(target, property, receiver) {
       if (property === "streamSimple") {
-        return (model: Model<Api>, context: Context, streamOptions?: unknown) => {
-          assertTrustedModelCapability(options);
-          if (model !== options.modelContext.model)
-            throw new TypeError("Provider 调用未使用冻结模型快照");
-          const decision = decideModelAwareContextBudget({
-            model: options.modelContext.descriptor,
-            trustedSystemPrompt: context.systemPrompt ?? "",
-            toolSchema: JSON.stringify(context.tools ?? []),
-            additionalFixedInputs: context.messages.map((message) => JSON.stringify(message)),
-            entries: [],
-            tokenizer: options.modelContext.tokenizer,
+        return (
+          model: Model<Api>,
+          context: Context,
+          streamOptions?: SimpleStreamOptions & {
+            transformHeaders?: (
+              headers: Record<string, string | null>,
+            ) => Promise<Record<string, string | null>>;
+            env?: Record<string, string>;
+          },
+        ) =>
+          lazyStream(model, async () => {
+            try {
+              assertTrustedModelCapability(options);
+              if (model !== options.modelContext.model) throw new ProviderBindingDriftError();
+              const { transformHeaders, apiKey, headers, env, ...dynamicOptions } =
+                streamOptions ?? {};
+              if (apiKey !== undefined || headers !== undefined || env !== undefined)
+                throw new ProviderBindingDriftError();
+              const beforeTransform = await resolveProviderBinding(options);
+              assertResolvedProviderBinding(binding, beforeTransform);
+              const transformedHeaders = transformHeaders
+                ? await transformHeaders({ ...(beforeTransform.auth.headers ?? {}) })
+                : beforeTransform.auth.headers;
+              // transformHeaders 是唯一异步窗口；其后重新解析，再同步调用已捕获的实现。
+              const finalBinding = await resolveProviderBinding(options);
+              assertResolvedProviderBinding(binding, finalBinding);
+              const decision = decideModelAwareContextBudget({
+                model: options.modelContext.descriptor,
+                trustedSystemPrompt: context.systemPrompt ?? "",
+                toolSchema: JSON.stringify(context.tools ?? []),
+                additionalFixedInputs: context.messages.map((message) => JSON.stringify(message)),
+                entries: [],
+                tokenizer: options.modelContext.tokenizer,
+              });
+              if (decision.outcome !== "ready")
+                return providerFailure.reject(
+                  new ContextBudgetAdmissionError("reserved_context_exceeds_window"),
+                );
+              const preparedOptions = Object.freeze({
+                ...dynamicOptions,
+                ...(binding.auth.apiKey === undefined ? {} : { apiKey: binding.auth.apiKey }),
+                ...(transformedHeaders === undefined
+                  ? {}
+                  : { headers: freezeProtocolRecord(transformedHeaders) }),
+                ...(binding.auth.env === undefined ? {} : { env: binding.auth.env }),
+              });
+              return binding.streamSimple.call(
+                binding.provider,
+                binding.model,
+                context,
+                preparedOptions,
+              );
+            } catch (error) {
+              if (error instanceof ContextBudgetAdmissionError) throw error;
+              return providerFailure.reject(
+                error instanceof ProviderBindingDriftError
+                  ? error
+                  : new ProviderBindingDriftError(),
+              );
+            }
           });
-          if (decision.outcome !== "ready") {
-            throw new ContextBudgetAdmissionError("reserved_context_exceeds_window");
-          }
-          return runtime.streamSimple(model, context, streamOptions as never);
-        };
       }
+      if (property === "hasConfiguredAuth")
+        return (providerId: string) =>
+          providerId === binding.model.provider || runtime.hasConfiguredAuth(providerId);
       const value = Reflect.get(target, property, receiver) as unknown;
       return typeof value === "function" ? value.bind(target) : value;
     },

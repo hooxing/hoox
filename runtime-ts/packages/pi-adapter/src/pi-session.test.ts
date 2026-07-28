@@ -167,24 +167,63 @@ describe("Pi 安全适配", () => {
   );
 
   it.runIf(process.platform === "linux")(
-    "第二轮累计的用户与已预留助手输出超窗时在 Provider 前失败关闭",
+    "活跃流 steer/followUp 超窗时不触达第二次 Provider 且回滚队列",
     async () => {
+      let releaseFirst: (() => void) | undefined;
       const tokenizer: TokenizerPort = {
         identity: "多轮累计-tokenizer",
         countTokens: (text) =>
           text.includes("轮次输入") ? 60_000 : new TextEncoder().encode(text).byteLength,
       };
-      const { controller, faux } = await harness(
-        [fauxAssistantMessage("第一轮完成"), fauxAssistantMessage("不应调用")],
+      const first: FauxResponseStep = async () => {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        return fauxAssistantMessage("第一轮完成");
+      };
+      const { controller, faux, events, started } = await harness(
+        [first, fauxAssistantMessage("不应调用")],
         new FakeSandboxHandle("budget-multi-turn"),
         undefined,
         undefined,
         undefined,
         tokenizer,
       );
-      await controller.prompt("第一轮次输入");
-      await controller.followUp("第二轮次输入");
+      const prompting = controller.prompt("第一轮次输入");
+      await started;
+      await controller.steer("第二轮次输入");
+      await controller.followUp("活跃追问");
+      releaseFirst?.();
+      await expect(prompting).rejects.toMatchObject({
+        code: "CONTEXT_TOO_LARGE",
+        action: "rebuild_context",
+      });
+      expect(faux.state.callCount).toBe(0);
+      expect(events).toContainEqual({
+        type: "error",
+        code: "CONTEXT_TOO_LARGE",
+        message: "上下文超出模型窗口",
+        action: "rebuild_context",
+      });
+      expect(events.filter((event) => event.type === "queue.updated").at(-1)).toEqual(
+        expect.objectContaining({ steering: [], followUp: [] }),
+      );
+      await expect(controller.followUp("非活跃追问不得入队")).rejects.toThrow(
+        "PI_SESSION_NOT_ACTIVE",
+      );
+      let nextContext = "";
+      faux.setResponses([
+        (context) => {
+          nextContext = JSON.stringify(context.messages);
+          return fauxAssistantMessage("回滚后继续");
+        },
+      ]);
+      await controller.prompt("队列回滚后安全输入");
       expect(faux.state.callCount).toBe(1);
+      expect(nextContext).not.toContain("第一轮次输入");
+      expect(nextContext).not.toContain("第二轮次输入");
+      expect(nextContext).not.toContain("活跃追问");
+      expect(nextContext).not.toContain("非活跃追问不得入队");
     },
   );
 
@@ -202,7 +241,7 @@ describe("Pi 安全适配", () => {
             ? 1_000_000
             : new TextEncoder().encode(text).byteLength,
       };
-      const { controller, faux } = await harness(
+      const { controller, faux, events } = await harness(
         [
           fauxAssistantMessage(fauxToolCall("sandbox_command", { command: "produce" }), {
             stopReason: "toolUse",
@@ -215,8 +254,28 @@ describe("Pi 安全适配", () => {
         undefined,
         tokenizer,
       );
-      await controller.prompt("执行工具");
+      await expect(controller.prompt("执行工具")).rejects.toMatchObject({
+        code: "CONTEXT_TOO_LARGE",
+        action: "rebuild_context",
+      });
       expect(faux.state.callCount).toBe(1);
+      expect(events).toContainEqual({
+        type: "error",
+        code: "CONTEXT_TOO_LARGE",
+        message: "上下文超出模型窗口",
+        action: "rebuild_context",
+      });
+      let nextContext = "";
+      faux.setResponses([
+        (context) => {
+          nextContext = JSON.stringify(context.messages);
+          return fauxAssistantMessage("回滚后成功");
+        },
+      ]);
+      await controller.prompt("回滚后安全输入");
+      expect(faux.state.callCount).toBe(2);
+      expect(nextContext).not.toContain("大工具结果");
+      expect(nextContext).not.toContain("执行工具");
     },
   );
 
@@ -293,6 +352,50 @@ describe("Pi 安全适配", () => {
     model.baseUrl = `${model.baseUrl}/drift`;
     expect(() => assessSafePiSessionContext(options)).toThrow("未绑定当前可信");
   });
+
+  it.runIf(process.platform === "linux")(
+    "已解析请求绑定后 Provider implementation 与 auth 漂移均失败关闭",
+    async () => {
+      const providerDrift = await harness([fauxAssistantMessage("不应调用")]);
+      const mutableProvider = providerDrift.faux.provider as unknown as {
+        streamSimple: (...args: unknown[]) => unknown;
+      };
+      mutableProvider.streamSimple = () => {
+        throw new Error("漂移实现不应调用");
+      };
+      await expect(providerDrift.controller.prompt("实现漂移")).rejects.toMatchObject({
+        code: "PROVIDER_BINDING_DRIFT",
+      });
+      expect(providerDrift.faux.state.callCount).toBe(0);
+
+      const authDrift = await harness([fauxAssistantMessage("不应调用")]);
+      const liveProvider = authDrift.modelRuntime.getProvider(authDrift.model.provider);
+      if (liveProvider?.auth.apiKey === undefined) throw new Error("测试 Provider 缺少 auth");
+      (
+        liveProvider.auth.apiKey as unknown as {
+          resolve: () => Promise<{ auth: { apiKey: string } }>;
+        }
+      ).resolve = async () => ({ auth: { apiKey: "drifted-key" } });
+      await expect(authDrift.controller.prompt("认证漂移")).rejects.toMatchObject({
+        code: "PROVIDER_BINDING_DRIFT",
+      });
+      expect(authDrift.faux.state.callCount).toBe(0);
+
+      const baseUrlDrift = await harness([fauxAssistantMessage("不应调用")]);
+      baseUrlDrift.model.baseUrl = `${baseUrlDrift.model.baseUrl}/drift`;
+      await expect(baseUrlDrift.controller.prompt("端点漂移")).rejects.toThrow(
+        "未绑定当前可信 Provider model",
+      );
+      expect(baseUrlDrift.faux.state.callCount).toBe(0);
+
+      const headerDrift = await harness([fauxAssistantMessage("不应调用")]);
+      headerDrift.model.headers = { "x-drift": "changed" };
+      await expect(headerDrift.controller.prompt("Header 漂移")).rejects.toThrow(
+        "未绑定当前可信 Provider model",
+      );
+      expect(headerDrift.faux.state.callCount).toBe(0);
+    },
+  );
 
   it.runIf(process.platform === "linux")(
     "低信任大 custom context 在 Session 建立前失败关闭",
@@ -714,6 +817,8 @@ async function harness(
   events: RuntimeAgentEvent[];
   started: Promise<void>;
   faux: FauxProviderHandle;
+  model: NonNullable<ReturnType<FauxProviderHandle["getModel"]>>;
+  modelRuntime: ModelRuntime;
   toolAuthorizationCount: () => number;
   authorizedCalls: Array<{ callId: string; toolName: string; argsDigest: string }>;
 }> {
@@ -764,6 +869,8 @@ async function harness(
     events,
     started,
     faux,
+    model,
+    modelRuntime,
     toolAuthorizationCount: () => authorizationCount,
     authorizedCalls,
   };

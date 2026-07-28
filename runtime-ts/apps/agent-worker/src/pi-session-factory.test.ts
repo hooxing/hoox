@@ -17,7 +17,10 @@ import {
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { PiWorkerSessionFactory } from "./pi-session-factory.js";
+import {
+  createDurableObservationRecorderFactory,
+  PiWorkerSessionFactory,
+} from "./pi-session-factory.js";
 import { RunWorker } from "./run-worker.js";
 import {
   FakeArtifactPublication,
@@ -48,6 +51,25 @@ const fakeObservationRecorder = (
 });
 
 describe("PiWorkerSessionFactory 持久操作门控", () => {
+  it("durable Observation 工厂拒绝错接 Tenant、Run 或 Attempt 的端口", () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("observation-binding"));
+    const otherScope = persistence.addSeed(fakeSeed("observation-binding-other"));
+    const input = { scope, attemptId: "attempt-1" } as Parameters<
+      Parameters<typeof createDurableObservationRecorderFactory>[0]
+    >[0];
+    const factory = createDurableObservationRecorderFactory((current) => ({
+      binding: { scope: otherScope, attemptId: current.attemptId },
+      traces: { persistTrace: async () => ({ outcome: "unavailable" as const }) },
+      rollout: { appendToolResult: async () => ({ outcome: "unavailable" as const }) },
+      policy: { maxModelObservationBytes: 100 },
+    }));
+
+    expect(() => factory(input, { readSanitizedOutput: async () => "受控 Observation" })).toThrow(
+      "ExecutionScope 不匹配",
+    );
+  });
+
   it.runIf(process.platform === "linux")(
     "真实 Pi tool.started 先提交，issue/consume 不被 heartbeat 插入且文件成功写入",
     async () => {

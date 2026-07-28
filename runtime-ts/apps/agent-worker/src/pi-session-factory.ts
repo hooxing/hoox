@@ -135,6 +135,11 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
 /** 生产装配必须显式提供绑定当前 ExecutionScope 的 durable Blob 与 Rollout 端口。 */
 export function createDurableObservationRecorderFactory(
   createDependencies: (input: Parameters<AgentSessionFactoryPort["create"]>[0]) => {
+    /** 端口创建时的事实绑定；错接其他租户、Run 或 Attempt 必须在首次写入前失败。 */
+    readonly binding: {
+      readonly scope: Parameters<AgentSessionFactoryPort["create"]>[0]["scope"];
+      readonly attemptId: string;
+    };
     readonly traces: TraceBlobPersistencePort;
     readonly rollout: ToolObservationRolloutPort;
     readonly policy: ToolObservationPolicy;
@@ -145,6 +150,18 @@ export function createDurableObservationRecorderFactory(
     outputs: SanitizedToolOutputSource,
   ) => {
     const dependencies = createDependencies(input);
+    const binding = dependencies.binding;
+    if (
+      binding.attemptId !== input.attemptId ||
+      binding.scope.tenantId !== input.scope.tenantId ||
+      binding.scope.threadId !== input.scope.threadId ||
+      binding.scope.runId !== input.scope.runId ||
+      binding.scope.rootRunId !== input.scope.rootRunId ||
+      binding.scope.workspaceId !== input.scope.workspaceId ||
+      binding.scope.baseRevisionId !== input.scope.baseRevisionId
+    ) {
+      throw new Error("durable Tool Observation 端口与当前 ExecutionScope 不匹配");
+    }
     const pipeline = new ToolObservationPipeline(
       dependencies.traces,
       dependencies.rollout,

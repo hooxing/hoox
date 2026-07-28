@@ -12,7 +12,7 @@
 
 `ToolObservationPipeline` 采用严格顺序：先将 UTF-8 原始输出经 `TraceBlobPersistencePort` 持久化为同租户 `stable/trace` Blob，校验 reference、摘要、大小、incarnation 与物理键，再生成 observation 并通过 `ToolObservationRolloutPort` 写入 `tool_result`。两个端口均使用派生的固定幂等键，因此进程重启/重放不改变事实。
 
-Pipeline 不公开创建“受信输出”的函数。`createObservedSandboxTools` 在实际 Tool adapter 的闭包内统一脱敏并只暴露只读 `SanitizedToolOutputSource`；原始异常既不能作为 Pipeline 参数，也不会写入 Trace 或日志。Blob commit 的首个 `upload_pending` snapshot 已绑定 expected purpose、SHA-256 与 size，之后每次加载和重启都核验 staged/stable/allocation 的同一身份，同键异文稳定冲突。
+Pipeline 不公开创建“受信输出”的函数。`createObservedSandboxTools` 在实际 Tool adapter 的闭包内将成功 stdout、文件内容、代码输出和失败 message 都替换为固定结构的 `sandbox_untrusted` Observation；它们可能含密钥或提示注入，故原文既不能作为 Pipeline 参数，也不会写入 Trace、Rollout、日志或模型上下文。该结构只声明工具名和成功/失败，明确原始数据不能作为指令执行。Blob commit 的首个 `upload_pending` snapshot 已绑定 expected purpose、SHA-256 与 size，之后每次加载和重启都核验 staged/stable/allocation 的同一身份，同键异文稳定冲突。
 
 模型可见 payload 与 Rollout body 使用两套独立硬预算；后者不超过数据库的 16 KiB 约束。模型可见内容按 UTF-8 字节预算截断，并按 Unicode code point 迭代，不能切开多字节字符；这不是 grapheme cluster 契约，组合字符可能在 code point 边界分开。占位符必须完整装入，否则返回空字符串，绝不生成半个标记。完整的工具调用配对、工具名、原始字节摘要、大小、截断原因及受限 Blob ref 写入 Rollout body；不持久化不可信的物理对象键。
 
@@ -26,7 +26,7 @@ Blob 返回 `unavailable`、`unknown` 或 `conflict` 时，不写 Rollout，不�
 
 ## 影响与可逆性
 
-`DurableTraceBlobPersistenceAdapter` 与受审工厂已经把 `TraceBlobPersistencePort` 接到现有 PostgreSQL Blob commit/promotion 状态机和 S3/MinIO：暂存、引用提交、allocation、授权 promotion、stable HEAD/mark 与 staging 清理均以持久 snapshot 恢复。`PgToolObservationRolloutAdapter` 接到 `PgRuntimeRolloutRepository.append` 的 `tool_result` 草稿。Rollout 表通过 `(tenant_id, reference_id, state, purpose, sha256, size)` 复合外键绑定 `blob_references` 的 stable/trace 事实；适配器本身不以一次应用层查询冒充授权或完整性证明。前驱复合外键与 CHECK 约束保证 `tool_call` 后只能紧跟相同 `toolCallId` 的 `tool_result`。端口可替换，但不得改变“先 stable Blob，后 Rollout”的顺序。
+`DurableTraceBlobPersistenceAdapter` 与受审工厂已经把 `TraceBlobPersistencePort` 接到现有 PostgreSQL Blob commit/promotion 状态机和 S3/MinIO：暂存、引用提交、allocation、授权 promotion、stable HEAD/mark 与 staging 清理均以持久 snapshot 恢复。受审工厂还要求依赖声明并校验完整 `ExecutionScope + attemptId`，拒绝错接的 tenant/run/attempt。`PgToolObservationRolloutAdapter` 接到 `PgRuntimeRolloutRepository.append` 的 `tool_result` 草稿。Rollout 表通过 `(tenant_id, reference_id, state, purpose, sha256, size)` 复合外键绑定 `blob_references` 的 stable/trace 事实；适配器本身不以一次应用层查询冒充授权或完整性证明。前驱复合外键与 CHECK 约束保证 `tool_call` 后只能紧跟相同 `toolCallId` 的 `tool_result`。端口可替换，但不得改变“先 stable Blob，后 Rollout”的顺序。
 
 ## 验证
 

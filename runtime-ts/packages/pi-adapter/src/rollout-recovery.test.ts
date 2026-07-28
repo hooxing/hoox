@@ -4,6 +4,7 @@ import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
+import { assessSafePiSessionContext, bindTrustedPiModelContextCapability } from "./pi-session.js";
 import {
   projectLoadedRuntimeRecovery,
   RuntimeRecoveryError,
@@ -188,11 +189,34 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
     });
   });
 
+  it("缩窗原因只从持久层 recorded budget 派生，不接受请求伪造 previous", async () => {
+    const harness = await sessionHarness();
+    const current = assessSafePiSessionContext(harness.options).policy;
+    const result = await recoverSafePiSession({
+      ...harness.options,
+      loadRecovery: async () => ({
+        outcome: "compatibility_mismatch",
+        action: "rebuild_attempt",
+        mismatches: ["modelCompatibilityHash"],
+        recordedBudget: {
+          modelId: current.model.modelId,
+          compatibilityHash: current.model.compatibilityHash,
+          contextWindow: current.model.contextWindow + 1,
+          policyHash: current.policyHash,
+        },
+      }),
+    });
+    expect(result).toEqual({ outcome: "rebuild_required", reason: "context_window_shrunk" });
+  });
+
   it("恢复入口在创建 Pi 前返回结构化 context_too_large，不调用 compaction 或静默截断", async () => {
     const harness = await sessionHarness();
     const result = await recoverSafePiSession({
       ...harness.options,
-      contextBudget: { safetyMarginRatio: 1, recoveryMarginRatio: 1 },
+      modelContext: bindTrustedPiModelContextCapability(harness.options.model, {
+        identity: "测试可信超保守-tokenizer",
+        countTokens: (text) => (text.length === 0 ? 0 : harness.options.model.contextWindow),
+      }),
       loadRecovery: async (current) => ({
         ...loaded([entry(0, "user", { text: "不可丢失的历史事实" })]),
         recordedCompatibility: current,
@@ -241,10 +265,12 @@ async function sessionHarness() {
   });
   modelRuntime.registerNativeProvider(faux.provider);
   await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+  const model = faux.getModel();
   return {
     faux,
     options: {
-      model: faux.getModel(),
+      model,
+      modelContext: bindTrustedPiModelContextCapability(model),
       modelRuntime,
       sandbox: new FakeSandboxHandle("recovery-fake"),
       authorizeToolEffect: async () => ({

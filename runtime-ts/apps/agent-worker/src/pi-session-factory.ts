@@ -1,6 +1,6 @@
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@cube-runtime/artifact";
 import { sha256Digest } from "@cube-runtime/domain";
-import { createSafePiSession } from "@cube-runtime/pi-adapter";
+import { bindTrustedPiModelContextCapability, createSafePiSession } from "@cube-runtime/pi-adapter";
 import type { ArtifactToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -12,12 +12,16 @@ import type { AgentSessionFactoryPort, AgentTurnOutcome, WorkerAgentSessionPort 
  * 再用 prompt 真正启动模型，绝不对空 Session 调 followUp。
  */
 export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
+  private readonly modelContext;
+
   constructor(
     private readonly model: Model<Api>,
     private readonly modelRuntime: ModelRuntime,
     private readonly artifactTools?: ArtifactToolRouterFactoryPort,
     private readonly artifactAuthorizationIssuer?: ArtifactExecutionAuthorizationIssuerPort,
-  ) {}
+  ) {
+    this.modelContext = bindTrustedPiModelContextCapability(model);
+  }
 
   async create(
     input: Parameters<AgentSessionFactoryPort["create"]>[0],
@@ -62,6 +66,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         : undefined;
     const controller = await createSafePiSession({
       model: this.model,
+      modelContext: this.modelContext,
       modelRuntime: this.modelRuntime,
       sandbox: input.sandbox,
       rolloutProjection: input.rolloutProjection,

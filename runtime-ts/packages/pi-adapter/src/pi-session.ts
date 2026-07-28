@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { types } from "node:util";
 import {
   type ContextBudgetDecision,
-  type ContextBudgetPolicyInput,
   decideModelAwareContextBudget,
+  type ModelBudgetDescriptor,
   type TokenizerPort,
 } from "@cube-runtime/context-policy";
 import { type RolloutCompatibilityIdentity, sha256Digest } from "@cube-runtime/domain";
@@ -62,25 +62,44 @@ export interface PiSessionController {
   getDiagnostics(): Readonly<PiSessionDiagnostics>;
 }
 
+export class ContextBudgetAdmissionError extends Error {
+  readonly outcome = "context_too_large" as const;
+  readonly action = "rebuild_context" as const;
+
+  constructor(readonly reason: "reserved_context_exceeds_window" | "active_history_would_change") {
+    super("CONTEXT_TOO_LARGE");
+    this.name = "ContextBudgetAdmissionError";
+  }
+}
+
 class PiSessionControllerImpl implements PiSessionController {
   readonly #session: PiSessionPort;
   readonly #diagnostics: () => PiSessionDiagnostics;
+  readonly #admitInput: (text: string) => void;
 
-  constructor(session: PiSessionPort, diagnostics: () => PiSessionDiagnostics) {
+  constructor(
+    session: PiSessionPort,
+    diagnostics: () => PiSessionDiagnostics,
+    admitInput: (text: string) => void,
+  ) {
     this.#session = session;
     this.#diagnostics = diagnostics;
+    this.#admitInput = admitInput;
   }
 
-  prompt(text: string): Promise<void> {
-    return this.#session.prompt(text);
+  async prompt(text: string): Promise<void> {
+    this.#admitInput(text);
+    await this.#session.prompt(text);
   }
 
-  steer(text: string): Promise<void> {
-    return this.#session.steer(text);
+  async steer(text: string): Promise<void> {
+    this.#admitInput(text);
+    await this.#session.steer(text);
   }
 
-  followUp(text: string): Promise<void> {
-    return this.#session.followUp(text);
+  async followUp(text: string): Promise<void> {
+    this.#admitInput(text);
+    await this.#session.followUp(text);
   }
 
   abort(): Promise<void> {
@@ -103,8 +122,39 @@ class PiSessionControllerImpl implements PiSessionController {
   }
 }
 
+const TRUSTED_MODEL_CAPABILITIES = new WeakSet<object>();
+export interface TrustedPiModelContextCapability {
+  readonly model: Model<Api>;
+  readonly descriptor: ModelBudgetDescriptor;
+  readonly tokenizer: TokenizerPort;
+}
+
+/** Provider/model registry 的唯一绑定入口；Session 不接受独立 descriptor 或裸 tokenizer。 */
+export function bindTrustedPiModelContextCapability(
+  model: Model<Api>,
+  tokenizer?: TokenizerPort,
+): TrustedPiModelContextCapability {
+  const selected = tokenizer ?? {
+    identity: "utf8-byte-upper-bound-v1",
+    countTokens: (text: string) => new TextEncoder().encode(text).byteLength,
+  };
+  const probe = selected.countTokens("可信探针🙂 entropy-0123456789");
+  if (!selected.identity.trim() || !Number.isSafeInteger(probe) || probe <= 0)
+    throw new TypeError("Provider tokenizer capability 无效");
+  const descriptor = Object.freeze({
+    modelId: model.id,
+    contextWindow: model.contextWindow,
+    maxOutputTokens: model.maxTokens,
+    compatibilityHash: modelCompatibilityHash(model),
+  });
+  const capability = Object.freeze({ model, descriptor, tokenizer: selected });
+  TRUSTED_MODEL_CAPABILITIES.add(capability);
+  return capability;
+}
+
 export interface CreateSafePiSessionOptions {
   model: Model<Api>;
+  modelContext: TrustedPiModelContextCapability;
   modelRuntime: ModelRuntime;
   sandbox: SandboxHandle;
   /** Tenant/Skill/User 只能进入低信任数据分区，不能直接替换系统 Harness。 */
@@ -114,12 +164,6 @@ export interface CreateSafePiSessionOptions {
   authorizeToolEffect: SandboxToolEffectAuthorizer["authorizeToolEffect"];
   /** 只有生产装配显式提供真实 Artifact/Resource 依赖时才注册，缺失时不伪造发布能力。 */
   artifactToolRouter?: ArtifactPiToolExecutorPort;
-  /** 可选的精确 tokenizer；未提供时使用 fail-closed UTF-8 上界估计。 */
-  contextTokenizer?: TokenizerPort;
-  contextBudget?: Pick<
-    ContextBudgetPolicyInput,
-    "outputReserveRatio" | "recoveryMarginRatio" | "safetyMarginRatio" | "previous"
-  >;
 }
 
 /**
@@ -159,26 +203,26 @@ export async function createSafePiSession(
     { projectTrusted: false },
   );
 
-  const { customTools, builtPrompt } = buildSafeSessionMaterial(options);
-  const budget = assessSafePiSessionContext(options, builtPrompt);
+  const material = buildSafeSessionMaterial(options);
+  const { customTools, builtPrompt } = material;
+  const budget = assessSafePiSessionContext(options, material);
   if (budget.outcome !== "ready") {
-    throw new Error(
-      budget.outcome === "context_too_large" ? "CONTEXT_TOO_LARGE" : "REBUILD_REQUIRED",
-    );
+    throw new ContextBudgetAdmissionError("reserved_context_exceeds_window");
   }
+  const activeProjection = selectActiveProjection(options.rolloutProjection, budget.activeEntries);
   const resourceLoader = new EmptyResourceLoader(builtPrompt.systemPrompt);
   await resourceLoader.reload();
   const sessionManager = SessionManager.inMemory(LOGICAL_WORKSPACE);
   for (const entry of builtPrompt.contextEntries) {
     sessionManager.appendCustomMessageEntry(entry.customType, entry.content, false, entry.source);
   }
-  const projectedContext = formatRolloutProjection(options.rolloutProjection);
+  const projectedContext = formatRolloutProjection(activeProjection);
   if (projectedContext !== undefined) {
     sessionManager.appendCustomMessageEntry(
       "runtime.controlled_rollout_projection.v1",
       projectedContext,
       false,
-      { checkpointId: options.rolloutProjection?.checkpointId },
+      { checkpointId: activeProjection?.checkpointId },
     );
   }
   const { session } = await createAgentSession({
@@ -205,18 +249,22 @@ export async function createSafePiSession(
   });
 
   // 对外只返回窄能力对象；AgentSession（含 compact）保留在闭包和 #private 字段内。
-  return new PiSessionControllerImpl(session, () => ({
-    logicalCwd: LOGICAL_WORKSPACE,
-    activeToolNames: session.agent.state.tools.map((tool) => tool.name),
-    promptSchemaVersion: builtPrompt.schemaVersion,
-    promptVersion: builtPrompt.version,
-    capabilityManifestDigest: builtPrompt.manifest.digest,
-    promptDigest: builtPrompt.promptDigest,
-    compactionEnabled: false,
-    hasCompactionEntry: session.sessionManager
-      .getEntries()
-      .some((entry) => entry.type === "compaction"),
-  }));
+  return new PiSessionControllerImpl(
+    session,
+    () => ({
+      logicalCwd: LOGICAL_WORKSPACE,
+      activeToolNames: session.agent.state.tools.map((tool) => tool.name),
+      promptSchemaVersion: builtPrompt.schemaVersion,
+      promptVersion: builtPrompt.version,
+      capabilityManifestDigest: builtPrompt.manifest.digest,
+      promptDigest: builtPrompt.promptDigest,
+      compactionEnabled: false,
+      hasCompactionEntry: session.sessionManager
+        .getEntries()
+        .some((entry) => entry.type === "compaction"),
+    }),
+    (text) => assertCurrentInputFits(options, material, activeProjection, text),
+  );
 }
 
 /**
@@ -226,22 +274,13 @@ export async function createSafePiSession(
 export function deriveSafePiSessionCompatibility(
   options: CreateSafePiSessionOptions,
 ): RolloutCompatibilityIdentity {
-  const { builtPrompt } = buildSafeSessionMaterial(options);
-  const budget = assessSafePiSessionContext(options, builtPrompt);
+  const material = buildSafeSessionMaterial(options);
+  const { builtPrompt } = material;
+  const budget = assessSafePiSessionContext(options, material);
   const model = options.model;
   return Object.freeze({
     modelId: model.id,
-    modelCompatibilityHash: digestProtocolValue({
-      id: model.id,
-      provider: model.provider,
-      api: model.api,
-      reasoning: model.reasoning,
-      thinkingLevelMap: model.thinkingLevelMap,
-      input: model.input,
-      contextWindow: model.contextWindow,
-      maxTokens: model.maxTokens,
-      compat: model.compat,
-    }),
+    modelCompatibilityHash: modelCompatibilityHash(model),
     // 预算策略是 prompt 可见历史窗口的协议组成部分，必须进入恢复兼容身份。
     promptPolicyHash: digestProtocolValue({
       schemaVersion: builtPrompt.schemaVersion,
@@ -269,31 +308,31 @@ export function deriveSafePiSessionCompatibility(
  */
 export function assessSafePiSessionContext(
   options: CreateSafePiSessionOptions,
-  material = buildSafeSessionMaterial(options).builtPrompt,
+  material = buildSafeSessionMaterial(options),
+  currentUserInput?: string,
 ): ContextBudgetDecision {
-  const model = options.model;
+  assertTrustedModelCapability(options);
+  const { builtPrompt } = material;
+  const projectionHeader = projectionProtocolHeader(options.rolloutProjection);
   return decideModelAwareContextBudget({
-    model: {
-      modelId: model.id,
-      contextWindow: model.contextWindow,
-      maxOutputTokens: model.maxTokens,
-      compatibilityHash: digestProtocolValue({
-        id: model.id,
-        provider: model.provider,
-        api: model.api,
-        contextWindow: model.contextWindow,
-        maxTokens: model.maxTokens,
-      }),
-    },
-    trustedSystemPrompt: material.systemPrompt,
-    toolSchema: JSON.stringify(material.manifest.capabilities),
+    model: options.modelContext.descriptor,
+    trustedSystemPrompt: builtPrompt.systemPrompt,
+    toolSchema: material.serializedToolDefinitions,
+    additionalFixedInputs: [
+      ...builtPrompt.contextEntries.map((entry) =>
+        JSON.stringify({ type: entry.customType, content: entry.content, source: entry.source }),
+      ),
+      ...(projectionHeader === undefined ? [] : [projectionHeader]),
+      ...(currentUserInput === undefined
+        ? []
+        : [JSON.stringify({ role: "user", content: currentUserInput })]),
+    ],
     entries: (options.rolloutProjection?.turns ?? []).map((turn, sequence) => ({
       sequence,
       kind: turn.role,
-      text: turn.text,
+      text: `${turn.role === "user" ? "用户" : "助手"}：${turn.text}\n`,
     })),
-    ...(options.contextTokenizer === undefined ? {} : { tokenizer: options.contextTokenizer }),
-    ...(options.contextBudget ?? {}),
+    tokenizer: options.modelContext.tokenizer,
   });
 }
 
@@ -316,7 +355,78 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     })),
     untrusted: options.untrustedPromptContent ?? { tenant: [], skill: [], user: [] },
   });
-  return { customTools, builtPrompt };
+  const serializedToolDefinitions = JSON.stringify(
+    customTools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: canonicalSchema(tool.parameters, new WeakSet<object>()),
+    })),
+  );
+  return { customTools, builtPrompt, serializedToolDefinitions };
+}
+
+function modelCompatibilityHash(model: Model<Api>) {
+  return digestProtocolValue({
+    id: model.id,
+    provider: model.provider,
+    api: model.api,
+    reasoning: model.reasoning,
+    thinkingLevelMap: model.thinkingLevelMap,
+    input: model.input,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
+    compat: model.compat,
+  });
+}
+
+function assertTrustedModelCapability(options: CreateSafePiSessionOptions): void {
+  if (
+    !TRUSTED_MODEL_CAPABILITIES.has(options.modelContext) ||
+    options.modelContext.model !== options.model ||
+    options.modelContext.descriptor.modelId !== options.model.id
+  )
+    throw new TypeError("Model Context capability 未绑定当前可信 Provider model");
+}
+
+function selectActiveProjection(
+  projection: ControlledRolloutProjection | undefined,
+  entries: readonly { sequence: number }[],
+): ControlledRolloutProjection | undefined {
+  if (projection === undefined) return undefined;
+  const turns = entries
+    .map((entry) => projection.turns[entry.sequence])
+    .filter((turn) => turn !== undefined);
+  return Object.freeze({ ...projection, turns: Object.freeze(turns) });
+}
+
+function assertCurrentInputFits(
+  options: CreateSafePiSessionOptions,
+  material: ReturnType<typeof buildSafeSessionMaterial>,
+  activeProjection: ControlledRolloutProjection | undefined,
+  text: string,
+): void {
+  const assessed = assessSafePiSessionContext(
+    activeProjection === undefined ? options : { ...options, rolloutProjection: activeProjection },
+    material,
+    text,
+  );
+  if (
+    assessed.outcome !== "ready" ||
+    assessed.activeEntries.length !== (activeProjection?.turns.length ?? 0)
+  )
+    throw new ContextBudgetAdmissionError(
+      assessed.outcome === "ready"
+        ? "active_history_would_change"
+        : "reserved_context_exceeds_window",
+    );
+}
+
+function projectionProtocolHeader(
+  projection: ControlledRolloutProjection | undefined,
+): string | undefined {
+  return projection === undefined || projection.turns.length === 0
+    ? undefined
+    : `以下是 Runtime 审核并持久化的历史上下文投影（checkpoint=${projection.checkpointId}）：\n`;
 }
 
 function digestProtocolValue(value: unknown) {

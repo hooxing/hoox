@@ -1,5 +1,6 @@
-import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
+import type { TokenizerPort } from "@cube-runtime/context-policy";
 import { buildToolCapabilityManifest } from "@cube-runtime/prompt-builder";
+import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import {
   type FauxProviderHandle,
   type FauxResponseStep,
@@ -15,6 +16,7 @@ import type { RuntimeAgentEvent } from "./events.js";
 import {
   assertLinuxWorkerPlatform,
   assertPiSessionCapabilityManifest,
+  bindTrustedPiModelContextCapability,
   createSafePiSession,
   digestCanonicalToolInputSchema,
   type PiSessionController,
@@ -88,6 +90,113 @@ describe("Pi 安全适配", () => {
         expect(modelContext).not.toMatch(hostPathPattern(process.cwd()));
         expect(modelContext).not.toMatch(hostPathPattern(process.cwd().replaceAll("\\", "/")));
       }
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "预算选出的活动历史才进入 Pi，旧历史仍保留在 Rollout 但不进入 Provider 消息",
+    async () => {
+      let providerMessages = "";
+      const tokenizer: TokenizerPort = {
+        identity: "测试历史窗口-tokenizer",
+        countTokens: (text) =>
+          text.includes("旧历史必须留在事实源")
+            ? 1_000_000
+            : new TextEncoder().encode(text).byteLength,
+      };
+      const { controller } = await harness(
+        [
+          (context) => {
+            providerMessages = JSON.stringify(context.messages);
+            return fauxAssistantMessage("完成");
+          },
+        ],
+        new FakeSandboxHandle("budget-active-history"),
+        {
+          schemaVersion: 1,
+          checkpointId: "checkpoint-budget-window",
+          turns: [
+            { role: "user", text: "旧历史必须留在事实源" },
+            { role: "assistant", text: "最近回复" },
+          ],
+        },
+        undefined,
+        undefined,
+        tokenizer,
+      );
+      await controller.prompt("当前问题");
+      expect(providerMessages).not.toContain("旧历史必须留在事实源");
+      expect(providerMessages).toContain("最近回复");
+      expect(providerMessages).toContain("当前问题");
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "完整工具定义与低信任 custom entry 参与计量，当前超大输入在调用 Provider 前拒绝",
+    async () => {
+      const counted: string[] = [];
+      const tokenizer: TokenizerPort = {
+        identity: "测试最终输入-tokenizer",
+        countTokens: (text) => {
+          counted.push(text);
+          if (text.includes("当前超大输入")) return 1_000_000;
+          return new TextEncoder().encode(text).byteLength;
+        },
+      };
+      const { controller, faux } = await harness(
+        [fauxAssistantMessage("不应调用")],
+        new FakeSandboxHandle("budget-visible-input"),
+        undefined,
+        undefined,
+        {
+          tenant: [{ id: "tenant-large", content: "低信任可见内容" }],
+          skill: [],
+          user: [],
+        },
+        tokenizer,
+      );
+      expect(
+        counted.some((text) => text.includes("sandbox_read_file") && text.includes("parameters")),
+      ).toBe(true);
+      expect(counted.some((text) => text.includes("低信任可见内容"))).toBe(true);
+      await expect(controller.prompt("当前超大输入")).rejects.toThrow("CONTEXT_TOO_LARGE");
+      expect(faux.state.callCount).toBe(0);
+    },
+  );
+
+  it("拒绝返回零的恶意 tokenizer capability", () => {
+    const faux = fauxProvider({ api: "bad-tokenizer", provider: "bad-tokenizer" });
+    expect(() =>
+      bindTrustedPiModelContextCapability(faux.getModel(), {
+        identity: "恶意-zero",
+        countTokens: () => 0,
+      }),
+    ).toThrow("tokenizer capability 无效");
+  });
+
+  it.runIf(process.platform === "linux")(
+    "低信任大 custom context 在 Session 建立前失败关闭",
+    async () => {
+      await expect(
+        harness(
+          [],
+          new FakeSandboxHandle("budget-untrusted-large"),
+          undefined,
+          undefined,
+          {
+            tenant: [],
+            skill: [],
+            user: [{ id: "large", content: "低信任超大内容" }],
+          },
+          {
+            identity: "测试低信任上限-tokenizer",
+            countTokens: (text) =>
+              text.includes("低信任超大内容")
+                ? 1_000_000
+                : new TextEncoder().encode(text).byteLength,
+          },
+        ),
+      ).rejects.toThrow("CONTEXT_TOO_LARGE");
     },
   );
 
@@ -331,9 +440,11 @@ describe("Pi 安全适配", () => {
       });
       const faux = fauxProvider({ api: "faux-platform", provider: "faux-platform" });
       modelRuntime.registerNativeProvider(faux.provider);
+      const model = faux.getModel();
       await expect(
         createSafePiSession({
-          model: faux.getModel(),
+          model,
+          modelContext: bindTrustedPiModelContextCapability(model),
           modelRuntime,
           sandbox: new FakeSandboxHandle("platform-guard"),
           authorizeToolEffect: async () => immediateAuthorization(),
@@ -454,6 +565,7 @@ async function harness(
   rolloutProjection?: Parameters<typeof createSafePiSession>[0]["rolloutProjection"],
   authorizeToolEffect?: Parameters<typeof createSafePiSession>[0]["authorizeToolEffect"],
   untrustedPromptContent?: Parameters<typeof createSafePiSession>[0]["untrustedPromptContent"],
+  tokenizer?: TokenizerPort,
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
@@ -477,8 +589,10 @@ async function harness(
   await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
   let authorizationCount = 0;
   const authorizedCalls: Array<{ callId: string; toolName: string; argsDigest: string }> = [];
+  const model = faux.getModel();
   const controller = await createSafePiSession({
-    model: faux.getModel(),
+    model,
+    modelContext: bindTrustedPiModelContextCapability(model, tokenizer),
     modelRuntime,
     sandbox,
     authorizeToolEffect: async (input) => {

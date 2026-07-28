@@ -110,6 +110,8 @@ export type RolloutCompatibilityField =
 export type LoadRecoveryResult =
   | {
       readonly outcome: "loaded";
+      /** 已由同一只读快照读取的 Stream 身份，恢复投影器仍须逐项复核。 */
+      readonly recordedCompatibility: RolloutCompatibilityIdentity;
       readonly checkpoint?: RuntimeRolloutCheckpoint;
       readonly tail: readonly RuntimeRolloutEntry[];
     }
@@ -840,6 +842,13 @@ export class PgRuntimeRolloutRepository {
             row.checkpoint_id === null ? undefined : mapCheckpoint(row as unknown as CheckpointRow);
           return Object.freeze({
             outcome: "loaded" as const,
+            recordedCompatibility: Object.freeze({
+              modelId: row.model_id,
+              modelCompatibilityHash: row.model_compatibility_hash as Sha256Digest,
+              promptPolicyHash: row.prompt_policy_hash as Sha256Digest,
+              toolSchemaHash: row.tool_schema_hash as Sha256Digest,
+              skillManifestHash: row.skill_manifest_hash as Sha256Digest,
+            }),
             ...(checkpoint === undefined ? {} : { checkpoint }),
             tail: Object.freeze(row.tail_entries.map((entry) => mapEntry(entry as EntryRow))),
           });

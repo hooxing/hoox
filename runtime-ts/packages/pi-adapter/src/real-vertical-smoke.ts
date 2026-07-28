@@ -1,4 +1,4 @@
-import { cubeConfigFromEnv, CubeSandboxGateway, type SandboxHandle } from "@cube-runtime/sandbox";
+import { CubeSandboxGateway, cubeConfigFromEnv, type SandboxHandle } from "@cube-runtime/sandbox";
 import {
   fauxAssistantMessage,
   fauxProvider,
@@ -6,7 +6,11 @@ import {
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { createSafePiSession, type PiSessionController } from "./pi-session.js";
+import {
+  bindTrustedPiModelContextCapability,
+  createSafePiSession,
+  type PiSessionController,
+} from "./pi-session.js";
 
 if (process.env.REAL_PI_CUBE_SMOKE !== "1") {
   throw new Error("真实 Pi + Cube 纵向冒烟默认关闭；请显式设置 REAL_PI_CUBE_SMOKE=1");
@@ -54,8 +58,10 @@ try {
   modelRuntime.registerNativeProvider(faux.provider);
   await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
   const authorizedCalls: Array<{ callId: string; toolName: string; argsDigest: string }> = [];
+  const model = faux.getModel();
   controller = await createSafePiSession({
-    model: faux.getModel(),
+    model,
+    modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
     modelRuntime,
     sandbox,
     authorizeToolEffect: async (call) => {

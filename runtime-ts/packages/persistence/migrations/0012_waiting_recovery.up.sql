@@ -129,7 +129,7 @@ CREATE TABLE waiting_recovery_effect_outbox (
   intent_id text NOT NULL CHECK (octet_length(intent_id) BETWEEN 1 AND 200),
   claim_epoch bigint NOT NULL CHECK (claim_epoch > 0),
   effect text NOT NULL CHECK (effect IN ('connect','create','materialize')),
-  state text NOT NULL CHECK (state IN ('pending','completed','unknown')),
+  state text NOT NULL CHECK (state IN ('pending','executing','completed','unknown')),
   payload jsonb NOT NULL CHECK (jsonb_typeof(payload)='object' AND octet_length(payload::text)<=65536),
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -140,7 +140,12 @@ CREATE TABLE waiting_recovery_effect_outbox (
   CONSTRAINT waiting_recovery_effect_payload_shape CHECK (
     (state='pending' AND payload ?& ARRAY['plan','decision']
       AND payload->>'requestDigest' ~ '^[0-9a-f]{64}$')
+    OR (state='executing' AND payload ?& ARRAY[
+      'plan','decision','requestDigest','executionTokenDigest','executionStartedAt'
+    ] AND payload->>'requestDigest' ~ '^[0-9a-f]{64}$'
+      AND payload->>'executionTokenDigest' ~ '^[0-9a-f]{64}$')
     OR (state='completed' AND payload ? 'plan' AND payload ? 'proof'
+      AND payload->>'requestDigest' ~ '^[0-9a-f]{64}$'
       AND octet_length(payload->'proof'->>'registryId') BETWEEN 1 AND 200
       AND octet_length(payload->'proof'->>'providerSandboxId') BETWEEN 1 AND 200
       AND jsonb_typeof(payload->'proof'->'generation')='number'
@@ -151,7 +156,8 @@ CREATE TABLE waiting_recovery_effect_outbox (
 );
 
 CREATE INDEX waiting_recovery_claim_idx ON waiting_recovery_checkpoints(tenant_id,state,claim_expires_at);
-CREATE INDEX waiting_recovery_effect_dispatch_idx ON waiting_recovery_effect_outbox(tenant_id,state,updated_at);
+CREATE INDEX waiting_recovery_effect_dispatch_idx ON waiting_recovery_effect_outbox(tenant_id,state,updated_at)
+  WHERE state IN ('pending','executing');
 
 ALTER TABLE waiting_recovery_checkpoints ENABLE ROW LEVEL SECURITY;
 ALTER TABLE waiting_recovery_checkpoints FORCE ROW LEVEL SECURITY;

@@ -16,7 +16,12 @@ import {
 import { digestCanonical } from "../../runtime-ts/packages/run-contracts/src/mutation-protocol.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
-import { PgWaitingRecoveryStore } from "../../runtime-ts/packages/persistence/src/pg-waiting-recovery.js";
+import {
+  createTestingPgWaitingRecoveryStore,
+  type PgWaitingRecoveryClaim,
+  type PgWaitingRecoveryStore,
+  type TrustedWaitingRecoveryEffectRequest,
+} from "../../runtime-ts/packages/persistence/src/pg-waiting-recovery.js";
 import {
   createPostgresPool,
   type Pool,
@@ -83,14 +88,20 @@ let runtime!: Pool;
 let store!: PgWaitingRecoveryStore;
 const receiptKey = randomBytes(32);
 let forgedReceipt = false;
+const effectRequests: TrustedWaitingRecoveryEffectRequest[] = [];
+let providerEntered: (() => void) | undefined;
+let providerBlock: Promise<void> | undefined;
 const effectProof = {
   registryId: `rebuilt_registry_${unique}`,
   providerSandboxId: `rebuilt_sandbox_${unique}`,
   generation: 1,
 };
 const effectAdapter = {
-  async execute(input: { requestDigest: string }) {
-    const responseDigest = digestCanonical({ requestDigest: input.requestDigest, ...effectProof });
+  async execute(input: TrustedWaitingRecoveryEffectRequest) {
+    effectRequests.push(input);
+    providerEntered?.();
+    if (providerBlock !== undefined) await providerBlock;
+    const responseDigest = digestCanonical({ request: input, result: effectProof });
     return {
       outcome: "succeeded" as const,
       receipt: {
@@ -105,15 +116,20 @@ const effectAdapter = {
   },
 };
 const receiptVerifier = {
-  verify(receipt: { responseDigest: string; attestation: string }) {
+  verify(input: { receipt: { responseDigest: string; attestation: string } }) {
     return (
-      receipt.attestation ===
-      createHmac("sha256", receiptKey).update(receipt.responseDigest).digest("hex")
+      input.receipt.attestation ===
+      createHmac("sha256", receiptKey).update(input.receipt.responseDigest).digest("hex")
     );
   },
 };
 let schemaCreated = false;
 let roleCreated = false;
+let raceClaim!: PgWaitingRecoveryClaim;
+let raceIntentId = "";
+let raceCheckpointId = "";
+let stalePendingCheckpointId = "";
+let pauseUnknownClaim!: PgWaitingRecoveryClaim;
 
 async function appendWaitingCheckpointFact(nextCheckpointId: string): Promise<void> {
   const rollout = new PgRuntimeRolloutRepository(runtime);
@@ -276,10 +292,25 @@ beforeAll(async () => {
       [scope.tenantId, attemptId, JSON.stringify({ question: "继续？", checkpointId })],
     );
   });
-  store = new PgWaitingRecoveryStore(runtime, effectAdapter, receiptVerifier, 30);
+  const previousNodeEnvironment = process.env.NODE_ENV;
+  process.env.NODE_ENV = "production";
+  expect(() =>
+    createTestingPgWaitingRecoveryStore(runtime, effectAdapter, receiptVerifier, 30),
+  ).toThrow("生产路径禁止");
+  if (previousNodeEnvironment === undefined) delete process.env.NODE_ENV;
+  else process.env.NODE_ENV = previousNodeEnvironment;
+  store = createTestingPgWaitingRecoveryStore(runtime, effectAdapter, receiptVerifier, 30);
   const compatiblePort: WaitingRecoveryStorePort = store;
   expect(compatiblePort).toBe(store);
+  const recoveryModule = await import(
+    "../../runtime-ts/packages/persistence/src/pg-waiting-recovery.js"
+  );
+  expect("PgWaitingRecoveryStore" in recoveryModule).toBe(false);
   expect("completeEffect" in store).toBe(false);
+  expect(Object.isFrozen(store)).toBe(true);
+  expect(Object.isFrozen(Object.getPrototypeOf(store))).toBe(true);
+  expect(Reflect.get(store, "constructor")).toBeUndefined();
+  expect(Reflect.set(store, "execute", async () => ({ outcome: "completed" }))).toBe(false);
   expect(
     await store.record({
       scope,
@@ -396,8 +427,6 @@ describe("waiting recovery PostgreSQL 事实源", () => {
             workspace: "unchanged",
             sandbox: { kind: "sandbox_rebuilt", reason: "missing" },
           },
-          observedWorkspaceHead: { outcome: "empty" },
-          workspaceManifestDigest: hash("o"),
           effect: "create",
         })
       ).outcome,
@@ -422,29 +451,23 @@ describe("waiting recovery PostgreSQL 事实源", () => {
       const intent = await store.beginEffect({
         claim: acquired.claim,
         decision,
-        observedWorkspaceHead: { outcome: "empty" },
-        workspaceManifestDigest: hash("m"),
         effect,
       });
       if (intent.outcome !== "authorized") throw new Error("测试需要 intent");
-      forgedReceipt = true;
+      const callsBeforeForgery = effectRequests.length;
       expect(
         await store.execute({
-          claim: acquired.claim,
+          claim: { ...acquired.claim, claimToken: "forged-claim" },
           intentId: intent.intentId,
-          requestDigest: intent.requestDigest,
           effect,
-          ...(intent.priorProof === undefined ? {} : { priorProof: intent.priorProof }),
         }),
       ).toEqual({ outcome: "claim_lost" });
-      forgedReceipt = false;
+      expect(effectRequests).toHaveLength(callsBeforeForgery);
       expect(
         await store.execute({
           claim: acquired.claim,
           intentId: intent.intentId,
-          requestDigest: intent.requestDigest,
           effect,
-          ...(intent.priorProof === undefined ? {} : { priorProof: intent.priorProof }),
         }),
       ).toEqual({ outcome: "completed" });
     }
@@ -453,12 +476,10 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         await store.beginEffect({
           claim: acquired.claim,
           decision,
-          observedWorkspaceHead: { outcome: "empty" },
-          workspaceManifestDigest: hash("r"),
           effect: "materialize",
         })
       ).outcome,
-    ).toBe("claim_lost");
+    ).toBe("already_completed");
     await withTenantTransaction(runtime, databaseContext, async (client) => {
       await client.query(
         `INSERT INTO workspace_revisions(
@@ -480,6 +501,15 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         [scope.tenantId, scope.workspaceId, changedRevision],
       );
     });
+    expect(
+      (
+        await store.beginEffect({
+          claim: acquired.claim,
+          decision: { ...decision, workspace: "replan" },
+          effect: "materialize",
+        })
+      ).outcome,
+    ).toBe("claim_lost");
     expect(await store.resolve({ claim: acquired.claim, decision })).toBe("claim_lost");
     await withTenantTransaction(runtime, databaseContext, (client) =>
       client.query(
@@ -541,6 +571,55 @@ describe("waiting recovery PostgreSQL 事实源", () => {
     ).toBe("already_resolved");
   });
 
+  it("伪造 attestation 在 provider 返回后收敛 UNKNOWN 且不会重投", async () => {
+    const forgedCheckpointId = `wait_forged_${unique}`;
+    await appendWaitingCheckpointFact(forgedCheckpointId);
+    expect(
+      await store.record({
+        scope,
+        attemptId,
+        checkpointId: forgedCheckpointId,
+        workspaceHeadAtWait: { outcome: "empty" },
+      }),
+    ).toBe("created");
+    const acquired = await store.claim({
+      scope,
+      attemptId,
+      checkpointId: forgedCheckpointId,
+      workerId: "forged-receipt-worker",
+    });
+    if (acquired.outcome !== "claimed") throw new Error("测试需要 forged claim");
+    const intent = await store.beginEffect({
+      claim: acquired.claim,
+      decision: {
+        outcome: "resume",
+        workspace: "unchanged",
+        sandbox: { kind: "sandbox_rebuilt", reason: "missing" },
+      },
+      effect: "create",
+    });
+    if (intent.outcome !== "authorized") throw new Error("测试需要 forged intent");
+    forgedReceipt = true;
+    const callsBefore = effectRequests.length;
+    expect(
+      await store.execute({
+        claim: acquired.claim,
+        intentId: intent.intentId,
+        effect: "create",
+      }),
+    ).toEqual({ outcome: "unknown", effect: "create" });
+    forgedReceipt = false;
+    expect(effectRequests).toHaveLength(callsBefore + 1);
+    expect(
+      await store.execute({
+        claim: acquired.claim,
+        intentId: intent.intentId,
+        effect: "create",
+      }),
+    ).toEqual({ outcome: "claim_lost" });
+    expect(effectRequests).toHaveLength(callsBefore + 1);
+  });
+
   it("崩溃后 Workspace 从 unchanged 变为 replan 时可复用已完成 connect", async () => {
     await withTenantTransaction(runtime, databaseContext, async (client) => {
       await client.query(
@@ -593,8 +672,6 @@ describe("waiting recovery PostgreSQL 事实源", () => {
     const connect = await store.beginEffect({
       claim: acquired.claim,
       decision: unchangedDecision,
-      observedWorkspaceHead: { outcome: "empty" },
-      workspaceManifestDigest: hash("s"),
       effect: "connect",
     });
     if (connect.outcome !== "authorized") throw new Error("测试需要 connect intent");
@@ -602,7 +679,6 @@ describe("waiting recovery PostgreSQL 事实源", () => {
       await store.execute({
         claim: acquired.claim,
         intentId: connect.intentId,
-        requestDigest: connect.requestDigest,
         effect: "connect",
       }),
     ).toEqual({ outcome: "completed" });
@@ -619,8 +695,6 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         await store.beginEffect({
           claim: acquired.claim,
           decision: replanDecision,
-          observedWorkspaceHead: { outcome: "found", revisionId: changedRevision },
-          workspaceManifestDigest: hash("t"),
           effect: "connect",
         })
       ).outcome,
@@ -628,8 +702,6 @@ describe("waiting recovery PostgreSQL 事实源", () => {
     const materialize = await store.beginEffect({
       claim: acquired.claim,
       decision: replanDecision,
-      observedWorkspaceHead: { outcome: "found", revisionId: changedRevision },
-      workspaceManifestDigest: hash("t"),
       effect: "materialize",
     });
     if (materialize.outcome !== "authorized") throw new Error("测试需要 materialize intent");
@@ -637,11 +709,27 @@ describe("waiting recovery PostgreSQL 事实源", () => {
       await store.execute({
         claim: acquired.claim,
         intentId: materialize.intentId,
-        requestDigest: materialize.requestDigest,
         effect: "materialize",
-        ...(materialize.priorProof === undefined ? {} : { priorProof: materialize.priorProof }),
       }),
     ).toEqual({ outcome: "completed" });
+    expect(effectRequests.at(-1)).toMatchObject({
+      scope: {
+        tenantId: scope.tenantId,
+        threadId: scope.threadId,
+        runId: scope.runId,
+        workspaceId: scope.workspaceId,
+      },
+      checkpointId: replanCheckpointId,
+      attemptId,
+      attemptGeneration: 1,
+      effect: "materialize",
+      providerSandboxId: effectProof.providerSandboxId,
+      workspace: {
+        headRevisionId: changedRevision,
+        manifestDigest: hash("q"),
+        objectKey: "test/wait-revision",
+      },
+    });
     expect(await store.resolve({ claim: acquired.claim, decision: replanDecision })).toBe(
       "resolved",
     );
@@ -719,8 +807,6 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         workspace: "unchanged",
         sandbox: { kind: "sandbox_rebuilt", reason: "missing" },
       },
-      observedWorkspaceHead: { outcome: "empty" },
-      workspaceManifestDigest: hash("n"),
       effect: "create",
     });
     if (intent.outcome !== "authorized") throw new Error("测试需要 create intent");
@@ -732,6 +818,15 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         [scope.tenantId, abandonedCheckpointId],
       ),
     );
+    const callsBeforeExpiredExecute = effectRequests.length;
+    expect(
+      await store.execute({
+        claim: acquired.claim,
+        intentId: intent.intentId,
+        effect: "create",
+      }),
+    ).toEqual({ outcome: "claim_lost" });
+    expect(effectRequests).toHaveLength(callsBeforeExpiredExecute);
     expect(
       (
         await store.claim({
@@ -799,21 +894,85 @@ describe("waiting recovery PostgreSQL 事实源", () => {
       workerId: "pause-unknown-worker",
     });
     if (acquired.outcome !== "claimed") throw new Error("测试需要 pause UNKNOWN claim");
+    pauseUnknownClaim = acquired.claim;
     expect(acquired.claim.checkpoint.sandbox?.lifecycle).toBe("pause_unknown");
     expect(
       decideWaitingRecovery(acquired.claim.checkpoint, {
         now: acquired.claim.databaseNow,
         currentWorkspaceHead: { outcome: "empty" },
         canReplanWorkspaceChange: false,
-        workspaceManifestDigest: hash("p"),
       }),
     ).toEqual({
       outcome: "external_effect_unknown",
       effect: "pause",
       requestAutomaticRetry: false,
     });
+  });
+
+  it("provider 执行中 Attempt generation 换代时只调用一次并收敛 UNKNOWN", async () => {
+    await withTenantTransaction(runtime, databaseContext, (client) =>
+      client.query(
+        `UPDATE sandbox_registry SET state='ready',updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND registry_id=$2`,
+        [scope.tenantId, effectProof.registryId],
+      ),
+    );
+    const preparePending = async (nextCheckpointId: string, workerId: string) => {
+      await appendWaitingCheckpointFact(nextCheckpointId);
+      expect(
+        await store.record({
+          scope,
+          attemptId,
+          checkpointId: nextCheckpointId,
+          workspaceHeadAtWait: { outcome: "empty" },
+        }),
+      ).toBe("created");
+      const acquired = await store.claim({
+        scope,
+        attemptId,
+        checkpointId: nextCheckpointId,
+        workerId,
+      });
+      if (acquired.outcome !== "claimed") throw new Error("测试需要 generation claim");
+      const intent = await store.beginEffect({
+        claim: acquired.claim,
+        decision: {
+          outcome: "resume",
+          workspace: "unchanged",
+          sandbox: { kind: "sandbox_rebuilt", reason: "missing" },
+        },
+        effect: "create",
+      });
+      if (intent.outcome !== "authorized") throw new Error("测试需要 generation intent");
+      return { claim: acquired.claim, intentId: intent.intentId };
+    };
+    stalePendingCheckpointId = `wait_stale_pending_${unique}`;
+    await preparePending(stalePendingCheckpointId, "stale-pending-worker");
+    raceCheckpointId = `wait_generation_race_${unique}`;
+    const preparedRace = await preparePending(raceCheckpointId, "generation-race-worker");
+    raceClaim = preparedRace.claim;
+    raceIntentId = preparedRace.intentId;
+    let releaseProvider!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      providerEntered = resolve;
+    });
+    providerBlock = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const callsBefore = effectRequests.length;
+    const execution = store.execute({
+      claim: raceClaim,
+      intentId: raceIntentId,
+      effect: "create",
+    });
+    await entered;
     const replacementAttemptId = `replacement_attempt_${unique}`;
     await withTenantTransaction(runtime, databaseContext, async (client) => {
+      // 与真实 Attempt 创建路径共用 runs 行锁，与 reserve/complete 形成线性化顺序。
+      await client.query(`SELECT 1 FROM runs WHERE tenant_id=$1 AND id=$2 FOR UPDATE`, [
+        scope.tenantId,
+        scope.runId,
+      ]);
       await client.query(
         `INSERT INTO execution_attempts(
            tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,status,stage
@@ -835,9 +994,22 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         [scope.tenantId, replacementAttemptId, scope.runId, scope.threadId, scope.workspaceId],
       );
     });
+    releaseProvider();
+    providerEntered = undefined;
+    providerBlock = undefined;
+    expect(await execution).toEqual({ outcome: "unknown", effect: "create" });
+    expect(effectRequests).toHaveLength(callsBefore + 1);
+    expect(
+      await store.execute({
+        claim: raceClaim,
+        intentId: raceIntentId,
+        effect: "create",
+      }),
+    ).toEqual({ outcome: "claim_lost" });
+    expect(effectRequests).toHaveLength(callsBefore + 1);
     expect(
       await store.resolve({
-        claim: acquired.claim,
+        claim: pauseUnknownClaim,
         decision: {
           outcome: "external_effect_unknown",
           effect: "pause",
@@ -845,5 +1017,22 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         },
       }),
     ).toBe("claim_lost");
+    expect(await store.reconcileExpiredEffect(scope, attemptId, stalePendingCheckpointId)).toBe(
+      "unknown",
+    );
+    const states = await withTenantTransaction(runtime, databaseContext, (client) =>
+      client.query<{ checkpoint_id: string; checkpoint_state: string; effect_state: string }>(
+        `SELECT checkpoint.checkpoint_id,checkpoint.state AS checkpoint_state,
+                effect.state AS effect_state
+           FROM waiting_recovery_checkpoints checkpoint
+           JOIN waiting_recovery_effect_outbox effect USING(tenant_id,checkpoint_id)
+          WHERE checkpoint.tenant_id=$1 AND checkpoint.checkpoint_id IN ($2,$3)
+          ORDER BY checkpoint.checkpoint_id`,
+        [scope.tenantId, raceCheckpointId, stalePendingCheckpointId],
+      ),
+    );
+    expect(states.rows).toHaveLength(2);
+    expect(states.rows.every((row) => row.checkpoint_state === "unknown")).toBe(true);
+    expect(states.rows.every((row) => row.effect_state === "unknown")).toBe(true);
   });
 });

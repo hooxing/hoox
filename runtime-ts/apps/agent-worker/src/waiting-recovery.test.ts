@@ -56,7 +56,6 @@ function observation(patch: Partial<WaitingRecoveryObservation> = {}): WaitingRe
     now: isoTimestamp("2026-07-28T00:09:59.999Z"),
     currentWorkspaceHead: { outcome: "found", revisionId: revisionOne },
     canReplanWorkspaceChange: false,
-    workspaceManifestDigest: "a".repeat(64),
     ...patch,
   };
 }
@@ -178,10 +177,7 @@ describe("waiting + Sandbox 恢复决策", () => {
         return "resolved";
       },
       async beginEffect() {
-        return { outcome: "authorized", intentId: "intent-1", requestDigest: "b".repeat(64) };
-      },
-      async markUnknown() {
-        return "unknown";
+        return { outcome: "authorized", intentId: "intent-1" };
       },
     };
     const effects = {
@@ -240,9 +236,6 @@ describe("waiting + Sandbox 恢复决策", () => {
       async beginEffect() {
         throw new Error("不应调用");
       },
-      async markUnknown() {
-        throw new Error("不应调用");
-      },
       async resolve() {
         throw new Error("不应调用");
       },
@@ -279,9 +272,6 @@ describe("waiting + Sandbox 恢复决策", () => {
         };
       },
       async beginEffect() {
-        throw new Error("不应调用");
-      },
-      async markUnknown() {
         throw new Error("不应调用");
       },
       async resolve() {
@@ -324,12 +314,7 @@ describe("waiting + Sandbox 恢复决策", () => {
         return {
           outcome: "authorized",
           intentId: "intent-unknown",
-          requestDigest: "c".repeat(64),
         };
-      },
-      async markUnknown(input) {
-        order.push(`unknown:${input.effect}`);
-        return "unknown";
       },
       async resolve() {
         order.push("resolve");
@@ -350,19 +335,14 @@ describe("waiting + Sandbox 恢复决策", () => {
         },
       },
     });
-    expect(order).toEqual(["intent", "effect", "unknown:connect"]);
+    expect(order).toEqual(["intent", "effect"]);
     expect(result).toMatchObject({
       outcome: "decided",
       decision: { outcome: "external_effect_unknown", requestAutomaticRetry: false },
     });
   });
 
-  it("materialize 只消费已完成 create 的持久化证明", async () => {
-    const createProof = {
-      registryId: "registry-created",
-      providerSandboxId: "cube-created",
-      generation: 7,
-    };
+  it("materialize 的证明和摘要不暴露给公共协调器", async () => {
     const rebuiltCheckpoint: WaitingRecoveryCheckpoint = {
       attemptId: "attempt-1",
       attemptGeneration: 1,
@@ -370,7 +350,7 @@ describe("waiting + Sandbox 恢复决策", () => {
       scope,
       workspaceHeadAtWait: { outcome: "found", revisionId: revisionOne },
     };
-    const effectInputs: Array<{ effect: string; priorProof?: typeof createProof }> = [];
+    const effectInputs: string[] = [];
     let effectIndex = 0;
     const store: WaitingRecoveryStorePort = {
       async claim() {
@@ -390,17 +370,11 @@ describe("waiting + Sandbox 恢复决策", () => {
           ? {
               outcome: "authorized",
               intentId: "create-intent",
-              requestDigest: "d".repeat(64),
             }
           : {
               outcome: "authorized",
               intentId: "materialize-intent",
-              requestDigest: "e".repeat(64),
-              priorProof: createProof,
             };
-      },
-      async markUnknown() {
-        throw new Error("不应进入 UNKNOWN");
       },
       async resolve() {
         return "resolved";
@@ -415,28 +389,16 @@ describe("waiting + Sandbox 恢复决策", () => {
       observation: observation(),
       effects: {
         async execute(input) {
-          effectInputs.push({
-            effect: input.effect,
-            ...(input.priorProof === undefined ? {} : { priorProof: input.priorProof }),
-          });
-          if (input.effect === "create") {
-            return { outcome: "completed" };
-          }
-          const priorProof = input.priorProof;
-          if (priorProof === undefined) throw new Error("materialize 必须收到 create proof");
+          effectInputs.push(input.effect);
           return { outcome: "completed" };
         },
       },
     });
     expect(result).toMatchObject({ outcome: "decided", decision: { outcome: "resume" } });
-    expect(effectInputs).toEqual([
-      { effect: "create" },
-      { effect: "materialize", priorProof: createProof },
-    ]);
+    expect(effectInputs).toEqual(["create", "materialize"]);
   });
 
   it("Workspace replan 复用 Sandbox 时仍以独立 intent 执行 materialize", async () => {
-    const proof = { registryId: "registry-1", providerSandboxId: "cube-1", generation: 3 };
     const begun: string[] = [];
     const executed: string[] = [];
     const store: WaitingRecoveryStorePort = {
@@ -456,12 +418,7 @@ describe("waiting + Sandbox 恢复决策", () => {
         return {
           outcome: "authorized",
           intentId: `intent-${input.effect}`,
-          requestDigest: input.effect === "connect" ? "f".repeat(64) : "1".repeat(64),
-          ...(input.effect === "materialize" ? { priorProof: proof } : {}),
         };
-      },
-      async markUnknown() {
-        throw new Error("不应进入 UNKNOWN");
       },
       async resolve() {
         return "resolved";

@@ -38,8 +38,6 @@ export interface WaitingRecoveryObservation {
   readonly currentWorkspaceHead: WorkspaceHeadObservation;
   /** 用户提交与 waiting 基线是否可由上层重新计算计划；false 时必须暴露结构化冲突。 */
   readonly canReplanWorkspaceChange: boolean;
-  /** Stable Blob 中目标 Workspace manifest 的 canonical SHA-256。 */
-  readonly workspaceManifestDigest: string;
 }
 
 export type WorkspaceHeadObservation =
@@ -102,36 +100,23 @@ export interface WaitingRecoveryStorePort {
   beginEffect(input: {
     readonly claim: WaitingRecoveryClaim;
     readonly decision: Extract<WaitingRecoveryDecision, { outcome: "resume" }>;
-    readonly observedWorkspaceHead: Exclude<WorkspaceHeadObservation, { outcome: "unavailable" }>;
-    readonly workspaceManifestDigest: string;
     readonly effect: "connect" | "create" | "materialize";
   }): Promise<
     | {
         readonly outcome: "authorized";
         readonly intentId: string;
-        readonly requestDigest: string;
-        readonly priorProof?: SandboxEffectProof;
       }
     | { readonly outcome: "already_completed"; readonly proof: SandboxEffectProof }
     | { readonly outcome: "claim_lost" | "already_started" }
   >;
-  markUnknown(input: {
-    readonly claim: WaitingRecoveryClaim;
-    readonly intentId: string;
-    readonly effect: "connect" | "create" | "materialize";
-    readonly priorProof?: SandboxEffectProof;
-  }): Promise<"unknown" | "claim_lost">;
 }
 
 export interface WaitingRecoveryEffectPort {
+  /** unknown 只能在受控执行器已将 executing intent 持久收敛后返回。 */
   execute(input: {
     readonly intentId: string;
-    readonly requestDigest: string;
     readonly claim: WaitingRecoveryClaim;
-    readonly decision: Extract<WaitingRecoveryDecision, { outcome: "resume" }>;
     readonly effect: "connect" | "create" | "materialize";
-    /** materialize 只能消费已由数据库确认的 create 证明，不能从本地推断 Sandbox 身份。 */
-    readonly priorProof?: SandboxEffectProof;
   }): Promise<
     | { readonly outcome: "completed" }
     | { readonly outcome: "unknown"; readonly effect: "connect" | "create" | "materialize" }
@@ -194,11 +179,6 @@ export async function coordinateWaitingRecovery(input: {
       const started = await input.store.beginEffect({
         claim: claimed.claim,
         decision,
-        observedWorkspaceHead: input.observation.currentWorkspaceHead as Exclude<
-          WorkspaceHeadObservation,
-          { outcome: "unavailable" }
-        >,
-        workspaceManifestDigest: input.observation.workspaceManifestDigest,
         effect: effectKind,
       });
       if (started.outcome !== "authorized") {
@@ -208,27 +188,17 @@ export async function coordinateWaitingRecovery(input: {
       const effect = await input.effects.execute({
         claim: claimed.claim,
         intentId: started.intentId,
-        requestDigest: started.requestDigest,
-        decision,
         effect: effectKind,
-        ...(started.priorProof === undefined ? {} : { priorProof: started.priorProof }),
       });
       if (effect.outcome === "unknown") {
-        const marked = await input.store.markUnknown({
-          claim: claimed.claim,
-          intentId: started.intentId,
-          effect: effect.effect,
-        });
-        return marked === "unknown"
-          ? {
-              outcome: "decided",
-              decision: {
-                outcome: "external_effect_unknown",
-                effect: effect.effect,
-                requestAutomaticRetry: false,
-              },
-            }
-          : { outcome: "claim_lost" };
+        return {
+          outcome: "decided",
+          decision: {
+            outcome: "external_effect_unknown",
+            effect: effect.effect,
+            requestAutomaticRetry: false,
+          },
+        };
       }
       if (effect.outcome === "claim_lost") return { outcome: "claim_lost" };
     }

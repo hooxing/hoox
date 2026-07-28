@@ -462,6 +462,9 @@ export class RunWorker {
             cancellation,
           );
         }
+        if (turn.kind === "recovery_required") {
+          return await this.recoverWithCleanup(context, sandbox, turn.code, cancellation);
+        }
         if (context.agentFailure) {
           return await this.finalizeWithCleanup(
             context,

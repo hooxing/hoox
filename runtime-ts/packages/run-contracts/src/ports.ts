@@ -499,6 +499,11 @@ export interface OrphanSandboxCleanupPort {
 export type AgentTurnOutcome =
   | { readonly kind: "completed" }
   | {
+      /** Tool Observation 未形成可恢复的 durable 事实；本 Attempt 不能继续成功。 */
+      readonly kind: "recovery_required";
+      readonly code: "PERSISTENCE_UNAVAILABLE" | "IDEMPOTENCY_CONFLICT";
+    }
+  | {
       readonly kind: "waiting";
       readonly question: string;
       readonly rolloutProjection: ControlledRolloutProjection;

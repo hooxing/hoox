@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { CopyObjectCommand, DeleteObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { ToolObservationPipeline } from "@cube-runtime/context-policy";
+import { encodeControlledToolReceipt, ToolObservationPipeline } from "@cube-runtime/context-policy";
 import {
   agentThreadId,
   runId,
@@ -10,6 +10,7 @@ import {
   userId,
 } from "@cube-runtime/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { createPgDurableObservationRecorderFactory } from "../../runtime-ts/apps/agent-worker/src/pg-observation-assembly.js";
 import {
   createS3BlobStore,
   createS3RetiredBlobTombstoneScrubber,
@@ -410,16 +411,25 @@ describe("PostgreSQL stable blob 生命周期", () => {
     ).toBe("created");
 
     const blobs = createS3BlobStore(minioConfig(), repository);
-    let observedOutput = "😀".repeat(1000);
+    let observedOutput = encodeControlledToolReceipt("sandbox_command", "succeeded");
     const rolloutAdapter = new PgToolObservationRolloutAdapter(rollout, context);
     const pipeline = new ToolObservationPipeline(
       createDurableTraceBlobPersistence(repository, blobs),
-      { appendToolResult: async () => ({ outcome: "unknown" }) },
-      { readSanitizedOutput: async () => observedOutput },
+      {
+        appendToolCall: async () => ({ outcome: "unknown" }),
+        appendToolResult: async () => ({ outcome: "unknown" }),
+      },
+      { readControlledReceipt: async () => observedOutput },
       { maxModelObservationBytes: 64 },
     );
     const command = {
-      tenantId: scopeA.tenantId,
+      binding: {
+        tenantId: context.scope.tenantId,
+        threadId: context.scope.threadId,
+        runId: context.scope.runId,
+        attemptId: context.scope.attemptId,
+        agentThreadId: context.scope.agentThreadId,
+      },
       idempotencyKey: `result.${suffix}`,
       toolCallId: `call_${suffix}`,
       toolName: "sandbox_command",
@@ -443,14 +453,14 @@ describe("PostgreSQL stable blob 生命周期", () => {
         ),
       ),
       rolloutAdapter,
-      { readSanitizedOutput: async () => observedOutput },
+      { readControlledReceipt: async () => observedOutput },
       { maxModelObservationBytes: 64 },
     );
     await expect(restarted.record(command)).resolves.toMatchObject({ outcome: "recorded" });
     await expect(restarted.record(command)).resolves.toMatchObject({ outcome: "replayed" });
-    observedOutput = "同一个幂等键但正文不同";
+    observedOutput = encodeControlledToolReceipt("sandbox_command", "failed");
     await expect(restarted.record(command)).resolves.toEqual({ outcome: "conflict" });
-    observedOutput = "😀".repeat(1000);
+    observedOutput = encodeControlledToolReceipt("sandbox_command", "succeeded");
     const restored = await rollout.loadRecovery({
       context,
       compatibility: {
@@ -468,6 +478,35 @@ describe("PostgreSQL stable blob 生命周期", () => {
         { kind: "tool_result", toolCallId: `call_${suffix}`, isTruncated: true },
       ],
     });
+
+    const factoryCallId = `factory_${suffix}`;
+    const recorderFactory = createPgDurableObservationRecorderFactory({
+      blobRepository: repository,
+      blobs,
+      rolloutRepository: rollout,
+      contextForSession: () => context,
+      policy: { maxModelObservationBytes: 64 },
+    });
+    const factoryReceipt = encodeControlledToolReceipt("sandbox_command", "succeeded");
+    const recorder = recorderFactory(
+      {
+        scope: {
+          tenantId: context.scope.tenantId,
+          threadId: context.scope.threadId,
+          runId: context.scope.runId,
+          rootRunId: context.scope.runId,
+          workspaceId,
+        },
+        attemptId: context.scope.attemptId,
+      } as never,
+      { readControlledReceipt: async () => factoryReceipt },
+    );
+    await expect(
+      recorder.recordStarted({ toolCallId: factoryCallId, toolName: "sandbox_command" }),
+    ).resolves.toBe("recorded");
+    await expect(
+      recorder.record({ toolCallId: factoryCallId, toolName: "sandbox_command" }),
+    ).resolves.toMatchObject({ outcome: "recorded" });
 
     const boundaryCallId = `boundary_${suffix}`;
     expect(
@@ -488,12 +527,21 @@ describe("PostgreSQL stable blob 生命周期", () => {
     const boundary = new ToolObservationPipeline(
       createDurableTraceBlobPersistence(repository, blobs),
       new PgToolObservationRolloutAdapter(rollout, context),
-      { readSanitizedOutput: async () => "x".repeat(30_000) },
-      { maxModelObservationBytes: 30_000, maxRolloutBodyBytes: 16 * 1024 },
+      {
+        readControlledReceipt: async () =>
+          encodeControlledToolReceipt("sandbox_command", "succeeded"),
+      },
+      { maxModelObservationBytes: 64, maxRolloutBodyBytes: 16 * 1024 },
     );
     await expect(
       boundary.record({
-        tenantId: scopeA.tenantId,
+        binding: {
+          tenantId: context.scope.tenantId,
+          threadId: context.scope.threadId,
+          runId: context.scope.runId,
+          attemptId: context.scope.attemptId,
+          agentThreadId: context.scope.agentThreadId,
+        },
         idempotencyKey: `boundary.result.${suffix}`,
         toolCallId: boundaryCallId,
         toolName: "sandbox_command",
@@ -510,8 +558,9 @@ describe("PostgreSQL stable blob 生命周期", () => {
           [scopeA.tenantId, rolloutScope.attemptId, boundaryCallId],
         ),
     );
-    expect(bodySize.rows[0]?.bytes).toBeLessThanOrEqual(16 * 1024);
-    expect(bodySize.rows[0]?.bytes).toBeGreaterThan(16_000);
+    expect(bodySize.rows[0]?.bytes).toBeGreaterThan(0);
+    // 固定受控回执不会为“贴近 16 KiB”而填充原始输出；Rollout body 应保持很小。
+    expect(bodySize.rows[0]?.bytes).toBeLessThan(1024);
   });
 
   it("并发 reserve 原子去重，同 operation 可读回且跨 Tenant 隔离", async () => {

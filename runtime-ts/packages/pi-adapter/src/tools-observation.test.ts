@@ -18,7 +18,7 @@ describe("受审 Tool 输出脱敏边界", () => {
       },
       (outputs) => ({
         record: async (call) => {
-          const observation = await outputs.readSanitizedOutput(call);
+          const observation = await outputs.readControlledReceipt(call);
           if (observation === undefined) throw new Error("测试缺少受控 Observation");
           expect(observation).toContain("sandbox_untrusted");
           expect(observation).not.toContain(rawOutput);
@@ -58,7 +58,7 @@ describe("受审 Tool 输出脱敏边界", () => {
       },
       (outputs) => ({
         record: async (call) => {
-          const observation = await outputs.readSanitizedOutput(call);
+          const observation = await outputs.readControlledReceipt(call);
           return observation === undefined
             ? { outcome: "conflict" as const }
             : { outcome: "recorded" as const, observation, isTruncated: false };
@@ -74,7 +74,7 @@ describe("受审 Tool 输出脱敏边界", () => {
       () => undefined,
       {} as never,
     );
-    const output = await observed.outputs.readSanitizedOutput({
+    const output = await observed.outputs.readControlledReceipt({
       toolCallId: "call_secret",
       toolName: "sandbox_command",
     });
@@ -82,10 +82,38 @@ describe("受审 Tool 输出脱敏边界", () => {
     expect(output).not.toContain(secret);
     expect(JSON.stringify(result)).not.toContain(secret);
     await expect(
-      observed.outputs.readSanitizedOutput({
+      observed.outputs.readControlledReceipt({
         toolCallId: "call_secret",
         toolName: "sandbox_read_file",
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("durable Observation 未收敛时抛错，不伪装成普通 Tool 失败供模型继续", async () => {
+    const sandbox = {
+      command: async () => ({ output: "不得泄漏" }),
+    } as unknown as SandboxHandle;
+    const observed = createObservedSandboxTools(
+      sandbox,
+      {
+        authorizeToolEffect: async () => ({
+          consumedAtMonotonicMs: performance.now(),
+          maxContinuationDelayMs: 1000,
+        }),
+      },
+      () => ({ record: async () => ({ outcome: "unknown" as const }) }),
+    );
+    const tool = observed.tools.find((item) => item.name === "sandbox_command");
+    if (tool === undefined) throw new Error("测试缺少 sandbox_command");
+
+    await expect(
+      tool.execute(
+        "call_unknown",
+        { command: "echo test" },
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("未能形成 durable 事实");
   });
 });

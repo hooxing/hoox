@@ -37,13 +37,15 @@ try {
     }),
     (context) => {
       const messages = JSON.stringify(context.messages);
-      writeObservationSeen = messages.includes("written") && messages.includes("true");
+      writeObservationSeen =
+        messages.includes("sandbox_untrusted") && !messages.includes('"written":true');
       return fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path }), {
         stopReason: "toolUse",
       });
     },
     (context) => {
-      readObservationSeen = JSON.stringify(context.messages).includes(content);
+      const messages = JSON.stringify(context.messages);
+      readObservationSeen = messages.includes("sandbox_untrusted") && !messages.includes(content);
       return fauxAssistantMessage("真实纵向链路完成");
     },
   ]);
@@ -67,7 +69,7 @@ try {
     },
     createToolObservationRecorder: (outputs) => ({
       record: async (call) => {
-        const observation = await outputs.readSanitizedOutput(call);
+        const observation = await outputs.readControlledReceipt(call);
         return observation === undefined
           ? { outcome: "conflict" as const }
           : { outcome: "recorded" as const, observation, isTruncated: false };

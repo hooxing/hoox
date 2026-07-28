@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import {
+  assertControlledToolObservation,
+  encodeControlledToolReceipt,
+  parseControlledToolReceipt,
+} from "@cube-runtime/context-policy";
 import { types } from "node:util";
 import { type RolloutCompatibilityIdentity, sha256Digest } from "@cube-runtime/domain";
 import {
@@ -117,17 +122,21 @@ export interface CreateSafePiSessionOptions {
  * 宿主路径或任意 Pi 内部 entry；恢复时只把经过裁剪的文本上下文重新投影给新 Session。
  */
 export interface ControlledRolloutProjection {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly checkpointId: string;
-  readonly turns: readonly {
-    readonly role: "user" | "assistant";
-    readonly text: string;
-  }[];
-  /** 经 Rollout/Blob 事实验证的低信任工具观察；绝不恢复原始 Sandbox 输出。 */
-  readonly toolObservations?: readonly {
-    readonly toolCallId: string;
-    readonly observation: string;
-  }[];
+  readonly items: readonly (
+    | { readonly kind: "turn"; readonly role: "user" | "assistant"; readonly text: string }
+    | {
+        readonly kind: "tool_receipt";
+        readonly toolCallId: string;
+        readonly toolName: string;
+        readonly outcome: "succeeded" | "failed";
+        readonly observation: string;
+        readonly isTruncated: boolean;
+        readonly modelVisibleBytes: number;
+        readonly reason?: "model_utf8_budget_or_rollout_body_budget";
+      }
+  )[];
 }
 
 const LOGICAL_WORKSPACE = "/workspace" as const;
@@ -305,32 +314,44 @@ function canonicalProtocolValue(value: unknown): unknown {
 function formatRolloutProjection(
   projection: ControlledRolloutProjection | undefined,
 ): string | undefined {
-  if (projection === undefined || projection.turns.length === 0) return undefined;
+  if (projection === undefined || projection.items.length === 0) return undefined;
   if (
-    projection.schemaVersion !== 1 ||
+    projection.schemaVersion !== 2 ||
     !projection.checkpointId.trim() ||
     projection.checkpointId.length > 200 ||
-    projection.turns.length > 200
+    projection.items.length > 200
   ) {
     throw new Error("RolloutProjection 版本或 checkpointId 无效");
   }
-  const lines = projection.turns.map((turn) => {
-    if (turn.role !== "user" && turn.role !== "assistant") {
+  const lines = projection.items.map((item) => {
+    if (item.kind === "tool_receipt") {
+      try {
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(item.toolCallId)) throw new Error();
+        const receipt = parseControlledToolReceipt(
+          encodeControlledToolReceipt(item.toolName, item.outcome),
+        );
+        assertControlledToolObservation({
+          receipt,
+          observation: item.observation,
+          isTruncated: item.isTruncated,
+          modelVisibleBytes: item.modelVisibleBytes,
+          ...(item.reason === undefined ? {} : { reason: item.reason }),
+        });
+      } catch {
+        throw new Error("RolloutProjection 工具 Observation 无效");
+      }
+      return `工具 ${item.toolCallId} 的低信任观察：${item.observation}`;
+    }
+    if (item.role !== "user" && item.role !== "assistant") {
       throw new Error("RolloutProjection role 无效");
     }
-    const text = turn.text.trim();
+    const text = item.text.trim();
     if (!text || text.length > 16_000) throw new Error("RolloutProjection 文本长度无效");
     if (/(?:[A-Za-z]:[\\/]|\/(?:home|Users|var\/lib|opt|srv)\/)/u.test(text)) {
       throw new Error("RolloutProjection 不能包含宿主机路径");
     }
-    return `${turn.role === "user" ? "用户" : "助手"}：${text}`;
+    return `${item.role === "user" ? "用户" : "助手"}：${text}`;
   });
-  for (const item of projection.toolObservations ?? []) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(item.toolCallId) || !item.observation.trim()) {
-      throw new Error("RolloutProjection 工具 Observation 无效");
-    }
-    lines.push(`工具 ${item.toolCallId} 的低信任观察：${item.observation}`);
-  }
   const rendered = `以下是 Runtime 审核并持久化的历史上下文投影（checkpoint=${projection.checkpointId}）：\n${lines.join("\n")}`;
   if (new TextEncoder().encode(rendered).byteLength > 64 * 1024) {
     throw new Error("RolloutProjection 超过 64 KiB 上限");

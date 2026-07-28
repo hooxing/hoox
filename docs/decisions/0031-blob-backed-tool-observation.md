@@ -6,28 +6,30 @@
 
 ## 背景
 
-工具可能输出超大文本、Unicode 内容或失败细节。若直接把结果塞入 Pi 会话或 Rollout，既无法稳定控制模型上下文，也会使重启后的事实与模型可见内容不一致。仅先截断则丢失可审计的完整输出；仅上传对象而未完成 stable 引用又不能称为已保存。
+Sandbox 工具的 stdout、文件内容、代码结果和异常文本都可能包含密钥或提示注入，不能直接进入 Pi、Rollout 或审计 Blob。Runtime 仍需持久化一个可验证、可恢复且受预算约束的工具执行事实，并保证数据库响应在 COMMIT 后丢失时不会产生第二份语义不同的结果。
 
 ## 决策
 
-`ToolObservationPipeline` 采用严格顺序：先将 UTF-8 原始输出经 `TraceBlobPersistencePort` 持久化为同租户 `stable/trace` Blob，校验 reference、摘要、大小、incarnation 与物理键，再生成 observation 并通过 `ToolObservationRolloutPort` 写入 `tool_result`。两个端口均使用派生的固定幂等键，因此进程重启/重放不改变事实。
+`createObservedSandboxTools` 在 Tool adapter 闭包内丢弃原始成功值和错误文本，只生成固定、精确编码的 `ControlledToolReceipt`。其 schema 只允许 `schemaVersion=1`、`trust=sandbox_untrusted`、受限工具名、成功/失败枚举和由 Runtime 固定的消息；调用方不能提交任意“已脱敏文本”。`ToolObservationPipeline` 只读取并重新解析该回执，原始输出不写 Trace、Rollout、日志或模型上下文。
 
-Pipeline 不公开创建“受信输出”的函数。`createObservedSandboxTools` 在实际 Tool adapter 的闭包内将成功 stdout、文件内容、代码输出和失败 message 都替换为固定结构的 `sandbox_untrusted` Observation；它们可能含密钥或提示注入，故原文既不能作为 Pipeline 参数，也不会写入 Trace、Rollout、日志或模型上下文。该结构只声明工具名和成功/失败，明确原始数据不能作为指令执行。Blob commit 的首个 `upload_pending` snapshot 已绑定 expected purpose、SHA-256 与 size，之后每次加载和重启都核验 staged/stable/allocation 的同一身份，同键异文稳定冲突。
+Pipeline 采用严格顺序：先将受控回执的 UTF-8 字节经 `TraceBlobPersistencePort` 持久化为同租户 `stable/trace` Blob，校验 reference、摘要、大小、incarnation 与物理键，再生成模型可见 observation 并通过 `ToolObservationRolloutPort` 写入 `tool_result`。Rollout body 使用精确的 schemaVersion 2，并绑定回执摘要、大小、固定回执、可见字节数和截断原因；恢复时还要与数据库返回的 stable Blob reference、摘要和大小逐字段相互验证。
 
-模型可见 payload 与 Rollout body 使用两套独立硬预算；后者不超过数据库的 16 KiB 约束。模型可见内容按 UTF-8 字节预算截断，并按 Unicode code point 迭代，不能切开多字节字符；这不是 grapheme cluster 契约，组合字符可能在 code point 边界分开。占位符必须完整装入，否则返回空字符串，绝不生成半个标记。完整的工具调用配对、工具名、原始字节摘要、大小、截断原因及受限 Blob ref 写入 Rollout body；不持久化不可信的物理对象键。
+实际执行路径在领取 Sandbox 副作用许可后、触碰 Sandbox 前自动追加 `{toolName}` 的 `tool_call` 前驱；结果适配器只允许同一 `tenantId + threadId + runId + attemptId + agentThreadId + toolCallId` 的 `tool_result`。生产工厂必须把当前完整 `ExecutionScope`、Attempt 和 AgentThread 绑定进两个端口，错接任何一项都在写入前失败。数据库的相邻配对约束继续保证同 call ID 的 `tool_call` 后只能紧跟 `tool_result`。
 
-Blob 返回 `unavailable`、`unknown` 或 `conflict` 时，不写 Rollout，不回传完整输出，也不显示“已保存”。Rollout 失败/未知时完整输出仍只保留在 Blob，调用方必须进行同一命令的幂等恢复，不能另造 observation。
+模型可见 payload 与 Rollout body 使用两套独立硬预算；后者不超过数据库的 16 KiB 约束。模型可见内容按 UTF-8 字节预算和 Unicode code point 截断，不能切开多字节字符；这不是 grapheme cluster 契约。截断占位符只声明“受控执行回执已保存”，必须完整装入，否则返回空字符串。
+
+Blob 或 Rollout 返回 `unknown` 时，适配器以完全相同的冻结命令和幂等键立即读回/重放一次：若第一次实际已提交，第二次必须收敛为 `replayed`；仍未知则中止 Pi，本 Attempt 进入 `recovery_required`，绝不能返回普通 Tool error 后继续成功。`conflict` 同样不能降级为模型可见结果。
 
 ## 备选方案
 
-1. 先写 Rollout，再异步上传 Blob：Rollout 可指向不存在内容，重启期间无法证明完整输出存在。
-2. 仅在超限时保存 Blob：小输出的审计、重放与安全语义会分叉。
-3. 让 Pi/模型 SDK 负责截断：无法把预算、完整事实和恢复策略固定在 Runtime。
+1. 保存原始输出再声明“低信任”：仍扩大密钥与提示注入的持久暴露面。
+2. 先写 Rollout，再异步上传 Blob：Rollout 可指向不存在的回执，重启期间无法证明事实。
+3. 让 Pi/模型 SDK 负责截断：无法把预算、Blob 证明和恢复策略固定在 Runtime。
 
 ## 影响与可逆性
 
-`DurableTraceBlobPersistenceAdapter` 与受审工厂已经把 `TraceBlobPersistencePort` 接到现有 PostgreSQL Blob commit/promotion 状态机和 S3/MinIO：暂存、引用提交、allocation、授权 promotion、stable HEAD/mark 与 staging 清理均以持久 snapshot 恢复。受审工厂还要求依赖声明并校验完整 `ExecutionScope + attemptId`，拒绝错接的 tenant/run/attempt。`PgToolObservationRolloutAdapter` 接到 `PgRuntimeRolloutRepository.append` 的 `tool_result` 草稿。Rollout 表通过 `(tenant_id, reference_id, state, purpose, sha256, size)` 复合外键绑定 `blob_references` 的 stable/trace 事实；适配器本身不以一次应用层查询冒充授权或完整性证明。前驱复合外键与 CHECK 约束保证 `tool_call` 后只能紧跟相同 `toolCallId` 的 `tool_result`。端口可替换，但不得改变“先 stable Blob，后 Rollout”的顺序。
+`DurableTraceBlobPersistenceAdapter` 将回执 Blob 接到现有 PostgreSQL Blob commit/promotion 状态机和 S3/MinIO。`PgToolObservationRolloutAdapter` 接到 PostgreSQL Rollout，并在写入前验证可信 scope 绑定。Rollout 表通过复合外键绑定 stable/trace reference；适配器不以应用层一次查询冒充授权或完整性证明。端口可替换，但不得改变“自动前驱 → Sandbox → stable 回执 Blob → tool_result”的顺序和同键 UNKNOWN 收敛规则。
 
 ## 验证
 
-单元测试覆盖大输出、Unicode、极小预算、双预算、Blob unknown、重放幂等键及跨租户伪造 Blob。真实 PostgreSQL + MinIO 集成覆盖 Trace promotion、Rollout append 与进程级 adapter 重建后的同命令重放；既有 Rollout 集成继续覆盖配对、幂等冲突、跨租户 RLS 与 stable/trace 外键。
+单元测试覆盖固定回执精确 schema、原始成功/失败值隔离、Unicode/极小预算、双预算、Blob unknown、同键重放、scope 伪造、自动前驱和持续 UNKNOWN 强制恢复。真实 PostgreSQL + MinIO 集成覆盖自动 `tool_call`、Trace promotion、Rollout append 与进程级 adapter 重建后的同命令重放。

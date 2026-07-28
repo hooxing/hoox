@@ -95,7 +95,9 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
             [input.scope.tenantId, input.runId],
           );
           const attemptId = attempt.rows[0]?.attempt_id;
-          if (attemptId === undefined) return { outcome: "found", events: [] } as const;
+          if (attemptId === undefined) {
+            return { outcome: "found", events: [], hasMore: false } as const;
+          }
           const events = await client.query<{
             sequence: string;
             kind: string;
@@ -105,12 +107,15 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
             `SELECT sequence,kind,payload,occurred_at FROM run_events
             WHERE tenant_id=$1 AND attempt_id=$2 AND sequence>$3
             ORDER BY sequence ASC LIMIT $4`,
-            [input.scope.tenantId, attemptId, input.after, input.limit],
+            [input.scope.tenantId, attemptId, input.after, input.limit + 1],
           );
+          const hasMore = events.rows.length > input.limit;
           return {
             outcome: "found",
             attemptId,
-            events: events.rows.map((event) => ({
+            // 只在固定的最新 Attempt 内判定 hasMore，绝不让 next cursor 跨 Attempt。
+            hasMore,
+            events: events.rows.slice(0, input.limit).map((event) => ({
               sequence: Number(event.sequence),
               kind: event.kind,
               payload: event.payload,

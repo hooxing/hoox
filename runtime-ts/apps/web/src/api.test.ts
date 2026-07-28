@@ -39,6 +39,20 @@ describe("RuntimeApi", () => {
     expect(headers.get("idempotency-key")).toMatch(/^[-a-z0-9]{8,}$/iu);
   });
 
+  it("恢复读取走 Thread 嵌套的最新 Run 快照接口", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ version: "v1", requestId: "req_1", data: { items: [{ id: "run_2" }] } }),
+          { status: 200 },
+        ),
+      );
+    const api = new RuntimeApi(fetcher);
+    await expect(api.listLatestRuns("thread_1")).resolves.toEqual([{ id: "run_2" }]);
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/api/v1/threads/thread_1/runs?limit=1");
+  });
+
   it("将公开错误转为可重试 API 错误", async () => {
     const api = new RuntimeApi(
       vi.fn().mockResolvedValue(

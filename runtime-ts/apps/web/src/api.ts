@@ -154,6 +154,17 @@ export class RuntimeApi {
   async listThreads(): Promise<readonly Thread[]> {
     return asArray(await this.request<unknown>("/v1/threads?limit=100")) as readonly Thread[];
   }
+  /**
+   * 读取 Thread 在本次服务端快照中的最新 Run 窗口；它不是跨写入可续接的历史分页。
+   * 恢复入口通常只需 limit=1，随后仍须分别按该 Run 拉取最新 Attempt 的事件和 Artifact。
+   */
+  async listLatestRuns(threadId: string, limit = 1): Promise<readonly Run[]> {
+    return asArray(
+      await this.request<unknown>(
+        `/v1/threads/${encodeURIComponent(threadId)}/runs?limit=${limit}`,
+      ),
+    ) as readonly Run[];
+  }
   createThread(title: string): Promise<Thread> {
     return this.request("/v1/threads", { method: "POST", body: JSON.stringify({ title }) });
   }

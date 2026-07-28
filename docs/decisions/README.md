@@ -49,6 +49,7 @@
 | [ADR-0041](0041-worker-stop-and-tool-rejection-fail-closed.md) | Worker 停机与工具拒绝的失败关闭边界 | 已接受 | 2026-07-28 |
 | [ADR-0042](0042-local-web-experience-read-contract.md) | 本地 Web 体验的 Run 事件与 Artifact 读取契约 | 已接受 | 2026-07-28 |
 | [ADR-0043](0043-cubesandbox-proxy-default-routing.md) | CubeSandbox 数据面缺省路由 | 已接受 | 2026-07-28 |
+| [ADR-0045](0045-thread-latest-run-recovery-contract.md) | Thread 最新 Run 恢复读取契约 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录
 

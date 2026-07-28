@@ -47,6 +47,12 @@ export function createObservedSandboxTools(
 ): {
   readonly tools: ReturnType<typeof createSandboxTools>;
   readonly outputs: ControlledToolReceiptSource;
+  /** 仅供同一 Pi Session 内的其他受审工具写入相同固定回执与 durable result。 */
+  readonly recordControlledReceipt: (
+    callId: string,
+    toolName: string,
+    outcome: "succeeded" | "failed",
+  ) => Promise<ToolObservationResult>;
 } {
   const outputs = new Map<string, { readonly name: string; readonly text: string }>();
   const source: ControlledToolReceiptSource = {
@@ -67,6 +73,8 @@ export function createObservedSandboxTools(
   return {
     tools: createSandboxToolsInternal(sandbox, authorizer, capture),
     outputs: source,
+    recordControlledReceipt: (callId, toolName, outcome) =>
+      capture(callId, toolName, controlledObservation(toolName, outcome)),
   };
 }
 

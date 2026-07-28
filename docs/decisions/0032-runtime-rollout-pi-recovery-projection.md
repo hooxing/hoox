@@ -10,11 +10,11 @@ Pi `AgentSession` 是 Worker 进程内的短生命周期模型执行器。它的
 
 ## 决策
 
-1. 公开恢复入口不接受调用者提交期望身份或任意 facts。它从实际 Pi Model、可信 Prompt Builder、本次真实 Tool Schema 和 Skill 分区派生五项兼容身份，再调用 PostgreSQL `loadRecovery`；loaded 分支仍逐项复核同一快照中的记录身份。
+1. 公开恢复入口不接受调用者提交期望身份、actor/context 或任意 facts。它从实际 Pi Model、可信 Prompt Builder、本次真实 Tool Schema 和 Skill 分区派生五项兼容身份，再凭 RunWorker 当前双栅栏调用 PostgreSQL 的 claim-backed root stream 入口。Repository 在同一事务从 Thread owner 与 active Membership 推导 actor 并幂等开流；Session 工厂随后以返回的可信 context 调用 `loadRecovery`，loaded 分支仍逐项复核同一快照中的记录身份。
 2. 恢复投影固定为 `schemaVersion=2` 的单一有序 `items` 序列。user/assistant turn 与受控 `tool_receipt` 按原始 sequence 交错追加；不存在把 tool item 放进第二个数组后丢失相对顺序的路径。即使没有文本 turn、只有工具事实，投影仍会进入新 Session。
 3. checkpoint 必须使用同一 schemaVersion 2、同 checkpoint ID 和有界受控项目。目前 checkpoint 只允许 user/assistant turn；含 tool receipt 的 checkpoint 会拒绝，因为缺少原始 `tool_call + tool_result + stable Blob` 证明。未来若要压缩 Tool 事实，必须扩展 checkpoint provenance，不能信任 checkpoint 内自报的工具正文。
 4. 恢复器重算每条 entry 的 `bodyDigest` 与 checkpoint 的 `projectionDigest`，检查 checkpoint window、replacement history 单调前缀和 tail 原始顺序。输入不得先排序掩盖数据库协议错误。
-5. tail user/assistant 文本按连续 sequence 加入有序投影。`tool_call` 必须携带受限 `toolName`，并与紧邻、同 call ID 的 `tool_result` 配对。恢复器只接受 ADR-0031 的精确 body schema，重新解析固定回执，验证工具名、成功/失败、Blob reference、摘要、大小、可见字节数、截断标记、原因和安全前缀，然后重建 `tool_receipt`；任意额外字段或自报文本均拒绝。
+5. tail user/assistant 文本按连续 sequence 加入有序投影。`tool_call` 必须携带受限 `toolName`，并与紧邻、同 call ID 的 `tool_result` 配对。恢复器只接受 ADR-0031 的精确 body schema，重新解析固定回执，验证工具名、成功/失败、Blob reference、摘要、大小、可见字节数、截断标记、原因和安全前缀，然后重建 `tool_receipt`；`modelVisibleBytes` 必须是非负安全整数，禁止字符串等隐式数值转换；`isTruncated=true` 时 observation 必须是严格短于完整回执的合法 UTF-8 安全前缀，`false` 时必须是完整回执。任意额外字段或自报文本均拒绝。
 6. 若 tail 最后存在未配对 tool call，返回 `requires_tool_reconciliation`。可信 Worker 必须根据外部副作用事实补齐或关闭 Attempt；恢复器不创建 Session，不伪造 tool result。
 7. waiting/terminal 保持 Worker 状态事实。平台 Harness 和 capability manifest 始终由当前可信 Builder 与实际 Pi custom tools 重建；Tenant、Skill、User 等低信任上下文不能进入 system role。
 8. 创建成功路径总是调用 `createSafePiSession` 新建内存 Session；不读、不写、不依赖 Pi Session 文件。Pi compaction 保持 `enabled=false`，窄 Controller 不暴露 `compact`。

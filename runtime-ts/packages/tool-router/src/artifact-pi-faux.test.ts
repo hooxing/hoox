@@ -259,9 +259,10 @@ describe("Pi Faux Artifact 纵向链路", () => {
       expect(initialContext).toContain("declare_deliverables");
       expect(initialContext).toContain("publish_artifact");
       expect(initialContext).not.toContain("request_user_input");
-      expect(correctionContext).toContain("ARTIFACT_PUBLICATION_FAILED");
-      expect(correctionContext).toContain("correctable");
-      expect(completionContext).toContain("ARTIFACT_PUBLISHED");
+      expect(correctionContext).toContain("sandbox_untrusted");
+      expect(completionContext).toContain("sandbox_untrusted");
+      expect(correctionContext).not.toContain("ARTIFACT_PUBLICATION_FAILED");
+      expect(completionContext).not.toContain("ARTIFACT_PUBLISHED");
       expect(JSON.stringify({ correctionContext, completionContext, events })).not.toMatch(
         /objectKey|physicalObjectKey|signed url|X-Amz|private object/iu,
       );

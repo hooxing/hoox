@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  assertControlledToolObservation,
   encodeControlledToolReceipt,
+  parseControlledToolReceipt,
   ToolObservationPipeline,
   type StableTraceBlobIdentity,
   type ToolObservationRolloutPort,
@@ -150,5 +152,37 @@ describe("Tool Observation Blob 截断切片", () => {
       16 * 1024,
     );
     expect(JSON.stringify(rollout.calls[0]?.body)).not.toContain("trace/observation");
+  });
+
+  it("截断标记必须严格对应完整回执的更短 UTF-8 前缀", () => {
+    const encoded = encodeControlledToolReceipt("sandbox_command", "succeeded");
+    const receipt = parseControlledToolReceipt(encoded);
+    const bytes = Buffer.byteLength(encoded, "utf8");
+    expect(() =>
+      assertControlledToolObservation({
+        receipt,
+        observation: encoded,
+        isTruncated: true,
+        modelVisibleBytes: bytes,
+        reason: "model_utf8_budget_or_rollout_body_budget",
+      }),
+    ).toThrow("严格短于");
+    expect(() =>
+      assertControlledToolObservation({
+        receipt,
+        observation: `${encoded}x`,
+        isTruncated: true,
+        modelVisibleBytes: bytes + 1,
+        reason: "model_utf8_budget_or_rollout_body_budget",
+      }),
+    ).toThrow("严格短于");
+    expect(() =>
+      assertControlledToolObservation({
+        receipt,
+        observation: encoded.slice(0, -1),
+        isTruncated: false,
+        modelVisibleBytes: bytes - 1,
+      }),
+    ).toThrow("未截断");
   });
 });

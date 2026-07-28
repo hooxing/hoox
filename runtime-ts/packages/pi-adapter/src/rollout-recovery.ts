@@ -209,6 +209,9 @@ function recoverToolObservation(
         ? ["isTruncated", "modelVisibleBytes", "reason"]
         : ["isTruncated", "modelVisibleBytes"],
     ) ||
+    typeof entry.body.truncation.modelVisibleBytes !== "number" ||
+    !Number.isSafeInteger(entry.body.truncation.modelVisibleBytes) ||
+    entry.body.truncation.modelVisibleBytes < 0 ||
     entry.body.truncation.isTruncated !== entry.isTruncated
   )
     malformed();
@@ -230,7 +233,7 @@ function recoverToolObservation(
       receipt,
       observation: entry.body.observation,
       isTruncated: entry.isTruncated,
-      modelVisibleBytes: Number(entry.body.truncation.modelVisibleBytes),
+      modelVisibleBytes: entry.body.truncation.modelVisibleBytes,
       ...(typeof entry.body.truncation.reason === "string"
         ? { reason: entry.body.truncation.reason }
         : {}),
@@ -249,7 +252,7 @@ function recoverToolObservation(
       ? entry.body.observation
       : encodeControlledToolReceipt(receipt.toolName, receipt.outcome),
     isTruncated: entry.isTruncated,
-    modelVisibleBytes: Number(entry.body.truncation.modelVisibleBytes),
+    modelVisibleBytes: entry.body.truncation.modelVisibleBytes,
     ...(typeof entry.body.truncation.reason === "string"
       ? { reason: "model_utf8_budget_or_rollout_body_budget" as const }
       : {}),

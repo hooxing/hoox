@@ -9,8 +9,10 @@ import {
   threadId,
   userId,
 } from "@cube-runtime/domain";
+import type { ExecutionFence } from "@cube-runtime/run-contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createPgDurableObservationRecorderFactory } from "../../runtime-ts/apps/agent-worker/src/pg-observation-assembly.js";
+import { createPgDurableObservationSession } from "../../runtime-ts/apps/agent-worker/src/pg-observation-assembly.js";
+import { startWorkerProcess } from "../../runtime-ts/apps/agent-worker/src/process-entry.js";
 import {
   createS3BlobStore,
   createS3RetiredBlobTombstoneScrubber,
@@ -327,6 +329,33 @@ async function preparePromotion(
 }
 
 describe("PostgreSQL stable blob 生命周期", () => {
+  it("生产 Agent Worker 入口装配真实 PG、S3 Observation 与 Pi 恢复依赖", async () => {
+    const service = await startWorkerProcess({
+      environment: {
+        RUNTIME_ENV: "production",
+        DATABASE_URL: runtimeDatabaseUrl,
+        DATABASE_SCHEMA: schema,
+        S3_ENDPOINT: requiredEnvironment("S3_ENDPOINT"),
+        S3_BUCKET: requiredEnvironment("S3_BUCKET"),
+        S3_REGION: requiredEnvironment("S3_REGION"),
+        S3_ACCESS_KEY_ID: requiredEnvironment("S3_ACCESS_KEY_ID"),
+        S3_SECRET_ACCESS_KEY: requiredEnvironment("S3_SECRET_ACCESS_KEY"),
+        S3_FORCE_PATH_STYLE: "true",
+        CUBESANDBOX_API_URL: "http://sandbox.invalid",
+        CUBESANDBOX_TEMPLATE_ID: "integration-template",
+        MODEL_BASE_URL: "https://model.invalid/v1",
+        MODEL_API_KEY: "integration-model-key",
+        MODEL_ID: "integration-model",
+        PROCESS_SHUTDOWN_TIMEOUT_MS: "5000",
+      },
+    });
+    try {
+      await expect(service.readiness()).resolves.toEqual({ status: "ready" });
+    } finally {
+      await service.close();
+    }
+  });
+
   it("真实 PG + MinIO 持久化 Trace 后追加 Rollout，并可在重启后幂等重放", async () => {
     const suffix = `observation_${unique}`;
     const rolloutScope = {
@@ -334,7 +363,9 @@ describe("PostgreSQL stable blob 生命周期", () => {
       threadId: threadId(`thread_${suffix}`),
       runId: runId(`run_${suffix}`),
       attemptId: `attempt_${suffix}`,
-      agentThreadId: agentThreadId(`agent_${suffix}`),
+      agentThreadId: agentThreadId(
+        `root_${createHash("sha256").update(`attempt_${suffix}`, "utf8").digest("hex")}`,
+      ),
     };
     const context = { scope: rolloutScope, userId: userId(`blob_user_a_${unique}`) };
     const workspaceId = `workspace_${suffix}`;
@@ -377,23 +408,74 @@ describe("PostgreSQL stable blob 生命周期", () => {
             workspaceId,
           ],
         );
+        await client.query(
+          `INSERT INTO execution_workspace_fences(
+             tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+             lease_epoch,initial_expires_at)
+           VALUES ($1,$2,$3,$4,$5,$3,1,clock_timestamp()+interval '10 minutes')`,
+          [
+            scopeA.tenantId,
+            rolloutScope.attemptId,
+            rolloutScope.runId,
+            rolloutScope.threadId,
+            workspaceId,
+          ],
+        );
+        await client.query(
+          `INSERT INTO run_claims(
+             tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+             worker_id,claim_token,claim_epoch,workspace_lease_epoch,expires_at)
+           VALUES ($1,$2,$3,$4,$5,$3,'observation-worker',$6,1,1,
+                   clock_timestamp()+interval '10 minutes')`,
+          [
+            scopeA.tenantId,
+            rolloutScope.attemptId,
+            rolloutScope.runId,
+            rolloutScope.threadId,
+            workspaceId,
+            `claim_${suffix}`,
+          ],
+        );
       },
     );
     const rollout = new PgRuntimeRolloutRepository(runtimePool);
-    expect(
-      await rollout.openRootStream({
-        context,
-        workspaceId,
+    const compatibility = {
+      modelId: "integration-model",
+      modelCompatibilityHash: digest,
+      promptPolicyHash: digest,
+      toolSchemaHash: digest,
+      skillManifestHash: digest,
+    };
+    const fenceData = {
+      scope: {
+        tenantId: rolloutScope.tenantId,
+        threadId: rolloutScope.threadId,
+        runId: rolloutScope.runId,
         rootRunId: rolloutScope.runId,
-        compatibility: {
-          modelId: "integration-model",
-          modelCompatibilityHash: digest,
-          promptPolicyHash: digest,
-          toolSchemaHash: digest,
-          skillManifestHash: digest,
-        },
-      }),
-    ).toBe("created");
+        workspaceId,
+      },
+      runClaim: { token: `claim_${suffix}`, epoch: 1, expiresAt: "2026-07-28T23:59:59.999Z" },
+      workspaceLease: {
+        rootRunId: rolloutScope.runId,
+        epoch: 1,
+        expiresAt: "2026-07-28T23:59:59.999Z",
+      },
+    };
+    const fence = fenceData as unknown as ExecutionFence;
+    const sessionInput = {
+      scope: fence.scope,
+      fence,
+      attemptId: rolloutScope.attemptId,
+    } as never;
+    const blobs = createS3BlobStore(minioConfig(), repository);
+    const durableObservation = createPgDurableObservationSession({
+      blobRepository: repository,
+      blobs,
+      rolloutRepository: rollout,
+      policy: { maxModelObservationBytes: 64 },
+    });
+    await expect(durableObservation.prepare(sessionInput, compatibility)).resolves.toBeUndefined();
+    await expect(durableObservation.prepare(sessionInput, compatibility)).resolves.toBeUndefined();
     expect(
       (
         await rollout.append({
@@ -410,7 +492,6 @@ describe("PostgreSQL stable blob 生命周期", () => {
       ).outcome,
     ).toBe("created");
 
-    const blobs = createS3BlobStore(minioConfig(), repository);
     let observedOutput = encodeControlledToolReceipt("sandbox_command", "succeeded");
     const rolloutAdapter = new PgToolObservationRolloutAdapter(rollout, context);
     const pipeline = new ToolObservationPipeline(
@@ -480,27 +561,10 @@ describe("PostgreSQL stable blob 生命周期", () => {
     });
 
     const factoryCallId = `factory_${suffix}`;
-    const recorderFactory = createPgDurableObservationRecorderFactory({
-      blobRepository: repository,
-      blobs,
-      rolloutRepository: rollout,
-      contextForSession: () => context,
-      policy: { maxModelObservationBytes: 64 },
-    });
     const factoryReceipt = encodeControlledToolReceipt("sandbox_command", "succeeded");
-    const recorder = recorderFactory(
-      {
-        scope: {
-          tenantId: context.scope.tenantId,
-          threadId: context.scope.threadId,
-          runId: context.scope.runId,
-          rootRunId: context.scope.runId,
-          workspaceId,
-        },
-        attemptId: context.scope.attemptId,
-      } as never,
-      { readControlledReceipt: async () => factoryReceipt },
-    );
+    const recorder = durableObservation.createRecorder(sessionInput, {
+      readControlledReceipt: async () => factoryReceipt,
+    });
     await expect(
       recorder.recordStarted({ toolCallId: factoryCallId, toolName: "sandbox_command" }),
     ).resolves.toBe("recorded");

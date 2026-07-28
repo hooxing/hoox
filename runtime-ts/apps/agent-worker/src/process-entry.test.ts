@@ -23,12 +23,21 @@ function productionEnvironment(): Record<string, string> {
 }
 
 describe("Agent Worker 进程入口", () => {
-  it("解析生产依赖，但没有真实装配器时拒绝启动", async () => {
+  it("生产入口固定使用内建真实装配器，拒绝调用方注入 Fake", async () => {
     const configuration = parseWorkerProcessEnvironment(productionEnvironment());
     expect(configuration.sandbox.templateId).toBe("tpl-test");
-    await expect(startWorkerProcess({ environment: productionEnvironment() })).rejects.toThrow(
-      "ASSEMBLER_MISSING:agent-worker",
-    );
+    await expect(
+      startWorkerProcess({
+        environment: productionEnvironment(),
+        assembler: {
+          assemble: async () => ({
+            stopAccepting: async () => undefined,
+            resources: [],
+            readiness: [],
+          }),
+        },
+      }),
+    ).rejects.toThrow("PRODUCTION_ASSEMBLY_UNAVAILABLE:agent-worker");
   });
 
   it("缺少模型依赖时在装配前失败且不泄漏其他秘密", () => {

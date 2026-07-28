@@ -7,8 +7,10 @@ import type {
   Sha256Digest,
   UserId,
 } from "@cube-runtime/domain";
-import { isoTimestamp, sha256Digest } from "@cube-runtime/domain";
+import { agentThreadId, isoTimestamp, sha256Digest, userId } from "@cube-runtime/domain";
+import type { ExecutionFence } from "@cube-runtime/run-contracts";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+import { createHash } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";
@@ -28,6 +30,16 @@ export interface OpenRootRolloutInput {
   readonly rootRunId: string;
   readonly compatibility: RolloutCompatibilityIdentity;
 }
+
+export interface OpenRootRolloutFromClaimInput {
+  readonly fence: ExecutionFence;
+  readonly attemptId: string;
+  readonly compatibility: RolloutCompatibilityIdentity;
+}
+
+export type OpenRootRolloutFromClaimResult =
+  | { readonly outcome: "ready"; readonly context: TrustedRolloutContext }
+  | { readonly outcome: "conflict" | "not_authorized" | "not_found" };
 
 export interface RolloutEntryDraft {
   readonly kind: RuntimeRolloutEntryKind;
@@ -133,6 +145,18 @@ function assertBoundedText(value: string, label: string, maximumBytes: number): 
 
 function assertHash(value: string, label: string): void {
   if (!HASH.test(value)) throw new TypeError(`${label}必须是 SHA-256`);
+}
+
+function assertCompatibility(compatibility: RolloutCompatibilityIdentity): void {
+  assertBoundedText(compatibility.modelId, "Model ID", 255);
+  for (const [label, hash] of [
+    ["Model compatibility hash", compatibility.modelCompatibilityHash],
+    ["Prompt policy hash", compatibility.promptPolicyHash],
+    ["Tool schema hash", compatibility.toolSchemaHash],
+    ["Skill manifest hash", compatibility.skillManifestHash],
+  ] as const) {
+    assertHash(hash, label);
+  }
 }
 
 function assertJsonRecord(value: unknown, label: string): asserts value is Record<string, unknown> {
@@ -286,87 +310,189 @@ function normalizeDraft(draft: RolloutEntryDraft): NormalizedRolloutEntryDraft {
 export class PgRuntimeRolloutRepository {
   constructor(private readonly pool: Pool) {}
 
+  /**
+   * 生产 Worker 的唯一 root stream 入口：调用方只持有当前双栅栏，userId 与 AgentThread
+   * 均由同一 PG 事务中的 claim、Thread owner 和 active Membership 事实推导。
+   */
+  async openRootStreamFromClaim(
+    input: OpenRootRolloutFromClaimInput,
+  ): Promise<OpenRootRolloutFromClaimResult> {
+    const { fence } = input;
+    for (const [label, value] of [
+      ["Tenant ID", fence.scope.tenantId],
+      ["Thread ID", fence.scope.threadId],
+      ["Run ID", fence.scope.runId],
+      ["Attempt ID", input.attemptId],
+      ["Workspace ID", fence.scope.workspaceId],
+      ["Root Run ID", fence.scope.rootRunId],
+      ["Run claim token", fence.runClaim.token],
+    ] as const) {
+      assertIdentifier(value, label);
+    }
+    if (fence.scope.baseRevisionId !== undefined) {
+      assertIdentifier(fence.scope.baseRevisionId, "Base revision ID");
+    }
+    if (
+      !Number.isSafeInteger(fence.runClaim.epoch) ||
+      fence.runClaim.epoch < 0 ||
+      !Number.isSafeInteger(fence.workspaceLease.epoch) ||
+      fence.workspaceLease.epoch < 0
+    ) {
+      throw new TypeError("执行栅栏 epoch 格式无效");
+    }
+    const rootAgentThreadId = agentThreadId(
+      `root_${createHash("sha256").update(input.attemptId, "utf8").digest("hex")}`,
+    );
+    assertIdentifier(rootAgentThreadId, "Agent Thread ID");
+    assertCompatibility(input.compatibility);
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        { tenantId: fence.scope.tenantId },
+        async (client) => {
+          const actor = await client.query<{ created_by_user_id: string }>(
+            `SELECT thread_state.created_by_user_id
+               FROM execution_attempts attempt
+               JOIN run_claims claim
+                 ON claim.tenant_id=attempt.tenant_id AND claim.attempt_id=attempt.attempt_id
+               JOIN threads thread_state
+                 ON thread_state.tenant_id=attempt.tenant_id AND thread_state.id=attempt.thread_id
+               JOIN memberships membership
+                 ON membership.tenant_id=thread_state.tenant_id
+                AND membership.user_id=thread_state.created_by_user_id
+                AND membership.status='active'
+              WHERE attempt.tenant_id=$1 AND attempt.attempt_id=$2
+                AND attempt.run_id=$3 AND attempt.thread_id=$4
+                AND attempt.workspace_id=$5 AND attempt.root_run_id=$6
+                AND attempt.base_revision_id IS NOT DISTINCT FROM $7
+                AND attempt.status IN ('claimed','running','finalizing')
+                AND claim.claim_token=$8 AND claim.claim_epoch=$9
+                AND claim.workspace_lease_epoch=$10
+                AND claim.expires_at >= clock_timestamp()
+              FOR SHARE OF membership`,
+            [
+              fence.scope.tenantId,
+              input.attemptId,
+              fence.scope.runId,
+              fence.scope.threadId,
+              fence.scope.workspaceId,
+              fence.scope.rootRunId,
+              fence.scope.baseRevisionId ?? null,
+              fence.runClaim.token,
+              fence.runClaim.epoch,
+              fence.workspaceLease.epoch,
+            ],
+          );
+          const actorUserId = actor.rows[0]?.created_by_user_id;
+          if (actorUserId === undefined) return { outcome: "not_authorized" } as const;
+          await client.query("SELECT set_config('app.current_user_id',$1,true)", [actorUserId]);
+          const context: TrustedRolloutContext = Object.freeze({
+            scope: Object.freeze({
+              tenantId: fence.scope.tenantId,
+              threadId: fence.scope.threadId,
+              runId: fence.scope.runId,
+              attemptId: input.attemptId,
+              agentThreadId: rootAgentThreadId,
+            }),
+            userId: userId(actorUserId),
+          });
+          const opened = await this.openRootStreamLocked(client, {
+            context,
+            workspaceId: fence.scope.workspaceId,
+            rootRunId: fence.scope.rootRunId,
+            compatibility: input.compatibility,
+          });
+          return opened === "created" || opened === "already_exists"
+            ? ({ outcome: "ready", context } as const)
+            : ({ outcome: opened } as const);
+        },
+        { isolationLevel: "SERIALIZABLE" },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "从执行 claim 打开 Runtime Rollout stream");
+    }
+  }
+
   async openRootStream(
     input: OpenRootRolloutInput,
   ): Promise<"created" | "already_exists" | "conflict" | "not_authorized" | "not_found"> {
     assertContext(input.context);
     assertIdentifier(input.workspaceId, "Workspace ID");
     assertIdentifier(input.rootRunId, "Root Run ID");
-    assertBoundedText(input.compatibility.modelId, "Model ID", 255);
-    for (const [label, hash] of [
-      ["Model compatibility hash", input.compatibility.modelCompatibilityHash],
-      ["Prompt policy hash", input.compatibility.promptPolicyHash],
-      ["Tool schema hash", input.compatibility.toolSchemaHash],
-      ["Skill manifest hash", input.compatibility.skillManifestHash],
-    ] as const) {
-      assertHash(hash, label);
-    }
+    assertCompatibility(input.compatibility);
     try {
       return await withTenantTransaction(
         this.pool,
         { tenantId: input.context.scope.tenantId, userId: input.context.userId },
         async (client) => {
           if (!(await lockActiveMembership(client, input.context))) return "not_authorized";
-          const params = scopeParams(input.context);
-          const inserted = await client.query(
-            `INSERT INTO runtime_rollout_streams(
-               tenant_id, thread_id, run_id, attempt_id, workspace_id, root_run_id,
-               agent_thread_id, agent_kind, model_id, model_compatibility_hash,
-               prompt_policy_hash, tool_schema_hash, skill_manifest_hash
-             ) VALUES ($1,$2,$3,$4,$6,$7,$5,'root',$8,$9,$10,$11,$12)
-             ON CONFLICT DO NOTHING`,
-            [
-              ...params,
-              input.workspaceId,
-              input.rootRunId,
-              input.compatibility.modelId,
-              input.compatibility.modelCompatibilityHash,
-              input.compatibility.promptPolicyHash,
-              input.compatibility.toolSchemaHash,
-              input.compatibility.skillManifestHash,
-            ],
-          );
-          if (inserted.rowCount === 1) return "created";
-          const existing = await client.query<{
-            thread_id: string;
-            run_id: string;
-            agent_thread_id: string;
-            workspace_id: string;
-            root_run_id: string;
-            agent_kind: string;
-            model_id: string;
-            model_compatibility_hash: string;
-            prompt_policy_hash: string;
-            tool_schema_hash: string;
-            skill_manifest_hash: string;
-          }>(
-            `SELECT thread_id, run_id, agent_thread_id, workspace_id, root_run_id,
-                    agent_kind, model_id, model_compatibility_hash,
-                    prompt_policy_hash, tool_schema_hash, skill_manifest_hash
-               FROM runtime_rollout_streams
-              WHERE tenant_id=$1 AND attempt_id=$2`,
-            [input.context.scope.tenantId, input.context.scope.attemptId],
-          );
-          const row = existing.rows[0];
-          if (row === undefined) return "not_found";
-          return row.thread_id === input.context.scope.threadId &&
-            row.run_id === input.context.scope.runId &&
-            row.agent_thread_id === input.context.scope.agentThreadId &&
-            row.workspace_id === input.workspaceId &&
-            row.root_run_id === input.rootRunId &&
-            row.agent_kind === "root" &&
-            row.model_id === input.compatibility.modelId &&
-            row.model_compatibility_hash === input.compatibility.modelCompatibilityHash &&
-            row.prompt_policy_hash === input.compatibility.promptPolicyHash &&
-            row.tool_schema_hash === input.compatibility.toolSchemaHash &&
-            row.skill_manifest_hash === input.compatibility.skillManifestHash
-            ? "already_exists"
-            : "conflict";
+          return await this.openRootStreamLocked(client, input);
         },
       );
     } catch (error) {
       throw mapPersistenceError(error, "打开 Runtime Rollout stream");
     }
+  }
+
+  private async openRootStreamLocked(
+    client: PoolClient,
+    input: OpenRootRolloutInput,
+  ): Promise<"created" | "already_exists" | "conflict" | "not_found"> {
+    const params = scopeParams(input.context);
+    const inserted = await client.query(
+      `INSERT INTO runtime_rollout_streams(
+               tenant_id, thread_id, run_id, attempt_id, workspace_id, root_run_id,
+               agent_thread_id, agent_kind, model_id, model_compatibility_hash,
+               prompt_policy_hash, tool_schema_hash, skill_manifest_hash
+             ) VALUES ($1,$2,$3,$4,$6,$7,$5,'root',$8,$9,$10,$11,$12)
+             ON CONFLICT DO NOTHING`,
+      [
+        ...params,
+        input.workspaceId,
+        input.rootRunId,
+        input.compatibility.modelId,
+        input.compatibility.modelCompatibilityHash,
+        input.compatibility.promptPolicyHash,
+        input.compatibility.toolSchemaHash,
+        input.compatibility.skillManifestHash,
+      ],
+    );
+    if (inserted.rowCount === 1) return "created";
+    const existing = await client.query<{
+      thread_id: string;
+      run_id: string;
+      agent_thread_id: string;
+      workspace_id: string;
+      root_run_id: string;
+      agent_kind: string;
+      model_id: string;
+      model_compatibility_hash: string;
+      prompt_policy_hash: string;
+      tool_schema_hash: string;
+      skill_manifest_hash: string;
+    }>(
+      `SELECT thread_id, run_id, agent_thread_id, workspace_id, root_run_id,
+                    agent_kind, model_id, model_compatibility_hash,
+                    prompt_policy_hash, tool_schema_hash, skill_manifest_hash
+               FROM runtime_rollout_streams
+              WHERE tenant_id=$1 AND attempt_id=$2`,
+      [input.context.scope.tenantId, input.context.scope.attemptId],
+    );
+    const row = existing.rows[0];
+    if (row === undefined) return "not_found";
+    return row.thread_id === input.context.scope.threadId &&
+      row.run_id === input.context.scope.runId &&
+      row.agent_thread_id === input.context.scope.agentThreadId &&
+      row.workspace_id === input.workspaceId &&
+      row.root_run_id === input.rootRunId &&
+      row.agent_kind === "root" &&
+      row.model_id === input.compatibility.modelId &&
+      row.model_compatibility_hash === input.compatibility.modelCompatibilityHash &&
+      row.prompt_policy_hash === input.compatibility.promptPolicyHash &&
+      row.tool_schema_hash === input.compatibility.toolSchemaHash &&
+      row.skill_manifest_hash === input.compatibility.skillManifestHash
+      ? "already_exists"
+      : "conflict";
   }
 
   async append(

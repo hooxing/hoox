@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@cube-runtime/context-policy": "workspace:*",
+    "@cube-runtime/domain": "workspace:*",
     "@cube-runtime/prompt-builder": "workspace:*",
     "@cube-runtime/sandbox": "workspace:*",
     "@earendil-works/pi-ai": "0.82.1",

@@ -1,20 +1,23 @@
-import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { createHash } from "node:crypto";
 import { types } from "node:util";
+import { type RolloutCompatibilityIdentity, sha256Digest } from "@cube-runtime/domain";
 import {
   buildRuntimeSystemPrompt,
   buildToolCapabilityManifest,
   type RuntimePromptInput,
   type ToolCapabilityManifest,
 } from "@cube-runtime/prompt-builder";
+import type { SandboxHandle } from "@cube-runtime/sandbox";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import {
+  type AgentSessionEvent,
   createAgentSession,
+  type ModelRuntime,
   SessionManager,
   SettingsManager,
-  type AgentSessionEvent,
-  type ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
+import type { ArtifactPiToolExecutorPort } from "./artifact-tools.js";
+import { createArtifactPiTools, PI_ARTIFACT_TOOL_NAMES } from "./artifact-tools.js";
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
 import {
@@ -22,8 +25,6 @@ import {
   SANDBOX_TOOL_NAMES,
   type SandboxToolEffectAuthorizer,
 } from "./tools.js";
-import { createArtifactPiTools, PI_ARTIFACT_TOOL_NAMES } from "./artifact-tools.js";
-import type { ArtifactPiToolExecutorPort } from "./artifact-tools.js";
 
 interface PiSessionPort {
   prompt(text: string): Promise<void>;
@@ -151,29 +152,7 @@ export async function createSafePiSession(
     { projectTrusted: false },
   );
 
-  const observedSandboxTools = createObservedSandboxTools(
-    options.sandbox,
-    {
-      authorizeToolEffect: options.authorizeToolEffect,
-    },
-    options.createToolObservationRecorder,
-  );
-  const customTools = [
-    ...observedSandboxTools.tools,
-    ...(options.artifactToolRouter === undefined
-      ? []
-      : createArtifactPiTools(options.artifactToolRouter)),
-  ];
-  // 能力清单从即将传给 Pi 的同一组真实工具派生，不能维护第二份易漂移的硬编码列表。
-  const builtPrompt = buildRuntimeSystemPrompt({
-    schemaVersion: 1,
-    capabilities: customTools.map((tool) => ({
-      id: tool.name,
-      description: tool.description,
-      inputSchemaDigest: digestCanonicalToolInputSchema(tool.parameters),
-    })),
-    untrusted: options.untrustedPromptContent ?? { tenant: [], skill: [], user: [] },
-  });
+  const { customTools, builtPrompt } = buildSafeSessionMaterial(options);
   const resourceLoader = new EmptyResourceLoader(builtPrompt.systemPrompt);
   await resourceLoader.reload();
   const sessionManager = SessionManager.inMemory(LOGICAL_WORKSPACE);
@@ -225,6 +204,97 @@ export async function createSafePiSession(
       .getEntries()
       .some((entry) => entry.type === "compaction"),
   }));
+}
+
+/**
+ * 恢复兼容身份只能由本次实际 Model、可信 Prompt Builder、真实 Tool Schema 与 Skill 分区派生。
+ * 调用方不能自行传入“期望摘要”来绕过数据库的兼容判断。
+ */
+export function deriveSafePiSessionCompatibility(
+  options: CreateSafePiSessionOptions,
+): RolloutCompatibilityIdentity {
+  const { builtPrompt } = buildSafeSessionMaterial(options);
+  const model = options.model;
+  return Object.freeze({
+    modelId: model.id,
+    modelCompatibilityHash: digestProtocolValue({
+      id: model.id,
+      provider: model.provider,
+      api: model.api,
+      reasoning: model.reasoning,
+      thinkingLevelMap: model.thinkingLevelMap,
+      input: model.input,
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      compat: model.compat,
+    }),
+    promptPolicyHash: digestProtocolValue({
+      schemaVersion: builtPrompt.schemaVersion,
+      version: builtPrompt.version,
+      systemPrompt: builtPrompt.systemPrompt,
+    }),
+    toolSchemaHash: digestProtocolValue(builtPrompt.manifest),
+    skillManifestHash: digestProtocolValue({
+      schemaVersion: 1,
+      entries: builtPrompt.contextEntries
+        .filter((entry) => entry.source.kind === "skill")
+        .map((entry) => ({
+          ordinal: entry.source.ordinal,
+          publicAlias: entry.source.publicAlias,
+          contentDigest: entry.source.contentDigest,
+        })),
+    }),
+  });
+}
+
+function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
+  const observedSandboxTools = createObservedSandboxTools(
+    options.sandbox,
+    {
+      authorizeToolEffect: options.authorizeToolEffect,
+    },
+    options.createToolObservationRecorder,
+  );
+  const customTools = [
+    ...observedSandboxTools.tools,
+    ...(options.artifactToolRouter === undefined
+      ? []
+      : createArtifactPiTools(options.artifactToolRouter)),
+  ];
+  // 能力清单从即将传给 Pi 的同一组真实工具派生，不能维护第二份易漂移的硬编码列表。
+  const builtPrompt = buildRuntimeSystemPrompt({
+    schemaVersion: 1,
+    capabilities: customTools.map((tool) => ({
+      id: tool.name,
+      description: tool.description,
+      inputSchemaDigest: digestCanonicalToolInputSchema(tool.parameters),
+    })),
+    untrusted: options.untrustedPromptContent ?? { tenant: [], skill: [], user: [] },
+  });
+  return { customTools, builtPrompt };
+}
+
+function digestProtocolValue(value: unknown) {
+  const encoded = JSON.stringify(canonicalProtocolValue(value));
+  return sha256Digest(createHash("sha256").update(encoded, "utf8").digest("hex"));
+}
+
+function canonicalProtocolValue(value: unknown): unknown {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new Error("恢复兼容身份含非法数值");
+    return value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalProtocolValue);
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, item]) => item !== undefined)
+        .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+        .map(([key, item]) => [key, canonicalProtocolValue(item)]),
+    );
+  }
+  throw new Error("恢复兼容身份只接受协议 JSON 值");
 }
 
 function formatRolloutProjection(

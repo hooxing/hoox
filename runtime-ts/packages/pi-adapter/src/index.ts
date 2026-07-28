@@ -3,7 +3,6 @@ export * from "./artifact-tools.js";
 export * from "./empty-resource-loader.js";
 export {
   assessSafePiSessionContext,
-  assertLinuxWorkerPlatform,
   assertPiSessionCapabilityManifest,
   bindTrustedPiModelContextCapability,
   ContextBudgetAdmissionError,

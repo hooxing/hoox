@@ -358,7 +358,7 @@ async function preparePromotion(
 }
 
 describe("PostgreSQL stable blob 生命周期", () => {
-  it("生产 Agent Worker 入口装配真实 PG、S3 Observation 与 Pi 恢复依赖", async () => {
+  it("开发 Agent Worker 入口装配真实 PG、S3 Observation 与 Pi 恢复依赖", async () => {
     const dependencyServer = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
       if (request.url === "/sandbox/v2/sandboxes") {
@@ -382,7 +382,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
     try {
       service = await startWorkerProcess({
         environment: {
-          RUNTIME_ENV: "production",
+          RUNTIME_ENV: "development",
           DATABASE_URL: runtimeDatabaseUrl,
           DATABASE_SCHEMA: schema,
           S3_ENDPOINT: requiredEnvironment("S3_ENDPOINT"),
@@ -396,11 +396,15 @@ describe("PostgreSQL stable blob 生命周期", () => {
           MODEL_BASE_URL: `http://127.0.0.1:${address.port}/model/v1/`,
           MODEL_API_KEY: "integration-model-key",
           MODEL_ID: "integration-model",
+          MODEL_CONTEXT_WINDOW: "128000",
+          MODEL_MAX_OUTPUT_TOKENS: "16384",
           AGENT_WORKER_TENANT_ID: scopeA.tenantId,
           AGENT_WORKER_ID: "integration-worker",
           AGENT_WORKER_POLL_INTERVAL_MS: "100",
           AGENT_WORKER_DISPATCH_LEASE_MS: "30000",
           AGENT_WORKER_RUN_LEASE_MS: "30000",
+          DEV_AUTH_ENABLED: "true",
+          DEV_AUTH_USER_A_TENANT_ID: scopeA.tenantId,
           PROCESS_SHUTDOWN_TIMEOUT_MS: "5000",
         },
       });

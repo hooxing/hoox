@@ -76,6 +76,12 @@ const workerEnvironmentSchema = Object.freeze({
   AGENT_WORKER_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 10, maximum: 60_000 }),
   AGENT_WORKER_DISPATCH_LEASE_MS: integerEnvironmentField({ minimum: 1_000, maximum: 300_000 }),
   AGENT_WORKER_RUN_LEASE_MS: integerEnvironmentField({ minimum: 9_000, maximum: 300_000 }),
+  // Worker 只会消费开发 API 的 dev-user-a 所属租户，避免本地 Web 看见“已创建但永不消费”的 Run。
+  DEV_AUTH_ENABLED: booleanEnvironmentField({ requiredIn: ["development"] }),
+  DEV_AUTH_USER_A_TENANT_ID: stringEnvironmentField({
+    requiredIn: ["development"],
+    maxLength: 128,
+  }),
   PROCESS_SHUTDOWN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1, maximum: 600_000 }),
 });
 
@@ -115,6 +121,9 @@ export interface WorkerProcessConfiguration {
     dispatchLeaseMs: number;
     runLeaseMs: number;
   }>;
+  readonly development?: Readonly<{
+    readonly userATenantId: string;
+  }>;
   readonly shutdownTimeoutMilliseconds: number;
 }
 
@@ -131,6 +140,17 @@ export function parseWorkerProcessEnvironment(
   const proxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
   if (proxyScheme !== undefined && proxyScheme !== "http" && proxyScheme !== "https") {
     throw new TypeError("CUBESANDBOX_PROXY_SCHEME 只能是 http 或 https");
+  }
+  if (parsed.runtimeEnvironment === "development") {
+    if (readRequiredEnvironmentValue(parsed, "DEV_AUTH_ENABLED") !== true) {
+      throw new TypeError("开发 Agent Worker 必须启用 DEV_AUTH_ENABLED");
+    }
+    if (
+      readRequiredEnvironmentValue(parsed, "AGENT_WORKER_TENANT_ID") !==
+      readRequiredEnvironmentValue(parsed, "DEV_AUTH_USER_A_TENANT_ID")
+    ) {
+      throw new TypeError("AGENT_WORKER_TENANT_ID 必须与 DEV_AUTH_USER_A_TENANT_ID 一致");
+    }
   }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
@@ -172,6 +192,13 @@ export function parseWorkerProcessEnvironment(
       dispatchLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_DISPATCH_LEASE_MS"),
       runLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_RUN_LEASE_MS"),
     }),
+    ...(parsed.runtimeEnvironment === "development"
+      ? {
+          development: Object.freeze({
+            userATenantId: readRequiredEnvironmentValue(parsed, "DEV_AUTH_USER_A_TENANT_ID"),
+          }),
+        }
+      : {}),
     shutdownTimeoutMilliseconds: readRequiredEnvironmentValue(
       parsed,
       "PROCESS_SHUTDOWN_TIMEOUT_MS",
@@ -179,9 +206,19 @@ export function parseWorkerProcessEnvironment(
   });
 }
 
-/** 生产装配只使用真实 PG、S3 与模型 provider；不接受调用者注入 actor/context 或内存持久层。 */
-const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfiguration> = {
+/**
+ * 仅本地 development 使用的真实装配：PG dispatch、CubeSandbox、S3 durable observation 和
+ * OpenAI-compatible provider 均为外部事实源；这里没有内存队列或 Sandbox 替身。
+ */
+export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfiguration> = {
   async assemble(configuration) {
+    if (
+      configuration.runtimeEnvironment !== "development" ||
+      configuration.development === undefined ||
+      configuration.development.userATenantId !== configuration.worker.tenantId
+    ) {
+      throw new Error("DEVELOPMENT_WORKER_ASSEMBLY_FORBIDDEN");
+    }
     const pool = createPostgresPool({
       connectionString: configuration.databaseUrl,
       schema: configuration.databaseSchema,
@@ -292,7 +329,7 @@ const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfigurati
         postgres: () => probePostgres(pool),
         objectStorage: () => probeS3BlobStore(s3Config),
         sandbox: () => upstreamSandboxes.probe(),
-        model: () => probeOpenAiCompatibleModel(configuration.model),
+        model: () => probeOpenAiCompatibleModel(configuration.model, "development"),
       });
       await Promise.all([
         probes.postgres(),
@@ -322,8 +359,70 @@ const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfigurati
   },
 };
 
-async function probeOpenAiCompatibleModel(
+/**
+ * 开发预检只能读取依赖就绪状态；绝不能复用 assembler，因为后者会启动 polling loop，可能领取
+ * 尚在队列中的真实 Run。这里不构造 RunWorker、Dispatch Outbox 或 Sandbox create 调用。
+ */
+export async function probeDevelopmentWorkerDependencies(
+  configuration: WorkerProcessConfiguration,
+): Promise<void> {
+  if (
+    configuration.runtimeEnvironment !== "development" ||
+    configuration.development === undefined ||
+    configuration.development.userATenantId !== configuration.worker.tenantId
+  ) {
+    throw new Error("DEVELOPMENT_WORKER_ASSEMBLY_FORBIDDEN");
+  }
+  const pool = createPostgresPool({
+    connectionString: configuration.databaseUrl,
+    schema: configuration.databaseSchema,
+    applicationName: "cube-runtime-agent-worker-preflight",
+  });
+  try {
+    const s3Config = {
+      bucket: configuration.objectStorage.bucket,
+      endpoint: configuration.objectStorage.endpoint,
+      region: configuration.objectStorage.region,
+      accessKeyId: configuration.objectStorage.accessKeyId,
+      secretAccessKey: configuration.objectStorage.secretAccessKey,
+      forcePathStyle: configuration.objectStorage.forcePathStyle,
+      prefix: "agent-worker",
+      maxPresignTtlSeconds: 60,
+      maxBlobSizeBytes: 8 * 1024 * 1024,
+    } as const;
+    const sandbox = new CubeSandboxSessionRegistry(
+      {
+        apiUrl: configuration.sandbox.apiUrl,
+        ...(configuration.sandbox.apiKey === undefined
+          ? {}
+          : { apiKey: configuration.sandbox.apiKey }),
+        ...(configuration.sandbox.proxyNodeIp === undefined
+          ? {}
+          : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
+        ...(configuration.sandbox.proxyPort === undefined
+          ? {}
+          : { proxyPort: configuration.sandbox.proxyPort }),
+        ...(configuration.sandbox.proxyScheme === undefined
+          ? {}
+          : { proxyScheme: configuration.sandbox.proxyScheme }),
+        defaultOperationTimeoutMs: 5_000,
+      },
+      configuration.sandbox.templateId,
+    );
+    await Promise.all([
+      probePostgres(pool),
+      probeS3BlobStore(s3Config),
+      sandbox.probe(),
+      probeOpenAiCompatibleModel(configuration.model, "development"),
+    ]);
+  } finally {
+    await pool.end().catch(() => undefined);
+  }
+}
+
+export async function probeOpenAiCompatibleModel(
   model: WorkerProcessConfiguration["model"],
+  mode: "development" | "production",
 ): Promise<void> {
   const endpoint = new URL(
     "models",
@@ -340,17 +439,23 @@ async function probeOpenAiCompatibleModel(
     body === null ||
     !("data" in body) ||
     !Array.isArray(body.data) ||
-    !body.data.some((entry) => modelMetadataMatches(entry, model))
+    !body.data.some((entry) => modelMetadataMatches(entry, model, mode))
   ) {
-    throw new Error("模型 provider 元数据与生产配置不一致");
+    throw new Error("模型 provider 元数据与配置不一致");
   }
 }
 
-function modelMetadataMatches(entry: unknown, model: WorkerProcessConfiguration["model"]): boolean {
+function modelMetadataMatches(
+  entry: unknown,
+  model: WorkerProcessConfiguration["model"],
+  mode: "development" | "production",
+): boolean {
   if (typeof entry !== "object" || entry === null) return false;
   const record = entry as Record<string, unknown>;
+  if (record.id !== model.modelId) return false;
+  // 开发 Provider 的 /models 常见只返回 id；模型预算仍由严格环境配置提供给 Pi。
+  if (mode === "development") return true;
   return (
-    record.id === model.modelId &&
     (record.context_window === model.contextWindow ||
       record.contextWindow === model.contextWindow) &&
     (record.max_output_tokens === model.maxOutputTokens ||
@@ -366,18 +471,17 @@ export async function startWorkerProcess(input: {
   readonly onShutdownFailure?: (error: Error) => void;
 }): Promise<RunningServiceProcess> {
   const configuration = parseWorkerProcessEnvironment(input.environment);
-  if (configuration.runtimeEnvironment === "production" && input.assembler !== undefined) {
+  if (configuration.runtimeEnvironment === "production") {
     throw new Error("PRODUCTION_ASSEMBLY_UNAVAILABLE:agent-worker");
   }
-  const processConfiguration =
-    configuration.runtimeEnvironment === "production"
-      ? Object.freeze({ ...configuration, runtimeEnvironment: "development" as const })
-      : configuration;
+  const assembler =
+    input.assembler ??
+    (configuration.runtimeEnvironment === "development" ? developmentWorkerAssembler : undefined);
   return startServiceProcess({
     serviceName: "agent-worker",
-    configuration: processConfiguration,
+    configuration,
     shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
-    assembler: input.assembler ?? productionWorkerAssembler,
+    ...(assembler === undefined ? {} : { assembler }),
     ...(input.signalSource === undefined ? {} : { signalSource: input.signalSource }),
     ...(input.onShutdownFailure === undefined
       ? {}

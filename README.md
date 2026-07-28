@@ -8,6 +8,14 @@
 
 当前最有价值的运行方式是执行工程 Gate、真实 CubeSandbox 冒烟和 PostgreSQL M4 黑盒测试，并通过 CubeSandbox、MinIO 自带的控制台观察外部资源。
 
+开发 API 还提供给本地 Web 体验的最小读取契约。前端应通过本地开发服务器反向代理到 API 的同源 `/v1` 路径，不需要也不启用宽松 CORS：
+
+- `GET /v1/threads/:threadId/runs/:runId/events?after=-1&limit=100`：按持久化 sequence 严格递增返回当前 Run 最新 Attempt 的事件；`after` 为排他游标，范围为 `-1` 到安全整数，`limit` 为 1 到 200。每项同时提供 Web 所需的 `{ eventId, sequence, occurredAt, type, payload }`，其中 `eventId` 为 `<attemptId>-<sequence>`，并保留兼容字段 `kind`。cursor 只在响应的 `attemptId` 内有效，发生变化时客户端必须重置或分区去重。
+- `GET /v1/threads/:threadId/runs/:runId/artifacts`：只列出已发布的 deliverable Artifact，不包含 diagnostic/trace。
+- `GET /v1/threads/:threadId/runs/:runId/artifacts/:artifactId/preview` 与 `/download`：使用短期 S3 预签名 URL；两者均重验租户成员关系、Run/Thread 归属、已发布状态和固定 Blob 身份。preview 采用 inline 响应，download 带净化后的下载名。
+
+所有接口复用 `Authorization: Bearer dev-user-a|dev-user-b` 的本地 fixture 身份，运行时从已认证身份重建 TenantScope，忽略任何客户端声明的 tenant。API 仍只监听回环地址。
+
 迁移完成后，用显式且可重复执行的命令初始化 `.env` 中两个开发身份，再启动开发 API：
 
 ```powershell

@@ -11,6 +11,13 @@ function productionEnvironment(): Record<string, string> {
     THREAD_CURSOR_SIGNING_KEYS: "current:opaque-test-value",
     DEV_AUTH_ENABLED: "false",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
+    S3_ENDPOINT: "http://object-storage:9000",
+    S3_PUBLIC_ENDPOINT: "http://127.0.0.1:19000",
+    S3_BUCKET: "runtime-artifacts",
+    S3_REGION: "us-east-1",
+    S3_ACCESS_KEY_ID: "local-access-key",
+    S3_SECRET_ACCESS_KEY: "opaque-test-value",
+    S3_FORCE_PATH_STYLE: "true",
   };
 }
 
@@ -53,6 +60,7 @@ describe("API 进程入口", () => {
     });
     expect(parsed.developmentPrincipals?.[0].userId).toBe("user-a-local");
     expect(parsed.listenPort).toBe(3001);
+    expect(parsed.objectStorage.bucket).toBe("runtime-artifacts");
   });
 
   it("开发监听地址显式配置，生产配置不会意外启用默认开发装配", async () => {

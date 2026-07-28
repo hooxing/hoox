@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
-import type { CoreRepositories } from "@cube-runtime/persistence";
+import { runId } from "@cube-runtime/domain";
+import type { BlobStore, CoreRepositories, RunExperienceReadPort } from "@cube-runtime/persistence";
 import { PersistenceError } from "@cube-runtime/persistence";
 import {
+  ArtifactDeliverySuccessEnvelopeSchema,
+  ArtifactListSuccessEnvelopeSchema,
   type CreateRunRequest,
   CreateRunRequestSchema,
   type CreateThreadRequest,
@@ -11,6 +14,11 @@ import {
   ErrorEnvelopeSchema,
   HealthSuccessEnvelopeSchema,
   MAX_RUN_INPUT_UTF8_BYTES,
+  type RunArtifactPath,
+  RunArtifactPathSchema,
+  type RunEventListQuery,
+  RunEventListQuerySchema,
+  RunEventPageSuccessEnvelopeSchema,
   type RunPath,
   RunPathSchema,
   RunSuccessEnvelopeSchema,
@@ -42,6 +50,8 @@ export interface ApiDependencies {
   readonly readiness: ReadinessPort;
   readonly clock: ApiClock;
   readonly ids: ApiIdGenerator;
+  readonly experience?: RunExperienceReadPort;
+  readonly blobs?: BlobStore;
 }
 
 export interface ApiAppOptions {
@@ -402,5 +412,199 @@ export function createApiApp(
     },
   );
 
+  if (normalizedDependencies.experience !== undefined) {
+    app.get<{ Params: RunPath; Querystring: RunEventListQuery }>(
+      "/v1/threads/:threadId/runs/:runId/events",
+      {
+        schema: {
+          params: RunPathSchema,
+          querystring: RunEventListQuerySchema,
+          response: {
+            200: RunEventPageSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await service.authenticate(authorization(request), requestId(request));
+        const run = await service.getRun(auth, request.params.threadId, request.params.runId);
+        const read = await normalizedDependencies.experience?.listEvents({
+          scope: auth.scope,
+          runId: runId(run.id),
+          after: request.query.after ?? -1,
+          limit: request.query.limit ?? 100,
+        });
+        if (read === undefined || read.outcome === "not_found") throw new ApiFailure("not_found");
+        return success(request, {
+          ...(read.attemptId === undefined ? {} : { attemptId: read.attemptId }),
+          items: read.events.map((event) => ({
+            eventId: `${read.attemptId ?? "pending"}-${event.sequence}`,
+            sequence: event.sequence,
+            type: event.kind,
+            kind: event.kind,
+            payload: event.payload,
+            occurredAt: event.occurredAt,
+          })),
+        });
+      },
+    );
+
+    app.get<{ Params: RunPath }>(
+      "/v1/threads/:threadId/runs/:runId/artifacts",
+      {
+        schema: {
+          params: RunPathSchema,
+          response: {
+            200: ArtifactListSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await service.authenticate(authorization(request), requestId(request));
+        const run = await service.getRun(auth, request.params.threadId, request.params.runId);
+        const read = await normalizedDependencies.experience?.listArtifacts({
+          scope: auth.scope,
+          runId: runId(run.id),
+        });
+        if (read === undefined || read.outcome === "not_found") throw new ApiFailure("not_found");
+        return success(request, {
+          items: read.artifacts.map((artifact) => ({
+            id: artifact.id,
+            tenantId: auth.scope.tenantId,
+            threadId: artifact.threadId,
+            runId: artifact.runId,
+            resourceVersionId: artifact.resourceVersionId,
+            name: artifact.name,
+            mediaType: artifact.mediaType,
+            sizeBytes: artifact.sizeBytes,
+            status: "published" as const,
+            createdAt: artifact.createdAt,
+            updatedAt: artifact.updatedAt,
+          })),
+        });
+      },
+    );
+  }
+
+  if (
+    normalizedDependencies.experience !== undefined &&
+    normalizedDependencies.blobs !== undefined
+  ) {
+    const artifactDeliverySchema = {
+      params: RunArtifactPathSchema,
+      response: {
+        200: ArtifactDeliverySuccessEnvelopeSchema,
+        400: ErrorEnvelopeSchema,
+        401: ErrorEnvelopeSchema,
+        404: ErrorEnvelopeSchema,
+        500: ErrorEnvelopeSchema,
+        503: ErrorEnvelopeSchema,
+      },
+    } as const;
+    for (const [path, disposition] of [
+      ["/v1/threads/:threadId/runs/:runId/artifacts/:artifactId/preview", "preview"],
+      ["/v1/threads/:threadId/runs/:runId/artifacts/:artifactId/download", "download"],
+    ] as const) {
+      app.get<{ Params: RunArtifactPath }>(
+        path,
+        { schema: artifactDeliverySchema },
+        async (request) => {
+          const auth = await service.authenticate(authorization(request), requestId(request));
+          const run = await service.getRun(auth, request.params.threadId, request.params.runId);
+          const artifact = await normalizedDependencies.experience?.getArtifact({
+            scope: auth.scope,
+            runId: runId(run.id),
+            artifactId: request.params.artifactId,
+          });
+          if (artifact === undefined || artifact.outcome === "not_found")
+            throw new ApiFailure("not_found");
+          const delivery = await normalizedDependencies.blobs?.presignDownload({
+            scope: { tenantId: auth.scope.tenantId },
+            blob: artifact.artifact.blob,
+            ttlSeconds: 300,
+            responseMediaType: artifact.artifact.mediaType,
+            delivery: disposition === "preview" ? "inline-preview" : "artifact-download",
+            ...(disposition === "download"
+              ? {
+                  downloadName: safeArtifactDownloadName(
+                    artifact.artifact.name,
+                    artifact.artifact.id,
+                  ),
+                }
+              : {}),
+          });
+          // 签发 URL 后再读取一次固定身份，避免成员撤销或发布状态变化时留下可用 URL。
+          const confirmed = await normalizedDependencies.experience?.getArtifact({
+            scope: auth.scope,
+            runId: runId(run.id),
+            artifactId: request.params.artifactId,
+          });
+          if (
+            delivery === undefined ||
+            confirmed === undefined ||
+            confirmed.outcome === "not_found"
+          ) {
+            throw new ApiFailure("not_found");
+          }
+          return success(request, {
+            artifact: {
+              id: artifact.artifact.id,
+              tenantId: auth.scope.tenantId,
+              threadId: artifact.artifact.threadId,
+              runId: artifact.artifact.runId,
+              resourceVersionId: artifact.artifact.resourceVersionId,
+              name: artifact.artifact.name,
+              mediaType: artifact.artifact.mediaType,
+              sizeBytes: artifact.artifact.sizeBytes,
+              status: "published" as const,
+              createdAt: artifact.artifact.createdAt,
+              updatedAt: artifact.artifact.updatedAt,
+            },
+            url: validateArtifactDeliveryUrl(delivery),
+            expiresInSeconds: 300,
+            disposition,
+          });
+        },
+      );
+    }
+  }
+
   return app;
+}
+
+function safeArtifactDownloadName(name: string, artifactId: string): string {
+  const normalized = Array.from(name.normalize("NFKC"))
+    .map((character) =>
+      /[\p{Cc}\p{Cf}]/u.test(character) || '/\\"*:<>?|'.includes(character) ? "_" : character,
+    )
+    .join("")
+    .replace(/[. ]+$/gu, "")
+    .trim();
+  return (normalized.length === 0 ? `artifact-${artifactId}` : normalized).slice(0, 180);
+}
+
+function validateArtifactDeliveryUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.username ||
+      url.password ||
+      !url.host
+    ) {
+      throw new Error("invalid artifact URL");
+    }
+    return url.toString();
+  } catch {
+    throw new ApiFailure("dependency_unavailable");
+  }
 }

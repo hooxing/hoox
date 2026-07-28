@@ -42,7 +42,7 @@
 | [ADR-0035](0035-model-aware-context-budget.md) | 模型感知的 Context Budget | 已接受 | 2026-07-28 |
 | [ADR-0036](0036-waiting-recovery-proof-derived-facts.md) | waiting 恢复事实由已完成副作用证明推导 | 已替代 | 2026-07-28 |
 | [ADR-0037](0037-waiting-recovery-capability-and-append-only-rollback.md) | waiting 恢复能力回执与只追加回退边界 | 已接受 | 2026-07-28 |
-| [本地 Web 体验读取契约](local-web-experience-read-contract.md) | 本地 Web 体验的 Run 事件与 Artifact 读取契约 | 已接受（待编号） | 2026-07-28 |
+| [ADR-0041](0041-local-web-experience-read-contract.md) | 本地 Web 体验的 Run 事件与 Artifact 读取契约 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录
 

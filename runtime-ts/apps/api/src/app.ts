@@ -61,6 +61,18 @@ export interface ApiAppOptions {
 }
 
 const idempotencyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u;
+const publicAgentEventTypes = new Set([
+  "agent.started",
+  "agent.settled",
+  "message.delta",
+  "message.completed",
+  "tool.started",
+  "tool.updated",
+  "tool.completed",
+  "queue.updated",
+  "compaction.forbidden",
+  "error",
+]);
 
 const statusByFailure: Readonly<Record<ApiFailureKind, number>> = {
   bad_request: 400,
@@ -444,7 +456,7 @@ export function createApiApp(
           items: read.events.map((event) => ({
             eventId: `${read.attemptId ?? "pending"}-${event.sequence}`,
             sequence: event.sequence,
-            type: event.kind,
+            type: publicEventType(event.kind, event.payload),
             kind: event.kind,
             payload: event.payload,
             occurredAt: event.occurredAt,
@@ -579,6 +591,13 @@ export function createApiApp(
   }
 
   return app;
+}
+
+/** 仅透传已由 RuntimeAgentEvent 协议声明的 agent 子类型，未知 payload 不能伪造公开事件类型。 */
+function publicEventType(kind: string, payload: Readonly<Record<string, unknown>>): string {
+  if (kind !== "agent_event") return kind;
+  const candidate = payload.type;
+  return typeof candidate === "string" && publicAgentEventTypes.has(candidate) ? candidate : kind;
 }
 
 function safeArtifactDownloadName(name: string, artifactId: string): string {

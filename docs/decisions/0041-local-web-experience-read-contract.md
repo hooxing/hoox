@@ -1,4 +1,4 @@
-# 本地 Web 体验的 Run 事件与 Artifact 读取契约（待 ADR 编号）
+# ADR-0041：本地 Web 体验的 Run 事件与 Artifact 读取契约
 
 - 状态：已接受
 - 日期：2026-07-28

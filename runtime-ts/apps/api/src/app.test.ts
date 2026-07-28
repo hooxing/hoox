@@ -414,7 +414,7 @@ function fixture(
                   {
                     sequence: 2,
                     kind: "agent_event",
-                    payload: { type: "message", text: "正在处理" },
+                    payload: { type: "message.delta", delta: "正在处理" },
                     occurredAt: baseTime,
                   },
                 ]
@@ -478,7 +478,23 @@ describe("Fastify API 契约", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json().data).toMatchObject({
       attemptId: "attempt_1",
-      items: [{ sequence: 2 }],
+      items: [
+        {
+          eventId: "attempt_1-2",
+          sequence: 2,
+          kind: "agent_event",
+          type: "message.delta",
+        },
+      ],
+    });
+    const initial = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/events?after=-1&limit=10",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(initial.json().data.items[0]).toMatchObject({
+      kind: "attempt_state_changed",
+      type: "attempt_state_changed",
     });
     const otherTenant = await app.inject({
       method: "GET",

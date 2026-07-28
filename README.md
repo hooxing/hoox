@@ -10,7 +10,7 @@
 
 开发 API 还提供给本地 Web 体验的最小读取契约。前端应通过本地开发服务器反向代理到 API 的同源 `/v1` 路径，不需要也不启用宽松 CORS：
 
-- `GET /v1/threads/:threadId/runs/:runId/events?after=-1&limit=100`：按持久化 sequence 严格递增返回当前 Run 最新 Attempt 的事件；`after` 为排他游标，范围为 `-1` 到安全整数，`limit` 为 1 到 200。每项同时提供 Web 所需的 `{ eventId, sequence, occurredAt, type, payload }`，其中 `eventId` 为 `<attemptId>-<sequence>`，并保留兼容字段 `kind`。cursor 只在响应的 `attemptId` 内有效，发生变化时客户端必须重置或分区去重。
+- `GET /v1/threads/:threadId/runs/:runId/events?after=-1&limit=100`：按持久化 sequence 严格递增返回当前 Run 最新 Attempt 的事件；`after` 为排他游标，范围为 `-1` 到安全整数，`limit` 为 1 到 200。每项同时提供 Web 所需的 `{ eventId, sequence, occurredAt, type, payload }`，其中 `eventId` 为 `<attemptId>-<sequence>`，并保留兼容字段 `kind`。当 `kind=agent_event` 且 `payload.type` 是 Runtime 声明的类型（如 `message.delta`、`tool.started`）时，`type` 使用该值；其他情况 `type=kind`。cursor 只在响应的 `attemptId` 内有效，发生变化时客户端必须重置或分区去重。
 - `GET /v1/threads/:threadId/runs/:runId/artifacts`：只列出已发布的 deliverable Artifact，不包含 diagnostic/trace。
 - `GET /v1/threads/:threadId/runs/:runId/artifacts/:artifactId/preview` 与 `/download`：使用短期 S3 预签名 URL；两者均重验租户成员关系、Run/Thread 归属、已发布状态和固定 Blob 身份。preview 采用 inline 响应，download 带净化后的下载名。
 

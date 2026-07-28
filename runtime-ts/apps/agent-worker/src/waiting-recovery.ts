@@ -93,8 +93,6 @@ export interface WaitingRecoveryStorePort {
   resolve(input: {
     readonly claim: WaitingRecoveryClaim;
     readonly decision: WaitingRecoveryDecision;
-    /** 与 Agent event / Runtime Rollout 共用的确定事实；UNKNOWN 不伪造该事件。 */
-    readonly sandboxFact?: SandboxRecoveryFact;
   }): Promise<"resolved" | "already_resolved" | "claim_lost">;
   beginEffect(input: {
     readonly claim: WaitingRecoveryClaim;
@@ -102,18 +100,25 @@ export interface WaitingRecoveryStorePort {
     readonly observedWorkspaceHead: Exclude<WorkspaceHeadObservation, { outcome: "unavailable" }>;
     readonly effect: "connect" | "create" | "materialize";
   }): Promise<
-    | { readonly outcome: "authorized"; readonly intentId: string }
+    | {
+        readonly outcome: "authorized";
+        readonly intentId: string;
+        readonly priorProof?: SandboxEffectProof;
+      }
+    | { readonly outcome: "already_completed"; readonly proof: SandboxEffectProof }
     | { readonly outcome: "claim_lost" | "already_started" }
   >;
   markUnknown(input: {
     readonly claim: WaitingRecoveryClaim;
     readonly intentId: string;
     readonly effect: "connect" | "create" | "materialize";
+    readonly priorProof?: SandboxEffectProof;
   }): Promise<"unknown" | "claim_lost">;
   completeEffect(input: {
     readonly claim: WaitingRecoveryClaim;
     readonly intentId: string;
     readonly effect: "connect" | "create" | "materialize";
+    readonly proof: SandboxEffectProof;
   }): Promise<"completed" | "claim_lost">;
 }
 
@@ -122,10 +127,18 @@ export interface WaitingRecoveryEffectPort {
     readonly intentId: string;
     readonly decision: Extract<WaitingRecoveryDecision, { outcome: "resume" }>;
     readonly effect: "connect" | "create" | "materialize";
+    /** materialize 只能消费已由数据库确认的 create 证明，不能从本地推断 Sandbox 身份。 */
+    readonly priorProof?: SandboxEffectProof;
   }): Promise<
-    | { readonly outcome: "succeeded" }
+    | { readonly outcome: "succeeded"; readonly proof: SandboxEffectProof }
     | { readonly outcome: "unknown"; readonly effect: "connect" | "create" | "materialize" }
   >;
+}
+
+export interface SandboxEffectProof {
+  readonly registryId: string;
+  readonly providerSandboxId: string;
+  readonly generation: number;
 }
 
 export type WaitingRecoveryCoordinatorResult =
@@ -133,8 +146,8 @@ export type WaitingRecoveryCoordinatorResult =
   | { readonly outcome: "decided"; readonly decision: WaitingRecoveryDecision };
 
 /**
- * 窄编排只负责 PG 恢复权和确定事实落库。真正的 connect/create/materialize 由后续 Saga
- * 在事实提交之后执行；因此进程崩溃后不会依赖本地变量判断副作用是否发生。
+ * 窄编排只负责 PG 恢复权、intent 和确定事实落库。真正的 connect/create/materialize 只能在
+ * intent 提交后执行；因此进程崩溃后不会依赖本地变量判断副作用是否发生。
  */
 export async function coordinateWaitingRecovery(input: {
   readonly store: WaitingRecoveryStorePort;
@@ -176,12 +189,14 @@ export async function coordinateWaitingRecovery(input: {
         effect: effectKind,
       });
       if (started.outcome !== "authorized") {
+        if (started.outcome === "already_completed") continue;
         return { outcome: started.outcome === "claim_lost" ? "claim_lost" : "busy" };
       }
       const effect = await input.effects.execute({
         intentId: started.intentId,
         decision,
         effect: effectKind,
+        ...(started.priorProof === undefined ? {} : { priorProof: started.priorProof }),
       });
       if (effect.outcome === "unknown") {
         const marked = await input.store.markUnknown({
@@ -204,6 +219,7 @@ export async function coordinateWaitingRecovery(input: {
         claim: claimed.claim,
         intentId: started.intentId,
         effect: effectKind,
+        proof: effect.proof,
       });
       if (completed !== "completed") {
         const marked = await input.store.markUnknown({
@@ -224,11 +240,9 @@ export async function coordinateWaitingRecovery(input: {
       }
     }
   }
-  const sandboxFact = decision.outcome === "resume" ? decision.sandbox : undefined;
   const resolved = await input.store.resolve({
     claim: claimed.claim,
     decision,
-    ...(sandboxFact === undefined ? {} : { sandboxFact }),
   });
   return resolved === "resolved"
     ? { outcome: "decided", decision }
@@ -335,9 +349,9 @@ export function decideWaitingRecovery(
   };
 }
 
-function headRevision(head: Exclude<WorkspaceHeadObservation, { outcome: "unavailable" }>):
-  | WorkspaceRevisionId
-  | undefined {
+function headRevision(
+  head: Exclude<WorkspaceHeadObservation, { outcome: "unavailable" }>,
+): WorkspaceRevisionId | undefined {
   return head.outcome === "found" ? head.revisionId : undefined;
 }
 

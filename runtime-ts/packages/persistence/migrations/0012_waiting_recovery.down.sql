@@ -7,6 +7,8 @@ ALTER TABLE run_events DROP CONSTRAINT run_events_waiting_recovery_payload_check
 -- down 仅在显式 allow-destructive 下执行；若后续 Rollout 已引用恢复事实，FK 会安全阻止降级。
 DELETE FROM run_events WHERE kind='sandbox_recovery_decided';
 DELETE FROM runtime_rollout_entries WHERE kind='sandbox_recovery';
+ALTER TABLE sandbox_registry DROP CONSTRAINT sandbox_registry_generation_check;
+ALTER TABLE sandbox_registry DROP COLUMN generation;
 
 ALTER TABLE runtime_rollout_entries DROP CONSTRAINT runtime_rollout_entries_kind_check;
 ALTER TABLE runtime_rollout_entries ADD CONSTRAINT runtime_rollout_entries_kind_check CHECK (

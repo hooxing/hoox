@@ -171,7 +171,7 @@ describe("waiting + Sandbox 恢复决策", () => {
       async resolve(input) {
         if (resolved) return "already_resolved";
         resolved = true;
-        if (input.sandboxFact) facts.push(input.sandboxFact.kind);
+        if (input.decision.outcome === "resume") facts.push(input.decision.sandbox.kind);
         return "resolved";
       },
       async beginEffect() {
@@ -186,7 +186,10 @@ describe("waiting + Sandbox 恢复决策", () => {
     };
     const effects = {
       async execute() {
-        return { outcome: "succeeded" as const };
+        return {
+          outcome: "succeeded" as const,
+          proof: { registryId: "registry-1", providerSandboxId: "cube-1", generation: 3 },
+        };
       },
     };
     const recover = (workerId: string) =>
@@ -252,7 +255,10 @@ describe("waiting + Sandbox 恢复决策", () => {
       effects: {
         async execute() {
           effectCalls += 1;
-          return { outcome: "succeeded" };
+          return {
+            outcome: "succeeded",
+            proof: { registryId: "registry-1", providerSandboxId: "cube-1", generation: 3 },
+          };
         },
       },
     });
@@ -309,5 +315,74 @@ describe("waiting + Sandbox 恢复决策", () => {
       outcome: "decided",
       decision: { outcome: "external_effect_unknown", requestAutomaticRetry: false },
     });
+  });
+
+  it("materialize 只消费已完成 create 的持久化证明", async () => {
+    const createProof = {
+      registryId: "registry-created",
+      providerSandboxId: "cube-created",
+      generation: 7,
+    };
+    const rebuiltCheckpoint: WaitingRecoveryCheckpoint = {
+      checkpointId: "checkpoint-waiting-1",
+      scope,
+      workspaceHeadAtWait: { outcome: "found", revisionId: revisionOne },
+    };
+    const effectInputs: Array<{ effect: string; priorProof?: typeof createProof }> = [];
+    let effectIndex = 0;
+    const store: WaitingRecoveryStorePort = {
+      async claim() {
+        return {
+          outcome: "claimed",
+          claim: {
+            claimToken: "claim",
+            claimEpoch: 1,
+            databaseNow: observation().now,
+            checkpoint: rebuiltCheckpoint,
+          },
+        };
+      },
+      async beginEffect(_input) {
+        effectIndex += 1;
+        return effectIndex === 1
+          ? { outcome: "authorized", intentId: "create-intent" }
+          : { outcome: "authorized", intentId: "materialize-intent", priorProof: createProof };
+      },
+      async markUnknown() {
+        throw new Error("不应进入 UNKNOWN");
+      },
+      async completeEffect() {
+        return "completed";
+      },
+      async resolve() {
+        return "resolved";
+      },
+    };
+    const result = await coordinateWaitingRecovery({
+      store,
+      scope,
+      checkpointId: "checkpoint-waiting-1",
+      workerId: "worker",
+      observation: observation(),
+      effects: {
+        async execute(input) {
+          effectInputs.push({
+            effect: input.effect,
+            ...(input.priorProof === undefined ? {} : { priorProof: input.priorProof }),
+          });
+          if (input.effect === "create") {
+            return { outcome: "succeeded", proof: createProof };
+          }
+          const priorProof = input.priorProof;
+          if (priorProof === undefined) throw new Error("materialize 必须收到 create proof");
+          return { outcome: "succeeded", proof: priorProof };
+        },
+      },
+    });
+    expect(result).toMatchObject({ outcome: "decided", decision: { outcome: "resume" } });
+    expect(effectInputs).toEqual([
+      { effect: "create" },
+      { effect: "materialize", priorProof: createProof },
+    ]);
   });
 });

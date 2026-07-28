@@ -42,6 +42,11 @@ describe("Agent Worker 进程入口", () => {
   it("生产入口固定使用内建真实装配器，拒绝调用方注入 Fake", async () => {
     const configuration = parseWorkerProcessEnvironment(productionEnvironment());
     expect(configuration.sandbox.templateId).toBe("tpl-test");
+    expect(configuration.sandbox).toMatchObject({
+      apiUrl: "http://sandbox:3000",
+      proxyNodeIp: "sandbox",
+      proxyScheme: "http",
+    });
     await expect(
       startWorkerProcess({
         environment: productionEnvironment(),
@@ -54,6 +59,21 @@ describe("Agent Worker 进程入口", () => {
         },
       }),
     ).rejects.toThrow("PRODUCTION_ASSEMBLY_UNAVAILABLE:agent-worker");
+  });
+
+  it("Worker 数据面默认与 CubeAPI 同机，显式 Proxy 配置仍优先", () => {
+    expect(
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        CUBESANDBOX_PROXY_NODE_IP: "10.0.0.8",
+        CUBESANDBOX_PROXY_PORT: "8443",
+        CUBESANDBOX_PROXY_SCHEME: "https",
+      }).sandbox,
+    ).toMatchObject({
+      proxyNodeIp: "10.0.0.8",
+      proxyPort: 8443,
+      proxyScheme: "https",
+    });
   });
 
   it("缺少模型依赖时在装配前失败且不泄漏其他秘密", () => {

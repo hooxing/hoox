@@ -20,6 +20,21 @@ describe("CubeSandbox Proxy 路由配置", () => {
     ).toEqual({ proxyNodeIp: "10.0.0.9", proxyPort: 8443, proxyScheme: "https" });
   });
 
+  it("只显式配置 443 端口时沿用 SDK 的 https 推导，显式 scheme 仍优先", () => {
+    expect(resolveCubeProxyRouting({ apiUrl: "http://cube-api:3000", proxyPort: 443 })).toEqual({
+      proxyNodeIp: "cube-api",
+      proxyPort: 443,
+      proxyScheme: "https",
+    });
+    expect(
+      resolveCubeProxyRouting({
+        apiUrl: "http://cube-api:3000",
+        proxyPort: 443,
+        proxyScheme: "http",
+      }),
+    ).toEqual({ proxyNodeIp: "cube-api", proxyPort: 443, proxyScheme: "http" });
+  });
+
   it("环境变量入口与 Worker 使用同一套默认规则", () => {
     expect(
       cubeConfigFromEnv({

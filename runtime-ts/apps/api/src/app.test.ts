@@ -21,7 +21,9 @@ import {
 } from "@cube-runtime/domain";
 import type {
   ArchiveThreadCommandPort,
+  BlobStore,
   CoreRepositories,
+  RunExperienceReadPort,
   TenantBundle,
   TenantScope,
   ThreadListPage,
@@ -74,6 +76,28 @@ class AsyncMutex {
 }
 
 const baseTime = isoTimestamp("2099-07-26T08:00:00.000Z");
+const experienceArtifact = {
+  id: "artifact_1",
+  runId: runId("run_1"),
+  threadId: threadId("thread_1"),
+  resourceVersionId: "resource_version_1",
+  name: "交付说明.txt",
+  mediaType: "text/plain",
+  sizeBytes: 42,
+  createdAt: baseTime,
+  updatedAt: baseTime,
+  blob: {
+    kind: "stable" as const,
+    tenantId: tenantId("tenant_owner_a"),
+    purpose: "resource" as const,
+    sha256: "a".repeat(64),
+    size: 42,
+    mediaType: "text/plain",
+    incarnationId: "00000000-0000-4000-8000-000000000001",
+    physicalObjectKey:
+      "agent-runtime/stable/tenant_owner_a/resource/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/00000000-0000-4000-8000-000000000001",
+  },
+};
 
 function key(scope: TenantScope, id: string): string {
   return `${scope.tenantId}:${id}`;
@@ -327,7 +351,13 @@ function teamBundle(input: {
   };
 }
 
-function fixture(options: { readonly enableCreate?: boolean } = {}) {
+function fixture(
+  options: {
+    readonly enableCreate?: boolean;
+    readonly enableExperience?: boolean;
+    readonly includeArtifact?: boolean;
+  } = {},
+) {
   const state = new FakeApiState();
   const ownerA = personalBundle("owner_a");
   const ownerB = personalBundle("owner_b");
@@ -366,6 +396,53 @@ function fixture(options: { readonly enableCreate?: boolean } = {}) {
       run: () => runId(`run_${++runSequence}`),
       workspace: () => workspaceId(`workspace_${++workspaceSequence}`),
     },
+    ...(options.enableExperience === true
+      ? {
+          experience: {
+            listEvents: async ({ runId, after, limit }) => {
+              if (runId !== "run_1") return { outcome: "not_found" } as const;
+              return {
+                outcome: "found" as const,
+                attemptId: "attempt_1",
+                events: [
+                  {
+                    sequence: 1,
+                    kind: "attempt_state_changed",
+                    payload: { status: "running", stage: "model_execution_started" },
+                    occurredAt: baseTime,
+                  },
+                  {
+                    sequence: 2,
+                    kind: "agent_event",
+                    payload: { type: "message", text: "正在处理" },
+                    occurredAt: baseTime,
+                  },
+                ]
+                  .filter((event) => event.sequence > after)
+                  .slice(0, limit),
+              };
+            },
+            listArtifacts: async ({ runId }) =>
+              runId === "run_1"
+                ? {
+                    outcome: "found" as const,
+                    artifacts: options.includeArtifact ? [experienceArtifact] : [],
+                  }
+                : { outcome: "not_found" as const },
+            getArtifact: async ({ runId, artifactId }) =>
+              runId === "run_1" && options.includeArtifact && artifactId === experienceArtifact.id
+                ? { outcome: "found" as const, artifact: experienceArtifact }
+                : { outcome: "not_found" as const },
+          } satisfies RunExperienceReadPort,
+          ...(options.includeArtifact
+            ? {
+                blobs: {
+                  presignDownload: async () => "http://127.0.0.1:19000/short-lived-download",
+                } as unknown as BlobStore,
+              }
+            : {}),
+        }
+      : {}),
   };
   const app = createApiApp(dependencies, { logger: false });
   return { app, state, dependencies, ownerA, ownerB };
@@ -378,6 +455,75 @@ afterEach(async () => {
 });
 
 describe("Fastify API 契约", () => {
+  it("Run 事件按 sequence 增量读取，并维持 Thread/租户边界", async () => {
+    const { app, state } = fixture({ enableExperience: true });
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-events-0001" },
+      payload: { title: "事件任务" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-events-0001" },
+      payload: { input: "生成事件" },
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/events?after=1&limit=10",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toMatchObject({
+      attemptId: "attempt_1",
+      items: [{ sequence: 2 }],
+    });
+    const otherTenant = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/events",
+      headers: { authorization: "Bearer token-b" },
+    });
+    expect(otherTenant.statusCode).toBe(404);
+    expect(state.runs).toHaveLength(1);
+  });
+
+  it("Artifact 只经 Run 归属签发短期预览和下载 URL", async () => {
+    const { app } = fixture({ enableExperience: true, includeArtifact: true });
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-artifacts-0001" },
+      payload: { title: "交付物任务" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-artifacts-0001" },
+      payload: { input: "生成交付物" },
+    });
+    const list = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/artifacts",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(list.json().data.items).toHaveLength(1);
+    const preview = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/preview",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json().data).toMatchObject({ disposition: "preview", expiresInSeconds: 300 });
+    const wrongRun = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_2/artifacts/artifact_1/download",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(wrongRun.statusCode).toBe(404);
+  });
   it("live/ready 返回服务端 requestId，依赖失败不泄漏原始错误", async () => {
     const { app, dependencies } = fixture();
     openApps.push(app);

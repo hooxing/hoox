@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@cube-runtime/domain";
-import { createApiPersistenceRuntime } from "@cube-runtime/persistence";
+import { createApiPersistenceRuntime, createS3BlobStore } from "@cube-runtime/persistence";
 import type { ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
@@ -75,6 +75,19 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
         ttlMilliseconds: cursorTtlMilliseconds,
         maximumTtlMilliseconds: cursorMaximumTtlMilliseconds,
       });
+      const blobs = createS3BlobStore(
+        {
+          endpoint: configuration.objectStorage.endpoint,
+          publicEndpoint: configuration.objectStorage.publicEndpoint,
+          bucket: configuration.objectStorage.bucket,
+          region: configuration.objectStorage.region,
+          accessKeyId: configuration.objectStorage.accessKeyId,
+          secretAccessKey: configuration.objectStorage.secretAccessKey,
+          forcePathStyle: configuration.objectStorage.forcePathStyle,
+          maxBlobSizeBytes: 100 * 1_024 * 1_024,
+        },
+        persistence.blobLifecycle,
+      );
       app = createApiApp(
         {
           auth: createDevelopmentAuthResolver({
@@ -87,6 +100,8 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
             enqueueOutbox: persistence.runDispatchCreation,
           }),
           archiveThread: persistence.archiveThread,
+          experience: persistence.experience,
+          blobs,
           cursorCodec,
           readiness: Object.freeze({ probe: () => persistence.probe() }),
           clock,

@@ -7,6 +7,7 @@ describe("mergeEvents", () => {
       eventId: `evt_${sequence}`,
       sequence,
       occurredAt: "2026-01-01T00:00:00Z",
+      kind: "agent_event",
       type: "text",
       payload: "x",
     });

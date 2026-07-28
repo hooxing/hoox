@@ -19,6 +19,7 @@ export type RunEvent = {
   readonly eventId: string;
   readonly sequence: number;
   readonly occurredAt: string;
+  readonly kind: string;
   readonly type: string;
   readonly payload: unknown;
 };
@@ -71,6 +72,41 @@ function asArray(value: unknown): readonly unknown[] {
     return Array.isArray(items) ? items : [];
   }
   return [];
+}
+
+function record(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return typeof value === "object" && value !== null
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
+}
+
+/** 将追加日志基线和未来的 HTTP 事件信封收敛为 UI 的稳定事件形状。 */
+export function normalizeRunEvent(value: unknown): RunEvent | undefined {
+  const raw = record(value);
+  if (
+    raw === undefined ||
+    typeof raw.sequence !== "number" ||
+    !Number.isSafeInteger(raw.sequence)
+  ) {
+    return undefined;
+  }
+  const kind = typeof raw.kind === "string" ? raw.kind : "unknown";
+  const payload = raw.payload;
+  const payloadType = record(payload)?.type;
+  const type =
+    typeof raw.type === "string"
+      ? raw.type
+      : kind === "agent_event" && typeof payloadType === "string"
+        ? payloadType
+        : kind;
+  return {
+    eventId: typeof raw.eventId === "string" ? raw.eventId : `event-${raw.sequence}`,
+    sequence: raw.sequence,
+    occurredAt: typeof raw.occurredAt === "string" ? raw.occurredAt : "",
+    kind,
+    type,
+    payload,
+  };
 }
 
 export class RuntimeApi {
@@ -135,7 +171,9 @@ export class RuntimeApi {
     const data = await this.request<unknown>(
       `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/events?after=${after}&limit=100`,
     );
-    return asArray(data) as readonly RunEvent[];
+    return asArray(data)
+      .map(normalizeRunEvent)
+      .filter((event): event is RunEvent => event !== undefined);
   }
   async listArtifacts(threadId: string, runId: string): Promise<readonly Artifact[]> {
     const data = await this.request<unknown>(
@@ -143,13 +181,9 @@ export class RuntimeApi {
     );
     return asArray(data) as readonly Artifact[];
   }
-  async downloadArtifact(artifactId: string): Promise<string> {
+  async downloadArtifact(threadId: string, runId: string, artifactId: string): Promise<string> {
     const data = await this.request<unknown>(
-      `/v1/artifacts/${encodeURIComponent(artifactId)}/download`,
-      {
-        method: "POST",
-        body: "{}",
-      },
+      `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/download`,
     );
     if (typeof data === "object" && data !== null) {
       const candidate =

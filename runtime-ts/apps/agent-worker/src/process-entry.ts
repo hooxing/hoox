@@ -31,9 +31,10 @@ import { PiWorkerSessionFactory } from "./pi-session-factory.js";
 import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
+  DatabaseRunCancellation,
   FailClosedWorkspaceRevisionVerifier,
   NoDeclaredArtifactCompletionGate,
-  ProcessCancellation,
+  ProcessShutdown,
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
 import { RunWorker } from "./run-worker.js";
@@ -305,7 +306,7 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
         configuration.sandbox.templateId,
       );
       const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
-      const cancellation = new ProcessCancellation();
+      const shutdown = new ProcessShutdown();
       const worker = new RunWorker(
         {
           persistence: new PgExecutionPersistence(pool),
@@ -313,7 +314,8 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
           sandboxes,
           orphanSandboxes: sandboxes,
           sessions,
-          cancellation,
+          cancellation: new DatabaseRunCancellation(),
+          shutdownSignal: shutdown.signal,
           artifacts: new NoDeclaredArtifactCompletionGate(),
           clock: new SystemWorkerClock(),
           metrics: new PgRecoveryMetrics(pool),
@@ -346,7 +348,7 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
       return Object.freeze({
         stopAccepting: async () => {
           loop.stopAccepting();
-          cancellation.cancel();
+          shutdown.request();
           await loop.drain();
         },
         resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),

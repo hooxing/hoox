@@ -3,7 +3,9 @@ import type { ExecutionScope } from "@cube-runtime/run-contracts";
 import { describe, expect, it } from "vitest";
 import {
   AgentWorkerPollingLoop,
+  DatabaseRunCancellation,
   FailClosedWorkspaceRevisionVerifier,
+  ProcessShutdown,
 } from "./production-worker-runtime.js";
 
 function deferred<T>() {
@@ -145,8 +147,19 @@ describe("Agent Worker production polling loop", () => {
     await closing;
     expect(executions).toBe(0);
     expect(acknowledgements).toEqual([
-      { claim: expected, outcome: "defer", retryAfterMilliseconds: 0 },
+      { claim: expected, outcome: "defer", retryAfterMilliseconds: 1_000 },
     ]);
+  });
+
+  it("进程停机信号与业务取消信号相互独立", () => {
+    const shutdown = new ProcessShutdown();
+    const cancellation = new DatabaseRunCancellation();
+    const businessSignal = cancellation.signalFor(claim().scope as ExecutionScope);
+
+    shutdown.request();
+
+    expect(shutdown.signal.aborted).toBe(true);
+    expect(businessSignal.aborted).toBe(false);
   });
 });
 

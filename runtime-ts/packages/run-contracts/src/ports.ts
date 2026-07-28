@@ -148,6 +148,7 @@ export type StableWorkerErrorCode =
   | "PROVIDER"
   | "PROTOCOL"
   | "EVENT_REJECTED"
+  | "WORKER_SHUTDOWN"
   | "PERSISTENCE_UNAVAILABLE"
   | "FENCE_LOST"
   | "SANDBOX_UNKNOWN"
@@ -562,7 +563,7 @@ export interface RecoveryMetricsPort {
   recordOrphanCleanup(input: {
     readonly scope: ExecutionScope;
     readonly registryId: string;
-    readonly reason: RuntimeMutationResult["outcome"] | "cancelled" | "timeout";
+    readonly reason: RuntimeMutationResult["outcome"] | "cancelled" | "timeout" | "shutdown";
     readonly cleanupOutcome: "settled" | "unknown" | "failed";
   }): Promise<void>;
 }

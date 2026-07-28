@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { PgClaimedRunDispatch, PgRunDispatchOutbox } from "@cube-runtime/persistence";
 import type {
   ArtifactPublicationPort,
   CancellationPort,
@@ -14,12 +15,11 @@ import type {
   WorkspaceRevisionVerifierPort,
 } from "@cube-runtime/run-contracts";
 import {
-  CubeSandboxGateway,
   type CubeGatewayOptions,
+  CubeSandboxGateway,
   SandboxRuntimeError,
   type UncertainLifecycleEvent,
 } from "@cube-runtime/sandbox";
-import type { PgClaimedRunDispatch, PgRunDispatchOutbox } from "@cube-runtime/persistence";
 import type { RunWorker, RunWorkerResult } from "./run-worker.js";
 
 export class SystemWorkerClock implements ClockPort {
@@ -45,14 +45,23 @@ export class SystemWorkerClock implements ClockPort {
   }
 }
 
-export class ProcessCancellation implements CancellationPort {
+const NEVER_CANCELLED_SIGNAL = new AbortController().signal;
+
+/** 业务取消由 PostgreSQL Run 状态提供；进程信号绝不能伪装成用户取消。 */
+export class DatabaseRunCancellation implements CancellationPort {
+  signalFor(_scope: ExecutionScope): AbortSignal {
+    return NEVER_CANCELLED_SIGNAL;
+  }
+}
+
+export class ProcessShutdown {
   private readonly controller = new AbortController();
 
-  signalFor(_scope: ExecutionScope): AbortSignal {
+  get signal(): AbortSignal {
     return this.controller.signal;
   }
 
-  cancel(): void {
+  request(): void {
     this.controller.abort(new Error("Agent Worker 正在关闭"));
   }
 }
@@ -255,7 +264,8 @@ export class AgentWorkerPollingLoop {
           await this.queue.acknowledge({
             claim,
             outcome: "defer",
-            retryAfterMilliseconds: 0,
+            // 与 PgRunDispatchOutbox 的最小重试约束一致，确保 ack 真正释放 dispatch claim。
+            retryAfterMilliseconds: 1_000,
           });
         } catch {
           // claim lease 会过期；关闭后的 claim 绝不交给 RunWorker 执行。

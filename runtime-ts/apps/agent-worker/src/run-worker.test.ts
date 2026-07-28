@@ -44,6 +44,7 @@ function harness(
   const sandboxes = new FakeSandboxRegistry();
   const factory = new FakeSessionFactory(sessions);
   const cancellation = new FakeCancellationPort();
+  const shutdown = new AbortController();
   const artifacts = new FakeArtifactPublication();
   const clock = new FakeClock();
   const metrics = new FakeRecoveryMetrics();
@@ -55,6 +56,7 @@ function harness(
       orphanSandboxes: sandboxes,
       sessions: factory,
       cancellation,
+      shutdownSignal: shutdown.signal,
       artifacts,
       clock,
       metrics,
@@ -75,6 +77,7 @@ function harness(
     sandboxes,
     factory,
     cancellation,
+    shutdown,
     artifacts,
     clock,
     metrics,
@@ -220,6 +223,28 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
     h.cancellation.cancel(h.scope);
     await expect(first).resolves.toEqual({ outcome: "cancelled" });
+  });
+
+  it("进程停机中止在途 Session，但只提交恢复事实而不伪造用户 cancelled", async () => {
+    const blocked = new BlockingAgentSession();
+    const h = harness([blocked], fakeSeed("worker-shutdown"));
+    const commands: RuntimeMutation[] = [];
+    h.persistence.afterMutation = (command) => commands.push(command);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.createCount === 1);
+
+    h.shutdown.abort("test_worker_shutdown");
+
+    await expect(execution).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "WORKER_SHUTDOWN",
+    });
+    const record = h.persistence.record(h.scope);
+    expect(blocked.abortCount).toBeGreaterThanOrEqual(1);
+    expect(record.run.status).toBe("running");
+    expect(record.attempt).toMatchObject({ status: "recovery_required" });
+    expect(commands.some((command) => command.nextRunStatus === "cancelled")).toBe(false);
+    expect(record.mutations.has("attempt-1/final/cancelled")).toBe(false);
   });
 
   it.each(["run", "workspace"] as const)(

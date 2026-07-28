@@ -123,6 +123,11 @@ export interface ControlledRolloutProjection {
     readonly role: "user" | "assistant";
     readonly text: string;
   }[];
+  /** 经 Rollout/Blob 事实验证的低信任工具观察；绝不恢复原始 Sandbox 输出。 */
+  readonly toolObservations?: readonly {
+    readonly toolCallId: string;
+    readonly observation: string;
+  }[];
 }
 
 const LOGICAL_WORKSPACE = "/workspace" as const;
@@ -320,6 +325,12 @@ function formatRolloutProjection(
     }
     return `${turn.role === "user" ? "用户" : "助手"}：${text}`;
   });
+  for (const item of projection.toolObservations ?? []) {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(item.toolCallId) || !item.observation.trim()) {
+      throw new Error("RolloutProjection 工具 Observation 无效");
+    }
+    lines.push(`工具 ${item.toolCallId} 的低信任观察：${item.observation}`);
+  }
   const rendered = `以下是 Runtime 审核并持久化的历史上下文投影（checkpoint=${projection.checkpointId}）：\n${lines.join("\n")}`;
   if (new TextEncoder().encode(rendered).byteLength > 64 * 1024) {
     throw new Error("RolloutProjection 超过 64 KiB 上限");

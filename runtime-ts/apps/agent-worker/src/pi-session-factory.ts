@@ -20,7 +20,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     private readonly artifactTools?: ArtifactToolRouterFactoryPort,
     private readonly artifactAuthorizationIssuer?: ArtifactExecutionAuthorizationIssuerPort,
   ) {
-    this.modelContext = bindTrustedPiModelContextCapability(model);
+    this.modelContext = bindTrustedPiModelContextCapability(modelRuntime, model);
   }
 
   async create(

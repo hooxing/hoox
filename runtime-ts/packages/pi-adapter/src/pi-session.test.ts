@@ -17,6 +17,7 @@ import {
   assertLinuxWorkerPlatform,
   assertPiSessionCapabilityManifest,
   bindTrustedPiModelContextCapability,
+  bindTestingPiModelContextCapability,
   assessSafePiSessionContext,
   createSafePiSession,
   digestCanonicalToolInputSchema,
@@ -171,7 +172,7 @@ describe("Pi 安全适配", () => {
       const tokenizer: TokenizerPort = {
         identity: "多轮累计-tokenizer",
         countTokens: (text) =>
-          text.includes("轮次输入") ? 50_000 : new TextEncoder().encode(text).byteLength,
+          text.includes("轮次输入") ? 60_000 : new TextEncoder().encode(text).byteLength,
       };
       const { controller, faux } = await harness(
         [fauxAssistantMessage("第一轮完成"), fauxAssistantMessage("不应调用")],
@@ -182,33 +183,74 @@ describe("Pi 安全适配", () => {
         tokenizer,
       );
       await controller.prompt("第一轮次输入");
-      await expect(controller.followUp("第二轮次输入")).rejects.toThrow("CONTEXT_TOO_LARGE");
+      await controller.followUp("第二轮次输入");
       expect(faux.state.callCount).toBe(1);
     },
   );
 
-  it("拒绝返回零的恶意 tokenizer capability", () => {
+  it.runIf(process.platform === "linux")(
+    "同一 prompt 的大工具结果在第二次 Provider 请求前失败关闭",
+    async () => {
+      const sandbox = new FakeSandboxHandle("budget-tool-loop") as FakeSandboxHandle & {
+        command: () => Promise<unknown>;
+      };
+      sandbox.command = async () => ({ stdout: "大工具结果", stderr: "", exitCode: 0 });
+      const tokenizer: TokenizerPort = {
+        identity: "工具循环-tokenizer",
+        countTokens: (text) =>
+          text.includes('"role":"toolResult"')
+            ? 1_000_000
+            : new TextEncoder().encode(text).byteLength,
+      };
+      const { controller, faux } = await harness(
+        [
+          fauxAssistantMessage(fauxToolCall("sandbox_command", { command: "produce" }), {
+            stopReason: "toolUse",
+          }),
+          fauxAssistantMessage("不应触达"),
+        ],
+        sandbox,
+        undefined,
+        undefined,
+        undefined,
+        tokenizer,
+      );
+      await controller.prompt("执行工具");
+      expect(faux.state.callCount).toBe(1);
+    },
+  );
+
+  it("公开绑定入口不接受特制 tokenizer，测试入口拒绝返回零的恶意 tokenizer", async () => {
     const faux = fauxProvider({ api: "bad-tokenizer", provider: "bad-tokenizer" });
+    const runtime = await registeredRuntime(faux);
     expect(() =>
-      bindTrustedPiModelContextCapability(faux.getModel(), {
+      (bindTrustedPiModelContextCapability as unknown as (...args: unknown[]) => unknown)(
+        runtime,
+        faux.getModel(),
+        { identity: "特制探针", countTokens: () => 1 },
+      ),
+    ).toThrow();
+    expect(() =>
+      bindTestingPiModelContextCapability(runtime, faux.getModel(), {
         identity: "恶意-zero",
         countTokens: () => 0,
       }),
     ).toThrow("tokenizer capability 无效");
   });
 
-  it("绑定后 tokenizer 探针或模型窗口漂移时失败关闭", () => {
+  it("绑定后 tokenizer 探针或模型窗口漂移时失败关闭", async () => {
     const faux = fauxProvider({ api: "mutable-context", provider: "mutable-context" });
     const model = faux.getModel();
+    const runtime = await registeredRuntime(faux);
     let probeTokens = 17;
-    const context = bindTrustedPiModelContextCapability(model, {
+    const context = bindTestingPiModelContextCapability(runtime, model, {
       identity: "可变探针测试",
       countTokens: () => probeTokens,
     });
     const options = {
       model,
       modelContext: context,
-      modelRuntime: {} as ModelRuntime,
+      modelRuntime: runtime,
       sandbox: new FakeSandboxHandle("mutable-context"),
       authorizeToolEffect: async () => ({
         consumedAtMonotonicMs: performance.now(),
@@ -218,7 +260,7 @@ describe("Pi 安全适配", () => {
     expect(assessSafePiSessionContext(options).outcome).toBeDefined();
     probeTokens = 1;
     expect(() => assessSafePiSessionContext(options)).toThrow("未绑定当前可信");
-    const fresh = bindTrustedPiModelContextCapability(model, {
+    const fresh = bindTestingPiModelContextCapability(runtime, model, {
       identity: "模型漂移测试",
       countTokens: () => 17,
     });
@@ -227,6 +269,29 @@ describe("Pi 安全适配", () => {
     expect(() => assessSafePiSessionContext({ ...options, modelContext: fresh })).toThrow(
       "未绑定当前可信",
     );
+  });
+
+  it("模型路由快照冻结且 baseUrl 或 headers 漂移时拒绝使用", async () => {
+    const faux = fauxProvider({ api: "route-snapshot", provider: "route-snapshot" });
+    const model = faux.getModel();
+    const runtime = await registeredRuntime(faux);
+    const context = bindTrustedPiModelContextCapability(runtime, model);
+    expect(context.model).not.toBe(model);
+    expect(Object.isFrozen(context.model)).toBe(true);
+    if (context.model.headers !== undefined)
+      expect(Object.isFrozen(context.model.headers)).toBe(true);
+    const options = {
+      model,
+      modelContext: context,
+      modelRuntime: runtime,
+      sandbox: new FakeSandboxHandle("route-snapshot"),
+      authorizeToolEffect: async () => ({
+        consumedAtMonotonicMs: performance.now(),
+        maxContinuationDelayMs: 100,
+      }),
+    };
+    model.baseUrl = `${model.baseUrl}/drift`;
+    expect(() => assessSafePiSessionContext(options)).toThrow("未绑定当前可信");
   });
 
   it.runIf(process.platform === "linux")(
@@ -358,8 +423,9 @@ describe("Pi 安全适配", () => {
   it.runIf(process.platform === "linux")(
     "把 Faux Provider 真实失败映射为稳定 PROVIDER，且不发布 completed",
     async () => {
-      const { controller, events } = await harness([
+      const { controller, events, faux } = await harness([
         fauxAssistantMessage("", { stopReason: "error", errorMessage: "测试 Provider 私有错误" }),
+        fauxAssistantMessage("失败后的新输入仍可执行"),
       ]);
       await controller.prompt("触发失败");
       expect(events).toContainEqual({
@@ -375,6 +441,11 @@ describe("Pi 安全适配", () => {
       expect(events.findIndex((event) => event.type === "error")).toBeLessThan(
         events.findIndex((event) => event.type === "agent.settled"),
       );
+      await controller.prompt("失败后新输入");
+      expect(faux.state.callCount).toBe(2);
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "message.delta", delta: "失败后的新输入仍可执行" }),
+      );
     },
   );
 
@@ -387,7 +458,10 @@ describe("Pi 安全适配", () => {
           if (options?.signal?.aborted) finish();
           else options?.signal?.addEventListener("abort", finish, { once: true });
         });
-      const { controller, events, started } = await harness([delayedAbort]);
+      const { controller, events, started, faux } = await harness([
+        delayedAbort,
+        fauxAssistantMessage("中止后的新输入仍可执行"),
+      ]);
       const prompting = controller.prompt("等待中止");
       await started;
       await controller.abort();
@@ -399,6 +473,11 @@ describe("Pi 安全适配", () => {
       );
       expect(events.findIndex((event) => event.type === "error")).toBeLessThan(
         events.findIndex((event) => event.type === "agent.settled"),
+      );
+      await controller.prompt("中止后新输入");
+      expect(faux.state.callCount).toBe(2);
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "message.delta", delta: "中止后的新输入仍可执行" }),
       );
     },
   );
@@ -499,7 +578,7 @@ describe("Pi 安全适配", () => {
       await expect(
         createSafePiSession({
           model,
-          modelContext: bindTrustedPiModelContextCapability(model),
+          modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
           modelRuntime,
           sandbox: new FakeSandboxHandle("platform-guard"),
           authorizeToolEffect: async () => immediateAuthorization(),
@@ -614,6 +693,15 @@ describe("Pi 安全适配", () => {
   });
 });
 
+async function registeredRuntime(faux: FauxProviderHandle): Promise<ModelRuntime> {
+  const runtime = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(),
+    modelsPath: null,
+  });
+  runtime.registerNativeProvider(faux.provider);
+  return runtime;
+}
+
 async function harness(
   responses: FauxResponseStep[],
   sandbox = new FakeSandboxHandle("pi-fake"),
@@ -647,7 +735,10 @@ async function harness(
   const model = faux.getModel();
   const controller = await createSafePiSession({
     model,
-    modelContext: bindTrustedPiModelContextCapability(model, tokenizer),
+    modelContext:
+      tokenizer === undefined
+        ? bindTrustedPiModelContextCapability(modelRuntime, model)
+        : bindTestingPiModelContextCapability(modelRuntime, model, tokenizer),
     modelRuntime,
     sandbox,
     authorizeToolEffect: async (input) => {

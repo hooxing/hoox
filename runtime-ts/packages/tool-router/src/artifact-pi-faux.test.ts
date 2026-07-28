@@ -228,7 +228,7 @@ describe("Pi Faux Artifact 纵向链路", () => {
       const model = faux.getModel();
       const controller = await createSafePiSession({
         model,
-        modelContext: bindTrustedPiModelContextCapability(model),
+        modelContext: bindTrustedPiModelContextCapability(runtime, model),
         modelRuntime: runtime,
         sandbox: new FakeSandboxHandle("artifact-faux"),
         artifactToolRouter: router,

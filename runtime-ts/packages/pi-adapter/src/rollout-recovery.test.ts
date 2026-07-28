@@ -4,7 +4,11 @@ import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { assessSafePiSessionContext, bindTrustedPiModelContextCapability } from "./pi-session.js";
+import {
+  assessSafePiSessionContext,
+  bindTestingPiModelContextCapability,
+  bindTrustedPiModelContextCapability,
+} from "./pi-session.js";
 import {
   projectLoadedRuntimeRecovery,
   RuntimeRecoveryError,
@@ -213,10 +217,14 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
     const harness = await sessionHarness();
     const result = await recoverSafePiSession({
       ...harness.options,
-      modelContext: bindTrustedPiModelContextCapability(harness.options.model, {
-        identity: "测试可信超保守-tokenizer",
-        countTokens: (text) => (text.length === 0 ? 0 : harness.options.model.contextWindow),
-      }),
+      modelContext: bindTestingPiModelContextCapability(
+        harness.options.modelRuntime,
+        harness.options.model,
+        {
+          identity: "测试可信超保守-tokenizer",
+          countTokens: (text) => (text.length === 0 ? 0 : harness.options.model.contextWindow),
+        },
+      ),
       loadRecovery: async (current) => ({
         ...loaded([entry(0, "user", { text: "不可丢失的历史事实" })]),
         recordedCompatibility: current,
@@ -270,7 +278,7 @@ async function sessionHarness() {
     faux,
     options: {
       model,
-      modelContext: bindTrustedPiModelContextCapability(model),
+      modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
       modelRuntime,
       sandbox: new FakeSandboxHandle("recovery-fake"),
       authorizeToolEffect: async () => ({

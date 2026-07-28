@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eventSummary } from "./event-view.js";
+import { buildTimeline, eventSummary } from "./event-view.js";
 
 describe("eventSummary", () => {
   it("显示 delta 而不序列化全部 payload", () => {
@@ -26,5 +26,28 @@ describe("eventSummary", () => {
         payload: { name: "write_artifact", callId: "call_1", receipt: { secret: "不应显示" } },
       }),
     ).toBe("工具 write_artifact（call_1）完成");
+  });
+
+  it("合并连续 delta，并在工具事件处分隔", () => {
+    const event = (sequence: number, type: string, payload: unknown) => ({
+      eventId: `event-${sequence}`,
+      sequence,
+      occurredAt: "",
+      kind: "agent_event",
+      type,
+      payload,
+    });
+    expect(
+      buildTimeline([
+        event(1, "message.delta", { delta: "你" }),
+        event(2, "message.delta", { delta: "好" }),
+        event(3, "tool.started", { name: "search", callId: "call_1" }),
+        event(4, "message.delta", { delta: "。" }),
+      ]),
+    ).toEqual([
+      { type: "assistant", id: "event-1", text: "你好" },
+      { type: "event", event: event(3, "tool.started", { name: "search", callId: "call_1" }) },
+      { type: "assistant", id: "event-4", text: "。" },
+    ]);
   });
 });

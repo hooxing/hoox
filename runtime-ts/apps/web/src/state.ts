@@ -1,9 +1,10 @@
-import type { Artifact, Run, RunEvent, Thread } from "./api.js";
+import type { Artifact, Run, RunEvent, RunEventPage, Thread } from "./api.js";
 
 export type WorkspaceState = {
   readonly threads: readonly Thread[];
   readonly selectedThreadId: string | undefined;
   readonly run: Run | undefined;
+  readonly eventAttemptId: string | undefined;
   readonly events: readonly RunEvent[];
   readonly artifacts: readonly Artifact[];
 };
@@ -12,6 +13,7 @@ export const initialWorkspaceState: WorkspaceState = {
   threads: [],
   selectedThreadId: undefined,
   run: undefined,
+  eventAttemptId: undefined,
   events: [],
   artifacts: [],
 };
@@ -31,7 +33,7 @@ export function workspaceReducer(
     | { readonly type: "threads"; readonly threads: readonly Thread[] }
     | { readonly type: "select"; readonly threadId: string }
     | { readonly type: "run"; readonly run: Run }
-    | { readonly type: "events"; readonly events: readonly RunEvent[] }
+    | { readonly type: "events"; readonly page: RunEventPage }
     | { readonly type: "artifacts"; readonly artifacts: readonly Artifact[] },
 ): WorkspaceState {
   switch (action.type) {
@@ -42,13 +44,16 @@ export function workspaceReducer(
         ...state,
         selectedThreadId: action.threadId,
         run: undefined,
+        eventAttemptId: undefined,
         events: [],
         artifacts: [],
       };
     case "run":
       return { ...state, run: action.run };
     case "events":
-      return { ...state, events: mergeEvents(state.events, action.events) };
+      return action.page.attemptId !== state.eventAttemptId
+        ? { ...state, eventAttemptId: action.page.attemptId, events: action.page.items }
+        : { ...state, events: mergeEvents(state.events, action.page.items) };
     case "artifacts":
       return { ...state, artifacts: action.artifacts };
   }

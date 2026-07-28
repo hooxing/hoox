@@ -10,6 +10,7 @@ import {
 } from "@cube-runtime/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { WaitingRecoveryStorePort } from "../../runtime-ts/apps/agent-worker/src/waiting-recovery.js";
+import { digestCanonical } from "../../runtime-ts/packages/run-contracts/src/mutation-protocol.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
 import { PgWaitingRecoveryStore } from "../../runtime-ts/packages/persistence/src/pg-waiting-recovery.js";
@@ -203,11 +204,21 @@ beforeAll(async () => {
 afterAll(async () => {
   if (runtime) await runtime.end();
   if (migrator) {
-    await migrateDown(migrator, {
-      ...migrationSecurity,
-      allowDestructive: true,
-      environment: "test",
-      targetVersion: 0,
+    await expect(
+      migrateDown(migrator, {
+        ...migrationSecurity,
+        allowDestructive: true,
+        environment: "test",
+        targetVersion: 0,
+      }),
+    ).rejects.toMatchObject({ code: "UNEXPECTED", message: "执行回退迁移失败" });
+    const rollback = await migrator.query<{ checkpoint_table: string; version_12: string }>(
+      `SELECT to_regclass('waiting_recovery_checkpoints')::text AS checkpoint_table,
+              (SELECT count(*)::text FROM runtime_schema_migrations WHERE version=12) AS version_12`,
+    );
+    expect(rollback.rows[0]).toEqual({
+      checkpoint_table: "waiting_recovery_checkpoints",
+      version_12: "1",
     });
     await migrator.end();
   }
@@ -223,16 +234,27 @@ afterAll(async () => {
 describe("waiting recovery PostgreSQL 事实源", () => {
   it("完整 Scope 并发 claim 只有一个胜者，错误 Scope 与跨租户均不可见", async () => {
     const [left, right] = await Promise.all([
-      store.claim({ scope, checkpointId, workerId: "worker-left" }),
-      store.claim({ scope, checkpointId, workerId: "worker-right" }),
+      store.claim({ scope, attemptId, checkpointId, workerId: "worker-left" }),
+      store.claim({ scope, attemptId, checkpointId, workerId: "worker-right" }),
     ]);
     expect([left.outcome, right.outcome].sort()).toEqual(["busy", "claimed"]);
     expect(
       (
         await store.claim({
           scope: { ...scope, threadId: threadId(`wrong_${unique}`) },
+          attemptId,
           checkpointId,
           workerId: "wrong",
+        })
+      ).outcome,
+    ).toBe("not_found");
+    expect(
+      (
+        await store.claim({
+          scope,
+          attemptId: `wrong_attempt_${unique}`,
+          checkpointId,
+          workerId: "wrong-attempt",
         })
       ).outcome,
     ).toBe("not_found");
@@ -249,7 +271,7 @@ describe("waiting recovery PostgreSQL 事实源", () => {
   });
 
   it("过期 claim 可 reclaim，旧 token 在 intent 前得到 claim_lost", async () => {
-    const first = await store.claim({ scope, checkpointId, workerId: "reclaim-first" });
+    const first = await store.claim({ scope, attemptId, checkpointId, workerId: "reclaim-first" });
     if (first.outcome !== "claimed") {
       await withTenantTransaction(migrator, databaseContext, (client) =>
         client.query(
@@ -261,7 +283,7 @@ describe("waiting recovery PostgreSQL 事实源", () => {
     const old =
       first.outcome === "claimed"
         ? first
-        : await store.claim({ scope, checkpointId, workerId: "reclaim-old" });
+        : await store.claim({ scope, attemptId, checkpointId, workerId: "reclaim-old" });
     if (old.outcome !== "claimed") throw new Error("测试需要旧 claim");
     await withTenantTransaction(migrator, databaseContext, (client) =>
       client.query(
@@ -269,7 +291,12 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         [scope.tenantId, checkpointId],
       ),
     );
-    const reclaimed = await store.claim({ scope, checkpointId, workerId: "reclaim-new" });
+    const reclaimed = await store.claim({
+      scope,
+      attemptId,
+      checkpointId,
+      workerId: "reclaim-new",
+    });
     expect(reclaimed.outcome).toBe("claimed");
     expect(
       (
@@ -294,7 +321,7 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         [scope.tenantId, checkpointId],
       ),
     );
-    const acquired = await store.claim({ scope, checkpointId, workerId: "saga" });
+    const acquired = await store.claim({ scope, attemptId, checkpointId, workerId: "saga" });
     if (acquired.outcome !== "claimed") throw new Error("测试需要 claim");
     const decision = {
       outcome: "resume",
@@ -314,22 +341,50 @@ describe("waiting recovery PostgreSQL 事实源", () => {
           claim: acquired.claim,
           intentId: intent.intentId,
           effect,
-          proof: {
+          receipt: {
             registryId: `rebuilt_registry_${unique}`,
             providerSandboxId: `rebuilt_sandbox_${unique}`,
             generation: 1,
+            completionCapability: "forged-capability",
+          },
+        }),
+      ).toBe("claim_lost");
+      expect(
+        await store.completeEffect({
+          claim: acquired.claim,
+          intentId: intent.intentId,
+          effect,
+          receipt: {
+            registryId: `rebuilt_registry_${unique}`,
+            providerSandboxId: `rebuilt_sandbox_${unique}`,
+            generation: 1,
+            completionCapability: intent.completionCapability,
           },
         }),
       ).toBe("completed");
     }
-    expect(
-      await store.resolve({
+    const [resolved, concurrentAppend] = await Promise.all([
+      store.resolve({
         claim: acquired.claim,
         decision,
       }),
-    ).toBe("resolved");
+      new PgRuntimeRolloutRepository(runtime).append({
+        context: rolloutContext,
+        idempotencyKey: `wait-concurrent-append-${unique}`,
+        entries: [{ kind: "assistant", body: { text: "concurrent append" } }],
+      }),
+    ]);
+    expect(resolved).toBe("resolved");
+    expect(concurrentAppend.outcome).toBe("created");
     const facts = await withTenantTransaction(runtime, databaseContext, (client) =>
-      client.query<{ run_count: string; rollout_count: string; decision: string; reason: string }>(
+      client.query<{
+        run_count: string;
+        rollout_count: string;
+        decision: string;
+        reason: string;
+        rollout_body: unknown;
+        rollout_digest: string;
+      }>(
         `SELECT
           (SELECT count(*) FROM run_events WHERE tenant_id=$1 AND attempt_id=$2
             AND kind='sandbox_recovery_decided')::text AS run_count,
@@ -338,22 +393,27 @@ describe("waiting recovery PostgreSQL 事实源", () => {
           (SELECT payload->>'decision' FROM run_events WHERE tenant_id=$1 AND attempt_id=$2
             AND kind='sandbox_recovery_decided') AS decision,
           (SELECT payload->>'reason' FROM run_events WHERE tenant_id=$1 AND attempt_id=$2
-            AND kind='sandbox_recovery_decided') AS reason`,
+            AND kind='sandbox_recovery_decided') AS reason,
+          (SELECT body FROM runtime_rollout_entries WHERE tenant_id=$1 AND attempt_id=$2
+            AND kind='sandbox_recovery') AS rollout_body,
+          (SELECT body_digest FROM runtime_rollout_entries WHERE tenant_id=$1 AND attempt_id=$2
+            AND kind='sandbox_recovery') AS rollout_digest`,
         [scope.tenantId, attemptId],
       ),
     );
-    expect(facts.rows[0]).toEqual({
+    expect(facts.rows[0]).toMatchObject({
       run_count: "1",
       rollout_count: "1",
       decision: "sandbox_rebuilt",
       reason: "missing",
     });
+    expect(facts.rows[0]?.rollout_digest).toBe(digestCanonical(facts.rows[0]?.rollout_body));
     expect(
       await store.resolve({
         claim: acquired.claim,
         decision,
       }),
-    ).not.toBe("resolved");
+    ).toBe("already_resolved");
   });
 
   it("effect_pending 租约过期时由后续 claim 收敛 UNKNOWN，绝不重发 create", async () => {
@@ -409,6 +469,7 @@ describe("waiting recovery PostgreSQL 事实源", () => {
     ).toBe("created");
     const acquired = await store.claim({
       scope,
+      attemptId,
       checkpointId: abandonedCheckpointId,
       workerId: "crashed-worker",
     });
@@ -436,6 +497,7 @@ describe("waiting recovery PostgreSQL 事实源", () => {
       (
         await store.claim({
           scope,
+          attemptId,
           checkpointId: abandonedCheckpointId,
           workerId: "recovery-worker",
         })

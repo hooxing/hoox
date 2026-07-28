@@ -6,6 +6,7 @@ import type { ExecutionScope } from "./ports.js";
  * Sandbox 中的进程、环境变量和网络连接都不属于恢复契约。
  */
 export interface WaitingRecoveryCheckpoint {
+  readonly attemptId: string;
   readonly checkpointId: string;
   readonly scope: ExecutionScope;
   readonly workspaceHeadAtWait: Exclude<WorkspaceHeadObservation, { outcome: "unavailable" }>;
@@ -85,6 +86,7 @@ export interface WaitingRecoveryStorePort {
   claim(input: {
     readonly scope: ExecutionScope;
     readonly checkpointId: string;
+    readonly attemptId: string;
     readonly workerId: string;
   }): Promise<
     | { readonly outcome: "claimed"; readonly claim: WaitingRecoveryClaim }
@@ -103,6 +105,7 @@ export interface WaitingRecoveryStorePort {
     | {
         readonly outcome: "authorized";
         readonly intentId: string;
+        readonly completionCapability: string;
         readonly priorProof?: SandboxEffectProof;
       }
     | { readonly outcome: "already_completed"; readonly proof: SandboxEffectProof }
@@ -118,8 +121,8 @@ export interface WaitingRecoveryStorePort {
     readonly claim: WaitingRecoveryClaim;
     readonly intentId: string;
     readonly effect: "connect" | "create" | "materialize";
-    readonly proof: SandboxEffectProof;
-  }): Promise<"completed" | "claim_lost">;
+    readonly receipt: SandboxEffectReceipt;
+  }): Promise<"completed" | "unknown" | "claim_lost">;
 }
 
 export interface WaitingRecoveryEffectPort {
@@ -129,8 +132,10 @@ export interface WaitingRecoveryEffectPort {
     readonly effect: "connect" | "create" | "materialize";
     /** materialize 只能消费已由数据库确认的 create 证明，不能从本地推断 Sandbox 身份。 */
     readonly priorProof?: SandboxEffectProof;
+    /** beginEffect 产生的一次性能力；外部适配器必须原样写入成功回执。 */
+    readonly completionCapability: string;
   }): Promise<
-    | { readonly outcome: "succeeded"; readonly proof: SandboxEffectProof }
+    | { readonly outcome: "succeeded"; readonly receipt: SandboxEffectReceipt }
     | { readonly outcome: "unknown"; readonly effect: "connect" | "create" | "materialize" }
   >;
 }
@@ -139,6 +144,10 @@ export interface SandboxEffectProof {
   readonly registryId: string;
   readonly providerSandboxId: string;
   readonly generation: number;
+}
+
+export interface SandboxEffectReceipt extends SandboxEffectProof {
+  readonly completionCapability: string;
 }
 
 export type WaitingRecoveryCoordinatorResult =
@@ -153,6 +162,7 @@ export async function coordinateWaitingRecovery(input: {
   readonly store: WaitingRecoveryStorePort;
   readonly scope: ExecutionScope;
   readonly checkpointId: string;
+  readonly attemptId: string;
   readonly workerId: string;
   readonly observation: WaitingRecoveryObservation;
   readonly effects: WaitingRecoveryEffectPort;
@@ -175,7 +185,9 @@ export async function coordinateWaitingRecovery(input: {
   if (decision.outcome === "resume") {
     const effectPlan =
       decision.sandbox.kind === "sandbox_reused"
-        ? (["connect"] as const)
+        ? decision.workspace === "replan"
+          ? (["connect", "materialize"] as const)
+          : (["connect"] as const)
         : (["create", "materialize"] as const);
     for (const effectKind of effectPlan) {
       // 每一个副作用都必须先有独立 intent；create 成功不能授权未持久化的 materialize。
@@ -196,6 +208,7 @@ export async function coordinateWaitingRecovery(input: {
         intentId: started.intentId,
         decision,
         effect: effectKind,
+        completionCapability: started.completionCapability,
         ...(started.priorProof === undefined ? {} : { priorProof: started.priorProof }),
       });
       if (effect.outcome === "unknown") {
@@ -219,8 +232,18 @@ export async function coordinateWaitingRecovery(input: {
         claim: claimed.claim,
         intentId: started.intentId,
         effect: effectKind,
-        proof: effect.proof,
+        receipt: effect.receipt,
       });
+      if (completed === "unknown") {
+        return {
+          outcome: "decided",
+          decision: {
+            outcome: "external_effect_unknown",
+            effect: effectKind,
+            requestAutomaticRetry: false,
+          },
+        };
+      }
       if (completed !== "completed") {
         const marked = await input.store.markUnknown({
           claim: claimed.claim,

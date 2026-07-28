@@ -206,7 +206,7 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
       "updated_at",
     ]),
   ],
-  ["waiting_recovery_effect_outbox", new Set(["state", "updated_at"])],
+  ["waiting_recovery_effect_outbox", new Set(["state", "payload", "updated_at"])],
 ]);
 
 async function hasWaitingRecoveryState(client: PoolClient, schema: string): Promise<boolean> {
@@ -1008,7 +1008,7 @@ export async function bootstrapRuntimeAccessOnClient(
     await client.query(
       `GRANT UPDATE(state,claim_owner,claim_token,claim_epoch,claim_expires_at,decision,updated_at)
          ON TABLE ${schema}.waiting_recovery_checkpoints TO ${role};
-       GRANT UPDATE(state,updated_at)
+       GRANT UPDATE(state,payload,updated_at)
          ON TABLE ${schema}.waiting_recovery_effect_outbox TO ${role}`,
     );
   }

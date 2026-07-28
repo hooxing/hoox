@@ -38,6 +38,8 @@
 | [ADR-0030](0030-runtime-rollout-checkpoint-fact-source.md) | Runtime Rollout 与 Checkpoint 事实源 | 已接受 | 2026-07-28 |
 | [ADR-0033](0033-waiting-sandbox-recovery.md) | waiting 与 SandboxSession 恢复安全边界 | 已接受 | 2026-07-28 |
 | [ADR-0034](0034-m4-runtime-dependency-build-gate.md) | M4 黑盒运行时依赖构建门禁 | 已接受 | 2026-07-28 |
+| [ADR-0035](0035-waiting-recovery-proof-derived-facts.md) | waiting 恢复事实由已完成副作用证明推导 | 已替代 | 2026-07-28 |
+| [ADR-0036](0036-waiting-recovery-capability-and-append-only-rollback.md) | waiting 恢复能力回执与只追加回退边界 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录
 

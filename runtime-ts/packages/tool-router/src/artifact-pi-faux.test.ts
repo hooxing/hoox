@@ -11,7 +11,11 @@ import {
   threadId,
   workspaceId,
 } from "@cube-runtime/domain";
-import { createSafePiSession, type RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
+import {
+  bindTrustedPiModelContextCapability,
+  createSafePiSession,
+  type RuntimeAgentEvent,
+} from "@cube-runtime/pi-adapter";
 import type { ExternalEffectCall } from "@cube-runtime/run-contracts";
 import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import {
@@ -221,8 +225,10 @@ describe("Pi Faux Artifact 纵向链路", () => {
       });
       runtime.registerNativeProvider(faux.provider);
       await runtime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const model = faux.getModel();
       const controller = await createSafePiSession({
-        model: faux.getModel(),
+        model,
+        modelContext: bindTrustedPiModelContextCapability(runtime, model),
         modelRuntime: runtime,
         sandbox: new FakeSandboxHandle("artifact-faux"),
         artifactToolRouter: router,

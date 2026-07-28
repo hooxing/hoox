@@ -14,6 +14,9 @@ export default defineConfig({
       "@cube-runtime/pi-adapter": fileURLToPath(
         new URL("./runtime-ts/packages/pi-adapter/src/index.ts", import.meta.url),
       ),
+      "@cube-runtime/context-policy": fileURLToPath(
+        new URL("./runtime-ts/packages/context-policy/src/index.ts", import.meta.url),
+      ),
       "@cube-runtime/run-contracts/mutation-protocol": fileURLToPath(
         new URL("./runtime-ts/packages/run-contracts/src/mutation-protocol.ts", import.meta.url),
       ),

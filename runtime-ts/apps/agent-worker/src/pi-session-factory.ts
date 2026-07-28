@@ -1,6 +1,10 @@
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@cube-runtime/artifact";
 import { sha256Digest } from "@cube-runtime/domain";
-import { createSafePiSession } from "@cube-runtime/pi-adapter";
+import {
+  bindTrustedPiModelContextCapability,
+  ContextBudgetAdmissionError,
+  createSafePiSession,
+} from "@cube-runtime/pi-adapter";
 import type { ArtifactToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -12,12 +16,16 @@ import type { AgentSessionFactoryPort, AgentTurnOutcome, WorkerAgentSessionPort 
  * 再用 prompt 真正启动模型，绝不对空 Session 调 followUp。
  */
 export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
+  private readonly modelContext;
+
   constructor(
     private readonly model: Model<Api>,
     private readonly modelRuntime: ModelRuntime,
     private readonly artifactTools?: ArtifactToolRouterFactoryPort,
     private readonly artifactAuthorizationIssuer?: ArtifactExecutionAuthorizationIssuerPort,
-  ) {}
+  ) {
+    this.modelContext = bindTrustedPiModelContextCapability(modelRuntime, model);
+  }
 
   async create(
     input: Parameters<AgentSessionFactoryPort["create"]>[0],
@@ -62,6 +70,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         : undefined;
     const controller = await createSafePiSession({
       model: this.model,
+      modelContext: this.modelContext,
       modelRuntime: this.modelRuntime,
       sandbox: input.sandbox,
       rolloutProjection: input.rolloutProjection,
@@ -98,7 +107,13 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           throw new Error("模型启动许可在本地 continuation 前已过期");
         }
         // 许可刚由 DB 一次性消费；校验后立即进入 prompt，中间不再插入异步窗口。
-        await controller.prompt(text);
+        try {
+          await controller.prompt(text);
+        } catch (error) {
+          if (error instanceof ContextBudgetAdmissionError)
+            return { kind: "context_too_large", action: "rebuild_context" };
+          throw error;
+        }
         return { kind: "completed" };
       },
       abort: () => controller.abort(),

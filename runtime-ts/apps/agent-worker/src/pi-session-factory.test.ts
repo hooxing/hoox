@@ -32,6 +32,63 @@ import {
 
 describe("PiWorkerSessionFactory 持久操作门控", () => {
   it.runIf(process.platform === "linux")(
+    "内部工具循环预算拒绝映射为 Worker CONTEXT_TOO_LARGE/rebuild_context",
+    async () => {
+      const persistence = new FakeExecutionPersistence();
+      const scope = persistence.addSeed(fakeSeed("pi-context-too-large"));
+      const sandboxes = new FakeSandboxRegistry();
+      sandboxes.handle.files.set("/tmp/huge.txt", "大".repeat(130_000));
+      const faux = fauxProvider({
+        api: `faux-worker-budget-${Date.now()}`,
+        provider: `faux-worker-budget-${Date.now()}`,
+        tokensPerSecond: 10_000,
+      });
+      faux.setResponses([
+        fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path: "/tmp/huge.txt" }), {
+          stopReason: "toolUse",
+        }),
+        fauxAssistantMessage("不应触达"),
+      ]);
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      modelRuntime.registerNativeProvider(faux.provider);
+      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const worker = new RunWorker(
+        {
+          persistence,
+          revisions: new FakeRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions: new PiWorkerSessionFactory(faux.getModel(), modelRuntime),
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        { workerId: "pi-budget-worker", runTimeoutMs: 60_000 },
+      );
+
+      await expect(worker.execute(scope)).resolves.toEqual({
+        outcome: "recovery_required",
+        code: "CONTEXT_TOO_LARGE",
+      });
+      expect(faux.state.callCount).toBe(1);
+      expect(
+        persistence
+          .record(scope)
+          .events.some(
+            (event) =>
+              event.kind === "agent_event" &&
+              event.payload.type === "error" &&
+              event.payload.code === "CONTEXT_TOO_LARGE",
+          ),
+      ).toBe(true);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
     "真实 Pi tool.started 先提交，issue/consume 不被 heartbeat 插入且文件成功写入",
     async () => {
       const persistence = new FakeExecutionPersistence();

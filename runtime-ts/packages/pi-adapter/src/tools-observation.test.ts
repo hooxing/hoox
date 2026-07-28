@@ -1,4 +1,4 @@
-import { parseControlledToolReceipt } from "@cube-runtime/context-policy";
+import { parseControlledToolReceipt, ToolObservationPipeline } from "@cube-runtime/context-policy";
 import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { describe, expect, it } from "vitest";
 import { createObservedSandboxTools } from "./tools.js";
@@ -118,6 +118,102 @@ describe("受审 Tool 输出脱敏边界", () => {
         {} as never,
       ),
     ).rejects.toThrow("未能形成 durable 事实");
+  });
+
+  it("许可拒绝的固定失败回执经 Trace Blob 与 Rollout tool_result 持久化", async () => {
+    const traceBodies: string[] = [];
+    const toolResults: unknown[] = [];
+    const binding = {
+      tenantId: "tenant_rejected_receipt",
+      threadId: "thread_rejected_receipt",
+      runId: "run_rejected_receipt",
+      rootRunId: "run_rejected_receipt",
+      workspaceId: "workspace_rejected_receipt",
+      attemptId: "attempt_rejected_receipt",
+      agentThreadId: "agent_rejected_receipt",
+      runClaimToken: "claim_rejected_receipt",
+      runClaimEpoch: 1,
+      workspaceLeaseRootRunId: "run_rejected_receipt",
+      workspaceLeaseEpoch: 1,
+    } as const;
+    const observed = createObservedSandboxTools(
+      {
+        command: async () => {
+          throw new Error("Sandbox 不应被触碰");
+        },
+      } as unknown as SandboxHandle,
+      {
+        authorizeToolEffect: async () => {
+          throw new Error("不得持久化的 DB 私有拒绝原因");
+        },
+      },
+      (outputs) => {
+        const pipeline = new ToolObservationPipeline(
+          {
+            persistTrace: async (command) => {
+              traceBodies.push(Buffer.from(command.body).toString("utf8"));
+              return {
+                outcome: "persisted" as const,
+                referenceId: "reference_rejected_receipt",
+                blob: {
+                  kind: "stable" as const,
+                  tenantId: command.tenantId,
+                  purpose: "trace" as const,
+                  sha256: command.sha256,
+                  size: command.body.byteLength,
+                  incarnationId: "incarnation_rejected_receipt",
+                  physicalObjectKey: "trace/rejected-receipt",
+                },
+              };
+            },
+          },
+          {
+            appendToolCall: async () => ({ outcome: "created" as const }),
+            appendToolResult: async (command) => {
+              toolResults.push(command);
+              return { outcome: "created" as const };
+            },
+          },
+          outputs,
+          { maxModelObservationBytes: 1_024 },
+        );
+        return {
+          record: (call) =>
+            pipeline.record({
+              binding,
+              idempotencyKey: `rejected.${call.toolCallId}`,
+              toolCallId: call.toolCallId,
+              toolName: call.toolName,
+            }),
+        };
+      },
+    );
+    const tool = observed.tools.find((item) => item.name === "sandbox_command");
+    if (tool === undefined) throw new Error("测试缺少 sandbox_command");
+
+    await expect(
+      tool.execute(
+        "call_rejected_receipt",
+        { command: "echo test" },
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("sandbox_untrusted");
+
+    expect(traceBodies).toHaveLength(1);
+    expect(parseControlledToolReceipt(traceBodies[0] ?? "")).toMatchObject({
+      toolName: "sandbox_command",
+      outcome: "failed",
+    });
+    expect(toolResults).toEqual([
+      expect.objectContaining({
+        toolCallId: "call_rejected_receipt",
+        body: expect.objectContaining({
+          receipt: expect.objectContaining({ outcome: "failed" }),
+        }),
+      }),
+    ]);
   });
 
   it.each(

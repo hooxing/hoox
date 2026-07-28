@@ -409,7 +409,12 @@ export async function createSafePiSession(
     // 受控的 CubeSandbox 自定义工具执行，因此该值仅是 Session 的逻辑标签，不能用于宿主 I/O。
     cwd: LOGICAL_WORKSPACE,
     model: options.modelContext.model,
-    modelRuntime: providerGatedRuntime(options, providerBinding, providerFailure),
+    modelRuntime: providerGatedRuntime(
+      options,
+      providerBinding,
+      providerFailure,
+      material.assertModelRequestAllowed,
+    ),
     thinkingLevel: "off",
     sessionManager,
     settingsManager,
@@ -537,12 +542,16 @@ export function assessSafePiSessionContext(
 }
 
 function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
+  let toolContinuationRejected = false;
   const observedSandboxTools = createObservedSandboxTools(
     options.sandbox,
     {
       authorizeToolEffect: options.authorizeToolEffect,
     },
     options.createToolObservationRecorder,
+    () => {
+      toolContinuationRejected = true;
+    },
   );
   const customTools = [
     ...observedSandboxTools.tools,
@@ -570,7 +579,16 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
       parameters: canonicalSchema(tool.parameters, new WeakSet<object>()),
     })),
   );
-  return { customTools, builtPrompt, serializedToolDefinitions };
+  return {
+    customTools,
+    builtPrompt,
+    serializedToolDefinitions,
+    assertModelRequestAllowed: () => {
+      if (toolContinuationRejected) {
+        throw new Error("Tool durable 失败回执完成后禁止继续模型轮次");
+      }
+    },
+  };
 }
 
 function modelCompatibilityHash(model: Model<Api>) {
@@ -661,6 +679,7 @@ function providerGatedRuntime(
   options: CreateSafePiSessionOptions,
   binding: ProviderBinding,
   providerFailure: DeferredProviderFailure,
+  assertInternalModelRequestAllowed: () => void,
 ): ModelRuntime {
   const runtime = options.modelRuntime;
   return new Proxy(runtime, {
@@ -680,6 +699,7 @@ function providerGatedRuntime(
             try {
               // Tool executor 内不能 await 当前 Session 的 abort，否则会与本轮完成屏障互相等待；
               // 因此在下一模型轮次的同步入口再次检查 durable Observation 恢复闩锁。
+              assertInternalModelRequestAllowed();
               options.assertModelRequestAllowed?.();
               assertTrustedModelCapability(options);
               if (model !== options.modelContext.model) throw new ProviderBindingDriftError();

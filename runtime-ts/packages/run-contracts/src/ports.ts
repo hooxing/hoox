@@ -541,11 +541,15 @@ export interface WorkerAgentSessionPort {
     authorization: ConsumedExternalEffectAuthorization,
   ): Promise<AgentTurnOutcome>;
   abort(): Promise<void>;
+  /** durable 工具拒绝回执在 abort 前完成；未声明能力的 Session 不得延迟拒绝中止。 */
+  drainRejectedToolReceipts?(): Promise<void>;
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void;
   dispose(): void;
 }
 
 export interface AgentSessionFactoryPort {
+  /** 工具许可拒绝会先形成 durable 失败回执，并在下一 Provider 轮次前失败关闭。 */
+  readonly toolRejectionReceiptBarrier?: "durable";
   create(input: {
     readonly scope: ExecutionScope;
     readonly attemptId: string;

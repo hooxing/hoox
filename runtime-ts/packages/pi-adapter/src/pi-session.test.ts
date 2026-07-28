@@ -15,9 +15,9 @@ import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import type { RuntimeAgentEvent } from "./events.js";
 import {
   assertPiSessionCapabilityManifest,
-  bindTrustedPiModelContextCapability,
-  bindTestingPiModelContextCapability,
   assessSafePiSessionContext,
+  bindTestingPiModelContextCapability,
+  bindTrustedPiModelContextCapability,
   createSafePiSession,
   digestCanonicalToolInputSchema,
   type PiSessionController,
@@ -527,7 +527,7 @@ describe("Pi 安全适配", () => {
 
   it.runIf(process.platform === "linux")("Tool Router 在 DB 许可拒绝时不触碰 Sandbox", async () => {
     const sandbox = new FakeSandboxHandle("pi-denied-tool");
-    const { controller, events } = await harness(
+    const { controller, events, faux } = await harness(
       [
         fauxAssistantMessage(
           fauxToolCall("sandbox_write_file", { path: "/tmp/denied.txt", content: "no" }),
@@ -542,9 +542,13 @@ describe("Pi 安全适配", () => {
       },
     );
 
-    await controller.prompt("尝试写入");
+    await expect(controller.prompt("尝试写入")).rejects.toThrow();
 
     expect(sandbox.files.has("/tmp/denied.txt")).toBe(false);
+    expect(faux.state.callCount).toBe(1);
+    expect(
+      events.some((event) => event.type === "message.completed" && event.stopReason === "stop"),
+    ).toBe(false);
     expect(events).toContainEqual(
       expect.objectContaining({ type: "tool.completed", isError: true }),
     );
@@ -554,7 +558,7 @@ describe("Pi 安全适配", () => {
     "Tool Router 用单调时钟拒绝迟到 continuation，且不触碰 Sandbox",
     async () => {
       const sandbox = new FakeSandboxHandle("pi-expired-tool");
-      const { controller, events } = await harness(
+      const { controller, events, faux } = await harness(
         [
           fauxAssistantMessage(
             fauxToolCall("sandbox_write_file", { path: "/tmp/expired.txt", content: "no" }),
@@ -570,9 +574,13 @@ describe("Pi 安全适配", () => {
         }),
       );
 
-      await controller.prompt("尝试使用迟到许可写入");
+      await expect(controller.prompt("尝试使用迟到许可写入")).rejects.toThrow();
 
       expect(sandbox.files.has("/tmp/expired.txt")).toBe(false);
+      expect(faux.state.callCount).toBe(1);
+      expect(
+        events.some((event) => event.type === "message.completed" && event.stopReason === "stop"),
+      ).toBe(false);
       expect(events).toContainEqual(
         expect.objectContaining({ type: "tool.completed", isError: true }),
       );

@@ -28,6 +28,7 @@ import type { AgentSessionFactoryPort, AgentTurnOutcome, WorkerAgentSessionPort 
  * 再用 prompt 真正启动模型，绝不对空 Session 调 followUp。
  */
 export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
+  readonly toolRejectionReceiptBarrier = "durable" as const;
   private readonly modelContext;
 
   constructor(
@@ -62,6 +63,10 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     const startedToolCalls = new Map<string, string>();
     const invalidToolCalls = new Set<string>();
     const authorizationRequested = new Set<string>();
+    const rejectedToolReceipts = new Map<
+      string,
+      { readonly completed: Promise<void>; readonly resolve: () => void }
+    >();
     let observationRecorder:
       | ReturnType<PiWorkerSessionFactory["createObservationRecorder"]>
       | undefined;
@@ -103,10 +108,19 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         throw new Error("Tool Rollout 前驱未能持久化");
       }
       // durable tool_call 已完成后才领取并消费一次性许可，返回后下一步直接触碰副作用端口。
-      return await input.authorizeToolEffect({
-        ...call,
-        argsDigest: sha256Digest(call.argsDigest),
-      });
+      try {
+        return await input.authorizeToolEffect({
+          ...call,
+          argsDigest: sha256Digest(call.argsDigest),
+        });
+      } catch (error) {
+        let resolve: () => void = () => undefined;
+        const completed = new Promise<void>((done) => {
+          resolve = done;
+        });
+        rejectedToolReceipts.set(call.callId, { completed, resolve });
+        throw error;
+      }
     };
     const artifactTools = this.artifactTools;
     const artifactAuthorizationIssuer = this.artifactAuthorizationIssuer;
@@ -146,6 +160,10 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             } catch (error) {
               requireObservationRecovery();
               throw error;
+            } finally {
+              const rejected = rejectedToolReceipts.get(call.toolCallId);
+              rejected?.resolve();
+              rejectedToolReceipts.delete(call.toolCallId);
             }
           },
         };
@@ -222,12 +240,18 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         return { kind: "completed" };
       },
       abort: () => controller.abort(),
+      drainRejectedToolReceipts: async () => {
+        while (rejectedToolReceipts.size > 0) {
+          await Promise.all([...rejectedToolReceipts.values()].map((item) => item.completed));
+        }
+      },
       subscribe: (listener) => controller.subscribe(listener),
       dispose: () => {
         unsubscribeToolGate();
         startedToolCalls.clear();
         invalidToolCalls.clear();
         authorizationRequested.clear();
+        rejectedToolReceipts.clear();
         controller.dispose();
       },
     };

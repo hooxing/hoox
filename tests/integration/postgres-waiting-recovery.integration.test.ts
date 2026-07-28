@@ -578,11 +578,12 @@ describe("waiting recovery PostgreSQL 事实源", () => {
           changedRevision,
           scope.threadId,
           scope.runId,
-          hash("q"),
+          hash("a"),
         ],
       );
       await client.query(
-        `UPDATE workspaces SET current_revision_id=$3,updated_at=clock_timestamp()
+        `UPDATE workspaces SET current_revision_id=$3,current_revision_number=1,
+            updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND id=$2`,
         [scope.tenantId, scope.workspaceId, changedRevision],
       );
@@ -599,7 +600,8 @@ describe("waiting recovery PostgreSQL 事实源", () => {
     expect(await store.resolve({ claim: acquired.claim, decision })).toBe("claim_lost");
     await withTenantTransaction(runtime, databaseContext, (client) =>
       client.query(
-        `UPDATE workspaces SET current_revision_id=NULL,updated_at=clock_timestamp()
+        `UPDATE workspaces SET current_revision_id=NULL,current_revision_number=0,
+            updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND id=$2`,
         [scope.tenantId, scope.workspaceId],
       ),
@@ -772,7 +774,8 @@ describe("waiting recovery PostgreSQL 事实源", () => {
     ).toEqual({ outcome: "completed" });
     await withTenantTransaction(runtime, databaseContext, (client) =>
       client.query(
-        `UPDATE workspaces SET current_revision_id=$3,updated_at=clock_timestamp()
+        `UPDATE workspaces SET current_revision_id=$3,current_revision_number=1,
+            updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND id=$2`,
         [scope.tenantId, scope.workspaceId, changedRevision],
       ),
@@ -814,7 +817,7 @@ describe("waiting recovery PostgreSQL 事实源", () => {
       providerSandboxId: effectProof.providerSandboxId,
       workspace: {
         headRevisionId: changedRevision,
-        manifestDigest: hash("q"),
+        manifestDigest: hash("a"),
         objectKey: "test/wait-revision",
       },
     });
@@ -823,7 +826,8 @@ describe("waiting recovery PostgreSQL 事实源", () => {
     );
     await withTenantTransaction(runtime, databaseContext, (client) =>
       client.query(
-        `UPDATE workspaces SET current_revision_id=NULL,updated_at=clock_timestamp()
+        `UPDATE workspaces SET current_revision_id=NULL,current_revision_number=0,
+            updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND id=$2`,
         [scope.tenantId, scope.workspaceId],
       ),
@@ -1129,7 +1133,7 @@ describe("waiting recovery PostgreSQL 事实源", () => {
     } as const;
     const intent = await store.beginEffect({ claim: acquired.claim, decision, effect: "connect" });
     if (intent.outcome !== "authorized") throw new Error("测试需要 reserve TTL intent");
-    await withTenantTransaction(runtime, databaseContext, async (client) => {
+    await withTenantTransaction(migrator, databaseContext, async (client) => {
       await client.query(
         `UPDATE sandbox_registry SET actual_ttl_seconds=1,updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND registry_id=$2`,
@@ -1257,7 +1261,7 @@ describe("waiting recovery PostgreSQL 事实源", () => {
       effect: "connect",
     });
     await entered;
-    await withTenantTransaction(runtime, databaseContext, async (client) => {
+    await withTenantTransaction(migrator, databaseContext, async (client) => {
       await client.query(
         `UPDATE sandbox_registry SET actual_ttl_seconds=1,updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND registry_id=$2`,

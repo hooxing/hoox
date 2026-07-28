@@ -1,5 +1,11 @@
 import { createHash } from "node:crypto";
 import { types } from "node:util";
+import {
+  type ContextBudgetDecision,
+  type ContextBudgetPolicyInput,
+  decideModelAwareContextBudget,
+  type TokenizerPort,
+} from "@cube-runtime/context-policy";
 import { type RolloutCompatibilityIdentity, sha256Digest } from "@cube-runtime/domain";
 import {
   buildRuntimeSystemPrompt,
@@ -108,6 +114,12 @@ export interface CreateSafePiSessionOptions {
   authorizeToolEffect: SandboxToolEffectAuthorizer["authorizeToolEffect"];
   /** 只有生产装配显式提供真实 Artifact/Resource 依赖时才注册，缺失时不伪造发布能力。 */
   artifactToolRouter?: ArtifactPiToolExecutorPort;
+  /** 可选的精确 tokenizer；未提供时使用 fail-closed UTF-8 上界估计。 */
+  contextTokenizer?: TokenizerPort;
+  contextBudget?: Pick<
+    ContextBudgetPolicyInput,
+    "outputReserveRatio" | "recoveryMarginRatio" | "safetyMarginRatio" | "previous"
+  >;
 }
 
 /**
@@ -148,6 +160,12 @@ export async function createSafePiSession(
   );
 
   const { customTools, builtPrompt } = buildSafeSessionMaterial(options);
+  const budget = assessSafePiSessionContext(options, builtPrompt);
+  if (budget.outcome !== "ready") {
+    throw new Error(
+      budget.outcome === "context_too_large" ? "CONTEXT_TOO_LARGE" : "REBUILD_REQUIRED",
+    );
+  }
   const resourceLoader = new EmptyResourceLoader(builtPrompt.systemPrompt);
   await resourceLoader.reload();
   const sessionManager = SessionManager.inMemory(LOGICAL_WORKSPACE);
@@ -209,6 +227,7 @@ export function deriveSafePiSessionCompatibility(
   options: CreateSafePiSessionOptions,
 ): RolloutCompatibilityIdentity {
   const { builtPrompt } = buildSafeSessionMaterial(options);
+  const budget = assessSafePiSessionContext(options, builtPrompt);
   const model = options.model;
   return Object.freeze({
     modelId: model.id,
@@ -223,10 +242,12 @@ export function deriveSafePiSessionCompatibility(
       maxTokens: model.maxTokens,
       compat: model.compat,
     }),
+    // 预算策略是 prompt 可见历史窗口的协议组成部分，必须进入恢复兼容身份。
     promptPolicyHash: digestProtocolValue({
       schemaVersion: builtPrompt.schemaVersion,
       version: builtPrompt.version,
       systemPrompt: builtPrompt.systemPrompt,
+      contextBudgetPolicyHash: budget.policy.policyHash,
     }),
     toolSchemaHash: digestProtocolValue(builtPrompt.manifest),
     skillManifestHash: digestProtocolValue({
@@ -239,6 +260,40 @@ export function deriveSafePiSessionCompatibility(
           contentDigest: entry.source.contentDigest,
         })),
     }),
+  });
+}
+
+/**
+ * 在创建 Pi Session 前评估模型实际 metadata 与可信 prompt/tool schema；纯决策不改变事实。
+ * Projection 已被恢复器验证过工具配对；此处仍仅计入 user/assistant，因为 tool body 永不伪装成文本。
+ */
+export function assessSafePiSessionContext(
+  options: CreateSafePiSessionOptions,
+  material = buildSafeSessionMaterial(options).builtPrompt,
+): ContextBudgetDecision {
+  const model = options.model;
+  return decideModelAwareContextBudget({
+    model: {
+      modelId: model.id,
+      contextWindow: model.contextWindow,
+      maxOutputTokens: model.maxTokens,
+      compatibilityHash: digestProtocolValue({
+        id: model.id,
+        provider: model.provider,
+        api: model.api,
+        contextWindow: model.contextWindow,
+        maxTokens: model.maxTokens,
+      }),
+    },
+    trustedSystemPrompt: material.systemPrompt,
+    toolSchema: JSON.stringify(material.manifest.capabilities),
+    entries: (options.rolloutProjection?.turns ?? []).map((turn, sequence) => ({
+      sequence,
+      kind: turn.role,
+      text: turn.text,
+    })),
+    ...(options.contextTokenizer === undefined ? {} : { tokenizer: options.contextTokenizer }),
+    ...(options.contextBudget ?? {}),
   });
 }
 

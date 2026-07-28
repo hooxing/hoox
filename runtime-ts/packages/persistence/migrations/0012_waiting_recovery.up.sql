@@ -132,7 +132,8 @@ CREATE TABLE waiting_recovery_effect_outbox (
   FOREIGN KEY (tenant_id, checkpoint_id) REFERENCES waiting_recovery_checkpoints(tenant_id, checkpoint_id)
     ON DELETE RESTRICT,
   CONSTRAINT waiting_recovery_effect_payload_shape CHECK (
-    (state='pending' AND payload ? 'plan')
+    (state='pending' AND payload ? 'plan'
+      AND payload->>'capabilityDigest' ~ '^[0-9a-f]{64}$')
     OR (state='completed' AND payload ? 'plan' AND payload ? 'proof'
       AND octet_length(payload->'proof'->>'registryId') BETWEEN 1 AND 200
       AND octet_length(payload->'proof'->>'providerSandboxId') BETWEEN 1 AND 200

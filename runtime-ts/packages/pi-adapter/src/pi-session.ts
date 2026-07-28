@@ -127,6 +127,7 @@ export interface TrustedPiModelContextCapability {
   readonly model: Model<Api>;
   readonly descriptor: ModelBudgetDescriptor;
   readonly tokenizer: TokenizerPort;
+  readonly tokenizerProbe: number;
 }
 
 /** Provider/model registry 的唯一绑定入口；Session 不接受独立 descriptor 或裸 tokenizer。 */
@@ -147,7 +148,13 @@ export function bindTrustedPiModelContextCapability(
     maxOutputTokens: model.maxTokens,
     compatibilityHash: modelCompatibilityHash(model),
   });
-  const capability = Object.freeze({ model, descriptor, tokenizer: selected });
+  // 保存探针结果而非只在绑定时检查；Provider 注册表若在运行中替换 tokenizer，必须失败关闭。
+  const capability = Object.freeze({
+    model,
+    descriptor,
+    tokenizer: selected,
+    tokenizerProbe: probe,
+  });
   TRUSTED_MODEL_CAPABILITIES.add(capability);
   return capability;
 }
@@ -263,7 +270,14 @@ export async function createSafePiSession(
         .getEntries()
         .some((entry) => entry.type === "compaction"),
     }),
-    (text) => assertCurrentInputFits(options, material, activeProjection, text),
+    (() => {
+      const admittedInputs: string[] = [];
+      return (text: string) => {
+        assertCurrentInputFits(options, material, activeProjection, admittedInputs, text);
+        // 只有 Pi 接受输入后才把它纳入后续 Provider 请求；失败调用不得污染会话预算。
+        admittedInputs.push(text);
+      };
+    })(),
   );
 }
 
@@ -309,7 +323,8 @@ export function deriveSafePiSessionCompatibility(
 export function assessSafePiSessionContext(
   options: CreateSafePiSessionOptions,
   material = buildSafeSessionMaterial(options),
-  currentUserInput?: string,
+  sessionInputs: readonly string[] = [],
+  priorOutputReserveTokens = 0,
 ): ContextBudgetDecision {
   assertTrustedModelCapability(options);
   const { builtPrompt } = material;
@@ -323,9 +338,7 @@ export function assessSafePiSessionContext(
         JSON.stringify({ type: entry.customType, content: entry.content, source: entry.source }),
       ),
       ...(projectionHeader === undefined ? [] : [projectionHeader]),
-      ...(currentUserInput === undefined
-        ? []
-        : [JSON.stringify({ role: "user", content: currentUserInput })]),
+      ...sessionInputs.map((input) => JSON.stringify({ role: "user", content: input })),
     ],
     entries: (options.rolloutProjection?.turns ?? []).map((turn, sequence) => ({
       sequence,
@@ -333,6 +346,7 @@ export function assessSafePiSessionContext(
       text: `${turn.role === "user" ? "用户" : "助手"}：${turn.text}\n`,
     })),
     tokenizer: options.modelContext.tokenizer,
+    providerOverheadTokens: 256 + priorOutputReserveTokens,
   });
 }
 
@@ -383,7 +397,12 @@ function assertTrustedModelCapability(options: CreateSafePiSessionOptions): void
   if (
     !TRUSTED_MODEL_CAPABILITIES.has(options.modelContext) ||
     options.modelContext.model !== options.model ||
-    options.modelContext.descriptor.modelId !== options.model.id
+    options.modelContext.descriptor.modelId !== options.model.id ||
+    options.modelContext.descriptor.contextWindow !== options.model.contextWindow ||
+    options.modelContext.descriptor.maxOutputTokens !== options.model.maxTokens ||
+    options.modelContext.descriptor.compatibilityHash !== modelCompatibilityHash(options.model) ||
+    options.modelContext.tokenizer.countTokens("可信探针🙂 entropy-0123456789") !==
+      options.modelContext.tokenizerProbe
   )
     throw new TypeError("Model Context capability 未绑定当前可信 Provider model");
 }
@@ -403,12 +422,18 @@ function assertCurrentInputFits(
   options: CreateSafePiSessionOptions,
   material: ReturnType<typeof buildSafeSessionMaterial>,
   activeProjection: ControlledRolloutProjection | undefined,
+  admittedInputs: readonly string[],
   text: string,
 ): void {
+  // Pi 会保留此前每轮 user 输入和 assistant 输出。assistant 文本无法在窄控制器上读取，
+  // 因而为每个已接受输入额外保留一次最大输出，宁可提前拒绝也不能低估最终 Provider 请求。
+  const priorOutputReserve =
+    admittedInputs.length * options.modelContext.descriptor.maxOutputTokens;
   const assessed = assessSafePiSessionContext(
     activeProjection === undefined ? options : { ...options, rolloutProjection: activeProjection },
     material,
-    text,
+    [...admittedInputs, text],
+    priorOutputReserve,
   );
   if (
     assessed.outcome !== "ready" ||

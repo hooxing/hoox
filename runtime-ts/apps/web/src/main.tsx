@@ -1,48 +1,29 @@
 import {
-  Archive,
-  Download,
-  Eye,
   LoaderCircle,
   MessageSquarePlus,
+  PanelLeftClose,
+  PanelLeftOpen,
   RotateCw,
-  Send,
-  Square,
 } from "lucide-react";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ApiError, canPreviewArtifact, type RunEvent, RuntimeApi } from "./api.js";
-import { buildTimeline, eventSummary } from "./event-view.js";
+import { ApiError, RuntimeApi } from "./api.js";
 import { WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
 import "./styles.css";
+import {
+  ActivityPanel,
+  activeRunStatuses,
+  ConversationComposer,
+  EmptyConversation,
+  RunTimeline,
+  ThreadHeader,
+  ThreadNavigation,
+} from "./workspace-view.js";
 
 const api = new RuntimeApi();
-const active = new Set(["queued", "running", "waiting"]);
-
-function RunTimeline({ events }: { readonly events: readonly RunEvent[] }) {
-  if (events.length === 0) return <div className="empty compact">等待运行事件</div>;
-  const entries = buildTimeline(events);
-  return (
-    <ol className="timeline">
-      {entries.map((entry) =>
-        entry.type === "assistant" ? (
-          <li key={entry.id} className="assistant-message">
-            <span className="event-type">助手</span>
-            <p>{entry.text}</p>
-          </li>
-        ) : (
-          <li key={entry.event.eventId}>
-            <span className="event-type">{entry.event.type.replaceAll("_", " ")}</span>
-            <p>{eventSummary(entry.event)}</p>
-          </li>
-        ),
-      )}
-    </ol>
-  );
-}
-
 function App() {
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [title, setTitle] = useState("");
@@ -51,6 +32,8 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<ApiError | undefined>();
+  const [activityOpen, setActivityOpen] = useState(true);
+  const [navigationOpen, setNavigationOpen] = useState(false);
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
   const currentRunPollRef = useRef(new CurrentRunPoll());
@@ -103,7 +86,7 @@ function App() {
           dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
           // 单次完成后再调度，状态更新不会重新创建计时器或导致紧密轮询。
-          if (eventPage.hasMore || active.has(latest.status)) {
+          if (eventPage.hasMore || activeRunStatuses.has(latest.status)) {
             timer = window.setTimeout(() => void poll(), 1200);
           }
         }
@@ -135,6 +118,7 @@ function App() {
         dispatch({ type: "select", threadId: thread.id });
         setCurrentRequest(undefined);
         setError(undefined);
+        setNavigationOpen(false);
       }
       setTitle("");
     } catch (reason) {
@@ -229,36 +213,61 @@ function App() {
 
   const selected = state.threads.find((thread) => thread.id === state.selectedThreadId);
   return (
-    <main className="workspace">
-      <aside className="sidebar">
-        <div className="brand">
-          <span>Agent 工作台</span>
-          <small>本地开发身份: dev-user-a</small>
+    <main className={`workspace ${navigationOpen ? "navigation-open" : ""}`}>
+      <aside className="sidebar" aria-label="会话导航">
+        <div className="brand-row">
+          <div className="brand">
+            <span className="brand-mark" aria-hidden="true">
+              C
+            </span>
+            <span>Cube Agent</span>
+          </div>
+          <button
+            className="mobile-only icon-button"
+            type="button"
+            onClick={() => setNavigationOpen(false)}
+            aria-label="关闭会话导航"
+          >
+            <PanelLeftClose size={18} />
+          </button>
         </div>
+        <p className="identity-note">本地开发身份 · dev-user-a</p>
         <div className="thread-create">
+          <label className="sr-only" htmlFor="thread-title">
+            新建会话标题
+          </label>
           <input
-            aria-label="线程标题"
+            id="thread-title"
             value={title}
             onChange={(event) => setTitle(event.target.value)}
-            placeholder="新线程标题"
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void createThread();
+            }}
+            placeholder="新建会话标题"
           />
           <button
             type="button"
-            title="创建线程"
+            className="icon-button"
+            title="创建会话"
+            aria-label="创建会话"
             onClick={() => void createThread()}
             disabled={actionLoading || !title.trim()}
           >
             <MessageSquarePlus size={17} />
           </button>
         </div>
-        <div className="thread-list">
+        <div className="thread-heading">
+          <span>会话</span>
+          <span>{state.threads.length}</span>
+        </div>
+        <ThreadNavigation>
           {loading ? (
-            <div className="empty">
+            <div className="empty compact">
               <LoaderCircle className="spin" size={18} />
-              正在加载
+              正在加载会话
             </div>
           ) : state.threads.length === 0 ? (
-            <div className="empty">尚无线程</div>
+            <div className="empty compact">创建第一个会话以开始工作。</div>
           ) : (
             state.threads.map((thread) => (
               <button
@@ -270,6 +279,7 @@ function App() {
                   currentRunPollRef.current.invalidate();
                   dispatch({ type: "select", threadId: thread.id });
                   setCurrentRequest(undefined);
+                  setNavigationOpen(false);
                 }}
               >
                 <span>{thread.title}</span>
@@ -281,124 +291,87 @@ function App() {
               </button>
             ))
           )}
-        </div>
+        </ThreadNavigation>
       </aside>
-      <section className="content">
+      <section className="content" aria-label="对话工作区">
+        <button
+          className="mobile-nav-toggle icon-button"
+          type="button"
+          onClick={() => setNavigationOpen(true)}
+          aria-label="打开会话导航"
+        >
+          <PanelLeftOpen size={18} />
+        </button>
         {error && (
-          <div role="alert" className="error">
-            <span>{error.message}</span>
+          <div role="alert" className="error" aria-live="assertive">
+            <span>
+              <strong>操作未完成。</strong>
+              {error.message}
+            </span>
             {error.retryable && (
-              <button type="button" onClick={() => void refreshThreads()} title="重试">
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => void refreshThreads()}
+                title="重试"
+                aria-label="重试加载"
+              >
                 <RotateCw size={16} />
               </button>
             )}
           </div>
         )}
         {!selected ? (
-          <div className="empty primary">选择一个线程，或创建新的工作线程</div>
+          <div className="empty primary">
+            <span className="welcome-mark" aria-hidden="true">
+              ✦
+            </span>
+            <h1>准备好协作了吗？</h1>
+            <p>从左侧选择一个会话，或先创建新的工作会话。</p>
+          </div>
         ) : (
           <>
-            <header>
-              <div>
-                <h1>{selected.title}</h1>
-                <span className="status">{state.run?.status ?? "就绪"}</span>
-              </div>
-              <button
-                type="button"
-                title="归档线程"
-                onClick={() => void archive()}
-                disabled={actionLoading}
-              >
-                <Archive size={18} />
-              </button>
-            </header>
-            <section className="run-area">
-              {state.run && (
-                <>
-                  <div className="run-head">
-                    <span>运行 {state.run.id}</span>
-                    {active.has(state.run.status) && (
-                      <button
-                        type="button"
-                        title="取消运行"
-                        onClick={() => void cancel()}
-                        disabled={actionLoading}
-                      >
-                        <Square size={15} />
-                      </button>
-                    )}
+            <ThreadHeader
+              thread={selected}
+              run={state.run}
+              actionLoading={actionLoading}
+              onArchive={() => void archive()}
+              onCancel={() => void cancel()}
+            />
+            <section className="run-area" aria-live="polite">
+              {state.run && currentRequest && (
+                <div className="message user-request">
+                  <span className="message-avatar" aria-hidden="true">
+                    你
+                  </span>
+                  <div className="message-card">
+                    <span className="message-label">你的请求</span>
+                    <p>{currentRequest}</p>
                   </div>
-                  {currentRequest && (
-                    <div className="user-request">
-                      <span>你</span>
-                      <p>{currentRequest}</p>
-                    </div>
-                  )}
-                </>
+                </div>
               )}
-              <RunTimeline events={state.events} />
+              {state.run ? <RunTimeline events={state.events} /> : <EmptyConversation />}
             </section>
-            <section className="artifacts">
-              <h2>产物</h2>
-              {state.artifacts.length === 0 ? (
-                <div className="empty compact">此运行尚未生成产物</div>
-              ) : (
-                <ul>
-                  {state.artifacts.map((artifact) => (
-                    <li key={artifact.id}>
-                      <div>
-                        <strong>{artifact.name}</strong>
-                        <small>
-                          {artifact.status}
-                          {artifact.mediaType ? ` · ${artifact.mediaType}` : ""}
-                        </small>
-                      </div>
-                      <div className="artifact-actions">
-                        {canPreviewArtifact(artifact.mediaType) && (
-                          <button
-                            type="button"
-                            title="预览产物"
-                            disabled={artifact.status !== "published"}
-                            onClick={() => void preview(artifact.id)}
-                          >
-                            <Eye size={16} />
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          title="下载产物"
-                          disabled={artifact.status !== "published"}
-                          onClick={() => void download(artifact.id)}
-                        >
-                          <Download size={16} />
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-            <form
-              className="composer"
+            <ConversationComposer
+              input={input}
+              disabled={actionLoading}
+              onChange={setInput}
               onSubmit={(event) => {
                 event.preventDefault();
                 void send();
               }}
-            >
-              <textarea
-                aria-label="发送消息"
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                placeholder="输入消息"
-                rows={3}
-              />
-              <button type="submit" title="发送消息" disabled={actionLoading || !input.trim()}>
-                <Send size={18} />
-              </button>
-            </form>
+            />
           </>
         )}
       </section>
+      <ActivityPanel
+        isOpen={activityOpen}
+        events={state.events}
+        artifacts={state.artifacts}
+        onToggle={() => setActivityOpen((open) => !open)}
+        onPreview={(artifactId) => void preview(artifactId)}
+        onDownload={(artifactId) => void download(artifactId)}
+      />
     </main>
   );
 }

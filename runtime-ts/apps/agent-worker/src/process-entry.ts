@@ -18,6 +18,7 @@ import {
   PgBackedSandboxSessionRegistry,
   PgBlobLifecycleRepository,
   PgExecutionPersistence,
+  PgRecoveryMetrics,
   PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
   probeS3BlobStore,
@@ -30,9 +31,8 @@ import { createPgDurableObservationSession } from "./pg-observation-assembly.js"
 import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
-  EphemeralWorkspaceRevisionVerifier,
+  FailClosedWorkspaceRevisionVerifier,
   NoDeclaredArtifactCompletionGate,
-  NoopRecoveryMetrics,
   ProcessCancellation,
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
@@ -69,6 +69,8 @@ const workerEnvironmentSchema = Object.freeze({
   MODEL_BASE_URL: urlEnvironmentField(),
   MODEL_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192 }),
   MODEL_ID: stringEnvironmentField({ maxLength: 255 }),
+  MODEL_CONTEXT_WINDOW: integerEnvironmentField({ minimum: 1, maximum: 10_000_000 }),
+  MODEL_MAX_OUTPUT_TOKENS: integerEnvironmentField({ minimum: 1, maximum: 10_000_000 }),
   AGENT_WORKER_TENANT_ID: stringEnvironmentField({ maxLength: 200 }),
   AGENT_WORKER_ID: stringEnvironmentField({ maxLength: 200 }),
   AGENT_WORKER_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 10, maximum: 60_000 }),
@@ -99,7 +101,13 @@ export interface WorkerProcessConfiguration {
     proxyPort?: number;
     proxyScheme?: "http" | "https";
   }>;
-  readonly model: Readonly<{ baseUrl: string; apiKey: string; modelId: string }>;
+  readonly model: Readonly<{
+    baseUrl: string;
+    apiKey: string;
+    modelId: string;
+    contextWindow: number;
+    maxOutputTokens: number;
+  }>;
   readonly worker: Readonly<{
     tenantId: string;
     workerId: string;
@@ -154,6 +162,8 @@ export function parseWorkerProcessEnvironment(
       baseUrl: readRequiredEnvironmentValue(parsed, "MODEL_BASE_URL"),
       apiKey: readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),
       modelId: readRequiredEnvironmentValue(parsed, "MODEL_ID"),
+      contextWindow: readRequiredEnvironmentValue(parsed, "MODEL_CONTEXT_WINDOW"),
+      maxOutputTokens: readRequiredEnvironmentValue(parsed, "MODEL_MAX_OUTPUT_TOKENS"),
     }),
     worker: Object.freeze({
       tenantId: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_TENANT_ID"),
@@ -218,8 +228,8 @@ const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfigurati
             reasoning: false,
             input: ["text"],
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: 128_000,
-            maxTokens: 16_384,
+            contextWindow: configuration.model.contextWindow,
+            maxTokens: configuration.model.maxOutputTokens,
           },
         ],
       });
@@ -257,14 +267,14 @@ const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfigurati
       const worker = new RunWorker(
         {
           persistence: new PgExecutionPersistence(pool),
-          revisions: new EphemeralWorkspaceRevisionVerifier(),
+          revisions: new FailClosedWorkspaceRevisionVerifier(),
           sandboxes,
           orphanSandboxes: sandboxes,
           sessions,
           cancellation,
           artifacts: new NoDeclaredArtifactCompletionGate(),
           clock: new SystemWorkerClock(),
-          metrics: new NoopRecoveryMetrics(),
+          metrics: new PgRecoveryMetrics(pool),
         },
         {
           workerId: configuration.worker.workerId,
@@ -292,7 +302,11 @@ const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfigurati
       ]);
       loop.start();
       return Object.freeze({
-        stopAccepting: () => loop.close(),
+        stopAccepting: async () => {
+          loop.stopAccepting();
+          cancellation.cancel();
+          await loop.drain();
+        },
         resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),
         readiness: Object.freeze([
           Object.freeze({ name: "postgres", probe: probes.postgres }),
@@ -326,13 +340,23 @@ async function probeOpenAiCompatibleModel(
     body === null ||
     !("data" in body) ||
     !Array.isArray(body.data) ||
-    !body.data.some(
-      (entry) =>
-        typeof entry === "object" && entry !== null && "id" in entry && entry.id === model.modelId,
-    )
+    !body.data.some((entry) => modelMetadataMatches(entry, model))
   ) {
-    throw new Error("模型 provider 未声明配置模型");
+    throw new Error("模型 provider 元数据与生产配置不一致");
   }
+}
+
+function modelMetadataMatches(entry: unknown, model: WorkerProcessConfiguration["model"]): boolean {
+  if (typeof entry !== "object" || entry === null) return false;
+  const record = entry as Record<string, unknown>;
+  return (
+    record.id === model.modelId &&
+    (record.context_window === model.contextWindow ||
+      record.contextWindow === model.contextWindow) &&
+    (record.max_output_tokens === model.maxOutputTokens ||
+      record.maxOutputTokens === model.maxOutputTokens ||
+      record.max_tokens === model.maxOutputTokens)
+  );
 }
 
 export async function startWorkerProcess(input: {

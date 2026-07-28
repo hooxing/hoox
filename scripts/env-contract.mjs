@@ -43,6 +43,8 @@ export const expectedEnvironmentKeys = Object.freeze([
   "MODEL_BASE_URL",
   "MODEL_API_KEY",
   "MODEL_ID",
+  "MODEL_CONTEXT_WINDOW",
+  "MODEL_MAX_OUTPUT_TOKENS",
   "DEV_AUTH_ENABLED",
   "DEV_AUTH_USER_A_ID",
   "DEV_AUTH_USER_A_TENANT_ID",

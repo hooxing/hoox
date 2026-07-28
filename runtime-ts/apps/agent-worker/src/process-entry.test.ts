@@ -18,6 +18,8 @@ function productionEnvironment(): Record<string, string> {
     MODEL_BASE_URL: "https://model.invalid/v1",
     MODEL_API_KEY: "opaque-model-value",
     MODEL_ID: "test-model",
+    MODEL_CONTEXT_WINDOW: "128000",
+    MODEL_MAX_OUTPUT_TOKENS: "16384",
     AGENT_WORKER_TENANT_ID: "tenant-test-worker",
     AGENT_WORKER_ID: "worker-test",
     AGENT_WORKER_POLL_INTERVAL_MS: "100",
@@ -56,5 +58,11 @@ describe("Agent Worker 进程入口", () => {
       expect(String(error)).toContain("MISSING:MODEL_API_KEY");
       expect(String(error)).not.toContain(secret);
     }
+  });
+
+  it("模型预算元数据是严格必填配置", () => {
+    const source = productionEnvironment();
+    delete source.MODEL_CONTEXT_WINDOW;
+    expect(() => parseWorkerProcessEnvironment(source)).toThrow("MISSING:MODEL_CONTEXT_WINDOW");
   });
 });

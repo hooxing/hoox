@@ -22,6 +22,7 @@ export type RuntimeRolloutEntryKind =
   | "tool_call"
   | "tool_result"
   | "waiting"
+  | "sandbox_recovery"
   | "terminal";
 
 export interface RolloutCompatibilityIdentity {

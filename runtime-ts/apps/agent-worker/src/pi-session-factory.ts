@@ -1,9 +1,9 @@
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@cube-runtime/artifact";
 import {
-  ToolObservationPipeline,
   type ControlledToolReceiptSource,
-  type ToolObservationPolicy,
   type ToolObservationBinding,
+  ToolObservationPipeline,
+  type ToolObservationPolicy,
   type ToolObservationResult,
   type ToolObservationRolloutPort,
   type TraceBlobPersistencePort,
@@ -12,9 +12,9 @@ import { sha256Digest } from "@cube-runtime/domain";
 import {
   bindTrustedPiModelContextCapability,
   ContextBudgetAdmissionError,
+  type ControlledRolloutProjection,
   createSafePiSession,
   deriveSafePiSessionCompatibility,
-  type ControlledRolloutProjection,
   type PiSessionController,
 } from "@cube-runtime/pi-adapter";
 import type { ArtifactToolRouterFactoryPort } from "@cube-runtime/tool-router";
@@ -149,6 +149,11 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             }
           },
         };
+      },
+      assertModelRequestAllowed: () => {
+        if (observationRecoveryCode !== undefined) {
+          throw new Error("Tool Observation 恢复未完成，禁止继续模型轮次");
+        }
       },
       ...(artifactToolRouter === undefined ? {} : { artifactToolRouter }),
     };

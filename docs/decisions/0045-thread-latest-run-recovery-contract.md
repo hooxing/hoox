@@ -38,30 +38,48 @@
 
 窗口查询固定排序但没有游标，故只表示“该次读取时最近的 N 条”，不承诺请求间无重复或无遗漏。这样避免把会被并发更新打破的伪游标公开为历史同步契约。需要完整历史时应另行设计带签名游标的端点。
 
-Run 事件读取在单个只读事务快照中先选出最新 Attempt，再从同一 Attempt 读取 `after` 排他 sequence，并以 `limit + 1` 计算 `hasMore`。响应中的 `attemptId` 是该 cursor 的边界：客户端遇到变更必须从 `-1` 重新读取，不能把旧 Attempt 的 cursor 带入新 Attempt。
+Run 事件读取使用只读 `REPEATABLE READ` 事务，在同一个 MVCC 快照中完成 Run 授权、最新 Attempt 选择和事件读取，并以 `limit + 1` 计算 `hasMore`。仅标记只读而保留 PostgreSQL 默认 `READ COMMITTED` 不足以满足该承诺，因为并发 Attempt 切换或旧 Attempt 追加可能被后续语句的新快照观察到。响应中的 `attemptId` 是该 cursor 的边界：客户端遇到变更必须从 `-1` 重新读取，不能把旧 Attempt 的 cursor 带入新 Attempt。
 
-Web client 提供 `listLatestRuns`，状态机的 `recoverLatestRun` 动作携带 Thread 与 `selectionGeneration`。Reducer 对 Thread 或代次不匹配的迟到响应保持原状态；导航辅助函数也在响应前复验导航代次。恢复命中 Run 后清空旧 Attempt/事件/Artifact，再由既有轮询重新投影该 Run。
+Web client 提供 `listLatestRuns`，状态机的 `recoverLatestRun` 动作携带 Thread 与 `selectionGeneration`。Reducer 对 Thread 或代次不匹配的迟到响应保持原状态；导航辅助函数也在响应前复验导航代次。这些是供主界面接入的恢复基础，当前 `main.tsx` 尚未调用它们，因此本 ADR 此阶段不宣称刷新或切回 Thread 已在实际页面中恢复内容。
+
+## 当前实施范围
+
+- 已实现并验证 API、PostgreSQL 查询、Web client、Reducer 与导航代次闩锁；
+- 已保持现有主界面代码不变，避免与并行 UI 重构产生冲突；
+- 实际页面的加载态、恢复调用、Run 轮询激活以及事件和 Artifact 回填仍待 UI 分支合并后接入。
 
 ## 影响
 
 ### 正面影响
 
-- 刷新和切回 Thread 能从持久化事实恢复最新 Run，再恢复事件和 Artifact；
+- API 与 Web 状态层已具备从持久化事实恢复最新 Run 的受权基础；
 - 未授权读取不会暴露 Thread 是否含有 Run；
 - Attempt 边界和浏览器导航边界都成为可测试的不变量。
 
 ### 负面影响与成本
 
 - 该端点不是完整历史 API；
-- 恢复过程至少需要 Run、事件和 Artifact 三次读取，页面应显示加载态而非把空快照当终态。
+- 当前主界面尚未接入恢复动作，刷新或切回 Thread 仍可能显示空白；
+- 完成 UI 接入后的恢复过程至少需要 Run、事件和 Artifact 三次读取，页面应显示加载态而非把空快照当终态。
 
 ## 验证
 
 - API 契约测试覆盖稳定最新窗口与跨租户 404；
-- Web API、Reducer 与导航测试覆盖恢复路径和迟到响应丢弃；
+- Web API、Reducer 与导航测试覆盖可供 UI 接入的恢复基础和迟到响应丢弃，但不作为主界面已接入的证明；
 - 持久层在同一受 RLS 约束的事务中查询 Run，并以 `limit + 1` 验证最新 Attempt 的 `hasMore` 边界；
 - 运行定向测试、类型检查、Biome 与 `git diff --check`。
 
 ## 可逆性与回退
 
 端点和恢复动作不改变数据库 schema。若需回退可停止 Web 调用并移除路由；单 Run 的既有读取语义不受影响。
+
+## 后续工作
+
+- UI 分支合并后，在 `main.tsx` 的初次加载与 Thread 选择路径调用 `listLatestRuns(limit=1)`；
+- 仅在导航代次仍匹配时分发 `recoverLatestRun`，随后激活该 Run 的事件和 Artifact 轮询；
+- 补主界面级测试，覆盖刷新、切回、空 Thread、切走再切回及迟到恢复响应。
+
+## 实施记录
+
+- 2026-07-28：完成最新 Run API、PG 查询以及 Web client/reducer/navigation 基础。
+- 2026-07-29：独立审查确认主界面尚未接入，收窄本 ADR 的完成声明；事件读取明确升级为只读 `REPEATABLE READ`，并补并发 Attempt 切换、`limit` 与 `hasMore` 集成覆盖。

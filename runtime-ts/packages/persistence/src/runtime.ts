@@ -126,7 +126,9 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
             })),
           } as const;
         },
-        { readOnly: true },
+        // 授权 Run、选定 latest Attempt、读取事件与 hasMore 必须共享一个 MVCC 快照；
+        // READ COMMITTED 会让并发 Attempt 切换或旧 Attempt 追加落入后续语句的新快照。
+        { readOnly: true, isolationLevel: "REPEATABLE READ" },
       );
     } catch {
       throw new PersistenceError("UNAVAILABLE", "读取 Run 体验事件暂时不可用");

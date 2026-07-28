@@ -186,6 +186,13 @@ h2 {
   display: grid;
   gap: 4px;
 }
+.artifact-actions {
+  display: flex;
+  gap: 6px;
+}
+.timeline .assistant-message {
+  border-left-color: #287760;
+}
 .composer {
   border-top: 1px solid #d2dbd3;
   padding-top: 16px;

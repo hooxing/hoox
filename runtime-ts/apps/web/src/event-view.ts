@@ -1,5 +1,11 @@
 import type { RunEvent } from "./api.js";
 
+const maxAssistantMessageLength = 16_000;
+
+export type TimelineEntry =
+  | { readonly type: "assistant"; readonly id: string; readonly text: string }
+  | { readonly type: "event"; readonly event: RunEvent };
+
 function object(value: unknown): Readonly<Record<string, unknown>> | undefined {
   return typeof value === "object" && value !== null
     ? (value as Readonly<Record<string, unknown>>)
@@ -43,4 +49,33 @@ export function eventSummary(event: RunEvent): string {
     default:
       return "已收到运行事件";
   }
+}
+
+/** 连续 delta 是同一条助手回复的流式片段，工具和状态事件会切断该回复。 */
+export function buildTimeline(events: readonly RunEvent[]): readonly TimelineEntry[] {
+  const entries: TimelineEntry[] = [];
+  for (const event of events) {
+    if (event.type !== "message.delta") {
+      entries.push({ type: "event", event });
+      continue;
+    }
+    const delta = eventSummary(event);
+    const previous = entries.at(-1);
+    if (previous?.type === "assistant") {
+      const remaining = maxAssistantMessageLength - previous.text.length;
+      if (remaining > 0) {
+        entries[entries.length - 1] = {
+          ...previous,
+          text: `${previous.text}${delta.slice(0, remaining)}`,
+        };
+      }
+      continue;
+    }
+    entries.push({
+      type: "assistant",
+      id: event.eventId,
+      text: delta.slice(0, maxAssistantMessageLength),
+    });
+  }
+  return entries;
 }

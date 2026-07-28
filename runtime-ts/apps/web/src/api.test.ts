@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { normalizeRunEvent, RuntimeApi } from "./api.js";
+import { canPreviewArtifact, normalizeRunEvent, RuntimeApi } from "./api.js";
 
 describe("RuntimeApi", () => {
   it("创建请求携带开发身份和幂等键", async () => {
@@ -43,6 +43,17 @@ describe("RuntimeApi", () => {
     ).toMatchObject({ eventId: "event-7", type: "message.delta", kind: "agent_event" });
   });
 
+  it("agent_event 优先使用 payload.type，兼容旧 raw.type", () => {
+    expect(
+      normalizeRunEvent({
+        sequence: 8,
+        kind: "agent_event",
+        type: "agent_event",
+        payload: { type: "message.delta", delta: "旧进程" },
+      }),
+    ).toMatchObject({ type: "message.delta" });
+  });
+
   it("下载只使用 Run 嵌套地址", async () => {
     const fetcher = vi.fn().mockResolvedValue(
       new Response(
@@ -61,5 +72,39 @@ describe("RuntimeApi", () => {
       "/api/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/download",
     );
     expect(fetcher.mock.calls[0]?.[1]).not.toMatchObject({ method: "POST" });
+  });
+
+  it("事件页保留 attemptId", async () => {
+    const api = new RuntimeApi(
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            version: "v1",
+            requestId: "req_1",
+            data: {
+              attemptId: "attempt_2",
+              items: [
+                {
+                  sequence: 1,
+                  kind: "agent_event",
+                  payload: { type: "message.delta", delta: "x" },
+                },
+              ],
+            },
+          }),
+        ),
+      ),
+    );
+    await expect(api.listEvents("thread_1", "run_1")).resolves.toMatchObject({
+      attemptId: "attempt_2",
+      items: [{ eventId: "event-1", type: "message.delta" }],
+    });
+  });
+
+  it("仅允许安全媒体类型预览", () => {
+    expect(canPreviewArtifact("text/plain")).toBe(true);
+    expect(canPreviewArtifact("image/png")).toBe(true);
+    expect(canPreviewArtifact("application/pdf")).toBe(true);
+    expect(canPreviewArtifact("application/zip")).toBe(false);
   });
 });

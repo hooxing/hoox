@@ -24,6 +24,11 @@ export type RunEvent = {
   readonly payload: unknown;
 };
 
+export type RunEventPage = {
+  readonly attemptId: string | undefined;
+  readonly items: readonly RunEvent[];
+};
+
 export type Artifact = {
   readonly id: string;
   readonly name: string;
@@ -93,11 +98,12 @@ export function normalizeRunEvent(value: unknown): RunEvent | undefined {
   const kind = typeof raw.kind === "string" ? raw.kind : "unknown";
   const payload = raw.payload;
   const payloadType = record(payload)?.type;
+  // 旧开发进程会把 agent_event 写进 raw.type；其 payload.type 才是可呈现的事件类型。
   const type =
-    typeof raw.type === "string"
-      ? raw.type
-      : kind === "agent_event" && typeof payloadType === "string"
-        ? payloadType
+    kind === "agent_event" && typeof payloadType === "string"
+      ? payloadType
+      : typeof raw.type === "string"
+        ? raw.type
         : kind;
   return {
     eventId: typeof raw.eventId === "string" ? raw.eventId : `event-${raw.sequence}`,
@@ -167,13 +173,17 @@ export class RuntimeApi {
       },
     );
   }
-  async listEvents(threadId: string, runId: string, after = -1): Promise<readonly RunEvent[]> {
+  async listEvents(threadId: string, runId: string, after = -1): Promise<RunEventPage> {
     const data = await this.request<unknown>(
       `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/events?after=${after}&limit=100`,
     );
-    return asArray(data)
-      .map(normalizeRunEvent)
-      .filter((event): event is RunEvent => event !== undefined);
+    const page = record(data);
+    return {
+      attemptId: typeof page?.attemptId === "string" ? page.attemptId : undefined,
+      items: asArray(data)
+        .map(normalizeRunEvent)
+        .filter((event): event is RunEvent => event !== undefined),
+    };
   }
   async listArtifacts(threadId: string, runId: string): Promise<readonly Artifact[]> {
     const data = await this.request<unknown>(
@@ -193,4 +203,24 @@ export class RuntimeApi {
     }
     throw new ApiError("下载地址格式无效", 502, true);
   }
+  async previewArtifact(threadId: string, runId: string, artifactId: string): Promise<string> {
+    const data = await this.request<unknown>(
+      `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/preview`,
+    );
+    if (typeof data === "object" && data !== null) {
+      const candidate =
+        (data as { readonly url?: unknown; readonly previewUrl?: unknown }).url ??
+        (data as { readonly previewUrl?: unknown }).previewUrl;
+      if (typeof candidate === "string") return candidate;
+    }
+    throw new ApiError("预览地址格式无效", 502, true);
+  }
+}
+
+export function canPreviewArtifact(mediaType: string | undefined): boolean {
+  return (
+    mediaType?.startsWith("text/") === true ||
+    mediaType?.startsWith("image/") === true ||
+    mediaType === "application/pdf"
+  );
 }

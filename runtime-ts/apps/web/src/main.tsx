@@ -1,6 +1,7 @@
 import {
   Archive,
   Download,
+  Eye,
   LoaderCircle,
   MessageSquarePlus,
   RotateCw,
@@ -9,8 +10,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ApiError, type RunEvent, RuntimeApi } from "./api.js";
-import { eventSummary } from "./event-view.js";
+import { ApiError, canPreviewArtifact, type RunEvent, RuntimeApi } from "./api.js";
+import { buildTimeline, eventSummary } from "./event-view.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
 import "./styles.css";
 
@@ -19,14 +20,22 @@ const active = new Set(["queued", "running", "waiting"]);
 
 function RunTimeline({ events }: { readonly events: readonly RunEvent[] }) {
   if (events.length === 0) return <div className="empty compact">等待运行事件</div>;
+  const entries = buildTimeline(events);
   return (
     <ol className="timeline">
-      {events.map((event) => (
-        <li key={event.eventId ?? `${event.sequence}`}>
-          <span className="event-type">{event.type.replaceAll("_", " ")}</span>
-          <p>{eventSummary(event)}</p>
-        </li>
-      ))}
+      {entries.map((entry) =>
+        entry.type === "assistant" ? (
+          <li key={entry.id} className="assistant-message">
+            <span className="event-type">助手</span>
+            <p>{entry.text}</p>
+          </li>
+        ) : (
+          <li key={entry.event.eventId}>
+            <span className="event-type">{entry.event.type.replaceAll("_", " ")}</span>
+            <p>{eventSummary(entry.event)}</p>
+          </li>
+        ),
+      )}
     </ol>
   );
 }
@@ -40,10 +49,12 @@ function App() {
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<ApiError | undefined>();
   const eventAfterRef = useRef(-1);
+  const eventAttemptRef = useRef<string | undefined>(undefined);
 
   useEffect(() => {
     eventAfterRef.current = state.events.at(-1)?.sequence ?? -1;
-  }, [state.events]);
+    eventAttemptRef.current = state.eventAttemptId;
+  }, [state.eventAttemptId, state.events]);
 
   const refreshThreads = useCallback(async () => {
     setLoading(true);
@@ -70,13 +81,17 @@ function App() {
     const poll = async (): Promise<void> => {
       try {
         const latest = await api.getRun(threadId, runId);
-        const [events, artifacts] = await Promise.all([
+        const [eventPage, artifacts] = await Promise.all([
           api.listEvents(threadId, runId, eventAfterRef.current),
           api.listArtifacts(threadId, runId),
         ]);
         if (!stopped) {
+          if (eventPage.attemptId !== eventAttemptRef.current) {
+            eventAttemptRef.current = eventPage.attemptId;
+            eventAfterRef.current = -1;
+          }
           dispatch({ type: "run", run: latest });
-          dispatch({ type: "events", events });
+          dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
           // 单次完成后再调度，状态更新不会重新创建计时器或导致紧密轮询。
           if (active.has(latest.status)) timer = window.setTimeout(() => void poll(), 1200);
@@ -160,6 +175,15 @@ function App() {
       window.open(url, "_blank", "noopener");
     } catch (reason) {
       setError(reason instanceof ApiError ? reason : new ApiError("获取下载地址失败", 0, true));
+    }
+  };
+  const preview = async (artifactId: string) => {
+    if (!state.selectedThreadId || !state.run) return;
+    try {
+      const url = await api.previewArtifact(state.selectedThreadId, state.run.id, artifactId);
+      window.open(url, "_blank", "noopener");
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason : new ApiError("获取预览地址失败", 0, true));
     }
   };
 
@@ -287,14 +311,26 @@ function App() {
                           {artifact.mediaType ? ` · ${artifact.mediaType}` : ""}
                         </small>
                       </div>
-                      <button
-                        type="button"
-                        title="下载产物"
-                        disabled={artifact.status !== "published"}
-                        onClick={() => void download(artifact.id)}
-                      >
-                        <Download size={16} />
-                      </button>
+                      <div className="artifact-actions">
+                        {canPreviewArtifact(artifact.mediaType) && (
+                          <button
+                            type="button"
+                            title="预览产物"
+                            disabled={artifact.status !== "published"}
+                            onClick={() => void preview(artifact.id)}
+                          >
+                            <Eye size={16} />
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          title="下载产物"
+                          disabled={artifact.status !== "published"}
+                          onClick={() => void download(artifact.id)}
+                        >
+                          <Download size={16} />
+                        </button>
+                      </div>
                     </li>
                   ))}
                 </ul>

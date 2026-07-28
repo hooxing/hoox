@@ -35,3 +35,16 @@ export class WorkspaceNavigation {
     return this.#selectedThreadId === threadId;
   }
 }
+
+/**
+ * UI 恢复命令的共同闩锁：请求前 capture，响应后用它确认仍是同一导航代次。
+ * Reducer 还会以 selectionGeneration 复验，避免调用点遗漏检查时让旧响应覆盖新选择。
+ */
+export async function recoverLatestRunForNavigation<T>(
+  navigation: WorkspaceNavigation,
+  expected: NavigationGeneration,
+  load: () => Promise<T>,
+): Promise<T | undefined> {
+  const value = await load();
+  return navigation.isCurrent(expected) ? value : undefined;
+}

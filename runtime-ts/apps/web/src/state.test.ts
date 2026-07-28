@@ -76,6 +76,34 @@ describe("mergeEvents", () => {
     });
   });
 
+  it("恢复只接受当前 Thread 的当前选择代次，并清空旧 Run 投影", () => {
+    const selected = workspaceReducer(initialWorkspaceState, {
+      type: "select",
+      threadId: "thread_1",
+    });
+    const recoveredRun = {
+      id: "run_2",
+      threadId: "thread_1",
+      status: "succeeded" as const,
+      createdAt: "2026-01-01T00:00:00Z",
+      updatedAt: "2026-01-01T00:00:00Z",
+    };
+    const stale = workspaceReducer(selected, {
+      type: "recoverLatestRun",
+      threadId: "thread_1",
+      selectionGeneration: 0,
+      run: recoveredRun,
+    });
+    expect(stale).toBe(selected);
+    const recovered = workspaceReducer(selected, {
+      type: "recoverLatestRun",
+      threadId: "thread_1",
+      selectionGeneration: selected.selectionGeneration,
+      run: recoveredRun,
+    });
+    expect(recovered).toMatchObject({ run: recoveredRun, events: [], artifacts: [] });
+  });
+
   it("迟到的 Thread 创建与归档只更新列表，不隐式改写当前选择", () => {
     const thread = {
       id: "thread_2",

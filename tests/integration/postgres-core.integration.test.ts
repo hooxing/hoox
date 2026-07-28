@@ -329,6 +329,24 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       expect(page.json().data.items.map((item: { id: string }) => item.id)).toEqual([
         left.thread.id,
       ]);
+      const laterRun = createRun({
+        id: runId("run_api_left_later"),
+        thread: left.thread,
+        now: timestamp(4),
+      });
+      expect(await repositories.runs.create(left.scope, laterRun)).toEqual({
+        outcome: "created",
+        version: 0n,
+      });
+      const latestRun = await app.inject({
+        method: "GET",
+        url: `/v1/threads/${left.thread.id}/runs?limit=1`,
+        headers: { authorization: "Bearer pg-left" },
+      });
+      expect(latestRun.statusCode).toBe(200);
+      expect(latestRun.json().data.items.map((item: { id: string }) => item.id)).toEqual([
+        laterRun.id,
+      ]);
       const crossTenant = await app.inject({
         method: "GET",
         url: `/v1/threads/${left.thread.id}/runs/${left.run.id}`,
@@ -339,6 +357,12 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       });
       expect(crossTenant.statusCode).toBe(404);
       expect(crossTenant.json().error.code).toBe("NOT_FOUND");
+      const crossTenantLatest = await app.inject({
+        method: "GET",
+        url: `/v1/threads/${left.thread.id}/runs?limit=1`,
+        headers: { authorization: "Bearer pg-right" },
+      });
+      expect(crossTenantLatest.statusCode).toBe(404);
 
       const cancelled = await app.inject({
         method: "DELETE",

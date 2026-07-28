@@ -133,6 +133,12 @@ export interface ThreadRepository {
 export interface RunRepository {
   create(scope: TenantScope, run: Run): Promise<VersionedCreateResult>;
   get(scope: TenantScope, id: Run["id"]): Promise<Versioned<Run> | undefined>;
+  /** 返回一次读取快照中的最新窗口；排序固定为 updatedAt、createdAt、id 倒序。 */
+  listByThread(
+    scope: TenantScope,
+    threadId: ThreadId,
+    input: { readonly limit: number },
+  ): Promise<readonly Versioned<Run>[]>;
   update(scope: TenantScope, run: Run, expectedVersion: bigint): Promise<VersionedUpdateResult>;
 }
 
@@ -166,6 +172,8 @@ export interface RunExperienceReadPort {
           readonly payload: Readonly<Record<string, unknown>>;
           readonly occurredAt: string;
         }[];
+        /** true 表示同一 Attempt 仍有 sequence 大于本页末尾的事件。 */
+        readonly hasMore: boolean;
       }
     | { readonly outcome: "not_found" }
   >;

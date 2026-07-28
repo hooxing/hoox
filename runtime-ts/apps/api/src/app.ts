@@ -32,6 +32,9 @@ import {
   ThreadPageSuccessEnvelopeSchema,
   type ThreadPath,
   ThreadPathSchema,
+  type ThreadRunListQuery,
+  ThreadRunListQuerySchema,
+  ThreadRunPageSuccessEnvelopeSchema,
   ThreadSuccessEnvelopeSchema,
 } from "@cube-runtime/protocol";
 import Fastify, { type FastifyInstance, type FastifyRequest, LogController } from "fastify";
@@ -382,6 +385,31 @@ export function createApiApp(
     },
   );
 
+  app.get<{ Params: ThreadPath; Querystring: ThreadRunListQuery }>(
+    "/v1/threads/:threadId/runs",
+    {
+      schema: {
+        params: ThreadPathSchema,
+        querystring: ThreadRunListQuerySchema,
+        response: {
+          200: ThreadRunPageSuccessEnvelopeSchema,
+          400: ErrorEnvelopeSchema,
+          401: ErrorEnvelopeSchema,
+          404: ErrorEnvelopeSchema,
+          500: ErrorEnvelopeSchema,
+          503: ErrorEnvelopeSchema,
+        },
+      },
+    },
+    async (request) => {
+      const auth = await service.authenticate(authorization(request), requestId(request));
+      return success(
+        request,
+        await service.listLatestRuns(auth, request.params.threadId, request.query),
+      );
+    },
+  );
+
   app.get<{ Params: RunPath }>(
     "/v1/threads/:threadId/runs/:runId",
     {
@@ -461,6 +489,7 @@ export function createApiApp(
         if (read === undefined || read.outcome === "not_found") throw new ApiFailure("not_found");
         return success(request, {
           ...(read.attemptId === undefined ? {} : { attemptId: read.attemptId }),
+          hasMore: read.hasMore,
           items: read.events.map((event) => ({
             eventId: `${read.attemptId ?? "pending"}-${event.sequence}`,
             sequence: event.sequence,

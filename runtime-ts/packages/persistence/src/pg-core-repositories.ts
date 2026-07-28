@@ -10,9 +10,9 @@ import { archiveThread, isoTimestamp } from "@cube-runtime/domain";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {
-  CoreRepositories,
   ArchiveThreadCommandPort,
   ArchiveThreadResult,
+  CoreRepositories,
   CreateResult,
   RunRepository,
   TenantBundle,
@@ -343,6 +343,44 @@ export class PgRunRepository implements RunRepository {
       return await withTenantTransaction(this.pool, scope, (client) => findRun(client, scope, id));
     } catch (error) {
       throw mapPersistenceError(error, "读取运行");
+    }
+  }
+
+  async listByThread(
+    scope: TenantScope,
+    requestedThreadId: Thread["id"],
+    input: { readonly limit: number },
+  ): Promise<readonly Versioned<Run>[]> {
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+      throw new TypeError("Run 最新窗口大小必须在 1 到 100 之间");
+    }
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        scope,
+        async (client) => {
+          // Membership、Thread 与 Run 同一条查询绑定；不存在或无权时返回空，供 API 先以 Thread 读取失败关闭。
+          const result = await client.query(
+            `SELECT ${tenantColumns}, ${authColumns}, ${threadColumns},
+                    r.id AS run_id, r.status AS run_status, r.version AS run_version,
+                    r.created_at AS run_created_at, r.updated_at AS run_updated_at
+               FROM runs r
+               JOIN threads th ON th.tenant_id = r.tenant_id AND th.id = r.thread_id
+               ${threadJoins}
+              WHERE r.tenant_id = $1 AND r.thread_id = $3
+              ORDER BY r.updated_at DESC, r.created_at DESC, r.id DESC
+              LIMIT $4`,
+            [scope.tenantId, scope.userId, requestedThreadId, input.limit],
+          );
+          return result.rows.map((row) => {
+            const thread = mapThread(row, mapTenant(row));
+            return { entity: mapRun(row, thread), version: BigInt(row.run_version) };
+          });
+        },
+        { readOnly: true },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "读取任务最新 Run");
     }
   }
 

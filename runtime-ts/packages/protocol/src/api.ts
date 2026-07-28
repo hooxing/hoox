@@ -28,6 +28,18 @@ export const RunEventListQuerySchema = Type.Object(
 );
 export type RunEventListQuery = Static<typeof RunEventListQuerySchema>;
 
+/**
+ * Thread 内 Run 的最新快照窗口。该接口不提供跨快照翻页游标：调用方应把结果视为
+ * 请求时刻按更新时间倒序截取的最近 N 条，而不是可在并发写入间续接的历史流。
+ */
+export const ThreadRunListQuerySchema = Type.Object(
+  {
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 20 })),
+  },
+  strict,
+);
+export type ThreadRunListQuery = Static<typeof ThreadRunListQuerySchema>;
+
 export const CreateThreadRequestSchema = Type.Object(
   { title: Type.String({ minLength: 1, maxLength: 200 }) },
   strict,
@@ -86,10 +98,17 @@ export const RunEventPageDtoSchema = Type.Object(
   {
     attemptId: Type.Optional(IdSchema),
     items: Type.Array(RunEventDtoSchema, { maxItems: 200 }),
+    hasMore: Type.Optional(Type.Boolean()),
   },
   { ...strict, $id: "v1.RunEventPageDto" },
 );
 export type RunEventPageDto = Static<typeof RunEventPageDtoSchema>;
+
+export const ThreadRunPageDtoSchema = Type.Object(
+  { items: Type.Array(RunDtoSchema, { maxItems: 100 }) },
+  { ...strict, $id: "v1.ThreadRunPageDto" },
+);
+export type ThreadRunPageDto = Static<typeof ThreadRunPageDtoSchema>;
 
 export const ArtifactDeliveryDtoSchema = Type.Object(
   {
@@ -111,6 +130,7 @@ export type ArtifactListDto = Static<typeof ArtifactListDtoSchema>;
 export const ThreadSuccessEnvelopeSchema = successEnvelopeSchema(ThreadDtoSchema);
 export const ThreadPageSuccessEnvelopeSchema = successEnvelopeSchema(ThreadPageDtoSchema);
 export const RunSuccessEnvelopeSchema = successEnvelopeSchema(RunDtoSchema);
+export const ThreadRunPageSuccessEnvelopeSchema = successEnvelopeSchema(ThreadRunPageDtoSchema);
 export const HealthSuccessEnvelopeSchema = successEnvelopeSchema(HealthDtoSchema);
 export const RunEventPageSuccessEnvelopeSchema = successEnvelopeSchema(RunEventPageDtoSchema);
 export const ArtifactListSuccessEnvelopeSchema = successEnvelopeSchema(ArtifactListDtoSchema);

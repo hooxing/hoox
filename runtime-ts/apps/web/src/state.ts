@@ -3,6 +3,8 @@ import type { Artifact, Run, RunEvent, RunEventPage, Thread } from "./api.js";
 export type WorkspaceState = {
   readonly threads: readonly Thread[];
   readonly selectedThreadId: string | undefined;
+  /** 同一 Thread 被再次选中也递增，拒绝跨导航边界的迟到恢复响应。 */
+  readonly selectionGeneration: number;
   readonly run: Run | undefined;
   readonly eventAttemptId: string | undefined;
   readonly events: readonly RunEvent[];
@@ -12,6 +14,7 @@ export type WorkspaceState = {
 export const initialWorkspaceState: WorkspaceState = {
   threads: [],
   selectedThreadId: undefined,
+  selectionGeneration: 0,
   run: undefined,
   eventAttemptId: undefined,
   events: [],
@@ -34,6 +37,12 @@ export function workspaceReducer(
     | { readonly type: "threadCreated"; readonly thread: Thread }
     | { readonly type: "threadArchived"; readonly threadId: string }
     | { readonly type: "select"; readonly threadId: string | undefined }
+    | {
+        readonly type: "recoverLatestRun";
+        readonly threadId: string;
+        readonly selectionGeneration: number;
+        readonly run: Run | undefined;
+      }
     | { readonly type: "startRun"; readonly run: Run }
     | { readonly type: "run"; readonly run: Run }
     | { readonly type: "events"; readonly page: RunEventPage }
@@ -59,7 +68,23 @@ export function workspaceReducer(
       return {
         ...state,
         selectedThreadId: action.threadId,
+        selectionGeneration: state.selectionGeneration + 1,
         run: undefined,
+        eventAttemptId: undefined,
+        events: [],
+        artifacts: [],
+      };
+    case "recoverLatestRun":
+      // 仅接受本次选择代次发起的恢复；切走再切回同一 Thread 时旧响应也必须失效。
+      if (
+        state.selectedThreadId !== action.threadId ||
+        state.selectionGeneration !== action.selectionGeneration
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        run: action.run,
         eventAttemptId: undefined,
         events: [],
         artifacts: [],

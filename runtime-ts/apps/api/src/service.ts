@@ -255,6 +255,28 @@ export class ApiService {
     return toRunDto(run.entity);
   }
 
+  /**
+   * 最新窗口不是可续接的历史分页：先读取并授权 Thread，随后才投影该 Thread 的 Run。
+   * 因而 Thread 不存在、跨租户和成员撤销在外部均保持同一个 404 失败关闭语义。
+   */
+  async listLatestRuns(
+    auth: AuthContext,
+    rawThreadId: string,
+    input: { readonly limit?: number },
+  ): Promise<{ readonly items: readonly RunDto[] }> {
+    const parent = await this.dependencies.repositories.threads.get(
+      auth.scope,
+      threadId(rawThreadId),
+    );
+    if (parent === undefined) throw new ApiFailure("not_found");
+    const items = await this.dependencies.repositories.runs.listByThread(
+      auth.scope,
+      parent.entity.id,
+      { limit: input.limit ?? 20 },
+    );
+    return { items: items.map(({ entity }) => toRunDto(entity)) };
+  }
+
   async cancelRun(auth: AuthContext, rawThreadId: string, rawRunId: string): Promise<RunDto> {
     const id = runId(rawRunId);
     const expectedThreadId = threadId(rawThreadId);

@@ -197,6 +197,20 @@ class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThre
     runs: {
       create: async () => ({ outcome: "conflict" }),
       get: async (scope, id) => this.runs.get(key(scope, id)),
+      listByThread: async (scope, threadId, input) =>
+        [...this.runs.entries()]
+          .filter(
+            ([storedKey, value]) =>
+              storedKey.startsWith(`${scope.tenantId}:`) && value.entity.threadId === threadId,
+          )
+          .map(([, value]) => value)
+          .sort((left, right) => {
+            const byUpdated = right.entity.updatedAt.localeCompare(left.entity.updatedAt);
+            if (byUpdated !== 0) return byUpdated;
+            const byCreated = right.entity.createdAt.localeCompare(left.entity.createdAt);
+            return byCreated === 0 ? right.entity.id.localeCompare(left.entity.id) : byCreated;
+          })
+          .slice(0, input.limit),
       update: async (scope, entity, expectedVersion) => {
         const storedKey = key(scope, entity.id);
         const current = this.runs.get(storedKey);
@@ -455,6 +469,7 @@ function fixture(
                 ]
                   .filter((event) => event.sequence > after)
                   .slice(0, limit),
+                hasMore: false,
               };
             },
             listArtifacts: async ({ runId }) =>
@@ -553,6 +568,51 @@ afterEach(async () => {
 });
 
 describe("Fastify API 契约", () => {
+  it("按稳定最新快照顺序读取 Thread 的 Run，并对无权 Thread 失败关闭", async () => {
+    const { app } = fixture();
+    openApps.push(app);
+    for (const suffix of ["one", "two", "three"] as const) {
+      await app.inject({
+        method: "POST",
+        url: "/v1/threads",
+        headers: {
+          authorization: "Bearer token-a",
+          "idempotency-key": `thread-latest-${suffix}-0001`,
+        },
+        payload: { title: "最新 Run" },
+      });
+      await app.inject({
+        method: "POST",
+        url: `/v1/threads/thread_${suffix === "one" ? 1 : suffix === "two" ? 2 : 3}/runs`,
+        headers: {
+          authorization: "Bearer token-a",
+          "idempotency-key": `run-latest-${suffix}-0001`,
+        },
+        payload: { input: "恢复运行" },
+      });
+    }
+    // 再在同一 Thread 创建一条 Run，较新的 updatedAt 应优先；limit 仅截取同一快照的最近窗口。
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-latest-four-0001" },
+      payload: { input: "同线程新运行" },
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs?limit=1",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.items.map((run: { id: string }) => run.id)).toEqual(["run_4"]);
+    const forbidden = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs?limit=1",
+      headers: { authorization: "Bearer token-b" },
+    });
+    expect(forbidden.statusCode).toBe(404);
+  });
+
   it("Run 事件按 sequence 增量读取，并维持 Thread/租户边界", async () => {
     const { app, state } = fixture({ enableExperience: true });
     openApps.push(app);

@@ -56,6 +56,7 @@ const waitingRecoveryTables = new Set([
   "waiting_recovery_checkpoints",
   "waiting_recovery_effect_outbox",
 ]);
+const workspaceRuntimeTables = new Set(["runtime_recovery_metrics"]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -108,6 +109,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["runtime_rollout_checkpoint_commands", new Set(["SELECT", "INSERT"])],
   ["waiting_recovery_checkpoints", new Set(["SELECT", "INSERT"])],
   ["waiting_recovery_effect_outbox", new Set(["SELECT", "INSERT"])],
+  ["runtime_recovery_metrics", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -229,6 +231,14 @@ async function hasMembershipLockMarker(client: PoolClient): Promise<boolean> {
   return result.rows[0]?.present === true;
 }
 
+async function hasWorkspaceRuntimeState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.runtime_recovery_metrics', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.run_execution_inputs', current_schema())) IS NOT NULL AS present",
@@ -329,6 +339,9 @@ async function activeTablePolicy(
   if (!(await hasWaitingRecoveryState(client, schema))) {
     for (const table of waitingRecoveryTables) policy.delete(table);
   }
+  if (!(await hasWorkspaceRuntimeState(client, schema))) {
+    for (const table of workspaceRuntimeTables) policy.delete(table);
+  }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
   }
@@ -365,6 +378,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasWaitingRecoveryState(client, schema))) {
     for (const table of waitingRecoveryTables) policy.delete(table);
+  }
+  if (!(await hasWorkspaceRuntimeState(client, schema))) {
+    for (const table of workspaceRuntimeTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(

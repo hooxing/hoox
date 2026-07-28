@@ -6,7 +6,6 @@ import type {
   ExecutionScope,
   HeartbeatTask,
   OrphanSandboxCleanupPort,
-  RecoveryMetricsPort,
   SandboxAcquireResult,
   SandboxSessionRef,
   SandboxSessionRegistryPort,
@@ -55,6 +54,20 @@ export class ProcessCancellation implements CancellationPort {
 
   cancel(): void {
     this.controller.abort(new Error("Agent Worker 正在关闭"));
+  }
+}
+
+/** 生产默认禁止成功关闭会丢失文件的 Sandbox；revision 发布接通前，非空 Workspace 失败关闭。 */
+export class FailClosedWorkspaceRevisionVerifier implements WorkspaceRevisionVerifierPort {
+  async verify(input: Parameters<WorkspaceRevisionVerifierPort["verify"]>[0]): Promise<undefined> {
+    const result = await input.sandbox.command(
+      `if [ ! -d /workspace ]; then exit 72; fi
+if find /workspace -mindepth 1 -print -quit | grep -q .; then exit 73; fi`,
+    );
+    if (result.exitCode !== 0) {
+      throw new Error("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
+    }
+    return undefined;
   }
 }
 
@@ -159,20 +172,9 @@ function fallbackUncertainEvent(
   };
 }
 
-/** 当前生产纵向不发布 Workspace revision；Sandbox 是短生命周期执行区。 */
-export class EphemeralWorkspaceRevisionVerifier implements WorkspaceRevisionVerifierPort {
-  async verify(): Promise<undefined> {
-    return undefined;
-  }
-}
-
 /** 未启用 Artifact Router 时不存在 required declaration，完成门确定通过。 */
 export class NoDeclaredArtifactCompletionGate implements ArtifactPublicationPort {
   async assertReadyForCompletion(): Promise<void> {}
-}
-
-export class NoopRecoveryMetrics implements RecoveryMetricsPort {
-  async recordOrphanCleanup(): Promise<void> {}
 }
 
 interface DispatchQueue {
@@ -213,10 +215,18 @@ export class AgentWorkerPollingLoop {
   }
 
   async close(): Promise<void> {
+    this.stopAccepting();
+    await this.inFlight;
+  }
+
+  stopAccepting(): void {
     this.closed = true;
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;
-    await this.inFlight;
+  }
+
+  drain(): Promise<void> {
+    return this.inFlight;
   }
 
   private schedule(delay: number): void {
@@ -240,6 +250,18 @@ export class AgentWorkerPollingLoop {
       return;
     }
     for (const claim of claims) {
+      if (this.closed) {
+        try {
+          await this.queue.acknowledge({
+            claim,
+            outcome: "defer",
+            retryAfterMilliseconds: 0,
+          });
+        } catch {
+          // claim lease 会过期；关闭后的 claim 绝不交给 RunWorker 执行。
+        }
+        continue;
+      }
       const result = await this.executeSafely(claim.scope);
       try {
         await this.queue.acknowledge({ claim, ...acknowledgement(result) });

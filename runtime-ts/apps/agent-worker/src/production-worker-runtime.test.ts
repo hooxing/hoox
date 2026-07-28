@@ -1,6 +1,10 @@
 import type { PgClaimedRunDispatch } from "@cube-runtime/persistence";
+import type { ExecutionScope } from "@cube-runtime/run-contracts";
 import { describe, expect, it } from "vitest";
-import { AgentWorkerPollingLoop } from "./production-worker-runtime.js";
+import {
+  AgentWorkerPollingLoop,
+  FailClosedWorkspaceRevisionVerifier,
+} from "./production-worker-runtime.js";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -100,5 +104,68 @@ describe("Agent Worker production polling loop", () => {
     await closed.promise;
     expect(claimCount).toBe(1);
     expect(ackCount).toBe(1);
+  });
+
+  it("claim 在关闭后才返回时只 defer，不执行 RunWorker", async () => {
+    const pendingClaim = deferred<readonly PgClaimedRunDispatch[]>();
+    const claimStarted = deferred<void>();
+    const acknowledged = deferred<void>();
+    const expected = claim();
+    let executions = 0;
+    const acknowledgements: unknown[] = [];
+    const loop = new AgentWorkerPollingLoop(
+      {
+        claim: async () => {
+          claimStarted.resolve();
+          return pendingClaim.promise;
+        },
+        acknowledge: async (input) => {
+          acknowledgements.push(input);
+          acknowledged.resolve();
+        },
+      },
+      {
+        execute: async () => {
+          executions += 1;
+          return { outcome: "succeeded" };
+        },
+      },
+      {
+        tenantId: expected.scope.tenantId,
+        workerId: "worker-loop",
+        pollIntervalMs: 10,
+        dispatchLeaseMs: 30_000,
+      },
+    );
+    loop.start();
+    await claimStarted.promise;
+    const closing = loop.close();
+    pendingClaim.resolve([expected]);
+    await acknowledged.promise;
+    await closing;
+    expect(executions).toBe(0);
+    expect(acknowledgements).toEqual([
+      { claim: expected, outcome: "defer", retryAfterMilliseconds: 0 },
+    ]);
+  });
+});
+
+describe("生产 Workspace revision 安全下限", () => {
+  it("非空 Workspace 失败关闭，避免成功丢失 Sandbox 文件", async () => {
+    const verifier = new FailClosedWorkspaceRevisionVerifier();
+    await expect(
+      verifier.verify({
+        scope: claim().scope as ExecutionScope,
+        sandbox: {
+          id: "sandbox-workspace",
+          command: async () => ({ stdout: "", stderr: "", exitCode: 73 }),
+          runCode: async () => ({ stdout: [], stderr: [] }),
+          readFile: async () => "",
+          writeFile: async () => undefined,
+          pause: async () => undefined,
+          kill: async () => undefined,
+        },
+      }),
+    ).rejects.toThrow("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
   });
 });

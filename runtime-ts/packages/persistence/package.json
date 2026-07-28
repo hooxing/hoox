@@ -16,6 +16,7 @@
     "test:integration:minio": "vitest run --root ../../.. runtime-ts/packages/persistence/src/s3-minio.integration.test.ts"
   },
   "dependencies": {
+    "@cube-runtime/context-policy": "workspace:*",
     "@cube-runtime/domain": "workspace:*",
     "@cube-runtime/resource": "workspace:*",
     "@cube-runtime/run-contracts": "workspace:*",

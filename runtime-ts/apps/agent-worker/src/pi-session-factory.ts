@@ -1,4 +1,12 @@
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@cube-runtime/artifact";
+import {
+  ToolObservationPipeline,
+  type SanitizedToolOutputSource,
+  type ToolObservationPolicy,
+  type ToolObservationResult,
+  type ToolObservationRolloutPort,
+  type TraceBlobPersistencePort,
+} from "@cube-runtime/context-policy";
 import { sha256Digest } from "@cube-runtime/domain";
 import { createSafePiSession } from "@cube-runtime/pi-adapter";
 import type { ArtifactToolRouterFactoryPort } from "@cube-runtime/tool-router";
@@ -15,6 +23,15 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
   constructor(
     private readonly model: Model<Api>,
     private readonly modelRuntime: ModelRuntime,
+    private readonly createObservationRecorder: (
+      input: Parameters<AgentSessionFactoryPort["create"]>[0],
+      outputs: SanitizedToolOutputSource,
+    ) => {
+      record(call: {
+        readonly toolCallId: string;
+        readonly toolName: string;
+      }): Promise<ToolObservationResult>;
+    },
     private readonly artifactTools?: ArtifactToolRouterFactoryPort,
     private readonly artifactAuthorizationIssuer?: ArtifactExecutionAuthorizationIssuerPort,
   ) {}
@@ -66,6 +83,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       sandbox: input.sandbox,
       rolloutProjection: input.rolloutProjection,
       authorizeToolEffect: authorizeStartedTool,
+      createToolObservationRecorder: (outputs) => this.createObservationRecorder(input, outputs),
       ...(artifactToolRouter === undefined ? {} : { artifactToolRouter }),
     });
     // 该订阅先于 RunWorker 的持久订阅注册，只负责证明 Pi 已真实发布 tool.started。
@@ -112,4 +130,35 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       },
     };
   }
+}
+
+/** 生产装配必须显式提供绑定当前 ExecutionScope 的 durable Blob 与 Rollout 端口。 */
+export function createDurableObservationRecorderFactory(
+  createDependencies: (input: Parameters<AgentSessionFactoryPort["create"]>[0]) => {
+    readonly traces: TraceBlobPersistencePort;
+    readonly rollout: ToolObservationRolloutPort;
+    readonly policy: ToolObservationPolicy;
+  },
+) {
+  return (
+    input: Parameters<AgentSessionFactoryPort["create"]>[0],
+    outputs: SanitizedToolOutputSource,
+  ) => {
+    const dependencies = createDependencies(input);
+    const pipeline = new ToolObservationPipeline(
+      dependencies.traces,
+      dependencies.rollout,
+      outputs,
+      dependencies.policy,
+    );
+    return {
+      record: (call: { readonly toolCallId: string; readonly toolName: string }) =>
+        pipeline.record({
+          tenantId: input.scope.tenantId,
+          idempotencyKey: `attempt.${input.attemptId}.tool.${call.toolCallId}`,
+          toolCallId: call.toolCallId,
+          toolName: call.toolName,
+        }),
+    };
+  };
 }

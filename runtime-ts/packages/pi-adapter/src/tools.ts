@@ -1,5 +1,8 @@
 import type { SandboxHandle } from "@cube-runtime/sandbox";
-import type { SanitizedToolOutputSource } from "@cube-runtime/context-policy";
+import type {
+  SanitizedToolOutputSource,
+  ToolObservationResult,
+} from "@cube-runtime/context-policy";
 import { SandboxRuntimeError } from "@cube-runtime/sandbox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -35,29 +38,42 @@ export function createSandboxTools(
 export function createObservedSandboxTools(
   sandbox: SandboxHandle,
   authorizer: SandboxToolEffectAuthorizer,
+  createRecorder: (outputs: SanitizedToolOutputSource) => {
+    record(input: {
+      readonly toolCallId: string;
+      readonly toolName: string;
+    }): Promise<ToolObservationResult>;
+  },
 ): {
   readonly tools: ReturnType<typeof createSandboxTools>;
   readonly outputs: SanitizedToolOutputSource;
 } {
   const outputs = new Map<string, { readonly name: string; readonly text: string }>();
-  const capture = (callId: string, name: string, text: string) =>
+  const source: SanitizedToolOutputSource = {
+    async readSanitizedOutput(input) {
+      const found = outputs.get(input.toolCallId);
+      if (found === undefined || found.name !== input.toolName) return undefined;
+      return found.text;
+    },
+  };
+  const recorder = createRecorder(source);
+  const capture = async (callId: string, name: string, text: string) => {
     outputs.set(callId, { name, text });
+    return recorder.record({
+      toolCallId: callId,
+      toolName: name,
+    });
+  };
   return {
     tools: createSandboxToolsInternal(sandbox, authorizer, capture),
-    outputs: {
-      async readSanitizedOutput(input) {
-        const found = outputs.get(input.toolCallId);
-        if (found === undefined || found.name !== input.toolName) return undefined;
-        return found.text;
-      },
-    },
+    outputs: source,
   };
 }
 
 function createSandboxToolsInternal(
   sandbox: SandboxHandle,
   authorizer: SandboxToolEffectAuthorizer,
-  capture?: (callId: string, name: string, text: string) => void,
+  capture?: (callId: string, name: string, text: string) => Promise<ToolObservationResult>,
 ) {
   return [
     defineTool({
@@ -177,14 +193,27 @@ function signalControl(signal: AbortSignal | undefined): { signal?: AbortSignal 
 async function toolResult(
   callId: string,
   toolName: string,
-  capture: ((callId: string, name: string, text: string) => void) | undefined,
+  capture:
+    | ((callId: string, name: string, text: string) => Promise<ToolObservationResult>)
+    | undefined,
   action: () => Promise<unknown>,
 ) {
   try {
     const value = await action();
     const text = JSON.stringify(value);
-    capture?.(callId, toolName, text);
-    return { content: [{ type: "text" as const, text }], details: {} };
+    const observation = await capture?.(callId, toolName, text);
+    if (
+      observation !== undefined &&
+      observation.outcome !== "recorded" &&
+      observation.outcome !== "replayed"
+    ) {
+      // 完整结果尚未形成可恢复的 durable 事实，绝不能以原始输出降级回传给模型。
+      return observationFailure();
+    }
+    return {
+      content: [{ type: "text" as const, text: observation?.observation ?? text }],
+      details: {},
+    };
   } catch (error) {
     // 工具结果不回传上游 cause，避免把网络地址、认证头或 SDK 内部响应泄漏给模型。
     const safe =
@@ -192,11 +221,32 @@ async function toolResult(
         ? { code: error.code, message: error.message }
         : { code: "UPSTREAM", message: "Sandbox 工具执行失败" };
     const text = JSON.stringify(safe);
-    capture?.(callId, toolName, text);
+    const observation = await capture?.(callId, toolName, text);
+    if (
+      observation !== undefined &&
+      observation.outcome !== "recorded" &&
+      observation.outcome !== "replayed"
+    ) {
+      // 错误分支同样 fail-closed，避免失败时绕过 Blob/Rollout 的持久化边界。
+      return observationFailure();
+    }
     return {
-      content: [{ type: "text" as const, text }],
+      content: [{ type: "text" as const, text: observation?.observation ?? text }],
       details: {},
       isError: true,
     };
   }
+}
+
+function observationFailure() {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: '{"code":"OBSERVATION_UNAVAILABLE","message":"工具结果未能安全持久化"}',
+      },
+    ],
+    details: {},
+    isError: true,
+  };
 }

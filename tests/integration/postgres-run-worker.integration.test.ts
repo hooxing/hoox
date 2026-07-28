@@ -1267,7 +1267,18 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         });
         modelRuntime.registerNativeProvider(faux.provider);
         await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-        const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime);
+        const sessions = new PiWorkerSessionFactory(
+          faux.getModel(),
+          modelRuntime,
+          (_input, outputs) => ({
+            record: async (call) => {
+              const observation = await outputs.readSanitizedOutput(call);
+              return observation === undefined
+                ? { outcome: "conflict" as const }
+                : { outcome: "recorded" as const, observation, isTruncated: false };
+            },
+          }),
+        );
         const registeredSandboxes = new PgBackedSandboxSessionRegistry(runtime, upstream, 120);
         const worker = new RunWorker(
           {

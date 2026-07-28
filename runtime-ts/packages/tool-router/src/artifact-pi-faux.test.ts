@@ -230,6 +230,14 @@ describe("Pi Faux Artifact 纵向链路", () => {
           consumedAtMonotonicMs: performance.now(),
           maxContinuationDelayMs: 250,
         }),
+        createToolObservationRecorder: (outputs) => ({
+          record: async (call) => {
+            const observation = await outputs.readSanitizedOutput(call);
+            return observation === undefined
+              ? { outcome: "conflict" as const }
+              : { outcome: "recorded" as const, observation, isTruncated: false };
+          },
+        }),
       });
       const events: RuntimeAgentEvent[] = [];
       controller.subscribe((event) => events.push(event));

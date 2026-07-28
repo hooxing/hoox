@@ -65,6 +65,14 @@ try {
         maxContinuationDelayMs: 250,
       };
     },
+    createToolObservationRecorder: (outputs) => ({
+      record: async (call) => {
+        const observation = await outputs.readSanitizedOutput(call);
+        return observation === undefined
+          ? { outcome: "conflict" as const }
+          : { outcome: "recorded" as const, observation, isTruncated: false };
+      },
+    }),
   });
 
   console.log("[3/6] Faux Provider 发起 Pi Tool Call");

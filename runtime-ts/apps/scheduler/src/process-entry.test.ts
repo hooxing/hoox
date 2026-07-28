@@ -26,6 +26,11 @@ describe("Scheduler 进程入口", () => {
   it("配置可验证，传入 Fake assembler 不能冒充受审生产装配", async () => {
     const configuration = parseSchedulerProcessEnvironment(productionEnvironment());
     expect(configuration.objectStorage.bucket).toBe("runtime-artifacts");
+    expect(configuration.sandbox).toMatchObject({
+      apiUrl: "http://cube-api:3000",
+      proxyNodeIp: "cube-api",
+      proxyScheme: "http",
+    });
     await expect(
       startSchedulerProcess({
         environment: productionEnvironment(),

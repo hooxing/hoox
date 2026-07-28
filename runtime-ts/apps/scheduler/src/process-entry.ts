@@ -18,7 +18,7 @@ import {
   PgSandboxCleanupConsumerStore,
   probePostgres,
 } from "@cube-runtime/persistence";
-import { CubeSandboxGateway } from "@cube-runtime/sandbox";
+import { CubeSandboxGateway, resolveCubeProxyRouting } from "@cube-runtime/sandbox";
 import {
   CubeSandboxCleanupResolver,
   SandboxCleanupConsumer,
@@ -108,6 +108,17 @@ export function parseSchedulerProcessEnvironment(
   ) {
     throw new TypeError("CUBESANDBOX_PROXY_SCHEME 只能是 http 或 https");
   }
+  const sandboxApiUrl = readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
+  const proxyRouting = resolveCubeProxyRouting({
+    apiUrl: sandboxApiUrl,
+    ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
+      ? {}
+      : { proxyNodeIp: parsed.values.CUBESANDBOX_PROXY_NODE_IP }),
+    ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined
+      ? {}
+      : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
+    ...(configuredProxyScheme === undefined ? {} : { proxyScheme: configuredProxyScheme }),
+  });
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
@@ -121,17 +132,11 @@ export function parseSchedulerProcessEnvironment(
       forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
     }),
     sandbox: Object.freeze({
-      apiUrl: readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL"),
+      apiUrl: sandboxApiUrl,
       ...(parsed.values.CUBESANDBOX_API_KEY === undefined
         ? {}
         : { apiKey: parsed.values.CUBESANDBOX_API_KEY }),
-      ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
-        ? {}
-        : { proxyNodeIp: parsed.values.CUBESANDBOX_PROXY_NODE_IP }),
-      ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined
-        ? {}
-        : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
-      ...(configuredProxyScheme === undefined ? {} : { proxyScheme: configuredProxyScheme }),
+      ...proxyRouting,
     }),
     cleanup: Object.freeze({
       tenantId: configuredTenantId,

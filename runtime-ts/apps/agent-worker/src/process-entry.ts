@@ -24,6 +24,7 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
+import { resolveCubeProxyRouting } from "@cube-runtime/sandbox";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
@@ -158,6 +159,17 @@ export function parseWorkerProcessEnvironment(
   if (maxOutputTokens > contextWindow) {
     throw new TypeError("MODEL_MAX_OUTPUT_TOKENS 不能大于 MODEL_CONTEXT_WINDOW");
   }
+  const sandboxApiUrl = readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
+  const proxyRouting = resolveCubeProxyRouting({
+    apiUrl: sandboxApiUrl,
+    ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
+      ? {}
+      : { proxyNodeIp: parsed.values.CUBESANDBOX_PROXY_NODE_IP }),
+    ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined
+      ? {}
+      : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
+    ...(proxyScheme === undefined ? {} : { proxyScheme }),
+  });
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
@@ -171,18 +183,12 @@ export function parseWorkerProcessEnvironment(
       forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
     }),
     sandbox: Object.freeze({
-      apiUrl: readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL"),
+      apiUrl: sandboxApiUrl,
       templateId: readRequiredEnvironmentValue(parsed, "CUBESANDBOX_TEMPLATE_ID"),
       ...(parsed.values.CUBESANDBOX_API_KEY === undefined
         ? {}
         : { apiKey: parsed.values.CUBESANDBOX_API_KEY }),
-      ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
-        ? {}
-        : { proxyNodeIp: parsed.values.CUBESANDBOX_PROXY_NODE_IP }),
-      ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined
-        ? {}
-        : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
-      ...(proxyScheme === undefined ? {} : { proxyScheme }),
+      ...proxyRouting,
     }),
     model: Object.freeze({
       baseUrl: readRequiredEnvironmentValue(parsed, "MODEL_BASE_URL"),

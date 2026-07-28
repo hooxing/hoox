@@ -388,7 +388,10 @@ export class RunWorker {
         authorizeToolEffect: (call) =>
           this.authorizeToolEffectAfterStarted(context, cancellation, call),
       });
-      context.abortSession = () => session?.abort().catch(() => undefined) ?? Promise.resolve();
+      context.abortSession = async () => {
+        await session?.drainRejectedToolReceipts?.();
+        await session?.abort().catch(() => undefined);
+      };
       const postSession = await this.stopPoint(context, cancellation);
       if (postSession) return await this.finishStopped(context, postSession, sandbox);
 
@@ -766,8 +769,7 @@ export class RunWorker {
       context.adapterRejected = true;
       context.agentFailure = "PROTOCOL";
       closeEventAcceptance(context);
-      if (!context.abortPromise)
-        context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+      this.abortAuthorizationFailure(context, "tool_execution");
       throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     }
     await gate.committed;
@@ -775,8 +777,7 @@ export class RunWorker {
       context.adapterRejected = true;
       context.agentFailure = "PROTOCOL";
       closeEventAcceptance(context);
-      if (!context.abortPromise)
-        context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+      this.abortAuthorizationFailure(context, "tool_execution");
       throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     }
     // callId 在 Attempt 内永久一次性；即使后续授权失败，也不能重新领取许可。
@@ -811,8 +812,7 @@ export class RunWorker {
       refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
       if (context.stopped) {
         closeEventAcceptance(context);
-        if (!context.abortPromise)
-          context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+        this.abortAuthorizationFailure(context, effect);
         throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
       }
       if (result.outcome !== "authorized" || !permitMatches(context, result.permit, effect, call)) {
@@ -825,15 +825,13 @@ export class RunWorker {
                 ? "fence_lost"
                 : "unavailable";
         closeEventAcceptance(context);
-        if (!context.abortPromise)
-          context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+        this.abortAuthorizationFailure(context, effect);
         throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
       }
       refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
       if (context.stopped) {
         closeEventAcceptance(context);
-        if (!context.abortPromise)
-          context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+        this.abortAuthorizationFailure(context, effect);
         throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
       }
       let consumed: Awaited<ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]>>;
@@ -865,8 +863,7 @@ export class RunWorker {
                   : "fence_lost";
         }
         closeEventAcceptance(context);
-        if (!context.abortPromise)
-          context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+        this.abortAuthorizationFailure(context, effect);
         throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
       }
       return {
@@ -884,6 +881,22 @@ export class RunWorker {
       throw new Error("EXTERNAL_EFFECT_NOT_AUTHORIZED");
     }
     return authorization;
+  }
+
+  private abortAuthorizationFailure(
+    context: ExecutionContext,
+    effect: ExternalEffectPermit["effect"],
+  ): void {
+    // PiFactory 的屏障必须先持久化固定失败回执，再同步阻断下一 Provider 请求；提前 abort
+    // 会让 Pi 丢弃仍在执行的 Tool Promise。其他 Session 实现没有该保证，仍立即中止。
+    if (
+      effect === "tool_execution" &&
+      this.dependencies.sessions.toolRejectionReceiptBarrier === "durable"
+    )
+      return;
+    if (!context.abortPromise) {
+      context.abortPromise = context.abortSession?.() ?? Promise.resolve();
+    }
   }
 
   private async applyMutation(

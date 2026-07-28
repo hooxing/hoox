@@ -44,6 +44,7 @@ export function createObservedSandboxTools(
       readonly toolName: string;
     }): Promise<ToolObservationResult>;
   },
+  rejectModelContinuation: () => void = () => undefined,
 ): {
   readonly tools: ReturnType<typeof createSandboxTools>;
   readonly outputs: ControlledToolReceiptSource;
@@ -65,13 +66,22 @@ export function createObservedSandboxTools(
   const recorder = createRecorder(source);
   const capture = async (callId: string, name: string, text: string) => {
     outputs.set(callId, { name, text });
-    return recorder.record({
-      toolCallId: callId,
-      toolName: name,
-    });
+    try {
+      const result = await recorder.record({
+        toolCallId: callId,
+        toolName: name,
+      });
+      if (result.outcome !== "recorded" && result.outcome !== "replayed") {
+        rejectModelContinuation();
+      }
+      return result;
+    } catch (error) {
+      rejectModelContinuation();
+      throw error;
+    }
   };
   return {
-    tools: createSandboxToolsInternal(sandbox, authorizer, capture),
+    tools: createSandboxToolsInternal(sandbox, authorizer, capture, rejectModelContinuation),
     outputs: source,
     recordControlledReceipt: (callId, toolName, outcome) =>
       capture(callId, toolName, controlledObservation(toolName, outcome)),
@@ -82,6 +92,7 @@ function createSandboxToolsInternal(
   sandbox: SandboxHandle,
   authorizer: SandboxToolEffectAuthorizer,
   capture?: (callId: string, name: string, text: string) => Promise<ToolObservationResult>,
+  rejectModelContinuation: () => void = () => undefined,
 ) {
   return [
     defineTool({
@@ -90,11 +101,17 @@ function createSandboxToolsInternal(
       description: "只在隔离的 CubeSandbox 中执行命令，不访问 Agent Worker 宿主机。",
       parameters: Type.Object({ command: Type.String({ minLength: 1 }) }),
       execute: async (_id, params, signal) =>
-        toolResult(_id, "sandbox_command", capture, async () => {
-          const authorization = await authorizeTool(authorizer, _id, "sandbox_command", params);
-          assertImmediateContinuation(authorization, signal);
-          return sandbox.command(params.command, signalControl(signal));
-        }),
+        toolResult(
+          _id,
+          "sandbox_command",
+          capture,
+          async () => {
+            const authorization = await authorizeTool(authorizer, _id, "sandbox_command", params);
+            assertImmediateContinuation(authorization, signal);
+            return sandbox.command(params.command, signalControl(signal));
+          },
+          rejectModelContinuation,
+        ),
     }),
     defineTool({
       name: "sandbox_run_code",
@@ -105,14 +122,20 @@ function createSandboxToolsInternal(
         language: Type.Optional(Type.String()),
       }),
       execute: async (_id, params, signal) =>
-        toolResult(_id, "sandbox_run_code", capture, async () => {
-          const authorization = await authorizeTool(authorizer, _id, "sandbox_run_code", params);
-          assertImmediateContinuation(authorization, signal);
-          return sandbox.runCode(params.code, {
-            ...signalControl(signal),
-            ...(params.language ? { language: params.language } : {}),
-          });
-        }),
+        toolResult(
+          _id,
+          "sandbox_run_code",
+          capture,
+          async () => {
+            const authorization = await authorizeTool(authorizer, _id, "sandbox_run_code", params);
+            assertImmediateContinuation(authorization, signal);
+            return sandbox.runCode(params.code, {
+              ...signalControl(signal),
+              ...(params.language ? { language: params.language } : {}),
+            });
+          },
+          rejectModelContinuation,
+        ),
     }),
     defineTool({
       name: "sandbox_read_file",
@@ -120,11 +143,17 @@ function createSandboxToolsInternal(
       description: "读取 CubeSandbox 中的绝对路径文件；不能读取 Worker 宿主机。",
       parameters: Type.Object({ path: Type.String({ pattern: "^/" }) }),
       execute: async (_id, params, signal) =>
-        toolResult(_id, "sandbox_read_file", capture, async () => {
-          const authorization = await authorizeTool(authorizer, _id, "sandbox_read_file", params);
-          assertImmediateContinuation(authorization, signal);
-          return sandbox.readFile(params.path, signalControl(signal));
-        }),
+        toolResult(
+          _id,
+          "sandbox_read_file",
+          capture,
+          async () => {
+            const authorization = await authorizeTool(authorizer, _id, "sandbox_read_file", params);
+            assertImmediateContinuation(authorization, signal);
+            return sandbox.readFile(params.path, signalControl(signal));
+          },
+          rejectModelContinuation,
+        ),
     }),
     defineTool({
       name: "sandbox_write_file",
@@ -135,12 +164,23 @@ function createSandboxToolsInternal(
         content: Type.String(),
       }),
       execute: async (_id, params, signal) =>
-        toolResult(_id, "sandbox_write_file", capture, async () => {
-          const authorization = await authorizeTool(authorizer, _id, "sandbox_write_file", params);
-          assertImmediateContinuation(authorization, signal);
-          await sandbox.writeFile(params.path, params.content, signalControl(signal));
-          return { written: true };
-        }),
+        toolResult(
+          _id,
+          "sandbox_write_file",
+          capture,
+          async () => {
+            const authorization = await authorizeTool(
+              authorizer,
+              _id,
+              "sandbox_write_file",
+              params,
+            );
+            assertImmediateContinuation(authorization, signal);
+            await sandbox.writeFile(params.path, params.content, signalControl(signal));
+            return { written: true };
+          },
+          rejectModelContinuation,
+        ),
     }),
   ];
 }
@@ -159,7 +199,7 @@ async function authorizeTool(
     });
   } catch {
     // 不泄漏 DB/栅栏细节；抛错让 Pi 将工具调用标记为失败，同时保证 Sandbox 尚未被触碰。
-    throw new Error("Runtime 已拒绝本次工具副作用");
+    throw new ToolEffectRejectedError("Runtime 已拒绝本次工具副作用");
   }
 }
 
@@ -172,7 +212,7 @@ function assertImmediateContinuation(
     signal?.aborted ||
     performance.now() - authorization.consumedAtMonotonicMs >= authorization.maxContinuationDelayMs
   ) {
-    throw new Error("Runtime 工具副作用许可已过期或调用已取消");
+    throw new ToolEffectRejectedError("Runtime 工具副作用许可已过期或调用已取消");
   }
 }
 
@@ -209,13 +249,15 @@ async function toolResult(
     | ((callId: string, name: string, text: string) => Promise<ToolObservationResult>)
     | undefined,
   action: () => Promise<unknown>,
+  rejectModelContinuation: () => void = () => undefined,
 ) {
   let outcome: "succeeded" | "failed" = "succeeded";
+  let effectRejected = false;
   try {
     await action();
   } catch (error) {
     // SandboxRuntimeError.message/code 同样来自上游，不能作为安全分类或模型文本使用。
-    void error;
+    effectRejected = error instanceof ToolEffectRejectedError;
     outcome = "failed";
   }
   const text = controlledObservation(toolName, outcome);
@@ -228,6 +270,8 @@ async function toolResult(
   ) {
     throw new ToolObservationPersistenceError(observation.outcome);
   }
+  // 许可拒绝已经形成配对 durable 回执；在抛给 Pi 前关闭下一模型轮次，不能以普通 Tool error 继续。
+  if (effectRejected) rejectModelContinuation();
   if (outcome === "failed") {
     // 只抛固定回执，Pi 才会产生 isError=true；原始 Sandbox 异常已在闭包内丢弃。
     throw new Error(observation?.observation ?? text);
@@ -236,6 +280,10 @@ async function toolResult(
     content: [{ type: "text" as const, text: observation?.observation ?? text }],
     details: {},
   };
+}
+
+class ToolEffectRejectedError extends Error {
+  override readonly name = "ToolEffectRejectedError";
 }
 
 class ToolObservationPersistenceError extends Error {

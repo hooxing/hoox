@@ -273,7 +273,10 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     ...observedSandboxTools.tools,
     ...(options.artifactToolRouter === undefined
       ? []
-      : createArtifactPiTools(options.artifactToolRouter)),
+      : createArtifactPiTools(
+          options.artifactToolRouter,
+          observedSandboxTools.recordControlledReceipt,
+        )),
   ];
   // 能力清单从即将传给 Pi 的同一组真实工具派生，不能维护第二份易漂移的硬编码列表。
   const builtPrompt = buildRuntimeSystemPrompt({

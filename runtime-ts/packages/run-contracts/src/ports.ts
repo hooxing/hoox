@@ -524,6 +524,8 @@ export interface AgentSessionFactoryPort {
   create(input: {
     readonly scope: ExecutionScope;
     readonly attemptId: string;
+    /** 当前 claim 的完整双栅栏；生产 Rollout 装配只从该能力回到 PG 推导 actor。 */
+    readonly fence: ExecutionFence;
     readonly sandbox: SandboxHandle;
     readonly rolloutProjection: ControlledRolloutProjection;
     readonly authorizeToolEffect: (

@@ -12,6 +12,17 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
+import {
+  createPostgresPool,
+  createS3BlobStore,
+  PgBlobLifecycleRepository,
+  PgRuntimeRolloutRepository,
+  probePostgres,
+} from "@cube-runtime/persistence";
+import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { PiWorkerSessionFactory } from "./pi-session-factory.js";
+import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
 
 const workerEnvironmentSchema = Object.freeze({
   DATABASE_URL: urlEnvironmentField({
@@ -92,6 +103,99 @@ export function parseWorkerProcessEnvironment(
   });
 }
 
+/** 生产装配只使用真实 PG、S3 与模型 provider；不接受调用者注入 actor/context 或内存持久层。 */
+const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfiguration> = {
+  async assemble(configuration) {
+    const pool = createPostgresPool({
+      connectionString: configuration.databaseUrl,
+      schema: configuration.databaseSchema,
+      applicationName: "cube-runtime-agent-worker",
+    });
+    try {
+      const blobRepository = new PgBlobLifecycleRepository(pool, {
+        objectPrefix: "agent-worker",
+      });
+      const blobs = createS3BlobStore(
+        {
+          bucket: configuration.objectStorage.bucket,
+          endpoint: configuration.objectStorage.endpoint,
+          region: configuration.objectStorage.region,
+          accessKeyId: configuration.objectStorage.accessKeyId,
+          secretAccessKey: configuration.objectStorage.secretAccessKey,
+          forcePathStyle: configuration.objectStorage.forcePathStyle,
+          prefix: "agent-worker",
+          maxPresignTtlSeconds: 60,
+          maxBlobSizeBytes: 8 * 1024 * 1024,
+        },
+        blobRepository,
+      );
+      const rolloutRepository = new PgRuntimeRolloutRepository(pool);
+      const durableObservation = createPgDurableObservationSession({
+        blobRepository,
+        blobs,
+        rolloutRepository,
+        policy: { maxModelObservationBytes: 4 * 1024 },
+      });
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      const providerId = "runtime-openai-compatible";
+      modelRuntime.registerProvider(providerId, {
+        name: "Runtime OpenAI-compatible Provider",
+        baseUrl: configuration.model.baseUrl,
+        apiKey: configuration.model.apiKey,
+        api: "openai-responses",
+        models: [
+          {
+            id: configuration.model.modelId,
+            name: configuration.model.modelId,
+            api: "openai-responses",
+            reasoning: false,
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 128_000,
+            maxTokens: 16_384,
+          },
+        ],
+      });
+      const model = modelRuntime.getModel(providerId, configuration.model.modelId);
+      if (model === undefined) throw new Error("生产模型配置无法解析");
+      const sessions = new PiWorkerSessionFactory(
+        model,
+        modelRuntime,
+        durableObservation.createRecorder,
+        undefined,
+        undefined,
+        durableObservation.prepare,
+      );
+      await probePostgres(pool);
+      return Object.freeze({
+        stopAccepting: async () => undefined,
+        resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),
+        readiness: Object.freeze([
+          Object.freeze({ name: "postgres", probe: () => probePostgres(pool) }),
+          Object.freeze({
+            name: "model-runtime",
+            probe: async () => {
+              // 闭包持有完整生产 Session 装配，且只验证本地已注册模型，不在 readiness 发模型请求。
+              if (
+                !(sessions instanceof PiWorkerSessionFactory) ||
+                modelRuntime.getModel(providerId, model.id) === undefined
+              ) {
+                throw new Error("模型 Session 装配不可用");
+              }
+            },
+          }),
+        ]),
+      });
+    } catch (error) {
+      await pool.end().catch(() => undefined);
+      throw error;
+    }
+  },
+};
+
 export async function startWorkerProcess(input: {
   readonly environment: Readonly<Record<string, string | undefined>>;
   readonly assembler?: ServiceAssemblyFactory<WorkerProcessConfiguration>;
@@ -99,11 +203,18 @@ export async function startWorkerProcess(input: {
   readonly onShutdownFailure?: (error: Error) => void;
 }): Promise<RunningServiceProcess> {
   const configuration = parseWorkerProcessEnvironment(input.environment);
+  if (configuration.runtimeEnvironment === "production" && input.assembler !== undefined) {
+    throw new Error("PRODUCTION_ASSEMBLY_UNAVAILABLE:agent-worker");
+  }
+  const processConfiguration =
+    configuration.runtimeEnvironment === "production"
+      ? Object.freeze({ ...configuration, runtimeEnvironment: "development" as const })
+      : configuration;
   return startServiceProcess({
     serviceName: "agent-worker",
-    configuration,
+    configuration: processConfiguration,
     shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
-    ...(input.assembler === undefined ? {} : { assembler: input.assembler }),
+    assembler: input.assembler ?? productionWorkerAssembler,
     ...(input.signalSource === undefined ? {} : { signalSource: input.signalSource }),
     ...(input.onShutdownFailure === undefined
       ? {}

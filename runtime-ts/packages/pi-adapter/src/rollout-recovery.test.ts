@@ -170,6 +170,48 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
     expect(() => projectLoadedRuntimeRecovery(loaded([call, forgedBlob]))).toThrow(
       new RuntimeRecoveryError("MALFORMED_FACTS"),
     );
+    const visibleBytesAsString = {
+      ...valid.body,
+      truncation: {
+        isTruncated: false,
+        modelVisibleBytes: String(
+          (valid.body.truncation as Record<string, unknown>).modelVisibleBytes,
+        ),
+      },
+    };
+    expect(() =>
+      projectLoadedRuntimeRecovery(
+        loaded([
+          call,
+          {
+            ...valid,
+            body: visibleBytesAsString,
+            bodyDigest: digest(visibleBytesAsString),
+          },
+        ]),
+      ),
+    ).toThrow(new RuntimeRecoveryError("MALFORMED_FACTS"));
+    const fullReceiptMarkedTruncated = {
+      ...valid.body,
+      truncation: {
+        isTruncated: true,
+        modelVisibleBytes: Buffer.byteLength(String(valid.body.observation), "utf8"),
+        reason: "model_utf8_budget_or_rollout_body_budget",
+      },
+    };
+    expect(() =>
+      projectLoadedRuntimeRecovery(
+        loaded([
+          call,
+          {
+            ...valid,
+            isTruncated: true,
+            body: fullReceiptMarkedTruncated,
+            bodyDigest: digest(fullReceiptMarkedTruncated),
+          },
+        ]),
+      ),
+    ).toThrow(new RuntimeRecoveryError("MALFORMED_FACTS"));
   });
 
   it("验证 checkpoint 摘要、replacement 前缀与窗口，重启投影确定", () => {

@@ -156,6 +156,7 @@ export function assertControlledToolObservation(input: {
   readonly reason?: string;
 }): void {
   const encoded = encodeControlledToolReceipt(input.receipt.toolName, input.receipt.outcome);
+  const encodedBytes = Buffer.byteLength(encoded, "utf8");
   if (
     Buffer.byteLength(input.observation, "utf8") !== input.modelVisibleBytes ||
     !Number.isSafeInteger(input.modelVisibleBytes) ||
@@ -166,6 +167,9 @@ export function assertControlledToolObservation(input: {
     if (input.reason !== undefined || input.observation !== encoded)
       throw new TypeError("未截断 Tool Observation 与固定回执不一致");
     return;
+  }
+  if (input.modelVisibleBytes >= encodedBytes || input.observation === encoded) {
+    throw new TypeError("截断 Tool Observation 必须严格短于完整固定回执");
   }
   if (input.reason !== "model_utf8_budget_or_rollout_body_budget")
     throw new TypeError("Tool Observation 截断原因无效");

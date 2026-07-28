@@ -9,7 +9,12 @@ import {
   type TraceBlobPersistencePort,
 } from "@cube-runtime/context-policy";
 import { sha256Digest } from "@cube-runtime/domain";
-import { createSafePiSession, type PiSessionController } from "@cube-runtime/pi-adapter";
+import {
+  createSafePiSession,
+  deriveSafePiSessionCompatibility,
+  type ControlledRolloutProjection,
+  type PiSessionController,
+} from "@cube-runtime/pi-adapter";
 import type { ArtifactToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -39,6 +44,10 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     },
     private readonly artifactTools?: ArtifactToolRouterFactoryPort,
     private readonly artifactAuthorizationIssuer?: ArtifactExecutionAuthorizationIssuerPort,
+    private readonly prepareObservationSession?: (
+      input: Parameters<AgentSessionFactoryPort["create"]>[0],
+      compatibility: ReturnType<typeof deriveSafePiSessionCompatibility>,
+    ) => Promise<ControlledRolloutProjection | undefined>,
   ) {}
 
   async create(
@@ -73,10 +82,6 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       }
       // 不删除 gate：callId 在整个 Attempt 内永久一次性，失败后的相同调用也不可重试。
       authorizationRequested.add(call.callId);
-      const consumed = await input.authorizeToolEffect({
-        ...call,
-        argsDigest: sha256Digest(call.argsDigest),
-      });
       let recorded: ToolObservationResult["outcome"] | undefined;
       try {
         recorded = await observationRecorder?.recordStarted({
@@ -91,7 +96,11 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         requireObservationRecovery(recorded);
         throw new Error("Tool Rollout 前驱未能持久化");
       }
-      return consumed;
+      // durable tool_call 已完成后才领取并消费一次性许可，返回后下一步直接触碰副作用端口。
+      return await input.authorizeToolEffect({
+        ...call,
+        argsDigest: sha256Digest(call.argsDigest),
+      });
     };
     const artifactTools = this.artifactTools;
     const artifactAuthorizationIssuer = this.artifactAuthorizationIssuer;
@@ -111,17 +120,16 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             },
           })
         : undefined;
-    controller = await createSafePiSession({
+    const sessionMaterial = {
       model: this.model,
       modelRuntime: this.modelRuntime,
       sandbox: input.sandbox,
-      rolloutProjection: input.rolloutProjection,
       authorizeToolEffect: authorizeStartedTool,
-      createToolObservationRecorder: (outputs) => {
+      createToolObservationRecorder: (outputs: ControlledToolReceiptSource) => {
         const recorder = this.createObservationRecorder(input, outputs);
         observationRecorder = recorder;
         return {
-          record: async (call) => {
+          record: async (call: { readonly toolCallId: string; readonly toolName: string }) => {
             try {
               const result = await recorder.record(call);
               if (result.outcome !== "recorded" && result.outcome !== "replayed") {
@@ -136,6 +144,18 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         };
       },
       ...(artifactToolRouter === undefined ? {} : { artifactToolRouter }),
+    };
+    // 兼容身份只由实际模型/Prompt/Tool schema 派生；占位 recorder 不执行任何写入。
+    const compatibility = deriveSafePiSessionCompatibility({
+      ...sessionMaterial,
+      createToolObservationRecorder: () => ({
+        record: async () => ({ outcome: "unknown" as const }),
+      }),
+    });
+    const recoveredProjection = await this.prepareObservationSession?.(input, compatibility);
+    controller = await createSafePiSession({
+      ...sessionMaterial,
+      rolloutProjection: recoveredProjection ?? input.rolloutProjection,
     });
     // 该订阅先于 RunWorker 的持久订阅注册，只负责证明 Pi 已真实发布 tool.started。
     const unsubscribeToolGate = controller.subscribe((event) => {

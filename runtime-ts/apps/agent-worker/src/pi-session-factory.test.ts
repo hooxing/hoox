@@ -33,24 +33,6 @@ import {
   fakeSeed,
 } from "./testing/fakes.js";
 
-const fakeObservationRecorder = (
-  _input: unknown,
-  outputs: {
-    readControlledReceipt(call: {
-      toolCallId: string;
-      toolName: string;
-    }): Promise<string | undefined>;
-  },
-) => ({
-  recordStarted: async () => "recorded" as const,
-  record: async (call: { toolCallId: string; toolName: string }) => {
-    const observation = await outputs.readControlledReceipt(call);
-    return observation === undefined
-      ? ({ outcome: "conflict" } as const)
-      : ({ outcome: "recorded", observation, isTruncated: false } as const);
-  },
-});
-
 describe("PiWorkerSessionFactory 持久操作门控", () => {
   it("durable Observation 工厂拒绝错接 Tenant、Run 或 Attempt 的端口", () => {
     const persistence = new FakeExecutionPersistence();
@@ -113,6 +95,10 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
         (_input, outputs) => ({
           recordStarted: async (call) => {
             observationOperations.push(`call:${call.toolCallId}:${call.toolName}`);
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            expect(
+              persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
+            ).toHaveLength(0);
             return "recorded" as const;
           },
           record: async (call) => {
@@ -125,6 +111,9 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
         }),
       );
       persistence.beforePermitIssueReturn = (input) => {
+        if (input.effect === "tool_execution") {
+          expect(observationOperations[0]).toMatch(/^call:/u);
+        }
         if (input.effect === "tool_execution") void clock.tickHeartbeat();
       };
       const worker = new RunWorker(
@@ -175,6 +164,62 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       expect(observationOperations).toHaveLength(2);
       expect(observationOperations[0]).toMatch(/^call:/u);
       expect(observationOperations[1]).toMatch(/^result:/u);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "tool_call 前驱 UNKNOWN 时不签发也不消费一次性工具许可",
+    async () => {
+      const persistence = new FakeExecutionPersistence();
+      const scope = persistence.addSeed(fakeSeed("pi-predecessor-unknown"));
+      const sandboxes = new FakeSandboxRegistry();
+      const faux = fauxProvider({
+        api: `faux-worker-predecessor-unknown-${Date.now()}`,
+        provider: `faux-worker-predecessor-unknown-${Date.now()}`,
+        tokensPerSecond: 10_000,
+      });
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall("sandbox_write_file", {
+            path: "/tmp/must-not-exist.txt",
+            content: "forbidden",
+          }),
+          { stopReason: "toolUse" },
+        ),
+      ]);
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      modelRuntime.registerNativeProvider(faux.provider);
+      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
+        recordStarted: async () => "unknown" as const,
+        record: async () => ({ outcome: "unknown" as const }),
+      }));
+      const worker = new RunWorker(
+        {
+          persistence,
+          revisions: new FakeRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions,
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        { workerId: "pi-predecessor-unknown-worker" },
+      );
+
+      await expect(worker.execute(scope)).resolves.toEqual({
+        outcome: "recovery_required",
+        code: "PERSISTENCE_UNAVAILABLE",
+      });
+      expect(
+        persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
+      ).toHaveLength(0);
+      expect(sandboxes.handle.files.has("/tmp/must-not-exist.txt")).toBe(false);
     },
   );
 
@@ -339,10 +384,23 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       });
       modelRuntime.registerNativeProvider(faux.provider);
       await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const artifactObservationOperations: string[] = [];
       const sessions = new PiWorkerSessionFactory(
         faux.getModel(),
         modelRuntime,
-        fakeObservationRecorder,
+        (_input, outputs) => ({
+          recordStarted: async (call) => {
+            artifactObservationOperations.push(`call:${call.toolCallId}:${call.toolName}`);
+            return "recorded" as const;
+          },
+          record: async (call) => {
+            artifactObservationOperations.push(`result:${call.toolCallId}:${call.toolName}`);
+            const observation = await outputs.readControlledReceipt(call);
+            return observation === undefined
+              ? { outcome: "conflict" as const }
+              : { outcome: "recorded" as const, observation, isTruncated: false };
+          },
+        }),
         routerFactory,
         authority.issuer,
       );
@@ -374,6 +432,12 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
           .events.filter((event) => event.kind === "artifact_correction_requested"),
       ).toHaveLength(1);
       expect(persistence.permits.map(({ permit }) => permit.effect)).toContain("model_continue");
+      expect(artifactObservationOperations).toEqual([
+        "call:call-pi-declare:declare_deliverables",
+        "result:call-pi-declare:declare_deliverables",
+        "call:call-pi-publish:publish_artifact",
+        "result:call-pi-publish:publish_artifact",
+      ]);
     },
   );
 });

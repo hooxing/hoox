@@ -14,7 +14,11 @@ Sandbox 工具的 stdout、文件内容、代码结果和异常文本都可能�
 
 Pipeline 采用严格顺序：先将受控回执的 UTF-8 字节经 `TraceBlobPersistencePort` 持久化为同租户 `stable/trace` Blob，校验 reference、摘要、大小、incarnation 与物理键，再生成模型可见 observation 并通过 `ToolObservationRolloutPort` 写入 `tool_result`。Rollout body 使用精确的 schemaVersion 2，并绑定回执摘要、大小、固定回执、可见字节数和截断原因；恢复时还要与数据库返回的 stable Blob reference、摘要和大小逐字段相互验证。
 
-实际执行路径在领取 Sandbox 副作用许可后、触碰 Sandbox 前自动追加 `{toolName}` 的 `tool_call` 前驱；结果适配器只允许同一 `tenantId + threadId + runId + attemptId + agentThreadId + toolCallId` 的 `tool_result`。生产工厂必须把当前完整 `ExecutionScope`、Attempt 和 AgentThread 绑定进两个端口，错接任何一项都在写入前失败。数据库的相邻配对约束继续保证同 call ID 的 `tool_call` 后只能紧跟 `tool_result`。
+实际执行路径先持久化 `{toolName}` 的 `tool_call` 意图，确认 `created/replayed` 后才领取并消费一次性 Sandbox 副作用许可；许可返回后的下一条受审语句立即检查本地时限并触碰 Sandbox，不插入异步持久化窗口。前驱写入缓慢、UNKNOWN、冲突或异常时均不得签发或消费许可。结果适配器只允许同一 `tenantId + threadId + runId + attemptId + agentThreadId + toolCallId` 的 `tool_result`。数据库的相邻配对约束继续保证同 call ID 的 `tool_call` 后只能紧跟 `tool_result`。
+
+`declare_deliverables` 与 `publish_artifact` 也走同一个固定回执 source 和同一个 durable recorder；Artifact Router 的业务结果或异常只用于判定 `succeeded/failed`，不得直接进入 Pi。因而所有当前开放给 Pi 的 Sandbox 与 Artifact 工具都必须形成成对的 `tool_call + tool_result`，不存在只写前驱的例外。
+
+生产 Session 工厂不接受 `userId`、`TrustedRolloutContext` 或 `contextForSession` 回调。它只接收 RunWorker 当前完整 `ExecutionFence`；PostgreSQL Repository 在一个 `SERIALIZABLE` 事务中锁定并复核 execution attempt、未过期 run claim、双 epoch、完整 scope、Thread creator 和 active Membership，设置事务内 actor，按 Attempt 确定性生成 root AgentThread，并原子幂等打开 stream。随后才加载 PG recovery，并用同一可信 context 装配 S3/PG recorder；任一身份事实不匹配都 fail closed。
 
 模型可见 payload 与 Rollout body 使用两套独立硬预算；后者不超过数据库的 16 KiB 约束。模型可见内容按 UTF-8 字节预算和 Unicode code point 截断，不能切开多字节字符；这不是 grapheme cluster 契约。截断占位符只声明“受控执行回执已保存”，必须完整装入，否则返回空字符串。
 
@@ -32,4 +36,4 @@ Blob 或 Rollout 返回 `unknown` 时，适配器以完全相同的冻结命令�
 
 ## 验证
 
-单元测试覆盖固定回执精确 schema、原始成功/失败值隔离、Unicode/极小预算、双预算、Blob unknown、同键重放、scope 伪造、自动前驱和持续 UNKNOWN 强制恢复。真实 PostgreSQL + MinIO 集成覆盖自动 `tool_call`、Trace promotion、Rollout append 与进程级 adapter 重建后的同命令重放。
+单元测试覆盖固定回执精确 schema、原始成功/失败值隔离、Unicode/极小预算、双预算、Blob unknown、同键重放、scope 伪造、Sandbox/Artifact 成对事实、慢前驱期间零许可，以及前驱持续 UNKNOWN 时零许可并强制恢复。真实 PostgreSQL + MinIO 集成从生产进程入口装配真实依赖，并从 claim 自动开 root stream；测试不向 Session 工厂手工注入 actor/context，同时覆盖 Trace promotion、Rollout append 与进程级 adapter 重建后的同命令重放。

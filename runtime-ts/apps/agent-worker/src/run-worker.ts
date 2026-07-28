@@ -369,6 +369,7 @@ export class RunWorker {
       session = await this.dependencies.sessions.create({
         scope,
         attemptId: context.attemptId,
+        fence: context.fence,
         sandbox: sandbox.sandbox,
         rolloutProjection: claim.snapshot.rolloutProjection,
         authorizeToolEffect: (call) =>

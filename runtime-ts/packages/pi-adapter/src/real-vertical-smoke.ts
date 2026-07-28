@@ -27,7 +27,7 @@ try {
   console.log("[1/6] 创建真实 CubeSandbox");
   sandbox = await gateway.create({ templateId: config.templateId, ttlSeconds: 120 });
 
-  console.log("[2/6] 创建 Linux Pi Session 与 Faux Provider");
+  console.log("[2/6] 创建 Pi Session 与 Faux Provider（工具在 Linux CubeSandbox 执行）");
   const faux = fauxProvider({
     api: "faux-real-cube-smoke",
     provider: "faux-real-cube-smoke",

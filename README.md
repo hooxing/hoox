@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-仓库已实现并测试 Tenant、Thread、Run、Workspace、Resource、Artifact 等领域边界，以及 PostgreSQL 持久化与 RLS、HTTP API 协议、Run/Worker 状态机、CubeSandbox 适配、MinIO 对象存储和进程生命周期等能力。实现仍处于开发阶段：目前没有可供浏览器使用的产品 Web UI；API 已提供只面向本地 development 的真实 PostgreSQL 常驻装配，但固定开发身份不属于生产认证，Agent Worker 也尚未完成真实模型和队列等完整生产装配，因此不能把开发服务当作产品服务。
+仓库已实现并测试 Tenant、Thread、Run、Workspace、Resource、Artifact 等领域边界，以及 PostgreSQL 持久化与 RLS、HTTP API 协议、Run/Worker 状态机、CubeSandbox 适配、MinIO 对象存储和进程生命周期等能力。实现仍处于开发阶段：API 与 Agent Worker 已提供只面向本地 development 的真实 PostgreSQL、真实模型、真实 CubeSandbox 常驻装配，但固定开发身份不属于生产认证，因此不能把开发服务当作产品服务。
 
 当前最有价值的运行方式是执行工程 Gate、真实 CubeSandbox 冒烟和 PostgreSQL M4 黑盒测试，并通过 CubeSandbox、MinIO 自带的控制台观察外部资源。
 
@@ -18,6 +18,29 @@ Invoke-RestMethod "http://$($env:API_LISTEN_HOST):$($env:API_LISTEN_PORT)/ready"
 ```
 
 `dev:identity:provision` 仅允许 `RUNTIME_ENV=development` 且 `DEV_AUTH_ENABLED=true`，通过 Runtime 数据库角色、正式 Tenant Repository、事务和 RLS 创建两个个人 Tenant 及 owner Membership；A/B 必须同时使用不同 User 和不同 Tenant，重复执行会验证并保留完全匹配的聚合，发现占用或关系冲突会失败关闭。`THREAD_CURSOR_SIGNING_KEYS` 格式为逗号分隔的 `kid:base64url-key`，每个 key 解码后必须为 32 到 64 字节。开发凭据只接受 `Bearer dev-user-a` 和 `Bearer dev-user-b`；它们是本机 fixture 选择器，不是认证方案，因此 API 只允许监听字面回环地址 `127.0.0.1`、`::1` 或 `localhost`，其中 `localhost` 会直接规范化为 `127.0.0.1`，不会经过 DNS 或接受其他 hostname。服务不会在启动时偷偷创建 Tenant 或 Membership，缺少开发身份数据时业务请求会返回 404。
+
+## 开发 Agent Worker
+
+完成数据库迁移和开发身份初始化后，在另一个 PowerShell 启动真实 Worker：
+
+```powershell
+corepack pnpm dev:worker:check
+corepack pnpm dev:worker
+```
+
+两条命令都只接受 `RUNTIME_ENV=development`。前者会依次只读探测真实 PostgreSQL、MinIO、CubeSandbox 与
+模型 Provider 后退出，不会启动 polling 或领取 Run；后者使用同一装配持续轮询 PostgreSQL dispatch。它不会使用内存队列、
+Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 必须等于
+`DEV_AUTH_USER_A_TENANT_ID`，因此用 `Bearer dev-user-a` 创建的 Thread/Run 会被同一 Worker 消费。
+
+模型 Provider 必须兼容 OpenAI `/models`。开发模式强制从
+`MODEL_CONTEXT_WINDOW` 和 `MODEL_MAX_OUTPUT_TOKENS` 读取 Pi 的预算，并只要求 `/models` 返回配置的
+`MODEL_ID`；不要把预算值猜测为 Provider 元数据。生产模式保持更严格的预算元数据匹配策略，且本仓库
+不提供生产 Worker 入口。
+
+当前 Workspace revision 发布尚未接通。为了不把 Sandbox 文件伪装为已保存的成果，纯聊天提示可以正常
+结束；任何让模型写入非空 `/workspace` 的 Run 都会失败关闭并进入恢复路径。Artifact 发布也尚未可用，
+因此 Web 体验请使用不要求写工作区或下载 Artifact 的纯聊天提示。
 
 ## 开发基线
 
@@ -81,10 +104,12 @@ corepack pnpm test:integration:m4
 Remove-Item Env:RUN_PG_RUN_WORKER_INTEGRATION
 ```
 
-Pi + Cube 的真实纵向冒烟同样默认关闭，并且目前只支持 Linux；不要在 Windows 上运行。这里的“真实”是指连接真实 CubeSandbox 的纵向链路，模型侧使用 Pi Faux Provider，不调用外部模型，也不需要真实模型凭据。Linux 上准备好 Cube 配置后可执行：
+Pi + Cube 的真实纵向冒烟同样默认关闭。它可以从 Windows Worker 连接 Linux CubeSandbox；这里的“真实”是指连接真实 CubeSandbox 的纵向链路，模型侧使用 Pi Faux Provider，不调用外部模型，也不需要真实模型凭据：
 
-```bash
-REAL_PI_CUBE_SMOKE=1 pnpm test:pi-cube:real
+```powershell
+$env:REAL_PI_CUBE_SMOKE = "1"
+corepack pnpm test:pi-cube:real
+Remove-Item Env:REAL_PI_CUBE_SMOKE
 ```
 
 完成观察后停止本仓库管理的 MinIO：

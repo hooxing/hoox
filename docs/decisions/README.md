@@ -44,6 +44,7 @@
 | [ADR-0036](0036-waiting-recovery-proof-derived-facts.md) | waiting 恢复事实由已完成副作用证明推导 | 已替代 | 2026-07-28 |
 | [ADR-0037](0037-waiting-recovery-capability-and-append-only-rollback.md) | waiting 恢复能力回执与只追加回退边界 | 已接受 | 2026-07-28 |
 | [ADR-0038](0038-production-worker-fail-closed-workspace-boundary.md) | 生产 Worker 的 Workspace 失败关闭边界 | 已接受 | 2026-07-28 |
+| [ADR-0040](0040-development-worker-windows-and-model-readiness.md) | 开发 Worker 的 Windows 运行与模型就绪边界 | 已接受 | 2026-07-28 |
 
 ## 何时必须记录
 

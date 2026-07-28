@@ -37,6 +37,8 @@
 
 客户端从 `kind` 与 agent payload 的 `type` 派生稳定事件类型和 `event-${sequence}` 标识；只展示 message delta、工具 name/callId/受限结果和 attempt 状态。Artifact 下载固定使用 Run 嵌套 GET 路由。
 
+Thread 选择使用同步递增的 navigation generation。创建 Run、取消 Run、归档 Thread 等异步命令只有在响应返回时仍属于发起它的选择代次，才能写回当前 Run、事件或选择状态；切走后再选回相同 Thread 也视为新代次。Thread 创建和归档的迟到成功仍以独立 reducer 动作更新列表，但不能覆盖用户已经切换到的工作区。
+
 ## 理由
 
 当前后端已提供 REST 读取模型而尚未承诺推送连接。方案 A 在不扩展可信边界的情况下可立即运行，且 sequence 去重能容忍轮询重叠和未来信封字段补充。方案 B 不必要地把 CORS 与配置复杂度带入本地工作流；方案 C 应在服务端具备完整重放语义后再评估。
@@ -66,6 +68,7 @@
 - `api.test.ts` 验证开发身份、幂等键、基线事件适配和嵌套下载 URL；
 - `event-view.test.ts` 验证 delta 与工具安全字段呈现；
 - `state.test.ts` 验证 sequence 去重；
+- `navigation.test.ts` 验证迟到命令不能跨 Thread 或跨选择代次写回；
 - `config.test.ts` 验证 Vite 环境变量优先级；
 - 执行 Web 的 typecheck、Vitest、Vite build 和 Biome 检查。
 
@@ -82,3 +85,4 @@
 ## 实施记录
 
 - 2026-07-28：实现 Vite/React 本地工作台、稳定轮询、事件适配与嵌套 Artifact 下载。
+- 2026-07-28：以 navigation generation 隔离迟到命令响应，并用独立列表动作保留已提交的 Thread 创建与归档结果。

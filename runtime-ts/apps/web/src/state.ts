@@ -31,7 +31,9 @@ export function workspaceReducer(
   state: WorkspaceState,
   action:
     | { readonly type: "threads"; readonly threads: readonly Thread[] }
-    | { readonly type: "select"; readonly threadId: string }
+    | { readonly type: "threadCreated"; readonly thread: Thread }
+    | { readonly type: "threadArchived"; readonly threadId: string }
+    | { readonly type: "select"; readonly threadId: string | undefined }
     | { readonly type: "startRun"; readonly run: Run }
     | { readonly type: "run"; readonly run: Run }
     | { readonly type: "events"; readonly page: RunEventPage }
@@ -40,6 +42,19 @@ export function workspaceReducer(
   switch (action.type) {
     case "threads":
       return { ...state, threads: action.threads };
+    case "threadCreated":
+      return {
+        ...state,
+        threads: [
+          action.thread,
+          ...state.threads.filter((thread) => thread.id !== action.thread.id),
+        ],
+      };
+    case "threadArchived":
+      return {
+        ...state,
+        threads: state.threads.filter((thread) => thread.id !== action.threadId),
+      };
     case "select":
       return {
         ...state,

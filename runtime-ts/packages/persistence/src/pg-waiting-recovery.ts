@@ -443,8 +443,8 @@ export interface PgWaitingRecoveryClaim {
 /** ADR-0033 的最小 PG 事实源；所有 lease/TTL 判断均使用数据库 clock_timestamp()。 */
 class PgWaitingRecoveryStoreImpl {
   readonly #pool: Pool;
-  readonly #effectAdapter: PgWaitingRecoveryEffectAdapter;
-  readonly #receiptVerifier: PgWaitingRecoveryReceiptVerifier;
+  readonly #executeEffect: PgWaitingRecoveryEffectAdapter["execute"];
+  readonly #verifyReceipt: PgWaitingRecoveryReceiptVerifier["verify"];
   readonly #leaseSeconds: number;
 
   constructor(
@@ -456,9 +456,15 @@ class PgWaitingRecoveryStoreImpl {
     if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 1 || leaseSeconds > 300) {
       throw new TypeError("waiting recovery leaseSeconds 无效");
     }
+    const executeEffect = effectAdapter.execute;
+    const verifyReceipt = receiptVerifier.verify;
+    if (typeof executeEffect !== "function" || typeof verifyReceipt !== "function") {
+      throw new TypeError("waiting recovery 副作用依赖无效");
+    }
     this.#pool = pool;
-    this.#effectAdapter = Object.freeze(effectAdapter);
-    this.#receiptVerifier = Object.freeze(receiptVerifier);
+    // 仅保留构造时审阅过的函数快照，后续不再查询可变原型链。
+    this.#executeEffect = Object.freeze(executeEffect.bind(effectAdapter));
+    this.#verifyReceipt = Object.freeze(verifyReceipt.bind(receiptVerifier));
     this.#leaseSeconds = leaseSeconds;
     Object.freeze(this);
   }
@@ -876,7 +882,7 @@ class PgWaitingRecoveryStoreImpl {
       | { readonly outcome: "succeeded"; readonly receipt: AttestedSandboxEffectReceipt }
       | { readonly outcome: "unknown" };
     try {
-      external = await this.#effectAdapter.execute(reserved.request);
+      external = await this.#executeEffect(reserved.request);
     } catch {
       await this.#finishUnknown(reserved);
       return { outcome: "unknown" as const, effect: input.effect };
@@ -984,12 +990,107 @@ class PgWaitingRecoveryStoreImpl {
         const executionToken = randomUUID();
         const executionTokenDigest = createHash("sha256").update(executionToken).digest("hex");
         const claimed = await client.query(
-          `UPDATE waiting_recovery_effect_outbox SET state='executing',
-             payload=payload||jsonb_build_object(
+          `UPDATE waiting_recovery_effect_outbox effect SET state='executing',
+             payload=effect.payload||jsonb_build_object(
                'executionTokenDigest',$5::text,'executionStartedAt',clock_timestamp()
              ),updated_at=clock_timestamp()
-           WHERE tenant_id=$1 AND checkpoint_id=$2 AND intent_id=$3 AND effect=$4 AND state='pending'`,
-          [row.tenant_id, row.checkpoint_id, input.intentId, input.effect, executionTokenDigest],
+            FROM waiting_recovery_checkpoints checkpoint
+           WHERE effect.tenant_id=$1 AND effect.checkpoint_id=$2
+             AND effect.intent_id=$3 AND effect.effect=$4 AND effect.state='pending'
+             AND effect.payload->>'requestDigest'=$16
+             AND checkpoint.tenant_id=effect.tenant_id
+             AND checkpoint.checkpoint_id=effect.checkpoint_id
+             AND checkpoint.attempt_id=$6 AND checkpoint.attempt_generation=$7
+             AND checkpoint.claim_token=$8 AND checkpoint.claim_epoch=$9
+             AND checkpoint.run_id=$10 AND checkpoint.state='effect_pending'
+             AND checkpoint.claim_expires_at>clock_timestamp()
+             AND EXISTS (
+               SELECT 1 FROM execution_attempts attempt JOIN runs run
+                 ON run.tenant_id=attempt.tenant_id AND run.id=attempt.run_id
+               JOIN run_claims attempt_claim
+                 ON attempt_claim.tenant_id=attempt.tenant_id
+                AND attempt_claim.run_id=attempt.run_id
+                AND attempt_claim.attempt_id=attempt.attempt_id
+              WHERE attempt.tenant_id=checkpoint.tenant_id
+                AND attempt.attempt_id=checkpoint.attempt_id
+                AND attempt.run_id=checkpoint.run_id
+                AND attempt.status='waiting' AND run.status='waiting'
+                AND attempt_claim.claim_epoch=checkpoint.attempt_generation
+                AND attempt_claim.claim_epoch=(
+                  SELECT max(latest.claim_epoch) FROM run_claims latest
+                   WHERE latest.tenant_id=attempt.tenant_id
+                     AND latest.run_id=attempt.run_id
+                )
+                AND 1=(
+                  SELECT count(*) FROM execution_attempts waiting_attempt
+                   WHERE waiting_attempt.tenant_id=attempt.tenant_id
+                     AND waiting_attempt.run_id=attempt.run_id
+                     AND waiting_attempt.status='waiting'
+                )
+             )
+             AND ($4::text<>'connect' OR (
+               checkpoint.registry_id IS NOT NULL
+               AND checkpoint.provider_sandbox_id IS NOT NULL
+               AND checkpoint.sandbox_generation IS NOT NULL
+               AND checkpoint.sandbox_generation=checkpoint.sandbox_expected_generation
+               AND checkpoint.sandbox_expires_at>clock_timestamp()
+               AND EXISTS (
+                 SELECT 1 FROM sandbox_registry registry
+                 JOIN LATERAL (
+                   SELECT cleanup.state,cleanup.updated_at
+                     FROM cleanup_outbox cleanup
+                    WHERE cleanup.tenant_id=registry.tenant_id
+                      AND cleanup.attempt_id=registry.attempt_id
+                      AND cleanup.registry_id=registry.registry_id
+                      AND cleanup.provider_sandbox_id=registry.provider_sandbox_id
+                      AND cleanup.disposition='pause'
+                      AND cleanup.updated_at<=clock_timestamp()
+                    ORDER BY cleanup.updated_at DESC LIMIT 1
+                 ) cleanup ON true
+                WHERE registry.tenant_id=checkpoint.tenant_id
+                  AND registry.attempt_id=checkpoint.attempt_id
+                  AND registry.registry_id=checkpoint.registry_id
+                  AND registry.provider_sandbox_id=checkpoint.provider_sandbox_id
+                  AND registry.generation=checkpoint.sandbox_generation
+                  AND registry.state='paused' AND cleanup.state='completed'
+                  AND cleanup.updated_at=checkpoint.sandbox_paused_at
+                  AND LEAST(
+                    cleanup.updated_at+make_interval(secs=>registry.actual_ttl_seconds),
+                    cleanup.updated_at+interval '10 minutes'
+                  )>clock_timestamp()
+               )
+             ))
+             AND EXISTS (
+               SELECT 1 FROM workspaces workspace
+               LEFT JOIN workspace_revisions revision
+                 ON revision.tenant_id=workspace.tenant_id
+                AND revision.workspace_id=workspace.id
+                AND revision.thread_id=workspace.thread_id
+                AND revision.id=workspace.current_revision_id
+              WHERE workspace.tenant_id=checkpoint.tenant_id
+                AND workspace.id=$11 AND workspace.thread_id=$12
+                AND workspace.current_revision_id IS NOT DISTINCT FROM $13
+                AND revision.digest IS NOT DISTINCT FROM $14
+                AND revision.object_key IS NOT DISTINCT FROM $15
+             )`,
+          [
+            row.tenant_id,
+            row.checkpoint_id,
+            input.intentId,
+            input.effect,
+            executionTokenDigest,
+            row.attempt_id,
+            row.attempt_generation,
+            row.claim_token,
+            row.claim_epoch,
+            row.run_id,
+            row.workspace_id,
+            row.thread_id,
+            plan.workspace.headRevisionId,
+            plan.workspace.manifestDigest,
+            plan.workspace.objectKey,
+            requestDigest,
+          ],
         );
         if (claimed.rowCount !== 1) return undefined;
         return {
@@ -1035,7 +1136,7 @@ class PgWaitingRecoveryStoreImpl {
           !current ||
           receipt.requestDigest !== reserved.request.requestDigest ||
           receipt.responseDigest !== responseDigestFor(reserved.request, receipt) ||
-          !this.#receiptVerifier.verify({ request: reserved.request, receipt })
+          !this.#verifyReceipt({ request: reserved.request, receipt })
         ) {
           await this.persistUnknown(client, row, reserved.request.effect, "executing");
           return "unknown" as const;

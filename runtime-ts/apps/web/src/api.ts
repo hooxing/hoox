@@ -32,6 +32,9 @@ export type RunEventPage = {
 
 export const EVENT_PAGE_LIMIT = 100;
 
+/** 原生浏览器 fetch 必须由 Window/globalThis 作为 receiver 调用，不能直接存成实例方法。 */
+const defaultFetcher: typeof fetch = (input, init) => globalThis.fetch(input, init);
+
 export type Artifact = {
   readonly id: string;
   readonly name: string;
@@ -120,7 +123,7 @@ export function normalizeRunEvent(value: unknown): RunEvent | undefined {
 
 export class RuntimeApi {
   constructor(
-    private readonly fetcher: typeof fetch = fetch,
+    private readonly fetcher: typeof fetch = defaultFetcher,
     private readonly baseUrl = "/api",
   ) {}
 

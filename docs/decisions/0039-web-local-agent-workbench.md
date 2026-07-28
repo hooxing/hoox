@@ -35,6 +35,8 @@
 
 选择方案 A。Vite 使用 `loadEnv` 读取 `VITE_WEB_API_TARGET`，默认代理到 `http://127.0.0.1:3001`，兼容旧 `WEB_API_TARGET` 命令行变量。所有 POST 自动附加幂等键，固定 `Bearer dev-user-a` 只在请求 Header 使用，页面仅标明该本地身份。
 
+`RuntimeApi` 的默认传输使用一层箭头函数包装，并在调用时通过 `globalThis.fetch(...)` 保留浏览器原生 fetch 所要求的 Window receiver；不能把裸 `fetch` 直接保存为实例字段后以 `this.fetcher(...)` 调用。构造器仍接受显式 fetcher，供契约测试和受控适配注入。
+
 客户端从 `kind` 与 agent payload 的 `type` 派生稳定事件类型和 `event-${sequence}` 标识；只展示 message delta、工具 name/callId/受限结果和 attempt 状态。Artifact 下载固定使用 Run 嵌套 GET 路由。
 
 Thread 选择使用同步递增的 navigation generation。创建 Run、取消 Run、归档 Thread 等异步命令只有在响应返回时仍属于发起它的选择代次，才能写回当前 Run、事件或选择状态；切走后再选回相同 Thread 也视为新代次。Thread 创建和归档的迟到成功仍以独立 reducer 动作更新列表，但不能覆盖用户已经切换到的工作区。
@@ -65,7 +67,7 @@ Thread 选择使用同步递增的 navigation generation。创建 Run、取消 R
 
 ## 验证
 
-- `api.test.ts` 验证开发身份、幂等键、基线事件适配和嵌套下载 URL；
+- `api.test.ts` 验证浏览器 fetch receiver、开发身份、幂等键、基线事件适配和嵌套下载 URL；
 - `event-view.test.ts` 验证 delta 与工具安全字段呈现；
 - `state.test.ts` 验证 sequence 去重；
 - `navigation.test.ts` 验证迟到命令不能跨 Thread 或跨选择代次写回；
@@ -86,3 +88,4 @@ Thread 选择使用同步递增的 navigation generation。创建 Run、取消 R
 
 - 2026-07-28：实现 Vite/React 本地工作台、稳定轮询、事件适配与嵌套 Artifact 下载。
 - 2026-07-28：以 navigation generation 隔离迟到命令响应，并用独立列表动作保留已提交的 Thread 创建与归档结果。
+- 2026-07-28：默认 fetch 改由 `globalThis` receiver 包装调用，避免 Chrome 将实例方法调用判为 `Illegal invocation`。

@@ -259,7 +259,7 @@ const UTF8_BYTE_TOKENIZER = Object.freeze<TokenizerPort>({
 });
 const TRUSTED_MODEL_CAPABILITIES = new WeakMap<
   object,
-  Readonly<{ modelRuntime: ModelRuntime; registeredModel: Model<Api> }>
+  Readonly<{ modelRuntime: ModelRuntime; registeredCompatibilityHash: string }>
 >();
 export interface TrustedPiModelContextCapability {
   readonly model: Model<Api>;
@@ -293,7 +293,11 @@ function bindModelContextCapability(
   selected: TokenizerPort,
 ): TrustedPiModelContextCapability {
   const registeredModel = modelRuntime.getModel(model.provider, model.id);
-  if (registeredModel === undefined || registeredModel !== model)
+  const compatibilityHash = modelCompatibilityHash(model);
+  if (
+    registeredModel === undefined ||
+    modelCompatibilityHash(registeredModel) !== compatibilityHash
+  )
     throw new TypeError("模型未绑定当前 Provider registry");
   const probe = selected.countTokens("可信探针🙂 entropy-0123456789");
   if (!selected.identity.trim() || !Number.isSafeInteger(probe) || probe <= 0)
@@ -303,7 +307,7 @@ function bindModelContextCapability(
     modelId: model.id,
     contextWindow: model.contextWindow,
     maxOutputTokens: model.maxTokens,
-    compatibilityHash: modelCompatibilityHash(model),
+    compatibilityHash,
   });
   // 保存探针结果而非只在绑定时检查；Provider 注册表若在运行中替换 tokenizer，必须失败关闭。
   const capability = Object.freeze({
@@ -312,7 +316,13 @@ function bindModelContextCapability(
     tokenizer: selected,
     tokenizerProbe: probe,
   });
-  TRUSTED_MODEL_CAPABILITIES.set(capability, Object.freeze({ modelRuntime, registeredModel }));
+  TRUSTED_MODEL_CAPABILITIES.set(
+    capability,
+    Object.freeze({
+      modelRuntime,
+      registeredCompatibilityHash: modelCompatibilityHash(registeredModel),
+    }),
+  );
   return capability;
 }
 
@@ -756,12 +766,12 @@ function assertTrustedModelCapability(options: CreateSafePiSessionOptions): void
   if (
     binding === undefined ||
     binding.modelRuntime !== options.modelRuntime ||
-    binding.registeredModel !== liveRegisteredModel ||
     options.modelContext.descriptor.modelId !== options.model.id ||
     options.modelContext.descriptor.contextWindow !== options.model.contextWindow ||
     options.modelContext.descriptor.maxOutputTokens !== options.model.maxTokens ||
     options.modelContext.descriptor.compatibilityHash !== modelCompatibilityHash(options.model) ||
     liveRegisteredModel === undefined ||
+    binding.registeredCompatibilityHash !== modelCompatibilityHash(liveRegisteredModel) ||
     options.modelContext.descriptor.compatibilityHash !==
       modelCompatibilityHash(liveRegisteredModel) ||
     options.modelContext.tokenizer.countTokens("可信探针🙂 entropy-0123456789") !==

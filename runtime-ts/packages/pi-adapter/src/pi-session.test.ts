@@ -595,7 +595,7 @@ describe("Pi 安全适配", () => {
   );
 
   it.runIf(process.platform === "linux")(
-    "Faux Provider 流式处理中 abort 产生 ABORTED 终态",
+    "只等待 abort 即形成 transaction 完成屏障并可立即启动下一 prompt",
     async () => {
       const delayedAbort: FauxResponseStep = async (_context, options) =>
         new Promise((resolve) => {
@@ -610,20 +610,40 @@ describe("Pi 安全适配", () => {
       const prompting = controller.prompt("等待中止");
       await started;
       await controller.abort();
+      const abortedEvents = [...events];
+      // 不等待旧 prompting；abort 自身必须已经跨过 Controller finally/end generation。
+      const nextPrompt = controller.prompt("中止后新输入");
+      await nextPrompt;
       await prompting;
-      expect(events).toContainEqual({ type: "error", code: "ABORTED", message: "模型调用已中止" });
-      expect(events.some((event) => event.type === "message.completed")).toBe(false);
-      expect(events.findIndex((event) => event.type === "agent.started")).toBeLessThan(
-        events.findIndex((event) => event.type === "error"),
+      expect(abortedEvents).toContainEqual({
+        type: "error",
+        code: "ABORTED",
+        message: "模型调用已中止",
+      });
+      expect(abortedEvents.some((event) => event.type === "message.completed")).toBe(false);
+      expect(abortedEvents.findIndex((event) => event.type === "agent.started")).toBeLessThan(
+        abortedEvents.findIndex((event) => event.type === "error"),
       );
-      expect(events.findIndex((event) => event.type === "error")).toBeLessThan(
-        events.findIndex((event) => event.type === "agent.settled"),
+      expect(abortedEvents.findIndex((event) => event.type === "error")).toBeLessThan(
+        abortedEvents.findIndex((event) => event.type === "agent.settled"),
       );
-      await controller.prompt("中止后新输入");
       expect(faux.state.callCount).toBe(2);
       expect(events).toContainEqual(
         expect.objectContaining({ type: "message.delta", delta: "中止后的新输入仍可执行" }),
       );
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "无活跃 transaction 时 abort 幂等且并发调用不阻塞后续 prompt",
+    async () => {
+      const { controller, faux } = await harness([fauxAssistantMessage("正常完成")]);
+      await Promise.all([controller.abort(), controller.abort(), controller.abort()]);
+      expect(faux.state.callCount).toBe(0);
+      await controller.prompt("abort 后执行");
+      expect(faux.state.callCount).toBe(1);
+      await Promise.all([controller.abort(), controller.abort()]);
+      expect(faux.state.callCount).toBe(1);
     },
   );
 

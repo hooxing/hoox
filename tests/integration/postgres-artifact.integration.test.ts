@@ -17,6 +17,7 @@ import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/sr
 import {
   createPostgresPool,
   type Pool,
+  type PoolClient,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
@@ -220,6 +221,36 @@ async function cloneDeliverableForExecution(
   return artifact;
 }
 
+/** 在 latest Attempt 查询返回后、事件查询开始前提交并发写入，用真实 PG 验证读取快照。 */
+function hookAfterLatestAttemptRead(pool: Pool, hook: () => Promise<void>): Pool {
+  let triggered = false;
+  return {
+    connect: async () => {
+      const client = await pool.connect();
+      const query = client.query.bind(client) as (
+        text: string,
+        values?: readonly unknown[],
+      ) => Promise<unknown>;
+      return new Proxy(client, {
+        get(target, property, receiver) {
+          if (property !== "query") {
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          }
+          return async (text: string, values?: readonly unknown[]) => {
+            const result = await query(text, values);
+            if (!triggered && text.includes("SELECT attempt_id FROM execution_attempts")) {
+              triggered = true;
+              await hook();
+            }
+            return result;
+          };
+        },
+      }) as PoolClient;
+    },
+  } as unknown as Pool;
+}
+
 beforeAll(async () => {
   admin = createPostgresPool({ connectionString: bootstrapUrl, maxConnections: 2 });
   await admin.query(
@@ -403,6 +434,91 @@ afterAll(async () => {
 });
 
 describe("Artifact PostgreSQL 持久化", () => {
+  it("事件读取在 Attempt 切换期间固定快照，并准确维持 limit 与 hasMore", async () => {
+    const execution = await seedAdditionalExecution("event_snapshot");
+    await withTenantTransaction(runtime, { tenantId: ids.tenant }, (client) =>
+      client.query(
+        `INSERT INTO run_events(tenant_id,attempt_id,sequence,schema_version,kind,payload)
+         VALUES($1,$2,0,1,'agent_event','{"type":"message.delta","delta":"旧-0"}'),
+               ($1,$2,1,1,'agent_event','{"type":"message.delta","delta":"旧-1"}')`,
+        [ids.tenant, execution.attempt],
+      ),
+    );
+    const nextAttempt = `artifact_event_snapshot_next_attempt_${unique}`;
+    const switchingRepository = new PgRunExperienceReadRepository(
+      hookAfterLatestAttemptRead(runtime, async () => {
+        await withTenantTransaction(runtime, { tenantId: ids.tenant }, async (client) => {
+          // 旧 Attempt 的追加与新 Attempt 的创建都发生在 reader 已选定 Attempt 之后。
+          await client.query(
+            `INSERT INTO run_events(tenant_id,attempt_id,sequence,schema_version,kind,payload)
+             VALUES($1,$2,2,1,'agent_event','{"type":"message.delta","delta":"旧-迟到"}')`,
+            [ids.tenant, execution.attempt],
+          );
+          await client.query(
+            `UPDATE execution_attempts
+                SET status='abandoned',stage='finished',finished_at=clock_timestamp(),
+                    updated_at=clock_timestamp()
+              WHERE tenant_id=$1 AND attempt_id=$2`,
+            [ids.tenant, execution.attempt],
+          );
+          await client.query(
+            `INSERT INTO execution_attempts(
+               tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,status,stage,version,
+               created_at,updated_at
+             ) VALUES($1,$2,$3,$4,$5,$3,'running','workspace_verified',0,
+                      clock_timestamp()+interval '1 second',clock_timestamp()+interval '1 second')`,
+            [ids.tenant, nextAttempt, execution.run, execution.thread, execution.workspace],
+          );
+          await client.query(
+            `INSERT INTO run_events(tenant_id,attempt_id,sequence,schema_version,kind,payload)
+             VALUES($1,$2,0,1,'agent_event','{"type":"message.delta","delta":"新-0"}'),
+                   ($1,$2,1,1,'agent_event','{"type":"message.delta","delta":"新-1"}'),
+                   ($1,$2,2,1,'agent_event','{"type":"message.delta","delta":"新-2"}')`,
+            [ids.tenant, nextAttempt],
+          );
+        });
+      }),
+    );
+
+    const duringSwitch = await switchingRepository.listEvents({
+      scope: { tenantId: ids.tenant, userId: ids.user },
+      runId: execution.run,
+      after: -1,
+      limit: 2,
+    });
+    expect(duringSwitch).toMatchObject({
+      outcome: "found",
+      attemptId: execution.attempt,
+      hasMore: false,
+      events: [{ sequence: 0 }, { sequence: 1 }],
+    });
+
+    const latest = await experienceRepository.listEvents({
+      scope: { tenantId: ids.tenant, userId: ids.user },
+      runId: execution.run,
+      after: -1,
+      limit: 2,
+    });
+    expect(latest).toMatchObject({
+      outcome: "found",
+      attemptId: nextAttempt,
+      hasMore: true,
+      events: [{ sequence: 0 }, { sequence: 1 }],
+    });
+    const tail = await experienceRepository.listEvents({
+      scope: { tenantId: ids.tenant, userId: ids.user },
+      runId: execution.run,
+      after: 1,
+      limit: 1,
+    });
+    expect(tail).toMatchObject({
+      outcome: "found",
+      attemptId: nextAttempt,
+      hasMore: false,
+      events: [{ sequence: 2 }],
+    });
+  });
+
   it("声明、发布、幂等重放、完成门与下载授权形成租户隔离闭环", async () => {
     const declare = authorization("declare_deliverables", "declare");
     const publish = authorization("publish_artifact", "publish");

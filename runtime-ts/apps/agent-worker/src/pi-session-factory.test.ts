@@ -349,6 +349,110 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
   );
 
   it.runIf(process.platform === "linux")(
+    "Artifact 工具授权拒绝在失败回执后关闭续轮，只调用一次 Provider",
+    async () => {
+      let artifactCalls = 0;
+      const artifacts: ArtifactToolServicePort = {
+        declareDeliverables: async () => {
+          artifactCalls += 1;
+        },
+        publishArtifact: async () => {
+          artifactCalls += 1;
+          throw new Error("授权拒绝时不得调用 Artifact 服务");
+        },
+      };
+      const resources: ArtifactPublicationResourcePort = {
+        prepareImmutableVersion: async () => {
+          throw new Error("授权拒绝时不得准备 ResourceVersion");
+        },
+      };
+      const authority = createArtifactExecutionAuthorizationAuthority();
+      const routerFactory = new ArtifactToolRouterFactory({
+        artifacts,
+        resources,
+        authorizationVerifier: authority.verifier,
+      });
+      const persistence = new FakeExecutionPersistence();
+      const scope = persistence.addSeed(fakeSeed("pi-artifact-authorization-rejected"));
+      persistence.beforePermitIssueReturn = (input) => {
+        if (input.effect === "model_start") persistence.rejectNextPermit = true;
+      };
+      const sandboxes = new FakeSandboxRegistry();
+      const faux = fauxProvider({
+        api: `faux-worker-artifact-rejected-${Date.now()}`,
+        provider: `faux-worker-artifact-rejected-${Date.now()}`,
+        tokensPerSecond: 10_000,
+      });
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall(
+            "declare_deliverables",
+            {
+              idempotencyKey: "declare:rejected:report",
+              declarations: [{ key: "report", name: "最终报告", requirement: "required" }],
+            },
+            { id: "call-artifact-rejected" },
+          ),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("授权拒绝后不得到达此轮"),
+      ]);
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      modelRuntime.registerNativeProvider(faux.provider);
+      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const operations: string[] = [];
+      const receipts: string[] = [];
+      const sessions = new PiWorkerSessionFactory(
+        faux.getModel(),
+        modelRuntime,
+        (_input, outputs) => ({
+          recordStarted: async (call) => {
+            operations.push(`call:${call.toolCallId}:${call.toolName}`);
+            return "recorded" as const;
+          },
+          record: async (call) => {
+            operations.push(`result:${call.toolCallId}:${call.toolName}`);
+            const observation = await outputs.readControlledReceipt(call);
+            if (observation === undefined) return { outcome: "conflict" as const };
+            receipts.push(observation);
+            return { outcome: "recorded" as const, observation, isTruncated: false };
+          },
+        }),
+        routerFactory,
+        authority.issuer,
+      );
+      const worker = new RunWorker(
+        {
+          persistence,
+          revisions: new FakeRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions,
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        { workerId: "pi-artifact-rejected-worker", runTimeoutMs: 60_000 },
+      );
+
+      await expect(worker.execute(scope)).resolves.toEqual({ outcome: "fence_lost" });
+      expect(faux.state.callCount).toBe(1);
+      expect(artifactCalls).toBe(0);
+      expect(operations).toEqual([
+        "call:call-artifact-rejected:declare_deliverables",
+        "result:call-artifact-rejected:declare_deliverables",
+      ]);
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0]).toContain('"toolName":"declare_deliverables"');
+      expect(receipts[0]).toContain('"outcome":"failed"');
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
     "RunWorker 经 PiFactory、Router 接收完成门反馈并发布后，在同一 Attempt 完成",
     async () => {
       class StatefulArtifacts implements ArtifactToolServicePort {

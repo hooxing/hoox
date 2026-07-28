@@ -103,8 +103,22 @@ describe("RuntimeApi", () => {
 
   it("仅允许安全媒体类型预览", () => {
     expect(canPreviewArtifact("text/plain")).toBe(true);
+    expect(canPreviewArtifact("text/plain; charset=utf-8")).toBe(true);
+    expect(canPreviewArtifact('TEXT/PLAIN; charset="us-ascii"')).toBe(true);
+    expect(canPreviewArtifact("text/plain; charset=iso-8859-1")).toBe(true);
+    expect(canPreviewArtifact("text/plain; charset=windows-1252")).toBe(true);
     expect(canPreviewArtifact("image/png")).toBe(true);
+    expect(canPreviewArtifact("image/jpeg")).toBe(true);
+    expect(canPreviewArtifact("image/gif")).toBe(true);
+    expect(canPreviewArtifact("image/webp")).toBe(true);
     expect(canPreviewArtifact("application/pdf")).toBe(true);
+    expect(canPreviewArtifact("text/html")).toBe(false);
+    expect(canPreviewArtifact("text/plain; charset=utf-7")).toBe(false);
+    expect(canPreviewArtifact("image/svg+xml")).toBe(false);
+    expect(canPreviewArtifact("image/avif")).toBe(false);
+    expect(canPreviewArtifact("image/png; charset=utf-8")).toBe(false);
+    expect(canPreviewArtifact("application/pdf; version=1.7")).toBe(false);
     expect(canPreviewArtifact("application/zip")).toBe(false);
+    expect(canPreviewArtifact(undefined)).toBe(false);
   });
 });

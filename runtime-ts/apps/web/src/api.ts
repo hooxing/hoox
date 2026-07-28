@@ -228,9 +228,20 @@ export class RuntimeApi {
 }
 
 export function canPreviewArtifact(mediaType: string | undefined): boolean {
+  if (mediaType === undefined) return false;
+  const [rawBase, ...rawParameters] = mediaType.split(";");
+  const base = rawBase?.trim().toLowerCase();
+  if (base === "text/plain") {
+    return rawParameters.every((parameter) =>
+      /^charset\s*=\s*(?:"(?:utf-8|us-ascii|iso-8859-1|windows-1252)"|(?:utf-8|us-ascii|iso-8859-1|windows-1252))$/iu.test(
+        parameter.trim(),
+      ),
+    );
+  }
   return (
-    mediaType?.startsWith("text/") === true ||
-    mediaType?.startsWith("image/") === true ||
-    mediaType === "application/pdf"
+    rawParameters.length === 0 &&
+    new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"]).has(
+      base ?? "",
+    )
   );
 }

@@ -24,11 +24,13 @@ A/B fixture 在 API 启动、身份初始化配置解析和实际 provision 前�
 
 开发启动不会创建 Tenant、User 或 Membership。身份数据属于显式开发准备步骤，避免一次进程重启静默改写授权关系。健康语义区分 HTTP 存活与 PG 就绪；关闭顺序固定为停止并排空 HTTP，再关闭连接池。日志只输出稳定状态，不输出配置或底层驱动消息。
 
+开发 API 的 S3 BlobStore 继续遵守持久化层当前 16 MiB 单对象内存上限。装配层不能以更大的应用配置绕过该完整缓冲与校验边界；超过 16 MiB 的交付需要先完成独立的 multipart/流式协议设计，而不是提高本地装配参数。
+
 ## 影响与验证
 
 - 本地可以用 `pnpm dev:api` 观察真实 API；仍没有产品 Web UI。
 - `.env.example` 和配置契约新增监听地址与端口。
-- 单元测试覆盖 development/production 选择边界、端口校验、字面回环白名单、A/B 身份隔离和密钥环脱敏解析；现有 PostgreSQL M4 黑盒继续覆盖真实 API/RLS 行为。
+- 单元测试覆盖 development/production 选择边界、端口校验、字面回环白名单、A/B 身份隔离、密钥环脱敏解析，以及默认开发装配使用 16 MiB Blob 上限并完成进程启动；现有 PostgreSQL M4 黑盒继续覆盖真实 API/RLS 行为。
 - 未来生产装配可独立替换身份、网络和遥测，不需要兼容开发 token。
 
 ## 可逆性

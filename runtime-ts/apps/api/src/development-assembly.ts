@@ -15,6 +15,8 @@ import type { ApiProcessConfiguration } from "./process-entry.js";
 
 const cursorTtlMilliseconds = 15 * 60_000;
 const cursorMaximumTtlMilliseconds = 60 * 60_000;
+// BlobStore 当前会在完整校验后才交付内存对象；开发 API 不得绕过其 16 MiB 绝对边界。
+const developmentApiMaxBlobSizeBytes = 16 * 1_024 * 1_024;
 
 /**
  * 密钥环使用 `kid:base64url,kid:base64url`，这里只拆分结构；密钥长度和规范编码仍由 codec 校验。
@@ -90,7 +92,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           accessKeyId: configuration.objectStorage.accessKeyId,
           secretAccessKey: configuration.objectStorage.secretAccessKey,
           forcePathStyle: configuration.objectStorage.forcePathStyle,
-          maxBlobSizeBytes: 100 * 1_024 * 1_024,
+          maxBlobSizeBytes: developmentApiMaxBlobSizeBytes,
         },
         persistence.blobLifecycle,
       );

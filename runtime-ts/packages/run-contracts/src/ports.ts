@@ -143,6 +143,7 @@ export type ClaimExecutionResult =
 
 export type StableWorkerErrorCode =
   | "CANCELLED"
+  | "CONTEXT_TOO_LARGE"
   | "TIMEOUT"
   | "PROVIDER"
   | "PROTOCOL"
@@ -498,6 +499,7 @@ export interface OrphanSandboxCleanupPort {
 
 export type AgentTurnOutcome =
   | { readonly kind: "completed" }
+  | { readonly kind: "context_too_large"; readonly action: "rebuild_context" }
   | {
       readonly kind: "waiting";
       readonly question: string;

@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import {
   agentThreadId,
   runId,
@@ -9,7 +9,10 @@ import {
   workspaceId,
 } from "@cube-runtime/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import type { WaitingRecoveryStorePort } from "../../runtime-ts/apps/agent-worker/src/waiting-recovery.js";
+import {
+  decideWaitingRecovery,
+  type WaitingRecoveryStorePort,
+} from "../../runtime-ts/apps/agent-worker/src/waiting-recovery.js";
 import { digestCanonical } from "../../runtime-ts/packages/run-contracts/src/mutation-protocol.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
@@ -52,6 +55,7 @@ const scope = {
 };
 const attemptId = `wait_attempt_${unique}`;
 const checkpointId = `wait_checkpoint_${unique}`;
+const changedRevision = `wait_revision_${unique}`;
 const actorId = userId(`wait_user_${unique}`);
 const databaseContext = { tenantId: scope.tenantId, userId: actorId };
 const rolloutContext = {
@@ -77,8 +81,78 @@ let admin!: Pool;
 let migrator!: Pool;
 let runtime!: Pool;
 let store!: PgWaitingRecoveryStore;
+const receiptKey = randomBytes(32);
+let forgedReceipt = false;
+const effectProof = {
+  registryId: `rebuilt_registry_${unique}`,
+  providerSandboxId: `rebuilt_sandbox_${unique}`,
+  generation: 1,
+};
+const effectAdapter = {
+  async execute(input: { requestDigest: string }) {
+    const responseDigest = digestCanonical({ requestDigest: input.requestDigest, ...effectProof });
+    return {
+      outcome: "succeeded" as const,
+      receipt: {
+        ...effectProof,
+        requestDigest: input.requestDigest,
+        responseDigest,
+        attestation: forgedReceipt
+          ? "forged"
+          : createHmac("sha256", receiptKey).update(responseDigest).digest("hex"),
+      },
+    };
+  },
+};
+const receiptVerifier = {
+  verify(receipt: { responseDigest: string; attestation: string }) {
+    return (
+      receipt.attestation ===
+      createHmac("sha256", receiptKey).update(receipt.responseDigest).digest("hex")
+    );
+  },
+};
 let schemaCreated = false;
 let roleCreated = false;
+
+async function appendWaitingCheckpointFact(nextCheckpointId: string): Promise<void> {
+  const rollout = new PgRuntimeRolloutRepository(runtime);
+  const appended = await rollout.append({
+    context: rolloutContext,
+    idempotencyKey: `wait-entry-${nextCheckpointId}`,
+    entries: [{ kind: "waiting", body: { checkpointId: nextCheckpointId } }],
+  });
+  if (appended.outcome !== "created") throw new Error("测试 waiting Rollout 写入失败");
+  const sequence = appended.value[0]?.sequence;
+  if (sequence === undefined) throw new Error("测试 waiting Rollout 缺少序号");
+  const checkpoint = await rollout.writeCheckpoint({
+    context: rolloutContext,
+    idempotencyKey: `wait-checkpoint-${nextCheckpointId}`,
+    checkpointId: nextCheckpointId,
+    windowStartSequence: sequence,
+    throughSequence: sequence,
+    projection: { turns: [] },
+    replacementHistory: [],
+  });
+  if (checkpoint.outcome !== "created") throw new Error("测试 waiting checkpoint 写入失败");
+  await withTenantTransaction(runtime, databaseContext, async (client) => {
+    const next = await client.query<{ sequence: string }>(
+      `UPDATE execution_attempts SET next_event_sequence=next_event_sequence+1
+        WHERE tenant_id=$1 AND attempt_id=$2 RETURNING (next_event_sequence-1)::text AS sequence`,
+      [scope.tenantId, attemptId],
+    );
+    await client.query(
+      `INSERT INTO run_events(tenant_id,attempt_id,sequence,schema_version,kind,payload)
+       VALUES($1,$2,$3,1,'run_waiting',$4::jsonb)`,
+      [
+        scope.tenantId,
+        attemptId,
+        next.rows[0]?.sequence,
+        JSON.stringify({ question: "继续？", checkpointId: nextCheckpointId }),
+      ],
+    );
+  });
+}
 
 beforeAll(async () => {
   admin = createPostgresPool({ connectionString: bootstrapUrl, maxConnections: 2 });
@@ -141,6 +215,20 @@ beforeAll(async () => {
        ) VALUES($1,$2,$3,$4,$5,$3,'running','model_settled')`,
       [scope.tenantId, attemptId, scope.runId, scope.threadId, scope.workspaceId],
     );
+    await client.query(
+      `INSERT INTO execution_workspace_fences(
+         tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,lease_epoch,initial_expires_at
+       ) VALUES($1,$2,$3,$4,$5,$3,1,clock_timestamp()+interval '1 hour')`,
+      [scope.tenantId, attemptId, scope.runId, scope.threadId, scope.workspaceId],
+    );
+    await client.query(
+      `INSERT INTO run_claims(
+         tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,worker_id,
+         claim_token,claim_epoch,workspace_lease_epoch,expires_at
+       ) VALUES($1,$2,$3,$4,$5,$3,'waiting-test','waiting-test-claim',1,1,
+         clock_timestamp()+interval '1 hour')`,
+      [scope.tenantId, attemptId, scope.runId, scope.threadId, scope.workspaceId],
+    );
   });
   const rollout = new PgRuntimeRolloutRepository(runtime);
   expect(
@@ -188,9 +276,10 @@ beforeAll(async () => {
       [scope.tenantId, attemptId, JSON.stringify({ question: "继续？", checkpointId })],
     );
   });
-  store = new PgWaitingRecoveryStore(runtime, 30);
+  store = new PgWaitingRecoveryStore(runtime, effectAdapter, receiptVerifier, 30);
   const compatiblePort: WaitingRecoveryStorePort = store;
   expect(compatiblePort).toBe(store);
+  expect("completeEffect" in store).toBe(false);
   expect(
     await store.record({
       scope,
@@ -308,6 +397,7 @@ describe("waiting recovery PostgreSQL 事实源", () => {
             sandbox: { kind: "sandbox_rebuilt", reason: "missing" },
           },
           observedWorkspaceHead: { outcome: "empty" },
+          workspaceManifestDigest: hash("o"),
           effect: "create",
         })
       ).outcome,
@@ -333,36 +423,71 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         claim: acquired.claim,
         decision,
         observedWorkspaceHead: { outcome: "empty" },
+        workspaceManifestDigest: hash("m"),
         effect,
       });
       if (intent.outcome !== "authorized") throw new Error("测试需要 intent");
+      forgedReceipt = true;
       expect(
-        await store.completeEffect({
+        await store.execute({
           claim: acquired.claim,
           intentId: intent.intentId,
+          requestDigest: intent.requestDigest,
           effect,
-          receipt: {
-            registryId: `rebuilt_registry_${unique}`,
-            providerSandboxId: `rebuilt_sandbox_${unique}`,
-            generation: 1,
-            completionCapability: "forged-capability",
-          },
+          ...(intent.priorProof === undefined ? {} : { priorProof: intent.priorProof }),
         }),
-      ).toBe("claim_lost");
+      ).toEqual({ outcome: "claim_lost" });
+      forgedReceipt = false;
       expect(
-        await store.completeEffect({
+        await store.execute({
           claim: acquired.claim,
           intentId: intent.intentId,
+          requestDigest: intent.requestDigest,
           effect,
-          receipt: {
-            registryId: `rebuilt_registry_${unique}`,
-            providerSandboxId: `rebuilt_sandbox_${unique}`,
-            generation: 1,
-            completionCapability: intent.completionCapability,
-          },
+          ...(intent.priorProof === undefined ? {} : { priorProof: intent.priorProof }),
         }),
-      ).toBe("completed");
+      ).toEqual({ outcome: "completed" });
     }
+    expect(
+      (
+        await store.beginEffect({
+          claim: acquired.claim,
+          decision,
+          observedWorkspaceHead: { outcome: "empty" },
+          workspaceManifestDigest: hash("r"),
+          effect: "materialize",
+        })
+      ).outcome,
+    ).toBe("claim_lost");
+    await withTenantTransaction(runtime, databaseContext, async (client) => {
+      await client.query(
+        `INSERT INTO workspace_revisions(
+           tenant_id,workspace_id,id,thread_id,revision_number,created_by_run_id,
+           lease_epoch,object_key,digest,created_at
+         ) VALUES($1,$2,$3,$4,1,$5,1,'test/wait-revision',$6,clock_timestamp())`,
+        [
+          scope.tenantId,
+          scope.workspaceId,
+          changedRevision,
+          scope.threadId,
+          scope.runId,
+          hash("q"),
+        ],
+      );
+      await client.query(
+        `UPDATE workspaces SET current_revision_id=$3,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND id=$2`,
+        [scope.tenantId, scope.workspaceId, changedRevision],
+      );
+    });
+    expect(await store.resolve({ claim: acquired.claim, decision })).toBe("claim_lost");
+    await withTenantTransaction(runtime, databaseContext, (client) =>
+      client.query(
+        `UPDATE workspaces SET current_revision_id=NULL,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND id=$2`,
+        [scope.tenantId, scope.workspaceId],
+      ),
+    );
     const [resolved, concurrentAppend] = await Promise.all([
       store.resolve({
         claim: acquired.claim,
@@ -414,6 +539,119 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         decision,
       }),
     ).toBe("already_resolved");
+  });
+
+  it("崩溃后 Workspace 从 unchanged 变为 replan 时可复用已完成 connect", async () => {
+    await withTenantTransaction(runtime, databaseContext, async (client) => {
+      await client.query(
+        `UPDATE sandbox_registry SET state='paused',updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND registry_id=$2`,
+        [scope.tenantId, effectProof.registryId],
+      );
+      await client.query(
+        `INSERT INTO cleanup_outbox(
+           tenant_id,attempt_id,idempotency_key,registry_id,provider_sandbox_id,state,armed,
+           identity_digest,disposition,payload,payload_digest,remote_call_started_at
+         ) VALUES($1,$2,$3,$4,$5,'completed',true,$6,'pause','{}'::jsonb,$7,clock_timestamp())`,
+        [
+          scope.tenantId,
+          attemptId,
+          `pause-completed-${unique}`,
+          effectProof.registryId,
+          effectProof.providerSandboxId,
+          "c".repeat(64),
+          "d".repeat(64),
+        ],
+      );
+    });
+    const replanCheckpointId = `wait_replan_${unique}`;
+    await appendWaitingCheckpointFact(replanCheckpointId);
+    expect(
+      await store.record({
+        scope,
+        attemptId,
+        checkpointId: replanCheckpointId,
+        workspaceHeadAtWait: { outcome: "empty" },
+      }),
+    ).toBe("created");
+    const acquired = await store.claim({
+      scope,
+      attemptId,
+      checkpointId: replanCheckpointId,
+      workerId: "replan-worker",
+    });
+    if (acquired.outcome !== "claimed") throw new Error("测试需要 replan claim");
+    const unchangedDecision = {
+      outcome: "resume",
+      workspace: "unchanged",
+      sandbox: {
+        kind: "sandbox_reused",
+        registryId: effectProof.registryId,
+        generation: effectProof.generation,
+      },
+    } as const;
+    const connect = await store.beginEffect({
+      claim: acquired.claim,
+      decision: unchangedDecision,
+      observedWorkspaceHead: { outcome: "empty" },
+      workspaceManifestDigest: hash("s"),
+      effect: "connect",
+    });
+    if (connect.outcome !== "authorized") throw new Error("测试需要 connect intent");
+    expect(
+      await store.execute({
+        claim: acquired.claim,
+        intentId: connect.intentId,
+        requestDigest: connect.requestDigest,
+        effect: "connect",
+      }),
+    ).toEqual({ outcome: "completed" });
+    await withTenantTransaction(runtime, databaseContext, (client) =>
+      client.query(
+        `UPDATE workspaces SET current_revision_id=$3,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND id=$2`,
+        [scope.tenantId, scope.workspaceId, changedRevision],
+      ),
+    );
+    const replanDecision = { ...unchangedDecision, workspace: "replan" } as const;
+    expect(
+      (
+        await store.beginEffect({
+          claim: acquired.claim,
+          decision: replanDecision,
+          observedWorkspaceHead: { outcome: "found", revisionId: changedRevision },
+          workspaceManifestDigest: hash("t"),
+          effect: "connect",
+        })
+      ).outcome,
+    ).toBe("already_completed");
+    const materialize = await store.beginEffect({
+      claim: acquired.claim,
+      decision: replanDecision,
+      observedWorkspaceHead: { outcome: "found", revisionId: changedRevision },
+      workspaceManifestDigest: hash("t"),
+      effect: "materialize",
+    });
+    if (materialize.outcome !== "authorized") throw new Error("测试需要 materialize intent");
+    expect(
+      await store.execute({
+        claim: acquired.claim,
+        intentId: materialize.intentId,
+        requestDigest: materialize.requestDigest,
+        effect: "materialize",
+        ...(materialize.priorProof === undefined ? {} : { priorProof: materialize.priorProof }),
+      }),
+    ).toEqual({ outcome: "completed" });
+    expect(await store.resolve({ claim: acquired.claim, decision: replanDecision })).toBe(
+      "resolved",
+    );
+    await withTenantTransaction(runtime, databaseContext, (client) =>
+      client.query(
+        `UPDATE workspaces SET current_revision_id=NULL,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND id=$2`,
+        [scope.tenantId, scope.workspaceId],
+      ),
+    );
   });
 
   it("effect_pending 租约过期时由后续 claim 收敛 UNKNOWN，绝不重发 create", async () => {
@@ -482,6 +720,7 @@ describe("waiting recovery PostgreSQL 事实源", () => {
         sandbox: { kind: "sandbox_rebuilt", reason: "missing" },
       },
       observedWorkspaceHead: { outcome: "empty" },
+      workspaceManifestDigest: hash("n"),
       effect: "create",
     });
     if (intent.outcome !== "authorized") throw new Error("测试需要 create intent");
@@ -518,5 +757,93 @@ describe("waiting recovery PostgreSQL 事实源", () => {
       effect_state: "unknown",
       unknown_effect: "create",
     });
+  });
+
+  it("pause UNKNOWN 由 registry/outbox 事实推导并禁止自动 create", async () => {
+    await withTenantTransaction(runtime, databaseContext, async (client) => {
+      await client.query(
+        `UPDATE sandbox_registry SET state='unknown',updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND registry_id=$2`,
+        [scope.tenantId, effectProof.registryId],
+      );
+      await client.query(
+        `INSERT INTO cleanup_outbox(
+           tenant_id,attempt_id,idempotency_key,registry_id,provider_sandbox_id,state,armed,
+           identity_digest,disposition,payload,payload_digest,remote_call_started_at
+         ) VALUES($1,$2,$3,$4,$5,'unknown',true,$6,'pause','{}'::jsonb,$7,clock_timestamp())`,
+        [
+          scope.tenantId,
+          attemptId,
+          `pause-unknown-${unique}`,
+          effectProof.registryId,
+          effectProof.providerSandboxId,
+          "a".repeat(64),
+          "b".repeat(64),
+        ],
+      );
+    });
+    const pauseCheckpointId = `wait_pause_unknown_${unique}`;
+    await appendWaitingCheckpointFact(pauseCheckpointId);
+    expect(
+      await store.record({
+        scope,
+        attemptId,
+        checkpointId: pauseCheckpointId,
+        workspaceHeadAtWait: { outcome: "empty" },
+      }),
+    ).toBe("created");
+    const acquired = await store.claim({
+      scope,
+      attemptId,
+      checkpointId: pauseCheckpointId,
+      workerId: "pause-unknown-worker",
+    });
+    if (acquired.outcome !== "claimed") throw new Error("测试需要 pause UNKNOWN claim");
+    expect(acquired.claim.checkpoint.sandbox?.lifecycle).toBe("pause_unknown");
+    expect(
+      decideWaitingRecovery(acquired.claim.checkpoint, {
+        now: acquired.claim.databaseNow,
+        currentWorkspaceHead: { outcome: "empty" },
+        canReplanWorkspaceChange: false,
+        workspaceManifestDigest: hash("p"),
+      }),
+    ).toEqual({
+      outcome: "external_effect_unknown",
+      effect: "pause",
+      requestAutomaticRetry: false,
+    });
+    const replacementAttemptId = `replacement_attempt_${unique}`;
+    await withTenantTransaction(runtime, databaseContext, async (client) => {
+      await client.query(
+        `INSERT INTO execution_attempts(
+           tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,status,stage
+         ) VALUES($1,$2,$3,$4,$5,$3,'claimed','claimed')`,
+        [scope.tenantId, replacementAttemptId, scope.runId, scope.threadId, scope.workspaceId],
+      );
+      await client.query(
+        `INSERT INTO execution_workspace_fences(
+           tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,lease_epoch,initial_expires_at
+         ) VALUES($1,$2,$3,$4,$5,$3,2,clock_timestamp()+interval '1 hour')`,
+        [scope.tenantId, replacementAttemptId, scope.runId, scope.threadId, scope.workspaceId],
+      );
+      await client.query(
+        `INSERT INTO run_claims(
+           tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,worker_id,
+           claim_token,claim_epoch,workspace_lease_epoch,expires_at
+         ) VALUES($1,$2,$3,$4,$5,$3,'replacement','replacement-claim',2,2,
+           clock_timestamp()+interval '1 hour')`,
+        [scope.tenantId, replacementAttemptId, scope.runId, scope.threadId, scope.workspaceId],
+      );
+    });
+    expect(
+      await store.resolve({
+        claim: acquired.claim,
+        decision: {
+          outcome: "external_effect_unknown",
+          effect: "pause",
+          requestAutomaticRetry: false,
+        },
+      }),
+    ).toBe("claim_lost");
   });
 });

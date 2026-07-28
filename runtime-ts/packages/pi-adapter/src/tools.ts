@@ -1,4 +1,5 @@
 import type { SandboxHandle } from "@cube-runtime/sandbox";
+import type { SanitizedToolOutputSource } from "@cube-runtime/context-policy";
 import { SandboxRuntimeError } from "@cube-runtime/sandbox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -27,6 +28,37 @@ export function createSandboxTools(
   sandbox: SandboxHandle,
   authorizer: SandboxToolEffectAuthorizer,
 ) {
+  return createSandboxToolsInternal(sandbox, authorizer);
+}
+
+/** 原始 Tool 结果只存在于闭包；对外只暴露完成统一脱敏后的只读 Observation source。 */
+export function createObservedSandboxTools(
+  sandbox: SandboxHandle,
+  authorizer: SandboxToolEffectAuthorizer,
+): {
+  readonly tools: ReturnType<typeof createSandboxTools>;
+  readonly outputs: SanitizedToolOutputSource;
+} {
+  const outputs = new Map<string, { readonly name: string; readonly text: string }>();
+  const capture = (callId: string, name: string, text: string) =>
+    outputs.set(callId, { name, text });
+  return {
+    tools: createSandboxToolsInternal(sandbox, authorizer, capture),
+    outputs: {
+      async readSanitizedOutput(input) {
+        const found = outputs.get(input.toolCallId);
+        if (found === undefined || found.name !== input.toolName) return undefined;
+        return found.text;
+      },
+    },
+  };
+}
+
+function createSandboxToolsInternal(
+  sandbox: SandboxHandle,
+  authorizer: SandboxToolEffectAuthorizer,
+  capture?: (callId: string, name: string, text: string) => void,
+) {
   return [
     defineTool({
       name: "sandbox_command",
@@ -36,7 +68,9 @@ export function createSandboxTools(
       execute: async (_id, params, signal) => {
         const authorization = await authorizeTool(authorizer, _id, "sandbox_command", params);
         assertImmediateContinuation(authorization, signal);
-        return toolResult(() => sandbox.command(params.command, signalControl(signal)));
+        return toolResult(_id, "sandbox_command", capture, () =>
+          sandbox.command(params.command, signalControl(signal)),
+        );
       },
     }),
     defineTool({
@@ -50,7 +84,7 @@ export function createSandboxTools(
       execute: async (_id, params, signal) => {
         const authorization = await authorizeTool(authorizer, _id, "sandbox_run_code", params);
         assertImmediateContinuation(authorization, signal);
-        return toolResult(() =>
+        return toolResult(_id, "sandbox_run_code", capture, () =>
           sandbox.runCode(params.code, {
             ...signalControl(signal),
             ...(params.language ? { language: params.language } : {}),
@@ -66,7 +100,9 @@ export function createSandboxTools(
       execute: async (_id, params, signal) => {
         const authorization = await authorizeTool(authorizer, _id, "sandbox_read_file", params);
         assertImmediateContinuation(authorization, signal);
-        return toolResult(() => sandbox.readFile(params.path, signalControl(signal)));
+        return toolResult(_id, "sandbox_read_file", capture, () =>
+          sandbox.readFile(params.path, signalControl(signal)),
+        );
       },
     }),
     defineTool({
@@ -80,7 +116,7 @@ export function createSandboxTools(
       execute: async (_id, params, signal) => {
         const authorization = await authorizeTool(authorizer, _id, "sandbox_write_file", params);
         assertImmediateContinuation(authorization, signal);
-        return toolResult(async () => {
+        return toolResult(_id, "sandbox_write_file", capture, async () => {
           await sandbox.writeFile(params.path, params.content, signalControl(signal));
           return { written: true };
         });
@@ -138,18 +174,27 @@ function signalControl(signal: AbortSignal | undefined): { signal?: AbortSignal 
   return signal ? { signal } : {};
 }
 
-async function toolResult(action: () => Promise<unknown>) {
+async function toolResult(
+  callId: string,
+  toolName: string,
+  capture: ((callId: string, name: string, text: string) => void) | undefined,
+  action: () => Promise<unknown>,
+) {
   try {
     const value = await action();
-    return { content: [{ type: "text" as const, text: JSON.stringify(value) }], details: {} };
+    const text = JSON.stringify(value);
+    capture?.(callId, toolName, text);
+    return { content: [{ type: "text" as const, text }], details: {} };
   } catch (error) {
     // 工具结果不回传上游 cause，避免把网络地址、认证头或 SDK 内部响应泄漏给模型。
     const safe =
       error instanceof SandboxRuntimeError
         ? { code: error.code, message: error.message }
         : { code: "UPSTREAM", message: "Sandbox 工具执行失败" };
+    const text = JSON.stringify(safe);
+    capture?.(callId, toolName, text);
     return {
-      content: [{ type: "text" as const, text: JSON.stringify(safe) }],
+      content: [{ type: "text" as const, text }],
       details: {},
       isError: true,
     };

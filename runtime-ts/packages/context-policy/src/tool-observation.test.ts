@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   ToolObservationPipeline,
-  trustedToolOutputFromSanitizedAdapter,
   type StableTraceBlobIdentity,
   type ToolObservationRolloutPort,
   type TraceBlobPersistencePort,
@@ -54,16 +53,22 @@ function pipeline(max = 80) {
   return {
     traces,
     rollout,
-    subject: new ToolObservationPipeline(traces, rollout, { maxModelObservationBytes: max }),
+    subject: new ToolObservationPipeline(
+      traces,
+      rollout,
+      { readSanitizedOutput: async () => currentOutput },
+      { maxModelObservationBytes: max },
+    ),
   };
 }
+let currentOutput = "";
 function input(output: string) {
+  currentOutput = output;
   return {
     tenantId,
     idempotencyKey: "observation_command",
     toolCallId: callId,
     toolName: "sandbox_command",
-    trustedOutput: trustedToolOutputFromSanitizedAdapter(output),
   };
 }
 function recorded(result: Awaited<ReturnType<ToolObservationPipeline["record"]>>) {

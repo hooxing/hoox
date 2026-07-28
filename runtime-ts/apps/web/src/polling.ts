@@ -3,7 +3,44 @@ import { EVENT_PAGE_LIMIT, type RunEvent, type RunEventPage } from "./api.js";
 export type DrainedEventPage = {
   readonly attemptId: string | undefined;
   readonly items: readonly RunEvent[];
+  /** 本轮最后确认的游标；达到页数上限时由下一轮从这里继续。 */
+  readonly nextAfter: number;
+  readonly hasMore: boolean;
 };
+
+export const MAX_EVENT_PAGES_PER_POLL = 8;
+
+export type RunPollGeneration = {
+  readonly threadId: string;
+  readonly runId: string;
+  readonly generation: number;
+};
+
+/** 同步代次闩锁：网络响应只能更新创建它时仍为 current 的 Run。 */
+export class CurrentRunPoll {
+  #generation = 0;
+  #current: RunPollGeneration | undefined;
+
+  activate(threadId: string, runId: string): RunPollGeneration {
+    const current = Object.freeze({ threadId, runId, generation: ++this.#generation });
+    this.#current = current;
+    return current;
+  }
+
+  invalidate(expected?: RunPollGeneration): void {
+    if (expected !== undefined && !this.isCurrent(expected)) return;
+    this.#generation += 1;
+    this.#current = undefined;
+  }
+
+  isCurrent(expected: RunPollGeneration): boolean {
+    return (
+      this.#current?.generation === expected.generation &&
+      this.#current.threadId === expected.threadId &&
+      this.#current.runId === expected.runId
+    );
+  }
+}
 
 /**
  * 拉空当前 Attempt 的事件页。Attempt 在请求间变化时，旧游标对新 Attempt 无效，
@@ -18,7 +55,7 @@ export async function drainEventPages(
   let attemptId = expectedAttemptId;
   let items: RunEvent[] = [];
 
-  for (;;) {
+  for (let pageNumber = 0; pageNumber < MAX_EVENT_PAGES_PER_POLL; pageNumber += 1) {
     const page = await listPage(after, EVENT_PAGE_LIMIT);
     if (page.attemptId !== attemptId) {
       attemptId = page.attemptId;
@@ -31,11 +68,12 @@ export async function drainEventPages(
 
     items.push(...page.items);
     const hasMore = page.hasMore ?? page.items.length >= EVENT_PAGE_LIMIT;
-    if (!hasMore) return { attemptId, items };
+    const nextAfter = page.items.at(-1)?.sequence ?? after;
+    if (!hasMore) return { attemptId, items, nextAfter, hasMore: false };
 
-    const nextAfter = page.items.at(-1)?.sequence;
     // 服务端声明还有数据却没有推进游标时终止，避免协议异常形成无界请求。
-    if (nextAfter === undefined || nextAfter <= after) return { attemptId, items };
+    if (nextAfter <= after) return { attemptId, items, nextAfter: after, hasMore: false };
     after = nextAfter;
   }
+  return { attemptId, items, nextAfter: after, hasMore: true };
 }

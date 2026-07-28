@@ -72,6 +72,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       | undefined;
     let controller: PiSessionController | undefined;
     let observationRecoveryCode: "PERSISTENCE_UNAVAILABLE" | "IDEMPOTENCY_CONFLICT" | undefined;
+    let toolEffectRejected = false;
     const requireObservationRecovery = (outcome?: ToolObservationResult["outcome"]) => {
       observationRecoveryCode =
         outcome === "conflict" ? "IDEMPOTENCY_CONFLICT" : "PERSISTENCE_UNAVAILABLE";
@@ -162,6 +163,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               throw error;
             } finally {
               const rejected = rejectedToolReceipts.get(call.toolCallId);
+              if (rejected !== undefined) toolEffectRejected = true;
               rejected?.resolve();
               rejectedToolReceipts.delete(call.toolCallId);
             }
@@ -171,6 +173,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       assertModelRequestAllowed: () => {
         if (observationRecoveryCode !== undefined) {
           throw new Error("Tool Observation 恢复未完成，禁止继续模型轮次");
+        }
+        if (toolEffectRejected) {
+          throw new Error("Tool 失败回执完成后禁止继续模型轮次");
         }
       },
       ...(artifactToolRouter === undefined ? {} : { artifactToolRouter }),

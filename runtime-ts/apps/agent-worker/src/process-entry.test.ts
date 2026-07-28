@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  createDevelopmentOpenAiCompatibleModel,
   parseWorkerProcessEnvironment,
   probeOpenAiCompatibleModel,
   startWorkerProcess,
@@ -105,6 +106,26 @@ describe("Agent Worker 进程入口", () => {
     expect(() =>
       parseWorkerProcessEnvironment({ ...source, AGENT_WORKER_TENANT_ID: "other-tenant" }),
     ).toThrow("AGENT_WORKER_TENANT_ID 必须与 DEV_AUTH_USER_A_TENANT_ID 一致");
+  });
+
+  it("开发模型装配固定使用 Chat Completions 且保留显式预算", async () => {
+    const configuration = parseWorkerProcessEnvironment({
+      ...productionEnvironment(),
+      RUNTIME_ENV: "development",
+      AGENT_WORKER_TENANT_ID: "tenant-dev-user-a",
+      DEV_AUTH_ENABLED: "true",
+      DEV_AUTH_USER_A_TENANT_ID: "tenant-dev-user-a",
+    });
+
+    const { model } = await createDevelopmentOpenAiCompatibleModel(configuration.model);
+
+    expect(model).toMatchObject({
+      api: "openai-completions",
+      id: configuration.model.modelId,
+      contextWindow: configuration.model.contextWindow,
+      maxTokens: configuration.model.maxOutputTokens,
+    });
+    expect(JSON.stringify(model)).not.toContain(configuration.model.apiKey);
   });
 
   it("开发 readiness 只要求 /models 返回已配置 model id", async () => {

@@ -24,7 +24,7 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
-import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
+import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
 import { PiWorkerSessionFactory } from "./pi-session-factory.js";
@@ -212,6 +212,50 @@ export function parseWorkerProcessEnvironment(
   });
 }
 
+const developmentOpenAiCompatibleProviderId = "runtime-openai-compatible";
+
+/**
+ * 本地 Provider 已由真实探针证明实现 Chat Completions；这里同时固定 Provider 与 Model 的
+ * Pi 协议，避免其中一处漂移后静默改走不受支持的 Responses 路由。
+ */
+export async function createDevelopmentOpenAiCompatibleModel(
+  configuration: WorkerProcessConfiguration["model"],
+): Promise<
+  Readonly<{
+    modelRuntime: ModelRuntime;
+    model: Model<"openai-completions">;
+  }>
+> {
+  const modelRuntime = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(),
+    modelsPath: null,
+  });
+  modelRuntime.registerProvider(developmentOpenAiCompatibleProviderId, {
+    name: "Runtime OpenAI-compatible Provider",
+    baseUrl: configuration.baseUrl,
+    apiKey: configuration.apiKey,
+    api: "openai-completions",
+    models: [
+      {
+        id: configuration.modelId,
+        name: configuration.modelId,
+        api: "openai-completions",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: configuration.contextWindow,
+        maxTokens: configuration.maxOutputTokens,
+      },
+    ],
+  });
+  const model = modelRuntime.getModel(developmentOpenAiCompatibleProviderId, configuration.modelId);
+  if (model?.api !== "openai-completions") throw new Error("开发模型配置无法解析");
+  return Object.freeze({
+    modelRuntime,
+    model: model as Model<"openai-completions">,
+  });
+}
+
 /**
  * 仅本地 development 使用的真实装配：PG dispatch、CubeSandbox、S3 durable observation 和
  * OpenAI-compatible provider 均为外部事实源；这里没有内存队列或 Sandbox 替身。
@@ -253,31 +297,9 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
         rolloutRepository,
         policy: { maxModelObservationBytes: 4 * 1024 },
       });
-      const modelRuntime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsPath: null,
-      });
-      const providerId = "runtime-openai-compatible";
-      modelRuntime.registerProvider(providerId, {
-        name: "Runtime OpenAI-compatible Provider",
-        baseUrl: configuration.model.baseUrl,
-        apiKey: configuration.model.apiKey,
-        api: "openai-responses",
-        models: [
-          {
-            id: configuration.model.modelId,
-            name: configuration.model.modelId,
-            api: "openai-responses",
-            reasoning: false,
-            input: ["text"],
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            contextWindow: configuration.model.contextWindow,
-            maxTokens: configuration.model.maxOutputTokens,
-          },
-        ],
-      });
-      const model = modelRuntime.getModel(providerId, configuration.model.modelId);
-      if (model === undefined) throw new Error("生产模型配置无法解析");
+      const { modelRuntime, model } = await createDevelopmentOpenAiCompatibleModel(
+        configuration.model,
+      );
       const sessions = new PiWorkerSessionFactory(
         model,
         modelRuntime,

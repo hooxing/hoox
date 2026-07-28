@@ -15,6 +15,9 @@ Pi 0.82.1 的 `createAgentSession` 会按宿主平台规范化传入的 cwd；Wi
 
 同时，部分 OpenAI-compatible Provider 的 `/models` 只返回模型 `id`，而 Pi 仍需要可信的
 context window 和最大输出 token 才能做预算。把缺失元数据默认为任意值会削弱生产边界。
+真实开发 Provider 还只实现 `/chat/completions`（包括 SSE 与工具调用），对同一 `MODEL_ID` 的
+`/responses` 返回不支持；若装配层把“OpenAI-compatible”误写成 Pi Responses 协议，readiness 会通过，
+但真实 Run 会在第一次模型请求后以 Provider 错误结束。
 
 ## 备选方案
 
@@ -34,6 +37,9 @@ development Worker 只接受 `RUNTIME_ENV=development`，并要求
 `AGENT_WORKER_TENANT_ID === DEV_AUTH_USER_A_TENANT_ID`。它用真实 PG、S3、CubeSandbox 和 Provider
 装配。`MODEL_CONTEXT_WINDOW`、`MODEL_MAX_OUTPUT_TOKENS` 一直是必填配置；development 的 `/models`
 只验证 `MODEL_ID` 存在，production 的 probe 仍要求窗口和最大输出 token 元数据精确一致。
+本地 OpenAI-compatible Provider 与其模型描述同时固定为 Pi `openai-completions`，模型请求因此只走
+`/chat/completions`；不能依据 `/models` 的成功把协议推断为 `openai-responses`。API key 仍只进入
+Pi 的 Provider 凭据配置，显式 context window、最大输出 token 与受控工具清单不因协议切换而放宽。
 
 Workspace revision 发布未完成前，继续依据 ADR-0038 对非空 `/workspace` 失败关闭；不把它表述为
 Artifact 支持。
@@ -43,6 +49,8 @@ Artifact 支持。
 - Windows 可启动真实 development Worker，工具副作用仍在 Linux CubeSandbox。
 - Provider 的简化 `/models` 响应不会阻断本地纯聊天体验，但错误的显式预算仍由 Pi 的 admission
   control 保护；生产不受此放宽影响。
+- 开发 Run 使用 Chat Completions 的 SSE 文本与工具调用协议，不再访问 Provider 不支持的
+  `/responses`；该选择只适用于当前 development 装配，不代表生产协议协商。
 - 生产 Worker 仍无可用入口，不能把 development 装配视为部署方案。
 
 ## 验证
@@ -50,6 +58,8 @@ Artifact 支持。
 - Pi/Faux 测试在 Windows 执行真实自定义 Sandbox 工具循环，断言文件只进入 Sandbox、Pi 内建工具
   不会进入能力清单，且模型上下文保留逻辑 `/workspace`；
 - Worker 配置测试覆盖 development tenant 一致性、id-only `/models` 通过和 production 元数据拒绝；
+- 本地 SSE Provider 测试覆盖 `/chat/completions` 端点、Bearer 凭据、模型预算、受控工具 schema，
+  并验证分片 `tool_calls` 能还原成 Pi `toolUse`；
 - `pnpm dev:worker:check` 只读探测真实依赖，测试断言其不会启动 polling 或领取 dispatch；
 - 真实 Cube 的纵向脚本在 Windows Worker 上可连接 Linux Sandbox，仍在 finally 清理 Sandbox。
 

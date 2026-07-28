@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@cube-runtime/domain";
-import { createApiPersistenceRuntime } from "@cube-runtime/persistence";
+import { createApiPersistenceRuntime, createS3BlobStore } from "@cube-runtime/persistence";
 import type { ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
@@ -8,6 +8,7 @@ import { createThreadCursorCodec, type ThreadCursorSigningKey } from "./cursor.j
 import { createDevelopmentAuthResolver } from "./development-auth.js";
 import {
   assertDevelopmentPrincipalsIsolated,
+  assertDevelopmentPublicObjectStorageEndpoint,
   normalizeDevelopmentLoopbackHost,
 } from "./development-boundary.js";
 import type { ApiProcessConfiguration } from "./process-entry.js";
@@ -49,6 +50,11 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
     // 即使调用方绕过进程配置解析直接调用装配器，也不能扩大固定凭据的网络与身份边界。
     assertDevelopmentPrincipalsIsolated(configuration.developmentPrincipals);
     const listenHost = normalizeDevelopmentLoopbackHost(configuration.listenHost);
+    assertDevelopmentPublicObjectStorageEndpoint(
+      configuration.objectStorage.publicEndpoint,
+      listenHost,
+      configuration.listenPort,
+    );
     const persistence = createApiPersistenceRuntime({
       connectionString: configuration.databaseUrl,
       schema: configuration.databaseSchema,
@@ -75,6 +81,19 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
         ttlMilliseconds: cursorTtlMilliseconds,
         maximumTtlMilliseconds: cursorMaximumTtlMilliseconds,
       });
+      const blobs = createS3BlobStore(
+        {
+          endpoint: configuration.objectStorage.endpoint,
+          publicEndpoint: configuration.objectStorage.publicEndpoint,
+          bucket: configuration.objectStorage.bucket,
+          region: configuration.objectStorage.region,
+          accessKeyId: configuration.objectStorage.accessKeyId,
+          secretAccessKey: configuration.objectStorage.secretAccessKey,
+          forcePathStyle: configuration.objectStorage.forcePathStyle,
+          maxBlobSizeBytes: 100 * 1_024 * 1_024,
+        },
+        persistence.blobLifecycle,
+      );
       app = createApiApp(
         {
           auth: createDevelopmentAuthResolver({
@@ -87,6 +106,8 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
             enqueueOutbox: persistence.runDispatchCreation,
           }),
           archiveThread: persistence.archiveThread,
+          experience: persistence.experience,
+          blobs,
           cursorCodec,
           readiness: Object.freeze({ probe: () => persistence.probe() }),
           clock,

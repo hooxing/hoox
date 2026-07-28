@@ -19,6 +19,7 @@ import {
   type Pool,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { loadPostgreSqlMigrationContract } from "./postgres-migration-contract.js";
 
 function required(name: string): string {
@@ -64,6 +65,7 @@ let admin!: Pool;
 let migrator!: Pool;
 let runtime!: Pool;
 let repository!: PgArtifactDeliveryRepository;
+let experienceRepository!: PgRunExperienceReadRepository;
 
 function authorization(
   toolName: string,
@@ -237,6 +239,7 @@ beforeAll(async () => {
     migrationContract.latestVersion,
   );
   repository = new PgArtifactDeliveryRepository(runtime, { assert() {} });
+  experienceRepository = new PgRunExperienceReadRepository(runtime);
 
   await withTenantTransaction(
     runtime,
@@ -568,18 +571,42 @@ describe("Artifact PostgreSQL 持久化", () => {
   });
 
   it("仅有 publishing 或 failed deliverable 时仍授权返回空列表，并拒绝交叉 Attempt 复合身份", async () => {
+    const empty = await seedAdditionalExecution("experience_empty");
     const publishing = await seedAdditionalExecution("publishing_only");
     const failed = await seedAdditionalExecution("failed_only");
+    const published = await seedAdditionalExecution("published_only");
     await cloneDeliverableForExecution(publishing, "publishing_only");
     await cloneDeliverableForExecution(failed, "failed_only", "failed");
+    const publishedArtifact = await cloneDeliverableForExecution(
+      published,
+      "published_only",
+      "published",
+    );
 
-    for (const execution of [publishing, failed]) {
+    for (const execution of [empty, publishing, failed]) {
       expect(
         await repository.listAuthorizedArtifacts({
           request: { tenantId: ids.tenant, userId: ids.user },
           runId: execution.run,
         }),
       ).toEqual({ outcome: "authorized", artifacts: [] });
+      expect(
+        await experienceRepository.listArtifacts({
+          scope: { tenantId: ids.tenant, userId: ids.user },
+          runId: execution.run,
+        }),
+      ).toEqual({ outcome: "found", artifacts: [] });
+    }
+
+    const publishedProjection = await experienceRepository.listArtifacts({
+      scope: { tenantId: ids.tenant, userId: ids.user },
+      runId: published.run,
+    });
+    expect(publishedProjection.outcome).toBe("found");
+    if (publishedProjection.outcome === "found") {
+      expect(publishedProjection.artifacts.map((artifact) => artifact.id)).toEqual([
+        publishedArtifact,
+      ]);
     }
 
     await expect(

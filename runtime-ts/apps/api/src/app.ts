@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
-import type { CoreRepositories } from "@cube-runtime/persistence";
-import { PersistenceError } from "@cube-runtime/persistence";
+import { runId } from "@cube-runtime/domain";
+import type {
+  BlobStore,
+  CoreRepositories,
+  RunExperienceArtifact,
+  RunExperienceReadPort,
+} from "@cube-runtime/persistence";
+import { BlobStoreError, PersistenceError } from "@cube-runtime/persistence";
 import {
+  ArtifactDeliverySuccessEnvelopeSchema,
+  ArtifactListSuccessEnvelopeSchema,
   type CreateRunRequest,
   CreateRunRequestSchema,
   type CreateThreadRequest,
@@ -11,6 +19,11 @@ import {
   ErrorEnvelopeSchema,
   HealthSuccessEnvelopeSchema,
   MAX_RUN_INPUT_UTF8_BYTES,
+  type RunArtifactPath,
+  RunArtifactPathSchema,
+  type RunEventListQuery,
+  RunEventListQuerySchema,
+  RunEventPageSuccessEnvelopeSchema,
   type RunPath,
   RunPathSchema,
   RunSuccessEnvelopeSchema,
@@ -42,6 +55,8 @@ export interface ApiDependencies {
   readonly readiness: ReadinessPort;
   readonly clock: ApiClock;
   readonly ids: ApiIdGenerator;
+  readonly experience?: RunExperienceReadPort;
+  readonly blobs?: BlobStore;
 }
 
 export interface ApiAppOptions {
@@ -51,6 +66,18 @@ export interface ApiAppOptions {
 }
 
 const idempotencyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u;
+const publicAgentEventTypes = new Set([
+  "agent.started",
+  "agent.settled",
+  "message.delta",
+  "message.completed",
+  "tool.started",
+  "tool.updated",
+  "tool.completed",
+  "queue.updated",
+  "compaction.forbidden",
+  "error",
+]);
 
 const statusByFailure: Readonly<Record<ApiFailureKind, number>> = {
   bad_request: 400,
@@ -193,6 +220,9 @@ export function createApiApp(
       kind = error.kind;
     } else if (error instanceof PersistenceError) {
       kind = persistenceFailure(error);
+    } else if (error instanceof BlobStoreError) {
+      // 对象已经通过业务授权后，签名、完整性或 provider 失败都是依赖异常，不能泄漏内部对象状态。
+      kind = "dependency_unavailable";
     } else {
       kind = "internal";
     }
@@ -402,5 +432,258 @@ export function createApiApp(
     },
   );
 
+  if (normalizedDependencies.experience !== undefined) {
+    app.get<{ Params: RunPath; Querystring: RunEventListQuery }>(
+      "/v1/threads/:threadId/runs/:runId/events",
+      {
+        schema: {
+          params: RunPathSchema,
+          querystring: RunEventListQuerySchema,
+          response: {
+            200: RunEventPageSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await service.authenticate(authorization(request), requestId(request));
+        const run = await service.getRun(auth, request.params.threadId, request.params.runId);
+        const read = await normalizedDependencies.experience?.listEvents({
+          scope: auth.scope,
+          runId: runId(run.id),
+          after: request.query.after ?? -1,
+          limit: request.query.limit ?? 100,
+        });
+        if (read === undefined || read.outcome === "not_found") throw new ApiFailure("not_found");
+        return success(request, {
+          ...(read.attemptId === undefined ? {} : { attemptId: read.attemptId }),
+          items: read.events.map((event) => ({
+            eventId: `${read.attemptId ?? "pending"}-${event.sequence}`,
+            sequence: event.sequence,
+            type: publicEventType(event.kind, event.payload),
+            kind: event.kind,
+            payload: event.payload,
+            occurredAt: event.occurredAt,
+          })),
+        });
+      },
+    );
+
+    app.get<{ Params: RunPath }>(
+      "/v1/threads/:threadId/runs/:runId/artifacts",
+      {
+        schema: {
+          params: RunPathSchema,
+          response: {
+            200: ArtifactListSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await service.authenticate(authorization(request), requestId(request));
+        const run = await service.getRun(auth, request.params.threadId, request.params.runId);
+        const read = await normalizedDependencies.experience?.listArtifacts({
+          scope: auth.scope,
+          runId: runId(run.id),
+        });
+        if (read === undefined || read.outcome === "not_found") throw new ApiFailure("not_found");
+        return success(request, {
+          items: read.artifacts.map((artifact) => ({
+            id: artifact.id,
+            tenantId: auth.scope.tenantId,
+            threadId: artifact.threadId,
+            runId: artifact.runId,
+            resourceVersionId: artifact.resourceVersionId,
+            name: artifact.name,
+            mediaType: artifact.mediaType,
+            sizeBytes: artifact.sizeBytes,
+            status: "published" as const,
+            createdAt: artifact.createdAt,
+            updatedAt: artifact.updatedAt,
+          })),
+        });
+      },
+    );
+  }
+
+  if (
+    normalizedDependencies.experience !== undefined &&
+    normalizedDependencies.blobs !== undefined
+  ) {
+    const artifactDeliverySchema = {
+      params: RunArtifactPathSchema,
+      response: {
+        200: ArtifactDeliverySuccessEnvelopeSchema,
+        400: ErrorEnvelopeSchema,
+        401: ErrorEnvelopeSchema,
+        404: ErrorEnvelopeSchema,
+        422: ErrorEnvelopeSchema,
+        500: ErrorEnvelopeSchema,
+        503: ErrorEnvelopeSchema,
+      },
+    } as const;
+    for (const [path, disposition] of [
+      ["/v1/threads/:threadId/runs/:runId/artifacts/:artifactId/preview", "preview"],
+      ["/v1/threads/:threadId/runs/:runId/artifacts/:artifactId/download", "download"],
+    ] as const) {
+      app.get<{ Params: RunArtifactPath }>(
+        path,
+        { schema: artifactDeliverySchema },
+        async (request) => {
+          const auth = await service.authenticate(authorization(request), requestId(request));
+          const run = await service.getRun(auth, request.params.threadId, request.params.runId);
+          const artifact = await normalizedDependencies.experience?.getArtifact({
+            scope: auth.scope,
+            runId: runId(run.id),
+            artifactId: request.params.artifactId,
+          });
+          if (artifact === undefined || artifact.outcome === "not_found")
+            throw new ApiFailure("not_found");
+          if (
+            disposition === "preview" &&
+            !isPassivePreviewMediaType(artifact.artifact.mediaType)
+          ) {
+            throw new ApiFailure("invalid_state");
+          }
+          const delivery = await normalizedDependencies.blobs?.presignDownload({
+            scope: { tenantId: auth.scope.tenantId },
+            blob: artifact.artifact.blob,
+            ttlSeconds: 300,
+            responseMediaType: artifact.artifact.mediaType,
+            delivery: disposition === "preview" ? "inline-preview" : "artifact-download",
+            ...(disposition === "download"
+              ? {
+                  downloadName: safeArtifactDownloadName(
+                    artifact.artifact.name,
+                    artifact.artifact.id,
+                  ),
+                }
+              : {}),
+          });
+          // 签发 URL 后再读取一次固定身份，避免成员撤销或发布状态变化时留下可用 URL。
+          const confirmed = await normalizedDependencies.experience?.getArtifact({
+            scope: auth.scope,
+            runId: runId(run.id),
+            artifactId: request.params.artifactId,
+          });
+          if (
+            delivery === undefined ||
+            confirmed === undefined ||
+            confirmed.outcome === "not_found" ||
+            !sameArtifactAuthorization(artifact.artifact, confirmed.artifact)
+          ) {
+            throw new ApiFailure("not_found");
+          }
+          return success(request, {
+            artifact: {
+              id: artifact.artifact.id,
+              tenantId: auth.scope.tenantId,
+              threadId: artifact.artifact.threadId,
+              runId: artifact.artifact.runId,
+              resourceVersionId: artifact.artifact.resourceVersionId,
+              name: artifact.artifact.name,
+              mediaType: artifact.artifact.mediaType,
+              sizeBytes: artifact.artifact.sizeBytes,
+              status: "published" as const,
+              createdAt: artifact.artifact.createdAt,
+              updatedAt: artifact.artifact.updatedAt,
+            },
+            url: validateArtifactDeliveryUrl(delivery),
+            expiresInSeconds: 300,
+            disposition,
+          });
+        },
+      );
+    }
+  }
+
   return app;
+}
+
+function sameArtifactAuthorization(
+  expected: RunExperienceArtifact,
+  confirmed: RunExperienceArtifact,
+): boolean {
+  return (
+    expected.authorizationRevision === confirmed.authorizationRevision &&
+    expected.tenantId === confirmed.tenantId &&
+    expected.threadId === confirmed.threadId &&
+    expected.runId === confirmed.runId &&
+    expected.id === confirmed.id &&
+    expected.resourceVersionId === confirmed.resourceVersionId &&
+    expected.name === confirmed.name &&
+    expected.mediaType === confirmed.mediaType &&
+    expected.sizeBytes === confirmed.sizeBytes &&
+    expected.createdAt === confirmed.createdAt &&
+    expected.updatedAt === confirmed.updatedAt &&
+    expected.blob.tenantId === confirmed.blob.tenantId &&
+    expected.blob.purpose === confirmed.blob.purpose &&
+    expected.blob.sha256 === confirmed.blob.sha256 &&
+    expected.blob.size === confirmed.blob.size &&
+    expected.blob.mediaType === confirmed.blob.mediaType &&
+    expected.blob.incarnationId === confirmed.blob.incarnationId &&
+    expected.blob.physicalObjectKey === confirmed.blob.physicalObjectKey
+  );
+}
+
+function isPassivePreviewMediaType(value: string): boolean {
+  const [rawBase, ...rawParameters] = value.split(";");
+  const base = rawBase?.trim().toLowerCase();
+  if (base === "text/plain") {
+    return rawParameters.every((parameter) =>
+      /^charset\s*=\s*(?:"(?:utf-8|us-ascii|iso-8859-1|windows-1252)"|(?:utf-8|us-ascii|iso-8859-1|windows-1252))$/iu.test(
+        parameter.trim(),
+      ),
+    );
+  }
+  return (
+    rawParameters.length === 0 &&
+    new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"]).has(
+      base ?? "",
+    )
+  );
+}
+
+/** 仅透传已由 RuntimeAgentEvent 协议声明的 agent 子类型，未知 payload 不能伪造公开事件类型。 */
+function publicEventType(kind: string, payload: Readonly<Record<string, unknown>>): string {
+  if (kind !== "agent_event") return kind;
+  const candidate = payload.type;
+  return typeof candidate === "string" && publicAgentEventTypes.has(candidate) ? candidate : kind;
+}
+
+function safeArtifactDownloadName(name: string, artifactId: string): string {
+  const normalized = Array.from(name.normalize("NFKC"))
+    .map((character) =>
+      /[\p{Cc}\p{Cf}]/u.test(character) || '/\\"*:<>?|'.includes(character) ? "_" : character,
+    )
+    .join("")
+    .replace(/[. ]+$/gu, "")
+    .trim();
+  return (normalized.length === 0 ? `artifact-${artifactId}` : normalized).slice(0, 180);
+}
+
+function validateArtifactDeliveryUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if (
+      (url.protocol !== "https:" && url.protocol !== "http:") ||
+      url.username ||
+      url.password ||
+      !url.host
+    ) {
+      throw new Error("invalid artifact URL");
+    }
+    return url.toString();
+  } catch {
+    throw new ApiFailure("dependency_unavailable");
+  }
 }

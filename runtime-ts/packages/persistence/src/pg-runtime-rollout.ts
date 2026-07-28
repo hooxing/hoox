@@ -243,7 +243,7 @@ async function lockActiveExecutionFence(
         AND attempt.thread_id=$3 AND attempt.run_id=$4
         AND attempt.workspace_id=$5 AND attempt.root_run_id=$6
         AND attempt.base_revision_id IS NOT DISTINCT FROM $7
-        AND attempt.status IN ('claimed','running','finalizing')
+        AND attempt.status IN ('claimed','running','finalizing','waiting')
         AND thread_state.created_by_user_id=$8
         AND claim.run_id=attempt.run_id AND claim.thread_id=attempt.thread_id
         AND claim.workspace_id=attempt.workspace_id AND claim.root_run_id=attempt.root_run_id
@@ -424,7 +424,7 @@ export class PgRuntimeRolloutRepository {
                 AND attempt.run_id=$3 AND attempt.thread_id=$4
                 AND attempt.workspace_id=$5 AND attempt.root_run_id=$6
                 AND attempt.base_revision_id IS NOT DISTINCT FROM $7
-                AND attempt.status IN ('claimed','running','finalizing')
+                AND attempt.status IN ('claimed','running','finalizing','waiting')
                 AND claim.run_id=attempt.run_id AND claim.thread_id=attempt.thread_id
                 AND claim.workspace_id=attempt.workspace_id
                 AND claim.root_run_id=attempt.root_run_id
@@ -981,7 +981,7 @@ export class PgRuntimeRolloutRepository {
                   AND attempt.thread_id=$2 AND attempt.run_id=$3
                   AND attempt.workspace_id=$7 AND attempt.root_run_id=$8
                   AND attempt.base_revision_id IS NOT DISTINCT FROM $9
-                  AND attempt.status IN ('claimed','running','finalizing')
+                  AND attempt.status IN ('claimed','running','finalizing','waiting')
                   AND thread_state.created_by_user_id=$6
                   AND claim.run_id=attempt.run_id AND claim.thread_id=attempt.thread_id
                   AND claim.workspace_id=attempt.workspace_id

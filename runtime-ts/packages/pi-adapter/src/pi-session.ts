@@ -135,6 +135,13 @@ class PiSessionControllerImpl implements PiSessionController {
     readonly messages: readonly unknown[];
   }) => void;
   #activeGeneration: number | undefined;
+  #activeTransaction:
+    | {
+        readonly generation: number;
+        readonly completion: Promise<void>;
+        readonly resolve: () => void;
+      }
+    | undefined;
   #nextGeneration = 1;
 
   constructor(
@@ -178,6 +185,15 @@ class PiSessionControllerImpl implements PiSessionController {
     const generation = this.#nextGeneration++;
     this.#providerFailure.begin(generation);
     this.#activeGeneration = generation;
+    let resolveCompletion: () => void = () => undefined;
+    const completion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+    this.#activeTransaction = {
+      generation,
+      completion,
+      resolve: resolveCompletion,
+    };
     try {
       const checkpoint = this.#checkpoint();
       try {
@@ -198,11 +214,22 @@ class PiSessionControllerImpl implements PiSessionController {
     } finally {
       this.#providerFailure.end(generation);
       if (this.#activeGeneration === generation) this.#activeGeneration = undefined;
+      if (this.#activeTransaction?.generation === generation) {
+        const transaction = this.#activeTransaction;
+        this.#activeTransaction = undefined;
+        transaction.resolve();
+      }
     }
   }
 
-  abort(): Promise<void> {
-    return this.#session.abort();
+  async abort(): Promise<void> {
+    // 只捕获调用 abort 时的 transaction；之后启动的新事务不属于本次同步屏障。
+    const transaction = this.#activeTransaction;
+    try {
+      await this.#session.abort();
+    } finally {
+      await transaction?.completion;
+    }
   }
 
   dispose(): void {

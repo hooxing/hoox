@@ -454,6 +454,9 @@ export class RunWorker {
         if (context.abortPromise) await context.abortPromise;
         const postModel = await this.stopPoint(context, cancellation);
         if (postModel) return await this.finishStopped(context, postModel, sandbox);
+        if (turn.kind === "context_too_large") {
+          return await this.recoverWithCleanup(context, sandbox, "CONTEXT_TOO_LARGE", cancellation);
+        }
         if (context.adapterRejected) {
           return await this.recoverWithCleanup(
             context,
@@ -1183,6 +1186,7 @@ function agentEvent(context: ExecutionContext, payload: RuntimeAgentEvent): Runt
 
 function sanitizeAgentEvent(event: RuntimeAgentEvent): RuntimeAgentEvent {
   if (event.type !== "error") return event;
+  if (event.code === "CONTEXT_TOO_LARGE") return { ...event, message: "上下文超出模型窗口" };
   const messages: Readonly<Record<typeof event.code, string>> = {
     ABORTED: "模型调用已中止",
     PROVIDER: "模型 Provider 调用失败",

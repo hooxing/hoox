@@ -141,4 +141,5 @@ jobs:
           DATABASE_RUNTIME_ROLE: m4_ci_runtime
           DATABASE_MIGRATOR_ROLE: m4_ci_migrator
           DATABASE_SCHEMA: m4_ci_runtime_schema
-        run: pnpm test:integration:m4
+        # M4 独立清理运行时依赖的 dist，以此回归验证黑盒不依赖其他 Job 或缓存遗留。
+        run: pnpm test:integration:m4:clean

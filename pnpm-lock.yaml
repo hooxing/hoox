@@ -188,6 +188,9 @@ importers:
       '@cube-runtime/context-policy':
         specifier: workspace:*
         version: link:../context-policy
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@cube-runtime/prompt-builder':
         specifier: workspace:*
         version: link:../prompt-builder

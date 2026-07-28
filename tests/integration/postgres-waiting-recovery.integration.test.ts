@@ -20,6 +20,8 @@ import {
   createTestingPgWaitingRecoveryStore,
   type PgWaitingRecoveryClaim,
   type PgWaitingRecoveryStore,
+  type TestingWaitingRecoveryEffectAdapter,
+  type TestingWaitingRecoveryReceiptVerifier,
   type TrustedWaitingRecoveryEffectRequest,
 } from "../../runtime-ts/packages/persistence/src/pg-waiting-recovery.js";
 import {
@@ -96,8 +98,10 @@ const effectProof = {
   providerSandboxId: `rebuilt_sandbox_${unique}`,
   generation: 1,
 };
-const effectAdapter = {
-  async execute(input: TrustedWaitingRecoveryEffectRequest) {
+class MutableEffectAdapter implements TestingWaitingRecoveryEffectAdapter {
+  async execute(
+    input: TrustedWaitingRecoveryEffectRequest,
+  ): ReturnType<TestingWaitingRecoveryEffectAdapter["execute"]> {
     effectRequests.push(input);
     providerEntered?.();
     if (providerBlock !== undefined) await providerBlock;
@@ -113,16 +117,20 @@ const effectAdapter = {
           : createHmac("sha256", receiptKey).update(responseDigest).digest("hex"),
       },
     };
-  },
-};
-const receiptVerifier = {
+  }
+}
+class MutableReceiptVerifier implements TestingWaitingRecoveryReceiptVerifier {
   verify(input: { receipt: { responseDigest: string; attestation: string } }) {
     return (
       input.receipt.attestation ===
       createHmac("sha256", receiptKey).update(input.receipt.responseDigest).digest("hex")
     );
-  },
-};
+  }
+}
+const effectAdapter = new MutableEffectAdapter();
+const receiptVerifier = new MutableReceiptVerifier();
+let replacedPrototypeExecuteCalls = 0;
+let replacedPrototypeVerifyCalls = 0;
 let schemaCreated = false;
 let roleCreated = false;
 let raceClaim!: PgWaitingRecoveryClaim;
@@ -168,6 +176,76 @@ async function appendWaitingCheckpointFact(nextCheckpointId: string): Promise<vo
       ],
     );
   });
+}
+
+async function holdPendingEffectRow(
+  nextCheckpointId: string,
+  intentId: string,
+  effect: "connect" | "create" | "materialize",
+): Promise<{ readonly release: () => void; readonly done: Promise<void> }> {
+  let release!: () => void;
+  let locked!: () => void;
+  let lockFailed!: (reason: unknown) => void;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const rowLocked = new Promise<void>((resolve, reject) => {
+    locked = resolve;
+    lockFailed = reject;
+  });
+  const done = withTenantTransaction(runtime, databaseContext, async (client) => {
+    const result = await client.query(
+      `SELECT 1 FROM waiting_recovery_effect_outbox
+        WHERE tenant_id=$1 AND checkpoint_id=$2 AND intent_id=$3 AND effect=$4
+          AND state='pending' FOR UPDATE`,
+      [scope.tenantId, nextCheckpointId, intentId, effect],
+    );
+    if (result.rowCount !== 1) throw new Error("未找到待阻塞的 pending effect 行");
+    locked();
+    await released;
+  });
+  void done.catch(lockFailed);
+  await rowLocked;
+  return { release, done };
+}
+
+async function waitUntilReserveOwnsCheckpoint(nextCheckpointId: string): Promise<void> {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try {
+      await withTenantTransaction(runtime, databaseContext, async (client) => {
+        await client.query("SET LOCAL lock_timeout='25ms'");
+        await client.query(
+          `SELECT 1 FROM waiting_recovery_checkpoints
+            WHERE tenant_id=$1 AND checkpoint_id=$2 FOR UPDATE`,
+          [scope.tenantId, nextCheckpointId],
+        );
+      });
+    } catch (error) {
+      if ((error as { readonly code?: string }).code === "55P03") return;
+      throw error;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("reserve 未在限时内持有 checkpoint 行锁");
+}
+
+async function waitUntilCheckpointDeadline(
+  nextCheckpointId: string,
+  deadline: "claim_expires_at" | "sandbox_expires_at",
+): Promise<void> {
+  for (let attempt = 0; attempt < 160; attempt += 1) {
+    const expired = await withTenantTransaction(runtime, databaseContext, (client) =>
+      client.query<{ expired: boolean }>(
+        `SELECT ${deadline}<=clock_timestamp() AS expired
+           FROM waiting_recovery_checkpoints
+          WHERE tenant_id=$1 AND checkpoint_id=$2`,
+        [scope.tenantId, nextCheckpointId],
+      ),
+    );
+    if (expired.rows[0]?.expired === true) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`reserve 等待期间 ${deadline} 未在限时内过期`);
 }
 
 beforeAll(async () => {
@@ -300,6 +378,14 @@ beforeAll(async () => {
   if (previousNodeEnvironment === undefined) delete process.env.NODE_ENV;
   else process.env.NODE_ENV = previousNodeEnvironment;
   store = createTestingPgWaitingRecoveryStore(runtime, effectAdapter, receiptVerifier, 30);
+  MutableEffectAdapter.prototype.execute = async () => {
+    replacedPrototypeExecuteCalls += 1;
+    return { outcome: "unknown" as const };
+  };
+  MutableReceiptVerifier.prototype.verify = () => {
+    replacedPrototypeVerifyCalls += 1;
+    return true;
+  };
   const compatiblePort: WaitingRecoveryStorePort = store;
   expect(compatiblePort).toBe(store);
   const recoveryModule = await import(
@@ -610,6 +696,8 @@ describe("waiting recovery PostgreSQL 事实源", () => {
     ).toEqual({ outcome: "unknown", effect: "create" });
     forgedReceipt = false;
     expect(effectRequests).toHaveLength(callsBefore + 1);
+    expect(replacedPrototypeExecuteCalls).toBe(0);
+    expect(replacedPrototypeVerifyCalls).toBe(0);
     expect(
       await store.execute({
         claim: acquired.claim,
@@ -852,6 +940,357 @@ describe("waiting recovery PostgreSQL 事实源", () => {
       effect_state: "unknown",
       unknown_effect: "create",
     });
+  });
+
+  it("reserve 等待 outbox 行锁时 claim 租约过期，最终 CAS 禁止 provider 调用", async () => {
+    const reserveLeaseCheckpointId = `wait_reserve_lease_${unique}`;
+    await appendWaitingCheckpointFact(reserveLeaseCheckpointId);
+    expect(
+      await store.record({
+        scope,
+        attemptId,
+        checkpointId: reserveLeaseCheckpointId,
+        workspaceHeadAtWait: { outcome: "empty" },
+      }),
+    ).toBe("created");
+    const acquired = await store.claim({
+      scope,
+      attemptId,
+      checkpointId: reserveLeaseCheckpointId,
+      workerId: "reserve-lease-worker",
+    });
+    if (acquired.outcome !== "claimed") throw new Error("测试需要 reserve lease claim");
+    const intent = await store.beginEffect({
+      claim: acquired.claim,
+      decision: {
+        outcome: "resume",
+        workspace: "unchanged",
+        sandbox: { kind: "sandbox_rebuilt", reason: "missing" },
+      },
+      effect: "create",
+    });
+    if (intent.outcome !== "authorized") throw new Error("测试需要 reserve lease intent");
+    await withTenantTransaction(migrator, databaseContext, (client) =>
+      client.query(
+        `UPDATE waiting_recovery_checkpoints
+            SET claim_expires_at=clock_timestamp()+interval '500 milliseconds'
+          WHERE tenant_id=$1 AND checkpoint_id=$2`,
+        [scope.tenantId, reserveLeaseCheckpointId],
+      ),
+    );
+    const blocker = await holdPendingEffectRow(reserveLeaseCheckpointId, intent.intentId, "create");
+    const callsBefore = effectRequests.length;
+    const executing = store.execute({
+      claim: acquired.claim,
+      intentId: intent.intentId,
+      effect: "create",
+    });
+    await waitUntilReserveOwnsCheckpoint(reserveLeaseCheckpointId);
+    await waitUntilCheckpointDeadline(reserveLeaseCheckpointId, "claim_expires_at");
+    blocker.release();
+    await blocker.done;
+    expect(await executing).toEqual({ outcome: "claim_lost" });
+    expect(effectRequests).toHaveLength(callsBefore);
+    const pending = await withTenantTransaction(runtime, databaseContext, (client) =>
+      client.query<{ state: string }>(
+        `SELECT state FROM waiting_recovery_effect_outbox
+          WHERE tenant_id=$1 AND checkpoint_id=$2 AND intent_id=$3`,
+        [scope.tenantId, reserveLeaseCheckpointId, intent.intentId],
+      ),
+    );
+    expect(pending.rows[0]?.state).toBe("pending");
+    expect(
+      (
+        await store.claim({
+          scope,
+          attemptId,
+          checkpointId: reserveLeaseCheckpointId,
+          workerId: "reserve-lease-reconciler",
+        })
+      ).outcome,
+    ).toBe("resolved");
+  });
+
+  it("provider 进入后 claim 租约过期，只调用一次并收敛 UNKNOWN", async () => {
+    const postCasLeaseCheckpointId = `wait_post_cas_lease_${unique}`;
+    await appendWaitingCheckpointFact(postCasLeaseCheckpointId);
+    expect(
+      await store.record({
+        scope,
+        attemptId,
+        checkpointId: postCasLeaseCheckpointId,
+        workspaceHeadAtWait: { outcome: "empty" },
+      }),
+    ).toBe("created");
+    const acquired = await store.claim({
+      scope,
+      attemptId,
+      checkpointId: postCasLeaseCheckpointId,
+      workerId: "post-cas-lease-worker",
+    });
+    if (acquired.outcome !== "claimed") throw new Error("测试需要 post-CAS lease claim");
+    const intent = await store.beginEffect({
+      claim: acquired.claim,
+      decision: {
+        outcome: "resume",
+        workspace: "unchanged",
+        sandbox: { kind: "sandbox_rebuilt", reason: "missing" },
+      },
+      effect: "create",
+    });
+    if (intent.outcome !== "authorized") throw new Error("测试需要 post-CAS lease intent");
+    let releaseProvider!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      providerEntered = resolve;
+    });
+    providerBlock = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const callsBefore = effectRequests.length;
+    const executing = store.execute({
+      claim: acquired.claim,
+      intentId: intent.intentId,
+      effect: "create",
+    });
+    await entered;
+    await withTenantTransaction(migrator, databaseContext, (client) =>
+      client.query(
+        `UPDATE waiting_recovery_checkpoints
+            SET claim_expires_at=clock_timestamp()-interval '1 second'
+          WHERE tenant_id=$1 AND checkpoint_id=$2`,
+        [scope.tenantId, postCasLeaseCheckpointId],
+      ),
+    );
+    releaseProvider();
+    providerEntered = undefined;
+    providerBlock = undefined;
+    expect(await executing).toEqual({ outcome: "unknown", effect: "create" });
+    expect(effectRequests).toHaveLength(callsBefore + 1);
+    expect(
+      await store.execute({
+        claim: acquired.claim,
+        intentId: intent.intentId,
+        effect: "create",
+      }),
+    ).toEqual({ outcome: "claim_lost" });
+    expect(effectRequests).toHaveLength(callsBefore + 1);
+  });
+
+  it("reserve 等待 outbox 行锁时暖池 TTL 过期，最终 CAS 禁止 connect", async () => {
+    const cleanupIdempotencyKey = `pause-reserve-ttl-${unique}`;
+    await withTenantTransaction(runtime, databaseContext, async (client) => {
+      await client.query(
+        `UPDATE sandbox_registry
+            SET state='paused',actual_ttl_seconds=30,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND registry_id=$2`,
+        [scope.tenantId, effectProof.registryId],
+      );
+      await client.query(
+        `INSERT INTO cleanup_outbox(
+           tenant_id,attempt_id,idempotency_key,registry_id,provider_sandbox_id,state,armed,
+           identity_digest,disposition,payload,payload_digest,remote_call_started_at
+         ) VALUES($1,$2,$3,$4,$5,'completed',true,$6,'pause','{}'::jsonb,$7,clock_timestamp())`,
+        [
+          scope.tenantId,
+          attemptId,
+          cleanupIdempotencyKey,
+          effectProof.registryId,
+          effectProof.providerSandboxId,
+          "e".repeat(64),
+          "f".repeat(64),
+        ],
+      );
+    });
+    const reserveTtlCheckpointId = `wait_reserve_ttl_${unique}`;
+    await appendWaitingCheckpointFact(reserveTtlCheckpointId);
+    expect(
+      await store.record({
+        scope,
+        attemptId,
+        checkpointId: reserveTtlCheckpointId,
+        workspaceHeadAtWait: { outcome: "empty" },
+      }),
+    ).toBe("created");
+    const acquired = await store.claim({
+      scope,
+      attemptId,
+      checkpointId: reserveTtlCheckpointId,
+      workerId: "reserve-ttl-worker",
+    });
+    if (acquired.outcome !== "claimed") throw new Error("测试需要 reserve TTL claim");
+    const decision = {
+      outcome: "resume",
+      workspace: "unchanged",
+      sandbox: {
+        kind: "sandbox_reused",
+        registryId: effectProof.registryId,
+        generation: effectProof.generation,
+      },
+    } as const;
+    const intent = await store.beginEffect({ claim: acquired.claim, decision, effect: "connect" });
+    if (intent.outcome !== "authorized") throw new Error("测试需要 reserve TTL intent");
+    await withTenantTransaction(runtime, databaseContext, async (client) => {
+      await client.query(
+        `UPDATE sandbox_registry SET actual_ttl_seconds=1,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND registry_id=$2`,
+        [scope.tenantId, effectProof.registryId],
+      );
+      await client.query(
+        `WITH refreshed AS (
+           UPDATE cleanup_outbox SET updated_at=clock_timestamp()
+            WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key=$3
+            RETURNING updated_at
+         )
+         UPDATE waiting_recovery_checkpoints checkpoint
+            SET sandbox_paused_at=refreshed.updated_at,
+                sandbox_expires_at=refreshed.updated_at+interval '1 second'
+           FROM refreshed
+          WHERE checkpoint.tenant_id=$1 AND checkpoint.checkpoint_id=$4`,
+        [scope.tenantId, attemptId, cleanupIdempotencyKey, reserveTtlCheckpointId],
+      );
+    });
+    const blocker = await holdPendingEffectRow(reserveTtlCheckpointId, intent.intentId, "connect");
+    const callsBefore = effectRequests.length;
+    const executing = store.execute({
+      claim: acquired.claim,
+      intentId: intent.intentId,
+      effect: "connect",
+    });
+    await waitUntilReserveOwnsCheckpoint(reserveTtlCheckpointId);
+    await waitUntilCheckpointDeadline(reserveTtlCheckpointId, "sandbox_expires_at");
+    blocker.release();
+    await blocker.done;
+    expect(await executing).toEqual({ outcome: "claim_lost" });
+    expect(effectRequests).toHaveLength(callsBefore);
+    const pending = await withTenantTransaction(runtime, databaseContext, (client) =>
+      client.query<{ state: string }>(
+        `SELECT state FROM waiting_recovery_effect_outbox
+          WHERE tenant_id=$1 AND checkpoint_id=$2 AND intent_id=$3`,
+        [scope.tenantId, reserveTtlCheckpointId, intent.intentId],
+      ),
+    );
+    expect(pending.rows[0]?.state).toBe("pending");
+    await withTenantTransaction(migrator, databaseContext, (client) =>
+      client.query(
+        `UPDATE waiting_recovery_checkpoints
+            SET claim_expires_at=clock_timestamp()-interval '1 second'
+          WHERE tenant_id=$1 AND checkpoint_id=$2`,
+        [scope.tenantId, reserveTtlCheckpointId],
+      ),
+    );
+    expect(
+      (
+        await store.claim({
+          scope,
+          attemptId,
+          checkpointId: reserveTtlCheckpointId,
+          workerId: "reserve-ttl-reconciler",
+        })
+      ).outcome,
+    ).toBe("resolved");
+  });
+
+  it("provider 进入后暖池 TTL 过期，connect 只调用一次并收敛 UNKNOWN", async () => {
+    const cleanupIdempotencyKey = `pause-post-cas-ttl-${unique}`;
+    await withTenantTransaction(runtime, databaseContext, async (client) => {
+      await client.query(
+        `UPDATE sandbox_registry
+            SET state='paused',actual_ttl_seconds=30,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND registry_id=$2`,
+        [scope.tenantId, effectProof.registryId],
+      );
+      await client.query(
+        `INSERT INTO cleanup_outbox(
+           tenant_id,attempt_id,idempotency_key,registry_id,provider_sandbox_id,state,armed,
+           identity_digest,disposition,payload,payload_digest,remote_call_started_at
+         ) VALUES($1,$2,$3,$4,$5,'completed',true,$6,'pause','{}'::jsonb,$7,clock_timestamp())`,
+        [
+          scope.tenantId,
+          attemptId,
+          cleanupIdempotencyKey,
+          effectProof.registryId,
+          effectProof.providerSandboxId,
+          "1".repeat(64),
+          "2".repeat(64),
+        ],
+      );
+    });
+    const postCasTtlCheckpointId = `wait_post_cas_ttl_${unique}`;
+    await appendWaitingCheckpointFact(postCasTtlCheckpointId);
+    expect(
+      await store.record({
+        scope,
+        attemptId,
+        checkpointId: postCasTtlCheckpointId,
+        workspaceHeadAtWait: { outcome: "empty" },
+      }),
+    ).toBe("created");
+    const acquired = await store.claim({
+      scope,
+      attemptId,
+      checkpointId: postCasTtlCheckpointId,
+      workerId: "post-cas-ttl-worker",
+    });
+    if (acquired.outcome !== "claimed") throw new Error("测试需要 post-CAS TTL claim");
+    const decision = {
+      outcome: "resume",
+      workspace: "unchanged",
+      sandbox: {
+        kind: "sandbox_reused",
+        registryId: effectProof.registryId,
+        generation: effectProof.generation,
+      },
+    } as const;
+    const intent = await store.beginEffect({ claim: acquired.claim, decision, effect: "connect" });
+    if (intent.outcome !== "authorized") throw new Error("测试需要 post-CAS TTL intent");
+    let releaseProvider!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      providerEntered = resolve;
+    });
+    providerBlock = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const callsBefore = effectRequests.length;
+    const executing = store.execute({
+      claim: acquired.claim,
+      intentId: intent.intentId,
+      effect: "connect",
+    });
+    await entered;
+    await withTenantTransaction(runtime, databaseContext, async (client) => {
+      await client.query(
+        `UPDATE sandbox_registry SET actual_ttl_seconds=1,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND registry_id=$2`,
+        [scope.tenantId, effectProof.registryId],
+      );
+      await client.query(
+        `WITH refreshed AS (
+           UPDATE cleanup_outbox SET updated_at=clock_timestamp()
+            WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key=$3
+            RETURNING updated_at
+         )
+         UPDATE waiting_recovery_checkpoints checkpoint
+            SET sandbox_paused_at=refreshed.updated_at,
+                sandbox_expires_at=refreshed.updated_at+interval '1 second'
+           FROM refreshed
+          WHERE checkpoint.tenant_id=$1 AND checkpoint.checkpoint_id=$4`,
+        [scope.tenantId, attemptId, cleanupIdempotencyKey, postCasTtlCheckpointId],
+      );
+    });
+    await waitUntilCheckpointDeadline(postCasTtlCheckpointId, "sandbox_expires_at");
+    releaseProvider();
+    providerEntered = undefined;
+    providerBlock = undefined;
+    expect(await executing).toEqual({ outcome: "unknown", effect: "connect" });
+    expect(effectRequests).toHaveLength(callsBefore + 1);
+    expect(
+      await store.execute({
+        claim: acquired.claim,
+        intentId: intent.intentId,
+        effect: "connect",
+      }),
+    ).toEqual({ outcome: "claim_lost" });
+    expect(effectRequests).toHaveLength(callsBefore + 1);
   });
 
   it("pause UNKNOWN 由 registry/outbox 事实推导并禁止自动 create", async () => {

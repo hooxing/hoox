@@ -3,6 +3,7 @@ import {
   CopyObjectCommand,
   DeleteObjectCommand,
   GetObjectCommand,
+  HeadBucketCommand,
   HeadObjectCommand,
   PutObjectCommand,
   S3Client,
@@ -653,6 +654,17 @@ export function createS3BlobStore(
   return new S3BlobStore(createAwsObjectClient(config), authorizations, config);
 }
 
+/** 生产 readiness 的真实 Bucket/凭据探针；只发 HEAD，不读取对象或响应正文。 */
+export async function probeS3BlobStore(config: CreateS3BlobStoreConfig): Promise<void> {
+  assertBucket(config.bucket);
+  const client = new S3Client(awsClientConfig(config));
+  try {
+    await client.send(new HeadBucketCommand({ Bucket: config.bucket }));
+  } finally {
+    client.destroy();
+  }
+}
+
 export function createS3StableBlobGarbageCollector(
   config: CreateS3BlobStoreConfig,
   claims: StableBlobGcClaimPort,
@@ -821,13 +833,7 @@ function assertDeletionContinuation(
 }
 
 function createAwsObjectClient(config: CreateS3BlobStoreConfig): S3ObjectClient {
-  const credentials = credentialsFrom(config);
-  const clientConfig: S3ClientConfig = {
-    region: config.region,
-    forcePathStyle: config.forcePathStyle ?? false,
-    ...(config.endpoint === undefined ? {} : { endpoint: config.endpoint }),
-    ...(credentials === undefined ? {} : { credentials }),
-  };
+  const clientConfig = awsClientConfig(config);
   const client = new S3Client(clientConfig);
   // Worker 可走 Docker 内部 endpoint，而下载签名必须使用浏览器可访问的 public endpoint。
   const presignClient =
@@ -835,6 +841,16 @@ function createAwsObjectClient(config: CreateS3BlobStoreConfig): S3ObjectClient 
       ? client
       : new S3Client({ ...clientConfig, endpoint: config.publicEndpoint });
   return new AwsS3ObjectClient(client, presignClient, config.bucket);
+}
+
+function awsClientConfig(config: CreateS3BlobStoreConfig): S3ClientConfig {
+  const credentials = credentialsFrom(config);
+  return {
+    region: config.region,
+    forcePathStyle: config.forcePathStyle ?? false,
+    ...(config.endpoint === undefined ? {} : { endpoint: config.endpoint }),
+    ...(credentials === undefined ? {} : { credentials }),
+  };
 }
 
 class AwsS3ObjectClient implements S3ObjectClient {

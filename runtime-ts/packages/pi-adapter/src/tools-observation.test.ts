@@ -67,20 +67,21 @@ describe("受审 Tool 输出脱敏边界", () => {
     );
     const tool = observed.tools.find((item) => item.name === "sandbox_command");
     if (tool === undefined) throw new Error("测试缺少 sandbox_command");
-    const result = await tool.execute(
-      "call_secret",
-      { command: "false" },
-      undefined,
-      () => undefined,
-      {} as never,
-    );
+    await expect(
+      tool.execute(
+        "call_secret",
+        { command: "false" },
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("sandbox_untrusted");
     const output = await observed.outputs.readControlledReceipt({
       toolCallId: "call_secret",
       toolName: "sandbox_command",
     });
     expect(output).toContain("sandbox_untrusted");
     expect(output).not.toContain(secret);
-    expect(JSON.stringify(result)).not.toContain(secret);
     await expect(
       observed.outputs.readControlledReceipt({
         toolCallId: "call_secret",

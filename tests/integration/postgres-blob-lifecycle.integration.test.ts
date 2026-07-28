@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import { CopyObjectCommand, DeleteObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { encodeControlledToolReceipt, ToolObservationPipeline } from "@cube-runtime/context-policy";
 import {
@@ -9,15 +10,43 @@ import {
   threadId,
   userId,
 } from "@cube-runtime/domain";
-import type { ExecutionFence } from "@cube-runtime/run-contracts";
+import type {
+  ExecutionFence,
+  ExecutionScope,
+  SandboxSessionRegistryPort,
+} from "@cube-runtime/run-contracts";
+import { rolloutProjectionDigest } from "@cube-runtime/run-contracts/mutation-protocol";
+import { FakeSandboxGateway } from "@cube-runtime/sandbox/testing";
+import {
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxToolCall,
+  InMemoryCredentialStore,
+} from "@earendil-works/pi-ai";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPgDurableObservationSession } from "../../runtime-ts/apps/agent-worker/src/pg-observation-assembly.js";
+import { PiWorkerSessionFactory } from "../../runtime-ts/apps/agent-worker/src/pi-session-factory.js";
 import { startWorkerProcess } from "../../runtime-ts/apps/agent-worker/src/process-entry.js";
+import {
+  AgentWorkerPollingLoop,
+  SystemWorkerClock,
+} from "../../runtime-ts/apps/agent-worker/src/production-worker-runtime.js";
+import { RunWorker } from "../../runtime-ts/apps/agent-worker/src/run-worker.js";
+import {
+  FakeArtifactPublication,
+  FakeCancellationPort,
+  FakeRecoveryMetrics,
+  FakeRevisionVerifier,
+} from "../../runtime-ts/apps/agent-worker/src/testing/fakes.js";
 import {
   createS3BlobStore,
   createS3RetiredBlobTombstoneScrubber,
   createS3StableBlobGarbageCollector,
   createDurableTraceBlobPersistence,
+  PgBackedSandboxSessionRegistry,
+  PgExecutionPersistence,
+  PgRunDispatchOutbox,
   sha256Hex,
   transitionBlobCommit,
   type BlobCommitSnapshot,
@@ -330,31 +359,247 @@ async function preparePromotion(
 
 describe("PostgreSQL stable blob 生命周期", () => {
   it("生产 Agent Worker 入口装配真实 PG、S3 Observation 与 Pi 恢复依赖", async () => {
-    const service = await startWorkerProcess({
-      environment: {
-        RUNTIME_ENV: "production",
-        DATABASE_URL: runtimeDatabaseUrl,
-        DATABASE_SCHEMA: schema,
-        S3_ENDPOINT: requiredEnvironment("S3_ENDPOINT"),
-        S3_BUCKET: requiredEnvironment("S3_BUCKET"),
-        S3_REGION: requiredEnvironment("S3_REGION"),
-        S3_ACCESS_KEY_ID: requiredEnvironment("S3_ACCESS_KEY_ID"),
-        S3_SECRET_ACCESS_KEY: requiredEnvironment("S3_SECRET_ACCESS_KEY"),
-        S3_FORCE_PATH_STYLE: "true",
-        CUBESANDBOX_API_URL: "http://sandbox.invalid",
-        CUBESANDBOX_TEMPLATE_ID: "integration-template",
-        MODEL_BASE_URL: "https://model.invalid/v1",
-        MODEL_API_KEY: "integration-model-key",
-        MODEL_ID: "integration-model",
-        PROCESS_SHUTDOWN_TIMEOUT_MS: "5000",
-      },
+    const dependencyServer = createServer((request, response) => {
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/sandbox/v2/sandboxes") {
+        response.end("[]");
+        return;
+      }
+      if (request.url === "/model/v1/models") {
+        response.end(JSON.stringify({ data: [{ id: "integration-model" }] }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end("{}");
     });
+    await new Promise<void>((resolve, reject) => {
+      dependencyServer.once("error", reject);
+      dependencyServer.listen(0, "127.0.0.1", resolve);
+    });
+    const address = dependencyServer.address();
+    if (address === null || typeof address === "string") throw new Error("依赖测试服务未监听 TCP");
+    let service: Awaited<ReturnType<typeof startWorkerProcess>> | undefined;
     try {
+      service = await startWorkerProcess({
+        environment: {
+          RUNTIME_ENV: "production",
+          DATABASE_URL: runtimeDatabaseUrl,
+          DATABASE_SCHEMA: schema,
+          S3_ENDPOINT: requiredEnvironment("S3_ENDPOINT"),
+          S3_BUCKET: requiredEnvironment("S3_BUCKET"),
+          S3_REGION: requiredEnvironment("S3_REGION"),
+          S3_ACCESS_KEY_ID: requiredEnvironment("S3_ACCESS_KEY_ID"),
+          S3_SECRET_ACCESS_KEY: requiredEnvironment("S3_SECRET_ACCESS_KEY"),
+          S3_FORCE_PATH_STYLE: "true",
+          CUBESANDBOX_API_URL: `http://127.0.0.1:${address.port}/sandbox`,
+          CUBESANDBOX_TEMPLATE_ID: "integration-template",
+          MODEL_BASE_URL: `http://127.0.0.1:${address.port}/model/v1/`,
+          MODEL_API_KEY: "integration-model-key",
+          MODEL_ID: "integration-model",
+          AGENT_WORKER_TENANT_ID: scopeA.tenantId,
+          AGENT_WORKER_ID: "integration-worker",
+          AGENT_WORKER_POLL_INTERVAL_MS: "100",
+          AGENT_WORKER_DISPATCH_LEASE_MS: "30000",
+          AGENT_WORKER_RUN_LEASE_MS: "30000",
+          PROCESS_SHUTDOWN_TIMEOUT_MS: "5000",
+        },
+      });
       await expect(service.readiness()).resolves.toEqual({ status: "ready" });
     } finally {
-      await service.close();
+      await service?.close();
+      await new Promise<void>((resolve, reject) =>
+        dependencyServer.close((error) => (error === undefined ? resolve() : reject(error))),
+      );
     }
   });
+
+  it.runIf(process.platform === "linux")(
+    "durable dispatch 经真实 PG RunWorker、Faux Pi 与 S3 Observation 完成生产消费闭环",
+    async () => {
+      const label = `worker_vertical_${unique}`;
+      const actorUserId = userId(`blob_user_a_${unique}`);
+      const executionScope = {
+        tenantId: tenantId(scopeA.tenantId),
+        threadId: threadId(`thread_${label}`),
+        runId: runId(`run_${label}`),
+        rootRunId: runId(`run_${label}`),
+        workspaceId: `workspace_${label}` as never,
+      } satisfies ExecutionScope;
+      const initialProjection = Object.freeze({
+        schemaVersion: 2 as const,
+        checkpointId: "initial",
+        items: Object.freeze([]),
+      });
+      const inputText = "执行一次受控命令后完成";
+      await withTenantTransaction(
+        runtimePool,
+        { tenantId: scopeA.tenantId, userId: actorUserId },
+        async (client) => {
+          await client.query(
+            `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
+             VALUES ($1,$2,$3,'Worker 纵向测试','active',clock_timestamp(),clock_timestamp())`,
+            [scopeA.tenantId, executionScope.threadId, actorUserId],
+          );
+          await client.query(
+            `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
+             VALUES ($1,$2,$3,'queued',clock_timestamp(),clock_timestamp())`,
+            [scopeA.tenantId, executionScope.runId, executionScope.threadId],
+          );
+          await client.query(
+            `INSERT INTO workspaces(tenant_id,id,thread_id,created_at,updated_at)
+             VALUES ($1,$2,$3,clock_timestamp(),clock_timestamp())`,
+            [scopeA.tenantId, executionScope.workspaceId, executionScope.threadId],
+          );
+          await client.query(
+            `INSERT INTO run_execution_inputs(
+               tenant_id,run_id,thread_id,workspace_id,root_run_id,input_text,
+               initial_projection,initial_projection_digest)
+             VALUES ($1,$2,$3,$4,$2,$5,$6::jsonb,$7)`,
+            [
+              scopeA.tenantId,
+              executionScope.runId,
+              executionScope.threadId,
+              executionScope.workspaceId,
+              inputText,
+              JSON.stringify(initialProjection),
+              rolloutProjectionDigest(initialProjection),
+            ],
+          );
+          await client.query(
+            `INSERT INTO run_dispatch_outbox(
+               tenant_id,outbox_id,run_id,thread_id,workspace_id,root_run_id,input_digest,state)
+             VALUES ($1,$2,$3,$4,$5,$3,$6,'ready')`,
+            [
+              scopeA.tenantId,
+              randomUUID(),
+              executionScope.runId,
+              executionScope.threadId,
+              executionScope.workspaceId,
+              createHash("sha256").update(inputText, "utf8").digest("hex"),
+            ],
+          );
+        },
+      );
+
+      const gateway = new FakeSandboxGateway();
+      let sandboxSequence = 0;
+      const upstream: SandboxSessionRegistryPort = {
+        acquire: async ({ signal }) => {
+          const sandbox = await gateway.create(
+            { templateId: "worker-vertical-template", ttlSeconds: 120 },
+            { signal },
+          );
+          sandboxSequence += 1;
+          return {
+            outcome: "ready",
+            session: {
+              registryId: `registry-${label}-${sandboxSequence}`,
+              providerSandboxId: sandbox.id,
+              mode: "created",
+              sandbox,
+            },
+          };
+        },
+        settle: async ({ session, disposition }) => {
+          if (disposition === "pause") await session.sandbox.pause();
+          else await session.sandbox.kill({ ignoreNotFound: true });
+          return { outcome: "settled" };
+        },
+      };
+      const faux = fauxProvider({
+        api: `worker-vertical-${unique}`,
+        provider: `worker-vertical-${unique}`,
+        tokensPerSecond: 10_000,
+      });
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall("sandbox_command", { command: "printf vertical" }, { id: `call_${label}` }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("完成"),
+      ]);
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      modelRuntime.registerNativeProvider(faux.provider);
+      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const blobRepository = new PgBlobLifecycleRepository(runtimePool, {
+        objectPrefix: prefix,
+      });
+      const durableObservation = createPgDurableObservationSession({
+        blobRepository,
+        blobs: createS3BlobStore(minioConfig(), blobRepository),
+        rolloutRepository: new PgRuntimeRolloutRepository(runtimePool),
+        policy: { maxModelObservationBytes: 64 },
+      });
+      const sessions = new PiWorkerSessionFactory(
+        faux.getModel(),
+        modelRuntime,
+        durableObservation.createRecorder,
+        undefined,
+        undefined,
+        durableObservation.prepare,
+      );
+      const sandboxes = new PgBackedSandboxSessionRegistry(runtimePool, upstream, 120);
+      const worker = new RunWorker(
+        {
+          persistence: new PgExecutionPersistence(runtimePool),
+          revisions: new FakeRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions,
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new SystemWorkerClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        { workerId: `worker-${label}`, leaseDurationMs: 30_000, heartbeatMs: 10_000 },
+      );
+      const loop = new AgentWorkerPollingLoop(new PgRunDispatchOutbox(runtimePool), worker, {
+        tenantId: scopeA.tenantId,
+        workerId: `dispatcher-${label}`,
+        pollIntervalMs: 25,
+        dispatchLeaseMs: 30_000,
+      });
+      loop.start();
+      try {
+        let status = "queued";
+        for (let index = 0; index < 200 && status !== "succeeded"; index += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          status = await withTenantTransaction(
+            runtimePool,
+            { tenantId: scopeA.tenantId },
+            async (client) =>
+              String(
+                (
+                  await client.query<{ status: string }>(
+                    "SELECT status FROM runs WHERE tenant_id=$1 AND id=$2",
+                    [scopeA.tenantId, executionScope.runId],
+                  )
+                ).rows[0]?.status,
+              ),
+          );
+        }
+        expect(status).toBe("succeeded");
+      } finally {
+        await loop.close();
+      }
+      expect(faux.state.callCount).toBe(2);
+      const facts = await withTenantTransaction(
+        runtimePool,
+        { tenantId: scopeA.tenantId, userId: actorUserId },
+        async (client) =>
+          client.query<{ kind: string; blob_reference_id: string | null }>(
+            `SELECT kind,blob_reference_id FROM runtime_rollout_entries
+              WHERE tenant_id=$1 AND run_id=$2 ORDER BY sequence`,
+            [scopeA.tenantId, executionScope.runId],
+          ),
+      );
+      expect(facts.rows.map((row) => row.kind)).toEqual(["tool_call", "tool_result"]);
+      expect(facts.rows[1]?.blob_reference_id).toMatch(/^trace-/u);
+    },
+  );
 
   it("真实 PG + MinIO 持久化 Trace 后追加 Rollout，并可在重启后幂等重放", async () => {
     const suffix = `observation_${unique}`;
@@ -367,17 +612,17 @@ describe("PostgreSQL stable blob 生命周期", () => {
         `root_${createHash("sha256").update(`attempt_${suffix}`, "utf8").digest("hex")}`,
       ),
     };
-    const context = { scope: rolloutScope, userId: userId(`blob_user_a_${unique}`) };
+    const actorUserId = userId(`blob_user_a_${unique}`);
     const workspaceId = `workspace_${suffix}`;
     const digest = sha256Digest(sha256Hex(new TextEncoder().encode("compatibility")));
     await withTenantTransaction(
       runtimePool,
-      { tenantId: scopeA.tenantId, userId: context.userId },
+      { tenantId: scopeA.tenantId, userId: actorUserId },
       async (client) => {
         await client.query(
           `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
          VALUES ($1,$2,$3,'Observation 集成测试','active',clock_timestamp(),clock_timestamp())`,
-          [scopeA.tenantId, rolloutScope.threadId, context.userId],
+          [scopeA.tenantId, rolloutScope.threadId, actorUserId],
         );
         await client.query(
           `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
@@ -407,6 +652,12 @@ describe("PostgreSQL stable blob 生命周期", () => {
             rolloutScope.threadId,
             workspaceId,
           ],
+        );
+        await client.query(
+          `INSERT INTO workspace_write_leases(
+             tenant_id,workspace_id,thread_id,root_run_id,epoch,expires_at)
+           VALUES ($1,$2,$3,$4,1,clock_timestamp()+interval '10 minutes')`,
+          [scopeA.tenantId, workspaceId, rolloutScope.threadId, rolloutScope.runId],
         );
         await client.query(
           `INSERT INTO execution_workspace_fences(
@@ -462,6 +713,16 @@ describe("PostgreSQL stable blob 生命周期", () => {
       },
     };
     const fence = fenceData as unknown as ExecutionFence;
+    const context = { scope: rolloutScope, userId: actorUserId, fence };
+    const observationBinding = {
+      ...fence.scope,
+      attemptId: rolloutScope.attemptId,
+      agentThreadId: rolloutScope.agentThreadId,
+      runClaimToken: fence.runClaim.token,
+      runClaimEpoch: fence.runClaim.epoch,
+      workspaceLeaseRootRunId: fence.workspaceLease.rootRunId,
+      workspaceLeaseEpoch: fence.workspaceLease.epoch,
+    };
     const sessionInput = {
       scope: fence.scope,
       fence,
@@ -504,13 +765,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
       { maxModelObservationBytes: 64 },
     );
     const command = {
-      binding: {
-        tenantId: context.scope.tenantId,
-        threadId: context.scope.threadId,
-        runId: context.scope.runId,
-        attemptId: context.scope.attemptId,
-        agentThreadId: context.scope.agentThreadId,
-      },
+      binding: observationBinding,
       idempotencyKey: `result.${suffix}`,
       toolCallId: `call_${suffix}`,
       toolName: "sandbox_command",
@@ -599,13 +854,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
     );
     await expect(
       boundary.record({
-        binding: {
-          tenantId: context.scope.tenantId,
-          threadId: context.scope.threadId,
-          runId: context.scope.runId,
-          attemptId: context.scope.attemptId,
-          agentThreadId: context.scope.agentThreadId,
-        },
+        binding: observationBinding,
         idempotencyKey: `boundary.result.${suffix}`,
         toolCallId: boundaryCallId,
         toolName: "sandbox_command",

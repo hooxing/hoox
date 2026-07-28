@@ -157,6 +157,13 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       ...sessionMaterial,
       rolloutProjection: recoveredProjection ?? input.rolloutProjection,
     });
+    try {
+      // Pi 构造可能执行异步初始化；返回可用 Session 前再次以同一 fence 进入 PG，关闭接管竞态窗口。
+      await this.prepareObservationSession?.(input, compatibility);
+    } catch (error) {
+      controller.dispose();
+      throw error;
+    }
     // 该订阅先于 RunWorker 的持久订阅注册，只负责证明 Pi 已真实发布 tool.started。
     const unsubscribeToolGate = controller.subscribe((event) => {
       if (event.type !== "tool.started") return;
@@ -249,8 +256,17 @@ export function createDurableObservationRecorderFactory(
       tenantId: binding.scope.tenantId,
       threadId: binding.scope.threadId,
       runId: binding.scope.runId,
+      rootRunId: binding.scope.rootRunId,
+      workspaceId: binding.scope.workspaceId,
+      ...(binding.scope.baseRevisionId === undefined
+        ? {}
+        : { baseRevisionId: binding.scope.baseRevisionId }),
       attemptId: binding.attemptId,
       agentThreadId: binding.agentThreadId,
+      runClaimToken: input.fence.runClaim.token,
+      runClaimEpoch: input.fence.runClaim.epoch,
+      workspaceLeaseRootRunId: input.fence.workspaceLease.rootRunId,
+      workspaceLeaseEpoch: input.fence.workspaceLease.epoch,
     });
     const pipeline = new ToolObservationPipeline(
       dependencies.traces,

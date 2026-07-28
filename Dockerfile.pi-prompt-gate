@@ -5,7 +5,9 @@ RUN corepack enable && corepack prepare pnpm@10.15.1 --activate
 WORKDIR /opt/runtime
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json tsconfig.base.json vitest.config.ts ./
+COPY vitest.integration.config.ts ./
 COPY runtime-ts ./runtime-ts
+COPY tests ./tests
 
 RUN pnpm install --frozen-lockfile && pnpm build
 RUN chown 1000:1000 /opt/runtime

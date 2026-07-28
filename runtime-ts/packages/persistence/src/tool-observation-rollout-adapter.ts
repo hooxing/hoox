@@ -98,7 +98,14 @@ function sameBinding(binding: ToolObservationBinding, context: TrustedRolloutCon
     binding.tenantId === scope.tenantId &&
     binding.threadId === scope.threadId &&
     binding.runId === scope.runId &&
+    binding.rootRunId === context.fence.scope.rootRunId &&
+    binding.workspaceId === context.fence.scope.workspaceId &&
+    binding.baseRevisionId === context.fence.scope.baseRevisionId &&
     binding.attemptId === scope.attemptId &&
-    binding.agentThreadId === scope.agentThreadId
+    binding.agentThreadId === scope.agentThreadId &&
+    binding.runClaimToken === context.fence.runClaim.token &&
+    binding.runClaimEpoch === context.fence.runClaim.epoch &&
+    binding.workspaceLeaseRootRunId === context.fence.workspaceLease.rootRunId &&
+    binding.workspaceLeaseEpoch === context.fence.workspaceLease.epoch
   );
 }

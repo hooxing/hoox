@@ -232,10 +232,13 @@ async function toolResult(
   ) {
     throw new ToolObservationPersistenceError(observation.outcome);
   }
+  if (outcome === "failed") {
+    // 只抛固定回执，Pi 才会产生 isError=true；原始 Sandbox 异常已在闭包内丢弃。
+    throw new Error(observation?.observation ?? text);
+  }
   return {
     content: [{ type: "text" as const, text: observation?.observation ?? text }],
     details: {},
-    ...(outcome === "failed" ? { isError: true } : {}),
   };
 }
 

@@ -1,18 +1,18 @@
 import { randomUUID } from "node:crypto";
-import {
-  type ArtifactPublicationPort,
-  type CancellationPort,
-  type ClockPort,
-  type ExecutionScope,
-  type HeartbeatTask,
-  type OrphanSandboxCleanupPort,
-  type RecoveryMetricsPort,
-  type SandboxAcquireResult,
-  type SandboxSessionRef,
-  type SandboxSessionRegistryPort,
-  type SandboxSettlementResult,
-  type ScheduledTask,
-  type WorkspaceRevisionVerifierPort,
+import type {
+  ArtifactPublicationPort,
+  CancellationPort,
+  ClockPort,
+  ExecutionScope,
+  HeartbeatTask,
+  OrphanSandboxCleanupPort,
+  RecoveryMetricsPort,
+  SandboxAcquireResult,
+  SandboxSessionRef,
+  SandboxSessionRegistryPort,
+  SandboxSettlementResult,
+  ScheduledTask,
+  WorkspaceRevisionVerifierPort,
 } from "@cube-runtime/run-contracts";
 import {
   CubeSandboxGateway,

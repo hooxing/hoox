@@ -49,13 +49,24 @@ export interface ToolObservationInput {
   readonly idempotencyKey: string;
   readonly toolCallId: string;
   readonly toolName: string;
-  /** Tool adapter 已经完成错误脱敏后的完整文本。 */
-  readonly output: string;
+  /** 只能由实际 Tool adapter 在完成错误脱敏后构造。 */
+  readonly trustedOutput: TrustedToolOutput;
+}
+
+declare const trustedToolOutputBrand: unique symbol;
+export type TrustedToolOutput = string & { readonly [trustedToolOutputBrand]: true };
+
+/** 这是进入 Observation 管线的显式信任边界；调用点必须先完成错误脱敏。 */
+export function trustedToolOutputFromSanitizedAdapter(output: string): TrustedToolOutput {
+  if (typeof output !== "string") throw new TypeError("Tool 输出必须是字符串");
+  return output as TrustedToolOutput;
 }
 
 export interface ToolObservationPolicy {
   /** 模型看到的 observation 的 UTF-8 总字节上限，包含“已保存”占位符。 */
   readonly maxModelObservationBytes: number;
+  /** Rollout body 独立硬上限；不得借模型预算放大持久事实。 */
+  readonly maxRolloutBodyBytes?: number;
 }
 
 export type ToolObservationResult =
@@ -68,6 +79,7 @@ export type ToolObservationResult =
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
+const PHYSICAL_KEY = /^[\x21-\x7e]{1,1024}$/u;
 const TRUNCATED_PREFIX = "[完整输出已保存，以下为截断内容]\n";
 
 /**
@@ -76,6 +88,7 @@ const TRUNCATED_PREFIX = "[完整输出已保存，以下为截断内容]\n";
  */
 export class ToolObservationPipeline {
   readonly #maxModelObservationBytes: number;
+  readonly #maxRolloutBodyBytes: number;
 
   constructor(
     private readonly traces: TraceBlobPersistencePort,
@@ -89,11 +102,12 @@ export class ToolObservationPipeline {
       throw new TypeError("模型 Observation UTF-8 预算必须是正整数");
     }
     this.#maxModelObservationBytes = policy.maxModelObservationBytes;
+    this.#maxRolloutBodyBytes = boundedRolloutBudget(policy.maxRolloutBodyBytes ?? 16 * 1024);
   }
 
   async record(input: ToolObservationInput): Promise<ToolObservationResult> {
     assertInput(input);
-    const bytes = Buffer.from(input.output, "utf8");
+    const bytes = Buffer.from(input.trustedOutput, "utf8");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const persisted = await this.traces.persistTrace({
       tenantId: input.tenantId,
@@ -107,24 +121,30 @@ export class ToolObservationPipeline {
     }
     assertPersistedTrace(input.tenantId, sha256, bytes.byteLength, persisted);
 
-    const rendered = renderObservation(input.output, this.#maxModelObservationBytes);
-    const body = Object.freeze({
-      schemaVersion: 1,
-      toolName: input.toolName,
-      rawOutputSha256: sha256,
-      rawOutputBytes: bytes.byteLength,
-      traceBlob: Object.freeze({
-        referenceId: persisted.referenceId,
-        incarnationId: persisted.blob.incarnationId,
-        physicalObjectKey: persisted.blob.physicalObjectKey,
-      }),
-      truncation: Object.freeze({
-        isTruncated: rendered.isTruncated,
-        ...(rendered.isTruncated ? { reason: "model_utf8_budget" } : {}),
-        modelVisibleBytes: Buffer.byteLength(rendered.observation, "utf8"),
-      }),
-      observation: rendered.observation,
-    });
+    const buildBody = (rendered: { readonly observation: string; readonly isTruncated: boolean }) =>
+      Object.freeze({
+        schemaVersion: 1,
+        toolName: input.toolName,
+        rawOutputSha256: sha256,
+        rawOutputBytes: bytes.byteLength,
+        traceBlob: Object.freeze({
+          referenceId: persisted.referenceId,
+          incarnationId: persisted.blob.incarnationId,
+        }),
+        truncation: Object.freeze({
+          isTruncated: rendered.isTruncated,
+          ...(rendered.isTruncated ? { reason: "model_utf8_budget_or_rollout_body_budget" } : {}),
+          modelVisibleBytes: Buffer.byteLength(rendered.observation, "utf8"),
+        }),
+        observation: rendered.observation,
+      });
+    const rendered = fitObservationToBothBudgets(
+      input.trustedOutput,
+      this.#maxModelObservationBytes,
+      this.#maxRolloutBodyBytes,
+      buildBody,
+    );
+    const body = buildBody(rendered);
     const appended = await this.rollout.appendToolResult({
       idempotencyKey: `${input.idempotencyKey}.rollout`,
       toolCallId: input.toolCallId,
@@ -154,7 +174,7 @@ function assertInput(input: ToolObservationInput): void {
   ] as const) {
     if (!SAFE_ID.test(value)) throw new TypeError(`${label}格式无效`);
   }
-  if (typeof input.output !== "string") throw new TypeError("Tool 输出必须是字符串");
+  if (typeof input.trustedOutput !== "string") throw new TypeError("Tool 输出必须来自受信适配边界");
 }
 
 function assertPersistedTrace(
@@ -172,7 +192,7 @@ function assertPersistedTrace(
     blob.sha256 !== sha256 ||
     blob.size !== size ||
     !SAFE_ID.test(blob.incarnationId) ||
-    blob.physicalObjectKey.length < 1 ||
+    !PHYSICAL_KEY.test(blob.physicalObjectKey) ||
     !SHA256.test(blob.sha256)
   ) {
     throw new Error("Trace Blob 持久化端口返回了无效 stable 身份");
@@ -185,7 +205,8 @@ function renderObservation(
 ): { readonly observation: string; readonly isTruncated: boolean } {
   const outputBytes = Buffer.byteLength(output, "utf8");
   if (outputBytes <= budget) return { observation: output, isTruncated: false };
-  const prefix = truncateUtf8(TRUNCATED_PREFIX, budget);
+  // 标记只有完整装得下才出现；返回半个“[”会误导模型且不构成有效协议。
+  const prefix = Buffer.byteLength(TRUNCATED_PREFIX, "utf8") <= budget ? TRUNCATED_PREFIX : "";
   const remainder = Math.max(0, budget - Buffer.byteLength(prefix, "utf8"));
   const content = truncateUtf8(output, remainder);
   const observation = `${prefix}${content}`;
@@ -193,6 +214,42 @@ function renderObservation(
   if (Buffer.byteLength(observation, "utf8") > budget)
     throw new Error("Observation 超出 UTF-8 预算");
   return { observation, isTruncated: true };
+}
+
+function boundedRolloutBudget(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 512 || value > 16 * 1024) {
+    throw new TypeError("Rollout body UTF-8 预算必须在 512 到 16384 字节之间");
+  }
+  return value;
+}
+
+function fitObservationToBothBudgets(
+  output: string,
+  modelBudget: number,
+  rolloutBudget: number,
+  bodyFor: (rendered: {
+    readonly observation: string;
+    readonly isTruncated: boolean;
+  }) => Readonly<Record<string, unknown>>,
+): { readonly observation: string; readonly isTruncated: boolean } {
+  let low = 0;
+  let high = modelBudget;
+  let best = renderObservation(output, 0);
+  while (low <= high) {
+    const candidateBudget = Math.floor((low + high) / 2);
+    const candidate = renderObservation(output, candidateBudget);
+    const size = Buffer.byteLength(JSON.stringify(bodyFor(candidate)), "utf8");
+    if (size <= rolloutBudget) {
+      best = candidate;
+      low = candidateBudget + 1;
+    } else {
+      high = candidateBudget - 1;
+    }
+  }
+  if (Buffer.byteLength(JSON.stringify(bodyFor(best)), "utf8") > rolloutBudget) {
+    throw new Error("Tool result metadata 无法装入 Rollout body 硬上限");
+  }
+  return best;
 }
 
 /** 按 Unicode code point 逐个加入，绝不切开 emoji 或其他 UTF-8 多字节字符。 */

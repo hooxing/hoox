@@ -1,10 +1,16 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { CopyObjectCommand, DeleteObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  ToolObservationPipeline,
+  trustedToolOutputFromSanitizedAdapter,
+} from "@cube-runtime/context-policy";
+import { agentThreadId, runId, sha256Digest, threadId, userId } from "@cube-runtime/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   createS3BlobStore,
   createS3RetiredBlobTombstoneScrubber,
   createS3StableBlobGarbageCollector,
+  createDurableTraceBlobPersistence,
   sha256Hex,
   transitionBlobCommit,
   type BlobCommitSnapshot,
@@ -14,6 +20,8 @@ import {
   type StagedBlobRef,
   type TenantBlobScope,
 } from "../../runtime-ts/packages/persistence/src/index.js";
+import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
+import { PgToolObservationRolloutAdapter } from "../../runtime-ts/packages/persistence/src/tool-observation-rollout-adapter.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
 import {
@@ -314,6 +322,137 @@ async function preparePromotion(
 }
 
 describe("PostgreSQL stable blob 生命周期", () => {
+  it("真实 PG + MinIO 持久化 Trace 后追加 Rollout，并可在重启后幂等重放", async () => {
+    const suffix = `observation_${unique}`;
+    const rolloutScope = {
+      tenantId: scopeA.tenantId,
+      threadId: threadId(`thread_${suffix}`),
+      runId: runId(`run_${suffix}`),
+      attemptId: `attempt_${suffix}`,
+      agentThreadId: agentThreadId(`agent_${suffix}`),
+    };
+    const context = { scope: rolloutScope, userId: userId(`blob_user_a_${unique}`) };
+    const workspaceId = `workspace_${suffix}`;
+    const digest = sha256Digest(sha256Hex(new TextEncoder().encode("compatibility")));
+    await withTenantTransaction(
+      runtimePool,
+      { tenantId: scopeA.tenantId, userId: context.userId },
+      async (client) => {
+        await client.query(
+          `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
+         VALUES ($1,$2,$3,'Observation 集成测试','active',clock_timestamp(),clock_timestamp())`,
+          [scopeA.tenantId, rolloutScope.threadId, context.userId],
+        );
+        await client.query(
+          `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
+         VALUES ($1,$2,$3,'running',clock_timestamp(),clock_timestamp())`,
+          [scopeA.tenantId, rolloutScope.runId, rolloutScope.threadId],
+        );
+        await client.query(
+          `INSERT INTO workspaces(tenant_id,id,thread_id,created_at,updated_at)
+         VALUES ($1,$2,$3,clock_timestamp(),clock_timestamp())`,
+          [scopeA.tenantId, workspaceId, rolloutScope.threadId],
+        );
+        await client.query(
+          `INSERT INTO run_execution_inputs(
+           tenant_id,run_id,thread_id,workspace_id,root_run_id,input_text,
+           initial_projection,initial_projection_digest)
+         VALUES ($1,$2,$3,$4,$2,'test','{}'::jsonb,$5)`,
+          [scopeA.tenantId, rolloutScope.runId, rolloutScope.threadId, workspaceId, digest],
+        );
+        await client.query(
+          `INSERT INTO execution_attempts(
+           tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,status,stage)
+         VALUES ($1,$2,$3,$4,$5,$3,'running','model_execution_started')`,
+          [
+            scopeA.tenantId,
+            rolloutScope.attemptId,
+            rolloutScope.runId,
+            rolloutScope.threadId,
+            workspaceId,
+          ],
+        );
+      },
+    );
+    const rollout = new PgRuntimeRolloutRepository(runtimePool);
+    expect(
+      await rollout.openRootStream({
+        context,
+        workspaceId,
+        rootRunId: rolloutScope.runId,
+        compatibility: {
+          modelId: "integration-model",
+          modelCompatibilityHash: digest,
+          promptPolicyHash: digest,
+          toolSchemaHash: digest,
+          skillManifestHash: digest,
+        },
+      }),
+    ).toBe("created");
+    expect(
+      (
+        await rollout.append({
+          context,
+          idempotencyKey: `call.${suffix}`,
+          entries: [
+            {
+              kind: "tool_call",
+              toolCallId: `call_${suffix}`,
+              body: { toolName: "sandbox_command" },
+            },
+          ],
+        })
+      ).outcome,
+    ).toBe("created");
+
+    const blobs = createS3BlobStore(minioConfig(), repository);
+    const pipeline = new ToolObservationPipeline(
+      createDurableTraceBlobPersistence(repository, blobs),
+      new PgToolObservationRolloutAdapter(rollout, context),
+      { maxModelObservationBytes: 64 },
+    );
+    const command = {
+      tenantId: scopeA.tenantId,
+      idempotencyKey: `result.${suffix}`,
+      toolCallId: `call_${suffix}`,
+      toolName: "sandbox_command",
+      trustedOutput: trustedToolOutputFromSanitizedAdapter("😀".repeat(1000)),
+    };
+    await expect(pipeline.record(command)).resolves.toMatchObject({
+      outcome: "recorded",
+      isTruncated: true,
+    });
+    const restarted = new ToolObservationPipeline(
+      createDurableTraceBlobPersistence(
+        new PgBlobLifecycleRepository(runtimePool, { objectPrefix: prefix }),
+        createS3BlobStore(
+          minioConfig(),
+          new PgBlobLifecycleRepository(runtimePool, { objectPrefix: prefix }),
+        ),
+      ),
+      new PgToolObservationRolloutAdapter(new PgRuntimeRolloutRepository(runtimePool), context),
+      { maxModelObservationBytes: 64 },
+    );
+    await expect(restarted.record(command)).resolves.toMatchObject({ outcome: "replayed" });
+    const restored = await rollout.loadRecovery({
+      context,
+      compatibility: {
+        modelId: "integration-model",
+        modelCompatibilityHash: digest,
+        promptPolicyHash: digest,
+        toolSchemaHash: digest,
+        skillManifestHash: digest,
+      },
+    });
+    expect(restored).toMatchObject({
+      outcome: "loaded",
+      tail: [
+        { kind: "tool_call", toolCallId: `call_${suffix}` },
+        { kind: "tool_result", toolCallId: `call_${suffix}`, isTruncated: true },
+      ],
+    });
+  });
+
   it("并发 reserve 原子去重，同 operation 可读回且跨 Tenant 隔离", async () => {
     const body = new TextEncoder().encode(`reserve-${unique}`);
     const stagedA1 = staged(scopeA, "reserve-a1", body);

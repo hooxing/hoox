@@ -1,5 +1,6 @@
 import type { ToolObservationRolloutPort } from "@cube-runtime/context-policy";
 import { sha256Digest } from "@cube-runtime/domain";
+import { PersistenceError } from "./errors.js";
 import type { RolloutEntryDraft } from "./pg-runtime-rollout.js";
 import type { PgRuntimeRolloutRepository, TrustedRolloutContext } from "./pg-runtime-rollout.js";
 
@@ -23,11 +24,22 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
       isTruncated: input.isTruncated,
       blob: { ...input.blob, sha256: sha256Digest(input.blob.sha256) },
     };
-    const result = await this.repository.append({
-      context: this.context,
-      idempotencyKey: input.idempotencyKey,
-      entries: [draft],
-    });
+    let result: Awaited<ReturnType<PgRuntimeRolloutRepository["append"]>>;
+    try {
+      result = await this.repository.append({
+        context: this.context,
+        idempotencyKey: input.idempotencyKey,
+        entries: [draft],
+      });
+    } catch (error) {
+      // 不向模型泄漏 SQL、约束名或连接信息；unknown 允许同幂等键安全读回。
+      if (
+        error instanceof PersistenceError &&
+        (error.code === "CONFLICT" || error.code === "CONSTRAINT_VIOLATION")
+      )
+        return { outcome: "conflict" };
+      return { outcome: "unknown" };
+    }
     switch (result.outcome) {
       case "created":
       case "replayed":

@@ -12,7 +12,7 @@
 
 `ToolObservationPipeline` 采用严格顺序：先将 UTF-8 原始输出经 `TraceBlobPersistencePort` 持久化为同租户 `stable/trace` Blob，校验 reference、摘要、大小、incarnation 与物理键，再生成 observation 并通过 `ToolObservationRolloutPort` 写入 `tool_result`。两个端口均使用派生的固定幂等键，因此进程重启/重放不改变事实。
 
-模型可见内容按 UTF-8 字节预算截断，并按 Unicode code point 迭代，不能切开多字节字符。预算包含截断占位符；极小预算允许 observation 为空或只有前缀的一部分。完整的工具调用配对、工具名、原始字节摘要、大小、截断原因及 Blob ref 始终写入 Rollout body，而不挤占模型预算。
+模型可见 payload 与 Rollout body 使用两套独立硬预算；后者不超过数据库的 16 KiB 约束。模型可见内容按 UTF-8 字节预算截断，并按 Unicode code point 迭代，不能切开多字节字符；这不是 grapheme cluster 契约，组合字符可能在 code point 边界分开。占位符必须完整装入，否则返回空字符串，绝不生成半个标记。完整的工具调用配对、工具名、原始字节摘要、大小、截断原因及受限 Blob ref 写入 Rollout body；不持久化不可信的物理对象键。
 
 Blob 返回 `unavailable`、`unknown` 或 `conflict` 时，不写 Rollout，不回传完整输出，也不显示“已保存”。Rollout 失败/未知时完整输出仍只保留在 Blob，调用方必须进行同一命令的幂等恢复，不能另造 observation。
 
@@ -24,8 +24,8 @@ Blob 返回 `unavailable`、`unknown` 或 `conflict` 时，不写 Rollout，不�
 
 ## 影响与可逆性
 
-该切片只定义应用核心与端口，不实现完整 Worker 装配。生产适配器必须把 `TraceBlobPersistencePort` 接到现有 PG Blob 生命周期 + MinIO/S3 promotion，并把 `ToolObservationRolloutPort` 接到 `PgRuntimeRolloutRepository.append` 的 `tool_result` 草稿；后者会再次校验同租户 stable/trace 引用。端口可替换，但不得改变“先 stable Blob，后 Rollout”的顺序。
+`DurableTraceBlobPersistenceAdapter` 与受审工厂已经把 `TraceBlobPersistencePort` 接到现有 PostgreSQL Blob commit/promotion 状态机和 S3/MinIO：暂存、引用提交、allocation、授权 promotion、stable HEAD/mark 与 staging 清理均以持久 snapshot 恢复。`PgToolObservationRolloutAdapter` 接到 `PgRuntimeRolloutRepository.append` 的 `tool_result` 草稿。Rollout 表通过 `(tenant_id, reference_id, state, purpose, sha256, size)` 复合外键绑定 `blob_references` 的 stable/trace 事实；适配器本身不以一次应用层查询冒充授权或完整性证明。前驱复合外键与 CHECK 约束保证 `tool_call` 后只能紧跟相同 `toolCallId` 的 `tool_result`。端口可替换，但不得改变“先 stable Blob，后 Rollout”的顺序。
 
 ## 验证
 
-单元测试覆盖大输出、Unicode、极小预算、Blob unknown、重放幂等键及跨租户伪造 Blob。后续接线时必须增加 PostgreSQL + MinIO 集成测试，验证真实 promotion、append replay 与 RLS。
+单元测试覆盖大输出、Unicode、极小预算、双预算、Blob unknown、重放幂等键及跨租户伪造 Blob。真实 PostgreSQL + MinIO 集成覆盖 Trace promotion、Rollout append 与进程级 adapter 重建后的同命令重放；既有 Rollout 集成继续覆盖配对、幂等冲突、跨租户 RLS 与 stable/trace 外键。

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   ToolObservationPipeline,
+  trustedToolOutputFromSanitizedAdapter,
   type StableTraceBlobIdentity,
   type ToolObservationRolloutPort,
   type TraceBlobPersistencePort,
@@ -62,7 +63,7 @@ function input(output: string) {
     idempotencyKey: "observation_command",
     toolCallId: callId,
     toolName: "sandbox_command",
-    output,
+    trustedOutput: trustedToolOutputFromSanitizedAdapter(output),
   };
 }
 function recorded(result: Awaited<ReturnType<ToolObservationPipeline["record"]>>) {
@@ -86,15 +87,15 @@ describe("Tool Observation Blob 截断切片", () => {
     expect(rollout.calls[0]?.body).toMatchObject({
       toolName: "sandbox_command",
       rawOutputSha256: digest(traces.calls[0]?.body ?? new Uint8Array()),
-      truncation: { reason: "model_utf8_budget" },
+      truncation: { reason: "model_utf8_budget_or_rollout_body_budget" },
     });
   });
 
   it("极小预算也不超字节上限，且不会切开 Unicode", async () => {
     const { subject } = pipeline(1);
     const result = await subject.record(input("😀x"));
-    expect(result).toMatchObject({ outcome: "recorded", isTruncated: true, observation: "[" });
-    expect(Buffer.byteLength(recorded(result).observation, "utf8")).toBe(1);
+    expect(result).toMatchObject({ outcome: "recorded", isTruncated: true, observation: "" });
+    expect(Buffer.byteLength(recorded(result).observation, "utf8")).toBe(0);
   });
 
   it("Blob 失败或未知时不写 Rollout，也不返回已保存的 observation", async () => {
@@ -124,5 +125,15 @@ describe("Tool Observation Blob 截断切片", () => {
       blob: { ...stable(value.body), tenantId: "tenant_other" },
     });
     await expect(subject.record(input("x"))).rejects.toThrow("无效 stable 身份");
+  });
+
+  it("模型预算与 Rollout 16KiB 预算独立生效，恶意物理键不进入 body", async () => {
+    const { subject, rollout } = pipeline(100_000);
+    const result = recorded(await subject.record(input("x".repeat(30_000))));
+    expect(Buffer.byteLength(result.observation, "utf8")).toBeLessThan(16 * 1024);
+    expect(Buffer.byteLength(JSON.stringify(rollout.calls[0]?.body), "utf8")).toBeLessThanOrEqual(
+      16 * 1024,
+    );
+    expect(JSON.stringify(rollout.calls[0]?.body)).not.toContain("trace/observation");
   });
 });

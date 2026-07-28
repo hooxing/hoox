@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ContextBudgetDecision } from "@cube-runtime/context-policy";
 import {
   type RolloutCompatibilityIdentity,
   type RuntimeRolloutCheckpoint,
@@ -6,6 +7,7 @@ import {
   sha256Digest,
 } from "@cube-runtime/domain";
 import {
+  assessSafePiSessionContext,
   type ControlledRolloutProjection,
   type CreateSafePiSessionOptions,
   createSafePiSession,
@@ -46,7 +48,8 @@ export type RuntimeRecoveryProjectionResult =
 export type RecoverSafePiSessionResult =
   | { readonly outcome: "session_created"; readonly controller: PiSessionController }
   | Exclude<RuntimeRolloutLoadRecoveryResult, { readonly outcome: "loaded" }>
-  | Extract<RuntimeRecoveryProjectionResult, { readonly outcome: "requires_tool_reconciliation" }>;
+  | Extract<RuntimeRecoveryProjectionResult, { readonly outcome: "requires_tool_reconciliation" }>
+  | Exclude<ContextBudgetDecision, { readonly outcome: "ready" }>;
 
 /** 恢复事实被篡改或已损坏时只公开稳定错误码，不回显正文、路径或内部身份。 */
 export class RuntimeRecoveryError extends Error {
@@ -74,6 +77,13 @@ export async function recoverSafePiSession(
   assertCompatibility(currentCompatibility, loaded.recordedCompatibility);
   const projected = projectLoadedRuntimeRecovery(loaded);
   if (projected.outcome !== "ready") return projected;
+  // 先做模型感知预算，再创建 Pi；超窗事实保留在 Rollout 中，调用方获得可处理的稳定结果。
+  const budget = assessSafePiSessionContext({
+    ...sessionOptions,
+    rolloutProjection: projected.projection,
+  });
+  if (budget.outcome === "context_too_large") return budget;
+  if (budget.outcome === "rebuild_required") return budget;
   const controller = await createSafePiSession({
     ...sessionOptions,
     rolloutProjection: projected.projection,
@@ -153,6 +163,10 @@ function safeSessionOptions(
     ...(options.artifactToolRouter === undefined
       ? {}
       : { artifactToolRouter: options.artifactToolRouter }),
+    ...(options.contextTokenizer === undefined
+      ? {}
+      : { contextTokenizer: options.contextTokenizer }),
+    ...(options.contextBudget === undefined ? {} : { contextBudget: options.contextBudget }),
   };
 }
 

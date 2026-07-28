@@ -188,6 +188,22 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
     });
   });
 
+  it("恢复入口在创建 Pi 前返回结构化 context_too_large，不调用 compaction 或静默截断", async () => {
+    const harness = await sessionHarness();
+    const result = await recoverSafePiSession({
+      ...harness.options,
+      contextBudget: { safetyMarginRatio: 1, recoveryMarginRatio: 1 },
+      loadRecovery: async (current) => ({
+        ...loaded([entry(0, "user", { text: "不可丢失的历史事实" })]),
+        recordedCompatibility: current,
+      }),
+    });
+    expect(result).toMatchObject({
+      outcome: "context_too_large",
+      reason: "reserved_context_exceeds_window",
+    });
+  });
+
   it.runIf(process.platform === "linux")(
     "Linux Faux Pi 从 PG loaded 形状创建全新 Session，且无 compaction 入口",
     async () => {

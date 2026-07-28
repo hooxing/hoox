@@ -186,11 +186,13 @@ export type RuntimeEventV1 =
       readonly payload:
         | {
             readonly decision: "sandbox_reused";
+            readonly checkpointId: string;
             readonly registryId: string;
             readonly generation: number;
           }
         | {
             readonly decision: "sandbox_rebuilt";
+            readonly checkpointId: string;
             readonly reason:
               | "missing"
               | "ttl_expired"

@@ -31,7 +31,7 @@ function checkpoint(
   return {
     checkpointId: "checkpoint-waiting-1",
     scope,
-    workspaceHeadAtWait: revisionOne,
+    workspaceHeadAtWait: { outcome: "found", revisionId: revisionOne },
     sandbox: {
       registryId: "registry-1",
       providerSandboxId: "cube-1",
@@ -52,7 +52,7 @@ function checkpoint(
 function observation(patch: Partial<WaitingRecoveryObservation> = {}): WaitingRecoveryObservation {
   return {
     now: isoTimestamp("2026-07-28T00:09:59.999Z"),
-    currentWorkspaceHead: revisionOne,
+    currentWorkspaceHead: { outcome: "found", revisionId: revisionOne },
     canReplanWorkspaceChange: false,
     ...patch,
   };
@@ -96,14 +96,29 @@ describe("waiting + Sandbox 恢复决策", () => {
   it("用户并发修改 Workspace 时要求重算计划或返回结构化冲突", () => {
     const changed = workspaceRevisionId("revision-user-change");
     expect(
-      decideWaitingRecovery(checkpoint(), observation({ currentWorkspaceHead: changed })),
+      decideWaitingRecovery(
+        checkpoint(),
+        observation({ currentWorkspaceHead: { outcome: "found", revisionId: changed } }),
+      ),
     ).toEqual({ outcome: "workspace_conflict", expectedHead: revisionOne, actualHead: changed });
     expect(
       decideWaitingRecovery(
         checkpoint(),
-        observation({ currentWorkspaceHead: changed, canReplanWorkspaceChange: true }),
+        observation({
+          currentWorkspaceHead: { outcome: "found", revisionId: changed },
+          canReplanWorkspaceChange: true,
+        }),
       ),
     ).toMatchObject({ outcome: "resume", workspace: "replan" });
+  });
+
+  it("Workspace head 读取失败不能伪装成 empty/unchanged", () => {
+    expect(
+      decideWaitingRecovery(
+        checkpoint(),
+        observation({ currentWorkspaceHead: { outcome: "unavailable" } }),
+      ),
+    ).toEqual({ outcome: "workspace_head_unavailable", requestAutomaticRetry: false });
   });
 
   it.each(["pause", "connect", "create", "materialize"] as const)(
@@ -145,7 +160,12 @@ describe("waiting + Sandbox 恢复决策", () => {
         held = true;
         return {
           outcome: "claimed",
-          claim: { checkpoint: checkpoint(), claimToken: "claim-1" },
+          claim: {
+            checkpoint: checkpoint(),
+            claimToken: "claim-1",
+            claimEpoch: 1,
+            databaseNow: observation().now,
+          },
         };
       },
       async resolve(input) {
@@ -153,6 +173,20 @@ describe("waiting + Sandbox 恢复决策", () => {
         resolved = true;
         if (input.sandboxFact) facts.push(input.sandboxFact.kind);
         return "resolved";
+      },
+      async beginEffect() {
+        return { outcome: "authorized", intentId: "intent-1" };
+      },
+      async markUnknown() {
+        return "unknown";
+      },
+      async completeEffect() {
+        return "completed";
+      },
+    };
+    const effects = {
+      async execute() {
+        return { outcome: "succeeded" as const };
       },
     };
     const recover = (workerId: string) =>
@@ -162,6 +196,7 @@ describe("waiting + Sandbox 恢复决策", () => {
         checkpointId: "checkpoint-waiting-1",
         workerId,
         observation: observation(),
+        effects,
       });
     const results = await Promise.all([recover("worker-1"), recover("worker-2")]);
     expect(results.map((item) => item.outcome).sort()).toEqual(["busy", "decided"]);
@@ -175,5 +210,104 @@ describe("waiting + Sandbox 恢复决策", () => {
         observation(),
       ),
     ).toThrow("最多十分钟");
+  });
+
+  it("Store 返回错误 Scope 时协调器在副作用前拒绝", async () => {
+    let effectCalls = 0;
+    const foreign = checkpoint();
+    const store: WaitingRecoveryStorePort = {
+      async claim() {
+        return {
+          outcome: "claimed",
+          claim: {
+            claimToken: "foreign",
+            claimEpoch: 1,
+            databaseNow: observation().now,
+            checkpoint: {
+              ...foreign,
+              scope: { ...scope, threadId: threadId("thread-other") },
+            },
+          },
+        };
+      },
+      async beginEffect() {
+        throw new Error("不应调用");
+      },
+      async markUnknown() {
+        throw new Error("不应调用");
+      },
+      async completeEffect() {
+        throw new Error("不应调用");
+      },
+      async resolve() {
+        throw new Error("不应调用");
+      },
+    };
+    const result = await coordinateWaitingRecovery({
+      store,
+      scope,
+      checkpointId: foreign.checkpointId,
+      workerId: "worker",
+      observation: observation(),
+      effects: {
+        async execute() {
+          effectCalls += 1;
+          return { outcome: "succeeded" };
+        },
+      },
+    });
+    expect(result).toEqual({ outcome: "claim_lost" });
+    expect(effectCalls).toBe(0);
+  });
+
+  it("先提交 intent 再执行副作用，结果不明时只落 UNKNOWN", async () => {
+    const order: string[] = [];
+    const store: WaitingRecoveryStorePort = {
+      async claim() {
+        return {
+          outcome: "claimed",
+          claim: {
+            claimToken: "claim",
+            claimEpoch: 1,
+            databaseNow: observation().now,
+            checkpoint: checkpoint(),
+          },
+        };
+      },
+      async beginEffect() {
+        order.push("intent");
+        return { outcome: "authorized", intentId: "intent-unknown" };
+      },
+      async markUnknown(input) {
+        order.push(`unknown:${input.effect}`);
+        return "unknown";
+      },
+      async completeEffect() {
+        order.push("complete");
+        return "completed";
+      },
+      async resolve() {
+        order.push("resolve");
+        return "resolved";
+      },
+    };
+    const result = await coordinateWaitingRecovery({
+      store,
+      scope,
+      checkpointId: "checkpoint-waiting-1",
+      workerId: "worker",
+      observation: observation(),
+      effects: {
+        async execute() {
+          order.push("effect");
+          return { outcome: "unknown", effect: "connect" };
+        },
+      },
+    });
+    expect(order).toEqual(["intent", "effect", "unknown:connect"]);
+    expect(result).toMatchObject({
+      outcome: "decided",
+      decision: { outcome: "external_effect_unknown", requestAutomaticRetry: false },
+    });
   });
 });

@@ -8,7 +8,7 @@ import type { ExecutionScope } from "./ports.js";
 export interface WaitingRecoveryCheckpoint {
   readonly checkpointId: string;
   readonly scope: ExecutionScope;
-  readonly workspaceHeadAtWait?: WorkspaceRevisionId;
+  readonly workspaceHeadAtWait: Exclude<WorkspaceHeadObservation, { outcome: "unavailable" }>;
   readonly sandbox?: WarmSandboxCandidate;
 }
 
@@ -33,10 +33,15 @@ export interface WarmSandboxCandidate {
 
 export interface WaitingRecoveryObservation {
   readonly now: IsoTimestamp;
-  readonly currentWorkspaceHead?: WorkspaceRevisionId;
+  readonly currentWorkspaceHead: WorkspaceHeadObservation;
   /** 用户提交与 waiting 基线是否可由上层重新计算计划；false 时必须暴露结构化冲突。 */
   readonly canReplanWorkspaceChange: boolean;
 }
+
+export type WorkspaceHeadObservation =
+  | { readonly outcome: "found"; readonly revisionId: WorkspaceRevisionId }
+  | { readonly outcome: "empty" }
+  | { readonly outcome: "unavailable" };
 
 export type SandboxRecoveryFact =
   | { readonly kind: "sandbox_reused"; readonly registryId: string; readonly generation: number }
@@ -61,6 +66,7 @@ export type WaitingRecoveryDecision =
       readonly expectedHead?: WorkspaceRevisionId;
       readonly actualHead?: WorkspaceRevisionId;
     }
+  | { readonly outcome: "workspace_head_unavailable"; readonly requestAutomaticRetry: false }
   | {
       readonly outcome: "external_effect_unknown";
       readonly effect: "pause" | "connect" | "create" | "materialize";
@@ -70,6 +76,8 @@ export type WaitingRecoveryDecision =
 export interface WaitingRecoveryClaim {
   readonly checkpoint: WaitingRecoveryCheckpoint;
   readonly claimToken: string;
+  readonly claimEpoch: number;
+  readonly databaseNow: IsoTimestamp;
 }
 
 /** PostgreSQL 实现必须用唯一键 + CAS 保证同一 checkpoint 只有一个恢复者。 */
@@ -88,6 +96,36 @@ export interface WaitingRecoveryStorePort {
     /** 与 Agent event / Runtime Rollout 共用的确定事实；UNKNOWN 不伪造该事件。 */
     readonly sandboxFact?: SandboxRecoveryFact;
   }): Promise<"resolved" | "already_resolved" | "claim_lost">;
+  beginEffect(input: {
+    readonly claim: WaitingRecoveryClaim;
+    readonly decision: Extract<WaitingRecoveryDecision, { outcome: "resume" }>;
+    readonly observedWorkspaceHead: Exclude<WorkspaceHeadObservation, { outcome: "unavailable" }>;
+    readonly effect: "connect" | "create" | "materialize";
+  }): Promise<
+    | { readonly outcome: "authorized"; readonly intentId: string }
+    | { readonly outcome: "claim_lost" | "already_started" }
+  >;
+  markUnknown(input: {
+    readonly claim: WaitingRecoveryClaim;
+    readonly intentId: string;
+    readonly effect: "connect" | "create" | "materialize";
+  }): Promise<"unknown" | "claim_lost">;
+  completeEffect(input: {
+    readonly claim: WaitingRecoveryClaim;
+    readonly intentId: string;
+    readonly effect: "connect" | "create" | "materialize";
+  }): Promise<"completed" | "claim_lost">;
+}
+
+export interface WaitingRecoveryEffectPort {
+  execute(input: {
+    readonly intentId: string;
+    readonly decision: Extract<WaitingRecoveryDecision, { outcome: "resume" }>;
+    readonly effect: "connect" | "create" | "materialize";
+  }): Promise<
+    | { readonly outcome: "succeeded" }
+    | { readonly outcome: "unknown"; readonly effect: "connect" | "create" | "materialize" }
+  >;
 }
 
 export type WaitingRecoveryCoordinatorResult =
@@ -104,10 +142,88 @@ export async function coordinateWaitingRecovery(input: {
   readonly checkpointId: string;
   readonly workerId: string;
   readonly observation: WaitingRecoveryObservation;
+  readonly effects: WaitingRecoveryEffectPort;
 }): Promise<WaitingRecoveryCoordinatorResult> {
   const claimed = await input.store.claim(input);
   if (claimed.outcome !== "claimed") return { outcome: claimed.outcome };
-  const decision = decideWaitingRecovery(claimed.claim.checkpoint, input.observation);
+  if (!sameScope(claimed.claim.checkpoint.scope, input.scope)) {
+    return { outcome: "claim_lost" };
+  }
+  const decision = decideWaitingRecovery(claimed.claim.checkpoint, {
+    ...input.observation,
+    now: claimed.claim.databaseNow,
+  });
+  if (decision.outcome === "workspace_head_unavailable") {
+    const resolved = await input.store.resolve({ claim: claimed.claim, decision });
+    return resolved === "resolved"
+      ? { outcome: "decided", decision }
+      : { outcome: resolved === "already_resolved" ? "resolved" : "claim_lost" };
+  }
+  if (decision.outcome === "resume") {
+    const effectPlan =
+      decision.sandbox.kind === "sandbox_reused"
+        ? (["connect"] as const)
+        : (["create", "materialize"] as const);
+    for (const effectKind of effectPlan) {
+      // 每一个副作用都必须先有独立 intent；create 成功不能授权未持久化的 materialize。
+      const started = await input.store.beginEffect({
+        claim: claimed.claim,
+        decision,
+        observedWorkspaceHead: input.observation.currentWorkspaceHead as Exclude<
+          WorkspaceHeadObservation,
+          { outcome: "unavailable" }
+        >,
+        effect: effectKind,
+      });
+      if (started.outcome !== "authorized") {
+        return { outcome: started.outcome === "claim_lost" ? "claim_lost" : "busy" };
+      }
+      const effect = await input.effects.execute({
+        intentId: started.intentId,
+        decision,
+        effect: effectKind,
+      });
+      if (effect.outcome === "unknown") {
+        const marked = await input.store.markUnknown({
+          claim: claimed.claim,
+          intentId: started.intentId,
+          effect: effect.effect,
+        });
+        return marked === "unknown"
+          ? {
+              outcome: "decided",
+              decision: {
+                outcome: "external_effect_unknown",
+                effect: effect.effect,
+                requestAutomaticRetry: false,
+              },
+            }
+          : { outcome: "claim_lost" };
+      }
+      const completed = await input.store.completeEffect({
+        claim: claimed.claim,
+        intentId: started.intentId,
+        effect: effectKind,
+      });
+      if (completed !== "completed") {
+        const marked = await input.store.markUnknown({
+          claim: claimed.claim,
+          intentId: started.intentId,
+          effect: effectKind,
+        });
+        return marked === "unknown"
+          ? {
+              outcome: "decided",
+              decision: {
+                outcome: "external_effect_unknown",
+                effect: effectKind,
+                requestAutomaticRetry: false,
+              },
+            }
+          : { outcome: "claim_lost" };
+      }
+    }
+  }
   const sandboxFact = decision.outcome === "resume" ? decision.sandbox : undefined;
   const resolved = await input.store.resolve({
     claim: claimed.claim,
@@ -119,6 +235,17 @@ export async function coordinateWaitingRecovery(input: {
     : { outcome: resolved === "already_resolved" ? "resolved" : "claim_lost" };
 }
 
+function sameScope(left: ExecutionScope, right: ExecutionScope): boolean {
+  return (
+    left.tenantId === right.tenantId &&
+    left.threadId === right.threadId &&
+    left.runId === right.runId &&
+    left.rootRunId === right.rootRunId &&
+    left.workspaceId === right.workspaceId &&
+    left.baseRevisionId === right.baseRevisionId
+  );
+}
+
 /**
  * 纯决策核心：不调用 CubeSandbox、不读取本机 Session 文件，也不隐式重试未知副作用。
  * 调用方先以 PG CAS 取得 checkpoint 的恢复权，再执行本函数给出的唯一动作。
@@ -128,16 +255,19 @@ export function decideWaitingRecovery(
   observation: WaitingRecoveryObservation,
 ): WaitingRecoveryDecision {
   assertCheckpoint(checkpoint);
-  const workspaceChanged = checkpoint.workspaceHeadAtWait !== observation.currentWorkspaceHead;
+  const currentHead = observation.currentWorkspaceHead;
+  if (currentHead.outcome === "unavailable") {
+    return { outcome: "workspace_head_unavailable", requestAutomaticRetry: false };
+  }
+  const baselineHead = checkpoint.workspaceHeadAtWait;
+  const expectedHead = headRevision(baselineHead);
+  const actualHead = headRevision(currentHead);
+  const workspaceChanged = expectedHead !== actualHead;
   if (workspaceChanged && !observation.canReplanWorkspaceChange) {
     return {
       outcome: "workspace_conflict",
-      ...(checkpoint.workspaceHeadAtWait === undefined
-        ? {}
-        : { expectedHead: checkpoint.workspaceHeadAtWait }),
-      ...(observation.currentWorkspaceHead === undefined
-        ? {}
-        : { actualHead: observation.currentWorkspaceHead }),
+      ...(expectedHead === undefined ? {} : { expectedHead }),
+      ...(actualHead === undefined ? {} : { actualHead }),
     };
   }
   const workspace = workspaceChanged ? "replan" : "unchanged";
@@ -203,6 +333,12 @@ export function decideWaitingRecovery(
       generation: candidate.generation,
     },
   };
+}
+
+function headRevision(head: Exclude<WorkspaceHeadObservation, { outcome: "unavailable" }>):
+  | WorkspaceRevisionId
+  | undefined {
+  return head.outcome === "found" ? head.revisionId : undefined;
 }
 
 function assertCheckpoint(checkpoint: WaitingRecoveryCheckpoint): void {

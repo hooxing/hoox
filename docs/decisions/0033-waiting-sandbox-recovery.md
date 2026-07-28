@@ -24,9 +24,11 @@ Run 在向用户追问后进入 `waiting`。用户回答可能在另一进程、
 2. warm window 最多十分钟，只有 `now < expiresAt` 有效；恰好到期必须重建。
 3. 只有 Tenant、Thread、Workspace、base revision、session generation 全匹配且生命周期明确为 `paused` 时才复用。环境变量、进程和网络连接不参与判定。
 4. 恢复前重新读取 Workspace 最新 head。head 改变时，上层若能基于 Stable Blob 重算计划则标记 `replan`；不能重算时返回包含 expected/actual head 的结构化冲突。
-5. `pause/connect/create/materialize` 为 UNKNOWN 时进入显式恢复路径，不自动重试，不伪造成功事件。
-6. PostgreSQL 实现以 checkpoint 唯一键和 CAS 签发单一恢复权。胜者在同一持久提交中记录 `sandbox_reused` 或 `sandbox_rebuilt`；其他 Worker 返回 busy/resolved。
-7. 恢复输入只来自 PostgreSQL 与 Stable Blob；Pi Session 文件和 Sandbox 内状态不属于事实源。
+5. `pause/connect/create/materialize` 采用 intent/outbox Saga：先在持有有效数据库租约时提交副作用 intent，再调用外部系统，成功后才在同一事务线性化 `run_events`、Runtime Rollout 与 checkpoint 决定事实。不能把计划当成已复用/已重建事实。
+6. 任一外部调用为 UNKNOWN、或进程在 intent 后崩溃而缺少成功证明时，持久化 UNKNOWN 并停止自动重试；协调器不得重复 connect/create/materialize。
+7. PostgreSQL 实现以完整 Tenant/Thread/Run/Workspace/rootRun/baseRevision/checkpoint Scope 和 CAS 签发单一恢复权。租约、TTL 和 reclaim 使用数据库时钟。胜者提交确定事实，其他 Worker 返回 busy/resolved/claim_lost。
+8. Workspace head 使用 `found(revisionId)`、`empty`、`unavailable` 三态。waiting checkpoint 只接受 found/empty 严格基线；副作用前必须重新读取，unavailable 不能当成 empty 或 unchanged。
+9. 恢复输入只来自 PostgreSQL 与 Stable Blob；Pi Session 文件和 Sandbox 内状态不属于事实源。
 
 ## 影响
 
@@ -39,7 +41,8 @@ Run 在向用户追问后进入 `waiting`。用户回答可能在另一进程、
 
 - 纯决策契约覆盖 TTL 边界、generation 漂移、用户改文件、四类 UNKNOWN、重启和跨租户。
 - Fake CAS 覆盖并发双恢复只有一个确定事实。
-- PostgreSQL 适配任务必须补事务竞争、RLS、进程重启及 Stable Blob 校验失败集成测试；完成前不宣称生产 Worker 已装配。
+- `0012_waiting_recovery` 提供 checkpoint、claim lease 与 effect outbox 事实表，`PgWaitingRecoveryStore` 在受限 Tenant 事务中实现 record/claim/intent/UNKNOWN/resolve。
+- 生产 Worker 完整装配和 Stable Blob 内容校验仍是后续任务；完成前不宣称该切片可独立对外服务。
 
 ## 可逆性
 

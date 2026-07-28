@@ -1,3 +1,9 @@
+import { tenantId } from "@cube-runtime/domain";
+import {
+  createPostgresPool,
+  PgSandboxCleanupConsumerStore,
+  probePostgres,
+} from "@cube-runtime/persistence";
 import {
   booleanEnvironmentField,
   integerEnvironmentField,
@@ -12,12 +18,6 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
-import { tenantId } from "@cube-runtime/domain";
-import {
-  createPostgresPool,
-  PgSandboxCleanupConsumerStore,
-  probePostgres,
-} from "@cube-runtime/persistence";
 import { CubeSandboxGateway, resolveCubeProxyRouting } from "@cube-runtime/sandbox";
 import {
   CubeSandboxCleanupResolver,

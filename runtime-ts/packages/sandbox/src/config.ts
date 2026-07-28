@@ -46,7 +46,8 @@ export function resolveCubeProxyRouting(input: {
 } {
   const normalizedApiUrl = validateBaseUrl(input.apiUrl);
   const proxyNodeIp = input.proxyNodeIp ?? new URL(normalizedApiUrl).hostname;
-  const proxyScheme = input.proxyScheme ?? "http";
+  // 与受控 SDK 的默认语义保持一致：显式 scheme 优先；否则 443 使用 https，其余端口使用 http。
+  const proxyScheme = input.proxyScheme ?? (input.proxyPort === 443 ? "https" : "http");
   if (!proxyNodeIp.trim()) {
     throw new SandboxRuntimeError("INVALID_ARGUMENT", "CubeSandbox Proxy 节点地址不能为空");
   }

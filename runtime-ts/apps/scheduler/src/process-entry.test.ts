@@ -43,6 +43,27 @@ describe("Scheduler 进程入口", () => {
     ).rejects.toThrow("PRODUCTION_ASSEMBLY_UNAVAILABLE:scheduler");
   });
 
+  it("Scheduler 支持部分显式 Proxy 配置，显式 scheme 优先于 443 默认", () => {
+    expect(
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        CUBESANDBOX_PROXY_NODE_IP: "10.0.0.10",
+        CUBESANDBOX_PROXY_PORT: "443",
+      }).sandbox,
+    ).toMatchObject({
+      proxyNodeIp: "10.0.0.10",
+      proxyPort: 443,
+      proxyScheme: "https",
+    });
+    expect(
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        CUBESANDBOX_PROXY_PORT: "443",
+        CUBESANDBOX_PROXY_SCHEME: "http",
+      }).sandbox,
+    ).toMatchObject({ proxyNodeIp: "cube-api", proxyPort: 443, proxyScheme: "http" });
+  });
+
   it("未知变量严格失败", () => {
     expect(() =>
       parseSchedulerProcessEnvironment({ ...productionEnvironment(), UNUSED_FLAG: "true" }),

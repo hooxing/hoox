@@ -30,6 +30,23 @@ import {
   fakeSeed,
 } from "./testing/fakes.js";
 
+const fakeObservationRecorder = (
+  _input: unknown,
+  outputs: {
+    readSanitizedOutput(call: {
+      toolCallId: string;
+      toolName: string;
+    }): Promise<string | undefined>;
+  },
+) => ({
+  record: async (call: { toolCallId: string; toolName: string }) => {
+    const observation = await outputs.readSanitizedOutput(call);
+    return observation === undefined
+      ? ({ outcome: "conflict" } as const)
+      : ({ outcome: "recorded", observation, isTruncated: false } as const);
+  },
+});
+
 describe("PiWorkerSessionFactory 持久操作门控", () => {
   it.runIf(process.platform === "linux")(
     "真实 Pi tool.started 先提交，issue/consume 不被 heartbeat 插入且文件成功写入",
@@ -59,7 +76,11 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       });
       modelRuntime.registerNativeProvider(faux.provider);
       await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-      const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime);
+      const sessions = new PiWorkerSessionFactory(
+        faux.getModel(),
+        modelRuntime,
+        fakeObservationRecorder,
+      );
       persistence.beforePermitIssueReturn = (input) => {
         if (input.effect === "tool_execution") void clock.tickHeartbeat();
       };
@@ -215,6 +236,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       const sessions = new PiWorkerSessionFactory(
         faux.getModel(),
         modelRuntime,
+        fakeObservationRecorder,
         routerFactory,
         authority.issuer,
       );

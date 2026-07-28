@@ -66,6 +66,9 @@ importers:
       '@cube-runtime/artifact':
         specifier: workspace:*
         version: link:../../packages/artifact
+      '@cube-runtime/context-policy':
+        specifier: workspace:*
+        version: link:../../packages/context-policy
       '@cube-runtime/domain':
         specifier: workspace:*
         version: link:../../packages/domain

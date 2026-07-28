@@ -337,6 +337,7 @@ describe("Pi 安全适配", () => {
           modelRuntime,
           sandbox: new FakeSandboxHandle("platform-guard"),
           authorizeToolEffect: async () => immediateAuthorization(),
+          createToolObservationRecorder: fakeObservationRecorder,
         }),
       ).rejects.toThrow("仅支持 Linux");
     }
@@ -486,6 +487,7 @@ async function harness(
       authorizedCalls.push(input);
       return (await authorizeToolEffect?.(input)) ?? immediateAuthorization();
     },
+    createToolObservationRecorder: fakeObservationRecorder,
     ...(rolloutProjection === undefined ? {} : { rolloutProjection }),
     ...(untrustedPromptContent === undefined ? {} : { untrustedPromptContent }),
   });
@@ -506,6 +508,21 @@ async function harness(
     faux,
     toolAuthorizationCount: () => authorizationCount,
     authorizedCalls,
+  };
+}
+
+function fakeObservationRecorder(
+  outputs: Parameters<
+    Parameters<typeof createSafePiSession>[0]["createToolObservationRecorder"]
+  >[0],
+) {
+  return {
+    async record(input: { readonly toolCallId: string; readonly toolName: string }) {
+      const observation = await outputs.readSanitizedOutput(input);
+      return observation === undefined
+        ? ({ outcome: "conflict" } as const)
+        : ({ outcome: "recorded", observation, isTruncated: false } as const);
+    },
   };
 }
 

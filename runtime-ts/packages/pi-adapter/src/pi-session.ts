@@ -18,7 +18,7 @@ import {
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
 import {
-  createSandboxTools,
+  createObservedSandboxTools,
   SANDBOX_TOOL_NAMES,
   type SandboxToolEffectAuthorizer,
 } from "./tools.js";
@@ -107,6 +107,8 @@ export interface CreateSafePiSessionOptions {
   authorizeToolEffect: SandboxToolEffectAuthorizer["authorizeToolEffect"];
   /** 只有生产装配显式提供真实 Artifact/Resource 依赖时才注册，缺失时不伪造发布能力。 */
   artifactToolRouter?: ArtifactPiToolExecutorPort;
+  /** 必须绑定当前 Tenant/Attempt 的 durable Observation recorder；生产缺失时拒绝创建 Session。 */
+  createToolObservationRecorder: Parameters<typeof createObservedSandboxTools>[2];
 }
 
 /**
@@ -138,6 +140,9 @@ export async function createSafePiSession(
   options: CreateSafePiSessionOptions,
 ): Promise<PiSessionController> {
   assertLinuxWorkerPlatform();
+  if (typeof options.createToolObservationRecorder !== "function") {
+    throw new Error("生产 Pi Session 缺少 durable Tool Observation recorder");
+  }
   const settingsManager = SettingsManager.inMemory(
     {
       compaction: { enabled: false },
@@ -146,10 +151,15 @@ export async function createSafePiSession(
     { projectTrusted: false },
   );
 
-  const customTools = [
-    ...createSandboxTools(options.sandbox, {
+  const observedSandboxTools = createObservedSandboxTools(
+    options.sandbox,
+    {
       authorizeToolEffect: options.authorizeToolEffect,
-    }),
+    },
+    options.createToolObservationRecorder,
+  );
+  const customTools = [
+    ...observedSandboxTools.tools,
     ...(options.artifactToolRouter === undefined
       ? []
       : createArtifactPiTools(options.artifactToolRouter)),

@@ -12,6 +12,7 @@ import type {
   WorkspaceRevisionCommitPort,
   WorkspaceWriteScope,
 } from "@cube-runtime/domain";
+import type { StableBlobRef } from "./blob-store.js";
 
 /** 由认证/授权层构造；Repository 不接受裸 tenantId 作为业务查询上下文。 */
 export interface TenantScope {
@@ -146,6 +147,60 @@ export interface CoreRepositories {
   readonly threads: ThreadRepository;
   readonly runs: RunRepository;
   readonly workspaces: WorkspaceRepository;
+}
+
+/** 面向已认证用户的 Run 体验读取投影；实现必须在每次读取时重验 Membership。 */
+export interface RunExperienceReadPort {
+  listEvents(input: {
+    readonly scope: TenantScope;
+    readonly runId: Run["id"];
+    readonly after: number;
+    readonly limit: number;
+  }): Promise<
+    | {
+        readonly outcome: "found";
+        readonly attemptId?: string;
+        readonly events: readonly {
+          readonly sequence: number;
+          readonly kind: string;
+          readonly payload: Readonly<Record<string, unknown>>;
+          readonly occurredAt: string;
+        }[];
+      }
+    | { readonly outcome: "not_found" }
+  >;
+  listArtifacts(input: { readonly scope: TenantScope; readonly runId: Run["id"] }): Promise<
+    | {
+        readonly outcome: "found";
+        readonly artifacts: readonly RunExperienceArtifact[];
+      }
+    | { readonly outcome: "not_found" }
+  >;
+  getArtifact(input: {
+    readonly scope: TenantScope;
+    readonly runId: Run["id"];
+    readonly artifactId: string;
+  }): Promise<
+    | { readonly outcome: "found"; readonly artifact: RunExperienceArtifact }
+    | { readonly outcome: "not_found" }
+  >;
+}
+
+/** 仅暴露已完成的用户交付物和它已固定的 stable Blob 身份。 */
+export interface RunExperienceArtifact {
+  readonly id: string;
+  readonly tenantId: TenantId;
+  readonly runId: Run["id"];
+  readonly threadId: ThreadId;
+  readonly resourceVersionId: string;
+  readonly name: string;
+  readonly mediaType: string;
+  readonly sizeBytes: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  /** Membership 与发布终态的组合修订，用于预签名后的二次确认。 */
+  readonly authorizationRevision: string;
+  readonly blob: StableBlobRef;
 }
 
 export type { WorkspaceWriteScope };

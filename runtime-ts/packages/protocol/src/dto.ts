@@ -119,6 +119,8 @@ export const ArtifactDtoSchema = Type.Object(
     resourceVersionId: IdSchema,
     replacesArtifactId: Type.Optional(IdSchema),
     name: Type.String({ minLength: 1, maxLength: 255 }),
+    mediaType: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })),
+    sizeBytes: Type.Optional(Type.Integer({ minimum: 0 })),
     status: Type.Union([
       Type.Literal("publishing"),
       Type.Literal("published"),

@@ -19,13 +19,16 @@ import {
   type Workspace,
   workspaceId,
 } from "@cube-runtime/domain";
-import type {
-  ArchiveThreadCommandPort,
-  CoreRepositories,
-  TenantBundle,
-  TenantScope,
-  ThreadListPage,
-  Versioned,
+import {
+  type ArchiveThreadCommandPort,
+  type BlobStore,
+  BlobStoreError,
+  type CoreRepositories,
+  type RunExperienceReadPort,
+  type TenantBundle,
+  type TenantScope,
+  type ThreadListPage,
+  type Versioned,
 } from "@cube-runtime/persistence";
 import { afterEach, describe, expect, it } from "vitest";
 import { type ApiDependencies, createApiApp } from "./app.js";
@@ -74,6 +77,50 @@ class AsyncMutex {
 }
 
 const baseTime = isoTimestamp("2099-07-26T08:00:00.000Z");
+const alternateExperienceRunId = runId("run_2");
+const experienceArtifact = {
+  id: "artifact_1",
+  tenantId: tenantId("tenant_owner_a"),
+  runId: runId("run_1"),
+  threadId: threadId("thread_1"),
+  resourceVersionId: "resource_version_1",
+  name: "交付说明.txt",
+  mediaType: "text/plain",
+  sizeBytes: 42,
+  createdAt: baseTime,
+  updatedAt: baseTime,
+  authorizationRevision: "false:2099-07-26T08:00:00.000Z:2099-07-26T08:00:00.000Z",
+  blob: {
+    kind: "stable" as const,
+    tenantId: tenantId("tenant_owner_a"),
+    purpose: "resource" as const,
+    sha256: "a".repeat(64),
+    size: 42,
+    mediaType: "text/plain",
+    incarnationId: "00000000-0000-4000-8000-000000000001",
+    physicalObjectKey:
+      "agent-runtime/stable/tenant_owner_a/resource/sha256/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/incarnations/00000000-0000-4000-8000-000000000001",
+  },
+};
+
+const artifactConfirmationDrifts = [
+  "authorizationRevision",
+  "tenantId",
+  "threadId",
+  "runId",
+  "artifactId",
+  "resourceVersionId",
+  "mediaType",
+  "sizeBytes",
+  "blobTenantId",
+  "blobPurpose",
+  "blobSha256",
+  "blobSize",
+  "blobMediaType",
+  "blobIncarnationId",
+  "physicalObjectKey",
+] as const;
+type ArtifactConfirmationDrift = (typeof artifactConfirmationDrifts)[number];
 
 function key(scope: TenantScope, id: string): string {
   return `${scope.tenantId}:${id}`;
@@ -327,7 +374,16 @@ function teamBundle(input: {
   };
 }
 
-function fixture(options: { readonly enableCreate?: boolean } = {}) {
+function fixture(
+  options: {
+    readonly enableCreate?: boolean;
+    readonly enableExperience?: boolean;
+    readonly includeArtifact?: boolean;
+    readonly confirmationDrift?: ArtifactConfirmationDrift;
+    readonly artifactMediaType?: string;
+    readonly blobFailure?: BlobStoreError;
+  } = {},
+) {
   const state = new FakeApiState();
   const ownerA = personalBundle("owner_a");
   const ownerB = personalBundle("owner_b");
@@ -336,6 +392,15 @@ function fixture(options: { readonly enableCreate?: boolean } = {}) {
   let threadSequence = 0;
   let runSequence = 0;
   let workspaceSequence = 0;
+  let artifactReadCount = 0;
+  const configuredArtifact = {
+    ...experienceArtifact,
+    mediaType: options.artifactMediaType ?? experienceArtifact.mediaType,
+    blob: {
+      ...experienceArtifact.blob,
+      mediaType: options.artifactMediaType ?? experienceArtifact.blob.mediaType,
+    },
+  };
   const clock = new FakeClock();
   const dependencies: ApiDependencies = {
     auth: {
@@ -366,6 +431,116 @@ function fixture(options: { readonly enableCreate?: boolean } = {}) {
       run: () => runId(`run_${++runSequence}`),
       workspace: () => workspaceId(`workspace_${++workspaceSequence}`),
     },
+    ...(options.enableExperience === true
+      ? {
+          experience: {
+            listEvents: async ({ runId, after, limit }) => {
+              if (runId !== "run_1") return { outcome: "not_found" } as const;
+              return {
+                outcome: "found" as const,
+                attemptId: "attempt_1",
+                events: [
+                  {
+                    sequence: 1,
+                    kind: "attempt_state_changed",
+                    payload: { status: "running", stage: "model_execution_started" },
+                    occurredAt: baseTime,
+                  },
+                  {
+                    sequence: 2,
+                    kind: "agent_event",
+                    payload: { type: "message.delta", delta: "正在处理" },
+                    occurredAt: baseTime,
+                  },
+                ]
+                  .filter((event) => event.sequence > after)
+                  .slice(0, limit),
+              };
+            },
+            listArtifacts: async ({ runId }) =>
+              runId === "run_1"
+                ? {
+                    outcome: "found" as const,
+                    artifacts: options.includeArtifact ? [configuredArtifact] : [],
+                  }
+                : { outcome: "not_found" as const },
+            getArtifact: async ({ runId, artifactId }) => {
+              if (
+                runId !== "run_1" ||
+                !options.includeArtifact ||
+                artifactId !== configuredArtifact.id
+              ) {
+                return { outcome: "not_found" as const };
+              }
+              artifactReadCount += 1;
+              const confirmationDrift = options.confirmationDrift;
+              return {
+                outcome: "found" as const,
+                artifact:
+                  confirmationDrift !== undefined && artifactReadCount >= 2
+                    ? {
+                        ...configuredArtifact,
+                        ...(confirmationDrift === "authorizationRevision"
+                          ? {
+                              authorizationRevision: `${configuredArtifact.authorizationRevision}:changed`,
+                            }
+                          : {}),
+                        ...(confirmationDrift === "tenantId"
+                          ? { tenantId: tenantId("tenant_owner_b") }
+                          : {}),
+                        ...(confirmationDrift === "threadId"
+                          ? { threadId: threadId("thread_2") }
+                          : {}),
+                        ...(confirmationDrift === "runId"
+                          ? { runId: alternateExperienceRunId }
+                          : {}),
+                        ...(confirmationDrift === "artifactId" ? { id: "artifact_2" } : {}),
+                        ...(confirmationDrift === "resourceVersionId"
+                          ? { resourceVersionId: "resource_version_2" }
+                          : {}),
+                        ...(confirmationDrift === "mediaType"
+                          ? { mediaType: "application/pdf" }
+                          : {}),
+                        ...(confirmationDrift === "sizeBytes" ? { sizeBytes: 43 } : {}),
+                        blob: {
+                          ...configuredArtifact.blob,
+                          ...(confirmationDrift === "blobTenantId"
+                            ? { tenantId: tenantId("tenant_owner_b") }
+                            : {}),
+                          ...(confirmationDrift === "blobPurpose"
+                            ? { purpose: "preview" as const }
+                            : {}),
+                          ...(confirmationDrift === "blobSha256" ? { sha256: "b".repeat(64) } : {}),
+                          ...(confirmationDrift === "blobSize" ? { size: 43 } : {}),
+                          ...(confirmationDrift === "blobMediaType"
+                            ? { mediaType: "application/pdf" }
+                            : {}),
+                          ...(confirmationDrift === "blobIncarnationId"
+                            ? { incarnationId: "00000000-0000-4000-8000-000000000002" }
+                            : {}),
+                          ...(confirmationDrift === "physicalObjectKey"
+                            ? {
+                                physicalObjectKey: `${configuredArtifact.blob.physicalObjectKey}-changed`,
+                              }
+                            : {}),
+                        },
+                      }
+                    : configuredArtifact,
+              };
+            },
+          } satisfies RunExperienceReadPort,
+          ...(options.includeArtifact
+            ? {
+                blobs: {
+                  presignDownload: async () => {
+                    if (options.blobFailure !== undefined) throw options.blobFailure;
+                    return "http://127.0.0.1:19000/short-lived-download";
+                  },
+                } as unknown as BlobStore,
+              }
+            : {}),
+        }
+      : {}),
   };
   const app = createApiApp(dependencies, { logger: false });
   return { app, state, dependencies, ownerA, ownerB };
@@ -378,6 +553,225 @@ afterEach(async () => {
 });
 
 describe("Fastify API 契约", () => {
+  it("Run 事件按 sequence 增量读取，并维持 Thread/租户边界", async () => {
+    const { app, state } = fixture({ enableExperience: true });
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-events-0001" },
+      payload: { title: "事件任务" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-events-0001" },
+      payload: { input: "生成事件" },
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/events?after=1&limit=10",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toMatchObject({
+      attemptId: "attempt_1",
+      items: [
+        {
+          eventId: "attempt_1-2",
+          sequence: 2,
+          kind: "agent_event",
+          type: "message.delta",
+        },
+      ],
+    });
+    const initial = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/events?after=-1&limit=10",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(initial.json().data.items[0]).toMatchObject({
+      kind: "attempt_state_changed",
+      type: "attempt_state_changed",
+    });
+    const otherTenant = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/events",
+      headers: { authorization: "Bearer token-b" },
+    });
+    expect(otherTenant.statusCode).toBe(404);
+    expect(state.runs).toHaveLength(1);
+  });
+
+  it("Artifact 只经 Run 归属签发短期预览和下载 URL", async () => {
+    const { app } = fixture({ enableExperience: true, includeArtifact: true });
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-artifacts-0001" },
+      payload: { title: "交付物任务" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-artifacts-0001" },
+      payload: { input: "生成交付物" },
+    });
+    const list = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/artifacts",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(list.json().data.items).toHaveLength(1);
+    const preview = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/preview",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json().data).toMatchObject({ disposition: "preview", expiresInSeconds: 300 });
+    const wrongRun = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_2/artifacts/artifact_1/download",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(wrongRun.statusCode).toBe(404);
+  });
+
+  it.each(artifactConfirmationDrifts)(
+    "Artifact 签名后 %s 字段漂移时不返回 URL",
+    async (confirmationDrift) => {
+      const { app } = fixture({
+        enableExperience: true,
+        includeArtifact: true,
+        confirmationDrift,
+      });
+      openApps.push(app);
+      await app.inject({
+        method: "POST",
+        url: "/v1/threads",
+        headers: {
+          authorization: "Bearer token-a",
+          "idempotency-key": `artifact-${confirmationDrift}-thread`,
+        },
+        payload: { title: "交付物竞态" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/v1/threads/thread_1/runs",
+        headers: {
+          authorization: "Bearer token-a",
+          "idempotency-key": `artifact-${confirmationDrift}-run`,
+        },
+        payload: { input: "生成交付物" },
+      });
+      const response = await app.inject({
+        method: "GET",
+        url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/download",
+        headers: { authorization: "Bearer token-a" },
+      });
+      expect(response.statusCode).toBe(404);
+      expect(response.body).not.toContain("short-lived-download");
+    },
+  );
+
+  it("BlobStore 失败映射为稳定 503 且不泄漏内部消息", async () => {
+    const { app } = fixture({
+      enableExperience: true,
+      includeArtifact: true,
+      blobFailure: new BlobStoreError("BLOB_PROVIDER_ERROR", "credential-canary"),
+    });
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "blob-error-thread" },
+      payload: { title: "对象存储失败" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "blob-error-run" },
+      payload: { input: "生成交付物" },
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/download",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(response.statusCode).toBe(503);
+    expect(response.json().error.code).toBe("DEPENDENCY_UNAVAILABLE");
+    expect(response.body).not.toContain("credential-canary");
+  });
+
+  it.each(["text/html", "image/svg+xml", "application/xml"])(
+    "主动内容 %s 不能 inline 预览，但仍可 attachment 下载",
+    async (artifactMediaType) => {
+      const { app } = fixture({ enableExperience: true, includeArtifact: true, artifactMediaType });
+      openApps.push(app);
+      const mediaKey = artifactMediaType.replace(/[^A-Za-z0-9]/gu, "-");
+      await app.inject({
+        method: "POST",
+        url: "/v1/threads",
+        headers: {
+          authorization: "Bearer token-a",
+          "idempotency-key": `media-thread-${mediaKey}`,
+        },
+        payload: { title: "媒体类型边界" },
+      });
+      await app.inject({
+        method: "POST",
+        url: "/v1/threads/thread_1/runs",
+        headers: {
+          authorization: "Bearer token-a",
+          "idempotency-key": `media-run-${mediaKey}`,
+        },
+        payload: { input: "生成交付物" },
+      });
+      const preview = await app.inject({
+        method: "GET",
+        url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/preview",
+        headers: { authorization: "Bearer token-a" },
+      });
+      expect(preview.statusCode).toBe(422);
+      expect(preview.json().error.code).toBe("INVALID_STATE");
+      const download = await app.inject({
+        method: "GET",
+        url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/download",
+        headers: { authorization: "Bearer token-a" },
+      });
+      expect(download.statusCode).toBe(200);
+      expect(download.json().data.disposition).toBe("download");
+    },
+  );
+
+  it.each([
+    ["text/plain; charset=utf-8", 200],
+    ['text/plain; charset="us-ascii"', 200],
+    ["text/plain; charset=utf-7", 422],
+  ] as const)("纯文本预览严格校验 charset：%s", async (artifactMediaType, statusCode) => {
+    const { app } = fixture({ enableExperience: true, includeArtifact: true, artifactMediaType });
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "text-media-thread" },
+      payload: { title: "纯文本媒体类型" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "text-media-run" },
+      payload: { input: "生成交付物" },
+    });
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/preview",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(response.statusCode).toBe(statusCode);
+  });
   it("live/ready 返回服务端 requestId，依赖失败不泄漏原始错误", async () => {
     const { app, dependencies } = fixture();
     openApps.push(app);

@@ -11,6 +11,13 @@ function productionEnvironment(): Record<string, string> {
     THREAD_CURSOR_SIGNING_KEYS: "current:opaque-test-value",
     DEV_AUTH_ENABLED: "false",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
+    S3_ENDPOINT: "http://object-storage:9000",
+    S3_PUBLIC_ENDPOINT: "http://127.0.0.1:19000",
+    S3_BUCKET: "runtime-artifacts",
+    S3_REGION: "us-east-1",
+    S3_ACCESS_KEY_ID: "local-access-key",
+    S3_SECRET_ACCESS_KEY: "opaque-test-value",
+    S3_FORCE_PATH_STYLE: "true",
   };
 }
 
@@ -53,6 +60,7 @@ describe("API 进程入口", () => {
     });
     expect(parsed.developmentPrincipals?.[0].userId).toBe("user-a-local");
     expect(parsed.listenPort).toBe(3001);
+    expect(parsed.objectStorage.bucket).toBe("runtime-artifacts");
   });
 
   it("开发监听地址显式配置，生产配置不会意外启用默认开发装配", async () => {
@@ -92,6 +100,44 @@ describe("API 进程入口", () => {
       expect(assembler.assemble).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    ["http://127.0.0.1:3001", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_MUST_BE_ISOLATED"],
+    ["http://127.0.0.1:4173", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_MUST_BE_ISOLATED"],
+    ["http://192.168.53.128:19000", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_REQUIRES_LOOPBACK_ORIGIN"],
+    ["http://localhost:19000", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_REQUIRES_LOOPBACK_ORIGIN"],
+    ["http://127.1:19000", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_REQUIRES_LOOPBACK_ORIGIN"],
+    ["http://2130706433:19000", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_REQUIRES_LOOPBACK_ORIGIN"],
+    ["http://127.0.0.1:19000/minio", "DEVELOPMENT_S3_PUBLIC_ENDPOINT_REQUIRES_LOOPBACK_ORIGIN"],
+  ])("固定开发身份拒绝不安全的对象存储公开 origin %s", (publicEndpoint, errorCode) => {
+    expect(() =>
+      parseApiProcessEnvironment(developmentEnvironment({ S3_PUBLIC_ENDPOINT: publicEndpoint })),
+    ).toThrow(errorCode);
+  });
+
+  it("对象存储隔离按实际 API 和明确 Web origin 判断，不把端口当成隐式身份", () => {
+    expect(
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          API_LISTEN_PORT: "3301",
+          S3_PUBLIC_ENDPOINT: "http://127.0.0.1:3001",
+        }),
+      ).objectStorage.publicEndpoint,
+    ).toBe("http://127.0.0.1:3001");
+    expect(
+      parseApiProcessEnvironment(
+        developmentEnvironment({ S3_PUBLIC_ENDPOINT: "http://[::1]:4173" }),
+      ).objectStorage.publicEndpoint,
+    ).toBe("http://[::1]:4173");
+    expect(() =>
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          API_LISTEN_PORT: "80",
+          S3_PUBLIC_ENDPOINT: "http://127.0.0.1",
+        }),
+      ),
+    ).toThrow("DEVELOPMENT_S3_PUBLIC_ENDPOINT_MUST_BE_ISOLATED");
+  });
 
   it.each([
     { DEV_AUTH_USER_B_ID: "user-a-local" },

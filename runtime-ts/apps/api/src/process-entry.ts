@@ -16,6 +16,8 @@ import { developmentApiAssembler } from "./development-assembly.js";
 import {
   type ApiDevelopmentPrincipal,
   assertDevelopmentPrincipalsIsolated,
+  assertDevelopmentPublicObjectStorageEndpoint,
+  DEVELOPMENT_API_DEFAULT_PORT,
   normalizeDevelopmentLoopbackHost,
 } from "./development-boundary.js";
 
@@ -48,6 +50,13 @@ const apiEnvironmentSchema = Object.freeze({
     minimum: 1,
     maximum: 65_535,
   }),
+  S3_ENDPOINT: urlEnvironmentField(),
+  S3_PUBLIC_ENDPOINT: urlEnvironmentField(),
+  S3_BUCKET: stringEnvironmentField({ maxLength: 255 }),
+  S3_REGION: stringEnvironmentField({ maxLength: 128 }),
+  S3_ACCESS_KEY_ID: stringEnvironmentField({ secret: true, maxLength: 1_024 }),
+  S3_SECRET_ACCESS_KEY: stringEnvironmentField({ secret: true, maxLength: 4_096 }),
+  S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
 });
 
 export const apiProcessEnvironmentKeys = Object.freeze(Object.keys(apiEnvironmentSchema));
@@ -64,6 +73,15 @@ export interface ApiProcessConfiguration {
   readonly shutdownTimeoutMilliseconds: number;
   readonly listenHost: string;
   readonly listenPort: number;
+  readonly objectStorage: Readonly<{
+    readonly endpoint: string;
+    readonly publicEndpoint: string;
+    readonly bucket: string;
+    readonly region: string;
+    readonly accessKeyId: string;
+    readonly secretAccessKey: string;
+    readonly forcePathStyle: boolean;
+  }>;
 }
 
 export function selectApiProcessEnvironment(
@@ -98,6 +116,23 @@ export function parseApiProcessEnvironment(
   if (developmentPrincipals !== undefined) {
     assertDevelopmentPrincipalsIsolated(developmentPrincipals);
   }
+  const listenPort = parsed.values.API_LISTEN_PORT ?? DEVELOPMENT_API_DEFAULT_PORT;
+  const objectStorage = Object.freeze({
+    endpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
+    publicEndpoint: readRequiredEnvironmentValue(parsed, "S3_PUBLIC_ENDPOINT"),
+    bucket: readRequiredEnvironmentValue(parsed, "S3_BUCKET"),
+    region: readRequiredEnvironmentValue(parsed, "S3_REGION"),
+    accessKeyId: readRequiredEnvironmentValue(parsed, "S3_ACCESS_KEY_ID"),
+    secretAccessKey: readRequiredEnvironmentValue(parsed, "S3_SECRET_ACCESS_KEY"),
+    forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
+  });
+  if (developmentPrincipals !== undefined) {
+    assertDevelopmentPublicObjectStorageEndpoint(
+      objectStorage.publicEndpoint,
+      listenHost,
+      listenPort,
+    );
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
@@ -110,7 +145,8 @@ export function parseApiProcessEnvironment(
       "PROCESS_SHUTDOWN_TIMEOUT_MS",
     ),
     listenHost,
-    listenPort: parsed.values.API_LISTEN_PORT ?? 3001,
+    listenPort,
+    objectStorage,
   });
 }
 

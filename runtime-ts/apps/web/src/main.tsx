@@ -12,6 +12,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ApiError, canPreviewArtifact, type RunEvent, RuntimeApi } from "./api.js";
 import { buildTimeline, eventSummary } from "./event-view.js";
+import { WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
@@ -53,6 +54,7 @@ function App() {
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
   const currentRunPollRef = useRef(new CurrentRunPoll());
+  const navigationRef = useRef(new WorkspaceNavigation());
 
   useEffect(() => {
     eventAfterRef.current = state.events.at(-1)?.sequence ?? -1;
@@ -122,27 +124,33 @@ function App() {
 
   const createThread = async () => {
     if (!title.trim()) return;
+    const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
       const thread = await api.createThread(title.trim());
-      currentRunPollRef.current.invalidate();
-      dispatch({ type: "threads", threads: [thread, ...state.threads] });
-      dispatch({ type: "select", threadId: thread.id });
-      setCurrentRequest(undefined);
+      dispatch({ type: "threadCreated", thread });
+      if (navigationRef.current.isCurrent(expectedNavigation)) {
+        navigationRef.current.navigate(thread.id);
+        currentRunPollRef.current.invalidate();
+        dispatch({ type: "select", threadId: thread.id });
+        setCurrentRequest(undefined);
+        setError(undefined);
+      }
       setTitle("");
-      setError(undefined);
     } catch (reason) {
-      setError(reason as ApiError);
+      if (navigationRef.current.isCurrent(expectedNavigation)) setError(reason as ApiError);
     } finally {
       setActionLoading(false);
     }
   };
   const send = async () => {
     if (!state.selectedThreadId || !input.trim()) return;
+    const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
       const request = input.trim();
       const run = await api.createRun(state.selectedThreadId, request);
+      if (!navigationRef.current.isCurrent(expectedNavigation)) return;
       // 新 Run 不能继承上一 Run 的 Attempt 或 sequence 游标。
       currentRunPollRef.current.activate(state.selectedThreadId, run.id);
       eventAfterRef.current = -1;
@@ -152,35 +160,45 @@ function App() {
       setInput("");
       setError(undefined);
     } catch (reason) {
-      setError(reason as ApiError);
+      if (navigationRef.current.isCurrent(expectedNavigation)) setError(reason as ApiError);
     } finally {
       setActionLoading(false);
     }
   };
   const archive = async () => {
     if (!state.selectedThreadId) return;
+    const archivedThreadId = state.selectedThreadId;
+    const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
-      await api.archiveThread(state.selectedThreadId);
-      currentRunPollRef.current.invalidate();
-      dispatch({
-        type: "threads",
-        threads: state.threads.filter((thread) => thread.id !== state.selectedThreadId),
-      });
-      dispatch({ type: "select", threadId: "" });
+      await api.archiveThread(archivedThreadId);
+      dispatch({ type: "threadArchived", threadId: archivedThreadId });
+      if (
+        navigationRef.current.isCurrent(expectedNavigation) ||
+        navigationRef.current.isSelected(archivedThreadId)
+      ) {
+        navigationRef.current.navigate(undefined);
+        currentRunPollRef.current.invalidate();
+        dispatch({ type: "select", threadId: undefined });
+      }
     } catch (reason) {
-      setError(reason as ApiError);
+      if (navigationRef.current.isCurrent(expectedNavigation)) setError(reason as ApiError);
     } finally {
       setActionLoading(false);
     }
   };
   const cancel = async () => {
     if (!state.run || !state.selectedThreadId) return;
+    const cancelledRun = state.run;
+    const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
-      dispatch({ type: "run", run: await api.cancelRun(state.selectedThreadId, state.run.id) });
+      const run = await api.cancelRun(state.selectedThreadId, cancelledRun.id);
+      if (navigationRef.current.isCurrent(expectedNavigation) && run.id === cancelledRun.id) {
+        dispatch({ type: "run", run });
+      }
     } catch (reason) {
-      setError(reason as ApiError);
+      if (navigationRef.current.isCurrent(expectedNavigation)) setError(reason as ApiError);
     } finally {
       setActionLoading(false);
     }
@@ -248,6 +266,7 @@ function App() {
                 className={thread.id === state.selectedThreadId ? "thread selected" : "thread"}
                 key={thread.id}
                 onClick={() => {
+                  navigationRef.current.navigate(thread.id);
                   currentRunPollRef.current.invalidate();
                   dispatch({ type: "select", threadId: thread.id });
                   setCurrentRequest(undefined);

@@ -62,6 +62,10 @@ export function createPgDurableObservationSession(input: {
         session.fence.scope.tenantId !== session.scope.tenantId ||
         session.fence.scope.threadId !== session.scope.threadId ||
         session.fence.scope.runId !== session.scope.runId ||
+        session.fence.scope.rootRunId !== session.scope.rootRunId ||
+        session.fence.scope.workspaceId !== session.scope.workspaceId ||
+        session.fence.scope.baseRevisionId !== session.scope.baseRevisionId ||
+        session.fence.workspaceLease.rootRunId !== session.scope.rootRunId ||
         session.attemptId.trim().length === 0
       ) {
         throw new Error("PG Tool Observation fence 与当前 Session 不匹配");

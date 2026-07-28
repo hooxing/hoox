@@ -57,8 +57,15 @@ export interface ToolObservationBinding {
   readonly tenantId: string;
   readonly threadId: string;
   readonly runId: string;
+  readonly rootRunId: string;
+  readonly workspaceId: string;
+  readonly baseRevisionId?: string;
   readonly attemptId: string;
   readonly agentThreadId: string;
+  readonly runClaimToken: string;
+  readonly runClaimEpoch: number;
+  readonly workspaceLeaseRootRunId: string;
+  readonly workspaceLeaseEpoch: number;
 }
 
 export interface ToolObservationInput {

@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   agentThreadId,
   runId,
@@ -7,6 +7,7 @@ import {
   threadId,
   userId,
 } from "@cube-runtime/domain";
+import type { ExecutionFence } from "@cube-runtime/run-contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
@@ -44,16 +45,39 @@ testMigrationUrl.password = migratorPassword;
 const migrationSecurity = { runtimeRole, migratorRole, schema } as const;
 
 const hash = (character: string) => sha256Digest(character.repeat(64));
-const scope = {
+const attemptId = `rollout_attempt_${unique}`;
+const executionScope = {
   tenantId: tenantId(`rollout_tenant_${unique}`),
   threadId: threadId(`rollout_thread_${unique}`),
   runId: runId(`rollout_run_${unique}`),
-  attemptId: `rollout_attempt_${unique}`,
-  agentThreadId: agentThreadId(`rollout_agent_${unique}`),
+  rootRunId: runId(`rollout_run_${unique}`),
+  workspaceId: `rollout_workspace_${unique}` as never,
 };
-const context = { scope, userId: userId(`rollout_user_${unique}`) };
+const fence = {
+  scope: executionScope,
+  runClaim: {
+    token: `rollout_claim_${unique}`,
+    epoch: 1,
+    expiresAt: "2099-01-01T00:00:00.000Z" as never,
+  },
+  workspaceLease: {
+    rootRunId: executionScope.rootRunId,
+    epoch: 1,
+    expiresAt: "2099-01-01T00:00:00.000Z" as never,
+  },
+} as unknown as ExecutionFence;
+const scope = {
+  tenantId: executionScope.tenantId,
+  threadId: executionScope.threadId,
+  runId: executionScope.runId,
+  attemptId,
+  agentThreadId: agentThreadId(
+    `root_${createHash("sha256").update(attemptId, "utf8").digest("hex")}`,
+  ),
+};
+const context = { scope, userId: userId(`rollout_user_${unique}`), fence };
 const databaseContext = { tenantId: scope.tenantId, userId: context.userId };
-const workspaceId = `rollout_workspace_${unique}`;
+const workspaceId = executionScope.workspaceId;
 
 let admin!: Pool;
 let migrator!: Pool;
@@ -62,7 +86,7 @@ let repository!: PgRuntimeRolloutRepository;
 let schemaCreated = false;
 let migratorCreated = false;
 
-function pausingMembershipLockPool(upstream: Pool): {
+function pausingFenceLockPool(upstream: Pool): {
   readonly pool: Pool;
   readonly locked: Promise<void>;
   readonly release: () => void;
@@ -86,7 +110,10 @@ function pausingMembershipLockPool(upstream: Pool): {
           const result = await (originalQuery as (...queryArgs: unknown[]) => Promise<unknown>)(
             ...args,
           );
-          if (typeof args[0] === "string" && args[0].includes("FOR SHARE OF membership")) {
+          if (
+            typeof args[0] === "string" &&
+            args[0].includes("FOR SHARE OF attempt,claim,lease,membership")
+          ) {
             signalLocked();
             await gate;
           }
@@ -216,6 +243,34 @@ async function seedExecution(): Promise<void> {
        ) VALUES ($1,$2,$3,$4,$5,$3,'running','model_execution_started')`,
       [scope.tenantId, scope.attemptId, scope.runId, scope.threadId, workspaceId],
     );
+    await client.query(
+      `INSERT INTO workspace_write_leases(
+         tenant_id,workspace_id,thread_id,root_run_id,epoch,expires_at)
+       VALUES ($1,$2,$3,$4,1,clock_timestamp()+interval '30 minutes')`,
+      [scope.tenantId, workspaceId, scope.threadId, scope.runId],
+    );
+    await client.query(
+      `INSERT INTO execution_workspace_fences(
+         tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+         lease_epoch,initial_expires_at)
+       VALUES ($1,$2,$3,$4,$5,$3,1,clock_timestamp()+interval '30 minutes')`,
+      [scope.tenantId, scope.attemptId, scope.runId, scope.threadId, workspaceId],
+    );
+    await client.query(
+      `INSERT INTO run_claims(
+         tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+         worker_id,claim_token,claim_epoch,workspace_lease_epoch,expires_at)
+       VALUES ($1,$2,$3,$4,$5,$3,'rollout-worker',$6,1,1,
+               clock_timestamp()+interval '30 minutes')`,
+      [
+        scope.tenantId,
+        scope.attemptId,
+        scope.runId,
+        scope.threadId,
+        workspaceId,
+        fence.runClaim.token,
+      ],
+    );
   });
 }
 
@@ -246,13 +301,12 @@ beforeAll(async () => {
   repository = new PgRuntimeRolloutRepository(runtime);
   await seedExecution();
   expect(
-    await repository.openRootStream({
-      context,
-      workspaceId,
-      rootRunId: scope.runId,
+    await repository.openRootStreamFromClaim({
+      fence,
+      attemptId: scope.attemptId,
       compatibility,
     }),
-  ).toBe("created");
+  ).toMatchObject({ outcome: "ready" });
 });
 
 afterAll(async () => {
@@ -534,6 +588,131 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
     ).rejects.toBeDefined();
   });
 
+  it("每次 append 都重验未释放 claim、实时 workspace lease 与接管后的新 token", async () => {
+    await withTenantTransaction(migrator, databaseContext, (client) =>
+      client.query(
+        "UPDATE run_claims SET released_at=clock_timestamp() WHERE tenant_id=$1 AND attempt_id=$2",
+        [scope.tenantId, scope.attemptId],
+      ),
+    );
+    expect(
+      (
+        await repository.append({
+          context,
+          idempotencyKey: `append-released-claim-${unique}`,
+          entries: [draft("assistant")],
+        })
+      ).outcome,
+    ).toBe("not_authorized");
+    await withTenantTransaction(migrator, databaseContext, (client) =>
+      client.query(
+        `UPDATE run_claims
+            SET released_at=NULL,expires_at=clock_timestamp()+interval '30 minutes'
+          WHERE tenant_id=$1 AND attempt_id=$2`,
+        [scope.tenantId, scope.attemptId],
+      ),
+    );
+
+    await withTenantTransaction(migrator, databaseContext, (client) =>
+      client.query(
+        `UPDATE workspace_write_leases SET expires_at=clock_timestamp()-interval '1 second'
+          WHERE tenant_id=$1 AND workspace_id=$2`,
+        [scope.tenantId, workspaceId],
+      ),
+    );
+    expect(
+      (
+        await repository.append({
+          context,
+          idempotencyKey: `append-expired-lease-${unique}`,
+          entries: [draft("assistant")],
+        })
+      ).outcome,
+    ).toBe("not_authorized");
+    await withTenantTransaction(migrator, databaseContext, (client) =>
+      client.query(
+        `UPDATE workspace_write_leases SET expires_at=clock_timestamp()+interval '30 minutes'
+          WHERE tenant_id=$1 AND workspace_id=$2`,
+        [scope.tenantId, workspaceId],
+      ),
+    );
+
+    const takeoverToken = `rollout_takeover_${unique}`;
+    await withTenantTransaction(migrator, databaseContext, (client) =>
+      client.query(
+        `UPDATE run_claims SET worker_id='takeover-worker',claim_token=$3,claim_epoch=2
+          WHERE tenant_id=$1 AND attempt_id=$2`,
+        [scope.tenantId, scope.attemptId, takeoverToken],
+      ),
+    );
+    expect(
+      (
+        await repository.append({
+          context,
+          idempotencyKey: `append-after-takeover-${unique}`,
+          entries: [draft("assistant")],
+        })
+      ).outcome,
+    ).toBe("not_authorized");
+    await withTenantTransaction(migrator, databaseContext, (client) =>
+      client.query(
+        `UPDATE run_claims SET worker_id='rollout-worker',claim_token=$3,claim_epoch=1
+          WHERE tenant_id=$1 AND attempt_id=$2`,
+        [scope.tenantId, scope.attemptId, fence.runClaim.token],
+      ),
+    );
+  });
+
+  it("loadRecovery 持有双栅栏共享锁，接管只能在一致快照返回后提交", async () => {
+    const paused = pausingFenceLockPool(runtime);
+    const guarded = new PgRuntimeRolloutRepository(paused.pool);
+    const recoveryPromise = guarded.loadRecovery({ context, compatibility });
+    await paused.locked;
+    const taker = await migrator.connect();
+    const takeoverToken = `rollout_race_takeover_${unique}`;
+    try {
+      await taker.query("BEGIN");
+      await taker.query(
+        "SELECT set_config('app.tenant_id',$1,true),set_config('app.user_id',$2,true)",
+        [scope.tenantId, context.userId],
+      );
+      const pid = Number(
+        (await taker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]?.pid,
+      );
+      const takeover = taker.query(
+        `UPDATE run_claims SET worker_id='race-takeover',claim_token=$3,claim_epoch=2
+          WHERE tenant_id=$1 AND attempt_id=$2`,
+        [scope.tenantId, scope.attemptId, takeoverToken],
+      );
+      let waiting = false;
+      for (let index = 0; index < 100 && !waiting; index += 1) {
+        const state = await admin.query<{ waiting: boolean }>(
+          "SELECT wait_event_type='Lock' AS waiting FROM pg_stat_activity WHERE pid=$1",
+          [pid],
+        );
+        waiting = state.rows[0]?.waiting === true;
+        if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(waiting).toBe(true);
+      paused.release();
+      expect((await recoveryPromise).outcome).toBe("loaded");
+      await takeover;
+      await taker.query("COMMIT");
+      expect((await repository.loadRecovery({ context, compatibility })).outcome).toBe("not_found");
+    } finally {
+      paused.release();
+      await taker.query("ROLLBACK").catch(() => undefined);
+      taker.release();
+      await withTenantTransaction(migrator, databaseContext, (client) =>
+        client.query(
+          `UPDATE run_claims SET worker_id='rollout-worker',claim_token=$3,claim_epoch=1
+            WHERE tenant_id=$1 AND attempt_id=$2`,
+          [scope.tenantId, scope.attemptId, fence.runClaim.token],
+        ),
+      );
+    }
+  });
+
   it("RLS 与 Runtime ACL 拒绝跨租户读取及事实 UPDATE/DELETE/TRUNCATE", async () => {
     const foreignContext = {
       tenantId: `rollout_foreign_tenant_${unique}`,
@@ -564,7 +743,7 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
   });
 
   it("append 持有 Membership SHARE 锁，revoke 必须在提交后生效", async () => {
-    const paused = pausingMembershipLockPool(runtime);
+    const paused = pausingFenceLockPool(runtime);
     const guarded = new PgRuntimeRolloutRepository(paused.pool);
     const appendPromise = guarded.append({
       context,

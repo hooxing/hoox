@@ -15,14 +15,28 @@ import {
 import {
   createPostgresPool,
   createS3BlobStore,
+  PgBackedSandboxSessionRegistry,
   PgBlobLifecycleRepository,
+  PgExecutionPersistence,
+  PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
+  probeS3BlobStore,
   probePostgres,
 } from "@cube-runtime/persistence";
 import { InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { PiWorkerSessionFactory } from "./pi-session-factory.js";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
+import {
+  AgentWorkerPollingLoop,
+  CubeSandboxSessionRegistry,
+  EphemeralWorkspaceRevisionVerifier,
+  NoDeclaredArtifactCompletionGate,
+  NoopRecoveryMetrics,
+  ProcessCancellation,
+  SystemWorkerClock,
+} from "./production-worker-runtime.js";
+import { RunWorker } from "./run-worker.js";
 
 const workerEnvironmentSchema = Object.freeze({
   DATABASE_URL: urlEnvironmentField({
@@ -40,9 +54,26 @@ const workerEnvironmentSchema = Object.freeze({
   S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
   CUBESANDBOX_API_URL: urlEnvironmentField(),
   CUBESANDBOX_TEMPLATE_ID: stringEnvironmentField({ maxLength: 255 }),
+  CUBESANDBOX_API_KEY: stringEnvironmentField({
+    secret: true,
+    maxLength: 4_096,
+    requiredIn: [],
+  }),
+  CUBESANDBOX_PROXY_NODE_IP: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
+  CUBESANDBOX_PROXY_PORT: integerEnvironmentField({
+    minimum: 1,
+    maximum: 65_535,
+    requiredIn: [],
+  }),
+  CUBESANDBOX_PROXY_SCHEME: stringEnvironmentField({ maxLength: 5, requiredIn: [] }),
   MODEL_BASE_URL: urlEnvironmentField(),
   MODEL_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192 }),
   MODEL_ID: stringEnvironmentField({ maxLength: 255 }),
+  AGENT_WORKER_TENANT_ID: stringEnvironmentField({ maxLength: 200 }),
+  AGENT_WORKER_ID: stringEnvironmentField({ maxLength: 200 }),
+  AGENT_WORKER_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 10, maximum: 60_000 }),
+  AGENT_WORKER_DISPATCH_LEASE_MS: integerEnvironmentField({ minimum: 1_000, maximum: 300_000 }),
+  AGENT_WORKER_RUN_LEASE_MS: integerEnvironmentField({ minimum: 9_000, maximum: 300_000 }),
   PROCESS_SHUTDOWN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1, maximum: 600_000 }),
 });
 
@@ -60,8 +91,22 @@ export interface WorkerProcessConfiguration {
     secretAccessKey: string;
     forcePathStyle: boolean;
   }>;
-  readonly sandbox: Readonly<{ apiUrl: string; templateId: string }>;
+  readonly sandbox: Readonly<{
+    apiUrl: string;
+    templateId: string;
+    apiKey?: string;
+    proxyNodeIp?: string;
+    proxyPort?: number;
+    proxyScheme?: "http" | "https";
+  }>;
   readonly model: Readonly<{ baseUrl: string; apiKey: string; modelId: string }>;
+  readonly worker: Readonly<{
+    tenantId: string;
+    workerId: string;
+    pollIntervalMs: number;
+    dispatchLeaseMs: number;
+    runLeaseMs: number;
+  }>;
   readonly shutdownTimeoutMilliseconds: number;
 }
 
@@ -75,6 +120,10 @@ export function parseWorkerProcessEnvironment(
   source: Readonly<Record<string, string | undefined>>,
 ): WorkerProcessConfiguration {
   const parsed = parseStrictEnvironment(source, workerEnvironmentSchema);
+  const proxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
+  if (proxyScheme !== undefined && proxyScheme !== "http" && proxyScheme !== "https") {
+    throw new TypeError("CUBESANDBOX_PROXY_SCHEME 只能是 http 或 https");
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
@@ -90,11 +139,28 @@ export function parseWorkerProcessEnvironment(
     sandbox: Object.freeze({
       apiUrl: readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL"),
       templateId: readRequiredEnvironmentValue(parsed, "CUBESANDBOX_TEMPLATE_ID"),
+      ...(parsed.values.CUBESANDBOX_API_KEY === undefined
+        ? {}
+        : { apiKey: parsed.values.CUBESANDBOX_API_KEY }),
+      ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
+        ? {}
+        : { proxyNodeIp: parsed.values.CUBESANDBOX_PROXY_NODE_IP }),
+      ...(parsed.values.CUBESANDBOX_PROXY_PORT === undefined
+        ? {}
+        : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
+      ...(proxyScheme === undefined ? {} : { proxyScheme }),
     }),
     model: Object.freeze({
       baseUrl: readRequiredEnvironmentValue(parsed, "MODEL_BASE_URL"),
       apiKey: readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),
       modelId: readRequiredEnvironmentValue(parsed, "MODEL_ID"),
+    }),
+    worker: Object.freeze({
+      tenantId: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_TENANT_ID"),
+      workerId: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_ID"),
+      pollIntervalMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_POLL_INTERVAL_MS"),
+      dispatchLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_DISPATCH_LEASE_MS"),
+      runLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_RUN_LEASE_MS"),
     }),
     shutdownTimeoutMilliseconds: readRequiredEnvironmentValue(
       parsed,
@@ -115,20 +181,18 @@ const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfigurati
       const blobRepository = new PgBlobLifecycleRepository(pool, {
         objectPrefix: "agent-worker",
       });
-      const blobs = createS3BlobStore(
-        {
-          bucket: configuration.objectStorage.bucket,
-          endpoint: configuration.objectStorage.endpoint,
-          region: configuration.objectStorage.region,
-          accessKeyId: configuration.objectStorage.accessKeyId,
-          secretAccessKey: configuration.objectStorage.secretAccessKey,
-          forcePathStyle: configuration.objectStorage.forcePathStyle,
-          prefix: "agent-worker",
-          maxPresignTtlSeconds: 60,
-          maxBlobSizeBytes: 8 * 1024 * 1024,
-        },
-        blobRepository,
-      );
+      const s3Config = {
+        bucket: configuration.objectStorage.bucket,
+        endpoint: configuration.objectStorage.endpoint,
+        region: configuration.objectStorage.region,
+        accessKeyId: configuration.objectStorage.accessKeyId,
+        secretAccessKey: configuration.objectStorage.secretAccessKey,
+        forcePathStyle: configuration.objectStorage.forcePathStyle,
+        prefix: "agent-worker",
+        maxPresignTtlSeconds: 60,
+        maxBlobSizeBytes: 8 * 1024 * 1024,
+      } as const;
+      const blobs = createS3BlobStore(s3Config, blobRepository);
       const rolloutRepository = new PgRuntimeRolloutRepository(pool);
       const durableObservation = createPgDurableObservationSession({
         blobRepository,
@@ -169,24 +233,72 @@ const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfigurati
         undefined,
         durableObservation.prepare,
       );
-      await probePostgres(pool);
+      const upstreamSandboxes = new CubeSandboxSessionRegistry(
+        {
+          apiUrl: configuration.sandbox.apiUrl,
+          ...(configuration.sandbox.apiKey === undefined
+            ? {}
+            : { apiKey: configuration.sandbox.apiKey }),
+          ...(configuration.sandbox.proxyNodeIp === undefined
+            ? {}
+            : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
+          ...(configuration.sandbox.proxyPort === undefined
+            ? {}
+            : { proxyPort: configuration.sandbox.proxyPort }),
+          ...(configuration.sandbox.proxyScheme === undefined
+            ? {}
+            : { proxyScheme: configuration.sandbox.proxyScheme }),
+          defaultOperationTimeoutMs: 5_000,
+        },
+        configuration.sandbox.templateId,
+      );
+      const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
+      const cancellation = new ProcessCancellation();
+      const worker = new RunWorker(
+        {
+          persistence: new PgExecutionPersistence(pool),
+          revisions: new EphemeralWorkspaceRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions,
+          cancellation,
+          artifacts: new NoDeclaredArtifactCompletionGate(),
+          clock: new SystemWorkerClock(),
+          metrics: new NoopRecoveryMetrics(),
+        },
+        {
+          workerId: configuration.worker.workerId,
+          leaseDurationMs: configuration.worker.runLeaseMs,
+          heartbeatMs: Math.floor(configuration.worker.runLeaseMs / 3),
+        },
+      );
+      const loop = new AgentWorkerPollingLoop(new PgRunDispatchOutbox(pool), worker, {
+        tenantId: configuration.worker.tenantId,
+        workerId: configuration.worker.workerId,
+        pollIntervalMs: configuration.worker.pollIntervalMs,
+        dispatchLeaseMs: configuration.worker.dispatchLeaseMs,
+      });
+      const probes = Object.freeze({
+        postgres: () => probePostgres(pool),
+        objectStorage: () => probeS3BlobStore(s3Config),
+        sandbox: () => upstreamSandboxes.probe(),
+        model: () => probeOpenAiCompatibleModel(configuration.model),
+      });
+      await Promise.all([
+        probes.postgres(),
+        probes.objectStorage(),
+        probes.sandbox(),
+        probes.model(),
+      ]);
+      loop.start();
       return Object.freeze({
-        stopAccepting: async () => undefined,
+        stopAccepting: () => loop.close(),
         resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),
         readiness: Object.freeze([
-          Object.freeze({ name: "postgres", probe: () => probePostgres(pool) }),
-          Object.freeze({
-            name: "model-runtime",
-            probe: async () => {
-              // 闭包持有完整生产 Session 装配，且只验证本地已注册模型，不在 readiness 发模型请求。
-              if (
-                !(sessions instanceof PiWorkerSessionFactory) ||
-                modelRuntime.getModel(providerId, model.id) === undefined
-              ) {
-                throw new Error("模型 Session 装配不可用");
-              }
-            },
-          }),
+          Object.freeze({ name: "postgres", probe: probes.postgres }),
+          Object.freeze({ name: "object-storage", probe: probes.objectStorage }),
+          Object.freeze({ name: "sandbox", probe: probes.sandbox }),
+          Object.freeze({ name: "model-runtime", probe: probes.model }),
         ]),
       });
     } catch (error) {
@@ -195,6 +307,33 @@ const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfigurati
     }
   },
 };
+
+async function probeOpenAiCompatibleModel(
+  model: WorkerProcessConfiguration["model"],
+): Promise<void> {
+  const endpoint = new URL(
+    "models",
+    model.baseUrl.endsWith("/") ? model.baseUrl : `${model.baseUrl}/`,
+  );
+  const response = await fetch(endpoint, {
+    headers: { authorization: `Bearer ${model.apiKey}` },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error("模型 provider readiness 失败");
+  const body = (await response.json()) as unknown;
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    !("data" in body) ||
+    !Array.isArray(body.data) ||
+    !body.data.some(
+      (entry) =>
+        typeof entry === "object" && entry !== null && "id" in entry && entry.id === model.modelId,
+    )
+  ) {
+    throw new Error("模型 provider 未声明配置模型");
+  }
+}
 
 export async function startWorkerProcess(input: {
   readonly environment: Readonly<Record<string, string | undefined>>;

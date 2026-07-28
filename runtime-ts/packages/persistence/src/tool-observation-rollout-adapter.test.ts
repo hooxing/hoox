@@ -1,9 +1,33 @@
-import { agentThreadId, runId, tenantId, threadId, userId } from "@cube-runtime/domain";
+import {
+  agentThreadId,
+  isoTimestamp,
+  runId,
+  tenantId,
+  threadId,
+  userId,
+  workspaceId,
+} from "@cube-runtime/domain";
 import { describe, expect, it } from "vitest";
 import { PersistenceError } from "./errors.js";
 import type { PgRuntimeRolloutRepository } from "./pg-runtime-rollout.js";
 import { PgToolObservationRolloutAdapter } from "./tool-observation-rollout-adapter.js";
 
+const executionScope = {
+  tenantId: tenantId("tenant_adapter"),
+  threadId: threadId("thread_adapter"),
+  runId: runId("run_adapter"),
+  rootRunId: runId("run_adapter"),
+  workspaceId: workspaceId("workspace_adapter"),
+};
+const fence = {
+  scope: executionScope,
+  runClaim: { token: "claim_adapter", epoch: 1, expiresAt: isoTimestamp("2026-07-28T01:00:00Z") },
+  workspaceLease: {
+    rootRunId: executionScope.rootRunId,
+    epoch: 2,
+    expiresAt: isoTimestamp("2026-07-28T01:00:00Z"),
+  },
+};
 const context = {
   scope: {
     tenantId: tenantId("tenant_adapter"),
@@ -13,9 +37,19 @@ const context = {
     agentThreadId: agentThreadId("agent_adapter"),
   },
   userId: userId("user_adapter"),
+  fence,
+};
+const binding = {
+  ...executionScope,
+  attemptId: context.scope.attemptId,
+  agentThreadId: context.scope.agentThreadId,
+  runClaimToken: fence.runClaim.token,
+  runClaimEpoch: fence.runClaim.epoch,
+  workspaceLeaseRootRunId: fence.workspaceLease.rootRunId,
+  workspaceLeaseEpoch: fence.workspaceLease.epoch,
 };
 const command = {
-  binding: context.scope,
+  binding,
   idempotencyKey: "result.adapter",
   toolCallId: "call_adapter",
   body: { toolName: "sandbox_command", observation: "ok" },
@@ -34,7 +68,7 @@ describe("PostgreSQL Tool Observation adapter", () => {
     } as Pick<PgRuntimeRolloutRepository, "append">;
     await expect(
       new PgToolObservationRolloutAdapter(repository, context).appendToolCall({
-        binding: context.scope,
+        binding,
         idempotencyKey: "call.adapter",
         toolCallId: "call_adapter",
         toolName: "sandbox_command",
@@ -105,7 +139,7 @@ describe("PostgreSQL Tool Observation adapter", () => {
     expect(calls[0]).toBe(calls[1]);
   });
 
-  it("拒绝错装到另一 Attempt 或 Agent Thread 的 adapter", async () => {
+  it("拒绝错装到另一执行 scope、Attempt、Agent Thread 或双栅栏的 adapter", async () => {
     let called = false;
     const repository = {
       append: async () => {
@@ -117,15 +151,27 @@ describe("PostgreSQL Tool Observation adapter", () => {
     await expect(
       adapter.appendToolResult({
         ...command,
-        binding: { ...context.scope, attemptId: "attempt_other" },
+        binding: { ...binding, attemptId: "attempt_other" },
       }),
     ).resolves.toEqual({ outcome: "conflict" });
     await expect(
       adapter.appendToolCall({
-        binding: { ...context.scope, agentThreadId: "agent_other" as never },
+        binding: { ...binding, agentThreadId: "agent_other" as never },
         idempotencyKey: "call.wrong",
         toolCallId: "call_wrong",
         toolName: "sandbox_command",
+      }),
+    ).resolves.toEqual({ outcome: "conflict" });
+    await expect(
+      adapter.appendToolResult({
+        ...command,
+        binding: { ...binding, workspaceId: "workspace_other" },
+      }),
+    ).resolves.toEqual({ outcome: "conflict" });
+    await expect(
+      adapter.appendToolResult({
+        ...command,
+        binding: { ...binding, runClaimToken: "claim_other" },
       }),
     ).resolves.toEqual({ outcome: "conflict" });
     expect(called).toBe(false);

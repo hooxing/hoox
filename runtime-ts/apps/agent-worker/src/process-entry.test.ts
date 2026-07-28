@@ -18,6 +18,11 @@ function productionEnvironment(): Record<string, string> {
     MODEL_BASE_URL: "https://model.invalid/v1",
     MODEL_API_KEY: "opaque-model-value",
     MODEL_ID: "test-model",
+    AGENT_WORKER_TENANT_ID: "tenant-test-worker",
+    AGENT_WORKER_ID: "worker-test",
+    AGENT_WORKER_POLL_INTERVAL_MS: "100",
+    AGENT_WORKER_DISPATCH_LEASE_MS: "30000",
+    AGENT_WORKER_RUN_LEASE_MS: "30000",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
   };
 }

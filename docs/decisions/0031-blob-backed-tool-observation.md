@@ -18,6 +18,8 @@ Pipeline 采用严格顺序：先将受控回执的 UTF-8 字节经 `TraceBlobPe
 
 `declare_deliverables` 与 `publish_artifact` 也走同一个固定回执 source 和同一个 durable recorder；Artifact Router 的业务结果或异常只用于判定 `succeeded/failed`，不得直接进入 Pi。因而所有当前开放给 Pi 的 Sandbox 与 Artifact 工具都必须形成成对的 `tool_call + tool_result`，不存在只写前驱的例外。
 
+失败回执在 `tool_result` 已经耐久提交后，以只包含固定受控 observation 的异常交给 Pi；不能依赖 tool 返回值中的 `isError`，因为 Pi 只把抛出的异常编码为失败 Tool event。原始 Sandbox/Artifact 异常在适配器闭包内被丢弃，既不进入异常消息，也不进入 Pi event。
+
 生产 Session 工厂不接受 `userId`、`TrustedRolloutContext` 或 `contextForSession` 回调。它只接收 RunWorker 当前完整 `ExecutionFence`；PostgreSQL Repository 在一个 `SERIALIZABLE` 事务中锁定并复核 execution attempt、未过期 run claim、双 epoch、完整 scope、Thread creator 和 active Membership，设置事务内 actor，按 Attempt 确定性生成 root AgentThread，并原子幂等打开 stream。随后才加载 PG recovery，并用同一可信 context 装配 S3/PG recorder；任一身份事实不匹配都 fail closed。
 
 模型可见 payload 与 Rollout body 使用两套独立硬预算；后者不超过数据库的 16 KiB 约束。模型可见内容按 UTF-8 字节预算和 Unicode code point 截断，不能切开多字节字符；这不是 grapheme cluster 契约。截断占位符只声明“受控执行回执已保存”，必须完整装入，否则返回空字符串。
@@ -36,4 +38,4 @@ Blob 或 Rollout 返回 `unknown` 时，适配器以完全相同的冻结命令�
 
 ## 验证
 
-单元测试覆盖固定回执精确 schema、原始成功/失败值隔离、Unicode/极小预算、双预算、Blob unknown、同键重放、scope 伪造、Sandbox/Artifact 成对事实、慢前驱期间零许可，以及前驱持续 UNKNOWN 时零许可并强制恢复。真实 PostgreSQL + MinIO 集成从生产进程入口装配真实依赖，并从 claim 自动开 root stream；测试不向 Session 工厂手工注入 actor/context，同时覆盖 Trace promotion、Rollout append 与进程级 adapter 重建后的同命令重放。
+单元测试覆盖固定回执精确 schema、原始成功/失败值隔离、失败 Tool event、Unicode/极小预算、双预算、Blob unknown、同键重放、scope 伪造、Sandbox/Artifact 成对事实、慢前驱期间零许可，以及前驱持续 UNKNOWN 时零许可并强制恢复。真实 PostgreSQL + MinIO 集成从生产进程入口装配真实依赖，并从 claim 自动开 root stream；测试不向 Session 工厂手工注入 actor/context，同时覆盖 Trace promotion、Rollout append、耐久 dispatch 到 Pi Tool event 的消费闭环与进程级 adapter 重建后的同命令重放。

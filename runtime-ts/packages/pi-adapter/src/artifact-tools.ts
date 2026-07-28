@@ -174,9 +174,12 @@ async function artifactToolResult(
   if (observation.outcome !== "recorded" && observation.outcome !== "replayed") {
     throw new Error("Artifact Tool Observation 未能形成 durable 事实");
   }
+  if (outcome === "failed") {
+    // Pi 只把异常执行标为 tool error；异常正文仍是已经持久化的固定受控回执。
+    throw new Error(observation.observation);
+  }
   return {
     content: [{ type: "text" as const, text: observation.observation }],
     details: {},
-    ...(outcome === "failed" ? { isError: true } : {}),
   };
 }

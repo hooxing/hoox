@@ -143,6 +143,7 @@ export type ClaimExecutionResult =
 
 export type StableWorkerErrorCode =
   | "CANCELLED"
+  | "CONTEXT_TOO_LARGE"
   | "TIMEOUT"
   | "PROVIDER"
   | "PROTOCOL"
@@ -498,6 +499,7 @@ export interface OrphanSandboxCleanupPort {
 
 export type AgentTurnOutcome =
   | { readonly kind: "completed" }
+  | { readonly kind: "context_too_large"; readonly action: "rebuild_context" }
   | {
       /** Tool Observation 未形成可恢复的 durable 事实；本 Attempt 不能继续成功。 */
       readonly kind: "recovery_required";

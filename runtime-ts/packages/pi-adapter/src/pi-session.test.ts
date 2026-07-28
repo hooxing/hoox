@@ -1,5 +1,6 @@
-import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
+import type { TokenizerPort } from "@cube-runtime/context-policy";
 import { buildToolCapabilityManifest } from "@cube-runtime/prompt-builder";
+import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import {
   type FauxProviderHandle,
   type FauxResponseStep,
@@ -15,6 +16,9 @@ import type { RuntimeAgentEvent } from "./events.js";
 import {
   assertLinuxWorkerPlatform,
   assertPiSessionCapabilityManifest,
+  bindTrustedPiModelContextCapability,
+  bindTestingPiModelContextCapability,
+  assessSafePiSessionContext,
   createSafePiSession,
   digestCanonicalToolInputSchema,
   type PiSessionController,
@@ -75,6 +79,9 @@ describe("Pi 安全适配", () => {
         promptDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
         compactionEnabled: false,
         hasCompactionEntry: false,
+        activeAgentMessageCount: expect.any(Number),
+        activeSessionEntryCount: expect.any(Number),
+        pendingMessageCount: 0,
       });
       expect("compact" in controller).toBe(false);
       expect("session" in controller).toBe(false);
@@ -88,6 +95,379 @@ describe("Pi 安全适配", () => {
         expect(modelContext).not.toMatch(hostPathPattern(process.cwd()));
         expect(modelContext).not.toMatch(hostPathPattern(process.cwd().replaceAll("\\", "/")));
       }
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "预算选出的活动历史才进入 Pi，旧历史仍保留在 Rollout 但不进入 Provider 消息",
+    async () => {
+      let providerMessages = "";
+      const tokenizer: TokenizerPort = {
+        identity: "测试历史窗口-tokenizer",
+        countTokens: (text) =>
+          text.includes("旧历史必须留在事实源")
+            ? 1_000_000
+            : new TextEncoder().encode(text).byteLength,
+      };
+      const { controller } = await harness(
+        [
+          (context) => {
+            providerMessages = JSON.stringify(context.messages);
+            return fauxAssistantMessage("完成");
+          },
+        ],
+        new FakeSandboxHandle("budget-active-history"),
+        {
+          schemaVersion: 2,
+          checkpointId: "checkpoint-budget-window",
+          items: [
+            { kind: "turn", role: "user", text: "旧历史必须留在事实源" },
+            { kind: "turn", role: "assistant", text: "最近回复" },
+          ],
+        },
+        undefined,
+        undefined,
+        tokenizer,
+      );
+      await controller.prompt("当前问题");
+      expect(providerMessages).not.toContain("旧历史必须留在事实源");
+      expect(providerMessages).toContain("最近回复");
+      expect(providerMessages).toContain("当前问题");
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "完整工具定义与低信任 custom entry 参与计量，当前超大输入在调用 Provider 前拒绝",
+    async () => {
+      const counted: string[] = [];
+      const tokenizer: TokenizerPort = {
+        identity: "测试最终输入-tokenizer",
+        countTokens: (text) => {
+          counted.push(text);
+          if (text.includes("当前超大输入")) return 1_000_000;
+          return new TextEncoder().encode(text).byteLength;
+        },
+      };
+      const { controller, faux } = await harness(
+        [fauxAssistantMessage("不应调用")],
+        new FakeSandboxHandle("budget-visible-input"),
+        undefined,
+        undefined,
+        {
+          tenant: [{ id: "tenant-large", content: "低信任可见内容" }],
+          skill: [],
+          user: [],
+        },
+        tokenizer,
+      );
+      expect(
+        counted.some((text) => text.includes("sandbox_read_file") && text.includes("parameters")),
+      ).toBe(true);
+      expect(counted.some((text) => text.includes("低信任可见内容"))).toBe(true);
+      await expect(controller.prompt("当前超大输入")).rejects.toThrow("CONTEXT_TOO_LARGE");
+      expect(faux.state.callCount).toBe(0);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "活跃流 steer/followUp 超窗时不触达第二次 Provider 且回滚队列",
+    async () => {
+      let releaseFirst: (() => void) | undefined;
+      const tokenizer: TokenizerPort = {
+        identity: "多轮累计-tokenizer",
+        countTokens: (text) =>
+          text.includes("轮次输入") ? 60_000 : new TextEncoder().encode(text).byteLength,
+      };
+      const first: FauxResponseStep = async () => {
+        await new Promise<void>((resolve) => {
+          releaseFirst = resolve;
+        });
+        return fauxAssistantMessage("第一轮完成");
+      };
+      const { controller, faux, events, started } = await harness(
+        [first, fauxAssistantMessage("不应调用")],
+        new FakeSandboxHandle("budget-multi-turn"),
+        undefined,
+        undefined,
+        undefined,
+        tokenizer,
+      );
+      const prompting = controller.prompt("第一轮次输入");
+      await started;
+      await controller.steer("第二轮次输入");
+      await controller.followUp("活跃追问");
+      releaseFirst?.();
+      await expect(prompting).rejects.toMatchObject({
+        code: "CONTEXT_TOO_LARGE",
+        action: "rebuild_context",
+      });
+      expect(faux.state.callCount).toBe(0);
+      expect(events).toContainEqual({
+        type: "error",
+        code: "CONTEXT_TOO_LARGE",
+        message: "上下文超出模型窗口",
+        action: "rebuild_context",
+      });
+      expect(events.filter((event) => event.type === "queue.updated").at(-1)).toEqual(
+        expect.objectContaining({ steering: [], followUp: [] }),
+      );
+      await expect(controller.followUp("非活跃追问不得入队")).rejects.toThrow(
+        "PI_SESSION_NOT_ACTIVE",
+      );
+      let nextContext = "";
+      faux.setResponses([
+        (context) => {
+          nextContext = JSON.stringify(context.messages);
+          return fauxAssistantMessage("回滚后继续");
+        },
+      ]);
+      await controller.prompt("队列回滚后安全输入");
+      expect(faux.state.callCount).toBe(1);
+      expect(nextContext).not.toContain("第一轮次输入");
+      expect(nextContext).not.toContain("第二轮次输入");
+      expect(nextContext).not.toContain("活跃追问");
+      expect(nextContext).not.toContain("非活跃追问不得入队");
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "同一 prompt 的大工具结果在第二次 Provider 请求前失败关闭",
+    async () => {
+      const sandbox = new FakeSandboxHandle("budget-tool-loop") as FakeSandboxHandle & {
+        command: () => Promise<unknown>;
+      };
+      sandbox.command = async () => ({ stdout: "大工具结果", stderr: "", exitCode: 0 });
+      const tokenizer: TokenizerPort = {
+        identity: "工具循环-tokenizer",
+        countTokens: (text) =>
+          text.includes('"role":"toolResult"')
+            ? 1_000_000
+            : new TextEncoder().encode(text).byteLength,
+      };
+      const { controller, faux, events } = await harness(
+        [
+          fauxAssistantMessage(fauxToolCall("sandbox_command", { command: "produce" }), {
+            stopReason: "toolUse",
+          }),
+          fauxAssistantMessage("不应触达"),
+        ],
+        sandbox,
+        undefined,
+        undefined,
+        undefined,
+        tokenizer,
+      );
+      const before = controller.getDiagnostics();
+      const reentrantResults: Array<Promise<unknown>> = [];
+      let errorReentryStarted = false;
+      let settledReentryStarted = false;
+      controller.subscribe((event) => {
+        if (event.type === "error" && event.code === "CONTEXT_TOO_LARGE" && !errorReentryStarted) {
+          errorReentryStarted = true;
+          reentrantResults.push(
+            controller.prompt("error 回调重入").then(
+              () => undefined,
+              (error: unknown) => error,
+            ),
+          );
+        }
+        if (event.type === "agent.settled" && !settledReentryStarted) {
+          settledReentryStarted = true;
+          reentrantResults.push(
+            controller.prompt("settled 回调重入").then(
+              () => undefined,
+              (error: unknown) => error,
+            ),
+          );
+        }
+      });
+      const prompting = controller.prompt("执行工具");
+      await expect(controller.prompt("并发 prompt")).rejects.toThrow(
+        "PI_SESSION_TRANSACTION_ACTIVE",
+      );
+      await expect(prompting).rejects.toMatchObject({
+        code: "CONTEXT_TOO_LARGE",
+        action: "rebuild_context",
+      });
+      const reentrantErrors = await Promise.all(reentrantResults);
+      expect(reentrantErrors).toHaveLength(2);
+      for (const error of reentrantErrors)
+        expect(error).toMatchObject({ message: "PI_SESSION_TRANSACTION_ACTIVE" });
+      expect(faux.state.callCount).toBe(1);
+      expect(events).toContainEqual({
+        type: "error",
+        code: "CONTEXT_TOO_LARGE",
+        message: "上下文超出模型窗口",
+        action: "rebuild_context",
+      });
+      const after = controller.getDiagnostics();
+      expect(after.activeAgentMessageCount).toBe(before.activeAgentMessageCount);
+      expect(after.activeSessionEntryCount).toBe(before.activeSessionEntryCount);
+      expect(after.pendingMessageCount).toBe(0);
+      let nextContext = "";
+      faux.setResponses([
+        (context) => {
+          nextContext = JSON.stringify(context.messages);
+          return fauxAssistantMessage("回滚后成功");
+        },
+      ]);
+      await controller.prompt("回滚后安全输入");
+      expect(faux.state.callCount).toBe(2);
+      expect(nextContext).not.toContain("大工具结果");
+      expect(nextContext).not.toContain("执行工具");
+      expect(nextContext).not.toContain("并发 prompt");
+      expect(nextContext).not.toContain("error 回调重入");
+      expect(nextContext).not.toContain("settled 回调重入");
+    },
+  );
+
+  it("公开绑定入口不接受特制 tokenizer，测试入口拒绝返回零的恶意 tokenizer", async () => {
+    const faux = fauxProvider({ api: "bad-tokenizer", provider: "bad-tokenizer" });
+    const runtime = await registeredRuntime(faux);
+    expect(() =>
+      (bindTrustedPiModelContextCapability as unknown as (...args: unknown[]) => unknown)(
+        runtime,
+        faux.getModel(),
+        { identity: "特制探针", countTokens: () => 1 },
+      ),
+    ).toThrow();
+    expect(() =>
+      bindTestingPiModelContextCapability(runtime, faux.getModel(), {
+        identity: "恶意-zero",
+        countTokens: () => 0,
+      }),
+    ).toThrow("tokenizer capability 无效");
+  });
+
+  it("绑定后 tokenizer 探针或模型窗口漂移时失败关闭", async () => {
+    const faux = fauxProvider({ api: "mutable-context", provider: "mutable-context" });
+    const model = faux.getModel();
+    const runtime = await registeredRuntime(faux);
+    let probeTokens = 17;
+    const context = bindTestingPiModelContextCapability(runtime, model, {
+      identity: "可变探针测试",
+      countTokens: () => probeTokens,
+    });
+    const options = {
+      model,
+      modelContext: context,
+      modelRuntime: runtime,
+      sandbox: new FakeSandboxHandle("mutable-context"),
+      createToolObservationRecorder: () => ({
+        record: async () => ({ outcome: "recorded" as const }),
+      }),
+      authorizeToolEffect: async () => ({
+        consumedAtMonotonicMs: performance.now(),
+        maxContinuationDelayMs: 100,
+      }),
+    };
+    expect(assessSafePiSessionContext(options).outcome).toBeDefined();
+    probeTokens = 1;
+    expect(() => assessSafePiSessionContext(options)).toThrow("未绑定当前可信");
+    const fresh = bindTestingPiModelContextCapability(runtime, model, {
+      identity: "模型漂移测试",
+      countTokens: () => 17,
+    });
+    const mutable = model as { contextWindow: number };
+    mutable.contextWindow += 1;
+    expect(() => assessSafePiSessionContext({ ...options, modelContext: fresh })).toThrow(
+      "未绑定当前可信",
+    );
+  });
+
+  it("模型路由快照冻结且 baseUrl 或 headers 漂移时拒绝使用", async () => {
+    const faux = fauxProvider({ api: "route-snapshot", provider: "route-snapshot" });
+    const model = faux.getModel();
+    const runtime = await registeredRuntime(faux);
+    const context = bindTrustedPiModelContextCapability(runtime, model);
+    expect(context.model).not.toBe(model);
+    expect(Object.isFrozen(context.model)).toBe(true);
+    if (context.model.headers !== undefined)
+      expect(Object.isFrozen(context.model.headers)).toBe(true);
+    const options = {
+      model,
+      modelContext: context,
+      modelRuntime: runtime,
+      sandbox: new FakeSandboxHandle("route-snapshot"),
+      createToolObservationRecorder: () => ({
+        record: async () => ({ outcome: "recorded" as const }),
+      }),
+      authorizeToolEffect: async () => ({
+        consumedAtMonotonicMs: performance.now(),
+        maxContinuationDelayMs: 100,
+      }),
+    };
+    model.baseUrl = `${model.baseUrl}/drift`;
+    expect(() => assessSafePiSessionContext(options)).toThrow("未绑定当前可信");
+  });
+
+  it.runIf(process.platform === "linux")(
+    "已解析请求绑定后 Provider implementation 与 auth 漂移均失败关闭",
+    async () => {
+      const providerDrift = await harness([fauxAssistantMessage("不应调用")]);
+      const mutableProvider = providerDrift.faux.provider as unknown as {
+        streamSimple: (...args: unknown[]) => unknown;
+      };
+      mutableProvider.streamSimple = () => {
+        throw new Error("漂移实现不应调用");
+      };
+      await expect(providerDrift.controller.prompt("实现漂移")).rejects.toMatchObject({
+        code: "PROVIDER_BINDING_DRIFT",
+      });
+      expect(providerDrift.faux.state.callCount).toBe(0);
+
+      const authDrift = await harness([fauxAssistantMessage("不应调用")]);
+      const liveProvider = authDrift.modelRuntime.getProvider(authDrift.model.provider);
+      if (liveProvider?.auth.apiKey === undefined) throw new Error("测试 Provider 缺少 auth");
+      (
+        liveProvider.auth.apiKey as unknown as {
+          resolve: () => Promise<{ auth: { apiKey: string } }>;
+        }
+      ).resolve = async () => ({ auth: { apiKey: "drifted-key" } });
+      await expect(authDrift.controller.prompt("认证漂移")).rejects.toMatchObject({
+        code: "PROVIDER_BINDING_DRIFT",
+      });
+      expect(authDrift.faux.state.callCount).toBe(0);
+
+      const baseUrlDrift = await harness([fauxAssistantMessage("不应调用")]);
+      baseUrlDrift.model.baseUrl = `${baseUrlDrift.model.baseUrl}/drift`;
+      await expect(baseUrlDrift.controller.prompt("端点漂移")).rejects.toThrow(
+        "未绑定当前可信 Provider model",
+      );
+      expect(baseUrlDrift.faux.state.callCount).toBe(0);
+
+      const headerDrift = await harness([fauxAssistantMessage("不应调用")]);
+      headerDrift.model.headers = { "x-drift": "changed" };
+      await expect(headerDrift.controller.prompt("Header 漂移")).rejects.toThrow(
+        "未绑定当前可信 Provider model",
+      );
+      expect(headerDrift.faux.state.callCount).toBe(0);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "低信任大 custom context 在 Session 建立前失败关闭",
+    async () => {
+      await expect(
+        harness(
+          [],
+          new FakeSandboxHandle("budget-untrusted-large"),
+          undefined,
+          undefined,
+          {
+            tenant: [],
+            skill: [],
+            user: [{ id: "large", content: "低信任超大内容" }],
+          },
+          {
+            identity: "测试低信任上限-tokenizer",
+            countTokens: (text) =>
+              text.includes("低信任超大内容")
+                ? 1_000_000
+                : new TextEncoder().encode(text).byteLength,
+          },
+        ),
+      ).rejects.toThrow("CONTEXT_TOO_LARGE");
     },
   );
 
@@ -194,8 +574,9 @@ describe("Pi 安全适配", () => {
   it.runIf(process.platform === "linux")(
     "把 Faux Provider 真实失败映射为稳定 PROVIDER，且不发布 completed",
     async () => {
-      const { controller, events } = await harness([
+      const { controller, events, faux } = await harness([
         fauxAssistantMessage("", { stopReason: "error", errorMessage: "测试 Provider 私有错误" }),
+        fauxAssistantMessage("失败后的新输入仍可执行"),
       ]);
       await controller.prompt("触发失败");
       expect(events).toContainEqual({
@@ -211,11 +592,16 @@ describe("Pi 安全适配", () => {
       expect(events.findIndex((event) => event.type === "error")).toBeLessThan(
         events.findIndex((event) => event.type === "agent.settled"),
       );
+      await controller.prompt("失败后新输入");
+      expect(faux.state.callCount).toBe(2);
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "message.delta", delta: "失败后的新输入仍可执行" }),
+      );
     },
   );
 
   it.runIf(process.platform === "linux")(
-    "Faux Provider 流式处理中 abort 产生 ABORTED 终态",
+    "只等待 abort 即形成 transaction 完成屏障并可立即启动下一 prompt",
     async () => {
       const delayedAbort: FauxResponseStep = async (_context, options) =>
         new Promise((resolve) => {
@@ -223,19 +609,47 @@ describe("Pi 安全适配", () => {
           if (options?.signal?.aborted) finish();
           else options?.signal?.addEventListener("abort", finish, { once: true });
         });
-      const { controller, events, started } = await harness([delayedAbort]);
+      const { controller, events, started, faux } = await harness([
+        delayedAbort,
+        fauxAssistantMessage("中止后的新输入仍可执行"),
+      ]);
       const prompting = controller.prompt("等待中止");
       await started;
       await controller.abort();
+      const abortedEvents = [...events];
+      // 不等待旧 prompting；abort 自身必须已经跨过 Controller finally/end generation。
+      const nextPrompt = controller.prompt("中止后新输入");
+      await nextPrompt;
       await prompting;
-      expect(events).toContainEqual({ type: "error", code: "ABORTED", message: "模型调用已中止" });
-      expect(events.some((event) => event.type === "message.completed")).toBe(false);
-      expect(events.findIndex((event) => event.type === "agent.started")).toBeLessThan(
-        events.findIndex((event) => event.type === "error"),
+      expect(abortedEvents).toContainEqual({
+        type: "error",
+        code: "ABORTED",
+        message: "模型调用已中止",
+      });
+      expect(abortedEvents.some((event) => event.type === "message.completed")).toBe(false);
+      expect(abortedEvents.findIndex((event) => event.type === "agent.started")).toBeLessThan(
+        abortedEvents.findIndex((event) => event.type === "error"),
       );
-      expect(events.findIndex((event) => event.type === "error")).toBeLessThan(
-        events.findIndex((event) => event.type === "agent.settled"),
+      expect(abortedEvents.findIndex((event) => event.type === "error")).toBeLessThan(
+        abortedEvents.findIndex((event) => event.type === "agent.settled"),
       );
+      expect(faux.state.callCount).toBe(2);
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "message.delta", delta: "中止后的新输入仍可执行" }),
+      );
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "无活跃 transaction 时 abort 幂等且并发调用不阻塞后续 prompt",
+    async () => {
+      const { controller, faux } = await harness([fauxAssistantMessage("正常完成")]);
+      await Promise.all([controller.abort(), controller.abort(), controller.abort()]);
+      expect(faux.state.callCount).toBe(0);
+      await controller.prompt("abort 后执行");
+      expect(faux.state.callCount).toBe(1);
+      await Promise.all([controller.abort(), controller.abort()]);
+      expect(faux.state.callCount).toBe(1);
     },
   );
 
@@ -331,9 +745,11 @@ describe("Pi 安全适配", () => {
       });
       const faux = fauxProvider({ api: "faux-platform", provider: "faux-platform" });
       modelRuntime.registerNativeProvider(faux.provider);
+      const model = faux.getModel();
       await expect(
         createSafePiSession({
-          model: faux.getModel(),
+          model,
+          modelContext: bindTrustedPiModelContextCapability(modelRuntime, model),
           modelRuntime,
           sandbox: new FakeSandboxHandle("platform-guard"),
           authorizeToolEffect: async () => immediateAuthorization(),
@@ -449,17 +865,29 @@ describe("Pi 安全适配", () => {
   });
 });
 
+async function registeredRuntime(faux: FauxProviderHandle): Promise<ModelRuntime> {
+  const runtime = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(),
+    modelsPath: null,
+  });
+  runtime.registerNativeProvider(faux.provider);
+  return runtime;
+}
+
 async function harness(
   responses: FauxResponseStep[],
   sandbox = new FakeSandboxHandle("pi-fake"),
   rolloutProjection?: Parameters<typeof createSafePiSession>[0]["rolloutProjection"],
   authorizeToolEffect?: Parameters<typeof createSafePiSession>[0]["authorizeToolEffect"],
   untrustedPromptContent?: Parameters<typeof createSafePiSession>[0]["untrustedPromptContent"],
+  tokenizer?: TokenizerPort,
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
   started: Promise<void>;
   faux: FauxProviderHandle;
+  model: NonNullable<ReturnType<FauxProviderHandle["getModel"]>>;
+  modelRuntime: ModelRuntime;
   toolAuthorizationCount: () => number;
   authorizedCalls: Array<{ callId: string; toolName: string; argsDigest: string }>;
 }> {
@@ -478,8 +906,13 @@ async function harness(
   await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
   let authorizationCount = 0;
   const authorizedCalls: Array<{ callId: string; toolName: string; argsDigest: string }> = [];
+  const model = faux.getModel();
   const controller = await createSafePiSession({
-    model: faux.getModel(),
+    model,
+    modelContext:
+      tokenizer === undefined
+        ? bindTrustedPiModelContextCapability(modelRuntime, model)
+        : bindTestingPiModelContextCapability(modelRuntime, model, tokenizer),
     modelRuntime,
     sandbox,
     authorizeToolEffect: async (input) => {
@@ -506,6 +939,8 @@ async function harness(
     events,
     started,
     faux,
+    model,
+    modelRuntime,
     toolAuthorizationCount: () => authorizationCount,
     authorizedCalls,
   };

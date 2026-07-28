@@ -10,6 +10,8 @@ import {
 } from "@cube-runtime/context-policy";
 import { sha256Digest } from "@cube-runtime/domain";
 import {
+  bindTrustedPiModelContextCapability,
+  ContextBudgetAdmissionError,
   createSafePiSession,
   deriveSafePiSessionCompatibility,
   type ControlledRolloutProjection,
@@ -26,6 +28,8 @@ import type { AgentSessionFactoryPort, AgentTurnOutcome, WorkerAgentSessionPort 
  * 再用 prompt 真正启动模型，绝不对空 Session 调 followUp。
  */
 export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
+  private readonly modelContext;
+
   constructor(
     private readonly model: Model<Api>,
     private readonly modelRuntime: ModelRuntime,
@@ -48,7 +52,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       input: Parameters<AgentSessionFactoryPort["create"]>[0],
       compatibility: ReturnType<typeof deriveSafePiSessionCompatibility>,
     ) => Promise<ControlledRolloutProjection | undefined>,
-  ) {}
+  ) {
+    this.modelContext = bindTrustedPiModelContextCapability(modelRuntime, model);
+  }
 
   async create(
     input: Parameters<AgentSessionFactoryPort["create"]>[0],
@@ -122,6 +128,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         : undefined;
     const sessionMaterial = {
       model: this.model,
+      modelContext: this.modelContext,
       modelRuntime: this.modelRuntime,
       sandbox: input.sandbox,
       authorizeToolEffect: authorizeStartedTool,
@@ -200,6 +207,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           if (observationRecoveryCode !== undefined) {
             return { kind: "recovery_required", code: observationRecoveryCode };
           }
+          if (error instanceof ContextBudgetAdmissionError)
+            return { kind: "context_too_large", action: "rebuild_context" };
           throw error;
         }
         if (observationRecoveryCode !== undefined) {

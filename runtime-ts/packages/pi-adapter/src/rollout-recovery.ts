@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
 import {
   assertControlledToolObservation,
+  type ContextBudgetCompatibilityDecision,
+  type ContextBudgetDecision,
   type ControlledToolReceipt,
+  compareRecordedContextBudget,
   encodeControlledToolReceipt,
   parseControlledToolReceipt,
+  type RecordedContextBudgetIdentity,
 } from "@cube-runtime/context-policy";
 import {
   type RolloutCompatibilityIdentity,
@@ -12,6 +16,7 @@ import {
   sha256Digest,
 } from "@cube-runtime/domain";
 import {
+  assessSafePiSessionContext,
   type ControlledRolloutProjection,
   type CreateSafePiSessionOptions,
   createSafePiSession,
@@ -37,6 +42,8 @@ export type RuntimeRolloutLoadRecoveryResult =
         | "toolSchemaHash"
         | "skillManifestHash"
       )[];
+      /** 只能由持久层从原 stream 记录返回，禁止 API/调用方提交。 */
+      readonly recordedBudget?: RecordedContextBudgetIdentity;
     }
   | { readonly outcome: "not_found" };
 
@@ -52,7 +59,9 @@ export type RuntimeRecoveryProjectionResult =
 export type RecoverSafePiSessionResult =
   | { readonly outcome: "session_created"; readonly controller: PiSessionController }
   | Exclude<RuntimeRolloutLoadRecoveryResult, { readonly outcome: "loaded" }>
-  | Extract<RuntimeRecoveryProjectionResult, { readonly outcome: "requires_tool_reconciliation" }>;
+  | Extract<RuntimeRecoveryProjectionResult, { readonly outcome: "requires_tool_reconciliation" }>
+  | Exclude<ContextBudgetDecision, { readonly outcome: "ready" }>
+  | Exclude<ContextBudgetCompatibilityDecision, { readonly outcome: "compatible" }>;
 
 /** 恢复事实被篡改或已损坏时只公开稳定错误码，不回显正文、路径或内部身份。 */
 export class RuntimeRecoveryError extends Error {
@@ -76,10 +85,21 @@ export async function recoverSafePiSession(
   const sessionOptions = safeSessionOptions(options);
   const currentCompatibility = deriveSafePiSessionCompatibility(sessionOptions);
   const loaded = await options.loadRecovery(currentCompatibility);
+  if (loaded.outcome === "compatibility_mismatch" && loaded.recordedBudget !== undefined) {
+    const currentBudget = assessSafePiSessionContext(sessionOptions).policy;
+    const compared = compareRecordedContextBudget(loaded.recordedBudget, currentBudget);
+    if (compared.outcome === "rebuild_required") return compared;
+  }
   if (loaded.outcome !== "loaded") return loaded;
   assertCompatibility(currentCompatibility, loaded.recordedCompatibility);
   const projected = projectLoadedRuntimeRecovery(loaded);
   if (projected.outcome !== "ready") return projected;
+  // 先做模型感知预算，再创建 Pi；超窗事实保留在 Rollout 中，调用方获得可处理的稳定结果。
+  const budget = assessSafePiSessionContext({
+    ...sessionOptions,
+    rolloutProjection: projected.projection,
+  });
+  if (budget.outcome === "context_too_large") return budget;
   const controller = await createSafePiSession({
     ...sessionOptions,
     rolloutProjection: projected.projection,
@@ -154,6 +174,7 @@ function safeSessionOptions(
 ): CreateSafePiSessionOptions {
   return {
     model: options.model,
+    modelContext: options.modelContext,
     modelRuntime: options.modelRuntime,
     sandbox: options.sandbox,
     authorizeToolEffect: options.authorizeToolEffect,

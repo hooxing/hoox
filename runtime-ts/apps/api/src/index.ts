@@ -1,10 +1,10 @@
 export * from "./app.js";
 export * from "./capabilities.js";
 export * from "./cursor.js";
-export { parseThreadCursorSigningKeys } from "./development-assembly.js";
 export * from "./development-auth.js";
 export * from "./development-boundary.js";
 export * from "./development-identity.js";
 export * from "./ports.js";
+export * from "./production-auth.js";
 export * from "./process-entry.js";
 export { ApiFailure, ApiService } from "./service.js";

@@ -4,7 +4,7 @@ import { createApiPersistenceRuntime, createS3BlobStore } from "@cube-runtime/pe
 import type { ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
-import { createThreadCursorCodec, type ThreadCursorSigningKey } from "./cursor.js";
+import { createThreadCursorCodec, parseThreadCursorSigningKeys } from "./cursor.js";
 import { createDevelopmentAuthResolver } from "./development-auth.js";
 import {
   assertDevelopmentPrincipalsIsolated,
@@ -18,27 +18,7 @@ const cursorMaximumTtlMilliseconds = 60 * 60_000;
 // BlobStore 当前会在完整校验后才交付内存对象；开发 API 不得绕过其 16 MiB 绝对边界。
 const developmentApiMaxBlobSizeBytes = 16 * 1_024 * 1_024;
 
-/**
- * 密钥环使用 `kid:base64url,kid:base64url`，这里只拆分结构；密钥长度和规范编码仍由 codec 校验。
- * 解析错误不能包含原始字符串，避免启动日志意外带出密钥。
- */
-export function parseThreadCursorSigningKeys(value: string): readonly ThreadCursorSigningKey[] {
-  const entries = value.split(",");
-  if (entries.length === 0) throw new TypeError("分页游标签名密钥环无效");
-  return Object.freeze(
-    entries.map((entry) => {
-      const separator = entry.indexOf(":");
-      if (
-        separator < 1 ||
-        separator === entry.length - 1 ||
-        entry.indexOf(":", separator + 1) >= 0
-      ) {
-        throw new TypeError("分页游标签名密钥环无效");
-      }
-      return Object.freeze({ kid: entry.slice(0, separator), secret: entry.slice(separator + 1) });
-    }),
-  );
-}
+export { parseThreadCursorSigningKeys } from "./cursor.js";
 
 /** 仅用于本地 development：真实 PG、固定开发身份和真实 TCP listener，不代表生产装配。 */
 export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = {

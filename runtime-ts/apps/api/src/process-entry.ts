@@ -1,5 +1,6 @@
 import {
   booleanEnvironmentField,
+  EnvironmentConfigurationError,
   integerEnvironmentField,
   type ProcessSignalSource,
   parseStrictEnvironment,
@@ -20,8 +21,19 @@ import {
   DEVELOPMENT_API_DEFAULT_PORT,
   normalizeDevelopmentLoopbackHost,
 } from "./development-boundary.js";
+import {
+  parseProductionJwtSigningKeys,
+  type ProductionJwtVerificationKey,
+} from "./production-auth.js";
+import { auditedProductionApiAssembly } from "./production-assembly.js";
+import {
+  parseProductionApiTransport,
+  type ProductionApiTransport,
+} from "./production-transport.js";
 
 const optionalEnvironments = [] as const;
+const developmentAndTestEnvironments = ["development", "test"] as const;
+const productionEnvironment = ["production"] as const;
 const apiEnvironmentSchema = Object.freeze({
   DATABASE_URL: urlEnvironmentField({
     secret: true,
@@ -30,9 +42,26 @@ const apiEnvironmentSchema = Object.freeze({
     maxLength: 8_192,
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
+  DATABASE_RUNTIME_ROLE: stringEnvironmentField({
+    requiredIn: productionEnvironment,
+    maxLength: 63,
+  }),
   THREAD_CURSOR_ACTIVE_KID: stringEnvironmentField({ maxLength: 128 }),
   THREAD_CURSOR_SIGNING_KEYS: stringEnvironmentField({ secret: true, maxLength: 16_384 }),
-  DEV_AUTH_ENABLED: booleanEnvironmentField(),
+  API_JWT_ISSUER: stringEnvironmentField({ requiredIn: productionEnvironment, maxLength: 512 }),
+  API_JWT_AUDIENCE: stringEnvironmentField({ requiredIn: productionEnvironment, maxLength: 512 }),
+  API_JWT_SIGNING_KEYS: stringEnvironmentField({
+    requiredIn: productionEnvironment,
+    secret: true,
+    maxLength: 8_192,
+  }),
+  API_JWT_CLOCK_SKEW_SECONDS: integerEnvironmentField({
+    requiredIn: productionEnvironment,
+    minimum: 1,
+    maximum: 300,
+  }),
+  // production 中即使 false 也不能出现，显式检查位于 parseApiProcessEnvironment。
+  DEV_AUTH_ENABLED: booleanEnvironmentField({ requiredIn: developmentAndTestEnvironments }),
   DEV_AUTH_USER_A_ID: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 128 }),
   DEV_AUTH_USER_A_TENANT_ID: stringEnvironmentField({
     requiredIn: optionalEnvironments,
@@ -44,11 +73,22 @@ const apiEnvironmentSchema = Object.freeze({
     maxLength: 128,
   }),
   PROCESS_SHUTDOWN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1, maximum: 600_000 }),
-  API_LISTEN_HOST: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 253 }),
+  API_LISTEN_HOST: stringEnvironmentField({ requiredIn: productionEnvironment, maxLength: 253 }),
   API_LISTEN_PORT: integerEnvironmentField({
-    requiredIn: optionalEnvironments,
+    requiredIn: productionEnvironment,
     minimum: 1,
     maximum: 65_535,
+  }),
+  API_TLS_MODE: stringEnvironmentField({ requiredIn: productionEnvironment, maxLength: 6 }),
+  API_TLS_CERT_PATH: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 4_096 }),
+  API_TLS_KEY_PATH: stringEnvironmentField({
+    requiredIn: optionalEnvironments,
+    secret: true,
+    maxLength: 4_096,
+  }),
+  API_TRUSTED_PROXY_CIDRS: stringEnvironmentField({
+    requiredIn: optionalEnvironments,
+    maxLength: 4_096,
   }),
   S3_ENDPOINT: urlEnvironmentField(),
   S3_PUBLIC_ENDPOINT: urlEnvironmentField(),
@@ -67,6 +107,7 @@ export interface ApiProcessConfiguration {
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
   readonly databaseSchema: string;
+  readonly databaseRuntimeRole?: string;
   readonly cursorActiveKeyId: string;
   readonly cursorSigningKeys: string;
   readonly developmentPrincipals?: readonly [ApiDevelopmentPrincipal, ApiDevelopmentPrincipal];
@@ -82,6 +123,15 @@ export interface ApiProcessConfiguration {
     readonly secretAccessKey: string;
     readonly forcePathStyle: boolean;
   }>;
+  readonly production?: Readonly<{
+    readonly jwt: Readonly<{
+      readonly issuer: string;
+      readonly audience: string;
+      readonly keys: readonly ProductionJwtVerificationKey[];
+      readonly clockSkewSeconds: number;
+    }>;
+    readonly transport: ProductionApiTransport;
+  }>;
 }
 
 export function selectApiProcessEnvironment(
@@ -94,7 +144,13 @@ export function parseApiProcessEnvironment(
   source: Readonly<Record<string, string | undefined>>,
 ): ApiProcessConfiguration {
   const parsed = parseStrictEnvironment(source, apiEnvironmentSchema);
-  const developmentAuthEnabled = readRequiredEnvironmentValue(parsed, "DEV_AUTH_ENABLED");
+  if (parsed.runtimeEnvironment === "production") {
+    assertProductionHasNoDevelopmentIdentity(source);
+  }
+  const developmentAuthEnabled =
+    parsed.runtimeEnvironment === "production"
+      ? false
+      : readRequiredEnvironmentValue(parsed, "DEV_AUTH_ENABLED");
   // 开发身份只有明确开启时才进入配置对象；生产环境由共享解析器直接拒绝。
   const developmentPrincipals = developmentAuthEnabled
     ? Object.freeze([
@@ -116,6 +172,10 @@ export function parseApiProcessEnvironment(
   if (developmentPrincipals !== undefined) {
     assertDevelopmentPrincipalsIsolated(developmentPrincipals);
   }
+  const databaseRuntimeRole = parsed.values.DATABASE_RUNTIME_ROLE;
+  if (databaseRuntimeRole !== undefined && !/^[a-z_][a-z0-9_]{0,62}$/u.test(databaseRuntimeRole)) {
+    throw new TypeError("DATABASE_RUNTIME_ROLE 格式无效");
+  }
   const listenPort = parsed.values.API_LISTEN_PORT ?? DEVELOPMENT_API_DEFAULT_PORT;
   const objectStorage = Object.freeze({
     endpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
@@ -133,10 +193,33 @@ export function parseApiProcessEnvironment(
       listenPort,
     );
   }
+  const production =
+    parsed.runtimeEnvironment === "production"
+      ? createProductionConfiguration({
+          listenHost,
+          tlsMode: readRequiredEnvironmentValue(parsed, "API_TLS_MODE"),
+          ...(parsed.values.API_TLS_CERT_PATH === undefined
+            ? {}
+            : { certificatePath: parsed.values.API_TLS_CERT_PATH }),
+          ...(parsed.values.API_TLS_KEY_PATH === undefined
+            ? {}
+            : { privateKeyPath: parsed.values.API_TLS_KEY_PATH }),
+          ...(parsed.values.API_TRUSTED_PROXY_CIDRS === undefined
+            ? {}
+            : { trustedProxyCidrs: parsed.values.API_TRUSTED_PROXY_CIDRS }),
+          issuer: readRequiredEnvironmentValue(parsed, "API_JWT_ISSUER"),
+          audience: readRequiredEnvironmentValue(parsed, "API_JWT_AUDIENCE"),
+          signingKeys: readRequiredEnvironmentValue(parsed, "API_JWT_SIGNING_KEYS"),
+          clockSkewSeconds: readRequiredEnvironmentValue(parsed, "API_JWT_CLOCK_SKEW_SECONDS"),
+          objectStorageEndpoint: objectStorage.endpoint,
+          objectStoragePublicEndpoint: objectStorage.publicEndpoint,
+        })
+      : undefined;
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
+    ...(databaseRuntimeRole === undefined ? {} : { databaseRuntimeRole }),
     cursorActiveKeyId: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_ACTIVE_KID"),
     cursorSigningKeys: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_SIGNING_KEYS"),
     ...(developmentPrincipals === undefined ? {} : { developmentPrincipals }),
@@ -147,6 +230,7 @@ export function parseApiProcessEnvironment(
     listenHost,
     listenPort,
     objectStorage,
+    ...(production === undefined ? {} : { production }),
   });
 }
 
@@ -157,6 +241,22 @@ export async function startApiProcess(input: {
   readonly onShutdownFailure?: (error: Error) => void;
 }): Promise<RunningServiceProcess> {
   const configuration = parseApiProcessEnvironment(input.environment);
+  if (configuration.runtimeEnvironment === "production") {
+    if (input.assembler !== undefined) {
+      // 生产依赖图只能来自模块顶层的 audited capability，调用方传入 Fake 时不进入装配阶段。
+      throw new Error("PRODUCTION_ASSEMBLY_UNAVAILABLE:api");
+    }
+    return startServiceProcess({
+      serviceName: "api",
+      configuration,
+      shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
+      auditedProductionAssembly: auditedProductionApiAssembly,
+      ...(input.signalSource === undefined ? {} : { signalSource: input.signalSource }),
+      ...(input.onShutdownFailure === undefined
+        ? {}
+        : { onShutdownFailure: input.onShutdownFailure }),
+    });
+  }
   const assembler =
     input.assembler ??
     (configuration.runtimeEnvironment === "development" &&
@@ -173,4 +273,65 @@ export async function startApiProcess(input: {
       ? {}
       : { onShutdownFailure: input.onShutdownFailure }),
   });
+}
+
+const developmentIdentityEnvironmentKeys = Object.freeze([
+  "DEV_AUTH_ENABLED",
+  "DEV_AUTH_USER_A_ID",
+  "DEV_AUTH_USER_A_TENANT_ID",
+  "DEV_AUTH_USER_B_ID",
+  "DEV_AUTH_USER_B_TENANT_ID",
+] as const);
+
+function assertProductionHasNoDevelopmentIdentity(
+  source: Readonly<Record<string, string | undefined>>,
+): void {
+  const configured = developmentIdentityEnvironmentKeys.filter((key) => source[key] !== undefined);
+  if (configured.length > 0) {
+    throw new EnvironmentConfigurationError(
+      configured.map((key) => ({ code: "FORBIDDEN_IN_PRODUCTION" as const, key })),
+    );
+  }
+}
+
+function createProductionConfiguration(input: {
+  readonly listenHost: string;
+  readonly tlsMode: string;
+  readonly certificatePath?: string;
+  readonly privateKeyPath?: string;
+  readonly trustedProxyCidrs?: string;
+  readonly issuer: string;
+  readonly audience: string;
+  readonly signingKeys: string;
+  readonly clockSkewSeconds: number;
+  readonly objectStorageEndpoint: string;
+  readonly objectStoragePublicEndpoint: string;
+}): NonNullable<ApiProcessConfiguration["production"]> {
+  assertProductionObjectStorageTransport(input.objectStorageEndpoint, "S3_ENDPOINT");
+  assertProductionObjectStorageTransport(input.objectStoragePublicEndpoint, "S3_PUBLIC_ENDPOINT");
+  return Object.freeze({
+    jwt: Object.freeze({
+      issuer: input.issuer,
+      audience: input.audience,
+      keys: parseProductionJwtSigningKeys(input.signingKeys),
+      clockSkewSeconds: input.clockSkewSeconds,
+    }),
+    transport: parseProductionApiTransport({
+      listenHost: input.listenHost,
+      tlsMode: input.tlsMode,
+      ...(input.certificatePath === undefined ? {} : { certificatePath: input.certificatePath }),
+      ...(input.privateKeyPath === undefined ? {} : { privateKeyPath: input.privateKeyPath }),
+      ...(input.trustedProxyCidrs === undefined
+        ? {}
+        : { trustedProxyCidrs: input.trustedProxyCidrs }),
+    }),
+  });
+}
+
+/** API 会向浏览器交付预签名 URL；生产对象存储入口不得回退到明文 HTTP。 */
+function assertProductionObjectStorageTransport(value: string, key: string): void {
+  const endpoint = new URL(value);
+  if (endpoint.protocol !== "https:" || endpoint.username !== "" || endpoint.password !== "") {
+    throw new TypeError(`${key} 在 production 必须为无凭据的 HTTPS URL`);
+  }
 }

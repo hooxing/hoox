@@ -244,6 +244,11 @@ class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThre
     this.revokedScopes.add(key(scope, scope.userId));
   }
 
+  revokeMembership(scope: TenantScope): void {
+    // 模拟 PG Membership/RLS 在认证后再次读取时发现 inactive/revoked 的结果。
+    this.tenants.delete(key(scope, scope.userId));
+  }
+
   overrideRole(scope: TenantScope, role: MembershipRole): void {
     this.roleOverrides.set(key(scope, scope.userId), role);
   }
@@ -396,6 +401,7 @@ function fixture(
     readonly confirmationDrift?: ArtifactConfirmationDrift;
     readonly artifactMediaType?: string;
     readonly blobFailure?: BlobStoreError;
+    readonly productionPrincipalOnly?: boolean;
   } = {},
 ) {
   const state = new FakeApiState();
@@ -418,8 +424,13 @@ function fixture(
   const clock = new FakeClock();
   const dependencies: ApiDependencies = {
     auth: {
-      resolve: async ({ authorization }) =>
-        authorization === undefined ? undefined : state.principals.get(authorization),
+      resolve: async ({ authorization }) => {
+        const principal =
+          authorization === undefined ? undefined : state.principals.get(authorization);
+        return principal === undefined || options.productionPrincipalOnly !== true
+          ? principal
+          : Object.freeze({ userId: principal.userId });
+      },
     },
     repositories: state.repositories,
     ...(options.enableCreate === false
@@ -954,6 +965,58 @@ describe("Fastify API 契约", () => {
     expect(crossTenant.json().error.code).toBe("NOT_FOUND");
     const unauthenticated = await app.inject({ method: "GET", url: "/v1/threads/thread_1" });
     expect(unauthenticated.statusCode).toBe(401);
+  });
+
+  it("生产 JWT user principal 只能把 X-Tenant-Id 当作经 Membership/RLS 二次验证的选择器", async () => {
+    const { app, ownerA, ownerB, state } = fixture({ productionPrincipalOnly: true });
+    openApps.push(app);
+    const missingSelector = await app.inject({
+      method: "GET",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(missingSelector.statusCode).toBe(400);
+    const malformedSelector = await app.inject({
+      method: "GET",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "x-tenant-id": "tenant with spaces" },
+    });
+    expect(malformedSelector.statusCode).toBe(400);
+    const duplicateSelector = await app.inject({
+      method: "GET",
+      url: "/v1/threads",
+      headers: {
+        authorization: "Bearer token-a",
+        "x-tenant-id": [ownerA.tenant.id, ownerA.tenant.id],
+      },
+    });
+    expect(duplicateSelector.statusCode).toBe(400);
+    const forgedTenant = await app.inject({
+      method: "GET",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "x-tenant-id": ownerB.tenant.id },
+    });
+    expect(forgedTenant.statusCode).toBe(404);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: {
+        authorization: "Bearer token-a",
+        "x-tenant-id": ownerA.tenant.id,
+        "idempotency-key": "production-selector-thread-key",
+      },
+      payload: { title: "生产租户选择器" },
+    });
+    expect(created.statusCode).toBe(200);
+    state.revokeMembership({ tenantId: ownerA.tenant.id, userId: ownerA.user.id });
+    const inactiveMembership = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1",
+      headers: { authorization: "Bearer token-a", "x-tenant-id": ownerA.tenant.id },
+    });
+    // 有效 JWT 也不能绕过当前 Membership/RLS；外部保持 not_found，不能枚举租户成员关系。
+    expect(inactiveMembership.statusCode).toBe(404);
   });
 
   it("member 可读取但不可归档，权限失败不泄漏 Thread 存在性", async () => {

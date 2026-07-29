@@ -10,6 +10,7 @@ import {
 import type { TenantBundle, TenantRepository } from "@cube-runtime/persistence";
 import {
   booleanEnvironmentField,
+  EnvironmentConfigurationError,
   parseStrictEnvironment,
   type RuntimeEnvironment,
   readRequiredEnvironmentValue,
@@ -23,6 +24,7 @@ import {
 } from "./development-boundary.js";
 
 const optionalEnvironments = [] as const;
+const developmentAndTestEnvironments = ["development", "test"] as const;
 const developmentIdentityEnvironmentSchema = Object.freeze({
   DATABASE_URL: urlEnvironmentField({
     secret: true,
@@ -31,7 +33,7 @@ const developmentIdentityEnvironmentSchema = Object.freeze({
     maxLength: 8_192,
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
-  DEV_AUTH_ENABLED: booleanEnvironmentField(),
+  DEV_AUTH_ENABLED: booleanEnvironmentField({ requiredIn: developmentAndTestEnvironments }),
   DEV_AUTH_USER_A_ID: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 128 }),
   DEV_AUTH_USER_A_TENANT_ID: stringEnvironmentField({
     requiredIn: optionalEnvironments,
@@ -66,7 +68,13 @@ export function parseDevelopmentIdentityEnvironment(
   source: Readonly<Record<string, string | undefined>>,
 ): DevelopmentIdentityConfiguration {
   const parsed = parseStrictEnvironment(source, developmentIdentityEnvironmentSchema);
-  const enabled = readRequiredEnvironmentValue(parsed, "DEV_AUTH_ENABLED");
+  if (parsed.runtimeEnvironment === "production") {
+    assertProductionHasNoDevelopmentIdentity(source);
+  }
+  const enabled =
+    parsed.runtimeEnvironment === "production"
+      ? false
+      : readRequiredEnvironmentValue(parsed, "DEV_AUTH_ENABLED");
   const principals = enabled
     ? Object.freeze([
         Object.freeze({
@@ -86,6 +94,24 @@ export function parseDevelopmentIdentityEnvironment(
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
     ...(principals === undefined ? {} : { principals }),
   });
+}
+
+function assertProductionHasNoDevelopmentIdentity(
+  source: Readonly<Record<string, string | undefined>>,
+): void {
+  const keys = [
+    "DEV_AUTH_ENABLED",
+    "DEV_AUTH_USER_A_ID",
+    "DEV_AUTH_USER_A_TENANT_ID",
+    "DEV_AUTH_USER_B_ID",
+    "DEV_AUTH_USER_B_TENANT_ID",
+  ] as const;
+  const configured = keys.filter((key) => source[key] !== undefined);
+  if (configured.length > 0) {
+    throw new EnvironmentConfigurationError(
+      configured.map((key) => ({ code: "FORBIDDEN_IN_PRODUCTION" as const, key })),
+    );
+  }
 }
 
 export interface DevelopmentIdentityProvisioningResult {

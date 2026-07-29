@@ -46,6 +46,28 @@ export interface ThreadCursorKeyRing {
   readonly maximumTtlMilliseconds: number;
 }
 
+/**
+ * 环境密钥环使用 `kid:base64url,kid:base64url`。这里只拆分结构；密钥长度、重复 kid 与
+ * 规范编码仍由 createThreadCursorCodec 统一验证，避免 development/production 解析语义漂移。
+ */
+export function parseThreadCursorSigningKeys(value: string): readonly ThreadCursorSigningKey[] {
+  const entries = value.split(",");
+  if (entries.length === 0) throw new TypeError("分页游标签名密钥环无效");
+  return Object.freeze(
+    entries.map((entry) => {
+      const separator = entry.indexOf(":");
+      if (
+        separator < 1 ||
+        separator === entry.length - 1 ||
+        entry.indexOf(":", separator + 1) >= 0
+      ) {
+        throw new TypeError("分页游标签名密钥环无效");
+      }
+      return Object.freeze({ kid: entry.slice(0, separator), secret: entry.slice(separator + 1) });
+    }),
+  );
+}
+
 interface CursorPayload {
   readonly v: 1;
   readonly kid: string;

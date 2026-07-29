@@ -1,0 +1,111 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ApiAppOptions, ApiDependencies } from "./app.js";
+
+const mocks = vi.hoisted(() => {
+  const app = {
+    listen: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined),
+  };
+  const persistence = {
+    blobLifecycle: {},
+    repositories: {},
+    threadCreation: { createThread: vi.fn() },
+    runDispatchCreation: {
+      replayQueuedRun: vi.fn(),
+      createQueuedRun: vi.fn(),
+    },
+    archiveThread: {},
+    experience: {},
+    probe: vi.fn(async () => undefined),
+    close: vi.fn(async () => undefined),
+  };
+  return {
+    app,
+    persistence,
+    createApiApp: vi.fn(() => app),
+    createApiPersistenceRuntime: vi.fn(() => persistence),
+    createS3BlobStore: vi.fn(() => ({})),
+    probeS3BlobStore: vi.fn(async () => undefined),
+  };
+});
+
+vi.mock("@cube-runtime/persistence", () => ({
+  createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
+  createS3BlobStore: mocks.createS3BlobStore,
+  probeS3BlobStore: mocks.probeS3BlobStore,
+}));
+
+vi.mock("./app.js", () => ({ createApiApp: mocks.createApiApp }));
+
+import { startApiProcess } from "./process-entry.js";
+
+function productionEnvironment(): Record<string, string> {
+  return {
+    RUNTIME_ENV: "production",
+    DATABASE_URL: "postgresql://runtime:credential@database/runtime",
+    DATABASE_SCHEMA: "runtime",
+    DATABASE_RUNTIME_ROLE: "runtime",
+    THREAD_CURSOR_ACTIVE_KID: "current",
+    THREAD_CURSOR_SIGNING_KEYS: "current:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    API_JWT_ISSUER: "https://issuer.example.invalid/runtime",
+    API_JWT_AUDIENCE: "cube-runtime-api",
+    API_JWT_SIGNING_KEYS: "current-key:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    API_JWT_CLOCK_SKEW_SECONDS: "60",
+    PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
+    API_LISTEN_HOST: "127.0.0.1",
+    API_LISTEN_PORT: "3001",
+    API_TLS_MODE: "proxy",
+    API_TRUSTED_PROXY_CIDRS: "127.0.0.1",
+    S3_ENDPOINT: "https://object-storage.example.invalid:9000",
+    S3_PUBLIC_ENDPOINT: "https://objects.example.invalid",
+    S3_BUCKET: "runtime-artifacts",
+    S3_REGION: "us-east-1",
+    S3_ACCESS_KEY_ID: "local-access-key",
+    S3_SECRET_ACCESS_KEY: "opaque-test-value",
+    S3_FORCE_PATH_STYLE: "true",
+  };
+}
+
+describe("生产 API 默认装配", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("只装配真实 PG/S3/JWT/proxy 依赖，且不把开发固定凭据带入 production", async () => {
+    const running = await startApiProcess({ environment: productionEnvironment() });
+    try {
+      expect(mocks.createApiPersistenceRuntime).toHaveBeenCalledWith({
+        connectionString: "postgresql://runtime:credential@database/runtime",
+        schema: "runtime",
+        expectedRuntimeRole: "runtime",
+        applicationName: "cube-runtime-api-production",
+      });
+      expect(mocks.createS3BlobStore).toHaveBeenCalledWith(
+        expect.objectContaining({
+          maxBlobSizeBytes: 16 * 1_024 * 1_024,
+          endpoint: "https://object-storage.example.invalid:9000",
+          publicEndpoint: "https://objects.example.invalid",
+        }),
+        mocks.persistence.blobLifecycle,
+      );
+      expect(mocks.app.listen).toHaveBeenCalledWith({ host: "127.0.0.1", port: 3001 });
+      const calls = mocks.createApiApp.mock.calls as unknown as Array<
+        [ApiDependencies, ApiAppOptions]
+      >;
+      const firstCall = calls[0];
+      if (firstCall === undefined) throw new Error("未创建 API 应用");
+      const [dependencies, options] = firstCall;
+      expect(
+        await dependencies.auth.resolve({ authorization: "Bearer dev-user-a", requestId: "r" }),
+      ).toBeUndefined();
+      if (typeof options.trustProxy !== "function") throw new Error("未配置受限代理信任");
+      expect(options.trustProxy("127.0.0.1", 0)).toBe(true);
+      expect(options.trustProxy("198.51.100.7", 0)).toBe(false);
+      await expect(running.readiness()).resolves.toEqual({ status: "ready" });
+    } finally {
+      await running.close();
+    }
+    expect(mocks.app.close).toHaveBeenCalledTimes(1);
+    expect(mocks.persistence.close).toHaveBeenCalledTimes(1);
+  });
+});

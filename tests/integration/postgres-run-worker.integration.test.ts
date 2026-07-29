@@ -438,6 +438,124 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     expect(acl.rows[0]).toEqual({ select_insert_update: true, delete: false });
   });
 
+  it("Workspace journal complete 的 COMMIT 响应未知映射为 unknown，原 identity 可读回", async () => {
+    const f = await fixture(`workspace-journal-commit-unknown-${suffix}`);
+    const policy = {
+      maxEntries: 1,
+      maxFiles: 1,
+      maxTotalBytes: 1,
+      maxSingleFileBytes: 1,
+      maxChunkBytes: 1,
+      maxPathUtf8Bytes: 128,
+      historicalManifest: { maxFiles: 1, maxTotalBytes: 1 },
+    } as const;
+    const scope = {
+      tenantId: f.scope.tenantId,
+      threadId: f.scope.threadId,
+      workspaceId: f.scope.workspaceId,
+    } as const;
+    const identity = {
+      schemaVersion: 1 as const,
+      digestAlgorithm: "workspace-operation-v2" as const,
+      operationKey: `journal-complete-unknown-${suffix}`,
+      kind: "publish" as const,
+      inputDigest: "d".repeat(64),
+      ...scope,
+      sandbox: { sessionId: "sandbox-journal-unknown", generation: 1 },
+      snapshotToken: "snapshot-journal-unknown",
+    };
+    const journal = new PgWorkspaceManifestRepository(runtime, policy);
+    expect(await journal.begin(identity)).toEqual({ status: "started" });
+    const result = {
+      kind: "published" as const,
+      operationKey: identity.operationKey,
+      change: {
+        kind: "validated_workspace_change" as const,
+        operationKey: identity.operationKey,
+        ...scope,
+        sandboxSnapshot: { ...identity.sandbox, snapshotToken: identity.snapshotToken },
+        candidateManifest: createWorkspaceManifest(
+          { tenantId: scope.tenantId, entries: [] },
+          policy.historicalManifest,
+        ),
+        verifiedAt: "2026-07-29T00:00:00.000Z",
+      },
+    };
+    await expect(
+      new PgWorkspaceManifestRepository(withLostCommitResponse(runtime), policy).complete(
+        identity,
+        result,
+      ),
+    ).rejects.toMatchObject({
+      result: "unknown",
+      dependencyCode: "WORKSPACE_JOURNAL_COMPLETE_COMMIT_UNKNOWN",
+    });
+    await expect(
+      journal.lookupCompleted({ operationKey: identity.operationKey, scope, kind: identity.kind }),
+    ).resolves.toMatchObject({ status: "completed", identity, result });
+  });
+
+  it("Workspace candidate prepare 的 COMMIT 响应未知映射为 unknown，原 identity 可恢复", async () => {
+    const f = await fixture(`workspace-prepare-commit-unknown-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "workspace-prepare-unknown-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("candidate prepare claim 失败");
+    const policy = {
+      maxEntries: 1,
+      maxFiles: 1,
+      maxTotalBytes: 1,
+      maxSingleFileBytes: 1,
+      maxChunkBytes: 1,
+      maxPathUtf8Bytes: 128,
+      historicalManifest: { maxFiles: 1, maxTotalBytes: 1 },
+    } as const;
+    const unsigned = {
+      tenantId: f.scope.tenantId,
+      threadId: f.scope.threadId,
+      workspaceId: f.scope.workspaceId,
+      attemptId: claimed.snapshot.attempt.attemptId,
+      runId: f.scope.runId,
+      rootRunId: f.scope.rootRunId,
+      revisionId: workspaceRevisionId(`prepare-unknown-revision-${suffix}`),
+      operationKey: `${claimed.snapshot.attempt.attemptId}/workspace/prepare-unknown`,
+    };
+    const identity = {
+      ...unsigned,
+      operationDigest: workspaceCandidateOperationDigest(unsigned),
+    };
+    const manifest = createWorkspaceManifest(
+      { tenantId: f.scope.tenantId, entries: [] },
+      policy.historicalManifest,
+    );
+    const handoff = new PgWorkspaceCandidateHandoff(runtime, policy);
+    await handoff.begin(identity);
+    await expect(
+      new PgWorkspaceCandidateHandoff(withLostCommitResponse(runtime), policy).prepare({
+        identity,
+        manifest,
+      }),
+    ).rejects.toMatchObject({
+      result: "unknown",
+      dependencyCode: "WORKSPACE_CANDIDATE_PREPARE_COMMIT_UNKNOWN",
+    });
+    await expect(handoff.prepare({ identity, manifest })).resolves.toBeUndefined();
+    const recovered = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      (client) =>
+        client.query<{ readonly status: string; readonly manifest_digest: string }>(
+          `SELECT status,manifest_digest FROM workspace_revision_candidates
+            WHERE tenant_id=$1 AND workspace_id=$2 AND attempt_id=$3 AND operation_key=$4`,
+          [identity.tenantId, identity.workspaceId, identity.attemptId, identity.operationKey],
+        ),
+      { readOnly: true },
+    );
+    expect(recovered.rows[0]).toEqual({ status: "prepared", manifest_digest: manifest.digest });
+  });
+
   it("双 Worker 并发 claim 只有一个取得双栅栏", async () => {
     const f = await fixture(`claim-${suffix}`);
     const outcomes = await Promise.all([

@@ -9,6 +9,7 @@ import {
   type WorkspaceCandidateBlobWritePort,
   type WorkspaceCandidateHandoffPort,
   type WorkspaceCandidateIdentity,
+  WorkspaceDependencyError,
   type WorkspaceExecutionPolicy,
   type WorkspaceManifest,
   WorkspaceMaterializer,
@@ -153,10 +154,15 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
         manifest: change.candidateManifest,
       });
     } catch (error) {
-      if (error instanceof WorkspaceApplicationError && error.code === "RESULT_UNKNOWN") {
+      if (
+        (error instanceof WorkspaceApplicationError && error.code === "RESULT_UNKNOWN") ||
+        (error instanceof WorkspaceDependencyError && error.result === "unknown")
+      ) {
         // unknown 仍可能已经完成远端副作用或 journal COMMIT，只能由原 operation 重入/readback，
         // 或在 Attempt 过期后恢复；此处释放会把仍在对账的 stable 引用错误变成不可达。
-        throw error;
+        throw error instanceof WorkspaceApplicationError
+          ? error
+          : new WorkspaceApplicationError("RESULT_UNKNOWN", "Workspace candidate 等待结果对账");
       }
       // release 的 COMMIT 若未知，候选仍由 Attempt 过期恢复收敛；绝不能据异常猜测引用已释放。
       await this.options.candidates

@@ -3,11 +3,12 @@ import {
   parseWorkspaceManifest,
   type WorkspaceCandidateHandoffPort,
   type WorkspaceCandidateIdentity,
+  WorkspaceDependencyError,
   type WorkspaceExecutionPolicy,
   type WorkspaceManifest,
 } from "@cube-runtime/workspace";
 import type { Pool, PoolClient } from "pg";
-import { withTenantTransaction } from "./postgres.js";
+import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 
 const DIGEST_VERSION = "workspace-candidate-handoff-v1";
 const IDENTIFIER = /^[^\0]{1,200}$/u;
@@ -107,6 +108,8 @@ export class PgWorkspaceCandidateHandoff implements WorkspaceCandidateHandoffPor
         await releaseCandidates(client, identity, "superseded", true);
       },
       { isolationLevel: "SERIALIZABLE" },
+    ).catch((error: unknown) =>
+      rethrowWorkspaceCommitUnknown(error, "WORKSPACE_CANDIDATE_BEGIN_COMMIT_UNKNOWN"),
     );
   }
 
@@ -242,6 +245,8 @@ export class PgWorkspaceCandidateHandoff implements WorkspaceCandidateHandoffPor
         if (prepared.rowCount !== 1) throw new Error("Workspace candidate 无法进入 prepared");
       },
       { isolationLevel: "SERIALIZABLE" },
+    ).catch((error: unknown) =>
+      rethrowWorkspaceCommitUnknown(error, "WORKSPACE_CANDIDATE_PREPARE_COMMIT_UNKNOWN"),
     );
   }
 
@@ -255,6 +260,8 @@ export class PgWorkspaceCandidateHandoff implements WorkspaceCandidateHandoffPor
       { tenantId: input.identity.tenantId },
       (client) => releaseCandidates(client, input.identity, input.reason, false),
       { isolationLevel: "SERIALIZABLE" },
+    ).catch((error: unknown) =>
+      rethrowWorkspaceCommitUnknown(error, "WORKSPACE_CANDIDATE_RELEASE_COMMIT_UNKNOWN"),
     );
   }
 }
@@ -354,4 +361,11 @@ function assertIdentity(identity: WorkspaceCandidateIdentity): void {
   if (workspaceCandidateOperationDigest(unsigned) !== identity.operationDigest) {
     throw new TypeError("Workspace candidate operation digest 不匹配");
   }
+}
+
+function rethrowWorkspaceCommitUnknown(error: unknown, dependencyCode: string): never {
+  if (error instanceof TransactionCommitUnknownError) {
+    throw new WorkspaceDependencyError("unknown", dependencyCode);
+  }
+  throw error;
 }

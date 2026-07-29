@@ -229,6 +229,10 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
           scope,
           blob: snapshot.stable,
         });
+        if (lifecycle.status === "pre_delete" || lifecycle.status === "deleting") {
+          // GC 状态是可重试的已知竞争，不可降级成 unknown。
+          return { outcome: "unavailable" };
+        }
         const event =
           lifecycle.status === "deleted"
             ? {
@@ -239,7 +243,7 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
               }
             : {
                 type: "stable_gc_lifecycle_resolved" as const,
-                status: lifecycle.status,
+                status: "active" as const,
               };
         return await this.cas(snapshot, transitionBlobCommit(snapshot, event));
       }

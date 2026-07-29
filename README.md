@@ -50,7 +50,7 @@ Workspace manifest 的持久化 schema、精确 incarnation 外键与 RuntimeMut
 但 development Worker **尚未启用** manifest 发布：候选 Blob 引用还不能与 RuntimeMutation/CAS 进行可证明
 的原子交接，若在 unchanged、取消、冲突或未知结果时继续发布会遗留不可回收引用。因此 Worker 目前只允许
 模型前和模型后都为空的 `/workspace`，任何模板残留、根目录缺失或模型写入都会失败关闭。`0014` 也会拒绝
-含旧 current head 的半升级数据库，必须先用受控回填流程转换。Artifact 发布仍是独立的交付闭环，Workspace
+在运行时失败关闭没有逐文件 manifest 的旧 current head，必须先用受控回填流程转换。Artifact 发布仍是独立的交付闭环，Workspace
 文件不会自动成为用户可下载的 Artifact。
 
 ## 开发基线

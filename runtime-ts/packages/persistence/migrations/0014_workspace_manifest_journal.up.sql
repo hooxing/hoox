@@ -1,16 +1,8 @@
 -- Workspace revision 从此以逐文件 stable Blob manifest 为唯一内容事实。旧 object_key 仅保留给
 -- 迁移前的兼容读取，新的 Runtime 提交必须写 NULL，不能把单一对象键伪装成 manifest。
---
--- 不能把已有 current_revision 仅改成 NULL object_key 后继续运行：旧 revision 没有逐文件
--- incarnation，任何“猜测式”转换都会把不可审计的 Blob 当成可读内容。升级前必须先由受控
--- 运维回填工具生成 manifest，或清空这些 head；本迁移明确拒绝这种半升级状态。
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM workspaces WHERE current_revision_id IS NOT NULL) THEN
-    RAISE EXCEPTION
-      '0014 requires workspace manifest backfill before upgrade: existing current_revision_id found';
-  END IF;
-END $$;
+-- 旧 current head 不能在 migration 中用平面 object_key 猜测转换为 manifest。此处不做越过
+-- FORCE RLS 的不可信“全租户检查”；运行时读取到没有 manifest 的旧 head 必须失败关闭，直到
+-- 独立、受审计的 backfill 工具按 tenant 生成可验证的 incarnation 引用。
 
 ALTER TABLE workspace_revisions ALTER COLUMN object_key DROP NOT NULL;
 ALTER TABLE workspace_revisions DROP CONSTRAINT IF EXISTS workspace_revisions_object_key_check;

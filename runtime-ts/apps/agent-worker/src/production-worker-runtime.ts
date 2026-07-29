@@ -76,6 +76,11 @@ export class FailClosedWorkspaceRevisionVerifier implements WorkspaceRevisionVer
   async materialize(
     input: Parameters<WorkspaceRevisionVerifierPort["materialize"]>[0],
   ): Promise<void> {
+    // 空目录 verifier 不具备将 committed head 物化为 Sandbox 的能力。带 checkpoint 仍继续执行
+    // 会让模型在空目录中工作并把文件静默丢失，因此必须在模型前拒绝。
+    if (input.expectedCurrentRevisionId !== undefined) {
+      throw new Error("WORKSPACE_REVISION_MATERIALIZATION_REQUIRED");
+    }
     await assertEmptyWorkspaceRoot(input.sandbox);
   }
 
@@ -88,8 +93,9 @@ export class FailClosedWorkspaceRevisionVerifier implements WorkspaceRevisionVer
 
 async function assertEmptyWorkspaceRoot(session: SandboxSessionRef): Promise<void> {
   const result = await session.sandbox.command(
-    `if [ ! -d /workspace ]; then exit 72; fi
-if find /workspace -mindepth 1 -print -quit | grep -q .; then exit 73; fi`,
+    `if [ ! -d /workspace ] || [ -L /workspace ]; then exit 72; fi
+if ! workspace_entry=$(find -P /workspace -mindepth 1 -print -quit); then exit 74; fi
+if [ -n "$workspace_entry" ]; then exit 73; fi`,
   );
   if (result.exitCode !== 0) throw new Error("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
 }

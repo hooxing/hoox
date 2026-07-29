@@ -54,6 +54,8 @@
 | [ADR-0046](0046-workspace-manifest-runtime-closure.md) | Workspace manifest Runtime 闭环 | 部分接受（Worker 发布延期） | 2026-07-29 |
 | [ADR-0047](0047-workspace-candidate-atomic-handoff.md) | Workspace candidate 原子交接与开发 Worker 启用 | 已接受 | 2026-07-29 |
 | [ADR-0048](0048-workspace-artifact-runtime-closure.md) | Workspace Revision 到 Artifact 的原子发布闭环 | 已接受 | 2026-07-29 |
+| [ADR-0052](0052-artifact-permit-version-monotonicity.md) | Artifact 工具许可与 Attempt 版本的单调边界 | 已接受 | 2026-07-30 |
+| [ADR-0053](0053-workspace-artifact-preview-media.md) | Workspace Artifact 的受限预览媒体类型 | 已接受 | 2026-07-30 |
 
 ## 何时必须记录
 

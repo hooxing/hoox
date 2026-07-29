@@ -1388,11 +1388,13 @@ function reportWorkspaceMaterializeFailure(error: unknown): void {
 
 /** Workspace candidate 发布与物化同样只记录固定分类，避免异常正文越过 Worker 边界。 */
 function reportWorkspaceVerifyFailure(error: unknown): void {
+  const diagnostic =
+    error instanceof WorkspaceApplicationError && error.diagnostic === "candidate_stream_pending"
+      ? "_candidate_stream_pending"
+      : "";
   const category =
     error instanceof WorkspaceApplicationError
-      ? `application_${error.code.toLowerCase()}${
-          error.diagnostic === undefined ? "" : `_${error.diagnostic}`
-        }`
+      ? `application_${error.code.toLowerCase()}${diagnostic}`
       : error instanceof WorkspaceDependencyError
         ? `dependency_${error.result}`
         : "unclassified";

@@ -21,7 +21,7 @@
 
 ## 验证
 
-开发环境真实纵向 Run 覆盖先后 Artifact 工具成功与 Workspace 发布；并发双 Artifact 调用验证首个许可在后续 `tool.started` 推进 Attempt 版本后仍通过持久化边界。测试同时断言 permit 时间写入为毫秒精度，以及终态、旧版本和 fence 不匹配仍被拒绝。
+`tests/integration/postgres-artifact.integration.test.ts` 在真实 PostgreSQL 隔离 schema 中，经 `PgExecutionPersistence` 写入首个 `tool.started`、签发并消费 permit、再写入第二个 `tool.started` 以将 Attempt 从版本 1 推进到版本 2；随后 `PgArtifactDeliveryRepository` 使用首个 permit 成功开始发布。该测试同时断言数据库中 `issued_at` 与 `expires_at` 的微秒余数为零，并拒绝版本倒退、已释放 claim、过期 Workspace lease、伪造 fence epoch 与已取消 Run。开发环境纵向 Run 另覆盖 Workspace 发布后的 Artifact 读取、预览和下载。
 
 ## 可逆性
 

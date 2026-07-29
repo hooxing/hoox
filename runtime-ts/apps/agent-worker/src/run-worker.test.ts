@@ -1,7 +1,7 @@
 import { sha256Digest, tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
-import { createWorkspaceManifest } from "@cube-runtime/workspace";
+import { WorkspaceApplicationError, createWorkspaceManifest } from "@cube-runtime/workspace";
 import { describe, expect, it, vi } from "vitest";
 import {
   outboxPayloadDigest,
@@ -1460,6 +1460,30 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(artifact.artifacts.calls).toBe(3);
     expect(artifactSession.prompts).toHaveLength(3);
     expect(artifactSession.prompts[1]).toContain("Artifact 完成门未通过（修正轮次 1/2）");
+  });
+
+  it("Workspace verify 日志只接受固定 diagnostic，伪造值不会离开边界", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.revisions.beforeReturn = () => {
+      throw new WorkspaceApplicationError(
+        "DEPENDENCY_FAILED",
+        "内部错误",
+        "credential_like_diagnostic" as never,
+      );
+    };
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await expect(h.worker.execute(h.scope)).resolves.toEqual({
+        outcome: "recovery_required",
+        code: "WORKSPACE_CONFLICT",
+      });
+      expect(warning).toHaveBeenCalledWith(
+        "WORKSPACE_VERIFY_FAILED category=application_dependency_failed",
+      );
+      expect(warning.mock.calls.flat().join(" ")).not.toContain("credential_like_diagnostic");
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it("完成门缺失时持久反馈并在同一 Session 修正，发布就绪后成功", async () => {

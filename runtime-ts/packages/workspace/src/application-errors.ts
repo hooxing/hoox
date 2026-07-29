@@ -10,13 +10,16 @@ export type WorkspaceApplicationErrorCode =
   | "DEPENDENCY_FAILED"
   | "RESULT_UNKNOWN";
 
+/** 仅开发期受控日志可用的固定标签；任何未知值都不得离开异常边界。 */
+export type WorkspaceApplicationDiagnostic = "candidate_stream_pending";
+
 /** 应用核心只暴露稳定分类；底层路径、对象键和 Provider 消息不得跨边界泄漏。 */
 export class WorkspaceApplicationError extends Error {
   constructor(
     readonly code: WorkspaceApplicationErrorCode,
     message: string,
     /** 仅允许固定枚举式诊断，不承载 Provider、路径或对象身份。 */
-    readonly diagnostic?: string,
+    readonly diagnostic?: WorkspaceApplicationDiagnostic,
   ) {
     super(message);
     this.name = "WorkspaceApplicationError";

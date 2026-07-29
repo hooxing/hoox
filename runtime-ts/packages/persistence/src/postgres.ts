@@ -3,6 +3,8 @@ import { mapPersistenceError, PersistenceUnavailableCause } from "./errors.js";
 
 export interface PostgresPoolOptions {
   readonly connectionString: string;
+  /** 运行进程只能以此最小权限登录角色连接；禁止依赖可被继承或 SET ROLE 的上游身份。 */
+  readonly expectedRuntimeRole?: string;
   readonly applicationName?: string;
   readonly schema?: string;
   readonly maxConnections?: number;
@@ -76,10 +78,24 @@ export function createPostgresPool(options: PostgresPoolOptions): Pool {
   return pool;
 }
 
-export async function probePostgres(pool: Pool): Promise<void> {
+export async function probePostgres(pool: Pool, expectedRuntimeRole?: string): Promise<void> {
   try {
-    await pool.query("SELECT 1");
+    if (expectedRuntimeRole === undefined) {
+      await pool.query("SELECT 1");
+      return;
+    }
+    if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(expectedRuntimeRole)) {
+      throw new TypeError("DATABASE_RUNTIME_ROLE 格式无效");
+    }
+    const result = await pool.query<{ readonly current_user: string }>("SELECT current_user");
+    if (result.rows[0]?.current_user !== expectedRuntimeRole) {
+      // 不泄漏真实连接角色，避免将部署拓扑或管理员误配带到日志/健康端点。
+      throw new Error("POSTGRES_RUNTIME_ROLE_MISMATCH");
+    }
   } catch (error) {
+    if (error instanceof TypeError || (error instanceof Error && error.message === "POSTGRES_RUNTIME_ROLE_MISMATCH")) {
+      throw error;
+    }
     throw mapPersistenceError(error, "PostgreSQL 启动探针");
   }
 }

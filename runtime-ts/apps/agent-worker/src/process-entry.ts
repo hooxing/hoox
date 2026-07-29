@@ -22,6 +22,8 @@ import {
 } from "@cube-runtime/persistence";
 import {
   booleanEnvironmentField,
+  createAuditedProductionAssembly,
+  EnvironmentConfigurationError,
   integerEnvironmentField,
   type ProcessSignalSource,
   parseStrictEnvironment,
@@ -34,6 +36,7 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
+import { tenantId } from "@cube-runtime/domain";
 import { resolveCubeProxyRouting } from "@cube-runtime/sandbox";
 import { ArtifactToolRouterFactory } from "@cube-runtime/tool-router";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
@@ -59,6 +62,7 @@ const workerEnvironmentSchema = Object.freeze({
     maxLength: 8_192,
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
+  DATABASE_RUNTIME_ROLE: stringEnvironmentField({ maxLength: 63 }),
   S3_ENDPOINT: urlEnvironmentField(),
   S3_BUCKET: stringEnvironmentField({ maxLength: 255 }),
   S3_REGION: stringEnvironmentField({ maxLength: 128 }),
@@ -89,12 +93,15 @@ const workerEnvironmentSchema = Object.freeze({
   AGENT_WORKER_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 10, maximum: 60_000 }),
   AGENT_WORKER_DISPATCH_LEASE_MS: integerEnvironmentField({ minimum: 1_000, maximum: 300_000 }),
   AGENT_WORKER_RUN_LEASE_MS: integerEnvironmentField({ minimum: 9_000, maximum: 300_000 }),
-  // Worker 只会消费开发 API 的 dev-user-a 所属租户，避免本地 Web 看见“已创建但永不消费”的 Run。
+  // 这些字段在 production 显式禁止；保留在投影视图中是为了让遗留部署携带开发身份时也失败关闭。
   DEV_AUTH_ENABLED: booleanEnvironmentField({ requiredIn: ["development"] }),
+  DEV_AUTH_USER_A_ID: stringEnvironmentField({ requiredIn: [], maxLength: 128 }),
   DEV_AUTH_USER_A_TENANT_ID: stringEnvironmentField({
     requiredIn: ["development"],
     maxLength: 128,
   }),
+  DEV_AUTH_USER_B_ID: stringEnvironmentField({ requiredIn: [], maxLength: 128 }),
+  DEV_AUTH_USER_B_TENANT_ID: stringEnvironmentField({ requiredIn: [], maxLength: 128 }),
   PROCESS_SHUTDOWN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1, maximum: 600_000 }),
 });
 
@@ -104,6 +111,8 @@ export interface WorkerProcessConfiguration {
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
   readonly databaseSchema: string;
+  /** 仅用于启动时证明连接 URL 未误用 Migrator/Owner；服务永不 SET ROLE。 */
+  readonly databaseRuntimeRole: string;
   readonly objectStorage: Readonly<{
     endpoint: string;
     bucket: string;
@@ -150,6 +159,9 @@ export function parseWorkerProcessEnvironment(
   source: Readonly<Record<string, string | undefined>>,
 ): WorkerProcessConfiguration {
   const parsed = parseStrictEnvironment(source, workerEnvironmentSchema);
+  if (parsed.runtimeEnvironment === "production") {
+    assertProductionHasNoDevelopmentIdentity(source);
+  }
   const proxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
   if (proxyScheme !== undefined && proxyScheme !== "http" && proxyScheme !== "https") {
     throw new TypeError("CUBESANDBOX_PROXY_SCHEME 只能是 http 或 https");
@@ -165,12 +177,32 @@ export function parseWorkerProcessEnvironment(
       throw new TypeError("AGENT_WORKER_TENANT_ID 必须与 DEV_AUTH_USER_A_TENANT_ID 一致");
     }
   }
+  const configuredTenantId = readRequiredEnvironmentValue(parsed, "AGENT_WORKER_TENANT_ID");
+  tenantId(configuredTenantId);
+  const configuredWorkerId = readRequiredEnvironmentValue(parsed, "AGENT_WORKER_ID");
+  if (Buffer.byteLength(configuredWorkerId, "utf8") > 200) {
+    throw new TypeError("AGENT_WORKER_ID UTF-8 字节长度不能超过 200");
+  }
+  const configuredRuntimeRole = readRequiredEnvironmentValue(parsed, "DATABASE_RUNTIME_ROLE");
+  if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(configuredRuntimeRole)) {
+    throw new TypeError("DATABASE_RUNTIME_ROLE 格式无效");
+  }
   const contextWindow = readRequiredEnvironmentValue(parsed, "MODEL_CONTEXT_WINDOW");
   const maxOutputTokens = readRequiredEnvironmentValue(parsed, "MODEL_MAX_OUTPUT_TOKENS");
   if (maxOutputTokens > contextWindow) {
     throw new TypeError("MODEL_MAX_OUTPUT_TOKENS 不能大于 MODEL_CONTEXT_WINDOW");
   }
   const sandboxApiUrl = readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
+  if (parsed.runtimeEnvironment === "production") {
+    assertProductionWorkerTransport({
+      modelBaseUrl: readRequiredEnvironmentValue(parsed, "MODEL_BASE_URL"),
+      objectStorageEndpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
+      sandboxApiUrl,
+      ...(parsed.values.CUBESANDBOX_API_KEY === undefined
+        ? {}
+        : { sandboxApiKey: parsed.values.CUBESANDBOX_API_KEY }),
+    });
+  }
   const proxyRouting = resolveCubeProxyRouting({
     apiUrl: sandboxApiUrl,
     ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
@@ -181,10 +213,14 @@ export function parseWorkerProcessEnvironment(
       : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
     ...(proxyScheme === undefined ? {} : { proxyScheme }),
   });
+  if (parsed.runtimeEnvironment === "production" && proxyRouting.proxyScheme !== "https") {
+    throw new TypeError("CUBESANDBOX_PROXY_SCHEME 在 production 必须为 https");
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
+    databaseRuntimeRole: configuredRuntimeRole,
     objectStorage: Object.freeze({
       endpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
       bucket: readRequiredEnvironmentValue(parsed, "S3_BUCKET"),
@@ -209,8 +245,8 @@ export function parseWorkerProcessEnvironment(
       maxOutputTokens,
     }),
     worker: Object.freeze({
-      tenantId: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_TENANT_ID"),
-      workerId: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_ID"),
+      tenantId: configuredTenantId,
+      workerId: configuredWorkerId,
       pollIntervalMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_POLL_INTERVAL_MS"),
       dispatchLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_DISPATCH_LEASE_MS"),
       runLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_RUN_LEASE_MS"),
@@ -229,13 +265,13 @@ export function parseWorkerProcessEnvironment(
   });
 }
 
-const developmentOpenAiCompatibleProviderId = "runtime-openai-compatible";
+const openAiCompatibleProviderId = "runtime-openai-compatible";
 
 /**
  * 本地 Provider 已由真实探针证明实现 Chat Completions；这里同时固定 Provider 与 Model 的
  * Pi 协议，避免其中一处漂移后静默改走不受支持的 Responses 路由。
  */
-export async function createDevelopmentOpenAiCompatibleModel(
+export async function createOpenAiCompatibleModel(
   configuration: WorkerProcessConfiguration["model"],
 ): Promise<
   Readonly<{
@@ -247,7 +283,7 @@ export async function createDevelopmentOpenAiCompatibleModel(
     credentials: new InMemoryCredentialStore(),
     modelsPath: null,
   });
-  modelRuntime.registerProvider(developmentOpenAiCompatibleProviderId, {
+  modelRuntime.registerProvider(openAiCompatibleProviderId, {
     name: "Runtime OpenAI-compatible Provider",
     baseUrl: configuration.baseUrl,
     apiKey: configuration.apiKey,
@@ -265,13 +301,16 @@ export async function createDevelopmentOpenAiCompatibleModel(
       },
     ],
   });
-  const model = modelRuntime.getModel(developmentOpenAiCompatibleProviderId, configuration.modelId);
-  if (model?.api !== "openai-completions") throw new Error("开发模型配置无法解析");
+  const model = modelRuntime.getModel(openAiCompatibleProviderId, configuration.modelId);
+  if (model?.api !== "openai-completions") throw new Error("模型配置无法解析");
   return Object.freeze({
     modelRuntime,
     model: model as Model<"openai-completions">,
   });
 }
+
+/** 向后兼容本地开发测试的导出名；生产路径与固定开发身份无关。 */
+export const createDevelopmentOpenAiCompatibleModel = createOpenAiCompatibleModel;
 
 /**
  * 仅本地 development 使用的真实装配：PG dispatch、CubeSandbox、S3 durable observation 和
@@ -286,10 +325,39 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
     ) {
       throw new Error("DEVELOPMENT_WORKER_ASSEMBLY_FORBIDDEN");
     }
+    return assembleWorkerRuntime(configuration, "development");
+  },
+};
+
+/**
+ * 生产 assembler 是模块私有封闭依赖图：startWorkerProcess 从不接受调用方提供的替身。
+ * 它与 development 共用持久化语义，但绝不继承 development 身份、明文下载或宽松模型探针。
+ */
+const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfiguration> = {
+  async assemble(configuration) {
+    if (configuration.runtimeEnvironment !== "production" || configuration.development !== undefined) {
+      throw new Error("PRODUCTION_WORKER_ASSEMBLY_FORBIDDEN");
+    }
+    if (process.platform !== "linux") throw new Error("PRODUCTION_WORKER_LINUX_REQUIRED");
+    return assembleWorkerRuntime(configuration, "production");
+  },
+};
+
+// 不导出 capability；外部调用方无法将 Fake 注入 startWorkerProcess 的 production 分支。
+const auditedProductionWorkerAssembly = createAuditedProductionAssembly(productionWorkerAssembler);
+
+async function assembleWorkerRuntime(
+  configuration: WorkerProcessConfiguration,
+  runtimeMode: "development" | "production",
+) {
     const pool = createPostgresPool({
       connectionString: configuration.databaseUrl,
       schema: configuration.databaseSchema,
-      applicationName: "cube-runtime-agent-worker",
+      expectedRuntimeRole: configuration.databaseRuntimeRole,
+      applicationName:
+        runtimeMode === "production"
+          ? "cube-runtime-agent-worker-production"
+          : "cube-runtime-agent-worker-development",
     });
     try {
       const blobRepository = new PgBlobLifecycleRepository(pool, {
@@ -314,17 +382,15 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
         rolloutRepository,
         policy: { maxModelObservationBytes: 4 * 1024 },
       });
-      const { modelRuntime, model } = await createDevelopmentOpenAiCompatibleModel(
-        configuration.model,
-      );
+      const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
       const artifactAuthorization = createArtifactExecutionAuthorizationAuthority();
       const artifactRepository = new PgArtifactDeliveryRepository(
         pool,
         artifactAuthorization.verifier,
       );
       const artifactService = new ArtifactDeliveryService(artifactRepository, blobs, {
-        runtimeMode: "development",
-        allowInsecureHttpDownload: true,
+        runtimeMode,
+        ...(runtimeMode === "development" ? { allowInsecureHttpDownload: true } : {}),
         executionAuthorizationVerifier: artifactAuthorization.verifier,
       });
       const artifactTools = new ArtifactToolRouterFactory({
@@ -433,10 +499,10 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
         dispatchLeaseMs: configuration.worker.dispatchLeaseMs,
       });
       const probes = Object.freeze({
-        postgres: () => probePostgres(pool),
+        postgres: () => probePostgres(pool, configuration.databaseRuntimeRole),
         objectStorage: () => probeS3BlobStore(s3Config),
         sandbox: () => upstreamSandboxes.probe(),
-        model: () => probeOpenAiCompatibleModel(configuration.model, "development"),
+        model: () => probeOpenAiCompatibleModel(configuration.model, runtimeMode),
       });
       await Promise.all([
         probes.postgres(),
@@ -463,8 +529,7 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
       await pool.end().catch(() => undefined);
       throw error;
     }
-  },
-};
+}
 
 /**
  * 开发预检只能读取依赖就绪状态；绝不能复用 assembler，因为后者会启动 polling loop，可能领取
@@ -483,6 +548,7 @@ export async function probeDevelopmentWorkerDependencies(
   const pool = createPostgresPool({
     connectionString: configuration.databaseUrl,
     schema: configuration.databaseSchema,
+    expectedRuntimeRole: configuration.databaseRuntimeRole,
     applicationName: "cube-runtime-agent-worker-preflight",
   });
   try {
@@ -517,7 +583,7 @@ export async function probeDevelopmentWorkerDependencies(
       configuration.sandbox.templateId,
     );
     await Promise.all([
-      probePostgres(pool),
+      probePostgres(pool, configuration.databaseRuntimeRole),
       probeS3BlobStore(s3Config),
       sandbox.probe(),
       probeOpenAiCompatibleModel(configuration.model, "development"),
@@ -571,6 +637,47 @@ function modelMetadataMatches(
   );
 }
 
+const developmentIdentityEnvironmentKeys = Object.freeze([
+  "DEV_AUTH_ENABLED",
+  "DEV_AUTH_USER_A_ID",
+  "DEV_AUTH_USER_A_TENANT_ID",
+  "DEV_AUTH_USER_B_ID",
+  "DEV_AUTH_USER_B_TENANT_ID",
+] as const);
+
+function assertProductionHasNoDevelopmentIdentity(
+  source: Readonly<Record<string, string | undefined>>,
+): void {
+  const configured = developmentIdentityEnvironmentKeys.filter((key) => source[key] !== undefined);
+  if (configured.length > 0) {
+    throw new EnvironmentConfigurationError(
+      configured.map((key) => ({ code: "FORBIDDEN_IN_PRODUCTION" as const, key })),
+    );
+  }
+}
+
+/** 凭据会随请求头发送，生产网络边界不能把模型/S3 密钥降为明文传输。 */
+function assertProductionWorkerTransport(input: {
+  readonly modelBaseUrl: string;
+  readonly objectStorageEndpoint: string;
+  readonly sandboxApiUrl: string;
+  readonly sandboxApiKey?: string;
+}): void {
+  const endpoints: Array<readonly [string, string]> = [
+    ["MODEL_BASE_URL", input.modelBaseUrl],
+    ["S3_ENDPOINT", input.objectStorageEndpoint],
+  ];
+  if (input.sandboxApiKey !== undefined) {
+    endpoints.push(["CUBESANDBOX_API_URL", input.sandboxApiUrl]);
+  }
+  for (const [key, value] of endpoints) {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.username !== "" || url.password !== "") {
+      throw new TypeError(`${key} 在 production 必须为无凭据的 HTTPS URL`);
+    }
+  }
+}
+
 export async function startWorkerProcess(input: {
   readonly environment: Readonly<Record<string, string | undefined>>;
   readonly assembler?: ServiceAssemblyFactory<WorkerProcessConfiguration>;
@@ -579,7 +686,20 @@ export async function startWorkerProcess(input: {
 }): Promise<RunningServiceProcess> {
   const configuration = parseWorkerProcessEnvironment(input.environment);
   if (configuration.runtimeEnvironment === "production") {
-    throw new Error("PRODUCTION_ASSEMBLY_UNAVAILABLE:agent-worker");
+    if (input.assembler !== undefined) {
+      // 外部调用方无法把测试 Fake 塞进 production；真实依赖图仅由本模块私有 assembler 取得。
+      throw new Error("PRODUCTION_ASSEMBLY_UNAVAILABLE:agent-worker");
+    }
+    return startServiceProcess({
+      serviceName: "agent-worker",
+      configuration,
+      shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
+      auditedProductionAssembly: auditedProductionWorkerAssembly,
+      ...(input.signalSource === undefined ? {} : { signalSource: input.signalSource }),
+      ...(input.onShutdownFailure === undefined
+        ? {}
+        : { onShutdownFailure: input.onShutdownFailure }),
+    });
   }
   const assembler =
     input.assembler ??

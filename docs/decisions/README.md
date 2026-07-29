@@ -54,6 +54,7 @@
 | [ADR-0046](0046-workspace-manifest-runtime-closure.md) | Workspace manifest Runtime 闭环 | 部分接受（Worker 发布延期） | 2026-07-29 |
 | [ADR-0047](0047-workspace-candidate-atomic-handoff.md) | Workspace candidate 原子交接与开发 Worker 启用 | 已接受 | 2026-07-29 |
 | [ADR-0048](0048-workspace-artifact-runtime-closure.md) | Workspace Revision 到 Artifact 的原子发布闭环 | 已接受 | 2026-07-29 |
+| [ADR-0049](0049-audited-production-worker-assembly.md) | 受审生产进程装配与 Worker 运行边界 | 已接受 | 2026-07-29 |
 
 ## 何时必须记录
 

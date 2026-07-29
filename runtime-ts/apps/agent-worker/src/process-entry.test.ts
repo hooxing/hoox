@@ -11,14 +11,16 @@ function productionEnvironment(): Record<string, string> {
   return {
     RUNTIME_ENV: "production",
     DATABASE_URL: "postgresql://runtime:credential@database/runtime",
+    DATABASE_RUNTIME_ROLE: "runtime",
     DATABASE_SCHEMA: "runtime",
-    S3_ENDPOINT: "http://object-storage:9000",
+    S3_ENDPOINT: "https://object-storage.example.invalid:9000",
     S3_BUCKET: "runtime-artifacts",
     S3_REGION: "us-east-1",
     S3_ACCESS_KEY_ID: "local-access-key",
     S3_SECRET_ACCESS_KEY: "opaque-test-value",
     S3_FORCE_PATH_STYLE: "true",
-    CUBESANDBOX_API_URL: "http://sandbox:3000",
+    CUBESANDBOX_API_URL: "https://sandbox.example.invalid:3000",
+    CUBESANDBOX_PROXY_SCHEME: "https",
     CUBESANDBOX_TEMPLATE_ID: "tpl-test",
     MODEL_BASE_URL: "https://model.invalid/v1",
     MODEL_API_KEY: "opaque-model-value",
@@ -43,9 +45,9 @@ describe("Agent Worker 进程入口", () => {
     const configuration = parseWorkerProcessEnvironment(productionEnvironment());
     expect(configuration.sandbox.templateId).toBe("tpl-test");
     expect(configuration.sandbox).toMatchObject({
-      apiUrl: "http://sandbox:3000",
-      proxyNodeIp: "sandbox",
-      proxyScheme: "http",
+      apiUrl: "https://sandbox.example.invalid:3000",
+      proxyNodeIp: "sandbox.example.invalid",
+      proxyScheme: "https",
     });
     await expect(
       startWorkerProcess({
@@ -83,10 +85,57 @@ describe("Agent Worker 进程入口", () => {
         CUBESANDBOX_PROXY_PORT: "443",
       }).sandbox,
     ).toMatchObject({
-      proxyNodeIp: "sandbox",
+      proxyNodeIp: "sandbox.example.invalid",
       proxyPort: 443,
       proxyScheme: "https",
     });
+  });
+
+  it("production 拒绝任何 development 身份变量，即使值为 false 或并未被 Worker 使用", () => {
+    expect(() =>
+      parseWorkerProcessEnvironment({ ...productionEnvironment(), DEV_AUTH_ENABLED: "false" }),
+    ).toThrow("FORBIDDEN_IN_PRODUCTION:DEV_AUTH_ENABLED");
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        DEV_AUTH_USER_B_ID: "copied-development-fixture",
+      }),
+    ).toThrow("FORBIDDEN_IN_PRODUCTION:DEV_AUTH_USER_B_ID");
+  });
+
+  it("production 在连接外部凭据端点前拒绝明文传输", () => {
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        MODEL_BASE_URL: "http://model.internal/v1",
+      }),
+    ).toThrow("MODEL_BASE_URL 在 production 必须为无凭据的 HTTPS URL");
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        S3_ENDPOINT: "http://object-storage.internal:9000",
+      }),
+    ).toThrow("S3_ENDPOINT 在 production 必须为无凭据的 HTTPS URL");
+    const missingProxyTls = productionEnvironment();
+    delete missingProxyTls.CUBESANDBOX_PROXY_SCHEME;
+    expect(() => parseWorkerProcessEnvironment(missingProxyTls)).toThrow(
+      "CUBESANDBOX_PROXY_SCHEME 在 production 必须为 https",
+    );
+  });
+
+  it("部署 Worker tenant 与数据库运行角色在解析期均受严格格式限制", () => {
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        AGENT_WORKER_TENANT_ID: "not a tenant",
+      }),
+    ).toThrow("ID 格式无效");
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        DATABASE_RUNTIME_ROLE: "Runtime-Owner",
+      }),
+    ).toThrow("DATABASE_RUNTIME_ROLE 格式无效");
   });
 
   it("缺少模型依赖时在装配前失败且不泄漏其他秘密", () => {

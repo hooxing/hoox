@@ -52,9 +52,13 @@ active incarnation 与 Workspace head，再写入 revision、推进 head 并释�
 同路径精确复用 parent revision，不创建新 Blob；发布失败、终态和租约过期恢复会释放未提交 candidate，
 COMMIT 响应未知则只通过原 mutation 幂等键读取结果，不猜测成功或失败。新 Sandbox 仍必须在物化前证明
 `/workspace` 为空，`0014` 仍会失败关闭没有逐文件 manifest 的旧 current head，旧数据必须先经受控回填。
-该能力只接入固定开发身份的 development Worker，不改变生产认证边界。Artifact 发布仍是独立交付闭环，
-Workspace 文件不会自动成为用户可下载的 Artifact。完整协议见
-[`ADR-0047`](docs/decisions/0047-workspace-candidate-atomic-handoff.md)。
+该能力只接入固定开发身份的 development Worker，不改变生产认证边界。development assembler 现已把
+`publish_artifact` 的 Workspace intent、最终 Revision、ResourceVersion、Artifact settlement 与真实完成门接成
+同一原子闭环；只有显式调用并通过完成门的文件才成为可下载 Artifact，不会自动发布整个 Workspace。
+diagnostic/trace 的内部 Resource 不进入租户成员可搜索的 Resource Library。导出的生产 `startWorkerProcess` 仍走
+`production-worker-runtime` 的 fail-closed 装配，不会复用 development assembler；生产入口接通属于 M7，本切片
+没有实现。完整协议见 [`ADR-0047`](docs/decisions/0047-workspace-candidate-atomic-handoff.md) 与
+[`ADR-0048`](docs/decisions/0048-workspace-artifact-runtime-closure.md)。
 
 ## 开发基线
 

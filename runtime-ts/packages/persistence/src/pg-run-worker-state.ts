@@ -2182,12 +2182,13 @@ async function settleWorkspaceArtifactIntents(
       `INSERT INTO resources(
          tenant_id,id,name,normalized_name,origin,visibility,latest_version_number,
          latest_version_id,created_at,updated_at
-       ) VALUES($1,$2,$3,lower($3),'promoted_workspace','searchable',1,$4,$5,$5)`,
+       ) VALUES($1,$2,$3,lower($3),'artifact',$5,1,$4,$6,$6)`,
       [
         input.tenantId,
         intent.resource_id,
         intent.resource_name,
         intent.resource_version_id,
+        intent.purpose === "deliverable" ? "searchable" : "pending_explicit_commit",
         input.databaseNow,
       ],
     );

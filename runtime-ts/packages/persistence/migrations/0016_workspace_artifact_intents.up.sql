@@ -54,6 +54,17 @@ ALTER TABLE artifact_publications
     blob_lifecycle_id,blob_incarnation_id,physical_object_key
   ) ON DELETE RESTRICT;
 
+-- intent 不得只保存一组可伪造的 permit/call 文本。组合候选键让后续 FK 同时证明：
+-- call 已登记为 publish_artifact，且对应 tool_execution permit 已消费并匹配 args。
+ALTER TABLE effect_invocations
+  ADD CONSTRAINT effect_invocations_artifact_intent_key UNIQUE (
+    tenant_id,attempt_id,call_id,tool_name
+  );
+ALTER TABLE external_effect_permits
+  ADD CONSTRAINT external_effect_permits_artifact_intent_key UNIQUE (
+    tenant_id,attempt_id,permit_id,effect,call_id,tool_name,args_digest,consumed_at
+  );
+
 CREATE TABLE workspace_artifact_publication_intents (
   tenant_id text NOT NULL,
   attempt_id text NOT NULL,
@@ -63,6 +74,9 @@ CREATE TABLE workspace_artifact_publication_intents (
   root_run_id text NOT NULL,
   call_id text NOT NULL CHECK (octet_length(call_id) BETWEEN 1 AND 256),
   permit_id text NOT NULL CHECK (octet_length(permit_id) BETWEEN 1 AND 256),
+  effect text GENERATED ALWAYS AS ('tool_execution'::text) STORED,
+  tool_name text GENERATED ALWAYS AS ('publish_artifact'::text) STORED,
+  permit_consumed_at timestamptz NOT NULL,
   idempotency_key text NOT NULL CHECK (octet_length(idempotency_key) BETWEEN 1 AND 512),
   command_digest text NOT NULL CHECK (command_digest ~ '^[0-9a-f]{64}$'),
   tool_args_digest text NOT NULL CHECK (tool_args_digest ~ '^[0-9a-f]{64}$'),
@@ -97,6 +111,15 @@ CREATE TABLE workspace_artifact_publication_intents (
     REFERENCES execution_attempts(
       tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id
     ) ON DELETE RESTRICT,
+  FOREIGN KEY (tenant_id,attempt_id,call_id,tool_name)
+    REFERENCES effect_invocations(tenant_id,attempt_id,call_id,tool_name)
+    ON DELETE RESTRICT,
+  FOREIGN KEY (
+    tenant_id,attempt_id,permit_id,effect,call_id,tool_name,
+    tool_args_digest,permit_consumed_at
+  ) REFERENCES external_effect_permits(
+    tenant_id,attempt_id,permit_id,effect,call_id,tool_name,args_digest,consumed_at
+  ) MATCH FULL ON DELETE RESTRICT,
   FOREIGN KEY (tenant_id,run_id,deliverable_key)
     REFERENCES artifact_deliverable_declarations(tenant_id,run_id,deliverable_key)
     ON DELETE RESTRICT,

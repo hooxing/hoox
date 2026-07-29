@@ -64,6 +64,7 @@ import {
   PgExecutionPersistence,
   PgRunExecutionSetup,
 } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
+import { PgResourceCatalog } from "../../runtime-ts/packages/persistence/src/pg-resource-library.js";
 import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-sandbox-cleanup-consumer.js";
 import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import {
@@ -2401,7 +2402,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     ]);
   });
 
-  it("cleanup armed/disposition、Projection CAS 与 Revision+Run 终态同事务", async () => {
+  it("cleanup、Revision 终态与 Artifact 结算同事务，并隔离诊断类 Resource", async () => {
     const f = await fixture(`final-${suffix}`);
     const claimed = await persistence.claim({
       scope: f.scope,
@@ -2486,6 +2487,22 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     const blobOperationId = `candidate-final-${suffix}`.slice(0, 120);
     const contentSha256 = "b".repeat(64);
     const physicalObjectKey = `runtime/stable/${f.scope.tenantId}/workspace/sha256/${contentSha256}/incarnations/${incarnationId}`;
+    const intentConsumedAt = new Date().toISOString();
+    const scopedArtifactIntents = (["diagnostic", "trace"] as const).map((purpose, index) => ({
+      purpose,
+      callId: `workspace-${purpose}-call-${suffix}`,
+      permitId: `workspace-${purpose}-permit-${suffix}`,
+      argsDigest: (index === 0 ? "c" : "d").repeat(64),
+      commandDigest: (index === 0 ? "e" : "f").repeat(64),
+      requestedArtifactId: `workspace-${purpose}-requested-${suffix}`,
+      artifactId: `workspace-${purpose}-artifact-${suffix}`,
+      resourceId: `workspace-${purpose}-resource-${suffix}`,
+      resourceVersionId: `workspace-${purpose}-version-${suffix}`,
+      blobReferenceId: `workspace-${purpose}-binding-ref-${suffix}`,
+      blobOperationId: `workspace-${purpose}-binding-${suffix}`.slice(0, 120),
+      idempotencyKey: `workspace-${purpose}-intent-${suffix}`,
+      consumedAt: intentConsumedAt,
+    }));
     const manifest = createWorkspaceManifest(
       {
         tenantId: f.scope.tenantId,
@@ -2586,6 +2603,112 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           referenceId,
         ],
       );
+      for (const intent of scopedArtifactIntents) {
+        await client.query(
+          `INSERT INTO effect_invocations(tenant_id,attempt_id,call_id,tool_name)
+           VALUES($1,$2,$3,'publish_artifact')`,
+          [f.scope.tenantId, claimed.snapshot.attempt.attemptId, intent.callId],
+        );
+        await client.query(
+          `INSERT INTO external_effect_permits(
+             tenant_id,permit_id,attempt_id,effect,call_id,tool_name,args_digest,
+             attempt_version,run_claim_token,run_claim_epoch,workspace_root_run_id,
+             workspace_lease_epoch,issued_at,expires_at,consumed_at
+           ) VALUES(
+             $1,$2,$3,'tool_execution',$4,'publish_artifact',$5,3,$6,$7,$8,$9,
+             $10::timestamptz-interval '1 second',$10::timestamptz+interval '10 minutes',$10
+           )`,
+          [
+            f.scope.tenantId,
+            intent.permitId,
+            claimed.snapshot.attempt.attemptId,
+            intent.callId,
+            intent.argsDigest,
+            claimed.fence.runClaim.token,
+            claimed.fence.runClaim.epoch,
+            f.scope.rootRunId,
+            claimed.fence.workspaceLease.epoch,
+            intent.consumedAt,
+          ],
+        );
+      }
+    });
+    const invalidIntent = scopedArtifactIntents[0];
+    if (invalidIntent === undefined) throw new Error("缺少 Artifact intent fixture");
+    await expect(
+      withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, (client) =>
+        client.query(
+          `INSERT INTO workspace_artifact_publication_intents(
+             tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+             call_id,permit_id,permit_consumed_at,idempotency_key,command_digest,
+             tool_args_digest,requested_artifact_id,artifact_id,resource_id,
+             resource_version_id,blob_reference_id,blob_operation_id,name,purpose,
+             source_relative_path,resource_name
+           ) VALUES(
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+             '伪造诊断','diagnostic','final.txt','伪造诊断'
+           )`,
+          [
+            f.scope.tenantId,
+            claimed.snapshot.attempt.attemptId,
+            f.scope.runId,
+            f.scope.threadId,
+            f.scope.workspaceId,
+            f.scope.rootRunId,
+            invalidIntent.callId,
+            invalidIntent.permitId,
+            invalidIntent.consumedAt,
+            `${invalidIntent.idempotencyKey}-forged`,
+            invalidIntent.commandDigest,
+            "0".repeat(64),
+            `${invalidIntent.requestedArtifactId}-forged`,
+            `${invalidIntent.artifactId}-forged`,
+            `${invalidIntent.resourceId}-forged`,
+            `${invalidIntent.resourceVersionId}-forged`,
+            `${invalidIntent.blobReferenceId}-forged`,
+            `${invalidIntent.blobOperationId}-forged`,
+          ],
+        ),
+      ),
+    ).rejects.toThrow();
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      for (const intent of scopedArtifactIntents) {
+        await client.query(
+          `INSERT INTO workspace_artifact_publication_intents(
+             tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+             call_id,permit_id,permit_consumed_at,idempotency_key,command_digest,
+             tool_args_digest,requested_artifact_id,artifact_id,resource_id,
+             resource_version_id,blob_reference_id,blob_operation_id,name,purpose,
+             source_relative_path,resource_name
+           ) VALUES(
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+             $19,$20,'final.txt',$21
+           )`,
+          [
+            f.scope.tenantId,
+            claimed.snapshot.attempt.attemptId,
+            f.scope.runId,
+            f.scope.threadId,
+            f.scope.workspaceId,
+            f.scope.rootRunId,
+            intent.callId,
+            intent.permitId,
+            intent.consumedAt,
+            intent.idempotencyKey,
+            intent.commandDigest,
+            intent.argsDigest,
+            intent.requestedArtifactId,
+            intent.artifactId,
+            intent.resourceId,
+            intent.resourceVersionId,
+            intent.blobReferenceId,
+            intent.blobOperationId,
+            `${intent.purpose} 证据`,
+            intent.purpose,
+            `${intent.purpose} 证据`,
+          ],
+        );
+      }
     });
     await handoff.prepare({ identity: candidate, manifest });
     const lossyFinal = new PgExecutionPersistence(runtime, {
@@ -2650,12 +2773,37 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
             WHERE tenant_id=$1 AND workspace_id=$2 AND revision_id=$3`,
           [f.scope.tenantId, f.scope.workspaceId, revision],
         ),
+        artifactResources: await client.query<{
+          readonly id: string;
+          readonly origin: string;
+          readonly visibility: string;
+        }>(
+          `SELECT id,origin,visibility FROM resources
+            WHERE tenant_id=$1 AND id=ANY($2::text[]) ORDER BY id`,
+          [f.scope.tenantId, scopedArtifactIntents.map((intent) => intent.resourceId)],
+        ),
       }),
       { readOnly: true },
     );
     expect(committedFacts.candidate.rows[0]?.status).toBe("committed");
     expect(committedFacts.reference.rows[0]?.state).toBe("released");
     expect(committedFacts.file.rows).toEqual([{ relative_path: "final.txt" }]);
+    expect(committedFacts.artifactResources.rows).toHaveLength(2);
+    expect(
+      committedFacts.artifactResources.rows.every(
+        (resource) =>
+          resource.origin === "artifact" && resource.visibility === "pending_explicit_commit",
+      ),
+    ).toBe(true);
+    const catalog = new PgResourceCatalog(runtime);
+    const catalogPage = await catalog.search({
+      context: { tenantId: f.scope.tenantId, userId: f.user.id },
+      normalizedQuery: "",
+      limit: 100,
+    });
+    expect(catalogPage.items.map((item) => item.resourceId)).not.toEqual(
+      expect.arrayContaining(scopedArtifactIntents.map((intent) => intent.resourceId)),
+    );
     const stableAccess = new PgWorkspaceStableBlobAccess(runtime, {} as BlobStore);
     const authorizationInput = {
       scope: {
@@ -3489,33 +3637,57 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     ).toBeUndefined();
   });
 
-  it("最新迁移可回退至 0004 并重新授予最小 Dispatch ACL", async () => {
-    const candidateDown = await migrateDown(migrator, {
+  it("0016 写入 workspace Artifact 事实后可安全回退并重新迁移", async () => {
+    const workspaceFactsBefore = await admin.query<{
+      readonly artifact_count: number;
+      readonly resource_version_count: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM "${schema}".artifact_publications
+           WHERE blob_purpose='workspace') AS artifact_count,
+         (SELECT count(*)::int FROM "${schema}".resource_versions
+           WHERE blob_purpose='workspace') AS resource_version_count`,
+    );
+    expect(workspaceFactsBefore.rows[0]?.artifact_count).toBeGreaterThan(0);
+    expect(workspaceFactsBefore.rows[0]?.resource_version_count).toBeGreaterThan(0);
+    const artifactDown = await migrateDown(migrator, {
       runtimeRole,
       migratorRole,
       schema,
-      targetVersion: 14,
+      targetVersion: 15,
       allowDestructive: true,
       environment: "test",
     });
-    expect(candidateDown.at(-1)?.version).toBe(14);
-    const down = await migrateDown(migrator, {
-      runtimeRole,
-      migratorRole,
-      schema,
-      targetVersion: 4,
-      allowDestructive: true,
-      environment: "test",
+    expect(artifactDown.at(-1)?.version).toBe(15);
+    const workspaceFactsAfter = await admin.query<{
+      readonly artifact_count: number;
+      readonly resource_version_count: number;
+      readonly restored_checks: number;
+    }>(
+      `SELECT
+         (SELECT count(*)::int FROM "${schema}".artifact_publications
+           WHERE blob_purpose='workspace') AS artifact_count,
+         (SELECT count(*)::int FROM "${schema}".resource_versions
+           WHERE blob_purpose='workspace') AS resource_version_count,
+         (SELECT count(*)::int FROM pg_constraint
+           WHERE conname IN (
+             'artifact_publications_blob_purpose_check',
+             'resource_versions_blob_purpose_check'
+           ) AND connamespace='"${schema}"'::regnamespace) AS restored_checks`,
+    );
+    expect(workspaceFactsAfter.rows[0]).toEqual({
+      artifact_count: 0,
+      resource_version_count: 0,
+      restored_checks: 2,
     });
-    expect(down.at(-1)?.version).toBe(4);
     const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
     expect(restored.at(-1)?.version).toBe(migrationContract.latestVersion);
     const acl = await admin.query<{
       readonly select_allowed: boolean;
       readonly update_allowed: boolean;
     }>(
-      `SELECT has_table_privilege($1::text, format('%I.api_idempotency_records', $2::text), 'SELECT') AS select_allowed,
-              has_table_privilege($1::text, format('%I.api_idempotency_records', $2::text), 'UPDATE') AS update_allowed`,
+      `SELECT has_table_privilege($1::text, format('%I.workspace_artifact_publication_intents', $2::text), 'SELECT') AS select_allowed,
+              has_table_privilege($1::text, format('%I.workspace_artifact_publication_intents', $2::text), 'UPDATE') AS update_allowed`,
       [runtimeRole, schema],
     );
     expect(acl.rows[0]).toEqual({ select_allowed: true, update_allowed: false });

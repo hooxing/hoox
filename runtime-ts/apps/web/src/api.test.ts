@@ -108,6 +108,23 @@ describe("RuntimeApi", () => {
     expect(fetcher.mock.calls[0]?.[1]).not.toMatchObject({ method: "POST" });
   });
 
+  it("纯文本预览只接受 API 内联文本，不将其解释为 URL", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          version: "v1",
+          requestId: "req_1",
+          data: { disposition: "preview", text: "<script>window.pwned=true</script>" },
+        }),
+      ),
+    );
+    const api = new RuntimeApi(fetcher);
+    await expect(api.previewArtifact("thread_1", "run_1", "artifact_1")).resolves.toEqual({
+      kind: "text",
+      text: "<script>window.pwned=true</script>",
+    });
+  });
+
   it("事件页保留 attemptId", async () => {
     const api = new RuntimeApi(
       vi.fn().mockResolvedValue(
@@ -136,11 +153,11 @@ describe("RuntimeApi", () => {
   });
 
   it("仅允许安全媒体类型预览", () => {
-    expect(canPreviewArtifact("text/plain")).toBe(true);
+    expect(canPreviewArtifact("text/plain")).toBe(false);
     expect(canPreviewArtifact("text/plain; charset=utf-8")).toBe(true);
-    expect(canPreviewArtifact('TEXT/PLAIN; charset="us-ascii"')).toBe(true);
-    expect(canPreviewArtifact("text/plain; charset=iso-8859-1")).toBe(true);
-    expect(canPreviewArtifact("text/plain; charset=windows-1252")).toBe(true);
+    expect(canPreviewArtifact('TEXT/PLAIN; charset="us-ascii"')).toBe(false);
+    expect(canPreviewArtifact("text/plain; charset=iso-8859-1")).toBe(false);
+    expect(canPreviewArtifact("text/plain; charset=windows-1252")).toBe(false);
     expect(canPreviewArtifact("image/png")).toBe(true);
     expect(canPreviewArtifact("image/jpeg")).toBe(true);
     expect(canPreviewArtifact("image/gif")).toBe(true);

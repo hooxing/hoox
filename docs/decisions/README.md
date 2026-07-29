@@ -56,6 +56,9 @@
 | [ADR-0048](0048-workspace-artifact-runtime-closure.md) | Workspace Revision 到 Artifact 的原子发布闭环 | 已接受 | 2026-07-29 |
 | [ADR-0049](0049-audited-production-worker-assembly.md) | 受审生产进程装配与 Worker 运行边界 | 已替代 | 2026-07-29 |
 | [ADR-0050](0050-production-api-jwt-authentication.md) | 生产 API 的 JWT 身份、租户选择与网络装配 | 已接受 | 2026-07-29 |
+| [ADR-0051](0051-workspace-materialization-safe-diagnostics.md) | Workspace 物化安全诊断 | 已接受 | 2026-07-30 |
+| [ADR-0052](0052-artifact-permit-version-monotonicity.md) | Artifact 工具许可与 Attempt 版本的单调边界 | 已接受 | 2026-07-30 |
+| [ADR-0053](0053-workspace-artifact-preview-media.md) | Workspace Artifact 的受限预览媒体类型 | 已接受 | 2026-07-30 |
 | [ADR-0054](0054-production-transport-and-reproducible-release.md) | 生产传输、进程边界与可复现发布制品 | 已接受 | 2026-07-30 |
 
 ## 何时必须记录

@@ -956,7 +956,9 @@ async function readExecutionBoundary(
             AND fence.lease_epoch=$10
             AND lease.root_run_id=$6 AND lease.epoch=$10
             AND lease.expires_at>clock_timestamp()
-            AND attempt.version=$11
+            -- 同一 Attempt 的后续受审计事件可合法推进版本；许可自身仍必须固定在签发版本。
+            -- 版本倒退表示旧 fence/快照，必须拒绝，不能把它放宽成任意版本。
+            AND attempt.version>=$11
             AND attempt.status IN ('running','finalizing') AS valid
        FROM execution_attempts attempt
        JOIN runs run ON run.tenant_id=attempt.tenant_id

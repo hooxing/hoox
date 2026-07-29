@@ -10,6 +10,8 @@ import {
   workspaceId,
   workspaceRevisionId,
 } from "@cube-runtime/domain";
+import type { RuntimeMutation } from "@cube-runtime/run-contracts";
+import { runtimeMutationDigest } from "@cube-runtime/run-contracts/mutation-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ArtifactExecutionAuthorization } from "../../runtime-ts/packages/artifact/src/authorization.js";
 import { PgArtifactDeliveryRepository } from "../../runtime-ts/packages/artifact/src/pg-repository.js";
@@ -20,6 +22,7 @@ import {
   type PoolClient,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { PgExecutionPersistence } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
 import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { loadPostgreSqlMigrationContract } from "./postgres-migration-contract.js";
 
@@ -67,6 +70,13 @@ let migrator!: Pool;
 let runtime!: Pool;
 let repository!: PgArtifactDeliveryRepository;
 let experienceRepository!: PgRunExperienceReadRepository;
+
+function signedMutation(
+  input: Omit<RuntimeMutation, "schemaVersion" | "commandDigest">,
+): RuntimeMutation {
+  const unsigned = { ...input, schemaVersion: 1 as const };
+  return { ...unsigned, commandDigest: runtimeMutationDigest(unsigned) };
+}
 
 function authorization(
   toolName: string,
@@ -628,6 +638,226 @@ describe("Artifact PostgreSQL 持久化", () => {
         outcome: "confirmed",
       });
     }
+  });
+
+  it("真实 PG permit 在后续 tool.started 推进版本后仍可发布，并严格拒绝倒退、claim、lease、fence 与取消", async () => {
+    const execution = await seedAdditionalExecution("permit_version_boundary");
+    const scope = {
+      tenantId: ids.tenant,
+      threadId: execution.thread,
+      runId: execution.run,
+      rootRunId: execution.run,
+      workspaceId: execution.workspace,
+    };
+    const claimToken = `permit-boundary-claim-${unique}`;
+    await withTenantTransaction(runtime, { tenantId: ids.tenant }, async (client) => {
+      await client.query(
+        `INSERT INTO workspace_write_leases(tenant_id,workspace_id,thread_id,root_run_id,epoch,expires_at)
+         VALUES($1,$2,$3,$4,1,$5)`,
+        [ids.tenant, execution.workspace, execution.thread, execution.run, expiresAt],
+      );
+      await client.query(
+        `INSERT INTO execution_workspace_fences(
+           tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,lease_epoch,initial_expires_at
+         ) VALUES($1,$2,$3,$4,$5,$6,1,$7)`,
+        [
+          ids.tenant,
+          execution.attempt,
+          execution.run,
+          execution.thread,
+          execution.workspace,
+          execution.run,
+          expiresAt,
+        ],
+      );
+      await client.query(
+        `INSERT INTO run_claims(
+           tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,worker_id,
+           claim_token,claim_epoch,workspace_lease_epoch,expires_at
+         ) VALUES($1,$2,$3,$4,$5,$6,'permit-boundary-worker',$7,1,1,$8)`,
+        [
+          ids.tenant,
+          execution.attempt,
+          execution.run,
+          execution.thread,
+          execution.workspace,
+          execution.run,
+          claimToken,
+          expiresAt,
+        ],
+      );
+    });
+    const fence = {
+      scope,
+      runClaim: { token: claimToken, epoch: 1, expiresAt },
+      workspaceLease: { rootRunId: execution.run, epoch: 1, expiresAt },
+    };
+    const persistence = new PgExecutionPersistence(runtime);
+    const publishCall = {
+      callId: `permit-boundary-publish-${unique}`,
+      toolName: "publish_artifact",
+      argsDigest: sha256Digest("b".repeat(64)),
+    };
+    const registered = await persistence.mutate(
+      signedMutation({
+        idempotencyKey: `${execution.attempt}/tool-started/0`,
+        fence,
+        expectedAttemptVersion: 0,
+        events: [
+          {
+            schemaVersion: 1,
+            kind: "agent_event",
+            sequence: 0,
+            payload: {
+              type: "tool.started",
+              callId: publishCall.callId,
+              name: publishCall.toolName,
+            },
+          },
+        ],
+        outbox: [],
+        effectInvocation: { callId: publishCall.callId, toolName: publishCall.toolName },
+      }),
+    );
+    expect(registered.outcome).toBe("applied");
+    const issued = await persistence.issueExternalEffectPermit({
+      fence,
+      expectedAttemptVersion: 1,
+      effect: "tool_execution",
+      call: publishCall,
+      permitDurationMs: 30_000,
+    });
+    expect(issued.outcome).toBe("authorized");
+    if (issued.outcome !== "authorized") throw new Error("真实 PG permit 未签发");
+    const precision = await withTenantTransaction(
+      runtime,
+      { tenantId: ids.tenant },
+      (client) =>
+        client.query<{
+          issued_microsecond_remainder: number;
+          expires_microsecond_remainder: number;
+        }>(
+          `SELECT (EXTRACT(MICROSECONDS FROM issued_at)::bigint % 1000)::int AS issued_microsecond_remainder,
+                  (EXTRACT(MICROSECONDS FROM expires_at)::bigint % 1000)::int AS expires_microsecond_remainder
+             FROM external_effect_permits WHERE tenant_id=$1 AND permit_id=$2`,
+          [ids.tenant, issued.permit.permitId],
+        ),
+      { readOnly: true },
+    );
+    expect(precision.rows[0]).toEqual({
+      issued_microsecond_remainder: 0,
+      expires_microsecond_remainder: 0,
+    });
+    const consumed = await persistence.consumeExternalEffectPermit({
+      fence,
+      expectedAttemptVersion: 1,
+      permit: issued.permit,
+    });
+    expect(consumed.outcome).toBe("consumed");
+    if (consumed.outcome !== "consumed") throw new Error("真实 PG permit 未消费");
+    const authorization = Object.freeze({
+      ...issued.permit,
+      attemptId: execution.attempt,
+      consumedAt: consumed.databaseNow,
+      consumedAtMonotonicMs: 1,
+      maxContinuationDelayMs: 60_000,
+    }) as unknown as ArtifactExecutionAuthorization;
+    const advanced = await persistence.mutate(
+      signedMutation({
+        idempotencyKey: `${execution.attempt}/tool-started/1`,
+        fence,
+        expectedAttemptVersion: 1,
+        events: [
+          {
+            schemaVersion: 1,
+            kind: "agent_event",
+            sequence: 1,
+            payload: {
+              type: "tool.started",
+              callId: `permit-boundary-followup-${unique}`,
+              name: "sandbox_read_file",
+            },
+          },
+        ],
+        outbox: [],
+        effectInvocation: {
+          callId: `permit-boundary-followup-${unique}`,
+          toolName: "sandbox_read_file",
+        },
+      }),
+    );
+    expect(advanced.outcome).toBe("applied");
+    const publish = (label: string, boundaryAuthorization = authorization) =>
+      repository.beginPublication({
+        authorization: boundaryAuthorization,
+        idempotencyKey: `permit-boundary-${label}-${unique}`,
+        commandDigest: sha256Digest(createHash("sha256").update(label).digest("hex")),
+        artifactId: artifactId(`artifact_permit_boundary_${label}_${unique}`),
+        resourceVersionId: ids.version,
+        name: `${label}.txt`,
+        purpose: "diagnostic",
+      });
+    // authorization 固定在 version=1；第二个 tool.started 已将 Attempt 推至 version=2。
+    expect((await publish("advanced")).outcome).toBe("started");
+
+    const expectRejected = async (
+      label: string,
+      boundaryAuthorization: ArtifactExecutionAuthorization = authorization,
+    ) => {
+      expect((await publish(label, boundaryAuthorization)).outcome).toBe("scope_mismatch");
+    };
+    await withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+      client.query("UPDATE execution_attempts SET version=0 WHERE tenant_id=$1 AND attempt_id=$2", [
+        ids.tenant,
+        execution.attempt,
+      ]),
+    );
+    await expectRejected("version-rollback");
+    await withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+      client.query("UPDATE execution_attempts SET version=2 WHERE tenant_id=$1 AND attempt_id=$2", [
+        ids.tenant,
+        execution.attempt,
+      ]),
+    );
+
+    await withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+      client.query(
+        "UPDATE run_claims SET released_at=clock_timestamp() WHERE tenant_id=$1 AND attempt_id=$2",
+        [ids.tenant, execution.attempt],
+      ),
+    );
+    await expectRejected("claim-released");
+    await withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+      client.query("UPDATE run_claims SET released_at=NULL WHERE tenant_id=$1 AND attempt_id=$2", [
+        ids.tenant,
+        execution.attempt,
+      ]),
+    );
+    await withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+      client.query(
+        "UPDATE workspace_write_leases SET expires_at='2020-01-01T00:00:00.000Z' WHERE tenant_id=$1 AND workspace_id=$2",
+        [ids.tenant, execution.workspace],
+      ),
+    );
+    await expectRejected("lease-expired");
+    await withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+      client.query(
+        "UPDATE workspace_write_leases SET expires_at=$3 WHERE tenant_id=$1 AND workspace_id=$2",
+        [ids.tenant, execution.workspace, expiresAt],
+      ),
+    );
+    await expectRejected(
+      "fence-epoch",
+      Object.freeze({ ...authorization, workspaceLeaseEpoch: 2 }) as ArtifactExecutionAuthorization,
+    );
+
+    await withTenantTransaction(migrator, { tenantId: ids.tenant }, (client) =>
+      client.query("UPDATE runs SET status='cancelled' WHERE tenant_id=$1 AND id=$2", [
+        ids.tenant,
+        execution.run,
+      ]),
+    );
+    expect((await publish("cancelled")).outcome).toBe("not_running");
   });
 
   it("数据库拒绝终态逆转、重复结算与未失败 replacement", async () => {

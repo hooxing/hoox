@@ -6,6 +6,8 @@ import type {
   WorkspaceRevisionId,
 } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
+import { WorkspaceApplicationError, WorkspaceDependencyError } from "@cube-runtime/workspace";
+import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 import { DurableOperationLane } from "./durable-operation-lane.js";
 import {
   assertControlledRolloutProjection,
@@ -387,10 +389,12 @@ export class RunWorker {
             ? {}
             : { expectedCurrentRevisionId: context.currentRevisionId }),
           sandbox,
-          operationKey: `${context.attemptId}/workspace/materialize`,
+          // Workspace journal 的 operationKey 是受限协议字段；不得复用含 `/` 的路径样式键。
+          operationKey: `${context.attemptId}:workspace:materialize`,
           signal: executionAbort.signal,
         });
-      } catch {
+      } catch (error) {
+        reportWorkspaceMaterializeFailure(error);
         return await this.recoverWithCleanup(context, sandbox, "WORKSPACE_CONFLICT", cancellation);
       }
       const postMaterialize = await this.stopPoint(context, cancellation);
@@ -548,10 +552,11 @@ export class RunWorker {
               ? {}
               : { expectedCurrentRevisionId: context.currentRevisionId }),
             sandbox,
-            operationKey: `${context.attemptId}/workspace/publish/${correctionRound}`,
+            operationKey: `${context.attemptId}:workspace:publish:${correctionRound}`,
             signal: executionAbort.signal,
           });
-        } catch {
+        } catch (error) {
+          reportWorkspaceVerifyFailure(error);
           return await this.recoverWithCleanup(
             context,
             sandbox,
@@ -1363,6 +1368,90 @@ function validateWorkspaceCandidate(
     throw new Error("WORKSPACE_CONFLICT");
   }
   return candidate;
+}
+
+/**
+ * Run 的公开错误码必须保持稳定，不能把驱动、对象键或路径写入事件；开发进程日志只记录
+ * 固定分类，供区分 Workspace head、Sandbox 数据面和依赖结果未知。
+ */
+function reportWorkspaceMaterializeFailure(error: unknown): void {
+  const category =
+    error instanceof WorkspaceMaterializationStageError
+      ? workspaceMaterializationCategory(error)
+      : error instanceof WorkspaceApplicationError
+        ? workspaceApplicationCategory(error)
+        : error instanceof WorkspaceDependencyError
+          ? workspaceDependencyCategory(error)
+          : "unclassified";
+  console.warn(`WORKSPACE_MATERIALIZE_FAILED category=${category}`);
+}
+
+/** Workspace candidate 发布与物化同样只记录固定分类，避免异常正文越过 Worker 边界。 */
+function reportWorkspaceVerifyFailure(error: unknown): void {
+  const category =
+    error instanceof WorkspaceApplicationError
+      ? workspaceApplicationCategory(error)
+      : error instanceof WorkspaceDependencyError
+        ? workspaceDependencyCategory(error)
+        : "unclassified";
+  console.warn(`WORKSPACE_VERIFY_FAILED category=${category}`);
+}
+
+function workspaceMaterializationCategory(error: WorkspaceMaterializationStageError): string {
+  const stage = new Set([
+    "load_current_manifest",
+    "open_workspace",
+    "baseline_snapshot",
+    "baseline_list",
+    "baseline_release",
+    "materializer",
+  ]).has(error.stage)
+    ? error.stage
+    : undefined;
+  if (stage === undefined) return "unclassified";
+  const detail = new Set([
+    "invalid_operation_key",
+    "invalid_scope",
+    "invalid_sandbox_session",
+    "invalid_manifest",
+    "invalid_revision",
+    "other_application",
+    "dependency",
+    "unclassified",
+  ]).has(error.detail ?? "")
+    ? error.detail
+    : undefined;
+  return `stage_${stage}${detail === undefined ? "" : `_${detail}`}`;
+}
+
+function workspaceApplicationCategory(error: WorkspaceApplicationError): string {
+  const code = new Map([
+    ["INVALID_INPUT", "invalid_input"],
+    ["OPERATION_CONFLICT", "operation_conflict"],
+    ["OPERATION_IN_PROGRESS", "operation_in_progress"],
+    ["ACCESS_DENIED", "access_denied"],
+    ["INTEGRITY_MISMATCH", "integrity_mismatch"],
+    ["LIMIT_EXCEEDED", "limit_exceeded"],
+    ["CANCELLED", "cancelled"],
+    ["UNSAFE_SANDBOX_ENTRY", "unsafe_sandbox_entry"],
+    ["DEPENDENCY_FAILED", "dependency_failed"],
+    ["RESULT_UNKNOWN", "result_unknown"],
+  ]).get(error.code);
+  if (code === undefined) return "unclassified";
+  return `application_${code}${
+    error.diagnostic === "candidate_stream_pending" ? "_candidate_stream_pending" : ""
+  }`;
+}
+
+function workspaceDependencyCategory(error: WorkspaceDependencyError): string {
+  switch (error.result) {
+    case "known":
+      return "dependency_known";
+    case "unknown":
+      return "dependency_unknown";
+    default:
+      return "unclassified";
+  }
 }
 
 function updateAgentState(context: ExecutionContext, event: RuntimeAgentEvent): void {

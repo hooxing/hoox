@@ -1,6 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@cube-runtime/domain";
-import { createApiPersistenceRuntime, createS3BlobStore } from "@cube-runtime/persistence";
+import {
+  createApiPersistenceRuntime,
+  createS3BlobStore,
+  RUNTIME_BLOB_OBJECT_PREFIX,
+} from "@cube-runtime/persistence";
 import type { ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
@@ -72,6 +76,8 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           accessKeyId: configuration.objectStorage.accessKeyId,
           secretAccessKey: configuration.objectStorage.secretAccessKey,
           forcePathStyle: configuration.objectStorage.forcePathStyle,
+          // Worker 将 Workspace/Artifact 对象置于这个受控前缀；下载端必须解析同一物理命名空间。
+          prefix: RUNTIME_BLOB_OBJECT_PREFIX,
           maxBlobSizeBytes: developmentApiMaxBlobSizeBytes,
         },
         persistence.blobLifecycle,

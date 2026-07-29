@@ -166,8 +166,11 @@ async function artifactToolResult(
   try {
     await action();
   } catch (error) {
-    // 只调用 projector 证明原异常可在受审边界内归类，但 Artifact 原始结果/错误都不进入模型。
-    void projector.projectError(error);
+    // 只记录稳定投影码；Artifact 原始结果、参数和错误正文都不进入模型或开发日志。
+    const projected = projector.projectError(error);
+    if (process.env.RUNTIME_ENV === "development") {
+      console.warn(`ARTIFACT_TOOL_FAILED tool=${toolName} code=${projected.code}`);
+    }
     outcome = "failed";
   }
   const observation = await recordControlledReceipt(callId, toolName, outcome);

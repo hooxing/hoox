@@ -648,6 +648,41 @@ describe("Workspace publisher 可靠边界", () => {
     });
   });
 
+  it("candidate 严格接受持久化 Writer 的 referenceId，并拒绝伪造引用身份", async () => {
+    const accepted = setup();
+    accepted.sandbox.addFile("a", "a");
+    const body = Buffer.from("a");
+    const sha256 = createHash("sha256").update(body).digest("hex");
+    const incarnationId = randomUUID();
+    accepted.blobs.candidateOverride = {
+      content: { sha256, size: 1 },
+      object: {
+        tenantId: SCOPE.tenantId,
+        purpose: "workspace",
+        incarnationId,
+        physicalObjectKey: `runtime/stable/${SCOPE.tenantId}/workspace/sha256/${sha256}/incarnations/${incarnationId}`,
+      },
+      referenceId: "reference_candidate_1",
+    };
+    await expect(accepted.publisher.publish(request("candidate-reference"))).resolves.toMatchObject(
+      {
+        candidateManifest: { entries: [{ path: "a" }] },
+      },
+    );
+
+    const rejected = setup();
+    rejected.sandbox.addFile("a", "a");
+    rejected.blobs.candidateOverride = {
+      ...accepted.blobs.candidateOverride,
+      referenceId: "invalid/reference",
+    };
+    await expect(
+      rejected.publisher.publish(request("candidate-reference-invalid")),
+    ).rejects.toMatchObject({
+      code: "DEPENDENCY_FAILED",
+    });
+  });
+
   it("适配器伪造公开 WorkspaceApplicationError 仍统一脱敏且无 cause", async () => {
     const state = setup();
     state.sandbox.addFile("a", "a");

@@ -85,10 +85,15 @@ export class Config {
       /\/+$/,
       "",
     );
-    const rawKey = options.apiKey ?? env.CUBE_API_KEY ?? env.E2B_API_KEY ?? null;
+    const rawKey =
+      options.apiKey === undefined
+        ? (env.CUBE_API_KEY ?? env.E2B_API_KEY ?? null)
+        : options.apiKey;
     this.apiKey = rawKey && rawKey.trim() ? rawKey.trim() : null;
-    this.templateId = options.templateId ?? env.CUBE_TEMPLATE_ID ?? null;
-    this.proxyNodeIp = options.proxyNodeIp ?? env.CUBE_PROXY_NODE_IP ?? null;
+    this.templateId =
+      options.templateId === undefined ? (env.CUBE_TEMPLATE_ID ?? null) : options.templateId;
+    this.proxyNodeIp =
+      options.proxyNodeIp === undefined ? (env.CUBE_PROXY_NODE_IP ?? null) : options.proxyNodeIp;
     this.proxyPort = options.proxyPort ?? parsePort(env.CUBE_PROXY_PORT_HTTP, 80);
     this.proxyScheme = normalizeProxyScheme(
       options.proxyScheme ?? env.CUBE_PROXY_SCHEME,

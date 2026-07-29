@@ -831,10 +831,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40cubesandbox/sdk@0.3.0",
+      "bom-ref": "pkg:npm/%40cubesandbox/sdk@0.3.0-cube.local.1",
       "name": "@cubesandbox/sdk",
-      "version": "0.3.0",
-      "purl": "pkg:npm/%40cubesandbox/sdk@0.3.0",
+      "version": "0.3.0-cube.local.1",
+      "purl": "pkg:npm/%40cubesandbox/sdk@0.3.0-cube.local.1",
       "licenses": [
         {
           "license": {
@@ -848,16 +848,36 @@
           "value": "runtime-ts/vendor/cubesandbox-sdk/LICENSE"
         },
         {
+          "name": "cube:local-modified",
+          "value": "true"
+        },
+        {
+          "name": "cube:local-patch-file",
+          "value": "runtime-ts/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.patch"
+        },
+        {
+          "name": "cube:local-patch-id",
+          "value": "CUBE-LOCAL-0001"
+        },
+        {
+          "name": "cube:local-patch-sha256",
+          "value": "ac285a52b5b5994b2a4b4102cf0cf952c252e421d8bfb33aa3f79e058008bb8a"
+        },
+        {
           "name": "cube:origin",
           "value": "vendor"
         },
         {
-          "name": "cube:source-commit",
-          "value": "8721dd151971ce3c2966482bbd32904ad98f378e"
+          "name": "cube:patched-tree-sha256",
+          "value": "4c496b33e88e3e375fca51fce0dacbc7fafc7fa20f862fe7fbd8d26ce8ad9c46"
         },
         {
           "name": "cube:source-file",
           "value": "runtime-ts/vendor/cubesandbox-sdk/SOURCE.md"
+        },
+        {
+          "name": "cube:upstream-source-commit",
+          "value": "8721dd151971ce3c2966482bbd32904ad98f378e"
         },
         {
           "name": "cube:workspace-path",
@@ -3191,7 +3211,7 @@
         "pkg:npm/%40cube-runtime/run-contracts@0.0.0",
         "pkg:npm/%40cube-runtime/sandbox@0.0.0",
         "pkg:npm/%40cube-runtime/workspace@0.0.0",
-        "pkg:npm/%40cubesandbox/sdk@0.3.0",
+        "pkg:npm/%40cubesandbox/sdk@0.3.0-cube.local.1",
         "pkg:npm/%40earendil-works/pi-agent-core@0.82.1",
         "pkg:npm/%40earendil-works/pi-ai@0.82.1",
         "pkg:npm/%40earendil-works/pi-coding-agent@0.82.1",

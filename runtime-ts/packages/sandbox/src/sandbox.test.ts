@@ -9,6 +9,47 @@ import { SandboxRuntimeError, settledOperation } from "./errors.js";
 import { FakeSandboxGateway } from "./testing/fake.js";
 
 describe("Sandbox 稳定适配契约", () => {
+  it("Gateway 显式 API key/null 与代理路由不受 vendor ambient 环境覆盖", async () => {
+    const keys = ["CUBE_API_KEY", "E2B_API_KEY", "CUBE_PROXY_NODE_IP"] as const;
+    const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+    process.env.CUBE_API_KEY = "ambient-cube-attacker-key";
+    process.env.E2B_API_KEY = "ambient-e2b-attacker-key";
+    process.env.CUBE_PROXY_NODE_IP = "ambient-proxy.invalid";
+    try {
+      const declaredCreate = vi.fn(fakeSdk().create);
+      const declaredSdk = fakeSdk({ create: declaredCreate });
+      await new CubeSandboxGateway(
+        {
+          apiUrl: "http://cube",
+          apiKey: "declared-production-key",
+          proxyNodeIp: "declared-proxy.invalid",
+        },
+        declaredSdk,
+      ).create({ templateId: "template-declared" });
+      expect(declaredCreate.mock.calls[0]?.[0].config).toMatchObject({
+        apiKey: "declared-production-key",
+        proxyNodeIp: "declared-proxy.invalid",
+      });
+
+      const anonymousCreate = vi.fn(fakeSdk().create);
+      const anonymousSdk = fakeSdk({ create: anonymousCreate });
+      await new CubeSandboxGateway(
+        { apiUrl: "http://cube", apiKey: null, proxyNodeIp: null },
+        anonymousSdk,
+      ).create({ templateId: "template-anonymous" });
+      expect(anonymousCreate.mock.calls[0]?.[0].config).toMatchObject({
+        apiKey: null,
+        proxyNodeIp: null,
+      });
+    } finally {
+      for (const key of keys) {
+        const value = previous[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it("无论业务是否失败都清理创建的 Sandbox", async () => {
     const gateway = new FakeSandboxGateway();
     await expect(

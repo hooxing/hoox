@@ -100,7 +100,8 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
           ...(tls === undefined ? {} : { https: tls }),
         },
       );
-      await Promise.all([probes.postgres(), probes.objectStorage()]);
+      await probes.postgres();
+      await probes.objectStorage();
       await app.listen({ host: configuration.listenHost, port: configuration.listenPort });
       const listeningApp = app;
       return Object.freeze({

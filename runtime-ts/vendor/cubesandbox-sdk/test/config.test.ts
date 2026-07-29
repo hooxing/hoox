@@ -59,6 +59,12 @@ describe("Config", () => {
     expect(new Config({ apiKey: "explicit" }).apiKey).toBe("explicit");
   });
 
+  it("explicit null suppresses ambient API key while undefined preserves fallback", () => {
+    process.env.CUBE_API_KEY = "ambient-cube-key";
+    expect(new Config({ apiKey: null }).apiKey).toBeNull();
+    expect(new Config({ apiKey: undefined }).apiKey).toBe("ambient-cube-key");
+  });
+
   it("treats a blank API key as unset", () => {
     process.env.CUBE_API_KEY = "   ";
     expect(new Config().apiKey).toBeNull();

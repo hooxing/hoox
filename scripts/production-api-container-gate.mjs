@@ -4,6 +4,13 @@ import { join } from "node:path";
 import process from "node:process";
 
 const baseDigest = "sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d";
+const runtimeSandboxArguments = Object.freeze([
+  "--read-only",
+  "--tmpfs",
+  "/tmp:rw,nosuid,nodev,noexec,mode=1777",
+]);
+const runtimeFilesystemProbe =
+  'for path in /opt/runtime /opt/runtime/dist/production-main.js /opt/runtime/node_modules /opt/runtime/sbom/cyclonedx.json /opt/runtime/licenses; do test "$(stat -c %u:%g "$path")" = 0:0; done; test -z "$(find /opt/runtime -xdev \\( -type f -o -type d \\) -perm /022 -print -quit)"; ! touch /opt/runtime/runtime-write-probe 2>/dev/null; touch /tmp/runtime-write-probe; rm /tmp/runtime-write-probe';
 
 function dockerResult(arguments_, options = {}) {
   const result = spawnSync("docker", arguments_, {
@@ -28,9 +35,12 @@ function environmentArguments(environment) {
 }
 
 function assertClosedFailure(imageId, environment, secretCanary, classification) {
-  const result = dockerResult(["run", "--rm", ...environmentArguments(environment), imageId], {
-    capture: true,
-  });
+  const result = dockerResult(
+    ["run", "--rm", ...runtimeSandboxArguments, ...environmentArguments(environment), imageId],
+    {
+      capture: true,
+    },
+  );
   if (result.status === 0) throw new Error(`PRODUCTION_API_GATE_FALSE_READY:${classification}`);
   if (
     !result.output.includes("API 生产进程启动失败") ||
@@ -38,6 +48,24 @@ function assertClosedFailure(imageId, environment, secretCanary, classification)
     result.output.includes(secretCanary)
   ) {
     throw new Error(`PRODUCTION_API_GATE_FAILURE_INVALID:${classification}`);
+  }
+}
+
+function assertEntrypointClosedFailure(imageId, environment, secretCanary, classification) {
+  const result = dockerResult(
+    ["run", "--rm", ...runtimeSandboxArguments, ...environmentArguments(environment), imageId],
+    {
+      capture: true,
+    },
+  );
+  if (
+    result.status === 0 ||
+    !result.output.includes("production inherited environment rejected") ||
+    result.output.includes("API 生产进程已启动") ||
+    result.output.includes(secretCanary) ||
+    result.output.includes("pre-node-canary")
+  ) {
+    throw new Error(`PRODUCTION_API_GATE_ENTRYPOINT_INVALID:${classification}`);
   }
 }
 
@@ -77,6 +105,13 @@ try {
   if (configuredCommand !== '["node","dist/production-main.js"]') {
     throw new Error("DOCKER_IMAGE_COMMAND_INVALID");
   }
+  const configuredEntrypoint = runDocker(
+    ["image", "inspect", "--format", "{{json .Config.Entrypoint}}", imageId],
+    { capture: true },
+  );
+  if (configuredEntrypoint !== '["/usr/local/bin/production-entrypoint"]') {
+    throw new Error("DOCKER_IMAGE_ENTRYPOINT_INVALID");
+  }
   const configuredBaseDigest = runDocker(
     [
       "image",
@@ -92,14 +127,34 @@ try {
   runDocker([
     "run",
     "--rm",
+    ...runtimeSandboxArguments,
     imageId,
     "sh",
     "-ec",
-    'test "$(id -u)" = 1000; test -f /opt/runtime/dist/production-main.js; test -f /opt/runtime/sbom/cyclonedx.json; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/LICENSE; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/SOURCE.md; test ! -e /opt/runtime/.env.production-api-gate-canary; test ! -d /opt/runtime/src; test ! -e /opt/runtime/dist/development-main.js; test ! -e /opt/runtime/dist/development-identity-main.js; ! command -v python; ! command -v python3; ! command -v npm; ! command -v npx; ! command -v corepack; ! command -v pnpm; test ! -e /usr/local/lib/node_modules/npm; test ! -e /usr/local/lib/node_modules/corepack; for tool in biome tsc tsx vitest; do test -z "$(find /opt/runtime -path "*/node_modules/.bin/$tool" -print -quit)"; done; for pattern in "*.test.*" "*.spec.*" "*.ts" "*.tsx"; do test -z "$(find /opt/runtime -type f -name "$pattern" -print -quit)"; done; for directory in test tests testing __tests__; do test -z "$(find /opt/runtime -type d -name "$directory" -print -quit)"; done',
+    runtimeFilesystemProbe,
+  ]);
+
+  runDocker([
+    "run",
+    "--rm",
+    ...runtimeSandboxArguments,
+    imageId,
+    "sh",
+    "-ec",
+    'test "$(id -u)" = 1000; test -f /opt/runtime/dist/production-main.js; test -f /opt/runtime/sbom/cyclonedx.json; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/LICENSE; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/SOURCE.md; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.md; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.patch; test ! -e /opt/runtime/.env.production-api-gate-canary; test ! -d /opt/runtime/src; test ! -e /opt/runtime/dist/development-main.js; test ! -e /opt/runtime/dist/development-identity-main.js; ! command -v python; ! command -v python3; ! command -v npm; ! command -v npx; ! command -v corepack; ! command -v pnpm; test ! -e /usr/local/lib/node_modules/npm; test ! -e /usr/local/lib/node_modules/corepack; for tool in biome tsc tsx vitest; do test -z "$(find /opt/runtime -path "*/node_modules/.bin/$tool" -print -quit)"; done; for pattern in "*.test.*" "*.spec.*" "*.ts" "*.tsx"; do test -z "$(find /opt/runtime -type f -name "$pattern" -print -quit)"; done; for directory in test tests testing __tests__; do test -z "$(find /opt/runtime -type d -name "$directory" -print -quit)"; done',
   ]);
 
   const blobPathProbe = dockerResult(
-    ["run", "--rm", "--interactive", imageId, "node", "--input-type=module", "-"],
+    [
+      "run",
+      "--rm",
+      ...runtimeSandboxArguments,
+      "--interactive",
+      imageId,
+      "node",
+      "--input-type=module",
+      "-",
+    ],
     {
       capture: true,
       input: readFileSync(
@@ -139,6 +194,38 @@ try {
 
   // 本 Gate 故意不提供真实 PG/S3：真实 production entry 必须失败关闭且日志只保留稳定分类。
   assertClosedFailure(imageId, baseEnvironment, secretCanary, "external-unavailable");
+  for (const [key, value] of Object.entries({
+    NODE_TLS_REJECT_UNAUTHORIZED: "0",
+    NODE_OPTIONS: "\n--import=data:text/javascript,process.stdout.write('pre-node-canary')",
+    NODE_USE_ENV_PROXY: "1",
+    NODE_USE_SYSTEM_CA: "1",
+    HTTP_PROXY: "http://127.0.0.1:9",
+    HTTPS_PROXY: "http://127.0.0.1:9",
+    ALL_PROXY: "http://127.0.0.1:9",
+    NO_PROXY: "*",
+    SSL_CERT_FILE: "/tmp/forbidden-ca.pem",
+    SSL_CERT_DIR: "/tmp/forbidden-ca-directory",
+    OPENSSL_CONF: "/tmp/forbidden-openssl.cnf",
+    OPENSSL_MODULES: "/tmp/forbidden-openssl-modules",
+    OPENSSL_ENGINES: "/tmp/forbidden-openssl-engines",
+    http_proxy: "http://127.0.0.1:9",
+    https_proxy: "http://127.0.0.1:9",
+    all_proxy: "http://127.0.0.1:9",
+    no_proxy: "*",
+  })) {
+    assertEntrypointClosedFailure(
+      imageId,
+      { ...baseEnvironment, [key]: value },
+      secretCanary,
+      `inherited-environment-${key}`,
+    );
+  }
+  assertClosedFailure(
+    imageId,
+    { ...baseEnvironment, node_future_transport_override: "1" },
+    secretCanary,
+    "future-node-environment-js-gate",
+  );
   const { DATABASE_URL: _databaseUrl, ...missingDatabase } = baseEnvironment;
   assertClosedFailure(imageId, missingDatabase, secretCanary, "database-missing");
   const { S3_ENDPOINT: _s3Endpoint, ...missingObjectStorage } = baseEnvironment;

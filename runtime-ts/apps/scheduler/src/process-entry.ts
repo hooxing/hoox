@@ -5,6 +5,7 @@ import {
   probePostgres,
 } from "@cube-runtime/persistence";
 import {
+  assertProductionInheritedEnvironment,
   integerEnvironmentField,
   type ProcessSignalSource,
   parseStrictEnvironment,
@@ -75,12 +76,14 @@ export interface SchedulerProcessConfiguration {
 export function selectSchedulerProcessEnvironment(
   source: NodeJS.ProcessEnv,
 ): Readonly<Record<string, string | undefined>> {
+  assertProductionInheritedEnvironment(source);
   return selectDeclaredEnvironment(source, schedulerProcessEnvironmentKeys);
 }
 
 export function parseSchedulerProcessEnvironment(
   source: Readonly<Record<string, string | undefined>>,
 ): SchedulerProcessConfiguration {
+  assertProductionInheritedEnvironment(source);
   const parsed = parseStrictEnvironment(source, schedulerEnvironmentSchema);
   const configuredDatabaseUrl = readRequiredEnvironmentValue(parsed, "DATABASE_URL");
   const productionDatabase =
@@ -178,9 +181,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       await probePostgres(pool, configuration.databaseRuntimeRole);
       const gateway = new CubeSandboxGateway({
         apiUrl: configuration.sandbox.apiUrl,
-        ...(configuration.sandbox.apiKey === undefined
-          ? {}
-          : { apiKey: configuration.sandbox.apiKey }),
+        apiKey: configuration.sandbox.apiKey ?? null,
         ...(configuration.sandbox.proxyNodeIp === undefined
           ? {}
           : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),

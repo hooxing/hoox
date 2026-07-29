@@ -193,6 +193,8 @@ function resolveCreateConfig(options: CreateOptions): Config {
     options.config instanceof Config
       ? {
           apiUrl: options.config.apiUrl,
+          // Config 已解析的显式 key（包括 null）必须原样进入 create，不能重新回退宿主环境。
+          apiKey: options.config.apiKey,
           templateId: options.config.templateId,
           proxyNodeIp: options.config.proxyNodeIp,
           proxyPort: options.config.proxyPort,

@@ -47,6 +47,15 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
 }
 
 describe("API 进程入口", () => {
+  it("production 在解析最早边界拒绝继承的 Node TLS/代理覆盖", () => {
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        NODE_TLS_REJECT_UNAUTHORIZED: "0",
+      }),
+    ).toThrow("PRODUCTION_INHERITED_ENVIRONMENT_FORBIDDEN");
+  });
+
   it("生产配置固定使用模块私有真实装配器，拒绝调用方注入 Fake", async () => {
     const assembler = Object.freeze({ assemble: vi.fn() });
     await expect(

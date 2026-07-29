@@ -22,6 +22,7 @@ import {
   RUNTIME_BLOB_OBJECT_PREFIX,
 } from "@cube-runtime/persistence";
 import {
+  assertProductionInheritedEnvironment,
   booleanEnvironmentField,
   EnvironmentConfigurationError,
   integerEnvironmentField,
@@ -154,12 +155,14 @@ export interface WorkerProcessConfiguration {
 export function selectWorkerProcessEnvironment(
   source: NodeJS.ProcessEnv,
 ): Readonly<Record<string, string | undefined>> {
+  assertProductionInheritedEnvironment(source);
   return selectDeclaredEnvironment(source, workerProcessEnvironmentKeys);
 }
 
 export function parseWorkerProcessEnvironment(
   source: Readonly<Record<string, string | undefined>>,
 ): WorkerProcessConfiguration {
+  assertProductionInheritedEnvironment(source);
   const parsed = parseStrictEnvironment(source, workerEnvironmentSchema);
   if (parsed.runtimeEnvironment === "production") {
     assertProductionHasNoDevelopmentIdentity(source);
@@ -334,6 +337,33 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
   },
 };
 
+interface WorkerStartupProbes {
+  readonly postgres: () => Promise<void>;
+  readonly objectStorage: () => Promise<void>;
+  readonly sandbox: () => Promise<void>;
+  readonly model: () => Promise<void>;
+}
+
+/** production 必须先独占完成数据库角色证明，才允许携带其他服务凭据发起远端探针。 */
+export async function startWorkerLoopAfterDependencyProbes(
+  runtimeMode: "development" | "production",
+  probes: WorkerStartupProbes,
+  startLoop: () => void,
+): Promise<void> {
+  if (runtimeMode === "production") {
+    await probes.postgres();
+    await Promise.all([probes.objectStorage(), probes.sandbox(), probes.model()]);
+  } else {
+    await Promise.all([
+      probes.postgres(),
+      probes.objectStorage(),
+      probes.sandbox(),
+      probes.model(),
+    ]);
+  }
+  startLoop();
+}
+
 /**
  * 生产 assembler 是模块私有封闭依赖图：startWorkerProcess 从不接受调用方提供的替身。
  * 它与 development 共用持久化语义，但绝不继承 development 身份、明文下载或宽松模型探针。
@@ -416,9 +446,7 @@ async function assembleWorkerRuntime(
     const upstreamSandboxes = new CubeSandboxSessionRegistry(
       {
         apiUrl: configuration.sandbox.apiUrl,
-        ...(configuration.sandbox.apiKey === undefined
-          ? {}
-          : { apiKey: configuration.sandbox.apiKey }),
+        apiKey: configuration.sandbox.apiKey ?? null,
         ...(configuration.sandbox.proxyNodeIp === undefined
           ? {}
           : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
@@ -510,13 +538,7 @@ async function assembleWorkerRuntime(
       sandbox: () => upstreamSandboxes.probe(),
       model: () => probeOpenAiCompatibleModel(configuration.model, runtimeMode),
     });
-    await Promise.all([
-      probes.postgres(),
-      probes.objectStorage(),
-      probes.sandbox(),
-      probes.model(),
-    ]);
-    loop.start();
+    await startWorkerLoopAfterDependencyProbes(runtimeMode, probes, () => loop.start());
     return Object.freeze({
       stopAccepting: async () => {
         loop.stopAccepting();
@@ -573,9 +595,7 @@ export async function probeDevelopmentWorkerDependencies(
     const sandbox = new CubeSandboxSessionRegistry(
       {
         apiUrl: configuration.sandbox.apiUrl,
-        ...(configuration.sandbox.apiKey === undefined
-          ? {}
-          : { apiKey: configuration.sandbox.apiKey }),
+        apiKey: configuration.sandbox.apiKey ?? null,
         ...(configuration.sandbox.proxyNodeIp === undefined
           ? {}
           : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),

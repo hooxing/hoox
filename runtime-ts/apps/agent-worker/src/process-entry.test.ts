@@ -4,6 +4,7 @@ import {
   createDevelopmentOpenAiCompatibleModel,
   parseWorkerProcessEnvironment,
   probeOpenAiCompatibleModel,
+  startWorkerLoopAfterDependencyProbes,
   startWorkerProcess,
 } from "./process-entry.js";
 
@@ -39,6 +40,39 @@ function productionEnvironment(): Record<string, string> {
 describe("Agent Worker 进程入口", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("production 在解析最早边界拒绝继承的 Node TLS/代理覆盖", () => {
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        NODE_TLS_REJECT_UNAUTHORIZED: "0",
+      }),
+    ).toThrow("PRODUCTION_INHERITED_ENVIRONMENT_FORBIDDEN");
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        CUBE_API_KEY: "ambient-attacker-key",
+      }),
+    ).toThrow("PRODUCTION_INHERITED_ENVIRONMENT_FORBIDDEN");
+  });
+
+  it("production 的 PG 角色证明失败时不触达 S3、Cube、模型或消费循环", async () => {
+    const databaseFailure = new Error("POSTGRES_RUNTIME_ROLE_UNSAFE");
+    const probes = {
+      postgres: vi.fn(async () => Promise.reject(databaseFailure)),
+      objectStorage: vi.fn(async () => undefined),
+      sandbox: vi.fn(async () => undefined),
+      model: vi.fn(async () => undefined),
+    };
+    const startLoop = vi.fn();
+    await expect(
+      startWorkerLoopAfterDependencyProbes("production", probes, startLoop),
+    ).rejects.toBe(databaseFailure);
+    expect(probes.objectStorage).not.toHaveBeenCalled();
+    expect(probes.sandbox).not.toHaveBeenCalled();
+    expect(probes.model).not.toHaveBeenCalled();
+    expect(startLoop).not.toHaveBeenCalled();
   });
 
   it("生产入口固定使用内建真实装配器，拒绝调用方注入 Fake", async () => {

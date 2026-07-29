@@ -113,4 +113,15 @@ describe("生产 API 默认装配", () => {
     expect(mocks.app.close).toHaveBeenCalledTimes(1);
     expect(mocks.persistence.close).toHaveBeenCalledTimes(1);
   });
+
+  it("PG 角色证明失败时不携 S3 凭据访问远端，也不监听端口", async () => {
+    const databaseFailure = new Error("POSTGRES_RUNTIME_ROLE_UNSAFE");
+    mocks.persistence.probe.mockRejectedValueOnce(databaseFailure);
+    await expect(startApiProcess({ environment: productionEnvironment() })).rejects.toThrow(
+      "ASSEMBLY_FAILED:api",
+    );
+    expect(mocks.probeS3BlobStore).not.toHaveBeenCalled();
+    expect(mocks.app.listen).not.toHaveBeenCalled();
+    expect(mocks.persistence.close).toHaveBeenCalledTimes(1);
+  });
 });

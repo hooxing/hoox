@@ -9,6 +9,7 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const lockfilePath = join(repositoryRoot, "pnpm-lock.yaml");
 const policyPath = join(repositoryRoot, "supply-chain", "license-policy.json");
 const sbomDirectory = join(repositoryRoot, "supply-chain", "sbom");
+const excludedVendorTreeDirectories = new Set(["dist", "node_modules", "coverage", ".tmp"]);
 
 export const productionSbomTargets = Object.freeze([
   Object.freeze({ id: "api", packageName: "@cube-runtime/api", fileName: "api.cdx.json" }),
@@ -28,6 +29,60 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function compareCodeUnits(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** 排序后的相对路径、UTF-8 路径长度与原始文件字节共同形成无歧义 vendor tree digest。 */
+export function canonicalVendorTreeSha256(directory) {
+  const files = [];
+  const visit = (current, prefix) => {
+    for (const entry of readdirSync(current, { withFileTypes: true }).sort((left, right) =>
+      compareCodeUnits(left.name, right.name),
+    )) {
+      const relativePath = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isSymbolicLink()) throw new Error("PRODUCTION_VENDOR_TREE_SYMLINK_FORBIDDEN");
+      if (entry.isDirectory()) {
+        if (!(prefix === "" && excludedVendorTreeDirectories.has(entry.name))) {
+          visit(join(current, entry.name), relativePath);
+        }
+      } else if (
+        entry.isFile() &&
+        !entry.name.endsWith(".tsbuildinfo") &&
+        entry.name !== ".DS_Store"
+      ) {
+        files.push(relativePath);
+      }
+    }
+  };
+  visit(directory, "");
+  const digest = createHash("sha256");
+  for (const relativePath of files) {
+    const content = readFileSync(join(directory, ...relativePath.split("/")));
+    digest.update(
+      Buffer.from(
+        `${Buffer.byteLength(relativePath, "utf8")}\n${relativePath}\n${content.length}\n`,
+      ),
+    );
+    digest.update(content);
+  }
+  return digest.digest("hex");
+}
+
+/** 精确补丁必须能从当前受控树反向应用；Git 缺失、异常或非零状态均失败关闭。 */
+export function verifyReverseApplicablePatch(patchPath) {
+  const result = spawnSync(
+    "git",
+    ["apply", "--reverse", "--check", "--whitespace=nowarn", patchPath],
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      windowsHide: true,
+    },
+  );
+  return result.error === undefined && result.status === 0;
+}
+
 function readJson(path) {
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -41,7 +96,7 @@ function packageUrl(name, version) {
 
 function sortedProperties(properties) {
   return Object.entries(properties)
-    .sort(([left], [right]) => left.localeCompare(right))
+    .sort(([left], [right]) => compareCodeUnits(left, right))
     .map(([name, value]) => Object.freeze({ name, value }));
 }
 
@@ -111,8 +166,13 @@ function workspaceClosure(rootPackageName, policy) {
             ? {}
             : {
                 "cube:license-file": evidence.licenseFile,
-                "cube:source-commit": evidence.sourceCommit,
+                "cube:upstream-source-commit": evidence.upstreamCommit,
                 "cube:source-file": evidence.sourceFile,
+                "cube:local-modified": "true",
+                "cube:local-patch-id": evidence.localPatchId,
+                "cube:local-patch-file": evidence.patchFile,
+                "cube:local-patch-sha256": evidence.patchSha256,
+                "cube:patched-tree-sha256": evidence.patchedTreeSha256,
               }),
         },
       }),
@@ -199,7 +259,7 @@ function uniqueSortedComponents(components) {
     byReference.set(item["bom-ref"], item);
   }
   return [...byReference.values()].sort((left, right) =>
-    left["bom-ref"].localeCompare(right["bom-ref"]),
+    compareCodeUnits(left["bom-ref"], right["bom-ref"]),
   );
 }
 
@@ -266,7 +326,7 @@ export function evaluateLicensePolicy(components, policy) {
 export function validateVendorEvidence(policy) {
   const issues = [];
   for (const [packageName, evidence] of Object.entries(policy.vendorEvidence ?? {})) {
-    for (const key of ["licenseFile", "sourceFile"]) {
+    for (const key of ["licenseFile", "sourceFile", "patchFile"]) {
       const relativePath = evidence[key];
       const path = typeof relativePath === "string" ? join(repositoryRoot, relativePath) : "";
       if (path === "" || !existsSync(path) || readFileSync(path, "utf8").trim().length === 0) {
@@ -276,9 +336,49 @@ export function validateVendorEvidence(policy) {
     const sourcePath = join(repositoryRoot, evidence.sourceFile ?? "");
     if (
       existsSync(sourcePath) &&
-      !readFileSync(sourcePath, "utf8").includes(evidence.sourceCommit ?? "missing")
+      (!readFileSync(sourcePath, "utf8").includes(evidence.upstreamCommit ?? "missing") ||
+        !readFileSync(sourcePath, "utf8").includes(evidence.localPatchId ?? "missing"))
     ) {
-      issues.push(`vendor 固定提交不匹配：${packageName}`);
+      issues.push(`vendor 来源或补丁登记不匹配：${packageName}`);
+    }
+    const vendorDirectory = dirname(sourcePath);
+    const patchPath = resolve(repositoryRoot, evidence.patchFile ?? "");
+    const patchRoot = resolve(vendorDirectory, "PATCHES");
+    const patchText = existsSync(patchPath) ? readFileSync(patchPath, "utf8") : "";
+    const patchedPaths = [...patchText.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gmu)].map(
+      ([, left, right]) => (left === right ? left : ""),
+    );
+    const expectedPatchedPaths = Array.isArray(evidence.patchedFiles)
+      ? [...evidence.patchedFiles].sort(compareCodeUnits)
+      : [];
+    if (
+      !patchPath.startsWith(`${patchRoot}${sep}`) ||
+      !/^CUBE-LOCAL-\d{4}-[a-z0-9-]+\.patch$/u.test(patchPath.slice(patchRoot.length + 1)) ||
+      !/^[a-f0-9]{64}$/u.test(evidence.patchSha256 ?? "") ||
+      !existsSync(patchPath) ||
+      sha256(readFileSync(patchPath)) !== evidence.patchSha256 ||
+      !patchText.startsWith(`Subject: [PATCH] ${evidence.localPatchId ?? "missing"}`) ||
+      !verifyReverseApplicablePatch(patchPath) ||
+      patchedPaths.includes("") ||
+      JSON.stringify([...patchedPaths].sort(compareCodeUnits)) !==
+        JSON.stringify(expectedPatchedPaths) ||
+      expectedPatchedPaths.some(
+        (path) =>
+          typeof path !== "string" ||
+          !path.startsWith("runtime-ts/vendor/cubesandbox-sdk/") ||
+          path.includes(".."),
+      )
+    ) {
+      issues.push(`vendor 补丁哈希不匹配：${packageName}`);
+    }
+    const manifestPath = join(vendorDirectory, "package.json");
+    if (
+      !existsSync(manifestPath) ||
+      !readJson(manifestPath).version?.includes("-cube.local.") ||
+      !/^[a-f0-9]{64}$/u.test(evidence.patchedTreeSha256 ?? "") ||
+      canonicalVendorTreeSha256(vendorDirectory) !== evidence.patchedTreeSha256
+    ) {
+      issues.push(`vendor patched tree 不匹配：${packageName}`);
     }
   }
   return issues.sort();

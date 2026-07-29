@@ -1,0 +1,155 @@
+Subject: [PATCH] CUBE-LOCAL-0001 explicit Config authority
+
+Patch base: repository commit 2251984 vendor snapshot, verified against upstream 8721dd151971ce3c2966482bbd32904ad98f378e.
+
+diff --git a/runtime-ts/vendor/cubesandbox-sdk/package-lock.json b/runtime-ts/vendor/cubesandbox-sdk/package-lock.json
+index f4ba5e0..cb330af 100644
+--- a/runtime-ts/vendor/cubesandbox-sdk/package-lock.json
++++ b/runtime-ts/vendor/cubesandbox-sdk/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+   "name": "@cubesandbox/sdk",
+-  "version": "0.3.0",
++  "version": "0.3.0-cube.local.1",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+       "name": "@cubesandbox/sdk",
+-      "version": "0.3.0",
++      "version": "0.3.0-cube.local.1",
+       "license": "Apache-2.0",
+       "dependencies": {
+         "undici": "^6.19.8"
+diff --git a/runtime-ts/vendor/cubesandbox-sdk/package.json b/runtime-ts/vendor/cubesandbox-sdk/package.json
+index f1cd934..ecb4a94 100644
+--- a/runtime-ts/vendor/cubesandbox-sdk/package.json
++++ b/runtime-ts/vendor/cubesandbox-sdk/package.json
+@@ -1,6 +1,6 @@
+ {
+   "name": "@cubesandbox/sdk",
+-  "version": "0.3.0",
++  "version": "0.3.0-cube.local.1",
+   "description": "Node.js / TypeScript SDK for CubeSandbox",
+   "license": "Apache-2.0",
+   "author": "Tencent Inc.",
+diff --git a/runtime-ts/vendor/cubesandbox-sdk/src/config.ts b/runtime-ts/vendor/cubesandbox-sdk/src/config.ts
+index b4cb861..76bbcd7 100644
+--- a/runtime-ts/vendor/cubesandbox-sdk/src/config.ts
++++ b/runtime-ts/vendor/cubesandbox-sdk/src/config.ts
+@@ -85,10 +85,15 @@ export class Config {
+       /\/+$/,
+       "",
+     );
+-    const rawKey = options.apiKey ?? env.CUBE_API_KEY ?? env.E2B_API_KEY ?? null;
++    const rawKey =
++      options.apiKey === undefined
++        ? (env.CUBE_API_KEY ?? env.E2B_API_KEY ?? null)
++        : options.apiKey;
+     this.apiKey = rawKey && rawKey.trim() ? rawKey.trim() : null;
+-    this.templateId = options.templateId ?? env.CUBE_TEMPLATE_ID ?? null;
+-    this.proxyNodeIp = options.proxyNodeIp ?? env.CUBE_PROXY_NODE_IP ?? null;
++    this.templateId =
++      options.templateId === undefined ? (env.CUBE_TEMPLATE_ID ?? null) : options.templateId;
++    this.proxyNodeIp =
++      options.proxyNodeIp === undefined ? (env.CUBE_PROXY_NODE_IP ?? null) : options.proxyNodeIp;
+     this.proxyPort = options.proxyPort ?? parsePort(env.CUBE_PROXY_PORT_HTTP, 80);
+     this.proxyScheme = normalizeProxyScheme(
+       options.proxyScheme ?? env.CUBE_PROXY_SCHEME,
+diff --git a/runtime-ts/vendor/cubesandbox-sdk/src/sandbox.ts b/runtime-ts/vendor/cubesandbox-sdk/src/sandbox.ts
+index ec9861d..1c06658 100644
+--- a/runtime-ts/vendor/cubesandbox-sdk/src/sandbox.ts
++++ b/runtime-ts/vendor/cubesandbox-sdk/src/sandbox.ts
+@@ -193,6 +193,8 @@ function resolveCreateConfig(options: CreateOptions): Config {
+     options.config instanceof Config
+       ? {
+           apiUrl: options.config.apiUrl,
++          // Config 已解析的显式 key（包括 null）必须原样进入 create，不能重新回退宿主环境。
++          apiKey: options.config.apiKey,
+           templateId: options.config.templateId,
+           proxyNodeIp: options.config.proxyNodeIp,
+           proxyPort: options.config.proxyPort,
+diff --git a/runtime-ts/vendor/cubesandbox-sdk/test/config.test.ts b/runtime-ts/vendor/cubesandbox-sdk/test/config.test.ts
+index 24f0a8d..66431cf 100644
+--- a/runtime-ts/vendor/cubesandbox-sdk/test/config.test.ts
++++ b/runtime-ts/vendor/cubesandbox-sdk/test/config.test.ts
+@@ -59,6 +59,12 @@ describe("Config", () => {
+     expect(new Config({ apiKey: "explicit" }).apiKey).toBe("explicit");
+   });
+ 
++  it("explicit null suppresses ambient API key while undefined preserves fallback", () => {
++    process.env.CUBE_API_KEY = "ambient-cube-key";
++    expect(new Config({ apiKey: null }).apiKey).toBeNull();
++    expect(new Config({ apiKey: undefined }).apiKey).toBe("ambient-cube-key");
++  });
++
+   it("treats a blank API key as unset", () => {
+     process.env.CUBE_API_KEY = "   ";
+     expect(new Config().apiKey).toBeNull();
+diff --git a/runtime-ts/vendor/cubesandbox-sdk/test/sandbox.test.ts b/runtime-ts/vendor/cubesandbox-sdk/test/sandbox.test.ts
+index 71e672a..4da3e60 100644
+--- a/runtime-ts/vendor/cubesandbox-sdk/test/sandbox.test.ts
++++ b/runtime-ts/vendor/cubesandbox-sdk/test/sandbox.test.ts
+@@ -113,6 +113,25 @@ afterEach(() => {
+ });
+ 
+ describe("Sandbox.create", () => {
++  it("preserves an explicit Config API key instead of ambient CUBE/E2B credentials", async () => {
++    process.env.CUBE_API_KEY = "ambient-cube-attacker-key";
++    process.env.E2B_API_KEY = "ambient-e2b-attacker-key";
++    const config = makeConfig();
++    config.apiKey = "declared-production-key";
++    const sb = await Sandbox.create({ config });
++    expect(requests[0]?.headers.authorization).toBe("Bearer declared-production-key");
++    sb.close();
++  });
++
++  it("preserves an explicit null Config API key instead of ambient credentials", async () => {
++    process.env.CUBE_API_KEY = "ambient-cube-attacker-key";
++    const config = makeConfig();
++    config.apiKey = null;
++    const sb = await Sandbox.create({ config });
++    expect(requests[0]?.headers.authorization).toBeUndefined();
++    sb.close();
++  });
++
+   it("returns a sandbox with fields parsed from the response", async () => {
+     setHandler(() => ({ status: 201, json: SANDBOX_DATA }));
+     const sb = await Sandbox.create({ config: makeConfig() });
+diff --git a/runtime-ts/vendor/cubesandbox-sdk/SOURCE.md b/runtime-ts/vendor/cubesandbox-sdk/SOURCE.md
+index ddb8dbd..9f53b22 100644
+--- a/runtime-ts/vendor/cubesandbox-sdk/SOURCE.md
++++ b/runtime-ts/vendor/cubesandbox-sdk/SOURCE.md
+@@ -1,19 +1,29 @@
+ # CubeSandbox Node SDK 来源
+ 
+-本目录是上游 Node SDK 的原样快照，Runtime 通过 `packages/sandbox` 隔离其接口，禁止在此目录打补丁。
++本目录以上游 Node SDK 固定提交为基线，Runtime 通过 `packages/sandbox` 隔离其接口。下述已登记安全补丁是唯一允许的
++本地差异；不得加入未记录改动。
+ 
+ - 上游仓库：`https://github.com/TencentCloud/CubeSandbox`
+ - 上游版本：`v0.6.0`
+ - 固定提交：`8721dd151971ce3c2966482bbd32904ad98f378e`
+ - 子目录：`sdk/node`
+-- SDK 包版本：`0.3.0`
++- SDK 上游包版本：`0.3.0`
++- Runtime 本地派生版本：`0.3.0-cube.local.1`
+ - 上游许可证：Apache-2.0
+ 
++## 本地安全补丁
++
++- `CUBE-LOCAL-0001`（`.patch` 为精确 unified diff，`.md` 为审计说明）：`src/config.ts`、`src/sandbox.ts` 的
++  `Sandbox.create({ config: Config })` 必须复制已经解析的 `apiKey`（包括显式
++  `null`），不能重新回退 `CUBE_API_KEY`/`E2B_API_KEY`。否则生产显式 Config 与宿主环境冲突时会把 create 请求发往
++  注入凭据对应的账户。`test/sandbox.test.ts` 固定验证 Authorization 使用声明 key，显式 null 也不读取 ambient key。
++- 上游基线仍是下列固定提交；该补丁尚未被表述为上游已合入，更新 vendor 前必须重新核对并决定保留或删除。
++
+ ## 同步规则
+ 
+ 1. 克隆上游并检出上述固定提交，而不是浮动的 `master`。
+ 2. 机械复制 `sdk/node` 全部内容和仓库根 `LICENSE` 到本目录。
+-3. 比较源目录与本目录；仅允许 `SOURCE.md` 是本地新增文件。
++3. 比较源目录与本目录；仅允许 `SOURCE.md` 及“本地安全补丁”列出的精确差异。
+ 4. 运行 `pnpm vendor:build`、类型检查、契约测试和显式真实冒烟。
+ 5. 更新固定提交时必须新增 ADR，说明行为差异及回退方式。
+ 

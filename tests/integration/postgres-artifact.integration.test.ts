@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   artifactId,
+  isoTimestamp,
   resourceVersionId,
   runId,
   sha256Digest,
@@ -62,9 +63,9 @@ const other = {
   tenant: tenantId(`artifact_other_tenant_${unique}`),
   user: userId(`artifact_other_user_${unique}`),
 };
-const issuedAt = "2099-07-28T00:00:00.000Z";
-const expiresAt = "2099-07-28T01:00:00.000Z";
-const consumedAt = "2099-07-28T00:00:01.000Z";
+const issuedAt = isoTimestamp("2099-07-28T00:00:00.000Z");
+const expiresAt = isoTimestamp("2099-07-28T01:00:00.000Z");
+const consumedAt = isoTimestamp("2099-07-28T00:00:01.000Z");
 let admin!: Pool;
 let migrator!: Pool;
 let runtime!: Pool;

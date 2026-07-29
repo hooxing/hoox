@@ -1,5 +1,6 @@
 import {
   ArtifactDeliveryError,
+  type AcceptWorkspaceArtifactIntentCommand,
   type ArtifactExecutionAuthorization,
   type ArtifactExecutionAuthorizationVerifierPort,
   type ArtifactPublicationSnapshot,
@@ -64,6 +65,12 @@ export interface ArtifactToolServicePort {
     readonly declarations: readonly DeliverableDeclaration[];
   }): Promise<void>;
   publishArtifact(command: PublishArtifactCommand): Promise<ArtifactPublicationSnapshot>;
+  acceptWorkspaceArtifactIntent(command: AcceptWorkspaceArtifactIntentCommand): Promise<{
+    readonly artifactId: ArtifactId;
+    readonly resourceVersionId: ResourceVersionId;
+    readonly sourceRelativePath: string;
+    readonly status: "accepted" | "settled";
+  }>;
 }
 
 export type ArtifactToolSuccess =
@@ -81,6 +88,12 @@ export type ArtifactToolSuccess =
       readonly name: string;
       readonly purpose: "deliverable" | "diagnostic" | "trace";
       readonly deliverableKey?: string;
+    }
+  | {
+      readonly ok: true;
+      readonly code: "ARTIFACT_ACCEPTED";
+      readonly artifactId: ArtifactId;
+      readonly sourceRelativePath: string;
     };
 
 export type ArtifactToolErrorCode =
@@ -191,7 +204,8 @@ export class ArtifactToolRouter {
       typeof options.authorizer.authorizeToolEffect !== "function" ||
       typeof options.resources.prepareImmutableVersion !== "function" ||
       typeof options.artifacts.declareDeliverables !== "function" ||
-      typeof options.artifacts.publishArtifact !== "function"
+      typeof options.artifacts.publishArtifact !== "function" ||
+      typeof options.artifacts.acceptWorkspaceArtifactIntent !== "function"
     ) {
       throw new ArtifactToolError(
         "ARTIFACT_TOOL_UNAVAILABLE",
@@ -251,6 +265,33 @@ export class ArtifactToolRouter {
       args,
       input.signal,
     );
+    if (source.kind === "workspace_file") {
+      if (input.signal?.aborted) throw notAuthorized();
+      try {
+        const accepted = await this.#artifacts.acceptWorkspaceArtifactIntent({
+          authorization,
+          toolArgsDigest: argsDigest,
+          idempotencyKey: args.idempotencyKey,
+          requestedArtifactId: artifactId(args.artifactId),
+          ...(args.replacesArtifactId === undefined
+            ? {}
+            : { replacesArtifactId: artifactId(args.replacesArtifactId) }),
+          name: args.name,
+          purpose: args.purpose,
+          ...(args.deliverableKey === undefined ? {} : { deliverableKey: args.deliverableKey }),
+          sourceRelativePath: source.relativePath,
+          resourceName: source.resourceName,
+        });
+        return Object.freeze({
+          ok: true,
+          code: "ARTIFACT_ACCEPTED",
+          artifactId: accepted.artifactId,
+          sourceRelativePath: accepted.sourceRelativePath,
+        });
+      } catch (error) {
+        throw mapArtifactError(error);
+      }
+    }
     let prepared: Awaited<ReturnType<ArtifactPublicationResourcePort["prepareImmutableVersion"]>>;
     try {
       // DB permit 已消费且同步重验后，下一条异步语句才进入实际 ResourceVersion 准备端口。

@@ -1,4 +1,12 @@
-import type { ArtifactId, ResourceVersionId, RunId, Sha256Digest } from "@cube-runtime/domain";
+import { createHash } from "node:crypto";
+import {
+  artifactId,
+  type ArtifactId,
+  resourceVersionId,
+  type ResourceVersionId,
+  type RunId,
+  type Sha256Digest,
+} from "@cube-runtime/domain";
 import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
 import type { ArtifactPublicationPort, ExecutionScope } from "@cube-runtime/run-contracts";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
@@ -14,6 +22,7 @@ import type {
   AuthorizedArtifactDownload,
   DeliverableDeclaration,
   UserRequestScope,
+  WorkspaceArtifactIntentSnapshot,
 } from "./contracts.js";
 import { ArtifactDeliveryError, artifactError } from "./errors.js";
 
@@ -43,6 +52,19 @@ export interface PublishArtifactCommand {
   readonly name: string;
   readonly purpose: ArtifactPurpose;
   readonly deliverableKey?: string;
+}
+
+export interface AcceptWorkspaceArtifactIntentCommand {
+  readonly authorization: ArtifactExecutionAuthorization;
+  readonly toolArgsDigest: Sha256Digest;
+  readonly idempotencyKey: string;
+  readonly requestedArtifactId: ArtifactId;
+  readonly replacesArtifactId?: ArtifactId;
+  readonly name: string;
+  readonly purpose: ArtifactPurpose;
+  readonly deliverableKey?: string;
+  readonly sourceRelativePath: string;
+  readonly resourceName: string;
 }
 
 export interface ArtifactDownloadProjection {
@@ -233,6 +255,98 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
     }
   }
 
+  async acceptWorkspaceArtifactIntent(
+    command: AcceptWorkspaceArtifactIntentCommand,
+  ): Promise<WorkspaceArtifactIntentSnapshot> {
+    validateIdempotencyKey(command.idempotencyKey);
+    const authorizationExpectation = {
+      toolName: "publish_artifact",
+      argsDigest: command.toolArgsDigest,
+    } as const;
+    this.#assertAuthorization(command.authorization, authorizationExpectation);
+    const name = normalizeName(command.name);
+    const resourceName = normalizeName(command.resourceName);
+    const deliverableKey = normalizePublicationPurpose(command.purpose, command.deliverableKey);
+    const ids = deterministicWorkspaceIntentIds(
+      command.authorization.scope.tenantId,
+      command.authorization.attemptId,
+      command.idempotencyKey,
+    );
+    const commandDigest = digestCanonical({
+      schemaVersion: 1,
+      kind: "workspace_artifact_intent",
+      scope: stableScope(command.authorization.scope),
+      attemptId: command.authorization.attemptId,
+      idempotencyKey: command.idempotencyKey,
+      toolArgsDigest: command.toolArgsDigest,
+      requestedArtifactId: command.requestedArtifactId,
+      replacesArtifactId: command.replacesArtifactId,
+      name,
+      purpose: command.purpose,
+      deliverableKey,
+      sourceRelativePath: command.sourceRelativePath,
+      resourceName,
+      ids,
+    });
+    const accept = this.repository.acceptWorkspaceIntent;
+    const read = this.repository.readWorkspaceIntentCommand;
+    if (accept === undefined || read === undefined) throw dependencyUnavailable();
+    try {
+      const result = await accept.call(this.repository, {
+        authorization: command.authorization,
+        idempotencyKey: command.idempotencyKey,
+        commandDigest,
+        toolArgsDigest: command.toolArgsDigest,
+        requestedArtifactId: command.requestedArtifactId,
+        artifactId: ids.artifactId,
+        resourceId: ids.resourceId,
+        resourceVersionId: ids.resourceVersionId,
+        blobReferenceId: ids.blobReferenceId,
+        blobOperationId: ids.blobOperationId,
+        ...(command.replacesArtifactId === undefined
+          ? {}
+          : { replacesArtifactId: command.replacesArtifactId }),
+        name,
+        purpose: command.purpose,
+        ...(deliverableKey === undefined ? {} : { deliverableKey }),
+        sourceRelativePath: command.sourceRelativePath,
+        resourceName,
+      });
+      if (
+        result.outcome === "accepted" ||
+        result.outcome === "already_accepted" ||
+        result.outcome === "already_settled"
+      ) {
+        if (result.commandDigest !== commandDigest) throw idempotencyConflict();
+        return result.intent;
+      }
+      if (result.outcome === "response_unknown") {
+        this.#assertAuthorization(command.authorization, authorizationExpectation);
+        const replay = await read.call(this.repository, {
+          authorization: command.authorization,
+          idempotencyKey: command.idempotencyKey,
+        });
+        if (replay.outcome === "found" && replay.commandDigest === commandDigest) {
+          return replay.intent;
+        }
+        if (replay.outcome === "found") throw idempotencyConflict();
+        throw dependencyUnavailable();
+      }
+      if (result.outcome === "conflict" || result.outcome === "invalid_replacement") {
+        throw idempotencyConflict();
+      }
+      if (result.outcome === "not_running") {
+        throw artifactError("ARTIFACT_INVALID_ARGUMENT", "只有运行中的 Run 可以接受发布意图");
+      }
+      if (result.outcome === "not_found" || result.outcome === "scope_mismatch") {
+        throw artifactNotFound();
+      }
+      throw dependencyUnavailable();
+    } catch (error) {
+      throw sanitize(error);
+    }
+  }
+
   async assertReadyForCompletion(
     input: Parameters<ArtifactPublicationPort["assertReadyForCompletion"]>[0],
   ): Promise<void> {
@@ -373,6 +487,29 @@ export class ArtifactDeliveryService implements ArtifactPublicationPort {
   }
 }
 
+function deterministicWorkspaceIntentIds(
+  tenant: string,
+  attempt: string,
+  idempotencyKey: string,
+): {
+  readonly artifactId: ArtifactId;
+  readonly resourceId: string;
+  readonly resourceVersionId: ResourceVersionId;
+  readonly blobReferenceId: string;
+  readonly blobOperationId: string;
+} {
+  const digest = createHash("sha256")
+    .update(`workspace-artifact-intent-v1\0${tenant}\0${attempt}\0${idempotencyKey}`, "utf8")
+    .digest("hex");
+  return Object.freeze({
+    artifactId: artifactId(`artifact_${digest}`),
+    resourceId: `resource_${digest}`,
+    resourceVersionId: resourceVersionId(`resource_version_${digest}`),
+    blobReferenceId: `artifact_reference_${digest}`,
+    blobOperationId: `artifact.bind.${digest}`,
+  });
+}
+
 function validatePublicationIdentity(
   publication: ArtifactPublicationSnapshot,
   command: PublishArtifactCommand,
@@ -397,12 +534,14 @@ function validatePublicationIdentity(
 function validateBinding(
   binding: ArtifactBlobBinding,
   publication: ArtifactPublicationSnapshot,
+  allowWorkspacePurpose = false,
 ): void {
   if (
     binding.resourceVersionId !== publication.resourceVersionId ||
     binding.blob.tenantId !== publication.tenantId ||
     binding.blob.kind !== "stable" ||
-    binding.blob.purpose !== "resource"
+    (binding.blob.purpose !== "resource" &&
+      !(allowWorkspacePurpose && binding.blob.purpose === "workspace"))
   ) {
     throw dependencyUnavailable();
   }
@@ -428,7 +567,7 @@ function validateDownloadGrant(
   ) {
     throw artifactNotFound();
   }
-  validateBinding(download.binding, publication);
+  validateBinding(download.binding, publication, true);
 }
 
 function sameBlobIdentity(left: StableBlobRef, right: StableBlobRef): boolean {

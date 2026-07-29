@@ -23,12 +23,15 @@ import type {
   ArtifactDeliveryRepositoryPort,
   ArtifactPublicationSnapshot,
   ArtifactUserAuthorization,
+  AcceptWorkspaceArtifactIntentResult,
   AuthorizedArtifactDownload,
   BeginArtifactPublicationResult,
   CompletionInspectionResult,
   DeclareDeliverablesResult,
   FinishArtifactPublicationResult,
   ReadArtifactPublicationResult,
+  ReadWorkspaceArtifactIntentResult,
+  WorkspaceArtifactIntentSnapshot,
 } from "./contracts.js";
 
 interface PublicationRow extends QueryResultRow {
@@ -42,6 +45,7 @@ interface PublicationRow extends QueryResultRow {
   purpose: "deliverable" | "diagnostic" | "trace";
   deliverable_key: string | null;
   status: "publishing" | "published" | "failed";
+  blob_purpose: "resource" | "workspace";
   blob_incarnation_id: string;
   physical_object_key: string;
   digest: string;
@@ -53,12 +57,20 @@ interface CommandRow extends PublicationRow {
   command_digest: string;
 }
 
+interface WorkspaceIntentRow extends QueryResultRow {
+  command_digest: string;
+  artifact_id: string;
+  resource_version_id: string;
+  source_relative_path: string;
+  settled: boolean;
+}
+
 const publicationColumns = `
   publication.tenant_id, publication.id, publication.thread_id, publication.run_id,
   publication.resource_version_id, publication.replaces_artifact_id, publication.name,
   publication.purpose, publication.deliverable_key,
   coalesce(settlement.target, publication.status) AS status,
-  publication.blob_incarnation_id, publication.physical_object_key,
+  publication.blob_purpose, publication.blob_incarnation_id, publication.physical_object_key,
   publication.digest, publication.media_type, publication.size`;
 
 /**
@@ -71,6 +83,161 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
     private readonly verifier: ArtifactExecutionAuthorizationVerifierPort,
   ) {
     if (typeof verifier?.assert !== "function") throw new TypeError("缺少 Artifact 授权验证器");
+  }
+
+  async acceptWorkspaceIntent(
+    input: NonNullable<ArtifactDeliveryRepositoryPort["acceptWorkspaceIntent"]> extends (
+      value: infer T,
+    ) => unknown
+      ? T
+      : never,
+  ): Promise<AcceptWorkspaceArtifactIntentResult> {
+    if (!this.verify(input.authorization, "publish_artifact")) {
+      return { outcome: "scope_mismatch" };
+    }
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        authContext(input.authorization),
+        async (client) => {
+          const boundary = await lockExecutionBoundary(client, input.authorization);
+          if (boundary === "not_running") return { outcome: "not_running" } as const;
+          if (boundary !== "valid") return { outcome: "scope_mismatch" } as const;
+          const previous = await readWorkspaceIntent(
+            client,
+            input.authorization,
+            input.idempotencyKey,
+          );
+          if (previous !== undefined) {
+            if (previous.command_digest !== input.commandDigest) {
+              return { outcome: "conflict" } as const;
+            }
+            return {
+              outcome: previous.settled ? "already_settled" : "already_accepted",
+              commandDigest: sha256Digest(previous.command_digest),
+              intent: mapWorkspaceIntent(previous),
+            } as const;
+          }
+          if (input.replacesArtifactId !== undefined) {
+            const replacement = await client.query<{ valid: boolean }>(
+              `SELECT EXISTS(
+                 SELECT 1 FROM artifact_publications publication
+                 JOIN artifact_publication_settlements settlement
+                   ON settlement.tenant_id=publication.tenant_id
+                  AND settlement.artifact_id=publication.id AND settlement.target='failed'
+                WHERE publication.tenant_id=$1 AND publication.id=$2
+                  AND publication.run_id=$3 AND publication.purpose=$4
+                  AND publication.deliverable_key IS NOT DISTINCT FROM $5
+               ) AS valid`,
+              [
+                input.authorization.scope.tenantId,
+                input.replacesArtifactId,
+                input.authorization.scope.runId,
+                input.purpose,
+                input.deliverableKey ?? null,
+              ],
+            );
+            if (replacement.rows[0]?.valid !== true) {
+              return { outcome: "invalid_replacement" } as const;
+            }
+          }
+          await client.query(
+            `INSERT INTO workspace_artifact_publication_intents(
+               tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+               call_id,permit_id,idempotency_key,command_digest,tool_args_digest,
+               requested_artifact_id,artifact_id,resource_id,resource_version_id,
+               blob_reference_id,blob_operation_id,replaces_artifact_id,name,purpose,
+               deliverable_key,source_relative_path,resource_name
+             ) VALUES(
+               $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
+             )`,
+            [
+              input.authorization.scope.tenantId,
+              input.authorization.attemptId,
+              input.authorization.scope.runId,
+              input.authorization.scope.threadId,
+              input.authorization.scope.workspaceId,
+              input.authorization.scope.rootRunId,
+              input.authorization.callId,
+              input.authorization.permitId,
+              input.idempotencyKey,
+              input.commandDigest,
+              input.toolArgsDigest,
+              input.requestedArtifactId,
+              input.artifactId,
+              input.resourceId,
+              input.resourceVersionId,
+              input.blobReferenceId,
+              input.blobOperationId,
+              input.replacesArtifactId ?? null,
+              input.name,
+              input.purpose,
+              input.deliverableKey ?? null,
+              input.sourceRelativePath,
+              input.resourceName,
+            ],
+          );
+          const inserted = await readWorkspaceIntent(
+            client,
+            input.authorization,
+            input.idempotencyKey,
+          );
+          if (inserted === undefined) return { outcome: "unavailable" } as const;
+          return {
+            outcome: "accepted",
+            commandDigest: input.commandDigest,
+            intent: mapWorkspaceIntent(inserted),
+          } as const;
+        },
+      );
+    } catch (error) {
+      if (error instanceof TransactionCommitUnknownError) return { outcome: "response_unknown" };
+      if (isUniqueViolation(error)) {
+        const replay = await this.readWorkspaceIntentCommand(input);
+        return replay.outcome === "found" && replay.commandDigest === input.commandDigest
+          ? {
+              outcome: replay.intent.status === "settled" ? "already_settled" : "already_accepted",
+              commandDigest: replay.commandDigest,
+              intent: replay.intent,
+            }
+          : { outcome: "conflict" };
+      }
+      return { outcome: "unavailable" };
+    }
+  }
+
+  async readWorkspaceIntentCommand(
+    input: NonNullable<ArtifactDeliveryRepositoryPort["readWorkspaceIntentCommand"]> extends (
+      value: infer T,
+    ) => unknown
+      ? T
+      : never,
+  ): Promise<ReadWorkspaceArtifactIntentResult> {
+    if (!this.verify(input.authorization, "publish_artifact")) {
+      return { outcome: "scope_mismatch" };
+    }
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        authContext(input.authorization),
+        async (client) => {
+          if ((await readExecutionBoundary(client, input.authorization)) !== "valid") {
+            return { outcome: "scope_mismatch" } as const;
+          }
+          const row = await readWorkspaceIntent(client, input.authorization, input.idempotencyKey);
+          return row === undefined
+            ? ({ outcome: "not_found" } as const)
+            : ({
+                outcome: "found",
+                commandDigest: sha256Digest(row.command_digest),
+                intent: mapWorkspaceIntent(row),
+              } as const);
+        },
+        { readOnly: true },
+      );
+    } catch {
+      return { outcome: "unavailable" };
+    }
   }
 
   async declareDeliverables(
@@ -229,18 +396,23 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
             QueryResultRow & {
               resource_id: string;
               blob_reference_id: string;
+              blob_purpose: "resource" | "workspace";
               blob_lifecycle_id: string;
               blob_incarnation_id: string;
               physical_object_key: string;
               digest: string;
               media_type: string;
               size: string;
+              source_workspace_id: string | null;
+              source_workspace_revision_id: string | null;
+              source_relative_path: string | null;
             }
           >(
-            `SELECT version.resource_id, version.blob_reference_id,
+            `SELECT version.resource_id, version.blob_reference_id,version.blob_purpose,
                   version.blob_lifecycle_id::text, version.blob_incarnation_id::text,
                   version.physical_object_key, version.digest, version.media_type,
-                  version.size::text
+                  version.size::text,version.source_workspace_id,
+                  version.source_workspace_revision_id,version.source_relative_path
              FROM resource_versions version
              JOIN resources resource ON resource.tenant_id=version.tenant_id
                                     AND resource.id=version.resource_id
@@ -287,10 +459,14 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
              resource_id,resource_version_id,
              replaces_artifact_id,name,purpose,deliverable_key,status,blob_reference_id,
              blob_purpose,blob_lifecycle_id,blob_incarnation_id,physical_object_key,
-             digest,media_type,size
-           ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'publishing',$14,'resource',$15,$16,$17,$18,$19,$20)
+             digest,media_type,size,source_workspace_id,workspace_revision_id,
+             source_relative_path
+           ) VALUES(
+             $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'publishing',$14,$15,
+             $16,$17,$18,$19,$20,$21,$22,$23,$24
+           )
            RETURNING tenant_id,id,thread_id,run_id,resource_version_id,replaces_artifact_id,
-                     name,purpose,deliverable_key,status,blob_incarnation_id,
+                     name,purpose,deliverable_key,status,blob_purpose,blob_incarnation_id,
                      physical_object_key,digest,media_type,size`,
             [
               input.authorization.scope.tenantId,
@@ -307,12 +483,16 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
               input.purpose,
               input.deliverableKey ?? null,
               binding.blob_reference_id,
+              binding.blob_purpose,
               binding.blob_lifecycle_id,
               binding.blob_incarnation_id,
               binding.physical_object_key,
               binding.digest,
               binding.media_type,
               binding.size,
+              binding.source_workspace_id,
+              binding.source_workspace_revision_id,
+              binding.source_relative_path,
             ],
           );
           await client.query(
@@ -474,7 +654,22 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
                                        AND workspace.thread_id=run.thread_id
              WHERE run.tenant_id=$1 AND run.id=$2 AND run.thread_id=$3
                AND workspace.id=$4 AND execution.root_run_id=$5
-               AND execution.base_revision_id IS NOT DISTINCT FROM $6) AS valid`,
+               AND execution.base_revision_id IS NOT DISTINCT FROM $6
+               AND ($7::text IS NULL OR EXISTS(
+                 SELECT 1 FROM execution_attempts attempt
+                 JOIN workspace_revision_candidates candidate
+                   ON candidate.tenant_id=attempt.tenant_id
+                  AND candidate.attempt_id=attempt.attempt_id
+                  AND candidate.workspace_id=attempt.workspace_id
+                  AND candidate.run_id=attempt.run_id
+                  AND candidate.thread_id=attempt.thread_id
+                  AND candidate.root_run_id=attempt.root_run_id
+                  AND candidate.status='prepared'
+                  AND candidate.revision_id=$7
+                WHERE attempt.tenant_id=run.tenant_id AND attempt.run_id=run.id
+                  AND attempt.workspace_id=workspace.id
+                  AND attempt.status IN ('running','finalizing')
+               ))) AS valid`,
             [
               input.scope.tenantId,
               input.scope.runId,
@@ -482,6 +677,7 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
               input.scope.workspaceId,
               input.scope.rootRunId,
               input.scope.baseRevisionId ?? null,
+              input.workspaceRevisionId ?? null,
             ],
           );
           if (owned.rows[0]?.valid !== true) return { outcome: "scope_mismatch" } as const;
@@ -491,25 +687,74 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
           }>(
             `SELECT declaration.deliverable_key,
                     CASE
-                      WHEN count(publication.id)=0 THEN 'missing'
-                      WHEN bool_or(settlement.target IS NULL) THEN 'publishing'
-                      ELSE 'failed'
+                      WHEN EXISTS(
+                        SELECT 1 FROM artifact_publications failed_publication
+                        JOIN artifact_publication_settlements failed_settlement
+                          ON failed_settlement.tenant_id=failed_publication.tenant_id
+                         AND failed_settlement.artifact_id=failed_publication.id
+                         AND failed_settlement.target='failed'
+                       WHERE failed_publication.tenant_id=declaration.tenant_id
+                         AND failed_publication.run_id=declaration.run_id
+                         AND failed_publication.deliverable_key=declaration.deliverable_key
+                      ) THEN 'failed'
+                      WHEN EXISTS(
+                        SELECT 1 FROM workspace_artifact_publication_intents pending
+                         WHERE pending.tenant_id=declaration.tenant_id
+                           AND pending.run_id=declaration.run_id
+                           AND pending.deliverable_key=declaration.deliverable_key
+                      ) OR EXISTS(
+                        SELECT 1 FROM artifact_publications publishing
+                         WHERE publishing.tenant_id=declaration.tenant_id
+                           AND publishing.run_id=declaration.run_id
+                           AND publishing.deliverable_key=declaration.deliverable_key
+                           AND NOT EXISTS(
+                             SELECT 1 FROM artifact_publication_settlements done
+                              WHERE done.tenant_id=publishing.tenant_id
+                                AND done.artifact_id=publishing.id
+                           )
+                      ) THEN 'publishing'
+                      ELSE 'missing'
                     END AS status
                FROM artifact_deliverable_declarations declaration
-               LEFT JOIN artifact_publications publication
-                 ON publication.tenant_id=declaration.tenant_id
-                AND publication.run_id=declaration.run_id
-                AND publication.deliverable_key=declaration.deliverable_key
-                AND publication.purpose='deliverable'
-               LEFT JOIN artifact_publication_settlements settlement
-                 ON settlement.tenant_id=publication.tenant_id
-                AND settlement.artifact_id=publication.id
               WHERE declaration.tenant_id=$1 AND declaration.run_id=$2
                 AND declaration.requirement='required'
-              GROUP BY declaration.deliverable_key
-             HAVING NOT coalesce(bool_or(settlement.target='published'), false)
+                AND NOT (
+                  EXISTS(
+                    SELECT 1 FROM artifact_publications publication
+                    JOIN artifact_publication_settlements settlement
+                      ON settlement.tenant_id=publication.tenant_id
+                     AND settlement.artifact_id=publication.id
+                     AND settlement.target='published'
+                   WHERE publication.tenant_id=declaration.tenant_id
+                     AND publication.run_id=declaration.run_id
+                     AND publication.deliverable_key=declaration.deliverable_key
+                     AND publication.workspace_revision_id IS NOT DISTINCT FROM $3
+                  ) OR ($3::text IS NOT NULL AND EXISTS(
+                    SELECT 1 FROM workspace_artifact_publication_intents intent
+                    JOIN workspace_revision_candidates candidate
+                      ON candidate.tenant_id=intent.tenant_id
+                     AND candidate.attempt_id=intent.attempt_id
+                     AND candidate.workspace_id=intent.workspace_id
+                     AND candidate.run_id=intent.run_id
+                     AND candidate.thread_id=intent.thread_id
+                     AND candidate.root_run_id=intent.root_run_id
+                     AND candidate.revision_id=$3
+                     AND candidate.status='prepared'
+                    JOIN workspace_revision_candidate_files file
+                      ON file.tenant_id=candidate.tenant_id
+                     AND file.workspace_id=candidate.workspace_id
+                     AND file.attempt_id=candidate.attempt_id
+                     AND file.operation_key=candidate.operation_key
+                     AND file.operation_digest=candidate.operation_digest
+                     AND file.manifest_digest=candidate.manifest_digest
+                     AND file.relative_path=intent.source_relative_path
+                   WHERE intent.tenant_id=declaration.tenant_id
+                     AND intent.run_id=declaration.run_id
+                     AND intent.deliverable_key=declaration.deliverable_key
+                  ))
+                )
               ORDER BY declaration.deliverable_key`,
-            [input.scope.tenantId, input.scope.runId],
+            [input.scope.tenantId, input.scope.runId, input.workspaceRevisionId ?? null],
           );
           return blockers.rowCount === 0
             ? ({ outcome: "ready" } as const)
@@ -778,6 +1023,38 @@ async function readPublicationCommand(
   return result.rows[0];
 }
 
+async function readWorkspaceIntent(
+  client: PoolClient,
+  authorization: ArtifactExecutionAuthorization,
+  idempotencyKey: string,
+): Promise<WorkspaceIntentRow | undefined> {
+  const result = await client.query<WorkspaceIntentRow>(
+    `SELECT intent.command_digest,intent.artifact_id,intent.resource_version_id,
+            intent.source_relative_path,
+            EXISTS(
+              SELECT 1 FROM artifact_publications publication
+              JOIN artifact_publication_settlements settlement
+                ON settlement.tenant_id=publication.tenant_id
+               AND settlement.artifact_id=publication.id AND settlement.target='published'
+              WHERE publication.tenant_id=intent.tenant_id
+                AND publication.id=intent.artifact_id
+            ) AS settled
+       FROM workspace_artifact_publication_intents intent
+      WHERE intent.tenant_id=$1 AND intent.attempt_id=$2 AND intent.idempotency_key=$3`,
+    [authorization.scope.tenantId, authorization.attemptId, idempotencyKey],
+  );
+  return result.rows[0];
+}
+
+function mapWorkspaceIntent(row: WorkspaceIntentRow): WorkspaceArtifactIntentSnapshot {
+  return Object.freeze({
+    artifactId: artifactId(row.artifact_id),
+    resourceVersionId: resourceVersionId(row.resource_version_id),
+    sourceRelativePath: row.source_relative_path,
+    status: row.settled ? "settled" : "accepted",
+  });
+}
+
 function mapPublication(row: PublicationRow): ArtifactPublicationSnapshot {
   return Object.freeze({
     artifactId: artifactId(row.id),
@@ -801,7 +1078,7 @@ function mapBinding(row: PublicationRow): ArtifactBlobBinding {
   const blob: StableBlobRef = Object.freeze({
     kind: "stable",
     tenantId: row.tenant_id,
-    purpose: "resource",
+    purpose: row.blob_purpose,
     incarnationId: row.blob_incarnation_id,
     physicalObjectKey: row.physical_object_key,
     sha256: row.digest,

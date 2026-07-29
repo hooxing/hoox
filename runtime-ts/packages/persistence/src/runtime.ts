@@ -172,6 +172,7 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
             created_at: Date | string;
             updated_at: Date | string;
             authorization_revision: string;
+            blob_purpose: "resource" | "workspace";
             blob_incarnation_id: string;
             physical_object_key: string;
             digest: string;
@@ -183,7 +184,8 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
            )
            SELECT publication.id,publication.run_id,publication.thread_id,publication.resource_version_id,publication.name,publication.media_type,
                   publication.size,publication.created_at,publication.updated_at,publication.blob_incarnation_id,
-                  publication.physical_object_key,publication.digest,publication.authorization_revision
+                  publication.blob_purpose,publication.physical_object_key,publication.digest,
+                  publication.authorization_revision
              FROM authorized_run run
              LEFT JOIN LATERAL (
                SELECT candidate.*,
@@ -231,7 +233,7 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
               blob: {
                 kind: "stable" as const,
                 tenantId: input.scope.tenantId,
-                purpose: "resource" as const,
+                purpose: row.blob_purpose,
                 sha256: row.digest,
                 size: Number(row.size),
                 mediaType: row.media_type,

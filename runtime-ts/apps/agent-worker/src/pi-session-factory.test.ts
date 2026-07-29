@@ -1,4 +1,5 @@
 import {
+  type AcceptWorkspaceArtifactIntentCommand,
   ArtifactCompletionGateAdapter,
   createArtifactExecutionAuthorizationAuthority,
   type PublishArtifactCommand,
@@ -360,6 +361,10 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
           artifactCalls += 1;
           throw new Error("授权拒绝时不得调用 Artifact 服务");
         },
+        acceptWorkspaceArtifactIntent: async () => {
+          artifactCalls += 1;
+          throw new Error("授权拒绝时不得调用 Artifact 服务");
+        },
       };
       const resources: ArtifactPublicationResourcePort = {
         prepareImmutableVersion: async () => {
@@ -483,6 +488,16 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
               ? {}
               : { deliverableKey: command.deliverableKey }),
             status: "published" as const,
+          };
+        }
+
+        async acceptWorkspaceArtifactIntent(command: AcceptWorkspaceArtifactIntentCommand) {
+          if (command.deliverableKey) this.published.add(command.deliverableKey);
+          return {
+            artifactId: command.requestedArtifactId,
+            resourceVersionId: resourceVersionId("version_pi_workspace_intent"),
+            sourceRelativePath: command.sourceRelativePath,
+            status: "accepted" as const,
           };
         }
 

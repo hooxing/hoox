@@ -1,4 +1,10 @@
 import {
+  ArtifactCompletionGateAdapter,
+  ArtifactDeliveryService,
+  createArtifactExecutionAuthorizationAuthority,
+  PgArtifactDeliveryRepository,
+} from "@cube-runtime/artifact";
+import {
   createPostgresPool,
   createS3BlobStore,
   DurableWorkspaceCandidateBlobWriter,
@@ -29,6 +35,7 @@ import {
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
 import { resolveCubeProxyRouting } from "@cube-runtime/sandbox";
+import { ArtifactToolRouterFactory } from "@cube-runtime/tool-router";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
@@ -37,10 +44,10 @@ import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
   DatabaseRunCancellation,
-  NoDeclaredArtifactCompletionGate,
   ProcessShutdown,
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
+import { PgArtifactPublicationResourceBridge } from "./pg-artifact-resource-bridge.js";
 import { RunWorker } from "./run-worker.js";
 import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
 
@@ -310,12 +317,27 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
       const { modelRuntime, model } = await createDevelopmentOpenAiCompatibleModel(
         configuration.model,
       );
+      const artifactAuthorization = createArtifactExecutionAuthorizationAuthority();
+      const artifactRepository = new PgArtifactDeliveryRepository(
+        pool,
+        artifactAuthorization.verifier,
+      );
+      const artifactService = new ArtifactDeliveryService(artifactRepository, blobs, {
+        runtimeMode: "development",
+        allowInsecureHttpDownload: true,
+        executionAuthorizationVerifier: artifactAuthorization.verifier,
+      });
+      const artifactTools = new ArtifactToolRouterFactory({
+        resources: new PgArtifactPublicationResourceBridge(pool),
+        artifacts: artifactService,
+        authorizationVerifier: artifactAuthorization.verifier,
+      });
       const sessions = new PiWorkerSessionFactory(
         model,
         modelRuntime,
         durableObservation.createRecorder,
-        undefined,
-        undefined,
+        artifactTools,
+        artifactAuthorization.issuer,
         durableObservation.prepare,
       );
       const upstreamSandboxes = new CubeSandboxSessionRegistry(
@@ -394,7 +416,7 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
           sessions,
           cancellation: new DatabaseRunCancellation(),
           shutdownSignal: shutdown.signal,
-          artifacts: new NoDeclaredArtifactCompletionGate(),
+          artifacts: new ArtifactCompletionGateAdapter(artifactService),
           clock: new SystemWorkerClock(),
           metrics: new PgRecoveryMetrics(pool),
         },

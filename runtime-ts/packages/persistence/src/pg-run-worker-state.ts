@@ -1579,6 +1579,18 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         );
         if (inserted.rowCount !== 1) throw new RuntimeWriteAbort("conflict");
       }
+      // Artifact intent 与 Revision 文件使用同一事务内刚写入的 exact path/hash/incarnation。
+      // 任一步冲突都会连同 Workspace head 一起回滚，外部读侧永远看不到半发布 Artifact。
+      await settleWorkspaceArtifactIntents(client, {
+        tenantId: change.tenantId,
+        attemptId: String(row.attempt_id),
+        runId: command.fence.scope.runId,
+        threadId: change.threadId,
+        workspaceId: change.workspaceId,
+        rootRunId: change.rootRunId,
+        revisionId: change.revisionId,
+        databaseNow,
+      });
       const uploadedCount = await client.query<{ readonly count: string }>(
         `SELECT count(*)::text AS count FROM workspace_revision_candidate_files
           WHERE tenant_id=$1 AND workspace_id=$2 AND attempt_id=$3 AND operation_key=$4
@@ -2069,6 +2081,202 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     const attemptRow = attempt.rows[0];
     if (attemptRow === undefined) return undefined;
     return { ...mapAggregate(aggregateRow), attempt: mapAttempt(attemptRow) };
+  }
+}
+
+async function settleWorkspaceArtifactIntents(
+  client: PoolClient,
+  input: {
+    readonly tenantId: string;
+    readonly attemptId: string;
+    readonly runId: string;
+    readonly threadId: string;
+    readonly workspaceId: string;
+    readonly rootRunId: string;
+    readonly revisionId: string;
+    readonly databaseNow: ReturnType<typeof isoTimestamp>;
+  },
+): Promise<void> {
+  const intents = await client.query<{
+    readonly idempotency_key: string;
+    readonly command_digest: string;
+    readonly artifact_id: string;
+    readonly resource_id: string;
+    readonly resource_version_id: string;
+    readonly blob_reference_id: string;
+    readonly blob_operation_id: string;
+    readonly replaces_artifact_id: string | null;
+    readonly name: string;
+    readonly purpose: "deliverable" | "diagnostic" | "trace";
+    readonly deliverable_key: string | null;
+    readonly source_relative_path: string;
+    readonly resource_name: string;
+    readonly content_sha256: string;
+    readonly size: string;
+    readonly blob_lifecycle_id: string;
+    readonly blob_incarnation_id: string;
+    readonly physical_object_key: string;
+  }>(
+    `SELECT intent.idempotency_key,intent.command_digest,intent.artifact_id,
+            intent.resource_id,intent.resource_version_id,intent.blob_reference_id,
+            intent.blob_operation_id,intent.replaces_artifact_id,intent.name,
+            intent.purpose,intent.deliverable_key,intent.source_relative_path,
+            intent.resource_name,file.content_sha256,file.size::text,
+            file.blob_lifecycle_id::text,file.blob_incarnation_id::text,
+            file.physical_object_key
+       FROM workspace_artifact_publication_intents intent
+       JOIN workspace_revision_files file
+         ON file.tenant_id=intent.tenant_id AND file.workspace_id=intent.workspace_id
+        AND file.revision_id=$7 AND file.relative_path=intent.source_relative_path
+      WHERE intent.tenant_id=$1 AND intent.attempt_id=$2 AND intent.run_id=$3
+        AND intent.thread_id=$4 AND intent.workspace_id=$5 AND intent.root_run_id=$6
+      ORDER BY intent.created_at,intent.idempotency_key`,
+    [
+      input.tenantId,
+      input.attemptId,
+      input.runId,
+      input.threadId,
+      input.workspaceId,
+      input.rootRunId,
+      input.revisionId,
+    ],
+  );
+  for (const intent of intents.rows) {
+    const size = Number(intent.size);
+    if (!Number.isSafeInteger(size) || size < 0) throw new RuntimeWriteAbort("conflict");
+    await client.query(
+      `INSERT INTO blob_commits(tenant_id,operation_id,status,version,snapshot,created_at,updated_at)
+       VALUES($1,$2,'completed',0,$3::jsonb,$4,$4)`,
+      [
+        input.tenantId,
+        intent.blob_operation_id,
+        JSON.stringify({
+          schemaVersion: 1,
+          kind: "workspace_artifact_binding",
+          workspaceRevisionId: input.revisionId,
+          sourceRelativePath: intent.source_relative_path,
+          digest: intent.content_sha256,
+        }),
+        input.databaseNow,
+      ],
+    );
+    await client.query(
+      `INSERT INTO blob_references(
+         tenant_id,reference_id,operation_id,state,purpose,sha256,size,media_type,
+         staging_upload_id,lifecycle_id,incarnation_id,physical_object_key,created_at,updated_at
+       ) VALUES($1,$2,$3,'stable','workspace',$4,$5,'application/octet-stream',$2,$6::uuid,$7::uuid,$8,$9,$9)`,
+      [
+        input.tenantId,
+        intent.blob_reference_id,
+        intent.blob_operation_id,
+        intent.content_sha256,
+        size,
+        intent.blob_lifecycle_id,
+        intent.blob_incarnation_id,
+        intent.physical_object_key,
+        input.databaseNow,
+      ],
+    );
+    // latest FK 是 deferred；先写入带最终 head 的 Resource，再补不可变 Version。
+    await client.query(
+      `INSERT INTO resources(
+         tenant_id,id,name,normalized_name,origin,visibility,latest_version_number,
+         latest_version_id,created_at,updated_at
+       ) VALUES($1,$2,$3,lower($3),'promoted_workspace','searchable',1,$4,$5,$5)`,
+      [
+        input.tenantId,
+        intent.resource_id,
+        intent.resource_name,
+        intent.resource_version_id,
+        input.databaseNow,
+      ],
+    );
+    await client.query(
+      `INSERT INTO resource_versions(
+         tenant_id,resource_id,id,version_number,parent_version_id,blob_reference_id,
+         blob_purpose,blob_lifecycle_id,blob_incarnation_id,physical_object_key,
+         digest,media_type,size,source_workspace_id,source_workspace_revision_id,
+         source_relative_path,created_at
+       ) VALUES(
+         $1,$2,$3,1,NULL,$4,'workspace',$5::uuid,$6::uuid,$7,$8,
+         'application/octet-stream',$9,$10,$11,$12,$13
+       )`,
+      [
+        input.tenantId,
+        intent.resource_id,
+        intent.resource_version_id,
+        intent.blob_reference_id,
+        intent.blob_lifecycle_id,
+        intent.blob_incarnation_id,
+        intent.physical_object_key,
+        intent.content_sha256,
+        size,
+        input.workspaceId,
+        input.revisionId,
+        intent.source_relative_path,
+        input.databaseNow,
+      ],
+    );
+    await client.query(
+      `INSERT INTO artifact_publications(
+         tenant_id,id,thread_id,run_id,attempt_id,workspace_id,root_run_id,
+         resource_id,resource_version_id,replaces_artifact_id,name,purpose,
+         deliverable_key,status,blob_reference_id,blob_purpose,blob_lifecycle_id,
+         blob_incarnation_id,physical_object_key,digest,media_type,size,
+         source_workspace_id,workspace_revision_id,source_relative_path,created_at,updated_at
+       ) VALUES(
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'publishing',$14,'workspace',
+         $15::uuid,$16::uuid,$17,$18,'application/octet-stream',$19,$20,$21,$22,$23,$23
+       )`,
+      [
+        input.tenantId,
+        intent.artifact_id,
+        input.threadId,
+        input.runId,
+        input.attemptId,
+        input.workspaceId,
+        input.rootRunId,
+        intent.resource_id,
+        intent.resource_version_id,
+        intent.replaces_artifact_id,
+        intent.name,
+        intent.purpose,
+        intent.deliverable_key,
+        intent.blob_reference_id,
+        intent.blob_lifecycle_id,
+        intent.blob_incarnation_id,
+        intent.physical_object_key,
+        intent.content_sha256,
+        size,
+        input.workspaceId,
+        input.revisionId,
+        intent.source_relative_path,
+        input.databaseNow,
+      ],
+    );
+    await client.query(
+      `INSERT INTO artifact_publication_commands(
+         tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+         idempotency_key,command_digest,artifact_id,created_at
+       ) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+      [
+        input.tenantId,
+        input.attemptId,
+        input.runId,
+        input.threadId,
+        input.workspaceId,
+        input.rootRunId,
+        intent.idempotency_key,
+        intent.command_digest,
+        intent.artifact_id,
+        input.databaseNow,
+      ],
+    );
+    await client.query(
+      `INSERT INTO artifact_publication_settlements(tenant_id,artifact_id,target,settled_at)
+       VALUES($1,$2,'published',$3)`,
+      [input.tenantId, intent.artifact_id, input.databaseNow],
+    );
   }
 }
 

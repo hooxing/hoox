@@ -132,7 +132,7 @@ export function createArtifactPiTools(
       name: "publish_artifact",
       label: "发布交付物",
       description:
-        "从安全 Workspace 相对路径或已固定 ResourceVersion 发布不可变 Artifact；失败修正必须使用新版本和新 Artifact。",
+        "接受安全 Workspace 相对路径的发布意图，最终 Revision 提交时原子发布；已固定 ResourceVersion 可直接发布。",
       parameters: PublishArtifactToolArgumentsSchema,
       execute: async (callId, args, signal) =>
         artifactToolResult(

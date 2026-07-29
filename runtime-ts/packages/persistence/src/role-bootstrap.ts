@@ -66,6 +66,7 @@ const workspaceCandidateTables = new Set([
   "workspace_revision_candidates",
   "workspace_revision_candidate_files",
 ]);
+const workspaceArtifactIntentTables = new Set(["workspace_artifact_publication_intents"]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -80,6 +81,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["workspace_operation_journal", new Set(["SELECT", "INSERT"])],
   ["workspace_revision_candidates", new Set(["SELECT", "INSERT"])],
   ["workspace_revision_candidate_files", new Set(["SELECT", "INSERT"])],
+  ["workspace_artifact_publication_intents", new Set(["SELECT", "INSERT"])],
   ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
   ["blob_lifecycles", new Set(["SELECT", "INSERT"])],
   ["blob_incarnations", new Set(["SELECT", "INSERT"])],
@@ -282,6 +284,18 @@ async function hasWorkspaceCandidateState(client: PoolClient, schema: string): P
   return result.rows[0]?.present === true;
 }
 
+async function hasWorkspaceArtifactIntentState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.workspace_artifact_publication_intents', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.run_execution_inputs', current_schema())) IS NOT NULL AS present",
@@ -391,6 +405,9 @@ async function activeTablePolicy(
   if (!(await hasWorkspaceCandidateState(client, schema))) {
     for (const table of workspaceCandidateTables) policy.delete(table);
   }
+  if (!(await hasWorkspaceArtifactIntentState(client, schema))) {
+    for (const table of workspaceArtifactIntentTables) policy.delete(table);
+  }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
   }
@@ -436,6 +453,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasWorkspaceCandidateState(client, schema))) {
     for (const table of workspaceCandidateTables) policy.delete(table);
+  }
+  if (!(await hasWorkspaceArtifactIntentState(client, schema))) {
+    for (const table of workspaceArtifactIntentTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -1061,6 +1081,13 @@ export async function bootstrapRuntimeAccessOnClient(
          ON TABLE ${schema}.workspace_revision_candidates TO ${role};
        GRANT UPDATE(manifest_digest)
          ON TABLE ${schema}.workspace_revision_candidate_files TO ${role}`,
+    );
+  }
+  if (await hasWorkspaceArtifactIntentState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.workspace_artifact_publication_intents
+       TO ${role}`,
     );
   }
   await client.query(

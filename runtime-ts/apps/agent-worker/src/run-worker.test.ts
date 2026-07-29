@@ -2,7 +2,7 @@ import { sha256Digest, tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
 import { createWorkspaceManifest } from "@cube-runtime/workspace";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   outboxPayloadDigest,
   rolloutProjectionDigest,
@@ -12,6 +12,7 @@ import {
 } from "./mutation-protocol.js";
 import type { ExecutionScope, RuntimeEventV1, RuntimeMutation } from "./ports.js";
 import { RunWorker, type RunWorkerOptions } from "./run-worker.js";
+import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 import {
   BlockingAgentSession,
   FakeArtifactPublication,
@@ -141,13 +142,22 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
     h.revisions.beforeMaterializeReturn = () => {
       expect(h.factory.createCount).toBe(0);
+      throw new WorkspaceMaterializationStageError("baseline_snapshot");
     };
-    h.revisions.throwOnMaterialize = true;
 
-    await expect(h.worker.execute(h.scope)).resolves.toEqual({
-      outcome: "recovery_required",
-      code: "WORKSPACE_CONFLICT",
-    });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await expect(h.worker.execute(h.scope)).resolves.toEqual({
+        outcome: "recovery_required",
+        code: "WORKSPACE_CONFLICT",
+      });
+      // 仅输出固定分类，不把 Sandbox、路径、对象键或原始异常带进日志。
+      expect(warning).toHaveBeenCalledWith(
+        "WORKSPACE_MATERIALIZE_FAILED category=stage_baseline_snapshot",
+      );
+    } finally {
+      warning.mockRestore();
+    }
 
     expect(h.revisions.materializeCount).toBe(1);
     expect(h.factory.createCount).toBe(0);
@@ -224,7 +234,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         workspaceId: h.scope.workspaceId,
         rootRunId: h.scope.rootRunId,
         revisionId: fakeRevision("revision-success"),
-        candidateOperationKey: "attempt-1/workspace/publish/0",
+        candidateOperationKey: "attempt-1:workspace:publish:0",
         candidateOperationDigest: "0".repeat(64) as ReturnType<typeof sha256Digest>,
         manifest: createWorkspaceManifest(
           { tenantId: h.scope.tenantId, entries: [] },

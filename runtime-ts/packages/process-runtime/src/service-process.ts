@@ -26,6 +26,44 @@ export interface ServiceAssemblyFactory<TConfiguration> {
   assemble(configuration: TConfiguration): Promise<ServiceAssembly>;
 }
 
+declare const auditedProductionAssemblyBrand: unique symbol;
+
+/**
+ * 只有服务模块在模块初始化时封闭创建的 production 依赖图可以取得该 capability。普通调用方
+ * 提供的 `assembler` 仍永远不能解锁 production；WeakSet 阻止对象字面量、JSON 或类型断言伪造。
+ */
+export interface AuditedProductionAssembly<TConfiguration> {
+  readonly [auditedProductionAssemblyBrand]: TConfiguration;
+}
+
+interface AuditedProductionAssemblyRecord<TConfiguration>
+  extends AuditedProductionAssembly<TConfiguration> {
+  readonly factory: ServiceAssemblyFactory<TConfiguration>;
+}
+
+const auditedProductionAssemblies = new WeakSet<object>();
+
+export function createAuditedProductionAssembly<TConfiguration>(
+  factory: ServiceAssemblyFactory<TConfiguration>,
+): AuditedProductionAssembly<TConfiguration> {
+  if (factory === null || typeof factory !== "object" || typeof factory.assemble !== "function") {
+    throw new TypeError("生产装配器无效");
+  }
+  // 捕获当下方法，调用方事后替换 factory.assemble 不能改变已经审阅的装配闭包。
+  const record: AuditedProductionAssemblyRecord<TConfiguration> = Object.freeze({
+    factory: Object.freeze({ assemble: factory.assemble.bind(factory) }),
+  } as AuditedProductionAssemblyRecord<TConfiguration>);
+  auditedProductionAssemblies.add(record);
+  return record;
+}
+
+function productionAssemblyFactory<TConfiguration>(
+  value: AuditedProductionAssembly<TConfiguration> | undefined,
+): ServiceAssemblyFactory<TConfiguration> | undefined {
+  if (value === undefined || !auditedProductionAssemblies.has(value)) return undefined;
+  return (value as AuditedProductionAssemblyRecord<TConfiguration>).factory;
+}
+
 export class ServiceAssemblyError extends Error {
   constructor(
     readonly serviceName: string,
@@ -168,18 +206,34 @@ export async function startServiceProcess<
   readonly serviceName: string;
   readonly configuration: TConfiguration;
   readonly shutdownTimeoutMilliseconds: number;
+  /**
+   * 模块私有的、经 createAuditedProductionAssembly 封装的真实生产依赖图。不得与普通
+   * assembler 同时传入，避免调用方用测试 Fake 替换受审组合。
+   */
+  readonly auditedProductionAssembly?: AuditedProductionAssembly<TConfiguration>;
   readonly assembler?: ServiceAssemblyFactory<TConfiguration>;
   readonly signalSource?: ProcessSignalSource;
   readonly onShutdownFailure?: (error: Error) => void;
 }): Promise<RunningServiceProcess> {
   if (!componentNamePattern.test(input.serviceName)) throw new TypeError("服务名称无效");
-  if (input.assembler === undefined) {
+  const auditedProductionAssembler = productionAssemblyFactory(input.auditedProductionAssembly);
+  if (input.assembler !== undefined && input.auditedProductionAssembly !== undefined) {
     throw new ServiceAssemblyError(input.serviceName, "ASSEMBLER_MISSING");
   }
-  // 通用入口永远不能由调用方提供“我可信”的回调解锁生产环境。
-  // 只有服务自己的封闭包装器可以在验证真实依赖后调用其受审启动路径。
   if (input.configuration.runtimeEnvironment === "production") {
-    throw new ServiceAssemblyError(input.serviceName, "PRODUCTION_ASSEMBLY_UNAVAILABLE");
+    if (input.assembler === undefined && input.auditedProductionAssembly === undefined) {
+      throw new ServiceAssemblyError(input.serviceName, "ASSEMBLER_MISSING");
+    }
+    if (input.assembler !== undefined || auditedProductionAssembler === undefined) {
+      throw new ServiceAssemblyError(input.serviceName, "PRODUCTION_ASSEMBLY_UNAVAILABLE");
+    }
+  } else if (input.auditedProductionAssembly !== undefined) {
+    // 避免 development/test 偶然共享生产闭包，使其测试和可观测配置漂移。
+    throw new ServiceAssemblyError(input.serviceName, "ASSEMBLER_MISSING");
+  }
+  const assembler = auditedProductionAssembler ?? input.assembler;
+  if (assembler === undefined) {
+    throw new ServiceAssemblyError(input.serviceName, "ASSEMBLER_MISSING");
   }
   const startupSignals = installStartupSafeSignalHandlers({
     source: input.signalSource ?? process,
@@ -189,7 +243,7 @@ export async function startServiceProcess<
   let normalizedAssembly: ServiceAssembly;
   let lifecycle: ProcessLifecycle;
   try {
-    assembly = await input.assembler.assemble(input.configuration);
+    assembly = await assembler.assemble(input.configuration);
     validateAssembly(assembly);
     // assembler/最外层日志只可记录稳定 serviceName 和错误码，禁止序列化 configuration。
     const probeNames = new Set<string>();

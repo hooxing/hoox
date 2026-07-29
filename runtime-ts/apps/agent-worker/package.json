@@ -8,7 +8,8 @@
     "clean": "tsc -b tsconfig.json --clean",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "node --env-file-if-exists=../../../.env dist/development-main.js",
-    "dev:preflight": "node --env-file-if-exists=../../../.env dist/development-preflight-main.js"
+    "dev:preflight": "node --env-file-if-exists=../../../.env dist/development-preflight-main.js",
+    "start:production": "node dist/production-main.js"
   },
   "dependencies": {
     "@cube-runtime/context-policy": "workspace:*",

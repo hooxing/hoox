@@ -65,7 +65,7 @@ export function createApiPersistenceRuntime(options: PostgresPoolOptions): ApiPe
     runDispatchCreation: new PgRunDispatchCreation(pool),
     experience: new PgRunExperienceReadRepository(pool),
     blobLifecycle: new PgBlobLifecycleRepository(pool),
-    probe: () => probePostgres(pool),
+    probe: () => probePostgres(pool, options.expectedRuntimeRole),
     close: () => pool.end(),
   });
 }

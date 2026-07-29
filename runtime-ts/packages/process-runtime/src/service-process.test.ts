@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import { startServiceProcess } from "./service-process.js";
+import { createAuditedProductionAssembly, startServiceProcess } from "./service-process.js";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -160,6 +160,35 @@ describe("服务进程装配", () => {
       }),
     ).rejects.toMatchObject({ code: "PRODUCTION_ASSEMBLY_UNAVAILABLE" });
     expect(assembleCalls).toBe(0);
+  });
+
+  it("受审 production capability 保留原始 production 配置并正常使用封闭依赖图", async () => {
+    const configuration = Object.freeze({ runtimeEnvironment: "production" as const, shard: "tenant-a" });
+    let observed: unknown;
+    const service = await startServiceProcess({
+      serviceName: "agent-worker",
+      configuration,
+      shutdownTimeoutMilliseconds: 1_000,
+      auditedProductionAssembly: createAuditedProductionAssembly<typeof configuration>({
+        assemble: async (received) => {
+          observed = received;
+          return { stopAccepting: async () => undefined, resources: [], readiness: [] };
+        },
+      }),
+    });
+    expect(observed).toBe(configuration);
+    await service.close();
+  });
+
+  it("对象字面量不能伪造受审 production capability", async () => {
+    await expect(
+      startServiceProcess({
+        serviceName: "agent-worker",
+        configuration: { runtimeEnvironment: "production" } as const,
+        shutdownTimeoutMilliseconds: 1_000,
+        auditedProductionAssembly: {} as never,
+      }),
+    ).rejects.toMatchObject({ code: "PRODUCTION_ASSEMBLY_UNAVAILABLE" });
   });
 
   it("启动后替换 assembler 数组、名称或方法不会改变已冻结的关闭与探针计划", async () => {

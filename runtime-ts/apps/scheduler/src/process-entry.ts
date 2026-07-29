@@ -6,6 +6,7 @@ import {
 } from "@cube-runtime/persistence";
 import {
   booleanEnvironmentField,
+  createAuditedProductionAssembly,
   integerEnvironmentField,
   type ProcessSignalSource,
   parseStrictEnvironment,
@@ -204,6 +205,11 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
   },
 };
 
+// 封闭在 Scheduler 模块内，外部 startSchedulerProcess 调用方不能以测试 assembler 置换它。
+const auditedProductionSchedulerAssembly = createAuditedProductionAssembly(
+  productionSchedulerAssembler,
+);
+
 export async function startSchedulerProcess(input: {
   readonly environment: Readonly<Record<string, string | undefined>>;
   readonly assembler?: ServiceAssemblyFactory<SchedulerProcessConfiguration>;
@@ -215,17 +221,13 @@ export async function startSchedulerProcess(input: {
     // 生产装配不接受注入；测试 Fake 只能在 development/test 使用。
     throw new Error("PRODUCTION_ASSEMBLY_UNAVAILABLE:scheduler");
   }
-  // 通用进程框架保持 production fail-closed。这里是 Scheduler 私有受审路径：仅使用本模块封闭的
-  // 真实 PostgreSQL+CubeSandbox+polling 装配器，配置已完成严格 production 校验后才降为框架内部标记。
-  const processConfiguration =
-    configuration.runtimeEnvironment === "production"
-      ? Object.freeze({ ...configuration, runtimeEnvironment: "development" as const })
-      : configuration;
   return startServiceProcess({
     serviceName: "scheduler",
-    configuration: processConfiguration,
+    configuration,
     shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
-    assembler: input.assembler ?? productionSchedulerAssembler,
+    ...(configuration.runtimeEnvironment === "production"
+      ? { auditedProductionAssembly: auditedProductionSchedulerAssembly }
+      : { assembler: input.assembler ?? productionSchedulerAssembler }),
     ...(input.signalSource === undefined ? {} : { signalSource: input.signalSource }),
     ...(input.onShutdownFailure === undefined
       ? {}

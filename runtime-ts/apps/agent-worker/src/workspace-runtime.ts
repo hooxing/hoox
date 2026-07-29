@@ -4,7 +4,9 @@ import { workspaceCandidateOperationDigest } from "@cube-runtime/persistence";
 import type { WorkspaceRuntimePort } from "@cube-runtime/run-contracts";
 import {
   createWorkspaceManifest,
+  type SandboxSessionIdentity,
   type SandboxWorkspacePort,
+  type SandboxWorkspaceSnapshot,
   WorkspaceApplicationError,
   type WorkspaceCandidateBlobWritePort,
   type WorkspaceCandidateHandoffPort,
@@ -41,6 +43,35 @@ export interface WorkerWorkspaceRuntimeOptions {
   readonly policy: WorkspaceExecutionPolicy;
 }
 
+/** 只表达已审查的边界阶段；不承载底层错误正文、路径或对象身份。 */
+export type WorkspaceMaterializationStage =
+  | "load_current_manifest"
+  | "open_workspace"
+  | "baseline_snapshot"
+  | "baseline_list"
+  | "baseline_release"
+  | "materializer";
+
+export type WorkspaceMaterializerFailureDetail =
+  | "invalid_operation_key"
+  | "invalid_scope"
+  | "invalid_sandbox_session"
+  | "invalid_manifest"
+  | "invalid_revision"
+  | "other_application"
+  | "dependency"
+  | "unclassified";
+
+export class WorkspaceMaterializationStageError extends Error {
+  constructor(
+    readonly stage: WorkspaceMaterializationStage,
+    readonly detail?: WorkspaceMaterializerFailureDetail,
+  ) {
+    super(`WORKSPACE_MATERIALIZATION_${stage.toUpperCase()}`);
+    this.name = "WorkspaceMaterializationStageError";
+  }
+}
+
 /**
  * Worker 只看 manifest-aware RuntimePort：进入模型前物化已提交 head，模型 settled 后将 Sandbox
  * snapshot 发布为待 RuntimeMutation 原子提交的候选。它从不向 Worker 暴露 BlobStore 或 object key。
@@ -50,19 +81,29 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
 
   async materialize(input: Parameters<WorkspaceRuntimePort["materialize"]>[0]): Promise<void> {
     const scope = trustedScope(input.scope);
-    const current = await this.options.revisions.loadCurrentManifest({
-      scope,
-      ...(input.expectedCurrentRevisionId === undefined
-        ? {}
-        : { expectedRevisionId: input.expectedCurrentRevisionId }),
-    });
+    let current: WorkspaceManifest | undefined;
+    try {
+      current = await this.options.revisions.loadCurrentManifest({
+        scope,
+        ...(input.expectedCurrentRevisionId === undefined
+          ? {}
+          : { expectedRevisionId: input.expectedCurrentRevisionId }),
+      });
+    } catch {
+      throw new WorkspaceMaterializationStageError("load_current_manifest");
+    }
     const target = current ?? emptyManifest(scope, this.options.policy);
-    const sandbox = await this.options.openSandboxWorkspace({
-      scope,
-      executionScope: input.scope,
-      session: input.sandbox,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    });
+    let sandbox: SandboxWorkspacePort;
+    try {
+      sandbox = await this.options.openSandboxWorkspace({
+        scope,
+        executionScope: input.scope,
+        session: input.sandbox,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      });
+    } catch {
+      throw new WorkspaceMaterializationStageError("open_workspace");
+    }
     // 新 acquire 的 Sandbox 不能把模板/上次执行残留当作 manifest 的 previous。先以受控快照
     // 证明 /workspace 为空；根不存在、列举失败或任意额外项都在模型 Session 创建前失败关闭。
     await assertEmptyWorkspaceBaseline({
@@ -71,20 +112,27 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
       scope,
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
-    await new WorkspaceMaterializer({
-      journal: this.options.journal,
-      stableBlobs: this.options.stableBlobs,
-      sandbox,
-      policy: this.options.policy,
-    }).materialize({
-      operationKey: input.operationKey,
-      scope,
-      target,
-      ...(input.expectedCurrentRevisionId === undefined
-        ? {}
-        : { targetRevisionId: input.expectedCurrentRevisionId }),
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    });
+    try {
+      await new WorkspaceMaterializer({
+        journal: this.options.journal,
+        stableBlobs: this.options.stableBlobs,
+        sandbox,
+        policy: this.options.policy,
+      }).materialize({
+        operationKey: input.operationKey,
+        scope,
+        target,
+        ...(input.expectedCurrentRevisionId === undefined
+          ? {}
+          : { targetRevisionId: input.expectedCurrentRevisionId }),
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      });
+    } catch (error) {
+      throw new WorkspaceMaterializationStageError(
+        "materializer",
+        materializerFailureDetail(error),
+      );
+    }
   }
 
   async verify(
@@ -173,30 +221,77 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
   }
 }
 
+/** 只将核心固定文案映射为枚举；绝不复制错误正文到上层日志。 */
+function materializerFailureDetail(error: unknown): WorkspaceMaterializerFailureDetail {
+  if (error instanceof WorkspaceDependencyError) return "dependency";
+  if (!(error instanceof WorkspaceApplicationError)) return "unclassified";
+  if (error.code !== "INVALID_INPUT") return "other_application";
+  if (error.message === "operationKey 格式无效") return "invalid_operation_key";
+  if (
+    error.message === "tenantId 格式无效" ||
+    error.message === "threadId 格式无效" ||
+    error.message === "workspaceId 格式无效"
+  ) {
+    return "invalid_scope";
+  }
+  if (
+    error.message === "Sandbox sessionId 格式无效" ||
+    error.message === "Sandbox generation 格式无效"
+  ) {
+    return "invalid_sandbox_session";
+  }
+  if (
+    error.message === "非空 Workspace 缺少 Revision 身份" ||
+    error.message === "Workspace Revision 身份缺失"
+  ) {
+    return "invalid_revision";
+  }
+  return "invalid_manifest";
+}
+
 async function assertEmptyWorkspaceBaseline(input: {
   readonly sandbox: SandboxWorkspacePort;
   readonly operationKey: string;
   readonly scope: WorkspaceTrustedScope;
   readonly signal?: AbortSignal;
 }): Promise<void> {
-  const session = await input.sandbox.currentSession();
+  let session: SandboxSessionIdentity;
+  try {
+    session = await input.sandbox.currentSession();
+  } catch {
+    throw new WorkspaceMaterializationStageError("baseline_snapshot");
+  }
   const operationKey = `workspace-baseline:${createHash("sha256")
     .update(input.operationKey)
     .digest("hex")}`;
-  const snapshot = await input.sandbox.captureSnapshot({ operationKey, scope: input.scope });
+  let snapshot: SandboxWorkspaceSnapshot;
   try {
-    if (snapshot.sessionId !== session.sessionId || snapshot.generation !== session.generation) {
-      throw new Error("WORKSPACE_BASELINE_SANDBOX_DRIFT");
-    }
-    for await (const _entry of input.sandbox.listWorkspace(
-      snapshot,
-      input.signal === undefined ? {} : { signal: input.signal },
-    )) {
-      throw new Error("WORKSPACE_BASELINE_NOT_EMPTY");
+    snapshot = await input.sandbox.captureSnapshot({ operationKey, scope: input.scope });
+  } catch {
+    throw new WorkspaceMaterializationStageError("baseline_snapshot");
+  }
+  let failure: WorkspaceMaterializationStageError | undefined;
+  try {
+    try {
+      if (snapshot.sessionId !== session.sessionId || snapshot.generation !== session.generation) {
+        throw new Error("WORKSPACE_BASELINE_SANDBOX_DRIFT");
+      }
+      for await (const _entry of input.sandbox.listWorkspace(
+        snapshot,
+        input.signal === undefined ? {} : { signal: input.signal },
+      )) {
+        throw new Error("WORKSPACE_BASELINE_NOT_EMPTY");
+      }
+    } catch {
+      failure = new WorkspaceMaterializationStageError("baseline_list");
     }
   } finally {
-    await input.sandbox.releaseSnapshots({ sandbox: session, operationKey });
+    // 空快照即使列举失败也必须释放；释放失败比列举失败更接近泄漏风险，因此覆盖阶段。
+    await input.sandbox.releaseSnapshots({ sandbox: session, operationKey }).catch(() => {
+      failure = new WorkspaceMaterializationStageError("baseline_release");
+    });
   }
+  if (failure !== undefined) throw failure;
 }
 
 function trustedScope(

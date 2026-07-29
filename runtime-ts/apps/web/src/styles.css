@@ -661,3 +661,32 @@ h2 {
     flex-wrap: wrap;
   }
 }
+
+.artifact-text-preview {
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(78vh, 680px);
+  border: 1px solid #d7ddd8;
+  border-radius: 14px;
+  padding: 0;
+  color: #17201c;
+  background: #f7f8f6;
+  box-shadow: 0 18px 56px rgb(13 31 22 / 28%);
+}
+.artifact-text-preview::backdrop {
+  background: rgb(13 31 22 / 38%);
+}
+.artifact-text-preview > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid #d7ddd8;
+}
+.artifact-text-preview > pre {
+  max-height: calc(min(78vh, 680px) - 58px);
+  margin: 0;
+  overflow: auto;
+  padding: 16px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

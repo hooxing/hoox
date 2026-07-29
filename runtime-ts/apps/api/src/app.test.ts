@@ -400,6 +400,8 @@ function fixture(
     readonly includeArtifact?: boolean;
     readonly confirmationDrift?: ArtifactConfirmationDrift;
     readonly artifactMediaType?: string;
+    readonly artifactSizeBytes?: number;
+    readonly blobBytes?: Uint8Array;
     readonly blobFailure?: BlobStoreError;
     readonly productionPrincipalOnly?: boolean;
   } = {},
@@ -413,11 +415,16 @@ function fixture(
   let runSequence = 0;
   let workspaceSequence = 0;
   let artifactReadCount = 0;
+  const artifactSizeBytes = options.artifactSizeBytes ?? experienceArtifact.sizeBytes;
+  const blobBytes = options.blobBytes ?? new Uint8Array(artifactSizeBytes);
+  const presignInputs: unknown[] = [];
   const configuredArtifact = {
     ...experienceArtifact,
+    sizeBytes: artifactSizeBytes,
     mediaType: options.artifactMediaType ?? experienceArtifact.mediaType,
     blob: {
       ...experienceArtifact.blob,
+      size: artifactSizeBytes,
       mediaType: options.artifactMediaType ?? experienceArtifact.blob.mediaType,
     },
   };
@@ -558,8 +565,13 @@ function fixture(
           ...(options.includeArtifact
             ? {
                 blobs: {
-                  presignDownload: async () => {
+                  getBytes: async () => {
                     if (options.blobFailure !== undefined) throw options.blobFailure;
+                    return blobBytes;
+                  },
+                  presignDownload: async (input: Parameters<BlobStore["presignDownload"]>[0]) => {
+                    if (options.blobFailure !== undefined) throw options.blobFailure;
+                    presignInputs.push(input);
                     return "http://127.0.0.1:19000/short-lived-download";
                   },
                 } as unknown as BlobStore,
@@ -569,7 +581,7 @@ function fixture(
       : {}),
   };
   const app = createApiApp(dependencies, { logger: false });
-  return { app, state, dependencies, ownerA, ownerB };
+  return { app, state, dependencies, ownerA, ownerB, presignInputs };
 }
 
 const openApps: { close(): Promise<void> }[] = [];
@@ -674,8 +686,15 @@ describe("Fastify API 契约", () => {
     expect(state.runs).toHaveLength(1);
   });
 
-  it("Artifact 只经 Run 归属签发短期预览和下载 URL", async () => {
-    const { app } = fixture({ enableExperience: true, includeArtifact: true });
+  it("UTF-8 纯文本预览经 API 返回安全文本而不暴露 S3 URL", async () => {
+    const payload = "<script>window.pwned=true</script>";
+    const { app, presignInputs } = fixture({
+      enableExperience: true,
+      includeArtifact: true,
+      artifactMediaType: "text/plain; charset=utf-8",
+      artifactSizeBytes: new TextEncoder().encode(payload).byteLength,
+      blobBytes: new TextEncoder().encode(payload),
+    });
     openApps.push(app);
     await app.inject({
       method: "POST",
@@ -701,13 +720,65 @@ describe("Fastify API 契约", () => {
       headers: { authorization: "Bearer token-a" },
     });
     expect(preview.statusCode).toBe(200);
-    expect(preview.json().data).toMatchObject({ disposition: "preview", expiresInSeconds: 300 });
+    expect(preview.headers["content-type"]).toContain("application/json");
+    expect(preview.headers["cache-control"]).toBe("no-store");
+    expect(preview.headers.pragma).toBe("no-cache");
+    expect(preview.headers["x-content-type-options"]).toBe("nosniff");
+    expect(preview.json().data).toEqual(
+      expect.objectContaining({ disposition: "preview", text: payload }),
+    );
+    expect(preview.json().data.url).toBeUndefined();
+    expect(presignInputs).toHaveLength(0);
+    const download = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/download",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(download.statusCode).toBe(200);
+    expect(download.headers["cache-control"]).toBe("no-store");
+    expect(download.headers.pragma).toBe("no-cache");
+    expect(download.headers["x-content-type-options"]).toBe("nosniff");
+    expect(presignInputs).toContainEqual(
+      expect.objectContaining({ delivery: "artifact-download", downloadName: "交付说明.txt" }),
+    );
     const wrongRun = await app.inject({
       method: "GET",
       url: "/v1/threads/thread_1/runs/run_2/artifacts/artifact_1/download",
       headers: { authorization: "Bearer token-a" },
     });
     expect(wrongRun.statusCode).toBe(404);
+  });
+
+  it("PNG 预览仍签发 inline URL", async () => {
+    const { app, presignInputs } = fixture({
+      enableExperience: true,
+      includeArtifact: true,
+      artifactMediaType: "image/png",
+    });
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "image-preview-thread" },
+      payload: { title: "二进制预览" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "image-preview-run" },
+      payload: { input: "预览图片" },
+    });
+    const preview = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/preview",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json().data).toMatchObject({
+      disposition: "preview",
+      url: "http://127.0.0.1:19000/short-lived-download",
+    });
+    expect(presignInputs).toContainEqual(expect.objectContaining({ delivery: "inline-preview" }));
   });
 
   it.each(artifactConfirmationDrifts)(
@@ -819,9 +890,12 @@ describe("Fastify API 契约", () => {
 
   it.each([
     ["text/plain; charset=utf-8", 200],
-    ['text/plain; charset="us-ascii"', 200],
+    ["text/plain", 422],
+    ['text/plain; charset="us-ascii"', 422],
+    ["text/plain; charset=iso-8859-1", 422],
+    ["text/plain; charset=windows-1252", 422],
     ["text/plain; charset=utf-7", 422],
-  ] as const)("纯文本预览严格校验 charset：%s", async (artifactMediaType, statusCode) => {
+  ] as const)("纯文本预览只接受规范 UTF-8：%s", async (artifactMediaType, statusCode) => {
     const { app } = fixture({ enableExperience: true, includeArtifact: true, artifactMediaType });
     openApps.push(app);
     await app.inject({
@@ -842,6 +916,45 @@ describe("Fastify API 契约", () => {
       headers: { authorization: "Bearer token-a" },
     });
     expect(response.statusCode).toBe(statusCode);
+  });
+
+  it("过大或非 UTF-8 的纯文本预览失败关闭", async () => {
+    const tooLarge = fixture({
+      enableExperience: true,
+      includeArtifact: true,
+      artifactSizeBytes: 1_024 * 1_024 + 1,
+    });
+    openApps.push(tooLarge.app);
+    const invalidUtf8 = fixture({
+      enableExperience: true,
+      includeArtifact: true,
+      artifactSizeBytes: 1,
+      blobBytes: new Uint8Array([0xff]),
+    });
+    openApps.push(invalidUtf8.app);
+    for (const [suffix, target] of [
+      ["oversize", tooLarge.app],
+      ["utf8", invalidUtf8.app],
+    ] as const) {
+      await target.inject({
+        method: "POST",
+        url: "/v1/threads",
+        headers: { authorization: "Bearer token-a", "idempotency-key": `text-fail-${suffix}` },
+        payload: { title: "文本失败关闭" },
+      });
+      await target.inject({
+        method: "POST",
+        url: "/v1/threads/thread_1/runs",
+        headers: { authorization: "Bearer token-a", "idempotency-key": `text-fail-run-${suffix}` },
+        payload: { input: "预览文本" },
+      });
+      const response = await target.inject({
+        method: "GET",
+        url: "/v1/threads/thread_1/runs/run_1/artifacts/artifact_1/preview",
+        headers: { authorization: "Bearer token-a" },
+      });
+      expect(response.statusCode).toBe(422);
+    }
   });
   it("live/ready 返回服务端 requestId，依赖失败不泄漏原始错误", async () => {
     const { app, dependencies } = fixture();

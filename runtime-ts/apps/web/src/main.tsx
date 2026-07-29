@@ -1,7 +1,7 @@
 import { LoaderCircle, PanelLeftOpen, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ApiError, RuntimeApi, type Thread } from "./api.js";
+import { ApiError, RuntimeApi, type ArtifactPreview, type Thread } from "./api.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
@@ -61,6 +61,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<ApiError | undefined>();
+  const [textPreview, setTextPreview] = useState<ArtifactPreview | undefined>();
   const [recoveryUi, setRecoveryUi] = useState<RecoveryUiState | undefined>();
   const [recoveryNonce, setRecoveryNonce] = useState(0);
   const [isCompact, setIsCompact] = useState(initialCompact);
@@ -330,10 +331,16 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     if (!state.selectedThreadId || !state.run) return;
     const threadId = state.selectedThreadId;
     const runId = state.run.id;
-    await openArtifact(
-      () => apiClient.previewArtifact(threadId, runId, artifactId),
-      "获取预览地址失败",
-    );
+    try {
+      const resolved = await apiClient.previewArtifact(threadId, runId, artifactId);
+      if (resolved.kind === "text") {
+        setTextPreview(resolved);
+      } else {
+        await openArtifact(() => Promise.resolve(resolved.url), "获取预览地址失败");
+      }
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason : new ApiError("获取预览地址失败", 0, true));
+    }
   };
 
   const selected = state.threads.find((thread) => thread.id === state.selectedThreadId);
@@ -482,6 +489,17 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         onPreview={(artifactId) => void preview(artifactId)}
         onDownload={(artifactId) => void download(artifactId)}
       />
+      {textPreview?.kind === "text" && (
+        <dialog className="artifact-text-preview" open aria-label="纯文本交付物预览">
+          <header>
+            <strong>交付物预览</strong>
+            <button type="button" className="icon-button" onClick={() => setTextPreview(undefined)}>
+              关闭
+            </button>
+          </header>
+          <pre>{textPreview.text}</pre>
+        </dialog>
+      )}
     </main>
   );
 }

@@ -1,8 +1,12 @@
 import { sha256Digest, tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
-import { createWorkspaceManifest } from "@cube-runtime/workspace";
-import { describe, expect, it } from "vitest";
+import {
+  WorkspaceApplicationError,
+  WorkspaceDependencyError,
+  createWorkspaceManifest,
+} from "@cube-runtime/workspace";
+import { describe, expect, it, vi } from "vitest";
 import {
   outboxPayloadDigest,
   rolloutProjectionDigest,
@@ -12,6 +16,7 @@ import {
 } from "./mutation-protocol.js";
 import type { ExecutionScope, RuntimeEventV1, RuntimeMutation } from "./ports.js";
 import { RunWorker, type RunWorkerOptions } from "./run-worker.js";
+import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 import {
   BlockingAgentSession,
   FakeArtifactPublication,
@@ -141,13 +146,22 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
     h.revisions.beforeMaterializeReturn = () => {
       expect(h.factory.createCount).toBe(0);
+      throw new WorkspaceMaterializationStageError("baseline_snapshot");
     };
-    h.revisions.throwOnMaterialize = true;
 
-    await expect(h.worker.execute(h.scope)).resolves.toEqual({
-      outcome: "recovery_required",
-      code: "WORKSPACE_CONFLICT",
-    });
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await expect(h.worker.execute(h.scope)).resolves.toEqual({
+        outcome: "recovery_required",
+        code: "WORKSPACE_CONFLICT",
+      });
+      // 仅输出固定分类，不把 Sandbox、路径、对象键或原始异常带进日志。
+      expect(warning).toHaveBeenCalledWith(
+        "WORKSPACE_MATERIALIZE_FAILED category=stage_baseline_snapshot",
+      );
+    } finally {
+      warning.mockRestore();
+    }
 
     expect(h.revisions.materializeCount).toBe(1);
     expect(h.factory.createCount).toBe(0);
@@ -224,7 +238,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         workspaceId: h.scope.workspaceId,
         rootRunId: h.scope.rootRunId,
         revisionId: fakeRevision("revision-success"),
-        candidateOperationKey: "attempt-1/workspace/publish/0",
+        candidateOperationKey: "attempt-1:workspace:publish:0",
         candidateOperationDigest: "0".repeat(64) as ReturnType<typeof sha256Digest>,
         manifest: createWorkspaceManifest(
           { tenantId: h.scope.tenantId, entries: [] },
@@ -1450,6 +1464,55 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(artifact.artifacts.calls).toBe(3);
     expect(artifactSession.prompts).toHaveLength(3);
     expect(artifactSession.prompts[1]).toContain("Artifact 完成门未通过（修正轮次 1/2）");
+  });
+
+  it("Workspace verify 日志只接受固定 diagnostic，伪造值不会离开边界", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.revisions.beforeReturn = () => {
+      throw new WorkspaceApplicationError(
+        "DEPENDENCY_FAILED",
+        "内部错误",
+        "credential_like_diagnostic" as never,
+      );
+    };
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await expect(h.worker.execute(h.scope)).resolves.toEqual({
+        outcome: "recovery_required",
+        code: "WORKSPACE_CONFLICT",
+      });
+      expect(warning).toHaveBeenCalledWith(
+        "WORKSPACE_VERIFY_FAILED category=application_dependency_failed",
+      );
+      expect(warning.mock.calls.flat().join(" ")).not.toContain("credential_like_diagnostic");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("Workspace 日志对伪造 code、result 与 diagnostic 一律输出 unclassified", async () => {
+    const canary = "credential-canary\nforged-category";
+    const application = harness([new ScriptedAgentSession(successfulEvents)]);
+    application.revisions.beforeReturn = () => {
+      throw new WorkspaceApplicationError(canary as never, "内部错误", canary as never);
+    };
+    const dependency = harness([new ScriptedAgentSession(successfulEvents)]);
+    dependency.revisions.beforeReturn = () => {
+      throw new WorkspaceDependencyError(canary as never, "内部依赖错误");
+    };
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      for (const target of [application, dependency]) {
+        await expect(target.worker.execute(target.scope)).resolves.toEqual({
+          outcome: "recovery_required",
+          code: "WORKSPACE_CONFLICT",
+        });
+      }
+      expect(warning).toHaveBeenCalledWith("WORKSPACE_VERIFY_FAILED category=unclassified");
+      expect(warning.mock.calls.flat().join(" ")).not.toContain(canary);
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it("完成门缺失时持久反馈并在同一 Session 修正，发布就绪后成功", async () => {

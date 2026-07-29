@@ -71,7 +71,10 @@ describe("开发 API 默认装配", () => {
 
     try {
       expect(mocks.createS3BlobStore).toHaveBeenCalledWith(
-        expect.objectContaining({ maxBlobSizeBytes: 16 * 1_024 * 1_024 }),
+        expect.objectContaining({
+          prefix: "agent-worker",
+          maxBlobSizeBytes: 16 * 1_024 * 1_024,
+        }),
         mocks.persistence.blobLifecycle,
       );
       expect(mocks.persistence.probe).toHaveBeenCalledTimes(1);

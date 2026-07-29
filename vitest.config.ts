@@ -38,7 +38,12 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["tests/**/*.test.ts", "runtime-ts/**/*.test.ts"],
+    include: [
+      "tests/**/*.test.ts",
+      "tests/**/*.test.tsx",
+      "runtime-ts/**/*.test.ts",
+      "runtime-ts/**/*.test.tsx",
+    ],
     exclude: ["tests/integration/**", "runtime-ts/vendor/**", "**/dist/**", "**/node_modules/**"],
     passWithNoTests: false,
     reporters: ["default"],

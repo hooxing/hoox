@@ -9,7 +9,17 @@
 - Thread：`thread_1e7c9c08-bac4-4566-9080-75c255a7dd12`
 - 首个 Run：`run_7237224e-f15e-4ee3-8a74-34fcc79f84d1`，状态 `succeeded`
 - Artifact：`artifact_fb9118de2b7a38bf04c0423f065f1b723e006768a0535e88e2857b3d604c88f4`
-- Artifact 为 28 B 的 `text/plain; charset=utf-8`；preview 与 download 均为 HTTP 200，二者字节与原内容的 SHA-256 均为 `b6724672aa6bfd75900164896f37e1f74a482ab85b63eceba077a0ed6e8f6eb7`。
+- Artifact 为 28 B 的 `text/plain; charset=utf-8`。当前 preview HTTP 响应为 JSON envelope；复核时提取 `data.text`、按 UTF-8 编码取 SHA-256，再与 download 原始字节的 SHA-256 比较。两者均为 `b6724672aa6bfd75900164896f37e1f74a482ab85b63eceba077a0ed6e8f6eb7`；preview 含 `text`、不含 `url`，不将 envelope 本身与对象字节作相同性声明。
+
+去敏后的复核字段如下；`text` 内容、认证信息、对象 URL 与对象键均省略：
+
+```text
+preview: status=200, hasText=true, hasUrl=false,
+         utf8(data.text).bytes=28,
+         sha256=b6724672aa6bfd75900164896f37e1f74a482ab85b63eceba077a0ed6e8f6eb7
+download: status=200, bytes=28,
+          sha256=b6724672aa6bfd75900164896f37e1f74a482ab85b63eceba077a0ed6e8f6eb7
+```
 - Workspace 初始发布 Revision：`revision-3e86d2540b9fa93355bc2145560bf9e27563c812fe7d3cb6f87115a7e14ba6cf`，manifest digest：`63c96ddabef6365c01b12c12ba26240ed01c4948c51b1cda6aeb8084bf753ac5`。
 - 同 Thread 的后续 Run `run_c48956b3-262b-4148-b70a-134d5d249f73` 成功物化该 Revision，产生 Revision `revision-37fac251920a22bfa7a381b40662462d466a119a9ddf49ec30b676d8f94573ca`，parent 为前述 Revision，digest 不变。
 

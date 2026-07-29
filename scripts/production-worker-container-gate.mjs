@@ -4,6 +4,13 @@ import { join } from "node:path";
 import process from "node:process";
 
 const baseDigest = "sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d";
+const runtimeSandboxArguments = Object.freeze([
+  "--read-only",
+  "--tmpfs",
+  "/tmp:rw,nosuid,nodev,noexec,mode=1777",
+]);
+const runtimeFilesystemProbe =
+  'for path in /opt/runtime /opt/runtime/dist/production-main.js /opt/runtime/node_modules /opt/runtime/sbom/cyclonedx.json /opt/runtime/licenses; do test "$(stat -c %u:%g "$path")" = 0:0; done; test -z "$(find /opt/runtime -xdev \\( -type f -o -type d \\) -perm /022 -print -quit)"; ! touch /opt/runtime/runtime-write-probe 2>/dev/null; touch /tmp/runtime-write-probe; rm /tmp/runtime-write-probe';
 
 function dockerResult(arguments_, options = {}) {
   const result = spawnSync("docker", arguments_, {
@@ -65,6 +72,13 @@ try {
   if (configuredCommand !== '["node","dist/production-main.js"]') {
     throw new Error("DOCKER_IMAGE_COMMAND_INVALID");
   }
+  const configuredEntrypoint = runDocker(
+    ["image", "inspect", "--format", "{{json .Config.Entrypoint}}", imageId],
+    { capture: true },
+  );
+  if (configuredEntrypoint !== '["/usr/local/bin/production-entrypoint"]') {
+    throw new Error("DOCKER_IMAGE_ENTRYPOINT_INVALID");
+  }
   const configuredBaseDigest = runDocker(
     [
       "image",
@@ -80,10 +94,21 @@ try {
   runDocker([
     "run",
     "--rm",
+    ...runtimeSandboxArguments,
     imageId,
     "sh",
     "-ec",
-    'test "$(id -u)" = 1000; test -f /opt/runtime/dist/production-main.js; test -f /opt/runtime/sbom/cyclonedx.json; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/LICENSE; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/SOURCE.md; ! command -v python; ! command -v python3; ! command -v npm; ! command -v npx; ! command -v corepack; ! command -v pnpm; test ! -e /usr/local/lib/node_modules/npm; test ! -e /usr/local/lib/node_modules/corepack; test ! -e /opt/runtime/.env.production-worker-gate-canary; test ! -e /opt/runtime/CubeSandbox; test ! -e /opt/runtime/cubesandbox-agent-lab; test ! -d /opt/runtime/src; test ! -e /opt/runtime/dist/development-main.js; test ! -e /opt/runtime/dist/development-preflight-main.js; for tool in biome tsc tsx vitest; do test -z "$(find /opt/runtime -path "*/node_modules/.bin/$tool" -print -quit)"; done; for pattern in "*.test.*" "*.spec.*" "*.ts" "*.tsx"; do test -z "$(find /opt/runtime -type f -name "$pattern" -print -quit)"; done; for directory in test tests testing __tests__; do test -z "$(find /opt/runtime -type d -name "$directory" -print -quit)"; done',
+    runtimeFilesystemProbe,
+  ]);
+
+  runDocker([
+    "run",
+    "--rm",
+    ...runtimeSandboxArguments,
+    imageId,
+    "sh",
+    "-ec",
+    'test "$(id -u)" = 1000; test -f /opt/runtime/dist/production-main.js; test -f /opt/runtime/sbom/cyclonedx.json; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/LICENSE; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/SOURCE.md; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.md; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.patch; ! command -v python; ! command -v python3; ! command -v npm; ! command -v npx; ! command -v corepack; ! command -v pnpm; test ! -e /usr/local/lib/node_modules/npm; test ! -e /usr/local/lib/node_modules/corepack; test ! -e /opt/runtime/.env.production-worker-gate-canary; test ! -e /opt/runtime/CubeSandbox; test ! -e /opt/runtime/cubesandbox-agent-lab; test ! -d /opt/runtime/src; test ! -e /opt/runtime/dist/development-main.js; test ! -e /opt/runtime/dist/development-preflight-main.js; for tool in biome tsc tsx vitest; do test -z "$(find /opt/runtime -path "*/node_modules/.bin/$tool" -print -quit)"; done; for pattern in "*.test.*" "*.spec.*" "*.ts" "*.tsx"; do test -z "$(find /opt/runtime -type f -name "$pattern" -print -quit)"; done; for directory in test tests testing __tests__; do test -z "$(find /opt/runtime -type d -name "$directory" -print -quit)"; done',
   ]);
 
   const baseEnvironment = [
@@ -115,9 +140,12 @@ try {
   const environmentArguments = baseEnvironment.flatMap((value) => ["--env", value]);
 
   // 真实外部设施在本 Gate 中故意不存在：不得把容器可构建误报为 ready，必须失败关闭且不泄密。
-  const unavailable = dockerResult(["run", "--rm", ...environmentArguments, imageId], {
-    capture: true,
-  });
+  const unavailable = dockerResult(
+    ["run", "--rm", ...runtimeSandboxArguments, ...environmentArguments, imageId],
+    {
+      capture: true,
+    },
+  );
   if (unavailable.status === 0) throw new Error("PRODUCTION_WORKER_GATE_FALSE_READY");
   if (
     !unavailable.output.includes("Agent Worker 生产进程启动失败") ||
@@ -129,9 +157,102 @@ try {
     throw new Error("PRODUCTION_WORKER_GATE_OUTPUT_LEAKED_SECRET");
   }
 
+  for (const [key, value] of Object.entries({
+    NODE_TLS_REJECT_UNAUTHORIZED: "0",
+    NODE_OPTIONS: "\n--import=data:text/javascript,process.stdout.write('pre-node-canary')",
+    NODE_USE_ENV_PROXY: "1",
+    NODE_USE_SYSTEM_CA: "1",
+    HTTP_PROXY: "http://127.0.0.1:9",
+    HTTPS_PROXY: "http://127.0.0.1:9",
+    ALL_PROXY: "http://127.0.0.1:9",
+    NO_PROXY: "*",
+    SSL_CERT_FILE: "/tmp/forbidden-ca.pem",
+    SSL_CERT_DIR: "/tmp/forbidden-ca-directory",
+    OPENSSL_CONF: "/tmp/forbidden-openssl.cnf",
+    OPENSSL_MODULES: "/tmp/forbidden-openssl-modules",
+    OPENSSL_ENGINES: "/tmp/forbidden-openssl-engines",
+    http_proxy: "http://127.0.0.1:9",
+    https_proxy: "http://127.0.0.1:9",
+    all_proxy: "http://127.0.0.1:9",
+    no_proxy: "*",
+  })) {
+    const rejected = dockerResult(
+      [
+        "run",
+        "--rm",
+        ...runtimeSandboxArguments,
+        ...environmentArguments,
+        "--env",
+        `${key}=${value}`,
+        imageId,
+      ],
+      { capture: true },
+    );
+    if (
+      rejected.status === 0 ||
+      !rejected.output.includes("production inherited environment rejected") ||
+      rejected.output.includes("Agent Worker 生产进程已启动") ||
+      rejected.output.includes(secretCanary) ||
+      rejected.output.includes("pre-node-canary")
+    ) {
+      throw new Error(`PRODUCTION_WORKER_GATE_INHERITED_ENVIRONMENT_INVALID:${key}`);
+    }
+  }
+
+  const futureNodeEnvironment = dockerResult(
+    [
+      "run",
+      "--rm",
+      ...runtimeSandboxArguments,
+      ...environmentArguments,
+      "--env",
+      "node_future_transport_override=1",
+      imageId,
+    ],
+    { capture: true },
+  );
+  if (
+    futureNodeEnvironment.status === 0 ||
+    !futureNodeEnvironment.output.includes("Agent Worker 生产进程启动失败") ||
+    futureNodeEnvironment.output.includes(secretCanary)
+  ) {
+    throw new Error("PRODUCTION_WORKER_GATE_FUTURE_NODE_ENVIRONMENT_INVALID");
+  }
+
+  for (const key of ["CUBE_API_KEY", "E2B_API_KEY", "CUBE_PROXY_NODE_IP"]) {
+    const rejected = dockerResult(
+      [
+        "run",
+        "--rm",
+        ...runtimeSandboxArguments,
+        ...environmentArguments,
+        "--env",
+        `${key}=ambient-cube-attacker-key`,
+        imageId,
+      ],
+      { capture: true },
+    );
+    if (
+      rejected.status === 0 ||
+      !rejected.output.includes("Agent Worker 生产进程启动失败") ||
+      rejected.output.includes(secretCanary) ||
+      rejected.output.includes("ambient-cube-attacker-key")
+    ) {
+      throw new Error(`PRODUCTION_WORKER_GATE_VENDOR_ENVIRONMENT_INVALID:${key}`);
+    }
+  }
+
   // development fixture 即使为 false 也必须在连接任何外部依赖之前拒绝。
   const forbiddenDevelopment = dockerResult(
-    ["run", "--rm", ...environmentArguments, "--env", "DEV_AUTH_ENABLED=false", imageId],
+    [
+      "run",
+      "--rm",
+      ...runtimeSandboxArguments,
+      ...environmentArguments,
+      "--env",
+      "DEV_AUTH_ENABLED=false",
+      imageId,
+    ],
     { capture: true },
   );
   if (forbiddenDevelopment.status === 0) {
@@ -149,6 +270,7 @@ try {
     [
       "run",
       "--rm",
+      ...runtimeSandboxArguments,
       ...environmentArguments,
       "--env",
       "CUBESANDBOX_API_URL=http://sandbox.invalid",

@@ -48,10 +48,19 @@
    同义写法、`options`、`search_path`、`application_name`、`sslrootcert` 等所有其他 query 一律拒绝。传给 `pg` 前移除
    query，并显式设置 `ssl.rejectUnauthorized=true`；证书链与主机名使用 Node 系统信任库及进程启动时的
    `NODE_EXTRA_CA_CERTS`，URL 不承载证书路径。
+   三个 production 入口在配置投影前对非空 `NODE_*` 默认拒绝，只允许镜像的 `NODE_ENV`/`NODE_VERSION` 与明示 CA
+   扩展 `NODE_EXTRA_CA_CERTS`；同时按 ASCII 大小写不敏感语义拒绝 HTTP(S)/ALL/NO proxy、`SSL_CERT_FILE`、
+   `SSL_CERT_DIR` 及 OpenSSL config/provider/engine 覆盖。最终镜像的非 Node entrypoint 在 Node 读取已知危险
+   `NODE_OPTIONS`/TLS/代理/CA 变量前以换行安全的固定参数展开拒绝，再 `exec` 固定 CMD；其余未来 `NODE_*` 和 vendor
+   `CUBE_*` 回退由最早 JS 配置边界默认拒绝。
 2. production probe 同时要求 `current_user=session_user=DATABASE_RUNTIME_ROLE`，并从 `pg_roles` 验证 `rolsuper=false`
    和 `rolbypassrls=false`。错误只暴露 mismatch/unsafe 稳定类别，不输出实际角色。Scheduler 必须在构造 Cube gateway、
    cleanup consumer 与启动 loop 前完成该 probe；gateway 构造后还必须先执行 Cube probe，readiness 同时登记 PG/Cube。
-   Scheduler 不使用 S3，因而不声明或投影任何 S3 变量；生产 API/Worker 的 S3 与各服务 Cube 端点必须使用无凭据 HTTPS。
+   API 与 Worker 首次启动同样先独占完成 PG 角色证明，成功后才运行 S3/Cube/模型远端 probe 或启动 listener/loop；后续
+   readiness 可独立重验各依赖。Scheduler 不使用 S3，因而不声明或投影任何 S3 变量；生产 API/Worker 的 S3 与各服务
+   Cube 端点必须使用无凭据 HTTPS。
+   Vendored Cube SDK 的 `Sandbox.create({config: Config})` 必须原样保留显式 `apiKey`/`null`，禁止重新读取 ambient
+   `CUBE_API_KEY`/`E2B_API_KEY`；production 继承环境门禁同时对所有 `CUBE_*` 和 `E2B_API_KEY` 失败关闭。
 3. JS 包不提供调用方 ACL。`process-runtime` 包根不导出任何创建或登记 production factory；它是受信服务代码可使用的
    通用编排器。安全边界位于三个服务公开 `start*Process`：production 分支拒绝 `input.assembler` 并固定本模块真实图。
 4. `RUNTIME_BLOB_OBJECT_PREFIX` 是 Worker 写侧、数据库 `physicalObjectKey` 与 API 读侧的共享持久数据契约。生产 API 和
@@ -63,11 +72,17 @@
    该值来自本地 Docker `RepoDigests` 证据；当前网络不可达时不宣称已远端重新验证。静态 Gate 拒绝 tag-only 或值漂移。
 7. `packageManager` 同时固定 pnpm 版本和 registry integrity。builder 唯一允许联网的依赖阶段是
    `pnpm fetch --frozen-lockfile`；随后 `pnpm install --offline --frozen-lockfile`、编译、`pnpm deploy --prod` 与裁剪均在
-   `RUN --network=none` 中完成。最终镜像只保留单服务闭包，以 UID/GID 1000 运行真实 `dist/production-main.js`，不含源码、
-   测试、development entry、sourcemap、声明文件、Python、npm/npx/Corepack/pnpm 或 Biome/TypeScript/tsx/Vitest。
+   `RUN --network=none` 中完成。最终镜像只保留单服务闭包，以 UID/GID 1000 运行真实 `dist/production-main.js`；应用、
+   node_modules、SBOM 与 vendor 证据归 root:root 且没有任何 group/world write 位，不含源码、测试、development entry、
+   sourcemap、声明文件、Python、npm/npx/Corepack/pnpm 或 Biome/TypeScript/tsx/Vitest。容器 Gate 用只读 root filesystem 与
+   单独 `/tmp` tmpfs 启动；真实部署必须配置等价的 `readOnlyRootFilesystem`，不能只依赖镜像文件 mode。
 8. SBOM 生成器只读取当前 pnpm production installed closure 与 `pnpm-lock.yaml`，强制 offline，不使用浮动临时执行器；
    输出排序、无时间戳的 CycloneDX 1.6，并记录 lock SHA-256。许可证默认失败关闭：仅 allow-list 可通过，deny-list 与
-   未知许可证均失败；vendor SDK 的 `LICENSE`、`SOURCE.md` 和固定 commit 同时进入证据与 API、Scheduler、Worker 镜像。
+   未知许可证均失败；本地派生 vendor SDK 使用 `0.3.0-cube.local.1`，其上游 commit、patch ID/file/SHA-256 与排除
+   根级 dist/node_modules/临时构建物后的 canonical patched-tree SHA-256 都由 Gate 重算，并由固定参数的
+   `git apply --reverse --check` 证明 exact patch 与当前受控文件一致。Canonical tree 是包含 `PATCHES` 自身的完整证据快照；
+   它不声称单个 patch 能从基线自描述地重建 patch manifest/patch 文件本身。`LICENSE`、`SOURCE.md`、`PATCHES` 和固定
+   来源/差异证据同时进入 API、Scheduler、Worker 镜像。
 9. 发布记录必须保存 API/Scheduler/Worker 镜像 digest、SBOM digest、迁移兼容窗口、必需 Gate 和上一组回滚 digest；清单约束灰度、
    回滚触发、停止领取、Schema down 条件与证据封存。发布只能引用已构建 digest，不能现场以 tag 重建。
 10. 三个服务分别投影声明环境并分片秘密：API 使用 PG/S3/JWT/TLS，Scheduler 只使用 PG/Cube，Worker 使用
@@ -92,6 +107,8 @@
 - prefix 将来变更需要对象与数据库引用迁移；
 - 三个 Docker Gate 会分别构建镜像，SBOM/License 变更必须随 lockfile 更新；
 - 锁定的 fetch 阶段仍需网络和包仓库可用；断网的依赖解析/编译证据不等于完整离线 Docker build；
+- 镜像 entrypoint 与 JS 入口的继承环境拒绝是部署误配置 Gate；有权覆盖镜像 entrypoint、命令或镜像内容的恶意部署者仍
+  不在该边界内，集群 admission policy/镜像启动策略、只读 root filesystem 与受控 `/tmp` tmpfs 仍是 M7 外部前置条件；
 - 本地 `RepoDigests` 和断网安装/编译证据不等于镜像仓库签名、来源证明或真实环境验收。
 
 ## 验证

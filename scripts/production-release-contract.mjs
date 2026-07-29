@@ -29,6 +29,7 @@ function readRepositoryInputs() {
     .map((entry) => readFileSync(join(repositoryRoot, "scripts", entry.name), "utf8"))
     .join("\n");
   return Object.freeze({
+    dockerignore: readFileSync(join(repositoryRoot, ".dockerignore"), "utf8"),
     apiDockerfile: readFileSync(join(repositoryRoot, "Dockerfile.production-api-gate"), "utf8"),
     schedulerDockerfile: readFileSync(
       join(repositoryRoot, "Dockerfile.production-scheduler-gate"),
@@ -52,6 +53,9 @@ function readRepositoryInputs() {
 
 export function validateProductionReleaseInputs(input) {
   const issues = [];
+  if (!/^\/exports\s*$/mu.test(input.dockerignore)) {
+    issues.push("Docker build context 未排除根级 exports 运行证据");
+  }
   for (const [service, dockerfile] of [
     ["API", input.apiDockerfile],
     ["Scheduler", input.schedulerDockerfile],
@@ -70,15 +74,32 @@ export function validateProductionReleaseInputs(input) {
     }
     if (
       !dockerfile.includes("USER 1000:1000") ||
+      !dockerfile.includes('ENTRYPOINT ["/usr/local/bin/production-entrypoint"]') ||
       !dockerfile.includes('CMD ["node", "dist/production-main.js"]')
     ) {
-      issues.push(`${service} 非 root production entry 契约缺失`);
+      issues.push(`${service} 非 root production entrypoint/CMD 契约缺失`);
+    }
+    if (
+      !dockerfile.includes(
+        "COPY --chown=0:0 scripts/production-entrypoint.sh /usr/local/bin/production-entrypoint",
+      ) ||
+      !dockerfile.includes("chmod 0555 /usr/local/bin/production-entrypoint")
+    ) {
+      issues.push(`${service} 缺少 pre-Node 继承环境门禁`);
+    }
+    if (
+      !dockerfile.includes("COPY --from=build --chown=0:0 /opt/deploy/ ./") ||
+      dockerfile.includes("--chown=1000:1000") ||
+      !dockerfile.includes("RUN chown -R 0:0 /opt/runtime && chmod -R a-w /opt/runtime")
+    ) {
+      issues.push(`${service} 运行闭包未固定为 root 所有且不可写`);
     }
     if (
       !dockerfile.includes("runtime-ts/vendor/cubesandbox-sdk/LICENSE") ||
-      !dockerfile.includes("runtime-ts/vendor/cubesandbox-sdk/SOURCE.md")
+      !dockerfile.includes("runtime-ts/vendor/cubesandbox-sdk/SOURCE.md") ||
+      !dockerfile.includes("runtime-ts/vendor/cubesandbox-sdk/PATCHES/")
     ) {
-      issues.push(`${service} 缺少 vendor LICENSE/SOURCE 镜像证据`);
+      issues.push(`${service} 缺少 vendor LICENSE/SOURCE/PATCHES 镜像证据`);
     }
     if (
       !dockerfile.includes("RUN pnpm fetch --frozen-lockfile") ||
@@ -144,6 +165,7 @@ export function validateProductionReleaseInputs(input) {
     "rollbackCompatibleThrough",
     "最小权限 Runtime 角色",
     "API/Scheduler/Worker",
+    "readOnlyRootFilesystem",
     "M7 的容量、全量故障与真实基础设施 Gate",
   ]) {
     if (!input.checklist.includes(boundary)) issues.push(`发布回滚边界缺少：${boundary}`);

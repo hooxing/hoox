@@ -24,12 +24,8 @@ const run = (id: string, threadId: string): Run => ({
   updatedAt: "2026-07-29T00:00:00.000Z",
 });
 
-const textArtifact = (threadId: string, runId: string): Artifact => ({
+const textArtifact = (): Artifact => ({
   id: "artifact_text",
-  tenantId: "tenant_a",
-  threadId,
-  runId,
-  resourceVersionId: "resource_version_text",
   name: "report.txt",
   mediaType: "text/plain; charset=utf-8",
   sizeBytes: 41,
@@ -233,7 +229,7 @@ describe("Agent 工作台恢复接入", () => {
       listThreads: vi.fn(async () => [selectedThread]),
       listLatestRuns: vi.fn(async () => [latest]),
       getRun: vi.fn(async () => latest),
-      listArtifacts: vi.fn(async () => [textArtifact(selectedThread.id, latest.id)]),
+      listArtifacts: vi.fn(async () => [textArtifact()]),
       previewArtifact: vi.fn(async () => ({ kind: "text" as const, text: payload })),
     });
     const { container } = mount(apiClient);

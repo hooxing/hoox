@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => {
 vi.mock("@cube-runtime/persistence", () => ({
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
   createS3BlobStore: mocks.createS3BlobStore,
+  RUNTIME_BLOB_OBJECT_PREFIX: "agent-worker",
 }));
 
 vi.mock("./app.js", () => ({ createApiApp: mocks.createApiApp }));

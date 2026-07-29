@@ -14,7 +14,20 @@
       "license": "Apache-2.0",
       "licenseFile": "runtime-ts/vendor/cubesandbox-sdk/LICENSE",
       "sourceFile": "runtime-ts/vendor/cubesandbox-sdk/SOURCE.md",
-      "sourceCommit": "8721dd151971ce3c2966482bbd32904ad98f378e"
+      "upstreamCommit": "8721dd151971ce3c2966482bbd32904ad98f378e",
+      "localPatchId": "CUBE-LOCAL-0001",
+      "patchFile": "runtime-ts/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.patch",
+      "patchedFiles": [
+        "runtime-ts/vendor/cubesandbox-sdk/SOURCE.md",
+        "runtime-ts/vendor/cubesandbox-sdk/package-lock.json",
+        "runtime-ts/vendor/cubesandbox-sdk/package.json",
+        "runtime-ts/vendor/cubesandbox-sdk/src/config.ts",
+        "runtime-ts/vendor/cubesandbox-sdk/src/sandbox.ts",
+        "runtime-ts/vendor/cubesandbox-sdk/test/config.test.ts",
+        "runtime-ts/vendor/cubesandbox-sdk/test/sandbox.test.ts"
+      ],
+      "patchSha256": "ac285a52b5b5994b2a4b4102cf0cf952c252e421d8bfb33aa3f79e058008bb8a",
+      "patchedTreeSha256": "4c496b33e88e3e375fca51fce0dacbc7fafc7fa20f862fe7fbd8d26ce8ad9c46"
     }
   }
 }

@@ -82,19 +82,27 @@ corepack pnpm test:production-worker:container
 integrity。builder 只在 `pnpm fetch --frozen-lockfile` 阶段联网；其后的 offline 安装、编译、deploy 和裁剪均以
 `RUN --network=none` 执行。最终镜像只含 production 闭包，不含源码、测试、development entry、Python、npm/npx、
 Corepack/pnpm 或 Biome/TypeScript/tsx/Vitest。这里证明的是锁定 fetch 后的断网解析与编译，不是完整离线 Docker build。
-容器 Gate 会确认 build context 不含 `.env` canary、进程使用非 root UID 与真实 production entry，并在外部依赖不可用、
+容器 Gate 会确认 build context 不含 `.env` canary、进程使用非 root UID 与真实 production entry，运行闭包和证据均为
+root:root 且不可由运行 UID 改写，并以只读 root filesystem 加独立 `/tmp` tmpfs 执行；同时在外部依赖不可用、
 development 变量遗留、明文端点或 TLS/角色配置错误时验证失败关闭和秘密脱敏。API Gate 还在最终镜像中以真实 AWS SDK
 执行与 Worker 相同 stable prefix 的 HEAD、GET 与预签名下载路径，防止 Artifact 读写侧漂移。Scheduler 在启动 cleanup
 loop 前探测 PG 角色与 CubeSandbox，readiness 同时包含两者；它不使用对象存储，因此其环境投影拒绝接收 S3 密钥。
 
 部署必须按服务分片秘密：API 只取得 PG/S3/JWT/TLS，Scheduler 只取得 PG/Cube，Worker 只取得 PG/S3/Cube/模型；不要
 把 `production.env.example` 作为共享秘密文件整包注入任一容器。样例是三服务配置字段的合集，不是单容器授权清单。
+三个 production 入口对非空 `NODE_*` 默认拒绝，仅允许镜像的 `NODE_ENV`/`NODE_VERSION` 与私有 CA 通道
+`NODE_EXTRA_CA_CERTS`，并按大小写不敏感语义拒绝环境代理、vendor Cube 回退及 OpenSSL CA/config/provider 覆盖。
+最终镜像先由非 Node entrypoint 拒绝 Node 启动前会消费的已知危险变量，防止 `NODE_OPTIONS` 预加载；未来 `NODE_*`
+与 `CUBE_*` 则由最早 JS 配置边界失败关闭。该边界不能抵抗有权覆盖镜像 entrypoint/命令的
+恶意部署者；真正的 admission policy、容器启动策略与 `readOnlyRootFilesystem` 仍须在 M7 外部部署验收中证明。
 `API_PUBLIC_ORIGIN` 是浏览器/API 对外 origin，`S3_PUBLIC_ENDPOINT` 必须使用不同的专用对象 origin，禁止经应用同源路径
 代理对象正文。对象存储/CDN 的 CORS 只能允许受信 Web origin；当前代码与容器 Gate 没有证明外部 CDN 已配置
 `nosniff` 或 CSP，部署验收必须单独核对，不能把文档要求当作已验证响应头。
 
 `supply-chain:check` 从 pnpm production installed closure 离线生成无时间戳、确定排序的 CycloneDX 1.6 并与已提交文件逐字
-比较；`license:check` 对 registry 与 vendor 闭包执行默认拒绝策略，vendor `LICENSE`/`SOURCE.md` 随 API、Scheduler、Worker 镜像交付。
+比较；`license:check` 对 registry 与 vendor 闭包执行默认拒绝策略，本地派生 vendor 的上游 commit、patch 与 canonical
+tree hash 由 Gate 重算，exact patch 还必须通过 `git apply --reverse --check`；canonical tree 是包含 `PATCHES` 的完整证据
+快照，并不声称 patch 单独重建自身证据文件。`LICENSE`/`SOURCE.md`/`PATCHES` 随 API、Scheduler、Worker 镜像交付。
 基础镜像 digest 的当前依据是本地 Docker `RepoDigests`；网络不可达时不宣称已经远端重新验证。发布时必须填写
 [`deploy/production-release-manifest.example.json`](deploy/production-release-manifest.example.json) 并执行
 [`deploy/production-release-checklist.md`](deploy/production-release-checklist.md)。以上 Gate **不等同于**真实部署 readiness：

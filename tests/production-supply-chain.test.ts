@@ -1,10 +1,16 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   buildCycloneDx,
+  canonicalVendorTreeSha256,
   evaluateLicensePolicy,
   productionSbomTargets,
   validateProductionSupplyChain,
+  validateVendorEvidence,
+  verifyReverseApplicablePatch,
 } from "../scripts/production-supply-chain.mjs";
 
 function component(name: string, license: string) {
@@ -23,13 +29,105 @@ function component(name: string, license: string) {
 describe("生产供应链契约", () => {
   it("锁文件安装闭包可离线复现已提交 CycloneDX SBOM", () => {
     expect(validateProductionSupplyChain()).toEqual([]);
+    const policy = JSON.parse(
+      readFileSync(new URL("../supply-chain/license-policy.json", import.meta.url), "utf8"),
+    );
+    expect(validateVendorEvidence(policy)).toEqual([]);
     for (const target of productionSbomTargets) {
       const bom = JSON.parse(
         readFileSync(new URL(`../supply-chain/sbom/${target.fileName}`, import.meta.url), "utf8"),
       );
       expect(bom).toMatchObject({ bomFormat: "CycloneDX", specVersion: "1.6", version: 1 });
+      const vendor = bom.components.find(
+        (component: { readonly name: string }) => component.name === "@cubesandbox/sdk",
+      );
+      expect(vendor).toMatchObject({ version: "0.3.0-cube.local.1" });
+      expect(
+        Object.fromEntries(
+          vendor.properties.map(
+            ({ name, value }: { readonly name: string; readonly value: string }) => [name, value],
+          ),
+        ),
+      ).toEqual(
+        expect.objectContaining({
+          "cube:upstream-source-commit": policy.vendorEvidence["@cubesandbox/sdk"].upstreamCommit,
+          "cube:local-modified": "true",
+          "cube:local-patch-id": "CUBE-LOCAL-0001",
+          "cube:local-patch-sha256": policy.vendorEvidence["@cubesandbox/sdk"].patchSha256,
+          "cube:patched-tree-sha256": policy.vendorEvidence["@cubesandbox/sdk"].patchedTreeSha256,
+        }),
+      );
     }
   }, 30_000);
+
+  it("vendor patch 或 canonical tree 哈希漂移时失败关闭", () => {
+    const policy = JSON.parse(
+      readFileSync(new URL("../supply-chain/license-policy.json", import.meta.url), "utf8"),
+    );
+    const evidence = policy.vendorEvidence["@cubesandbox/sdk"];
+    expect(
+      validateVendorEvidence({
+        ...policy,
+        vendorEvidence: {
+          ...policy.vendorEvidence,
+          "@cubesandbox/sdk": { ...evidence, patchSha256: "0".repeat(64) },
+        },
+      }),
+    ).toContain("vendor 补丁哈希不匹配：@cubesandbox/sdk");
+    expect(
+      validateVendorEvidence({
+        ...policy,
+        vendorEvidence: {
+          ...policy.vendorEvidence,
+          "@cubesandbox/sdk": { ...evidence, patchedTreeSha256: "0".repeat(64) },
+        },
+      }),
+    ).toContain("vendor patched tree 不匹配：@cubesandbox/sdk");
+    expect(
+      validateVendorEvidence({
+        ...policy,
+        vendorEvidence: {
+          ...policy.vendorEvidence,
+          "@cubesandbox/sdk": { ...evidence, patchedFiles: ["runtime-ts/vendor/other.ts"] },
+        },
+      }),
+    ).toContain("vendor 补丁哈希不匹配：@cubesandbox/sdk");
+  });
+
+  it("canonical tree 只排除 vendor 根级生成目录", () => {
+    const directory = mkdtempSync(join(tmpdir(), "cube-vendor-tree-"));
+    try {
+      mkdirSync(join(directory, "dist"));
+      mkdirSync(join(directory, "src", "dist"), { recursive: true });
+      writeFileSync(join(directory, "dist", "generated.js"), "ignored-one");
+      writeFileSync(join(directory, "src", "dist", "controlled.ts"), "controlled-one");
+      const initial = canonicalVendorTreeSha256(directory);
+      writeFileSync(join(directory, "dist", "generated.js"), "ignored-two");
+      expect(canonicalVendorTreeSha256(directory)).toBe(initial);
+      writeFileSync(join(directory, "src", "dist", "controlled.ts"), "controlled-two");
+      expect(canonicalVendorTreeSha256(directory)).not.toBe(initial);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("exact patch 必须能从当前受控 vendor tree 反向应用", () => {
+    const patchPath = fileURLToPath(
+      new URL(
+        "../runtime-ts/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.patch",
+        import.meta.url,
+      ),
+    );
+    expect(verifyReverseApplicablePatch(patchPath)).toBe(true);
+    const directory = mkdtempSync(join(tmpdir(), "cube-invalid-patch-"));
+    try {
+      const invalidPatchPath = join(directory, "invalid.patch");
+      writeFileSync(invalidPatchPath, "Subject: [PATCH] invalid\n\nnot a unified diff\n");
+      expect(verifyReverseApplicablePatch(invalidPatchPath)).toBe(false);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 
   it("组件输入顺序不影响确定性输出", () => {
     const first = component("alpha", "MIT");

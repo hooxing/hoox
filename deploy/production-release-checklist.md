@@ -8,14 +8,16 @@
 1. 记录 release ID、Git commit、API/Scheduler/Worker 镜像 digest，确认部署引用 `sha256:`，不使用 tag 或 `latest`。
 2. 运行 `config:check:production`、`supply-chain:check`、`license:check`、`release:check`、三个服务的容器 Gate；保存日志与
    CycloneDX SBOM SHA-256。Gate 只能证明静态边界和外部依赖缺失时失败关闭。
-3. 复核 vendor `LICENSE`/`SOURCE.md`、Node base manifest digest、pnpm lock hash，以及 License allow/deny 结果；禁止 `dlx`、
+3. 部署声明必须启用 `readOnlyRootFilesystem`（只读 root filesystem），仅挂载受控的 `/tmp` tmpfs，并由 admission policy 拒绝覆盖镜像
+   entrypoint/command；运行 UID 1000 不得写入应用、node_modules、SBOM 或 vendor 证据目录。
+4. 复核 vendor `LICENSE`/`SOURCE.md`、Node base manifest digest、pnpm lock hash，以及 License allow/deny 结果；禁止 `dlx`、
    `npx` 或任何未锁定的临时下载。
-4. 为 API、Scheduler、Worker 分别只注入其声明的秘密；禁止把共享 env 文件整包注入。Scheduler 只需要 PG/Cube，不接收
+5. 为 API、Scheduler、Worker 分别只注入其声明的秘密；禁止把共享 env 文件整包注入。Scheduler 只需要 PG/Cube，不接收
    S3 或模型密钥。在隔离预生产 Linux 环境以最小权限 Runtime 角色连接真实 PG/S3/CubeSandbox/模型，验证三个服务的
    readiness、关闭、JWT/Tenant 越权矩阵和秘密脱敏。Web/OIDC 是外部产品身份前置，未接通时不得声称浏览器生产闭环。
    同时确认对象存储使用与 `API_PUBLIC_ORIGIN` 不同的专用 origin，CORS 只允许受信 Web origin；逐响应验证 CDN 的
    `nosniff`/CSP，不能把未受代码控制的外部响应头视为已由本 Gate 证明。
-5. 记录数据库 migrationFrom、migrationTo 和 rollbackCompatibleThrough；先完成备份/恢复演练，并确认旧镜像读取新 Schema 的
+6. 记录数据库 migrationFrom、migrationTo 和 rollbackCompatibleThrough；先完成备份/恢复演练，并确认旧镜像读取新 Schema 的
    兼容窗口。破坏性迁移必须单独发布，不能与应用切换合并。
 
 ## 发布

@@ -1,6 +1,7 @@
 export const productionNodeBaseDigest: string;
 
 export interface ProductionReleaseInputs {
+  readonly dockerignore: string;
   readonly apiDockerfile: string;
   readonly schedulerDockerfile: string;
   readonly workerDockerfile: string;

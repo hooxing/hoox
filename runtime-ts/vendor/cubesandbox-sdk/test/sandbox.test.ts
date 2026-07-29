@@ -113,6 +113,25 @@ afterEach(() => {
 });
 
 describe("Sandbox.create", () => {
+  it("preserves an explicit Config API key instead of ambient CUBE/E2B credentials", async () => {
+    process.env.CUBE_API_KEY = "ambient-cube-attacker-key";
+    process.env.E2B_API_KEY = "ambient-e2b-attacker-key";
+    const config = makeConfig();
+    config.apiKey = "declared-production-key";
+    const sb = await Sandbox.create({ config });
+    expect(requests[0]?.headers.authorization).toBe("Bearer declared-production-key");
+    sb.close();
+  });
+
+  it("preserves an explicit null Config API key instead of ambient credentials", async () => {
+    process.env.CUBE_API_KEY = "ambient-cube-attacker-key";
+    const config = makeConfig();
+    config.apiKey = null;
+    const sb = await Sandbox.create({ config });
+    expect(requests[0]?.headers.authorization).toBeUndefined();
+    sb.close();
+  });
+
   it("returns a sandbox with fields parsed from the response", async () => {
     setHandler(() => ({ status: 201, json: SANDBOX_DATA }));
     const sb = await Sandbox.create({ config: makeConfig() });

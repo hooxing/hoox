@@ -23,6 +23,15 @@ function productionEnvironment(): Record<string, string> {
 }
 
 describe("Scheduler 进程入口", () => {
+  it("production 在解析最早边界拒绝继承的 Node TLS/代理覆盖", () => {
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        NODE_TLS_REJECT_UNAUTHORIZED: "0",
+      }),
+    ).toThrow("PRODUCTION_INHERITED_ENVIRONMENT_FORBIDDEN");
+  });
+
   it("配置可验证，传入 Fake assembler 不能冒充受审生产装配", async () => {
     const configuration = parseSchedulerProcessEnvironment(productionEnvironment());
     expect(configuration.sandbox).toMatchObject({

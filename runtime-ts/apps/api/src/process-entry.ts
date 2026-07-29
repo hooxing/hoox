@@ -1,4 +1,5 @@
 import {
+  assertProductionInheritedEnvironment,
   booleanEnvironmentField,
   EnvironmentConfigurationError,
   integerEnvironmentField,
@@ -147,12 +148,14 @@ export interface ApiProcessConfiguration {
 export function selectApiProcessEnvironment(
   source: NodeJS.ProcessEnv,
 ): Readonly<Record<string, string | undefined>> {
+  assertProductionInheritedEnvironment(source);
   return selectDeclaredEnvironment(source, apiProcessEnvironmentKeys);
 }
 
 export function parseApiProcessEnvironment(
   source: Readonly<Record<string, string | undefined>>,
 ): ApiProcessConfiguration {
+  assertProductionInheritedEnvironment(source);
   const parsed = parseStrictEnvironment(source, apiEnvironmentSchema);
   if (parsed.runtimeEnvironment === "production") {
     assertProductionHasNoDevelopmentIdentity(source);

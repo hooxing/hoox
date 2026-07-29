@@ -18,6 +18,22 @@ Resource Library 已增加 PostgreSQL 目录与显式提升提交：生产装配
 
 执行端口和协议位于 `@cube-runtime/run-contracts`，应用目录只保留兼容导出。生产表全部 FORCE RLS，Runtime 角色使用表/列白名单且没有 routine 权限。
 
+## Workspace candidate 交接
+
+`0015_workspace_candidate_handoff` 实现 ADR-0047 的 Workspace 发布事务边界：Sandbox 快照产生的新 stable
+引用必须先绑定到完整 Attempt candidate，candidate 从 `building` 经 manifest 逐文件核验进入 `prepared`。
+最终 `PgExecutionPersistence` 在同一 SERIALIZABLE RuntimeMutation 中写入 revision/manifest/files、推进
+Workspace head、把 uploaded 引用标记为 `released` 并把 candidate 标记为 `committed`。已提交 revision file
+随后是 GC 可达事实，released 引用仅保留审计身份。
+
+同路径且内容与精确 incarnation 均未变化的文件直接复用 parent revision，不创建新 Blob 或引用。发布明确
+失败、修正轮次、终态释放栅栏和租约过期恢复会在 PostgreSQL 事务内释放仍处于 building/prepared 的
+candidate 与 uploaded 引用；COMMIT 响应未知只能通过原 RuntimeMutation 幂等键读取结果。stable 读取授权
+及续期逐字段绑定 Tenant、Thread、Workspace、revision 和 relative path，不能用同一物理 Blob 越过文件事实。
+
+`released` 是不可逆的生命周期状态，不计入 stable 引用可达性。迁移 down 只删除 candidate 协调表，故意
+保留 released 状态和约束，避免把已释放引用错误恢复为会阻止 GC 的 stable。
+
 ## Blob Store 约束
 
 - 调用必须携带可信 `TenantBlobScope` 和固定 `BlobPurpose`；

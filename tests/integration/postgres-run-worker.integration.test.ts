@@ -27,7 +27,6 @@ import {
   outboxPayloadDigest,
   runtimeMutationDigest,
 } from "@cube-runtime/run-contracts/mutation-protocol";
-import { createWorkspaceManifest } from "../../runtime-ts/packages/workspace/src/manifest.js";
 import { FakeSandboxGateway } from "@cube-runtime/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -50,6 +49,7 @@ import {
   CubeSandboxCleanupResolver,
   SandboxCleanupConsumer,
 } from "../../runtime-ts/apps/scheduler/src/sandbox-cleanup-consumer.js";
+import type { BlobStore } from "../../runtime-ts/packages/persistence/src/blob-store.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import {
   PgArchiveThreadCommand,
@@ -64,14 +64,22 @@ import {
   PgExecutionPersistence,
   PgRunExecutionSetup,
 } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
-import { PgWorkspaceManifestRepository } from "../../runtime-ts/packages/persistence/src/pg-workspace-manifest.js";
 import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-sandbox-cleanup-consumer.js";
 import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
+import {
+  PgWorkspaceCandidateHandoff,
+  workspaceCandidateOperationDigest,
+} from "../../runtime-ts/packages/persistence/src/pg-workspace-candidate.js";
+import {
+  PgWorkspaceManifestRepository,
+  PgWorkspaceStableBlobAccess,
+} from "../../runtime-ts/packages/persistence/src/pg-workspace-manifest.js";
 import {
   createPostgresPool,
   type Pool,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { createWorkspaceManifest } from "../../runtime-ts/packages/workspace/src/manifest.js";
 import {
   loadPostgreSqlMigrationContract,
   type PostgreSqlMigrationContract,
@@ -392,10 +400,10 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
          FROM pg_class relation
          JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
          LEFT JOIN LATERAL (
-           SELECT pg_get_constraintdef(constraint.oid) AS definition
-             FROM pg_constraint constraint
-            WHERE constraint.conrelid=relation.oid AND constraint.contype='f'
-            ORDER BY constraint.oid
+           SELECT pg_get_constraintdef(constraint_row.oid) AS definition
+             FROM pg_constraint constraint_row
+            WHERE constraint_row.conrelid=relation.oid AND constraint_row.contype='f'
+            ORDER BY constraint_row.oid
             LIMIT 1
          ) constraint_def ON true
         WHERE namespace.nspname=$1
@@ -406,11 +414,11 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     expect(schemaFacts.rows).toHaveLength(3);
     expect(schemaFacts.rows.every((row) => row.rls && row.force_rls)).toBe(true);
     const fileForeignKeys = await admin.query<{ readonly definition: string }>(
-      `SELECT pg_get_constraintdef(constraint.oid) AS definition
-         FROM pg_constraint constraint
-         JOIN pg_class relation ON relation.oid=constraint.conrelid
+      `SELECT pg_get_constraintdef(constraint_row.oid) AS definition
+         FROM pg_constraint constraint_row
+         JOIN pg_class relation ON relation.oid=constraint_row.conrelid
          JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
-        WHERE namespace.nspname=$1 AND relation.relname='workspace_revision_files' AND constraint.contype='f'`,
+        WHERE namespace.nspname=$1 AND relation.relname='workspace_revision_files' AND constraint_row.contype='f'`,
       [schema],
     );
     expect(fileForeignKeys.rows.map((row) => row.definition).join("\n")).toContain(
@@ -2354,6 +2362,114 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     );
     expect(finalizing.outcome).toBe("applied");
     const revision = workspaceRevisionId(`rw-revision-${suffix}`);
+    const lifecycleId = randomUUID();
+    const incarnationId = randomUUID();
+    const referenceId = `candidate-final-ref-${suffix}`;
+    const blobOperationId = `candidate-final-${suffix}`.slice(0, 120);
+    const contentSha256 = "b".repeat(64);
+    const physicalObjectKey = `runtime/stable/${f.scope.tenantId}/workspace/sha256/${contentSha256}/incarnations/${incarnationId}`;
+    const manifest = createWorkspaceManifest(
+      {
+        tenantId: f.scope.tenantId,
+        entries: [
+          {
+            type: "file",
+            path: "final.txt",
+            content: { sha256: contentSha256, size: 1 },
+            object: {
+              tenantId: f.scope.tenantId,
+              purpose: "workspace",
+              incarnationId,
+              physicalObjectKey,
+            },
+          },
+        ],
+      },
+      { maxFiles: 1, maxTotalBytes: 1 },
+    );
+    const candidateUnsigned = {
+      tenantId: f.scope.tenantId,
+      threadId: f.scope.threadId,
+      workspaceId: f.scope.workspaceId,
+      attemptId: claimed.snapshot.attempt.attemptId,
+      runId: f.scope.runId,
+      rootRunId: f.scope.rootRunId,
+      revisionId: revision,
+      operationKey: `${claimed.snapshot.attempt.attemptId}/workspace/final`,
+    };
+    const candidate = {
+      ...candidateUnsigned,
+      operationDigest: workspaceCandidateOperationDigest(candidateUnsigned),
+    };
+    const handoff = new PgWorkspaceCandidateHandoff(runtime, {
+      maxEntries: 1,
+      maxFiles: 1,
+      maxTotalBytes: 1,
+      maxSingleFileBytes: 1,
+      maxChunkBytes: 1,
+      maxPathUtf8Bytes: 128,
+      historicalManifest: { maxFiles: 1, maxTotalBytes: 1 },
+    });
+    await handoff.begin(candidate);
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      await client.query(
+        `INSERT INTO blob_lifecycles(
+           tenant_id,lifecycle_id,purpose,sha256,size,state,current_incarnation_id
+         ) VALUES ($1,$2,'workspace',$3,1,'active',$4)`,
+        [f.scope.tenantId, lifecycleId, contentSha256, incarnationId],
+      );
+      await client.query(
+        `INSERT INTO blob_incarnations(
+           tenant_id,lifecycle_id,purpose,sha256,size,incarnation_id,physical_object_key,state
+         ) VALUES ($1,$2,'workspace',$3,1,$4,$5,'active')`,
+        [f.scope.tenantId, lifecycleId, contentSha256, incarnationId, physicalObjectKey],
+      );
+      await client.query(
+        `INSERT INTO blob_commits(tenant_id,operation_id,status,version,snapshot)
+         VALUES ($1,$2,'completed',1,'{}'::jsonb)`,
+        [f.scope.tenantId, blobOperationId],
+      );
+      await client.query(
+        `INSERT INTO blob_references(
+           tenant_id,reference_id,operation_id,state,purpose,sha256,size,media_type,
+           staging_upload_id,lifecycle_id,incarnation_id,physical_object_key
+         ) VALUES ($1,$2,$3,'stable','workspace',$4,1,'application/octet-stream',
+                   'candidate-final-upload',$5,$6,$7)`,
+        [
+          f.scope.tenantId,
+          referenceId,
+          blobOperationId,
+          contentSha256,
+          lifecycleId,
+          incarnationId,
+          physicalObjectKey,
+        ],
+      );
+      await client.query(
+        `INSERT INTO workspace_revision_candidate_files(
+           tenant_id,workspace_id,attempt_id,run_id,thread_id,root_run_id,parent_revision_id,
+           revision_id,operation_key,operation_digest,relative_path,source,content_sha256,size,
+           blob_lifecycle_id,blob_incarnation_id,physical_object_key,blob_reference_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9,'final.txt','uploaded',$10,1,$11,$12,$13,$14)`,
+        [
+          f.scope.tenantId,
+          f.scope.workspaceId,
+          claimed.snapshot.attempt.attemptId,
+          f.scope.runId,
+          f.scope.threadId,
+          f.scope.rootRunId,
+          revision,
+          candidate.operationKey,
+          candidate.operationDigest,
+          contentSha256,
+          lifecycleId,
+          incarnationId,
+          physicalObjectKey,
+          referenceId,
+        ],
+      );
+    });
+    await handoff.prepare({ identity: candidate, manifest });
     const lossyFinal = new PgExecutionPersistence(runtime, {
       afterCommit: () => {
         throw new Error("模拟 Revision 终态 COMMIT 响应丢失");
@@ -2374,10 +2490,9 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         workspaceId: f.scope.workspaceId,
         rootRunId: f.scope.rootRunId,
         revisionId: revision,
-        manifest: createWorkspaceManifest(
-          { tenantId: f.scope.tenantId, entries: [] },
-          { maxFiles: 1, maxTotalBytes: 1 },
-        ),
+        candidateOperationKey: candidate.operationKey,
+        candidateOperationDigest: sha256Digest(candidate.operationDigest),
+        manifest,
       },
       releaseFences: true,
     });
@@ -2394,6 +2509,200 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       workspace: { currentRevisionId: revision },
       receipt: { workspace: { currentHead: revision } },
     });
+    const committedFacts = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      async (client) => ({
+        candidate: await client.query<{ readonly status: string }>(
+          `SELECT status FROM workspace_revision_candidates
+            WHERE tenant_id=$1 AND workspace_id=$2 AND attempt_id=$3 AND operation_key=$4`,
+          [
+            f.scope.tenantId,
+            f.scope.workspaceId,
+            claimed.snapshot.attempt.attemptId,
+            candidate.operationKey,
+          ],
+        ),
+        reference: await client.query<{ readonly state: string }>(
+          `SELECT state FROM blob_references WHERE tenant_id=$1 AND reference_id=$2`,
+          [f.scope.tenantId, referenceId],
+        ),
+        file: await client.query<{ readonly relative_path: string }>(
+          `SELECT relative_path FROM workspace_revision_files
+            WHERE tenant_id=$1 AND workspace_id=$2 AND revision_id=$3`,
+          [f.scope.tenantId, f.scope.workspaceId, revision],
+        ),
+      }),
+      { readOnly: true },
+    );
+    expect(committedFacts.candidate.rows[0]?.status).toBe("committed");
+    expect(committedFacts.reference.rows[0]?.state).toBe("released");
+    expect(committedFacts.file.rows).toEqual([{ relative_path: "final.txt" }]);
+    const stableAccess = new PgWorkspaceStableBlobAccess(runtime, {} as BlobStore);
+    const authorizationInput = {
+      scope: {
+        tenantId: f.scope.tenantId,
+        threadId: f.scope.threadId,
+        workspaceId: f.scope.workspaceId,
+      },
+      purpose: "workspace_materialization" as const,
+      revisionId: revision,
+      relativePath: "final.txt",
+      content: { sha256: contentSha256, size: 1 },
+      object: {
+        tenantId: f.scope.tenantId,
+        purpose: "workspace" as const,
+        incarnationId,
+        physicalObjectKey,
+      },
+    };
+    await expect(stableAccess.authorize(authorizationInput)).resolves.toMatchObject({
+      status: "authorized",
+      receipt: {
+        threadId: f.scope.threadId,
+        workspaceId: f.scope.workspaceId,
+        revisionId: revision,
+        relativePath: "final.txt",
+      },
+    });
+    await expect(
+      stableAccess.authorize({ ...authorizationInput, relativePath: "other.txt" }),
+    ).resolves.toEqual({ status: "denied" });
+  });
+
+  it("终态 mutation 原子释放 building candidate 与 uploaded stable 引用", async () => {
+    const f = await fixture(`candidate-release-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "candidate-release-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("candidate release claim 失败");
+    const revision = workspaceRevisionId(`candidate-release-revision-${suffix}`);
+    const unsignedCandidate = {
+      tenantId: f.scope.tenantId,
+      threadId: f.scope.threadId,
+      workspaceId: f.scope.workspaceId,
+      attemptId: claimed.snapshot.attempt.attemptId,
+      runId: f.scope.runId,
+      rootRunId: f.scope.rootRunId,
+      revisionId: revision,
+      operationKey: `${claimed.snapshot.attempt.attemptId}/workspace/release`,
+    };
+    const candidate = {
+      ...unsignedCandidate,
+      operationDigest: workspaceCandidateOperationDigest(unsignedCandidate),
+    };
+    const handoff = new PgWorkspaceCandidateHandoff(runtime, {
+      maxEntries: 1,
+      maxFiles: 1,
+      maxTotalBytes: 8,
+      maxSingleFileBytes: 8,
+      maxChunkBytes: 8,
+      maxPathUtf8Bytes: 128,
+      historicalManifest: { maxFiles: 1, maxTotalBytes: 8 },
+    });
+    await handoff.begin(candidate);
+    const lifecycleId = randomUUID();
+    const incarnationId = randomUUID();
+    const referenceId = `candidate-release-ref-${suffix}`;
+    const blobOperationId = `candidate-release-${suffix}`.slice(0, 120);
+    const sha256 = "c".repeat(64);
+    const physicalObjectKey = `runtime/stable/${f.scope.tenantId}/workspace/sha256/${sha256}/incarnations/${incarnationId}`;
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      await client.query(
+        `INSERT INTO blob_lifecycles(
+           tenant_id,lifecycle_id,purpose,sha256,size,state,current_incarnation_id
+         ) VALUES ($1,$2,'workspace',$3,1,'active',$4)`,
+        [f.scope.tenantId, lifecycleId, sha256, incarnationId],
+      );
+      await client.query(
+        `INSERT INTO blob_incarnations(
+           tenant_id,lifecycle_id,purpose,sha256,size,incarnation_id,physical_object_key,state
+         ) VALUES ($1,$2,'workspace',$3,1,$4,$5,'active')`,
+        [f.scope.tenantId, lifecycleId, sha256, incarnationId, physicalObjectKey],
+      );
+      await client.query(
+        `INSERT INTO blob_commits(tenant_id,operation_id,status,version,snapshot)
+         VALUES ($1,$2,'completed',1,'{}'::jsonb)`,
+        [f.scope.tenantId, blobOperationId],
+      );
+      await client.query(
+        `INSERT INTO blob_references(
+           tenant_id,reference_id,operation_id,state,purpose,sha256,size,media_type,
+           staging_upload_id,lifecycle_id,incarnation_id,physical_object_key
+         ) VALUES ($1,$2,$3,'stable','workspace',$4,1,'application/octet-stream',
+                   'candidate-release-upload',$5,$6,$7)`,
+        [
+          f.scope.tenantId,
+          referenceId,
+          blobOperationId,
+          sha256,
+          lifecycleId,
+          incarnationId,
+          physicalObjectKey,
+        ],
+      );
+      await client.query(
+        `INSERT INTO workspace_revision_candidate_files(
+           tenant_id,workspace_id,attempt_id,run_id,thread_id,root_run_id,parent_revision_id,
+           revision_id,operation_key,operation_digest,relative_path,source,content_sha256,size,
+           blob_lifecycle_id,blob_incarnation_id,physical_object_key,blob_reference_id
+         ) VALUES ($1,$2,$3,$4,$5,$6,NULL,$7,$8,$9,'new.txt','uploaded',$10,1,$11,$12,$13,$14)`,
+        [
+          f.scope.tenantId,
+          f.scope.workspaceId,
+          claimed.snapshot.attempt.attemptId,
+          f.scope.runId,
+          f.scope.threadId,
+          f.scope.rootRunId,
+          revision,
+          candidate.operationKey,
+          candidate.operationDigest,
+          sha256,
+          lifecycleId,
+          incarnationId,
+          physicalObjectKey,
+          referenceId,
+        ],
+      );
+    });
+    const terminal = await persistence.mutate(
+      signed({
+        idempotencyKey: `${claimed.snapshot.attempt.attemptId}/terminal/release-candidate`,
+        fence: claimed.fence,
+        expectedAttemptVersion: 0,
+        nextAttemptStatus: "failed",
+        nextRunStatus: "failed",
+        events: [],
+        outbox: [],
+        releaseFences: true,
+      }),
+    );
+    expect(terminal.outcome).toBe("applied");
+    const released = await withTenantTransaction(
+      runtime,
+      { tenantId: f.scope.tenantId },
+      async (client) => ({
+        candidate: await client.query<{ readonly status: string; readonly release_reason: string }>(
+          `SELECT status,release_reason FROM workspace_revision_candidates
+            WHERE tenant_id=$1 AND workspace_id=$2 AND attempt_id=$3 AND operation_key=$4`,
+          [
+            f.scope.tenantId,
+            f.scope.workspaceId,
+            claimed.snapshot.attempt.attemptId,
+            candidate.operationKey,
+          ],
+        ),
+        reference: await client.query<{ readonly state: string }>(
+          `SELECT state FROM blob_references WHERE tenant_id=$1 AND reference_id=$2`,
+          [f.scope.tenantId, referenceId],
+        ),
+      }),
+      { readOnly: true },
+    );
+    expect(released.candidate.rows[0]).toEqual({ status: "released", release_reason: "terminal" });
+    expect(released.reference.rows[0]?.state).toBe("released");
   });
 
   it("租约过期由恢复协调器收敛，普通 claim 不越过 running Run", async () => {
@@ -2404,6 +2713,30 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       leaseDurationMs: 30_000,
     });
     if (claimed.outcome !== "claimed") throw new Error("claim 失败");
+    const recoveryRevision = workspaceRevisionId(`recover-candidate-revision-${suffix}`);
+    const recoveryCandidateUnsigned = {
+      tenantId: f.scope.tenantId,
+      threadId: f.scope.threadId,
+      workspaceId: f.scope.workspaceId,
+      attemptId: claimed.snapshot.attempt.attemptId,
+      runId: f.scope.runId,
+      rootRunId: f.scope.rootRunId,
+      revisionId: recoveryRevision,
+      operationKey: `${claimed.snapshot.attempt.attemptId}/workspace/recovery`,
+    };
+    const recoveryCandidate = {
+      ...recoveryCandidateUnsigned,
+      operationDigest: workspaceCandidateOperationDigest(recoveryCandidateUnsigned),
+    };
+    await new PgWorkspaceCandidateHandoff(runtime, {
+      maxEntries: 1,
+      maxFiles: 1,
+      maxTotalBytes: 1,
+      maxSingleFileBytes: 1,
+      maxChunkBytes: 1,
+      maxPathUtf8Bytes: 128,
+      historicalManifest: { maxFiles: 1, maxTotalBytes: 1 },
+    }).begin(recoveryCandidate);
     await admin.query(
       `UPDATE "${schema}".run_claims
           SET expires_at=acquired_at+interval '1 millisecond'
@@ -2429,10 +2762,18 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       runtime,
       { tenantId: f.scope.tenantId },
       async (client) => {
-        const result = await client.query<{ run_status: string; attempt_status: string }>(
-          `SELECT run.status AS run_status,attempt.status AS attempt_status
+        const result = await client.query<{
+          run_status: string;
+          attempt_status: string;
+          candidate_status: string;
+          release_reason: string;
+        }>(
+          `SELECT run.status AS run_status,attempt.status AS attempt_status,
+                  candidate.status AS candidate_status,candidate.release_reason
              FROM runs run JOIN execution_attempts attempt
                ON attempt.tenant_id=run.tenant_id AND attempt.run_id=run.id
+             JOIN workspace_revision_candidates candidate
+               ON candidate.tenant_id=attempt.tenant_id AND candidate.attempt_id=attempt.attempt_id
             WHERE run.tenant_id=$1 AND run.id=$2`,
           [f.scope.tenantId, f.scope.runId],
         );
@@ -2440,7 +2781,12 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       },
       { readOnly: true },
     );
-    expect(state).toEqual({ run_status: "failed", attempt_status: "failed" });
+    expect(state).toEqual({
+      run_status: "failed",
+      attempt_status: "failed",
+      candidate_status: "released",
+      release_reason: "expired_recovery",
+    });
 
     const unsafe = await fixture(`recover-model-${suffix}`);
     const unsafeClaim = await persistence.claim({
@@ -3026,6 +3372,15 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
   });
 
   it("最新迁移可回退至 0004 并重新授予最小 Dispatch ACL", async () => {
+    const candidateDown = await migrateDown(migrator, {
+      runtimeRole,
+      migratorRole,
+      schema,
+      targetVersion: 14,
+      allowDestructive: true,
+      environment: "test",
+    });
+    expect(candidateDown.at(-1)?.version).toBe(14);
     const down = await migrateDown(migrator, {
       runtimeRole,
       migratorRole,

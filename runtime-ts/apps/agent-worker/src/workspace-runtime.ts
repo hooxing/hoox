@@ -2,10 +2,10 @@ import { createHash } from "node:crypto";
 import type { WorkspaceRuntimePort } from "@cube-runtime/run-contracts";
 import {
   createWorkspaceManifest,
-  WorkspaceMaterializer,
   type SandboxWorkspacePort,
   type WorkspaceExecutionPolicy,
   type WorkspaceManifest,
+  WorkspaceMaterializer,
   type WorkspaceOperationJournalPort,
   type WorkspaceStableBlobReadPort,
   type WorkspaceTrustedScope,

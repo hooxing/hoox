@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import type { Pool, PoolClient, QueryResultRow } from "pg";
 import {
   createWorkspaceManifest,
   type WorkspaceExecutionPolicy,
@@ -12,6 +11,7 @@ import {
   type WorkspaceTrustedScope,
   type WorkspaceUnknownFact,
 } from "@cube-runtime/workspace";
+import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type { BlobStore, StableBlobRef } from "./blob-store.js";
 import { BlobStoreError } from "./blob-store.js";
 import { withTenantTransaction } from "./postgres.js";

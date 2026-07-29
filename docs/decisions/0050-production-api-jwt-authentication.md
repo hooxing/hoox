@@ -21,7 +21,7 @@ production assembler，以防调用方注入内存 Fake。
 - JWT 验签必须支持 HS256 密钥轮换，但不能暴露 kid、签名或密钥内容；
 - production principal 只能来自已验签 `sub`，而非 token 里的租户、角色或其他附加声明；
 - 租户选择必须继续由 PostgreSQL active Membership 与 RLS 作为授权权威；
-- API 生产启动必须使用 ADR-0049 的受审 capability，不能接收调用方 Fake；
+- API 公开生产入口必须固定模块内真实依赖图，不能接收调用方 Fake；通用生命周期库不承担进程内 ACL；
 - 明文 API listener、泛化 `trustProxy` 和明文预签名对象 URL 都必须失败关闭。
 
 ## 备选方案
@@ -47,12 +47,13 @@ API 先验证 JWT 的 `sub`，再用 `{ tenantId: X-Tenant-Id, userId: sub }` �
 
 1. Bearer token 只接受紧凑三段、长度受限且每段规范 base64url 的 HS256 JWT。严格验证 `alg`、`kid`、`iss`、单值
    `aud`、`sub`、整数 `iat`/`nbf`/`exp`，拒绝重复 JSON 键；时间顺序固定为 `iat <= nbf < exp`。clock skew 只允许
-   1–300 秒，`now >= exp + skew` 时拒绝，并拒绝超出未来 skew 的 `iat` 或 `nbf`。
+   1–300 秒，`now >= exp + skew` 时拒绝，并拒绝超出未来 skew 的 `iat` 或 `nbf`。显式最大 token 生命周期只允许
+   60–86400 秒，`exp-iat` 超过部署值即拒绝。
 2. `API_JWT_SIGNING_KEYS` 是 `kid:base64url-key` 密钥环；kid 必须唯一，原始 HMAC key 为 32–64 字节。未知 kid 仍以
    随机拒绝密钥完成同长度 HMAC，并以 `timingSafeEqual` 比较，避免用主验签路径枚举轮换状态。
 3. 验签成功只生成 `{ userId: sub }`。`X-Tenant-Id` 以单值快照传入服务层；它从不进入 JWT principal，也不覆盖开发
    fixture 的固定 tenant。Repository 读取及后续命令仍在 PostgreSQL Membership/RLS 下复核 active 状态。
-4. `startApiProcess` 的 production 分支拒绝任意 `input.assembler`，只交给模块私有 `auditedProductionApiAssembly`。该
+4. `startApiProcess` 的 production 分支拒绝任意 `input.assembler`，固定选择模块内 production assembler。该
    装配图创建真实 PostgreSQL Runtime role 探针、S3 Bucket 探针、HS256 resolver、正式 Repository 和 Fastify listener。
 5. `API_TLS_MODE=direct` 必须提供独立绝对 PEM 文件路径，在监听前读取、限制文件类型/大小并解析证书与私钥；
    `API_TLS_MODE=proxy` 必须绑定 `127.0.0.1` 或 `::1`，且只信任 `API_TRUSTED_PROXY_CIDRS` 中的规范字面 CIDR。两种
@@ -65,8 +66,8 @@ JWT 签名证明的是用户身份，不是当前成员资格。将 Header 降�
 数据库以该 `sub` 查询并由 RLS/active Membership 拒绝；外部统一 404 不泄漏成员或租户存在性。固定 JSON/编码/长度/
 时间检查消除了多义 token 解析和资源放大路径，而 key ring 让旧 token 可在有限重叠窗口中完成密钥轮换。
 
-TLS 直连和 loopback-only proxy 两种模式分别把加密端点与明文内部跳点界定为可审核配置。受审 production capability
-保留 `runtimeEnvironment: production`，因此不会把 development fixture、宽松 listener 或 Fake 依赖带入生产。
+TLS 直连和 loopback-only proxy 两种模式分别把加密端点与明文内部跳点界定为可审核配置。公开服务入口保持
+`runtimeEnvironment: production` 并固定真实依赖图，因此不会把 development fixture、宽松 listener 或 Fake 带入生产。
 
 ## 影响
 
@@ -115,5 +116,6 @@ clock skew 已过，再从 key ring 移除。
 
 ## 实施记录
 
-- 2026-07-29：新增生产 HS256 JWT resolver、tenant selector/Membership 二次授权、受审 API assembler、TLS/proxy
+- 2026-07-29：新增生产 HS256 JWT resolver、tenant selector/Membership 二次授权、固定 API assembler、TLS/proxy
   边界和相应单元测试。
+- 2026-07-30：新增显式最大 token 生命周期；轮换或回退都必须在旧 token 最大寿命加 clock skew 后才能移除旧 kid。

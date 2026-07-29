@@ -1,10 +1,14 @@
 # ADR-0049：受审生产进程装配与 Worker 运行边界
 
-- 状态：已接受
+- 状态：已替代
 - 日期：2026-07-29
 - 决策者：M7 生产 Gate 实施审阅
 - 关联任务：M7 production Worker、运行角色与部署 Gate
-- 替代关系：细化 ADR-0015、ADR-0038、ADR-0047、ADR-0048；不改变其领域事实
+- 替代关系：曾细化 ADR-0015、ADR-0038、ADR-0047、ADR-0048；production capability 结论已由 ADR-0054 替代
+
+> 2026-07-30 安全复审：同一进程内已执行代码可调用公开 factory，JS 包边界不能提供调用方 ACL。本文关于 WeakSet/
+> capability “不可伪造”的安全声明不成立，相关实现已移除。保留本文仅记录历史；当前约束以 ADR-0054 为准：
+> `process-runtime` 是受信代码编排工具，production 安全边界位于各服务拒绝外部 assembler 的公开 `start*Process`。
 
 ## 背景
 

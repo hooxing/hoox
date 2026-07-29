@@ -26,48 +26,10 @@ export interface ServiceAssemblyFactory<TConfiguration> {
   assemble(configuration: TConfiguration): Promise<ServiceAssembly>;
 }
 
-declare const auditedProductionAssemblyBrand: unique symbol;
-
-/**
- * 只有服务模块在模块初始化时封闭创建的 production 依赖图可以取得该 capability。普通调用方
- * 提供的 `assembler` 仍永远不能解锁 production；WeakSet 阻止对象字面量、JSON 或类型断言伪造。
- */
-export interface AuditedProductionAssembly<TConfiguration> {
-  readonly [auditedProductionAssemblyBrand]: TConfiguration;
-}
-
-interface AuditedProductionAssemblyRecord<TConfiguration>
-  extends AuditedProductionAssembly<TConfiguration> {
-  readonly factory: ServiceAssemblyFactory<TConfiguration>;
-}
-
-const auditedProductionAssemblies = new WeakSet<object>();
-
-export function createAuditedProductionAssembly<TConfiguration>(
-  factory: ServiceAssemblyFactory<TConfiguration>,
-): AuditedProductionAssembly<TConfiguration> {
-  if (factory === null || typeof factory !== "object" || typeof factory.assemble !== "function") {
-    throw new TypeError("生产装配器无效");
-  }
-  // 捕获当下方法，调用方事后替换 factory.assemble 不能改变已经审阅的装配闭包。
-  const record: AuditedProductionAssemblyRecord<TConfiguration> = Object.freeze({
-    factory: Object.freeze({ assemble: factory.assemble.bind(factory) }),
-  } as AuditedProductionAssemblyRecord<TConfiguration>);
-  auditedProductionAssemblies.add(record);
-  return record;
-}
-
-function productionAssemblyFactory<TConfiguration>(
-  value: AuditedProductionAssembly<TConfiguration> | undefined,
-): ServiceAssemblyFactory<TConfiguration> | undefined {
-  if (value === undefined || !auditedProductionAssemblies.has(value)) return undefined;
-  return (value as AuditedProductionAssemblyRecord<TConfiguration>).factory;
-}
-
 export class ServiceAssemblyError extends Error {
   constructor(
     readonly serviceName: string,
-    readonly code: "ASSEMBLER_MISSING" | "ASSEMBLY_FAILED" | "PRODUCTION_ASSEMBLY_UNAVAILABLE",
+    readonly code: "ASSEMBLER_MISSING" | "ASSEMBLY_FAILED",
   ) {
     super(`${code}:${serviceName}`);
     this.name = "ServiceAssemblyError";
@@ -197,41 +159,32 @@ function installStartupSafeSignalHandlers(input: {
 }
 
 /**
- * 本函数只编排已经注入的生产依赖。没有 assembler 时始终拒绝启动，
- * 不会用内存 Fake、开发身份或空消费者伪装为可用生产进程。
+ * 本函数是受信代码的通用生命周期编排工具，不承担 JS 进程内调用方 ACL。
+ * 各服务的公开 start*Process 才是生产安全边界：生产分支选择模块内真实 assembler，
+ * 并拒绝调用方注入。这里没有 assembler 时始终拒绝启动，不会隐式创建空消费者。
  */
-export async function startServiceProcess<
+interface ServiceProcessInput<
   TConfiguration extends Readonly<{ runtimeEnvironment: RuntimeEnvironment }>,
->(input: {
+> {
   readonly serviceName: string;
   readonly configuration: TConfiguration;
   readonly shutdownTimeoutMilliseconds: number;
-  /**
-   * 模块私有的、经 createAuditedProductionAssembly 封装的真实生产依赖图。不得与普通
-   * assembler 同时传入，避免调用方用测试 Fake 替换受审组合。
-   */
-  readonly auditedProductionAssembly?: AuditedProductionAssembly<TConfiguration>;
   readonly assembler?: ServiceAssemblyFactory<TConfiguration>;
   readonly signalSource?: ProcessSignalSource;
   readonly onShutdownFailure?: (error: Error) => void;
-}): Promise<RunningServiceProcess> {
+}
+
+export async function startServiceProcess<
+  TConfiguration extends Readonly<{ runtimeEnvironment: RuntimeEnvironment }>,
+>(input: ServiceProcessInput<TConfiguration>): Promise<RunningServiceProcess> {
+  return startServiceProcessInternal(input);
+}
+
+async function startServiceProcessInternal<
+  TConfiguration extends Readonly<{ runtimeEnvironment: RuntimeEnvironment }>,
+>(input: ServiceProcessInput<TConfiguration>): Promise<RunningServiceProcess> {
   if (!componentNamePattern.test(input.serviceName)) throw new TypeError("服务名称无效");
-  const auditedProductionAssembler = productionAssemblyFactory(input.auditedProductionAssembly);
-  if (input.assembler !== undefined && input.auditedProductionAssembly !== undefined) {
-    throw new ServiceAssemblyError(input.serviceName, "ASSEMBLER_MISSING");
-  }
-  if (input.configuration.runtimeEnvironment === "production") {
-    if (input.assembler === undefined && input.auditedProductionAssembly === undefined) {
-      throw new ServiceAssemblyError(input.serviceName, "ASSEMBLER_MISSING");
-    }
-    if (input.assembler !== undefined || auditedProductionAssembler === undefined) {
-      throw new ServiceAssemblyError(input.serviceName, "PRODUCTION_ASSEMBLY_UNAVAILABLE");
-    }
-  } else if (input.auditedProductionAssembly !== undefined) {
-    // 避免 development/test 偶然共享生产闭包，使其测试和可观测配置漂移。
-    throw new ServiceAssemblyError(input.serviceName, "ASSEMBLER_MISSING");
-  }
-  const assembler = auditedProductionAssembler ?? input.assembler;
+  const assembler = input.assembler;
   if (assembler === undefined) {
     throw new ServiceAssemblyError(input.serviceName, "ASSEMBLER_MISSING");
   }
@@ -259,12 +212,9 @@ export async function startServiceProcess<
       resources: normalizedAssembly.resources,
       shutdownTimeoutMilliseconds: input.shutdownTimeoutMilliseconds,
     });
-  } catch (error) {
+  } catch {
     await closePartiallyAssembledResources(assembly);
     startupSignals.registration.dispose();
-    if (error instanceof ServiceAssemblyError && error.code === "PRODUCTION_ASSEMBLY_UNAVAILABLE") {
-      throw error;
-    }
     throw new ServiceAssemblyError(input.serviceName, "ASSEMBLY_FAILED");
   }
   startupSignals.bind(lifecycle);

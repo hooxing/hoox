@@ -25,4 +25,14 @@ describe("production 部署配置契约", () => {
     expect(issues).toContain("示例配置疑似包含真实凭据：MODEL_API_KEY");
     expect(issues.join(" ")).not.toContain(secret);
   });
+
+  it("对象交付必须使用独立 origin，不能与浏览器/API 同源代理", () => {
+    const source = example.replace(
+      "S3_PUBLIC_ENDPOINT=https://downloads.example.invalid",
+      "S3_PUBLIC_ENDPOINT=https://app.example.invalid",
+    );
+    expect(validateProductionEnvironmentExample(source)).toContain(
+      "S3_PUBLIC_ENDPOINT 必须使用独立对象 origin",
+    );
+  });
 });

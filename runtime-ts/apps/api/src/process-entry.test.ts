@@ -5,7 +5,7 @@ import { parseApiProcessEnvironment, startApiProcess } from "./process-entry.js"
 function productionEnvironment(): Record<string, string> {
   return {
     RUNTIME_ENV: "production",
-    DATABASE_URL: "postgresql://runtime:credential@database/runtime",
+    DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_SCHEMA: "runtime",
     DATABASE_RUNTIME_ROLE: "runtime",
     THREAD_CURSOR_ACTIVE_KID: "current",
@@ -14,9 +14,11 @@ function productionEnvironment(): Record<string, string> {
     API_JWT_AUDIENCE: "cube-runtime-api",
     API_JWT_SIGNING_KEYS: "current-key:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     API_JWT_CLOCK_SKEW_SECONDS: "60",
+    API_JWT_MAX_LIFETIME_SECONDS: "3600",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
     API_LISTEN_HOST: "127.0.0.1",
     API_LISTEN_PORT: "3001",
+    API_PUBLIC_ORIGIN: "https://app.example.invalid",
     API_TLS_MODE: "proxy",
     API_TRUSTED_PROXY_CIDRS: "127.0.0.1",
     S3_ENDPOINT: "https://object-storage.example.invalid:9000",
@@ -212,7 +214,25 @@ describe("API 进程入口", () => {
       }),
     ).toThrow("S3_PUBLIC_ENDPOINT 在 production 必须为无凭据的 HTTPS URL");
     expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        S3_PUBLIC_ENDPOINT: "https://app.example.invalid",
+      }),
+    ).toThrow("S3_PUBLIC_ENDPOINT 必须与 API_PUBLIC_ORIGIN 使用独立 origin");
+    expect(() =>
       parseApiProcessEnvironment({ ...productionEnvironment(), API_JWT_CLOCK_SKEW_SECONDS: "0" }),
     ).toThrow("INVALID:API_JWT_CLOCK_SKEW_SECONDS");
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        API_JWT_MAX_LIFETIME_SECONDS: "86401",
+      }),
+    ).toThrow("INVALID:API_JWT_MAX_LIFETIME_SECONDS");
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        DATABASE_URL: "postgresql://runtime:credential@database/runtime?sslmode=require",
+      }),
+    ).toThrow("PRODUCTION_DATABASE_TRANSPORT_INVALID");
   });
 });

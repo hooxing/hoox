@@ -1,20 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { parseSchedulerProcessEnvironment, startSchedulerProcess } from "./process-entry.js";
+import {
+  parseSchedulerProcessEnvironment,
+  selectSchedulerProcessEnvironment,
+  startSchedulerProcess,
+} from "./process-entry.js";
 
 function productionEnvironment(): Record<string, string> {
   return {
     RUNTIME_ENV: "production",
-    DATABASE_URL: "postgresql://runtime:credential@database/runtime",
+    DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_RUNTIME_ROLE: "runtime",
     DATABASE_SCHEMA: "runtime",
-    S3_ENDPOINT: "http://object-storage:9000",
-    S3_BUCKET: "runtime-artifacts",
-    S3_REGION: "us-east-1",
-    S3_ACCESS_KEY_ID: "local-access-key",
-    S3_SECRET_ACCESS_KEY: "opaque-test-value",
-    S3_FORCE_PATH_STYLE: "true",
-    CUBESANDBOX_API_URL: "http://cube-api:3000",
+    CUBESANDBOX_API_URL: "https://cube-api.invalid",
+    CUBESANDBOX_PROXY_SCHEME: "https",
     SCHEDULER_TENANT_ID: "tenant-test",
     SCHEDULER_WORKER_ID: "scheduler-test",
     CLEANUP_POLL_INTERVAL_MS: "1000",
@@ -26,11 +25,10 @@ function productionEnvironment(): Record<string, string> {
 describe("Scheduler 进程入口", () => {
   it("配置可验证，传入 Fake assembler 不能冒充受审生产装配", async () => {
     const configuration = parseSchedulerProcessEnvironment(productionEnvironment());
-    expect(configuration.objectStorage.bucket).toBe("runtime-artifacts");
     expect(configuration.sandbox).toMatchObject({
-      apiUrl: "http://cube-api:3000",
-      proxyNodeIp: "cube-api",
-      proxyScheme: "http",
+      apiUrl: "https://cube-api.invalid",
+      proxyNodeIp: "cube-api.invalid",
+      proxyScheme: "https",
     });
     await expect(
       startSchedulerProcess({
@@ -56,19 +54,31 @@ describe("Scheduler 进程入口", () => {
       proxyPort: 443,
       proxyScheme: "https",
     });
-    expect(
+    expect(() =>
       parseSchedulerProcessEnvironment({
         ...productionEnvironment(),
         CUBESANDBOX_PROXY_PORT: "443",
         CUBESANDBOX_PROXY_SCHEME: "http",
-      }).sandbox,
-    ).toMatchObject({ proxyNodeIp: "cube-api", proxyPort: 443, proxyScheme: "http" });
+      }),
+    ).toThrow("CUBESANDBOX_PROXY_SCHEME 在 production 必须为 https");
   });
 
   it("未知变量严格失败", () => {
     expect(() =>
       parseSchedulerProcessEnvironment({ ...productionEnvironment(), UNUSED_FLAG: "true" }),
     ).toThrow("UNKNOWN:UNUSED_FLAG");
+  });
+
+  it("宿主 S3 密钥不属于 Scheduler 声明配置，也不会进入投影", () => {
+    const selected = selectSchedulerProcessEnvironment({
+      ...productionEnvironment(),
+      S3_ENDPOINT: "https://object-storage.invalid",
+      S3_ACCESS_KEY_ID: "must-not-enter-scheduler",
+      S3_SECRET_ACCESS_KEY: "must-not-enter-scheduler",
+    });
+    expect(selected).not.toHaveProperty("S3_ENDPOINT");
+    expect(selected).not.toHaveProperty("S3_ACCESS_KEY_ID");
+    expect(selected).not.toHaveProperty("S3_SECRET_ACCESS_KEY");
   });
 
   it("按 UTF-8 与领域 Tenant ID 在启动前拒绝永久配置错误", () => {
@@ -96,5 +106,17 @@ describe("Scheduler 进程入口", () => {
         DATABASE_RUNTIME_ROLE: "Runtime-Owner",
       }),
     ).toThrow("DATABASE_RUNTIME_ROLE 格式无效");
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        DATABASE_URL: "postgresql://runtime:credential@database/runtime?sslmode=require",
+      }),
+    ).toThrow("PRODUCTION_DATABASE_TRANSPORT_INVALID");
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        CUBESANDBOX_API_URL: "http://cube-api.internal",
+      }),
+    ).toThrow("CUBESANDBOX_API_URL 在 production 必须为无凭据的 HTTPS URL");
   });
 });

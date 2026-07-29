@@ -3,6 +3,8 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 
+const baseDigest = "sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d";
+
 function dockerResult(arguments_, options = {}) {
   const result = spawnSync("docker", arguments_, {
     cwd: process.cwd(),
@@ -56,6 +58,24 @@ try {
     capture: true,
   });
   if (configuredUser !== "1000:1000") throw new Error("DOCKER_IMAGE_USER_CONFIG_INVALID");
+  const configuredCommand = runDocker(
+    ["image", "inspect", "--format", "{{json .Config.Cmd}}", imageId],
+    { capture: true },
+  );
+  if (configuredCommand !== '["node","dist/production-main.js"]') {
+    throw new Error("DOCKER_IMAGE_COMMAND_INVALID");
+  }
+  const configuredBaseDigest = runDocker(
+    [
+      "image",
+      "inspect",
+      "--format",
+      '{{index .Config.Labels "org.opencontainers.image.base.digest"}}',
+      imageId,
+    ],
+    { capture: true },
+  );
+  if (configuredBaseDigest !== baseDigest) throw new Error("DOCKER_IMAGE_BASE_DIGEST_INVALID");
 
   runDocker([
     "run",
@@ -63,12 +83,12 @@ try {
     imageId,
     "sh",
     "-ec",
-    'test "$(id -u)" != 0; ! command -v python; ! command -v python3; test ! -e /opt/runtime/.env.production-worker-gate-canary; test ! -e /opt/runtime/CubeSandbox; test ! -e /opt/runtime/cubesandbox-agent-lab',
+    'test "$(id -u)" = 1000; test -f /opt/runtime/dist/production-main.js; test -f /opt/runtime/sbom/cyclonedx.json; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/LICENSE; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/SOURCE.md; ! command -v python; ! command -v python3; ! command -v npm; ! command -v npx; ! command -v corepack; ! command -v pnpm; test ! -e /usr/local/lib/node_modules/npm; test ! -e /usr/local/lib/node_modules/corepack; test ! -e /opt/runtime/.env.production-worker-gate-canary; test ! -e /opt/runtime/CubeSandbox; test ! -e /opt/runtime/cubesandbox-agent-lab; test ! -d /opt/runtime/src; test ! -e /opt/runtime/dist/development-main.js; test ! -e /opt/runtime/dist/development-preflight-main.js; for tool in biome tsc tsx vitest; do test -z "$(find /opt/runtime -path "*/node_modules/.bin/$tool" -print -quit)"; done; for pattern in "*.test.*" "*.spec.*" "*.ts" "*.tsx"; do test -z "$(find /opt/runtime -type f -name "$pattern" -print -quit)"; done; for directory in test tests testing __tests__; do test -z "$(find /opt/runtime -type d -name "$directory" -print -quit)"; done',
   ]);
 
   const baseEnvironment = [
     "RUNTIME_ENV=production",
-    `DATABASE_URL=postgresql://runtime:${secretCanary}@127.0.0.1:1/runtime`,
+    `DATABASE_URL=postgresql://runtime:${secretCanary}@127.0.0.1:1/runtime?sslmode=verify-full`,
     "DATABASE_RUNTIME_ROLE=runtime",
     "DATABASE_SCHEMA=runtime",
     "S3_ENDPOINT=https://object-storage.invalid",
@@ -122,6 +142,26 @@ try {
     forbiddenDevelopment.output.includes(secretCanary)
   ) {
     throw new Error("PRODUCTION_WORKER_GATE_DEVELOPMENT_REJECTION_INVALID");
+  }
+
+  // Cube 管理面即使没有 API key 也会执行 create/delete/probe，production 仍必须拒绝明文 HTTP。
+  const plaintextCubeWithoutKey = dockerResult(
+    [
+      "run",
+      "--rm",
+      ...environmentArguments,
+      "--env",
+      "CUBESANDBOX_API_URL=http://sandbox.invalid",
+      imageId,
+    ],
+    { capture: true },
+  );
+  if (
+    plaintextCubeWithoutKey.status === 0 ||
+    !plaintextCubeWithoutKey.output.includes("Agent Worker 生产进程启动失败") ||
+    plaintextCubeWithoutKey.output.includes(secretCanary)
+  ) {
+    throw new Error("PRODUCTION_WORKER_GATE_PLAINTEXT_CUBE_REJECTION_INVALID");
   }
 } catch (error) {
   primaryFailure = error;

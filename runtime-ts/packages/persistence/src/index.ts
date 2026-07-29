@@ -1,5 +1,6 @@
 export * from "./blob-commit-protocol.js";
 export * from "./blob-store.js";
+export * from "./blob-storage-contract.js";
 export * from "./errors.js";
 export * from "./pg-blob-lifecycle.js";
 export { PgArchiveThreadCommand } from "./pg-core-repositories.js";

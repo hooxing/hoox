@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
-import { createAuditedProductionAssembly, startServiceProcess } from "./service-process.js";
+import * as publicProcessRuntime from "./index.js";
+import { startServiceProcess } from "./service-process.js";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -144,51 +145,34 @@ describe("服务进程装配", () => {
     expect(source.listenerCount("SIGTERM")).toBe(0);
   });
 
-  it("生产环境拒绝注入的 Fake assembler，不能伪造 ready", async () => {
-    let assembleCalls = 0;
-    await expect(
-      startServiceProcess({
-        serviceName: "api",
-        configuration: { runtimeEnvironment: "production" } as const,
-        shutdownTimeoutMilliseconds: 1_000,
-        assembler: {
-          assemble: async () => {
-            assembleCalls += 1;
-            return { stopAccepting: async () => undefined, resources: [], readiness: [] };
-          },
-        },
-      }),
-    ).rejects.toMatchObject({ code: "PRODUCTION_ASSEMBLY_UNAVAILABLE" });
-    expect(assembleCalls).toBe(0);
-  });
-
-  it("受审 production capability 保留原始 production 配置并正常使用封闭依赖图", async () => {
-    const configuration = Object.freeze({ runtimeEnvironment: "production" as const, shard: "tenant-a" });
+  it("通用编排器可由受信服务代码显式装配 production", async () => {
+    const configuration = Object.freeze({
+      runtimeEnvironment: "production" as const,
+      shard: "tenant-a",
+    });
     let observed: unknown;
     const service = await startServiceProcess({
       serviceName: "agent-worker",
       configuration,
       shutdownTimeoutMilliseconds: 1_000,
-      auditedProductionAssembly: createAuditedProductionAssembly<typeof configuration>({
-        assemble: async (received) => {
+      assembler: {
+        assemble: async (received: typeof configuration) => {
           observed = received;
           return { stopAccepting: async () => undefined, resources: [], readiness: [] };
         },
-      }),
+      },
     });
     expect(observed).toBe(configuration);
     await service.close();
   });
 
-  it("对象字面量不能伪造受审 production capability", async () => {
-    await expect(
-      startServiceProcess({
-        serviceName: "agent-worker",
-        configuration: { runtimeEnvironment: "production" } as const,
-        shutdownTimeoutMilliseconds: 1_000,
-        auditedProductionAssembly: {} as never,
-      }),
-    ).rejects.toMatchObject({ code: "PRODUCTION_ASSEMBLY_UNAVAILABLE" });
+  it("包根不导出 production factory 或 capability 铸造函数", () => {
+    expect(
+      Object.keys(publicProcessRuntime).filter((name) =>
+        /^(?:create|register).*production/iu.test(name),
+      ),
+    ).toEqual([]);
+    expect(publicProcessRuntime).not.toHaveProperty("createProductionServiceStarter");
   });
 
   it("启动后替换 assembler 数组、名称或方法不会改变已冻结的关闭与探针计划", async () => {

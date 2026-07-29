@@ -3,6 +3,8 @@ import { mapPersistenceError, PersistenceUnavailableCause } from "./errors.js";
 
 export interface PostgresPoolOptions {
   readonly connectionString: string;
+  /** production 必须由共享传输契约显式提供，不能让 connection string 降级或覆盖 TLS。 */
+  readonly ssl?: Readonly<{ readonly rejectUnauthorized: true }>;
   /** 运行进程只能以此最小权限登录角色连接；禁止依赖可被继承或 SET ROLE 的上游身份。 */
   readonly expectedRuntimeRole?: string;
   readonly applicationName?: string;
@@ -44,6 +46,7 @@ export function createPostgresPool(options: PostgresPoolOptions): Pool {
   if (options.schema !== undefined) assertSafeSchemaName(options.schema);
   const config: PoolConfig = {
     connectionString: options.connectionString,
+    ...(options.ssl === undefined ? {} : { ssl: options.ssl }),
     application_name: options.applicationName ?? "cube-agent-runtime",
     max: boundedInteger(options.maxConnections, 10, 1, 100, "maxConnections"),
     idleTimeoutMillis: boundedInteger(
@@ -87,13 +90,35 @@ export async function probePostgres(pool: Pool, expectedRuntimeRole?: string): P
     if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(expectedRuntimeRole)) {
       throw new TypeError("DATABASE_RUNTIME_ROLE 格式无效");
     }
-    const result = await pool.query<{ readonly current_user: string }>("SELECT current_user");
-    if (result.rows[0]?.current_user !== expectedRuntimeRole) {
+    const result = await pool.query<{
+      readonly current_user: string;
+      readonly session_user: string;
+      readonly rolsuper: boolean;
+      readonly rolbypassrls: boolean;
+    }>(
+      `SELECT current_user,
+              session_user,
+              role.rolsuper,
+              role.rolbypassrls
+         FROM pg_roles AS role
+        WHERE role.rolname = current_user`,
+    );
+    const role = result.rows[0];
+    if (role?.current_user !== expectedRuntimeRole || role.session_user !== expectedRuntimeRole) {
       // 不泄漏真实连接角色，避免将部署拓扑或管理员误配带到日志/健康端点。
       throw new Error("POSTGRES_RUNTIME_ROLE_MISMATCH");
     }
+    if (role.rolsuper || role.rolbypassrls) {
+      // 即使名称正确，高权限属性仍可绕过 RLS；只公开稳定类别，不输出实际属性。
+      throw new Error("POSTGRES_RUNTIME_ROLE_UNSAFE");
+    }
   } catch (error) {
-    if (error instanceof TypeError || (error instanceof Error && error.message === "POSTGRES_RUNTIME_ROLE_MISMATCH")) {
+    if (
+      error instanceof TypeError ||
+      (error instanceof Error &&
+        (error.message === "POSTGRES_RUNTIME_ROLE_MISMATCH" ||
+          error.message === "POSTGRES_RUNTIME_ROLE_UNSAFE"))
+    ) {
       throw error;
     }
     throw mapPersistenceError(error, "PostgreSQL 启动探针");

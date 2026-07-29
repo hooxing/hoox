@@ -9,6 +9,7 @@ const maximumTokenLength = 8_192;
 const maximumHeaderBytes = 1_024;
 const maximumPayloadBytes = 4_096;
 const maximumClockSkewSeconds = 300;
+const absoluteMaximumTokenLifetimeSeconds = 24 * 60 * 60;
 const maximumNumericDate = 8_640_000_000_000;
 
 export interface ProductionJwtVerificationKey {
@@ -22,6 +23,7 @@ export interface ProductionJwtAuthResolverConfiguration {
   readonly audience: string;
   readonly keys: readonly ProductionJwtVerificationKey[];
   readonly clockSkewSeconds: number;
+  readonly maxTokenLifetimeSeconds: number;
   readonly now?: () => Date;
 }
 
@@ -72,6 +74,7 @@ function validateResolverConfiguration(
   readonly issuer: string;
   readonly audience: string;
   readonly clockSkewSeconds: number;
+  readonly maxTokenLifetimeSeconds: number;
   readonly keys: ReadonlyMap<string, Buffer>;
 }> {
   if (
@@ -86,6 +89,9 @@ function validateResolverConfiguration(
     !Number.isSafeInteger(configuration.clockSkewSeconds) ||
     configuration.clockSkewSeconds < 1 ||
     configuration.clockSkewSeconds > maximumClockSkewSeconds ||
+    !Number.isSafeInteger(configuration.maxTokenLifetimeSeconds) ||
+    configuration.maxTokenLifetimeSeconds < 60 ||
+    configuration.maxTokenLifetimeSeconds > absoluteMaximumTokenLifetimeSeconds ||
     !Array.isArray(configuration.keys) ||
     configuration.keys.length === 0 ||
     configuration.keys.length > 16
@@ -113,6 +119,7 @@ function validateResolverConfiguration(
     issuer: configuration.issuer,
     audience: configuration.audience,
     clockSkewSeconds: configuration.clockSkewSeconds,
+    maxTokenLifetimeSeconds: configuration.maxTokenLifetimeSeconds,
     keys,
   });
 }
@@ -394,6 +401,7 @@ export function createProductionJwtAuthResolver(
         issuedAt === undefined ||
         notBefore === undefined ||
         expiresAt === undefined ||
+        expiresAt - issuedAt > normalized.maxTokenLifetimeSeconds ||
         issuedAt > current + normalized.clockSkewSeconds ||
         notBefore > current + normalized.clockSkewSeconds ||
         expiresAt + normalized.clockSkewSeconds <= current

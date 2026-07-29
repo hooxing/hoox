@@ -94,11 +94,12 @@ Gate：越权矩阵全部通过；DB/S3/Worker/Sandbox 故障有确定结果；�
 
 当前切片状态（不代表 M7 已完成）：
 
-- [x] Worker 与 Scheduler 使用受审 production 装配，不再把 production 配置降级为 development；Worker 保持 Workspace→Revision→Artifact 持久化闭环。
-- [x] `DATABASE_RUNTIME_ROLE` 在连接和 readiness 时验证 PostgreSQL `current_user`；production Worker 拒绝 `DEV_AUTH_*`、明文秘密端点及非 HTTPS 数据面 Proxy。
-- [x] `deploy/production.env.example`、静态契约和 Linux 非 root Worker 容器 Gate 已实现；容器 Gate 只验证 build context、最小镜像与外部依赖不可用时的失败关闭，不是真实基础设施 ready 证明。
+- [x] API、Worker 与 Scheduler 的公开 production 入口固定模块内真实装配并拒绝调用方 Fake；Worker 保持 Workspace→Revision→Artifact 持久化闭环，API/Worker 共用 stable Blob prefix。
+- [x] production PostgreSQL 强制单一 `sslmode=verify-full` 与显式证书/主机名验证；角色探针同时验证 current/session user、非 superuser 且无 BYPASSRLS，Scheduler 在远端 cleanup 前执行探针。API/Worker/Scheduler 拒绝 development 身份与明文秘密端点。
+- [x] 生产 API JWT 身份、最大 token 生命周期、Tenant selector 的 Membership/RLS 二次授权与 TLS/受限代理边界已实现。
+- [x] API/Scheduler/Worker 基础镜像 digest、runtime-only 非 root 闭包、离线确定性 CycloneDX SBOM、License allow/deny、vendor 证据与静态发布/回滚清单已实现；Scheduler 在 loop 前探测 PG/Cube 且不接收无用 S3 密钥。容器 Gate 不是真实基础设施 ready 证明。
 - [ ] 在真实 Linux 部署中，以最小权限 Runtime 角色和真实 PostgreSQL/S3/CubeSandbox/模型完成 ready、关闭、故障与回滚验收。
-- [ ] 完成生产 API 身份链路、全量越权矩阵、配额、对象生命周期、观测、SBOM/License、容量与发布回滚 Gate。
+- [ ] 完成真实代理/身份系统集成、全量越权矩阵、配额、对象生命周期、观测、镜像签名/provenance、容量与集群发布回滚验收。
 
 ### M8：发布后 Memory
 

@@ -4,6 +4,7 @@ import {
   integerEnvironmentField,
   type ProcessSignalSource,
   parseStrictEnvironment,
+  parseProductionPostgresTransport,
   type RunningServiceProcess,
   type RuntimeEnvironment,
   readRequiredEnvironmentValue,
@@ -25,7 +26,7 @@ import {
   parseProductionJwtSigningKeys,
   type ProductionJwtVerificationKey,
 } from "./production-auth.js";
-import { auditedProductionApiAssembly } from "./production-assembly.js";
+import { startProductionApiProcess } from "./production-assembly.js";
 import {
   parseProductionApiTransport,
   type ProductionApiTransport,
@@ -60,6 +61,11 @@ const apiEnvironmentSchema = Object.freeze({
     minimum: 1,
     maximum: 300,
   }),
+  API_JWT_MAX_LIFETIME_SECONDS: integerEnvironmentField({
+    requiredIn: productionEnvironment,
+    minimum: 60,
+    maximum: 86_400,
+  }),
   // production 中即使 false 也不能出现，显式检查位于 parseApiProcessEnvironment。
   DEV_AUTH_ENABLED: booleanEnvironmentField({ requiredIn: developmentAndTestEnvironments }),
   DEV_AUTH_USER_A_ID: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 128 }),
@@ -79,6 +85,7 @@ const apiEnvironmentSchema = Object.freeze({
     minimum: 1,
     maximum: 65_535,
   }),
+  API_PUBLIC_ORIGIN: urlEnvironmentField({ requiredIn: productionEnvironment }),
   API_TLS_MODE: stringEnvironmentField({ requiredIn: productionEnvironment, maxLength: 6 }),
   API_TLS_CERT_PATH: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 4_096 }),
   API_TLS_KEY_PATH: stringEnvironmentField({
@@ -106,6 +113,7 @@ export type { ApiDevelopmentPrincipal } from "./development-boundary.js";
 export interface ApiProcessConfiguration {
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
+  readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly databaseSchema: string;
   readonly databaseRuntimeRole?: string;
   readonly cursorActiveKeyId: string;
@@ -124,11 +132,13 @@ export interface ApiProcessConfiguration {
     readonly forcePathStyle: boolean;
   }>;
   readonly production?: Readonly<{
+    readonly publicOrigin: string;
     readonly jwt: Readonly<{
       readonly issuer: string;
       readonly audience: string;
       readonly keys: readonly ProductionJwtVerificationKey[];
       readonly clockSkewSeconds: number;
+      readonly maxTokenLifetimeSeconds: number;
     }>;
     readonly transport: ProductionApiTransport;
   }>;
@@ -151,6 +161,11 @@ export function parseApiProcessEnvironment(
     parsed.runtimeEnvironment === "production"
       ? false
       : readRequiredEnvironmentValue(parsed, "DEV_AUTH_ENABLED");
+  const configuredDatabaseUrl = readRequiredEnvironmentValue(parsed, "DATABASE_URL");
+  const productionDatabase =
+    parsed.runtimeEnvironment === "production"
+      ? parseProductionPostgresTransport(configuredDatabaseUrl)
+      : undefined;
   // 开发身份只有明确开启时才进入配置对象；生产环境由共享解析器直接拒绝。
   const developmentPrincipals = developmentAuthEnabled
     ? Object.freeze([
@@ -211,13 +226,19 @@ export function parseApiProcessEnvironment(
           audience: readRequiredEnvironmentValue(parsed, "API_JWT_AUDIENCE"),
           signingKeys: readRequiredEnvironmentValue(parsed, "API_JWT_SIGNING_KEYS"),
           clockSkewSeconds: readRequiredEnvironmentValue(parsed, "API_JWT_CLOCK_SKEW_SECONDS"),
+          maxTokenLifetimeSeconds: readRequiredEnvironmentValue(
+            parsed,
+            "API_JWT_MAX_LIFETIME_SECONDS",
+          ),
+          publicOrigin: readRequiredEnvironmentValue(parsed, "API_PUBLIC_ORIGIN"),
           objectStorageEndpoint: objectStorage.endpoint,
           objectStoragePublicEndpoint: objectStorage.publicEndpoint,
         })
       : undefined;
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
-    databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
+    databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
+    ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
     ...(databaseRuntimeRole === undefined ? {} : { databaseRuntimeRole }),
     cursorActiveKeyId: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_ACTIVE_KID"),
@@ -243,14 +264,10 @@ export async function startApiProcess(input: {
   const configuration = parseApiProcessEnvironment(input.environment);
   if (configuration.runtimeEnvironment === "production") {
     if (input.assembler !== undefined) {
-      // 生产依赖图只能来自模块顶层的 audited capability，调用方传入 Fake 时不进入装配阶段。
+      // 生产入口固定选择真实依赖图；调用方传入 Fake 时不进入装配阶段。
       throw new Error("PRODUCTION_ASSEMBLY_UNAVAILABLE:api");
     }
-    return startServiceProcess({
-      serviceName: "api",
-      configuration,
-      shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
-      auditedProductionAssembly: auditedProductionApiAssembly,
+    return startProductionApiProcess(configuration, {
       ...(input.signalSource === undefined ? {} : { signalSource: input.signalSource }),
       ...(input.onShutdownFailure === undefined
         ? {}
@@ -304,17 +321,29 @@ function createProductionConfiguration(input: {
   readonly audience: string;
   readonly signingKeys: string;
   readonly clockSkewSeconds: number;
+  readonly maxTokenLifetimeSeconds: number;
+  readonly publicOrigin: string;
   readonly objectStorageEndpoint: string;
   readonly objectStoragePublicEndpoint: string;
 }): NonNullable<ApiProcessConfiguration["production"]> {
   assertProductionObjectStorageTransport(input.objectStorageEndpoint, "S3_ENDPOINT");
   assertProductionObjectStorageTransport(input.objectStoragePublicEndpoint, "S3_PUBLIC_ENDPOINT");
+  const publicOrigin = parseProductionPublicOrigin(input.publicOrigin, "API_PUBLIC_ORIGIN");
+  const objectOrigin = parseProductionPublicOrigin(
+    input.objectStoragePublicEndpoint,
+    "S3_PUBLIC_ENDPOINT",
+  );
+  if (publicOrigin === objectOrigin) {
+    throw new TypeError("S3_PUBLIC_ENDPOINT 必须与 API_PUBLIC_ORIGIN 使用独立 origin");
+  }
   return Object.freeze({
+    publicOrigin,
     jwt: Object.freeze({
       issuer: input.issuer,
       audience: input.audience,
       keys: parseProductionJwtSigningKeys(input.signingKeys),
       clockSkewSeconds: input.clockSkewSeconds,
+      maxTokenLifetimeSeconds: input.maxTokenLifetimeSeconds,
     }),
     transport: parseProductionApiTransport({
       listenHost: input.listenHost,
@@ -334,4 +363,19 @@ function assertProductionObjectStorageTransport(value: string, key: string): voi
   if (endpoint.protocol !== "https:" || endpoint.username !== "" || endpoint.password !== "") {
     throw new TypeError(`${key} 在 production 必须为无凭据的 HTTPS URL`);
   }
+}
+
+function parseProductionPublicOrigin(value: string, key: string): string {
+  const endpoint = new URL(value);
+  if (
+    endpoint.protocol !== "https:" ||
+    endpoint.username !== "" ||
+    endpoint.password !== "" ||
+    endpoint.pathname !== "/" ||
+    endpoint.search !== "" ||
+    endpoint.hash !== ""
+  ) {
+    throw new TypeError(`${key} 在 production 必须为无凭据 HTTPS origin`);
+  }
+  return endpoint.origin;
 }

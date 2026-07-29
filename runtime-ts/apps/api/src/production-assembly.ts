@@ -4,12 +4,10 @@ import {
   createApiPersistenceRuntime,
   createS3BlobStore,
   probeS3BlobStore,
+  RUNTIME_BLOB_OBJECT_PREFIX,
   type CreateS3BlobStoreConfig,
 } from "@cube-runtime/persistence";
-import {
-  createAuditedProductionAssembly,
-  type ServiceAssemblyFactory,
-} from "@cube-runtime/process-runtime";
+import { startServiceProcess, type ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec, parseThreadCursorSigningKeys } from "./cursor.js";
@@ -24,7 +22,7 @@ const productionApiMaxBlobSizeBytes = 16 * 1_024 * 1_024;
 
 /**
  * 真正的生产依赖图只在此模块构造：PostgreSQL、S3、HS256 JWT 与受限 TLS/proxy listener 缺一不可。
- * 不导出 assembler 本体，外部调用方只能经过 process-entry 持有的 audited capability 启动进程。
+ * assembler 本体不进入应用公开入口；process-entry 的 production 分支固定选择该依赖图。
  */
 const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = {
   async assemble(configuration) {
@@ -32,12 +30,14 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
       configuration.runtimeEnvironment !== "production" ||
       configuration.production === undefined ||
       configuration.developmentPrincipals !== undefined ||
-      configuration.databaseRuntimeRole === undefined
+      configuration.databaseRuntimeRole === undefined ||
+      configuration.databaseSsl === undefined
     ) {
       throw new Error("PRODUCTION_API_ASSEMBLY_FORBIDDEN");
     }
     const persistence = createApiPersistenceRuntime({
       connectionString: configuration.databaseUrl,
+      ssl: configuration.databaseSsl,
       schema: configuration.databaseSchema,
       expectedRuntimeRole: configuration.databaseRuntimeRole,
       applicationName: "cube-runtime-api-production",
@@ -53,6 +53,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
         accessKeyId: configuration.objectStorage.accessKeyId,
         secretAccessKey: configuration.objectStorage.secretAccessKey,
         forcePathStyle: configuration.objectStorage.forcePathStyle,
+        prefix: RUNTIME_BLOB_OBJECT_PREFIX,
         maxBlobSizeBytes: productionApiMaxBlobSizeBytes,
       });
       const probes = Object.freeze({
@@ -121,5 +122,21 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
   },
 };
 
-// 不从 package index 导出此 capability；WeakSet 品牌由 process-runtime 拒绝对象字面量和测试 Fake。
-export const auditedProductionApiAssembly = createAuditedProductionAssembly(productionApiAssembler);
+export function startProductionApiProcess(
+  configuration: ApiProcessConfiguration,
+  options: Readonly<{
+    signalSource?: import("@cube-runtime/process-runtime").ProcessSignalSource;
+    onShutdownFailure?: (error: Error) => void;
+  }> = {},
+) {
+  return startServiceProcess({
+    serviceName: "api",
+    configuration,
+    shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
+    assembler: productionApiAssembler,
+    ...(options.signalSource === undefined ? {} : { signalSource: options.signalSource }),
+    ...(options.onShutdownFailure === undefined
+      ? {}
+      : { onShutdownFailure: options.onShutdownFailure }),
+  });
+}

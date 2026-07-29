@@ -1,8 +1,9 @@
 import type { PgClaimedRunDispatch } from "@cube-runtime/persistence";
-import type { ExecutionScope } from "@cube-runtime/run-contracts";
+import type { ExecutionScope, SandboxSessionRef } from "@cube-runtime/run-contracts";
 import { describe, expect, it } from "vitest";
 import {
   AgentWorkerPollingLoop,
+  CubeSandboxSessionRegistry,
   DatabaseRunCancellation,
   FailClosedWorkspaceRevisionVerifier,
   ProcessShutdown,
@@ -164,6 +165,61 @@ describe("Agent Worker production polling loop", () => {
 });
 
 describe("生产 Workspace revision 安全下限", () => {
+  it("Workspace capability 逐字段绑定 acquire 时的 ExecutionScope，不能跨 tenant/thread/workspace 重放", async () => {
+    const registry = new CubeSandboxSessionRegistry(
+      { apiUrl: "http://127.0.0.1:18080" },
+      "template-workspace-binding",
+    );
+    const scope = claim().scope as ExecutionScope;
+    const session: SandboxSessionRef = Object.freeze({
+      registryId: "registry-bound",
+      providerSandboxId: "sandbox-bound",
+      mode: "created",
+      sandbox: {
+        id: "sandbox-bound",
+        command: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+        runCode: async () => ({ stdout: [], stderr: [] }),
+        readFile: async () => "",
+        writeFile: async () => undefined,
+        pause: async () => undefined,
+        kill: async () => undefined,
+      },
+    });
+    // acquire 的外部网络调用不属于本单元测试；仅以 registry 私有事实模拟其已完成绑定的结果。
+    (
+      registry as unknown as {
+        readonly workspaceBindings: WeakMap<object, unknown>;
+      }
+    ).workspaceBindings.set(session, {
+      registryId: session.registryId,
+      providerSandboxId: session.providerSandboxId,
+      scope: { ...scope },
+    });
+
+    await expect(registry.workspaceCapability({ scope, session }).current()).resolves.toMatchObject(
+      {
+        sessionId: session.providerSandboxId,
+        scope: {
+          tenantId: scope.tenantId,
+          threadId: scope.threadId,
+          workspaceId: scope.workspaceId,
+        },
+      },
+    );
+    const alteredScopes: readonly ExecutionScope[] = [
+      { ...scope, tenantId: "other-tenant" } as unknown as ExecutionScope,
+      { ...scope, threadId: "other-thread" } as unknown as ExecutionScope,
+      { ...scope, workspaceId: "other-workspace" } as unknown as ExecutionScope,
+      { ...scope, runId: "other-run" } as unknown as ExecutionScope,
+      { ...scope, rootRunId: "other-root-run" } as unknown as ExecutionScope,
+    ];
+    for (const altered of alteredScopes) {
+      expect(() => registry.workspaceCapability({ scope: altered, session })).toThrow(
+        "未授予 Sandbox Workspace capability",
+      );
+    }
+  });
+
   it("非空 Workspace 失败关闭，避免成功丢失 Sandbox 文件", async () => {
     const verifier = new FailClosedWorkspaceRevisionVerifier();
     await expect(
@@ -184,6 +240,30 @@ describe("生产 Workspace revision 安全下限", () => {
           },
         },
         operationKey: "workspace-verify-test",
+      }),
+    ).rejects.toThrow("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
+  });
+
+  it.each([72, 73])("模型前拒绝缺失根目录或模板额外文件（exit %i）", async (exitCode) => {
+    const verifier = new FailClosedWorkspaceRevisionVerifier();
+    await expect(
+      verifier.materialize({
+        scope: claim().scope as ExecutionScope,
+        sandbox: {
+          registryId: "registry-workspace-preflight",
+          providerSandboxId: "sandbox-workspace-preflight",
+          mode: "created",
+          sandbox: {
+            id: "sandbox-workspace-preflight",
+            command: async () => ({ stdout: "", stderr: "", exitCode }),
+            runCode: async () => ({ stdout: [], stderr: [] }),
+            readFile: async () => "",
+            writeFile: async () => undefined,
+            pause: async () => undefined,
+            kill: async () => undefined,
+          },
+        },
+        operationKey: `workspace-materialize-${exitCode}`,
       }),
     ).rejects.toThrow("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
   });

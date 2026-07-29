@@ -67,22 +67,31 @@ export class ProcessShutdown {
   }
 }
 
-/** 生产默认禁止成功关闭会丢失文件的 Sandbox；revision 发布接通前，非空 Workspace 失败关闭。 */
+/**
+ * 发布的候选引用尚未能与 RuntimeMutation 原子交接时，生产 Worker 必须保持 fail-closed。
+ * 这一检查放在模型 Session 创建之前：模板残留、上次执行残留或 /workspace 缺失都不能被模型
+ * 读取，更不能在后续 verify 中被误当成用户变更发布。
+ */
 export class FailClosedWorkspaceRevisionVerifier implements WorkspaceRevisionVerifierPort {
-  async materialize(): Promise<void> {
-    // 兼容旧部署的安全下限：没有 manifest runtime 时仅允许一个空 Sandbox 进入模型。
+  async materialize(
+    input: Parameters<WorkspaceRevisionVerifierPort["materialize"]>[0],
+  ): Promise<void> {
+    await assertEmptyWorkspaceRoot(input.sandbox);
   }
 
   async verify(input: Parameters<WorkspaceRevisionVerifierPort["verify"]>[0]): Promise<undefined> {
-    const result = await input.sandbox.sandbox.command(
-      `if [ ! -d /workspace ]; then exit 72; fi
-if find /workspace -mindepth 1 -print -quit | grep -q .; then exit 73; fi`,
-    );
-    if (result.exitCode !== 0) {
-      throw new Error("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
-    }
+    // Session 内模型/工具可能写入文件；模型结束后的再次检查保证不会把未发布内容成功关闭。
+    await assertEmptyWorkspaceRoot(input.sandbox);
     return undefined;
   }
+}
+
+async function assertEmptyWorkspaceRoot(session: SandboxSessionRef): Promise<void> {
+  const result = await session.sandbox.command(
+    `if [ ! -d /workspace ]; then exit 72; fi
+if find /workspace -mindepth 1 -print -quit | grep -q .; then exit 73; fi`,
+  );
+  if (result.exitCode !== 0) throw new Error("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
 }
 
 /** CubeSandbox 的生产 Session registry；PG 包装器会在返回 Worker 前提交 registry 事实。 */
@@ -91,8 +100,11 @@ export class CubeSandboxSessionRegistry
 {
   readonly gateway: CubeSandboxGateway;
   private uncertainCreate: UncertainLifecycleEvent | undefined;
-  /** 只有本实例真正 create/connect 并返回的同一对象才能派生 Workspace capability。 */
-  private readonly workspaceCapabilities = new WeakSet<object>();
+  /**
+   * Workspace capability 不只绑定对象身份：必须绑定 acquire 时已经由 Run fence 审核过的完整
+   * ExecutionScope。否则攻击者可把同一 SandboxSessionRef 重放到另一 tenant/thread/workspace。
+   */
+  private readonly workspaceBindings = new WeakMap<object, WorkspaceCapabilityBinding>();
 
   constructor(
     options: CubeGatewayOptions,
@@ -129,7 +141,14 @@ export class CubeSandboxSessionRegistry
         mode: "created",
         sandbox,
       });
-      this.workspaceCapabilities.add(session);
+      this.workspaceBindings.set(
+        session,
+        Object.freeze({
+          registryId: session.registryId,
+          providerSandboxId: session.providerSandboxId,
+          scope: freezeExecutionScope(input.scope),
+        }),
+      );
       return { outcome: "ready", session };
     } catch (error) {
       if (error instanceof SandboxRuntimeError && error.code === "UNKNOWN") {
@@ -177,19 +196,23 @@ export class CubeSandboxSessionRegistry
     readonly scope: ExecutionScope;
     readonly session: SandboxSessionRef;
   }): TrustedSandboxSessionCapability {
+    const recorded = this.workspaceBindings.get(input.session);
     if (
-      !this.workspaceCapabilities.has(input.session) ||
-      input.session.sandbox.id !== input.session.providerSandboxId
+      recorded === undefined ||
+      recorded.registryId !== input.session.registryId ||
+      recorded.providerSandboxId !== input.session.providerSandboxId ||
+      input.session.sandbox.id !== input.session.providerSandboxId ||
+      !sameExecutionScope(recorded.scope, input.scope)
     ) {
       throw new Error("未授予 Sandbox Workspace capability");
     }
     const binding = Object.freeze({
-      sessionId: input.session.providerSandboxId,
+      sessionId: recorded.providerSandboxId,
       generation: 1,
       scope: Object.freeze({
-        tenantId: input.scope.tenantId,
-        threadId: input.scope.threadId,
-        workspaceId: input.scope.workspaceId,
+        tenantId: recorded.scope.tenantId,
+        threadId: recorded.scope.threadId,
+        workspaceId: recorded.scope.workspaceId,
       }),
     });
     return Object.freeze({
@@ -199,6 +222,34 @@ export class CubeSandboxSessionRegistry
       },
     });
   }
+}
+
+interface WorkspaceCapabilityBinding {
+  readonly registryId: string;
+  readonly providerSandboxId: string;
+  readonly scope: ExecutionScope;
+}
+
+function freezeExecutionScope(scope: ExecutionScope): ExecutionScope {
+  return Object.freeze({
+    tenantId: scope.tenantId,
+    threadId: scope.threadId,
+    runId: scope.runId,
+    rootRunId: scope.rootRunId,
+    workspaceId: scope.workspaceId,
+    ...(scope.baseRevisionId === undefined ? {} : { baseRevisionId: scope.baseRevisionId }),
+  });
+}
+
+function sameExecutionScope(left: ExecutionScope, right: ExecutionScope): boolean {
+  return (
+    left.tenantId === right.tenantId &&
+    left.threadId === right.threadId &&
+    left.runId === right.runId &&
+    left.rootRunId === right.rootRunId &&
+    left.workspaceId === right.workspaceId &&
+    left.baseRevisionId === right.baseRevisionId
+  );
 }
 
 function fallbackUncertainEvent(

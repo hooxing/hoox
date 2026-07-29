@@ -46,11 +46,12 @@ Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 必须等于
 `MODEL_ID`；不要把预算值猜测为 Provider 元数据。生产模式保持更严格的预算元数据匹配策略，且本仓库
 不提供生产 Worker 入口。
 
-development Worker 已接通 Workspace revision：在创建模型 Session 前从已提交的逐文件 stable Blob manifest
-物化当前 head，模型结束后再发布 Sandbox snapshot，并在同一 RuntimeMutation 事务中提交 revision、head 与
-文件 incarnation 引用。运行前必须完成 `0014_workspace_manifest_journal` 迁移；任何 manifest、Blob、租约或
-Sandbox 身份不确定都会失败关闭进入恢复路径。Artifact 发布仍是独立的交付闭环，Workspace 文件不会自动
-成为用户可下载的 Artifact。
+Workspace manifest 的持久化 schema、精确 incarnation 外键与 RuntimeMutation 原子写入已经准备就绪，
+但 development Worker **尚未启用** manifest 发布：候选 Blob 引用还不能与 RuntimeMutation/CAS 进行可证明
+的原子交接，若在 unchanged、取消、冲突或未知结果时继续发布会遗留不可回收引用。因此 Worker 目前只允许
+模型前和模型后都为空的 `/workspace`，任何模板残留、根目录缺失或模型写入都会失败关闭。`0014` 也会拒绝
+含旧 current head 的半升级数据库，必须先用受控回填流程转换。Artifact 发布仍是独立的交付闭环，Workspace
+文件不会自动成为用户可下载的 Artifact。
 
 ## 开发基线
 

@@ -4,7 +4,12 @@ import type {
   TraceBlobPersistenceResult,
 } from "@cube-runtime/context-policy";
 import { createHash } from "node:crypto";
-import { BlobStoreError, type BlobStore, type StableBlobRef } from "./blob-store.js";
+import {
+  BlobStoreError,
+  type BlobStore,
+  type StableBlobGcClaimPort,
+  type StableBlobRef,
+} from "./blob-store.js";
 import {
   type BlobCommitSnapshot,
   type BlobCommitStatePort,
@@ -15,7 +20,8 @@ import type { StableBlobLifecycleAllocationPort } from "./blob-store.js";
 
 export type TraceBlobCommitRepository = BlobCommitStatePort &
   BlobReferenceCommitPort &
-  StableBlobLifecycleAllocationPort;
+  StableBlobLifecycleAllocationPort &
+  Pick<StableBlobGcClaimPort, "resolveLifecycle">;
 
 /**
  * 生产 Trace adapter 复用唯一的 Blob commit/promotion 状态机。每一步先落 PG 状态，
@@ -217,7 +223,26 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
           transitionBlobCommit(snapshot, { type: "cleanup_succeeded", target: "staging" }),
         );
       }
-      case "stable_mark_gc_blocked":
+      case "stable_mark_gc_blocked": {
+        if (snapshot.stable === undefined) return { outcome: "conflict" };
+        const lifecycle = await this.repository.resolveLifecycle({
+          scope,
+          blob: snapshot.stable,
+        });
+        const event =
+          lifecycle.status === "deleted"
+            ? {
+                type: "stable_gc_lifecycle_resolved" as const,
+                status: "deleted" as const,
+                retiredIncarnationId: lifecycle.retiredIncarnationId,
+                retiredPhysicalObjectKey: lifecycle.retiredPhysicalObjectKey,
+              }
+            : {
+                type: "stable_gc_lifecycle_resolved" as const,
+                status: lifecycle.status,
+              };
+        return await this.cas(snapshot, transitionBlobCommit(snapshot, event));
+      }
       case "abandoned":
         return { outcome: "unavailable" };
       default:

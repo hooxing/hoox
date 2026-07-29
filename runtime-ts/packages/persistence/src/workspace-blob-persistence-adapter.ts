@@ -13,13 +13,15 @@ import {
 import {
   BlobStoreError,
   type BlobStore,
+  type StableBlobGcClaimPort,
   type StableBlobLifecycleAllocationPort,
   type StableBlobRef,
 } from "./blob-store.js";
 
 export type WorkspaceBlobCommitRepository = BlobCommitStatePort &
   BlobReferenceCommitPort &
-  StableBlobLifecycleAllocationPort;
+  StableBlobLifecycleAllocationPort &
+  Pick<StableBlobGcClaimPort, "resolveLifecycle">;
 
 /**
  * 逐文件 Workspace 上传必须走与 Trace 相同的 Blob lifecycle 状态机；这里仅把受控字节流
@@ -305,6 +307,28 @@ export class DurableWorkspaceCandidateBlobWriter implements WorkspaceCandidateBl
             transitionBlobCommit(snapshot, { type: "stable_mark_resolved", status }),
           ),
         );
+      }
+      case "stable_mark_gc_blocked": {
+        if (snapshot.stable === undefined) throw unavailable("BLOB_COMMIT_INVALID");
+        // GC 租约可能已经释放、进入 deleting 或完成删除。每次恢复都从生命周期事实收敛：
+        // active 回到 mark，deleted 重新 reserve 新 incarnation，仍在删除则保留阻塞状态。
+        const lifecycle = await this.repository.resolveLifecycle({
+          scope,
+          blob: snapshot.stable,
+        });
+        const event =
+          lifecycle.status === "deleted"
+            ? {
+                type: "stable_gc_lifecycle_resolved" as const,
+                status: "deleted" as const,
+                retiredIncarnationId: lifecycle.retiredIncarnationId,
+                retiredPhysicalObjectKey: lifecycle.retiredPhysicalObjectKey,
+              }
+            : {
+                type: "stable_gc_lifecycle_resolved" as const,
+                status: lifecycle.status,
+              };
+        return next(await this.cas(snapshot, transitionBlobCommit(snapshot, event)));
       }
       default:
         throw unknown("BLOB_COMMIT_UNKNOWN");

@@ -64,6 +64,7 @@ import {
   PgExecutionPersistence,
   PgRunExecutionSetup,
 } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
+import { PgWorkspaceManifestRepository } from "../../runtime-ts/packages/persistence/src/pg-workspace-manifest.js";
 import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-sandbox-cleanup-consumer.js";
 import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import {
@@ -327,6 +328,106 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       `DROP ROLE IF EXISTS "${runtimeRole}"; DROP ROLE IF EXISTS "${migratorRole}"`,
     );
     await admin?.end();
+  });
+
+  it("0014 journal 保持 completed 单调，manifest 外键、RLS 与 runtime ACL 均受约束", async () => {
+    const f = await fixture(`workspace-manifest-contract-${suffix}`);
+    const policy = {
+      maxEntries: 8,
+      maxFiles: 8,
+      maxTotalBytes: 1024,
+      maxSingleFileBytes: 1024,
+      maxChunkBytes: 1024,
+      maxPathUtf8Bytes: 128,
+      historicalManifest: { maxFiles: 8, maxTotalBytes: 1024 },
+    } as const;
+    const journal = new PgWorkspaceManifestRepository(runtime, policy);
+    const scope = {
+      tenantId: f.scope.tenantId,
+      threadId: f.scope.threadId,
+      workspaceId: f.scope.workspaceId,
+    } as const;
+    const identity = {
+      schemaVersion: 1 as const,
+      digestAlgorithm: "workspace-operation-v2" as const,
+      operationKey: `journal-${suffix}`,
+      kind: "materialize" as const,
+      inputDigest: "a".repeat(64),
+      ...scope,
+      sandbox: { sessionId: "sandbox-journal", generation: 1 },
+    };
+    expect(await journal.begin(identity)).toEqual({ status: "started" });
+    await journal.complete(identity, {
+      kind: "materialized",
+      operationKey: identity.operationKey,
+      scope,
+      sandbox: identity.sandbox,
+      targetManifestDigest: "b".repeat(64),
+    });
+    await journal.recordUnknown(identity, {
+      operationKey: identity.operationKey,
+      kind: identity.kind,
+      inputDigest: identity.inputDigest,
+      phase: "after_complete",
+      dependencyCode: "SIMULATED_UNKNOWN",
+      occurredAt: "2026-07-29T00:00:00.000Z",
+    });
+    await expect(
+      journal.lookupCompleted({
+        operationKey: identity.operationKey,
+        scope,
+        kind: identity.kind,
+      }),
+    ).resolves.toMatchObject({ status: "completed" });
+
+    const schemaFacts = await admin.query<{
+      readonly table_name: string;
+      readonly rls: boolean;
+      readonly force_rls: boolean;
+      readonly definition: string;
+    }>(
+      `SELECT relation.relname AS table_name,relation.relrowsecurity AS rls,
+              relation.relforcerowsecurity AS force_rls,
+              COALESCE(constraint_def.definition, '') AS definition
+         FROM pg_class relation
+         JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+         LEFT JOIN LATERAL (
+           SELECT pg_get_constraintdef(constraint.oid) AS definition
+             FROM pg_constraint constraint
+            WHERE constraint.conrelid=relation.oid AND constraint.contype='f'
+            ORDER BY constraint.oid
+            LIMIT 1
+         ) constraint_def ON true
+        WHERE namespace.nspname=$1
+          AND relation.relname IN ('workspace_revision_manifests','workspace_revision_files','workspace_operation_journal')
+        ORDER BY relation.relname`,
+      [schema],
+    );
+    expect(schemaFacts.rows).toHaveLength(3);
+    expect(schemaFacts.rows.every((row) => row.rls && row.force_rls)).toBe(true);
+    const fileForeignKeys = await admin.query<{ readonly definition: string }>(
+      `SELECT pg_get_constraintdef(constraint.oid) AS definition
+         FROM pg_constraint constraint
+         JOIN pg_class relation ON relation.oid=constraint.conrelid
+         JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
+        WHERE namespace.nspname=$1 AND relation.relname='workspace_revision_files' AND constraint.contype='f'`,
+      [schema],
+    );
+    expect(fileForeignKeys.rows.map((row) => row.definition).join("\n")).toContain(
+      "blob_incarnations",
+    );
+    expect(fileForeignKeys.rows.map((row) => row.definition).join("\n")).toContain(
+      "workspace_revision_manifests",
+    );
+    const acl = await admin.query<{
+      readonly select_insert_update: boolean;
+      readonly delete: boolean;
+    }>(
+      `SELECT has_table_privilege($1::text, format('%I.workspace_operation_journal', $2::text), 'SELECT,INSERT,UPDATE') AS select_insert_update,
+              has_table_privilege($1::text, format('%I.workspace_operation_journal', $2::text), 'DELETE') AS delete`,
+      [runtimeRole, schema],
+    );
+    expect(acl.rows[0]).toEqual({ select_insert_update: true, delete: false });
   });
 
   it("双 Worker 并发 claim 只有一个取得双栅栏", async () => {

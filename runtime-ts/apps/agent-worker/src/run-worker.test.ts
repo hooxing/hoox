@@ -1,7 +1,11 @@
 import { sha256Digest, tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
-import { WorkspaceApplicationError, createWorkspaceManifest } from "@cube-runtime/workspace";
+import {
+  WorkspaceApplicationError,
+  WorkspaceDependencyError,
+  createWorkspaceManifest,
+} from "@cube-runtime/workspace";
 import { describe, expect, it, vi } from "vitest";
 import {
   outboxPayloadDigest,
@@ -1481,6 +1485,31 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         "WORKSPACE_VERIFY_FAILED category=application_dependency_failed",
       );
       expect(warning.mock.calls.flat().join(" ")).not.toContain("credential_like_diagnostic");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("Workspace 日志对伪造 code、result 与 diagnostic 一律输出 unclassified", async () => {
+    const canary = "credential-canary\nforged-category";
+    const application = harness([new ScriptedAgentSession(successfulEvents)]);
+    application.revisions.beforeReturn = () => {
+      throw new WorkspaceApplicationError(canary as never, "内部错误", canary as never);
+    };
+    const dependency = harness([new ScriptedAgentSession(successfulEvents)]);
+    dependency.revisions.beforeReturn = () => {
+      throw new WorkspaceDependencyError(canary as never, "内部依赖错误");
+    };
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      for (const target of [application, dependency]) {
+        await expect(target.worker.execute(target.scope)).resolves.toEqual({
+          outcome: "recovery_required",
+          code: "WORKSPACE_CONFLICT",
+        });
+      }
+      expect(warning).toHaveBeenCalledWith("WORKSPACE_VERIFY_FAILED category=unclassified");
+      expect(warning.mock.calls.flat().join(" ")).not.toContain(canary);
     } finally {
       warning.mockRestore();
     }

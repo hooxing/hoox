@@ -81,6 +81,7 @@ const publicAgentEventTypes = new Set([
   "compaction.forbidden",
   "error",
 ]);
+const MAX_TEXT_ARTIFACT_PREVIEW_BYTES = 1_024 * 1_024;
 
 const statusByFailure: Readonly<Record<ApiFailureKind, number>> = {
   bad_request: 400,
@@ -567,7 +568,10 @@ export function createApiApp(
       app.get<{ Params: RunArtifactPath }>(
         path,
         { schema: artifactDeliverySchema },
-        async (request) => {
+        async (request, reply) => {
+          void reply.header("cache-control", "no-store");
+          void reply.header("pragma", "no-cache");
+          void reply.header("x-content-type-options", "nosniff");
           const auth = await service.authenticate(authorization(request), requestId(request));
           const run = await service.getRun(auth, request.params.threadId, request.params.runId);
           const artifact = await normalizedDependencies.experience?.getArtifact({
@@ -577,27 +581,58 @@ export function createApiApp(
           });
           if (artifact === undefined || artifact.outcome === "not_found")
             throw new ApiFailure("not_found");
+          const textPreview =
+            disposition === "preview" && isTextPreviewMediaType(artifact.artifact.mediaType);
           if (
             disposition === "preview" &&
-            !isPassivePreviewMediaType(artifact.artifact.mediaType)
+            !textPreview &&
+            !isInlineBinaryPreviewMediaType(artifact.artifact.mediaType)
           ) {
             throw new ApiFailure("invalid_state");
           }
-          const delivery = await normalizedDependencies.blobs?.presignDownload({
-            scope: { tenantId: auth.scope.tenantId },
-            blob: artifact.artifact.blob,
-            ttlSeconds: 300,
-            responseMediaType: artifact.artifact.mediaType,
-            delivery: disposition === "preview" ? "inline-preview" : "artifact-download",
-            ...(disposition === "download"
-              ? {
-                  downloadName: safeArtifactDownloadName(
-                    artifact.artifact.name,
-                    artifact.artifact.id,
-                  ),
-                }
-              : {}),
-          });
+          if (textPreview && artifact.artifact.sizeBytes > MAX_TEXT_ARTIFACT_PREVIEW_BYTES) {
+            throw new ApiFailure("invalid_state");
+          }
+          const previewBytes = textPreview
+            ? await normalizedDependencies.blobs?.getBytes(
+                { tenantId: auth.scope.tenantId },
+                artifact.artifact.blob,
+              )
+            : undefined;
+          if (
+            previewBytes !== undefined &&
+            (previewBytes.byteLength !== artifact.artifact.sizeBytes ||
+              previewBytes.byteLength > MAX_TEXT_ARTIFACT_PREVIEW_BYTES)
+          ) {
+            throw new ApiFailure("invalid_state");
+          }
+          let previewText: string | undefined;
+          if (previewBytes !== undefined) {
+            try {
+              previewText = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+                previewBytes,
+              );
+            } catch {
+              throw new ApiFailure("invalid_state");
+            }
+          }
+          const delivery = textPreview
+            ? undefined
+            : await normalizedDependencies.blobs?.presignDownload({
+                scope: { tenantId: auth.scope.tenantId },
+                blob: artifact.artifact.blob,
+                ttlSeconds: 300,
+                responseMediaType: artifact.artifact.mediaType,
+                delivery: disposition === "preview" ? "inline-preview" : "artifact-download",
+                ...(disposition === "download"
+                  ? {
+                      downloadName: safeArtifactDownloadName(
+                        artifact.artifact.name,
+                        artifact.artifact.id,
+                      ),
+                    }
+                  : {}),
+              });
           // 签发 URL 后再读取一次固定身份，避免成员撤销或发布状态变化时留下可用 URL。
           const confirmed = await normalizedDependencies.experience?.getArtifact({
             scope: auth.scope,
@@ -605,14 +640,13 @@ export function createApiApp(
             artifactId: request.params.artifactId,
           });
           if (
-            delivery === undefined ||
             confirmed === undefined ||
             confirmed.outcome === "not_found" ||
             !sameArtifactAuthorization(artifact.artifact, confirmed.artifact)
           ) {
             throw new ApiFailure("not_found");
           }
-          return success(request, {
+          const artifactDto = {
             artifact: {
               id: artifact.artifact.id,
               tenantId: auth.scope.tenantId,
@@ -626,6 +660,13 @@ export function createApiApp(
               createdAt: artifact.artifact.createdAt,
               updatedAt: artifact.artifact.updatedAt,
             },
+          };
+          if (previewText !== undefined) {
+            return success(request, { ...artifactDto, text: previewText, disposition: "preview" });
+          }
+          if (delivery === undefined) throw new ApiFailure("not_found");
+          return success(request, {
+            ...artifactDto,
             url: validateArtifactDeliveryUrl(delivery),
             expiresInSeconds: 300,
             disposition,
@@ -664,22 +705,19 @@ function sameArtifactAuthorization(
   );
 }
 
-function isPassivePreviewMediaType(value: string): boolean {
+function isInlineBinaryPreviewMediaType(value: string): boolean {
   const [rawBase, ...rawParameters] = value.split(";");
   const base = rawBase?.trim().toLowerCase();
-  if (base === "text/plain") {
-    return rawParameters.every((parameter) =>
-      /^charset\s*=\s*(?:"(?:utf-8|us-ascii|iso-8859-1|windows-1252)"|(?:utf-8|us-ascii|iso-8859-1|windows-1252))$/iu.test(
-        parameter.trim(),
-      ),
-    );
-  }
   return (
     rawParameters.length === 0 &&
     new Set(["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"]).has(
       base ?? "",
     )
   );
+}
+
+function isTextPreviewMediaType(value: string): boolean {
+  return /^text\/plain\s*;\s*charset\s*=\s*utf-8\s*$/iu.test(value);
 }
 
 /** 仅透传已由 RuntimeAgentEvent 协议声明的 agent 子类型，未知 payload 不能伪造公开事件类型。 */

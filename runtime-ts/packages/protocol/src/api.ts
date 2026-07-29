@@ -110,14 +110,28 @@ export const ThreadRunPageDtoSchema = Type.Object(
 );
 export type ThreadRunPageDto = Static<typeof ThreadRunPageDtoSchema>;
 
-export const ArtifactDeliveryDtoSchema = Type.Object(
+const ArtifactDeliveryArtifactDtoSchema = Type.Object(ArtifactDtoSchema.properties, strict);
+
+const ArtifactDeliveryUrlDtoSchema = Type.Object(
   {
-    artifact: ArtifactDtoSchema,
+    artifact: ArtifactDeliveryArtifactDtoSchema,
     url: Type.String({ minLength: 1, maxLength: 8_192 }),
     expiresInSeconds: Type.Integer({ minimum: 1, maximum: 900 }),
     disposition: Type.Union([Type.Literal("preview"), Type.Literal("download")]),
   },
-  { ...strict, $id: "v1.ArtifactDeliveryDto" },
+  strict,
+);
+const ArtifactTextPreviewDtoSchema = Type.Object(
+  {
+    artifact: ArtifactDeliveryArtifactDtoSchema,
+    text: Type.String({ maxLength: 1_048_576 }),
+    disposition: Type.Literal("preview"),
+  },
+  { ...strict, $id: "v1.ArtifactTextPreviewDto" },
+);
+export const ArtifactDeliveryDtoSchema = Type.Union(
+  [ArtifactDeliveryUrlDtoSchema, ArtifactTextPreviewDtoSchema],
+  { $id: "v1.ArtifactDeliveryDto" },
 );
 export type ArtifactDeliveryDto = Static<typeof ArtifactDeliveryDtoSchema>;
 

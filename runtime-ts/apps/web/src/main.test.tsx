@@ -3,7 +3,7 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, type Run, type Thread } from "./api.js";
+import { ApiError, type Artifact, type Run, type Thread } from "./api.js";
 import { App, chooseInitialThread } from "./main.js";
 
 type AppApi = NonNullable<ComponentProps<typeof App>["apiClient"]>;
@@ -24,6 +24,20 @@ const run = (id: string, threadId: string): Run => ({
   updatedAt: "2026-07-29T00:00:00.000Z",
 });
 
+const textArtifact = (threadId: string, runId: string): Artifact => ({
+  id: "artifact_text",
+  tenantId: "tenant_a",
+  threadId,
+  runId,
+  resourceVersionId: "resource_version_text",
+  name: "report.txt",
+  mediaType: "text/plain; charset=utf-8",
+  sizeBytes: 41,
+  status: "published",
+  createdAt: "2026-07-29T00:00:00.000Z",
+  updatedAt: "2026-07-29T00:00:00.000Z",
+});
+
 function apiFixture(overrides: Partial<AppApi> = {}): AppApi {
   const defaultThread = thread("thread_default");
   const defaultRun = run("run_default", defaultThread.id);
@@ -38,7 +52,10 @@ function apiFixture(overrides: Partial<AppApi> = {}): AppApi {
     createRun: vi.fn(async () => defaultRun),
     cancelRun: vi.fn(async () => defaultRun),
     downloadArtifact: vi.fn(async () => "https://example.invalid/download"),
-    previewArtifact: vi.fn(async () => "https://example.invalid/preview"),
+    previewArtifact: vi.fn(async () => ({
+      kind: "url" as const,
+      url: "https://example.invalid/preview",
+    })),
     ...overrides,
   };
 }
@@ -205,6 +222,30 @@ describe("Agent 工作台恢复接入", () => {
     await settleEffects();
     expect(container.textContent).toContain("运行 run_new");
     expect(apiClient.getRun).toHaveBeenCalledWith(selectedThread.id, newRun.id);
+  });
+
+  it("恶意 HTML 文本只渲染为 pre 的文本节点，且不打开或导航弹窗", async () => {
+    const selectedThread = thread("thread_text");
+    const latest = run("run_text", selectedThread.id);
+    const payload = "<script>window.pwned=true</script>";
+    const open = vi.spyOn(window, "open");
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [selectedThread]),
+      listLatestRuns: vi.fn(async () => [latest]),
+      getRun: vi.fn(async () => latest),
+      listArtifacts: vi.fn(async () => [textArtifact(selectedThread.id, latest.id)]),
+      previewArtifact: vi.fn(async () => ({ kind: "text" as const, text: payload })),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+    const preview = container.querySelector<HTMLButtonElement>("[aria-label='预览 report.txt']");
+    if (preview === null) throw new Error("未渲染纯文本预览按钮");
+    await act(async () => preview.click());
+
+    const rendered = container.querySelector(".artifact-text-preview pre");
+    expect(rendered?.textContent).toBe(payload);
+    expect(rendered?.querySelector("script")).toBeNull();
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("初始选择策略跳过归档 Thread，并在无活跃 Thread 时保持空选择", () => {

@@ -1377,28 +1377,81 @@ function validateWorkspaceCandidate(
 function reportWorkspaceMaterializeFailure(error: unknown): void {
   const category =
     error instanceof WorkspaceMaterializationStageError
-      ? `stage_${error.stage}${error.detail === undefined ? "" : `_${error.detail}`}`
+      ? workspaceMaterializationCategory(error)
       : error instanceof WorkspaceApplicationError
-        ? `application_${error.code.toLowerCase()}`
+        ? workspaceApplicationCategory(error)
         : error instanceof WorkspaceDependencyError
-          ? `dependency_${error.result}`
+          ? workspaceDependencyCategory(error)
           : "unclassified";
   console.warn(`WORKSPACE_MATERIALIZE_FAILED category=${category}`);
 }
 
 /** Workspace candidate 发布与物化同样只记录固定分类，避免异常正文越过 Worker 边界。 */
 function reportWorkspaceVerifyFailure(error: unknown): void {
-  const diagnostic =
-    error instanceof WorkspaceApplicationError && error.diagnostic === "candidate_stream_pending"
-      ? "_candidate_stream_pending"
-      : "";
   const category =
     error instanceof WorkspaceApplicationError
-      ? `application_${error.code.toLowerCase()}${diagnostic}`
+      ? workspaceApplicationCategory(error)
       : error instanceof WorkspaceDependencyError
-        ? `dependency_${error.result}`
+        ? workspaceDependencyCategory(error)
         : "unclassified";
   console.warn(`WORKSPACE_VERIFY_FAILED category=${category}`);
+}
+
+function workspaceMaterializationCategory(error: WorkspaceMaterializationStageError): string {
+  const stage = new Set([
+    "load_current_manifest",
+    "open_workspace",
+    "baseline_snapshot",
+    "baseline_list",
+    "baseline_release",
+    "materializer",
+  ]).has(error.stage)
+    ? error.stage
+    : undefined;
+  if (stage === undefined) return "unclassified";
+  const detail = new Set([
+    "invalid_operation_key",
+    "invalid_scope",
+    "invalid_sandbox_session",
+    "invalid_manifest",
+    "invalid_revision",
+    "other_application",
+    "dependency",
+    "unclassified",
+  ]).has(error.detail ?? "")
+    ? error.detail
+    : undefined;
+  return `stage_${stage}${detail === undefined ? "" : `_${detail}`}`;
+}
+
+function workspaceApplicationCategory(error: WorkspaceApplicationError): string {
+  const code = new Map([
+    ["INVALID_INPUT", "invalid_input"],
+    ["OPERATION_CONFLICT", "operation_conflict"],
+    ["OPERATION_IN_PROGRESS", "operation_in_progress"],
+    ["ACCESS_DENIED", "access_denied"],
+    ["INTEGRITY_MISMATCH", "integrity_mismatch"],
+    ["LIMIT_EXCEEDED", "limit_exceeded"],
+    ["CANCELLED", "cancelled"],
+    ["UNSAFE_SANDBOX_ENTRY", "unsafe_sandbox_entry"],
+    ["DEPENDENCY_FAILED", "dependency_failed"],
+    ["RESULT_UNKNOWN", "result_unknown"],
+  ]).get(error.code);
+  if (code === undefined) return "unclassified";
+  return `application_${code}${
+    error.diagnostic === "candidate_stream_pending" ? "_candidate_stream_pending" : ""
+  }`;
+}
+
+function workspaceDependencyCategory(error: WorkspaceDependencyError): string {
+  switch (error.result) {
+    case "known":
+      return "dependency_known";
+    case "unknown":
+      return "dependency_unknown";
+    default:
+      return "unclassified";
+  }
 }
 
 function updateAgentState(context: ExecutionContext, event: RuntimeAgentEvent): void {

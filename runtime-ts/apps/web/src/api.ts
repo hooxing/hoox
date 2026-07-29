@@ -45,6 +45,10 @@ export type Artifact = {
   readonly sizeBytes?: number;
 };
 
+export type ArtifactPreview =
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "url"; readonly url: string };
+
 type Envelope<T> = { readonly version: "v1"; readonly requestId: string; readonly data: T };
 type ErrorEnvelope = {
   readonly error?: {
@@ -227,15 +231,21 @@ export class RuntimeApi {
     }
     throw new ApiError("下载地址格式无效", 502, true);
   }
-  async previewArtifact(threadId: string, runId: string, artifactId: string): Promise<string> {
+  async previewArtifact(
+    threadId: string,
+    runId: string,
+    artifactId: string,
+  ): Promise<ArtifactPreview> {
     const data = await this.request<unknown>(
       `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/artifacts/${encodeURIComponent(artifactId)}/preview`,
     );
     if (typeof data === "object" && data !== null) {
+      const text = (data as { readonly text?: unknown }).text;
+      if (typeof text === "string") return { kind: "text", text };
       const candidate =
         (data as { readonly url?: unknown; readonly previewUrl?: unknown }).url ??
         (data as { readonly previewUrl?: unknown }).previewUrl;
-      if (typeof candidate === "string") return candidate;
+      if (typeof candidate === "string") return { kind: "url", url: candidate };
     }
     throw new ApiError("预览地址格式无效", 502, true);
   }
@@ -246,11 +256,7 @@ export function canPreviewArtifact(mediaType: string | undefined): boolean {
   const [rawBase, ...rawParameters] = mediaType.split(";");
   const base = rawBase?.trim().toLowerCase();
   if (base === "text/plain") {
-    return rawParameters.every((parameter) =>
-      /^charset\s*=\s*(?:"(?:utf-8|us-ascii|iso-8859-1|windows-1252)"|(?:utf-8|us-ascii|iso-8859-1|windows-1252))$/iu.test(
-        parameter.trim(),
-      ),
-    );
+    return /^text\/plain\s*;\s*charset\s*=\s*utf-8\s*$/iu.test(mediaType);
   }
   return (
     rawParameters.length === 0 &&

@@ -1,12 +1,9 @@
 import { createHash } from "node:crypto";
-import { workspaceRevisionId } from "@cube-runtime/domain";
 import type { WorkspaceRuntimePort } from "@cube-runtime/run-contracts";
 import {
   createWorkspaceManifest,
   WorkspaceMaterializer,
-  WorkspacePublisher,
   type SandboxWorkspacePort,
-  type WorkspaceCandidateBlobWritePort,
   type WorkspaceExecutionPolicy,
   type WorkspaceManifest,
   type WorkspaceOperationJournalPort,
@@ -25,7 +22,6 @@ export interface WorkerWorkspaceRuntimeOptions {
   readonly journal: WorkspaceOperationJournalPort;
   readonly revisions: WorkspaceRevisionFactPort;
   readonly stableBlobs: WorkspaceStableBlobReadPort;
-  readonly candidates: WorkspaceCandidateBlobWritePort;
   readonly openSandboxWorkspace: (input: {
     readonly scope: WorkspaceTrustedScope;
     readonly executionScope: Parameters<WorkspaceRuntimePort["verify"]>[0]["scope"];
@@ -57,6 +53,14 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
       session: input.sandbox,
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
+    // 新 acquire 的 Sandbox 不能把模板/上次执行残留当作 manifest 的 previous。先以受控快照
+    // 证明 /workspace 为空；根不存在、列举失败或任意额外项都在模型 Session 创建前失败关闭。
+    await assertEmptyWorkspaceBaseline({
+      sandbox,
+      operationKey: input.operationKey,
+      scope,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+    });
     await new WorkspaceMaterializer({
       journal: this.options.journal,
       stableBlobs: this.options.stableBlobs,
@@ -70,52 +74,38 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
     });
   }
 
-  async verify(input: Parameters<WorkspaceRuntimePort["verify"]>[0]) {
-    const scope = trustedScope(input.scope);
-    const base = await this.options.revisions.loadCurrentManifest({
-      scope,
-      ...(input.expectedCurrentRevisionId === undefined
-        ? {}
-        : { expectedRevisionId: input.expectedCurrentRevisionId }),
-    });
-    const sandbox = await this.options.openSandboxWorkspace({
-      scope,
-      executionScope: input.scope,
-      session: input.sandbox,
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    });
-    const published = await new WorkspacePublisher({
-      journal: this.options.journal,
-      sandbox,
-      blobs: this.options.candidates,
-      policy: this.options.policy,
-    }).publish({
-      operationKey: input.operationKey,
-      scope,
-      ...(base === undefined ? {} : { base }),
-      ...(input.signal === undefined ? {} : { signal: input.signal }),
-    });
-    // 空 Workspace 或没有任何内容变化不创建无意义 revision；这同时保证跨 Run materialize 的
-    // head 不会在纯聊天中漂移。
-    if (
-      (base === undefined && published.candidateManifest.entries.length === 0) ||
-      base?.digest === published.candidateManifest.digest
-    ) {
-      return undefined;
+  async verify(input: Parameters<WorkspaceRuntimePort["verify"]>[0]): Promise<undefined> {
+    // WorkspacePublisher 目前会在 RuntimeMutation/CAS 之前独立创建 stable 引用。若随后是
+    // unchanged、取消、双栅栏 conflict 或 unknown，这些引用没有可证明的交接/回收路径。
+    // 因此本实现绝不触发 publish 或 Blob 写；真正的候选引用事务协议接通前必须失败关闭。
+    void input;
+    throw new Error("WORKSPACE_MANIFEST_PUBLICATION_DISABLED");
+  }
+}
+
+async function assertEmptyWorkspaceBaseline(input: {
+  readonly sandbox: SandboxWorkspacePort;
+  readonly operationKey: string;
+  readonly scope: WorkspaceTrustedScope;
+  readonly signal?: AbortSignal;
+}): Promise<void> {
+  const session = await input.sandbox.currentSession();
+  const operationKey = `workspace-baseline:${createHash("sha256")
+    .update(input.operationKey)
+    .digest("hex")}`;
+  const snapshot = await input.sandbox.captureSnapshot({ operationKey, scope: input.scope });
+  try {
+    if (snapshot.sessionId !== session.sessionId || snapshot.generation !== session.generation) {
+      throw new Error("WORKSPACE_BASELINE_SANDBOX_DRIFT");
     }
-    return Object.freeze({
-      tenantId: input.scope.tenantId,
-      threadId: input.scope.threadId,
-      workspaceId: input.scope.workspaceId,
-      rootRunId: input.scope.rootRunId,
-      ...(input.expectedCurrentRevisionId === undefined
-        ? {}
-        : { parentRevisionId: input.expectedCurrentRevisionId }),
-      revisionId: workspaceRevisionId(
-        `revision-${revisionSuffix(input.operationKey, published.candidateManifest.digest)}`,
-      ),
-      manifest: published.candidateManifest,
-    });
+    for await (const _entry of input.sandbox.listWorkspace(
+      snapshot,
+      input.signal === undefined ? {} : { signal: input.signal },
+    )) {
+      throw new Error("WORKSPACE_BASELINE_NOT_EMPTY");
+    }
+  } finally {
+    await input.sandbox.releaseSnapshots({ sandbox: session, operationKey });
   }
 }
 
@@ -137,11 +127,4 @@ function emptyManifest(
     { tenantId: scope.tenantId, entries: [] },
     policy.historicalManifest,
   );
-}
-
-function revisionSuffix(operationKey: string, manifestDigest: string): string {
-  return createHash("sha256")
-    .update(`workspace-revision-v1\0${operationKey}\0${manifestDigest}`)
-    .digest("hex")
-    .slice(0, 48);
 }

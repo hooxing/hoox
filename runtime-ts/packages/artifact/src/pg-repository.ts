@@ -144,12 +144,12 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
           await client.query(
             `INSERT INTO workspace_artifact_publication_intents(
                tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
-               call_id,permit_id,idempotency_key,command_digest,tool_args_digest,
+               call_id,permit_id,permit_consumed_at,idempotency_key,command_digest,tool_args_digest,
                requested_artifact_id,artifact_id,resource_id,resource_version_id,
                blob_reference_id,blob_operation_id,replaces_artifact_id,name,purpose,
                deliverable_key,source_relative_path,resource_name
              ) VALUES(
-               $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23
+               $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24
              )`,
             [
               input.authorization.scope.tenantId,
@@ -160,6 +160,7 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
               input.authorization.scope.rootRunId,
               input.authorization.callId,
               input.authorization.permitId,
+              input.authorization.consumedAt,
               input.idempotencyKey,
               input.commandDigest,
               input.toolArgsDigest,

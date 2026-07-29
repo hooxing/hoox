@@ -28,7 +28,9 @@ Artifact settlement 和下载读侧连接为一条失败关闭事实链。
 
 - `0016_workspace_artifact_intents` 新增只追加 intent 表。身份绑定 Tenant、Thread、Run、Attempt、Workspace、
   RootRun、已消费 permit/call、幂等键、原始工具摘要、命令摘要、模型请求别名、replacement/deliverable、来源路径
-  与 Resource 名称。Artifact、Resource、ResourceVersion、Blob reference/operation ID 均由服务端按
+  与 Resource 名称。组合 FK 还要求 call 已登记为 `publish_artifact`，并精确引用同 Attempt、同 call、同 args digest、
+  `tool_execution` 且 `consumed_at` 非空的 permit；Runtime 不能只插入一组裸文本伪造来源。Artifact、Resource、
+  ResourceVersion、Blob reference/operation ID 均由服务端按
   `tenant + attempt + idempotency key` 确定性派生。
 - Workspace 来源的 `publish_artifact` 返回 `ARTIFACT_ACCEPTED`，不再调用 Resource preparation 或
   `finishPublication`，也不返回 published 快照。同键同完整 identity 可读回；摘要或别名冲突永久拒绝；COMMIT
@@ -40,12 +42,15 @@ Artifact settlement 和下载读侧连接为一条失败关闭事实链。
   `path + sha256 + size + lifecycle/incarnation/physical key` 创建独立 resource Blob 引用、不可变 ResourceVersion
   和 Artifact，最后追加 published settlement。Artifact 通过组合外键反向绑定同一 Revision file。所有写入与
   Workspace head CAS、Run success、mutation receipt 共用 SERIALIZABLE 事务；提交前列表和下载查询均不可见。
+- deliverable intent 结算出的 Resource 可进入租户 Resource Library；diagnostic/trace 只服务于 Artifact 审计范围，
+  Resource 保持 `pending_explicit_commit`，`pg-resource-library` 的成员搜索与版本解析均不会暴露它们。
 - 新表启用并强制 RLS，Runtime 仅有 SELECT/INSERT；Artifact source 组合 FK 与既有 Tenant RLS 共同拒绝跨租户、
   跨 Workspace、跨 Revision 和 incarnation 漂移。读侧继续使用既有 Membership 原子授权、预签名前后双重确认，
   不新增 UI 或绕过 API 的下载路径。
-- development process-entry 创建单一 Artifact authorization authority，把 issuer 仅交给 Worker session，把
+- 只有 development assembler 创建单一 Artifact authorization authority，把 issuer 仅交给 Worker session，把
   verifier 交给 Router、Service 和 PG Repository；同时注入 PG Resource bridge 与真实 completion gate。任一
-  依赖缺失时构造失败，不使用 `NoDeclaredArtifactCompletionGate`。
+  依赖缺失时构造失败，不使用 `NoDeclaredArtifactCompletionGate`。导出的生产 `startWorkerProcess` 仍走
+  `production-worker-runtime` 的 fail-closed 边界；生产 Artifact/Workspace assembler 属于 M7，本切片不接通。
 
 ## 失败与恢复语义
 
@@ -63,12 +68,16 @@ Artifact settlement 和下载读侧连接为一条失败关闭事实链。
 - Tool Router 测试证明 Workspace 来源只调用 intent 端口并返回 accepted，不触碰 Resource preparation 和即时
   publication。
 - migration 契约测试覆盖 source 组合键/FK、tool digest、RLS/FORCE、PUBLIC 回收和无 UPDATE ACL。
+- PostgreSQL 定向测试证明伪造 args digest 的裸 intent 被组合 FK 拒绝，diagnostic/trace 结算后不会进入成员可搜索
+  Resource 目录，并覆盖 `0016 up → 写入 workspace Artifact/ResourceVersion → down`。
 - Artifact、Tool Router、Pi Session 与 process-entry focused 测试继续覆盖授权伪造、幂等冲突、完成门和真实装配。
 - PostgreSQL 集成环境可进一步验证列表、预览和下载 bytes/hash 与 Revision file 相同；环境不可用时不得用内存
   结果替代真实 PG 结论。
 
 ## 可逆性
 
-停止新 Worker 后可回退代码，使 intent 不再创建。down 只允许 development/test：删除 intent 与新增 source FK；
-已经发布的 ResourceVersion 和 Artifact 是不可变交付事实，不应在生产回退中删除或改写。若发布链异常，可停止
-Artifact 工具和下载签发，但不能放宽完成门或把 pending intent 投影为已发布。
+停止新 Worker 后可回退代码，使 intent 不再创建。down 只允许 development/test，并会先删除由 intent 确定性
+派生的 workspace-purpose settlement、command、Artifact、ResourceVersion、Resource 与专用 Blob reference/commit，
+解除后续 correction 对被删 Artifact 的 replacement 指针，再恢复 resource-only CHECK；普通 resource-purpose 事实
+不受影响。生产数据不可把该破坏性 down 当作兼容回退；若发布链异常，应停止 Artifact 工具和下载签发，但不能
+放宽完成门或把 pending intent 投影为已发布。

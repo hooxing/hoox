@@ -79,8 +79,8 @@ let constructWorkspaceAdapter!: AdapterConstructor;
 /**
  * CubeSandbox v0.6 的 `/workspace` 窄适配器。
  *
- * 生产入口固定检查 Linux；根目录、服务 URL 与宿主路径均不属于公开参数。所有调用在开始和
- * 结束时重验可信 session/generation，代际漂移时失败关闭。
+ * 根目录、服务 URL 与宿主路径均不属于公开参数。所有文件和命令都经 Cube SDK 在远端 Sandbox
+ * 执行，Worker 宿主平台不会参与路径解析；所有调用在开始和结束时重验可信 session/generation。
  */
 export class CubeSandboxWorkspacePort implements WorkspacePort {
   private readonly options: CubeWorkspaceAdapterOptions;
@@ -116,12 +116,6 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
   }
 
   static async open(input: AdapterOpenInput): Promise<CubeSandboxWorkspacePort> {
-    if (process.platform !== "linux") {
-      throw new SandboxRuntimeError(
-        "INVALID_ARGUMENT",
-        "CubeSandbox Workspace 生产适配器只允许在 Linux Worker 启动",
-      );
-    }
     return constructWorkspaceAdapter(input);
   }
 

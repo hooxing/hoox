@@ -379,6 +379,21 @@ export class RunWorker {
 
       const preSession = await this.stopPoint(context, cancellation);
       if (preSession) return await this.finishStopped(context, preSession, sandbox);
+      try {
+        await this.dependencies.revisions.materialize({
+          scope,
+          ...(context.currentRevisionId === undefined
+            ? {}
+            : { expectedCurrentRevisionId: context.currentRevisionId }),
+          sandbox,
+          operationKey: `${context.attemptId}/workspace/materialize`,
+          signal: executionAbort.signal,
+        });
+      } catch {
+        return await this.recoverWithCleanup(context, sandbox, "WORKSPACE_CONFLICT", cancellation);
+      }
+      const postMaterialize = await this.stopPoint(context, cancellation);
+      if (postMaterialize) return await this.finishStopped(context, postMaterialize, sandbox);
       session = await this.dependencies.sessions.create({
         scope,
         attemptId: context.attemptId,
@@ -530,7 +545,9 @@ export class RunWorker {
             ...(context.currentRevisionId === undefined
               ? {}
               : { expectedCurrentRevisionId: context.currentRevisionId }),
-            sandbox: sandbox.sandbox,
+            sandbox,
+            operationKey: `${context.attemptId}/workspace/publish/${correctionRound}`,
+            signal: executionAbort.signal,
           });
         } catch {
           return await this.recoverWithCleanup(

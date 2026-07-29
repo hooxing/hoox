@@ -27,6 +27,7 @@ import {
   outboxPayloadDigest,
   runtimeMutationDigest,
 } from "@cube-runtime/run-contracts/mutation-protocol";
+import { createWorkspaceManifest } from "../../runtime-ts/packages/workspace/src/manifest.js";
 import { FakeSandboxGateway } from "@cube-runtime/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -2272,8 +2273,10 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         workspaceId: f.scope.workspaceId,
         rootRunId: f.scope.rootRunId,
         revisionId: revision,
-        objectKey: `workspace/${revision}.tar`,
-        digest: sha256Digest("a".repeat(64)),
+        manifest: createWorkspaceManifest(
+          { tenantId: f.scope.tenantId, entries: [] },
+          { maxFiles: 1, maxTotalBytes: 1 },
+        ),
       },
       releaseFences: true,
     });

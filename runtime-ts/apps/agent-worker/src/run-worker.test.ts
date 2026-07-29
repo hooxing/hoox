@@ -1,6 +1,7 @@
 import { sha256Digest, tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
+import { createWorkspaceManifest } from "@cube-runtime/workspace";
 import { describe, expect, it } from "vitest";
 import {
   outboxPayloadDigest,
@@ -133,11 +134,33 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(record.mutations.has("attempt-1/final/succeeded")).toBe(false);
   });
 
+  it("在创建 Session 前物化 Workspace；物化失败会走 cleanup，绝不启动模型", async () => {
+    const h = harness(
+      [new ScriptedAgentSession(successfulEvents)],
+      fakeSeed("materialize-before-model"),
+    );
+    h.revisions.beforeMaterializeReturn = () => {
+      expect(h.factory.createCount).toBe(0);
+    };
+    h.revisions.throwOnMaterialize = true;
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "WORKSPACE_CONFLICT",
+    });
+
+    expect(h.revisions.materializeCount).toBe(1);
+    expect(h.factory.createCount).toBe(0);
+    expect(h.sandboxes.settleCount).toBe(1);
+  });
+
   it("Revision、Run succeeded、Attempt 终态和双栅栏释放在同一幂等事务完成", async () => {
     const h = harness([new ScriptedAgentSession(successfulEvents)]);
     h.revisions.nextRevisionId = fakeRevision("revision-success");
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(h.revisions.materializeCount).toBe(1);
 
     const currentScope = h.persistence.scopeForRun(h.scope.runId);
     const record = h.persistence.record(currentScope);
@@ -201,8 +224,10 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         workspaceId: h.scope.workspaceId,
         rootRunId: h.scope.rootRunId,
         revisionId: fakeRevision("revision-success"),
-        objectKey: "workspace/revision-success.tar",
-        digest: sha256Digest("a".repeat(64)),
+        manifest: createWorkspaceManifest(
+          { tenantId: h.scope.tenantId, entries: [] },
+          { maxFiles: 1, maxTotalBytes: 1 },
+        ),
       }),
       currentHead: fakeRevision("revision-success"),
     });

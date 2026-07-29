@@ -90,6 +90,9 @@ importers:
       '@cube-runtime/tool-router':
         specifier: workspace:*
         version: link:../../packages/tool-router
+      '@cube-runtime/workspace':
+        specifier: workspace:*
+        version: link:../../packages/workspace
       '@earendil-works/pi-ai':
         specifier: 0.82.1
         version: 0.82.1(ws@8.21.1)(zod@4.4.3)
@@ -208,6 +211,9 @@ importers:
       '@cube-runtime/run-contracts':
         specifier: workspace:*
         version: link:../run-contracts
+      '@cube-runtime/workspace':
+        specifier: workspace:*
+        version: link:../workspace
       pg:
         specifier: 8.22.0
         version: 8.22.0
@@ -282,6 +288,9 @@ importers:
       '@cube-runtime/sandbox':
         specifier: workspace:*
         version: link:../sandbox
+      '@cube-runtime/workspace':
+        specifier: workspace:*
+        version: link:../workspace
 
   runtime-ts/packages/sandbox:
     dependencies:

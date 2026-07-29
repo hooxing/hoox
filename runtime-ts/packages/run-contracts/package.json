@@ -23,6 +23,7 @@
     "@cube-runtime/context-policy": "workspace:*",
     "@cube-runtime/domain": "workspace:*",
     "@cube-runtime/pi-adapter": "workspace:*",
-    "@cube-runtime/sandbox": "workspace:*"
+    "@cube-runtime/sandbox": "workspace:*",
+    "@cube-runtime/workspace": "workspace:*"
   }
 }

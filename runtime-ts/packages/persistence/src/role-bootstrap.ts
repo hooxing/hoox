@@ -57,6 +57,11 @@ const waitingRecoveryTables = new Set([
   "waiting_recovery_effect_outbox",
 ]);
 const workspaceRuntimeTables = new Set(["runtime_recovery_metrics"]);
+const workspaceManifestTables = new Set([
+  "workspace_revision_manifests",
+  "workspace_revision_files",
+  "workspace_operation_journal",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -66,6 +71,9 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["runs", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspace_revisions", new Set(["SELECT", "INSERT"])],
+  ["workspace_revision_manifests", new Set(["SELECT", "INSERT"])],
+  ["workspace_revision_files", new Set(["SELECT", "INSERT"])],
+  ["workspace_operation_journal", new Set(["SELECT", "INSERT"])],
   ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
   ["blob_lifecycles", new Set(["SELECT", "INSERT"])],
   ["blob_incarnations", new Set(["SELECT", "INSERT"])],
@@ -197,6 +205,10 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ],
   ["resource_promotion_authorizations", new Set(["state", "consumed_at"])],
   [
+    "workspace_operation_journal",
+    new Set(["status", "result", "failure_phase", "failure_code", "unknown_fact", "updated_at"]),
+  ],
+  [
     "waiting_recovery_checkpoints",
     new Set([
       "state",
@@ -234,6 +246,16 @@ async function hasMembershipLockMarker(client: PoolClient): Promise<boolean> {
 async function hasWorkspaceRuntimeState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.runtime_recovery_metrics', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasWorkspaceManifestState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.workspace_revision_manifests', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.workspace_revision_files', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.workspace_operation_journal', $1::text)) IS NOT NULL AS present`,
     [schema],
   );
   return result.rows[0]?.present === true;
@@ -342,6 +364,9 @@ async function activeTablePolicy(
   if (!(await hasWorkspaceRuntimeState(client, schema))) {
     for (const table of workspaceRuntimeTables) policy.delete(table);
   }
+  if (!(await hasWorkspaceManifestState(client, schema))) {
+    for (const table of workspaceManifestTables) policy.delete(table);
+  }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
   }
@@ -381,6 +406,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasWorkspaceRuntimeState(client, schema))) {
     for (const table of workspaceRuntimeTables) policy.delete(table);
+  }
+  if (!(await hasWorkspaceManifestState(client, schema))) {
+    for (const table of workspaceManifestTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -975,9 +1003,23 @@ export async function bootstrapRuntimeAccessOnClient(
     );
   }
   if (await hasWorkspaceRuntimeState(client, context.schema)) {
-    // 恢复指标是只追加审计事实；Runtime 只能读取和新增，不能更新或删除。
+    // 恢复指标是只追加审计事实。
     await client.query(
       `GRANT SELECT, INSERT ON TABLE ${schema}.runtime_recovery_metrics TO ${role}`,
+    );
+  }
+  if (await hasWorkspaceManifestState(client, context.schema)) {
+    // Revision manifest 是只追加事实；journal 仅能沿单调状态机更新。
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.workspace_revision_manifests,
+         ${schema}.workspace_revision_files,
+         ${schema}.workspace_operation_journal
+       TO ${role}`,
+    );
+    await client.query(
+      `GRANT UPDATE(status, result, failure_phase, failure_code, unknown_fact, updated_at)
+         ON TABLE ${schema}.workspace_operation_journal TO ${role}`,
     );
   }
   await client.query(

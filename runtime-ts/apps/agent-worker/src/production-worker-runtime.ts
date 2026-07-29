@@ -18,6 +18,7 @@ import {
   type CubeGatewayOptions,
   CubeSandboxGateway,
   SandboxRuntimeError,
+  type TrustedSandboxSessionCapability,
   type UncertainLifecycleEvent,
 } from "@cube-runtime/sandbox";
 import type { RunWorker, RunWorkerResult } from "./run-worker.js";
@@ -68,8 +69,12 @@ export class ProcessShutdown {
 
 /** 生产默认禁止成功关闭会丢失文件的 Sandbox；revision 发布接通前，非空 Workspace 失败关闭。 */
 export class FailClosedWorkspaceRevisionVerifier implements WorkspaceRevisionVerifierPort {
+  async materialize(): Promise<void> {
+    // 兼容旧部署的安全下限：没有 manifest runtime 时仅允许一个空 Sandbox 进入模型。
+  }
+
   async verify(input: Parameters<WorkspaceRevisionVerifierPort["verify"]>[0]): Promise<undefined> {
-    const result = await input.sandbox.command(
+    const result = await input.sandbox.sandbox.command(
       `if [ ! -d /workspace ]; then exit 72; fi
 if find /workspace -mindepth 1 -print -quit | grep -q .; then exit 73; fi`,
     );
@@ -86,6 +91,8 @@ export class CubeSandboxSessionRegistry
 {
   readonly gateway: CubeSandboxGateway;
   private uncertainCreate: UncertainLifecycleEvent | undefined;
+  /** 只有本实例真正 create/connect 并返回的同一对象才能派生 Workspace capability。 */
+  private readonly workspaceCapabilities = new WeakSet<object>();
 
   constructor(
     options: CubeGatewayOptions,
@@ -122,6 +129,7 @@ export class CubeSandboxSessionRegistry
         mode: "created",
         sandbox,
       });
+      this.workspaceCapabilities.add(session);
       return { outcome: "ready", session };
     } catch (error) {
       if (error instanceof SandboxRuntimeError && error.code === "UNKNOWN") {
@@ -162,6 +170,33 @@ export class CubeSandboxSessionRegistry
       ...input,
       cleanupIntentId: `registry:${input.session.registryId}:orphan-cleanup`,
       disposition: "close",
+    });
+  }
+
+  workspaceCapability(input: {
+    readonly scope: ExecutionScope;
+    readonly session: SandboxSessionRef;
+  }): TrustedSandboxSessionCapability {
+    if (
+      !this.workspaceCapabilities.has(input.session) ||
+      input.session.sandbox.id !== input.session.providerSandboxId
+    ) {
+      throw new Error("未授予 Sandbox Workspace capability");
+    }
+    const binding = Object.freeze({
+      sessionId: input.session.providerSandboxId,
+      generation: 1,
+      scope: Object.freeze({
+        tenantId: input.scope.tenantId,
+        threadId: input.scope.threadId,
+        workspaceId: input.scope.workspaceId,
+      }),
+    });
+    return Object.freeze({
+      async current() {
+        // 不能回读调用方可变对象；上面的 capability 已在 registry 私有 WeakSet 中完成对象身份校验。
+        return binding;
+      },
     });
   }
 }

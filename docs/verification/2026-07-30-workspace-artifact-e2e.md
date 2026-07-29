@@ -19,8 +19,20 @@
 - Run：`run_d5d1fd44-bdb1-4add-930b-1dfb79e3243d`，状态 `succeeded`
 - Artifact：`artifact_e3aa1ad3e6b75ad6cd42ba7bb610ed7e3f85353cf13fdddb28a3647eb2922261`
 - 该 `.txt` Artifact 含脚本型 HTML payload。preview API 返回受鉴权 JSON `text`、不含 `url`，并返回 `Cache-Control: no-store`、`Pragma: no-cache`、`X-Content-Type-Options: nosniff`。
-- download 返回 34 B，SHA-256 为 `0d239cb60ef9b7af6c7181e21cd738e5e79d589324a71a3d37abd0e307c3905d`，与预期字节一致。
+- preview HTTP 响应本身是 JSON envelope，不能与下载对象逐字节比较。复核时先提取 `data.text`，按 UTF-8 编码计算 SHA-256；该值与 download 34 B 对象的 SHA-256 均为 `0d239cb60ef9b7af6c7181e21cd738e5e79d589324a71a3d37abd0e307c3905d`。
 - 在 Web `http://127.0.0.1:4174/` 点击预览后，文本显示在 `<pre>`；DOM 检查确认预览容器内 `scriptCount=0`，即 payload 没有成为 HTML/脚本节点。
+
+去敏后的原始复核字段如下；`text` 内容、认证信息、对象 URL 与对象键均省略：
+
+```text
+preview: status=200, disposition=preview, hasText=true, hasUrl=false,
+         cacheControl=no-store, pragma=no-cache, nosniff=nosniff,
+         utf8(data.text).sha256=0d239cb60ef9b7af6c7181e21cd738e5e79d589324a71a3d37abd0e307c3905d
+download: status=200, bytes=34,
+          sha256=0d239cb60ef9b7af6c7181e21cd738e5e79d589324a71a3d37abd0e307c3905d
+```
+
+可复核步骤：在已认证的开发 API 会话中请求该 Run 的 preview 与 download；对 preview JSON 的 `data.text` 执行 UTF-8 编码后取 SHA-256，再对 download 返回的原始字节取 SHA-256。两个摘要应与上面的字段一致。
 
 ## 自动化证据
 
@@ -28,4 +40,3 @@
 - `runtime-ts/apps/web/src/api.test.ts` 与 `runtime-ts/apps/web/src/main.test.tsx`：受控 UTF-8 预览契约与恶意文本只作为 `<pre>` 文本节点渲染。
 - `runtime-ts/packages/persistence/src/s3-blob-store.test.ts`：Artifact download 的受控 attachment delivery 参数。
 - `tests/integration/postgres-artifact.integration.test.ts`：真实 PostgreSQL permit、Attempt 版本推进、fence/lease/claim/终态拒绝与毫秒时间精度。
-

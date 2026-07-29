@@ -1,4 +1,5 @@
 import {
+  type AcceptWorkspaceArtifactIntentCommand,
   ArtifactCompletionGateAdapter,
   ArtifactDeliveryError,
   createArtifactExecutionAuthorizationAuthority,
@@ -56,6 +57,15 @@ class StatefulFauxArtifactService implements ArtifactToolServicePort {
     this.required = new Set(
       input.declarations.filter((item) => item.requirement === "required").map((item) => item.key),
     );
+  }
+
+  async acceptWorkspaceArtifactIntent(command: AcceptWorkspaceArtifactIntentCommand) {
+    return {
+      artifactId: command.requestedArtifactId,
+      resourceVersionId: resourceVersionId("version_faux_workspace_intent"),
+      sourceRelativePath: command.sourceRelativePath,
+      status: "accepted" as const,
+    };
   }
 
   async publishArtifact(command: Parameters<ArtifactToolServicePort["publishArtifact"]>[0]) {
@@ -149,9 +159,8 @@ const brokenPublication = {
   purpose: "deliverable",
   deliverableKey: "report",
   source: {
-    kind: "workspace_file",
-    relativePath: "reports/broken.md",
-    resourceName: "报告源文件",
+    kind: "resource_version",
+    resourceVersionId: "version_faux_broken",
   },
 };
 const fixedPublication = {
@@ -162,9 +171,8 @@ const fixedPublication = {
   purpose: "deliverable",
   deliverableKey: "report",
   source: {
-    kind: "workspace_file",
-    relativePath: "reports/fixed.md",
-    resourceName: "报告修正版",
+    kind: "resource_version",
+    resourceVersionId: "version_faux_fixed",
   },
 };
 

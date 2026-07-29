@@ -1,4 +1,5 @@
 import {
+  type AcceptWorkspaceArtifactIntentCommand,
   ArtifactDeliveryError,
   createArtifactExecutionAuthorizationAuthority,
   type PublishArtifactCommand,
@@ -52,6 +53,15 @@ class FakeArtifactService implements ArtifactToolServicePort {
     input: Parameters<ArtifactToolServicePort["declareDeliverables"]>[0],
   ): Promise<void> {
     this.declarations.push(input);
+  }
+
+  async acceptWorkspaceArtifactIntent(command: AcceptWorkspaceArtifactIntentCommand) {
+    return {
+      artifactId: command.requestedArtifactId,
+      resourceVersionId: resourceVersionId("resource_version_workspace_intent"),
+      sourceRelativePath: command.sourceRelativePath,
+      status: "accepted" as const,
+    };
   }
 
   async publishArtifact(command: PublishArtifactCommand) {
@@ -163,7 +173,46 @@ const publishArgs = {
   },
 };
 
+const fixedVersionPublishArgs = {
+  ...publishArgs,
+  source: { kind: "resource_version" as const, resourceVersionId: "version_tool_one" },
+};
+
 describe("Artifact Tool Router", () => {
+  it("Workspace 文件只接受 durable intent，不在 Revision 提交前谎报 published", async () => {
+    const { router, artifacts, resources } = harness();
+    const accepted: AcceptWorkspaceArtifactIntentCommand[] = [];
+    Object.defineProperty(artifacts, "acceptWorkspaceArtifactIntent", {
+      value: async (command: AcceptWorkspaceArtifactIntentCommand) => {
+        accepted.push(command);
+        return {
+          artifactId: artifactId("artifact_server_deterministic"),
+          resourceVersionId: resourceVersionId("resource_version_server_deterministic"),
+          sourceRelativePath: command.sourceRelativePath,
+          status: "accepted" as const,
+        };
+      },
+    });
+
+    await expect(
+      router.publishArtifact({ callId: "call-intent-1", arguments: publishArgs }),
+    ).resolves.toEqual({
+      ok: true,
+      code: "ARTIFACT_ACCEPTED",
+      artifactId: artifactId("artifact_server_deterministic"),
+      sourceRelativePath: "reports/final.md",
+    });
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0]).toMatchObject({
+      requestedArtifactId: artifactId("artifact_tool_one"),
+      sourceRelativePath: "reports/final.md",
+      resourceName: "最终报告源文件",
+      toolArgsDigest: digestCanonical(publishArgs),
+    });
+    expect(resources.calls).toHaveLength(0);
+    expect(artifacts.publications).toHaveLength(0);
+  });
+
   it("严格协议只授权 canonical 实参，并从可信上下文收窄写能力", async () => {
     const { router, artifacts, resources, calls } = harness();
     await expect(
@@ -175,7 +224,7 @@ describe("Artifact Tool Router", () => {
       optionalCount: 1,
     });
     await expect(
-      router.publishArtifact({ callId: "call-publish-1", arguments: publishArgs }),
+      router.publishArtifact({ callId: "call-publish-1", arguments: fixedVersionPublishArgs }),
     ).resolves.toMatchObject({
       ok: true,
       code: "ARTIFACT_PUBLISHED",
@@ -192,15 +241,16 @@ describe("Artifact Tool Router", () => {
       {
         callId: "call-publish-1",
         toolName: "publish_artifact",
-        argsDigest: digestCanonical(publishArgs),
+        argsDigest: digestCanonical(fixedVersionPublishArgs),
       },
     ]);
     expect(resources.calls[0]?.source).toEqual({
-      kind: "workspace_file",
-      relativePath: "reports/final.md",
-      resourceName: "最终报告源文件",
+      kind: "resource_version",
+      resourceVersionId: versionOne,
     });
-    expect(artifacts.publications[0]?.toolArgsDigest).toBe(digestCanonical(publishArgs));
+    expect(artifacts.publications[0]?.toolArgsDigest).toBe(
+      digestCanonical(fixedVersionPublishArgs),
+    );
     expect(artifacts.publications[0]?.authorization.scope).toEqual(scope);
   });
 
@@ -222,8 +272,14 @@ describe("Artifact Tool Router", () => {
 
   it("不同 callId 重放同一业务参数时保持相同幂等键和工具摘要", async () => {
     const { router, artifacts } = harness();
-    await router.publishArtifact({ callId: "call-replay-first", arguments: publishArgs });
-    await router.publishArtifact({ callId: "call-replay-second", arguments: publishArgs });
+    await router.publishArtifact({
+      callId: "call-replay-first",
+      arguments: fixedVersionPublishArgs,
+    });
+    await router.publishArtifact({
+      callId: "call-replay-second",
+      arguments: fixedVersionPublishArgs,
+    });
     expect(artifacts.publications).toHaveLength(2);
     expect(artifacts.publications[0]?.idempotencyKey).toBe(
       artifacts.publications[1]?.idempotencyKey,
@@ -364,7 +420,7 @@ describe("Artifact Tool Router", () => {
       "private object key",
     );
     const failed = await router
-      .publishArtifact({ callId: "call-failed", arguments: publishArgs })
+      .publishArtifact({ callId: "call-failed", arguments: fixedVersionPublishArgs })
       .catch(artifactToolErrorProjection);
     expect(failed).toEqual({
       ok: false,
@@ -379,7 +435,7 @@ describe("Artifact Tool Router", () => {
       "s3://secret-bucket/private-key?X-Amz-Signature=secret",
     );
     const projection = await unknown.router
-      .publishArtifact({ callId: "call-upstream", arguments: publishArgs })
+      .publishArtifact({ callId: "call-upstream", arguments: fixedVersionPublishArgs })
       .catch(artifactToolErrorProjection);
     expect(projection).toMatchObject({ code: "ARTIFACT_TOOL_UNAVAILABLE" });
     expect(JSON.stringify(projection)).not.toMatch(/bucket|signature|private-key/iu);

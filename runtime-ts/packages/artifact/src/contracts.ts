@@ -44,6 +44,42 @@ export interface ArtifactBlobBinding {
   readonly blob: StableBlobRef;
 }
 
+/**
+ * Workspace 文件在最终 Revision 提交前只能形成不可下载的发布意图。ID 由服务端从
+ * Attempt 与幂等身份确定性派生；模型提供的 artifactId 只作为冲突检测别名保留。
+ */
+export interface WorkspaceArtifactIntentSnapshot {
+  readonly artifactId: ArtifactId;
+  readonly resourceVersionId: ResourceVersionId;
+  readonly sourceRelativePath: string;
+  readonly status: "accepted" | "settled";
+}
+
+export type AcceptWorkspaceArtifactIntentResult =
+  | {
+      readonly outcome: "accepted" | "already_accepted" | "already_settled";
+      readonly commandDigest: Sha256Digest;
+      readonly intent: WorkspaceArtifactIntentSnapshot;
+    }
+  | {
+      readonly outcome:
+        | "response_unknown"
+        | "not_found"
+        | "scope_mismatch"
+        | "not_running"
+        | "invalid_replacement"
+        | "conflict"
+        | "unavailable";
+    };
+
+export type ReadWorkspaceArtifactIntentResult =
+  | {
+      readonly outcome: "found";
+      readonly commandDigest: Sha256Digest;
+      readonly intent: WorkspaceArtifactIntentSnapshot;
+    }
+  | { readonly outcome: "not_found" | "scope_mismatch" | "unavailable" };
+
 export interface UserRequestScope {
   readonly tenantId: TenantId;
   readonly userId: UserId;
@@ -132,6 +168,29 @@ export type AuthorizeArtifactDownloadResult =
   | { readonly outcome: "not_found" | "unavailable" };
 
 export interface ArtifactDeliveryRepositoryPort {
+  /** Workspace 来源只落 durable intent；最终 ResourceVersion/Artifact 由 Revision mutation 结算。 */
+  acceptWorkspaceIntent?(input: {
+    readonly authorization: ArtifactExecutionAuthorization;
+    readonly idempotencyKey: string;
+    readonly commandDigest: Sha256Digest;
+    readonly toolArgsDigest: Sha256Digest;
+    readonly requestedArtifactId: ArtifactId;
+    readonly artifactId: ArtifactId;
+    readonly resourceId: string;
+    readonly resourceVersionId: ResourceVersionId;
+    readonly blobReferenceId: string;
+    readonly blobOperationId: string;
+    readonly replacesArtifactId?: ArtifactId;
+    readonly name: string;
+    readonly purpose: ArtifactPurpose;
+    readonly deliverableKey?: string;
+    readonly sourceRelativePath: string;
+    readonly resourceName: string;
+  }): Promise<AcceptWorkspaceArtifactIntentResult>;
+  readWorkspaceIntentCommand?(input: {
+    readonly authorization: ArtifactExecutionAuthorization;
+    readonly idempotencyKey: string;
+  }): Promise<ReadWorkspaceArtifactIntentResult>;
   /**
    * 写端口必须逐字段重验 authorization 对应的已消费 permit、完整双栅栏、Attempt version、
    * toolName 与 argsDigest；类实例只阻断普通请求结构伪造，不能替代数据库事实。

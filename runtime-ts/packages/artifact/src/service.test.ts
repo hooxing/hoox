@@ -21,6 +21,7 @@ import {
   type MonotonicClockPort,
 } from "./authorization.js";
 import type {
+  AcceptWorkspaceArtifactIntentResult,
   ArtifactBlobBinding,
   ArtifactDeliveryRepositoryPort,
   ArtifactPublicationSnapshot,
@@ -30,10 +31,15 @@ import type {
   DeclareDeliverablesResult,
   FinishArtifactPublicationResult,
   ReadArtifactPublicationResult,
+  ReadWorkspaceArtifactIntentResult,
   UserRequestScope,
 } from "./contracts.js";
 import { ArtifactDeliveryError } from "./errors.js";
-import { ArtifactDeliveryService, type PublishArtifactCommand } from "./service.js";
+import {
+  type AcceptWorkspaceArtifactIntentCommand,
+  ArtifactDeliveryService,
+  type PublishArtifactCommand,
+} from "./service.js";
 
 const scope: ExecutionScope = Object.freeze({
   tenantId: tenantId("tenant_alpha"),
@@ -183,6 +189,31 @@ function publishCommand(overrides: Partial<PublishArtifactCommand> = {}): Publis
   return { ...business, authorization };
 }
 
+function workspaceIntentCommand(
+  overrides: Partial<AcceptWorkspaceArtifactIntentCommand> = {},
+): AcceptWorkspaceArtifactIntentCommand {
+  const { authorization: overrideAuthorization, ...businessOverrides } = overrides;
+  const business: Omit<AcceptWorkspaceArtifactIntentCommand, "authorization"> = {
+    toolArgsDigest: placeholderDigest,
+    idempotencyKey: "publish:run_alpha:workspace:1",
+    requestedArtifactId: artifactOne,
+    name: "最终报告.txt",
+    purpose: "deliverable",
+    deliverableKey: "report",
+    sourceRelativePath: "reports/final.txt",
+    resourceName: "最终报告源文件",
+    ...businessOverrides,
+  };
+  const authorization =
+    overrideAuthorization ??
+    executionAuthorization({
+      toolName: "publish_artifact",
+      args: business.toolArgsDigest,
+      overrides: { argsDigest: business.toolArgsDigest },
+    });
+  return { ...business, authorization };
+}
+
 function declarationInput(input: {
   readonly idempotencyKey: string;
   readonly declarations: readonly {
@@ -207,6 +238,17 @@ function declarationInput(input: {
 }
 
 class FakeRepository implements ArtifactDeliveryRepositoryPort {
+  intentResult: AcceptWorkspaceArtifactIntentResult = {
+    outcome: "accepted",
+    commandDigest: placeholderDigest,
+    intent: {
+      artifactId: artifactId("artifact_workspace_deterministic"),
+      resourceVersionId: resourceVersionId("resource_version_workspace_deterministic"),
+      sourceRelativePath: "reports/final.txt",
+      status: "accepted",
+    },
+  };
+  intentReadResult: ReadWorkspaceArtifactIntentResult = { outcome: "not_found" };
   declarationResult: DeclareDeliverablesResult = {
     outcome: "applied",
     commandDigest: placeholderDigest,
@@ -240,6 +282,28 @@ class FakeRepository implements ArtifactDeliveryRepositoryPort {
   declarationReadInputs: Parameters<
     ArtifactDeliveryRepositoryPort["readDeliverableDeclarationCommand"]
   >[0][] = [];
+  intentInputs: Parameters<
+    NonNullable<ArtifactDeliveryRepositoryPort["acceptWorkspaceIntent"]>
+  >[0][] = [];
+
+  async acceptWorkspaceIntent(
+    input: Parameters<NonNullable<ArtifactDeliveryRepositoryPort["acceptWorkspaceIntent"]>>[0],
+  ): Promise<AcceptWorkspaceArtifactIntentResult> {
+    this.intentInputs.push(input);
+    return this.intentResult.outcome === "accepted" ||
+      this.intentResult.outcome === "already_accepted" ||
+      this.intentResult.outcome === "already_settled"
+      ? { ...this.intentResult, commandDigest: input.commandDigest }
+      : this.intentResult;
+  }
+
+  async readWorkspaceIntentCommand(): Promise<ReadWorkspaceArtifactIntentResult> {
+    if (this.intentReadResult.outcome !== "found") return this.intentReadResult;
+    return {
+      ...this.intentReadResult,
+      commandDigest: this.intentInputs.at(-1)?.commandDigest ?? this.intentReadResult.commandDigest,
+    };
+  }
 
   async declareDeliverables(
     input: Parameters<ArtifactDeliveryRepositoryPort["declareDeliverables"]>[0],
@@ -381,6 +445,39 @@ describe("ArtifactDeliveryService 发布与完成门", () => {
       status: "published",
     });
     expect(repository.finishInputs).toHaveLength(1);
+  });
+
+  it("Workspace intent 的 durable identity 不依赖瞬时 callId，COMMIT unknown 只读回原事实", async () => {
+    repository.intentResult = { outcome: "response_unknown" };
+    repository.intentReadResult = {
+      outcome: "found",
+      commandDigest: placeholderDigest,
+      intent: {
+        artifactId: artifactId("artifact_workspace_deterministic"),
+        resourceVersionId: resourceVersionId("resource_version_workspace_deterministic"),
+        sourceRelativePath: "reports/final.txt",
+        status: "accepted",
+      },
+    };
+    const first = workspaceIntentCommand();
+    await expect(service.acceptWorkspaceArtifactIntent(first)).resolves.toMatchObject({
+      status: "accepted",
+      sourceRelativePath: "reports/final.txt",
+    });
+
+    repository.intentResult = { outcome: "conflict" };
+    const replay = workspaceIntentCommand({
+      authorization: executionAuthorization({
+        toolName: "publish_artifact",
+        args: placeholderDigest,
+        permitId: "permit-artifact-replay",
+        overrides: { callId: "call-artifact-replay", argsDigest: placeholderDigest },
+      }),
+    });
+    await service.acceptWorkspaceArtifactIntent(replay).catch(() => undefined);
+    expect(repository.intentInputs.at(-2)?.commandDigest).toBe(
+      repository.intentInputs.at(-1)?.commandDigest,
+    );
   });
 
   it("普通同形请求对象不能伪造 Artifact 写授权，Repository 收到可重验的窄授权", async () => {
@@ -1258,6 +1355,24 @@ describe("ArtifactDeliveryService 用户投影与授权下载", () => {
       delivery: "artifact-download",
       downloadName: result.fileName,
     });
+  });
+
+  it("Workspace Revision 结算的稳定 Blob 可进入同一授权下载投影", async () => {
+    const workspaceBlob = stableBlob({
+      purpose: "workspace",
+      physicalObjectKey: `objects/stable/${scope.tenantId}/workspace/sha256/${"a".repeat(64)}/incarnations/11111111-1111-4111-8111-111111111111`,
+    });
+    repository.download = {
+      ...repository.download,
+      binding: binding({ blob: workspaceBlob }),
+    };
+
+    await expect(
+      service.createDownload({ request, artifactId: artifactOne }),
+    ).resolves.toMatchObject({ artifactId: artifactOne });
+    expect(blobs.presignDownload).toHaveBeenCalledWith(
+      expect.objectContaining({ blob: workspaceBlob, delivery: "artifact-download" }),
+    );
   });
 
   it("下载拒绝持久快照中的 Cc/Cf，并防御 Windows 保留设备名", async () => {

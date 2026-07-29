@@ -6,6 +6,7 @@ function productionEnvironment(): Record<string, string> {
   return {
     RUNTIME_ENV: "production",
     DATABASE_URL: "postgresql://runtime:credential@database/runtime",
+    DATABASE_RUNTIME_ROLE: "runtime",
     DATABASE_SCHEMA: "runtime",
     S3_ENDPOINT: "http://object-storage:9000",
     S3_BUCKET: "runtime-artifacts",
@@ -89,5 +90,11 @@ describe("Scheduler 进程入口", () => {
         CUBESANDBOX_PROXY_SCHEME: "ftp",
       }),
     ).toThrow("CUBESANDBOX_PROXY_SCHEME");
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        DATABASE_RUNTIME_ROLE: "Runtime-Owner",
+      }),
+    ).toThrow("DATABASE_RUNTIME_ROLE 格式无效");
   });
 });

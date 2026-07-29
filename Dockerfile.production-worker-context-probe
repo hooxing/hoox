@@ -1,0 +1,3 @@
+# 仅由 production Worker 容器 Gate 使用；canary 若进入 build context，此 COPY 会意外成功。
+FROM scratch
+COPY .env.production-worker-gate-canary /proof/.env.production-worker-gate-canary

@@ -113,3 +113,6 @@ ADR-0047/0048 提交的 Revision 和 Artifact 按其各自回退规则保留。
 
 - 2026-07-29：新增受审 production capability，启用 Agent Worker 真实生产 assembler，移除 Scheduler
   environment 降级，并增加 Runtime 角色、开发身份和 TLS 配置门禁。
+- 2026-07-29：新增独立 production 配置契约与非 root Linux Worker 容器 Gate；Gate 验证 build context 不带
+  `.env` canary、镜像无 Python/旧数据目录，以及依赖不可用或遗留 development 身份时只会失败关闭且不泄露秘密。
+  它不替代真实 PostgreSQL/S3/CubeSandbox/模型 readiness 或完整 M7 发布验收。

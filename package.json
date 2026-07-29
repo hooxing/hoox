@@ -11,6 +11,7 @@
     "build": "pnpm --recursive --sort --if-present build",
     "clean": "pnpm --recursive --if-present clean",
     "config:check": "node scripts/validate-env-example.mjs && docker compose --env-file .env.example -f docker-compose.dev.yml config --quiet",
+    "config:check:production": "node scripts/validate-production-env-example.mjs",
     "check:clean-workspace": "node scripts/remove-workspace-dist.mjs && pnpm check",
     "check:clean-vendor": "pnpm check:clean-workspace",
     "db:migrate:up": "pnpm --filter @cube-runtime/persistence build && node --env-file-if-exists=.env runtime-ts/packages/persistence/dist/cli.js up",
@@ -35,6 +36,7 @@
     "test:process-runtime": "pnpm build:process-runtime-dependencies && vitest run runtime-ts/packages/process-runtime/src runtime-ts/apps/api/src/process-entry.test.ts runtime-ts/apps/agent-worker/src/process-entry.test.ts runtime-ts/apps/scheduler/src/process-entry.test.ts",
     "test:process-runtime:clean": "node scripts/remove-workspace-dist.mjs && pnpm test:process-runtime",
     "test:process:container": "pnpm --filter @cube-runtime/process-runtime build && node scripts/run-process-container-gate.mjs",
+    "test:production-worker:container": "node scripts/production-worker-container-gate.mjs",
     "typecheck": "pnpm build && tsc -p tsconfig.json && pnpm --recursive --sort --if-present typecheck",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm config:check"
   },

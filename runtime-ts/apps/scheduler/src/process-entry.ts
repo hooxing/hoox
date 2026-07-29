@@ -34,6 +34,7 @@ const schedulerEnvironmentSchema = Object.freeze({
     maxLength: 8_192,
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
+  DATABASE_RUNTIME_ROLE: stringEnvironmentField({ maxLength: 63 }),
   S3_ENDPOINT: urlEnvironmentField(),
   S3_BUCKET: stringEnvironmentField({ maxLength: 255 }),
   S3_REGION: stringEnvironmentField({ maxLength: 128 }),
@@ -60,6 +61,7 @@ export interface SchedulerProcessConfiguration {
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
   readonly databaseSchema: string;
+  readonly databaseRuntimeRole: string;
   readonly objectStorage: Readonly<{
     endpoint: string;
     bucket: string;
@@ -101,6 +103,10 @@ export function parseSchedulerProcessEnvironment(
   if (Buffer.byteLength(configuredWorkerId, "utf8") > 200) {
     throw new TypeError("SCHEDULER_WORKER_ID UTF-8 字节长度不能超过 200");
   }
+  const configuredRuntimeRole = readRequiredEnvironmentValue(parsed, "DATABASE_RUNTIME_ROLE");
+  if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(configuredRuntimeRole)) {
+    throw new TypeError("DATABASE_RUNTIME_ROLE 格式无效");
+  }
   const configuredProxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
   if (
     configuredProxyScheme !== undefined &&
@@ -124,6 +130,7 @@ export function parseSchedulerProcessEnvironment(
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
+    databaseRuntimeRole: configuredRuntimeRole,
     objectStorage: Object.freeze({
       endpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
       bucket: readRequiredEnvironmentValue(parsed, "S3_BUCKET"),
@@ -159,6 +166,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
     const pool = createPostgresPool({
       connectionString: configuration.databaseUrl,
       schema: configuration.databaseSchema,
+      expectedRuntimeRole: configuration.databaseRuntimeRole,
       applicationName: "cube-runtime-scheduler-cleanup",
     });
     try {
@@ -194,7 +202,10 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
         // loop 必须先停止并等待在途远端调用，再关闭连接池。
         resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),
         readiness: Object.freeze([
-          Object.freeze({ name: "postgres", probe: () => probePostgres(pool) }),
+          Object.freeze({
+            name: "postgres",
+            probe: () => probePostgres(pool, configuration.databaseRuntimeRole),
+          }),
         ]),
       });
       return assembly;

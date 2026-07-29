@@ -1,0 +1,23 @@
+FROM node:24.18.0-bookworm-slim AS build
+
+WORKDIR /opt/runtime
+RUN corepack enable
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json tsconfig.base.json ./
+COPY runtime-ts ./runtime-ts
+
+# 只按锁文件安装并构建 Worker 所需闭包；镜像构建本身就是固定依赖/无旧 Python 运行时的 Gate。
+RUN pnpm install --frozen-lockfile \
+ && pnpm --filter @cube-runtime/agent-worker^... build
+
+FROM node:24.18.0-bookworm-slim
+
+WORKDIR /opt/runtime
+ENV NODE_ENV=production
+
+COPY --from=build /opt/runtime /opt/runtime
+
+# Node 官方镜像的 node 用户为固定非 root UID；以数字 UID 避免名称被镜像层改写。
+USER 1000:1000
+
+CMD ["node", "runtime-ts/apps/agent-worker/dist/production-main.js"]

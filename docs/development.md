@@ -56,7 +56,7 @@ corepack pnpm config:check
 ## 配置安全
 
 - 真实 `.env` 只保存在开发者机器并由 Git 忽略。
-- 新增或删除环境变量时，必须同步修改 `.env.example` 和 `scripts/env-contract.mjs`。
+- 新增或删除 development 环境变量时，必须同步修改 `.env.example` 和 `scripts/env-contract.mjs`；production 变量必须同步修改 `deploy/production.env.example` 和 `scripts/production-env-contract.mjs`。跨环境共享变量两套契约都要更新。
 - 示例中的数据库密码、访问密钥、模板 ID、模型地址和模型 ID 必须保持为明显占位值。
 - CI 的工程基线任务只使用 `.env.example` 执行静态 Compose 展开；独立的 Ubuntu M4 黑盒 Gate 会连接 CI PostgreSQL service，运行真实 HTTP、RLS、Dispatch、Worker 与 Pi adapter（Faux Provider）纵向链路。该 Gate 不连接 MinIO、真实 CubeSandbox 或外部模型服务。
 
@@ -66,7 +66,9 @@ corepack pnpm config:check
 
 `runtime-ts/apps/api` 在 `RUNTIME_ENV=development`、显式启用开发身份时可选择内建的开发装配：它打开真实 PostgreSQL Repository 和 HTTP listener，可用 `pnpm dev:api` 启动。迁移后先显式执行 `pnpm dev:identity:provision`，该命令幂等创建配置的两个 User、个人 Tenant 和 owner Membership；服务启动本身绝不写入授权数据。该装配和初始化命令都不支持 production，也不会退化到内存 Fake。
 
-`agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 必须严格等于 `DEV_AUTH_USER_A_TENANT_ID`，保证 `dev-user-a` 的 Web/API 创建结果由同一 Worker 消费。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。生产不会继承这项放宽：其 readiness 仍要求 Provider 元数据精确匹配预算，且 Worker 入口保持 fail-closed。当前未接入 Workspace revision/Artifact 发布，非空 `/workspace` 会使 Run 失败关闭；开发 UI 只能承诺纯聊天 Run 成功。
+`agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 必须严格等于 `DEV_AUTH_USER_A_TENANT_ID`，保证 `dev-user-a` 的 Web/API 创建结果由同一 Worker 消费。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
+
+production Worker 使用 `pnpm --filter @cube-runtime/agent-worker start:production` 或 `Dockerfile.production-worker-gate`，仅支持 Linux。入口只接受模块私有的受审真实装配，不接受调用方注入的 Fake，且不改写 `runtimeEnvironment=production`。启动前必须验证 `DATABASE_RUNTIME_ROLE`、部署 Tenant 分片、严格模型元数据和 TLS 端点；任一 `DEV_AUTH_*` 变量（包括 `DEV_AUTH_ENABLED=false`）都会失败关闭。生产装配已经接入持久化 Workspace revision/Artifact 发布闭环，但这不替代真实基础设施验收：`pnpm test:production-worker:container` 仅验证非 root、无 Python/旧数据、build context 秘密排除与依赖不可用时不误报 ready，不能据此宣称 production ready。
 
 装配器按业务接收顺序实现 `stopAccepting`，将数据库连接池、HTTP listener、消费者和遥测等资源按确定顺序登记。关闭时先停止接收，再等待 `lifecycle.track()` 登记的在途操作，最后串行关闭资源。资源错误只上报稳定名称；库不调用 `process.exit`。部署平台的强制终止宽限期必须大于 `PROCESS_SHUTDOWN_TIMEOUT_MS`。
 
@@ -75,9 +77,12 @@ corepack pnpm config:check
 ```powershell
 corepack pnpm test:process-runtime
 corepack pnpm test:process:container
+corepack pnpm config:check:production
+corepack pnpm test:production-worker:container
 ```
 
 第一条在 Windows/Linux 运行相同单元与入口测试；第二条需要 Docker，构建 Linux 非 root 最小镜像并验证配置、就绪和关闭顺序。
+后两条分别校验独立 production 配置契约和 Worker 容器失败关闭边界；它们故意不连接真实外部依赖。部署前仍必须在 Linux 上用最小权限 Runtime 角色、真实 PostgreSQL/S3/CubeSandbox/模型完成 readiness 和其余 M7 Gate。
 
 ## PostgreSQL 角色 bootstrap
 

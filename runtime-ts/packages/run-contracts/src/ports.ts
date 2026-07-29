@@ -466,6 +466,8 @@ export interface WorkspaceRevisionCandidate {
   readonly rootRunId: RunId;
   readonly parentRevisionId?: WorkspaceRevisionId;
   readonly revisionId: WorkspaceRevisionId;
+  readonly candidateOperationKey: string;
+  readonly candidateOperationDigest: Sha256Digest;
   /**
    * Revision 的唯一内容事实是逐文件 stable Blob 的不可变 manifest。它绝不能退化为单一
    * objectKey；物理对象键只保留在每个 entry 的 stable incarnation 身份中。
@@ -482,6 +484,7 @@ export interface WorkspaceRevisionVerifierPort {
    */
   materialize(input: {
     readonly scope: ExecutionScope;
+    readonly attemptId?: string;
     readonly expectedCurrentRevisionId?: WorkspaceRevisionId;
     readonly sandbox: SandboxSessionRef;
     readonly operationKey: string;
@@ -490,6 +493,7 @@ export interface WorkspaceRevisionVerifierPort {
   /** 模型 settled 后发布 Sandbox snapshot，返回尚未提交的 manifest-aware revision 候选。 */
   verify(input: {
     readonly scope: ExecutionScope;
+    readonly attemptId?: string;
     readonly expectedCurrentRevisionId?: WorkspaceRevisionId;
     readonly sandbox: SandboxSessionRef;
     readonly operationKey: string;

@@ -1,12 +1,16 @@
 import {
   createPostgresPool,
   createS3BlobStore,
+  DurableWorkspaceCandidateBlobWriter,
   PgBackedSandboxSessionRegistry,
   PgBlobLifecycleRepository,
   PgExecutionPersistence,
   PgRecoveryMetrics,
   PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
+  PgWorkspaceCandidateHandoff,
+  PgWorkspaceManifestRepository,
+  PgWorkspaceStableBlobAccess,
   probePostgres,
   probeS3BlobStore,
 } from "@cube-runtime/persistence";
@@ -33,12 +37,12 @@ import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
   DatabaseRunCancellation,
-  FailClosedWorkspaceRevisionVerifier,
   NoDeclaredArtifactCompletionGate,
   ProcessShutdown,
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
 import { RunWorker } from "./run-worker.js";
+import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
 
 const workerEnvironmentSchema = Object.freeze({
   DATABASE_URL: urlEnvironmentField({
@@ -334,14 +338,57 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
         configuration.sandbox.templateId,
       );
       const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
+      const workspacePolicy = Object.freeze({
+        maxEntries: 1_024,
+        maxFiles: 1_000,
+        maxTotalBytes: 8 * 1024 * 1024,
+        maxSingleFileBytes: 8 * 1024 * 1024,
+        maxChunkBytes: 256 * 1024,
+        maxPathUtf8Bytes: 4_096,
+        historicalManifest: Object.freeze({
+          maxFiles: 1_000,
+          maxTotalBytes: 8 * 1024 * 1024,
+          maxSingleFileBytes: 8 * 1024 * 1024,
+          maxPathUtf8Bytes: 4_096,
+        }),
+      });
+      const workspaceManifest = new PgWorkspaceManifestRepository(pool, workspacePolicy);
+      const workspaceRuntime = new ManifestWorkspaceRuntime({
+        journal: workspaceManifest,
+        revisions: workspaceManifest,
+        stableBlobs: new PgWorkspaceStableBlobAccess(pool, blobs),
+        candidateBlobs: new DurableWorkspaceCandidateBlobWriter(
+          blobRepository,
+          blobs,
+          workspacePolicy.maxSingleFileBytes,
+        ),
+        candidates: new PgWorkspaceCandidateHandoff(pool, workspacePolicy),
+        openSandboxWorkspace: async (input) =>
+          upstreamSandboxes.gateway.connectWorkspace(
+            upstreamSandboxes.workspaceCapability({
+              scope: input.executionScope,
+              session: input.session,
+            }),
+            {
+              maxEntries: workspacePolicy.maxEntries,
+              maxFileBytes: workspacePolicy.maxSingleFileBytes,
+              maxTotalBytes: workspacePolicy.maxTotalBytes,
+              maxPathUtf8Bytes: workspacePolicy.maxPathUtf8Bytes,
+              maxCommandOutputBytes:
+                Math.ceil((workspacePolicy.maxSingleFileBytes * 4) / 3) + 1_024,
+              readChunkBytes: workspacePolicy.maxChunkBytes,
+              maxSnapshots: 4,
+              operationTimeoutMs: 30_000,
+            },
+            input.signal === undefined ? {} : { signal: input.signal },
+          ),
+        policy: workspacePolicy,
+      });
       const shutdown = new ProcessShutdown();
       const worker = new RunWorker(
         {
           persistence: new PgExecutionPersistence(pool),
-          // Workspace candidate Blob 尚无法和 RuntimeMutation 做同一事务的引用交接；启用会让
-          // unchanged/cancel/conflict/unknown 留下不可回收 stable 引用。因此开发 Worker 目前
-          // 只允许空 /workspace，并在模型前及模型后均 fail-closed。
-          revisions: new FailClosedWorkspaceRevisionVerifier(),
+          revisions: workspaceRuntime,
           sandboxes,
           orphanSandboxes: sandboxes,
           sessions,

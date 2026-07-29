@@ -1,3 +1,31 @@
+export {
+  WorkspaceApplicationError,
+  type WorkspaceApplicationErrorCode,
+  WorkspaceDependencyError,
+  type WorkspaceDependencyResult,
+} from "./application-errors.js";
+export type {
+  SandboxSessionIdentity,
+  SandboxWorkspaceEntry,
+  SandboxWorkspaceEntryKind,
+  SandboxWorkspacePort,
+  SandboxWorkspaceSnapshot,
+  ValidatedWorkspaceChange,
+  WorkspaceCandidateBlob,
+  WorkspaceCandidateBlobWritePort,
+  WorkspaceCandidateHandoffPort,
+  WorkspaceCandidateIdentity,
+  WorkspaceExecutionPolicy,
+  WorkspaceKnownFailureDisposition,
+  WorkspaceOperationBeginResult,
+  WorkspaceOperationIdentity,
+  WorkspaceOperationJournalPort,
+  WorkspaceOperationResult,
+  WorkspaceStableAuthorizationReceipt,
+  WorkspaceStableBlobReadPort,
+  WorkspaceTrustedScope,
+  WorkspaceUnknownFact,
+} from "./application-ports.js";
 export { WorkspaceManifestError, type WorkspaceManifestErrorCode } from "./errors.js";
 export {
   createWorkspaceManifest,
@@ -18,43 +46,17 @@ export {
   type WorkspaceMaterializationPlan,
 } from "./materialization-plan.js";
 export {
-  assertMaterializationRoot,
-  resolveWorkspaceTargetPath,
-  workspaceRelativePath,
-} from "./path.js";
-export {
-  WorkspaceApplicationError,
-  type WorkspaceApplicationErrorCode,
-  WorkspaceDependencyError,
-  type WorkspaceDependencyResult,
-} from "./application-errors.js";
-export type {
-  SandboxSessionIdentity,
-  SandboxWorkspaceEntry,
-  SandboxWorkspaceEntryKind,
-  SandboxWorkspacePort,
-  SandboxWorkspaceSnapshot,
-  ValidatedWorkspaceChange,
-  WorkspaceCandidateBlob,
-  WorkspaceCandidateBlobWritePort,
-  WorkspaceExecutionPolicy,
-  WorkspaceKnownFailureDisposition,
-  WorkspaceOperationBeginResult,
-  WorkspaceOperationIdentity,
-  WorkspaceOperationJournalPort,
-  WorkspaceOperationResult,
-  WorkspaceStableAuthorizationReceipt,
-  WorkspaceStableBlobReadPort,
-  WorkspaceTrustedScope,
-  WorkspaceUnknownFact,
-} from "./application-ports.js";
-export {
   type MaterializedWorkspace,
   type MaterializeWorkspaceInput,
   SANDBOX_WORKSPACE_ROOT,
   WorkspaceMaterializer,
   type WorkspaceMaterializerOptions,
 } from "./materializer.js";
+export {
+  assertMaterializationRoot,
+  resolveWorkspaceTargetPath,
+  workspaceRelativePath,
+} from "./path.js";
 export {
   type PublishWorkspaceInput,
   WorkspacePublisher,

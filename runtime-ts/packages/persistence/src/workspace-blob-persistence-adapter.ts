@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   type WorkspaceCandidateBlob,
   type WorkspaceCandidateBlobWritePort,
+  type WorkspaceCandidateIdentity,
   WorkspaceDependencyError,
 } from "@cube-runtime/workspace";
 import {
@@ -21,7 +22,16 @@ import {
 export type WorkspaceBlobCommitRepository = BlobCommitStatePort &
   BlobReferenceCommitPort &
   StableBlobLifecycleAllocationPort &
-  Pick<StableBlobGcClaimPort, "resolveLifecycle">;
+  Pick<StableBlobGcClaimPort, "resolveLifecycle"> & {
+    markWorkspaceCandidateReferenceStable(input: {
+      readonly operationId: string;
+      readonly scope: { readonly tenantId: string };
+      readonly referenceId: string;
+      readonly stable: StableBlobRef;
+      readonly candidate: WorkspaceCandidateIdentity;
+      readonly relativePath: string;
+    }): Promise<"marked" | "gc_in_progress">;
+  };
 
 /**
  * 逐文件 Workspace 上传必须走与 Trace 相同的 Blob lifecycle 状态机；这里仅把受控字节流
@@ -40,6 +50,7 @@ export class DurableWorkspaceCandidateBlobWriter implements WorkspaceCandidateBl
   async putCandidate(
     input: Parameters<WorkspaceCandidateBlobWritePort["putCandidate"]>[0],
   ): Promise<WorkspaceCandidateBlob> {
+    if (input.candidate === undefined) throw unavailable("WORKSPACE_CANDIDATE_IDENTITY_REQUIRED");
     const body = await collectExact(
       input.body,
       input.expectedContent.sha256,
@@ -77,7 +88,13 @@ export class DurableWorkspaceCandidateBlobWriter implements WorkspaceCandidateBl
         ) {
           throw unavailable("BLOB_COMMIT_CONFLICT");
         }
-        const next = await this.advance(snapshot, body, uploadId);
+        const next = await this.advance(
+          snapshot,
+          body,
+          uploadId,
+          input.candidate,
+          input.relativePath,
+        );
         if (next.kind === "done") return next.blob;
         snapshot = next.snapshot;
       }
@@ -116,6 +133,8 @@ export class DurableWorkspaceCandidateBlobWriter implements WorkspaceCandidateBl
     snapshot: BlobCommitSnapshot,
     body: Uint8Array,
     uploadId: string,
+    candidate?: WorkspaceCandidateIdentity,
+    relativePath?: string,
   ): Promise<
     | { readonly kind: "next"; readonly snapshot: BlobCommitSnapshot }
     | { readonly kind: "done"; readonly blob: WorkspaceCandidateBlob }
@@ -248,11 +267,15 @@ export class DurableWorkspaceCandidateBlobWriter implements WorkspaceCandidateBl
           throw unavailable("BLOB_COMMIT_INVALID");
         const head = await this.blobs.head(scope, snapshot.stable);
         if (head === undefined) throw unknown("BLOB_STABLE_HEAD_UNKNOWN");
-        const marked = await this.repository.markReferenceStable({
+        if (candidate === undefined || relativePath === undefined)
+          throw unavailable("WORKSPACE_CANDIDATE_IDENTITY_REQUIRED");
+        const marked = await this.repository.markWorkspaceCandidateReferenceStable({
           operationId: snapshot.operationId,
           scope,
           referenceId: snapshot.referenceId,
           stable: snapshot.stable,
+          candidate,
+          relativePath,
         });
         return next(
           await this.cas(
@@ -284,7 +307,11 @@ export class DurableWorkspaceCandidateBlobWriter implements WorkspaceCandidateBl
         );
       }
       case "completed": {
-        if (snapshot.stable === undefined || snapshot.stable.purpose !== "workspace")
+        if (
+          snapshot.stable === undefined ||
+          snapshot.stable.purpose !== "workspace" ||
+          snapshot.referenceId === undefined
+        )
           throw unavailable("BLOB_COMMIT_INVALID");
         return {
           kind: "done",
@@ -296,6 +323,7 @@ export class DurableWorkspaceCandidateBlobWriter implements WorkspaceCandidateBl
               incarnationId: snapshot.stable.incarnationId,
               physicalObjectKey: snapshot.stable.physicalObjectKey,
             }),
+            referenceId: snapshot.referenceId,
           }),
         };
       }

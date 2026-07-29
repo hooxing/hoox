@@ -224,6 +224,8 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         workspaceId: h.scope.workspaceId,
         rootRunId: h.scope.rootRunId,
         revisionId: fakeRevision("revision-success"),
+        candidateOperationKey: "attempt-1/workspace/publish/0",
+        candidateOperationDigest: "0".repeat(64) as ReturnType<typeof sha256Digest>,
         manifest: createWorkspaceManifest(
           { tenantId: h.scope.tenantId, entries: [] },
           { maxFiles: 1, maxTotalBytes: 1 },

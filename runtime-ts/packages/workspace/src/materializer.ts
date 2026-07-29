@@ -57,6 +57,8 @@ export interface MaterializeWorkspaceInput {
   readonly operationKey: string;
   readonly scope: WorkspaceTrustedScope;
   readonly target: WorkspaceManifest;
+  /** 非空 manifest 必须绑定其已提交 Revision，供 stable 授权逐 path 续验。 */
+  readonly targetRevisionId?: string;
   readonly previous?: WorkspaceManifest;
   readonly signal?: AbortSignal;
 }
@@ -86,6 +88,12 @@ export class WorkspaceMaterializer {
       scope.tenantId,
       currentManifestPolicy(this.policy),
     );
+    if (
+      target.entries.length > 0 &&
+      (input.targetRevisionId === undefined || !validRevisionId(input.targetRevisionId))
+    ) {
+      throw new WorkspaceApplicationError("INVALID_INPUT", "非空 Workspace 缺少 Revision 身份");
+    }
     const previous =
       input.previous === undefined
         ? undefined
@@ -112,7 +120,13 @@ export class WorkspaceMaterializer {
           target,
           ...(previous === undefined ? {} : { previous }),
         });
-        const receipts = await this.authorizeAll(scope, target, identity, input.signal);
+        const receipts = await this.authorizeAll(
+          scope,
+          target,
+          input.targetRevisionId,
+          identity,
+          input.signal,
+        );
         const validExisting = new Set<string>();
         const driftDirectories = new Set<string>();
         const driftNonDirectories = new Set<string>();
@@ -311,17 +325,23 @@ export class WorkspaceMaterializer {
   private async authorizeAll(
     scope: WorkspaceTrustedScope,
     target: WorkspaceManifest,
+    revisionId: string | undefined,
     identity: WorkspaceOperationIdentity,
     signal: AbortSignal | undefined,
   ): Promise<Map<string, WorkspaceStableAuthorizationReceipt>> {
     const result = new Map<string, WorkspaceStableAuthorizationReceipt>();
     for (const entry of target.entries) {
+      if (revisionId === undefined) {
+        throw new WorkspaceApplicationError("INVALID_INPUT", "Workspace Revision 身份缺失");
+      }
       stopPoint(signal);
       const authorization = parseAuthorizationResult(
         await this.callDependency(identity, "authorize_stable", () =>
           this.options.stableBlobs.authorize({
             scope,
             purpose: "workspace_materialization",
+            revisionId,
+            relativePath: entry.path,
             content: entry.content,
             object: entry.object,
           }),
@@ -330,7 +350,7 @@ export class WorkspaceMaterializer {
       if (authorization.status !== "authorized") {
         throw new WorkspaceApplicationError("ACCESS_DENIED", "Workspace Blob 不可用于当前 Tenant");
       }
-      assertReceipt(entry, scope.tenantId, authorization.receipt);
+      assertReceipt(entry, scope, revisionId, authorization.receipt);
       const head = parseStableHeadResult(
         await this.callDependency(identity, "head_stable", () =>
           this.options.stableBlobs.head(authorization.receipt),
@@ -464,11 +484,16 @@ function currentManifestPolicy(policy: WorkspaceExecutionPolicy) {
 
 function assertReceipt(
   entry: WorkspaceFileEntry,
-  tenantId: string,
+  scope: WorkspaceTrustedScope,
+  revisionId: string,
   receipt: WorkspaceStableAuthorizationReceipt,
 ): void {
   if (
-    receipt.tenantId !== tenantId ||
+    receipt.tenantId !== scope.tenantId ||
+    receipt.threadId !== scope.threadId ||
+    receipt.workspaceId !== scope.workspaceId ||
+    receipt.revisionId !== revisionId ||
+    receipt.relativePath !== entry.path ||
     receipt.purpose !== "workspace" ||
     !sameContent(receipt.content, entry.content) ||
     !sameObject(receipt.object, entry.object)
@@ -560,13 +585,27 @@ function parseAuthorizationResult(value: unknown): ParsedAuthorizationResult {
   const receipt = plainDataRecord(input.receipt, "Workspace Blob 授权回执");
   exactKeys(
     receipt,
-    ["authorizationId", "tenantId", "purpose", "content", "object"],
+    [
+      "authorizationId",
+      "tenantId",
+      "threadId",
+      "workspaceId",
+      "revisionId",
+      "relativePath",
+      "purpose",
+      "content",
+      "object",
+    ],
     "Workspace Blob 授权回执",
   );
   if (
     typeof receipt.authorizationId !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(receipt.authorizationId) ||
     typeof receipt.tenantId !== "string" ||
+    typeof receipt.threadId !== "string" ||
+    typeof receipt.workspaceId !== "string" ||
+    !validRevisionId(receipt.revisionId) ||
+    typeof receipt.relativePath !== "string" ||
     receipt.purpose !== "workspace"
   ) {
     throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace Blob 授权回执字段无效");
@@ -576,11 +615,21 @@ function parseAuthorizationResult(value: unknown): ParsedAuthorizationResult {
     receipt: Object.freeze({
       authorizationId: receipt.authorizationId,
       tenantId: receipt.tenantId,
+      threadId: receipt.threadId,
+      workspaceId: receipt.workspaceId,
+      revisionId: receipt.revisionId,
+      relativePath: workspaceRelativePath(receipt.relativePath),
       purpose: "workspace",
       content: parseContentIdentity(receipt.content),
       object: parseStableObjectIdentity(receipt.object),
     }),
   });
+}
+
+function validRevisionId(value: unknown): value is string {
+  return (
+    typeof value === "string" && value.length > 0 && value.length <= 200 && !value.includes("\0")
+  );
 }
 
 type ParsedStableHeadResult =

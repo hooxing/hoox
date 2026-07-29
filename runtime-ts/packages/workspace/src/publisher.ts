@@ -11,6 +11,7 @@ import type {
   ValidatedWorkspaceChange,
   WorkspaceCandidateBlob,
   WorkspaceCandidateBlobWritePort,
+  WorkspaceCandidateIdentity,
   WorkspaceExecutionPolicy,
   WorkspaceOperationIdentity,
   WorkspaceOperationJournalPort,
@@ -59,6 +60,7 @@ export interface PublishWorkspaceInput {
   readonly operationKey: string;
   readonly scope: WorkspaceTrustedScope;
   readonly base?: WorkspaceManifest;
+  readonly candidate?: WorkspaceCandidateIdentity;
   readonly signal?: AbortSignal;
 }
 
@@ -81,7 +83,7 @@ export class WorkspacePublisher {
       input.base === undefined
         ? undefined
         : parseWorkspaceManifest(input.base, scope.tenantId, this.policy.historicalManifest);
-    const completed = await this.lookupCompleted(operationKey, scope, base);
+    const completed = await this.lookupCompleted(operationKey, scope, base, input.candidate);
     if (completed !== undefined) return completed;
     const sandbox = await this.currentSandbox();
     try {
@@ -94,6 +96,7 @@ export class WorkspacePublisher {
         scope,
         snapshot,
         ...(base === undefined ? {} : { base }),
+        ...(input.candidate === undefined ? {} : { candidate: input.candidate }),
       });
       const begun = await beginOperation(this.options.journal, identity);
       if (begun.status === "completed") {
@@ -105,6 +108,7 @@ export class WorkspacePublisher {
         stopPoint(input.signal);
         const entries = await this.collectEntries(identity, snapshot, input.signal);
         const manifestEntries: unknown[] = [];
+        const baseByPath = new Map(base?.entries.map((entry) => [entry.path, entry]) ?? []);
         let totalBytes = 0;
 
         for (const entry of entries) {
@@ -134,6 +138,17 @@ export class WorkspacePublisher {
             throw new WorkspaceApplicationError("INTEGRITY_MISMATCH", "Sandbox 快照文件长度不匹配");
           }
 
+          const previous = baseByPath.get(relativePath);
+          if (
+            previous !== undefined &&
+            previous.content.sha256 === content.sha256 &&
+            previous.content.size === content.size
+          ) {
+            // unchanged 必须复用 base 的精确 incarnation；不能仅因内容相同再创建 Blob 引用。
+            manifestEntries.push(previous);
+            continue;
+          }
+
           phase = "upload_candidate";
           stopPoint(input.signal);
           const verified = verifyingStream({
@@ -157,6 +172,7 @@ export class WorkspacePublisher {
                 operationKey: candidateOperationKey(identity, relativePath, content),
                 relativePath,
                 expectedContent: content,
+                ...(input.candidate === undefined ? {} : { candidate: input.candidate }),
                 body: verified.body,
                 ...(input.signal === undefined ? {} : { signal: input.signal }),
               }),
@@ -251,6 +267,7 @@ export class WorkspacePublisher {
     operationKey: string,
     scope: WorkspaceTrustedScope,
     base: WorkspaceManifest | undefined,
+    candidate: WorkspaceCandidateIdentity | undefined,
   ): Promise<ValidatedWorkspaceChange | undefined> {
     let raw: unknown;
     try {
@@ -271,7 +288,13 @@ export class WorkspacePublisher {
     if (lookup.status !== "completed") {
       throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace 完成事实状态非法");
     }
-    const identity = parseStoredPublishIdentity(lookup.identity, operationKey, scope, base);
+    const identity = parseStoredPublishIdentity(
+      lookup.identity,
+      operationKey,
+      scope,
+      base,
+      candidate,
+    );
     return parsePublishedResult(lookup.result, identity, base, this.manifestPolicy);
   }
 
@@ -376,6 +399,7 @@ function publishIdentity(input: {
   readonly scope: WorkspaceTrustedScope;
   readonly snapshot: SandboxWorkspaceSnapshot;
   readonly base?: WorkspaceManifest;
+  readonly candidate?: WorkspaceCandidateIdentity;
 }): WorkspaceOperationIdentity {
   const payload = [
     OPERATION_DIGEST_VERSION,
@@ -387,6 +411,7 @@ function publishIdentity(input: {
     String(input.snapshot.generation),
     input.snapshot.snapshotToken,
     input.base?.digest ?? "",
+    input.candidate?.operationDigest ?? "",
   ].join("\0");
   return Object.freeze({
     schemaVersion: 1,
@@ -408,6 +433,7 @@ function parseStoredPublishIdentity(
   operationKey: string,
   scope: WorkspaceTrustedScope,
   base: WorkspaceManifest | undefined,
+  candidate: WorkspaceCandidateIdentity | undefined,
 ): WorkspaceOperationIdentity {
   const stored = plainDataRecord(value, "WorkspaceOperationIdentity");
   exactKeys(
@@ -447,6 +473,7 @@ function parseStoredPublishIdentity(
     scope,
     snapshot,
     ...(base === undefined ? {} : { base }),
+    ...(candidate === undefined ? {} : { candidate }),
   });
   if (stored.inputDigest !== expected.inputDigest) {
     throw new WorkspaceApplicationError("OPERATION_CONFLICT", "已完成发布输入摘要与请求不一致");

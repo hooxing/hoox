@@ -20,7 +20,6 @@ import type {
   SandboxSessionRegistryPort,
   SandboxSettlementResult,
 } from "@cube-runtime/run-contracts";
-import { parseWorkspaceManifest } from "@cube-runtime/workspace";
 import {
   assertControlledRolloutProjection,
   outboxPayloadDigest,
@@ -29,6 +28,7 @@ import {
   sandboxCleanupIdentityDigest,
   workspaceChangeDigest,
 } from "@cube-runtime/run-contracts/mutation-protocol";
+import { parseWorkspaceManifest } from "@cube-runtime/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
@@ -252,6 +252,8 @@ function mutationStorageShapeValid(command: RuntimeMutation): boolean {
   return (
     command.workspaceChange === undefined ||
     (boundedIdentifier(command.workspaceChange.revisionId) &&
+      boundedIdentifier(command.workspaceChange.candidateOperationKey, 256) &&
+      /^[0-9a-f]{64}$/.test(command.workspaceChange.candidateOperationDigest) &&
       validWorkspaceManifest(command.workspaceChange.manifest, command.workspaceChange.tenantId))
   );
 }
@@ -1294,6 +1296,11 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             : input.decision === "safe_fail"
               ? "failed"
               : "abandoned";
+          await releasePreparedWorkspaceCandidates(client, {
+            tenantId: input.scope.tenantId,
+            attemptId: String(row.attempt_id),
+            reason: "expired_recovery",
+          });
           await client.query(
             `UPDATE execution_attempts
                 SET status=$3, version=version+1, updated_at=$4, finished_at=$4
@@ -1444,6 +1451,44 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
       ) {
         return { outcome: "conflict" };
       }
+      const candidate = await client.query<{
+        readonly manifest_digest: string;
+        readonly file_count: string;
+      }>(
+        `SELECT candidate.manifest_digest,
+                (SELECT count(*)::text FROM workspace_revision_candidate_files file
+                  WHERE file.tenant_id=candidate.tenant_id
+                    AND file.workspace_id=candidate.workspace_id
+                    AND file.attempt_id=candidate.attempt_id
+                    AND file.operation_key=candidate.operation_key) AS file_count
+           FROM workspace_revision_candidates candidate
+          WHERE candidate.tenant_id=$1 AND candidate.workspace_id=$2
+            AND candidate.attempt_id=$3 AND candidate.run_id=$4 AND candidate.thread_id=$5
+            AND candidate.root_run_id=$6 AND candidate.parent_revision_key=COALESCE($7,'')
+            AND candidate.revision_id=$8 AND candidate.operation_key=$9
+            AND candidate.operation_digest=$10 AND candidate.status='prepared'
+          FOR UPDATE`,
+        [
+          change.tenantId,
+          change.workspaceId,
+          row.attempt_id,
+          command.fence.scope.runId,
+          change.threadId,
+          change.rootRunId,
+          change.parentRevisionId ?? null,
+          change.revisionId,
+          change.candidateOperationKey,
+          change.candidateOperationDigest,
+        ],
+      );
+      const prepared = candidate.rows[0];
+      if (
+        prepared === undefined ||
+        prepared.manifest_digest !== change.manifest.digest ||
+        prepared.file_count !== String(change.manifest.entries.length)
+      ) {
+        return { outcome: "conflict" };
+      }
       const revisionNumber = Number(row.current_revision_number) + 1;
       await client.query(
         `INSERT INTO workspace_revisions(
@@ -1490,14 +1535,33 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
              tenant_id,workspace_id,revision_id,relative_path,content_sha256,size,
              blob_lifecycle_id,blob_incarnation_id,physical_object_key
            )
-           SELECT $1,$2,$3,$4,$5,$6,incarnation.lifecycle_id,incarnation.incarnation_id,incarnation.physical_object_key
-             FROM blob_incarnations incarnation
+           SELECT $1,$2,$3,$4,$5,$6,file.blob_lifecycle_id,file.blob_incarnation_id,
+                  file.physical_object_key
+             FROM workspace_revision_candidate_files file
+             JOIN blob_incarnations incarnation
+               ON incarnation.tenant_id=file.tenant_id
+              AND incarnation.lifecycle_id=file.blob_lifecycle_id
+              AND incarnation.incarnation_id=file.blob_incarnation_id
+              AND incarnation.physical_object_key=file.physical_object_key
              JOIN blob_lifecycles lifecycle
-               ON lifecycle.tenant_id=incarnation.tenant_id AND lifecycle.lifecycle_id=incarnation.lifecycle_id
-            WHERE incarnation.tenant_id=$1 AND incarnation.incarnation_id=$7::uuid
-              AND incarnation.physical_object_key=$8 AND incarnation.purpose='workspace'
-              AND incarnation.sha256=$5 AND incarnation.size=$6
-              AND incarnation.state='active' AND lifecycle.state='active'`,
+               ON lifecycle.tenant_id=incarnation.tenant_id
+              AND lifecycle.lifecycle_id=incarnation.lifecycle_id
+             LEFT JOIN blob_references reference
+               ON reference.tenant_id=file.tenant_id
+              AND reference.reference_id=file.blob_reference_id
+            WHERE file.tenant_id=$1 AND file.workspace_id=$2 AND file.attempt_id=$7
+              AND file.operation_key=$8 AND file.operation_digest=$9
+              AND file.manifest_digest=$10 AND file.relative_path=$4
+              AND file.content_sha256=$5 AND file.size=$6
+              AND file.blob_incarnation_id=$11::uuid AND file.physical_object_key=$12
+              AND incarnation.purpose='workspace' AND incarnation.state='active'
+              AND lifecycle.state='active'
+              AND ((file.source='base' AND file.blob_reference_id IS NULL)
+                OR (file.source='uploaded' AND reference.state='stable'
+                  AND reference.purpose='workspace'
+                  AND reference.lifecycle_id=file.blob_lifecycle_id
+                  AND reference.incarnation_id=file.blob_incarnation_id
+                  AND reference.physical_object_key=file.physical_object_key))`,
           [
             change.tenantId,
             change.workspaceId,
@@ -1505,12 +1569,54 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             entry.path,
             entry.content.sha256,
             entry.content.size,
+            row.attempt_id,
+            change.candidateOperationKey,
+            change.candidateOperationDigest,
+            change.manifest.digest,
             entry.object.incarnationId,
             entry.object.physicalObjectKey,
           ],
         );
         if (inserted.rowCount !== 1) throw new RuntimeWriteAbort("conflict");
       }
+      const uploadedCount = await client.query<{ readonly count: string }>(
+        `SELECT count(*)::text AS count FROM workspace_revision_candidate_files
+          WHERE tenant_id=$1 AND workspace_id=$2 AND attempt_id=$3 AND operation_key=$4
+            AND source='uploaded'`,
+        [change.tenantId, change.workspaceId, row.attempt_id, change.candidateOperationKey],
+      );
+      const released = await client.query(
+        `UPDATE blob_references reference SET state='released',updated_at=$5
+           FROM workspace_revision_candidate_files file
+          WHERE file.tenant_id=$1 AND file.workspace_id=$2 AND file.attempt_id=$3
+            AND file.operation_key=$4 AND file.source='uploaded'
+            AND reference.tenant_id=file.tenant_id
+            AND reference.reference_id=file.blob_reference_id AND reference.state='stable'`,
+        [
+          change.tenantId,
+          change.workspaceId,
+          row.attempt_id,
+          change.candidateOperationKey,
+          databaseNow,
+        ],
+      );
+      if (released.rowCount !== Number(uploadedCount.rows[0]?.count ?? "-1")) {
+        throw new RuntimeWriteAbort("conflict");
+      }
+      const committedCandidate = await client.query(
+        `UPDATE workspace_revision_candidates
+            SET status='committed',updated_at=$5
+          WHERE tenant_id=$1 AND workspace_id=$2 AND attempt_id=$3 AND operation_key=$4
+            AND status='prepared'`,
+        [
+          change.tenantId,
+          change.workspaceId,
+          row.attempt_id,
+          change.candidateOperationKey,
+          databaseNow,
+        ],
+      );
+      if (committedCandidate.rowCount !== 1) throw new RuntimeWriteAbort("conflict");
       await client.query(
         `UPDATE workspaces
             SET current_revision_number=$3,current_revision_id=$4,updated_at=$5
@@ -1648,6 +1754,11 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     if (updatedAttempt.rowCount !== 1) throw new RuntimeWriteAbort("conflict");
 
     if (command.releaseFences === true) {
+      await releasePreparedWorkspaceCandidates(client, {
+        tenantId: command.fence.scope.tenantId,
+        attemptId: String(row.attempt_id),
+        reason: "terminal",
+      });
       await client.query(
         `UPDATE run_claims SET released_at=$3,updated_at=$3
           WHERE tenant_id=$1 AND attempt_id=$2 AND released_at IS NULL`,
@@ -1959,6 +2070,34 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     if (attemptRow === undefined) return undefined;
     return { ...mapAggregate(aggregateRow), attempt: mapAttempt(attemptRow) };
   }
+}
+
+async function releasePreparedWorkspaceCandidates(
+  client: PoolClient,
+  input: {
+    readonly tenantId: string;
+    readonly attemptId: string;
+    readonly reason: "terminal" | "expired_recovery" | "manual_recovery";
+  },
+): Promise<void> {
+  await client.query(
+    `UPDATE blob_references reference SET state='released',updated_at=clock_timestamp()
+       FROM workspace_revision_candidate_files file
+       JOIN workspace_revision_candidates candidate
+         ON candidate.tenant_id=file.tenant_id AND candidate.workspace_id=file.workspace_id
+        AND candidate.attempt_id=file.attempt_id AND candidate.operation_key=file.operation_key
+      WHERE candidate.tenant_id=$1 AND candidate.attempt_id=$2
+        AND candidate.status IN ('building','prepared') AND file.source='uploaded'
+        AND reference.tenant_id=file.tenant_id AND reference.reference_id=file.blob_reference_id
+        AND reference.state='stable'`,
+    [input.tenantId, input.attemptId],
+  );
+  await client.query(
+    `UPDATE workspace_revision_candidates
+        SET status='released',release_reason=$3,updated_at=clock_timestamp()
+      WHERE tenant_id=$1 AND attempt_id=$2 AND status IN ('building','prepared')`,
+    [input.tenantId, input.attemptId, input.reason],
+  );
 }
 
 function attemptTransitionAllowed(current: string, next: string | undefined): boolean {

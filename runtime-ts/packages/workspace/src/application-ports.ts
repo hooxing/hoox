@@ -11,6 +11,32 @@ export interface WorkspaceTrustedScope {
   readonly workspaceId: string;
 }
 
+/**
+ * Candidate 在任何 Blob 副作用之前绑定完整执行身份。operationDigest 由调用方与 PG 分别计算，
+ * 不能只靠可重放的 operationKey 推断 Attempt 或 Revision 归属。
+ */
+export interface WorkspaceCandidateIdentity extends WorkspaceTrustedScope {
+  readonly attemptId: string;
+  readonly runId: string;
+  readonly rootRunId: string;
+  readonly parentRevisionId?: string;
+  readonly revisionId: string;
+  readonly operationKey: string;
+  readonly operationDigest: string;
+}
+
+export interface WorkspaceCandidateHandoffPort {
+  begin(identity: WorkspaceCandidateIdentity): Promise<void>;
+  prepare(input: {
+    readonly identity: WorkspaceCandidateIdentity;
+    readonly manifest: WorkspaceManifest;
+  }): Promise<void>;
+  release(input: {
+    readonly identity: WorkspaceCandidateIdentity;
+    readonly reason: "publish_failed" | "manual_recovery";
+  }): Promise<void>;
+}
+
 export interface SandboxSessionIdentity {
   readonly sessionId: string;
   readonly generation: number;
@@ -93,6 +119,10 @@ export interface WorkspaceOperationJournalPort {
 export interface WorkspaceStableAuthorizationReceipt {
   readonly authorizationId: string;
   readonly tenantId: string;
+  readonly threadId: string;
+  readonly workspaceId: string;
+  readonly revisionId: string;
+  readonly relativePath: string;
   readonly purpose: "workspace";
   readonly content: WorkspaceContentIdentity;
   readonly object: WorkspaceStableObjectIdentity;
@@ -102,6 +132,8 @@ export interface WorkspaceStableBlobReadPort {
   authorize(input: {
     readonly scope: WorkspaceTrustedScope;
     readonly purpose: "workspace_materialization";
+    readonly revisionId: string;
+    readonly relativePath: string;
     readonly content: WorkspaceContentIdentity;
     readonly object: WorkspaceStableObjectIdentity;
   }): Promise<
@@ -195,6 +227,8 @@ export interface SandboxWorkspacePort {
 export interface WorkspaceCandidateBlob {
   readonly content: WorkspaceContentIdentity;
   readonly object: WorkspaceStableObjectIdentity;
+  /** 仅持久化候选端口返回；纯领域测试可不提供。 */
+  readonly referenceId?: string;
 }
 
 export interface WorkspaceCandidateBlobWritePort {
@@ -204,6 +238,7 @@ export interface WorkspaceCandidateBlobWritePort {
     readonly operationKey: string;
     readonly relativePath: string;
     readonly expectedContent: WorkspaceContentIdentity;
+    readonly candidate?: WorkspaceCandidateIdentity;
     readonly body: AsyncIterable<Uint8Array>;
     readonly signal?: AbortSignal;
   }): Promise<WorkspaceCandidateBlob>;

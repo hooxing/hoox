@@ -46,12 +46,15 @@ Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 必须等于
 `MODEL_ID`；不要把预算值猜测为 Provider 元数据。生产模式保持更严格的预算元数据匹配策略，且本仓库
 不提供生产 Worker 入口。
 
-Workspace manifest 的持久化 schema、精确 incarnation 外键与 RuntimeMutation 原子写入已经准备就绪，
-但 development Worker **尚未启用** manifest 发布：候选 Blob 引用还不能与 RuntimeMutation/CAS 进行可证明
-的原子交接，若在 unchanged、取消、冲突或未知结果时继续发布会遗留不可回收引用。因此 Worker 目前只允许
-模型前和模型后都为空的 `/workspace`，任何模板残留、根目录缺失或模型写入都会失败关闭。`0014` 也会拒绝
-在运行时失败关闭没有逐文件 manifest 的旧 current head，必须先用受控回填流程转换。Artifact 发布仍是独立的交付闭环，Workspace
-文件不会自动成为用户可下载的 Artifact。
+development Worker 已启用 Workspace manifest 物化与发布。新文件的 stable Blob 引用会先绑定到同一
+Attempt 的持久化 candidate；最终 RuntimeMutation 在一个 SERIALIZABLE 事务内核对完整执行身份、manifest、
+active incarnation 与 Workspace head，再写入 revision、推进 head 并释放 candidate 引用。unchanged 文件按
+同路径精确复用 parent revision，不创建新 Blob；发布失败、终态和租约过期恢复会释放未提交 candidate，
+COMMIT 响应未知则只通过原 mutation 幂等键读取结果，不猜测成功或失败。新 Sandbox 仍必须在物化前证明
+`/workspace` 为空，`0014` 仍会失败关闭没有逐文件 manifest 的旧 current head，旧数据必须先经受控回填。
+该能力只接入固定开发身份的 development Worker，不改变生产认证边界。Artifact 发布仍是独立交付闭环，
+Workspace 文件不会自动成为用户可下载的 Artifact。完整协议见
+[`ADR-0047`](docs/decisions/0047-workspace-candidate-atomic-handoff.md)。
 
 ## 开发基线
 

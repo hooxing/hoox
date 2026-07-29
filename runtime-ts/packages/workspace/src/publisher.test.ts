@@ -458,6 +458,19 @@ describe("Workspace publisher 可靠边界", () => {
     expect(repeated.candidateManifest.entries.map((entry) => entry.path)).toEqual(["a"]);
   });
 
+  it("同 path/hash/size 的 unchanged 文件复用 base incarnation 且不创建新 Blob 引用", async () => {
+    const state = setup();
+    state.sandbox.addFile("same.txt", "unchanged");
+    const first = await state.publisher.publish(request("unchanged-first"));
+    expect(state.blobs.effects).toBe(1);
+
+    const second = await state.publisher.publish(
+      request("unchanged-second", first.candidateManifest),
+    );
+    expect(state.blobs.effects).toBe(1);
+    expect(second.candidateManifest.entries).toEqual(first.candidateManifest.entries);
+  });
+
   it("非法 tenant/scope 在 snapshot 与任何 Blob 副作用前拒绝", async () => {
     const state = setup();
     state.sandbox.addFile("a", "a");

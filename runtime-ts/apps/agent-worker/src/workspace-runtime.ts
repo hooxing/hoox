@@ -1,12 +1,18 @@
 import { createHash } from "node:crypto";
+import { sha256Digest, workspaceRevisionId } from "@cube-runtime/domain";
+import { workspaceCandidateOperationDigest } from "@cube-runtime/persistence";
 import type { WorkspaceRuntimePort } from "@cube-runtime/run-contracts";
 import {
   createWorkspaceManifest,
   type SandboxWorkspacePort,
+  type WorkspaceCandidateBlobWritePort,
+  type WorkspaceCandidateHandoffPort,
+  type WorkspaceCandidateIdentity,
   type WorkspaceExecutionPolicy,
   type WorkspaceManifest,
   WorkspaceMaterializer,
   type WorkspaceOperationJournalPort,
+  WorkspacePublisher,
   type WorkspaceStableBlobReadPort,
   type WorkspaceTrustedScope,
 } from "@cube-runtime/workspace";
@@ -22,6 +28,8 @@ export interface WorkerWorkspaceRuntimeOptions {
   readonly journal: WorkspaceOperationJournalPort;
   readonly revisions: WorkspaceRevisionFactPort;
   readonly stableBlobs: WorkspaceStableBlobReadPort;
+  readonly candidateBlobs: WorkspaceCandidateBlobWritePort;
+  readonly candidates: WorkspaceCandidateHandoffPort;
   readonly openSandboxWorkspace: (input: {
     readonly scope: WorkspaceTrustedScope;
     readonly executionScope: Parameters<WorkspaceRuntimePort["verify"]>[0]["scope"];
@@ -70,16 +78,86 @@ export class ManifestWorkspaceRuntime implements WorkspaceRuntimePort {
       operationKey: input.operationKey,
       scope,
       target,
+      ...(input.expectedCurrentRevisionId === undefined
+        ? {}
+        : { targetRevisionId: input.expectedCurrentRevisionId }),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     });
   }
 
-  async verify(input: Parameters<WorkspaceRuntimePort["verify"]>[0]): Promise<undefined> {
-    // WorkspacePublisher 目前会在 RuntimeMutation/CAS 之前独立创建 stable 引用。若随后是
-    // unchanged、取消、双栅栏 conflict 或 unknown，这些引用没有可证明的交接/回收路径。
-    // 因此本实现绝不触发 publish 或 Blob 写；真正的候选引用事务协议接通前必须失败关闭。
-    void input;
-    throw new Error("WORKSPACE_MANIFEST_PUBLICATION_DISABLED");
+  async verify(
+    input: Parameters<WorkspaceRuntimePort["verify"]>[0],
+  ): Promise<Awaited<ReturnType<WorkspaceRuntimePort["verify"]>>> {
+    if (input.attemptId === undefined) throw new Error("WORKSPACE_ATTEMPT_ID_REQUIRED");
+    const attemptId = input.attemptId;
+    const scope = trustedScope(input.scope);
+    const base = await this.options.revisions.loadCurrentManifest({
+      scope,
+      ...(input.expectedCurrentRevisionId === undefined
+        ? {}
+        : { expectedRevisionId: input.expectedCurrentRevisionId }),
+    });
+    const sandbox = await this.options.openSandboxWorkspace({
+      scope,
+      executionScope: input.scope,
+      session: input.sandbox,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+    });
+    const revisionId = workspaceRevisionId(
+      `revision-${createHash("sha256")
+        .update(`${scope.tenantId}\0${scope.workspaceId}\0${attemptId}\0${input.operationKey}`)
+        .digest("hex")}`,
+    );
+    const unsigned = {
+      ...scope,
+      attemptId,
+      runId: input.scope.runId,
+      rootRunId: input.scope.rootRunId,
+      ...(input.expectedCurrentRevisionId === undefined
+        ? {}
+        : { parentRevisionId: input.expectedCurrentRevisionId }),
+      revisionId,
+      operationKey: input.operationKey,
+    };
+    const identity: WorkspaceCandidateIdentity = Object.freeze({
+      ...unsigned,
+      operationDigest: workspaceCandidateOperationDigest(unsigned),
+    });
+    await this.options.candidates.begin(identity);
+    try {
+      const change = await new WorkspacePublisher({
+        journal: this.options.journal,
+        sandbox,
+        blobs: this.options.candidateBlobs,
+        policy: this.options.policy,
+      }).publish({
+        operationKey: input.operationKey,
+        scope,
+        ...(base === undefined ? {} : { base }),
+        candidate: identity,
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
+      });
+      await this.options.candidates.prepare({ identity, manifest: change.candidateManifest });
+      return Object.freeze({
+        tenantId: input.scope.tenantId,
+        threadId: input.scope.threadId,
+        workspaceId: input.scope.workspaceId,
+        rootRunId: input.scope.rootRunId,
+        ...(input.expectedCurrentRevisionId === undefined
+          ? {}
+          : { parentRevisionId: input.expectedCurrentRevisionId }),
+        revisionId,
+        candidateOperationKey: identity.operationKey,
+        candidateOperationDigest: sha256Digest(identity.operationDigest),
+        manifest: change.candidateManifest,
+      });
+    } catch (error) {
+      // release 的 COMMIT 若未知，候选仍由 Attempt 过期恢复收敛；绝不能据异常猜测引用已释放。
+      await this.options.candidates
+        .release({ identity, reason: "publish_failed" })
+        .catch(() => undefined);
+      throw error;
+    }
   }
 }
 

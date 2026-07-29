@@ -830,6 +830,8 @@ export class FakeRevisionVerifier implements WorkspaceRevisionVerifierPort {
             ? {}
             : { parentRevisionId: input.expectedCurrentRevisionId }),
           revisionId,
+          candidateOperationKey: input.operationKey,
+          candidateOperationDigest: "0".repeat(64) as ReturnType<typeof sha256Digest>,
           manifest: createWorkspaceManifest(
             { tenantId: input.scope.tenantId, entries: [] },
             { maxFiles: 1, maxTotalBytes: 1 },

@@ -161,6 +161,10 @@ class StableBlobs implements WorkspaceStableBlobReadPort {
       receipt: {
         authorizationId: `auth-${this.authorizeCalls}`,
         tenantId: input.scope.tenantId,
+        threadId: input.scope.threadId,
+        workspaceId: input.scope.workspaceId,
+        revisionId: input.revisionId,
+        relativePath: input.relativePath,
         purpose: "workspace" as const,
         content: input.content,
         object: input.object,
@@ -335,7 +339,13 @@ function setup(values: ReturnType<typeof item>[]) {
 }
 
 function request(operationKey: string, target: WorkspaceManifest, previous?: WorkspaceManifest) {
-  return { operationKey, scope: SCOPE, target, ...(previous === undefined ? {} : { previous }) };
+  return {
+    operationKey,
+    scope: SCOPE,
+    target,
+    targetRevisionId: "revision-a",
+    ...(previous === undefined ? {} : { previous }),
+  };
 }
 
 describe("Workspace materializer 可靠边界", () => {

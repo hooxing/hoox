@@ -52,6 +52,7 @@
 | [ADR-0044](0044-agent-workbench-information-architecture.md) | Agent 工作台三段式信息架构 | 已接受 | 2026-07-28 |
 | [ADR-0045](0045-thread-latest-run-recovery-contract.md) | Thread 最新 Run 恢复读取契约 | 已接受 | 2026-07-28 |
 | [ADR-0046](0046-workspace-manifest-runtime-closure.md) | Workspace manifest Runtime 闭环 | 部分接受（Worker 发布延期） | 2026-07-29 |
+| [ADR-0047](0047-workspace-candidate-atomic-handoff.md) | Workspace candidate 原子交接与开发 Worker 启用 | 已接受 | 2026-07-29 |
 
 ## 何时必须记录
 

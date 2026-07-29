@@ -1,14 +1,18 @@
 import { randomUUID } from "node:crypto";
+import type { WorkspaceCandidateIdentity } from "@cube-runtime/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import {
+  assertBlobOperationId,
   type BlobCommitSnapshot,
   type BlobCommitStatePort,
   type BlobReferenceCommitPort,
-  assertBlobOperationId,
   transitionBlobCommit,
 } from "./blob-commit-protocol.js";
 import {
+  assertBlobRef,
+  assertTenantScope,
   type BlobPurpose,
+  BlobStoreError,
   type PromotionAuthorizationRef,
   type PromotionAuthorizationResolution,
   type PromotionExecutionClaim,
@@ -24,11 +28,9 @@ import {
   type StableBlobRetiredTombstonePort,
   type StagedBlobRef,
   type TenantBlobScope,
-  BlobStoreError,
-  assertBlobRef,
-  assertTenantScope,
 } from "./blob-store.js";
-import { PersistenceError, mapPersistenceError } from "./errors.js";
+import { mapPersistenceError, PersistenceError } from "./errors.js";
+import { assertWorkspaceCandidateIdentity } from "./pg-workspace-candidate.js";
 import { withTenantTransaction } from "./postgres.js";
 
 export interface PgBlobLifecycleOptions {
@@ -722,94 +724,198 @@ export class PgBlobLifecycleRepository
     assertReferenceId(input.referenceId);
     assertBlobRef(input.scope, input.stable);
     try {
+      return await withTenantTransaction(this.pool, input.scope, (client) =>
+        this.markReferenceStableOnClient(client, input),
+      );
+    } catch (error) {
+      throw mapBlobPersistenceError(error, "标记 stable 引用");
+    }
+  }
+
+  /** stable 标记与 uploaded candidate file 必须同事务提交，消除进程崩溃产生的无主 stable 引用。 */
+  async markWorkspaceCandidateReferenceStable(input: {
+    readonly operationId: string;
+    readonly scope: TenantBlobScope;
+    readonly referenceId: string;
+    readonly stable: StableBlobRef;
+    readonly candidate: WorkspaceCandidateIdentity;
+    readonly relativePath: string;
+  }): Promise<"marked" | "gc_in_progress"> {
+    assertTenantScope(input.scope);
+    assertBlobOperationId(input.operationId);
+    assertReferenceId(input.referenceId);
+    assertBlobRef(input.scope, input.stable);
+    assertWorkspaceCandidateIdentity(input.candidate);
+    if (input.scope.tenantId !== input.candidate.tenantId) {
+      throw new TypeError("Workspace candidate 与 Blob Tenant 不一致");
+    }
+    try {
       return await withTenantTransaction(this.pool, input.scope, async (client) => {
-        const referenceResult = await client.query(
-          `SELECT * FROM blob_references
-            WHERE tenant_id = $1 AND operation_id = $2 AND reference_id = $3
-            FOR UPDATE`,
-          [input.scope.tenantId, input.operationId, input.referenceId],
-        );
-        const reference = referenceResult.rows[0];
-        if (reference === undefined) throw new Error("staging 引用不存在");
-        if (reference.state === "stable") {
-          assertReferenceMatchesStable(reference, input.stable);
-          return "marked";
-        }
-        assertReferenceMatchesStaged(
-          reference,
-          stableToStagedView(input.stable, String(reference.staging_upload_id)),
-        );
-        const lifecycleResult = await client.query<LifecycleRow>(
-          `SELECT * FROM blob_lifecycles
-            WHERE tenant_id = $1 AND purpose = $2 AND sha256 = $3 AND size = $4
-            FOR UPDATE`,
-          [input.scope.tenantId, input.stable.purpose, input.stable.sha256, input.stable.size],
-        );
-        const lifecycle = lifecycleResult.rows[0];
-        if (lifecycle === undefined) throw new Error("stable lifecycle 不存在");
-        if (lifecycle.state === "pre_delete" || lifecycle.state === "deleting")
-          return "gc_in_progress";
-        if (lifecycle.current_incarnation_id !== input.stable.incarnationId) {
-          throw new Error("stable 不是 lifecycle 当前 incarnation");
-        }
-        const incarnation = await findIncarnation(
-          client,
-          input.scope.tenantId,
-          lifecycle.lifecycle_id,
-          input.stable.incarnationId,
-        );
-        if (
-          incarnation === undefined ||
-          incarnation.state === "retired" ||
-          incarnation.physical_object_key !== input.stable.physicalObjectKey
-        ) {
-          throw new Error("stable incarnation 已退休或身份不一致");
-        }
-        if (lifecycle.state === "deleted") {
-          const proof = await client.query<{ one: number }>(
-            `SELECT 1 AS one FROM promotion_authorizations
-              WHERE tenant_id = $1 AND operation_id = $2 AND incarnation_id = $3
-                AND physical_object_key = $4 AND state = 'succeeded'`,
-            [
-              input.scope.tenantId,
-              input.operationId,
-              input.stable.incarnationId,
-              input.stable.physicalObjectKey,
-            ],
-          );
-          if (proof.rows[0] === undefined) throw new Error("缺少已完成 promotion 证明");
-          await client.query(
-            `UPDATE blob_lifecycles
-                SET state = 'active', updated_at = clock_timestamp()
-              WHERE tenant_id = $1 AND lifecycle_id = $2`,
-            [input.scope.tenantId, lifecycle.lifecycle_id],
-          );
-          await client.query(
-            `UPDATE blob_incarnations
-                SET state = 'active'
-              WHERE tenant_id = $1 AND lifecycle_id = $2 AND incarnation_id = $3 AND state = 'allocated'`,
-            [input.scope.tenantId, lifecycle.lifecycle_id, input.stable.incarnationId],
-          );
-        }
-        await client.query(
-          `UPDATE blob_references
-              SET state = 'stable', lifecycle_id = $4, incarnation_id = $5,
-                  physical_object_key = $6, updated_at = clock_timestamp()
-            WHERE tenant_id = $1 AND operation_id = $2 AND reference_id = $3`,
+        const marked = await this.markReferenceStableOnClient(client, input);
+        if (marked !== "marked") return marked;
+        const attached = await client.query(
+          `INSERT INTO workspace_revision_candidate_files(
+             tenant_id,workspace_id,attempt_id,run_id,thread_id,root_run_id,parent_revision_id,
+             revision_id,operation_key,operation_digest,manifest_digest,relative_path,source,
+             content_sha256,size,blob_lifecycle_id,blob_incarnation_id,physical_object_key,
+             blob_reference_id
+           )
+           SELECT candidate.tenant_id,candidate.workspace_id,candidate.attempt_id,candidate.run_id,
+                  candidate.thread_id,candidate.root_run_id,candidate.parent_revision_id,
+                  candidate.revision_id,candidate.operation_key,candidate.operation_digest,NULL,
+                  $11,'uploaded',reference.sha256,reference.size,reference.lifecycle_id,
+                  reference.incarnation_id,reference.physical_object_key,reference.reference_id
+             FROM workspace_revision_candidates candidate
+             JOIN blob_references reference
+               ON reference.tenant_id=candidate.tenant_id AND reference.reference_id=$10
+            WHERE candidate.tenant_id=$1 AND candidate.workspace_id=$2 AND candidate.attempt_id=$3
+              AND candidate.run_id=$4 AND candidate.thread_id=$5 AND candidate.root_run_id=$6
+              AND candidate.parent_revision_key=COALESCE($7,'') AND candidate.revision_id=$8
+              AND candidate.operation_key=$9 AND candidate.operation_digest=$12
+              AND candidate.status='building' AND reference.state='stable'
+              AND reference.purpose='workspace' AND reference.sha256=$13 AND reference.size=$14
+              AND reference.incarnation_id=$15::uuid AND reference.physical_object_key=$16
+           ON CONFLICT (tenant_id,workspace_id,attempt_id,operation_key,relative_path)
+           DO NOTHING`,
           [
-            input.scope.tenantId,
-            input.operationId,
+            input.candidate.tenantId,
+            input.candidate.workspaceId,
+            input.candidate.attemptId,
+            input.candidate.runId,
+            input.candidate.threadId,
+            input.candidate.rootRunId,
+            input.candidate.parentRevisionId ?? null,
+            input.candidate.revisionId,
+            input.candidate.operationKey,
             input.referenceId,
-            lifecycle.lifecycle_id,
+            input.relativePath,
+            input.candidate.operationDigest,
+            input.stable.sha256,
+            input.stable.size,
             input.stable.incarnationId,
             input.stable.physicalObjectKey,
           ],
         );
+        if (attached.rowCount !== 1) {
+          const existing = await client.query<{ readonly one: number }>(
+            `SELECT 1 AS one FROM workspace_revision_candidate_files
+              WHERE tenant_id=$1 AND workspace_id=$2 AND attempt_id=$3 AND operation_key=$4
+                AND relative_path=$5 AND source='uploaded' AND blob_reference_id=$6
+                AND content_sha256=$7 AND size=$8 AND blob_incarnation_id=$9::uuid
+                AND physical_object_key=$10`,
+            [
+              input.candidate.tenantId,
+              input.candidate.workspaceId,
+              input.candidate.attemptId,
+              input.candidate.operationKey,
+              input.relativePath,
+              input.referenceId,
+              input.stable.sha256,
+              input.stable.size,
+              input.stable.incarnationId,
+              input.stable.physicalObjectKey,
+            ],
+          );
+          if (existing.rows[0]?.one !== 1) throw new Error("Workspace uploaded candidate 绑定冲突");
+        }
         return "marked";
       });
     } catch (error) {
-      throw mapBlobPersistenceError(error, "标记 stable 引用");
+      throw mapBlobPersistenceError(error, "标记 Workspace candidate stable 引用");
     }
+  }
+
+  private async markReferenceStableOnClient(
+    client: PoolClient,
+    input: {
+      readonly operationId: string;
+      readonly scope: TenantBlobScope;
+      readonly referenceId: string;
+      readonly stable: StableBlobRef;
+    },
+  ): Promise<"marked" | "gc_in_progress"> {
+    const referenceResult = await client.query(
+      `SELECT * FROM blob_references
+            WHERE tenant_id = $1 AND operation_id = $2 AND reference_id = $3
+            FOR UPDATE`,
+      [input.scope.tenantId, input.operationId, input.referenceId],
+    );
+    const reference = referenceResult.rows[0];
+    if (reference === undefined) throw new Error("staging 引用不存在");
+    if (reference.state === "stable") {
+      assertReferenceMatchesStable(reference, input.stable);
+      return "marked";
+    }
+    assertReferenceMatchesStaged(
+      reference,
+      stableToStagedView(input.stable, String(reference.staging_upload_id)),
+    );
+    const lifecycleResult = await client.query<LifecycleRow>(
+      `SELECT * FROM blob_lifecycles
+            WHERE tenant_id = $1 AND purpose = $2 AND sha256 = $3 AND size = $4
+            FOR UPDATE`,
+      [input.scope.tenantId, input.stable.purpose, input.stable.sha256, input.stable.size],
+    );
+    const lifecycle = lifecycleResult.rows[0];
+    if (lifecycle === undefined) throw new Error("stable lifecycle 不存在");
+    if (lifecycle.state === "pre_delete" || lifecycle.state === "deleting") return "gc_in_progress";
+    if (lifecycle.current_incarnation_id !== input.stable.incarnationId) {
+      throw new Error("stable 不是 lifecycle 当前 incarnation");
+    }
+    const incarnation = await findIncarnation(
+      client,
+      input.scope.tenantId,
+      lifecycle.lifecycle_id,
+      input.stable.incarnationId,
+    );
+    if (
+      incarnation === undefined ||
+      incarnation.state === "retired" ||
+      incarnation.physical_object_key !== input.stable.physicalObjectKey
+    ) {
+      throw new Error("stable incarnation 已退休或身份不一致");
+    }
+    if (lifecycle.state === "deleted") {
+      const proof = await client.query<{ one: number }>(
+        `SELECT 1 AS one FROM promotion_authorizations
+              WHERE tenant_id = $1 AND operation_id = $2 AND incarnation_id = $3
+                AND physical_object_key = $4 AND state = 'succeeded'`,
+        [
+          input.scope.tenantId,
+          input.operationId,
+          input.stable.incarnationId,
+          input.stable.physicalObjectKey,
+        ],
+      );
+      if (proof.rows[0] === undefined) throw new Error("缺少已完成 promotion 证明");
+      await client.query(
+        `UPDATE blob_lifecycles
+                SET state = 'active', updated_at = clock_timestamp()
+              WHERE tenant_id = $1 AND lifecycle_id = $2`,
+        [input.scope.tenantId, lifecycle.lifecycle_id],
+      );
+      await client.query(
+        `UPDATE blob_incarnations
+                SET state = 'active'
+              WHERE tenant_id = $1 AND lifecycle_id = $2 AND incarnation_id = $3 AND state = 'allocated'`,
+        [input.scope.tenantId, lifecycle.lifecycle_id, input.stable.incarnationId],
+      );
+    }
+    await client.query(
+      `UPDATE blob_references
+              SET state = 'stable', lifecycle_id = $4, incarnation_id = $5,
+                  physical_object_key = $6, updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND operation_id = $2 AND reference_id = $3`,
+      [
+        input.scope.tenantId,
+        input.operationId,
+        input.referenceId,
+        lifecycle.lifecycle_id,
+        input.stable.incarnationId,
+        input.stable.physicalObjectKey,
+      ],
+    );
+    return "marked";
   }
 
   async resolveStableMark(

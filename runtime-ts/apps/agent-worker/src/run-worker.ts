@@ -382,6 +382,7 @@ export class RunWorker {
       try {
         await this.dependencies.revisions.materialize({
           scope,
+          attemptId: context.attemptId,
           ...(context.currentRevisionId === undefined
             ? {}
             : { expectedCurrentRevisionId: context.currentRevisionId }),
@@ -542,6 +543,7 @@ export class RunWorker {
         try {
           candidate = await this.dependencies.revisions.verify({
             scope,
+            attemptId: context.attemptId,
             ...(context.currentRevisionId === undefined
               ? {}
               : { expectedCurrentRevisionId: context.currentRevisionId }),

@@ -62,6 +62,10 @@ const workspaceManifestTables = new Set([
   "workspace_revision_files",
   "workspace_operation_journal",
 ]);
+const workspaceCandidateTables = new Set([
+  "workspace_revision_candidates",
+  "workspace_revision_candidate_files",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -74,6 +78,8 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["workspace_revision_manifests", new Set(["SELECT", "INSERT"])],
   ["workspace_revision_files", new Set(["SELECT", "INSERT"])],
   ["workspace_operation_journal", new Set(["SELECT", "INSERT"])],
+  ["workspace_revision_candidates", new Set(["SELECT", "INSERT"])],
+  ["workspace_revision_candidate_files", new Set(["SELECT", "INSERT"])],
   ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
   ["blob_lifecycles", new Set(["SELECT", "INSERT"])],
   ["blob_incarnations", new Set(["SELECT", "INSERT"])],
@@ -149,6 +155,11 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
     "blob_references",
     new Set(["state", "lifecycle_id", "incarnation_id", "physical_object_key", "updated_at"]),
   ],
+  [
+    "workspace_revision_candidates",
+    new Set(["status", "manifest_digest", "release_reason", "expires_at", "updated_at"]),
+  ],
+  ["workspace_revision_candidate_files", new Set(["manifest_digest"])],
   ["run_execution_inputs", new Set(["answer_text", "updated_at"])],
   [
     "execution_attempts",
@@ -261,6 +272,16 @@ async function hasWorkspaceManifestState(client: PoolClient, schema: string): Pr
   return result.rows[0]?.present === true;
 }
 
+async function hasWorkspaceCandidateState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.workspace_revision_candidates', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.workspace_revision_candidate_files', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.run_execution_inputs', current_schema())) IS NOT NULL AS present",
@@ -367,6 +388,9 @@ async function activeTablePolicy(
   if (!(await hasWorkspaceManifestState(client, schema))) {
     for (const table of workspaceManifestTables) policy.delete(table);
   }
+  if (!(await hasWorkspaceCandidateState(client, schema))) {
+    for (const table of workspaceCandidateTables) policy.delete(table);
+  }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
   }
@@ -409,6 +433,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasWorkspaceManifestState(client, schema))) {
     for (const table of workspaceManifestTables) policy.delete(table);
+  }
+  if (!(await hasWorkspaceCandidateState(client, schema))) {
+    for (const table of workspaceCandidateTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -1020,6 +1047,20 @@ export async function bootstrapRuntimeAccessOnClient(
     await client.query(
       `GRANT UPDATE(status, result, failure_phase, failure_code, unknown_fact, updated_at)
          ON TABLE ${schema}.workspace_operation_journal TO ${role}`,
+    );
+  }
+  if (await hasWorkspaceCandidateState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.workspace_revision_candidates,
+         ${schema}.workspace_revision_candidate_files
+       TO ${role}`,
+    );
+    await client.query(
+      `GRANT UPDATE(status, manifest_digest, release_reason, expires_at, updated_at)
+         ON TABLE ${schema}.workspace_revision_candidates TO ${role};
+       GRANT UPDATE(manifest_digest)
+         ON TABLE ${schema}.workspace_revision_candidate_files TO ${role}`,
     );
   }
   await client.query(

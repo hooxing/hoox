@@ -350,6 +350,7 @@ export class PgWorkspaceStableBlobAccess implements WorkspaceStableBlobReadPort 
              JOIN blob_lifecycles lifecycle
                ON lifecycle.tenant_id=incarnation.tenant_id AND lifecycle.lifecycle_id=incarnation.lifecycle_id
             WHERE file.tenant_id=$1 AND file.workspace_id=$2 AND revision.thread_id=$3
+              AND file.revision_id=$8 AND file.relative_path=$9
               AND file.content_sha256=$4 AND file.size=$5
               AND file.blob_incarnation_id=$6::uuid AND file.physical_object_key=$7
               AND incarnation.state='active' AND lifecycle.state='active'
@@ -362,6 +363,8 @@ export class PgWorkspaceStableBlobAccess implements WorkspaceStableBlobReadPort 
             input.content.size,
             input.object.incarnationId,
             input.object.physicalObjectKey,
+            input.revisionId,
+            input.relativePath,
           ],
         );
         return row.rows[0];
@@ -373,10 +376,14 @@ export class PgWorkspaceStableBlobAccess implements WorkspaceStableBlobReadPort 
       receipt: Object.freeze({
         authorizationId: `workspace-${createHash("sha256")
           .update(
-            `${input.scope.workspaceId}\0${authorized.revision_id}\0${authorized.relative_path}`,
+            `${input.scope.threadId}\0${input.scope.workspaceId}\0${authorized.revision_id}\0${authorized.relative_path}`,
           )
           .digest("hex")}`,
         tenantId: input.scope.tenantId,
+        threadId: input.scope.threadId,
+        workspaceId: input.scope.workspaceId,
+        revisionId: authorized.revision_id,
+        relativePath: authorized.relative_path,
         purpose: "workspace" as const,
         content: Object.freeze({ ...input.content }),
         object: Object.freeze({ ...input.object }),
@@ -416,6 +423,10 @@ export class PgWorkspaceStableBlobAccess implements WorkspaceStableBlobReadPort 
       const row = await client.query<{ readonly one: number }>(
         `SELECT 1 AS one
            FROM workspace_revision_files file
+           JOIN workspace_revisions revision
+             ON revision.tenant_id=file.tenant_id
+            AND revision.workspace_id=file.workspace_id
+            AND revision.id=file.revision_id
            JOIN blob_incarnations incarnation
              ON incarnation.tenant_id=file.tenant_id
             AND incarnation.lifecycle_id=file.blob_lifecycle_id
@@ -423,12 +434,18 @@ export class PgWorkspaceStableBlobAccess implements WorkspaceStableBlobReadPort 
             AND incarnation.physical_object_key=file.physical_object_key
            JOIN blob_lifecycles lifecycle
              ON lifecycle.tenant_id=incarnation.tenant_id AND lifecycle.lifecycle_id=incarnation.lifecycle_id
-          WHERE file.tenant_id=$1 AND file.content_sha256=$2 AND file.size=$3
-            AND file.blob_incarnation_id=$4::uuid AND file.physical_object_key=$5
+          WHERE file.tenant_id=$1 AND file.workspace_id=$2 AND revision.thread_id=$3
+            AND file.revision_id=$4 AND file.relative_path=$5
+            AND file.content_sha256=$6 AND file.size=$7
+            AND file.blob_incarnation_id=$8::uuid AND file.physical_object_key=$9
             AND incarnation.state='active' AND lifecycle.state='active'
           LIMIT 1`,
         [
           receipt.tenantId,
+          receipt.workspaceId,
+          receipt.threadId,
+          receipt.revisionId,
+          receipt.relativePath,
           receipt.content.sha256,
           receipt.content.size,
           receipt.object.incarnationId,

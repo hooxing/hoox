@@ -92,6 +92,14 @@ Gate：Skill 与子 Agent 继承 Tenant Context；租户脚本只在 Sandbox 运
 
 Gate：越权矩阵全部通过；DB/S3/Worker/Sandbox 故障有确定结果；无引用清理不误删；镜像无 Python/旧数据依赖；固定依赖、SBOM、License、回滚和容量门槛通过。
 
+当前切片状态（不代表 M7 已完成）：
+
+- [x] Worker 与 Scheduler 使用受审 production 装配，不再把 production 配置降级为 development；Worker 保持 Workspace→Revision→Artifact 持久化闭环。
+- [x] `DATABASE_RUNTIME_ROLE` 在连接和 readiness 时验证 PostgreSQL `current_user`；production Worker 拒绝 `DEV_AUTH_*`、明文秘密端点及非 HTTPS 数据面 Proxy。
+- [x] `deploy/production.env.example`、静态契约和 Linux 非 root Worker 容器 Gate 已实现；容器 Gate 只验证 build context、最小镜像与外部依赖不可用时的失败关闭，不是真实基础设施 ready 证明。
+- [ ] 在真实 Linux 部署中，以最小权限 Runtime 角色和真实 PostgreSQL/S3/CubeSandbox/模型完成 ready、关闭、故障与回滚验收。
+- [ ] 完成生产 API 身份链路、全量越权矩阵、配额、对象生命周期、观测、SBOM/License、容量与发布回滚 Gate。
+
 ### M8：发布后 Memory
 
 只有首版稳定且 Memory Provider ADR 单独通过后实施。Memory 服务不可用时必须降级为无记忆运行，且不能改变现有 Thread/Workspace/Resource/Artifact 的所有权。

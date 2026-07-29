@@ -4,7 +4,9 @@
 
 ## 当前状态
 
-仓库已实现并测试 Tenant、Thread、Run、Workspace、Resource、Artifact 等领域边界，以及 PostgreSQL 持久化与 RLS、HTTP API 协议、Run/Worker 状态机、CubeSandbox 适配、MinIO 对象存储和进程生命周期等能力。实现仍处于开发阶段：API 与 Agent Worker 已提供只面向本地 development 的真实 PostgreSQL、真实模型、真实 CubeSandbox 常驻装配，但固定开发身份不属于生产认证，因此不能把开发服务当作产品服务。
+仓库已实现并测试 Tenant、Thread、Run、Workspace、Resource、Artifact 等领域边界，以及 PostgreSQL 持久化与 RLS、HTTP API 协议、Run/Worker 状态机、CubeSandbox 适配、MinIO 对象存储和进程生命周期等能力。开发 API 与 Agent Worker 可使用本地 development 的真实 PostgreSQL、模型和 CubeSandbox；固定开发身份不属于生产认证，因此不能把开发服务当作产品服务。
+
+M7 已提供受审的 Linux production Worker 装配、Runtime 数据库角色验证、独立部署配置样例和容器失败关闭 Gate。它们只证明镜像、配置边界和依赖缺失时的行为；真实 PostgreSQL/S3/CubeSandbox/模型 readiness、生产 API 身份集成，以及配额、对象生命周期、观测、SBOM/License 和容量验收尚未全部通过。因此仓库当前**不能宣称已可整体生产发布**。
 
 当前最有价值的运行方式是执行工程 Gate、真实 CubeSandbox 冒烟和 PostgreSQL M4 黑盒测试，并通过 CubeSandbox、MinIO 自带的控制台观察外部资源。
 
@@ -43,8 +45,9 @@ Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 必须等于
 
 模型 Provider 必须兼容 OpenAI `/models`。开发模式强制从
 `MODEL_CONTEXT_WINDOW` 和 `MODEL_MAX_OUTPUT_TOKENS` 读取 Pi 的预算，并只要求 `/models` 返回配置的
-`MODEL_ID`；不要把预算值猜测为 Provider 元数据。生产模式保持更严格的预算元数据匹配策略，且本仓库
-不提供生产 Worker 入口。
+`MODEL_ID`；不要把预算值猜测为 Provider 元数据。生产模式保持更严格的预算元数据匹配策略。生产 Worker
+入口为 `runtime-ts/apps/agent-worker` 的 `pnpm start:production`，仅支持 Linux，并且只使用模块私有、受审的真实
+PostgreSQL/S3/CubeSandbox/Pi/Workspace/Artifact 依赖图；它绝不会复用 development 身份或调用方注入的 Fake。
 
 development Worker 已启用 Workspace manifest 物化与发布。新文件的 stable Blob 引用会先绑定到同一
 Attempt 的持久化 candidate；最终 RuntimeMutation 在一个 SERIALIZABLE 事务内核对完整执行身份、manifest、
@@ -52,13 +55,28 @@ active incarnation 与 Workspace head，再写入 revision、推进 head 并释�
 同路径精确复用 parent revision，不创建新 Blob；发布失败、终态和租约过期恢复会释放未提交 candidate，
 COMMIT 响应未知则只通过原 mutation 幂等键读取结果，不猜测成功或失败。新 Sandbox 仍必须在物化前证明
 `/workspace` 为空，`0014` 仍会失败关闭没有逐文件 manifest 的旧 current head，旧数据必须先经受控回填。
-该能力只接入固定开发身份的 development Worker，不改变生产认证边界。development assembler 现已把
+development assembler 现已把
 `publish_artifact` 的 Workspace intent、最终 Revision、ResourceVersion、Artifact settlement 与真实完成门接成
 同一原子闭环；只有显式调用并通过完成门的文件才成为可下载 Artifact，不会自动发布整个 Workspace。
-diagnostic/trace 的内部 Resource 不进入租户成员可搜索的 Resource Library。导出的生产 `startWorkerProcess` 仍走
-`production-worker-runtime` 的 fail-closed 装配，不会复用 development assembler；生产入口接通属于 M7，本切片
-没有实现。完整协议见 [`ADR-0047`](docs/decisions/0047-workspace-candidate-atomic-handoff.md) 与
+diagnostic/trace 的内部 Resource 不进入租户成员可搜索的 Resource Library。生产 `startWorkerProcess` 也使用同一
+持久化 Workspace→Revision→Artifact 闭环，但 production 只接受部署分片 Tenant、Runtime 数据库角色、TLS 依赖
+端点，并拒绝任何遗留的 `DEV_AUTH_*` 变量。完整协议见 [`ADR-0047`](docs/decisions/0047-workspace-candidate-atomic-handoff.md) 与
 [`ADR-0048`](docs/decisions/0048-workspace-artifact-runtime-closure.md)。
+
+## 受限生产 Worker Gate
+
+`deploy/production.env.example` 是 production 的独立、可提交配置契约；真实值必须由部署平台的秘密管理系统注入，
+绝不能复制 development 的 `DEV_AUTH_*`、MinIO root、bootstrap 或 migration 变量。可执行的静态与容器 Gate 为：
+
+```powershell
+corepack pnpm config:check:production
+corepack pnpm test:production-worker:container
+```
+
+容器 Gate 会确认 build context 不包含 `.env` canary、镜像以非 root UID 运行、没有 Python 或旧 CubeSandbox 数据目录，
+并在 PostgreSQL/S3/CubeSandbox/模型均不可用时验证 Worker 不会误报 ready 且不会泄露秘密；它也验证即使
+`DEV_AUTH_ENABLED=false` 被注入，production 仍会在建立外部连接前失败关闭。该 Gate **不等同于**真实部署 readiness：
+上线前仍需在 Linux、最小权限 Runtime 角色和真实外部依赖下完成 `/ready` 验收及 M7 的其余 Gate。
 
 ## 开发基线
 

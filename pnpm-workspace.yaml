@@ -2,3 +2,9 @@ packages:
   - runtime-ts/apps/*
   - runtime-ts/packages/*
   - runtime-ts/vendor/*
+
+# production deploy 必须只携带目标应用的锁定运行闭包；pnpm 10 的现代 deploy 以注入式
+# workspace package 固化闭包，避免 legacy deploy 把无关 workspace store 一并复制进镜像。
+injectWorkspacePackages: true
+syncInjectedDepsAfterScripts:
+  - build

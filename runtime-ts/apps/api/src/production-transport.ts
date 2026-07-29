@@ -1,4 +1,5 @@
-import { lstat, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
 import { isIP } from "node:net";
 import { isAbsolute, posix, win32 } from "node:path";
 import { createSecureContext } from "node:tls";
@@ -181,21 +182,32 @@ export function productionTrustProxy(
 }
 
 async function readPem(path: string, privateKey: boolean): Promise<Buffer> {
+  let handle: FileHandle | undefined;
   try {
-    const metadata = await lstat(path);
+    if (typeof constants.O_NOFOLLOW !== "number") {
+      throw new Error("TLS_NOFOLLOW_UNAVAILABLE");
+    }
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const metadata = await handle.stat();
     if (
       !metadata.isFile() ||
-      metadata.isSymbolicLink() ||
       metadata.size < 1 ||
       metadata.size > maximumPemBytes ||
-      (privateKey && (metadata.mode & 0o007) !== 0)
+      (privateKey && (metadata.mode & 0o077) !== 0)
     ) {
       throw new Error("TLS_CREDENTIAL_FILE_INVALID");
     }
-    return await readFile(path);
+    const content = await handle.readFile();
+    if (content.length !== metadata.size) throw new Error("TLS_CREDENTIAL_FILE_CHANGED");
+    return content;
   } catch {
     // 路径、权限和 PEM 内容都可能是敏感部署细节，装配边界只保留稳定失败语义。
     throw new Error("PRODUCTION_TLS_CREDENTIALS_UNAVAILABLE");
+  } finally {
+    if (handle !== undefined) {
+      // close 异常不覆盖前面的稳定失败分类；句柄仍由 FileHandle 最终化兜底。
+      await handle.close().catch(() => undefined);
+    }
   }
 }
 

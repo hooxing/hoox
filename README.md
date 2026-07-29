@@ -6,7 +6,7 @@
 
 仓库已实现并测试 Tenant、Thread、Run、Workspace、Resource、Artifact 等领域边界，以及 PostgreSQL 持久化与 RLS、HTTP API 协议、Run/Worker 状态机、CubeSandbox 适配、MinIO 对象存储和进程生命周期等能力。开发 API 与 Agent Worker 可使用本地 development 的真实 PostgreSQL、模型和 CubeSandbox；固定开发身份不属于生产认证，因此不能把开发服务当作产品服务。
 
-M7 已提供受审的 Linux production Worker 装配、Runtime 数据库角色验证、独立部署配置样例和容器失败关闭 Gate。它们只证明镜像、配置边界和依赖缺失时的行为；真实 PostgreSQL/S3/CubeSandbox/模型 readiness、生产 API 身份集成，以及配额、对象生命周期、观测、SBOM/License 和容量验收尚未全部通过。因此仓库当前**不能宣称已可整体生产发布**。
+M7 当前切片已提供生产 API JWT 身份、API/Scheduler/Worker 固定真实装配、严格 PostgreSQL TLS/最小权限角色探针、独立部署配置，以及三个进程的非 root runtime-only 容器 Gate。基础镜像固定到已记录 digest，锁文件闭包可离线复现 CycloneDX SBOM 和 License allow/deny 结果，并有静态发布/回滚清单。这些证据只覆盖代码、制品和外部依赖缺失时的失败关闭；真实 PostgreSQL/S3/CubeSandbox/模型/代理 readiness、外部 Web/OIDC 产品身份集成、完整越权矩阵、配额、对象生命周期、观测、容量与集群回滚演练仍未全部通过。因此仓库当前**不能宣称已可整体生产发布或浏览器生产闭环**。
 
 当前最有价值的运行方式是执行工程 Gate、真实 CubeSandbox 冒烟和 PostgreSQL M4 黑盒测试，并通过 CubeSandbox、MinIO 自带的控制台观察外部资源。
 
@@ -46,7 +46,7 @@ Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 必须等于
 模型 Provider 必须兼容 OpenAI `/models`。开发模式强制从
 `MODEL_CONTEXT_WINDOW` 和 `MODEL_MAX_OUTPUT_TOKENS` 读取 Pi 的预算，并只要求 `/models` 返回配置的
 `MODEL_ID`；不要把预算值猜测为 Provider 元数据。生产模式保持更严格的预算元数据匹配策略。生产 Worker
-入口为 `runtime-ts/apps/agent-worker` 的 `pnpm start:production`，仅支持 Linux，并且只使用模块私有、受审的真实
+入口为 `runtime-ts/apps/agent-worker` 的 `pnpm start:production`，仅支持 Linux，并且只使用模块内固定的真实
 PostgreSQL/S3/CubeSandbox/Pi/Workspace/Artifact 依赖图；它绝不会复用 development 身份或调用方注入的 Fake。
 
 development Worker 已启用 Workspace manifest 物化与发布。新文件的 stable Blob 引用会先绑定到同一
@@ -63,20 +63,42 @@ diagnostic/trace 的内部 Resource 不进入租户成员可搜索的 Resource L
 端点，并拒绝任何遗留的 `DEV_AUTH_*` 变量。完整协议见 [`ADR-0047`](docs/decisions/0047-workspace-candidate-atomic-handoff.md) 与
 [`ADR-0048`](docs/decisions/0048-workspace-artifact-runtime-closure.md)。
 
-## 受限生产 Worker Gate
+## 生产 API、Scheduler、Worker 与供应链 Gate
 
 `deploy/production.env.example` 是 production 的独立、可提交配置契约；真实值必须由部署平台的秘密管理系统注入，
 绝不能复制 development 的 `DEV_AUTH_*`、MinIO root、bootstrap 或 migration 变量。可执行的静态与容器 Gate 为：
 
 ```powershell
 corepack pnpm config:check:production
+corepack pnpm supply-chain:check
+corepack pnpm license:check
+corepack pnpm release:check
+corepack pnpm test:production-api:container
+corepack pnpm test:production-scheduler:container
 corepack pnpm test:production-worker:container
 ```
 
-容器 Gate 会确认 build context 不包含 `.env` canary、镜像以非 root UID 运行、没有 Python 或旧 CubeSandbox 数据目录，
-并在 PostgreSQL/S3/CubeSandbox/模型均不可用时验证 Worker 不会误报 ready 且不会泄露秘密；它也验证即使
-`DEV_AUTH_ENABLED=false` 被注入，production 仍会在建立外部连接前失败关闭。该 Gate **不等同于**真实部署 readiness：
-上线前仍需在 Linux、最小权限 Runtime 角色和真实外部依赖下完成 `/ready` 验收及 M7 的其余 Gate。
+三个镜像的 build 与 runtime 层固定使用同一 Node manifest digest，`packageManager` 同时固定 pnpm 版本与 registry
+integrity。builder 只在 `pnpm fetch --frozen-lockfile` 阶段联网；其后的 offline 安装、编译、deploy 和裁剪均以
+`RUN --network=none` 执行。最终镜像只含 production 闭包，不含源码、测试、development entry、Python、npm/npx、
+Corepack/pnpm 或 Biome/TypeScript/tsx/Vitest。这里证明的是锁定 fetch 后的断网解析与编译，不是完整离线 Docker build。
+容器 Gate 会确认 build context 不含 `.env` canary、进程使用非 root UID 与真实 production entry，并在外部依赖不可用、
+development 变量遗留、明文端点或 TLS/角色配置错误时验证失败关闭和秘密脱敏。API Gate 还在最终镜像中以真实 AWS SDK
+执行与 Worker 相同 stable prefix 的 HEAD、GET 与预签名下载路径，防止 Artifact 读写侧漂移。Scheduler 在启动 cleanup
+loop 前探测 PG 角色与 CubeSandbox，readiness 同时包含两者；它不使用对象存储，因此其环境投影拒绝接收 S3 密钥。
+
+部署必须按服务分片秘密：API 只取得 PG/S3/JWT/TLS，Scheduler 只取得 PG/Cube，Worker 只取得 PG/S3/Cube/模型；不要
+把 `production.env.example` 作为共享秘密文件整包注入任一容器。样例是三服务配置字段的合集，不是单容器授权清单。
+`API_PUBLIC_ORIGIN` 是浏览器/API 对外 origin，`S3_PUBLIC_ENDPOINT` 必须使用不同的专用对象 origin，禁止经应用同源路径
+代理对象正文。对象存储/CDN 的 CORS 只能允许受信 Web origin；当前代码与容器 Gate 没有证明外部 CDN 已配置
+`nosniff` 或 CSP，部署验收必须单独核对，不能把文档要求当作已验证响应头。
+
+`supply-chain:check` 从 pnpm production installed closure 离线生成无时间戳、确定排序的 CycloneDX 1.6 并与已提交文件逐字
+比较；`license:check` 对 registry 与 vendor 闭包执行默认拒绝策略，vendor `LICENSE`/`SOURCE.md` 随 API、Scheduler、Worker 镜像交付。
+基础镜像 digest 的当前依据是本地 Docker `RepoDigests`；网络不可达时不宣称已经远端重新验证。发布时必须填写
+[`deploy/production-release-manifest.example.json`](deploy/production-release-manifest.example.json) 并执行
+[`deploy/production-release-checklist.md`](deploy/production-release-checklist.md)。以上 Gate **不等同于**真实部署 readiness：
+上线前仍需在 Linux、最小权限 Runtime 角色和真实外部依赖下完成验收及 M7 的其余 Gate。
 
 ## 开发基线
 

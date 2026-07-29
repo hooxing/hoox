@@ -33,6 +33,7 @@ vi.mock("@cube-runtime/persistence", () => ({
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
   createS3BlobStore: mocks.createS3BlobStore,
   probeS3BlobStore: mocks.probeS3BlobStore,
+  RUNTIME_BLOB_OBJECT_PREFIX: "agent-worker",
 }));
 
 vi.mock("./app.js", () => ({ createApiApp: mocks.createApiApp }));
@@ -42,7 +43,7 @@ import { startApiProcess } from "./process-entry.js";
 function productionEnvironment(): Record<string, string> {
   return {
     RUNTIME_ENV: "production",
-    DATABASE_URL: "postgresql://runtime:credential@database/runtime",
+    DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_SCHEMA: "runtime",
     DATABASE_RUNTIME_ROLE: "runtime",
     THREAD_CURSOR_ACTIVE_KID: "current",
@@ -51,9 +52,11 @@ function productionEnvironment(): Record<string, string> {
     API_JWT_AUDIENCE: "cube-runtime-api",
     API_JWT_SIGNING_KEYS: "current-key:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     API_JWT_CLOCK_SKEW_SECONDS: "60",
+    API_JWT_MAX_LIFETIME_SECONDS: "3600",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
     API_LISTEN_HOST: "127.0.0.1",
     API_LISTEN_PORT: "3001",
+    API_PUBLIC_ORIGIN: "https://app.example.invalid",
     API_TLS_MODE: "proxy",
     API_TRUSTED_PROXY_CIDRS: "127.0.0.1",
     S3_ENDPOINT: "https://object-storage.example.invalid:9000",
@@ -75,7 +78,8 @@ describe("生产 API 默认装配", () => {
     const running = await startApiProcess({ environment: productionEnvironment() });
     try {
       expect(mocks.createApiPersistenceRuntime).toHaveBeenCalledWith({
-        connectionString: "postgresql://runtime:credential@database/runtime",
+        connectionString: "postgresql://runtime:credential@database:5432/runtime",
+        ssl: { rejectUnauthorized: true },
         schema: "runtime",
         expectedRuntimeRole: "runtime",
         applicationName: "cube-runtime-api-production",
@@ -85,6 +89,7 @@ describe("生产 API 默认装配", () => {
           maxBlobSizeBytes: 16 * 1_024 * 1_024,
           endpoint: "https://object-storage.example.invalid:9000",
           publicEndpoint: "https://objects.example.invalid",
+          prefix: "agent-worker",
         }),
         mocks.persistence.blobLifecycle,
       );

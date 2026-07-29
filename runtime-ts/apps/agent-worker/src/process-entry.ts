@@ -19,14 +19,15 @@ import {
   PgWorkspaceStableBlobAccess,
   probePostgres,
   probeS3BlobStore,
+  RUNTIME_BLOB_OBJECT_PREFIX,
 } from "@cube-runtime/persistence";
 import {
   booleanEnvironmentField,
-  createAuditedProductionAssembly,
   EnvironmentConfigurationError,
   integerEnvironmentField,
   type ProcessSignalSource,
   parseStrictEnvironment,
+  parseProductionPostgresTransport,
   type RunningServiceProcess,
   type RuntimeEnvironment,
   readRequiredEnvironmentValue,
@@ -110,6 +111,7 @@ export const workerProcessEnvironmentKeys = Object.freeze(Object.keys(workerEnvi
 export interface WorkerProcessConfiguration {
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
+  readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly databaseSchema: string;
   /** 仅用于启动时证明连接 URL 未误用 Migrator/Owner；服务永不 SET ROLE。 */
   readonly databaseRuntimeRole: string;
@@ -163,6 +165,11 @@ export function parseWorkerProcessEnvironment(
     assertProductionHasNoDevelopmentIdentity(source);
   }
   const proxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
+  const configuredDatabaseUrl = readRequiredEnvironmentValue(parsed, "DATABASE_URL");
+  const productionDatabase =
+    parsed.runtimeEnvironment === "production"
+      ? parseProductionPostgresTransport(configuredDatabaseUrl)
+      : undefined;
   if (proxyScheme !== undefined && proxyScheme !== "http" && proxyScheme !== "https") {
     throw new TypeError("CUBESANDBOX_PROXY_SCHEME 只能是 http 或 https");
   }
@@ -198,9 +205,6 @@ export function parseWorkerProcessEnvironment(
       modelBaseUrl: readRequiredEnvironmentValue(parsed, "MODEL_BASE_URL"),
       objectStorageEndpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
       sandboxApiUrl,
-      ...(parsed.values.CUBESANDBOX_API_KEY === undefined
-        ? {}
-        : { sandboxApiKey: parsed.values.CUBESANDBOX_API_KEY }),
     });
   }
   const proxyRouting = resolveCubeProxyRouting({
@@ -218,7 +222,8 @@ export function parseWorkerProcessEnvironment(
   }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
-    databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
+    databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
+    ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
     databaseRuntimeRole: configuredRuntimeRole,
     objectStorage: Object.freeze({
@@ -335,7 +340,11 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
  */
 const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfiguration> = {
   async assemble(configuration) {
-    if (configuration.runtimeEnvironment !== "production" || configuration.development !== undefined) {
+    if (
+      configuration.runtimeEnvironment !== "production" ||
+      configuration.development !== undefined ||
+      configuration.databaseSsl === undefined
+    ) {
       throw new Error("PRODUCTION_WORKER_ASSEMBLY_FORBIDDEN");
     }
     if (process.platform !== "linux") throw new Error("PRODUCTION_WORKER_LINUX_REQUIRED");
@@ -343,192 +352,189 @@ const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfigurati
   },
 };
 
-// 不导出 capability；外部调用方无法将 Fake 注入 startWorkerProcess 的 production 分支。
-const auditedProductionWorkerAssembly = createAuditedProductionAssembly(productionWorkerAssembler);
-
 async function assembleWorkerRuntime(
   configuration: WorkerProcessConfiguration,
   runtimeMode: "development" | "production",
 ) {
-    const pool = createPostgresPool({
-      connectionString: configuration.databaseUrl,
-      schema: configuration.databaseSchema,
-      expectedRuntimeRole: configuration.databaseRuntimeRole,
-      applicationName:
-        runtimeMode === "production"
-          ? "cube-runtime-agent-worker-production"
-          : "cube-runtime-agent-worker-development",
+  const pool = createPostgresPool({
+    connectionString: configuration.databaseUrl,
+    ...(configuration.databaseSsl === undefined ? {} : { ssl: configuration.databaseSsl }),
+    schema: configuration.databaseSchema,
+    expectedRuntimeRole: configuration.databaseRuntimeRole,
+    applicationName:
+      runtimeMode === "production"
+        ? "cube-runtime-agent-worker-production"
+        : "cube-runtime-agent-worker-development",
+  });
+  try {
+    const blobRepository = new PgBlobLifecycleRepository(pool, {
+      objectPrefix: RUNTIME_BLOB_OBJECT_PREFIX,
     });
-    try {
-      const blobRepository = new PgBlobLifecycleRepository(pool, {
-        objectPrefix: "agent-worker",
-      });
-      const s3Config = {
-        bucket: configuration.objectStorage.bucket,
-        endpoint: configuration.objectStorage.endpoint,
-        region: configuration.objectStorage.region,
-        accessKeyId: configuration.objectStorage.accessKeyId,
-        secretAccessKey: configuration.objectStorage.secretAccessKey,
-        forcePathStyle: configuration.objectStorage.forcePathStyle,
-        prefix: "agent-worker",
-        maxPresignTtlSeconds: 60,
-        maxBlobSizeBytes: 8 * 1024 * 1024,
-      } as const;
-      const blobs = createS3BlobStore(s3Config, blobRepository);
-      const rolloutRepository = new PgRuntimeRolloutRepository(pool);
-      const durableObservation = createPgDurableObservationSession({
-        blobRepository,
-        blobs,
-        rolloutRepository,
-        policy: { maxModelObservationBytes: 4 * 1024 },
-      });
-      const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
-      const artifactAuthorization = createArtifactExecutionAuthorizationAuthority();
-      const artifactRepository = new PgArtifactDeliveryRepository(
-        pool,
-        artifactAuthorization.verifier,
-      );
-      const artifactService = new ArtifactDeliveryService(artifactRepository, blobs, {
-        runtimeMode,
-        ...(runtimeMode === "development" ? { allowInsecureHttpDownload: true } : {}),
-        executionAuthorizationVerifier: artifactAuthorization.verifier,
-      });
-      const artifactTools = new ArtifactToolRouterFactory({
-        resources: new PgArtifactPublicationResourceBridge(pool),
-        artifacts: artifactService,
-        authorizationVerifier: artifactAuthorization.verifier,
-      });
-      const sessions = new PiWorkerSessionFactory(
-        model,
-        modelRuntime,
-        durableObservation.createRecorder,
-        artifactTools,
-        artifactAuthorization.issuer,
-        durableObservation.prepare,
-      );
-      const upstreamSandboxes = new CubeSandboxSessionRegistry(
-        {
-          apiUrl: configuration.sandbox.apiUrl,
-          ...(configuration.sandbox.apiKey === undefined
-            ? {}
-            : { apiKey: configuration.sandbox.apiKey }),
-          ...(configuration.sandbox.proxyNodeIp === undefined
-            ? {}
-            : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
-          ...(configuration.sandbox.proxyPort === undefined
-            ? {}
-            : { proxyPort: configuration.sandbox.proxyPort }),
-          ...(configuration.sandbox.proxyScheme === undefined
-            ? {}
-            : { proxyScheme: configuration.sandbox.proxyScheme }),
-          defaultOperationTimeoutMs: 5_000,
-        },
-        configuration.sandbox.templateId,
-      );
-      const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
-      const workspacePolicy = Object.freeze({
-        maxEntries: 1_024,
+    const s3Config = {
+      bucket: configuration.objectStorage.bucket,
+      endpoint: configuration.objectStorage.endpoint,
+      region: configuration.objectStorage.region,
+      accessKeyId: configuration.objectStorage.accessKeyId,
+      secretAccessKey: configuration.objectStorage.secretAccessKey,
+      forcePathStyle: configuration.objectStorage.forcePathStyle,
+      prefix: RUNTIME_BLOB_OBJECT_PREFIX,
+      maxPresignTtlSeconds: 60,
+      maxBlobSizeBytes: 8 * 1024 * 1024,
+    } as const;
+    const blobs = createS3BlobStore(s3Config, blobRepository);
+    const rolloutRepository = new PgRuntimeRolloutRepository(pool);
+    const durableObservation = createPgDurableObservationSession({
+      blobRepository,
+      blobs,
+      rolloutRepository,
+      policy: { maxModelObservationBytes: 4 * 1024 },
+    });
+    const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
+    const artifactAuthorization = createArtifactExecutionAuthorizationAuthority();
+    const artifactRepository = new PgArtifactDeliveryRepository(
+      pool,
+      artifactAuthorization.verifier,
+    );
+    const artifactService = new ArtifactDeliveryService(artifactRepository, blobs, {
+      runtimeMode,
+      ...(runtimeMode === "development" ? { allowInsecureHttpDownload: true } : {}),
+      executionAuthorizationVerifier: artifactAuthorization.verifier,
+    });
+    const artifactTools = new ArtifactToolRouterFactory({
+      resources: new PgArtifactPublicationResourceBridge(pool),
+      artifacts: artifactService,
+      authorizationVerifier: artifactAuthorization.verifier,
+    });
+    const sessions = new PiWorkerSessionFactory(
+      model,
+      modelRuntime,
+      durableObservation.createRecorder,
+      artifactTools,
+      artifactAuthorization.issuer,
+      durableObservation.prepare,
+    );
+    const upstreamSandboxes = new CubeSandboxSessionRegistry(
+      {
+        apiUrl: configuration.sandbox.apiUrl,
+        ...(configuration.sandbox.apiKey === undefined
+          ? {}
+          : { apiKey: configuration.sandbox.apiKey }),
+        ...(configuration.sandbox.proxyNodeIp === undefined
+          ? {}
+          : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
+        ...(configuration.sandbox.proxyPort === undefined
+          ? {}
+          : { proxyPort: configuration.sandbox.proxyPort }),
+        ...(configuration.sandbox.proxyScheme === undefined
+          ? {}
+          : { proxyScheme: configuration.sandbox.proxyScheme }),
+        defaultOperationTimeoutMs: 5_000,
+      },
+      configuration.sandbox.templateId,
+    );
+    const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
+    const workspacePolicy = Object.freeze({
+      maxEntries: 1_024,
+      maxFiles: 1_000,
+      maxTotalBytes: 8 * 1024 * 1024,
+      maxSingleFileBytes: 8 * 1024 * 1024,
+      maxChunkBytes: 256 * 1024,
+      maxPathUtf8Bytes: 4_096,
+      historicalManifest: Object.freeze({
         maxFiles: 1_000,
         maxTotalBytes: 8 * 1024 * 1024,
         maxSingleFileBytes: 8 * 1024 * 1024,
-        maxChunkBytes: 256 * 1024,
         maxPathUtf8Bytes: 4_096,
-        historicalManifest: Object.freeze({
-          maxFiles: 1_000,
-          maxTotalBytes: 8 * 1024 * 1024,
-          maxSingleFileBytes: 8 * 1024 * 1024,
-          maxPathUtf8Bytes: 4_096,
-        }),
-      });
-      const workspaceManifest = new PgWorkspaceManifestRepository(pool, workspacePolicy);
-      const workspaceRuntime = new ManifestWorkspaceRuntime({
-        journal: workspaceManifest,
-        revisions: workspaceManifest,
-        stableBlobs: new PgWorkspaceStableBlobAccess(pool, blobs),
-        candidateBlobs: new DurableWorkspaceCandidateBlobWriter(
-          blobRepository,
-          blobs,
-          workspacePolicy.maxSingleFileBytes,
+      }),
+    });
+    const workspaceManifest = new PgWorkspaceManifestRepository(pool, workspacePolicy);
+    const workspaceRuntime = new ManifestWorkspaceRuntime({
+      journal: workspaceManifest,
+      revisions: workspaceManifest,
+      stableBlobs: new PgWorkspaceStableBlobAccess(pool, blobs),
+      candidateBlobs: new DurableWorkspaceCandidateBlobWriter(
+        blobRepository,
+        blobs,
+        workspacePolicy.maxSingleFileBytes,
+      ),
+      candidates: new PgWorkspaceCandidateHandoff(pool, workspacePolicy),
+      openSandboxWorkspace: async (input) =>
+        upstreamSandboxes.gateway.connectWorkspace(
+          upstreamSandboxes.workspaceCapability({
+            scope: input.executionScope,
+            session: input.session,
+          }),
+          {
+            maxEntries: workspacePolicy.maxEntries,
+            maxFileBytes: workspacePolicy.maxSingleFileBytes,
+            maxTotalBytes: workspacePolicy.maxTotalBytes,
+            maxPathUtf8Bytes: workspacePolicy.maxPathUtf8Bytes,
+            maxCommandOutputBytes: Math.ceil((workspacePolicy.maxSingleFileBytes * 4) / 3) + 1_024,
+            readChunkBytes: workspacePolicy.maxChunkBytes,
+            maxSnapshots: 4,
+            operationTimeoutMs: 30_000,
+          },
+          input.signal === undefined ? {} : { signal: input.signal },
         ),
-        candidates: new PgWorkspaceCandidateHandoff(pool, workspacePolicy),
-        openSandboxWorkspace: async (input) =>
-          upstreamSandboxes.gateway.connectWorkspace(
-            upstreamSandboxes.workspaceCapability({
-              scope: input.executionScope,
-              session: input.session,
-            }),
-            {
-              maxEntries: workspacePolicy.maxEntries,
-              maxFileBytes: workspacePolicy.maxSingleFileBytes,
-              maxTotalBytes: workspacePolicy.maxTotalBytes,
-              maxPathUtf8Bytes: workspacePolicy.maxPathUtf8Bytes,
-              maxCommandOutputBytes:
-                Math.ceil((workspacePolicy.maxSingleFileBytes * 4) / 3) + 1_024,
-              readChunkBytes: workspacePolicy.maxChunkBytes,
-              maxSnapshots: 4,
-              operationTimeoutMs: 30_000,
-            },
-            input.signal === undefined ? {} : { signal: input.signal },
-          ),
-        policy: workspacePolicy,
-      });
-      const shutdown = new ProcessShutdown();
-      const worker = new RunWorker(
-        {
-          persistence: new PgExecutionPersistence(pool),
-          revisions: workspaceRuntime,
-          sandboxes,
-          orphanSandboxes: sandboxes,
-          sessions,
-          cancellation: new DatabaseRunCancellation(),
-          shutdownSignal: shutdown.signal,
-          artifacts: new ArtifactCompletionGateAdapter(artifactService),
-          clock: new SystemWorkerClock(),
-          metrics: new PgRecoveryMetrics(pool),
-        },
-        {
-          workerId: configuration.worker.workerId,
-          leaseDurationMs: configuration.worker.runLeaseMs,
-          heartbeatMs: Math.floor(configuration.worker.runLeaseMs / 3),
-        },
-      );
-      const loop = new AgentWorkerPollingLoop(new PgRunDispatchOutbox(pool), worker, {
-        tenantId: configuration.worker.tenantId,
+      policy: workspacePolicy,
+    });
+    const shutdown = new ProcessShutdown();
+    const worker = new RunWorker(
+      {
+        persistence: new PgExecutionPersistence(pool),
+        revisions: workspaceRuntime,
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new DatabaseRunCancellation(),
+        shutdownSignal: shutdown.signal,
+        artifacts: new ArtifactCompletionGateAdapter(artifactService),
+        clock: new SystemWorkerClock(),
+        metrics: new PgRecoveryMetrics(pool),
+      },
+      {
         workerId: configuration.worker.workerId,
-        pollIntervalMs: configuration.worker.pollIntervalMs,
-        dispatchLeaseMs: configuration.worker.dispatchLeaseMs,
-      });
-      const probes = Object.freeze({
-        postgres: () => probePostgres(pool, configuration.databaseRuntimeRole),
-        objectStorage: () => probeS3BlobStore(s3Config),
-        sandbox: () => upstreamSandboxes.probe(),
-        model: () => probeOpenAiCompatibleModel(configuration.model, runtimeMode),
-      });
-      await Promise.all([
-        probes.postgres(),
-        probes.objectStorage(),
-        probes.sandbox(),
-        probes.model(),
-      ]);
-      loop.start();
-      return Object.freeze({
-        stopAccepting: async () => {
-          loop.stopAccepting();
-          shutdown.request();
-          await loop.drain();
-        },
-        resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),
-        readiness: Object.freeze([
-          Object.freeze({ name: "postgres", probe: probes.postgres }),
-          Object.freeze({ name: "object-storage", probe: probes.objectStorage }),
-          Object.freeze({ name: "sandbox", probe: probes.sandbox }),
-          Object.freeze({ name: "model-runtime", probe: probes.model }),
-        ]),
-      });
-    } catch (error) {
-      await pool.end().catch(() => undefined);
-      throw error;
-    }
+        leaseDurationMs: configuration.worker.runLeaseMs,
+        heartbeatMs: Math.floor(configuration.worker.runLeaseMs / 3),
+      },
+    );
+    const loop = new AgentWorkerPollingLoop(new PgRunDispatchOutbox(pool), worker, {
+      tenantId: configuration.worker.tenantId,
+      workerId: configuration.worker.workerId,
+      pollIntervalMs: configuration.worker.pollIntervalMs,
+      dispatchLeaseMs: configuration.worker.dispatchLeaseMs,
+    });
+    const probes = Object.freeze({
+      postgres: () => probePostgres(pool, configuration.databaseRuntimeRole),
+      objectStorage: () => probeS3BlobStore(s3Config),
+      sandbox: () => upstreamSandboxes.probe(),
+      model: () => probeOpenAiCompatibleModel(configuration.model, runtimeMode),
+    });
+    await Promise.all([
+      probes.postgres(),
+      probes.objectStorage(),
+      probes.sandbox(),
+      probes.model(),
+    ]);
+    loop.start();
+    return Object.freeze({
+      stopAccepting: async () => {
+        loop.stopAccepting();
+        shutdown.request();
+        await loop.drain();
+      },
+      resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),
+      readiness: Object.freeze([
+        Object.freeze({ name: "postgres", probe: probes.postgres }),
+        Object.freeze({ name: "object-storage", probe: probes.objectStorage }),
+        Object.freeze({ name: "sandbox", probe: probes.sandbox }),
+        Object.freeze({ name: "model-runtime", probe: probes.model }),
+      ]),
+    });
+  } catch (error) {
+    await pool.end().catch(() => undefined);
+    throw error;
+  }
 }
 
 /**
@@ -547,6 +553,7 @@ export async function probeDevelopmentWorkerDependencies(
   }
   const pool = createPostgresPool({
     connectionString: configuration.databaseUrl,
+    ...(configuration.databaseSsl === undefined ? {} : { ssl: configuration.databaseSsl }),
     schema: configuration.databaseSchema,
     expectedRuntimeRole: configuration.databaseRuntimeRole,
     applicationName: "cube-runtime-agent-worker-preflight",
@@ -559,7 +566,7 @@ export async function probeDevelopmentWorkerDependencies(
       accessKeyId: configuration.objectStorage.accessKeyId,
       secretAccessKey: configuration.objectStorage.secretAccessKey,
       forcePathStyle: configuration.objectStorage.forcePathStyle,
-      prefix: "agent-worker",
+      prefix: RUNTIME_BLOB_OBJECT_PREFIX,
       maxPresignTtlSeconds: 60,
       maxBlobSizeBytes: 8 * 1024 * 1024,
     } as const;
@@ -661,15 +668,12 @@ function assertProductionWorkerTransport(input: {
   readonly modelBaseUrl: string;
   readonly objectStorageEndpoint: string;
   readonly sandboxApiUrl: string;
-  readonly sandboxApiKey?: string;
 }): void {
   const endpoints: Array<readonly [string, string]> = [
     ["MODEL_BASE_URL", input.modelBaseUrl],
     ["S3_ENDPOINT", input.objectStorageEndpoint],
+    ["CUBESANDBOX_API_URL", input.sandboxApiUrl],
   ];
-  if (input.sandboxApiKey !== undefined) {
-    endpoints.push(["CUBESANDBOX_API_URL", input.sandboxApiUrl]);
-  }
   for (const [key, value] of endpoints) {
     const url = new URL(value);
     if (url.protocol !== "https:" || url.username !== "" || url.password !== "") {
@@ -694,7 +698,7 @@ export async function startWorkerProcess(input: {
       serviceName: "agent-worker",
       configuration,
       shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
-      auditedProductionAssembly: auditedProductionWorkerAssembly,
+      assembler: productionWorkerAssembler,
       ...(input.signalSource === undefined ? {} : { signalSource: input.signalSource }),
       ...(input.onShutdownFailure === undefined
         ? {}

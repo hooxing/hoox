@@ -44,6 +44,7 @@ function resolver(
     audience: "cube-runtime-api",
     keys: parseProductionJwtSigningKeys(input.keys ?? `current-key:${encodedKey}`),
     clockSkewSeconds: input.skew ?? 60,
+    maxTokenLifetimeSeconds: 3_600,
     now: () => new Date((input.now ?? nowSeconds) * 1_000),
   });
 }
@@ -133,6 +134,17 @@ describe("生产 HS256 Bearer JWT 认证", () => {
         {
           skew: 60,
         },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it("拒绝超过配置上限的 token lifetime，限制旧 kid 必须保留的轮换窗口", async () => {
+    await expect(
+      resolve(
+        sign(
+          { alg: "HS256", kid: "current-key" },
+          payload({ iat: nowSeconds - 30, nbf: nowSeconds - 30, exp: nowSeconds + 3_571 }),
+        ),
       ),
     ).resolves.toBeUndefined();
   });

@@ -45,6 +45,39 @@ jobs:
       - name: Linux Pi Prompt 与能力清单容器门禁
         run: pnpm test:pi-prompt:container
 
+  production-gates:
+    name: Production 静态与容器 Gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: 检出代码
+        # actions/checkout v4.2.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+
+      - name: 安装 Node.js
+        # actions/setup-node v4.4.0
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.18.0
+
+      - name: 启用带 registry integrity 的固定 pnpm
+        run: corepack enable
+
+      - name: 冻结安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: Production 配置、SBOM、许可证与发布静态 Gate
+        run: pnpm config:check:production && pnpm supply-chain:check && pnpm license:check && pnpm release:check
+
+      - name: Production API 容器 Gate
+        run: pnpm test:production-api:container
+
+      - name: Production Scheduler 容器 Gate
+        run: pnpm test:production-scheduler:container
+
+      - name: Production Worker 容器 Gate
+        run: pnpm test:production-worker:container
+
   process-portability:
     name: 进程骨架（${{ matrix.os }}）
     runs-on: ${{ matrix.os }}

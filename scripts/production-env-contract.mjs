@@ -8,12 +8,14 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "THREAD_CURSOR_SIGNING_KEYS",
   "API_LISTEN_HOST",
   "API_LISTEN_PORT",
+  "API_PUBLIC_ORIGIN",
   "API_TLS_MODE",
   "API_TRUSTED_PROXY_CIDRS",
   "API_JWT_ISSUER",
   "API_JWT_AUDIENCE",
   "API_JWT_SIGNING_KEYS",
   "API_JWT_CLOCK_SKEW_SECONDS",
+  "API_JWT_MAX_LIFETIME_SECONDS",
   "S3_ENDPOINT",
   "S3_PUBLIC_ENDPOINT",
   "S3_BUCKET",
@@ -110,6 +112,7 @@ export function validateProductionEnvironmentExample(source) {
   }
   for (const key of [
     "API_JWT_ISSUER",
+    "API_PUBLIC_ORIGIN",
     "S3_ENDPOINT",
     "S3_PUBLIC_ENDPOINT",
     "CUBESANDBOX_API_URL",
@@ -132,6 +135,25 @@ export function validateProductionEnvironmentExample(source) {
   }
   if (values.get("CUBESANDBOX_PROXY_SCHEME") !== "https") {
     issues.push("CUBESANDBOX_PROXY_SCHEME 必须为 https");
+  }
+  try {
+    const apiOrigin = new URL(values.get("API_PUBLIC_ORIGIN") ?? "");
+    const objectOrigin = new URL(values.get("S3_PUBLIC_ENDPOINT") ?? "");
+    if (
+      apiOrigin.pathname !== "/" ||
+      apiOrigin.search !== "" ||
+      apiOrigin.hash !== "" ||
+      objectOrigin.pathname !== "/" ||
+      objectOrigin.search !== "" ||
+      objectOrigin.hash !== ""
+    ) {
+      issues.push("API_PUBLIC_ORIGIN 与 S3_PUBLIC_ENDPOINT 必须为 origin");
+    }
+    if (apiOrigin.origin === objectOrigin.origin) {
+      issues.push("S3_PUBLIC_ENDPOINT 必须使用独立对象 origin");
+    }
+  } catch {
+    // 上面的 URL 校验已提供稳定变量名错误。
   }
   return issues;
 }

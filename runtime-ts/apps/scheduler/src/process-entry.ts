@@ -5,11 +5,10 @@ import {
   probePostgres,
 } from "@cube-runtime/persistence";
 import {
-  booleanEnvironmentField,
-  createAuditedProductionAssembly,
   integerEnvironmentField,
   type ProcessSignalSource,
   parseStrictEnvironment,
+  parseProductionPostgresTransport,
   type RunningServiceProcess,
   type RuntimeEnvironment,
   readRequiredEnvironmentValue,
@@ -35,12 +34,6 @@ const schedulerEnvironmentSchema = Object.freeze({
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
   DATABASE_RUNTIME_ROLE: stringEnvironmentField({ maxLength: 63 }),
-  S3_ENDPOINT: urlEnvironmentField(),
-  S3_BUCKET: stringEnvironmentField({ maxLength: 255 }),
-  S3_REGION: stringEnvironmentField({ maxLength: 128 }),
-  S3_ACCESS_KEY_ID: stringEnvironmentField({ secret: true, maxLength: 1_024 }),
-  S3_SECRET_ACCESS_KEY: stringEnvironmentField({ secret: true, maxLength: 4_096 }),
-  S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
   CUBESANDBOX_API_URL: urlEnvironmentField(),
   CUBESANDBOX_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
   CUBESANDBOX_PROXY_NODE_IP: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
@@ -60,16 +53,9 @@ export const schedulerProcessEnvironmentKeys = Object.freeze(
 export interface SchedulerProcessConfiguration {
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
+  readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly databaseSchema: string;
   readonly databaseRuntimeRole: string;
-  readonly objectStorage: Readonly<{
-    endpoint: string;
-    bucket: string;
-    region: string;
-    accessKeyId: string;
-    secretAccessKey: string;
-    forcePathStyle: boolean;
-  }>;
   readonly sandbox: Readonly<{
     apiUrl: string;
     apiKey?: string;
@@ -96,6 +82,11 @@ export function parseSchedulerProcessEnvironment(
   source: Readonly<Record<string, string | undefined>>,
 ): SchedulerProcessConfiguration {
   const parsed = parseStrictEnvironment(source, schedulerEnvironmentSchema);
+  const configuredDatabaseUrl = readRequiredEnvironmentValue(parsed, "DATABASE_URL");
+  const productionDatabase =
+    parsed.runtimeEnvironment === "production"
+      ? parseProductionPostgresTransport(configuredDatabaseUrl)
+      : undefined;
   const configuredTenantId = readRequiredEnvironmentValue(parsed, "SCHEDULER_TENANT_ID");
   // Scheduler 仅接受领域 Tenant ID；避免把任意数据库文本带入 RLS 上下文。
   tenantId(configuredTenantId);
@@ -116,6 +107,9 @@ export function parseSchedulerProcessEnvironment(
     throw new TypeError("CUBESANDBOX_PROXY_SCHEME 只能是 http 或 https");
   }
   const sandboxApiUrl = readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
+  if (parsed.runtimeEnvironment === "production") {
+    assertProductionHttpsEndpoint(sandboxApiUrl, "CUBESANDBOX_API_URL");
+  }
   const proxyRouting = resolveCubeProxyRouting({
     apiUrl: sandboxApiUrl,
     ...(parsed.values.CUBESANDBOX_PROXY_NODE_IP === undefined
@@ -126,19 +120,15 @@ export function parseSchedulerProcessEnvironment(
       : { proxyPort: parsed.values.CUBESANDBOX_PROXY_PORT }),
     ...(configuredProxyScheme === undefined ? {} : { proxyScheme: configuredProxyScheme }),
   });
+  if (parsed.runtimeEnvironment === "production" && proxyRouting.proxyScheme !== "https") {
+    throw new TypeError("CUBESANDBOX_PROXY_SCHEME 在 production 必须为 https");
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
-    databaseUrl: readRequiredEnvironmentValue(parsed, "DATABASE_URL"),
+    databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
+    ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
     databaseRuntimeRole: configuredRuntimeRole,
-    objectStorage: Object.freeze({
-      endpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
-      bucket: readRequiredEnvironmentValue(parsed, "S3_BUCKET"),
-      region: readRequiredEnvironmentValue(parsed, "S3_REGION"),
-      accessKeyId: readRequiredEnvironmentValue(parsed, "S3_ACCESS_KEY_ID"),
-      secretAccessKey: readRequiredEnvironmentValue(parsed, "S3_SECRET_ACCESS_KEY"),
-      forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
-    }),
     sandbox: Object.freeze({
       apiUrl: sandboxApiUrl,
       ...(parsed.values.CUBESANDBOX_API_KEY === undefined
@@ -159,17 +149,33 @@ export function parseSchedulerProcessEnvironment(
   });
 }
 
+function assertProductionHttpsEndpoint(value: string, key: string): void {
+  const endpoint = new URL(value);
+  if (endpoint.protocol !== "https:" || endpoint.username !== "" || endpoint.password !== "") {
+    throw new TypeError(`${key} 在 production 必须为无凭据的 HTTPS URL`);
+  }
+}
+
 /** 生产装配显式创建真实依赖；不会降级到内存 Fake 或跨租户扫描。 */
 /** 不导出：生产依赖组合只能由本模块的 startSchedulerProcess 调用，外部无法替换或复用。 */
 const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfiguration> = {
   async assemble(configuration) {
+    if (
+      configuration.runtimeEnvironment === "production" &&
+      configuration.databaseSsl === undefined
+    ) {
+      throw new Error("PRODUCTION_SCHEDULER_ASSEMBLY_FORBIDDEN");
+    }
     const pool = createPostgresPool({
       connectionString: configuration.databaseUrl,
+      ...(configuration.databaseSsl === undefined ? {} : { ssl: configuration.databaseSsl }),
       schema: configuration.databaseSchema,
       expectedRuntimeRole: configuration.databaseRuntimeRole,
       applicationName: "cube-runtime-scheduler-cleanup",
     });
     try {
+      // 角色身份和 RLS 绕过属性必须在 cleanup loop 产生任何远端副作用前证明安全。
+      await probePostgres(pool, configuration.databaseRuntimeRole);
       const gateway = new CubeSandboxGateway({
         apiUrl: configuration.sandbox.apiUrl,
         ...(configuration.sandbox.apiKey === undefined
@@ -185,6 +191,8 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
           ? {}
           : { proxyScheme: configuration.sandbox.proxyScheme }),
       });
+      // Cube 控制面凭据/端点必须在 cleanup loop 产生副作用前证明可用。
+      await gateway.probe();
       const consumer = new SandboxCleanupConsumer(
         new PgSandboxCleanupConsumerStore(pool),
         new CubeSandboxCleanupResolver(gateway),
@@ -206,6 +214,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
             name: "postgres",
             probe: () => probePostgres(pool, configuration.databaseRuntimeRole),
           }),
+          Object.freeze({ name: "cubesandbox", probe: () => gateway.probe() }),
         ]),
       });
       return assembly;
@@ -215,11 +224,6 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
     }
   },
 };
-
-// 封闭在 Scheduler 模块内，外部 startSchedulerProcess 调用方不能以测试 assembler 置换它。
-const auditedProductionSchedulerAssembly = createAuditedProductionAssembly(
-  productionSchedulerAssembler,
-);
 
 export async function startSchedulerProcess(input: {
   readonly environment: Readonly<Record<string, string | undefined>>;
@@ -232,16 +236,20 @@ export async function startSchedulerProcess(input: {
     // 生产装配不接受注入；测试 Fake 只能在 development/test 使用。
     throw new Error("PRODUCTION_ASSEMBLY_UNAVAILABLE:scheduler");
   }
-  return startServiceProcess({
-    serviceName: "scheduler",
+  const sharedInput = {
     configuration,
     shutdownTimeoutMilliseconds: configuration.shutdownTimeoutMilliseconds,
-    ...(configuration.runtimeEnvironment === "production"
-      ? { auditedProductionAssembly: auditedProductionSchedulerAssembly }
-      : { assembler: input.assembler ?? productionSchedulerAssembler }),
     ...(input.signalSource === undefined ? {} : { signalSource: input.signalSource }),
     ...(input.onShutdownFailure === undefined
       ? {}
       : { onShutdownFailure: input.onShutdownFailure }),
+  } as const;
+  return startServiceProcess({
+    serviceName: "scheduler",
+    ...sharedInput,
+    assembler:
+      configuration.runtimeEnvironment === "production"
+        ? productionSchedulerAssembler
+        : (input.assembler ?? productionSchedulerAssembler),
   });
 }

@@ -68,7 +68,7 @@ corepack pnpm config:check
 
 `agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 必须严格等于 `DEV_AUTH_USER_A_TENANT_ID`，保证 `dev-user-a` 的 Web/API 创建结果由同一 Worker 消费。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
 
-production Worker 使用 `pnpm --filter @cube-runtime/agent-worker start:production` 或 `Dockerfile.production-worker-gate`，仅支持 Linux。入口只接受模块私有的受审真实装配，不接受调用方注入的 Fake，且不改写 `runtimeEnvironment=production`。启动前必须验证 `DATABASE_RUNTIME_ROLE`、部署 Tenant 分片、严格模型元数据和 TLS 端点；任一 `DEV_AUTH_*` 变量（包括 `DEV_AUTH_ENABLED=false`）都会失败关闭。生产装配已经接入持久化 Workspace revision/Artifact 发布闭环，但这不替代真实基础设施验收：`pnpm test:production-worker:container` 仅验证非 root、无 Python/旧数据、build context 秘密排除与依赖不可用时不误报 ready，不能据此宣称 production ready。
+production Worker 使用 `pnpm --filter @cube-runtime/agent-worker start:production` 或 `Dockerfile.production-worker-gate`，仅支持 Linux。公开入口固定模块内真实装配，不接受调用方注入的 Fake，且不改写 `runtimeEnvironment=production`；通用 `process-runtime` 只是受信代码的生命周期编排器，不是 JS 进程内调用方 ACL。启动前必须验证 `DATABASE_RUNTIME_ROLE`、部署 Tenant 分片、严格模型元数据和 TLS 端点；任一 `DEV_AUTH_*` 变量（包括 `DEV_AUTH_ENABLED=false`）都会失败关闭。生产装配已经接入持久化 Workspace revision/Artifact 发布闭环，但这不替代真实基础设施验收。
 
 装配器按业务接收顺序实现 `stopAccepting`，将数据库连接池、HTTP listener、消费者和遥测等资源按确定顺序登记。关闭时先停止接收，再等待 `lifecycle.track()` 登记的在途操作，最后串行关闭资源。资源错误只上报稳定名称；库不调用 `process.exit`。部署平台的强制终止宽限期必须大于 `PROCESS_SHUTDOWN_TIMEOUT_MS`。
 
@@ -78,11 +78,16 @@ production Worker 使用 `pnpm --filter @cube-runtime/agent-worker start:product
 corepack pnpm test:process-runtime
 corepack pnpm test:process:container
 corepack pnpm config:check:production
+corepack pnpm supply-chain:check
+corepack pnpm license:check
+corepack pnpm release:check
+corepack pnpm test:production-api:container
+corepack pnpm test:production-scheduler:container
 corepack pnpm test:production-worker:container
 ```
 
 第一条在 Windows/Linux 运行相同单元与入口测试；第二条需要 Docker，构建 Linux 非 root 最小镜像并验证配置、就绪和关闭顺序。
-后两条分别校验独立 production 配置契约和 Worker 容器失败关闭边界；它们故意不连接真实外部依赖。部署前仍必须在 Linux 上用最小权限 Runtime 角色、真实 PostgreSQL/S3/CubeSandbox/模型完成 readiness 和其余 M7 Gate。
+后七条依次校验独立 production 配置、离线 SBOM、许可证、发布回滚以及 API/Scheduler/Worker runtime-only 容器边界；容器 Gate 故意不连接真实外部依赖。部署必须分片注入秘密：API 使用 PG/S3/JWT/TLS，Scheduler 只使用 PG/Cube，Worker 使用 PG/S3/Cube/模型，不能把共享 env 文件整包注入。部署前仍必须在 Linux 上用最小权限 Runtime 角色、真实 PostgreSQL/S3/CubeSandbox/模型完成 readiness 和其余 M7 Gate；Web/OIDC 产品身份仍是未完成的外部集成。
 
 ## PostgreSQL 角色 bootstrap
 

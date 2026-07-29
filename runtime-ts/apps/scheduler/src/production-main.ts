@@ -1,0 +1,21 @@
+import { selectSchedulerProcessEnvironment, startSchedulerProcess } from "./process-entry.js";
+
+try {
+  const environment = selectSchedulerProcessEnvironment(process.env);
+  if (environment.RUNTIME_ENV !== "production") throw new Error("PRODUCTION_SCHEDULER_ONLY");
+  const running = await startSchedulerProcess({
+    environment,
+    onShutdownFailure: () => {
+      // 只输出稳定分类，不能把数据库、Cube 或 S3 凭据写入日志。
+      console.error("Scheduler 生产进程关闭失败");
+    },
+  });
+  if ((await running.readiness()).status !== "ready") {
+    await running.close();
+    throw new Error("SCHEDULER_NOT_READY");
+  }
+  console.info("Scheduler 生产进程已启动");
+} catch {
+  console.error("Scheduler 生产进程启动失败");
+  process.exitCode = 1;
+}

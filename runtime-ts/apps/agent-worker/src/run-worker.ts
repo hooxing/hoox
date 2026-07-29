@@ -555,7 +555,8 @@ export class RunWorker {
             operationKey: `${context.attemptId}:workspace:publish:${correctionRound}`,
             signal: executionAbort.signal,
           });
-        } catch {
+        } catch (error) {
+          reportWorkspaceVerifyFailure(error);
           return await this.recoverWithCleanup(
             context,
             sandbox,
@@ -1383,6 +1384,19 @@ function reportWorkspaceMaterializeFailure(error: unknown): void {
           ? `dependency_${error.result}`
           : "unclassified";
   console.warn(`WORKSPACE_MATERIALIZE_FAILED category=${category}`);
+}
+
+/** Workspace candidate 发布与物化同样只记录固定分类，避免异常正文越过 Worker 边界。 */
+function reportWorkspaceVerifyFailure(error: unknown): void {
+  const category =
+    error instanceof WorkspaceApplicationError
+      ? `application_${error.code.toLowerCase()}${
+          error.diagnostic === undefined ? "" : `_${error.diagnostic}`
+        }`
+      : error instanceof WorkspaceDependencyError
+        ? `dependency_${error.result}`
+        : "unclassified";
+  console.warn(`WORKSPACE_VERIFY_FAILED category=${category}`);
 }
 
 function updateAgentState(context: ExecutionContext, event: RuntimeAgentEvent): void {

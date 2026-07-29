@@ -1081,12 +1081,17 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           }
           const permitId = `permit-${randomUUID()}`;
           const inserted = await client.query<{ issued_at: Date; expires_at: Date }>(
-            `INSERT INTO external_effect_permits(
+            `WITH permit_clock AS (
+               SELECT date_trunc('milliseconds', clock_timestamp()) AS issued_at
+             )
+             INSERT INTO external_effect_permits(
                tenant_id,permit_id,attempt_id,effect,call_id,tool_name,args_digest,
                attempt_version,run_claim_token,run_claim_epoch,workspace_root_run_id,
-               workspace_lease_epoch,expires_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
-               clock_timestamp() + ($13::bigint * interval '1 millisecond'))
+               workspace_lease_epoch,issued_at,expires_at
+             ) SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+                      permit_clock.issued_at,
+                      permit_clock.issued_at + ($13::bigint * interval '1 millisecond')
+                 FROM permit_clock
              RETURNING issued_at,expires_at`,
             [
               input.fence.scope.tenantId,

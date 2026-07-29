@@ -52,6 +52,23 @@ function unknownSandbox(): SandboxWorkspacePort {
   };
 }
 
+function emptySandbox(): SandboxWorkspacePort {
+  const sandbox = { sessionId: "sandbox-workspace-unknown", generation: 1 };
+  return {
+    currentSession: async () => sandbox,
+    captureSnapshot: async () => ({ ...sandbox, snapshotToken: "snapshot-workspace-unknown" }),
+    releaseSnapshots: async () => undefined,
+    inspectRegularFile: async () => ({ status: "missing" }),
+    removeFile: async () => undefined,
+    removeDirectory: async () => undefined,
+    removeUnexpectedDirectory: async () => undefined,
+    ensureDirectory: async () => undefined,
+    writeFileAtomically: async () => undefined,
+    listWorkspace: async function* () {},
+    readRegularFile: async function* () {},
+  };
+}
+
 describe("ManifestWorkspaceRuntime candidate 恢复边界", () => {
   it("发布结果未知时保留 candidate，不以 publish_failed 释放", async () => {
     const begin = vi.fn(async () => undefined);
@@ -94,6 +111,52 @@ describe("ManifestWorkspaceRuntime candidate 恢复边界", () => {
       }),
     ).rejects.toMatchObject({ code: "RESULT_UNKNOWN" });
     expect(begin).toHaveBeenCalledOnce();
+    expect(release).not.toHaveBeenCalled();
+  });
+
+  it("candidate prepare COMMIT 结果未知时转换为 RESULT_UNKNOWN 并保留原 identity", async () => {
+    const release = vi.fn(async () => undefined);
+    const prepare = vi.fn(async () => {
+      throw new WorkspaceDependencyError("unknown", "WORKSPACE_CANDIDATE_PREPARE_COMMIT_UNKNOWN");
+    });
+    const runtime = new ManifestWorkspaceRuntime({
+      journal: {
+        lookupCompleted: async () => ({ status: "not_found" }),
+        begin: async () => ({ status: "started" }),
+        complete: async () => undefined,
+        failKnown: async () => undefined,
+        recordUnknown: async () => undefined,
+      },
+      revisions: { loadCurrentManifest: async () => undefined },
+      stableBlobs: {
+        authorize: async () => ({ status: "denied" }),
+        head: async () => ({ status: "not_found" }),
+        read: async function* () {},
+      },
+      candidateBlobs: {
+        putCandidate: async () => {
+          throw new Error("空 Workspace 不应上传 candidate");
+        },
+        headCandidate: async () => ({ status: "not_found" }),
+      },
+      candidates: {
+        begin: async () => undefined,
+        prepare,
+        release,
+      },
+      openSandboxWorkspace: async () => emptySandbox(),
+      policy,
+    });
+
+    await expect(
+      runtime.verify({
+        scope,
+        attemptId: "attempt-workspace-prepare-unknown" as never,
+        sandbox: session,
+        operationKey: "workspace-prepare-unknown-operation",
+      }),
+    ).rejects.toMatchObject({ code: "RESULT_UNKNOWN" });
+    expect(prepare).toHaveBeenCalledOnce();
     expect(release).not.toHaveBeenCalled();
   });
 });

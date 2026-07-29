@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   createWorkspaceManifest,
+  WorkspaceDependencyError,
   type WorkspaceExecutionPolicy,
   type WorkspaceManifest,
   type WorkspaceOperationIdentity,
@@ -14,7 +15,7 @@ import {
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type { BlobStore, StableBlobRef } from "./blob-store.js";
 import { BlobStoreError } from "./blob-store.js";
-import { withTenantTransaction } from "./postgres.js";
+import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 
 interface ManifestRow extends QueryResultRow {
   readonly schema_version: number;
@@ -191,7 +192,9 @@ export class PgWorkspaceManifestRepository implements WorkspaceOperationJournalP
       return resumed.rowCount === 1
         ? Object.freeze({ status: "started" })
         : Object.freeze({ status: "in_progress" });
-    });
+    }).catch((error: unknown) =>
+      rethrowWorkspaceCommitUnknown(error, "WORKSPACE_JOURNAL_BEGIN_COMMIT_UNKNOWN"),
+    );
   }
 
   async complete(
@@ -218,7 +221,9 @@ export class PgWorkspaceManifestRepository implements WorkspaceOperationJournalP
         ],
       );
       if (updated.rowCount !== 1) throw new Error("Workspace journal cannot complete");
-    });
+    }).catch((error: unknown) =>
+      rethrowWorkspaceCommitUnknown(error, "WORKSPACE_JOURNAL_COMPLETE_COMMIT_UNKNOWN"),
+    );
   }
 
   async failKnown(input: Parameters<WorkspaceOperationJournalPort["failKnown"]>[0]): Promise<void> {
@@ -247,6 +252,8 @@ export class PgWorkspaceManifestRepository implements WorkspaceOperationJournalP
         if (updated.rowCount !== 1)
           throw new Error("Workspace journal cannot record known failure");
       },
+    ).catch((error: unknown) =>
+      rethrowWorkspaceCommitUnknown(error, "WORKSPACE_JOURNAL_FAIL_COMMIT_UNKNOWN"),
     );
   }
 
@@ -276,7 +283,9 @@ export class PgWorkspaceManifestRepository implements WorkspaceOperationJournalP
         if (row?.status === "completed") return;
         throw new Error("Workspace journal cannot record unknown result");
       }
-    });
+    }).catch((error: unknown) =>
+      rethrowWorkspaceCommitUnknown(error, "WORKSPACE_JOURNAL_UNKNOWN_COMMIT_UNKNOWN"),
+    );
   }
 
   private async lockJournal(
@@ -318,6 +327,13 @@ export class PgWorkspaceManifestRepository implements WorkspaceOperationJournalP
     );
     return row.rows[0]?.identity ?? {};
   }
+}
+
+function rethrowWorkspaceCommitUnknown(error: unknown, dependencyCode: string): never {
+  if (error instanceof TransactionCommitUnknownError) {
+    throw new WorkspaceDependencyError("unknown", dependencyCode);
+  }
+  throw error;
 }
 
 /** 读取 stable Blob 前同时核验 Workspace manifest 文件引用与当前 incarnation。 */

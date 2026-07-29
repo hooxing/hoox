@@ -5,7 +5,10 @@ import {
   type WorkspaceExecutionPolicy,
 } from "@cube-runtime/workspace";
 import { describe, expect, it, vi } from "vitest";
-import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
+import {
+  ManifestWorkspaceRuntime,
+  WorkspaceMaterializationStageError,
+} from "./workspace-runtime.js";
 
 const policy: WorkspaceExecutionPolicy = {
   maxEntries: 1,
@@ -70,6 +73,50 @@ function emptySandbox(): SandboxWorkspacePort {
 }
 
 describe("ManifestWorkspaceRuntime candidate 恢复边界", () => {
+  it("物化前读取 head 失败时只暴露固定阶段，不传播底层错误", async () => {
+    const runtime = new ManifestWorkspaceRuntime({
+      journal: {
+        lookupCompleted: async () => ({ status: "not_found" }),
+        begin: async () => ({ status: "started" }),
+        complete: async () => undefined,
+        failKnown: async () => undefined,
+        recordUnknown: async () => undefined,
+      },
+      revisions: {
+        loadCurrentManifest: async () => {
+          throw new Error("private database detail");
+        },
+      },
+      stableBlobs: {
+        authorize: async () => ({ status: "denied" }),
+        head: async () => ({ status: "not_found" }),
+        read: async function* () {},
+      },
+      candidateBlobs: {
+        putCandidate: async () => {
+          throw new Error("不应写入 candidate");
+        },
+        headCandidate: async () => ({ status: "not_found" }),
+      },
+      candidates: {
+        begin: async () => undefined,
+        prepare: async () => undefined,
+        release: async () => undefined,
+      },
+      openSandboxWorkspace: async () => emptySandbox(),
+      policy,
+    });
+
+    await expect(
+      runtime.materialize({
+        scope,
+        attemptId: "attempt-workspace-stage" as never,
+        sandbox: session,
+        operationKey: "workspace-stage-operation",
+      }),
+    ).rejects.toEqual(new WorkspaceMaterializationStageError("load_current_manifest"));
+  });
+
   it("发布结果未知时保留 candidate，不以 publish_failed 释放", async () => {
     const begin = vi.fn(async () => undefined);
     const release = vi.fn(async () => undefined);

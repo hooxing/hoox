@@ -6,6 +6,8 @@ import type {
   WorkspaceRevisionId,
 } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
+import { WorkspaceApplicationError, WorkspaceDependencyError } from "@cube-runtime/workspace";
+import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 import { DurableOperationLane } from "./durable-operation-lane.js";
 import {
   assertControlledRolloutProjection,
@@ -387,10 +389,12 @@ export class RunWorker {
             ? {}
             : { expectedCurrentRevisionId: context.currentRevisionId }),
           sandbox,
-          operationKey: `${context.attemptId}/workspace/materialize`,
+          // Workspace journal 的 operationKey 是受限协议字段；不得复用含 `/` 的路径样式键。
+          operationKey: `${context.attemptId}:workspace:materialize`,
           signal: executionAbort.signal,
         });
-      } catch {
+      } catch (error) {
+        reportWorkspaceMaterializeFailure(error);
         return await this.recoverWithCleanup(context, sandbox, "WORKSPACE_CONFLICT", cancellation);
       }
       const postMaterialize = await this.stopPoint(context, cancellation);
@@ -548,7 +552,7 @@ export class RunWorker {
               ? {}
               : { expectedCurrentRevisionId: context.currentRevisionId }),
             sandbox,
-            operationKey: `${context.attemptId}/workspace/publish/${correctionRound}`,
+            operationKey: `${context.attemptId}:workspace:publish:${correctionRound}`,
             signal: executionAbort.signal,
           });
         } catch {
@@ -1363,6 +1367,22 @@ function validateWorkspaceCandidate(
     throw new Error("WORKSPACE_CONFLICT");
   }
   return candidate;
+}
+
+/**
+ * Run 的公开错误码必须保持稳定，不能把驱动、对象键或路径写入事件；开发进程日志只记录
+ * 固定分类，供区分 Workspace head、Sandbox 数据面和依赖结果未知。
+ */
+function reportWorkspaceMaterializeFailure(error: unknown): void {
+  const category =
+    error instanceof WorkspaceMaterializationStageError
+      ? `stage_${error.stage}${error.detail === undefined ? "" : `_${error.detail}`}`
+      : error instanceof WorkspaceApplicationError
+        ? `application_${error.code.toLowerCase()}`
+        : error instanceof WorkspaceDependencyError
+          ? `dependency_${error.result}`
+          : "unclassified";
+  console.warn(`WORKSPACE_MATERIALIZE_FAILED category=${category}`);
 }
 
 function updateAgentState(context: ExecutionContext, event: RuntimeAgentEvent): void {

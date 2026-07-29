@@ -1,7 +1,13 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.5/schema.json",
   "files": {
-    "includes": ["**", "!!**/dist", "!!**/node_modules", "!!runtime-ts/vendor/cubesandbox-sdk"]
+    "includes": [
+      "**",
+      "!!exports",
+      "!!**/dist",
+      "!!**/node_modules",
+      "!!runtime-ts/vendor/cubesandbox-sdk"
+    ]
   },
   "formatter": {
     "enabled": true,

@@ -24,6 +24,8 @@ describe("0016 Workspace Artifact intent migration contract", () => {
     expect(sql).not.toContain("GRANT UPDATE");
     expect(rollback).toContain("DROP TABLE IF EXISTS workspace_artifact_publication_intents");
     expect(rollback).toContain("DELETE FROM artifact_publications publication");
+    expect(rollback).toContain("workspace_artifact_down_publications");
+    expect(rollback).toContain("intent.resource_version_id=publication.resource_version_id");
     expect(rollback).toContain("DELETE FROM resource_versions version");
     expect(rollback.indexOf("DELETE FROM resource_versions version")).toBeLessThan(
       rollback.indexOf("resource_versions_blob_purpose_check"),

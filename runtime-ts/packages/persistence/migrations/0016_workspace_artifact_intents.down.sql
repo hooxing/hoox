@@ -9,23 +9,52 @@ ALTER TABLE resource_versions DISABLE ROW LEVEL SECURITY;
 ALTER TABLE resources DISABLE ROW LEVEL SECURITY;
 ALTER TABLE blob_references DISABLE ROW LEVEL SECURITY;
 ALTER TABLE blob_commits DISABLE ROW LEVEL SECURITY;
-UPDATE artifact_publications dependent
+-- 使用同一未提交 DDL 事务内的短命辅助表；migrator 按最小权限不持有数据库 TEMP。
+CREATE TABLE workspace_artifact_down_publications (
+  tenant_id text NOT NULL,
+  artifact_id text NOT NULL,
+  PRIMARY KEY (tenant_id,artifact_id)
+);
+-- 兼容修复前 beginPublication 已复用 workspace ResourceVersion 的事实，并递归包含其
+-- replacement 后继；先固化闭包，后续删除 settlement 时不会再丢失图关系。
+WITH RECURSIVE publication_closure(tenant_id,artifact_id) AS (
+  SELECT publication.tenant_id,publication.id
+    FROM artifact_publications publication
+    JOIN workspace_artifact_publication_intents intent
+      ON intent.tenant_id=publication.tenant_id
+     AND intent.resource_version_id=publication.resource_version_id
+  UNION
+  SELECT dependent.tenant_id,dependent.id
+    FROM artifact_publications dependent
+    JOIN publication_closure parent
+      ON parent.tenant_id=dependent.tenant_id
+     AND parent.artifact_id=dependent.replaces_artifact_id
+)
+INSERT INTO workspace_artifact_down_publications(tenant_id,artifact_id)
+SELECT tenant_id,artifact_id FROM publication_closure;
+UPDATE workspace_artifact_publication_intents intent
    SET replaces_artifact_id=NULL
-  FROM workspace_artifact_publication_intents intent
- WHERE dependent.tenant_id=intent.tenant_id
-   AND dependent.replaces_artifact_id=intent.artifact_id;
+  FROM workspace_artifact_down_publications closure
+ WHERE intent.tenant_id=closure.tenant_id
+   AND intent.replaces_artifact_id=closure.artifact_id;
+UPDATE artifact_publications publication
+   SET replaces_artifact_id=NULL
+  FROM workspace_artifact_down_publications closure
+ WHERE publication.tenant_id=closure.tenant_id
+   AND publication.id=closure.artifact_id
+   AND publication.replaces_artifact_id IS NOT NULL;
 DELETE FROM artifact_publication_settlements settlement
- USING workspace_artifact_publication_intents intent
- WHERE settlement.tenant_id=intent.tenant_id
-   AND settlement.artifact_id=intent.artifact_id;
+ USING workspace_artifact_down_publications closure
+ WHERE settlement.tenant_id=closure.tenant_id
+   AND settlement.artifact_id=closure.artifact_id;
 DELETE FROM artifact_publication_commands command
- USING workspace_artifact_publication_intents intent
- WHERE command.tenant_id=intent.tenant_id
-   AND command.artifact_id=intent.artifact_id;
+ USING workspace_artifact_down_publications closure
+ WHERE command.tenant_id=closure.tenant_id
+   AND command.artifact_id=closure.artifact_id;
 DELETE FROM artifact_publications publication
- USING workspace_artifact_publication_intents intent
- WHERE publication.tenant_id=intent.tenant_id
-   AND publication.id=intent.artifact_id;
+ USING workspace_artifact_down_publications closure
+ WHERE publication.tenant_id=closure.tenant_id
+   AND publication.id=closure.artifact_id;
 DELETE FROM resource_versions version
  USING workspace_artifact_publication_intents intent
  WHERE version.tenant_id=intent.tenant_id
@@ -44,6 +73,7 @@ DELETE FROM blob_commits commit_record
  USING workspace_artifact_publication_intents intent
  WHERE commit_record.tenant_id=intent.tenant_id
    AND commit_record.operation_id=intent.blob_operation_id;
+DROP TABLE workspace_artifact_down_publications;
 ALTER TABLE artifact_publication_settlements ENABLE ROW LEVEL SECURITY;
 ALTER TABLE artifact_publication_settlements FORCE ROW LEVEL SECURITY;
 ALTER TABLE artifact_publication_commands ENABLE ROW LEVEL SECURITY;

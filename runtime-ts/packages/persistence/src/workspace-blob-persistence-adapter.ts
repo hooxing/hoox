@@ -316,6 +316,10 @@ export class DurableWorkspaceCandidateBlobWriter implements WorkspaceCandidateBl
           scope,
           blob: snapshot.stable,
         });
+        if (lifecycle.status === "pre_delete" || lifecycle.status === "deleting") {
+          // GC 尚持有租约时结果确定为“稍后重试”，不能靠 32 次本地空转把它误报为 unknown。
+          throw unavailable("BLOB_GC_IN_PROGRESS");
+        }
         const event =
           lifecycle.status === "deleted"
             ? {
@@ -326,7 +330,7 @@ export class DurableWorkspaceCandidateBlobWriter implements WorkspaceCandidateBl
               }
             : {
                 type: "stable_gc_lifecycle_resolved" as const,
-                status: lifecycle.status,
+                status: "active" as const,
               };
         return next(await this.cas(snapshot, transitionBlobCommit(snapshot, event)));
       }

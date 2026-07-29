@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { WorkspaceDependencyError } from "@cube-runtime/workspace";
 import { describe, expect, it } from "vitest";
 import type { BlobCommitSnapshot } from "./blob-commit-protocol.js";
 import type { BlobStore } from "./blob-store.js";
@@ -104,4 +105,22 @@ describe("Workspace candidate Blob 的 GC 阻塞恢复", () => {
     expect(result.snapshot.status).toBe("stable_object_ready");
     expect(result.snapshot.stable).toMatchObject({ incarnationId, physicalObjectKey });
   });
+
+  it.each(["pre_delete", "deleting"] as const)(
+    "%s 中的 GC 是已知可重试竞争，不被误报为 unknown",
+    async (status) => {
+      const service = writer({ status });
+      await expect(
+        (
+          service as unknown as {
+            advance(
+              snapshot: BlobCommitSnapshot,
+              body: Uint8Array,
+              uploadId: string,
+            ): Promise<{ readonly kind: "next"; readonly snapshot: BlobCommitSnapshot }>;
+          }
+        ).advance(blockedSnapshot(), new Uint8Array(), "unused"),
+      ).rejects.toEqual(new WorkspaceDependencyError("known", "BLOB_GC_IN_PROGRESS"));
+    },
+  );
 });

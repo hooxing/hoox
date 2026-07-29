@@ -244,18 +244,50 @@ describe("生产 Workspace revision 安全下限", () => {
     ).rejects.toThrow("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
   });
 
-  it.each([72, 73])("模型前拒绝缺失根目录或模板额外文件（exit %i）", async (exitCode) => {
+  it.each([72, 73, 74])(
+    "模型前拒绝缺失/符号链接根目录、模板额外文件或 find 失败（exit %i）",
+    async (exitCode) => {
+      const verifier = new FailClosedWorkspaceRevisionVerifier();
+      await expect(
+        verifier.materialize({
+          scope: claim().scope as ExecutionScope,
+          sandbox: {
+            registryId: "registry-workspace-preflight",
+            providerSandboxId: "sandbox-workspace-preflight",
+            mode: "created",
+            sandbox: {
+              id: "sandbox-workspace-preflight",
+              command: async () => ({ stdout: "", stderr: "", exitCode }),
+              runCode: async () => ({ stdout: [], stderr: [] }),
+              readFile: async () => "",
+              writeFile: async () => undefined,
+              pause: async () => undefined,
+              kill: async () => undefined,
+            },
+          },
+          operationKey: `workspace-materialize-${exitCode}`,
+        }),
+      ).rejects.toThrow("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
+    },
+  );
+
+  it("空目录 verifier 对已有 revision checkpoint 在调用 shell 前拒绝", async () => {
     const verifier = new FailClosedWorkspaceRevisionVerifier();
+    let calls = 0;
     await expect(
       verifier.materialize({
         scope: claim().scope as ExecutionScope,
+        expectedCurrentRevisionId: "revision-existing" as never,
         sandbox: {
-          registryId: "registry-workspace-preflight",
-          providerSandboxId: "sandbox-workspace-preflight",
+          registryId: "registry-workspace-existing",
+          providerSandboxId: "sandbox-workspace-existing",
           mode: "created",
           sandbox: {
-            id: "sandbox-workspace-preflight",
-            command: async () => ({ stdout: "", stderr: "", exitCode }),
+            id: "sandbox-workspace-existing",
+            command: async () => {
+              calls += 1;
+              return { stdout: "", stderr: "", exitCode: 0 };
+            },
             runCode: async () => ({ stdout: [], stderr: [] }),
             readFile: async () => "",
             writeFile: async () => undefined,
@@ -263,8 +295,38 @@ describe("生产 Workspace revision 安全下限", () => {
             kill: async () => undefined,
           },
         },
-        operationKey: `workspace-materialize-${exitCode}`,
+        operationKey: "workspace-materialize-existing",
       }),
-    ).rejects.toThrow("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
+    ).rejects.toThrow("WORKSPACE_REVISION_MATERIALIZATION_REQUIRED");
+    expect(calls).toBe(0);
+  });
+
+  it("预检脚本拒绝根符号链接，并保留 find 失败状态而不使用管道", async () => {
+    const verifier = new FailClosedWorkspaceRevisionVerifier();
+    let command = "";
+    await verifier.materialize({
+      scope: claim().scope as ExecutionScope,
+      sandbox: {
+        registryId: "registry-workspace-command",
+        providerSandboxId: "sandbox-workspace-command",
+        mode: "created",
+        sandbox: {
+          id: "sandbox-workspace-command",
+          command: async (value) => {
+            command = value;
+            return { stdout: "", stderr: "", exitCode: 0 };
+          },
+          runCode: async () => ({ stdout: [], stderr: [] }),
+          readFile: async () => "",
+          writeFile: async () => undefined,
+          pause: async () => undefined,
+          kill: async () => undefined,
+        },
+      },
+      operationKey: "workspace-materialize-command",
+    });
+    expect(command).toContain("[ -L /workspace ]");
+    expect(command).toContain("workspace_entry=$(find -P /workspace");
+    expect(command).not.toContain("| grep");
   });
 });

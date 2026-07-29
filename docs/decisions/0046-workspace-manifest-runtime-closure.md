@@ -48,8 +48,9 @@ CubeSandbox Workspace capability 只能由 acquire 时冻结的完整 `Execution
 
 - 正面：schema 已禁止 flat `object_key` 伪装 manifest，且完成后的 revision 可精确引用 stable incarnation。
 - 负面：当前 Worker 会拒绝所有非空 Workspace，跨 Run 文件闭环尚不可用。
-- 兼容：`0014` 在发现旧 `current_revision_id` 时直接拒绝升级，避免历史 object_key 被猜测转换。运维必须先
-  运行受控 backfill 或在确认可丢弃后清空 head；迁移后 Worker path 不读取或写入 legacy object_key。
+- 兼容：`0014` 不尝试越过 FORCE RLS 检查或猜测转换旧 `current_revision_id`；运行时遇到没有 manifest 的旧
+  head 必须失败关闭。运维必须先运行受控 backfill 或在确认可丢弃后清空 head；迁移后 Worker path 不读取或
+  写入 legacy object_key。
 - 未包含：Artifact declaration/publication 与用户下载继续由 Artifact Router 闭环；本 ADR 不把 Workspace
   文件自动发布成 Artifact，也不改变生产认证边界。
 

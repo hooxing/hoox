@@ -5,6 +5,7 @@ import {
   createWorkspace,
   DomainError,
   runId,
+  tenantId,
   threadId,
   transitionRun,
 } from "@cube-runtime/domain";
@@ -25,6 +26,7 @@ import type {
   ArchiveThreadCommandPort,
   AuthContextResolver,
   AuthPrincipal,
+  TenantSelector,
   ThreadCursorCodec,
 } from "./ports.js";
 
@@ -85,10 +87,24 @@ function mapDomainFailure(error: unknown): never {
 export class ApiService {
   constructor(private readonly dependencies: ServiceDependencies) {}
 
-  async authenticate(authorization: string | undefined, requestId: string): Promise<AuthContext> {
+  async authenticate(
+    authorization: string | undefined,
+    requestId: string,
+    tenantSelector: TenantSelector = Object.freeze({ kind: "absent" }),
+  ): Promise<AuthContext> {
     const principal = await this.dependencies.auth.resolve({ authorization, requestId });
     if (principal === undefined) throw new ApiFailure("unauthorized");
-    const scope = { tenantId: principal.tenantId, userId: principal.userId } as const;
+    let selectedTenantId = principal.tenantId;
+    if (selectedTenantId === undefined) {
+      if (tenantSelector.kind !== "selected") throw new ApiFailure("bad_request");
+      try {
+        selectedTenantId = tenantId(tenantSelector.value);
+      } catch {
+        throw new ApiFailure("bad_request");
+      }
+    }
+    // JWT 只能证明 userId；X-Tenant-Id 只是候选 scope，Repository 会用 Membership 与 RLS 复核。
+    const scope = { tenantId: selectedTenantId, userId: principal.userId } as const;
     const tenant = await this.dependencies.repositories.tenants.get(scope);
     // 凭据有效但成员关系无效时统一为不存在，不能成为租户成员枚举接口。
     if (tenant === undefined) throw new ApiFailure("not_found");

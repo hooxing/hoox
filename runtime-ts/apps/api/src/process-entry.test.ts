@@ -7,12 +7,20 @@ function productionEnvironment(): Record<string, string> {
     RUNTIME_ENV: "production",
     DATABASE_URL: "postgresql://runtime:credential@database/runtime",
     DATABASE_SCHEMA: "runtime",
+    DATABASE_RUNTIME_ROLE: "runtime",
     THREAD_CURSOR_ACTIVE_KID: "current",
-    THREAD_CURSOR_SIGNING_KEYS: "current:opaque-test-value",
-    DEV_AUTH_ENABLED: "false",
+    THREAD_CURSOR_SIGNING_KEYS: "current:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    API_JWT_ISSUER: "https://issuer.example.invalid/runtime",
+    API_JWT_AUDIENCE: "cube-runtime-api",
+    API_JWT_SIGNING_KEYS: "current-key:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    API_JWT_CLOCK_SKEW_SECONDS: "60",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
-    S3_ENDPOINT: "http://object-storage:9000",
-    S3_PUBLIC_ENDPOINT: "http://127.0.0.1:19000",
+    API_LISTEN_HOST: "127.0.0.1",
+    API_LISTEN_PORT: "3001",
+    API_TLS_MODE: "proxy",
+    API_TRUSTED_PROXY_CIDRS: "127.0.0.1",
+    S3_ENDPOINT: "https://object-storage.example.invalid:9000",
+    S3_PUBLIC_ENDPOINT: "https://objects.example.invalid",
     S3_BUCKET: "runtime-artifacts",
     S3_REGION: "us-east-1",
     S3_ACCESS_KEY_ID: "local-access-key",
@@ -30,15 +38,19 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
     DEV_AUTH_USER_A_TENANT_ID: "tenant-a-local",
     DEV_AUTH_USER_B_ID: "user-b-local",
     DEV_AUTH_USER_B_TENANT_ID: "tenant-b-local",
+    S3_ENDPOINT: "http://object-storage:9000",
+    S3_PUBLIC_ENDPOINT: "http://127.0.0.1:19000",
     ...overrides,
   };
 }
 
 describe("API 进程入口", () => {
-  it("生产配置没有真实装配器时拒绝启动", async () => {
-    await expect(startApiProcess({ environment: productionEnvironment() })).rejects.toThrow(
-      "ASSEMBLER_MISSING:api",
-    );
+  it("生产配置固定使用模块私有真实装配器，拒绝调用方注入 Fake", async () => {
+    const assembler = Object.freeze({ assemble: vi.fn() });
+    await expect(
+      startApiProcess({ environment: productionEnvironment(), assembler }),
+    ).rejects.toThrow("PRODUCTION_ASSEMBLY_UNAVAILABLE:api");
+    expect(assembler.assemble).not.toHaveBeenCalled();
   });
 
   it("开发身份只有显式开启且字段完整时才启用", () => {
@@ -48,6 +60,8 @@ describe("API 进程入口", () => {
       DEV_AUTH_ENABLED: "true",
       API_LISTEN_HOST: "127.0.0.1",
       API_LISTEN_PORT: "3001",
+      S3_ENDPOINT: "http://object-storage:9000",
+      S3_PUBLIC_ENDPOINT: "http://127.0.0.1:19000",
     };
     expect(() => parseApiProcessEnvironment(incomplete)).toThrow("MISSING:DEV_AUTH_USER_A_ID");
 
@@ -63,7 +77,7 @@ describe("API 进程入口", () => {
     expect(parsed.objectStorage.bucket).toBe("runtime-artifacts");
   });
 
-  it("开发监听地址显式配置，生产配置不会意外启用默认开发装配", async () => {
+  it("开发监听地址显式配置，生产配置不会意外启用固定开发身份", () => {
     expect(() =>
       parseApiProcessEnvironment({
         ...productionEnvironment(),
@@ -72,9 +86,6 @@ describe("API 进程入口", () => {
         API_LISTEN_PORT: "0",
       }),
     ).toThrow("INVALID:API_LISTEN_PORT");
-    await expect(startApiProcess({ environment: productionEnvironment() })).rejects.toThrow(
-      "ASSEMBLER_MISSING:api",
-    );
   });
 
   it.each(["127.0.0.1", "::1", "localhost", "LOCALHOST"])(
@@ -176,5 +187,32 @@ describe("API 进程入口", () => {
     } catch (error) {
       expect(String(error)).not.toContain("must-not-appear");
     }
+  });
+
+  it("production 明确拒绝任何 DEV_AUTH 变量，并在解析期校验 JWT/PG/对象存储边界", () => {
+    expect(() =>
+      parseApiProcessEnvironment({ ...productionEnvironment(), DEV_AUTH_ENABLED: "false" }),
+    ).toThrow("FORBIDDEN_IN_PRODUCTION:DEV_AUTH_ENABLED");
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        DEV_AUTH_USER_A_ID: "copied-development-user",
+      }),
+    ).toThrow("FORBIDDEN_IN_PRODUCTION:DEV_AUTH_USER_A_ID");
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        DATABASE_RUNTIME_ROLE: "Runtime-Owner",
+      }),
+    ).toThrow("DATABASE_RUNTIME_ROLE 格式无效");
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        S3_PUBLIC_ENDPOINT: "http://objects",
+      }),
+    ).toThrow("S3_PUBLIC_ENDPOINT 在 production 必须为无凭据的 HTTPS URL");
+    expect(() =>
+      parseApiProcessEnvironment({ ...productionEnvironment(), API_JWT_CLOCK_SKEW_SECONDS: "0" }),
+    ).toThrow("INVALID:API_JWT_CLOCK_SKEW_SECONDS");
   });
 });

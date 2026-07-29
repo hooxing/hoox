@@ -10,7 +10,11 @@ export type {
 
 export interface AuthPrincipal {
   readonly userId: UserId;
-  readonly tenantId: TenantId;
+  /**
+   * 固定开发 fixture 才携带已绑定的 tenant。生产 JWT principal 只有受验签保护的 sub，
+   * 租户由请求选择器与 PostgreSQL Membership/RLS 二次授权后再构造 TenantScope。
+   */
+  readonly tenantId?: TenantId;
 }
 
 /**
@@ -23,6 +27,12 @@ export interface AuthContextResolver {
     readonly requestId: string;
   }): Promise<AuthPrincipal | undefined>;
 }
+
+/** HTTP 层对 `X-Tenant-Id` 的单值快照；它只选择待验证租户，绝不是授权事实。 */
+export type TenantSelector =
+  | Readonly<{ readonly kind: "absent" }>
+  | Readonly<{ readonly kind: "invalid" }>
+  | Readonly<{ readonly kind: "selected"; readonly value: string }>;
 
 export interface ApiClock {
   now(): IsoTimestamp;

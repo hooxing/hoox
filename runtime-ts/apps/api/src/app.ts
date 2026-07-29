@@ -45,6 +45,7 @@ import type {
   ArchiveThreadCommandPort,
   AuthContextResolver,
   ReadinessPort,
+  TenantSelector,
   ThreadCursorCodec,
 } from "./ports.js";
 import { ApiFailure, type ApiFailureKind, ApiService } from "./service.js";
@@ -66,6 +67,14 @@ export interface ApiAppOptions {
   readonly logger?: boolean;
   readonly bodyLimitBytes?: number;
   readonly requestTimeoutMs?: number;
+  /** production 仅允许由明确 CIDR 匹配器启用反向代理语义。 */
+  readonly trustProxy?: false | ((address: string, hop: number) => boolean);
+  /** 生产直连模式在 Fastify 建立 listener 前提供已校验的 TLS 凭据。 */
+  readonly https?: Readonly<{
+    readonly key: Buffer;
+    readonly cert: Buffer;
+    readonly minVersion: "TLSv1.2";
+  }>;
 }
 
 const idempotencyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u;
@@ -97,9 +106,33 @@ function requestId(request: FastifyRequest): string {
   return String(request.id);
 }
 
+function headerValues(request: FastifyRequest, name: string): readonly string[] {
+  const rawHeaders = request.raw.rawHeaders;
+  if (Array.isArray(rawHeaders)) {
+    const values: string[] = [];
+    for (let index = 0; index + 1 < rawHeaders.length; index += 2) {
+      if (rawHeaders[index]?.toLowerCase() === name) {
+        const value = rawHeaders[index + 1];
+        if (value !== undefined) values.push(value);
+      }
+    }
+    return values;
+  }
+  const value = request.headers[name];
+  if (typeof value === "string") return [value];
+  return Array.isArray(value) ? value : [];
+}
+
 function authorization(request: FastifyRequest): string | undefined {
-  const value = request.headers.authorization;
-  return typeof value === "string" ? value : undefined;
+  const values = headerValues(request, "authorization");
+  return values.length === 1 ? values[0] : undefined;
+}
+
+function tenantSelector(request: FastifyRequest): TenantSelector {
+  const values = headerValues(request, "x-tenant-id");
+  if (values.length === 0) return Object.freeze({ kind: "absent" });
+  if (values.length !== 1 || values[0] === undefined) return Object.freeze({ kind: "invalid" });
+  return Object.freeze({ kind: "selected", value: values[0] });
 }
 
 function requireIdempotencyKey(request: FastifyRequest): string {
@@ -158,6 +191,8 @@ export function createApiApp(
     requestTimeout: options.requestTimeoutMs ?? 15_000,
     handlerTimeout: options.requestTimeoutMs ?? 15_000,
     connectionTimeout: 5_000,
+    trustProxy: options.trustProxy ?? false,
+    ...(options.https === undefined ? {} : { https: options.https }),
     onProtoPoisoning: "error",
     onConstructorPoisoning: "error",
     logController: new LogController({ disableRequestLogging: true }),
@@ -183,6 +218,8 @@ export function createApiApp(
           },
   });
   const service = new ApiService(normalizedDependencies);
+  const authenticate = async (request: FastifyRequest) =>
+    service.authenticate(authorization(request), requestId(request), tenantSelector(request));
 
   app.addHook("onSend", async (request, reply) => {
     void reply.header("x-request-id", requestId(request));
@@ -278,7 +315,7 @@ export function createApiApp(
         },
       },
       async (request) => {
-        const auth = await service.authenticate(authorization(request), requestId(request));
+        const auth = await authenticate(request);
         return success(
           request,
           await service.createThread(auth, request.body.title, requireIdempotencyKey(request)),
@@ -307,7 +344,7 @@ export function createApiApp(
         },
       },
       async (request) => {
-        const auth = await service.authenticate(authorization(request), requestId(request));
+        const auth = await authenticate(request);
         return success(
           request,
           await service.createRun(
@@ -337,7 +374,7 @@ export function createApiApp(
       },
     },
     async (request) => {
-      const auth = await service.authenticate(authorization(request), requestId(request));
+      const auth = await authenticate(request);
       return success(request, await service.listThreads(auth, request.query));
     },
   );
@@ -358,7 +395,7 @@ export function createApiApp(
       },
     },
     async (request) => {
-      const auth = await service.authenticate(authorization(request), requestId(request));
+      const auth = await authenticate(request);
       return success(request, await service.getThread(auth, request.params.threadId));
     },
   );
@@ -380,7 +417,7 @@ export function createApiApp(
       },
     },
     async (request) => {
-      const auth = await service.authenticate(authorization(request), requestId(request));
+      const auth = await authenticate(request);
       return success(request, await service.archiveThread(auth, request.params.threadId));
     },
   );
@@ -402,7 +439,7 @@ export function createApiApp(
       },
     },
     async (request) => {
-      const auth = await service.authenticate(authorization(request), requestId(request));
+      const auth = await authenticate(request);
       return success(
         request,
         await service.listLatestRuns(auth, request.params.threadId, request.query),
@@ -426,7 +463,7 @@ export function createApiApp(
       },
     },
     async (request) => {
-      const auth = await service.authenticate(authorization(request), requestId(request));
+      const auth = await authenticate(request);
       return success(
         request,
         await service.getRun(auth, request.params.threadId, request.params.runId),
@@ -452,7 +489,7 @@ export function createApiApp(
       },
     },
     async (request) => {
-      const auth = await service.authenticate(authorization(request), requestId(request));
+      const auth = await authenticate(request);
       return success(
         request,
         await service.cancelRun(auth, request.params.threadId, request.params.runId),
@@ -478,7 +515,7 @@ export function createApiApp(
         },
       },
       async (request) => {
-        const auth = await service.authenticate(authorization(request), requestId(request));
+        const auth = await authenticate(request);
         const run = await service.getRun(auth, request.params.threadId, request.params.runId);
         const read = await normalizedDependencies.experience?.listEvents({
           scope: auth.scope,
@@ -518,7 +555,7 @@ export function createApiApp(
         },
       },
       async (request) => {
-        const auth = await service.authenticate(authorization(request), requestId(request));
+        const auth = await authenticate(request);
         const run = await service.getRun(auth, request.params.threadId, request.params.runId);
         const read = await normalizedDependencies.experience?.listArtifacts({
           scope: auth.scope,
@@ -568,7 +605,7 @@ export function createApiApp(
         path,
         { schema: artifactDeliverySchema },
         async (request) => {
-          const auth = await service.authenticate(authorization(request), requestId(request));
+          const auth = await authenticate(request);
           const run = await service.getRun(auth, request.params.threadId, request.params.runId);
           const artifact = await normalizedDependencies.experience?.getArtifact({
             scope: auth.scope,

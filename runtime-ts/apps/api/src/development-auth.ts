@@ -1,5 +1,8 @@
+import type { TenantId } from "@cube-runtime/domain";
 import type { RuntimeEnvironment } from "@cube-runtime/process-runtime";
 import type { AuthContextResolver, AuthPrincipal } from "./ports.js";
+
+type DevelopmentAuthPrincipal = AuthPrincipal & Readonly<{ readonly tenantId: TenantId }>;
 
 /**
  * 仅供开发/测试黑盒 Gate 使用的固定身份解析器。
@@ -7,7 +10,7 @@ import type { AuthContextResolver, AuthPrincipal } from "./ports.js";
  */
 export function createDevelopmentAuthResolver(input: {
   readonly runtimeEnvironment: RuntimeEnvironment;
-  readonly principals: readonly [AuthPrincipal, AuthPrincipal];
+  readonly principals: readonly [DevelopmentAuthPrincipal, DevelopmentAuthPrincipal];
 }): AuthContextResolver {
   if (input.runtimeEnvironment === "production") {
     throw new Error("DEVELOPMENT_AUTH_FORBIDDEN_IN_PRODUCTION");

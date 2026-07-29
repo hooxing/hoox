@@ -32,6 +32,7 @@ import { parseWorkspaceManifest } from "@cube-runtime/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
+import { workspaceArtifactMediaType } from "./workspace-artifact-media.js";
 
 type AppliedMutation = Extract<
   RuntimeMutationResult,
@@ -2149,6 +2150,7 @@ async function settleWorkspaceArtifactIntents(
   for (const intent of intents.rows) {
     const size = Number(intent.size);
     if (!Number.isSafeInteger(size) || size < 0) throw new RuntimeWriteAbort("conflict");
+    const mediaType = workspaceArtifactMediaType(intent.source_relative_path);
     await client.query(
       `INSERT INTO blob_commits(tenant_id,operation_id,status,version,snapshot,created_at,updated_at)
        VALUES($1,$2,'completed',0,$3::jsonb,$4,$4)`,
@@ -2169,7 +2171,7 @@ async function settleWorkspaceArtifactIntents(
       `INSERT INTO blob_references(
          tenant_id,reference_id,operation_id,state,purpose,sha256,size,media_type,
          staging_upload_id,lifecycle_id,incarnation_id,physical_object_key,created_at,updated_at
-       ) VALUES($1,$2,$3,'stable','workspace',$4,$5,'application/octet-stream',$2,$6::uuid,$7::uuid,$8,$9,$9)`,
+       ) VALUES($1,$2,$3,'stable','workspace',$4,$5,$10,$2,$6::uuid,$7::uuid,$8,$9,$9)`,
       [
         input.tenantId,
         intent.blob_reference_id,
@@ -2180,6 +2182,7 @@ async function settleWorkspaceArtifactIntents(
         intent.blob_incarnation_id,
         intent.physical_object_key,
         input.databaseNow,
+        mediaType,
       ],
     );
     // latest FK 是 deferred；先写入带最终 head 的 Resource，再补不可变 Version。
@@ -2205,7 +2208,7 @@ async function settleWorkspaceArtifactIntents(
          source_relative_path,created_at
        ) VALUES(
          $1,$2,$3,1,NULL,$4,'workspace',$5::uuid,$6::uuid,$7,$8,
-         'application/octet-stream',$9,$10,$11,$12,$13
+         $14,$9,$10,$11,$12,$13
        )`,
       [
         input.tenantId,
@@ -2221,6 +2224,7 @@ async function settleWorkspaceArtifactIntents(
         input.revisionId,
         intent.source_relative_path,
         input.databaseNow,
+        mediaType,
       ],
     );
     await client.query(
@@ -2232,7 +2236,7 @@ async function settleWorkspaceArtifactIntents(
          source_workspace_id,workspace_revision_id,source_relative_path,created_at,updated_at
        ) VALUES(
          $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'publishing',$14,'workspace',
-         $15::uuid,$16::uuid,$17,$18,'application/octet-stream',$19,$20,$21,$22,$23,$23
+         $15::uuid,$16::uuid,$17,$18,$24,$19,$20,$21,$22,$23,$23
        )`,
       [
         input.tenantId,
@@ -2258,6 +2262,7 @@ async function settleWorkspaceArtifactIntents(
         input.revisionId,
         intent.source_relative_path,
         input.databaseNow,
+        mediaType,
       ],
     );
     await client.query(

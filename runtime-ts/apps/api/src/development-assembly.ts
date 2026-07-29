@@ -92,6 +92,8 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           accessKeyId: configuration.objectStorage.accessKeyId,
           secretAccessKey: configuration.objectStorage.secretAccessKey,
           forcePathStyle: configuration.objectStorage.forcePathStyle,
+          // Worker 将 Workspace/Artifact 对象置于这个受控前缀；下载端必须解析同一物理命名空间。
+          prefix: "agent-worker",
           maxBlobSizeBytes: developmentApiMaxBlobSizeBytes,
         },
         persistence.blobLifecycle,

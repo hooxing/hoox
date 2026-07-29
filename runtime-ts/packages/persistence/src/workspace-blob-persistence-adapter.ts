@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import {
-  WorkspaceDependencyError,
   type WorkspaceCandidateBlob,
   type WorkspaceCandidateBlobWritePort,
+  WorkspaceDependencyError,
 } from "@cube-runtime/workspace";
 import {
   type BlobCommitSnapshot,
@@ -11,8 +11,8 @@ import {
   transitionBlobCommit,
 } from "./blob-commit-protocol.js";
 import {
-  BlobStoreError,
   type BlobStore,
+  BlobStoreError,
   type StableBlobGcClaimPort,
   type StableBlobLifecycleAllocationPort,
   type StableBlobRef,

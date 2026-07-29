@@ -424,8 +424,9 @@ export class PgArtifactDeliveryRepository implements ArtifactDeliveryRepositoryP
              JOIN blob_incarnations incarnation ON incarnation.tenant_id=version.tenant_id
                                                AND incarnation.lifecycle_id=version.blob_lifecycle_id
                                                AND incarnation.incarnation_id=version.blob_incarnation_id
-            WHERE version.tenant_id=$1 AND version.id=$2
-              AND resource.visibility='searchable' AND reference.state='stable'
+             WHERE version.tenant_id=$1 AND version.id=$2
+               AND version.blob_purpose='resource'
+               AND resource.visibility='searchable' AND reference.state='stable'
               AND lifecycle.state='active'
               AND lifecycle.current_incarnation_id=version.blob_incarnation_id
               AND incarnation.state='active'`,

@@ -34,7 +34,8 @@ Artifact settlement 和下载读侧连接为一条失败关闭事实链。
   `tenant + attempt + idempotency key` 确定性派生。
 - Workspace 来源的 `publish_artifact` 返回 `ARTIFACT_ACCEPTED`，不再调用 Resource preparation 或
   `finishPublication`，也不返回 published 快照。同键同完整 identity 可读回；摘要或别名冲突永久拒绝；COMMIT
-  响应未知只按原授权和幂等键读回，不创建第二份意图。
+  响应未知只按原授权和幂等键读回，不创建第二份意图。旧式 `beginPublication` 只接受
+  `blob_purpose='resource'` 的 ResourceVersion，不能复用 workspace-purpose 版本创建旁路 Artifact。
 - 完成门要求传入本轮 `workspaceRevisionId`。Repository 重新验证 Run/Workspace/Attempt scope，并只把与该
   prepared candidate 同 Attempt、同 Revision、同 source path 且确实存在 candidate file 的 required intent
   视为可结算；历史 Revision 的 published Artifact、其他 candidate 或裸路径均不能放行。
@@ -77,7 +78,8 @@ Artifact settlement 和下载读侧连接为一条失败关闭事实链。
 ## 可逆性
 
 停止新 Worker 后可回退代码，使 intent 不再创建。down 只允许 development/test，并会先删除由 intent 确定性
-派生的 workspace-purpose settlement、command、Artifact、ResourceVersion、Resource 与专用 Blob reference/commit，
-解除后续 correction 对被删 Artifact 的 replacement 指针，再恢复 resource-only CHECK；普通 resource-purpose 事实
+派生的 workspace-purpose settlement、command、Artifact、ResourceVersion、Resource 与专用 Blob reference/commit；
+清理范围按 intent 的 ResourceVersion 找到全部历史旁路 Artifact，并递归包含 replacement 后继，解除闭包内
+replacement 指针后再按 FK 顺序删除，最后恢复 resource-only CHECK。普通 resource-purpose 事实
 不受影响。生产数据不可把该破坏性 down 当作兼容回退；若发布链异常，应停止 Artifact 工具和下载签发，但不能
 放宽完成门或把 pending intent 投影为已发布。

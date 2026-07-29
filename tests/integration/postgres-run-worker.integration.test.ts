@@ -3638,6 +3638,81 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
   });
 
   it("0016 写入 workspace Artifact 事实后可安全回退并重新迁移", async () => {
+    const workspaceRoot = await admin.query<{
+      readonly tenant_id: string;
+      readonly id: string;
+    }>(
+      `SELECT tenant_id,id FROM "${schema}".artifact_publications
+        WHERE blob_purpose='workspace' ORDER BY id LIMIT 1`,
+    );
+    const root = workspaceRoot.rows[0];
+    if (root === undefined) throw new Error("缺少 workspace Artifact 回退 fixture");
+    const legacyArtifactId = `workspace-legacy-artifact-${suffix}`;
+    const legacyCorrectionId = `workspace-legacy-correction-${suffix}`;
+    await withTenantTransaction(runtime, { tenantId: tenantId(root.tenant_id) }, async (client) => {
+      await client.query(
+        `INSERT INTO artifact_publications(
+           tenant_id,id,thread_id,run_id,attempt_id,workspace_id,root_run_id,
+           resource_id,resource_version_id,replaces_artifact_id,name,purpose,
+           deliverable_key,status,blob_reference_id,blob_purpose,blob_lifecycle_id,
+           blob_incarnation_id,physical_object_key,digest,media_type,size,
+           source_workspace_id,workspace_revision_id,source_relative_path,created_at,updated_at
+         )
+         SELECT tenant_id,$2,thread_id,run_id,attempt_id,workspace_id,root_run_id,
+                resource_id,resource_version_id,NULL,'兼容旧发布',purpose,
+                deliverable_key,'publishing',blob_reference_id,blob_purpose,blob_lifecycle_id,
+                blob_incarnation_id,physical_object_key,digest,media_type,size,
+                source_workspace_id,workspace_revision_id,source_relative_path,
+                clock_timestamp(),clock_timestamp()
+           FROM artifact_publications WHERE tenant_id=$1 AND id=$3`,
+        [root.tenant_id, legacyArtifactId, root.id],
+      );
+      await client.query(
+        `INSERT INTO artifact_publication_commands(
+           tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+           idempotency_key,command_digest,artifact_id
+         )
+         SELECT tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+                $3,$4,$2 FROM artifact_publications WHERE tenant_id=$1 AND id=$2`,
+        [root.tenant_id, legacyArtifactId, `legacy-${suffix}`, "7".repeat(64)],
+      );
+      await client.query(
+        `INSERT INTO artifact_publication_settlements(tenant_id,artifact_id,target)
+         VALUES($1,$2,'failed')`,
+        [root.tenant_id, legacyArtifactId],
+      );
+      await client.query(
+        `INSERT INTO artifact_publications(
+           tenant_id,id,thread_id,run_id,attempt_id,workspace_id,root_run_id,
+           resource_id,resource_version_id,replaces_artifact_id,name,purpose,
+           deliverable_key,status,blob_reference_id,blob_purpose,blob_lifecycle_id,
+           blob_incarnation_id,physical_object_key,digest,media_type,size,
+           source_workspace_id,workspace_revision_id,source_relative_path,created_at,updated_at
+         )
+         SELECT tenant_id,$2,thread_id,run_id,attempt_id,workspace_id,root_run_id,
+                resource_id,resource_version_id,$3,'兼容旧发布修正',purpose,
+                deliverable_key,'publishing',blob_reference_id,blob_purpose,blob_lifecycle_id,
+                blob_incarnation_id,physical_object_key,digest,media_type,size,
+                source_workspace_id,workspace_revision_id,source_relative_path,
+                clock_timestamp(),clock_timestamp()
+           FROM artifact_publications WHERE tenant_id=$1 AND id=$3`,
+        [root.tenant_id, legacyCorrectionId, legacyArtifactId],
+      );
+      await client.query(
+        `INSERT INTO artifact_publication_commands(
+           tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+           idempotency_key,command_digest,artifact_id
+         )
+         SELECT tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
+                $3,$4,$2 FROM artifact_publications WHERE tenant_id=$1 AND id=$2`,
+        [root.tenant_id, legacyCorrectionId, `legacy-correction-${suffix}`, "8".repeat(64)],
+      );
+      await client.query(
+        `INSERT INTO artifact_publication_settlements(tenant_id,artifact_id,target)
+         VALUES($1,$2,'published')`,
+        [root.tenant_id, legacyCorrectionId],
+      );
+    });
     const workspaceFactsBefore = await admin.query<{
       readonly artifact_count: number;
       readonly resource_version_count: number;
@@ -3680,6 +3755,17 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       resource_version_count: 0,
       restored_checks: 2,
     });
+    const legacyFactsAfter = await admin.query<{ readonly count: number }>(
+      `SELECT (
+         (SELECT count(*) FROM "${schema}".artifact_publications WHERE id=ANY($1::text[]))
+         +(SELECT count(*) FROM "${schema}".artifact_publication_commands
+            WHERE artifact_id=ANY($1::text[]))
+         +(SELECT count(*) FROM "${schema}".artifact_publication_settlements
+            WHERE artifact_id=ANY($1::text[]))
+       )::int AS count`,
+      [[legacyArtifactId, legacyCorrectionId]],
+    );
+    expect(legacyFactsAfter.rows[0]?.count).toBe(0);
     const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
     expect(restored.at(-1)?.version).toBe(migrationContract.latestVersion);
     const acl = await admin.query<{

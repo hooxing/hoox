@@ -15,6 +15,8 @@ export class WorkspaceApplicationError extends Error {
   constructor(
     readonly code: WorkspaceApplicationErrorCode,
     message: string,
+    /** 仅允许固定枚举式诊断，不承载 Provider、路径或对象身份。 */
+    readonly diagnostic?: string,
   ) {
     super(message);
     this.name = "WorkspaceApplicationError";

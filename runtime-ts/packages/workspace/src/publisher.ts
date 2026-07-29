@@ -182,6 +182,7 @@ export class WorkspacePublisher {
             throw new WorkspaceApplicationError(
               "DEPENDENCY_FAILED",
               "候选 Blob 端口未消费完整文件流",
+              "candidate_stream_pending",
             );
           }
           await verified.result;
@@ -679,10 +680,30 @@ function parseSandboxEntry(value: unknown): SandboxWorkspaceEntry {
 
 function parseCandidateBlob(value: unknown): WorkspaceCandidateBlob {
   const input = plainDataRecord(value, "Workspace candidate Blob");
-  exactKeys(input, ["content", "object"], "Workspace candidate Blob");
+  const keys = Object.keys(input).sort();
+  if (
+    (keys.length !== 2 || keys[0] !== "content" || keys[1] !== "object") &&
+    (keys.length !== 3 ||
+      keys[0] !== "content" ||
+      keys[1] !== "object" ||
+      keys[2] !== "referenceId")
+  ) {
+    throw new WorkspaceApplicationError("DEPENDENCY_FAILED", "Workspace candidate Blob 字段无效");
+  }
+  const referenceId = input.referenceId;
+  if (
+    referenceId !== undefined &&
+    (typeof referenceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u.test(referenceId))
+  ) {
+    throw new WorkspaceApplicationError(
+      "DEPENDENCY_FAILED",
+      "Workspace candidate Blob 引用身份无效",
+    );
+  }
   return Object.freeze({
     content: parseContentIdentity(input.content),
     object: parseStableObjectIdentity(input.object),
+    ...(referenceId === undefined ? {} : { referenceId }),
   });
 }
 

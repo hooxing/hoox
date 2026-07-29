@@ -13,6 +13,8 @@ export * from "./pg-waiting-recovery.js";
 export * from "./pg-recovery-metrics.js";
 export * from "./tool-observation-rollout-adapter.js";
 export * from "./trace-blob-persistence-adapter.js";
+export * from "./workspace-blob-persistence-adapter.js";
+export * from "./pg-workspace-manifest.js";
 export * from "./pg-sandbox-cleanup-consumer.js";
 export type {
   ResourcePromotionCommitPort,

@@ -80,7 +80,6 @@ export interface TrustedWaitingRecoveryEffectRequest {
   readonly workspace: {
     readonly headRevisionId: string | null;
     readonly manifestDigest: string | null;
-    readonly objectKey: string | null;
   };
   readonly priorProof: SandboxProof | null;
   readonly requestDigest: string;
@@ -250,10 +249,7 @@ function parseStoredPlan(payload: unknown): StoredEffectPlan {
     (workspace.manifestDigest !== null &&
       (typeof workspace.manifestDigest !== "string" ||
         !/^[0-9a-f]{64}$/u.test(workspace.manifestDigest))) ||
-    (workspace.objectKey !== null &&
-      (typeof workspace.objectKey !== "string" || workspace.objectKey.trim().length === 0)) ||
-    (workspace.headRevisionId === null) !== (workspace.manifestDigest === null) ||
-    (workspace.headRevisionId === null) !== (workspace.objectKey === null)
+    (workspace.headRevisionId === null) !== (workspace.manifestDigest === null)
   ) {
     throw new TypeError("Workspace 副作用事实无效");
   }
@@ -997,7 +993,7 @@ class PgWaitingRecoveryStoreImpl {
             FROM waiting_recovery_checkpoints checkpoint
            WHERE effect.tenant_id=$1 AND effect.checkpoint_id=$2
              AND effect.intent_id=$3 AND effect.effect=$4 AND effect.state='pending'
-             AND effect.payload->>'requestDigest'=$16
+             AND effect.payload->>'requestDigest'=$15
              AND checkpoint.tenant_id=effect.tenant_id
              AND checkpoint.checkpoint_id=effect.checkpoint_id
              AND checkpoint.attempt_id=$6 AND checkpoint.attempt_generation=$7
@@ -1071,7 +1067,6 @@ class PgWaitingRecoveryStoreImpl {
                 AND workspace.id=$11 AND workspace.thread_id=$12
                 AND workspace.current_revision_id IS NOT DISTINCT FROM $13
                 AND revision.digest IS NOT DISTINCT FROM $14
-                AND revision.object_key IS NOT DISTINCT FROM $15
              )`,
           [
             row.tenant_id,
@@ -1088,7 +1083,6 @@ class PgWaitingRecoveryStoreImpl {
             row.thread_id,
             plan.workspace.headRevisionId,
             plan.workspace.manifestDigest,
-            plan.workspace.objectKey,
             requestDigest,
           ],
         );
@@ -1647,10 +1641,10 @@ class PgWaitingRecoveryStoreImpl {
     const headRevisionId = workspace.rows[0]?.current_revision_id;
     if (headRevisionId === undefined) return undefined;
     if (headRevisionId === null) {
-      return { headRevisionId: null, manifestDigest: null, objectKey: null };
+      return { headRevisionId: null, manifestDigest: null };
     }
-    const revision = await client.query<{ digest: string; object_key: string }>(
-      `SELECT digest,object_key FROM workspace_revisions
+    const revision = await client.query<{ digest: string }>(
+      `SELECT digest FROM workspace_revisions
         WHERE tenant_id=$1 AND workspace_id=$2 AND id=$3 AND thread_id=$4`,
       [row.tenant_id, row.workspace_id, headRevisionId, row.thread_id],
     );
@@ -1659,7 +1653,6 @@ class PgWaitingRecoveryStoreImpl {
     return {
       headRevisionId,
       manifestDigest: fact.digest,
-      objectKey: fact.object_key,
     };
   }
 

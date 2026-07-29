@@ -20,6 +20,7 @@ import type {
   SandboxSessionRegistryPort,
   SandboxSettlementResult,
 } from "@cube-runtime/run-contracts";
+import { parseWorkspaceManifest } from "@cube-runtime/workspace";
 import {
   assertControlledRolloutProjection,
   outboxPayloadDigest,
@@ -99,6 +100,20 @@ function boundedDuration(value: number, name: string): number {
     throw new TypeError(`${name} 必须是 1 到 86400000 毫秒之间的整数`);
   }
   return value;
+}
+
+function validWorkspaceManifest(value: unknown, tenantId: string): boolean {
+  try {
+    parseWorkspaceManifest(value, tenantId, {
+      maxFiles: 10_000,
+      maxTotalBytes: 512 * 1024 * 1024,
+      maxSingleFileBytes: 512 * 1024 * 1024,
+      maxPathUtf8Bytes: 4_096,
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function isPgCode(error: unknown, code: string): boolean {
@@ -237,7 +252,7 @@ function mutationStorageShapeValid(command: RuntimeMutation): boolean {
   return (
     command.workspaceChange === undefined ||
     (boundedIdentifier(command.workspaceChange.revisionId) &&
-      boundedIdentifier(command.workspaceChange.objectKey, 1_024))
+      validWorkspaceManifest(command.workspaceChange.manifest, command.workspaceChange.tenantId))
   );
 }
 
@@ -1434,7 +1449,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         `INSERT INTO workspace_revisions(
            tenant_id,workspace_id,id,thread_id,revision_number,parent_revision_id,
            created_by_run_id,lease_epoch,object_key,digest,created_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NULL,$9,$10)`,
         [
           change.tenantId,
           change.workspaceId,
@@ -1444,11 +1459,58 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           change.parentRevisionId ?? null,
           change.rootRunId,
           command.fence.workspaceLease.epoch,
-          change.objectKey,
-          change.digest,
+          change.manifest.digest,
           databaseNow,
         ],
       );
+      const totalBytes = change.manifest.entries.reduce(
+        (sum, entry) => sum + entry.content.size,
+        0,
+      );
+      await client.query(
+        `INSERT INTO workspace_revision_manifests(
+           tenant_id,workspace_id,revision_id,thread_id,schema_version,manifest_digest,entry_count,total_bytes,created_at
+         ) VALUES ($1,$2,$3,$4,1,$5,$6,$7,$8)`,
+        [
+          change.tenantId,
+          change.workspaceId,
+          change.revisionId,
+          change.threadId,
+          change.manifest.digest,
+          change.manifest.entries.length,
+          totalBytes,
+          databaseNow,
+        ],
+      );
+      for (const entry of change.manifest.entries) {
+        // 每一条 manifest entry 都必须在同一事务内锁定 exact stable incarnation；不能只保存
+        // digest 或非约束 physical key，否则 GC/重用后会把 revision 指向另一个对象。
+        const inserted = await client.query(
+          `INSERT INTO workspace_revision_files(
+             tenant_id,workspace_id,revision_id,relative_path,content_sha256,size,
+             blob_lifecycle_id,blob_incarnation_id,physical_object_key
+           )
+           SELECT $1,$2,$3,$4,$5,$6,incarnation.lifecycle_id,incarnation.incarnation_id,incarnation.physical_object_key
+             FROM blob_incarnations incarnation
+             JOIN blob_lifecycles lifecycle
+               ON lifecycle.tenant_id=incarnation.tenant_id AND lifecycle.lifecycle_id=incarnation.lifecycle_id
+            WHERE incarnation.tenant_id=$1 AND incarnation.incarnation_id=$7::uuid
+              AND incarnation.physical_object_key=$8 AND incarnation.purpose='workspace'
+              AND incarnation.sha256=$5 AND incarnation.size=$6
+              AND incarnation.state='active' AND lifecycle.state='active'`,
+          [
+            change.tenantId,
+            change.workspaceId,
+            change.revisionId,
+            entry.path,
+            entry.content.sha256,
+            entry.content.size,
+            entry.object.incarnationId,
+            entry.object.physicalObjectKey,
+          ],
+        );
+        if (inserted.rowCount !== 1) throw new RuntimeWriteAbort("conflict");
+      }
       await client.query(
         `UPDATE workspaces
             SET current_revision_number=$3,current_revision_id=$4,updated_at=$5

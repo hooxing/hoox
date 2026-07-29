@@ -170,14 +170,20 @@ describe("生产 Workspace revision 安全下限", () => {
       verifier.verify({
         scope: claim().scope as ExecutionScope,
         sandbox: {
-          id: "sandbox-workspace",
-          command: async () => ({ stdout: "", stderr: "", exitCode: 73 }),
-          runCode: async () => ({ stdout: [], stderr: [] }),
-          readFile: async () => "",
-          writeFile: async () => undefined,
-          pause: async () => undefined,
-          kill: async () => undefined,
+          registryId: "registry-workspace",
+          providerSandboxId: "sandbox-workspace",
+          mode: "created",
+          sandbox: {
+            id: "sandbox-workspace",
+            command: async () => ({ stdout: "", stderr: "", exitCode: 73 }),
+            runCode: async () => ({ stdout: [], stderr: [] }),
+            readFile: async () => "",
+            writeFile: async () => undefined,
+            pause: async () => undefined,
+            kill: async () => undefined,
+          },
         },
+        operationKey: "workspace-verify-test",
       }),
     ).rejects.toThrow("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
   });

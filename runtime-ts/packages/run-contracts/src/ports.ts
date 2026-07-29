@@ -12,6 +12,7 @@ import type {
 } from "@cube-runtime/domain";
 import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { SandboxHandle, UncertainLifecycleEvent } from "@cube-runtime/sandbox";
+import type { WorkspaceManifest } from "@cube-runtime/workspace";
 
 export interface ExecutionScope {
   readonly tenantId: TenantId;
@@ -465,19 +466,42 @@ export interface WorkspaceRevisionCandidate {
   readonly rootRunId: RunId;
   readonly parentRevisionId?: WorkspaceRevisionId;
   readonly revisionId: WorkspaceRevisionId;
-  readonly objectKey: string;
-  readonly digest: Sha256Digest;
+  /**
+   * Revision 的唯一内容事实是逐文件 stable Blob 的不可变 manifest。它绝不能退化为单一
+   * objectKey；物理对象键只保留在每个 entry 的 stable incarnation 身份中。
+   */
+  readonly manifest: WorkspaceManifest;
 }
 
 export type ValidatedWorkspaceChange = WorkspaceRevisionCandidate;
 
 export interface WorkspaceRevisionVerifierPort {
+  /**
+   * 必须在 Session/模型调用前执行。实现从 revision manifest 物化当前 head；空 head 也要
+   * 经 journal 记录，从而不能把依赖不可用误判成空 Workspace。
+   */
+  materialize(input: {
+    readonly scope: ExecutionScope;
+    readonly expectedCurrentRevisionId?: WorkspaceRevisionId;
+    readonly sandbox: SandboxSessionRef;
+    readonly operationKey: string;
+    readonly signal?: AbortSignal;
+  }): Promise<void>;
+  /** 模型 settled 后发布 Sandbox snapshot，返回尚未提交的 manifest-aware revision 候选。 */
   verify(input: {
     readonly scope: ExecutionScope;
     readonly expectedCurrentRevisionId?: WorkspaceRevisionId;
-    readonly sandbox: SandboxHandle;
+    readonly sandbox: SandboxSessionRef;
+    readonly operationKey: string;
+    readonly signal?: AbortSignal;
   }): Promise<WorkspaceRevisionCandidate | undefined>;
 }
+
+/**
+ * Workspace 的 Worker 边界。保留旧名称是为了避免拆分部署期间的二进制接口断裂；新装配必须
+ * 使用该完整端口，不能仅注入一个“非空则失败”的 verifier。
+ */
+export type WorkspaceRuntimePort = WorkspaceRevisionVerifierPort;
 
 export interface SandboxSessionRef {
   readonly registryId: string;

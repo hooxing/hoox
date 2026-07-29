@@ -6,4 +6,5 @@ export * from "./pg-observation-assembly.js";
 export type * from "./ports.js";
 export * from "./process-entry.js";
 export * from "./run-worker.js";
+export * from "./workspace-runtime.js";
 export * from "./waiting-recovery.js";

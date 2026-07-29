@@ -46,9 +46,11 @@ Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 必须等于
 `MODEL_ID`；不要把预算值猜测为 Provider 元数据。生产模式保持更严格的预算元数据匹配策略，且本仓库
 不提供生产 Worker 入口。
 
-当前 Workspace revision 发布尚未接通。为了不把 Sandbox 文件伪装为已保存的成果，纯聊天提示可以正常
-结束；任何让模型写入非空 `/workspace` 的 Run 都会失败关闭并进入恢复路径。Artifact 发布也尚未可用，
-因此 Web 体验请使用不要求写工作区或下载 Artifact 的纯聊天提示。
+development Worker 已接通 Workspace revision：在创建模型 Session 前从已提交的逐文件 stable Blob manifest
+物化当前 head，模型结束后再发布 Sandbox snapshot，并在同一 RuntimeMutation 事务中提交 revision、head 与
+文件 incarnation 引用。运行前必须完成 `0014_workspace_manifest_journal` 迁移；任何 manifest、Blob、租约或
+Sandbox 身份不确定都会失败关闭进入恢复路径。Artifact 发布仍是独立的交付闭环，Workspace 文件不会自动
+成为用户可下载的 Artifact。
 
 ## 开发基线
 

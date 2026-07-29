@@ -1112,9 +1112,14 @@ export class PgBlobLifecycleRepository
         if (lifecycle.state === "deleted") return { status: "already_deleted" as const };
         if (lifecycle.state === "active") {
           const reachable = await client.query<{ count: string }>(
-            `SELECT count(*)::text AS count FROM blob_references
-              WHERE tenant_id = $1 AND lifecycle_id = $2 AND incarnation_id = $3
-                AND state = 'stable'`,
+            `SELECT (
+                (SELECT count(*) FROM blob_references
+                  WHERE tenant_id = $1 AND lifecycle_id = $2 AND incarnation_id = $3
+                    AND state = 'stable')
+                +
+                (SELECT count(*) FROM workspace_revision_files
+                  WHERE tenant_id = $1 AND blob_lifecycle_id = $2 AND blob_incarnation_id = $3)
+              )::text AS count`,
             [input.scope.tenantId, lifecycle.lifecycle_id, input.blob.incarnationId],
           );
           const promotions = await client.query<{ count: string }>(

@@ -51,6 +51,7 @@
 | [ADR-0043](0043-cubesandbox-proxy-default-routing.md) | CubeSandbox 数据面缺省路由 | 已接受 | 2026-07-28 |
 | [ADR-0044](0044-agent-workbench-information-architecture.md) | Agent 工作台三段式信息架构 | 已接受 | 2026-07-28 |
 | [ADR-0045](0045-thread-latest-run-recovery-contract.md) | Thread 最新 Run 恢复读取契约 | 已接受 | 2026-07-28 |
+| [ADR-0046](0046-workspace-manifest-runtime-closure.md) | Workspace manifest Runtime 闭环 | 已接受 | 2026-07-29 |
 
 ## 何时必须记录
 

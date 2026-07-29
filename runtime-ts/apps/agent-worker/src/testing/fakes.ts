@@ -26,6 +26,7 @@ import {
 } from "@cube-runtime/domain";
 import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
+import { createWorkspaceManifest } from "@cube-runtime/workspace";
 import {
   outboxPayloadDigest,
   rolloutProjectionDigest,
@@ -560,8 +561,8 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
         rootRun: record.run,
         leaseEpoch: command.fence.workspaceLease.epoch,
         revisionId: command.workspaceChange.revisionId,
-        objectKey: command.workspaceChange.objectKey,
-        digest: command.workspaceChange.digest,
+        objectKey: "legacy-manifest-not-used",
+        digest: sha256Digest(command.workspaceChange.manifest.digest),
         now,
       });
       record.workspace = commit.workspace;
@@ -799,8 +800,17 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
 
 export class FakeRevisionVerifier implements WorkspaceRevisionVerifierPort {
   verifyCount = 0;
+  materializeCount = 0;
   nextRevisionId: WorkspaceRevisionId | undefined;
   beforeReturn?: () => void | Promise<void>;
+  beforeMaterializeReturn?: () => void | Promise<void>;
+  throwOnMaterialize = false;
+
+  async materialize(): Promise<void> {
+    this.materializeCount += 1;
+    await this.beforeMaterializeReturn?.();
+    if (this.throwOnMaterialize) throw new Error("Workspace materialize failed");
+  }
 
   async verify(
     input: Parameters<WorkspaceRevisionVerifierPort["verify"]>[0],
@@ -820,8 +830,10 @@ export class FakeRevisionVerifier implements WorkspaceRevisionVerifierPort {
             ? {}
             : { parentRevisionId: input.expectedCurrentRevisionId }),
           revisionId,
-          objectKey: `workspace/${revisionId}.tar`,
-          digest: sha256Digest("a".repeat(64)),
+          manifest: createWorkspaceManifest(
+            { tenantId: input.scope.tenantId, entries: [] },
+            { maxFiles: 1, maxTotalBytes: 1 },
+          ),
         };
   }
 }

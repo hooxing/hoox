@@ -7,6 +7,9 @@ import {
   PgRecoveryMetrics,
   PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
+  PgWorkspaceManifestRepository,
+  PgWorkspaceStableBlobAccess,
+  DurableWorkspaceCandidateBlobWriter,
   probePostgres,
   probeS3BlobStore,
 } from "@cube-runtime/persistence";
@@ -33,12 +36,12 @@ import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
   DatabaseRunCancellation,
-  FailClosedWorkspaceRevisionVerifier,
   NoDeclaredArtifactCompletionGate,
   ProcessShutdown,
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
 import { RunWorker } from "./run-worker.js";
+import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
 
 const workerEnvironmentSchema = Object.freeze({
   DATABASE_URL: urlEnvironmentField({
@@ -296,6 +299,21 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
         maxBlobSizeBytes: 8 * 1024 * 1024,
       } as const;
       const blobs = createS3BlobStore(s3Config, blobRepository);
+      const workspacePolicy = Object.freeze({
+        maxEntries: 1_024,
+        maxFiles: 512,
+        maxTotalBytes: 8 * 1024 * 1024,
+        maxSingleFileBytes: 2 * 1024 * 1024,
+        maxChunkBytes: 64 * 1024,
+        maxPathUtf8Bytes: 1_024,
+        historicalManifest: Object.freeze({
+          maxFiles: 512,
+          maxTotalBytes: 8 * 1024 * 1024,
+          maxSingleFileBytes: 2 * 1024 * 1024,
+          maxPathUtf8Bytes: 1_024,
+        }),
+      });
+      const workspaceRepository = new PgWorkspaceManifestRepository(pool, workspacePolicy);
       const rolloutRepository = new PgRuntimeRolloutRepository(pool);
       const durableObservation = createPgDurableObservationSession({
         blobRepository,
@@ -334,11 +352,37 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
         configuration.sandbox.templateId,
       );
       const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
+      const workspaces = new ManifestWorkspaceRuntime({
+        journal: workspaceRepository,
+        revisions: workspaceRepository,
+        stableBlobs: new PgWorkspaceStableBlobAccess(pool, blobs),
+        candidates: new DurableWorkspaceCandidateBlobWriter(
+          blobRepository,
+          blobs,
+          workspacePolicy.maxSingleFileBytes,
+        ),
+        policy: workspacePolicy,
+        openSandboxWorkspace: async ({ executionScope, session, signal }) =>
+          upstreamSandboxes.gateway.connectWorkspace(
+            upstreamSandboxes.workspaceCapability({ scope: executionScope, session }),
+            {
+              maxEntries: workspacePolicy.maxEntries,
+              maxFileBytes: workspacePolicy.maxSingleFileBytes,
+              maxTotalBytes: workspacePolicy.maxTotalBytes,
+              maxPathUtf8Bytes: workspacePolicy.maxPathUtf8Bytes,
+              maxCommandOutputBytes: 256 * 1024,
+              readChunkBytes: workspacePolicy.maxChunkBytes,
+              maxSnapshots: 8,
+              operationTimeoutMs: 5_000,
+            },
+            signal === undefined ? {} : { signal },
+          ),
+      });
       const shutdown = new ProcessShutdown();
       const worker = new RunWorker(
         {
           persistence: new PgExecutionPersistence(pool),
-          revisions: new FailClosedWorkspaceRevisionVerifier(),
+          revisions: workspaces,
           sandboxes,
           orphanSandboxes: sandboxes,
           sessions,

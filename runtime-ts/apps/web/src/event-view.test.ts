@@ -53,6 +53,18 @@ describe("用户运行进度投影", () => {
     expect(progress.finalMessage).toBe("你好 世界\n\n- 第一项\n- 第二项");
   });
 
+  it("不截断超过 16k 的多段正文，并以线性聚合保留全部文本", () => {
+    const first = "甲".repeat(12_000);
+    const second = ` 世界\n${"乙".repeat(12_000)}`;
+    const progress = buildRunProgress([
+      event(1, "message.delta", { delta: first }),
+      event(2, "message.delta", { delta: second }),
+    ]);
+
+    expect(progress.finalMessage).toBe(`${first}${second}`);
+    expect(progress.finalMessage).toHaveLength(24_004);
+  });
+
   it("将 waiting 问题投影为受限的用户输入提示", () => {
     const progress = buildRunProgress([
       event(1, "message.delta", { delta: "我需要确认一个选项。" }),

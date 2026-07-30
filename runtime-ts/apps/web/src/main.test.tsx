@@ -354,6 +354,74 @@ describe("Agent 工作台恢复接入", () => {
     expect(apiClient.getRun).toHaveBeenCalledWith(selectedThread.id, newRun.id);
   });
 
+  it("切换 Thread 后不展示上一 Run 的交付物", async () => {
+    const first = thread("thread_artifact_first");
+    const second = thread("thread_artifact_second");
+    const firstRun = run("run_artifact_first", first.id);
+    const secondRecovery = deferred<readonly Run[]>();
+    const previousArtifact = { ...textArtifact(), name: "上一会话.txt" };
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [first, second]),
+      listLatestRuns: vi.fn((threadId: string) =>
+        threadId === first.id ? Promise.resolve([firstRun]) : secondRecovery.promise,
+      ),
+      getRun: vi.fn(async () => firstRun),
+      listArtifacts: vi.fn(async () => [previousArtifact]),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+    expect(container.textContent).toContain(previousArtifact.name);
+
+    const secondButton = [...container.querySelectorAll<HTMLButtonElement>(".thread")].find(
+      (button) => button.textContent?.includes(second.title),
+    );
+    if (secondButton === undefined) throw new Error("未找到第二个会话按钮");
+    act(() => secondButton.click());
+    await settleEffects();
+
+    expect(container.textContent).not.toContain(previousArtifact.name);
+    expect(container.querySelector(".inline-artifact-delivery")).toBeNull();
+  });
+
+  it("新建 Run 后不展示上一 Run 的交付物", async () => {
+    const selectedThread = thread("thread_new_run_artifact");
+    const previousRun = run("run_previous_artifact", selectedThread.id);
+    const newRun = run("run_new_artifact", selectedThread.id);
+    const previousArtifact = { ...textArtifact(), name: "上一运行.txt" };
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [selectedThread]),
+      listLatestRuns: vi.fn(async () => [previousRun]),
+      createRun: vi.fn(async () => newRun),
+      getRun: vi.fn(async (_threadId: string, runId: string) =>
+        runId === previousRun.id ? previousRun : newRun,
+      ),
+      listArtifacts: vi.fn(async (_threadId: string, runId: string) =>
+        runId === previousRun.id ? [previousArtifact] : [],
+      ),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+    expect(container.textContent).toContain(previousArtifact.name);
+
+    const textarea = container.querySelector("textarea");
+    const form = container.querySelector("form");
+    if (textarea === null || form === null) throw new Error("未渲染会话输入区");
+    act(() => {
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      valueSetter?.call(textarea, "生成新的交付物");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    await settleEffects();
+
+    expect(container.textContent).toContain("运行 run_new_artifact");
+    expect(container.textContent).not.toContain(previousArtifact.name);
+    expect(container.querySelector(".inline-artifact-delivery")).toBeNull();
+  });
+
   it("恶意 HTML 文本只渲染为 pre 的文本节点，且不打开或导航弹窗", async () => {
     const selectedThread = thread("thread_text");
     const latest = run("run_text", selectedThread.id);
@@ -391,12 +459,20 @@ describe("Agent 工作台恢复接入", () => {
         payload: { delta: "文件已经准备好。" },
       },
     ];
+    const downloadArtifact = vi.fn(async () => "https://example.invalid/report.txt");
+    const popup = {
+      close: vi.fn(),
+      location: { replace: vi.fn() },
+      opener: null,
+    };
+    const open = vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
     const apiClient = apiFixture({
       listThreads: vi.fn(async () => [selectedThread]),
       listLatestRuns: vi.fn(async () => [latest]),
       getRun: vi.fn(async () => latest),
       listEvents: vi.fn(async () => ({ attemptId: "attempt_1", items: events })),
       listArtifacts: vi.fn(async () => [textArtifact()]),
+      downloadArtifact,
     });
     const { container } = mount(apiClient);
 
@@ -416,6 +492,14 @@ describe("Agent 工作台恢复接入", () => {
       assistantReply.compareDocumentPosition(inlineDelivery) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     expect(activityPanel?.textContent).not.toContain("report.txt");
+    const download = inlineDelivery.querySelector<HTMLButtonElement>(
+      "[aria-label='下载 report.txt']",
+    );
+    if (download === null) throw new Error("未渲染内联交付物下载按钮");
+    await act(async () => download.click());
+    expect(downloadArtifact).toHaveBeenCalledWith(selectedThread.id, latest.id, "artifact_text");
+    expect(popup.location.replace).toHaveBeenCalledWith("https://example.invalid/report.txt");
+    open.mockRestore();
   });
 
   it("初始选择策略跳过归档 Thread，并在无活跃 Thread 时保持空选择", () => {

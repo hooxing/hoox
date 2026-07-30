@@ -30,6 +30,36 @@ export type RunEventPage = {
   readonly hasMore?: boolean;
 };
 
+export type ModelWireTraceCaptureStatus = "complete" | "truncated" | "aborted" | "failed";
+export type ModelWireTracePersistenceStatus =
+  | "pending"
+  | "stored"
+  | "unknown"
+  | "conflict"
+  | "unavailable"
+  | "not_captured";
+export type ModelWireTraceRecord = {
+  readonly attemptId: string;
+  readonly modelTurn: number;
+  readonly transportAttempt: number;
+  readonly part: "request" | "response";
+  readonly captureStatus: ModelWireTraceCaptureStatus;
+  readonly persistenceStatus: ModelWireTracePersistenceStatus;
+  readonly captureErrorCode?: "CAPTURE_UNAVAILABLE" | "BODY_UNREADABLE";
+  readonly httpStatus?: number;
+  readonly sha256?: string;
+  readonly size?: number;
+  readonly bodyAvailable: boolean;
+  readonly createdAt: string;
+  readonly expiresAt: string;
+};
+export type ModelWireTracePage = {
+  readonly items: readonly ModelWireTraceRecord[];
+  readonly hasMore: boolean;
+  readonly unavailable?: boolean;
+  readonly nextCursor?: string;
+};
+
 export const EVENT_PAGE_LIMIT = 100;
 
 /** 原生浏览器 fetch 必须由 Window/globalThis 作为 receiver 调用，不能直接存成实例方法。 */
@@ -95,6 +125,75 @@ function record(value: unknown): Readonly<Record<string, unknown>> | undefined {
     : undefined;
 }
 
+const modelWireCaptureStatuses = new Set<ModelWireTraceCaptureStatus>([
+  "complete",
+  "truncated",
+  "aborted",
+  "failed",
+]);
+const modelWirePersistenceStatuses = new Set<ModelWireTracePersistenceStatus>([
+  "pending",
+  "stored",
+  "unknown",
+  "conflict",
+  "unavailable",
+  "not_captured",
+]);
+const sha256Pattern = /^[a-f0-9]{64}$/u;
+
+export function normalizeModelWireTrace(value: unknown): ModelWireTraceRecord | undefined {
+  const raw = record(value);
+  if (raw === undefined) return undefined;
+  const captureStatus = raw.captureStatus;
+  const persistenceStatus = raw.persistenceStatus;
+  if (
+    typeof raw.attemptId !== "string" ||
+    !Number.isSafeInteger(raw.modelTurn) ||
+    (raw.modelTurn as number) < 0 ||
+    !Number.isSafeInteger(raw.transportAttempt) ||
+    (raw.transportAttempt as number) < 0 ||
+    (raw.part !== "request" && raw.part !== "response") ||
+    typeof captureStatus !== "string" ||
+    !modelWireCaptureStatuses.has(captureStatus as ModelWireTraceCaptureStatus) ||
+    typeof persistenceStatus !== "string" ||
+    !modelWirePersistenceStatuses.has(persistenceStatus as ModelWireTracePersistenceStatus) ||
+    typeof raw.bodyAvailable !== "boolean" ||
+    typeof raw.createdAt !== "string" ||
+    typeof raw.expiresAt !== "string"
+  ) {
+    return undefined;
+  }
+  const httpStatus =
+    Number.isInteger(raw.httpStatus) &&
+    (raw.httpStatus as number) >= 100 &&
+    (raw.httpStatus as number) <= 599
+      ? (raw.httpStatus as number)
+      : undefined;
+  const sha256 =
+    typeof raw.sha256 === "string" && sha256Pattern.test(raw.sha256) ? raw.sha256 : undefined;
+  const size =
+    Number.isSafeInteger(raw.size) && (raw.size as number) >= 0 ? (raw.size as number) : undefined;
+  const captureErrorCode =
+    raw.captureErrorCode === "CAPTURE_UNAVAILABLE" || raw.captureErrorCode === "BODY_UNREADABLE"
+      ? raw.captureErrorCode
+      : undefined;
+  return {
+    attemptId: raw.attemptId,
+    modelTurn: raw.modelTurn as number,
+    transportAttempt: raw.transportAttempt as number,
+    part: raw.part,
+    captureStatus: captureStatus as ModelWireTraceCaptureStatus,
+    persistenceStatus: persistenceStatus as ModelWireTracePersistenceStatus,
+    ...(captureErrorCode === undefined ? {} : { captureErrorCode }),
+    ...(httpStatus === undefined ? {} : { httpStatus }),
+    ...(sha256 === undefined ? {} : { sha256 }),
+    ...(size === undefined ? {} : { size }),
+    bodyAvailable: raw.bodyAvailable,
+    createdAt: raw.createdAt,
+    expiresAt: raw.expiresAt,
+  };
+}
+
 /** 将追加日志基线和未来的 HTTP 事件信封收敛为 UI 的稳定事件形状。 */
 export function normalizeRunEvent(value: unknown): RunEvent | undefined {
   const raw = record(value);
@@ -153,6 +252,28 @@ export class RuntimeApi {
       );
     }
     return envelope<T>(body);
+  }
+
+  private async requestBytes(path: string): Promise<Uint8Array> {
+    const headers = new Headers({
+      Authorization: "Bearer dev-user-a",
+      Accept: "application/octet-stream",
+    });
+    let response: Response;
+    try {
+      response = await this.fetcher(`${this.baseUrl}${path}`, { headers });
+    } catch {
+      throw new ApiError("无法连接本地运行时", 0, true);
+    }
+    if (!response.ok) {
+      const body = (await response.json().catch(() => undefined)) as ErrorEnvelope | undefined;
+      throw new ApiError(
+        body?.error?.message ?? "诊断正文不可用或已过期",
+        response.status,
+        body?.error?.retryable ?? response.status >= 500,
+      );
+    }
+    return new Uint8Array(await response.arrayBuffer());
   }
 
   async listThreads(): Promise<readonly Thread[]> {
@@ -218,6 +339,42 @@ export class RuntimeApi {
       `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/artifacts`,
     );
     return asArray(data) as readonly Artifact[];
+  }
+  async listModelWireTraces(
+    threadId: string,
+    runId: string,
+    cursor?: string,
+  ): Promise<ModelWireTracePage> {
+    let data: unknown;
+    try {
+      const query = new URLSearchParams({ limit: "500" });
+      if (cursor !== undefined) query.set("cursor", cursor);
+      data = await this.request<unknown>(
+        `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/model-wire-traces?${query.toString()}`,
+      );
+    } catch (error) {
+      // 诊断默认关闭或旧 API 尚未部署时保持现有 Run 体验，不把可选诊断变成轮询故障。
+      if (error instanceof ApiError && error.status === 404) return { items: [], hasMore: false };
+      throw error;
+    }
+    const page = record(data);
+    const nextCursor = typeof page?.nextCursor === "string" ? page.nextCursor : undefined;
+    return {
+      items: asArray(data)
+        .map(normalizeModelWireTrace)
+        .filter((item): item is ModelWireTraceRecord => item !== undefined),
+      hasMore: page?.hasMore === true && nextCursor !== undefined,
+      ...(nextCursor === undefined ? {} : { nextCursor }),
+    };
+  }
+  getModelWireTraceBody(
+    threadId: string,
+    runId: string,
+    trace: Pick<ModelWireTraceRecord, "attemptId" | "modelTurn" | "transportAttempt" | "part">,
+  ): Promise<Uint8Array> {
+    return this.requestBytes(
+      `/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/model-wire-traces/${encodeURIComponent(trace.attemptId)}/${trace.modelTurn}/${trace.transportAttempt}/${trace.part}/body`,
+    );
   }
   async downloadArtifact(threadId: string, runId: string, artifactId: string): Promise<string> {
     const data = await this.request<unknown>(

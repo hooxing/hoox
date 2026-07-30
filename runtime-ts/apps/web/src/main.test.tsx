@@ -43,6 +43,8 @@ function apiFixture(overrides: Partial<AppApi> = {}): AppApi {
     getRun: vi.fn(async () => defaultRun),
     listEvents: vi.fn(async () => ({ attemptId: undefined, items: [] })),
     listArtifacts: vi.fn(async () => []),
+    listModelWireTraces: vi.fn(async () => ({ items: [], hasMore: false })),
+    getModelWireTraceBody: vi.fn(async () => new Uint8Array()),
     createThread: vi.fn(async () => defaultThread),
     archiveThread: vi.fn(async () => defaultThread),
     createRun: vi.fn(async () => defaultRun),
@@ -131,6 +133,27 @@ describe("Agent 工作台恢复接入", () => {
     expect(container.textContent).toContain("运行 run_latest");
     expect(apiClient.listEvents).toHaveBeenCalledWith(active.id, latest.id, -1, 100);
     expect(apiClient.listArtifacts).toHaveBeenCalledWith(active.id, latest.id);
+  });
+
+  it("诊断索引缺失或暂不可用时不阻断 Run、事件与交付物投影", async () => {
+    const selectedThread = thread("thread_trace_unavailable");
+    const latest = run("run_trace_unavailable", selectedThread.id);
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [selectedThread]),
+      listLatestRuns: vi.fn(async () => [latest]),
+      getRun: vi.fn(async () => latest),
+      listModelWireTraces: vi.fn(async () => {
+        throw new ApiError("依赖服务暂时不可用", 503, true);
+      }),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+
+    expect(apiClient.getRun).toHaveBeenCalledWith(selectedThread.id, latest.id);
+    expect(apiClient.listEvents).toHaveBeenCalled();
+    expect(apiClient.listArtifacts).toHaveBeenCalled();
+    expect(container.textContent).toContain("诊断索引暂不可用");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 
   it("切换和切回都会重新恢复，迟到错误与加载不会污染其他 Thread", async () => {

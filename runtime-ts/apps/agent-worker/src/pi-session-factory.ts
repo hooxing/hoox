@@ -17,7 +17,10 @@ import {
   deriveSafePiSessionCompatibility,
   type PiSessionController,
 } from "@cube-runtime/pi-adapter";
-import type { ArtifactToolRouterFactoryPort } from "@cube-runtime/tool-router";
+import type {
+  ArtifactToolRouterFactoryPort,
+  DeliverFileToolRouterFactoryPort,
+} from "@cube-runtime/tool-router";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
@@ -55,6 +58,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       compatibility: ReturnType<typeof deriveSafePiSessionCompatibility>,
     ) => Promise<ControlledRolloutProjection | undefined>,
     private readonly modelWireTraces?: ModelWireTraceSession,
+    private readonly deliverFileTools?: DeliverFileToolRouterFactoryPort,
   ) {
     this.modelContext = bindTrustedPiModelContextCapability(modelRuntime, model);
   }
@@ -144,6 +148,23 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             },
           })
         : undefined;
+    const deliverFileToolRouter =
+      this.deliverFileTools && artifactAuthorizationIssuer && input.sandboxSession
+        ? this.deliverFileTools.create({
+            binding: {
+              scope: input.scope,
+              attemptId: input.attemptId,
+              sandbox: input.sandboxSession,
+            },
+            authorizer: {
+              authorizeToolEffect: async (call) =>
+                artifactAuthorizationIssuer.issue({
+                  consumed: await authorizeStartedTool(call),
+                  attemptId: input.attemptId,
+                }),
+            },
+          })
+        : undefined;
     const sessionMaterial = {
       model: this.model,
       modelContext: this.modelContext,
@@ -196,6 +217,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
               ),
           }),
       ...(artifactToolRouter === undefined ? {} : { artifactToolRouter }),
+      ...(deliverFileToolRouter === undefined ? {} : { deliverFileToolRouter }),
     };
     // 兼容身份只由实际模型/Prompt/Tool schema 派生；占位 recorder 不执行任何写入。
     const compatibility = deriveSafePiSessionCompatibility({

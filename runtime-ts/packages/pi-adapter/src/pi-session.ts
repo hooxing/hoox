@@ -33,7 +33,10 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { ArtifactPiToolExecutorPort } from "./artifact-tools.js";
-import { createArtifactPiTools, PI_ARTIFACT_TOOL_NAMES } from "./artifact-tools.js";
+import {
+  createDeliverFilePiTool,
+  type DeliverFilePiToolExecutorPort,
+} from "./deliver-file-tool.js";
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
 import {
@@ -334,8 +337,10 @@ export interface CreateSafePiSessionOptions {
   rolloutProjection?: ControlledRolloutProjection;
   /** 生产 Tool Router 在每次 Sandbox 工具执行前回到 DB 重验双栅栏。 */
   authorizeToolEffect: SandboxToolEffectAuthorizer["authorizeToolEffect"];
-  /** 只有生产装配显式提供真实 Artifact/Resource 依赖时才注册，缺失时不伪造发布能力。 */
+  /** TODO(codex-alignment): 旧装配兼容字段；新 Session 不会注册其中的两个旧工具。 */
   artifactToolRouter?: ArtifactPiToolExecutorPort;
+  /** 新 Run 只注册简化交付工具；旧 Artifact Router 仅保留为装配兼容字段。 */
+  deliverFileToolRouter?: DeliverFilePiToolExecutorPort;
   /** 必须绑定当前 Tenant/Attempt 的 durable Observation recorder；生产缺失时拒绝创建 Session。 */
   createToolObservationRecorder: Parameters<typeof createObservedSandboxTools>[2];
   /** durable Tool 配对失败后，在 Pi 发起下一次 Provider 请求前同步失败关闭。 */
@@ -426,7 +431,7 @@ export async function createSafePiSession(
     noTools: "all",
     tools: [
       ...SANDBOX_TOOL_NAMES,
-      ...(options.artifactToolRouter === undefined ? [] : PI_ARTIFACT_TOOL_NAMES),
+      ...(options.deliverFileToolRouter === undefined ? [] : ["deliver_file"]),
     ],
     excludeTools: ["bash", "read", "write", "edit", "grep", "find", "ls"],
   });
@@ -557,12 +562,14 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
   );
   const customTools = [
     ...observedSandboxTools.tools,
-    ...(options.artifactToolRouter === undefined
+    ...(options.deliverFileToolRouter === undefined
       ? []
-      : createArtifactPiTools(
-          options.artifactToolRouter,
-          observedSandboxTools.recordControlledReceipt,
-        )),
+      : [
+          createDeliverFilePiTool(
+            options.deliverFileToolRouter,
+            observedSandboxTools.recordControlledReceipt,
+          ),
+        ]),
   ];
   // 能力清单从即将传给 Pi 的同一组真实工具派生，不能维护第二份易漂移的硬编码列表。
   const builtPrompt = buildRuntimeSystemPrompt({

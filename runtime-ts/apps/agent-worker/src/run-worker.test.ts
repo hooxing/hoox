@@ -2,9 +2,9 @@ import { sha256Digest, tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
 import {
+  createWorkspaceManifest,
   WorkspaceApplicationError,
   WorkspaceDependencyError,
-  createWorkspaceManifest,
 } from "@cube-runtime/workspace";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -16,7 +16,6 @@ import {
 } from "./mutation-protocol.js";
 import type { ExecutionScope, RuntimeEventV1, RuntimeMutation } from "./ports.js";
 import { RunWorker, type RunWorkerOptions } from "./run-worker.js";
-import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 import {
   BlockingAgentSession,
   FakeArtifactPublication,
@@ -31,6 +30,7 @@ import {
   fakeSeed,
   ScriptedAgentSession,
 } from "./testing/fakes.js";
+import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 
 const successfulEvents: readonly RuntimeAgentEvent[] = [
   { type: "agent.started" },
@@ -91,15 +91,15 @@ function harness(
 }
 
 describe("Run Worker 双栅栏与恢复状态机", () => {
-  it("Artifact 修正轮次与反馈总预算不能配置为超过硬上限", () => {
+  it("旧 Artifact 修正配置不再改变新 Run 的完成协议", () => {
     expect(() =>
-      harness([], fakeSeed("artifact-round-limit"), { maxArtifactCorrectionRounds: 3 }),
-    ).toThrow("maxArtifactCorrectionRounds 必须是 0 到 2 的安全整数");
+      harness([], fakeSeed("artifact-round-limit"), { maxArtifactCorrectionRounds: 99 }),
+    ).not.toThrow();
     expect(() =>
       harness([], fakeSeed("artifact-budget-limit"), {
-        artifactCorrectionPromptBudgetBytes: 8 * 1_024 + 1,
+        artifactCorrectionPromptBudgetBytes: 1,
       }),
-    ).toThrow("artifactCorrectionPromptBudgetBytes 必须是 1 到 8192 的安全整数");
+    ).not.toThrow();
   });
 
   it("初始 Projection 按 UTF-8 字节拒绝 emoji 超限，不能先启动 Sandbox 或 Session", async () => {
@@ -411,15 +411,19 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.persistence.record(h.scope).workspace.currentRevisionId).toBeUndefined();
   });
 
-  it("verify 完成后、Artifact 外部调用返回时丢 claim，Revision 仍未提交", async () => {
+  it("verify 完成后丢 claim，旧完成门不运行且 Revision 仍未提交", async () => {
     const h = harness([new ScriptedAgentSession(successfulEvents)]);
     h.revisions.nextRevisionId = fakeRevision("revision-after-verify");
-    h.artifacts.beforeReturn = () => h.persistence.expireRunLease(h.scope);
+    h.persistence.afterMutation = (command) => {
+      if (command.idempotencyKey.includes("/stage/workspace-verified")) {
+        h.persistence.expireRunLease(h.scope);
+      }
+    };
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "fence_lost" });
 
     const record = h.persistence.record(h.scope);
-    expect(h.artifacts.calls).toBe(1);
+    expect(h.artifacts.calls).toBe(0);
     expect(record.workspace.currentRevisionId).toBeUndefined();
     expect(record.run.status).toBe("running");
   });
@@ -865,8 +869,10 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
   it("settle 调用前 started 事务失败，不调用外部 settle，也不写业务终态", async () => {
     const h = harness([new ScriptedAgentSession(successfulEvents)]);
-    h.artifacts.beforeReturn = () => {
-      h.persistence.unavailableNextMutation = true;
+    h.persistence.afterMutation = (command) => {
+      if (command.idempotencyKey.includes("/stage/workspace-verified")) {
+        h.persistence.unavailableNextMutation = true;
+      }
     };
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({
@@ -1456,14 +1462,13 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     const artifactSession = new ScriptedAgentSession(successfulEvents);
     const artifact = harness([artifactSession]);
     artifact.artifacts.beforeReturn = () => {
-      throw new Error("私有 Artifact 异常");
+      throw new Error("旧 Artifact 完成门不应再被调用");
     };
     await expect(artifact.worker.execute(artifact.scope)).resolves.toEqual({
-      outcome: "failed",
+      outcome: "succeeded",
     });
-    expect(artifact.artifacts.calls).toBe(3);
-    expect(artifactSession.prompts).toHaveLength(3);
-    expect(artifactSession.prompts[1]).toContain("Artifact 完成门未通过（修正轮次 1/2）");
+    expect(artifact.artifacts.calls).toBe(0);
+    expect(artifactSession.prompts).toHaveLength(1);
   });
 
   it("Workspace verify 日志只接受固定 diagnostic，伪造值不会离开边界", async () => {
@@ -1515,98 +1520,24 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     }
   });
 
-  it("完成门缺失时持久反馈并在同一 Session 修正，发布就绪后成功", async () => {
+  it("模型完成后不依赖旧声明、发布意图或 Artifact 修正门", async () => {
     const session = new ScriptedAgentSession(successfulEvents);
     const h = harness([session]);
     h.artifacts.beforeReturn = () => {
-      if (h.artifacts.calls === 1) throw new Error("required deliverable missing");
+      throw new Error("旧完成门不应被调用");
     };
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
 
     expect(h.factory.createCount).toBe(1);
-    expect(session.prompts).toHaveLength(2);
-    expect(session.prompts[1]).toContain("publish_artifact");
-    expect(h.persistence.record(h.scope).events).toContainEqual(
-      expect.objectContaining({
-        kind: "artifact_correction_requested",
-        payload: expect.objectContaining({ round: 1, code: "ARTIFACT_NOT_READY" }),
-      }),
-    );
-    expect(h.persistence.permits.map(({ permit }) => permit.effect)).toEqual([
-      "model_start",
-      "model_continue",
-    ]);
-  });
-
-  it("修正反馈提交后取消优先，不能再启动模型", async () => {
-    const session = new ScriptedAgentSession(successfulEvents);
-    const h = harness([session]);
-    h.artifacts.beforeReturn = () => {
-      throw new Error("missing");
-    };
-    h.persistence.afterMutation = (command) => {
-      if (command.idempotencyKey.includes("/correction/1/feedback")) {
-        h.cancellation.cancel(h.scope);
-      }
-    };
-
-    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "cancelled" });
     expect(session.prompts).toHaveLength(1);
+    expect(h.artifacts.calls).toBe(0);
     expect(h.persistence.permits).toHaveLength(1);
-  });
-
-  it("修正反馈提交后租约丢失，不能再启动模型或伪造终态", async () => {
-    const session = new ScriptedAgentSession(successfulEvents);
-    const h = harness([session]);
-    h.artifacts.beforeReturn = () => {
-      throw new Error("missing");
-    };
-    h.persistence.afterMutation = (command) => {
-      if (command.idempotencyKey.includes("/correction/1/feedback")) {
-        h.persistence.expireRunLease(h.scope);
-      }
-    };
-
-    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "fence_lost" });
-    expect(session.prompts).toHaveLength(1);
-    expect(h.persistence.record(h.scope).run.status).toBe("running");
-  });
-
-  it("修正反馈事务响应未知时按 receipt 读回，不重复反馈或重复许可", async () => {
-    const session = new ScriptedAgentSession(successfulEvents);
-    const h = harness([session]);
-    h.persistence.responseUnknownKeyIncludes = "/correction/1/feedback";
-    h.artifacts.beforeReturn = () => {
-      if (h.artifacts.calls === 1) throw new Error("missing");
-    };
-
-    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
-    expect(
-      h.persistence
-        .record(h.scope)
-        .events.filter((event) => event.kind === "artifact_correction_requested"),
-    ).toHaveLength(1);
-    expect(h.persistence.permits).toHaveLength(2);
-  });
-
-  it("修正反馈总字节预算不足时稳定失败，不持久化半截反馈或启动下一轮", async () => {
-    const session = new ScriptedAgentSession(successfulEvents);
-    const h = harness([session], fakeSeed("artifact-budget"), {
-      artifactCorrectionPromptBudgetBytes: 1,
-    });
-    h.artifacts.beforeReturn = () => {
-      throw new Error("missing");
-    };
-
-    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "failed" });
-    expect(session.prompts).toHaveLength(1);
     expect(
       h.persistence
         .record(h.scope)
         .events.filter((event) => event.kind === "artifact_correction_requested"),
     ).toHaveLength(0);
-    expect(h.persistence.permits).toHaveLength(1);
   });
 
   it("跨 Tenant scope 被拒绝且不泄漏或改写原记录", async () => {

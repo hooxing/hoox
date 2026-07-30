@@ -584,6 +584,8 @@ export interface AgentSessionFactoryPort {
     /** 当前 claim 的完整双栅栏；生产 Rollout 装配只从该能力回到 PG 推导 actor。 */
     readonly fence: ExecutionFence;
     readonly sandbox: SandboxHandle;
+    /** deliver_file 需要当前 registry capability；旧测试装配可暂不提供。 */
+    readonly sandboxSession?: SandboxSessionRef;
     readonly rolloutProjection: ControlledRolloutProjection;
     readonly authorizeToolEffect: (
       call: ExternalEffectCall,

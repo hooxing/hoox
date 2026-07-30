@@ -184,7 +184,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       ...(attemptWireTraces === undefined
         ? {}
         : {
-            withProviderInvocation: <T>(operation: () => Promise<T>) =>
+            withProviderInvocation: <T>(operation: () => T) =>
               attemptWireTraces.run(
                 {
                   tenantId: input.scope.tenantId,

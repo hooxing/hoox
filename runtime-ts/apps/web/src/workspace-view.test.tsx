@@ -78,6 +78,63 @@ describe("工作台展示组件", () => {
     expect(html).toContain('aria-label="下载 结果.txt"');
   });
 
+  it("没有交付物时不渲染内联交付区域", () => {
+    const html = renderToStaticMarkup(
+      <InlineArtifactDelivery
+        artifacts={[]}
+        onPreview={() => undefined}
+        onDownload={() => undefined}
+      />,
+    );
+
+    expect(html).toBe("");
+  });
+
+  it("未发布或发布失败的交付物禁用预览和下载", () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const artifacts: readonly Artifact[] = [
+      {
+        id: "artifact-publishing",
+        name: "上传中.txt",
+        mediaType: "text/plain; charset=utf-8",
+        status: "publishing",
+        createdAt: "",
+        updatedAt: "",
+      },
+      {
+        id: "artifact-failed",
+        name: "失败.txt",
+        mediaType: "text/plain; charset=utf-8",
+        status: "failed",
+        createdAt: "",
+        updatedAt: "",
+      },
+    ];
+
+    act(() => {
+      root.render(
+        <InlineArtifactDelivery
+          artifacts={artifacts}
+          onPreview={() => undefined}
+          onDownload={() => undefined}
+        />,
+      );
+    });
+
+    for (const artifact of artifacts) {
+      expect(
+        container.querySelector<HTMLButtonElement>(`[aria-label="预览 ${artifact.name}"]`)
+          ?.disabled,
+      ).toBe(true);
+      expect(
+        container.querySelector<HTMLButtonElement>(`[aria-label="下载 ${artifact.name}"]`)
+          ?.disabled,
+      ).toBe(true);
+    }
+    act(() => root.unmount());
+  });
+
   it("没有事件时显示运行中的明确空态", () => {
     const html = renderToStaticMarkup(<RunTimeline events={[]} />);
 

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  assembleModelWireTraceIfEnabled,
   createDevelopmentOpenAiCompatibleModel,
   parseWorkerProcessEnvironment,
   probeOpenAiCompatibleModel,
@@ -98,6 +99,80 @@ describe("Agent Worker 进程入口", () => {
         },
       }),
     ).rejects.toThrow("PRODUCTION_ASSEMBLY_UNAVAILABLE:agent-worker");
+  });
+
+  it("production 启用模型报文诊断时在 Pool、fetch 与 assembler 副作用前失败关闭", async () => {
+    const fetchSpy = vi.fn();
+    const assembleSpy = vi.fn(async () => ({
+      stopAccepting: async () => undefined,
+      resources: [],
+      readiness: [],
+    }));
+    vi.stubGlobal("fetch", fetchSpy);
+
+    await expect(
+      startWorkerProcess({
+        environment: {
+          ...productionEnvironment(),
+          MODEL_WIRE_TRACE_ENABLED: "true",
+        },
+        // 整个 assembler 都未进入，因而其内部 Pool 及所有远端依赖也不可能创建。
+        assembler: { assemble: assembleSpy },
+      }),
+    ).rejects.toThrow("MODEL_WIRE_TRACE_ENABLED 在 production 需要已部署保留清理消费者");
+
+    expect(assembleSpy).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("development 严格解析并按开关原子装配模型报文诊断", () => {
+    const enabled = parseWorkerProcessEnvironment({
+      ...productionEnvironment(),
+      RUNTIME_ENV: "development",
+      AGENT_WORKER_TENANT_ID: "tenant-dev-user-a",
+      DEV_AUTH_ENABLED: "true",
+      DEV_AUTH_USER_A_TENANT_ID: "tenant-dev-user-a",
+      MODEL_WIRE_TRACE_ENABLED: "true",
+      MODEL_WIRE_TRACE_RETENTION_DAYS: "13",
+      MODEL_WIRE_TRACE_MAX_BYTES: "4096",
+    });
+    expect(enabled.model).toMatchObject({
+      wireTraceEnabled: true,
+      wireTraceRetentionDays: 13,
+      wireTraceMaxBytes: 4096,
+    });
+
+    const enabledCalls: string[] = [];
+    const session = Object.freeze({ kind: "model-wire-session" });
+    expect(
+      assembleModelWireTraceIfEnabled(enabled.model.wireTraceEnabled, {
+        installFetchInstrumentation: () => enabledCalls.push("install"),
+        createSession: () => {
+          enabledCalls.push("create");
+          return session;
+        },
+      }),
+    ).toBe(session);
+    expect(enabledCalls).toEqual(["install", "create"]);
+
+    const disabled = parseWorkerProcessEnvironment({
+      ...productionEnvironment(),
+      RUNTIME_ENV: "development",
+      AGENT_WORKER_TENANT_ID: "tenant-dev-user-a",
+      DEV_AUTH_ENABLED: "true",
+      DEV_AUTH_USER_A_TENANT_ID: "tenant-dev-user-a",
+      MODEL_WIRE_TRACE_ENABLED: "false",
+    });
+    const installDisabled = vi.fn();
+    const createDisabled = vi.fn();
+    expect(
+      assembleModelWireTraceIfEnabled(disabled.model.wireTraceEnabled, {
+        installFetchInstrumentation: installDisabled,
+        createSession: createDisabled,
+      }),
+    ).toBeUndefined();
+    expect(installDisabled).not.toHaveBeenCalled();
+    expect(createDisabled).not.toHaveBeenCalled();
   });
 
   it("Worker 数据面默认与 CubeAPI 同机，显式 Proxy 配置仍优先", () => {

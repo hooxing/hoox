@@ -41,7 +41,7 @@ async function eventually(predicate: () => boolean): Promise<void> {
 }
 
 describe("模型网络原始报文诊断", () => {
-  it("保存最终发送的 UTF-8 body 和原始 SSE 字节，且不保存 Authorization", async () => {
+  it("保存最终发送的 application request body 和 content-decoded SSE 字节，且不保存 Authorization", async () => {
     installModelWireFetchInstrumentation();
     const server = createServer((request, response) => {
       void (async () => {
@@ -339,5 +339,52 @@ describe("模型网络原始报文诊断", () => {
         server.close((error) => (error ? reject(error) : resolve())),
       );
     }
+  });
+
+  it("自定义 AbortSignal reason 记为正文不可读并向调用方原样抛回", async () => {
+    installModelWireFetchInstrumentation();
+    const traces = new TracePort();
+    const session = new ModelWireTraceSession(traces, 1024, "https://model.invalid/v1");
+    const controller = new AbortController();
+    const reason = new Error("custom abort reason");
+    controller.abort(reason);
+
+    let rejection: unknown;
+    try {
+      await session.run(
+        {
+          tenantId: "tenant_custom_abort",
+          threadId: "thread_custom_abort",
+          runId: "run_custom_abort",
+          attemptId: "attempt_custom_abort",
+        },
+        () =>
+          fetch("https://model.invalid/v1/chat/completions", {
+            method: "POST",
+            body: "abort-with-custom-reason",
+            signal: controller.signal,
+          }),
+      );
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toBe(reason);
+    await session.drain();
+    expect(traces.failures).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          part: "response",
+          code: "BODY_UNREADABLE",
+          modelTurn: 0,
+          transportAttempt: 0,
+        }),
+      ]),
+    );
+    expect(
+      traces.failures.some(
+        (failure) => failure.part === "response" && failure.code === "CAPTURE_UNAVAILABLE",
+      ),
+    ).toBe(false);
   });
 });

@@ -4,6 +4,7 @@ import {
   createArtifactExecutionAuthorizationAuthority,
   PgArtifactDeliveryRepository,
 } from "@cube-runtime/artifact";
+import { tenantId } from "@cube-runtime/domain";
 import {
   createPostgresPool,
   createS3BlobStore,
@@ -28,8 +29,8 @@ import {
   EnvironmentConfigurationError,
   integerEnvironmentField,
   type ProcessSignalSource,
-  parseStrictEnvironment,
   parseProductionPostgresTransport,
+  parseStrictEnvironment,
   type RunningServiceProcess,
   type RuntimeEnvironment,
   readRequiredEnvironmentValue,
@@ -39,13 +40,13 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
-import { tenantId } from "@cube-runtime/domain";
 import { resolveCubeProxyRouting } from "@cube-runtime/sandbox";
 import { ArtifactToolRouterFactory } from "@cube-runtime/tool-router";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
 import { installModelWireFetchInstrumentation, ModelWireTraceSession } from "./model-wire-trace.js";
+import { PgArtifactPublicationResourceBridge } from "./pg-artifact-resource-bridge.js";
+import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
 import { PiWorkerSessionFactory } from "./pi-session-factory.js";
 import {
   AgentWorkerPollingLoop,
@@ -54,7 +55,6 @@ import {
   ProcessShutdown,
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
-import { PgArtifactPublicationResourceBridge } from "./pg-artifact-resource-bridge.js";
 import { RunWorker } from "./run-worker.js";
 import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
 
@@ -360,6 +360,22 @@ export const developmentWorkerAssembler: ServiceAssemblyFactory<WorkerProcessCon
   },
 };
 
+/**
+ * 将开关判断、fetch instrumentation 安装与 Session 创建收束为一个可验证的装配边界。
+ * disabled 必须零副作用；enabled 必须先安装 instrumentation，再创建具体 Session。
+ */
+export function assembleModelWireTraceIfEnabled<T>(
+  enabled: boolean,
+  dependencies: Readonly<{
+    readonly installFetchInstrumentation: () => void;
+    readonly createSession: () => T;
+  }>,
+): T | undefined {
+  if (!enabled) return undefined;
+  dependencies.installFetchInstrumentation();
+  return dependencies.createSession();
+}
+
 interface WorkerStartupProbes {
   readonly postgres: () => Promise<void>;
   readonly objectStorage: () => Promise<void>;
@@ -442,21 +458,20 @@ async function assembleWorkerRuntime(
       rolloutRepository,
       policy: { maxModelObservationBytes: 4 * 1024 },
     });
-    const modelWireTraces = configuration.model.wireTraceEnabled
-      ? (() => {
-          installModelWireFetchInstrumentation();
-          return new ModelWireTraceSession(
-            new PgModelWireTraceRepository(
-              pool,
-              blobRepository,
-              blobs,
-              configuration.model.wireTraceRetentionDays,
-            ),
-            configuration.model.wireTraceMaxBytes,
-            configuration.model.baseUrl,
-          );
-        })()
-      : undefined;
+    const modelWireTraces = assembleModelWireTraceIfEnabled(configuration.model.wireTraceEnabled, {
+      installFetchInstrumentation: installModelWireFetchInstrumentation,
+      createSession: () =>
+        new ModelWireTraceSession(
+          new PgModelWireTraceRepository(
+            pool,
+            blobRepository,
+            blobs,
+            configuration.model.wireTraceRetentionDays,
+          ),
+          configuration.model.wireTraceMaxBytes,
+          configuration.model.baseUrl,
+        ),
+    });
     const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
     const artifactAuthorization = createArtifactExecutionAuthorizationAuthority();
     const artifactRepository = new PgArtifactDeliveryRepository(

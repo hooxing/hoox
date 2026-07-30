@@ -49,7 +49,7 @@ Sandbox 输出，且首版尚无 Codex 的交互式会话能力。
 
 - 必填 `cmd`；
 - 可选 `workdir`，默认 `/workspace`；
-- 可选 `timeout_ms`，默认 `120000`；
+- 可选 `timeout_ms`，默认 `120000`，同步执行上限为 `3600000`；
 - 可选 `max_output_tokens`，默认 `10000`，首版策略上限为 `20000`。
 
 工具在可信许可消费后立即调用 CubeSandbox，并在指定目录通过固定 `/bin/bash -c` 同步执行。正常返回：
@@ -95,6 +95,8 @@ Run fence 不变量。
 - Sandbox 输出可能包含提示注入或敏感文本；它会进入模型上下文，开启模型网络报文诊断时也会按
   ADR-0055 的敏感 Trace 规则保存；
 - 当前 Session 重建时只能从 durable 固定回执恢复“调用完成”，不能恢复本次真实 stdout/stderr；
+- 长任务最多可同步等待 1 小时，尚未对齐 Codex 通过 `session_id`、wait/yield 和 `write_stdin`
+  持续管理长运行进程的 session 模式；
 - `max_output_tokens` 暂按 UTF-8 字节近似，不是模型 tokenizer 的精确 token 数。
 
 ### 安全、数据与运维影响
@@ -121,7 +123,8 @@ Run fence 不变量。
 
 ## 后续工作
 
-- TODO(codex-alignment)：加入 PTY、`yield_time_ms`、后台 `session_id` 和 `write_stdin`，支持长任务与交互程序；
+- TODO(codex-alignment)：对齐 Codex 长任务 session 模式，加入 PTY、`yield_time_ms`、后台
+  `session_id`、wait 和 `write_stdin`，避免只能在 `timeout_ms <= 3600000` 的单次同步调用中等待；
 - TODO(codex-alignment)：CubeSandbox SDK 支持后改用独立 cwd 参数，移除 Bash `cd` 包装；
 - TODO(codex-alignment)：使用当前模型 tokenizer 计算输出预算，并对齐 Codex 的截断策略与策略上限；
 - TODO(codex-alignment)：保留超时前的部分输出，并将真实结果纳入可恢复终端 transcript；

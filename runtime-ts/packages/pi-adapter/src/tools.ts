@@ -12,6 +12,7 @@ export const SANDBOX_TOOL_NAMES = ["exec_command"] as const;
 
 const DEFAULT_WORKDIR = "/workspace";
 const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_TIMEOUT_MS = 3_600_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const MAX_OUTPUT_TOKENS = 20_000;
 const APPROX_BYTES_PER_TOKEN = 4;
@@ -109,7 +110,7 @@ function createSandboxToolsInternal(
   rejectModelContinuation: () => void = () => undefined,
 ) {
   // TODO(codex-alignment): 同步 MVP 暂无 PTY、yield/session、write_stdin、shell/login 参数；
-  // 长任务与交互程序需要在 CubeSandbox 提供可恢复进程端口后补齐。
+  // 即使允许最长 1 小时，长任务仍未对齐 Codex 返回 session_id 后 wait/write_stdin 的可恢复会话模式。
   return [
     defineTool({
       name: "exec_command",
@@ -120,7 +121,7 @@ function createSandboxToolsInternal(
         {
           cmd: Type.String({ minLength: 1 }),
           workdir: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, pattern: "^/" })),
-          timeout_ms: Type.Optional(Type.Integer({ minimum: 1 })),
+          timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS })),
           max_output_tokens: Type.Optional(
             Type.Integer({ minimum: 1, maximum: MAX_OUTPUT_TOKENS }),
           ),

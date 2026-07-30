@@ -7,7 +7,6 @@ import type {
 } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import { WorkspaceApplicationError, WorkspaceDependencyError } from "@cube-runtime/workspace";
-import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 import { DurableOperationLane } from "./durable-operation-lane.js";
 import {
   assertControlledRolloutProjection,
@@ -48,6 +47,7 @@ import type {
   WorkspaceRevisionVerifierPort,
 } from "./ports.js";
 import { assertProtocolSize } from "./ports.js";
+import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 
 export interface RunWorkerOptions {
   readonly workerId: string;
@@ -55,7 +55,9 @@ export interface RunWorkerOptions {
   readonly heartbeatMs?: number;
   readonly runTimeoutMs?: number;
   readonly externalEffectPermitMs?: number;
+  /** TODO(codex-alignment): 旧调用方兼容字段，简化交付协议稳定后删除。 */
   readonly maxArtifactCorrectionRounds?: number;
+  /** TODO(codex-alignment): 旧调用方兼容字段，简化交付协议稳定后删除。 */
   readonly artifactCorrectionPromptBudgetBytes?: number;
 }
 
@@ -84,6 +86,7 @@ interface WorkerDependencies {
   readonly cancellation: CancellationPort;
   /** 进程停机只中止当前执行，不代表用户取消 Run。 */
   readonly shutdownSignal?: AbortSignal;
+  /** TODO(codex-alignment): 旧装配 ABI；新 Run 完成流程不再读取该门。 */
   readonly artifacts: ArtifactPublicationPort;
   readonly clock: ClockPort;
   readonly metrics: RecoveryMetricsPort;
@@ -134,8 +137,6 @@ export class RunWorker {
   readonly #heartbeatMs: number;
   readonly #runTimeoutMs: number;
   readonly #externalEffectPermitMs: number;
-  readonly #maxArtifactCorrectionRounds: number;
-  readonly #artifactCorrectionPromptBudgetBytes: number;
 
   constructor(
     private readonly dependencies: WorkerDependencies,
@@ -147,16 +148,6 @@ export class RunWorker {
     this.#externalEffectPermitMs = positive(
       options.externalEffectPermitMs ?? 3_000,
       "externalEffectPermitMs",
-    );
-    this.#maxArtifactCorrectionRounds = boundedNonNegativeInteger(
-      options.maxArtifactCorrectionRounds ?? 2,
-      2,
-      "maxArtifactCorrectionRounds",
-    );
-    this.#artifactCorrectionPromptBudgetBytes = boundedPositiveInteger(
-      options.artifactCorrectionPromptBudgetBytes ?? 8 * 1_024,
-      8 * 1_024,
-      "artifactCorrectionPromptBudgetBytes",
     );
     if (this.#heartbeatMs * 2 >= this.#leaseDurationMs) {
       throw new Error("heartbeatMs 必须小于 leaseDurationMs 的一半");
@@ -404,6 +395,7 @@ export class RunWorker {
         attemptId: context.attemptId,
         fence: context.fence,
         sandbox: sandbox.sandbox,
+        sandboxSession: sandbox,
         rolloutProjection: claim.snapshot.rolloutProjection,
         authorizeToolEffect: (call) =>
           this.authorizeToolEffectAfterStarted(context, cancellation, call),
@@ -466,12 +458,11 @@ export class RunWorker {
       });
       if (!isApplied(modelCheckpoint)) return await this.handleMutationFailure(modelCheckpoint);
 
-      let promptText = claim.snapshot.answer ?? claim.snapshot.input;
-      let correctionRound = 0;
-      let correctionPromptBytes = 0;
+      const promptText = claim.snapshot.answer ?? claim.snapshot.input;
+      const correctionRound = 0;
       let workspaceChange: ValidatedWorkspaceChange | undefined;
 
-      // 必需交付物缺失属于可修正业务状态：保持同一 Session、双栅栏和 Attempt，持久化反馈后再启动模型。
+      // TODO(codex-alignment): waiting 仍复用历史单轮循环骨架；后续清理不可达 correction 命名。
       for (;;) {
         const preModel = await this.stopPoint(context, cancellation);
         if (preModel) return await this.finishStopped(context, preModel, sandbox);
@@ -615,63 +606,8 @@ export class RunWorker {
             : await this.handleMutationFailure(waiting);
         }
 
-        const preArtifact = await this.stopPoint(context, cancellation);
-        if (preArtifact) return await this.finishStopped(context, preArtifact, sandbox);
-        let artifactReady = true;
-        try {
-          await this.dependencies.artifacts.assertReadyForCompletion({
-            scope,
-            ...(workspaceChange === undefined
-              ? {}
-              : { workspaceRevisionId: workspaceChange.revisionId }),
-          });
-        } catch {
-          artifactReady = false;
-        }
-        // 完成门检查之后先重验取消/租约；取消始终高于修正和成功。
-        const postArtifact = await this.stopPoint(context, cancellation);
-        if (postArtifact) return await this.finishStopped(context, postArtifact, sandbox);
-        if (artifactReady) break;
-
-        if (correctionRound >= this.#maxArtifactCorrectionRounds) {
-          return await this.finalizeWithCleanup(
-            context,
-            sandbox,
-            "failed",
-            "ARTIFACT_NOT_READY",
-            cancellation,
-          );
-        }
-        const nextRound = correctionRound + 1;
-        const feedback = artifactCorrectionFeedback(nextRound, this.#maxArtifactCorrectionRounds);
-        const feedbackBytes = new TextEncoder().encode(feedback).byteLength;
-        if (correctionPromptBytes + feedbackBytes > this.#artifactCorrectionPromptBudgetBytes) {
-          return await this.finalizeWithCleanup(
-            context,
-            sandbox,
-            "failed",
-            "ARTIFACT_NOT_READY",
-            cancellation,
-          );
-        }
-        const feedbackPersisted = await this.applyMutation(context, {
-          idempotencyKey: `${context.attemptId}/correction/${nextRound}/feedback`,
-          events: [
-            artifactCorrectionEvent(
-              context,
-              nextRound,
-              this.#maxArtifactCorrectionRounds,
-              feedback,
-            ),
-          ],
-          outbox: [],
-        });
-        if (!isApplied(feedbackPersisted)) {
-          return await this.handleMutationFailure(feedbackPersisted);
-        }
-        correctionRound = nextRound;
-        correctionPromptBytes += feedbackBytes;
-        promptText = feedback;
+        // deliver_file 的成功已是 published 事实；Run 完成不再依赖声明或修正轮次。
+        break;
       }
 
       const settled = await this.settleSandbox(context, sandbox, "close");
@@ -1224,31 +1160,6 @@ function waitingEvent(
   return event;
 }
 
-function artifactCorrectionFeedback(round: number, maxRounds: number): string {
-  return [
-    `Artifact 完成门未通过（修正轮次 ${round}/${maxRounds}）。`,
-    "必需交付物尚未全部发布成功。请检查已经声明的 required deliverable，修正对应文件，",
-    "并使用 publish_artifact 发布新的不可变 ResourceVersion；完成后再结束本轮。",
-    "不要回显对象键、签名 URL、租户或授权信息。",
-  ].join("");
-}
-
-function artifactCorrectionEvent(
-  context: ExecutionContext,
-  round: number,
-  maxRounds: number,
-  feedback: string,
-): RuntimeEventV1 {
-  const event: RuntimeEventV1 = {
-    schemaVersion: 1,
-    kind: "artifact_correction_requested",
-    sequence: context.nextEventSequence,
-    payload: { round, maxRounds, code: "ARTIFACT_NOT_READY", feedback },
-  };
-  assertProtocolSize(event);
-  return event;
-}
-
 function agentEvent(context: ExecutionContext, payload: RuntimeAgentEvent): RuntimeEventV1 {
   const event: RuntimeEventV1 = {
     schemaVersion: 1,
@@ -1737,19 +1648,5 @@ function assertScope(scope: ExecutionScope): void {
 
 function positive(value: number, name: string): number {
   if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} 必须是正整数`);
-  return value;
-}
-
-function boundedNonNegativeInteger(value: number, maximum: number, name: string): number {
-  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
-    throw new Error(`${name} 必须是 0 到 ${maximum} 的安全整数`);
-  }
-  return value;
-}
-
-function boundedPositiveInteger(value: number, maximum: number, name: string): number {
-  if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
-    throw new Error(`${name} 必须是 1 到 ${maximum} 的安全整数`);
-  }
   return value;
 }

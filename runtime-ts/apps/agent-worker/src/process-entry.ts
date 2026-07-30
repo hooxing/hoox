@@ -3,11 +3,14 @@ import {
   ArtifactDeliveryService,
   createArtifactExecutionAuthorizationAuthority,
   PgArtifactDeliveryRepository,
+  PgSimpleDeliveredFileRepository,
+  SimpleArtifactDeliveryService,
 } from "@cube-runtime/artifact";
 import { tenantId } from "@cube-runtime/domain";
 import {
   createPostgresPool,
   createS3BlobStore,
+  DurableResourceBlobWriter,
   DurableWorkspaceCandidateBlobWriter,
   PgBackedSandboxSessionRegistry,
   PgBlobLifecycleRepository,
@@ -41,9 +44,10 @@ import {
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
 import { resolveCubeProxyRouting } from "@cube-runtime/sandbox";
-import { ArtifactToolRouterFactory } from "@cube-runtime/tool-router";
+import { ArtifactToolRouterFactory, DeliverFileToolRouterFactory } from "@cube-runtime/tool-router";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { SandboxDeliverFileSource } from "./deliver-file-source.js";
 import { installModelWireFetchInstrumentation, ModelWireTraceSession } from "./model-wire-trace.js";
 import { PgArtifactPublicationResourceBridge } from "./pg-artifact-resource-bridge.js";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
@@ -488,15 +492,6 @@ async function assembleWorkerRuntime(
       artifacts: artifactService,
       authorizationVerifier: artifactAuthorization.verifier,
     });
-    const sessions = new PiWorkerSessionFactory(
-      model,
-      modelRuntime,
-      durableObservation.createRecorder,
-      artifactTools,
-      artifactAuthorization.issuer,
-      durableObservation.prepare,
-      modelWireTraces,
-    );
     const upstreamSandboxes = new CubeSandboxSessionRegistry(
       {
         apiUrl: configuration.sandbox.apiUrl,
@@ -560,6 +555,46 @@ async function assembleWorkerRuntime(
         ),
       policy: workspacePolicy,
     });
+    const deliverFileTools = new DeliverFileToolRouterFactory({
+      source: new SandboxDeliverFileSource(
+        async ({ binding, signal }) =>
+          upstreamSandboxes.gateway.connectWorkspace(
+            upstreamSandboxes.workspaceCapability({
+              scope: binding.scope,
+              session: binding.sandbox,
+            }),
+            {
+              maxEntries: workspacePolicy.maxEntries,
+              maxFileBytes: workspacePolicy.maxSingleFileBytes,
+              maxTotalBytes: workspacePolicy.maxTotalBytes,
+              maxPathUtf8Bytes: workspacePolicy.maxPathUtf8Bytes,
+              maxCommandOutputBytes:
+                Math.ceil((workspacePolicy.maxSingleFileBytes * 4) / 3) + 1_024,
+              readChunkBytes: workspacePolicy.maxChunkBytes,
+              maxSnapshots: 4,
+              operationTimeoutMs: 30_000,
+            },
+            signal === undefined ? {} : { signal },
+          ),
+        workspacePolicy.maxSingleFileBytes,
+      ),
+      publications: new SimpleArtifactDeliveryService(
+        new PgSimpleDeliveredFileRepository(pool),
+        new DurableResourceBlobWriter(blobRepository, blobs, workspacePolicy.maxSingleFileBytes),
+        artifactAuthorization.verifier,
+      ),
+      authorizationVerifier: artifactAuthorization.verifier,
+    });
+    const sessions = new PiWorkerSessionFactory(
+      model,
+      modelRuntime,
+      durableObservation.createRecorder,
+      artifactTools,
+      artifactAuthorization.issuer,
+      durableObservation.prepare,
+      modelWireTraces,
+      deliverFileTools,
+    );
     const shutdown = new ProcessShutdown();
     const worker = new RunWorker(
       {

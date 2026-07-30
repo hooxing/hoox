@@ -341,7 +341,7 @@ export interface CreateSafePiSessionOptions {
   /** durable Tool 配对失败后，在 Pi 发起下一次 Provider 请求前同步失败关闭。 */
   assertModelRequestAllowed?: () => void;
   /** 每次真实 Provider stream 创建前进入；适配器不依赖具体诊断实现。 */
-  withProviderInvocation?<T>(operation: () => Promise<T>): Promise<T>;
+  withProviderInvocation?<T>(operation: () => T): T;
 }
 
 /**

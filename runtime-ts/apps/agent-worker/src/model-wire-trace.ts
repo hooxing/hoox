@@ -123,7 +123,7 @@ export class ModelWireTraceSession {
     );
   }
 
-  run<T>(context: ModelWireTraceContext, operation: () => Promise<T>): Promise<T> {
+  run<T>(context: ModelWireTraceContext, operation: () => T): T {
     assertContext(context);
     return activeTrace.run(
       {

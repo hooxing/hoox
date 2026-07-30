@@ -13,8 +13,8 @@ Provider 的 UTF-8 字节，也无法复现 SSE 分片、非 2xx、断流或中�
   `POST /chat/completions`，不捕获 Sandbox、S3、探针或其他 HTTP。
 - 对每个命中的请求构造唯一 outbound `Request`，从其 clone 读取并持久化最终 body bytes，再把
   同一对象交给真实 fetch；不以 `onPayload` 或 `JSON.stringify` 重建请求。
-- Response 以 clone 并行消费，保留应用可见的未压缩 response body bytes（不是 TCP 分片或
-  Content-Encoding 前的线路字节）。上限后保存精确前缀并标为 `truncated`；Abort/断流、非 2xx
+- Response 以 clone 并行消费，保留 HTTP content-decoding 后、SSE 解析前的应用可见 response body
+  bytes（不是 TCP 分片、chunk framing 或 Content-Encoding 前的线路字节）。上限后保存精确前缀并标为 `truncated`；Abort/断流、非 2xx
   和 Blob/DB 结果未知均留下状态，且不改变模型调用结果。
 - 正文进入现有 trace Blob 生命周期；`model_wire_trace_records` 仅保存 tenant/run/attempt/turn/part
   索引、摘要、大小、HTTP 状态与持久化状态，并启用 RLS。它不属于 Artifact/Resource 搜索目录。
@@ -31,5 +31,5 @@ Provider 的 UTF-8 字节，也无法复现 SSE 分片、非 2xx、断流或中�
 
 ## 可逆性
 
-关闭开关立即停止新增采集，历史数据仍按租户保留策略清理。迁移 down 仅用于受控开发回滚；生产
+关闭开关立即停止新增采集。保留清理消费者合入前，production 对 enabled=true 失败关闭；迁移 down 仅用于受控开发回滚；生产
 删除前须先完成引用可达性审计。

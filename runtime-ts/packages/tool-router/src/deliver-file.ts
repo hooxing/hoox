@@ -146,10 +146,11 @@ class DeliverFileToolRouter implements DeliverFileToolRouterPort {
     readonly signal?: AbortSignal;
   }): Promise<DeliverFileSuccess> {
     const args = decodeArguments(input.arguments);
+    const argsDigest = digestCanonical(args);
+    // durable tool_call 与一次性许可必须先形成；之后的路径/name 业务校验即使失败也能配对 tool_result。
+    const authorization = await this.#authorize(input.callId, argsDigest, input.signal);
     const relativePath = absoluteWorkspacePath(args.path);
     const name = normalizeName(args.name ?? basename(relativePath));
-    const argsDigest = digestCanonical(args);
-    const authorization = await this.#authorize(input.callId, argsDigest, input.signal);
     let source: DeliverFileReadResult;
     try {
       source = await this.options.source.read({
@@ -265,7 +266,8 @@ function normalizeName(value: string): string {
     value.normalize("NFC") !== value ||
     /[\p{Cc}\p{Cf}]/u.test(value) ||
     value.includes("/") ||
-    value.includes("\\")
+    value.includes("\\") ||
+    Buffer.byteLength(value, "utf8") > 255
   ) {
     throw invalidArgument();
   }

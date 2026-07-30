@@ -8,10 +8,7 @@ import {
   sha256Digest,
 } from "@cube-runtime/domain";
 import type { PersistResourceBlobResult } from "@cube-runtime/persistence";
-import type {
-  ArtifactExecutionAuthorization,
-  ArtifactExecutionAuthorizationVerifierPort,
-} from "./authorization.js";
+import type { ArtifactExecutionAuthorization } from "./authorization.js";
 
 export interface SimpleDeliveredFileSnapshot {
   readonly artifactId: ArtifactId;
@@ -55,7 +52,6 @@ export class SimpleArtifactDeliveryService {
   constructor(
     private readonly repository: SimpleDeliveredFileRepositoryPort,
     private readonly blobs: SimpleResourceBlobWriterPort,
-    private readonly verifier: ArtifactExecutionAuthorizationVerifierPort,
   ) {}
 
   async publish(input: {
@@ -66,10 +62,6 @@ export class SimpleArtifactDeliveryService {
     readonly name: string;
     readonly body: Uint8Array;
   }): Promise<SimpleDeliveredFileSnapshot> {
-    this.verifier.assert(input.authorization, {
-      toolName: "deliver_file",
-      argsDigest: input.toolArgsDigest,
-    });
     const bytes = Uint8Array.from(input.body);
     const sha256 = sha256Digest(createHash("sha256").update(bytes).digest("hex"));
     const mediaType = mediaTypeFor(input.name);

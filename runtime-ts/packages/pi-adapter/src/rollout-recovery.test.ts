@@ -395,8 +395,18 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
     async () => {
       const harness = await sessionHarness();
       harness.faux.setResponses([fauxAssistantMessage("恢复后继续")]);
+      const deliverFileToolRouter = {
+        deliverFile: async () => ({ status: "published", download_ready: true }),
+        projectError: () => ({
+          status: "failed" as const,
+          code: "SERVICE_UNAVAILABLE",
+          message: "暂不可用",
+          correctable: false,
+        }),
+      };
       const result = await recoverSafePiSession({
         ...harness.options,
+        deliverFileToolRouter,
         loadRecovery: async (current) => ({
           ...loaded([entry(0, "user", { text: "恢复前的问题" })]),
           recordedCompatibility: current,
@@ -406,6 +416,7 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
       if (result.outcome !== "session_created") return;
       try {
         expect(result.controller.getDiagnostics().compactionEnabled).toBe(false);
+        expect(result.controller.getDiagnostics().activeToolNames).toContain("deliver_file");
         expect("compact" in result.controller).toBe(false);
         await result.controller.prompt("恢复后的输入");
       } finally {

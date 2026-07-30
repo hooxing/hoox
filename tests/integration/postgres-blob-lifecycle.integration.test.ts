@@ -595,7 +595,6 @@ describe("PostgreSQL stable blob 生命周期", () => {
         modelRuntime,
         durableObservation.createRecorder,
         undefined,
-        undefined,
         durableObservation.prepare,
       );
       const sandboxes = new PgBackedSandboxSessionRegistry(runtimePool, upstream, 120);

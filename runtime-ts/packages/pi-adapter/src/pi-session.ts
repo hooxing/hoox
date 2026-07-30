@@ -32,7 +32,6 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import type { ArtifactPiToolExecutorPort } from "./artifact-tools.js";
 import {
   createDeliverFilePiTool,
   type DeliverFilePiToolExecutorPort,
@@ -337,9 +336,7 @@ export interface CreateSafePiSessionOptions {
   rolloutProjection?: ControlledRolloutProjection;
   /** 生产 Tool Router 在每次 Sandbox 工具执行前回到 DB 重验双栅栏。 */
   authorizeToolEffect: SandboxToolEffectAuthorizer["authorizeToolEffect"];
-  /** TODO(codex-alignment): 旧装配兼容字段；新 Session 不会注册其中的两个旧工具。 */
-  artifactToolRouter?: ArtifactPiToolExecutorPort;
-  /** 新 Run 只注册简化交付工具；旧 Artifact Router 仅保留为装配兼容字段。 */
+  /** 只有生产装配提供真实交付依赖时才注册。 */
   deliverFileToolRouter?: DeliverFilePiToolExecutorPort;
   /** 必须绑定当前 Tenant/Attempt 的 durable Observation recorder；生产缺失时拒绝创建 Session。 */
   createToolObservationRecorder: Parameters<typeof createObservedSandboxTools>[2];

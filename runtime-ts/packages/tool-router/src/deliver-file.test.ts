@@ -115,15 +115,56 @@ describe("deliver_file Tool Router", () => {
 
   it("拒绝宿主路径、相对路径和模型提供的内部发布字段", async () => {
     const { router } = harness({ outcome: "not_found" });
-    for (const arguments_ of [
+    for (const [index, arguments_] of [
       { path: "reports/final.pdf" },
       { path: "D:/workspace/final.pdf" },
       { path: "/workspace/final.pdf", artifactId: "model-controlled" },
-    ]) {
+    ].entries()) {
       await expect(
-        router.deliverFile({ callId: "call-invalid", arguments: arguments_ }),
+        router.deliverFile({ callId: `call-invalid-${index}`, arguments: arguments_ }),
       ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
     }
+  });
+
+  it("在读取和写 Blob 前按 UTF-8 字节拒绝超长交付名称", async () => {
+    let reads = 0;
+    const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 100 });
+    const router = new DeliverFileToolRouterFactory({
+      source: {
+        read: async () => {
+          reads += 1;
+          return { outcome: "not_found" };
+        },
+      },
+      publications: { publish: async () => Promise.reject(new Error("不得发布")) },
+      authorizationVerifier: authority.verifier,
+    }).create({
+      binding: {
+        scope,
+        attemptId: "attempt-deliver",
+        sandbox: {
+          registryId: "registry-deliver",
+          providerSandboxId: "sandbox-deliver",
+          mode: "created",
+          sandbox: {} as SandboxHandle,
+        },
+      },
+      authorizer: {
+        authorizeToolEffect: async (call) =>
+          authority.issuer.issue({
+            attemptId: "attempt-deliver",
+            consumed: consumed(call.callId, call.toolName, call.argsDigest),
+          }),
+      },
+    });
+
+    await expect(
+      router.deliverFile({
+        callId: "call-name-too-long",
+        arguments: { path: "/workspace/final.pdf", name: `${"文".repeat(85)}a` },
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    expect(reads).toBe(0);
   });
 });
 

@@ -182,9 +182,9 @@ function safeSessionOptions(
     ...(options.untrustedPromptContent === undefined
       ? {}
       : { untrustedPromptContent: options.untrustedPromptContent }),
-    ...(options.artifactToolRouter === undefined
+    ...(options.deliverFileToolRouter === undefined
       ? {}
-      : { artifactToolRouter: options.artifactToolRouter }),
+      : { deliverFileToolRouter: options.deliverFileToolRouter }),
   };
 }
 

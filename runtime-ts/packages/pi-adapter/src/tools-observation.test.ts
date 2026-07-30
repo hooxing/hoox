@@ -110,13 +110,7 @@ describe("exec_command", () => {
     const input = { cmd: "long-running-task", timeout_ms: 3_600_000 };
 
     expect(Value.Check(tested.parameters, input)).toBe(true);
-    await tested.execute(
-      "call_exec_max_timeout",
-      input,
-      undefined,
-      () => undefined,
-      {} as never,
-    );
+    await tested.execute("call_exec_max_timeout", input, undefined, () => undefined, {} as never);
 
     expect(command).toHaveBeenCalledWith(
       expect.any(String),

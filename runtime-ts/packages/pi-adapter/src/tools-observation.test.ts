@@ -1,5 +1,6 @@
 import { parseControlledToolReceipt } from "@cube-runtime/context-policy";
 import { SandboxRuntimeError, type SandboxHandle } from "@cube-runtime/sandbox";
+import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import { createObservedSandboxTools, SANDBOX_TOOL_NAMES } from "./tools.js";
 
@@ -40,6 +41,7 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
   if (tool === undefined) throw new Error("测试缺少 exec_command");
   return {
     execute: tool.execute as unknown as ToolExecute,
+    parameters: tool.parameters,
     receipts,
     continuationRejected: () => continuationRejected,
   };
@@ -100,6 +102,36 @@ describe("exec_command", () => {
       `cd -- '/workspace/a'"'"'b' && exec /bin/bash -c 'printf '"'"'%s'"'"' ok'`,
       expect.objectContaining({ timeoutMs: 55 }),
     );
+  });
+
+  it("timeout_ms 接受 1 小时上限并传给 CubeSandbox", async () => {
+    const command = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const tested = fixture({ command } as unknown as SandboxHandle);
+    const input = { cmd: "long-running-task", timeout_ms: 3_600_000 };
+
+    expect(Value.Check(tested.parameters, input)).toBe(true);
+    await tested.execute(
+      "call_exec_max_timeout",
+      input,
+      undefined,
+      () => undefined,
+      {} as never,
+    );
+
+    expect(command).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({ timeoutMs: 3_600_000 }),
+    );
+  });
+
+  it("timeout_ms 拒绝超过 1 小时的参数", () => {
+    const tested = fixture({
+      command: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+    } as unknown as SandboxHandle);
+
+    expect(
+      Value.Check(tested.parameters, { cmd: "too-long-running-task", timeout_ms: 3_600_001 }),
+    ).toBe(false);
   });
 
   it("非零退出码是可供模型修正的正常工具结果", async () => {

@@ -143,13 +143,18 @@ export class ModelWireTraceSession {
   async drain(maxWaitMilliseconds = 2_000): Promise<void> {
     if (!Number.isSafeInteger(maxWaitMilliseconds) || maxWaitMilliseconds < 0)
       throw new TypeError("模型网络诊断等待上限无效");
-    const deadline = new Promise<void>((resolve) => setTimeout(resolve, maxWaitMilliseconds));
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, maxWaitMilliseconds);
+      timer.unref?.();
+    });
     await Promise.race([
       (async () => {
         while (this.state.tasks.size > 0) await Promise.allSettled([...this.state.tasks]);
       })(),
       deadline,
     ]);
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 

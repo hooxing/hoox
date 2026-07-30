@@ -22,6 +22,11 @@ Provider 的 application request body bytes，也无法复现 SSE 分片、非 2
   外键绑定 reference 的 stable/state/purpose、摘要、大小、lifecycle、incarnation 与物理键。
   相同 tenant/attempt/model turn/transport attempt/part 的完整同命令只重放，不同命令稳定冲突；
   它启用 RLS，且不属于 Artifact/Resource 搜索目录。
+- development 且开关启用时，同步 best-effort 镜像每个已捕获正文到项目固定根目录
+  `model-wire-traces/<runId>/<attemptId>/`。目录只能由已验证的 context 与固定根派生；文件名稳定包含
+  model turn、transport attempt、part、capture status，并保留 request JSON 或 response SSE 原始字节。
+  文件先在目标目录以 0600 临时文件完整写入并同步，再用不覆盖的 hard link 原子发布；同字节重放成功，
+  异字节冲突保留原文件。镜像失败被隔离，不能使权威持久化降级为 capture failure。
 - 维护者读取入口必须经过既有认证、Membership/RLS 与 Run 归属校验，并只允许读取该表引用的
   trace Blob；不得根据普通 Artifact id 或全文搜索发现这些报文。
 
@@ -48,6 +53,10 @@ COMMIT 响应未知时，写入与清理都只按原命令摘要读回事实名�
 非 2xx、上限截断、持久化失败不改变
 Response，以及索引幂等、引用释放、共享 lifecycle、跨租户隔离与迁移 up/down/up。
 
+项目目录镜像只是本机开发排障副本，不具备租户 ACL、Web/API 读取、retention、Blob lifecycle 或备份语义；
+PG/MinIO 仍是 UI、授权、保留和清理的唯一权威存储。production 装配永远不创建该镜像，即使未来允许生产
+采集开关；测试还覆盖镜像磁盘失败不影响权威端口、固定路径不能被 context 逃逸，以及原子幂等冲突不覆盖。
+
 到期墓碑不含正文、HTTP 状态、run/thread 或物理键，只保留 tenant、attempt/turn/part、命令摘要与
 Blob operation 摘要身份。它与 `blob_commits` 的永久幂等事实同寿命，不能按普通 retention 删除；
 否则旧 key 会命中已完成但引用已释放的 commit snapshot，并重新产生不可收敛引用。容量核算因此按
@@ -55,5 +64,6 @@ Blob operation 摘要身份。它与 `blob_commits` 的永久幂等事实同寿�
 
 ## 可逆性
 
-关闭开关立即停止新增采集。保留清理消费者合入前，production 对 enabled=true 失败关闭；迁移 down 仅用于受控开发回滚；生产
+关闭开关立即停止新增采集和本地镜像。`model-wire-traces/` 可在 Worker 停止后由开发者手动删除，不影响
+PG/MinIO 权威记录。保留清理消费者合入前，production 对 enabled=true 失败关闭；迁移 down 仅用于受控开发回滚；生产
 删除前须先完成引用可达性审计。

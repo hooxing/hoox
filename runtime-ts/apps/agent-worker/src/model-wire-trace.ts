@@ -125,7 +125,7 @@ export class ModelWireTraceSession {
   }
 
   run<T>(context: ModelWireTraceContext, operation: () => T): T {
-    assertContext(context);
+    assertModelWireTraceContext(context);
     return activeTrace.run(
       {
         context: Object.freeze({ ...context }),
@@ -323,9 +323,9 @@ function isAbort(error: unknown): boolean {
   return error instanceof DOMException ? error.name === "AbortError" : false;
 }
 
-function assertContext(context: ModelWireTraceContext): void {
-  for (const value of Object.values(context)) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(value))
+export function assertModelWireTraceContext(context: ModelWireTraceContext): void {
+  for (const value of [context.tenantId, context.threadId, context.runId, context.attemptId]) {
+    if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(value))
       throw new TypeError("模型网络诊断作用域无效");
   }
 }

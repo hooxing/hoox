@@ -65,6 +65,13 @@ MODEL_WIRE_TRACE_MAX_BYTES=1048576
 `corepack pnpm dev:worker`，此后新 Run 的每次 `/chat/completions` 调用才会进入诊断面。旧 Run 在采集关闭期间
 没有保存网络正文，不能追溯或事后重建精确请求与 SSE。
 
+同一开关在 development 还会把实际捕获的正文 best-effort 镜像到项目根目录
+`model-wire-traces/<runId>/<attemptId>/`，方便直接用编辑器排障。文件名包含模型轮次、传输次数、part 与采集状态，
+例如 `model-turn-00-transport-0-request-complete.json` 和
+`model-turn-00-transport-0-response-truncated.sse`。该目录已被 Git 忽略；写入采用同目录临时文件加原子发布，
+相同字节可以幂等重放，不同字节不会覆盖已有文件。镜像写失败不会改变模型调用或 PG/MinIO 诊断持久化结果。
+本地文件不提供 ACL、UI 读取或 retention 保证，PG/MinIO 始终是这些能力的唯一权威存储；production 不创建本地镜像。
+
 启动开发 API 和 Web 后，在 Web 中选择 Thread 与 Run，进入“模型网络报文”区域即可按 Attempt、
 `modelTurn` 和 `transportAttempt` 查看记录：`modelTurn` 表示工具循环中的模型轮次，`transportAttempt` 表示
 同一轮的 HTTP 重试。request 展示实际交给 Fetch 的最终 application request body；response 展示 HTTP

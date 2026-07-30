@@ -20,6 +20,7 @@ Thumbs.db
 *.log
 .tmp/
 tmp/
+model-wire-traces/
 
 # Vendored SDK working directories and archives
 runtime-ts/vendor/cubesandbox-sdk/source/

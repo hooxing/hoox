@@ -24,6 +24,7 @@ import {
 import {
   type Artifact,
   canPreviewArtifact,
+  type ModelWireTraceRecord,
   type Run,
   type RunEvent,
   type RunStatus,
@@ -31,6 +32,7 @@ import {
 } from "./api.js";
 import { buildRunProgress } from "./event-view.js";
 import { AssistantMarkdown } from "./markdown-view.js";
+import { ModelWireTracePanel } from "./model-wire-trace-view.js";
 
 /** waiting 仍可取消，但不代表 Worker 正在执行。 */
 export const cancellableRunStatuses = new Set<RunStatus>(["queued", "running", "waiting"]);
@@ -179,6 +181,71 @@ export function AssistantMessage({
   );
 }
 
+/**
+ * Artifact 仍归属于整次 Run；抽屉用于集中操作，内联卡片保证交付物不会脱离 Agent 正文的阅读路径。
+ */
+export function InlineArtifactDelivery({
+  artifacts,
+  onPreview,
+  onDownload,
+}: {
+  readonly artifacts: readonly Artifact[];
+  readonly onPreview: (artifactId: string) => void;
+  readonly onDownload: (artifactId: string) => void;
+}) {
+  if (artifacts.length === 0) return null;
+  return (
+    <section className="inline-artifact-delivery" aria-labelledby="inline-deliverable-title">
+      <div className="inline-artifact-heading">
+        <div>
+          <span className="message-label">Agent 交付物</span>
+          <h2 id="inline-deliverable-title">本次回复的可下载产物</h2>
+        </div>
+        <span className="count-badge">{artifacts.length}</span>
+      </div>
+      <ul className="artifact-list inline-artifact-list">
+        {artifacts.map((artifact) => (
+          <li key={artifact.id}>
+            <FileText size={17} aria-hidden="true" />
+            <div className="artifact-details">
+              <strong>{artifact.name}</strong>
+              <small>
+                {artifact.mediaType ?? "未知格式"} ·{" "}
+                {artifact.status === "published" ? "可用" : artifact.status}
+              </small>
+            </div>
+            <fieldset className="artifact-actions">
+              <legend className="sr-only">{artifact.name} 操作</legend>
+              {canPreviewArtifact(artifact.mediaType) && (
+                <button
+                  type="button"
+                  className="icon-button"
+                  title="预览产物"
+                  aria-label={`预览 ${artifact.name}`}
+                  disabled={artifact.status !== "published"}
+                  onClick={() => onPreview(artifact.id)}
+                >
+                  <Eye size={16} />
+                </button>
+              )}
+              <button
+                type="button"
+                className="icon-button"
+                title="下载产物"
+                aria-label={`下载 ${artifact.name}`}
+                disabled={artifact.status !== "published"}
+                onClick={() => onDownload(artifact.id)}
+              >
+                <Download size={16} />
+              </button>
+            </fieldset>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function EmptyConversation() {
   return (
     <div className="conversation-empty welcome-empty">
@@ -205,23 +272,35 @@ export function RunRecoveryLoading() {
 export function ActivityPanel({
   isOpen,
   artifacts,
+  modelWireTraces = [],
+  modelWireTraceHasMore = false,
+  modelWireTraceUnavailable = false,
   onToggle,
   onPreview,
   onDownload,
+  onLoadModelWireTrace = async () => new Uint8Array(),
+  onLoadMoreModelWireTraces = async () => undefined,
   returnFocusRef,
   fallbackFocusRef,
 }: {
   readonly isOpen: boolean;
   readonly artifacts: readonly Artifact[];
+  readonly modelWireTraces?: readonly ModelWireTraceRecord[];
+  readonly modelWireTraceHasMore?: boolean;
+  readonly modelWireTraceUnavailable?: boolean;
   readonly onToggle: () => void;
   readonly onPreview: (artifactId: string) => void;
   readonly onDownload: (artifactId: string) => void;
+  readonly onLoadModelWireTrace?: (record: ModelWireTraceRecord) => Promise<Uint8Array>;
+  readonly onLoadMoreModelWireTraces?: () => Promise<void>;
   readonly returnFocusRef: RefObject<HTMLButtonElement | null>;
   readonly fallbackFocusRef: RefObject<HTMLElement | null>;
 }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const wasOpenRef = useRef(false);
-  const open = isOpen && artifacts.length > 0;
+  const hasContents =
+    artifacts.length > 0 || modelWireTraces.length > 0 || modelWireTraceUnavailable;
+  const open = isOpen && hasContents;
   useEffect(() => {
     if (open) {
       wasOpenRef.current = true;
@@ -234,7 +313,7 @@ export function ActivityPanel({
       else fallbackFocusRef.current?.focus();
     }
   }, [fallbackFocusRef, open, returnFocusRef]);
-  if (artifacts.length === 0) return null;
+  if (!hasContents) return null;
   return (
     <aside
       className={`activity-panel ${open ? "" : "is-collapsed"}`}
@@ -313,6 +392,13 @@ export function ActivityPanel({
               </ul>
             )}
           </section>
+          <ModelWireTracePanel
+            records={modelWireTraces}
+            hasMore={modelWireTraceHasMore}
+            unavailable={modelWireTraceUnavailable}
+            onLoadBody={onLoadModelWireTrace}
+            onLoadMore={onLoadMoreModelWireTraces}
+          />
         </div>
       )}
     </aside>

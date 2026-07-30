@@ -3,7 +3,13 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, type Artifact, type Run, type Thread } from "./api.js";
+import {
+  ApiError,
+  type Artifact,
+  type ModelWireTraceRecord,
+  type Run,
+  type Thread,
+} from "./api.js";
 import { App, chooseInitialThread, deriveThreadTitle, shouldContinueRunPolling } from "./main.js";
 
 type AppApi = NonNullable<ComponentProps<typeof App>["apiClient"]>;
@@ -34,6 +40,18 @@ const textArtifact = (): Artifact => ({
   updatedAt: "2026-07-29T00:00:00.000Z",
 });
 
+const modelWireTrace = (): ModelWireTraceRecord => ({
+  attemptId: "attempt_poll",
+  modelTurn: 0,
+  transportAttempt: 0,
+  part: "request",
+  captureStatus: "complete",
+  persistenceStatus: "stored",
+  bodyAvailable: true,
+  createdAt: "2026-07-30T00:00:00.000Z",
+  expiresAt: "2026-08-06T00:00:00.000Z",
+});
+
 function apiFixture(overrides: Partial<AppApi> = {}): AppApi {
   const defaultThread = thread("thread_default");
   const defaultRun = run("run_default", defaultThread.id);
@@ -43,6 +61,8 @@ function apiFixture(overrides: Partial<AppApi> = {}): AppApi {
     getRun: vi.fn(async () => defaultRun),
     listEvents: vi.fn(async () => ({ attemptId: undefined, items: [] })),
     listArtifacts: vi.fn(async () => []),
+    listModelWireTraces: vi.fn(async () => ({ items: [], hasMore: false })),
+    getModelWireTraceBody: vi.fn(async () => new Uint8Array()),
     createThread: vi.fn(async () => defaultThread),
     archiveThread: vi.fn(async () => defaultThread),
     createRun: vi.fn(async () => defaultRun),
@@ -179,6 +199,23 @@ describe("Agent 工作台恢复接入", () => {
     expect(container.textContent).toContain("运行 run_latest");
     expect(apiClient.listEvents).toHaveBeenCalledWith(active.id, latest.id, -1, 100);
     expect(apiClient.listArtifacts).toHaveBeenCalledWith(active.id, latest.id);
+  });
+
+  it("运行读取同时保留模型报文诊断出口", async () => {
+    const active = thread("thread_trace");
+    const latest = run("run_trace", active.id);
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [active]),
+      listLatestRuns: vi.fn(async () => [latest]),
+      getRun: vi.fn(async () => latest),
+      listModelWireTraces: vi.fn(async () => ({ items: [modelWireTrace()], hasMore: false })),
+    });
+    const { container } = mount(apiClient);
+
+    await settleEffects();
+
+    expect(apiClient.listModelWireTraces).toHaveBeenCalledWith(active.id, latest.id);
+    expect(container.textContent).toContain("模型网络报文");
   });
 
   it("切换和切回都会重新恢复，迟到错误与加载不会污染其他 Thread", async () => {

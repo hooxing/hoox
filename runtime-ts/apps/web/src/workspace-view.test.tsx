@@ -76,7 +76,41 @@ describe("工作台展示组件", () => {
     expect(html).not.toContain("received runtime event");
   });
 
-  it("新建会话不要求填写标题，并阻止连续点击重入", () => {
+  it("waiting 显示需要输入的问题与已有回复，不显示运行中动画或时长", () => {
+    const waiting: Run = { ...running, status: "waiting" };
+    const html = renderToStaticMarkup(
+      <RunTimeline
+        run={waiting}
+        events={[
+          {
+            eventId: "event-1",
+            sequence: 1,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "message.delta",
+            payload: { delta: "请先确认范围。" },
+          },
+          {
+            eventId: "event-2",
+            sequence: 2,
+            occurredAt: "",
+            kind: "run_waiting",
+            type: "run_waiting",
+            payload: { question: "需要处理哪个地区？", checkpointId: "不应展示" },
+          },
+        ]}
+      />,
+    );
+
+    expect(html).toContain("需要你的输入");
+    expect(html).toContain("需要处理哪个地区？");
+    expect(html).toContain("请先确认范围。");
+    expect(html).not.toContain("已运行");
+    expect(html).not.toContain("spin");
+    expect(html).not.toContain("checkpointId");
+  });
+
+  it("新建会话不要求填写标题，后续点击仍然有效", () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     const onCreate = vi.fn();
@@ -90,7 +124,7 @@ describe("工作台展示组件", () => {
       button.click();
       button.click();
     });
-    expect(onCreate).toHaveBeenCalledTimes(1);
+    expect(onCreate).toHaveBeenCalledTimes(2);
 
     act(() => {
       root.render(<ThreadCreate actionLoading onCreate={onCreate} />);
@@ -98,7 +132,7 @@ describe("工作台展示组件", () => {
     const disabledButton = container.querySelector("button");
     expect(disabledButton?.disabled).toBe(true);
     act(() => disabledButton?.click());
-    expect(onCreate).toHaveBeenCalledTimes(1);
+    expect(onCreate).toHaveBeenCalledTimes(2);
     act(() => root.unmount());
   });
 

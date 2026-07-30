@@ -1,7 +1,7 @@
 import { LoaderCircle, PanelLeftOpen, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ApiError, RuntimeApi, type ArtifactPreview, type Thread } from "./api.js";
+import { ApiError, RuntimeApi, type ArtifactPreview, type RunStatus, type Thread } from "./api.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
@@ -9,11 +9,11 @@ import { initialWorkspaceState, workspaceReducer } from "./state.js";
 import "./styles.css";
 import {
   ActivityPanel,
-  activeRunStatuses,
   ConversationComposer,
   compactWorkspaceMedia,
   EmptyConversation,
   NavigationSidebar,
+  pollingRunStatuses,
   RunRecoveryLoading,
   RunTimeline,
   shouldOpenActivityPanel,
@@ -61,6 +61,11 @@ type RecoveryUiState = {
 /** Thread 列表由服务端稳定排序；刷新时选择其中第一个活跃会话。 */
 export function chooseInitialThread(threads: readonly Thread[]): string | undefined {
   return threads.find((thread) => thread.status === "active")?.id;
+}
+
+/** waiting 已由 Worker 持久化为用户输入边界，不能继续短轮询。 */
+export function shouldContinueRunPolling(hasMoreEvents: boolean, status: RunStatus): boolean {
+  return hasMoreEvents || pollingRunStatuses.has(status);
 }
 
 export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) {
@@ -218,7 +223,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
           // 单次完成后再调度，状态更新不会重新创建计时器或导致紧密轮询。
-          if (eventPage.hasMore || activeRunStatuses.has(latest.status)) {
+          if (shouldContinueRunPolling(eventPage.hasMore, latest.status)) {
             timer = window.setTimeout(() => void poll(), 1200);
           }
         }

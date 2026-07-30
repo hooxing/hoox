@@ -43,6 +43,26 @@ describe("用户运行进度投影", () => {
     expect(progress.finalMessage).toBe("已生成报告。");
   });
 
+  it("保留流式片段边界的空格与 Markdown 换行", () => {
+    const progress = buildRunProgress([
+      event(1, "message.delta", { delta: "你好" }),
+      event(2, "message.delta", { delta: " 世界\n\n" }),
+      event(3, "message.delta", { delta: "- 第一项\n- 第二项" }),
+    ]);
+
+    expect(progress.finalMessage).toBe("你好 世界\n\n- 第一项\n- 第二项");
+  });
+
+  it("将 waiting 问题投影为受限的用户输入提示", () => {
+    const progress = buildRunProgress([
+      event(1, "message.delta", { delta: "我需要确认一个选项。" }),
+      event(2, "run_waiting", { question: "请选择目标地区。", checkpointId: "不应展示" }),
+    ]);
+
+    expect(progress.finalMessage).toBe("我需要确认一个选项。");
+    expect(progress.waitingQuestion).toBe("请选择目标地区。");
+  });
+
   it("为未识别工具提供安全的通用动作", () => {
     expect(toolActionLabel("private_tool")).toBe("正在处理任务…");
   });

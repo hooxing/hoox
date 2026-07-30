@@ -141,6 +141,26 @@ describe("工作台展示组件", () => {
     expect(html).toContain("正在等待第一条活动");
   });
 
+  it("在运行对话中将助手增量文本渲染为 Markdown", () => {
+    const html = renderToStaticMarkup(
+      <RunTimeline
+        events={[
+          {
+            eventId: "event-markdown",
+            sequence: 1,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "message.delta",
+            payload: { delta: "## 结论\n\n- 支持 **Markdown**" },
+          },
+        ]}
+      />,
+    );
+
+    expect(html).toContain("<h2>结论</h2>");
+    expect(html).toContain("<li>支持 <strong>Markdown</strong></li>");
+  });
+
   it("创建请求进行中时禁用标题输入并阻止 Enter 重入", () => {
     const container = document.createElement("div");
     const root = createRoot(container);

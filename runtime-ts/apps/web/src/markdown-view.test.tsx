@@ -1,0 +1,70 @@
+// @vitest-environment jsdom
+
+import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it } from "vitest";
+import { AssistantMarkdown } from "./markdown-view.js";
+
+function renderMarkdown(text: string): HTMLElement {
+  const container = document.createElement("div");
+  container.innerHTML = renderToStaticMarkup(<AssistantMarkdown text={text} />);
+  return container;
+}
+
+describe("助手 Markdown", () => {
+  it("渲染 GFM 表格、任务列表、删除线与带语言的代码块", () => {
+    const container = renderMarkdown(`
+| 项目 | 状态 |
+| --- | --- |
+| 安全渲染 | 完成 |
+
+- [x] 支持任务列表
+
+~~旧结论~~
+
+\`\`\`ts
+const ready = true;
+\`\`\`
+`);
+
+    expect(container.querySelector("table")?.textContent).toContain("安全渲染");
+    expect(container.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(true);
+    expect(container.querySelector("del")?.textContent).toBe("旧结论");
+    expect(container.querySelector("pre code")?.className).toContain("language-ts");
+    expect(container.querySelector("pre code")?.textContent).toContain("const ready = true;");
+  });
+
+  it("丢弃原始 HTML 并阻止危险协议进入链接属性", () => {
+    const container = renderMarkdown(`
+<img src=x onerror="globalThis.compromised=true">
+<script>globalThis.compromised=true</script>
+`);
+    const unsafeLink = renderMarkdown("[危险链接](javascript:alert(document.domain))");
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.querySelector("script")).toBeNull();
+    expect(container.innerHTML).not.toContain("onerror");
+    expect(unsafeLink.textContent).toContain("危险链接");
+    expect(unsafeLink.innerHTML).not.toContain("javascript:");
+    expect(unsafeLink.querySelector("a")?.getAttribute("href")).toBe("");
+  });
+
+  it("不允许 Markdown 图片触发第三方资源请求", () => {
+    const container = renderMarkdown("![追踪像素](https://tracker.example/pixel.gif)");
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).toContain("[图片：追踪像素]");
+    expect(container.innerHTML).not.toContain("tracker.example");
+  });
+
+  it("外部网页使用新窗口隔离，站内链接保持当前窗口", () => {
+    const container = renderMarkdown(
+      "[外部文档](https://example.com/docs) [站内产物](/artifacts/report)",
+    );
+    const links = container.querySelectorAll("a");
+
+    expect(links[0]?.getAttribute("target")).toBe("_blank");
+    expect(links[0]?.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(links[1]?.hasAttribute("target")).toBe(false);
+    expect(links[1]?.hasAttribute("rel")).toBe(false);
+  });
+});

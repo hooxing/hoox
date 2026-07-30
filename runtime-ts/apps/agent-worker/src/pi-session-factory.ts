@@ -62,6 +62,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
   async create(
     input: Parameters<AgentSessionFactoryPort["create"]>[0],
   ): Promise<WorkerAgentSessionPort> {
+    const attemptWireTraces = this.modelWireTraces?.createAttempt();
     const startedToolCalls = new Map<string, string>();
     const invalidToolCalls = new Set<string>();
     const authorizationRequested = new Set<string>();
@@ -180,6 +181,20 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           throw new Error("Tool 失败回执完成后禁止继续模型轮次");
         }
       },
+      ...(attemptWireTraces === undefined
+        ? {}
+        : {
+            withProviderInvocation: <T>(operation: () => Promise<T>) =>
+              attemptWireTraces.run(
+                {
+                  tenantId: input.scope.tenantId,
+                  threadId: input.scope.threadId,
+                  runId: input.scope.runId,
+                  attemptId: input.attemptId,
+                },
+                operation,
+              ),
+          }),
       ...(artifactToolRouter === undefined ? {} : { artifactToolRouter }),
     };
     // 兼容身份只由实际模型/Prompt/Tool schema 派生；占位 recorder 不执行任何写入。
@@ -232,20 +247,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         }
         // 许可刚由 DB 一次性消费；校验后立即进入 prompt，中间不再插入异步窗口。
         try {
-          const prompt = () => controller.prompt(text);
-          await (this.modelWireTraces === undefined
-            ? prompt()
-            : this.modelWireTraces.run(
-                {
-                  tenantId: input.scope.tenantId,
-                  threadId: input.scope.threadId,
-                  runId: input.scope.runId,
-                  attemptId: input.attemptId,
-                },
-                prompt,
-              ));
-          // 仅受限等待已经发起的诊断写入；超时和失败均不改变模型成功语义。
-          await this.modelWireTraces?.drain();
+          try {
+            await controller.prompt(text);
+          } finally {
+            // 即使 Provider 失败也只等待当前 Attempt 已创建的诊断任务，且不会改变原异常。
+            await attemptWireTraces?.drain();
+          }
         } catch (error) {
           if (observationRecoveryCode !== undefined) {
             return { kind: "recovery_required", code: observationRecoveryCode };

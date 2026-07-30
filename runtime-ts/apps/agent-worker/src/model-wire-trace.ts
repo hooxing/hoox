@@ -115,6 +115,14 @@ export class ModelWireTraceSession {
     this.provider = providerBoundary(providerBaseUrl);
   }
 
+  createAttempt(): ModelWireTraceSession {
+    return new ModelWireTraceSession(
+      this.port,
+      this.maxBytes,
+      `${this.provider.origin}${this.provider.completionsPath.replace(/\/chat\/completions$/u, "")}`,
+    );
+  }
+
   run<T>(context: ModelWireTraceContext, operation: () => Promise<T>): Promise<T> {
     assertContext(context);
     return activeTrace.run(
@@ -198,7 +206,7 @@ async function safePersist(
       ...(httpStatus === undefined ? {} : { httpStatus }),
     });
   } catch {
-    await safeFailure(trace, turn, part, "CAPTURE_UNAVAILABLE", httpStatus);
+    await safeFailure(trace, transportAttempt, part, "CAPTURE_UNAVAILABLE", httpStatus);
   }
 }
 

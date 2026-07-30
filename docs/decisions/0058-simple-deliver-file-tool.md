@@ -69,6 +69,8 @@ ResourceVersion 和 Artifact replacement 都不是模型应当控制的协议字
   completion 不再调用旧门。
 - production/development 共用同一装配；Linux Worker 纵向 Gate 使用当前 `exec_command → deliver_file` 工具链、
   真实 Router、PostgreSQL/MinIO publication，并通过下载授权 URL 读回同一字节。
+- Worker 的 Artifact 下载 TTL 与其 BlobStore 预签名上限共用同一 60 秒常量；应用服务不得使用高于对象存储
+  策略的默认 TTL，否则已发布 Artifact 会在 presign 阶段被错误投影为依赖不可用。
 
 ## 可逆性
 

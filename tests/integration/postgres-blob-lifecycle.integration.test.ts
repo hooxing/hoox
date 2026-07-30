@@ -30,7 +30,10 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPgDurableObservationSession } from "../../runtime-ts/apps/agent-worker/src/pg-observation-assembly.js";
 import { PiWorkerSessionFactory } from "../../runtime-ts/apps/agent-worker/src/pi-session-factory.js";
-import { startWorkerProcess } from "../../runtime-ts/apps/agent-worker/src/process-entry.js";
+import {
+  startWorkerProcess,
+  WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
+} from "../../runtime-ts/apps/agent-worker/src/process-entry.js";
 import {
   AgentWorkerPollingLoop,
   SystemWorkerClock,
@@ -877,6 +880,8 @@ describe("PostgreSQL stable blob 生命周期", () => {
         {
           runtimeMode: "development",
           allowInsecureHttpDownload: true,
+          defaultDownloadTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
+          maxDownloadTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
           executionAuthorizationVerifier: artifactAuthorization.verifier,
         },
       );

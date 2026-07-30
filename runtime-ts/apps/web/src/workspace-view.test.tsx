@@ -12,6 +12,7 @@ import {
   RunTimeline,
   shouldOpenActivityPanel,
   ThreadCreate,
+  ThreadHeader,
 } from "./workspace-view.js";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -31,7 +32,7 @@ describe("工作台展示组件", () => {
     expect(html).toContain("is-waiting");
   });
 
-  it("右侧只保留本次运行产物，不渲染安全摘要或事件", () => {
+  it("没有产物时不渲染右侧竖栏或无意义入口", () => {
     const artifacts: readonly Artifact[] = [];
     const html = renderToStaticMarkup(
       <ActivityPanel
@@ -43,9 +44,54 @@ describe("工作台展示组件", () => {
       />,
     );
 
-    expect(html).toContain("本次运行产物");
-    expect(html).not.toContain("安全摘要");
-    expect(html).not.toContain("activity-log");
+    expect(html).toBe("");
+  });
+
+  it("有产物时使用可关闭的覆盖式抽屉，关闭后移出辅助技术焦点", () => {
+    const artifact: Artifact = {
+      id: "artifact-1",
+      name: "result.txt",
+      status: "published",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    };
+    const closed = renderToStaticMarkup(
+      <ActivityPanel
+        isOpen={false}
+        artifacts={[artifact]}
+        onToggle={() => undefined}
+        onPreview={() => undefined}
+        onDownload={() => undefined}
+      />,
+    );
+
+    expect(closed).toContain("activity-panel is-collapsed");
+    expect(closed).toContain('aria-hidden="true"');
+    expect(closed).toContain("inert");
+  });
+
+  it("会话头部用文字化操作打开产物抽屉和归档", () => {
+    const html = renderToStaticMarkup(
+      <ThreadHeader
+        thread={{
+          id: "thread-1",
+          title: "视觉改版",
+          status: "active",
+          createdAt: "2026-07-30T00:00:00.000Z",
+          updatedAt: "2026-07-30T00:00:00.000Z",
+        }}
+        run={running}
+        artifactCount={2}
+        actionLoading={false}
+        onArchive={() => undefined}
+        onCancel={() => undefined}
+        onOpenArtifacts={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("产物");
+    expect(html).toContain("归档");
+    expect(html).toContain("打开本次运行产物，共 2 个");
   });
 
   it("运行组件仅展示紧凑进度，隐藏内部事件和工具调用标识", () => {

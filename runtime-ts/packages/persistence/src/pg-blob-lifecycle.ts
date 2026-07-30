@@ -163,6 +163,74 @@ export class PgBlobLifecycleRepository
     );
   }
 
+  /**
+   * 只释放尚未被规范 ResourceVersion/Artifact 绑定的 resource reference。
+   * 对引用行加锁后再检查规范表，使 COMMIT unknown 与清理事务严格串行化。
+   */
+  async releaseUnattachedResourceReference(input: {
+    readonly scope: TenantBlobScope;
+    readonly referenceId: string;
+    readonly blob: StableBlobRef & { readonly purpose: "resource" };
+  }): Promise<"released" | "still_referenced"> {
+    assertTenantScope(input.scope);
+    assertBlobRef(input.scope, input.blob);
+    assertReferenceId(input.referenceId);
+    try {
+      return await withTenantTransaction(this.pool, input.scope, async (client) => {
+        const reference = await client.query<{
+          readonly state: "stable" | "released";
+          readonly purpose: BlobPurpose;
+          readonly sha256: string;
+          readonly size: string;
+          readonly lifecycle_id: string;
+          readonly incarnation_id: string;
+          readonly physical_object_key: string;
+        }>(
+          `SELECT state,purpose,sha256,size::text,lifecycle_id::text,
+                  incarnation_id::text,physical_object_key
+             FROM blob_references
+            WHERE tenant_id=$1 AND reference_id=$2
+            FOR UPDATE`,
+          [input.scope.tenantId, input.referenceId],
+        );
+        const row = reference.rows[0];
+        if (
+          row === undefined ||
+          row.purpose !== "resource" ||
+          row.sha256 !== input.blob.sha256 ||
+          row.size !== String(input.blob.size) ||
+          row.incarnation_id !== input.blob.incarnationId ||
+          row.physical_object_key !== input.blob.physicalObjectKey
+        ) {
+          throw new Error("Resource Blob release 身份不连续");
+        }
+        if (row.state === "released") return "released";
+        const attached = await client.query<{ readonly one: number }>(
+          `SELECT 1 AS one
+             WHERE EXISTS (
+               SELECT 1 FROM resource_versions
+                WHERE tenant_id=$1 AND blob_reference_id=$2
+             ) OR EXISTS (
+               SELECT 1 FROM artifact_publications
+                WHERE tenant_id=$1 AND blob_reference_id=$2
+             )`,
+          [input.scope.tenantId, input.referenceId],
+        );
+        if (attached.rows[0] !== undefined) return "still_referenced";
+        const released = await client.query(
+          `UPDATE blob_references
+              SET state='released',updated_at=clock_timestamp()
+            WHERE tenant_id=$1 AND reference_id=$2 AND state='stable'`,
+          [input.scope.tenantId, input.referenceId],
+        );
+        if (released.rowCount !== 1) throw new Error("Resource Blob release 状态冲突");
+        return "released";
+      });
+    } catch (error) {
+      throw mapBlobPersistenceError(error, "释放未绑定的 Resource Blob 引用");
+    }
+  }
+
   async reserve(input: {
     readonly scope: TenantBlobScope;
     readonly staged: StagedBlobRef;

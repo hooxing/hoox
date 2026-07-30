@@ -4,11 +4,13 @@ import { CopyObjectCommand, DeleteObjectCommand, S3Client } from "@aws-sdk/clien
 import { encodeControlledToolReceipt, ToolObservationPipeline } from "@cube-runtime/context-policy";
 import {
   agentThreadId,
+  isoTimestamp,
   runId,
   sha256Digest,
   tenantId,
   threadId,
   userId,
+  workspaceId,
 } from "@cube-runtime/domain";
 import type {
   ExecutionFence,
@@ -40,10 +42,16 @@ import {
   FakeRevisionVerifier,
 } from "../../runtime-ts/apps/agent-worker/src/testing/fakes.js";
 import {
+  createArtifactExecutionAuthorizationAuthority,
+  PgSimpleDeliveredFileRepository,
+  SimpleArtifactDeliveryService,
+} from "../../runtime-ts/packages/artifact/src/index.js";
+import {
   createS3BlobStore,
   createS3RetiredBlobTombstoneScrubber,
   createS3StableBlobGarbageCollector,
   createDurableTraceBlobPersistence,
+  DurableResourceBlobWriter,
   PgBackedSandboxSessionRegistry,
   PgExecutionPersistence,
   PgModelWireTraceCleanupRepository,
@@ -408,6 +416,83 @@ async function preparePromotion(
 }
 
 describe("PostgreSQL stable blob 生命周期", () => {
+  it("deliver_file 最终事务确定失败后以 released 事实回收真实 MinIO stable Blob", async () => {
+    const idempotencyKey = `delivery-failed-${unique}`;
+    const body = new TextEncoder().encode(`delivery-cleanup-${unique}`);
+    const digest = sha256Digest(createHash("sha256").update("delivery-cleanup").digest("hex"));
+    const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 0 });
+    const authorization = authority.issuer.issue({
+      attemptId: `delivery_attempt_${unique}`,
+      consumed: {
+        permit: {
+          permitId: `delivery_permit_${unique}`,
+          scope: {
+            tenantId: tenantId(scopeA.tenantId),
+            threadId: threadId(`delivery_thread_${unique}`),
+            runId: runId(`delivery_run_${unique}`),
+            rootRunId: runId(`delivery_run_${unique}`),
+            workspaceId: workspaceId(`delivery_workspace_${unique}`),
+          },
+          runClaimToken: `delivery_claim_${unique}`,
+          runClaimEpoch: 1,
+          workspaceRootRunId: runId(`delivery_run_${unique}`),
+          workspaceLeaseEpoch: 1,
+          attemptVersion: 0,
+          effect: "tool_execution",
+          callId: idempotencyKey,
+          toolName: "deliver_file",
+          argsDigest: digest,
+          issuedAt: isoTimestamp("2099-07-30T00:00:00.000Z"),
+          expiresAt: isoTimestamp("2099-07-30T00:01:00.000Z"),
+        },
+        consumedAt: isoTimestamp("2099-07-30T00:00:01.000Z"),
+        consumedAtMonotonicMs: 0,
+        maxContinuationDelayMs: 250,
+      },
+    });
+    const config = minioConfig();
+    const store = createS3BlobStore(config, repository);
+    const service = new SimpleArtifactDeliveryService(
+      new PgSimpleDeliveredFileRepository(runtimePool),
+      new DurableResourceBlobWriter(
+        repository,
+        store,
+        1024 * 1024,
+        createS3StableBlobGarbageCollector(config, repository),
+      ),
+    );
+
+    await expect(
+      service.publish({
+        authorization,
+        idempotencyKey,
+        toolArgsDigest: digest,
+        sourcePath: "failed-delivery.txt",
+        name: "failed-delivery.txt",
+        body,
+      }),
+    ).rejects.toThrow("DELIVER_FILE_COMMIT_FAILED");
+
+    const operationDigest = createHash("sha256")
+      .update(`${scopeA.tenantId}\0${idempotencyKey}`, "utf8")
+      .digest("hex");
+    const released = await withTenantTransaction(runtimePool, scopeA, (client) =>
+      client.query<{
+        readonly state: string;
+        readonly lifecycle_state: string;
+      }>(
+        `SELECT reference.state,lifecycle.state AS lifecycle_state
+           FROM blob_references reference
+           JOIN blob_lifecycles lifecycle
+             ON lifecycle.tenant_id=reference.tenant_id
+            AND lifecycle.lifecycle_id=reference.lifecycle_id
+          WHERE reference.tenant_id=$1 AND reference.operation_id=$2`,
+        [scopeA.tenantId, `deliver-${operationDigest}`],
+      ),
+    );
+    expect(released.rows).toEqual([{ state: "released", lifecycle_state: "deleted" }]);
+  });
+
   it("开发 Agent Worker 入口装配真实 PG、S3 Observation 与 Pi 恢复依赖", async () => {
     const dependencyServer = createServer((request, response) => {
       response.setHeader("content-type", "application/json");

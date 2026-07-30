@@ -57,6 +57,7 @@ describe("SimpleArtifactDeliveryService", () => {
           referenceId: "reference-simple-delivery",
           blob: stable(input.tenantId, input.sha256, input.body.byteLength, input.mediaType),
         }),
+        abandon: async () => "released",
       },
     );
     const result = await service.publish({
@@ -80,6 +81,65 @@ describe("SimpleArtifactDeliveryService", () => {
       persisted: { referenceId: "reference-simple-delivery" },
     });
     expect(committed?.persisted.blob.sha256).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it("Repository 失败时以 guarded release 回收 stable reference，并保留原始发布错误", async () => {
+    const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 100 });
+    const argsDigest = sha256Digest("b".repeat(64));
+    const authorization = authority.issuer.issue({
+      attemptId: "attempt-simple-delivery",
+      consumed: consumed(argsDigest),
+    });
+    const persisted = {
+      referenceId: "reference-failed-delivery",
+      blob: stable(scope.tenantId, "c".repeat(64), 3, "application/pdf"),
+    } as const;
+    const abandoned: unknown[] = [];
+    const service = new SimpleArtifactDeliveryService(
+      { commit: async () => Promise.reject(new Error("DELIVER_FILE_COMMIT_FAILED")) },
+      {
+        persist: async () => persisted,
+        abandon: async (input) => {
+          abandoned.push(input);
+          return "released";
+        },
+      },
+    );
+
+    await expect(
+      service.publish({
+        authorization,
+        idempotencyKey: "call-simple-delivery",
+        toolArgsDigest: argsDigest,
+        sourcePath: "report.pdf",
+        name: "report.pdf",
+        body: new Uint8Array([1, 2, 3]),
+      }),
+    ).rejects.toThrow("DELIVER_FILE_COMMIT_FAILED");
+    expect(abandoned).toEqual([
+      {
+        tenantId: scope.tenantId,
+        persisted: expect.objectContaining({ referenceId: persisted.referenceId }),
+      },
+    ]);
+  });
+
+  it("continuation window 在 249ms 仍有效，250ms 与 251ms 均关闭", () => {
+    let now = 0;
+    const authority = createArtifactExecutionAuthorizationAuthority({ now: () => now });
+    const argsDigest = sha256Digest("d".repeat(64));
+    const authorization = authority.issuer.issue({
+      attemptId: "attempt-simple-delivery",
+      consumed: { ...consumed(argsDigest), consumedAtMonotonicMs: 0, maxContinuationDelayMs: 250 },
+    });
+    const expectation = { toolName: "deliver_file", argsDigest };
+
+    now = 249;
+    expect(() => authority.verifier.assert(authorization, expectation)).not.toThrow();
+    now = 250;
+    expect(() => authority.verifier.assert(authorization, expectation)).toThrow();
+    now = 251;
+    expect(() => authority.verifier.assert(authorization, expectation)).toThrow();
   });
 });
 

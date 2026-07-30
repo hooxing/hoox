@@ -40,15 +40,15 @@ const textArtifact = (): Artifact => ({
   updatedAt: "2026-07-29T00:00:00.000Z",
 });
 
-const modelWireTrace = (): ModelWireTraceRecord => ({
+const modelWireTrace = (index = 0): ModelWireTraceRecord => ({
   attemptId: "attempt_poll",
-  modelTurn: 0,
+  modelTurn: index,
   transportAttempt: 0,
   part: "request",
   captureStatus: "complete",
   persistenceStatus: "stored",
   bodyAvailable: true,
-  createdAt: "2026-07-30T00:00:00.000Z",
+  createdAt: new Date(Date.UTC(2026, 6, 30, 0, 0, index)).toISOString(),
   expiresAt: "2026-08-06T00:00:00.000Z",
 });
 
@@ -216,6 +216,116 @@ describe("Agent 工作台恢复接入", () => {
 
     expect(apiClient.listModelWireTraces).toHaveBeenCalledWith(active.id, latest.id);
     expect(container.textContent).toContain("模型网络报文");
+  });
+
+  it("诊断索引暂不可用时不阻断 Run、事件与交付物投影", async () => {
+    const selectedThread = thread("thread_trace_unavailable");
+    const latest = run("run_trace_unavailable", selectedThread.id);
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [selectedThread]),
+      listLatestRuns: vi.fn(async () => [latest]),
+      getRun: vi.fn(async () => latest),
+      listModelWireTraces: vi.fn(async () => {
+        throw new ApiError("依赖服务暂时不可用", 503, true);
+      }),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+
+    expect(apiClient.getRun).toHaveBeenCalledWith(selectedThread.id, latest.id);
+    expect(apiClient.listEvents).toHaveBeenCalled();
+    expect(apiClient.listArtifacts).toHaveBeenCalled();
+    expect(container.textContent).toContain("诊断索引暂不可用");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("终态轮询保留已加载页并沿尾游标追完跨页新增诊断", async () => {
+    vi.useFakeTimers();
+    const selectedThread = thread("thread_trace_poll");
+    const activeRun = { ...run("run_trace_poll", selectedThread.id), status: "running" as const };
+    const terminalRun = { ...activeRun, status: "succeeded" as const };
+    const firstPage = [modelWireTrace(0), modelWireTrace(1)];
+    const tail = modelWireTrace(2);
+    const burstTail = [modelWireTrace(3), modelWireTrace(4)];
+    const finalTail = modelWireTrace(5);
+    let headRequestCount = 0;
+    const listModelWireTraces = vi.fn(
+      async (_threadId: string, _runId: string, cursor?: string) => {
+        if (cursor === "cursor_2") {
+          return {
+            items: [firstPage[1] as ModelWireTraceRecord, tail],
+            hasMore: false,
+            nextCursor: "cursor_3",
+          };
+        }
+        if (cursor === "cursor_3") {
+          return { items: burstTail, hasMore: true, nextCursor: "cursor_5" };
+        }
+        if (cursor === "cursor_5") {
+          return { items: [finalTail], hasMore: false, nextCursor: "cursor_6" };
+        }
+        headRequestCount += 1;
+        return {
+          items:
+            headRequestCount === 1
+              ? firstPage
+              : firstPage.map((record, index) =>
+                  index === 0
+                    ? {
+                        ...record,
+                        captureStatus: "truncated" as const,
+                        persistenceStatus: "unavailable" as const,
+                        bodyAvailable: false,
+                      }
+                    : record,
+                ),
+          hasMore: true,
+          nextCursor: headRequestCount === 1 ? "cursor_2" : "cursor_refreshed_head",
+        };
+      },
+    );
+    let runPollCount = 0;
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [selectedThread]),
+      listLatestRuns: vi.fn(async () => [activeRun]),
+      getRun: vi.fn(async () => {
+        runPollCount += 1;
+        return runPollCount === 1 ? activeRun : terminalRun;
+      }),
+      listModelWireTraces,
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(2);
+    const loadMore = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "加载更多",
+    );
+    if (loadMore === undefined) throw new Error("未渲染模型网络诊断加载更多按钮");
+    await act(async () => loadMore.click());
+    await settleEffects();
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(3);
+    expect(container.querySelectorAll('[aria-label="模型轮次 2"]')).toHaveLength(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_200));
+    await settleEffects();
+
+    expect(listModelWireTraces).toHaveBeenCalledTimes(4);
+    expect(listModelWireTraces).toHaveBeenCalledWith(selectedThread.id, activeRun.id, "cursor_3");
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(5);
+    expect(container.querySelectorAll('[aria-label="模型轮次 2"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[aria-label="模型轮次 4"]')).toHaveLength(1);
+    expect(container.querySelectorAll(".model-wire-record.is-truncated")).toHaveLength(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_200));
+    await settleEffects();
+
+    expect(listModelWireTraces).toHaveBeenCalledTimes(6);
+    expect(listModelWireTraces).toHaveBeenCalledWith(selectedThread.id, activeRun.id, "cursor_5");
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(6);
+    expect(container.querySelectorAll('[aria-label="模型轮次 5"]')).toHaveLength(1);
+    expect(container.textContent).not.toContain("加载更多");
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("切换和切回都会重新恢复，迟到错误与加载不会污染其他 Thread", async () => {

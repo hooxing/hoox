@@ -88,6 +88,8 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const [navigationOpen, setNavigationOpen] = useState(false);
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
+  const modelWireTracePaginationAdvancedRef = useRef(false);
+  const modelWireTraceTailCursorRef = useRef<string | undefined>(undefined);
   const currentRunPollRef = useRef(new CurrentRunPoll());
   const navigationRef = useRef(new WorkspaceNavigation());
   const mobileNavigationToggleRef = useRef<HTMLButtonElement>(null);
@@ -122,6 +124,17 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     eventAfterRef.current = state.events.at(-1)?.sequence ?? -1;
     eventAttemptRef.current = state.eventAttemptId;
   }, [state.eventAttemptId, state.events]);
+
+  useEffect(() => {
+    modelWireTracePaginationAdvancedRef.current = state.modelWireTracePaginationAdvanced;
+    modelWireTraceTailCursorRef.current = state.modelWireTraceTailFollowing
+      ? state.modelWireTraceNextCursor
+      : undefined;
+  }, [
+    state.modelWireTraceNextCursor,
+    state.modelWireTracePaginationAdvanced,
+    state.modelWireTraceTailFollowing,
+  ]);
 
   const refreshThreads = useCallback(async () => {
     const expectedNavigation = navigationRef.current.capture();
@@ -214,7 +227,8 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       if (!currentRunPollRef.current.isCurrent(pollGeneration)) return;
       try {
         const latest = await apiClient.getRun(threadId, runId);
-        const [eventPage, artifacts, modelWireTraces] = await Promise.all([
+        const tailCursor = modelWireTraceTailCursorRef.current;
+        const [eventPage, artifacts, modelWireTraces, modelWireTraceTail] = await Promise.all([
           drainEventPages(
             (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
             eventAfterRef.current,
@@ -224,6 +238,9 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           apiClient
             .listModelWireTraces(threadId, runId)
             .catch(() => ({ items: [], hasMore: false, unavailable: true })),
+          tailCursor === undefined
+            ? Promise.resolve(undefined)
+            : apiClient.listModelWireTraces(threadId, runId, tailCursor).catch(() => undefined),
         ]);
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           eventAttemptRef.current = eventPage.attemptId;
@@ -232,8 +249,15 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
           dispatch({ type: "modelWireTraces", page: modelWireTraces, mode: "refreshHead" });
-          // 单次完成后再调度，状态更新不会重新创建计时器或导致紧密轮询。
-          if (shouldContinueRunPolling(eventPage.hasMore, latest.status)) {
+          if (modelWireTraceTail !== undefined) {
+            dispatch({ type: "modelWireTraces", page: modelWireTraceTail, mode: "append" });
+          }
+          // 终态也必须追完已抵达尾页后的跨页新增诊断；waiting 仍不因普通 Run 状态保持短轮询。
+          if (
+            shouldContinueRunPolling(eventPage.hasMore, latest.status) ||
+            modelWireTraceTail?.hasMore === true ||
+            (modelWireTraces.hasMore && !modelWireTracePaginationAdvancedRef.current)
+          ) {
             timer = window.setTimeout(() => void poll(), 1200);
           }
         }
@@ -253,8 +277,14 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   }, [apiClient, state.run?.id, state.selectedThreadId]);
 
   useEffect(() => {
-    if (state.artifacts.length > 0 || state.modelWireTraces.length > 0) setActivityOpen(true);
-  }, [state.artifacts.length, state.modelWireTraces.length]);
+    if (
+      state.artifacts.length > 0 ||
+      state.modelWireTraces.length > 0 ||
+      state.modelWireTraceUnavailable
+    ) {
+      setActivityOpen(true);
+    }
+  }, [state.artifacts.length, state.modelWireTraceUnavailable, state.modelWireTraces.length]);
 
   const createConversation = () => selectThread(undefined);
   const send = async () => {
@@ -475,6 +505,8 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
               thread={selected}
               run={state.run}
               artifactCount={state.artifacts.length}
+              modelWireTraceCount={state.modelWireTraces.length}
+              modelWireTraceUnavailable={state.modelWireTraceUnavailable}
               actionLoading={actionLoading}
               onArchive={() => void archive()}
               onCancel={() => void cancel()}

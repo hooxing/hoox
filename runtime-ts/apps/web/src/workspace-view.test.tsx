@@ -4,7 +4,7 @@ import { act, createRef, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { Artifact, Run, RunEvent } from "./api.js";
+import type { Artifact, ModelWireTraceRecord, Run, RunEvent } from "./api.js";
 import {
   ActivityPanel,
   ConversationComposer,
@@ -121,6 +121,75 @@ describe("工作台展示组件", () => {
     expect(html).toContain("产物");
     expect(html).toContain("归档");
     expect(html).toContain("打开本次运行产物，共 2 个");
+  });
+
+  it("只有模型报文时仍提供可重复打开诊断抽屉的外部入口", () => {
+    const trace: ModelWireTraceRecord = {
+      attemptId: "attempt_trace",
+      modelTurn: 0,
+      transportAttempt: 0,
+      part: "request",
+      captureStatus: "complete",
+      persistenceStatus: "stored",
+      bodyAvailable: true,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      expiresAt: "2026-08-06T00:00:00.000Z",
+    };
+    const selectedThread = {
+      id: "thread-trace",
+      title: "诊断会话",
+      status: "active" as const,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    };
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      const triggerRef = useRef<HTMLButtonElement>(null);
+      const fallbackRef = useRef<HTMLDivElement>(null);
+      return (
+        <div ref={fallbackRef} tabIndex={-1}>
+          <ThreadHeader
+            thread={selectedThread}
+            run={running}
+            artifactCount={0}
+            modelWireTraceCount={1}
+            actionLoading={false}
+            onArchive={() => undefined}
+            onCancel={() => undefined}
+            onOpenArtifacts={() => setOpen(true)}
+            artifactTriggerRef={triggerRef}
+          />
+          <ActivityPanel
+            isOpen={open}
+            artifacts={[]}
+            modelWireTraces={[trace]}
+            onToggle={() => setOpen(false)}
+            onPreview={() => undefined}
+            onDownload={() => undefined}
+            returnFocusRef={triggerRef}
+            fallbackFocusRef={fallbackRef}
+          />
+        </div>
+      );
+    }
+
+    act(() => root.render(<Harness />));
+    const trigger = container.querySelector<HTMLButtonElement>(
+      "[aria-label='打开本次运行模型网络诊断']",
+    );
+    if (trigger === null) throw new Error("未渲染诊断抽屉入口");
+    act(() => trigger.click());
+    const close = container.querySelector<HTMLButtonElement>("[aria-label='关闭诊断抽屉']");
+    expect(document.activeElement).toBe(close);
+    act(() => close?.click());
+    expect(document.activeElement).toBe(trigger);
+    act(() => trigger.click());
+    expect(container.querySelector("[aria-label='关闭诊断抽屉']")).not.toBeNull();
+    act(() => root.unmount());
+    container.remove();
   });
 
   it("产物抽屉打开后接管焦点，Escape 或关闭按钮返回入口", () => {

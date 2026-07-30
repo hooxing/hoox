@@ -301,6 +301,9 @@ export function ActivityPanel({
   const hasContents =
     artifacts.length > 0 || modelWireTraces.length > 0 || modelWireTraceUnavailable;
   const open = isOpen && hasContents;
+  const traceOnly = artifacts.length === 0;
+  const drawerLabel = traceOnly ? "本次运行模型网络诊断" : "本次运行产物与诊断";
+  const drawerAction = traceOnly ? "诊断抽屉" : "产物抽屉";
   useEffect(() => {
     if (open) {
       wasOpenRef.current = true;
@@ -317,7 +320,7 @@ export function ActivityPanel({
   return (
     <aside
       className={`activity-panel ${open ? "" : "is-collapsed"}`}
-      aria-label="本次运行产物"
+      aria-label={drawerLabel}
       aria-hidden={!open || undefined}
       inert={!open || undefined}
       onKeyDown={(event) => {
@@ -333,8 +336,8 @@ export function ActivityPanel({
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        aria-label={open ? "关闭产物抽屉" : "打开产物抽屉"}
-        title={open ? "关闭产物抽屉" : "打开产物抽屉"}
+        aria-label={open ? `关闭${drawerAction}` : `打开${drawerAction}`}
+        title={open ? `关闭${drawerAction}` : `打开${drawerAction}`}
       >
         {open ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
       </button>
@@ -558,6 +561,8 @@ export function ThreadHeader({
   thread,
   run,
   artifactCount,
+  modelWireTraceCount = 0,
+  modelWireTraceUnavailable = false,
   actionLoading,
   onArchive,
   onCancel,
@@ -567,6 +572,8 @@ export function ThreadHeader({
   readonly thread: Thread;
   readonly run: Run | undefined;
   readonly artifactCount: number;
+  readonly modelWireTraceCount?: number;
+  readonly modelWireTraceUnavailable?: boolean;
   readonly actionLoading: boolean;
   readonly onArchive: () => void;
   readonly onCancel: () => void;
@@ -598,7 +605,7 @@ export function ThreadHeader({
             停止运行
           </button>
         )}
-        {artifactCount > 0 && (
+        {artifactCount > 0 ? (
           <button
             ref={artifactTriggerRef}
             type="button"
@@ -610,7 +617,19 @@ export function ThreadHeader({
             <Package size={15} />
             产物 <span>{artifactCount}</span>
           </button>
-        )}
+        ) : modelWireTraceCount > 0 || modelWireTraceUnavailable ? (
+          <button
+            ref={artifactTriggerRef}
+            type="button"
+            className="quiet-button artifact-entry-button"
+            onClick={onOpenArtifacts}
+            aria-label="打开本次运行模型网络诊断"
+            title="查看本次运行模型网络诊断"
+          >
+            <Package size={15} />
+            诊断
+          </button>
+        ) : null}
         <button
           type="button"
           className="quiet-button archive-button"

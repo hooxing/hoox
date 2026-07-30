@@ -46,10 +46,13 @@ import {
   createDurableTraceBlobPersistence,
   PgBackedSandboxSessionRegistry,
   PgExecutionPersistence,
+  PgModelWireTraceCleanupRepository,
+  PgModelWireTraceRepository,
   PgRunDispatchOutbox,
   sha256Hex,
   transitionBlobCommit,
   type BlobCommitSnapshot,
+  type BlobStore,
   type CreateS3BlobStoreConfig,
   type StableBlobLifecycleAllocation,
   type StableBlobRef,
@@ -157,6 +160,53 @@ async function migrationTenantQuery(
   await withTenantTransaction(migratorPool, scope, async (client) => {
     await client.query(sql, [...values]);
   });
+}
+
+async function seedModelWireAttempt(label: string, scope: TenantBlobScope) {
+  const actorUserId = `blob_user_${scope === scopeA ? "a" : "b"}_${unique}`;
+  const context = {
+    tenantId: scope.tenantId,
+    threadId: `wire_thread_${label}_${unique}`,
+    runId: `wire_run_${label}_${unique}`,
+    attemptId: `wire_attempt_${label}_${unique}`,
+  };
+  const workspaceId = `wire_workspace_${label}_${unique}`;
+  const projectionDigest = sha256Hex(new TextEncoder().encode(`wire-${label}`));
+  await withTenantTransaction(
+    runtimePool,
+    { tenantId: scope.tenantId, userId: actorUserId },
+    async (client) => {
+      await client.query(
+        `INSERT INTO threads(tenant_id,id,created_by_user_id,title,status,created_at,updated_at)
+       VALUES($1,$2,$3,'Wire Trace','active',clock_timestamp(),clock_timestamp())`,
+        [scope.tenantId, context.threadId, actorUserId],
+      );
+      await client.query(
+        `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
+       VALUES($1,$2,$3,'running',clock_timestamp(),clock_timestamp())`,
+        [scope.tenantId, context.runId, context.threadId],
+      );
+      await client.query(
+        `INSERT INTO workspaces(tenant_id,id,thread_id,created_at,updated_at)
+       VALUES($1,$2,$3,clock_timestamp(),clock_timestamp())`,
+        [scope.tenantId, workspaceId, context.threadId],
+      );
+      await client.query(
+        `INSERT INTO run_execution_inputs(
+         tenant_id,run_id,thread_id,workspace_id,root_run_id,input_text,
+         initial_projection,initial_projection_digest
+       ) VALUES($1,$2,$3,$4,$2,'wire','{}'::jsonb,$5)`,
+        [scope.tenantId, context.runId, context.threadId, workspaceId, projectionDigest],
+      );
+      await client.query(
+        `INSERT INTO execution_attempts(
+         tenant_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,status,stage
+       ) VALUES($1,$2,$3,$4,$5,$3,'running','model_execution_started')`,
+        [scope.tenantId, context.attemptId, context.runId, context.threadId, workspaceId],
+      );
+    },
+  );
+  return context;
 }
 
 beforeAll(async () => {
@@ -1369,5 +1419,313 @@ describe("PostgreSQL stable blob 生命周期", () => {
       store.deleteStaging(scopeA, secondStaging),
     ]);
     client.destroy();
+  });
+
+  it("模型 Wire Trace 精确重放、冲突、COMMIT unknown、RLS 与真实 MinIO 到期删除闭环", async () => {
+    const context = await seedModelWireAttempt("closure", scopeA);
+    const body = new TextEncoder().encode("model-wire-shared-body");
+    const sha256 = sha256Hex(body);
+    const store = createS3BlobStore(minioConfig(), repository);
+    const wire = new PgModelWireTraceRepository(runtimePool, repository, store, 1, {
+      afterCommit: () => {
+        throw new Error("模拟 COMMIT 响应丢失");
+      },
+    });
+    const base = {
+      context,
+      modelTurn: 0,
+      part: "response" as const,
+      body,
+      sha256,
+      size: body.byteLength,
+      status: "complete" as const,
+    };
+    await wire.persist({ ...base, transportAttempt: 0 });
+    await wire.persist({ ...base, transportAttempt: 0 });
+    await expect(
+      wire.persist({ ...base, transportAttempt: 0, status: "truncated" }),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    await wire.persist({ ...base, transportAttempt: 1 });
+    await wire.captureFailed({
+      context,
+      modelTurn: 1,
+      transportAttempt: 0,
+      part: "response",
+      code: "BODY_UNREADABLE",
+    });
+    const facts = await withTenantTransaction(runtimePool, scopeA, (client) =>
+      client.query<{
+        transport_attempt: string;
+        persistence_status: string;
+        capture_error_code: string | null;
+        blob_incarnation_id: string | null;
+        physical_object_key: string | null;
+      }>(
+        `SELECT transport_attempt,persistence_status,capture_error_code,
+                blob_incarnation_id,physical_object_key
+           FROM model_wire_trace_records WHERE tenant_id=$1 AND attempt_id=$2
+           ORDER BY model_turn,transport_attempt`,
+        [scopeA.tenantId, context.attemptId],
+      ),
+    );
+    expect(facts.rows).toHaveLength(3);
+    expect(facts.rows[0]).toMatchObject({ persistence_status: "stored", capture_error_code: null });
+    expect(facts.rows[1]?.blob_incarnation_id).toBe(facts.rows[0]?.blob_incarnation_id);
+    expect(facts.rows[2]).toMatchObject({
+      persistence_status: "not_captured",
+      capture_error_code: "BODY_UNREADABLE",
+    });
+    const forbiddenDelete = await withTenantTransaction(runtimePool, scopeA, (client) =>
+      client.query(
+        `DELETE FROM model_wire_trace_records
+          WHERE tenant_id=$1 AND attempt_id=$2 AND model_turn=0 AND transport_attempt=0`,
+        [scopeA.tenantId, context.attemptId],
+      ),
+    );
+    expect(forbiddenDelete.rowCount).toBe(0);
+    const cross = await withTenantTransaction(runtimePool, scopeB, (client) =>
+      client.query("SELECT 1 FROM model_wire_trace_records WHERE tenant_id=$1", [scopeA.tenantId]),
+    );
+    expect(cross.rowCount).toBe(0);
+    const stable = {
+      kind: "stable" as const,
+      tenantId: scopeA.tenantId,
+      purpose: "trace" as const,
+      sha256,
+      size: body.byteLength,
+      mediaType: "text/plain; charset=utf-8",
+      incarnationId: facts.rows[0]?.blob_incarnation_id ?? "",
+      physicalObjectKey: facts.rows[0]?.physical_object_key ?? "",
+    };
+    const cleanup = new PgModelWireTraceCleanupRepository(
+      runtimePool,
+      createS3StableBlobGarbageCollector(minioConfig(), repository),
+      {
+        afterCommit: () => {
+          throw new Error("模拟 cleanup COMMIT 响应丢失");
+        },
+      },
+    );
+    await migrationTenantQuery(
+      scopeA,
+      `UPDATE model_wire_trace_records SET expires_at=clock_timestamp()-interval '1 second'
+        WHERE tenant_id=$1 AND attempt_id=$2 AND model_turn=0 AND transport_attempt=0`,
+      [scopeA.tenantId, context.attemptId],
+    );
+    await cleanup.cleanupExpired({
+      tenantId: scopeA.tenantId,
+      commandId: `wire-cleanup-first-${unique}`,
+      expiresBefore: new Date(),
+      batchSize: 10,
+    });
+    await expect(store.getBytes(scopeA, stable)).resolves.toEqual(body);
+    await migrationTenantQuery(
+      scopeA,
+      `UPDATE model_wire_trace_records SET expires_at=clock_timestamp()-interval '1 second'
+        WHERE tenant_id=$1 AND attempt_id=$2`,
+      [scopeA.tenantId, context.attemptId],
+    );
+    const finalCleanup = {
+      tenantId: scopeA.tenantId,
+      commandId: `wire-cleanup-final-${unique}`,
+      expiresBefore: new Date(),
+      batchSize: 10,
+    };
+    await expect(cleanup.cleanupExpired(finalCleanup)).resolves.toMatchObject({ deletedCount: 2 });
+    await expect(cleanup.cleanupExpired(finalCleanup)).resolves.toMatchObject({
+      outcome: "replayed",
+    });
+    await expect(store.getBytes(scopeA, stable)).rejects.toMatchObject({ code: "BLOB_NOT_FOUND" });
+  });
+
+  it("慢上传穿越 processing lease 后由墓碑补偿迟到引用，max=1 pool 并发无连接饥饿", async () => {
+    const context = await seedModelWireAttempt("late", scopeA);
+    const body = new TextEncoder().encode("model-wire-late-body");
+    const sha256 = sha256Hex(body);
+    const baseStore = createS3BlobStore(minioConfig(), repository);
+    let entered!: () => void;
+    let release!: () => void;
+    const putEntered = new Promise<void>((resolve) => (entered = resolve));
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const blockedStore: BlobStore = {
+      putStaging: async (input) => {
+        entered();
+        await released;
+        return baseStore.putStaging(input);
+      },
+      promote: (scope, staged, auth) => baseStore.promote(scope, staged, auth),
+      head: (scope, blob) => baseStore.head(scope, blob),
+      read: (scope, blob) => baseStore.read(scope, blob),
+      getBytes: (scope, blob) => baseStore.getBytes(scope, blob),
+      deleteStaging: (scope, blob) => baseStore.deleteStaging(scope, blob),
+      presignDownload: (input) => baseStore.presignDownload(input),
+    };
+    const wire = new PgModelWireTraceRepository(runtimePool, repository, blockedStore, 1, {
+      processingLeaseSeconds: 1,
+      beforeLateReferenceCompensation: () => {
+        throw new Error("模拟迟到引用补偿前进程退出");
+      },
+    });
+    const persist = wire.persist({
+      context,
+      modelTurn: 0,
+      transportAttempt: 0,
+      part: "request",
+      body,
+      sha256,
+      size: body.byteLength,
+      status: "complete",
+    });
+    await putEntered;
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await migrationTenantQuery(
+      scopeA,
+      `UPDATE model_wire_trace_records SET expires_at=clock_timestamp()-interval '1 second'
+        WHERE tenant_id=$1 AND attempt_id=$2`,
+      [scopeA.tenantId, context.attemptId],
+    );
+    const cleanup = new PgModelWireTraceCleanupRepository(
+      runtimePool,
+      createS3StableBlobGarbageCollector(minioConfig(), repository),
+    );
+    await cleanup.cleanupExpired({
+      tenantId: scopeA.tenantId,
+      commandId: `wire-cleanup-late-${unique}`,
+      expiresBefore: new Date(),
+      batchSize: 10,
+    });
+    release();
+    await expect(persist).rejects.toThrow("模拟迟到引用补偿前进程退出");
+    const orphanBeforeRestart = await withTenantTransaction(runtimePool, scopeA, (client) =>
+      client.query(
+        "SELECT 1 FROM blob_references WHERE tenant_id=$1 AND purpose='trace' AND sha256=$2",
+        [scopeA.tenantId, sha256],
+      ),
+    );
+    expect(orphanBeforeRestart.rowCount).toBe(1);
+    const restartedCleanup = new PgModelWireTraceCleanupRepository(
+      runtimePool,
+      createS3StableBlobGarbageCollector(minioConfig(), repository),
+    );
+    await expect(
+      restartedCleanup.resumePending({ tenantId: scopeA.tenantId, batchSize: 10 }),
+    ).resolves.toBe(1);
+    const late = await withTenantTransaction(runtimePool, scopeA, (client) =>
+      client.query<{ state: string; outcome: string }>(
+        `SELECT state,outcome FROM model_wire_trace_cleanup_items
+          WHERE tenant_id=$1 AND cleanup_command_id=$2`,
+        [scopeA.tenantId, `wire-cleanup-late-${unique}`],
+      ),
+    );
+    expect(late.rows).toEqual([{ state: "completed", outcome: "deleted" }]);
+    const references = await withTenantTransaction(runtimePool, scopeA, (client) =>
+      client.query(
+        "SELECT 1 FROM blob_references WHERE tenant_id=$1 AND purpose='trace' AND sha256=$2",
+        [scopeA.tenantId, sha256],
+      ),
+    );
+    expect(references.rowCount).toBe(0);
+
+    const single = createPostgresPool({
+      connectionString: runtimeDatabaseUrl,
+      schema,
+      maxConnections: 1,
+    });
+    try {
+      const singleRepo = new PgBlobLifecycleRepository(single, { objectPrefix: prefix });
+      const singleWire = new PgModelWireTraceRepository(
+        single,
+        singleRepo,
+        createS3BlobStore(minioConfig(), singleRepo),
+        1,
+      );
+      const singleContext = await seedModelWireAttempt("single", scopeA);
+      const operations = [0, 1].map((transportAttempt) =>
+        singleWire.persist({
+          context: singleContext,
+          modelTurn: 0,
+          transportAttempt,
+          part: "request",
+          body,
+          sha256,
+          size: body.byteLength,
+          status: "complete",
+        }),
+      );
+      await expect(
+        Promise.race([
+          Promise.all(operations),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("max=1 pool 饥饿")), 20_000),
+          ),
+        ]),
+      ).resolves.toBeDefined();
+    } finally {
+      await single.end();
+    }
+  });
+
+  it("0017 在含索引、清理 item 与墓碑事实时可 down 至 0016 后再次 up 并恢复 ACL/RLS", async () => {
+    const before = await withTenantTransaction(runtimePool, scopeA, (client) =>
+      client.query<{ records: string; items: string; tombstones: string }>(
+        `SELECT
+           (SELECT count(*)::text FROM model_wire_trace_records) AS records,
+           (SELECT count(*)::text FROM model_wire_trace_cleanup_items) AS items,
+           (SELECT count(*)::text FROM model_wire_trace_expiry_tombstones) AS tombstones`,
+      ),
+    );
+    expect(Number(before.rows[0]?.records)).toBeGreaterThan(0);
+    expect(Number(before.rows[0]?.items)).toBeGreaterThan(0);
+    expect(Number(before.rows[0]?.tombstones)).toBeGreaterThan(0);
+    await migrateDown(migratorPool, {
+      ...migrationSecurity,
+      allowDestructive: true,
+      environment: "test",
+      targetVersion: 16,
+    });
+    const down = await migratorPool.query<{
+      records: string | null;
+      items: string | null;
+      tombstones: string | null;
+      identity_constraint: string | null;
+    }>(
+      `SELECT to_regclass('model_wire_trace_records')::text AS records,
+              to_regclass('model_wire_trace_cleanup_items')::text AS items,
+              to_regclass('model_wire_trace_expiry_tombstones')::text AS tombstones,
+              (SELECT conname FROM pg_constraint
+                WHERE conrelid='blob_references'::regclass
+                  AND conname='blob_references_model_wire_identity_unique') AS identity_constraint`,
+    );
+    expect(down.rows[0]).toEqual({
+      records: null,
+      items: null,
+      tombstones: null,
+      identity_constraint: null,
+    });
+    expect((await migrateUp(migratorPool, migrationSecurity)).at(-1)?.version).toBe(17);
+    const restored = await migratorPool.query<{
+      table_name: string;
+      rls: boolean;
+      forced: boolean;
+      runtime_select: boolean;
+    }>(
+      `SELECT relation.relname AS table_name,relation.relrowsecurity AS rls,
+              relation.relforcerowsecurity AS forced,
+              has_table_privilege($1,relation.oid,'SELECT') AS runtime_select
+         FROM pg_class relation
+        WHERE relation.relnamespace=current_schema()::regnamespace
+          AND relation.relname IN (
+            'model_wire_trace_records','model_wire_trace_cleanup_commands',
+            'model_wire_trace_cleanup_items','model_wire_trace_expiry_tombstones'
+          ) ORDER BY relation.relname`,
+      [runtimeRole],
+    );
+    expect(restored.rows).toHaveLength(4);
+    expect(restored.rows.every((row) => row.rls && row.forced && row.runtime_select)).toBe(true);
+    const deletePrivilege = await migratorPool.query<{ allowed: boolean }>(
+      "SELECT has_table_privilege($1,'blob_references','DELETE') AS allowed",
+      [runtimeRole],
+    );
+    expect(deletePrivilege.rows[0]?.allowed).toBe(true);
   });
 });

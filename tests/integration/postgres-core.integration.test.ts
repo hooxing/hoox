@@ -1531,7 +1531,11 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       ["promotion_executions", new Set(["SELECT", "INSERT"])],
       ["blob_gc_claims", new Set(["SELECT", "INSERT"])],
       ["retired_blob_tombstones", new Set(["SELECT", "INSERT"])],
-      ["blob_references", new Set(["SELECT", "INSERT"])],
+      ["blob_references", new Set(["SELECT", "INSERT", "DELETE"])],
+      ["model_wire_trace_cleanup_commands", new Set(["SELECT", "INSERT"])],
+      ["model_wire_trace_cleanup_items", new Set(["SELECT", "INSERT"])],
+      ["model_wire_trace_expiry_tombstones", new Set(["SELECT", "INSERT"])],
+      ["model_wire_trace_records", new Set(["SELECT", "INSERT", "DELETE"])],
       ["run_execution_inputs", new Set(["SELECT", "INSERT"])],
       ["execution_attempts", new Set(["SELECT", "INSERT"])],
       ["execution_workspace_fences", new Set(["SELECT", "INSERT"])],
@@ -1646,6 +1650,28 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         ]),
       ],
       ["external_effect_permits", new Set(["consumed_at"])],
+      ["model_wire_trace_cleanup_commands", new Set(["status", "deleted_count", "completed_at"])],
+      [
+        "model_wire_trace_cleanup_items",
+        new Set(["state", "outcome", "attempt_count", "updated_at"]),
+      ],
+      ["model_wire_trace_expiry_tombstones", new Set()],
+      [
+        "model_wire_trace_records",
+        new Set([
+          "persistence_status",
+          "blob_reference_id",
+          "blob_state",
+          "blob_purpose",
+          "blob_lifecycle_id",
+          "blob_incarnation_id",
+          "physical_object_key",
+          "processing_token",
+          "processing_lease_expires_at",
+          "cleanup_command_id",
+          "updated_at",
+        ]),
+      ],
     ]);
     const columnMatrix = await migratorPool.query<{
       table_name: string;

@@ -62,6 +62,9 @@ import {
 import { RunWorker } from "./run-worker.js";
 import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
 
+/** Artifact 服务请求的 TTL 必须不超过同一 Worker BlobStore 的预签名策略上限。 */
+export const WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS = 60;
+
 const workerEnvironmentSchema = Object.freeze({
   DATABASE_URL: urlEnvironmentField({
     secret: true,
@@ -451,7 +454,7 @@ async function assembleWorkerRuntime(
       secretAccessKey: configuration.objectStorage.secretAccessKey,
       forcePathStyle: configuration.objectStorage.forcePathStyle,
       prefix: RUNTIME_BLOB_OBJECT_PREFIX,
-      maxPresignTtlSeconds: 60,
+      maxPresignTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
       maxBlobSizeBytes: 8 * 1024 * 1024,
     } as const;
     const blobs = createS3BlobStore(s3Config, blobRepository);
@@ -484,6 +487,8 @@ async function assembleWorkerRuntime(
     );
     const artifactService = new ArtifactDeliveryService(artifactRepository, blobs, {
       runtimeMode,
+      defaultDownloadTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
+      maxDownloadTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
       ...(runtimeMode === "development" ? { allowInsecureHttpDownload: true } : {}),
       executionAuthorizationVerifier: artifactAuthorization.verifier,
     });
@@ -683,7 +688,7 @@ export async function probeDevelopmentWorkerDependencies(
       secretAccessKey: configuration.objectStorage.secretAccessKey,
       forcePathStyle: configuration.objectStorage.forcePathStyle,
       prefix: RUNTIME_BLOB_OBJECT_PREFIX,
-      maxPresignTtlSeconds: 60,
+      maxPresignTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
       maxBlobSizeBytes: 8 * 1024 * 1024,
     } as const;
     const sandbox = new CubeSandboxSessionRegistry(

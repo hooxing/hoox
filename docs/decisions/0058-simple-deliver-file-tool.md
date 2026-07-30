@@ -23,7 +23,8 @@ ResourceVersion 和 Artifact replacement 都不是模型应当控制的协议字
 
 ## 决策
 
-- 新 Run 的模型工具只暴露 `deliver_file`。输入只有 `/workspace` 下的 Sandbox 绝对 `path` 与可选展示
+- 新 Run 的模型工具只暴露 `exec_command` 与 `deliver_file`；前者承担命令、Python 和文件读写，后者承担
+  交付。`deliver_file` 输入只有 `/workspace` 下的 Sandbox 绝对 `path` 与可选展示
   `name`。工具描述固定为：
 
   > 将 CubeSandbox 中已经生成的文件作为本次任务的交付文件提供给用户。仅当文件已成功保存为可下载交付物时返回成功。
@@ -44,15 +45,19 @@ ResourceVersion 和 Artifact replacement 都不是模型应当控制的协议字
 ## Codex 对齐 TODO
 
 - `deliver_file` 是产品交付能力，不是 Codex `exec_command` 的对应工具；无需与 Codex 参数完全一致。
-- 旧 `artifactToolRouter` 装配兼容字段、`ArtifactPublicationPort` completion 依赖和两项 correction 配置暂时保留但不参与
-  新 Run；待整合分支确认无旧调用方后删除。
+- 新 Session、rollout recovery 与生产装配已经删除旧 `artifactToolRouter` 接线；旧数据库表和读侧 API 继续保留。
+- TODO(codex-alignment)：`exec_command` 尚缺 PTY、yield/后台 session、`write_stdin`、独立 cwd、精确 tokenizer
+  预算、超时部分输出、可恢复 transcript 与可选 shell/login/TTY 参数；这些差异不得宣称已经对齐 Codex。
 - Blob 上传当前仍使用既有小对象内存上限。若后续需要大文件，应增加可恢复流式上传，而不是扩大模型参数。
 
 ## 影响与验证
 
 - 模型工具数量减少，发布成功与用户可下载事实一致。
-- stable Blob 已完成但最终事务失败时会保留可重放引用；相同 tool call ID 重试读取同一 commit 状态，不会创建另一组
-  模型控制身份。
+- stable Blob 已完成但最终事务失败时，Runtime 先锁定 exact reference，并确认没有 ResourceVersion/Artifact 绑定后
+  才把引用持久化为 `released`，再按固定物理身份触发 GC。若 PG COMMIT 实际成功但响应丢失，规范引用检查返回
+  `still_referenced`，不得删除对象；若 GC 暂时失败，`released` 事实允许后续恢复，不会把远端对象重新视为可达。
+- continuation window 只保护 Router 在许可消费后立即开始首个 Sandbox 副作用；Sandbox 读取和 Blob promotion 可以超过
+  该短窗口。最终发布事务改用 PG `lockExecutionBoundary` 锁后重验 run、attempt、permit、claim 与 lease。
 - 自动化测试覆盖模型描述、只允许 `path/name`、绝对 Workspace 路径、`FILE_NOT_FOUND`、published 回执，以及 Run
   completion 不再调用旧门。
 - production/development 共用同一装配；真实 PostgreSQL、S3、CubeSandbox 与下载读侧 E2E 在整合分支执行。

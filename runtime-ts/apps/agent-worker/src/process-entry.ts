@@ -10,6 +10,7 @@ import { tenantId } from "@cube-runtime/domain";
 import {
   createPostgresPool,
   createS3BlobStore,
+  createS3StableBlobGarbageCollector,
   DurableResourceBlobWriter,
   DurableWorkspaceCandidateBlobWriter,
   PgBackedSandboxSessionRegistry,
@@ -574,7 +575,12 @@ async function assembleWorkerRuntime(
       ),
       publications: new SimpleArtifactDeliveryService(
         new PgSimpleDeliveredFileRepository(pool),
-        new DurableResourceBlobWriter(blobRepository, blobs, workspacePolicy.maxSingleFileBytes),
+        new DurableResourceBlobWriter(
+          blobRepository,
+          blobs,
+          workspacePolicy.maxSingleFileBytes,
+          createS3StableBlobGarbageCollector(s3Config, blobRepository),
+        ),
       ),
       authorizationVerifier: artifactAuthorization.verifier,
     });

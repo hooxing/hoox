@@ -8,6 +8,7 @@ import {
 import type {
   BlobStore,
   StableBlobGcClaimPort,
+  StableBlobGcPort,
   StableBlobLifecycleAllocationPort,
   StableBlobRef,
 } from "./blob-store.js";
@@ -15,7 +16,13 @@ import type {
 export type ResourceBlobCommitRepository = BlobCommitStatePort &
   BlobReferenceCommitPort &
   StableBlobLifecycleAllocationPort &
-  Pick<StableBlobGcClaimPort, "resolveLifecycle">;
+  Pick<StableBlobGcClaimPort, "resolveLifecycle"> & {
+    releaseUnattachedResourceReference(input: {
+      readonly scope: { readonly tenantId: string };
+      readonly referenceId: string;
+      readonly blob: StableBlobRef & { readonly purpose: "resource" };
+    }): Promise<"released" | "still_referenced">;
+  };
 
 export interface PersistResourceBlobResult {
   readonly referenceId: string;
@@ -28,9 +35,27 @@ export class DurableResourceBlobWriter {
     private readonly repository: ResourceBlobCommitRepository,
     private readonly blobs: BlobStore,
     private readonly maxBytes: number,
+    private readonly gc?: StableBlobGcPort,
   ) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
       throw new TypeError("Resource Blob 配额无效");
+  }
+
+  async abandon(input: {
+    readonly tenantId: string;
+    readonly persisted: PersistResourceBlobResult;
+  }): Promise<"released" | "still_referenced"> {
+    const scope = { tenantId: input.tenantId };
+    const released = await this.repository.releaseUnattachedResourceReference({
+      scope,
+      referenceId: input.persisted.referenceId,
+      blob: input.persisted.blob,
+    });
+    if (released === "released" && this.gc !== undefined) {
+      // reference 已持久化为 released；远端 DELETE 即使失败，也可由同一物理身份安全重试。
+      await this.gc.collectIfUnreachable(scope, input.persisted.blob);
+    }
+    return released;
   }
 
   async persist(input: {

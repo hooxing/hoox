@@ -45,6 +45,14 @@ export interface SimpleResourceBlobWriterPort {
     readonly sha256: string;
     readonly mediaType: string;
   }): Promise<PersistResourceBlobResult>;
+  /**
+   * Publication 未能形成规范引用时释放本次 stable reference。实现必须先在数据库中确认
+   * ResourceVersion/Artifact 均未绑定该引用；COMMIT 响应未知时不能仅凭异常删除对象。
+   */
+  abandon(input: {
+    readonly tenantId: string;
+    readonly persisted: PersistResourceBlobResult;
+  }): Promise<"released" | "still_referenced">;
 }
 
 /** deliver_file 的应用服务：先固定字节，再原子提交 ResourceVersion 与 published Artifact。 */
@@ -97,16 +105,27 @@ export class SimpleArtifactDeliveryService {
       sha256,
       mediaType,
     });
-    return this.repository.commit({
-      authorization: input.authorization,
-      idempotencyKey: input.idempotencyKey,
-      commandDigest,
-      ids,
-      sourcePath: input.sourcePath,
-      name: input.name,
-      mediaType,
-      persisted,
-    });
+    try {
+      return await this.repository.commit({
+        authorization: input.authorization,
+        idempotencyKey: input.idempotencyKey,
+        commandDigest,
+        ids,
+        sourcePath: input.sourcePath,
+        name: input.name,
+        mediaType,
+        persisted,
+      });
+    } catch (error) {
+      // abandon 内部以 PG 规范引用做 guarded release；若 COMMIT 实际成功，只会返回 still_referenced。
+      await this.blobs
+        .abandon({
+          tenantId: input.authorization.scope.tenantId,
+          persisted,
+        })
+        .catch(() => undefined);
+      throw error;
+    }
   }
 }
 

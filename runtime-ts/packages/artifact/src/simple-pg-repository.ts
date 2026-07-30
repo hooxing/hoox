@@ -18,6 +18,14 @@ interface DeliveredRow extends QueryResultRow {
   target: "published" | "failed" | null;
 }
 
+/** COMMIT 已发送，但规范读回本身不可用；调用方不得把 stable Blob 当作确定孤儿。 */
+export class SimpleDeliveryCommitResultUnknownError extends Error {
+  constructor() {
+    super("DELIVER_FILE_COMMIT_RESULT_UNKNOWN");
+    this.name = "SimpleDeliveryCommitResultUnknownError";
+  }
+}
+
 /** deliver_file 的 PG 写侧；Resource、Version、Artifact 和 published settlement 同事务提交。 */
 export class PgSimpleDeliveredFileRepository implements SimpleDeliveredFileRepositoryPort {
   constructor(private readonly pool: Pool) {}
@@ -169,9 +177,15 @@ export class PgSimpleDeliveredFileRepository implements SimpleDeliveredFileRepos
         },
       );
     } catch (error) {
-      if (error instanceof TransactionCommitUnknownError || isUniqueViolation(error)) {
+      if (error instanceof TransactionCommitUnknownError) {
         const replay = await this.readback(input);
-        if (replay !== undefined) return replay;
+        if (replay.outcome === "found") return replay.value;
+        if (replay.outcome === "unavailable") {
+          throw new SimpleDeliveryCommitResultUnknownError();
+        }
+      } else if (isUniqueViolation(error)) {
+        const replay = await this.readback(input);
+        if (replay.outcome === "found") return replay.value;
       }
       throw new Error("DELIVER_FILE_COMMIT_FAILED");
     }
@@ -179,20 +193,24 @@ export class PgSimpleDeliveredFileRepository implements SimpleDeliveredFileRepos
 
   private async readback(
     input: Parameters<SimpleDeliveredFileRepositoryPort["commit"]>[0],
-  ): Promise<SimpleDeliveredFileSnapshot | undefined> {
+  ): Promise<
+    | { readonly outcome: "found"; readonly value: SimpleDeliveredFileSnapshot }
+    | { readonly outcome: "missing" | "unavailable" }
+  > {
+    let row: DeliveredRow | undefined;
     try {
-      return await withTenantTransaction(
+      row = await withTenantTransaction(
         this.pool,
         { tenantId: input.authorization.scope.tenantId },
-        async (client) => {
-          const row = await readDelivered(client, input.authorization, input.idempotencyKey);
-          return row === undefined ? undefined : mapPrevious(row, input.commandDigest);
-        },
+        (client) => readDelivered(client, input.authorization, input.idempotencyKey),
         { readOnly: true },
       );
     } catch {
-      return undefined;
+      return { outcome: "unavailable" };
     }
+    return row === undefined
+      ? { outcome: "missing" }
+      : { outcome: "found", value: mapPrevious(row, input.commandDigest) };
   }
 }
 

@@ -36,20 +36,22 @@ try {
   let writeObservationSeen = false;
   let readObservationSeen = false;
   faux.setResponses([
-    fauxAssistantMessage(fauxToolCall("sandbox_write_file", { path, content }), {
-      stopReason: "toolUse",
-    }),
+    fauxAssistantMessage(
+      fauxToolCall("exec_command", { cmd: `printf %s '${content}' > '${path}'` }),
+      {
+        stopReason: "toolUse",
+      },
+    ),
     (context) => {
       const messages = JSON.stringify(context.messages);
-      writeObservationSeen =
-        messages.includes("sandbox_untrusted") && !messages.includes('"written":true');
-      return fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path }), {
+      writeObservationSeen = messages.includes('\\"exit_code\\":0');
+      return fauxAssistantMessage(fauxToolCall("exec_command", { cmd: `cat '${path}'` }), {
         stopReason: "toolUse",
       });
     },
     (context) => {
       const messages = JSON.stringify(context.messages);
-      readObservationSeen = messages.includes("sandbox_untrusted") && !messages.includes(content);
+      readObservationSeen = messages.includes('\\"exit_code\\":0') && messages.includes(content);
       return fauxAssistantMessage("真实纵向链路完成");
     },
   ]);
@@ -93,8 +95,7 @@ try {
   assert(readObservationSeen, "模型没有收到读取 Observation");
   assert(events.filter((event) => event === "tool.completed").length === 2, "工具终态数量错误");
   assert(
-    authorizedCalls.map((call) => call.toolName).join(",") ===
-      "sandbox_write_file,sandbox_read_file",
+    authorizedCalls.map((call) => call.toolName).join(",") === "exec_command,exec_command",
     "工具许可没有逐调用绑定真实工具名",
   );
   assert(new Set(authorizedCalls.map((call) => call.callId)).size === 2, "工具许可 callId 未隔离");

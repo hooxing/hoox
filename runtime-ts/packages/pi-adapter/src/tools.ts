@@ -4,16 +4,18 @@ import type {
   ToolObservationResult,
 } from "@cube-runtime/context-policy";
 import { encodeControlledToolReceipt } from "@cube-runtime/context-policy";
-import type { SandboxHandle } from "@cube-runtime/sandbox";
+import { SandboxRuntimeError, type SandboxHandle } from "@cube-runtime/sandbox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-export const SANDBOX_TOOL_NAMES = [
-  "sandbox_command",
-  "sandbox_run_code",
-  "sandbox_read_file",
-  "sandbox_write_file",
-] as const;
+export const SANDBOX_TOOL_NAMES = ["exec_command"] as const;
+
+const DEFAULT_WORKDIR = "/workspace";
+const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
+const MAX_OUTPUT_TOKENS = 20_000;
+const APPROX_BYTES_PER_TOKEN = 4;
+const TRUNCATION_MARKER = "\n...[输出已截断]...\n";
 
 export interface SandboxToolEffectAuthorizer {
   /** 每次工具副作用前都向 Runtime DB 重新领取短时许可。 */
@@ -27,6 +29,15 @@ export interface SandboxToolEffectAuthorizer {
   }>;
 }
 
+export interface ExecCommandResult {
+  readonly exit_code: number;
+  readonly wall_time_seconds: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly output_truncated: boolean;
+  readonly original_output_bytes: number;
+}
+
 export function createSandboxTools(
   sandbox: SandboxHandle,
   authorizer: SandboxToolEffectAuthorizer,
@@ -34,7 +45,10 @@ export function createSandboxTools(
   return createSandboxToolsInternal(sandbox, authorizer);
 }
 
-/** 原始 Tool 结果只存在于闭包；对外只暴露完成统一脱敏后的只读 Observation source。 */
+/**
+ * Tool 的真实有界结果直接返回 Pi；固定回执仍只承担 durable tool_call/tool_result 配对。
+ * TODO(codex-alignment): 将真实结果纳入可恢复的终端 transcript，避免 Session 重建后只剩完成回执。
+ */
 export function createObservedSandboxTools(
   sandbox: SandboxHandle,
   authorizer: SandboxToolEffectAuthorizer,
@@ -84,7 +98,7 @@ export function createObservedSandboxTools(
     tools: createSandboxToolsInternal(sandbox, authorizer, capture, rejectModelContinuation),
     outputs: source,
     recordControlledReceipt: (callId, toolName, outcome) =>
-      capture(callId, toolName, controlledObservation(toolName, outcome)),
+      capture(callId, toolName, encodeControlledToolReceipt(toolName, outcome)),
   };
 }
 
@@ -94,95 +108,76 @@ function createSandboxToolsInternal(
   capture?: (callId: string, name: string, text: string) => Promise<ToolObservationResult>,
   rejectModelContinuation: () => void = () => undefined,
 ) {
+  // TODO(codex-alignment): 同步 MVP 暂无 PTY、yield/session、write_stdin、shell/login 参数；
+  // 长任务与交互程序需要在 CubeSandbox 提供可恢复进程端口后补齐。
   return [
     defineTool({
-      name: "sandbox_command",
-      label: "Sandbox 命令",
-      description: "只在隔离的 CubeSandbox 中执行命令，不访问 Agent Worker 宿主机。",
-      parameters: Type.Object({ command: Type.String({ minLength: 1 }) }),
-      execute: async (_id, params, signal) =>
-        toolResult(
-          _id,
-          "sandbox_command",
-          capture,
-          async () => {
-            const authorization = await authorizeTool(authorizer, _id, "sandbox_command", params);
-            assertImmediateContinuation(authorization, signal);
-            return sandbox.command(params.command, signalControl(signal));
-          },
-          rejectModelContinuation,
-        ),
-    }),
-    defineTool({
-      name: "sandbox_run_code",
-      label: "Sandbox 代码",
-      description: "只在隔离的 CubeSandbox Jupyter 环境中执行代码。",
-      parameters: Type.Object({
-        code: Type.String({ minLength: 1 }),
-        language: Type.Optional(Type.String()),
-      }),
-      execute: async (_id, params, signal) =>
-        toolResult(
-          _id,
-          "sandbox_run_code",
-          capture,
-          async () => {
-            const authorization = await authorizeTool(authorizer, _id, "sandbox_run_code", params);
-            assertImmediateContinuation(authorization, signal);
-            return sandbox.runCode(params.code, {
-              ...signalControl(signal),
-              ...(params.language ? { language: params.language } : {}),
-            });
-          },
-          rejectModelContinuation,
-        ),
-    }),
-    defineTool({
-      name: "sandbox_read_file",
-      label: "读取 Sandbox 文件",
-      description: "读取 CubeSandbox 中的绝对路径文件；不能读取 Worker 宿主机。",
-      parameters: Type.Object({ path: Type.String({ pattern: "^/" }) }),
-      execute: async (_id, params, signal) =>
-        toolResult(
-          _id,
-          "sandbox_read_file",
-          capture,
-          async () => {
-            const authorization = await authorizeTool(authorizer, _id, "sandbox_read_file", params);
-            assertImmediateContinuation(authorization, signal);
-            return sandbox.readFile(params.path, signalControl(signal));
-          },
-          rejectModelContinuation,
-        ),
-    }),
-    defineTool({
-      name: "sandbox_write_file",
-      label: "写入 Sandbox 文件",
-      description: "写入 CubeSandbox 中的绝对路径文件；不能写入 Worker 宿主机。",
-      parameters: Type.Object({
-        path: Type.String({ pattern: "^/" }),
-        content: Type.String(),
-      }),
-      execute: async (_id, params, signal) =>
-        toolResult(
-          _id,
-          "sandbox_write_file",
-          capture,
-          async () => {
-            const authorization = await authorizeTool(
-              authorizer,
-              _id,
-              "sandbox_write_file",
-              params,
-            );
-            assertImmediateContinuation(authorization, signal);
-            await sandbox.writeFile(params.path, params.content, signalControl(signal));
-            return { written: true };
-          },
-          rejectModelContinuation,
-        ),
+      name: "exec_command",
+      label: "执行 Sandbox 命令",
+      description:
+        "在当前 CubeSandbox 中同步执行 Bash 命令并返回真实输出。默认工作目录是 /workspace；可使用 Shell、Python 和常规命令读写 Sandbox 文件。",
+      parameters: Type.Object(
+        {
+          cmd: Type.String({ minLength: 1 }),
+          workdir: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, pattern: "^/" })),
+          timeout_ms: Type.Optional(Type.Integer({ minimum: 1 })),
+          max_output_tokens: Type.Optional(
+            Type.Integer({ minimum: 1, maximum: MAX_OUTPUT_TOKENS }),
+          ),
+        },
+        { additionalProperties: false },
+      ),
+      execute: async (callId, params, signal) => {
+        const timeoutMs = params.timeout_ms ?? DEFAULT_TIMEOUT_MS;
+        const maxOutputTokens = params.max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
+        const workdir = params.workdir ?? DEFAULT_WORKDIR;
+        let effectRejected = false;
+        let result: ExecCommandResult;
+        try {
+          const authorization = await authorizeTool(authorizer, callId, "exec_command", params);
+          assertImmediateContinuation(authorization, signal);
+          const startedAt = performance.now();
+          const commandOutput = await sandbox.command(buildBashCommand(params.cmd, workdir), {
+            ...signalControl(signal),
+            timeoutMs,
+          });
+          result = projectCommandResult(
+            commandOutput,
+            Math.max(0, performance.now() - startedAt),
+            maxOutputTokens,
+          );
+        } catch (error) {
+          effectRejected = error instanceof ToolEffectRejectedError;
+          await persistReceipt(callId, "failed", capture);
+          if (effectRejected) rejectModelContinuation();
+          throw new Error(projectInfrastructureError(error, timeoutMs));
+        }
+        await persistReceipt(callId, "succeeded", capture);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          details: result,
+        };
+      },
     }),
   ];
+}
+
+async function persistReceipt(
+  callId: string,
+  outcome: "succeeded" | "failed",
+  capture:
+    | ((callId: string, name: string, text: string) => Promise<ToolObservationResult>)
+    | undefined,
+): Promise<void> {
+  const text = encodeControlledToolReceipt("exec_command", outcome);
+  const observation = await capture?.(callId, "exec_command", text);
+  if (
+    observation !== undefined &&
+    observation.outcome !== "recorded" &&
+    observation.outcome !== "replayed"
+  ) {
+    throw new ToolObservationPersistenceError(observation.outcome);
+  }
 }
 
 async function authorizeTool(
@@ -198,7 +193,6 @@ async function authorizeTool(
       argsDigest: createHash("sha256").update(canonicalJson(args)).digest("hex"),
     });
   } catch {
-    // 不泄漏 DB/栅栏细节；抛错让 Pi 将工具调用标记为失败，同时保证 Sandbox 尚未被触碰。
     throw new ToolEffectRejectedError("Runtime 已拒绝本次工具副作用");
   }
 }
@@ -214,6 +208,116 @@ function assertImmediateContinuation(
   ) {
     throw new ToolEffectRejectedError("Runtime 工具副作用许可已过期或调用已取消");
   }
+}
+
+function buildBashCommand(cmd: string, workdir: string): string {
+  if (!workdir.startsWith("/") || workdir.includes("\0")) {
+    throw new SandboxRuntimeError("INVALID_ARGUMENT", "workdir 必须是 Sandbox Linux 绝对路径");
+  }
+  // SDK 暂无 cwd/shell 独立参数，用安全引号把工作目录和命令交给固定 Bash。
+  // TODO(codex-alignment): CubeSandbox SDK 支持 cwd 后改为参数传递，不再由包装命令切换目录。
+  return `cd -- ${shellQuote(workdir)} && exec /bin/bash -c ${shellQuote(cmd)}`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function projectCommandResult(
+  output: { readonly stdout: string; readonly stderr: string; readonly exitCode: number },
+  wallTimeMs: number,
+  maxOutputTokens: number,
+): ExecCommandResult {
+  const stdoutBytes = Buffer.byteLength(output.stdout, "utf8");
+  const stderrBytes = Buffer.byteLength(output.stderr, "utf8");
+  const originalOutputBytes = stdoutBytes + stderrBytes;
+  // TODO(codex-alignment): 接入与当前模型一致的 tokenizer；同步 MVP 先按 4 UTF-8 bytes/token 近似。
+  const byteBudget = maxOutputTokens * APPROX_BYTES_PER_TOKEN;
+  const truncated = truncateStreams(output.stdout, output.stderr, byteBudget);
+  return Object.freeze({
+    exit_code: output.exitCode,
+    wall_time_seconds: Number((wallTimeMs / 1000).toFixed(3)),
+    stdout: truncated.stdout,
+    stderr: truncated.stderr,
+    output_truncated: originalOutputBytes > byteBudget,
+    original_output_bytes: originalOutputBytes,
+  });
+}
+
+function truncateStreams(
+  stdout: string,
+  stderr: string,
+  byteBudget: number,
+): { readonly stdout: string; readonly stderr: string } {
+  const stdoutBytes = Buffer.byteLength(stdout, "utf8");
+  const stderrBytes = Buffer.byteLength(stderr, "utf8");
+  const totalBytes = stdoutBytes + stderrBytes;
+  if (totalBytes <= byteBudget) return { stdout, stderr };
+  if (totalBytes === 0 || byteBudget === 0) return { stdout: "", stderr: "" };
+  const stdoutBudget = Math.floor((byteBudget * stdoutBytes) / totalBytes);
+  const stderrBudget = byteBudget - stdoutBudget;
+  return {
+    stdout: truncateHeadTailUtf8(stdout, stdoutBudget),
+    stderr: truncateHeadTailUtf8(stderr, stderrBudget),
+  };
+}
+
+function truncateHeadTailUtf8(value: string, byteBudget: number): string {
+  if (Buffer.byteLength(value, "utf8") <= byteBudget) return value;
+  const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
+  if (byteBudget <= markerBytes) return takeUtf8Prefix(value, byteBudget);
+  const contentBudget = byteBudget - markerBytes;
+  const headBudget = Math.ceil(contentBudget / 2);
+  const tailBudget = contentBudget - headBudget;
+  return `${takeUtf8Prefix(value, headBudget)}${TRUNCATION_MARKER}${takeUtf8Suffix(value, tailBudget)}`;
+}
+
+function takeUtf8Prefix(value: string, byteBudget: number): string {
+  let used = 0;
+  let result = "";
+  for (const point of value) {
+    const bytes = Buffer.byteLength(point, "utf8");
+    if (used + bytes > byteBudget) break;
+    result += point;
+    used += bytes;
+  }
+  return result;
+}
+
+function takeUtf8Suffix(value: string, byteBudget: number): string {
+  let used = 0;
+  const points = [...value];
+  const result: string[] = [];
+  for (let index = points.length - 1; index >= 0; index -= 1) {
+    const point = points[index] ?? "";
+    const bytes = Buffer.byteLength(point, "utf8");
+    if (used + bytes > byteBudget) break;
+    result.push(point);
+    used += bytes;
+  }
+  return result.reverse().join("");
+}
+
+function projectInfrastructureError(error: unknown, timeoutMs: number): string {
+  if (error instanceof ToolEffectRejectedError) {
+    return JSON.stringify({ code: "EXEC_REJECTED", message: error.message });
+  }
+  if (error instanceof SandboxRuntimeError) {
+    if (error.code === "TIMEOUT") {
+      // TODO(codex-alignment): 当前 SDK 超时异常不携带可验证的部分 stdout/stderr。
+      return JSON.stringify({
+        code: "EXEC_TIMEOUT",
+        message: `命令执行超过 ${timeoutMs} 毫秒`,
+      });
+    }
+    if (error.code === "CANCELLED") {
+      return JSON.stringify({ code: "EXEC_CANCELLED", message: "命令执行已取消" });
+    }
+    if (error.code === "INVALID_ARGUMENT") {
+      return JSON.stringify({ code: "EXEC_INVALID_ARGUMENT", message: error.message });
+    }
+  }
+  return JSON.stringify({ code: "EXEC_UNAVAILABLE", message: "CubeSandbox 命令服务暂时不可用" });
 }
 
 function canonicalJson(value: unknown): string {
@@ -232,54 +336,6 @@ function canonical(value: unknown): unknown {
 
 function signalControl(signal: AbortSignal | undefined): { signal?: AbortSignal } {
   return signal ? { signal } : {};
-}
-
-/**
- * Sandbox 返回的 stdout、文件内容和异常 message 都属于低信任原始数据：其中既可能有密钥，
- * 也可能含有提示注入。当前策略只持久化固定结构的观察事实，原始值不进入模型、Rollout 或 Blob。
- */
-function controlledObservation(toolName: string, outcome: "succeeded" | "failed"): string {
-  return encodeControlledToolReceipt(toolName, outcome);
-}
-
-async function toolResult(
-  callId: string,
-  toolName: string,
-  capture:
-    | ((callId: string, name: string, text: string) => Promise<ToolObservationResult>)
-    | undefined,
-  action: () => Promise<unknown>,
-  rejectModelContinuation: () => void = () => undefined,
-) {
-  let outcome: "succeeded" | "failed" = "succeeded";
-  let effectRejected = false;
-  try {
-    await action();
-  } catch (error) {
-    // SandboxRuntimeError.message/code 同样来自上游，不能作为安全分类或模型文本使用。
-    effectRejected = error instanceof ToolEffectRejectedError;
-    outcome = "failed";
-  }
-  const text = controlledObservation(toolName, outcome);
-  // capture 位于 Sandbox try/catch 之外：持久化异常绝不能被误分类成普通 Tool 失败。
-  const observation = await capture?.(callId, toolName, text);
-  if (
-    observation !== undefined &&
-    observation.outcome !== "recorded" &&
-    observation.outcome !== "replayed"
-  ) {
-    throw new ToolObservationPersistenceError(observation.outcome);
-  }
-  // 许可拒绝已经形成配对 durable 回执；在抛给 Pi 前关闭下一模型轮次，不能以普通 Tool error 继续。
-  if (effectRejected) rejectModelContinuation();
-  if (outcome === "failed") {
-    // 只抛固定回执，Pi 才会产生 isError=true；原始 Sandbox 异常已在闭包内丢弃。
-    throw new Error(observation?.observation ?? text);
-  }
-  return {
-    content: [{ type: "text" as const, text: observation?.observation ?? text }],
-    details: {},
-  };
 }
 
 class ToolEffectRejectedError extends Error {

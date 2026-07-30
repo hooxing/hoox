@@ -60,6 +60,7 @@
 | [ADR-0052](0052-artifact-permit-version-monotonicity.md) | Artifact 工具许可与 Attempt 版本的单调边界 | 已接受 | 2026-07-30 |
 | [ADR-0053](0053-workspace-artifact-preview-media.md) | Workspace Artifact 的受限预览媒体类型 | 已接受 | 2026-07-30 |
 | [ADR-0054](0054-production-transport-and-reproducible-release.md) | 生产传输、进程边界与可复现发布制品 | 已接受 | 2026-07-30 |
+| [ADR-0057](0057-single-exec-command-model-observation.md) | 单一 exec_command 与模型可见真实执行结果 | 已接受 | 2026-07-30 |
 
 ## 何时必须记录
 

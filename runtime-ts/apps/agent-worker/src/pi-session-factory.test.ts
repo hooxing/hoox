@@ -67,14 +67,18 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       const persistence = new FakeExecutionPersistence();
       const scope = persistence.addSeed(fakeSeed("pi-context-too-large"));
       const sandboxes = new FakeSandboxRegistry();
-      sandboxes.handle.files.set("/tmp/huge.txt", "大".repeat(130_000));
+      sandboxes.handle.command = async () => ({
+        stdout: "大".repeat(130_000),
+        stderr: "",
+        exitCode: 0,
+      });
       const faux = fauxProvider({
         api: `faux-worker-budget-${Date.now()}`,
         provider: `faux-worker-budget-${Date.now()}`,
         tokensPerSecond: 10_000,
       });
       faux.setResponses([
-        fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path: "/tmp/huge.txt" }), {
+        fauxAssistantMessage(fauxToolCall("exec_command", { cmd: "cat /tmp/huge.txt" }), {
           stopReason: "toolUse",
         }),
         fauxAssistantMessage("不应触达"),
@@ -131,6 +135,10 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       const persistence = new FakeExecutionPersistence();
       const scope = persistence.addSeed(fakeSeed("pi-lane"));
       const sandboxes = new FakeSandboxRegistry();
+      sandboxes.handle.command = async () => {
+        sandboxes.handle.files.set("/tmp/lane.txt", "durable-lane-ok");
+        return { stdout: "", stderr: "", exitCode: 0 };
+      };
       const clock = new FakeClock();
       const faux = fauxProvider({
         api: `faux-worker-lane-${Date.now()}`,
@@ -139,10 +147,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       });
       faux.setResponses([
         fauxAssistantMessage(
-          fauxToolCall("sandbox_write_file", {
-            path: "/tmp/lane.txt",
-            content: "durable-lane-ok",
-          }),
+          fauxToolCall("exec_command", { cmd: "printf durable-lane-ok > /tmp/lane.txt" }),
           { stopReason: "toolUse" },
         ),
         fauxAssistantMessage("完成"),
@@ -245,10 +250,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       });
       faux.setResponses([
         fauxAssistantMessage(
-          fauxToolCall("sandbox_write_file", {
-            path: "/tmp/must-not-exist.txt",
-            content: "forbidden",
-          }),
+          fauxToolCall("exec_command", { cmd: "printf forbidden > /tmp/must-not-exist.txt" }),
           { stopReason: "toolUse" },
         ),
       ]);
@@ -301,10 +303,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       });
       faux.setResponses([
         fauxAssistantMessage(
-          fauxToolCall("sandbox_write_file", {
-            path: "/tmp/unknown.txt",
-            content: "side-effect-issued",
-          }),
+          fauxToolCall("exec_command", { cmd: "printf side-effect-issued > /tmp/unknown.txt" }),
           { stopReason: "toolUse" },
         ),
         fauxAssistantMessage("不得到达成功终态"),

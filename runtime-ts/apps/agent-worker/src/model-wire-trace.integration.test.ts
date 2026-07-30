@@ -48,7 +48,7 @@ afterEach(async () => {
 });
 
 describe("模型网络报文真实 Pi transport", () => {
-  it("穿过 PiWorkerSessionFactory 的工具循环，逐轮保存精确请求、SSE 与模型可见工具回执", async () => {
+  it("穿过 PiWorkerSessionFactory 的工具循环，逐轮保存精确请求、SSE 与模型可见真实命令结果", async () => {
     const requests: ProviderRequest[] = [];
     const responses: Buffer[] = [];
     const server = createServer((request, response) => {
@@ -58,9 +58,8 @@ describe("模型网络报文真实 Pi transport", () => {
         const hasToolResult = messages.some((message) => message.role === "tool");
         const bytes = hasToolResult
           ? finalTextSse("工具结果已核验")
-          : toolCallSse("call-wire-write", "sandbox_write_file", {
-              path: "/tmp/wire-trace.txt",
-              content: "wire-tool-effect",
+          : toolCallSse("call-wire-write", "exec_command", {
+              cmd: "printf wire-tool-effect > /tmp/wire-trace.txt",
             });
         responses.push(bytes);
         sendSse(response, bytes);
@@ -71,6 +70,10 @@ describe("模型网络报文真实 Pi transport", () => {
     const persistence = new FakeExecutionPersistence();
     const scope = persistence.addSeed({ ...fakeSeed("wire-loop"), input: "执行网络报文工具循环" });
     const sandboxes = new FakeSandboxRegistry();
+    sandboxes.handle.command = async () => {
+      sandboxes.handle.files.set("/tmp/wire-trace.txt", "wire-tool-effect");
+      return { stdout: "wire-tool-effect\n", stderr: "", exitCode: 0 };
+    };
     const worker = await createWorker(port, traces, persistence, sandboxes);
 
     await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
@@ -82,8 +85,8 @@ describe("模型网络报文真实 Pi transport", () => {
     const secondMessages = requests[1]?.body.messages as Array<Record<string, unknown>>;
     const toolResult = secondMessages.find((message) => message.role === "tool");
     expect(toolResult).toMatchObject({ tool_call_id: "call-wire-write" });
-    expect(String(toolResult?.content)).toContain('"toolName":"sandbox_write_file"');
-    expect(String(toolResult?.content)).toContain('"outcome":"succeeded"');
+    expect(String(toolResult?.content)).toContain('"exit_code":0');
+    expect(String(toolResult?.content)).toContain('"stdout":"wire-tool-effect\\n"');
     expect(sandboxes.handle.files.get("/tmp/wire-trace.txt")).toBe("wire-tool-effect");
 
     const requestRecords = recordsFor(traces, "request");

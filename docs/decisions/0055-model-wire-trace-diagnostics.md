@@ -30,7 +30,18 @@ Provider 的 application request body bytes，也无法复现 SSE 分片、非 2
 该功能增加了显式数据保留面和对象存储成本，因此部署默认不采集。每条索引带有由
 `MODEL_WIRE_TRACE_RETENTION_DAYS` 派生的过期时间。生产清理以租户级幂等命令批量 claim 到期记录，
 使用 `SKIP LOCKED` 与持久 processing lease 避免和在途上传竞争；事务先写最小到期墓碑、
-再删除由完整身份约束的专属 trace reference 与索引。删除前把完整 stable 身份写入清理 item；
+再删除由完整身份约束的专属 trace reference 与索引。删除前按不可变 operation/sha256/size 查找全部
+stable trace reference，把完整身份写入清理 item；即使进程已在 Blob completed 后、索引 finalize 前
+退出，也禁止出现“删 reference 却无 GC outbox”。
+非终态 `blob_commits` 先由 retention recovery 从 durable snapshot 收敛。`upload_pending` 可能仍有 PUT
+在途，因此绝不终结：consumer 只按 operation 重建固定 staging 身份并幂等删除，保留 record/commit 锚点；
+`staged` 才可 CAS 到 `cleanup_pending`，reference commit/promotion 之后则继续到 stable/completed，再走相同
+stable outbox。恢复真正失败时原 cleanup command 不落库；成功但仍是 upload_pending 的 deferred 记录不阻塞
+同批 terminal 记录，且 live record 以 `retention_recovery_at` 公平轮转，不能由最老一批永久占满。
+每条已删 record 的永久墓碑也是 deterministic staging sweep 锚点；production 必须周期调用 `resumePending`，
+按 `staging_swept_at NULLS FIRST` 公平 claim 并重删所有关联 commit（包括 completed/abandoned）的 staging key，
+从而清除在 record 删除甚至 abandoned 之后才落下的迟到 PUT。墓碑 sweep 的 deferred/retry 不阻断同租户
+已释放 stable GC；只有 completed/abandoned 或无 commit 的 live record 才能进入删除事务。
 清理 consumer 随后显式调用既有 GC。共享 lifecycle 尚有其他引用时以 `still_referenced` 安全完成，
 零引用时必须完成物理对象删除后才把清理命令标为 completed；失败或 `in_progress` 保留 item 重试。
 COMMIT 响应未知时，写入与清理都只按原命令摘要读回事实名义收敛。测试覆盖最终请求/SSE 字节、

@@ -10,6 +10,7 @@ import {
 } from "./postgres.js";
 import {
   createDurableTraceBlobPersistence,
+  DurableTraceBlobPersistenceAdapter,
   type TraceBlobCommitRepository,
 } from "./trace-blob-persistence-adapter.js";
 
@@ -56,6 +57,8 @@ export interface PgModelWireTraceRepositoryOptions {
   readonly lateReferenceGc?: StableBlobGcPort;
   /** 仅供故障测试在迟到引用补偿事务前模拟进程退出。 */
   readonly beforeLateReferenceCompensation?: () => void | Promise<void>;
+  readonly beforeBlobPersistence?: () => void | Promise<void>;
+  readonly beforeFinalizeStored?: () => void | Promise<void>;
 }
 
 export interface ModelWireTraceCleanupCommand {
@@ -78,6 +81,11 @@ export interface ModelWireTraceCleanupResumeInput {
 export interface PgModelWireTraceCleanupRepositoryOptions {
   readonly afterCommit?: (operation: "cleanup") => void | Promise<void>;
   readonly beforeCompletionTransition?: () => void | Promise<void>;
+  /** 提供后，cleanup 会先从 durable commit snapshot 收敛/放弃过期 in-flight staging。 */
+  readonly inFlightRecovery?: {
+    readonly commits: TraceBlobCommitRepository;
+    readonly blobs: BlobStore;
+  };
 }
 
 type PersistenceStatus =
@@ -150,6 +158,7 @@ export class PgModelWireTraceRepository implements ModelWireTracePort {
     ) {
       return;
     }
+    await this.options.beforeBlobPersistence?.();
     const traces = createDurableTraceBlobPersistence(this.commits, this.blobs);
     const result = await traces.persistTrace({
       tenantId: input.context.tenantId,
@@ -166,6 +175,7 @@ export class PgModelWireTraceRepository implements ModelWireTracePort {
       ) {
         throw new PersistenceError("CONSTRAINT_VIOLATION", "Trace Blob 返回身份与命令不一致");
       }
+      await this.options.beforeFinalizeStored?.();
       await this.finalizeStored(command, processingToken, result);
       return;
     }
@@ -641,6 +651,22 @@ export class PgModelWireTraceCleanupRepository {
   async cleanupExpired(input: ModelWireTraceCleanupCommand): Promise<ModelWireTraceCleanupResult> {
     assertCleanupInput(input);
     const digest = cleanupDigest(input);
+    const existing = await withTenantTransaction(
+      this.pool,
+      { tenantId: input.tenantId },
+      (client) => readCleanupCommand(client, input.tenantId, input.commandId),
+    );
+    if (existing !== undefined) {
+      const replay = releasedCleanupReplay(existing, digest);
+      if (replay.outcome === "replayed") return replay;
+      return this.collectReleased(input, digest, replay.deletedCount);
+    }
+    let recoveryIncomplete: boolean;
+    try {
+      recoveryIncomplete = await this.recoverExpiredInFlight(input, false);
+    } catch (error) {
+      throw mapPersistenceError(error, "恢复过期模型网络诊断 Blob commit");
+    }
     let committed = false;
     try {
       const result = await withTenantTransaction(
@@ -663,10 +689,16 @@ export class PgModelWireTraceCleanupRepository {
                  WHERE candidate.tenant_id=$1 AND candidate.expires_at<=$3
                    AND candidate.expires_at<=clock_timestamp()
                    AND candidate.cleanup_command_id IS NULL
-                   AND (
-                     candidate.processing_token IS NULL
-                     OR candidate.processing_lease_expires_at<=clock_timestamp()
-                   )
+                    AND (
+                      candidate.processing_token IS NULL
+                      OR candidate.processing_lease_expires_at<=clock_timestamp()
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM blob_commits commit
+                       WHERE commit.tenant_id=candidate.tenant_id
+                         AND commit.operation_id=candidate.blob_operation_id
+                         AND commit.status NOT IN ('completed','abandoned')
+                    )
                  ORDER BY candidate.expires_at,candidate.attempt_id,candidate.model_turn,
                           candidate.transport_attempt,candidate.part
                  FOR UPDATE SKIP LOCKED LIMIT $4
@@ -674,6 +706,9 @@ export class PgModelWireTraceCleanupRepository {
               RETURNING record.attempt_id`,
             [input.tenantId, input.commandId, input.expiresBefore, input.batchSize],
           );
+          if (claimed.rowCount === 0 && recoveryIncomplete) {
+            throw new PersistenceError("UNAVAILABLE", "过期 Trace Blob commit 尚未收敛");
+          }
           await client.query(
             `INSERT INTO model_wire_trace_expiry_tombstones(
                tenant_id,attempt_id,model_turn,transport_attempt,part,command_digest,
@@ -688,33 +723,30 @@ export class PgModelWireTraceCleanupRepository {
             `INSERT INTO model_wire_trace_cleanup_items(
                tenant_id,cleanup_command_id,blob_reference_id,lifecycle_id,purpose,sha256,size,
                incarnation_id,physical_object_key,state
-             ) SELECT tenant_id,$2,blob_reference_id,blob_lifecycle_id,blob_purpose,sha256,size,
-                      blob_incarnation_id,physical_object_key,'pending'
-                 FROM model_wire_trace_records
-                WHERE tenant_id=$1 AND cleanup_command_id=$2 AND persistence_status='stored'`,
+              ) SELECT reference.tenant_id,$2,reference.reference_id,reference.lifecycle_id,
+                       reference.purpose,reference.sha256,reference.size,reference.incarnation_id,
+                       reference.physical_object_key,'pending'
+                  FROM model_wire_trace_records record
+                  JOIN blob_references reference
+                    ON reference.tenant_id=record.tenant_id
+                   AND reference.operation_id=record.blob_operation_id
+                   AND reference.state='stable' AND reference.purpose='trace'
+                   AND reference.sha256=record.sha256 AND reference.size=record.size
+                 WHERE record.tenant_id=$1 AND record.cleanup_command_id=$2`,
             [input.tenantId, input.commandId],
           );
           // 复合 FK 延迟到提交检查；先持久 GC outbox，再释放专属引用与索引。
           await client.query(
             `DELETE FROM blob_references reference
-              USING model_wire_trace_records record
-              WHERE record.tenant_id=$1 AND record.cleanup_command_id=$2
-                AND reference.tenant_id=record.tenant_id
-                AND reference.operation_id=record.blob_operation_id
-                AND reference.purpose='trace' AND reference.sha256=record.sha256
-                AND reference.size=record.size
-                AND (
-                  record.blob_reference_id IS NULL
-                  OR (
-                    record.persistence_status='stored'
-                    AND reference.reference_id=record.blob_reference_id
-                    AND reference.state=record.blob_state
-                    AND reference.purpose=record.blob_purpose
-                    AND reference.lifecycle_id=record.blob_lifecycle_id
-                    AND reference.incarnation_id=record.blob_incarnation_id
-                    AND reference.physical_object_key=record.physical_object_key
-                  )
-                )`,
+              USING model_wire_trace_cleanup_items item
+              WHERE item.tenant_id=$1 AND item.cleanup_command_id=$2
+                AND reference.tenant_id=item.tenant_id
+                AND reference.reference_id=item.blob_reference_id
+                AND reference.state='stable' AND reference.purpose=item.purpose
+                AND reference.sha256=item.sha256 AND reference.size=item.size
+                AND reference.lifecycle_id=item.lifecycle_id
+                AND reference.incarnation_id=item.incarnation_id
+                AND reference.physical_object_key=item.physical_object_key`,
             [input.tenantId, input.commandId],
           );
           const removed = await client.query(
@@ -759,9 +791,129 @@ export class PgModelWireTraceCleanupRepository {
     }
   }
 
+  private async recoverExpiredInFlight(
+    input: ModelWireTraceCleanupResumeInput & { readonly expiresBefore: Date },
+    includeTombstones: boolean,
+  ): Promise<boolean> {
+    const recovery = this.options.inFlightRecovery;
+    const candidates = await withTenantTransaction(
+      this.pool,
+      { tenantId: input.tenantId },
+      async (client) => {
+        type RecoveryCandidate = {
+          readonly blob_operation_id: string;
+          readonly sha256: string;
+          readonly size: string | number;
+          readonly blocks_cleanup: boolean;
+        };
+        const records = includeTombstones
+          ? { rows: [] as RecoveryCandidate[] }
+          : await client.query<RecoveryCandidate>(
+              `WITH claimed AS (
+                 SELECT record.tenant_id,record.attempt_id,record.model_turn,
+                        record.transport_attempt,record.part
+                   FROM model_wire_trace_records record
+                   JOIN blob_commits commit
+                     ON commit.tenant_id=record.tenant_id
+                    AND commit.operation_id=record.blob_operation_id
+                  WHERE record.tenant_id=$1 AND record.expires_at<=$2
+                    AND record.expires_at<=clock_timestamp() AND record.cleanup_command_id IS NULL
+                    AND record.sha256 IS NOT NULL AND record.size IS NOT NULL
+                    AND (
+                      record.processing_token IS NULL
+                      OR record.processing_lease_expires_at<=clock_timestamp()
+                    )
+                    AND commit.status NOT IN ('completed','abandoned')
+                  ORDER BY record.retention_recovery_at ASC NULLS FIRST,record.expires_at,
+                           record.attempt_id,record.model_turn,record.transport_attempt,record.part
+                  FOR UPDATE OF record SKIP LOCKED LIMIT $3
+               )
+               UPDATE model_wire_trace_records record
+                  SET retention_recovery_at=clock_timestamp(),updated_at=clock_timestamp()
+                 FROM claimed
+                WHERE record.tenant_id=claimed.tenant_id
+                  AND record.attempt_id=claimed.attempt_id
+                  AND record.model_turn=claimed.model_turn
+                  AND record.transport_attempt=claimed.transport_attempt
+                  AND record.part=claimed.part
+               RETURNING record.blob_operation_id,record.sha256,record.size,
+                         true AS blocks_cleanup`,
+              [input.tenantId, input.expiresBefore, input.batchSize],
+            );
+        const tombstones = includeTombstones
+          ? await client.query<RecoveryCandidate>(
+              `WITH claimed AS (
+             SELECT tombstone.tenant_id,tombstone.attempt_id,tombstone.model_turn,
+                    tombstone.transport_attempt,tombstone.part
+               FROM model_wire_trace_expiry_tombstones tombstone
+              WHERE tombstone.tenant_id=$1
+                AND tombstone.sha256 IS NOT NULL AND tombstone.size IS NOT NULL
+                AND EXISTS (
+                  SELECT 1 FROM blob_commits commit
+                   WHERE commit.tenant_id=tombstone.tenant_id
+                     AND commit.operation_id=tombstone.blob_operation_id
+                )
+              ORDER BY tombstone.staging_swept_at ASC NULLS FIRST,tombstone.expired_at,
+                       tombstone.attempt_id,tombstone.model_turn,
+                       tombstone.transport_attempt,tombstone.part
+              FOR UPDATE SKIP LOCKED LIMIT $2
+           )
+           UPDATE model_wire_trace_expiry_tombstones tombstone
+              SET staging_swept_at=clock_timestamp()
+             FROM claimed
+            WHERE tombstone.tenant_id=claimed.tenant_id
+              AND tombstone.attempt_id=claimed.attempt_id
+              AND tombstone.model_turn=claimed.model_turn
+              AND tombstone.transport_attempt=claimed.transport_attempt
+              AND tombstone.part=claimed.part
+           RETURNING tombstone.blob_operation_id,tombstone.sha256,tombstone.size,
+                     false AS blocks_cleanup`,
+              [input.tenantId, input.batchSize],
+            )
+          : { rows: [] as RecoveryCandidate[] };
+        const deduplicated = new Map<string, RecoveryCandidate>();
+        for (const candidate of [...records.rows, ...tombstones.rows]) {
+          deduplicated.set(candidate.blob_operation_id, candidate);
+        }
+        return [...deduplicated.values()];
+      },
+    );
+    if (candidates.length === 0) return false;
+    if (recovery === undefined) {
+      return true;
+    }
+    const adapter = new DurableTraceBlobPersistenceAdapter(recovery.commits, recovery.blobs);
+    let incomplete = false;
+    for (const candidate of candidates) {
+      const outcome = await adapter.recoverForRetention({
+        tenantId: input.tenantId,
+        operationId: candidate.blob_operation_id,
+        sha256: candidate.sha256,
+        size: Number(candidate.size),
+      });
+      if (outcome === "conflict") {
+        throw new PersistenceError(
+          "CONSTRAINT_VIOLATION",
+          "过期 Trace Blob commit 身份与索引不一致",
+        );
+      }
+      if (outcome === "retry" || outcome === "deferred") {
+        if (candidate.blocks_cleanup) {
+          incomplete = true;
+        }
+      }
+    }
+    return incomplete;
+  }
+
   /** 周期 consumer 入口：扫描引用已释放但正文 GC 尚未完成的命令，进程重启后可继续。 */
   async resumePending(input: ModelWireTraceCleanupResumeInput): Promise<number> {
     assertCleanupResumeInput(input);
+    try {
+      await this.recoverExpiredInFlight({ ...input, expiresBefore: new Date() }, true);
+    } catch (error) {
+      throw mapPersistenceError(error, "恢复墓碑关联的模型网络诊断 Blob commit");
+    }
     await this.reconcileTombstoneReferences(input);
     const commands = await withTenantTransaction(
       this.pool,

@@ -1655,7 +1655,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         "model_wire_trace_cleanup_items",
         new Set(["state", "outcome", "attempt_count", "updated_at"]),
       ],
-      ["model_wire_trace_expiry_tombstones", new Set()],
+      ["model_wire_trace_expiry_tombstones", new Set(["staging_swept_at"])],
       [
         "model_wire_trace_records",
         new Set([
@@ -1668,6 +1668,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           "physical_object_key",
           "processing_token",
           "processing_lease_expires_at",
+          "retention_recovery_at",
           "cleanup_command_id",
           "updated_at",
         ]),

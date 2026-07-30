@@ -60,6 +60,7 @@ CREATE TABLE model_wire_trace_expiry_tombstones (
   size bigint CHECK (size BETWEEN 0 AND 9007199254740991),
   cleanup_command_id text NOT NULL,
   expired_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  staging_swept_at timestamptz,
   PRIMARY KEY (tenant_id, attempt_id, model_turn, transport_attempt, part),
   FOREIGN KEY (tenant_id, cleanup_command_id)
     REFERENCES model_wire_trace_cleanup_commands(tenant_id, command_id) ON DELETE RESTRICT,
@@ -67,6 +68,11 @@ CREATE TABLE model_wire_trace_expiry_tombstones (
     (sha256 IS NULL AND size IS NULL) OR (sha256 ~ '^[0-9a-f]{64}$' AND size IS NOT NULL)
   )
 );
+CREATE INDEX model_wire_trace_tombstone_staging_sweep_idx
+  ON model_wire_trace_expiry_tombstones(
+    tenant_id, staging_swept_at ASC NULLS FIRST, expired_at, attempt_id, model_turn,
+    transport_attempt, part
+  );
 
 -- reference_id 已经唯一；该冗余唯一键让下游 FK 同时证明 stable/state/purpose 与完整物理身份。
 ALTER TABLE blob_references ADD CONSTRAINT blob_references_model_wire_identity_unique
@@ -103,6 +109,7 @@ CREATE TABLE model_wire_trace_records (
   physical_object_key text,
   processing_token uuid,
   processing_lease_expires_at timestamptz,
+  retention_recovery_at timestamptz,
   cleanup_command_id text,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -161,6 +168,10 @@ CREATE INDEX model_wire_trace_records_run_idx ON model_wire_trace_records(
 );
 CREATE INDEX model_wire_trace_records_expiry_idx ON model_wire_trace_records(
   tenant_id, expires_at, attempt_id, model_turn, transport_attempt, part
+) WHERE cleanup_command_id IS NULL;
+CREATE INDEX model_wire_trace_records_recovery_sweep_idx ON model_wire_trace_records(
+  tenant_id, retention_recovery_at ASC NULLS FIRST, expires_at, attempt_id,
+  model_turn, transport_attempt, part
 ) WHERE cleanup_command_id IS NULL;
 
 ALTER TABLE model_wire_trace_cleanup_commands ENABLE ROW LEVEL SECURITY;
@@ -231,35 +242,36 @@ CREATE POLICY blob_references_expired_trace_delete_policy ON blob_references FOR
     )
     OR (
       tenant_id = NULLIF(current_setting('app.tenant_id', true), '')
-      AND purpose = 'trace'
-      AND (
-      EXISTS (
-      SELECT 1 FROM model_wire_trace_records record
-       WHERE record.tenant_id = blob_references.tenant_id
-         AND record.blob_operation_id = blob_references.operation_id
-         AND record.sha256 = blob_references.sha256
-         AND record.size = blob_references.size
-         AND record.expires_at <= clock_timestamp()
-         AND (
-           record.blob_reference_id IS NULL
-           OR (
-             record.persistence_status = 'stored'
-             AND record.blob_reference_id = blob_references.reference_id
-             AND record.blob_state = blob_references.state
-             AND record.blob_purpose = blob_references.purpose
-             AND record.blob_lifecycle_id = blob_references.lifecycle_id
-             AND record.blob_incarnation_id = blob_references.incarnation_id
-             AND record.physical_object_key = blob_references.physical_object_key
+      AND purpose = 'trace' AND state = 'stable'
+      AND EXISTS (
+        SELECT 1 FROM model_wire_trace_cleanup_items item
+         WHERE item.tenant_id = blob_references.tenant_id
+           AND item.blob_reference_id = blob_references.reference_id
+           AND item.purpose = blob_references.purpose
+           AND item.sha256 = blob_references.sha256
+           AND item.size = blob_references.size
+           AND item.lifecycle_id = blob_references.lifecycle_id
+           AND item.incarnation_id = blob_references.incarnation_id
+           AND item.physical_object_key = blob_references.physical_object_key
+           AND (
+             EXISTS (
+               SELECT 1 FROM model_wire_trace_records record
+                WHERE record.tenant_id = blob_references.tenant_id
+                  AND record.cleanup_command_id = item.cleanup_command_id
+                  AND record.blob_operation_id = blob_references.operation_id
+                  AND record.sha256 = blob_references.sha256
+                  AND record.size = blob_references.size
+                  AND record.expires_at <= clock_timestamp()
+             )
+             OR EXISTS (
+               SELECT 1 FROM model_wire_trace_expiry_tombstones tombstone
+                WHERE tombstone.tenant_id = blob_references.tenant_id
+                  AND tombstone.cleanup_command_id = item.cleanup_command_id
+                  AND tombstone.blob_operation_id = blob_references.operation_id
+                  AND tombstone.sha256 = blob_references.sha256
+                  AND tombstone.size = blob_references.size
+             )
            )
-         )
-      )
-      OR EXISTS (
-        SELECT 1 FROM model_wire_trace_expiry_tombstones tombstone
-         WHERE tombstone.tenant_id = blob_references.tenant_id
-           AND tombstone.blob_operation_id = blob_references.operation_id
-           AND tombstone.sha256 = blob_references.sha256
-           AND tombstone.size = blob_references.size
-      )
       )
     )
   );

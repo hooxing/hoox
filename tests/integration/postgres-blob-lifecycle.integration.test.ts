@@ -1603,12 +1603,65 @@ describe("PostgreSQL stable blob 生命周期", () => {
       ),
     );
     expect(orphanBeforeRestart.rowCount).toBe(1);
+    const raceReferenceId = `wire-cleanup-race-${unique}`;
+    let completionEntered!: () => void;
+    let releaseCompletion!: () => void;
+    const completionBarrier = new Promise<void>((resolve) => (completionEntered = resolve));
+    const completionReleased = new Promise<void>((resolve) => (releaseCompletion = resolve));
     const restartedCleanup = new PgModelWireTraceCleanupRepository(
+      runtimePool,
+      createS3StableBlobGarbageCollector(minioConfig(), repository),
+      {
+        beforeCompletionTransition: async () => {
+          completionEntered();
+          await completionReleased;
+        },
+      },
+    );
+    const resuming = restartedCleanup.resumePending({ tenantId: scopeA.tenantId, batchSize: 10 });
+    await completionBarrier;
+    await withTenantTransaction(runtimePool, scopeA, async (client) => {
+      const inserted = await client.query(
+        `INSERT INTO model_wire_trace_cleanup_items(
+           tenant_id,cleanup_command_id,blob_reference_id,lifecycle_id,purpose,sha256,size,
+           incarnation_id,physical_object_key,state
+         ) SELECT tenant_id,cleanup_command_id,$3,lifecycle_id,purpose,sha256,size,
+                  incarnation_id,physical_object_key,'pending'
+             FROM model_wire_trace_cleanup_items
+            WHERE tenant_id=$1 AND cleanup_command_id=$2
+            ORDER BY created_at,blob_reference_id LIMIT 1`,
+        [scopeA.tenantId, `wire-cleanup-late-${unique}`, raceReferenceId],
+      );
+      expect(inserted.rowCount).toBe(1);
+      const reopened = await client.query(
+        `UPDATE model_wire_trace_cleanup_commands
+            SET status='references_released',completed_at=NULL
+          WHERE tenant_id=$1 AND command_id=$2 AND status='completed'`,
+        [scopeA.tenantId, `wire-cleanup-late-${unique}`],
+      );
+      expect(reopened.rowCount).toBe(1);
+    });
+    releaseCompletion();
+    await expect(resuming).rejects.toMatchObject({ code: "UNAVAILABLE" });
+    const raced = await withTenantTransaction(runtimePool, scopeA, (client) =>
+      client.query<{ status: string; pending_count: string }>(
+        `SELECT command.status,
+                count(item.*) FILTER (WHERE item.state<>'completed')::text AS pending_count
+           FROM model_wire_trace_cleanup_commands command
+           LEFT JOIN model_wire_trace_cleanup_items item
+             ON item.tenant_id=command.tenant_id AND item.cleanup_command_id=command.command_id
+          WHERE command.tenant_id=$1 AND command.command_id=$2
+          GROUP BY command.status`,
+        [scopeA.tenantId, `wire-cleanup-late-${unique}`],
+      ),
+    );
+    expect(raced.rows).toEqual([{ status: "references_released", pending_count: "1" }]);
+    const finalCleanup = new PgModelWireTraceCleanupRepository(
       runtimePool,
       createS3StableBlobGarbageCollector(minioConfig(), repository),
     );
     await expect(
-      restartedCleanup.resumePending({ tenantId: scopeA.tenantId, batchSize: 10 }),
+      finalCleanup.resumePending({ tenantId: scopeA.tenantId, batchSize: 10 }),
     ).resolves.toBe(1);
     const late = await withTenantTransaction(runtimePool, scopeA, (client) =>
       client.query<{ state: string; outcome: string }>(
@@ -1617,7 +1670,10 @@ describe("PostgreSQL stable blob 生命周期", () => {
         [scopeA.tenantId, `wire-cleanup-late-${unique}`],
       ),
     );
-    expect(late.rows).toEqual([{ state: "completed", outcome: "deleted" }]);
+    expect(late.rows).toHaveLength(2);
+    expect(late.rows.every((row) => row.state === "completed" && row.outcome === "deleted")).toBe(
+      true,
+    );
     const references = await withTenantTransaction(runtimePool, scopeA, (client) =>
       client.query(
         "SELECT 1 FROM blob_references WHERE tenant_id=$1 AND purpose='trace' AND sha256=$2",

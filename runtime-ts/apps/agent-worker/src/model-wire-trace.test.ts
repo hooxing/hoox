@@ -1,10 +1,10 @@
 import { createServer, type Server } from "node:http";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   installModelWireFetchInstrumentation,
-  ModelWireTraceSession,
   type ModelWireTracePort,
   type ModelWireTraceRecord,
+  ModelWireTraceSession,
 } from "./model-wire-trace.js";
 
 async function listen(server: Server): Promise<number> {
@@ -28,6 +28,10 @@ class TracePort implements ModelWireTracePort {
   }
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 async function eventually(predicate: () => boolean): Promise<void> {
   for (let index = 0; index < 100; index += 1) {
     if (predicate()) return;
@@ -45,6 +49,7 @@ describe("模型网络原始报文诊断", () => {
         for await (const chunk of request)
           body.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         expect(request.headers.authorization).toBe("Bearer test-secret");
+        expect(request.headers.cookie).toBe("session=test-cookie-secret");
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.write('data: {"delta":"甲"}\n\n');
         response.end("data: [DONE]\n\n");
@@ -59,7 +64,11 @@ describe("模型网络原始报文诊断", () => {
         () =>
           fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
             method: "POST",
-            headers: { authorization: "Bearer test-secret", "content-type": "application/json" },
+            headers: {
+              authorization: "Bearer test-secret",
+              cookie: "session=test-cookie-secret",
+              "content-type": "application/json",
+            },
             // 空格和 Unicode 用于证明保存的是 Fetch 实际编码后的字节，而非对象重建。
             body: '{ "message": "甲" }',
           }),
@@ -75,6 +84,7 @@ describe("模型网络原始报文诊断", () => {
         'data: {"delta":"甲"}\n\ndata: [DONE]\n\n',
       );
       expect(JSON.stringify(traces.records)).not.toContain("test-secret");
+      expect(JSON.stringify(traces.records)).not.toContain("test-cookie-secret");
       expect(sse).toMatchObject({
         status: "complete",
         httpStatus: 200,
@@ -155,6 +165,175 @@ describe("模型网络原始报文诊断", () => {
         traces.records.filter((entry) => entry.part === "request").map((entry) => entry.modelTurn),
       ).toEqual([0, 1]);
       expect(traces.records.every((entry) => entry.transportAttempt === 0)).toBe(true);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it("persist 与 captureFailed 同时失败也不改变 Provider Response", async () => {
+    installModelWireFetchInstrumentation();
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end("data: diagnostic-port-down\n\n");
+    });
+    const port = await listen(server);
+    let persistCalls = 0;
+    let failureCalls = 0;
+    const session = new ModelWireTraceSession(
+      {
+        persist: async () => {
+          persistCalls += 1;
+          throw new Error("diagnostic persistence unavailable");
+        },
+        captureFailed: async () => {
+          failureCalls += 1;
+          throw new Error("diagnostic failure recorder unavailable");
+        },
+      },
+      1024,
+      `http://127.0.0.1:${port}/v1`,
+    );
+    try {
+      const response = await session.run(
+        { tenantId: "tenant_d", threadId: "thread_d", runId: "run_d", attemptId: "attempt_d" },
+        () =>
+          fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+            method: "POST",
+            body: "diagnostic failures are isolated",
+          }),
+      );
+      expect(await response.text()).toBe("data: diagnostic-port-down\n\n");
+      await session.drain();
+      expect(persistCalls).toBe(2);
+      expect(failureCalls).toBe(2);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it("慢 capture 的 drain 成功路径清理 deadline，超时路径也不阻塞业务", async () => {
+    installModelWireFetchInstrumentation();
+    const server = createServer((_request, response) => response.end("provider-ok"));
+    const port = await listen(server);
+    const releases: Array<() => void> = [];
+    let persistStarted = 0;
+    const session = new ModelWireTraceSession(
+      {
+        persist: async () => {
+          persistStarted += 1;
+          await new Promise<void>((resolve) => releases.push(resolve));
+        },
+        captureFailed: async () => undefined,
+      },
+      1024,
+      `http://127.0.0.1:${port}/v1`,
+    );
+    try {
+      const response = await session.run(
+        { tenantId: "tenant_e", threadId: "thread_e", runId: "run_e", attemptId: "attempt_e" },
+        () =>
+          fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+            method: "POST",
+            body: "slow-capture",
+          }),
+      );
+      expect(await response.text()).toBe("provider-ok");
+      await eventually(() => persistStarted === 2);
+
+      vi.useFakeTimers();
+      const completedBeforeDeadline = session.drain(5_000);
+      expect(vi.getTimerCount()).toBe(1);
+      for (const release of releases) release();
+      await completedBeforeDeadline;
+      expect(vi.getTimerCount()).toBe(0);
+      vi.useRealTimers();
+
+      let neverResolve: (() => void) | undefined;
+      const timeoutSession = new ModelWireTraceSession(
+        {
+          persist: () => new Promise<void>((resolve) => (neverResolve = resolve)),
+          captureFailed: async () => undefined,
+        },
+        1024,
+        `http://127.0.0.1:${port}/v1`,
+      );
+      const second = await timeoutSession.run(
+        { tenantId: "tenant_f", threadId: "thread_f", runId: "run_f", attemptId: "attempt_f" },
+        () =>
+          fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+            method: "POST",
+            body: "timeout-capture",
+          }),
+      );
+      expect(await second.text()).toBe("provider-ok");
+      await eventually(() => neverResolve !== undefined);
+      vi.useFakeTimers();
+      const baselineTimers = vi.getTimerCount();
+      const timedOut = timeoutSession.drain(25);
+      expect(vi.getTimerCount()).toBe(baselineTimers + 1);
+      await vi.advanceTimersByTimeAsync(25);
+      await timedOut;
+      neverResolve?.();
+    } finally {
+      vi.useRealTimers();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it("Abort 与响应断流分别保留失败事实，且不把诊断异常替换成成功", async () => {
+    installModelWireFetchInstrumentation();
+    let requestCount = 0;
+    const server = createServer((_request, response) => {
+      requestCount += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write("data: partial\n\n");
+      response.destroy(new Error("test disconnect"));
+    });
+    const port = await listen(server);
+    const traces = new TracePort();
+    const session = new ModelWireTraceSession(traces, 1024, `http://127.0.0.1:${port}/v1`);
+    const context = {
+      tenantId: "tenant_g",
+      threadId: "thread_g",
+      runId: "run_g",
+      attemptId: "attempt_g",
+    };
+    try {
+      const controller = new AbortController();
+      controller.abort();
+      await expect(
+        session.run(context, () =>
+          fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+            method: "POST",
+            body: "abort-before-send",
+            signal: controller.signal,
+          }),
+        ),
+      ).rejects.toMatchObject({ name: "AbortError" });
+
+      await expect(
+        session.run(context, async () => {
+          const response = await fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+            method: "POST",
+            body: "disconnect",
+          });
+          return response.text();
+        }),
+      ).rejects.toBeInstanceOf(Error);
+      await session.drain();
+      expect(requestCount).toBe(1);
+      expect(traces.failures).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ part: "response", code: "BODY_UNREADABLE", modelTurn: 0 }),
+          expect.objectContaining({ part: "response", modelTurn: 1 }),
+        ]),
+      );
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),

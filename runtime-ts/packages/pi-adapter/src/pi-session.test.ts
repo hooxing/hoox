@@ -30,6 +30,30 @@ afterEach(() => {
 });
 
 describe("Pi 安全适配", () => {
+  it("每次 Provider stream 调用均经过诊断钩子，工具循环不会误作 retry", async () => {
+    const invocations: number[] = [];
+    const { controller } = await harness(
+      [
+        fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path: "/tmp/a" }), {
+          stopReason: "toolUse",
+        }),
+        fauxAssistantMessage("完成"),
+      ],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (operation) => {
+        invocations.push(invocations.length);
+        return operation();
+      },
+    );
+    await controller.prompt("读取文件");
+    expect(invocations).toEqual([0, 1]);
+  });
+
   it("跨平台只发布 assistant 成功终态，工具只进入 Sandbox", async () => {
     const sandbox = new FakeSandboxHandle("pi-fake");
     let modelContext = "";
@@ -874,6 +898,7 @@ async function harness(
   authorizeToolEffect?: Parameters<typeof createSafePiSession>[0]["authorizeToolEffect"],
   untrustedPromptContent?: Parameters<typeof createSafePiSession>[0]["untrustedPromptContent"],
   tokenizer?: TokenizerPort,
+  withProviderInvocation?: Parameters<typeof createSafePiSession>[0]["withProviderInvocation"],
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
@@ -916,6 +941,7 @@ async function harness(
     createToolObservationRecorder: fakeObservationRecorder,
     ...(rolloutProjection === undefined ? {} : { rolloutProjection }),
     ...(untrustedPromptContent === undefined ? {} : { untrustedPromptContent }),
+    ...(withProviderInvocation === undefined ? {} : { withProviderInvocation }),
   });
   disposers.push(() => controller.dispose());
   const events: RuntimeAgentEvent[] = [];

@@ -550,6 +550,12 @@ async function assembleWorkerRuntime(
         ),
       policy: workspacePolicy,
     });
+    const resourceBlobWriter = new DurableResourceBlobWriter(
+      blobRepository,
+      blobs,
+      workspacePolicy.maxSingleFileBytes,
+      createS3StableBlobGarbageCollector(s3Config, blobRepository),
+    );
     const deliverFileTools = new DeliverFileToolRouterFactory({
       source: new SandboxDeliverFileSource(
         async ({ binding, signal }) =>
@@ -575,12 +581,7 @@ async function assembleWorkerRuntime(
       ),
       publications: new SimpleArtifactDeliveryService(
         new PgSimpleDeliveredFileRepository(pool),
-        new DurableResourceBlobWriter(
-          blobRepository,
-          blobs,
-          workspacePolicy.maxSingleFileBytes,
-          createS3StableBlobGarbageCollector(s3Config, blobRepository),
-        ),
+        resourceBlobWriter,
       ),
       authorizationVerifier: artifactAuthorization.verifier,
     });
@@ -618,6 +619,12 @@ async function assembleWorkerRuntime(
       workerId: configuration.worker.workerId,
       pollIntervalMs: configuration.worker.pollIntervalMs,
       dispatchLeaseMs: configuration.worker.dispatchLeaseMs,
+      maintenance: () =>
+        resourceBlobWriter.recoverPending({
+          tenantId: configuration.worker.tenantId,
+          limit: 16,
+          orphanGraceSeconds: 300,
+        }),
     });
     const probes = Object.freeze({
       postgres: () => probePostgres(pool, configuration.databaseRuntimeRole),

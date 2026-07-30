@@ -306,6 +306,8 @@ export class AgentWorkerPollingLoop {
       readonly workerId: string;
       readonly pollIntervalMs: number;
       readonly dispatchLeaseMs: number;
+      /** 周期性收敛已具 durable anchor 的维护任务；失败不阻塞 dispatch，下一 tick 重试。 */
+      readonly maintenance?: () => Promise<unknown>;
     },
   ) {}
 
@@ -339,6 +341,11 @@ export class AgentWorkerPollingLoop {
   }
 
   private async tick(): Promise<void> {
+    try {
+      await this.options.maintenance?.();
+    } catch {
+      // 维护任务必须保持幂等 durable anchor；当前 tick 失败后由下一 tick 重试。
+    }
     let claims: readonly PgClaimedRunDispatch[];
     try {
       claims = await this.queue.claim({

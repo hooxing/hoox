@@ -6,6 +6,7 @@ import type {
   SimpleDeliveredFileRepositoryPort,
   SimpleDeliveredFileSnapshot,
 } from "./simple-delivery.js";
+import { SimpleDeliveryCommitResultUnknownError } from "./simple-delivery.js";
 
 interface DeliveredRow extends QueryResultRow {
   command_digest: string;
@@ -16,14 +17,6 @@ interface DeliveredRow extends QueryResultRow {
   media_type: string;
   size: string;
   target: "published" | "failed" | null;
-}
-
-/** COMMIT 已发送，但规范读回本身不可用；调用方不得把 stable Blob 当作确定孤儿。 */
-export class SimpleDeliveryCommitResultUnknownError extends Error {
-  constructor() {
-    super("DELIVER_FILE_COMMIT_RESULT_UNKNOWN");
-    this.name = "SimpleDeliveryCommitResultUnknownError";
-  }
 }
 
 /** deliver_file 的 PG 写侧；Resource、Version、Artifact 和 published settlement 同事务提交。 */

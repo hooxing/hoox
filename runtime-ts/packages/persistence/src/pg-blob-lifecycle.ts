@@ -231,6 +231,119 @@ export class PgBlobLifecycleRepository
     }
   }
 
+  async claimPendingResourceBlobCleanup(input: {
+    readonly scope: TenantBlobScope;
+    readonly limit: number;
+    readonly orphanGraceSeconds: number;
+  }): Promise<
+    readonly {
+      readonly referenceId: string;
+      readonly blob: StableBlobRef & { readonly purpose: "resource" };
+    }[]
+  > {
+    assertTenantScope(input.scope);
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 256) {
+      throw new TypeError("Resource Blob cleanup limit 无效");
+    }
+    if (
+      !Number.isSafeInteger(input.orphanGraceSeconds) ||
+      input.orphanGraceSeconds < 1 ||
+      input.orphanGraceSeconds > 86_400
+    ) {
+      throw new TypeError("Resource Blob cleanup grace 无效");
+    }
+    try {
+      return await withTenantTransaction(this.pool, input.scope, async (client) => {
+        const result = await client.query<{
+          readonly reference_id: string;
+          readonly sha256: string;
+          readonly size: string;
+          readonly media_type: string;
+          readonly incarnation_id: string;
+          readonly physical_object_key: string;
+        }>(
+          `WITH candidate AS (
+             SELECT reference.reference_id
+               FROM blob_references reference
+               JOIN blob_lifecycles lifecycle
+                 ON lifecycle.tenant_id=reference.tenant_id
+                AND lifecycle.lifecycle_id=reference.lifecycle_id
+              WHERE reference.tenant_id=$1 AND reference.purpose='resource'
+                AND reference.operation_id LIKE 'deliver-%'
+                AND lifecycle.state <> 'deleted'
+                AND (
+                  (
+                    reference.state='released'
+                    AND NOT EXISTS (
+                      SELECT 1 FROM blob_references other
+                       WHERE other.tenant_id=reference.tenant_id
+                         AND other.lifecycle_id=reference.lifecycle_id
+                         AND other.incarnation_id=reference.incarnation_id
+                         AND other.state='stable'
+                         AND other.reference_id<>reference.reference_id
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM workspace_revision_files file
+                       WHERE file.tenant_id=reference.tenant_id
+                         AND file.blob_lifecycle_id=reference.lifecycle_id
+                         AND file.blob_incarnation_id=reference.incarnation_id
+                    )
+                  )
+                  OR (
+                    reference.state='stable'
+                    AND reference.updated_at <
+                        clock_timestamp()-($3 * interval '1 second')
+                  )
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM resource_versions version
+                   WHERE version.tenant_id=reference.tenant_id
+                     AND version.blob_reference_id=reference.reference_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM artifact_publications publication
+                   WHERE publication.tenant_id=reference.tenant_id
+                     AND publication.blob_reference_id=reference.reference_id
+                )
+              ORDER BY reference.updated_at,reference.reference_id
+              LIMIT $2
+              FOR UPDATE OF reference SKIP LOCKED
+           ), released AS (
+             UPDATE blob_references reference
+                SET state='released',updated_at=clock_timestamp()
+               FROM candidate
+              WHERE reference.tenant_id=$1
+                AND reference.reference_id=candidate.reference_id
+              RETURNING reference.reference_id,reference.sha256,reference.size::text,
+                        reference.media_type,reference.incarnation_id::text,
+                        reference.physical_object_key
+           ) SELECT * FROM released`,
+          [input.scope.tenantId, input.limit, input.orphanGraceSeconds],
+        );
+        return Object.freeze(
+          result.rows.map((row) => {
+            const size = safeInteger(row.size, "Resource Blob cleanup size");
+            return Object.freeze({
+              referenceId: row.reference_id,
+              blob: Object.freeze({
+                kind: "stable" as const,
+                tenantId: input.scope.tenantId,
+                purpose: "resource" as const,
+                sha256: row.sha256,
+                size,
+                mediaType: row.media_type,
+                incarnationId: row.incarnation_id,
+                physicalObjectKey: row.physical_object_key,
+              }),
+            });
+          }),
+        );
+      });
+    } catch (error) {
+      throw mapBlobPersistenceError(error, "领取 Resource Blob cleanup");
+    }
+  }
+
   async reserve(input: {
     readonly scope: TenantBlobScope;
     readonly staged: StagedBlobRef;

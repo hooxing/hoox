@@ -152,6 +152,39 @@ describe("Agent Worker production polling loop", () => {
     ]);
   });
 
+  it("durable maintenance 失败不阻塞 dispatch，并在下一 tick 重试", async () => {
+    const recovered = deferred<void>();
+    let maintenanceCalls = 0;
+    let claimCalls = 0;
+    const loop = new AgentWorkerPollingLoop(
+      {
+        claim: async () => {
+          claimCalls += 1;
+          return [];
+        },
+        acknowledge: async () => undefined,
+      },
+      { execute: async () => ({ outcome: "succeeded" }) },
+      {
+        tenantId: "tenant-worker-loop",
+        workerId: "worker-loop",
+        pollIntervalMs: 10,
+        dispatchLeaseMs: 30_000,
+        maintenance: async () => {
+          maintenanceCalls += 1;
+          if (maintenanceCalls === 1) throw new Error("维护依赖暂时不可用");
+          recovered.resolve();
+        },
+      },
+    );
+
+    loop.start();
+    await recovered.promise;
+    await loop.close();
+    expect(maintenanceCalls).toBeGreaterThanOrEqual(2);
+    expect(claimCalls).toBeGreaterThanOrEqual(2);
+  });
+
   it("进程停机信号与业务取消信号相互独立", () => {
     const shutdown = new ProcessShutdown();
     const cancellation = new DatabaseRunCancellation();

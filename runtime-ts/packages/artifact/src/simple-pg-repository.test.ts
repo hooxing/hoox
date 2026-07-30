@@ -2,11 +2,11 @@ import { sha256Digest } from "@cube-runtime/domain";
 import { TransactionCommitUnknownError, type Pool } from "@cube-runtime/persistence";
 import { describe, expect, it } from "vitest";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
-import type { SimpleDeliveredFileRepositoryPort } from "./simple-delivery.js";
 import {
-  PgSimpleDeliveredFileRepository,
   SimpleDeliveryCommitResultUnknownError,
-} from "./simple-pg-repository.js";
+  type SimpleDeliveredFileRepositoryPort,
+} from "./simple-delivery.js";
+import { PgSimpleDeliveredFileRepository } from "./simple-pg-repository.js";
 
 describe("PgSimpleDeliveredFileRepository COMMIT unknown", () => {
   it("COMMIT 响应未知但规范事实可读回时返回既有 published 结果", async () => {

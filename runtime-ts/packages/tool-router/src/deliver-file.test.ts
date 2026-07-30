@@ -1,4 +1,8 @@
-import { createArtifactExecutionAuthorizationAuthority } from "@cube-runtime/artifact";
+import {
+  createArtifactExecutionAuthorizationAuthority,
+  SimpleDeliveryCleanupResultUnknownError,
+  SimpleDeliveryCommitResultUnknownError,
+} from "@cube-runtime/artifact";
 import {
   artifactId,
   isoTimestamp,
@@ -25,7 +29,7 @@ const scope: ExecutionScope = {
   workspaceId: workspaceId("workspace_deliver"),
 };
 
-function harness(read: DeliverFileReadResult) {
+function harness(read: DeliverFileReadResult, publicationError?: Error) {
   const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 100 });
   const publications: unknown[] = [];
   const factory = new DeliverFileToolRouterFactory({
@@ -33,6 +37,7 @@ function harness(read: DeliverFileReadResult) {
     publications: {
       publish: async (input) => {
         publications.push(input);
+        if (publicationError !== undefined) throw publicationError;
         return {
           artifactId: artifactId("artifact_delivered"),
           resourceVersionId: resourceVersionId("resource_version_delivered"),
@@ -110,6 +115,42 @@ describe("deliver_file Tool Router", () => {
       code: "FILE_NOT_FOUND",
       message: "Sandbox 文件不存在：/workspace/missing.docx",
       correctable: true,
+      fatal: false,
+    });
+  });
+
+  it.each([
+    [
+      new SimpleDeliveryCommitResultUnknownError(),
+      "PUBLICATION_RESULT_UNKNOWN",
+      "文件发布结果未知，需要恢复后确认",
+    ],
+    [
+      new SimpleDeliveryCleanupResultUnknownError(),
+      "CLEANUP_RESULT_UNKNOWN",
+      "文件发布清理结果未知，需要恢复后确认",
+    ],
+  ])("把发布/清理 unknown 投影为 fatal，禁止模型修正猜测", async (cause, code, message) => {
+    const { router } = harness(
+      {
+        outcome: "found",
+        relativePath: "reports/final.pdf",
+        body: new Uint8Array([1, 2, 3]),
+      },
+      cause,
+    );
+    const failure = await router
+      .deliverFile({
+        callId: `call-${code}`,
+        arguments: { path: "/workspace/reports/final.pdf" },
+      })
+      .catch((error: unknown) => router.projectError(error));
+    expect(failure).toEqual({
+      status: "failed",
+      code,
+      message,
+      correctable: false,
+      fatal: true,
     });
   });
 

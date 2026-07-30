@@ -1,3 +1,4 @@
+import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import { createDeliverFilePiTool } from "./deliver-file-tool.js";
 
@@ -27,5 +28,86 @@ describe("deliver_file Pi 工具", () => {
       {} as never,
     );
     expect(JSON.stringify(result)).toContain('\\"download_ready\\":true');
+  });
+
+  it("schema 级无效参数进入 durable 失败回执，不触碰 Router", async () => {
+    let routerCalls = 0;
+    const outcomes: string[] = [];
+    const tool = createDeliverFilePiTool(
+      {
+        deliverFile: async () => {
+          routerCalls += 1;
+          return {};
+        },
+        projectError: () => ({
+          status: "failed",
+          code: "SERVICE_UNAVAILABLE",
+          message: "暂不可用",
+          correctable: false,
+        }),
+      },
+      async (_callId, _toolName, outcome) => {
+        outcomes.push(outcome);
+        return { outcome: "recorded", observation: "recorded", isTruncated: false };
+      },
+    );
+    if (tool.prepareArguments === undefined) throw new Error("测试缺少 schema 参数桥");
+
+    for (const [index, input] of [
+      {},
+      { path: 1 },
+      { path: "/workspace/a", extra: true },
+    ].entries()) {
+      const prepared = tool.prepareArguments(input);
+      expect(Value.Check(tool.parameters, prepared)).toBe(true);
+      await expect(
+        tool.execute(
+          `call-deliver-invalid-${index}`,
+          prepared,
+          undefined,
+          () => undefined,
+          {} as never,
+        ),
+      ).rejects.toThrow("INVALID_ARGUMENT");
+    }
+
+    expect(routerCalls).toBe(0);
+    expect(outcomes).toEqual(["failed", "failed", "failed"]);
+  });
+
+  it("fatal Router 结果先写 durable 失败回执，再关闭后续模型轮次", async () => {
+    const order: string[] = [];
+    const tool = createDeliverFilePiTool(
+      {
+        deliverFile: async () => {
+          throw new Error("commit unknown");
+        },
+        projectError: () => ({
+          status: "failed",
+          code: "PUBLICATION_RESULT_UNKNOWN",
+          message: "文件发布结果未知，需要恢复后确认",
+          correctable: false,
+          fatal: true,
+        }),
+      },
+      async (_callId, _toolName, outcome) => {
+        order.push(`receipt:${outcome}`);
+        return { outcome: "recorded", observation: "recorded", isTruncated: false };
+      },
+      () => {
+        order.push("continuation:rejected");
+      },
+    );
+
+    await expect(
+      tool.execute(
+        "call-deliver-unknown",
+        { path: "/workspace/report.pdf" },
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("PUBLICATION_RESULT_UNKNOWN");
+    expect(order).toEqual(["receipt:failed", "continuation:rejected"]);
   });
 });

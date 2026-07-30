@@ -292,6 +292,102 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
   );
 
   it.runIf(process.platform === "linux")(
+    "exec_command schema 错误持久化相邻 call/result 且不消费 effect 许可，模型仍可修正",
+    async () => {
+      const persistence = new FakeExecutionPersistence();
+      const scope = persistence.addSeed(fakeSeed("pi-exec-schema-correction"));
+      const sandboxes = new FakeSandboxRegistry();
+      let sandboxCalls = 0;
+      sandboxes.handle.command = async () => {
+        sandboxCalls += 1;
+        return { stdout: "fixed\n", stderr: "", exitCode: 0 };
+      };
+      const faux = fauxProvider({
+        api: `faux-worker-exec-schema-${Date.now()}`,
+        provider: `faux-worker-exec-schema-${Date.now()}`,
+        tokensPerSecond: 10_000,
+      });
+      faux.setResponses([
+        fauxAssistantMessage(fauxToolCall("exec_command", {}, { id: "call-exec-missing" }), {
+          stopReason: "toolUse",
+        }),
+        fauxAssistantMessage(
+          fauxToolCall("exec_command", { cmd: 123 }, { id: "call-exec-wrong-type" }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage(
+          fauxToolCall(
+            "exec_command",
+            { cmd: "echo should-not-run", extra: true },
+            { id: "call-exec-extra" },
+          ),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage(
+          fauxToolCall("exec_command", { cmd: "echo fixed" }, { id: "call-exec-fixed" }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("完成"),
+      ]);
+      const modelRuntime = await ModelRuntime.create({
+        credentials: new InMemoryCredentialStore(),
+        modelsPath: null,
+      });
+      modelRuntime.registerNativeProvider(faux.provider);
+      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+      const operations: string[] = [];
+      const sessions = new PiWorkerSessionFactory(
+        faux.getModel(),
+        modelRuntime,
+        (_input, outputs) => ({
+          recordStarted: async (call) => {
+            operations.push(`call:${call.toolCallId}:${call.toolName}`);
+            return "recorded" as const;
+          },
+          record: async (call) => {
+            operations.push(`result:${call.toolCallId}:${call.toolName}`);
+            const observation = await outputs.readControlledReceipt(call);
+            return observation === undefined
+              ? { outcome: "conflict" as const }
+              : { outcome: "recorded" as const, observation, isTruncated: false };
+          },
+        }),
+      );
+      const worker = new RunWorker(
+        {
+          persistence,
+          revisions: new FakeRevisionVerifier(),
+          sandboxes,
+          orphanSandboxes: sandboxes,
+          sessions,
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        { workerId: "pi-exec-schema-worker", runTimeoutMs: 60_000 },
+      );
+
+      await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+      expect(sandboxCalls).toBe(1);
+      expect(
+        persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
+      ).toHaveLength(1);
+      expect(operations).toEqual([
+        "call:call-exec-missing:exec_command",
+        "result:call-exec-missing:exec_command",
+        "call:call-exec-wrong-type:exec_command",
+        "result:call-exec-wrong-type:exec_command",
+        "call:call-exec-extra:exec_command",
+        "result:call-exec-extra:exec_command",
+        "call:call-exec-fixed:exec_command",
+        "result:call-exec-fixed:exec_command",
+      ]);
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform === "linux")(
     "Tool result 持久化持续 UNKNOWN 时中止 Pi，Attempt 只能进入 recovery_required",
     async () => {
       const persistence = new FakeExecutionPersistence();
@@ -660,6 +756,9 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
         tokensPerSecond: 10_000,
       });
       faux.setResponses([
+        fauxAssistantMessage(fauxToolCall("deliver_file", {}, { id: "call-pi-missing-path" }), {
+          stopReason: "toolUse",
+        }),
         fauxAssistantMessage(
           fauxToolCall(
             "deliver_file",
@@ -724,7 +823,12 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
       expect(sourceReads).toBe(1);
       expect(publications).toBe(1);
+      expect(
+        persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
+      ).toHaveLength(1);
       expect(operations).toEqual([
+        "call:call-pi-missing-path:deliver_file",
+        "result:call-pi-missing-path:deliver_file",
         "call:call-pi-invalid-path:deliver_file",
         "result:call-pi-invalid-path:deliver_file",
         "call:call-pi-valid-path:deliver_file",

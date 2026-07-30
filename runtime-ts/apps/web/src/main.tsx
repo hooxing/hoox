@@ -87,6 +87,8 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const currentRunPollRef = useRef(new CurrentRunPoll());
   const navigationRef = useRef(new WorkspaceNavigation());
   const mobileNavigationToggleRef = useRef<HTMLButtonElement>(null);
+  const artifactTriggerRef = useRef<HTMLButtonElement>(null);
+  const contentFocusRef = useRef<HTMLElement>(null);
   const sendInFlightRef = useRef(false);
   const initialSelectionAppliedRef = useRef(false);
 
@@ -406,7 +408,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           )}
         </ThreadNavigation>
       </NavigationSidebar>
-      <section className="content" aria-label="对话工作区">
+      <section ref={contentFocusRef} className="content" aria-label="对话工作区" tabIndex={-1}>
         <button
           ref={mobileNavigationToggleRef}
           className="mobile-nav-toggle icon-button"
@@ -459,6 +461,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
               onArchive={() => void archive()}
               onCancel={() => void cancel()}
               onOpenArtifacts={() => setActivityOpen(true)}
+              artifactTriggerRef={artifactTriggerRef}
             />
             <section className="run-area" aria-live="polite">
               {state.run && currentRequest && (
@@ -498,6 +501,8 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         onToggle={() => setActivityOpen((open) => !open)}
         onPreview={(artifactId) => void preview(artifactId)}
         onDownload={(artifactId) => void download(artifactId)}
+        returnFocusRef={artifactTriggerRef}
+        fallbackFocusRef={contentFocusRef}
       />
       {textPreview?.kind === "text" && (
         <dialog className="artifact-text-preview" open aria-label="纯文本交付物预览">

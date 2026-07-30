@@ -392,6 +392,24 @@ h2 {
   font-size: 14px;
   line-height: 1.7;
 }
+.waiting-question {
+  padding-top: 11px;
+  border-top: 1px solid #e5ebe7;
+}
+.waiting-question > span {
+  display: block;
+  margin-bottom: 5px;
+  color: #865c0b;
+  font-size: 12px;
+  font-weight: 700;
+}
+.waiting-question p {
+  margin: 0;
+  white-space: pre-wrap;
+  color: #4f4326;
+  font-size: 14px;
+  line-height: 1.7;
+}
 @keyframes progress-sheen {
   50% {
     background-position: 100% 0;

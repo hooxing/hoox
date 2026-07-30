@@ -30,7 +30,11 @@ import {
 } from "./api.js";
 import { buildRunProgress } from "./event-view.js";
 
-export const activeRunStatuses = new Set<RunStatus>(["queued", "running", "waiting"]);
+/** waiting 仍可取消，但不代表 Worker 正在执行。 */
+export const cancellableRunStatuses = new Set<RunStatus>(["queued", "running", "waiting"]);
+/** 仅尚会自行变化的 Run 继续短轮询；waiting 由用户下一次提交恢复。 */
+export const pollingRunStatuses = new Set<RunStatus>(["queued", "running"]);
+export const timedRunStatuses = new Set<RunStatus>(["running"]);
 export const compactWorkspaceMedia = "(max-width: 820px)";
 
 export function canCreateThread(title: string, actionLoading: boolean): boolean {
@@ -59,7 +63,7 @@ export function RunStatusBadge({ status }: { readonly status: RunStatus | undefi
 function useElapsedSeconds(run: Run | undefined): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (run === undefined || !activeRunStatuses.has(run.status)) return;
+    if (run === undefined || !timedRunStatuses.has(run.status)) return;
     setNow(Date.now());
     const interval = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(interval);
@@ -83,26 +87,33 @@ export function RunTimeline({
   readonly events: readonly RunEvent[];
 }) {
   const progress = buildRunProgress(events);
-  const active = activeRunStatuses.has(run.status);
+  const isRunning = timedRunStatuses.has(run.status);
+  const isQueued = run.status === "queued";
+  const isWaiting = run.status === "waiting";
+  const showActivity = isRunning || isQueued;
   const elapsed = useElapsedSeconds(run);
   const isFailure = run.status === "failed" || run.status === "cancelled";
   const summary = isFailure
     ? run.status === "cancelled"
       ? "运行已停止。你可以调整任务后再次发送。"
       : "运行未完成。请稍后重试，或调整任务后再次发送。"
-    : active
-      ? progress.currentAction
-      : run.status === "succeeded"
-        ? "已完成本次任务。"
-        : "等待你的下一步输入。";
+    : isWaiting
+      ? "需要你的输入"
+      : isRunning
+        ? progress.currentAction
+        : isQueued
+          ? "正在排队，准备开始任务。"
+          : run.status === "succeeded"
+            ? "已完成本次任务。"
+            : "等待你的下一步输入。";
   return (
     <section
-      className={`run-progress ${active ? "is-active" : ""} ${isFailure ? "is-failed" : ""}`}
+      className={`run-progress ${showActivity ? "is-active" : ""} ${isFailure ? "is-failed" : ""}`}
       aria-label="运行进度"
       aria-live="polite"
     >
       <div className="run-progress-summary">
-        {active ? (
+        {showActivity ? (
           <LoaderCircle className="spin" size={18} aria-hidden="true" />
         ) : (
           <ChevronRight size={18} aria-hidden="true" />
@@ -110,7 +121,7 @@ export function RunTimeline({
         <div>
           <strong>{summary}</strong>
           <span>
-            {active ? `已运行 ${elapsedLabel(elapsed)} · ` : ""}已完成{" "}
+            {isRunning ? `已运行 ${elapsedLabel(elapsed)} · ` : ""}已完成{" "}
             {progress.steps.filter((step) => step.status === "completed").length} 步
           </span>
         </div>
@@ -128,9 +139,15 @@ export function RunTimeline({
           </ol>
         </details>
       )}
-      {!active && progress.finalMessage !== undefined && (
+      {isWaiting && (
+        <div className="waiting-question">
+          <span>需要你的输入</span>
+          <p>{progress.waitingQuestion ?? "请补充所需信息后继续。"}</p>
+        </div>
+      )}
+      {!showActivity && progress.finalMessage !== undefined && (
         <div className="final-answer">
-          <span>最终结果</span>
+          <span>{isWaiting ? "当前回复" : "最终结果"}</span>
           <p>{progress.finalMessage}</p>
         </div>
       )}
@@ -306,14 +323,8 @@ export function ThreadCreate({
   readonly actionLoading: boolean;
   readonly onCreate: () => void;
 }) {
-  const submissionInFlightRef = useRef(actionLoading);
-  useEffect(() => {
-    submissionInFlightRef.current = actionLoading;
-  }, [actionLoading]);
   const requestCreate = () => {
-    if (actionLoading || submissionInFlightRef.current) return;
-    // React 提交状态写回前也可能连续点击，本地栅栏同步阻止新会话重入。
-    submissionInFlightRef.current = true;
+    if (actionLoading) return;
     onCreate();
   };
   return (
@@ -431,7 +442,7 @@ export function ThreadHeader({
         </div>
       </div>
       <div className="header-actions">
-        {run && activeRunStatuses.has(run.status) && (
+        {run && cancellableRunStatuses.has(run.status) && (
           <button
             type="button"
             className="quiet-button"

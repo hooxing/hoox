@@ -4,7 +4,7 @@ import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type Artifact, type Run, type Thread } from "./api.js";
-import { App, chooseInitialThread, deriveThreadTitle } from "./main.js";
+import { App, chooseInitialThread, deriveThreadTitle, shouldContinueRunPolling } from "./main.js";
 
 type AppApi = NonNullable<ComponentProps<typeof App>["apiClient"]>;
 
@@ -118,6 +118,12 @@ describe("Agent 工作台恢复接入", () => {
     );
     expect(deriveThreadTitle("甲".repeat(40))).toBe(`${"甲".repeat(26)}…`);
     expect(deriveThreadTitle(" \n ")).toBe("新任务");
+  });
+
+  it("waiting 不启动无限短轮询，但未读事件页仍会被排空", () => {
+    expect(shouldContinueRunPolling(false, "waiting")).toBe(false);
+    expect(shouldContinueRunPolling(true, "waiting")).toBe(true);
+    expect(shouldContinueRunPolling(false, "running")).toBe(true);
   });
 
   it("首条请求自动创建会话并使用派生标题，用户无需预先填写标题", async () => {

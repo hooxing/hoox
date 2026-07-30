@@ -59,6 +59,7 @@ import {
   ProcessShutdown,
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
+import { withDevelopmentProjectModelWireTraceMirror } from "./project-model-wire-trace.js";
 import { RunWorker } from "./run-worker.js";
 import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
 
@@ -469,11 +470,14 @@ async function assembleWorkerRuntime(
       installFetchInstrumentation: installModelWireFetchInstrumentation,
       createSession: () =>
         new ModelWireTraceSession(
-          new PgModelWireTraceRepository(
-            pool,
-            blobRepository,
-            blobs,
-            configuration.model.wireTraceRetentionDays,
+          withDevelopmentProjectModelWireTraceMirror(
+            runtimeMode,
+            new PgModelWireTraceRepository(
+              pool,
+              blobRepository,
+              blobs,
+              configuration.model.wireTraceRetentionDays,
+            ),
           ),
           configuration.model.wireTraceMaxBytes,
           configuration.model.baseUrl,

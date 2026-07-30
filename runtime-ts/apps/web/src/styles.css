@@ -460,10 +460,23 @@ h2 {
   background: #eef3ef;
 }
 .assistant-markdown input[type="checkbox"] {
-  width: auto;
-  margin-right: 6px;
+  all: revert;
+  box-sizing: border-box;
+  display: inline-block;
+  width: 14px;
+  min-width: 14px;
+  height: 14px;
+  padding: 0;
+  margin: 0 6px 0 0;
+  border: 0;
+  border-radius: 0;
+  appearance: auto;
+  accent-color: #247c5c;
+  vertical-align: -2px;
+  cursor: default;
 }
-.markdown-image-alt {
+.markdown-image-alt,
+.markdown-invalid-link {
   color: #68786f;
   font-style: italic;
 }

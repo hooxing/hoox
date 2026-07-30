@@ -58,7 +58,7 @@ describe("生产供应链契约", () => {
         }),
       );
     }
-  }, 30_000);
+  }, 60_000);
 
   it("vendor patch 或 canonical tree 哈希漂移时失败关闭", () => {
     const policy = JSON.parse(

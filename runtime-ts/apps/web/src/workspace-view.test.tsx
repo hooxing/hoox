@@ -1,23 +1,33 @@
 // @vitest-environment jsdom
 
-import { act, createRef } from "react";
+import { act, createRef, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { Artifact, RunEvent } from "./api.js";
+import type { Artifact, ModelWireTraceRecord, Run, RunEvent } from "./api.js";
 import {
   ActivityPanel,
+  ConversationComposer,
   InlineArtifactDelivery,
   NavigationSidebar,
   RunStatusBadge,
+  RunTranscript,
   RunTimeline,
   shouldOpenActivityPanel,
   ThreadCreate,
+  ThreadHeader,
 } from "./workspace-view.js";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 describe("工作台展示组件", () => {
+  const running: Run = {
+    id: "run-1",
+    threadId: "thread-1",
+    status: "running",
+    createdAt: "2026-07-29T00:00:00.000Z",
+    updatedAt: "2026-07-29T00:00:00.000Z",
+  };
   it("将运行状态转换为面向用户的中文状态", () => {
     const html = renderToStaticMarkup(<RunStatusBadge status="waiting" />);
 
@@ -25,48 +35,59 @@ describe("工作台展示组件", () => {
     expect(html).toContain("is-waiting");
   });
 
-  it("活动面板只使用事件安全摘要，不渲染原始工具回执", () => {
-    const events: readonly RunEvent[] = [
-      {
-        eventId: "event-1",
-        sequence: 1,
-        occurredAt: "",
-        kind: "agent_event",
-        type: "tool.completed",
-        payload: { name: "read_file", callId: "call-1", secret: "不应展示" },
-      },
-    ];
+  it("没有产物时不渲染右侧竖栏或无意义入口", () => {
+    const artifacts: readonly Artifact[] = [];
     const html = renderToStaticMarkup(
       <ActivityPanel
         isOpen
-        events={events}
-        modelWireTraces={[]}
-        modelWireTraceHasMore={false}
-        modelWireTraceUnavailable={false}
+        artifacts={artifacts}
         onToggle={() => undefined}
-        onLoadModelWireTrace={async () => new Uint8Array()}
-        onLoadMoreModelWireTraces={async () => undefined}
+        onPreview={() => undefined}
+        onDownload={() => undefined}
+        returnFocusRef={createRef<HTMLButtonElement>()}
+        fallbackFocusRef={createRef<HTMLElement>()}
       />,
     );
 
-    expect(html).toContain("工具 read_file（call-1）完成");
-    expect(html).not.toContain("不应展示");
+    expect(html).toBe("");
   });
 
-  it("交付物在 Agent 回复区内联展示，并保留预览和下载操作", () => {
-    const artifacts: readonly Artifact[] = [
-      {
-        id: "artifact-1",
-        name: "结果.txt",
-        mediaType: "text/plain; charset=utf-8",
-        status: "published",
-        createdAt: "",
-        updatedAt: "",
-      },
-    ];
+  it("有产物时使用可关闭的覆盖式抽屉，关闭后移出辅助技术焦点", () => {
+    const artifact: Artifact = {
+      id: "artifact-1",
+      name: "result.txt",
+      status: "published",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    };
+    const closed = renderToStaticMarkup(
+      <ActivityPanel
+        isOpen={false}
+        artifacts={[artifact]}
+        onToggle={() => undefined}
+        onPreview={() => undefined}
+        onDownload={() => undefined}
+        returnFocusRef={createRef<HTMLButtonElement>()}
+        fallbackFocusRef={createRef<HTMLElement>()}
+      />,
+    );
+
+    expect(closed).toContain("activity-panel is-collapsed");
+    expect(closed).toContain('aria-hidden="true"');
+    expect(closed).toContain("inert");
+  });
+
+  it("交付物同时内联在 Agent 正文之后，抽屉不取代阅读路径", () => {
+    const artifact: Artifact = {
+      id: "artifact-inline",
+      name: "summary.md",
+      status: "published",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    };
     const html = renderToStaticMarkup(
       <InlineArtifactDelivery
-        artifacts={artifacts}
+        artifacts={[artifact]}
         onPreview={() => undefined}
         onDownload={() => undefined}
       />,
@@ -74,118 +95,335 @@ describe("工作台展示组件", () => {
 
     expect(html).toContain("inline-artifact-delivery");
     expect(html).toContain("本次回复的可下载产物");
-    expect(html).toContain('aria-label="预览 结果.txt"');
-    expect(html).toContain('aria-label="下载 结果.txt"');
+    expect(html).toContain("summary.md");
   });
 
-  it("没有交付物时不渲染内联交付区域", () => {
+  it("会话头部用文字化操作打开产物抽屉和归档", () => {
     const html = renderToStaticMarkup(
-      <InlineArtifactDelivery
-        artifacts={[]}
-        onPreview={() => undefined}
-        onDownload={() => undefined}
+      <ThreadHeader
+        thread={{
+          id: "thread-1",
+          title: "视觉改版",
+          status: "active",
+          createdAt: "2026-07-30T00:00:00.000Z",
+          updatedAt: "2026-07-30T00:00:00.000Z",
+        }}
+        run={running}
+        artifactCount={2}
+        actionLoading={false}
+        onArchive={() => undefined}
+        onCancel={() => undefined}
+        onOpenArtifacts={() => undefined}
+        artifactTriggerRef={createRef<HTMLButtonElement>()}
       />,
     );
 
-    expect(html).toBe("");
+    expect(html).toContain("产物");
+    expect(html).toContain("归档");
+    expect(html).toContain("打开本次运行产物，共 2 个");
   });
 
-  it("未发布或发布失败的交付物禁用预览和下载", () => {
+  it("只有模型报文时仍提供可重复打开诊断抽屉的外部入口", () => {
+    const trace: ModelWireTraceRecord = {
+      attemptId: "attempt_trace",
+      modelTurn: 0,
+      transportAttempt: 0,
+      part: "request",
+      captureStatus: "complete",
+      persistenceStatus: "stored",
+      bodyAvailable: true,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      expiresAt: "2026-08-06T00:00:00.000Z",
+    };
+    const selectedThread = {
+      id: "thread-trace",
+      title: "诊断会话",
+      status: "active" as const,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    };
     const container = document.createElement("div");
+    document.body.append(container);
     const root = createRoot(container);
-    const artifacts: readonly Artifact[] = [
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      const triggerRef = useRef<HTMLButtonElement>(null);
+      const fallbackRef = useRef<HTMLDivElement>(null);
+      return (
+        <div ref={fallbackRef} tabIndex={-1}>
+          <ThreadHeader
+            thread={selectedThread}
+            run={running}
+            artifactCount={0}
+            modelWireTraceCount={1}
+            actionLoading={false}
+            onArchive={() => undefined}
+            onCancel={() => undefined}
+            onOpenArtifacts={() => setOpen(true)}
+            artifactTriggerRef={triggerRef}
+          />
+          <ActivityPanel
+            isOpen={open}
+            artifacts={[]}
+            modelWireTraces={[trace]}
+            onToggle={() => setOpen(false)}
+            onPreview={() => undefined}
+            onDownload={() => undefined}
+            returnFocusRef={triggerRef}
+            fallbackFocusRef={fallbackRef}
+          />
+        </div>
+      );
+    }
+
+    act(() => root.render(<Harness />));
+    const trigger = container.querySelector<HTMLButtonElement>(
+      "[aria-label='打开本次运行模型网络诊断']",
+    );
+    if (trigger === null) throw new Error("未渲染诊断抽屉入口");
+    act(() => trigger.click());
+    const close = container.querySelector<HTMLButtonElement>("[aria-label='关闭诊断抽屉']");
+    expect(document.activeElement).toBe(close);
+    act(() => close?.click());
+    expect(document.activeElement).toBe(trigger);
+    act(() => trigger.click());
+    expect(container.querySelector("[aria-label='关闭诊断抽屉']")).not.toBeNull();
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("产物抽屉打开后接管焦点，Escape 或关闭按钮返回入口", () => {
+    const artifact: Artifact = {
+      id: "artifact-focus",
+      name: "focus.txt",
+      status: "published",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    };
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      const triggerRef = useRef<HTMLButtonElement>(null);
+      const fallbackRef = useRef<HTMLDivElement>(null);
+      return (
+        <div ref={fallbackRef} tabIndex={-1}>
+          <button ref={triggerRef} type="button" onClick={() => setOpen(true)}>
+            产物 1
+          </button>
+          <ActivityPanel
+            isOpen={open}
+            artifacts={[artifact]}
+            onToggle={() => setOpen(false)}
+            onPreview={() => undefined}
+            onDownload={() => undefined}
+            returnFocusRef={triggerRef}
+            fallbackFocusRef={fallbackRef}
+          />
+        </div>
+      );
+    }
+
+    act(() => root.render(<Harness />));
+    const trigger = container.querySelector<HTMLButtonElement>("button");
+    if (trigger === null) throw new Error("未渲染产物入口");
+    act(() => trigger.click());
+    const close = container.querySelector<HTMLButtonElement>("[aria-label='关闭产物抽屉']");
+    expect(document.activeElement).toBe(close);
+    act(() => close?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(document.activeElement).toBe(trigger);
+
+    act(() => trigger.click());
+    const closeAgain = container.querySelector<HTMLButtonElement>("[aria-label='关闭产物抽屉']");
+    act(() => closeAgain?.click());
+    expect(document.activeElement).toBe(trigger);
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("切换会话移除产物入口时，抽屉关闭后回退到中部工作区", () => {
+    const artifact: Artifact = {
+      id: "artifact-switch",
+      name: "switch.txt",
+      status: "published",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    };
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      const [showArtifacts, setShowArtifacts] = useState(true);
+      const triggerRef = useRef<HTMLButtonElement>(null);
+      const fallbackRef = useRef<HTMLDivElement>(null);
+      return (
+        <div ref={fallbackRef} tabIndex={-1}>
+          <button type="button" onClick={() => setShowArtifacts(false)}>
+            切换会话
+          </button>
+          {showArtifacts && (
+            <button ref={triggerRef} type="button" onClick={() => setOpen(true)}>
+              产物 1
+            </button>
+          )}
+          <ActivityPanel
+            isOpen={open}
+            artifacts={showArtifacts ? [artifact] : []}
+            onToggle={() => setOpen(false)}
+            onPreview={() => undefined}
+            onDownload={() => undefined}
+            returnFocusRef={triggerRef}
+            fallbackFocusRef={fallbackRef}
+          />
+        </div>
+      );
+    }
+
+    act(() => root.render(<Harness />));
+    const trigger = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+      button.textContent?.includes("产物"),
+    );
+    if (trigger === undefined) throw new Error("未渲染产物入口");
+    act(() => trigger.click());
+    const switchThread = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.includes("切换会话"),
+    );
+    act(() => switchThread?.click());
+    expect(document.activeElement).toBe(container.querySelector("div"));
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("运行组件仅展示紧凑进度，隐藏内部事件和工具调用标识", () => {
+    const events: readonly RunEvent[] = [
       {
-        id: "artifact-publishing",
-        name: "上传中.txt",
-        mediaType: "text/plain; charset=utf-8",
-        status: "publishing",
-        createdAt: "",
-        updatedAt: "",
+        eventId: "event-1",
+        sequence: 1,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "tool.started",
+        payload: { name: "web_search", callId: "call-private", secret: "不应展示" },
       },
       {
-        id: "artifact-failed",
-        name: "失败.txt",
-        mediaType: "text/plain; charset=utf-8",
-        status: "failed",
-        createdAt: "",
-        updatedAt: "",
+        eventId: "event-2",
+        sequence: 2,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "received runtime event",
+        payload: { secret: "仍不应展示" },
       },
     ];
+    const html = renderToStaticMarkup(<RunTimeline run={running} events={events} />);
 
-    act(() => {
-      root.render(
-        <InlineArtifactDelivery
-          artifacts={artifacts}
-          onPreview={() => undefined}
-          onDownload={() => undefined}
-        />,
+    expect(html).toContain("正在搜索网页");
+    expect(html).toContain("已运行");
+    expect(html).not.toContain("call-private");
+    expect(html).not.toContain("不应展示");
+    expect(html).not.toContain("received runtime event");
+  });
+
+  it("运行中与失败后的部分正文始终在状态卡外完整可见", () => {
+    const events: readonly RunEvent[] = [
+      {
+        eventId: "event-body",
+        sequence: 1,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "message.delta",
+        payload: { delta: "## 已完成的部分\n\n仍保留这段正文。" },
+      },
+    ];
+    for (const run of [running, { ...running, status: "failed" as const }]) {
+      const html = renderToStaticMarkup(
+        <>
+          <RunTimeline run={run} events={events} />
+          <RunTranscript events={events} />
+        </>,
       );
-    });
-
-    for (const artifact of artifacts) {
-      expect(
-        container.querySelector<HTMLButtonElement>(`[aria-label="预览 ${artifact.name}"]`)
-          ?.disabled,
-      ).toBe(true);
-      expect(
-        container.querySelector<HTMLButtonElement>(`[aria-label="下载 ${artifact.name}"]`)
-          ?.disabled,
-      ).toBe(true);
+      expect(html).toContain("已完成的部分");
+      expect(html).toContain("仍保留这段正文。");
+      expect(html.indexOf("run-progress")).toBeLessThan(html.indexOf("assistant-transcript"));
+      expect(html).not.toContain("final-answer");
     }
-    act(() => root.unmount());
   });
 
-  it("没有事件时显示运行中的明确空态", () => {
-    const html = renderToStaticMarkup(<RunTimeline events={[]} />);
+  it("waiting 状态卡不混入问题或正文，普通 Agent 正文保留二者", () => {
+    const waiting: Run = { ...running, status: "waiting" };
+    const events: readonly RunEvent[] = [
+      {
+        eventId: "event-1",
+        sequence: 1,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "message.delta",
+        payload: { delta: "请先确认范围。" },
+      },
+      {
+        eventId: "event-2",
+        sequence: 2,
+        occurredAt: "",
+        kind: "run_waiting",
+        type: "run_waiting",
+        payload: { question: "需要处理哪个地区？", checkpointId: "不应展示" },
+      },
+    ];
+    const statusHtml = renderToStaticMarkup(<RunTimeline run={waiting} events={events} />);
+    const transcriptHtml = renderToStaticMarkup(<RunTranscript events={events} />);
 
-    expect(html).toContain("正在等待第一条活动");
+    expect(statusHtml).toContain("需要你的输入");
+    expect(statusHtml).not.toContain("需要处理哪个地区？");
+    expect(statusHtml).not.toContain("请先确认范围。");
+    expect(statusHtml).not.toContain("spin");
+    expect(transcriptHtml).toContain("需要处理哪个地区？");
+    expect(transcriptHtml).toContain("请先确认范围。");
+    expect(transcriptHtml).toContain("assistant-transcript");
+    expect(transcriptHtml).not.toContain("run-progress");
   });
 
-  it("创建请求进行中时禁用标题输入并阻止 Enter 重入", () => {
+  it("新建会话不要求填写标题，后续点击仍然有效", () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     const onCreate = vi.fn();
 
     act(() => {
-      root.render(
-        <ThreadCreate
-          title="分析任务"
-          actionLoading={false}
-          onChange={() => undefined}
-          onCreate={onCreate}
-        />,
-      );
+      root.render(<ThreadCreate actionLoading={false} onCreate={onCreate} />);
     });
-    const input = container.querySelector("input");
-    if (input === null) throw new Error("未渲染标题输入框");
+    const button = container.querySelector("button");
+    if (button === null) throw new Error("未渲染新建会话按钮");
     act(() => {
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      button.click();
+      button.click();
     });
-    expect(onCreate).toHaveBeenCalledTimes(1);
+    expect(onCreate).toHaveBeenCalledTimes(2);
 
     act(() => {
-      root.render(
-        <ThreadCreate
-          title="分析任务"
-          actionLoading
-          onChange={() => undefined}
-          onCreate={onCreate}
-        />,
-      );
+      root.render(<ThreadCreate actionLoading onCreate={onCreate} />);
     });
-    const disabledInput = container.querySelector("input");
-    expect(disabledInput?.disabled).toBe(true);
-    act(() =>
-      disabledInput?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
-    );
-    expect(onCreate).toHaveBeenCalledTimes(1);
+    const disabledButton = container.querySelector("button");
+    expect(disabledButton?.disabled).toBe(true);
+    act(() => disabledButton?.click());
+    expect(onCreate).toHaveBeenCalledTimes(2);
     act(() => root.unmount());
   });
 
-  it("窄屏首次进入时默认收起活动侧栏", () => {
+  it("任务输入框固定尺寸，发送操作不会被纵向拖拽推出应用壳", () => {
+    const html = renderToStaticMarkup(
+      <ConversationComposer
+        input=""
+        disabled={false}
+        onChange={() => undefined}
+        onSubmit={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("resize:none");
+  });
+
+  it("无论屏幕尺寸，无产物时默认收起右侧产物栏", () => {
     expect(shouldOpenActivityPanel(true)).toBe(false);
-    expect(shouldOpenActivityPanel(false)).toBe(true);
+    expect(shouldOpenActivityPanel(false)).toBe(false);
   });
 
   it("移动会话抽屉管理 inert、Escape 与焦点往返", () => {

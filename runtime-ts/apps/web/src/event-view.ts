@@ -1,10 +1,18 @@
 import type { RunEvent } from "./api.js";
 
-const maxAssistantMessageLength = 16_000;
+export type UserFacingStep = {
+  readonly id: string;
+  readonly label: string;
+  readonly status: "running" | "completed" | "failed";
+  readonly count: number;
+};
 
-export type TimelineEntry =
-  | { readonly type: "assistant"; readonly id: string; readonly text: string }
-  | { readonly type: "event"; readonly event: RunEvent };
+export type RunProgress = {
+  readonly currentAction: string;
+  readonly steps: readonly UserFacingStep[];
+  readonly finalMessage: string | undefined;
+  readonly waitingQuestion: string | undefined;
+};
 
 function object(value: unknown): Readonly<Record<string, unknown>> | undefined {
   return typeof value === "object" && value !== null
@@ -12,70 +20,109 @@ function object(value: unknown): Readonly<Record<string, unknown>> | undefined {
     : undefined;
 }
 
-function text(value: unknown, fallback: string): string {
-  return typeof value === "string" && value.length > 0 ? value.slice(0, 500) : fallback;
+function text(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim().slice(0, 500)
+    : undefined;
 }
 
-/** 只呈现已知、受限字段，避免把工具回执或外部输入整体泄露到页面。 */
-export function eventSummary(event: RunEvent): string {
+/** waiting 问题是用户可见正文，不能沿用工具字段的展示截断。 */
+function waitingQuestionText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function normalizedWholeText(value: string): string {
+  return value.trim().replace(/\s+/gu, " ");
+}
+
+/** 工具名只用于归类，不把调用标识或工具协议直接暴露给用户。 */
+export function toolActionLabel(name: string | undefined): string {
+  const normalized = name?.toLowerCase() ?? "";
+  if (/(search|web|browse|fetch|crawl)/u.test(normalized)) return "正在搜索网页…";
+  if (/(write|artifact|export|generate.*file|create.*file)/u.test(normalized)) {
+    return "正在生成文件…";
+  }
+  if (/(shell|command|code|python|node|execute|run)/u.test(normalized)) {
+    return "正在执行代码…";
+  }
+  if (/(read|list|inspect|open)/u.test(normalized)) return "正在读取资料…";
+  return "正在处理任务…";
+}
+
+function toolDescriptor(
+  event: RunEvent,
+): { readonly key: string; readonly label: string } | undefined {
+  if (!event.type.startsWith("tool.")) return undefined;
   const payload = object(event.payload);
-  switch (event.type) {
-    case "message.delta":
-      return text(payload?.delta, "助手正在生成内容");
-    case "tool.started":
-    case "tool.updated":
-    case "tool.completed":
-    case "tool.failed": {
-      const name = text(payload?.name, "未命名工具");
-      const callId = text(payload?.callId, "未知调用");
-      const outcome =
-        event.type === "tool.started"
-          ? "开始"
-          : event.type === "tool.updated"
-            ? "更新"
-            : event.type === "tool.failed" || payload?.isError === true
-              ? "失败"
-              : "完成";
-      return `工具 ${name}（${callId}）${outcome}`;
-    }
-    case "attempt_state_changed": {
-      const status = text(payload?.status, "未知状态");
-      const stage = text(payload?.stage, "未知阶段");
-      const code = typeof payload?.code === "string" ? `（${payload.code.slice(0, 120)}）` : "";
-      return `运行状态：${status} · ${stage}${code}`;
-    }
-    case "run_waiting":
-      return `等待输入：${text(payload?.question, "需要继续处理")}`;
-    default:
-      return "已收到运行事件";
-  }
+  const name = text(payload?.name);
+  // callId 仅作前端聚合键，不能进入可见文案。
+  const key = text(payload?.callId) ?? `${name ?? "unknown"}:${event.sequence}`;
+  return { key, label: toolActionLabel(name) };
 }
 
-/** 连续 delta 是同一条助手回复的流式片段，工具和状态事件会切断该回复。 */
-export function buildTimeline(events: readonly RunEvent[]): readonly TimelineEntry[] {
-  const entries: TimelineEntry[] = [];
+/**
+ * 将底层事件投影为有限的用户动作。未知生命周期事件被刻意忽略，避免页面成为调试日志。
+ */
+export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
+  const byTool = new Map<string, number>();
+  const steps: UserFacingStep[] = [];
+  const messageDeltas: string[] = [];
+  let waitingQuestion: string | undefined;
+
   for (const event of events) {
-    if (event.type !== "message.delta") {
-      entries.push({ type: "event", event });
+    if (event.type === "message.delta") {
+      const delta = object(event.payload)?.delta;
+      // 每个字符串片段（包括独立空格和换行）都是 Markdown 结构的一部分。
+      if (typeof delta === "string") messageDeltas.push(delta);
       continue;
     }
-    const delta = eventSummary(event);
-    const previous = entries.at(-1);
-    if (previous?.type === "assistant") {
-      const remaining = maxAssistantMessageLength - previous.text.length;
-      if (remaining > 0) {
-        entries[entries.length - 1] = {
-          ...previous,
-          text: `${previous.text}${delta.slice(0, remaining)}`,
-        };
-      }
+    if (event.type === "run_waiting") {
+      waitingQuestion =
+        waitingQuestionText(object(event.payload)?.question) ?? "请补充所需信息后继续。";
       continue;
     }
-    entries.push({
-      type: "assistant",
-      id: event.eventId,
-      text: delta.slice(0, maxAssistantMessageLength),
-    });
+    const descriptor = toolDescriptor(event);
+    if (descriptor === undefined) continue;
+    const index = byTool.get(descriptor.key);
+    const nextStatus =
+      event.type === "tool.failed" || object(event.payload)?.isError === true
+        ? "failed"
+        : event.type === "tool.completed"
+          ? "completed"
+          : "running";
+    if (index === undefined) {
+      byTool.set(descriptor.key, steps.length);
+      steps.push({ id: descriptor.key, label: descriptor.label, status: nextStatus, count: 1 });
+    } else {
+      const previous = steps[index];
+      if (previous !== undefined) steps[index] = { ...previous, status: nextStatus };
+    }
   }
-  return entries;
+
+  // 相邻的同类完成动作压缩为一步，降低重复工具调用的视觉噪声。
+  const compacted: UserFacingStep[] = [];
+  for (const step of steps) {
+    const previous = compacted.at(-1);
+    if (
+      previous?.label === step.label &&
+      previous.status === step.status &&
+      step.status !== "running"
+    ) {
+      compacted[compacted.length - 1] = { ...previous, count: previous.count + step.count };
+    } else {
+      compacted.push(step);
+    }
+  }
+  const active = [...compacted].reverse().find((step) => step.status === "running");
+  const finalMessage = messageDeltas.join("");
+  return {
+    currentAction: active?.label ?? compacted.at(-1)?.label ?? "正在准备任务…",
+    steps: compacted,
+    finalMessage: messageDeltas.length > 0 ? finalMessage : undefined,
+    waitingQuestion:
+      waitingQuestion !== undefined &&
+      normalizedWholeText(finalMessage) !== normalizedWholeText(waitingQuestion)
+        ? waitingQuestion
+        : undefined,
+  };
 }

@@ -60,9 +60,13 @@
 | [ADR-0052](0052-artifact-permit-version-monotonicity.md) | Artifact 工具许可与 Attempt 版本的单调边界 | 已接受 | 2026-07-30 |
 | [ADR-0053](0053-workspace-artifact-preview-media.md) | Workspace Artifact 的受限预览媒体类型 | 已接受 | 2026-07-30 |
 | [ADR-0054](0054-production-transport-and-reproducible-release.md) | 生产传输、进程边界与可复现发布制品 | 已接受 | 2026-07-30 |
+| [ADR-0055](0055-model-wire-trace-diagnostics.md) | 模型网络报文诊断 | 已接受 | 2026-07-30 |
+| [ADR-0056](0056-model-wire-trace-safe-reading.md) | 模型网络报文诊断的安全读取与原始字节呈现 | 已接受 | 2026-07-30 |
 | [ADR-0057](0057-single-exec-command-model-observation.md) | 单一 exec_command 与模型可见真实执行结果 | 已接受 | 2026-07-30 |
 | [ADR-0058](0058-simple-deliver-file-tool.md) | 面向模型的单一文件交付工具 | 已接受 | 2026-07-30 |
 | [ADR-0059](0059-inline-artifact-delivery-in-conversation.md) | 在 Agent 对话中内联交付 Artifact | 已接受 | 2026-07-30 |
+| [ADR-0060](0060-safe-markdown-model-output.md) | 模型输出的安全 Markdown 展示边界 | 已接受 | 2026-07-30 |
+| [ADR-0061](0061-user-focused-running-experience.md) | 面向用户的运行状态体验 | 已接受 | 2026-07-30 |
 
 ## 何时必须记录
 

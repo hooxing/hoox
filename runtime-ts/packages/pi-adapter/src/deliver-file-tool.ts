@@ -26,7 +26,7 @@ export interface DeliverFilePiToolExecutorPort {
     message: string;
     correctable: boolean;
     /** 必须在 durable 失败回执后关闭后续 Provider，不能让模型当作普通可修正错误继续。 */
-    fatal?: boolean;
+    fatal: boolean;
   }>;
 }
 

@@ -12,6 +12,7 @@ describe("deliver_file Pi 工具", () => {
           code: "SERVICE_UNAVAILABLE",
           message: "暂不可用",
           correctable: false,
+          fatal: false,
         }),
       },
       async () => ({ outcome: "recorded", observation: "recorded", isTruncated: false }),
@@ -44,6 +45,7 @@ describe("deliver_file Pi 工具", () => {
           code: "SERVICE_UNAVAILABLE",
           message: "暂不可用",
           correctable: false,
+          fatal: false,
         }),
       },
       async (_callId, _toolName, outcome) => {

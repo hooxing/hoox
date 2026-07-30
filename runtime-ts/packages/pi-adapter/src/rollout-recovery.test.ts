@@ -402,6 +402,7 @@ describe("Runtime Rollout → Pi 恢复投影", () => {
           code: "SERVICE_UNAVAILABLE",
           message: "暂不可用",
           correctable: false,
+          fatal: false,
         }),
       };
       const result = await recoverSafePiSession({

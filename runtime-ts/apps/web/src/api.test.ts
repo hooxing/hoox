@@ -207,12 +207,16 @@ describe("RuntimeApi", () => {
         JSON.stringify({
           version: "v1",
           requestId: "req_1",
-          data: { hasMore: false, items: [] },
+          data: { hasMore: false, nextCursor: "cursor_terminal", items: [] },
         }),
       ),
     );
     const api = new RuntimeApi(fetcher);
-    await api.listModelWireTraces("thread_1", "run_1", "cursor+/=");
+    await expect(api.listModelWireTraces("thread_1", "run_1", "cursor+/=")).resolves.toEqual({
+      items: [],
+      hasMore: false,
+      nextCursor: "cursor_terminal",
+    });
     expect(fetcher.mock.calls[0]?.[0]).toBe(
       "/api/v1/threads/thread_1/runs/run_1/model-wire-traces?limit=500&cursor=cursor%2B%2F%3D",
     );

@@ -27,13 +27,13 @@ import {
   ErrorEnvelopeSchema,
   HealthSuccessEnvelopeSchema,
   MAX_RUN_INPUT_UTF8_BYTES,
-  type RunArtifactPath,
-  RunArtifactPathSchema,
   type ModelWireTraceBodyPath,
   ModelWireTraceBodyPathSchema,
   type ModelWireTraceListQuery,
   ModelWireTraceListQuerySchema,
   ModelWireTraceListSuccessEnvelopeSchema,
+  type RunArtifactPath,
+  RunArtifactPathSchema,
   type RunEventListQuery,
   RunEventListQuerySchema,
   RunEventPageSuccessEnvelopeSchema,
@@ -788,13 +788,25 @@ export function createApiApp(
           ...(after === undefined ? {} : { after }),
         });
         if (read === undefined || read.outcome === "not_found") throw new ApiFailure("not_found");
-        if (read.hasMore && read.nextCursor === undefined) throw new ApiFailure("internal");
+        const last = read.records.at(-1);
+        const nextCursor =
+          read.nextCursor ??
+          (last === undefined
+            ? undefined
+            : {
+                createdAt: last.createdAt,
+                attemptId: last.attemptId,
+                modelTurn: last.modelTurn,
+                transportAttempt: last.transportAttempt,
+                part: last.part,
+              });
+        if (read.hasMore && nextCursor === undefined) throw new ApiFailure("internal");
         return success(request, {
           items: read.records,
           hasMore: read.hasMore,
-          ...(read.nextCursor === undefined
+          ...(nextCursor === undefined
             ? {}
-            : { nextCursor: encodeModelWireTraceCursor(cursorScope, read.nextCursor) }),
+            : { nextCursor: encodeModelWireTraceCursor(cursorScope, nextCursor) }),
         });
       },
     );

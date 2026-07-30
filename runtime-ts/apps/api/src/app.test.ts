@@ -28,14 +28,14 @@ import {
   type ModelWireTraceReadPort,
   PersistenceError,
   type RunExperienceReadPort,
+  sha256Hex,
   type TenantBundle,
   type TenantScope,
   type ThreadListPage,
   type Versioned,
-  sha256Hex,
 } from "@cube-runtime/persistence";
-import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
+import { afterEach, describe, expect, it } from "vitest";
 import { type ApiDependencies, createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec } from "./cursor.js";
@@ -786,6 +786,7 @@ describe("Fastify API 契约", () => {
         },
       ],
     });
+    expect(response.json().data.nextCursor).toBeTypeOf("string");
     expect(response.body).not.toContain("secret-cookie-canary");
     expect(response.body).not.toContain("authorization");
     expect(
@@ -818,7 +819,7 @@ describe("Fastify API 契约", () => {
     });
     expect(second.statusCode).toBe(200);
     expect(second.json().data).toMatchObject({ hasMore: false, items: [{ modelTurn: 2 }] });
-    expect(second.json().data.nextCursor).toBeUndefined();
+    expect(second.json().data.nextCursor).toBeTypeOf("string");
 
     const wrongRun = await app.inject({
       method: "GET",

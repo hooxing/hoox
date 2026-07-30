@@ -3,7 +3,13 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiError, type Artifact, type Run, type Thread } from "./api.js";
+import {
+  ApiError,
+  type Artifact,
+  type ModelWireTraceRecord,
+  type Run,
+  type Thread,
+} from "./api.js";
 import { App, chooseInitialThread } from "./main.js";
 
 type AppApi = NonNullable<ComponentProps<typeof App>["apiClient"]>;
@@ -32,6 +38,18 @@ const textArtifact = (): Artifact => ({
   status: "published",
   createdAt: "2026-07-29T00:00:00.000Z",
   updatedAt: "2026-07-29T00:00:00.000Z",
+});
+
+const modelWireTrace = (index: number): ModelWireTraceRecord => ({
+  attemptId: "attempt_poll",
+  modelTurn: index,
+  transportAttempt: 0,
+  part: "request",
+  captureStatus: "complete",
+  persistenceStatus: "stored",
+  bodyAvailable: true,
+  createdAt: new Date(Date.UTC(2026, 6, 30, 0, 0, 0, index)).toISOString(),
+  expiresAt: "2026-08-06T00:00:00.000Z",
 });
 
 function apiFixture(overrides: Partial<AppApi> = {}): AppApi {
@@ -111,6 +129,8 @@ beforeEach(() => {
 afterEach(() => {
   for (const root of mountedRoots.splice(0)) act(() => root.unmount());
   document.body.replaceChildren();
+  vi.clearAllTimers();
+  vi.useRealTimers();
 });
 
 describe("Agent 工作台恢复接入", () => {
@@ -154,6 +174,99 @@ describe("Agent 工作台恢复接入", () => {
     expect(apiClient.listArtifacts).toHaveBeenCalled();
     expect(container.textContent).toContain("诊断索引暂不可用");
     expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("终态轮询保留已加载页并沿尾游标追完超过一页的新增诊断", async () => {
+    vi.useFakeTimers();
+    const selectedThread = thread("thread_trace_poll");
+    const activeRun = { ...run("run_trace_poll", selectedThread.id), status: "running" as const };
+    const terminalRun = { ...activeRun, status: "succeeded" as const };
+    const firstPage = Array.from({ length: 500 }, (_, index) => modelWireTrace(index));
+    const tail = modelWireTrace(500);
+    const burstTail = Array.from({ length: 500 }, (_, index) => modelWireTrace(index + 501));
+    const finalTail = modelWireTrace(1_001);
+    let headRequestCount = 0;
+    const listModelWireTraces = vi.fn(
+      async (_threadId: string, _runId: string, cursor?: string) => {
+        if (cursor === "cursor_500") {
+          return {
+            items: [firstPage[499] as ModelWireTraceRecord, tail],
+            hasMore: false,
+            nextCursor: "cursor_501",
+          };
+        }
+        if (cursor === "cursor_501") {
+          return { items: burstTail, hasMore: true, nextCursor: "cursor_1001" };
+        }
+        if (cursor === "cursor_1001") {
+          return { items: [finalTail], hasMore: false, nextCursor: "cursor_1002" };
+        }
+        headRequestCount += 1;
+        return {
+          items:
+            headRequestCount === 1
+              ? firstPage
+              : firstPage.map((record, index) =>
+                  index === 0
+                    ? {
+                        ...record,
+                        captureStatus: "truncated" as const,
+                        persistenceStatus: "unavailable" as const,
+                        bodyAvailable: false,
+                      }
+                    : record,
+                ),
+          hasMore: true,
+          nextCursor: headRequestCount === 1 ? "cursor_500" : "cursor_refreshed_head",
+        };
+      },
+    );
+    let runPollCount = 0;
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [selectedThread]),
+      listLatestRuns: vi.fn(async () => [activeRun]),
+      getRun: vi.fn(async () => {
+        runPollCount += 1;
+        return runPollCount === 1 ? activeRun : terminalRun;
+      }),
+      listModelWireTraces,
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(500);
+    const loadMore = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent === "加载更多",
+    );
+    if (loadMore === undefined) throw new Error("未渲染模型网络诊断加载更多按钮");
+    await act(async () => loadMore.click());
+    await settleEffects();
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(501);
+    expect(container.querySelectorAll('[aria-label="模型轮次 500"]')).toHaveLength(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_200));
+    await settleEffects();
+
+    expect(listModelWireTraces).toHaveBeenCalledTimes(4);
+    expect(listModelWireTraces).toHaveBeenCalledWith(selectedThread.id, activeRun.id, "cursor_501");
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(1_001);
+    expect(container.querySelectorAll('[aria-label="模型轮次 500"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[aria-label="模型轮次 1000"]')).toHaveLength(1);
+    expect(container.querySelectorAll(".model-wire-record.is-truncated")).toHaveLength(1);
+
+    await act(async () => vi.advanceTimersByTimeAsync(1_200));
+    await settleEffects();
+
+    expect(listModelWireTraces).toHaveBeenCalledTimes(6);
+    expect(listModelWireTraces).toHaveBeenCalledWith(
+      selectedThread.id,
+      activeRun.id,
+      "cursor_1001",
+    );
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(1_002);
+    expect(container.querySelectorAll('[aria-label="模型轮次 1001"]')).toHaveLength(1);
+    expect(container.textContent).not.toContain("加载更多");
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("切换和切回都会重新恢复，迟到错误与加载不会污染其他 Thread", async () => {

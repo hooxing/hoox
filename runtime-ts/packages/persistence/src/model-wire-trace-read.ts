@@ -1,7 +1,7 @@
-import { PersistenceError } from "./errors.js";
 import type { StableBlobRef } from "./blob-store.js";
-import { withTenantTransaction, type Pool } from "./postgres.js";
+import { PersistenceError } from "./errors.js";
 import type { TenantScope } from "./ports.js";
+import { type Pool, withTenantTransaction } from "./postgres.js";
 
 export type ModelWireTracePart = "request" | "response";
 export type ModelWireTraceCaptureStatus = "complete" | "truncated" | "aborted" | "failed";
@@ -51,6 +51,7 @@ export interface ModelWireTraceReadPort {
         readonly outcome: "found";
         readonly records: readonly ModelWireTraceMetadata[];
         readonly hasMore: boolean;
+        /** 非空页始终返回末项位置；尾页游标用于活跃读取追取稍后新增的记录。 */
         readonly nextCursor?: ModelWireTraceCursor;
       }
     | { readonly outcome: "not_found" }
@@ -209,7 +210,8 @@ const joins = `LEFT JOIN blob_references AS reference
 function selectColumns(includeBlob: boolean): string {
   return `record.attempt_id, record.model_turn, record.transport_attempt, record.part,
           record.capture_status, record.persistence_status, record.capture_error_code, record.http_status,
-          record.sha256, record.size, record.created_at, record.expires_at,
+          record.sha256, record.size,
+          date_trunc('milliseconds', record.created_at) AS created_at, record.expires_at,
           (${bodyShape}) AS body_available${
             includeBlob
               ? ", reference.media_type AS blob_media_type, reference.incarnation_id AS blob_incarnation_id, reference.physical_object_key AS blob_physical_object_key"
@@ -240,6 +242,8 @@ export class PgModelWireTraceReadRepository implements ModelWireTraceReadPort {
             input.runId,
           ]);
           if (run.rowCount !== 1) return { outcome: "not_found" } as const;
+          // 游标经 JSON/Date 只保留毫秒；SELECT、比较与排序必须共享同一截断值，
+          // 再由不可重复的复合身份打破同毫秒并列，否则下一页会重复微秒尾部记录。
           const records = await client.query<TraceRow>(
             `SELECT ${selectColumns(false)}
                FROM model_wire_trace_records AS record
@@ -248,11 +252,12 @@ export class PgModelWireTraceReadRepository implements ModelWireTraceReadPort {
                 AND record.expires_at > clock_timestamp()
                 AND (
                   $4::timestamptz IS NULL OR
-                  (record.created_at, record.attempt_id, record.model_turn,
+                  (date_trunc('milliseconds', record.created_at), record.attempt_id, record.model_turn,
                    record.transport_attempt, record.part) >
                   ($4::timestamptz, $5::text, $6::bigint, $7::bigint, $8::text)
                 )
-              ORDER BY record.created_at ASC, record.attempt_id ASC, record.model_turn ASC,
+              ORDER BY date_trunc('milliseconds', record.created_at) ASC,
+                       record.attempt_id ASC, record.model_turn ASC,
                        record.transport_attempt ASC, record.part ASC
               LIMIT $9`,
             [
@@ -276,7 +281,7 @@ export class PgModelWireTraceReadRepository implements ModelWireTraceReadPort {
             outcome: "found" as const,
             records: mapped,
             hasMore,
-            ...(hasMore && last !== undefined
+            ...(last !== undefined
               ? {
                   nextCursor: Object.freeze({
                     createdAt: last.createdAt,

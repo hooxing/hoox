@@ -15,6 +15,7 @@ import {
   NavigationSidebar,
   pollingRunStatuses,
   RunRecoveryLoading,
+  RunTranscript,
   RunTimeline,
   shouldOpenActivityPanel,
   ThreadCreate,
@@ -476,7 +477,10 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
                 </div>
               )}
               {state.run ? (
-                <RunTimeline run={state.run} events={state.events} />
+                <>
+                  <RunTimeline run={state.run} events={state.events} />
+                  <RunTranscript events={state.events} />
+                </>
               ) : currentRecovery?.status === "loading" ? (
                 <RunRecoveryLoading />
               ) : (

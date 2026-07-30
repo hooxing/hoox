@@ -30,6 +30,7 @@ import {
   type Thread,
 } from "./api.js";
 import { buildRunProgress } from "./event-view.js";
+import { AssistantMarkdown } from "./markdown-view.js";
 
 /** waiting 仍可取消，但不代表 Worker 正在执行。 */
 export const cancellableRunStatuses = new Set<RunStatus>(["queued", "running", "waiting"]);
@@ -141,19 +142,40 @@ export function RunTimeline({
           </ol>
         </details>
       )}
-      {isWaiting && (
-        <div className="waiting-question">
-          <span>需要你的输入</span>
-          <p>{progress.waitingQuestion ?? "请补充所需信息后继续。"}</p>
-        </div>
-      )}
-      {!showActivity && progress.finalMessage !== undefined && (
-        <div className="final-answer">
-          <span>{isWaiting ? "当前回复" : "最终结果"}</span>
-          <p>{progress.finalMessage}</p>
-        </div>
+    </section>
+  );
+}
+
+export function RunTranscript({ events }: { readonly events: readonly RunEvent[] }) {
+  const progress = buildRunProgress(events);
+  if (progress.finalMessage === undefined && progress.waitingQuestion === undefined) return null;
+  return (
+    <section className="assistant-transcript" aria-label="Agent 正文">
+      {progress.finalMessage !== undefined && <AssistantMessage text={progress.finalMessage} />}
+      {progress.waitingQuestion !== undefined && (
+        <AssistantMessage label="需要你的输入" text={progress.waitingQuestion} />
       )}
     </section>
+  );
+}
+
+export function AssistantMessage({
+  text,
+  label = "Agent",
+}: {
+  readonly text: string;
+  readonly label?: string;
+}) {
+  return (
+    <article className="message assistant-message" aria-label={label}>
+      <span className="message-avatar" aria-hidden="true">
+        A
+      </span>
+      <div className="message-card">
+        <span className="message-label">{label}</span>
+        <AssistantMarkdown text={text} />
+      </div>
+    </article>
   );
 }
 

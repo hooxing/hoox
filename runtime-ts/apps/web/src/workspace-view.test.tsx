@@ -10,6 +10,7 @@ import {
   ConversationComposer,
   NavigationSidebar,
   RunStatusBadge,
+  RunTranscript,
   RunTimeline,
   shouldOpenActivityPanel,
   ThreadCreate,
@@ -232,38 +233,62 @@ describe("工作台展示组件", () => {
     expect(html).not.toContain("received runtime event");
   });
 
-  it("waiting 显示需要输入的问题与已有回复，不显示运行中动画或时长", () => {
-    const waiting: Run = { ...running, status: "waiting" };
-    const html = renderToStaticMarkup(
-      <RunTimeline
-        run={waiting}
-        events={[
-          {
-            eventId: "event-1",
-            sequence: 1,
-            occurredAt: "",
-            kind: "agent_event",
-            type: "message.delta",
-            payload: { delta: "请先确认范围。" },
-          },
-          {
-            eventId: "event-2",
-            sequence: 2,
-            occurredAt: "",
-            kind: "run_waiting",
-            type: "run_waiting",
-            payload: { question: "需要处理哪个地区？", checkpointId: "不应展示" },
-          },
-        ]}
-      />,
-    );
+  it("运行中与失败后的部分正文始终在状态卡外完整可见", () => {
+    const events: readonly RunEvent[] = [
+      {
+        eventId: "event-body",
+        sequence: 1,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "message.delta",
+        payload: { delta: "## 已完成的部分\n\n仍保留这段正文。" },
+      },
+    ];
+    for (const run of [running, { ...running, status: "failed" as const }]) {
+      const html = renderToStaticMarkup(
+        <>
+          <RunTimeline run={run} events={events} />
+          <RunTranscript events={events} />
+        </>,
+      );
+      expect(html).toContain("已完成的部分");
+      expect(html).toContain("仍保留这段正文。");
+      expect(html.indexOf("run-progress")).toBeLessThan(html.indexOf("assistant-transcript"));
+      expect(html).not.toContain("final-answer");
+    }
+  });
 
-    expect(html).toContain("需要你的输入");
-    expect(html).toContain("需要处理哪个地区？");
-    expect(html).toContain("请先确认范围。");
-    expect(html).not.toContain("已运行");
-    expect(html).not.toContain("spin");
-    expect(html).not.toContain("checkpointId");
+  it("waiting 状态卡不混入问题或正文，普通 Agent 正文保留二者", () => {
+    const waiting: Run = { ...running, status: "waiting" };
+    const events: readonly RunEvent[] = [
+      {
+        eventId: "event-1",
+        sequence: 1,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "message.delta",
+        payload: { delta: "请先确认范围。" },
+      },
+      {
+        eventId: "event-2",
+        sequence: 2,
+        occurredAt: "",
+        kind: "run_waiting",
+        type: "run_waiting",
+        payload: { question: "需要处理哪个地区？", checkpointId: "不应展示" },
+      },
+    ];
+    const statusHtml = renderToStaticMarkup(<RunTimeline run={waiting} events={events} />);
+    const transcriptHtml = renderToStaticMarkup(<RunTranscript events={events} />);
+
+    expect(statusHtml).toContain("需要你的输入");
+    expect(statusHtml).not.toContain("需要处理哪个地区？");
+    expect(statusHtml).not.toContain("请先确认范围。");
+    expect(statusHtml).not.toContain("spin");
+    expect(transcriptHtml).toContain("需要处理哪个地区？");
+    expect(transcriptHtml).toContain("请先确认范围。");
+    expect(transcriptHtml).toContain("assistant-transcript");
+    expect(transcriptHtml).not.toContain("run-progress");
   });
 
   it("新建会话不要求填写标题，后续点击仍然有效", () => {

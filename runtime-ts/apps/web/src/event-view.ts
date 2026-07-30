@@ -1,7 +1,5 @@
 import type { RunEvent } from "./api.js";
 
-const maxAssistantMessageLength = 16_000;
-
 export type UserFacingStep = {
   readonly id: string;
   readonly label: string;
@@ -59,19 +57,15 @@ function toolDescriptor(
 export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
   const byTool = new Map<string, number>();
   const steps: UserFacingStep[] = [];
-  let finalMessage = "";
+  const messageDeltas: string[] = [];
   let waitingQuestion: string | undefined;
 
   for (const event of events) {
     if (event.type === "message.delta") {
       const delta = object(event.payload)?.delta;
       // trim 只用于排除空片段；拼接必须保留流式片段的原始空格和换行。
-      if (
-        typeof delta === "string" &&
-        delta.trim().length > 0 &&
-        finalMessage.length < maxAssistantMessageLength
-      ) {
-        finalMessage += delta.slice(0, maxAssistantMessageLength - finalMessage.length);
+      if (typeof delta === "string" && delta.trim().length > 0) {
+        messageDeltas.push(delta);
       }
       continue;
     }
@@ -112,10 +106,14 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
     }
   }
   const active = [...compacted].reverse().find((step) => step.status === "running");
+  const finalMessage = messageDeltas.join("");
   return {
     currentAction: active?.label ?? compacted.at(-1)?.label ?? "正在准备任务…",
     steps: compacted,
     finalMessage: finalMessage.length > 0 ? finalMessage : undefined,
-    waitingQuestion,
+    waitingQuestion:
+      waitingQuestion !== undefined && !finalMessage.includes(waitingQuestion)
+        ? waitingQuestion
+        : undefined,
   };
 }

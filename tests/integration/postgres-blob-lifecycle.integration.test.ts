@@ -520,6 +520,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
           RUNTIME_ENV: "development",
           DATABASE_URL: runtimeDatabaseUrl,
           DATABASE_SCHEMA: schema,
+          DATABASE_RUNTIME_ROLE: requiredEnvironment("DATABASE_RUNTIME_ROLE"),
           S3_ENDPOINT: requiredEnvironment("S3_ENDPOINT"),
           S3_BUCKET: requiredEnvironment("S3_BUCKET"),
           S3_REGION: requiredEnvironment("S3_REGION"),

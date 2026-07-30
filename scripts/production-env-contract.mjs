@@ -43,6 +43,9 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "MODEL_ID",
   "MODEL_CONTEXT_WINDOW",
   "MODEL_MAX_OUTPUT_TOKENS",
+  "MODEL_WIRE_TRACE_ENABLED",
+  "MODEL_WIRE_TRACE_RETENTION_DAYS",
+  "MODEL_WIRE_TRACE_MAX_BYTES",
 ]);
 
 const secretKeys = new Set([
@@ -103,6 +106,9 @@ export function validateProductionEnvironmentExample(source) {
   if (values.get("RUNTIME_ENV") !== "production") issues.push("RUNTIME_ENV 必须为 production");
   if (values.get("API_TLS_MODE") !== "proxy") {
     issues.push("生产样例 API_TLS_MODE 必须为 proxy");
+  }
+  if (values.get("MODEL_WIRE_TRACE_ENABLED") !== "false") {
+    issues.push("生产样例 MODEL_WIRE_TRACE_ENABLED 必须为 false");
   }
   for (const key of secretKeys) {
     const value = values.get(key);

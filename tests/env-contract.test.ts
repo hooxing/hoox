@@ -34,6 +34,13 @@ function validExample(): string {
 
 describe("环境变量示例契约", () => {
   it("接受完整且只包含占位凭据的示例", () => {
+    expect(expectedEnvironmentKeys).toEqual(
+      expect.arrayContaining([
+        "MODEL_WIRE_TRACE_ENABLED",
+        "MODEL_WIRE_TRACE_RETENTION_DAYS",
+        "MODEL_WIRE_TRACE_MAX_BYTES",
+      ]),
+    );
     expect(validateEnvironmentExample(validExample())).toEqual([]);
   });
 

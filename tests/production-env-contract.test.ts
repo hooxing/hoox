@@ -10,7 +10,24 @@ const example = readFileSync(new URL("../deploy/production.env.example", import.
 describe("production 部署配置契约", () => {
   it("完整样例只使用占位凭据，且不包含 development 身份", () => {
     expect(expectedProductionEnvironmentKeys).not.toContain("DEV_AUTH_ENABLED");
+    expect(expectedProductionEnvironmentKeys).toEqual(
+      expect.arrayContaining([
+        "MODEL_WIRE_TRACE_ENABLED",
+        "MODEL_WIRE_TRACE_RETENTION_DAYS",
+        "MODEL_WIRE_TRACE_MAX_BYTES",
+      ]),
+    );
     expect(validateProductionEnvironmentExample(example)).toEqual([]);
+  });
+
+  it("生产样例固定关闭尚未部署清理 consumer 的模型报文采集", () => {
+    const enabled = example.replace(
+      "MODEL_WIRE_TRACE_ENABLED=false",
+      "MODEL_WIRE_TRACE_ENABLED=true",
+    );
+    expect(validateProductionEnvironmentExample(enabled)).toContain(
+      "生产样例 MODEL_WIRE_TRACE_ENABLED 必须为 false",
+    );
   });
 
   it("development 身份、明文端点和真实样式密钥都会失败且不回显其值", () => {

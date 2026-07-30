@@ -5,6 +5,7 @@ import {
   createDevelopmentOpenAiCompatibleModel,
   parseWorkerProcessEnvironment,
   probeOpenAiCompatibleModel,
+  selectWorkerProcessEnvironment,
   startWorkerLoopAfterDependencyProbes,
   startWorkerProcess,
 } from "./process-entry.js";
@@ -59,6 +60,20 @@ describe("Agent Worker 进程入口", () => {
         CUBE_API_KEY: "ambient-attacker-key",
       }),
     ).toThrow("PRODUCTION_INHERITED_ENVIRONMENT_FORBIDDEN");
+  });
+
+  it("Worker 投影模型报文配置但不继承其他服务秘密", () => {
+    const projected = selectWorkerProcessEnvironment({
+      ...productionEnvironment(),
+      API_JWT_SIGNING_KEYS: "api-only-secret-canary",
+    });
+    expect(projected).toMatchObject({
+      MODEL_WIRE_TRACE_ENABLED: "false",
+      MODEL_WIRE_TRACE_RETENTION_DAYS: "7",
+      MODEL_WIRE_TRACE_MAX_BYTES: "1048576",
+    });
+    expect(projected.API_JWT_SIGNING_KEYS).toBeUndefined();
+    expect(JSON.stringify(projected)).not.toContain("api-only-secret-canary");
   });
 
   it("production 的 PG 角色证明失败时不触达 S3、Cube、模型或消费循环", async () => {

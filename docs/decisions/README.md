@@ -62,6 +62,7 @@
 | [ADR-0054](0054-production-transport-and-reproducible-release.md) | 生产传输、进程边界与可复现发布制品 | 已接受 | 2026-07-30 |
 | [ADR-0057](0057-single-exec-command-model-observation.md) | 单一 exec_command 与模型可见真实执行结果 | 已接受 | 2026-07-30 |
 | [ADR-0058](0058-simple-deliver-file-tool.md) | 面向模型的单一文件交付工具 | 已接受 | 2026-07-30 |
+| [ADR-0059](0059-inline-artifact-delivery-in-conversation.md) | 在 Agent 对话中内联交付 Artifact | 已接受 | 2026-07-30 |
 
 ## 何时必须记录
 

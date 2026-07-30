@@ -14,6 +14,7 @@ import {
   canCreateThread,
   compactWorkspaceMedia,
   EmptyConversation,
+  InlineArtifactDelivery,
   NavigationSidebar,
   RunRecoveryLoading,
   RunTimeline,
@@ -503,7 +504,14 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
                 </div>
               )}
               {state.run ? (
-                <RunTimeline events={state.events} />
+                <>
+                  <RunTimeline events={state.events} />
+                  <InlineArtifactDelivery
+                    artifacts={state.artifacts}
+                    onPreview={(artifactId) => void preview(artifactId)}
+                    onDownload={(artifactId) => void download(artifactId)}
+                  />
+                </>
               ) : currentRecovery?.status === "loading" ? (
                 <RunRecoveryLoading />
               ) : (
@@ -526,13 +534,10 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         key={`${state.selectedThreadId ?? "none"}:${state.run?.id ?? "none"}`}
         isOpen={activityOpen}
         events={state.events}
-        artifacts={state.artifacts}
         modelWireTraces={state.modelWireTraces}
         modelWireTraceHasMore={state.modelWireTraceHasMore}
         modelWireTraceUnavailable={state.modelWireTraceUnavailable}
         onToggle={() => setActivityOpen((open) => !open)}
-        onPreview={(artifactId) => void preview(artifactId)}
-        onDownload={(artifactId) => void download(artifactId)}
         onLoadModelWireTrace={(record) => {
           if (state.selectedThreadId === undefined || state.run === undefined) {
             return Promise.reject(new ApiError("当前运行已切换", 404, false));

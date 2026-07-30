@@ -8,6 +8,7 @@ import {
   type Artifact,
   type ModelWireTraceRecord,
   type Run,
+  type RunEvent,
   type Thread,
 } from "./api.js";
 import { App, chooseInitialThread } from "./main.js";
@@ -375,6 +376,46 @@ describe("Agent 工作台恢复接入", () => {
     expect(rendered?.textContent).toBe(payload);
     expect(rendered?.querySelector("script")).toBeNull();
     expect(open).not.toHaveBeenCalled();
+  });
+
+  it("将本次运行交付物紧随 Agent 对话内联展示，不在右侧活动栏重复", async () => {
+    const selectedThread = thread("thread_inline_artifact");
+    const latest = run("run_inline_artifact", selectedThread.id);
+    const events: readonly RunEvent[] = [
+      {
+        eventId: "event_reply",
+        sequence: 1,
+        occurredAt: "2026-07-30T00:00:00.000Z",
+        kind: "agent_event",
+        type: "message.delta",
+        payload: { delta: "文件已经准备好。" },
+      },
+    ];
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [selectedThread]),
+      listLatestRuns: vi.fn(async () => [latest]),
+      getRun: vi.fn(async () => latest),
+      listEvents: vi.fn(async () => ({ attemptId: "attempt_1", items: events })),
+      listArtifacts: vi.fn(async () => [textArtifact()]),
+    });
+    const { container } = mount(apiClient);
+
+    await settleEffects();
+
+    const assistantReply = container.querySelector(".assistant-message");
+    const inlineDelivery = container.querySelector(".run-area .inline-artifact-delivery");
+    const activityPanel = container.querySelector(".activity-panel");
+    if (assistantReply === null || inlineDelivery === null) {
+      throw new Error("未在 Agent 对话后渲染内联交付物");
+    }
+    expect(assistantReply?.textContent).toContain("文件已经准备好。");
+    expect(inlineDelivery?.textContent).toContain("report.txt");
+    expect(inlineDelivery?.querySelector('[aria-label="预览 report.txt"]')).not.toBeNull();
+    expect(inlineDelivery?.querySelector('[aria-label="下载 report.txt"]')).not.toBeNull();
+    expect(
+      assistantReply.compareDocumentPosition(inlineDelivery) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+    expect(activityPanel?.textContent).not.toContain("report.txt");
   });
 
   it("初始选择策略跳过归档 Thread，并在无活跃 Thread 时保持空选择", () => {

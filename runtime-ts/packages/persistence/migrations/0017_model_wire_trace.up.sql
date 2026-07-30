@@ -4,7 +4,8 @@ CREATE TABLE model_wire_trace_records (
   thread_id text NOT NULL,
   run_id text NOT NULL,
   attempt_id text NOT NULL,
-  turn bigint NOT NULL CHECK (turn BETWEEN 0 AND 9007199254740991),
+  model_turn bigint NOT NULL CHECK (model_turn BETWEEN 0 AND 9007199254740991),
+  transport_attempt bigint NOT NULL CHECK (transport_attempt BETWEEN 0 AND 9007199254740991),
   part text NOT NULL CHECK (part IN ('request', 'response')),
   capture_status text NOT NULL CHECK (capture_status IN ('complete', 'truncated', 'aborted', 'failed')),
   persistence_status text NOT NULL CHECK (persistence_status IN (
@@ -16,7 +17,7 @@ CREATE TABLE model_wire_trace_records (
   blob_reference_id text,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   expires_at timestamptz NOT NULL,
-  PRIMARY KEY (tenant_id, attempt_id, turn, part),
+  PRIMARY KEY (tenant_id, attempt_id, model_turn, transport_attempt, part),
   FOREIGN KEY (tenant_id, attempt_id, run_id, thread_id)
     REFERENCES execution_attempts(tenant_id, attempt_id, run_id, thread_id) ON DELETE RESTRICT,
   FOREIGN KEY (tenant_id, blob_reference_id)
@@ -33,7 +34,7 @@ CREATE TABLE model_wire_trace_records (
   )
 );
 CREATE INDEX model_wire_trace_records_run_idx ON model_wire_trace_records(
-  tenant_id, run_id, attempt_id, turn, part
+  tenant_id, run_id, attempt_id, model_turn, transport_attempt, part
 );
 CREATE INDEX model_wire_trace_records_expiry_idx ON model_wire_trace_records(expires_at);
 

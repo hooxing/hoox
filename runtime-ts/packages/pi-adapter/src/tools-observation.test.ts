@@ -1,5 +1,5 @@
 import { parseControlledToolReceipt } from "@cube-runtime/context-policy";
-import { SandboxRuntimeError, type SandboxHandle } from "@cube-runtime/sandbox";
+import { type SandboxHandle, SandboxRuntimeError } from "@cube-runtime/sandbox";
 import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import { createObservedSandboxTools, SANDBOX_TOOL_NAMES } from "./tools.js";
@@ -14,14 +14,18 @@ type ToolExecute = (
 
 function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown" = "recorded") {
   const receipts: string[] = [];
+  let authorizationCalls = 0;
   let continuationRejected = false;
   const observed = createObservedSandboxTools(
     sandbox,
     {
-      authorizeToolEffect: async () => ({
-        consumedAtMonotonicMs: performance.now(),
-        maxContinuationDelayMs: 1_000,
-      }),
+      authorizeToolEffect: async () => {
+        authorizationCalls += 1;
+        return {
+          consumedAtMonotonicMs: performance.now(),
+          maxContinuationDelayMs: 1_000,
+        };
+      },
     },
     (outputs) => ({
       record: async (call) => {
@@ -41,8 +45,10 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
   if (tool === undefined) throw new Error("测试缺少 exec_command");
   return {
     execute: tool.execute as unknown as ToolExecute,
+    prepareArguments: tool.prepareArguments,
     parameters: tool.parameters,
     receipts,
+    authorizationCalls: () => authorizationCalls,
     continuationRejected: () => continuationRejected,
   };
 }
@@ -102,6 +108,35 @@ describe("exec_command", () => {
       `cd -- '/workspace/a'"'"'b' && exec /bin/bash -c 'printf '"'"'%s'"'"' ok'`,
       expect.objectContaining({ timeoutMs: 55 }),
     );
+  });
+
+  it("schema 级缺字段、错类型和额外字段都不申请许可，但形成失败回执", async () => {
+    const command = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const tested = fixture({ command } as unknown as SandboxHandle);
+    if (tested.prepareArguments === undefined) throw new Error("测试缺少 schema 参数桥");
+    const invalidInputs = [{}, { cmd: 123 }, { cmd: "echo no", extra: true }];
+
+    for (const [index, input] of invalidInputs.entries()) {
+      const prepared = tested.prepareArguments(input);
+      expect(Value.Check(tested.parameters, prepared)).toBe(true);
+      await expect(
+        tested.execute(
+          `call_exec_invalid_${index}`,
+          prepared as Record<string, unknown>,
+          undefined,
+          () => undefined,
+          {} as never,
+        ),
+      ).rejects.toThrow("EXEC_INVALID_ARGUMENTS");
+    }
+
+    expect(command).not.toHaveBeenCalled();
+    expect(tested.authorizationCalls()).toBe(0);
+    expect(tested.receipts.map((receipt) => parseControlledToolReceipt(receipt).outcome)).toEqual([
+      "failed",
+      "failed",
+      "failed",
+    ]);
   });
 
   it("timeout_ms 接受 1 小时上限并传给 CubeSandbox", async () => {

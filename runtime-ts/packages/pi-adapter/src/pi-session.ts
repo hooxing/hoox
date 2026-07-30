@@ -565,6 +565,9 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
           createDeliverFilePiTool(
             options.deliverFileToolRouter,
             observedSandboxTools.recordControlledReceipt,
+            () => {
+              toolContinuationRejected = true;
+            },
           ),
         ]),
   ];

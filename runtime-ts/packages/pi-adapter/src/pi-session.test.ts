@@ -587,6 +587,50 @@ describe("Pi 安全适配", () => {
   });
 
   it.runIf(process.platform === "linux")(
+    "deliver_file fatal 失败回执完成后关闭下一次 Provider 请求",
+    async () => {
+      let routerCalls = 0;
+      const { controller, events, faux } = await harness(
+        [
+          fauxAssistantMessage(fauxToolCall("deliver_file", { path: "/workspace/report.pdf" }), {
+            stopReason: "toolUse",
+          }),
+          fauxAssistantMessage("不应触达"),
+        ],
+        new FakeSandboxHandle("pi-deliver-fatal"),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          deliverFile: async () => {
+            routerCalls += 1;
+            throw new Error("commit unknown");
+          },
+          projectError: () => ({
+            status: "failed" as const,
+            code: "PUBLICATION_RESULT_UNKNOWN",
+            message: "文件发布结果未知，需要恢复后确认",
+            correctable: false,
+            fatal: true,
+          }),
+        },
+      );
+
+      await expect(controller.prompt("交付文件")).rejects.toThrow();
+      expect(routerCalls).toBe(1);
+      expect(faux.state.callCount).toBe(1);
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "tool.completed", name: "deliver_file", isError: true }),
+      );
+      expect(
+        events.some((event) => event.type === "message.completed" && event.stopReason === "stop"),
+      ).toBe(false);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
     "Tool Router 用单调时钟拒绝迟到 continuation，且不触碰 Sandbox",
     async () => {
       const sandbox = new FakeSandboxHandle("pi-expired-tool");
@@ -912,6 +956,7 @@ async function harness(
   untrustedPromptContent?: Parameters<typeof createSafePiSession>[0]["untrustedPromptContent"],
   tokenizer?: TokenizerPort,
   withProviderInvocation?: Parameters<typeof createSafePiSession>[0]["withProviderInvocation"],
+  deliverFileToolRouter?: Parameters<typeof createSafePiSession>[0]["deliverFileToolRouter"],
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
@@ -955,6 +1000,7 @@ async function harness(
     ...(rolloutProjection === undefined ? {} : { rolloutProjection }),
     ...(untrustedPromptContent === undefined ? {} : { untrustedPromptContent }),
     ...(withProviderInvocation === undefined ? {} : { withProviderInvocation }),
+    ...(deliverFileToolRouter === undefined ? {} : { deliverFileToolRouter }),
   });
   disposers.push(() => controller.dispose());
   const events: RuntimeAgentEvent[] = [];

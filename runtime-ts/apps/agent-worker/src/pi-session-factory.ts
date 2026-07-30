@@ -65,7 +65,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     const attemptWireTraces = this.modelWireTraces?.createAttempt();
     const startedToolCalls = new Map<string, string>();
     const invalidToolCalls = new Set<string>();
-    const authorizationRequested = new Set<string>();
+    const effectAuthorizationRequested = new Set<string>();
+    const durableToolCalls = new Set<string>();
     const rejectedToolReceipts = new Map<
       string,
       { readonly completed: Promise<void>; readonly resolve: () => void }
@@ -82,27 +83,22 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       // 立即停止本轮，避免模型在缺失 durable Tool 事实后继续发起其他副作用。
       void controller?.abort().catch(() => undefined);
     };
-    const authorizeStartedTool = async (call: {
-      readonly callId: string;
+    const recordStartedTool = async (call: {
+      readonly toolCallId: string;
       readonly toolName: string;
-      readonly argsDigest: string;
     }) => {
-      const startedName = startedToolCalls.get(call.callId);
       if (
-        invalidToolCalls.has(call.callId) ||
-        authorizationRequested.has(call.callId) ||
-        startedName !== call.toolName
+        invalidToolCalls.has(call.toolCallId) ||
+        durableToolCalls.has(call.toolCallId) ||
+        startedToolCalls.get(call.toolCallId) !== call.toolName
       ) {
-        throw new Error("Pi 工具许可缺少匹配的 tool.started");
+        throw new Error("Pi 工具缺少唯一且匹配的 tool.started");
       }
-      // 不删除 gate：callId 在整个 Attempt 内永久一次性，失败后的相同调用也不可重试。
-      authorizationRequested.add(call.callId);
+      // 先占住 callId；写入结果未知时必须转恢复，不得在本 Attempt 重放。
+      durableToolCalls.add(call.toolCallId);
       let recorded: ToolObservationResult["outcome"] | undefined;
       try {
-        recorded = await observationRecorder?.recordStarted({
-          toolCallId: call.callId,
-          toolName: call.toolName,
-        });
+        recorded = await observationRecorder?.recordStarted(call);
       } catch {
         requireObservationRecovery();
         throw new Error("Tool Rollout 前驱持久化状态未知");
@@ -111,6 +107,23 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         requireObservationRecovery(recorded);
         throw new Error("Tool Rollout 前驱未能持久化");
       }
+    };
+    const authorizeStartedTool = async (call: {
+      readonly callId: string;
+      readonly toolName: string;
+      readonly argsDigest: string;
+    }) => {
+      const startedName = startedToolCalls.get(call.callId);
+      if (
+        invalidToolCalls.has(call.callId) ||
+        effectAuthorizationRequested.has(call.callId) ||
+        startedName !== call.toolName
+      ) {
+        throw new Error("Pi 工具许可缺少匹配的 tool.started");
+      }
+      // 不删除 gate：callId 在整个 Attempt 内永久一次性，失败后的相同调用也不可重试。
+      effectAuthorizationRequested.add(call.callId);
+      await recordStartedTool({ toolCallId: call.callId, toolName: call.toolName });
       // durable tool_call 已完成后才领取并消费一次性许可，返回后下一步直接触碰副作用端口。
       try {
         return await input.authorizeToolEffect({
@@ -156,6 +169,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         return {
           record: async (call: { readonly toolCallId: string; readonly toolName: string }) => {
             try {
+              // schema 级错误与 Router 在许可前拒绝都不会进入 authorizer；在失败
+              // tool_result 前补齐 durable tool_call，但不消费外部副作用许可。
+              if (!durableToolCalls.has(call.toolCallId)) await recordStartedTool(call);
               const result = await recorder.record(call);
               if (result.outcome !== "recorded" && result.outcome !== "replayed") {
                 requireObservationRecovery(result.outcome);
@@ -277,7 +293,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         unsubscribeToolGate();
         startedToolCalls.clear();
         invalidToolCalls.clear();
-        authorizationRequested.clear();
+        effectAuthorizationRequested.clear();
+        durableToolCalls.clear();
         rejectedToolReceipts.clear();
         controller.dispose();
       },

@@ -1,12 +1,13 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   ControlledToolReceiptSource,
   ToolObservationResult,
 } from "@cube-runtime/context-policy";
 import { encodeControlledToolReceipt } from "@cube-runtime/context-policy";
-import { SandboxRuntimeError, type SandboxHandle } from "@cube-runtime/sandbox";
+import { type SandboxHandle, SandboxRuntimeError } from "@cube-runtime/sandbox";
 import { defineTool } from "@earendil-works/pi-coding-agent";
-import { Type } from "typebox";
+import { type Static, type TSchema, Type } from "typebox";
+import { Value } from "typebox/value";
 
 export const SANDBOX_TOOL_NAMES = ["exec_command"] as const;
 
@@ -17,6 +18,16 @@ const DEFAULT_MAX_OUTPUT_TOKENS = 10_000;
 const MAX_OUTPUT_TOKENS = 20_000;
 const APPROX_BYTES_PER_TOKEN = 4;
 const TRUNCATION_MARKER = "\n...[输出已截断]...\n";
+const ExecCommandArgumentsSchema = Type.Object(
+  {
+    cmd: Type.String({ minLength: 1 }),
+    workdir: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, pattern: "^/" })),
+    timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS })),
+    max_output_tokens: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_OUTPUT_TOKENS })),
+  },
+  { additionalProperties: false },
+);
+type ExecCommandArguments = Static<typeof ExecCommandArgumentsSchema>;
 
 export interface SandboxToolEffectAuthorizer {
   /** 每次工具副作用前都向 Runtime DB 重新领取短时许可。 */
@@ -37,6 +48,34 @@ export interface ExecCommandResult {
   readonly stderr: string;
   readonly output_truncated: boolean;
   readonly original_output_bytes: number;
+}
+
+/**
+ * Pi 会在 execute 之前拦截 schema 错误，使 Runtime 无法持久化对应的 tool_call/tool_result。
+ * 这里把原始 schema 不通过的输入换成一次性、schema 合法的内部占位参数；工具
+ * execute 识别后只写 durable 失败回执，不得申请副作用许可或触碰外部端口。
+ */
+export function createSchemaInvalidArgumentsBridge<T>(
+  schema: TSchema,
+  fallback: (token: string) => T,
+  tokenOf: (value: T) => string | undefined,
+): Readonly<{
+  prepareArguments(value: unknown): T;
+  consume(value: T): boolean;
+}> {
+  const pending = new Set<string>();
+  return Object.freeze({
+    prepareArguments(value: unknown): T {
+      if (Value.Check(schema, value)) return value as T;
+      const token = randomUUID();
+      pending.add(token);
+      return fallback(token);
+    },
+    consume(value: T): boolean {
+      const token = tokenOf(value);
+      return token !== undefined && pending.delete(token);
+    },
+  });
 }
 
 export function createSandboxTools(
@@ -111,27 +150,29 @@ function createSandboxToolsInternal(
 ) {
   // TODO(codex-alignment): 同步 MVP 暂无 PTY、yield/session、write_stdin、shell/login 参数；
   // 即使允许最长 1 小时，长任务仍未对齐 Codex 返回 session_id 后 wait/write_stdin 的可恢复会话模式。
+  const execArguments = createSchemaInvalidArgumentsBridge<ExecCommandArguments>(
+    ExecCommandArgumentsSchema,
+    (token) => ({ cmd: token }),
+    (value) => value.cmd,
+  );
   return [
     defineTool({
       name: "exec_command",
       label: "执行 Sandbox 命令",
       description:
         "在当前 CubeSandbox 中同步执行 Bash 命令并返回真实输出。默认工作目录是 /workspace；可使用 Shell、Python 和常规命令读写 Sandbox 文件。",
-      parameters: Type.Object(
-        {
-          cmd: Type.String({ minLength: 1 }),
-          workdir: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, pattern: "^/" })),
-          timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS })),
-          max_output_tokens: Type.Optional(
-            Type.Integer({ minimum: 1, maximum: MAX_OUTPUT_TOKENS }),
-          ),
-        },
-        { additionalProperties: false },
-      ),
+      parameters: ExecCommandArgumentsSchema,
+      prepareArguments: execArguments.prepareArguments,
       execute: async (callId, params, signal) => {
         const timeoutMs = params.timeout_ms ?? DEFAULT_TIMEOUT_MS;
         const maxOutputTokens = params.max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
         const workdir = params.workdir ?? DEFAULT_WORKDIR;
+        if (execArguments.consume(params)) {
+          await persistReceipt(callId, "failed", capture);
+          throw new Error(
+            JSON.stringify({ code: "EXEC_INVALID_ARGUMENTS", message: "exec_command 参数无效" }),
+          );
+        }
         let effectRejected = false;
         let result: ExecCommandResult;
         try {

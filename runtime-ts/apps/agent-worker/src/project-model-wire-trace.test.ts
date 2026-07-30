@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -120,12 +120,49 @@ describe("项目模型报文本地镜像", () => {
     await expect(mirror.persist(invalid)).rejects.toThrow("模型网络诊断作用域无效");
     await expect(readdir(root)).resolves.toEqual([]);
   });
+
+  it("拒绝镜像 root 上的 Windows junction 或 WSL/Linux symlink", async () => {
+    const trusted = await temporaryRoot();
+    const outside = await temporaryRoot();
+    const root = join(trusted, "model-wire-traces");
+    await createDirectoryLink(outside, root);
+    expect((await lstat(root)).isSymbolicLink()).toBe(true);
+
+    const mirror = new ProjectModelWireTraceMirror(root, trusted);
+    await expect(mirror.persist(record())).rejects.toThrow("LOCAL_MODEL_WIRE_TRACE_LINK_FORBIDDEN");
+    await expect(readdir(outside)).resolves.toEqual([]);
+  });
+
+  it.each(["run", "attempt"] as const)(
+    "拒绝中间 %s 目录上的 Windows junction 或 WSL/Linux symlink",
+    async (level) => {
+      const trusted = await temporaryRoot();
+      const outside = await temporaryRoot();
+      const root = join(trusted, "model-wire-traces");
+      const run = join(root, "run_dev_1");
+      await mkdir(root);
+      const link = level === "run" ? run : join(run, "attempt_dev_1");
+      if (level === "attempt") await mkdir(run);
+      await createDirectoryLink(outside, link);
+      expect((await lstat(link)).isSymbolicLink()).toBe(true);
+
+      const mirror = new ProjectModelWireTraceMirror(root, trusted);
+      await expect(mirror.persist(record())).rejects.toThrow(
+        "LOCAL_MODEL_WIRE_TRACE_LINK_FORBIDDEN",
+      );
+      await expect(readdir(outside)).resolves.toEqual([]);
+    },
+  );
 });
 
 async function temporaryRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "cube-model-wire-traces-"));
   temporaryRoots.push(root);
   return root;
+}
+
+async function createDirectoryLink(target: string, path: string): Promise<void> {
+  await symlink(target, path, process.platform === "win32" ? "junction" : "dir");
 }
 
 function record(

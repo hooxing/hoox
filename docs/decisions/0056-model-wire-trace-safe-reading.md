@@ -16,7 +16,10 @@ ADR-0055 决定保存最终 `/chat/completions` 请求正文和 Provider 应用�
   `transportAttempt`、request/response part、采集/持久化状态、`captureErrorCode`、HTTP 状态、
   SHA-256、字节数、截断状态和过期时间。列表每页最多返回调用方请求的 500 条，并返回
   绑定 Tenant/User/Thread/Run 的复合排序游标、`hasMore` 和 `nextCursor`；Web 可显式继续加载，
-  同时避免响应 schema 因无界记录数转为 500。游标不是授权能力，每一页都重新执行完整授权。
+  同时避免响应 schema 因无界记录数转为 500。非空尾页仍返回最后一条的复合排序游标，活跃 Run
+  据此从已加载尾部追取新增记录，并在新增突发超过一页时持续推进；`hasMore` 只表示当前位置后是否
+  还有已存在页。游标不是授权能力，
+  每一页都重新执行完整授权。时间排序统一到 JSON 游标可无损表达的毫秒，再以复合身份打破并列。
 - 读取先复用现有认证、Tenant Membership/RLS 与 Thread/Run 归属校验。只读投影在同一
   `REPEATABLE READ` 快照中，将诊断索引的完整 Blob 身份与 `blob_references`、active lifecycle、
   active/current incarnation 逐项绑定；过期、缺失、非 stable、非 trace purpose 或任一摘要/大小/
@@ -43,7 +46,8 @@ ADR-0055 决定保存最终 `/chat/completions` 请求正文和 Provider 应用�
 
 自动化测试覆盖同租户读取、跨租户/Thread/Run 与猜测 Attempt 的统一 404、Blob purpose/state/
 SHA/size/incarnation 拒绝、二次授权漂移、对象完整性失败、no-store/nosniff、原始字节不改写，
-以及 Web 的模型轮次/重试分组、失败态、敏感提示和原始下载信息。
+以及 Web 的模型轮次/重试分组、失败态、敏感提示、原始下载信息、首屏刷新保留已加载后续页和
+尾游标追取新记录。
 
 ## 可逆性
 

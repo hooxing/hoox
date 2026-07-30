@@ -1,7 +1,7 @@
 import { LoaderCircle, PanelLeftOpen, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ApiError, RuntimeApi, type ArtifactPreview, type Thread } from "./api.js";
+import { ApiError, type ArtifactPreview, RuntimeApi, type Thread } from "./api.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
@@ -71,6 +71,8 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const [navigationOpen, setNavigationOpen] = useState(false);
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
+  const modelWireTracePaginationAdvancedRef = useRef(false);
+  const modelWireTraceTailCursorRef = useRef<string | undefined>(undefined);
   const currentRunPollRef = useRef(new CurrentRunPoll());
   const navigationRef = useRef(new WorkspaceNavigation());
   const mobileNavigationToggleRef = useRef<HTMLButtonElement>(null);
@@ -103,6 +105,17 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     eventAfterRef.current = state.events.at(-1)?.sequence ?? -1;
     eventAttemptRef.current = state.eventAttemptId;
   }, [state.eventAttemptId, state.events]);
+
+  useEffect(() => {
+    modelWireTracePaginationAdvancedRef.current = state.modelWireTracePaginationAdvanced;
+    modelWireTraceTailCursorRef.current = state.modelWireTraceTailFollowing
+      ? state.modelWireTraceNextCursor
+      : undefined;
+  }, [
+    state.modelWireTraceNextCursor,
+    state.modelWireTracePaginationAdvanced,
+    state.modelWireTraceTailFollowing,
+  ]);
 
   const refreshThreads = useCallback(async () => {
     const expectedNavigation = navigationRef.current.capture();
@@ -195,7 +208,8 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       if (!currentRunPollRef.current.isCurrent(pollGeneration)) return;
       try {
         const latest = await apiClient.getRun(threadId, runId);
-        const [eventPage, artifacts, modelWireTraces] = await Promise.all([
+        const tailCursor = modelWireTraceTailCursorRef.current;
+        const [eventPage, artifacts, modelWireTraces, modelWireTraceTail] = await Promise.all([
           drainEventPages(
             (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
             eventAfterRef.current,
@@ -205,6 +219,9 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           apiClient
             .listModelWireTraces(threadId, runId)
             .catch(() => ({ items: [], hasMore: false, unavailable: true })),
+          tailCursor === undefined
+            ? Promise.resolve(undefined)
+            : apiClient.listModelWireTraces(threadId, runId, tailCursor).catch(() => undefined),
         ]);
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           eventAttemptRef.current = eventPage.attemptId;
@@ -212,9 +229,17 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           dispatch({ type: "run", run: latest });
           dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
-          dispatch({ type: "modelWireTraces", page: modelWireTraces });
+          dispatch({ type: "modelWireTraces", page: modelWireTraces, mode: "refreshHead" });
+          if (modelWireTraceTail !== undefined) {
+            dispatch({ type: "modelWireTraces", page: modelWireTraceTail, mode: "append" });
+          }
           // 单次完成后再调度，状态更新不会重新创建计时器或导致紧密轮询。
-          if (eventPage.hasMore || activeRunStatuses.has(latest.status)) {
+          if (
+            eventPage.hasMore ||
+            modelWireTraceTail?.hasMore === true ||
+            (modelWireTraces.hasMore && !modelWireTracePaginationAdvancedRef.current) ||
+            activeRunStatuses.has(latest.status)
+          ) {
             timer = window.setTimeout(() => void poll(), 1200);
           }
         }

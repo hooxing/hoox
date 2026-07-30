@@ -208,8 +208,13 @@ export function parseWorkerProcessEnvironment(
   }
   const contextWindow = readRequiredEnvironmentValue(parsed, "MODEL_CONTEXT_WINDOW");
   const maxOutputTokens = readRequiredEnvironmentValue(parsed, "MODEL_MAX_OUTPUT_TOKENS");
+  const wireTraceEnabled = readRequiredEnvironmentValue(parsed, "MODEL_WIRE_TRACE_ENABLED");
   if (maxOutputTokens > contextWindow) {
     throw new TypeError("MODEL_MAX_OUTPUT_TOKENS 不能大于 MODEL_CONTEXT_WINDOW");
+  }
+  // raw prompt/SSE 的保留清理消费者尚未随本 Worker 部署；production 不能留下无界敏感引用。
+  if (parsed.runtimeEnvironment === "production" && wireTraceEnabled) {
+    throw new TypeError("MODEL_WIRE_TRACE_ENABLED 在 production 需要已部署保留清理消费者");
   }
   const sandboxApiUrl = readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
   if (parsed.runtimeEnvironment === "production") {
@@ -261,7 +266,7 @@ export function parseWorkerProcessEnvironment(
       contextWindow,
       maxOutputTokens,
       wireTraceMaxBytes: readRequiredEnvironmentValue(parsed, "MODEL_WIRE_TRACE_MAX_BYTES"),
-      wireTraceEnabled: readRequiredEnvironmentValue(parsed, "MODEL_WIRE_TRACE_ENABLED"),
+      wireTraceEnabled,
       wireTraceRetentionDays: readRequiredEnvironmentValue(
         parsed,
         "MODEL_WIRE_TRACE_RETENTION_DAYS",

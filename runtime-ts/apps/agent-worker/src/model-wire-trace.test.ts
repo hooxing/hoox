@@ -127,4 +127,38 @@ describe("模型网络原始报文诊断", () => {
       );
     }
   });
+
+  it("连续 prompt 使用单调 modelTurn，Request 输入与无作用域请求不会串入", async () => {
+    installModelWireFetchInstrumentation();
+    const server = createServer((_request, response) => response.end("ok"));
+    const port = await listen(server);
+    const traces = new TracePort();
+    const session = new ModelWireTraceSession(traces, 1024, `http://127.0.0.1:${port}/v1`);
+    const context = {
+      tenantId: "tenant_c",
+      threadId: "thread_c",
+      runId: "run_c",
+      attemptId: "attempt_c",
+    };
+    try {
+      const request = new Request(`http://127.0.0.1:${port}/v1/chat/completions`, {
+        method: "POST",
+        body: "one",
+      });
+      await session.run(context, () => fetch(request));
+      await session.run(context, () =>
+        fetch(`http://127.0.0.1:${port}/v1/chat/completions`, { method: "POST", body: "two" }),
+      );
+      await fetch(`http://127.0.0.1:${port}/v1/other`, { method: "POST", body: "outside" });
+      await session.drain();
+      expect(
+        traces.records.filter((entry) => entry.part === "request").map((entry) => entry.modelTurn),
+      ).toEqual([0, 1]);
+      expect(traces.records.every((entry) => entry.transportAttempt === 0)).toBe(true);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
 });

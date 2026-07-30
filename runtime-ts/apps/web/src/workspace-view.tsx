@@ -24,6 +24,7 @@ import {
   type Thread,
 } from "./api.js";
 import { buildTimeline, eventSummary } from "./event-view.js";
+import { AssistantMarkdown } from "./markdown-view.js";
 import { ModelWireTracePanel } from "./model-wire-trace-view.js";
 
 export const activeRunStatuses = new Set<RunStatus>(["queued", "running", "waiting"]);
@@ -79,7 +80,7 @@ export function RunTimeline({ events }: { readonly events: readonly RunEvent[] }
             </span>
             <div className="message-card">
               <span className="message-label">Agent</span>
-              <p>{entry.text}</p>
+              <AssistantMarkdown text={entry.text} />
             </div>
           </li>
         ) : (

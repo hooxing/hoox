@@ -6,14 +6,21 @@ import {
   FileText,
   LoaderCircle,
   MessageSquarePlus,
+  Package,
   PanelLeftClose,
   PanelRightClose,
   PanelRightOpen,
   Send,
   Square,
-  Wrench,
 } from "lucide-react";
-import { type FormEventHandler, type ReactNode, type RefObject, useEffect, useRef } from "react";
+import {
+  type FormEventHandler,
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   type Artifact,
   canPreviewArtifact,
@@ -23,18 +30,25 @@ import {
   type RunStatus,
   type Thread,
 } from "./api.js";
-import { buildTimeline, eventSummary } from "./event-view.js";
+import { buildRunProgress } from "./event-view.js";
+import { AssistantMarkdown } from "./markdown-view.js";
 import { ModelWireTracePanel } from "./model-wire-trace-view.js";
 
-export const activeRunStatuses = new Set<RunStatus>(["queued", "running", "waiting"]);
+/** waiting 仍可取消，但不代表 Worker 正在执行。 */
+export const cancellableRunStatuses = new Set<RunStatus>(["queued", "running", "waiting"]);
+/** 仅尚会自行变化的 Run 继续短轮询；waiting 由用户下一次提交恢复。 */
+export const pollingRunStatuses = new Set<RunStatus>(["queued", "running"]);
+export const timedRunStatuses = new Set<RunStatus>(["running"]);
 export const compactWorkspaceMedia = "(max-width: 820px)";
+export const composerTextareaResize = "none";
 
 export function canCreateThread(title: string, actionLoading: boolean): boolean {
   return title.trim().length > 0 && !actionLoading;
 }
 
-export function shouldOpenActivityPanel(isCompact: boolean): boolean {
-  return !isCompact;
+export function shouldOpenActivityPanel(_isCompact: boolean): boolean {
+  // 无产物时侧栏收敛；首个产物到达后由工作台自动展开。
+  return false;
 }
 
 const statusLabel: Record<RunStatus, string> = {
@@ -51,50 +65,124 @@ export function RunStatusBadge({ status }: { readonly status: RunStatus | undefi
   return <span className={`run-status is-${status}`}>{statusLabel[status]}</span>;
 }
 
-function ActivityIcon({ type }: { readonly type: string }) {
-  return type.startsWith("tool.") ? (
-    <Wrench size={15} aria-hidden="true" />
-  ) : (
-    <ChevronRight size={15} aria-hidden="true" />
+function useElapsedSeconds(run: Run | undefined): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (run === undefined || !timedRunStatuses.has(run.status)) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [run]);
+  if (run === undefined) return 0;
+  const startedAt = Date.parse(run.createdAt);
+  return Number.isFinite(startedAt) ? Math.max(0, Math.floor((now - startedAt) / 1_000)) : 0;
+}
+
+function elapsedLabel(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return minutes > 0 ? `${minutes} 分 ${rest} 秒` : `${rest} 秒`;
+}
+
+export function RunTimeline({
+  run,
+  events,
+}: {
+  readonly run: Run;
+  readonly events: readonly RunEvent[];
+}) {
+  const progress = buildRunProgress(events);
+  const isRunning = timedRunStatuses.has(run.status);
+  const isQueued = run.status === "queued";
+  const isWaiting = run.status === "waiting";
+  const showActivity = isRunning || isQueued;
+  const elapsed = useElapsedSeconds(run);
+  const isFailure = run.status === "failed" || run.status === "cancelled";
+  const summary = isFailure
+    ? run.status === "cancelled"
+      ? "运行已停止。你可以调整任务后再次发送。"
+      : "运行未完成。请稍后重试，或调整任务后再次发送。"
+    : isWaiting
+      ? "需要你的输入"
+      : isRunning
+        ? progress.currentAction
+        : isQueued
+          ? "正在排队，准备开始任务。"
+          : run.status === "succeeded"
+            ? "已完成本次任务。"
+            : "等待你的下一步输入。";
+  return (
+    <section
+      className={`run-progress ${showActivity ? "is-active" : ""} ${isFailure ? "is-failed" : ""}`}
+      aria-label="运行进度"
+      aria-live="polite"
+    >
+      <div className="run-progress-summary">
+        {showActivity ? (
+          <LoaderCircle className="spin" size={18} aria-hidden="true" />
+        ) : (
+          <ChevronRight size={18} aria-hidden="true" />
+        )}
+        <div>
+          <strong>{summary}</strong>
+          <span>
+            {isRunning ? `已运行 ${elapsedLabel(elapsed)} · ` : ""}已完成{" "}
+            {progress.steps.filter((step) => step.status === "completed").length} 步
+          </span>
+        </div>
+      </div>
+      {progress.steps.length > 0 && (
+        <details className="run-progress-history">
+          <summary>查看简要步骤</summary>
+          <ol>
+            {progress.steps.map((step) => (
+              <li key={step.id} className={`is-${step.status}`}>
+                <span>{step.label.replace("正在", "")}</span>
+                {step.count > 1 && <small>× {step.count}</small>}
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
+    </section>
   );
 }
 
-export function RunTimeline({ events }: { readonly events: readonly RunEvent[] }) {
-  if (events.length === 0) {
-    return (
-      <div className="conversation-empty" aria-live="polite">
-        <LoaderCircle className="spin" size={18} aria-hidden="true" />
-        <span>运行已创建，正在等待第一条活动。</span>
-      </div>
-    );
-  }
-  const entries = buildTimeline(events);
+export function RunTranscript({ events }: { readonly events: readonly RunEvent[] }) {
+  const progress = buildRunProgress(events);
+  if (progress.finalMessage === undefined && progress.waitingQuestion === undefined) return null;
   return (
-    <ol className="conversation-list" aria-label="运行对话">
-      {entries.map((entry) =>
-        entry.type === "assistant" ? (
-          <li key={entry.id} className="message assistant-message">
-            <span className="message-avatar" aria-hidden="true">
-              A
-            </span>
-            <div className="message-card">
-              <span className="message-label">Agent</span>
-              <p>{entry.text}</p>
-            </div>
-          </li>
-        ) : (
-          <li key={entry.event.eventId} className="activity-inline">
-            <ActivityIcon type={entry.event.type} />
-            <span>{eventSummary(entry.event)}</span>
-          </li>
-        ),
+    <section className="assistant-transcript" aria-label="Agent 正文">
+      {progress.finalMessage !== undefined && <AssistantMessage text={progress.finalMessage} />}
+      {progress.waitingQuestion !== undefined && (
+        <AssistantMessage label="需要你的输入" text={progress.waitingQuestion} />
       )}
-    </ol>
+    </section>
+  );
+}
+
+export function AssistantMessage({
+  text,
+  label = "Agent",
+}: {
+  readonly text: string;
+  readonly label?: string;
+}) {
+  return (
+    <article className="message assistant-message" aria-label={label}>
+      <span className="message-avatar" aria-hidden="true">
+        A
+      </span>
+      <div className="message-card">
+        <span className="message-label">{label}</span>
+        <AssistantMarkdown text={text} />
+      </div>
+    </article>
   );
 }
 
 /**
- * Artifact 归属于整次 Run 而不是单个流式事件；将其紧随对话展示，避免用户离开阅读路径才可操作交付物。
+ * Artifact 仍归属于整次 Run；抽屉用于集中操作，内联卡片保证交付物不会脱离 Agent 正文的阅读路径。
  */
 export function InlineArtifactDelivery({
   artifacts,
@@ -183,37 +271,130 @@ export function RunRecoveryLoading() {
 
 export function ActivityPanel({
   isOpen,
-  events,
-  modelWireTraces,
-  modelWireTraceHasMore,
-  modelWireTraceUnavailable,
+  artifacts,
+  modelWireTraces = [],
+  modelWireTraceHasMore = false,
+  modelWireTraceUnavailable = false,
   onToggle,
-  onLoadModelWireTrace,
-  onLoadMoreModelWireTraces,
+  onPreview,
+  onDownload,
+  onLoadModelWireTrace = async () => new Uint8Array(),
+  onLoadMoreModelWireTraces = async () => undefined,
+  returnFocusRef,
+  fallbackFocusRef,
 }: {
   readonly isOpen: boolean;
-  readonly events: readonly RunEvent[];
-  readonly modelWireTraces: readonly ModelWireTraceRecord[];
-  readonly modelWireTraceHasMore: boolean;
-  readonly modelWireTraceUnavailable: boolean;
+  readonly artifacts: readonly Artifact[];
+  readonly modelWireTraces?: readonly ModelWireTraceRecord[];
+  readonly modelWireTraceHasMore?: boolean;
+  readonly modelWireTraceUnavailable?: boolean;
   readonly onToggle: () => void;
-  readonly onLoadModelWireTrace: (record: ModelWireTraceRecord) => Promise<Uint8Array>;
-  readonly onLoadMoreModelWireTraces: () => Promise<void>;
+  readonly onPreview: (artifactId: string) => void;
+  readonly onDownload: (artifactId: string) => void;
+  readonly onLoadModelWireTrace?: (record: ModelWireTraceRecord) => Promise<Uint8Array>;
+  readonly onLoadMoreModelWireTraces?: () => Promise<void>;
+  readonly returnFocusRef: RefObject<HTMLButtonElement | null>;
+  readonly fallbackFocusRef: RefObject<HTMLElement | null>;
 }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const wasOpenRef = useRef(false);
+  const hasContents =
+    artifacts.length > 0 || modelWireTraces.length > 0 || modelWireTraceUnavailable;
+  const open = isOpen && hasContents;
+  const traceOnly = artifacts.length === 0;
+  const drawerLabel = traceOnly ? "本次运行模型网络诊断" : "本次运行产物与诊断";
+  const drawerAction = traceOnly ? "诊断抽屉" : "产物抽屉";
+  useEffect(() => {
+    if (open) {
+      wasOpenRef.current = true;
+      closeButtonRef.current?.focus();
+    } else if (wasOpenRef.current) {
+      wasOpenRef.current = false;
+      // 切换 Thread 后旧的产物入口可能已卸载，退回到中部工作区而非保留失效焦点。
+      const returnTarget = returnFocusRef.current;
+      if (returnTarget !== null) returnTarget.focus();
+      else fallbackFocusRef.current?.focus();
+    }
+  }, [fallbackFocusRef, open, returnFocusRef]);
+  if (!hasContents) return null;
   return (
-    <aside className={`activity-panel ${isOpen ? "" : "is-collapsed"}`} aria-label="运行活动与诊断">
+    <aside
+      className={`activity-panel ${open ? "" : "is-collapsed"}`}
+      aria-label={drawerLabel}
+      aria-hidden={!open || undefined}
+      inert={!open || undefined}
+      onKeyDown={(event) => {
+        if (open && event.key === "Escape") {
+          event.preventDefault();
+          onToggle();
+        }
+      }}
+    >
       <button
+        ref={closeButtonRef}
         className="panel-toggle icon-button"
         type="button"
         onClick={onToggle}
-        aria-expanded={isOpen}
-        aria-label={isOpen ? "收起活动侧栏" : "展开活动侧栏"}
-        title={isOpen ? "收起活动侧栏" : "展开活动侧栏"}
+        aria-expanded={open}
+        aria-label={open ? `关闭${drawerAction}` : `打开${drawerAction}`}
+        title={open ? `关闭${drawerAction}` : `打开${drawerAction}`}
       >
-        {isOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
+        {open ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
       </button>
-      {isOpen && (
+      {open && (
         <div className="activity-scroll">
+          <section className="activity-section" aria-labelledby="deliverable-title">
+            <div className="section-heading">
+              <div>
+                <span className="eyebrow">交付物</span>
+                <h2 id="deliverable-title">本次运行产物</h2>
+              </div>
+              <span className="count-badge">{artifacts.length}</span>
+            </div>
+            {artifacts.length === 0 ? (
+              <p className="panel-empty">尚未生成可交付的产物。</p>
+            ) : (
+              <ul className="artifact-list">
+                {artifacts.map((artifact) => (
+                  <li key={artifact.id}>
+                    <FileText size={17} aria-hidden="true" />
+                    <div className="artifact-details">
+                      <strong>{artifact.name}</strong>
+                      <small>
+                        {artifact.mediaType ?? "未知格式"} ·{" "}
+                        {artifact.status === "published" ? "可用" : artifact.status}
+                      </small>
+                    </div>
+                    <fieldset className="artifact-actions">
+                      <legend className="sr-only">{artifact.name} 操作</legend>
+                      {canPreviewArtifact(artifact.mediaType) && (
+                        <button
+                          type="button"
+                          className="icon-button"
+                          title="预览产物"
+                          aria-label={`预览 ${artifact.name}`}
+                          disabled={artifact.status !== "published"}
+                          onClick={() => onPreview(artifact.id)}
+                        >
+                          <Eye size={16} />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="icon-button"
+                        title="下载产物"
+                        aria-label={`下载 ${artifact.name}`}
+                        disabled={artifact.status !== "published"}
+                        onClick={() => onDownload(artifact.id)}
+                      >
+                        <Download size={16} />
+                      </button>
+                    </fieldset>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
           <ModelWireTracePanel
             records={modelWireTraces}
             hasMore={modelWireTraceHasMore}
@@ -221,27 +402,6 @@ export function ActivityPanel({
             onLoadBody={onLoadModelWireTrace}
             onLoadMore={onLoadMoreModelWireTraces}
           />
-          <section className="activity-section activity-log" aria-labelledby="activity-title">
-            <div className="section-heading">
-              <div>
-                <span className="eyebrow">活动</span>
-                <h2 id="activity-title">安全摘要</h2>
-              </div>
-              <span className="count-badge">{events.length}</span>
-            </div>
-            {events.length === 0 ? (
-              <p className="panel-empty">尚无运行活动。</p>
-            ) : (
-              <ol className="activity-list">
-                {events.map((event) => (
-                  <li key={event.eventId}>
-                    <ActivityIcon type={event.type} />
-                    <span>{eventSummary(event)}</span>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </section>
         </div>
       )}
     </aside>
@@ -271,6 +431,7 @@ export function ConversationComposer({
         placeholder="描述你希望 Agent 完成的任务…"
         rows={3}
         disabled={disabled}
+        style={{ resize: composerTextareaResize }}
         onKeyDown={(event) => {
           if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
             event.preventDefault();
@@ -298,55 +459,29 @@ export function ThreadNavigation({ children }: { readonly children: ReactNode })
 }
 
 export function ThreadCreate({
-  title,
   actionLoading,
-  onChange,
   onCreate,
 }: {
-  readonly title: string;
   readonly actionLoading: boolean;
-  readonly onChange: (value: string) => void;
   readonly onCreate: () => void;
 }) {
-  const canCreate = canCreateThread(title, actionLoading);
-  const submissionInFlightRef = useRef(actionLoading);
-  useEffect(() => {
-    submissionInFlightRef.current = actionLoading;
-  }, [actionLoading]);
   const requestCreate = () => {
-    if (!canCreate || submissionInFlightRef.current) return;
-    // React 提交状态写回前也可能连续收到键盘事件，本地栅栏同步阻止同一标题重入。
-    submissionInFlightRef.current = true;
+    if (actionLoading) return;
     onCreate();
   };
   return (
     <div className="thread-create">
-      <label className="sr-only" htmlFor="thread-title">
-        新建会话标题
-      </label>
-      <input
-        id="thread-title"
-        data-navigation-initial-focus
-        value={title}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && canCreate) {
-            event.preventDefault();
-            requestCreate();
-          }
-        }}
-        placeholder="新建会话标题"
-        disabled={actionLoading}
-      />
       <button
+        data-navigation-initial-focus
         type="button"
-        className="icon-button"
-        title="创建会话"
-        aria-label="创建会话"
+        className="new-thread-button"
+        title="新建会话"
+        aria-label="新建会话"
         onClick={requestCreate}
-        disabled={!canCreate}
+        disabled={actionLoading}
       >
         <MessageSquarePlus size={17} />
+        新建会话
       </button>
     </div>
   );
@@ -425,15 +560,25 @@ export function NavigationSidebar({
 export function ThreadHeader({
   thread,
   run,
+  artifactCount,
+  modelWireTraceCount = 0,
+  modelWireTraceUnavailable = false,
   actionLoading,
   onArchive,
   onCancel,
+  onOpenArtifacts,
+  artifactTriggerRef,
 }: {
   readonly thread: Thread;
   readonly run: Run | undefined;
+  readonly artifactCount: number;
+  readonly modelWireTraceCount?: number;
+  readonly modelWireTraceUnavailable?: boolean;
   readonly actionLoading: boolean;
   readonly onArchive: () => void;
   readonly onCancel: () => void;
+  readonly onOpenArtifacts: () => void;
+  readonly artifactTriggerRef: RefObject<HTMLButtonElement | null>;
 }) {
   return (
     <header className="conversation-header">
@@ -449,7 +594,7 @@ export function ThreadHeader({
         </div>
       </div>
       <div className="header-actions">
-        {run && activeRunStatuses.has(run.status) && (
+        {run && cancellableRunStatuses.has(run.status) && (
           <button
             type="button"
             className="quiet-button"
@@ -460,15 +605,41 @@ export function ThreadHeader({
             停止运行
           </button>
         )}
+        {artifactCount > 0 ? (
+          <button
+            ref={artifactTriggerRef}
+            type="button"
+            className="quiet-button artifact-entry-button"
+            onClick={onOpenArtifacts}
+            aria-label={`打开本次运行产物，共 ${artifactCount} 个`}
+            title="查看本次运行产物"
+          >
+            <Package size={15} />
+            产物 <span>{artifactCount}</span>
+          </button>
+        ) : modelWireTraceCount > 0 || modelWireTraceUnavailable ? (
+          <button
+            ref={artifactTriggerRef}
+            type="button"
+            className="quiet-button artifact-entry-button"
+            onClick={onOpenArtifacts}
+            aria-label="打开本次运行模型网络诊断"
+            title="查看本次运行模型网络诊断"
+          >
+            <Package size={15} />
+            诊断
+          </button>
+        ) : null}
         <button
           type="button"
-          className="icon-button"
+          className="quiet-button archive-button"
           title="归档会话"
           aria-label="归档会话"
           onClick={onArchive}
           disabled={actionLoading}
         >
           <Archive size={17} />
+          归档
         </button>
       </div>
     </header>

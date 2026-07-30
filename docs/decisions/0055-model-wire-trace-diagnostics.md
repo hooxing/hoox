@@ -26,7 +26,10 @@ Provider 的 application request body bytes，也无法复现 SSE 分片、非 2
   `model-wire-traces/<runId>/<attemptId>/`。目录只能由已验证的 context 与固定根派生；文件名稳定包含
   model turn、transport attempt、part、capture status，并保留 request JSON 或 response SSE 原始字节。
   文件先在目标目录以 0600 临时文件完整写入并同步，再用不覆盖的 hard link 原子发布；同字节重放成功，
-  异字节冲突保留原文件。镜像失败被隔离，不能使权威持久化降级为 capture failure。
+  异字节冲突保留原文件。项目目录先解析成受信 real root，再逐级创建并核对 mirror root、run 与 attempt；
+  任一级 symlink、junction、非目录 reparse 重定向、realpath 越界或目标文件链接都失败关闭。Linux 额外使用
+  `O_DIRECTORY | O_NOFOLLOW` 打开的目录句柄，并经 `/proc/self/fd/<fd>` 完成后续逐级打开与文件发布，
+  使检查后的路径名替换不会改变已经固定的父目录 inode。镜像失败被隔离，不能使权威持久化降级为 capture failure。
 - 维护者读取入口必须经过既有认证、Membership/RLS 与 Run 归属校验，并只允许读取该表引用的
   trace Blob；不得根据普通 Artifact id 或全文搜索发现这些报文。
 
@@ -55,7 +58,17 @@ Response，以及索引幂等、引用释放、共享 lifecycle、跨租户隔�
 
 项目目录镜像只是本机开发排障副本，不具备租户 ACL、Web/API 读取、retention、Blob lifecycle 或备份语义；
 PG/MinIO 仍是 UI、授权、保留和清理的唯一权威存储。production 装配永远不创建该镜像，即使未来允许生产
-采集开关；测试还覆盖镜像磁盘失败不影响权威端口、固定路径不能被 context 逃逸，以及原子幂等冲突不覆盖。
+采集开关；测试还覆盖镜像磁盘失败不影响权威端口、固定路径不能被 context 逃逸、root/run/attempt 上的
+Windows junction 与 WSL/Linux symlink，以及原子幂等冲突不覆盖。
+
+Node core 当前没有跨平台 `openat`，Windows 也未公开 `FILE_FLAG_OPEN_REPARSE_POINT` 或目录句柄相对创建接口。
+因此 Windows 采用逐级 `lstat`、`realpath` 等值、受信 real root containment，并在临时文件创建、hard link
+发布前后重复核验；这能拒绝静态 symlink/junction 和会改变 realpath 的重定向 reparse point，但不能证明抵抗
+具有同一开发账户目录写权限的恶意进程在核验间实施的瞬时替换，也无法识别 realpath 不变且 Node 不报告为
+symbolic link 的非重定向 reparse tag。该剩余限制只存在于默认关闭的本机开发副本；Linux 缺少 `/proc/self/fd`
+或 no-follow flags 时直接放弃镜像，不回退到易受竞态影响的路径写入。Linux 目录句柄会在发布前后反查并要求
+仍等于最初逐级打开的 realpath；Node 仍没有阻止同一开发账户在两次核验之间 rename 已打开目录的原语，因而
+不能把本地副本提升为面对同账户恶意进程的安全存储。以上任一异常都只放弃镜像，PG/MinIO 权威诊断仍继续。
 
 到期墓碑不含正文、HTTP 状态、run/thread 或物理键，只保留 tenant、attempt/turn/part、命令摘要与
 Blob operation 摘要身份。它与 `blob_commits` 的永久幂等事实同寿命，不能按普通 retention 删除；

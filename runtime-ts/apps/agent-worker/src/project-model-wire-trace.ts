@@ -1,7 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { link, mkdir, open, readFile, unlink } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import {
+  type FileHandle,
+  link,
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  realpath,
+  unlink,
+} from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertModelWireTraceContext,
@@ -9,29 +18,54 @@ import {
   type ModelWireTraceRecord,
 } from "./model-wire-trace.js";
 
-export const PROJECT_MODEL_WIRE_TRACE_ROOT = fileURLToPath(
-  new URL("../../../../model-wire-traces/", import.meta.url),
-);
+const PROJECT_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
+export const PROJECT_MODEL_WIRE_TRACE_ROOT = join(PROJECT_ROOT, "model-wire-traces");
+const captureStatuses = new Set(["complete", "truncated", "aborted", "failed"]);
+
+interface OpenMirrorDirectory {
+  readonly path: string;
+  readonly verify: () => Promise<void>;
+  readonly close: () => Promise<void>;
+}
 
 /**
  * 将开发诊断同步镜像到固定项目目录。目标文件只通过同目录 hard link 原子发布；相同字节
  * 可幂等重放，不同字节绝不覆盖已有排障证据。
  */
 export class ProjectModelWireTraceMirror implements ModelWireTracePort {
-  readonly #root: string;
+  readonly #trustedBase: string;
+  readonly #rootSegments: readonly string[];
 
-  constructor(root = PROJECT_MODEL_WIRE_TRACE_ROOT) {
-    if (!isAbsolute(root)) throw new TypeError("模型网络本地镜像根目录必须是绝对路径");
-    this.#root = resolve(root);
+  constructor(root = PROJECT_MODEL_WIRE_TRACE_ROOT, trustedBase = dirname(root)) {
+    if (!isAbsolute(root) || !isAbsolute(trustedBase))
+      throw new TypeError("模型网络本地镜像根目录必须是绝对路径");
+    const lexicalBase = resolve(trustedBase);
+    const lexicalRoot = resolve(root);
+    const rootRelative = relative(lexicalBase, lexicalRoot);
+    if (!isContainedRelative(rootRelative))
+      throw new TypeError("模型网络本地镜像根目录越出受信边界");
+    const segments = rootRelative.split(sep).filter((segment) => segment.length > 0);
+    if (segments.length === 0 || segments.some((segment) => segment === "." || segment === ".."))
+      throw new TypeError("模型网络本地镜像根目录无效");
+    this.#trustedBase = lexicalBase;
+    this.#rootSegments = Object.freeze(segments);
   }
 
   async persist(record: ModelWireTraceRecord): Promise<void> {
     assertMirrorRecord(record);
-    const directory = join(this.#root, record.context.runId, record.context.attemptId);
-    const extension = record.part === "request" ? "json" : "sse";
-    const turn = String(record.modelTurn).padStart(2, "0");
-    const filename = `model-turn-${turn}-transport-${record.transportAttempt}-${record.part}-${record.status}.${extension}`;
-    await writeOnceAtomically(join(directory, filename), record.body);
+    const directory = await openMirrorDirectory(this.#trustedBase, [
+      ...this.#rootSegments,
+      record.context.runId,
+      record.context.attemptId,
+    ]);
+    try {
+      const extension = record.part === "request" ? "json" : "sse";
+      const turn = String(record.modelTurn).padStart(2, "0");
+      const filename = `model-turn-${turn}-transport-${record.transportAttempt}-${record.part}-${record.status}.${extension}`;
+      await writeOnceAtomically(directory, filename, record.body);
+    } finally {
+      await directory.close().catch(() => undefined);
+    }
   }
 
   async captureFailed(): Promise<void> {
@@ -66,29 +100,118 @@ class BestEffortMirroredModelWireTracePort implements ModelWireTracePort {
 export function withDevelopmentProjectModelWireTraceMirror(
   runtimeMode: "development" | "production",
   authoritative: ModelWireTracePort,
-  createMirror: () => ModelWireTracePort = () => new ProjectModelWireTraceMirror(),
+  createMirror: () => ModelWireTracePort = () =>
+    new ProjectModelWireTraceMirror(PROJECT_MODEL_WIRE_TRACE_ROOT, PROJECT_ROOT),
 ): ModelWireTracePort {
   if (runtimeMode !== "development") return authoritative;
   return new BestEffortMirroredModelWireTracePort(authoritative, createMirror());
 }
 
-async function writeOnceAtomically(target: string, body: Uint8Array): Promise<void> {
-  await mkdir(dirname(target), { recursive: true });
-  const temporary = join(
-    dirname(target),
-    `.${basename(target)}.${process.pid}.${randomUUID()}.tmp`,
-  );
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
+async function openMirrorDirectory(
+  trustedBase: string,
+  segments: readonly string[],
+): Promise<OpenMirrorDirectory> {
+  const realBase = await realpath(trustedBase);
+  if (process.platform === "linux") return openLinuxMirrorDirectory(realBase, segments);
+  return openPortableMirrorDirectory(realBase, segments);
+}
+
+/**
+ * Node 尚未公开 openat；Linux 使用 O_NOFOLLOW 目录句柄和 /proc/self/fd 相对路径保持父目录
+ * inode 打开，避免检查后的 root/run/attempt 被替换为链接。
+ */
+async function openLinuxMirrorDirectory(
+  realBase: string,
+  segments: readonly string[],
+): Promise<OpenMirrorDirectory> {
+  const noFollow = requiredFlag("O_NOFOLLOW");
+  const directoryFlag = requiredFlag("O_DIRECTORY");
+  let current = await open(realBase, constants.O_RDONLY | noFollow | directoryFlag);
+  let expected = realBase;
   try {
+    await assertOpenDirectory(current, realBase, realBase);
+    for (const segment of segments) {
+      const childPath = `/proc/self/fd/${current.fd}/${segment}`;
+      const expectedChild = join(expected, segment);
+      await createDirectory(childPath);
+      await assertPlainDirectory(childPath);
+      const child = await open(childPath, constants.O_RDONLY | noFollow | directoryFlag);
+      try {
+        await assertOpenDirectory(child, realBase, expectedChild);
+      } catch (error) {
+        await child.close().catch(() => undefined);
+        throw error;
+      }
+      await current.close();
+      current = child;
+      expected = expectedChild;
+    }
+    const handle = current;
+    const expectedDirectory = expected;
+    return Object.freeze({
+      path: `/proc/self/fd/${handle.fd}`,
+      verify: async () => assertOpenDirectory(handle, realBase, expectedDirectory),
+      close: async () => handle.close(),
+    });
+  } catch (error) {
+    await current.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function openPortableMirrorDirectory(
+  realBase: string,
+  segments: readonly string[],
+): Promise<OpenMirrorDirectory> {
+  const verify = async () => {
+    let current = realBase;
+    for (const segment of segments) {
+      const child = join(current, segment);
+      await assertPlainDirectory(child);
+      const realChild = await realpath(child);
+      assertContained(realBase, realChild);
+      if (!samePath(child, realChild)) throw new Error("LOCAL_MODEL_WIRE_TRACE_LINK_FORBIDDEN");
+      current = realChild;
+    }
+  };
+  let current = realBase;
+  for (const segment of segments) {
+    const child = join(current, segment);
+    await createDirectory(child);
+    await assertPlainDirectory(child);
+    const realChild = await realpath(child);
+    assertContained(realBase, realChild);
+    if (!samePath(child, realChild)) throw new Error("LOCAL_MODEL_WIRE_TRACE_LINK_FORBIDDEN");
+    current = realChild;
+  }
+  await verify();
+  return Object.freeze({ path: current, verify, close: async () => undefined });
+}
+
+async function writeOnceAtomically(
+  directory: OpenMirrorDirectory,
+  filename: string,
+  body: Uint8Array,
+): Promise<void> {
+  await directory.verify();
+  const target = join(directory.path, filename);
+  const temporary = join(
+    directory.path,
+    `.${basename(filename)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  let handle: FileHandle | undefined;
+  try {
+    const noFollow = optionalFlag("O_NOFOLLOW");
     handle = await open(
       temporary,
-      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | noFollow,
       0o600,
     );
     await handle.writeFile(body);
     await handle.sync();
     await handle.close();
     handle = undefined;
+    await directory.verify();
     try {
       await link(temporary, target);
     } catch (error) {
@@ -96,6 +219,11 @@ async function writeOnceAtomically(target: string, body: Uint8Array): Promise<vo
         throw new Error("LOCAL_MODEL_WIRE_TRACE_CONFLICT", { cause: error });
       }
     }
+    await directory.verify();
+    const realTarget = await realpath(target);
+    const realDirectory = await realpath(directory.path);
+    assertContained(realDirectory, realTarget);
+    await directory.verify();
   } finally {
     await handle?.close().catch(() => undefined);
     await unlink(temporary).catch(() => undefined);
@@ -103,18 +231,85 @@ async function writeOnceAtomically(target: string, body: Uint8Array): Promise<vo
 }
 
 async function sameBytes(target: string, expected: Uint8Array): Promise<boolean> {
-  const actual = await readFile(target).catch(() => undefined);
-  return (
-    actual !== undefined && actual.byteLength === expected.byteLength && actual.equals(expected)
-  );
+  const noFollow = optionalFlag("O_NOFOLLOW");
+  const targetStats = await lstat(target).catch(() => undefined);
+  if (targetStats === undefined || targetStats.isSymbolicLink() || !targetStats.isFile())
+    return false;
+  const handle = await open(target, constants.O_RDONLY | noFollow).catch(() => undefined);
+  if (handle === undefined) return false;
+  try {
+    const actual = await readFile(handle);
+    return actual.byteLength === expected.byteLength && actual.equals(expected);
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
+async function createDirectory(path: string): Promise<void> {
+  try {
+    await mkdir(path, { mode: 0o700 });
+  } catch (error) {
+    if (!hasCode(error, "EEXIST")) throw error;
+  }
+}
+
+async function assertPlainDirectory(path: string): Promise<void> {
+  const stats = await lstat(path);
+  if (stats.isSymbolicLink() || !stats.isDirectory())
+    throw new Error("LOCAL_MODEL_WIRE_TRACE_LINK_FORBIDDEN");
+}
+
+async function assertOpenDirectory(
+  handle: FileHandle,
+  trustedRealBase: string,
+  expectedPath?: string,
+): Promise<void> {
+  const stats = await handle.stat();
+  if (!stats.isDirectory()) throw new Error("LOCAL_MODEL_WIRE_TRACE_LINK_FORBIDDEN");
+  const actual = await realpath(`/proc/self/fd/${handle.fd}`);
+  assertContained(trustedRealBase, actual);
+  if (expectedPath !== undefined && !samePath(expectedPath, actual))
+    throw new Error("LOCAL_MODEL_WIRE_TRACE_LINK_FORBIDDEN");
+}
+
+function assertContained(trustedRealBase: string, candidate: string): void {
+  if (!isContainedRelative(relative(trustedRealBase, candidate)))
+    throw new Error("LOCAL_MODEL_WIRE_TRACE_PATH_ESCAPE");
+}
+
+function isContainedRelative(value: string): boolean {
+  return value === "" || (!isAbsolute(value) && value !== ".." && !value.startsWith(`..${sep}`));
+}
+
+function samePath(left: string, right: string): boolean {
+  const normalizedLeft = resolve(left);
+  const normalizedRight = resolve(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function requiredFlag(name: "O_NOFOLLOW" | "O_DIRECTORY"): number {
+  const value = constants[name];
+  if (typeof value !== "number") throw new Error(`LOCAL_MODEL_WIRE_TRACE_${name}_UNAVAILABLE`);
+  return value;
+}
+
+function optionalFlag(name: "O_NOFOLLOW"): number {
+  const value = constants[name];
+  return typeof value === "number" ? value : 0;
 }
 
 function isAlreadyExists(error: unknown): boolean {
+  return hasCode(error, "EEXIST");
+}
+
+function hasCode(error: unknown, code: string): boolean {
   return (
     typeof error === "object" &&
     error !== null &&
     "code" in error &&
-    (error as { readonly code?: unknown }).code === "EEXIST"
+    (error as { readonly code?: unknown }).code === code
   );
 }
 
@@ -126,8 +321,7 @@ function assertMirrorRecord(record: ModelWireTraceRecord): void {
     throw new TypeError("模型网络本地镜像传输次数无效");
   if (record.part !== "request" && record.part !== "response")
     throw new TypeError("模型网络本地镜像 part 无效");
-  if (!new Set(["complete", "truncated", "aborted", "failed"]).has(record.status))
-    throw new TypeError("模型网络本地镜像状态无效");
+  if (!captureStatuses.has(record.status)) throw new TypeError("模型网络本地镜像状态无效");
   if (!(record.body instanceof Uint8Array) || record.size !== record.body.byteLength)
     throw new TypeError("模型网络本地镜像正文无效");
 }

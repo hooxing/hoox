@@ -181,25 +181,26 @@ describe("Agent 工作台恢复接入", () => {
     const selectedThread = thread("thread_trace_poll");
     const activeRun = { ...run("run_trace_poll", selectedThread.id), status: "running" as const };
     const terminalRun = { ...activeRun, status: "succeeded" as const };
-    const firstPage = Array.from({ length: 500 }, (_, index) => modelWireTrace(index));
-    const tail = modelWireTrace(500);
-    const burstTail = Array.from({ length: 500 }, (_, index) => modelWireTrace(index + 501));
-    const finalTail = modelWireTrace(1_001);
+    // hasMore 才是服务端分页边界；精确 500 条由 reducer 测试覆盖，这里缩小 DOM 以隔离轮询调度。
+    const firstPage = [modelWireTrace(0), modelWireTrace(1)];
+    const tail = modelWireTrace(2);
+    const burstTail = [modelWireTrace(3), modelWireTrace(4)];
+    const finalTail = modelWireTrace(5);
     let headRequestCount = 0;
     const listModelWireTraces = vi.fn(
       async (_threadId: string, _runId: string, cursor?: string) => {
-        if (cursor === "cursor_500") {
+        if (cursor === "cursor_2") {
           return {
-            items: [firstPage[499] as ModelWireTraceRecord, tail],
+            items: [firstPage[1] as ModelWireTraceRecord, tail],
             hasMore: false,
-            nextCursor: "cursor_501",
+            nextCursor: "cursor_3",
           };
         }
-        if (cursor === "cursor_501") {
-          return { items: burstTail, hasMore: true, nextCursor: "cursor_1001" };
+        if (cursor === "cursor_3") {
+          return { items: burstTail, hasMore: true, nextCursor: "cursor_5" };
         }
-        if (cursor === "cursor_1001") {
-          return { items: [finalTail], hasMore: false, nextCursor: "cursor_1002" };
+        if (cursor === "cursor_5") {
+          return { items: [finalTail], hasMore: false, nextCursor: "cursor_6" };
         }
         headRequestCount += 1;
         return {
@@ -217,7 +218,7 @@ describe("Agent 工作台恢复接入", () => {
                     : record,
                 ),
           hasMore: true,
-          nextCursor: headRequestCount === 1 ? "cursor_500" : "cursor_refreshed_head",
+          nextCursor: headRequestCount === 1 ? "cursor_2" : "cursor_refreshed_head",
         };
       },
     );
@@ -234,37 +235,33 @@ describe("Agent 工作台恢复接入", () => {
     const { container } = mount(apiClient);
     await settleEffects();
 
-    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(500);
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(2);
     const loadMore = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (button) => button.textContent === "加载更多",
     );
     if (loadMore === undefined) throw new Error("未渲染模型网络诊断加载更多按钮");
     await act(async () => loadMore.click());
     await settleEffects();
-    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(501);
-    expect(container.querySelectorAll('[aria-label="模型轮次 500"]')).toHaveLength(1);
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(3);
+    expect(container.querySelectorAll('[aria-label="模型轮次 2"]')).toHaveLength(1);
 
     await act(async () => vi.advanceTimersByTimeAsync(1_200));
     await settleEffects();
 
     expect(listModelWireTraces).toHaveBeenCalledTimes(4);
-    expect(listModelWireTraces).toHaveBeenCalledWith(selectedThread.id, activeRun.id, "cursor_501");
-    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(1_001);
-    expect(container.querySelectorAll('[aria-label="模型轮次 500"]')).toHaveLength(1);
-    expect(container.querySelectorAll('[aria-label="模型轮次 1000"]')).toHaveLength(1);
+    expect(listModelWireTraces).toHaveBeenCalledWith(selectedThread.id, activeRun.id, "cursor_3");
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(5);
+    expect(container.querySelectorAll('[aria-label="模型轮次 2"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[aria-label="模型轮次 4"]')).toHaveLength(1);
     expect(container.querySelectorAll(".model-wire-record.is-truncated")).toHaveLength(1);
 
     await act(async () => vi.advanceTimersByTimeAsync(1_200));
     await settleEffects();
 
     expect(listModelWireTraces).toHaveBeenCalledTimes(6);
-    expect(listModelWireTraces).toHaveBeenCalledWith(
-      selectedThread.id,
-      activeRun.id,
-      "cursor_1001",
-    );
-    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(1_002);
-    expect(container.querySelectorAll('[aria-label="模型轮次 1001"]')).toHaveLength(1);
+    expect(listModelWireTraces).toHaveBeenCalledWith(selectedThread.id, activeRun.id, "cursor_5");
+    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(6);
+    expect(container.querySelectorAll('[aria-label="模型轮次 5"]')).toHaveLength(1);
     expect(container.textContent).not.toContain("加载更多");
     expect(vi.getTimerCount()).toBe(0);
   });

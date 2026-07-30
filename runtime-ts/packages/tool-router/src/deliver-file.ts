@@ -2,6 +2,10 @@ import type {
   ArtifactExecutionAuthorization,
   ArtifactExecutionAuthorizationVerifierPort,
 } from "@cube-runtime/artifact";
+import {
+  SimpleDeliveryCleanupResultUnknownError,
+  SimpleDeliveryCommitResultUnknownError,
+} from "@cube-runtime/artifact";
 import type { ArtifactId, ResourceVersionId, Sha256Digest } from "@cube-runtime/domain";
 import {
   type DeliverFileToolArguments,
@@ -76,6 +80,8 @@ export type DeliverFileErrorCode =
   | "NOT_REGULAR_FILE"
   | "NOT_AUTHORIZED"
   | "PUBLICATION_FAILED"
+  | "PUBLICATION_RESULT_UNKNOWN"
+  | "CLEANUP_RESULT_UNKNOWN"
   | "SERVICE_UNAVAILABLE";
 
 export class DeliverFileError extends Error {
@@ -83,10 +89,20 @@ export class DeliverFileError extends Error {
     readonly code: DeliverFileErrorCode,
     message: string,
     readonly correctable: boolean,
+    readonly fatal = false,
   ) {
     super(message);
     this.name = "DeliverFileError";
   }
+}
+
+export interface DeliverFileFailureProjection {
+  readonly status: "failed";
+  readonly code: DeliverFileErrorCode;
+  readonly message: string;
+  readonly correctable: boolean;
+  /** true 时 Tool 层必须先持久化 failed tool_result，再拒绝本轮模型 continuation。 */
+  readonly fatal: boolean;
 }
 
 export interface DeliverFileToolRouterPort {
@@ -95,12 +111,7 @@ export interface DeliverFileToolRouterPort {
     readonly arguments: unknown;
     readonly signal?: AbortSignal;
   }): Promise<DeliverFileSuccess>;
-  projectError(error: unknown): Readonly<{
-    status: "failed";
-    code: DeliverFileErrorCode;
-    message: string;
-    correctable: boolean;
-  }>;
+  projectError(error: unknown): Readonly<DeliverFileFailureProjection>;
 }
 
 export interface DeliverFileToolRouterFactoryPort {
@@ -194,6 +205,22 @@ class DeliverFileToolRouter implements DeliverFileToolRouterPort {
       });
     } catch (error) {
       if (error instanceof DeliverFileError) throw error;
+      if (error instanceof SimpleDeliveryCommitResultUnknownError) {
+        throw new DeliverFileError(
+          "PUBLICATION_RESULT_UNKNOWN",
+          "文件发布结果未知，需要恢复后确认",
+          false,
+          true,
+        );
+      }
+      if (error instanceof SimpleDeliveryCleanupResultUnknownError) {
+        throw new DeliverFileError(
+          "CLEANUP_RESULT_UNKNOWN",
+          "文件发布清理结果未知，需要恢复后确认",
+          false,
+          true,
+        );
+      }
       throw new DeliverFileError("PUBLICATION_FAILED", "文件未能保存为可下载交付物", true);
     }
   }
@@ -205,6 +232,7 @@ class DeliverFileToolRouter implements DeliverFileToolRouterPort {
       code: safe.code,
       message: safe.message,
       correctable: safe.correctable,
+      fatal: safe.fatal,
     });
   }
 

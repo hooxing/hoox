@@ -4,6 +4,7 @@ import { CopyObjectCommand, DeleteObjectCommand, S3Client } from "@aws-sdk/clien
 import { encodeControlledToolReceipt, ToolObservationPipeline } from "@cube-runtime/context-policy";
 import {
   agentThreadId,
+  artifactId,
   isoTimestamp,
   runId,
   sha256Digest,
@@ -42,10 +43,13 @@ import {
   FakeRevisionVerifier,
 } from "../../runtime-ts/apps/agent-worker/src/testing/fakes.js";
 import {
+  ArtifactDeliveryService,
   createArtifactExecutionAuthorizationAuthority,
+  PgArtifactDeliveryRepository,
   PgSimpleDeliveredFileRepository,
   SimpleArtifactDeliveryService,
 } from "../../runtime-ts/packages/artifact/src/index.js";
+import { DeliverFileToolRouterFactory } from "../../runtime-ts/packages/tool-router/src/deliver-file.js";
 import {
   createS3BlobStore,
   createS3RetiredBlobTombstoneScrubber,
@@ -416,7 +420,7 @@ async function preparePromotion(
 }
 
 describe("PostgreSQL stable blob 生命周期", () => {
-  it("deliver_file 最终事务确定失败后以 released 事实回收真实 MinIO stable Blob", async () => {
+  it("deliver_file 清理失败后由 released anchor 周期恢复真实 MinIO stable Blob", async () => {
     const idempotencyKey = `delivery-failed-${unique}`;
     const body = new TextEncoder().encode(`delivery-cleanup-${unique}`);
     const digest = sha256Digest(createHash("sha256").update("delivery-cleanup").digest("hex"));
@@ -452,14 +456,12 @@ describe("PostgreSQL stable blob 生命周期", () => {
     });
     const config = minioConfig();
     const store = createS3BlobStore(config, repository);
+    const failedGcWriter = new DurableResourceBlobWriter(repository, store, 1024 * 1024, {
+      collectIfUnreachable: async () => Promise.reject(new Error("模拟首次 GC 不可用")),
+    });
     const service = new SimpleArtifactDeliveryService(
       new PgSimpleDeliveredFileRepository(runtimePool),
-      new DurableResourceBlobWriter(
-        repository,
-        store,
-        1024 * 1024,
-        createS3StableBlobGarbageCollector(config, repository),
-      ),
+      failedGcWriter,
     );
 
     await expect(
@@ -471,7 +473,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
         name: "failed-delivery.txt",
         body,
       }),
-    ).rejects.toThrow("DELIVER_FILE_COMMIT_FAILED");
+    ).rejects.toThrow("DELIVER_FILE_CLEANUP_RESULT_UNKNOWN");
 
     const operationDigest = createHash("sha256")
       .update(`${scopeA.tenantId}\0${idempotencyKey}`, "utf8")
@@ -490,7 +492,56 @@ describe("PostgreSQL stable blob 生命周期", () => {
         [scopeA.tenantId, `deliver-${operationDigest}`],
       ),
     );
-    expect(released.rows).toEqual([{ state: "released", lifecycle_state: "deleted" }]);
+    expect(released.rows).toEqual([{ state: "released", lifecycle_state: "active" }]);
+    const recovery = new DurableResourceBlobWriter(
+      repository,
+      store,
+      1024 * 1024,
+      createS3StableBlobGarbageCollector(config, repository),
+    );
+    await expect(
+      recovery.recoverPending({
+        tenantId: scopeA.tenantId,
+        limit: 8,
+        orphanGraceSeconds: 1,
+      }),
+    ).resolves.toMatchObject({ claimed: 1, converged: 1 });
+    const recovered = await withTenantTransaction(runtimePool, scopeA, (client) =>
+      client.query<{ readonly state: string; readonly lifecycle_state: string }>(
+        `SELECT reference.state,lifecycle.state AS lifecycle_state
+           FROM blob_references reference
+           JOIN blob_lifecycles lifecycle
+             ON lifecycle.tenant_id=reference.tenant_id
+            AND lifecycle.lifecycle_id=reference.lifecycle_id
+          WHERE reference.tenant_id=$1 AND reference.operation_id=$2`,
+        [scopeA.tenantId, `deliver-${operationDigest}`],
+      ),
+    );
+    expect(recovered.rows).toEqual([{ state: "released", lifecycle_state: "deleted" }]);
+
+    const crashKey = `delivery-abandon-crash-${unique}`;
+    const crashed = await recovery.persist({
+      tenantId: scopeA.tenantId,
+      idempotencyKey: crashKey,
+      body: new TextEncoder().encode(`delivery-abandon-crash-${unique}`),
+      sha256: sha256Hex(new TextEncoder().encode(`delivery-abandon-crash-${unique}`)),
+      mediaType: "text/plain; charset=utf-8",
+    });
+    await withTenantTransaction(runtimePool, scopeA, (client) =>
+      client.query(
+        `UPDATE blob_references SET updated_at=clock_timestamp()-interval '10 seconds'
+          WHERE tenant_id=$1 AND reference_id=$2`,
+        [scopeA.tenantId, crashed.referenceId],
+      ),
+    );
+    await expect(
+      recovery.recoverPending({
+        tenantId: scopeA.tenantId,
+        limit: 8,
+        orphanGraceSeconds: 1,
+      }),
+    ).resolves.toMatchObject({ claimed: 1, converged: 1 });
+    expect(await store.head(scopeA, crashed.blob)).toBeUndefined();
   });
 
   it("开发 Agent Worker 入口装配真实 PG、S3 Observation 与 Pi 恢复依赖", async () => {
@@ -573,7 +624,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
         checkpointId: "initial",
         items: Object.freeze([]),
       });
-      const inputText = "执行一次受控命令后完成";
+      const inputText = "执行一次受控命令并交付生成文件后完成";
       await withTenantTransaction(
         runtimePool,
         { tenantId: scopeA.tenantId, userId: actorUserId },
@@ -632,6 +683,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
             { templateId: "worker-vertical-template", ttlSeconds: 120 },
             { signal },
           );
+          await sandbox.writeFile("/workspace/vertical.txt", "vertical-deliver-file");
           sandboxSequence += 1;
           return {
             outcome: "ready",
@@ -656,7 +708,15 @@ describe("PostgreSQL stable blob 生命周期", () => {
       });
       faux.setResponses([
         fauxAssistantMessage(
-          fauxToolCall("sandbox_command", { command: "printf vertical" }, { id: `call_${label}` }),
+          fauxToolCall("exec_command", { cmd: "printf vertical" }, { id: `call_exec_${label}` }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage(
+          fauxToolCall(
+            "deliver_file",
+            { path: "/workspace/vertical.txt" },
+            { id: `call_deliver_${label}` },
+          ),
           { stopReason: "toolUse" },
         ),
         fauxAssistantMessage("完成"),
@@ -670,18 +730,49 @@ describe("PostgreSQL stable blob 生命周期", () => {
       const blobRepository = new PgBlobLifecycleRepository(runtimePool, {
         objectPrefix: prefix,
       });
+      const blobStore = createS3BlobStore(minioConfig(), blobRepository);
       const durableObservation = createPgDurableObservationSession({
         blobRepository,
-        blobs: createS3BlobStore(minioConfig(), blobRepository),
+        blobs: blobStore,
         rolloutRepository: new PgRuntimeRolloutRepository(runtimePool),
         policy: { maxModelObservationBytes: 64 },
+      });
+      const artifactAuthorization = createArtifactExecutionAuthorizationAuthority();
+      const resourceBlobs = new DurableResourceBlobWriter(
+        blobRepository,
+        blobStore,
+        1024 * 1024,
+        createS3StableBlobGarbageCollector(minioConfig(), blobRepository),
+      );
+      const deliverFileTools = new DeliverFileToolRouterFactory({
+        source: {
+          read: async ({ binding, absolutePath }) => {
+            try {
+              const content = await binding.sandbox.sandbox.readFile(absolutePath);
+              return {
+                outcome: "found" as const,
+                relativePath: absolutePath.slice("/workspace/".length),
+                body: new TextEncoder().encode(content),
+              };
+            } catch {
+              return { outcome: "not_found" as const };
+            }
+          },
+        },
+        publications: new SimpleArtifactDeliveryService(
+          new PgSimpleDeliveredFileRepository(runtimePool),
+          resourceBlobs,
+        ),
+        authorizationVerifier: artifactAuthorization.verifier,
       });
       const sessions = new PiWorkerSessionFactory(
         faux.getModel(),
         modelRuntime,
         durableObservation.createRecorder,
-        undefined,
+        artifactAuthorization.issuer,
         durableObservation.prepare,
+        undefined,
+        deliverFileTools,
       );
       const sandboxes = new PgBackedSandboxSessionRegistry(runtimePool, upstream, 120);
       const worker = new RunWorker(
@@ -727,18 +818,19 @@ describe("PostgreSQL stable blob 生命周期", () => {
       } finally {
         await loop.close();
       }
-      expect(faux.state.callCount).toBe(2);
+      expect(faux.state.callCount).toBe(3);
       const facts = await withTenantTransaction(
         runtimePool,
         { tenantId: scopeA.tenantId, userId: actorUserId },
         async (client) =>
           client.query<{
             kind: string;
+            tool_name: string | null;
             blob_reference_id: string | null;
             blob_state: string | null;
             blob_purpose: string | null;
           }>(
-            `SELECT entry.kind,entry.blob_reference_id,
+            `SELECT entry.kind,entry.body->>'toolName' AS tool_name,entry.blob_reference_id,
                     reference.state AS blob_state,reference.purpose AS blob_purpose
                FROM runtime_rollout_entries entry
                LEFT JOIN blob_references reference
@@ -748,9 +840,53 @@ describe("PostgreSQL stable blob 生命周期", () => {
             [scopeA.tenantId, executionScope.runId],
           ),
       );
-      expect(facts.rows.map((row) => row.kind)).toEqual(["tool_call", "tool_result"]);
-      expect(facts.rows[1]).toMatchObject({ blob_state: "stable", blob_purpose: "trace" });
-      expect(facts.rows[1]?.blob_reference_id).toBeTypeOf("string");
+      expect(facts.rows.map((row) => row.kind)).toEqual([
+        "tool_call",
+        "tool_result",
+        "tool_call",
+        "tool_result",
+      ]);
+      expect(facts.rows.map((row) => row.tool_name)).toEqual([
+        "exec_command",
+        "exec_command",
+        "deliver_file",
+        "deliver_file",
+      ]);
+      expect(facts.rows[3]).toMatchObject({ blob_state: "stable", blob_purpose: "trace" });
+      expect(facts.rows[3]?.blob_reference_id).toBeTypeOf("string");
+
+      const published = await withTenantTransaction(
+        runtimePool,
+        { tenantId: scopeA.tenantId, userId: actorUserId },
+        (client) =>
+          client.query<{ readonly artifact_id: string; readonly target: string }>(
+            `SELECT publication.id AS artifact_id,settlement.target
+               FROM artifact_publications publication
+               JOIN artifact_publication_settlements settlement
+                 ON settlement.tenant_id=publication.tenant_id
+                AND settlement.artifact_id=publication.id
+              WHERE publication.tenant_id=$1 AND publication.run_id=$2`,
+            [scopeA.tenantId, executionScope.runId],
+          ),
+      );
+      expect(published.rows).toHaveLength(1);
+      expect(published.rows[0]?.target).toBe("published");
+      const artifactService = new ArtifactDeliveryService(
+        new PgArtifactDeliveryRepository(runtimePool, artifactAuthorization.verifier),
+        blobStore,
+        {
+          runtimeMode: "development",
+          allowInsecureHttpDownload: true,
+          executionAuthorizationVerifier: artifactAuthorization.verifier,
+        },
+      );
+      const download = await artifactService.createDownload({
+        request: { tenantId: tenantId(scopeA.tenantId), userId: actorUserId },
+        artifactId: artifactId(String(published.rows[0]?.artifact_id)),
+      });
+      const response = await fetch(download.url);
+      expect(response.status).toBe(200);
+      expect(await response.text()).toBe("vertical-deliver-file");
     },
   );
 

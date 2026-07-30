@@ -55,6 +55,22 @@ export interface SimpleResourceBlobWriterPort {
   }): Promise<"released" | "still_referenced">;
 }
 
+/** 发布未形成确定结果且清理也未能收敛；Attempt 必须进入恢复，不能让模型重试猜测。 */
+export class SimpleDeliveryCleanupResultUnknownError extends Error {
+  constructor() {
+    super("DELIVER_FILE_CLEANUP_RESULT_UNKNOWN");
+    this.name = "SimpleDeliveryCleanupResultUnknownError";
+  }
+}
+
+/** PG COMMIT 已发送，但规范读回不可用；只能恢复后按原幂等身份确认。 */
+export class SimpleDeliveryCommitResultUnknownError extends Error {
+  constructor() {
+    super("DELIVER_FILE_COMMIT_RESULT_UNKNOWN");
+    this.name = "SimpleDeliveryCommitResultUnknownError";
+  }
+}
+
 /** deliver_file 的应用服务：先固定字节，再原子提交 ResourceVersion 与 published Artifact。 */
 export class SimpleArtifactDeliveryService {
   constructor(
@@ -118,12 +134,15 @@ export class SimpleArtifactDeliveryService {
       });
     } catch (error) {
       // abandon 内部以 PG 规范引用做 guarded release；若 COMMIT 实际成功，只会返回 still_referenced。
-      await this.blobs
-        .abandon({
+      try {
+        await this.blobs.abandon({
           tenantId: input.authorization.scope.tenantId,
           persisted,
-        })
-        .catch(() => undefined);
+        });
+      } catch {
+        if (error instanceof SimpleDeliveryCommitResultUnknownError) throw error;
+        throw new SimpleDeliveryCleanupResultUnknownError();
+      }
       throw error;
     }
   }

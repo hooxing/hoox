@@ -82,14 +82,44 @@ describe("DurableResourceBlobWriter abandon", () => {
     );
     expect(released).toBe(true);
   });
+
+  it("周期恢复会重新领取 released anchor，并在后续 GC 可用时收敛", async () => {
+    let gcCalls = 0;
+    const writer = createWriter(
+      {
+        releaseUnattachedResourceReference: async () => "released",
+        claimPendingResourceBlobCleanup: async () => [persisted],
+      },
+      {
+        collectIfUnreachable: async () => {
+          gcCalls += 1;
+          if (gcCalls === 1) throw new Error("S3_UNAVAILABLE");
+          return "deleted";
+        },
+      },
+    );
+
+    await expect(writer.abandon({ tenantId: persisted.blob.tenantId, persisted })).rejects.toThrow(
+      "S3_UNAVAILABLE",
+    );
+    await expect(writer.recoverPending({ tenantId: persisted.blob.tenantId })).resolves.toEqual({
+      claimed: 1,
+      converged: 1,
+    });
+    expect(gcCalls).toBe(2);
+  });
 });
 
 function createWriter(
-  repository: Pick<ResourceBlobCommitRepository, "releaseUnattachedResourceReference">,
+  repository: Pick<ResourceBlobCommitRepository, "releaseUnattachedResourceReference"> &
+    Partial<Pick<ResourceBlobCommitRepository, "claimPendingResourceBlobCleanup">>,
   gc: StableBlobGcPort,
 ): DurableResourceBlobWriter {
   return new DurableResourceBlobWriter(
-    repository as ResourceBlobCommitRepository,
+    {
+      claimPendingResourceBlobCleanup: async () => [],
+      ...repository,
+    } as ResourceBlobCommitRepository,
     {} as BlobStore,
     1024,
     gc,

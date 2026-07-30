@@ -58,9 +58,17 @@ ResourceVersion 和 Artifact replacement 都不是模型应当控制的协议字
   `still_referenced`，不得删除对象；若 GC 暂时失败，`released` 事实允许后续恢复，不会把远端对象重新视为可达。
 - continuation window 只保护 Router 在许可消费后立即开始首个 Sandbox 副作用；Sandbox 读取和 Blob promotion 可以超过
   该短窗口。最终发布事务改用 PG `lockExecutionBoundary` 锁后重验 run、attempt、permit、claim 与 lease。
+- PG COMMIT unknown 且规范读回不可用时，Router 投影 `PUBLICATION_RESULT_UNKNOWN`、`fatal=true`；清理结果
+  unknown 则投影 `CLEANUP_RESULT_UNKNOWN`、`fatal=true`。Tool 层必须先形成 durable failed `tool_result`，再拒绝
+  continuation，使 Attempt 进入 recovery，绝不能把它们伪装成可修正 `PUBLICATION_FAILED` 后继续下一次 Provider。
+- `abandon` 失败不再静默吞掉。PG 中的 exact `blob_reference` 本身是恢复 anchor：Worker 周期扫描 `deliver-*` 的
+  `released` 引用，以及超过五分钟仍未绑定 ResourceVersion/Artifact 的 stable 引用；领取时在租户事务中锁定并
+  原子转为 `released`，随后按固定 incarnation/physical key 重试 GC。GC 再次失败时保留 anchor 给下一 poll；仍在
+  正常发布窗口内的 stable 引用不会被提前领取。
 - 自动化测试覆盖模型描述、只允许 `path/name`、绝对 Workspace 路径、`FILE_NOT_FOUND`、published 回执，以及 Run
   completion 不再调用旧门。
-- production/development 共用同一装配；真实 PostgreSQL、S3、CubeSandbox 与下载读侧 E2E 在整合分支执行。
+- production/development 共用同一装配；Linux Worker 纵向 Gate 使用当前 `exec_command → deliver_file` 工具链、
+  真实 Router、PostgreSQL/MinIO publication，并通过下载授权 URL 读回同一字节。
 
 ## 可逆性
 

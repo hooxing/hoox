@@ -15,6 +15,8 @@ import { describe, expect, it } from "vitest";
 import { createArtifactExecutionAuthorizationAuthority } from "./authorization.js";
 import {
   SimpleArtifactDeliveryService,
+  SimpleDeliveryCleanupResultUnknownError,
+  SimpleDeliveryCommitResultUnknownError,
   type SimpleDeliveredFileRepositoryPort,
 } from "./simple-delivery.js";
 
@@ -122,6 +124,66 @@ describe("SimpleArtifactDeliveryService", () => {
         persisted: expect.objectContaining({ referenceId: persisted.referenceId }),
       },
     ]);
+  });
+
+  it("guarded release 或 GC 未收敛时抛恢复哨兵，不把孤儿清理失败吞掉", async () => {
+    const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 100 });
+    const argsDigest = sha256Digest("e".repeat(64));
+    const authorization = authority.issuer.issue({
+      attemptId: "attempt-simple-delivery",
+      consumed: consumed(argsDigest),
+    });
+    const service = new SimpleArtifactDeliveryService(
+      { commit: async () => Promise.reject(new Error("DELIVER_FILE_COMMIT_FAILED")) },
+      {
+        persist: async () => ({
+          referenceId: "reference-cleanup-unknown",
+          blob: stable(scope.tenantId, "f".repeat(64), 3, "application/pdf"),
+        }),
+        abandon: async () => Promise.reject(new Error("GC_RESULT_UNKNOWN")),
+      },
+    );
+
+    await expect(
+      service.publish({
+        authorization,
+        idempotencyKey: "call-simple-delivery",
+        toolArgsDigest: argsDigest,
+        sourcePath: "report.pdf",
+        name: "report.pdf",
+        body: new Uint8Array([1, 2, 3]),
+      }),
+    ).rejects.toBeInstanceOf(SimpleDeliveryCleanupResultUnknownError);
+  });
+
+  it("COMMIT unknown 即使伴随 cleanup unknown 也保留发布结果未知哨兵", async () => {
+    const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 100 });
+    const argsDigest = sha256Digest("1".repeat(64));
+    const authorization = authority.issuer.issue({
+      attemptId: "attempt-simple-delivery",
+      consumed: consumed(argsDigest),
+    });
+    const service = new SimpleArtifactDeliveryService(
+      { commit: async () => Promise.reject(new SimpleDeliveryCommitResultUnknownError()) },
+      {
+        persist: async () => ({
+          referenceId: "reference-commit-unknown",
+          blob: stable(scope.tenantId, "2".repeat(64), 3, "application/pdf"),
+        }),
+        abandon: async () => Promise.reject(new Error("cleanup unavailable")),
+      },
+    );
+
+    await expect(
+      service.publish({
+        authorization,
+        idempotencyKey: "call-simple-delivery",
+        toolArgsDigest: argsDigest,
+        sourcePath: "report.pdf",
+        name: "report.pdf",
+        body: new Uint8Array([1, 2, 3]),
+      }),
+    ).rejects.toBeInstanceOf(SimpleDeliveryCommitResultUnknownError);
   });
 
   it("continuation window 在 249ms 仍有效，250ms 与 251ms 均关闭", () => {

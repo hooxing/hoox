@@ -22,6 +22,11 @@ export type ResourceBlobCommitRepository = BlobCommitStatePort &
       readonly referenceId: string;
       readonly blob: StableBlobRef & { readonly purpose: "resource" };
     }): Promise<"released" | "still_referenced">;
+    claimPendingResourceBlobCleanup(input: {
+      readonly scope: { readonly tenantId: string };
+      readonly limit: number;
+      readonly orphanGraceSeconds: number;
+    }): Promise<readonly PersistResourceBlobResult[]>;
   };
 
 export interface PersistResourceBlobResult {
@@ -56,6 +61,46 @@ export class DurableResourceBlobWriter {
       await this.gc.collectIfUnreachable(scope, input.persisted.blob);
     }
     return released;
+  }
+
+  /**
+   * Worker 周期恢复：released 引用会持续重试 GC；超过 grace 且始终未形成规范绑定的
+   * deliver-* stable 引用也会先原子转为 released，覆盖进程在 abandon 前退出的窗口。
+   */
+  async recoverPending(input: {
+    readonly tenantId: string;
+    readonly limit?: number;
+    readonly orphanGraceSeconds?: number;
+  }): Promise<{ readonly claimed: number; readonly converged: number }> {
+    if (this.gc === undefined) throw new Error("RESOURCE_BLOB_GC_UNAVAILABLE");
+    const limit = input.limit ?? 16;
+    const orphanGraceSeconds = input.orphanGraceSeconds ?? 300;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
+      throw new TypeError("Resource Blob cleanup limit 无效");
+    }
+    if (
+      !Number.isSafeInteger(orphanGraceSeconds) ||
+      orphanGraceSeconds < 1 ||
+      orphanGraceSeconds > 86_400
+    ) {
+      throw new TypeError("Resource Blob cleanup grace 无效");
+    }
+    const scope = { tenantId: input.tenantId };
+    const pending = await this.repository.claimPendingResourceBlobCleanup({
+      scope,
+      limit,
+      orphanGraceSeconds,
+    });
+    let converged = 0;
+    for (const item of pending) {
+      try {
+        const outcome = await this.gc.collectIfUnreachable(scope, item.blob);
+        if (outcome === "deleted" || outcome === "still_referenced") converged += 1;
+      } catch {
+        // exact reference 已是 released；保留 durable anchor，下一次 poll 继续同一物理身份。
+      }
+    }
+    return { claimed: pending.length, converged };
   }
 
   async persist(input: {

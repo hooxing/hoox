@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Artifact, RunEvent } from "./api.js";
 import {
   ActivityPanel,
+  InlineArtifactDelivery,
   NavigationSidebar,
   RunStatusBadge,
   RunTimeline,
@@ -35,18 +36,14 @@ describe("工作台展示组件", () => {
         payload: { name: "read_file", callId: "call-1", secret: "不应展示" },
       },
     ];
-    const artifacts: readonly Artifact[] = [];
     const html = renderToStaticMarkup(
       <ActivityPanel
         isOpen
         events={events}
-        artifacts={artifacts}
         modelWireTraces={[]}
         modelWireTraceHasMore={false}
         modelWireTraceUnavailable={false}
         onToggle={() => undefined}
-        onPreview={() => undefined}
-        onDownload={() => undefined}
         onLoadModelWireTrace={async () => new Uint8Array()}
         onLoadMoreModelWireTraces={async () => undefined}
       />,
@@ -54,6 +51,31 @@ describe("工作台展示组件", () => {
 
     expect(html).toContain("工具 read_file（call-1）完成");
     expect(html).not.toContain("不应展示");
+  });
+
+  it("交付物在 Agent 回复区内联展示，并保留预览和下载操作", () => {
+    const artifacts: readonly Artifact[] = [
+      {
+        id: "artifact-1",
+        name: "结果.txt",
+        mediaType: "text/plain; charset=utf-8",
+        status: "published",
+        createdAt: "",
+        updatedAt: "",
+      },
+    ];
+    const html = renderToStaticMarkup(
+      <InlineArtifactDelivery
+        artifacts={artifacts}
+        onPreview={() => undefined}
+        onDownload={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("inline-artifact-delivery");
+    expect(html).toContain("本次回复的可下载产物");
+    expect(html).toContain('aria-label="预览 结果.txt"');
+    expect(html).toContain('aria-label="下载 结果.txt"');
   });
 
   it("没有事件时显示运行中的明确空态", () => {

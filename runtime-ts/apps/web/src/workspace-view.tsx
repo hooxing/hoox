@@ -93,6 +93,71 @@ export function RunTimeline({ events }: { readonly events: readonly RunEvent[] }
   );
 }
 
+/**
+ * Artifact 归属于整次 Run 而不是单个流式事件；将其紧随对话展示，避免用户离开阅读路径才可操作交付物。
+ */
+export function InlineArtifactDelivery({
+  artifacts,
+  onPreview,
+  onDownload,
+}: {
+  readonly artifacts: readonly Artifact[];
+  readonly onPreview: (artifactId: string) => void;
+  readonly onDownload: (artifactId: string) => void;
+}) {
+  if (artifacts.length === 0) return null;
+  return (
+    <section className="inline-artifact-delivery" aria-labelledby="inline-deliverable-title">
+      <div className="inline-artifact-heading">
+        <div>
+          <span className="message-label">Agent 交付物</span>
+          <h2 id="inline-deliverable-title">本次回复的可下载产物</h2>
+        </div>
+        <span className="count-badge">{artifacts.length}</span>
+      </div>
+      <ul className="artifact-list inline-artifact-list">
+        {artifacts.map((artifact) => (
+          <li key={artifact.id}>
+            <FileText size={17} aria-hidden="true" />
+            <div className="artifact-details">
+              <strong>{artifact.name}</strong>
+              <small>
+                {artifact.mediaType ?? "未知格式"} ·{" "}
+                {artifact.status === "published" ? "可用" : artifact.status}
+              </small>
+            </div>
+            <fieldset className="artifact-actions">
+              <legend className="sr-only">{artifact.name} 操作</legend>
+              {canPreviewArtifact(artifact.mediaType) && (
+                <button
+                  type="button"
+                  className="icon-button"
+                  title="预览产物"
+                  aria-label={`预览 ${artifact.name}`}
+                  disabled={artifact.status !== "published"}
+                  onClick={() => onPreview(artifact.id)}
+                >
+                  <Eye size={16} />
+                </button>
+              )}
+              <button
+                type="button"
+                className="icon-button"
+                title="下载产物"
+                aria-label={`下载 ${artifact.name}`}
+                disabled={artifact.status !== "published"}
+                onClick={() => onDownload(artifact.id)}
+              >
+                <Download size={16} />
+              </button>
+            </fieldset>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
 export function EmptyConversation() {
   return (
     <div className="conversation-empty welcome-empty">
@@ -119,33 +184,24 @@ export function RunRecoveryLoading() {
 export function ActivityPanel({
   isOpen,
   events,
-  artifacts,
   modelWireTraces,
   modelWireTraceHasMore,
   modelWireTraceUnavailable,
   onToggle,
-  onPreview,
-  onDownload,
   onLoadModelWireTrace,
   onLoadMoreModelWireTraces,
 }: {
   readonly isOpen: boolean;
   readonly events: readonly RunEvent[];
-  readonly artifacts: readonly Artifact[];
   readonly modelWireTraces: readonly ModelWireTraceRecord[];
   readonly modelWireTraceHasMore: boolean;
   readonly modelWireTraceUnavailable: boolean;
   readonly onToggle: () => void;
-  readonly onPreview: (artifactId: string) => void;
-  readonly onDownload: (artifactId: string) => void;
   readonly onLoadModelWireTrace: (record: ModelWireTraceRecord) => Promise<Uint8Array>;
   readonly onLoadMoreModelWireTraces: () => Promise<void>;
 }) {
   return (
-    <aside
-      className={`activity-panel ${isOpen ? "" : "is-collapsed"}`}
-      aria-label="运行活动与交付物"
-    >
+    <aside className={`activity-panel ${isOpen ? "" : "is-collapsed"}`} aria-label="运行活动与诊断">
       <button
         className="panel-toggle icon-button"
         type="button"
@@ -158,58 +214,6 @@ export function ActivityPanel({
       </button>
       {isOpen && (
         <div className="activity-scroll">
-          <section className="activity-section" aria-labelledby="deliverable-title">
-            <div className="section-heading">
-              <div>
-                <span className="eyebrow">交付物</span>
-                <h2 id="deliverable-title">本次运行产物</h2>
-              </div>
-              <span className="count-badge">{artifacts.length}</span>
-            </div>
-            {artifacts.length === 0 ? (
-              <p className="panel-empty">尚未生成可交付的产物。</p>
-            ) : (
-              <ul className="artifact-list">
-                {artifacts.map((artifact) => (
-                  <li key={artifact.id}>
-                    <FileText size={17} aria-hidden="true" />
-                    <div className="artifact-details">
-                      <strong>{artifact.name}</strong>
-                      <small>
-                        {artifact.mediaType ?? "未知格式"} ·{" "}
-                        {artifact.status === "published" ? "可用" : artifact.status}
-                      </small>
-                    </div>
-                    <fieldset className="artifact-actions">
-                      <legend className="sr-only">{artifact.name} 操作</legend>
-                      {canPreviewArtifact(artifact.mediaType) && (
-                        <button
-                          type="button"
-                          className="icon-button"
-                          title="预览产物"
-                          aria-label={`预览 ${artifact.name}`}
-                          disabled={artifact.status !== "published"}
-                          onClick={() => onPreview(artifact.id)}
-                        >
-                          <Eye size={16} />
-                        </button>
-                      )}
-                      <button
-                        type="button"
-                        className="icon-button"
-                        title="下载产物"
-                        aria-label={`下载 ${artifact.name}`}
-                        disabled={artifact.status !== "published"}
-                        onClick={() => onDownload(artifact.id)}
-                      >
-                        <Download size={16} />
-                      </button>
-                    </fieldset>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </section>
           <ModelWireTracePanel
             records={modelWireTraces}
             hasMore={modelWireTraceHasMore}

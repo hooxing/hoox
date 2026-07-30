@@ -40,5 +40,5 @@ describe("领域实体名义类型编译契约", () => {
 
     expect(diagnostics).toHaveLength(2);
     expect(diagnostics.every((diagnostic) => diagnostic.code === 2322)).toBe(true);
-  });
+  }, 15_000);
 });

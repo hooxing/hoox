@@ -11,21 +11,24 @@ import {
   PanelRightOpen,
   Send,
   Square,
-  Wrench,
 } from "lucide-react";
-import { type FormEventHandler, type ReactNode, type RefObject, useEffect, useRef } from "react";
+import {
+  type FormEventHandler,
+  type ReactNode,
+  type RefObject,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   type Artifact,
   canPreviewArtifact,
-  type ModelWireTraceRecord,
   type Run,
   type RunEvent,
   type RunStatus,
   type Thread,
 } from "./api.js";
-import { buildTimeline, eventSummary } from "./event-view.js";
-import { AssistantMarkdown } from "./markdown-view.js";
-import { ModelWireTracePanel } from "./model-wire-trace-view.js";
+import { buildRunProgress } from "./event-view.js";
 
 export const activeRunStatuses = new Set<RunStatus>(["queued", "running", "waiting"]);
 export const compactWorkspaceMedia = "(max-width: 820px)";
@@ -34,8 +37,9 @@ export function canCreateThread(title: string, actionLoading: boolean): boolean 
   return title.trim().length > 0 && !actionLoading;
 }
 
-export function shouldOpenActivityPanel(isCompact: boolean): boolean {
-  return !isCompact;
+export function shouldOpenActivityPanel(_isCompact: boolean): boolean {
+  // 无产物时侧栏收敛；首个产物到达后由工作台自动展开。
+  return false;
 }
 
 const statusLabel: Record<RunStatus, string> = {
@@ -52,109 +56,84 @@ export function RunStatusBadge({ status }: { readonly status: RunStatus | undefi
   return <span className={`run-status is-${status}`}>{statusLabel[status]}</span>;
 }
 
-function ActivityIcon({ type }: { readonly type: string }) {
-  return type.startsWith("tool.") ? (
-    <Wrench size={15} aria-hidden="true" />
-  ) : (
-    <ChevronRight size={15} aria-hidden="true" />
-  );
+function useElapsedSeconds(run: Run | undefined): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (run === undefined || !activeRunStatuses.has(run.status)) return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [run]);
+  if (run === undefined) return 0;
+  const startedAt = Date.parse(run.createdAt);
+  return Number.isFinite(startedAt) ? Math.max(0, Math.floor((now - startedAt) / 1_000)) : 0;
 }
 
-export function RunTimeline({ events }: { readonly events: readonly RunEvent[] }) {
-  if (events.length === 0) {
-    return (
-      <div className="conversation-empty" aria-live="polite">
-        <LoaderCircle className="spin" size={18} aria-hidden="true" />
-        <span>运行已创建，正在等待第一条活动。</span>
-      </div>
-    );
-  }
-  const entries = buildTimeline(events);
-  return (
-    <ol className="conversation-list" aria-label="运行对话">
-      {entries.map((entry) =>
-        entry.type === "assistant" ? (
-          <li key={entry.id} className="message assistant-message">
-            <span className="message-avatar" aria-hidden="true">
-              A
-            </span>
-            <div className="message-card">
-              <span className="message-label">Agent</span>
-              <AssistantMarkdown text={entry.text} />
-            </div>
-          </li>
-        ) : (
-          <li key={entry.event.eventId} className="activity-inline">
-            <ActivityIcon type={entry.event.type} />
-            <span>{eventSummary(entry.event)}</span>
-          </li>
-        ),
-      )}
-    </ol>
-  );
+function elapsedLabel(seconds: number): string {
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return minutes > 0 ? `${minutes} 分 ${rest} 秒` : `${rest} 秒`;
 }
 
-/**
- * Artifact 归属于整次 Run 而不是单个流式事件；将其紧随对话展示，避免用户离开阅读路径才可操作交付物。
- */
-export function InlineArtifactDelivery({
-  artifacts,
-  onPreview,
-  onDownload,
+export function RunTimeline({
+  run,
+  events,
 }: {
-  readonly artifacts: readonly Artifact[];
-  readonly onPreview: (artifactId: string) => void;
-  readonly onDownload: (artifactId: string) => void;
+  readonly run: Run;
+  readonly events: readonly RunEvent[];
 }) {
-  if (artifacts.length === 0) return null;
+  const progress = buildRunProgress(events);
+  const active = activeRunStatuses.has(run.status);
+  const elapsed = useElapsedSeconds(run);
+  const isFailure = run.status === "failed" || run.status === "cancelled";
+  const summary = isFailure
+    ? run.status === "cancelled"
+      ? "运行已停止。你可以调整任务后再次发送。"
+      : "运行未完成。请稍后重试，或调整任务后再次发送。"
+    : active
+      ? progress.currentAction
+      : run.status === "succeeded"
+        ? "已完成本次任务。"
+        : "等待你的下一步输入。";
   return (
-    <section className="inline-artifact-delivery" aria-labelledby="inline-deliverable-title">
-      <div className="inline-artifact-heading">
+    <section
+      className={`run-progress ${active ? "is-active" : ""} ${isFailure ? "is-failed" : ""}`}
+      aria-label="运行进度"
+      aria-live="polite"
+    >
+      <div className="run-progress-summary">
+        {active ? (
+          <LoaderCircle className="spin" size={18} aria-hidden="true" />
+        ) : (
+          <ChevronRight size={18} aria-hidden="true" />
+        )}
         <div>
-          <span className="message-label">Agent 交付物</span>
-          <h2 id="inline-deliverable-title">本次回复的可下载产物</h2>
+          <strong>{summary}</strong>
+          <span>
+            {active ? `已运行 ${elapsedLabel(elapsed)} · ` : ""}已完成{" "}
+            {progress.steps.filter((step) => step.status === "completed").length} 步
+          </span>
         </div>
-        <span className="count-badge">{artifacts.length}</span>
       </div>
-      <ul className="artifact-list inline-artifact-list">
-        {artifacts.map((artifact) => (
-          <li key={artifact.id}>
-            <FileText size={17} aria-hidden="true" />
-            <div className="artifact-details">
-              <strong>{artifact.name}</strong>
-              <small>
-                {artifact.mediaType ?? "未知格式"} ·{" "}
-                {artifact.status === "published" ? "可用" : artifact.status}
-              </small>
-            </div>
-            <fieldset className="artifact-actions">
-              <legend className="sr-only">{artifact.name} 操作</legend>
-              {canPreviewArtifact(artifact.mediaType) && (
-                <button
-                  type="button"
-                  className="icon-button"
-                  title="预览产物"
-                  aria-label={`预览 ${artifact.name}`}
-                  disabled={artifact.status !== "published"}
-                  onClick={() => onPreview(artifact.id)}
-                >
-                  <Eye size={16} />
-                </button>
-              )}
-              <button
-                type="button"
-                className="icon-button"
-                title="下载产物"
-                aria-label={`下载 ${artifact.name}`}
-                disabled={artifact.status !== "published"}
-                onClick={() => onDownload(artifact.id)}
-              >
-                <Download size={16} />
-              </button>
-            </fieldset>
-          </li>
-        ))}
-      </ul>
+      {progress.steps.length > 0 && (
+        <details className="run-progress-history">
+          <summary>查看简要步骤</summary>
+          <ol>
+            {progress.steps.map((step) => (
+              <li key={step.id} className={`is-${step.status}`}>
+                <span>{step.label.replace("正在", "")}</span>
+                {step.count > 1 && <small>× {step.count}</small>}
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
+      {!active && progress.finalMessage !== undefined && (
+        <div className="final-answer">
+          <span>最终结果</span>
+          <p>{progress.finalMessage}</p>
+        </div>
+      )}
     </section>
   );
 }
@@ -184,63 +163,85 @@ export function RunRecoveryLoading() {
 
 export function ActivityPanel({
   isOpen,
-  events,
-  modelWireTraces,
-  modelWireTraceHasMore,
-  modelWireTraceUnavailable,
+  artifacts,
   onToggle,
-  onLoadModelWireTrace,
-  onLoadMoreModelWireTraces,
+  onPreview,
+  onDownload,
 }: {
   readonly isOpen: boolean;
-  readonly events: readonly RunEvent[];
-  readonly modelWireTraces: readonly ModelWireTraceRecord[];
-  readonly modelWireTraceHasMore: boolean;
-  readonly modelWireTraceUnavailable: boolean;
+  readonly artifacts: readonly Artifact[];
   readonly onToggle: () => void;
-  readonly onLoadModelWireTrace: (record: ModelWireTraceRecord) => Promise<Uint8Array>;
-  readonly onLoadMoreModelWireTraces: () => Promise<void>;
+  readonly onPreview: (artifactId: string) => void;
+  readonly onDownload: (artifactId: string) => void;
 }) {
+  const open = isOpen && artifacts.length > 0;
   return (
-    <aside className={`activity-panel ${isOpen ? "" : "is-collapsed"}`} aria-label="运行活动与诊断">
+    <aside
+      className={`activity-panel ${open ? "" : "is-collapsed"} ${artifacts.length === 0 ? "is-empty" : ""}`}
+      aria-label="本次运行产物"
+    >
       <button
         className="panel-toggle icon-button"
         type="button"
         onClick={onToggle}
-        aria-expanded={isOpen}
-        aria-label={isOpen ? "收起活动侧栏" : "展开活动侧栏"}
-        title={isOpen ? "收起活动侧栏" : "展开活动侧栏"}
+        aria-expanded={open}
+        aria-label={open ? "收起产物侧栏" : "展开产物侧栏"}
+        title={open ? "收起产物侧栏" : "展开产物侧栏"}
       >
-        {isOpen ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
+        {open ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
       </button>
-      {isOpen && (
+      {open && (
         <div className="activity-scroll">
-          <ModelWireTracePanel
-            records={modelWireTraces}
-            hasMore={modelWireTraceHasMore}
-            unavailable={modelWireTraceUnavailable}
-            onLoadBody={onLoadModelWireTrace}
-            onLoadMore={onLoadMoreModelWireTraces}
-          />
-          <section className="activity-section activity-log" aria-labelledby="activity-title">
+          <section className="activity-section" aria-labelledby="deliverable-title">
             <div className="section-heading">
               <div>
-                <span className="eyebrow">活动</span>
-                <h2 id="activity-title">安全摘要</h2>
+                <span className="eyebrow">交付物</span>
+                <h2 id="deliverable-title">本次运行产物</h2>
               </div>
-              <span className="count-badge">{events.length}</span>
+              <span className="count-badge">{artifacts.length}</span>
             </div>
-            {events.length === 0 ? (
-              <p className="panel-empty">尚无运行活动。</p>
+            {artifacts.length === 0 ? (
+              <p className="panel-empty">尚未生成可交付的产物。</p>
             ) : (
-              <ol className="activity-list">
-                {events.map((event) => (
-                  <li key={event.eventId}>
-                    <ActivityIcon type={event.type} />
-                    <span>{eventSummary(event)}</span>
+              <ul className="artifact-list">
+                {artifacts.map((artifact) => (
+                  <li key={artifact.id}>
+                    <FileText size={17} aria-hidden="true" />
+                    <div className="artifact-details">
+                      <strong>{artifact.name}</strong>
+                      <small>
+                        {artifact.mediaType ?? "未知格式"} ·{" "}
+                        {artifact.status === "published" ? "可用" : artifact.status}
+                      </small>
+                    </div>
+                    <fieldset className="artifact-actions">
+                      <legend className="sr-only">{artifact.name} 操作</legend>
+                      {canPreviewArtifact(artifact.mediaType) && (
+                        <button
+                          type="button"
+                          className="icon-button"
+                          title="预览产物"
+                          aria-label={`预览 ${artifact.name}`}
+                          disabled={artifact.status !== "published"}
+                          onClick={() => onPreview(artifact.id)}
+                        >
+                          <Eye size={16} />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        className="icon-button"
+                        title="下载产物"
+                        aria-label={`下载 ${artifact.name}`}
+                        disabled={artifact.status !== "published"}
+                        onClick={() => onDownload(artifact.id)}
+                      >
+                        <Download size={16} />
+                      </button>
+                    </fieldset>
                   </li>
                 ))}
-              </ol>
+              </ul>
             )}
           </section>
         </div>
@@ -299,55 +300,35 @@ export function ThreadNavigation({ children }: { readonly children: ReactNode })
 }
 
 export function ThreadCreate({
-  title,
   actionLoading,
-  onChange,
   onCreate,
 }: {
-  readonly title: string;
   readonly actionLoading: boolean;
-  readonly onChange: (value: string) => void;
   readonly onCreate: () => void;
 }) {
-  const canCreate = canCreateThread(title, actionLoading);
   const submissionInFlightRef = useRef(actionLoading);
   useEffect(() => {
     submissionInFlightRef.current = actionLoading;
   }, [actionLoading]);
   const requestCreate = () => {
-    if (!canCreate || submissionInFlightRef.current) return;
-    // React 提交状态写回前也可能连续收到键盘事件，本地栅栏同步阻止同一标题重入。
+    if (actionLoading || submissionInFlightRef.current) return;
+    // React 提交状态写回前也可能连续点击，本地栅栏同步阻止新会话重入。
     submissionInFlightRef.current = true;
     onCreate();
   };
   return (
     <div className="thread-create">
-      <label className="sr-only" htmlFor="thread-title">
-        新建会话标题
-      </label>
-      <input
-        id="thread-title"
-        data-navigation-initial-focus
-        value={title}
-        onChange={(event) => onChange(event.target.value)}
-        onKeyDown={(event) => {
-          if (event.key === "Enter" && canCreate) {
-            event.preventDefault();
-            requestCreate();
-          }
-        }}
-        placeholder="新建会话标题"
-        disabled={actionLoading}
-      />
       <button
+        data-navigation-initial-focus
         type="button"
-        className="icon-button"
-        title="创建会话"
-        aria-label="创建会话"
+        className="new-thread-button"
+        title="新建会话"
+        aria-label="新建会话"
         onClick={requestCreate}
-        disabled={!canCreate}
+        disabled={actionLoading}
       >
         <MessageSquarePlus size={17} />
+        新建会话
       </button>
     </div>
   );

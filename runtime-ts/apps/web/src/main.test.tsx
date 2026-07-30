@@ -3,15 +3,8 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  ApiError,
-  type Artifact,
-  type ModelWireTraceRecord,
-  type Run,
-  type RunEvent,
-  type Thread,
-} from "./api.js";
-import { App, chooseInitialThread } from "./main.js";
+import { ApiError, type Artifact, type Run, type Thread } from "./api.js";
+import { App, chooseInitialThread, deriveThreadTitle } from "./main.js";
 
 type AppApi = NonNullable<ComponentProps<typeof App>["apiClient"]>;
 
@@ -41,18 +34,6 @@ const textArtifact = (): Artifact => ({
   updatedAt: "2026-07-29T00:00:00.000Z",
 });
 
-const modelWireTrace = (index: number): ModelWireTraceRecord => ({
-  attemptId: "attempt_poll",
-  modelTurn: index,
-  transportAttempt: 0,
-  part: "request",
-  captureStatus: "complete",
-  persistenceStatus: "stored",
-  bodyAvailable: true,
-  createdAt: new Date(Date.UTC(2026, 6, 30, 0, 0, 0, index)).toISOString(),
-  expiresAt: "2026-08-06T00:00:00.000Z",
-});
-
 function apiFixture(overrides: Partial<AppApi> = {}): AppApi {
   const defaultThread = thread("thread_default");
   const defaultRun = run("run_default", defaultThread.id);
@@ -62,8 +43,6 @@ function apiFixture(overrides: Partial<AppApi> = {}): AppApi {
     getRun: vi.fn(async () => defaultRun),
     listEvents: vi.fn(async () => ({ attemptId: undefined, items: [] })),
     listArtifacts: vi.fn(async () => []),
-    listModelWireTraces: vi.fn(async () => ({ items: [], hasMore: false })),
-    getModelWireTraceBody: vi.fn(async () => new Uint8Array()),
     createThread: vi.fn(async () => defaultThread),
     archiveThread: vi.fn(async () => defaultThread),
     createRun: vi.fn(async () => defaultRun),
@@ -130,11 +109,51 @@ beforeEach(() => {
 afterEach(() => {
   for (const root of mountedRoots.splice(0)) act(() => root.unmount());
   document.body.replaceChildren();
-  vi.clearAllTimers();
-  vi.useRealTimers();
 });
 
 describe("Agent 工作台恢复接入", () => {
+  it("从首条有效请求生成确定性、紧凑的会话标题", () => {
+    expect(deriveThreadTitle("  # 调研\nOpenAI *最新* 模型，并给出建议  ")).toBe(
+      "调研 OpenAI 最新 模型，并给出建议",
+    );
+    expect(deriveThreadTitle("甲".repeat(40))).toBe(`${"甲".repeat(26)}…`);
+    expect(deriveThreadTitle(" \n ")).toBe("新任务");
+  });
+
+  it("首条请求自动创建会话并使用派生标题，用户无需预先填写标题", async () => {
+    const createdThread = thread("thread_created");
+    const createdRun = run("run_created", createdThread.id);
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => []),
+      createThread: vi.fn(async () => createdThread),
+      createRun: vi.fn(async () => createdRun),
+      getRun: vi.fn(async () => createdRun),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+    const textarea = container.querySelector("textarea");
+    const form = container.querySelector("form");
+    if (textarea === null || form === null) throw new Error("未渲染任务输入区");
+    act(() => {
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      valueSetter?.call(textarea, "  生成一份周报  ");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settleEffects();
+
+    expect(apiClient.createThread).toHaveBeenCalledWith("生成一份周报");
+    expect(apiClient.createThread).toHaveBeenCalledTimes(1);
+    expect(apiClient.createRun).toHaveBeenCalledWith(createdThread.id, "生成一份周报");
+    expect(container.querySelector("h1")?.textContent).toBe(createdThread.title);
+  });
+
   it("刷新后稳定选择第一个活跃 Thread，恢复最新 Run 并启动投影读取", async () => {
     const archived = thread("thread_archived", "archived");
     const active = thread("thread_active");
@@ -154,117 +173,6 @@ describe("Agent 工作台恢复接入", () => {
     expect(container.textContent).toContain("运行 run_latest");
     expect(apiClient.listEvents).toHaveBeenCalledWith(active.id, latest.id, -1, 100);
     expect(apiClient.listArtifacts).toHaveBeenCalledWith(active.id, latest.id);
-  });
-
-  it("诊断索引缺失或暂不可用时不阻断 Run、事件与交付物投影", async () => {
-    const selectedThread = thread("thread_trace_unavailable");
-    const latest = run("run_trace_unavailable", selectedThread.id);
-    const apiClient = apiFixture({
-      listThreads: vi.fn(async () => [selectedThread]),
-      listLatestRuns: vi.fn(async () => [latest]),
-      getRun: vi.fn(async () => latest),
-      listModelWireTraces: vi.fn(async () => {
-        throw new ApiError("依赖服务暂时不可用", 503, true);
-      }),
-    });
-    const { container } = mount(apiClient);
-    await settleEffects();
-
-    expect(apiClient.getRun).toHaveBeenCalledWith(selectedThread.id, latest.id);
-    expect(apiClient.listEvents).toHaveBeenCalled();
-    expect(apiClient.listArtifacts).toHaveBeenCalled();
-    expect(container.textContent).toContain("诊断索引暂不可用");
-    expect(container.querySelector('[role="alert"]')).toBeNull();
-  });
-
-  it("终态轮询保留已加载页并沿尾游标追完超过一页的新增诊断", async () => {
-    vi.useFakeTimers();
-    const selectedThread = thread("thread_trace_poll");
-    const activeRun = { ...run("run_trace_poll", selectedThread.id), status: "running" as const };
-    const terminalRun = { ...activeRun, status: "succeeded" as const };
-    // hasMore 才是服务端分页边界；精确 500 条由 reducer 测试覆盖，这里缩小 DOM 以隔离轮询调度。
-    const firstPage = [modelWireTrace(0), modelWireTrace(1)];
-    const tail = modelWireTrace(2);
-    const burstTail = [modelWireTrace(3), modelWireTrace(4)];
-    const finalTail = modelWireTrace(5);
-    let headRequestCount = 0;
-    const listModelWireTraces = vi.fn(
-      async (_threadId: string, _runId: string, cursor?: string) => {
-        if (cursor === "cursor_2") {
-          return {
-            items: [firstPage[1] as ModelWireTraceRecord, tail],
-            hasMore: false,
-            nextCursor: "cursor_3",
-          };
-        }
-        if (cursor === "cursor_3") {
-          return { items: burstTail, hasMore: true, nextCursor: "cursor_5" };
-        }
-        if (cursor === "cursor_5") {
-          return { items: [finalTail], hasMore: false, nextCursor: "cursor_6" };
-        }
-        headRequestCount += 1;
-        return {
-          items:
-            headRequestCount === 1
-              ? firstPage
-              : firstPage.map((record, index) =>
-                  index === 0
-                    ? {
-                        ...record,
-                        captureStatus: "truncated" as const,
-                        persistenceStatus: "unavailable" as const,
-                        bodyAvailable: false,
-                      }
-                    : record,
-                ),
-          hasMore: true,
-          nextCursor: headRequestCount === 1 ? "cursor_2" : "cursor_refreshed_head",
-        };
-      },
-    );
-    let runPollCount = 0;
-    const apiClient = apiFixture({
-      listThreads: vi.fn(async () => [selectedThread]),
-      listLatestRuns: vi.fn(async () => [activeRun]),
-      getRun: vi.fn(async () => {
-        runPollCount += 1;
-        return runPollCount === 1 ? activeRun : terminalRun;
-      }),
-      listModelWireTraces,
-    });
-    const { container } = mount(apiClient);
-    await settleEffects();
-
-    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(2);
-    const loadMore = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent === "加载更多",
-    );
-    if (loadMore === undefined) throw new Error("未渲染模型网络诊断加载更多按钮");
-    await act(async () => loadMore.click());
-    await settleEffects();
-    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(3);
-    expect(container.querySelectorAll('[aria-label="模型轮次 2"]')).toHaveLength(1);
-
-    await act(async () => vi.advanceTimersByTimeAsync(1_200));
-    await settleEffects();
-
-    expect(listModelWireTraces).toHaveBeenCalledTimes(4);
-    expect(listModelWireTraces).toHaveBeenCalledWith(selectedThread.id, activeRun.id, "cursor_3");
-    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(5);
-    expect(container.querySelectorAll('[aria-label="模型轮次 2"]')).toHaveLength(1);
-    expect(container.querySelectorAll('[aria-label="模型轮次 4"]')).toHaveLength(1);
-    expect(container.querySelectorAll(".model-wire-record.is-truncated")).toHaveLength(1);
-
-    await act(async () => vi.advanceTimersByTimeAsync(1_200));
-    await settleEffects();
-
-    expect(listModelWireTraces).toHaveBeenCalledTimes(6);
-    expect(listModelWireTraces).toHaveBeenCalledWith(selectedThread.id, activeRun.id, "cursor_5");
-    expect(container.querySelectorAll(".model-wire-record")).toHaveLength(6);
-    expect(container.querySelectorAll('[aria-label="模型轮次 5"]')).toHaveLength(1);
-    expect(container.textContent).not.toContain("加载更多");
-    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("切换和切回都会重新恢复，迟到错误与加载不会污染其他 Thread", async () => {
@@ -354,74 +262,6 @@ describe("Agent 工作台恢复接入", () => {
     expect(apiClient.getRun).toHaveBeenCalledWith(selectedThread.id, newRun.id);
   });
 
-  it("切换 Thread 后不展示上一 Run 的交付物", async () => {
-    const first = thread("thread_artifact_first");
-    const second = thread("thread_artifact_second");
-    const firstRun = run("run_artifact_first", first.id);
-    const secondRecovery = deferred<readonly Run[]>();
-    const previousArtifact = { ...textArtifact(), name: "上一会话.txt" };
-    const apiClient = apiFixture({
-      listThreads: vi.fn(async () => [first, second]),
-      listLatestRuns: vi.fn((threadId: string) =>
-        threadId === first.id ? Promise.resolve([firstRun]) : secondRecovery.promise,
-      ),
-      getRun: vi.fn(async () => firstRun),
-      listArtifacts: vi.fn(async () => [previousArtifact]),
-    });
-    const { container } = mount(apiClient);
-    await settleEffects();
-    expect(container.textContent).toContain(previousArtifact.name);
-
-    const secondButton = [...container.querySelectorAll<HTMLButtonElement>(".thread")].find(
-      (button) => button.textContent?.includes(second.title),
-    );
-    if (secondButton === undefined) throw new Error("未找到第二个会话按钮");
-    act(() => secondButton.click());
-    await settleEffects();
-
-    expect(container.textContent).not.toContain(previousArtifact.name);
-    expect(container.querySelector(".inline-artifact-delivery")).toBeNull();
-  });
-
-  it("新建 Run 后不展示上一 Run 的交付物", async () => {
-    const selectedThread = thread("thread_new_run_artifact");
-    const previousRun = run("run_previous_artifact", selectedThread.id);
-    const newRun = run("run_new_artifact", selectedThread.id);
-    const previousArtifact = { ...textArtifact(), name: "上一运行.txt" };
-    const apiClient = apiFixture({
-      listThreads: vi.fn(async () => [selectedThread]),
-      listLatestRuns: vi.fn(async () => [previousRun]),
-      createRun: vi.fn(async () => newRun),
-      getRun: vi.fn(async (_threadId: string, runId: string) =>
-        runId === previousRun.id ? previousRun : newRun,
-      ),
-      listArtifacts: vi.fn(async (_threadId: string, runId: string) =>
-        runId === previousRun.id ? [previousArtifact] : [],
-      ),
-    });
-    const { container } = mount(apiClient);
-    await settleEffects();
-    expect(container.textContent).toContain(previousArtifact.name);
-
-    const textarea = container.querySelector("textarea");
-    const form = container.querySelector("form");
-    if (textarea === null || form === null) throw new Error("未渲染会话输入区");
-    act(() => {
-      const valueSetter = Object.getOwnPropertyDescriptor(
-        HTMLTextAreaElement.prototype,
-        "value",
-      )?.set;
-      valueSetter?.call(textarea, "生成新的交付物");
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    act(() => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    await settleEffects();
-
-    expect(container.textContent).toContain("运行 run_new_artifact");
-    expect(container.textContent).not.toContain(previousArtifact.name);
-    expect(container.querySelector(".inline-artifact-delivery")).toBeNull();
-  });
-
   it("恶意 HTML 文本只渲染为 pre 的文本节点，且不打开或导航弹窗", async () => {
     const selectedThread = thread("thread_text");
     const latest = run("run_text", selectedThread.id);
@@ -444,62 +284,6 @@ describe("Agent 工作台恢复接入", () => {
     expect(rendered?.textContent).toBe(payload);
     expect(rendered?.querySelector("script")).toBeNull();
     expect(open).not.toHaveBeenCalled();
-  });
-
-  it("将本次运行交付物紧随 Agent 对话内联展示，不在右侧活动栏重复", async () => {
-    const selectedThread = thread("thread_inline_artifact");
-    const latest = run("run_inline_artifact", selectedThread.id);
-    const events: readonly RunEvent[] = [
-      {
-        eventId: "event_reply",
-        sequence: 1,
-        occurredAt: "2026-07-30T00:00:00.000Z",
-        kind: "agent_event",
-        type: "message.delta",
-        payload: { delta: "文件已经准备好。" },
-      },
-    ];
-    const downloadArtifact = vi.fn(async () => "https://example.invalid/report.txt");
-    const popup = {
-      close: vi.fn(),
-      location: { replace: vi.fn() },
-      opener: null,
-    };
-    const open = vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
-    const apiClient = apiFixture({
-      listThreads: vi.fn(async () => [selectedThread]),
-      listLatestRuns: vi.fn(async () => [latest]),
-      getRun: vi.fn(async () => latest),
-      listEvents: vi.fn(async () => ({ attemptId: "attempt_1", items: events })),
-      listArtifacts: vi.fn(async () => [textArtifact()]),
-      downloadArtifact,
-    });
-    const { container } = mount(apiClient);
-
-    await settleEffects();
-
-    const assistantReply = container.querySelector(".assistant-message");
-    const inlineDelivery = container.querySelector(".run-area .inline-artifact-delivery");
-    const activityPanel = container.querySelector(".activity-panel");
-    if (assistantReply === null || inlineDelivery === null) {
-      throw new Error("未在 Agent 对话后渲染内联交付物");
-    }
-    expect(assistantReply?.textContent).toContain("文件已经准备好。");
-    expect(inlineDelivery?.textContent).toContain("report.txt");
-    expect(inlineDelivery?.querySelector('[aria-label="预览 report.txt"]')).not.toBeNull();
-    expect(inlineDelivery?.querySelector('[aria-label="下载 report.txt"]')).not.toBeNull();
-    expect(
-      assistantReply.compareDocumentPosition(inlineDelivery) & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
-    expect(activityPanel?.textContent).not.toContain("report.txt");
-    const download = inlineDelivery.querySelector<HTMLButtonElement>(
-      "[aria-label='下载 report.txt']",
-    );
-    if (download === null) throw new Error("未渲染内联交付物下载按钮");
-    await act(async () => download.click());
-    expect(downloadArtifact).toHaveBeenCalledWith(selectedThread.id, latest.id, "artifact_text");
-    expect(popup.location.replace).toHaveBeenCalledWith("https://example.invalid/report.txt");
-    open.mockRestore();
   });
 
   it("初始选择策略跳过归档 Thread，并在无活跃 Thread 时保持空选择", () => {

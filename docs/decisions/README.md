@@ -66,6 +66,7 @@
 | [ADR-0058](0058-simple-deliver-file-tool.md) | 面向模型的单一文件交付工具 | 已接受 | 2026-07-30 |
 | [ADR-0059](0059-inline-artifact-delivery-in-conversation.md) | 在 Agent 对话中内联交付 Artifact | 已接受 | 2026-07-30 |
 | [ADR-0060](0060-safe-markdown-model-output.md) | 模型输出的安全 Markdown 展示边界 | 已接受 | 2026-07-30 |
+| [ADR-0061](0061-user-focused-running-experience.md) | 面向用户的运行状态体验 | 已接受 | 2026-07-30 |
 
 ## 何时必须记录
 

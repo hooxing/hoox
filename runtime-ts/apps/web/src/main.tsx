@@ -1,7 +1,7 @@
 import { LoaderCircle, PanelLeftOpen, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ApiError, type ArtifactPreview, RuntimeApi, type Thread } from "./api.js";
+import { ApiError, RuntimeApi, type ArtifactPreview, type Thread } from "./api.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
@@ -11,10 +11,8 @@ import {
   ActivityPanel,
   activeRunStatuses,
   ConversationComposer,
-  canCreateThread,
   compactWorkspaceMedia,
   EmptyConversation,
-  InlineArtifactDelivery,
   NavigationSidebar,
   RunRecoveryLoading,
   RunTimeline,
@@ -25,6 +23,18 @@ import {
 } from "./workspace-view.js";
 
 const api = new RuntimeApi();
+
+/** 首条请求在浏览器侧生成稳定标题，既满足现有必填协议，也不把取名工作交给用户。 */
+export function deriveThreadTitle(query: string): string {
+  const cleaned = query
+    .replace(/[\r\n\t]+/gu, " ")
+    .replace(/[`*_#>[\]()]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (cleaned.length === 0) return "新任务";
+  const limit = 26;
+  return cleaned.length > limit ? `${cleaned.slice(0, limit)}…` : cleaned;
+}
 type WorkspaceApi = Pick<
   RuntimeApi,
   | "archiveThread"
@@ -33,11 +43,9 @@ type WorkspaceApi = Pick<
   | "createThread"
   | "downloadArtifact"
   | "getRun"
-  | "getModelWireTraceBody"
   | "listArtifacts"
   | "listEvents"
   | "listLatestRuns"
-  | "listModelWireTraces"
   | "listThreads"
   | "previewArtifact"
 >;
@@ -58,7 +66,6 @@ export function chooseInitialThread(threads: readonly Thread[]): string | undefi
 export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) {
   const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
-  const [title, setTitle] = useState("");
   const [input, setInput] = useState("");
   const [currentRequest, setCurrentRequest] = useState<string | undefined>();
   const [loading, setLoading] = useState(true);
@@ -72,12 +79,10 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const [navigationOpen, setNavigationOpen] = useState(false);
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
-  const modelWireTracePaginationAdvancedRef = useRef(false);
-  const modelWireTraceTailCursorRef = useRef<string | undefined>(undefined);
   const currentRunPollRef = useRef(new CurrentRunPoll());
   const navigationRef = useRef(new WorkspaceNavigation());
   const mobileNavigationToggleRef = useRef<HTMLButtonElement>(null);
-  const createThreadInFlightRef = useRef(false);
+  const sendInFlightRef = useRef(false);
   const initialSelectionAppliedRef = useRef(false);
 
   const selectThread = useCallback((threadId: string | undefined) => {
@@ -106,17 +111,6 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     eventAfterRef.current = state.events.at(-1)?.sequence ?? -1;
     eventAttemptRef.current = state.eventAttemptId;
   }, [state.eventAttemptId, state.events]);
-
-  useEffect(() => {
-    modelWireTracePaginationAdvancedRef.current = state.modelWireTracePaginationAdvanced;
-    modelWireTraceTailCursorRef.current = state.modelWireTraceTailFollowing
-      ? state.modelWireTraceNextCursor
-      : undefined;
-  }, [
-    state.modelWireTraceNextCursor,
-    state.modelWireTracePaginationAdvanced,
-    state.modelWireTraceTailFollowing,
-  ]);
 
   const refreshThreads = useCallback(async () => {
     const expectedNavigation = navigationRef.current.capture();
@@ -209,20 +203,13 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       if (!currentRunPollRef.current.isCurrent(pollGeneration)) return;
       try {
         const latest = await apiClient.getRun(threadId, runId);
-        const tailCursor = modelWireTraceTailCursorRef.current;
-        const [eventPage, artifacts, modelWireTraces, modelWireTraceTail] = await Promise.all([
+        const [eventPage, artifacts] = await Promise.all([
           drainEventPages(
             (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
             eventAfterRef.current,
             eventAttemptRef.current,
           ),
           apiClient.listArtifacts(threadId, runId),
-          apiClient
-            .listModelWireTraces(threadId, runId)
-            .catch(() => ({ items: [], hasMore: false, unavailable: true })),
-          tailCursor === undefined
-            ? Promise.resolve(undefined)
-            : apiClient.listModelWireTraces(threadId, runId, tailCursor).catch(() => undefined),
         ]);
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           eventAttemptRef.current = eventPage.attemptId;
@@ -230,17 +217,8 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           dispatch({ type: "run", run: latest });
           dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
-          dispatch({ type: "modelWireTraces", page: modelWireTraces, mode: "refreshHead" });
-          if (modelWireTraceTail !== undefined) {
-            dispatch({ type: "modelWireTraces", page: modelWireTraceTail, mode: "append" });
-          }
           // 单次完成后再调度，状态更新不会重新创建计时器或导致紧密轮询。
-          if (
-            eventPage.hasMore ||
-            modelWireTraceTail?.hasMore === true ||
-            (modelWireTraces.hasMore && !modelWireTracePaginationAdvancedRef.current) ||
-            activeRunStatuses.has(latest.status)
-          ) {
+          if (eventPage.hasMore || activeRunStatuses.has(latest.status)) {
             timer = window.setTimeout(() => void poll(), 1200);
           }
         }
@@ -259,38 +237,36 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     };
   }, [apiClient, state.run?.id, state.selectedThreadId]);
 
-  const createThread = async () => {
-    if (!canCreateThread(title, actionLoading) || createThreadInFlightRef.current) return;
-    createThreadInFlightRef.current = true;
-    const expectedNavigation = navigationRef.current.capture();
-    setActionLoading(true);
-    try {
-      const thread = await apiClient.createThread(title.trim());
-      dispatch({ type: "threadCreated", thread });
-      if (navigationRef.current.isCurrent(expectedNavigation)) {
-        selectThread(thread.id);
-      }
-      setTitle("");
-    } catch (reason) {
-      if (navigationRef.current.isCurrent(expectedNavigation)) setError(reason as ApiError);
-    } finally {
-      createThreadInFlightRef.current = false;
-      setActionLoading(false);
-    }
-  };
+  useEffect(() => {
+    if (state.artifacts.length > 0) setActivityOpen(true);
+  }, [state.artifacts.length]);
+
+  const createConversation = () => selectThread(undefined);
   const send = async () => {
-    if (!state.selectedThreadId || !input.trim()) return;
+    if (!input.trim() || actionLoading || sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
     const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
       const request = input.trim();
-      const run = await apiClient.createRun(state.selectedThreadId, request);
-      if (!navigationRef.current.isCurrent(expectedNavigation)) return;
+      let threadId = state.selectedThreadId;
+      if (threadId === undefined) {
+        const thread = await apiClient.createThread(deriveThreadTitle(request));
+        dispatch({ type: "threadCreated", thread });
+        if (!navigationRef.current.isCurrent(expectedNavigation)) return;
+        navigationRef.current.navigate(thread.id);
+        currentRunPollRef.current.invalidate();
+        dispatch({ type: "select", threadId: thread.id });
+        threadId = thread.id;
+      }
+      const runNavigation = navigationRef.current.capture();
+      const run = await apiClient.createRun(threadId, request);
+      if (!navigationRef.current.isCurrent(runNavigation)) return;
       // 新 Run 已成为当前事实时同步推进导航代次，使同 Thread 在途恢复响应立即失效。
-      navigationRef.current.navigate(state.selectedThreadId);
+      navigationRef.current.navigate(threadId);
       setRecoveryUi(undefined);
       // 新 Run 不能继承上一 Run 的 Attempt 或 sequence 游标。
-      currentRunPollRef.current.activate(state.selectedThreadId, run.id);
+      currentRunPollRef.current.activate(threadId, run.id);
       eventAfterRef.current = -1;
       eventAttemptRef.current = undefined;
       dispatch({ type: "startRun", run });
@@ -300,6 +276,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     } catch (reason) {
       if (navigationRef.current.isCurrent(expectedNavigation)) setError(reason as ApiError);
     } finally {
+      sendInFlightRef.current = false;
       setActionLoading(false);
     }
   };
@@ -374,16 +351,6 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       setError(reason instanceof ApiError ? reason : new ApiError("获取预览地址失败", 0, true));
     }
   };
-  const loadMoreModelWireTraces = async () => {
-    const threadId = state.selectedThreadId;
-    const run = state.run;
-    const cursor = state.modelWireTraceNextCursor;
-    if (threadId === undefined || run === undefined || cursor === undefined) return;
-    const expectedNavigation = navigationRef.current.capture();
-    const page = await apiClient.listModelWireTraces(threadId, run.id, cursor);
-    if (!navigationRef.current.isCurrent(expectedNavigation)) return;
-    dispatch({ type: "modelWireTraces", page, mode: "append" });
-  };
 
   const selected = state.threads.find((thread) => thread.id === state.selectedThreadId);
   const currentRecovery =
@@ -402,12 +369,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         onClose={() => setNavigationOpen(false)}
       >
         <p className="identity-note">本地开发身份 · dev-user-a</p>
-        <ThreadCreate
-          title={title}
-          actionLoading={actionLoading}
-          onChange={setTitle}
-          onCreate={() => void createThread()}
-        />
+        <ThreadCreate actionLoading={actionLoading} onCreate={createConversation} />
         <div className="thread-heading">
           <span>会话</span>
           <span>{state.threads.length}</span>
@@ -480,7 +442,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
               ✦
             </span>
             <h1>准备好协作了吗？</h1>
-            <p>从左侧选择一个会话，或先创建新的工作会话。</p>
+            <p>描述任务后会自动创建会话，并用首条请求作为标题。</p>
           </div>
         ) : (
           <>
@@ -504,47 +466,31 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
                 </div>
               )}
               {state.run ? (
-                <>
-                  <RunTimeline events={state.events} />
-                  <InlineArtifactDelivery
-                    artifacts={state.artifacts}
-                    onPreview={(artifactId) => void preview(artifactId)}
-                    onDownload={(artifactId) => void download(artifactId)}
-                  />
-                </>
+                <RunTimeline run={state.run} events={state.events} />
               ) : currentRecovery?.status === "loading" ? (
                 <RunRecoveryLoading />
               ) : (
                 <EmptyConversation />
               )}
             </section>
-            <ConversationComposer
-              input={input}
-              disabled={actionLoading}
-              onChange={setInput}
-              onSubmit={(event) => {
-                event.preventDefault();
-                void send();
-              }}
-            />
           </>
         )}
+        <ConversationComposer
+          input={input}
+          disabled={actionLoading}
+          onChange={setInput}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void send();
+          }}
+        />
       </section>
       <ActivityPanel
-        key={`${state.selectedThreadId ?? "none"}:${state.run?.id ?? "none"}`}
         isOpen={activityOpen}
-        events={state.events}
-        modelWireTraces={state.modelWireTraces}
-        modelWireTraceHasMore={state.modelWireTraceHasMore}
-        modelWireTraceUnavailable={state.modelWireTraceUnavailable}
+        artifacts={state.artifacts}
         onToggle={() => setActivityOpen((open) => !open)}
-        onLoadModelWireTrace={(record) => {
-          if (state.selectedThreadId === undefined || state.run === undefined) {
-            return Promise.reject(new ApiError("当前运行已切换", 404, false));
-          }
-          return apiClient.getModelWireTraceBody(state.selectedThreadId, state.run.id, record);
-        }}
-        onLoadMoreModelWireTraces={loadMoreModelWireTraces}
+        onPreview={(artifactId) => void preview(artifactId)}
+        onDownload={(artifactId) => void download(artifactId)}
       />
       {textPreview?.kind === "text" && (
         <dialog className="artifact-text-preview" open aria-label="纯文本交付物预览">

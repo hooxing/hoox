@@ -482,6 +482,29 @@ h2 {
 .assistant-message .message-card {
   width: min(100%, 700px);
 }
+.inline-artifact-delivery {
+  width: min(100%, 760px);
+  margin-top: 18px;
+  padding: 14px;
+  border: 1px solid #dce8e0;
+  border-radius: 11px;
+  background: #fbfdfb;
+}
+.inline-artifact-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.inline-artifact-heading h2 {
+  margin: 3px 0 0;
+}
+.inline-artifact-list {
+  margin-top: 12px;
+}
+.inline-artifact-list li {
+  background: #fff;
+}
 .assistant-markdown {
   margin-top: 5px;
   overflow-wrap: anywhere;

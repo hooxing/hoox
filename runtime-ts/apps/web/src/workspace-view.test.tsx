@@ -8,6 +8,7 @@ import type { Artifact, Run, RunEvent } from "./api.js";
 import {
   ActivityPanel,
   ConversationComposer,
+  InlineArtifactDelivery,
   NavigationSidebar,
   RunStatusBadge,
   RunTranscript,
@@ -74,6 +75,27 @@ describe("工作台展示组件", () => {
     expect(closed).toContain("activity-panel is-collapsed");
     expect(closed).toContain('aria-hidden="true"');
     expect(closed).toContain("inert");
+  });
+
+  it("交付物同时内联在 Agent 正文之后，抽屉不取代阅读路径", () => {
+    const artifact: Artifact = {
+      id: "artifact-inline",
+      name: "summary.md",
+      status: "published",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+    };
+    const html = renderToStaticMarkup(
+      <InlineArtifactDelivery
+        artifacts={[artifact]}
+        onPreview={() => undefined}
+        onDownload={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("inline-artifact-delivery");
+    expect(html).toContain("本次回复的可下载产物");
+    expect(html).toContain("summary.md");
   });
 
   it("会话头部用文字化操作打开产物抽屉和归档", () => {

@@ -12,6 +12,7 @@ import {
   ConversationComposer,
   compactWorkspaceMedia,
   EmptyConversation,
+  InlineArtifactDelivery,
   NavigationSidebar,
   pollingRunStatuses,
   RunRecoveryLoading,
@@ -44,9 +45,11 @@ type WorkspaceApi = Pick<
   | "createThread"
   | "downloadArtifact"
   | "getRun"
+  | "getModelWireTraceBody"
   | "listArtifacts"
   | "listEvents"
   | "listLatestRuns"
+  | "listModelWireTraces"
   | "listThreads"
   | "previewArtifact"
 >;
@@ -211,13 +214,16 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       if (!currentRunPollRef.current.isCurrent(pollGeneration)) return;
       try {
         const latest = await apiClient.getRun(threadId, runId);
-        const [eventPage, artifacts] = await Promise.all([
+        const [eventPage, artifacts, modelWireTraces] = await Promise.all([
           drainEventPages(
             (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
             eventAfterRef.current,
             eventAttemptRef.current,
           ),
           apiClient.listArtifacts(threadId, runId),
+          apiClient
+            .listModelWireTraces(threadId, runId)
+            .catch(() => ({ items: [], hasMore: false, unavailable: true })),
         ]);
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           eventAttemptRef.current = eventPage.attemptId;
@@ -225,6 +231,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           dispatch({ type: "run", run: latest });
           dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
+          dispatch({ type: "modelWireTraces", page: modelWireTraces, mode: "refreshHead" });
           // 单次完成后再调度，状态更新不会重新创建计时器或导致紧密轮询。
           if (shouldContinueRunPolling(eventPage.hasMore, latest.status)) {
             timer = window.setTimeout(() => void poll(), 1200);
@@ -246,8 +253,8 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   }, [apiClient, state.run?.id, state.selectedThreadId]);
 
   useEffect(() => {
-    if (state.artifacts.length > 0) setActivityOpen(true);
-  }, [state.artifacts.length]);
+    if (state.artifacts.length > 0 || state.modelWireTraces.length > 0) setActivityOpen(true);
+  }, [state.artifacts.length, state.modelWireTraces.length]);
 
   const createConversation = () => selectThread(undefined);
   const send = async () => {
@@ -358,6 +365,16 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     } catch (reason) {
       setError(reason instanceof ApiError ? reason : new ApiError("获取预览地址失败", 0, true));
     }
+  };
+  const loadMoreModelWireTraces = async () => {
+    const threadId = state.selectedThreadId;
+    const run = state.run;
+    const cursor = state.modelWireTraceNextCursor;
+    if (threadId === undefined || run === undefined || cursor === undefined) return;
+    const expectedNavigation = navigationRef.current.capture();
+    const page = await apiClient.listModelWireTraces(threadId, run.id, cursor);
+    if (!navigationRef.current.isCurrent(expectedNavigation)) return;
+    dispatch({ type: "modelWireTraces", page, mode: "append" });
   };
 
   const selected = state.threads.find((thread) => thread.id === state.selectedThreadId);
@@ -480,6 +497,11 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
                 <>
                   <RunTimeline run={state.run} events={state.events} />
                   <RunTranscript events={state.events} />
+                  <InlineArtifactDelivery
+                    artifacts={state.artifacts}
+                    onPreview={(artifactId) => void preview(artifactId)}
+                    onDownload={(artifactId) => void download(artifactId)}
+                  />
                 </>
               ) : currentRecovery?.status === "loading" ? (
                 <RunRecoveryLoading />
@@ -502,9 +524,19 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       <ActivityPanel
         isOpen={activityOpen}
         artifacts={state.artifacts}
+        modelWireTraces={state.modelWireTraces}
+        modelWireTraceHasMore={state.modelWireTraceHasMore}
+        modelWireTraceUnavailable={state.modelWireTraceUnavailable}
         onToggle={() => setActivityOpen((open) => !open)}
         onPreview={(artifactId) => void preview(artifactId)}
         onDownload={(artifactId) => void download(artifactId)}
+        onLoadModelWireTrace={(record) => {
+          if (state.selectedThreadId === undefined || state.run === undefined) {
+            return Promise.reject(new ApiError("当前运行已切换", 404, false));
+          }
+          return apiClient.getModelWireTraceBody(state.selectedThreadId, state.run.id, record);
+        }}
+        onLoadMoreModelWireTraces={loadMoreModelWireTraces}
         returnFocusRef={artifactTriggerRef}
         fallbackFocusRef={contentFocusRef}
       />

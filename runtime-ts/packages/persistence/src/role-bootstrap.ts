@@ -67,6 +67,12 @@ const workspaceCandidateTables = new Set([
   "workspace_revision_candidate_files",
 ]);
 const workspaceArtifactIntentTables = new Set(["workspace_artifact_publication_intents"]);
+const modelWireTraceTables = new Set([
+  "model_wire_trace_cleanup_commands",
+  "model_wire_trace_cleanup_items",
+  "model_wire_trace_expiry_tombstones",
+  "model_wire_trace_records",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -82,6 +88,10 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["workspace_revision_candidates", new Set(["SELECT", "INSERT"])],
   ["workspace_revision_candidate_files", new Set(["SELECT", "INSERT"])],
   ["workspace_artifact_publication_intents", new Set(["SELECT", "INSERT"])],
+  ["model_wire_trace_cleanup_commands", new Set(["SELECT", "INSERT"])],
+  ["model_wire_trace_cleanup_items", new Set(["SELECT", "INSERT"])],
+  ["model_wire_trace_expiry_tombstones", new Set(["SELECT", "INSERT"])],
+  ["model_wire_trace_records", new Set(["SELECT", "INSERT", "DELETE"])],
   ["workspace_write_leases", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
   ["blob_lifecycles", new Set(["SELECT", "INSERT"])],
   ["blob_incarnations", new Set(["SELECT", "INSERT"])],
@@ -234,6 +244,25 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
     ]),
   ],
   ["waiting_recovery_effect_outbox", new Set(["state", "payload", "updated_at"])],
+  ["model_wire_trace_cleanup_commands", new Set(["status", "deleted_count", "completed_at"])],
+  ["model_wire_trace_cleanup_items", new Set(["state", "outcome", "attempt_count", "updated_at"])],
+  ["model_wire_trace_expiry_tombstones", new Set()],
+  [
+    "model_wire_trace_records",
+    new Set([
+      "persistence_status",
+      "blob_reference_id",
+      "blob_state",
+      "blob_purpose",
+      "blob_lifecycle_id",
+      "blob_incarnation_id",
+      "physical_object_key",
+      "processing_token",
+      "processing_lease_expires_at",
+      "cleanup_command_id",
+      "updated_at",
+    ]),
+  ],
 ]);
 
 async function hasWaitingRecoveryState(client: PoolClient, schema: string): Promise<boolean> {
@@ -291,6 +320,17 @@ async function hasWorkspaceArtifactIntentState(
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.workspace_artifact_publication_intents', $1::text)) IS NOT NULL
             AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasModelWireTraceState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.model_wire_trace_cleanup_commands', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.model_wire_trace_cleanup_items', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.model_wire_trace_expiry_tombstones', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.model_wire_trace_records', $1::text)) IS NOT NULL AS present`,
     [schema],
   );
   return result.rows[0]?.present === true;
@@ -408,6 +448,12 @@ async function activeTablePolicy(
   if (!(await hasWorkspaceArtifactIntentState(client, schema))) {
     for (const table of workspaceArtifactIntentTables) policy.delete(table);
   }
+  if (!(await hasModelWireTraceState(client, schema))) {
+    for (const table of modelWireTraceTables) policy.delete(table);
+  } else {
+    // DELETE 仍受 0017 的 purpose/完整身份/到期 RLS policy 约束，不能释放普通 Blob 引用。
+    policy.set("blob_references", new Set(["SELECT", "INSERT", "DELETE"]));
+  }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
   }
@@ -456,6 +502,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasWorkspaceArtifactIntentState(client, schema))) {
     for (const table of workspaceArtifactIntentTables) policy.delete(table);
+  }
+  if (!(await hasModelWireTraceState(client, schema))) {
+    for (const table of modelWireTraceTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -1088,6 +1137,26 @@ export async function bootstrapRuntimeAccessOnClient(
       `GRANT SELECT, INSERT ON TABLE
          ${schema}.workspace_artifact_publication_intents
        TO ${role}`,
+    );
+  }
+  if (await hasModelWireTraceState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.model_wire_trace_cleanup_commands,
+         ${schema}.model_wire_trace_cleanup_items,
+         ${schema}.model_wire_trace_expiry_tombstones
+       TO ${role};
+       GRANT SELECT, INSERT, DELETE ON TABLE ${schema}.model_wire_trace_records TO ${role};
+       GRANT DELETE ON TABLE ${schema}.blob_references TO ${role};
+       GRANT UPDATE(status, deleted_count, completed_at)
+         ON TABLE ${schema}.model_wire_trace_cleanup_commands TO ${role};
+       GRANT UPDATE(state, outcome, attempt_count, updated_at)
+         ON TABLE ${schema}.model_wire_trace_cleanup_items TO ${role};
+       GRANT UPDATE(
+         persistence_status, blob_reference_id, blob_state, blob_purpose, blob_lifecycle_id,
+         blob_incarnation_id, physical_object_key, processing_token, processing_lease_expires_at,
+         cleanup_command_id, updated_at
+       ) ON TABLE ${schema}.model_wire_trace_records TO ${role}`,
     );
   }
   await client.query(

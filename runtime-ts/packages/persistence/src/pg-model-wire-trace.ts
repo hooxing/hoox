@@ -77,6 +77,7 @@ export interface ModelWireTraceCleanupResumeInput {
 
 export interface PgModelWireTraceCleanupRepositoryOptions {
   readonly afterCommit?: (operation: "cleanup") => void | Promise<void>;
+  readonly beforeCompletionTransition?: () => void | Promise<void>;
 }
 
 type PersistenceStatus =
@@ -936,17 +937,28 @@ export class PgModelWireTraceCleanupRepository {
         if (pending.rows[0]?.count !== "0") {
           throw new PersistenceError("UNAVAILABLE", "模型网络诊断正文 GC 尚未完成");
         }
+        await this.options.beforeCompletionTransition?.();
         const updated = await client.query(
-          `UPDATE model_wire_trace_cleanup_commands
+          `UPDATE model_wire_trace_cleanup_commands command
               SET status='completed',completed_at=clock_timestamp()
-            WHERE tenant_id=$1 AND command_id=$2 AND command_digest=$3
-              AND status='references_released'`,
+            WHERE command.tenant_id=$1 AND command.command_id=$2 AND command.command_digest=$3
+              AND command.status='references_released'
+              AND NOT EXISTS (
+                SELECT 1 FROM model_wire_trace_cleanup_items item
+                 WHERE item.tenant_id=command.tenant_id
+                   AND item.cleanup_command_id=command.command_id
+                   AND item.state<>'completed'
+              )`,
           [input.tenantId, input.commandId, commandDigest],
         );
         if (updated.rowCount !== 1) {
           const replay = await readCleanupCommand(client, input.tenantId, input.commandId);
-          if (replay?.status !== "completed" || replay.command_digest !== commandDigest)
+          if (replay?.command_digest === commandDigest && replay.status === "references_released") {
+            throw new PersistenceError("UNAVAILABLE", "模型网络诊断正文 GC 出现新的待处理引用");
+          }
+          if (replay?.status !== "completed" || replay.command_digest !== commandDigest) {
             throw new Error("模型网络诊断清理完成事实未收敛");
+          }
         }
       });
       committed = true;

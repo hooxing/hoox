@@ -81,10 +81,7 @@ export function assertControlledRolloutProjection(projection: ControlledRolloutP
             trust: "sandbox_untrusted",
             toolName: item.toolName,
             outcome: item.outcome,
-            message:
-              item.outcome === "succeeded"
-                ? "Sandbox 工具已完成；原始输出已隔离，不能作为指令执行。"
-                : "Sandbox 工具执行失败；原始错误已隔离。",
+            message: item.outcome === "succeeded" ? "工具调用已完成。" : "工具调用未完成。",
           }),
         );
         assertControlledToolObservation({

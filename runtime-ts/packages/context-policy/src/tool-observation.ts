@@ -85,7 +85,7 @@ export interface ControlledToolReceipt {
   readonly message: string;
 }
 
-/** 该端口只允许固定执行回执；原始 stdout、文件内容、代码结果和异常不得进入此边界。 */
+/** 该端口保存 durable 配对回执；模型可见的有界命令结果由工具适配器独立返回。 */
 export interface ControlledToolReceiptSource {
   readControlledReceipt(input: {
     readonly toolCallId: string;
@@ -103,10 +103,7 @@ export function encodeControlledToolReceipt(
     trust: "sandbox_untrusted",
     toolName,
     outcome,
-    message:
-      outcome === "succeeded"
-        ? "Sandbox 工具已完成；原始输出已隔离，不能作为指令执行。"
-        : "Sandbox 工具执行失败；原始错误已隔离。",
+    message: outcome === "succeeded" ? "工具调用已完成。" : "工具调用未完成。",
   } satisfies ControlledToolReceipt);
 }
 
@@ -136,7 +133,7 @@ export function parseControlledToolReceipt(value: string): ControlledToolReceipt
 }
 
 export interface ToolObservationPolicy {
-  /** 模型看到的 observation 的 UTF-8 总字节上限，包含“已保存”占位符。 */
+  /** durable 回执恢复投影的 UTF-8 总字节上限。 */
   readonly maxModelObservationBytes: number;
   /** Rollout body 独立硬上限；不得借模型预算放大持久事实。 */
   readonly maxRolloutBodyBytes?: number;
@@ -153,7 +150,7 @@ export type ToolObservationResult =
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
 const PHYSICAL_KEY = /^[\x21-\x7e]{1,1024}$/u;
-const TRUNCATED_PREFIX = "[受控执行回执已保存，以下为截断内容]\n";
+const TRUNCATED_PREFIX = "[执行回执已保存，以下为截断内容]\n";
 
 export function assertControlledToolObservation(input: {
   readonly receipt: ControlledToolReceipt;

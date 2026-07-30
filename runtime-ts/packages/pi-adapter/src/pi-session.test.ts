@@ -34,7 +34,7 @@ describe("Pi 安全适配", () => {
     const invocations: number[] = [];
     const { controller } = await harness(
       [
-        fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path: "/tmp/a" }), {
+        fauxAssistantMessage(fauxToolCall("exec_command", { cmd: "cat /tmp/a" }), {
           stopReason: "toolUse",
         }),
         fauxAssistantMessage("完成"),
@@ -55,17 +55,22 @@ describe("Pi 安全适配", () => {
 
   it("跨平台只发布 assistant 成功终态，工具只进入 Sandbox", async () => {
     const sandbox = new FakeSandboxHandle("pi-fake");
+    const sandboxCommands: string[] = [];
+    sandbox.command = async (command) => {
+      sandboxCommands.push(command);
+      return { stdout: command.includes("cat ") ? "pi-safe" : "", stderr: "", exitCode: 0 };
+    };
     let modelContext = "";
     const { controller, events, toolAuthorizationCount, authorizedCalls } = await harness(
       [
         (context) => {
           modelContext = JSON.stringify(context);
           return fauxAssistantMessage(
-            fauxToolCall("sandbox_write_file", { path: "/tmp/pi.txt", content: "pi-safe" }),
+            fauxToolCall("exec_command", { cmd: "printf pi-safe > /tmp/pi.txt" }),
             { stopReason: "toolUse" },
           );
         },
-        fauxAssistantMessage(fauxToolCall("sandbox_read_file", { path: "/tmp/pi.txt" }), {
+        fauxAssistantMessage(fauxToolCall("exec_command", { cmd: "cat /tmp/pi.txt" }), {
           stopReason: "toolUse",
         }),
         fauxAssistantMessage("完成"),
@@ -75,12 +80,12 @@ describe("Pi 安全适配", () => {
 
     await controller.prompt("把内容写入隔离环境");
 
-    expect(sandbox.files.get("/tmp/pi.txt")).toBe("pi-safe");
-    expect(toolAuthorizationCount()).toBe(2);
-    expect(authorizedCalls.map((call) => call.toolName)).toEqual([
-      "sandbox_write_file",
-      "sandbox_read_file",
+    expect(sandboxCommands).toEqual([
+      "cd -- '/workspace' && exec /bin/bash -c 'printf pi-safe > /tmp/pi.txt'",
+      "cd -- '/workspace' && exec /bin/bash -c 'cat /tmp/pi.txt'",
     ]);
+    expect(toolAuthorizationCount()).toBe(2);
+    expect(authorizedCalls.map((call) => call.toolName)).toEqual(["exec_command", "exec_command"]);
     expect(new Set(authorizedCalls.map((call) => call.callId)).size).toBe(2);
     expect(authorizedCalls.every((call) => /^[a-f0-9]{64}$/u.test(call.argsDigest))).toBe(true);
     expect(events.filter((event) => event.type === "message.completed")).toEqual([
@@ -110,7 +115,7 @@ describe("Pi 安全适配", () => {
     expect("session" in controller).toBe(false);
     expect(modelContext).toContain("Cube Runtime 托管的受控 Agent");
     expect(modelContext).toContain("/workspace");
-    expect(modelContext).toContain("sandbox_write_file");
+    expect(modelContext).toContain("exec_command");
     expect(modelContext).not.toContain("request_user_input");
     expect(modelContext).not.toMatch(/[A-Za-z]:\\\\workspace/iu);
     // CI 的仓库挂载点也可能恰好叫 /workspace；此时它与 Sandbox 的固定逻辑 cwd
@@ -184,7 +189,7 @@ describe("Pi 安全适配", () => {
         tokenizer,
       );
       expect(
-        counted.some((text) => text.includes("sandbox_read_file") && text.includes("parameters")),
+        counted.some((text) => text.includes("exec_command") && text.includes("parameters")),
       ).toBe(true);
       expect(counted.some((text) => text.includes("低信任可见内容"))).toBe(true);
       await expect(controller.prompt("当前超大输入")).rejects.toThrow("CONTEXT_TOO_LARGE");
@@ -269,7 +274,7 @@ describe("Pi 安全适配", () => {
       };
       const { controller, faux, events } = await harness(
         [
-          fauxAssistantMessage(fauxToolCall("sandbox_command", { command: "produce" }), {
+          fauxAssistantMessage(fauxToolCall("exec_command", { cmd: "produce" }), {
             stopReason: "toolUse",
           }),
           fauxAssistantMessage("不应触达"),
@@ -550,12 +555,16 @@ describe("Pi 安全适配", () => {
 
   it.runIf(process.platform === "linux")("Tool Router 在 DB 许可拒绝时不触碰 Sandbox", async () => {
     const sandbox = new FakeSandboxHandle("pi-denied-tool");
+    let sandboxCalls = 0;
+    sandbox.command = async () => {
+      sandboxCalls += 1;
+      return { stdout: "", stderr: "", exitCode: 0 };
+    };
     const { controller, events, faux } = await harness(
       [
-        fauxAssistantMessage(
-          fauxToolCall("sandbox_write_file", { path: "/tmp/denied.txt", content: "no" }),
-          { stopReason: "toolUse" },
-        ),
+        fauxAssistantMessage(fauxToolCall("exec_command", { cmd: "printf no > /tmp/denied.txt" }), {
+          stopReason: "toolUse",
+        }),
         fauxAssistantMessage("已处理"),
       ],
       sandbox,
@@ -567,7 +576,7 @@ describe("Pi 安全适配", () => {
 
     await expect(controller.prompt("尝试写入")).rejects.toThrow();
 
-    expect(sandbox.files.has("/tmp/denied.txt")).toBe(false);
+    expect(sandboxCalls).toBe(0);
     expect(faux.state.callCount).toBe(1);
     expect(
       events.some((event) => event.type === "message.completed" && event.stopReason === "stop"),
@@ -581,10 +590,15 @@ describe("Pi 安全适配", () => {
     "Tool Router 用单调时钟拒绝迟到 continuation，且不触碰 Sandbox",
     async () => {
       const sandbox = new FakeSandboxHandle("pi-expired-tool");
+      let sandboxCalls = 0;
+      sandbox.command = async () => {
+        sandboxCalls += 1;
+        return { stdout: "", stderr: "", exitCode: 0 };
+      };
       const { controller, events, faux } = await harness(
         [
           fauxAssistantMessage(
-            fauxToolCall("sandbox_write_file", { path: "/tmp/expired.txt", content: "no" }),
+            fauxToolCall("exec_command", { cmd: "printf no > /tmp/expired.txt" }),
             { stopReason: "toolUse" },
           ),
           fauxAssistantMessage("已处理"),
@@ -599,7 +613,7 @@ describe("Pi 安全适配", () => {
 
       await expect(controller.prompt("尝试使用迟到许可写入")).rejects.toThrow();
 
-      expect(sandbox.files.has("/tmp/expired.txt")).toBe(false);
+      expect(sandboxCalls).toBe(0);
       expect(faux.state.callCount).toBe(1);
       expect(
         events.some((event) => event.type === "message.completed" && event.stopReason === "stop"),

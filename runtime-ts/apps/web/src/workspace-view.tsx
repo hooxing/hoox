@@ -37,6 +37,7 @@ export const cancellableRunStatuses = new Set<RunStatus>(["queued", "running", "
 export const pollingRunStatuses = new Set<RunStatus>(["queued", "running"]);
 export const timedRunStatuses = new Set<RunStatus>(["running"]);
 export const compactWorkspaceMedia = "(max-width: 820px)";
+export const composerTextareaResize = "none";
 
 export function canCreateThread(title: string, actionLoading: boolean): boolean {
   return title.trim().length > 0 && !actionLoading;
@@ -185,23 +186,48 @@ export function ActivityPanel({
   onToggle,
   onPreview,
   onDownload,
+  returnFocusRef,
+  fallbackFocusRef,
 }: {
   readonly isOpen: boolean;
   readonly artifacts: readonly Artifact[];
   readonly onToggle: () => void;
   readonly onPreview: (artifactId: string) => void;
   readonly onDownload: (artifactId: string) => void;
+  readonly returnFocusRef: RefObject<HTMLButtonElement | null>;
+  readonly fallbackFocusRef: RefObject<HTMLElement | null>;
 }) {
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const wasOpenRef = useRef(false);
+  const open = isOpen && artifacts.length > 0;
+  useEffect(() => {
+    if (open) {
+      wasOpenRef.current = true;
+      closeButtonRef.current?.focus();
+    } else if (wasOpenRef.current) {
+      wasOpenRef.current = false;
+      // 切换 Thread 后旧的产物入口可能已卸载，退回到中部工作区而非保留失效焦点。
+      const returnTarget = returnFocusRef.current;
+      if (returnTarget !== null) returnTarget.focus();
+      else fallbackFocusRef.current?.focus();
+    }
+  }, [fallbackFocusRef, open, returnFocusRef]);
   if (artifacts.length === 0) return null;
-  const open = isOpen;
   return (
     <aside
       className={`activity-panel ${open ? "" : "is-collapsed"}`}
       aria-label="本次运行产物"
       aria-hidden={!open || undefined}
       inert={!open || undefined}
+      onKeyDown={(event) => {
+        if (open && event.key === "Escape") {
+          event.preventDefault();
+          onToggle();
+        }
+      }}
     >
       <button
+        ref={closeButtonRef}
         className="panel-toggle icon-button"
         type="button"
         onClick={onToggle}
@@ -294,6 +320,7 @@ export function ConversationComposer({
         placeholder="描述你希望 Agent 完成的任务…"
         rows={3}
         disabled={disabled}
+        style={{ resize: composerTextareaResize }}
         onKeyDown={(event) => {
           if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
             event.preventDefault();
@@ -427,6 +454,7 @@ export function ThreadHeader({
   onArchive,
   onCancel,
   onOpenArtifacts,
+  artifactTriggerRef,
 }: {
   readonly thread: Thread;
   readonly run: Run | undefined;
@@ -435,6 +463,7 @@ export function ThreadHeader({
   readonly onArchive: () => void;
   readonly onCancel: () => void;
   readonly onOpenArtifacts: () => void;
+  readonly artifactTriggerRef: RefObject<HTMLButtonElement | null>;
 }) {
   return (
     <header className="conversation-header">
@@ -463,6 +492,7 @@ export function ThreadHeader({
         )}
         {artifactCount > 0 && (
           <button
+            ref={artifactTriggerRef}
             type="button"
             className="quiet-button artifact-entry-button"
             onClick={onOpenArtifacts}

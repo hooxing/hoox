@@ -49,6 +49,41 @@ Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 必须等于
 入口为 `runtime-ts/apps/agent-worker` 的 `pnpm start:production`，仅支持 Linux，并且只使用模块内固定的真实
 PostgreSQL/S3/CubeSandbox/Pi/Workspace/Artifact 依赖图；它绝不会复用 development 身份或调用方注入的 Fake。
 
+### 模型网络报文诊断（development）
+
+模型网络报文诊断默认关闭。需要定位“模型生成的工具参数有误”还是“工具内部执行失败”时，在本机 `.env`
+显式设置以下字段，然后重启 Worker；修改正在运行的进程环境不会动态开启采集：
+
+```dotenv
+MODEL_WIRE_TRACE_ENABLED=true
+MODEL_WIRE_TRACE_RETENTION_DAYS=7
+MODEL_WIRE_TRACE_MAX_BYTES=1048576
+```
+
+`MODEL_WIRE_TRACE_RETENTION_DAYS` 决定新记录的到期时间，`MODEL_WIRE_TRACE_MAX_BYTES` 是每个 request/response
+正文的独立字节上限，超过上限只保存精确前缀并标记为 `truncated`。停止现有 Worker 后重新执行
+`corepack pnpm dev:worker`，此后新 Run 的每次 `/chat/completions` 调用才会进入诊断面。旧 Run 在采集关闭期间
+没有保存网络正文，不能追溯或事后重建精确请求与 SSE。
+
+启动开发 API 和 Web 后，在 Web 中选择 Thread 与 Run，进入“模型网络报文”区域即可按 Attempt、
+`modelTurn` 和 `transportAttempt` 查看记录：`modelTurn` 表示工具循环中的模型轮次，`transportAttempt` 表示
+同一轮的 HTTP 重试。request 展示实际交给 Fetch 的最终 application request body；response 展示 HTTP
+content-decoding 后、SSE 解析前的应用可见正文，不包含 TCP/chunk framing 或 Content-Encoding 前的线路字节。
+页面可以查看 UTF-8 文本或下载未经 API 重编码的正文，并同时显示采集状态、HTTP 状态、字节数和 SHA-256。
+
+同一读取能力也通过 Run 嵌套 API 提供：
+
+- `GET /v1/threads/:threadId/runs/:runId/model-wire-traces?limit=500`：列出元数据，并可用返回的 `nextCursor`
+  继续分页。
+- `GET /v1/threads/:threadId/runs/:runId/model-wire-traces/:attemptId/:modelTurn/:transportAttempt/:part/body`：
+  读取 `request` 或 `response` 的 `application/octet-stream` 正文字节。
+
+这两类接口沿用现有认证、Tenant Membership/RLS 与 Thread/Run 归属校验，不返回 S3 URL。正文可能包含完整
+Prompt、工具参数、模型生成的 tool call，以及下一轮请求中模型可见的工具回执，必须按敏感诊断数据处理。
+采集端口不接受 HTTP headers，因此不会保存 `Authorization`、Cookie 或 Provider 密钥。关闭
+`MODEL_WIRE_TRACE_ENABLED` 只停止新增采集；生产环境在保留清理 consumer 完成部署前若设置为 `true`，Worker
+会在创建数据库 Pool、安装 fetch instrumentation 或触达任何外部依赖之前失败关闭。
+
 development Worker 已启用 Workspace manifest 物化与发布。新文件的 stable Blob 引用会先绑定到同一
 Attempt 的持久化 candidate；最终 RuntimeMutation 在一个 SERIALIZABLE 事务内核对完整执行身份、manifest、
 active incarnation 与 Workspace head，再写入 revision、推进 head 并释放 candidate 引用。unchanged 文件按

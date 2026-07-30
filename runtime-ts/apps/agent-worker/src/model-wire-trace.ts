@@ -82,16 +82,17 @@ export function installModelWireFetchInstrumentation(): void {
     try {
       response = await originalFetch(outbound);
     } catch (error) {
-      // Abort/网络中断时没有 Response body；仍留下可检索的 response 失败事实。
+      // 自定义 AbortSignal reason 不一定是 DOMException；以实际 outbound signal 为最终分类事实。
       track(
         current,
         safeFailure(
           current,
           transportAttempt,
           "response",
-          isAbort(error) ? "BODY_UNREADABLE" : "CAPTURE_UNAVAILABLE",
+          outbound.signal.aborted || isAbort(error) ? "BODY_UNREADABLE" : "CAPTURE_UNAVAILABLE",
         ),
       );
+      // 捕获面只旁路记录失败事实，调用方仍收到 Provider transport 的原始 rejection reason。
       throw error;
     }
     // clone() 建立独立消费者；读取从不等待或替换 Provider 实际消费的 Response body。
@@ -164,7 +165,7 @@ async function captureRequest(
   outbound: Request,
 ): Promise<void> {
   try {
-    // Request.clone 读取的是 Fetch 即将发送的最终 UTF-8 body bytes，不是 onPayload 的对象重建。
+    // Request.clone 读取的是 Fetch 即将发送的 application body bytes，不是 onPayload 的对象重建。
     const captured = await readBounded(outbound.clone().body, trace.maxBytes);
     await safePersist(trace, transportAttempt, "request", captured);
   } catch {

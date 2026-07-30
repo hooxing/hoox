@@ -3,7 +3,7 @@
 ## 背景
 
 维护 OpenAI-compatible `/chat/completions` 时，仅保存 Pi 的 payload 对象无法证明真正送往
-Provider 的 UTF-8 字节，也无法复现 SSE 分片、非 2xx、断流或中止。与此同时，prompt 与回复
+Provider 的 application request body bytes，也无法复现 SSE 分片、非 2xx、断流或中止。与此同时，prompt 与回复
 可能含租户敏感内容，Authorization、Cookie 和代理凭据绝不能进入诊断面。
 
 ## 决策
@@ -16,7 +16,8 @@ Provider 的 UTF-8 字节，也无法复现 SSE 分片、非 2xx、断流或中�
   HTTP header、TCP framing 或 Content-Encoding 前的线路字节称为 request body。
 - Response 以 clone 并行消费，保留 HTTP content-decoding 后、SSE 解析前的应用可见 response body
   bytes（不是 TCP 分片、chunk framing 或 Content-Encoding 前的线路字节）。上限后保存精确前缀并标为 `truncated`；Abort/断流、非 2xx
-  和 Blob/DB 结果未知均留下状态，且不改变模型调用结果。
+  和 Blob/DB 结果未知均留下状态，且不改变模型调用结果。Abort 分类同时检查 outbound
+  `Request.signal.aborted`，因此自定义非 `DOMException` reason 也记录为正文不可读，并向调用方原样抛回该 reason。
 - 正文进入现有 trace Blob 生命周期；`model_wire_trace_records` 先保存不可变命令摘要，再以复合
   外键绑定 reference 的 stable/state/purpose、摘要、大小、lifecycle、incarnation 与物理键。
   相同 tenant/attempt/model turn/transport attempt/part 的完整同命令只重放，不同命令稳定冲突；

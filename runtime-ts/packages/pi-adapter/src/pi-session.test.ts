@@ -44,7 +44,6 @@ describe("Pi 安全适配", () => {
       undefined,
       undefined,
       undefined,
-      undefined,
       (operation) => {
         invocations.push(invocations.length);
         return operation();

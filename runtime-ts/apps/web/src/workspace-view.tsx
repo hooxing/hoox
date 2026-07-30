@@ -6,6 +6,7 @@ import {
   FileText,
   LoaderCircle,
   MessageSquarePlus,
+  Package,
   PanelLeftClose,
   PanelRightClose,
   PanelRightOpen,
@@ -191,19 +192,22 @@ export function ActivityPanel({
   readonly onPreview: (artifactId: string) => void;
   readonly onDownload: (artifactId: string) => void;
 }) {
-  const open = isOpen && artifacts.length > 0;
+  if (artifacts.length === 0) return null;
+  const open = isOpen;
   return (
     <aside
-      className={`activity-panel ${open ? "" : "is-collapsed"} ${artifacts.length === 0 ? "is-empty" : ""}`}
+      className={`activity-panel ${open ? "" : "is-collapsed"}`}
       aria-label="本次运行产物"
+      aria-hidden={!open || undefined}
+      inert={!open || undefined}
     >
       <button
         className="panel-toggle icon-button"
         type="button"
         onClick={onToggle}
         aria-expanded={open}
-        aria-label={open ? "收起产物侧栏" : "展开产物侧栏"}
-        title={open ? "收起产物侧栏" : "展开产物侧栏"}
+        aria-label={open ? "关闭产物抽屉" : "打开产物抽屉"}
+        title={open ? "关闭产物抽屉" : "打开产物抽屉"}
       >
         {open ? <PanelRightClose size={18} /> : <PanelRightOpen size={18} />}
       </button>
@@ -418,15 +422,19 @@ export function NavigationSidebar({
 export function ThreadHeader({
   thread,
   run,
+  artifactCount,
   actionLoading,
   onArchive,
   onCancel,
+  onOpenArtifacts,
 }: {
   readonly thread: Thread;
   readonly run: Run | undefined;
+  readonly artifactCount: number;
   readonly actionLoading: boolean;
   readonly onArchive: () => void;
   readonly onCancel: () => void;
+  readonly onOpenArtifacts: () => void;
 }) {
   return (
     <header className="conversation-header">
@@ -453,15 +461,28 @@ export function ThreadHeader({
             停止运行
           </button>
         )}
+        {artifactCount > 0 && (
+          <button
+            type="button"
+            className="quiet-button artifact-entry-button"
+            onClick={onOpenArtifacts}
+            aria-label={`打开本次运行产物，共 ${artifactCount} 个`}
+            title="查看本次运行产物"
+          >
+            <Package size={15} />
+            产物 <span>{artifactCount}</span>
+          </button>
+        )}
         <button
           type="button"
-          className="icon-button"
+          className="quiet-button archive-button"
           title="归档会话"
           aria-label="归档会话"
           onClick={onArchive}
           disabled={actionLoading}
         >
           <Archive size={17} />
+          归档
         </button>
       </div>
     </header>

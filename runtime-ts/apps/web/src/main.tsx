@@ -454,9 +454,11 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
             <ThreadHeader
               thread={selected}
               run={state.run}
+              artifactCount={state.artifacts.length}
               actionLoading={actionLoading}
               onArchive={() => void archive()}
               onCancel={() => void cancel()}
+              onOpenArtifacts={() => setActivityOpen(true)}
             />
             <section className="run-area" aria-live="polite">
               {state.run && currentRequest && (

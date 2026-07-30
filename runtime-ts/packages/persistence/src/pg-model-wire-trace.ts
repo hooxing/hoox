@@ -62,7 +62,8 @@ export class PgModelWireTraceRepository implements ModelWireTracePort {
       result.outcome === "persisted" || result.outcome === "replayed" ? result : undefined;
     await this.write({
       context: input.context,
-      turn: input.modelTurn,
+      modelTurn: input.modelTurn,
+      transportAttempt: input.transportAttempt,
       part: input.part,
       captureStatus: input.status,
       persistenceStatus:
@@ -83,7 +84,8 @@ export class PgModelWireTraceRepository implements ModelWireTracePort {
   async captureFailed(input: Parameters<ModelWireTracePort["captureFailed"]>[0]): Promise<void> {
     await this.write({
       context: input.context,
-      turn: input.modelTurn,
+      modelTurn: input.modelTurn,
+      transportAttempt: input.transportAttempt,
       part: input.part,
       captureStatus: input.code === "BODY_UNREADABLE" ? "aborted" : "failed",
       persistenceStatus: "not_captured",
@@ -93,7 +95,8 @@ export class PgModelWireTraceRepository implements ModelWireTracePort {
 
   private async write(input: {
     readonly context: Parameters<ModelWireTracePort["persist"]>[0]["context"];
-    readonly turn: number;
+    readonly modelTurn: number;
+    readonly transportAttempt: number;
     readonly part: "request" | "response";
     readonly captureStatus: "complete" | "truncated" | "aborted" | "failed";
     readonly persistenceStatus: "stored" | "unknown" | "conflict" | "unavailable" | "not_captured";
@@ -105,17 +108,18 @@ export class PgModelWireTraceRepository implements ModelWireTracePort {
     await withTenantTransaction(this.pool, { tenantId: input.context.tenantId }, async (client) => {
       await client.query(
         `INSERT INTO model_wire_trace_records (
-           tenant_id, thread_id, run_id, attempt_id, turn, part, capture_status,
+           tenant_id, thread_id, run_id, attempt_id, model_turn, transport_attempt, part, capture_status,
            persistence_status, sha256, size, http_status, blob_reference_id, expires_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                   clock_timestamp() + make_interval(days => $13::integer))
-         ON CONFLICT (tenant_id, attempt_id, turn, part) DO NOTHING`,
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                   clock_timestamp() + make_interval(days => $14::integer))
+         ON CONFLICT (tenant_id, attempt_id, model_turn, transport_attempt, part) DO NOTHING`,
         [
           input.context.tenantId,
           input.context.threadId,
           input.context.runId,
           input.context.attemptId,
-          input.turn,
+          input.modelTurn,
+          input.transportAttempt,
           input.part,
           input.captureStatus,
           input.persistenceStatus,

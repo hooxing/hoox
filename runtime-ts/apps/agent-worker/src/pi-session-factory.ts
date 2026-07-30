@@ -17,10 +17,7 @@ import {
   deriveSafePiSessionCompatibility,
   type PiSessionController,
 } from "@cube-runtime/pi-adapter";
-import type {
-  ArtifactToolRouterFactoryPort,
-  DeliverFileToolRouterFactoryPort,
-} from "@cube-runtime/tool-router";
+import type { DeliverFileToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
@@ -51,7 +48,6 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         readonly toolName: string;
       }): Promise<ToolObservationResult>;
     },
-    private readonly artifactTools?: ArtifactToolRouterFactoryPort,
     private readonly artifactAuthorizationIssuer?: ArtifactExecutionAuthorizationIssuerPort,
     private readonly prepareObservationSession?: (
       input: Parameters<AgentSessionFactoryPort["create"]>[0],
@@ -130,24 +126,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         throw error;
       }
     };
-    const artifactTools = this.artifactTools;
     const artifactAuthorizationIssuer = this.artifactAuthorizationIssuer;
-    if (artifactTools && !artifactAuthorizationIssuer) {
-      throw new Error("Artifact 工具缺少动态授权 issuer");
-    }
-    const artifactToolRouter =
-      artifactTools && artifactAuthorizationIssuer
-        ? artifactTools.create({
-            binding: { scope: input.scope, attemptId: input.attemptId },
-            authorizer: {
-              authorizeToolEffect: async (call) =>
-                artifactAuthorizationIssuer.issue({
-                  consumed: await authorizeStartedTool(call),
-                  attemptId: input.attemptId,
-                }),
-            },
-          })
-        : undefined;
     const deliverFileToolRouter =
       this.deliverFileTools && artifactAuthorizationIssuer && input.sandboxSession
         ? this.deliverFileTools.create({
@@ -216,7 +195,6 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                 operation,
               ),
           }),
-      ...(artifactToolRouter === undefined ? {} : { artifactToolRouter }),
       ...(deliverFileToolRouter === undefined ? {} : { deliverFileToolRouter }),
     };
     // 兼容身份只由实际模型/Prompt/Tool schema 派生；占位 recorder 不执行任何写入。

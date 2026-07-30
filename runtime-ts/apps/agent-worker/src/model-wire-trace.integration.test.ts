@@ -184,7 +184,6 @@ describe("模型网络报文真实 Pi transport", () => {
       observationRecorder,
       undefined,
       undefined,
-      undefined,
       new ModelWireTraceSession(traces, 1024 * 1024, `http://127.0.0.1:${port}/v1`),
     );
     const persistence = new FakeExecutionPersistence();
@@ -252,7 +251,6 @@ async function createWorker(
     model,
     modelRuntime,
     observationRecorder,
-    undefined,
     undefined,
     undefined,
     new ModelWireTraceSession(traces, 1024 * 1024, `http://127.0.0.1:${port}/v1`),

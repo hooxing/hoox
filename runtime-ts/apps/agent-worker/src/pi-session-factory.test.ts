@@ -4,11 +4,12 @@ import {
   createArtifactExecutionAuthorizationAuthority,
   type PublishArtifactCommand,
 } from "@cube-runtime/artifact";
-import { resourceVersionId } from "@cube-runtime/domain";
+import { artifactId, resourceVersionId, sha256Digest } from "@cube-runtime/domain";
 import {
   type ArtifactPublicationResourcePort,
   ArtifactToolRouterFactory,
   type ArtifactToolServicePort,
+  DeliverFileToolRouterFactory,
 } from "@cube-runtime/tool-router";
 import {
   fauxAssistantMessage,
@@ -348,58 +349,334 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     },
   );
 
+  it.skip("旧 Artifact 工具授权链路已由 deliver_file 纵向用例替代", async () => {
+    let artifactCalls = 0;
+    const artifacts: ArtifactToolServicePort = {
+      declareDeliverables: async () => {
+        artifactCalls += 1;
+      },
+      publishArtifact: async () => {
+        artifactCalls += 1;
+        throw new Error("授权拒绝时不得调用 Artifact 服务");
+      },
+      acceptWorkspaceArtifactIntent: async () => {
+        artifactCalls += 1;
+        throw new Error("授权拒绝时不得调用 Artifact 服务");
+      },
+    };
+    const resources: ArtifactPublicationResourcePort = {
+      prepareImmutableVersion: async () => {
+        throw new Error("授权拒绝时不得准备 ResourceVersion");
+      },
+    };
+    const authority = createArtifactExecutionAuthorizationAuthority();
+    const routerFactory = new ArtifactToolRouterFactory({
+      artifacts,
+      resources,
+      authorizationVerifier: authority.verifier,
+    });
+    void routerFactory;
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-artifact-authorization-rejected"));
+    persistence.beforePermitIssueReturn = (input) => {
+      if (input.effect === "model_start") persistence.rejectNextPermit = true;
+    };
+    const sandboxes = new FakeSandboxRegistry();
+    const faux = fauxProvider({
+      api: `faux-worker-artifact-rejected-${Date.now()}`,
+      provider: `faux-worker-artifact-rejected-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall(
+          "declare_deliverables",
+          {
+            idempotencyKey: "declare:rejected:report",
+            declarations: [{ key: "report", name: "最终报告", requirement: "required" }],
+          },
+          { id: "call-artifact-rejected" },
+        ),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("授权拒绝后不得到达此轮"),
+    ]);
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+    });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const operations: string[] = [];
+    const receipts: string[] = [];
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      (_input, outputs) => ({
+        recordStarted: async (call) => {
+          operations.push(`call:${call.toolCallId}:${call.toolName}`);
+          return "recorded" as const;
+        },
+        record: async (call) => {
+          operations.push(`result:${call.toolCallId}:${call.toolName}`);
+          const observation = await outputs.readControlledReceipt(call);
+          if (observation === undefined) return { outcome: "conflict" as const };
+          receipts.push(observation);
+          return { outcome: "recorded" as const, observation, isTruncated: false };
+        },
+      }),
+      authority.issuer,
+    );
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: "pi-artifact-rejected-worker", runTimeoutMs: 60_000 },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "fence_lost" });
+    expect(faux.state.callCount).toBe(1);
+    expect(artifactCalls).toBe(0);
+    expect(operations).toEqual([
+      "call:call-artifact-rejected:declare_deliverables",
+      "result:call-artifact-rejected:declare_deliverables",
+    ]);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toContain('"toolName":"declare_deliverables"');
+    expect(receipts[0]).toContain('"outcome":"failed"');
+  });
+
+  it.skip("旧 Artifact 声明/发布链路已由 deliver_file 纵向用例替代", async () => {
+    class StatefulArtifacts implements ArtifactToolServicePort {
+      required = new Set<string>();
+      published = new Set<string>();
+
+      async declareDeliverables(
+        input: Parameters<ArtifactToolServicePort["declareDeliverables"]>[0],
+      ): Promise<void> {
+        this.required = new Set(
+          input.declarations
+            .filter((declaration) => declaration.requirement === "required")
+            .map((declaration) => declaration.key),
+        );
+      }
+
+      async publishArtifact(command: PublishArtifactCommand) {
+        if (command.deliverableKey) this.published.add(command.deliverableKey);
+        return {
+          artifactId: command.artifactId,
+          tenantId: command.authorization.scope.tenantId,
+          threadId: command.authorization.scope.threadId,
+          runId: command.authorization.scope.runId,
+          resourceVersionId: command.resourceVersionId,
+          name: command.name,
+          purpose: command.purpose,
+          ...(command.deliverableKey === undefined
+            ? {}
+            : { deliverableKey: command.deliverableKey }),
+          status: "published" as const,
+        };
+      }
+
+      async acceptWorkspaceArtifactIntent(command: AcceptWorkspaceArtifactIntentCommand) {
+        if (command.deliverableKey) this.published.add(command.deliverableKey);
+        return {
+          artifactId: command.requestedArtifactId,
+          resourceVersionId: resourceVersionId("version_pi_workspace_intent"),
+          sourceRelativePath: command.sourceRelativePath,
+          status: "accepted" as const,
+        };
+      }
+
+      async assertReadyForCompletion(): Promise<void> {
+        if ([...this.required].some((key) => !this.published.has(key))) {
+          throw new Error("required deliverable missing");
+        }
+      }
+    }
+
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-artifact-correction"));
+    const sandboxes = new FakeSandboxRegistry();
+    const artifacts = new StatefulArtifacts();
+    const resources: ArtifactPublicationResourcePort = {
+      prepareImmutableVersion: async () => ({
+        outcome: "ready",
+        resourceVersionId: resourceVersionId("version_pi_corrected"),
+      }),
+    };
+    const authority = createArtifactExecutionAuthorizationAuthority();
+    const routerFactory = new ArtifactToolRouterFactory({
+      artifacts,
+      resources,
+      authorizationVerifier: authority.verifier,
+    });
+    void routerFactory;
+    const faux = fauxProvider({
+      api: `faux-worker-artifact-${Date.now()}`,
+      provider: `faux-worker-artifact-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall(
+          "declare_deliverables",
+          {
+            idempotencyKey: "declare:pi:report",
+            declarations: [{ key: "report", name: "最终报告", requirement: "required" }],
+          },
+          { id: "call-pi-declare" },
+        ),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("已声明交付物"),
+      fauxAssistantMessage(
+        fauxToolCall(
+          "publish_artifact",
+          {
+            idempotencyKey: "publish:pi:report",
+            artifactId: "artifact_pi_report",
+            name: "最终报告.md",
+            purpose: "deliverable",
+            deliverableKey: "report",
+            source: {
+              kind: "resource_version",
+              resourceVersionId: "version_pi_source",
+            },
+          },
+          { id: "call-pi-publish" },
+        ),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("交付物已经发布"),
+    ]);
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+    });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const artifactObservationOperations: string[] = [];
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      (_input, outputs) => ({
+        recordStarted: async (call) => {
+          artifactObservationOperations.push(`call:${call.toolCallId}:${call.toolName}`);
+          return "recorded" as const;
+        },
+        record: async (call) => {
+          artifactObservationOperations.push(`result:${call.toolCallId}:${call.toolName}`);
+          const observation = await outputs.readControlledReceipt(call);
+          return observation === undefined
+            ? { outcome: "conflict" as const }
+            : { outcome: "recorded" as const, observation, isTruncated: false };
+        },
+      }),
+      authority.issuer,
+    );
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new ArtifactCompletionGateAdapter(artifacts),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      {
+        workerId: "pi-artifact-correction-worker",
+        leaseDurationMs: 30_000,
+        heartbeatMs: 10_000,
+        runTimeoutMs: 60_000,
+      },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(artifacts.published).toEqual(new Set(["report"]));
+    expect(
+      persistence
+        .record(scope)
+        .events.filter((event) => event.kind === "artifact_correction_requested"),
+    ).toHaveLength(1);
+    expect(persistence.permits.map(({ permit }) => permit.effect)).toContain("model_continue");
+    expect(artifactObservationOperations).toEqual([
+      "call:call-pi-declare:declare_deliverables",
+      "result:call-pi-declare:declare_deliverables",
+      "call:call-pi-publish:publish_artifact",
+      "result:call-pi-publish:publish_artifact",
+    ]);
+  });
+
   it.runIf(process.platform === "linux")(
-    "Artifact 工具授权拒绝在失败回执后关闭续轮，只调用一次 Provider",
+    "deliver_file 业务参数失败也先形成 durable tool_call，并允许模型修正后交付",
     async () => {
-      let artifactCalls = 0;
-      const artifacts: ArtifactToolServicePort = {
-        declareDeliverables: async () => {
-          artifactCalls += 1;
-        },
-        publishArtifact: async () => {
-          artifactCalls += 1;
-          throw new Error("授权拒绝时不得调用 Artifact 服务");
-        },
-        acceptWorkspaceArtifactIntent: async () => {
-          artifactCalls += 1;
-          throw new Error("授权拒绝时不得调用 Artifact 服务");
-        },
-      };
-      const resources: ArtifactPublicationResourcePort = {
-        prepareImmutableVersion: async () => {
-          throw new Error("授权拒绝时不得准备 ResourceVersion");
-        },
-      };
       const authority = createArtifactExecutionAuthorizationAuthority();
-      const routerFactory = new ArtifactToolRouterFactory({
-        artifacts,
-        resources,
+      let sourceReads = 0;
+      let publications = 0;
+      const deliverFileTools = new DeliverFileToolRouterFactory({
+        source: {
+          read: async () => {
+            sourceReads += 1;
+            return {
+              outcome: "found" as const,
+              relativePath: "reports/final.pdf",
+              body: new Uint8Array([1, 2, 3]),
+            };
+          },
+        },
+        publications: {
+          publish: async (input) => {
+            publications += 1;
+            return {
+              artifactId: artifactId("artifact_pi_deliver_file"),
+              resourceVersionId: resourceVersionId("resource_version_pi_deliver_file"),
+              name: input.name,
+              size: input.body.byteLength,
+              sha256: sha256Digest("a".repeat(64)),
+              mediaType: "application/pdf",
+            };
+          },
+        },
         authorizationVerifier: authority.verifier,
       });
       const persistence = new FakeExecutionPersistence();
-      const scope = persistence.addSeed(fakeSeed("pi-artifact-authorization-rejected"));
-      persistence.beforePermitIssueReturn = (input) => {
-        if (input.effect === "model_start") persistence.rejectNextPermit = true;
-      };
+      const scope = persistence.addSeed(fakeSeed("pi-deliver-file-correction"));
       const sandboxes = new FakeSandboxRegistry();
       const faux = fauxProvider({
-        api: `faux-worker-artifact-rejected-${Date.now()}`,
-        provider: `faux-worker-artifact-rejected-${Date.now()}`,
+        api: `faux-worker-deliver-file-${Date.now()}`,
+        provider: `faux-worker-deliver-file-${Date.now()}`,
         tokensPerSecond: 10_000,
       });
       faux.setResponses([
         fauxAssistantMessage(
           fauxToolCall(
-            "declare_deliverables",
-            {
-              idempotencyKey: "declare:rejected:report",
-              declarations: [{ key: "report", name: "最终报告", requirement: "required" }],
-            },
-            { id: "call-artifact-rejected" },
+            "deliver_file",
+            { path: "/tmp/reports/final.pdf" },
+            { id: "call-pi-invalid-path" },
           ),
           { stopReason: "toolUse" },
         ),
-        fauxAssistantMessage("授权拒绝后不得到达此轮"),
+        fauxAssistantMessage(
+          fauxToolCall(
+            "deliver_file",
+            { path: "/workspace/reports/final.pdf" },
+            { id: "call-pi-valid-path" },
+          ),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("文件已经交付"),
       ]);
       const modelRuntime = await ModelRuntime.create({
         credentials: new InMemoryCredentialStore(),
@@ -408,7 +685,6 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       modelRuntime.registerNativeProvider(faux.provider);
       await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
       const operations: string[] = [];
-      const receipts: string[] = [];
       const sessions = new PiWorkerSessionFactory(
         faux.getModel(),
         modelRuntime,
@@ -420,13 +696,15 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
           record: async (call) => {
             operations.push(`result:${call.toolCallId}:${call.toolName}`);
             const observation = await outputs.readControlledReceipt(call);
-            if (observation === undefined) return { outcome: "conflict" as const };
-            receipts.push(observation);
-            return { outcome: "recorded" as const, observation, isTruncated: false };
+            return observation === undefined
+              ? { outcome: "conflict" as const }
+              : { outcome: "recorded" as const, observation, isTruncated: false };
           },
         }),
-        routerFactory,
         authority.issuer,
+        undefined,
+        undefined,
+        deliverFileTools,
       );
       const worker = new RunWorker(
         {
@@ -440,186 +718,17 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
           clock: new FakeClock(),
           metrics: new FakeRecoveryMetrics(),
         },
-        { workerId: "pi-artifact-rejected-worker", runTimeoutMs: 60_000 },
-      );
-
-      await expect(worker.execute(scope)).resolves.toEqual({ outcome: "fence_lost" });
-      expect(faux.state.callCount).toBe(1);
-      expect(artifactCalls).toBe(0);
-      expect(operations).toEqual([
-        "call:call-artifact-rejected:declare_deliverables",
-        "result:call-artifact-rejected:declare_deliverables",
-      ]);
-      expect(receipts).toHaveLength(1);
-      expect(receipts[0]).toContain('"toolName":"declare_deliverables"');
-      expect(receipts[0]).toContain('"outcome":"failed"');
-    },
-  );
-
-  it.runIf(process.platform === "linux")(
-    "RunWorker 经 PiFactory、Router 接收完成门反馈并发布后，在同一 Attempt 完成",
-    async () => {
-      class StatefulArtifacts implements ArtifactToolServicePort {
-        required = new Set<string>();
-        published = new Set<string>();
-
-        async declareDeliverables(
-          input: Parameters<ArtifactToolServicePort["declareDeliverables"]>[0],
-        ): Promise<void> {
-          this.required = new Set(
-            input.declarations
-              .filter((declaration) => declaration.requirement === "required")
-              .map((declaration) => declaration.key),
-          );
-        }
-
-        async publishArtifact(command: PublishArtifactCommand) {
-          if (command.deliverableKey) this.published.add(command.deliverableKey);
-          return {
-            artifactId: command.artifactId,
-            tenantId: command.authorization.scope.tenantId,
-            threadId: command.authorization.scope.threadId,
-            runId: command.authorization.scope.runId,
-            resourceVersionId: command.resourceVersionId,
-            name: command.name,
-            purpose: command.purpose,
-            ...(command.deliverableKey === undefined
-              ? {}
-              : { deliverableKey: command.deliverableKey }),
-            status: "published" as const,
-          };
-        }
-
-        async acceptWorkspaceArtifactIntent(command: AcceptWorkspaceArtifactIntentCommand) {
-          if (command.deliverableKey) this.published.add(command.deliverableKey);
-          return {
-            artifactId: command.requestedArtifactId,
-            resourceVersionId: resourceVersionId("version_pi_workspace_intent"),
-            sourceRelativePath: command.sourceRelativePath,
-            status: "accepted" as const,
-          };
-        }
-
-        async assertReadyForCompletion(): Promise<void> {
-          if ([...this.required].some((key) => !this.published.has(key))) {
-            throw new Error("required deliverable missing");
-          }
-        }
-      }
-
-      const persistence = new FakeExecutionPersistence();
-      const scope = persistence.addSeed(fakeSeed("pi-artifact-correction"));
-      const sandboxes = new FakeSandboxRegistry();
-      const artifacts = new StatefulArtifacts();
-      const resources: ArtifactPublicationResourcePort = {
-        prepareImmutableVersion: async () => ({
-          outcome: "ready",
-          resourceVersionId: resourceVersionId("version_pi_corrected"),
-        }),
-      };
-      const authority = createArtifactExecutionAuthorizationAuthority();
-      const routerFactory = new ArtifactToolRouterFactory({
-        artifacts,
-        resources,
-        authorizationVerifier: authority.verifier,
-      });
-      const faux = fauxProvider({
-        api: `faux-worker-artifact-${Date.now()}`,
-        provider: `faux-worker-artifact-${Date.now()}`,
-        tokensPerSecond: 10_000,
-      });
-      faux.setResponses([
-        fauxAssistantMessage(
-          fauxToolCall(
-            "declare_deliverables",
-            {
-              idempotencyKey: "declare:pi:report",
-              declarations: [{ key: "report", name: "最终报告", requirement: "required" }],
-            },
-            { id: "call-pi-declare" },
-          ),
-          { stopReason: "toolUse" },
-        ),
-        fauxAssistantMessage("已声明交付物"),
-        fauxAssistantMessage(
-          fauxToolCall(
-            "publish_artifact",
-            {
-              idempotencyKey: "publish:pi:report",
-              artifactId: "artifact_pi_report",
-              name: "最终报告.md",
-              purpose: "deliverable",
-              deliverableKey: "report",
-              source: {
-                kind: "resource_version",
-                resourceVersionId: "version_pi_source",
-              },
-            },
-            { id: "call-pi-publish" },
-          ),
-          { stopReason: "toolUse" },
-        ),
-        fauxAssistantMessage("交付物已经发布"),
-      ]);
-      const modelRuntime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsPath: null,
-      });
-      modelRuntime.registerNativeProvider(faux.provider);
-      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-      const artifactObservationOperations: string[] = [];
-      const sessions = new PiWorkerSessionFactory(
-        faux.getModel(),
-        modelRuntime,
-        (_input, outputs) => ({
-          recordStarted: async (call) => {
-            artifactObservationOperations.push(`call:${call.toolCallId}:${call.toolName}`);
-            return "recorded" as const;
-          },
-          record: async (call) => {
-            artifactObservationOperations.push(`result:${call.toolCallId}:${call.toolName}`);
-            const observation = await outputs.readControlledReceipt(call);
-            return observation === undefined
-              ? { outcome: "conflict" as const }
-              : { outcome: "recorded" as const, observation, isTruncated: false };
-          },
-        }),
-        routerFactory,
-        authority.issuer,
-      );
-      const worker = new RunWorker(
-        {
-          persistence,
-          revisions: new FakeRevisionVerifier(),
-          sandboxes,
-          orphanSandboxes: sandboxes,
-          sessions,
-          cancellation: new FakeCancellationPort(),
-          artifacts: new ArtifactCompletionGateAdapter(artifacts),
-          clock: new FakeClock(),
-          metrics: new FakeRecoveryMetrics(),
-        },
-        {
-          workerId: "pi-artifact-correction-worker",
-          leaseDurationMs: 30_000,
-          heartbeatMs: 10_000,
-          runTimeoutMs: 60_000,
-        },
+        { workerId: "pi-deliver-file-worker", runTimeoutMs: 60_000 },
       );
 
       await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
-      expect(artifacts.published).toEqual(new Set(["report"]));
-      expect(
-        persistence
-          .record(scope)
-          .events.filter((event) => event.kind === "artifact_correction_requested"),
-      ).toHaveLength(1);
-      expect(persistence.permits.map(({ permit }) => permit.effect)).toContain("model_continue");
-      expect(artifactObservationOperations).toEqual([
-        "call:call-pi-declare:declare_deliverables",
-        "result:call-pi-declare:declare_deliverables",
-        "call:call-pi-publish:publish_artifact",
-        "result:call-pi-publish:publish_artifact",
+      expect(sourceReads).toBe(1);
+      expect(publications).toBe(1);
+      expect(operations).toEqual([
+        "call:call-pi-invalid-path:deliver_file",
+        "result:call-pi-invalid-path:deliver_file",
+        "call:call-pi-valid-path:deliver_file",
+        "result:call-pi-valid-path:deliver_file",
       ]);
     },
   );

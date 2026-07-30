@@ -44,12 +44,11 @@ import {
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
 import { resolveCubeProxyRouting } from "@cube-runtime/sandbox";
-import { ArtifactToolRouterFactory, DeliverFileToolRouterFactory } from "@cube-runtime/tool-router";
+import { DeliverFileToolRouterFactory } from "@cube-runtime/tool-router";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { SandboxDeliverFileSource } from "./deliver-file-source.js";
 import { installModelWireFetchInstrumentation, ModelWireTraceSession } from "./model-wire-trace.js";
-import { PgArtifactPublicationResourceBridge } from "./pg-artifact-resource-bridge.js";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
 import { PiWorkerSessionFactory } from "./pi-session-factory.js";
 import {
@@ -487,11 +486,6 @@ async function assembleWorkerRuntime(
       ...(runtimeMode === "development" ? { allowInsecureHttpDownload: true } : {}),
       executionAuthorizationVerifier: artifactAuthorization.verifier,
     });
-    const artifactTools = new ArtifactToolRouterFactory({
-      resources: new PgArtifactPublicationResourceBridge(pool),
-      artifacts: artifactService,
-      authorizationVerifier: artifactAuthorization.verifier,
-    });
     const upstreamSandboxes = new CubeSandboxSessionRegistry(
       {
         apiUrl: configuration.sandbox.apiUrl,
@@ -581,7 +575,6 @@ async function assembleWorkerRuntime(
       publications: new SimpleArtifactDeliveryService(
         new PgSimpleDeliveredFileRepository(pool),
         new DurableResourceBlobWriter(blobRepository, blobs, workspacePolicy.maxSingleFileBytes),
-        artifactAuthorization.verifier,
       ),
       authorizationVerifier: artifactAuthorization.verifier,
     });
@@ -589,7 +582,6 @@ async function assembleWorkerRuntime(
       model,
       modelRuntime,
       durableObservation.createRecorder,
-      artifactTools,
       artifactAuthorization.issuer,
       durableObservation.prepare,
       modelWireTraces,

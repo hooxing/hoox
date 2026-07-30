@@ -28,12 +28,15 @@ const scope: ExecutionScope = {
 
 describe("SimpleArtifactDeliveryService", () => {
   it("计算二进制身份并只在 Repository 提交 published 事实后成功", async () => {
-    const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 100 });
+    let now = 100;
+    const authority = createArtifactExecutionAuthorizationAuthority({ now: () => now });
     const argsDigest = sha256Digest("a".repeat(64));
     const authorization = authority.issuer.issue({
       attemptId: "attempt-simple-delivery",
       consumed: consumed(argsDigest),
     });
+    // Sandbox 读取可以超过短 continuation window；发布阶段由 PG execution boundary 重验。
+    now = 351;
     let committed: Parameters<SimpleDeliveredFileRepositoryPort["commit"]>[0] | undefined;
     const service = new SimpleArtifactDeliveryService(
       {
@@ -55,7 +58,6 @@ describe("SimpleArtifactDeliveryService", () => {
           blob: stable(input.tenantId, input.sha256, input.body.byteLength, input.mediaType),
         }),
       },
-      authority.verifier,
     );
     const result = await service.publish({
       authorization,

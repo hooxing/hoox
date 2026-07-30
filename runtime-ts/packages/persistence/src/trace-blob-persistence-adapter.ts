@@ -16,6 +16,7 @@ import {
   BlobStoreError,
   type StableBlobGcClaimPort,
   type StableBlobRef,
+  type StagedBlobRef,
 } from "./blob-store.js";
 
 export type TraceBlobCommitRepository = BlobCommitStatePort &
@@ -72,6 +73,66 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
     }
   }
 
+  /**
+   * 保留期 consumer 不持有敏感正文，只能从 durable snapshot 继续 promotion，或在尚未提交引用时
+   * 先用 CAS 抢占 staging 清理。返回 retry 时 snapshot 仍是下一轮可恢复锚点。
+   */
+  async recoverForRetention(input: {
+    readonly tenantId: string;
+    readonly operationId: string;
+    readonly sha256: string;
+    readonly size: number;
+  }): Promise<"completed" | "abandoned" | "deferred" | "retry" | "conflict"> {
+    try {
+      const scope = { tenantId: input.tenantId };
+      let snapshot = await this.repository.load(scope, input.operationId);
+      if (snapshot === undefined) return "abandoned";
+      if (!matchesTraceCommand(snapshot, input.tenantId, input.sha256, input.size))
+        return "conflict";
+      const uploadId = `trace-${input.operationId}`;
+      for (let step = 0; step < 32; step += 1) {
+        if (snapshot.status === "completed" || snapshot.status === "abandoned") {
+          await this.blobs.deleteStaging(
+            scope,
+            snapshot.staged ??
+              expectedTraceStaging(snapshot, input.tenantId, input.sha256, input.size, uploadId),
+          );
+          return snapshot.status;
+        }
+        if (snapshot.status === "upload_pending") {
+          // PUT 可能仍在途；只能周期重删固定 key，不能终结 durable anchor。
+          await this.blobs.deleteStaging(
+            scope,
+            expectedTraceStaging(snapshot, input.tenantId, input.sha256, input.size, uploadId),
+          );
+          return "deferred";
+        }
+        if (snapshot.status === "staged") {
+          snapshot = await this.cas(
+            snapshot,
+            transitionBlobCommit(snapshot, {
+              type: "cleanup_requested",
+              target: "staging",
+            }),
+          );
+          continue;
+        }
+        const advanced = await this.advance(snapshot, new Uint8Array(0), input.sha256, uploadId);
+        if ("outcome" in advanced) {
+          return advanced.outcome === "persisted" || advanced.outcome === "replayed"
+            ? "completed"
+            : advanced.outcome === "conflict"
+              ? "conflict"
+              : "retry";
+        }
+        snapshot = advanced;
+      }
+      return "retry";
+    } catch {
+      return "retry";
+    }
+  }
+
   private async advance(
     snapshot: BlobCommitSnapshot,
     body: Uint8Array,
@@ -90,10 +151,15 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
           expectedSha256: sha256,
           expectedSize: body.byteLength,
         });
-        return await this.cas(
+        const converged = await this.cas(
           snapshot,
           transitionBlobCommit(snapshot, { type: "stage_verified", staged }),
         );
+        if (converged.status === "cleanup_pending" || converged.status === "abandoned") {
+          // retention CAS 可能在 PUT 进行中先完成；迟到上传者必须再次删除，不能让对象在 abandoned 后复活。
+          await this.blobs.deleteStaging(scope, staged);
+        }
+        return converged;
       }
       case "staged":
         return await this.cas(
@@ -269,6 +335,31 @@ export class DurableTraceBlobPersistenceAdapter implements TraceBlobPersistenceP
       return next;
     return (await this.repository.load(current.scope, current.operationId)) ?? current;
   }
+}
+
+function expectedTraceStaging(
+  snapshot: BlobCommitSnapshot,
+  tenantId: string,
+  sha256: string,
+  size: number,
+  uploadId: string,
+): StagedBlobRef {
+  if (
+    snapshot.expectedPurpose !== "trace" ||
+    snapshot.expectedSha256 !== sha256 ||
+    snapshot.expectedSize !== size
+  ) {
+    throw new BlobStoreError("BLOB_IDEMPOTENCY_CONFLICT", "Trace cleanup staging 身份与命令不一致");
+  }
+  return {
+    kind: "staging",
+    tenantId,
+    purpose: "trace",
+    uploadId,
+    sha256,
+    size,
+    mediaType: "text/plain; charset=utf-8",
+  };
 }
 
 function matchesTraceCommand(

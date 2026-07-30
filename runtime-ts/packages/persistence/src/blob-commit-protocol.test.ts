@@ -11,6 +11,12 @@ import {
 } from "./index.js";
 
 describe("Blob 补偿状态协议", () => {
+  it("upload_pending 不得直接 abandon，避免在途 PUT 于删除后复活", () => {
+    expect(() =>
+      transitionBlobCommit(initialState(), { type: "cleanup_requested", target: "staging" }),
+    ).toThrow(BlobCommitTransitionError);
+  });
+
   it("按 staging、业务引用、stable 和清理顺序完成", () => {
     let state = initialState();
     state = transitionBlobCommit(state, { type: "stage_verified", staged });

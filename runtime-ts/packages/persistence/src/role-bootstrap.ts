@@ -246,7 +246,7 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ["waiting_recovery_effect_outbox", new Set(["state", "payload", "updated_at"])],
   ["model_wire_trace_cleanup_commands", new Set(["status", "deleted_count", "completed_at"])],
   ["model_wire_trace_cleanup_items", new Set(["state", "outcome", "attempt_count", "updated_at"])],
-  ["model_wire_trace_expiry_tombstones", new Set()],
+  ["model_wire_trace_expiry_tombstones", new Set(["staging_swept_at"])],
   [
     "model_wire_trace_records",
     new Set([
@@ -259,6 +259,7 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
       "physical_object_key",
       "processing_token",
       "processing_lease_expires_at",
+      "retention_recovery_at",
       "cleanup_command_id",
       "updated_at",
     ]),
@@ -1152,11 +1153,13 @@ export async function bootstrapRuntimeAccessOnClient(
          ON TABLE ${schema}.model_wire_trace_cleanup_commands TO ${role};
        GRANT UPDATE(state, outcome, attempt_count, updated_at)
          ON TABLE ${schema}.model_wire_trace_cleanup_items TO ${role};
+       GRANT UPDATE(staging_swept_at)
+         ON TABLE ${schema}.model_wire_trace_expiry_tombstones TO ${role};
        GRANT UPDATE(
-         persistence_status, blob_reference_id, blob_state, blob_purpose, blob_lifecycle_id,
-         blob_incarnation_id, physical_object_key, processing_token, processing_lease_expires_at,
-         cleanup_command_id, updated_at
-       ) ON TABLE ${schema}.model_wire_trace_records TO ${role}`,
+          persistence_status, blob_reference_id, blob_state, blob_purpose, blob_lifecycle_id,
+          blob_incarnation_id, physical_object_key, processing_token, processing_lease_expires_at,
+          retention_recovery_at, cleanup_command_id, updated_at
+        ) ON TABLE ${schema}.model_wire_trace_records TO ${role}`,
     );
   }
   await client.query(

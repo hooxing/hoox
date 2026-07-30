@@ -368,7 +368,7 @@ function applyTransition(
         current.cleanupTarget === "staging"
       ) {
         return current.stable === undefined
-          ? { ...base(current), status: "abandoned" }
+          ? { ...base(current), status: "abandoned", staged: requireStaged(current) }
           : copyStable(current, "completed");
       }
       break;

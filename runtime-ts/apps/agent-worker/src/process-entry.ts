@@ -11,6 +11,7 @@ import {
   PgBackedSandboxSessionRegistry,
   PgBlobLifecycleRepository,
   PgExecutionPersistence,
+  PgModelWireTraceRepository,
   PgRecoveryMetrics,
   PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
@@ -44,6 +45,7 @@ import { ArtifactToolRouterFactory } from "@cube-runtime/tool-router";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
+import { installModelWireFetchInstrumentation, ModelWireTraceSession } from "./model-wire-trace.js";
 import { PiWorkerSessionFactory } from "./pi-session-factory.js";
 import {
   AgentWorkerPollingLoop,
@@ -90,6 +92,10 @@ const workerEnvironmentSchema = Object.freeze({
   MODEL_ID: stringEnvironmentField({ maxLength: 255 }),
   MODEL_CONTEXT_WINDOW: integerEnvironmentField({ minimum: 1, maximum: 10_000_000 }),
   MODEL_MAX_OUTPUT_TOKENS: integerEnvironmentField({ minimum: 1, maximum: 10_000_000 }),
+  MODEL_WIRE_TRACE_ENABLED: booleanEnvironmentField(),
+  MODEL_WIRE_TRACE_RETENTION_DAYS: integerEnvironmentField({ minimum: 1, maximum: 365 }),
+  // 每个 request/response 原始字节独立上限；超过后保存精确前缀并标为 truncated。
+  MODEL_WIRE_TRACE_MAX_BYTES: integerEnvironmentField({ minimum: 1, maximum: 8 * 1024 * 1024 }),
   AGENT_WORKER_TENANT_ID: stringEnvironmentField({ maxLength: 200 }),
   AGENT_WORKER_ID: stringEnvironmentField({ maxLength: 200 }),
   AGENT_WORKER_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 10, maximum: 60_000 }),
@@ -138,6 +144,9 @@ export interface WorkerProcessConfiguration {
     modelId: string;
     contextWindow: number;
     maxOutputTokens: number;
+    wireTraceMaxBytes: number;
+    wireTraceEnabled: boolean;
+    wireTraceRetentionDays: number;
   }>;
   readonly worker: Readonly<{
     tenantId: string;
@@ -251,6 +260,12 @@ export function parseWorkerProcessEnvironment(
       modelId: readRequiredEnvironmentValue(parsed, "MODEL_ID"),
       contextWindow,
       maxOutputTokens,
+      wireTraceMaxBytes: readRequiredEnvironmentValue(parsed, "MODEL_WIRE_TRACE_MAX_BYTES"),
+      wireTraceEnabled: readRequiredEnvironmentValue(parsed, "MODEL_WIRE_TRACE_ENABLED"),
+      wireTraceRetentionDays: readRequiredEnvironmentValue(
+        parsed,
+        "MODEL_WIRE_TRACE_RETENTION_DAYS",
+      ),
     }),
     worker: Object.freeze({
       tenantId: configuredTenantId,
@@ -280,7 +295,10 @@ const openAiCompatibleProviderId = "runtime-openai-compatible";
  * Pi 协议，避免其中一处漂移后静默改走不受支持的 Responses 路由。
  */
 export async function createOpenAiCompatibleModel(
-  configuration: WorkerProcessConfiguration["model"],
+  configuration: Pick<
+    WorkerProcessConfiguration["model"],
+    "baseUrl" | "apiKey" | "modelId" | "contextWindow" | "maxOutputTokens"
+  >,
 ): Promise<
   Readonly<{
     modelRuntime: ModelRuntime;
@@ -419,6 +437,21 @@ async function assembleWorkerRuntime(
       rolloutRepository,
       policy: { maxModelObservationBytes: 4 * 1024 },
     });
+    const modelWireTraces = configuration.model.wireTraceEnabled
+      ? (() => {
+          installModelWireFetchInstrumentation();
+          return new ModelWireTraceSession(
+            new PgModelWireTraceRepository(
+              pool,
+              blobRepository,
+              blobs,
+              configuration.model.wireTraceRetentionDays,
+            ),
+            configuration.model.wireTraceMaxBytes,
+            configuration.model.baseUrl,
+          );
+        })()
+      : undefined;
     const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
     const artifactAuthorization = createArtifactExecutionAuthorizationAuthority();
     const artifactRepository = new PgArtifactDeliveryRepository(
@@ -442,6 +475,7 @@ async function assembleWorkerRuntime(
       artifactTools,
       artifactAuthorization.issuer,
       durableObservation.prepare,
+      modelWireTraces,
     );
     const upstreamSandboxes = new CubeSandboxSessionRegistry(
       {

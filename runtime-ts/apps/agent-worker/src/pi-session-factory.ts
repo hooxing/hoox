@@ -20,6 +20,7 @@ import {
 import type { ArtifactToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { ModelWireTraceSession } from "./model-wire-trace.js";
 import type { AgentSessionFactoryPort, AgentTurnOutcome, WorkerAgentSessionPort } from "./ports.js";
 
 /**
@@ -53,6 +54,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       input: Parameters<AgentSessionFactoryPort["create"]>[0],
       compatibility: ReturnType<typeof deriveSafePiSessionCompatibility>,
     ) => Promise<ControlledRolloutProjection | undefined>,
+    private readonly modelWireTraces?: ModelWireTraceSession,
   ) {
     this.modelContext = bindTrustedPiModelContextCapability(modelRuntime, model);
   }
@@ -230,7 +232,20 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         }
         // 许可刚由 DB 一次性消费；校验后立即进入 prompt，中间不再插入异步窗口。
         try {
-          await controller.prompt(text);
+          const prompt = () => controller.prompt(text);
+          await (this.modelWireTraces === undefined
+            ? prompt()
+            : this.modelWireTraces.run(
+                {
+                  tenantId: input.scope.tenantId,
+                  threadId: input.scope.threadId,
+                  runId: input.scope.runId,
+                  attemptId: input.attemptId,
+                },
+                prompt,
+              ));
+          // 仅受限等待已经发起的诊断写入；超时和失败均不改变模型成功语义。
+          await this.modelWireTraces?.drain();
         } catch (error) {
           if (observationRecoveryCode !== undefined) {
             return { kind: "recovery_required", code: observationRecoveryCode };

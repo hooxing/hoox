@@ -95,6 +95,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           }),
           archiveThread: persistence.archiveThread,
           experience: persistence.experience,
+          modelWireTraces: persistence.modelWireTraces,
           blobs,
           cursorCodec,
           readiness: Object.freeze({ probe: () => persistence.probe() }),

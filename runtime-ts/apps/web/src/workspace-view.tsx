@@ -17,12 +17,14 @@ import { type FormEventHandler, type ReactNode, type RefObject, useEffect, useRe
 import {
   type Artifact,
   canPreviewArtifact,
+  type ModelWireTraceRecord,
   type Run,
   type RunEvent,
   type RunStatus,
   type Thread,
 } from "./api.js";
 import { buildTimeline, eventSummary } from "./event-view.js";
+import { ModelWireTracePanel } from "./model-wire-trace-view.js";
 
 export const activeRunStatuses = new Set<RunStatus>(["queued", "running", "waiting"]);
 export const compactWorkspaceMedia = "(max-width: 820px)";
@@ -118,16 +120,26 @@ export function ActivityPanel({
   isOpen,
   events,
   artifacts,
+  modelWireTraces,
+  modelWireTraceHasMore,
+  modelWireTraceUnavailable,
   onToggle,
   onPreview,
   onDownload,
+  onLoadModelWireTrace,
+  onLoadMoreModelWireTraces,
 }: {
   readonly isOpen: boolean;
   readonly events: readonly RunEvent[];
   readonly artifacts: readonly Artifact[];
+  readonly modelWireTraces: readonly ModelWireTraceRecord[];
+  readonly modelWireTraceHasMore: boolean;
+  readonly modelWireTraceUnavailable: boolean;
   readonly onToggle: () => void;
   readonly onPreview: (artifactId: string) => void;
   readonly onDownload: (artifactId: string) => void;
+  readonly onLoadModelWireTrace: (record: ModelWireTraceRecord) => Promise<Uint8Array>;
+  readonly onLoadMoreModelWireTraces: () => Promise<void>;
 }) {
   return (
     <aside
@@ -198,6 +210,13 @@ export function ActivityPanel({
               </ul>
             )}
           </section>
+          <ModelWireTracePanel
+            records={modelWireTraces}
+            hasMore={modelWireTraceHasMore}
+            unavailable={modelWireTraceUnavailable}
+            onLoadBody={onLoadModelWireTrace}
+            onLoadMore={onLoadMoreModelWireTraces}
+          />
           <section className="activity-section activity-log" aria-labelledby="activity-title">
             <div className="section-heading">
               <div>

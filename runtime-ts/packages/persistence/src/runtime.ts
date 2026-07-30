@@ -12,6 +12,10 @@ import {
 import { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-state.js";
 import { PgThreadCreation } from "./pg-thread-creation.js";
+import {
+  type ModelWireTraceReadPort,
+  PgModelWireTraceReadRepository,
+} from "./model-wire-trace-read.js";
 import type { ArchiveThreadCommandPort, CoreRepositories, RunExperienceReadPort } from "./ports.js";
 import {
   createPostgresPool,
@@ -51,6 +55,7 @@ export interface ApiPersistenceRuntime {
   readonly threadCreation: PgThreadCreation;
   readonly runDispatchCreation: PgRunDispatchCreation;
   readonly experience: RunExperienceReadPort;
+  readonly modelWireTraces: ModelWireTraceReadPort;
   readonly blobLifecycle: PgBlobLifecycleRepository;
   probe(): Promise<void>;
   close(): Promise<void>;
@@ -64,6 +69,7 @@ export function createApiPersistenceRuntime(options: PostgresPoolOptions): ApiPe
     threadCreation: new PgThreadCreation(pool),
     runDispatchCreation: new PgRunDispatchCreation(pool),
     experience: new PgRunExperienceReadRepository(pool),
+    modelWireTraces: new PgModelWireTraceReadRepository(pool),
     blobLifecycle: new PgBlobLifecycleRepository(pool),
     probe: () => probePostgres(pool, options.expectedRuntimeRole),
     close: () => pool.end(),

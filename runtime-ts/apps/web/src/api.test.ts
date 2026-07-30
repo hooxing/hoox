@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { canPreviewArtifact, normalizeRunEvent, RuntimeApi } from "./api.js";
+import {
+  canPreviewArtifact,
+  normalizeModelWireTrace,
+  normalizeRunEvent,
+  RuntimeApi,
+} from "./api.js";
 
 describe("RuntimeApi", () => {
   it("默认 fetch 保留浏览器全局 receiver，不会以 RuntimeApi 实例调用", async () => {
@@ -150,6 +155,118 @@ describe("RuntimeApi", () => {
       attemptId: "attempt_2",
       items: [{ eventId: "event-1", type: "message.delta" }],
     });
+  });
+
+  it("读取模型网络诊断元数据并保留轮次、重试与采集错误", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          version: "v1",
+          requestId: "req_1",
+          data: {
+            hasMore: true,
+            nextCursor: "cursor_page_2",
+            items: [
+              {
+                attemptId: "attempt_1",
+                modelTurn: 2,
+                transportAttempt: 1,
+                part: "response",
+                captureStatus: "aborted",
+                persistenceStatus: "not_captured",
+                captureErrorCode: "BODY_UNREADABLE",
+                bodyAvailable: false,
+                createdAt: "2026-07-30T00:00:00.000Z",
+                expiresAt: "2026-08-06T00:00:00.000Z",
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    const api = new RuntimeApi(fetcher);
+    await expect(api.listModelWireTraces("thread_1", "run_1")).resolves.toMatchObject({
+      hasMore: true,
+      nextCursor: "cursor_page_2",
+      items: [
+        {
+          modelTurn: 2,
+          transportAttempt: 1,
+          captureErrorCode: "BODY_UNREADABLE",
+        },
+      ],
+    });
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "/api/v1/threads/thread_1/runs/run_1/model-wire-traces?limit=500",
+    );
+  });
+
+  it("后续模型网络诊断页携带服务端游标", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          version: "v1",
+          requestId: "req_1",
+          data: { hasMore: false, items: [] },
+        }),
+      ),
+    );
+    const api = new RuntimeApi(fetcher);
+    await api.listModelWireTraces("thread_1", "run_1", "cursor+/=");
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "/api/v1/threads/thread_1/runs/run_1/model-wire-traces?limit=500&cursor=cursor%2B%2F%3D",
+    );
+  });
+
+  it("旧 API 或诊断关闭返回 404 时保持空诊断面", async () => {
+    const api = new RuntimeApi(
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ error: { message: "不存在", retryable: false } }), {
+          status: 404,
+        }),
+      ),
+    );
+    await expect(api.listModelWireTraces("thread_1", "run_1")).resolves.toEqual({
+      items: [],
+      hasMore: false,
+    });
+  });
+
+  it("模型网络正文按原始 ArrayBuffer 读取，不经过 JSON 或文本改写", async () => {
+    const raw = new Uint8Array([0, 13, 10, 255, 1]);
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(raw, {
+        status: 200,
+        headers: { "content-type": "application/octet-stream" },
+      }),
+    );
+    const api = new RuntimeApi(fetcher);
+    await expect(
+      api.getModelWireTraceBody("thread_1", "run_1", {
+        attemptId: "attempt_1",
+        modelTurn: 0,
+        transportAttempt: 1,
+        part: "response",
+      }),
+    ).resolves.toEqual(raw);
+    const [, init] = fetcher.mock.calls[0] as [string, RequestInit];
+    expect(new Headers(init.headers).get("accept")).toBe("application/octet-stream");
+  });
+
+  it("拒绝形状异常的模型网络元数据", () => {
+    expect(
+      normalizeModelWireTrace({
+        attemptId: "attempt_1",
+        modelTurn: -1,
+        transportAttempt: 0,
+        part: "response",
+        captureStatus: "complete",
+        persistenceStatus: "stored",
+        bodyAvailable: true,
+        createdAt: "x",
+        expiresAt: "y",
+      }),
+    ).toBeUndefined();
   });
 
   it("仅允许安全媒体类型预览", () => {

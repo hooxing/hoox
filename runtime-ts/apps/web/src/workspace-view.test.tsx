@@ -41,9 +41,14 @@ describe("工作台展示组件", () => {
         isOpen
         events={events}
         artifacts={artifacts}
+        modelWireTraces={[]}
+        modelWireTraceHasMore={false}
+        modelWireTraceUnavailable={false}
         onToggle={() => undefined}
         onPreview={() => undefined}
         onDownload={() => undefined}
+        onLoadModelWireTrace={async () => new Uint8Array()}
+        onLoadMoreModelWireTraces={async () => undefined}
       />,
     );
 

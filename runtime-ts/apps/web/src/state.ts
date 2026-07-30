@@ -1,4 +1,12 @@
-import type { Artifact, Run, RunEvent, RunEventPage, Thread } from "./api.js";
+import type {
+  Artifact,
+  ModelWireTracePage,
+  ModelWireTraceRecord,
+  Run,
+  RunEvent,
+  RunEventPage,
+  Thread,
+} from "./api.js";
 
 export type WorkspaceState = {
   readonly threads: readonly Thread[];
@@ -9,6 +17,10 @@ export type WorkspaceState = {
   readonly eventAttemptId: string | undefined;
   readonly events: readonly RunEvent[];
   readonly artifacts: readonly Artifact[];
+  readonly modelWireTraces: readonly ModelWireTraceRecord[];
+  readonly modelWireTraceHasMore: boolean;
+  readonly modelWireTraceUnavailable: boolean;
+  readonly modelWireTraceNextCursor: string | undefined;
 };
 
 export const initialWorkspaceState: WorkspaceState = {
@@ -19,6 +31,10 @@ export const initialWorkspaceState: WorkspaceState = {
   eventAttemptId: undefined,
   events: [],
   artifacts: [],
+  modelWireTraces: [],
+  modelWireTraceHasMore: false,
+  modelWireTraceUnavailable: false,
+  modelWireTraceNextCursor: undefined,
 };
 
 export function mergeEvents(
@@ -46,7 +62,12 @@ export function workspaceReducer(
     | { readonly type: "startRun"; readonly run: Run }
     | { readonly type: "run"; readonly run: Run }
     | { readonly type: "events"; readonly page: RunEventPage }
-    | { readonly type: "artifacts"; readonly artifacts: readonly Artifact[] },
+    | { readonly type: "artifacts"; readonly artifacts: readonly Artifact[] }
+    | {
+        readonly type: "modelWireTraces";
+        readonly page: ModelWireTracePage;
+        readonly mode?: "replace" | "append";
+      },
 ): WorkspaceState {
   switch (action.type) {
     case "threads":
@@ -73,6 +94,10 @@ export function workspaceReducer(
         eventAttemptId: undefined,
         events: [],
         artifacts: [],
+        modelWireTraces: [],
+        modelWireTraceHasMore: false,
+        modelWireTraceUnavailable: false,
+        modelWireTraceNextCursor: undefined,
       };
     case "recoverLatestRun":
       // 仅接受本次选择代次发起的恢复；切走再切回同一 Thread 时旧响应也必须失效。
@@ -88,6 +113,10 @@ export function workspaceReducer(
         eventAttemptId: undefined,
         events: [],
         artifacts: [],
+        modelWireTraces: [],
+        modelWireTraceHasMore: false,
+        modelWireTraceUnavailable: false,
+        modelWireTraceNextCursor: undefined,
       };
     case "run":
       return { ...state, run: action.run };
@@ -98,6 +127,10 @@ export function workspaceReducer(
         eventAttemptId: undefined,
         events: [],
         artifacts: [],
+        modelWireTraces: [],
+        modelWireTraceHasMore: false,
+        modelWireTraceUnavailable: false,
+        modelWireTraceNextCursor: undefined,
       };
     case "events":
       return action.page.attemptId !== state.eventAttemptId
@@ -105,5 +138,30 @@ export function workspaceReducer(
         : { ...state, events: mergeEvents(state.events, action.page.items) };
     case "artifacts":
       return { ...state, artifacts: action.artifacts };
+    case "modelWireTraces":
+      return {
+        ...state,
+        modelWireTraces:
+          action.mode === "append"
+            ? mergeModelWireTraces(state.modelWireTraces, action.page.items)
+            : action.page.items,
+        modelWireTraceHasMore: action.page.hasMore,
+        modelWireTraceUnavailable: action.page.unavailable === true,
+        modelWireTraceNextCursor: action.page.nextCursor,
+      };
   }
+}
+
+function mergeModelWireTraces(
+  existing: readonly ModelWireTraceRecord[],
+  incoming: readonly ModelWireTraceRecord[],
+): readonly ModelWireTraceRecord[] {
+  const records = new Map<string, ModelWireTraceRecord>();
+  for (const record of [...existing, ...incoming]) {
+    records.set(
+      `${record.attemptId}\u0000${record.modelTurn}\u0000${record.transportAttempt}\u0000${record.part}`,
+      record,
+    );
+  }
+  return [...records.values()];
 }

@@ -80,6 +80,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
           }),
           archiveThread: persistence.archiveThread,
           experience: persistence.experience,
+          modelWireTraces: persistence.modelWireTraces,
           blobs,
           cursorCodec,
           readiness: Object.freeze({

@@ -24,13 +24,18 @@ import {
   type BlobStore,
   BlobStoreError,
   type CoreRepositories,
+  type ModelWireTraceBody,
+  type ModelWireTraceReadPort,
+  PersistenceError,
   type RunExperienceReadPort,
   type TenantBundle,
   type TenantScope,
   type ThreadListPage,
   type Versioned,
+  sha256Hex,
 } from "@cube-runtime/persistence";
 import { afterEach, describe, expect, it } from "vitest";
+import type { FastifyInstance } from "fastify";
 import { type ApiDependencies, createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec } from "./cursor.js";
@@ -404,6 +409,15 @@ function fixture(
     readonly blobBytes?: Uint8Array;
     readonly blobFailure?: BlobStoreError;
     readonly productionPrincipalOnly?: boolean;
+    readonly enableModelWireTrace?: boolean;
+    readonly modelWireTraceBytes?: Uint8Array;
+    readonly modelWireTraceReturnedBytes?: Uint8Array;
+    readonly modelWireTraceBody?: ModelWireTraceBody;
+    readonly modelWireTraceConfirmationBody?: ModelWireTraceBody;
+    readonly modelWireTraceConfirmationMissing?: boolean;
+    readonly modelWireTraceBlobFailure?: BlobStoreError;
+    readonly modelWireTraceListFailure?: PersistenceError;
+    readonly modelWireTracePaginated?: boolean;
   } = {},
 ) {
   const state = new FakeApiState();
@@ -415,6 +429,8 @@ function fixture(
   let runSequence = 0;
   let workspaceSequence = 0;
   let artifactReadCount = 0;
+  let modelWireTraceReadCount = 0;
+  let modelWireTraceBlobReadCount = 0;
   const artifactSizeBytes = options.artifactSizeBytes ?? experienceArtifact.sizeBytes;
   const blobBytes = options.blobBytes ?? new Uint8Array(artifactSizeBytes);
   const presignInputs: unknown[] = [];
@@ -428,6 +444,37 @@ function fixture(
       mediaType: options.artifactMediaType ?? experienceArtifact.blob.mediaType,
     },
   };
+  const modelWireTraceBytes =
+    options.modelWireTraceBytes ??
+    new TextEncoder().encode('data: {"choices":[{"delta":{"content":"原始\\r\\n字节"}}]}\r\n\r\n');
+  const modelWireTraceSha256 = sha256Hex(modelWireTraceBytes);
+  const defaultModelWireTraceBody: ModelWireTraceBody = Object.freeze({
+    metadata: Object.freeze({
+      attemptId: "attempt_1",
+      modelTurn: 1,
+      transportAttempt: 0,
+      part: "response",
+      captureStatus: "complete",
+      persistenceStatus: "stored",
+      httpStatus: 200,
+      sha256: modelWireTraceSha256,
+      size: modelWireTraceBytes.byteLength,
+      bodyAvailable: true,
+      createdAt: baseTime,
+      expiresAt: "2099-08-02T08:00:00.000Z",
+    }),
+    blob: Object.freeze({
+      kind: "stable",
+      tenantId: "tenant_owner_a",
+      purpose: "trace",
+      sha256: modelWireTraceSha256,
+      size: modelWireTraceBytes.byteLength,
+      mediaType: "text/plain; charset=utf-8",
+      incarnationId: "00000000-0000-4000-8000-000000000009",
+      physicalObjectKey: `agent-worker/stable/tenant_owner_a/trace/sha256/${modelWireTraceSha256}/incarnations/00000000-0000-4000-8000-000000000009`,
+    }),
+  });
+  const configuredModelWireTraceBody = options.modelWireTraceBody ?? defaultModelWireTraceBody;
   const clock = new FakeClock();
   const dependencies: ApiDependencies = {
     auth: {
@@ -579,9 +626,129 @@ function fixture(
             : {}),
         }
       : {}),
+    ...(options.enableModelWireTrace === true
+      ? {
+          modelWireTraces: {
+            list: async ({ runId, threadId, after }) => {
+              if (options.modelWireTraceListFailure !== undefined) {
+                throw options.modelWireTraceListFailure;
+              }
+              if (
+                options.modelWireTracePaginated === true &&
+                runId === "run_1" &&
+                threadId === "thread_1"
+              ) {
+                const second = {
+                  ...configuredModelWireTraceBody.metadata,
+                  modelTurn: configuredModelWireTraceBody.metadata.modelTurn + 1,
+                  createdAt: "2099-07-26T08:00:01.000Z",
+                };
+                return after === undefined
+                  ? {
+                      outcome: "found" as const,
+                      records: [configuredModelWireTraceBody.metadata],
+                      hasMore: true,
+                      nextCursor: {
+                        createdAt: configuredModelWireTraceBody.metadata.createdAt,
+                        attemptId: configuredModelWireTraceBody.metadata.attemptId,
+                        modelTurn: configuredModelWireTraceBody.metadata.modelTurn,
+                        transportAttempt: configuredModelWireTraceBody.metadata.transportAttempt,
+                        part: configuredModelWireTraceBody.metadata.part,
+                      },
+                    }
+                  : { outcome: "found" as const, records: [second], hasMore: false };
+              }
+              return runId === "run_1" && threadId === "thread_1"
+                ? {
+                    outcome: "found" as const,
+                    records: [configuredModelWireTraceBody.metadata],
+                    hasMore: false,
+                  }
+                : { outcome: "not_found" as const };
+            },
+            getBody: async ({ runId, threadId, attemptId, modelTurn, transportAttempt, part }) => {
+              if (
+                runId !== "run_1" ||
+                threadId !== "thread_1" ||
+                attemptId !== configuredModelWireTraceBody.metadata.attemptId ||
+                modelTurn !== configuredModelWireTraceBody.metadata.modelTurn ||
+                transportAttempt !== configuredModelWireTraceBody.metadata.transportAttempt ||
+                part !== configuredModelWireTraceBody.metadata.part
+              ) {
+                return { outcome: "not_found" as const };
+              }
+              modelWireTraceReadCount += 1;
+              if (
+                modelWireTraceReadCount >= 2 &&
+                options.modelWireTraceConfirmationMissing === true
+              ) {
+                return { outcome: "not_found" as const };
+              }
+              return {
+                outcome: "found" as const,
+                body:
+                  modelWireTraceReadCount >= 2 &&
+                  options.modelWireTraceConfirmationBody !== undefined
+                    ? options.modelWireTraceConfirmationBody
+                    : configuredModelWireTraceBody,
+              };
+            },
+          } satisfies ModelWireTraceReadPort,
+          blobs: {
+            getBytes: async () => {
+              modelWireTraceBlobReadCount += 1;
+              if (options.modelWireTraceBlobFailure !== undefined) {
+                throw options.modelWireTraceBlobFailure;
+              }
+              return options.modelWireTraceReturnedBytes ?? modelWireTraceBytes;
+            },
+          } as unknown as BlobStore,
+        }
+      : {}),
   };
   const app = createApiApp(dependencies, { logger: false });
-  return { app, state, dependencies, ownerA, ownerB, presignInputs };
+  return {
+    app,
+    state,
+    dependencies,
+    ownerA,
+    ownerB,
+    presignInputs,
+    modelWireTraceStats: {
+      blobReads: () => modelWireTraceBlobReadCount,
+      authorizationReads: () => modelWireTraceReadCount,
+    },
+    defaultModelWireTraceBody,
+  };
+}
+
+async function createModelWireTraceRun(app: FastifyInstance): Promise<void> {
+  expect(
+    (
+      await app.inject({
+        method: "POST",
+        url: "/v1/threads",
+        headers: {
+          authorization: "Bearer token-a",
+          "idempotency-key": "model-wire-thread-0001",
+        },
+        payload: { title: "模型报文诊断" },
+      })
+    ).statusCode,
+  ).toBe(200);
+  expect(
+    (
+      await app.inject({
+        method: "POST",
+        url: "/v1/threads/thread_1/runs",
+        headers: {
+          authorization: "Bearer token-a",
+          "idempotency-key": "model-wire-run-0001",
+        },
+        payload: { input: "生成诊断" },
+      })
+    ).statusCode,
+  ).toBe(200);
 }
 
 const openApps: { close(): Promise<void> }[] = [];
@@ -591,6 +758,296 @@ afterEach(async () => {
 });
 
 describe("Fastify API 契约", () => {
+  it("按 Run 列出模型轮次与 HTTP 尝试，且诊断响应禁止缓存与嗅探", async () => {
+    const { app } = fixture({ enableModelWireTrace: true });
+    openApps.push(app);
+    await createModelWireTraceRun(app);
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/model-wire-traces?limit=200",
+      headers: { authorization: "Bearer token-a", cookie: "secret-cookie-canary" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["cache-control"]).toBe("private, no-store, no-cache, must-revalidate");
+    expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    expect(response.headers.pragma).toBe("no-cache");
+    expect(response.json().data).toMatchObject({
+      hasMore: false,
+      items: [
+        {
+          attemptId: "attempt_1",
+          modelTurn: 1,
+          transportAttempt: 0,
+          part: "response",
+          captureStatus: "complete",
+          persistenceStatus: "stored",
+          httpStatus: 200,
+          bodyAvailable: true,
+        },
+      ],
+    });
+    expect(response.body).not.toContain("secret-cookie-canary");
+    expect(response.body).not.toContain("authorization");
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/v1/threads/thread_1/runs/run_1/model-wire-traces?limit=501",
+          headers: { authorization: "Bearer token-a" },
+        })
+      ).statusCode,
+    ).toBe(400);
+  });
+
+  it("模型网络诊断列表用绑定 Run scope 的游标继续读取后续页", async () => {
+    const { app } = fixture({ enableModelWireTrace: true, modelWireTracePaginated: true });
+    openApps.push(app);
+    await createModelWireTraceRun(app);
+    const first = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/model-wire-traces?limit=1",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().data).toMatchObject({ hasMore: true, items: [{ modelTurn: 1 }] });
+    const nextCursor = first.json().data.nextCursor as string;
+    const second = await app.inject({
+      method: "GET",
+      url: `/v1/threads/thread_1/runs/run_1/model-wire-traces?limit=1&cursor=${encodeURIComponent(nextCursor)}`,
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(second.statusCode).toBe(200);
+    expect(second.json().data).toMatchObject({ hasMore: false, items: [{ modelTurn: 2 }] });
+    expect(second.json().data.nextCursor).toBeUndefined();
+
+    const wrongRun = await app.inject({
+      method: "GET",
+      url: `/v1/threads/thread_1/runs/run_1/model-wire-traces?cursor=${encodeURIComponent(`${nextCursor}x`)}`,
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(wrongRun.statusCode).toBe(400);
+  });
+
+  it("逐字节交付原始响应正文，不解析、不改写且不返回对象存储 URL", async () => {
+    const raw = new Uint8Array([100, 97, 116, 97, 58, 32, 123, 125, 13, 10, 13, 10, 0, 255]);
+    const { app, modelWireTraceStats } = fixture({
+      enableModelWireTrace: true,
+      modelWireTraceBytes: raw,
+    });
+    openApps.push(app);
+    await createModelWireTraceRun(app);
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/model-wire-traces/attempt_1/1/0/response/body",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toBe("application/octet-stream");
+    expect(response.headers["cache-control"]).toContain("no-store");
+    expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    expect(new Uint8Array(response.rawPayload)).toEqual(raw);
+    expect(response.headers.location).toBeUndefined();
+    expect(response.body).not.toContain("physical_object_key");
+    expect(modelWireTraceStats.blobReads()).toBe(1);
+    expect(modelWireTraceStats.authorizationReads()).toBe(2);
+  });
+
+  it("原始请求即使截断也作为八位字节交付，不声称是可解析 JSON", async () => {
+    const requestBytes = new TextEncoder().encode('{"model":"test","messages":[');
+    const seed = fixture({ enableModelWireTrace: true, modelWireTraceBytes: requestBytes });
+    await seed.app.close();
+    const requestBody: ModelWireTraceBody = {
+      metadata: {
+        ...seed.defaultModelWireTraceBody.metadata,
+        modelTurn: 2,
+        part: "request",
+        captureStatus: "truncated",
+      },
+      blob: seed.defaultModelWireTraceBody.blob,
+    };
+    const { app } = fixture({
+      enableModelWireTrace: true,
+      modelWireTraceBytes: requestBytes,
+      modelWireTraceBody: requestBody,
+    });
+    openApps.push(app);
+    await createModelWireTraceRun(app);
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/model-wire-traces/attempt_1/2/0/request/body",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toBe("application/octet-stream");
+    expect(new Uint8Array(response.rawPayload)).toEqual(requestBytes);
+  });
+
+  it("跨租户、跨 Thread/Run 与猜测 Attempt 均统一为 404", async () => {
+    const { app } = fixture({ enableModelWireTrace: true });
+    openApps.push(app);
+    await createModelWireTraceRun(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: {
+        authorization: "Bearer token-a",
+        "idempotency-key": "model-wire-thread-0002",
+      },
+      payload: { title: "其他 Thread" },
+    });
+    const urls = [
+      "/v1/threads/thread_2/runs/run_1/model-wire-traces",
+      "/v1/threads/thread_1/runs/run_999/model-wire-traces",
+      "/v1/threads/thread_1/runs/run_1/model-wire-traces/attempt_guessed/1/0/response/body",
+    ];
+    for (const url of urls) {
+      const response = await app.inject({
+        method: "GET",
+        url,
+        headers: { authorization: "Bearer token-a" },
+      });
+      expect(response.statusCode).toBe(404);
+      expect(response.headers["cache-control"]).toContain("no-store");
+      expect(response.headers["x-content-type-options"]).toBe("nosniff");
+    }
+    const crossTenant = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/model-wire-traces",
+      headers: { authorization: "Bearer token-b" },
+    });
+    expect(crossTenant.statusCode).toBe(404);
+  });
+
+  it.each(["purpose", "sha", "size", "state", "incarnation"] as const)(
+    "诊断 Blob 的 %s 形状异常时拒绝读取正文",
+    async (drift) => {
+      const seed = fixture({ enableModelWireTrace: true });
+      await seed.app.close();
+      const base = seed.defaultModelWireTraceBody;
+      const invalid = {
+        ...base,
+        ...(drift === "state" ? { metadata: { ...base.metadata, bodyAvailable: false } } : {}),
+        blob: {
+          ...base.blob,
+          ...(drift === "purpose" ? { purpose: "preview" as const } : {}),
+          ...(drift === "sha" ? { sha256: "b".repeat(64) } : {}),
+          ...(drift === "size" ? { size: base.blob.size + 1 } : {}),
+          ...(drift === "incarnation" ? { incarnationId: "not-a-uuid" } : {}),
+        },
+      } as ModelWireTraceBody;
+      const { app, modelWireTraceStats } = fixture({
+        enableModelWireTrace: true,
+        modelWireTraceBody: invalid,
+      });
+      openApps.push(app);
+      await createModelWireTraceRun(app);
+      const response = await app.inject({
+        method: "GET",
+        url: "/v1/threads/thread_1/runs/run_1/model-wire-traces/attempt_1/1/0/response/body",
+        headers: { authorization: "Bearer token-a" },
+      });
+      expect(response.statusCode).toBe(404);
+      expect(modelWireTraceStats.blobReads()).toBe(0);
+    },
+  );
+
+  it.each(["expired-or-revoked", "identity-drift"] as const)(
+    "对象读取后的二次授权遇到 %s 时不返回正文",
+    async (failure) => {
+      const seed = fixture({ enableModelWireTrace: true });
+      await seed.app.close();
+      const confirmation = {
+        ...seed.defaultModelWireTraceBody,
+        metadata: {
+          ...seed.defaultModelWireTraceBody.metadata,
+          expiresAt: "2099-08-02T08:00:01.000Z",
+        },
+      };
+      const { app, modelWireTraceStats } = fixture({
+        enableModelWireTrace: true,
+        ...(failure === "expired-or-revoked"
+          ? { modelWireTraceConfirmationMissing: true }
+          : { modelWireTraceConfirmationBody: confirmation }),
+      });
+      openApps.push(app);
+      await createModelWireTraceRun(app);
+      const response = await app.inject({
+        method: "GET",
+        url: "/v1/threads/thread_1/runs/run_1/model-wire-traces/attempt_1/1/0/response/body",
+        headers: { authorization: "Bearer token-a" },
+      });
+      expect(response.statusCode).toBe(404);
+      expect(modelWireTraceStats.blobReads()).toBe(1);
+      expect(response.body).not.toContain(seed.defaultModelWireTraceBody.blob.physicalObjectKey);
+    },
+  );
+
+  it("对象内容完整性校验失败时不返回篡改正文或内部存储身份", async () => {
+    const { app } = fixture({
+      enableModelWireTrace: true,
+      modelWireTraceBlobFailure: new BlobStoreError(
+        "BLOB_INTEGRITY_MISMATCH",
+        "storage-key-canary",
+      ),
+    });
+    openApps.push(app);
+    await createModelWireTraceRun(app);
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/model-wire-traces/attempt_1/1/0/response/body",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(response.statusCode).toBe(503);
+    expect(response.body).not.toContain("storage-key-canary");
+    expect(response.body).not.toContain("agent-worker/");
+    expect(response.headers.location).toBeUndefined();
+  });
+
+  it("诊断迁移缺失等只读依赖故障失败关闭为脱敏 503，不影响其他 API 契约", async () => {
+    const { app } = fixture({
+      enableModelWireTrace: true,
+      modelWireTraceListFailure: new PersistenceError(
+        "UNAVAILABLE",
+        "relation model_wire_trace_records does not exist",
+      ),
+    });
+    openApps.push(app);
+    await createModelWireTraceRun(app);
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/model-wire-traces",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(response.statusCode).toBe(503);
+    expect(response.body).not.toContain("model_wire_trace_records");
+    expect(response.headers["cache-control"]).toContain("no-store");
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: "/v1/threads/thread_1/runs/run_1",
+          headers: { authorization: "Bearer token-a" },
+        })
+      ).statusCode,
+    ).toBe(200);
+  });
+
+  it("即使 BlobStore 适配器错误返回篡改字节，API 仍执行防御性摘要复核", async () => {
+    const { app } = fixture({
+      enableModelWireTrace: true,
+      modelWireTraceReturnedBytes: new TextEncoder().encode("tampered-provider-body"),
+    });
+    openApps.push(app);
+    await createModelWireTraceRun(app);
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/runs/run_1/model-wire-traces/attempt_1/1/0/response/body",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(response.statusCode).toBe(503);
+    expect(response.body).not.toContain("tampered-provider-body");
+  });
+
   it("按稳定最新快照顺序读取 Thread 的 Run，并对无权 Thread 失败关闭", async () => {
     const { app } = fixture();
     openApps.push(app);

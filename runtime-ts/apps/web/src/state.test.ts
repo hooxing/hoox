@@ -122,4 +122,31 @@ describe("mergeEvents", () => {
       workspaceReducer(afterCreate, { type: "threadArchived", threadId: "thread_2" }),
     ).toMatchObject({ selectedThreadId: "thread_1", threads: [] });
   });
+
+  it("模型网络诊断后续页按复合身份追加并推进游标", () => {
+    const trace = {
+      attemptId: "attempt_1",
+      modelTurn: 0,
+      transportAttempt: 0,
+      part: "request" as const,
+      captureStatus: "complete" as const,
+      persistenceStatus: "stored" as const,
+      bodyAvailable: true,
+      createdAt: "2026-07-30T00:00:00.000Z",
+      expiresAt: "2026-08-06T00:00:00.000Z",
+    };
+    const first = workspaceReducer(initialWorkspaceState, {
+      type: "modelWireTraces",
+      page: { items: [trace], hasMore: true, nextCursor: "cursor_1" },
+    });
+    const secondTrace = { ...trace, part: "response" as const };
+    const second = workspaceReducer(first, {
+      type: "modelWireTraces",
+      mode: "append",
+      page: { items: [trace, secondTrace], hasMore: false },
+    });
+    expect(second.modelWireTraces).toEqual([trace, secondTrace]);
+    expect(second.modelWireTraceHasMore).toBe(false);
+    expect(second.modelWireTraceNextCursor).toBeUndefined();
+  });
 });

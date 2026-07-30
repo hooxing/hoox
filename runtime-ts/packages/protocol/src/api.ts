@@ -1,7 +1,7 @@
 import { type Static, Type } from "@sinclair/typebox";
 import { ArtifactDtoSchema, RunDtoSchema, ThreadDtoSchema } from "./dto.js";
 import { successEnvelopeSchema } from "./envelopes.js";
-import { IdSchema, IsoTimestampSchema } from "./schemas.js";
+import { IdSchema, IsoTimestampSchema, Sha256DigestSchema } from "./schemas.js";
 
 const strict = { additionalProperties: false } as const;
 
@@ -17,6 +17,19 @@ export const RunArtifactPathSchema = Type.Object(
 );
 export type RunArtifactPath = Static<typeof RunArtifactPathSchema>;
 
+export const ModelWireTraceBodyPathSchema = Type.Object(
+  {
+    threadId: IdSchema,
+    runId: IdSchema,
+    attemptId: IdSchema,
+    modelTurn: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    transportAttempt: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    part: Type.Union([Type.Literal("request"), Type.Literal("response")]),
+  },
+  strict,
+);
+export type ModelWireTraceBodyPath = Static<typeof ModelWireTraceBodyPathSchema>;
+
 export const RunEventListQuerySchema = Type.Object(
   {
     after: Type.Optional(
@@ -27,6 +40,15 @@ export const RunEventListQuerySchema = Type.Object(
   strict,
 );
 export type RunEventListQuery = Static<typeof RunEventListQuerySchema>;
+
+export const ModelWireTraceListQuerySchema = Type.Object(
+  {
+    cursor: Type.Optional(Type.String({ minLength: 1, maxLength: 1_500 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 200 })),
+  },
+  strict,
+);
+export type ModelWireTraceListQuery = Static<typeof ModelWireTraceListQuerySchema>;
 
 /**
  * Thread 内 Run 的最新快照窗口。该接口不提供跨快照翻页游标：调用方应把结果视为
@@ -141,6 +163,50 @@ export const ArtifactListDtoSchema = Type.Object(
 );
 export type ArtifactListDto = Static<typeof ArtifactListDtoSchema>;
 
+export const ModelWireTraceRecordDtoSchema = Type.Object(
+  {
+    attemptId: IdSchema,
+    modelTurn: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    transportAttempt: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    part: Type.Union([Type.Literal("request"), Type.Literal("response")]),
+    captureStatus: Type.Union([
+      Type.Literal("complete"),
+      Type.Literal("truncated"),
+      Type.Literal("aborted"),
+      Type.Literal("failed"),
+    ]),
+    persistenceStatus: Type.Union([
+      Type.Literal("pending"),
+      Type.Literal("stored"),
+      Type.Literal("unknown"),
+      Type.Literal("conflict"),
+      Type.Literal("unavailable"),
+      Type.Literal("not_captured"),
+    ]),
+    captureErrorCode: Type.Optional(
+      Type.Union([Type.Literal("CAPTURE_UNAVAILABLE"), Type.Literal("BODY_UNREADABLE")]),
+    ),
+    httpStatus: Type.Optional(Type.Integer({ minimum: 100, maximum: 599 })),
+    sha256: Type.Optional(Sha256DigestSchema),
+    size: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+    bodyAvailable: Type.Boolean(),
+    createdAt: IsoTimestampSchema,
+    expiresAt: IsoTimestampSchema,
+  },
+  strict,
+);
+export type ModelWireTraceRecordDto = Static<typeof ModelWireTraceRecordDtoSchema>;
+
+export const ModelWireTraceListDtoSchema = Type.Object(
+  {
+    items: Type.Array(ModelWireTraceRecordDtoSchema, { maxItems: 500 }),
+    hasMore: Type.Boolean(),
+    nextCursor: Type.Optional(Type.String({ minLength: 1, maxLength: 1_500 })),
+  },
+  { ...strict, $id: "v1.ModelWireTraceListDto" },
+);
+export type ModelWireTraceListDto = Static<typeof ModelWireTraceListDtoSchema>;
+
 export const ThreadSuccessEnvelopeSchema = successEnvelopeSchema(ThreadDtoSchema);
 export const ThreadPageSuccessEnvelopeSchema = successEnvelopeSchema(ThreadPageDtoSchema);
 export const RunSuccessEnvelopeSchema = successEnvelopeSchema(RunDtoSchema);
@@ -150,3 +216,6 @@ export const RunEventPageSuccessEnvelopeSchema = successEnvelopeSchema(RunEventP
 export const ArtifactListSuccessEnvelopeSchema = successEnvelopeSchema(ArtifactListDtoSchema);
 export const ArtifactDeliverySuccessEnvelopeSchema =
   successEnvelopeSchema(ArtifactDeliveryDtoSchema);
+export const ModelWireTraceListSuccessEnvelopeSchema = successEnvelopeSchema(
+  ModelWireTraceListDtoSchema,
+);

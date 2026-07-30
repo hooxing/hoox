@@ -53,6 +53,20 @@ describe("用户运行进度投影", () => {
     expect(progress.finalMessage).toBe("你好 世界\n\n- 第一项\n- 第二项");
   });
 
+  it("保留独立空格、空行与代码围栏边界片段", () => {
+    const progress = buildRunProgress([
+      event(1, "message.delta", { delta: "正文" }),
+      event(2, "message.delta", { delta: "\n\n" }),
+      event(3, "message.delta", { delta: "下一段" }),
+      event(4, "message.delta", { delta: " " }),
+      event(5, "message.delta", { delta: "```ts\n" }),
+      event(6, "message.delta", { delta: "const ok = true;\n" }),
+      event(7, "message.delta", { delta: "```" }),
+    ]);
+
+    expect(progress.finalMessage).toBe("正文\n\n下一段 ```ts\nconst ok = true;\n```");
+  });
+
   it("不截断超过 16k 的多段正文，并以线性聚合保留全部文本", () => {
     const first = "甲".repeat(12_000);
     const second = ` 世界\n${"乙".repeat(12_000)}`;
@@ -73,6 +87,22 @@ describe("用户运行进度投影", () => {
 
     expect(progress.finalMessage).toBe("我需要确认一个选项。");
     expect(progress.waitingQuestion).toBe("请选择目标地区。");
+  });
+
+  it("waiting 问题不截断，且仅在规范化后全文相等时去重", () => {
+    const question = `请确认：${"甲".repeat(800)}`;
+    const partial = buildRunProgress([
+      event(1, "message.delta", { delta: `此前提到${question}，但还需要补充。` }),
+      event(2, "run_waiting", { question }),
+    ]);
+    const same = buildRunProgress([
+      event(1, "message.delta", { delta: "  请确认范围\n" }),
+      event(2, "run_waiting", { question: "请确认范围" }),
+    ]);
+
+    expect(partial.waitingQuestion).toBe(question);
+    expect(partial.waitingQuestion).toHaveLength(804);
+    expect(same.waitingQuestion).toBeUndefined();
   });
 
   it("为未识别工具提供安全的通用动作", () => {

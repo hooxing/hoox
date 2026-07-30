@@ -26,6 +26,15 @@ function text(value: unknown): string | undefined {
     : undefined;
 }
 
+/** waiting 问题是用户可见正文，不能沿用工具字段的展示截断。 */
+function waitingQuestionText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function normalizedWholeText(value: string): string {
+  return value.trim().replace(/\s+/gu, " ");
+}
+
 /** 工具名只用于归类，不把调用标识或工具协议直接暴露给用户。 */
 export function toolActionLabel(name: string | undefined): string {
   const normalized = name?.toLowerCase() ?? "";
@@ -63,14 +72,13 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
   for (const event of events) {
     if (event.type === "message.delta") {
       const delta = object(event.payload)?.delta;
-      // trim 只用于排除空片段；拼接必须保留流式片段的原始空格和换行。
-      if (typeof delta === "string" && delta.trim().length > 0) {
-        messageDeltas.push(delta);
-      }
+      // 每个字符串片段（包括独立空格和换行）都是 Markdown 结构的一部分。
+      if (typeof delta === "string") messageDeltas.push(delta);
       continue;
     }
     if (event.type === "run_waiting") {
-      waitingQuestion = text(object(event.payload)?.question) ?? "请补充所需信息后继续。";
+      waitingQuestion =
+        waitingQuestionText(object(event.payload)?.question) ?? "请补充所需信息后继续。";
       continue;
     }
     const descriptor = toolDescriptor(event);
@@ -110,9 +118,10 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
   return {
     currentAction: active?.label ?? compacted.at(-1)?.label ?? "正在准备任务…",
     steps: compacted,
-    finalMessage: finalMessage.length > 0 ? finalMessage : undefined,
+    finalMessage: messageDeltas.length > 0 ? finalMessage : undefined,
     waitingQuestion:
-      waitingQuestion !== undefined && !finalMessage.includes(waitingQuestion)
+      waitingQuestion !== undefined &&
+      normalizedWholeText(finalMessage) !== normalizedWholeText(waitingQuestion)
         ? waitingQuestion
         : undefined,
   };

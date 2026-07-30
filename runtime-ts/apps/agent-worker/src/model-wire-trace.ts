@@ -13,7 +13,8 @@ export interface ModelWireTraceContext {
 
 export interface ModelWireTraceRecord {
   readonly context: ModelWireTraceContext;
-  readonly turn: number;
+  readonly modelTurn: number;
+  readonly transportAttempt: number;
   readonly part: ModelWirePart;
   readonly body: Uint8Array;
   readonly sha256: string;
@@ -30,7 +31,8 @@ export interface ModelWireTracePort {
   persist(record: ModelWireTraceRecord): Promise<void>;
   captureFailed(input: {
     readonly context: ModelWireTraceContext;
-    readonly turn: number;
+    readonly modelTurn: number;
+    readonly transportAttempt: number;
     readonly part: ModelWirePart;
     readonly code: "CAPTURE_UNAVAILABLE" | "BODY_UNREADABLE";
     readonly httpStatus?: number;
@@ -43,6 +45,8 @@ interface ActiveTrace {
   readonly state: TraceState;
   readonly provider: ProviderBoundary;
   readonly maxBytes: number;
+  readonly modelTurn: number;
+  nextTransportAttempt: number;
 }
 
 interface TraceState {
@@ -72,8 +76,8 @@ export function installModelWireFetchInstrumentation(): void {
       return originalFetch(input, init);
     // 只构造这一份 outbound Request：capture 读取 clone，原对象随后交给真实 fetch，二者字节一致。
     const outbound = new Request(input, init);
-    const turn = current.state.nextTurn++;
-    track(current, captureRequest(current, turn, outbound));
+    const transportAttempt = current.nextTransportAttempt++;
+    track(current, captureRequest(current, transportAttempt, outbound));
     let response: Response;
     try {
       response = await originalFetch(outbound);
@@ -83,7 +87,7 @@ export function installModelWireFetchInstrumentation(): void {
         current,
         safeFailure(
           current,
-          turn,
+          transportAttempt,
           "response",
           isAbort(error) ? "BODY_UNREADABLE" : "CAPTURE_UNAVAILABLE",
         ),
@@ -91,7 +95,7 @@ export function installModelWireFetchInstrumentation(): void {
       throw error;
     }
     // clone() 建立独立消费者；读取从不等待或替换 Provider 实际消费的 Response body。
-    track(current, captureResponse(current, turn, response));
+    track(current, captureResponse(current, transportAttempt, response));
     return response;
   };
   installed = true;
@@ -120,6 +124,8 @@ export class ModelWireTraceSession {
         state: this.state,
         provider: this.provider,
         maxBytes: this.maxBytes,
+        modelTurn: this.state.nextTurn++,
+        nextTransportAttempt: 0,
       },
       operation,
     );
@@ -139,28 +145,32 @@ export class ModelWireTraceSession {
   }
 }
 
-async function captureRequest(trace: ActiveTrace, turn: number, outbound: Request): Promise<void> {
+async function captureRequest(
+  trace: ActiveTrace,
+  transportAttempt: number,
+  outbound: Request,
+): Promise<void> {
   try {
     // Request.clone 读取的是 Fetch 即将发送的最终 UTF-8 body bytes，不是 onPayload 的对象重建。
     const captured = await readBounded(outbound.clone().body, trace.maxBytes);
-    await safePersist(trace, turn, "request", captured);
+    await safePersist(trace, transportAttempt, "request", captured);
   } catch {
-    await safeFailure(trace, turn, "request", "BODY_UNREADABLE");
+    await safeFailure(trace, transportAttempt, "request", "BODY_UNREADABLE");
   }
 }
 
 async function captureResponse(
   trace: ActiveTrace,
-  turn: number,
+  transportAttempt: number,
   response: Response,
 ): Promise<void> {
   try {
     const captured = await readBounded(response.clone().body, trace.maxBytes);
-    await safePersist(trace, turn, "response", captured, response.status);
+    await safePersist(trace, transportAttempt, "response", captured, response.status);
   } catch (error) {
     await safeFailure(
       trace,
-      turn,
+      transportAttempt,
       "response",
       isAbort(error) ? "BODY_UNREADABLE" : "CAPTURE_UNAVAILABLE",
       response.status,
@@ -170,7 +180,7 @@ async function captureResponse(
 
 async function safePersist(
   trace: ActiveTrace,
-  turn: number,
+  transportAttempt: number,
   part: ModelWirePart,
   captured: { readonly body: Uint8Array; readonly status: ModelWireCaptureStatus },
   httpStatus?: number,
@@ -178,7 +188,8 @@ async function safePersist(
   try {
     await trace.port.persist({
       context: trace.context,
-      turn,
+      modelTurn: trace.modelTurn,
+      transportAttempt,
       part,
       body: captured.body,
       sha256: createHash("sha256").update(captured.body).digest("hex"),
@@ -193,7 +204,7 @@ async function safePersist(
 
 async function safeFailure(
   trace: ActiveTrace,
-  turn: number,
+  transportAttempt: number,
   part: ModelWirePart,
   code: "CAPTURE_UNAVAILABLE" | "BODY_UNREADABLE",
   httpStatus?: number,
@@ -201,7 +212,8 @@ async function safeFailure(
   try {
     await trace.port.captureFailed({
       context: trace.context,
-      turn,
+      modelTurn: trace.modelTurn,
+      transportAttempt,
       part,
       code,
       ...(httpStatus === undefined ? {} : { httpStatus }),

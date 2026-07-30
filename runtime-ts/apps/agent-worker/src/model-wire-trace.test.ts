@@ -75,7 +75,12 @@ describe("模型网络原始报文诊断", () => {
         'data: {"delta":"甲"}\n\ndata: [DONE]\n\n',
       );
       expect(JSON.stringify(traces.records)).not.toContain("test-secret");
-      expect(sse).toMatchObject({ status: "complete", httpStatus: 200, turn: 0 });
+      expect(sse).toMatchObject({
+        status: "complete",
+        httpStatus: 200,
+        modelTurn: 0,
+        transportAttempt: 0,
+      });
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),

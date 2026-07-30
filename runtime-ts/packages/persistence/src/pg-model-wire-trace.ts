@@ -15,7 +15,8 @@ interface ModelWireTraceContext {
 interface ModelWireTracePort {
   persist(input: {
     readonly context: ModelWireTraceContext;
-    readonly turn: number;
+    readonly modelTurn: number;
+    readonly transportAttempt: number;
     readonly part: "request" | "response";
     readonly body: Uint8Array;
     readonly sha256: string;
@@ -25,7 +26,8 @@ interface ModelWireTracePort {
   }): Promise<void>;
   captureFailed(input: {
     readonly context: ModelWireTraceContext;
-    readonly turn: number;
+    readonly modelTurn: number;
+    readonly transportAttempt: number;
     readonly part: "request" | "response";
     readonly code: "CAPTURE_UNAVAILABLE" | "BODY_UNREADABLE";
     readonly httpStatus?: number;
@@ -48,7 +50,7 @@ export class PgModelWireTraceRepository implements ModelWireTracePort {
   }
 
   async persist(input: Parameters<ModelWireTracePort["persist"]>[0]): Promise<void> {
-    const operation = `wire.${input.context.attemptId}.${input.turn}.${input.part}`;
+    const operation = `wire.${input.context.attemptId}.${input.modelTurn}.${input.transportAttempt}.${input.part}`;
     const traces = createDurableTraceBlobPersistence(this.commits, this.blobs);
     const result = await traces.persistTrace({
       tenantId: input.context.tenantId,
@@ -60,7 +62,7 @@ export class PgModelWireTraceRepository implements ModelWireTracePort {
       result.outcome === "persisted" || result.outcome === "replayed" ? result : undefined;
     await this.write({
       context: input.context,
-      turn: input.turn,
+      turn: input.modelTurn,
       part: input.part,
       captureStatus: input.status,
       persistenceStatus:
@@ -81,7 +83,7 @@ export class PgModelWireTraceRepository implements ModelWireTracePort {
   async captureFailed(input: Parameters<ModelWireTracePort["captureFailed"]>[0]): Promise<void> {
     await this.write({
       context: input.context,
-      turn: input.turn,
+      turn: input.modelTurn,
       part: input.part,
       captureStatus: input.code === "BODY_UNREADABLE" ? "aborted" : "failed",
       persistenceStatus: "not_captured",

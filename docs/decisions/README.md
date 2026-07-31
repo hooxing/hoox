@@ -68,6 +68,7 @@
 | [ADR-0060](0060-safe-markdown-model-output.md) | 模型输出的安全 Markdown 展示边界 | 已接受 | 2026-07-30 |
 | [ADR-0061](0061-user-focused-running-experience.md) | 面向用户的运行状态体验 | 已接受 | 2026-07-30 |
 | [ADR-0062](0062-simplify-web-workspace-scrolling.md) | 简化 Web 工作台滚动与交付入口 | 已接受 | 2026-07-31 |
+| [ADR-0063](0063-thread-context-steer-followup-sandbox-retention.md) | Thread 连续上下文、Steer/Follow-up 与 Sandbox 保留 | 提议 | 2026-07-31 |
 
 ## 何时必须记录
 

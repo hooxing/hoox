@@ -1,14 +1,13 @@
 import { LoaderCircle, PanelLeftOpen, RotateCw } from "lucide-react";
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ApiError, RuntimeApi, type ArtifactPreview, type RunStatus, type Thread } from "./api.js";
+import { ApiError, type ArtifactPreview, type RunStatus, RuntimeApi, type Thread } from "./api.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
 import "./styles.css";
 import {
-  ActivityPanel,
   ConversationComposer,
   compactWorkspaceMedia,
   EmptyConversation,
@@ -16,9 +15,8 @@ import {
   NavigationSidebar,
   pollingRunStatuses,
   RunRecoveryLoading,
-  RunTranscript,
   RunTimeline,
-  shouldOpenActivityPanel,
+  RunTranscript,
   ThreadCreate,
   ThreadHeader,
   ThreadNavigation,
@@ -45,7 +43,6 @@ type WorkspaceApi = Pick<
   | "createThread"
   | "downloadArtifact"
   | "getRun"
-  | "getModelWireTraceBody"
   | "listArtifacts"
   | "listEvents"
   | "listLatestRuns"
@@ -84,7 +81,6 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const [recoveryUi, setRecoveryUi] = useState<RecoveryUiState | undefined>();
   const [recoveryNonce, setRecoveryNonce] = useState(0);
   const [isCompact, setIsCompact] = useState(initialCompact);
-  const [activityOpen, setActivityOpen] = useState(() => shouldOpenActivityPanel(initialCompact));
   const [navigationOpen, setNavigationOpen] = useState(false);
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
@@ -93,8 +89,6 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const currentRunPollRef = useRef(new CurrentRunPoll());
   const navigationRef = useRef(new WorkspaceNavigation());
   const mobileNavigationToggleRef = useRef<HTMLButtonElement>(null);
-  const artifactTriggerRef = useRef<HTMLButtonElement>(null);
-  const contentFocusRef = useRef<HTMLElement>(null);
   const sendInFlightRef = useRef(false);
   const initialSelectionAppliedRef = useRef(false);
 
@@ -111,10 +105,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     const media = window.matchMedia(compactWorkspaceMedia);
     const updateLayout = (event: MediaQueryListEvent) => {
       setIsCompact(event.matches);
-      if (event.matches) {
-        setActivityOpen(false);
-        setNavigationOpen(false);
-      }
+      if (event.matches) setNavigationOpen(false);
     };
     media.addEventListener("change", updateLayout);
     return () => media.removeEventListener("change", updateLayout);
@@ -276,16 +267,6 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     };
   }, [apiClient, state.run?.id, state.selectedThreadId]);
 
-  useEffect(() => {
-    if (
-      state.artifacts.length > 0 ||
-      state.modelWireTraces.length > 0 ||
-      state.modelWireTraceUnavailable
-    ) {
-      setActivityOpen(true);
-    }
-  }, [state.artifacts.length, state.modelWireTraceUnavailable, state.modelWireTraces.length]);
-
   const createConversation = () => selectThread(undefined);
   const send = async () => {
     if (!input.trim() || actionLoading || sendInFlightRef.current) return;
@@ -396,17 +377,6 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       setError(reason instanceof ApiError ? reason : new ApiError("获取预览地址失败", 0, true));
     }
   };
-  const loadMoreModelWireTraces = async () => {
-    const threadId = state.selectedThreadId;
-    const run = state.run;
-    const cursor = state.modelWireTraceNextCursor;
-    if (threadId === undefined || run === undefined || cursor === undefined) return;
-    const expectedNavigation = navigationRef.current.capture();
-    const page = await apiClient.listModelWireTraces(threadId, run.id, cursor);
-    if (!navigationRef.current.isCurrent(expectedNavigation)) return;
-    dispatch({ type: "modelWireTraces", page, mode: "append" });
-  };
-
   const selected = state.threads.find((thread) => thread.id === state.selectedThreadId);
   const currentRecovery =
     recoveryUi !== undefined &&
@@ -456,7 +426,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           )}
         </ThreadNavigation>
       </NavigationSidebar>
-      <section ref={contentFocusRef} className="content" aria-label="对话工作区" tabIndex={-1}>
+      <section className="content" aria-label="对话工作区">
         <button
           ref={mobileNavigationToggleRef}
           className="mobile-nav-toggle icon-button"
@@ -504,14 +474,9 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
             <ThreadHeader
               thread={selected}
               run={state.run}
-              artifactCount={state.artifacts.length}
-              modelWireTraceCount={state.modelWireTraces.length}
-              modelWireTraceUnavailable={state.modelWireTraceUnavailable}
               actionLoading={actionLoading}
               onArchive={() => void archive()}
               onCancel={() => void cancel()}
-              onOpenArtifacts={() => setActivityOpen(true)}
-              artifactTriggerRef={artifactTriggerRef}
             />
             <section className="run-area" aria-live="polite">
               {state.run && currentRequest && (
@@ -553,25 +518,6 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           }}
         />
       </section>
-      <ActivityPanel
-        isOpen={activityOpen}
-        artifacts={state.artifacts}
-        modelWireTraces={state.modelWireTraces}
-        modelWireTraceHasMore={state.modelWireTraceHasMore}
-        modelWireTraceUnavailable={state.modelWireTraceUnavailable}
-        onToggle={() => setActivityOpen((open) => !open)}
-        onPreview={(artifactId) => void preview(artifactId)}
-        onDownload={(artifactId) => void download(artifactId)}
-        onLoadModelWireTrace={(record) => {
-          if (state.selectedThreadId === undefined || state.run === undefined) {
-            return Promise.reject(new ApiError("当前运行已切换", 404, false));
-          }
-          return apiClient.getModelWireTraceBody(state.selectedThreadId, state.run.id, record);
-        }}
-        onLoadMoreModelWireTraces={loadMoreModelWireTraces}
-        returnFocusRef={artifactTriggerRef}
-        fallbackFocusRef={contentFocusRef}
-      />
       {textPreview?.kind === "text" && (
         <dialog className="artifact-text-preview" open aria-label="纯文本交付物预览">
           <header>

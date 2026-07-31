@@ -6,17 +6,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { Artifact, ModelWireTraceRecord, Run, RunEvent } from "./api.js";
 import {
-  ActivityPanel,
   ConversationComposer,
   InlineArtifactDelivery,
   NavigationSidebar,
   RunStatusBadge,
-  RunTranscript,
   RunTimeline,
-  shouldOpenActivityPanel,
+  RunTranscript,
   ThreadCreate,
   ThreadHeader,
 } from "./workspace-view.js";
+
+// 已移除的抽屉交互用例暂留作历史说明，不再参与当前界面契约。
+const ActivityPanel = (_props: Record<string, unknown>) => null;
+const shouldOpenActivityPanel = (_isCompact: boolean) => false;
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -33,48 +35,6 @@ describe("工作台展示组件", () => {
 
     expect(html).toContain("等待输入");
     expect(html).toContain("is-waiting");
-  });
-
-  it("没有产物时不渲染右侧竖栏或无意义入口", () => {
-    const artifacts: readonly Artifact[] = [];
-    const html = renderToStaticMarkup(
-      <ActivityPanel
-        isOpen
-        artifacts={artifacts}
-        onToggle={() => undefined}
-        onPreview={() => undefined}
-        onDownload={() => undefined}
-        returnFocusRef={createRef<HTMLButtonElement>()}
-        fallbackFocusRef={createRef<HTMLElement>()}
-      />,
-    );
-
-    expect(html).toBe("");
-  });
-
-  it("有产物时使用可关闭的覆盖式抽屉，关闭后移出辅助技术焦点", () => {
-    const artifact: Artifact = {
-      id: "artifact-1",
-      name: "result.txt",
-      status: "published",
-      createdAt: "2026-07-30T00:00:00.000Z",
-      updatedAt: "2026-07-30T00:00:00.000Z",
-    };
-    const closed = renderToStaticMarkup(
-      <ActivityPanel
-        isOpen={false}
-        artifacts={[artifact]}
-        onToggle={() => undefined}
-        onPreview={() => undefined}
-        onDownload={() => undefined}
-        returnFocusRef={createRef<HTMLButtonElement>()}
-        fallbackFocusRef={createRef<HTMLElement>()}
-      />,
-    );
-
-    expect(closed).toContain("activity-panel is-collapsed");
-    expect(closed).toContain('aria-hidden="true"');
-    expect(closed).toContain("inert");
   });
 
   it("交付物同时内联在 Agent 正文之后，抽屉不取代阅读路径", () => {
@@ -98,7 +58,7 @@ describe("工作台展示组件", () => {
     expect(html).toContain("summary.md");
   });
 
-  it("会话头部用文字化操作打开产物抽屉和归档", () => {
+  it("会话头部不再提供产物或网络诊断侧栏入口", () => {
     const html = renderToStaticMarkup(
       <ThreadHeader
         thread={{
@@ -109,21 +69,19 @@ describe("工作台展示组件", () => {
           updatedAt: "2026-07-30T00:00:00.000Z",
         }}
         run={running}
-        artifactCount={2}
         actionLoading={false}
         onArchive={() => undefined}
         onCancel={() => undefined}
-        onOpenArtifacts={() => undefined}
-        artifactTriggerRef={createRef<HTMLButtonElement>()}
       />,
     );
 
-    expect(html).toContain("产物");
     expect(html).toContain("归档");
-    expect(html).toContain("打开本次运行产物，共 2 个");
+    expect(html).not.toContain("产物");
+    expect(html).not.toContain("诊断");
+    expect(html).not.toContain("activity-panel");
   });
 
-  it("只有模型报文时仍提供可重复打开诊断抽屉的外部入口", () => {
+  it.skip("只有模型报文时仍提供可重复打开诊断抽屉的外部入口", () => {
     const trace: ModelWireTraceRecord = {
       attemptId: "attempt_trace",
       modelTurn: 0,
@@ -192,7 +150,7 @@ describe("工作台展示组件", () => {
     container.remove();
   });
 
-  it("产物抽屉打开后接管焦点，Escape 或关闭按钮返回入口", () => {
+  it.skip("产物抽屉打开后接管焦点，Escape 或关闭按钮返回入口", () => {
     const artifact: Artifact = {
       id: "artifact-focus",
       name: "focus.txt",
@@ -242,7 +200,7 @@ describe("工作台展示组件", () => {
     container.remove();
   });
 
-  it("切换会话移除产物入口时，抽屉关闭后回退到中部工作区", () => {
+  it.skip("切换会话移除产物入口时，抽屉关闭后回退到中部工作区", () => {
     const artifact: Artifact = {
       id: "artifact-switch",
       name: "switch.txt",

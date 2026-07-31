@@ -180,8 +180,13 @@ input {
   align-content: start;
   gap: 3px;
   overflow-y: auto;
+  scrollbar-width: none;
   overscroll-behavior: contain;
   padding: 2px 2px 10px;
+}
+.thread-list::-webkit-scrollbar,
+.run-area::-webkit-scrollbar {
+  display: none;
 }
 .thread {
   display: grid;
@@ -332,14 +337,6 @@ h2 {
   color: #46574d;
   background: #fff;
 }
-.artifact-entry-button span {
-  min-width: 18px;
-  border-radius: 999px;
-  padding: 1px 5px;
-  color: #416252;
-  background: #e8f0eb;
-  font-size: 11px;
-}
 .archive-button {
   color: #6f4c47;
 }
@@ -351,6 +348,7 @@ h2 {
   min-height: 0;
   align-self: center;
   overflow-y: auto;
+  scrollbar-width: none;
   overscroll-behavior: contain;
   padding: 22px 2px;
 }
@@ -741,34 +739,6 @@ h2 {
   background: #fff8f6;
 }
 
-.activity-panel {
-  position: fixed;
-  z-index: 12;
-  inset: 0 0 0 auto;
-  width: min(380px, calc(100vw - 24px));
-  height: var(--app-shell-height);
-  border-left: 1px solid #dfe5e0;
-  background: #fff;
-  box-shadow: -12px 0 32px rgb(13 31 22 / 14%);
-  transition: transform 0.18s ease;
-}
-.activity-panel.is-collapsed {
-  transform: translateX(105%);
-}
-.panel-toggle {
-  position: absolute;
-  z-index: 1;
-  top: 16px;
-  left: 14px;
-}
-.activity-scroll {
-  height: 100%;
-  padding: 23px 18px 30px;
-  overflow-y: auto;
-}
-.activity-section {
-  padding: 0 0 22px 42px;
-}
 .section-heading {
   display: flex;
   align-items: flex-start;
@@ -890,16 +860,6 @@ h2 {
   .content {
     padding-top: 70px;
   }
-  .activity-panel {
-    width: min(318px, calc(100vw - 24px));
-    box-shadow: -8px 0 25px rgb(13 31 22 / 14%);
-  }
-  .activity-scroll {
-    padding-top: 25px;
-  }
-  .activity-section {
-    padding-left: 34px;
-  }
 }
 @media (max-width: 560px) {
   .content {
@@ -923,9 +883,6 @@ h2 {
   }
   .conversation-empty {
     min-height: 170px;
-  }
-  .activity-panel {
-    width: calc(100vw - 16px);
   }
   .run-meta {
     flex-wrap: wrap;

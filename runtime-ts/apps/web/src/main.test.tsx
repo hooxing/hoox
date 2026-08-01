@@ -13,6 +13,7 @@ import {
 import {
   App,
   chooseInitialThread,
+  compactThreadTitle,
   deriveThreadTitle,
   nextExpectedUserOccurrence,
   shouldContinueRunPolling,
@@ -174,10 +175,13 @@ describe("Agent 工作台恢复接入", () => {
 
   it("从首条有效请求生成确定性、紧凑的会话标题", () => {
     expect(deriveThreadTitle("  # 调研\nOpenAI *最新* 模型，并给出建议  ")).toBe(
-      "调研 OpenAI 最新 模型，并给出建议",
+      "调研 OpenAI 最新 模型，并给…",
     );
-    expect(deriveThreadTitle("甲".repeat(40))).toBe(`${"甲".repeat(26)}…`);
+    expect(deriveThreadTitle("甲".repeat(40))).toBe(`${"甲".repeat(18)}…`);
     expect(deriveThreadTitle(" \n ")).toBe("新任务");
+    expect(compactThreadTitle("帮我起草一份投诉信，要求电信退款的，docx")).toBe(
+      "帮我起草一份投诉信，要求电信退款…",
+    );
   });
 
   it("waiting 不启动无限短轮询，但未读事件页仍会被排空", () => {

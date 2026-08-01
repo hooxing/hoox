@@ -84,6 +84,7 @@ export function RunTimeline({
   readonly events: readonly RunEvent[];
 }) {
   const progress = buildRunProgress(events);
+  const progressTrackRef = useRef<HTMLOListElement>(null);
   const isRunning = timedRunStatuses.has(run.status);
   const isQueued = run.status === "queued";
   const isWaiting = run.status === "waiting";
@@ -92,6 +93,30 @@ export function RunTimeline({
   const isFailure = run.status === "failed" || run.status === "cancelled";
   const completedStepCount = progress.steps.filter((step) => step.status === "completed").length;
   const totalStepCount = progress.steps.length;
+  const trackItems = [
+    ...(progress.thinking === undefined
+      ? []
+      : [
+          {
+            id: "thinking",
+            label: progress.thinking.status === "running" ? "分析任务" : "已完成分析",
+            status: progress.thinking.status,
+            count: 1,
+          },
+        ]),
+    ...progress.steps.map((step) => ({
+      ...step,
+      label: step.label.replace(/^正在/u, "").replace(/…$/u, ""),
+    })),
+  ];
+  const trackVersion = trackItems
+    .map((item) => `${item.id}:${item.status}:${item.count}`)
+    .join("|");
+  useEffect(() => {
+    void trackVersion;
+    const track = progressTrackRef.current;
+    if (track !== null) track.scrollLeft = track.scrollWidth;
+  }, [trackVersion]);
   const summary = isFailure
     ? run.status === "cancelled"
       ? "运行已停止。你可以调整任务后再次发送。"
@@ -130,37 +155,26 @@ export function RunTimeline({
           {totalStepCount > 0 ? `已完成 ${completedStepCount} / ${totalStepCount} 步` : "暂无步骤"}
         </span>
       </div>
-      {(progress.thinking !== undefined || progress.steps.length > 0) && (
-        <div className="run-progress-disclosures">
-          {progress.thinking !== undefined && (
-            <details className={`run-thinking is-${progress.thinking.status}`}>
-              <summary>
-                {progress.thinking.status === "running" && (
-                  <LoaderCircle className="spin" size={14} aria-hidden="true" />
-                )}
-                <span>
-                  {progress.thinking.status === "running" ? "查看实时工作记录" : "查看工作记录"}
+      {trackItems.length > 0 && (
+        <ol ref={progressTrackRef} className="run-progress-track" aria-label="工作状态">
+          {trackItems.map((item) => (
+            <li
+              key={item.id}
+              className={`is-${item.status}`}
+              aria-current={item.status === "running" ? "step" : undefined}
+            >
+              {item.status === "running" ? (
+                <LoaderCircle className="spin" size={12} aria-hidden="true" />
+              ) : (
+                <span className="run-step-indicator" aria-hidden="true">
+                  {item.status === "failed" ? "!" : "✓"}
                 </span>
-              </summary>
-              <div className="run-thinking-content">
-                <AssistantMarkdown text={progress.thinking.text} />
-              </div>
-            </details>
-          )}
-          {progress.steps.length > 0 && (
-            <details className="run-progress-history">
-              <summary>查看执行步骤</summary>
-              <ol>
-                {progress.steps.map((step) => (
-                  <li key={step.id} className={`is-${step.status}`}>
-                    <span>{step.label.replace("正在", "")}</span>
-                    {step.count > 1 && <small>× {step.count}</small>}
-                  </li>
-                ))}
-              </ol>
-            </details>
-          )}
-        </div>
+              )}
+              <span>{item.label}</span>
+              {item.count > 1 && <small>× {item.count}</small>}
+            </li>
+          ))}
+        </ol>
       )}
     </section>
   );
@@ -192,9 +206,6 @@ export function ThreadTranscript({
       {messages.map((message) =>
         message.role === "user" ? (
           <article className="message user-request" key={message.sequence}>
-            <span className="message-avatar" aria-hidden="true">
-              你
-            </span>
             <div className="message-card">
               <span className="message-label">你的请求</span>
               <p>{message.text}</p>
@@ -202,19 +213,16 @@ export function ThreadTranscript({
           </article>
         ) : message.role === "assistant" ? (
           <AssistantMessage key={message.sequence} text={message.text} />
-        ) : (
+        ) : shouldDisplayRuntimeContextMessage(message.text) ? (
           <p className="runtime-context-notice" key={message.sequence}>
             {message.text}
           </p>
-        ),
+        ) : null,
       )}
       {pendingInputs.map((input) => (
         <article className="message user-request is-pending" key={input.localId}>
-          <span className="message-avatar" aria-hidden="true">
-            你
-          </span>
           <div className="message-card">
-            <span className="message-label">你</span>
+            <span className="message-label">你的请求</span>
             <p>{input.text}</p>
             <small className={`conversation-input-status is-${input.disposition}`}>
               {threadInputDispositionLabel(input)}
@@ -224,6 +232,10 @@ export function ThreadTranscript({
       ))}
     </section>
   );
+}
+
+export function shouldDisplayRuntimeContextMessage(text: string): boolean {
+  return text.trim() !== "运行已完成。";
 }
 
 export type PendingThreadInputView = {

@@ -72,6 +72,33 @@ describe("工作台展示组件", () => {
     expect(html).toContain("正在处理");
     expect(html).toContain("完成后再改成深色主题");
     expect(html).toContain("已排入下一任务 · 第 1 位");
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    expect(container.querySelector(".user-request .message-avatar")).toBeNull();
+  });
+
+  it("隐藏重复的运行完成通知，但保留失败等需要用户关注的状态", () => {
+    const html = renderToStaticMarkup(
+      <ThreadTranscript
+        messages={[
+          {
+            sequence: 1,
+            role: "runtime",
+            text: "运行已完成。",
+            createdAt: "2026-08-01T00:00:00.000Z",
+          },
+          {
+            sequence: 2,
+            role: "runtime",
+            text: "运行失败；未提交工作不视为成功。",
+            createdAt: "2026-08-01T00:00:01.000Z",
+          },
+        ]}
+      />,
+    );
+
+    expect(html).not.toContain("运行已完成。");
+    expect(html).toContain("运行失败；未提交工作不视为成功。");
   });
 
   it("交付物同时内联在 Agent 正文之后，抽屉不取代阅读路径", () => {
@@ -373,7 +400,7 @@ describe("工作台展示组件", () => {
     }
   });
 
-  it("工作记录始终默认折叠，运行中仍保留可查看的实时内容", () => {
+  it("思考与执行步骤直接进入横向状态轨道，不展示内部逐字记录", () => {
     const baseEvents: readonly RunEvent[] = [
       {
         eventId: "thinking-start",
@@ -410,14 +437,13 @@ describe("工作台展示组件", () => {
       />,
     );
 
-    expect(activeHtml).toContain("查看实时工作记录");
-    expect(activeHtml).toContain("先检查依赖，再生成文档。");
-    expect(activeHtml).toContain('<details class="run-thinking is-running"');
-    expect(activeHtml).not.toContain('is-running" open');
-    expect(settledHtml).toContain("查看工作记录");
-    expect(settledHtml).toContain("先检查依赖，再生成文档。");
-    expect(settledHtml).toContain('<details class="run-thinking is-completed"');
-    expect(settledHtml).not.toContain('is-completed" open');
+    expect(activeHtml).toContain('class="run-progress-track"');
+    expect(activeHtml).toContain("分析任务");
+    expect(activeHtml).not.toContain("先检查依赖，再生成文档。");
+    expect(activeHtml).not.toContain("<details");
+    expect(settledHtml).toContain("已完成分析");
+    expect(settledHtml).not.toContain("先检查依赖，再生成文档。");
+    expect(settledHtml).not.toContain("<details");
   });
 
   it("waiting 状态卡不混入问题或正文，普通 Agent 正文保留二者", () => {

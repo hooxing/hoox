@@ -3,8 +3,15 @@ import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@c
 import {
   createApiPersistenceRuntime,
   createS3BlobStore,
+  DurableResourceBlobWriter,
+  DurableResourceUploadBlobAdapter,
   RUNTIME_BLOB_OBJECT_PREFIX,
 } from "@cube-runtime/persistence";
+import {
+  createResourceFilesystemCapabilityCodec,
+  ResourceAttachmentResolver,
+  ResourceUploadService,
+} from "@cube-runtime/resource";
 import type { ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
@@ -83,6 +90,20 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
         },
         persistence.blobLifecycle,
       );
+      const resourceFilesystemCapabilities = createResourceFilesystemCapabilityCodec({
+        secret: configuration.resourceFilesystemSigningKey,
+      });
+      const resourceUploads = new ResourceUploadService(
+        new DurableResourceUploadBlobAdapter(
+          new DurableResourceBlobWriter(
+            persistence.blobLifecycle,
+            blobs,
+            developmentApiMaxBlobSizeBytes,
+          ),
+        ),
+        persistence.resourceUploads,
+        { maxBytes: developmentApiMaxBlobSizeBytes, now: clock.now },
+      );
       app = createApiApp(
         {
           auth: createDevelopmentAuthResolver({
@@ -101,6 +122,12 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           experience: persistence.experience,
           modelWireTraces: persistence.modelWireTraces,
           blobs,
+          resourceUploads,
+          resourceAttachments: new ResourceAttachmentResolver(persistence.resourceCatalog),
+          resourceFilesystem: {
+            catalog: persistence.resourceFilesystem,
+            capabilities: resourceFilesystemCapabilities,
+          },
           ...(configuration.threadContextV2ReadEnabled
             ? {
                 threadContext: persistence.threadContext(blobs),

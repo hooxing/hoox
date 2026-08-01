@@ -9,6 +9,8 @@ import {
   PgResourcePromotionRepository,
   type ResourcePromotionCommitPort,
 } from "./pg-resource-library.js";
+import { PgResourceFilesystemCatalog } from "./pg-resource-filesystem.js";
+import { PgResourceUploadRepository } from "./pg-resource-upload.js";
 import { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-state.js";
 import { PgThreadCreation } from "./pg-thread-creation.js";
@@ -68,6 +70,9 @@ export interface ApiPersistenceRuntime {
   readonly experience: RunExperienceReadPort;
   readonly modelWireTraces: ModelWireTraceReadPort;
   readonly blobLifecycle: PgBlobLifecycleRepository;
+  readonly resourceCatalog: PgResourceCatalog;
+  readonly resourceUploads: PgResourceUploadRepository;
+  readonly resourceFilesystem: PgResourceFilesystemCatalog;
   readonly threadContinuity: ThreadContinuityReadPort;
   threadContext(blobs: BlobStore): ThreadContextReadPort;
   probe(): Promise<void>;
@@ -89,6 +94,9 @@ export function createApiPersistenceRuntime(
     experience: new PgRunExperienceReadRepository(pool),
     modelWireTraces: new PgModelWireTraceReadRepository(pool),
     blobLifecycle: new PgBlobLifecycleRepository(pool),
+    resourceCatalog: new PgResourceCatalog(pool),
+    resourceUploads: new PgResourceUploadRepository(pool),
+    resourceFilesystem: new PgResourceFilesystemCatalog(pool),
     threadContinuity: new PgThreadContinuityReadRepository(pool),
     threadContext: (blobs: BlobStore) => new PgThreadContextReadRepository(pool, blobs),
     probe: () => probePostgres(pool, options.expectedRuntimeRole),

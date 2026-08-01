@@ -1,10 +1,13 @@
 export const resourceErrorCodes = [
   "INVALID_REQUEST",
+  "CONFLICT",
+  "LIMIT_EXCEEDED",
   "NOT_FOUND",
   "NOT_AUTHORIZED",
   "PREVIEW_BUDGET_EXCEEDED",
   "CONTENT_INTEGRITY_ERROR",
   "DEPENDENCY_FAILURE",
+  "DEPENDENCY_UNAVAILABLE",
 ] as const;
 
 export type ResourceErrorCode = (typeof resourceErrorCodes)[number];

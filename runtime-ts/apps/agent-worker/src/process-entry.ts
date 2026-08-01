@@ -53,6 +53,7 @@ import {
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
 import { resolveCubeProxyRouting } from "@cube-runtime/sandbox";
+import { createResourceFilesystemCapabilityCodec } from "@cube-runtime/resource";
 import { DeliverFileToolRouterFactory } from "@cube-runtime/tool-router";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -68,6 +69,7 @@ import {
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
 import { withDevelopmentProjectModelWireTraceMirror } from "./project-model-wire-trace.js";
+import { RcloneResourceFilesystemMounter } from "./resource-filesystem-mounter.js";
 import { RunWorker } from "./run-worker.js";
 import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
 import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
@@ -104,6 +106,8 @@ const workerEnvironmentSchema = Object.freeze({
     requiredIn: [],
   }),
   CUBESANDBOX_PROXY_SCHEME: stringEnvironmentField({ maxLength: 5, requiredIn: [] }),
+  RESOURCE_FILESYSTEM_ENDPOINT: urlEnvironmentField(),
+  RESOURCE_FILESYSTEM_SIGNING_KEY: stringEnvironmentField({ secret: true, maxLength: 256 }),
   MODEL_BASE_URL: urlEnvironmentField(),
   MODEL_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192 }),
   MODEL_ID: stringEnvironmentField({ maxLength: 255 }),
@@ -182,6 +186,8 @@ const workerEnvironmentSchema = Object.freeze({
   DEV_AUTH_USER_B_TENANT_ID: stringEnvironmentField({ requiredIn: [], maxLength: 128 }),
   PROCESS_SHUTDOWN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1, maximum: 600_000 }),
 });
+// capability 覆盖单次较长 Run；Sandbox 恢复时仍会重新签发并重新挂载。
+const resourceFilesystemCapabilityTtlSeconds = 3_600;
 
 export const workerProcessEnvironmentKeys = Object.freeze(Object.keys(workerEnvironmentSchema));
 
@@ -207,6 +213,10 @@ export interface WorkerProcessConfiguration {
     proxyNodeIp?: string;
     proxyPort?: number;
     proxyScheme?: "http" | "https";
+  }>;
+  readonly resourceFilesystem: Readonly<{
+    endpoint: string;
+    signingKey: string;
   }>;
   readonly model: Readonly<{
     baseUrl: string;
@@ -350,12 +360,19 @@ export function parseWorkerProcessEnvironment(
     throw new TypeError("THREAD_CONTEXT_COMPACTION_TARGET_PERCENT 必须小于 soft limit");
   }
   const sandboxApiUrl = readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
+  const resourceFilesystemEndpoint = readRequiredEnvironmentValue(
+    parsed,
+    "RESOURCE_FILESYSTEM_ENDPOINT",
+  );
   if (parsed.runtimeEnvironment === "production") {
     assertProductionWorkerTransport({
       modelBaseUrl: readRequiredEnvironmentValue(parsed, "MODEL_BASE_URL"),
       objectStorageEndpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
       sandboxApiUrl,
     });
+    if (new URL(resourceFilesystemEndpoint).protocol !== "https:") {
+      throw new TypeError("RESOURCE_FILESYSTEM_ENDPOINT 在 production 必须使用 HTTPS");
+    }
   }
   const proxyRouting = resolveCubeProxyRouting({
     apiUrl: sandboxApiUrl,
@@ -391,6 +408,10 @@ export function parseWorkerProcessEnvironment(
         ? {}
         : { apiKey: parsed.values.CUBESANDBOX_API_KEY }),
       ...proxyRouting,
+    }),
+    resourceFilesystem: Object.freeze({
+      endpoint: resourceFilesystemEndpoint,
+      signingKey: readRequiredEnvironmentValue(parsed, "RESOURCE_FILESYSTEM_SIGNING_KEY"),
     }),
     model: Object.freeze({
       baseUrl: readRequiredEnvironmentValue(parsed, "MODEL_BASE_URL"),
@@ -661,6 +682,13 @@ async function assembleWorkerRuntime(
       ...(runtimeMode === "development" ? { allowInsecureHttpDownload: true } : {}),
       executionAuthorizationVerifier: artifactAuthorization.verifier,
     });
+    const resourceFilesystemMounter = new RcloneResourceFilesystemMounter(
+      configuration.resourceFilesystem.endpoint,
+      createResourceFilesystemCapabilityCodec({
+        secret: configuration.resourceFilesystem.signingKey,
+      }),
+      resourceFilesystemCapabilityTtlSeconds,
+    );
     const upstreamSandboxes = new CubeSandboxSessionRegistry(
       {
         apiUrl: configuration.sandbox.apiUrl,
@@ -679,6 +707,7 @@ async function assembleWorkerRuntime(
       configuration.sandbox.templateId,
       configuration.threadSandbox.sessionTtlSeconds,
       configuration.threadSandbox.lifecycleTimeoutMs,
+      resourceFilesystemMounter,
     );
     const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
     const threadSandboxes = new PgThreadSandboxSessionLifecycle(

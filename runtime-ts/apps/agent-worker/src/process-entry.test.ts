@@ -25,6 +25,8 @@ function productionEnvironment(): Record<string, string> {
     CUBESANDBOX_API_URL: "https://sandbox.example.invalid:3000",
     CUBESANDBOX_PROXY_SCHEME: "https",
     CUBESANDBOX_TEMPLATE_ID: "tpl-test",
+    RESOURCE_FILESYSTEM_ENDPOINT: "https://app.example.invalid/v1/resource-filesystem",
+    RESOURCE_FILESYSTEM_SIGNING_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     MODEL_BASE_URL: "https://model.invalid/v1",
     MODEL_API_KEY: "opaque-model-value",
     MODEL_ID: "test-model",

@@ -125,6 +125,8 @@ try {
     "CUBESANDBOX_API_URL=https://sandbox.invalid",
     "CUBESANDBOX_TEMPLATE_ID=template-placeholder",
     "CUBESANDBOX_PROXY_SCHEME=https",
+    "RESOURCE_FILESYSTEM_ENDPOINT=https://app.example.invalid/v1/resource-filesystem",
+    "RESOURCE_FILESYSTEM_SIGNING_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     "MODEL_BASE_URL=https://model.invalid/v1",
     `MODEL_API_KEY=${secretCanary}`,
     "MODEL_ID=model-placeholder",

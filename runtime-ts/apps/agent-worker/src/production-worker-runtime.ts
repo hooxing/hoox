@@ -23,6 +23,7 @@ import {
   type UncertainLifecycleEvent,
 } from "@cube-runtime/sandbox";
 import type { RunWorker, RunWorkerResult } from "./run-worker.js";
+import type { SandboxResourceFilesystemMounter } from "./resource-filesystem-mounter.js";
 
 export class SystemWorkerClock implements ClockPort {
   schedule(delayMs: number, callback: () => void): ScheduledTask {
@@ -118,6 +119,7 @@ export class CubeSandboxSessionRegistry
     private readonly templateId: string,
     private readonly ttlSeconds = 120,
     private readonly lifecycleTimeoutMs = 90_000,
+    private readonly resourceFilesystem?: SandboxResourceFilesystemMounter,
   ) {
     if (
       !Number.isSafeInteger(lifecycleTimeoutMs) ||
@@ -150,6 +152,7 @@ export class CubeSandboxSessionRegistry
         { templateId: this.templateId, ttlSeconds: this.ttlSeconds },
         { signal: input.signal },
       );
+      await this.mountResourceFilesystem(input.scope, sandbox, true);
       const session = this.bindSession(input.scope, `registry-${randomUUID()}`, sandbox, "created");
       return { outcome: "ready", session };
     } catch (error) {
@@ -178,6 +181,7 @@ export class CubeSandboxSessionRegistry
         },
         { signal: input.signal },
       );
+      await this.mountResourceFilesystem(input.scope, sandbox, true);
       return {
         outcome: "ready",
         session: this.bindSession(input.scope, input.registryId, sandbox, "created"),
@@ -202,6 +206,7 @@ export class CubeSandboxSessionRegistry
       const sandbox = await this.gateway.connect(input.providerSandboxId, {
         signal: input.signal,
       });
+      await this.mountResourceFilesystem(input.scope, sandbox, false);
       return {
         outcome: "ready",
         session: this.bindSession(input.scope, input.registryId, sandbox, "connected"),
@@ -238,6 +243,23 @@ export class CubeSandboxSessionRegistry
           input.session.providerSandboxId,
         ),
       };
+    }
+  }
+
+  private async mountResourceFilesystem(
+    scope: ExecutionScope,
+    sandbox: import("@cube-runtime/sandbox").SandboxHandle,
+    cleanupOnFailure: boolean,
+  ): Promise<void> {
+    try {
+      await this.resourceFilesystem?.mount({ scope, sandbox });
+    } catch (error) {
+      if (cleanupOnFailure) {
+        await sandbox
+          .kill({ ignoreNotFound: true, timeoutMs: this.lifecycleTimeoutMs })
+          .catch(() => undefined);
+      }
+      throw error;
     }
   }
 

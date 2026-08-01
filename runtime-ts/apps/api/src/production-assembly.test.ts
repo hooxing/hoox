@@ -36,6 +36,8 @@ const mocks = vi.hoisted(() => {
 vi.mock("@cube-runtime/persistence", () => ({
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
   createS3BlobStore: mocks.createS3BlobStore,
+  DurableResourceBlobWriter: class {},
+  DurableResourceUploadBlobAdapter: class {},
   probeS3BlobStore: mocks.probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX: "agent-worker",
 }));
@@ -71,6 +73,7 @@ function productionEnvironment(): Record<string, string> {
     S3_ACCESS_KEY_ID: "local-access-key",
     S3_SECRET_ACCESS_KEY: "opaque-test-value",
     S3_FORCE_PATH_STYLE: "true",
+    RESOURCE_FILESYSTEM_SIGNING_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   };
 }
 

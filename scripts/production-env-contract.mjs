@@ -47,6 +47,8 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "CUBESANDBOX_PROXY_NODE_IP",
   "CUBESANDBOX_PROXY_PORT",
   "CUBESANDBOX_PROXY_SCHEME",
+  "RESOURCE_FILESYSTEM_ENDPOINT",
+  "RESOURCE_FILESYSTEM_SIGNING_KEY",
   "SCHEDULER_TENANT_ID",
   "SCHEDULER_WORKER_ID",
   "CLEANUP_POLL_INTERVAL_MS",
@@ -76,6 +78,7 @@ const secretKeys = new Set([
   "CUBESANDBOX_API_KEY",
   "MODEL_API_KEY",
   "MODEL_ID",
+  "RESOURCE_FILESYSTEM_SIGNING_KEY",
 ]);
 
 function parseLines(source) {

@@ -9,6 +9,8 @@ import {
   membershipId,
   type Run,
   rehydrateTenant,
+  resourceId,
+  resourceVersionId,
   runId,
   type Tenant,
   type Thread,
@@ -37,7 +39,7 @@ import {
   type Versioned,
 } from "@cube-runtime/persistence";
 import type { FastifyInstance } from "fastify";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ApiDependencies, createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec } from "./cursor.js";
@@ -154,6 +156,7 @@ class FakeApiState
     string,
     { readonly hash: string; readonly receipt: ThreadInputReceiptView; readonly run?: Run }
   >();
+  readonly submittedInputTexts: string[] = [];
   idempotencyBarrier: AsyncBarrier | undefined;
   beforeThreadCreate: (() => Promise<void> | void) | undefined;
   beforeRunCreate: (() => Promise<void> | void) | undefined;
@@ -328,6 +331,7 @@ class FakeApiState
         : { outcome: "key_conflict" };
     }
     const queued = input.mode === "follow_up";
+    this.submittedInputTexts.push(input.inputText);
     const receipt: ThreadInputReceiptView = {
       receiptId: `input-${this.inputReceipts.size + 1}`,
       inputSequence: this.inputReceipts.size + 1,
@@ -494,6 +498,8 @@ function fixture(
     readonly enableThreadContext?: boolean;
     readonly enableThreadContinuity?: boolean;
     readonly enableThreadInputs?: boolean;
+    readonly resourceAttachments?: ApiDependencies["resourceAttachments"];
+    readonly resourceUploads?: ApiDependencies["resourceUploads"];
   } = {},
 ) {
   const state = new FakeApiState();
@@ -587,6 +593,10 @@ function fixture(
       run: () => runId(`run_${++runSequence}`),
       workspace: () => workspaceId(`workspace_${++workspaceSequence}`),
     },
+    ...(options.resourceAttachments === undefined
+      ? {}
+      : { resourceAttachments: options.resourceAttachments }),
+    ...(options.resourceUploads === undefined ? {} : { resourceUploads: options.resourceUploads }),
     ...(options.enableThreadContext === true
       ? {
           threadContext: {
@@ -1917,6 +1927,90 @@ describe("Fastify API 契约", () => {
       queuedRun: { status: "queued" },
     });
     expect(state.inputReceipts).toHaveLength(2);
+  });
+
+  it("把已授权附件的文件名与稳定路径只注入本轮 user 输入", async () => {
+    const resourceAttachments = {
+      resolve: async () => [
+        {
+          resourceId: resourceId("resource_attachment_1"),
+          versionId: resourceVersionId("resource_version_attachment_1"),
+          name: "需求说明.md",
+          path: "/resources/resource_attachment_1/resource_version_attachment_1/需求说明.md",
+          mediaType: "text/markdown",
+          sizeBytes: 128,
+        },
+      ],
+    } satisfies NonNullable<ApiDependencies["resourceAttachments"]>;
+    const { app, state } = fixture({ enableThreadInputs: true, resourceAttachments });
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "attachment-thread-key" },
+      payload: { title: "附件输入" },
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/inputs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "attachment-input-key" },
+      payload: {
+        input: "请按说明实现",
+        mode: "follow_up",
+        attachments: [
+          {
+            resourceId: "resource_attachment_1",
+            versionId: "resource_version_attachment_1",
+          },
+        ],
+      },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(state.submittedInputTexts).toEqual([
+      `请按说明实现\n\n# 用户在本轮上传的文件\n- ${JSON.stringify({
+        文件名: "需求说明.md",
+        文件地址: "/resources/resource_attachment_1/resource_version_attachment_1/需求说明.md",
+      })}`,
+    ]);
+  });
+
+  it("以原始字节上传文件，并返回与 Sandbox 一致的稳定路径", async () => {
+    const upload = vi.fn(async () => ({
+      resourceId: "resource_upload_1" as never,
+      versionId: "resource_version_upload_1" as never,
+      name: "数据.csv",
+      path: "/resources/resource_upload_1/resource_version_upload_1/数据.csv",
+      mediaType: "text/csv",
+      sizeBytes: 3,
+    }));
+    const { app } = fixture({ resourceUploads: { upload } });
+    openApps.push(app);
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/resources/uploads",
+      headers: {
+        authorization: "Bearer token-a",
+        "content-type": "application/octet-stream",
+        "idempotency-key": "resource-upload-key-0001",
+        "x-file-name": encodeURIComponent("数据.csv"),
+        "x-file-media-type": "text/csv",
+      },
+      payload: Buffer.from([1, 2, 3]),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.path).toBe(
+      "/resources/resource_upload_1/resource_version_upload_1/数据.csv",
+    );
+    expect(upload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        idempotencyKey: "resource-upload-key-0001",
+        name: "数据.csv",
+        mediaType: "text/csv",
+        body: new Uint8Array([1, 2, 3]),
+      }),
+    );
   });
 
   it("Run 只以 queued 原子入队，幂等重放不产生第二个 Run", async () => {

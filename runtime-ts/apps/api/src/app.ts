@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { runId } from "@cube-runtime/domain";
+import { runId, threadId } from "@cube-runtime/domain";
 import type {
   BlobStore,
   CoreRepositories,
@@ -8,6 +8,8 @@ import type {
   ModelWireTraceReadPort,
   RunExperienceArtifact,
   RunExperienceReadPort,
+  ThreadContinuityReadPort,
+  ThreadContextReadPort,
 } from "@cube-runtime/persistence";
 import {
   assertBlobRef,
@@ -20,6 +22,8 @@ import {
   ArtifactListSuccessEnvelopeSchema,
   type CreateRunRequest,
   CreateRunRequestSchema,
+  type CreateThreadInputRequest,
+  CreateThreadInputRequestSchema,
   type CreateThreadRequest,
   CreateThreadRequestSchema,
   createErrorEnvelope,
@@ -43,6 +47,13 @@ import {
   type ThreadListQuery,
   ThreadListQuerySchema,
   ThreadPageSuccessEnvelopeSchema,
+  type ThreadContextListQuery,
+  ThreadContextListQuerySchema,
+  ThreadContextPageSuccessEnvelopeSchema,
+  ThreadContinuityStatusSuccessEnvelopeSchema,
+  type ThreadInputReceiptPath,
+  ThreadInputReceiptPathSchema,
+  ThreadInputReceiptSuccessEnvelopeSchema,
   type ThreadPath,
   ThreadPathSchema,
   type ThreadRunListQuery,
@@ -85,6 +96,8 @@ export interface ApiDependencies {
   readonly experience?: RunExperienceReadPort;
   readonly modelWireTraces?: ModelWireTraceReadPort;
   readonly blobs?: BlobStore;
+  readonly threadContext?: ThreadContextReadPort;
+  readonly threadContinuity?: ThreadContinuityReadPort;
 }
 
 export interface ApiAppOptions {
@@ -105,6 +118,9 @@ const idempotencyKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u;
 const publicAgentEventTypes = new Set([
   "agent.started",
   "agent.settled",
+  "thinking.started",
+  "thinking.delta",
+  "thinking.completed",
   "message.delta",
   "message.completed",
   "tool.started",
@@ -382,6 +398,70 @@ export function createApiApp(
         );
       },
     );
+
+    if (createCapability.threadInputs !== undefined) {
+      app.post<{ Params: ThreadPath; Body: CreateThreadInputRequest }>(
+        "/v1/threads/:threadId/inputs",
+        {
+          preValidation: async (request) => requireJsonContentType(request),
+          schema: {
+            params: ThreadPathSchema,
+            body: CreateThreadInputRequestSchema,
+            response: {
+              200: ThreadInputReceiptSuccessEnvelopeSchema,
+              400: ErrorEnvelopeSchema,
+              401: ErrorEnvelopeSchema,
+              404: ErrorEnvelopeSchema,
+              409: ErrorEnvelopeSchema,
+              415: ErrorEnvelopeSchema,
+              422: ErrorEnvelopeSchema,
+              500: ErrorEnvelopeSchema,
+              503: ErrorEnvelopeSchema,
+            },
+          },
+        },
+        async (request) => {
+          const auth = await authenticate(request);
+          return success(
+            request,
+            await service.submitThreadInput(
+              auth,
+              request.params.threadId,
+              request.body,
+              requireIdempotencyKey(request),
+            ),
+          );
+        },
+      );
+
+      app.get<{ Params: ThreadInputReceiptPath }>(
+        "/v1/threads/:threadId/inputs/:receiptId",
+        {
+          schema: {
+            params: ThreadInputReceiptPathSchema,
+            response: {
+              200: ThreadInputReceiptSuccessEnvelopeSchema,
+              400: ErrorEnvelopeSchema,
+              401: ErrorEnvelopeSchema,
+              404: ErrorEnvelopeSchema,
+              500: ErrorEnvelopeSchema,
+              503: ErrorEnvelopeSchema,
+            },
+          },
+        },
+        async (request) => {
+          const auth = await authenticate(request);
+          return success(
+            request,
+            await service.getThreadInputReceipt(
+              auth,
+              request.params.threadId,
+              request.params.receiptId,
+            ),
+          );
+        },
+      );
+    }
   }
 
   app.get<{ Querystring: ThreadListQuery }>(
@@ -522,6 +602,65 @@ export function createApiApp(
       );
     },
   );
+
+  if (normalizedDependencies.threadContext !== undefined) {
+    app.get<{ Params: ThreadPath; Querystring: ThreadContextListQuery }>(
+      "/v1/threads/:threadId/context",
+      {
+        schema: {
+          params: ThreadPathSchema,
+          querystring: ThreadContextListQuerySchema,
+          response: {
+            200: ThreadContextPageSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        const read = await normalizedDependencies.threadContext?.listMessages({
+          scope: auth.scope,
+          threadId: threadId(request.params.threadId),
+          after: request.query.after ?? 0,
+          limit: request.query.limit ?? 100,
+        });
+        if (read === undefined || read.outcome === "not_found") throw new ApiFailure("not_found");
+        return success(request, { items: read.items, hasMore: read.hasMore });
+      },
+    );
+  }
+
+  if (normalizedDependencies.threadContinuity !== undefined) {
+    app.get<{ Params: ThreadPath }>(
+      "/v1/threads/:threadId/continuity",
+      {
+        schema: {
+          params: ThreadPathSchema,
+          response: {
+            200: ThreadContinuityStatusSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        const read = await normalizedDependencies.threadContinuity?.getStatus({
+          scope: auth.scope,
+          threadId: threadId(request.params.threadId),
+        });
+        if (read === undefined || read.outcome === "not_found") throw new ApiFailure("not_found");
+        return success(request, read.status);
+      },
+    );
+  }
 
   if (normalizedDependencies.experience !== undefined) {
     app.get<{ Params: RunPath; Querystring: RunEventListQuery }>(

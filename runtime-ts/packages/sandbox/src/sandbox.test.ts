@@ -9,6 +9,27 @@ import { SandboxRuntimeError, settledOperation } from "./errors.js";
 import { FakeSandboxGateway } from "./testing/fake.js";
 
 describe("Sandbox 稳定适配契约", () => {
+  it("阶段 5 create 显式透传 onTimeout=pause 与 autoResume，且不依赖 SDK 默认值", async () => {
+    const create = vi.fn(fakeSdk().create);
+    const gateway = new CubeSandboxGateway(
+      { apiUrl: "http://cube", maxCreateTtlSeconds: 86_400 },
+      fakeSdk({ create }),
+    );
+
+    await gateway.create({
+      templateId: "thread-session-template",
+      ttlSeconds: 86_400,
+      lifecycle: { onTimeout: "pause", autoResume: true },
+    });
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        timeout: 86_400,
+        lifecycle: { onTimeout: "pause", autoResume: true },
+      }),
+    );
+  });
+
   it("Gateway 显式 API key/null 与代理路由不受 vendor ambient 环境覆盖", async () => {
     const keys = ["CUBE_API_KEY", "E2B_API_KEY", "CUBE_PROXY_NODE_IP"] as const;
     const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
@@ -191,7 +212,7 @@ describe("Sandbox 稳定适配契约", () => {
       code: "INVALID_ARGUMENT",
     });
     expectInvalid(
-      () => new CubeSandboxGateway({ apiUrl: "http://cube", maxCreateTtlSeconds: 121 }, sdk),
+      () => new CubeSandboxGateway({ apiUrl: "http://cube", maxCreateTtlSeconds: 86_401 }, sdk),
     );
     expectInvalid(
       () =>

@@ -10,7 +10,14 @@ import {
   type Run,
   type Thread,
 } from "./api.js";
-import { App, chooseInitialThread, deriveThreadTitle, shouldContinueRunPolling } from "./main.js";
+import {
+  App,
+  chooseInitialThread,
+  deriveThreadTitle,
+  nextExpectedUserOccurrence,
+  shouldContinueRunPolling,
+  shouldFollowLatest,
+} from "./main.js";
 
 type AppApi = NonNullable<ComponentProps<typeof App>["apiClient"]>;
 
@@ -131,6 +138,40 @@ afterEach(() => {
 });
 
 describe("Agent 工作台恢复接入", () => {
+  it("重复文本只计算尚未落入 Thread 上下文的消息，拒绝项不占用序号", () => {
+    expect(
+      nextExpectedUserOccurrence(
+        [{ role: "user", text: "继续" }],
+        [
+          {
+            text: "继续",
+            disposition: "queued",
+            expectedUserOccurrence: 1,
+          },
+          {
+            text: "继续",
+            disposition: "rejected",
+            expectedUserOccurrence: 2,
+          },
+        ],
+        "继续",
+      ),
+    ).toBe(2);
+    expect(
+      nextExpectedUserOccurrence(
+        [{ role: "user", text: "继续" }],
+        [
+          {
+            text: "继续",
+            disposition: "queued",
+            expectedUserOccurrence: 2,
+          },
+        ],
+        "继续",
+      ),
+    ).toBe(3);
+  });
+
   it("从首条有效请求生成确定性、紧凑的会话标题", () => {
     expect(deriveThreadTitle("  # 调研\nOpenAI *最新* 模型，并给出建议  ")).toBe(
       "调研 OpenAI 最新 模型，并给出建议",
@@ -143,6 +184,19 @@ describe("Agent 工作台恢复接入", () => {
     expect(shouldContinueRunPolling(false, "waiting")).toBe(false);
     expect(shouldContinueRunPolling(true, "waiting")).toBe(true);
     expect(shouldContinueRunPolling(false, "running")).toBe(true);
+  });
+
+  it("Run 终态后继续追踪 Sandbox 瞬时态，稳定或 UNKNOWN 后停止短轮询", () => {
+    expect(shouldContinueRunPolling(false, "succeeded", "pausing")).toBe(true);
+    expect(shouldContinueRunPolling(false, "succeeded", "resuming")).toBe(true);
+    expect(shouldContinueRunPolling(false, "succeeded", "paused")).toBe(false);
+    expect(shouldContinueRunPolling(false, "succeeded", "unknown")).toBe(false);
+  });
+
+  it("只在用户仍停留于底部附近时自动跟随最新进展", () => {
+    expect(shouldFollowLatest(1_000, 500, 400)).toBe(false);
+    expect(shouldFollowLatest(1_000, 510, 400)).toBe(true);
+    expect(shouldFollowLatest(1_000, 600, 400)).toBe(true);
   });
 
   it("首条请求自动创建会话并使用派生标题，用户无需预先填写标题", async () => {
@@ -195,7 +249,9 @@ describe("Agent 工作台恢复接入", () => {
     expect(apiClient.listLatestRuns).toHaveBeenCalledWith(active.id, 1);
     expect(apiClient.getRun).toHaveBeenCalledWith(active.id, latest.id);
     expect(container.querySelector("h1")?.textContent).toBe(active.title);
-    expect(container.textContent).toContain("运行 run_latest");
+    expect(container.querySelector(".conversation-header")?.getAttribute("data-run-id")).toBe(
+      "run_latest",
+    );
     expect(apiClient.listEvents).toHaveBeenCalledWith(active.id, latest.id, -1, 100);
     expect(apiClient.listArtifacts).toHaveBeenCalledWith(active.id, latest.id);
   });
@@ -408,11 +464,15 @@ describe("Agent 工作台恢复接入", () => {
     act(() => form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
     await settleEffects();
     expect(apiClient.createRun).toHaveBeenCalledWith(selectedThread.id, "启动新的分析");
-    expect(container.textContent).toContain("运行 run_new");
+    expect(container.querySelector(".conversation-header")?.getAttribute("data-run-id")).toBe(
+      "run_new",
+    );
 
     await act(async () => pendingRecovery.resolve([]));
     await settleEffects();
-    expect(container.textContent).toContain("运行 run_new");
+    expect(container.querySelector(".conversation-header")?.getAttribute("data-run-id")).toBe(
+      "run_new",
+    );
     expect(apiClient.getRun).toHaveBeenCalledWith(selectedThread.id, newRun.id);
   });
 

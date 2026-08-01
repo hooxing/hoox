@@ -10,7 +10,11 @@ import type {
   WorkspaceId,
   WorkspaceRevisionId,
 } from "@cube-runtime/domain";
-import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
+import type {
+  ControlledRolloutProjection,
+  RuntimeAgentEvent,
+  ThreadActiveHistoryV1,
+} from "@cube-runtime/pi-adapter";
 import type { SandboxHandle, UncertainLifecycleEvent } from "@cube-runtime/sandbox";
 import type { WorkspaceManifest } from "@cube-runtime/workspace";
 
@@ -63,6 +67,52 @@ export interface ClaimedExecutionSnapshot {
   readonly input: string;
   readonly answer?: string;
   readonly rolloutProjection: ControlledRolloutProjection;
+  /** 激活时冻结；当前 Run 自身输入不属于这段 predecessor history。 */
+  readonly contextThroughSequence?: number;
+}
+
+export type ThreadContextEntryKindV1 =
+  | "run_started"
+  | "user_message"
+  | "assistant_message"
+  | "tool_call"
+  | "tool_result"
+  | "workspace_committed"
+  | "workspace_unchanged"
+  | "run_terminal"
+  | "compaction_checkpoint"
+  | "legacy_history_gap"
+  | "legacy_v2_anchor";
+
+export type ThreadContextBodyV1 =
+  | {
+      readonly storage: "inline";
+      readonly value: Readonly<Record<string, unknown>>;
+      readonly sha256: Sha256Digest;
+      readonly size: number;
+    }
+  | {
+      readonly storage: "blob";
+      readonly referenceId: string;
+      readonly sha256: Sha256Digest;
+      readonly size: number;
+      readonly incarnationId: string;
+      readonly physicalObjectKey: string;
+    };
+
+export interface ThreadContextAppendEntryV1 {
+  readonly entryId: string;
+  readonly kind: ThreadContextEntryKindV1;
+  readonly body: ThreadContextBodyV1;
+  /** result 必须指向同批或既有 assistant_message 中真实存在的 call。 */
+  readonly toolCallId?: string;
+  readonly toolName?: string;
+}
+
+export interface ThreadContextAppendCommandV1 {
+  readonly schemaVersion: 1;
+  readonly idempotencyKey: string;
+  readonly entries: readonly ThreadContextAppendEntryV1[];
 }
 
 export interface RunClaimFence {
@@ -310,6 +360,19 @@ export interface RuntimeMutation {
   readonly workspaceChange?: ValidatedWorkspaceChange;
   readonly nextRunStatus?: Extract<RunStatus, "waiting" | "succeeded" | "failed" | "cancelled">;
   readonly releaseFences?: boolean;
+  /** 与 Attempt/Workspace/terminal 状态在同一 Thread writer 事务中追加。 */
+  readonly threadContextAppend?: ThreadContextAppendCommandV1;
+  /** 阶段 3：事务从 durable receipt 构造真实 user_message，调用方不能覆盖正文。 */
+  readonly threadSteer?: {
+    readonly receiptId: string;
+    readonly targetTurnId: string;
+    readonly bodyDigest: Sha256Digest;
+  };
+  /**
+   * 阶段 5：仅在 releaseFences 的 Run terminal mutation 中使用。存储层在同一 Thread
+   * writer 事务内决定 running handoff 或 pause intent；Worker 不能预先猜测队列是否为空。
+   */
+  readonly threadSandboxTerminal?: ThreadSandboxTerminalCommandV1;
 }
 
 export interface RuntimeMutationReceiptV1 {
@@ -334,6 +397,19 @@ export interface RuntimeMutationReceiptV1 {
     readonly previousHead?: WorkspaceRevisionId;
     readonly currentHead: WorkspaceRevisionId;
   };
+  readonly threadContext?: {
+    readonly schemaVersion: 1;
+    readonly firstSequence: number;
+    readonly lastSequence: number;
+    readonly entryCount: number;
+  };
+  readonly threadSteer?: {
+    readonly receiptId: string;
+    readonly targetTurnId: string;
+    readonly appliedContextSequence: number;
+    readonly bodyDigest: Sha256Digest;
+  };
+  readonly threadSandbox?: ThreadSandboxTerminalReceiptV1;
 }
 
 export type RuntimeOutboxReceiptV1 =
@@ -447,6 +523,18 @@ export interface ExecutionPersistencePort {
           | "scope_mismatch";
       }
   >;
+  readPendingThreadSteer(input: { readonly fence: ExecutionFence }): Promise<
+    | {
+        readonly outcome: "pending";
+        readonly receiptId: string;
+        readonly targetTurnId: string;
+        readonly inputText: string;
+        readonly bodyDigest: Sha256Digest;
+      }
+    | {
+        readonly outcome: "none" | "fence_lost" | "cancelled" | "unavailable" | "scope_mismatch";
+      }
+  >;
   mutate(command: RuntimeMutation): Promise<RuntimeMutationResult>;
   readMutation(input: {
     readonly scope: ExecutionScope;
@@ -537,6 +625,102 @@ export interface SandboxSessionRegistryPort {
   }): Promise<SandboxSettlementResult>;
 }
 
+export interface ThreadSandboxLeaseRefV1 {
+  readonly schemaVersion: 1;
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly leaseId: string;
+  /** 只在 Runtime 内部传递；不得进入公开事件或日志。 */
+  readonly leaseToken: string;
+  readonly leaseEpoch: number;
+}
+
+export interface ThreadSandboxTerminalCommandV1 {
+  readonly schemaVersion: 1;
+  readonly sessionId: string;
+  readonly generation: number;
+  readonly leaseId: string;
+  readonly leaseToken: string;
+}
+
+export type ThreadSandboxTerminalReceiptV1 =
+  | {
+      readonly schemaVersion: 1;
+      readonly outcome: "handed_off";
+      readonly sessionId: string;
+      readonly generation: number;
+      readonly nextRunId: RunId;
+    }
+  | {
+      readonly schemaVersion: 1;
+      readonly outcome: "effect_pending";
+      readonly sessionId: string;
+      readonly generation: number;
+      readonly effectId: string;
+      readonly effectKind: "pause";
+    };
+
+export type ThreadSandboxAcquireResult =
+  | {
+      readonly outcome: "ready";
+      readonly session: SandboxSessionRef;
+      readonly lease: ThreadSandboxLeaseRefV1;
+      /** false 只在 revision/generation/lease attestation 全部成立时返回。 */
+      readonly requiresMaterialization: boolean;
+      readonly source: "cold_created" | "running_handoff" | "paused_resumed";
+    }
+  | { readonly outcome: "unknown" }
+  | { readonly outcome: "failed"; readonly code: StableWorkerErrorCode };
+
+/** Provider 驱动不接触数据库；Thread lifecycle repository 独占 intent/receipt 与 lease。 */
+export interface ThreadSandboxProviderPort {
+  create(input: {
+    readonly scope: ExecutionScope;
+    readonly registryId: string;
+    readonly signal: AbortSignal;
+  }): Promise<SandboxAcquireResult>;
+  connect(input: {
+    readonly scope: ExecutionScope;
+    readonly registryId: string;
+    readonly providerSandboxId: string;
+    readonly signal: AbortSignal;
+  }): Promise<SandboxAcquireResult | { readonly outcome: "not_found" }>;
+  settle(input: {
+    readonly scope: ExecutionScope;
+    readonly session: SandboxSessionRef;
+    readonly cleanupIntentId: string;
+    readonly disposition: "pause" | "close";
+  }): Promise<SandboxSettlementResult>;
+}
+
+export interface ThreadSandboxSessionLifecyclePort {
+  acquire(input: {
+    readonly scope: ExecutionScope;
+    readonly attemptId: string;
+    readonly owner: string;
+    readonly leaseDurationMs: number;
+    readonly signal: AbortSignal;
+  }): Promise<ThreadSandboxAcquireResult>;
+  attestMaterialized(input: {
+    readonly scope: ExecutionScope;
+    readonly attemptId: string;
+    readonly lease: ThreadSandboxLeaseRefV1;
+    readonly revisionId?: WorkspaceRevisionId;
+  }): Promise<"attested" | "lease_lost" | "unavailable">;
+  completeTerminalEffect(input: {
+    readonly scope: ExecutionScope;
+    readonly session: SandboxSessionRef;
+    readonly receipt: Extract<ThreadSandboxTerminalReceiptV1, { outcome: "effect_pending" }>;
+  }): Promise<"settled" | "unknown" | "not_owner">;
+  terminate(input: {
+    readonly scope: ExecutionScope;
+    readonly attemptId: string;
+    readonly session: SandboxSessionRef;
+    readonly lease: ThreadSandboxLeaseRefV1;
+    readonly reason: string;
+  }): Promise<"settled" | "unknown" | "lease_lost">;
+}
+
 /**
  * 失去执行栅栏后的孤儿 Sandbox 只能通过独立端口关闭。实现必须把成功 acquire 返回的
  * session 对象身份当作进程内 capability，拒绝复制或伪造的 session。
@@ -568,6 +752,11 @@ export interface WorkerAgentSessionPort {
     text: string,
     authorization: ConsumedExternalEffectAuthorization,
   ): Promise<AgentTurnOutcome>;
+  /**
+   * 当前完整 assistant/tool turn 已持久化后，把 durable steer 放入 Pi 的原生 steering
+   * 队列；它必须在同一次活跃 prompt 的下一次 Provider 采样前被消费。
+   */
+  steer(text: string): Promise<void>;
   abort(): Promise<void>;
   /** durable 工具拒绝回执在 abort 前完成；未声明能力的 Session 不得延迟拒绝中止。 */
   drainRejectedToolReceipts?(): Promise<void>;
@@ -587,10 +776,71 @@ export interface AgentSessionFactoryPort {
     /** deliver_file 需要当前 registry capability；旧测试装配可暂不提供。 */
     readonly sandboxSession?: SandboxSessionRef;
     readonly rolloutProjection: ControlledRolloutProjection;
+    readonly contextThroughSequence?: number;
+    readonly threadActiveHistory?: ThreadActiveHistoryV1;
+    /**
+     * Pi turn_end 后、下一次 Provider 请求前的 awaited 安全点。先提交完整 assistant/tool
+     * 事实，再允许 Runtime 重建或压缩上下文；失败必须中止本 Attempt。
+     */
+    readonly onTurnSafePoint?: (
+      event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
+    ) => Promise<{
+      /** 只覆盖已经完成的 assistant/tool turn；steer user fact 由 Pi 队列在其后注入。 */
+      readonly throughSequence: number;
+      readonly steer?: { readonly receiptId: string; readonly inputText: string };
+    }>;
     readonly authorizeToolEffect: (
       call: ExternalEffectCall,
     ) => Promise<ConsumedExternalEffectAuthorization>;
   }): Promise<WorkerAgentSessionPort>;
+}
+
+export interface ThreadContextHistoryPort {
+  readActiveHistory(input: {
+    readonly scope: ExecutionScope;
+    readonly attemptId: string;
+    readonly throughSequence: number;
+    readonly compatibilityDigest: Sha256Digest;
+    readonly mode: "shadow" | "read";
+  }): Promise<
+    | { readonly outcome: "ready"; readonly history: ThreadActiveHistoryV1 }
+    | { readonly outcome: "legacy_gap" | "unsupported" | "unavailable" }
+  >;
+}
+
+export interface ThreadContextCompactionCommitPort {
+  commit(input: {
+    readonly fence: ExecutionFence;
+    readonly attemptId: string;
+    readonly operationId: string;
+    readonly checkpointId: string;
+    readonly compatibilityDigest: Sha256Digest;
+    readonly policyDigest: Sha256Digest;
+    readonly tokenizerIdentity: string;
+    readonly tokensBefore: number;
+    readonly tokensAfter: number;
+    readonly path: "local" | "remote";
+    readonly sourceFromSequence: number;
+    readonly sourceThroughSequence: number;
+    readonly sourceHistoryDigest: Sha256Digest;
+    readonly replacement: ThreadActiveHistoryV1;
+  }): Promise<
+    | {
+        readonly outcome: "applied" | "replayed";
+        readonly checkpointId: string;
+        readonly windowNumber: number;
+        readonly checkpointFactSequence: number;
+      }
+    | { readonly outcome: "stale" | "fence_lost" | "conflict" | "unavailable" }
+  >;
+}
+
+export interface ThreadContextBodyPersistencePort {
+  persist(input: {
+    readonly tenantId: TenantId;
+    readonly idempotencyKey: string;
+    readonly value: Readonly<Record<string, unknown>>;
+  }): Promise<ThreadContextBodyV1>;
 }
 
 export interface RecoveryMetricsPort {
@@ -599,6 +849,49 @@ export interface RecoveryMetricsPort {
     readonly registryId: string;
     readonly reason: RuntimeMutationResult["outcome"] | "cancelled" | "timeout" | "shutdown";
     readonly cleanupOutcome: "settled" | "unknown" | "failed";
+  }): Promise<void>;
+}
+
+export type ThreadContinuityMetricName =
+  | "thread_input_total"
+  | "steer_apply_latency_ms"
+  | "steer_to_follow_up_total"
+  | "follow_up_queue_depth"
+  | "follow_up_wait_ms"
+  | "thread_writer_conflict_total"
+  | "context_rebuild_latency_ms"
+  | "context_visible_tokens"
+  | "context_tokens_before_compaction"
+  | "context_tokens_after_compaction"
+  | "compaction_latency_ms"
+  | "compaction_total"
+  | "context_recovery_digest_mismatch_total"
+  | "context_window_number"
+  | "sandbox_handoff_total"
+  | "sandbox_resume_total"
+  | "sandbox_resume_latency_ms"
+  | "sandbox_create_latency_ms"
+  | "workspace_materialize_latency_ms"
+  | "sandbox_paused_seconds"
+  | "sandbox_snapshot_bytes"
+  | "sandbox_cold_rebuild_total"
+  | "sandbox_unknown_total"
+  | "sandbox_revision_mismatch_total"
+  | "sandbox_idle_running_seconds";
+
+/** 只接受低基数维度和数值；用户正文、Provider ID、token 不属于指标协议。 */
+export interface ThreadContinuityMetricsPort {
+  record(input: {
+    readonly tenantId: TenantId;
+    readonly threadId: ThreadId;
+    readonly runId?: RunId;
+    readonly observationId: string;
+    readonly metricName: ThreadContinuityMetricName;
+    readonly value: number;
+    readonly unit: "count" | "milliseconds" | "seconds" | "tokens" | "items" | "bytes";
+    readonly path?: "local" | "remote" | "resume" | "cold" | "handoff";
+    readonly outcome?: string;
+    readonly reason?: string;
   }): Promise<void>;
 }
 

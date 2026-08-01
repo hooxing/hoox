@@ -11,6 +11,12 @@ export type ThreadPath = Static<typeof ThreadPathSchema>;
 export const RunPathSchema = Type.Object({ threadId: IdSchema, runId: IdSchema }, strict);
 export type RunPath = Static<typeof RunPathSchema>;
 
+export const ThreadInputReceiptPathSchema = Type.Object(
+  { threadId: IdSchema, receiptId: Type.String({ minLength: 1, maxLength: 200 }) },
+  strict,
+);
+export type ThreadInputReceiptPath = Static<typeof ThreadInputReceiptPathSchema>;
+
 export const RunArtifactPathSchema = Type.Object(
   { threadId: IdSchema, runId: IdSchema, artifactId: IdSchema },
   strict,
@@ -40,6 +46,17 @@ export const RunEventListQuerySchema = Type.Object(
   strict,
 );
 export type RunEventListQuery = Static<typeof RunEventListQuerySchema>;
+
+export const ThreadContextListQuerySchema = Type.Object(
+  {
+    after: Type.Optional(
+      Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER, default: 0 }),
+    ),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 100 })),
+  },
+  strict,
+);
+export type ThreadContextListQuery = Static<typeof ThreadContextListQuerySchema>;
 
 export const ModelWireTraceListQuerySchema = Type.Object(
   {
@@ -79,6 +96,20 @@ export const CreateRunRequestSchema = Type.Object(
   strict,
 );
 export type CreateRunRequest = Static<typeof CreateRunRequestSchema>;
+
+export const CreateThreadInputRequestSchema = Type.Object(
+  {
+    input: Type.String({ minLength: 1, maxLength: MAX_RUN_INPUT_UTF8_BYTES }),
+    mode: Type.Union([Type.Literal("auto"), Type.Literal("steer"), Type.Literal("follow_up")]),
+    expectedRunId: Type.Optional(IdSchema),
+    expectedTurnId: Type.Optional(
+      Type.String({ pattern: "^turn-[1-9][0-9]{0,15}$", maxLength: 200 }),
+    ),
+    fallbackToFollowUp: Type.Optional(Type.Boolean({ default: false })),
+  },
+  strict,
+);
+export type CreateThreadInputRequest = Static<typeof CreateThreadInputRequestSchema>;
 
 export const ThreadListQuerySchema = Type.Object(
   {
@@ -126,11 +157,129 @@ export const RunEventPageDtoSchema = Type.Object(
 );
 export type RunEventPageDto = Static<typeof RunEventPageDtoSchema>;
 
+export const ThreadContextMessageDtoSchema = Type.Object(
+  {
+    sequence: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    runId: Type.Optional(IdSchema),
+    role: Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("runtime")]),
+    text: Type.String({ maxLength: 8 * 1024 * 1024 }),
+    createdAt: IsoTimestampSchema,
+  },
+  { ...strict, $id: "v1.ThreadContextMessageDto" },
+);
+export type ThreadContextMessageDto = Static<typeof ThreadContextMessageDtoSchema>;
+
+export const ThreadContextPageDtoSchema = Type.Object(
+  {
+    items: Type.Array(ThreadContextMessageDtoSchema, { maxItems: 500 }),
+    hasMore: Type.Boolean(),
+  },
+  { ...strict, $id: "v1.ThreadContextPageDto" },
+);
+export type ThreadContextPageDto = Static<typeof ThreadContextPageDtoSchema>;
+
+export const ThreadContinuityStatusDtoSchema = Type.Object(
+  {
+    boundary: Type.Union([
+      Type.Literal("new_thread"),
+      Type.Literal("legacy_anchor"),
+      Type.Literal("manual"),
+      Type.Literal("unmigrated"),
+    ]),
+    readMode: Type.Union([Type.Literal("legacy"), Type.Literal("v2")]),
+    anchorState: Type.Union([Type.Literal("none"), Type.Literal("completed")]),
+    queueDepth: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    contextSequence: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    compactionWindow: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    sandboxState: Type.Optional(
+      Type.Union([
+        Type.Literal("running"),
+        Type.Literal("pausing"),
+        Type.Literal("paused"),
+        Type.Literal("resuming"),
+        Type.Literal("terminated"),
+        Type.Literal("unknown"),
+      ]),
+    ),
+  },
+  { ...strict, $id: "v1.ThreadContinuityStatusDto" },
+);
+export type ThreadContinuityStatusDto = Static<typeof ThreadContinuityStatusDtoSchema>;
+
 export const ThreadRunPageDtoSchema = Type.Object(
   { items: Type.Array(RunDtoSchema, { maxItems: 100 }) },
   { ...strict, $id: "v1.ThreadRunPageDto" },
 );
 export type ThreadRunPageDto = Static<typeof ThreadRunPageDtoSchema>;
+
+const ThreadInputDispositionSchema = Type.Union([
+  Type.Literal("pending_steer"),
+  Type.Literal("steered"),
+  Type.Literal("queued"),
+  Type.Literal("cancelled"),
+  Type.Literal("rejected"),
+]);
+
+export const ThreadInputReceiptDtoSchema = Type.Object(
+  {
+    receiptId: Type.String({ minLength: 1, maxLength: 200 }),
+    inputSequence: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    requestedMode: Type.Union([
+      Type.Literal("auto"),
+      Type.Literal("steer"),
+      Type.Literal("follow_up"),
+    ]),
+    disposition: ThreadInputDispositionSchema,
+    targetRunId: Type.Optional(IdSchema),
+    targetTurnId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+    queuedRunId: Type.Optional(IdSchema),
+    queueSequence: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
+    appliedContextSequence: Type.Optional(
+      Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+    ),
+    rejectionCode: Type.Optional(
+      Type.Union([
+        Type.Literal("no_active_turn"),
+        Type.Literal("expected_run_mismatch"),
+        Type.Literal("expected_turn_mismatch"),
+        Type.Literal("unsupported_phase"),
+        Type.Literal("target_run_finished"),
+      ]),
+    ),
+    createdAt: IsoTimestampSchema,
+    updatedAt: IsoTimestampSchema,
+    events: Type.Array(
+      Type.Object(
+        {
+          sequence: Type.Integer({ minimum: 1, maximum: 32 }),
+          kind: Type.Union([Type.Literal("accepted"), Type.Literal("disposition_changed")]),
+          disposition: ThreadInputDispositionSchema,
+          targetRunId: Type.Optional(IdSchema),
+          targetTurnId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+          queuedRunId: Type.Optional(IdSchema),
+          queueSequence: Type.Optional(
+            Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+          ),
+          rejectionCode: Type.Optional(
+            Type.Union([
+              Type.Literal("no_active_turn"),
+              Type.Literal("expected_run_mismatch"),
+              Type.Literal("expected_turn_mismatch"),
+              Type.Literal("unsupported_phase"),
+              Type.Literal("target_run_finished"),
+            ]),
+          ),
+          createdAt: IsoTimestampSchema,
+        },
+        strict,
+      ),
+      { maxItems: 32 },
+    ),
+    queuedRun: Type.Optional(RunDtoSchema),
+  },
+  { ...strict, $id: "v1.ThreadInputReceiptDto" },
+);
+export type ThreadInputReceiptDto = Static<typeof ThreadInputReceiptDtoSchema>;
 
 const ArtifactDeliveryArtifactDtoSchema = Type.Object(ArtifactDtoSchema.properties, strict);
 
@@ -213,6 +362,15 @@ export const RunSuccessEnvelopeSchema = successEnvelopeSchema(RunDtoSchema);
 export const ThreadRunPageSuccessEnvelopeSchema = successEnvelopeSchema(ThreadRunPageDtoSchema);
 export const HealthSuccessEnvelopeSchema = successEnvelopeSchema(HealthDtoSchema);
 export const RunEventPageSuccessEnvelopeSchema = successEnvelopeSchema(RunEventPageDtoSchema);
+export const ThreadContextPageSuccessEnvelopeSchema = successEnvelopeSchema(
+  ThreadContextPageDtoSchema,
+);
+export const ThreadContinuityStatusSuccessEnvelopeSchema = successEnvelopeSchema(
+  ThreadContinuityStatusDtoSchema,
+);
+export const ThreadInputReceiptSuccessEnvelopeSchema = successEnvelopeSchema(
+  ThreadInputReceiptDtoSchema,
+);
 export const ArtifactListSuccessEnvelopeSchema = successEnvelopeSchema(ArtifactListDtoSchema);
 export const ArtifactDeliverySuccessEnvelopeSchema =
   successEnvelopeSchema(ArtifactDeliveryDtoSchema);

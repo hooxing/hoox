@@ -14,6 +14,10 @@ const mocks = vi.hoisted(() => {
       replayQueuedRun: vi.fn(),
       createQueuedRun: vi.fn(),
     },
+    threadInputs: { submit: vi.fn(), get: vi.fn() },
+    threadContext: vi.fn(() => ({})),
+    threadContinuity: {},
+    modelWireTraces: {},
     archiveThread: {},
     experience: {},
     probe: vi.fn(async () => undefined),
@@ -48,6 +52,7 @@ function productionEnvironment(): Record<string, string> {
     DATABASE_RUNTIME_ROLE: "runtime",
     THREAD_CURSOR_ACTIVE_KID: "current",
     THREAD_CURSOR_SIGNING_KEYS: "current:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    THREAD_SERIAL_QUEUE_V2_ENABLED: "true",
     API_JWT_ISSUER: "https://issuer.example.invalid/runtime",
     API_JWT_AUDIENCE: "cube-runtime-api",
     API_JWT_SIGNING_KEYS: "current-key:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -83,6 +88,7 @@ describe("生产 API 默认装配", () => {
         schema: "runtime",
         expectedRuntimeRole: "runtime",
         applicationName: "cube-runtime-api-production",
+        serialQueueV2Enabled: true,
       });
       expect(mocks.createS3BlobStore).toHaveBeenCalledWith(
         expect.objectContaining({

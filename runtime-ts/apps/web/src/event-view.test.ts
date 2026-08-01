@@ -53,6 +53,34 @@ describe("用户运行进度投影", () => {
     expect(progress.finalMessage).toBe("你好 世界\n\n- 第一项\n- 第二项");
   });
 
+  it("聚合思考流，并在 thinking_end 后切换为已完成状态", () => {
+    const running = buildRunProgress([
+      event(1, "thinking.started", {}),
+      event(2, "thinking.delta", { delta: "先检查" }),
+      event(3, "thinking.delta", { delta: "依赖。" }),
+    ]);
+    const completed = buildRunProgress([
+      event(1, "thinking.started", {}),
+      event(2, "thinking.delta", { delta: "先检查依赖。" }),
+      event(3, "thinking.completed", {}),
+      event(4, "tool.started", { name: "exec_command", callId: "call-thinking" }),
+    ]);
+
+    expect(running.thinking).toEqual({ text: "先检查依赖。", status: "running" });
+    expect(running.currentAction).toBe("正在思考…");
+    expect(completed.thinking).toEqual({ text: "先检查依赖。", status: "completed" });
+    expect(completed.currentAction).toBe("正在执行代码…");
+  });
+
+  it("以 message.completed 兼容关闭缺少 thinking_end 的思考流", () => {
+    const progress = buildRunProgress([
+      event(1, "thinking.delta", { delta: "兼容推理内容" }),
+      event(2, "message.completed", { stopReason: "toolUse" }),
+    ]);
+
+    expect(progress.thinking).toEqual({ text: "兼容推理内容", status: "completed" });
+  });
+
   it("保留独立空格、空行与代码围栏边界片段", () => {
     const progress = buildRunProgress([
       event(1, "message.delta", { delta: "正文" }),

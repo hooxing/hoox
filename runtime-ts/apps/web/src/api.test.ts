@@ -44,6 +44,64 @@ describe("RuntimeApi", () => {
     expect(headers.get("idempotency-key")).toMatch(/^[-a-z0-9]{8,}$/iu);
   });
 
+  it("统一输入发送 auto/expected Run，并在入口关闭时回退 legacy follow-up", async () => {
+    const receipt = {
+      receiptId: "input-1",
+      inputSequence: 2,
+      requestedMode: "auto",
+      disposition: "pending_steer",
+      targetRunId: "run_1",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ version: "v1", requestId: "req", data: receipt }), {
+        status: 200,
+      }),
+    );
+    const api = new RuntimeApi(fetcher);
+    await expect(api.submitThreadInput("thread_1", "只改配色", "auto", "run_1")).resolves.toEqual(
+      receipt,
+    );
+    const requestInit = fetcher.mock.calls[0]?.[1] as RequestInit | undefined;
+    expect(requestInit).toBeDefined();
+    expect(JSON.parse(String(requestInit?.body))).toEqual({
+      input: "只改配色",
+      mode: "auto",
+      expectedRunId: "run_1",
+    });
+
+    const fallbackFetcher = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: {} }), { status: 404 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            version: "v1",
+            requestId: "req",
+            data: {
+              id: "run_2",
+              threadId: "thread_1",
+              status: "queued",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+    const fallback = await new RuntimeApi(fallbackFetcher).submitThreadInput(
+      "thread_1",
+      "下一任务",
+    );
+    expect(fallback).toMatchObject({
+      requestedMode: "follow_up",
+      disposition: "queued",
+      queuedRunId: "run_2",
+    });
+    expect(fallbackFetcher.mock.calls[1]?.[0]).toBe("/api/v1/threads/thread_1/runs");
+  });
+
   it("恢复读取走 Thread 嵌套的最新 Run 快照接口", async () => {
     const fetcher = vi
       .fn()
@@ -155,6 +213,95 @@ describe("RuntimeApi", () => {
       attemptId: "attempt_2",
       items: [{ eventId: "event-1", type: "message.delta" }],
     });
+  });
+
+  it("Thread Context 跨页读取且旧 API 404 时回到旧投影", async () => {
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            version: "v1",
+            requestId: "req_1",
+            data: {
+              items: [
+                {
+                  sequence: 1,
+                  runId: "run_a",
+                  role: "user",
+                  text: "A",
+                  createdAt: "2026-07-31T00:00:00.000Z",
+                },
+              ],
+              hasMore: true,
+            },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            version: "v1",
+            requestId: "req_2",
+            data: {
+              items: [
+                {
+                  sequence: 2,
+                  runId: "run_a",
+                  role: "assistant",
+                  text: "B",
+                  createdAt: "2026-07-31T00:00:01.000Z",
+                },
+              ],
+              hasMore: false,
+            },
+          }),
+        ),
+      );
+    const api = new RuntimeApi(fetcher);
+    await expect(api.listThreadContext("thread_1")).resolves.toMatchObject([
+      { sequence: 1, text: "A" },
+      { sequence: 2, text: "B" },
+    ]);
+    expect(fetcher.mock.calls[1]?.[0]).toBe("/api/v1/threads/thread_1/context?after=1&limit=500");
+
+    const legacy = new RuntimeApi(
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ error: { message: "不存在" } }), { status: 404 }),
+        ),
+    );
+    await expect(legacy.listThreadContext("thread_1")).resolves.toBeUndefined();
+  });
+
+  it("读取连续性状态，并在独立开关关闭时兼容 404", async () => {
+    const status = {
+      boundary: "legacy_anchor",
+      readMode: "v2",
+      anchorState: "completed",
+      queueDepth: 2,
+      contextSequence: 17,
+      compactionWindow: 3,
+      sandboxState: "resuming",
+    } as const;
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ version: "v1", requestId: "req_1", data: status }), {
+        status: 200,
+      }),
+    );
+    const api = new RuntimeApi(fetcher);
+    await expect(api.getThreadContinuity("thread/1")).resolves.toEqual(status);
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/api/v1/threads/thread%2F1/continuity");
+
+    const disabled = new RuntimeApi(
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response(JSON.stringify({ error: { message: "不存在" } }), { status: 404 }),
+        ),
+    );
+    await expect(disabled.getThreadContinuity("thread_1")).resolves.toBeUndefined();
   });
 
   it("读取模型网络诊断元数据并保留轮次、重试与采集错误", async () => {

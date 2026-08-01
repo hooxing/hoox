@@ -15,7 +15,13 @@ import type {
   TenantScope,
   ThreadListCursor,
 } from "@cube-runtime/persistence";
-import type { RunDto, ThreadDto, ThreadPageDto } from "@cube-runtime/protocol";
+import type {
+  CreateThreadInputRequest,
+  RunDto,
+  ThreadDto,
+  ThreadInputReceiptDto,
+  ThreadPageDto,
+} from "@cube-runtime/protocol";
 import { MAX_RUN_INPUT_UTF8_BYTES } from "@cube-runtime/protocol";
 import { toRunDto, toThreadDto } from "@cube-runtime/protocol-mapper";
 import type { ApiCreateCapability } from "./capabilities.js";
@@ -238,6 +244,7 @@ export class ApiService {
         idempotency,
       });
       if (replay.outcome === "key_conflict") throw new ApiFailure("conflict");
+      if (replay.outcome === "legacy_drain_required") throw new ApiFailure("invalid_state");
       if (replay.outcome === "not_authorized") throw new ApiFailure("not_found");
       if (replay.outcome === "created" || replay.outcome === "replayed") {
         return toRunDto(replay.entity);
@@ -255,12 +262,107 @@ export class ApiService {
         idempotency,
       });
       if (result.outcome === "key_conflict") throw new ApiFailure("conflict");
+      if (result.outcome === "legacy_drain_required") throw new ApiFailure("invalid_state");
       if (result.outcome === "parent_inactive") throw new ApiFailure("invalid_state");
       if (result.outcome === "not_authorized") throw new ApiFailure("not_found");
       return toRunDto(result.entity);
     } catch (error) {
       return mapDomainFailure(error);
     }
+  }
+
+  async submitThreadInput(
+    auth: AuthContext,
+    rawThreadId: string,
+    input: CreateThreadInputRequest,
+    idempotencyKey: string,
+  ): Promise<ThreadInputReceiptDto> {
+    try {
+      const routing = this.dependencies.createCapability?.threadInputs;
+      if (routing === undefined) throw new ApiFailure("not_found");
+      if (
+        input.input.trim().length === 0 ||
+        Buffer.byteLength(input.input, "utf8") > MAX_RUN_INPUT_UTF8_BYTES
+      ) {
+        throw new ApiFailure("bad_request");
+      }
+      const thread = await this.dependencies.repositories.threads.get(
+        auth.scope,
+        threadId(rawThreadId),
+      );
+      if (thread === undefined) throw new ApiFailure("not_found");
+      const fallbackRun = createRun({
+        id: this.dependencies.ids.run(),
+        thread: thread.entity,
+        now: this.dependencies.clock.now(),
+      });
+      const result = await routing.submit({
+        scope: auth.scope,
+        thread: thread.entity,
+        fallbackRun,
+        inputText: input.input,
+        mode: input.mode,
+        ...(input.expectedRunId === undefined ? {} : { expectedRunId: input.expectedRunId }),
+        ...(input.expectedTurnId === undefined ? {} : { expectedTurnId: input.expectedTurnId }),
+        fallbackToFollowUp: input.fallbackToFollowUp ?? false,
+        idempotency: {
+          key: idempotencyKey,
+          requestHash: commandHash("thread.input", {
+            threadId: thread.entity.id,
+            input: input.input,
+            mode: input.mode,
+            expectedRunId: input.expectedRunId ?? null,
+            expectedTurnId: input.expectedTurnId ?? null,
+            fallbackToFollowUp: input.fallbackToFollowUp ?? false,
+          }),
+        },
+      });
+      if (result.outcome === "key_conflict") throw new ApiFailure("conflict");
+      if (result.outcome === "legacy_drain_required") throw new ApiFailure("invalid_state");
+      if (result.outcome === "parent_inactive") throw new ApiFailure("invalid_state");
+      if (result.outcome === "not_authorized") throw new ApiFailure("not_found");
+      if (result.outcome !== "accepted" && result.outcome !== "replayed") {
+        throw new ApiFailure("internal");
+      }
+      return {
+        ...result.receipt,
+        events: result.receipt.events.map((event) => ({ ...event })),
+        ...(result.queuedRun === undefined ? {} : { queuedRun: toRunDto(result.queuedRun) }),
+      };
+    } catch (error) {
+      return mapDomainFailure(error);
+    }
+  }
+
+  async getThreadInputReceipt(
+    auth: AuthContext,
+    rawThreadId: string,
+    receiptId: string,
+  ): Promise<ThreadInputReceiptDto> {
+    const routing = this.dependencies.createCapability?.threadInputs;
+    if (routing === undefined) throw new ApiFailure("not_found");
+    const receipt = await routing.get({
+      scope: auth.scope,
+      threadId: threadId(rawThreadId),
+      receiptId,
+    });
+    if (receipt === undefined) throw new ApiFailure("not_found");
+    let queuedRun: RunDto | undefined;
+    if (receipt.queuedRunId !== undefined) {
+      const run = await this.dependencies.repositories.runs.get(
+        auth.scope,
+        runId(receipt.queuedRunId),
+      );
+      if (run === undefined || run.entity.threadId !== threadId(rawThreadId)) {
+        throw new ApiFailure("not_found");
+      }
+      queuedRun = toRunDto(run.entity);
+    }
+    return {
+      ...receipt,
+      events: receipt.events.map((event) => ({ ...event })),
+      ...(queuedRun === undefined ? {} : { queuedRun }),
+    };
   }
 
   async getRun(auth: AuthContext, rawThreadId: string, rawRunId: string): Promise<RunDto> {

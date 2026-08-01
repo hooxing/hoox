@@ -10,6 +10,9 @@ export type UserFacingStep = {
 export type RunProgress = {
   readonly currentAction: string;
   readonly steps: readonly UserFacingStep[];
+  readonly thinking:
+    | { readonly text: string; readonly status: "running" | "completed" }
+    | undefined;
   readonly finalMessage: string | undefined;
   readonly waitingQuestion: string | undefined;
 };
@@ -67,13 +70,46 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
   const byTool = new Map<string, number>();
   const steps: UserFacingStep[] = [];
   const messageDeltas: string[] = [];
+  const thinkingBlocks: string[] = [];
+  let activeThinkingBlock = -1;
+  let thinkingActive = false;
   let waitingQuestion: string | undefined;
 
   for (const event of events) {
+    if (event.type === "thinking.started") {
+      thinkingBlocks.push("");
+      activeThinkingBlock = thinkingBlocks.length - 1;
+      thinkingActive = true;
+      continue;
+    }
+    if (event.type === "thinking.delta") {
+      const delta = object(event.payload)?.delta;
+      if (typeof delta === "string") {
+        if (activeThinkingBlock < 0 || !thinkingActive) {
+          thinkingBlocks.push("");
+          activeThinkingBlock = thinkingBlocks.length - 1;
+        }
+        thinkingBlocks[activeThinkingBlock] =
+          `${thinkingBlocks[activeThinkingBlock] ?? ""}${delta}`;
+        thinkingActive = true;
+      }
+      continue;
+    }
+    if (event.type === "thinking.completed") {
+      thinkingActive = false;
+      activeThinkingBlock = -1;
+      continue;
+    }
     if (event.type === "message.delta") {
       const delta = object(event.payload)?.delta;
       // 每个字符串片段（包括独立空格和换行）都是 Markdown 结构的一部分。
       if (typeof delta === "string") messageDeltas.push(delta);
+      continue;
+    }
+    if (event.type === "message.completed") {
+      // 兼容缺少 thinking_end 的 Provider：assistant message 结束即视为本轮思考结束。
+      thinkingActive = false;
+      activeThinkingBlock = -1;
       continue;
     }
     if (event.type === "run_waiting") {
@@ -115,9 +151,17 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
   }
   const active = [...compacted].reverse().find((step) => step.status === "running");
   const finalMessage = messageDeltas.join("");
+  const thinkingText = thinkingBlocks.filter((block) => block.length > 0).join("\n\n");
   return {
-    currentAction: active?.label ?? compacted.at(-1)?.label ?? "正在准备任务…",
+    currentAction:
+      thinkingActive === true
+        ? "正在思考…"
+        : (active?.label ?? compacted.at(-1)?.label ?? "正在准备任务…"),
     steps: compacted,
+    thinking:
+      thinkingText.length === 0
+        ? undefined
+        : { text: thinkingText, status: thinkingActive ? "running" : "completed" },
     finalMessage: messageDeltas.length > 0 ? finalMessage : undefined,
     waitingQuestion:
       waitingQuestion !== undefined &&

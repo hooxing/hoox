@@ -12,6 +12,24 @@ describe("production 部署配置契约", () => {
     expect(expectedProductionEnvironmentKeys).not.toContain("DEV_AUTH_ENABLED");
     expect(expectedProductionEnvironmentKeys).toEqual(
       expect.arrayContaining([
+        "THREAD_SERIAL_QUEUE_V2_ENABLED",
+        "THREAD_CONTEXT_V2_WRITE_ENABLED",
+        "THREAD_CONTEXT_V2_SHADOW_READ_ENABLED",
+        "THREAD_CONTEXT_V2_READ_ENABLED",
+        "THREAD_INPUT_ROUTING_V2_ENABLED",
+        "THREAD_CONTEXT_INLINE_BODY_MAX_BYTES",
+        "THREAD_CONTEXT_COMPACTION_ENABLED",
+        "THREAD_CONTEXT_COMPACTION_PATH",
+        "THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT",
+        "THREAD_CONTEXT_COMPACTION_TARGET_PERCENT",
+        "THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS",
+        "THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS",
+        "THREAD_CONTEXT_COMPACTION_TIMEOUT_MS",
+        "THREAD_SANDBOX_SESSION_REUSE_ENABLED",
+        "THREAD_SANDBOX_RETENTION_SCHEDULER_ENABLED",
+        "CUBESANDBOX_SESSION_TTL_SECONDS",
+        "THREAD_SANDBOX_PAUSED_RETENTION_SECONDS",
+        "THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS",
         "MODEL_WIRE_TRACE_ENABLED",
         "MODEL_WIRE_TRACE_RETENTION_DAYS",
         "MODEL_WIRE_TRACE_MAX_BYTES",
@@ -27,6 +45,16 @@ describe("production 部署配置契约", () => {
     );
     expect(validateProductionEnvironmentExample(enabled)).toContain(
       "生产样例 MODEL_WIRE_TRACE_ENABLED 必须为 false",
+    );
+  });
+
+  it("生产样例默认开启 Thread 连续性能力", () => {
+    const disabled = example.replace(
+      "THREAD_SERIAL_QUEUE_V2_ENABLED=true",
+      "THREAD_SERIAL_QUEUE_V2_ENABLED=false",
+    );
+    expect(validateProductionEnvironmentExample(disabled)).toContain(
+      "生产样例 THREAD_SERIAL_QUEUE_V2_ENABLED 必须为 true",
     );
   });
 

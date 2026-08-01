@@ -66,6 +66,7 @@ describe("开发 OpenAI-compatible Provider", () => {
                 index: 0,
                 delta: {
                   role: "assistant",
+                  reasoning_content: "先检查 Sandbox 目录",
                   tool_calls: [
                     {
                       index: 0,
@@ -144,9 +145,12 @@ describe("开发 OpenAI-compatible Provider", () => {
 
       expect(eventTypes).toEqual([
         "start",
+        "thinking_start",
+        "thinking_delta",
         "toolcall_start",
         "toolcall_delta",
         "toolcall_delta",
+        "thinking_end",
         "toolcall_end",
         "done",
       ]);
@@ -154,6 +158,11 @@ describe("开发 OpenAI-compatible Provider", () => {
         api: "openai-completions",
         stopReason: "toolUse",
         content: [
+          {
+            type: "thinking",
+            thinking: "先检查 Sandbox 目录",
+            thinkingSignature: "reasoning_content",
+          },
           {
             type: "toolCall",
             id: "call-sandbox-command",

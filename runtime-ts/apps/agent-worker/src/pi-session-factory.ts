@@ -11,11 +11,13 @@ import {
 import { sha256Digest } from "@cube-runtime/domain";
 import {
   bindTrustedPiModelContextCapability,
+  assessSafePiSessionContext,
   ContextBudgetAdmissionError,
   type ControlledRolloutProjection,
   createSafePiSession,
   deriveSafePiSessionCompatibility,
   type PiSessionController,
+  type ThreadActiveHistoryV1,
 } from "@cube-runtime/pi-adapter";
 import type { DeliverFileToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
@@ -55,6 +57,16 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     ) => Promise<ControlledRolloutProjection | undefined>,
     private readonly modelWireTraces?: ModelWireTraceSession,
     private readonly deliverFileTools?: DeliverFileToolRouterFactoryPort,
+    private readonly prepareThreadHistory?: (
+      input: Parameters<AgentSessionFactoryPort["create"]>[0],
+      compatibility: ReturnType<typeof deriveSafePiSessionCompatibility>,
+    ) => Promise<ThreadActiveHistoryV1 | undefined>,
+    private readonly prepareRuntimeCompaction?: (
+      input: Parameters<AgentSessionFactoryPort["create"]>[0],
+      compatibility: ReturnType<typeof deriveSafePiSessionCompatibility>,
+      history: ThreadActiveHistoryV1,
+      availableHistoryTokens: number,
+    ) => Promise<ThreadActiveHistoryV1>,
   ) {
     this.modelContext = bindTrustedPiModelContextCapability(modelRuntime, model);
   }
@@ -63,6 +75,33 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     input: Parameters<AgentSessionFactoryPort["create"]>[0],
   ): Promise<WorkerAgentSessionPort> {
     const attemptWireTraces = this.modelWireTraces?.createAttempt();
+    const runRuntimeCompaction = async (
+      targetInput: Parameters<AgentSessionFactoryPort["create"]>[0],
+      compatibility: ReturnType<typeof deriveSafePiSessionCompatibility>,
+      history: ThreadActiveHistoryV1,
+      availableHistoryTokens: number,
+    ) => {
+      const invoke = () =>
+        this.prepareRuntimeCompaction?.(
+          targetInput,
+          compatibility,
+          history,
+          availableHistoryTokens,
+        );
+      const result =
+        attemptWireTraces === undefined
+          ? await invoke()
+          : await attemptWireTraces.run(
+              {
+                tenantId: input.scope.tenantId,
+                threadId: input.scope.threadId,
+                runId: input.scope.runId,
+                attemptId: input.attemptId,
+              },
+              invoke,
+            );
+      return result ?? history;
+    };
     const startedToolCalls = new Map<string, string>();
     const invalidToolCalls = new Set<string>();
     const effectAuthorizationRequested = new Set<string>();
@@ -221,9 +260,69 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       }),
     });
     const recoveredProjection = await this.prepareObservationSession?.(input, compatibility);
+    const activeRolloutProjection = recoveredProjection ?? input.rolloutProjection;
+    const baselineBudget = assessSafePiSessionContext({
+      ...sessionMaterial,
+      rolloutProjection: activeRolloutProjection,
+    });
+    if (baselineBudget.outcome !== "ready") {
+      throw new ContextBudgetAdmissionError("reserved_context_exceeds_window");
+    }
+    const availableThreadHistoryTokens =
+      baselineBudget.policy.availableHistoryTokens - baselineBudget.activeEntryTokens;
+    if (availableThreadHistoryTokens < 1) {
+      throw new ContextBudgetAdmissionError("reserved_context_exceeds_window");
+    }
+    const recoveredThreadHistory =
+      input.threadActiveHistory ?? (await this.prepareThreadHistory?.(input, compatibility));
+    const initialThreadHistory =
+      recoveredThreadHistory === undefined || this.prepareRuntimeCompaction === undefined
+        ? recoveredThreadHistory
+        : await runRuntimeCompaction(
+            input,
+            compatibility,
+            recoveredThreadHistory,
+            availableThreadHistoryTokens,
+          );
     controller = await createSafePiSession({
       ...sessionMaterial,
-      rolloutProjection: recoveredProjection ?? input.rolloutProjection,
+      rolloutProjection: activeRolloutProjection,
+      ...(initialThreadHistory === undefined ? {} : { threadActiveHistory: initialThreadHistory }),
+      ...(input.onTurnSafePoint === undefined
+        ? {}
+        : {
+            prepareNextTurnHistory: async (
+              event: Extract<
+                import("@cube-runtime/pi-adapter").RuntimeAgentEvent,
+                { type: "turn.completed" }
+              >,
+            ) => {
+              const persisted = await input.onTurnSafePoint?.(event);
+              if (persisted === undefined) return undefined;
+              let replacement: ThreadActiveHistoryV1 | undefined;
+              if (this.prepareThreadHistory !== undefined) {
+                const nextInput = { ...input, contextThroughSequence: persisted.throughSequence };
+                const rebuilt = await this.prepareThreadHistory(nextInput, compatibility);
+                if (rebuilt === undefined) throw new Error("Thread Context 安全点重建失败");
+                replacement =
+                  this.prepareRuntimeCompaction === undefined
+                    ? rebuilt
+                    : await runRuntimeCompaction(
+                        nextInput,
+                        compatibility,
+                        rebuilt,
+                        availableThreadHistoryTokens,
+                      );
+              }
+              if (persisted.steer !== undefined) {
+                if (controller === undefined) throw new Error("Pi Session steer 安全点尚未就绪");
+                // 有 replacement 时它截止到 assistant/tool turn；无重建器时也必须把已持久消费的
+                // steer 送入 Pi 原生队列，不能因可选的上下文投影能力关闭而丢失用户输入。
+                await controller.steer(persisted.steer.inputText);
+              }
+              return replacement;
+            },
+          }),
     });
     try {
       // Pi 构造可能执行异步初始化；返回可用 Session 前再次以同一 fence 进入 PG，关闭接管竞态窗口。
@@ -282,6 +381,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         }
         return { kind: "completed" };
       },
+      steer: (text) => controller.steer(text),
       abort: () => controller.abort(),
       drainRejectedToolReceipts: async () => {
         while (rejectedToolReceipts.size > 0) {

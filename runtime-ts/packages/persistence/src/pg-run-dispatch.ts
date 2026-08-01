@@ -3,16 +3,16 @@ import { isoTimestamp, type Run, rehydrateRun } from "@cube-runtime/domain";
 import { rolloutProjectionDigest } from "@cube-runtime/run-contracts/mutation-protocol";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
-import type { EnqueueOutboxPort, IdempotentCreateResult } from "./ports.js";
+import type { EnqueueOutboxPort, IdempotentRunEnqueueResult } from "./ports.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
+import {
+  enqueueThreadFollowUp,
+  LegacyRunDrainRequiredError,
+  legacyInitialProjection,
+} from "./pg-thread-run-queue.js";
 
 const maxInputBytes = 1_048_576;
-const initialProjection = Object.freeze({
-  schemaVersion: 2 as const,
-  checkpointId: "initial",
-  items: Object.freeze([]),
-});
-const initialProjectionDigest = rolloutProjectionDigest(initialProjection);
+const legacyInitialProjectionDigest = rolloutProjectionDigest(legacyInitialProjection);
 const maxOutboxLeaseMilliseconds = 300_000;
 const maxOutboxRetryMilliseconds = 86_400_000;
 
@@ -58,11 +58,14 @@ function restoreRun(row: QueryResultRow, thread: Parameters<typeof rehydrateRun>
 export interface PgRunDispatchCreationOptions {
   /** 故障测试可模拟 COMMIT 成功但客户端没有获得响应；实现会按幂等键读回。 */
   readonly afterCommit?: (operation: "create_run") => void | Promise<void>;
+  /** 默认关闭；关闭只影响新入口，Worker 仍会 drain 已经接受的 V2 queue item。 */
+  readonly serialQueueV2Enabled?: boolean;
 }
 
 /**
- * API 的唯一生产 CreateRun capability。Membership→Thread→Workspace 为固定锁序；
- * Run、不可变输入、Outbox 与幂等记录在同一事务提交，绝不由 API 拼接多次写入。
+ * API 的唯一生产 CreateRun capability。V2 的固定锁序是 Membership→Thread→execution
+ * head→Workspace；Run、receipt、queue、可选的队首激活与幂等记录在同一事务提交。
+ * 开关关闭且 Thread 没有 V2 事实时保留既有“创建即绑定/dispatch”兼容路径。
  */
 export class PgRunDispatchCreation implements EnqueueOutboxPort {
   constructor(
@@ -72,7 +75,7 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
 
   async createQueuedRun(
     input: Parameters<EnqueueOutboxPort["createQueuedRun"]>[0],
-  ): Promise<IdempotentCreateResult<Run>> {
+  ): Promise<IdempotentRunEnqueueResult<Run>> {
     if (
       input.scope.tenantId !== input.run.tenantId ||
       input.thread.id !== input.run.threadId ||
@@ -104,18 +107,15 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
           [input.scope.tenantId, input.run.threadId],
         );
         if (thread.rows[0]?.status !== "active") return { outcome: "parent_inactive" } as const;
-
-        // 读取并锁定原始 head，后续 Worker 只能依据已持久化的 base_revision_id 执行。
-        const workspace = await client.query<{
-          readonly id: string;
-          readonly current_revision_id: string | null;
-        }>(
-          `SELECT id,current_revision_id FROM workspaces
-            WHERE tenant_id=$1 AND thread_id=$2 FOR UPDATE`,
-          [input.scope.tenantId, input.run.threadId],
-        );
-        const workspaceRow = workspace.rows[0];
-        if (workspaceRow === undefined) return { outcome: "parent_inactive" } as const;
+        if (this.options.serialQueueV2Enabled !== true) {
+          const v2Thread = await client.query(
+            `SELECT 1 FROM thread_follow_up_queue
+              WHERE tenant_id=$1 AND thread_id=$2 LIMIT 1`,
+            [input.scope.tenantId, input.run.threadId],
+          );
+          // 回退不能在已有 V2 顺序事实的 Thread 上重新打开并行旧入口。
+          if (v2Thread.rowCount !== 0) return { outcome: "legacy_drain_required" } as const;
+        }
 
         const run = await client.query<QueryResultRow>(
           `INSERT INTO runs(tenant_id,id,thread_id,status,created_at,updated_at)
@@ -126,36 +126,59 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
         );
         const runRow = run.rows[0];
         if (runRow === undefined) throw new TypeError("创建 Run 未返回数据");
-        await client.query(
-          `INSERT INTO run_execution_inputs(
-             tenant_id,run_id,thread_id,workspace_id,root_run_id,base_revision_id,
-             input_text,initial_projection,initial_projection_digest
-           ) VALUES ($1,$2,$3,$4,$2,$5,$6,$7::jsonb,$8)`,
-          [
-            input.scope.tenantId,
-            input.run.id,
-            input.run.threadId,
-            workspaceRow.id,
-            workspaceRow.current_revision_id,
-            input.inputText,
-            JSON.stringify(initialProjection),
-            initialProjectionDigest,
-          ],
-        );
-        await client.query(
-          `INSERT INTO run_dispatch_outbox(
-             tenant_id,outbox_id,run_id,thread_id,workspace_id,root_run_id,
-             input_digest,state
-           ) VALUES ($1,$2,$3,$4,$5,$3,$6,'ready')`,
-          [
-            input.scope.tenantId,
-            randomUUID(),
-            input.run.id,
-            input.run.threadId,
-            workspaceRow.id,
-            digest,
-          ],
-        );
+        if (this.options.serialQueueV2Enabled === true) {
+          await enqueueThreadFollowUp(client, {
+            tenantId: input.scope.tenantId,
+            threadId: input.run.threadId,
+            runId: input.run.id,
+            clientRequestId: input.idempotency.key,
+            requestDigest: input.idempotency.requestHash,
+            inputText: input.inputText,
+            inputDigest: digest,
+          });
+        } else {
+          // 兼容路径仍在创建时绑定 base；V2 开启后只由激活事务执行下面两项写入。
+          const workspace = await client.query<{
+            readonly id: string;
+            readonly current_revision_id: string | null;
+          }>(
+            `SELECT id,current_revision_id FROM workspaces
+              WHERE tenant_id=$1 AND thread_id=$2 FOR UPDATE`,
+            [input.scope.tenantId, input.run.threadId],
+          );
+          const workspaceRow = workspace.rows[0];
+          if (workspaceRow === undefined) return { outcome: "parent_inactive" } as const;
+          await client.query(
+            `INSERT INTO run_execution_inputs(
+               tenant_id,run_id,thread_id,workspace_id,root_run_id,base_revision_id,
+               input_text,initial_projection,initial_projection_digest
+             ) VALUES ($1,$2,$3,$4,$2,$5,$6,$7::jsonb,$8)`,
+            [
+              input.scope.tenantId,
+              input.run.id,
+              input.run.threadId,
+              workspaceRow.id,
+              workspaceRow.current_revision_id,
+              input.inputText,
+              JSON.stringify(legacyInitialProjection),
+              legacyInitialProjectionDigest,
+            ],
+          );
+          await client.query(
+            `INSERT INTO run_dispatch_outbox(
+               tenant_id,outbox_id,run_id,thread_id,workspace_id,root_run_id,
+               input_digest,state
+             ) VALUES ($1,$2,$3,$4,$5,$3,$6,'ready')`,
+            [
+              input.scope.tenantId,
+              randomUUID(),
+              input.run.id,
+              input.run.threadId,
+              workspaceRow.id,
+              digest,
+            ],
+          );
+        }
         await client.query(
           `INSERT INTO api_idempotency_records(tenant_id,user_id,operation,idempotency_key,request_hash,run_id)
            VALUES ($1,$2,'run.create',$3,$4,$5)`,
@@ -173,6 +196,9 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
       await this.options.afterCommit?.("create_run");
       return result;
     } catch (error) {
+      if (error instanceof LegacyRunDrainRequiredError) {
+        return { outcome: "legacy_drain_required" };
+      }
       // 已离开事务后连接断开与测试注入的响应丢失都不能重写；只按原键读回。
       if (error instanceof TransactionCommitUnknownError || committed) {
         const replay = await this.readReplay(input);
@@ -184,7 +210,7 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
 
   async replayQueuedRun(
     input: Parameters<EnqueueOutboxPort["replayQueuedRun"]>[0],
-  ): Promise<IdempotentCreateResult<Run> | { readonly outcome: "not_found" }> {
+  ): Promise<IdempotentRunEnqueueResult<Run> | { readonly outcome: "not_found" }> {
     try {
       return await withTenantTransaction(this.pool, input.scope, async (client) => {
         const membership = await client.query<{ readonly status: string }>(
@@ -206,7 +232,9 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
     input: Parameters<EnqueueOutboxPort["createQueuedRun"]>[0],
   ): Promise<void> {
     await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [
-      `${input.scope.tenantId}\u001f${input.scope.userId}\u001frun.create\u001f${input.idempotency.key}`,
+      this.options.serialQueueV2Enabled === true
+        ? `${input.scope.tenantId}\u001f${input.thread.id}\u001ffollow_up\u001f${input.idempotency.key}`
+        : `${input.scope.tenantId}\u001f${input.scope.userId}\u001frun.create\u001f${input.idempotency.key}`,
     ]);
   }
 
@@ -216,14 +244,37 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
       Parameters<EnqueueOutboxPort["createQueuedRun"]>[0],
       "scope" | "thread" | "idempotency"
     >,
-  ): Promise<IdempotentCreateResult<Run> | undefined> {
+  ): Promise<IdempotentRunEnqueueResult<Run> | undefined> {
     const record = await client.query<QueryResultRow>(
       `SELECT request_hash,run_id FROM api_idempotency_records
         WHERE tenant_id=$1 AND user_id=$2 AND operation='run.create' AND idempotency_key=$3`,
       [input.scope.tenantId, input.scope.userId, input.idempotency.key],
     );
     const row = record.rows[0];
-    if (row === undefined) return undefined;
+    if (row === undefined) {
+      const receipt = await client.query<{
+        readonly request_digest: string;
+        readonly queued_run_id: string;
+      }>(
+        `SELECT request_digest,queued_run_id FROM thread_input_receipts
+          WHERE tenant_id=$1 AND thread_id=$2 AND client_request_id=$3`,
+        [input.scope.tenantId, input.thread.id, input.idempotency.key],
+      );
+      const receiptRow = receipt.rows[0];
+      if (receiptRow === undefined) return undefined;
+      if (receiptRow.request_digest !== input.idempotency.requestHash) {
+        return { outcome: "key_conflict" };
+      }
+      const run = await client.query<QueryResultRow>(
+        `SELECT id AS run_id,tenant_id,thread_id,status AS run_status,
+                created_at AS run_created_at,updated_at AS run_updated_at
+           FROM runs WHERE tenant_id=$1 AND id=$2`,
+        [input.scope.tenantId, receiptRow.queued_run_id],
+      );
+      const runRow = run.rows[0];
+      if (runRow === undefined) throw new TypeError("输入 receipt 缺少 Run");
+      return { outcome: "replayed", entity: restoreRun(runRow, input.thread) };
+    }
     if (row.request_hash !== input.idempotency.requestHash) return { outcome: "key_conflict" };
     const run = await client.query<QueryResultRow>(
       `SELECT id AS run_id,tenant_id,thread_id,status AS run_status,
@@ -238,7 +289,7 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
 
   private async readReplay(
     input: Parameters<EnqueueOutboxPort["createQueuedRun"]>[0],
-  ): Promise<IdempotentCreateResult<Run> | undefined> {
+  ): Promise<IdempotentRunEnqueueResult<Run> | undefined> {
     return withTenantTransaction(this.pool, input.scope, (client) =>
       this.readIdempotency(client, input),
     );
@@ -287,10 +338,16 @@ export class PgRunDispatchOutbox {
            FROM run_dispatch_outbox AS outbox
            JOIN run_execution_inputs AS input
              ON input.tenant_id=outbox.tenant_id AND input.run_id=outbox.run_id
+          LEFT JOIN thread_follow_up_queue queue
+            ON queue.tenant_id=outbox.tenant_id AND queue.thread_id=outbox.thread_id
+           AND queue.run_id=outbox.run_id
+          LEFT JOIN thread_execution_heads head
+            ON head.tenant_id=outbox.tenant_id AND head.thread_id=outbox.thread_id
           WHERE outbox.tenant_id=$1
+            AND (queue.run_id IS NULL OR (queue.state='active' AND head.active_run_id=outbox.run_id))
             AND (
-              (state='ready' AND next_attempt_at <= clock_timestamp())
-              OR (state='claimed' AND lease_expires_at < clock_timestamp())
+              (outbox.state='ready' AND outbox.next_attempt_at <= clock_timestamp())
+              OR (outbox.state='claimed' AND outbox.lease_expires_at < clock_timestamp())
             )
           ORDER BY outbox.next_attempt_at,outbox.created_at
           LIMIT $2 FOR UPDATE OF outbox SKIP LOCKED`,

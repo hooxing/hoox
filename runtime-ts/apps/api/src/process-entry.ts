@@ -50,6 +50,13 @@ const apiEnvironmentSchema = Object.freeze({
   }),
   THREAD_CURSOR_ACTIVE_KID: stringEnvironmentField({ maxLength: 128 }),
   THREAD_CURSOR_SIGNING_KEYS: stringEnvironmentField({ secret: true, maxLength: 16_384 }),
+  THREAD_SERIAL_QUEUE_V2_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
+  THREAD_CONTEXT_V2_WRITE_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
+  THREAD_CONTEXT_V2_SHADOW_READ_ENABLED: booleanEnvironmentField({
+    requiredIn: optionalEnvironments,
+  }),
+  THREAD_CONTEXT_V2_READ_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
+  THREAD_INPUT_ROUTING_V2_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
   API_JWT_ISSUER: stringEnvironmentField({ requiredIn: productionEnvironment, maxLength: 512 }),
   API_JWT_AUDIENCE: stringEnvironmentField({ requiredIn: productionEnvironment, maxLength: 512 }),
   API_JWT_SIGNING_KEYS: stringEnvironmentField({
@@ -119,6 +126,9 @@ export interface ApiProcessConfiguration {
   readonly databaseRuntimeRole?: string;
   readonly cursorActiveKeyId: string;
   readonly cursorSigningKeys: string;
+  readonly serialQueueV2Enabled: boolean;
+  readonly threadContextV2ReadEnabled: boolean;
+  readonly threadInputRoutingV2Enabled: boolean;
   readonly developmentPrincipals?: readonly [ApiDevelopmentPrincipal, ApiDevelopmentPrincipal];
   readonly shutdownTimeoutMilliseconds: number;
   readonly listenHost: string;
@@ -238,6 +248,23 @@ export function parseApiProcessEnvironment(
           objectStoragePublicEndpoint: objectStorage.publicEndpoint,
         })
       : undefined;
+  const serialQueueV2Enabled = parsed.values.THREAD_SERIAL_QUEUE_V2_ENABLED ?? true;
+  const contextWriteEnabled = parsed.values.THREAD_CONTEXT_V2_WRITE_ENABLED ?? true;
+  const contextShadowEnabled = parsed.values.THREAD_CONTEXT_V2_SHADOW_READ_ENABLED ?? true;
+  const contextReadEnabled = parsed.values.THREAD_CONTEXT_V2_READ_ENABLED ?? true;
+  const inputRoutingEnabled = parsed.values.THREAD_INPUT_ROUTING_V2_ENABLED ?? true;
+  if (contextWriteEnabled && !serialQueueV2Enabled) {
+    throw new TypeError("THREAD_CONTEXT_V2_WRITE_ENABLED 依赖 Thread 串行队列");
+  }
+  if (contextShadowEnabled && !contextWriteEnabled) {
+    throw new TypeError("THREAD_CONTEXT_V2_SHADOW_READ_ENABLED 依赖 V2 write");
+  }
+  if (contextReadEnabled && !contextShadowEnabled) {
+    throw new TypeError("THREAD_CONTEXT_V2_READ_ENABLED 依赖 shadow read");
+  }
+  if (inputRoutingEnabled && (!serialQueueV2Enabled || !contextReadEnabled)) {
+    throw new TypeError("THREAD_INPUT_ROUTING_V2_ENABLED 依赖串行队列与 V2 Context read");
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
@@ -246,6 +273,9 @@ export function parseApiProcessEnvironment(
     ...(databaseRuntimeRole === undefined ? {} : { databaseRuntimeRole }),
     cursorActiveKeyId: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_ACTIVE_KID"),
     cursorSigningKeys: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_SIGNING_KEYS"),
+    serialQueueV2Enabled,
+    threadContextV2ReadEnabled: contextReadEnabled,
+    threadInputRoutingV2Enabled: inputRoutingEnabled,
     ...(developmentPrincipals === undefined ? {} : { developmentPrincipals }),
     shutdownTimeoutMilliseconds: readRequiredEnvironmentValue(
       parsed,

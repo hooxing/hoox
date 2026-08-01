@@ -7,6 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { Artifact, ModelWireTraceRecord, Run, RunEvent } from "./api.js";
 import {
   ConversationComposer,
+  formatArtifactSize,
+  formatArtifactType,
   InlineArtifactDelivery,
   NavigationSidebar,
   RunStatusBadge,
@@ -14,6 +16,7 @@ import {
   RunTranscript,
   ThreadCreate,
   ThreadHeader,
+  ThreadTranscript,
 } from "./workspace-view.js";
 
 // 已移除的抽屉交互用例暂留作历史说明，不再参与当前界面契约。
@@ -37,6 +40,40 @@ describe("工作台展示组件", () => {
     expect(html).toContain("is-waiting");
   });
 
+  it("把 steer 与 follow-up 作为对话中的用户消息展示，而不是替换当前任务", () => {
+    const html = renderToStaticMarkup(
+      <ThreadTranscript
+        messages={[
+          {
+            sequence: 1,
+            role: "user",
+            text: "先生成项目",
+            createdAt: "2026-08-01T00:00:00.000Z",
+          },
+          {
+            sequence: 2,
+            role: "assistant",
+            text: "正在处理",
+            createdAt: "2026-08-01T00:00:01.000Z",
+          },
+        ]}
+        pendingInputs={[
+          {
+            localId: "follow-up-1",
+            text: "完成后再改成深色主题",
+            disposition: "queued",
+            queueSequence: 1,
+          },
+        ]}
+      />,
+    );
+
+    expect(html).toContain("先生成项目");
+    expect(html).toContain("正在处理");
+    expect(html).toContain("完成后再改成深色主题");
+    expect(html).toContain("已排入下一任务 · 第 1 位");
+  });
+
   it("交付物同时内联在 Agent 正文之后，抽屉不取代阅读路径", () => {
     const artifact: Artifact = {
       id: "artifact-inline",
@@ -54,8 +91,23 @@ describe("工作台展示组件", () => {
     );
 
     expect(html).toContain("inline-artifact-delivery");
-    expect(html).toContain("本次回复的可下载产物");
+    expect(html).toContain("交付文件");
     expect(html).toContain("summary.md");
+    expect(html).toContain("MD 文件");
+    expect(html).toContain("下载");
+  });
+
+  it("交付文件使用用户可读的格式和大小，不直接暴露 MIME", () => {
+    expect(
+      formatArtifactType(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "方案.docx",
+      ),
+    ).toBe("Word 文档");
+    expect(formatArtifactType(undefined, "数据.parquet")).toBe("PARQUET 文件");
+    expect(formatArtifactSize(41)).toBe("41 B");
+    expect(formatArtifactSize(4_200)).toBe("4.1 KB");
+    expect(formatArtifactSize(2_621_440)).toBe("2.5 MB");
   });
 
   it("会话头部不再提供产物或网络诊断侧栏入口", () => {
@@ -69,6 +121,15 @@ describe("工作台展示组件", () => {
           updatedAt: "2026-07-30T00:00:00.000Z",
         }}
         run={running}
+        continuity={{
+          boundary: "legacy_anchor",
+          readMode: "v2",
+          anchorState: "completed",
+          queueDepth: 3,
+          contextSequence: 12,
+          compactionWindow: 2,
+          sandboxState: "resuming",
+        }}
         actionLoading={false}
         onArchive={() => undefined}
         onCancel={() => undefined}
@@ -79,6 +140,11 @@ describe("工作台展示组件", () => {
     expect(html).not.toContain("产物");
     expect(html).not.toContain("诊断");
     expect(html).not.toContain("activity-panel");
+    expect(html).toContain("工作区正在恢复");
+    expect(html).toContain("后续任务 3");
+    expect(html).not.toContain("上下文窗口");
+    expect(html).not.toContain("运行 run-1");
+    expect(html).not.toContain("providerSandboxId");
   });
 
   it.skip("只有模型报文时仍提供可重复打开诊断抽屉的外部入口", () => {
@@ -307,6 +373,53 @@ describe("工作台展示组件", () => {
     }
   });
 
+  it("工作记录始终默认折叠，运行中仍保留可查看的实时内容", () => {
+    const baseEvents: readonly RunEvent[] = [
+      {
+        eventId: "thinking-start",
+        sequence: 1,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "thinking.started",
+        payload: { type: "thinking.started" },
+      },
+      {
+        eventId: "thinking-delta",
+        sequence: 2,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "thinking.delta",
+        payload: { type: "thinking.delta", delta: "先检查依赖，再生成文档。" },
+      },
+    ];
+    const activeHtml = renderToStaticMarkup(<RunTimeline run={running} events={baseEvents} />);
+    const settledHtml = renderToStaticMarkup(
+      <RunTimeline
+        run={running}
+        events={[
+          ...baseEvents,
+          {
+            eventId: "thinking-end",
+            sequence: 3,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "thinking.completed",
+            payload: { type: "thinking.completed" },
+          },
+        ]}
+      />,
+    );
+
+    expect(activeHtml).toContain("查看实时工作记录");
+    expect(activeHtml).toContain("先检查依赖，再生成文档。");
+    expect(activeHtml).toContain('<details class="run-thinking is-running"');
+    expect(activeHtml).not.toContain('is-running" open');
+    expect(settledHtml).toContain("查看工作记录");
+    expect(settledHtml).toContain("先检查依赖，再生成文档。");
+    expect(settledHtml).toContain('<details class="run-thinking is-completed"');
+    expect(settledHtml).not.toContain('is-completed" open');
+  });
+
   it("waiting 状态卡不混入问题或正文，普通 Agent 正文保留二者", () => {
     const waiting: Run = { ...running, status: "waiting" };
     const events: readonly RunEvent[] = [
@@ -371,7 +484,9 @@ describe("工作台展示组件", () => {
       <ConversationComposer
         input=""
         disabled={false}
+        showQueueAction={false}
         onChange={() => undefined}
+        onQueue={() => undefined}
         onSubmit={() => undefined}
       />,
     );

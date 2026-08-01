@@ -41,6 +41,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
       schema: configuration.databaseSchema,
       expectedRuntimeRole: configuration.databaseRuntimeRole,
       applicationName: "cube-runtime-api-production",
+      serialQueueV2Enabled: configuration.serialQueueV2Enabled,
     });
     let app: ReturnType<typeof createApiApp> | undefined;
     try {
@@ -77,11 +78,20 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
           createCapability: createApiCreateCapability({
             threadCreation: persistence.threadCreation,
             enqueueOutbox: persistence.runDispatchCreation,
+            ...(configuration.threadInputRoutingV2Enabled
+              ? { threadInputs: persistence.threadInputs }
+              : {}),
           }),
           archiveThread: persistence.archiveThread,
           experience: persistence.experience,
           modelWireTraces: persistence.modelWireTraces,
           blobs,
+          ...(configuration.threadContextV2ReadEnabled
+            ? {
+                threadContext: persistence.threadContext(blobs),
+                threadContinuity: persistence.threadContinuity,
+              }
+            : {}),
           cursorCodec,
           readiness: Object.freeze({
             probe: async () => {

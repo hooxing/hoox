@@ -11,6 +11,10 @@
 - Pi 默认 Compaction 完全关闭，Runtime 自有 Context Policy；
 - 首版个人租户，Memory、团队、真实 FileSource 和丰富预览后置。
 
+## 后续连续对话改造
+
+Thread 跨 Run 连续上下文、durable steer/follow-up、Runtime Context Compaction、按 Run 记录 Workspace 结果，以及 Sandbox 立即 pause、resume 与冷重建的完整改造范围，统一记录在 [Thread 连续上下文实施总计划](thread-continuous-context-implementation-plan.md)。后续相关任务必须先核对该总计划；本路线中既有的“10 分钟 warm Session”和 Attempt 级上下文描述只代表当前实现，不再代表目标产品语义。
+
 ## 开发 Ready Gate
 
 - [ ] 从 Agent Worker 实际运行位置可连接 PostgreSQL、MinIO、模型 Provider 和 VMware 中的 CubeSandbox；

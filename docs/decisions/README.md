@@ -68,7 +68,19 @@
 | [ADR-0060](0060-safe-markdown-model-output.md) | 模型输出的安全 Markdown 展示边界 | 已接受 | 2026-07-30 |
 | [ADR-0061](0061-user-focused-running-experience.md) | 面向用户的运行状态体验 | 已接受 | 2026-07-30 |
 | [ADR-0062](0062-simplify-web-workspace-scrolling.md) | 简化 Web 工作台滚动与交付入口 | 已接受 | 2026-07-31 |
-| [ADR-0063](0063-thread-context-steer-followup-sandbox-retention.md) | Thread 连续上下文、Steer/Follow-up 与 Sandbox 保留 | 提议 | 2026-07-31 |
+| [ADR-0063](0063-thread-writer-and-durable-follow-up-queue.md) | Thread 单写者与持久 Follow-up 队列 | 已接受 | 2026-07-31 |
+| [ADR-0064](0064-thread-context-fact-stream-and-active-history.md) | Thread Context 事实流与活动历史 | 已接受（阶段 2） | 2026-07-31 |
+| [ADR-0065](0065-runtime-compaction-checkpoint-and-replacement-history.md) | Runtime Compaction 检查点与 Replacement History | 提议 | 2026-07-31 |
+| [ADR-0066](0066-thread-sandbox-session-lifecycle.md) | Thread Sandbox Session 生命周期 | 已替代 | 2026-07-31 |
+| [ADR-0067](0067-durable-steer-and-unified-thread-input.md) | Durable Steer 与统一 Thread 输入协议 | 已接受（阶段 3） | 2026-07-31 |
+| [ADR-0068](0068-runtime-owned-persistent-compaction.md) | Runtime 持久 Compaction 实施边界 | 已接受（阶段 4） | 2026-07-31 |
+| [ADR-0069](0069-thread-sandbox-session-lifecycle-implementation.md) | Thread Sandbox Session 生命周期实施边界 | 已接受（阶段 5） | 2026-07-31 |
+| [ADR-0070](0070-legacy-thread-anchor-and-continuity-rollout.md) | 旧 Thread 证据式 Anchor 与连续上下文灰度 | 已接受（阶段 6，生产数据 Gate 待完成） | 2026-07-31 |
+| [ADR-0071](0071-default-on-continuity-native-steer-and-conversation-ui.md) | 连续性能力默认开启、原生安全点 Steer 与对话式 UI | 已接受 | 2026-08-01 |
+| [ADR-0072](0072-reasoning-stream-continuity-and-disclosure.md) | 模型思考流的连续性持久化与折叠展示 | 已接受 | 2026-08-01 |
+| [ADR-0073](0073-numeric-cursor-ordering-after-text-projection.md) | 数值游标文本投影后的数据库排序边界 | 已接受 | 2026-08-01 |
+| [ADR-0074](0074-development-scheduler-and-sandbox-lifecycle-timeout.md) | 开发 Scheduler 常驻与 Sandbox lifecycle 专用超时 | 已接受 | 2026-08-01 |
+| [ADR-0075](0075-capability-aware-conversation-workspace.md) | 能力感知的对话工作台信息层级 | 已接受 | 2026-08-01 |
 
 ## 何时必须记录
 

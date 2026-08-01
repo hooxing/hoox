@@ -31,6 +31,32 @@ const runWorkerTables = new Set([
 ]);
 const runDispatchTables = new Set(["api_idempotency_records", "run_dispatch_outbox"]);
 const threadCreationTables = new Set(["api_thread_idempotency_records"]);
+const threadHeadTables = new Set(["thread_execution_heads"]);
+const threadInputQueueTables = new Set(["thread_input_receipts", "thread_follow_up_queue"]);
+const threadInputRoutingTables = new Set(["thread_input_receipt_events"]);
+const runWorkspaceResultTables = new Set(["run_workspace_results"]);
+const threadContextTables = new Set([
+  "thread_context_streams",
+  "thread_context_entries",
+  "thread_context_append_commands",
+]);
+const threadContextCompactionTables = new Set([
+  "thread_context_compaction_checkpoints",
+  "thread_context_compaction_replacement_items",
+]);
+const threadContextAuditTables = new Set(["thread_context_history_audits"]);
+const threadSandboxSessionTables = new Set([
+  "thread_sandbox_sessions",
+  "thread_sandbox_leases",
+  "sandbox_lifecycle_effects",
+]);
+const threadContinuityRolloutTables = new Set([
+  "tenant_thread_continuity_policies",
+  "thread_context_legacy_anchors",
+  "thread_context_legacy_backfill_items",
+  "thread_continuity_profiles",
+  "thread_continuity_metric_observations",
+]);
 const resourceLibraryTables = new Set([
   "resources",
   "resource_versions",
@@ -118,6 +144,25 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["api_idempotency_records", new Set(["SELECT", "INSERT"])],
   ["api_thread_idempotency_records", new Set(["SELECT", "INSERT"])],
   ["run_dispatch_outbox", new Set(["SELECT", "INSERT"])],
+  ["thread_execution_heads", new Set(["SELECT", "INSERT"])],
+  ["thread_input_receipts", new Set(["SELECT", "INSERT"])],
+  ["thread_follow_up_queue", new Set(["SELECT", "INSERT"])],
+  ["thread_input_receipt_events", new Set(["SELECT", "INSERT"])],
+  ["run_workspace_results", new Set(["SELECT", "INSERT"])],
+  ["thread_context_streams", new Set(["SELECT", "INSERT"])],
+  ["thread_context_entries", new Set(["SELECT", "INSERT"])],
+  ["thread_context_append_commands", new Set(["SELECT", "INSERT"])],
+  ["thread_context_compaction_checkpoints", new Set(["SELECT", "INSERT"])],
+  ["thread_context_compaction_replacement_items", new Set(["SELECT", "INSERT"])],
+  ["thread_context_history_audits", new Set(["SELECT", "INSERT"])],
+  ["thread_sandbox_sessions", new Set(["SELECT", "INSERT"])],
+  ["thread_sandbox_leases", new Set(["SELECT", "INSERT"])],
+  ["sandbox_lifecycle_effects", new Set(["SELECT", "INSERT"])],
+  ["tenant_thread_continuity_policies", new Set(["SELECT"])],
+  ["thread_context_legacy_anchors", new Set(["SELECT", "INSERT"])],
+  ["thread_context_legacy_backfill_items", new Set(["SELECT", "INSERT"])],
+  ["thread_continuity_profiles", new Set(["SELECT", "INSERT"])],
+  ["thread_continuity_metric_observations", new Set(["SELECT", "INSERT"])],
   ["resources", new Set(["SELECT", "INSERT"])],
   ["resource_versions", new Set(["SELECT", "INSERT"])],
   ["resource_promotion_authorizations", new Set(["SELECT", "INSERT"])],
@@ -188,8 +233,96 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
     ]),
   ],
   ["run_claims", new Set(["expires_at", "updated_at", "released_at"])],
+  [
+    "thread_execution_heads",
+    new Set([
+      "active_run_id",
+      "active_turn_id",
+      "next_turn_ordinal",
+      "next_queue_sequence",
+      "next_input_sequence",
+      "context_through_sequence",
+      "writer_owner",
+      "writer_token",
+      "writer_epoch",
+      "writer_expires_at",
+      "version",
+      "updated_at",
+    ]),
+  ],
+  [
+    "thread_context_streams",
+    new Set([
+      "next_sequence",
+      "current_window_number",
+      "current_checkpoint_id",
+      "current_compatibility_digest",
+      "updated_at",
+    ]),
+  ],
+  [
+    "thread_input_receipts",
+    new Set([
+      "state",
+      "disposition",
+      "queued_run_id",
+      "queue_sequence",
+      "target_run_id",
+      "target_turn_id",
+      "applied_context_sequence",
+      "rejection_code",
+      "updated_at",
+      "consumed_at",
+    ]),
+  ],
+  [
+    "thread_follow_up_queue",
+    new Set([
+      "state",
+      "claim_owner",
+      "claim_token",
+      "claim_epoch",
+      "claim_expires_at",
+      "consumption_receipt",
+      "activated_at",
+      "finished_at",
+    ]),
+  ],
   ["rollout_projections", new Set(["attempt_id", "version", "projection", "digest", "updated_at"])],
   ["sandbox_registry", new Set(["state", "actual_ttl_seconds", "updated_at"])],
+  [
+    "thread_sandbox_sessions",
+    new Set([
+      "state",
+      "materialized_revision_id",
+      "materialization_attested",
+      "paused_at",
+      "retention_expires_at",
+      "current_effect_id",
+      "updated_at",
+      "terminated_at",
+    ]),
+  ],
+  [
+    "thread_sandbox_leases",
+    new Set(["attempt_id", "owner", "expires_at", "released_at", "updated_at"]),
+  ],
+  [
+    "sandbox_lifecycle_effects",
+    new Set([
+      "state",
+      "provider_sandbox_id",
+      "resulting_session_state",
+      "provider_receipt_digest",
+      "claim_token",
+      "claimed_by",
+      "claim_generation",
+      "claim_expires_at",
+      "remote_call_started_at",
+      "updated_at",
+      "completed_at",
+    ]),
+  ],
   [
     "cleanup_outbox",
     new Set([
@@ -369,6 +502,98 @@ async function hasThreadCreationState(client: PoolClient, schema: string): Promi
   return result.rows[0]?.present === true;
 }
 
+async function hasThreadHeadState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.thread_execution_heads', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasThreadInputQueueState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.thread_input_receipts', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_follow_up_queue', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasThreadInputRoutingState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.thread_input_receipt_events', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasRunWorkspaceResultState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.run_workspace_results', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasThreadContextState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.thread_context_streams', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_context_entries', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_context_append_commands', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasThreadContextAuditState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.thread_context_history_audits', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasThreadContextCompactionState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.thread_context_compaction_checkpoints', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_context_compaction_replacement_items', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasThreadSandboxSessionState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.thread_sandbox_sessions', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_sandbox_leases', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.sandbox_lifecycle_effects', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasThreadContinuityRolloutState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.tenant_thread_continuity_policies', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_context_legacy_anchors', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_context_legacy_backfill_items', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_continuity_profiles', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_continuity_metric_observations', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasCleanupConsumerState(client: PoolClient): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='cleanup_outbox' AND column_name='claim_token') AS present",
@@ -425,6 +650,33 @@ async function activeTablePolicy(
   if (!(await hasThreadCreationState(client, schema))) {
     for (const table of threadCreationTables) policy.delete(table);
   }
+  if (!(await hasThreadHeadState(client, schema))) {
+    for (const table of threadHeadTables) policy.delete(table);
+  }
+  if (!(await hasThreadInputQueueState(client, schema))) {
+    for (const table of threadInputQueueTables) policy.delete(table);
+  }
+  if (!(await hasThreadInputRoutingState(client, schema))) {
+    for (const table of threadInputRoutingTables) policy.delete(table);
+  }
+  if (!(await hasRunWorkspaceResultState(client, schema))) {
+    for (const table of runWorkspaceResultTables) policy.delete(table);
+  }
+  if (!(await hasThreadContextState(client, schema))) {
+    for (const table of threadContextTables) policy.delete(table);
+  }
+  if (!(await hasThreadContextCompactionState(client, schema))) {
+    for (const table of threadContextCompactionTables) policy.delete(table);
+  }
+  if (!(await hasThreadContextAuditState(client, schema))) {
+    for (const table of threadContextAuditTables) policy.delete(table);
+  }
+  if (!(await hasThreadSandboxSessionState(client, schema))) {
+    for (const table of threadSandboxSessionTables) policy.delete(table);
+  }
+  if (!(await hasThreadContinuityRolloutState(client, schema))) {
+    for (const table of threadContinuityRolloutTables) policy.delete(table);
+  }
   if (!(await hasResourceLibraryState(client, schema))) {
     for (const table of resourceLibraryTables) policy.delete(table);
   }
@@ -479,6 +731,71 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasThreadCreationState(client, schema))) {
     for (const table of threadCreationTables) policy.delete(table);
+  }
+  if (!(await hasThreadHeadState(client, schema))) {
+    for (const table of threadHeadTables) policy.delete(table);
+  }
+  if (!(await hasThreadInputQueueState(client, schema))) {
+    for (const table of threadInputQueueTables) policy.delete(table);
+  }
+  if (!(await hasThreadInputRoutingState(client, schema))) {
+    for (const table of threadInputRoutingTables) policy.delete(table);
+    if (policy.has("thread_execution_heads")) {
+      policy.set(
+        "thread_execution_heads",
+        new Set(
+          [...(policy.get("thread_execution_heads") ?? [])].filter(
+            (column) => column !== "next_input_sequence",
+          ),
+        ),
+      );
+    }
+    if (policy.has("thread_input_receipts")) {
+      policy.set(
+        "thread_input_receipts",
+        new Set(
+          [...(policy.get("thread_input_receipts") ?? [])].filter(
+            (column) =>
+              !new Set(["queued_run_id", "queue_sequence", "target_run_id", "target_turn_id"]).has(
+                column,
+              ),
+          ),
+        ),
+      );
+    }
+  }
+  if (!(await hasRunWorkspaceResultState(client, schema))) {
+    for (const table of runWorkspaceResultTables) policy.delete(table);
+  }
+  if (!(await hasThreadContextState(client, schema))) {
+    for (const table of threadContextTables) policy.delete(table);
+  }
+  if (!(await hasThreadContextCompactionState(client, schema))) {
+    for (const table of threadContextCompactionTables) policy.delete(table);
+    if (policy.has("thread_context_streams")) {
+      policy.set(
+        "thread_context_streams",
+        new Set(
+          [...(policy.get("thread_context_streams") ?? [])].filter(
+            (column) =>
+              !new Set([
+                "current_window_number",
+                "current_checkpoint_id",
+                "current_compatibility_digest",
+              ]).has(column),
+          ),
+        ),
+      );
+    }
+  }
+  if (!(await hasThreadContextAuditState(client, schema))) {
+    for (const table of threadContextAuditTables) policy.delete(table);
+  }
+  if (!(await hasThreadSandboxSessionState(client, schema))) {
+    for (const table of threadSandboxSessionTables) policy.delete(table);
+  }
+  if (!(await hasThreadContinuityRolloutState(client, schema))) {
+    for (const table of threadContinuityRolloutTables) policy.delete(table);
   }
   if (!(await hasResourceLibraryState(client, schema))) {
     for (const table of resourceLibraryTables) policy.delete(table);
@@ -1058,6 +1375,81 @@ export async function bootstrapRuntimeAccessOnClient(
       `GRANT SELECT, INSERT ON TABLE ${schema}.api_thread_idempotency_records TO ${role}`,
     );
   }
+  if (await hasThreadHeadState(client, context.schema)) {
+    await client.query(`GRANT SELECT, INSERT ON TABLE ${schema}.thread_execution_heads TO ${role}`);
+  }
+  if (await hasThreadSandboxSessionState(client, context.schema)) {
+    await client.query(
+      `GRANT UPDATE(
+         state,materialized_revision_id,materialization_attested,paused_at,
+         retention_expires_at,current_effect_id,updated_at,terminated_at
+       ) ON TABLE ${schema}.thread_sandbox_sessions TO ${role};
+       GRANT UPDATE(attempt_id,owner,expires_at,released_at,updated_at)
+         ON TABLE ${schema}.thread_sandbox_leases TO ${role};
+       GRANT UPDATE(
+         state,provider_sandbox_id,resulting_session_state,provider_receipt_digest,
+         claim_token,claimed_by,claim_generation,claim_expires_at,
+         remote_call_started_at,updated_at,completed_at
+       ) ON TABLE ${schema}.sandbox_lifecycle_effects TO ${role}`,
+    );
+  }
+  if (await hasThreadInputQueueState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.thread_input_receipts, ${schema}.thread_follow_up_queue TO ${role}`,
+    );
+  }
+  if (await hasThreadInputRoutingState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.thread_input_receipt_events TO ${role}`,
+    );
+  }
+  if (await hasRunWorkspaceResultState(client, context.schema)) {
+    await client.query(`GRANT SELECT, INSERT ON TABLE ${schema}.run_workspace_results TO ${role}`);
+  }
+  if (await hasThreadContextState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.thread_context_streams,
+         ${schema}.thread_context_entries,
+         ${schema}.thread_context_append_commands TO ${role};
+       GRANT UPDATE(next_sequence,updated_at)
+         ON TABLE ${schema}.thread_context_streams TO ${role}`,
+    );
+  }
+  if (await hasThreadContextCompactionState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.thread_context_compaction_checkpoints,
+         ${schema}.thread_context_compaction_replacement_items TO ${role};
+       GRANT UPDATE(current_window_number,current_checkpoint_id,current_compatibility_digest)
+         ON TABLE ${schema}.thread_context_streams TO ${role}`,
+    );
+  }
+  if (await hasThreadContextAuditState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.thread_context_history_audits TO ${role}`,
+    );
+  }
+  if (await hasThreadSandboxSessionState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.thread_sandbox_sessions,
+         ${schema}.thread_sandbox_leases,
+         ${schema}.sandbox_lifecycle_effects TO ${role}`,
+    );
+  }
+  if (await hasThreadContinuityRolloutState(client, context.schema)) {
+    // Tenant rollout 策略只由运维/Migrator 修改；Runtime 只读策略并追加档案、审计和指标。
+    await client.query(
+      `GRANT SELECT ON TABLE ${schema}.tenant_thread_continuity_policies TO ${role};
+       GRANT SELECT, INSERT ON TABLE
+         ${schema}.thread_context_legacy_anchors,
+         ${schema}.thread_context_legacy_backfill_items,
+         ${schema}.thread_continuity_profiles,
+         ${schema}.thread_continuity_metric_observations TO ${role}`,
+    );
+  }
   if (await hasResourceLibraryState(client, context.schema)) {
     await client.query(
       `GRANT SELECT, INSERT ON TABLE
@@ -1206,6 +1598,31 @@ export async function bootstrapRuntimeAccessOnClient(
          state, generation, claim_token, claimed_by, lease_expires_at, next_attempt_at,
          dispatch_attempts, last_error_code, updated_at
        ) ON TABLE ${schema}.run_dispatch_outbox TO ${role}`,
+    );
+  }
+  if (await hasThreadHeadState(client, context.schema)) {
+    const inputRouting = await hasThreadInputRoutingState(client, context.schema);
+    await client.query(
+      `GRANT UPDATE(
+         active_run_id, active_turn_id, next_turn_ordinal, next_queue_sequence,
+         ${inputRouting ? "next_input_sequence," : ""}
+         context_through_sequence, writer_owner, writer_token, writer_epoch,
+         writer_expires_at, version, updated_at
+       ) ON TABLE ${schema}.thread_execution_heads TO ${role}`,
+    );
+  }
+  if (await hasThreadInputQueueState(client, context.schema)) {
+    const inputRouting = await hasThreadInputRoutingState(client, context.schema);
+    await client.query(
+      `GRANT UPDATE(
+         state, disposition,
+         ${inputRouting ? "queued_run_id, queue_sequence, target_run_id, target_turn_id," : ""}
+         applied_context_sequence, rejection_code, updated_at, consumed_at
+       ) ON TABLE ${schema}.thread_input_receipts TO ${role};
+       GRANT UPDATE(
+         state, claim_owner, claim_token, claim_epoch, claim_expires_at,
+         consumption_receipt, activated_at, finished_at
+       ) ON TABLE ${schema}.thread_follow_up_queue TO ${role}`,
     );
   }
   if (await hasWaitingRecoveryState(client, context.schema)) {

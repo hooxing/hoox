@@ -75,7 +75,8 @@ export interface CubeGatewayOptions extends ConfigOptions {
 }
 
 const CREATE_REQUEST_METADATA = "agentRuntimeCreateRequestId";
-const MAX_SAFE_SANDBOX_TTL_SECONDS = 120;
+// 86400 只表示当前真实 Spike 已接受的配置上界，不宣称是 Provider 永久最大值。
+const MAX_CONFIGURABLE_SANDBOX_TTL_SECONDS = 86_400;
 type EffectiveOperationControl = Omit<OperationControl, "timeoutMs"> & { timeoutMs: number };
 
 export class CubeSandboxGateway implements SandboxGateway {
@@ -94,7 +95,7 @@ export class CubeSandboxGateway implements SandboxGateway {
     this.defaultOperationTimeoutMs = options.defaultOperationTimeoutMs ?? 60_000;
     this.maxCreateTtlSeconds = options.maxCreateTtlSeconds ?? 120;
     validateTimeout(this.defaultOperationTimeoutMs, "defaultOperationTimeoutMs");
-    validateTtl(this.maxCreateTtlSeconds, MAX_SAFE_SANDBOX_TTL_SECONDS);
+    validateTtl(this.maxCreateTtlSeconds, MAX_CONFIGURABLE_SANDBOX_TTL_SECONDS);
     this.connectTtlSeconds = validateTtl(
       options.timeout ?? this.maxCreateTtlSeconds,
       this.maxCreateTtlSeconds,
@@ -111,6 +112,7 @@ export class CubeSandboxGateway implements SandboxGateway {
   async create(input: SandboxCreateInput, control: OperationControl = {}): Promise<SandboxHandle> {
     validateTemplateId(input.templateId);
     validateEnvironment(input.env);
+    validateLifecycle(input.lifecycle);
     const ttlSeconds = validateTtl(input.ttlSeconds, this.maxCreateTtlSeconds);
     const effectiveControl = this.control(control);
     if (effectiveControl.signal?.aborted) {
@@ -131,6 +133,7 @@ export class CubeSandboxGateway implements SandboxGateway {
         timeout: ttlSeconds,
         metadata: { [CREATE_REQUEST_METADATA]: requestId },
         ...(input.env === undefined ? {} : { envVars: input.env }),
+        ...(input.lifecycle === undefined ? {} : { lifecycle: { ...input.lifecycle } }),
       });
     } catch (error) {
       const mapped = mapSandboxError(error, "创建 Sandbox");
@@ -168,6 +171,23 @@ export class CubeSandboxGateway implements SandboxGateway {
       effectiveControl,
     );
     return new CubeSandboxHandle(sandbox, this.defaultOperationTimeoutMs);
+  }
+
+  async inspect(
+    id: string,
+    control: OperationControl = {},
+  ): Promise<"running" | "paused" | "not_found" | "unknown"> {
+    validateSandboxId(id);
+    const effectiveControl = this.control(control);
+    const entries = await settledOperation(
+      "查询 Sandbox 状态",
+      () => this.sdk.listV2(this.config(effectiveControl.timeoutMs)),
+      effectiveControl,
+    );
+    const entry = entries.find((candidate) => sandboxId(candidate) === id);
+    if (entry === undefined) return "not_found";
+    const state = entry.state ?? entry.status;
+    return state === "paused" ? "paused" : state === "running" ? "running" : "unknown";
   }
 
   /** 生产 readiness 使用真实鉴权调用；不创建 Sandbox，也不返回上游响应正文。 */
@@ -286,6 +306,16 @@ export class CubeSandboxGateway implements SandboxGateway {
   private control(control: OperationControl): EffectiveOperationControl {
     validateTimeout(control.timeoutMs);
     return { ...control, timeoutMs: control.timeoutMs ?? this.defaultOperationTimeoutMs };
+  }
+}
+
+function validateLifecycle(input: SandboxCreateInput["lifecycle"]): void {
+  if (input === undefined) return;
+  if (input.onTimeout !== undefined && input.onTimeout !== "kill" && input.onTimeout !== "pause") {
+    throw new SandboxRuntimeError("INVALID_ARGUMENT", "Sandbox lifecycle.onTimeout 无效");
+  }
+  if (input.autoResume !== undefined && typeof input.autoResume !== "boolean") {
+    throw new SandboxRuntimeError("INVALID_ARGUMENT", "Sandbox lifecycle.autoResume 无效");
   }
 }
 

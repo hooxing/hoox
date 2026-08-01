@@ -3,10 +3,17 @@ import { isoTimestamp, runId, threadId, workspaceId } from "@cube-runtime/domain
 import {
   createApiPersistenceRuntime,
   createS3BlobStore,
+  DurableResourceBlobWriter,
+  DurableResourceUploadBlobAdapter,
   probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX,
   type CreateS3BlobStoreConfig,
 } from "@cube-runtime/persistence";
+import {
+  createResourceFilesystemCapabilityCodec,
+  ResourceAttachmentResolver,
+  ResourceUploadService,
+} from "@cube-runtime/resource";
 import { startServiceProcess, type ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
@@ -71,6 +78,20 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
         maximumTtlMilliseconds: cursorMaximumTtlMilliseconds,
       });
       const blobs = createS3BlobStore(objectStorage, persistence.blobLifecycle);
+      const resourceFilesystemCapabilities = createResourceFilesystemCapabilityCodec({
+        secret: configuration.resourceFilesystemSigningKey,
+      });
+      const resourceUploads = new ResourceUploadService(
+        new DurableResourceUploadBlobAdapter(
+          new DurableResourceBlobWriter(
+            persistence.blobLifecycle,
+            blobs,
+            productionApiMaxBlobSizeBytes,
+          ),
+        ),
+        persistence.resourceUploads,
+        { maxBytes: productionApiMaxBlobSizeBytes, now: clock.now },
+      );
       app = createApiApp(
         {
           auth: createProductionJwtAuthResolver(configuration.production.jwt),
@@ -86,6 +107,12 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
           experience: persistence.experience,
           modelWireTraces: persistence.modelWireTraces,
           blobs,
+          resourceUploads,
+          resourceAttachments: new ResourceAttachmentResolver(persistence.resourceCatalog),
+          resourceFilesystem: {
+            catalog: persistence.resourceFilesystem,
+            capabilities: resourceFilesystemCapabilities,
+          },
           ...(configuration.threadContextV2ReadEnabled
             ? {
                 threadContext: persistence.threadContext(blobs),

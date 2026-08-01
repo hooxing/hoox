@@ -88,6 +88,25 @@ export type CreateThreadRequest = Static<typeof CreateThreadRequestSchema>;
 /** API 与数据库共同遵守的 UTF-8 字节上限；字符数不能替代此边界。 */
 export const MAX_RUN_INPUT_UTF8_BYTES = 1_048_576;
 
+export const ResourceAttachmentReferenceSchema = Type.Object(
+  { resourceId: IdSchema, versionId: IdSchema },
+  strict,
+);
+export type ResourceAttachmentReferenceDto = Static<typeof ResourceAttachmentReferenceSchema>;
+
+export const UploadedResourceDtoSchema = Type.Object(
+  {
+    resourceId: IdSchema,
+    versionId: IdSchema,
+    name: Type.String({ minLength: 1, maxLength: 255 }),
+    path: Type.String({ pattern: "^/resources/", maxLength: 1_024 }),
+    mediaType: Type.String({ minLength: 3, maxLength: 255 }),
+    sizeBytes: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  },
+  { ...strict, $id: "v1.UploadedResourceDto" },
+);
+export type UploadedResourceDto = Static<typeof UploadedResourceDtoSchema>;
+
 export const CreateRunRequestSchema = Type.Object(
   {
     // maxLength 仅限制 JSON/校验器工作量；运行时会再按 UTF-8 字节数精确验证。
@@ -99,7 +118,10 @@ export type CreateRunRequest = Static<typeof CreateRunRequestSchema>;
 
 export const CreateThreadInputRequestSchema = Type.Object(
   {
-    input: Type.String({ minLength: 1, maxLength: MAX_RUN_INPUT_UTF8_BYTES }),
+    input: Type.String({ maxLength: MAX_RUN_INPUT_UTF8_BYTES }),
+    attachments: Type.Optional(
+      Type.Array(ResourceAttachmentReferenceSchema, { maxItems: 20, uniqueItems: true }),
+    ),
     mode: Type.Union([Type.Literal("auto"), Type.Literal("steer"), Type.Literal("follow_up")]),
     expectedRunId: Type.Optional(IdSchema),
     expectedTurnId: Type.Optional(
@@ -371,6 +393,8 @@ export const ThreadContinuityStatusSuccessEnvelopeSchema = successEnvelopeSchema
 export const ThreadInputReceiptSuccessEnvelopeSchema = successEnvelopeSchema(
   ThreadInputReceiptDtoSchema,
 );
+export const UploadedResourceSuccessEnvelopeSchema =
+  successEnvelopeSchema(UploadedResourceDtoSchema);
 export const ArtifactListSuccessEnvelopeSchema = successEnvelopeSchema(ArtifactListDtoSchema);
 export const ArtifactDeliverySuccessEnvelopeSchema =
   successEnvelopeSchema(ArtifactDeliveryDtoSchema);

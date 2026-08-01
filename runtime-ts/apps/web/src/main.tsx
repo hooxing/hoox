@@ -8,6 +8,7 @@ import {
   RuntimeApi,
   type Thread,
   type ThreadInputReceipt,
+  type UploadedResource,
 } from "./api.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
@@ -99,6 +100,7 @@ type WorkspaceApi = Pick<
   | "listModelWireTraces"
   | "listThreads"
   | "previewArtifact"
+  | "uploadResource"
 > & {
   readonly listThreadContext?: RuntimeApi["listThreadContext"];
   readonly getThreadContinuity?: RuntimeApi["getThreadContinuity"];
@@ -146,6 +148,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [input, setInput] = useState("");
+  const [uploadFiles, setUploadFiles] = useState<readonly File[]>([]);
   const [pendingInputs, setPendingInputs] = useState<readonly PendingConversationInput[]>([]);
   const [continuity, setContinuity] =
     useState<Awaited<ReturnType<RuntimeApi["getThreadContinuity"]>>>();
@@ -168,6 +171,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const followLatestRef = useRef(true);
   const followedThreadRef = useRef<string | undefined>(undefined);
   const sendInFlightRef = useRef(false);
+  const uploadIdempotencyKeysRef = useRef(new WeakMap<File, string>());
   const initialSelectionAppliedRef = useRef(false);
 
   const selectThread = useCallback((threadId: string | undefined) => {
@@ -483,18 +487,29 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
 
   const createConversation = () => selectThread(undefined);
   const send = async (mode: "auto" | "follow_up" = "auto") => {
-    if (!input.trim() || actionLoading || sendInFlightRef.current) return;
+    if ((!input.trim() && uploadFiles.length === 0) || actionLoading || sendInFlightRef.current)
+      return;
     sendInFlightRef.current = true;
     const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
-      const request = input.trim();
+      const request = input.trim() || "请处理本轮上传的文件。";
       const expectedUserOccurrence = nextExpectedUserOccurrence(
         state.threadContext ?? [],
         pendingInputs,
         request,
       );
       const localId = crypto.randomUUID();
+      const uploaded: readonly UploadedResource[] = await Promise.all(
+        uploadFiles.map((file) => {
+          let idempotencyKey = uploadIdempotencyKeysRef.current.get(file);
+          if (idempotencyKey === undefined) {
+            idempotencyKey = crypto.randomUUID();
+            uploadIdempotencyKeysRef.current.set(file, idempotencyKey);
+          }
+          return apiClient.uploadResource(file, idempotencyKey);
+        }),
+      );
       let threadId = state.selectedThreadId;
       if (threadId === undefined) {
         const thread = await apiClient.createThread(deriveThreadTitle(request));
@@ -515,6 +530,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
               request,
               mode,
               state.run?.status === "running" ? state.run.id : undefined,
+              uploaded,
             );
       const run =
         receipt === undefined
@@ -538,6 +554,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       ]);
       if (run === undefined || state.run?.status === "running") {
         setInput("");
+        setUploadFiles([]);
         setError(undefined);
         return;
       }
@@ -550,6 +567,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       eventAttemptRef.current = undefined;
       dispatch({ type: "startRun", run });
       setInput("");
+      setUploadFiles([]);
       setError(undefined);
     } catch (reason) {
       if (navigationRef.current.isCurrent(expectedNavigation)) setError(reason as ApiError);
@@ -799,8 +817,10 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         )}
         <ConversationComposer
           input={input}
+          files={uploadFiles}
           disabled={actionLoading}
           onChange={setInput}
+          onFilesChange={setUploadFiles}
           onSubmit={(event) => {
             event.preventDefault();
             void send();

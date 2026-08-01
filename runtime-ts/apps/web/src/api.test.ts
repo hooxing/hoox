@@ -102,6 +102,59 @@ describe("RuntimeApi", () => {
     expect(fallbackFetcher.mock.calls[1]?.[0]).toBe("/api/v1/threads/thread_1/runs");
   });
 
+  it("上传原始文件字节，并把返回的 Resource 版本附到统一输入", async () => {
+    const uploaded = {
+      resourceId: "resource_upload_1",
+      versionId: "resource_version_upload_1",
+      name: "数据.csv",
+      path: "/resources/resource_upload_1/resource_version_upload_1/数据.csv",
+      mediaType: "text/csv",
+      sizeBytes: 3,
+    };
+    const receipt = {
+      receiptId: "input-upload-1",
+      inputSequence: 1,
+      requestedMode: "follow_up",
+      disposition: "queued",
+      createdAt: "2026-08-01T00:00:00.000Z",
+      updatedAt: "2026-08-01T00:00:00.000Z",
+    };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ version: "v1", requestId: "req-1", data: uploaded }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ version: "v1", requestId: "req-2", data: receipt }), {
+          status: 200,
+        }),
+      );
+    const api = new RuntimeApi(fetcher);
+    const result = await api.uploadResource(
+      new File([new Uint8Array([1, 2, 3])], "数据.csv", { type: "text/csv" }),
+    );
+    await api.submitThreadInput("thread_1", "请分析", "follow_up", undefined, [result]);
+
+    const uploadInit = fetcher.mock.calls[0]?.[1] as RequestInit;
+    const uploadHeaders = new Headers(uploadInit.headers);
+    expect(uploadHeaders.get("content-type")).toBe("application/octet-stream");
+    expect(uploadHeaders.get("x-file-name")).toBe(encodeURIComponent("数据.csv"));
+    expect(new Uint8Array(uploadInit.body as ArrayBuffer)).toEqual(new Uint8Array([1, 2, 3]));
+    const inputInit = fetcher.mock.calls[1]?.[1] as RequestInit;
+    expect(JSON.parse(String(inputInit.body))).toEqual({
+      input: "请分析",
+      mode: "follow_up",
+      attachments: [
+        {
+          resourceId: uploaded.resourceId,
+          versionId: uploaded.versionId,
+        },
+      ],
+    });
+  });
+
   it("恢复读取走 Thread 嵌套的最新 Run 快照接口", async () => {
     const fetcher = vi
       .fn()

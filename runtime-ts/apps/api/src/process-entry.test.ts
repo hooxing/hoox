@@ -29,6 +29,7 @@ function productionEnvironment(): Record<string, string> {
     S3_ACCESS_KEY_ID: "local-access-key",
     S3_SECRET_ACCESS_KEY: "opaque-test-value",
     S3_FORCE_PATH_STYLE: "true",
+    RESOURCE_FILESYSTEM_SIGNING_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   };
 }
 

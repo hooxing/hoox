@@ -509,9 +509,11 @@ describe("工作台展示组件", () => {
     const html = renderToStaticMarkup(
       <ConversationComposer
         input=""
+        files={[]}
         disabled={false}
         showQueueAction={false}
         onChange={() => undefined}
+        onFilesChange={() => undefined}
         onQueue={() => undefined}
         onSubmit={() => undefined}
       />,

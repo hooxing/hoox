@@ -7,8 +7,10 @@ import {
   LoaderCircle,
   MessageSquarePlus,
   PanelLeftClose,
+  Paperclip,
   Send,
   Square,
+  X,
 } from "lucide-react";
 import {
   type FormEventHandler,
@@ -413,21 +415,44 @@ export function RunRecoveryLoading() {
 
 export function ConversationComposer({
   input,
+  files,
   disabled,
   onChange,
+  onFilesChange,
   onSubmit,
   showQueueAction,
   onQueue,
 }: {
   readonly input: string;
+  readonly files: readonly File[];
   readonly disabled: boolean;
   readonly onChange: (value: string) => void;
+  readonly onFilesChange: (files: readonly File[]) => void;
   readonly onSubmit: FormEventHandler<HTMLFormElement>;
   readonly showQueueAction: boolean;
   readonly onQueue: () => void;
 }) {
   return (
     <form className="composer" onSubmit={onSubmit}>
+      {files.length > 0 && (
+        <ul className="composer-files" aria-label="待上传文件">
+          {files.map((file, index) => (
+            <li className="composer-file" key={composerFileKey(file)}>
+              <span title={file.name}>{file.name}</span>
+              <button
+                type="button"
+                aria-label={`移除文件 ${file.name}`}
+                disabled={disabled}
+                onClick={() =>
+                  onFilesChange(files.filter((_candidate, ordinal) => ordinal !== index))
+                }
+              >
+                <X size={13} />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       <label className="sr-only" htmlFor="agent-request">
         发送给 Agent 的任务
       </label>
@@ -447,12 +472,35 @@ export function ConversationComposer({
         }}
       />
       <div className="composer-footer">
+        <label className="attachment-button" title="上传文件">
+          <Paperclip size={16} aria-hidden="true" />
+          <span>上传文件</span>
+          <input
+            type="file"
+            multiple
+            disabled={disabled}
+            onChange={(event) => {
+              const selected = Array.from(event.target.files ?? []);
+              onFilesChange(
+                [...files, ...selected]
+                  .filter(
+                    (file, index, combined) =>
+                      combined.findIndex(
+                        (candidate) => composerFileKey(candidate) === composerFileKey(file),
+                      ) === index,
+                  )
+                  .slice(0, 20),
+              );
+              event.target.value = "";
+            }}
+          />
+        </label>
         <span>Ctrl / ⌘ + Enter 发送</span>
         {showQueueAction && (
           <button
             type="button"
             className="queue-button"
-            disabled={disabled || !input.trim()}
+            disabled={disabled || (!input.trim() && files.length === 0)}
             onClick={onQueue}
           >
             排队下一任务
@@ -463,7 +511,7 @@ export function ConversationComposer({
           className="send-button"
           title="发送"
           aria-label="发送任务"
-          disabled={disabled || !input.trim()}
+          disabled={disabled || (!input.trim() && files.length === 0)}
         >
           <Send size={16} />
           <span className="send-label">发送</span>
@@ -471,6 +519,10 @@ export function ConversationComposer({
       </div>
     </form>
   );
+}
+
+function composerFileKey(file: File): string {
+  return `${file.name}\0${file.size}\0${file.type}\0${file.lastModified}`;
 }
 
 export function ThreadNavigation({ children }: { readonly children: ReactNode }) {

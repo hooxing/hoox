@@ -112,6 +112,7 @@ const apiEnvironmentSchema = Object.freeze({
   S3_ACCESS_KEY_ID: stringEnvironmentField({ secret: true, maxLength: 1_024 }),
   S3_SECRET_ACCESS_KEY: stringEnvironmentField({ secret: true, maxLength: 4_096 }),
   S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
+  RESOURCE_FILESYSTEM_SIGNING_KEY: stringEnvironmentField({ secret: true, maxLength: 256 }),
 });
 
 export const apiProcessEnvironmentKeys = Object.freeze(Object.keys(apiEnvironmentSchema));
@@ -142,6 +143,7 @@ export interface ApiProcessConfiguration {
     readonly secretAccessKey: string;
     readonly forcePathStyle: boolean;
   }>;
+  readonly resourceFilesystemSigningKey: string;
   readonly production?: Readonly<{
     readonly publicOrigin: string;
     readonly jwt: Readonly<{
@@ -284,6 +286,10 @@ export function parseApiProcessEnvironment(
     listenHost,
     listenPort,
     objectStorage,
+    resourceFilesystemSigningKey: readRequiredEnvironmentValue(
+      parsed,
+      "RESOURCE_FILESYSTEM_SIGNING_KEY",
+    ),
     ...(production === undefined ? {} : { production }),
   });
 }

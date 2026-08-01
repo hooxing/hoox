@@ -60,7 +60,17 @@ import {
   ThreadRunListQuerySchema,
   ThreadRunPageSuccessEnvelopeSchema,
   ThreadSuccessEnvelopeSchema,
+  type UploadedResourceDto,
+  UploadedResourceSuccessEnvelopeSchema,
 } from "@cube-runtime/protocol";
+import {
+  type ResourceAttachmentResolverPort,
+  type ResourceFilesystemCapabilityCodec,
+  type ResourceFilesystemCatalog,
+  ResourceServiceError,
+  type ResourceUploadPort,
+  stripAttachmentsFromUserFacingPrompt,
+} from "@cube-runtime/resource";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -83,6 +93,10 @@ import type {
   ThreadCursorCodec,
 } from "./ports.js";
 import { ApiFailure, type ApiFailureKind, ApiService } from "./service.js";
+import {
+  registerResourceFilesystemHttp,
+  ResourceFilesystemHttpError,
+} from "./resource-filesystem-http.js";
 
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
@@ -98,6 +112,12 @@ export interface ApiDependencies {
   readonly blobs?: BlobStore;
   readonly threadContext?: ThreadContextReadPort;
   readonly threadContinuity?: ThreadContinuityReadPort;
+  readonly resourceUploads?: ResourceUploadPort;
+  readonly resourceAttachments?: ResourceAttachmentResolverPort;
+  readonly resourceFilesystem?: Readonly<{
+    catalog: ResourceFilesystemCatalog;
+    capabilities: ResourceFilesystemCapabilityCodec;
+  }>;
 }
 
 export interface ApiAppOptions {
@@ -132,6 +152,7 @@ const publicAgentEventTypes = new Set([
 ]);
 const MAX_TEXT_ARTIFACT_PREVIEW_BYTES = 1_024 * 1_024;
 const diagnosticCacheControl = "private, no-store, no-cache, must-revalidate";
+const MAX_RESOURCE_UPLOAD_BYTES = 16 * 1_024 * 1_024;
 
 const statusByFailure: Readonly<Record<ApiFailureKind, number>> = {
   bad_request: 400,
@@ -212,6 +233,40 @@ function persistenceFailure(error: PersistenceError): ApiFailureKind {
   }
 }
 
+function resourceFailure(error: ResourceServiceError): ApiFailureKind {
+  switch (error.code) {
+    case "INVALID_REQUEST":
+    case "LIMIT_EXCEEDED":
+    case "PREVIEW_BUDGET_EXCEEDED":
+      return "bad_request";
+    case "CONFLICT":
+      return "conflict";
+    case "NOT_FOUND":
+    case "NOT_AUTHORIZED":
+      return "not_found";
+    case "DEPENDENCY_FAILURE":
+    case "DEPENDENCY_UNAVAILABLE":
+      return "dependency_unavailable";
+    case "CONTENT_INTEGRITY_ERROR":
+      return "internal";
+  }
+}
+
+function singleHeader(request: FastifyRequest, name: string): string | undefined {
+  const values = headerValues(request, name);
+  if (values.length > 1) throw new ApiFailure("bad_request");
+  return values[0];
+}
+
+function decodeUploadFileName(value: string | undefined): string {
+  if (value === undefined || value.length > 1_024) throw new ApiFailure("bad_request");
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new ApiFailure("bad_request");
+  }
+}
+
 function errorEnvelope(id: string, kind: ApiFailureKind): ErrorEnvelope {
   return createErrorEnvelope(id, { kind });
 }
@@ -229,7 +284,9 @@ export function createApiApp(
   const app = Fastify({
     // 输入以解码后的 UTF-8 字节计量。JSON 的 \u0000 等转义最多占六倍 wire 字节，
     // 因此 HTTP 上限不能错误地把合法的 1 MiB 解码输入挡在解析器之前。
-    bodyLimit: options.bodyLimitBytes ?? MAX_RUN_INPUT_UTF8_BYTES * 6 + 16 * 1024,
+    bodyLimit:
+      options.bodyLimitBytes ??
+      Math.max(MAX_RUN_INPUT_UTF8_BYTES * 6 + 16 * 1024, MAX_RESOURCE_UPLOAD_BYTES),
     requestTimeout: options.requestTimeoutMs ?? 15_000,
     handlerTimeout: options.requestTimeoutMs ?? 15_000,
     connectionTimeout: 5_000,
@@ -262,6 +319,14 @@ export function createApiApp(
   const service = new ApiService(normalizedDependencies);
   const authenticate = async (request: FastifyRequest) =>
     service.authenticate(authorization(request), requestId(request), tenantSelector(request));
+
+  if (normalizedDependencies.resourceUploads !== undefined) {
+    app.addContentTypeParser(
+      "application/octet-stream",
+      { parseAs: "buffer", bodyLimit: MAX_RESOURCE_UPLOAD_BYTES },
+      (_request, body, done) => done(null, body),
+    );
+  }
 
   app.addHook("onSend", async (request, reply) => {
     void reply.header("x-request-id", requestId(request));
@@ -298,6 +363,11 @@ export function createApiApp(
       kind = "unsupported_media_type";
     } else if (errorShape.code === "FST_ERR_HANDLER_TIMEOUT") {
       kind = "dependency_unavailable";
+    } else if (error instanceof ResourceFilesystemHttpError) {
+      void reply.status(error.statusCode).send();
+      return;
+    } else if (error instanceof ResourceServiceError) {
+      kind = resourceFailure(error);
     } else if (error instanceof ApiFailure) {
       kind = error.kind;
     } else if (error instanceof PersistenceError) {
@@ -336,6 +406,54 @@ export function createApiApp(
       checkedAt: normalizedDependencies.clock.now(),
     });
   });
+
+  if (
+    normalizedDependencies.resourceFilesystem !== undefined &&
+    normalizedDependencies.blobs !== undefined
+  ) {
+    registerResourceFilesystemHttp(app, {
+      ...normalizedDependencies.resourceFilesystem,
+      blobs: normalizedDependencies.blobs,
+    });
+  }
+
+  if (normalizedDependencies.resourceUploads !== undefined) {
+    const resourceUploads = normalizedDependencies.resourceUploads;
+    app.post<{ Body: Buffer }>(
+      "/v1/resources/uploads",
+      {
+        schema: {
+          response: {
+            200: UploadedResourceSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            415: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const contentType = request.headers["content-type"];
+        if (contentType?.split(";", 1)[0]?.trim().toLowerCase() !== "application/octet-stream") {
+          throw new ApiFailure("unsupported_media_type");
+        }
+        const auth = await authenticate(request);
+        const name = decodeUploadFileName(singleHeader(request, "x-file-name"));
+        const mediaType = singleHeader(request, "x-file-media-type") ?? "application/octet-stream";
+        const uploaded: UploadedResourceDto = await resourceUploads.upload({
+          context: auth.scope,
+          idempotencyKey: requireIdempotencyKey(request),
+          name,
+          mediaType,
+          body: new Uint8Array(request.body),
+        });
+        return success(request, uploaded);
+      },
+    );
+  }
 
   if (createCapability !== undefined) {
     app.post<{ Body: CreateThreadRequest }>(
@@ -629,7 +747,14 @@ export function createApiApp(
           limit: request.query.limit ?? 100,
         });
         if (read === undefined || read.outcome === "not_found") throw new ApiFailure("not_found");
-        return success(request, { items: read.items, hasMore: read.hasMore });
+        return success(request, {
+          items: read.items.map((item) =>
+            item.role === "user"
+              ? { ...item, text: stripAttachmentsFromUserFacingPrompt(item.text) }
+              : item,
+          ),
+          hasMore: read.hasMore,
+        });
       },
     );
   }

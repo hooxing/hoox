@@ -82,6 +82,9 @@ importers:
       '@cube-runtime/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
+      '@cube-runtime/resource':
+        specifier: workspace:*
+        version: link:../../packages/resource
       '@cube-runtime/run-contracts':
         specifier: workspace:*
         version: link:../../packages/run-contracts
@@ -118,6 +121,9 @@ importers:
       '@cube-runtime/protocol-mapper':
         specifier: workspace:*
         version: link:../../packages/protocol-mapper
+      '@cube-runtime/resource':
+        specifier: workspace:*
+        version: link:../../packages/resource
       fastify:
         specifier: 5.10.0
         version: 5.10.0

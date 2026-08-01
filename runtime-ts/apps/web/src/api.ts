@@ -31,6 +31,15 @@ export type ThreadInputReceipt = {
   readonly queuedRun?: Run;
 };
 
+export type UploadedResource = {
+  readonly resourceId: string;
+  readonly versionId: string;
+  readonly name: string;
+  readonly path: string;
+  readonly mediaType: string;
+  readonly sizeBytes: number;
+};
+
 export type RunEvent = {
   readonly eventId: string;
   readonly sequence: number;
@@ -376,6 +385,7 @@ export class RuntimeApi {
     input: string,
     mode: "auto" | "follow_up" = "auto",
     expectedRunId?: string,
+    attachments: readonly Pick<UploadedResource, "resourceId" | "versionId">[] = [],
   ): Promise<ThreadInputReceipt> {
     try {
       return await this.request(`/v1/threads/${encodeURIComponent(threadId)}/inputs`, {
@@ -384,11 +394,20 @@ export class RuntimeApi {
           input,
           mode,
           ...(expectedRunId === undefined ? {} : { expectedRunId }),
+          ...(attachments.length === 0
+            ? {}
+            : {
+                attachments: attachments.map(({ resourceId, versionId }) => ({
+                  resourceId,
+                  versionId,
+                })),
+              }),
         }),
       });
     } catch (error) {
       // Feature Flag 关闭或旧 API：统一入口不存在时保持 /runs=follow_up 的兼容语义。
-      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+      if (!(error instanceof ApiError) || error.status !== 404 || attachments.length > 0)
+        throw error;
       const run = await this.createRun(threadId, input);
       return {
         receiptId: `legacy-${run.id}`,
@@ -401,6 +420,36 @@ export class RuntimeApi {
         queuedRun: run,
       };
     }
+  }
+  async uploadResource(file: File, idempotencyKey = createKey()): Promise<UploadedResource> {
+    const headers = new Headers({
+      Authorization: "Bearer dev-user-a",
+      Accept: "application/json",
+      "Content-Type": "application/octet-stream",
+      "Idempotency-Key": idempotencyKey,
+      "X-File-Name": encodeURIComponent(file.name),
+      "X-File-Media-Type": file.type || "application/octet-stream",
+    });
+    let response: Response;
+    try {
+      response = await this.fetcher(`${this.baseUrl}/v1/resources/uploads`, {
+        method: "POST",
+        headers,
+        body: await file.arrayBuffer(),
+      });
+    } catch {
+      throw new ApiError("上传文件失败：无法连接本地运行时", 0, true);
+    }
+    const body: unknown = await response.json().catch(() => undefined);
+    if (!response.ok) {
+      const error = body as ErrorEnvelope | undefined;
+      throw new ApiError(
+        error?.error?.message ?? "上传文件失败",
+        response.status,
+        error?.error?.retryable ?? response.status >= 500,
+      );
+    }
+    return envelope<UploadedResource>(body);
   }
   getThreadInputReceipt(threadId: string, receiptId: string): Promise<ThreadInputReceipt> {
     return this.request(

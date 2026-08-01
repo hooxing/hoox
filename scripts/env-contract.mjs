@@ -49,6 +49,8 @@ export const expectedEnvironmentKeys = Object.freeze([
   "CUBESANDBOX_PROXY_NODE_IP",
   "CUBESANDBOX_PROXY_PORT",
   "CUBESANDBOX_PROXY_SCHEME",
+  "RESOURCE_FILESYSTEM_ENDPOINT",
+  "RESOURCE_FILESYSTEM_SIGNING_KEY",
   "SCHEDULER_TENANT_ID",
   "SCHEDULER_WORKER_ID",
   "CLEANUP_POLL_INTERVAL_MS",
@@ -88,6 +90,8 @@ const placeholderOnlyKeys = new Set([
   "MODEL_API_KEY",
   "MODEL_ID",
   "THREAD_CURSOR_SIGNING_KEYS",
+  "RESOURCE_FILESYSTEM_ENDPOINT",
+  "RESOURCE_FILESYSTEM_SIGNING_KEY",
 ]);
 const nullablePlaceholderKeys = new Set(["CUBESANDBOX_API_KEY"]);
 
@@ -105,7 +109,7 @@ function looksLikePlaceholder(key, value) {
     }
   }
 
-  if (key === "MODEL_BASE_URL") {
+  if (key === "MODEL_BASE_URL" || key === "RESOURCE_FILESYSTEM_ENDPOINT") {
     try {
       return new URL(value).hostname.endsWith(".invalid");
     } catch {

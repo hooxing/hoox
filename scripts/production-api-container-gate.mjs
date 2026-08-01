@@ -190,6 +190,7 @@ try {
     S3_ACCESS_KEY_ID: "production-access-placeholder",
     S3_SECRET_ACCESS_KEY: secretCanary,
     S3_FORCE_PATH_STYLE: "true",
+    RESOURCE_FILESYSTEM_SIGNING_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   });
 
   // 本 Gate 故意不提供真实 PG/S3：真实 production entry 必须失败关闭且日志只保留稳定分类。

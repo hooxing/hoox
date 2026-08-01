@@ -79,6 +79,14 @@ function apiFixture(overrides: Partial<AppApi> = {}): AppApi {
       kind: "url" as const,
       url: "https://example.invalid/preview",
     })),
+    uploadResource: vi.fn(async (file: File) => ({
+      resourceId: "resource_uploaded",
+      versionId: "resource_version_uploaded",
+      name: file.name,
+      path: `/resources/resource_uploaded/resource_version_uploaded/${file.name}`,
+      mediaType: file.type || "application/octet-stream",
+      sizeBytes: file.size,
+    })),
     ...overrides,
   };
 }

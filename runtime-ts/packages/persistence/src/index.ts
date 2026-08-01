@@ -11,6 +11,8 @@ export type {
   ResourcePromotionCommitPort,
   ResourcePromotionCommitResult,
 } from "./pg-resource-library.js";
+export * from "./pg-resource-filesystem.js";
+export * from "./pg-resource-upload.js";
 export type { PgClaimedRunDispatch } from "./pg-run-dispatch.js";
 export { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 export * from "./pg-run-worker-state.js";
@@ -31,6 +33,7 @@ export {
   withTenantTransaction,
 } from "./postgres.js";
 export * from "./resource-blob-persistence-adapter.js";
+export * from "./resource-upload-adapter.js";
 export * from "./runtime.js";
 export type { CreateS3BlobStoreConfig } from "./s3-blob-store.js";
 export {

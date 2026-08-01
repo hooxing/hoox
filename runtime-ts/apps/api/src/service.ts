@@ -4,6 +4,8 @@ import {
   createThread,
   createWorkspace,
   DomainError,
+  resourceId,
+  resourceVersionId,
   runId,
   tenantId,
   threadId,
@@ -24,6 +26,10 @@ import type {
 } from "@cube-runtime/protocol";
 import { MAX_RUN_INPUT_UTF8_BYTES } from "@cube-runtime/protocol";
 import { toRunDto, toThreadDto } from "@cube-runtime/protocol-mapper";
+import {
+  appendAttachmentsToLatestUserPrompt,
+  type ResourceAttachmentResolverPort,
+} from "@cube-runtime/resource";
 import type { ApiCreateCapability } from "./capabilities.js";
 import { InvalidThreadCursorError } from "./cursor.js";
 import type {
@@ -67,6 +73,7 @@ interface ServiceDependencies {
   readonly cursorCodec: ThreadCursorCodec;
   readonly clock: ApiClock;
   readonly ids: ApiIdGenerator;
+  readonly resourceAttachments?: ResourceAttachmentResolverPort;
 }
 
 function commandHash(operation: string, value: unknown): string {
@@ -280,10 +287,25 @@ export class ApiService {
     try {
       const routing = this.dependencies.createCapability?.threadInputs;
       if (routing === undefined) throw new ApiFailure("not_found");
-      if (
-        input.input.trim().length === 0 ||
-        Buffer.byteLength(input.input, "utf8") > MAX_RUN_INPUT_UTF8_BYTES
-      ) {
+      const attachmentReferences = input.attachments ?? [];
+      if (input.input.trim().length === 0 && attachmentReferences.length === 0) {
+        throw new ApiFailure("bad_request");
+      }
+      if (attachmentReferences.length > 0 && this.dependencies.resourceAttachments === undefined) {
+        throw new ApiFailure("not_found");
+      }
+      const attachments =
+        attachmentReferences.length === 0
+          ? []
+          : await this.dependencies.resourceAttachments?.resolve({
+              context: auth.scope,
+              attachments: attachmentReferences.map((attachment) => ({
+                resourceId: resourceId(attachment.resourceId),
+                versionId: resourceVersionId(attachment.versionId),
+              })),
+            });
+      const inputText = appendAttachmentsToLatestUserPrompt(input.input, attachments ?? []);
+      if (Buffer.byteLength(inputText, "utf8") > MAX_RUN_INPUT_UTF8_BYTES) {
         throw new ApiFailure("bad_request");
       }
       const thread = await this.dependencies.repositories.threads.get(
@@ -300,7 +322,7 @@ export class ApiService {
         scope: auth.scope,
         thread: thread.entity,
         fallbackRun,
-        inputText: input.input,
+        inputText,
         mode: input.mode,
         ...(input.expectedRunId === undefined ? {} : { expectedRunId: input.expectedRunId }),
         ...(input.expectedTurnId === undefined ? {} : { expectedTurnId: input.expectedTurnId }),
@@ -310,6 +332,7 @@ export class ApiService {
           requestHash: commandHash("thread.input", {
             threadId: thread.entity.id,
             input: input.input,
+            attachments: attachmentReferences,
             mode: input.mode,
             expectedRunId: input.expectedRunId ?? null,
             expectedTurnId: input.expectedTurnId ?? null,

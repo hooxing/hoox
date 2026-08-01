@@ -22,7 +22,36 @@ function productionEnvironment(): Record<string, string> {
   };
 }
 
+function developmentEnvironment(): Record<string, string> {
+  return {
+    RUNTIME_ENV: "development",
+    DATABASE_URL: "postgresql://runtime:credential@127.0.0.1:5432/runtime",
+    DATABASE_RUNTIME_ROLE: "runtime",
+    DATABASE_SCHEMA: "runtime",
+    CUBESANDBOX_API_URL: "http://127.0.0.1:18080",
+    SCHEDULER_TENANT_ID: "tenant-a",
+    SCHEDULER_WORKER_ID: "scheduler-development",
+    CLEANUP_POLL_INTERVAL_MS: "1000",
+    CLEANUP_LEASE_MS: "210000",
+    PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
+  };
+}
+
 describe("Scheduler 进程入口", () => {
+  it("development 允许使用受控装配启动常驻 Scheduler", async () => {
+    const running = await startSchedulerProcess({
+      environment: developmentEnvironment(),
+      assembler: {
+        async assemble() {
+          return { stopAccepting: async () => undefined, resources: [], readiness: [] };
+        },
+      },
+    });
+
+    expect((await running.readiness()).status).toBe("ready");
+    await running.close();
+  });
+
   it("production 在解析最早边界拒绝继承的 Node TLS/代理覆盖", () => {
     expect(() =>
       parseSchedulerProcessEnvironment({
@@ -34,6 +63,11 @@ describe("Scheduler 进程入口", () => {
 
   it("配置可验证，传入 Fake assembler 不能冒充受审生产装配", async () => {
     const configuration = parseSchedulerProcessEnvironment(productionEnvironment());
+    expect(configuration.threadSandbox).toEqual({
+      retentionSchedulerEnabled: true,
+      lifecycleTimeoutMs: 90_000,
+      pausedRetentionSeconds: 600,
+    });
     expect(configuration.sandbox).toMatchObject({
       apiUrl: "https://cube-api.invalid",
       proxyNodeIp: "cube-api.invalid",
@@ -49,6 +83,21 @@ describe("Scheduler 进程入口", () => {
         },
       }),
     ).rejects.toThrow("PRODUCTION_ASSEMBLY_UNAVAILABLE:scheduler");
+  });
+
+  it("retention scheduler 与 lifecycle 参数显式配置，关闭 retention 不关闭 effect 对账装配", () => {
+    expect(
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        THREAD_SANDBOX_RETENTION_SCHEDULER_ENABLED: "true",
+        THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS: "120000",
+        THREAD_SANDBOX_PAUSED_RETENTION_SECONDS: "1800",
+      }).threadSandbox,
+    ).toEqual({
+      retentionSchedulerEnabled: true,
+      lifecycleTimeoutMs: 120_000,
+      pausedRetentionSeconds: 1_800,
+    });
   });
 
   it("Scheduler 支持部分显式 Proxy 配置，显式 scheme 优先于 443 默认", () => {

@@ -22,4 +22,11 @@ describe("工作台滚动区域样式", () => {
     expect(styles).not.toContain(".activity-panel");
     expect(styles).not.toContain(".activity-scroll");
   });
+
+  it("桌面端使用轻量任务栏、窄正文和与输入框衔接的进度区", () => {
+    expect(styles).toMatch(/grid-template-columns:\s*300px minmax\(0, 1fr\)/u);
+    expect(styles).toMatch(/\.run-area\s*\{[^}]*width:\s*min\(100%, 810px\)/su);
+    expect(styles).toMatch(/\.composer\s*\{[^}]*762px[^}]*border-radius:\s*20px/su);
+    expect(styles).toContain(".run-progress-dock + .composer");
+  });
 });

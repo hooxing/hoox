@@ -11,6 +11,7 @@ import {
   createPostgresPool,
   createS3BlobStore,
   createS3StableBlobGarbageCollector,
+  DurableTraceBlobPersistenceAdapter,
   DurableResourceBlobWriter,
   DurableWorkspaceCandidateBlobWriter,
   PgBackedSandboxSessionRegistry,
@@ -20,13 +21,20 @@ import {
   PgRecoveryMetrics,
   PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
+  PgThreadContextHistoryRepository,
+  PgThreadContextCompactionRepository,
+  PgThreadSandboxSessionLifecycle,
+  PgThreadContinuityMetrics,
   PgWorkspaceCandidateHandoff,
   PgWorkspaceManifestRepository,
   PgWorkspaceStableBlobAccess,
   probePostgres,
   probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX,
+  ThreadContextBodyPersistence,
 } from "@cube-runtime/persistence";
+import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+import { bindTrustedPiModelContextCapability } from "@cube-runtime/pi-adapter";
 import {
   assertProductionInheritedEnvironment,
   booleanEnvironmentField,
@@ -61,6 +69,7 @@ import {
 } from "./production-worker-runtime.js";
 import { withDevelopmentProjectModelWireTraceMirror } from "./project-model-wire-trace.js";
 import { RunWorker } from "./run-worker.js";
+import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
 import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
 
 /** Artifact 服务请求的 TTL 必须不超过同一 Worker BlobStore 的预签名策略上限。 */
@@ -109,6 +118,59 @@ const workerEnvironmentSchema = Object.freeze({
   AGENT_WORKER_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 10, maximum: 60_000 }),
   AGENT_WORKER_DISPATCH_LEASE_MS: integerEnvironmentField({ minimum: 1_000, maximum: 300_000 }),
   AGENT_WORKER_RUN_LEASE_MS: integerEnvironmentField({ minimum: 9_000, maximum: 300_000 }),
+  THREAD_SERIAL_QUEUE_V2_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  THREAD_CONTEXT_V2_WRITE_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  THREAD_CONTEXT_V2_SHADOW_READ_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  THREAD_CONTEXT_V2_READ_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  THREAD_INPUT_ROUTING_V2_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  THREAD_CONTEXT_INLINE_BODY_MAX_BYTES: integerEnvironmentField({
+    minimum: 256,
+    maximum: 1_048_576,
+    requiredIn: [],
+  }),
+  THREAD_CONTEXT_COMPACTION_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  THREAD_CONTEXT_COMPACTION_PATH: stringEnvironmentField({ maxLength: 16, requiredIn: [] }),
+  THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT: integerEnvironmentField({
+    minimum: 1,
+    maximum: 99,
+    requiredIn: [],
+  }),
+  THREAD_CONTEXT_COMPACTION_TARGET_PERCENT: integerEnvironmentField({
+    minimum: 1,
+    maximum: 98,
+    requiredIn: [],
+  }),
+  THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS: integerEnvironmentField({
+    minimum: 1,
+    maximum: 10_000_000,
+    requiredIn: [],
+  }),
+  THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS: integerEnvironmentField({
+    minimum: 1,
+    maximum: 10_000_000,
+    requiredIn: [],
+  }),
+  THREAD_CONTEXT_COMPACTION_TIMEOUT_MS: integerEnvironmentField({
+    minimum: 1,
+    maximum: 600_000,
+    requiredIn: [],
+  }),
+  THREAD_SANDBOX_SESSION_REUSE_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  CUBESANDBOX_SESSION_TTL_SECONDS: integerEnvironmentField({
+    minimum: 1,
+    maximum: 86_400,
+    requiredIn: [],
+  }),
+  THREAD_SANDBOX_PAUSED_RETENTION_SECONDS: integerEnvironmentField({
+    minimum: 1,
+    maximum: 31_536_000,
+    requiredIn: [],
+  }),
+  THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS: integerEnvironmentField({
+    minimum: 1,
+    maximum: 600_000,
+    requiredIn: [],
+  }),
   // 这些字段在 production 显式禁止；保留在投影视图中是为了让遗留部署携带开发身份时也失败关闭。
   DEV_AUTH_ENABLED: booleanEnvironmentField({ requiredIn: ["development"] }),
   DEV_AUTH_USER_A_ID: stringEnvironmentField({ requiredIn: [], maxLength: 128 }),
@@ -162,6 +224,29 @@ export interface WorkerProcessConfiguration {
     pollIntervalMs: number;
     dispatchLeaseMs: number;
     runLeaseMs: number;
+  }>;
+  readonly threadContext: Readonly<{
+    serialQueueV2Enabled: boolean;
+    writeEnabled: boolean;
+    shadowReadEnabled: boolean;
+    readEnabled: boolean;
+    inputRoutingEnabled: boolean;
+    inlineBodyMaxBytes: number;
+    compaction: Readonly<{
+      enabled: boolean;
+      path: "local" | "remote";
+      softLimitPercent: number;
+      targetPercent: number;
+      recentUserTokens: number;
+      maxOutputTokens: number;
+      timeoutMs: number;
+    }>;
+  }>;
+  readonly threadSandbox: Readonly<{
+    reuseEnabled: boolean;
+    sessionTtlSeconds: number;
+    pausedRetentionSeconds: number;
+    lifecycleTimeoutMs: number;
   }>;
   readonly development?: Readonly<{
     readonly userATenantId: string;
@@ -223,6 +308,46 @@ export function parseWorkerProcessEnvironment(
   // raw prompt/SSE 的保留清理消费者尚未随本 Worker 部署；production 不能留下无界敏感引用。
   if (parsed.runtimeEnvironment === "production" && wireTraceEnabled) {
     throw new TypeError("MODEL_WIRE_TRACE_ENABLED 在 production 需要已部署保留清理消费者");
+  }
+  const serialQueueV2Enabled = parsed.values.THREAD_SERIAL_QUEUE_V2_ENABLED ?? true;
+  const contextWriteEnabled = parsed.values.THREAD_CONTEXT_V2_WRITE_ENABLED ?? true;
+  const contextShadowReadEnabled = parsed.values.THREAD_CONTEXT_V2_SHADOW_READ_ENABLED ?? true;
+  const contextReadEnabled = parsed.values.THREAD_CONTEXT_V2_READ_ENABLED ?? true;
+  const inputRoutingEnabled = parsed.values.THREAD_INPUT_ROUTING_V2_ENABLED ?? true;
+  const compactionEnabled = parsed.values.THREAD_CONTEXT_COMPACTION_ENABLED ?? true;
+  const sandboxSessionReuseEnabled = parsed.values.THREAD_SANDBOX_SESSION_REUSE_ENABLED ?? true;
+  const compactionPath = parsed.values.THREAD_CONTEXT_COMPACTION_PATH ?? "local";
+  if (compactionPath !== "local" && compactionPath !== "remote") {
+    throw new TypeError("THREAD_CONTEXT_COMPACTION_PATH 只能是 local 或 remote");
+  }
+  if (contextWriteEnabled && !serialQueueV2Enabled) {
+    throw new TypeError("THREAD_CONTEXT_V2_WRITE_ENABLED 依赖 Thread 串行队列");
+  }
+  if (contextShadowReadEnabled && !contextWriteEnabled) {
+    throw new TypeError("THREAD_CONTEXT_V2_SHADOW_READ_ENABLED 依赖 V2 write");
+  }
+  if (contextReadEnabled && !contextShadowReadEnabled) {
+    throw new TypeError("THREAD_CONTEXT_V2_READ_ENABLED 依赖 shadow read");
+  }
+  if (inputRoutingEnabled && (!serialQueueV2Enabled || !contextReadEnabled)) {
+    throw new TypeError("THREAD_INPUT_ROUTING_V2_ENABLED 依赖串行队列与 V2 Context read");
+  }
+  if (compactionEnabled && (!serialQueueV2Enabled || !contextWriteEnabled || !contextReadEnabled)) {
+    throw new TypeError("THREAD_CONTEXT_COMPACTION_ENABLED 依赖串行队列与 V2 Context write/read");
+  }
+  if (
+    sandboxSessionReuseEnabled &&
+    (!serialQueueV2Enabled || !contextWriteEnabled || !contextReadEnabled)
+  ) {
+    throw new TypeError(
+      "THREAD_SANDBOX_SESSION_REUSE_ENABLED 依赖串行队列与 V2 Context write/read",
+    );
+  }
+  const compactionSoftLimitPercent =
+    parsed.values.THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT ?? 80;
+  const compactionTargetPercent = parsed.values.THREAD_CONTEXT_COMPACTION_TARGET_PERCENT ?? 55;
+  if (compactionTargetPercent >= compactionSoftLimitPercent) {
+    throw new TypeError("THREAD_CONTEXT_COMPACTION_TARGET_PERCENT 必须小于 soft limit");
   }
   const sandboxApiUrl = readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
   if (parsed.runtimeEnvironment === "production") {
@@ -286,6 +411,31 @@ export function parseWorkerProcessEnvironment(
       pollIntervalMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_POLL_INTERVAL_MS"),
       dispatchLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_DISPATCH_LEASE_MS"),
       runLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_RUN_LEASE_MS"),
+    }),
+    threadContext: Object.freeze({
+      serialQueueV2Enabled,
+      writeEnabled: contextWriteEnabled,
+      shadowReadEnabled: contextShadowReadEnabled,
+      readEnabled: contextReadEnabled,
+      inputRoutingEnabled,
+      inlineBodyMaxBytes: parsed.values.THREAD_CONTEXT_INLINE_BODY_MAX_BYTES ?? 16 * 1024,
+      compaction: Object.freeze({
+        enabled: compactionEnabled,
+        path: compactionPath,
+        softLimitPercent: compactionSoftLimitPercent,
+        targetPercent: compactionTargetPercent,
+        recentUserTokens: parsed.values.THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS ?? 4_096,
+        maxOutputTokens:
+          parsed.values.THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS ??
+          Math.min(2_048, maxOutputTokens),
+        timeoutMs: parsed.values.THREAD_CONTEXT_COMPACTION_TIMEOUT_MS ?? 60_000,
+      }),
+    }),
+    threadSandbox: Object.freeze({
+      reuseEnabled: sandboxSessionReuseEnabled,
+      sessionTtlSeconds: parsed.values.CUBESANDBOX_SESSION_TTL_SECONDS ?? 120,
+      pausedRetentionSeconds: parsed.values.THREAD_SANDBOX_PAUSED_RETENTION_SECONDS ?? 600,
+      lifecycleTimeoutMs: parsed.values.THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS ?? 90_000,
     }),
     ...(parsed.runtimeEnvironment === "development"
       ? {
@@ -466,6 +616,11 @@ async function assembleWorkerRuntime(
       rolloutRepository,
       policy: { maxModelObservationBytes: 4 * 1024 },
     });
+    const threadContextHistory = new PgThreadContextHistoryRepository(pool, blobs);
+    const threadContextBodies = new ThreadContextBodyPersistence(
+      new DurableTraceBlobPersistenceAdapter(blobRepository, blobs),
+      configuration.threadContext.inlineBodyMaxBytes,
+    );
     const modelWireTraces = assembleModelWireTraceIfEnabled(configuration.model.wireTraceEnabled, {
       installFetchInstrumentation: installModelWireFetchInstrumentation,
       createSession: () =>
@@ -484,6 +639,16 @@ async function assembleWorkerRuntime(
         ),
     });
     const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
+    const threadContinuityMetrics = new PgThreadContinuityMetrics(pool);
+    const runtimeCompaction = new RuntimeCompactionCoordinator(
+      configuration.threadContext.compaction,
+      model,
+      modelRuntime,
+      bindTrustedPiModelContextCapability(modelRuntime, model),
+      new PgThreadContextCompactionRepository(pool, blobs),
+      undefined,
+      threadContinuityMetrics,
+    );
     const artifactAuthorization = createArtifactExecutionAuthorizationAuthority();
     const artifactRepository = new PgArtifactDeliveryRepository(
       pool,
@@ -512,8 +677,19 @@ async function assembleWorkerRuntime(
         defaultOperationTimeoutMs: 5_000,
       },
       configuration.sandbox.templateId,
+      configuration.threadSandbox.sessionTtlSeconds,
+      configuration.threadSandbox.lifecycleTimeoutMs,
     );
     const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
+    const threadSandboxes = new PgThreadSandboxSessionLifecycle(
+      pool,
+      upstreamSandboxes,
+      {
+        pausedRetentionSeconds: configuration.threadSandbox.pausedRetentionSeconds,
+        transitionWaitMs: configuration.threadSandbox.lifecycleTimeoutMs,
+      },
+      threadContinuityMetrics,
+    );
     const workspacePolicy = Object.freeze({
       maxEntries: 1_024,
       maxFiles: 1_000,
@@ -602,11 +778,99 @@ async function assembleWorkerRuntime(
       durableObservation.prepare,
       modelWireTraces,
       deliverFileTools,
+      configuration.threadContext.shadowReadEnabled
+        ? async (input, compatibility) => {
+            const compatibilityDigest = digestCanonical(compatibility);
+            const throughSequence = input.contextThroughSequence ?? 0;
+            const readHistory = async (
+              mode: "shadow" | "read",
+              sample: "primary" | "comparison" | "active",
+            ) => {
+              const startedAt = Date.now();
+              const result = await threadContextHistory.readActiveHistory({
+                scope: input.scope,
+                attemptId: input.attemptId,
+                throughSequence,
+                compatibilityDigest,
+                mode,
+              });
+              await threadContinuityMetrics
+                .record({
+                  tenantId: input.scope.tenantId,
+                  threadId: input.scope.threadId,
+                  runId: input.scope.runId,
+                  observationId: `${input.attemptId}:context-rebuild:${sample}:${throughSequence}`,
+                  metricName: "context_rebuild_latency_ms",
+                  value: Math.max(0, Date.now() - startedAt),
+                  unit: "milliseconds",
+                  outcome: result.outcome,
+                })
+                .catch(() => undefined);
+              return result;
+            };
+            const recordDigestMismatch = async (sample: "shadow" | "active") => {
+              await threadContinuityMetrics
+                .record({
+                  tenantId: input.scope.tenantId,
+                  threadId: input.scope.threadId,
+                  runId: input.scope.runId,
+                  observationId: `${input.attemptId}:context-digest-mismatch:${sample}:${throughSequence}`,
+                  metricName: "context_recovery_digest_mismatch_total",
+                  value: 1,
+                  unit: "count",
+                  reason: sample,
+                })
+                .catch(() => undefined);
+            };
+            const shadow = await readHistory("shadow", "primary");
+            if (shadow.outcome !== "ready") {
+              // Tenant/new-Thread 灰度未选中的 Thread 保持旧每 Run Session 读路径。
+              if (shadow.outcome === "unsupported") return undefined;
+              if (configuration.threadContext.readEnabled) {
+                throw new Error(`THREAD_CONTEXT_${shadow.outcome.toUpperCase()}`);
+              }
+              return undefined;
+            }
+            const comparison = await readHistory("shadow", "comparison");
+            if (
+              comparison.outcome !== "ready" ||
+              comparison.history.digest !== shadow.history.digest
+            ) {
+              await recordDigestMismatch("shadow");
+              if (configuration.threadContext.readEnabled) {
+                throw new Error("THREAD_CONTEXT_SHADOW_DIGEST_MISMATCH");
+              }
+              return undefined;
+            }
+            if (!configuration.threadContext.readEnabled) return undefined;
+            const active = await readHistory("read", "active");
+            if (active.outcome !== "ready" || active.history.digest !== comparison.history.digest) {
+              await recordDigestMismatch("active");
+              throw new Error("THREAD_CONTEXT_SHADOW_DIGEST_MISMATCH");
+            }
+            return active.history;
+          }
+        : undefined,
+      configuration.threadContext.compaction.enabled
+        ? async (input, compatibility, history, availableHistoryTokens) =>
+            await runtimeCompaction.prepare({
+              fence: input.fence,
+              attemptId: input.attemptId,
+              compatibilityDigest: digestCanonical(compatibility),
+              history,
+              availableHistoryTokens,
+            })
+        : undefined,
     );
     const shutdown = new ProcessShutdown();
     const worker = new RunWorker(
       {
-        persistence: new PgExecutionPersistence(pool),
+        persistence: new PgExecutionPersistence(pool, {
+          threadContextWriteEnabled: configuration.threadContext.writeEnabled,
+          threadInputRoutingV2Enabled: configuration.threadContext.inputRoutingEnabled,
+          threadSandboxSessionReuseEnabled: configuration.threadSandbox.reuseEnabled,
+          threadSandboxHandoffLeaseMs: configuration.worker.runLeaseMs,
+        }),
         revisions: workspaceRuntime,
         sandboxes,
         orphanSandboxes: sandboxes,
@@ -616,11 +880,17 @@ async function assembleWorkerRuntime(
         artifacts: new ArtifactCompletionGateAdapter(artifactService),
         clock: new SystemWorkerClock(),
         metrics: new PgRecoveryMetrics(pool),
+        continuityMetrics: threadContinuityMetrics,
+        ...(configuration.threadContext.writeEnabled ? { threadContextBodies } : {}),
+        ...(configuration.threadSandbox.reuseEnabled ? { threadSandboxes } : {}),
       },
       {
         workerId: configuration.worker.workerId,
         leaseDurationMs: configuration.worker.runLeaseMs,
         heartbeatMs: Math.floor(configuration.worker.runLeaseMs / 3),
+        threadContextWriteEnabled: configuration.threadContext.writeEnabled,
+        threadInputRoutingV2Enabled: configuration.threadContext.inputRoutingEnabled,
+        threadSandboxSessionReuseEnabled: configuration.threadSandbox.reuseEnabled,
       },
     );
     const loop = new AgentWorkerPollingLoop(new PgRunDispatchOutbox(pool), worker, {

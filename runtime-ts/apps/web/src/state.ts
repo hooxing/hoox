@@ -6,6 +6,7 @@ import type {
   RunEvent,
   RunEventPage,
   Thread,
+  ThreadContextMessage,
 } from "./api.js";
 
 export type WorkspaceState = {
@@ -16,6 +17,7 @@ export type WorkspaceState = {
   readonly run: Run | undefined;
   readonly eventAttemptId: string | undefined;
   readonly events: readonly RunEvent[];
+  readonly threadContext: readonly ThreadContextMessage[] | undefined;
   readonly artifacts: readonly Artifact[];
   readonly modelWireTraces: readonly ModelWireTraceRecord[];
   /** 最近一次无游标首屏包含的复合身份；刷新首屏时只替换这一段。 */
@@ -36,6 +38,7 @@ export const initialWorkspaceState: WorkspaceState = {
   run: undefined,
   eventAttemptId: undefined,
   events: [],
+  threadContext: undefined,
   artifacts: [],
   modelWireTraces: [],
   modelWireTraceHeadKeys: [],
@@ -71,6 +74,10 @@ export function workspaceReducer(
     | { readonly type: "startRun"; readonly run: Run }
     | { readonly type: "run"; readonly run: Run }
     | { readonly type: "events"; readonly page: RunEventPage }
+    | {
+        readonly type: "threadContext";
+        readonly items: readonly ThreadContextMessage[] | undefined;
+      }
     | { readonly type: "artifacts"; readonly artifacts: readonly Artifact[] }
     | {
         readonly type: "modelWireTraces";
@@ -102,6 +109,7 @@ export function workspaceReducer(
         run: undefined,
         eventAttemptId: undefined,
         events: [],
+        threadContext: undefined,
         artifacts: [],
         modelWireTraces: [],
         modelWireTraceHeadKeys: [],
@@ -154,6 +162,8 @@ export function workspaceReducer(
       return action.page.attemptId !== state.eventAttemptId
         ? { ...state, eventAttemptId: action.page.attemptId, events: action.page.items }
         : { ...state, events: mergeEvents(state.events, action.page.items) };
+    case "threadContext":
+      return { ...state, threadContext: action.items };
     case "artifacts":
       return { ...state, artifacts: action.artifacts };
     case "modelWireTraces": {

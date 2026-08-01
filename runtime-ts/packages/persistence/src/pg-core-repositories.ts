@@ -27,6 +27,11 @@ import type {
 } from "./ports.js";
 import { withTenantTransaction } from "./postgres.js";
 import { mapRun, mapTenant, mapTenantBundle, mapThread, mapWorkspace } from "./row-mappers.js";
+import {
+  cancelThreadQueuedRun,
+  lockThreadExecutionHead,
+  settleActiveThreadRun,
+} from "./pg-thread-run-queue.js";
 
 const tenantColumns = `
   t.id AS tenant_id, t.kind AS tenant_kind, t.owner_user_id, t.display_name,
@@ -409,6 +414,8 @@ export class PgRunRepository implements RunRepository {
           [scope.tenantId, actualThreadId],
         );
         if (parent.rowCount !== 1) return { outcome: "not_found" };
+        // V2 终态和 Worker 使用同一线性化锁序：Thread → execution head → Run。
+        await lockThreadExecutionHead(client, scope.tenantId, actualThreadId);
         const locked = await client.query<{ thread_id: string }>(
           `SELECT thread_id FROM runs
             WHERE tenant_id = $1 AND id = $2 AND thread_id = $3
@@ -434,7 +441,29 @@ export class PgRunRepository implements RunRepository {
           ],
         );
         const version = result.rows[0]?.version;
-        if (version !== undefined) return { outcome: "updated", version: BigInt(version) };
+        if (version !== undefined) {
+          if (run.status === "cancelled") {
+            await cancelThreadQueuedRun(client, {
+              tenantId: scope.tenantId,
+              threadId: actualThreadId,
+              runId: run.id,
+            });
+          } else if (run.status === "succeeded" || run.status === "failed") {
+            const now = await client.query<{ readonly database_now: Date }>(
+              "SELECT clock_timestamp() AS database_now",
+            );
+            const databaseNow = now.rows[0]?.database_now;
+            if (databaseNow === undefined) throw new TypeError("数据库时钟缺失");
+            await settleActiveThreadRun(client, {
+              tenantId: scope.tenantId,
+              threadId: actualThreadId,
+              runId: run.id,
+              runStatus: run.status,
+              databaseNow: databaseNow.toISOString(),
+            });
+          }
+          return { outcome: "updated", version: BigInt(version) };
+        }
         return (await findRun(client, scope, run.id)) === undefined
           ? { outcome: "not_found" }
           : { outcome: "conflict" };

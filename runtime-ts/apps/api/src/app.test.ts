@@ -32,6 +32,8 @@ import {
   type TenantBundle,
   type TenantScope,
   type ThreadListPage,
+  type ThreadInputReceiptView,
+  type ThreadInputRoutingPort,
   type Versioned,
 } from "@cube-runtime/persistence";
 import type { FastifyInstance } from "fastify";
@@ -131,7 +133,9 @@ function key(scope: TenantScope, id: string): string {
   return `${scope.tenantId}:${id}`;
 }
 
-class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThreadCommandPort {
+class FakeApiState
+  implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThreadCommandPort, ThreadInputRoutingPort
+{
   readonly tenants = new Map<string, TenantBundle>();
   readonly principals = new Map<string, AuthPrincipal>();
   readonly threads = new Map<string, Versioned<Thread>>();
@@ -146,6 +150,10 @@ class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThre
   readonly roleOverrides = new Map<string, MembershipRole>();
   readonly idempotencyFirstObservations: boolean[] = [];
   readonly idempotencyOutcomes: ("created" | "replayed")[] = [];
+  readonly inputReceipts = new Map<
+    string,
+    { readonly hash: string; readonly receipt: ThreadInputReceiptView; readonly run?: Run }
+  >();
   idempotencyBarrier: AsyncBarrier | undefined;
   beforeThreadCreate: (() => Promise<void> | void) | undefined;
   beforeRunCreate: (() => Promise<void> | void) | undefined;
@@ -304,6 +312,71 @@ class FakeApiState implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThre
     return { outcome: "replayed", entity: existing.entity as Run };
   }
 
+  async submit(
+    input: Parameters<ThreadInputRoutingPort["submit"]>[0],
+  ): ReturnType<ThreadInputRoutingPort["submit"]> {
+    if (this.activeRole(input.scope) === undefined) return { outcome: "not_authorized" };
+    const commandKey = `${input.scope.tenantId}:${input.thread.id}:${input.idempotency.key}`;
+    const replay = this.inputReceipts.get(commandKey);
+    if (replay !== undefined) {
+      return replay.hash === input.idempotency.requestHash
+        ? {
+            outcome: "replayed",
+            receipt: replay.receipt,
+            ...(replay.run === undefined ? {} : { queuedRun: replay.run }),
+          }
+        : { outcome: "key_conflict" };
+    }
+    const queued = input.mode === "follow_up";
+    const receipt: ThreadInputReceiptView = {
+      receiptId: `input-${this.inputReceipts.size + 1}`,
+      inputSequence: this.inputReceipts.size + 1,
+      requestedMode: input.mode,
+      disposition: queued ? "queued" : "pending_steer",
+      ...(queued
+        ? { queuedRunId: input.fallbackRun.id, queueSequence: this.inputReceipts.size + 1 }
+        : {
+            targetRunId: input.expectedRunId ?? "run_1",
+            targetTurnId: input.expectedTurnId ?? "turn-1",
+          }),
+      createdAt: baseTime,
+      updatedAt: baseTime,
+      events: [
+        {
+          sequence: 1,
+          kind: "accepted",
+          disposition: queued ? "queued" : "pending_steer",
+          createdAt: baseTime,
+        },
+      ],
+    };
+    if (queued) {
+      this.runs.set(key(input.scope, input.fallbackRun.id), {
+        entity: input.fallbackRun,
+        version: 0n,
+      });
+    }
+    this.inputReceipts.set(commandKey, {
+      hash: input.idempotency.requestHash,
+      receipt,
+      ...(queued ? { run: input.fallbackRun } : {}),
+    });
+    return {
+      outcome: "accepted",
+      receipt,
+      ...(queued ? { queuedRun: input.fallbackRun } : {}),
+    };
+  }
+
+  async get(
+    input: Parameters<ThreadInputRoutingPort["get"]>[0],
+  ): ReturnType<ThreadInputRoutingPort["get"]> {
+    if (this.activeRole(input.scope) === undefined) return undefined;
+    return [...this.inputReceipts.values()].find(
+      ({ receipt }) => receipt.receiptId === input.receiptId,
+    )?.receipt;
+  }
+
   async archiveThread(
     input: Parameters<ArchiveThreadCommandPort["archiveThread"]>[0],
   ): ReturnType<ArchiveThreadCommandPort["archiveThread"]> {
@@ -418,6 +491,9 @@ function fixture(
     readonly modelWireTraceBlobFailure?: BlobStoreError;
     readonly modelWireTraceListFailure?: PersistenceError;
     readonly modelWireTracePaginated?: boolean;
+    readonly enableThreadContext?: boolean;
+    readonly enableThreadContinuity?: boolean;
+    readonly enableThreadInputs?: boolean;
   } = {},
 ) {
   const state = new FakeApiState();
@@ -493,6 +569,7 @@ function fixture(
           createCapability: createApiCreateCapability({
             threadCreation: state,
             enqueueOutbox: state,
+            ...(options.enableThreadInputs === true ? { threadInputs: state } : {}),
           }),
         }),
     archiveThread: state,
@@ -510,6 +587,56 @@ function fixture(
       run: () => runId(`run_${++runSequence}`),
       workspace: () => workspaceId(`workspace_${++workspaceSequence}`),
     },
+    ...(options.enableThreadContext === true
+      ? {
+          threadContext: {
+            listMessages: async ({ scope, threadId }) =>
+              scope.tenantId === "tenant_owner_a" && threadId === "thread_1"
+                ? {
+                    outcome: "found" as const,
+                    items: [
+                      {
+                        sequence: 1,
+                        runId: "run_1",
+                        role: "user" as const,
+                        text: "Run A",
+                        createdAt: baseTime,
+                      },
+                      {
+                        sequence: 2,
+                        runId: "run_1",
+                        role: "assistant" as const,
+                        text: "Run A 回复",
+                        createdAt: baseTime,
+                      },
+                    ],
+                    hasMore: false,
+                  }
+                : { outcome: "not_found" as const },
+          },
+        }
+      : {}),
+    ...(options.enableThreadContinuity === true
+      ? {
+          threadContinuity: {
+            getStatus: async ({ scope, threadId }) =>
+              scope.tenantId === "tenant_owner_a" && threadId === "thread_1"
+                ? {
+                    outcome: "found" as const,
+                    status: {
+                      boundary: "legacy_anchor" as const,
+                      readMode: "v2" as const,
+                      anchorState: "completed" as const,
+                      queueDepth: 2,
+                      contextSequence: 9,
+                      compactionWindow: 1,
+                      sandboxState: "resuming" as const,
+                    },
+                  }
+                : { outcome: "not_found" as const },
+          },
+        }
+      : {}),
     ...(options.enableExperience === true
       ? {
           experience: {
@@ -529,6 +656,24 @@ function fixture(
                     sequence: 2,
                     kind: "agent_event",
                     payload: { type: "message.delta", delta: "正在处理" },
+                    occurredAt: baseTime,
+                  },
+                  {
+                    sequence: 3,
+                    kind: "agent_event",
+                    payload: { type: "thinking.started" },
+                    occurredAt: baseTime,
+                  },
+                  {
+                    sequence: 4,
+                    kind: "agent_event",
+                    payload: { type: "thinking.delta", delta: "检查依赖" },
+                    occurredAt: baseTime,
+                  },
+                  {
+                    sequence: 5,
+                    kind: "agent_event",
+                    payload: { type: "thinking.completed" },
                     occurredAt: baseTime,
                   },
                 ]
@@ -1124,6 +1269,24 @@ describe("Fastify API 契约", () => {
           kind: "agent_event",
           type: "message.delta",
         },
+        {
+          eventId: "attempt_1-3",
+          sequence: 3,
+          kind: "agent_event",
+          type: "thinking.started",
+        },
+        {
+          eventId: "attempt_1-4",
+          sequence: 4,
+          kind: "agent_event",
+          type: "thinking.delta",
+        },
+        {
+          eventId: "attempt_1-5",
+          sequence: 5,
+          kind: "agent_event",
+          type: "thinking.completed",
+        },
       ],
     });
     const initial = await app.inject({
@@ -1142,6 +1305,75 @@ describe("Fastify API 契约", () => {
     });
     expect(otherTenant.statusCode).toBe(404);
     expect(state.runs).toHaveLength(1);
+  });
+
+  it("V2 read 开启时按 Thread 返回跨 Run 对话，关闭时路由不存在", async () => {
+    const enabled = fixture({ enableThreadContext: true, enableThreadContinuity: true });
+    openApps.push(enabled.app);
+    await enabled.app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-context-0001" },
+      payload: { title: "上下文任务" },
+    });
+    const response = await enabled.app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/context?after=0&limit=100",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.items.map((item: { text: string }) => item.text)).toEqual([
+      "Run A",
+      "Run A 回复",
+    ]);
+    const crossTenant = await enabled.app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/context",
+      headers: { authorization: "Bearer token-b" },
+    });
+    expect(crossTenant.statusCode).toBe(404);
+    const continuity = await enabled.app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/continuity",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(continuity.statusCode).toBe(200);
+    expect(continuity.json().data).toEqual({
+      boundary: "legacy_anchor",
+      readMode: "v2",
+      anchorState: "completed",
+      queueDepth: 2,
+      contextSequence: 9,
+      compactionWindow: 1,
+      sandboxState: "resuming",
+    });
+    expect(
+      (
+        await enabled.app.inject({
+          method: "GET",
+          url: "/v1/threads/thread_1/continuity",
+          headers: { authorization: "Bearer token-b" },
+        })
+      ).statusCode,
+    ).toBe(404);
+
+    const disabled = fixture();
+    openApps.push(disabled.app);
+    const missingRoute = await disabled.app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/context",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(missingRoute.statusCode).toBe(404);
+    expect(
+      (
+        await disabled.app.inject({
+          method: "GET",
+          url: "/v1/threads/thread_1/continuity",
+          headers: { authorization: "Bearer token-a" },
+        })
+      ).statusCode,
+    ).toBe(404);
   });
 
   it("UTF-8 纯文本预览经 API 返回安全文本而不暴露 S3 URL", async () => {
@@ -1633,6 +1865,58 @@ describe("Fastify API 契约", () => {
         })
       ).statusCode,
     ).toBe(404);
+  });
+
+  it("统一输入返回 durable receipt、稳定重放，并保留显式 follow-up Run", async () => {
+    const { app, state } = fixture({ enableThreadInputs: true });
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "input-thread-key" },
+      payload: { title: "输入路由" },
+    });
+    const headers = {
+      authorization: "Bearer token-a",
+      "idempotency-key": "input-steer-key",
+    };
+    const first = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/inputs",
+      headers,
+      payload: { input: "不要改后端", mode: "auto", expectedRunId: "run_1" },
+    });
+    const replay = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/inputs",
+      headers,
+      payload: { input: "不要改后端", mode: "auto", expectedRunId: "run_1" },
+    });
+    expect(first.statusCode).toBe(200);
+    expect(replay.json().data).toEqual(first.json().data);
+    expect(first.json().data).toMatchObject({
+      requestedMode: "auto",
+      disposition: "pending_steer",
+      targetRunId: "run_1",
+    });
+    const receipt = await app.inject({
+      method: "GET",
+      url: `/v1/threads/thread_1/inputs/${first.json().data.receiptId}`,
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(receipt.statusCode).toBe(200);
+    const queued = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/inputs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "input-queue-key" },
+      payload: { input: "下一项任务", mode: "follow_up" },
+    });
+    expect(queued.json().data).toMatchObject({
+      requestedMode: "follow_up",
+      disposition: "queued",
+      queuedRun: { status: "queued" },
+    });
+    expect(state.inputReceipts).toHaveLength(2);
   });
 
   it("Run 只以 queued 原子入队，幂等重放不产生第二个 Run", async () => {

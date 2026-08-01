@@ -41,6 +41,122 @@ export interface ThreadListPage {
   readonly nextCursor?: ThreadListCursor;
 }
 
+export interface ThreadContextMessageView {
+  readonly sequence: number;
+  readonly runId?: string;
+  readonly role: "user" | "assistant" | "runtime";
+  readonly text: string;
+  readonly createdAt: string;
+}
+
+export interface ThreadContextReadPort {
+  listMessages(input: {
+    readonly scope: TenantScope;
+    readonly threadId: ThreadId;
+    readonly after: number;
+    readonly limit: number;
+  }): Promise<
+    | {
+        readonly outcome: "found";
+        readonly items: readonly ThreadContextMessageView[];
+        readonly hasMore: boolean;
+      }
+    | { readonly outcome: "not_found" }
+  >;
+}
+
+export interface ThreadContinuityStatusView {
+  readonly boundary: "new_thread" | "legacy_anchor" | "manual" | "unmigrated";
+  readonly readMode: "legacy" | "v2";
+  readonly anchorState: "none" | "completed";
+  readonly queueDepth: number;
+  readonly contextSequence: number;
+  readonly compactionWindow: number;
+  readonly sandboxState?: "running" | "pausing" | "paused" | "resuming" | "terminated" | "unknown";
+}
+
+export interface ThreadContinuityReadPort {
+  getStatus(input: {
+    readonly scope: TenantScope;
+    readonly threadId: ThreadId;
+  }): Promise<
+    | { readonly outcome: "found"; readonly status: ThreadContinuityStatusView }
+    | { readonly outcome: "not_found" }
+  >;
+}
+
+export type ThreadInputMode = "auto" | "steer" | "follow_up";
+export type ThreadInputDisposition =
+  | "pending_steer"
+  | "steered"
+  | "queued"
+  | "cancelled"
+  | "rejected";
+export type ThreadInputRejectionCode =
+  | "no_active_turn"
+  | "expected_run_mismatch"
+  | "expected_turn_mismatch"
+  | "unsupported_phase"
+  | "target_run_finished";
+
+export interface ThreadInputReceiptEventView {
+  readonly sequence: number;
+  readonly kind: "accepted" | "disposition_changed";
+  readonly disposition: ThreadInputDisposition;
+  readonly targetRunId?: string;
+  readonly targetTurnId?: string;
+  readonly queuedRunId?: string;
+  readonly queueSequence?: number;
+  readonly rejectionCode?: ThreadInputRejectionCode;
+  readonly createdAt: string;
+}
+
+export interface ThreadInputReceiptView {
+  readonly receiptId: string;
+  readonly inputSequence: number;
+  readonly requestedMode: ThreadInputMode;
+  readonly disposition: ThreadInputDisposition;
+  readonly targetRunId?: string;
+  readonly targetTurnId?: string;
+  readonly queuedRunId?: string;
+  readonly queueSequence?: number;
+  readonly appliedContextSequence?: number;
+  readonly rejectionCode?: ThreadInputRejectionCode;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly events: readonly ThreadInputReceiptEventView[];
+}
+
+export type ThreadInputSubmitResult =
+  | {
+      readonly outcome: "accepted" | "replayed";
+      readonly receipt: ThreadInputReceiptView;
+      readonly queuedRun?: Run;
+    }
+  | { readonly outcome: "key_conflict" | "parent_inactive" | "not_authorized" }
+  | { readonly outcome: "legacy_drain_required" };
+
+/** 统一输入、receipt、可选 Run 与 FIFO item 必须在同一 Thread-head 事务中提交。 */
+export interface ThreadInputRoutingPort {
+  submit(input: {
+    readonly scope: TenantScope;
+    readonly thread: Thread;
+    /** 只在进入 follow-up（含 terminal fallback）时使用，不能提前创建。 */
+    readonly fallbackRun: Run;
+    readonly inputText: string;
+    readonly mode: ThreadInputMode;
+    readonly expectedRunId?: string;
+    readonly expectedTurnId?: string;
+    readonly fallbackToFollowUp: boolean;
+    readonly idempotency: IdempotentCommand;
+  }): Promise<ThreadInputSubmitResult>;
+  get(input: {
+    readonly scope: TenantScope;
+    readonly threadId: ThreadId;
+    readonly receiptId: string;
+  }): Promise<ThreadInputReceiptView | undefined>;
+}
+
 export type CreateResult = { readonly outcome: "created" } | { readonly outcome: "conflict" };
 
 export type VersionedCreateResult =
@@ -63,6 +179,10 @@ export type IdempotentCreateResult<T> =
   | { readonly outcome: "parent_inactive" }
   | { readonly outcome: "not_authorized" };
 
+export type IdempotentRunEnqueueResult<T> =
+  | IdempotentCreateResult<T>
+  | { readonly outcome: "legacy_drain_required" };
+
 /** Thread、空 Workspace、幂等记录和有效 Membership 重验必须共用事务。 */
 export interface ThreadCreationPort {
   createThread(input: {
@@ -77,7 +197,7 @@ export interface ThreadCreationPort {
   }): Promise<IdempotentCreateResult<Thread>>;
 }
 
-/** queued Run、enqueue outbox、幂等记录和有效 Membership 重验必须共用事务。 */
+/** Run、durable follow-up（或 legacy outbox）、幂等记录和 Membership 重验必须共用事务。 */
 export interface EnqueueOutboxPort {
   /**
    * 在创建候选 Run 前按原始幂等键读回。父 Thread 可以已归档，但同键同载荷仍必须返回
@@ -87,7 +207,7 @@ export interface EnqueueOutboxPort {
     readonly scope: TenantScope;
     readonly thread: Thread;
     readonly idempotency: IdempotentCommand;
-  }): Promise<IdempotentCreateResult<Run> | { readonly outcome: "not_found" }>;
+  }): Promise<IdempotentRunEnqueueResult<Run> | { readonly outcome: "not_found" }>;
   createQueuedRun(input: {
     readonly scope: TenantScope;
     readonly run: Run;
@@ -96,7 +216,7 @@ export interface EnqueueOutboxPort {
     /** 已由 API 按 UTF-8 字节上限验证，持久层仍必须以数据库约束兜底。 */
     readonly inputText: string;
     readonly idempotency: IdempotentCommand;
-  }): Promise<IdempotentCreateResult<Run>>;
+  }): Promise<IdempotentRunEnqueueResult<Run>>;
 }
 
 export type ArchiveThreadResult =

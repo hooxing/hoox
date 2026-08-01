@@ -3,11 +3,48 @@ import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 export type RuntimeAgentEvent =
   | { type: "agent.started" }
   | { type: "agent.settled" }
+  | { type: "thinking.started" }
+  | { type: "thinking.delta"; delta: string }
+  | { type: "thinking.completed" }
   | { type: "message.delta"; delta: string }
   | { type: "message.completed"; stopReason: "stop" | "length" | "toolUse" }
   | { type: "tool.started"; callId: string; name: string }
   | { type: "tool.updated"; callId: string; name: string }
   | { type: "tool.completed"; callId: string; name: string; isError: boolean }
+  | {
+      /** 只在完整 turn_end 后发布；RunWorker 将其写入 Thread Context，不写入 UI run_events。 */
+      type: "turn.completed";
+      assistant: {
+        readonly content: readonly (
+          | { readonly type: "text"; readonly text: string }
+          | {
+              readonly type: "toolCall";
+              readonly id: string;
+              readonly name: string;
+              readonly arguments: Readonly<Record<string, unknown>>;
+              readonly thoughtSignature?: string;
+            }
+          | {
+              readonly type: "thinking";
+              readonly thinking: string;
+              readonly thinkingSignature?: string;
+              readonly redacted?: boolean;
+            }
+        )[];
+        readonly api: string;
+        readonly provider: string;
+        readonly model: string;
+        readonly stopReason: "stop" | "length" | "toolUse";
+        readonly timestamp: number;
+      };
+      toolResults: readonly {
+        readonly toolCallId: string;
+        readonly toolName: string;
+        readonly text: string;
+        readonly isError: boolean;
+        readonly timestamp: number;
+      }[];
+    }
   | { type: "queue.updated"; steering: readonly string[]; followUp: readonly string[] }
   | { type: "compaction.forbidden"; source: "pi" }
   | {
@@ -26,9 +63,18 @@ export function mapPiEvent(event: AgentSessionEvent): RuntimeAgentEvent | undefi
     case "agent_settled":
       return { type: "agent.settled" };
     case "message_update":
-      return event.assistantMessageEvent.type === "text_delta"
-        ? { type: "message.delta", delta: event.assistantMessageEvent.delta }
-        : undefined;
+      switch (event.assistantMessageEvent.type) {
+        case "thinking_start":
+          return { type: "thinking.started" };
+        case "thinking_delta":
+          return { type: "thinking.delta", delta: event.assistantMessageEvent.delta };
+        case "thinking_end":
+          return { type: "thinking.completed" };
+        case "text_delta":
+          return { type: "message.delta", delta: event.assistantMessageEvent.delta };
+        default:
+          return undefined;
+      }
     case "message_end": {
       // Pi 会为 user、assistant 和 toolResult 都发 message_end；Runtime 只发布 assistant 终态。
       if (event.message.role !== "assistant") return undefined;
@@ -43,6 +89,13 @@ export function mapPiEvent(event: AgentSessionEvent): RuntimeAgentEvent | undefi
             message: "上下文超出模型窗口",
             action: "rebuild_context",
           };
+        }
+        // Pi 会把 turn hook 抛错包装成 assistant error；Runtime 自身协议错误不能伪装成 Provider 故障。
+        if (
+          event.message.errorMessage?.includes("THREAD_CONTEXT_") === true ||
+          event.message.errorMessage?.includes("Pi turn 安全点事件无效") === true
+        ) {
+          return { type: "error", code: "PROTOCOL", message: "模型协议响应无效" };
         }
         return { type: "error", code: "PROVIDER", message: "模型 Provider 调用失败" };
       }
@@ -62,6 +115,70 @@ export function mapPiEvent(event: AgentSessionEvent): RuntimeAgentEvent | undefi
         name: event.toolName,
         isError: event.isError,
       };
+    case "turn_end": {
+      if (event.message.role !== "assistant") return undefined;
+      if (
+        event.message.stopReason === "aborted" ||
+        event.message.stopReason === "error" ||
+        event.message.errorMessage
+      ) {
+        return undefined;
+      }
+      const content: Extract<
+        RuntimeAgentEvent,
+        { type: "turn.completed" }
+      >["assistant"]["content"] = event.message.content.map((item) => {
+        if (item.type === "text") return { type: "text" as const, text: item.text };
+        if (item.type === "thinking") {
+          return {
+            type: "thinking" as const,
+            thinking: item.thinking,
+            ...(item.thinkingSignature === undefined
+              ? {}
+              : { thinkingSignature: item.thinkingSignature }),
+            ...(item.redacted === undefined ? {} : { redacted: item.redacted }),
+          };
+        }
+        if (item.type === "toolCall") {
+          return {
+            type: "toolCall" as const,
+            id: item.id,
+            name: item.name,
+            arguments: item.arguments as Readonly<Record<string, unknown>>,
+            ...(item.thoughtSignature === undefined
+              ? {}
+              : { thoughtSignature: item.thoughtSignature }),
+          };
+        }
+        item satisfies never;
+        throw new TypeError("THREAD_CONTEXT_UNSUPPORTED_ASSISTANT_ITEM");
+      });
+      const toolResults = event.toolResults.map((result) => {
+        const texts = result.content.map((item) => {
+          if (item.type !== "text") throw new TypeError("THREAD_CONTEXT_UNSUPPORTED_TOOL_ITEM");
+          return item.text;
+        });
+        return {
+          toolCallId: result.toolCallId,
+          toolName: result.toolName,
+          text: texts.join("\n"),
+          isError: result.isError,
+          timestamp: result.timestamp,
+        };
+      });
+      return {
+        type: "turn.completed",
+        assistant: {
+          content,
+          api: event.message.api,
+          provider: event.message.provider,
+          model: event.message.model,
+          stopReason: event.message.stopReason,
+          timestamp: event.message.timestamp,
+        },
+        toolResults,
+      };
+    }
     case "queue_update":
       return { type: "queue.updated", steering: event.steering, followUp: event.followUp };
     case "compaction_start":

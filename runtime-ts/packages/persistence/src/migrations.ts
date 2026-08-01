@@ -188,6 +188,9 @@ export async function migrateDown(
         if (source === undefined || source.checksum !== record.checksum) {
           throw new PersistenceError("MIGRATION_MISMATCH", `无法安全回退迁移 ${record.version}`);
         }
+        // 某个 down migration 可能为冲刷自身约束临时切到 IMMEDIATE；下一项必须恢复
+        // DEFERRABLE 约束的初始语义，避免一个迁移的会话状态污染后续回退脚本。
+        await client.query("SET CONSTRAINTS ALL DEFERRED");
         await client.query(source.downSql);
         await client.query("DELETE FROM runtime_schema_migrations WHERE version = $1", [
           record.version,

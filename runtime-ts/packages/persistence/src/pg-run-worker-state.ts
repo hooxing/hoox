@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { isoTimestamp, type Run, type Workspace, workspaceRevisionId } from "@cube-runtime/domain";
+import {
+  isoTimestamp,
+  type Run,
+  type Sha256Digest,
+  type Workspace,
+  workspaceRevisionId,
+} from "@cube-runtime/domain";
 import type {
   ClaimExecutionResult,
   ControlledRolloutProjection,
@@ -22,6 +28,7 @@ import type {
 } from "@cube-runtime/run-contracts";
 import {
   assertControlledRolloutProjection,
+  digestCanonical,
   outboxPayloadDigest,
   rolloutProjectionDigest,
   runtimeMutationDigest,
@@ -30,8 +37,11 @@ import {
 } from "@cube-runtime/run-contracts/mutation-protocol";
 import { parseWorkspaceManifest } from "@cube-runtime/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
+import { lockThreadExecutionHead, settleActiveThreadRun } from "./pg-thread-run-queue.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
+import { appendThreadContext } from "./thread-context.js";
+import { applyThreadSandboxTerminal } from "./thread-sandbox-session.js";
 import { workspaceArtifactMediaType } from "./workspace-artifact-media.js";
 
 type AppliedMutation = Extract<
@@ -50,6 +60,10 @@ class RuntimeWriteAbort extends Error {
 export interface PgRunWorkerStateOptions {
   /** 故障测试可在 COMMIT 后抛错，模拟客户端没有收到提交响应。 */
   readonly afterCommit?: (operation: "mutate") => void | Promise<void>;
+  readonly threadContextWriteEnabled?: boolean;
+  readonly threadInputRoutingV2Enabled?: boolean;
+  readonly threadSandboxSessionReuseEnabled?: boolean;
+  readonly threadSandboxHandoffLeaseMs?: number;
 }
 
 export interface InitializeRunExecutionInput {
@@ -162,14 +176,25 @@ function scopeMatches(row: QueryResultRow, scope: ExecutionScope): boolean {
 }
 
 function fenceMatches(row: QueryResultRow, fence: ExecutionFence): boolean {
-  return (
+  const existingFenceMatches =
     scopeMatches(row, fence.scope) &&
     row.claim_token === fence.runClaim.token &&
     Number(row.claim_epoch) === fence.runClaim.epoch &&
     Number(row.claim_workspace_lease_epoch) === fence.workspaceLease.epoch &&
     Number(row.fence_lease_epoch) === fence.workspaceLease.epoch &&
     row.lease_root_run_id === fence.workspaceLease.rootRunId &&
-    Number(row.lease_row_epoch) === fence.workspaceLease.epoch
+    Number(row.lease_row_epoch) === fence.workspaceLease.epoch;
+  if (!existingFenceMatches) return false;
+  if (row.queue_state === null || row.queue_state === undefined) return true;
+  return (
+    row.queue_state === "active" &&
+    row.head_active_run_id === fence.scope.runId &&
+    row.head_writer_owner === row.worker_id &&
+    row.head_writer_token === fence.runClaim.token &&
+    Number(row.head_writer_epoch) === fence.runClaim.epoch &&
+    row.queue_claim_owner === row.worker_id &&
+    row.queue_claim_token === fence.runClaim.token &&
+    Number(row.queue_claim_epoch) === fence.runClaim.epoch
   );
 }
 
@@ -223,7 +248,20 @@ function mutationStorageShapeValid(command: RuntimeMutation): boolean {
         ) !== undefined,
     ) ||
     (command.rolloutProjection !== undefined &&
-      serializedJson(command.rolloutProjection) === undefined)
+      serializedJson(command.rolloutProjection) === undefined) ||
+    (command.threadContextAppend !== undefined &&
+      serializedJson(command.threadContextAppend) === undefined) ||
+    (command.threadSteer !== undefined &&
+      (!boundedIdentifier(command.threadSteer.receiptId) ||
+        !/^turn-[1-9][0-9]{0,15}$/.test(command.threadSteer.targetTurnId) ||
+        !/^[0-9a-f]{64}$/.test(command.threadSteer.bodyDigest))) ||
+    (command.threadSteer !== undefined && command.threadContextAppend !== undefined) ||
+    (command.threadSandboxTerminal !== undefined &&
+      (!boundedIdentifier(command.threadSandboxTerminal.sessionId) ||
+        !boundedIdentifier(command.threadSandboxTerminal.leaseId) ||
+        !boundedIdentifier(command.threadSandboxTerminal.leaseToken) ||
+        !Number.isSafeInteger(command.threadSandboxTerminal.generation) ||
+        command.threadSandboxTerminal.generation < 1))
   ) {
     return false;
   }
@@ -713,10 +751,35 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         this.pool,
         { tenantId: input.scope.tenantId },
         async (client) => {
+          const threadHead = await lockThreadExecutionHead(
+            client,
+            input.scope.tenantId,
+            input.scope.threadId,
+          );
+          const queuedItem = await client.query<{
+            readonly state: string;
+            readonly claim_owner: string | null;
+            readonly claim_token: string | null;
+            readonly claim_epoch: string;
+            readonly claim_expires_at: Date | null;
+          }>(
+            `SELECT state,claim_owner,claim_token,claim_epoch::text,claim_expires_at
+               FROM thread_follow_up_queue
+              WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3 FOR UPDATE`,
+            [input.scope.tenantId, input.scope.threadId, input.scope.runId],
+          );
+          const queueRow = queuedItem.rows[0];
+          if (
+            queueRow !== undefined &&
+            (queueRow.state !== "active" || threadHead?.active_run_id !== input.scope.runId)
+          ) {
+            return { outcome: "busy" } as const;
+          }
           const aggregate = await client.query(
             `SELECT ${aggregateColumns}, input.root_run_id, input.base_revision_id,
                     input.input_text, input.answer_text,
-                    input.initial_projection, input.initial_projection_digest
+                    input.initial_projection, input.initial_projection_digest,
+                    input.context_through_sequence
                FROM runs r ${aggregateJoins}
               WHERE r.tenant_id=$1 AND r.id=$2
               FOR UPDATE OF r, w, input`,
@@ -781,12 +844,21 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           }
           const attemptId = `attempt-${randomUUID()}`;
           const claimToken = `claim-${randomUUID()}`;
-          const claimEpochResult = await client.query<{ next_epoch: string }>(
-            `SELECT (COALESCE(max(claim_epoch),0)+1)::text AS next_epoch
-               FROM run_claims WHERE tenant_id=$1 AND run_id=$2`,
-            [input.scope.tenantId, input.scope.runId],
-          );
-          const claimEpoch = Number(claimEpochResult.rows[0]?.next_epoch ?? "1");
+          const claimEpoch =
+            queueRow === undefined
+              ? Number(
+                  (
+                    await client.query<{ next_epoch: string }>(
+                      `SELECT (COALESCE(max(claim_epoch),0)+1)::text AS next_epoch
+                         FROM run_claims WHERE tenant_id=$1 AND run_id=$2`,
+                      [input.scope.tenantId, input.scope.runId],
+                    )
+                  ).rows[0]?.next_epoch ?? "1",
+                )
+              : Number(threadHead?.writer_epoch ?? "0") + 1;
+          if (!Number.isSafeInteger(claimEpoch) || claimEpoch < 1) {
+            throw new TypeError("Thread writer epoch 无效");
+          }
           const leaseEpoch = Number(row.lease_epoch) + 1;
           const previousProjection = await client.query<{
             version: string;
@@ -893,6 +965,84 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               expiresAt,
             ],
           );
+          if (queueRow !== undefined) {
+            const writer = await client.query(
+              `UPDATE thread_execution_heads
+                  SET writer_owner=$4,writer_token=$5,writer_epoch=$6,writer_expires_at=$7,
+                      version=version+1,updated_at=$8
+                WHERE tenant_id=$1 AND thread_id=$2 AND active_run_id=$3
+                  AND writer_owner IS NULL AND writer_token IS NULL AND writer_expires_at IS NULL`,
+              [
+                input.scope.tenantId,
+                input.scope.threadId,
+                input.scope.runId,
+                workerId,
+                claimToken,
+                claimEpoch,
+                expiresAt,
+                databaseNow,
+              ],
+            );
+            const queueClaim = await client.query(
+              `UPDATE thread_follow_up_queue
+                  SET claim_owner=$4,claim_token=$5,claim_epoch=$6,claim_expires_at=$7
+                WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3 AND state='active'
+                  AND claim_owner IS NULL AND claim_token IS NULL AND claim_expires_at IS NULL`,
+              [
+                input.scope.tenantId,
+                input.scope.threadId,
+                input.scope.runId,
+                workerId,
+                claimToken,
+                claimEpoch,
+                expiresAt,
+              ],
+            );
+            if (writer.rowCount !== 1 || queueClaim.rowCount !== 1) {
+              throw new TypeError("Thread writer claim 冲突");
+            }
+          }
+          if (this.options.threadContextWriteEnabled === true) {
+            if (queueRow === undefined) return { outcome: "recovery_required" } as const;
+            const userText = String(row.answer_text ?? row.input_text);
+            const startedBody = {
+              attemptId,
+              runId: input.scope.runId,
+              baseRevisionId: input.scope.baseRevisionId ?? null,
+            };
+            const userBody = { role: "user", text: userText };
+            await appendThreadContext(
+              client,
+              { scope: input.scope, attemptId },
+              {
+                schemaVersion: 1,
+                idempotencyKey: `${attemptId}/claim`,
+                entries: [
+                  {
+                    entryId: `${attemptId}/run-started`,
+                    kind: "run_started",
+                    body: {
+                      storage: "inline",
+                      value: startedBody,
+                      sha256: digestCanonical(startedBody),
+                      size: Buffer.byteLength(JSON.stringify(startedBody), "utf8"),
+                    },
+                  },
+                  {
+                    entryId: `${attemptId}/user-message`,
+                    kind: "user_message",
+                    body: {
+                      storage: "inline",
+                      value: userBody,
+                      sha256: digestCanonical(userBody),
+                      size: Buffer.byteLength(JSON.stringify(userBody), "utf8"),
+                    },
+                  },
+                ],
+              },
+              databaseNow,
+            );
+          }
           await client.query(
             `INSERT INTO rollout_projections(tenant_id,run_id,attempt_id,version,projection,digest)
              VALUES ($1,$2,$3,$4,$5::jsonb,$6)
@@ -923,6 +1073,9 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               input: String(row.input_text),
               ...(row.answer_text === null ? {} : { answer: String(row.answer_text) }),
               rolloutProjection: projection,
+              ...(row.context_through_sequence === null
+                ? {}
+                : { contextThroughSequence: Number(row.context_through_sequence) }),
             },
             fence,
             databaseNow,
@@ -953,12 +1106,20 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           if (row.run_status !== "running") return { outcome: "fence_lost" } as const;
           const nowResult = await client.query<{ database_now: Date; expires_at: Date }>(
             `SELECT clock_timestamp() AS database_now,
-                    GREATEST(
-                      clock_timestamp() + ($1::bigint * interval '1 millisecond'),
-                      $2::timestamptz + interval '1 millisecond',
-                      $3::timestamptz + interval '1 millisecond'
-                    ) AS expires_at`,
-            [leaseDurationMs, row.claim_expires_at, row.lease_expires_at],
+                     GREATEST(
+                       clock_timestamp() + ($1::bigint * interval '1 millisecond'),
+                       $2::timestamptz + interval '1 millisecond',
+                       $3::timestamptz + interval '1 millisecond',
+                       $4::timestamptz + interval '1 millisecond',
+                       $5::timestamptz + interval '1 millisecond'
+                     ) AS expires_at`,
+            [
+              leaseDurationMs,
+              row.claim_expires_at,
+              row.lease_expires_at,
+              row.head_writer_expires_at,
+              row.queue_claim_expires_at,
+            ],
           );
           const nowRow = nowResult.rows[0];
           if (nowRow === undefined) throw new Error("数据库时钟查询没有返回行");
@@ -966,11 +1127,85 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           if (
             Date.parse(dbTimestamp(row.claim_expires_at)) <= Date.parse(databaseNow) ||
             Date.parse(dbTimestamp(row.lease_expires_at)) <= Date.parse(databaseNow) ||
+            (row.queue_state !== null &&
+              (Date.parse(dbTimestamp(row.head_writer_expires_at)) <= Date.parse(databaseNow) ||
+                Date.parse(dbTimestamp(row.queue_claim_expires_at)) <= Date.parse(databaseNow))) ||
             row.claim_released_at !== null
           ) {
             return { outcome: "fence_lost" } as const;
           }
           const expiresAt = dbTimestamp(nowRow.expires_at);
+          if (this.options.threadSandboxSessionReuseEnabled === true) {
+            const sandboxLease = await client.query<{
+              session_id: string;
+              lease_id: string;
+              attempt_id: string | null;
+            }>(
+              `SELECT session_id,lease_id,attempt_id
+                 FROM thread_sandbox_leases
+                WHERE tenant_id=$1 AND run_id=$2 AND released_at IS NULL
+                FOR UPDATE`,
+              [input.fence.scope.tenantId, input.fence.scope.runId],
+            );
+            const activeSandboxLease = sandboxLease.rows[0];
+            if (
+              activeSandboxLease !== undefined &&
+              activeSandboxLease.attempt_id !== null &&
+              activeSandboxLease.attempt_id !== String(row.attempt_id)
+            ) {
+              return { outcome: "fence_lost" } as const;
+            }
+            if (activeSandboxLease !== undefined) {
+              const renewed = await client.query(
+                `UPDATE thread_sandbox_leases
+                    SET expires_at=GREATEST(expires_at,$5::timestamptz),updated_at=$6
+                  WHERE tenant_id=$1 AND session_id=$2 AND lease_id=$3 AND run_id=$4
+                    AND released_at IS NULL AND (attempt_id IS NULL OR attempt_id=$7)`,
+                [
+                  input.fence.scope.tenantId,
+                  activeSandboxLease.session_id,
+                  activeSandboxLease.lease_id,
+                  input.fence.scope.runId,
+                  expiresAt,
+                  databaseNow,
+                  row.attempt_id,
+                ],
+              );
+              if (renewed.rowCount !== 1) return { outcome: "fence_lost" } as const;
+            }
+          }
+          if (row.queue_state !== null) {
+            const writer = await client.query(
+              `UPDATE thread_execution_heads SET writer_expires_at=$6,updated_at=$7
+                 WHERE tenant_id=$1 AND thread_id=$2 AND active_run_id=$3
+                   AND writer_token=$4 AND writer_epoch=$5`,
+              [
+                input.fence.scope.tenantId,
+                input.fence.scope.threadId,
+                input.fence.scope.runId,
+                input.fence.runClaim.token,
+                input.fence.runClaim.epoch,
+                expiresAt,
+                databaseNow,
+              ],
+            );
+            const queue = await client.query(
+              `UPDATE thread_follow_up_queue SET claim_expires_at=$6
+                 WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3 AND state='active'
+                   AND claim_token=$4 AND claim_epoch=$5`,
+              [
+                input.fence.scope.tenantId,
+                input.fence.scope.threadId,
+                input.fence.scope.runId,
+                input.fence.runClaim.token,
+                input.fence.runClaim.epoch,
+                expiresAt,
+              ],
+            );
+            if (writer.rowCount !== 1 || queue.rowCount !== 1) {
+              return { outcome: "fence_lost" } as const;
+            }
+          }
           await client.query(
             `UPDATE run_claims SET expires_at=$3, updated_at=$4
               WHERE tenant_id=$1 AND attempt_id=$2`,
@@ -1036,38 +1271,61 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             return { outcome: "conflict" } as const;
           }
           if (input.effect === "model_continue") {
-            if (row?.attempt_stage !== "workspace_verified") {
-              return { outcome: "conflict" } as const;
-            }
-            const correction = await client.query(
-              `SELECT 1 FROM run_events
-                WHERE tenant_id=$1 AND attempt_id=$2
-                  AND kind='artifact_correction_requested'
-                  AND payload->>'code'='ARTIFACT_NOT_READY'
-                  AND $3 = attempt_id || '/model/correction/' || (payload->>'round')
-                LIMIT 1`,
-              [input.fence.scope.tenantId, row.attempt_id, input.call.callId],
-            );
-            if (correction.rowCount !== 1) return { outcome: "conflict" } as const;
-            const budget = await client.query<{ correction_count: string; feedback_bytes: string }>(
-              `SELECT count(*)::text AS correction_count,
-                      COALESCE(sum(octet_length(payload->>'feedback')), 0)::text AS feedback_bytes
-                 FROM run_events
-                WHERE tenant_id=$1 AND attempt_id=$2
-                  AND kind='artifact_correction_requested'`,
-              [input.fence.scope.tenantId, row.attempt_id],
-            );
-            const correctionCount = Number(budget.rows[0]?.correction_count);
-            const feedbackBytes = Number(budget.rows[0]?.feedback_bytes);
-            if (
-              !Number.isSafeInteger(correctionCount) ||
-              correctionCount < 1 ||
-              correctionCount > 2 ||
-              !Number.isSafeInteger(feedbackBytes) ||
-              feedbackBytes < 1 ||
-              feedbackBytes > 8 * 1_024
-            ) {
-              return { outcome: "conflict" } as const;
+            const steer =
+              row?.attempt_stage === "model_execution_started"
+                ? await client.query(
+                    `SELECT 1 FROM thread_input_receipts
+                      WHERE tenant_id=$1 AND thread_id=$2 AND target_run_id=$3
+                        AND state='consumed' AND disposition='steered'
+                        AND applied_context_sequence IS NOT NULL
+                        AND $4 = $5 || '/model/steer/' || receipt_id
+                      LIMIT 1`,
+                    [
+                      input.fence.scope.tenantId,
+                      input.fence.scope.threadId,
+                      input.fence.scope.runId,
+                      input.call.callId,
+                      row.attempt_id,
+                    ],
+                  )
+                : undefined;
+            if (steer?.rowCount !== 1) {
+              if (row?.attempt_stage !== "workspace_verified") {
+                return { outcome: "conflict" } as const;
+              }
+              const correction = await client.query(
+                `SELECT 1 FROM run_events
+                  WHERE tenant_id=$1 AND attempt_id=$2
+                    AND kind='artifact_correction_requested'
+                    AND payload->>'code'='ARTIFACT_NOT_READY'
+                    AND $3 = attempt_id || '/model/correction/' || (payload->>'round')
+                  LIMIT 1`,
+                [input.fence.scope.tenantId, row.attempt_id, input.call.callId],
+              );
+              if (correction.rowCount !== 1) return { outcome: "conflict" } as const;
+              const budget = await client.query<{
+                correction_count: string;
+                feedback_bytes: string;
+              }>(
+                `SELECT count(*)::text AS correction_count,
+                        COALESCE(sum(octet_length(payload->>'feedback')), 0)::text AS feedback_bytes
+                   FROM run_events
+                  WHERE tenant_id=$1 AND attempt_id=$2
+                    AND kind='artifact_correction_requested'`,
+                [input.fence.scope.tenantId, row.attempt_id],
+              );
+              const correctionCount = Number(budget.rows[0]?.correction_count);
+              const feedbackBytes = Number(budget.rows[0]?.feedback_bytes);
+              if (
+                !Number.isSafeInteger(correctionCount) ||
+                correctionCount < 1 ||
+                correctionCount > 2 ||
+                !Number.isSafeInteger(feedbackBytes) ||
+                feedbackBytes < 1 ||
+                feedbackBytes > 8 * 1_024
+              ) {
+                return { outcome: "conflict" } as const;
+              }
             }
           }
           if (input.effect === "tool_execution") {
@@ -1137,6 +1395,60 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
       if (isPgCode(error, "23505") || isPgCode(error, "23503") || isPgCode(error, "23514")) {
         return { outcome: "conflict" };
       }
+      return { outcome: "unavailable" };
+    }
+  }
+
+  async readPendingThreadSteer(input: {
+    readonly fence: ExecutionFence;
+  }): ReturnType<ExecutionPersistencePort["readPendingThreadSteer"]> {
+    if (this.options.threadInputRoutingV2Enabled !== true) return { outcome: "none" };
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        { tenantId: input.fence.scope.tenantId },
+        async (client) => {
+          const row = await this.lockFenceState(client, input.fence.scope);
+          const fenceOutcome = await this.validateLockedFence(client, row, input.fence);
+          if (fenceOutcome !== "active") return { outcome: fenceOutcome } as const;
+          if (
+            row?.attempt_stage !== "model_execution_started" ||
+            row.head_active_turn_id === null
+          ) {
+            return { outcome: "none" } as const;
+          }
+          const receipt = await client.query<{
+            readonly receipt_id: string;
+            readonly target_turn_id: string;
+            readonly input_text: string;
+            readonly body_digest: Sha256Digest;
+          }>(
+            `SELECT receipt_id,target_turn_id,input_text,body_digest
+               FROM thread_input_receipts
+              WHERE tenant_id=$1 AND thread_id=$2 AND target_run_id=$3
+                AND target_turn_id=$4 AND state='pending' AND disposition='pending_steer'
+              ORDER BY input_sequence LIMIT 1 FOR UPDATE`,
+            [
+              input.fence.scope.tenantId,
+              input.fence.scope.threadId,
+              input.fence.scope.runId,
+              row.head_active_turn_id,
+            ],
+          );
+          const pending = receipt.rows[0];
+          return pending === undefined
+            ? ({ outcome: "none" } as const)
+            : ({
+                outcome: "pending",
+                receiptId: pending.receipt_id,
+                targetTurnId: pending.target_turn_id,
+                inputText: pending.input_text,
+                bodyDigest: pending.body_digest,
+              } as const);
+        },
+        { isolationLevel: "SERIALIZABLE" },
+      );
+    } catch {
       return { outcome: "unavailable" };
     }
   }
@@ -1291,7 +1603,11 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           if (
             row.claim_released_at !== null ||
             (Date.parse(dbTimestamp(row.claim_expires_at)) > Date.parse(databaseNow) &&
-              Date.parse(dbTimestamp(row.lease_expires_at)) > Date.parse(databaseNow))
+              Date.parse(dbTimestamp(row.lease_expires_at)) > Date.parse(databaseNow) &&
+              (row.queue_state !== "active" ||
+                row.head_active_run_id !== input.scope.runId ||
+                (Date.parse(dbTimestamp(row.head_writer_expires_at)) > Date.parse(databaseNow) &&
+                  Date.parse(dbTimestamp(row.queue_claim_expires_at)) > Date.parse(databaseNow))))
           ) {
             return "not_expired" as const;
           }
@@ -1335,6 +1651,29 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               Number(row.lease_row_epoch),
             ],
           );
+          if (attemptStatus === "failed") {
+            await settleActiveThreadRun(client, {
+              tenantId: input.scope.tenantId,
+              threadId: input.scope.threadId,
+              runId: input.scope.runId,
+              runStatus: "failed",
+              databaseNow,
+            });
+          } else if (row.queue_state === "active" && row.head_active_run_id === input.scope.runId) {
+            await client.query(
+              `UPDATE thread_execution_heads
+                  SET writer_owner=NULL,writer_token=NULL,writer_expires_at=NULL,
+                      version=version+1,updated_at=$4
+                WHERE tenant_id=$1 AND thread_id=$2 AND active_run_id=$3`,
+              [input.scope.tenantId, input.scope.threadId, input.scope.runId, databaseNow],
+            );
+            await client.query(
+              `UPDATE thread_follow_up_queue
+                  SET claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL
+                WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3 AND state='active'`,
+              [input.scope.tenantId, input.scope.threadId, input.scope.runId],
+            );
+          }
           return "recovered" as const;
         },
         { isolationLevel: "SERIALIZABLE" },
@@ -1417,6 +1756,56 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     }
     if (!attemptTransitionAllowed(row.attempt_status, command.nextAttemptStatus)) {
       return { outcome: "conflict" };
+    }
+    if (
+      command.threadSandboxTerminal !== undefined &&
+      (this.options.threadSandboxSessionReuseEnabled !== true ||
+        command.releaseFences !== true ||
+        command.nextRunStatus === undefined ||
+        !["waiting", "succeeded", "failed", "cancelled"].includes(command.nextRunStatus))
+    ) {
+      return { outcome: "conflict" };
+    }
+    let pendingSteer:
+      | {
+          readonly receipt_id: string;
+          readonly target_turn_id: string;
+          readonly input_text: string;
+          readonly body_digest: Sha256Digest;
+        }
+      | undefined;
+    if (command.threadSteer !== undefined) {
+      if (
+        this.options.threadInputRoutingV2Enabled !== true ||
+        this.options.threadContextWriteEnabled !== true ||
+        row.attempt_stage !== "model_execution_started" ||
+        row.head_active_run_id !== command.fence.scope.runId ||
+        row.head_active_turn_id !== command.threadSteer.targetTurnId
+      ) {
+        return { outcome: "conflict" };
+      }
+      const receipt = await client.query<NonNullable<typeof pendingSteer>>(
+        `SELECT receipt_id,target_turn_id,input_text,body_digest
+           FROM thread_input_receipts
+          WHERE tenant_id=$1 AND thread_id=$2 AND receipt_id=$3
+            AND target_run_id=$4 AND target_turn_id=$5
+            AND state='pending' AND disposition='pending_steer'
+          FOR UPDATE`,
+        [
+          command.fence.scope.tenantId,
+          command.fence.scope.threadId,
+          command.threadSteer.receiptId,
+          command.fence.scope.runId,
+          command.threadSteer.targetTurnId,
+        ],
+      );
+      pendingSteer = receipt.rows[0];
+      if (
+        pendingSteer === undefined ||
+        pendingSteer.body_digest !== command.threadSteer.bodyDigest
+      ) {
+        return { outcome: "conflict" };
+      }
     }
     if (command.effectInvocation !== undefined) {
       const matchingStarted = command.events.filter(
@@ -1648,6 +2037,93 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
       };
     }
 
+    let threadContextReceipt: RuntimeMutationReceiptV1["threadContext"];
+    let threadSteerReceipt: RuntimeMutationReceiptV1["threadSteer"];
+    if (pendingSteer !== undefined && command.threadSteer !== undefined) {
+      const userBody = { role: "user", text: pendingSteer.input_text };
+      threadContextReceipt = await appendThreadContext(
+        client,
+        { scope: command.fence.scope, attemptId: String(row.attempt_id) },
+        {
+          schemaVersion: 1,
+          idempotencyKey: `${row.attempt_id}/steer/${pendingSteer.receipt_id}`,
+          entries: [
+            {
+              entryId: `${row.attempt_id}/steer/${pendingSteer.receipt_id}/user-message`,
+              kind: "user_message",
+              body: {
+                storage: "inline",
+                value: userBody,
+                sha256: digestCanonical(userBody),
+                size: Buffer.byteLength(JSON.stringify(userBody), "utf8"),
+              },
+            },
+          ],
+        },
+        databaseNow,
+      );
+      const applied = await client.query(
+        `UPDATE thread_input_receipts
+            SET state='consumed',disposition='steered',applied_context_sequence=$4,
+                consumed_at=$5,updated_at=$5
+          WHERE tenant_id=$1 AND thread_id=$2 AND receipt_id=$3
+            AND state='pending' AND disposition='pending_steer'`,
+        [
+          command.fence.scope.tenantId,
+          command.fence.scope.threadId,
+          pendingSteer.receipt_id,
+          threadContextReceipt.firstSequence,
+          databaseNow,
+        ],
+      );
+      if (applied.rowCount !== 1) throw new RuntimeWriteAbort("conflict");
+      await client.query(
+        `INSERT INTO thread_input_receipt_events(
+           tenant_id,thread_id,receipt_id,event_sequence,event_kind,disposition,
+           target_run_id,target_turn_id,created_at
+         ) VALUES ($1,$2,$3,2,'disposition_changed','steered',$4,$5,$6)`,
+        [
+          command.fence.scope.tenantId,
+          command.fence.scope.threadId,
+          pendingSteer.receipt_id,
+          command.fence.scope.runId,
+          pendingSteer.target_turn_id,
+          databaseNow,
+        ],
+      );
+      await client.query(
+        `INSERT INTO thread_continuity_metric_observations(
+           tenant_id,observation_id,thread_id,run_id,metric_name,value,unit,outcome
+         ) SELECT $1,$2,$3,$4,'steer_apply_latency_ms',
+                  GREATEST(0,EXTRACT(EPOCH FROM ($5::timestamptz-receipt.created_at))*1000),
+                  'milliseconds','steered'
+             FROM thread_input_receipts receipt
+            WHERE receipt.tenant_id=$1 AND receipt.thread_id=$3 AND receipt.receipt_id=$6
+         ON CONFLICT (tenant_id,observation_id) DO NOTHING`,
+        [
+          command.fence.scope.tenantId,
+          `${pendingSteer.receipt_id}:steer-latency`,
+          command.fence.scope.threadId,
+          command.fence.scope.runId,
+          databaseNow,
+          pendingSteer.receipt_id,
+        ],
+      );
+      threadSteerReceipt = {
+        receiptId: pendingSteer.receipt_id,
+        targetTurnId: pendingSteer.target_turn_id,
+        appliedContextSequence: threadContextReceipt.firstSequence,
+        bodyDigest: pendingSteer.body_digest,
+      };
+    } else if (command.threadContextAppend !== undefined) {
+      threadContextReceipt = await appendThreadContext(
+        client,
+        { scope: command.fence.scope, attemptId: String(row.attempt_id) },
+        command.threadContextAppend,
+        databaseNow,
+      );
+    }
+
     if (command.effectInvocation !== undefined) {
       await client.query(
         `INSERT INTO effect_invocations(tenant_id,attempt_id,call_id,tool_name,registered_at)
@@ -1792,7 +2268,85 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           command.fence.workspaceLease.epoch,
         ],
       );
+      if (command.nextRunStatus === "waiting" && row.queue_state === "active") {
+        const releasedWriter = await client.query(
+          `UPDATE thread_execution_heads
+              SET writer_owner=NULL,writer_token=NULL,writer_expires_at=NULL,
+                  version=version+1,updated_at=$6
+            WHERE tenant_id=$1 AND thread_id=$2 AND active_run_id=$3
+              AND writer_token=$4 AND writer_epoch=$5`,
+          [
+            command.fence.scope.tenantId,
+            command.fence.scope.threadId,
+            command.fence.scope.runId,
+            command.fence.runClaim.token,
+            command.fence.runClaim.epoch,
+            databaseNow,
+          ],
+        );
+        const releasedQueueClaim = await client.query(
+          `UPDATE thread_follow_up_queue
+              SET claim_owner=NULL,claim_token=NULL,claim_expires_at=NULL
+            WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3 AND state='active'
+              AND claim_token=$4 AND claim_epoch=$5`,
+          [
+            command.fence.scope.tenantId,
+            command.fence.scope.threadId,
+            command.fence.scope.runId,
+            command.fence.runClaim.token,
+            command.fence.runClaim.epoch,
+          ],
+        );
+        if (releasedWriter.rowCount !== 1 || releasedQueueClaim.rowCount !== 1) {
+          throw new RuntimeWriteAbort("fence_lost");
+        }
+      }
     }
+
+    let activatedNextRunId: string | undefined;
+    if (
+      command.releaseFences === true &&
+      command.nextRunStatus !== undefined &&
+      ["succeeded", "failed", "cancelled"].includes(command.nextRunStatus)
+    ) {
+      await settleActiveThreadRun(client, {
+        tenantId: command.fence.scope.tenantId,
+        threadId: command.fence.scope.threadId,
+        runId: command.fence.scope.runId,
+        runStatus: command.nextRunStatus as "succeeded" | "failed" | "cancelled",
+        databaseNow,
+      });
+      const activeHead = await client.query<{ active_run_id: string | null }>(
+        `SELECT active_run_id FROM thread_execution_heads
+          WHERE tenant_id=$1 AND thread_id=$2`,
+        [command.fence.scope.tenantId, command.fence.scope.threadId],
+      );
+      const activeRunId = activeHead.rows[0]?.active_run_id ?? null;
+      if (activeRunId !== null && activeRunId !== command.fence.scope.runId) {
+        activatedNextRunId = activeRunId;
+      }
+    }
+
+    const threadSandboxReceipt =
+      command.threadSandboxTerminal === undefined
+        ? undefined
+        : await applyThreadSandboxTerminal(client, {
+            scope: command.fence.scope,
+            attemptId: String(row.attempt_id),
+            command: command.threadSandboxTerminal,
+            ...(command.workspaceChange?.revisionId === undefined && row.current_revision_id == null
+              ? {}
+              : {
+                  currentRevisionId:
+                    command.workspaceChange?.revisionId ?? String(row.current_revision_id),
+                }),
+            ...(activatedNextRunId === undefined ? {} : { nextRunId: activatedNextRunId }),
+            databaseNow,
+            handoffLeaseMs: boundedDuration(
+              this.options.threadSandboxHandoffLeaseMs ?? 30_000,
+              "threadSandboxHandoffLeaseMs",
+            ),
+          });
 
     const state = await this.loadState(client, command.fence.scope, String(row.attempt_id));
     if (state === undefined) throw new Error("mutation 后无法读回状态");
@@ -1810,6 +2364,9 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         : { effectInvocation: command.effectInvocation }),
       ...(projectionReceipt === undefined ? {} : { projection: projectionReceipt }),
       ...(workspaceReceipt === undefined ? {} : { workspace: workspaceReceipt }),
+      ...(threadContextReceipt === undefined ? {} : { threadContext: threadContextReceipt }),
+      ...(threadSteerReceipt === undefined ? {} : { threadSteer: threadSteerReceipt }),
+      ...(threadSandboxReceipt === undefined ? {} : { threadSandbox: threadSandboxReceipt }),
     };
     const applied: AppliedMutation = {
       outcome: "applied",
@@ -1998,6 +2555,12 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     client: PoolClient,
     scope: ExecutionScope,
   ): Promise<QueryResultRow | undefined> {
+    await lockThreadExecutionHead(client, scope.tenantId, scope.threadId);
+    await client.query(
+      `SELECT 1 FROM thread_follow_up_queue
+        WHERE tenant_id=$1 AND thread_id=$2 AND run_id=$3 FOR UPDATE`,
+      [scope.tenantId, scope.threadId, scope.runId],
+    );
     const result = await client.query(
       `SELECT attempt.tenant_id,attempt.attempt_id,attempt.run_id,attempt.thread_id,attempt.workspace_id,
               attempt.root_run_id,attempt.base_revision_id,
@@ -2006,13 +2569,21 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               attempt.version AS attempt_version,
               attempt.next_event_sequence,attempt.projection_version,
               attempt.model_execution_started,
-              claim.claim_token,claim.claim_epoch,claim.expires_at AS claim_expires_at,
+              claim.worker_id,claim.claim_token,claim.claim_epoch,claim.expires_at AS claim_expires_at,
               claim.workspace_lease_epoch AS claim_workspace_lease_epoch,
               claim.released_at AS claim_released_at,
               fence.lease_epoch AS fence_lease_epoch,
               lease.root_run_id AS lease_root_run_id,lease.epoch AS lease_row_epoch,
               lease.expires_at AS lease_expires_at,
-              r.status AS run_status,w.current_revision_number,w.current_revision_id,w.lease_epoch
+              r.status AS run_status,w.current_revision_number,w.current_revision_id,w.lease_epoch,
+              head.active_run_id AS head_active_run_id,
+              head.active_turn_id AS head_active_turn_id,
+              head.writer_owner AS head_writer_owner,head.writer_token AS head_writer_token,
+              head.writer_epoch AS head_writer_epoch,
+              head.writer_expires_at AS head_writer_expires_at,
+              queue.state AS queue_state,queue.claim_owner AS queue_claim_owner,
+              queue.claim_token AS queue_claim_token,queue.claim_epoch AS queue_claim_epoch,
+              queue.claim_expires_at AS queue_claim_expires_at
          FROM execution_attempts attempt
          JOIN run_claims claim
            ON claim.tenant_id=attempt.tenant_id AND claim.attempt_id=attempt.attempt_id
@@ -2022,11 +2593,16 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
            ON fence.tenant_id=attempt.tenant_id
           AND fence.attempt_id=attempt.attempt_id
           AND fence.lease_epoch=claim.workspace_lease_epoch
-         JOIN workspace_write_leases lease
+          JOIN workspace_write_leases lease
            ON lease.tenant_id=attempt.tenant_id
           AND lease.workspace_id=attempt.workspace_id
-          AND lease.root_run_id=attempt.root_run_id
-          AND lease.epoch=claim.workspace_lease_epoch
+           AND lease.root_run_id=attempt.root_run_id
+           AND lease.epoch=claim.workspace_lease_epoch
+          LEFT JOIN thread_execution_heads head
+            ON head.tenant_id=attempt.tenant_id AND head.thread_id=attempt.thread_id
+          LEFT JOIN thread_follow_up_queue queue
+            ON queue.tenant_id=attempt.tenant_id AND queue.thread_id=attempt.thread_id
+           AND queue.run_id=attempt.run_id
         WHERE attempt.tenant_id=$1 AND attempt.run_id=$2
           AND attempt.status IN ('claimed','running','finalizing')
         ORDER BY attempt.created_at DESC LIMIT 1
@@ -2051,7 +2627,10 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     );
     const databaseNow = Date.parse(dbTimestamp(now.rows[0]?.database_now));
     return Date.parse(dbTimestamp(row.claim_expires_at)) <= databaseNow ||
-      Date.parse(dbTimestamp(row.lease_expires_at)) <= databaseNow
+      Date.parse(dbTimestamp(row.lease_expires_at)) <= databaseNow ||
+      (row.queue_state !== null &&
+        (Date.parse(dbTimestamp(row.head_writer_expires_at)) <= databaseNow ||
+          Date.parse(dbTimestamp(row.queue_claim_expires_at)) <= databaseNow))
       ? "fence_lost"
       : "active";
   }

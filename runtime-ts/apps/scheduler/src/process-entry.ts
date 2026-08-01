@@ -2,10 +2,13 @@ import { tenantId } from "@cube-runtime/domain";
 import {
   createPostgresPool,
   PgSandboxCleanupConsumerStore,
+  PgThreadSandboxLifecycleConsumerStore,
+  PgThreadContinuityMetrics,
   probePostgres,
 } from "@cube-runtime/persistence";
 import {
   assertProductionInheritedEnvironment,
+  booleanEnvironmentField,
   integerEnvironmentField,
   type ProcessSignalSource,
   parseStrictEnvironment,
@@ -25,6 +28,11 @@ import {
   SandboxCleanupConsumer,
   SandboxCleanupPollingLoop,
 } from "./sandbox-cleanup-consumer.js";
+import {
+  CubeThreadSandboxLifecycleResolver,
+  ThreadSandboxLifecycleConsumer,
+  ThreadSandboxLifecyclePollingLoop,
+} from "./thread-sandbox-lifecycle-consumer.js";
 
 const schedulerEnvironmentSchema = Object.freeze({
   DATABASE_URL: urlEnvironmentField({
@@ -44,6 +52,17 @@ const schedulerEnvironmentSchema = Object.freeze({
   SCHEDULER_WORKER_ID: stringEnvironmentField({ maxLength: 200 }),
   CLEANUP_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 50, maximum: 600_000 }),
   CLEANUP_LEASE_MS: integerEnvironmentField({ minimum: 210_000, maximum: 600_000 }),
+  THREAD_SANDBOX_RETENTION_SCHEDULER_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS: integerEnvironmentField({
+    minimum: 1,
+    maximum: 600_000,
+    requiredIn: [],
+  }),
+  THREAD_SANDBOX_PAUSED_RETENTION_SECONDS: integerEnvironmentField({
+    minimum: 1,
+    maximum: 31_536_000,
+    requiredIn: [],
+  }),
   PROCESS_SHUTDOWN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1, maximum: 600_000 }),
 });
 
@@ -69,6 +88,11 @@ export interface SchedulerProcessConfiguration {
     workerId: string;
     pollIntervalMs: number;
     leaseMs: number;
+  }>;
+  readonly threadSandbox: Readonly<{
+    retentionSchedulerEnabled: boolean;
+    lifecycleTimeoutMs: number;
+    pausedRetentionSeconds: number;
   }>;
   readonly shutdownTimeoutMilliseconds: number;
 }
@@ -145,6 +169,11 @@ export function parseSchedulerProcessEnvironment(
       pollIntervalMs: readRequiredEnvironmentValue(parsed, "CLEANUP_POLL_INTERVAL_MS"),
       leaseMs: readRequiredEnvironmentValue(parsed, "CLEANUP_LEASE_MS"),
     }),
+    threadSandbox: Object.freeze({
+      retentionSchedulerEnabled: parsed.values.THREAD_SANDBOX_RETENTION_SCHEDULER_ENABLED ?? true,
+      lifecycleTimeoutMs: parsed.values.THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS ?? 90_000,
+      pausedRetentionSeconds: parsed.values.THREAD_SANDBOX_PAUSED_RETENTION_SECONDS ?? 600,
+    }),
     shutdownTimeoutMilliseconds: readRequiredEnvironmentValue(
       parsed,
       "PROCESS_SHUTDOWN_TIMEOUT_MS",
@@ -191,6 +220,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
         ...(configuration.sandbox.proxyScheme === undefined
           ? {}
           : { proxyScheme: configuration.sandbox.proxyScheme }),
+        defaultOperationTimeoutMs: configuration.threadSandbox.lifecycleTimeoutMs,
       });
       // Cube 控制面凭据/端点必须在 cleanup loop 产生副作用前证明可用。
       await gateway.probe();
@@ -205,9 +235,30 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
         configuration.cleanup.tenantId,
         configuration.cleanup.pollIntervalMs,
       );
+      const threadSandboxLoop = new ThreadSandboxLifecyclePollingLoop(
+        new ThreadSandboxLifecycleConsumer(
+          new PgThreadSandboxLifecycleConsumerStore(
+            pool,
+            configuration.threadSandbox.pausedRetentionSeconds,
+            configuration.threadSandbox.retentionSchedulerEnabled,
+          ),
+          new CubeThreadSandboxLifecycleResolver(
+            gateway,
+            configuration.threadSandbox.lifecycleTimeoutMs,
+          ),
+          configuration.cleanup.workerId,
+          configuration.cleanup.leaseMs,
+          new PgThreadContinuityMetrics(pool),
+        ),
+        configuration.cleanup.tenantId,
+        configuration.cleanup.pollIntervalMs,
+      );
       loop.start();
+      threadSandboxLoop.start();
       const assembly = Object.freeze({
-        stopAccepting: () => loop.close(),
+        stopAccepting: async () => {
+          await Promise.all([loop.close(), threadSandboxLoop.close()]);
+        },
         // loop 必须先停止并等待在途远端调用，再关闭连接池。
         resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),
         readiness: Object.freeze([

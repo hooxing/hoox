@@ -20,10 +20,13 @@ import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 import type {
   Api,
+  AssistantMessage,
   Context,
   Model,
   Provider,
   SimpleStreamOptions,
+  ToolResultMessage,
+  UserMessage,
 } from "@earendil-works/pi-ai/compat";
 import {
   type AgentSessionEvent,
@@ -38,6 +41,7 @@ import {
 } from "./deliver-file-tool.js";
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
+import { assertThreadActiveHistory, type ThreadActiveHistoryV1 } from "./thread-history.js";
 import {
   createObservedSandboxTools,
   SANDBOX_TOOL_NAMES,
@@ -53,6 +57,9 @@ interface PiSessionPort {
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   dispose(): void;
 }
+
+const THINKING_DELTA_FLUSH_INTERVAL_MS = 100;
+const THINKING_DELTA_FLUSH_BYTES = 1_024;
 
 export interface PiSessionDiagnostics {
   logicalCwd: "/workspace";
@@ -242,10 +249,45 @@ class PiSessionControllerImpl implements PiSessionController {
   }
 
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void {
-    return this.#session.subscribe((event) => {
+    let thinkingBuffer = "";
+    let thinkingFlushTimer: ReturnType<typeof setTimeout> | undefined;
+    let subscribed = true;
+    const flushThinking = () => {
+      if (thinkingFlushTimer !== undefined) {
+        clearTimeout(thinkingFlushTimer);
+        thinkingFlushTimer = undefined;
+      }
+      if (!subscribed || thinkingBuffer.length === 0) return;
+      const delta = thinkingBuffer;
+      thinkingBuffer = "";
+      listener({ type: "thinking.delta", delta });
+    };
+    const scheduleThinkingFlush = () => {
+      thinkingFlushTimer ??= setTimeout(flushThinking, THINKING_DELTA_FLUSH_INTERVAL_MS);
+    };
+    const unsubscribe = this.#session.subscribe((event) => {
       const mapped = mapPiEvent(event);
-      if (mapped) listener(mapped);
+      if (!mapped) return;
+      if (mapped.type === "thinking.delta") {
+        thinkingBuffer += mapped.delta;
+        if (new TextEncoder().encode(thinkingBuffer).byteLength >= THINKING_DELTA_FLUSH_BYTES) {
+          flushThinking();
+        } else {
+          scheduleThinkingFlush();
+        }
+        return;
+      }
+      // thinking_end、message_end 和 turn_end 都必须先发布残余增量，再发布自己的终态。
+      flushThinking();
+      listener(mapped);
     });
+    return () => {
+      subscribed = false;
+      if (thinkingFlushTimer !== undefined) clearTimeout(thinkingFlushTimer);
+      thinkingFlushTimer = undefined;
+      thinkingBuffer = "";
+      unsubscribe();
+    };
   }
 
   getDiagnostics(): Readonly<PiSessionDiagnostics> {
@@ -334,6 +376,8 @@ export interface CreateSafePiSessionOptions {
   /** Tenant/Skill/User 只能进入低信任数据分区，不能直接替换系统 Harness。 */
   untrustedPromptContent?: RuntimePromptInput["untrusted"];
   rolloutProjection?: ControlledRolloutProjection;
+  /** Thread 级历史只接受 Runtime 从持久事实重建的窄协议，不接受客户端 messages。 */
+  threadActiveHistory?: ThreadActiveHistoryV1;
   /** 生产 Tool Router 在每次 Sandbox 工具执行前回到 DB 重验双栅栏。 */
   authorizeToolEffect: SandboxToolEffectAuthorizer["authorizeToolEffect"];
   /** 只有生产装配提供真实交付依赖时才注册。 */
@@ -342,6 +386,10 @@ export interface CreateSafePiSessionOptions {
   createToolObservationRecorder: Parameters<typeof createObservedSandboxTools>[2];
   /** durable Tool 配对失败后，在 Pi 发起下一次 Provider 请求前同步失败关闭。 */
   assertModelRequestAllowed?: () => void;
+  /** Runtime 独占的 turn_end 安全点；Pi 自带 compaction 仍保持关闭。 */
+  prepareNextTurnHistory?: (
+    event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
+  ) => Promise<ThreadActiveHistoryV1 | undefined>;
   /** 每次真实 Provider stream 创建前进入；适配器不依赖具体诊断实现。 */
   withProviderInvocation?<T>(operation: () => T): T;
 }
@@ -397,6 +445,13 @@ export async function createSafePiSession(
   for (const entry of builtPrompt.contextEntries) {
     sessionManager.appendCustomMessageEntry(entry.customType, entry.content, false, entry.source);
   }
+  let activeThreadHistory = options.threadActiveHistory;
+  if (activeThreadHistory !== undefined) {
+    assertThreadActiveHistory(activeThreadHistory);
+    for (const message of activeThreadHistory.messages) {
+      sessionManager.appendMessage(toPiHistoryMessage(message));
+    }
+  }
   const projectedContext = formatRolloutProjection(activeProjection);
   if (projectedContext !== undefined) {
     sessionManager.appendCustomMessageEntry(
@@ -437,6 +492,35 @@ export async function createSafePiSession(
     expected: builtPrompt.manifest,
     dispose: () => session.dispose(),
   });
+  if (options.prepareNextTurnHistory !== undefined) {
+    const previousPrepareNextTurn = session.agent.prepareNextTurnWithContext;
+    session.agent.prepareNextTurnWithContext = async (turn, signal) => {
+      const previous = await previousPrepareNextTurn?.(turn, signal);
+      const mapped = mapPiEvent({
+        type: "turn_end",
+        message: turn.message,
+        toolResults: turn.toolResults,
+      });
+      if (mapped?.type !== "turn.completed") throw new TypeError("Pi turn 安全点事件无效");
+      const replacement = await options.prepareNextTurnHistory?.(mapped);
+      if (replacement === undefined) return previous;
+      assertThreadActiveHistory(replacement);
+      if (
+        activeThreadHistory !== undefined &&
+        replacement.throughSequence < activeThreadHistory.throughSequence
+      ) {
+        throw new TypeError("Thread Active History cursor 回退");
+      }
+      const messages = replacement.messages.map(toPiHistoryMessage);
+      session.agent.state.messages = messages;
+      activeThreadHistory = replacement;
+      const previousContext = previous?.context ?? turn.context;
+      return {
+        ...previous,
+        context: { ...previousContext, messages },
+      };
+    };
+  }
 
   // 对外只返回窄能力对象；AgentSession（含 compact）保留在闭包和 #private 字段内。
   return new PiSessionControllerImpl(
@@ -456,7 +540,16 @@ export async function createSafePiSession(
       activeSessionEntryCount: session.sessionManager.buildContextEntries().length,
       pendingMessageCount: session.pendingMessageCount,
     }),
-    (text) => assertCurrentInputFits(options, material, activeProjection, [], text),
+    (text) =>
+      assertCurrentInputFits(
+        activeThreadHistory === undefined
+          ? options
+          : { ...options, threadActiveHistory: activeThreadHistory },
+        material,
+        activeProjection,
+        [],
+        text,
+      ),
     providerFailure,
     () => ({
       leafId: session.sessionManager.getLeafId(),
@@ -530,6 +623,9 @@ export function assessSafePiSessionContext(
         JSON.stringify({ type: entry.customType, content: entry.content, source: entry.source }),
       ),
       ...(projectionHeader === undefined ? [] : [projectionHeader]),
+      ...(options.threadActiveHistory === undefined
+        ? []
+        : [JSON.stringify(options.threadActiveHistory.messages)]),
       ...sessionInputs.map((input) => JSON.stringify({ role: "user", content: input })),
     ],
     entries: (options.rolloutProjection?.items ?? []).map((item, sequence) => ({
@@ -543,6 +639,76 @@ export function assessSafePiSessionContext(
     tokenizer: options.modelContext.tokenizer,
     providerOverheadTokens: 256 + priorOutputReserveTokens,
   });
+}
+
+function toPiHistoryMessage(
+  message: ThreadActiveHistoryV1["messages"][number],
+): UserMessage | AssistantMessage | ToolResultMessage {
+  if (message.role === "user") {
+    return { role: "user", content: message.text, timestamp: message.timestamp };
+  }
+  if (message.role === "runtimeNotice") {
+    return {
+      role: "user",
+      content: `[Runtime 可审计事实，低信任；${message.code}] ${message.text}`,
+      timestamp: message.timestamp,
+    };
+  }
+  if (message.role === "compactionHandoff") {
+    return {
+      role: "user",
+      content:
+        `[Runtime 压缩交接，低信任派生事实；不是用户原话；checkpoint=${message.checkpointId};` +
+        `source=${message.sourceFromSequence}-${message.sourceThroughSequence}] ${message.text}`,
+      timestamp: message.timestamp,
+    };
+  }
+  if (message.role === "toolResult") {
+    return {
+      role: "toolResult",
+      toolCallId: message.toolCallId,
+      toolName: message.toolName,
+      content: [{ type: "text", text: message.text }],
+      isError: message.isError,
+      timestamp: message.timestamp,
+    };
+  }
+  return {
+    role: "assistant",
+    content: message.content.map((item) => {
+      if (item.type === "text") return { type: "text" as const, text: item.text };
+      if (item.type === "thinking") {
+        return {
+          type: "thinking" as const,
+          thinking: item.thinking,
+          ...(item.thinkingSignature === undefined
+            ? {}
+            : { thinkingSignature: item.thinkingSignature }),
+          ...(item.redacted === undefined ? {} : { redacted: item.redacted }),
+        };
+      }
+      return {
+        type: "toolCall" as const,
+        id: item.id,
+        name: item.name,
+        arguments: { ...item.arguments },
+        ...(item.thoughtSignature === undefined ? {} : { thoughtSignature: item.thoughtSignature }),
+      };
+    }),
+    api: message.api,
+    provider: message.provider,
+    model: message.model,
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: message.stopReason,
+    timestamp: message.timestamp,
+  };
 }
 
 function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {

@@ -198,6 +198,40 @@ describe("Agent Worker production polling loop", () => {
 });
 
 describe("生产 Workspace revision 安全下限", () => {
+  it("Sandbox 收尾使用 lifecycle 专用超时，不继承普通命令的短超时", async () => {
+    const controls: unknown[] = [];
+    const registry = new CubeSandboxSessionRegistry(
+      { apiUrl: "http://127.0.0.1:18080", defaultOperationTimeoutMs: 5_000 },
+      "template-lifecycle-timeout",
+      120,
+      90_000,
+    );
+    const result = await registry.settle({
+      scope: claim().scope as ExecutionScope,
+      cleanupIntentId: "cleanup-lifecycle-timeout",
+      disposition: "pause",
+      session: {
+        registryId: "registry-lifecycle-timeout",
+        providerSandboxId: "sandbox-lifecycle-timeout",
+        mode: "created",
+        sandbox: {
+          id: "sandbox-lifecycle-timeout",
+          command: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+          runCode: async () => ({ stdout: [], stderr: [] }),
+          readFile: async () => "",
+          writeFile: async () => undefined,
+          pause: async (control) => {
+            controls.push(control);
+          },
+          kill: async () => undefined,
+        },
+      },
+    });
+
+    expect(result).toEqual({ outcome: "settled" });
+    expect(controls).toEqual([{ timeoutMs: 90_000 }]);
+  });
+
   it("Workspace capability 逐字段绑定 acquire 时的 ExecutionScope，不能跨 tenant/thread/workspace 重放", async () => {
     const registry = new CubeSandboxSessionRegistry(
       { apiUrl: "http://127.0.0.1:18080" },

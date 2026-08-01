@@ -41,6 +41,11 @@ import type {
   SandboxSessionRef,
   SandboxSessionRegistryPort,
   StableWorkerErrorCode,
+  ThreadContextAppendCommandV1,
+  ThreadContextBodyPersistencePort,
+  ThreadContinuityMetricsPort,
+  ThreadSandboxLeaseRefV1,
+  ThreadSandboxSessionLifecyclePort,
   ValidatedWorkspaceChange,
   WorkerAgentSessionPort,
   WorkspaceRevisionCandidate,
@@ -59,6 +64,9 @@ export interface RunWorkerOptions {
   readonly maxArtifactCorrectionRounds?: number;
   /** TODO(codex-alignment): 旧调用方兼容字段，简化交付协议稳定后删除。 */
   readonly artifactCorrectionPromptBudgetBytes?: number;
+  readonly threadContextWriteEnabled?: boolean;
+  readonly threadInputRoutingV2Enabled?: boolean;
+  readonly threadSandboxSessionReuseEnabled?: boolean;
 }
 
 export type RunWorkerResult =
@@ -90,6 +98,9 @@ interface WorkerDependencies {
   readonly artifacts: ArtifactPublicationPort;
   readonly clock: ClockPort;
   readonly metrics: RecoveryMetricsPort;
+  readonly threadContextBodies?: ThreadContextBodyPersistencePort;
+  readonly threadSandboxes?: ThreadSandboxSessionLifecyclePort;
+  readonly continuityMetrics?: ThreadContinuityMetricsPort;
 }
 
 interface ExecutionContext {
@@ -113,8 +124,10 @@ interface ExecutionContext {
   modelCompleted: boolean;
   eventAcceptanceOpen: boolean;
   adapterRejected: boolean;
+  contextTurnOrdinal: number;
   abortPromise?: Promise<void>;
   abortSession?: () => Promise<void>;
+  threadSandboxLease?: ThreadSandboxLeaseRefV1;
 }
 
 interface ToolStartedGate {
@@ -156,6 +169,24 @@ export class RunWorker {
       throw new Error("外部副作用许可必须短于租约");
     }
     if (!options.workerId.trim()) throw new Error("workerId 不能为空");
+    if (
+      options.threadContextWriteEnabled === true &&
+      dependencies.threadContextBodies === undefined
+    ) {
+      throw new Error("Thread Context 写入已启用但缺少 body persistence");
+    }
+    if (
+      options.threadInputRoutingV2Enabled === true &&
+      options.threadContextWriteEnabled !== true
+    ) {
+      throw new Error("Thread steer 依赖 Thread Context 写入");
+    }
+    if (
+      options.threadSandboxSessionReuseEnabled === true &&
+      dependencies.threadSandboxes === undefined
+    ) {
+      throw new Error("Thread Sandbox 复用已启用但缺少 lifecycle persistence");
+    }
   }
 
   async execute(scope: ExecutionScope): Promise<RunWorkerResult> {
@@ -168,6 +199,20 @@ export class RunWorker {
     if (claim.outcome !== "claimed") {
       if (claim.outcome === "unavailable") {
         return { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" };
+      }
+      if (claim.outcome === "busy") {
+        await this.dependencies.continuityMetrics
+          ?.record({
+            tenantId: scope.tenantId,
+            threadId: scope.threadId,
+            runId: scope.runId,
+            observationId: `${scope.runId}:thread-writer-conflict`,
+            metricName: "thread_writer_conflict_total",
+            value: 1,
+            unit: "count",
+            outcome: "busy",
+          })
+          .catch(() => undefined);
       }
       return { outcome: "ignored", reason: claim.outcome };
     }
@@ -230,6 +275,7 @@ export class RunWorker {
       modelCompleted: false,
       eventAcceptanceOpen: true,
       adapterRejected: false,
+      contextTurnOrdinal: 0,
     };
     const cancellation = this.dependencies.cancellation.signalFor(scope);
     const shutdown = this.dependencies.shutdownSignal;
@@ -312,27 +358,52 @@ export class RunWorker {
       const preAcquire = await this.stopPoint(context, cancellation);
       if (preAcquire) return await this.finishStopped(context, preAcquire);
 
-      let acquisition: Awaited<ReturnType<SandboxSessionRegistryPort["acquire"]>>;
-      try {
-        acquisition = await this.dependencies.sandboxes.acquire({
+      let requiresMaterialization = true;
+      let legacyAcquisition: Awaited<ReturnType<SandboxSessionRegistryPort["acquire"]>> | undefined;
+      if (this.options.threadSandboxSessionReuseEnabled === true) {
+        const lifecycle = this.dependencies.threadSandboxes;
+        if (lifecycle === undefined) throw new Error("Thread Sandbox lifecycle 缺失");
+        const acquisition = await lifecycle.acquire({
           scope,
+          attemptId: context.attemptId,
+          owner: this.options.workerId,
+          leaseDurationMs: this.#leaseDurationMs,
           signal: executionAbort.signal,
         });
-      } catch {
-        return await this.requireRecovery(context, "SANDBOX_FAILED", []);
-      }
-      if (acquisition.outcome === "ready") sandbox = acquisition.session;
-      // UNKNOWN 是 acquire 已发生但结果不确定的独立恢复事实；必须先提交，再响应并发取消/超时。
-      if (acquisition.outcome === "unknown") {
-        const unknownFact = await this.applyMutation(context, {
-          idempotencyKey: `${context.attemptId}/sandbox/acquire-unknown/${acquisition.event.requestId}`,
-          events: [],
-          outbox: [cleanupUnknownOutbox(context, acquisition.event)],
-        });
-        if (!isApplied(unknownFact)) return await this.handleMutationFailure(unknownFact);
+        if (acquisition.outcome === "unknown") {
+          return await this.requireRecovery(context, "SANDBOX_UNKNOWN", []);
+        }
+        if (acquisition.outcome === "failed") {
+          return await this.requireRecovery(context, acquisition.code, []);
+        }
+        sandbox = acquisition.session;
+        context.threadSandboxLease = acquisition.lease;
+        requiresMaterialization = acquisition.requiresMaterialization;
+      } else {
+        try {
+          legacyAcquisition = await this.dependencies.sandboxes.acquire({
+            scope,
+            signal: executionAbort.signal,
+          });
+        } catch {
+          return await this.requireRecovery(context, "SANDBOX_FAILED", []);
+        }
+        if (legacyAcquisition.outcome === "ready") sandbox = legacyAcquisition.session;
+        // UNKNOWN 是 acquire 已发生但结果不确定的独立恢复事实；必须先提交，再响应并发取消/超时。
+        if (legacyAcquisition.outcome === "unknown") {
+          const unknownFact = await this.applyMutation(context, {
+            idempotencyKey: `${context.attemptId}/sandbox/acquire-unknown/${legacyAcquisition.event.requestId}`,
+            events: [],
+            outbox: [cleanupUnknownOutbox(context, legacyAcquisition.event)],
+          });
+          if (!isApplied(unknownFact)) return await this.handleMutationFailure(unknownFact);
+        }
       }
       const postAcquire = await this.stopPoint(context, cancellation);
       if (postAcquire) {
+        if (context.threadSandboxLease !== undefined && sandbox !== undefined) {
+          return await this.finishStopped(context, postAcquire, sandbox);
+        }
         if (sandbox && (postAcquire === "cancelled" || postAcquire === "timeout")) {
           const intent = await this.applyMutation(context, {
             idempotencyKey: `${context.attemptId}/sandbox/cleanup-intent`,
@@ -348,13 +419,14 @@ export class RunWorker {
         if (sandbox) await this.bestEffortOrphanCleanup(scope, sandbox, postAcquire);
         return await this.finishStopped(context, postAcquire);
       }
-      if (acquisition.outcome === "unknown") {
+      if (legacyAcquisition?.outcome === "unknown") {
         return await this.requireRecovery(context, "SANDBOX_UNKNOWN", []);
       }
-      if (acquisition.outcome === "failed") {
-        return await this.requireRecovery(context, acquisition.code, []);
+      if (legacyAcquisition?.outcome === "failed") {
+        return await this.requireRecovery(context, legacyAcquisition.code, []);
       }
-      sandbox = acquisition.session;
+      if (legacyAcquisition?.outcome === "ready") sandbox = legacyAcquisition.session;
+      if (sandbox === undefined) return await this.requireRecovery(context, "SANDBOX_FAILED", []);
 
       // Sandbox 可见后的首个 checkpoint 与 cleanup intent 在同一事务中提交。
       const intent = await this.applyMutation(context, {
@@ -362,29 +434,61 @@ export class RunWorker {
         nextAttemptStatus: "running",
         nextStage: "cleanup_intent_persisted",
         events: [attemptEvent(context, "running", "cleanup_intent_persisted")],
-        outbox: [cleanupOutbox(context, sandbox, "pending")],
+        outbox:
+          context.threadSandboxLease === undefined
+            ? [cleanupOutbox(context, sandbox, "pending")]
+            : [],
       });
       if (!isApplied(intent)) {
         // intent 未被 receipt 证明提交，不能假设 Outbox 存在；registry 事实独立驱动孤儿清理。
-        await this.bestEffortOrphanCleanup(scope, sandbox, intent.outcome);
+        if (context.threadSandboxLease === undefined) {
+          await this.bestEffortOrphanCleanup(scope, sandbox, intent.outcome);
+        } else {
+          await this.dependencies.threadSandboxes?.terminate({
+            scope,
+            attemptId: context.attemptId,
+            session: sandbox,
+            lease: context.threadSandboxLease,
+            reason: "checkpoint_failed",
+          });
+        }
         return await this.handleMutationFailure(intent);
       }
 
       const preSession = await this.stopPoint(context, cancellation);
       if (preSession) return await this.finishStopped(context, preSession, sandbox);
+      const materializeStartedAt = Date.now();
       try {
-        await this.dependencies.revisions.materialize({
-          scope,
-          attemptId: context.attemptId,
-          ...(context.currentRevisionId === undefined
-            ? {}
-            : { expectedCurrentRevisionId: context.currentRevisionId }),
-          sandbox,
-          // Workspace journal 的 operationKey 是受限协议字段；不得复用含 `/` 的路径样式键。
-          operationKey: `${context.attemptId}:workspace:materialize`,
-          signal: executionAbort.signal,
-        });
+        if (requiresMaterialization)
+          await this.dependencies.revisions.materialize({
+            scope,
+            attemptId: context.attemptId,
+            ...(context.currentRevisionId === undefined
+              ? {}
+              : { expectedCurrentRevisionId: context.currentRevisionId }),
+            sandbox,
+            // Workspace journal 的 operationKey 是受限协议字段；不得复用含 `/` 的路径样式键。
+            operationKey: `${context.attemptId}:workspace:materialize`,
+            signal: executionAbort.signal,
+          });
+        if (context.threadSandboxLease !== undefined && requiresMaterialization) {
+          const attested = await this.dependencies.threadSandboxes?.attestMaterialized({
+            scope,
+            attemptId: context.attemptId,
+            lease: context.threadSandboxLease,
+            ...(context.currentRevisionId === undefined
+              ? {}
+              : { revisionId: context.currentRevisionId }),
+          });
+          if (attested !== "attested") throw new Error("THREAD_SANDBOX_ATTESTATION_FAILED");
+        }
+        if (requiresMaterialization) {
+          await this.recordWorkspaceMaterialization(context, materializeStartedAt, "ready");
+        }
       } catch (error) {
+        if (requiresMaterialization) {
+          await this.recordWorkspaceMaterialization(context, materializeStartedAt, "failed");
+        }
         reportWorkspaceMaterializeFailure(error);
         return await this.recoverWithCleanup(context, sandbox, "WORKSPACE_CONFLICT", cancellation);
       }
@@ -397,6 +501,77 @@ export class RunWorker {
         sandbox: sandbox.sandbox,
         sandboxSession: sandbox,
         rolloutProjection: claim.snapshot.rolloutProjection,
+        ...(claim.snapshot.contextThroughSequence === undefined
+          ? {}
+          : { contextThroughSequence: claim.snapshot.contextThroughSequence }),
+        ...(this.options.threadContextWriteEnabled !== true
+          ? {}
+          : {
+              onTurnSafePoint: async (
+                event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
+              ) => {
+                // turn 安全点可能从 Pi 的 prepare hook 进入，而流式公开事件仍在异步持久化队列中。
+                // 必须先排空已发布事件，禁止 Thread Context 越过 thinking/message 终态。
+                await eventChain;
+                if (!context.eventAcceptanceOpen) throw new Error("Thread Context 写入口已关闭");
+                const append = await this.prepareTurnContextAppend(context, event);
+                const persisted = await this.applyMutation(context, {
+                  idempotencyKey: append.idempotencyKey,
+                  events: [],
+                  outbox: [],
+                  threadContextAppend: append,
+                });
+                if (!isApplied(persisted) || persisted.receipt.threadContext === undefined) {
+                  closeEventAcceptance(context);
+                  context.stopped =
+                    persisted.outcome === "fence_lost" || persisted.outcome === "scope_mismatch"
+                      ? "fence_lost"
+                      : "unavailable";
+                  throw new Error("Thread Context turn 安全点提交失败");
+                }
+                const throughSequence = persisted.receipt.threadContext.lastSequence;
+                if (this.options.threadInputRoutingV2Enabled !== true) return { throughSequence };
+                // 先持久化完整 assistant/tool 配对，再观察 steer；绝不把 user message 插进工具配对中间。
+                const pending = await this.dependencies.persistence.readPendingThreadSteer({
+                  fence: context.fence,
+                });
+                if (pending.outcome === "pending") {
+                  const steered = await this.applyMutation(context, {
+                    idempotencyKey: `${context.attemptId}/steer/${pending.receiptId}`,
+                    events: [],
+                    outbox: [],
+                    threadSteer: {
+                      receiptId: pending.receiptId,
+                      targetTurnId: pending.targetTurnId,
+                      bodyDigest: pending.bodyDigest,
+                    },
+                  });
+                  if (!isApplied(steered)) {
+                    closeEventAcceptance(context);
+                    context.stopped =
+                      steered.outcome === "fence_lost" || steered.outcome === "scope_mismatch"
+                        ? "fence_lost"
+                        : "unavailable";
+                    throw new Error("Thread steer 安全点提交失败");
+                  }
+                  return {
+                    throughSequence,
+                    steer: { receiptId: pending.receiptId, inputText: pending.inputText },
+                  };
+                }
+                if (pending.outcome !== "none") {
+                  closeEventAcceptance(context);
+                  context.stopped =
+                    pending.outcome === "cancelled"
+                      ? "cancelled"
+                      : pending.outcome === "fence_lost" || pending.outcome === "scope_mismatch"
+                        ? "fence_lost"
+                        : "unavailable";
+                  throw new Error("Thread steer 安全点不可继续");
+                }
+                return { throughSequence };
+              },
+            }),
         authorizeToolEffect: (call) =>
           this.authorizeToolEffectAfterStarted(context, cancellation, call),
       });
@@ -418,6 +593,8 @@ export class RunWorker {
             return;
           }
           try {
+            // turn.completed 由 awaited onTurnSafePoint 原子提交；这里不能异步重复写入。
+            if (event.type === "turn.completed") return;
             const encoded = agentEvent(context, event);
             const persisted = await this.applyMutation(context, {
               idempotencyKey: `${context.attemptId}/event/${encoded.sequence}`,
@@ -458,7 +635,8 @@ export class RunWorker {
       });
       if (!isApplied(modelCheckpoint)) return await this.handleMutationFailure(modelCheckpoint);
 
-      const promptText = claim.snapshot.answer ?? claim.snapshot.input;
+      let promptText = claim.snapshot.answer ?? claim.snapshot.input;
+      let steerReceiptId: string | undefined;
       const correctionRound = 0;
       let workspaceChange: ValidatedWorkspaceChange | undefined;
 
@@ -466,11 +644,11 @@ export class RunWorker {
       for (;;) {
         const preModel = await this.stopPoint(context, cancellation);
         if (preModel) return await this.finishStopped(context, preModel, sandbox);
-        const modelEffect = correctionRound === 0 ? "model_start" : "model_continue";
+        const modelEffect = steerReceiptId === undefined ? "model_start" : "model_continue";
         const modelCallId =
-          correctionRound === 0
+          steerReceiptId === undefined
             ? `${context.attemptId}/model/start`
-            : `${context.attemptId}/model/correction/${correctionRound}`;
+            : `${context.attemptId}/model/steer/${steerReceiptId}`;
         const modelAuthorization = await this.authorizeEffect(context, cancellation, modelEffect, {
           callId: modelCallId,
           toolName: "pi_model",
@@ -513,6 +691,37 @@ export class RunWorker {
             "PROTOCOL",
             cancellation,
           );
+        }
+
+        if (this.options.threadInputRoutingV2Enabled === true) {
+          const pending = await this.dependencies.persistence.readPendingThreadSteer({
+            fence: context.fence,
+          });
+          if (pending.outcome === "pending") {
+            const applied = await this.applyMutation(context, {
+              idempotencyKey: `${context.attemptId}/steer/${pending.receiptId}`,
+              events: [],
+              outbox: [],
+              threadSteer: {
+                receiptId: pending.receiptId,
+                targetTurnId: pending.targetTurnId,
+                bodyDigest: pending.bodyDigest,
+              },
+            });
+            if (!isApplied(applied)) return await this.handleMutationFailure(applied);
+            promptText = pending.inputText;
+            steerReceiptId = pending.receiptId;
+            continue;
+          }
+          if (pending.outcome !== "none") {
+            context.stopped =
+              pending.outcome === "cancelled"
+                ? "cancelled"
+                : pending.outcome === "fence_lost" || pending.outcome === "scope_mismatch"
+                  ? "fence_lost"
+                  : "unavailable";
+            return await this.finishStopped(context, context.stopped, sandbox);
+          }
         }
 
         const modelSettled = await this.applyMutation(context, {
@@ -586,10 +795,15 @@ export class RunWorker {
           }
           const preSettle = await this.stopPoint(context, cancellation);
           if (preSettle) return await this.finishStopped(context, preSettle, sandbox);
-          const settled = await this.settleSandbox(context, sandbox, "pause");
-          if (settled.outcome !== "settled") return settled.result;
-          const postSettle = await this.stopPoint(context, cancellation);
-          if (postSettle) return await this.finishStopped(context, postSettle);
+          if (context.threadSandboxLease === undefined) {
+            const settled = await this.settleSandbox(context, sandbox, "pause");
+            if (settled.outcome !== "settled") return settled.result;
+            const postSettle = await this.stopPoint(context, cancellation);
+            if (postSettle) return await this.finishStopped(context, postSettle);
+          } else {
+            const finalizing = await this.prepareThreadSandboxTerminal(context);
+            if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
+          }
           const waiting = await this.applyMutation(context, {
             idempotencyKey: `${context.attemptId}/final/waiting`,
             nextAttemptStatus: "waiting",
@@ -600,21 +814,32 @@ export class RunWorker {
             ...(workspaceChange === undefined ? {} : { workspaceChange }),
             nextRunStatus: "waiting",
             releaseFences: true,
+            ...(context.threadSandboxLease === undefined
+              ? {}
+              : { threadSandboxTerminal: terminalSandboxCommand(context.threadSandboxLease) }),
+            ...(this.options.threadContextWriteEnabled === true
+              ? { threadContextAppend: terminalContextAppend(context, "waiting") }
+              : {}),
           });
-          return isApplied(waiting)
-            ? { outcome: "waiting" }
-            : await this.handleMutationFailure(waiting);
+          if (!isApplied(waiting)) return await this.handleMutationFailure(waiting);
+          await this.completeThreadSandboxTerminalEffect(context, sandbox, waiting);
+          return { outcome: "waiting" };
         }
 
         // deliver_file 的成功已是 published 事实；Run 完成不再依赖声明或修正轮次。
         break;
       }
 
-      const settled = await this.settleSandbox(context, sandbox, "close");
-      if (settled.outcome !== "settled") return settled.result;
-      // settle 与 Run success 之间必须同步重验，避免取消被成功覆盖。
-      const postSettle = await this.stopPoint(context, cancellation);
-      if (postSettle) return await this.finishStopped(context, postSettle);
+      if (context.threadSandboxLease === undefined) {
+        const settled = await this.settleSandbox(context, sandbox, "close");
+        if (settled.outcome !== "settled") return settled.result;
+        // settle 与 Run success 之间必须同步重验，避免取消被成功覆盖。
+        const postSettle = await this.stopPoint(context, cancellation);
+        if (postSettle) return await this.finishStopped(context, postSettle);
+      } else {
+        const finalizing = await this.prepareThreadSandboxTerminal(context);
+        if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
+      }
       const final = await this.applyMutation(context, {
         idempotencyKey: `${context.attemptId}/final/succeeded`,
         nextAttemptStatus: "succeeded",
@@ -624,8 +849,18 @@ export class RunWorker {
         ...(workspaceChange === undefined ? {} : { workspaceChange }),
         nextRunStatus: "succeeded",
         releaseFences: true,
+        ...(context.threadSandboxLease === undefined
+          ? {}
+          : { threadSandboxTerminal: terminalSandboxCommand(context.threadSandboxLease) }),
+        ...(this.options.threadContextWriteEnabled === true
+          ? {
+              threadContextAppend: terminalContextAppend(context, "succeeded", workspaceChange),
+            }
+          : {}),
       });
-      return isApplied(final) ? { outcome: "succeeded" } : await this.handleMutationFailure(final);
+      if (!isApplied(final)) return await this.handleMutationFailure(final);
+      await this.completeThreadSandboxTerminalEffect(context, sandbox, final);
+      return { outcome: "succeeded" };
     } catch {
       closeEventAcceptance(context);
       await eventChain.catch(() => undefined);
@@ -649,6 +884,25 @@ export class RunWorker {
         Promise.resolve().then(() => session?.dispose()),
       ]);
     }
+  }
+
+  private async recordWorkspaceMaterialization(
+    context: ExecutionContext,
+    startedAt: number,
+    outcome: "ready" | "failed",
+  ): Promise<void> {
+    await this.dependencies.continuityMetrics
+      ?.record({
+        tenantId: context.scope.tenantId,
+        threadId: context.scope.threadId,
+        runId: context.scope.runId,
+        observationId: `${context.attemptId}:workspace-materialize:${outcome}`,
+        metricName: "workspace_materialize_latency_ms",
+        value: Math.max(0, Date.now() - startedAt),
+        unit: "milliseconds",
+        outcome,
+      })
+      .catch(() => undefined);
   }
 
   private async stopPoint(
@@ -916,6 +1170,97 @@ export class RunWorker {
     });
   }
 
+  private async prepareTurnContextAppend(
+    context: ExecutionContext,
+    event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
+  ): Promise<ThreadContextAppendCommandV1> {
+    const ordinal = context.contextTurnOrdinal;
+    context.contextTurnOrdinal += 1;
+    const key = `${context.attemptId}/context/turn/${ordinal}`;
+    const bodies = this.dependencies.threadContextBodies;
+    if (bodies === undefined) throw new Error("Thread Context body persistence 缺失");
+    const entries: ThreadContextAppendCommandV1["entries"][number][] = [];
+    const assistantText = event.assistant.content
+      .filter((item): item is Extract<typeof item, { type: "text" }> => item.type === "text")
+      .map((item) => item.text)
+      .join("\n");
+    const assistantContent = event.assistant.content
+      .filter(
+        (item): item is Exclude<typeof item, { type: "toolCall" }> => item.type !== "toolCall",
+      )
+      .map((item) =>
+        item.type === "text"
+          ? { type: "text" as const, text: item.text }
+          : {
+              type: "thinking" as const,
+              thinking: item.thinking,
+              ...(item.thinkingSignature === undefined
+                ? {}
+                : { thinkingSignature: item.thinkingSignature }),
+              ...(item.redacted === undefined ? {} : { redacted: item.redacted }),
+            },
+      );
+    const assistantBody = {
+      role: "assistant",
+      text: assistantText,
+      content: assistantContent,
+      api: event.assistant.api,
+      provider: event.assistant.provider,
+      model: event.assistant.model,
+      stopReason: event.assistant.stopReason,
+      timestamp: event.assistant.timestamp,
+    };
+    entries.push({
+      entryId: `${key}/assistant`,
+      kind: "assistant_message",
+      body: await bodies.persist({
+        tenantId: context.scope.tenantId,
+        idempotencyKey: `${key}/assistant/body`,
+        value: assistantBody,
+      }),
+    });
+    for (const item of event.assistant.content) {
+      if (item.type !== "toolCall") continue;
+      const body = {
+        name: item.name,
+        arguments: item.arguments,
+        ...(item.thoughtSignature === undefined ? {} : { thoughtSignature: item.thoughtSignature }),
+        timestamp: event.assistant.timestamp,
+      };
+      entries.push({
+        entryId: `${key}/tool/${item.id}/call`,
+        kind: "tool_call",
+        toolCallId: item.id,
+        toolName: item.name,
+        body: await bodies.persist({
+          tenantId: context.scope.tenantId,
+          idempotencyKey: `${key}/tool/${item.id}/call/body`,
+          value: body,
+        }),
+      });
+    }
+    for (const result of event.toolResults) {
+      const body = {
+        name: result.toolName,
+        text: result.text,
+        isError: result.isError,
+        timestamp: result.timestamp,
+      };
+      entries.push({
+        entryId: `${key}/tool/${result.toolCallId}/result`,
+        kind: "tool_result",
+        toolCallId: result.toolCallId,
+        toolName: result.toolName,
+        body: await bodies.persist({
+          tenantId: context.scope.tenantId,
+          idempotencyKey: `${key}/tool/${result.toolCallId}/result/body`,
+          value: body,
+        }),
+      });
+    }
+    return { schemaVersion: 1, idempotencyKey: key, entries };
+  }
+
   private async settleSandbox(
     context: ExecutionContext,
     sandbox: SandboxSessionRef,
@@ -924,6 +1269,39 @@ export class RunWorker {
     | { readonly outcome: "settled" }
     | { readonly outcome: "recovery"; readonly result: RunWorkerResult }
   > {
+    if (context.threadSandboxLease !== undefined) {
+      // Thread Session 的失败/取消路径终止可变缓存；success/waiting 由 terminal mutation
+      // 原子决定 handoff 或 pause，绝不能在这里提前观察队列。
+      if (disposition === "pause") {
+        return {
+          outcome: "recovery",
+          result: await this.requireRecovery(context, "PROTOCOL", []),
+        };
+      }
+      const lifecycle = this.dependencies.threadSandboxes;
+      if (lifecycle === undefined) {
+        return {
+          outcome: "recovery",
+          result: await this.requireRecovery(context, "SANDBOX_FAILED", []),
+        };
+      }
+      const settled = await lifecycle.terminate({
+        scope: context.scope,
+        attemptId: context.attemptId,
+        session: sandbox,
+        lease: context.threadSandboxLease,
+        reason: "run_cleanup",
+      });
+      if (settled === "settled") return { outcome: "settled" };
+      return {
+        outcome: "recovery",
+        result: await this.requireRecovery(
+          context,
+          settled === "unknown" ? "SANDBOX_UNKNOWN" : "SANDBOX_FAILED",
+          [],
+        ),
+      };
+    }
     const started = await this.applyMutation(context, {
       idempotencyKey: `${context.attemptId}/sandbox/settle-started/${disposition}`,
       nextAttemptStatus: "finalizing",
@@ -978,6 +1356,32 @@ export class RunWorker {
     }
   }
 
+  private async completeThreadSandboxTerminalEffect(
+    context: ExecutionContext,
+    sandbox: SandboxSessionRef,
+    mutation: AppliedMutation,
+  ): Promise<void> {
+    const receipt = mutation.receipt.threadSandbox;
+    if (context.threadSandboxLease === undefined || receipt?.outcome !== "effect_pending") return;
+    // Run terminal 已经提交；此处 UNKNOWN 只改变 Session 缓存状态，不能回滚已提交的
+    // Workspace/Context/Run 事实。Scheduler 会继续消费 durable effect。
+    await this.dependencies.threadSandboxes
+      ?.completeTerminalEffect({ scope: context.scope, session: sandbox, receipt })
+      .catch(() => "unknown");
+  }
+
+  private async prepareThreadSandboxTerminal(
+    context: ExecutionContext,
+  ): Promise<RuntimeMutationResult> {
+    return this.applyMutation(context, {
+      idempotencyKey: `${context.attemptId}/sandbox/thread-terminal-ready`,
+      nextAttemptStatus: "finalizing",
+      nextStage: "finalizing",
+      events: [attemptEvent(context, "finalizing", "finalizing")],
+      outbox: [],
+    });
+  }
+
   private async recoverWithCleanup(
     context: ExecutionContext,
     sandbox: SandboxSessionRef,
@@ -1023,6 +1427,9 @@ export class RunWorker {
       outbox: [],
       nextRunStatus: runStatus,
       releaseFences: true,
+      ...(this.options.threadContextWriteEnabled === true
+        ? { threadContextAppend: terminalContextAppend(context, runStatus) }
+        : {}),
     });
     return isApplied(final) ? { outcome: runStatus } : await this.handleMutationFailure(final);
   }
@@ -1160,6 +1567,42 @@ function waitingEvent(
   return event;
 }
 
+function terminalContextAppend(
+  context: ExecutionContext,
+  status: "waiting" | "succeeded" | "failed" | "cancelled",
+  workspaceChange?: ValidatedWorkspaceChange,
+): ThreadContextAppendCommandV1 {
+  const key = `${context.attemptId}/context/final/${status}`;
+  const entries: ThreadContextAppendCommandV1["entries"][number][] = [];
+  if (status === "succeeded") {
+    const workspaceBody =
+      workspaceChange !== undefined
+        ? { outcome: "committed", revisionId: workspaceChange.revisionId }
+        : { outcome: "unchanged", revisionId: context.currentRevisionId ?? null };
+    entries.push({
+      entryId: `${key}/workspace`,
+      kind: workspaceChange !== undefined ? "workspace_committed" : "workspace_unchanged",
+      body: inlineContextBody(workspaceBody),
+    });
+  }
+  const terminalBody = { status };
+  entries.push({
+    entryId: `${key}/terminal`,
+    kind: "run_terminal",
+    body: inlineContextBody(terminalBody),
+  });
+  return { schemaVersion: 1, idempotencyKey: key, entries };
+}
+
+function inlineContextBody(value: Readonly<Record<string, unknown>>) {
+  return {
+    storage: "inline" as const,
+    value,
+    sha256: digestCanonical(value),
+    size: Buffer.byteLength(JSON.stringify(value), "utf8"),
+  };
+}
+
 function agentEvent(context: ExecutionContext, payload: RuntimeAgentEvent): RuntimeEventV1 {
   const event: RuntimeEventV1 = {
     schemaVersion: 1,
@@ -1201,6 +1644,16 @@ function cleanupOutbox(
   if (state === "pending") return { ...base, state };
   if (disposition === undefined) throw new Error("started 后必须一次性决定 cleanup disposition");
   return { ...base, state, payload: { ...base.payload, disposition } };
+}
+
+function terminalSandboxCommand(lease: ThreadSandboxLeaseRefV1) {
+  return {
+    schemaVersion: 1 as const,
+    sessionId: lease.sessionId,
+    generation: lease.generation,
+    leaseId: lease.leaseId,
+    leaseToken: lease.leaseToken,
+  };
 }
 
 function cleanupIntentKey(context: ExecutionContext, sandbox: SandboxSessionRef): string {
@@ -1583,11 +2036,39 @@ function receiptMatches(
       : receipt.workspace?.changeDigest === workspaceChangeDigest(command.workspaceChange) &&
         receipt.workspace.previousHead === context.currentRevisionId &&
         receipt.workspace.currentHead === command.workspaceChange.revisionId;
+  const expectedContextEntries =
+    command.threadSteer === undefined ? command.threadContextAppend?.entries.length : 1;
+  const threadContextMatches =
+    expectedContextEntries === undefined
+      ? receipt.threadContext === undefined
+      : receipt.threadContext?.schemaVersion === 1 &&
+        receipt.threadContext.entryCount === expectedContextEntries &&
+        Number.isSafeInteger(receipt.threadContext.firstSequence) &&
+        receipt.threadContext.firstSequence > 0 &&
+        receipt.threadContext.lastSequence ===
+          receipt.threadContext.firstSequence + expectedContextEntries - 1;
+  const threadSteerMatches =
+    command.threadSteer === undefined
+      ? receipt.threadSteer === undefined
+      : receipt.threadSteer?.receiptId === command.threadSteer.receiptId &&
+        receipt.threadSteer.targetTurnId === command.threadSteer.targetTurnId &&
+        receipt.threadSteer.bodyDigest === command.threadSteer.bodyDigest &&
+        receipt.threadSteer.appliedContextSequence === receipt.threadContext?.firstSequence;
   const effectInvocationMatches =
     command.effectInvocation === undefined
       ? receipt.effectInvocation === undefined
       : receipt.effectInvocation?.callId === command.effectInvocation.callId &&
         receipt.effectInvocation.toolName === command.effectInvocation.toolName;
+  const threadSandboxMatches =
+    command.threadSandboxTerminal === undefined
+      ? receipt.threadSandbox === undefined
+      : receipt.threadSandbox?.schemaVersion === 1 &&
+        receipt.threadSandbox.sessionId === command.threadSandboxTerminal.sessionId &&
+        receipt.threadSandbox.generation === command.threadSandboxTerminal.generation &&
+        (receipt.threadSandbox.outcome === "effect_pending"
+          ? receipt.threadSandbox.effectKind === "pause" &&
+            receipt.threadSandbox.effectId.trim().length > 0
+          : receipt.threadSandbox.nextRunId.trim().length > 0);
   return (
     receipt.schemaVersion === 1 &&
     receipt.idempotencyKey === command.idempotencyKey &&
@@ -1602,7 +2083,10 @@ function receiptMatches(
     outboxMatches &&
     effectInvocationMatches &&
     projectionMatches &&
-    workspaceMatches
+    workspaceMatches &&
+    threadContextMatches &&
+    threadSteerMatches &&
+    threadSandboxMatches
   );
 }
 

@@ -18,3 +18,5 @@ export {
 } from "./pi-session.js";
 export * from "./rollout-recovery.js";
 export * from "./tools.js";
+export * from "./thread-history.js";
+export * from "./runtime-compaction.js";

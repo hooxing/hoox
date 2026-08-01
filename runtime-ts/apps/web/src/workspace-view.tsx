@@ -25,6 +25,8 @@ import {
   type RunEvent,
   type RunStatus,
   type Thread,
+  type ThreadContinuityStatus,
+  type ThreadContextMessage,
 } from "./api.js";
 import { buildRunProgress } from "./event-view.js";
 import { AssistantMarkdown } from "./markdown-view.js";
@@ -88,6 +90,8 @@ export function RunTimeline({
   const showActivity = isRunning || isQueued;
   const elapsed = useElapsedSeconds(run);
   const isFailure = run.status === "failed" || run.status === "cancelled";
+  const completedStepCount = progress.steps.filter((step) => step.status === "completed").length;
+  const totalStepCount = progress.steps.length;
   const summary = isFailure
     ? run.status === "cancelled"
       ? "运行已停止。你可以调整任务后再次发送。"
@@ -108,31 +112,55 @@ export function RunTimeline({
       aria-live="polite"
     >
       <div className="run-progress-summary">
-        {showActivity ? (
-          <LoaderCircle className="spin" size={18} aria-hidden="true" />
-        ) : (
-          <ChevronRight size={18} aria-hidden="true" />
-        )}
-        <div>
-          <strong>{summary}</strong>
-          <span>
-            {isRunning ? `已运行 ${elapsedLabel(elapsed)} · ` : ""}已完成{" "}
-            {progress.steps.filter((step) => step.status === "completed").length} 步
-          </span>
+        <div className="run-progress-primary">
+          {showActivity ? (
+            <LoaderCircle className="spin" size={16} aria-hidden="true" />
+          ) : (
+            <ChevronRight size={16} aria-hidden="true" />
+          )}
+          <div>
+            <strong>{summary}</strong>
+            {isRunning && <span>已运行 {elapsedLabel(elapsed)}</span>}
+          </div>
         </div>
+        <span className="run-progress-count" aria-hidden="true">
+          {totalStepCount > 0 ? `${completedStepCount}/${totalStepCount}` : "—"}
+        </span>
+        <span className="sr-only">
+          {totalStepCount > 0 ? `已完成 ${completedStepCount} / ${totalStepCount} 步` : "暂无步骤"}
+        </span>
       </div>
-      {progress.steps.length > 0 && (
-        <details className="run-progress-history">
-          <summary>查看简要步骤</summary>
-          <ol>
-            {progress.steps.map((step) => (
-              <li key={step.id} className={`is-${step.status}`}>
-                <span>{step.label.replace("正在", "")}</span>
-                {step.count > 1 && <small>× {step.count}</small>}
-              </li>
-            ))}
-          </ol>
-        </details>
+      {(progress.thinking !== undefined || progress.steps.length > 0) && (
+        <div className="run-progress-disclosures">
+          {progress.thinking !== undefined && (
+            <details className={`run-thinking is-${progress.thinking.status}`}>
+              <summary>
+                {progress.thinking.status === "running" && (
+                  <LoaderCircle className="spin" size={14} aria-hidden="true" />
+                )}
+                <span>
+                  {progress.thinking.status === "running" ? "查看实时工作记录" : "查看工作记录"}
+                </span>
+              </summary>
+              <div className="run-thinking-content">
+                <AssistantMarkdown text={progress.thinking.text} />
+              </div>
+            </details>
+          )}
+          {progress.steps.length > 0 && (
+            <details className="run-progress-history">
+              <summary>查看执行步骤</summary>
+              <ol>
+                {progress.steps.map((step) => (
+                  <li key={step.id} className={`is-${step.status}`}>
+                    <span>{step.label.replace("正在", "")}</span>
+                    {step.count > 1 && <small>× {step.count}</small>}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
+        </div>
       )}
     </section>
   );
@@ -149,6 +177,84 @@ export function RunTranscript({ events }: { readonly events: readonly RunEvent[]
       )}
     </section>
   );
+}
+
+export function ThreadTranscript({
+  messages,
+  pendingInputs = [],
+}: {
+  readonly messages: readonly ThreadContextMessage[];
+  readonly pendingInputs?: readonly PendingThreadInputView[];
+}) {
+  if (messages.length === 0 && pendingInputs.length === 0) return null;
+  return (
+    <section className="assistant-transcript" aria-label="Thread 连续对话">
+      {messages.map((message) =>
+        message.role === "user" ? (
+          <article className="message user-request" key={message.sequence}>
+            <span className="message-avatar" aria-hidden="true">
+              你
+            </span>
+            <div className="message-card">
+              <span className="message-label">你的请求</span>
+              <p>{message.text}</p>
+            </div>
+          </article>
+        ) : message.role === "assistant" ? (
+          <AssistantMessage key={message.sequence} text={message.text} />
+        ) : (
+          <p className="runtime-context-notice" key={message.sequence}>
+            {message.text}
+          </p>
+        ),
+      )}
+      {pendingInputs.map((input) => (
+        <article className="message user-request is-pending" key={input.localId}>
+          <span className="message-avatar" aria-hidden="true">
+            你
+          </span>
+          <div className="message-card">
+            <span className="message-label">你</span>
+            <p>{input.text}</p>
+            <small className={`conversation-input-status is-${input.disposition}`}>
+              {threadInputDispositionLabel(input)}
+            </small>
+          </div>
+        </article>
+      ))}
+    </section>
+  );
+}
+
+export type PendingThreadInputView = {
+  readonly localId: string;
+  readonly text: string;
+  readonly disposition:
+    | "submitting"
+    | "pending_steer"
+    | "steered"
+    | "queued"
+    | "cancelled"
+    | "rejected";
+  readonly queueSequence?: number;
+  readonly rejectionCode?: string;
+};
+
+function threadInputDispositionLabel(input: PendingThreadInputView): string {
+  switch (input.disposition) {
+    case "submitting":
+      return "正在发送";
+    case "pending_steer":
+      return "等待下一个安全点";
+    case "steered":
+      return "已进入当前任务";
+    case "queued":
+      return `已排入下一任务${input.queueSequence === undefined ? "" : ` · 第 ${input.queueSequence} 位`}`;
+    case "cancelled":
+      return "已取消";
+    case "rejected":
+      return `未应用${input.rejectionCode === undefined ? "" : ` · ${input.rejectionCode}`}`;
+  }
 }
 
 export function AssistantMessage({
@@ -188,8 +294,8 @@ export function InlineArtifactDelivery({
     <section className="inline-artifact-delivery" aria-labelledby="inline-deliverable-title">
       <div className="inline-artifact-heading">
         <div>
-          <span className="message-label">Agent 交付物</span>
-          <h2 id="inline-deliverable-title">本次回复的可下载产物</h2>
+          <span className="message-label">交付结果</span>
+          <h2 id="inline-deliverable-title">交付文件</h2>
         </div>
         <span className="count-badge">{artifacts.length}</span>
       </div>
@@ -200,8 +306,10 @@ export function InlineArtifactDelivery({
             <div className="artifact-details">
               <strong>{artifact.name}</strong>
               <small>
-                {artifact.mediaType ?? "未知格式"} ·{" "}
-                {artifact.status === "published" ? "可用" : artifact.status}
+                {formatArtifactType(artifact.mediaType, artifact.name)}
+                {artifact.sizeBytes === undefined
+                  ? ""
+                  : ` · ${formatArtifactSize(artifact.sizeBytes)}`}
               </small>
             </div>
             <fieldset className="artifact-actions">
@@ -209,24 +317,26 @@ export function InlineArtifactDelivery({
               {canPreviewArtifact(artifact.mediaType) && (
                 <button
                   type="button"
-                  className="icon-button"
+                  className="artifact-action-button"
                   title="预览产物"
                   aria-label={`预览 ${artifact.name}`}
                   disabled={artifact.status !== "published"}
                   onClick={() => onPreview(artifact.id)}
                 >
                   <Eye size={16} />
+                  <span>预览</span>
                 </button>
               )}
               <button
                 type="button"
-                className="icon-button"
+                className="artifact-action-button is-primary"
                 title="下载产物"
                 aria-label={`下载 ${artifact.name}`}
                 disabled={artifact.status !== "published"}
                 onClick={() => onDownload(artifact.id)}
               >
                 <Download size={16} />
+                <span>下载</span>
               </button>
             </fieldset>
           </li>
@@ -234,6 +344,36 @@ export function InlineArtifactDelivery({
       </ul>
     </section>
   );
+}
+
+export function formatArtifactType(mediaType: string | undefined, name: string): string {
+  const normalized = mediaType?.split(";", 1)[0]?.trim().toLowerCase();
+  const knownTypes: Readonly<Record<string, string>> = {
+    "application/json": "JSON 文件",
+    "application/pdf": "PDF 文档",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "Excel 工作簿",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "Word 文档",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+      "PowerPoint 演示文稿",
+    "image/gif": "GIF 图片",
+    "image/jpeg": "JPEG 图片",
+    "image/png": "PNG 图片",
+    "image/webp": "WebP 图片",
+    "text/csv": "CSV 表格",
+    "text/markdown": "Markdown 文档",
+    "text/plain": "文本文件",
+  };
+  if (normalized !== undefined && knownTypes[normalized] !== undefined) {
+    return knownTypes[normalized];
+  }
+  const extension = name.includes(".") ? name.split(".").pop()?.trim().toUpperCase() : undefined;
+  return extension ? `${extension} 文件` : "文件";
+}
+
+export function formatArtifactSize(sizeBytes: number): string {
+  if (sizeBytes < 1_024) return `${sizeBytes} B`;
+  if (sizeBytes < 1_048_576) return `${(sizeBytes / 1_024).toFixed(sizeBytes < 10_240 ? 1 : 0)} KB`;
+  return `${(sizeBytes / 1_048_576).toFixed(sizeBytes < 10_485_760 ? 1 : 0)} MB`;
 }
 
 export function EmptyConversation() {
@@ -264,11 +404,15 @@ export function ConversationComposer({
   disabled,
   onChange,
   onSubmit,
+  showQueueAction,
+  onQueue,
 }: {
   readonly input: string;
   readonly disabled: boolean;
   readonly onChange: (value: string) => void;
   readonly onSubmit: FormEventHandler<HTMLFormElement>;
+  readonly showQueueAction: boolean;
+  readonly onQueue: () => void;
 }) {
   return (
     <form className="composer" onSubmit={onSubmit}>
@@ -280,7 +424,7 @@ export function ConversationComposer({
         value={input}
         onChange={(event) => onChange(event.target.value)}
         placeholder="描述你希望 Agent 完成的任务…"
-        rows={3}
+        rows={2}
         disabled={disabled}
         style={{ resize: composerTextareaResize }}
         onKeyDown={(event) => {
@@ -292,9 +436,25 @@ export function ConversationComposer({
       />
       <div className="composer-footer">
         <span>Ctrl / ⌘ + Enter 发送</span>
-        <button type="submit" className="send-button" disabled={disabled || !input.trim()}>
+        {showQueueAction && (
+          <button
+            type="button"
+            className="queue-button"
+            disabled={disabled || !input.trim()}
+            onClick={onQueue}
+          >
+            排队下一任务
+          </button>
+        )}
+        <button
+          type="submit"
+          className="send-button"
+          title="发送"
+          aria-label="发送任务"
+          disabled={disabled || !input.trim()}
+        >
           <Send size={16} />
-          发送
+          <span className="send-label">发送</span>
         </button>
       </div>
     </form>
@@ -411,12 +571,14 @@ export function NavigationSidebar({
 export function ThreadHeader({
   thread,
   run,
+  continuity,
   actionLoading,
   onArchive,
   onCancel,
 }: {
   readonly thread: Thread;
   readonly run: Run | undefined;
+  readonly continuity?: ThreadContinuityStatus;
   /** @deprecated 右侧活动栏已移除，仅为旧调用方提供无行为的迁移兼容。 */
   readonly artifactCount?: number;
   readonly modelWireTraceCount?: number;
@@ -427,17 +589,22 @@ export function ThreadHeader({
   readonly onOpenArtifacts?: () => void;
   readonly artifactTriggerRef?: RefObject<HTMLButtonElement | null>;
 }) {
+  const workspaceStateLabel =
+    continuity?.sandboxState === "pausing"
+      ? "工作区正在暂停"
+      : continuity?.sandboxState === "resuming"
+        ? "工作区正在恢复"
+        : continuity?.sandboxState === "paused"
+          ? "工作区已暂停"
+          : undefined;
   return (
-    <header className="conversation-header">
-      <div>
-        <div className="header-meta">
-          <span className="connection-dot" aria-hidden="true" />
-          本地 Agent 会话
-        </div>
-        <h1>{thread.title}</h1>
+    <header className="conversation-header" data-run-id={run?.id}>
+      <div className="conversation-title">
+        <h1 title={thread.title}>{thread.title}</h1>
         <div className="run-meta">
           <RunStatusBadge status={run?.status} />
-          {run && <span>运行 {run.id}</span>}
+          {workspaceStateLabel !== undefined && <span>{workspaceStateLabel}</span>}
+          {(continuity?.queueDepth ?? 0) > 0 && <span>后续任务 {continuity?.queueDepth}</span>}
         </div>
       </div>
       <div className="header-actions">
@@ -449,7 +616,7 @@ export function ThreadHeader({
             disabled={actionLoading}
           >
             <Square size={14} />
-            停止运行
+            <span>停止运行</span>
           </button>
         )}
         <button
@@ -461,7 +628,7 @@ export function ThreadHeader({
           disabled={actionLoading}
         >
           <Archive size={17} />
-          归档
+          <span>归档</span>
         </button>
       </div>
     </header>

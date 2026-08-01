@@ -1,4 +1,4 @@
-import { sha256Digest, tenantId } from "@cube-runtime/domain";
+import { runId, sha256Digest, tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
 import {
@@ -14,7 +14,12 @@ import {
   sandboxCleanupIdentityDigest,
   workspaceChangeDigest,
 } from "./mutation-protocol.js";
-import type { ExecutionScope, RuntimeEventV1, RuntimeMutation } from "./ports.js";
+import type {
+  ExecutionScope,
+  RuntimeEventV1,
+  RuntimeMutation,
+  ThreadContinuityMetricsPort,
+} from "./ports.js";
 import { RunWorker, type RunWorkerOptions } from "./run-worker.js";
 import {
   BlockingAgentSession,
@@ -26,6 +31,8 @@ import {
   FakeRevisionVerifier,
   FakeSandboxRegistry,
   FakeSessionFactory,
+  FakeThreadContextBodies,
+  FakeThreadSandboxLifecycle,
   fakeRevision,
   fakeSeed,
   ScriptedAgentSession,
@@ -54,6 +61,11 @@ function harness(
   const artifacts = new FakeArtifactPublication();
   const clock = new FakeClock();
   const metrics = new FakeRecoveryMetrics();
+  const continuityMetrics = {
+    record: vi.fn<ThreadContinuityMetricsPort["record"]>(async () => undefined),
+  };
+  const threadContextBodies = new FakeThreadContextBodies();
+  const threadSandboxes = new FakeThreadSandboxLifecycle();
   const worker = new RunWorker(
     {
       persistence,
@@ -66,6 +78,9 @@ function harness(
       artifacts,
       clock,
       metrics,
+      continuityMetrics,
+      ...(workerOptions.threadContextWriteEnabled === true ? { threadContextBodies } : {}),
+      ...(workerOptions.threadSandboxSessionReuseEnabled === true ? { threadSandboxes } : {}),
     },
     {
       workerId: "worker-test",
@@ -87,10 +102,323 @@ function harness(
     artifacts,
     clock,
     metrics,
+    continuityMetrics,
+    threadContextBodies,
+    threadSandboxes,
   };
 }
 
 describe("Run Worker 双栅栏与恢复状态机", () => {
+  it("阶段 5 成功终态先提交 pause intent，再执行 lifecycle effect，且不走 success-close", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
+      threadSandboxSessionReuseEnabled: true,
+    });
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(h.threadSandboxes.acquireCount).toBe(1);
+    expect(h.threadSandboxes.attestCount).toBe(1);
+    expect(h.threadSandboxes.terminalEffectCount).toBe(1);
+    expect(h.threadSandboxes.terminateCount).toBe(0);
+    expect(h.sandboxes.acquireCount).toBe(0);
+    expect(h.sandboxes.settleCount).toBe(0);
+    const terminal = h.persistence.mutationCommands.find((mutation) =>
+      mutation.idempotencyKey.endsWith("/final/succeeded"),
+    );
+    expect(terminal?.threadSandboxTerminal).toMatchObject({
+      schemaVersion: 1,
+      sessionId: h.threadSandboxes.lease.sessionId,
+      generation: 1,
+    });
+  });
+
+  it("阶段 5 pause 结果未知不回滚已经提交的 Run/Workspace/Context 终态", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
+      threadSandboxSessionReuseEnabled: true,
+    });
+    h.threadSandboxes.nextTerminalEffect = "unknown";
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(h.persistence.record(h.scope).run.status).toBe("succeeded");
+    expect(h.threadSandboxes.terminalEffectCount).toBe(1);
+  });
+
+  it("阶段 5 running handoff 通过 revision attestation 时跳过物化且不 pause", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
+      threadSandboxSessionReuseEnabled: true,
+    });
+    h.threadSandboxes.nextAcquire = {
+      outcome: "ready",
+      session: {
+        registryId: "thread-registry-reused",
+        providerSandboxId: h.threadSandboxes.handle.id,
+        mode: "connected",
+        sandbox: h.threadSandboxes.handle,
+      },
+      lease: h.threadSandboxes.lease,
+      requiresMaterialization: false,
+      source: "running_handoff",
+    };
+    h.persistence.threadSandboxHandoffRunId = runId("run-next");
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(h.revisions.materializeCount).toBe(0);
+    expect(h.threadSandboxes.attestCount).toBe(0);
+    expect(h.threadSandboxes.terminalEffectCount).toBe(0);
+    expect(h.threadSandboxes.terminateCount).toBe(0);
+  });
+
+  it("阶段 3 在完整 turn 后原子消费 steer，并注入同一活跃 Session 的原生 steer 队列", async () => {
+    const completedTurn: RuntimeAgentEvent = {
+      type: "turn.completed",
+      assistant: {
+        content: [{ type: "text", text: "第一轮完成" }],
+        api: "openai-completions",
+        provider: "test",
+        model: "test-model",
+        stopReason: "stop",
+        timestamp: 1,
+      },
+      toolResults: [],
+    };
+    const session = new ScriptedAgentSession([
+      { type: "agent.started" },
+      { type: "message.completed", stopReason: "stop" },
+      completedTurn,
+      { type: "agent.settled" },
+    ]);
+    const execution = harness([session], fakeSeed("durable-steer"), {
+      threadContextWriteEnabled: true,
+      threadInputRoutingV2Enabled: true,
+    });
+    execution.persistence.pendingThreadSteers.push({
+      scope: execution.scope,
+      receiptId: "input-steer-1",
+      targetTurnId: "turn-1",
+      inputText: "不要改后端，只调整配色",
+      bodyDigest: sha256Digest("a".repeat(64)),
+    });
+
+    await expect(execution.worker.execute(execution.scope)).resolves.toEqual({
+      outcome: "succeeded",
+    });
+    expect(session.prompts).toEqual(["执行任务"]);
+    expect(session.steers).toEqual(["不要改后端，只调整配色"]);
+    expect(execution.persistence.pendingThreadSteers).toHaveLength(0);
+    expect(
+      execution.persistence.durableOperations.some((item) =>
+        item.includes("permit:consume:attempt-1/model/steer/input-steer-1"),
+      ),
+    ).toBe(false);
+  });
+
+  it("阶段 3 在 Provider stream 与完整 tool call/result 收敛前不读取或消费 steer", async () => {
+    const session = new BlockingAgentSession();
+    const execution = harness([session], fakeSeed("durable-steer-safe-point"), {
+      threadContextWriteEnabled: true,
+      threadInputRoutingV2Enabled: true,
+    });
+    execution.persistence.pendingThreadSteers.push({
+      scope: execution.scope,
+      receiptId: "input-steer-safe-point",
+      targetTurnId: "turn-1",
+      inputText: "工具完成后再采用这条输入",
+      bodyDigest: sha256Digest("b".repeat(64)),
+    });
+
+    const running = execution.worker.execute(execution.scope);
+    await eventually(() => session.prompts.length === 1);
+    session.emit({ type: "agent.started" });
+    session.emit({ type: "message.delta", delta: "仍在流式输出" });
+    await eventually(() =>
+      execution.persistence
+        .record(execution.scope)
+        .events.some(
+          (event) => event.kind === "agent_event" && event.payload.type === "message.delta",
+        ),
+    );
+    expect(execution.persistence.durableOperations).not.toContain("steer:read");
+    expect(execution.persistence.pendingThreadSteers).toHaveLength(1);
+
+    session.emit({ type: "message.completed", stopReason: "stop" });
+    session.emit({
+      type: "turn.completed",
+      assistant: {
+        content: [
+          {
+            type: "toolCall",
+            id: "tool-safe-point",
+            name: "sandbox_write_file",
+            arguments: { path: "theme.css" },
+          },
+          { type: "text", text: "工具结果已经配对" },
+        ],
+        api: "openai-completions",
+        provider: "test",
+        model: "test-model",
+        stopReason: "stop",
+        timestamp: 1,
+      },
+      toolResults: [
+        {
+          toolCallId: "tool-safe-point",
+          toolName: "sandbox_write_file",
+          text: "ok",
+          isError: false,
+          timestamp: 2,
+        },
+      ],
+    });
+    await eventually(() => session.steers.length === 1);
+    const contextAppendIndex = execution.persistence.durableOperations.findIndex((item) =>
+      item.includes("/context/turn/0"),
+    );
+    const steerReadIndex = execution.persistence.durableOperations.indexOf("steer:read");
+    expect(contextAppendIndex).toBeGreaterThanOrEqual(0);
+    expect(contextAppendIndex).toBeLessThan(steerReadIndex);
+    expect(session.prompts).toEqual(["执行任务"]);
+    expect(session.steers).toEqual(["工具完成后再采用这条输入"]);
+
+    // 模拟 Pi 在原 prompt 中消费 steer 后完成下一轮，而不是由 Worker 另开 prompt。
+    session.emit({ type: "message.completed", stopReason: "stop" });
+    session.emit({
+      type: "turn.completed",
+      assistant: {
+        content: [{ type: "text", text: "已采用新输入" }],
+        api: "openai-completions",
+        provider: "test",
+        model: "test-model",
+        stopReason: "stop",
+        timestamp: 3,
+      },
+      toolResults: [],
+    });
+    session.emit({ type: "agent.settled" });
+    session.complete();
+    await expect(running).resolves.toEqual({ outcome: "succeeded" });
+    expect(execution.persistence.pendingThreadSteers).toHaveLength(0);
+  });
+
+  it("阶段 2 只在完整 turn 后双写 assistant，并在 terminal 同事务追加 Workspace/Run 事实", async () => {
+    const turn: RuntimeAgentEvent = {
+      type: "turn.completed",
+      assistant: {
+        content: [
+          {
+            type: "thinking",
+            thinking: "先核验文档依赖，再生成文件",
+            thinkingSignature: "reasoning_content",
+          },
+          { type: "text", text: "跨 Run 可恢复回答" },
+        ],
+        api: "openai-completions",
+        provider: "test",
+        model: "test-model",
+        stopReason: "stop",
+        timestamp: 1,
+      },
+      toolResults: [],
+    };
+    const execution = harness(
+      [
+        new ScriptedAgentSession([
+          { type: "agent.started" },
+          { type: "message.completed", stopReason: "stop" },
+          turn,
+          { type: "agent.settled" },
+        ]),
+      ],
+      fakeSeed("thread-context-write"),
+      { threadContextWriteEnabled: true },
+    );
+    const commands: RuntimeMutation[] = [];
+    execution.persistence.afterMutation = (command) => commands.push(command);
+    await expect(execution.worker.execute(execution.scope)).resolves.toEqual({
+      outcome: "succeeded",
+    });
+    const contextCommands = commands.filter((command) => command.threadContextAppend !== undefined);
+    expect(contextCommands).toHaveLength(2);
+    expect(contextCommands[0]?.threadContextAppend?.entries.map((entry) => entry.kind)).toEqual([
+      "assistant_message",
+    ]);
+    expect(contextCommands[1]?.threadContextAppend?.entries.map((entry) => entry.kind)).toEqual([
+      "workspace_unchanged",
+      "run_terminal",
+    ]);
+    expect(execution.threadContextBodies.values).toContainEqual(
+      expect.objectContaining({
+        text: "跨 Run 可恢复回答",
+        content: [
+          {
+            type: "thinking",
+            thinking: "先核验文档依赖，再生成文件",
+            thinkingSignature: "reasoning_content",
+          },
+          { type: "text", text: "跨 Run 可恢复回答" },
+        ],
+      }),
+    );
+  });
+
+  it("turn 安全点先排空思考与消息公开事件，再提交 Thread Context", async () => {
+    const turn: RuntimeAgentEvent = {
+      type: "turn.completed",
+      assistant: {
+        content: [
+          { type: "thinking", thinking: "先检查输入" },
+          { type: "text", text: "检查完成" },
+        ],
+        api: "openai-completions",
+        provider: "test",
+        model: "test-model",
+        stopReason: "stop",
+        timestamp: 1,
+      },
+      toolResults: [],
+    };
+    const execution = harness(
+      [
+        new ScriptedAgentSession([
+          { type: "agent.started" },
+          { type: "thinking.started" },
+          { type: "thinking.delta", delta: "先检查输入" },
+          { type: "thinking.completed" },
+          { type: "message.completed", stopReason: "stop" },
+          turn,
+          { type: "agent.settled" },
+        ]),
+      ],
+      fakeSeed("thread-context-event-order"),
+      { threadContextWriteEnabled: true },
+    );
+
+    await expect(execution.worker.execute(execution.scope)).resolves.toEqual({
+      outcome: "succeeded",
+    });
+
+    const events = execution.persistence
+      .record(execution.scope)
+      .events.filter((event) => event.kind === "agent_event");
+    const contextIndex = execution.persistence.durableOperations.findIndex((operation) =>
+      operation.includes("/context/turn/0"),
+    );
+    expect(contextIndex).toBeGreaterThanOrEqual(0);
+    for (const type of [
+      "thinking.started",
+      "thinking.delta",
+      "thinking.completed",
+      "message.completed",
+    ]) {
+      const event = events.find((candidate) => candidate.payload.type === type);
+      if (event === undefined) throw new Error(`缺少测试事件：${type}`);
+      const eventIndex = execution.persistence.durableOperations.indexOf(
+        `mutate:attempt-1/event/${event.sequence}`,
+      );
+      expect(eventIndex).toBeGreaterThanOrEqual(0);
+      expect(eventIndex).toBeLessThan(contextIndex);
+    }
+  });
+
   it("旧 Artifact 修正配置不再改变新 Run 的完成协议", () => {
     expect(() =>
       harness([], fakeSeed("artifact-round-limit"), { maxArtifactCorrectionRounds: 99 }),
@@ -166,6 +494,12 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.revisions.materializeCount).toBe(1);
     expect(h.factory.createCount).toBe(0);
     expect(h.sandboxes.settleCount).toBe(1);
+    expect(h.continuityMetrics.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metricName: "workspace_materialize_latency_ms",
+        outcome: "failed",
+      }),
+    );
   });
 
   it("Revision、Run succeeded、Attempt 终态和双栅栏释放在同一幂等事务完成", async () => {
@@ -175,6 +509,12 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
 
     expect(h.revisions.materializeCount).toBe(1);
+    expect(h.continuityMetrics.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metricName: "workspace_materialize_latency_ms",
+        outcome: "ready",
+      }),
+    );
 
     const currentScope = h.persistence.scopeForRun(h.scope.runId);
     const record = h.persistence.record(currentScope);
@@ -899,7 +1239,11 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("settle 返回后、终态事务前观察到取消时，cancelled 优先于 succeeded", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed("cancelled-context"), {
+      threadContextWriteEnabled: true,
+    });
+    const commands: RuntimeMutation[] = [];
+    h.persistence.afterMutation = (command) => commands.push(command);
     h.sandboxes.beforeSettleReturn = () => h.cancellation.cancel(h.scope);
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "cancelled" });
@@ -909,6 +1253,18 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(record.attempt?.status).toBe("cancelled");
     expect(record.outbox).toContainEqual(
       expect.objectContaining({ kind: "sandbox_cleanup", state: "completed" }),
+    );
+    expect(commands).toContainEqual(
+      expect.objectContaining({
+        threadContextAppend: expect.objectContaining({
+          entries: expect.arrayContaining([
+            expect.objectContaining({
+              kind: "run_terminal",
+              body: expect.objectContaining({ value: { status: "cancelled" } }),
+            }),
+          ]),
+        }),
+      }),
     );
   });
 
@@ -1003,13 +1359,19 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("经过稳定净化的 Provider 失败属于模型业务失败，可安全收尾为 Domain failed", async () => {
-    const h = harness([
-      new ScriptedAgentSession([
-        { type: "agent.started" },
-        { type: "error", code: "PROVIDER", message: "上游私有请求和密钥信息" },
-        { type: "agent.settled" },
-      ]),
-    ]);
+    const h = harness(
+      [
+        new ScriptedAgentSession([
+          { type: "agent.started" },
+          { type: "error", code: "PROVIDER", message: "上游私有请求和密钥信息" },
+          { type: "agent.settled" },
+        ]),
+      ],
+      fakeSeed("failed-context"),
+      { threadContextWriteEnabled: true },
+    );
+    const commands: RuntimeMutation[] = [];
+    h.persistence.afterMutation = (command) => commands.push(command);
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "failed" });
 
@@ -1018,6 +1380,18 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(record.attempt?.status).toBe("failed");
     expect(record.workspace.currentRevisionId).toBeUndefined();
     expect(JSON.stringify(record.events)).not.toContain("上游私有");
+    expect(commands).toContainEqual(
+      expect.objectContaining({
+        threadContextAppend: expect.objectContaining({
+          entries: expect.arrayContaining([
+            expect.objectContaining({
+              kind: "run_terminal",
+              body: expect.objectContaining({ value: { status: "failed" } }),
+            }),
+          ]),
+        }),
+      }),
+    );
   });
 
   it("waiting 原子提交 checkpoint 与 RolloutProjection，回答后新 Session 用 prompt 启动模型", async () => {

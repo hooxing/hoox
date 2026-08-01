@@ -10,6 +10,7 @@ function productionEnvironment(): Record<string, string> {
     DATABASE_RUNTIME_ROLE: "runtime",
     THREAD_CURSOR_ACTIVE_KID: "current",
     THREAD_CURSOR_SIGNING_KEYS: "current:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    THREAD_SERIAL_QUEUE_V2_ENABLED: "true",
     API_JWT_ISSUER: "https://issuer.example.invalid/runtime",
     API_JWT_AUDIENCE: "cube-runtime-api",
     API_JWT_SIGNING_KEYS: "current-key:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -47,6 +48,48 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
 }
 
 describe("API 进程入口", () => {
+  it("Thread 串行队列开关缺省开启且允许显式关闭", () => {
+    const defaultEnvironment = developmentEnvironment();
+    delete defaultEnvironment.THREAD_SERIAL_QUEUE_V2_ENABLED;
+    expect(parseApiProcessEnvironment(defaultEnvironment).serialQueueV2Enabled).toBe(true);
+    expect(
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          THREAD_SERIAL_QUEUE_V2_ENABLED: "false",
+          THREAD_CONTEXT_V2_WRITE_ENABLED: "false",
+          THREAD_CONTEXT_V2_SHADOW_READ_ENABLED: "false",
+          THREAD_CONTEXT_V2_READ_ENABLED: "false",
+          THREAD_INPUT_ROUTING_V2_ENABLED: "false",
+        }),
+      ).serialQueueV2Enabled,
+    ).toBe(false);
+  });
+
+  it("统一输入开关默认开启并强制依赖完整 Thread Context read 链", () => {
+    expect(parseApiProcessEnvironment(developmentEnvironment()).threadInputRoutingV2Enabled).toBe(
+      true,
+    );
+    expect(() =>
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          THREAD_INPUT_ROUTING_V2_ENABLED: "true",
+          THREAD_CONTEXT_V2_READ_ENABLED: "false",
+        }),
+      ),
+    ).toThrow("依赖串行队列与 V2 Context read");
+    expect(
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          THREAD_SERIAL_QUEUE_V2_ENABLED: "true",
+          THREAD_CONTEXT_V2_WRITE_ENABLED: "true",
+          THREAD_CONTEXT_V2_SHADOW_READ_ENABLED: "true",
+          THREAD_CONTEXT_V2_READ_ENABLED: "true",
+          THREAD_INPUT_ROUTING_V2_ENABLED: "true",
+        }),
+      ).threadInputRoutingV2Enabled,
+    ).toBe(true);
+  });
+
   it("production 在解析最早边界拒绝继承的 Node TLS/代理覆盖", () => {
     expect(() =>
       parseApiProcessEnvironment({

@@ -15,6 +15,22 @@ export type Run = {
   readonly updatedAt: string;
 };
 
+export type ThreadInputReceipt = {
+  readonly receiptId: string;
+  readonly inputSequence: number;
+  readonly requestedMode: "auto" | "steer" | "follow_up";
+  readonly disposition: "pending_steer" | "steered" | "queued" | "cancelled" | "rejected";
+  readonly targetRunId?: string;
+  readonly targetTurnId?: string;
+  readonly queuedRunId?: string;
+  readonly queueSequence?: number;
+  readonly appliedContextSequence?: number;
+  readonly rejectionCode?: string;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly queuedRun?: Run;
+};
+
 export type RunEvent = {
   readonly eventId: string;
   readonly sequence: number;
@@ -28,6 +44,24 @@ export type RunEventPage = {
   readonly attemptId: string | undefined;
   readonly items: readonly RunEvent[];
   readonly hasMore?: boolean;
+};
+
+export type ThreadContextMessage = {
+  readonly sequence: number;
+  readonly runId?: string;
+  readonly role: "user" | "assistant" | "runtime";
+  readonly text: string;
+  readonly createdAt: string;
+};
+
+export type ThreadContinuityStatus = {
+  readonly boundary: "new_thread" | "legacy_anchor" | "manual" | "unmigrated";
+  readonly readMode: "legacy" | "v2";
+  readonly anchorState: "none" | "completed";
+  readonly queueDepth: number;
+  readonly contextSequence: number;
+  readonly compactionWindow: number;
+  readonly sandboxState?: "running" | "pausing" | "paused" | "resuming" | "terminated" | "unknown";
 };
 
 export type ModelWireTraceCaptureStatus = "complete" | "truncated" | "aborted" | "failed";
@@ -290,6 +324,41 @@ export class RuntimeApi {
       ),
     ) as readonly Run[];
   }
+  async listThreadContext(threadId: string): Promise<readonly ThreadContextMessage[] | undefined> {
+    const items: ThreadContextMessage[] = [];
+    let after = 0;
+    for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+      let data: unknown;
+      try {
+        data = await this.request<unknown>(
+          `/v1/threads/${encodeURIComponent(threadId)}/context?after=${after}&limit=500`,
+        );
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) return undefined;
+        throw error;
+      }
+      const page = record(data);
+      const incoming = asArray(data).filter(isThreadContextMessage);
+      items.push(...incoming);
+      if (page?.hasMore !== true) return items;
+      const next = incoming.at(-1)?.sequence;
+      if (next === undefined || next <= after)
+        throw new ApiError("Thread 历史游标无进展", 502, true);
+      after = next;
+    }
+    throw new ApiError("Thread 历史超过当前客户端分页上限", 422, false);
+  }
+  async getThreadContinuity(threadId: string): Promise<ThreadContinuityStatus | undefined> {
+    try {
+      const value = await this.request<unknown>(
+        `/v1/threads/${encodeURIComponent(threadId)}/continuity`,
+      );
+      return isThreadContinuityStatus(value) ? value : undefined;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return undefined;
+      throw error;
+    }
+  }
   createThread(title: string): Promise<Thread> {
     return this.request("/v1/threads", { method: "POST", body: JSON.stringify({ title }) });
   }
@@ -301,6 +370,42 @@ export class RuntimeApi {
       method: "POST",
       body: JSON.stringify({ input }),
     });
+  }
+  async submitThreadInput(
+    threadId: string,
+    input: string,
+    mode: "auto" | "follow_up" = "auto",
+    expectedRunId?: string,
+  ): Promise<ThreadInputReceipt> {
+    try {
+      return await this.request(`/v1/threads/${encodeURIComponent(threadId)}/inputs`, {
+        method: "POST",
+        body: JSON.stringify({
+          input,
+          mode,
+          ...(expectedRunId === undefined ? {} : { expectedRunId }),
+        }),
+      });
+    } catch (error) {
+      // Feature Flag 关闭或旧 API：统一入口不存在时保持 /runs=follow_up 的兼容语义。
+      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+      const run = await this.createRun(threadId, input);
+      return {
+        receiptId: `legacy-${run.id}`,
+        inputSequence: 1,
+        requestedMode: "follow_up",
+        disposition: "queued",
+        queuedRunId: run.id,
+        createdAt: run.createdAt,
+        updatedAt: run.updatedAt,
+        queuedRun: run,
+      };
+    }
+  }
+  getThreadInputReceipt(threadId: string, receiptId: string): Promise<ThreadInputReceipt> {
+    return this.request(
+      `/v1/threads/${encodeURIComponent(threadId)}/inputs/${encodeURIComponent(receiptId)}`,
+    );
   }
   getRun(threadId: string, runId: string): Promise<Run> {
     return this.request(
@@ -406,6 +511,42 @@ export class RuntimeApi {
     }
     throw new ApiError("预览地址格式无效", 502, true);
   }
+}
+
+function isThreadContextMessage(value: unknown): value is ThreadContextMessage {
+  const item = record(value);
+  return (
+    item !== undefined &&
+    typeof item.sequence === "number" &&
+    Number.isSafeInteger(item.sequence) &&
+    item.sequence > 0 &&
+    (item.role === "user" || item.role === "assistant" || item.role === "runtime") &&
+    typeof item.text === "string" &&
+    typeof item.createdAt === "string"
+  );
+}
+
+function isThreadContinuityStatus(value: unknown): value is ThreadContinuityStatus {
+  const item = record(value);
+  return (
+    item !== undefined &&
+    (item.boundary === "new_thread" ||
+      item.boundary === "legacy_anchor" ||
+      item.boundary === "manual" ||
+      item.boundary === "unmigrated") &&
+    (item.readMode === "legacy" || item.readMode === "v2") &&
+    (item.anchorState === "none" || item.anchorState === "completed") &&
+    Number.isSafeInteger(item.queueDepth) &&
+    (item.queueDepth as number) >= 0 &&
+    Number.isSafeInteger(item.contextSequence) &&
+    (item.contextSequence as number) >= 0 &&
+    Number.isSafeInteger(item.compactionWindow) &&
+    (item.compactionWindow as number) >= 0 &&
+    (item.sandboxState === undefined ||
+      new Set(["running", "pausing", "paused", "resuming", "terminated", "unknown"]).has(
+        item.sandboxState as string,
+      ))
+  );
 }
 
 export function canPreviewArtifact(mediaType: string | undefined): boolean {

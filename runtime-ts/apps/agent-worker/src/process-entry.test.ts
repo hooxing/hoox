@@ -76,6 +76,119 @@ describe("Agent Worker 进程入口", () => {
     expect(JSON.stringify(projected)).not.toContain("api-only-secret-canary");
   });
 
+  it("Thread Context flags 强制 read→shadow→write→serial，默认开启且阈值可配置", () => {
+    expect(parseWorkerProcessEnvironment(productionEnvironment()).threadContext).toEqual({
+      serialQueueV2Enabled: true,
+      writeEnabled: true,
+      shadowReadEnabled: true,
+      readEnabled: true,
+      inputRoutingEnabled: true,
+      inlineBodyMaxBytes: 16 * 1024,
+      compaction: {
+        enabled: true,
+        path: "local",
+        softLimitPercent: 80,
+        targetPercent: 55,
+        recentUserTokens: 4096,
+        maxOutputTokens: 2048,
+        timeoutMs: 60000,
+      },
+    });
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        THREAD_CONTEXT_V2_READ_ENABLED: "true",
+        THREAD_CONTEXT_V2_SHADOW_READ_ENABLED: "false",
+      }),
+    ).toThrow("依赖 shadow read");
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        THREAD_CONTEXT_V2_WRITE_ENABLED: "true",
+        THREAD_SERIAL_QUEUE_V2_ENABLED: "false",
+      }),
+    ).toThrow("依赖 Thread 串行队列");
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        THREAD_INPUT_ROUTING_V2_ENABLED: "true",
+        THREAD_CONTEXT_V2_READ_ENABLED: "false",
+      }),
+    ).toThrow("依赖串行队列与 V2 Context read");
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        THREAD_CONTEXT_COMPACTION_ENABLED: "true",
+        THREAD_CONTEXT_V2_WRITE_ENABLED: "false",
+        THREAD_CONTEXT_V2_SHADOW_READ_ENABLED: "false",
+        THREAD_CONTEXT_V2_READ_ENABLED: "false",
+        THREAD_INPUT_ROUTING_V2_ENABLED: "false",
+      }),
+    ).toThrow("依赖串行队列与 V2 Context write/read");
+    expect(
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        THREAD_SERIAL_QUEUE_V2_ENABLED: "true",
+        THREAD_CONTEXT_V2_WRITE_ENABLED: "true",
+        THREAD_CONTEXT_V2_SHADOW_READ_ENABLED: "true",
+        THREAD_CONTEXT_V2_READ_ENABLED: "true",
+        THREAD_INPUT_ROUTING_V2_ENABLED: "true",
+        THREAD_CONTEXT_INLINE_BODY_MAX_BYTES: "32768",
+        THREAD_CONTEXT_COMPACTION_ENABLED: "true",
+        THREAD_CONTEXT_COMPACTION_SOFT_LIMIT_PERCENT: "75",
+        THREAD_CONTEXT_COMPACTION_TARGET_PERCENT: "50",
+      }).threadContext,
+    ).toMatchObject({
+      writeEnabled: true,
+      shadowReadEnabled: true,
+      readEnabled: true,
+      inputRoutingEnabled: true,
+      inlineBodyMaxBytes: 32768,
+      compaction: expect.objectContaining({
+        enabled: true,
+        path: "local",
+        softLimitPercent: 75,
+        targetPercent: 50,
+      }),
+    });
+  });
+
+  it("Thread Sandbox reuse 默认开启，显式配置仍校验依赖并保持策略参数可配置", () => {
+    expect(parseWorkerProcessEnvironment(productionEnvironment()).threadSandbox).toEqual({
+      reuseEnabled: true,
+      sessionTtlSeconds: 120,
+      pausedRetentionSeconds: 600,
+      lifecycleTimeoutMs: 90_000,
+    });
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        THREAD_SANDBOX_SESSION_REUSE_ENABLED: "true",
+        THREAD_CONTEXT_V2_READ_ENABLED: "false",
+        THREAD_INPUT_ROUTING_V2_ENABLED: "false",
+        THREAD_CONTEXT_COMPACTION_ENABLED: "false",
+      }),
+    ).toThrow("依赖串行队列与 V2 Context write/read");
+    expect(
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        THREAD_SERIAL_QUEUE_V2_ENABLED: "true",
+        THREAD_CONTEXT_V2_WRITE_ENABLED: "true",
+        THREAD_CONTEXT_V2_SHADOW_READ_ENABLED: "true",
+        THREAD_CONTEXT_V2_READ_ENABLED: "true",
+        THREAD_SANDBOX_SESSION_REUSE_ENABLED: "true",
+        CUBESANDBOX_SESSION_TTL_SECONDS: "86400",
+        THREAD_SANDBOX_PAUSED_RETENTION_SECONDS: "1800",
+        THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS: "120000",
+      }).threadSandbox,
+    ).toEqual({
+      reuseEnabled: true,
+      sessionTtlSeconds: 86_400,
+      pausedRetentionSeconds: 1_800,
+      lifecycleTimeoutMs: 120_000,
+    });
+  });
+
   it("production 的 PG 角色证明失败时不触达 S3、Cube、模型或消费循环", async () => {
     const databaseFailure = new Error("POSTGRES_RUNTIME_ROLE_UNSAFE");
     const probes = {

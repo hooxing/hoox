@@ -1,7 +1,14 @@
 import { LoaderCircle, PanelLeftOpen, RotateCw } from "lucide-react";
-import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ApiError, type ArtifactPreview, type RunStatus, RuntimeApi, type Thread } from "./api.js";
+import {
+  ApiError,
+  type ArtifactPreview,
+  type RunStatus,
+  RuntimeApi,
+  type Thread,
+  type ThreadInputReceipt,
+} from "./api.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
@@ -20,9 +27,47 @@ import {
   ThreadCreate,
   ThreadHeader,
   ThreadNavigation,
+  ThreadTranscript,
+  type PendingThreadInputView,
 } from "./workspace-view.js";
 
 const api = new RuntimeApi();
+
+type PendingConversationInput = PendingThreadInputView & {
+  readonly expectedUserOccurrence: number;
+  readonly receipt?: ThreadInputReceipt;
+};
+
+export function nextExpectedUserOccurrence(
+  messages: readonly { readonly role: string; readonly text: string }[],
+  pending: readonly {
+    readonly text: string;
+    readonly disposition: PendingThreadInputView["disposition"];
+    readonly expectedUserOccurrence: number;
+  }[],
+  text: string,
+): number {
+  const persisted = messages.filter(
+    (message) => message.role === "user" && message.text === text,
+  ).length;
+  const activeDispositions = new Set<PendingThreadInputView["disposition"]>([
+    "submitting",
+    "pending_steer",
+    "steered",
+    "queued",
+  ]);
+  return (
+    pending.reduce(
+      (highest, message) =>
+        message.text === text &&
+        activeDispositions.has(message.disposition) &&
+        message.expectedUserOccurrence > persisted
+          ? Math.max(highest, message.expectedUserOccurrence)
+          : highest,
+      persisted,
+    ) + 1
+  );
+}
 
 /** 首条请求在浏览器侧生成稳定标题，既满足现有必填协议，也不把取名工作交给用户。 */
 export function deriveThreadTitle(query: string): string {
@@ -49,7 +94,12 @@ type WorkspaceApi = Pick<
   | "listModelWireTraces"
   | "listThreads"
   | "previewArtifact"
->;
+> & {
+  readonly listThreadContext?: RuntimeApi["listThreadContext"];
+  readonly getThreadContinuity?: RuntimeApi["getThreadContinuity"];
+  readonly submitThreadInput?: RuntimeApi["submitThreadInput"];
+  readonly getThreadInputReceipt?: RuntimeApi["getThreadInputReceipt"];
+};
 
 type RecoveryUiState = {
   readonly threadId: string;
@@ -65,15 +115,35 @@ export function chooseInitialThread(threads: readonly Thread[]): string | undefi
 }
 
 /** waiting 已由 Worker 持久化为用户输入边界，不能继续短轮询。 */
-export function shouldContinueRunPolling(hasMoreEvents: boolean, status: RunStatus): boolean {
-  return hasMoreEvents || pollingRunStatuses.has(status);
+export function shouldContinueRunPolling(
+  hasMoreEvents: boolean,
+  status: RunStatus,
+  sandboxState?: "running" | "pausing" | "paused" | "resuming" | "terminated" | "unknown",
+): boolean {
+  return (
+    hasMoreEvents ||
+    pollingRunStatuses.has(status) ||
+    sandboxState === "pausing" ||
+    sandboxState === "resuming"
+  );
+}
+
+export function shouldFollowLatest(
+  scrollHeight: number,
+  scrollTop: number,
+  clientHeight: number,
+  threshold = 96,
+): boolean {
+  return scrollHeight - scrollTop - clientHeight <= threshold;
 }
 
 export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) {
   const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [input, setInput] = useState("");
-  const [currentRequest, setCurrentRequest] = useState<string | undefined>();
+  const [pendingInputs, setPendingInputs] = useState<readonly PendingConversationInput[]>([]);
+  const [continuity, setContinuity] =
+    useState<Awaited<ReturnType<RuntimeApi["getThreadContinuity"]>>>();
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<ApiError | undefined>();
@@ -89,6 +159,9 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const currentRunPollRef = useRef(new CurrentRunPoll());
   const navigationRef = useRef(new WorkspaceNavigation());
   const mobileNavigationToggleRef = useRef<HTMLButtonElement>(null);
+  const runAreaRef = useRef<HTMLElement>(null);
+  const followLatestRef = useRef(true);
+  const followedThreadRef = useRef<string | undefined>(undefined);
   const sendInFlightRef = useRef(false);
   const initialSelectionAppliedRef = useRef(false);
 
@@ -96,7 +169,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     navigationRef.current.navigate(threadId);
     currentRunPollRef.current.invalidate();
     dispatch({ type: "select", threadId });
-    setCurrentRequest(undefined);
+    setPendingInputs([]);
     setError(undefined);
     setNavigationOpen(false);
   }, []);
@@ -209,6 +282,52 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
 
   useEffect(() => {
     const threadId = state.selectedThreadId;
+    if (threadId === undefined || apiClient.listThreadContext === undefined) {
+      dispatch({ type: "threadContext", items: undefined });
+      return;
+    }
+    const expected = navigationRef.current.capture();
+    let stopped = false;
+    void apiClient
+      .listThreadContext(threadId)
+      .then((items) => {
+        if (!stopped && navigationRef.current.isCurrent(expected)) {
+          dispatch({ type: "threadContext", items });
+        }
+      })
+      .catch(() => {
+        if (!stopped && navigationRef.current.isCurrent(expected)) {
+          dispatch({ type: "threadContext", items: undefined });
+        }
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [apiClient, state.selectedThreadId]);
+
+  useEffect(() => {
+    const threadId = state.selectedThreadId;
+    if (threadId === undefined || apiClient.getThreadContinuity === undefined) {
+      setContinuity(undefined);
+      return;
+    }
+    const expected = navigationRef.current.capture();
+    let stopped = false;
+    void apiClient
+      .getThreadContinuity(threadId)
+      .then((status) => {
+        if (!stopped && navigationRef.current.isCurrent(expected)) setContinuity(status);
+      })
+      .catch(() => {
+        if (!stopped && navigationRef.current.isCurrent(expected)) setContinuity(undefined);
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [apiClient, state.selectedThreadId]);
+
+  useEffect(() => {
+    const threadId = state.selectedThreadId;
     const runId = state.run?.id;
     if (runId === undefined || threadId === undefined) return;
     const pollGeneration = currentRunPollRef.current.activate(threadId, runId);
@@ -219,7 +338,14 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       try {
         const latest = await apiClient.getRun(threadId, runId);
         const tailCursor = modelWireTraceTailCursorRef.current;
-        const [eventPage, artifacts, modelWireTraces, modelWireTraceTail] = await Promise.all([
+        const [
+          eventPage,
+          artifacts,
+          modelWireTraces,
+          modelWireTraceTail,
+          threadContext,
+          continuityStatus,
+        ] = await Promise.all([
           drainEventPages(
             (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
             eventAfterRef.current,
@@ -232,6 +358,10 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           tailCursor === undefined
             ? Promise.resolve(undefined)
             : apiClient.listModelWireTraces(threadId, runId, tailCursor).catch(() => undefined),
+          apiClient.listThreadContext?.(threadId).catch(() => undefined) ??
+            Promise.resolve(undefined),
+          apiClient.getThreadContinuity?.(threadId).catch(() => undefined) ??
+            Promise.resolve(undefined),
         ]);
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           eventAttemptRef.current = eventPage.attemptId;
@@ -239,13 +369,42 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           dispatch({ type: "run", run: latest });
           dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
+          if (apiClient.listThreadContext !== undefined) {
+            dispatch({ type: "threadContext", items: threadContext });
+          }
+          if (apiClient.getThreadContinuity !== undefined) setContinuity(continuityStatus);
           dispatch({ type: "modelWireTraces", page: modelWireTraces, mode: "refreshHead" });
           if (modelWireTraceTail !== undefined) {
             dispatch({ type: "modelWireTraces", page: modelWireTraceTail, mode: "append" });
           }
+          if (
+            !eventPage.hasMore &&
+            (latest.status === "succeeded" ||
+              latest.status === "failed" ||
+              latest.status === "cancelled")
+          ) {
+            const [nextRun] = await apiClient.listLatestRuns(threadId, 1);
+            if (
+              nextRun !== undefined &&
+              nextRun.id !== runId &&
+              !stopped &&
+              currentRunPollRef.current.isCurrent(pollGeneration)
+            ) {
+              // follow-up 被激活后继续追踪新 Run；对话历史本身不切换、不清空。
+              currentRunPollRef.current.invalidate(pollGeneration);
+              eventAfterRef.current = -1;
+              eventAttemptRef.current = undefined;
+              dispatch({ type: "startRun", run: nextRun });
+              return;
+            }
+          }
           // 终态也必须追完已抵达尾页后的跨页新增诊断；waiting 仍不因普通 Run 状态保持短轮询。
           if (
-            shouldContinueRunPolling(eventPage.hasMore, latest.status) ||
+            shouldContinueRunPolling(
+              eventPage.hasMore,
+              latest.status,
+              continuityStatus?.sandboxState,
+            ) ||
             modelWireTraceTail?.hasMore === true ||
             (modelWireTraces.hasMore && !modelWireTracePaginationAdvancedRef.current)
           ) {
@@ -267,14 +426,70 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     };
   }, [apiClient, state.run?.id, state.selectedThreadId]);
 
+  useEffect(() => {
+    const pendingReceipts = pendingInputs
+      .map((item) => item.receipt)
+      .filter(
+        (receipt): receipt is ThreadInputReceipt =>
+          receipt?.disposition === "pending_steer" && !receipt.receiptId.startsWith("legacy-"),
+      );
+    if (
+      pendingReceipts.length === 0 ||
+      state.selectedThreadId === undefined ||
+      apiClient.getThreadInputReceipt === undefined
+    )
+      return;
+    const threadId = state.selectedThreadId;
+    const getThreadInputReceipt = apiClient.getThreadInputReceipt;
+    let stopped = false;
+    const timer = window.setInterval(() => {
+      void Promise.all(
+        pendingReceipts.map((receipt) => getThreadInputReceipt(threadId, receipt.receiptId)),
+      )
+        .then((receipts) => {
+          if (stopped) return;
+          const byId = new Map(receipts.map((receipt) => [receipt.receiptId, receipt]));
+          setPendingInputs((current) =>
+            current.map((item) => {
+              const receipt = item.receipt && byId.get(item.receipt.receiptId);
+              return receipt === undefined
+                ? item
+                : {
+                    ...item,
+                    receipt,
+                    disposition: receipt.disposition,
+                    ...(receipt.queueSequence === undefined
+                      ? {}
+                      : { queueSequence: receipt.queueSequence }),
+                    ...(receipt.rejectionCode === undefined
+                      ? {}
+                      : { rejectionCode: receipt.rejectionCode }),
+                  };
+            }),
+          );
+        })
+        .catch(() => undefined);
+    }, 1_200);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [apiClient, pendingInputs, state.selectedThreadId]);
+
   const createConversation = () => selectThread(undefined);
-  const send = async () => {
+  const send = async (mode: "auto" | "follow_up" = "auto") => {
     if (!input.trim() || actionLoading || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
     const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
       const request = input.trim();
+      const expectedUserOccurrence = nextExpectedUserOccurrence(
+        state.threadContext ?? [],
+        pendingInputs,
+        request,
+      );
+      const localId = crypto.randomUUID();
       let threadId = state.selectedThreadId;
       if (threadId === undefined) {
         const thread = await apiClient.createThread(deriveThreadTitle(request));
@@ -283,11 +498,44 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         navigationRef.current.navigate(thread.id);
         currentRunPollRef.current.invalidate();
         dispatch({ type: "select", threadId: thread.id });
+        setPendingInputs([]);
         threadId = thread.id;
       }
       const runNavigation = navigationRef.current.capture();
-      const run = await apiClient.createRun(threadId, request);
+      const receipt =
+        apiClient.submitThreadInput === undefined
+          ? undefined
+          : await apiClient.submitThreadInput(
+              threadId,
+              request,
+              mode,
+              state.run?.status === "running" ? state.run.id : undefined,
+            );
+      const run =
+        receipt === undefined
+          ? await apiClient.createRun(threadId, request)
+          : (receipt.queuedRun ??
+            (receipt.queuedRunId === undefined
+              ? undefined
+              : await apiClient.getRun(threadId, receipt.queuedRunId)));
       if (!navigationRef.current.isCurrent(runNavigation)) return;
+      setPendingInputs((current) => [
+        ...current,
+        {
+          localId,
+          text: request,
+          expectedUserOccurrence,
+          disposition: receipt?.disposition ?? "queued",
+          ...(receipt === undefined ? {} : { receipt }),
+          ...(receipt?.queueSequence === undefined ? {} : { queueSequence: receipt.queueSequence }),
+          ...(receipt?.rejectionCode === undefined ? {} : { rejectionCode: receipt.rejectionCode }),
+        },
+      ]);
+      if (run === undefined || state.run?.status === "running") {
+        setInput("");
+        setError(undefined);
+        return;
+      }
       // 新 Run 已成为当前事实时同步推进导航代次，使同 Thread 在途恢复响应立即失效。
       navigationRef.current.navigate(threadId);
       setRecoveryUi(undefined);
@@ -296,7 +544,6 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       eventAfterRef.current = -1;
       eventAttemptRef.current = undefined;
       dispatch({ type: "startRun", run });
-      setCurrentRequest(request);
       setInput("");
       setError(undefined);
     } catch (reason) {
@@ -385,6 +632,37 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       ? recoveryUi
       : undefined;
   const visibleError = currentRecovery?.status === "error" ? currentRecovery.error : error;
+  const currentRunHasContext =
+    state.run !== undefined && state.threadContext?.some((item) => item.runId === state.run?.id);
+  const persistedUserOccurrences = new Map<string, number>();
+  for (const message of state.threadContext ?? []) {
+    if (message.role !== "user") continue;
+    persistedUserOccurrences.set(
+      message.text,
+      (persistedUserOccurrences.get(message.text) ?? 0) + 1,
+    );
+  }
+  const visiblePendingInputs = pendingInputs.filter(
+    (message) => (persistedUserOccurrences.get(message.text) ?? 0) < message.expectedUserOccurrence,
+  );
+  const renderedContentVersion = [
+    state.artifacts.length,
+    state.events.length,
+    state.run?.updatedAt ?? "",
+    state.threadContext?.length ?? 0,
+    visiblePendingInputs.length,
+  ].join(":");
+  useLayoutEffect(() => {
+    const runArea = runAreaRef.current;
+    if (runArea === null) return;
+    // 内容版本只负责触发本次布局同步；滚动是否跟随仍由用户当前位置决定。
+    void renderedContentVersion;
+    if (followedThreadRef.current !== state.selectedThreadId) {
+      followedThreadRef.current = state.selectedThreadId;
+      followLatestRef.current = true;
+    }
+    if (followLatestRef.current) runArea.scrollTop = runArea.scrollHeight;
+  }, [renderedContentVersion, state.selectedThreadId]);
   return (
     <main className={`workspace ${navigationOpen ? "navigation-open" : ""}`}>
       <NavigationSidebar
@@ -393,10 +671,9 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         returnFocusRef={mobileNavigationToggleRef}
         onClose={() => setNavigationOpen(false)}
       >
-        <p className="identity-note">本地开发身份 · dev-user-a</p>
         <ThreadCreate actionLoading={actionLoading} onCreate={createConversation} />
         <div className="thread-heading">
-          <span>会话</span>
+          <span>任务</span>
           <span>{state.threads.length}</span>
         </div>
         <ThreadNavigation>
@@ -414,13 +691,10 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
                 className={thread.id === state.selectedThreadId ? "thread selected" : "thread"}
                 key={thread.id}
                 onClick={() => selectThread(thread.id)}
+                aria-label={`${thread.title}${thread.status === "archived" ? "，已归档" : ""}`}
               >
                 <span>{thread.title}</span>
-                <small>
-                  {thread.status === "archived"
-                    ? "已归档"
-                    : new Date(thread.updatedAt).toLocaleString()}
-                </small>
+                {thread.status === "archived" && <small>已归档</small>}
               </button>
             ))
           )}
@@ -474,26 +748,31 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
             <ThreadHeader
               thread={selected}
               run={state.run}
+              {...(continuity === undefined ? {} : { continuity })}
               actionLoading={actionLoading}
               onArchive={() => void archive()}
               onCancel={() => void cancel()}
             />
-            <section className="run-area" aria-live="polite">
-              {state.run && currentRequest && (
-                <div className="message user-request">
-                  <span className="message-avatar" aria-hidden="true">
-                    你
-                  </span>
-                  <div className="message-card">
-                    <span className="message-label">你的请求</span>
-                    <p>{currentRequest}</p>
-                  </div>
-                </div>
-              )}
+            <section
+              ref={runAreaRef}
+              className="run-area"
+              aria-live="polite"
+              onScroll={(event) => {
+                const area = event.currentTarget;
+                followLatestRef.current = shouldFollowLatest(
+                  area.scrollHeight,
+                  area.scrollTop,
+                  area.clientHeight,
+                );
+              }}
+            >
+              <ThreadTranscript
+                messages={state.threadContext ?? []}
+                pendingInputs={visiblePendingInputs}
+              />
               {state.run ? (
                 <>
-                  <RunTimeline run={state.run} events={state.events} />
-                  <RunTranscript events={state.events} />
+                  {!currentRunHasContext && <RunTranscript events={state.events} />}
                   <InlineArtifactDelivery
                     artifacts={state.artifacts}
                     onPreview={(artifactId) => void preview(artifactId)}
@@ -506,6 +785,11 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
                 <EmptyConversation />
               )}
             </section>
+            {state.run && (
+              <div className="run-progress-dock">
+                <RunTimeline run={state.run} events={state.events} />
+              </div>
+            )}
           </>
         )}
         <ConversationComposer
@@ -516,6 +800,8 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
             event.preventDefault();
             void send();
           }}
+          showQueueAction={state.run?.status === "running"}
+          onQueue={() => void send("follow_up")}
         />
       </section>
       {textPreview?.kind === "text" && (

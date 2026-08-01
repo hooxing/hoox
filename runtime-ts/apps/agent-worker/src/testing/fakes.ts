@@ -11,6 +11,7 @@ import {
   membershipId,
   prepareWorkspaceRevision,
   type Run,
+  type Sha256Digest,
   releaseWorkspaceLease,
   renewWorkspaceLease,
   runId,
@@ -28,6 +29,7 @@ import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@cube-runti
 import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import { createWorkspaceManifest } from "@cube-runtime/workspace";
 import {
+  digestCanonical,
   outboxPayloadDigest,
   rolloutProjectionDigest,
   runtimeMutationDigest,
@@ -66,6 +68,10 @@ import type {
   WorkerAgentSessionPort,
   WorkspaceRevisionCandidate,
   WorkspaceRevisionVerifierPort,
+  ThreadContextBodyPersistencePort,
+  ThreadSandboxAcquireResult,
+  ThreadSandboxLeaseRefV1,
+  ThreadSandboxSessionLifecyclePort,
 } from "../ports.js";
 
 interface FakeRecord {
@@ -76,6 +82,7 @@ interface FakeRecord {
   answer?: string;
   rolloutProjection: ControlledRolloutProjection;
   projectionVersion: number;
+  contextNextSequence: number;
   attempt: ExecutionAttemptSnapshot | undefined;
   fence: ExecutionFence | undefined;
   readonly events: PersistedRuntimeEventV1[];
@@ -117,17 +124,26 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   forceInspectUnavailable = false;
   rejectInspectNext = false;
   forceFenceLost = false;
+  threadSandboxHandoffRunId: ReturnType<typeof runId> | undefined;
   rejectNextPermit = false;
   beforePermitIssueReturn?: (
     input: Parameters<ExecutionPersistencePort["issueExternalEffectPermit"]>[0],
   ) => void | Promise<void>;
   readonly durableOperations: string[] = [];
+  readonly mutationCommands: RuntimeMutation[] = [];
   readonly permits: Array<{
     readonly attemptId: string;
     readonly permit: ExternalEffectPermit;
     consumed: boolean;
   }> = [];
   readonly revisionCreatedAt: IsoTimestamp[] = [];
+  readonly pendingThreadSteers: Array<{
+    readonly scope: ExecutionScope;
+    readonly receiptId: string;
+    readonly targetTurnId: string;
+    readonly inputText: string;
+    readonly bodyDigest: Sha256Digest;
+  }> = [];
   rewriteNextCleanupReceiptDisposition:
     | {
         readonly state: "started" | "completed" | "unknown";
@@ -149,6 +165,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       ...(seed.answer === undefined ? {} : { answer: seed.answer }),
       rolloutProjection: seed.rolloutProjection,
       projectionVersion: 0,
+      contextNextSequence: 1,
       attempt: undefined,
       fence: undefined,
       events: [],
@@ -220,6 +237,29 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       fence,
       databaseNow: now,
     };
+  }
+
+  async readPendingThreadSteer(input: {
+    readonly fence: ExecutionFence;
+  }): ReturnType<ExecutionPersistencePort["readPendingThreadSteer"]> {
+    this.durableOperations.push("steer:read");
+    const record = this.find(input.fence.scope);
+    if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
+    if (record === undefined || record.fence?.runClaim.token !== input.fence.runClaim.token) {
+      return { outcome: "fence_lost" };
+    }
+    const pending = this.pendingThreadSteers.find(
+      (candidate) => scopeKey(candidate.scope) === scopeKey(input.fence.scope),
+    );
+    return pending === undefined
+      ? { outcome: "none" }
+      : {
+          outcome: "pending",
+          receiptId: pending.receiptId,
+          targetTurnId: pending.targetTurnId,
+          inputText: pending.inputText,
+          bodyDigest: pending.bodyDigest,
+        };
   }
 
   async inspectAndRenew(input: {
@@ -312,7 +352,18 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
           input.call.callId ===
             `${record.attempt?.attemptId}/model/correction/${event.payload.round}`,
       );
-      if (record.attempt.stage !== "workspace_verified" || correction === undefined) {
+      const steer = [...record.mutations.values()].find(
+        (mutation) =>
+          mutation.receipt.threadSteer !== undefined &&
+          input.call.callId ===
+            `${record.attempt?.attemptId}/model/steer/${mutation.receipt.threadSteer.receiptId}`,
+      );
+      if (
+        !(
+          (record.attempt.stage === "model_execution_started" && steer !== undefined) ||
+          (record.attempt.stage === "workspace_verified" && correction !== undefined)
+        )
+      ) {
         return { outcome: "conflict" };
       }
     }
@@ -378,6 +429,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
 
   async mutate(command: RuntimeMutation): Promise<RuntimeMutationResult> {
     this.durableOperations.push(`mutate:${command.idempotencyKey}`);
+    this.mutationCommands.push(command);
     if (this.unavailableNextMutation) {
       this.unavailableNextMutation = false;
       return { outcome: "unavailable" };
@@ -596,6 +648,8 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       });
       record.fence = undefined;
     }
+    const contextEntryCount =
+      command.threadSteer === undefined ? (command.threadContextAppend?.entries.length ?? 0) : 1;
     const receipt: RuntimeMutationReceiptV1 = {
       schemaVersion: 1,
       idempotencyKey: command.idempotencyKey,
@@ -639,7 +693,59 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
               currentHead: command.workspaceChange.revisionId,
             },
           }),
+      ...(command.threadContextAppend === undefined && command.threadSteer === undefined
+        ? {}
+        : {
+            threadContext: {
+              schemaVersion: 1,
+              firstSequence: record.contextNextSequence,
+              lastSequence: record.contextNextSequence + contextEntryCount - 1,
+              entryCount: contextEntryCount,
+            },
+          }),
+      ...(command.threadSteer === undefined
+        ? {}
+        : {
+            threadSteer: {
+              receiptId: command.threadSteer.receiptId,
+              targetTurnId: command.threadSteer.targetTurnId,
+              appliedContextSequence: record.contextNextSequence,
+              bodyDigest: command.threadSteer.bodyDigest,
+            },
+          }),
+      ...(command.threadSandboxTerminal === undefined
+        ? {}
+        : {
+            threadSandbox:
+              this.threadSandboxHandoffRunId === undefined
+                ? ({
+                    schemaVersion: 1,
+                    outcome: "effect_pending",
+                    sessionId: command.threadSandboxTerminal.sessionId,
+                    generation: command.threadSandboxTerminal.generation,
+                    effectId: `${attempt.attemptId}/sandbox/terminal-pause`,
+                    effectKind: "pause",
+                  } as const)
+                : ({
+                    schemaVersion: 1,
+                    outcome: "handed_off",
+                    sessionId: command.threadSandboxTerminal.sessionId,
+                    generation: command.threadSandboxTerminal.generation,
+                    nextRunId: this.threadSandboxHandoffRunId,
+                  } as const),
+          }),
     };
+    if (command.threadContextAppend !== undefined || command.threadSteer !== undefined) {
+      record.contextNextSequence += contextEntryCount;
+    }
+    if (command.threadSteer !== undefined) {
+      const index = this.pendingThreadSteers.findIndex(
+        (candidate) =>
+          scopeKey(candidate.scope) === scopeKey(command.fence.scope) &&
+          candidate.receiptId === command.threadSteer?.receiptId,
+      );
+      if (index >= 0) this.pendingThreadSteers.splice(index, 1);
+    }
     const result: AppliedFakeMutation = {
       outcome: "applied",
       attemptVersion: nextAttempt.version,
@@ -894,8 +1000,65 @@ export class FakeSandboxRegistry implements SandboxSessionRegistryPort, OrphanSa
   }
 }
 
+export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecyclePort {
+  acquireCount = 0;
+  attestCount = 0;
+  terminalEffectCount = 0;
+  terminateCount = 0;
+  nextAcquire: ThreadSandboxAcquireResult | undefined;
+  nextTerminalEffect: "settled" | "unknown" | "not_owner" | undefined;
+  readonly handle = new FakeSandboxHandle("thread-worker-fake");
+  readonly lease: ThreadSandboxLeaseRefV1 = {
+    schemaVersion: 1,
+    sessionId: "thread-session-test",
+    generation: 1,
+    leaseId: "sandbox-lease-test",
+    leaseToken: "sandbox-token-test",
+    leaseEpoch: 1,
+  };
+
+  async acquire(): Promise<ThreadSandboxAcquireResult> {
+    this.acquireCount += 1;
+    if (this.nextAcquire !== undefined) {
+      const result = this.nextAcquire;
+      this.nextAcquire = undefined;
+      return result;
+    }
+    return {
+      outcome: "ready",
+      session: {
+        registryId: "thread-registry-test",
+        providerSandboxId: this.handle.id,
+        mode: "created",
+        sandbox: this.handle,
+      },
+      lease: this.lease,
+      requiresMaterialization: true,
+      source: "cold_created",
+    };
+  }
+
+  async attestMaterialized(): Promise<"attested"> {
+    this.attestCount += 1;
+    return "attested";
+  }
+
+  async completeTerminalEffect(): Promise<"settled" | "unknown" | "not_owner"> {
+    this.terminalEffectCount += 1;
+    const result = this.nextTerminalEffect ?? "settled";
+    this.nextTerminalEffect = undefined;
+    return result;
+  }
+
+  async terminate(): Promise<"settled"> {
+    this.terminateCount += 1;
+    return "settled";
+  }
+}
+
 export class ScriptedAgentSession implements WorkerAgentSessionPort {
   readonly prompts: string[] = [];
+  readonly steers: string[] = [];
   readonly modelPermits: string[] = [];
   abortCount = 0;
   abortCompleted = false;
@@ -918,6 +1081,10 @@ export class ScriptedAgentSession implements WorkerAgentSessionPort {
     return this.outcome;
   }
 
+  async steer(text: string): Promise<void> {
+    this.steers.push(text);
+  }
+
   async abort(): Promise<void> {
     this.abortCount += 1;
     await this.beforeAbortReturn?.();
@@ -935,18 +1102,31 @@ export class ScriptedAgentSession implements WorkerAgentSessionPort {
 }
 
 export class BlockingAgentSession implements WorkerAgentSessionPort {
+  readonly prompts: string[] = [];
+  readonly steers: string[] = [];
   abortCount = 0;
   disposeCount = 0;
   private resolve: ((outcome: AgentTurnOutcome) => void) | undefined;
   private readonly listeners = new Set<(event: RuntimeAgentEvent) => void>();
 
-  runPrompt(): Promise<AgentTurnOutcome> {
+  runPrompt(text: string): Promise<AgentTurnOutcome> {
+    this.prompts.push(text);
     return new Promise((resolve) => (this.resolve = resolve));
+  }
+
+  complete(outcome: AgentTurnOutcome = { kind: "completed" }): void {
+    const resolve = this.resolve;
+    this.resolve = undefined;
+    resolve?.(outcome);
+  }
+
+  async steer(text: string): Promise<void> {
+    this.steers.push(text);
   }
 
   async abort(): Promise<void> {
     this.abortCount += 1;
-    this.resolve?.({ kind: "completed" });
+    this.complete();
   }
 
   emit(event: RuntimeAgentEvent): void {
@@ -980,7 +1160,33 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
     this.createCount += 1;
     this.projections.push(input.rolloutProjection);
     this.toolAuthorizers.push(input.authorizeToolEffect);
-    return session;
+    if (input.onTurnSafePoint === undefined) return session;
+    let safePointChain = Promise.resolve();
+    const unsubscribe = session.subscribe((event) => {
+      if (event.type !== "turn.completed") return;
+      safePointChain = safePointChain.then(async () => {
+        const safePoint = await input.onTurnSafePoint?.(event);
+        if (safePoint?.steer !== undefined) await session.steer(safePoint.steer.inputText);
+      });
+    });
+    const drainRejectedToolReceipts = session.drainRejectedToolReceipts?.bind(session);
+    return {
+      runPrompt: async (text, authorization) => {
+        const outcome = await session.runPrompt(text, authorization);
+        await safePointChain;
+        return outcome;
+      },
+      steer: (text) => session.steer(text),
+      abort: () => session.abort(),
+      ...(drainRejectedToolReceipts === undefined
+        ? {}
+        : { drainRejectedToolReceipts: () => drainRejectedToolReceipts() }),
+      subscribe: (listener) => session.subscribe(listener),
+      dispose: () => {
+        unsubscribe();
+        session.dispose();
+      },
+    };
   }
 }
 
@@ -1070,6 +1276,20 @@ export class FakeRecoveryMetrics implements RecoveryMetricsPort {
     input: Parameters<RecoveryMetricsPort["recordOrphanCleanup"]>[0],
   ): Promise<void> {
     this.orphanCleanups.push(input);
+  }
+}
+
+export class FakeThreadContextBodies implements ThreadContextBodyPersistencePort {
+  readonly values: Readonly<Record<string, unknown>>[] = [];
+
+  async persist(input: Parameters<ThreadContextBodyPersistencePort["persist"]>[0]) {
+    this.values.push(input.value);
+    return {
+      storage: "inline" as const,
+      value: input.value,
+      sha256: digestCanonical(input.value),
+      size: Buffer.byteLength(JSON.stringify(input.value), "utf8"),
+    };
   }
 }
 

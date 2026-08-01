@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   createPersonalTenant,
   createRun,
@@ -11,6 +11,7 @@ import {
   sha256Digest,
   tenantId,
   threadId,
+  transitionRun,
   userId,
   workspaceId,
   workspaceRevisionId,
@@ -21,9 +22,11 @@ import type {
   RuntimeMutation,
   RuntimeOutboxV1,
   SandboxSessionRegistryPort,
+  ThreadSandboxProviderPort,
 } from "@cube-runtime/run-contracts";
 import { assertProtocolSize } from "@cube-runtime/run-contracts";
 import {
+  digestCanonical,
   outboxPayloadDigest,
   runtimeMutationDigest,
 } from "@cube-runtime/run-contracts/mutation-protocol";
@@ -55,6 +58,7 @@ import {
   PgArchiveThreadCommand,
   PgCoreRepositories,
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
+import { PgResourceCatalog } from "../../runtime-ts/packages/persistence/src/pg-resource-library.js";
 import {
   PgRunDispatchCreation,
   PgRunDispatchOutbox,
@@ -64,9 +68,9 @@ import {
   PgExecutionPersistence,
   PgRunExecutionSetup,
 } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
-import { PgResourceCatalog } from "../../runtime-ts/packages/persistence/src/pg-resource-library.js";
 import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-sandbox-cleanup-consumer.js";
 import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
+import { PgThreadInputRouting } from "../../runtime-ts/packages/persistence/src/pg-thread-input.js";
 import {
   PgWorkspaceCandidateHandoff,
   workspaceCandidateOperationDigest,
@@ -80,6 +84,13 @@ import {
   type Pool,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { PgThreadContextHistoryRepository } from "../../runtime-ts/packages/persistence/src/thread-context.js";
+import {
+  isThreadV2ReadEnabled,
+  PgLegacyThreadContextAnchor,
+  PgThreadContinuityMetrics,
+} from "../../runtime-ts/packages/persistence/src/thread-continuity-rollout.js";
+import { PgThreadSandboxSessionLifecycle } from "../../runtime-ts/packages/persistence/src/thread-sandbox-session.js";
 import { createWorkspaceManifest } from "../../runtime-ts/packages/workspace/src/manifest.js";
 import {
   loadPostgreSqlMigrationContract,
@@ -119,6 +130,106 @@ interface Fixture {
   readonly user: ReturnType<typeof createUser>;
   readonly thread: ReturnType<typeof createThread>;
   readonly workspace: ReturnType<typeof createWorkspace>;
+}
+
+interface SerialQueueFixture {
+  readonly tenantScope: {
+    readonly tenantId: ReturnType<typeof tenantId>;
+    readonly userId: ReturnType<typeof userId>;
+  };
+  readonly user: ReturnType<typeof createUser>;
+  readonly thread: ReturnType<typeof createThread>;
+  readonly workspace: ReturnType<typeof createWorkspace>;
+}
+
+async function serialQueueFixture(label: string): Promise<SerialQueueFixture> {
+  const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+  const user = createUser(userId(`serial-user-${label}`), now);
+  const personal = createPersonalTenant({
+    id: tenantId(`serial-tenant-${label}`),
+    ownerMembershipId: membershipId(`serial-member-${label}`),
+    owner: user,
+    createdAt: now,
+  });
+  const tenantScope = { tenantId: personal.tenant.id, userId: user.id } as const;
+  expect(
+    await repositories.tenants.createPersonal({
+      user,
+      tenant: personal.tenant,
+      membership: personal.ownerMembership,
+    }),
+  ).toEqual({ outcome: "created" });
+  const thread = createThread({
+    id: threadId(`serial-thread-${label}`),
+    tenant: personal.tenant,
+    user,
+    membership: personal.ownerMembership,
+    title: "Thread 串行队列集成测试",
+    now,
+  });
+  expect(await repositories.threads.create(tenantScope, thread)).toMatchObject({
+    outcome: "created",
+  });
+  const workspace = createWorkspace({
+    id: workspaceId(`serial-workspace-${label}`),
+    thread,
+    now,
+  });
+  expect(await repositories.workspaces.create(tenantScope, workspace)).toEqual({
+    outcome: "created",
+  });
+  return { tenantScope, user, thread, workspace };
+}
+
+function requestDigest(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function fakeThreadSandboxProvider(gateway: FakeSandboxGateway): ThreadSandboxProviderPort {
+  return {
+    create: async (input) => {
+      const sandbox = await gateway.create(
+        {
+          templateId: "thread-session-integration",
+          ttlSeconds: 120,
+          lifecycle: { onTimeout: "pause", autoResume: true },
+        },
+        { signal: input.signal },
+      );
+      return {
+        outcome: "ready",
+        session: {
+          registryId: input.registryId,
+          providerSandboxId: sandbox.id,
+          mode: "created",
+          sandbox,
+        },
+      };
+    },
+    connect: async (input) => {
+      try {
+        const sandbox = await gateway.connect(input.providerSandboxId, {
+          signal: input.signal,
+        });
+        return {
+          outcome: "ready",
+          session: {
+            registryId: input.registryId,
+            providerSandboxId: sandbox.id,
+            mode: "connected",
+            sandbox,
+          },
+        };
+      } catch {
+        return { outcome: "not_found" };
+      }
+    },
+    settle: async (input) => {
+      if (input.disposition === "pause") await input.session.sandbox.pause();
+      else await input.session.sandbox.kill({ ignoreNotFound: true });
+      return { outcome: "settled" };
+    },
+  };
 }
 
 async function fixture(
@@ -439,6 +550,298 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     expect(acl.rows[0]).toEqual({ select_insert_update: true, delete: false });
   });
 
+  it("阶段 6 只回填可证明旧事实，以 gap+anchor 收敛并按 Tenant policy 开启读取", async () => {
+    const f = await fixture(`legacy-anchor-${suffix}`);
+    const secondRun = createRun({
+      id: runId(`rw-run-legacy-anchor-second-${suffix}`),
+      thread: f.thread,
+      now: isoTimestamp("2099-07-26T00:00:01.000Z"),
+    });
+    expect(
+      await repositories.runs.create({ tenantId: f.scope.tenantId, userId: f.user.id }, secondRun),
+    ).toMatchObject({ outcome: "created" });
+    expect(
+      await setup.initialize({
+        scope: {
+          ...f.scope,
+          runId: secondRun.id,
+          rootRunId: secondRun.id,
+        },
+        input: "第二条可验证旧输入",
+        rolloutProjection: { schemaVersion: 2, checkpointId: "legacy-anchor-second", items: [] },
+      }),
+    ).toBe("created");
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      await client.query(`INSERT INTO thread_execution_heads(tenant_id,thread_id) VALUES ($1,$2)`, [
+        f.scope.tenantId,
+        f.scope.threadId,
+      ]);
+      await client.query(`INSERT INTO thread_context_streams(tenant_id,thread_id) VALUES ($1,$2)`, [
+        f.scope.tenantId,
+        f.scope.threadId,
+      ]);
+    });
+    const anchor = new PgLegacyThreadContextAnchor(runtime);
+    await expect(
+      anchor.anchor({
+        tenantId: f.scope.tenantId,
+        threadId: f.scope.threadId,
+        maxRuns: 1,
+        operationId: `legacy-anchor-busy-${suffix}`,
+      }),
+    ).resolves.toEqual({ outcome: "busy" });
+    await expect(
+      anchor.anchor({
+        tenantId: tenantId(`rw-tenant-missing-${suffix}`),
+        threadId: f.scope.threadId,
+        maxRuns: 1,
+        operationId: `legacy-anchor-cross-tenant-${suffix}`,
+      }),
+    ).resolves.toEqual({ outcome: "not_found" });
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      await client.query(
+        `UPDATE runs SET status='succeeded',updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND thread_id=$2`,
+        [f.scope.tenantId, f.scope.threadId],
+      );
+    });
+    await withTenantTransaction(migrator, { tenantId: f.scope.tenantId }, async (client) => {
+      await client.query(
+        `INSERT INTO tenant_thread_continuity_policies(
+           tenant_id,policy_version,v2_read_enabled,new_thread_rollout_basis_points,
+           legacy_anchor_read_enabled
+         ) VALUES ($1,1,true,0,true)`,
+        [f.scope.tenantId],
+      );
+    });
+
+    const anchored = await anchor.anchor({
+      tenantId: f.scope.tenantId,
+      threadId: f.scope.threadId,
+      maxRuns: 1,
+      operationId: `legacy-anchor-operation-${suffix}`,
+    });
+    expect(anchored).toMatchObject({
+      outcome: "anchored",
+      selectedRuns: 1,
+      backfilledEntries: 2,
+      gapItems: 3,
+    });
+    if (anchored.outcome !== "anchored") throw new Error("legacy anchor 未完成");
+    await expect(
+      anchor.anchor({
+        tenantId: f.scope.tenantId,
+        threadId: f.scope.threadId,
+        maxRuns: 999,
+        operationId: `legacy-anchor-retry-${suffix}`,
+      }),
+    ).resolves.toMatchObject({ outcome: "replayed", anchorId: anchored.anchorId });
+
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      const entries = await client.query<{
+        readonly kind: string;
+        readonly body_inline: Record<string, unknown>;
+      }>(
+        `SELECT kind,body_inline FROM thread_context_entries
+          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY sequence`,
+        [f.scope.tenantId, f.scope.threadId],
+      );
+      expect(entries.rows.map((row) => row.kind)).toEqual([
+        "legacy_history_gap",
+        "user_message",
+        "run_terminal",
+        "legacy_v2_anchor",
+      ]);
+      expect(entries.rows[1]?.body_inline).toMatchObject({ text: "第二条可验证旧输入" });
+      expect(entries.rows.some((row) => row.kind === "assistant_message")).toBe(false);
+      const audit = await client.query<{
+        readonly evidence_kind: string;
+        readonly outcome: string;
+        readonly reason_code: string | null;
+      }>(
+        `SELECT evidence_kind,outcome,reason_code FROM thread_context_legacy_backfill_items
+          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY item_ordinal`,
+        [f.scope.tenantId, f.scope.threadId],
+      );
+      expect(audit.rows).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            evidence_kind: "earlier_run_range",
+            outcome: "gap",
+            reason_code: "max_depth_exceeded",
+          }),
+          expect.objectContaining({
+            evidence_kind: "assistant_tool_history",
+            outcome: "gap",
+            reason_code: "not_provable",
+          }),
+          expect.objectContaining({
+            evidence_kind: "workspace_result",
+            outcome: "gap",
+            reason_code: "source_missing",
+          }),
+        ]),
+      );
+      expect(await isThreadV2ReadEnabled(client, f.scope.tenantId, f.scope.threadId)).toBe(true);
+    });
+
+    const metrics = new PgThreadContinuityMetrics(runtime);
+    const observation = {
+      tenantId: f.scope.tenantId,
+      threadId: f.scope.threadId,
+      runId: secondRun.id,
+      observationId: `legacy-anchor-metric-${suffix}`,
+      metricName: "context_rebuild_latency_ms" as const,
+      value: 12,
+      unit: "milliseconds" as const,
+      outcome: "ready",
+    };
+    await metrics.record(observation);
+    await metrics.record(observation);
+    await withTenantTransaction(runtime, { tenantId: f.scope.tenantId }, async (client) => {
+      const count = await client.query<{ readonly count: string }>(
+        `SELECT count(*)::text AS count FROM thread_continuity_metric_observations
+          WHERE tenant_id=$1 AND observation_id=$2`,
+        [f.scope.tenantId, observation.observationId],
+      );
+      expect(count.rows[0]?.count).toBe("1");
+    });
+  });
+
+  it("阶段 6 不把旧历史伪装追加到已有 V2 stream，并在 anchor 末端失败时整笔回滚", async () => {
+    const existing = await fixture(`legacy-anchor-existing-${suffix}`);
+    const existingBody = { code: "preexisting_v2_fact" } as const;
+    await withTenantTransaction(runtime, { tenantId: existing.scope.tenantId }, async (client) => {
+      await client.query(`INSERT INTO thread_execution_heads(tenant_id,thread_id) VALUES ($1,$2)`, [
+        existing.scope.tenantId,
+        existing.scope.threadId,
+      ]);
+      await client.query(`INSERT INTO thread_context_streams(tenant_id,thread_id) VALUES ($1,$2)`, [
+        existing.scope.tenantId,
+        existing.scope.threadId,
+      ]);
+      await client.query(
+        `UPDATE runs SET status='succeeded',updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND thread_id=$2`,
+        [existing.scope.tenantId, existing.scope.threadId],
+      );
+      await client.query(
+        `INSERT INTO thread_context_entries(
+           tenant_id,thread_id,sequence,entry_id,kind,body_inline,body_sha256,body_size
+         ) VALUES ($1,$2,1,$3,'legacy_history_gap',$4::jsonb,$5,$6)`,
+        [
+          existing.scope.tenantId,
+          existing.scope.threadId,
+          `preexisting-v2-${suffix}`,
+          JSON.stringify(existingBody),
+          digestCanonical(existingBody),
+          Buffer.byteLength(JSON.stringify(existingBody), "utf8"),
+        ],
+      );
+      await client.query(
+        `UPDATE thread_context_streams SET next_sequence=2
+          WHERE tenant_id=$1 AND thread_id=$2`,
+        [existing.scope.tenantId, existing.scope.threadId],
+      );
+    });
+    await expect(
+      new PgLegacyThreadContextAnchor(runtime).anchor({
+        tenantId: existing.scope.tenantId,
+        threadId: existing.scope.threadId,
+        maxRuns: 10,
+        operationId: `legacy-anchor-existing-${suffix}`,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "anchored",
+      firstSequence: 2,
+      anchorSequence: 3,
+      backfilledEntries: 0,
+      gapItems: 1,
+    });
+    await withTenantTransaction(runtime, { tenantId: existing.scope.tenantId }, async (client) => {
+      const facts = await client.query<{ readonly kind: string }>(
+        `SELECT kind FROM thread_context_entries
+          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY sequence`,
+        [existing.scope.tenantId, existing.scope.threadId],
+      );
+      expect(facts.rows.map((row) => row.kind)).toEqual([
+        "legacy_history_gap",
+        "legacy_history_gap",
+        "legacy_v2_anchor",
+      ]);
+      expect(facts.rows.some((row) => row.kind === "user_message")).toBe(false);
+    });
+
+    const rollback = await fixture(`legacy-anchor-rollback-${suffix}`);
+    await withTenantTransaction(runtime, { tenantId: rollback.scope.tenantId }, async (client) => {
+      await client.query(`INSERT INTO thread_execution_heads(tenant_id,thread_id) VALUES ($1,$2)`, [
+        rollback.scope.tenantId,
+        rollback.scope.threadId,
+      ]);
+      await client.query(`INSERT INTO thread_context_streams(tenant_id,thread_id) VALUES ($1,$2)`, [
+        rollback.scope.tenantId,
+        rollback.scope.threadId,
+      ]);
+      await client.query(
+        `UPDATE runs SET status='succeeded',updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND thread_id=$2`,
+        [rollback.scope.tenantId, rollback.scope.threadId],
+      );
+    });
+    const triggerName = `test_anchor_rollback_${process.pid}`;
+    await migrator.query(
+      `CREATE FUNCTION ${triggerName}() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.thread_id='${rollback.scope.threadId}' THEN
+             RAISE EXCEPTION 'test anchor rollback';
+           END IF;
+           RETURN NEW;
+         END $$;
+       CREATE TRIGGER ${triggerName} BEFORE INSERT ON thread_context_legacy_anchors
+         FOR EACH ROW EXECUTE FUNCTION ${triggerName}()`,
+    );
+    try {
+      await expect(
+        new PgLegacyThreadContextAnchor(runtime).anchor({
+          tenantId: rollback.scope.tenantId,
+          threadId: rollback.scope.threadId,
+          maxRuns: 10,
+          operationId: `legacy-anchor-rollback-${suffix}`,
+        }),
+      ).rejects.toThrow();
+    } finally {
+      await migrator.query(
+        `DROP TRIGGER ${triggerName} ON thread_context_legacy_anchors;
+         DROP FUNCTION ${triggerName}()`,
+      );
+    }
+    await withTenantTransaction(runtime, { tenantId: rollback.scope.tenantId }, async (client) => {
+      const state = await client.query<{
+        readonly next_sequence: string;
+        readonly entries: string;
+        readonly anchors: string;
+        readonly profiles: string;
+      }>(
+        `SELECT stream.next_sequence::text,
+                (SELECT count(*)::text FROM thread_context_entries entry
+                  WHERE entry.tenant_id=$1 AND entry.thread_id=$2) AS entries,
+                (SELECT count(*)::text FROM thread_context_legacy_anchors anchor
+                  WHERE anchor.tenant_id=$1 AND anchor.thread_id=$2) AS anchors,
+                (SELECT count(*)::text FROM thread_continuity_profiles profile
+                  WHERE profile.tenant_id=$1 AND profile.thread_id=$2) AS profiles
+           FROM thread_context_streams stream
+          WHERE stream.tenant_id=$1 AND stream.thread_id=$2`,
+        [rollback.scope.tenantId, rollback.scope.threadId],
+      );
+      expect(state.rows[0]).toEqual({
+        next_sequence: "1",
+        entries: "0",
+        anchors: "0",
+        profiles: "0",
+      });
+    });
+  });
+
   it("Workspace journal complete 的 COMMIT 响应未知映射为 unknown，原 identity 可读回", async () => {
     const f = await fixture(`workspace-journal-commit-unknown-${suffix}`);
     const policy = {
@@ -694,6 +1097,1365 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     ).resolves.toEqual([]);
   });
 
+  it("V2 并发 100 次 follow-up 只激活一个 Run，重试不复制 receipt、Run 或 dispatch", async () => {
+    const f = await serialQueueFixture(`hundred-${suffix}`);
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const commands = Array.from({ length: 100 }, (_, index) => {
+      const inputText = `串行输入 ${index}`;
+      return {
+        scope: f.tenantScope,
+        run: createRun({ id: runId(`serial-run-${suffix}-${index}`), thread: f.thread, now }),
+        thread: f.thread,
+        inputText,
+        idempotency: {
+          key: `serial-key-${suffix}-${index}`,
+          requestHash: requestDigest(`${f.thread.id}\u0000${inputText}`),
+        },
+      } as const;
+    });
+    const firstCommand = commands[0];
+    if (firstCommand === undefined) throw new Error("并发命令 fixture 缺失");
+    const results = await Promise.all([
+      ...commands.map((command) => creation.createQueuedRun(command)),
+      ...Array.from({ length: 10 }, () => creation.createQueuedRun(firstCommand)),
+    ]);
+    expect(results.filter((result) => result.outcome === "created")).toHaveLength(100);
+    expect(results.filter((result) => result.outcome === "replayed")).toHaveLength(10);
+    const disabledEntry = new PgRunDispatchCreation(runtime);
+    const rollbackInput = "关闭 V2 后不得在已有队列的 Thread 重开并行旧入口";
+    await expect(
+      disabledEntry.createQueuedRun({
+        scope: f.tenantScope,
+        run: createRun({ id: runId(`serial-disabled-${suffix}`), thread: f.thread, now }),
+        thread: f.thread,
+        inputText: rollbackInput,
+        idempotency: {
+          key: `serial-disabled-key-${suffix}`,
+          requestHash: requestDigest(rollbackInput),
+        },
+      }),
+    ).resolves.toEqual({ outcome: "legacy_drain_required" });
+
+    const snapshot = await withTenantTransaction(runtime, f.tenantScope, async (client) => {
+      const queue = await client.query<{ queue_sequence: string; state: string; run_id: string }>(
+        `SELECT queue_sequence::text,state,run_id FROM thread_follow_up_queue
+          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY thread_follow_up_queue.queue_sequence`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      const head = await client.query<{ active_run_id: string }>(
+        `SELECT active_run_id FROM thread_execution_heads
+          WHERE tenant_id=$1 AND thread_id=$2`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      const counts = await client.query<{
+        receipts: string;
+        execution_inputs: string;
+        dispatches: string;
+      }>(
+        `SELECT
+           (SELECT count(*)::text FROM thread_input_receipts
+             WHERE tenant_id=$1 AND thread_id=$2) AS receipts,
+           (SELECT count(*)::text FROM run_execution_inputs
+             WHERE tenant_id=$1 AND thread_id=$2) AS execution_inputs,
+           (SELECT count(*)::text FROM run_dispatch_outbox
+             WHERE tenant_id=$1 AND thread_id=$2 AND state IN ('ready','claimed')) AS dispatches`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      return { queue: queue.rows, head: head.rows[0], counts: counts.rows[0] };
+    });
+    expect(snapshot.queue.map((item) => Number(item.queue_sequence))).toEqual(
+      Array.from({ length: 100 }, (_, index) => index + 1),
+    );
+    expect(snapshot.queue.filter((item) => item.state === "active")).toHaveLength(1);
+    expect(snapshot.queue.filter((item) => item.state === "queued")).toHaveLength(99);
+    expect(snapshot.head?.active_run_id).toBe(snapshot.queue[0]?.run_id);
+    expect(snapshot.counts).toEqual({ receipts: "100", execution_inputs: "1", dispatches: "1" });
+
+    const dispatches = await runDispatchOutbox.claim({
+      tenantId: f.tenantScope.tenantId,
+      dispatcherId: "serial-hundred-dispatcher",
+      limit: 100,
+      leaseMilliseconds: 30_000,
+    });
+    expect(dispatches).toHaveLength(1);
+    expect(dispatches[0]?.scope.runId).toBe(snapshot.head?.active_run_id);
+  });
+
+  it("queued Run 到激活时才绑定上一 Run 的 result revision 与最新 context through-sequence", async () => {
+    const f = await serialQueueFixture(`late-bind-${suffix}`);
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const firstRun = createRun({ id: runId(`serial-first-${suffix}`), thread: f.thread, now });
+    const secondRun = createRun({ id: runId(`serial-second-${suffix}`), thread: f.thread, now });
+    for (const [index, run] of [firstRun, secondRun].entries()) {
+      const inputText = `延迟绑定输入 ${index + 1}`;
+      await expect(
+        creation.createQueuedRun({
+          scope: f.tenantScope,
+          run,
+          thread: f.thread,
+          inputText,
+          idempotency: {
+            key: `late-bind-key-${suffix}-${index}`,
+            requestHash: requestDigest(inputText),
+          },
+        }),
+      ).resolves.toMatchObject({ outcome: "created", entity: { id: run.id } });
+    }
+    await expect(
+      withTenantTransaction(runtime, f.tenantScope, (client) =>
+        client.query(`SELECT 1 FROM run_execution_inputs WHERE tenant_id=$1 AND run_id=$2`, [
+          f.tenantScope.tenantId,
+          secondRun.id,
+        ]),
+      ),
+    ).resolves.toMatchObject({ rowCount: 0 });
+
+    const dispatch = (
+      await runDispatchOutbox.claim({
+        tenantId: f.tenantScope.tenantId,
+        dispatcherId: "late-bind-dispatcher",
+        limit: 10,
+        leaseMilliseconds: 30_000,
+      })
+    )[0];
+    if (dispatch === undefined) throw new Error("首个 Run dispatch 缺失");
+    expect(dispatch.scope.runId).toBe(firstRun.id);
+    const claimed = await persistence.claim({
+      scope: dispatch.scope as ExecutionScope,
+      workerId: "late-bind-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("首个 Run 未取得 writer");
+    await runDispatchOutbox.acknowledge({ claim: dispatch, outcome: "dispatched" });
+
+    const revision = workspaceRevisionId(`serial-revision-${suffix}`);
+    const manifestDigest = "f".repeat(64);
+    await withTenantTransaction(runtime, f.tenantScope, async (client) => {
+      await client.query(
+        `INSERT INTO workspace_revisions(
+           tenant_id,workspace_id,id,thread_id,revision_number,parent_revision_id,
+           created_by_run_id,lease_epoch,object_key,digest,created_at
+         ) VALUES ($1,$2,$3,$4,1,NULL,$5,$6,NULL,$7,clock_timestamp())`,
+        [
+          f.tenantScope.tenantId,
+          f.workspace.id,
+          revision,
+          f.thread.id,
+          firstRun.id,
+          claimed.fence.workspaceLease.epoch,
+          manifestDigest,
+        ],
+      );
+      await client.query(
+        `INSERT INTO workspace_revision_manifests(
+           tenant_id,workspace_id,revision_id,thread_id,schema_version,manifest_digest,
+           entry_count,total_bytes
+         ) VALUES ($1,$2,$3,$4,1,$5,0,0)`,
+        [f.tenantScope.tenantId, f.workspace.id, revision, f.thread.id, manifestDigest],
+      );
+      await client.query(
+        `UPDATE workspaces SET current_revision_number=1,current_revision_id=$3,
+             updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND id=$2`,
+        [f.tenantScope.tenantId, f.workspace.id, revision],
+      );
+      await client.query(
+        `UPDATE execution_attempts SET current_revision_id=$3,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND attempt_id=$2`,
+        [f.tenantScope.tenantId, claimed.snapshot.attempt.attemptId, revision],
+      );
+      // 阶段 1 不创建 Context facts；直接推进 head cursor 模拟后续 Context writer 的最新事实。
+      await client.query(
+        `UPDATE thread_execution_heads SET context_through_sequence=41,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND thread_id=$2 AND active_run_id=$3`,
+        [f.tenantScope.tenantId, f.thread.id, firstRun.id],
+      );
+    });
+
+    const running = signed({
+      idempotencyKey: `${claimed.snapshot.attempt.attemptId}/running`,
+      fence: claimed.fence,
+      expectedAttemptVersion: 0,
+      nextAttemptStatus: "running",
+      events: [],
+      outbox: [],
+    });
+    expect(await persistence.mutate(running)).toMatchObject({ outcome: "applied" });
+    const finalizing = signed({
+      idempotencyKey: `${claimed.snapshot.attempt.attemptId}/finalizing`,
+      fence: claimed.fence,
+      expectedAttemptVersion: 1,
+      nextAttemptStatus: "finalizing",
+      nextStage: "finalizing",
+      events: [],
+      outbox: [],
+    });
+    expect(await persistence.mutate(finalizing)).toMatchObject({ outcome: "applied" });
+    const terminal = signed({
+      idempotencyKey: `${claimed.snapshot.attempt.attemptId}/terminal`,
+      fence: claimed.fence,
+      expectedAttemptVersion: 2,
+      nextAttemptStatus: "succeeded",
+      nextStage: "finished",
+      nextRunStatus: "succeeded",
+      events: [],
+      outbox: [],
+      releaseFences: true,
+    });
+    expect(await persistence.mutate(terminal)).toMatchObject({
+      outcome: "applied",
+      run: { status: "succeeded" },
+    });
+
+    const handoff = await withTenantTransaction(runtime, f.tenantScope, async (client) => {
+      const input = await client.query<{
+        base_revision_id: string;
+        context_through_sequence: string;
+      }>(
+        `SELECT base_revision_id,context_through_sequence::text
+           FROM run_execution_inputs WHERE tenant_id=$1 AND run_id=$2`,
+        [f.tenantScope.tenantId, secondRun.id],
+      );
+      const result = await client.query<{
+        base_revision_id: string | null;
+        result_revision_id: string;
+        outcome: string;
+        manifest_digest: string;
+      }>(
+        `SELECT base_revision_id,result_revision_id,outcome,manifest_digest
+           FROM run_workspace_results WHERE tenant_id=$1 AND run_id=$2`,
+        [f.tenantScope.tenantId, firstRun.id],
+      );
+      const head = await client.query<{
+        active_run_id: string;
+        writer_token: string | null;
+      }>(
+        `SELECT active_run_id,writer_token FROM thread_execution_heads
+          WHERE tenant_id=$1 AND thread_id=$2`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      return { input: input.rows[0], result: result.rows[0], head: head.rows[0] };
+    });
+    expect(handoff.input).toEqual({
+      base_revision_id: revision,
+      context_through_sequence: "41",
+    });
+    expect(handoff.result).toEqual({
+      base_revision_id: null,
+      result_revision_id: revision,
+      outcome: "committed",
+      manifest_digest: manifestDigest,
+    });
+    expect(handoff.head).toEqual({ active_run_id: secondRun.id, writer_token: null });
+    await expect(
+      persistence.inspectAndRenew({ fence: claimed.fence, leaseDurationMs: 30_000 }),
+    ).resolves.toEqual({ outcome: "fence_lost" });
+    const nextDispatches = await runDispatchOutbox.claim({
+      tenantId: f.tenantScope.tenantId,
+      dispatcherId: "late-bind-next-dispatcher",
+      limit: 10,
+      leaseMilliseconds: 30_000,
+    });
+    expect(nextDispatches.map((item) => item.scope.runId)).toEqual([secondRun.id]);
+    expect(nextDispatches[0]?.scope.baseRevisionId).toBe(revision);
+  });
+
+  it("阶段 5 在真实 PG 并发 terminal/follow-up 只产生 handoff 或 pause intent，且复用同一 Sandbox", async () => {
+    const f = await serialQueueFixture(`sandbox-session-${suffix}`);
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const sandboxPersistence = new PgExecutionPersistence(runtime, {
+      threadSandboxSessionReuseEnabled: true,
+      threadSandboxHandoffLeaseMs: 30_000,
+    });
+    const gateway = new FakeSandboxGateway();
+    const lifecycle = new PgThreadSandboxSessionLifecycle(
+      runtime,
+      fakeThreadSandboxProvider(gateway),
+      { pausedRetentionSeconds: 600, transitionWaitMs: 1_000 },
+    );
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const runA = createRun({ id: runId(`sandbox-a-${suffix}`), thread: f.thread, now });
+    const runB = createRun({ id: runId(`sandbox-b-${suffix}`), thread: f.thread, now });
+    await expect(
+      creation.createQueuedRun({
+        scope: f.tenantScope,
+        run: runA,
+        thread: f.thread,
+        inputText: "Sandbox Session 输入 1",
+        idempotency: {
+          key: `sandbox-session-key-${suffix}-0`,
+          requestHash: requestDigest("Sandbox Session 输入 1"),
+        },
+      }),
+    ).resolves.toMatchObject({ outcome: "created" });
+
+    const dispatchA = (
+      await runDispatchOutbox.claim({
+        tenantId: f.tenantScope.tenantId,
+        dispatcherId: "sandbox-session-dispatcher-a",
+        limit: 10,
+        leaseMilliseconds: 30_000,
+      })
+    )[0];
+    if (dispatchA === undefined) throw new Error("Run A dispatch 缺失");
+    const claimedA = await sandboxPersistence.claim({
+      scope: dispatchA.scope as ExecutionScope,
+      workerId: "sandbox-session-worker-a",
+      leaseDurationMs: 30_000,
+    });
+    if (claimedA.outcome !== "claimed") throw new Error("Run A claim 失败");
+    await runDispatchOutbox.acknowledge({ claim: dispatchA, outcome: "dispatched" });
+    const acquiredA = await lifecycle.acquire({
+      scope: claimedA.fence.scope,
+      attemptId: claimedA.snapshot.attempt.attemptId,
+      owner: "sandbox-session-worker-a",
+      leaseDurationMs: 30_000,
+      signal: new AbortController().signal,
+    });
+    if (acquiredA.outcome !== "ready") throw new Error("Run A Sandbox acquire 失败");
+    expect(acquiredA).toMatchObject({ source: "cold_created", requiresMaterialization: true });
+    await expect(
+      lifecycle.attestMaterialized({
+        scope: claimedA.fence.scope,
+        attemptId: claimedA.snapshot.attempt.attemptId,
+        lease: acquiredA.lease,
+      }),
+    ).resolves.toBe("attested");
+
+    const revision = workspaceRevisionId(`sandbox-revision-${suffix}`);
+    const manifestDigest = "e".repeat(64);
+    await withTenantTransaction(runtime, f.tenantScope, async (client) => {
+      await client.query(
+        `INSERT INTO workspace_revisions(
+           tenant_id,workspace_id,id,thread_id,revision_number,parent_revision_id,
+           created_by_run_id,lease_epoch,object_key,digest,created_at
+         ) VALUES ($1,$2,$3,$4,1,NULL,$5,$6,NULL,$7,clock_timestamp())`,
+        [
+          f.tenantScope.tenantId,
+          f.workspace.id,
+          revision,
+          f.thread.id,
+          runA.id,
+          claimedA.fence.workspaceLease.epoch,
+          manifestDigest,
+        ],
+      );
+      await client.query(
+        `INSERT INTO workspace_revision_manifests(
+           tenant_id,workspace_id,revision_id,thread_id,schema_version,manifest_digest,
+           entry_count,total_bytes
+         ) VALUES ($1,$2,$3,$4,1,$5,0,0)`,
+        [f.tenantScope.tenantId, f.workspace.id, revision, f.thread.id, manifestDigest],
+      );
+      await client.query(
+        `UPDATE workspaces SET current_revision_number=1,current_revision_id=$3,
+             updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND id=$2`,
+        [f.tenantScope.tenantId, f.workspace.id, revision],
+      );
+      await client.query(
+        `UPDATE execution_attempts SET current_revision_id=$3,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND attempt_id=$2`,
+        [f.tenantScope.tenantId, claimedA.snapshot.attempt.attemptId, revision],
+      );
+    });
+
+    expect(
+      await sandboxPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/running-sandbox`,
+          fence: claimedA.fence,
+          expectedAttemptVersion: 0,
+          nextAttemptStatus: "running",
+          events: [],
+          outbox: [],
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+    expect(
+      await sandboxPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/finalizing-sandbox`,
+          fence: claimedA.fence,
+          expectedAttemptVersion: 1,
+          nextAttemptStatus: "finalizing",
+          nextStage: "finalizing",
+          events: [],
+          outbox: [],
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+    const terminalACommand = signed({
+      idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/terminal-sandbox`,
+      fence: claimedA.fence,
+      expectedAttemptVersion: 2,
+      nextAttemptStatus: "succeeded",
+      nextStage: "finished",
+      nextRunStatus: "succeeded",
+      events: [],
+      outbox: [],
+      releaseFences: true,
+      threadSandboxTerminal: {
+        schemaVersion: 1,
+        sessionId: acquiredA.lease.sessionId,
+        generation: acquiredA.lease.generation,
+        leaseId: acquiredA.lease.leaseId,
+        leaseToken: acquiredA.lease.leaseToken,
+      },
+    });
+    const [terminalA, queuedB] = await Promise.all([
+      sandboxPersistence.mutate(terminalACommand),
+      creation.createQueuedRun({
+        scope: f.tenantScope,
+        run: runB,
+        thread: f.thread,
+        inputText: "Sandbox Session 输入 2",
+        idempotency: {
+          key: `sandbox-session-key-${suffix}-1`,
+          requestHash: requestDigest("Sandbox Session 输入 2"),
+        },
+      }),
+    ]);
+    expect(queuedB).toMatchObject({ outcome: "created" });
+    if (terminalA.outcome !== "applied") throw new Error("Run A terminal 失败");
+    const firstSandboxReceipt = terminalA.receipt.threadSandbox;
+    if (firstSandboxReceipt === undefined) throw new Error("Run A Sandbox terminal receipt 缺失");
+    expect(["handed_off", "effect_pending"]).toContain(firstSandboxReceipt.outcome);
+
+    const handoffState = await withTenantTransaction(runtime, f.tenantScope, async (client) => {
+      const session = await client.query<{
+        state: string;
+        materialized_revision_id: string | null;
+        materialization_attested: boolean;
+      }>(
+        `SELECT state,materialized_revision_id,materialization_attested
+           FROM thread_sandbox_sessions WHERE tenant_id=$1 AND session_id=$2`,
+        [f.tenantScope.tenantId, acquiredA.lease.sessionId],
+      );
+      const leases = await client.query<{
+        run_id: string | null;
+        attempt_id: string | null;
+        active_count: string;
+      }>(
+        `SELECT min(run_id) AS run_id,min(attempt_id) AS attempt_id,count(*)::text AS active_count
+           FROM thread_sandbox_leases
+          WHERE tenant_id=$1 AND session_id=$2 AND released_at IS NULL`,
+        [f.tenantScope.tenantId, acquiredA.lease.sessionId],
+      );
+      const queue = await client.query<{ active_count: string }>(
+        `SELECT count(*)::text AS active_count FROM thread_follow_up_queue
+          WHERE tenant_id=$1 AND thread_id=$2 AND state='active'`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      return { session: session.rows[0], leases: leases.rows[0], queue: queue.rows[0] };
+    });
+    expect(handoffState.session).toEqual({
+      state: firstSandboxReceipt.outcome === "handed_off" ? "running" : "pausing",
+      materialized_revision_id: revision,
+      materialization_attested: true,
+    });
+    expect(handoffState.leases).toEqual(
+      firstSandboxReceipt.outcome === "handed_off"
+        ? { run_id: runB.id, attempt_id: null, active_count: "1" }
+        : { run_id: null, attempt_id: null, active_count: "0" },
+    );
+    expect(handoffState.queue?.active_count).toBe("1");
+    if (firstSandboxReceipt.outcome === "effect_pending") {
+      await expect(
+        lifecycle.completeTerminalEffect({
+          scope: claimedA.fence.scope,
+          session: acquiredA.session,
+          receipt: firstSandboxReceipt,
+        }),
+      ).resolves.toBe("settled");
+    }
+
+    const dispatchB = (
+      await runDispatchOutbox.claim({
+        tenantId: f.tenantScope.tenantId,
+        dispatcherId: "sandbox-session-dispatcher-b",
+        limit: 10,
+        leaseMilliseconds: 30_000,
+      })
+    )[0];
+    if (dispatchB === undefined) throw new Error("Run B dispatch 缺失");
+    expect(dispatchB.scope.baseRevisionId).toBe(revision);
+    const claimedB = await sandboxPersistence.claim({
+      scope: dispatchB.scope as ExecutionScope,
+      workerId: "sandbox-session-worker-b",
+      leaseDurationMs: 30_000,
+    });
+    if (claimedB.outcome !== "claimed") throw new Error("Run B claim 失败");
+    await runDispatchOutbox.acknowledge({ claim: dispatchB, outcome: "dispatched" });
+    const acquiredB = await lifecycle.acquire({
+      scope: claimedB.fence.scope,
+      attemptId: claimedB.snapshot.attempt.attemptId,
+      owner: "sandbox-session-worker-b",
+      leaseDurationMs: 30_000,
+      signal: new AbortController().signal,
+    });
+    if (acquiredB.outcome !== "ready") throw new Error("Run B Sandbox acquire 失败");
+    expect(acquiredB).toMatchObject({
+      source: firstSandboxReceipt.outcome === "handed_off" ? "running_handoff" : "paused_resumed",
+      requiresMaterialization: false,
+      session: { providerSandboxId: acquiredA.session.providerSandboxId },
+      lease: { sessionId: acquiredA.lease.sessionId, generation: acquiredA.lease.generation },
+    });
+    expect(gateway.sandboxes.size).toBe(1);
+    await withTenantTransaction(runtime, f.tenantScope, (client) =>
+      client.query(
+        `UPDATE thread_sandbox_leases
+            SET expires_at=clock_timestamp()+interval '100 milliseconds',updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND session_id=$2 AND lease_id=$3 AND released_at IS NULL`,
+        [f.tenantScope.tenantId, acquiredB.lease.sessionId, acquiredB.lease.leaseId],
+      ),
+    );
+    const renewedB = await sandboxPersistence.inspectAndRenew({
+      fence: claimedB.fence,
+      leaseDurationMs: 30_000,
+    });
+    if (renewedB.outcome !== "active") throw new Error("Run B heartbeat 续租失败");
+    await expect(
+      withTenantTransaction(runtime, f.tenantScope, (client) =>
+        client.query<{ lease_renewed: boolean }>(
+          `SELECT expires_at > clock_timestamp()+interval '20 seconds' AS lease_renewed
+             FROM thread_sandbox_leases
+            WHERE tenant_id=$1 AND session_id=$2 AND lease_id=$3 AND released_at IS NULL`,
+          [f.tenantScope.tenantId, acquiredB.lease.sessionId, acquiredB.lease.leaseId],
+        ),
+      ),
+    ).resolves.toMatchObject({ rows: [{ lease_renewed: true }] });
+    const otherTenant = await serialQueueFixture(`sandbox-other-tenant-${suffix}`);
+    const crossTenantReplay = await withTenantTransaction(
+      runtime,
+      otherTenant.tenantScope,
+      (client) =>
+        client.query(
+          `SELECT session_id FROM thread_sandbox_sessions WHERE provider_sandbox_id=$1`,
+          [acquiredA.session.providerSandboxId],
+        ),
+    );
+    expect(crossTenantReplay.rowCount).toBe(0);
+
+    expect(
+      await sandboxPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimedB.snapshot.attempt.attemptId}/running-sandbox`,
+          fence: renewedB.fence,
+          expectedAttemptVersion: 0,
+          nextAttemptStatus: "running",
+          events: [],
+          outbox: [],
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+    expect(
+      await sandboxPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimedB.snapshot.attempt.attemptId}/finalizing-sandbox`,
+          fence: renewedB.fence,
+          expectedAttemptVersion: 1,
+          nextAttemptStatus: "finalizing",
+          nextStage: "finalizing",
+          events: [],
+          outbox: [],
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+    const terminalB = await sandboxPersistence.mutate(
+      signed({
+        idempotencyKey: `${claimedB.snapshot.attempt.attemptId}/terminal-sandbox`,
+        fence: renewedB.fence,
+        expectedAttemptVersion: 2,
+        nextAttemptStatus: "succeeded",
+        nextStage: "finished",
+        nextRunStatus: "succeeded",
+        events: [],
+        outbox: [],
+        releaseFences: true,
+        threadSandboxTerminal: {
+          schemaVersion: 1,
+          sessionId: acquiredB.lease.sessionId,
+          generation: acquiredB.lease.generation,
+          leaseId: acquiredB.lease.leaseId,
+          leaseToken: acquiredB.lease.leaseToken,
+        },
+      }),
+    );
+    if (terminalB.outcome !== "applied") throw new Error("Run B terminal 失败");
+    const pauseReceipt = terminalB.receipt.threadSandbox;
+    if (pauseReceipt?.outcome !== "effect_pending") throw new Error("pause intent 缺失");
+    await expect(
+      withTenantTransaction(runtime, f.tenantScope, async (client) => {
+        const session = await client.query<{ state: string; current_effect_id: string | null }>(
+          `SELECT state,current_effect_id FROM thread_sandbox_sessions
+            WHERE tenant_id=$1 AND session_id=$2`,
+          [f.tenantScope.tenantId, acquiredB.lease.sessionId],
+        );
+        const lease = await client.query<{ active_count: string }>(
+          `SELECT count(*)::text AS active_count FROM thread_sandbox_leases
+            WHERE tenant_id=$1 AND session_id=$2 AND released_at IS NULL`,
+          [f.tenantScope.tenantId, acquiredB.lease.sessionId],
+        );
+        return { session: session.rows[0], activeLeases: lease.rows[0]?.active_count };
+      }),
+    ).resolves.toEqual({
+      session: { state: "pausing", current_effect_id: pauseReceipt.effectId },
+      activeLeases: "0",
+    });
+    await expect(
+      lifecycle.completeTerminalEffect({
+        scope: renewedB.fence.scope,
+        session: acquiredB.session,
+        receipt: pauseReceipt,
+      }),
+    ).resolves.toBe("settled");
+    await expect(gateway.inspect(acquiredB.session.providerSandboxId)).resolves.toBe("paused");
+  });
+
+  it("阶段 2 让 Run B 只读取激活时冻结的 Run A 历史，重启重建 digest 稳定", async () => {
+    const f = await serialQueueFixture(`context-v2-${suffix}`);
+    await withTenantTransaction(runtime, f.tenantScope, (client) =>
+      client.query(
+        `INSERT INTO thread_continuity_profiles(
+           tenant_id,thread_id,rollout_source,cohort_bucket,rollout_selected,policy_version
+         ) VALUES($1,$2,'manual',0,true,0)`,
+        [f.tenantScope.tenantId, f.thread.id],
+      ),
+    );
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const contextPersistence = new PgExecutionPersistence(runtime, {
+      threadContextWriteEnabled: true,
+    });
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const runA = createRun({ id: runId(`context-a-${suffix}`), thread: f.thread, now });
+    const runB = createRun({ id: runId(`context-b-${suffix}`), thread: f.thread, now });
+    for (const [index, run] of [runA, runB].entries()) {
+      const inputText = index === 0 ? "Run A 用户输入" : "Run B 用户输入";
+      await creation.createQueuedRun({
+        scope: f.tenantScope,
+        run,
+        thread: f.thread,
+        inputText,
+        idempotency: {
+          key: `context-key-${suffix}-${index}`,
+          requestHash: requestDigest(inputText),
+        },
+      });
+    }
+    const dispatchA = (
+      await runDispatchOutbox.claim({
+        tenantId: f.tenantScope.tenantId,
+        dispatcherId: "context-dispatcher-a",
+        limit: 10,
+        leaseMilliseconds: 30_000,
+      })
+    )[0];
+    if (dispatchA === undefined) throw new Error("Run A dispatch 缺失");
+    const claimedA = await contextPersistence.claim({
+      scope: dispatchA.scope as ExecutionScope,
+      workerId: "context-worker-a",
+      leaseDurationMs: 30_000,
+    });
+    if (claimedA.outcome !== "claimed") throw new Error("Run A claim 失败");
+    const assistantBody = {
+      role: "assistant",
+      text: "Run A Assistant 最终回复",
+      content: [
+        {
+          type: "thinking",
+          thinking: "Run A 先核对 Workspace 状态",
+          thinkingSignature: "reasoning_content",
+        },
+        { type: "text", text: "Run A Assistant 最终回复" },
+      ],
+      api: "openai-completions",
+      provider: "integration",
+      model: "integration-model",
+      stopReason: "stop",
+      timestamp: 1,
+    };
+    const inlineBody = (value: Readonly<Record<string, unknown>>) => ({
+      storage: "inline" as const,
+      value,
+      sha256: digestCanonical(value),
+      size: Buffer.byteLength(JSON.stringify(value), "utf8"),
+    });
+    const toolTurns = Array.from({ length: 3 }, (_, index) => {
+      const callId = `context-tool-${index}-${suffix}`;
+      const toolName = "exec_command";
+      const turnBody = {
+        ...assistantBody,
+        text: "",
+        content: [
+          {
+            type: "thinking",
+            thinking: `Run A 工具轮次 ${index + 1}`,
+            thinkingSignature: "reasoning_content",
+          },
+        ],
+        stopReason: "toolUse",
+        timestamp: index + 1,
+      };
+      const callBody = {
+        name: toolName,
+        arguments: { cmd: `printf context-${index + 1}` },
+        timestamp: index + 1,
+      };
+      const resultBody = {
+        name: toolName,
+        text: `context-${index + 1}`,
+        isError: false,
+        timestamp: index + 1,
+      };
+      return [
+        {
+          entryId: `${claimedA.snapshot.attempt.attemptId}/assistant/${index}`,
+          kind: "assistant_message" as const,
+          body: inlineBody(turnBody),
+        },
+        {
+          entryId: `${claimedA.snapshot.attempt.attemptId}/tool-call/${index}`,
+          kind: "tool_call" as const,
+          toolCallId: callId,
+          toolName,
+          body: inlineBody(callBody),
+        },
+        {
+          entryId: `${claimedA.snapshot.attempt.attemptId}/tool-result/${index}`,
+          kind: "tool_result" as const,
+          toolCallId: callId,
+          toolName,
+          body: inlineBody(resultBody),
+        },
+      ];
+    }).flat();
+    expect(
+      await contextPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/context-turn`,
+          fence: claimedA.fence,
+          expectedAttemptVersion: 0,
+          nextAttemptStatus: "running",
+          events: [],
+          outbox: [],
+          threadContextAppend: {
+            schemaVersion: 1,
+            idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/context/turn/0`,
+            entries: [
+              ...toolTurns,
+              {
+                entryId: `${claimedA.snapshot.attempt.attemptId}/assistant/final`,
+                kind: "assistant_message",
+                body: inlineBody(assistantBody),
+              },
+            ],
+          },
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+    expect(
+      await contextPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/finalizing-context`,
+          fence: claimedA.fence,
+          expectedAttemptVersion: 1,
+          nextAttemptStatus: "finalizing",
+          nextStage: "finalizing",
+          events: [],
+          outbox: [],
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+    const workspaceBody = { outcome: "unchanged", revisionId: null };
+    const terminalBody = { status: "succeeded" };
+    expect(
+      await contextPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/terminal-context`,
+          fence: claimedA.fence,
+          expectedAttemptVersion: 2,
+          nextAttemptStatus: "succeeded",
+          nextStage: "finished",
+          nextRunStatus: "succeeded",
+          events: [],
+          outbox: [],
+          releaseFences: true,
+          threadContextAppend: {
+            schemaVersion: 1,
+            idempotencyKey: `${claimedA.snapshot.attempt.attemptId}/context/final/succeeded`,
+            entries: [
+              {
+                entryId: `${claimedA.snapshot.attempt.attemptId}/workspace`,
+                kind: "workspace_unchanged",
+                body: {
+                  storage: "inline",
+                  value: workspaceBody,
+                  sha256: digestCanonical(workspaceBody),
+                  size: Buffer.byteLength(JSON.stringify(workspaceBody), "utf8"),
+                },
+              },
+              {
+                entryId: `${claimedA.snapshot.attempt.attemptId}/terminal`,
+                kind: "run_terminal",
+                body: {
+                  storage: "inline",
+                  value: terminalBody,
+                  sha256: digestCanonical(terminalBody),
+                  size: Buffer.byteLength(JSON.stringify(terminalBody), "utf8"),
+                },
+              },
+            ],
+          },
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied", run: { status: "succeeded" } });
+
+    const dispatchB = (
+      await runDispatchOutbox.claim({
+        tenantId: f.tenantScope.tenantId,
+        dispatcherId: "context-dispatcher-b",
+        limit: 10,
+        leaseMilliseconds: 30_000,
+      })
+    )[0];
+    if (dispatchB === undefined) throw new Error("Run B dispatch 缺失");
+    const claimedB = await contextPersistence.claim({
+      scope: dispatchB.scope as ExecutionScope,
+      workerId: "context-worker-b",
+      leaseDurationMs: 30_000,
+    });
+    if (claimedB.outcome !== "claimed") throw new Error("Run B claim 失败");
+    expect(claimedB.snapshot.contextThroughSequence).toBe(14);
+    const throughSequence = claimedB.snapshot.contextThroughSequence;
+    if (throughSequence === undefined) throw new Error("Run B context cursor 缺失");
+    const compatibilityDigest = sha256Digest("a".repeat(64));
+    const noBlobReads = {
+      getBytes: async () => {
+        throw new Error("不应读取 Blob");
+      },
+    } as unknown as BlobStore;
+    const firstReader = new PgThreadContextHistoryRepository(runtime, noBlobReads);
+    const first = await firstReader.readActiveHistory({
+      scope: dispatchB.scope as ExecutionScope,
+      attemptId: claimedB.snapshot.attempt.attemptId,
+      throughSequence,
+      compatibilityDigest,
+      mode: "shadow",
+    });
+    if (first.outcome !== "ready") throw new Error("首次 history 重建失败");
+    const restartedReader = new PgThreadContextHistoryRepository(runtime, noBlobReads);
+    const restarted = await restartedReader.readActiveHistory({
+      scope: dispatchB.scope as ExecutionScope,
+      attemptId: claimedB.snapshot.attempt.attemptId,
+      throughSequence,
+      compatibilityDigest,
+      mode: "read",
+    });
+    if (restarted.outcome !== "ready") throw new Error("重启 history 重建失败");
+    expect(restarted.history.digest).toBe(first.history.digest);
+    expect(JSON.stringify(restarted.history.messages)).toContain("Run A 用户输入");
+    expect(JSON.stringify(restarted.history.messages)).toContain("Run A 先核对 Workspace 状态");
+    expect(JSON.stringify(restarted.history.messages)).toContain("reasoning_content");
+    expect(JSON.stringify(restarted.history.messages)).toContain("Run A Assistant 最终回复");
+    expect(JSON.stringify(restarted.history.messages)).not.toContain("Run B 用户输入");
+
+    const active = await withTenantTransaction(runtime, f.tenantScope, (client) =>
+      client.query<{ active_count: string }>(
+        `SELECT count(*)::text AS active_count FROM thread_follow_up_queue
+          WHERE tenant_id=$1 AND thread_id=$2 AND state='active'`,
+        [f.tenantScope.tenantId, f.thread.id],
+      ),
+    );
+    expect(active.rows[0]?.active_count).toBe("1");
+  });
+
+  it("阶段 3 在真实 PG 原子 steer，terminal fallback 按原 input 顺序领先后到 follow-up", async () => {
+    const f = await serialQueueFixture(`input-v2-${suffix}`);
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const inputRouting = new PgThreadInputRouting(runtime);
+    const inputPersistence = new PgExecutionPersistence(runtime, {
+      threadContextWriteEnabled: true,
+      threadInputRoutingV2Enabled: true,
+    });
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const activeRun = createRun({ id: runId(`input-active-${suffix}`), thread: f.thread, now });
+    await creation.createQueuedRun({
+      scope: f.tenantScope,
+      run: activeRun,
+      thread: f.thread,
+      inputText: "先执行当前任务",
+      idempotency: { key: `input-active-key-${suffix}`, requestHash: requestDigest("active") },
+    });
+    const dispatch = (
+      await runDispatchOutbox.claim({
+        tenantId: f.tenantScope.tenantId,
+        dispatcherId: "input-v2-dispatcher",
+        limit: 1,
+        leaseMilliseconds: 30_000,
+      })
+    )[0];
+    if (dispatch === undefined) throw new Error("阶段 3 active dispatch 缺失");
+    const claimed = await inputPersistence.claim({
+      scope: dispatch.scope as ExecutionScope,
+      workerId: "input-v2-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("阶段 3 active Run claim 失败");
+    expect(
+      await inputPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimed.snapshot.attempt.attemptId}/model-started`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 0,
+          nextAttemptStatus: "running",
+          nextStage: "model_execution_started",
+          events: [],
+          outbox: [],
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+
+    const steerText = "不要改后端，只调整配色";
+    const steer = await inputRouting.submit({
+      scope: f.tenantScope,
+      thread: f.thread,
+      fallbackRun: createRun({
+        id: runId(`input-steer-fallback-${suffix}`),
+        thread: f.thread,
+        now,
+      }),
+      inputText: steerText,
+      mode: "auto",
+      expectedRunId: activeRun.id,
+      expectedTurnId: "turn-1",
+      fallbackToFollowUp: false,
+      idempotency: { key: `input-steer-key-${suffix}`, requestHash: requestDigest(steerText) },
+    });
+    expect(steer).toMatchObject({
+      outcome: "accepted",
+      receipt: { disposition: "pending_steer", targetRunId: activeRun.id },
+    });
+    const pending = await inputPersistence.readPendingThreadSteer({ fence: claimed.fence });
+    if (pending.outcome !== "pending") throw new Error("阶段 3 pending steer 缺失");
+    expect(
+      await inputPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimed.snapshot.attempt.attemptId}/steer/${pending.receiptId}`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 1,
+          events: [],
+          outbox: [],
+          threadSteer: {
+            receiptId: pending.receiptId,
+            targetTurnId: pending.targetTurnId,
+            bodyDigest: pending.bodyDigest,
+          },
+        }),
+      ),
+    ).toMatchObject({
+      outcome: "applied",
+      receipt: {
+        threadSteer: { receiptId: pending.receiptId },
+        threadContext: { entryCount: 1 },
+      },
+    });
+
+    const strictText = "只允许当前 Run，结束后不要自动排队";
+    const strict = await inputRouting.submit({
+      scope: f.tenantScope,
+      thread: f.thread,
+      fallbackRun: createRun({ id: runId(`input-strict-${suffix}`), thread: f.thread, now }),
+      inputText: strictText,
+      mode: "steer",
+      expectedRunId: activeRun.id,
+      expectedTurnId: "turn-1",
+      fallbackToFollowUp: false,
+      idempotency: { key: `input-strict-key-${suffix}`, requestHash: requestDigest(strictText) },
+    });
+    expect(strict).toMatchObject({
+      outcome: "accepted",
+      receipt: { disposition: "pending_steer" },
+    });
+    if (strict.outcome !== "accepted" && strict.outcome !== "replayed") {
+      throw new Error("阶段 3 strict steer receipt 未接受");
+    }
+
+    const fallbackText = "若已结束则排到下一项";
+    const fallback = await inputRouting.submit({
+      scope: f.tenantScope,
+      thread: f.thread,
+      fallbackRun: createRun({ id: runId(`input-fallback-${suffix}`), thread: f.thread, now }),
+      inputText: fallbackText,
+      mode: "auto",
+      expectedRunId: activeRun.id,
+      expectedTurnId: "turn-1",
+      fallbackToFollowUp: false,
+      idempotency: {
+        key: `input-fallback-key-${suffix}`,
+        requestHash: requestDigest(fallbackText),
+      },
+    });
+    if (fallback.outcome !== "accepted" && fallback.outcome !== "replayed") {
+      throw new Error("阶段 3 fallback receipt 未接受");
+    }
+    const laterText = "更晚的显式下一项";
+    const later = await inputRouting.submit({
+      scope: f.tenantScope,
+      thread: f.thread,
+      fallbackRun: createRun({ id: runId(`input-later-${suffix}`), thread: f.thread, now }),
+      inputText: laterText,
+      mode: "follow_up",
+      fallbackToFollowUp: false,
+      idempotency: { key: `input-later-key-${suffix}`, requestHash: requestDigest(laterText) },
+    });
+    expect(later).toMatchObject({ outcome: "accepted", receipt: { disposition: "queued" } });
+
+    expect(
+      await inputPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimed.snapshot.attempt.attemptId}/finalizing-input-v2`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 2,
+          nextAttemptStatus: "finalizing",
+          nextStage: "finalizing",
+          events: [],
+          outbox: [],
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+    expect(
+      await inputPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimed.snapshot.attempt.attemptId}/terminal-input-v2`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 3,
+          nextAttemptStatus: "succeeded",
+          nextStage: "finished",
+          nextRunStatus: "succeeded",
+          events: [],
+          outbox: [],
+          releaseFences: true,
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+
+    const snapshot = await withTenantTransaction(runtime, f.tenantScope, async (client) => {
+      const receipts = await client.query<{
+        receipt_id: string;
+        disposition: string;
+        applied_context_sequence: string | null;
+        queued_run_id: string | null;
+        input_sequence: string;
+        rejection_code: string | null;
+      }>(
+        `SELECT receipt_id,disposition,applied_context_sequence::text,queued_run_id,
+                input_sequence::text,rejection_code
+           FROM thread_input_receipts WHERE tenant_id=$1 AND thread_id=$2
+           ORDER BY input_sequence`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      const queue = await client.query<{ run_id: string; queue_sequence: string; state: string }>(
+        `SELECT run_id,queue_sequence::text,state FROM thread_follow_up_queue
+          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY queue_sequence`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      const userFacts = await client.query<{ text: string }>(
+        `SELECT body_inline->>'text' AS text FROM thread_context_entries
+          WHERE tenant_id=$1 AND thread_id=$2 AND kind='user_message' ORDER BY sequence`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      return { receipts: receipts.rows, queue: queue.rows, userFacts: userFacts.rows };
+    });
+    expect(snapshot.userFacts.map((item) => item.text)).toContain(steerText);
+    const steerReceipt = snapshot.receipts.find((item) => item.receipt_id === pending.receiptId);
+    expect(steerReceipt).toMatchObject({ disposition: "steered" });
+    expect(steerReceipt?.applied_context_sequence).not.toBeNull();
+    expect(
+      snapshot.receipts.find((item) => item.receipt_id === strict.receipt.receiptId),
+    ).toMatchObject({ disposition: "rejected", rejection_code: "target_run_finished" });
+    const fallbackReceipt = snapshot.receipts.find(
+      (item) => item.receipt_id === fallback.receipt.receiptId,
+    );
+    expect(fallbackReceipt).toMatchObject({ disposition: "queued" });
+    expect(snapshot.queue.find((item) => item.state === "active")?.run_id).toBe(
+      fallbackReceipt?.queued_run_id,
+    );
+    expect(Number(snapshot.queue.at(-2)?.queue_sequence)).toBeLessThan(
+      Number(snapshot.queue.at(-1)?.queue_sequence),
+    );
+  });
+
+  it("阶段 3 active Run 取消把 pending auto 原子转 follow-up，且不重复写 user fact", async () => {
+    const f = await serialQueueFixture(`input-cancel-v2-${suffix}`);
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const inputRouting = new PgThreadInputRouting(runtime);
+    const inputPersistence = new PgExecutionPersistence(runtime, {
+      threadContextWriteEnabled: true,
+      threadInputRoutingV2Enabled: true,
+    });
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const activeRun = createRun({
+      id: runId(`input-cancel-active-${suffix}`),
+      thread: f.thread,
+      now,
+    });
+    await creation.createQueuedRun({
+      scope: f.tenantScope,
+      run: activeRun,
+      thread: f.thread,
+      inputText: "取消前的当前任务",
+      idempotency: {
+        key: `input-cancel-active-key-${suffix}`,
+        requestHash: requestDigest("active"),
+      },
+    });
+    const dispatch = (
+      await runDispatchOutbox.claim({
+        tenantId: f.tenantScope.tenantId,
+        dispatcherId: "input-cancel-v2-dispatcher",
+        limit: 1,
+        leaseMilliseconds: 30_000,
+      })
+    )[0];
+    if (dispatch === undefined) throw new Error("阶段 3 cancel dispatch 缺失");
+    const claimed = await inputPersistence.claim({
+      scope: dispatch.scope as ExecutionScope,
+      workerId: "input-cancel-v2-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("阶段 3 cancel Run claim 失败");
+    expect(
+      await inputPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimed.snapshot.attempt.attemptId}/model-started-cancel-v2`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 0,
+          nextAttemptStatus: "running",
+          nextStage: "model_execution_started",
+          events: [],
+          outbox: [],
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+
+    const inputText = "当前 Run 已取消则排到下一项";
+    const submitted = await inputRouting.submit({
+      scope: f.tenantScope,
+      thread: f.thread,
+      fallbackRun: createRun({
+        id: runId(`input-cancel-fallback-${suffix}`),
+        thread: f.thread,
+        now,
+      }),
+      inputText,
+      mode: "auto",
+      expectedRunId: activeRun.id,
+      expectedTurnId: "turn-1",
+      fallbackToFollowUp: false,
+      idempotency: {
+        key: `input-cancel-fallback-key-${suffix}`,
+        requestHash: requestDigest(inputText),
+      },
+    });
+    expect(submitted).toMatchObject({
+      outcome: "accepted",
+      receipt: { disposition: "pending_steer" },
+    });
+    if (submitted.outcome !== "accepted" && submitted.outcome !== "replayed") {
+      throw new Error("阶段 3 cancel pending receipt 未接受");
+    }
+    const current = await repositories.runs.get(f.tenantScope, activeRun.id);
+    if (current === undefined) throw new Error("阶段 3 cancel active Run 缺失");
+    await expect(
+      repositories.runs.update(
+        f.tenantScope,
+        transitionRun(current.entity, "cancelled", isoTimestamp("2099-07-26T00:00:01.000Z")),
+        current.version,
+      ),
+    ).resolves.toMatchObject({ outcome: "updated" });
+
+    const receipt = await inputRouting.get({
+      scope: f.tenantScope,
+      threadId: f.thread.id,
+      receiptId: submitted.receipt.receiptId,
+    });
+    expect(receipt).toMatchObject({
+      disposition: "queued",
+      events: [
+        { sequence: 1, disposition: "pending_steer" },
+        { sequence: 2, disposition: "queued" },
+      ],
+    });
+    const facts = await withTenantTransaction(runtime, f.tenantScope, (client) =>
+      client.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM thread_context_entries
+          WHERE tenant_id=$1 AND thread_id=$2 AND kind='user_message'
+            AND body_inline->>'text'=$3`,
+        [f.tenantScope.tenantId, f.thread.id, inputText],
+      ),
+    );
+    expect(facts.rows[0]?.count).toBe("0");
+  });
+
+  it("取消 queued Run 保留 receipt/queue 事实，取消 active Run 后 FIFO 跳过它", async () => {
+    const f = await serialQueueFixture(`cancel-${suffix}`);
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const firstRun = createRun({ id: runId(`cancel-run-${suffix}-0`), thread: f.thread, now });
+    const secondRun = createRun({ id: runId(`cancel-run-${suffix}-1`), thread: f.thread, now });
+    const thirdRun = createRun({ id: runId(`cancel-run-${suffix}-2`), thread: f.thread, now });
+    const runs = [firstRun, secondRun, thirdRun] as const;
+    for (const [index, run] of runs.entries()) {
+      const inputText = `取消队列输入 ${index}`;
+      await creation.createQueuedRun({
+        scope: f.tenantScope,
+        run,
+        thread: f.thread,
+        inputText,
+        idempotency: {
+          key: `cancel-key-${suffix}-${index}`,
+          requestHash: requestDigest(inputText),
+        },
+      });
+    }
+    for (const run of [secondRun, firstRun]) {
+      const current = await repositories.runs.get(f.tenantScope, run.id);
+      if (current === undefined) throw new Error("待取消 Run 缺失");
+      const cancelled = transitionRun(
+        current.entity,
+        "cancelled",
+        isoTimestamp("2099-07-26T00:00:01.000Z"),
+      );
+      await expect(
+        repositories.runs.update(f.tenantScope, cancelled, current.version),
+      ).resolves.toMatchObject({ outcome: "updated" });
+    }
+    const cancelled = await withTenantTransaction(runtime, f.tenantScope, async (client) => {
+      const queue = await client.query<{ run_id: string; state: string }>(
+        `SELECT run_id,state FROM thread_follow_up_queue
+          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY thread_follow_up_queue.queue_sequence`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      const receipts = await client.query<{ queued_run_id: string; state: string }>(
+        `SELECT queued_run_id,state FROM thread_input_receipts
+          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY queue_sequence`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      const head = await client.query<{ active_run_id: string }>(
+        `SELECT active_run_id FROM thread_execution_heads
+          WHERE tenant_id=$1 AND thread_id=$2`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      const inputs = await client.query<{ run_id: string }>(
+        `SELECT run_id FROM run_execution_inputs
+          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY created_at,run_id`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      return {
+        queue: queue.rows,
+        receipts: receipts.rows,
+        head: head.rows[0],
+        inputs: inputs.rows,
+      };
+    });
+    expect(cancelled.queue).toEqual([
+      { run_id: firstRun.id, state: "cancelled" },
+      { run_id: secondRun.id, state: "cancelled" },
+      { run_id: thirdRun.id, state: "active" },
+    ]);
+    expect(cancelled.receipts).toEqual([
+      { queued_run_id: firstRun.id, state: "consumed" },
+      { queued_run_id: secondRun.id, state: "cancelled" },
+      { queued_run_id: thirdRun.id, state: "consumed" },
+    ]);
+    expect(cancelled.head).toEqual({ active_run_id: thirdRun.id });
+    expect(cancelled.inputs.map((item) => item.run_id).sort()).toEqual(
+      [firstRun.id, thirdRun.id].sort(),
+    );
+  });
+
+  it("V2 writer 过期后 recovery 原子失败当前 Run 并激活 FIFO 下一项", async () => {
+    const f = await serialQueueFixture(`writer-recovery-${suffix}`);
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const firstRun = createRun({ id: runId(`recovery-first-${suffix}`), thread: f.thread, now });
+    const secondRun = createRun({ id: runId(`recovery-second-${suffix}`), thread: f.thread, now });
+    const runs = [firstRun, secondRun] as const;
+    for (const [index, run] of runs.entries()) {
+      const inputText = `崩溃恢复输入 ${index}`;
+      await creation.createQueuedRun({
+        scope: f.tenantScope,
+        run,
+        thread: f.thread,
+        inputText,
+        idempotency: {
+          key: `writer-recovery-key-${suffix}-${index}`,
+          requestHash: requestDigest(inputText),
+        },
+      });
+    }
+    const dispatch = (
+      await runDispatchOutbox.claim({
+        tenantId: f.tenantScope.tenantId,
+        dispatcherId: "writer-recovery-dispatcher",
+        limit: 10,
+        leaseMilliseconds: 30_000,
+      })
+    )[0];
+    if (dispatch === undefined) throw new Error("恢复测试 dispatch 缺失");
+    const claimed = await persistence.claim({
+      scope: dispatch.scope as ExecutionScope,
+      workerId: "crashed-thread-writer",
+      leaseDurationMs: 1_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("恢复测试 writer claim 失败");
+    await withTenantTransaction(runtime, f.tenantScope, (client) =>
+      client.query("SELECT pg_sleep(1.05)"),
+    );
+    await expect(
+      persistence.recoverExpiredAttempt({
+        scope: dispatch.scope as ExecutionScope,
+        decision: "safe_fail",
+      }),
+    ).resolves.toBe("recovered");
+    const recovered = await withTenantTransaction(runtime, f.tenantScope, async (client) => {
+      const queue = await client.query<{ run_id: string; state: string }>(
+        `SELECT run_id,state FROM thread_follow_up_queue
+          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY queue_sequence`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      const head = await client.query<{ active_run_id: string; writer_token: string | null }>(
+        `SELECT active_run_id,writer_token FROM thread_execution_heads
+          WHERE tenant_id=$1 AND thread_id=$2`,
+        [f.tenantScope.tenantId, f.thread.id],
+      );
+      const result = await client.query<{ outcome: string }>(
+        `SELECT outcome FROM run_workspace_results WHERE tenant_id=$1 AND run_id=$2`,
+        [f.tenantScope.tenantId, firstRun.id],
+      );
+      const nextInput = await client.query(
+        `SELECT 1 FROM run_execution_inputs WHERE tenant_id=$1 AND run_id=$2`,
+        [f.tenantScope.tenantId, secondRun.id],
+      );
+      return {
+        queue: queue.rows,
+        head: head.rows[0],
+        result: result.rows[0],
+        nextInputCount: nextInput.rowCount,
+      };
+    });
+    expect(recovered.queue).toEqual([
+      { run_id: firstRun.id, state: "failed" },
+      { run_id: secondRun.id, state: "active" },
+    ]);
+    expect(recovered.head).toEqual({ active_run_id: secondRun.id, writer_token: null });
+    expect(recovered.result).toEqual({ outcome: "failed_before_commit" });
+    expect(recovered.nextInputCount).toBe(1);
+  });
+
   it("过期 ack 不能覆盖重领，两个连接只会产生一个下一代 claim", async () => {
     const f = await fixture(`dispatch-reclaim-${suffix}`);
     await expect(
@@ -849,6 +2611,15 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       tenant: personal.tenant,
       membership: personal.ownerMembership,
     });
+    await withTenantTransaction(migrator, { tenantId: scope.tenantId }, (client) =>
+      client.query(
+        `INSERT INTO tenant_thread_continuity_policies(
+           tenant_id,policy_version,v2_read_enabled,new_thread_rollout_basis_points,
+           legacy_anchor_read_enabled
+         ) VALUES ($1,7,true,10000,false)`,
+        [scope.tenantId],
+      ),
+    );
     const thread = createThread({
       id: threadId(`thread-id-${label}`),
       tenant: personal.tenant,
@@ -905,7 +2676,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       }),
     ).resolves.toEqual({ outcome: "key_conflict" });
     const facts = await withTenantTransaction(runtime, scope, async (client) => {
-      const [threads, workspaces] = await Promise.all([
+      const [threads, workspaces, profile] = await Promise.all([
         client.query<{ count: string }>(
           "SELECT count(*)::text AS count FROM threads WHERE tenant_id=$1",
           [scope.tenantId],
@@ -914,10 +2685,31 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           "SELECT count(*)::text AS count FROM workspaces WHERE tenant_id=$1",
           [scope.tenantId],
         ),
+        client.query<{
+          readonly rollout_source: string;
+          readonly rollout_selected: boolean;
+          readonly policy_version: string;
+        }>(
+          `SELECT rollout_source,rollout_selected,policy_version::text
+             FROM thread_continuity_profiles WHERE tenant_id=$1 AND thread_id=$2`,
+          [scope.tenantId, thread.id],
+        ),
       ]);
-      return { threads: threads.rows[0]?.count, workspaces: workspaces.rows[0]?.count };
+      return {
+        threads: threads.rows[0]?.count,
+        workspaces: workspaces.rows[0]?.count,
+        profile: profile.rows[0],
+      };
     });
-    expect(facts).toEqual({ threads: "1", workspaces: "1" });
+    expect(facts).toEqual({
+      threads: "1",
+      workspaces: "1",
+      profile: {
+        rollout_source: "new_thread",
+        rollout_selected: true,
+        policy_version: "7",
+      },
+    });
   });
 
   it("Thread 创建直接命中 TransactionCommitUnknownError 后按原键精确读回", async () => {
@@ -3725,6 +5517,24 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     );
     expect(workspaceFactsBefore.rows[0]?.artifact_count).toBeGreaterThan(0);
     expect(workspaceFactsBefore.rows[0]?.resource_version_count).toBeGreaterThan(0);
+    // 此用例验证 0016 的可逆性；共享集成 schema 中其他用例产生的 0018+ 事实必须先从
+    // 一次性测试数据库清空，否则各阶段的防破坏 down guard 会正确拒绝跨功能回退。
+    await admin.query(
+      `TRUNCATE TABLE
+         "${schema}".thread_continuity_metric_observations,
+         "${schema}".thread_continuity_profiles,
+         "${schema}".thread_context_legacy_backfill_items,
+         "${schema}".thread_context_legacy_anchors,
+         "${schema}".sandbox_lifecycle_effects,
+         "${schema}".thread_sandbox_leases,
+         "${schema}".thread_sandbox_sessions,
+         "${schema}".thread_input_receipt_events,
+         "${schema}".thread_follow_up_queue,
+         "${schema}".thread_input_receipts,
+         "${schema}".run_workspace_results,
+         "${schema}".thread_context_entries
+       CASCADE`,
+    );
     const artifactDown = await migrateDown(migrator, {
       runtimeRole,
       migratorRole,

@@ -6,6 +6,10 @@ const markdownComponents: Components = {
   a: ({ node, href, children, ...props }) => {
     void node;
     if (!href) return <span className="markdown-invalid-link">{children}</span>;
+    if (/(?:^|\/)resource_version_[a-z0-9]+(?:[?#].*)?$/iu.test(href)) {
+      // Runtime 资源引用并不是稳定路由；真实下载能力由紧邻正文的 Artifact 卡片提供。
+      return <span className="markdown-artifact-reference">{children}</span>;
+    }
     const opensNewWindow = /^(?:https?:)?\/\//i.test(href);
     return (
       <a

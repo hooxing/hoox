@@ -18,6 +18,7 @@ Thumbs.db
 
 # Logs and temporary files
 *.log
+.arts/
 .tmp/
 tmp/
 model-wire-traces/

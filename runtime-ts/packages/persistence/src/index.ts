@@ -16,7 +16,9 @@ export { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js
 export * from "./pg-run-worker-state.js";
 export * from "./pg-runtime-rollout.js";
 export * from "./pg-sandbox-cleanup-consumer.js";
+export * from "./pg-thread-sandbox-lifecycle-consumer.js";
 export { PgThreadCreation } from "./pg-thread-creation.js";
+export * from "./pg-thread-input.js";
 export * from "./pg-waiting-recovery.js";
 export * from "./pg-workspace-candidate.js";
 export * from "./pg-workspace-manifest.js";
@@ -38,5 +40,8 @@ export {
   probeS3BlobStore,
 } from "./s3-blob-store.js";
 export * from "./tool-observation-rollout-adapter.js";
+export * from "./thread-context.js";
+export * from "./thread-continuity-rollout.js";
+export * from "./thread-sandbox-session.js";
 export * from "./trace-blob-persistence-adapter.js";
 export * from "./workspace-blob-persistence-adapter.js";

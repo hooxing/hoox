@@ -1456,7 +1456,7 @@ class PgWaitingRecoveryStoreImpl {
     }>(
       `SELECT sequence::text,kind,normalized_tool_call_id FROM runtime_rollout_entries
         WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3
-        ORDER BY sequence DESC LIMIT 1`,
+        ORDER BY runtime_rollout_entries.sequence DESC LIMIT 1`,
       [row.tenant_id, row.attempt_id, rollout.agent_thread_id],
     );
     const previous = tail.rows[0];

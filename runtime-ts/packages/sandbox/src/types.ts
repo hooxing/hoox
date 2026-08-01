@@ -7,6 +7,10 @@ export interface SandboxCreateInput {
   templateId: string;
   ttlSeconds?: number;
   env?: Record<string, string>;
+  lifecycle?: {
+    onTimeout?: "kill" | "pause";
+    autoResume?: boolean;
+  };
 }
 
 export interface CommandOutput {
@@ -35,4 +39,8 @@ export interface SandboxHandle {
 export interface SandboxGateway {
   create(input: SandboxCreateInput, control?: OperationControl): Promise<SandboxHandle>;
   connect(id: string, control?: OperationControl): Promise<SandboxHandle>;
+  inspect(
+    id: string,
+    control?: OperationControl,
+  ): Promise<"running" | "paused" | "not_found" | "unknown">;
 }

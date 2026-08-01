@@ -1,0 +1,2 @@
+DROP TABLE run_workspace_results;
+ALTER TABLE run_execution_inputs DROP CONSTRAINT run_execution_inputs_result_scope_unique;

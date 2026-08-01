@@ -12,6 +12,7 @@ import type {
   SandboxSessionRegistryPort,
   SandboxSettlementResult,
   ScheduledTask,
+  ThreadSandboxProviderPort,
   WorkspaceRevisionVerifierPort,
 } from "@cube-runtime/run-contracts";
 import {
@@ -102,7 +103,7 @@ if [ -n "$workspace_entry" ]; then exit 73; fi`,
 
 /** CubeSandbox 的生产 Session registry；PG 包装器会在返回 Worker 前提交 registry 事实。 */
 export class CubeSandboxSessionRegistry
-  implements SandboxSessionRegistryPort, OrphanSandboxCleanupPort
+  implements SandboxSessionRegistryPort, OrphanSandboxCleanupPort, ThreadSandboxProviderPort
 {
   readonly gateway: CubeSandboxGateway;
   private uncertainCreate: UncertainLifecycleEvent | undefined;
@@ -116,7 +117,15 @@ export class CubeSandboxSessionRegistry
     options: CubeGatewayOptions,
     private readonly templateId: string,
     private readonly ttlSeconds = 120,
+    private readonly lifecycleTimeoutMs = 90_000,
   ) {
+    if (
+      !Number.isSafeInteger(lifecycleTimeoutMs) ||
+      lifecycleTimeoutMs < 1 ||
+      lifecycleTimeoutMs > 600_000
+    ) {
+      throw new TypeError("Sandbox lifecycle timeout 无效");
+    }
     this.gateway = new CubeSandboxGateway({
       ...options,
       maxCreateTtlSeconds: ttlSeconds,
@@ -141,20 +150,7 @@ export class CubeSandboxSessionRegistry
         { templateId: this.templateId, ttlSeconds: this.ttlSeconds },
         { signal: input.signal },
       );
-      const session: SandboxSessionRef = Object.freeze({
-        registryId: `registry-${randomUUID()}`,
-        providerSandboxId: sandbox.id,
-        mode: "created",
-        sandbox,
-      });
-      this.workspaceBindings.set(
-        session,
-        Object.freeze({
-          registryId: session.registryId,
-          providerSandboxId: session.providerSandboxId,
-          scope: freezeExecutionScope(input.scope),
-        }),
-      );
+      const session = this.bindSession(input.scope, `registry-${randomUUID()}`, sandbox, "created");
       return { outcome: "ready", session };
     } catch (error) {
       if (error instanceof SandboxRuntimeError && error.code === "UNKNOWN") {
@@ -169,12 +165,69 @@ export class CubeSandboxSessionRegistry
     }
   }
 
+  async create(
+    input: Parameters<ThreadSandboxProviderPort["create"]>[0],
+  ): Promise<SandboxAcquireResult> {
+    this.uncertainCreate = undefined;
+    try {
+      const sandbox = await this.gateway.create(
+        {
+          templateId: this.templateId,
+          ttlSeconds: this.ttlSeconds,
+          lifecycle: { onTimeout: "pause", autoResume: true },
+        },
+        { signal: input.signal },
+      );
+      return {
+        outcome: "ready",
+        session: this.bindSession(input.scope, input.registryId, sandbox, "created"),
+      };
+    } catch (error) {
+      if (error instanceof SandboxRuntimeError && error.code === "UNKNOWN") {
+        return {
+          outcome: "unknown",
+          event:
+            this.uncertainCreate ??
+            fallbackUncertainEvent(`create-${randomUUID()}`, this.ttlSeconds),
+        };
+      }
+      return { outcome: "failed", code: "SANDBOX_FAILED" };
+    }
+  }
+
+  async connect(
+    input: Parameters<ThreadSandboxProviderPort["connect"]>[0],
+  ): Promise<SandboxAcquireResult | { readonly outcome: "not_found" }> {
+    try {
+      const sandbox = await this.gateway.connect(input.providerSandboxId, {
+        signal: input.signal,
+      });
+      return {
+        outcome: "ready",
+        session: this.bindSession(input.scope, input.registryId, sandbox, "connected"),
+      };
+    } catch (error) {
+      if (error instanceof SandboxRuntimeError && error.code === "NOT_FOUND") {
+        return { outcome: "not_found" };
+      }
+      return error instanceof SandboxRuntimeError && error.code === "TIMEOUT"
+        ? { outcome: "unknown", event: fallbackUncertainEvent(input.registryId, this.ttlSeconds) }
+        : { outcome: "failed", code: "SANDBOX_FAILED" };
+    }
+  }
+
   async settle(
     input: Parameters<SandboxSessionRegistryPort["settle"]>[0],
   ): Promise<SandboxSettlementResult> {
     try {
-      if (input.disposition === "pause") await input.session.sandbox.pause();
-      else await input.session.sandbox.kill({ ignoreNotFound: true });
+      if (input.disposition === "pause") {
+        await input.session.sandbox.pause({ timeoutMs: this.lifecycleTimeoutMs });
+      } else {
+        await input.session.sandbox.kill({
+          timeoutMs: this.lifecycleTimeoutMs,
+          ignoreNotFound: true,
+        });
+      }
       return { outcome: "settled" };
     } catch {
       return {
@@ -196,6 +249,29 @@ export class CubeSandboxSessionRegistry
       cleanupIntentId: `registry:${input.session.registryId}:orphan-cleanup`,
       disposition: "close",
     });
+  }
+
+  private bindSession(
+    scope: ExecutionScope,
+    registryId: string,
+    sandbox: SandboxSessionRef["sandbox"],
+    mode: SandboxSessionRef["mode"],
+  ): SandboxSessionRef {
+    const session: SandboxSessionRef = Object.freeze({
+      registryId,
+      providerSandboxId: sandbox.id,
+      mode,
+      sandbox,
+    });
+    this.workspaceBindings.set(
+      session,
+      Object.freeze({
+        registryId,
+        providerSandboxId: sandbox.id,
+        scope: freezeExecutionScope(scope),
+      }),
+    );
+    return session;
   }
 
   workspaceCapability(input: {

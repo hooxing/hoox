@@ -3,7 +3,10 @@
   "files": {
     "includes": [
       "**",
+      "!!.arts",
+      "!!.codeartsdoer",
       "!!exports",
+      "!!model-wire-traces",
       "!!**/dist",
       "!!**/node_modules",
       "!!runtime-ts/vendor/cubesandbox-sdk"

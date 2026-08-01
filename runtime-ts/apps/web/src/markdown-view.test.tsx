@@ -89,6 +89,15 @@ const ready = true;
     expect(links[1]?.hasAttribute("rel")).toBe(false);
   });
 
+  it("运行时资源引用退化为文件提示，避免进入无法下载的伪路由", () => {
+    const container = renderMarkdown(
+      "[下载报告](./resource_version_a2cb5e9e3516c1a1b84fb90354ba35529d3ec6df4fa531165a5c2e3eca3b9bee)",
+    );
+
+    expect(container.querySelector("a")).toBeNull();
+    expect(container.querySelector(".markdown-artifact-reference")?.textContent).toBe("下载报告");
+  });
+
   it("任务复选框完整覆盖全局输入框盒模型", () => {
     const selector = '.assistant-markdown input[type="checkbox"]';
     const start = webStyles.indexOf(selector);

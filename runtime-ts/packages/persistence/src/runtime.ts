@@ -12,11 +12,21 @@ import {
 import { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-state.js";
 import { PgThreadCreation } from "./pg-thread-creation.js";
+import { PgThreadInputRouting } from "./pg-thread-input.js";
 import {
   type ModelWireTraceReadPort,
   PgModelWireTraceReadRepository,
 } from "./model-wire-trace-read.js";
-import type { ArchiveThreadCommandPort, CoreRepositories, RunExperienceReadPort } from "./ports.js";
+import type {
+  ArchiveThreadCommandPort,
+  CoreRepositories,
+  RunExperienceReadPort,
+  ThreadContinuityReadPort,
+} from "./ports.js";
+import type { ThreadContextReadPort } from "./ports.js";
+import type { BlobStore } from "./blob-store.js";
+import { PgThreadContextReadRepository } from "./thread-context.js";
+import { PgThreadContinuityReadRepository } from "./thread-continuity-rollout.js";
 import {
   createPostgresPool,
   type Pool,
@@ -54,23 +64,33 @@ export interface ApiPersistenceRuntime {
   readonly archiveThread: ArchiveThreadCommandPort;
   readonly threadCreation: PgThreadCreation;
   readonly runDispatchCreation: PgRunDispatchCreation;
+  readonly threadInputs: PgThreadInputRouting;
   readonly experience: RunExperienceReadPort;
   readonly modelWireTraces: ModelWireTraceReadPort;
   readonly blobLifecycle: PgBlobLifecycleRepository;
+  readonly threadContinuity: ThreadContinuityReadPort;
+  threadContext(blobs: BlobStore): ThreadContextReadPort;
   probe(): Promise<void>;
   close(): Promise<void>;
 }
 
-export function createApiPersistenceRuntime(options: PostgresPoolOptions): ApiPersistenceRuntime {
+export function createApiPersistenceRuntime(
+  options: PostgresPoolOptions & { readonly serialQueueV2Enabled?: boolean },
+): ApiPersistenceRuntime {
   const pool = createPostgresPool(options);
   return Object.freeze({
     repositories: new PgCoreRepositories(pool),
     archiveThread: new PgArchiveThreadCommand(pool),
     threadCreation: new PgThreadCreation(pool),
-    runDispatchCreation: new PgRunDispatchCreation(pool),
+    runDispatchCreation: new PgRunDispatchCreation(pool, {
+      serialQueueV2Enabled: options.serialQueueV2Enabled ?? false,
+    }),
+    threadInputs: new PgThreadInputRouting(pool),
     experience: new PgRunExperienceReadRepository(pool),
     modelWireTraces: new PgModelWireTraceReadRepository(pool),
     blobLifecycle: new PgBlobLifecycleRepository(pool),
+    threadContinuity: new PgThreadContinuityReadRepository(pool),
+    threadContext: (blobs: BlobStore) => new PgThreadContextReadRepository(pool, blobs),
     probe: () => probePostgres(pool, options.expectedRuntimeRole),
     close: () => pool.end(),
   });

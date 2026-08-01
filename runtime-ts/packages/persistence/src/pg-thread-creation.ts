@@ -2,6 +2,7 @@ import { rehydrateThread, type Thread } from "@cube-runtime/domain";
 import type { QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type { IdempotentCreateResult, ThreadCreationPort } from "./ports.js";
+import { threadContinuityCohortBucket } from "./thread-continuity-rollout.js";
 import {
   type Pool,
   type PoolClient,
@@ -16,7 +17,7 @@ function storedTimestamp(value: unknown): string {
 }
 
 /**
- * API 的唯一 Thread 创建能力：Thread、空 Workspace、幂等记录与成员资格重验共用一个事务。
+ * API 的唯一 Thread 创建能力：Thread、空 Workspace、execution head、幂等记录与成员资格重验共用一个事务。
  * 该实现不复用普通 Repository，避免看似成功但只写入一半父实体。
  */
 export interface PgThreadCreationOptions {
@@ -87,6 +88,34 @@ export class PgThreadCreation implements ThreadCreationPort {
           ],
         );
         if (createdWorkspace.rowCount !== 1) throw new TypeError("创建初始 Workspace 未写入");
+        await client.query(
+          `INSERT INTO thread_execution_heads(tenant_id,thread_id)
+           VALUES ($1,$2)`,
+          [input.scope.tenantId, input.thread.id],
+        );
+        const policy = await client.query<{
+          readonly policy_version: string;
+          readonly new_thread_rollout_basis_points: number;
+        }>(
+          `SELECT policy_version::text,new_thread_rollout_basis_points
+             FROM tenant_thread_continuity_policies WHERE tenant_id=$1`,
+          [input.scope.tenantId],
+        );
+        const cohortBucket = threadContinuityCohortBucket(input.scope.tenantId, input.thread.id);
+        // 没有显式 Tenant policy 时采用产品默认全量；policy 仍可把单 Tenant 回退到 0。
+        const rolloutBasisPoints = policy.rows[0]?.new_thread_rollout_basis_points ?? 10_000;
+        await client.query(
+          `INSERT INTO thread_continuity_profiles(
+             tenant_id,thread_id,rollout_source,cohort_bucket,rollout_selected,policy_version
+           ) VALUES ($1,$2,'new_thread',$3,$4,$5)`,
+          [
+            input.scope.tenantId,
+            input.thread.id,
+            cohortBucket,
+            cohortBucket < rolloutBasisPoints,
+            Number(policy.rows[0]?.policy_version ?? "0"),
+          ],
+        );
         await client.query(
           `INSERT INTO api_thread_idempotency_records(tenant_id,user_id,idempotency_key,request_hash,thread_id)
            VALUES ($1,$2,$3,$4,$5)`,

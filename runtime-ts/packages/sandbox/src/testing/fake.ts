@@ -41,6 +41,13 @@ export class FakeSandboxGateway implements SandboxGateway {
     handle.paused = false;
     return handle;
   }
+
+  async inspect(id: string): Promise<"running" | "paused" | "not_found"> {
+    validateSandboxId(id);
+    const handle = this.sandboxes.get(id);
+    if (handle === undefined || handle.killed) return "not_found";
+    return handle.paused ? "paused" : "running";
+  }
 }
 
 export class FakeSandboxHandle implements SandboxHandle {

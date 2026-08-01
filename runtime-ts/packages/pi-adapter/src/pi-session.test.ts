@@ -6,6 +6,7 @@ import {
   type FauxResponseStep,
   fauxAssistantMessage,
   fauxProvider,
+  fauxThinking,
   fauxToolCall,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
@@ -23,6 +24,7 @@ import {
   type PiSessionController,
 } from "./pi-session.js";
 import { SANDBOX_TOOL_NAMES } from "./tools.js";
+import { threadActiveHistoryDigest, type ThreadActiveHistoryV1 } from "./thread-history.js";
 
 const disposers: Array<() => void> = [];
 afterEach(() => {
@@ -30,6 +32,92 @@ afterEach(() => {
 });
 
 describe("Pi 安全适配", () => {
+  it("Run B 的 Provider 可见消息保留 Run A 的真实角色与工具配对", async () => {
+    let providerMessages: unknown[] = [];
+    const unsigned = {
+      schemaVersion: 1 as const,
+      projectionSchemaVersion: 1 as const,
+      throughSequence: 4,
+      messages: [
+        { sequence: 1, role: "user" as const, text: "Run A 用户输入", timestamp: 1 },
+        {
+          sequence: 2,
+          role: "assistant" as const,
+          content: [
+            {
+              type: "thinking" as const,
+              thinking: "Run A 先核对目录",
+              thinkingSignature: "reasoning_content",
+            },
+            { type: "text" as const, text: "Run A 调用工具" },
+            {
+              type: "toolCall" as const,
+              id: "call-a",
+              name: "exec_command",
+              arguments: { cmd: "pwd" },
+            },
+          ],
+          api: "faux",
+          provider: "faux",
+          model: "faux",
+          stopReason: "toolUse" as const,
+          timestamp: 2,
+        },
+        {
+          sequence: 3,
+          role: "toolResult" as const,
+          toolCallId: "call-a",
+          toolName: "exec_command",
+          text: "/workspace",
+          isError: false,
+          timestamp: 3,
+        },
+        {
+          sequence: 4,
+          role: "assistant" as const,
+          content: [{ type: "text" as const, text: "Run A 完成" }],
+          api: "faux",
+          provider: "faux",
+          model: "faux",
+          stopReason: "stop" as const,
+          timestamp: 4,
+        },
+      ],
+    };
+    const history: ThreadActiveHistoryV1 = {
+      ...unsigned,
+      digest: threadActiveHistoryDigest(unsigned),
+    };
+    const { controller } = await harness(
+      [
+        (context) => {
+          providerMessages = context.messages;
+          return fauxAssistantMessage("Run B 完成");
+        },
+      ],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      history,
+    );
+    await controller.prompt("Run B 用户输入");
+    expect(
+      providerMessages.map((message) =>
+        typeof message === "object" && message !== null && "role" in message
+          ? message.role
+          : undefined,
+      ),
+    ).toEqual(["user", "assistant", "toolResult", "assistant", "user"]);
+    expect(JSON.stringify(providerMessages)).toContain("Run A 用户输入");
+    expect(JSON.stringify(providerMessages)).toContain("Run A 先核对目录");
+    expect(JSON.stringify(providerMessages)).toContain("reasoning_content");
+    expect(JSON.stringify(providerMessages)).toContain("Run B 用户输入");
+  });
+
   it("每次 Provider stream 调用均经过诊断钩子，工具循环不会误作 retry", async () => {
     const invocations: number[] = [];
     const { controller } = await harness(
@@ -51,6 +139,135 @@ describe("Pi 安全适配", () => {
     );
     await controller.prompt("读取文件");
     expect(invocations).toEqual([0, 1]);
+  });
+
+  it("Runtime awaited 安全点只在 tool pair 完整后替换历史，并先于下一次 Provider 请求", async () => {
+    const order: string[] = [];
+    let safeEvent: Extract<RuntimeAgentEvent, { type: "turn.completed" }> | undefined;
+    const replacementUnsigned = {
+      schemaVersion: 1 as const,
+      projectionSchemaVersion: 1 as const,
+      throughSequence: 1,
+      messages: [
+        {
+          sequence: 1,
+          role: "compactionHandoff" as const,
+          checkpointId: "checkpoint-safe-1",
+          sourceFromSequence: 1,
+          sourceThroughSequence: 1,
+          text: "已完成受控工具读取",
+          timestamp: 10,
+        },
+      ],
+    };
+    const replacement: ThreadActiveHistoryV1 = {
+      ...replacementUnsigned,
+      digest: threadActiveHistoryDigest(replacementUnsigned),
+    };
+    let secondProviderContext = "";
+    const { controller } = await harness(
+      [
+        fauxAssistantMessage(fauxToolCall("exec_command", { cmd: "pwd" }), {
+          stopReason: "toolUse",
+        }),
+        (context) => {
+          order.push("provider-2");
+          secondProviderContext = JSON.stringify(context.messages);
+          return fauxAssistantMessage("完成");
+        },
+      ],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async (event) => {
+        order.push("safe-point");
+        safeEvent ??= event;
+        return replacement;
+      },
+    );
+    await controller.prompt("读取目录");
+    expect(order).toEqual(["safe-point", "provider-2", "safe-point"]);
+    expect(safeEvent?.toolResults[0]).toMatchObject({
+      toolName: "exec_command",
+      isError: false,
+    });
+    expect(secondProviderContext).toContain("Runtime 压缩交接，低信任派生事实");
+    expect(secondProviderContext).toContain("checkpoint-safe-1");
+    expect(controller.getDiagnostics()).toMatchObject({
+      compactionEnabled: false,
+      hasCompactionEntry: false,
+    });
+  });
+
+  it("推理内容实时发布并在 turn 安全点完整保留，不阻断工具后的下一次 Provider 请求", async () => {
+    let safeEvent: Extract<RuntimeAgentEvent, { type: "turn.completed" }> | undefined;
+    const { controller, events, faux } = await harness(
+      [
+        fauxAssistantMessage(
+          [
+            {
+              ...fauxThinking("先确认 python-docx 是否可用"),
+              thinkingSignature: "reasoning_content",
+            },
+            fauxToolCall("exec_command", { cmd: 'python -c "import docx"' }),
+          ],
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("依赖可用，继续生成文档"),
+      ],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async (event) => {
+        safeEvent ??= event;
+        return undefined;
+      },
+    );
+
+    await controller.prompt("生成文档");
+
+    expect(faux.state.callCount).toBe(2);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        { type: "thinking.started" },
+        expect.objectContaining({ type: "thinking.delta" }),
+        { type: "thinking.completed" },
+      ]),
+    );
+    expect(
+      events
+        .filter(
+          (event): event is Extract<RuntimeAgentEvent, { type: "thinking.delta" }> =>
+            event.type === "thinking.delta",
+        )
+        .map((event) => event.delta)
+        .join(""),
+    ).toBe("先确认 python-docx 是否可用");
+    expect(events.filter((event) => event.type === "thinking.delta")).toHaveLength(1);
+    expect(safeEvent?.assistant.content).toEqual(
+      expect.arrayContaining([
+        {
+          type: "thinking",
+          thinking: "先确认 python-docx 是否可用",
+          thinkingSignature: "reasoning_content",
+        },
+        expect.objectContaining({ type: "toolCall", name: "exec_command" }),
+      ]),
+    );
+    expect(safeEvent?.toolResults[0]).toMatchObject({
+      toolName: "exec_command",
+      isError: false,
+    });
   });
 
   it("跨平台只发布 assistant 成功终态，工具只进入 Sandbox", async () => {
@@ -957,6 +1174,8 @@ async function harness(
   tokenizer?: TokenizerPort,
   withProviderInvocation?: Parameters<typeof createSafePiSession>[0]["withProviderInvocation"],
   deliverFileToolRouter?: Parameters<typeof createSafePiSession>[0]["deliverFileToolRouter"],
+  threadActiveHistory?: Parameters<typeof createSafePiSession>[0]["threadActiveHistory"],
+  prepareNextTurnHistory?: Parameters<typeof createSafePiSession>[0]["prepareNextTurnHistory"],
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
@@ -1001,6 +1220,8 @@ async function harness(
     ...(untrustedPromptContent === undefined ? {} : { untrustedPromptContent }),
     ...(withProviderInvocation === undefined ? {} : { withProviderInvocation }),
     ...(deliverFileToolRouter === undefined ? {} : { deliverFileToolRouter }),
+    ...(threadActiveHistory === undefined ? {} : { threadActiveHistory }),
+    ...(prepareNextTurnHistory === undefined ? {} : { prepareNextTurnHistory }),
   });
   disposers.push(() => controller.dispose());
   const events: RuntimeAgentEvent[] = [];

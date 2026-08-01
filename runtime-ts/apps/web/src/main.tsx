@@ -77,8 +77,13 @@ export function deriveThreadTitle(query: string): string {
     .replace(/\s+/gu, " ")
     .trim();
   if (cleaned.length === 0) return "新任务";
-  const limit = 26;
-  return cleaned.length > limit ? `${cleaned.slice(0, limit)}…` : cleaned;
+  return compactThreadTitle(cleaned, 18);
+}
+
+export function compactThreadTitle(title: string, limit = 16): string {
+  const normalized = title.replace(/\s+/gu, " ").trim();
+  const characters = Array.from(normalized);
+  return characters.length > limit ? `${characters.slice(0, limit).join("")}…` : normalized;
 }
 type WorkspaceApi = Pick<
   RuntimeApi,
@@ -693,7 +698,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
                 onClick={() => selectThread(thread.id)}
                 aria-label={`${thread.title}${thread.status === "archived" ? "，已归档" : ""}`}
               >
-                <span>{thread.title}</span>
+                <span title={thread.title}>{compactThreadTitle(thread.title)}</span>
                 {thread.status === "archived" && <small>已归档</small>}
               </button>
             ))

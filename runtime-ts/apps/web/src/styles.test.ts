@@ -29,4 +29,13 @@ describe("工作台滚动区域样式", () => {
     expect(styles).toMatch(/\.composer\s*\{[^}]*762px[^}]*border-radius:\s*20px/su);
     expect(styles).toContain(".run-progress-dock + .composer");
   });
+
+  it("运行步骤在进度条内横向滑动，且不再保留双重折叠区", () => {
+    expect(styles).toMatch(
+      /\.run-progress-track\s*\{[^}]*display:\s*flex;[^}]*overflow-x:\s*auto;/su,
+    );
+    expect(styles).toContain(".run-progress-track::-webkit-scrollbar");
+    expect(styles).not.toContain(".run-progress-disclosures");
+    expect(styles).not.toContain(".run-thinking");
+  });
 });

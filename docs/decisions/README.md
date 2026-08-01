@@ -81,6 +81,7 @@
 | [ADR-0073](0073-numeric-cursor-ordering-after-text-projection.md) | 数值游标文本投影后的数据库排序边界 | 已接受 | 2026-08-01 |
 | [ADR-0074](0074-development-scheduler-and-sandbox-lifecycle-timeout.md) | 开发 Scheduler 常驻与 Sandbox lifecycle 专用超时 | 已接受 | 2026-08-01 |
 | [ADR-0075](0075-capability-aware-conversation-workspace.md) | 能力感知的对话工作台信息层级 | 已接受 | 2026-08-01 |
+| [ADR-0076](0076-compact-work-status-track.md) | 紧凑工作状态轨道与对话视觉去重 | 已接受 | 2026-08-01 |
 
 ## 何时必须记录
 

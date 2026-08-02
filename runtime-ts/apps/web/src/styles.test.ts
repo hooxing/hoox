@@ -30,12 +30,18 @@ describe("工作台滚动区域样式", () => {
     expect(styles).toContain(".run-progress-dock + .composer");
   });
 
-  it("运行步骤在进度条内横向滑动，且不再保留双重折叠区", () => {
+  it("运行步骤保留横向进度轨道，思考文本使用单一可滚动披露区", () => {
     expect(styles).toMatch(
       /\.run-progress-track\s*\{[^}]*display:\s*flex;[^}]*overflow-x:\s*auto;/su,
     );
     expect(styles).toContain(".run-progress-track::-webkit-scrollbar");
     expect(styles).not.toContain(".run-progress-disclosures");
-    expect(styles).not.toContain(".run-thinking");
+    expect(styles).not.toContain(".run-progress-history");
+    expect(styles).toMatch(/\.run-thinking\s*\{[^}]*border-top:/su);
+    expect(styles).toMatch(
+      /\.run-thinking-content\s*\{[^}]*max-height:\s*min\([^;]+;[^}]*overflow:\s*auto;/su,
+    );
+    expect(styles).toContain(".run-thinking[open] .when-expanded");
+    expect(styles).toContain(".run-thinking-content:focus-visible");
   });
 });

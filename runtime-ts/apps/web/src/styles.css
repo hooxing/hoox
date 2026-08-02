@@ -470,6 +470,97 @@ h2 {
   font-size: 10px;
   font-weight: 760;
 }
+.run-thinking {
+  min-width: 0;
+  padding-top: 8px;
+  border-top: 1px solid #dededb;
+}
+.run-thinking summary {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 5px;
+  border-radius: 7px;
+  color: #5d625e;
+  cursor: pointer;
+  list-style: none;
+}
+.run-thinking summary::-webkit-details-marker {
+  display: none;
+}
+.run-thinking summary:hover {
+  background: rgb(255 255 255 / 62%);
+}
+.run-thinking summary:focus-visible,
+.run-thinking-content:focus-visible {
+  outline: 3px solid #82bca8;
+  outline-offset: 2px;
+}
+.run-thinking-chevron {
+  min-width: 14px;
+  transition: transform 0.16s ease;
+}
+.run-thinking[open] .run-thinking-chevron {
+  transform: rotate(90deg);
+}
+.run-thinking-spinner {
+  min-width: 14px;
+  color: #3d8062;
+}
+.run-thinking-indicator {
+  display: grid;
+  width: 14px;
+  min-width: 14px;
+  height: 14px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #5d806f;
+  font-size: 9px;
+  font-weight: 780;
+}
+.run-thinking.is-stopped .run-thinking-indicator {
+  background: #94756e;
+}
+.run-thinking-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.run-thinking-copy strong {
+  color: #454a46;
+  font-size: 12px;
+}
+.run-thinking-copy small {
+  flex: 0 0 auto;
+  color: #7b817d;
+  font-size: 11px;
+}
+.run-thinking .when-expanded {
+  display: none;
+}
+.run-thinking[open] .when-collapsed {
+  display: none;
+}
+.run-thinking[open] .when-expanded {
+  display: inline;
+}
+.run-thinking-content {
+  max-height: min(32vh, 300px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 11px 13px;
+  margin: 6px 5px 2px 25px;
+  border: 1px solid #dfe4e0;
+  border-radius: 9px;
+  color: #526159;
+  background: rgb(253 253 252 / 94%);
+  scrollbar-width: thin;
+}
 @keyframes progress-sheen {
   50% {
     background-position: 100% 0;
@@ -696,6 +787,12 @@ h2 {
   accent-color: #247c5c;
   vertical-align: -2px;
   cursor: default;
+}
+.run-thinking-content .assistant-markdown {
+  margin-top: 0;
+  color: inherit;
+  font-size: 12px;
+  line-height: 1.65;
 }
 .markdown-image-alt,
 .markdown-invalid-link {
@@ -1063,6 +1160,10 @@ h2 {
   }
   .composer {
     margin-bottom: 12px;
+  }
+  .run-thinking-content {
+    max-height: min(30vh, 240px);
+    margin-left: 5px;
   }
   .artifact-actions {
     align-items: stretch;

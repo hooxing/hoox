@@ -22,6 +22,8 @@ Thread 事实，否则既破坏上下文缓存，也扩大敏感内容持久化�
   `['text', 'image']` 或 `['text']`；运行中不探测、不自动降级。
 - 统一输入 receipt 持久化当前轮已授权的 `{resourceId, versionId}` 列表；最新 user 文本仍只追加
   JSON 转义的文件名和 `/resources/...` 路径，不修改 system、developer/harness prompt 或工具 schema。
+- receipt 的 JSONB 内部使用 `resourceId → versionId → ordinal` 规范映射：对象键排除重复身份，ordinal
+  保留用户上传顺序；约束只调用 PostgreSQL 内建 immutable JSONPath，不突破首版空 routine manifest。
 - 视觉模型在首轮、排队 follow-up 和 durable steer 中都解析当前 user turn 的附件。PNG、JPEG、GIF、
   WebP 由 Worker 从稳定 Resource Blob 完整校验读取，编码为 Base64 `ImageContent`，与文本一起直接交给 Pi。
   非图片附件只保留路径，不生成模型图片 part。

@@ -48,6 +48,9 @@ Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 必须等于
 `MODEL_ID`；不要把预算值猜测为 Provider 元数据。生产模式保持更严格的预算元数据匹配策略。生产 Worker
 入口为 `runtime-ts/apps/agent-worker` 的 `pnpm start:production`，仅支持 Linux，并且只使用模块内固定的真实
 PostgreSQL/S3/CubeSandbox/Pi/Workspace/Artifact 依赖图；它绝不会复用 development 身份或调用方注入的 Fake。
+`/resources` 要求 CubeSandbox 0.6+ 的 `runtime-resourcefs` Volume driver：Worker 只通过 Cube Volume API
+确保 Tenant 卷并在创建时绑定，rclone/FUSE 运行于 Cubelet 宿主机而不是 Sandbox 模板。节点安装和真实
+上线 Gate 见 `deploy/cube-resource-volume/README.md`。
 
 ### 模型网络报文诊断（development）
 

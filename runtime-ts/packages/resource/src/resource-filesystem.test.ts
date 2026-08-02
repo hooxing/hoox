@@ -78,6 +78,22 @@ describe("Resource 只读文件系统", () => {
     expect(codec.verify(token)).toBeUndefined();
   });
 
+  it("为 Cube Volume 宿主机挂载签发专用 capability", () => {
+    const codec = createResourceFilesystemCapabilityCodec({
+      secret: "resource-filesystem-test-signing-key-32-bytes",
+      now: () => 1_000,
+    });
+    const token = codec.issueHostVolume({ tenantId: context.tenantId });
+
+    expect(codec.verify(token)).toEqual({
+      kind: "host_volume",
+      tenantId: context.tenantId,
+    });
+    expect(Buffer.from(token.split(".")[0] ?? "", "base64url").toString("utf8")).toBe(
+      `{"v":2,"tenantId":"${context.tenantId}"}`,
+    );
+  });
+
   it("附件解析只接受目录授权成功的不可变版本", async () => {
     const aggregate = uploadedAggregate("授权说明.md", 7);
     const catalog: ResourceCatalog = {

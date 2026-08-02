@@ -30,6 +30,30 @@ describe("Sandbox 稳定适配契约", () => {
     );
   });
 
+  it("创建 Sandbox 时只允许把 Cube Volume 挂到固定 /resources", async () => {
+    const create = vi.fn(fakeSdk().create);
+    const gateway = new CubeSandboxGateway({ apiUrl: "http://cube" }, fakeSdk({ create }));
+
+    await gateway.create({
+      templateId: "resource-volume-template",
+      volumeMounts: [{ name: "tenant-resource-volume", path: "/resources" }],
+    });
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extra: {
+          volumeMounts: [{ name: "tenant-resource-volume", path: "/resources" }],
+        },
+      }),
+    );
+    await expect(
+      gateway.create({
+        templateId: "resource-volume-template",
+        volumeMounts: [{ name: "tenant-resource-volume", path: "/workspace" }],
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+  });
+
   it("Gateway 显式 API key/null 与代理路由不受 vendor ambient 环境覆盖", async () => {
     const keys = ["CUBE_API_KEY", "E2B_API_KEY", "CUBE_PROXY_NODE_IP"] as const;
     const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));

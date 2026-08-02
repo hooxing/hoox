@@ -19,7 +19,7 @@ interface ResourceFileRow {
   readonly physical_object_key: string;
 }
 
-/** WebDAV 目录只读取 searchable 的不可变版本，并且永不向 Sandbox 暴露对象键。 */
+/** 宿主 ResourceFS 只读取 searchable 的不可变版本，并且永不向 Cube Volume/Sandbox 暴露对象键。 */
 export class PgResourceFilesystemCatalog implements ResourceFilesystemCatalog {
   constructor(private readonly pool: Pool) {}
 

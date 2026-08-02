@@ -10,7 +10,8 @@ ResourceFS bearer token。
 在 CubeMaster 和每个 Cubelet 节点安装 `resourcefs-volume-plugin.sh` 到 root 可执行路径。在每个
 Cubelet 安装 rclone、FUSE3、OpenSSL 和 coreutils；CubeMaster 只执行 create/destroy，不需要 rclone。
 将 `resourcefs-volume.conf.example` 复制为 `/etc/cubesandbox/resourcefs-volume.conf`，替换 HTTPS
-端点和签名密钥，并设置 `root:root 0600`。签名密钥必须与 API 的
+端点和签名密钥，确认 `RESOURCEFS_VOLUME_BASE_DIR` 与 Cubelet 的 `volume_plugin_base_dir` 相同，并设置
+`root:root 0600`。签名密钥必须与 API 的
 `RESOURCE_FILESYSTEM_SIGNING_KEY` 完全一致，配置文件不得进入镜像或 Git。
 
 CubeMaster `conf.yaml`：
@@ -48,3 +49,7 @@ Volume。Volume 只是视图选择器，destroy hook 绝不删除 Resource 或 B
 4. pause/resume 后路径仍可读，最后一个 Sandbox kill 后 detach 卸载宿主机 FUSE；
 5. Sandbox 内不存在 rclone 进程、bearer token、MinIO 凭据或宿主机物理对象键；
 6. 轮换签名密钥时先清空/重建宿主机挂载，再撤销旧密钥，避免旧 mount 在缓存未命中时失败。
+
+排障时注意：Cubelet 的 binary Detach 不传 `--volume-base-dir`。插件只接受 Attach 返回的精确
+`metadata.mount_dir`，并以 root 配置中的 `RESOURCEFS_VOLUME_BASE_DIR` 重建路径；不要从 metadata 接受任意
+宿主机路径。

@@ -82,6 +82,23 @@ describe("Resource WebDAV HTTP 边界", () => {
     expect(response.body).toContain("resource-http-test");
     await fixture.app.close();
   });
+
+  it("兼容 rclone 未声明 Content-Type 的 PROPFIND XML body", async () => {
+    const fixture = await appFixture();
+    const response = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: "/v1/resource-filesystem/",
+      headers: {
+        authorization: `Bearer ${fixture.hostToken}`,
+        depth: "1",
+      },
+      payload: '<?xml version="1.0"?><propfind xmlns="DAV:"/>',
+    });
+
+    expect(response.statusCode).toBe(207);
+    expect(response.body).toContain("resource-http-test");
+    await fixture.app.close();
+  });
 });
 
 async function appFixture() {

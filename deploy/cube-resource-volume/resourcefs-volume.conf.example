@@ -2,3 +2,4 @@
 RESOURCE_FILESYSTEM_ENDPOINT='https://app.example.invalid/v1/resource-filesystem'
 RESOURCE_FILESYSTEM_SIGNING_KEY='replace-with-the-same-key-used-by-runtime-api'
 RESOURCEFS_RCLONE_BIN='/usr/bin/rclone'
+RESOURCEFS_VOLUME_BASE_DIR='/data/cube-shared/volume'

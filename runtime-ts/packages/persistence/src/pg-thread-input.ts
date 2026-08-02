@@ -22,7 +22,8 @@ function serializeAttachments(
 ): string {
   if (attachments.length > 20) throw new TypeError("Thread 输入附件数量无效");
   const seen = new Set<string>();
-  const value = attachments.map((attachment) => {
+  const value: Record<string, Record<string, number>> = Object.create(null);
+  attachments.forEach((attachment, ordinal) => {
     if (
       !attachmentIdPattern.test(attachment.resourceId) ||
       !attachmentIdPattern.test(attachment.versionId)
@@ -32,7 +33,9 @@ function serializeAttachments(
     const identity = `${attachment.resourceId}\0${attachment.versionId}`;
     if (seen.has(identity)) throw new TypeError("Thread 输入附件不能重复");
     seen.add(identity);
-    return { resourceId: attachment.resourceId, versionId: attachment.versionId };
+    const versions = value[attachment.resourceId] ?? Object.create(null);
+    versions[attachment.versionId] = ordinal;
+    value[attachment.resourceId] = versions;
   });
   return JSON.stringify(value);
 }

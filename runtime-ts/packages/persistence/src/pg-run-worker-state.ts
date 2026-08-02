@@ -223,31 +223,44 @@ function serializedJson(value: unknown): string | undefined {
 }
 
 function parseUserInputAttachments(value: unknown): readonly UserInputAttachmentReference[] {
-  if (!Array.isArray(value) || value.length > 20) throw new TypeError("持久化输入附件无效");
-  const seen = new Set<string>();
-  return Object.freeze(
-    value.map((entry) => {
-      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-        throw new TypeError("持久化输入附件无效");
-      }
-      const record = entry as Record<string, unknown>;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("持久化输入附件无效");
+  }
+  const ordered: Array<Readonly<{ ordinal: number; attachment: UserInputAttachmentReference }>> =
+    [];
+  const ordinals = new Set<number>();
+  for (const [rawResourceId, rawVersions] of Object.entries(value)) {
+    if (typeof rawVersions !== "object" || rawVersions === null || Array.isArray(rawVersions)) {
+      throw new TypeError("持久化输入附件无效");
+    }
+    const versions = Object.entries(rawVersions);
+    if (versions.length === 0) throw new TypeError("持久化输入附件无效");
+    for (const [rawVersionId, ordinal] of versions) {
       if (
-        Object.keys(record).length !== 2 ||
-        typeof record.resourceId !== "string" ||
-        typeof record.versionId !== "string"
+        typeof ordinal !== "number" ||
+        !Number.isSafeInteger(ordinal) ||
+        ordinal < 0 ||
+        ordinal >= 20 ||
+        ordinals.has(ordinal)
       ) {
-        throw new TypeError("持久化输入附件无效");
+        throw new TypeError("持久化输入附件顺序无效");
       }
-      const parsed = Object.freeze({
-        resourceId: resourceId(record.resourceId),
-        versionId: resourceVersionId(record.versionId),
+      ordinals.add(ordinal);
+      ordered.push({
+        ordinal,
+        attachment: Object.freeze({
+          resourceId: resourceId(rawResourceId),
+          versionId: resourceVersionId(rawVersionId),
+        }),
       });
-      const identity = `${parsed.resourceId}\0${parsed.versionId}`;
-      if (seen.has(identity)) throw new TypeError("持久化输入附件重复");
-      seen.add(identity);
-      return parsed;
-    }),
-  );
+    }
+  }
+  if (ordered.length > 20) throw new TypeError("持久化输入附件无效");
+  ordered.sort((left, right) => left.ordinal - right.ordinal);
+  if (ordered.some((entry, index) => entry.ordinal !== index)) {
+    throw new TypeError("持久化输入附件顺序无效");
+  }
+  return Object.freeze(ordered.map((entry) => entry.attachment));
 }
 
 async function readRunInputAttachments(

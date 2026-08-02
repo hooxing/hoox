@@ -4911,6 +4911,15 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       run_status: "running",
       attempt_status: "recovery_required",
     });
+    await expect(
+      repositories.runs.get(
+        { tenantId: unsafe.scope.tenantId, userId: unsafe.user.id },
+        unsafe.scope.runId,
+      ),
+    ).resolves.toMatchObject({
+      entity: { status: "running" },
+      executionStatus: "recovery_required",
+    });
   });
 
   it("RLS 对跨租户读写均 fail closed", async () => {

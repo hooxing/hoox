@@ -252,15 +252,23 @@ export interface ThreadRepository {
   ): Promise<VersionedUpdateResult>;
 }
 
+/**
+ * Run 的领域状态与执行器恢复状态分层。该字段只在最新 Attempt 已持久化
+ * recovery_required 时出现，不能据此改写 Domain Run 或伪造业务 failed。
+ */
+export interface RunReadSnapshot extends Versioned<Run> {
+  readonly executionStatus?: "recovery_required";
+}
+
 export interface RunRepository {
   create(scope: TenantScope, run: Run): Promise<VersionedCreateResult>;
-  get(scope: TenantScope, id: Run["id"]): Promise<Versioned<Run> | undefined>;
+  get(scope: TenantScope, id: Run["id"]): Promise<RunReadSnapshot | undefined>;
   /** 返回一次读取快照中的最新窗口；排序固定为 updatedAt、createdAt、id 倒序。 */
   listByThread(
     scope: TenantScope,
     threadId: ThreadId,
     input: { readonly limit: number },
-  ): Promise<readonly Versioned<Run>[]>;
+  ): Promise<readonly RunReadSnapshot[]>;
   update(scope: TenantScope, run: Run, expectedVersion: bigint): Promise<VersionedUpdateResult>;
 }
 

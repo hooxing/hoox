@@ -144,6 +144,7 @@ beforeEach(() => {
 afterEach(() => {
   for (const root of mountedRoots.splice(0)) act(() => root.unmount());
   document.body.replaceChildren();
+  vi.useRealTimers();
 });
 
 describe("Agent 工作台恢复接入", () => {
@@ -196,6 +197,33 @@ describe("Agent 工作台恢复接入", () => {
     expect(shouldContinueRunPolling(false, "waiting")).toBe(false);
     expect(shouldContinueRunPolling(true, "waiting")).toBe(true);
     expect(shouldContinueRunPolling(false, "running")).toBe(true);
+    expect(shouldContinueRunPolling(true, "running", "resuming", "recovery_required")).toBe(false);
+  });
+
+  it("recovery_required 首次读取投影后停止所有短轮询来源", async () => {
+    vi.useFakeTimers();
+    const selectedThread = thread("thread_recovery_required");
+    const interruptedRun: Run = {
+      ...run("run_recovery_required", selectedThread.id),
+      status: "running",
+      executionStatus: "recovery_required",
+    };
+    const getRun = vi.fn(async () => interruptedRun);
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [selectedThread]),
+      listLatestRuns: vi.fn(async () => [interruptedRun]),
+      getRun,
+      // 即使诊断首页声称还有后续页，恢复终止投影也不能重新武装轮询定时器。
+      listModelWireTraces: vi.fn(async () => ({ items: [], hasMore: true })),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+
+    expect(getRun).toHaveBeenCalledTimes(1);
+    expect(container.textContent).toContain("运行已中断，当前没有 Agent 在继续执行。");
+    await act(async () => vi.advanceTimersByTimeAsync(12_000));
+    await settleEffects();
+    expect(getRun).toHaveBeenCalledTimes(1);
   });
 
   it("Run 终态后继续追踪 Sandbox 瞬时态，稳定或 UNKNOWN 后停止短轮询", () => {

@@ -54,15 +54,29 @@ const statusLabel: Record<RunStatus, string> = {
   cancelled: "已取消",
 };
 
-export function RunStatusBadge({ status }: { readonly status: RunStatus | undefined }) {
+export function RunStatusBadge({
+  status,
+  executionStatus,
+}: {
+  readonly status: RunStatus | undefined;
+  readonly executionStatus?: Run["executionStatus"];
+}) {
   if (status === undefined) return <span className="run-status is-ready">就绪</span>;
+  if (executionStatus === "recovery_required") {
+    return <span className="run-status is-recovery-required">执行已中断</span>;
+  }
   return <span className={`run-status is-${status}`}>{statusLabel[status]}</span>;
 }
 
 function useElapsedSeconds(run: Run | undefined): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (run === undefined || !timedRunStatuses.has(run.status)) return;
+    if (
+      run === undefined ||
+      run.executionStatus === "recovery_required" ||
+      !timedRunStatuses.has(run.status)
+    )
+      return;
     setNow(Date.now());
     const interval = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(interval);
@@ -87,12 +101,13 @@ export function RunTimeline({
 }) {
   const progress = buildRunProgress(events);
   const progressTrackRef = useRef<HTMLOListElement>(null);
-  const isRunning = timedRunStatuses.has(run.status);
+  const recoveryRequired = run.executionStatus === "recovery_required";
+  const isRunning = !recoveryRequired && timedRunStatuses.has(run.status);
   const isQueued = run.status === "queued";
   const isWaiting = run.status === "waiting";
   const showActivity = isRunning || isQueued;
   const elapsed = useElapsedSeconds(run);
-  const isFailure = run.status === "failed" || run.status === "cancelled";
+  const isFailure = recoveryRequired || run.status === "failed" || run.status === "cancelled";
   const completedStepCount = progress.steps.filter((step) => step.status === "completed").length;
   const totalStepCount = progress.steps.length;
   const trackItems = [
@@ -101,14 +116,23 @@ export function RunTimeline({
       : [
           {
             id: "thinking",
-            label: progress.thinking.status === "running" ? "分析任务" : "已完成分析",
-            status: progress.thinking.status,
+            label:
+              recoveryRequired && progress.thinking.status === "running"
+                ? "分析已中断"
+                : progress.thinking.status === "running"
+                  ? "分析任务"
+                  : "已完成分析",
+            status:
+              recoveryRequired && progress.thinking.status === "running"
+                ? ("failed" as const)
+                : progress.thinking.status,
             count: 1,
           },
         ]),
     ...progress.steps.map((step) => ({
       ...step,
       label: step.label.replace(/^正在/u, "").replace(/…$/u, ""),
+      ...(recoveryRequired && step.status === "running" ? { status: "failed" as const } : {}),
     })),
   ];
   const trackVersion = trackItems
@@ -119,19 +143,21 @@ export function RunTimeline({
     const track = progressTrackRef.current;
     if (track !== null) track.scrollLeft = track.scrollWidth;
   }, [trackVersion]);
-  const summary = isFailure
-    ? run.status === "cancelled"
-      ? "运行已停止。你可以调整任务后再次发送。"
-      : "运行未完成。请稍后重试，或调整任务后再次发送。"
-    : isWaiting
-      ? "需要你的输入"
-      : isRunning
-        ? progress.currentAction
-        : isQueued
-          ? "正在排队，准备开始任务。"
-          : run.status === "succeeded"
-            ? "已完成本次任务。"
-            : "等待你的下一步输入。";
+  const summary = recoveryRequired
+    ? "运行已中断，当前没有 Agent 在继续执行。"
+    : isFailure
+      ? run.status === "cancelled"
+        ? "运行已停止。你可以调整任务后再次发送。"
+        : "运行未完成。请稍后重试，或调整任务后再次发送。"
+      : isWaiting
+        ? "需要你的输入"
+        : isRunning
+          ? progress.currentAction
+          : isQueued
+            ? "正在排队，准备开始任务。"
+            : run.status === "succeeded"
+              ? "已完成本次任务。"
+              : "等待你的下一步输入。";
   return (
     <section
       className={`run-progress ${showActivity ? "is-active" : ""} ${isFailure ? "is-failed" : ""}`}
@@ -666,7 +692,7 @@ export function ThreadHeader({
       <div className="conversation-title">
         <h1 title={thread.title}>{thread.title}</h1>
         <div className="run-meta">
-          <RunStatusBadge status={run?.status} />
+          <RunStatusBadge status={run?.status} executionStatus={run?.executionStatus} />
           {workspaceStateLabel !== undefined && <span>{workspaceStateLabel}</span>}
           {(continuity?.queueDepth ?? 0) > 0 && <span>后续任务 {continuity?.queueDepth}</span>}
         </div>
@@ -680,7 +706,7 @@ export function ThreadHeader({
             disabled={actionLoading}
           >
             <Square size={14} />
-            <span>停止运行</span>
+            <span>{run.executionStatus === "recovery_required" ? "结束本次运行" : "停止运行"}</span>
           </button>
         )}
         <button

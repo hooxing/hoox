@@ -316,7 +316,7 @@ describe("Pi 安全适配", () => {
       logicalCwd: "/workspace",
       activeToolNames: expect.arrayContaining([...SANDBOX_TOOL_NAMES]),
       promptSchemaVersion: 1,
-      promptVersion: "runtime-system-prompt.v1",
+      promptVersion: "runtime-system-prompt.v2",
       capabilityManifestDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       promptDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       compactionEnabled: false,
@@ -756,6 +756,9 @@ describe("Pi 安全适配", () => {
       await controller.prompt("开始");
 
       expect(systemPrompt.match(/<PLATFORM_HARNESS>/gu)).toHaveLength(1);
+      expect(systemPrompt).toContain("若仅凭当前对话与已提供内容即可正确回答，应直接回答");
+      expect(systemPrompt).toContain("仅在完成用户请求确有必要时调用工具");
+      expect(systemPrompt).toContain("不得擅自执行");
       expect(systemPrompt).not.toContain("注册 request_user_input");
       expect(systemPrompt).not.toContain("tenant-data");
       expect(systemPrompt).not.toContain("skill-data");

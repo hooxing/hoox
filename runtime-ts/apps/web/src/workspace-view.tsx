@@ -17,6 +17,7 @@ import {
   type ReactNode,
   type RefObject,
   useEffect,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -27,8 +28,8 @@ import {
   type RunEvent,
   type RunStatus,
   type Thread,
-  type ThreadContinuityStatus,
   type ThreadContextMessage,
+  type ThreadContinuityStatus,
 } from "./api.js";
 import { buildRunProgress } from "./event-view.js";
 import { AssistantMarkdown } from "./markdown-view.js";
@@ -78,6 +79,90 @@ function elapsedLabel(seconds: number): string {
   return minutes > 0 ? `${minutes} 分 ${rest} 秒` : `${rest} 秒`;
 }
 
+function RunThinkingPanel({
+  text,
+  status,
+  runStatus,
+}: {
+  readonly text: string;
+  readonly status: "running" | "completed";
+  readonly runStatus: RunStatus;
+}) {
+  const isLive = status === "running" && runStatus === "running";
+  const wasInterrupted = status === "running" && !isLive;
+  const visibleStatus = isLive ? "running" : wasInterrupted ? "stopped" : "completed";
+  const statusText = isLive ? "正在思考" : wasInterrupted ? "思考已结束" : "思考已完成";
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const contentRef = useRef<HTMLElement>(null);
+  const followLatestRef = useRef(true);
+  const summaryId = useId();
+  const contentId = useId();
+
+  useEffect(() => {
+    // 每段实时思考自动展开，收到终态或 Run 先行结束时自动折叠；终态下的手工选择随后保持不变。
+    const details = detailsRef.current;
+    if (details !== null) details.open = visibleStatus === "running";
+    if (visibleStatus === "running") followLatestRef.current = true;
+  }, [visibleStatus]);
+
+  useEffect(() => {
+    // text 只作为增量触发器；用户已向上阅读时不抢夺滚动位置。
+    void text;
+    const content = contentRef.current;
+    if (
+      content !== null &&
+      visibleStatus === "running" &&
+      detailsRef.current?.open === true &&
+      followLatestRef.current
+    ) {
+      content.scrollTop = content.scrollHeight;
+    }
+  }, [text, visibleStatus]);
+
+  return (
+    <details
+      ref={detailsRef}
+      className={`run-thinking is-${visibleStatus}`}
+      open={visibleStatus === "running"}
+    >
+      <summary id={summaryId} aria-controls={contentId}>
+        <ChevronRight className="run-thinking-chevron" size={14} aria-hidden="true" />
+        {isLive ? (
+          <LoaderCircle className="run-thinking-spinner spin" size={14} aria-hidden="true" />
+        ) : (
+          <span className="run-thinking-indicator" aria-hidden="true">
+            {wasInterrupted ? "!" : "✓"}
+          </span>
+        )}
+        <span className="run-thinking-copy">
+          <strong aria-live="polite">{statusText}</strong>
+          <small>
+            <span className="when-collapsed">{isLive ? "展开实时内容" : "展开查看"}</span>
+            <span className="when-expanded">{isLive ? "实时更新中" : "收起"}</span>
+          </small>
+        </span>
+      </summary>
+      <section
+        ref={contentRef}
+        id={contentId}
+        className="run-thinking-content"
+        aria-labelledby={summaryId}
+        aria-busy={isLive}
+        aria-live="off"
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: 限高滚动区必须可由键盘聚焦后滚动。
+        tabIndex={0}
+        onScroll={(event) => {
+          const content = event.currentTarget;
+          followLatestRef.current =
+            content.scrollHeight - content.scrollTop - content.clientHeight <= 24;
+        }}
+      >
+        <AssistantMarkdown text={text} />
+      </section>
+    </details>
+  );
+}
+
 export function RunTimeline({
   run,
   events,
@@ -95,14 +180,25 @@ export function RunTimeline({
   const isFailure = run.status === "failed" || run.status === "cancelled";
   const completedStepCount = progress.steps.filter((step) => step.status === "completed").length;
   const totalStepCount = progress.steps.length;
+  const thinkingWasInterrupted = progress.thinking?.status === "running" && !isRunning;
   const trackItems = [
     ...(progress.thinking === undefined
       ? []
       : [
           {
             id: "thinking",
-            label: progress.thinking.status === "running" ? "分析任务" : "已完成分析",
-            status: progress.thinking.status,
+            label:
+              progress.thinking.status === "running" && !thinkingWasInterrupted
+                ? "分析任务"
+                : thinkingWasInterrupted
+                  ? "分析已结束"
+                  : "已完成分析",
+            status:
+              thinkingWasInterrupted && isFailure
+                ? ("failed" as const)
+                : thinkingWasInterrupted
+                  ? ("completed" as const)
+                  : progress.thinking.status,
             count: 1,
           },
         ]),
@@ -177,6 +273,13 @@ export function RunTimeline({
             </li>
           ))}
         </ol>
+      )}
+      {progress.thinking !== undefined && (
+        <RunThinkingPanel
+          text={progress.thinking.text}
+          status={progress.thinking.status}
+          runStatus={run.status}
+        />
       )}
     </section>
   );

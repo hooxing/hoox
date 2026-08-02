@@ -79,6 +79,11 @@ MODEL_WIRE_TRACE_MAX_BYTES=1048576
 相同字节可以幂等重放，不同字节不会覆盖已有文件。镜像写失败不会改变模型调用或 PG/MinIO 诊断持久化结果。
 本地文件不提供 ACL、UI 读取或 retention 保证，PG/MinIO 始终是这些能力的唯一权威存储；production 不创建本地镜像。
 
+同一显式开关还会在上述 Run/Attempt 目录写入已经形成 durable mutation 的 Run 事件，文件名形如
+`runtime-event-00000003-agent_event.json`。每个 sequence 单独使用不可变文件，便于直接查看思考增量、工具生命周期、
+稳定错误类别和 Attempt 状态，同时避免 JSONL 在崩溃或幂等重放时产生半行或重复行。该镜像仍可能含用户或模型正文，
+安全、保留和删除约束与原始模型报文完全相同；它不会保存原始工具异常、凭据或被既有安全边界禁止的 stdout/stderr。
+
 启动开发 API 和 Web 后，在 Web 中选择 Thread 与 Run，进入“模型网络报文”区域即可按 Attempt、
 `modelTurn` 和 `transportAttempt` 查看记录：`modelTurn` 表示工具循环中的模型轮次，`transportAttempt` 表示
 同一轮的 HTTP 重试。request 展示实际交给 Fetch 的最终 application request body；response 展示 HTTP

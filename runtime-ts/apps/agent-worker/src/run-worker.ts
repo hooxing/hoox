@@ -52,6 +52,7 @@ import type {
   WorkspaceRevisionVerifierPort,
 } from "./ports.js";
 import { assertProtocolSize } from "./ports.js";
+import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
 import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 
 export interface RunWorkerOptions {
@@ -101,6 +102,8 @@ interface WorkerDependencies {
   readonly threadContextBodies?: ThreadContextBodyPersistencePort;
   readonly threadSandboxes?: ThreadSandboxSessionLifecyclePort;
   readonly continuityMetrics?: ThreadContinuityMetricsPort;
+  /** development 敏感诊断镜像；失败不得改变 durable Run 语义。 */
+  readonly runEventDiagnostics?: RunEventDiagnosticsPort;
 }
 
 interface ExecutionContext {
@@ -1142,7 +1145,7 @@ export class RunWorker {
   ): Promise<RuntimeMutationResult> {
     for (const event of input.events) assertProtocolSize(event);
     for (const outbox of input.outbox) assertProtocolSize(outbox);
-    return await context.durableLane.run(async () => {
+    const result = await context.durableLane.run<RuntimeMutationResult>(async () => {
       const unsigned: Omit<RuntimeMutation, "commandDigest"> = {
         schemaVersion: 1,
         ...input,
@@ -1184,6 +1187,22 @@ export class RunWorker {
       }
       return result;
     });
+    if (isApplied(result) && input.events.length > 0) {
+      await Promise.allSettled(
+        input.events.map((event) =>
+          this.dependencies.runEventDiagnostics?.persist({
+            context: {
+              tenantId: context.scope.tenantId,
+              threadId: context.scope.threadId,
+              runId: context.scope.runId,
+              attemptId: context.attemptId,
+            },
+            event,
+          }),
+        ),
+      );
+    }
+    return result;
   }
 
   private async prepareTurnContextAppend(

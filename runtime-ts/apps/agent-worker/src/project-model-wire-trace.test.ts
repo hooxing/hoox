@@ -4,8 +4,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ModelWireTracePort, ModelWireTraceRecord } from "./model-wire-trace.js";
+import type { RuntimeEventV1 } from "./ports.js";
 import {
+  createDevelopmentProjectRunEventMirror,
   ProjectModelWireTraceMirror,
+  ProjectRunEventMirror,
   withDevelopmentProjectModelWireTraceMirror,
 } from "./project-model-wire-trace.js";
 
@@ -153,6 +156,44 @@ describe("项目模型报文本地镜像", () => {
       await expect(readdir(outside)).resolves.toEqual([]);
     },
   );
+
+  it("将 durable Run 事件按 sequence 写成可幂等重放的规范 JSON", async () => {
+    const root = await temporaryRoot();
+    const mirror = new ProjectRunEventMirror(root);
+    const context = record().context;
+    const event: RuntimeEventV1 = {
+      schemaVersion: 1,
+      kind: "agent_event",
+      sequence: 3,
+      payload: { type: "thinking.delta", delta: "先检查，再回答。" },
+    };
+
+    await mirror.persist({ context, event });
+    await mirror.persist({ context, event });
+
+    const directory = join(root, "run_dev_1", "attempt_dev_1");
+    expect(await readdir(directory)).toEqual(["runtime-event-00000003-agent_event.json"]);
+    expect(await readFile(join(directory, "runtime-event-00000003-agent_event.json"), "utf8")).toBe(
+      `{\n  "kind": "agent_event",\n  "payload": {\n    "delta": "先检查，再回答。",\n    "type": "thinking.delta"\n  },\n  "schemaVersion": 1,\n  "sequence": 3\n}\n`,
+    );
+
+    await expect(
+      mirror.persist({
+        context,
+        event: { ...event, payload: { type: "thinking.delta", delta: "不同正文" } },
+      }),
+    ).rejects.toThrow("LOCAL_MODEL_WIRE_TRACE_CONFLICT");
+  });
+
+  it("Run 事件文件镜像只在 development 且显式诊断开启时创建", () => {
+    const factory = vi.fn(() => ({ persist: async () => undefined }));
+    expect(createDevelopmentProjectRunEventMirror("development", true, factory)).toBeDefined();
+    expect(factory).toHaveBeenCalledOnce();
+
+    expect(createDevelopmentProjectRunEventMirror("development", false, factory)).toBeUndefined();
+    expect(createDevelopmentProjectRunEventMirror("production", true, factory)).toBeUndefined();
+    expect(factory).toHaveBeenCalledOnce();
+  });
 });
 
 async function temporaryRoot(): Promise<string> {

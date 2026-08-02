@@ -15,6 +15,7 @@ import type {
   CoreRepositories,
   CreateResult,
   RunRepository,
+  RunReadSnapshot,
   TenantBundle,
   TenantRepository,
   TenantScope,
@@ -96,21 +97,38 @@ async function findRun(
   client: PoolClient,
   scope: TenantScope,
   runId: string,
-): Promise<Versioned<Run> | undefined> {
+): Promise<RunReadSnapshot | undefined> {
   const result = await client.query(
     `SELECT ${tenantColumns}, ${authColumns}, ${threadColumns},
             r.id AS run_id, r.status AS run_status, r.version AS run_version,
-            r.created_at AS run_created_at, r.updated_at AS run_updated_at
+            r.created_at AS run_created_at, r.updated_at AS run_updated_at,
+            latest_attempt.status AS latest_attempt_status
        FROM runs r
        JOIN threads th ON th.tenant_id = r.tenant_id AND th.id = r.thread_id
        ${threadJoins}
+       LEFT JOIN LATERAL (
+         SELECT attempt.status FROM execution_attempts attempt
+          WHERE attempt.tenant_id = r.tenant_id AND attempt.run_id = r.id
+          ORDER BY attempt.created_at DESC, attempt.attempt_id DESC LIMIT 1
+       ) latest_attempt ON true
       WHERE r.tenant_id = $1 AND r.id = $3`,
     [scope.tenantId, scope.userId, runId],
   );
   const row = result.rows[0];
   if (row === undefined) return undefined;
   const thread = mapThread(row, mapTenant(row));
-  return { entity: mapRun(row, thread), version: BigInt(row.run_version) };
+  return mapRunReadSnapshot(row, thread);
+}
+
+function mapRunReadSnapshot(row: QueryResultRow, thread: Thread): RunReadSnapshot {
+  return {
+    entity: mapRun(row, thread),
+    version: BigInt(row.run_version),
+    // 只有显式 durable Attempt 事实才能覆盖“仍在执行”的公开投影；缺行或超时均不猜测。
+    ...(row.run_status === "running" && row.latest_attempt_status === "recovery_required"
+      ? { executionStatus: "recovery_required" as const }
+      : {}),
+  };
 }
 
 export class PgTenantRepository implements TenantRepository {
@@ -343,7 +361,7 @@ export class PgRunRepository implements RunRepository {
     }
   }
 
-  async get(scope: TenantScope, id: Run["id"]): Promise<Versioned<Run> | undefined> {
+  async get(scope: TenantScope, id: Run["id"]): Promise<RunReadSnapshot | undefined> {
     try {
       return await withTenantTransaction(this.pool, scope, (client) => findRun(client, scope, id));
     } catch (error) {
@@ -355,7 +373,7 @@ export class PgRunRepository implements RunRepository {
     scope: TenantScope,
     requestedThreadId: Thread["id"],
     input: { readonly limit: number },
-  ): Promise<readonly Versioned<Run>[]> {
+  ): Promise<readonly RunReadSnapshot[]> {
     if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
       throw new TypeError("Run 最新窗口大小必须在 1 到 100 之间");
     }
@@ -368,10 +386,16 @@ export class PgRunRepository implements RunRepository {
           const result = await client.query(
             `SELECT ${tenantColumns}, ${authColumns}, ${threadColumns},
                     r.id AS run_id, r.status AS run_status, r.version AS run_version,
-                    r.created_at AS run_created_at, r.updated_at AS run_updated_at
+                    r.created_at AS run_created_at, r.updated_at AS run_updated_at,
+                    latest_attempt.status AS latest_attempt_status
                FROM runs r
                JOIN threads th ON th.tenant_id = r.tenant_id AND th.id = r.thread_id
                ${threadJoins}
+               LEFT JOIN LATERAL (
+                 SELECT attempt.status FROM execution_attempts attempt
+                  WHERE attempt.tenant_id = r.tenant_id AND attempt.run_id = r.id
+                  ORDER BY attempt.created_at DESC, attempt.attempt_id DESC LIMIT 1
+               ) latest_attempt ON true
               WHERE r.tenant_id = $1 AND r.thread_id = $3
               ORDER BY r.updated_at DESC, r.created_at DESC, r.id DESC
               LIMIT $4`,
@@ -379,7 +403,7 @@ export class PgRunRepository implements RunRepository {
           );
           return result.rows.map((row) => {
             const thread = mapThread(row, mapTenant(row));
-            return { entity: mapRun(row, thread), version: BigInt(row.run_version) };
+            return mapRunReadSnapshot(row, thread);
           });
         },
         { readOnly: true },

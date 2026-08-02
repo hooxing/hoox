@@ -89,6 +89,7 @@
 | [ADR-0085](0085-live-thinking-disclosure.md) | 运行中思考正文的实时披露 | 已接受 | 2026-08-02 |
 | [ADR-0086](0086-parallel-tool-call-durable-rollout-serialization.md) | 并行工具调用的 Durable Rollout 串行化边界 | 已接受 | 2026-08-02 |
 | [ADR-0087](0087-development-run-event-file-diagnostics.md) | 开发环境 Run 事件文件诊断 | 已接受 | 2026-08-02 |
+| [ADR-0088](0088-recovery-required-public-terminal-projection.md) | recovery_required 的公开终止投影 | 已接受 | 2026-08-03 |
 
 ## 何时必须记录
 

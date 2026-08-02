@@ -16,6 +16,7 @@ import {
   type Thread,
   tenantId,
   threadId,
+  transitionRun,
   type User,
   userId,
   type Workspace,
@@ -29,6 +30,7 @@ import {
   type ModelWireTraceBody,
   type ModelWireTraceReadPort,
   PersistenceError,
+  type RunReadSnapshot,
   type RunExperienceReadPort,
   sha256Hex,
   type TenantBundle,
@@ -141,7 +143,7 @@ class FakeApiState
   readonly tenants = new Map<string, TenantBundle>();
   readonly principals = new Map<string, AuthPrincipal>();
   readonly threads = new Map<string, Versioned<Thread>>();
-  readonly runs = new Map<string, Versioned<Run>>();
+  readonly runs = new Map<string, RunReadSnapshot>();
   readonly workspaces = new Map<string, Workspace>();
   readonly idempotency = new Map<
     string,
@@ -1247,6 +1249,61 @@ describe("Fastify API 契约", () => {
       headers: { authorization: "Bearer token-b" },
     });
     expect(forbidden.statusCode).toBe(404);
+  });
+
+  it("Run 保持 running 时仍公开 latest Attempt 的 recovery_required 终止投影", async () => {
+    const { app, state } = fixture();
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-recovery-0001" },
+      payload: { title: "恢复状态错位" },
+    });
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-recovery-0001" },
+      payload: { input: "触发恢复状态" },
+    });
+    const storedEntry = [...state.runs.entries()][0];
+    if (storedEntry === undefined) throw new Error("恢复投影测试缺少 Run");
+    const [storedKey, stored] = storedEntry;
+    state.runs.set(storedKey, {
+      entity: transitionRun(stored.entity, "running", baseTime),
+      version: stored.version + 1n,
+      executionStatus: "recovery_required",
+    });
+
+    const [single, latest] = await Promise.all([
+      app.inject({
+        method: "GET",
+        url: "/v1/threads/thread_1/runs/run_1",
+        headers: { authorization: "Bearer token-a" },
+      }),
+      app.inject({
+        method: "GET",
+        url: "/v1/threads/thread_1/runs?limit=1",
+        headers: { authorization: "Bearer token-a" },
+      }),
+    ]);
+    expect(single.statusCode).toBe(200);
+    expect(single.json().data).toMatchObject({
+      status: "running",
+      executionStatus: "recovery_required",
+    });
+    expect(latest.json().data.items[0]).toMatchObject({
+      status: "running",
+      executionStatus: "recovery_required",
+    });
+
+    const cancelled = await app.inject({
+      method: "DELETE",
+      url: "/v1/threads/thread_1/runs/run_1",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(cancelled.json().data).toMatchObject({ status: "cancelled" });
+    expect(cancelled.json().data).not.toHaveProperty("executionStatus");
   });
 
   it("Run 事件按 sequence 增量读取，并维持 Thread/租户边界", async () => {

@@ -40,6 +40,45 @@ describe("工作台展示组件", () => {
     expect(html).toContain("is-waiting");
   });
 
+  it("recovery_required 不再显示执行动画或累计运行时间", () => {
+    const interrupted: Run = { ...running, executionStatus: "recovery_required" };
+    const badge = renderToStaticMarkup(
+      <RunStatusBadge status={interrupted.status} executionStatus={interrupted.executionStatus} />,
+    );
+    const timeline = renderToStaticMarkup(
+      <RunTimeline
+        run={interrupted}
+        events={[
+          {
+            eventId: "thinking-started",
+            sequence: 1,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "thinking.started",
+            payload: {},
+          },
+          {
+            eventId: "thinking-delta",
+            sequence: 2,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "thinking.delta",
+            payload: { delta: "中断前的思考。" },
+          },
+        ]}
+      />,
+    );
+
+    expect(badge).toContain("执行已中断");
+    expect(badge).toContain("is-recovery-required");
+    expect(timeline).toContain("当前没有 Agent 在继续执行");
+    expect(timeline).toContain("分析已中断");
+    expect(timeline).toContain("思考已中断");
+    expect(timeline).toContain("中断前的思考。");
+    expect(timeline).not.toContain("spin");
+    expect(timeline).not.toContain("已运行");
+  });
+
   it("把 steer 与 follow-up 作为对话中的用户消息展示，而不是替换当前任务", () => {
     const html = renderToStaticMarkup(
       <ThreadTranscript

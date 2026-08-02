@@ -79,6 +79,11 @@ describe("开发 API 默认装配", () => {
     const running = await startApiProcess({ environment: developmentEnvironment() });
 
     try {
+      expect(mocks.createApiPersistenceRuntime).toHaveBeenCalledWith(
+        expect.objectContaining({
+          blobLifecycle: { objectPrefix: "agent-worker" },
+        }),
+      );
       expect(mocks.createS3BlobStore).toHaveBeenCalledWith(
         expect.objectContaining({
           prefix: "agent-worker",

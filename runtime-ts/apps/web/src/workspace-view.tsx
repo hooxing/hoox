@@ -213,10 +213,10 @@ export function RunTimeline({
               recoveryRequired && progress.thinking.status === "running"
                 ? "分析已中断"
                 : progress.thinking.status === "running" && !thinkingWasInterrupted
-                ? "分析任务"
-                : thinkingWasInterrupted
-                  ? "分析已结束"
-                  : "已完成分析",
+                  ? "分析任务"
+                  : thinkingWasInterrupted
+                    ? "分析已结束"
+                    : "已完成分析",
             status:
               thinkingWasInterrupted && isFailure
                 ? ("failed" as const)

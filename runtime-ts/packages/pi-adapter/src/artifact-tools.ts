@@ -113,6 +113,7 @@ export function createArtifactPiTools(
       name: "declare_deliverables",
       label: "声明交付物",
       description: "声明本次 Run 必需和可选的最终交付物；必需项未发布时 Run 不能成功。",
+      executionMode: "sequential",
       parameters: DeclareDeliverablesToolArgumentsSchema,
       execute: async (callId, args, signal) =>
         artifactToolResult(
@@ -133,6 +134,7 @@ export function createArtifactPiTools(
       label: "发布交付物",
       description:
         "接受安全 Workspace 相对路径的发布意图，最终 Revision 提交时原子发布；已固定 ResourceVersion 可直接发布。",
+      executionMode: "sequential",
       parameters: PublishArtifactToolArgumentsSchema,
       execute: async (callId, args, signal) =>
         artifactToolResult(

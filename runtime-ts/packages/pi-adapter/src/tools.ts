@@ -161,6 +161,9 @@ function createSandboxToolsInternal(
       label: "执行 Sandbox 命令",
       description:
         "在当前 CubeSandbox 中同步执行 Bash 命令并返回真实输出。默认工作目录是 /workspace；可使用 Shell、Python 和常规命令读写 Sandbox 文件。",
+      // Rollout 的 tool_call 必须等本次副作用对应的 tool_result 落库后才能开放下一对。
+      // Pi 仍接受同一模型消息中的多个调用，但按消息顺序完成每个 durable pair。
+      executionMode: "sequential",
       parameters: ExecCommandArgumentsSchema,
       prepareArguments: execArguments.prepareArguments,
       execute: async (callId, params, signal) => {

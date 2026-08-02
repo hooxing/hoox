@@ -586,6 +586,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
           MODEL_BASE_URL: `http://127.0.0.1:${address.port}/model/v1/`,
           MODEL_API_KEY: "integration-model-key",
           MODEL_ID: "integration-model",
+          MODEL_SUPPORTS_IMAGES: "false",
           MODEL_CONTEXT_WINDOW: "128000",
           MODEL_MAX_OUTPUT_TOKENS: "16384",
           MODEL_WIRE_TRACE_ENABLED: "false",

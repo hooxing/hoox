@@ -19,6 +19,7 @@ import {
   PgExecutionPersistence,
   PgModelWireTraceRepository,
   PgRecoveryMetrics,
+  PgResourceFilesystemCatalog,
   PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
   PgThreadContextHistoryRepository,
@@ -61,6 +62,7 @@ import { SandboxDeliverFileSource } from "./deliver-file-source.js";
 import { installModelWireFetchInstrumentation, ModelWireTraceSession } from "./model-wire-trace.js";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
 import { PiWorkerSessionFactory } from "./pi-session-factory.js";
+import { BlobPromptImageLoader } from "./prompt-image-loader.js";
 import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
@@ -111,6 +113,7 @@ const workerEnvironmentSchema = Object.freeze({
   MODEL_BASE_URL: urlEnvironmentField(),
   MODEL_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192 }),
   MODEL_ID: stringEnvironmentField({ maxLength: 255 }),
+  MODEL_SUPPORTS_IMAGES: booleanEnvironmentField(),
   MODEL_CONTEXT_WINDOW: integerEnvironmentField({ minimum: 1, maximum: 10_000_000 }),
   MODEL_MAX_OUTPUT_TOKENS: integerEnvironmentField({ minimum: 1, maximum: 10_000_000 }),
   MODEL_WIRE_TRACE_ENABLED: booleanEnvironmentField(),
@@ -222,6 +225,7 @@ export interface WorkerProcessConfiguration {
     baseUrl: string;
     apiKey: string;
     modelId: string;
+    supportsImages: boolean;
     contextWindow: number;
     maxOutputTokens: number;
     wireTraceMaxBytes: number;
@@ -417,6 +421,7 @@ export function parseWorkerProcessEnvironment(
       baseUrl: readRequiredEnvironmentValue(parsed, "MODEL_BASE_URL"),
       apiKey: readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),
       modelId: readRequiredEnvironmentValue(parsed, "MODEL_ID"),
+      supportsImages: readRequiredEnvironmentValue(parsed, "MODEL_SUPPORTS_IMAGES"),
       contextWindow,
       maxOutputTokens,
       wireTraceMaxBytes: readRequiredEnvironmentValue(parsed, "MODEL_WIRE_TRACE_MAX_BYTES"),
@@ -481,7 +486,7 @@ const openAiCompatibleProviderId = "runtime-openai-compatible";
 export async function createOpenAiCompatibleModel(
   configuration: Pick<
     WorkerProcessConfiguration["model"],
-    "baseUrl" | "apiKey" | "modelId" | "contextWindow" | "maxOutputTokens"
+    "baseUrl" | "apiKey" | "modelId" | "supportsImages" | "contextWindow" | "maxOutputTokens"
   >,
 ): Promise<
   Readonly<{
@@ -504,7 +509,7 @@ export async function createOpenAiCompatibleModel(
         name: configuration.modelId,
         api: "openai-completions",
         reasoning: false,
-        input: ["text"],
+        input: configuration.supportsImages ? ["text", "image"] : ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: configuration.contextWindow,
         maxTokens: configuration.maxOutputTokens,
@@ -627,7 +632,8 @@ async function assembleWorkerRuntime(
       forcePathStyle: configuration.objectStorage.forcePathStyle,
       prefix: RUNTIME_BLOB_OBJECT_PREFIX,
       maxPresignTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
-      maxBlobSizeBytes: 8 * 1024 * 1024,
+      // Worker 需要读取 API 已接受的完整上传附件；上限必须与上传边界一致。
+      maxBlobSizeBytes: 16 * 1024 * 1024,
     } as const;
     const blobs = createS3BlobStore(s3Config, blobRepository);
     const rolloutRepository = new PgRuntimeRolloutRepository(pool);
@@ -890,6 +896,7 @@ async function assembleWorkerRuntime(
               availableHistoryTokens,
             })
         : undefined,
+      new BlobPromptImageLoader(new PgResourceFilesystemCatalog(pool), blobs),
     );
     const shutdown = new ProcessShutdown();
     const worker = new RunWorker(
@@ -992,7 +999,8 @@ export async function probeDevelopmentWorkerDependencies(
       forcePathStyle: configuration.objectStorage.forcePathStyle,
       prefix: RUNTIME_BLOB_OBJECT_PREFIX,
       maxPresignTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
-      maxBlobSizeBytes: 8 * 1024 * 1024,
+      // Readiness 使用与真实 Worker 相同的附件读取边界，避免探针与运行时配置漂移。
+      maxBlobSizeBytes: 16 * 1024 * 1024,
     } as const;
     const sandbox = new CubeSandboxSessionRegistry(
       {

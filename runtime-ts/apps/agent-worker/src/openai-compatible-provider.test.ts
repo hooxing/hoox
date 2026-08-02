@@ -122,6 +122,7 @@ describe("开发 OpenAI-compatible Provider", () => {
         baseUrl: `http://127.0.0.1:${port}/v1`,
         apiKey,
         modelId: "test-chat-model",
+        supportsImages: false,
         contextWindow: 8_192,
         maxOutputTokens: 2_048,
       });

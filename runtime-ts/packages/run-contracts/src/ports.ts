@@ -1,5 +1,7 @@
 import type {
   IsoTimestamp,
+  ResourceId,
+  ResourceVersionId,
   Run,
   RunId,
   RunStatus,
@@ -25,6 +27,27 @@ export interface ExecutionScope {
   readonly rootRunId: RunId;
   readonly workspaceId: WorkspaceId;
   readonly baseRevisionId?: WorkspaceRevisionId;
+}
+
+/** 由 API 授权并持久化的当前 user turn 附件身份；文件内容永不进入调度表。 */
+export interface UserInputAttachmentReference {
+  readonly resourceId: ResourceId;
+  readonly versionId: ResourceVersionId;
+}
+
+export interface AgentUserInput {
+  readonly text: string;
+  readonly attachments: readonly UserInputAttachmentReference[];
+}
+
+/** 仅存在于 Worker 内存；Base64 图片不得进入 Run/Thread 持久化事实。 */
+export interface PreparedAgentUserInput {
+  readonly text: string;
+  readonly images: readonly Readonly<{
+    type: "image";
+    data: string;
+    mimeType: string;
+  }>[];
 }
 
 export type ExecutionAttemptStatus =
@@ -65,6 +88,7 @@ export interface ClaimedExecutionSnapshot {
   readonly workspace: Workspace;
   readonly attempt: ExecutionAttemptSnapshot;
   readonly input: string;
+  readonly attachments?: readonly UserInputAttachmentReference[];
   readonly answer?: string;
   readonly rolloutProjection: ControlledRolloutProjection;
   /** 激活时冻结；当前 Run 自身输入不属于这段 predecessor history。 */
@@ -529,6 +553,7 @@ export interface ExecutionPersistencePort {
         readonly receiptId: string;
         readonly targetTurnId: string;
         readonly inputText: string;
+        readonly attachments?: readonly UserInputAttachmentReference[];
         readonly bodyDigest: Sha256Digest;
       }
     | {
@@ -747,16 +772,18 @@ export type AgentTurnOutcome =
     };
 
 export interface WorkerAgentSessionPort {
+  /** 模型许可签发前完成按模型能力选择与图片字节读取，避免 S3 I/O 消耗短时许可。 */
+  prepareInput(input: AgentUserInput): Promise<PreparedAgentUserInput>;
   /** 新 Session 无论首轮还是 waiting 恢复都用 prompt 启动模型；禁止对空 Session 调 followUp。 */
   runPrompt(
-    text: string,
+    input: PreparedAgentUserInput,
     authorization: ConsumedExternalEffectAuthorization,
   ): Promise<AgentTurnOutcome>;
   /**
    * 当前完整 assistant/tool turn 已持久化后，把 durable steer 放入 Pi 的原生 steering
    * 队列；它必须在同一次活跃 prompt 的下一次 Provider 采样前被消费。
    */
-  steer(text: string): Promise<void>;
+  steer(input: AgentUserInput): Promise<void>;
   abort(): Promise<void>;
   /** durable 工具拒绝回执在 abort 前完成；未声明能力的 Session 不得延迟拒绝中止。 */
   drainRejectedToolReceipts?(): Promise<void>;
@@ -787,7 +814,11 @@ export interface AgentSessionFactoryPort {
     ) => Promise<{
       /** 只覆盖已经完成的 assistant/tool turn；steer user fact 由 Pi 队列在其后注入。 */
       readonly throughSequence: number;
-      readonly steer?: { readonly receiptId: string; readonly inputText: string };
+      readonly steer?: {
+        readonly receiptId: string;
+        readonly inputText: string;
+        readonly attachments?: readonly UserInputAttachmentReference[];
+      };
     }>;
     readonly authorizeToolEffect: (
       call: ExternalEffectCall,

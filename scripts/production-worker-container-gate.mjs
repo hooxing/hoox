@@ -130,6 +130,7 @@ try {
     "MODEL_BASE_URL=https://model.invalid/v1",
     `MODEL_API_KEY=${secretCanary}`,
     "MODEL_ID=model-placeholder",
+    "MODEL_SUPPORTS_IMAGES=false",
     "MODEL_CONTEXT_WINDOW=128000",
     "MODEL_MAX_OUTPUT_TOKENS=16384",
     "MODEL_WIRE_TRACE_ENABLED=false",

@@ -4,7 +4,7 @@ import {
   createArtifactExecutionAuthorizationAuthority,
   type PublishArtifactCommand,
 } from "@cube-runtime/artifact";
-import { artifactId, resourceVersionId, sha256Digest } from "@cube-runtime/domain";
+import { artifactId, resourceId, resourceVersionId, sha256Digest } from "@cube-runtime/domain";
 import {
   type ArtifactPublicationResourcePort,
   ArtifactToolRouterFactory,
@@ -18,7 +18,7 @@ import {
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createDurableObservationRecorderFactory,
   PiWorkerSessionFactory,
@@ -36,6 +36,137 @@ import {
 } from "./testing/fakes.js";
 
 describe("PiWorkerSessionFactory 持久操作门控", () => {
+  it("视觉模型在当前 user turn 自动取得全部图片且读取发生在模型许可之前", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const seed = fakeSeed("direct-vision");
+    const attachment = {
+      resourceId: resourceId("resource-direct-vision"),
+      versionId: resourceVersionId("version-direct-vision"),
+    };
+    const scope = persistence.addSeed({ ...seed, attachments: [attachment] });
+    const operations: string[] = [];
+    persistence.beforePermitIssueReturn = async ({ effect }) => {
+      if (effect === "model_start") operations.push("permit");
+    };
+    const faux = fauxProvider();
+    faux.setResponses([
+      (context) => {
+        const user = context.messages.at(-1);
+        expect(user).toMatchObject({
+          role: "user",
+          content: [
+            { type: "text", text: "执行任务" },
+            { type: "image", data: "AQID", mimeType: "image/png" },
+          ],
+        });
+        return fauxAssistantMessage("已查看图片");
+      },
+    ]);
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+    });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      () => ({
+        recordStarted: async () => "recorded" as const,
+        record: async () => ({ outcome: "recorded" as const, observation: "", isTruncated: false }),
+      }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        load: async ({ attachments }) => {
+          operations.push("image");
+          expect(attachments).toEqual([attachment]);
+          return [{ type: "image", data: "AQID", mimeType: "image/png" }];
+        },
+      },
+    );
+    const sandboxes = new FakeSandboxRegistry();
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: "direct-vision-worker", runTimeoutMs: 60_000 },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(operations).toEqual(["image", "permit"]);
+  });
+
+  it("纯文本模型保留附件路径但不读取图片 Blob", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const seed = fakeSeed("non-vision");
+    const scope = persistence.addSeed({
+      ...seed,
+      attachments: [
+        {
+          resourceId: resourceId("resource-non-vision"),
+          versionId: resourceVersionId("version-non-vision"),
+        },
+      ],
+    });
+    const faux = fauxProvider({
+      models: [{ id: "text-only", input: ["text"] }],
+    });
+    faux.setResponses([fauxAssistantMessage("按路径处理")]);
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+    });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const load = vi.fn();
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      () => ({
+        recordStarted: async () => "recorded" as const,
+        record: async () => ({ outcome: "recorded" as const, observation: "", isTruncated: false }),
+      }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { load },
+    );
+    const sandboxes = new FakeSandboxRegistry();
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: "non-vision-worker", runTimeoutMs: 60_000 },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(load).not.toHaveBeenCalled();
+  });
+
   it("durable Observation 工厂拒绝错接 Tenant、Run 或 Attempt 的端口", () => {
     const persistence = new FakeExecutionPersistence();
     const scope = persistence.addSeed(fakeSeed("observation-binding"));

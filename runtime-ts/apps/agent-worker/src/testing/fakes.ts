@@ -72,6 +72,7 @@ import type {
   ThreadSandboxAcquireResult,
   ThreadSandboxLeaseRefV1,
   ThreadSandboxSessionLifecyclePort,
+  UserInputAttachmentReference,
 } from "../ports.js";
 
 interface FakeRecord {
@@ -79,6 +80,7 @@ interface FakeRecord {
   run: Run;
   workspace: Workspace;
   readonly input: string;
+  readonly attachments: readonly UserInputAttachmentReference[];
   answer?: string;
   rolloutProjection: ControlledRolloutProjection;
   projectionVersion: number;
@@ -142,6 +144,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     readonly receiptId: string;
     readonly targetTurnId: string;
     readonly inputText: string;
+    readonly attachments?: readonly UserInputAttachmentReference[];
     readonly bodyDigest: Sha256Digest;
   }> = [];
   rewriteNextCleanupReceiptDisposition:
@@ -162,6 +165,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       run: seed.run,
       workspace: seed.workspace,
       input: seed.input,
+      attachments: seed.attachments ?? [],
       ...(seed.answer === undefined ? {} : { answer: seed.answer }),
       rolloutProjection: seed.rolloutProjection,
       projectionVersion: 0,
@@ -231,6 +235,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
         workspace: record.workspace,
         attempt,
         input: record.input,
+        ...(record.attachments.length === 0 ? {} : { attachments: record.attachments }),
         ...(record.answer === undefined ? {} : { answer: record.answer }),
         rolloutProjection: record.rolloutProjection,
       },
@@ -258,6 +263,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
           receiptId: pending.receiptId,
           targetTurnId: pending.targetTurnId,
           inputText: pending.inputText,
+          ...(pending.attachments === undefined ? {} : { attachments: pending.attachments }),
           bodyDigest: pending.bodyDigest,
         };
   }
@@ -1071,18 +1077,22 @@ export class ScriptedAgentSession implements WorkerAgentSessionPort {
     private readonly outcome: AgentTurnOutcome = { kind: "completed" },
   ) {}
 
+  async prepareInput(input: Parameters<WorkerAgentSessionPort["prepareInput"]>[0]) {
+    return { text: input.text, images: [] } as const;
+  }
+
   async runPrompt(
-    text: string,
+    input: Parameters<WorkerAgentSessionPort["runPrompt"]>[0],
     authorization: Parameters<WorkerAgentSessionPort["runPrompt"]>[1],
   ): Promise<AgentTurnOutcome> {
-    this.prompts.push(text);
+    this.prompts.push(input.text);
     this.modelPermits.push(authorization.permit.permitId);
     for (const event of this.events) for (const listener of this.listeners) listener(event);
     return this.outcome;
   }
 
-  async steer(text: string): Promise<void> {
-    this.steers.push(text);
+  async steer(input: Parameters<WorkerAgentSessionPort["steer"]>[0]): Promise<void> {
+    this.steers.push(input.text);
   }
 
   async abort(): Promise<void> {
@@ -1109,8 +1119,12 @@ export class BlockingAgentSession implements WorkerAgentSessionPort {
   private resolve: ((outcome: AgentTurnOutcome) => void) | undefined;
   private readonly listeners = new Set<(event: RuntimeAgentEvent) => void>();
 
-  runPrompt(text: string): Promise<AgentTurnOutcome> {
-    this.prompts.push(text);
+  async prepareInput(input: Parameters<WorkerAgentSessionPort["prepareInput"]>[0]) {
+    return { text: input.text, images: [] } as const;
+  }
+
+  runPrompt(input: Parameters<WorkerAgentSessionPort["runPrompt"]>[0]): Promise<AgentTurnOutcome> {
+    this.prompts.push(input.text);
     return new Promise((resolve) => (this.resolve = resolve));
   }
 
@@ -1120,8 +1134,8 @@ export class BlockingAgentSession implements WorkerAgentSessionPort {
     resolve?.(outcome);
   }
 
-  async steer(text: string): Promise<void> {
-    this.steers.push(text);
+  async steer(input: Parameters<WorkerAgentSessionPort["steer"]>[0]): Promise<void> {
+    this.steers.push(input.text);
   }
 
   async abort(): Promise<void> {
@@ -1166,17 +1180,23 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
       if (event.type !== "turn.completed") return;
       safePointChain = safePointChain.then(async () => {
         const safePoint = await input.onTurnSafePoint?.(event);
-        if (safePoint?.steer !== undefined) await session.steer(safePoint.steer.inputText);
+        if (safePoint?.steer !== undefined) {
+          await session.steer({
+            text: safePoint.steer.inputText,
+            attachments: safePoint.steer.attachments ?? [],
+          });
+        }
       });
     });
     const drainRejectedToolReceipts = session.drainRejectedToolReceipts?.bind(session);
     return {
-      runPrompt: async (text, authorization) => {
-        const outcome = await session.runPrompt(text, authorization);
+      prepareInput: (userInput) => session.prepareInput(userInput),
+      runPrompt: async (prepared, authorization) => {
+        const outcome = await session.runPrompt(prepared, authorization);
         await safePointChain;
         return outcome;
       },
-      steer: (text) => session.steer(text),
+      steer: (userInput) => session.steer(userInput),
       abort: () => session.abort(),
       ...(drainRejectedToolReceipts === undefined
         ? {}
@@ -1297,6 +1317,7 @@ export interface FakeSeed {
   readonly run: Run;
   readonly workspace: Workspace;
   readonly input: string;
+  readonly attachments?: readonly UserInputAttachmentReference[];
   readonly answer?: string;
   readonly rolloutProjection: ControlledRolloutProjection;
 }

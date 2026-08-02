@@ -48,6 +48,9 @@ Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 必须等于
 `MODEL_ID`；不要把预算值猜测为 Provider 元数据。生产模式保持更严格的预算元数据匹配策略。生产 Worker
 入口为 `runtime-ts/apps/agent-worker` 的 `pnpm start:production`，仅支持 Linux，并且只使用模块内固定的真实
 PostgreSQL/S3/CubeSandbox/Pi/Workspace/Artifact 依赖图；它绝不会复用 development 身份或调用方注入的 Fake。
+`MODEL_SUPPORTS_IMAGES` 是必须显式配置的模型输入能力：设为 `true` 时，Worker 会把当前 user turn 的 PNG、
+JPEG、GIF 与 WebP 附件以内联图片输入直接提交给模型；设为 `false` 时不读取图片字节，模型仍可从 user turn
+中的稳定 `/resources/...` 路径按需使用文件。该开关不能依赖 Provider 失败后自动降级。
 
 ### 模型网络报文诊断（development）
 

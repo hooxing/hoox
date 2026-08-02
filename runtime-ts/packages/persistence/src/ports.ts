@@ -12,6 +12,7 @@ import type {
   WorkspaceRevisionCommitPort,
   WorkspaceWriteScope,
 } from "@cube-runtime/domain";
+import type { ResourceAttachmentReference } from "@cube-runtime/resource";
 import type { StableBlobRef } from "./blob-store.js";
 
 /** 由认证/授权层构造；Repository 不接受裸 tenantId 作为业务查询上下文。 */
@@ -144,6 +145,7 @@ export interface ThreadInputRoutingPort {
     /** 只在进入 follow-up（含 terminal fallback）时使用，不能提前创建。 */
     readonly fallbackRun: Run;
     readonly inputText: string;
+    readonly attachments: readonly ResourceAttachmentReference[];
     readonly mode: ThreadInputMode;
     readonly expectedRunId?: string;
     readonly expectedTurnId?: string;

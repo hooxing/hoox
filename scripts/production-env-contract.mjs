@@ -61,6 +61,7 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "MODEL_BASE_URL",
   "MODEL_API_KEY",
   "MODEL_ID",
+  "MODEL_SUPPORTS_IMAGES",
   "MODEL_CONTEXT_WINDOW",
   "MODEL_MAX_OUTPUT_TOKENS",
   "MODEL_WIRE_TRACE_ENABLED",

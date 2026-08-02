@@ -8,7 +8,7 @@ import {
   type ToolObservationRolloutPort,
   type TraceBlobPersistencePort,
 } from "@cube-runtime/context-policy";
-import { sha256Digest } from "@cube-runtime/domain";
+import { sha256Digest, type TenantId } from "@cube-runtime/domain";
 import {
   bindTrustedPiModelContextCapability,
   assessSafePiSessionContext,
@@ -23,7 +23,21 @@ import type { DeliverFileToolRouterFactoryPort } from "@cube-runtime/tool-router
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
-import type { AgentSessionFactoryPort, AgentTurnOutcome, WorkerAgentSessionPort } from "./ports.js";
+import type {
+  AgentSessionFactoryPort,
+  AgentTurnOutcome,
+  AgentUserInput,
+  PreparedAgentUserInput,
+  UserInputAttachmentReference,
+  WorkerAgentSessionPort,
+} from "./ports.js";
+
+export interface PromptImageLoaderPort {
+  load(input: {
+    readonly tenantId: TenantId;
+    readonly attachments: readonly UserInputAttachmentReference[];
+  }): Promise<PreparedAgentUserInput["images"]>;
+}
 
 /**
  * Worker 的生产 Pi 绑定只返回应用层窄接口；原始 AgentSession 和 compact() 从未跨越适配层。
@@ -67,6 +81,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       history: ThreadActiveHistoryV1,
       availableHistoryTokens: number,
     ) => Promise<ThreadActiveHistoryV1>,
+    private readonly promptImages?: PromptImageLoaderPort,
   ) {
     this.modelContext = bindTrustedPiModelContextCapability(modelRuntime, model);
   }
@@ -75,6 +90,19 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     input: Parameters<AgentSessionFactoryPort["create"]>[0],
   ): Promise<WorkerAgentSessionPort> {
     const attemptWireTraces = this.modelWireTraces?.createAttempt();
+    const prepareInput = async (userInput: AgentUserInput): Promise<PreparedAgentUserInput> => {
+      if (!this.model.input.includes("image") || userInput.attachments.length === 0) {
+        return Object.freeze({ text: userInput.text, images: Object.freeze([]) });
+      }
+      if (this.promptImages === undefined) {
+        throw new Error("视觉模型缺少当前 user turn 图片加载器");
+      }
+      const images = await this.promptImages.load({
+        tenantId: input.scope.tenantId,
+        attachments: userInput.attachments,
+      });
+      return Object.freeze({ text: userInput.text, images: Object.freeze([...images]) });
+    };
     const runRuntimeCompaction = async (
       targetInput: Parameters<AgentSessionFactoryPort["create"]>[0],
       compatibility: ReturnType<typeof deriveSafePiSessionCompatibility>,
@@ -318,7 +346,11 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                 if (controller === undefined) throw new Error("Pi Session steer 安全点尚未就绪");
                 // 有 replacement 时它截止到 assistant/tool turn；无重建器时也必须把已持久消费的
                 // steer 送入 Pi 原生队列，不能因可选的上下文投影能力关闭而丢失用户输入。
-                await controller.steer(persisted.steer.inputText);
+                const preparedSteer = await prepareInput({
+                  text: persisted.steer.inputText,
+                  attachments: persisted.steer.attachments ?? [],
+                });
+                await controller.steer(preparedSteer.text, preparedSteer.images);
               }
               return replacement;
             },
@@ -341,7 +373,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       startedToolCalls.set(event.callId, event.name);
     });
     return {
-      runPrompt: async (text, authorization): Promise<AgentTurnOutcome> => {
+      prepareInput,
+      runPrompt: async (prepared, authorization): Promise<AgentTurnOutcome> => {
         const { permit } = authorization;
         if (
           (permit.effect !== "model_start" && permit.effect !== "model_continue") ||
@@ -363,7 +396,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         // 许可刚由 DB 一次性消费；校验后立即进入 prompt，中间不再插入异步窗口。
         try {
           try {
-            await controller.prompt(text);
+            await controller.prompt(prepared.text, prepared.images);
           } finally {
             // 即使 Provider 失败也只等待当前 Attempt 已创建的诊断任务，且不会改变原异常。
             await attemptWireTraces?.drain();
@@ -381,7 +414,10 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         }
         return { kind: "completed" };
       },
-      steer: (text) => controller.steer(text),
+      steer: async (userInput) => {
+        const prepared = await prepareInput(userInput);
+        await controller.steer(prepared.text, prepared.images);
+      },
       abort: () => controller.abort(),
       drainRejectedToolReceipts: async () => {
         while (rejectedToolReceipts.size > 0) {

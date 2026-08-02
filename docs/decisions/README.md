@@ -83,6 +83,7 @@
 | [ADR-0075](0075-capability-aware-conversation-workspace.md) | 能力感知的对话工作台信息层级 | 已接受 | 2026-08-01 |
 | [ADR-0076](0076-compact-work-status-track.md) | 紧凑工作状态轨道与对话视觉去重 | 已接受 | 2026-08-01 |
 | [ADR-0077](0077-resource-upload-and-lazy-virtual-filesystem.md) | 文件上传与按需只读虚拟目录 | 已接受 | 2026-08-01 |
+| [ADR-0078](0078-direct-vision-user-attachments.md) | 视觉模型当前轮图片直传 | 已接受 | 2026-08-02 |
 
 ## 何时必须记录
 

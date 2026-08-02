@@ -30,6 +30,7 @@ function productionEnvironment(): Record<string, string> {
     MODEL_BASE_URL: "https://model.invalid/v1",
     MODEL_API_KEY: "opaque-model-value",
     MODEL_ID: "test-model",
+    MODEL_SUPPORTS_IMAGES: "false",
     MODEL_CONTEXT_WINDOW: "128000",
     MODEL_MAX_OUTPUT_TOKENS: "16384",
     MODEL_WIRE_TRACE_ENABLED: "false",
@@ -262,6 +263,7 @@ describe("Agent Worker 进程入口", () => {
       AGENT_WORKER_TENANT_ID: "tenant-dev-user-a",
       DEV_AUTH_ENABLED: "true",
       DEV_AUTH_USER_A_TENANT_ID: "tenant-dev-user-a",
+      MODEL_SUPPORTS_IMAGES: "true",
       MODEL_WIRE_TRACE_ENABLED: "true",
       MODEL_WIRE_TRACE_RETENTION_DAYS: "13",
       MODEL_WIRE_TRACE_MAX_BYTES: "4096",
@@ -452,6 +454,7 @@ describe("Agent Worker 进程入口", () => {
       AGENT_WORKER_TENANT_ID: "tenant-dev-user-a",
       DEV_AUTH_ENABLED: "true",
       DEV_AUTH_USER_A_TENANT_ID: "tenant-dev-user-a",
+      MODEL_SUPPORTS_IMAGES: "true",
     });
 
     const { model } = await createDevelopmentOpenAiCompatibleModel(configuration.model);
@@ -461,6 +464,7 @@ describe("Agent Worker 进程入口", () => {
       id: configuration.model.modelId,
       contextWindow: configuration.model.contextWindow,
       maxTokens: configuration.model.maxOutputTokens,
+      input: ["text", "image"],
     });
     expect(JSON.stringify(model)).not.toContain(configuration.model.apiKey);
   });

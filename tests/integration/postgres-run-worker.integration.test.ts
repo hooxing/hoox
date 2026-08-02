@@ -7,6 +7,8 @@ import {
   createWorkspace,
   isoTimestamp,
   membershipId,
+  resourceId,
+  resourceVersionId,
   runId,
   sha256Digest,
   tenantId,
@@ -2019,6 +2021,10 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     ).toMatchObject({ outcome: "applied" });
 
     const steerText = "不要改后端，只调整配色";
+    const steerAttachment = {
+      resourceId: resourceId(`resource-input-steer-${suffix}`),
+      versionId: resourceVersionId(`version-input-steer-${suffix}`),
+    };
     const steer = await inputRouting.submit({
       scope: f.tenantScope,
       thread: f.thread,
@@ -2028,6 +2034,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         now,
       }),
       inputText: steerText,
+      attachments: [steerAttachment],
       mode: "auto",
       expectedRunId: activeRun.id,
       expectedTurnId: "turn-1",
@@ -2040,6 +2047,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     });
     const pending = await inputPersistence.readPendingThreadSteer({ fence: claimed.fence });
     if (pending.outcome !== "pending") throw new Error("阶段 3 pending steer 缺失");
+    expect(pending.attachments).toEqual([steerAttachment]);
     expect(
       await inputPersistence.mutate(
         signed({
@@ -2069,6 +2077,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       thread: f.thread,
       fallbackRun: createRun({ id: runId(`input-strict-${suffix}`), thread: f.thread, now }),
       inputText: strictText,
+      attachments: [],
       mode: "steer",
       expectedRunId: activeRun.id,
       expectedTurnId: "turn-1",
@@ -2089,6 +2098,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       thread: f.thread,
       fallbackRun: createRun({ id: runId(`input-fallback-${suffix}`), thread: f.thread, now }),
       inputText: fallbackText,
+      attachments: [],
       mode: "auto",
       expectedRunId: activeRun.id,
       expectedTurnId: "turn-1",
@@ -2107,6 +2117,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       thread: f.thread,
       fallbackRun: createRun({ id: runId(`input-later-${suffix}`), thread: f.thread, now }),
       inputText: laterText,
+      attachments: [],
       mode: "follow_up",
       fallbackToFollowUp: false,
       idempotency: { key: `input-later-key-${suffix}`, requestHash: requestDigest(laterText) },
@@ -2251,6 +2262,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         now,
       }),
       inputText,
+      attachments: [],
       mode: "auto",
       expectedRunId: activeRun.id,
       expectedTurnId: "turn-1",

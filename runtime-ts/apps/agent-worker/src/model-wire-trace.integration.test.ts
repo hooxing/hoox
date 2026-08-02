@@ -175,6 +175,7 @@ describe("模型网络报文真实 Pi transport", () => {
       baseUrl: `http://127.0.0.1:${port}/v1`,
       apiKey: "test-wire-secret",
       modelId: "wire-test-model",
+      supportsImages: false,
       contextWindow: 16_384,
       maxOutputTokens: 1_024,
     });
@@ -231,6 +232,7 @@ async function createWorker(
     baseUrl: `http://127.0.0.1:${port}/v1`,
     apiKey: "test-wire-secret",
     modelId: "wire-test-model",
+    supportsImages: false,
     contextWindow: 16_384,
     maxOutputTokens: 1_024,
   });

@@ -323,6 +323,10 @@ export class ApiService {
         thread: thread.entity,
         fallbackRun,
         inputText,
+        attachments: (attachments ?? []).map((attachment) => ({
+          resourceId: attachment.resourceId,
+          versionId: attachment.versionId,
+        })),
         mode: input.mode,
         ...(input.expectedRunId === undefined ? {} : { expectedRunId: input.expectedRunId }),
         ...(input.expectedTurnId === undefined ? {} : { expectedTurnId: input.expectedTurnId }),

@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
   isoTimestamp,
+  resourceId,
+  resourceVersionId,
   type Run,
   type Sha256Digest,
   type Workspace,
@@ -25,6 +27,7 @@ import type {
   SandboxAcquireResult,
   SandboxSessionRegistryPort,
   SandboxSettlementResult,
+  UserInputAttachmentReference,
 } from "@cube-runtime/run-contracts";
 import {
   assertControlledRolloutProjection,
@@ -217,6 +220,53 @@ function serializedJson(value: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function parseUserInputAttachments(value: unknown): readonly UserInputAttachmentReference[] {
+  if (!Array.isArray(value) || value.length > 20) throw new TypeError("持久化输入附件无效");
+  const seen = new Set<string>();
+  return Object.freeze(
+    value.map((entry) => {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        throw new TypeError("持久化输入附件无效");
+      }
+      const record = entry as Record<string, unknown>;
+      if (
+        Object.keys(record).length !== 2 ||
+        typeof record.resourceId !== "string" ||
+        typeof record.versionId !== "string"
+      ) {
+        throw new TypeError("持久化输入附件无效");
+      }
+      const parsed = Object.freeze({
+        resourceId: resourceId(record.resourceId),
+        versionId: resourceVersionId(record.versionId),
+      });
+      const identity = `${parsed.resourceId}\0${parsed.versionId}`;
+      if (seen.has(identity)) throw new TypeError("持久化输入附件重复");
+      seen.add(identity);
+      return parsed;
+    }),
+  );
+}
+
+async function readRunInputAttachments(
+  client: PoolClient,
+  tenantId: string,
+  threadId: string,
+  runId: string,
+): Promise<readonly UserInputAttachmentReference[]> {
+  const result = await client.query<{ readonly input_attachments: unknown }>(
+    `SELECT receipt.input_attachments
+       FROM thread_follow_up_queue queue
+       JOIN thread_input_receipts receipt
+         ON receipt.tenant_id=queue.tenant_id AND receipt.thread_id=queue.thread_id
+        AND receipt.receipt_id=queue.receipt_id
+      WHERE queue.tenant_id=$1 AND queue.thread_id=$2 AND queue.run_id=$3`,
+    [tenantId, threadId, runId],
+  );
+  const row = result.rows[0];
+  return row === undefined ? Object.freeze([]) : parseUserInputAttachments(row.input_attachments);
 }
 
 /** 与数据库 CHECK 使用同一个 jsonb 规范化表达，避免紧凑 JSON 与 jsonb::text 的字节差异。 */
@@ -1059,6 +1109,12 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           );
           const state = await this.loadState(client, input.scope, attemptId);
           if (state === undefined) throw new Error("claim 提交前无法读回执行状态");
+          const attachments = await readRunInputAttachments(
+            client,
+            input.scope.tenantId,
+            input.scope.threadId,
+            input.scope.runId,
+          );
           const fence: ExecutionFence = {
             scope: input.scope,
             runClaim: { token: claimToken, epoch: claimEpoch, expiresAt },
@@ -1071,6 +1127,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               workspace: state.workspace,
               attempt: state.attempt,
               input: String(row.input_text),
+              ...(attachments.length === 0 ? {} : { attachments }),
               ...(row.answer_text === null ? {} : { answer: String(row.answer_text) }),
               rolloutProjection: projection,
               ...(row.context_through_sequence === null
@@ -1421,9 +1478,10 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             readonly receipt_id: string;
             readonly target_turn_id: string;
             readonly input_text: string;
+            readonly input_attachments: unknown;
             readonly body_digest: Sha256Digest;
           }>(
-            `SELECT receipt_id,target_turn_id,input_text,body_digest
+            `SELECT receipt_id,target_turn_id,input_text,input_attachments,body_digest
                FROM thread_input_receipts
               WHERE tenant_id=$1 AND thread_id=$2 AND target_run_id=$3
                 AND target_turn_id=$4 AND state='pending' AND disposition='pending_steer'
@@ -1436,15 +1494,16 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             ],
           );
           const pending = receipt.rows[0];
-          return pending === undefined
-            ? ({ outcome: "none" } as const)
-            : ({
-                outcome: "pending",
-                receiptId: pending.receipt_id,
-                targetTurnId: pending.target_turn_id,
-                inputText: pending.input_text,
-                bodyDigest: pending.body_digest,
-              } as const);
+          if (pending === undefined) return { outcome: "none" } as const;
+          const attachments = parseUserInputAttachments(pending.input_attachments);
+          return {
+            outcome: "pending",
+            receiptId: pending.receipt_id,
+            targetTurnId: pending.target_turn_id,
+            inputText: pending.input_text,
+            ...(attachments.length === 0 ? {} : { attachments }),
+            bodyDigest: pending.body_digest,
+          } as const;
         },
         { isolationLevel: "SERIALIZABLE" },
       );

@@ -15,6 +15,27 @@ import {
 } from "./pg-thread-run-queue.js";
 
 const maxInputBytes = 1_048_576;
+const attachmentIdPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+
+function serializeAttachments(
+  attachments: Parameters<ThreadInputRoutingPort["submit"]>[0]["attachments"],
+): string {
+  if (attachments.length > 20) throw new TypeError("Thread 输入附件数量无效");
+  const seen = new Set<string>();
+  const value = attachments.map((attachment) => {
+    if (
+      !attachmentIdPattern.test(attachment.resourceId) ||
+      !attachmentIdPattern.test(attachment.versionId)
+    ) {
+      throw new TypeError("Thread 输入附件身份无效");
+    }
+    const identity = `${attachment.resourceId}\0${attachment.versionId}`;
+    if (seen.has(identity)) throw new TypeError("Thread 输入附件不能重复");
+    seen.add(identity);
+    return { resourceId: attachment.resourceId, versionId: attachment.versionId };
+  });
+  return JSON.stringify(value);
+}
 
 function safeSequence(value: unknown, name: string): number {
   const parsed = Number(value);
@@ -116,6 +137,7 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
       return { outcome: "not_authorized" };
     }
     const digest = bodyDigest(input.inputText);
+    const attachmentsJson = serializeAttachments(input.attachments);
     try {
       return await withTenantTransaction(
         this.pool,
@@ -226,11 +248,11 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
               await client.query(
                 `INSERT INTO thread_input_receipts(
                    tenant_id,thread_id,receipt_id,client_request_id,request_digest,requested_mode,
-                   state,disposition,input_sequence,input_text,body_digest,body_size_bytes,
+                   state,disposition,input_sequence,input_text,input_attachments,body_digest,body_size_bytes,
                    expected_run_id,expected_turn_id,fallback_to_follow_up,target_run_id,
                    target_turn_id,fallback_run_id
-                 ) VALUES ($1,$2,$3,$4,$5,$6,'pending','pending_steer',$7,$8,$9,$10,
-                           $11,$12,$13,$14,$15,$16)`,
+                 ) VALUES ($1,$2,$3,$4,$5,$6,'pending','pending_steer',$7,$8,$9::jsonb,$10,$11,
+                           $12,$13,$14,$15,$16,$17)`,
                 [
                   input.scope.tenantId,
                   input.thread.id,
@@ -240,6 +262,7 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
                   input.mode,
                   inputSequence,
                   input.inputText,
+                  attachmentsJson,
                   digest,
                   Buffer.byteLength(input.inputText, "utf8"),
                   input.expectedRunId ?? null,
@@ -262,10 +285,10 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
               await client.query(
                 `INSERT INTO thread_input_receipts(
                    tenant_id,thread_id,receipt_id,client_request_id,request_digest,requested_mode,
-                   state,disposition,input_sequence,input_text,body_digest,body_size_bytes,
+                   state,disposition,input_sequence,input_text,input_attachments,body_digest,body_size_bytes,
                    expected_run_id,expected_turn_id,fallback_to_follow_up,rejection_code,consumed_at
-                 ) VALUES ($1,$2,$3,$4,$5,$6,'rejected','rejected',$7,$8,$9,$10,
-                           $11,$12,$13,$14,clock_timestamp())`,
+                 ) VALUES ($1,$2,$3,$4,$5,$6,'rejected','rejected',$7,$8,$9::jsonb,$10,$11,
+                           $12,$13,$14,$15,clock_timestamp())`,
                 [
                   input.scope.tenantId,
                   input.thread.id,
@@ -275,6 +298,7 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
                   input.mode,
                   inputSequence,
                   input.inputText,
+                  attachmentsJson,
                   digest,
                   Buffer.byteLength(input.inputText, "utf8"),
                   input.expectedRunId ?? null,
@@ -412,9 +436,9 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
     await client.query(
       `INSERT INTO thread_input_receipts(
          tenant_id,thread_id,receipt_id,client_request_id,request_digest,requested_mode,
-         state,disposition,queued_run_id,queue_sequence,input_sequence,input_text,body_digest,
+         state,disposition,queued_run_id,queue_sequence,input_sequence,input_text,input_attachments,body_digest,
          body_size_bytes,expected_run_id,expected_turn_id,fallback_to_follow_up,fallback_run_id
-       ) VALUES ($1,$2,$3,$4,$5,$6,'pending','queued',$7,$8,$9,$10,$11,$12,$13,$14,$15,$7)`,
+       ) VALUES ($1,$2,$3,$4,$5,$6,'pending','queued',$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15,$16,$7)`,
       [
         input.scope.tenantId,
         input.thread.id,
@@ -426,6 +450,7 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
         values.queueSequence,
         values.inputSequence,
         input.inputText,
+        serializeAttachments(input.attachments),
         values.digest,
         Buffer.byteLength(input.inputText, "utf8"),
         input.expectedRunId ?? null,

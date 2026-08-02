@@ -556,7 +556,13 @@ export class RunWorker {
                   }
                   return {
                     throughSequence,
-                    steer: { receiptId: pending.receiptId, inputText: pending.inputText },
+                    steer: {
+                      receiptId: pending.receiptId,
+                      inputText: pending.inputText,
+                      ...(pending.attachments === undefined
+                        ? {}
+                        : { attachments: pending.attachments }),
+                    },
                   };
                 }
                 if (pending.outcome !== "none") {
@@ -635,7 +641,10 @@ export class RunWorker {
       });
       if (!isApplied(modelCheckpoint)) return await this.handleMutationFailure(modelCheckpoint);
 
-      let promptText = claim.snapshot.answer ?? claim.snapshot.input;
+      let promptInput = {
+        text: claim.snapshot.answer ?? claim.snapshot.input,
+        attachments: claim.snapshot.answer === undefined ? (claim.snapshot.attachments ?? []) : [],
+      };
       let steerReceiptId: string | undefined;
       const correctionRound = 0;
       let workspaceChange: ValidatedWorkspaceChange | undefined;
@@ -649,13 +658,17 @@ export class RunWorker {
           steerReceiptId === undefined
             ? `${context.attemptId}/model/start`
             : `${context.attemptId}/model/steer/${steerReceiptId}`;
+        const preparedInput = await session.prepareInput(promptInput);
         const modelAuthorization = await this.authorizeEffect(context, cancellation, modelEffect, {
           callId: modelCallId,
           toolName: "pi_model",
-          argsDigest: digestCanonical({ prompt: promptText }),
+          argsDigest: digestCanonical({
+            prompt: promptInput.text,
+            attachments: promptInput.attachments,
+          }),
         });
         context.modelCompleted = false;
-        const turn = await session.runPrompt(promptText, modelAuthorization);
+        const turn = await session.runPrompt(preparedInput, modelAuthorization);
         await eventChain;
         if (context.abortPromise) await context.abortPromise;
         const postModel = await this.stopPoint(context, cancellation);
@@ -709,7 +722,10 @@ export class RunWorker {
               },
             });
             if (!isApplied(applied)) return await this.handleMutationFailure(applied);
-            promptText = pending.inputText;
+            promptInput = {
+              text: pending.inputText,
+              attachments: pending.attachments ?? [],
+            };
             steerReceiptId = pending.receiptId;
             continue;
           }

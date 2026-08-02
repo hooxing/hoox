@@ -22,6 +22,7 @@ import type {
   Api,
   AssistantMessage,
   Context,
+  ImageContent,
   Model,
   Provider,
   SimpleStreamOptions,
@@ -50,9 +51,9 @@ import {
 
 interface PiSessionPort {
   readonly isStreaming: boolean;
-  prompt(text: string): Promise<void>;
-  steer(text: string): Promise<void>;
-  followUp(text: string): Promise<void>;
+  prompt(text: string, options?: { readonly images?: ImageContent[] }): Promise<void>;
+  steer(text: string, images?: ImageContent[]): Promise<void>;
+  followUp(text: string, images?: ImageContent[]): Promise<void>;
   abort(): Promise<void>;
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   dispose(): void;
@@ -76,9 +77,9 @@ export interface PiSessionDiagnostics {
 }
 
 export interface PiSessionController {
-  prompt(text: string): Promise<void>;
-  steer(text: string): Promise<void>;
-  followUp(text: string): Promise<void>;
+  prompt(text: string, images?: readonly ImageContent[]): Promise<void>;
+  steer(text: string, images?: readonly ImageContent[]): Promise<void>;
+  followUp(text: string, images?: readonly ImageContent[]): Promise<void>;
   abort(): Promise<void>;
   dispose(): void;
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void;
@@ -175,22 +176,24 @@ class PiSessionControllerImpl implements PiSessionController {
     this.#rollback = rollback;
   }
 
-  async prompt(text: string): Promise<void> {
+  async prompt(text: string, images: readonly ImageContent[] = []): Promise<void> {
     if (this.#activeGeneration !== undefined) throw new Error("PI_SESSION_TRANSACTION_ACTIVE");
     this.#admitInput(text);
-    await this.#runTransactional(() => this.#session.prompt(text));
+    await this.#runTransactional(() =>
+      this.#session.prompt(text, images.length === 0 ? undefined : { images: [...images] }),
+    );
   }
 
-  async steer(text: string): Promise<void> {
+  async steer(text: string, images: readonly ImageContent[] = []): Promise<void> {
     if (!this.#session.isStreaming) throw new Error("PI_SESSION_NOT_ACTIVE");
     this.#admitInput(text);
-    await this.#session.steer(text);
+    await this.#session.steer(text, [...images]);
   }
 
-  async followUp(text: string): Promise<void> {
+  async followUp(text: string, images: readonly ImageContent[] = []): Promise<void> {
     if (!this.#session.isStreaming) throw new Error("PI_SESSION_NOT_ACTIVE");
     this.#admitInput(text);
-    await this.#session.followUp(text);
+    await this.#session.followUp(text, [...images]);
   }
 
   async #runTransactional(action: () => Promise<void>): Promise<void> {

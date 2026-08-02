@@ -85,6 +85,7 @@
 | [ADR-0077](0077-resource-upload-and-lazy-virtual-filesystem.md) | 文件上传与按需只读虚拟目录 | 已接受 | 2026-08-01 |
 | [ADR-0078](0078-direct-vision-user-attachments.md) | 视觉模型当前轮图片直传 | 已接受 | 2026-08-02 |
 | [ADR-0079](0079-cube-resource-volume-plugin.md) | Cube 宿主机 ResourceFS Volume Plugin | 已接受 | 2026-08-02 |
+| [ADR-0085](0085-live-thinking-disclosure.md) | 运行中思考正文的实时披露 | 已接受 | 2026-08-02 |
 
 ## 何时必须记录
 

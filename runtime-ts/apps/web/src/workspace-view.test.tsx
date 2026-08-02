@@ -400,7 +400,7 @@ describe("工作台展示组件", () => {
     }
   });
 
-  it("思考与执行步骤直接进入横向状态轨道，不展示内部逐字记录", () => {
+  it("保留横向状态轨道，并在运行中默认展开实时思考内容", () => {
     const baseEvents: readonly RunEvent[] = [
       {
         eventId: "thinking-start",
@@ -437,13 +437,130 @@ describe("工作台展示组件", () => {
       />,
     );
 
-    expect(activeHtml).toContain('class="run-progress-track"');
-    expect(activeHtml).toContain("分析任务");
-    expect(activeHtml).not.toContain("先检查依赖，再生成文档。");
-    expect(activeHtml).not.toContain("<details");
-    expect(settledHtml).toContain("已完成分析");
-    expect(settledHtml).not.toContain("先检查依赖，再生成文档。");
-    expect(settledHtml).not.toContain("<details");
+    const active = document.createElement("div");
+    active.innerHTML = activeHtml;
+    const activeDetails = active.querySelector<HTMLDetailsElement>(".run-thinking");
+    const activeSummary = active.querySelector<HTMLElement>(".run-thinking summary");
+    const activeContent = active.querySelector<HTMLElement>(".run-thinking-content");
+    if (activeDetails === null || activeSummary === null || activeContent === null) {
+      throw new Error("未渲染实时思考披露区");
+    }
+
+    expect(active.querySelector(".run-progress-track")?.textContent).toContain("分析任务");
+    expect(activeDetails.open).toBe(true);
+    expect(activeSummary.textContent).toContain("正在思考");
+    expect(activeSummary.textContent).toContain("实时更新中");
+    expect(activeContent.textContent).toContain("先检查依赖，再生成文档。");
+    expect(activeContent.tagName).toBe("SECTION");
+    expect(activeContent.getAttribute("aria-busy")).toBe("true");
+    expect(activeContent.getAttribute("aria-live")).toBe("off");
+    expect(activeSummary.getAttribute("aria-controls")).toBe(activeContent.id);
+    expect(activeContent.getAttribute("aria-labelledby")).toBe(activeSummary.id);
+
+    const settled = document.createElement("div");
+    settled.innerHTML = settledHtml;
+    const settledDetails = settled.querySelector<HTMLDetailsElement>(".run-thinking");
+    expect(settled.querySelector(".run-progress-track")?.textContent).toContain("已完成分析");
+    expect(settledDetails?.open).toBe(false);
+    expect(settledDetails?.textContent).toContain("思考已完成");
+    expect(settledDetails?.textContent).toContain("先检查依赖，再生成文档。");
+    expect(settled.querySelector(".run-thinking-content")?.getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("思考结束时自动折叠，之后仍可手工展开，异常终态不会伪装成仍在思考", () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const liveEvents: readonly RunEvent[] = [
+      {
+        eventId: "thinking-start",
+        sequence: 1,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "thinking.started",
+        payload: {},
+      },
+      {
+        eventId: "thinking-delta",
+        sequence: 2,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "thinking.delta",
+        payload: { delta: "实时检查中。" },
+      },
+    ];
+
+    act(() => root.render(<RunTimeline run={running} events={liveEvents} />));
+    const details = container.querySelector<HTMLDetailsElement>(".run-thinking");
+    if (details === null) throw new Error("未渲染思考披露区");
+    expect(details.open).toBe(true);
+
+    const updatedLiveEvents: readonly RunEvent[] = [
+      ...liveEvents,
+      {
+        eventId: "thinking-delta-2",
+        sequence: 3,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "thinking.delta",
+        payload: { delta: "继续分析。" },
+      },
+    ];
+    act(() => root.render(<RunTimeline run={running} events={updatedLiveEvents} />));
+    expect(details.open).toBe(true);
+    expect(details.querySelector(".run-thinking-content")?.textContent).toContain(
+      "实时检查中。继续分析。",
+    );
+
+    const completedEvents: readonly RunEvent[] = [
+      ...updatedLiveEvents,
+      {
+        eventId: "thinking-end",
+        sequence: 4,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "thinking.completed",
+        payload: {},
+      },
+    ];
+    act(() => root.render(<RunTimeline run={running} events={completedEvents} />));
+    expect(details.open).toBe(false);
+    expect(details.classList).toContain("is-completed");
+
+    const summary = details.querySelector("summary");
+    if (summary === null) throw new Error("未渲染思考摘要按钮");
+    act(() => summary.click());
+    expect(details.open).toBe(true);
+    expect(details.textContent).toContain("收起");
+
+    act(() =>
+      root.render(
+        <RunTimeline
+          run={running}
+          events={[
+            ...completedEvents,
+            {
+              eventId: "tool-start",
+              sequence: 5,
+              occurredAt: "",
+              kind: "agent_event",
+              type: "tool.started",
+              payload: { name: "read_file", callId: "call-1" },
+            },
+          ]}
+        />,
+      ),
+    );
+    expect(details.open).toBe(true);
+
+    act(() =>
+      root.render(<RunTimeline run={{ ...running, status: "failed" }} events={liveEvents} />),
+    );
+    expect(details.open).toBe(false);
+    expect(details.classList).toContain("is-stopped");
+    expect(details.textContent).toContain("思考已结束");
+    expect(container.querySelector(".run-progress-track")?.textContent).toContain("分析已结束");
+
+    act(() => root.unmount());
   });
 
   it("waiting 状态卡不混入问题或正文，普通 Agent 正文保留二者", () => {

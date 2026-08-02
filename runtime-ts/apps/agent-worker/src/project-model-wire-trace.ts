@@ -17,10 +17,13 @@ import {
   type ModelWireTracePort,
   type ModelWireTraceRecord,
 } from "./model-wire-trace.js";
+import type { RuntimeEventV1 } from "./ports.js";
+import type { RunEventDiagnosticRecord, RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 export const PROJECT_MODEL_WIRE_TRACE_ROOT = join(PROJECT_ROOT, "model-wire-traces");
 const captureStatuses = new Set(["complete", "truncated", "aborted", "failed"]);
+const eventKinds = new Set(["agent_event", "attempt_state_changed", "run_waiting"]);
 
 interface OpenMirrorDirectory {
   readonly path: string;
@@ -73,6 +76,48 @@ export class ProjectModelWireTraceMirror implements ModelWireTracePort {
   }
 }
 
+/**
+ * 将已经形成 durable mutation 的 Run 事件写成逐事件不可变文件。逐事件文件避免 append
+ * 在进程退出或幂等重放时产生半行、重复行或覆盖既有证据。
+ */
+export class ProjectRunEventMirror implements RunEventDiagnosticsPort {
+  readonly #trustedBase: string;
+  readonly #rootSegments: readonly string[];
+
+  constructor(root = PROJECT_MODEL_WIRE_TRACE_ROOT, trustedBase = dirname(root)) {
+    if (!isAbsolute(root) || !isAbsolute(trustedBase))
+      throw new TypeError("Run 事件本地镜像根目录必须是绝对路径");
+    const lexicalBase = resolve(trustedBase);
+    const lexicalRoot = resolve(root);
+    const rootRelative = relative(lexicalBase, lexicalRoot);
+    if (!isContainedRelative(rootRelative))
+      throw new TypeError("Run 事件本地镜像根目录越出受信边界");
+    const segments = rootRelative.split(sep).filter((segment) => segment.length > 0);
+    if (segments.length === 0 || segments.some((segment) => segment === "." || segment === ".."))
+      throw new TypeError("Run 事件本地镜像根目录无效");
+    this.#trustedBase = lexicalBase;
+    this.#rootSegments = Object.freeze(segments);
+  }
+
+  async persist(record: RunEventDiagnosticRecord): Promise<void> {
+    assertModelWireTraceContext(record.context);
+    assertRunEvent(record.event);
+    const directory = await openMirrorDirectory(this.#trustedBase, [
+      ...this.#rootSegments,
+      record.context.runId,
+      record.context.attemptId,
+    ]);
+    try {
+      const sequence = String(record.event.sequence).padStart(8, "0");
+      const filename = `runtime-event-${sequence}-${record.event.kind}.json`;
+      const body = new TextEncoder().encode(`${canonicalJson(record.event)}\n`);
+      await writeOnceAtomically(directory, filename, body);
+    } finally {
+      await directory.close().catch(() => undefined);
+    }
+  }
+}
+
 /** 本地镜像永远是 best-effort；只有权威端口失败才能进入既有 durable 诊断失败语义。 */
 class BestEffortMirroredModelWireTracePort implements ModelWireTracePort {
   constructor(
@@ -105,6 +150,16 @@ export function withDevelopmentProjectModelWireTraceMirror(
 ): ModelWireTracePort {
   if (runtimeMode !== "development") return authoritative;
   return new BestEffortMirroredModelWireTracePort(authoritative, createMirror());
+}
+
+/** 与原始模型报文共用显式敏感诊断开关；production 永不创建宿主机文件镜像。 */
+export function createDevelopmentProjectRunEventMirror(
+  runtimeMode: "development" | "production",
+  enabled: boolean,
+  createMirror: () => RunEventDiagnosticsPort = () =>
+    new ProjectRunEventMirror(PROJECT_MODEL_WIRE_TRACE_ROOT, PROJECT_ROOT),
+): RunEventDiagnosticsPort | undefined {
+  return runtimeMode === "development" && enabled ? createMirror() : undefined;
 }
 
 async function openMirrorDirectory(
@@ -324,4 +379,28 @@ function assertMirrorRecord(record: ModelWireTraceRecord): void {
   if (!captureStatuses.has(record.status)) throw new TypeError("模型网络本地镜像状态无效");
   if (!(record.body instanceof Uint8Array) || record.size !== record.body.byteLength)
     throw new TypeError("模型网络本地镜像正文无效");
+}
+
+function assertRunEvent(event: RuntimeEventV1): void {
+  if (!Number.isSafeInteger(event.sequence) || event.sequence < 0)
+    throw new TypeError("Run 事件本地镜像序号无效");
+  if (event.schemaVersion !== 1 || !eventKinds.has(event.kind))
+    throw new TypeError("Run 事件本地镜像协议无效");
+  if (typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload))
+    throw new TypeError("Run 事件本地镜像正文无效");
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(canonical(value), null, 2);
+}
+
+function canonical(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(canonical);
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+      .map(([key, item]) => [key, canonical(item)]),
+  );
 }

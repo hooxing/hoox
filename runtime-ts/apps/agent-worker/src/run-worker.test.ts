@@ -20,6 +20,7 @@ import type {
   RuntimeMutation,
   ThreadContinuityMetricsPort,
 } from "./ports.js";
+import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
 import { RunWorker, type RunWorkerOptions } from "./run-worker.js";
 import {
   BlockingAgentSession,
@@ -50,6 +51,7 @@ function harness(
   sessions: Array<ScriptedAgentSession | BlockingAgentSession>,
   seed = fakeSeed(),
   workerOptions: Partial<RunWorkerOptions> = {},
+  runEventDiagnostics?: RunEventDiagnosticsPort,
 ) {
   const persistence = new FakeExecutionPersistence();
   const scope = persistence.addSeed(seed);
@@ -79,6 +81,7 @@ function harness(
       clock,
       metrics,
       continuityMetrics,
+      ...(runEventDiagnostics === undefined ? {} : { runEventDiagnostics }),
       ...(workerOptions.threadContextWriteEnabled === true ? { threadContextBodies } : {}),
       ...(workerOptions.threadSandboxSessionReuseEnabled === true ? { threadSandboxes } : {}),
     },
@@ -105,10 +108,31 @@ function harness(
     continuityMetrics,
     threadContextBodies,
     threadSandboxes,
+    runEventDiagnostics,
   };
 }
 
 describe("Run Worker 双栅栏与恢复状态机", () => {
+  it("durable mutation 成功后 best-effort 镜像 Run 事件，镜像失败不改变 Run 结果", async () => {
+    const persist = vi.fn<RunEventDiagnosticsPort["persist"]>(async () => {
+      throw new Error("测试磁盘只读");
+    });
+    const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {}, { persist });
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(persist).toHaveBeenCalled();
+    expect(
+      persist.mock.calls.some(
+        ([record]) =>
+          record.context.runId === h.scope.runId &&
+          record.context.attemptId.startsWith("attempt-") &&
+          record.event.kind === "agent_event" &&
+          record.event.payload.type === "message.delta",
+      ),
+    ).toBe(true);
+  });
+
   it("阶段 5 成功终态先提交 pause intent，再执行 lifecycle effect，且不走 success-close", async () => {
     const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
       threadSandboxSessionReuseEnabled: true,

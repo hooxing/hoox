@@ -11,8 +11,8 @@ import {
   createPostgresPool,
   createS3BlobStore,
   createS3StableBlobGarbageCollector,
-  DurableTraceBlobPersistenceAdapter,
   DurableResourceBlobWriter,
+  DurableTraceBlobPersistenceAdapter,
   DurableWorkspaceCandidateBlobWriter,
   PgBackedSandboxSessionRegistry,
   PgBlobLifecycleRepository,
@@ -22,10 +22,10 @@ import {
   PgResourceFilesystemCatalog,
   PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
-  PgThreadContextHistoryRepository,
   PgThreadContextCompactionRepository,
-  PgThreadSandboxSessionLifecycle,
+  PgThreadContextHistoryRepository,
   PgThreadContinuityMetrics,
+  PgThreadSandboxSessionLifecycle,
   PgWorkspaceCandidateHandoff,
   PgWorkspaceManifestRepository,
   PgWorkspaceStableBlobAccess,
@@ -34,7 +34,6 @@ import {
   RUNTIME_BLOB_OBJECT_PREFIX,
   ThreadContextBodyPersistence,
 } from "@cube-runtime/persistence";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import { bindTrustedPiModelContextCapability } from "@cube-runtime/pi-adapter";
 import {
   assertProductionInheritedEnvironment,
@@ -53,6 +52,7 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
+import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import { CubeTenantResourceVolume, resolveCubeProxyRouting } from "@cube-runtime/sandbox";
 import { DeliverFileToolRouterFactory } from "@cube-runtime/tool-router";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
@@ -61,7 +61,6 @@ import { SandboxDeliverFileSource } from "./deliver-file-source.js";
 import { installModelWireFetchInstrumentation, ModelWireTraceSession } from "./model-wire-trace.js";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
 import { PiWorkerSessionFactory } from "./pi-session-factory.js";
-import { BlobPromptImageLoader } from "./prompt-image-loader.js";
 import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
@@ -69,7 +68,11 @@ import {
   ProcessShutdown,
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
-import { withDevelopmentProjectModelWireTraceMirror } from "./project-model-wire-trace.js";
+import {
+  createDevelopmentProjectRunEventMirror,
+  withDevelopmentProjectModelWireTraceMirror,
+} from "./project-model-wire-trace.js";
+import { BlobPromptImageLoader } from "./prompt-image-loader.js";
 import { RunWorker } from "./run-worker.js";
 import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
 import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
@@ -649,6 +652,10 @@ async function assembleWorkerRuntime(
           configuration.model.baseUrl,
         ),
     });
+    const runEventDiagnostics = createDevelopmentProjectRunEventMirror(
+      runtimeMode,
+      configuration.model.wireTraceEnabled,
+    );
     const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
     const threadContinuityMetrics = new PgThreadContinuityMetrics(pool);
     const runtimeCompaction = new RuntimeCompactionCoordinator(
@@ -900,6 +907,7 @@ async function assembleWorkerRuntime(
         clock: new SystemWorkerClock(),
         metrics: new PgRecoveryMetrics(pool),
         continuityMetrics: threadContinuityMetrics,
+        ...(runEventDiagnostics === undefined ? {} : { runEventDiagnostics }),
         ...(configuration.threadContext.writeEnabled ? { threadContextBodies } : {}),
         ...(configuration.threadSandbox.reuseEnabled ? { threadSandboxes } : {}),
       },

@@ -86,6 +86,7 @@
 | [ADR-0078](0078-direct-vision-user-attachments.md) | 视觉模型当前轮图片直传 | 已接受 | 2026-08-02 |
 | [ADR-0079](0079-cube-resource-volume-plugin.md) | Cube 宿主机 ResourceFS Volume Plugin | 已接受 | 2026-08-02 |
 | [ADR-0084](0084-runtime-direct-answer-and-explicit-execution-boundary.md) | Runtime 直接回答与显式执行授权边界 | 已接受 | 2026-08-02 |
+| [ADR-0085](0085-live-thinking-disclosure.md) | 运行中思考正文的实时披露 | 已接受 | 2026-08-02 |
 | [ADR-0086](0086-parallel-tool-call-durable-rollout-serialization.md) | 并行工具调用的 Durable Rollout 串行化边界 | 已接受 | 2026-08-02 |
 | [ADR-0087](0087-development-run-event-file-diagnostics.md) | 开发环境 Run 事件文件诊断 | 已接受 | 2026-08-02 |
 

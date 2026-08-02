@@ -7,6 +7,7 @@ VOLUME_ID=""
 NAME=""
 REF_COUNT="0"
 VOLUME_BASE_DIR=""
+METADATA=""
 
 fail() {
   printf '{"error":"RESOURCEFS_VOLUME_PLUGIN_FAILED"}\n'
@@ -23,6 +24,21 @@ ensure_directory() {
   [[ -d "$1" && ! -L "$1" ]] || fail
 }
 
+load_config() {
+  [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || fail
+  [[ "$(stat -c %u "$CONFIG_FILE")" == "0" ]] || fail
+  config_mode="$(stat -c %a "$CONFIG_FILE")"
+  [[ "$config_mode" =~ ^[0-7]{3,4}$ && "${config_mode: -2}" == "00" ]] || fail
+  # 配置文件由部署方以 root:root 0600 提供；它是插件唯一的秘密输入边界。
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  : "${RESOURCEFS_VOLUME_BASE_DIR:=/data/cube-shared/volume}"
+  [[ "$RESOURCEFS_VOLUME_BASE_DIR" =~ ^/[A-Za-z0-9_./-]+$ ]] || fail
+  [[ "$RESOURCEFS_VOLUME_BASE_DIR" != *"/../"* && "$RESOURCEFS_VOLUME_BASE_DIR" != */.. ]] || fail
+  RESOURCEFS_VOLUME_BASE_DIR="${RESOURCEFS_VOLUME_BASE_DIR%/}"
+  [[ -n "$RESOURCEFS_VOLUME_BASE_DIR" ]] || fail
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --op) need_value "$@"; OP="$2"; shift 2 ;;
@@ -30,7 +46,8 @@ while [[ $# -gt 0 ]]; do
     --name) need_value "$@"; NAME="$2"; shift 2 ;;
     --ref-count) need_value "$@"; REF_COUNT="$2"; shift 2 ;;
     --volume-base-dir) need_value "$@"; VOLUME_BASE_DIR="$2"; shift 2 ;;
-    --sandbox-id|--namespace|--private-data|--metadata) need_value "$@"; shift 2 ;;
+    --metadata) need_value "$@"; METADATA="$2"; shift 2 ;;
+    --sandbox-id|--namespace|--private-data) need_value "$@"; shift 2 ;;
     *) fail ;;
   esac
 done
@@ -50,13 +67,8 @@ case "$OP" in
   attach)
     [[ "$VOLUME_BASE_DIR" =~ ^/[A-Za-z0-9_./-]+$ ]] || fail
     [[ "$VOLUME_BASE_DIR" != *"/../"* && "$VOLUME_BASE_DIR" != */.. ]] || fail
-    [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || fail
-    [[ "$(stat -c %u "$CONFIG_FILE")" == "0" ]] || fail
-    config_mode="$(stat -c %a "$CONFIG_FILE")"
-    [[ "$config_mode" =~ ^[0-7]{3,4}$ && "${config_mode: -2}" == "00" ]] || fail
-    # 配置文件由部署方以 root:root 0600 提供；它是插件唯一的秘密输入边界。
-    # shellcheck disable=SC1090
-    source "$CONFIG_FILE"
+    load_config
+    [[ "${VOLUME_BASE_DIR%/}" == "$RESOURCEFS_VOLUME_BASE_DIR" ]] || fail
     : "${RESOURCE_FILESYSTEM_ENDPOINT:?}"
     : "${RESOURCE_FILESYSTEM_SIGNING_KEY:?}"
     : "${RESOURCEFS_RCLONE_BIN:=/usr/bin/rclone}"
@@ -93,8 +105,6 @@ case "$OP" in
         "$RESOURCEFS_RCLONE_BIN" mount resourcefs: "$volume_root" \
           --read-only \
           --allow-other \
-          --daemon \
-          --daemon-timeout 20s \
           --dir-cache-time 30s \
           --poll-interval 0 \
           --vfs-cache-mode full \
@@ -104,25 +114,41 @@ case "$OP" in
           --log-file "$log_root/rclone.log" \
           --log-level NOTICE \
           --dir-perms 0555 \
-          --file-perms 0444
+          --file-perms 0444 \
+          </dev/null >/dev/null 2>&1 &
+      mount_pid="$!"
       for _ready in {1..40}; do
         mountpoint -q "$volume_root" && break
+        if ! kill -0 "$mount_pid" 2>/dev/null; then
+          wait "$mount_pid" 2>/dev/null || true
+          fail
+        fi
         sleep 0.25
       done
-      mountpoint -q "$volume_root" || fail
+      if ! mountpoint -q "$volume_root"; then
+        kill "$mount_pid" 2>/dev/null || true
+        wait "$mount_pid" 2>/dev/null || true
+        fail
+      fi
     fi
     printf '{"host_path":"%s","metadata":{"mount_dir":"%s"},"error":""}\n' "$volume_root" "$volume_root"
     ;;
   detach)
-    [[ "$VOLUME_BASE_DIR" =~ ^/[A-Za-z0-9_./-]+$ ]] || fail
-    volume_root="${VOLUME_BASE_DIR%/}/runtime-resourcefs-${VOLUME_ID}"
+    load_config
+    command -v mountpoint >/dev/null || fail
+    command -v fusermount3 >/dev/null || fail
+    volume_root="${RESOURCEFS_VOLUME_BASE_DIR}/runtime-resourcefs-${VOLUME_ID}"
+    expected_metadata="$(printf '{\"mount_dir\":\"%s\"}' "$volume_root")"
+    [[ "$METADATA" == "$expected_metadata" ]] || fail
     if [[ "$REF_COUNT" == "0" ]] && mountpoint -q "$volume_root"; then
       fusermount3 -uz "$volume_root" || fail
       for _detached in {1..40}; do
         mountpoint -q "$volume_root" || break
         sleep 0.25
       done
-      mountpoint -q "$volume_root" && fail
+      if mountpoint -q "$volume_root"; then
+        fail
+      fi
     fi
     printf '{"error":""}\n'
     ;;

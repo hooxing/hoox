@@ -18,24 +18,34 @@ export function registerResourceFilesystemHttp(
     capabilities: ResourceFilesystemCapabilityCodec;
   }>,
 ): void {
-  app.addContentTypeParser(
-    ["application/xml", "text/xml"],
-    { parseAs: "string", bodyLimit: 64 * 1_024 },
-    (_request, body, done) => done(null, body),
-  );
-  app.addHttpMethod("PROPFIND", { hasBody: true });
-  for (const url of [HTTP_ROOT, `${HTTP_ROOT}/*`]) {
-    app.route({
-      method: "PROPFIND" as HTTPMethods,
-      url,
-      handler: async (request, reply) => handlePropfind(request, reply, dependencies),
-    });
-    app.route({
-      method: ["GET", "HEAD", "OPTIONS"],
-      url,
-      handler: async (request, reply) => handleRead(request, reply, dependencies),
-    });
-  }
+  app.register((resourceApp, _options, done) => {
+    resourceApp.addContentTypeParser(
+      ["application/xml", "text/xml"],
+      { parseAs: "string", bodyLimit: 64 * 1_024 },
+      (_request, body, parserDone) => parserDone(null, body),
+    );
+    // rclone 的 PROPFIND 带 XML body 却不发送 Content-Type。兼容解析器只封装在只读
+    // ResourceFS 路由内，避免放宽 JSON API 和文件上传端点的媒体类型契约。
+    resourceApp.addContentTypeParser(
+      "*",
+      { parseAs: "string", bodyLimit: 64 * 1_024 },
+      (_request, body, parserDone) => parserDone(null, body),
+    );
+    resourceApp.addHttpMethod("PROPFIND", { hasBody: true });
+    for (const url of [HTTP_ROOT, `${HTTP_ROOT}/*`]) {
+      resourceApp.route({
+        method: "PROPFIND" as HTTPMethods,
+        url,
+        handler: async (request, reply) => handlePropfind(request, reply, dependencies),
+      });
+      resourceApp.route({
+        method: ["GET", "HEAD", "OPTIONS"],
+        url,
+        handler: async (request, reply) => handleRead(request, reply, dependencies),
+      });
+    }
+    done();
+  });
 }
 
 async function handlePropfind(

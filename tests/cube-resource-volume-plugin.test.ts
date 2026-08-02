@@ -21,6 +21,21 @@ describe("Cube ResourceFS binary Volume plugin 契约", () => {
     expect(script).not.toContain("MINIO_");
   });
 
+  it("rclone 后台进程不继承 Cubelet 的 Hook 输出管道", () => {
+    expect(script).not.toContain("--daemon");
+    expect(script).toMatch(/--file-perms 0444 \\\r?\n\s*<\/dev\/null >\/dev\/null 2>&1 &/u);
+    expect(script).toContain('mount_pid="$!"');
+    expect(script).toContain('kill -0 "$mount_pid"');
+  });
+
+  it("Detach 从 root 配置重建固定路径而不依赖未提供的 volume-base-dir", () => {
+    expect(script).toContain(`: "\${RESOURCEFS_VOLUME_BASE_DIR:=/data/cube-shared/volume}"`);
+    expect(script).toContain('expected_metadata="$(printf');
+    expect(script).toContain('[[ "$METADATA" == "$expected_metadata" ]]');
+    expect(script).not.toMatch(/detach\)\s*\n\s*\[\[ "\$VOLUME_BASE_DIR"/u);
+    expect(script).not.toContain('mountpoint -q "$volume_root" && fail');
+  });
+
   it("宿主 capability 与 Runtime v2 JSON/HMAC 输入保持字节一致", () => {
     expect(script).toContain('printf \'{"v":2,"tenantId":"%s"}\' "$VOLUME_ID"');
     expect(script).toContain(

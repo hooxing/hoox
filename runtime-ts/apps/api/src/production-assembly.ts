@@ -49,6 +49,8 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
       expectedRuntimeRole: configuration.databaseRuntimeRole,
       applicationName: "cube-runtime-api-production",
       serialQueueV2Enabled: configuration.serialQueueV2Enabled,
+      // PG 签发的 canonical physicalObjectKey 必须与 S3 客户端使用同一持久前缀。
+      blobLifecycle: { objectPrefix: RUNTIME_BLOB_OBJECT_PREFIX },
     });
     let app: ReturnType<typeof createApiApp> | undefined;
     try {

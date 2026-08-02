@@ -80,7 +80,10 @@ export interface ApiPersistenceRuntime {
 }
 
 export function createApiPersistenceRuntime(
-  options: PostgresPoolOptions & { readonly serialQueueV2Enabled?: boolean },
+  options: PostgresPoolOptions & {
+    readonly serialQueueV2Enabled?: boolean;
+    readonly blobLifecycle?: PgBlobLifecycleOptions;
+  },
 ): ApiPersistenceRuntime {
   const pool = createPostgresPool(options);
   return Object.freeze({
@@ -93,7 +96,7 @@ export function createApiPersistenceRuntime(
     threadInputs: new PgThreadInputRouting(pool),
     experience: new PgRunExperienceReadRepository(pool),
     modelWireTraces: new PgModelWireTraceReadRepository(pool),
-    blobLifecycle: new PgBlobLifecycleRepository(pool),
+    blobLifecycle: new PgBlobLifecycleRepository(pool, options.blobLifecycle),
     resourceCatalog: new PgResourceCatalog(pool),
     resourceUploads: new PgResourceUploadRepository(pool),
     resourceFilesystem: new PgResourceFilesystemCatalog(pool),

@@ -45,6 +45,7 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
   if (tool === undefined) throw new Error("测试缺少 exec_command");
   return {
     execute: tool.execute as unknown as ToolExecute,
+    executionMode: tool.executionMode,
     prepareArguments: tool.prepareArguments,
     parameters: tool.parameters,
     receipts,
@@ -56,6 +57,11 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
 describe("exec_command", () => {
   it("新 Session 只暴露一个同步命令工具", () => {
     expect(SANDBOX_TOOL_NAMES).toEqual(["exec_command"]);
+  });
+
+  it("同一模型消息中的多个 durable 调用按完整 call/result 对顺序执行", () => {
+    const tested = fixture({ command: vi.fn() } as unknown as SandboxHandle);
+    expect(tested.executionMode).toBe("sequential");
   });
 
   it("默认在 /workspace 通过 Bash 执行并把真实结构化结果返回模型", async () => {

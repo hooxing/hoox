@@ -21,6 +21,7 @@ describe("deliver_file Pi 工具", () => {
       "将 CubeSandbox 中已经生成的文件作为本次任务的交付文件提供给用户。仅当文件已成功保存为可下载交付物时返回成功。",
     );
     expect(tool.description).not.toContain("页面");
+    expect(tool.executionMode).toBe("sequential");
     const result = await tool.execute(
       "call-deliver",
       { path: "/workspace/report.pdf" },

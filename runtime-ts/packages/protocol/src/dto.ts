@@ -68,6 +68,11 @@ export const RunDtoSchema = Type.Object(
     tenantId: IdSchema,
     threadId: IdSchema,
     status: RunStatusSchema,
+    /**
+     * Domain Run 继续保持六态；该可选覆盖只表达最新 Attempt 已明确停止执行并需要恢复。
+     * 旧客户端可以忽略它，新客户端不得再仅凭 running 推断 Worker 仍在运行。
+     */
+    executionStatus: Type.Optional(Type.Literal("recovery_required")),
     createdAt: IsoTimestampSchema,
     updatedAt: IsoTimestampSchema,
   },

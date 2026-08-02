@@ -37,6 +37,20 @@ describe("协议 Schema", () => {
     expect(restored).toEqual(dto);
   });
 
+  it("Run 可追加 recovery_required 执行投影而不扩张 Domain 六态", () => {
+    const dto = {
+      id: "run_recovery_projection",
+      tenantId: "tenant_one",
+      threadId: "thread_one",
+      status: "running",
+      executionStatus: "recovery_required",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    };
+    expect(Value.Check(RunDtoSchema, dto)).toBe(true);
+    expect(Value.Check(RunDtoSchema, { ...dto, executionStatus: "running" })).toBe(false);
+  });
+
   it("严格拒绝未声明字段和非法状态", () => {
     const base = {
       id: "thread_one",

@@ -314,7 +314,8 @@ h2 {
   background: #d7f1e4;
 }
 .is-failed,
-.is-cancelled {
+.is-cancelled,
+.is-recovery-required {
   color: #9e302e;
   background: #fde5e3;
 }

@@ -11,6 +11,8 @@ export type Run = {
   readonly id: string;
   readonly threadId: string;
   readonly status: RunStatus;
+  /** Domain Run 仍可为 running，但该 durable 投影证明当前 Attempt 已停止执行。 */
+  readonly executionStatus?: "recovery_required";
   readonly createdAt: string;
   readonly updatedAt: string;
 };

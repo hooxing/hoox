@@ -52,6 +52,10 @@ PostgreSQL/S3/CubeSandbox/Pi/Workspace/Artifact 依赖图；它绝不会复用 d
 JPEG、GIF 与 WebP 附件以内联图片输入直接提交给模型；设为 `false` 时不读取图片字节，模型仍可从 user turn
 中的稳定 `/resources/...` 路径按需使用文件。该开关不能依赖 Provider 失败后自动降级。
 
+`/resources` 要求 CubeSandbox 0.6+ 的 `runtime-resourcefs` Volume driver：Worker 只通过 Cube Volume API
+确保 Tenant 卷并在创建时绑定，rclone/FUSE 运行于 Cubelet 宿主机而不是 Sandbox 模板。节点安装和真实
+上线 Gate 见 `deploy/cube-resource-volume/README.md`。
+
 ### 模型网络报文诊断（development）
 
 模型网络报文诊断默认关闭。需要定位“模型生成的工具参数有误”还是“工具内部执行失败”时，在本机 `.env`

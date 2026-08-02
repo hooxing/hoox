@@ -1,0 +1,4 @@
+# 安装为 /etc/cubesandbox/resourcefs-volume.conf，root:root 0600。
+RESOURCE_FILESYSTEM_ENDPOINT='https://app.example.invalid/v1/resource-filesystem'
+RESOURCE_FILESYSTEM_SIGNING_KEY='replace-with-the-same-key-used-by-runtime-api'
+RESOURCEFS_RCLONE_BIN='/usr/bin/rclone'

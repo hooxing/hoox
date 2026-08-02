@@ -113,6 +113,7 @@ export class CubeSandboxGateway implements SandboxGateway {
     validateTemplateId(input.templateId);
     validateEnvironment(input.env);
     validateLifecycle(input.lifecycle);
+    validateVolumeMounts(input.volumeMounts);
     const ttlSeconds = validateTtl(input.ttlSeconds, this.maxCreateTtlSeconds);
     const effectiveControl = this.control(control);
     if (effectiveControl.signal?.aborted) {
@@ -134,6 +135,16 @@ export class CubeSandboxGateway implements SandboxGateway {
         metadata: { [CREATE_REQUEST_METADATA]: requestId },
         ...(input.env === undefined ? {} : { envVars: input.env }),
         ...(input.lifecycle === undefined ? {} : { lifecycle: { ...input.lifecycle } }),
+        ...(input.volumeMounts === undefined
+          ? {}
+          : {
+              extra: {
+                volumeMounts: input.volumeMounts.map((mount) => ({
+                  name: mount.name,
+                  path: mount.path,
+                })),
+              },
+            }),
       });
     } catch (error) {
       const mapped = mapSandboxError(error, "创建 Sandbox");
@@ -316,6 +327,17 @@ function validateLifecycle(input: SandboxCreateInput["lifecycle"]): void {
   }
   if (input.autoResume !== undefined && typeof input.autoResume !== "boolean") {
     throw new SandboxRuntimeError("INVALID_ARGUMENT", "Sandbox lifecycle.autoResume 无效");
+  }
+}
+
+function validateVolumeMounts(input: SandboxCreateInput["volumeMounts"]): void {
+  if (input === undefined) return;
+  if (
+    input.length !== 1 ||
+    input[0]?.path !== "/resources" ||
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(input[0].name)
+  ) {
+    throw new SandboxRuntimeError("INVALID_ARGUMENT", "Sandbox Resource Volume 挂载无效");
   }
 }
 

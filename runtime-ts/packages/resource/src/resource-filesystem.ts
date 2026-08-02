@@ -135,11 +135,21 @@ export function resourceFilesystemFileName(name: string): string {
   return bounded.length === 0 ? "file" : bounded;
 }
 
-export interface ResourceFilesystemCapability {
+export interface SandboxResourceFilesystemCapability {
   readonly tenantId: TenantId;
   readonly sandboxId: string;
   readonly expiresAt: number;
 }
+
+/** 只供 Cubelet 宿主机 Volume 插件持有；不会进入 Sandbox 或模型上下文。 */
+export interface HostVolumeResourceFilesystemCapability {
+  readonly kind: "host_volume";
+  readonly tenantId: TenantId;
+}
+
+export type ResourceFilesystemCapability =
+  | SandboxResourceFilesystemCapability
+  | HostVolumeResourceFilesystemCapability;
 
 export interface ResourceFilesystemCapabilityCodec {
   issue(input: {
@@ -147,6 +157,7 @@ export interface ResourceFilesystemCapabilityCodec {
     readonly sandboxId: string;
     readonly ttlSeconds: number;
   }): string;
+  issueHostVolume(input: { readonly tenantId: TenantId }): string;
   verify(token: string): ResourceFilesystemCapability | undefined;
 }
 
@@ -155,6 +166,11 @@ interface CapabilityPayload {
   readonly tenantId: string;
   readonly sandboxId: string;
   readonly expiresAt: number;
+}
+
+interface HostVolumeCapabilityPayload {
+  readonly v: 2;
+  readonly tenantId: string;
 }
 
 const CAPABILITY_PATTERN = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u;
@@ -204,6 +220,12 @@ export function createResourceFilesystemCapabilityCodec(input: {
       const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
       return `${body}.${sign(body).toString("base64url")}`;
     },
+    issueHostVolume(request: { readonly tenantId: TenantId }) {
+      resourceInvariant(ID_PATTERN.test(request.tenantId), "INVALID_REQUEST", "Tenant ID 无效");
+      const payload: HostVolumeCapabilityPayload = { v: 2, tenantId: request.tenantId };
+      const body = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+      return `${body}.${sign(body).toString("base64url")}`;
+    },
     verify(token: string) {
       if (token.length > 2_048 || !CAPABILITY_PATTERN.test(token)) return undefined;
       const [body, rawSignature] = token.split(".");
@@ -220,15 +242,33 @@ export function createResourceFilesystemCapabilityCodec(input: {
       if (signature.byteLength !== expected.byteLength || !timingSafeEqual(signature, expected)) {
         return undefined;
       }
-      if (!isCapabilityPayload(payload) || payload.expiresAt <= now()) return undefined;
+      if (isCapabilityPayload(payload)) {
+        if (payload.expiresAt <= now()) return undefined;
+        return Object.freeze({
+          tenantId: payload.tenantId as TenantId,
+          sandboxId: payload.sandboxId,
+          expiresAt: payload.expiresAt,
+        });
+      }
+      if (!isHostVolumeCapabilityPayload(payload)) return undefined;
       return Object.freeze({
+        kind: "host_volume" as const,
         tenantId: payload.tenantId as TenantId,
-        sandboxId: payload.sandboxId,
-        expiresAt: payload.expiresAt,
       });
     },
   };
   return Object.freeze(codec);
+}
+
+function isHostVolumeCapabilityPayload(value: unknown): value is HostVolumeCapabilityPayload {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Object.keys(record).length === 2 &&
+    record.v === 2 &&
+    typeof record.tenantId === "string" &&
+    ID_PATTERN.test(record.tenantId)
+  );
 }
 
 function isCapabilityPayload(value: unknown): value is CapabilityPayload {

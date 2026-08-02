@@ -48,17 +48,22 @@ API 暴露受 capability 保护的只读 WebDAV 视图；Sandbox 模板安装 rc
 无需修改模板，但 URL 有时效，shell、库和模型 Provider 的下载能力不同；对话恢复后旧 URL
 可能失效。直接暴露签名 URL也扩大了泄漏面，并让普通文件、图片和历史 Resource 形成多套逻辑。
 
+### 方案 D：宿主机 ResourceFS 加 Cube Volume Plugin
+
+Cubelet 宿主机运行只读 ResourceFS 挂载，由 Cube Volume Plugin 返回 `hostPath`，Cube 再通过
+virtiofs 将其绑定到 Sandbox `/resources`。Sandbox 模板不安装 rclone/FUSE，也不持有网络令牌。
+
 ## 选择
 
-选择方案 B：
+原首版选择方案 B；Cube 0.6 提供正式 Volume Plugin 后，按 ADR-0079 切换为方案 D：
 
 - 上传 API 把原始字节写入现有可恢复 Blob 生命周期，再原子创建 `origin=upload` 的不可变
   Resource 首版；
 - 所有版本使用 `/resources/<resourceId>/<versionId>/<safeFileName>`，文件名只影响末段展示，
   Resource ID 与 Version ID 决定身份；
 - API 内置只读 WebDAV 模块，目录只投影当前 Tenant 中 `searchable` 且 Blob 为 `stable` 的版本；
-- Worker 为 Tenant 与 Sandbox ID 签发 HMAC capability，在 Sandbox 创建或恢复后挂载
-  `/resources`；挂载失败时在模型执行前失败关闭，不回退为全量复制；
+- Worker 为 Tenant 幂等确保一个长期 Cube Volume，并在创建 Sandbox 时通过 `volumeMounts` 固定绑定
+  `/resources`；Cubelet 插件在宿主机挂载 ResourceFS，attach 失败会直接使 Sandbox 创建失败；
 - `/resources` 位于 `/workspace` 之外，不参与 Workspace Revision、Artifact 发布或写租约；
 - 当前消息只提交 `{resourceId, versionId}`。API 重验目录授权后，把 JSON 转义的文件名和稳定
   路径追加到最新 user 文本；system、developer/harness prompt 与工具 schema 不改变；
@@ -98,11 +103,12 @@ Blob 完整性校验与运维链路；边界已经足够窄，访问量或故障
 
 ### 负面影响与成本
 
-- Sandbox 模板必须包含 rclone、FUSE3，并由 Provider 提供 `/dev/fuse`；
+- Cube 平台必须为 0.6 及以上，CubeMaster/Cubelet 必须注册同名 ResourceFS Volume Plugin；
+- rclone 与 FUSE3 只安装在 Cubelet 宿主机，Sandbox 模板不再包含它们；
 - API 暂时承担 WebDAV 目录与文件读取流量；首版 BlobStore 会先做完整对象校验，单文件上限为
   16 MiB，不适合作为大文件流式网关；
-- rclone 在打开过的文件上使用 Sandbox 临时缓存，已使用文件仍会占用临时磁盘；
-- capability 在 Worker 与 API 间共享签名配置，需由秘密管理系统一致注入并定期轮换；
+- rclone 在打开过的文件上使用 Cubelet 宿主机缓存，已使用文件仍会占用节点磁盘；
+- 宿主机插件与 API 共享签名配置，需由秘密管理系统一致注入并按 ADR-0079 的卸载顺序轮换；
 - 当前租户 Resource 目录沿用既有 Tenant 共享语义，不新增“上传者私有”所有权模型。
 
 ### 安全、数据与运维影响
@@ -110,29 +116,32 @@ Blob 完整性校验与运维链路；边界已经足够窄，访问量或故障
 - 上传请求要求认证、幂等键、受限文件名、媒体类型和 16 MiB 大小边界；
 - Blob 先进入可恢复生命周期，只有 stable 引用和 ResourceVersion 在事务中绑定成功后才可见；
 - WebDAV 仅支持 `OPTIONS`、`PROPFIND`、`GET`、`HEAD`，拒绝写操作；
-- capability 绑定 Tenant、Sandbox ID 与过期时间，Sandbox 每次恢复重新挂载；当前 API 以签名
-  真实性作为授权，不根据 Provider 状态反查 Sandbox ID；
-- 生产 WebDAV 端点必须 HTTPS。开发环境需用受控 HTTPS 隧道让远端 Sandbox 访问本地 API；
-- 模板基础镜像与 rclone 镜像均须固定审核过的 digest。Provider 不支持 FUSE 时不得上线该模板。
+- 宿主机 capability 绑定 Tenant、使用独立 audience 且没有请求级过期时间，只存在于可信 Cubelet；
+  Sandbox 不可读取 bearer token。签名密钥轮换必须重建现有宿主机 mount；
+- 生产 WebDAV 端点必须 HTTPS。开发环境需用受控 HTTPS 隧道让远端 Cubelet 访问本地 API；
+- Cubelet 的 rclone 与插件版本必须固定并通过目标集群 Gate；Sandbox 模板无需 `/dev/fuse`。
 
 ## 验证
 
 - Resource 单元测试验证稳定路径、文件名转义、user turn 注入、授权解析、上传边界和 capability
   篡改/过期；
 - API 测试验证原始字节上传、附件输入投影、WebDAV 目录不披露对象键、鉴权与 Range 读取；
-- Worker 测试验证只读 rclone/FUSE 命令、超时和失败关闭；
+- Sandbox/Worker 测试验证 Volume REST 幂等创建、固定 `/resources` mount 投影和失败关闭；
+- 部署插件契约测试验证四个 Hook、宿主机只读 rclone 参数、HMAC 输入和禁止删除业务数据；
 - Web 测试验证原始文件上传与 `{resourceId, versionId}` 输入协议；
 - 环境契约测试覆盖新增端点与签名密钥，提交前执行 `pnpm check`；
-- 上线 Gate 必须另行用目标 CubeSandbox Template 做真实 `/dev/fuse` 创建、恢复、读取与过期测试。
+- 上线 Gate 必须在目标 Cube 0.6 集群完成 attach/detach、pause/resume、跨 Sandbox 复用、租户隔离和
+  Sandbox 内秘密不可见测试。
 
 ## 可逆性与回退
 
 上传后的 Resource 与 Blob 遵守现有不可变资源生命周期，不应通过数据库回滚删除。若虚拟目录
-上线失败，可停止使用新 Template、Worker mounter 和上传 UI，保留已写入 Resource；之后改用
-显式 Resource 导入或新的只读服务继续访问。WebDAV 从 API 拆出时保持 URL path 后缀、capability
-格式与 `/resources` 目录不变，仅切换 `RESOURCE_FILESYSTEM_ENDPOINT`。
+上线失败，可停止 Worker 的 Volume 绑定并保留已写入 Resource；之后改用显式 Resource 导入或新的
+只读服务继续访问。WebDAV 从 API 拆出时保持 URL path 后缀、宿主 capability 与 `/resources` 目录
+不变，仅切换插件的 `RESOURCE_FILESYSTEM_ENDPOINT` 并重建宿主机挂载。
 
 ## 实施记录
 
 - 2026-08-01：首版以内置 API 模块实现，代码注释标记后续可拆服务。
 - 2026-08-02：视觉模型当前轮图片直传按 ADR-0078 实施；纯文本模型继续只接收路径事实。
+- 2026-08-02：按 ADR-0079 切换到 Cube Volume Plugin 宿主机挂载，移除 Sandbox 内 rclone/FUSE。

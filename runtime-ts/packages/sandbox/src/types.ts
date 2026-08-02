@@ -11,6 +11,8 @@ export interface SandboxCreateInput {
     onTimeout?: "kill" | "pause";
     autoResume?: boolean;
   };
+  /** Cube ≥ 0.6 Volume 挂载；Provider 之外的业务层不得注入任意 hostPath。 */
+  volumeMounts?: readonly Readonly<{ readonly name: string; readonly path: string }>[];
 }
 
 export interface CommandOutput {

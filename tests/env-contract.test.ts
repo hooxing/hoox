@@ -15,9 +15,6 @@ function validExample(): string {
         return `${key}=postgresql://user:replace-me@database/db`;
       }
       if (key === "MODEL_BASE_URL") return `${key}=https://provider.example.invalid/v1`;
-      if (key === "RESOURCE_FILESYSTEM_ENDPOINT") {
-        return `${key}=https://api.example.invalid/v1/resource-filesystem`;
-      }
       if (
         key.endsWith("PASSWORD") ||
         key.endsWith("SECRET_ACCESS_KEY") ||
@@ -58,7 +55,7 @@ describe("环境变量示例契约", () => {
         "CUBESANDBOX_SESSION_TTL_SECONDS",
         "THREAD_SANDBOX_PAUSED_RETENTION_SECONDS",
         "THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS",
-        "RESOURCE_FILESYSTEM_ENDPOINT",
+        "CUBESANDBOX_RESOURCE_VOLUME_DRIVER",
         "RESOURCE_FILESYSTEM_SIGNING_KEY",
         "MODEL_WIRE_TRACE_ENABLED",
         "MODEL_WIRE_TRACE_RETENTION_DAYS",

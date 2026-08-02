@@ -1,6 +1,6 @@
 import type { PgClaimedRunDispatch } from "@cube-runtime/persistence";
 import type { ExecutionScope, SandboxSessionRef } from "@cube-runtime/run-contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
@@ -198,6 +198,47 @@ describe("Agent Worker production polling loop", () => {
 });
 
 describe("生产 Workspace revision 安全下限", () => {
+  it("Sandbox 创建前确保 Tenant Cube Volume，并只绑定固定 /resources", async () => {
+    const ensure = vi.fn(async () => ({
+      name: "tenant-worker-loop",
+      path: "/resources" as const,
+    }));
+    const registry = new CubeSandboxSessionRegistry(
+      { apiUrl: "http://127.0.0.1:18080" },
+      "template-resource-volume",
+      120,
+      90_000,
+      { ensure, probe: async () => undefined },
+    );
+    const sandbox = {
+      id: "sandbox-resource-volume",
+      command: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      runCode: async () => ({ stdout: [], stderr: [] }),
+      readFile: async () => "",
+      writeFile: async () => undefined,
+      pause: async () => undefined,
+      kill: async () => undefined,
+    };
+    const create = vi.spyOn(registry.gateway, "create").mockResolvedValue(sandbox);
+    const scope = claim().scope as ExecutionScope;
+
+    await expect(
+      registry.create({
+        scope,
+        registryId: "registry-resource-volume",
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready" });
+
+    expect(ensure).toHaveBeenCalledWith({ tenantId: scope.tenantId, signal: expect.anything() });
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        volumeMounts: [{ name: "tenant-worker-loop", path: "/resources" }],
+      }),
+      expect.anything(),
+    );
+  });
+
   it("Sandbox 收尾使用 lifecycle 专用超时，不继承普通命令的短超时", async () => {
     const controls: unknown[] = [];
     const registry = new CubeSandboxSessionRegistry(

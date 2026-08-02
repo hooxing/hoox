@@ -69,6 +69,19 @@ describe("Resource WebDAV HTTP 边界", () => {
     expect(fixture.getBytes).toHaveBeenCalledOnce();
     await fixture.app.close();
   });
+
+  it("Cubelet host-volume capability 使用相同 Tenant 目录但不要求 Sandbox TTL", async () => {
+    const fixture = await appFixture();
+    const response = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: "/v1/resource-filesystem/",
+      headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "1" },
+    });
+
+    expect(response.statusCode).toBe(207);
+    expect(response.body).toContain("resource-http-test");
+    await fixture.app.close();
+  });
 });
 
 async function appFixture() {
@@ -115,5 +128,6 @@ async function appFixture() {
       sandboxId: "sandbox-resource-http",
       ttlSeconds: 60,
     }),
+    hostToken: capabilities.issueHostVolume({ tenantId: tenant }),
   };
 }

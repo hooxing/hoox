@@ -307,6 +307,9 @@ importers:
 
   runtime-ts/packages/sandbox:
     dependencies:
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../domain
       '@cube-runtime/workspace':
         specifier: workspace:*
         version: link:../workspace

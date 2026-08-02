@@ -369,6 +369,91 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     },
   );
 
+  it("同轮两个 Pi 工具调用按 durable call/result 对串行，不触发 observation conflict", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-parallel-tool-rollout"));
+    const sandboxes = new FakeSandboxRegistry();
+    let activeSandboxCalls = 0;
+    let maximumActiveSandboxCalls = 0;
+    sandboxes.handle.command = async () => {
+      activeSandboxCalls += 1;
+      maximumActiveSandboxCalls = Math.max(maximumActiveSandboxCalls, activeSandboxCalls);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      activeSandboxCalls -= 1;
+      return { stdout: "ok\n", stderr: "", exitCode: 0 };
+    };
+    const faux = fauxProvider({
+      api: `faux-worker-parallel-rollout-${Date.now()}`,
+      provider: `faux-worker-parallel-rollout-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxToolCall("exec_command", { cmd: "echo first" }, { id: "call-parallel-first" }),
+          fauxToolCall("exec_command", { cmd: "echo second" }, { id: "call-parallel-second" }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("完成"),
+    ]);
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+    });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const operations: string[] = [];
+    let pendingCallId: string | undefined;
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      (_input, outputs) => ({
+        recordStarted: async (call) => {
+          if (pendingCallId !== undefined) return "conflict" as const;
+          pendingCallId = call.toolCallId;
+          operations.push(`call:${call.toolCallId}`);
+          return "recorded" as const;
+        },
+        record: async (call) => {
+          if (pendingCallId !== call.toolCallId) return { outcome: "conflict" as const };
+          const observation = await outputs.readControlledReceipt(call);
+          if (observation === undefined) return { outcome: "conflict" as const };
+          operations.push(`result:${call.toolCallId}`);
+          pendingCallId = undefined;
+          return { outcome: "recorded" as const, observation, isTruncated: false };
+        },
+      }),
+    );
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: "pi-parallel-tool-rollout-worker", runTimeoutMs: 60_000 },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(operations).toEqual([
+      "call:call-parallel-first",
+      "result:call-parallel-first",
+      "call:call-parallel-second",
+      "result:call-parallel-second",
+    ]);
+    expect(maximumActiveSandboxCalls).toBe(1);
+    expect(
+      persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
+    ).toHaveLength(2);
+    expect(faux.state.callCount).toBe(2);
+  }, 30_000);
+
   it.runIf(process.platform === "linux")(
     "tool_call 前驱 UNKNOWN 时不签发也不消费一次性工具许可",
     async () => {

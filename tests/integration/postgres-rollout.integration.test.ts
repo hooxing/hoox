@@ -126,6 +126,47 @@ function pausingFenceLockPool(upstream: Pool): {
   return { pool, locked, release: releaseLock };
 }
 
+function synchronizingRolloutWriteLockPool(upstream: Pool): {
+  readonly pool: Pool;
+  readonly ready: Promise<void>;
+  readonly release: () => void;
+  readonly arrivals: () => number;
+} {
+  let arrivals = 0;
+  let signalReady!: () => void;
+  let releaseGate!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    signalReady = resolve;
+  });
+  const gate = new Promise<void>((resolve) => {
+    releaseGate = resolve;
+  });
+  const originalConnect = upstream.connect.bind(upstream);
+  const pool = new Proxy(upstream, {
+    get(target, property, receiver) {
+      if (property !== "connect") return Reflect.get(target, property, receiver);
+      return async () => {
+        const client = await originalConnect();
+        const originalQuery = client.query.bind(client);
+        client.query = (async (...args: unknown[]) => {
+          if (
+            typeof args[0] === "string" &&
+            args[0].includes("pg_advisory_xact_lock(hashtextextended")
+          ) {
+            arrivals += 1;
+            if (arrivals === 2) signalReady();
+            // 两个独立连接先同时到达写锁，再交给 PostgreSQL 决定唯一线性化顺序。
+            await gate;
+          }
+          return (originalQuery as (...queryArgs: unknown[]) => Promise<unknown>)(...args);
+        }) as typeof client.query;
+        return client;
+      };
+    },
+  }) as Pool;
+  return { pool, ready, release: releaseGate, arrivals: () => arrivals };
+}
+
 async function seedStableBlob(purpose: "trace" | "resource", label: string) {
   const operationId = `rollout-blob-operation-${label}-${unique}`;
   const referenceId = `rollout-blob-reference-${label}-${unique}`;
@@ -368,6 +409,74 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
     ).toBe("conflict");
     const restored = await recovery(new PgRuntimeRolloutRepository(runtime));
     expect(restored.tail.map((entry) => entry.sequence)).toEqual([0, 1, 2]);
+  });
+
+  it("两个并发工具对由数据库 stream 写锁串行，保持相邻并支持回放与冲突", async () => {
+    const synchronized = synchronizingRolloutWriteLockPool(runtime);
+    const guarded = new PgRuntimeRolloutRepository(synchronized.pool);
+    const leftCallId = `parallel-left-${unique}`;
+    const rightCallId = `parallel-right-${unique}`;
+    const leftCommand = {
+      context,
+      idempotencyKey: `parallel-pair-left-${unique}`,
+      entries: [draft("tool_call", leftCallId), draft("tool_result", leftCallId)],
+    } as const;
+    const rightCommand = {
+      context,
+      idempotencyKey: `parallel-pair-right-${unique}`,
+      entries: [draft("tool_call", rightCallId), draft("tool_result", rightCallId)],
+    } as const;
+    const appends = Promise.all([guarded.append(leftCommand), guarded.append(rightCommand)]);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const bothReachedLock = await Promise.race([
+      synchronized.ready.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), 2_000);
+      }),
+    ]);
+    if (timeout !== undefined) clearTimeout(timeout);
+    synchronized.release();
+
+    const [left, right] = await appends;
+    expect(bothReachedLock).toBe(true);
+    expect(synchronized.arrivals()).toBe(2);
+    expect([left.outcome, right.outcome]).toEqual(["created", "created"]);
+    if (left.outcome !== "created" || right.outcome !== "created") {
+      throw new Error("并发工具对未创建");
+    }
+    for (const value of [left.value, right.value]) {
+      expect(value.map((entry) => entry.kind)).toEqual(["tool_call", "tool_result"]);
+      expect(value[1]?.toolCallId).toBe(value[0]?.toolCallId);
+      expect(value[1]?.sequence).toBe((value[0]?.sequence ?? -1) + 1);
+    }
+    const allSequences = [...left.value, ...right.value]
+      .map((entry) => entry.sequence)
+      .sort((a, b) => a - b);
+    expect(allSequences).toEqual([
+      allSequences[0],
+      (allSequences[0] ?? -1) + 1,
+      (allSequences[0] ?? -1) + 2,
+      (allSequences[0] ?? -1) + 3,
+    ]);
+
+    const replay = await repository.append(leftCommand);
+    expect(replay.outcome).toBe("replayed");
+    if (replay.outcome === "replayed") {
+      expect(replay.value.map((entry) => entry.sequence)).toEqual(
+        left.value.map((entry) => entry.sequence),
+      );
+    }
+    expect(
+      (
+        await repository.append({
+          ...leftCommand,
+          entries: [
+            { ...draft("tool_call", leftCallId), body: { toolName: "changed" } },
+            draft("tool_result", leftCallId),
+          ],
+        })
+      ).outcome,
+    ).toBe("conflict");
   });
 
   it("保存未配对尾部，且后续只能追加同 call ID 的 tool_result", async () => {

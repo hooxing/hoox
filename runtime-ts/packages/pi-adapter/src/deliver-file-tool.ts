@@ -52,6 +52,7 @@ export function createDeliverFilePiTool(
     label: "交付文件",
     description:
       "将 CubeSandbox 中已经生成的文件作为本次任务的交付文件提供给用户。仅当文件已成功保存为可下载交付物时返回成功。",
+    executionMode: "sequential",
     parameters: DeliverFileToolArgumentsSchema,
     prepareArguments: invalidArguments.prepareArguments,
     execute: async (callId, args, signal) => {

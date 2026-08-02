@@ -110,6 +110,16 @@ describe("Domain 与 Protocol 显式 Mapper", () => {
     expect(toRunDto(run)).toEqual(toRunDto(source.run));
   });
 
+  it("恢复投影不改写 Domain Run 的 running 事实", () => {
+    const source = fixture();
+    const dto = decodeDtoJson(
+      RunDtoSchema,
+      JSON.stringify(toRunDto(source.run, "recovery_required")),
+    );
+    expect(dto).toMatchObject({ status: "running", executionStatus: "recovery_required" });
+    expect(fromRunDto(dto, source.thread).status).toBe("running");
+  });
+
   it("版本和交付物往返时重新校验所有关联", () => {
     const source = fixture();
     const workspace = acquireWorkspaceLease({

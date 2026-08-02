@@ -397,7 +397,7 @@ export class ApiService {
     if (run === undefined || run.entity.threadId !== threadId(rawThreadId)) {
       throw new ApiFailure("not_found");
     }
-    return toRunDto(run.entity);
+    return toRunDto(run.entity, run.executionStatus);
   }
 
   /**
@@ -419,7 +419,9 @@ export class ApiService {
       parent.entity.id,
       { limit: input.limit ?? 20 },
     );
-    return { items: items.map(({ entity }) => toRunDto(entity)) };
+    return {
+      items: items.map(({ entity, executionStatus }) => toRunDto(entity, executionStatus)),
+    };
   }
 
   async cancelRun(auth: AuthContext, rawThreadId: string, rawRunId: string): Promise<RunDto> {

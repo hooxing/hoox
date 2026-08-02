@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import {
   ApiError,
   type ArtifactPreview,
+  type Run,
   type RunStatus,
   RuntimeApi,
   type Thread,
@@ -126,7 +127,10 @@ export function shouldContinueRunPolling(
   hasMoreEvents: boolean,
   status: RunStatus,
   sandboxState?: "running" | "pausing" | "paused" | "resuming" | "terminated" | "unknown",
+  executionStatus?: Run["executionStatus"],
 ): boolean {
+  // durable recovery_required 已证明没有 Worker 继续执行；事件、诊断或 Sandbox 瞬时态都不能重启无界轮询。
+  if (executionStatus === "recovery_required") return false;
   return (
     hasMoreEvents ||
     pollingRunStatuses.has(status) ||
@@ -165,6 +169,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const modelWireTracePaginationAdvancedRef = useRef(false);
   const modelWireTraceTailCursorRef = useRef<string | undefined>(undefined);
   const currentRunPollRef = useRef(new CurrentRunPoll());
+  const runExecutionStatusRef = useRef<Run["executionStatus"]>(undefined);
   const navigationRef = useRef(new WorkspaceNavigation());
   const mobileNavigationToggleRef = useRef<HTMLButtonElement>(null);
   const runAreaRef = useRef<HTMLElement>(null);
@@ -173,6 +178,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const sendInFlightRef = useRef(false);
   const uploadIdempotencyKeysRef = useRef(new WeakMap<File, string>());
   const initialSelectionAppliedRef = useRef(false);
+  runExecutionStatusRef.current = state.run?.executionStatus;
 
   const selectThread = useCallback((threadId: string | undefined) => {
     navigationRef.current.navigate(threadId);
@@ -344,8 +350,10 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     let timer: number | undefined;
     const poll = async (): Promise<void> => {
       if (!currentRunPollRef.current.isCurrent(pollGeneration)) return;
+      let recoveryRequired = runExecutionStatusRef.current === "recovery_required";
       try {
         const latest = await apiClient.getRun(threadId, runId);
+        recoveryRequired = latest.executionStatus === "recovery_required";
         const tailCursor = modelWireTraceTailCursorRef.current;
         const [
           eventPage,
@@ -409,13 +417,15 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           }
           // 终态也必须追完已抵达尾页后的跨页新增诊断；waiting 仍不因普通 Run 状态保持短轮询。
           if (
-            shouldContinueRunPolling(
+            !recoveryRequired &&
+            (shouldContinueRunPolling(
               eventPage.hasMore,
               latest.status,
               continuityStatus?.sandboxState,
+              latest.executionStatus,
             ) ||
-            modelWireTraceTail?.hasMore === true ||
-            (modelWireTraces.hasMore && !modelWireTracePaginationAdvancedRef.current)
+              modelWireTraceTail?.hasMore === true ||
+              (modelWireTraces.hasMore && !modelWireTracePaginationAdvancedRef.current))
           ) {
             timer = window.setTimeout(() => void poll(), 1200);
           }
@@ -423,7 +433,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       } catch (reason) {
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           setError(reason instanceof ApiError ? reason : new ApiError("轮询运行状态失败", 0, true));
-          timer = window.setTimeout(() => void poll(), 1200);
+          if (!recoveryRequired) timer = window.setTimeout(() => void poll(), 1200);
         }
       }
     };
@@ -825,7 +835,9 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
             event.preventDefault();
             void send();
           }}
-          showQueueAction={state.run?.status === "running"}
+          showQueueAction={
+            state.run?.status === "running" && state.run.executionStatus !== "recovery_required"
+          }
           onQueue={() => void send("follow_up")}
         />
       </section>

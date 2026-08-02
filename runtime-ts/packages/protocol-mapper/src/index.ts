@@ -100,11 +100,12 @@ export const fromThreadDto = (
   membership: Membership,
 ): Thread => rehydrateThread(dto, tenant, user, membership);
 
-export const toRunDto = (entity: Run): RunDto => ({
+export const toRunDto = (entity: Run, executionStatus?: RunDto["executionStatus"]): RunDto => ({
   id: entity.id,
   tenantId: entity.tenantId,
   threadId: entity.threadId,
   status: entity.status,
+  ...(executionStatus === undefined ? {} : { executionStatus }),
   createdAt: entity.createdAt,
   updatedAt: entity.updatedAt,
 });

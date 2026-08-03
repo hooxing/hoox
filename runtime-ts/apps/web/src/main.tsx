@@ -737,6 +737,19 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         onClose={() => setNavigationOpen(false)}
       >
         <ThreadCreate actionLoading={actionLoading} onCreate={createConversation} />
+        {skillCenterApi !== undefined && (
+          <button
+            type="button"
+            className="skill-center-entry"
+            onClick={() => {
+              setSkillCenterOpen(true);
+              setNavigationOpen(false);
+            }}
+          >
+            <Puzzle size={17} />
+            技能中心
+          </button>
+        )}
         <div className="thread-heading">
           <span>任务</span>
           <span>{state.threads.length}</span>
@@ -764,19 +777,6 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
             ))
           )}
         </ThreadNavigation>
-        {skillCenterApi !== undefined && (
-          <button
-            type="button"
-            className="skill-center-entry"
-            onClick={() => {
-              setSkillCenterOpen(true);
-              setNavigationOpen(false);
-            }}
-          >
-            <Puzzle size={17} />
-            技能中心
-          </button>
-        )}
       </NavigationSidebar>
       <section className="content" aria-label="对话工作区">
         <button

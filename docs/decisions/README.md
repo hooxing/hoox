@@ -96,6 +96,7 @@
 | [ADR-0093](0093-resourcefs-attach-data-plane-readiness.md) | ResourceFS Attach 验证真实数据面 | 已接受 | 2026-08-03 |
 | [ADR-0094](0094-skill-center-user-installation.md) | Skill Center 全局用户安装与受管目录边界 | 已接受 | 2026-08-03 |
 | [ADR-0095](0095-skill-runtime-snapshot-and-lazy-materialization.md) | Skill Runtime 快照、后端注入与延迟物化 | 已接受 | 2026-08-03 |
+| [ADR-0096](0096-skill-center-primary-navigation-placement.md) | Skill Center 主导航入口位置 | 已接受 | 2026-08-03 |
 
 ## 何时必须记录
 

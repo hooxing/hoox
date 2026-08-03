@@ -488,7 +488,7 @@ export async function createSafePiSession(
       ...SANDBOX_TOOL_NAMES,
       ...(options.deliverFileToolRouter === undefined ? [] : ["deliver_file"]),
     ],
-    excludeTools: ["bash", "read", "write", "edit", "grep", "find", "ls"],
+    excludeTools: ["bash", "grep", "find", "ls"],
   });
   assertPiSessionCapabilityManifest({
     readTools: () => session.agent.state.tools,

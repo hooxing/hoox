@@ -55,8 +55,8 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
 }
 
 describe("exec_command", () => {
-  it("新 Session 只暴露一个同步命令工具", () => {
-    expect(SANDBOX_TOOL_NAMES).toEqual(["exec_command"]);
+  it("新 Session 暴露受控命令与文件工具", () => {
+    expect(SANDBOX_TOOL_NAMES).toEqual(["exec_command", "read", "edit", "write"]);
   });
 
   it("同一模型消息中的多个 durable 调用按完整 call/result 对顺序执行", () => {

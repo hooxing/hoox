@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { mapPiEvent } from "./events.js";
 
@@ -25,5 +25,40 @@ describe("Pi 运行事件映射", () => {
         }),
       }),
     ).toEqual({ type: "error", code: "PROVIDER", message: "模型 Provider 调用失败" });
+  });
+
+  it("图片工具结果只把文本说明投影到 Thread Context", () => {
+    const mapped = mapPiEvent({
+      type: "turn_end",
+      message: fauxAssistantMessage(
+        fauxToolCall("read", { path: "/workspace/chart.png" }, { id: "call_image" }),
+        { stopReason: "toolUse" },
+      ),
+      toolResults: [
+        {
+          role: "toolResult",
+          toolCallId: "call_image",
+          toolName: "read",
+          content: [
+            { type: "text", text: "Read image file [image/png]" },
+            { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+          ],
+          isError: false,
+          timestamp: 1,
+        },
+      ],
+    });
+
+    expect(mapped).toMatchObject({
+      type: "turn.completed",
+      toolResults: [
+        {
+          toolName: "read",
+          text: "Read image file [image/png]",
+          isError: false,
+        },
+      ],
+    });
+    expect(JSON.stringify(mapped)).not.toContain("iVBORw0KGgo");
   });
 });

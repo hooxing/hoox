@@ -154,10 +154,9 @@ export function mapPiEvent(event: AgentSessionEvent): RuntimeAgentEvent | undefi
         throw new TypeError("THREAD_CONTEXT_UNSUPPORTED_ASSISTANT_ITEM");
       });
       const toolResults = event.toolResults.map((result) => {
-        const texts = result.content.map((item) => {
-          if (item.type !== "text") throw new TypeError("THREAD_CONTEXT_UNSUPPORTED_TOOL_ITEM");
-          return item.text;
-        });
+        // 图片字节只进入当前工具循环的 Provider 请求；Thread Context 保留同一结果中的
+        // 文本说明，不把 Base64 复制进长期历史或 durable Rollout。
+        const texts = result.content.flatMap((item) => (item.type === "text" ? [item.text] : []));
         return {
           toolCallId: result.toolCallId,
           toolName: result.toolName,

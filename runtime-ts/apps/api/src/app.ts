@@ -71,6 +71,7 @@ import {
   type ResourceUploadPort,
   stripAttachmentsFromUserFacingPrompt,
 } from "@cube-runtime/resource";
+import { beijingPinoTimestamp } from "./logging.js";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -310,6 +311,7 @@ export function createApiApp(
         ? false
         : {
             level: "info",
+            timestamp: beijingPinoTimestamp,
             redact: {
               paths: ["req.headers.authorization", "req.headers.cookie", "res.headers.set-cookie"],
               censor: "[REDACTED]",

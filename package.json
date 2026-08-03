@@ -18,6 +18,7 @@
     "db:migrate:down": "pnpm --filter @cube-runtime/persistence build && node --env-file-if-exists=.env runtime-ts/packages/persistence/dist/cli.js down --allow-destructive",
     "thread:legacy-anchor": "pnpm --filter @cube-runtime/persistence build && node --env-file-if-exists=.env runtime-ts/packages/persistence/dist/legacy-thread-anchor-cli.js",
     "dev:identity:provision": "pnpm --filter @cube-runtime/api^... build && pnpm --filter @cube-runtime/api dev:identity:provision",
+    "dev:skill:publish:pptx": "pnpm --filter @cube-runtime/persistence build && node --env-file-if-exists=.env runtime-ts/packages/persistence/dist/development-pptx-publisher-cli.js runtime-ts/vendor/anthropic-skills-pptx",
     "dev:api": "pnpm --filter @cube-runtime/api^... build && pnpm --filter @cube-runtime/api dev",
     "dev:scheduler": "pnpm --filter @cube-runtime/scheduler^... build && pnpm --filter @cube-runtime/scheduler dev",
     "dev:web": "pnpm --filter @cube-runtime/web dev",

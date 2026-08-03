@@ -149,6 +149,74 @@ describe("Sandbox 文件工具", () => {
     `);
   });
 
+  it("合法工具调用按准备 Sandbox、签发许可、触碰文件系统的顺序执行", async () => {
+    const operations: string[] = [];
+    const sandbox = {
+      command: async () => {
+        operations.push("command");
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+      writeFile: async () => {
+        operations.push("write");
+      },
+    } as unknown as SandboxHandle;
+    const prepareSandboxTool = vi.fn(async () => {
+      operations.push("prepare");
+      return sandbox;
+    });
+    const tools = createSandboxTools(
+      { prepareSandboxTool },
+      {
+        authorizeToolEffect: async () => {
+          operations.push("authorize");
+          return immediateAuthorization();
+        },
+      },
+    );
+    const write = tools.find((tool) => tool.name === "write");
+    if (write === undefined) throw new Error("测试缺少 write");
+
+    await (write.execute as unknown as ToolExecute)(
+      "call_lazy_write",
+      { path: "result.txt", content: "done" },
+      undefined,
+      () => undefined,
+      {} as never,
+    );
+
+    expect(operations).toEqual(["prepare", "authorize", "command", "write"]);
+    expect(prepareSandboxTool).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: "call_lazy_write",
+        toolName: "write",
+        argsDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      }),
+    );
+  });
+
+  it("schema 错误不会触发按需 Sandbox 准备", async () => {
+    const prepareSandboxTool = vi.fn(async () => {
+      throw new Error("不应准备 Sandbox");
+    });
+    const authorizeToolEffect = vi.fn(async () => immediateAuthorization());
+    const tools = createSandboxTools({ prepareSandboxTool }, { authorizeToolEffect });
+    const write = tools.find((tool) => tool.name === "write");
+    if (write?.prepareArguments === undefined) throw new Error("测试缺少 write 参数桥");
+    const prepared = write.prepareArguments({ path: 123 });
+
+    await expect(
+      (write.execute as unknown as ToolExecute)(
+        "call_invalid_lazy_write",
+        prepared as Record<string, unknown>,
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("WRITE_INVALID_ARGUMENTS");
+    expect(prepareSandboxTool).not.toHaveBeenCalled();
+    expect(authorizeToolEffect).not.toHaveBeenCalled();
+  });
+
   it("read 支持相对路径、offset/limit，并返回继续读取提示", async () => {
     const command = vi.fn(async () => base64Result("line 1\nline 2\nline 3"));
     const readFile = vi.fn(async () => "line 1\nline 2\nline 3");

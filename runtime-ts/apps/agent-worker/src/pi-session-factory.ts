@@ -23,6 +23,7 @@ import type { DeliverFileToolRouterFactoryPort } from "@cube-runtime/tool-router
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
+import { digestCanonical } from "./mutation-protocol.js";
 import type {
   AgentSessionFactoryPort,
   AgentTurnOutcome,
@@ -91,16 +92,20 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
   ): Promise<WorkerAgentSessionPort> {
     const attemptWireTraces = this.modelWireTraces?.createAttempt();
     const prepareInput = async (userInput: AgentUserInput): Promise<PreparedAgentUserInput> => {
-      if (!this.model.input.includes("image") || userInput.attachments.length === 0) {
-        return Object.freeze({ text: userInput.text, images: Object.freeze([]) });
+      let images: PreparedAgentUserInput["images"] = Object.freeze([]);
+      if (this.model.input.includes("image") && userInput.attachments.length > 0) {
+        if (this.promptImages === undefined) {
+          throw new Error("视觉模型缺少当前 user turn 图片加载器");
+        }
+        images = await this.promptImages.load({
+          tenantId: input.scope.tenantId,
+          attachments: userInput.attachments,
+        });
       }
-      if (this.promptImages === undefined) {
-        throw new Error("视觉模型缺少当前 user turn 图片加载器");
+      // 全部附件都已作为视觉输入直送 Provider 时不需要文件系统；其余附件需要先挂载 /resources。
+      if (images.length !== userInput.attachments.length) {
+        await input.ensureSandboxReady({ reason: "attachment" });
       }
-      const images = await this.promptImages.load({
-        tenantId: input.scope.tenantId,
-        attachments: userInput.attachments,
-      });
       return Object.freeze({ text: userInput.text, images: Object.freeze([...images]) });
     };
     const runRuntimeCompaction = async (
@@ -133,6 +138,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     const startedToolCalls = new Map<string, string>();
     const invalidToolCalls = new Set<string>();
     const effectAuthorizationRequested = new Set<string>();
+    const sandboxPreparationRequested = new Set<string>();
     const durableToolCalls = new Set<string>();
     const rejectedToolReceipts = new Map<
       string,
@@ -190,7 +196,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       }
       // 不删除 gate：callId 在整个 Attempt 内永久一次性，失败后的相同调用也不可重试。
       effectAuthorizationRequested.add(call.callId);
-      await recordStartedTool({ toolCallId: call.callId, toolName: call.toolName });
+      if (!durableToolCalls.has(call.callId)) {
+        await recordStartedTool({ toolCallId: call.callId, toolName: call.toolName });
+      }
       // durable tool_call 已完成后才领取并消费一次性许可，返回后下一步直接触碰副作用端口。
       try {
         return await input.authorizeToolEffect({
@@ -206,29 +214,95 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         throw error;
       }
     };
+    const prepareStartedSandboxTool = async (call: {
+      readonly callId: string;
+      readonly toolName: string;
+      readonly argsDigest: ReturnType<typeof sha256Digest>;
+    }) => {
+      const startedName = startedToolCalls.get(call.callId);
+      if (
+        invalidToolCalls.has(call.callId) ||
+        sandboxPreparationRequested.has(call.callId) ||
+        effectAuthorizationRequested.has(call.callId) ||
+        startedName !== call.toolName
+      ) {
+        throw new Error("Pi 工具 Sandbox 准备缺少匹配的 tool.started");
+      }
+      sandboxPreparationRequested.add(call.callId);
+      await recordStartedTool({ toolCallId: call.callId, toolName: call.toolName });
+      try {
+        return await input.ensureSandboxReady({ reason: "tool", call });
+      } catch (error) {
+        let resolve: () => void = () => undefined;
+        const completed = new Promise<void>((done) => {
+          resolve = done;
+        });
+        rejectedToolReceipts.set(call.callId, { completed, resolve });
+        throw error;
+      }
+    };
     const artifactAuthorizationIssuer = this.artifactAuthorizationIssuer;
+    const deliverFileTools = this.deliverFileTools;
+    let activeDeliverFileRouter:
+      | ReturnType<NonNullable<typeof deliverFileTools>["create"]>
+      | undefined;
     const deliverFileToolRouter =
-      this.deliverFileTools && artifactAuthorizationIssuer && input.sandboxSession
-        ? this.deliverFileTools.create({
-            binding: {
-              scope: input.scope,
-              attemptId: input.attemptId,
-              sandbox: input.sandboxSession,
-            },
-            authorizer: {
-              authorizeToolEffect: async (call) =>
-                artifactAuthorizationIssuer.issue({
-                  consumed: await authorizeStartedTool(call),
+      deliverFileTools === undefined || artifactAuthorizationIssuer === undefined
+        ? undefined
+        : {
+            deliverFile: async (request: {
+              readonly callId: string;
+              readonly arguments: unknown;
+              readonly signal?: AbortSignal;
+            }) => {
+              const prepared = await prepareStartedSandboxTool({
+                callId: request.callId,
+                toolName: "deliver_file",
+                argsDigest: digestCanonical(request.arguments),
+              });
+              activeDeliverFileRouter ??= deliverFileTools.create({
+                binding: {
+                  scope: input.scope,
                   attemptId: input.attemptId,
-                }),
+                  sandbox: prepared,
+                },
+                authorizer: {
+                  authorizeToolEffect: async (call) =>
+                    artifactAuthorizationIssuer.issue({
+                      consumed: await authorizeStartedTool(call),
+                      attemptId: input.attemptId,
+                    }),
+                },
+              });
+              return await activeDeliverFileRouter.deliverFile(request);
             },
-          })
-        : undefined;
+            projectError: (error: unknown) =>
+              activeDeliverFileRouter?.projectError(error) ??
+              Object.freeze({
+                status: "failed" as const,
+                code: "SERVICE_UNAVAILABLE",
+                message: "Sandbox 未能准备，文件无法交付",
+                correctable: false,
+                fatal: true,
+              }),
+          };
     const sessionMaterial = {
       model: this.model,
       modelContext: this.modelContext,
       modelRuntime: this.modelRuntime,
-      sandbox: input.sandbox,
+      prepareSandboxTool: async (call: {
+        readonly callId: string;
+        readonly toolName: string;
+        readonly argsDigest: string;
+        readonly signal?: AbortSignal;
+      }) =>
+        (
+          await prepareStartedSandboxTool({
+            callId: call.callId,
+            toolName: call.toolName,
+            argsDigest: sha256Digest(call.argsDigest),
+          })
+        ).sandbox,
       authorizeToolEffect: authorizeStartedTool,
       createToolObservationRecorder: (outputs: ControlledToolReceiptSource) => {
         const recorder = this.createObservationRecorder(input, outputs);
@@ -430,6 +504,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         startedToolCalls.clear();
         invalidToolCalls.clear();
         effectAuthorizationRequested.clear();
+        sandboxPreparationRequested.clear();
         durableToolCalls.clear();
         rejectedToolReceipts.clear();
         controller.dispose();

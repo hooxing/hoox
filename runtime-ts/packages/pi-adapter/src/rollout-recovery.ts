@@ -176,7 +176,10 @@ function safeSessionOptions(
     model: options.model,
     modelContext: options.modelContext,
     modelRuntime: options.modelRuntime,
-    sandbox: options.sandbox,
+    ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
+    ...(options.prepareSandboxTool === undefined
+      ? {}
+      : { prepareSandboxTool: options.prepareSandboxTool }),
     authorizeToolEffect: options.authorizeToolEffect,
     createToolObservationRecorder: options.createToolObservationRecorder,
     ...(options.untrustedPromptContent === undefined

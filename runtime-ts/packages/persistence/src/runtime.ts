@@ -14,6 +14,7 @@ import { PgResourceUploadRepository } from "./pg-resource-upload.js";
 import { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-state.js";
 import { PgThreadCreation } from "./pg-thread-creation.js";
+import { PgSkillCenterRepository } from "./pg-skill-center.js";
 import { PgThreadInputRouting } from "./pg-thread-input.js";
 import {
   type ModelWireTraceReadPort,
@@ -74,6 +75,7 @@ export interface ApiPersistenceRuntime {
   readonly resourceUploads: PgResourceUploadRepository;
   readonly resourceFilesystem: PgResourceFilesystemCatalog;
   readonly threadContinuity: ThreadContinuityReadPort;
+  readonly skillCenter: PgSkillCenterRepository;
   threadContext(blobs: BlobStore): ThreadContextReadPort;
   probe(): Promise<void>;
   close(): Promise<void>;
@@ -101,6 +103,7 @@ export function createApiPersistenceRuntime(
     resourceUploads: new PgResourceUploadRepository(pool),
     resourceFilesystem: new PgResourceFilesystemCatalog(pool),
     threadContinuity: new PgThreadContinuityReadRepository(pool),
+    skillCenter: new PgSkillCenterRepository(pool),
     threadContext: (blobs: BlobStore) => new PgThreadContextReadRepository(pool, blobs),
     probe: () => probePostgres(pool, options.expectedRuntimeRole),
     close: () => pool.end(),

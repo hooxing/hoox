@@ -18,6 +18,7 @@ export { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js
 export * from "./pg-run-worker-state.js";
 export * from "./pg-runtime-rollout.js";
 export * from "./pg-sandbox-cleanup-consumer.js";
+export * from "./pg-skill-center.js";
 export * from "./pg-thread-sandbox-lifecycle-consumer.js";
 export { PgThreadCreation } from "./pg-thread-creation.js";
 export * from "./pg-thread-input.js";

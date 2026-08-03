@@ -14,6 +14,7 @@ import {
   ResourceAttachmentResolver,
   ResourceUploadService,
 } from "@cube-runtime/resource";
+import { SkillCenterService } from "@cube-runtime/skill";
 import { startServiceProcess, type ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
@@ -111,6 +112,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
           blobs,
           resourceUploads,
           resourceAttachments: new ResourceAttachmentResolver(persistence.resourceCatalog),
+          skillCenter: new SkillCenterService(persistence.skillCenter),
           resourceFilesystem: {
             catalog: persistence.resourceFilesystem,
             capabilities: resourceFilesystemCapabilities,

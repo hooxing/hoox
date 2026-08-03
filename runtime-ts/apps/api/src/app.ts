@@ -44,6 +44,18 @@ import {
   type RunPath,
   RunPathSchema,
   RunSuccessEnvelopeSchema,
+  type ConfigureSkillRequest,
+  ConfigureSkillRequestSchema,
+  type InstallSkillRequest,
+  InstallSkillRequestSchema,
+  type SkillCatalogQuery,
+  SkillCatalogPageSuccessEnvelopeSchema,
+  SkillCatalogQuerySchema,
+  SkillInstallationListSuccessEnvelopeSchema,
+  SkillInstallationSuccessEnvelopeSchema,
+  type SkillPath,
+  SkillPathSchema,
+  SkillUninstallSuccessEnvelopeSchema,
   type ThreadListQuery,
   ThreadListQuerySchema,
   ThreadPageSuccessEnvelopeSchema,
@@ -62,6 +74,8 @@ import {
   ThreadSuccessEnvelopeSchema,
   type UploadedResourceDto,
   UploadedResourceSuccessEnvelopeSchema,
+  type UninstallSkillQuery,
+  UninstallSkillQuerySchema,
 } from "@cube-runtime/protocol";
 import {
   type ResourceAttachmentResolverPort,
@@ -71,6 +85,7 @@ import {
   type ResourceUploadPort,
   stripAttachmentsFromUserFacingPrompt,
 } from "@cube-runtime/resource";
+import { type SkillCenterService, SkillServiceError } from "@cube-runtime/skill";
 import { beijingPinoTimestamp } from "./logging.js";
 import Fastify, {
   type FastifyInstance,
@@ -119,6 +134,7 @@ export interface ApiDependencies {
     catalog: ResourceFilesystemCatalog;
     capabilities: ResourceFilesystemCapabilityCodec;
   }>;
+  readonly skillCenter?: SkillCenterService;
 }
 
 export interface ApiAppOptions {
@@ -253,6 +269,20 @@ function resourceFailure(error: ResourceServiceError): ApiFailureKind {
   }
 }
 
+function skillFailure(error: SkillServiceError): ApiFailureKind {
+  switch (error.code) {
+    case "INVALID_REQUEST":
+      return "bad_request";
+    case "NOT_FOUND":
+      return "not_found";
+    case "CONFLICT":
+    case "LIMIT_EXCEEDED":
+      return "conflict";
+    case "DEPENDENCY_UNAVAILABLE":
+      return "dependency_unavailable";
+  }
+}
+
 function singleHeader(request: FastifyRequest, name: string): string | undefined {
   const values = headerValues(request, name);
   if (values.length > 1) throw new ApiFailure("bad_request");
@@ -370,6 +400,8 @@ export function createApiApp(
       return;
     } else if (error instanceof ResourceServiceError) {
       kind = resourceFailure(error);
+    } else if (error instanceof SkillServiceError) {
+      kind = skillFailure(error);
     } else if (error instanceof ApiFailure) {
       kind = error.kind;
     } else if (error instanceof PersistenceError) {
@@ -408,6 +440,162 @@ export function createApiApp(
       checkedAt: normalizedDependencies.clock.now(),
     });
   });
+
+  if (normalizedDependencies.skillCenter !== undefined) {
+    const skillCenter = normalizedDependencies.skillCenter;
+    app.get<{ Querystring: SkillCatalogQuery }>(
+      "/v1/skills",
+      {
+        schema: {
+          querystring: SkillCatalogQuerySchema,
+          response: {
+            200: SkillCatalogPageSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        const page = await skillCenter.browse({
+          context: auth.scope,
+          ...(request.query.q === undefined ? {} : { query: request.query.q }),
+          ...(request.query.limit === undefined ? {} : { limit: request.query.limit }),
+          ...(request.query.cursor === undefined ? {} : { cursor: request.query.cursor }),
+        });
+        return success(request, {
+          items: page.items,
+          ...(page.nextCanonicalKey === undefined ? {} : { nextCursor: page.nextCanonicalKey }),
+        });
+      },
+    );
+
+    app.get(
+      "/v1/me/skills",
+      {
+        schema: {
+          response: {
+            200: SkillInstallationListSuccessEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        return success(request, { items: await skillCenter.listInstalled(auth.scope) });
+      },
+    );
+
+    app.put<{ Params: SkillPath; Body: InstallSkillRequest }>(
+      "/v1/me/skills/:canonicalKey",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: {
+          params: SkillPathSchema,
+          body: InstallSkillRequestSchema,
+          response: {
+            200: SkillInstallationSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            415: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        return success(
+          request,
+          await skillCenter.install({
+            context: auth.scope,
+            canonicalKey: request.params.canonicalKey,
+            version: request.body.version,
+            invocationName: request.body.invocationName,
+            idempotencyKey: requireIdempotencyKey(request),
+          }),
+        );
+      },
+    );
+
+    app.patch<{ Params: SkillPath; Body: ConfigureSkillRequest }>(
+      "/v1/me/skills/:canonicalKey",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: {
+          params: SkillPathSchema,
+          body: ConfigureSkillRequestSchema,
+          response: {
+            200: SkillInstallationSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            415: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        return success(
+          request,
+          await skillCenter.configure({
+            context: auth.scope,
+            canonicalKey: request.params.canonicalKey,
+            expectedVersionToken: request.body.expectedVersionToken,
+            ...(request.body.version === undefined ? {} : { version: request.body.version }),
+            ...(request.body.invocationName === undefined
+              ? {}
+              : { invocationName: request.body.invocationName }),
+            ...(request.body.enabled === undefined ? {} : { enabled: request.body.enabled }),
+            idempotencyKey: requireIdempotencyKey(request),
+          }),
+        );
+      },
+    );
+
+    app.delete<{ Params: SkillPath; Querystring: UninstallSkillQuery }>(
+      "/v1/me/skills/:canonicalKey",
+      {
+        schema: {
+          params: SkillPathSchema,
+          querystring: UninstallSkillQuerySchema,
+          response: {
+            200: SkillUninstallSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        await skillCenter.uninstall({
+          context: auth.scope,
+          canonicalKey: request.params.canonicalKey,
+          expectedVersionToken: request.query.expectedVersionToken,
+          idempotencyKey: requireIdempotencyKey(request),
+        });
+        return success(request, {
+          canonicalKey: request.params.canonicalKey,
+          uninstalled: true as const,
+        });
+      },
+    );
+  }
 
   if (
     normalizedDependencies.resourceFilesystem !== undefined &&

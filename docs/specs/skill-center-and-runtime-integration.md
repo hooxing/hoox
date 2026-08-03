@@ -262,7 +262,7 @@ Skill 目录位于 System Prompt 的逻辑末尾：在 `CAPABILITY_MANIFEST` 之
 建议格式如下：
 
 ```text
-<AVAILABLE_SKILLS schema=1 digest=sha256:...>
+<AVAILABLE_SKILLS schema=1>
 以下是当前用户为本次 Run 安装并启用的 Skill。name 是唯一可传给 skill 工具或 Slash 调用的精确名称；不要猜测未列出的名称。
 - name="review" description="按团队检查清单审阅代码变更"
 - name="deploy" description="按照受控发布流程准备部署"
@@ -272,7 +272,7 @@ Skill 目录位于 System Prompt 的逻辑末尾：在 `CAPABILITY_MANIFEST` 之
 没有可用 Skill 时仍输出固定空分区：
 
 ```text
-<AVAILABLE_SKILLS schema=1 digest=sha256:...>
+<AVAILABLE_SKILLS schema=1>
 当前 Run 没有可用 Skill。
 </AVAILABLE_SKILLS>
 ```
@@ -282,7 +282,8 @@ Skill 目录位于 System Prompt 的逻辑末尾：在 `CAPABILITY_MANIFEST` 之
 - 目录来源只能是 Run 快照，不能来自请求文本或模型输出。
 - 条目按 `invocationName` 的 UTF-8/ASCII 规范顺序排序，拒绝重复。
 - 名称与描述使用与 capability manifest 相同等级的结构校验和 JSON 字符串转义。
-- `digest` 覆盖 schema、排序后名称、描述、精确版本和入口摘要；版本与摘要参与原像，但不必逐项展示给模型。
+- `RunSkillSnapshot` 可在数据库内部保留完整性摘要，但摘要不得写入模型可见目录，避免仅内部版本或摘要变化破坏
+  System Prompt 上下文缓存。
 - Skill 目录改变必须改变 `promptDigest`；相同目录和 capability manifest 必须得到相同字节。
 - 不把 Run ID、安装 ID或其他请求级随机值写入 System Prompt，保证同一用户安装集合可以跨 Run 命中缓存。
 
@@ -537,7 +538,7 @@ Platform Harness / 安全与工具授权
 实施前必须新增 ADR，至少覆盖：
 
 1. 对 ADR-0029 的局部替代：受控 Skill 目录进入 System Prompt 末尾；完整 Skill 正文仍在独立上下文或工具结果。
-2. Prompt 版本升级、目录摘要、Golden Prompt 和 Provider 缓存影响。
+2. Prompt 版本升级、目录规范、Golden Prompt 和 Provider 缓存影响。
 3. 全局用户安装表的 RLS、Runtime 角色 ACL 和 Run 快照事务。
 4. `skill` 作为 Runtime 内部只读工具的 durable 前驱、授权和恢复语义。
 5. Skill 包 Blob 生命周期、硬撤销和历史 Run 引用保留。

@@ -35,6 +35,9 @@ export default defineConfig({
       "@cube-runtime/persistence": fileURLToPath(
         new URL("./runtime-ts/packages/persistence/src/index.ts", import.meta.url),
       ),
+      "@cube-runtime/skill": fileURLToPath(
+        new URL("./runtime-ts/packages/skill/src/index.ts", import.meta.url),
+      ),
     },
   },
   test: {

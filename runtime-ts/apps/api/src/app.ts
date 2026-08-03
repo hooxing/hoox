@@ -702,6 +702,7 @@ export function createApiApp(
             request.params.threadId,
             request.body.input,
             requireIdempotencyKey(request),
+            request.body.skillInvocation,
           ),
         );
       },

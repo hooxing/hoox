@@ -5,6 +5,7 @@ import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type { EnqueueOutboxPort, IdempotentRunEnqueueResult } from "./ports.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
+import { createRunSkillSnapshot, SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
 import {
   enqueueThreadFollowUp,
   LegacyRunDrainRequiredError,
@@ -126,6 +127,14 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
         );
         const runRow = run.rows[0];
         if (runRow === undefined) throw new TypeError("创建 Run 未返回数据");
+        await createRunSkillSnapshot(client, {
+          tenantId: input.scope.tenantId,
+          runId: input.run.id,
+          userId: input.scope.userId,
+          ...(input.skillInvocation === undefined
+            ? {}
+            : { explicitInvocation: input.skillInvocation }),
+        });
         if (this.options.serialQueueV2Enabled === true) {
           await enqueueThreadFollowUp(client, {
             tenantId: input.scope.tenantId,
@@ -196,6 +205,9 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
       await this.options.afterCommit?.("create_run");
       return result;
     } catch (error) {
+      if (error instanceof SkillSnapshotUnavailableError) {
+        return { outcome: "skill_not_available" };
+      }
       if (error instanceof LegacyRunDrainRequiredError) {
         return { outcome: "legacy_drain_required" };
       }

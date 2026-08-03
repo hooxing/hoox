@@ -8,6 +8,7 @@ import type {
   ThreadInputSubmitResult,
 } from "./ports.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
+import { createRunSkillSnapshot, SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
 import {
   activateNextThreadRun,
   LegacyRunDrainRequiredError,
@@ -248,6 +249,15 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
               if (head.active_run_id === null || head.active_turn_id === null) {
                 throw new TypeError("steer 决策缺少 active Run/Turn");
               }
+              if (input.mode === "auto" || input.fallbackToFollowUp) {
+                // fallback Run 尚未插入 runs，但其不可变身份与 Skill 快照在用户提交时已经固定；
+                // terminal 转队列时只消费该候选，不能反查届时的安装集合。
+                await createRunSkillSnapshot(client, {
+                  tenantId: input.scope.tenantId,
+                  runId: input.fallbackRun.id,
+                  userId: input.scope.userId,
+                });
+              }
               await client.query(
                 `INSERT INTO thread_input_receipts(
                    tenant_id,thread_id,receipt_id,client_request_id,request_digest,requested_mode,
@@ -359,6 +369,9 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
         { isolationLevel: "SERIALIZABLE" },
       );
     } catch (error) {
+      if (error instanceof SkillSnapshotUnavailableError) {
+        return { outcome: "skill_not_available" };
+      }
       if (error instanceof LegacyRunDrainRequiredError) {
         return { outcome: "legacy_drain_required" };
       }
@@ -436,6 +449,12 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
                  created_at AS run_created_at,updated_at AS run_updated_at`,
       [input.scope.tenantId, input.fallbackRun.id, input.thread.id],
     );
+    await createRunSkillSnapshot(client, {
+      tenantId: input.scope.tenantId,
+      runId: input.fallbackRun.id,
+      userId: input.scope.userId,
+      ...(input.skillInvocation === undefined ? {} : { explicitInvocation: input.skillInvocation }),
+    });
     await client.query(
       `INSERT INTO thread_input_receipts(
          tenant_id,thread_id,receipt_id,client_request_id,request_digest,requested_mode,

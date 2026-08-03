@@ -107,6 +107,11 @@ const skillCenterTables = new Set([
   "user_skill_installation_commands",
   "user_skill_installation_audits",
 ]);
+const skillRuntimeTables = new Set([
+  "run_skill_snapshots",
+  "run_skill_snapshot_items",
+  "skill_invocations",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -195,6 +200,9 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["user_skill_installations", new Set(["SELECT", "INSERT"])],
   ["user_skill_installation_commands", new Set(["SELECT", "INSERT"])],
   ["user_skill_installation_audits", new Set(["SELECT", "INSERT"])],
+  ["run_skill_snapshots", new Set(["SELECT", "INSERT"])],
+  ["run_skill_snapshot_items", new Set(["SELECT", "INSERT"])],
+  ["skill_invocations", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -232,6 +240,7 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ],
   ["workspace_revision_candidate_files", new Set(["manifest_digest"])],
   ["run_execution_inputs", new Set(["answer_text", "updated_at"])],
+  ["skill_invocations", new Set(["status", "instruction_digest", "failure_code", "updated_at"])],
   [
     "execution_attempts",
     new Set([
@@ -509,6 +518,16 @@ async function hasSkillCenterState(client: PoolClient, schema: string): Promise<
   return result.rows[0]?.present === true;
 }
 
+async function hasSkillRuntimeState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.run_skill_snapshots', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.run_skill_snapshot_items', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.skill_invocations', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.run_execution_inputs', current_schema())) IS NOT NULL AS present",
@@ -749,6 +768,9 @@ async function activeTablePolicy(
   if (!(await hasSkillCenterState(client, schema))) {
     for (const table of skillCenterTables) policy.delete(table);
   }
+  if (!(await hasSkillRuntimeState(client, schema))) {
+    for (const table of skillRuntimeTables) policy.delete(table);
+  }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
   }
@@ -868,6 +890,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasSkillCenterState(client, schema))) {
     for (const table of skillCenterTables) policy.delete(table);
+  }
+  if (!(await hasSkillRuntimeState(client, schema))) {
+    for (const table of skillRuntimeTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -1615,6 +1640,17 @@ export async function bootstrapRuntimeAccessOnClient(
        GRANT UPDATE(
          skill_version,invocation_name,status,version_token,installed_at,updated_at
        ) ON TABLE ${schema}.user_skill_installations TO ${role}`,
+    );
+  }
+  if (await hasSkillRuntimeState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.run_skill_snapshots,
+         ${schema}.run_skill_snapshot_items,
+         ${schema}.skill_invocations
+       TO ${role};
+       GRANT UPDATE(status,instruction_digest,failure_code,updated_at)
+         ON TABLE ${schema}.skill_invocations TO ${role}`,
     );
   }
   await client.query(

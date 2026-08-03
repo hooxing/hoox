@@ -41,6 +41,7 @@ import {
 import { parseWorkspaceManifest } from "@cube-runtime/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { lockThreadExecutionHead, settleActiveThreadRun } from "./pg-thread-run-queue.js";
+import { readRunSkillSnapshot } from "./pg-skill-runtime.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
 import { appendThreadContext } from "./thread-context.js";
@@ -1128,6 +1129,11 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             input.scope.threadId,
             input.scope.runId,
           );
+          const skills = await readRunSkillSnapshot(
+            client,
+            input.scope.tenantId,
+            input.scope.runId,
+          );
           const fence: ExecutionFence = {
             scope: input.scope,
             runClaim: { token: claimToken, epoch: claimEpoch, expiresAt },
@@ -1143,6 +1149,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               ...(attachments.length === 0 ? {} : { attachments }),
               ...(row.answer_text === null ? {} : { answer: String(row.answer_text) }),
               rolloutProjection: projection,
+              skills,
               ...(row.context_through_sequence === null
                 ? {}
                 : { contextThroughSequence: Number(row.context_through_sequence) }),

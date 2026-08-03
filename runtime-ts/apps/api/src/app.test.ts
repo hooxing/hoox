@@ -164,6 +164,9 @@ class FakeApiState
     { readonly hash: string; readonly receipt: ThreadInputReceiptView; readonly run?: Run }
   >();
   readonly submittedInputTexts: string[] = [];
+  readonly submittedRunSkillInvocations: Array<
+    { readonly invocationName: string; readonly args: string } | undefined
+  > = [];
   idempotencyBarrier: AsyncBarrier | undefined;
   beforeThreadCreate: (() => Promise<void> | void) | undefined;
   beforeRunCreate: (() => Promise<void> | void) | undefined;
@@ -302,9 +305,11 @@ class FakeApiState
     readonly run: Run;
     readonly thread: Thread;
     readonly inputText: string;
+    readonly skillInvocation?: { readonly invocationName: string; readonly args: string };
     readonly idempotency: IdempotentCommand;
   }): Promise<IdempotentCreateResult<Run>> {
     await this.beforeRunCreate?.();
+    this.submittedRunSkillInvocations.push(input.skillInvocation);
     return this.idempotent(input.scope, "run", input.idempotency, input.run, () => {
       this.runs.set(key(input.scope, input.run.id), { entity: input.run, version: 0n });
     });
@@ -2222,6 +2227,55 @@ describe("Fastify API 契约", () => {
       headers: { authorization: "Bearer token-a" },
     });
     expect(repeated.statusCode).toBe(200);
+  });
+
+  it("Slash 与结构化 Skill 调用都固定传给 Run 创建端口，并拒绝双重指定", async () => {
+    const { app, state } = fixture();
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-skill-run" },
+      payload: { title: "Skill Run" },
+    });
+
+    const slash = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-skill-slash" },
+      payload: { input: "/review 检查当前修改" },
+    });
+    expect(slash.statusCode).toBe(200);
+    expect(state.submittedRunSkillInvocations.at(-1)).toEqual({
+      invocationName: "review",
+      args: "检查当前修改",
+    });
+
+    const structured = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-skill-structured" },
+      payload: {
+        input: "检查另一个修改",
+        skillInvocation: { skill: "review", args: "只检查安全问题" },
+      },
+    });
+    expect(structured.statusCode).toBe(200);
+    expect(state.submittedRunSkillInvocations.at(-1)).toEqual({
+      invocationName: "review",
+      args: "只检查安全问题",
+    });
+
+    const ambiguous = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/runs",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "run-skill-ambiguous" },
+      payload: {
+        input: "/review 检查修改",
+        skillInvocation: { skill: "review" },
+      },
+    });
+    expect(ambiguous.statusCode).toBe(400);
   });
 
   it("Thread 归档竞态由 EnqueueOutboxPort 在事务内重验", async () => {

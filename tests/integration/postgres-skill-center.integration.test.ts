@@ -4,6 +4,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgSkillCenterRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-center.js";
 import {
+  createRunSkillSnapshot,
+  readRunSkillSnapshot,
+} from "../../runtime-ts/packages/persistence/src/pg-skill-runtime.js";
+import {
   createPostgresPool,
   type Pool,
   withTenantTransaction,
@@ -110,6 +114,12 @@ beforeAll(async () => {
            entrypoint_path,entrypoint_digest,package_blob_ref,security_status,status
          ) VALUES ($1,'1.0.0',$2,'runtime >= 1',$3,'SKILL.md',$4,$5,'verified','available')`,
         [id, `${displayName}工作流`, "a".repeat(64), "b".repeat(64), `skills/${id}/1.0.0/package`],
+      );
+      await client.query(
+        `INSERT INTO skill_version_files(
+           skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref
+         ) VALUES ($1,'1.0.0','SKILL.md','text/markdown',20,$2,$3)`,
+        [id, "b".repeat(64), `skills/${id}/1.0.0/SKILL.md`],
       );
     }
   });
@@ -224,5 +234,39 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         requestDigest: "2".repeat(64),
       }),
     ).toEqual({ outcome: "name_conflict" });
+  });
+
+  it("Run 快照固定用户当时的安装版本，之后停用不会改变目录或显式调用", async () => {
+    const candidateRunId = `skill-run-${unique}`;
+    await withTenantTransaction(runtime, scopeB, (client) =>
+      createRunSkillSnapshot(client, {
+        tenantId: scopeB.tenantId,
+        runId: candidateRunId,
+        userId: scopeB.userId,
+        explicitInvocation: { invocationName: "shared-name", args: "检查修改" },
+      }),
+    );
+    const before = await withTenantTransaction(runtime, scopeB, (client) =>
+      readRunSkillSnapshot(client, scopeB.tenantId, candidateRunId),
+    );
+    expect(before).toMatchObject({
+      items: [{ invocationName: "shared-name", skillVersion: "1.0.0" }],
+      explicitInvocation: { invocationName: "shared-name", args: "检查修改" },
+    });
+
+    expect(
+      await repository.configure({
+        context: scopeB,
+        canonicalKey: "code-review",
+        expectedVersionToken: 0,
+        enabled: false,
+        idempotencyKey: "skill-configure-b-0001",
+        requestDigest: "3".repeat(64),
+      }),
+    ).toMatchObject({ outcome: "updated" });
+    const after = await withTenantTransaction(runtime, scopeB, (client) =>
+      readRunSkillSnapshot(client, scopeB.tenantId, candidateRunId),
+    );
+    expect(after).toEqual(before);
   });
 });

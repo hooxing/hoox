@@ -91,6 +91,9 @@ importers:
       '@cube-runtime/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
+      '@cube-runtime/skill':
+        specifier: workspace:*
+        version: link:../../packages/skill
       '@cube-runtime/tool-router':
         specifier: workspace:*
         version: link:../../packages/tool-router
@@ -307,6 +310,9 @@ importers:
       '@cube-runtime/sandbox':
         specifier: workspace:*
         version: link:../sandbox
+      '@cube-runtime/skill':
+        specifier: workspace:*
+        version: link:../skill
       '@cube-runtime/workspace':
         specifier: workspace:*
         version: link:../workspace

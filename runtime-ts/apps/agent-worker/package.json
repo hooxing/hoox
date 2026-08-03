@@ -21,6 +21,7 @@
     "@cube-runtime/run-contracts": "workspace:*",
     "@cube-runtime/resource": "workspace:*",
     "@cube-runtime/sandbox": "workspace:*",
+    "@cube-runtime/skill": "workspace:*",
     "@cube-runtime/tool-router": "workspace:*",
     "@cube-runtime/workspace": "workspace:*",
     "@earendil-works/pi-ai": "0.82.1",

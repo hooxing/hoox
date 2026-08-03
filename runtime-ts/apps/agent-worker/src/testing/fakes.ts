@@ -74,6 +74,7 @@ import type {
   ThreadSandboxSessionLifecyclePort,
   UserInputAttachmentReference,
 } from "../ports.js";
+import type { RunSkillSnapshot } from "@cube-runtime/skill";
 
 interface FakeRecord {
   readonly scope: ExecutionScope;
@@ -83,6 +84,7 @@ interface FakeRecord {
   readonly attachments: readonly UserInputAttachmentReference[];
   answer?: string;
   rolloutProjection: ControlledRolloutProjection;
+  readonly skills?: RunSkillSnapshot;
   projectionVersion: number;
   contextNextSequence: number;
   attempt: ExecutionAttemptSnapshot | undefined;
@@ -168,6 +170,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       attachments: seed.attachments ?? [],
       ...(seed.answer === undefined ? {} : { answer: seed.answer }),
       rolloutProjection: seed.rolloutProjection,
+      ...(seed.skills === undefined ? {} : { skills: seed.skills }),
       projectionVersion: 0,
       contextNextSequence: 1,
       attempt: undefined,
@@ -238,6 +241,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
         ...(record.attachments.length === 0 ? {} : { attachments: record.attachments }),
         ...(record.answer === undefined ? {} : { answer: record.answer }),
         rolloutProjection: record.rolloutProjection,
+        ...(record.skills === undefined ? {} : { skills: record.skills }),
       },
       fence,
       databaseNow: now,
@@ -1336,6 +1340,7 @@ export interface FakeSeed {
   readonly attachments?: readonly UserInputAttachmentReference[];
   readonly answer?: string;
   readonly rolloutProjection: ControlledRolloutProjection;
+  readonly skills?: RunSkillSnapshot;
 }
 
 export function fakeSeed(prefix = "worker"): FakeSeed {

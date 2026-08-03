@@ -15,6 +15,7 @@ import {
   buildToolCapabilityManifest,
   type RuntimePromptInput,
   type ToolCapabilityManifest,
+  type AvailableSkillPromptInput,
 } from "@cube-runtime/prompt-builder";
 import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
@@ -41,6 +42,7 @@ import {
   type DeliverFilePiToolExecutorPort,
 } from "./deliver-file-tool.js";
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
+import { createSkillPiTool, type SkillPiToolExecutorPort } from "./skill-tool.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
 import { assertThreadActiveHistory, type ThreadActiveHistoryV1 } from "./thread-history.js";
 import {
@@ -381,6 +383,26 @@ export interface CreateSafePiSessionOptions {
   prepareSandboxTool?: SandboxToolHandleProvider["prepareSandboxTool"];
   /** Tenant/Skill/User 只能进入低信任数据分区，不能直接替换系统 Harness。 */
   untrustedPromptContent?: RuntimePromptInput["untrusted"];
+  /** 只接受 Worker 从 RunSkillSnapshot 投影出的名称与一句描述。 */
+  availableSkills?: readonly AvailableSkillPromptInput[];
+  /** 内部兼容身份；不进入模型可见 AVAILABLE_SKILLS。 */
+  skillSnapshotDigest?: string;
+  /** 显式 Slash/结构化调用在首个模型请求前由后端读取并固定。 */
+  explicitSkillInstruction?: Readonly<{
+    readonly name: string;
+    readonly version: string;
+    readonly digest: string;
+    readonly modelText: string;
+  }>;
+  /** 从既有 durable invocation 恢复；正文仍由后端按固定版本重新校验读取。 */
+  recoveredSkillInstructions?: readonly Readonly<{
+    readonly name: string;
+    readonly version: string;
+    readonly digest: string;
+    readonly modelText: string;
+  }>[];
+  /** 固定注册 skill schema；未配置时只返回稳定的服务不可用结果。 */
+  skillToolExecutor?: SkillPiToolExecutorPort;
   rolloutProjection?: ControlledRolloutProjection;
   /** Thread 级历史只接受 Runtime 从持久事实重建的窄协议，不接受客户端 messages。 */
   threadActiveHistory?: ThreadActiveHistoryV1;
@@ -451,6 +473,31 @@ export async function createSafePiSession(
   for (const entry of builtPrompt.contextEntries) {
     sessionManager.appendCustomMessageEntry(entry.customType, entry.content, false, entry.source);
   }
+  for (const instruction of options.recoveredSkillInstructions ?? []) {
+    sessionManager.appendCustomMessageEntry(
+      "runtime.skill_instruction.v1",
+      instruction.modelText,
+      false,
+      {
+        name: instruction.name,
+        version: instruction.version,
+        digest: instruction.digest,
+        recovered: true,
+      },
+    );
+  }
+  if (options.explicitSkillInstruction !== undefined) {
+    sessionManager.appendCustomMessageEntry(
+      "runtime.skill_instruction.v1",
+      options.explicitSkillInstruction.modelText,
+      false,
+      {
+        name: options.explicitSkillInstruction.name,
+        version: options.explicitSkillInstruction.version,
+        digest: options.explicitSkillInstruction.digest,
+      },
+    );
+  }
   let activeThreadHistory = options.threadActiveHistory;
   if (activeThreadHistory !== undefined) {
     assertThreadActiveHistory(activeThreadHistory);
@@ -489,6 +536,7 @@ export async function createSafePiSession(
     noTools: "all",
     tools: [
       ...SANDBOX_TOOL_NAMES,
+      "skill",
       ...(options.deliverFileToolRouter === undefined ? [] : ["deliver_file"]),
     ],
     excludeTools: ["bash", "grep", "find", "ls"],
@@ -596,13 +644,30 @@ export function deriveSafePiSessionCompatibility(
     toolSchemaHash: digestProtocolValue(builtPrompt.manifest),
     skillManifestHash: digestProtocolValue({
       schemaVersion: 1,
-      entries: builtPrompt.contextEntries
+      untrustedContextEntries: builtPrompt.contextEntries
         .filter((entry) => entry.source.kind === "skill")
         .map((entry) => ({
           ordinal: entry.source.ordinal,
           publicAlias: entry.source.publicAlias,
           contentDigest: entry.source.contentDigest,
         })),
+      availableEntries: [...(options.availableSkills ?? [])].sort((left, right) =>
+        left.name < right.name ? -1 : left.name > right.name ? 1 : 0,
+      ),
+      snapshotDigest: options.skillSnapshotDigest ?? null,
+      explicitInstruction:
+        options.explicitSkillInstruction === undefined
+          ? null
+          : {
+              name: options.explicitSkillInstruction.name,
+              version: options.explicitSkillInstruction.version,
+              digest: options.explicitSkillInstruction.digest,
+            },
+      recoveredInstructions: (options.recoveredSkillInstructions ?? []).map((instruction) => ({
+        name: instruction.name,
+        version: instruction.version,
+        digest: instruction.digest,
+      })),
     }),
   });
 }
@@ -627,6 +692,21 @@ export function assessSafePiSessionContext(
     additionalFixedInputs: [
       ...builtPrompt.contextEntries.map((entry) =>
         JSON.stringify({ type: entry.customType, content: entry.content, source: entry.source }),
+      ),
+      ...(options.explicitSkillInstruction === undefined
+        ? []
+        : [
+            JSON.stringify({
+              type: "runtime.skill_instruction.v1",
+              content: options.explicitSkillInstruction.modelText,
+            }),
+          ]),
+      ...(options.recoveredSkillInstructions ?? []).map((instruction) =>
+        JSON.stringify({
+          type: "runtime.skill_instruction.v1",
+          content: instruction.modelText,
+          recovered: true,
+        }),
       ),
       ...(projectionHeader === undefined ? [] : [projectionHeader]),
       ...(options.threadActiveHistory === undefined
@@ -736,6 +816,13 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
   );
   const customTools = [
     ...observedSandboxTools.tools,
+    createSkillPiTool(
+      options.skillToolExecutor ?? unavailableSkillToolExecutor,
+      observedSandboxTools.recordControlledReceipt,
+      () => {
+        toolContinuationRejected = true;
+      },
+    ),
     ...(options.deliverFileToolRouter === undefined
       ? []
       : [
@@ -756,6 +843,7 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
       description: tool.description,
       inputSchemaDigest: digestCanonicalToolInputSchema(tool.parameters),
     })),
+    availableSkills: options.availableSkills ?? [],
     untrusted: options.untrustedPromptContent ?? { tenant: [], skill: [], user: [] },
   });
   const serializedToolDefinitions = JSON.stringify(
@@ -776,6 +864,20 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     },
   };
 }
+
+const unavailableSkillToolExecutor: SkillPiToolExecutorPort = Object.freeze({
+  async invoke(): Promise<string> {
+    throw new Error("SKILL_CONTENT_UNAVAILABLE");
+  },
+  projectError: () =>
+    Object.freeze({
+      status: "failed" as const,
+      code: "SKILL_CONTENT_UNAVAILABLE",
+      message: "Skill 内容暂时不可用",
+      correctable: false,
+      fatal: false,
+    }),
+});
 
 function modelCompatibilityHash(model: Model<Api>) {
   return digestProtocolValue({

@@ -19,4 +19,5 @@ export {
 export * from "./rollout-recovery.js";
 export * from "./tools.js";
 export * from "./thread-history.js";
+export * from "./skill-tool.js";
 export * from "./runtime-compaction.js";

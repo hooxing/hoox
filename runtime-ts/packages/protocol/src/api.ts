@@ -107,10 +107,24 @@ export const UploadedResourceDtoSchema = Type.Object(
 );
 export type UploadedResourceDto = Static<typeof UploadedResourceDtoSchema>;
 
+export const SkillInvocationRequestSchema = Type.Object(
+  {
+    skill: Type.String({
+      minLength: 1,
+      maxLength: 128,
+      pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    }),
+    args: Type.Optional(Type.String({ maxLength: 16 * 1024 })),
+  },
+  strict,
+);
+export type SkillInvocationRequest = Static<typeof SkillInvocationRequestSchema>;
+
 export const CreateRunRequestSchema = Type.Object(
   {
     // maxLength 仅限制 JSON/校验器工作量；运行时会再按 UTF-8 字节数精确验证。
     input: Type.String({ minLength: 1, maxLength: MAX_RUN_INPUT_UTF8_BYTES }),
+    skillInvocation: Type.Optional(SkillInvocationRequestSchema),
   },
   strict,
 );
@@ -128,6 +142,7 @@ export const CreateThreadInputRequestSchema = Type.Object(
       Type.String({ pattern: "^turn-[1-9][0-9]{0,15}$", maxLength: 200 }),
     ),
     fallbackToFollowUp: Type.Optional(Type.Boolean({ default: false })),
+    skillInvocation: Type.Optional(SkillInvocationRequestSchema),
   },
   strict,
 );

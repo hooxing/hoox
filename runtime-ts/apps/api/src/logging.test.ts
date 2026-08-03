@@ -9,6 +9,8 @@ describe("API 日志时间", () => {
   });
 
   it("生成 Pino 可直接使用的 time 字段", () => {
-    expect(beijingPinoTimestamp()).toMatch(/^,"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00"$/);
+    expect(beijingPinoTimestamp()).toMatch(
+      /^,"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+08:00"$/,
+    );
   });
 });

@@ -50,6 +50,11 @@ Volume。Volume 只是视图选择器，destroy hook 绝不删除 Resource 或 B
 5. Sandbox 内不存在 rclone 进程、bearer token、MinIO 凭据或宿主机物理对象键；
 6. 轮换签名密钥时先清空/重建宿主机挂载，再撤销旧密钥，避免旧 mount 在缓存未命中时失败。
 
+Attach 会先用本次 Tenant capability 直探 WebDAV，再枚举宿主 FUSE 根目录；任一步超过有界超时都会拒绝
+返回 `host_path`。因此 `RESOURCE_FILESYSTEM_ENDPOINT` 必须从每个 Cubelet 宿主机实际可达。开发 API 若
+只监听 `127.0.0.1`，不能直接配置给远端 Cubelet，必须经受保护的 HTTPS 代理暴露 ResourceFS 路由。
+已有挂载失效且没有其他 Sandbox 使用时，下一次 Attach 会卸载并重建；仍有共享使用者时失败关闭。
+
 排障时注意：Cubelet 的 binary Detach 不传 `--volume-base-dir`。插件只接受 Attach 返回的精确
 `metadata.mount_dir`，并以 root 配置中的 `RESOURCEFS_VOLUME_BASE_DIR` 重建路径；不要从 metadata 接受任意
 宿主机路径。

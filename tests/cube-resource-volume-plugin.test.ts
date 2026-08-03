@@ -28,6 +28,24 @@ describe("Cube ResourceFS binary Volume plugin 契约", () => {
     expect(script).toContain('kill -0 "$mount_pid"');
   });
 
+  it("Attach 在返回 host_path 前验证远端与 FUSE 数据面，并只修复无既有使用者的坏挂载", () => {
+    expect(script).toContain('"$RESOURCEFS_RCLONE_BIN" lsf resourcefs:');
+    expect(script).toContain("--contimeout 5s");
+    expect(script).toContain("--timeout 10s");
+    expect(script).toContain("--retries 1");
+    expect(script).toContain("--low-level-retries 1");
+    expect(script).toContain('timeout --signal=KILL 10s ls -A -- "$volume_root"');
+    expect(script).toMatch(
+      /probe_resourcefs_remote \|\| fail[\s\S]*\[\[ "\$REF_COUNT" == "1" \]\] \|\| fail[\s\S]*unmount_resourcefs \|\| fail/u,
+    );
+    expect(script).toMatch(
+      /if ! probe_resourcefs_mount; then[\s\S]*unmount_resourcefs \|\| true[\s\S]*kill "\$mount_pid"/u,
+    );
+    expect(script.indexOf("probe_resourcefs_remote || fail")).toBeLessThan(
+      script.indexOf(`printf '{"host_path":"%s"`),
+    );
+  });
+
   it("Detach 从 root 配置重建固定路径而不依赖未提供的 volume-base-dir", () => {
     expect(script).toContain(`: "\${RESOURCEFS_VOLUME_BASE_DIR:=/data/cube-shared/volume}"`);
     expect(script).toContain('expected_metadata="$(printf');

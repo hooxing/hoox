@@ -549,6 +549,7 @@ export class RunWorker {
         fence: context.fence,
         ensureSandboxReady,
         rolloutProjection: claim.snapshot.rolloutProjection,
+        ...(claim.snapshot.skills === undefined ? {} : { skillSnapshot: claim.snapshot.skills }),
         ...(claim.snapshot.contextThroughSequence === undefined
           ? {}
           : { contextThroughSequence: claim.snapshot.contextThroughSequence }),

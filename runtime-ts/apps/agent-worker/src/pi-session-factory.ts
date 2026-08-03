@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@cube-runtime/artifact";
 import {
   type ControlledToolReceiptSource,
@@ -20,6 +21,14 @@ import {
   type ThreadActiveHistoryV1,
 } from "@cube-runtime/pi-adapter";
 import type { DeliverFileToolRouterFactoryPort } from "@cube-runtime/tool-router";
+import {
+  assertRunSkillSnapshot,
+  digestRunSkillSnapshot,
+  SkillRuntimeError,
+  type RunSkillSnapshot,
+  type SkillExecutionBinding,
+  type SkillRuntimeService,
+} from "@cube-runtime/skill";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
@@ -83,6 +92,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       availableHistoryTokens: number,
     ) => Promise<ThreadActiveHistoryV1>,
     private readonly promptImages?: PromptImageLoaderPort,
+    private readonly skillRuntime?: SkillRuntimeService,
   ) {
     this.modelContext = bindTrustedPiModelContextCapability(modelRuntime, model);
   }
@@ -150,6 +160,50 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     let controller: PiSessionController | undefined;
     let observationRecoveryCode: "PERSISTENCE_UNAVAILABLE" | "IDEMPOTENCY_CONFLICT" | undefined;
     let toolEffectRejected = false;
+    const skillSnapshot: RunSkillSnapshot =
+      input.skillSnapshot ??
+      Object.freeze({
+        schemaVersion: 1 as const,
+        digest: digestRunSkillSnapshot({ items: [] }),
+        items: Object.freeze([]),
+      });
+    assertRunSkillSnapshot(skillSnapshot);
+    const skillBinding: SkillExecutionBinding = Object.freeze({
+      tenantId: input.scope.tenantId,
+      threadId: input.scope.threadId,
+      runId: input.scope.runId,
+      rootRunId: input.scope.rootRunId,
+      workspaceId: input.scope.workspaceId,
+      ...(input.scope.baseRevisionId === undefined
+        ? {}
+        : { baseRevisionId: input.scope.baseRevisionId }),
+      attemptId: input.attemptId,
+      runClaimToken: input.fence.runClaim.token,
+      runClaimEpoch: input.fence.runClaim.epoch,
+      workspaceLeaseRootRunId: input.fence.workspaceLease.rootRunId,
+      workspaceLeaseEpoch: input.fence.workspaceLease.epoch,
+    });
+    const recoveredSkillInstructions =
+      this.skillRuntime === undefined
+        ? Object.freeze([])
+        : await this.skillRuntime.recoverLoadedInstructions({ binding: skillBinding });
+    const explicitSkillInstruction =
+      skillSnapshot.explicitInvocation === undefined
+        ? undefined
+        : await this.requireSkillRuntime().loadInstruction({
+            binding: skillBinding,
+            source: "explicit",
+            invocationName: skillSnapshot.explicitInvocation.invocationName,
+            args: skillSnapshot.explicitInvocation.args,
+          });
+    const recoveredForSession = recoveredSkillInstructions.filter(
+      (instruction) =>
+        explicitSkillInstruction === undefined ||
+        instruction.name !== explicitSkillInstruction.name ||
+        instruction.version !== explicitSkillInstruction.version ||
+        instruction.digest !== explicitSkillInstruction.digest,
+    );
+    const materializedSkillRoots = new Set<string>();
     const requireObservationRecovery = (outcome?: ToolObservationResult["outcome"]) => {
       observationRecoveryCode =
         outcome === "conflict" ? "IDEMPOTENCY_CONFLICT" : "PERSISTENCE_UNAVAILABLE";
@@ -286,6 +340,38 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                 fatal: true,
               }),
           };
+    const skillToolExecutor = {
+      invoke: async (request: {
+        readonly callId: string;
+        readonly skill: string;
+        readonly args?: string;
+      }) => {
+        if (startedToolCalls.get(request.callId) !== "skill") {
+          throw new SkillRuntimeError("SKILL_PROTOCOL");
+        }
+        if (!durableToolCalls.has(request.callId)) {
+          await recordStartedTool({ toolCallId: request.callId, toolName: "skill" });
+        }
+        const instruction = await this.requireSkillRuntime().loadInstruction({
+          binding: skillBinding,
+          source: "tool",
+          callId: request.callId,
+          invocationName: request.skill,
+          ...(request.args === undefined ? {} : { args: request.args }),
+        });
+        return instruction.modelText;
+      },
+      projectError: (error: unknown) => {
+        const code = error instanceof SkillRuntimeError ? error.code : "SKILL_CONTENT_UNAVAILABLE";
+        return Object.freeze({
+          status: "failed" as const,
+          code,
+          message: skillErrorMessage(code),
+          correctable: code === "SKILL_NOT_INSTALLED" || code === "SKILL_ARGUMENTS_INVALID",
+          fatal: code === "SKILL_PROTOCOL",
+        });
+      },
+    };
     const sessionMaterial = {
       model: this.model,
       modelContext: this.modelContext,
@@ -295,14 +381,22 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         readonly toolName: string;
         readonly argsDigest: string;
         readonly signal?: AbortSignal;
-      }) =>
-        (
-          await prepareStartedSandboxTool({
-            callId: call.callId,
-            toolName: call.toolName,
-            argsDigest: sha256Digest(call.argsDigest),
-          })
-        ).sandbox,
+      }) => {
+        const prepared = await prepareStartedSandboxTool({
+          callId: call.callId,
+          toolName: call.toolName,
+          argsDigest: sha256Digest(call.argsDigest),
+        });
+        if (this.skillRuntime !== undefined) {
+          const roots = await this.skillRuntime.materializeLoadedPackages({
+            binding: skillBinding,
+            alreadyMaterialized: materializedSkillRoots,
+            target: sandboxSkillTarget(prepared.sandbox, call.signal),
+          });
+          for (const root of roots) materializedSkillRoots.add(root);
+        }
+        return prepared.sandbox;
+      },
       authorizeToolEffect: authorizeStartedTool,
       createToolObservationRecorder: (outputs: ControlledToolReceiptSource) => {
         const recorder = this.createObservationRecorder(input, outputs);
@@ -330,6 +424,28 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           },
         };
       },
+      availableSkills: skillSnapshot.items.map((item) => ({
+        name: item.invocationName,
+        description: item.description,
+      })),
+      skillSnapshotDigest: skillSnapshot.digest,
+      skillToolExecutor,
+      recoveredSkillInstructions: recoveredForSession.map((instruction) => ({
+        name: instruction.name,
+        version: instruction.version,
+        digest: instruction.digest,
+        modelText: instruction.modelText,
+      })),
+      ...(explicitSkillInstruction === undefined
+        ? {}
+        : {
+            explicitSkillInstruction: {
+              name: explicitSkillInstruction.name,
+              version: explicitSkillInstruction.version,
+              digest: explicitSkillInstruction.digest,
+              modelText: explicitSkillInstruction.modelText,
+            },
+          }),
       assertModelRequestAllowed: () => {
         if (observationRecoveryCode !== undefined) {
           throw new Error("Tool Observation 恢复未完成，禁止继续模型轮次");
@@ -510,6 +626,73 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         controller.dispose();
       },
     };
+  }
+
+  private requireSkillRuntime(): SkillRuntimeService {
+    if (this.skillRuntime === undefined) {
+      throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
+    }
+    return this.skillRuntime;
+  }
+}
+
+function sandboxSkillTarget(
+  sandbox: import("@cube-runtime/sandbox").SandboxHandle,
+  signal?: AbortSignal,
+) {
+  return {
+    prepareRoot: async (input: { readonly absoluteRoot: string }) => {
+      if (!/^\/skills\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.absoluteRoot)) {
+        throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
+      }
+      const removed = await sandbox.command(`rm -rf -- ${quoteShell(input.absoluteRoot)}`, {
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (removed.exitCode !== 0) throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
+      const created = await sandbox.command(`mkdir -p -- ${quoteShell(input.absoluteRoot)}`, {
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (created.exitCode !== 0) throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
+    },
+    writeFile: async (input: { readonly absolutePath: string; readonly body: Uint8Array }) => {
+      const directory = posix.dirname(input.absolutePath);
+      const mkdir = await sandbox.command(`mkdir -p -- ${quoteShell(directory)}`, {
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (mkdir.exitCode !== 0) throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
+      await sandbox.writeFile(input.absolutePath, input.body, {
+        ...(signal === undefined ? {} : { signal }),
+      });
+    },
+    sealReadOnly: async (input: { readonly absoluteRoot: string }) => {
+      const sealed = await sandbox.command(`chmod -R a-w -- ${quoteShell(input.absoluteRoot)}`, {
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (sealed.exitCode !== 0) throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
+    },
+  };
+}
+
+function quoteShell(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function skillErrorMessage(code: SkillRuntimeError["code"]): string {
+  switch (code) {
+    case "SKILL_NOT_INSTALLED":
+      return "该 Skill 不在本次 Run 的可用目录中";
+    case "SKILL_REVOKED":
+      return "该 Skill 版本已撤销";
+    case "SKILL_INCOMPATIBLE":
+      return "该 Skill 与当前 Runtime 不兼容";
+    case "SKILL_ARGUMENTS_INVALID":
+      return "Skill 参数无效";
+    case "SKILL_CONTEXT_LIMIT":
+      return "Skill 指令超过当前上下文预算";
+    case "SKILL_PROTOCOL":
+      return "Skill 调用协议校验失败";
+    case "SKILL_CONTENT_UNAVAILABLE":
+      return "Skill 内容暂时不可用";
   }
 }
 

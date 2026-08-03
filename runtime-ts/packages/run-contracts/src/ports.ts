@@ -18,6 +18,7 @@ import type {
   ThreadActiveHistoryV1,
 } from "@cube-runtime/pi-adapter";
 import type { SandboxHandle, UncertainLifecycleEvent } from "@cube-runtime/sandbox";
+import type { RunSkillSnapshot } from "@cube-runtime/skill";
 import type { WorkspaceManifest } from "@cube-runtime/workspace";
 
 export interface ExecutionScope {
@@ -93,6 +94,8 @@ export interface ClaimedExecutionSnapshot {
   readonly rolloutProjection: ControlledRolloutProjection;
   /** 激活时冻结；当前 Run 自身输入不属于这段 predecessor history。 */
   readonly contextThroughSequence?: number;
+  /** API 创建 Run 时冻结；Worker 不反查用户当前安装集合。 */
+  readonly skills?: RunSkillSnapshot;
 }
 
 export type ThreadContextEntryKindV1 =
@@ -809,6 +812,7 @@ export interface AgentSessionFactoryPort {
         | { readonly reason: "tool"; readonly call: ExternalEffectCall },
     ) => Promise<SandboxSessionRef>;
     readonly rolloutProjection: ControlledRolloutProjection;
+    readonly skillSnapshot?: RunSkillSnapshot;
     readonly contextThroughSequence?: number;
     readonly threadActiveHistory?: ThreadActiveHistoryV1;
     /**

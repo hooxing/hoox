@@ -30,6 +30,11 @@ import {
   appendAttachmentsToLatestUserPrompt,
   type ResourceAttachmentResolverPort,
 } from "@cube-runtime/resource";
+import {
+  resolveExplicitSkillInvocation,
+  SkillRuntimeError,
+  type ExplicitSkillInvocation,
+} from "@cube-runtime/skill";
 import type { ApiCreateCapability } from "./capabilities.js";
 import { InvalidThreadCursorError } from "./cursor.js";
 import type {
@@ -224,6 +229,7 @@ export class ApiService {
     rawThreadId: string,
     inputText: string,
     idempotencyKey: string,
+    structuredSkillInvocation?: { readonly skill: string; readonly args?: string },
   ): Promise<RunDto> {
     try {
       const capability = this.dependencies.createCapability;
@@ -240,9 +246,14 @@ export class ApiService {
         threadId(rawThreadId),
       );
       if (thread === undefined) throw new ApiFailure("not_found");
+      const skillInvocation = resolveSkillInvocation(inputText, structuredSkillInvocation);
       const idempotency = {
         key: idempotencyKey,
-        requestHash: commandHash("run.create", { threadId: thread.entity.id, inputText }),
+        requestHash: commandHash("run.create", {
+          threadId: thread.entity.id,
+          inputText,
+          skillInvocation: skillInvocation ?? null,
+        }),
       } as const;
       // 回放先于 createRun 的 active Thread 领域约束；归档不改变已经提交命令的 HTTP 结果。
       const replay = await capability.enqueueOutbox.replayQueuedRun({
@@ -266,12 +277,15 @@ export class ApiService {
         run,
         thread: thread.entity,
         inputText,
+        ...(skillInvocation === undefined ? {} : { skillInvocation }),
         idempotency,
       });
       if (result.outcome === "key_conflict") throw new ApiFailure("conflict");
       if (result.outcome === "legacy_drain_required") throw new ApiFailure("invalid_state");
       if (result.outcome === "parent_inactive") throw new ApiFailure("invalid_state");
       if (result.outcome === "not_authorized") throw new ApiFailure("not_found");
+      if (result.outcome === "skill_not_available") throw new ApiFailure("invalid_state");
+      if (!("entity" in result)) throw new ApiFailure("internal");
       return toRunDto(result.entity);
     } catch (error) {
       return mapDomainFailure(error);
@@ -313,6 +327,10 @@ export class ApiService {
         threadId(rawThreadId),
       );
       if (thread === undefined) throw new ApiFailure("not_found");
+      const skillInvocation = resolveSkillInvocation(input.input, input.skillInvocation);
+      if (skillInvocation !== undefined && input.mode === "steer") {
+        throw new ApiFailure("bad_request");
+      }
       const fallbackRun = createRun({
         id: this.dependencies.ids.run(),
         thread: thread.entity,
@@ -327,10 +345,11 @@ export class ApiService {
           resourceId: attachment.resourceId,
           versionId: attachment.versionId,
         })),
-        mode: input.mode,
+        mode: skillInvocation === undefined ? input.mode : "follow_up",
         ...(input.expectedRunId === undefined ? {} : { expectedRunId: input.expectedRunId }),
         ...(input.expectedTurnId === undefined ? {} : { expectedTurnId: input.expectedTurnId }),
         fallbackToFollowUp: input.fallbackToFollowUp ?? false,
+        ...(skillInvocation === undefined ? {} : { skillInvocation }),
         idempotency: {
           key: idempotencyKey,
           requestHash: commandHash("thread.input", {
@@ -341,6 +360,7 @@ export class ApiService {
             expectedRunId: input.expectedRunId ?? null,
             expectedTurnId: input.expectedTurnId ?? null,
             fallbackToFollowUp: input.fallbackToFollowUp ?? false,
+            skillInvocation: skillInvocation ?? null,
           }),
         },
       });
@@ -348,6 +368,7 @@ export class ApiService {
       if (result.outcome === "legacy_drain_required") throw new ApiFailure("invalid_state");
       if (result.outcome === "parent_inactive") throw new ApiFailure("invalid_state");
       if (result.outcome === "not_authorized") throw new ApiFailure("not_found");
+      if (result.outcome === "skill_not_available") throw new ApiFailure("invalid_state");
       if (result.outcome !== "accepted" && result.outcome !== "replayed") {
         throw new ApiFailure("internal");
       }
@@ -449,6 +470,21 @@ export class ApiService {
     } catch (error) {
       return mapDomainFailure(error);
     }
+  }
+}
+
+function resolveSkillInvocation(
+  inputText: string,
+  structured?: { readonly skill: string; readonly args?: string },
+): ExplicitSkillInvocation | undefined {
+  try {
+    return resolveExplicitSkillInvocation({
+      inputText,
+      ...(structured === undefined ? {} : { structured }),
+    });
+  } catch (error) {
+    if (error instanceof SkillRuntimeError) throw new ApiFailure("bad_request");
+    throw error;
   }
 }
 

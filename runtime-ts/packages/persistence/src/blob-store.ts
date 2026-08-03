@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 
-export const BLOB_PURPOSES = ["workspace", "resource", "artifact", "trace", "preview"] as const;
+export const BLOB_PURPOSES = [
+  "workspace",
+  "resource",
+  "artifact",
+  "trace",
+  "preview",
+  "skill",
+] as const;
 
 export type BlobPurpose = (typeof BLOB_PURPOSES)[number];
 

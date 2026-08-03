@@ -21,6 +21,7 @@ import {
   PgRecoveryMetrics,
   PgResourceFilesystemCatalog,
   PgRunDispatchOutbox,
+  PgSkillRuntimeRepository,
   PgRuntimeRolloutRepository,
   PgThreadContextCompactionRepository,
   PgThreadContextHistoryRepository,
@@ -32,6 +33,7 @@ import {
   probePostgres,
   probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX,
+  BlobSkillContentStore,
   ThreadContextBodyPersistence,
 } from "@cube-runtime/persistence";
 import { bindTrustedPiModelContextCapability } from "@cube-runtime/pi-adapter";
@@ -54,6 +56,7 @@ import {
 } from "@cube-runtime/process-runtime";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import { CubeTenantResourceVolume, resolveCubeProxyRouting } from "@cube-runtime/sandbox";
+import { SkillRuntimeService } from "@cube-runtime/skill";
 import { DeliverFileToolRouterFactory } from "@cube-runtime/tool-router";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -619,10 +622,14 @@ async function assembleWorkerRuntime(
       forcePathStyle: configuration.objectStorage.forcePathStyle,
       prefix: RUNTIME_BLOB_OBJECT_PREFIX,
       maxPresignTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
-      // Worker 需要读取 API 已接受的完整上传附件；上限必须与上传边界一致。
-      maxBlobSizeBytes: 16 * 1024 * 1024,
+      // Resource 上传仍由 API 限制为 16 MiB；Worker 还需读取中心校验过的 32 MiB Skill 资源。
+      maxBlobSizeBytes: 32 * 1024 * 1024,
     } as const;
     const blobs = createS3BlobStore(s3Config, blobRepository);
+    const skillRuntime = new SkillRuntimeService(
+      new PgSkillRuntimeRepository(pool),
+      new BlobSkillContentStore(blobs),
+    );
     const rolloutRepository = new PgRuntimeRolloutRepository(pool);
     const durableObservation = createPgDurableObservationSession({
       blobRepository,
@@ -887,6 +894,7 @@ async function assembleWorkerRuntime(
             })
         : undefined,
       new BlobPromptImageLoader(new PgResourceFilesystemCatalog(pool), blobs),
+      skillRuntime,
     );
     const shutdown = new ProcessShutdown();
     const worker = new RunWorker(

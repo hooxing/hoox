@@ -13,6 +13,7 @@ import type {
   WorkspaceWriteScope,
 } from "@cube-runtime/domain";
 import type { ResourceAttachmentReference } from "@cube-runtime/resource";
+import type { ExplicitSkillInvocation } from "@cube-runtime/skill";
 import type { StableBlobRef } from "./blob-store.js";
 
 /** 由认证/授权层构造；Repository 不接受裸 tenantId 作为业务查询上下文。 */
@@ -134,7 +135,13 @@ export type ThreadInputSubmitResult =
       readonly receipt: ThreadInputReceiptView;
       readonly queuedRun?: Run;
     }
-  | { readonly outcome: "key_conflict" | "parent_inactive" | "not_authorized" }
+  | {
+      readonly outcome:
+        | "key_conflict"
+        | "parent_inactive"
+        | "not_authorized"
+        | "skill_not_available";
+    }
   | { readonly outcome: "legacy_drain_required" };
 
 /** 统一输入、receipt、可选 Run 与 FIFO item 必须在同一 Thread-head 事务中提交。 */
@@ -150,6 +157,7 @@ export interface ThreadInputRoutingPort {
     readonly expectedRunId?: string;
     readonly expectedTurnId?: string;
     readonly fallbackToFollowUp: boolean;
+    readonly skillInvocation?: ExplicitSkillInvocation;
     readonly idempotency: IdempotentCommand;
   }): Promise<ThreadInputSubmitResult>;
   get(input: {
@@ -183,7 +191,7 @@ export type IdempotentCreateResult<T> =
 
 export type IdempotentRunEnqueueResult<T> =
   | IdempotentCreateResult<T>
-  | { readonly outcome: "legacy_drain_required" };
+  | { readonly outcome: "legacy_drain_required" | "skill_not_available" };
 
 /** Thread、空 Workspace、幂等记录和有效 Membership 重验必须共用事务。 */
 export interface ThreadCreationPort {
@@ -217,6 +225,7 @@ export interface EnqueueOutboxPort {
     readonly thread: Thread;
     /** 已由 API 按 UTF-8 字节上限验证，持久层仍必须以数据库约束兜底。 */
     readonly inputText: string;
+    readonly skillInvocation?: ExplicitSkillInvocation;
     readonly idempotency: IdempotentCommand;
   }): Promise<IdempotentRunEnqueueResult<Run>>;
 }

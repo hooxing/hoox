@@ -32,6 +32,89 @@ afterEach(() => {
 });
 
 describe("Pi 安全适配", () => {
+  it("零 Skill 与多 Skill 始终注册同一 skill 工具 Schema，仅目录改变 Prompt", async () => {
+    const empty = await harness([fauxAssistantMessage("empty")]);
+    const populated = await harness(
+      [fauxAssistantMessage("populated")],
+      new FakeSandboxHandle("pi-skill-directory"),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [
+        { name: "review", description: "审阅修改" },
+        { name: "deploy", description: "准备部署" },
+      ],
+    );
+
+    expect(empty.controller.getDiagnostics().activeToolNames).toContain("skill");
+    expect(populated.controller.getDiagnostics().activeToolNames).toContain("skill");
+    expect(populated.controller.getDiagnostics().capabilityManifestDigest).toBe(
+      empty.controller.getDiagnostics().capabilityManifestDigest,
+    );
+    expect(populated.controller.getDiagnostics().promptDigest).not.toBe(
+      empty.controller.getDiagnostics().promptDigest,
+    );
+  });
+
+  it("skill 工具只读取后端指令，不触碰 Sandbox 或副作用许可", async () => {
+    const sandbox = new FakeSandboxHandle("pi-skill-no-sandbox");
+    let sandboxCommands = 0;
+    sandbox.command = async () => {
+      sandboxCommands += 1;
+      return { stdout: "", stderr: "", exitCode: 0 };
+    };
+    const invocations: Array<{ callId: string; skill: string; args?: string }> = [];
+    let secondModelContext = "";
+    const { controller, toolAuthorizationCount } = await harness(
+      [
+        fauxAssistantMessage(fauxToolCall("skill", { skill: "review", args: "只看安全性" }), {
+          stopReason: "toolUse",
+        }),
+        (context) => {
+          secondModelContext = JSON.stringify(context.messages);
+          return fauxAssistantMessage("审阅完成");
+        },
+      ],
+      sandbox,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [{ name: "review", description: "审阅修改" }],
+      {
+        invoke: async (input) => {
+          invocations.push(input);
+          return "[RUNTIME_SKILL_INSTRUCTION]只检查安全问题[/RUNTIME_SKILL_INSTRUCTION]";
+        },
+        projectError: () => ({
+          status: "failed" as const,
+          code: "SKILL_CONTENT_UNAVAILABLE",
+          message: "Skill 内容不可用",
+          correctable: false,
+          fatal: false,
+        }),
+      },
+    );
+
+    await controller.prompt("请审阅这次修改");
+
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]).toMatchObject({ skill: "review", args: "只看安全性" });
+    expect(secondModelContext).toContain("只检查安全问题");
+    expect(toolAuthorizationCount()).toBe(0);
+    expect(sandboxCommands).toBe(0);
+    expect(sandbox.files.size).toBe(0);
+  });
+
   it("Run B 的 Provider 可见消息保留 Run A 的真实角色与工具配对", async () => {
     let providerMessages: unknown[] = [];
     const unsigned = {
@@ -316,7 +399,7 @@ describe("Pi 安全适配", () => {
       logicalCwd: "/workspace",
       activeToolNames: expect.arrayContaining([...SANDBOX_TOOL_NAMES]),
       promptSchemaVersion: 1,
-      promptVersion: "runtime-system-prompt.v3",
+      promptVersion: "runtime-system-prompt.v4",
       capabilityManifestDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       promptDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       compactionEnabled: false,
@@ -326,7 +409,7 @@ describe("Pi 安全适配", () => {
       pendingMessageCount: 0,
     });
     expect([...controller.getDiagnostics().activeToolNames].sort()).toEqual(
-      [...SANDBOX_TOOL_NAMES].sort(),
+      [...SANDBOX_TOOL_NAMES, "skill"].sort(),
     );
     expect("compact" in controller).toBe(false);
     expect("session" in controller).toBe(false);
@@ -1179,6 +1262,8 @@ async function harness(
   deliverFileToolRouter?: Parameters<typeof createSafePiSession>[0]["deliverFileToolRouter"],
   threadActiveHistory?: Parameters<typeof createSafePiSession>[0]["threadActiveHistory"],
   prepareNextTurnHistory?: Parameters<typeof createSafePiSession>[0]["prepareNextTurnHistory"],
+  availableSkills?: Parameters<typeof createSafePiSession>[0]["availableSkills"],
+  skillToolExecutor?: Parameters<typeof createSafePiSession>[0]["skillToolExecutor"],
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
@@ -1225,6 +1310,8 @@ async function harness(
     ...(deliverFileToolRouter === undefined ? {} : { deliverFileToolRouter }),
     ...(threadActiveHistory === undefined ? {} : { threadActiveHistory }),
     ...(prepareNextTurnHistory === undefined ? {} : { prepareNextTurnHistory }),
+    ...(availableSkills === undefined ? {} : { availableSkills }),
+    ...(skillToolExecutor === undefined ? {} : { skillToolExecutor }),
   });
   disposers.push(() => controller.dispose());
   const events: RuntimeAgentEvent[] = [];

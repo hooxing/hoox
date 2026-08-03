@@ -71,6 +71,7 @@ import {
   PgRunExecutionSetup,
 } from "../../runtime-ts/packages/persistence/src/pg-run-worker-state.js";
 import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-sandbox-cleanup-consumer.js";
+import { PgSkillRuntimeRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-runtime.js";
 import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import { PgThreadInputRouting } from "../../runtime-ts/packages/persistence/src/pg-thread-input.js";
 import {
@@ -1004,6 +1005,29 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         leaseDurationMs: 30_000,
       }),
     ).resolves.toEqual({ outcome: "fence_lost" });
+  });
+
+  it("Skill 恢复可在空调用集合上按稳定名称排序", async () => {
+    const f = await fixture(`skill-recovery-empty-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "skill-recovery-empty-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("Skill 恢复 claim 失败");
+
+    const loaded = await new PgSkillRuntimeRepository(runtime).listLoadedPackages({
+      binding: {
+        ...f.scope,
+        attemptId: claimed.snapshot.attempt.attemptId,
+        runClaimToken: claimed.fence.runClaim.token,
+        runClaimEpoch: claimed.fence.runClaim.epoch,
+        workspaceLeaseRootRunId: claimed.fence.workspaceLease.rootRunId,
+        workspaceLeaseEpoch: claimed.fence.workspaceLease.epoch,
+      },
+    });
+
+    expect(loaded).toEqual([]);
   });
 
   it("同键 Run 创建原子重放，并由 Outbox 至少一次领取", async () => {

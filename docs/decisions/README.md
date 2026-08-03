@@ -98,6 +98,8 @@
 | [ADR-0095](0095-skill-runtime-snapshot-and-lazy-materialization.md) | Skill Runtime 快照、后端注入与延迟物化 | 已接受 | 2026-08-03 |
 | [ADR-0096](0096-skill-center-primary-navigation-placement.md) | Skill Center 主导航入口位置 | 已接受 | 2026-08-03 |
 | [ADR-0097](0097-development-pptx-skill-fixture.md) | development PPTX Skill 测试目录发布 | 已接受 | 2026-08-03 |
+| [ADR-0098](0098-worker-skill-blob-size-boundary.md) | Worker Skill Blob 读取上限与预检一致性 | 已接受 | 2026-08-04 |
+| [ADR-0099](0099-skill-recovery-stable-ordering.md) | Skill 恢复查询的 PostgreSQL 稳定排序 | 已接受 | 2026-08-04 |
 
 ## 何时必须记录
 

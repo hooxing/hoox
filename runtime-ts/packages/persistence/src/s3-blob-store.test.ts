@@ -38,6 +38,23 @@ const defaultIncarnationId = "00000000-0000-4000-8000-000000000001";
 const defaultLifecycleId = "10000000-0000-4000-8000-000000000001";
 const defaultAllocationId = "20000000-0000-4000-8000-000000000001";
 describe("S3BlobStore", () => {
+  it("允许 Skill 文件读取所需的 32 MiB 实例上限，但拒绝继续扩大内存边界", () => {
+    expect(
+      () =>
+        new S3BlobStore(new FakeS3ObjectClient(), promotionAuthorizations, {
+          ...config,
+          maxBlobSizeBytes: 32 * 1024 * 1024,
+        }),
+    ).not.toThrow();
+    expect(
+      () =>
+        new S3BlobStore(new FakeS3ObjectClient(), promotionAuthorizations, {
+          ...config,
+          maxBlobSizeBytes: 32 * 1024 * 1024 + 1,
+        }),
+    ).toThrowError(expect.objectContaining({ code: "INVALID_BLOB_ARGUMENT" }));
+  });
+
   it("只使用派生键，并隔离 Tenant 与用途", async () => {
     const client = new FakeS3ObjectClient();
     const store = new S3BlobStore(client, promotionAuthorizations, { ...config, prefix: "test" });

@@ -66,6 +66,8 @@ corepack pnpm config:check
 
 `runtime-ts/apps/api` 在 `RUNTIME_ENV=development`、显式启用开发身份时可选择内建的开发装配：它打开真实 PostgreSQL Repository 和 HTTP listener，可用 `pnpm dev:api` 启动。迁移后先显式执行 `pnpm dev:identity:provision`，该命令幂等创建配置的两个 User、个人 Tenant 和 owner Membership；服务启动本身绝不写入授权数据。该装配和初始化命令都不支持 production，也不会退化到内存 Fake。
 
+需要测试 Skill Center 时，可显式执行 `pnpm dev:skill:publish:pptx`。该命令只接受 `RUNTIME_ENV=development`，把固定提交的 Anthropic PPTX 测试包幂等写入私有对象存储并原子发布到受管目录；API 启动不会隐式发布目录内容。该 fixture 受专有许可证约束，不属于生产目录或发布制品。
+
 `agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 必须严格等于 `DEV_AUTH_USER_A_TENANT_ID`，保证 `dev-user-a` 的 Web/API 创建结果由同一 Worker 消费。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
 
 production Worker 使用 `pnpm --filter @cube-runtime/agent-worker start:production` 或 `Dockerfile.production-worker-gate`，仅支持 Linux。公开入口固定模块内真实装配，不接受调用方注入的 Fake，且不改写 `runtimeEnvironment=production`；通用 `process-runtime` 只是受信代码的生命周期编排器，不是 JS 进程内调用方 ACL。启动前必须验证 `DATABASE_RUNTIME_ROLE`、部署 Tenant 分片、严格模型元数据和 TLS 端点；任一 `DEV_AUTH_*` 变量（包括 `DEV_AUTH_ENABLED=false`）都会失败关闭。生产装配已经接入持久化 Workspace revision/Artifact 发布闭环，但这不替代真实基础设施验收。

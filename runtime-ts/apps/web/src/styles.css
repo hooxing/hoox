@@ -460,18 +460,11 @@ h2 {
   font-size: 12px;
 }
 .run-thinking-content {
-  max-height: calc(4.95em + 24px);
   overflow: auto;
-  overscroll-behavior: contain;
   padding: 11px 13px;
-  margin: 6px 0 2px 20px;
-  border: 1px solid #dfe4e0;
   border-radius: 9px;
   color: #526159;
-  background: rgb(253 253 252 / 94%);
   font-size: 12px;
-  line-height: 1.65;
-  scrollbar-width: none;
 }
 .run-thinking-content::-webkit-scrollbar {
   display: none;

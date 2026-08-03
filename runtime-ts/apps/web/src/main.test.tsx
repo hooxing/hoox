@@ -148,6 +148,34 @@ afterEach(() => {
 });
 
 describe("Agent 工作台恢复接入", () => {
+  it("技能中心固定显示在新建会话下方、任务列表上方", async () => {
+    const { container } = mount(
+      apiFixture({
+        listSkills: vi.fn(async () => ({ items: [] })),
+        listInstalledSkills: vi.fn(async () => []),
+        installSkill: vi.fn(async () => {
+          throw new Error("不应安装技能");
+        }),
+        setSkillEnabled: vi.fn(async () => {
+          throw new Error("不应更新技能");
+        }),
+        uninstallSkill: vi.fn(async () => {
+          throw new Error("不应卸载技能");
+        }),
+      }),
+    );
+
+    await settleEffects();
+
+    const createEntry = container.querySelector(".thread-create");
+    const skillCenterEntry = container.querySelector(".skill-center-entry");
+    const taskHeading = container.querySelector(".thread-heading");
+    expect(createEntry).not.toBeNull();
+    expect(skillCenterEntry).not.toBeNull();
+    expect(createEntry?.nextElementSibling).toBe(skillCenterEntry);
+    expect(skillCenterEntry?.nextElementSibling).toBe(taskHeading);
+  });
+
   it("重复文本只计算尚未落入 Thread 上下文的消息，拒绝项不占用序号", () => {
     expect(
       nextExpectedUserOccurrence(

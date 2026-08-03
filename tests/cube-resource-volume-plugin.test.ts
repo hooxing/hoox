@@ -26,6 +26,13 @@ describe("Cube ResourceFS binary Volume plugin 契约", () => {
     expect(script).toMatch(/--file-perms 0444 \\\r?\n\s*<\/dev\/null >\/dev\/null 2>&1 &/u);
     expect(script).toContain('mount_pid="$!"');
     expect(script).toContain('kill -0 "$mount_pid"');
+    expect(script).toContain('pid_file="$' + '{log_root}/rclone.pid"');
+    expect(script).toContain("mapfile -d '' -t tracked_args");
+    expect(script).toContain('"$' + '{tracked_args[3]-}" == "$volume_root"');
+    expect(script).toContain('kill -KILL "$tracked_pid"');
+    expect(script).toMatch(
+      /if ! mountpoint -q "\$volume_root"; then\s*#.*\s*stop_tracked_rclone \|\| fail/u,
+    );
   });
 
   it("Attach 在返回 host_path 前验证远端与 FUSE 数据面，并只修复无既有使用者的坏挂载", () => {
@@ -48,6 +55,10 @@ describe("Cube ResourceFS binary Volume plugin 契约", () => {
 
   it("Detach 从 root 配置重建固定路径而不依赖未提供的 volume-base-dir", () => {
     expect(script).toContain(`: "\${RESOURCEFS_VOLUME_BASE_DIR:=/data/cube-shared/volume}"`);
+    expect(script).toContain(`: "\${RESOURCEFS_RCLONE_BIN:=/usr/bin/rclone}"`);
+    expect(script.indexOf(`: "\${RESOURCEFS_RCLONE_BIN:=/usr/bin/rclone}"`)).toBeLessThan(
+      script.indexOf('case "$OP" in'),
+    );
     expect(script).toContain('expected_metadata="$(printf');
     expect(script).toContain('[[ "$METADATA" == "$expected_metadata" ]]');
     expect(script).not.toMatch(/detach\)\s*\n\s*\[\[ "\$VOLUME_BASE_DIR"/u);

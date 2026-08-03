@@ -49,7 +49,9 @@ Volume 管理 API，无法从管理面证明宿主挂载的数据面健康。
 2. 对已存在和刚创建的 FUSE 挂载都执行最多 10 秒的根目录枚举，避免把“仅有 mountpoint”当作可用。
 3. 已有挂载探测失败时，只有 `refCount=1` 才允许卸载并重建；更高 refCount 直接失败。
 4. 新挂载探测失败时，卸载 FUSE、终止本次 rclone 并让 Attach 失败，不向 Cube 返回 `host_path`。
-5. Detach 复用同一个有界卸载函数，保持 refCount 归零才卸载的既有语义。
+5. 插件在 root 管理的 Tenant 日志目录以 `0600` 文件记录 rclone PID。Detach 在 refCount 归零时先卸载
+   FUSE，再校验 PID 对应进程的完整命令身份并有界终止，不能假设 lazy unmount 会让 rclone 自行退出；
+   rclone 可执行路径的默认值在 Attach/Detach 共用的配置加载阶段完成，避免 Detach 在卸载后因未初始化变量中断。
 
 ## 理由
 
@@ -91,3 +93,6 @@ Volume 管理 API，无法从管理面证明宿主挂载的数据面健康。
 ## 实施记录
 
 - 2026-08-03：增加远端 WebDAV 与 FUSE 双探针、残留挂载有条件自愈和失败清理。
+- 2026-08-03：真实回归发现 `fusermount3 -uz` 后 rclone 仍可存活；增加受信 PID 记录、进程身份校验和
+  Detach 有界回收。
+- 2026-08-03：修复 Detach 未初始化 rclone 可执行路径导致 FUSE 已卸载但后台进程与 PID 文件残留。

@@ -107,6 +107,8 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
 
     await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
     expect(operations).toEqual(["image", "permit"]);
+    expect(sandboxes.acquireCount).toBe(0);
+    expect(sandboxes.settleCount).toBe(0);
   });
 
   it("纯文本模型保留附件路径但不读取图片 Blob", async () => {
@@ -148,6 +150,11 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       { load },
     );
     const sandboxes = new FakeSandboxRegistry();
+    persistence.beforePermitIssueReturn = ({ effect }) => {
+      if (effect !== "model_start") return;
+      expect(sandboxes.acquireCount).toBe(1);
+      expect(sandboxes.settleCount).toBe(0);
+    };
     const worker = new RunWorker(
       {
         persistence,
@@ -165,6 +172,8 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
 
     await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
     expect(load).not.toHaveBeenCalled();
+    expect(sandboxes.acquireCount).toBe(1);
+    expect(sandboxes.settleCount).toBe(1);
   });
 
   it("durable Observation 工厂拒绝错接 Tenant、Run 或 Attempt 的端口", () => {
@@ -425,6 +434,11 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
         },
       }),
     );
+    persistence.beforePermitIssueReturn = ({ effect }) => {
+      if (effect !== "tool_execution") return;
+      expect(sandboxes.acquireCount).toBe(1);
+      expect(sandboxes.settleCount).toBe(0);
+    };
     const worker = new RunWorker(
       {
         persistence,
@@ -441,6 +455,8 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     );
 
     await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(sandboxes.acquireCount).toBe(1);
+    expect(sandboxes.settleCount).toBe(1);
     expect(operations).toEqual([
       "call:call-parallel-first",
       "result:call-parallel-first",

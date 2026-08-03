@@ -284,6 +284,8 @@ export class RunWorker {
     const shutdown = this.dependencies.shutdownSignal;
     let session: WorkerAgentSessionPort | undefined;
     let sandbox: SandboxSessionRef | undefined;
+    let sandboxPreparation: Promise<SandboxSessionRef> | undefined;
+    let sandboxPreparationResult: RunWorkerResult | undefined;
     let unsubscribe: (() => void) | undefined;
     let eventChain = Promise.resolve();
     const executionAbort = new AbortController();
@@ -358,151 +360,194 @@ export class RunWorker {
       } catch {
         return await this.requireRecovery(context, "EVENT_REJECTED", []);
       }
-      const preAcquire = await this.stopPoint(context, cancellation);
-      if (preAcquire) return await this.finishStopped(context, preAcquire);
+      const ensureSandboxReady: Parameters<
+        AgentSessionFactoryPort["create"]
+      >[0]["ensureSandboxReady"] = async (request) => {
+        if (request.reason === "tool") {
+          const call = request.call;
+          const gate = context.toolStartedGates.get(call.callId);
+          if (gate === undefined || gate.name !== call.toolName) {
+            context.adapterRejected = true;
+            context.agentFailure = "PROTOCOL";
+            throw new Error("Sandbox 准备缺少匹配的 tool.started");
+          }
+          await gate.committed;
+          if (!context.eventAcceptanceOpen || context.adapterRejected) {
+            throw new Error("tool.started 未能持久化，拒绝准备 Sandbox");
+          }
+        }
+        // acquire 后会先设置 ref，再继续物化 Workspace；并发调用必须等待同一个完整准备 Promise，
+        // 不能仅因 ref 已可见就提前取得尚未 ready 的 Sandbox。
+        if (sandboxPreparation !== undefined) return await sandboxPreparation;
+        if (sandbox !== undefined) return sandbox;
+        sandboxPreparation ??= (async () => {
+          const preAcquire = await this.stopPoint(context, cancellation);
+          if (preAcquire) throw new Error("Sandbox acquire 前运行已停止");
 
-      let requiresMaterialization = true;
-      let legacyAcquisition: Awaited<ReturnType<SandboxSessionRegistryPort["acquire"]>> | undefined;
-      if (this.options.threadSandboxSessionReuseEnabled === true) {
-        const lifecycle = this.dependencies.threadSandboxes;
-        if (lifecycle === undefined) throw new Error("Thread Sandbox lifecycle 缺失");
-        const acquisition = await lifecycle.acquire({
-          scope,
-          attemptId: context.attemptId,
-          owner: this.options.workerId,
-          leaseDurationMs: this.#leaseDurationMs,
-          signal: executionAbort.signal,
-        });
-        if (acquisition.outcome === "unknown") {
-          return await this.requireRecovery(context, "SANDBOX_UNKNOWN", []);
-        }
-        if (acquisition.outcome === "failed") {
-          return await this.requireRecovery(context, acquisition.code, []);
-        }
-        sandbox = acquisition.session;
-        context.threadSandboxLease = acquisition.lease;
-        requiresMaterialization = acquisition.requiresMaterialization;
-      } else {
-        try {
-          legacyAcquisition = await this.dependencies.sandboxes.acquire({
-            scope,
-            signal: executionAbort.signal,
-          });
-        } catch {
-          return await this.requireRecovery(context, "SANDBOX_FAILED", []);
-        }
-        if (legacyAcquisition.outcome === "ready") sandbox = legacyAcquisition.session;
-        // UNKNOWN 是 acquire 已发生但结果不确定的独立恢复事实；必须先提交，再响应并发取消/超时。
-        if (legacyAcquisition.outcome === "unknown") {
-          const unknownFact = await this.applyMutation(context, {
-            idempotencyKey: `${context.attemptId}/sandbox/acquire-unknown/${legacyAcquisition.event.requestId}`,
-            events: [],
-            outbox: [cleanupUnknownOutbox(context, legacyAcquisition.event)],
-          });
-          if (!isApplied(unknownFact)) return await this.handleMutationFailure(unknownFact);
-        }
-      }
-      const postAcquire = await this.stopPoint(context, cancellation);
-      if (postAcquire) {
-        if (context.threadSandboxLease !== undefined && sandbox !== undefined) {
-          return await this.finishStopped(context, postAcquire, sandbox);
-        }
-        if (sandbox && (postAcquire === "cancelled" || postAcquire === "timeout")) {
+          let requiresMaterialization = true;
+          if (this.options.threadSandboxSessionReuseEnabled === true) {
+            const lifecycle = this.dependencies.threadSandboxes;
+            if (lifecycle === undefined) throw new Error("Thread Sandbox lifecycle 缺失");
+            const acquisition = await lifecycle.acquire({
+              scope,
+              attemptId: context.attemptId,
+              owner: this.options.workerId,
+              leaseDurationMs: this.#leaseDurationMs,
+              signal: executionAbort.signal,
+            });
+            if (acquisition.outcome !== "ready") {
+              context.agentFailure =
+                acquisition.outcome === "unknown" ? "SANDBOX_UNKNOWN" : acquisition.code;
+              throw new Error("Thread Sandbox acquire 失败");
+            }
+            sandbox = acquisition.session;
+            context.threadSandboxLease = acquisition.lease;
+            requiresMaterialization = acquisition.requiresMaterialization;
+          } else {
+            let acquisition: Awaited<ReturnType<SandboxSessionRegistryPort["acquire"]>>;
+            try {
+              acquisition = await this.dependencies.sandboxes.acquire({
+                scope,
+                signal: executionAbort.signal,
+              });
+            } catch {
+              context.agentFailure = "SANDBOX_FAILED";
+              throw new Error("Sandbox acquire 失败");
+            }
+            if (acquisition.outcome === "unknown") {
+              const unknownFact = await this.applyMutation(context, {
+                idempotencyKey: `${context.attemptId}/sandbox/acquire-unknown/${acquisition.event.requestId}`,
+                events: [],
+                outbox: [cleanupUnknownOutbox(context, acquisition.event)],
+              });
+              if (!isApplied(unknownFact)) {
+                sandboxPreparationResult = await this.handleMutationFailure(unknownFact);
+                throw new Error("Sandbox acquire UNKNOWN 事实未能持久化");
+              }
+              context.agentFailure = "SANDBOX_UNKNOWN";
+              throw new Error("Sandbox acquire 结果未知");
+            }
+            if (acquisition.outcome === "failed") {
+              context.agentFailure = acquisition.code;
+              throw new Error("Sandbox acquire 失败");
+            }
+            sandbox = acquisition.session;
+          }
+
+          const acquired = sandbox;
+          if (acquired === undefined) {
+            context.agentFailure = "SANDBOX_FAILED";
+            throw new Error("Sandbox acquire 未返回 Session");
+          }
+          const postAcquire = await this.stopPoint(context, cancellation);
+          if (
+            postAcquire !== undefined &&
+            postAcquire !== "cancelled" &&
+            postAcquire !== "timeout"
+          ) {
+            if (context.threadSandboxLease === undefined) {
+              await this.bestEffortOrphanCleanup(scope, acquired, postAcquire);
+            } else {
+              await this.dependencies.threadSandboxes
+                ?.terminate({
+                  scope,
+                  attemptId: context.attemptId,
+                  session: acquired,
+                  lease: context.threadSandboxLease,
+                  reason: "checkpoint_failed",
+                })
+                .catch(() => "unknown");
+            }
+            sandbox = undefined;
+            delete context.threadSandboxLease;
+            throw new Error("Sandbox acquire 后运行已停止");
+          }
+
+          // acquire 可能发生在模型执行阶段；cleanup intent 是正交生命周期事实，不回退主阶段。
           const intent = await this.applyMutation(context, {
             idempotencyKey: `${context.attemptId}/sandbox/cleanup-intent`,
-            nextAttemptStatus: "running",
-            nextStage: "cleanup_intent_persisted",
-            events: [attemptEvent(context, "running", "cleanup_intent_persisted")],
-            outbox: [cleanupOutbox(context, sandbox, "pending")],
+            events: [],
+            outbox:
+              context.threadSandboxLease === undefined
+                ? [cleanupOutbox(context, acquired, "pending")]
+                : [],
           });
-          if (isApplied(intent)) return await this.finishStopped(context, postAcquire, sandbox);
-          await this.bestEffortOrphanCleanup(scope, sandbox, intent.outcome);
-          return await this.handleMutationFailure(intent);
-        }
-        if (sandbox) await this.bestEffortOrphanCleanup(scope, sandbox, postAcquire);
-        return await this.finishStopped(context, postAcquire);
-      }
-      if (legacyAcquisition?.outcome === "unknown") {
-        return await this.requireRecovery(context, "SANDBOX_UNKNOWN", []);
-      }
-      if (legacyAcquisition?.outcome === "failed") {
-        return await this.requireRecovery(context, legacyAcquisition.code, []);
-      }
-      if (legacyAcquisition?.outcome === "ready") sandbox = legacyAcquisition.session;
-      if (sandbox === undefined) return await this.requireRecovery(context, "SANDBOX_FAILED", []);
+          if (!isApplied(intent)) {
+            if (context.threadSandboxLease === undefined) {
+              await this.bestEffortOrphanCleanup(scope, acquired, intent.outcome);
+            } else {
+              await this.dependencies.threadSandboxes
+                ?.terminate({
+                  scope,
+                  attemptId: context.attemptId,
+                  session: acquired,
+                  lease: context.threadSandboxLease,
+                  reason: "checkpoint_failed",
+                })
+                .catch(() => "unknown");
+            }
+            sandbox = undefined;
+            delete context.threadSandboxLease;
+            sandboxPreparationResult = await this.handleMutationFailure(intent);
+            throw new Error("Sandbox cleanup intent 未能持久化");
+          }
+          if (postAcquire) throw new Error("Sandbox acquire 后运行已停止");
 
-      // Sandbox 可见后的首个 checkpoint 与 cleanup intent 在同一事务中提交。
-      const intent = await this.applyMutation(context, {
-        idempotencyKey: `${context.attemptId}/sandbox/cleanup-intent`,
-        nextAttemptStatus: "running",
-        nextStage: "cleanup_intent_persisted",
-        events: [attemptEvent(context, "running", "cleanup_intent_persisted")],
-        outbox:
-          context.threadSandboxLease === undefined
-            ? [cleanupOutbox(context, sandbox, "pending")]
-            : [],
-      });
-      if (!isApplied(intent)) {
-        // intent 未被 receipt 证明提交，不能假设 Outbox 存在；registry 事实独立驱动孤儿清理。
-        if (context.threadSandboxLease === undefined) {
-          await this.bestEffortOrphanCleanup(scope, sandbox, intent.outcome);
-        } else {
-          await this.dependencies.threadSandboxes?.terminate({
-            scope,
-            attemptId: context.attemptId,
-            session: sandbox,
-            lease: context.threadSandboxLease,
-            reason: "checkpoint_failed",
-          });
-        }
-        return await this.handleMutationFailure(intent);
-      }
+          const preMaterialize = await this.stopPoint(context, cancellation);
+          if (preMaterialize) throw new Error("Workspace 物化前运行已停止");
+          const materializeStartedAt = Date.now();
+          try {
+            if (requiresMaterialization) {
+              await this.dependencies.revisions.materialize({
+                scope,
+                attemptId: context.attemptId,
+                ...(context.currentRevisionId === undefined
+                  ? {}
+                  : { expectedCurrentRevisionId: context.currentRevisionId }),
+                sandbox: acquired,
+                // Workspace journal 的 operationKey 是受限协议字段；不得复用含 `/` 的路径样式键。
+                operationKey: `${context.attemptId}:workspace:materialize`,
+                signal: executionAbort.signal,
+              });
+            }
+            if (context.threadSandboxLease !== undefined && requiresMaterialization) {
+              const attested = await this.dependencies.threadSandboxes?.attestMaterialized({
+                scope,
+                attemptId: context.attemptId,
+                lease: context.threadSandboxLease,
+                ...(context.currentRevisionId === undefined
+                  ? {}
+                  : { revisionId: context.currentRevisionId }),
+              });
+              if (attested !== "attested") {
+                throw new Error("THREAD_SANDBOX_ATTESTATION_FAILED");
+              }
+            }
+            if (requiresMaterialization) {
+              await this.recordWorkspaceMaterialization(context, materializeStartedAt, "ready");
+            }
+          } catch (error) {
+            if (requiresMaterialization) {
+              await this.recordWorkspaceMaterialization(context, materializeStartedAt, "failed");
+            }
+            reportWorkspaceMaterializeFailure(error);
+            context.agentFailure = "WORKSPACE_CONFLICT";
+            throw new Error("Workspace 物化失败");
+          }
+          const postMaterialize = await this.stopPoint(context, cancellation);
+          if (postMaterialize) throw new Error("Workspace 物化后运行已停止");
+          return acquired;
+        })();
+        return await sandboxPreparation;
+      };
 
       const preSession = await this.stopPoint(context, cancellation);
-      if (preSession) return await this.finishStopped(context, preSession, sandbox);
-      const materializeStartedAt = Date.now();
-      try {
-        if (requiresMaterialization)
-          await this.dependencies.revisions.materialize({
-            scope,
-            attemptId: context.attemptId,
-            ...(context.currentRevisionId === undefined
-              ? {}
-              : { expectedCurrentRevisionId: context.currentRevisionId }),
-            sandbox,
-            // Workspace journal 的 operationKey 是受限协议字段；不得复用含 `/` 的路径样式键。
-            operationKey: `${context.attemptId}:workspace:materialize`,
-            signal: executionAbort.signal,
-          });
-        if (context.threadSandboxLease !== undefined && requiresMaterialization) {
-          const attested = await this.dependencies.threadSandboxes?.attestMaterialized({
-            scope,
-            attemptId: context.attemptId,
-            lease: context.threadSandboxLease,
-            ...(context.currentRevisionId === undefined
-              ? {}
-              : { revisionId: context.currentRevisionId }),
-          });
-          if (attested !== "attested") throw new Error("THREAD_SANDBOX_ATTESTATION_FAILED");
-        }
-        if (requiresMaterialization) {
-          await this.recordWorkspaceMaterialization(context, materializeStartedAt, "ready");
-        }
-      } catch (error) {
-        if (requiresMaterialization) {
-          await this.recordWorkspaceMaterialization(context, materializeStartedAt, "failed");
-        }
-        reportWorkspaceMaterializeFailure(error);
-        return await this.recoverWithCleanup(context, sandbox, "WORKSPACE_CONFLICT", cancellation);
-      }
-      const postMaterialize = await this.stopPoint(context, cancellation);
-      if (postMaterialize) return await this.finishStopped(context, postMaterialize, sandbox);
+      if (preSession) return await this.finishStopped(context, preSession);
       session = await this.dependencies.sessions.create({
         scope,
         attemptId: context.attemptId,
         fence: context.fence,
-        sandbox: sandbox.sandbox,
-        sandboxSession: sandbox,
+        ensureSandboxReady,
         rolloutProjection: claim.snapshot.rolloutProjection,
         ...(claim.snapshot.contextThroughSequence === undefined
           ? {}
@@ -760,51 +805,53 @@ export class RunWorker {
         });
         if (!isApplied(modelSettled)) return await this.handleMutationFailure(modelSettled);
 
-        const preVerify = await this.stopPoint(context, cancellation);
-        if (preVerify) return await this.finishStopped(context, preVerify, sandbox);
-        let candidate: WorkspaceRevisionCandidate | undefined;
-        try {
-          candidate = await this.dependencies.revisions.verify({
-            scope,
-            attemptId: context.attemptId,
-            ...(context.currentRevisionId === undefined
-              ? {}
-              : { expectedCurrentRevisionId: context.currentRevisionId }),
-            sandbox,
-            operationKey: `${context.attemptId}:workspace:publish:${correctionRound}`,
-            signal: executionAbort.signal,
+        if (sandbox !== undefined) {
+          const preVerify = await this.stopPoint(context, cancellation);
+          if (preVerify) return await this.finishStopped(context, preVerify, sandbox);
+          let candidate: WorkspaceRevisionCandidate | undefined;
+          try {
+            candidate = await this.dependencies.revisions.verify({
+              scope,
+              attemptId: context.attemptId,
+              ...(context.currentRevisionId === undefined
+                ? {}
+                : { expectedCurrentRevisionId: context.currentRevisionId }),
+              sandbox,
+              operationKey: `${context.attemptId}:workspace:publish:${correctionRound}`,
+              signal: executionAbort.signal,
+            });
+          } catch (error) {
+            reportWorkspaceVerifyFailure(error);
+            return await this.recoverWithCleanup(
+              context,
+              sandbox,
+              "WORKSPACE_CONFLICT",
+              cancellation,
+            );
+          }
+          const postVerify = await this.stopPoint(context, cancellation);
+          if (postVerify) return await this.finishStopped(context, postVerify, sandbox);
+          try {
+            workspaceChange = validateWorkspaceCandidate(context, candidate);
+          } catch {
+            return await this.recoverWithCleanup(
+              context,
+              sandbox,
+              "WORKSPACE_CONFLICT",
+              cancellation,
+            );
+          }
+          const verified = await this.applyMutation(context, {
+            idempotencyKey:
+              correctionRound === 0
+                ? `${context.attemptId}/stage/workspace-verified`
+                : `${context.attemptId}/correction/${correctionRound}/workspace-verified`,
+            ...(correctionRound === 0 ? { nextStage: "workspace_verified" as const } : {}),
+            events: [attemptEvent(context, "running", "workspace_verified")],
+            outbox: [],
           });
-        } catch (error) {
-          reportWorkspaceVerifyFailure(error);
-          return await this.recoverWithCleanup(
-            context,
-            sandbox,
-            "WORKSPACE_CONFLICT",
-            cancellation,
-          );
+          if (!isApplied(verified)) return await this.handleMutationFailure(verified);
         }
-        const postVerify = await this.stopPoint(context, cancellation);
-        if (postVerify) return await this.finishStopped(context, postVerify, sandbox);
-        try {
-          workspaceChange = validateWorkspaceCandidate(context, candidate);
-        } catch {
-          return await this.recoverWithCleanup(
-            context,
-            sandbox,
-            "WORKSPACE_CONFLICT",
-            cancellation,
-          );
-        }
-        const verified = await this.applyMutation(context, {
-          idempotencyKey:
-            correctionRound === 0
-              ? `${context.attemptId}/stage/workspace-verified`
-              : `${context.attemptId}/correction/${correctionRound}/workspace-verified`,
-          ...(correctionRound === 0 ? { nextStage: "workspace_verified" as const } : {}),
-          events: [attemptEvent(context, "running", "workspace_verified")],
-          outbox: [],
-        });
-        if (!isApplied(verified)) return await this.handleMutationFailure(verified);
 
         if (turn.kind === "waiting") {
           try {
@@ -814,14 +861,16 @@ export class RunWorker {
           }
           const preSettle = await this.stopPoint(context, cancellation);
           if (preSettle) return await this.finishStopped(context, preSettle, sandbox);
-          if (context.threadSandboxLease === undefined) {
-            const settled = await this.settleSandbox(context, sandbox, "pause");
-            if (settled.outcome !== "settled") return settled.result;
-            const postSettle = await this.stopPoint(context, cancellation);
-            if (postSettle) return await this.finishStopped(context, postSettle);
-          } else {
-            const finalizing = await this.prepareThreadSandboxTerminal(context);
-            if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
+          if (sandbox !== undefined) {
+            if (context.threadSandboxLease === undefined) {
+              const settled = await this.settleSandbox(context, sandbox, "pause");
+              if (settled.outcome !== "settled") return settled.result;
+              const postSettle = await this.stopPoint(context, cancellation);
+              if (postSettle) return await this.finishStopped(context, postSettle);
+            } else {
+              const finalizing = await this.prepareThreadSandboxTerminal(context);
+              if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
+            }
           }
           const waiting = await this.applyMutation(context, {
             idempotencyKey: `${context.attemptId}/final/waiting`,
@@ -841,7 +890,9 @@ export class RunWorker {
               : {}),
           });
           if (!isApplied(waiting)) return await this.handleMutationFailure(waiting);
-          await this.completeThreadSandboxTerminalEffect(context, sandbox, waiting);
+          if (sandbox !== undefined) {
+            await this.completeThreadSandboxTerminalEffect(context, sandbox, waiting);
+          }
           return { outcome: "waiting" };
         }
 
@@ -849,15 +900,20 @@ export class RunWorker {
         break;
       }
 
-      if (context.threadSandboxLease === undefined) {
-        const settled = await this.settleSandbox(context, sandbox, "close");
-        if (settled.outcome !== "settled") return settled.result;
-        // settle 与 Run success 之间必须同步重验，避免取消被成功覆盖。
-        const postSettle = await this.stopPoint(context, cancellation);
-        if (postSettle) return await this.finishStopped(context, postSettle);
-      } else {
-        const finalizing = await this.prepareThreadSandboxTerminal(context);
+      if (sandbox === undefined) {
+        const finalizing = await this.prepareNoSandboxTerminal(context);
         if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
+      } else {
+        if (context.threadSandboxLease === undefined) {
+          const settled = await this.settleSandbox(context, sandbox, "close");
+          if (settled.outcome !== "settled") return settled.result;
+          // settle 与 Run success 之间必须同步重验，避免取消被成功覆盖。
+          const postSettle = await this.stopPoint(context, cancellation);
+          if (postSettle) return await this.finishStopped(context, postSettle);
+        } else {
+          const finalizing = await this.prepareThreadSandboxTerminal(context);
+          if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
+        }
       }
       const final = await this.applyMutation(context, {
         idempotencyKey: `${context.attemptId}/final/succeeded`,
@@ -878,13 +934,21 @@ export class RunWorker {
           : {}),
       });
       if (!isApplied(final)) return await this.handleMutationFailure(final);
-      await this.completeThreadSandboxTerminalEffect(context, sandbox, final);
+      if (sandbox !== undefined) {
+        await this.completeThreadSandboxTerminalEffect(context, sandbox, final);
+      }
       return { outcome: "succeeded" };
     } catch {
       closeEventAcceptance(context);
       await eventChain.catch(() => undefined);
       await requestAbort();
+      if (sandboxPreparationResult !== undefined) return sandboxPreparationResult;
       if (context.stopped) return await this.finishStopped(context, context.stopped, sandbox);
+      if (context.agentFailure !== undefined) {
+        return sandbox === undefined
+          ? await this.requireRecovery(context, context.agentFailure, [])
+          : await this.recoverWithCleanup(context, sandbox, context.agentFailure, cancellation);
+      }
       return sandbox
         ? await this.recoverWithCleanup(context, sandbox, "INTERNAL", cancellation)
         : await this.requireRecovery(context, "INTERNAL", []);
@@ -1417,15 +1481,29 @@ export class RunWorker {
     });
   }
 
+  private async prepareNoSandboxTerminal(
+    context: ExecutionContext,
+  ): Promise<RuntimeMutationResult> {
+    return this.applyMutation(context, {
+      idempotencyKey: `${context.attemptId}/sandbox/not-required`,
+      nextAttemptStatus: "finalizing",
+      nextStage: "finalizing",
+      events: [attemptEvent(context, "finalizing", "finalizing")],
+      outbox: [],
+    });
+  }
+
   private async recoverWithCleanup(
     context: ExecutionContext,
-    sandbox: SandboxSessionRef,
+    sandbox: SandboxSessionRef | undefined,
     code: StableWorkerErrorCode,
     cancellation: AbortSignal,
   ): Promise<RunWorkerResult> {
     if (context.abortPromise) await context.abortPromise;
-    const settled = await this.settleSandbox(context, sandbox, "close");
-    if (settled.outcome !== "settled") return settled.result;
+    if (sandbox !== undefined) {
+      const settled = await this.settleSandbox(context, sandbox, "close");
+      if (settled.outcome !== "settled") return settled.result;
+    }
     const stopped = await this.stopPoint(context, cancellation);
     if (stopped) return await this.finishStopped(context, stopped);
     return await this.requireRecovery(context, code, []);
@@ -1433,14 +1511,16 @@ export class RunWorker {
 
   private async finalizeWithCleanup(
     context: ExecutionContext,
-    sandbox: SandboxSessionRef,
+    sandbox: SandboxSessionRef | undefined,
     runStatus: "failed" | "cancelled",
     code: StableWorkerErrorCode,
     cancellation: AbortSignal,
   ): Promise<RunWorkerResult> {
     if (context.abortPromise) await context.abortPromise;
-    const settled = await this.settleSandbox(context, sandbox, "close");
-    if (settled.outcome !== "settled") return settled.result;
+    if (sandbox !== undefined) {
+      const settled = await this.settleSandbox(context, sandbox, "close");
+      if (settled.outcome !== "settled") return settled.result;
+    }
     const stopped = await this.stopPoint(context, cancellation);
     if (stopped === "cancelled")
       return await this.finalizeWithoutRevision(context, "cancelled", "CANCELLED");

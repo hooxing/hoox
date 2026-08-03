@@ -47,6 +47,7 @@ import {
   createObservedSandboxTools,
   SANDBOX_TOOL_NAMES,
   type SandboxToolEffectAuthorizer,
+  type SandboxToolHandleProvider,
 } from "./tools.js";
 
 interface PiSessionPort {
@@ -375,7 +376,9 @@ export interface CreateSafePiSessionOptions {
   model: Model<Api>;
   modelContext: TrustedPiModelContextCapability;
   modelRuntime: ModelRuntime;
-  sandbox: SandboxHandle;
+  /** 固定 Sandbox 只供测试和独立 smoke；生产 Worker 使用按需准备能力。 */
+  sandbox?: SandboxHandle;
+  prepareSandboxTool?: SandboxToolHandleProvider["prepareSandboxTool"];
   /** Tenant/Skill/User 只能进入低信任数据分区，不能直接替换系统 Harness。 */
   untrustedPromptContent?: RuntimePromptInput["untrusted"];
   rolloutProjection?: ControlledRolloutProjection;
@@ -716,8 +719,13 @@ function toPiHistoryMessage(
 
 function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
   let toolContinuationRejected = false;
+  const sandboxTarget =
+    options.prepareSandboxTool === undefined
+      ? options.sandbox
+      : { prepareSandboxTool: options.prepareSandboxTool };
+  if (sandboxTarget === undefined) throw new Error("Pi Session 缺少 Sandbox 按需准备能力");
   const observedSandboxTools = createObservedSandboxTools(
-    options.sandbox,
+    sandboxTarget,
     {
       authorizeToolEffect: options.authorizeToolEffect,
     },

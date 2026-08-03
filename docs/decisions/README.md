@@ -92,7 +92,8 @@
 | [ADR-0088](0088-recovery-required-public-terminal-projection.md) | recovery_required 的公开终止投影 | 已接受 | 2026-08-03 |
 | [ADR-0089](0089-conversation-thinking-and-current-status-only.md) | 思考归入对话与单一当前状态 | 已接受 | 2026-08-03 |
 | [ADR-0091](0091-sandbox-read-edit-write-tools.md) | 为 Agent 增加受控 read、edit、write 文件工具 | 已接受 | 2026-08-03 |
-| [ADR-0092](0092-resourcefs-attach-data-plane-readiness.md) | ResourceFS Attach 验证真实数据面 | 已接受 | 2026-08-03 |
+| [ADR-0092](0092-lazy-sandbox-acquisition.md) | 按附件与工具信号延迟创建 Sandbox | 已接受 | 2026-08-03 |
+| [ADR-0093](0093-resourcefs-attach-data-plane-readiness.md) | ResourceFS Attach 验证真实数据面 | 已接受 | 2026-08-03 |
 
 ## 何时必须记录
 

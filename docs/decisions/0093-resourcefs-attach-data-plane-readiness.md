@@ -1,4 +1,4 @@
-# ADR-0092：ResourceFS Attach 验证真实数据面
+# ADR-0093：ResourceFS Attach 验证真实数据面
 
 - 状态：已接受
 - 日期：2026-08-03

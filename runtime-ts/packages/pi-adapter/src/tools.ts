@@ -80,6 +80,18 @@ export interface SandboxToolEffectAuthorizer {
   }>;
 }
 
+export interface SandboxToolHandleProvider {
+  /** 在短时副作用许可签发前准备 Sandbox，避免 acquire/materialize 消耗许可窗口。 */
+  prepareSandboxTool(input: {
+    readonly callId: string;
+    readonly toolName: string;
+    readonly argsDigest: string;
+    readonly signal?: AbortSignal;
+  }): Promise<SandboxHandle>;
+}
+
+type SandboxToolTarget = SandboxHandle | SandboxToolHandleProvider;
+
 export interface ExecCommandResult {
   readonly exit_code: number;
   readonly wall_time_seconds: number;
@@ -118,7 +130,7 @@ export function createSchemaInvalidArgumentsBridge<T>(
 }
 
 export function createSandboxTools(
-  sandbox: SandboxHandle,
+  sandbox: SandboxToolTarget,
   authorizer: SandboxToolEffectAuthorizer,
 ) {
   return createSandboxToolsInternal(sandbox, authorizer);
@@ -129,7 +141,7 @@ export function createSandboxTools(
  * TODO(codex-alignment): 将真实结果纳入可恢复的终端 transcript，避免 Session 重建后只剩完成回执。
  */
 export function createObservedSandboxTools(
-  sandbox: SandboxHandle,
+  sandbox: SandboxToolTarget,
   authorizer: SandboxToolEffectAuthorizer,
   createRecorder: (outputs: ControlledToolReceiptSource) => {
     record(input: {
@@ -182,7 +194,7 @@ export function createObservedSandboxTools(
 }
 
 function createSandboxToolsInternal(
-  sandbox: SandboxHandle,
+  sandbox: SandboxToolTarget,
   authorizer: SandboxToolEffectAuthorizer,
   capture?: (callId: string, name: string, text: string) => Promise<ToolObservationResult>,
   rejectModelContinuation: () => void = () => undefined,
@@ -219,7 +231,7 @@ function createSandboxToolsInternal(
 }
 
 function createExecCommandTool(
-  sandbox: SandboxHandle,
+  sandbox: SandboxToolTarget,
   authorizer: SandboxToolEffectAuthorizer,
   invalidArguments: ReturnType<typeof createSchemaInvalidArgumentsBridge<ExecCommandArguments>>,
   capture:
@@ -252,10 +264,17 @@ function createExecCommandTool(
       let effectRejected = false;
       let result: ExecCommandResult;
       try {
+        const preparedSandbox = await prepareSandboxTool(
+          sandbox,
+          callId,
+          "exec_command",
+          params,
+          signal,
+        );
         const authorization = await authorizeTool(authorizer, callId, "exec_command", params);
         assertImmediateContinuation(authorization, signal);
         const startedAt = performance.now();
-        const commandOutput = await sandbox.command(buildBashCommand(params.cmd, workdir), {
+        const commandOutput = await preparedSandbox.command(buildBashCommand(params.cmd, workdir), {
           ...signalControl(signal),
           timeoutMs,
         });
@@ -280,7 +299,7 @@ function createExecCommandTool(
 }
 
 function createReadTool(
-  sandbox: SandboxHandle,
+  sandbox: SandboxToolTarget,
   authorizer: SandboxToolEffectAuthorizer,
   invalidArguments: ReturnType<typeof createSchemaInvalidArgumentsBridge<ReadArguments>>,
   capture:
@@ -313,12 +332,16 @@ function createReadTool(
         assertReadRange(params.offset, "offset");
         assertReadRange(params.limit, "limit");
         const path = resolveSandboxPath(params.path);
+        const preparedSandbox = await prepareSandboxTool(sandbox, callId, "read", params, signal);
         const authorization = await authorizeTool(authorizer, callId, "read", params);
         assertImmediateContinuation(authorization, signal);
-        const probe = await sandbox.command(buildBase64ReadCommand(path, IMAGE_SNIFF_BYTES), {
-          ...signalControl(signal),
-          timeoutMs: DEFAULT_TIMEOUT_MS,
-        });
+        const probe = await preparedSandbox.command(
+          buildBase64ReadCommand(path, IMAGE_SNIFF_BYTES),
+          {
+            ...signalControl(signal),
+            timeoutMs: DEFAULT_TIMEOUT_MS,
+          },
+        );
         if (probe.exitCode !== 0) {
           throw new FileToolUsageError("READ_NOT_FOUND", "无法读取指定的 Sandbox 文件");
         }
@@ -329,7 +352,7 @@ function createReadTool(
         >;
         let details: Readonly<Record<string, unknown>>;
         if (mimeType === undefined) {
-          const text = await sandbox.readFile(path, {
+          const text = await preparedSandbox.readFile(path, {
             ...signalControl(signal),
             timeoutMs: DEFAULT_TIMEOUT_MS,
           });
@@ -337,7 +360,7 @@ function createReadTool(
           content = [{ type: "text", text: projected.text }];
           details = projected.details;
         } else {
-          const image = await sandbox.command(buildBase64ReadCommand(path), {
+          const image = await preparedSandbox.command(buildBase64ReadCommand(path), {
             ...signalControl(signal),
             timeoutMs: DEFAULT_TIMEOUT_MS,
           });
@@ -379,7 +402,7 @@ function createReadTool(
 }
 
 function createEditTool(
-  sandbox: SandboxHandle,
+  sandbox: SandboxToolTarget,
   authorizer: SandboxToolEffectAuthorizer,
   invalidArguments: ReturnType<typeof createSchemaInvalidArgumentsBridge<EditArguments>>,
   capture:
@@ -410,10 +433,11 @@ function createEditTool(
           throw new FileToolUsageError("EDIT_INVALID_ARGUMENTS", "edits 至少需要一个替换项");
         }
         const path = resolveSandboxPath(params.path);
-        result = await withSandboxFileMutation(sandbox, path, async () => {
+        const preparedSandbox = await prepareSandboxTool(sandbox, callId, "edit", params, signal);
+        result = await withSandboxFileMutation(preparedSandbox, path, async () => {
           const authorization = await authorizeTool(authorizer, callId, "edit", params);
           assertImmediateContinuation(authorization, signal);
-          const original = await sandbox.readFile(path, {
+          const original = await preparedSandbox.readFile(path, {
             ...signalControl(signal),
             timeoutMs: DEFAULT_TIMEOUT_MS,
           });
@@ -421,7 +445,7 @@ function createEditTool(
           if (signal?.aborted) {
             throw new SandboxRuntimeError("CANCELLED", "文件修改已取消");
           }
-          await sandbox.writeFile(path, applied.content, {
+          await preparedSandbox.writeFile(path, applied.content, {
             ...signalControl(signal),
             timeoutMs: DEFAULT_TIMEOUT_MS,
           });
@@ -453,7 +477,7 @@ function createEditTool(
 }
 
 function createWriteTool(
-  sandbox: SandboxHandle,
+  sandbox: SandboxToolTarget,
   authorizer: SandboxToolEffectAuthorizer,
   invalidArguments: ReturnType<typeof createSchemaInvalidArgumentsBridge<WriteArguments>>,
   capture:
@@ -481,20 +505,24 @@ function createWriteTool(
       };
       try {
         const path = resolveSandboxPath(params.path);
-        result = await withSandboxFileMutation(sandbox, path, async () => {
+        const preparedSandbox = await prepareSandboxTool(sandbox, callId, "write", params, signal);
+        result = await withSandboxFileMutation(preparedSandbox, path, async () => {
           const authorization = await authorizeTool(authorizer, callId, "write", params);
           assertImmediateContinuation(authorization, signal);
-          const prepared = await sandbox.command(`mkdir -p -- ${shellQuote(posix.dirname(path))}`, {
-            ...signalControl(signal),
-            timeoutMs: DEFAULT_TIMEOUT_MS,
-          });
+          const prepared = await preparedSandbox.command(
+            `mkdir -p -- ${shellQuote(posix.dirname(path))}`,
+            {
+              ...signalControl(signal),
+              timeoutMs: DEFAULT_TIMEOUT_MS,
+            },
+          );
           if (prepared.exitCode !== 0) {
             throw new FileToolUsageError("WRITE_PARENT_FAILED", "无法创建 Sandbox 父目录");
           }
           if (signal?.aborted) {
             throw new SandboxRuntimeError("CANCELLED", "文件写入已取消");
           }
-          await sandbox.writeFile(path, params.content, {
+          await preparedSandbox.writeFile(path, params.content, {
             ...signalControl(signal),
             timeoutMs: DEFAULT_TIMEOUT_MS,
           });
@@ -537,6 +565,26 @@ async function persistReceipt(
     observation.outcome !== "replayed"
   ) {
     throw new ToolObservationPersistenceError(observation.outcome);
+  }
+}
+
+async function prepareSandboxTool(
+  target: SandboxToolTarget,
+  callId: string,
+  toolName: string,
+  args: unknown,
+  signal?: AbortSignal,
+): Promise<SandboxHandle> {
+  if (!("prepareSandboxTool" in target)) return target;
+  try {
+    return await target.prepareSandboxTool({
+      callId,
+      toolName,
+      argsDigest: createHash("sha256").update(canonicalJson(args)).digest("hex"),
+      ...(signal === undefined ? {} : { signal }),
+    });
+  } catch {
+    throw new ToolEffectRejectedError("Runtime 未能准备本次工具所需的 Sandbox");
   }
 }
 

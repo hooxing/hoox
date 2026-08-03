@@ -799,9 +799,15 @@ export interface AgentSessionFactoryPort {
     readonly attemptId: string;
     /** 当前 claim 的完整双栅栏；生产 Rollout 装配只从该能力回到 PG 推导 actor。 */
     readonly fence: ExecutionFence;
-    readonly sandbox: SandboxHandle;
-    /** deliver_file 需要当前 registry capability；旧测试装配可暂不提供。 */
-    readonly sandboxSession?: SandboxSessionRef;
+    /**
+     * Session 创建不再隐式创建 Sandbox。附件或工具确认需要文件系统时，通过这个窄能力
+     * 单次初始化并物化当前 Workspace；实现必须对并发调用 single-flight。
+     */
+    readonly ensureSandboxReady: (
+      input:
+        | { readonly reason: "attachment" }
+        | { readonly reason: "tool"; readonly call: ExternalEffectCall },
+    ) => Promise<SandboxSessionRef>;
     readonly rolloutProjection: ControlledRolloutProjection;
     readonly contextThroughSequence?: number;
     readonly threadActiveHistory?: ThreadActiveHistoryV1;

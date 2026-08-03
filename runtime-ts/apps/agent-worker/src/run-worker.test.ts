@@ -18,6 +18,7 @@ import type {
   ExecutionScope,
   RuntimeEventV1,
   RuntimeMutation,
+  SandboxSessionRef,
   ThreadContinuityMetricsPort,
 } from "./ports.js";
 import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
@@ -52,12 +53,15 @@ function harness(
   seed = fakeSeed(),
   workerOptions: Partial<RunWorkerOptions> = {},
   runEventDiagnostics?: RunEventDiagnosticsPort,
+  prepareSandboxBeforeInput:
+    | boolean
+    | ((ensure: () => Promise<SandboxSessionRef>) => Promise<void>) = false,
 ) {
   const persistence = new FakeExecutionPersistence();
   const scope = persistence.addSeed(seed);
   const revisions = new FakeRevisionVerifier();
   const sandboxes = new FakeSandboxRegistry();
-  const factory = new FakeSessionFactory(sessions);
+  const factory = new FakeSessionFactory(sessions, prepareSandboxBeforeInput);
   const cancellation = new FakeCancellationPort();
   const shutdown = new AbortController();
   const artifacts = new FakeArtifactPublication();
@@ -112,7 +116,73 @@ function harness(
   };
 }
 
+function sandboxHarness(
+  sessions: Array<ScriptedAgentSession | BlockingAgentSession>,
+  seed = fakeSeed(),
+  workerOptions: Partial<RunWorkerOptions> = {},
+  runEventDiagnostics?: RunEventDiagnosticsPort,
+) {
+  return harness(sessions, seed, workerOptions, runEventDiagnostics, true);
+}
+
 describe("Run Worker 双栅栏与恢复状态机", () => {
+  it("纯文本回答不 acquire、materialize、verify 或 settle Sandbox", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed("no-sandbox"));
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(h.sandboxes.acquireCount).toBe(0);
+    expect(h.sandboxes.settleCount).toBe(0);
+    expect(h.revisions.materializeCount).toBe(0);
+    expect(h.revisions.verifyCount).toBe(0);
+    expect(h.persistence.record(h.scope).outbox).not.toContainEqual(
+      expect.objectContaining({ kind: "sandbox_cleanup" }),
+    );
+  });
+
+  it("并发启动信号共享完整 acquire 与 materialize，不能提前取得未就绪 Sandbox", async () => {
+    let markMaterializeStarted: () => void = () => undefined;
+    const materializeStarted = new Promise<void>((resolve) => {
+      markMaterializeStarted = resolve;
+    });
+    let releaseMaterialize: () => void = () => undefined;
+    const materializeRelease = new Promise<void>((resolve) => {
+      releaseMaterialize = resolve;
+    });
+    let materializeFinished = false;
+    let secondResolvedBeforeMaterialize = false;
+    const prepareConcurrently = async (ensure: () => Promise<SandboxSessionRef>) => {
+      const first = ensure();
+      await materializeStarted;
+      const second = ensure().then((ready) => {
+        if (!materializeFinished) secondResolvedBeforeMaterialize = true;
+        return ready;
+      });
+      await Promise.resolve();
+      releaseMaterialize();
+      const [firstReady, secondReady] = await Promise.all([first, second]);
+      expect(secondReady).toBe(firstReady);
+    };
+    const h = harness(
+      [new ScriptedAgentSession(successfulEvents)],
+      fakeSeed("sandbox-single-flight"),
+      {},
+      undefined,
+      prepareConcurrently,
+    );
+    h.revisions.beforeMaterializeReturn = async () => {
+      markMaterializeStarted();
+      await materializeRelease;
+      materializeFinished = true;
+    };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(secondResolvedBeforeMaterialize).toBe(false);
+    expect(h.sandboxes.acquireCount).toBe(1);
+    expect(h.revisions.materializeCount).toBe(1);
+  });
+
   it("durable mutation 成功后 best-effort 镜像 Run 事件，镜像失败不改变 Run 结果", async () => {
     const persist = vi.fn<RunEventDiagnosticsPort["persist"]>(async () => {
       throw new Error("测试磁盘只读");
@@ -134,7 +204,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("阶段 5 成功终态先提交 pause intent，再执行 lifecycle effect，且不走 success-close", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
       threadSandboxSessionReuseEnabled: true,
     });
 
@@ -157,7 +227,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("阶段 5 pause 结果未知不回滚已经提交的 Run/Workspace/Context 终态", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
       threadSandboxSessionReuseEnabled: true,
     });
     h.threadSandboxes.nextTerminalEffect = "unknown";
@@ -168,7 +238,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("阶段 5 running handoff 通过 revision attestation 时跳过物化且不 pause", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
       threadSandboxSessionReuseEnabled: true,
     });
     h.threadSandboxes.nextAcquire = {
@@ -491,13 +561,11 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(record.mutations.has("attempt-1/final/succeeded")).toBe(false);
   });
 
-  it("在创建 Session 前物化 Workspace；物化失败会走 cleanup，绝不启动模型", async () => {
-    const h = harness(
-      [new ScriptedAgentSession(successfulEvents)],
-      fakeSeed("materialize-before-model"),
-    );
+  it("Session 创建后仅在文件信号到达时物化 Workspace；失败会 cleanup 且不启动模型", async () => {
+    const session = new ScriptedAgentSession(successfulEvents);
+    const h = sandboxHarness([session], fakeSeed("materialize-before-model"));
     h.revisions.beforeMaterializeReturn = () => {
-      expect(h.factory.createCount).toBe(0);
+      expect(h.factory.createCount).toBe(1);
       throw new WorkspaceMaterializationStageError("baseline_snapshot");
     };
 
@@ -516,7 +584,8 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     }
 
     expect(h.revisions.materializeCount).toBe(1);
-    expect(h.factory.createCount).toBe(0);
+    expect(h.factory.createCount).toBe(1);
+    expect(session.prompts).toHaveLength(0);
     expect(h.sandboxes.settleCount).toBe(1);
     expect(h.continuityMetrics.record).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -527,7 +596,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("Revision、Run succeeded、Attempt 终态和双栅栏释放在同一幂等事务完成", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.revisions.nextRevisionId = fakeRevision("revision-success");
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
@@ -554,7 +623,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       expect.objectContaining({ kind: "sandbox_cleanup", state: "completed" }),
     );
     const mutations = [...record.mutations.keys()];
-    expect(mutations.indexOf("attempt-1/sandbox/cleanup-intent")).toBeLessThan(
+    expect(mutations.indexOf("attempt-1/sandbox/cleanup-intent")).toBeGreaterThan(
       mutations.indexOf("attempt-1/stage/model-execution-started"),
     );
     const intent = record.mutations.get("attempt-1/sandbox/cleanup-intent");
@@ -613,7 +682,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     });
   });
 
-  it("重复投递不能重领 running Run，也不会创建第二个 Sandbox 或模型 Session", async () => {
+  it("重复投递不能重领 running Run，也不会提前创建 Sandbox 或第二个模型 Session", async () => {
     const blocked = new BlockingAgentSession();
     const h = harness([blocked]);
     const first = h.worker.execute(h.scope);
@@ -623,7 +692,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       outcome: "ignored",
       reason: "busy",
     });
-    expect(h.sandboxes.acquireCount).toBe(1);
+    expect(h.sandboxes.acquireCount).toBe(0);
     expect(h.factory.createCount).toBe(1);
 
     h.cancellation.cancel(h.scope);
@@ -675,7 +744,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   it.each(["run", "workspace"] as const)(
     "Sandbox create 期间 %s lease 丢失，返回后只清理 Sandbox，绝不启动模型",
     async (lease) => {
-      const h = harness([new ScriptedAgentSession(successfulEvents)]);
+      const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
       h.sandboxes.beforeAcquireReturn = () => {
         if (lease === "run") h.persistence.expireRunLease(h.scope);
         else h.persistence.expireWorkspaceLease(h.scope);
@@ -685,7 +754,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
       expect(h.sandboxes.acquireCount).toBe(1);
       expect(h.sandboxes.settleCount).toBe(1);
-      expect(h.factory.createCount).toBe(0);
+      expect(h.factory.createCount).toBe(1);
       expect(h.persistence.record(h.scope).run.status).toBe("running");
       expect(h.sandboxes.cleanupIntentIds).toEqual(["registry:registry-test:orphan-cleanup"]);
       expect(h.metrics.orphanCleanups).toEqual([
@@ -701,7 +770,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   ])(
     "Sandbox 已登记但 cleanup intent 返回 $failure 时，使用 registry 事实独立清理",
     async ({ failure, expected }) => {
-      const h = harness([new ScriptedAgentSession(successfulEvents)]);
+      const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
       h.sandboxes.beforeAcquireReturn = () => {
         if (failure === "unavailable") h.persistence.unavailableNextMutation = true;
         if (failure === "response_unknown") {
@@ -719,7 +788,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
           ? { outcome: "fence_lost" }
           : { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" },
       );
-      expect(h.factory.createCount).toBe(0);
+      expect(h.factory.createCount).toBe(1);
       expect(h.sandboxes.cleanupIntentIds).toEqual(["registry:registry-test:orphan-cleanup"]);
       expect(h.metrics.orphanCleanups).toEqual([
         expect.objectContaining({
@@ -733,7 +802,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   );
 
   it("cleanup intent 幂等摘要冲突映射稳定错误码，同时仍清理已登记 Sandbox", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.sandboxes.beforeAcquireReturn = () => {
       h.persistence.idempotencyConflictKeyIncludes = "/sandbox/cleanup-intent";
     };
@@ -749,7 +818,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("Workspace verify 返回前丢租约，不执行 prepare/Revision 提交", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.revisions.nextRevisionId = fakeRevision("revision-never-commit");
     h.revisions.beforeReturn = () => h.persistence.expireWorkspaceLease(h.scope);
 
@@ -762,7 +831,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("verify 调用前丢 Workspace lease，Verifier 完全不会被调用", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.persistence.afterMutation = (command) => {
       if (command.idempotencyKey.includes("/stage/model-settled")) {
         h.persistence.expireWorkspaceLease(h.scope);
@@ -776,7 +845,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("verify 完成后丢 claim，旧完成门不运行且 Revision 仍未提交", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.revisions.nextRevisionId = fakeRevision("revision-after-verify");
     h.persistence.afterMutation = (command) => {
       if (command.idempotencyKey.includes("/stage/workspace-verified")) {
@@ -793,7 +862,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("Revision+终态事务响应丢失时按幂等键读回，不重复提交 Revision", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.revisions.nextRevisionId = fakeRevision("revision-response-lost");
     h.persistence.responseUnknownKeyIncludes = "/final/succeeded";
 
@@ -809,7 +878,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("Revision 推进后仍只允许原始完整 scope 精确 readback，不接受伪造 baseRevision", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.revisions.nextRevisionId = fakeRevision("revision-scope-immutable");
     h.persistence.responseUnknownKeyIncludes = "/final/succeeded";
 
@@ -1076,7 +1145,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("settle 抛异常时保留 started cleanup checkpoint，禁止回退 pending", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.sandboxes.throwOnSettle = true;
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({
@@ -1094,7 +1163,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("settle 返回 UNKNOWN 时持久化 unknown cleanup 与告警，不自动再次 settle", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.sandboxes.nextSettlement = { outcome: "unknown", event: uncertain("cleanup_after_create") };
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({
@@ -1111,7 +1180,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("cleanup started 已决定 close 后，completed receipt 伪造成 pause 必须失败关闭", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.persistence.rewriteNextCleanupReceiptDisposition = {
       state: "completed",
       disposition: "pause",
@@ -1135,7 +1204,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("Sandbox acquire UNKNOWN 只进入 Attempt recovery_required，不伪造 Run failed", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.sandboxes.nextAcquire = { outcome: "unknown", event: uncertain("create_response") };
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({
@@ -1146,8 +1215,8 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     const record = h.persistence.record(h.scope);
     expect(record.run.status).toBe("running");
     expect(record.attempt?.status).toBe("recovery_required");
-    expect(record.attempt?.stage).toBe("claimed");
-    expect(h.factory.createCount).toBe(0);
+    expect(record.attempt?.stage).toBe("model_execution_started");
+    expect(h.factory.createCount).toBe(1);
     expect(record.outbox).toContainEqual(
       expect.objectContaining({
         kind: "sandbox_lifecycle_unknown",
@@ -1177,7 +1246,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   ])(
     "acquire UNKNOWN 返回前发生 $race 时，先持久化恢复事实再写业务终态",
     async ({ race, expectedResult, expectedRun }) => {
-      const h = harness([new ScriptedAgentSession(successfulEvents)]);
+      const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
       h.sandboxes.nextAcquire = { outcome: "unknown", event: uncertain("create_response") };
       h.sandboxes.beforeAcquireReturn = () => {
         if (race === "cancel") h.cancellation.cancel(h.scope);
@@ -1200,14 +1269,15 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         }),
       );
       const mutations = [...record.mutations.keys()];
-      expect(mutations[0]).toBe("attempt-1/sandbox/acquire-unknown/request-test");
+      expect(mutations[0]).toBe("attempt-1/stage/model-execution-started");
+      expect(mutations[1]).toBe("attempt-1/sandbox/acquire-unknown/request-test");
       expect(mutations.at(-1)).toBe(`attempt-1/final/${expectedRun}`);
-      expect(h.factory.createCount).toBe(0);
+      expect(h.factory.createCount).toBe(1);
     },
   );
 
   it("acquire UNKNOWN 没有 sandboxId/ref 时仍保留 requestId、TTL 与阶段", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     const { sandboxId: _sandboxId, ...eventWithoutSandboxId } = uncertain("create_response");
     h.sandboxes.nextAcquire = { outcome: "unknown", event: eventWithoutSandboxId };
 
@@ -1232,7 +1302,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("settle 调用前 started 事务失败，不调用外部 settle，也不写业务终态", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.persistence.afterMutation = (command) => {
       if (command.idempotencyKey.includes("/stage/workspace-verified")) {
         h.persistence.unavailableNextMutation = true;
@@ -1249,7 +1319,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("外部 settle 完成后 claim 丢失，旧 Worker 不写 completed 或 Run succeeded", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.sandboxes.beforeSettleReturn = () => h.persistence.expireRunLease(h.scope);
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "fence_lost" });
@@ -1263,9 +1333,13 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("settle 返回后、终态事务前观察到取消时，cancelled 优先于 succeeded", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed("cancelled-context"), {
-      threadContextWriteEnabled: true,
-    });
+    const h = sandboxHarness(
+      [new ScriptedAgentSession(successfulEvents)],
+      fakeSeed("cancelled-context"),
+      {
+        threadContextWriteEnabled: true,
+      },
+    );
     const commands: RuntimeMutation[] = [];
     h.persistence.afterMutation = (command) => commands.push(command);
     h.sandboxes.beforeSettleReturn = () => h.cancellation.cancel(h.scope);
@@ -1294,14 +1368,14 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
   it("流式事件持久化不可用时立即 abort，保留 cleanup intent 并等待 Attempt 恢复", async () => {
     const session = new ScriptedAgentSession(successfulEvents);
-    const h = harness([session]);
-    h.persistence.responseUnknownKeyIncludes = "/stage/model-execution-started";
-    // 先让 checkpoint 以读回方式成功，再让第一个 agent event 失败。
+    const h = sandboxHarness([session]);
+    h.persistence.responseUnknownKeyIncludes = "/sandbox/cleanup-intent";
+    // 先让按需 cleanup intent 以读回方式成功，再让第一个 agent event 失败。
     const originalRead = h.persistence.readMutation.bind(h.persistence);
     let checkpointRead = false;
     h.persistence.readMutation = async (input) => {
       const result = await originalRead(input);
-      if (input.idempotencyKey.includes("model-execution-started")) {
+      if (input.idempotencyKey.includes("sandbox/cleanup-intent")) {
         checkpointRead = true;
         h.persistence.unavailableNextMutation = true;
       }
@@ -1839,7 +1913,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("Sandbox、Workspace 与 Artifact 异常分别映射稳定错误码", async () => {
-    const acquire = harness([new ScriptedAgentSession(successfulEvents)]);
+    const acquire = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     acquire.sandboxes.beforeAcquireReturn = () => {
       throw new Error("私有 Sandbox 异常");
     };
@@ -1848,7 +1922,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       code: "SANDBOX_FAILED",
     });
 
-    const workspace = harness([new ScriptedAgentSession(successfulEvents)]);
+    const workspace = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     workspace.revisions.beforeReturn = () => {
       throw new Error("私有 Workspace 异常");
     };
@@ -1870,7 +1944,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("Workspace verify 日志只接受固定 diagnostic，伪造值不会离开边界", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.revisions.beforeReturn = () => {
       throw new WorkspaceApplicationError(
         "DEPENDENCY_FAILED",
@@ -1895,11 +1969,11 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
   it("Workspace 日志对伪造 code、result 与 diagnostic 一律输出 unclassified", async () => {
     const canary = "credential-canary\nforged-category";
-    const application = harness([new ScriptedAgentSession(successfulEvents)]);
+    const application = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     application.revisions.beforeReturn = () => {
       throw new WorkspaceApplicationError(canary as never, "内部错误", canary as never);
     };
-    const dependency = harness([new ScriptedAgentSession(successfulEvents)]);
+    const dependency = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     dependency.revisions.beforeReturn = () => {
       throw new WorkspaceDependencyError(canary as never, "内部依赖错误");
     };
@@ -1952,7 +2026,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
   });
 
   it("DB 在同一事务时钟内生成事件与 Revision 时间，Worker command 不携带时间", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.revisions.nextRevisionId = fakeRevision("revision-db-clock");
     const commands: unknown[] = [];
     h.persistence.afterMutation = (command) => commands.push(command);
@@ -2143,7 +2217,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
   it("超时在安全点清理 Sandbox 后只使用 Domain failed 终态", async () => {
     const blocked = new BlockingAgentSession();
-    const h = harness([blocked]);
+    const h = sandboxHarness([blocked]);
     const execution = h.worker.execute(h.scope);
     await eventually(() => h.factory.createCount === 1);
     h.clock.fireTimeout();

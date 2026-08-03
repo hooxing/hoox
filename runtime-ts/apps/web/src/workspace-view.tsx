@@ -192,7 +192,6 @@ export function RunTimeline({
   readonly events: readonly RunEvent[];
 }) {
   const progress = buildRunProgress(events);
-  const progressTrackRef = useRef<HTMLOListElement>(null);
   const recoveryRequired = run.executionStatus === "recovery_required";
   const isRunning = !recoveryRequired && timedRunStatuses.has(run.status);
   const isQueued = run.status === "queued";
@@ -200,61 +199,21 @@ export function RunTimeline({
   const showActivity = isRunning || isQueued;
   const elapsed = useElapsedSeconds(run);
   const isFailure = recoveryRequired || run.status === "failed" || run.status === "cancelled";
-  const completedStepCount = progress.steps.filter((step) => step.status === "completed").length;
-  const totalStepCount = progress.steps.length;
-  const thinkingWasInterrupted = progress.thinking?.status === "running" && !isRunning;
-  const trackItems = [
-    ...(progress.thinking === undefined
-      ? []
-      : [
-          {
-            id: "thinking",
-            label:
-              recoveryRequired && progress.thinking.status === "running"
-                ? "分析已中断"
-                : progress.thinking.status === "running" && !thinkingWasInterrupted
-                  ? "分析任务"
-                  : thinkingWasInterrupted
-                    ? "分析已结束"
-                    : "已完成分析",
-            status:
-              thinkingWasInterrupted && isFailure
-                ? ("failed" as const)
-                : thinkingWasInterrupted
-                  ? ("completed" as const)
-                  : progress.thinking.status,
-            count: 1,
-          },
-        ]),
-    ...progress.steps.map((step) => ({
-      ...step,
-      label: step.label.replace(/^正在/u, "").replace(/…$/u, ""),
-      ...(recoveryRequired && step.status === "running" ? { status: "failed" as const } : {}),
-    })),
-  ];
-  const trackVersion = trackItems
-    .map((item) => `${item.id}:${item.status}:${item.count}`)
-    .join("|");
-  useEffect(() => {
-    void trackVersion;
-    const track = progressTrackRef.current;
-    if (track !== null) track.scrollLeft = track.scrollWidth;
-  }, [trackVersion]);
   const summary = recoveryRequired
-    ? "运行已中断，当前没有 Agent 在继续执行。"
-    : isFailure
-      ? run.status === "cancelled"
-        ? "运行已停止。你可以调整任务后再次发送。"
-        : "运行未完成。请稍后重试，或调整任务后再次发送。"
-      : isWaiting
-        ? "需要你的输入"
-        : isRunning
-          ? progress.currentAction
-          : isQueued
-            ? "正在排队，准备开始任务。"
-            : run.status === "succeeded"
-              ? "已完成本次任务。"
-              : "等待你的下一步输入。";
+    ? "执行已中断"
+    : run.status === "cancelled"
+      ? "已取消"
+      : run.status === "failed"
+        ? "执行失败"
+        : isWaiting
+          ? "等待你的输入"
+          : isRunning
+            ? progress.currentAction
+            : isQueued
+              ? "排队中"
+              : run.status === "succeeded"
+                ? "已完成"
+                : "就绪";
   return (
     <section
       className={`run-progress ${showActivity ? "is-active" : ""} ${isFailure ? "is-failed" : ""}`}
@@ -273,51 +232,41 @@ export function RunTimeline({
             {isRunning && <span>已运行 {elapsedLabel(elapsed)}</span>}
           </div>
         </div>
-        <span className="run-progress-count" aria-hidden="true">
-          {totalStepCount > 0 ? `${completedStepCount}/${totalStepCount}` : "—"}
-        </span>
-        <span className="sr-only">
-          {totalStepCount > 0 ? `已完成 ${completedStepCount} / ${totalStepCount} 步` : "暂无步骤"}
-        </span>
       </div>
-      {trackItems.length > 0 && (
-        <ol ref={progressTrackRef} className="run-progress-track" aria-label="工作状态">
-          {trackItems.map((item) => (
-            <li
-              key={item.id}
-              className={`is-${item.status}`}
-              aria-current={item.status === "running" ? "step" : undefined}
-            >
-              {item.status === "running" ? (
-                <LoaderCircle className="spin" size={12} aria-hidden="true" />
-              ) : (
-                <span className="run-step-indicator" aria-hidden="true">
-                  {item.status === "failed" ? "!" : "✓"}
-                </span>
-              )}
-              <span>{item.label}</span>
-              {item.count > 1 && <small>× {item.count}</small>}
-            </li>
-          ))}
-        </ol>
-      )}
-      {progress.thinking !== undefined && (
-        <RunThinkingPanel
-          text={progress.thinking.text}
-          status={progress.thinking.status}
-          run={run}
-        />
-      )}
     </section>
   );
 }
 
-export function RunTranscript({ events }: { readonly events: readonly RunEvent[] }) {
+export function RunTranscript({
+  run,
+  events,
+}: {
+  readonly run: Run;
+  readonly events: readonly RunEvent[];
+}) {
   const progress = buildRunProgress(events);
-  if (progress.finalMessage === undefined && progress.waitingQuestion === undefined) return null;
+  if (
+    progress.thinking === undefined &&
+    progress.finalMessage === undefined &&
+    progress.waitingQuestion === undefined
+  )
+    return null;
   return (
     <section className="assistant-transcript" aria-label="Agent 正文">
-      {progress.finalMessage !== undefined && <AssistantMessage text={progress.finalMessage} />}
+      {(progress.thinking !== undefined || progress.finalMessage !== undefined) && (
+        <AssistantMessage
+          text={progress.finalMessage ?? ""}
+          contentBefore={
+            progress.thinking === undefined ? undefined : (
+              <RunThinkingPanel
+                text={progress.thinking.text}
+                status={progress.thinking.status}
+                run={run}
+              />
+            )
+          }
+        />
+      )}
       {progress.waitingQuestion !== undefined && (
         <AssistantMessage label="需要你的输入" text={progress.waitingQuestion} />
       )}
@@ -328,11 +277,16 @@ export function RunTranscript({ events }: { readonly events: readonly RunEvent[]
 export function ThreadTranscript({
   messages,
   pendingInputs = [],
+  currentRun,
+  currentRunEvents = [],
 }: {
   readonly messages: readonly ThreadContextMessage[];
   readonly pendingInputs?: readonly PendingThreadInputView[];
+  readonly currentRun?: Run;
+  readonly currentRunEvents?: readonly RunEvent[];
 }) {
   if (messages.length === 0 && pendingInputs.length === 0) return null;
+  const currentProgress = currentRun === undefined ? undefined : buildRunProgress(currentRunEvents);
   return (
     <section className="assistant-transcript" aria-label="Thread 连续对话">
       {messages.map((message) =>
@@ -344,7 +298,21 @@ export function ThreadTranscript({
             </div>
           </article>
         ) : message.role === "assistant" ? (
-          <AssistantMessage key={message.sequence} text={message.text} />
+          <AssistantMessage
+            key={message.sequence}
+            text={message.text}
+            contentBefore={
+              currentRun !== undefined &&
+              message.runId === currentRun.id &&
+              currentProgress?.thinking !== undefined ? (
+                <RunThinkingPanel
+                  text={currentProgress.thinking.text}
+                  status={currentProgress.thinking.status}
+                  run={currentRun}
+                />
+              ) : undefined
+            }
+          />
         ) : shouldDisplayRuntimeContextMessage(message.text) ? (
           <p className="runtime-context-notice" key={message.sequence}>
             {message.text}
@@ -404,9 +372,11 @@ function threadInputDispositionLabel(input: PendingThreadInputView): string {
 export function AssistantMessage({
   text,
   label = "Agent",
+  contentBefore,
 }: {
   readonly text: string;
   readonly label?: string;
+  readonly contentBefore?: ReactNode;
 }) {
   return (
     <article className="message assistant-message" aria-label={label}>
@@ -415,7 +385,8 @@ export function AssistantMessage({
       </span>
       <div className="message-card">
         <span className="message-label">{label}</span>
-        <AssistantMarkdown text={text} />
+        {contentBefore}
+        {text.length > 0 && <AssistantMarkdown text={text} />}
       </div>
     </article>
   );

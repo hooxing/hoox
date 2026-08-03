@@ -665,8 +665,9 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       ? recoveryUi
       : undefined;
   const visibleError = currentRecovery?.status === "error" ? currentRecovery.error : error;
-  const currentRunHasContext =
-    state.run !== undefined && state.threadContext?.some((item) => item.runId === state.run?.id);
+  const currentRunHasAssistantContext =
+    state.run !== undefined &&
+    state.threadContext?.some((item) => item.runId === state.run?.id && item.role === "assistant");
   const persistedUserOccurrences = new Map<string, number>();
   for (const message of state.threadContext ?? []) {
     if (message.role !== "user") continue;
@@ -802,10 +803,15 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
               <ThreadTranscript
                 messages={state.threadContext ?? []}
                 pendingInputs={visiblePendingInputs}
+                {...(state.run === undefined
+                  ? {}
+                  : { currentRun: state.run, currentRunEvents: state.events })}
               />
               {state.run ? (
                 <>
-                  {!currentRunHasContext && <RunTranscript events={state.events} />}
+                  {!currentRunHasAssistantContext && (
+                    <RunTranscript run={state.run} events={state.events} />
+                  )}
                   <InlineArtifactDelivery
                     artifacts={state.artifacts}
                     onPreview={(artifactId) => void preview(artifactId)}

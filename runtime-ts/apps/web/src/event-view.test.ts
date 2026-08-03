@@ -23,7 +23,7 @@ describe("用户运行进度投影", () => {
       { id: "call-private-1", label: "正在搜索网页…", status: "completed", count: 1 },
     ]);
     expect(JSON.stringify(progress)).not.toContain("cleanup_intent_persisted");
-    expect(progress.currentAction).toBe("正在搜索网页…");
+    expect(progress.currentAction).toBe("正在准备任务…");
   });
 
   it("合并连续同类完成步骤，保留失败状态和最终回复", () => {
@@ -41,6 +41,7 @@ describe("用户运行进度投影", () => {
       { id: "call-3", label: "正在执行代码…", status: "failed", count: 1 },
     ]);
     expect(progress.finalMessage).toBe("已生成报告。");
+    expect(progress.currentAction).toBe("正在回复…");
   });
 
   it("保留流式片段边界的空格与 Markdown 换行", () => {

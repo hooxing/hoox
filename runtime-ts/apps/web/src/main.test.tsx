@@ -220,7 +220,7 @@ describe("Agent 工作台恢复接入", () => {
     await settleEffects();
 
     expect(getRun).toHaveBeenCalledTimes(1);
-    expect(container.textContent).toContain("运行已中断，当前没有 Agent 在继续执行。");
+    expect(container.textContent).toContain("执行已中断");
     await act(async () => vi.advanceTimersByTimeAsync(12_000));
     await settleEffects();
     expect(getRun).toHaveBeenCalledTimes(1);

@@ -493,7 +493,8 @@ describe("工作台展示组件", () => {
     expect(activeDetails.closest(".assistant-message")).not.toBeNull();
     expect(activeDetails.open).toBe(true);
     expect(activeSummary.textContent).toContain("正在思考");
-    expect(activeSummary.textContent).toContain("实时更新中");
+    expect(activeSummary.textContent).not.toContain("展开");
+    expect(activeSummary.textContent).not.toContain("收起");
     expect(activeContent.textContent).toContain("先检查依赖，再生成文档。");
     expect(activeContent.tagName).toBe("SECTION");
     expect(activeContent.getAttribute("aria-busy")).toBe("true");
@@ -508,6 +509,8 @@ describe("工作台展示组件", () => {
     expect(settledStatusHtml).not.toContain("已完成分析");
     expect(settledDetails?.open).toBe(false);
     expect(settledDetails?.textContent).toContain("思考已完成");
+    expect(settledDetails?.querySelector(".run-thinking-indicator")).toBeNull();
+    expect(settledDetails?.querySelector("summary")?.textContent).toBe("思考已完成");
     expect(settledDetails?.textContent).toContain("先检查依赖，再生成文档。");
     expect(settled.querySelector(".run-thinking-content")?.getAttribute("aria-busy")).toBe("false");
   });
@@ -620,7 +623,7 @@ describe("工作台展示组件", () => {
     if (summary === null) throw new Error("未渲染思考摘要按钮");
     act(() => summary.click());
     expect(details.open).toBe(true);
-    expect(details.textContent).toContain("收起");
+    expect(summary.textContent).toBe("思考已完成");
 
     act(() =>
       root.render(

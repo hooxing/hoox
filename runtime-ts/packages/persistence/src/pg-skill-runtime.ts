@@ -369,8 +369,9 @@ export class PgSkillRuntimeRepository implements SkillRuntimeRepository {
       async (client) => {
         await requireActiveFence(client, input.binding);
         const names = await client.query<{ readonly invocation_name: string }>(
-          `SELECT DISTINCT invocation_name FROM skill_invocations
+          `SELECT invocation_name FROM skill_invocations
             WHERE tenant_id=$1 AND run_id=$2 AND status='loaded'
+            GROUP BY invocation_name
             ORDER BY invocation_name COLLATE "C"`,
           [input.binding.tenantId, input.binding.runId],
         );

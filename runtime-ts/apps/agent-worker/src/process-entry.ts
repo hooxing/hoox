@@ -82,6 +82,8 @@ import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
 
 /** Artifact 服务请求的 TTL 必须不超过同一 Worker BlobStore 的预签名策略上限。 */
 export const WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS = 60;
+/** Worker 需要读取中心校验过的 Skill 包文件；写侧服务仍保留各自更小的业务配额。 */
+const WORKER_MAX_BLOB_SIZE_BYTES = 32 * 1024 * 1024;
 
 const workerEnvironmentSchema = Object.freeze({
   DATABASE_URL: urlEnvironmentField({
@@ -623,7 +625,7 @@ async function assembleWorkerRuntime(
       prefix: RUNTIME_BLOB_OBJECT_PREFIX,
       maxPresignTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
       // Resource 上传仍由 API 限制为 16 MiB；Worker 还需读取中心校验过的 32 MiB Skill 资源。
-      maxBlobSizeBytes: 32 * 1024 * 1024,
+      maxBlobSizeBytes: WORKER_MAX_BLOB_SIZE_BYTES,
     } as const;
     const blobs = createS3BlobStore(s3Config, blobRepository);
     const skillRuntime = new SkillRuntimeService(
@@ -998,8 +1000,8 @@ export async function probeDevelopmentWorkerDependencies(
       forcePathStyle: configuration.objectStorage.forcePathStyle,
       prefix: RUNTIME_BLOB_OBJECT_PREFIX,
       maxPresignTtlSeconds: WORKER_ARTIFACT_DOWNLOAD_TTL_SECONDS,
-      // Readiness 使用与真实 Worker 相同的附件读取边界，避免探针与运行时配置漂移。
-      maxBlobSizeBytes: 16 * 1024 * 1024,
+      // Readiness 必须使用与真实 Worker 相同的绝对读取边界，避免预检成功、装配失败。
+      maxBlobSizeBytes: WORKER_MAX_BLOB_SIZE_BYTES,
     } as const;
     const sandbox = new CubeSandboxSessionRegistry(
       {

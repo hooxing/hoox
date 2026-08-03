@@ -417,7 +417,7 @@ export class S3BlobStore implements BlobStore {
         throw new BlobStoreError("BLOB_INTEGRITY_MISMATCH", "读取内容超过固定大小");
       }
       hash.update(chunk);
-      // 当前绝对上限为 16 MiB，先缓冲并完成全量校验，避免消费者在最终哈希失败前提交外部效果。
+      // 当前绝对上限为 32 MiB，先缓冲并完成全量校验，避免消费者在最终哈希失败前提交外部效果。
       verifiedChunks.push(chunk.slice());
     }
     if (received !== blob.size || hash.digest("hex") !== blob.sha256) {
@@ -1670,7 +1670,7 @@ export function encodeRfc5987Value(value: string): string {
   );
 }
 
-const MAX_IN_MEMORY_BLOB_SIZE_BYTES = 16 * 1024 * 1024;
+const MAX_IN_MEMORY_BLOB_SIZE_BYTES = 32 * 1024 * 1024;
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const REFERENCE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;

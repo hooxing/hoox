@@ -44,13 +44,41 @@ probe_resourcefs_mount() {
 }
 
 unmount_resourcefs() {
-  mountpoint -q "$volume_root" || return 0
-  fusermount3 -uz "$volume_root" || return 1
-  for _detached in {1..40}; do
-    mountpoint -q "$volume_root" || return 0
-    sleep 0.25
-  done
-  return 1
+  if mountpoint -q "$volume_root"; then
+    fusermount3 -uz "$volume_root" || return 1
+    for _detached in {1..40}; do
+      mountpoint -q "$volume_root" || break
+      sleep 0.25
+    done
+    mountpoint -q "$volume_root" && return 1
+  fi
+  stop_tracked_rclone
+}
+
+stop_tracked_rclone() {
+  [[ -e "$pid_file" ]] || return 0
+  [[ -f "$pid_file" && ! -L "$pid_file" ]] || return 1
+  tracked_pid="$(<"$pid_file")"
+  [[ "$tracked_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  if kill -0 "$tracked_pid" 2>/dev/null; then
+    [[ -r "/proc/${tracked_pid}/cmdline" ]] || return 1
+    mapfile -d '' -t tracked_args < "/proc/${tracked_pid}/cmdline"
+    [[
+      "${tracked_args[0]-}" == "$RESOURCEFS_RCLONE_BIN" &&
+      "${tracked_args[1]-}" == "mount" &&
+      "${tracked_args[2]-}" == "resourcefs:" &&
+      "${tracked_args[3]-}" == "$volume_root"
+    ]] || return 1
+    kill "$tracked_pid" 2>/dev/null || return 1
+    for _stopped in {1..40}; do
+      kill -0 "$tracked_pid" 2>/dev/null || break
+      sleep 0.25
+    done
+    if kill -0 "$tracked_pid" 2>/dev/null; then
+      kill -KILL "$tracked_pid" 2>/dev/null || return 1
+    fi
+  fi
+  rm -f -- "$pid_file"
 }
 
 load_config() {
@@ -62,6 +90,7 @@ load_config() {
   # shellcheck disable=SC1090
   source "$CONFIG_FILE"
   : "${RESOURCEFS_VOLUME_BASE_DIR:=/data/cube-shared/volume}"
+  : "${RESOURCEFS_RCLONE_BIN:=/usr/bin/rclone}"
   [[ "$RESOURCEFS_VOLUME_BASE_DIR" =~ ^/[A-Za-z0-9_./-]+$ ]] || fail
   [[ "$RESOURCEFS_VOLUME_BASE_DIR" != *"/../"* && "$RESOURCEFS_VOLUME_BASE_DIR" != */.. ]] || fail
   RESOURCEFS_VOLUME_BASE_DIR="${RESOURCEFS_VOLUME_BASE_DIR%/}"
@@ -100,7 +129,6 @@ case "$OP" in
     [[ "${VOLUME_BASE_DIR%/}" == "$RESOURCEFS_VOLUME_BASE_DIR" ]] || fail
     : "${RESOURCE_FILESYSTEM_ENDPOINT:?}"
     : "${RESOURCE_FILESYSTEM_SIGNING_KEY:?}"
-    : "${RESOURCEFS_RCLONE_BIN:=/usr/bin/rclone}"
     [[ "$RESOURCE_FILESYSTEM_ENDPOINT" =~ ^https://[^[:space:]?#]+/v1/resource-filesystem/?$ ]] || fail
     [[ ${#RESOURCE_FILESYSTEM_SIGNING_KEY} -ge 32 && ${#RESOURCE_FILESYSTEM_SIGNING_KEY} -le 256 ]] || fail
     [[ -x "$RESOURCEFS_RCLONE_BIN" ]] || fail
@@ -115,6 +143,7 @@ case "$OP" in
     cache_root="${VOLUME_BASE_DIR%/}/.runtime-resourcefs-cache/${VOLUME_ID}"
     log_base="${VOLUME_BASE_DIR%/}/.runtime-resourcefs-log"
     log_root="${VOLUME_BASE_DIR%/}/.runtime-resourcefs-log/${VOLUME_ID}"
+    pid_file="${log_root}/rclone.pid"
     ensure_directory "$VOLUME_BASE_DIR"
     ensure_directory "$volume_root"
     ensure_directory "$cache_base"
@@ -137,6 +166,8 @@ case "$OP" in
     fi
 
     if ! mountpoint -q "$volume_root"; then
+      # 上一次 lazy unmount 后若 rclone 没有自行退出，先按受信 PID 文件精确回收。
+      stop_tracked_rclone || fail
       env \
         RCLONE_CONFIG_RESOURCEFS_TYPE=webdav \
         RCLONE_CONFIG_RESOURCEFS_URL="$endpoint" \
@@ -157,6 +188,17 @@ case "$OP" in
           --file-perms 0444 \
           </dev/null >/dev/null 2>&1 &
       mount_pid="$!"
+      pid_tmp="${pid_file}.tmp.$$"
+      (umask 077 && printf '%s\n' "$mount_pid" > "$pid_tmp") || {
+        kill "$mount_pid" 2>/dev/null || true
+        wait "$mount_pid" 2>/dev/null || true
+        fail
+      }
+      mv -f -- "$pid_tmp" "$pid_file" || {
+        kill "$mount_pid" 2>/dev/null || true
+        wait "$mount_pid" 2>/dev/null || true
+        fail
+      }
       for _ready in {1..40}; do
         mountpoint -q "$volume_root" && break
         if ! kill -0 "$mount_pid" 2>/dev/null; then
@@ -184,6 +226,8 @@ case "$OP" in
     command -v mountpoint >/dev/null || fail
     command -v fusermount3 >/dev/null || fail
     volume_root="${RESOURCEFS_VOLUME_BASE_DIR}/runtime-resourcefs-${VOLUME_ID}"
+    log_root="${RESOURCEFS_VOLUME_BASE_DIR}/.runtime-resourcefs-log/${VOLUME_ID}"
+    pid_file="${log_root}/rclone.pid"
     expected_metadata="$(printf '{\"mount_dir\":\"%s\"}' "$volume_root")"
     [[ "$METADATA" == "$expected_metadata" ]] || fail
     if [[ "$REF_COUNT" == "0" ]]; then

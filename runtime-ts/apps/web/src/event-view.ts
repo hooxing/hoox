@@ -73,6 +73,7 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
   const thinkingBlocks: string[] = [];
   let activeThinkingBlock = -1;
   let thinkingActive = false;
+  let messageActive = false;
   let waitingQuestion: string | undefined;
 
   for (const event of events) {
@@ -103,13 +104,17 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
     if (event.type === "message.delta") {
       const delta = object(event.payload)?.delta;
       // 每个字符串片段（包括独立空格和换行）都是 Markdown 结构的一部分。
-      if (typeof delta === "string") messageDeltas.push(delta);
+      if (typeof delta === "string") {
+        messageDeltas.push(delta);
+        messageActive = true;
+      }
       continue;
     }
     if (event.type === "message.completed") {
       // 兼容缺少 thinking_end 的 Provider：assistant message 结束即视为本轮思考结束。
       thinkingActive = false;
       activeThinkingBlock = -1;
+      messageActive = false;
       continue;
     }
     if (event.type === "run_waiting") {
@@ -156,7 +161,7 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
     currentAction:
       thinkingActive === true
         ? "正在思考…"
-        : (active?.label ?? compacted.at(-1)?.label ?? "正在准备任务…"),
+        : (active?.label ?? (messageActive ? "正在回复…" : "正在准备任务…")),
     steps: compacted,
     thinking:
       thinkingText.length === 0

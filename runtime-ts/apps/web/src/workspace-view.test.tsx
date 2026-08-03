@@ -42,41 +42,38 @@ describe("工作台展示组件", () => {
 
   it("recovery_required 不再显示执行动画或累计运行时间", () => {
     const interrupted: Run = { ...running, executionStatus: "recovery_required" };
+    const events: readonly RunEvent[] = [
+      {
+        eventId: "thinking-started",
+        sequence: 1,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "thinking.started",
+        payload: {},
+      },
+      {
+        eventId: "thinking-delta",
+        sequence: 2,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "thinking.delta",
+        payload: { delta: "中断前的思考。" },
+      },
+    ];
     const badge = renderToStaticMarkup(
       <RunStatusBadge status={interrupted.status} executionStatus={interrupted.executionStatus} />,
     );
-    const timeline = renderToStaticMarkup(
-      <RunTimeline
-        run={interrupted}
-        events={[
-          {
-            eventId: "thinking-started",
-            sequence: 1,
-            occurredAt: "",
-            kind: "agent_event",
-            type: "thinking.started",
-            payload: {},
-          },
-          {
-            eventId: "thinking-delta",
-            sequence: 2,
-            occurredAt: "",
-            kind: "agent_event",
-            type: "thinking.delta",
-            payload: { delta: "中断前的思考。" },
-          },
-        ]}
-      />,
-    );
+    const timeline = renderToStaticMarkup(<RunTimeline run={interrupted} events={events} />);
+    const transcript = renderToStaticMarkup(<RunTranscript run={interrupted} events={events} />);
 
     expect(badge).toContain("执行已中断");
     expect(badge).toContain("is-recovery-required");
-    expect(timeline).toContain("当前没有 Agent 在继续执行");
-    expect(timeline).toContain("分析已中断");
-    expect(timeline).toContain("思考已中断");
-    expect(timeline).toContain("中断前的思考。");
+    expect(timeline).toContain("执行已中断");
+    expect(timeline).not.toContain("中断前的思考。");
     expect(timeline).not.toContain("spin");
     expect(timeline).not.toContain("已运行");
+    expect(transcript).toContain("思考已中断");
+    expect(transcript).toContain("中断前的思考。");
   });
 
   it("把 steer 与 follow-up 作为对话中的用户消息展示，而不是替换当前任务", () => {
@@ -409,6 +406,7 @@ describe("工作台展示组件", () => {
 
     expect(html).toContain("正在搜索网页");
     expect(html).toContain("已运行");
+    expect(html).not.toContain("run-progress-track");
     expect(html).not.toContain("call-private");
     expect(html).not.toContain("不应展示");
     expect(html).not.toContain("received runtime event");
@@ -429,7 +427,7 @@ describe("工作台展示组件", () => {
       const html = renderToStaticMarkup(
         <>
           <RunTimeline run={run} events={events} />
-          <RunTranscript events={events} />
+          <RunTranscript run={run} events={events} />
         </>,
       );
       expect(html).toContain("已完成的部分");
@@ -439,7 +437,7 @@ describe("工作台展示组件", () => {
     }
   });
 
-  it("保留横向状态轨道，并在运行中默认展开实时思考内容", () => {
+  it("状态栏只展示当前状态，思考内容在 Agent 对话中实时展开", () => {
     const baseEvents: readonly RunEvent[] = [
       {
         eventId: "thinking-start",
@@ -458,22 +456,26 @@ describe("工作台展示组件", () => {
         payload: { type: "thinking.delta", delta: "先检查依赖，再生成文档。" },
       },
     ];
-    const activeHtml = renderToStaticMarkup(<RunTimeline run={running} events={baseEvents} />);
+    const settledEvents: readonly RunEvent[] = [
+      ...baseEvents,
+      {
+        eventId: "thinking-end",
+        sequence: 3,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "thinking.completed",
+        payload: { type: "thinking.completed" },
+      },
+    ];
+    const activeStatusHtml = renderToStaticMarkup(
+      <RunTimeline run={running} events={baseEvents} />,
+    );
+    const activeHtml = renderToStaticMarkup(<RunTranscript run={running} events={baseEvents} />);
+    const settledStatusHtml = renderToStaticMarkup(
+      <RunTimeline run={{ ...running, status: "succeeded" }} events={settledEvents} />,
+    );
     const settledHtml = renderToStaticMarkup(
-      <RunTimeline
-        run={running}
-        events={[
-          ...baseEvents,
-          {
-            eventId: "thinking-end",
-            sequence: 3,
-            occurredAt: "",
-            kind: "agent_event",
-            type: "thinking.completed",
-            payload: { type: "thinking.completed" },
-          },
-        ]}
-      />,
+      <RunTranscript run={{ ...running, status: "succeeded" }} events={settledEvents} />,
     );
 
     const active = document.createElement("div");
@@ -485,7 +487,10 @@ describe("工作台展示组件", () => {
       throw new Error("未渲染实时思考披露区");
     }
 
-    expect(active.querySelector(".run-progress-track")?.textContent).toContain("分析任务");
+    expect(activeStatusHtml).toContain("正在思考");
+    expect(activeStatusHtml).not.toContain("run-progress-track");
+    expect(activeStatusHtml).not.toContain("先检查依赖，再生成文档。");
+    expect(activeDetails.closest(".assistant-message")).not.toBeNull();
     expect(activeDetails.open).toBe(true);
     expect(activeSummary.textContent).toContain("正在思考");
     expect(activeSummary.textContent).toContain("实时更新中");
@@ -499,11 +504,57 @@ describe("工作台展示组件", () => {
     const settled = document.createElement("div");
     settled.innerHTML = settledHtml;
     const settledDetails = settled.querySelector<HTMLDetailsElement>(".run-thinking");
-    expect(settled.querySelector(".run-progress-track")?.textContent).toContain("已完成分析");
+    expect(settledStatusHtml).toContain("已完成");
+    expect(settledStatusHtml).not.toContain("已完成分析");
     expect(settledDetails?.open).toBe(false);
     expect(settledDetails?.textContent).toContain("思考已完成");
     expect(settledDetails?.textContent).toContain("先检查依赖，再生成文档。");
     expect(settled.querySelector(".run-thinking-content")?.getAttribute("aria-busy")).toBe("false");
+  });
+
+  it("当前 Run 的回答进入连续上下文后，思考仍与最终回答位于同一 Agent 消息", () => {
+    const succeeded: Run = { ...running, status: "succeeded" };
+    const html = renderToStaticMarkup(
+      <ThreadTranscript
+        messages={[
+          {
+            sequence: 1,
+            runId: running.id,
+            role: "assistant",
+            text: "这是最终回答。",
+            createdAt: "2026-08-03T00:00:00.000Z",
+          },
+        ]}
+        currentRun={succeeded}
+        currentRunEvents={[
+          {
+            eventId: "thinking-delta",
+            sequence: 1,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "thinking.delta",
+            payload: { delta: "先确认问题范围。" },
+          },
+          {
+            eventId: "thinking-completed",
+            sequence: 2,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "thinking.completed",
+            payload: {},
+          },
+        ]}
+      />,
+    );
+
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    const assistant = container.querySelectorAll(".assistant-message");
+    expect(assistant).toHaveLength(1);
+    expect(assistant[0]?.querySelector(".run-thinking")?.textContent).toContain("思考已完成");
+    expect(assistant[0]?.textContent).toContain("先确认问题范围。");
+    expect(assistant[0]?.textContent).toContain("这是最终回答。");
+    expect(html.indexOf("思考已完成")).toBeLessThan(html.indexOf("这是最终回答。"));
   });
 
   it("思考结束时自动折叠，之后仍可手工展开，异常终态不会伪装成仍在思考", () => {
@@ -528,7 +579,7 @@ describe("工作台展示组件", () => {
       },
     ];
 
-    act(() => root.render(<RunTimeline run={running} events={liveEvents} />));
+    act(() => root.render(<RunTranscript run={running} events={liveEvents} />));
     const details = container.querySelector<HTMLDetailsElement>(".run-thinking");
     if (details === null) throw new Error("未渲染思考披露区");
     expect(details.open).toBe(true);
@@ -544,7 +595,7 @@ describe("工作台展示组件", () => {
         payload: { delta: "继续分析。" },
       },
     ];
-    act(() => root.render(<RunTimeline run={running} events={updatedLiveEvents} />));
+    act(() => root.render(<RunTranscript run={running} events={updatedLiveEvents} />));
     expect(details.open).toBe(true);
     expect(details.querySelector(".run-thinking-content")?.textContent).toContain(
       "实时检查中。继续分析。",
@@ -561,7 +612,7 @@ describe("工作台展示组件", () => {
         payload: {},
       },
     ];
-    act(() => root.render(<RunTimeline run={running} events={completedEvents} />));
+    act(() => root.render(<RunTranscript run={running} events={completedEvents} />));
     expect(details.open).toBe(false);
     expect(details.classList).toContain("is-completed");
 
@@ -573,7 +624,7 @@ describe("工作台展示组件", () => {
 
     act(() =>
       root.render(
-        <RunTimeline
+        <RunTranscript
           run={running}
           events={[
             ...completedEvents,
@@ -592,12 +643,12 @@ describe("工作台展示组件", () => {
     expect(details.open).toBe(true);
 
     act(() =>
-      root.render(<RunTimeline run={{ ...running, status: "failed" }} events={liveEvents} />),
+      root.render(<RunTranscript run={{ ...running, status: "failed" }} events={liveEvents} />),
     );
     expect(details.open).toBe(false);
     expect(details.classList).toContain("is-stopped");
     expect(details.textContent).toContain("思考已结束");
-    expect(container.querySelector(".run-progress-track")?.textContent).toContain("分析已结束");
+    expect(container.querySelector(".run-progress-track")).toBeNull();
 
     act(() => root.unmount());
   });
@@ -623,9 +674,9 @@ describe("工作台展示组件", () => {
       },
     ];
     const statusHtml = renderToStaticMarkup(<RunTimeline run={waiting} events={events} />);
-    const transcriptHtml = renderToStaticMarkup(<RunTranscript events={events} />);
+    const transcriptHtml = renderToStaticMarkup(<RunTranscript run={waiting} events={events} />);
 
-    expect(statusHtml).toContain("需要你的输入");
+    expect(statusHtml).toContain("等待你的输入");
     expect(statusHtml).not.toContain("需要处理哪个地区？");
     expect(statusHtml).not.toContain("请先确认范围。");
     expect(statusHtml).not.toContain("spin");

@@ -24,6 +24,35 @@ ensure_directory() {
   [[ -d "$1" && ! -L "$1" ]] || fail
 }
 
+probe_resourcefs_remote() {
+  env \
+    RCLONE_CONFIG_RESOURCEFS_TYPE=webdav \
+    RCLONE_CONFIG_RESOURCEFS_URL="$endpoint" \
+    RCLONE_CONFIG_RESOURCEFS_VENDOR=other \
+    RCLONE_CONFIG_RESOURCEFS_BEARER_TOKEN="$capability" \
+    "$RESOURCEFS_RCLONE_BIN" lsf resourcefs: \
+      --max-depth 1 \
+      --contimeout 5s \
+      --timeout 10s \
+      --retries 1 \
+      --low-level-retries 1 \
+      >/dev/null 2>&1
+}
+
+probe_resourcefs_mount() {
+  timeout --signal=KILL 10s ls -A -- "$volume_root" >/dev/null 2>&1
+}
+
+unmount_resourcefs() {
+  mountpoint -q "$volume_root" || return 0
+  fusermount3 -uz "$volume_root" || return 1
+  for _detached in {1..40}; do
+    mountpoint -q "$volume_root" || return 0
+    sleep 0.25
+  done
+  return 1
+}
+
 load_config() {
   [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || fail
   [[ "$(stat -c %u "$CONFIG_FILE")" == "0" ]] || fail
@@ -79,6 +108,7 @@ case "$OP" in
     command -v base64 >/dev/null || fail
     command -v mountpoint >/dev/null || fail
     command -v fusermount3 >/dev/null || fail
+    command -v timeout >/dev/null || fail
 
     volume_root="${VOLUME_BASE_DIR%/}/runtime-resourcefs-${VOLUME_ID}"
     cache_base="${VOLUME_BASE_DIR%/}/.runtime-resourcefs-cache"
@@ -92,11 +122,21 @@ case "$OP" in
     ensure_directory "$log_base"
     ensure_directory "$log_root"
 
+    capability_body="$(printf '{"v":2,"tenantId":"%s"}' "$VOLUME_ID" | base64 | tr -d '\n=' | tr '+/' '-_')"
+    capability_signature="$(printf '%s' "$capability_body" | openssl dgst -sha256 -hmac "$RESOURCE_FILESYSTEM_SIGNING_KEY" -binary | base64 | tr -d '\n=' | tr '+/' '-_')"
+    capability="${capability_body}.${capability_signature}"
+    endpoint="${RESOURCE_FILESYSTEM_ENDPOINT%/}"
+
+    # mountpoint 只能证明内核里仍有 FUSE 条目，不能证明 rclone/WebDAV 数据面可用。
+    # 先用同一 capability 直探远端；否则坏挂载会被复用并让 Sandbox 内 open(2) 无界阻塞。
+    probe_resourcefs_remote || fail
+    if mountpoint -q "$volume_root" && ! probe_resourcefs_mount; then
+      # refCount=1 表示本次 Attach 之前没有使用者，此时才允许修复残留挂载。
+      [[ "$REF_COUNT" == "1" ]] || fail
+      unmount_resourcefs || fail
+    fi
+
     if ! mountpoint -q "$volume_root"; then
-      capability_body="$(printf '{"v":2,"tenantId":"%s"}' "$VOLUME_ID" | base64 | tr -d '\n=' | tr '+/' '-_')"
-      capability_signature="$(printf '%s' "$capability_body" | openssl dgst -sha256 -hmac "$RESOURCE_FILESYSTEM_SIGNING_KEY" -binary | base64 | tr -d '\n=' | tr '+/' '-_')"
-      capability="${capability_body}.${capability_signature}"
-      endpoint="${RESOURCE_FILESYSTEM_ENDPOINT%/}"
       env \
         RCLONE_CONFIG_RESOURCEFS_TYPE=webdav \
         RCLONE_CONFIG_RESOURCEFS_URL="$endpoint" \
@@ -130,6 +170,12 @@ case "$OP" in
         wait "$mount_pid" 2>/dev/null || true
         fail
       fi
+      if ! probe_resourcefs_mount; then
+        unmount_resourcefs || true
+        kill "$mount_pid" 2>/dev/null || true
+        wait "$mount_pid" 2>/dev/null || true
+        fail
+      fi
     fi
     printf '{"host_path":"%s","metadata":{"mount_dir":"%s"},"error":""}\n' "$volume_root" "$volume_root"
     ;;
@@ -140,15 +186,8 @@ case "$OP" in
     volume_root="${RESOURCEFS_VOLUME_BASE_DIR}/runtime-resourcefs-${VOLUME_ID}"
     expected_metadata="$(printf '{\"mount_dir\":\"%s\"}' "$volume_root")"
     [[ "$METADATA" == "$expected_metadata" ]] || fail
-    if [[ "$REF_COUNT" == "0" ]] && mountpoint -q "$volume_root"; then
-      fusermount3 -uz "$volume_root" || fail
-      for _detached in {1..40}; do
-        mountpoint -q "$volume_root" || break
-        sleep 0.25
-      done
-      if mountpoint -q "$volume_root"; then
-        fail
-      fi
+    if [[ "$REF_COUNT" == "0" ]]; then
+      unmount_resourcefs || fail
     fi
     printf '{"error":""}\n'
     ;;

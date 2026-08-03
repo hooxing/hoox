@@ -30,18 +30,20 @@ describe("工作台滚动区域样式", () => {
     expect(styles).toContain(".run-progress-dock + .composer");
   });
 
-  it("状态栏不保留历史轨道，思考文本在对话中使用单一可滚动披露区", () => {
+  it("状态栏不保留历史轨道，思考文本使用隐藏滚动条的三行披露区", () => {
     expect(styles).not.toContain(".run-progress-track");
     expect(styles).not.toContain(".run-progress-count");
     expect(styles).not.toContain(".run-progress-disclosures");
     expect(styles).not.toContain(".run-progress-history");
     expect(styles).toMatch(/\.run-thinking\s*\{[^}]*margin-top:/su);
     expect(styles).toMatch(
-      /\.run-thinking-content\s*\{[^}]*max-height:\s*calc\(4\.95em \+ 24px\);[^}]*overflow:\s*auto;/su,
+      /\.run-thinking-content\s*\{[^}]*max-height:\s*calc\(4\.95em \+ 24px\);[^}]*overflow:\s*auto;[^}]*scrollbar-width:\s*none;/su,
     );
     expect(styles).toMatch(/\.run-thinking-content\s*\{[^}]*line-height:\s*1\.65;/su);
+    expect(styles).toContain(".run-thinking-content::-webkit-scrollbar");
     expect(styles).toContain(".run-thinking + .assistant-markdown");
-    expect(styles).toContain(".run-thinking[open] .when-expanded");
+    expect(styles).not.toContain(".run-thinking-indicator");
+    expect(styles).not.toContain(".when-expanded");
     expect(styles).toContain(".run-thinking-content:focus-visible");
   });
 });

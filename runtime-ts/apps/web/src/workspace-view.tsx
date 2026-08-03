@@ -147,21 +147,13 @@ function RunThinkingPanel({
       open={visibleStatus === "running"}
     >
       <summary id={summaryId} aria-controls={contentId}>
-        <ChevronRight className="run-thinking-chevron" size={14} aria-hidden="true" />
-        {isLive ? (
+        {isLive && (
           <LoaderCircle className="run-thinking-spinner spin" size={14} aria-hidden="true" />
-        ) : (
-          <span className="run-thinking-indicator" aria-hidden="true">
-            {wasInterrupted ? "!" : "✓"}
-          </span>
         )}
-        <span className="run-thinking-copy">
-          <strong aria-live="polite">{statusText}</strong>
-          <small>
-            <span className="when-collapsed">{isLive ? "展开实时内容" : "展开查看"}</span>
-            <span className="when-expanded">{isLive ? "实时更新中" : "收起"}</span>
-          </small>
-        </span>
+        <strong className="run-thinking-label" aria-live="polite">
+          {statusText}
+        </strong>
+        <ChevronRight className="run-thinking-chevron" size={14} aria-hidden="true" />
       </summary>
       <section
         ref={contentRef}

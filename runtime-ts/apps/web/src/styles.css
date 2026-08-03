@@ -455,46 +455,9 @@ h2 {
   min-width: 14px;
   color: #3d8062;
 }
-.run-thinking-indicator {
-  display: grid;
-  width: 14px;
-  min-width: 14px;
-  height: 14px;
-  place-items: center;
-  border-radius: 50%;
-  color: #fff;
-  background: #5d806f;
-  font-size: 9px;
-  font-weight: 780;
-}
-.run-thinking.is-stopped .run-thinking-indicator {
-  background: #94756e;
-}
-.run-thinking-copy {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-.run-thinking-copy strong {
+.run-thinking-label {
   color: #454a46;
   font-size: 12px;
-}
-.run-thinking-copy small {
-  flex: 0 0 auto;
-  color: #7b817d;
-  font-size: 11px;
-}
-.run-thinking .when-expanded {
-  display: none;
-}
-.run-thinking[open] .when-collapsed {
-  display: none;
-}
-.run-thinking[open] .when-expanded {
-  display: inline;
 }
 .run-thinking-content {
   max-height: calc(4.95em + 24px);
@@ -508,7 +471,10 @@ h2 {
   background: rgb(253 253 252 / 94%);
   font-size: 12px;
   line-height: 1.65;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+}
+.run-thinking-content::-webkit-scrollbar {
+  display: none;
 }
 @keyframes progress-sheen {
   50% {

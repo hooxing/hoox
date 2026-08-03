@@ -1164,7 +1164,12 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
     Parameters<AgentSessionFactoryPort["create"]>[0]["authorizeToolEffect"]
   > = [];
 
-  constructor(private readonly queue: WorkerAgentSessionPort[]) {}
+  constructor(
+    private readonly queue: WorkerAgentSessionPort[],
+    private readonly prepareSandboxBeforeInput:
+      | boolean
+      | ((ensure: () => Promise<SandboxSessionRef>) => Promise<void>) = false,
+  ) {}
 
   async create(
     input: Parameters<AgentSessionFactoryPort["create"]>[0],
@@ -1174,23 +1179,34 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
     this.createCount += 1;
     this.projections.push(input.rolloutProjection);
     this.toolAuthorizers.push(input.authorizeToolEffect);
-    if (input.onTurnSafePoint === undefined) return session;
     let safePointChain = Promise.resolve();
-    const unsubscribe = session.subscribe((event) => {
-      if (event.type !== "turn.completed") return;
-      safePointChain = safePointChain.then(async () => {
-        const safePoint = await input.onTurnSafePoint?.(event);
-        if (safePoint?.steer !== undefined) {
-          await session.steer({
-            text: safePoint.steer.inputText,
-            attachments: safePoint.steer.attachments ?? [],
+    const unsubscribe =
+      input.onTurnSafePoint === undefined
+        ? () => undefined
+        : session.subscribe((event) => {
+            if (event.type !== "turn.completed") return;
+            safePointChain = safePointChain.then(async () => {
+              const safePoint = await input.onTurnSafePoint?.(event);
+              if (safePoint?.steer !== undefined) {
+                await session.steer({
+                  text: safePoint.steer.inputText,
+                  attachments: safePoint.steer.attachments ?? [],
+                });
+              }
+            });
           });
-        }
-      });
-    });
     const drainRejectedToolReceipts = session.drainRejectedToolReceipts?.bind(session);
     return {
-      prepareInput: (userInput) => session.prepareInput(userInput),
+      prepareInput: async (userInput) => {
+        if (typeof this.prepareSandboxBeforeInput === "function") {
+          await this.prepareSandboxBeforeInput(() =>
+            input.ensureSandboxReady({ reason: "attachment" }),
+          );
+        } else if (this.prepareSandboxBeforeInput) {
+          await input.ensureSandboxReady({ reason: "attachment" });
+        }
+        return await session.prepareInput(userInput);
+      },
       runPrompt: async (prepared, authorization) => {
         const outcome = await session.runPrompt(prepared, authorization);
         await safePointChain;

@@ -99,6 +99,14 @@ const modelWireTraceTables = new Set([
   "model_wire_trace_expiry_tombstones",
   "model_wire_trace_records",
 ]);
+const skillCenterTables = new Set([
+  "skills",
+  "skill_versions",
+  "skill_version_files",
+  "user_skill_installations",
+  "user_skill_installation_commands",
+  "user_skill_installation_audits",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -181,6 +189,12 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["waiting_recovery_checkpoints", new Set(["SELECT", "INSERT"])],
   ["waiting_recovery_effect_outbox", new Set(["SELECT", "INSERT"])],
   ["runtime_recovery_metrics", new Set(["SELECT", "INSERT"])],
+  ["skills", new Set(["SELECT"])],
+  ["skill_versions", new Set(["SELECT"])],
+  ["skill_version_files", new Set(["SELECT"])],
+  ["user_skill_installations", new Set(["SELECT", "INSERT"])],
+  ["user_skill_installation_commands", new Set(["SELECT", "INSERT"])],
+  ["user_skill_installation_audits", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -397,6 +411,17 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
       "updated_at",
     ]),
   ],
+  [
+    "user_skill_installations",
+    new Set([
+      "skill_version",
+      "invocation_name",
+      "status",
+      "version_token",
+      "installed_at",
+      "updated_at",
+    ]),
+  ],
 ]);
 
 async function hasWaitingRecoveryState(client: PoolClient, schema: string): Promise<boolean> {
@@ -465,6 +490,20 @@ async function hasModelWireTraceState(client: PoolClient, schema: string): Promi
             AND to_regclass(format('%I.model_wire_trace_cleanup_items', $1::text)) IS NOT NULL
             AND to_regclass(format('%I.model_wire_trace_expiry_tombstones', $1::text)) IS NOT NULL
             AND to_regclass(format('%I.model_wire_trace_records', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasSkillCenterState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.skills', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.skill_versions', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.skill_version_files', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.user_skill_installations', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.user_skill_installation_commands', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.user_skill_installation_audits', $1::text)) IS NOT NULL
+            AS present`,
     [schema],
   );
   return result.rows[0]?.present === true;
@@ -707,6 +746,9 @@ async function activeTablePolicy(
     // DELETE 仍受 0017 的 purpose/完整身份/到期 RLS policy 约束，不能释放普通 Blob 引用。
     policy.set("blob_references", new Set(["SELECT", "INSERT", "DELETE"]));
   }
+  if (!(await hasSkillCenterState(client, schema))) {
+    for (const table of skillCenterTables) policy.delete(table);
+  }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
   }
@@ -823,6 +865,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasModelWireTraceState(client, schema))) {
     for (const table of modelWireTraceTables) policy.delete(table);
+  }
+  if (!(await hasSkillCenterState(client, schema))) {
+    for (const table of skillCenterTables) policy.delete(table);
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set(
@@ -1552,6 +1597,24 @@ export async function bootstrapRuntimeAccessOnClient(
           blob_incarnation_id, physical_object_key, processing_token, processing_lease_expires_at,
           retention_recovery_at, cleanup_command_id, updated_at
         ) ON TABLE ${schema}.model_wire_trace_records TO ${role}`,
+    );
+  }
+  if (await hasSkillCenterState(client, context.schema)) {
+    // Skill 内容由受信发布流程写入；Runtime 只读中心元数据并维护当前用户自己的安装事实。
+    await client.query(
+      `GRANT SELECT ON TABLE
+         ${schema}.skills,
+         ${schema}.skill_versions,
+         ${schema}.skill_version_files
+       TO ${role};
+       GRANT SELECT, INSERT ON TABLE
+         ${schema}.user_skill_installation_commands,
+         ${schema}.user_skill_installation_audits
+       TO ${role};
+       GRANT SELECT, INSERT ON TABLE ${schema}.user_skill_installations TO ${role};
+       GRANT UPDATE(
+         skill_version,invocation_name,status,version_token,installed_at,updated_at
+       ) ON TABLE ${schema}.user_skill_installations TO ${role}`,
     );
   }
   await client.query(

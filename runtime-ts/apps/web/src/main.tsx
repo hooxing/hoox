@@ -1,5 +1,13 @@
-import { LoaderCircle, PanelLeftOpen, RotateCw } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
+import { LoaderCircle, PanelLeftOpen, Puzzle, RotateCw } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import { createRoot } from "react-dom/client";
 import {
   ApiError,
@@ -15,6 +23,7 @@ import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
+import { SkillCenterDialog, type SkillCenterApi } from "./skill-center.js";
 import "./styles.css";
 import {
   ConversationComposer,
@@ -107,7 +116,27 @@ type WorkspaceApi = Pick<
   readonly getThreadContinuity?: RuntimeApi["getThreadContinuity"];
   readonly submitThreadInput?: RuntimeApi["submitThreadInput"];
   readonly getThreadInputReceipt?: RuntimeApi["getThreadInputReceipt"];
-};
+} & Partial<SkillCenterApi>;
+
+function resolveSkillCenterApi(client: WorkspaceApi): SkillCenterApi | undefined {
+  const { listSkills, listInstalledSkills, installSkill, setSkillEnabled, uninstallSkill } = client;
+  if (
+    listSkills === undefined ||
+    listInstalledSkills === undefined ||
+    installSkill === undefined ||
+    setSkillEnabled === undefined ||
+    uninstallSkill === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    listSkills: listSkills.bind(client),
+    listInstalledSkills: listInstalledSkills.bind(client),
+    installSkill: installSkill.bind(client),
+    setSkillEnabled: setSkillEnabled.bind(client),
+    uninstallSkill: uninstallSkill.bind(client),
+  };
+}
 
 type RecoveryUiState = {
   readonly threadId: string;
@@ -164,6 +193,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const [recoveryNonce, setRecoveryNonce] = useState(0);
   const [isCompact, setIsCompact] = useState(initialCompact);
   const [navigationOpen, setNavigationOpen] = useState(false);
+  const [skillCenterOpen, setSkillCenterOpen] = useState(false);
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
   const modelWireTracePaginationAdvancedRef = useRef(false);
@@ -179,6 +209,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const uploadIdempotencyKeysRef = useRef(new WeakMap<File, string>());
   const initialSelectionAppliedRef = useRef(false);
   runExecutionStatusRef.current = state.run?.executionStatus;
+  const skillCenterApi = useMemo(() => resolveSkillCenterApi(apiClient), [apiClient]);
 
   const selectThread = useCallback((threadId: string | undefined) => {
     navigationRef.current.navigate(threadId);
@@ -733,6 +764,19 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
             ))
           )}
         </ThreadNavigation>
+        {skillCenterApi !== undefined && (
+          <button
+            type="button"
+            className="skill-center-entry"
+            onClick={() => {
+              setSkillCenterOpen(true);
+              setNavigationOpen(false);
+            }}
+          >
+            <Puzzle size={17} />
+            技能中心
+          </button>
+        )}
       </NavigationSidebar>
       <section className="content" aria-label="对话工作区">
         <button
@@ -857,6 +901,9 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           </header>
           <pre>{textPreview.text}</pre>
         </dialog>
+      )}
+      {skillCenterOpen && skillCenterApi !== undefined && (
+        <SkillCenterDialog api={skillCenterApi} onClose={() => setSkillCenterOpen(false)} />
       )}
     </main>
   );

@@ -42,6 +42,34 @@ export type UploadedResource = {
   readonly sizeBytes: number;
 };
 
+export type SkillCatalogItem = {
+  readonly canonicalKey: string;
+  readonly displayName: string;
+  readonly publisher: string;
+  readonly description: string;
+  readonly recommendedVersion: string;
+  readonly compatibility: string;
+  readonly securityStatus: "verified" | "restricted";
+};
+
+export type SkillCatalogPage = {
+  readonly items: readonly SkillCatalogItem[];
+  readonly nextCursor?: string;
+};
+
+export type SkillInstallation = {
+  readonly canonicalKey: string;
+  readonly displayName: string;
+  readonly publisher: string;
+  readonly description: string;
+  readonly skillVersion: string;
+  readonly invocationName: string;
+  readonly status: "enabled" | "disabled";
+  readonly versionToken: number;
+  readonly installedAt: string;
+  readonly updatedAt: string;
+};
+
 export type RunEvent = {
   readonly eventId: string;
   readonly sequence: number;
@@ -280,7 +308,9 @@ export class RuntimeApi {
     headers.set("Authorization", "Bearer dev-user-a");
     headers.set("Accept", "application/json");
     if (init.body !== undefined) headers.set("Content-Type", "application/json");
-    if (init.method === "POST") headers.set("Idempotency-Key", createKey());
+    if (["POST", "PUT", "PATCH", "DELETE"].includes(init.method ?? "GET")) {
+      headers.set("Idempotency-Key", createKey());
+    }
     let response: Response;
     try {
       response = await this.fetcher(`${this.baseUrl}${path}`, { ...init, headers });
@@ -323,6 +353,45 @@ export class RuntimeApi {
 
   async listThreads(): Promise<readonly Thread[]> {
     return asArray(await this.request<unknown>("/v1/threads?limit=100")) as readonly Thread[];
+  }
+
+  async listSkills(query = ""): Promise<SkillCatalogPage> {
+    const suffix = query.trim().length === 0 ? "" : `?q=${encodeURIComponent(query.trim())}`;
+    return this.request<SkillCatalogPage>(`/v1/skills${suffix}`);
+  }
+
+  async listInstalledSkills(): Promise<readonly SkillInstallation[]> {
+    return asArray(await this.request<unknown>("/v1/me/skills")) as readonly SkillInstallation[];
+  }
+
+  async installSkill(canonicalKey: string, invocationName: string): Promise<SkillInstallation> {
+    return this.request<SkillInstallation>(`/v1/me/skills/${encodeURIComponent(canonicalKey)}`, {
+      method: "PUT",
+      body: JSON.stringify({ version: "recommended", invocationName }),
+    });
+  }
+
+  async setSkillEnabled(
+    installation: SkillInstallation,
+    enabled: boolean,
+  ): Promise<SkillInstallation> {
+    return this.request<SkillInstallation>(
+      `/v1/me/skills/${encodeURIComponent(installation.canonicalKey)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          expectedVersionToken: installation.versionToken,
+          enabled,
+        }),
+      },
+    );
+  }
+
+  async uninstallSkill(installation: SkillInstallation): Promise<void> {
+    await this.request(
+      `/v1/me/skills/${encodeURIComponent(installation.canonicalKey)}?expectedVersionToken=${installation.versionToken}`,
+      { method: "DELETE" },
+    );
   }
   /**
    * 读取 Thread 在本次服务端快照中的最新 Run 窗口；它不是跨写入可续接的历史分页。

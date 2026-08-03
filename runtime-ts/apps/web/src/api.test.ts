@@ -473,6 +473,63 @@ describe("RuntimeApi", () => {
     ).toBeUndefined();
   });
 
+  it("技能安装、配置和卸载请求都携带幂等键与 CAS 版本", async () => {
+    const installed = {
+      canonicalKey: "code-review",
+      displayName: "代码审阅",
+      publisher: "Cube",
+      description: "按照团队检查清单审阅代码变更",
+      skillVersion: "1.2.3",
+      invocationName: "review",
+      status: "enabled" as const,
+      versionToken: 2,
+      installedAt: "2026-08-03T00:00:00.000Z",
+      updatedAt: "2026-08-03T00:00:00.000Z",
+    };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ version: "v1", requestId: "req-1", data: installed })),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            version: "v1",
+            requestId: "req-2",
+            data: { ...installed, status: "disabled", versionToken: 3 },
+          }),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            version: "v1",
+            requestId: "req-3",
+            data: { canonicalKey: "code-review", uninstalled: true },
+          }),
+        ),
+      );
+    const api = new RuntimeApi(fetcher);
+    await api.installSkill("code-review", "review");
+    await api.setSkillEnabled(installed, false);
+    await api.uninstallSkill({ ...installed, versionToken: 3 });
+
+    const [, installInit] = fetcher.mock.calls[0] as [string, RequestInit];
+    const [configureUrl, configureInit] = fetcher.mock.calls[1] as [string, RequestInit];
+    const [uninstallUrl, uninstallInit] = fetcher.mock.calls[2] as [string, RequestInit];
+    expect(JSON.parse(String(installInit.body))).toEqual({
+      version: "recommended",
+      invocationName: "review",
+    });
+    expect(JSON.parse(String(configureInit.body))).toEqual({
+      expectedVersionToken: 2,
+      enabled: false,
+    });
+    expect(configureUrl).toBe("/api/v1/me/skills/code-review");
+    expect(uninstallUrl).toBe("/api/v1/me/skills/code-review?expectedVersionToken=3");
+    expect(new Headers(uninstallInit.headers).get("idempotency-key")).toBeTruthy();
+  });
+
   it("仅允许安全媒体类型预览", () => {
     expect(canPreviewArtifact("text/plain")).toBe(false);
     expect(canPreviewArtifact("text/plain; charset=utf-8")).toBe(true);

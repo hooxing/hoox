@@ -19,6 +19,9 @@ export default defineConfig({
       "@cube-runtime/resource": fileURLToPath(
         new URL("./runtime-ts/packages/resource/src/index.ts", import.meta.url),
       ),
+      "@cube-runtime/skill": fileURLToPath(
+        new URL("./runtime-ts/packages/skill/src/index.ts", import.meta.url),
+      ),
       "@cube-runtime/protocol": fileURLToPath(
         new URL("./runtime-ts/packages/protocol/src/index.ts", import.meta.url),
       ),

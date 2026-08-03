@@ -124,6 +124,9 @@ importers:
       '@cube-runtime/resource':
         specifier: workspace:*
         version: link:../../packages/resource
+      '@cube-runtime/skill':
+        specifier: workspace:*
+        version: link:../../packages/skill
       fastify:
         specifier: 5.10.0
         version: 5.10.0
@@ -224,6 +227,9 @@ importers:
       '@cube-runtime/run-contracts':
         specifier: workspace:*
         version: link:../run-contracts
+      '@cube-runtime/skill':
+        specifier: workspace:*
+        version: link:../skill
       '@cube-runtime/workspace':
         specifier: workspace:*
         version: link:../workspace
@@ -316,6 +322,12 @@ importers:
       '@cubesandbox/sdk':
         specifier: workspace:*
         version: link:../../vendor/cubesandbox-sdk
+
+  runtime-ts/packages/skill:
+    dependencies:
+      '@cube-runtime/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   runtime-ts/packages/testing: {}
 

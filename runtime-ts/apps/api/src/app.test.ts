@@ -41,6 +41,11 @@ import {
   type Versioned,
 } from "@cube-runtime/persistence";
 import type { FastifyInstance } from "fastify";
+import {
+  SkillCenterService,
+  type SkillCenterPort,
+  type SkillInstallation,
+} from "@cube-runtime/skill";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ApiDependencies, createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
@@ -502,6 +507,7 @@ function fixture(
     readonly enableThreadInputs?: boolean;
     readonly resourceAttachments?: ApiDependencies["resourceAttachments"];
     readonly resourceUploads?: ApiDependencies["resourceUploads"];
+    readonly skillCenter?: ApiDependencies["skillCenter"];
   } = {},
 ) {
   const state = new FakeApiState();
@@ -599,6 +605,7 @@ function fixture(
       ? {}
       : { resourceAttachments: options.resourceAttachments }),
     ...(options.resourceUploads === undefined ? {} : { resourceUploads: options.resourceUploads }),
+    ...(options.skillCenter === undefined ? {} : { skillCenter: options.skillCenter }),
     ...(options.enableThreadContext === true
       ? {
           threadContext: {
@@ -915,6 +922,100 @@ afterEach(async () => {
 });
 
 describe("Fastify API 契约", () => {
+  it("技能中心按认证用户隔离安装，并以同一幂等键稳定回放", async () => {
+    const installations = new Map<string, SkillInstallation>();
+    const commands = new Map<
+      string,
+      { readonly digest: string; readonly item: SkillInstallation }
+    >();
+    const port: SkillCenterPort = {
+      listCatalog: async () => ({
+        items: [
+          {
+            canonicalKey: "code-review",
+            displayName: "代码审阅",
+            publisher: "Cube",
+            description: "按照团队检查清单审阅代码变更",
+            recommendedVersion: "1.2.3",
+            compatibility: "runtime >= 1",
+            securityStatus: "verified",
+          },
+        ],
+      }),
+      listInstallations: async ({ context }) => {
+        const item = installations.get(context.userId);
+        return item === undefined ? [] : [item];
+      },
+      install: async (input) => {
+        const commandKey = `${input.context.userId}:${input.idempotencyKey}`;
+        const previous = commands.get(commandKey);
+        if (previous !== undefined) {
+          return previous.digest === input.requestDigest
+            ? { outcome: "replayed", installation: previous.item }
+            : { outcome: "key_conflict" };
+        }
+        const item: SkillInstallation = {
+          canonicalKey: input.canonicalKey,
+          displayName: "代码审阅",
+          publisher: "Cube",
+          description: "按照团队检查清单审阅代码变更",
+          skillVersion: "1.2.3",
+          invocationName: input.invocationName,
+          status: "enabled",
+          versionToken: 0,
+          installedAt: baseTime,
+          updatedAt: baseTime,
+        };
+        installations.set(input.context.userId, item);
+        commands.set(commandKey, { digest: input.requestDigest, item });
+        return { outcome: "installed", installation: item };
+      },
+      configure: async () => ({ outcome: "not_found" }),
+      uninstall: async () => ({ outcome: "not_found" }),
+    };
+    const { app } = fixture({ skillCenter: new SkillCenterService(port) });
+
+    const catalog = await app.inject({
+      method: "GET",
+      url: "/v1/skills",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(catalog.statusCode).toBe(200);
+    expect(catalog.json().data.items[0].canonicalKey).toBe("code-review");
+
+    const installRequest = {
+      method: "PUT" as const,
+      url: "/v1/me/skills/code-review",
+      headers: {
+        authorization: "Bearer token-a",
+        "idempotency-key": "skill-install-http-0001",
+      },
+      payload: { version: "recommended", invocationName: "review" },
+    };
+    expect((await app.inject(installRequest)).statusCode).toBe(200);
+    expect((await app.inject(installRequest)).statusCode).toBe(200);
+
+    const ownerA = await app.inject({
+      method: "GET",
+      url: "/v1/me/skills",
+      headers: { authorization: "Bearer token-a" },
+    });
+    const ownerB = await app.inject({
+      method: "GET",
+      url: "/v1/me/skills",
+      headers: { authorization: "Bearer token-b" },
+    });
+    expect(ownerA.json().data.items).toHaveLength(1);
+    expect(ownerB.json().data.items).toEqual([]);
+
+    const conflict = await app.inject({
+      ...installRequest,
+      payload: { version: "recommended", invocationName: "other-review" },
+    });
+    expect(conflict.statusCode).toBe(409);
+    await app.close();
+  });
+
   it("按 Run 列出模型轮次与 HTTP 尝试，且诊断响应禁止缓存与嗅探", async () => {
     const { app } = fixture({ enableModelWireTrace: true });
     openApps.push(app);

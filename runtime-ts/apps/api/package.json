@@ -10,6 +10,7 @@
     "@cube-runtime/protocol": "workspace:*",
     "@cube-runtime/protocol-mapper": "workspace:*",
     "@cube-runtime/resource": "workspace:*",
+    "@cube-runtime/skill": "workspace:*",
     "fastify": "5.10.0"
   },
   "scripts": {

@@ -1,6 +1,7 @@
 import type { TokenizerPort } from "@cube-runtime/context-policy";
 import {
   assertThreadActiveHistory,
+  providerVisibleThreadHistoryMessages,
   threadActiveHistoryDigest,
   type ThreadActiveHistoryV1,
   type ThreadHistoryMessageV1,
@@ -33,16 +34,17 @@ export type RuntimeCompactionTriggerDecision =
   | { readonly outcome: "no_safe_prefix"; readonly tokens: number };
 
 /**
- * 对最终 Provider 可见的 history message 形状计数。当前 tokenizer identity 也进入兼容摘要；
- * 未配置模型 tokenizer 时上层绑定的 UTF-8 byte 计数是保守上界，不会低估。
+ * 对最终 Provider 可见的 history message 形状计数。审计专用事实先被过滤，tokenizer
+ * identity 进入兼容摘要，确保预算与真正发给模型的数据采用同一语义。
  */
 export function providerVisibleThreadHistoryTokens(
   messages: readonly ThreadHistoryMessageV1[],
   tokenizer: TokenizerPort,
 ): number {
-  const value = messages.map(providerVisibleHistoryMessage);
+  const visibleMessages = providerVisibleThreadHistoryMessages(messages);
+  const value = visibleMessages.map(providerVisibleHistoryMessage);
   const tokens = tokenizer.countTokens(JSON.stringify(value));
-  if (!Number.isSafeInteger(tokens) || tokens < 0 || (messages.length > 0 && tokens === 0)) {
+  if (!Number.isSafeInteger(tokens) || tokens < 0) {
     throw new TypeError("Provider 可见历史 token 计数无效");
   }
   return tokens;
@@ -147,7 +149,7 @@ export function serializeRuntimeCompactionSource(source: RuntimeCompactionSource
     schemaVersion: 1,
     sourceFromSequence: source.sourceFromSequence,
     sourceThroughSequence: source.sourceThroughSequence,
-    messages: source.prefix,
+    messages: providerVisibleThreadHistoryMessages(source.prefix),
   });
 }
 

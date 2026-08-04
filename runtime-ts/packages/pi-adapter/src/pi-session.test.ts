@@ -201,6 +201,75 @@ describe("Pi 安全适配", () => {
     expect(JSON.stringify(providerMessages)).toContain("Run B 用户输入");
   });
 
+  it("workspace_unchanged 只留在审计历史，不投影给 Provider 或预算", async () => {
+    let providerMessages = "";
+    const unsigned = {
+      schemaVersion: 1 as const,
+      projectionSchemaVersion: 1 as const,
+      throughSequence: 4,
+      messages: [
+        { sequence: 1, role: "user" as const, text: "上一轮请求", timestamp: 1 },
+        {
+          sequence: 2,
+          role: "assistant" as const,
+          content: [{ type: "text" as const, text: "上一轮回答" }],
+          api: "faux",
+          provider: "faux",
+          model: "faux",
+          stopReason: "stop" as const,
+          timestamp: 2,
+        },
+        {
+          sequence: 3,
+          role: "runtimeNotice" as const,
+          code: "workspace_unchanged" as const,
+          text: "上一运行未产生 Workspace revision。",
+          timestamp: 3,
+        },
+        {
+          sequence: 4,
+          role: "runtimeNotice" as const,
+          code: "run_failed" as const,
+          text: "上一运行失败，可根据错误继续处理。",
+          timestamp: 4,
+        },
+      ],
+    };
+    const history: ThreadActiveHistoryV1 = {
+      ...unsigned,
+      digest: threadActiveHistoryDigest(unsigned),
+    };
+    const { controller } = await harness(
+      [
+        (context) => {
+          providerMessages = JSON.stringify(context.messages);
+          return fauxAssistantMessage("继续完成");
+        },
+      ],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      history,
+    );
+
+    await controller.prompt("继续");
+
+    expect(providerMessages).not.toContain("workspace_unchanged");
+    expect(providerMessages).not.toContain("上一运行未产生 Workspace revision");
+    expect(providerMessages).toContain("run_failed");
+    expect(controller.getDiagnostics().contextBudget).toMatchObject({
+      outcome: "ready",
+      tokenizerIdentity: "utf8-byte-upper-bound-v1",
+      contextWindow: expect.any(Number),
+      additionalFixedInputTokens: expect.any(Number),
+      availableHistoryTokens: expect.any(Number),
+    });
+  });
+
   it("每次 Provider stream 调用均经过诊断钩子，工具循环不会误作 retry", async () => {
     const invocations: number[] = [];
     const { controller } = await harness(
@@ -407,6 +476,21 @@ describe("Pi 安全适配", () => {
       activeAgentMessageCount: expect.any(Number),
       activeSessionEntryCount: expect.any(Number),
       pendingMessageCount: 0,
+      contextBudget: {
+        outcome: "ready",
+        tokenizerIdentity: "utf8-byte-upper-bound-v1",
+        contextWindow: expect.any(Number),
+        maxOutputTokens: expect.any(Number),
+        systemPromptTokens: expect.any(Number),
+        toolSchemaTokens: expect.any(Number),
+        additionalFixedInputTokens: expect.any(Number),
+        outputReserveTokens: expect.any(Number),
+        recoveryMarginTokens: expect.any(Number),
+        safetyMarginTokens: expect.any(Number),
+        providerOverheadTokens: expect.any(Number),
+        availableHistoryTokens: expect.any(Number),
+        activeEntryTokens: expect.any(Number),
+      },
     });
     expect([...controller.getDiagnostics().activeToolNames].sort()).toEqual(
       [...SANDBOX_TOOL_NAMES, "skill"].sort(),

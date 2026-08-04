@@ -3,6 +3,7 @@ import {
   buildRuntimeCompactionReplacement,
   decideRuntimeCompaction,
   providerVisibleThreadHistoryTokens,
+  serializeRuntimeCompactionSource,
 } from "./runtime-compaction.js";
 import { threadActiveHistoryDigest, type ThreadActiveHistoryV1 } from "./thread-history.js";
 
@@ -22,6 +23,34 @@ function history(messages: ThreadActiveHistoryV1["messages"]): ThreadActiveHisto
 }
 
 describe("Runtime compaction 纯策略", () => {
+  it("审计专用 workspace_unchanged 不参与 Provider token 或压缩输入", () => {
+    const visible = {
+      sequence: 1,
+      role: "user" as const,
+      text: "真实用户输入",
+      timestamp: 1,
+    };
+    const auditOnly = {
+      sequence: 2,
+      role: "runtimeNotice" as const,
+      code: "workspace_unchanged" as const,
+      text: "上一运行未产生 Workspace revision。",
+      timestamp: 2,
+    };
+    expect(providerVisibleThreadHistoryTokens([visible, auditOnly], tokenizer)).toBe(
+      providerVisibleThreadHistoryTokens([visible], tokenizer),
+    );
+    const serialized = serializeRuntimeCompactionSource({
+      sourceFromSequence: 1,
+      sourceThroughSequence: 2,
+      prefix: [visible, auditOnly],
+      retainedSuffix: [],
+    });
+    expect(serialized).toContain("真实用户输入");
+    expect(serialized).not.toContain("workspace_unchanged");
+    expect(serialized).not.toContain("Workspace revision");
+  });
+
   it("从真实 user 边界保留完整尾部，不切断 tool call/result provenance", () => {
     const source = history([
       { sequence: 1, role: "user", text: "旧目标".repeat(200), timestamp: 1 },

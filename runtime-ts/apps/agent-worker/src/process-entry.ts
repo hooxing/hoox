@@ -36,7 +36,10 @@ import {
   BlobSkillContentStore,
   ThreadContextBodyPersistence,
 } from "@cube-runtime/persistence";
-import { bindTrustedPiModelContextCapability } from "@cube-runtime/pi-adapter";
+import {
+  bindTrustedPiModelContextCapability,
+  loadTrustedModelTokenizerCapability,
+} from "@cube-runtime/pi-adapter";
 import {
   assertProductionInheritedEnvironment,
   booleanEnvironmentField,
@@ -666,12 +669,14 @@ async function assembleWorkerRuntime(
       configuration.model.wireTraceEnabled,
     );
     const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
+    const modelTokenizer = await loadTrustedModelTokenizerCapability(model.id);
+    const modelContext = bindTrustedPiModelContextCapability(modelRuntime, model, modelTokenizer);
     const threadContinuityMetrics = new PgThreadContinuityMetrics(pool);
     const runtimeCompaction = new RuntimeCompactionCoordinator(
       configuration.threadContext.compaction,
       model,
       modelRuntime,
-      bindTrustedPiModelContextCapability(modelRuntime, model),
+      modelContext,
       new PgThreadContextCompactionRepository(pool, blobs),
       undefined,
       threadContinuityMetrics,
@@ -897,6 +902,7 @@ async function assembleWorkerRuntime(
         : undefined,
       new BlobPromptImageLoader(new PgResourceFilesystemCatalog(pool), blobs),
       skillRuntime,
+      modelContext,
     );
     const shutdown = new ProcessShutdown();
     const worker = new RunWorker(

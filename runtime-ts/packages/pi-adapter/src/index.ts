@@ -1,5 +1,6 @@
 export * from "./artifact-tools.js";
 export * from "./deliver-file-tool.js";
+export * from "./deepseek-v4-tokenizer.js";
 export * from "./empty-resource-loader.js";
 export * from "./events.js";
 export {
@@ -13,6 +14,7 @@ export {
   deriveSafePiSessionCompatibility,
   digestCanonicalToolInputSchema,
   type PiSessionController,
+  type PiContextBudgetDiagnostics,
   type PiSessionDiagnostics,
   type TrustedPiModelContextCapability,
 } from "./pi-session.js";

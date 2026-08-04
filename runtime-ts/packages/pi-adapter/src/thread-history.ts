@@ -67,6 +67,20 @@ export type ThreadHistoryMessageV1 =
       readonly timestamp: number;
     };
 
+/**
+ * workspace_unchanged 是持久审计结论，不会改变后续任务的语义；它保留在 Thread 历史中，
+ * 但不得伪装成 user 消息进入 Provider、预算或压缩摘要。
+ */
+export function isProviderVisibleThreadHistoryMessage(message: ThreadHistoryMessageV1): boolean {
+  return message.role !== "runtimeNotice" || message.code !== "workspace_unchanged";
+}
+
+export function providerVisibleThreadHistoryMessages(
+  messages: readonly ThreadHistoryMessageV1[],
+): readonly ThreadHistoryMessageV1[] {
+  return messages.filter(isProviderVisibleThreadHistoryMessage);
+}
+
 export function threadActiveHistoryDigest(history: Omit<ThreadActiveHistoryV1, "digest">): string {
   return createHash("sha256")
     .update(JSON.stringify(canonical(history)), "utf8")

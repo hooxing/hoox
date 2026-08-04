@@ -235,8 +235,70 @@ describe("生产 Workspace revision 安全下限", () => {
       expect.objectContaining({
         volumeMounts: [{ name: "tenant-worker-loop", path: "/resources" }],
       }),
-      expect.anything(),
+      expect.objectContaining({ timeoutMs: 90_000 }),
     );
+  });
+
+  it("Sandbox 创建显式使用 lifecycle 超时，不被 Gateway 的五秒普通操作上限截断", async () => {
+    const registry = new CubeSandboxSessionRegistry(
+      { apiUrl: "http://127.0.0.1:18080", defaultOperationTimeoutMs: 5_000 },
+      "template-create-lifecycle-timeout",
+      120,
+      90_000,
+    );
+    const create = vi.spyOn(registry.gateway, "create").mockResolvedValue({
+      id: "sandbox-create-lifecycle-timeout",
+      command: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      runCode: async () => ({ stdout: [], stderr: [] }),
+      readFile: async () => "",
+      writeFile: async () => undefined,
+      pause: async () => undefined,
+      kill: async () => undefined,
+    });
+    const signal = new AbortController().signal;
+
+    await expect(
+      registry.create({
+        scope: claim().scope as ExecutionScope,
+        registryId: "registry-create-lifecycle-timeout",
+        signal,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready" });
+
+    expect(create).toHaveBeenCalledWith(expect.anything(), { signal, timeoutMs: 90_000 });
+  });
+
+  it("Sandbox 连接同样显式使用 lifecycle 超时", async () => {
+    const registry = new CubeSandboxSessionRegistry(
+      { apiUrl: "http://127.0.0.1:18080", defaultOperationTimeoutMs: 5_000 },
+      "template-connect-lifecycle-timeout",
+      120,
+      90_000,
+    );
+    const connect = vi.spyOn(registry.gateway, "connect").mockResolvedValue({
+      id: "sandbox-connect-lifecycle-timeout",
+      command: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      runCode: async () => ({ stdout: [], stderr: [] }),
+      readFile: async () => "",
+      writeFile: async () => undefined,
+      pause: async () => undefined,
+      kill: async () => undefined,
+    });
+    const signal = new AbortController().signal;
+
+    await expect(
+      registry.connect({
+        scope: claim().scope as ExecutionScope,
+        registryId: "registry-connect-lifecycle-timeout",
+        providerSandboxId: "sandbox-connect-lifecycle-timeout",
+        signal,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready" });
+
+    expect(connect).toHaveBeenCalledWith("sandbox-connect-lifecycle-timeout", {
+      signal,
+      timeoutMs: 90_000,
+    });
   });
 
   it("Sandbox 收尾使用 lifecycle 专用超时，不继承普通命令的短超时", async () => {

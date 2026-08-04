@@ -1,6 +1,6 @@
 # ADR-0103：一次性 Sandbox 按附件需求挂载 Resource Volume
 
-- 状态：已接受
+- 状态：已接受；Thread Session 限制已由 ADR-0107 取代
 - 日期：2026-08-04
 - 决策者：Runtime 团队
 - 关联任务/PR：无附件 Skill 工具调用被 ResourceFS 故障阻断

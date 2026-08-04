@@ -149,6 +149,9 @@ export class CubeSandboxSessionRegistry
   }): Promise<SandboxAcquireResult> {
     this.uncertainCreate = undefined;
     try {
+      if (input.requiresResourceFilesystem && this.resourceVolume === undefined) {
+        throw new Error("ResourceFS Volume provider 未配置");
+      }
       const volume = input.requiresResourceFilesystem
         ? await this.resourceVolume?.ensure({
             tenantId: input.scope.tenantId,
@@ -183,10 +186,15 @@ export class CubeSandboxSessionRegistry
   ): Promise<SandboxAcquireResult> {
     this.uncertainCreate = undefined;
     try {
-      const volume = await this.resourceVolume?.ensure({
-        tenantId: input.scope.tenantId,
-        signal: input.signal,
-      });
+      if (input.requiresResourceFilesystem && this.resourceVolume === undefined) {
+        throw new Error("ResourceFS Volume provider 未配置");
+      }
+      const volume = input.requiresResourceFilesystem
+        ? await this.resourceVolume?.ensure({
+            tenantId: input.scope.tenantId,
+            signal: input.signal,
+          })
+        : undefined;
       const sandbox = await this.gateway.create(
         {
           templateId: this.templateId,

@@ -227,6 +227,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
 
     expect(h.threadSandboxes.acquireCount).toBe(1);
+    expect(h.threadSandboxes.resourceFilesystemRequirements).toEqual([true]);
     expect(h.threadSandboxes.attestCount).toBe(1);
     expect(h.threadSandboxes.terminalEffectCount).toBe(1);
     expect(h.threadSandboxes.terminateCount).toBe(0);
@@ -266,6 +267,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         sandbox: h.threadSandboxes.handle,
       },
       lease: h.threadSandboxes.lease,
+      resourceFilesystemMounted: false,
       requiresMaterialization: false,
       source: "running_handoff",
     };

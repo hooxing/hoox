@@ -14,6 +14,10 @@ import {
 } from "@cube-runtime/resource";
 import { SkillCenterService } from "@cube-runtime/skill";
 import type { ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
+import {
+  startDevelopmentResourceFsProxy,
+  type RunningDevelopmentResourceFsProxy,
+} from "../development-resourcefs-proxy.mjs";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec, parseThreadCursorSigningKeys } from "./cursor.js";
@@ -58,6 +62,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
       blobLifecycle: { objectPrefix: RUNTIME_BLOB_OBJECT_PREFIX },
     });
     let app: ReturnType<typeof createApiApp> | undefined;
+    let resourceFilesystemProxy: RunningDevelopmentResourceFsProxy | undefined;
     try {
       const clock = Object.freeze({ now: () => isoTimestamp(new Date().toISOString()) });
       const [firstPrincipal, secondPrincipal] = configuration.developmentPrincipals;
@@ -151,18 +156,38 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
       );
       await persistence.probe();
       await app.listen({ host: listenHost, port: configuration.listenPort });
+      if (configuration.developmentResourceFilesystemProxy !== undefined) {
+        resourceFilesystemProxy = await startDevelopmentResourceFsProxy(
+          configuration.developmentResourceFilesystemProxy,
+        );
+      }
       const listeningApp = app;
+      const listeningResourceFilesystemProxy = resourceFilesystemProxy;
       return Object.freeze({
-        // Fastify close 会先停止接收并等待已经进入 handler 的请求完成。
-        stopAccepting: () => listeningApp.close(),
+        // 先停止 Sidecar 并等待转发结束，再关闭它依赖的 Fastify upstream。
+        stopAccepting: async () => {
+          await listeningResourceFilesystemProxy?.close();
+          await listeningApp.close();
+        },
         resources: Object.freeze([
           Object.freeze({ name: "postgres", close: () => persistence.close() }),
         ]),
         readiness: Object.freeze([
           Object.freeze({ name: "postgres", probe: () => persistence.probe() }),
+          ...(listeningResourceFilesystemProxy === undefined
+            ? []
+            : [
+                Object.freeze({
+                  name: "resourcefs-proxy",
+                  probe: () => listeningResourceFilesystemProxy.probe(),
+                }),
+              ]),
         ]),
       });
     } catch (error) {
+      if (resourceFilesystemProxy !== undefined) {
+        await resourceFilesystemProxy.close().catch(() => undefined);
+      }
       if (app !== undefined) await app.close().catch(() => undefined);
       await persistence.close().catch(() => undefined);
       throw error;

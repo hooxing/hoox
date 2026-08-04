@@ -21,6 +21,7 @@ interface SessionRow {
   readonly state: "running" | "pausing" | "paused" | "resuming";
   readonly materialized_revision_id: string | null;
   readonly materialization_attested: boolean;
+  readonly resource_filesystem_mounted: boolean;
   readonly paused_at: Date | null;
   readonly retention_expires_at: Date | null;
   readonly updated_at: Date;
@@ -52,6 +53,10 @@ type PreparedAcquisition =
       readonly lease: ThreadSandboxLeaseRefV1;
       readonly effectId?: undefined;
       readonly source: "running_handoff" | "paused_resumed";
+      readonly reason:
+        | "retention_expired"
+        | "revision_attestation_mismatch"
+        | "resource_filesystem_capability_mismatch";
     };
 type PreparedReusable = Extract<PreparedAcquisition, { readonly row: SessionRow }>;
 
@@ -294,19 +299,21 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           attemptId: input.attemptId,
           session: connected.session,
           lease: prepared.lease,
-          reason: "revision_attestation_mismatch",
+          reason: prepared.reason,
         });
         if (retired === "unknown") {
           return this.observeAcquire(input, { outcome: "unknown" }, startedAt);
         }
         if (retired === "lease_lost") return { outcome: "failed", code: "SANDBOX_FAILED" };
-        await this.recordAcquireMetric(input, {
-          observationId: `${input.attemptId}:sandbox:revision-mismatch`,
-          metricName: "sandbox_revision_mismatch_total",
-          value: 1,
-          unit: "count",
-          reason: "revision_attestation",
-        });
+        if (prepared.reason === "revision_attestation_mismatch") {
+          await this.recordAcquireMetric(input, {
+            observationId: `${input.attemptId}:sandbox:revision-mismatch`,
+            metricName: "sandbox_revision_mismatch_total",
+            value: 1,
+            unit: "count",
+            reason: "revision_attestation",
+          });
+        }
         return this.observeAcquire(
           input,
           await this.coldCreate(input, Number(prepared.row.generation) + 1),
@@ -358,6 +365,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           outcome: "ready",
           session: connected.session,
           lease: prepared.lease,
+          resourceFilesystemMounted: prepared.row.resource_filesystem_mounted,
           requiresMaterialization: false,
           source: prepared.source,
         },
@@ -614,7 +622,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     }
     const result = await client.query<SessionRow>(
       `SELECT session_id,registry_id,provider_sandbox_id,generation::text,state,
-              materialized_revision_id,materialization_attested,paused_at,
+              materialized_revision_id,materialization_attested,resource_filesystem_mounted,paused_at,
               retention_expires_at,updated_at
          FROM thread_sandbox_sessions
         WHERE tenant_id=$1 AND thread_id=$2 AND workspace_id=$3
@@ -631,11 +639,26 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
         const lease = await attachLease(client, input, row);
         return lease === undefined
           ? { kind: "lease_conflict" }
-          : { kind: "retire", row, lease, source: "paused_resumed" };
+          : {
+              kind: "retire",
+              row,
+              lease,
+              source: "paused_resumed",
+              reason: "retention_expired",
+            };
       }
     }
     const lease = await attachLease(client, input, row);
     if (lease === undefined) return { kind: "lease_conflict" };
+    if (input.requiresResourceFilesystem && !row.resource_filesystem_mounted) {
+      return {
+        kind: "retire",
+        row,
+        lease,
+        source: row.state === "paused" ? "paused_resumed" : "running_handoff",
+        reason: "resource_filesystem_capability_mismatch",
+      };
+    }
     const revisionMatches =
       row.materialization_attested &&
       (row.materialized_revision_id ?? undefined) === input.scope.baseRevisionId;
@@ -645,6 +668,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
         row,
         lease,
         source: row.state === "paused" ? "paused_resumed" : "running_handoff",
+        reason: "revision_attestation_mismatch",
       };
     }
     if (row.state === "running") {
@@ -775,6 +799,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
       scope: input.scope,
       registryId,
       signal: input.signal,
+      requiresResourceFilesystem: input.requiresResourceFilesystem,
     });
     if (created.outcome !== "ready") {
       await (created.outcome === "unknown"
@@ -796,8 +821,8 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           await client.query(
             `INSERT INTO thread_sandbox_sessions(
                tenant_id,session_id,thread_id,workspace_id,registry_id,provider_sandbox_id,
-               generation,state,materialization_attested
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,'running',false)`,
+               generation,state,materialization_attested,resource_filesystem_mounted
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,'running',false,$8)`,
             [
               input.scope.tenantId,
               sessionId,
@@ -806,6 +831,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
               registryId,
               created.session.providerSandboxId,
               generation,
+              input.requiresResourceFilesystem,
             ],
           );
           const lease = await insertLease(client, input, sessionId, generation, 1);
@@ -834,6 +860,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
         outcome: "ready",
         session: created.session,
         lease,
+        resourceFilesystemMounted: input.requiresResourceFilesystem,
         requiresMaterialization: true,
         source: "cold_created",
       };

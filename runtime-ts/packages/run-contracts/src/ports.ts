@@ -695,6 +695,8 @@ export type ThreadSandboxAcquireResult =
       readonly outcome: "ready";
       readonly session: SandboxSessionRef;
       readonly lease: ThreadSandboxLeaseRefV1;
+      /** 当前 Session 是否已经挂载 Tenant ResourceFS；只能复用于不超过该能力的请求。 */
+      readonly resourceFilesystemMounted: boolean;
       /** false 只在 revision/generation/lease attestation 全部成立时返回。 */
       readonly requiresMaterialization: boolean;
       readonly source: "cold_created" | "running_handoff" | "paused_resumed";
@@ -708,6 +710,8 @@ export interface ThreadSandboxProviderPort {
     readonly scope: ExecutionScope;
     readonly registryId: string;
     readonly signal: AbortSignal;
+    /** 只有当前输入包含必须通过虚拟文件系统读取的附件时才挂载 `/resources`。 */
+    readonly requiresResourceFilesystem: boolean;
   }): Promise<SandboxAcquireResult>;
   connect(input: {
     readonly scope: ExecutionScope;
@@ -730,6 +734,8 @@ export interface ThreadSandboxSessionLifecyclePort {
     readonly owner: string;
     readonly leaseDurationMs: number;
     readonly signal: AbortSignal;
+    /** true 时不得复用未挂载 ResourceFS 的 Session。 */
+    readonly requiresResourceFilesystem: boolean;
   }): Promise<ThreadSandboxAcquireResult>;
   attestMaterialized(input: {
     readonly scope: ExecutionScope;

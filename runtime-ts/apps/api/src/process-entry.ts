@@ -113,6 +113,26 @@ const apiEnvironmentSchema = Object.freeze({
   S3_SECRET_ACCESS_KEY: stringEnvironmentField({ secret: true, maxLength: 4_096 }),
   S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
   RESOURCE_FILESYSTEM_SIGNING_KEY: stringEnvironmentField({ secret: true, maxLength: 256 }),
+  // 仅供本地 Cubelet 访问开发 API 的 ResourceFS HTTPS 边界，production 显式拒绝。
+  RESOURCEFS_PROXY_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
+  RESOURCEFS_PROXY_LISTEN_HOST: stringEnvironmentField({
+    requiredIn: optionalEnvironments,
+    maxLength: 253,
+  }),
+  RESOURCEFS_PROXY_LISTEN_PORT: integerEnvironmentField({
+    requiredIn: optionalEnvironments,
+    minimum: 1,
+    maximum: 65_535,
+  }),
+  RESOURCEFS_PROXY_TLS_KEY_PATH: stringEnvironmentField({
+    requiredIn: optionalEnvironments,
+    secret: true,
+    maxLength: 4_096,
+  }),
+  RESOURCEFS_PROXY_TLS_CERT_PATH: stringEnvironmentField({
+    requiredIn: optionalEnvironments,
+    maxLength: 4_096,
+  }),
 });
 
 export const apiProcessEnvironmentKeys = Object.freeze(Object.keys(apiEnvironmentSchema));
@@ -144,6 +164,13 @@ export interface ApiProcessConfiguration {
     readonly forcePathStyle: boolean;
   }>;
   readonly resourceFilesystemSigningKey: string;
+  readonly developmentResourceFilesystemProxy?: Readonly<{
+    readonly listenHost: string;
+    readonly listenPort: number;
+    readonly upstream: string;
+    readonly privateKeyPath: string;
+    readonly certificatePath: string;
+  }>;
   readonly production?: Readonly<{
     readonly publicOrigin: string;
     readonly jwt: Readonly<{
@@ -171,6 +198,7 @@ export function parseApiProcessEnvironment(
   const parsed = parseStrictEnvironment(source, apiEnvironmentSchema);
   if (parsed.runtimeEnvironment === "production") {
     assertProductionHasNoDevelopmentIdentity(source);
+    assertProductionHasNoDevelopmentResourceFilesystemProxy(source);
   }
   const developmentAuthEnabled =
     parsed.runtimeEnvironment === "production"
@@ -207,6 +235,16 @@ export function parseApiProcessEnvironment(
     throw new TypeError("DATABASE_RUNTIME_ROLE 格式无效");
   }
   const listenPort = parsed.values.API_LISTEN_PORT ?? DEVELOPMENT_API_DEFAULT_PORT;
+  const developmentResourceFilesystemProxy = createDevelopmentResourceFilesystemProxy({
+    runtimeEnvironment: parsed.runtimeEnvironment,
+    enabled: parsed.values.RESOURCEFS_PROXY_ENABLED ?? false,
+    listenHost: parsed.values.RESOURCEFS_PROXY_LISTEN_HOST,
+    listenPort: parsed.values.RESOURCEFS_PROXY_LISTEN_PORT,
+    privateKeyPath: parsed.values.RESOURCEFS_PROXY_TLS_KEY_PATH,
+    certificatePath: parsed.values.RESOURCEFS_PROXY_TLS_CERT_PATH,
+    apiListenHost: listenHost,
+    apiListenPort: listenPort,
+  });
   const objectStorage = Object.freeze({
     endpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
     publicEndpoint: readRequiredEnvironmentValue(parsed, "S3_PUBLIC_ENDPOINT"),
@@ -290,6 +328,9 @@ export function parseApiProcessEnvironment(
       parsed,
       "RESOURCE_FILESYSTEM_SIGNING_KEY",
     ),
+    ...(developmentResourceFilesystemProxy === undefined
+      ? {}
+      : { developmentResourceFilesystemProxy }),
     ...(production === undefined ? {} : { production }),
   });
 }
@@ -339,6 +380,14 @@ const developmentIdentityEnvironmentKeys = Object.freeze([
   "DEV_AUTH_USER_B_TENANT_ID",
 ] as const);
 
+const developmentResourceFilesystemProxyEnvironmentKeys = Object.freeze([
+  "RESOURCEFS_PROXY_ENABLED",
+  "RESOURCEFS_PROXY_LISTEN_HOST",
+  "RESOURCEFS_PROXY_LISTEN_PORT",
+  "RESOURCEFS_PROXY_TLS_KEY_PATH",
+  "RESOURCEFS_PROXY_TLS_CERT_PATH",
+] as const);
+
 function assertProductionHasNoDevelopmentIdentity(
   source: Readonly<Record<string, string | undefined>>,
 ): void {
@@ -348,6 +397,64 @@ function assertProductionHasNoDevelopmentIdentity(
       configured.map((key) => ({ code: "FORBIDDEN_IN_PRODUCTION" as const, key })),
     );
   }
+}
+
+function assertProductionHasNoDevelopmentResourceFilesystemProxy(
+  source: Readonly<Record<string, string | undefined>>,
+): void {
+  const configured = developmentResourceFilesystemProxyEnvironmentKeys.filter(
+    (key) => source[key] !== undefined,
+  );
+  if (configured.length > 0) {
+    throw new EnvironmentConfigurationError(
+      configured.map((key) => ({ code: "FORBIDDEN_IN_PRODUCTION" as const, key })),
+    );
+  }
+}
+
+function createDevelopmentResourceFilesystemProxy(input: {
+  readonly runtimeEnvironment: RuntimeEnvironment;
+  readonly enabled: boolean;
+  readonly listenHost: string | undefined;
+  readonly listenPort: number | undefined;
+  readonly privateKeyPath: string | undefined;
+  readonly certificatePath: string | undefined;
+  readonly apiListenHost: string;
+  readonly apiListenPort: number;
+}): ApiProcessConfiguration["developmentResourceFilesystemProxy"] {
+  const configuredFields = [
+    input.listenHost,
+    input.listenPort,
+    input.privateKeyPath,
+    input.certificatePath,
+  ];
+  if (!input.enabled) {
+    if (configuredFields.some((value) => value !== undefined)) {
+      throw new TypeError("RESOURCEFS_PROXY_ENABLED=false 时不得配置 Sidecar 字段");
+    }
+    return undefined;
+  }
+  if (input.runtimeEnvironment !== "development") {
+    throw new TypeError("ResourceFS Sidecar 只允许在 development 启用");
+  }
+  if (
+    input.listenHost === undefined ||
+    input.listenPort === undefined ||
+    input.privateKeyPath === undefined ||
+    input.certificatePath === undefined
+  ) {
+    throw new TypeError("ResourceFS Sidecar 配置不完整");
+  }
+  const upstreamHost = input.apiListenHost.includes(":")
+    ? `[${input.apiListenHost}]`
+    : input.apiListenHost;
+  return Object.freeze({
+    listenHost: input.listenHost,
+    listenPort: input.listenPort,
+    upstream: `http://${upstreamHost}:${input.apiListenPort}`,
+    privateKeyPath: input.privateKeyPath,
+    certificatePath: input.certificatePath,
+  });
 }
 
 function createProductionConfiguration(input: {

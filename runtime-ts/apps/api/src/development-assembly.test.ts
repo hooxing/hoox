@@ -22,14 +22,24 @@ const mocks = vi.hoisted(() => {
     probe: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
   };
+  const resourceFilesystemProxy = {
+    close: vi.fn(async () => undefined),
+    probe: vi.fn(async () => undefined),
+  };
   return {
     app,
     persistence,
     createApiApp: vi.fn(() => app),
     createApiPersistenceRuntime: vi.fn(() => persistence),
     createS3BlobStore: vi.fn(() => ({})),
+    resourceFilesystemProxy,
+    startDevelopmentResourceFsProxy: vi.fn(async () => resourceFilesystemProxy),
   };
 });
+
+vi.mock("../development-resourcefs-proxy.mjs", () => ({
+  startDevelopmentResourceFsProxy: mocks.startDevelopmentResourceFsProxy,
+}));
 
 vi.mock("@cube-runtime/persistence", () => ({
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
@@ -100,5 +110,35 @@ describe("开发 API 默认装配", () => {
 
     expect(mocks.app.close).toHaveBeenCalledTimes(1);
     expect(mocks.persistence.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("由 API 进程启动、探测并在 Fastify 前关闭 ResourceFS Sidecar", async () => {
+    const running = await startApiProcess({
+      environment: {
+        ...developmentEnvironment(),
+        RESOURCEFS_PROXY_ENABLED: "true",
+        RESOURCEFS_PROXY_LISTEN_HOST: "192.0.2.10",
+        RESOURCEFS_PROXY_LISTEN_PORT: "13443",
+        RESOURCEFS_PROXY_TLS_KEY_PATH: "C:/development/resourcefs/server.key",
+        RESOURCEFS_PROXY_TLS_CERT_PATH: "C:/development/resourcefs/server.crt",
+      },
+    });
+
+    expect(mocks.startDevelopmentResourceFsProxy).toHaveBeenCalledWith({
+      listenHost: "192.0.2.10",
+      listenPort: 13443,
+      upstream: "http://127.0.0.1:3001",
+      privateKeyPath: "C:/development/resourcefs/server.key",
+      certificatePath: "C:/development/resourcefs/server.crt",
+    });
+    await expect(running.readiness()).resolves.toEqual({ status: "ready" });
+    expect(mocks.resourceFilesystemProxy.probe).toHaveBeenCalledTimes(1);
+
+    await running.close();
+
+    expect(mocks.resourceFilesystemProxy.close).toHaveBeenCalledTimes(1);
+    expect(mocks.resourceFilesystemProxy.close.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.app.close.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
+    );
   });
 });

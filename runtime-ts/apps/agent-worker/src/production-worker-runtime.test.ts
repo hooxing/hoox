@@ -277,10 +277,89 @@ describe("生产 Workspace revision 安全下限", () => {
         scope: claim().scope as ExecutionScope,
         registryId: "registry-create-lifecycle-timeout",
         signal,
+        requiresResourceFilesystem: false,
       }),
     ).resolves.toMatchObject({ outcome: "ready" });
 
     expect(create).toHaveBeenCalledWith(expect.anything(), { signal, timeoutMs: 90_000 });
+  });
+
+  it("Thread Sandbox 仅按显式附件需求挂载 ResourceFS", async () => {
+    const ensure = vi.fn(async () => ({
+      name: "tenant-thread-resource",
+      path: "/resources" as const,
+    }));
+    const registry = new CubeSandboxSessionRegistry(
+      { apiUrl: "http://127.0.0.1:18080" },
+      "template-thread-resource",
+      120,
+      90_000,
+      { ensure, probe: async () => undefined },
+    );
+    const create = vi.spyOn(registry.gateway, "create").mockImplementation(async () => ({
+      id: `sandbox-thread-resource-${create.mock.calls.length}`,
+      command: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      runCode: async () => ({ stdout: [], stderr: [] }),
+      readFile: async () => "",
+      writeFile: async () => undefined,
+      pause: async () => undefined,
+      kill: async () => undefined,
+    }));
+    const scope = claim().scope as ExecutionScope;
+    const signal = new AbortController().signal;
+
+    await expect(
+      registry.create({
+        scope,
+        registryId: "thread-registry-without-resource",
+        signal,
+        requiresResourceFilesystem: false,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready" });
+    expect(ensure).not.toHaveBeenCalled();
+    expect(create).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ volumeMounts: expect.anything() }),
+      expect.anything(),
+    );
+
+    await expect(
+      registry.create({
+        scope,
+        registryId: "thread-registry-with-resource",
+        signal,
+        requiresResourceFilesystem: true,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready" });
+    expect(ensure).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        volumeMounts: [{ name: "tenant-thread-resource", path: "/resources" }],
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("附件要求 ResourceFS 但未配置 Volume provider 时失败关闭", async () => {
+    const registry = new CubeSandboxSessionRegistry(
+      { apiUrl: "http://127.0.0.1:18080" },
+      "template-resource-required",
+    );
+    const create = vi.spyOn(registry.gateway, "create");
+    const scope = claim().scope as ExecutionScope;
+    const signal = new AbortController().signal;
+
+    await expect(
+      registry.acquire({ scope, signal, requiresResourceFilesystem: true }),
+    ).resolves.toEqual({ outcome: "failed", code: "SANDBOX_FAILED" });
+    await expect(
+      registry.create({
+        scope,
+        registryId: "thread-registry-resource-required",
+        signal,
+        requiresResourceFilesystem: true,
+      }),
+    ).resolves.toEqual({ outcome: "failed", code: "SANDBOX_FAILED" });
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("Sandbox 连接同样显式使用 lifecycle 超时", async () => {

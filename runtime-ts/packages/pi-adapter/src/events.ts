@@ -1,7 +1,15 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 export type ToolPresentation = {
-  readonly action: "search" | "read" | "create" | "write" | "edit" | "command" | "other";
+  readonly action:
+    | "search"
+    | "read"
+    | "create"
+    | "write"
+    | "edit"
+    | "deliver"
+    | "command"
+    | "other";
   readonly title?: string;
 };
 
@@ -225,6 +233,26 @@ function projectToolPresentation(name: string, unsafeArgs: unknown): ToolPresent
   if (name === "exec_command") {
     const purpose = safeText(args?.user_facing_purpose);
     return { action: "command", ...(purpose === undefined ? {} : { title: purpose }) };
+  }
+  if (name === "deliver_file") {
+    const title = safeText(args?.name, 255) ?? workspacePath(args?.path);
+    return { action: "deliver", ...(title === undefined ? {} : { title }) };
+  }
+  if (name === "publish_artifact") {
+    const title = safeText(args?.name, 255);
+    return { action: "deliver", ...(title === undefined ? {} : { title }) };
+  }
+  if (name === "declare_deliverables") {
+    const declarations = Array.isArray(args?.declarations) ? args.declarations : [];
+    const names = declarations.flatMap((item) => {
+      const name =
+        typeof item === "object" && item !== null
+          ? safeText((item as Readonly<Record<string, unknown>>).name, 255)
+          : undefined;
+      return name === undefined ? [] : [name];
+    });
+    const title = names.slice(0, 3).join("、");
+    return { action: "other", ...(title.length === 0 ? {} : { title: `准备交付 ${title}` }) };
   }
   return undefined;
 }

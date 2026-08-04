@@ -39,7 +39,15 @@ export type ConversationBlock =
       readonly callId: string;
     };
 
-export type ToolAction = "search" | "read" | "create" | "write" | "edit" | "command" | "other";
+export type ToolAction =
+  | "search"
+  | "read"
+  | "create"
+  | "write"
+  | "edit"
+  | "deliver"
+  | "command"
+  | "other";
 
 export type ConversationSection =
   | Extract<ConversationBlock, { type: "answer" | "tool" }>
@@ -107,6 +115,7 @@ function toolPresentationAction(
     action === "create" ||
     action === "write" ||
     action === "edit" ||
+    action === "deliver" ||
     action === "command" ||
     action === "other"
     ? action
@@ -251,7 +260,10 @@ export function buildConversationSections(
       sections.push(block);
     } else if (
       block.type === "tool" &&
-      (block.action === "create" || block.action === "write" || block.action === "edit")
+      (block.action === "create" ||
+        block.action === "write" ||
+        block.action === "edit" ||
+        block.action === "deliver")
     ) {
       flush();
       sections.push(block);

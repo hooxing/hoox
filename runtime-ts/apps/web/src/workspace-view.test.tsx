@@ -494,15 +494,13 @@ describe("工作台展示组件", () => {
 
     const settled = document.createElement("div");
     settled.innerHTML = settledHtml;
-    const settledDetails = settled.querySelector<HTMLDetailsElement>(".run-thinking");
+    const settledDetails = settled.querySelector<HTMLDetailsElement>(".thinking-activity");
     expect(settledStatusHtml).toContain("已完成");
     expect(settledStatusHtml).not.toContain("已完成分析");
     expect(settledDetails?.open).toBe(false);
-    expect(settledDetails?.textContent).toContain("思考已完成");
-    expect(settledDetails?.querySelector(".run-thinking-indicator")).toBeNull();
-    expect(settledDetails?.querySelector("summary")?.textContent).toBe("思考已完成");
+    expect(settledDetails?.textContent).toContain("思考完成");
+    expect(settledDetails?.querySelector("summary")?.textContent).toBe("思考完成");
     expect(settledDetails?.textContent).toContain("先检查依赖，再生成文档。");
-    expect(settled.querySelector(".run-thinking-content")?.getAttribute("aria-busy")).toBe("false");
   });
 
   it("当前 Run 的回答进入连续上下文后，思考仍与最终回答位于同一 Agent 消息", () => {
@@ -544,10 +542,10 @@ describe("工作台展示组件", () => {
     container.innerHTML = html;
     const assistant = container.querySelectorAll(".assistant-message");
     expect(assistant).toHaveLength(1);
-    expect(assistant[0]?.querySelector(".run-thinking")?.textContent).toContain("思考已完成");
+    expect(assistant[0]?.querySelector(".thinking-activity")?.textContent).toContain("思考完成");
     expect(assistant[0]?.textContent).toContain("先确认问题范围。");
     expect(assistant[0]?.textContent).toContain("这是最终回答。");
-    expect(html.indexOf("思考已完成")).toBeLessThan(html.indexOf("这是最终回答。"));
+    expect(html.indexOf("思考完成")).toBeLessThan(html.indexOf("这是最终回答。"));
   });
 
   it("同一历史 Run 的多段回答只渲染一个 Agent 身份", () => {
@@ -630,7 +628,7 @@ describe("工作台展示组件", () => {
       "正在执行命令 · 查看当前目录中的文件",
     );
     expect(group.querySelectorAll(".activity-group-content > .tool-activity")).toHaveLength(0);
-    expect(group.querySelectorAll(".activity-group-content > .run-thinking")).toHaveLength(1);
+    expect(group.querySelectorAll(".activity-group-content > .thinking-activity")).toHaveLength(1);
 
     const liveSummary = group.querySelector<HTMLElement>(":scope > summary");
     if (liveSummary === null) throw new Error("未渲染执行阶段摘要按钮");
@@ -650,7 +648,9 @@ describe("工作台展示组件", () => {
     ];
     act(() => root.render(<RunTranscript run={running} events={completedEvents} />));
     expect(group.open).toBe(true);
-    expect(group.querySelector(":scope > summary")?.textContent).toContain("已完成 2 项");
+    expect(group.querySelector(":scope > summary")?.textContent).toContain(
+      "已执行命令 · 查看当前目录中的文件",
+    );
     expect(group.querySelectorAll(".activity-group-content > .tool-activity")).toHaveLength(1);
 
     act(() => root.unmount());

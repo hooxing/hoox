@@ -1,5 +1,6 @@
 import {
   Archive,
+  Check,
   ChevronRight,
   Download,
   Eye,
@@ -17,7 +18,6 @@ import {
   type ReactNode,
   type RefObject,
   useEffect,
-  useId,
   useRef,
   useState,
 } from "react";
@@ -97,78 +97,6 @@ function elapsedLabel(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   return minutes > 0 ? `${minutes} 分 ${rest} 秒` : `${rest} 秒`;
-}
-
-function RunThinkingPanel({
-  text,
-  status,
-  run,
-}: {
-  readonly text: string;
-  readonly status: "running" | "completed";
-  readonly run: Run;
-}) {
-  const recoveryRequired = run.executionStatus === "recovery_required";
-  const isLive = status === "running" && run.status === "running" && !recoveryRequired;
-  const wasInterrupted = status === "running" && !isLive;
-  const visibleStatus = isLive ? "running" : wasInterrupted ? "stopped" : "completed";
-  const statusText = isLive
-    ? "正在思考"
-    : wasInterrupted && recoveryRequired
-      ? "思考已中断"
-      : wasInterrupted
-        ? "思考已结束"
-        : "思考已完成";
-  const detailsRef = useRef<HTMLDetailsElement>(null);
-  const contentRef = useRef<HTMLElement>(null);
-  const followLatestRef = useRef(true);
-  const summaryId = useId();
-  const contentId = useId();
-
-  useEffect(() => {
-    // text 只作为增量触发器；用户已向上阅读时不抢夺滚动位置。
-    void text;
-    const content = contentRef.current;
-    if (
-      content !== null &&
-      visibleStatus === "running" &&
-      detailsRef.current?.open === true &&
-      followLatestRef.current
-    ) {
-      content.scrollTop = content.scrollHeight;
-    }
-  }, [text, visibleStatus]);
-
-  return (
-    <details ref={detailsRef} className={`run-thinking is-${visibleStatus}`}>
-      <summary id={summaryId} aria-controls={contentId}>
-        {isLive && (
-          <LoaderCircle className="run-thinking-spinner spin" size={14} aria-hidden="true" />
-        )}
-        <strong className="run-thinking-label" aria-live="polite">
-          {statusText}
-        </strong>
-        <ChevronRight className="run-thinking-chevron" size={14} aria-hidden="true" />
-      </summary>
-      <section
-        ref={contentRef}
-        id={contentId}
-        className="run-thinking-content"
-        aria-labelledby={summaryId}
-        aria-busy={isLive}
-        aria-live="off"
-        // biome-ignore lint/a11y/noNoninteractiveTabindex: 限高滚动区必须可由键盘聚焦后滚动。
-        tabIndex={0}
-        onScroll={(event) => {
-          const content = event.currentTarget;
-          followLatestRef.current =
-            content.scrollHeight - content.scrollTop - content.clientHeight <= 24;
-        }}
-      >
-        <AssistantMarkdown text={text} />
-      </section>
-    </details>
-  );
 }
 
 export function RunTimeline({
@@ -255,22 +183,51 @@ const toolActionText: Record<ToolAction, { running: string; completed: string; f
   create: { running: "正在创建", completed: "已创建", failed: "创建失败" },
   write: { running: "正在写入", completed: "已写入", failed: "写入失败" },
   edit: { running: "正在修改", completed: "已修改", failed: "修改失败" },
+  deliver: { running: "正在交付", completed: "已交付", failed: "交付失败" },
   command: { running: "正在执行命令", completed: "已执行命令", failed: "命令执行失败" },
   other: { running: "正在执行", completed: "已完成", failed: "执行失败" },
 };
 
 function ToolActivity({ block }: { readonly block: Extract<ConversationBlock, { type: "tool" }> }) {
   return (
-    <div className={`tool-activity is-${block.status}`}>
+    <div className={`activity-item tool-activity is-${block.status}`}>
       {block.status === "running" ? (
         <LoaderCircle className="spin" size={14} aria-hidden="true" />
+      ) : block.status === "failed" ? (
+        <X size={14} aria-hidden="true" />
       ) : (
-        <ChevronRight size={14} aria-hidden="true" />
+        <Check size={14} aria-hidden="true" />
       )}
       <span>{toolActionText[block.action][block.status]}</span>
       {block.title !== undefined && <strong>· {block.title}</strong>}
     </div>
   );
+}
+
+function ThinkingActivity({
+  block,
+  run,
+}: {
+  readonly block: Extract<ConversationBlock, { type: "thinking" }>;
+  readonly run: Run;
+}) {
+  const label = thinkingActivityLabel(block, run);
+  return (
+    <details className="activity-item thinking-activity">
+      <summary>
+        <ChevronRight className="thinking-activity-chevron" size={14} aria-hidden="true" />
+        <span>{label}</span>
+      </summary>
+      <div className="thinking-activity-content">
+        <AssistantMarkdown text={block.text} />
+      </div>
+    </details>
+  );
+}
+
+function thinkingActivityLabel(block: Extract<ConversationBlock, { type: "thinking" }>, run: Run) {
+  if (block.status === "completed") return "思考完成";
+  return run.executionStatus === "recovery_required" ? "思考已中断" : "思考已结束";
 }
 
 function ActivityGroup({
@@ -288,12 +245,19 @@ function ActivityGroup({
     ? [...items].reverse().find((item) => item.status === "running")
     : undefined;
   const completed = runIsLive ? items.filter((item) => item.status !== "running") : items;
+  const lastCompleted = completed.at(-1);
+  const completedSummary =
+    lastCompleted?.type === "thinking"
+      ? thinkingActivityLabel(lastCompleted, run)
+      : lastCompleted?.type === "tool"
+        ? `${toolActionText[lastCompleted.action][lastCompleted.status]}${lastCompleted.title === undefined ? "" : ` · ${lastCompleted.title}`}`
+        : "执行过程";
   const summary =
     active?.type === "thinking"
       ? "正在思考"
       : active?.type === "tool"
         ? `${toolActionText[active.action].running}${active.title === undefined ? "" : ` · ${active.title}`}`
-        : `执行过程 · 已完成 ${completed.length} 项`;
+        : completedSummary;
   return (
     <details className={`activity-group ${active === undefined ? "is-completed" : "is-running"}`}>
       <summary>
@@ -303,13 +267,12 @@ function ActivityGroup({
           <LoaderCircle className="spin" size={14} aria-hidden="true" />
         )}
         <strong>{summary}</strong>
-        {active !== undefined && completed.length > 0 && <span>已完成 {completed.length} 项</span>}
       </summary>
       {completed.length > 0 && (
         <div className="activity-group-content">
           {completed.map((item) =>
             item.type === "thinking" ? (
-              <RunThinkingPanel key={item.id} text={item.text} status={item.status} run={run} />
+              <ThinkingActivity key={item.id} block={item} run={run} />
             ) : (
               <ToolActivity key={item.id} block={item} />
             ),

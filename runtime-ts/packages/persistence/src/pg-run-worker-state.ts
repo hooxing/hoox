@@ -70,6 +70,8 @@ export interface PgRunWorkerStateOptions {
   readonly threadSandboxHandoffLeaseMs?: number;
 }
 
+const mutationSerializableRetryDelaysMs = Object.freeze([5, 15, 45]);
+
 export interface InitializeRunExecutionInput {
   readonly scope: ExecutionScope;
   readonly input: string;
@@ -1583,22 +1585,31 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     if (runtimeMutationDigest(unsigned) !== suppliedDigest) {
       return { outcome: "idempotency_conflict" };
     }
-    let result: RuntimeMutationResult;
-    try {
-      result = await withTenantTransaction(
-        this.pool,
-        { tenantId: command.fence.scope.tenantId },
-        (client) => this.applyMutation(client, command),
-        { isolationLevel: "SERIALIZABLE" },
-      );
-    } catch (error) {
-      if (error instanceof TransactionCommitUnknownError) return { outcome: "response_unknown" };
-      if (error instanceof RuntimeWriteAbort) return { outcome: error.outcome };
-      if (isPgCode(error, "23514")) return { outcome: "protocol_invalid" };
-      if (isPgCode(error, "23505") || isPgCode(error, "23503")) {
-        return { outcome: "idempotency_conflict" };
+    let result: RuntimeMutationResult | undefined;
+    for (let retry = 0; result === undefined; retry += 1) {
+      try {
+        result = await withTenantTransaction(
+          this.pool,
+          { tenantId: command.fence.scope.tenantId },
+          (client) => this.applyMutation(client, command),
+          { isolationLevel: "SERIALIZABLE" },
+        );
+      } catch (error) {
+        if (error instanceof TransactionCommitUnknownError) return { outcome: "response_unknown" };
+        if (error instanceof RuntimeWriteAbort) return { outcome: error.outcome };
+        if (isPgCode(error, "23514")) return { outcome: "protocol_invalid" };
+        if (isPgCode(error, "23505") || isPgCode(error, "23503")) {
+          return { outcome: "idempotency_conflict" };
+        }
+        const retryDelay = mutationSerializableRetryDelaysMs[retry];
+        if ((isPgCode(error, "40001") || isPgCode(error, "40P01")) && retryDelay !== undefined) {
+          // PostgreSQL 已明确回滚 SERIALIZABLE/deadlock 事务，原幂等命令可安全重放；
+          // COMMIT 结果未知仍由上面的独立分支禁止重试。
+          await delay(retryDelay);
+          continue;
+        }
+        return { outcome: "unavailable" };
       }
-      return { outcome: "unavailable" };
     }
     try {
       await this.options.afterCommit?.("mutate");
@@ -2755,6 +2766,10 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     if (attemptRow === undefined) return undefined;
     return { ...mapAggregate(aggregateRow), attempt: mapAttempt(attemptRow) };
   }
+}
+
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function settleWorkspaceArtifactIntents(

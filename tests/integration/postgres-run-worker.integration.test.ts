@@ -375,6 +375,41 @@ function withLostCommitResponse(
   } as unknown as Pool;
 }
 
+function withOneSerializationFailure(
+  upstream: Pool,
+  statementFragment: string,
+): { readonly pool: Pool; readonly rejectionCount: () => number } {
+  let rejected = false;
+  let rejectionCount = 0;
+  const pool = {
+    connect: async () => {
+      const client = await upstream.connect();
+      const originalQuery = client.query.bind(client) as (
+        ...args: readonly unknown[]
+      ) => Promise<unknown>;
+      client.query = (async (...args: readonly unknown[]) => {
+        const first = args[0];
+        const sql =
+          typeof first === "string"
+            ? first
+            : typeof first === "object" && first !== null && "text" in first
+              ? String(first.text)
+              : "";
+        if (!rejected && sql.includes(statementFragment)) {
+          rejected = true;
+          rejectionCount += 1;
+          throw Object.assign(new Error("模拟 SERIALIZABLE 事务被数据库明确回滚"), {
+            code: "40001",
+          });
+        }
+        return await originalQuery(...args);
+      }) as typeof client.query;
+      return client;
+    },
+  } as unknown as Pool;
+  return { pool, rejectionCount: () => rejectionCount };
+}
+
 describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
   beforeAll(async () => {
     migrationContract = await loadPostgreSqlMigrationContract();
@@ -4081,6 +4116,38 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     await expect(persistence.mutate(sameKeyDifferentCommand)).resolves.toEqual({
       outcome: "idempotency_conflict",
     });
+  });
+
+  it("SERIALIZABLE 事务被明确回滚后自动重放同一幂等 mutation", async () => {
+    const f = await fixture(`serializable-retry-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "serializable-retry-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("claim 失败");
+    const injected = withOneSerializationFailure(runtime, "UPDATE execution_attempts");
+    const retrying = new PgExecutionPersistence(injected.pool);
+    const command = signed({
+      idempotencyKey: `${claimed.snapshot.attempt.attemptId}/serializable-retry`,
+      fence: claimed.fence,
+      expectedAttemptVersion: 0,
+      nextAttemptStatus: "running",
+      events: [],
+      outbox: [],
+    });
+
+    await expect(retrying.mutate(command)).resolves.toMatchObject({
+      outcome: "applied",
+      attemptVersion: 1,
+    });
+    expect(injected.rejectionCount()).toBe(1);
+    await expect(
+      persistence.readMutation({
+        scope: f.scope,
+        idempotencyKey: command.idempotencyKey,
+      }),
+    ).resolves.toMatchObject({ outcome: "applied", attemptVersion: 1 });
   });
 
   it("Sandbox acquire UNKNOWN 作为独立恢复事实持久化", async () => {

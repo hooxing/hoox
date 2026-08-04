@@ -1,19 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@cube-runtime/domain";
 import {
+  BlobSkillContentStore,
   createApiPersistenceRuntime,
   createS3BlobStore,
   DurableResourceBlobWriter,
   DurableResourceUploadBlobAdapter,
   RUNTIME_BLOB_OBJECT_PREFIX,
 } from "@cube-runtime/persistence";
+import type { ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
 import {
   createResourceFilesystemCapabilityCodec,
   ResourceAttachmentResolver,
   ResourceUploadService,
 } from "@cube-runtime/resource";
 import { SkillCenterService } from "@cube-runtime/skill";
-import type { ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
 import {
   startDevelopmentResourceFsProxy,
   type RunningDevelopmentResourceFsProxy,
@@ -33,6 +34,7 @@ const cursorTtlMilliseconds = 15 * 60_000;
 const cursorMaximumTtlMilliseconds = 60 * 60_000;
 // BlobStore 当前会在完整校验后才交付内存对象；开发 API 不得绕过其 16 MiB 绝对边界。
 const developmentApiMaxBlobSizeBytes = 16 * 1_024 * 1_024;
+const developmentApiMaxSkillBlobSizeBytes = 32 * 1_024 * 1_024;
 
 export { parseThreadCursorSigningKeys } from "./cursor.js";
 
@@ -98,6 +100,20 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
         },
         persistence.blobLifecycle,
       );
+      const skillBlobs = createS3BlobStore(
+        {
+          endpoint: configuration.objectStorage.endpoint,
+          publicEndpoint: configuration.objectStorage.publicEndpoint,
+          bucket: configuration.objectStorage.bucket,
+          region: configuration.objectStorage.region,
+          accessKeyId: configuration.objectStorage.accessKeyId,
+          secretAccessKey: configuration.objectStorage.secretAccessKey,
+          forcePathStyle: configuration.objectStorage.forcePathStyle,
+          prefix: RUNTIME_BLOB_OBJECT_PREFIX,
+          maxBlobSizeBytes: developmentApiMaxSkillBlobSizeBytes,
+        },
+        persistence.blobLifecycle,
+      );
       const resourceFilesystemCapabilities = createResourceFilesystemCapabilityCodec({
         secret: configuration.resourceFilesystemSigningKey,
       });
@@ -136,6 +152,10 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           resourceFilesystem: {
             catalog: persistence.resourceFilesystem,
             capabilities: resourceFilesystemCapabilities,
+            skills: {
+              catalog: persistence.skillFilesystem,
+              contents: new BlobSkillContentStore(skillBlobs),
+            },
           },
           ...(configuration.threadContextV2ReadEnabled
             ? {

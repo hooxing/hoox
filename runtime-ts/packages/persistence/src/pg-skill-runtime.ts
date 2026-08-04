@@ -414,6 +414,7 @@ async function readTarget(
 ): Promise<Omit<SkillInvocationTarget, "invocationId">> {
   const item = await client.query<{
     readonly invocation_name: string;
+    readonly canonical_key: string;
     readonly skill_id: string;
     readonly skill_version: string;
     readonly entrypoint_digest: string;
@@ -421,7 +422,7 @@ async function readTarget(
     readonly skill_status: string;
     readonly version_status: string;
   }>(
-    `SELECT item.invocation_name,item.skill_id,item.skill_version,item.entrypoint_digest,
+    `SELECT item.invocation_name,item.canonical_key,item.skill_id,item.skill_version,item.entrypoint_digest,
             item.package_digest,skill.status AS skill_status,version.status AS version_status
        FROM run_skill_snapshot_items item
        JOIN skills skill ON skill.id=item.skill_id
@@ -464,6 +465,7 @@ async function readTarget(
   }
   return {
     invocationName: row.invocation_name,
+    canonicalKey: row.canonical_key,
     skillVersion: row.skill_version,
     entrypointDigest: row.entrypoint_digest,
     entrypointSizeBytes: entrypoint.sizeBytes,

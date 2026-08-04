@@ -106,6 +106,8 @@
 | [ADR-0103](0103-resource-volume-demand-signal.md) | 一次性 Sandbox 按附件需求挂载 Resource Volume | 已接受 | 2026-08-04 |
 | [ADR-0104](0104-active-sandbox-lifetime-and-exec-circuit-breaker.md) | 活跃 Sandbox 存活窗口与命令数据面熔断 | 已接受 | 2026-08-04 |
 | [ADR-0105](0105-development-resourcefs-https-sidecar.md) | 开发环境 ResourceFS 最小 HTTPS Sidecar | 已接受 | 2026-08-04 |
+| [ADR-0106](0106-expired-attempt-convergence-and-long-running-sandbox.md) | 过期 Attempt 自动收敛与长任务 Sandbox 时限 | 已接受 | 2026-08-04 |
+| [ADR-0107](0107-public-skill-market-virtual-filesystem.md) | 公开 Skill 市场虚拟文件系统 | 已接受 | 2026-08-04 |
 
 ## 何时必须记录
 

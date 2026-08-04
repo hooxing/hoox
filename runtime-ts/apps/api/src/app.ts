@@ -8,8 +8,8 @@ import type {
   ModelWireTraceReadPort,
   RunExperienceArtifact,
   RunExperienceReadPort,
-  ThreadContinuityReadPort,
   ThreadContextReadPort,
+  ThreadContinuityReadPort,
 } from "@cube-runtime/persistence";
 import {
   assertBlobRef,
@@ -20,6 +20,8 @@ import {
 import {
   ArtifactDeliverySuccessEnvelopeSchema,
   ArtifactListSuccessEnvelopeSchema,
+  type ConfigureSkillRequest,
+  ConfigureSkillRequestSchema,
   type CreateRunRequest,
   CreateRunRequestSchema,
   type CreateThreadInputRequest,
@@ -30,6 +32,8 @@ import {
   type ErrorEnvelope,
   ErrorEnvelopeSchema,
   HealthSuccessEnvelopeSchema,
+  type InstallSkillRequest,
+  InstallSkillRequestSchema,
   MAX_RUN_INPUT_UTF8_BYTES,
   type ModelWireTraceBodyPath,
   ModelWireTraceBodyPathSchema,
@@ -44,21 +48,14 @@ import {
   type RunPath,
   RunPathSchema,
   RunSuccessEnvelopeSchema,
-  type ConfigureSkillRequest,
-  ConfigureSkillRequestSchema,
-  type InstallSkillRequest,
-  InstallSkillRequestSchema,
-  type SkillCatalogQuery,
   SkillCatalogPageSuccessEnvelopeSchema,
+  type SkillCatalogQuery,
   SkillCatalogQuerySchema,
   SkillInstallationListSuccessEnvelopeSchema,
   SkillInstallationSuccessEnvelopeSchema,
   type SkillPath,
   SkillPathSchema,
   SkillUninstallSuccessEnvelopeSchema,
-  type ThreadListQuery,
-  ThreadListQuerySchema,
-  ThreadPageSuccessEnvelopeSchema,
   type ThreadContextListQuery,
   ThreadContextListQuerySchema,
   ThreadContextPageSuccessEnvelopeSchema,
@@ -66,16 +63,19 @@ import {
   type ThreadInputReceiptPath,
   ThreadInputReceiptPathSchema,
   ThreadInputReceiptSuccessEnvelopeSchema,
+  type ThreadListQuery,
+  ThreadListQuerySchema,
+  ThreadPageSuccessEnvelopeSchema,
   type ThreadPath,
   ThreadPathSchema,
   type ThreadRunListQuery,
   ThreadRunListQuerySchema,
   ThreadRunPageSuccessEnvelopeSchema,
   ThreadSuccessEnvelopeSchema,
-  type UploadedResourceDto,
-  UploadedResourceSuccessEnvelopeSchema,
   type UninstallSkillQuery,
   UninstallSkillQuerySchema,
+  type UploadedResourceDto,
+  UploadedResourceSuccessEnvelopeSchema,
 } from "@cube-runtime/protocol";
 import {
   type ResourceAttachmentResolverPort,
@@ -85,8 +85,12 @@ import {
   type ResourceUploadPort,
   stripAttachmentsFromUserFacingPrompt,
 } from "@cube-runtime/resource";
-import { type SkillCenterService, SkillServiceError } from "@cube-runtime/skill";
-import { beijingPinoTimestamp } from "./logging.js";
+import {
+  type SkillCenterService,
+  type SkillContentStore,
+  type SkillFilesystemCatalog,
+  SkillServiceError,
+} from "@cube-runtime/skill";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -94,6 +98,7 @@ import Fastify, {
   LogController,
 } from "fastify";
 import { type ApiCreateCapability, isApiCreateCapability } from "./capabilities.js";
+import { beijingPinoTimestamp } from "./logging.js";
 import {
   decodeModelWireTraceCursor,
   encodeModelWireTraceCursor,
@@ -108,11 +113,11 @@ import type {
   TenantSelector,
   ThreadCursorCodec,
 } from "./ports.js";
-import { ApiFailure, type ApiFailureKind, ApiService } from "./service.js";
 import {
-  registerResourceFilesystemHttp,
   ResourceFilesystemHttpError,
+  registerResourceFilesystemHttp,
 } from "./resource-filesystem-http.js";
+import { ApiFailure, type ApiFailureKind, ApiService } from "./service.js";
 
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
@@ -133,6 +138,10 @@ export interface ApiDependencies {
   readonly resourceFilesystem?: Readonly<{
     catalog: ResourceFilesystemCatalog;
     capabilities: ResourceFilesystemCapabilityCodec;
+    skills?: Readonly<{
+      catalog: SkillFilesystemCatalog;
+      contents: SkillContentStore;
+    }>;
   }>;
   readonly skillCenter?: SkillCenterService;
 }

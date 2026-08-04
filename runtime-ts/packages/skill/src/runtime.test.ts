@@ -4,11 +4,11 @@ import {
   assertRunSkillSnapshot,
   digestRunSkillSnapshot,
   resolveExplicitSkillInvocation,
-  SkillRuntimeError,
-  SkillRuntimeService,
   type SkillExecutionBinding,
   type SkillInvocationTarget,
+  SkillRuntimeError,
   type SkillRuntimeRepository,
+  SkillRuntimeService,
 } from "./runtime.js";
 
 const binding: SkillExecutionBinding = Object.freeze({
@@ -34,6 +34,7 @@ function fixture() {
   const target: SkillInvocationTarget = {
     invocationId: "tool:call-1",
     invocationName: "review",
+    canonicalKey: "code-review",
     skillVersion: "1.2.3",
     entrypointDigest: sha(instruction),
     entrypointSizeBytes: instruction.byteLength,
@@ -93,70 +94,55 @@ describe("Skill Runtime", () => {
       '[RUNTIME_SKILL_INSTRUCTION schema=1 name="review" version="1.2.3"',
     );
     expect(instruction.modelText).toContain("按清单检查修改");
-    expect(instruction.packageRoot).toBe("/skills/review");
+    expect(instruction.packageRoot).toBe("/resources/skills/code-review/1.2.3");
     expect(value.read).toHaveBeenCalledTimes(1);
     expect(value.completeInvocation).toHaveBeenCalledWith(
       expect.objectContaining({ status: "loaded", invocationId: "tool:call-1" }),
     );
   });
 
-  it("只有物化入口才写入已调用 Skill 包，并把根目录封成只读", async () => {
+  it("指令加载只读取入口文件，包内资源由全局虚拟目录按需提供", async () => {
     const value = fixture();
-    const prepareRoot = vi.fn(async () => undefined);
-    const writeFile = vi.fn(async () => undefined);
-    const sealReadOnly = vi.fn(async () => undefined);
 
-    const roots = await value.service.materializeLoadedPackages({
+    const instruction = await value.service.loadInstruction({
       binding,
-      target: { prepareRoot, writeFile, sealReadOnly },
+      source: "tool",
+      callId: "call-1",
+      invocationName: "review",
     });
 
-    expect(roots).toEqual(["/skills/review"]);
-    expect(prepareRoot).toHaveBeenCalledWith({ absoluteRoot: "/skills/review" });
-    expect(writeFile).toHaveBeenCalledTimes(2);
-    expect(writeFile).toHaveBeenCalledWith(
-      expect.objectContaining({ absolutePath: "/skills/review/references/checklist.txt" }),
-    );
-    expect(sealReadOnly).toHaveBeenCalledWith({ absoluteRoot: "/skills/review" });
-
-    await value.service.materializeLoadedPackages({
-      binding,
-      target: { prepareRoot, writeFile, sealReadOnly },
-      alreadyMaterialized: new Set(roots),
-    });
-    expect(writeFile).toHaveBeenCalledTimes(2);
+    expect(instruction.resources).toEqual([
+      expect.objectContaining({ path: "references/checklist.txt" }),
+    ]);
+    expect(value.read).toHaveBeenCalledTimes(1);
+    expect(value.read).toHaveBeenCalledWith(expect.objectContaining({ blobRef: "entrypoint-ref" }));
   });
 
-  it("物化前拒绝路径穿越等非法包元数据", async () => {
+  it("加载指令前拒绝路径穿越等非法包元数据", async () => {
     const value = fixture();
-    const prepareRoot = vi.fn(async () => undefined);
-    const writeFile = vi.fn(async () => undefined);
-    const sealReadOnly = vi.fn(async () => undefined);
-    value.listLoadedPackages.mockResolvedValueOnce([
-      {
-        ...value.target,
-        files: [
-          ...value.target.files,
-          {
-            path: "references/../escape.txt",
-            mediaType: "text/plain",
-            sizeBytes: 0,
-            contentDigest: sha(""),
-            blobRef: "escape-ref",
-          },
-        ],
-      },
-    ]);
+    vi.mocked(value.repository.beginInvocation).mockResolvedValueOnce({
+      ...value.target,
+      files: [
+        ...value.target.files,
+        {
+          path: "references/../escape.txt",
+          mediaType: "text/plain",
+          sizeBytes: 0,
+          contentDigest: sha(""),
+          blobRef: "escape-ref",
+        },
+      ],
+    });
 
     await expect(
-      value.service.materializeLoadedPackages({
+      value.service.loadInstruction({
         binding,
-        target: { prepareRoot, writeFile, sealReadOnly },
+        source: "tool",
+        callId: "call-1",
+        invocationName: "review",
       }),
     ).rejects.toEqual(new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE"));
-    expect(prepareRoot).not.toHaveBeenCalled();
-    expect(writeFile).not.toHaveBeenCalled();
-    expect(sealReadOnly).not.toHaveBeenCalled();
+    expect(value.read).not.toHaveBeenCalled();
   });
 
   it("Session 重建从 durable loaded invocation 重读同一版本正文", async () => {

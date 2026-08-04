@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { resourceId, resourceVersionId, tenantId } from "@cube-runtime/domain";
 import type { BlobStore } from "@cube-runtime/persistence";
 import {
@@ -5,11 +6,19 @@ import {
   type ResourceFilesystemCatalog,
   type ResourceFilesystemFile,
 } from "@cube-runtime/resource";
+import type {
+  SkillContentStore,
+  SkillFilesystemCatalog,
+  SkillFilesystemEntry,
+  SkillFilesystemFile,
+} from "@cube-runtime/skill";
 import Fastify from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import { registerResourceFilesystemHttp } from "./resource-filesystem-http.js";
 
 const tenant = tenantId("tenant-resource-http");
+const skillBody = new TextEncoder().encode("# Review\n\n按清单检查。\n");
+const skillDigest = createHash("sha256").update(skillBody).digest("hex");
 const file: ResourceFilesystemFile = {
   resourceId: resourceId("resource-http-test"),
   versionId: resourceVersionId("version-http-test"),
@@ -80,6 +89,46 @@ describe("Resource WebDAV HTTP 边界", () => {
 
     expect(response.statusCode).toBe(207);
     expect(response.body).toContain("resource-http-test");
+    expect(response.body).toContain("/v1/resource-filesystem/skills/");
+    await fixture.app.close();
+  });
+
+  it("向所有 Tenant 投影公开 Skill 市场，并按精确版本延迟读取包文件", async () => {
+    const fixture = await appFixture();
+    const directory = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: "/v1/resource-filesystem/skills/code-review/1.2.3",
+      headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "1" },
+    });
+    expect(directory.statusCode).toBe(207);
+    expect(directory.body).toContain("SKILL.md");
+    expect(directory.body).toContain("scripts/");
+    expect(directory.body).not.toContain("skill-secret-blob-ref");
+
+    const response = await fixture.app.inject({
+      method: "GET",
+      url: "/v1/resource-filesystem/skills/code-review/1.2.3/SKILL.md",
+      headers: { authorization: `Bearer ${fixture.hostToken}`, range: "bytes=2-7" },
+    });
+    expect(response.statusCode).toBe(206);
+    expect(response.body).toBe("Review");
+    expect(response.headers.etag).toBe(`"${skillDigest}"`);
+    expect(fixture.readSkill).toHaveBeenCalledWith({
+      blobRef: "skill-secret-blob-ref",
+      expectedDigest: skillDigest,
+      expectedSizeBytes: skillBody.byteLength,
+    });
+
+    const metadata = await fixture.app.inject({
+      method: "GET",
+      url: "/v1/resource-filesystem/skills/code-review/_metadata.json",
+      headers: { authorization: `Bearer ${fixture.hostToken}` },
+    });
+    expect(metadata.statusCode).toBe(200);
+    expect(metadata.json()).toMatchObject({
+      canonicalKey: "code-review",
+      recommendedVersion: "1.2.3",
+    });
     await fixture.app.close();
   });
 
@@ -130,8 +179,66 @@ async function appFixture() {
       throw new Error("unused");
     },
   };
+  const metadataBody = new TextEncoder().encode(
+    `${JSON.stringify({ canonicalKey: "code-review", recommendedVersion: "1.2.3" })}\n`,
+  );
+  const metadataDigest = createHash("sha256").update(metadataBody).digest("hex");
+  const skillFile: SkillFilesystemFile = {
+    mediaType: "text/markdown",
+    sizeBytes: skillBody.byteLength,
+    contentDigest: skillDigest,
+    source: { kind: "blob", blobRef: "skill-secret-blob-ref" },
+  };
+  const metadataFile: SkillFilesystemFile = {
+    mediaType: "application/json",
+    sizeBytes: metadataBody.byteLength,
+    contentDigest: metadataDigest,
+    source: { kind: "inline", body: metadataBody },
+  };
+  const skillCatalog: SkillFilesystemCatalog = {
+    listDirectory: vi.fn(async ({ segments }) => {
+      const key = segments.join("/");
+      const entries: Record<string, readonly SkillFilesystemEntry[]> = {
+        "": [{ kind: "directory", name: "code-review" }],
+        "code-review": [
+          {
+            kind: "file",
+            name: "_metadata.json",
+            mediaType: "application/json",
+            sizeBytes: metadataBody.byteLength,
+            contentDigest: metadataDigest,
+          },
+          { kind: "directory", name: "1.2.3" },
+        ],
+        "code-review/1.2.3": [
+          {
+            kind: "file",
+            name: "SKILL.md",
+            mediaType: skillFile.mediaType,
+            sizeBytes: skillFile.sizeBytes,
+            contentDigest: skillFile.contentDigest,
+          },
+          { kind: "directory", name: "scripts" },
+        ],
+      };
+      return entries[key];
+    }),
+    resolveFile: vi.fn(async ({ segments }) => {
+      const key = segments.join("/");
+      if (key === "code-review/1.2.3/SKILL.md") return skillFile;
+      if (key === "code-review/_metadata.json") return metadataFile;
+      return undefined;
+    }),
+  };
+  const readSkill = vi.fn(async () => skillBody);
+  const skillContents: SkillContentStore = { read: readSkill };
   const app = Fastify();
-  registerResourceFilesystemHttp(app, { catalog, blobs, capabilities });
+  registerResourceFilesystemHttp(app, {
+    catalog,
+    blobs,
+    capabilities,
+    skills: { catalog: skillCatalog, contents: skillContents },
+  });
   app.setErrorHandler((error, _request, reply) => {
     const status = (error as { readonly statusCode?: number }).statusCode;
     void reply.status(status === 401 ? 401 : 500).send();
@@ -140,6 +247,7 @@ async function appFixture() {
   return {
     app,
     getBytes,
+    readSkill,
     token: capabilities.issue({
       tenantId: tenant,
       sandboxId: "sandbox-resource-http",

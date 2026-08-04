@@ -737,6 +737,12 @@ export interface ThreadSandboxSessionLifecyclePort {
     /** true 时不得复用未挂载 ResourceFS 的 Session。 */
     readonly requiresResourceFilesystem: boolean;
   }): Promise<ThreadSandboxAcquireResult>;
+  renew(input: {
+    readonly scope: ExecutionScope;
+    readonly attemptId: string;
+    readonly lease: ThreadSandboxLeaseRefV1;
+    readonly leaseDurationMs: number;
+  }): Promise<"renewed" | "lease_lost" | "unavailable">;
   attestMaterialized(input: {
     readonly scope: ExecutionScope;
     readonly attemptId: string;

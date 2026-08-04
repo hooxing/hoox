@@ -243,6 +243,33 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     });
   });
 
+  it("Workspace 物化期间 heartbeat 同时续租 Thread Sandbox，避免首个工具因租约过期中断", async () => {
+    let markMaterializeStarted: () => void = () => undefined;
+    const materializeStarted = new Promise<void>((resolve) => {
+      markMaterializeStarted = resolve;
+    });
+    let releaseMaterialize: () => void = () => undefined;
+    const materializeRelease = new Promise<void>((resolve) => {
+      releaseMaterialize = resolve;
+    });
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
+      threadSandboxSessionReuseEnabled: true,
+    });
+    h.revisions.beforeMaterializeReturn = async () => {
+      markMaterializeStarted();
+      await materializeRelease;
+    };
+
+    const execution = h.worker.execute(h.scope);
+    await materializeStarted;
+    await h.clock.tickHeartbeat();
+    releaseMaterialize();
+
+    await expect(execution).resolves.toEqual({ outcome: "succeeded" });
+    expect(h.threadSandboxes.renewCount).toBe(1);
+    expect(h.threadSandboxes.attestCount).toBe(1);
+  });
+
   it("阶段 5 pause 结果未知不回滚已经提交的 Run/Workspace/Context 终态", async () => {
     const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
       threadSandboxSessionReuseEnabled: true,

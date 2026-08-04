@@ -516,6 +516,41 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     }
   }
 
+  async renew(
+    input: Parameters<ThreadSandboxSessionLifecyclePort["renew"]>[0],
+  ): Promise<"renewed" | "lease_lost" | "unavailable"> {
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        { tenantId: input.scope.tenantId },
+        async (client) => {
+          if (!(await lockLease(client, input.scope, input.attemptId, input.lease))) {
+            return "lease_lost" as const;
+          }
+          const renewed = await client.query(
+            `UPDATE thread_sandbox_leases
+                SET expires_at=clock_timestamp() + ($6::bigint * interval '1 millisecond'),
+                    updated_at=clock_timestamp()
+              WHERE tenant_id=$1 AND session_id=$2 AND lease_id=$3 AND lease_token=$4
+                AND lease_epoch=$5 AND released_at IS NULL`,
+            [
+              input.scope.tenantId,
+              input.lease.sessionId,
+              input.lease.leaseId,
+              input.lease.leaseToken,
+              input.lease.leaseEpoch,
+              input.leaseDurationMs,
+            ],
+          );
+          return renewed.rowCount === 1 ? ("renewed" as const) : ("lease_lost" as const);
+        },
+        { isolationLevel: "SERIALIZABLE" },
+      );
+    } catch {
+      return "unavailable";
+    }
+  }
+
   async completeTerminalEffect(
     input: Parameters<ThreadSandboxSessionLifecyclePort["completeTerminalEffect"]>[0],
   ): Promise<"settled" | "unknown" | "not_owner"> {

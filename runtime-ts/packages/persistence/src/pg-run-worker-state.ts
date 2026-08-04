@@ -531,10 +531,9 @@ export class PgBackedSandboxSessionRegistry
     }
   }
 
-  async acquire(input: {
-    readonly scope: ExecutionScope;
-    readonly signal: AbortSignal;
-  }): Promise<SandboxAcquireResult> {
+  async acquire(
+    input: Parameters<SandboxSessionRegistryPort["acquire"]>[0],
+  ): Promise<SandboxAcquireResult> {
     const result = await this.upstream.acquire(input);
     if (result.outcome !== "ready") return result;
     try {

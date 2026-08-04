@@ -409,6 +409,7 @@ export class RunWorker {
               acquisition = await this.dependencies.sandboxes.acquire({
                 scope,
                 signal: executionAbort.signal,
+                requiresResourceFilesystem: request.reason === "attachment",
               });
             } catch {
               context.agentFailure = "SANDBOX_FAILED";
@@ -723,7 +724,13 @@ export class RunWorker {
         const postModel = await this.stopPoint(context, cancellation);
         if (postModel) return await this.finishStopped(context, postModel, sandbox);
         if (turn.kind === "context_too_large") {
-          return await this.recoverWithCleanup(context, sandbox, "CONTEXT_TOO_LARGE", cancellation);
+          return await this.finalizeWithCleanup(
+            context,
+            sandbox,
+            "failed",
+            "CONTEXT_TOO_LARGE",
+            cancellation,
+          );
         }
         if (context.adapterRejected) {
           return await this.recoverWithCleanup(
@@ -946,6 +953,9 @@ export class RunWorker {
       if (sandboxPreparationResult !== undefined) return sandboxPreparationResult;
       if (context.stopped) return await this.finishStopped(context, context.stopped, sandbox);
       if (context.agentFailure !== undefined) {
+        if (sandbox === undefined && context.agentFailure === "SANDBOX_FAILED") {
+          return await this.finalizeWithoutRevision(context, "failed", "SANDBOX_FAILED");
+        }
         return sandbox === undefined
           ? await this.requireRecovery(context, context.agentFailure, [])
           : await this.recoverWithCleanup(context, sandbox, context.agentFailure, cancellation);

@@ -100,6 +100,10 @@
 | [ADR-0097](0097-development-pptx-skill-fixture.md) | development PPTX Skill 测试目录发布 | 已接受 | 2026-08-03 |
 | [ADR-0098](0098-worker-skill-blob-size-boundary.md) | Worker Skill Blob 读取上限与预检一致性 | 已接受 | 2026-08-04 |
 | [ADR-0099](0099-skill-recovery-stable-ordering.md) | Skill 恢复查询的 PostgreSQL 稳定排序 | 已接受 | 2026-08-04 |
+| [ADR-0100](0100-provider-visible-history-and-deepseek-tokenizer.md) | Provider 可见历史与 DeepSeek Tokenizer | 已接受 | 2026-08-04 |
+| [ADR-0101](0101-sandbox-lifecycle-acquire-timeout.md) | Sandbox lifecycle 获取超时 | 已接受 | 2026-08-04 |
+| [ADR-0102](0102-definitive-sandbox-create-failure.md) | 确定性 Sandbox 创建失败直接终止 Run | 已接受 | 2026-08-04 |
+| [ADR-0103](0103-resource-volume-demand-signal.md) | 一次性 Sandbox 按附件需求挂载 Resource Volume | 已接受 | 2026-08-04 |
 
 ## 何时必须记录
 

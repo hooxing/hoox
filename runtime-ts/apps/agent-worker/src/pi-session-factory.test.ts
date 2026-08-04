@@ -280,6 +280,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       expect.objectContaining({ source: "tool", invocationName: "review" }),
     );
     expect(sandboxes.acquireCount).toBe(1);
+    expect(sandboxes.acquireResourceFilesystemRequirements).toEqual([false]);
     expect(sandboxCommands).toContain("rm -rf -- '/skills/review'");
     expect(sandboxes.handle.files.has("/skills/review/old-version.txt")).toBe(false);
     expect(sandboxes.handle.files.get("/skills/review/SKILL.md")).toContain("按检查清单处理");
@@ -425,6 +426,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
     expect(load).not.toHaveBeenCalled();
     expect(sandboxes.acquireCount).toBe(1);
+    expect(sandboxes.acquireResourceFilesystemRequirements).toEqual([true]);
     expect(sandboxes.settleCount).toBe(1);
   });
 

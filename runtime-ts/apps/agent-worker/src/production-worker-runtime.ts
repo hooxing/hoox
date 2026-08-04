@@ -145,13 +145,16 @@ export class CubeSandboxSessionRegistry
   async acquire(input: {
     readonly scope: ExecutionScope;
     readonly signal: AbortSignal;
+    readonly requiresResourceFilesystem: boolean;
   }): Promise<SandboxAcquireResult> {
     this.uncertainCreate = undefined;
     try {
-      const volume = await this.resourceVolume?.ensure({
-        tenantId: input.scope.tenantId,
-        signal: input.signal,
-      });
+      const volume = input.requiresResourceFilesystem
+        ? await this.resourceVolume?.ensure({
+            tenantId: input.scope.tenantId,
+            signal: input.signal,
+          })
+        : undefined;
       const sandbox = await this.gateway.create(
         {
           templateId: this.templateId,

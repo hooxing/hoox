@@ -643,6 +643,8 @@ export interface SandboxSessionRegistryPort {
   acquire(input: {
     readonly scope: ExecutionScope;
     readonly signal: AbortSignal;
+    /** 只有当前输入包含必须通过虚拟文件系统读取的附件时才挂载 `/resources`。 */
+    readonly requiresResourceFilesystem: boolean;
   }): Promise<SandboxAcquireResult>;
   settle(input: {
     readonly scope: ExecutionScope;

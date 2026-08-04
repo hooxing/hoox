@@ -198,7 +198,7 @@ describe("Agent Worker production polling loop", () => {
 });
 
 describe("生产 Workspace revision 安全下限", () => {
-  it("Sandbox 创建前确保 Tenant Cube Volume，并只绑定固定 /resources", async () => {
+  it("Sandbox 只在附件要求 ResourceFS 时确保 Tenant Cube Volume 并绑定 /resources", async () => {
     const ensure = vi.fn(async () => ({
       name: "tenant-worker-loop",
       path: "/resources" as const,
@@ -223,10 +223,10 @@ describe("生产 Workspace revision 安全下限", () => {
     const scope = claim().scope as ExecutionScope;
 
     await expect(
-      registry.create({
+      registry.acquire({
         scope,
-        registryId: "registry-resource-volume",
         signal: new AbortController().signal,
+        requiresResourceFilesystem: true,
       }),
     ).resolves.toMatchObject({ outcome: "ready" });
 
@@ -235,6 +235,21 @@ describe("生产 Workspace revision 安全下限", () => {
       expect.objectContaining({
         volumeMounts: [{ name: "tenant-worker-loop", path: "/resources" }],
       }),
+      expect.objectContaining({ timeoutMs: 90_000 }),
+    );
+
+    ensure.mockClear();
+    create.mockClear();
+    await expect(
+      registry.acquire({
+        scope,
+        signal: new AbortController().signal,
+        requiresResourceFilesystem: false,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready" });
+    expect(ensure).not.toHaveBeenCalled();
+    expect(create).toHaveBeenCalledWith(
+      expect.not.objectContaining({ volumeMounts: expect.anything() }),
       expect.objectContaining({ timeoutMs: 90_000 }),
     );
   });

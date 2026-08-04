@@ -140,6 +140,22 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
   });
 
+  it("模型确认上下文过大时终止 Run 并释放队列，不进入人工恢复", async () => {
+    const session = new ScriptedAgentSession([], {
+      kind: "context_too_large",
+      action: "rebuild_context",
+    });
+    const h = harness([session], fakeSeed("context-too-large"));
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "failed" });
+
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("failed");
+    expect(record.attempt?.status).toBe("failed");
+    expect(record.attempt?.stage).toBe("finished");
+    expect(record.fence).toBeUndefined();
+  });
+
   it("并发启动信号共享完整 acquire 与 materialize，不能提前取得未就绪 Sandbox", async () => {
     let markMaterializeStarted: () => void = () => undefined;
     const materializeStarted = new Promise<void>((resolve) => {
@@ -1914,13 +1930,13 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
   it("Sandbox、Workspace 与 Artifact 异常分别映射稳定错误码", async () => {
     const acquire = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
-    acquire.sandboxes.beforeAcquireReturn = () => {
-      throw new Error("私有 Sandbox 异常");
-    };
+    acquire.sandboxes.nextAcquire = { outcome: "failed", code: "SANDBOX_FAILED" };
     await expect(acquire.worker.execute(acquire.scope)).resolves.toEqual({
-      outcome: "recovery_required",
-      code: "SANDBOX_FAILED",
+      outcome: "failed",
     });
+    expect(acquire.persistence.record(acquire.scope).run.status).toBe("failed");
+    expect(acquire.persistence.record(acquire.scope).attempt?.status).toBe("failed");
+    expect(acquire.persistence.record(acquire.scope).fence).toBeUndefined();
 
     const workspace = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     workspace.revisions.beforeReturn = () => {
@@ -1941,6 +1957,22 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     });
     expect(artifact.artifacts.calls).toBe(0);
     expect(artifactSession.prompts).toHaveLength(1);
+  });
+
+  it("Thread Sandbox 的确定性创建失败终止 Run，后续任务不再排队", async () => {
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)], fakeSeed(), {
+      threadSandboxSessionReuseEnabled: true,
+    });
+    h.threadSandboxes.nextAcquire = { outcome: "failed", code: "SANDBOX_FAILED" };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "failed" });
+
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("failed");
+    expect(record.attempt?.status).toBe("failed");
+    expect(record.attempt?.stage).toBe("finished");
+    expect(record.fence).toBeUndefined();
+    expect(record.outbox.some((item) => item.kind === "sandbox_lifecycle_unknown")).toBe(false);
   });
 
   it("Workspace verify 日志只接受固定 diagnostic，伪造值不会离开边界", async () => {

@@ -15,6 +15,7 @@ export type SandboxErrorCode =
   | "INVALID_ARGUMENT"
   | "UNKNOWN"
   | "PROTOCOL"
+  | "RESOURCE_VOLUME_FAILED"
   | "UPSTREAM";
 
 /** 对外只暴露稳定错误码，禁止业务层依赖上游 SDK 的类名或英文消息。 */
@@ -40,6 +41,16 @@ export function mapSandboxError(error: unknown, operation: string): SandboxRunti
   }
   if (error instanceof AuthenticationError) {
     return new SandboxRuntimeError("AUTHENTICATION", `${operation} 未通过 CubeSandbox 鉴权`, error);
+  }
+  if (
+    error instanceof ApiError &&
+    /plugin_volume[\s\S]*RESOURCEFS_VOLUME_PLUGIN_FAILED/iu.test(error.message)
+  ) {
+    return new SandboxRuntimeError(
+      "RESOURCE_VOLUME_FAILED",
+      `${operation} 的 Resource Volume 挂载失败`,
+      error,
+    );
   }
 
   const message = error instanceof Error ? error.message : String(error);

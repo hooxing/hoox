@@ -308,6 +308,7 @@ export class RunWorker {
     const shutdown = this.dependencies.shutdownSignal;
     let session: WorkerAgentSessionPort | undefined;
     let sandbox: SandboxSessionRef | undefined;
+    let sandboxResourceFilesystemMounted = false;
     let sandboxPreparation: Promise<SandboxSessionRef> | undefined;
     let sandboxPreparationResult: RunWorkerResult | undefined;
     let unsubscribe: (() => void) | undefined;
@@ -402,8 +403,22 @@ export class RunWorker {
         }
         // acquire 后会先设置 ref，再继续物化 Workspace；并发调用必须等待同一个完整准备 Promise，
         // 不能仅因 ref 已可见就提前取得尚未 ready 的 Sandbox。
-        if (sandboxPreparation !== undefined) return await sandboxPreparation;
-        if (sandbox !== undefined) return sandbox;
+        const requiresResourceFilesystem = request.reason === "attachment";
+        if (sandboxPreparation !== undefined) {
+          const prepared = await sandboxPreparation;
+          if (requiresResourceFilesystem && !sandboxResourceFilesystemMounted) {
+            context.agentFailure = "SANDBOX_FAILED";
+            throw new Error("当前 Run 的 Sandbox 无法在创建后追加 ResourceFS mount");
+          }
+          return prepared;
+        }
+        if (sandbox !== undefined) {
+          if (requiresResourceFilesystem && !sandboxResourceFilesystemMounted) {
+            context.agentFailure = "SANDBOX_FAILED";
+            throw new Error("当前 Run 的 Sandbox 无法在创建后追加 ResourceFS mount");
+          }
+          return sandbox;
+        }
         sandboxPreparation ??= (async () => {
           const preAcquire = await this.stopPoint(context, cancellation);
           if (preAcquire) throw new Error("Sandbox acquire 前运行已停止");
@@ -418,6 +433,7 @@ export class RunWorker {
               owner: this.options.workerId,
               leaseDurationMs: this.#leaseDurationMs,
               signal: executionAbort.signal,
+              requiresResourceFilesystem,
             });
             if (acquisition.outcome !== "ready") {
               context.agentFailure =
@@ -425,6 +441,7 @@ export class RunWorker {
               throw new Error("Thread Sandbox acquire 失败");
             }
             sandbox = acquisition.session;
+            sandboxResourceFilesystemMounted = acquisition.resourceFilesystemMounted;
             context.threadSandboxLease = acquisition.lease;
             requiresMaterialization = acquisition.requiresMaterialization;
           } else {
@@ -433,7 +450,7 @@ export class RunWorker {
               acquisition = await this.dependencies.sandboxes.acquire({
                 scope,
                 signal: executionAbort.signal,
-                requiresResourceFilesystem: request.reason === "attachment",
+                requiresResourceFilesystem,
               });
             } catch {
               context.agentFailure = "SANDBOX_FAILED";
@@ -457,6 +474,7 @@ export class RunWorker {
               throw new Error("Sandbox acquire 失败");
             }
             sandbox = acquisition.session;
+            sandboxResourceFilesystemMounted = requiresResourceFilesystem;
           }
 
           const acquired = sandbox;

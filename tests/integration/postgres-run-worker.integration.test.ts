@@ -189,9 +189,13 @@ function requestDigest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-function fakeThreadSandboxProvider(gateway: FakeSandboxGateway): ThreadSandboxProviderPort {
+function fakeThreadSandboxProvider(
+  gateway: FakeSandboxGateway,
+  resourceFilesystemRequirements?: boolean[],
+): ThreadSandboxProviderPort {
   return {
     create: async (input) => {
+      resourceFilesystemRequirements?.push(input.requiresResourceFilesystem);
       const sandbox = await gateway.create(
         {
           templateId: "thread-session-integration",
@@ -1440,9 +1444,11 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       owner: "sandbox-session-worker-a",
       leaseDurationMs: 30_000,
       signal: new AbortController().signal,
+      requiresResourceFilesystem: false,
     });
     if (acquiredA.outcome !== "ready") throw new Error("Run A Sandbox acquire 失败");
     expect(acquiredA).toMatchObject({ source: "cold_created", requiresMaterialization: true });
+    expect(acquiredA.resourceFilesystemMounted).toBe(false);
     await expect(
       lifecycle.attestMaterialized({
         scope: claimedA.fence.scope,
@@ -1622,11 +1628,13 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       owner: "sandbox-session-worker-b",
       leaseDurationMs: 30_000,
       signal: new AbortController().signal,
+      requiresResourceFilesystem: false,
     });
     if (acquiredB.outcome !== "ready") throw new Error("Run B Sandbox acquire 失败");
     expect(acquiredB).toMatchObject({
       source: firstSandboxReceipt.outcome === "handed_off" ? "running_handoff" : "paused_resumed",
       requiresMaterialization: false,
+      resourceFilesystemMounted: false,
       session: { providerSandboxId: acquiredA.session.providerSandboxId },
       lease: { sessionId: acquiredA.lease.sessionId, generation: acquiredA.lease.generation },
     });
@@ -1740,6 +1748,114 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       }),
     ).resolves.toBe("settled");
     await expect(gateway.inspect(acquiredB.session.providerSandboxId)).resolves.toBe("paused");
+  });
+
+  it("Thread Sandbox 的附件能力升级会退役无挂载 Session 并冷建新 generation", async () => {
+    const f = await serialQueueFixture(`sandbox-capability-${suffix}`);
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const sandboxPersistence = new PgExecutionPersistence(runtime, {
+      threadSandboxSessionReuseEnabled: true,
+      threadSandboxHandoffLeaseMs: 30_000,
+    });
+    const gateway = new FakeSandboxGateway();
+    const requirements: boolean[] = [];
+    const lifecycle = new PgThreadSandboxSessionLifecycle(
+      runtime,
+      fakeThreadSandboxProvider(gateway, requirements),
+      { pausedRetentionSeconds: 600, transitionWaitMs: 1_000 },
+    );
+    const run = createRun({
+      id: runId(`sandbox-capability-run-${suffix}`),
+      thread: f.thread,
+      now: isoTimestamp("2099-07-26T00:00:00.000Z"),
+    });
+    await expect(
+      creation.createQueuedRun({
+        scope: f.tenantScope,
+        run,
+        thread: f.thread,
+        inputText: "Thread Sandbox capability upgrade",
+        idempotency: {
+          key: `sandbox-capability-key-${suffix}`,
+          requestHash: requestDigest("Thread Sandbox capability upgrade"),
+        },
+      }),
+    ).resolves.toMatchObject({ outcome: "created" });
+    const dispatch = (
+      await runDispatchOutbox.claim({
+        tenantId: f.tenantScope.tenantId,
+        dispatcherId: "sandbox-capability-dispatcher",
+        limit: 10,
+        leaseMilliseconds: 30_000,
+      })
+    )[0];
+    if (dispatch === undefined) throw new Error("capability dispatch 缺失");
+    const claimed = await sandboxPersistence.claim({
+      scope: dispatch.scope as ExecutionScope,
+      workerId: "sandbox-capability-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("capability claim 失败");
+    await runDispatchOutbox.acknowledge({ claim: dispatch, outcome: "dispatched" });
+
+    const first = await lifecycle.acquire({
+      scope: claimed.fence.scope,
+      attemptId: claimed.snapshot.attempt.attemptId,
+      owner: "sandbox-capability-worker",
+      leaseDurationMs: 30_000,
+      signal: new AbortController().signal,
+      requiresResourceFilesystem: false,
+    });
+    if (first.outcome !== "ready") throw new Error("首次 capability acquire 失败");
+    await expect(
+      lifecycle.attestMaterialized({
+        scope: claimed.fence.scope,
+        attemptId: claimed.snapshot.attempt.attemptId,
+        lease: first.lease,
+      }),
+    ).resolves.toBe("attested");
+    await withTenantTransaction(runtime, f.tenantScope, (client) =>
+      client.query(
+        `UPDATE thread_sandbox_leases
+            SET released_at=clock_timestamp(),updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND session_id=$2 AND lease_id=$3 AND released_at IS NULL`,
+        [f.tenantScope.tenantId, first.lease.sessionId, first.lease.leaseId],
+      ),
+    );
+
+    const upgraded = await lifecycle.acquire({
+      scope: claimed.fence.scope,
+      attemptId: claimed.snapshot.attempt.attemptId,
+      owner: "sandbox-capability-worker",
+      leaseDurationMs: 30_000,
+      signal: new AbortController().signal,
+      requiresResourceFilesystem: true,
+    });
+    if (upgraded.outcome !== "ready") throw new Error("升级 capability acquire 失败");
+
+    expect(requirements).toEqual([false, true]);
+    expect(upgraded).toMatchObject({
+      source: "cold_created",
+      resourceFilesystemMounted: true,
+      lease: { generation: first.lease.generation + 1 },
+    });
+    expect(upgraded.session.providerSandboxId).not.toBe(first.session.providerSandboxId);
+    const sessions = await withTenantTransaction(runtime, f.tenantScope, (client) =>
+      client.query<{
+        generation: string;
+        resource_filesystem_mounted: boolean;
+        state: string;
+      }>(
+        `SELECT generation::text,resource_filesystem_mounted,state
+           FROM thread_sandbox_sessions
+          WHERE tenant_id=$1 AND thread_id=$2 ORDER BY generation`,
+        [f.tenantScope.tenantId, f.thread.id],
+      ),
+    );
+    expect(sessions.rows).toEqual([
+      { generation: "1", resource_filesystem_mounted: false, state: "terminated" },
+      { generation: "2", resource_filesystem_mounted: true, state: "running" },
+    ]);
   });
 
   it("阶段 2 让 Run B 只读取激活时冻结的 Run A 历史，重启重建 digest 稳定", async () => {
@@ -5015,6 +5131,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       owner: "expired-finalizing-worker",
       leaseDurationMs: 30_000,
       signal: new AbortController().signal,
+      requiresResourceFilesystem: false,
     });
     if (acquired.outcome !== "ready") {
       throw new Error(`恢复测试 Sandbox acquire 失败：${JSON.stringify(acquired)}`);

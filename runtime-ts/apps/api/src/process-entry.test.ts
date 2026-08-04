@@ -251,6 +251,12 @@ describe("API 进程入口", () => {
     expect(() =>
       parseApiProcessEnvironment({
         ...productionEnvironment(),
+        RESOURCEFS_PROXY_ENABLED: "false",
+      }),
+    ).toThrow("FORBIDDEN_IN_PRODUCTION:RESOURCEFS_PROXY_ENABLED");
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
         DEV_AUTH_USER_A_ID: "copied-development-user",
       }),
     ).toThrow("FORBIDDEN_IN_PRODUCTION:DEV_AUTH_USER_A_ID");
@@ -287,5 +293,39 @@ describe("API 进程入口", () => {
         DATABASE_URL: "postgresql://runtime:credential@database/runtime?sslmode=require",
       }),
     ).toThrow("PRODUCTION_DATABASE_TRANSPORT_INVALID");
+  });
+
+  it("ResourceFS Sidecar 仅在 development 显式完整配置时启用", () => {
+    expect(parseApiProcessEnvironment(developmentEnvironment())).not.toHaveProperty(
+      "developmentResourceFilesystemProxy",
+    );
+    expect(() =>
+      parseApiProcessEnvironment(developmentEnvironment({ RESOURCEFS_PROXY_ENABLED: "true" })),
+    ).toThrow("ResourceFS Sidecar 配置不完整");
+    expect(() =>
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          RESOURCEFS_PROXY_ENABLED: "false",
+          RESOURCEFS_PROXY_LISTEN_HOST: "192.0.2.10",
+        }),
+      ),
+    ).toThrow("不得配置 Sidecar 字段");
+    expect(
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          RESOURCEFS_PROXY_ENABLED: "true",
+          RESOURCEFS_PROXY_LISTEN_HOST: "192.0.2.10",
+          RESOURCEFS_PROXY_LISTEN_PORT: "13443",
+          RESOURCEFS_PROXY_TLS_KEY_PATH: "C:/development/resourcefs/server.key",
+          RESOURCEFS_PROXY_TLS_CERT_PATH: "C:/development/resourcefs/server.crt",
+        }),
+      ).developmentResourceFilesystemProxy,
+    ).toEqual({
+      listenHost: "192.0.2.10",
+      listenPort: 13443,
+      upstream: "http://127.0.0.1:3001",
+      privateKeyPath: "C:/development/resourcefs/server.key",
+      certificatePath: "C:/development/resourcefs/server.crt",
+    });
   });
 });

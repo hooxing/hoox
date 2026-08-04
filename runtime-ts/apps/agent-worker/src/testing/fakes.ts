@@ -1018,6 +1018,7 @@ export class FakeSandboxRegistry implements SandboxSessionRegistryPort, OrphanSa
 
 export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecyclePort {
   acquireCount = 0;
+  readonly resourceFilesystemRequirements: boolean[] = [];
   attestCount = 0;
   terminalEffectCount = 0;
   terminateCount = 0;
@@ -1033,8 +1034,11 @@ export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecycle
     leaseEpoch: 1,
   };
 
-  async acquire(): Promise<ThreadSandboxAcquireResult> {
+  async acquire(
+    input: Parameters<ThreadSandboxSessionLifecyclePort["acquire"]>[0],
+  ): Promise<ThreadSandboxAcquireResult> {
     this.acquireCount += 1;
+    this.resourceFilesystemRequirements.push(input.requiresResourceFilesystem);
     if (this.nextAcquire !== undefined) {
       const result = this.nextAcquire;
       this.nextAcquire = undefined;
@@ -1049,6 +1053,7 @@ export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecycle
         sandbox: this.handle,
       },
       lease: this.lease,
+      resourceFilesystemMounted: input.requiresResourceFilesystem,
       requiresMaterialization: true,
       source: "cold_created",
     };

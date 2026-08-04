@@ -79,6 +79,8 @@ loopback HTTP upstream。
 - 将 Sidecar 进程纳入本地开发进程管理器，避免宿主重启后遗漏启动；
 - 生产环境继续使用受管理的 TLS 入口，不复用开发 CA 或私钥。
 
+第一项已由 ADR-0107 完成：development API 现在托管 Sidecar 的启动、readiness 与关闭。
+
 ## 实施记录
 
 - 2026-08-04：Sidecar、开发证书信任和真实 Resource Volume 冒烟验证完成；重新启用本地 Thread Session reuse。

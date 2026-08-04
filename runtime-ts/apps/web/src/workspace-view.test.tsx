@@ -437,7 +437,7 @@ describe("工作台展示组件", () => {
     }
   });
 
-  it("状态栏只展示当前状态，思考内容在 Agent 对话中实时展开", () => {
+  it("状态栏只展示当前状态，思考内容在 Agent 对话中默认折叠", () => {
     const baseEvents: readonly RunEvent[] = [
       {
         eventId: "thinking-start",
@@ -491,7 +491,7 @@ describe("工作台展示组件", () => {
     expect(activeStatusHtml).not.toContain("run-progress-track");
     expect(activeStatusHtml).not.toContain("先检查依赖，再生成文档。");
     expect(activeDetails.closest(".assistant-message")).not.toBeNull();
-    expect(activeDetails.open).toBe(true);
+    expect(activeDetails.open).toBe(false);
     expect(activeSummary.textContent).toContain("正在思考");
     expect(activeSummary.textContent).not.toContain("展开");
     expect(activeSummary.textContent).not.toContain("收起");
@@ -560,7 +560,37 @@ describe("工作台展示组件", () => {
     expect(html.indexOf("思考已完成")).toBeLessThan(html.indexOf("这是最终回答。"));
   });
 
-  it("思考结束时自动折叠，之后仍可手工展开，异常终态不会伪装成仍在思考", () => {
+  it("同一历史 Run 的多段回答只渲染一个 Agent 身份", () => {
+    const html = renderToStaticMarkup(
+      <ThreadTranscript
+        messages={[
+          {
+            sequence: 1,
+            runId: "run-history",
+            role: "assistant",
+            text: "第一段回答。",
+            createdAt: "2026-08-03T00:00:00.000Z",
+          },
+          {
+            sequence: 2,
+            runId: "run-history",
+            role: "assistant",
+            text: "第二段回答。",
+            createdAt: "2026-08-03T00:00:01.000Z",
+          },
+        ]}
+      />,
+    );
+    const container = document.createElement("div");
+    container.innerHTML = html;
+
+    expect(container.querySelectorAll(".assistant-message")).toHaveLength(1);
+    expect(container.querySelectorAll(".message-avatar")).toHaveLength(1);
+    expect(container.textContent).toContain("第一段回答。");
+    expect(container.textContent).toContain("第二段回答。");
+  });
+
+  it("思考始终默认折叠，手工展开后更新不抢夺选择，异常终态不会伪装成仍在思考", () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     const liveEvents: readonly RunEvent[] = [
@@ -585,6 +615,11 @@ describe("工作台展示组件", () => {
     act(() => root.render(<RunTranscript run={running} events={liveEvents} />));
     const details = container.querySelector<HTMLDetailsElement>(".run-thinking");
     if (details === null) throw new Error("未渲染思考披露区");
+    expect(details.open).toBe(false);
+
+    const liveSummary = details.querySelector("summary");
+    if (liveSummary === null) throw new Error("未渲染实时思考摘要按钮");
+    act(() => liveSummary.click());
     expect(details.open).toBe(true);
 
     const updatedLiveEvents: readonly RunEvent[] = [
@@ -616,13 +651,11 @@ describe("工作台展示组件", () => {
       },
     ];
     act(() => root.render(<RunTranscript run={running} events={completedEvents} />));
-    expect(details.open).toBe(false);
+    expect(details.open).toBe(true);
     expect(details.classList).toContain("is-completed");
 
     const summary = details.querySelector("summary");
     if (summary === null) throw new Error("未渲染思考摘要按钮");
-    act(() => summary.click());
-    expect(details.open).toBe(true);
     expect(summary.textContent).toBe("思考已完成");
 
     act(() =>
@@ -648,7 +681,7 @@ describe("工作台展示组件", () => {
     act(() =>
       root.render(<RunTranscript run={{ ...running, status: "failed" }} events={liveEvents} />),
     );
-    expect(details.open).toBe(false);
+    expect(details.open).toBe(true);
     expect(details.classList).toContain("is-stopped");
     expect(details.textContent).toContain("思考已结束");
     expect(container.querySelector(".run-progress-track")).toBeNull();

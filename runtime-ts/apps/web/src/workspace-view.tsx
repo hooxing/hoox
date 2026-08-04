@@ -31,7 +31,12 @@ import {
   type ThreadContextMessage,
   type ThreadContinuityStatus,
 } from "./api.js";
-import { buildRunProgress } from "./event-view.js";
+import {
+  buildConversationBlocks,
+  buildRunProgress,
+  type ConversationBlock,
+  type ToolAction,
+} from "./event-view.js";
 import { AssistantMarkdown } from "./markdown-view.js";
 
 /** waiting 仍可取消，但不代表 Worker 正在执行。 */
@@ -120,13 +125,6 @@ function RunThinkingPanel({
   const contentId = useId();
 
   useEffect(() => {
-    // 每段实时思考自动展开，收到终态或 Run 先行结束时自动折叠；终态下的手工选择随后保持不变。
-    const details = detailsRef.current;
-    if (details !== null) details.open = visibleStatus === "running";
-    if (visibleStatus === "running") followLatestRef.current = true;
-  }, [visibleStatus]);
-
-  useEffect(() => {
     // text 只作为增量触发器；用户已向上阅读时不抢夺滚动位置。
     void text;
     const content = contentRef.current;
@@ -141,11 +139,7 @@ function RunThinkingPanel({
   }, [text, visibleStatus]);
 
   return (
-    <details
-      ref={detailsRef}
-      className={`run-thinking is-${visibleStatus}`}
-      open={visibleStatus === "running"}
-    >
+    <details ref={detailsRef} className={`run-thinking is-${visibleStatus}`}>
       <summary id={summaryId} aria-controls={contentId}>
         {isLive && (
           <LoaderCircle className="run-thinking-spinner spin" size={14} aria-hidden="true" />
@@ -237,6 +231,7 @@ export function RunTranscript({
   readonly events: readonly RunEvent[];
 }) {
   const progress = buildRunProgress(events);
+  const blocks = buildConversationBlocks(events);
   if (
     progress.thinking === undefined &&
     progress.finalMessage === undefined &&
@@ -245,24 +240,65 @@ export function RunTranscript({
     return null;
   return (
     <section className="assistant-transcript" aria-label="Agent 正文">
-      {(progress.thinking !== undefined || progress.finalMessage !== undefined) && (
-        <AssistantMessage
-          text={progress.finalMessage ?? ""}
-          contentBefore={
-            progress.thinking === undefined ? undefined : (
-              <RunThinkingPanel
-                text={progress.thinking.text}
-                status={progress.thinking.status}
-                run={run}
-              />
-            )
-          }
-        />
-      )}
+      {blocks.length > 0 && <AgentTurn run={run} blocks={blocks} />}
       {progress.waitingQuestion !== undefined && (
         <AssistantMessage label="需要你的输入" text={progress.waitingQuestion} />
       )}
     </section>
+  );
+}
+
+const toolActionText: Record<ToolAction, { running: string; completed: string; failed: string }> = {
+  search: { running: "正在搜索", completed: "已搜索", failed: "搜索失败" },
+  read: { running: "正在读取", completed: "已读取", failed: "读取失败" },
+  create: { running: "正在创建", completed: "已创建", failed: "创建失败" },
+  command: { running: "正在执行命令", completed: "已执行命令", failed: "命令执行失败" },
+  other: { running: "正在执行", completed: "已完成", failed: "执行失败" },
+};
+
+function ToolActivity({ block }: { readonly block: Extract<ConversationBlock, { type: "tool" }> }) {
+  return (
+    <div className={`tool-activity is-${block.status}`}>
+      {block.status === "running" ? (
+        <LoaderCircle className="spin" size={14} aria-hidden="true" />
+      ) : (
+        <ChevronRight size={14} aria-hidden="true" />
+      )}
+      <span>{toolActionText[block.action][block.status]}</span>
+      {block.title !== undefined && <strong>· {block.title}</strong>}
+    </div>
+  );
+}
+
+function AgentTurn({
+  run,
+  blocks,
+}: {
+  readonly run: Run;
+  readonly blocks: readonly ConversationBlock[];
+}) {
+  return (
+    <article className="message assistant-message agent-turn" aria-label="Agent">
+      <span className="message-avatar" aria-hidden="true">
+        A
+      </span>
+      <div className="message-card">
+        <span className="message-label">Agent</span>
+        <div className="agent-turn-blocks">
+          {blocks.map((block) =>
+            block.type === "thinking" ? (
+              <RunThinkingPanel key={block.id} text={block.text} status={block.status} run={run} />
+            ) : block.type === "answer" ? (
+              <div className="agent-answer-block" key={block.id}>
+                <AssistantMarkdown text={block.text} />
+              </div>
+            ) : (
+              <ToolActivity key={block.id} block={block} />
+            ),
+          )}
+        </div>
+      </div>
+    </article>
   );
 }
 
@@ -278,7 +314,8 @@ export function ThreadTranscript({
   readonly currentRunEvents?: readonly RunEvent[];
 }) {
   if (messages.length === 0 && pendingInputs.length === 0) return null;
-  const currentProgress = currentRun === undefined ? undefined : buildRunProgress(currentRunEvents);
+  const currentBlocks = currentRun === undefined ? [] : buildConversationBlocks(currentRunEvents);
+  const renderedAgentTurns = new Set<string>();
   return (
     <section className="assistant-transcript" aria-label="Thread 连续对话">
       {messages.map((message) =>
@@ -290,21 +327,36 @@ export function ThreadTranscript({
             </div>
           </article>
         ) : message.role === "assistant" ? (
-          <AssistantMessage
-            key={message.sequence}
-            text={message.text}
-            contentBefore={
-              currentRun !== undefined &&
-              message.runId === currentRun.id &&
-              currentProgress?.thinking !== undefined ? (
-                <RunThinkingPanel
-                  text={currentProgress.thinking.text}
-                  status={currentProgress.thinking.status}
-                  run={currentRun}
-                />
-              ) : undefined
+          (() => {
+            const turnKey = message.runId ?? `message-${message.sequence}`;
+            if (renderedAgentTurns.has(turnKey)) return null;
+            renderedAgentTurns.add(turnKey);
+            if (currentRun !== undefined && message.runId === currentRun.id) {
+              const blocks = currentBlocks.some((block) => block.type === "answer")
+                ? currentBlocks
+                : [
+                    ...currentBlocks,
+                    {
+                      id: `persisted-${message.sequence}`,
+                      type: "answer" as const,
+                      text: message.text,
+                      status: "completed" as const,
+                    },
+                  ];
+              return <AgentTurn key={message.sequence} run={currentRun} blocks={blocks} />;
             }
-          />
+            const text =
+              message.runId === undefined
+                ? message.text
+                : messages
+                    .filter(
+                      (candidate) =>
+                        candidate.role === "assistant" && candidate.runId === message.runId,
+                    )
+                    .map((candidate) => candidate.text)
+                    .join("\n\n");
+            return <AssistantMessage key={message.sequence} text={text} />;
+          })()
         ) : shouldDisplayRuntimeContextMessage(message.text) ? (
           <p className="runtime-context-notice" key={message.sequence}>
             {message.text}

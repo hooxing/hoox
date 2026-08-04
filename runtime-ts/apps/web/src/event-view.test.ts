@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRunProgress, toolActionLabel } from "./event-view.js";
+import { buildConversationBlocks, buildRunProgress, toolActionLabel } from "./event-view.js";
 
 const event = (sequence: number, type: string, payload: unknown) => ({
   eventId: `event-${sequence}`,
@@ -11,6 +11,42 @@ const event = (sequence: number, type: string, payload: unknown) => ({
 });
 
 describe("用户运行进度投影", () => {
+  it("按原始顺序保留多段思考、回答与工具状态", () => {
+    const blocks = buildConversationBlocks([
+      event(1, "thinking.delta", { delta: "先分析。" }),
+      event(2, "thinking.completed", {}),
+      event(3, "message.delta", { delta: "我先搜索资料。" }),
+      event(4, "message.completed", {}),
+      event(5, "tool.started", {
+        name: "web_search",
+        callId: "call-1",
+        presentation: { title: "AI 行业最新动态" },
+      }),
+      event(6, "tool.completed", { name: "web_search", callId: "call-1" }),
+      event(7, "message.delta", { delta: "资料已经整理完成。" }),
+    ]);
+
+    expect(blocks.map((block) => block.type)).toEqual(["thinking", "answer", "tool", "answer"]);
+    expect(blocks[2]).toMatchObject({
+      type: "tool",
+      action: "search",
+      title: "AI 行业最新动态",
+      status: "completed",
+    });
+  });
+
+  it("不把工具原始参数作为展示标题", () => {
+    const blocks = buildConversationBlocks([
+      event(1, "tool.started", {
+        name: "exec_command",
+        callId: "call-secret",
+        command: "包含敏感信息的命令",
+      }),
+    ]);
+
+    expect(blocks).toMatchObject([{ type: "tool", action: "command", status: "running" }]);
+    expect(JSON.stringify(blocks)).not.toContain("包含敏感信息的命令");
+  });
   it("将工具调用投影为用户可理解动作，并忽略内部生命周期", () => {
     const progress = buildRunProgress([
       event(1, "model_execution_started", { trace: "不应显示" }),

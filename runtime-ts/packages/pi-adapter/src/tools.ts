@@ -26,6 +26,9 @@ const IMAGE_SNIFF_BYTES = 4_100;
 const INVALID_ARGUMENT_PATH_PREFIX = "/workspace/.runtime-invalid/";
 const strictSchema = { additionalProperties: false } as const;
 const sandboxFileMutationQueues = new WeakMap<SandboxHandle, Map<string, Promise<void>>>();
+const SANDBOX_INFRASTRUCTURE_FAILURE_LIMIT = 3;
+export type ToolContinuationFailure = "SANDBOX_FAILED";
+type RejectModelContinuation = (failure?: ToolContinuationFailure) => void;
 const ExecCommandArgumentsSchema = Type.Object(
   {
     cmd: Type.String({ minLength: 1 }),
@@ -149,7 +152,7 @@ export function createObservedSandboxTools(
       readonly toolName: string;
     }): Promise<ToolObservationResult>;
   },
-  rejectModelContinuation: () => void = () => undefined,
+  rejectModelContinuation: RejectModelContinuation = () => undefined,
 ): {
   readonly tools: ReturnType<typeof createSandboxTools>;
   readonly outputs: ControlledToolReceiptSource;
@@ -197,8 +200,9 @@ function createSandboxToolsInternal(
   sandbox: SandboxToolTarget,
   authorizer: SandboxToolEffectAuthorizer,
   capture?: (callId: string, name: string, text: string) => Promise<ToolObservationResult>,
-  rejectModelContinuation: () => void = () => undefined,
+  rejectModelContinuation: RejectModelContinuation = () => undefined,
 ) {
+  const execInfrastructureCircuit = createSandboxInfrastructureCircuit();
   const execArguments = createSchemaInvalidArgumentsBridge<ExecCommandArguments>(
     ExecCommandArgumentsSchema,
     (token) => ({ cmd: token }),
@@ -223,7 +227,14 @@ function createSandboxToolsInternal(
     (value) => value.path.slice(INVALID_ARGUMENT_PATH_PREFIX.length),
   );
   return [
-    createExecCommandTool(sandbox, authorizer, execArguments, capture, rejectModelContinuation),
+    createExecCommandTool(
+      sandbox,
+      authorizer,
+      execArguments,
+      capture,
+      rejectModelContinuation,
+      execInfrastructureCircuit,
+    ),
     createReadTool(sandbox, authorizer, readArguments, capture, rejectModelContinuation),
     createEditTool(sandbox, authorizer, editArguments, capture, rejectModelContinuation),
     createWriteTool(sandbox, authorizer, writeArguments, capture, rejectModelContinuation),
@@ -237,7 +248,8 @@ function createExecCommandTool(
   capture:
     | ((callId: string, name: string, text: string) => Promise<ToolObservationResult>)
     | undefined,
-  rejectModelContinuation: () => void,
+  rejectModelContinuation: RejectModelContinuation,
+  infrastructureCircuit: SandboxInfrastructureCircuit,
 ) {
   // TODO(codex-alignment): 同步 MVP 暂无 PTY、yield/session、write_stdin、shell/login 参数；
   // 即使允许最长 1 小时，长任务仍未对齐 Codex 返回 session_id 后 wait/write_stdin 的可恢复会话模式。
@@ -261,6 +273,11 @@ function createExecCommandTool(
           JSON.stringify({ code: "EXEC_INVALID_ARGUMENTS", message: "exec_command 参数无效" }),
         );
       }
+      if (infrastructureCircuit.isOpen()) {
+        await persistReceipt(callId, "exec_command", "failed", capture);
+        rejectModelContinuation("SANDBOX_FAILED");
+        throw new Error(execUnavailableError());
+      }
       let effectRejected = false;
       let result: ExecCommandResult;
       try {
@@ -283,10 +300,20 @@ function createExecCommandTool(
           Math.max(0, performance.now() - startedAt),
           maxOutputTokens,
         );
+        infrastructureCircuit.recordSuccess();
       } catch (error) {
         effectRejected = error instanceof ToolEffectRejectedError;
         await persistReceipt(callId, "exec_command", "failed", capture);
         if (effectRejected) rejectModelContinuation();
+        if (
+          !effectRejected &&
+          isSandboxInfrastructureFailure(error) &&
+          infrastructureCircuit.recordFailure()
+        ) {
+          // 同一 Sandbox 的命令数据面连续失败后不会靠模型改写命令恢复；持久化第三个
+          // 失败回执后关闭下一次 Provider 请求，避免无界消耗 token 和副作用许可。
+          rejectModelContinuation("SANDBOX_FAILED");
+        }
         throw new Error(projectInfrastructureError(error, timeoutMs));
       }
       await persistReceipt(callId, "exec_command", "succeeded", capture);
@@ -305,7 +332,7 @@ function createReadTool(
   capture:
     | ((callId: string, name: string, text: string) => Promise<ToolObservationResult>)
     | undefined,
-  rejectModelContinuation: () => void,
+  rejectModelContinuation: RejectModelContinuation,
 ) {
   return defineTool({
     name: "read",
@@ -408,7 +435,7 @@ function createEditTool(
   capture:
     | ((callId: string, name: string, text: string) => Promise<ToolObservationResult>)
     | undefined,
-  rejectModelContinuation: () => void,
+  rejectModelContinuation: RejectModelContinuation,
 ) {
   return defineTool({
     name: "edit",
@@ -483,7 +510,7 @@ function createWriteTool(
   capture:
     | ((callId: string, name: string, text: string) => Promise<ToolObservationResult>)
     | undefined,
-  rejectModelContinuation: () => void,
+  rejectModelContinuation: RejectModelContinuation,
 ) {
   return defineTool({
     name: "write",
@@ -958,7 +985,36 @@ function projectInfrastructureError(error: unknown, timeoutMs: number): string {
       return JSON.stringify({ code: "EXEC_INVALID_ARGUMENT", message: error.message });
     }
   }
+  return execUnavailableError();
+}
+
+function execUnavailableError(): string {
   return JSON.stringify({ code: "EXEC_UNAVAILABLE", message: "CubeSandbox 命令服务暂时不可用" });
+}
+
+interface SandboxInfrastructureCircuit {
+  isOpen(): boolean;
+  recordFailure(): boolean;
+  recordSuccess(): void;
+}
+
+function createSandboxInfrastructureCircuit(): SandboxInfrastructureCircuit {
+  let failures = 0;
+  return Object.freeze({
+    isOpen: () => failures >= SANDBOX_INFRASTRUCTURE_FAILURE_LIMIT,
+    recordFailure: () => {
+      failures += 1;
+      return failures >= SANDBOX_INFRASTRUCTURE_FAILURE_LIMIT;
+    },
+    recordSuccess: () => {
+      failures = 0;
+    },
+  });
+}
+
+function isSandboxInfrastructureFailure(error: unknown): boolean {
+  if (!(error instanceof SandboxRuntimeError)) return true;
+  return !["TIMEOUT", "CANCELLED", "INVALID_ARGUMENT"].includes(error.code);
 }
 
 function canonicalJson(value: unknown): string {

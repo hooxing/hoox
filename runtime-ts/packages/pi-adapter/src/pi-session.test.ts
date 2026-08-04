@@ -1,5 +1,6 @@
 import type { TokenizerPort } from "@cube-runtime/context-policy";
 import { buildToolCapabilityManifest } from "@cube-runtime/prompt-builder";
+import { SandboxRuntimeError } from "@cube-runtime/sandbox";
 import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import {
   type FauxProviderHandle,
@@ -22,9 +23,10 @@ import {
   createSafePiSession,
   digestCanonicalToolInputSchema,
   type PiSessionController,
+  SandboxToolCircuitOpenError,
 } from "./pi-session.js";
+import { type ThreadActiveHistoryV1, threadActiveHistoryDigest } from "./thread-history.js";
 import { SANDBOX_TOOL_NAMES } from "./tools.js";
-import { threadActiveHistoryDigest, type ThreadActiveHistoryV1 } from "./thread-history.js";
 
 const disposers: Array<() => void> = [];
 afterEach(() => {
@@ -971,6 +973,31 @@ describe("Pi 安全适配", () => {
     expect(events).toContainEqual(
       expect.objectContaining({ type: "tool.completed", isError: true }),
     );
+  });
+
+  it("exec_command 连续三次基础设施失败后阻止第四次 Provider 请求", async () => {
+    const sandbox = new FakeSandboxHandle("pi-exec-circuit");
+    let sandboxCalls = 0;
+    sandbox.command = async () => {
+      sandboxCalls += 1;
+      throw new SandboxRuntimeError("UPSTREAM", "private data-plane detail");
+    };
+    const toolTurn = (suffix: string) =>
+      fauxAssistantMessage(fauxToolCall("exec_command", { cmd: `echo ${suffix}` }), {
+        stopReason: "toolUse",
+      });
+    const { controller, faux, events } = await harness(
+      [toolTurn("one"), toolTurn("two"), toolTurn("three"), toolTurn("must-not-reach")],
+      sandbox,
+    );
+
+    await expect(controller.prompt("执行命令")).rejects.toBeInstanceOf(SandboxToolCircuitOpenError);
+
+    expect(sandboxCalls).toBe(3);
+    expect(faux.state.callCount).toBe(3);
+    expect(
+      events.filter((event) => event.type === "tool.completed" && event.name === "exec_command"),
+    ).toHaveLength(3);
   });
 
   it.runIf(process.platform === "linux")(

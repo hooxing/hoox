@@ -140,6 +140,7 @@ try {
     "AGENT_WORKER_POLL_INTERVAL_MS=1000",
     "AGENT_WORKER_DISPATCH_LEASE_MS=30000",
     "AGENT_WORKER_RUN_LEASE_MS=30000",
+    "AGENT_WORKER_RUN_TIMEOUT_MS=900000",
     "PROCESS_SHUTDOWN_TIMEOUT_MS=15000",
   ];
   const environmentArguments = baseEnvironment.flatMap((value) => ["--env", value]);

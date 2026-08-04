@@ -52,37 +52,37 @@ import {
   PgSimpleDeliveredFileRepository,
   SimpleArtifactDeliveryService,
 } from "../../runtime-ts/packages/artifact/src/index.js";
-import { DeliverFileToolRouterFactory } from "../../runtime-ts/packages/tool-router/src/deliver-file.js";
 import {
+  type BlobCommitSnapshot,
+  type BlobStore,
+  type CreateS3BlobStoreConfig,
+  createDurableTraceBlobPersistence,
   createS3BlobStore,
   createS3RetiredBlobTombstoneScrubber,
   createS3StableBlobGarbageCollector,
-  createDurableTraceBlobPersistence,
   DurableResourceBlobWriter,
   PgBackedSandboxSessionRegistry,
   PgExecutionPersistence,
   PgModelWireTraceCleanupRepository,
   PgModelWireTraceRepository,
   PgRunDispatchOutbox,
-  sha256Hex,
-  transitionBlobCommit,
-  type BlobCommitSnapshot,
-  type BlobStore,
-  type CreateS3BlobStoreConfig,
   type StableBlobLifecycleAllocation,
   type StableBlobRef,
   type StagedBlobRef,
+  sha256Hex,
   type TenantBlobScope,
+  transitionBlobCommit,
 } from "../../runtime-ts/packages/persistence/src/index.js";
-import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
-import { PgToolObservationRolloutAdapter } from "../../runtime-ts/packages/persistence/src/tool-observation-rollout-adapter.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
+import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
 import {
   createPostgresPool,
   type Pool,
   withTenantTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
+import { PgToolObservationRolloutAdapter } from "../../runtime-ts/packages/persistence/src/tool-observation-rollout-adapter.js";
+import { DeliverFileToolRouterFactory } from "../../runtime-ts/packages/tool-router/src/deliver-file.js";
 
 function requiredEnvironment(name: string): string {
   const value = process.env[name];
@@ -597,6 +597,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
           AGENT_WORKER_POLL_INTERVAL_MS: "100",
           AGENT_WORKER_DISPATCH_LEASE_MS: "30000",
           AGENT_WORKER_RUN_LEASE_MS: "30000",
+          AGENT_WORKER_RUN_TIMEOUT_MS: "900000",
           DEV_AUTH_ENABLED: "true",
           DEV_AUTH_USER_A_TENANT_ID: scopeA.tenantId,
           PROCESS_SHUTDOWN_TIMEOUT_MS: "5000",

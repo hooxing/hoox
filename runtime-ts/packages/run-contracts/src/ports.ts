@@ -768,7 +768,7 @@ export type AgentTurnOutcome =
   | {
       /** Tool Observation 未形成可恢复的 durable 事实；本 Attempt 不能继续成功。 */
       readonly kind: "recovery_required";
-      readonly code: "PERSISTENCE_UNAVAILABLE" | "IDEMPOTENCY_CONFLICT";
+      readonly code: "PERSISTENCE_UNAVAILABLE" | "IDEMPOTENCY_CONFLICT" | "SANDBOX_FAILED";
     }
   | {
       readonly kind: "waiting";

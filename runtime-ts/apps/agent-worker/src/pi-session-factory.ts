@@ -11,25 +11,26 @@ import {
 } from "@cube-runtime/context-policy";
 import { sha256Digest, type TenantId } from "@cube-runtime/domain";
 import {
-  bindTrustedPiModelContextCapability,
   assessSafePiSessionContext,
+  bindTrustedPiModelContextCapability,
   ContextBudgetAdmissionError,
   type ControlledRolloutProjection,
   createSafePiSession,
   deriveSafePiSessionCompatibility,
   type PiSessionController,
-  type TrustedPiModelContextCapability,
+  SandboxToolCircuitOpenError,
   type ThreadActiveHistoryV1,
+  type TrustedPiModelContextCapability,
 } from "@cube-runtime/pi-adapter";
-import type { DeliverFileToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import {
   assertRunSkillSnapshot,
   digestRunSkillSnapshot,
-  SkillRuntimeError,
   type RunSkillSnapshot,
   type SkillExecutionBinding,
+  SkillRuntimeError,
   type SkillRuntimeService,
 } from "@cube-runtime/skill";
+import type { DeliverFileToolRouterFactoryPort } from "@cube-runtime/tool-router";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
@@ -596,6 +597,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         } catch (error) {
           if (observationRecoveryCode !== undefined) {
             return { kind: "recovery_required", code: observationRecoveryCode };
+          }
+          if (error instanceof SandboxToolCircuitOpenError) {
+            return { kind: "recovery_required", code: "SANDBOX_FAILED" };
           }
           if (error instanceof ContextBudgetAdmissionError)
             return { kind: "context_too_large", action: "rebuild_context" };

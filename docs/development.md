@@ -68,7 +68,25 @@ corepack pnpm config:check
 
 需要测试 Skill Center 时，可显式执行 `pnpm dev:skill:publish:pptx`。该命令只接受 `RUNTIME_ENV=development`，把固定提交的 Anthropic PPTX 测试包幂等写入私有对象存储并原子发布到受管目录；API 启动不会隐式发布目录内容。该 fixture 受专有许可证约束，不属于生产目录或发布制品。
 
+PPTX Skill 宣称预装的 Node.js、`pptxgenjs`、图标渲染和 LibreOffice/Poppler 依赖必须由 Sandbox 模板提供，不能在 Run 内临时安装。开发模板从 `deploy/cubesandbox/agent-sandbox-pptx.Dockerfile` 构建；发布镜像后用 CubeSandbox `Template.build({ image })` 创建不可变模板，并把返回的模板 ID 写入本地 `.env` 的 `CUBESANDBOX_TEMPLATE_ID`。基础镜像使用摘要固定，Node 模块使用精确版本；每次发布使用新的不可变镜像标签，不在既有标签上依赖 `Template.rebuild` 刷新。命令服务会净化进程环境，因此模板同时提供根级 `/node_modules` 解析路径，不能只依赖镜像中的 `NODE_PATH`。旧模板保留到新模板完成真实 `.pptx` 生成及 pause/resume 冒烟后再回收。
+
 `agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 必须严格等于 `DEV_AUTH_USER_A_TENANT_ID`，保证 `dev-user-a` 的 Web/API 创建结果由同一 Worker 消费。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
+
+VMware 内的 Cubelet 需要挂载附件时，不能直接访问只监听 Windows loopback 的 API。先为宿主虚拟网卡生成独立的
+开发 TLS 证书，把 CA 公钥安装到 Cubelet 节点系统信任库，再随 API 启动最小 ResourceFS Sidecar：
+
+```powershell
+$env:RESOURCEFS_PROXY_LISTEN_HOST='<VMware host-only 宿主地址>'
+$env:RESOURCEFS_PROXY_LISTEN_PORT='<HTTPS 端口>'
+$env:RESOURCEFS_PROXY_UPSTREAM='http://127.0.0.1:3001'
+$env:RESOURCEFS_PROXY_TLS_KEY_PATH='<未提交的 server.key 绝对路径>'
+$env:RESOURCEFS_PROXY_TLS_CERT_PATH='<未提交的 server.crt 绝对路径>'
+node scripts/development-resourcefs-proxy.mjs
+```
+
+Sidecar 只接受 `/v1/resource-filesystem`，不得用它转发其他 API 路由。证书、CA 私钥和日志必须放在 `.arts` 等
+忽略目录。节点 endpoint 使用该证书覆盖的 HTTPS 地址；未携带 ResourceFS capability 的探针应快速返回 401，
+而不是超时。配置与安全边界见 [ADR-0105](decisions/0105-development-resourcefs-https-sidecar.md)。
 
 production Worker 使用 `pnpm --filter @cube-runtime/agent-worker start:production` 或 `Dockerfile.production-worker-gate`，仅支持 Linux。公开入口固定模块内真实装配，不接受调用方注入的 Fake，且不改写 `runtimeEnvironment=production`；通用 `process-runtime` 只是受信代码的生命周期编排器，不是 JS 进程内调用方 ACL。启动前必须验证 `DATABASE_RUNTIME_ROLE`、部署 Tenant 分片、严格模型元数据和 TLS 端点；任一 `DEV_AUTH_*` 变量（包括 `DEV_AUTH_ENABLED=false`）都会失败关闭。生产装配已经接入持久化 Workspace revision/Artifact 发布闭环，但这不替代真实基础设施验收。
 

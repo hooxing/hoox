@@ -6,6 +6,13 @@ import {
   type PublishArtifactCommand,
 } from "@cube-runtime/artifact";
 import { artifactId, resourceId, resourceVersionId, sha256Digest } from "@cube-runtime/domain";
+import { SandboxRuntimeError } from "@cube-runtime/sandbox";
+import {
+  digestRunSkillSnapshot,
+  type SkillInvocationTarget,
+  type SkillRuntimeRepository,
+  SkillRuntimeService,
+} from "@cube-runtime/skill";
 import {
   type ArtifactPublicationResourcePort,
   ArtifactToolRouterFactory,
@@ -19,12 +26,6 @@ import {
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import {
-  SkillRuntimeService,
-  digestRunSkillSnapshot,
-  type SkillInvocationTarget,
-  type SkillRuntimeRepository,
-} from "@cube-runtime/skill";
 import { describe, expect, it, vi } from "vitest";
 import {
   createDurableObservationRecorderFactory,
@@ -930,6 +931,74 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       expect(faux.state.callCount).toBe(1);
     },
   );
+
+  it("exec_command 数据面连续失败时三次熔断并进入可结束的恢复态", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-exec-infrastructure-circuit"));
+    const sandboxes = new FakeSandboxRegistry();
+    let commandCalls = 0;
+    sandboxes.handle.command = async () => {
+      commandCalls += 1;
+      throw new SandboxRuntimeError("UPSTREAM", "private CubeProxy detail");
+    };
+    const faux = fauxProvider({
+      api: `faux-worker-exec-circuit-${Date.now()}`,
+      provider: `faux-worker-exec-circuit-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    const commandTurn = (suffix: string) =>
+      fauxAssistantMessage(fauxToolCall("exec_command", { cmd: `echo ${suffix}` }), {
+        stopReason: "toolUse",
+      });
+    faux.setResponses([
+      commandTurn("one"),
+      commandTurn("two"),
+      commandTurn("three"),
+      commandTurn("must-not-reach"),
+    ]);
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+    });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      (_input, outputs) => ({
+        recordStarted: async () => "recorded" as const,
+        record: async (call) => {
+          const observation = await outputs.readControlledReceipt(call);
+          return observation === undefined
+            ? { outcome: "conflict" as const }
+            : { outcome: "recorded" as const, observation, isTruncated: false };
+        },
+      }),
+    );
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: "pi-exec-circuit-worker", runTimeoutMs: 60_000 },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "SANDBOX_FAILED",
+    });
+    expect(commandCalls).toBe(3);
+    expect(faux.state.callCount).toBe(3);
+    expect(sandboxes.settleCount).toBe(1);
+    expect(persistence.record(scope).attempt?.status).toBe("recovery_required");
+  });
 
   it.skip("旧 Artifact 工具授权链路已由 deliver_file 纵向用例替代", async () => {
     let artifactCalls = 0;

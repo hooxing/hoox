@@ -958,6 +958,7 @@ export class FakeRevisionVerifier implements WorkspaceRevisionVerifierPort {
 
 export class FakeSandboxRegistry implements SandboxSessionRegistryPort, OrphanSandboxCleanupPort {
   acquireCount = 0;
+  readonly acquireResourceFilesystemRequirements: boolean[] = [];
   settleCount = 0;
   nextAcquire: SandboxAcquireResult | undefined;
   nextSettlement: SandboxSettlementResult | undefined;
@@ -968,8 +969,11 @@ export class FakeSandboxRegistry implements SandboxSessionRegistryPort, OrphanSa
   readonly handle = new FakeSandboxHandle("worker-fake");
   private known = false;
 
-  async acquire(): Promise<SandboxAcquireResult> {
+  async acquire(
+    input: Parameters<SandboxSessionRegistryPort["acquire"]>[0],
+  ): Promise<SandboxAcquireResult> {
     this.acquireCount += 1;
+    this.acquireResourceFilesystemRequirements.push(input.requiresResourceFilesystem);
     await this.beforeAcquireReturn?.();
     if (this.nextAcquire) {
       const result = this.nextAcquire;

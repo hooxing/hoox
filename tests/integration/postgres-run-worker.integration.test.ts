@@ -4058,6 +4058,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     const acquired = await registry.acquire({
       scope: f.scope,
       signal: new AbortController().signal,
+      requiresResourceFilesystem: false,
     });
     if (acquired.outcome !== "ready") throw new Error("registry acquire 失败");
     const orphanKey = `registry:${acquired.session.registryId}:orphan-cleanup`;
@@ -4215,6 +4216,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     const acquired = await registry.acquire({
       scope: f.scope,
       signal: new AbortController().signal,
+      requiresResourceFilesystem: false,
     });
     if (acquired.outcome !== "ready") throw new Error("registry acquire 失败");
 

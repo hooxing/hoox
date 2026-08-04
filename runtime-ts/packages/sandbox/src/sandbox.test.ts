@@ -1,3 +1,4 @@
+import { ApiError } from "@cubesandbox/sdk";
 import { describe, expect, it, vi } from "vitest";
 import {
   CubeSandboxGateway,
@@ -321,6 +322,37 @@ describe("Sandbox 稳定适配契约", () => {
     );
     await expect(gateway.create({ templateId: "tpl" })).rejects.toMatchObject({ code: "TIMEOUT" });
     expect(killed).toHaveBeenCalledOnce();
+    expect(events).toEqual([]);
+  });
+
+  it("ResourceFS Volume attach 被 CubeMaster 明确拒绝时不误报 UNKNOWN", async () => {
+    const events: unknown[] = [];
+    const sdk = fakeSdk({
+      create: vi.fn(async () => {
+        throw new ApiError(
+          'CubeMaster returned error code 130545: plugin_volume "tenant-a" (driver=runtime-resourcefs): attach: {"error":"RESOURCEFS_VOLUME_PLUGIN_FAILED"}',
+          500,
+        );
+      }),
+      listV2: vi.fn(async () => []),
+    });
+    const gateway = new CubeSandboxGateway(
+      {
+        apiUrl: "http://cube",
+        onUncertainLifecycle: (event) => {
+          events.push(event);
+        },
+      },
+      sdk,
+    );
+
+    await expect(
+      gateway.create({
+        templateId: "tpl",
+        volumeMounts: [{ name: "tenant-a", path: "/resources" }],
+      }),
+    ).rejects.toMatchObject({ code: "RESOURCE_VOLUME_FAILED" });
+    expect(sdk.listV2).toHaveBeenCalledTimes(3);
     expect(events).toEqual([]);
   });
 

@@ -151,6 +151,9 @@ export class CubeSandboxGateway implements SandboxGateway {
       if (mapped.code === "AUTHENTICATION" || mapped.code === "NOT_FOUND") throw mapped;
       if (await this.reconcileFailedCreate(requestId, ttlSeconds, effectiveControl.timeoutMs))
         throw mapped;
+      // CubeMaster 已明确报告 Volume attach 失败；对账未发现 Sandbox 后可按
+      // failed_not_applied 收敛。网络失败及普通 5xx 仍可能丢失成功响应，必须保留 UNKNOWN。
+      if (mapped.code === "RESOURCE_VOLUME_FAILED") throw mapped;
       await this.recordUnknownCreate({
         stage: "create_response",
         requestId,

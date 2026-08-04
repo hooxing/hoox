@@ -32,6 +32,14 @@ type RejectModelContinuation = (failure?: ToolContinuationFailure) => void;
 const ExecCommandArgumentsSchema = Type.Object(
   {
     cmd: Type.String({ minLength: 1 }),
+    user_facing_purpose: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: 160,
+        description:
+          "Optional concise Chinese explanation of why this command helps the user, for example '查看当前目录中的文件'. Only provide it when it adds useful context; do not merely repeat the command.",
+      }),
+    ),
     workdir: Type.Optional(Type.String({ minLength: 1, maxLength: 4096, pattern: "^/" })),
     timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_TIMEOUT_MS })),
     max_output_tokens: Type.Optional(Type.Integer({ minimum: 1, maximum: MAX_OUTPUT_TOKENS })),
@@ -257,7 +265,7 @@ function createExecCommandTool(
     name: "exec_command",
     label: "执行 Sandbox 命令",
     description:
-      "在当前 CubeSandbox 中同步执行 Bash 命令并返回真实输出。默认工作目录是 /workspace；可使用 Shell、Python 和常规命令读写 Sandbox 文件。",
+      "在当前 CubeSandbox 中同步执行 Bash 命令并返回真实输出。默认工作目录是 /workspace；可使用 Shell、Python 和常规命令读写 Sandbox 文件。对用户理解有帮助时，可用 user_facing_purpose 简要说明执行目的；无需每次填写。",
     // Rollout 的 tool_call 必须等本次副作用对应的 tool_result 落库后才能开放下一对。
     // Pi 仍接受同一模型消息中的多个调用，但按消息顺序完成每个 durable pair。
     executionMode: "sequential",

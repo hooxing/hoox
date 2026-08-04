@@ -1,5 +1,10 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
+export type ToolPresentation = {
+  readonly action: "search" | "read" | "create" | "write" | "edit" | "command" | "other";
+  readonly title?: string;
+};
+
 export type RuntimeAgentEvent =
   | { type: "agent.started" }
   | { type: "agent.settled" }
@@ -8,7 +13,7 @@ export type RuntimeAgentEvent =
   | { type: "thinking.completed" }
   | { type: "message.delta"; delta: string }
   | { type: "message.completed"; stopReason: "stop" | "length" | "toolUse" }
-  | { type: "tool.started"; callId: string; name: string }
+  | { type: "tool.started"; callId: string; name: string; presentation?: ToolPresentation }
   | { type: "tool.updated"; callId: string; name: string }
   | { type: "tool.completed"; callId: string; name: string; isError: boolean }
   | {
@@ -104,8 +109,15 @@ export function mapPiEvent(event: AgentSessionEvent): RuntimeAgentEvent | undefi
         stopReason: event.message.stopReason,
       };
     }
-    case "tool_execution_start":
-      return { type: "tool.started", callId: event.toolCallId, name: event.toolName };
+    case "tool_execution_start": {
+      const presentation = projectToolPresentation(event.toolName, event.args);
+      return {
+        type: "tool.started",
+        callId: event.toolCallId,
+        name: event.toolName,
+        ...(presentation === undefined ? {} : { presentation }),
+      };
+    }
     case "tool_execution_update":
       return { type: "tool.updated", callId: event.toolCallId, name: event.toolName };
     case "tool_execution_end":
@@ -187,4 +199,32 @@ export function mapPiEvent(event: AgentSessionEvent): RuntimeAgentEvent | undefi
     default:
       return undefined;
   }
+}
+
+function projectToolPresentation(name: string, unsafeArgs: unknown): ToolPresentation | undefined {
+  const args =
+    typeof unsafeArgs === "object" && unsafeArgs !== null
+      ? (unsafeArgs as Readonly<Record<string, unknown>>)
+      : undefined;
+  const safeText = (value: unknown, maxLength = 160) =>
+    typeof value === "string" && value.trim().length > 0
+      ? value.trim().replace(/\s+/gu, " ").slice(0, maxLength)
+      : undefined;
+  const workspacePath = (value: unknown) => {
+    const path = safeText(value, 4096);
+    if (path === undefined) return undefined;
+    return path.replace(/^\/workspace\//u, "").slice(0, 240);
+  };
+  const filePresentation = (action: "read" | "write" | "edit") => {
+    const title = workspacePath(args?.path);
+    return { action, ...(title === undefined ? {} : { title }) };
+  };
+  if (name === "read") return filePresentation("read");
+  if (name === "write") return filePresentation("write");
+  if (name === "edit") return filePresentation("edit");
+  if (name === "exec_command") {
+    const purpose = safeText(args?.user_facing_purpose);
+    return { action: "command", ...(purpose === undefined ? {} : { title: purpose }) };
+  }
+  return undefined;
 }

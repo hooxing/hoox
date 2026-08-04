@@ -33,6 +33,7 @@ import {
 } from "./api.js";
 import {
   buildConversationBlocks,
+  buildConversationSections,
   buildRunProgress,
   type ConversationBlock,
   type ToolAction,
@@ -252,6 +253,8 @@ const toolActionText: Record<ToolAction, { running: string; completed: string; f
   search: { running: "正在搜索", completed: "已搜索", failed: "搜索失败" },
   read: { running: "正在读取", completed: "已读取", failed: "读取失败" },
   create: { running: "正在创建", completed: "已创建", failed: "创建失败" },
+  write: { running: "正在写入", completed: "已写入", failed: "写入失败" },
+  edit: { running: "正在修改", completed: "已修改", failed: "修改失败" },
   command: { running: "正在执行命令", completed: "已执行命令", failed: "命令执行失败" },
   other: { running: "正在执行", completed: "已完成", failed: "执行失败" },
 };
@@ -270,6 +273,53 @@ function ToolActivity({ block }: { readonly block: Extract<ConversationBlock, { 
   );
 }
 
+function ActivityGroup({
+  run,
+  items,
+}: {
+  readonly run: Run;
+  readonly items: readonly (
+    | Extract<ConversationBlock, { type: "thinking" }>
+    | Extract<ConversationBlock, { type: "tool" }>
+  )[];
+}) {
+  const runIsLive = run.status === "running" && run.executionStatus !== "recovery_required";
+  const active = runIsLive
+    ? [...items].reverse().find((item) => item.status === "running")
+    : undefined;
+  const completed = runIsLive ? items.filter((item) => item.status !== "running") : items;
+  const summary =
+    active?.type === "thinking"
+      ? "正在思考"
+      : active?.type === "tool"
+        ? `${toolActionText[active.action].running}${active.title === undefined ? "" : ` · ${active.title}`}`
+        : `执行过程 · 已完成 ${completed.length} 项`;
+  return (
+    <details className={`activity-group ${active === undefined ? "is-completed" : "is-running"}`}>
+      <summary>
+        {active === undefined ? (
+          <ChevronRight className="activity-group-chevron" size={14} aria-hidden="true" />
+        ) : (
+          <LoaderCircle className="spin" size={14} aria-hidden="true" />
+        )}
+        <strong>{summary}</strong>
+        {active !== undefined && completed.length > 0 && <span>已完成 {completed.length} 项</span>}
+      </summary>
+      {completed.length > 0 && (
+        <div className="activity-group-content">
+          {completed.map((item) =>
+            item.type === "thinking" ? (
+              <RunThinkingPanel key={item.id} text={item.text} status={item.status} run={run} />
+            ) : (
+              <ToolActivity key={item.id} block={item} />
+            ),
+          )}
+        </div>
+      )}
+    </details>
+  );
+}
+
 function AgentTurn({
   run,
   blocks,
@@ -277,6 +327,7 @@ function AgentTurn({
   readonly run: Run;
   readonly blocks: readonly ConversationBlock[];
 }) {
+  const sections = buildConversationSections(blocks);
   return (
     <article className="message assistant-message agent-turn" aria-label="Agent">
       <span className="message-avatar" aria-hidden="true">
@@ -285,15 +336,15 @@ function AgentTurn({
       <div className="message-card">
         <span className="message-label">Agent</span>
         <div className="agent-turn-blocks">
-          {blocks.map((block) =>
-            block.type === "thinking" ? (
-              <RunThinkingPanel key={block.id} text={block.text} status={block.status} run={run} />
-            ) : block.type === "answer" ? (
-              <div className="agent-answer-block" key={block.id}>
-                <AssistantMarkdown text={block.text} />
+          {sections.map((section) =>
+            section.type === "activity" ? (
+              <ActivityGroup key={section.id} run={run} items={section.items} />
+            ) : section.type === "answer" ? (
+              <div className="agent-answer-block" key={section.id}>
+                <AssistantMarkdown text={section.text} />
               </div>
             ) : (
-              <ToolActivity key={block.id} block={block} />
+              <ToolActivity key={section.id} block={section} />
             ),
           )}
         </div>

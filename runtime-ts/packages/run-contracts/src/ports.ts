@@ -568,7 +568,7 @@ export interface ExecutionPersistencePort {
     readonly scope: ExecutionScope;
     readonly idempotencyKey: string;
   }): Promise<RuntimeMutationResult | { readonly outcome: "not_found" }>;
-  /** 只有恢复协调器可调用；running Run 不能由普通 Worker 直接重领。 */
+  /** 只有 claim 返回 recovery_required 后的恢复入口可调用；running Run 不能直接重领。 */
   recoverExpiredAttempt(input: {
     readonly scope: ExecutionScope;
     readonly decision: "safe_fail" | "require_manual_recovery" | "abandon";

@@ -800,7 +800,9 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   }): Promise<"recovered" | "not_expired" | "not_found" | "scope_mismatch" | "unavailable"> {
     const record = this.find(input.scope);
     if (record === "scope_mismatch") return "scope_mismatch";
-    if (!record?.attempt || !record.fence) return "not_found";
+    if (!record?.attempt) return "not_found";
+    if (record.attempt.status === "recovery_required") return "recovered";
+    if (!record.fence) return "not_found";
     if (!this.isExpired(record)) return "not_expired";
     const now = this.databaseNow();
     if (input.decision === "require_manual_recovery" || record.attempt.modelExecutionStarted) {

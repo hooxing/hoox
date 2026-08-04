@@ -40,7 +40,7 @@ function productionEnvironment(): Record<string, string> {
     AGENT_WORKER_POLL_INTERVAL_MS: "100",
     AGENT_WORKER_DISPATCH_LEASE_MS: "30000",
     AGENT_WORKER_RUN_LEASE_MS: "30000",
-    AGENT_WORKER_RUN_TIMEOUT_MS: "900000",
+    AGENT_WORKER_RUN_TIMEOUT_MS: "43200000",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
   };
 }
@@ -159,12 +159,12 @@ describe("Agent Worker 进程入口", () => {
   it("Thread Sandbox reuse 默认开启，显式配置仍校验依赖并保持策略参数可配置", () => {
     expect(parseWorkerProcessEnvironment(productionEnvironment()).threadSandbox).toEqual({
       reuseEnabled: true,
-      sessionTtlSeconds: 1200,
+      sessionTtlSeconds: 43_800,
       pausedRetentionSeconds: 86_400,
       lifecycleTimeoutMs: 90_000,
     });
     expect(parseWorkerProcessEnvironment(productionEnvironment()).worker.runTimeoutMs).toBe(
-      900_000,
+      43_200_000,
     );
     expect(() =>
       parseWorkerProcessEnvironment({

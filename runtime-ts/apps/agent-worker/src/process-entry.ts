@@ -133,7 +133,7 @@ const workerEnvironmentSchema = Object.freeze({
   AGENT_WORKER_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 10, maximum: 60_000 }),
   AGENT_WORKER_DISPATCH_LEASE_MS: integerEnvironmentField({ minimum: 1_000, maximum: 300_000 }),
   AGENT_WORKER_RUN_LEASE_MS: integerEnvironmentField({ minimum: 9_000, maximum: 300_000 }),
-  AGENT_WORKER_RUN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1_000, maximum: 3_600_000 }),
+  AGENT_WORKER_RUN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1_000, maximum: 86_400_000 }),
   THREAD_SERIAL_QUEUE_V2_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
   THREAD_CONTEXT_V2_WRITE_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
   THREAD_CONTEXT_V2_SHADOW_READ_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
@@ -334,8 +334,8 @@ export function parseWorkerProcessEnvironment(
   const inputRoutingEnabled = parsed.values.THREAD_INPUT_ROUTING_V2_ENABLED ?? true;
   const compactionEnabled = parsed.values.THREAD_CONTEXT_COMPACTION_ENABLED ?? true;
   const sandboxSessionReuseEnabled = parsed.values.THREAD_SANDBOX_SESSION_REUSE_ENABLED ?? true;
-  const runTimeoutMs = parsed.values.AGENT_WORKER_RUN_TIMEOUT_MS ?? 15 * 60_000;
-  const sessionTtlSeconds = parsed.values.CUBESANDBOX_SESSION_TTL_SECONDS ?? 20 * 60;
+  const runTimeoutMs = parsed.values.AGENT_WORKER_RUN_TIMEOUT_MS ?? 12 * 60 * 60_000;
+  const sessionTtlSeconds = parsed.values.CUBESANDBOX_SESSION_TTL_SECONDS ?? 12 * 60 * 60 + 600;
   const sandboxLifecycleTimeoutMs = parsed.values.THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS ?? 90_000;
   const compactionPath = parsed.values.THREAD_CONTEXT_COMPACTION_PATH ?? "local";
   if (compactionPath !== "local" && compactionPath !== "remote") {

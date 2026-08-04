@@ -18,6 +18,7 @@ import {
   createSafePiSession,
   deriveSafePiSessionCompatibility,
   type PiSessionController,
+  type TrustedPiModelContextCapability,
   type ThreadActiveHistoryV1,
 } from "@cube-runtime/pi-adapter";
 import type { DeliverFileToolRouterFactoryPort } from "@cube-runtime/tool-router";
@@ -93,8 +94,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     ) => Promise<ThreadActiveHistoryV1>,
     private readonly promptImages?: PromptImageLoaderPort,
     private readonly skillRuntime?: SkillRuntimeService,
+    modelContext?: TrustedPiModelContextCapability,
   ) {
-    this.modelContext = bindTrustedPiModelContextCapability(modelRuntime, model);
+    this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
   }
 
   async create(

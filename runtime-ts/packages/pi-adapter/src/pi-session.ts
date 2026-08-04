@@ -44,13 +44,21 @@ import {
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { createSkillPiTool, type SkillPiToolExecutorPort } from "./skill-tool.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
-import { assertThreadActiveHistory, type ThreadActiveHistoryV1 } from "./thread-history.js";
 import {
   createObservedSandboxTools,
   SANDBOX_TOOL_NAMES,
   type SandboxToolEffectAuthorizer,
   type SandboxToolHandleProvider,
 } from "./tools.js";
+import {
+  isTrustedModelTokenizerCapability,
+  type TrustedModelTokenizerCapability,
+} from "./deepseek-v4-tokenizer.js";
+import {
+  assertThreadActiveHistory,
+  providerVisibleThreadHistoryMessages,
+  type ThreadActiveHistoryV1,
+} from "./thread-history.js";
 
 interface PiSessionPort {
   readonly isStreaming: boolean;
@@ -65,6 +73,24 @@ interface PiSessionPort {
 const THINKING_DELTA_FLUSH_INTERVAL_MS = 100;
 const THINKING_DELTA_FLUSH_BYTES = 1_024;
 
+export interface PiContextBudgetDiagnostics {
+  readonly outcome: ContextBudgetDecision["outcome"];
+  readonly reason?: "reserved_context_exceeds_window" | "single_atomic_entry_exceeds_budget";
+  readonly tokenizerIdentity: string;
+  readonly contextWindow: number;
+  readonly maxOutputTokens: number;
+  readonly systemPromptTokens: number;
+  readonly toolSchemaTokens: number;
+  readonly additionalFixedInputTokens: number;
+  readonly outputReserveTokens: number;
+  readonly recoveryMarginTokens: number;
+  readonly safetyMarginTokens: number;
+  readonly providerOverheadTokens: number;
+  readonly availableHistoryTokens: number;
+  readonly activeEntryTokens?: number;
+  readonly requiredTokens?: number;
+}
+
 export interface PiSessionDiagnostics {
   logicalCwd: "/workspace";
   activeToolNames: string[];
@@ -77,6 +103,7 @@ export interface PiSessionDiagnostics {
   activeAgentMessageCount: number;
   activeSessionEntryCount: number;
   pendingMessageCount: number;
+  contextBudget: Readonly<PiContextBudgetDiagnostics>;
 }
 
 export interface PiSessionController {
@@ -320,10 +347,12 @@ export interface TrustedPiModelContextCapability {
 export function bindTrustedPiModelContextCapability(
   modelRuntime: ModelRuntime,
   model: Model<Api>,
-  ...unsupported: never[]
+  tokenizer?: TrustedModelTokenizerCapability,
 ): TrustedPiModelContextCapability {
-  if (unsupported.length !== 0) throw new TypeError("公开绑定入口不接受外部 tokenizer");
-  return bindModelContextCapability(modelRuntime, model, UTF8_BYTE_TOKENIZER);
+  if (tokenizer !== undefined && !isTrustedModelTokenizerCapability(tokenizer)) {
+    throw new TypeError("公开绑定入口不接受外部 tokenizer");
+  }
+  return bindModelContextCapability(modelRuntime, model, tokenizer ?? UTF8_BYTE_TOKENIZER);
 }
 
 /** @internal 仅供本包测试构造极端预算；未从包入口导出。 */
@@ -463,6 +492,7 @@ export async function createSafePiSession(
   const material = buildSafeSessionMaterial(options);
   const { customTools, builtPrompt } = material;
   const budget = assessSafePiSessionContext(options, material);
+  let latestContextBudgetDecision = budget;
   if (budget.outcome !== "ready") {
     throw new ContextBudgetAdmissionError("reserved_context_exceeds_window");
   }
@@ -501,7 +531,7 @@ export async function createSafePiSession(
   let activeThreadHistory = options.threadActiveHistory;
   if (activeThreadHistory !== undefined) {
     assertThreadActiveHistory(activeThreadHistory);
-    for (const message of activeThreadHistory.messages) {
+    for (const message of providerVisibleThreadHistoryMessages(activeThreadHistory.messages)) {
       sessionManager.appendMessage(toPiHistoryMessage(message));
     }
   }
@@ -526,6 +556,9 @@ export async function createSafePiSession(
       providerBinding,
       providerFailure,
       material.assertModelRequestAllowed,
+      (decision) => {
+        latestContextBudgetDecision = decision;
+      },
     ),
     thinkingLevel: "off",
     sessionManager,
@@ -565,7 +598,9 @@ export async function createSafePiSession(
       ) {
         throw new TypeError("Thread Active History cursor 回退");
       }
-      const messages = replacement.messages.map(toPiHistoryMessage);
+      const messages = providerVisibleThreadHistoryMessages(replacement.messages).map(
+        toPiHistoryMessage,
+      );
       session.agent.state.messages = messages;
       activeThreadHistory = replacement;
       const previousContext = previous?.context ?? turn.context;
@@ -593,6 +628,7 @@ export async function createSafePiSession(
       activeAgentMessageCount: session.agent.state.messages.length,
       activeSessionEntryCount: session.sessionManager.buildContextEntries().length,
       pendingMessageCount: session.pendingMessageCount,
+      contextBudget: contextBudgetDiagnostics(latestContextBudgetDecision),
     }),
     (text) =>
       assertCurrentInputFits(
@@ -603,6 +639,9 @@ export async function createSafePiSession(
         activeProjection,
         [],
         text,
+        (decision) => {
+          latestContextBudgetDecision = decision;
+        },
       ),
     providerFailure,
     () => ({
@@ -711,7 +750,11 @@ export function assessSafePiSessionContext(
       ...(projectionHeader === undefined ? [] : [projectionHeader]),
       ...(options.threadActiveHistory === undefined
         ? []
-        : [JSON.stringify(options.threadActiveHistory.messages)]),
+        : [
+            JSON.stringify(
+              providerVisibleThreadHistoryMessages(options.threadActiveHistory.messages),
+            ),
+          ]),
       ...sessionInputs.map((input) => JSON.stringify({ role: "user", content: input })),
     ],
     entries: (options.rolloutProjection?.items ?? []).map((item, sequence) => ({
@@ -968,6 +1011,7 @@ function providerGatedRuntime(
   binding: ProviderBinding,
   providerFailure: DeferredProviderFailure,
   assertInternalModelRequestAllowed: () => void,
+  onContextBudgetDecision: (decision: ContextBudgetDecision) => void,
 ): ModelRuntime {
   const runtime = options.modelRuntime;
   return new Proxy(runtime, {
@@ -1011,6 +1055,7 @@ function providerGatedRuntime(
                 entries: [],
                 tokenizer: options.modelContext.tokenizer,
               });
+              onContextBudgetDecision(decision);
               if (decision.outcome !== "ready")
                 return providerFailure.reject(
                   new ContextBudgetAdmissionError("reserved_context_exceeds_window"),
@@ -1103,6 +1148,7 @@ function assertCurrentInputFits(
   activeProjection: ControlledRolloutProjection | undefined,
   admittedInputs: readonly string[],
   text: string,
+  onContextBudgetDecision: (decision: ContextBudgetDecision) => void,
 ): void {
   // Pi 会保留此前每轮 user 输入和 assistant 输出。assistant 文本无法在窄控制器上读取，
   // 因而为每个已接受输入额外保留一次最大输出，宁可提前拒绝也不能低估最终 Provider 请求。
@@ -1114,6 +1160,7 @@ function assertCurrentInputFits(
     [...admittedInputs, text],
     priorOutputReserve,
   );
+  onContextBudgetDecision(assessed);
   if (
     assessed.outcome !== "ready" ||
     assessed.activeEntries.length !== (activeProjection?.items.length ?? 0)
@@ -1123,6 +1170,29 @@ function assertCurrentInputFits(
         ? "active_history_would_change"
         : "reserved_context_exceeds_window",
     );
+}
+
+function contextBudgetDiagnostics(
+  decision: ContextBudgetDecision,
+): Readonly<PiContextBudgetDiagnostics> {
+  const { policy } = decision;
+  return Object.freeze({
+    outcome: decision.outcome,
+    ...(decision.outcome === "ready"
+      ? { activeEntryTokens: decision.activeEntryTokens }
+      : { reason: decision.reason, requiredTokens: decision.requiredTokens }),
+    tokenizerIdentity: policy.tokenizerIdentity,
+    contextWindow: policy.model.contextWindow,
+    maxOutputTokens: policy.model.maxOutputTokens,
+    systemPromptTokens: policy.systemPromptTokens,
+    toolSchemaTokens: policy.toolSchemaTokens,
+    additionalFixedInputTokens: policy.additionalFixedInputTokens,
+    outputReserveTokens: policy.outputReserveTokens,
+    recoveryMarginTokens: policy.recoveryMarginTokens,
+    safetyMarginTokens: policy.safetyMarginTokens,
+    providerOverheadTokens: policy.providerOverheadTokens,
+    availableHistoryTokens: policy.availableHistoryTokens,
+  });
 }
 
 function projectionProtocolHeader(

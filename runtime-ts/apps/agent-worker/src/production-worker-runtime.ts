@@ -158,7 +158,7 @@ export class CubeSandboxSessionRegistry
           ttlSeconds: this.ttlSeconds,
           ...(volume === undefined ? {} : { volumeMounts: [volume] }),
         },
-        { signal: input.signal },
+        { signal: input.signal, timeoutMs: this.lifecycleTimeoutMs },
       );
       const session = this.bindSession(input.scope, `registry-${randomUUID()}`, sandbox, "created");
       return { outcome: "ready", session };
@@ -191,7 +191,7 @@ export class CubeSandboxSessionRegistry
           lifecycle: { onTimeout: "pause", autoResume: true },
           ...(volume === undefined ? {} : { volumeMounts: [volume] }),
         },
-        { signal: input.signal },
+        { signal: input.signal, timeoutMs: this.lifecycleTimeoutMs },
       );
       return {
         outcome: "ready",
@@ -216,6 +216,7 @@ export class CubeSandboxSessionRegistry
     try {
       const sandbox = await this.gateway.connect(input.providerSandboxId, {
         signal: input.signal,
+        timeoutMs: this.lifecycleTimeoutMs,
       });
       return {
         outcome: "ready",

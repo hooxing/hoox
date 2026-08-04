@@ -357,6 +357,17 @@ export class RunWorker {
             });
             if (inspected.outcome === "active" && inspectionMatches(context, inspected)) {
               acceptInspection(context, inspected);
+              if (context.threadSandboxLease !== undefined) {
+                const renewed = await this.dependencies.threadSandboxes?.renew({
+                  scope: context.scope,
+                  attemptId: context.attemptId,
+                  lease: context.threadSandboxLease,
+                  leaseDurationMs: this.#leaseDurationMs,
+                });
+                if (renewed !== "renewed") {
+                  context.stopped = renewed === "lease_lost" ? "fence_lost" : "unavailable";
+                }
+              }
               return;
             }
             context.stopped =

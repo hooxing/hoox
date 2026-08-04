@@ -1018,6 +1018,7 @@ export class FakeSandboxRegistry implements SandboxSessionRegistryPort, OrphanSa
 
 export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecyclePort {
   acquireCount = 0;
+  renewCount = 0;
   readonly resourceFilesystemRequirements: boolean[] = [];
   attestCount = 0;
   terminalEffectCount = 0;
@@ -1062,6 +1063,11 @@ export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecycle
   async attestMaterialized(): Promise<"attested"> {
     this.attestCount += 1;
     return "attested";
+  }
+
+  async renew(): Promise<"renewed"> {
+    this.renewCount += 1;
+    return "renewed";
   }
 
   async completeTerminalEffect(): Promise<"settled" | "unknown" | "not_owner"> {

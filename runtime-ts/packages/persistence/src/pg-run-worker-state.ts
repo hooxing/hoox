@@ -1671,6 +1671,11 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         this.pool,
         { tenantId: input.scope.tenantId },
         async (client) => {
+          const existingRecovery = await inspectExpiredAttemptRecovery(client, input.scope);
+          if (existingRecovery === "scope_mismatch") return "scope_mismatch" as const;
+          if (existingRecovery === "recovered") {
+            return "recovered" as const;
+          }
           const row = await this.lockFenceState(client, input.scope);
           if (row === undefined) return "not_found" as const;
           if (!scopeMatches(row, input.scope)) return "scope_mismatch" as const;
@@ -1696,6 +1701,11 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             : input.decision === "safe_fail"
               ? "failed"
               : "abandoned";
+          await prepareExpiredThreadSandboxTermination(client, {
+            scope: input.scope,
+            attemptId: String(row.attempt_id),
+            databaseNow,
+          });
           await releasePreparedWorkspaceCandidates(client, {
             tenantId: input.scope.tenantId,
             attemptId: String(row.attempt_id),
@@ -2946,6 +2956,101 @@ async function settleWorkspaceArtifactIntents(
       [input.tenantId, intent.artifact_id, input.databaseNow],
     );
   }
+}
+
+async function inspectExpiredAttemptRecovery(
+  client: PoolClient,
+  scope: ExecutionScope,
+): Promise<"recovered" | "not_found" | "scope_mismatch"> {
+  const result = await client.query(
+    `SELECT tenant_id,run_id,thread_id,workspace_id,root_run_id,base_revision_id,status
+       FROM execution_attempts
+      WHERE tenant_id=$1 AND run_id=$2
+      ORDER BY created_at DESC,attempt_id DESC LIMIT 1
+      FOR UPDATE`,
+    [scope.tenantId, scope.runId],
+  );
+  const row = result.rows[0];
+  if (row === undefined || row.status !== "recovery_required") return "not_found";
+  return scopeMatches(row, scope) ? "recovered" : "scope_mismatch";
+}
+
+/**
+ * 过期 Attempt 已经失去调用 Provider 的资格；恢复事务只登记一次 terminate effect，立即隔离
+ * 可变 Session 并释放旧 lease。真正的远端关闭仍由 Scheduler 的 durable consumer 执行。
+ */
+async function prepareExpiredThreadSandboxTermination(
+  client: PoolClient,
+  input: {
+    readonly scope: ExecutionScope;
+    readonly attemptId: string;
+    readonly databaseNow: string;
+  },
+): Promise<void> {
+  const active = await client.query<{
+    readonly session_id: string;
+    readonly generation: string;
+    readonly provider_sandbox_id: string;
+    readonly state: string;
+  }>(
+    `SELECT session.session_id,session.generation::text,session.provider_sandbox_id,session.state
+       FROM thread_sandbox_leases sandbox_lease
+       JOIN thread_sandbox_sessions session
+         ON session.tenant_id=sandbox_lease.tenant_id AND session.session_id=sandbox_lease.session_id
+      WHERE sandbox_lease.tenant_id=$1 AND sandbox_lease.run_id=$2
+        AND sandbox_lease.attempt_id=$3 AND sandbox_lease.released_at IS NULL
+      ORDER BY sandbox_lease.lease_epoch DESC LIMIT 1
+      FOR UPDATE OF sandbox_lease,session`,
+    [input.scope.tenantId, input.scope.runId, input.attemptId],
+  );
+  const session = active.rows[0];
+  if (session === undefined) return;
+  if (session.state !== "terminated") {
+    const effectId = `sandbox-effect-${randomUUID()}`;
+    const operationId = `${input.attemptId}/sandbox/expired-recovery-terminate`;
+    const effect = await client.query<{ readonly effect_id: string }>(
+      `INSERT INTO sandbox_lifecycle_effects(
+         tenant_id,effect_id,operation_id,request_digest,session_id,generation,effect_kind,state,
+         run_id,attempt_id,provider_sandbox_id,expected_session_state,created_at,updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,'terminate','pending',$7,$8,$9,$10,$11,$11)
+       ON CONFLICT (tenant_id,operation_id) DO UPDATE
+         SET updated_at=sandbox_lifecycle_effects.updated_at
+       RETURNING effect_id`,
+      [
+        input.scope.tenantId,
+        effectId,
+        operationId,
+        digestCanonical({ operationId, reason: "expired_attempt_recovery" }),
+        session.session_id,
+        Number(session.generation),
+        input.scope.runId,
+        input.attemptId,
+        session.provider_sandbox_id,
+        session.state,
+        input.databaseNow,
+      ],
+    );
+    const durableEffectId = effect.rows[0]?.effect_id;
+    if (durableEffectId === undefined) throw new Error("过期 Sandbox terminate effect 缺失");
+    await client.query(
+      `UPDATE thread_sandbox_sessions
+          SET state='unknown',current_effect_id=$4,paused_at=NULL,retention_expires_at=NULL,
+              updated_at=$5
+        WHERE tenant_id=$1 AND session_id=$2 AND generation=$3 AND state<>'terminated'`,
+      [
+        input.scope.tenantId,
+        session.session_id,
+        Number(session.generation),
+        durableEffectId,
+        input.databaseNow,
+      ],
+    );
+  }
+  await client.query(
+    `UPDATE thread_sandbox_leases SET released_at=$4,updated_at=$4
+      WHERE tenant_id=$1 AND session_id=$2 AND run_id=$3 AND released_at IS NULL`,
+    [input.scope.tenantId, session.session_id, input.scope.runId, input.databaseNow],
+  );
 }
 
 async function releasePreparedWorkspaceCandidates(

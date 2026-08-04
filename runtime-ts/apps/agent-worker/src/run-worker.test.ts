@@ -1536,7 +1536,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.persistence.record(resumedScope).run.status).toBe("succeeded");
   });
 
-  it("model_execution_started 后崩溃不会自动重跑，恢复协调器强制 recovery_required", async () => {
+  it("model_execution_started 后租约过期由 Worker 入口自动收敛且不会重跑模型", async () => {
     const h = harness([]);
     const claimed = await h.persistence.claim({
       scope: h.scope,
@@ -1563,12 +1563,14 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
     h.persistence.advanceDatabase(31_000);
 
-    await expect(
-      h.persistence.recoverExpiredAttempt({ scope: h.scope, decision: "safe_fail" }),
-    ).resolves.toBe("recovered");
     await expect(h.worker.execute(h.scope)).resolves.toEqual({
-      outcome: "ignored",
-      reason: "recovery_required",
+      outcome: "recovery_required",
+      code: "INTERNAL",
+    });
+    // Dispatch ack 结果未知时再次进入同一路径必须幂等收敛，不能重新武装模型。
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "INTERNAL",
     });
     const record = h.persistence.record(h.scope);
     expect(record.attempt?.status).toBe("recovery_required");

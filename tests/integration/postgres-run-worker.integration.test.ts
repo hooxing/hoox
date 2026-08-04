@@ -74,6 +74,7 @@ import { PgSandboxCleanupConsumerStore } from "../../runtime-ts/packages/persist
 import { PgSkillRuntimeRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-runtime.js";
 import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import { PgThreadInputRouting } from "../../runtime-ts/packages/persistence/src/pg-thread-input.js";
+import { PgThreadSandboxLifecycleConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-thread-sandbox-lifecycle-consumer.js";
 import {
   PgWorkspaceCandidateHandoff,
   workspaceCandidateOperationDigest,
@@ -4946,6 +4947,199 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       entity: { status: "running" },
       executionStatus: "recovery_required",
     });
+  });
+
+  it("过期 finalizing Attempt 原子隔离 Thread Sandbox 并登记唯一 terminate effect", async () => {
+    const f = await serialQueueFixture(`expired-finalizing-${suffix}`);
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const sandboxPersistence = new PgExecutionPersistence(runtime, {
+      threadSandboxSessionReuseEnabled: true,
+      threadSandboxHandoffLeaseMs: 30_000,
+    });
+    const baseProvider = fakeThreadSandboxProvider(new FakeSandboxGateway());
+    const uniqueProvider: ThreadSandboxProviderPort = {
+      ...baseProvider,
+      create: async (input) => {
+        const result = await baseProvider.create(input);
+        return result.outcome !== "ready"
+          ? result
+          : {
+              ...result,
+              session: {
+                ...result.session,
+                providerSandboxId: `expired-finalizing-provider-${randomUUID()}`,
+              },
+            };
+      },
+    };
+    const lifecycle = new PgThreadSandboxSessionLifecycle(runtime, uniqueProvider, {
+      pausedRetentionSeconds: 600,
+      transitionWaitMs: 1_000,
+    });
+    const run = createRun({
+      id: runId(`expired-finalizing-run-${suffix}`),
+      thread: f.thread,
+      now: isoTimestamp("2099-07-26T00:00:00.000Z"),
+    });
+    await expect(
+      creation.createQueuedRun({
+        scope: f.tenantScope,
+        run,
+        thread: f.thread,
+        inputText: "构造 finalizing 恢复",
+        idempotency: {
+          key: `expired-finalizing-key-${suffix}`,
+          requestHash: requestDigest("构造 finalizing 恢复"),
+        },
+      }),
+    ).resolves.toMatchObject({ outcome: "created" });
+    const dispatch = (
+      await runDispatchOutbox.claim({
+        tenantId: f.tenantScope.tenantId,
+        dispatcherId: "expired-finalizing-dispatcher",
+        limit: 10,
+        leaseMilliseconds: 30_000,
+      })
+    )[0];
+    if (dispatch === undefined) throw new Error("恢复测试 dispatch 缺失");
+    const claimed = await sandboxPersistence.claim({
+      scope: dispatch.scope as ExecutionScope,
+      workerId: "expired-finalizing-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("恢复测试 claim 失败");
+    await runDispatchOutbox.acknowledge({ claim: dispatch, outcome: "dispatched" });
+    const acquired = await lifecycle.acquire({
+      scope: claimed.fence.scope,
+      attemptId: claimed.snapshot.attempt.attemptId,
+      owner: "expired-finalizing-worker",
+      leaseDurationMs: 30_000,
+      signal: new AbortController().signal,
+    });
+    if (acquired.outcome !== "ready") {
+      throw new Error(`恢复测试 Sandbox acquire 失败：${JSON.stringify(acquired)}`);
+    }
+    expect(
+      await sandboxPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimed.snapshot.attempt.attemptId}/model-started`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 0,
+          nextAttemptStatus: "running",
+          nextStage: "model_execution_started",
+          events: [],
+          outbox: [],
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+    expect(
+      await sandboxPersistence.mutate(
+        signed({
+          idempotencyKey: `${claimed.snapshot.attempt.attemptId}/finalizing`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 1,
+          nextAttemptStatus: "finalizing",
+          nextStage: "finalizing",
+          events: [],
+          outbox: [],
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied" });
+    await admin.query(
+      `UPDATE "${schema}".run_claims
+          SET expires_at=acquired_at+interval '1 millisecond'
+        WHERE tenant_id=$1 AND attempt_id=$2`,
+      [f.tenantScope.tenantId, claimed.snapshot.attempt.attemptId],
+    );
+    await admin.query(
+      `UPDATE "${schema}".workspace_write_leases
+          SET expires_at=clock_timestamp()-interval '1 second'
+        WHERE tenant_id=$1 AND workspace_id=$2`,
+      [f.tenantScope.tenantId, f.workspace.id],
+    );
+
+    await expect(
+      sandboxPersistence.claim({
+        scope: claimed.fence.scope,
+        workerId: "expired-finalizing-late-worker",
+        leaseDurationMs: 30_000,
+      }),
+    ).resolves.toEqual({ outcome: "recovery_required" });
+    await expect(
+      sandboxPersistence.recoverExpiredAttempt({
+        scope: claimed.fence.scope,
+        decision: "require_manual_recovery",
+      }),
+    ).resolves.toBe("recovered");
+    await expect(
+      sandboxPersistence.recoverExpiredAttempt({
+        scope: claimed.fence.scope,
+        decision: "require_manual_recovery",
+      }),
+    ).resolves.toBe("recovered");
+
+    const recovered = await withTenantTransaction(
+      runtime,
+      f.tenantScope,
+      async (client) => {
+        const attempt = await client.query<{ readonly status: string }>(
+          `SELECT status FROM execution_attempts WHERE tenant_id=$1 AND attempt_id=$2`,
+          [f.tenantScope.tenantId, claimed.snapshot.attempt.attemptId],
+        );
+        const session = await client.query<{ readonly state: string }>(
+          `SELECT state FROM thread_sandbox_sessions WHERE tenant_id=$1 AND session_id=$2`,
+          [f.tenantScope.tenantId, acquired.lease.sessionId],
+        );
+        const lease = await client.query<{ readonly released: boolean }>(
+          `SELECT released_at IS NOT NULL AS released FROM thread_sandbox_leases
+            WHERE tenant_id=$1 AND session_id=$2 AND lease_id=$3`,
+          [f.tenantScope.tenantId, acquired.lease.sessionId, acquired.lease.leaseId],
+        );
+        const effects = await client.query<{
+          readonly state: string;
+          readonly effect_kind: string;
+        }>(
+          `SELECT state,effect_kind FROM sandbox_lifecycle_effects
+            WHERE tenant_id=$1 AND attempt_id=$2 AND effect_kind='terminate'`,
+          [f.tenantScope.tenantId, claimed.snapshot.attempt.attemptId],
+        );
+        return {
+          attempt: attempt.rows[0],
+          session: session.rows[0],
+          lease: lease.rows[0],
+          effects: effects.rows,
+        };
+      },
+      { readOnly: true },
+    );
+    expect(recovered).toEqual({
+      attempt: { status: "recovery_required" },
+      session: { state: "unknown" },
+      lease: { released: true },
+      effects: [{ state: "pending", effect_kind: "terminate" }],
+    });
+
+    const effectStore = new PgThreadSandboxLifecycleConsumerStore(runtime, 600, true);
+    const effectClaim = await effectStore.claimNext({
+      tenantId: f.tenantScope.tenantId,
+      workerId: "expired-finalizing-effect-worker",
+      leaseMs: 30_000,
+    });
+    if (effectClaim === undefined) throw new Error("恢复测试 terminate effect 缺失");
+    expect(effectClaim).toMatchObject({ effectKind: "terminate", mode: "execute" });
+    expect(await effectStore.markRemoteStarted(effectClaim)).toBe(true);
+    expect(await effectStore.resolve(effectClaim, "terminated")).toBe(true);
+    const terminated = await withTenantTransaction(
+      runtime,
+      f.tenantScope,
+      (client) =>
+        client.query<{ readonly state: string }>(
+          `SELECT state FROM thread_sandbox_sessions WHERE tenant_id=$1 AND session_id=$2`,
+          [f.tenantScope.tenantId, acquired.lease.sessionId],
+        ),
+      { readOnly: true },
+    );
+    expect(terminated.rows[0]?.state).toBe("terminated");
   });
 
   it("RLS 对跨租户读写均 fail closed", async () => {

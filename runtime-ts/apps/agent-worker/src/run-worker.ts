@@ -160,7 +160,7 @@ export class RunWorker {
   ) {
     this.#leaseDurationMs = positive(options.leaseDurationMs ?? 30_000, "leaseDurationMs");
     this.#heartbeatMs = positive(options.heartbeatMs ?? 10_000, "heartbeatMs");
-    this.#runTimeoutMs = positive(options.runTimeoutMs ?? 15 * 60_000, "runTimeoutMs");
+    this.#runTimeoutMs = positive(options.runTimeoutMs ?? 12 * 60 * 60_000, "runTimeoutMs");
     this.#externalEffectPermitMs = positive(
       options.externalEffectPermitMs ?? 3_000,
       "externalEffectPermitMs",
@@ -200,6 +200,30 @@ export class RunWorker {
       leaseDurationMs: this.#leaseDurationMs,
     });
     if (claim.outcome !== "claimed") {
+      if (claim.outcome === "recovery_required") {
+        // 过期 Attempt 不能继续由普通 claim 重领，但也不能只返回 ignored 让 dispatch
+        // 每五秒空转。这里切换到窄恢复命令，只固化“执行已停止”和 Sandbox 清理事实，
+        // 不重放模型、工具或猜测业务 succeeded/failed。
+        const recovered = await this.dependencies.persistence.recoverExpiredAttempt({
+          scope,
+          decision: "require_manual_recovery",
+        });
+        if (recovered === "recovered") {
+          return { outcome: "recovery_required", code: "INTERNAL" };
+        }
+        if (recovered === "unavailable") {
+          return { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" };
+        }
+        return {
+          outcome: "ignored",
+          reason:
+            recovered === "not_expired"
+              ? "busy"
+              : recovered === "scope_mismatch"
+                ? "scope_mismatch"
+                : "not_found",
+        };
+      }
       if (claim.outcome === "unavailable") {
         return { outcome: "retryable", code: "PERSISTENCE_UNAVAILABLE" };
       }

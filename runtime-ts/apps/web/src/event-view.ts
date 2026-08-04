@@ -17,6 +17,30 @@ export type RunProgress = {
   readonly waitingQuestion: string | undefined;
 };
 
+export type ConversationBlock =
+  | {
+      readonly id: string;
+      readonly type: "thinking";
+      readonly text: string;
+      readonly status: "running" | "completed";
+    }
+  | {
+      readonly id: string;
+      readonly type: "answer";
+      readonly text: string;
+      readonly status: "streaming" | "completed";
+    }
+  | {
+      readonly id: string;
+      readonly type: "tool";
+      readonly action: ToolAction;
+      readonly title?: string;
+      readonly status: "running" | "completed" | "failed";
+      readonly callId: string;
+    };
+
+export type ToolAction = "search" | "read" | "create" | "command" | "other";
+
 function object(value: unknown): Readonly<Record<string, unknown>> | undefined {
   return typeof value === "object" && value !== null
     ? (value as Readonly<Record<string, unknown>>)
@@ -50,6 +74,129 @@ export function toolActionLabel(name: string | undefined): string {
   }
   if (/(read|list|inspect|open)/u.test(normalized)) return "正在读取资料…";
   return "正在处理任务…";
+}
+
+function toolAction(name: string | undefined): ToolAction {
+  const normalized = name?.toLowerCase() ?? "";
+  if (/(search|web|browse|fetch|crawl)/u.test(normalized)) return "search";
+  if (/(write|artifact|export|generate.*file|create.*file|deliver_file)/u.test(normalized)) {
+    return "create";
+  }
+  if (/(shell|command|code|python|node|execute|run)/u.test(normalized)) return "command";
+  if (/(read|list|inspect|open)/u.test(normalized)) return "read";
+  return "other";
+}
+
+/** 展示标题只能来自服务端显式提供的安全摘要，前端不解析或泄露原始工具参数。 */
+function toolPresentationTitle(payload: Readonly<Record<string, unknown>> | undefined) {
+  const presentation = object(payload?.presentation);
+  return text(presentation?.title);
+}
+
+/**
+ * 保留模型回复、思考与工具调用的原始先后关系；callId 只用于更新对应工具块。
+ */
+export function buildConversationBlocks(events: readonly RunEvent[]): readonly ConversationBlock[] {
+  const blocks: ConversationBlock[] = [];
+  const tools = new Map<string, number>();
+  let activeThinking: number | undefined;
+  let activeAnswer: number | undefined;
+
+  for (const event of events) {
+    const payload = object(event.payload);
+    if (event.type === "thinking.started") {
+      activeAnswer = undefined;
+      activeThinking = blocks.length;
+      blocks.push({ id: event.eventId, type: "thinking", text: "", status: "running" });
+      continue;
+    }
+    if (event.type === "thinking.delta") {
+      activeAnswer = undefined;
+      if (activeThinking === undefined) {
+        activeThinking = blocks.length;
+        blocks.push({ id: event.eventId, type: "thinking", text: "", status: "running" });
+      }
+      const block = blocks[activeThinking];
+      const delta = payload?.delta;
+      if (block?.type === "thinking" && typeof delta === "string") {
+        blocks[activeThinking] = { ...block, text: `${block.text}${delta}` };
+      }
+      continue;
+    }
+    if (event.type === "thinking.completed") {
+      const index = activeThinking;
+      const block = index === undefined ? undefined : blocks[index];
+      if (index !== undefined && block?.type === "thinking") {
+        blocks[index] = { ...block, status: "completed" };
+      }
+      activeThinking = undefined;
+      continue;
+    }
+    if (event.type === "message.delta") {
+      activeThinking = undefined;
+      const delta = payload?.delta;
+      if (typeof delta !== "string") continue;
+      if (activeAnswer === undefined) {
+        activeAnswer = blocks.length;
+        blocks.push({ id: event.eventId, type: "answer", text: "", status: "streaming" });
+      }
+      const block = blocks[activeAnswer];
+      if (block?.type === "answer")
+        blocks[activeAnswer] = { ...block, text: `${block.text}${delta}` };
+      continue;
+    }
+    if (event.type === "message.completed") {
+      const answerIndex = activeAnswer;
+      const answer = answerIndex === undefined ? undefined : blocks[answerIndex];
+      if (answerIndex !== undefined && answer?.type === "answer") {
+        blocks[answerIndex] = { ...answer, status: "completed" };
+      }
+      const thinkingIndex = activeThinking;
+      const thinking = thinkingIndex === undefined ? undefined : blocks[thinkingIndex];
+      if (thinkingIndex !== undefined && thinking?.type === "thinking") {
+        blocks[thinkingIndex] = { ...thinking, status: "completed" };
+      }
+      activeAnswer = undefined;
+      activeThinking = undefined;
+      continue;
+    }
+    if (!event.type.startsWith("tool.")) continue;
+    activeAnswer = undefined;
+    activeThinking = undefined;
+    const name = text(payload?.name);
+    const callId = text(payload?.callId) ?? `${name ?? "unknown"}:${event.sequence}`;
+    const index = tools.get(callId);
+    const status =
+      event.type === "tool.failed" || payload?.isError === true
+        ? "failed"
+        : event.type === "tool.completed"
+          ? "completed"
+          : "running";
+    if (index === undefined) {
+      const title = toolPresentationTitle(payload);
+      tools.set(callId, blocks.length);
+      blocks.push({
+        id: event.eventId,
+        type: "tool",
+        action: toolAction(name),
+        status,
+        callId,
+        ...(title === undefined ? {} : { title }),
+      });
+    } else {
+      const block = blocks[index];
+      if (block?.type === "tool") {
+        const title = toolPresentationTitle(payload) ?? block.title;
+        blocks[index] = {
+          ...block,
+          status,
+          ...(title === undefined ? {} : { title }),
+        };
+      }
+    }
+  }
+
+  return blocks.filter((block) => block.type === "tool" || block.text.length > 0);
 }
 
 function toolDescriptor(

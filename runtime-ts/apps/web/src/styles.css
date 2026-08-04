@@ -759,6 +759,43 @@ h2 {
 .assistant-message .message-card {
   width: min(100%, 710px);
 }
+.agent-turn-blocks {
+  display: grid;
+  gap: 12px;
+  margin-top: 5px;
+}
+.agent-turn-blocks .run-thinking {
+  margin-top: 0;
+}
+.tool-activity {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  gap: 6px;
+  color: #747a76;
+  font-size: 12px;
+}
+.tool-activity > svg {
+  min-width: 14px;
+  color: #668072;
+}
+.tool-activity strong {
+  overflow: hidden;
+  color: #555c58;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-activity.is-failed,
+.tool-activity.is-failed > svg,
+.tool-activity.is-failed strong {
+  color: #a0473f;
+}
+.agent-answer-block + .run-thinking,
+.tool-activity + .agent-answer-block,
+.agent-answer-block + .tool-activity {
+  margin-top: 2px;
+}
 .inline-artifact-delivery {
   width: 100%;
   margin-top: 20px;

@@ -23,6 +23,8 @@ function validExample(): string {
         key.endsWith("SIGNING_KEY") ||
         key.endsWith("SIGNING_KEYS") ||
         key.endsWith("TEMPLATE_ID") ||
+        key === "RESOURCEFS_PROXY_TLS_KEY_PATH" ||
+        key === "RESOURCEFS_PROXY_TLS_CERT_PATH" ||
         key === "MINIO_ROOT_USER" ||
         key === "MODEL_ID"
       ) {
@@ -57,6 +59,8 @@ describe("环境变量示例契约", () => {
         "THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS",
         "CUBESANDBOX_RESOURCE_VOLUME_DRIVER",
         "RESOURCE_FILESYSTEM_SIGNING_KEY",
+        "RESOURCEFS_PROXY_TLS_KEY_PATH",
+        "RESOURCEFS_PROXY_TLS_CERT_PATH",
         "MODEL_WIRE_TRACE_ENABLED",
         "MODEL_WIRE_TRACE_RETENTION_DAYS",
         "MODEL_WIRE_TRACE_MAX_BYTES",

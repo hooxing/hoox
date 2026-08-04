@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { buildConversationBlocks, buildRunProgress, toolActionLabel } from "./event-view.js";
+import {
+  buildConversationBlocks,
+  buildConversationSections,
+  buildRunProgress,
+  toolActionLabel,
+} from "./event-view.js";
 
 const event = (sequence: number, type: string, payload: unknown) => ({
   eventId: `event-${sequence}`,
@@ -46,6 +51,41 @@ describe("用户运行进度投影", () => {
 
     expect(blocks).toMatchObject([{ type: "tool", action: "command", status: "running" }]);
     expect(JSON.stringify(blocks)).not.toContain("包含敏感信息的命令");
+  });
+
+  it("在回答边界内折叠思考和低信息操作，创建与修改文件保持直出", () => {
+    const blocks = buildConversationBlocks([
+      event(1, "thinking.delta", { delta: "检查环境。" }),
+      event(2, "thinking.completed", {}),
+      event(3, "tool.started", {
+        name: "read",
+        callId: "call-read",
+        presentation: { action: "read", title: "input.md" },
+      }),
+      event(4, "tool.completed", { name: "read", callId: "call-read" }),
+      event(5, "tool.started", {
+        name: "write",
+        callId: "call-write",
+        presentation: { action: "write", title: "report.docx" },
+      }),
+      event(6, "tool.completed", { name: "write", callId: "call-write" }),
+      event(7, "tool.started", {
+        name: "edit",
+        callId: "call-edit",
+        presentation: { action: "edit", title: "report.md" },
+      }),
+      event(8, "tool.completed", { name: "edit", callId: "call-edit" }),
+      event(9, "message.delta", { delta: "处理完成。" }),
+    ]);
+    const sections = buildConversationSections(blocks);
+
+    expect(sections.map((section) => section.type)).toEqual(["activity", "tool", "tool", "answer"]);
+    expect(sections[0]).toMatchObject({
+      type: "activity",
+      items: [{ type: "thinking" }, { type: "tool", action: "read" }],
+    });
+    expect(sections[1]).toMatchObject({ type: "tool", action: "write", title: "report.docx" });
+    expect(sections[2]).toMatchObject({ type: "tool", action: "edit", title: "report.md" });
   });
   it("将工具调用投影为用户可理解动作，并忽略内部生命周期", () => {
     const progress = buildRunProgress([

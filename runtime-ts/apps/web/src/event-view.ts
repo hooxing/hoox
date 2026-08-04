@@ -39,7 +39,18 @@ export type ConversationBlock =
       readonly callId: string;
     };
 
-export type ToolAction = "search" | "read" | "create" | "command" | "other";
+export type ToolAction = "search" | "read" | "create" | "write" | "edit" | "command" | "other";
+
+export type ConversationSection =
+  | Extract<ConversationBlock, { type: "answer" | "tool" }>
+  | {
+      readonly id: string;
+      readonly type: "activity";
+      readonly items: readonly (
+        | Extract<ConversationBlock, { type: "thinking" }>
+        | Extract<ConversationBlock, { type: "tool" }>
+      )[];
+    };
 
 function object(value: unknown): Readonly<Record<string, unknown>> | undefined {
   return typeof value === "object" && value !== null
@@ -85,6 +96,21 @@ function toolAction(name: string | undefined): ToolAction {
   if (/(shell|command|code|python|node|execute|run)/u.test(normalized)) return "command";
   if (/(read|list|inspect|open)/u.test(normalized)) return "read";
   return "other";
+}
+
+function toolPresentationAction(
+  payload: Readonly<Record<string, unknown>> | undefined,
+): ToolAction | undefined {
+  const action = text(object(payload?.presentation)?.action);
+  return action === "search" ||
+    action === "read" ||
+    action === "create" ||
+    action === "write" ||
+    action === "edit" ||
+    action === "command" ||
+    action === "other"
+    ? action
+    : undefined;
 }
 
 /** 展示标题只能来自服务端显式提供的安全摘要，前端不解析或泄露原始工具参数。 */
@@ -178,7 +204,7 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
       blocks.push({
         id: event.eventId,
         type: "tool",
-        action: toolAction(name),
+        action: toolPresentationAction(payload) ?? toolAction(name),
         status,
         callId,
         ...(title === undefined ? {} : { title }),
@@ -197,6 +223,44 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
   }
 
   return blocks.filter((block) => block.type === "tool" || block.text.length > 0);
+}
+
+/**
+ * 回答是执行阶段的硬边界；创建和修改文件保持直出，其余过程在相邻区间内折叠聚合。
+ */
+export function buildConversationSections(
+  blocks: readonly ConversationBlock[],
+): readonly ConversationSection[] {
+  const sections: ConversationSection[] = [];
+  let grouped: Array<
+    Extract<ConversationBlock, { type: "thinking" }> | Extract<ConversationBlock, { type: "tool" }>
+  > = [];
+  const flush = () => {
+    if (grouped.length === 0) return;
+    sections.push({
+      id: `activity-${grouped[0]?.id ?? sections.length}`,
+      type: "activity",
+      items: grouped,
+    });
+    grouped = [];
+  };
+
+  for (const block of blocks) {
+    if (block.type === "answer") {
+      flush();
+      sections.push(block);
+    } else if (
+      block.type === "tool" &&
+      (block.action === "create" || block.action === "write" || block.action === "edit")
+    ) {
+      flush();
+      sections.push(block);
+    } else {
+      grouped.push(block);
+    }
+  }
+  flush();
+  return sections;
 }
 
 function toolDescriptor(

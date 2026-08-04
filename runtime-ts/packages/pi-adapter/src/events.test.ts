@@ -3,6 +3,45 @@ import { describe, expect, it } from "vitest";
 import { mapPiEvent } from "./events.js";
 
 describe("Pi 运行事件映射", () => {
+  it("从真实工具参数生成受限的用户可读展示信息", () => {
+    expect(
+      mapPiEvent({
+        type: "tool_execution_start",
+        toolCallId: "call-write",
+        toolName: "write",
+        args: { path: "/workspace/output/report.docx", content: "不应进入事件" },
+      }),
+    ).toMatchObject({
+      presentation: { action: "write", title: "output/report.docx" },
+    });
+    expect(
+      mapPiEvent({
+        type: "tool_execution_start",
+        toolCallId: "call-read",
+        toolName: "read",
+        args: { path: "/workspace/reports/行业报告.md", ignored: "不得透传" },
+      }),
+    ).toEqual({
+      type: "tool.started",
+      callId: "call-read",
+      name: "read",
+      presentation: { action: "read", title: "reports/行业报告.md" },
+    });
+    expect(
+      mapPiEvent({
+        type: "tool_execution_start",
+        toolCallId: "call-command",
+        toolName: "exec_command",
+        args: {
+          cmd: "find /workspace -type f",
+          user_facing_purpose: "查看当前目录中的文件",
+        },
+      }),
+    ).toMatchObject({
+      presentation: { action: "command", title: "查看当前目录中的文件" },
+    });
+  });
+
   it("把 Runtime turn hook 错误归类为协议错误，不误报 Provider", () => {
     expect(
       mapPiEvent({

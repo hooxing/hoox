@@ -480,27 +480,17 @@ describe("工作台展示组件", () => {
 
     const active = document.createElement("div");
     active.innerHTML = activeHtml;
-    const activeDetails = active.querySelector<HTMLDetailsElement>(".run-thinking");
-    const activeSummary = active.querySelector<HTMLElement>(".run-thinking summary");
-    const activeContent = active.querySelector<HTMLElement>(".run-thinking-content");
-    if (activeDetails === null || activeSummary === null || activeContent === null) {
-      throw new Error("未渲染实时思考披露区");
-    }
+    const activeGroup = active.querySelector<HTMLDetailsElement>(".activity-group");
+    if (activeGroup === null) throw new Error("未渲染执行阶段折叠区");
 
     expect(activeStatusHtml).toContain("正在思考");
     expect(activeStatusHtml).not.toContain("run-progress-track");
     expect(activeStatusHtml).not.toContain("先检查依赖，再生成文档。");
-    expect(activeDetails.closest(".assistant-message")).not.toBeNull();
-    expect(activeDetails.open).toBe(false);
-    expect(activeSummary.textContent).toContain("正在思考");
-    expect(activeSummary.textContent).not.toContain("展开");
-    expect(activeSummary.textContent).not.toContain("收起");
-    expect(activeContent.textContent).toContain("先检查依赖，再生成文档。");
-    expect(activeContent.tagName).toBe("SECTION");
-    expect(activeContent.getAttribute("aria-busy")).toBe("true");
-    expect(activeContent.getAttribute("aria-live")).toBe("off");
-    expect(activeSummary.getAttribute("aria-controls")).toBe(activeContent.id);
-    expect(activeContent.getAttribute("aria-labelledby")).toBe(activeSummary.id);
+    expect(activeGroup.closest(".assistant-message")).not.toBeNull();
+    expect(activeGroup.open).toBe(false);
+    expect(activeGroup.querySelector(":scope > summary")?.textContent).toContain("正在思考");
+    expect(activeGroup.querySelector(".activity-group-content")).toBeNull();
+    expect(activeHtml).not.toContain("先检查依赖，再生成文档。");
 
     const settled = document.createElement("div");
     settled.innerHTML = settledHtml;
@@ -590,7 +580,7 @@ describe("工作台展示组件", () => {
     expect(container.textContent).toContain("第二段回答。");
   });
 
-  it("思考始终默认折叠，手工展开后更新不抢夺选择，异常终态不会伪装成仍在思考", () => {
+  it("执行阶段只展开已结束项目，并在状态更新时保持用户选择", () => {
     const container = document.createElement("div");
     const root = createRoot(container);
     const liveEvents: readonly RunEvent[] = [
@@ -608,83 +598,60 @@ describe("工作台展示组件", () => {
         occurredAt: "",
         kind: "agent_event",
         type: "thinking.delta",
-        payload: { delta: "实时检查中。" },
+        payload: { delta: "先检查环境。" },
       },
-    ];
-
-    act(() => root.render(<RunTranscript run={running} events={liveEvents} />));
-    const details = container.querySelector<HTMLDetailsElement>(".run-thinking");
-    if (details === null) throw new Error("未渲染思考披露区");
-    expect(details.open).toBe(false);
-
-    const liveSummary = details.querySelector("summary");
-    if (liveSummary === null) throw new Error("未渲染实时思考摘要按钮");
-    act(() => liveSummary.click());
-    expect(details.open).toBe(true);
-
-    const updatedLiveEvents: readonly RunEvent[] = [
-      ...liveEvents,
-      {
-        eventId: "thinking-delta-2",
-        sequence: 3,
-        occurredAt: "",
-        kind: "agent_event",
-        type: "thinking.delta",
-        payload: { delta: "继续分析。" },
-      },
-    ];
-    act(() => root.render(<RunTranscript run={running} events={updatedLiveEvents} />));
-    expect(details.open).toBe(true);
-    expect(details.querySelector(".run-thinking-content")?.textContent).toContain(
-      "实时检查中。继续分析。",
-    );
-
-    const completedEvents: readonly RunEvent[] = [
-      ...updatedLiveEvents,
       {
         eventId: "thinking-end",
-        sequence: 4,
+        sequence: 3,
         occurredAt: "",
         kind: "agent_event",
         type: "thinking.completed",
         payload: {},
       },
+      {
+        eventId: "tool-start",
+        sequence: 4,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "tool.started",
+        payload: {
+          name: "exec_command",
+          callId: "call-1",
+          presentation: { action: "command", title: "查看当前目录中的文件" },
+        },
+      },
+    ];
+
+    act(() => root.render(<RunTranscript run={running} events={liveEvents} />));
+    const group = container.querySelector<HTMLDetailsElement>(".activity-group");
+    if (group === null) throw new Error("未渲染执行阶段折叠区");
+    expect(group.open).toBe(false);
+    expect(group.querySelector(":scope > summary")?.textContent).toContain(
+      "正在执行命令 · 查看当前目录中的文件",
+    );
+    expect(group.querySelectorAll(".activity-group-content > .tool-activity")).toHaveLength(0);
+    expect(group.querySelectorAll(".activity-group-content > .run-thinking")).toHaveLength(1);
+
+    const liveSummary = group.querySelector<HTMLElement>(":scope > summary");
+    if (liveSummary === null) throw new Error("未渲染执行阶段摘要按钮");
+    act(() => liveSummary.click());
+    expect(group.open).toBe(true);
+
+    const completedEvents: readonly RunEvent[] = [
+      ...liveEvents,
+      {
+        eventId: "tool-end",
+        sequence: 5,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "tool.completed",
+        payload: { name: "exec_command", callId: "call-1", isError: false },
+      },
     ];
     act(() => root.render(<RunTranscript run={running} events={completedEvents} />));
-    expect(details.open).toBe(true);
-    expect(details.classList).toContain("is-completed");
-
-    const summary = details.querySelector("summary");
-    if (summary === null) throw new Error("未渲染思考摘要按钮");
-    expect(summary.textContent).toBe("思考已完成");
-
-    act(() =>
-      root.render(
-        <RunTranscript
-          run={running}
-          events={[
-            ...completedEvents,
-            {
-              eventId: "tool-start",
-              sequence: 5,
-              occurredAt: "",
-              kind: "agent_event",
-              type: "tool.started",
-              payload: { name: "read_file", callId: "call-1" },
-            },
-          ]}
-        />,
-      ),
-    );
-    expect(details.open).toBe(true);
-
-    act(() =>
-      root.render(<RunTranscript run={{ ...running, status: "failed" }} events={liveEvents} />),
-    );
-    expect(details.open).toBe(true);
-    expect(details.classList).toContain("is-stopped");
-    expect(details.textContent).toContain("思考已结束");
-    expect(container.querySelector(".run-progress-track")).toBeNull();
+    expect(group.open).toBe(true);
+    expect(group.querySelector(":scope > summary")?.textContent).toContain("已完成 2 项");
+    expect(group.querySelectorAll(".activity-group-content > .tool-activity")).toHaveLength(1);
 
     act(() => root.unmount());
   });

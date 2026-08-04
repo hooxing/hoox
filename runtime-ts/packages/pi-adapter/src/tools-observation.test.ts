@@ -58,6 +58,22 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
 }
 
 describe("exec_command", () => {
+  it("允许模型按需提供面向用户的命令目的", () => {
+    const tested = fixture({ command: vi.fn() } as unknown as SandboxHandle);
+    expect(
+      Value.Check(tested.parameters, {
+        cmd: "ls -la",
+        user_facing_purpose: "查看当前目录中的文件",
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(tested.parameters, {
+        cmd: "ls -la",
+        user_facing_purpose: "",
+      }),
+    ).toBe(false);
+  });
+
   it("新 Session 暴露受控命令与文件工具", () => {
     expect(SANDBOX_TOOL_NAMES).toEqual(["exec_command", "read", "edit", "write"]);
   });

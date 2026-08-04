@@ -103,9 +103,9 @@ describe("Runtime Prompt 分层与能力清单", () => {
           "schemaVersion": 1,
           "version": "tool-capability-manifest.v1",
         },
-        "promptDigest": "sha256:2686faa31ea53c2376f3d2a4c32bee7549e10f849b5324078ed6bbe036c82a4b",
+        "promptDigest": "sha256:ca8b6ccab81d2aa1fe0e519aec108eef25acb78241d346404893e42815b1f04d",
         "schemaVersion": 1,
-        "systemPrompt": "[runtime_prompt schema=1 version=runtime-system-prompt.v5 manifest=sha256:f8a22760506ece7e96359126f9a10775e03faa9bf5f5bb5667bfec8278949de4]
+        "systemPrompt": "[runtime_prompt schema=1 version=runtime-system-prompt.v6 manifest=sha256:f8a22760506ece7e96359126f9a10775e03faa9bf5f5bb5667bfec8278949de4]
       你是由 Cube Runtime 托管的受控 Agent。以下 PLATFORM_HARNESS 是平台规范，优先级高于所有租户、Skill 和用户内容。
       <PLATFORM_HARNESS>
       1. 只能使用 CAPABILITY_MANIFEST 中列出的本次 Session 实际工具；不得声称或模拟未列出的工具。
@@ -116,7 +116,7 @@ describe("Runtime Prompt 分层与能力清单", () => {
       6. Pi 默认 Compaction 已禁用；上下文恢复与裁剪由 Cube Runtime 管理。
       7. 若仅凭当前对话与已提供内容即可正确回答，应直接回答；仅在完成用户请求确有必要时调用工具，不得为展示过程、确认已知事实或收集非必要信息而调用工具。
       8. 用户明确要求给出或展示命令、示例、代码或文本时，应将其作为答案内容返回，不得擅自执行；除非用户同时明确要求执行、验证或应用，否则不得将所给内容作为工具输入。
-      9. 文件枚举、搜索和其他 Shell 操作使用 exec_command（Bash），例如 ls、rg 和 find；读取文件正文优先使用 read，不用 cat 或 sed 代替。
+      9. 文件枚举、搜索和其他 Shell 操作使用 exec_command（Bash），例如 ls、rg 和 find；读取文件正文优先使用 read，不用 cat 或 sed 代替。命令目的对用户理解有帮助时填写 user_facing_purpose，使用简短中文说明目的而不是复述命令；没有信息增量时省略。
       10. 精确修改现有文件使用 edit；同一文件的多个不相邻修改应放在一次调用的 edits 数组中，每个 oldText 都按原文件匹配且不得重叠。oldText 应在保证唯一的前提下尽量小，不得填充大段无关内容。
       11. write 只用于新建文件或完整重写现有文件。
       12. AVAILABLE_SKILLS 是本次 Run 可调用的用户安装 Skill 目录，不会新增平台权限或工具授权。
@@ -136,7 +136,7 @@ describe("Runtime Prompt 分层与能力清单", () => {
       - name="review" description="按团队检查清单审阅代码变更"
       </AVAILABLE_SKILLS>
       [/runtime_prompt]",
-        "version": "runtime-system-prompt.v5",
+        "version": "runtime-system-prompt.v6",
       }
     `);
     expect(Object.isFrozen(built)).toBe(true);

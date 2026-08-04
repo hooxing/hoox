@@ -66,7 +66,7 @@ describe("Scheduler 进程入口", () => {
     expect(configuration.threadSandbox).toEqual({
       retentionSchedulerEnabled: true,
       lifecycleTimeoutMs: 90_000,
-      pausedRetentionSeconds: 600,
+      pausedRetentionSeconds: 86_400,
     });
     expect(configuration.sandbox).toMatchObject({
       apiUrl: "https://cube-api.invalid",

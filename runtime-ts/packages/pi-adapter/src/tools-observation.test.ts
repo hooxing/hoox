@@ -16,6 +16,7 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
   const receipts: string[] = [];
   let authorizationCalls = 0;
   let continuationRejected = false;
+  let continuationFailure: string | undefined;
   const observed = createObservedSandboxTools(
     sandbox,
     {
@@ -37,8 +38,9 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
           : { outcome: "unknown" as const };
       },
     }),
-    () => {
+    (failure) => {
       continuationRejected = true;
+      continuationFailure = failure;
     },
   );
   const tool = observed.tools[0];
@@ -51,6 +53,7 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
     receipts,
     authorizationCalls: () => authorizationCalls,
     continuationRejected: () => continuationRejected,
+    continuationFailure: () => continuationFailure,
   };
 }
 
@@ -231,6 +234,81 @@ describe("exec_command", () => {
       JSON.stringify({ code: "EXEC_UNAVAILABLE", message: "CubeSandbox 命令服务暂时不可用" }),
     );
     expect(parseControlledToolReceipt(tested.receipts[0] ?? "").outcome).toBe("failed");
+  });
+
+  it("连续三次命令数据面故障后熔断 Session，后续调用不再触碰 Sandbox", async () => {
+    const command = vi.fn(async () => {
+      throw new SandboxRuntimeError("UPSTREAM", "private upstream detail");
+    });
+    const tested = fixture({ command } as unknown as SandboxHandle);
+
+    for (let index = 1; index <= 3; index += 1) {
+      await expect(
+        tested.execute(
+          `call_exec_unavailable_${index}`,
+          { cmd: "echo probe" },
+          undefined,
+          () => undefined,
+          {} as never,
+        ),
+      ).rejects.toThrow("EXEC_UNAVAILABLE");
+    }
+
+    expect(tested.continuationRejected()).toBe(true);
+    expect(tested.continuationFailure()).toBe("SANDBOX_FAILED");
+    await expect(
+      tested.execute(
+        "call_exec_after_circuit",
+        { cmd: "echo must-not-run" },
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("EXEC_UNAVAILABLE");
+    expect(command).toHaveBeenCalledTimes(3);
+    expect(tested.authorizationCalls()).toBe(3);
+  });
+
+  it("命令成功会清零连续基础设施失败计数", async () => {
+    const command = vi
+      .fn()
+      .mockRejectedValueOnce(new SandboxRuntimeError("UPSTREAM", "first"))
+      .mockRejectedValueOnce(new SandboxRuntimeError("UPSTREAM", "second"))
+      .mockResolvedValueOnce({ stdout: "ok", stderr: "", exitCode: 0 })
+      .mockRejectedValueOnce(new SandboxRuntimeError("UPSTREAM", "third"));
+    const tested = fixture({ command } as unknown as SandboxHandle);
+
+    for (let index = 1; index <= 2; index += 1) {
+      await expect(
+        tested.execute(
+          `call_exec_reset_failure_${index}`,
+          { cmd: "echo probe" },
+          undefined,
+          () => undefined,
+          {} as never,
+        ),
+      ).rejects.toThrow("EXEC_UNAVAILABLE");
+    }
+    await expect(
+      tested.execute(
+        "call_exec_reset_success",
+        { cmd: "echo ok" },
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).resolves.toBeDefined();
+    await expect(
+      tested.execute(
+        "call_exec_reset_new_failure",
+        { cmd: "echo probe" },
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("EXEC_UNAVAILABLE");
+
+    expect(tested.continuationRejected()).toBe(false);
   });
 
   it("超时返回稳定 Tool Error 码和调用方期限", async () => {

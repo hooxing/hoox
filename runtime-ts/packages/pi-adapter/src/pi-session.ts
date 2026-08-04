@@ -11,11 +11,11 @@ import {
 } from "@cube-runtime/context-policy";
 import { type RolloutCompatibilityIdentity, sha256Digest } from "@cube-runtime/domain";
 import {
+  type AvailableSkillPromptInput,
   buildRuntimeSystemPrompt,
   buildToolCapabilityManifest,
   type RuntimePromptInput,
   type ToolCapabilityManifest,
-  type AvailableSkillPromptInput,
 } from "@cube-runtime/prompt-builder";
 import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
@@ -38,27 +38,28 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import {
+  isTrustedModelTokenizerCapability,
+  type TrustedModelTokenizerCapability,
+} from "./deepseek-v4-tokenizer.js";
+import {
   createDeliverFilePiTool,
   type DeliverFilePiToolExecutorPort,
 } from "./deliver-file-tool.js";
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
-import { createSkillPiTool, type SkillPiToolExecutorPort } from "./skill-tool.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
-import {
-  createObservedSandboxTools,
-  SANDBOX_TOOL_NAMES,
-  type SandboxToolEffectAuthorizer,
-  type SandboxToolHandleProvider,
-} from "./tools.js";
-import {
-  isTrustedModelTokenizerCapability,
-  type TrustedModelTokenizerCapability,
-} from "./deepseek-v4-tokenizer.js";
+import { createSkillPiTool, type SkillPiToolExecutorPort } from "./skill-tool.js";
 import {
   assertThreadActiveHistory,
   providerVisibleThreadHistoryMessages,
   type ThreadActiveHistoryV1,
 } from "./thread-history.js";
+import {
+  createObservedSandboxTools,
+  SANDBOX_TOOL_NAMES,
+  type SandboxToolEffectAuthorizer,
+  type SandboxToolHandleProvider,
+  type ToolContinuationFailure,
+} from "./tools.js";
 
 interface PiSessionPort {
   readonly isStreaming: boolean;
@@ -127,6 +128,16 @@ export class ContextBudgetAdmissionError extends Error {
   }
 }
 
+/** Sandbox 数据面熔断后由 Provider 同步入口携带回 Worker，不能伪装成模型故障。 */
+export class SandboxToolCircuitOpenError extends Error {
+  readonly code = "SANDBOX_FAILED" as const;
+
+  constructor() {
+    super("SANDBOX_FAILED");
+    this.name = "SandboxToolCircuitOpenError";
+  }
+}
+
 class ProviderBindingDriftError extends Error {
   readonly code = "PROVIDER_BINDING_DRIFT" as const;
 
@@ -137,7 +148,10 @@ class ProviderBindingDriftError extends Error {
 }
 
 class DeferredProviderFailure {
-  readonly #failures = new Map<number, ContextBudgetAdmissionError | ProviderBindingDriftError>();
+  readonly #failures = new Map<
+    number,
+    ContextBudgetAdmissionError | ProviderBindingDriftError | SandboxToolCircuitOpenError
+  >();
   #activeGeneration: number | undefined;
 
   begin(generation: number): void {
@@ -145,14 +159,22 @@ class DeferredProviderFailure {
     this.#activeGeneration = generation;
   }
 
-  reject<T>(failure: ContextBudgetAdmissionError | ProviderBindingDriftError): T {
+  reject<T>(
+    failure: ContextBudgetAdmissionError | ProviderBindingDriftError | SandboxToolCircuitOpenError,
+  ): T {
     const generation = this.#activeGeneration;
     if (generation === undefined) throw new ProviderBindingDriftError();
     if (!this.#failures.has(generation)) this.#failures.set(generation, failure);
     throw failure;
   }
 
-  consume(generation: number): ContextBudgetAdmissionError | ProviderBindingDriftError | undefined {
+  consume(
+    generation: number,
+  ):
+    | ContextBudgetAdmissionError
+    | ProviderBindingDriftError
+    | SandboxToolCircuitOpenError
+    | undefined {
     const failure = this.#failures.get(generation);
     this.#failures.delete(generation);
     return failure;
@@ -842,6 +864,7 @@ function toPiHistoryMessage(
 
 function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
   let toolContinuationRejected = false;
+  let toolContinuationFailure: ToolContinuationFailure | undefined;
   const sandboxTarget =
     options.prepareSandboxTool === undefined
       ? options.sandbox
@@ -853,8 +876,9 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
       authorizeToolEffect: options.authorizeToolEffect,
     },
     options.createToolObservationRecorder,
-    () => {
+    (failure) => {
       toolContinuationRejected = true;
+      toolContinuationFailure ??= failure;
     },
   );
   const customTools = [
@@ -902,6 +926,9 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     serializedToolDefinitions,
     assertModelRequestAllowed: () => {
       if (toolContinuationRejected) {
+        if (toolContinuationFailure === "SANDBOX_FAILED") {
+          throw new SandboxToolCircuitOpenError();
+        }
         throw new Error("Tool durable 失败回执完成后禁止继续模型轮次");
       }
     },
@@ -1079,7 +1106,12 @@ function providerGatedRuntime(
                 ? invoke()
                 : options.withProviderInvocation(invoke);
             } catch (error) {
-              if (error instanceof ContextBudgetAdmissionError) throw error;
+              if (
+                error instanceof ContextBudgetAdmissionError ||
+                error instanceof SandboxToolCircuitOpenError
+              ) {
+                return providerFailure.reject(error);
+              }
               return providerFailure.reject(
                 error instanceof ProviderBindingDriftError
                   ? error

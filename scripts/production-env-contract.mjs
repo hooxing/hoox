@@ -58,6 +58,7 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "AGENT_WORKER_POLL_INTERVAL_MS",
   "AGENT_WORKER_DISPATCH_LEASE_MS",
   "AGENT_WORKER_RUN_LEASE_MS",
+  "AGENT_WORKER_RUN_TIMEOUT_MS",
   "MODEL_BASE_URL",
   "MODEL_API_KEY",
   "MODEL_ID",

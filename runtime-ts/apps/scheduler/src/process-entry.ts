@@ -2,8 +2,8 @@ import { tenantId } from "@cube-runtime/domain";
 import {
   createPostgresPool,
   PgSandboxCleanupConsumerStore,
-  PgThreadSandboxLifecycleConsumerStore,
   PgThreadContinuityMetrics,
+  PgThreadSandboxLifecycleConsumerStore,
   probePostgres,
 } from "@cube-runtime/persistence";
 import {
@@ -11,8 +11,8 @@ import {
   booleanEnvironmentField,
   integerEnvironmentField,
   type ProcessSignalSource,
-  parseStrictEnvironment,
   parseProductionPostgresTransport,
+  parseStrictEnvironment,
   type RunningServiceProcess,
   type RuntimeEnvironment,
   readRequiredEnvironmentValue,
@@ -172,7 +172,7 @@ export function parseSchedulerProcessEnvironment(
     threadSandbox: Object.freeze({
       retentionSchedulerEnabled: parsed.values.THREAD_SANDBOX_RETENTION_SCHEDULER_ENABLED ?? true,
       lifecycleTimeoutMs: parsed.values.THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS ?? 90_000,
-      pausedRetentionSeconds: parsed.values.THREAD_SANDBOX_PAUSED_RETENTION_SECONDS ?? 600,
+      pausedRetentionSeconds: parsed.values.THREAD_SANDBOX_PAUSED_RETENTION_SECONDS ?? 86_400,
     }),
     shutdownTimeoutMilliseconds: readRequiredEnvironmentValue(
       parsed,

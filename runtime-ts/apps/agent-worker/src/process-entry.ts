@@ -8,6 +8,7 @@ import {
 } from "@cube-runtime/artifact";
 import { tenantId } from "@cube-runtime/domain";
 import {
+  BlobSkillContentStore,
   createPostgresPool,
   createS3BlobStore,
   createS3StableBlobGarbageCollector,
@@ -21,8 +22,8 @@ import {
   PgRecoveryMetrics,
   PgResourceFilesystemCatalog,
   PgRunDispatchOutbox,
-  PgSkillRuntimeRepository,
   PgRuntimeRolloutRepository,
+  PgSkillRuntimeRepository,
   PgThreadContextCompactionRepository,
   PgThreadContextHistoryRepository,
   PgThreadContinuityMetrics,
@@ -33,7 +34,6 @@ import {
   probePostgres,
   probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX,
-  BlobSkillContentStore,
   ThreadContextBodyPersistence,
 } from "@cube-runtime/persistence";
 import {
@@ -133,6 +133,7 @@ const workerEnvironmentSchema = Object.freeze({
   AGENT_WORKER_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 10, maximum: 60_000 }),
   AGENT_WORKER_DISPATCH_LEASE_MS: integerEnvironmentField({ minimum: 1_000, maximum: 300_000 }),
   AGENT_WORKER_RUN_LEASE_MS: integerEnvironmentField({ minimum: 9_000, maximum: 300_000 }),
+  AGENT_WORKER_RUN_TIMEOUT_MS: integerEnvironmentField({ minimum: 1_000, maximum: 3_600_000 }),
   THREAD_SERIAL_QUEUE_V2_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
   THREAD_CONTEXT_V2_WRITE_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
   THREAD_CONTEXT_V2_SHADOW_READ_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
@@ -240,6 +241,7 @@ export interface WorkerProcessConfiguration {
     pollIntervalMs: number;
     dispatchLeaseMs: number;
     runLeaseMs: number;
+    runTimeoutMs: number;
   }>;
   readonly threadContext: Readonly<{
     serialQueueV2Enabled: boolean;
@@ -332,6 +334,9 @@ export function parseWorkerProcessEnvironment(
   const inputRoutingEnabled = parsed.values.THREAD_INPUT_ROUTING_V2_ENABLED ?? true;
   const compactionEnabled = parsed.values.THREAD_CONTEXT_COMPACTION_ENABLED ?? true;
   const sandboxSessionReuseEnabled = parsed.values.THREAD_SANDBOX_SESSION_REUSE_ENABLED ?? true;
+  const runTimeoutMs = parsed.values.AGENT_WORKER_RUN_TIMEOUT_MS ?? 15 * 60_000;
+  const sessionTtlSeconds = parsed.values.CUBESANDBOX_SESSION_TTL_SECONDS ?? 20 * 60;
+  const sandboxLifecycleTimeoutMs = parsed.values.THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS ?? 90_000;
   const compactionPath = parsed.values.THREAD_CONTEXT_COMPACTION_PATH ?? "local";
   if (compactionPath !== "local" && compactionPath !== "remote") {
     throw new TypeError("THREAD_CONTEXT_COMPACTION_PATH 只能是 local 或 remote");
@@ -357,6 +362,13 @@ export function parseWorkerProcessEnvironment(
   ) {
     throw new TypeError(
       "THREAD_SANDBOX_SESSION_REUSE_ENABLED 依赖串行队列与 V2 Context write/read",
+    );
+  }
+  // Provider TTL 从创建时开始倒计时；它必须覆盖整个 Run 以及超时后的安全收敛窗口，
+  // 否则活跃任务会在 Worker 截止时间前被平台主动销毁。
+  if (sessionTtlSeconds * 1_000 < runTimeoutMs + sandboxLifecycleTimeoutMs) {
+    throw new TypeError(
+      "CUBESANDBOX_SESSION_TTL_SECONDS 必须覆盖 AGENT_WORKER_RUN_TIMEOUT_MS 与 Sandbox 收敛窗口",
     );
   }
   const compactionSoftLimitPercent =
@@ -432,6 +444,7 @@ export function parseWorkerProcessEnvironment(
       pollIntervalMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_POLL_INTERVAL_MS"),
       dispatchLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_DISPATCH_LEASE_MS"),
       runLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_RUN_LEASE_MS"),
+      runTimeoutMs,
     }),
     threadContext: Object.freeze({
       serialQueueV2Enabled,
@@ -454,9 +467,9 @@ export function parseWorkerProcessEnvironment(
     }),
     threadSandbox: Object.freeze({
       reuseEnabled: sandboxSessionReuseEnabled,
-      sessionTtlSeconds: parsed.values.CUBESANDBOX_SESSION_TTL_SECONDS ?? 120,
-      pausedRetentionSeconds: parsed.values.THREAD_SANDBOX_PAUSED_RETENTION_SECONDS ?? 600,
-      lifecycleTimeoutMs: parsed.values.THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS ?? 90_000,
+      sessionTtlSeconds,
+      pausedRetentionSeconds: parsed.values.THREAD_SANDBOX_PAUSED_RETENTION_SECONDS ?? 86_400,
+      lifecycleTimeoutMs: sandboxLifecycleTimeoutMs,
     }),
     ...(parsed.runtimeEnvironment === "development"
       ? {
@@ -931,6 +944,7 @@ async function assembleWorkerRuntime(
         workerId: configuration.worker.workerId,
         leaseDurationMs: configuration.worker.runLeaseMs,
         heartbeatMs: Math.floor(configuration.worker.runLeaseMs / 3),
+        runTimeoutMs: configuration.worker.runTimeoutMs,
         threadContextWriteEnabled: configuration.threadContext.writeEnabled,
         threadInputRoutingV2Enabled: configuration.threadContext.inputRoutingEnabled,
         threadSandboxSessionReuseEnabled: configuration.threadSandbox.reuseEnabled,

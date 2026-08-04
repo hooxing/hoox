@@ -40,6 +40,16 @@ describe("Pi 运行事件映射", () => {
     ).toMatchObject({
       presentation: { action: "command", title: "查看当前目录中的文件" },
     });
+    expect(
+      mapPiEvent({
+        type: "tool_execution_start",
+        toolCallId: "call-deliver",
+        toolName: "deliver_file",
+        args: { path: "/workspace/output/deepseek.pptx", name: "DeepSeek介绍.pptx" },
+      }),
+    ).toMatchObject({
+      presentation: { action: "deliver", title: "DeepSeek介绍.pptx" },
+    });
   });
 
   it("把 Runtime turn hook 错误归类为协议错误，不误报 Provider", () => {

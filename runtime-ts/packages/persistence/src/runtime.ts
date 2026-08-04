@@ -1,35 +1,34 @@
 import type { PromotionCapabilityVerifier, ResourceCatalog } from "@cube-runtime/resource";
+import type { BlobStore } from "./blob-store.js";
 import { PersistenceError } from "./errors.js";
 import type { MigrationDownOptions, MigrationRecord } from "./migrations.js";
 import { migrateDown, migrateUp } from "./migrations.js";
+import {
+  type ModelWireTraceReadPort,
+  PgModelWireTraceReadRepository,
+} from "./model-wire-trace-read.js";
 import { type PgBlobLifecycleOptions, PgBlobLifecycleRepository } from "./pg-blob-lifecycle.js";
 import { PgArchiveThreadCommand, PgCoreRepositories } from "./pg-core-repositories.js";
+import { PgResourceFilesystemCatalog } from "./pg-resource-filesystem.js";
 import {
   PgResourceCatalog,
   PgResourcePromotionRepository,
   type ResourcePromotionCommitPort,
 } from "./pg-resource-library.js";
-import { PgResourceFilesystemCatalog } from "./pg-resource-filesystem.js";
 import { PgResourceUploadRepository } from "./pg-resource-upload.js";
 import { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-state.js";
-import { PgThreadCreation } from "./pg-thread-creation.js";
 import { PgSkillCenterRepository } from "./pg-skill-center.js";
+import { PgSkillFilesystemCatalog } from "./pg-skill-filesystem.js";
+import { PgThreadCreation } from "./pg-thread-creation.js";
 import { PgThreadInputRouting } from "./pg-thread-input.js";
-import {
-  type ModelWireTraceReadPort,
-  PgModelWireTraceReadRepository,
-} from "./model-wire-trace-read.js";
 import type {
   ArchiveThreadCommandPort,
   CoreRepositories,
   RunExperienceReadPort,
+  ThreadContextReadPort,
   ThreadContinuityReadPort,
 } from "./ports.js";
-import type { ThreadContextReadPort } from "./ports.js";
-import type { BlobStore } from "./blob-store.js";
-import { PgThreadContextReadRepository } from "./thread-context.js";
-import { PgThreadContinuityReadRepository } from "./thread-continuity-rollout.js";
 import {
   createPostgresPool,
   type Pool,
@@ -37,6 +36,8 @@ import {
   probePostgres,
   withTenantTransaction,
 } from "./postgres.js";
+import { PgThreadContextReadRepository } from "./thread-context.js";
+import { PgThreadContinuityReadRepository } from "./thread-continuity-rollout.js";
 
 export interface PersistenceRuntime {
   readonly repositories: CoreRepositories;
@@ -76,6 +77,7 @@ export interface ApiPersistenceRuntime {
   readonly resourceFilesystem: PgResourceFilesystemCatalog;
   readonly threadContinuity: ThreadContinuityReadPort;
   readonly skillCenter: PgSkillCenterRepository;
+  readonly skillFilesystem: PgSkillFilesystemCatalog;
   threadContext(blobs: BlobStore): ThreadContextReadPort;
   probe(): Promise<void>;
   close(): Promise<void>;
@@ -104,6 +106,7 @@ export function createApiPersistenceRuntime(
     resourceFilesystem: new PgResourceFilesystemCatalog(pool),
     threadContinuity: new PgThreadContinuityReadRepository(pool),
     skillCenter: new PgSkillCenterRepository(pool),
+    skillFilesystem: new PgSkillFilesystemCatalog(pool),
     threadContext: (blobs: BlobStore) => new PgThreadContextReadRepository(pool, blobs),
     probe: () => probePostgres(pool, options.expectedRuntimeRole),
     close: () => pool.end(),

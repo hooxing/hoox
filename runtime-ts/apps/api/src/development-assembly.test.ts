@@ -42,6 +42,7 @@ vi.mock("../development-resourcefs-proxy.mjs", () => ({
 }));
 
 vi.mock("@cube-runtime/persistence", () => ({
+  BlobSkillContentStore: class {},
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
   createS3BlobStore: mocks.createS3BlobStore,
   DurableResourceBlobWriter: class {},
@@ -85,7 +86,7 @@ describe("开发 API 默认装配", () => {
     vi.clearAllMocks();
   });
 
-  it("沿用 16 MiB 小对象边界并完成进程启动", async () => {
+  it("普通对象保持 16 MiB，Skill 文件使用 32 MiB 读取边界并完成进程启动", async () => {
     const running = await startApiProcess({ environment: developmentEnvironment() });
 
     try {
@@ -94,10 +95,19 @@ describe("开发 API 默认装配", () => {
           blobLifecycle: { objectPrefix: "agent-worker" },
         }),
       );
-      expect(mocks.createS3BlobStore).toHaveBeenCalledWith(
+      expect(mocks.createS3BlobStore).toHaveBeenNthCalledWith(
+        1,
         expect.objectContaining({
           prefix: "agent-worker",
           maxBlobSizeBytes: 16 * 1_024 * 1_024,
+        }),
+        mocks.persistence.blobLifecycle,
+      );
+      expect(mocks.createS3BlobStore).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          prefix: "agent-worker",
+          maxBlobSizeBytes: 32 * 1_024 * 1_024,
         }),
         mocks.persistence.blobLifecycle,
       );

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { skillFilesystemPackageRoot } from "./filesystem.js";
 
 const invocationNamePattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const canonicalKeyPattern = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
@@ -109,6 +110,7 @@ export interface SkillPackageFile {
 export interface SkillInvocationTarget {
   readonly invocationId: string;
   readonly invocationName: string;
+  readonly canonicalKey: string;
   readonly skillVersion: string;
   readonly entrypointDigest: string;
   readonly entrypointSizeBytes: number;
@@ -159,12 +161,6 @@ export interface SkillContentStore {
     readonly expectedDigest: string;
     readonly expectedSizeBytes: number;
   }): Promise<Uint8Array>;
-}
-
-export interface SkillPackageMaterializationTarget {
-  prepareRoot(input: { readonly absoluteRoot: string }): Promise<void>;
-  writeFile(input: { readonly absolutePath: string; readonly body: Uint8Array }): Promise<void>;
-  sealReadOnly(input: { readonly absoluteRoot: string }): Promise<void>;
 }
 
 export interface RuntimeSkillInstruction {
@@ -233,7 +229,7 @@ export class SkillRuntimeService {
         throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
       }
       const instructions = decodeUtf8(bytes);
-      const packageRoot = `/skills/${invocationName}`;
+      const packageRoot = skillFilesystemPackageRoot(target.canonicalKey, target.skillVersion);
       const digest = `sha256:${target.entrypointDigest}`;
       const resources = sortedPackageFiles(target.files)
         .filter((file) => file.path !== "SKILL.md")
@@ -312,7 +308,7 @@ export class SkillRuntimeService {
         throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
       }
       const instructions = decodeUtf8(bytes);
-      const packageRoot = `/skills/${target.invocationName}`;
+      const packageRoot = skillFilesystemPackageRoot(target.canonicalKey, target.skillVersion);
       const digest = `sha256:${target.entrypointDigest}`;
       const resources = sortedPackageFiles(target.files)
         .filter((file) => file.path !== "SKILL.md")
@@ -344,39 +340,6 @@ export class SkillRuntimeService {
       );
     }
     return Object.freeze(recovered);
-  }
-
-  /** 该方法只在 Sandbox 工具已经触发按需 acquire 后调用；指令加载路径从不触碰 target。 */
-  async materializeLoadedPackages(input: {
-    readonly binding: SkillExecutionBinding;
-    readonly target: SkillPackageMaterializationTarget;
-    readonly alreadyMaterialized?: ReadonlySet<string>;
-  }): Promise<readonly string[]> {
-    const packages = await this.repository.listLoadedPackages({ binding: input.binding });
-    const materialized: string[] = [];
-    for (const skill of packages) {
-      validateTarget(skill);
-      const root = `/skills/${validateInvocationName(skill.invocationName)}`;
-      if (input.alreadyMaterialized?.has(root) === true) continue;
-      const files: Array<{ readonly absolutePath: string; readonly body: Uint8Array }> = [];
-      for (const file of sortedPackageFiles(skill.files)) {
-        const bytes = await this.contents.read({
-          blobRef: file.blobRef,
-          expectedDigest: file.contentDigest,
-          expectedSizeBytes: file.sizeBytes,
-        });
-        if (bytes.byteLength !== file.sizeBytes || sha256Bytes(bytes) !== file.contentDigest) {
-          throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
-        }
-        files.push({ absolutePath: `${root}/${file.path}`, body: bytes });
-      }
-      // Thread Sandbox 可能跨 Run 复用；先完整校验新包，再替换同名旧版本，不能混留旧文件。
-      await input.target.prepareRoot({ absoluteRoot: root });
-      for (const file of files) await input.target.writeFile(file);
-      await input.target.sealReadOnly({ absoluteRoot: root });
-      materialized.push(root);
-    }
-    return Object.freeze(materialized);
   }
 }
 
@@ -423,6 +386,7 @@ function validateArguments(value: string): string {
 function validateTarget(target: SkillInvocationTarget): void {
   if (
     !invocationNamePattern.test(target.invocationName) ||
+    !canonicalKeyPattern.test(target.canonicalKey) ||
     !versionPattern.test(target.skillVersion) ||
     !digestPattern.test(target.entrypointDigest) ||
     !digestPattern.test(target.packageDigest) ||

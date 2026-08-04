@@ -470,7 +470,7 @@ describe("Pi 安全适配", () => {
       logicalCwd: "/workspace",
       activeToolNames: expect.arrayContaining([...SANDBOX_TOOL_NAMES]),
       promptSchemaVersion: 1,
-      promptVersion: "runtime-system-prompt.v4",
+      promptVersion: "runtime-system-prompt.v5",
       capabilityManifestDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       promptDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       compactionEnabled: false,

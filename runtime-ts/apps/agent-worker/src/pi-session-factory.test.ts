@@ -50,6 +50,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     const target: SkillInvocationTarget = {
       invocationId: "explicit",
       invocationName: "review",
+      canonicalKey: "code-review",
       skillVersion: "1.0.0",
       entrypointDigest,
       entrypointSizeBytes: body.byteLength,
@@ -150,7 +151,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     expect(sandboxes.settleCount).toBe(0);
   });
 
-  it("skill 工具完成后仍不启动 Sandbox，后续 Sandbox 工具才物化只读包", async () => {
+  it("skill 工具保持零 Sandbox，后续工具直接使用已挂载的市场虚拟目录", async () => {
     const instruction = new TextEncoder().encode("# Review\n按检查清单处理。\n");
     const resource = new TextEncoder().encode("security\ncorrectness\n");
     const entrypointDigest = createHash("sha256").update(instruction).digest("hex");
@@ -158,6 +159,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     const target: SkillInvocationTarget = {
       invocationId: "tool:review",
       invocationName: "review",
+      canonicalKey: "code-review",
       skillVersion: "1.0.0",
       entrypointDigest,
       entrypointSizeBytes: instruction.byteLength,
@@ -215,17 +217,6 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       },
     });
     const sandboxes = new FakeSandboxRegistry();
-    const sandboxCommands: string[] = [];
-    sandboxes.handle.files.set("/skills/review/old-version.txt", "stale");
-    sandboxes.handle.command = async (command) => {
-      sandboxCommands.push(command);
-      if (command === "rm -rf -- '/skills/review'") {
-        for (const path of sandboxes.handle.files.keys()) {
-          if (path.startsWith("/skills/review/")) sandboxes.handle.files.delete(path);
-        }
-      }
-      return { stdout: "", stderr: "", exitCode: 0 };
-    };
     const faux = fauxProvider();
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("skill", { skill: "review" }), {
@@ -280,14 +271,9 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     expect(repository.beginInvocation).toHaveBeenCalledWith(
       expect.objectContaining({ source: "tool", invocationName: "review" }),
     );
+    expect(contents.read).toHaveBeenCalledTimes(1);
     expect(sandboxes.acquireCount).toBe(1);
-    expect(sandboxes.acquireResourceFilesystemRequirements).toEqual([false]);
-    expect(sandboxCommands).toContain("rm -rf -- '/skills/review'");
-    expect(sandboxes.handle.files.has("/skills/review/old-version.txt")).toBe(false);
-    expect(sandboxes.handle.files.get("/skills/review/SKILL.md")).toContain("按检查清单处理");
-    expect(sandboxes.handle.files.get("/skills/review/references/checklist.txt")).toBe(
-      "security\ncorrectness\n",
-    );
+    expect(sandboxes.acquireResourceFilesystemRequirements).toEqual([true]);
   });
 
   it("视觉模型在当前 user turn 自动取得全部图片且读取发生在模型许可之前", async () => {

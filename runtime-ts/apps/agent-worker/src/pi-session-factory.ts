@@ -1,4 +1,3 @@
-import { posix } from "node:path";
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@cube-runtime/artifact";
 import {
   type ControlledToolReceiptSource,
@@ -206,7 +205,6 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         instruction.version !== explicitSkillInstruction.version ||
         instruction.digest !== explicitSkillInstruction.digest,
     );
-    const materializedSkillRoots = new Set<string>();
     const requireObservationRecovery = (outcome?: ToolObservationResult["outcome"]) => {
       observationRecoveryCode =
         outcome === "conflict" ? "IDEMPOTENCY_CONFLICT" : "PERSISTENCE_UNAVAILABLE";
@@ -390,14 +388,6 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           toolName: call.toolName,
           argsDigest: sha256Digest(call.argsDigest),
         });
-        if (this.skillRuntime !== undefined) {
-          const roots = await this.skillRuntime.materializeLoadedPackages({
-            binding: skillBinding,
-            alreadyMaterialized: materializedSkillRoots,
-            target: sandboxSkillTarget(prepared.sandbox, call.signal),
-          });
-          for (const root of roots) materializedSkillRoots.add(root);
-        }
         return prepared.sandbox;
       },
       authorizeToolEffect: authorizeStartedTool,
@@ -640,47 +630,6 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     }
     return this.skillRuntime;
   }
-}
-
-function sandboxSkillTarget(
-  sandbox: import("@cube-runtime/sandbox").SandboxHandle,
-  signal?: AbortSignal,
-) {
-  return {
-    prepareRoot: async (input: { readonly absoluteRoot: string }) => {
-      if (!/^\/skills\/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(input.absoluteRoot)) {
-        throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
-      }
-      const removed = await sandbox.command(`rm -rf -- ${quoteShell(input.absoluteRoot)}`, {
-        ...(signal === undefined ? {} : { signal }),
-      });
-      if (removed.exitCode !== 0) throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
-      const created = await sandbox.command(`mkdir -p -- ${quoteShell(input.absoluteRoot)}`, {
-        ...(signal === undefined ? {} : { signal }),
-      });
-      if (created.exitCode !== 0) throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
-    },
-    writeFile: async (input: { readonly absolutePath: string; readonly body: Uint8Array }) => {
-      const directory = posix.dirname(input.absolutePath);
-      const mkdir = await sandbox.command(`mkdir -p -- ${quoteShell(directory)}`, {
-        ...(signal === undefined ? {} : { signal }),
-      });
-      if (mkdir.exitCode !== 0) throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
-      await sandbox.writeFile(input.absolutePath, input.body, {
-        ...(signal === undefined ? {} : { signal }),
-      });
-    },
-    sealReadOnly: async (input: { readonly absoluteRoot: string }) => {
-      const sealed = await sandbox.command(`chmod -R a-w -- ${quoteShell(input.absoluteRoot)}`, {
-        ...(signal === undefined ? {} : { signal }),
-      });
-      if (sealed.exitCode !== 0) throw new SkillRuntimeError("SKILL_CONTENT_UNAVAILABLE");
-    },
-  };
-}
-
-function quoteShell(value: string): string {
-  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function skillErrorMessage(code: SkillRuntimeError["code"]): string {

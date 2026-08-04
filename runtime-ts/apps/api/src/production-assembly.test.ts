@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => {
 });
 
 vi.mock("@cube-runtime/persistence", () => ({
+  BlobSkillContentStore: class {},
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
   createS3BlobStore: mocks.createS3BlobStore,
   DurableResourceBlobWriter: class {},
@@ -94,9 +95,20 @@ describe("生产 API 默认装配", () => {
         serialQueueV2Enabled: true,
         blobLifecycle: { objectPrefix: "agent-worker" },
       });
-      expect(mocks.createS3BlobStore).toHaveBeenCalledWith(
+      expect(mocks.createS3BlobStore).toHaveBeenNthCalledWith(
+        1,
         expect.objectContaining({
           maxBlobSizeBytes: 16 * 1_024 * 1_024,
+          endpoint: "https://object-storage.example.invalid:9000",
+          publicEndpoint: "https://objects.example.invalid",
+          prefix: "agent-worker",
+        }),
+        mocks.persistence.blobLifecycle,
+      );
+      expect(mocks.createS3BlobStore).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          maxBlobSizeBytes: 32 * 1_024 * 1_024,
           endpoint: "https://object-storage.example.invalid:9000",
           publicEndpoint: "https://objects.example.invalid",
           prefix: "agent-worker",

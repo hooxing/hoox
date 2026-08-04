@@ -1,4 +1,5 @@
-import { resourceId, resourceVersionId } from "@cube-runtime/domain";
+import { createHash } from "node:crypto";
+import { resourceId, resourceVersionId, type TenantId } from "@cube-runtime/domain";
 import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
 import {
   RESOURCE_FILESYSTEM_ROOT,
@@ -6,17 +7,31 @@ import {
   type ResourceFilesystemCatalog,
   type ResourceFilesystemFile,
 } from "@cube-runtime/resource";
+import {
+  assertSkillFilesystemEntry,
+  assertSkillFilesystemFile,
+  SKILL_FILESYSTEM_ROOT_SEGMENT,
+  type SkillContentStore,
+  type SkillFilesystemCatalog,
+  type SkillFilesystemEntry,
+} from "@cube-runtime/skill";
 import type { FastifyInstance, FastifyReply, FastifyRequest, HTTPMethods } from "fastify";
 
 const HTTP_ROOT = "/v1/resource-filesystem";
 
+interface ResourceFilesystemHttpDependencies {
+  readonly catalog: ResourceFilesystemCatalog;
+  readonly blobs: BlobStore;
+  readonly capabilities: ResourceFilesystemCapabilityCodec;
+  readonly skills?: Readonly<{
+    catalog: SkillFilesystemCatalog;
+    contents: SkillContentStore;
+  }>;
+}
+
 export function registerResourceFilesystemHttp(
   app: FastifyInstance,
-  dependencies: Readonly<{
-    catalog: ResourceFilesystemCatalog;
-    blobs: BlobStore;
-    capabilities: ResourceFilesystemCapabilityCodec;
-  }>,
+  dependencies: ResourceFilesystemHttpDependencies,
 ): void {
   app.register((resourceApp, _options, done) => {
     resourceApp.addContentTypeParser(
@@ -51,10 +66,7 @@ export function registerResourceFilesystemHttp(
 async function handlePropfind(
   request: FastifyRequest,
   reply: FastifyReply,
-  dependencies: Readonly<{
-    catalog: ResourceFilesystemCatalog;
-    capabilities: ResourceFilesystemCapabilityCodec;
-  }>,
+  dependencies: ResourceFilesystemHttpDependencies,
 ): Promise<void> {
   const capability = authorize(request, dependencies.capabilities);
   const depth = request.headers.depth ?? "infinity";
@@ -67,14 +79,39 @@ async function handlePropfind(
       );
     return;
   }
-  const files = await dependencies.catalog.list({ tenantId: capability.tenantId });
   const segments = requestSegments(request.url);
-  const target = resolveNode(files, segments);
+  let target: FilesystemNode | undefined;
+  let children: readonly FilesystemNode[] = [];
+  if (segments.length === 0) {
+    target = directoryNode([]);
+    if (depth === "1") {
+      const files = await dependencies.catalog.list({ tenantId: capability.tenantId });
+      children = [
+        ...resourceRootChildren(files),
+        ...(dependencies.skills === undefined
+          ? []
+          : [directoryNode([SKILL_FILESYSTEM_ROOT_SEGMENT])]),
+      ].sort(compareNodes);
+    }
+  } else if (segments[0] === SKILL_FILESYSTEM_ROOT_SEGMENT) {
+    const resolved = await resolveSkillNode(
+      dependencies.skills?.catalog,
+      capability.tenantId,
+      segments,
+      depth === "1",
+    );
+    target = resolved?.target;
+    children = resolved?.children ?? [];
+  } else {
+    const files = await dependencies.catalog.list({ tenantId: capability.tenantId });
+    target = resolveResourceNode(files, segments);
+    if (target !== undefined && depth === "1") children = resourceChildren(files, target);
+  }
   if (target === undefined) {
     void reply.code(404).send();
     return;
   }
-  const nodes = depth === "0" ? [target] : [target, ...childrenOf(files, target)];
+  const nodes = depth === "0" ? [target] : [target, ...children];
   const xml = `<?xml version="1.0" encoding="utf-8"?><d:multistatus xmlns:d="DAV:">${nodes
     .map(propfindResponse)
     .join("")}</d:multistatus>`;
@@ -89,11 +126,7 @@ async function handlePropfind(
 async function handleRead(
   request: FastifyRequest,
   reply: FastifyReply,
-  dependencies: Readonly<{
-    catalog: ResourceFilesystemCatalog;
-    blobs: BlobStore;
-    capabilities: ResourceFilesystemCapabilityCodec;
-  }>,
+  dependencies: ResourceFilesystemHttpDependencies,
 ): Promise<void> {
   const capability = authorize(request, dependencies.capabilities);
   if (request.method === "OPTIONS") {
@@ -101,6 +134,10 @@ async function handleRead(
     return;
   }
   const segments = requestSegments(request.url);
+  if (segments[0] === SKILL_FILESYSTEM_ROOT_SEGMENT) {
+    await handleSkillRead(request, reply, dependencies.skills, capability.tenantId, segments);
+    return;
+  }
   if (segments.length !== 3) {
     void reply.code(segments.length < 3 ? 405 : 404).send();
     return;
@@ -123,6 +160,60 @@ async function handleRead(
     void reply.code(404).send();
     return;
   }
+  await sendFile(request, reply, fileMetadata(file), async () => {
+    const bytes = await dependencies.blobs.getBytes(
+      { tenantId: capability.tenantId },
+      stableBlob(file),
+    );
+    if (bytes.byteLength !== file.sizeBytes) throw new Error("Resource 文件内容大小不一致");
+    return bytes;
+  });
+}
+
+async function handleSkillRead(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  dependencies: ResourceFilesystemHttpDependencies["skills"],
+  tenantId: TenantId,
+  segments: readonly string[],
+): Promise<void> {
+  if (dependencies === undefined) {
+    void reply.code(404).send();
+    return;
+  }
+  const relativeSegments = segments.slice(1);
+  const file = await dependencies.catalog.resolveFile({ tenantId, segments: relativeSegments });
+  if (file === undefined) {
+    const directory = await dependencies.catalog.listDirectory({
+      tenantId,
+      segments: relativeSegments,
+    });
+    void reply.code(directory === undefined ? 404 : 405).send();
+    return;
+  }
+  assertSkillFilesystemFile(file);
+  await sendFile(request, reply, file, async () => {
+    const bytes =
+      file.source.kind === "inline"
+        ? file.source.body
+        : await dependencies.contents.read({
+            blobRef: file.source.blobRef,
+            expectedDigest: file.contentDigest,
+            expectedSizeBytes: file.sizeBytes,
+          });
+    if (bytes.byteLength !== file.sizeBytes || sha256(bytes) !== file.contentDigest) {
+      throw new Error("Skill 文件内容完整性校验失败");
+    }
+    return bytes;
+  });
+}
+
+async function sendFile(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  file: FilesystemFileMetadata,
+  read: () => Promise<Uint8Array>,
+): Promise<void> {
   const range = parseRange(request.headers.range, file.sizeBytes);
   if (range === "invalid") {
     void reply.code(416).header("content-range", `bytes */${file.sizeBytes}`).send();
@@ -135,7 +226,7 @@ async function handleRead(
     .code(range === undefined ? 200 : 206)
     .header("accept-ranges", "bytes")
     .header("content-length", String(length))
-    .header("etag", `"${file.object.sha256}"`)
+    .header("etag", `"${file.contentDigest}"`)
     .header("cache-control", "private, no-store")
     .header("x-content-type-options", "nosniff")
     .type(file.mediaType);
@@ -145,11 +236,7 @@ async function handleRead(
     void reply.send();
     return;
   }
-  const bytes = await dependencies.blobs.getBytes(
-    { tenantId: capability.tenantId },
-    stableBlob(file),
-  );
-  if (bytes.byteLength !== file.sizeBytes) throw new Error("Resource 文件内容大小不一致");
+  const bytes = await read();
   void reply.send(Buffer.from(bytes.subarray(start, start + length)));
 }
 
@@ -176,29 +263,40 @@ export class ResourceFilesystemHttpError extends Error {
   }
 }
 
+interface FilesystemFileMetadata {
+  readonly mediaType: string;
+  readonly sizeBytes: number;
+  readonly contentDigest: string;
+}
+
 type FilesystemNode =
-  | { readonly kind: "root"; readonly segments: readonly [] }
-  | { readonly kind: "resource"; readonly segments: readonly [string] }
-  | { readonly kind: "version"; readonly segments: readonly [string, string] }
+  | { readonly kind: "directory"; readonly segments: readonly string[] }
   | {
       readonly kind: "file";
-      readonly segments: readonly [string, string, string];
-      readonly file: ResourceFilesystemFile;
+      readonly segments: readonly string[];
+      readonly file: FilesystemFileMetadata;
     };
 
-function resolveNode(
+function directoryNode(segments: readonly string[]): FilesystemNode {
+  return Object.freeze({ kind: "directory", segments: Object.freeze([...segments]) });
+}
+
+function fileNode(segments: readonly string[], file: FilesystemFileMetadata): FilesystemNode {
+  return Object.freeze({ kind: "file", segments: Object.freeze([...segments]), file });
+}
+
+function resolveResourceNode(
   files: readonly ResourceFilesystemFile[],
   segments: readonly string[],
 ): FilesystemNode | undefined {
-  if (segments.length === 0) return { kind: "root", segments: [] };
   if (segments.length === 1) {
     return files.some((file) => file.resourceId === segments[0])
-      ? { kind: "resource", segments: [segments[0] ?? ""] }
+      ? directoryNode([segments[0] ?? ""])
       : undefined;
   }
   if (segments.length === 2) {
     return files.some((file) => file.resourceId === segments[0] && file.versionId === segments[1])
-      ? { kind: "version", segments: [segments[0] ?? "", segments[1] ?? ""] }
+      ? directoryNode([segments[0] ?? "", segments[1] ?? ""])
       : undefined;
   }
   if (segments.length === 3) {
@@ -208,60 +306,88 @@ function resolveNode(
         candidate.versionId === segments[1] &&
         candidate.path.split("/").at(-1) === segments[2],
     );
-    return file === undefined
-      ? undefined
-      : {
-          kind: "file",
-          segments: [segments[0] ?? "", segments[1] ?? "", segments[2] ?? ""],
-          file,
-        };
+    return file === undefined ? undefined : fileNode(segments, fileMetadata(file));
   }
   return undefined;
 }
 
-function childrenOf(
+function resourceRootChildren(files: readonly ResourceFilesystemFile[]): readonly FilesystemNode[] {
+  return [...new Set(files.map((file) => String(file.resourceId)))].map((resource) =>
+    directoryNode([resource]),
+  );
+}
+
+function resourceChildren(
   files: readonly ResourceFilesystemFile[],
   node: FilesystemNode,
 ): readonly FilesystemNode[] {
   if (node.kind === "file") return [];
-  if (node.kind === "root") {
-    return [...new Set(files.map((file) => String(file.resourceId)))].map((resource) => ({
-      kind: "resource" as const,
-      segments: [resource] as const,
-    }));
-  }
-  if (node.kind === "resource") {
+  if (node.segments.length === 1) {
     return [
       ...new Set(
         files
           .filter((file) => file.resourceId === node.segments[0])
           .map((file) => String(file.versionId)),
       ),
-    ].map((version) => ({
-      kind: "version" as const,
-      segments: [node.segments[0], version] as const,
-    }));
+    ].map((version) => directoryNode([node.segments[0] ?? "", version]));
   }
+  if (node.segments.length !== 2) return [];
   return files
     .filter((file) => file.resourceId === node.segments[0] && file.versionId === node.segments[1])
-    .map((file) => ({
-      kind: "file" as const,
-      segments: [
-        String(file.resourceId),
-        String(file.versionId),
-        file.path.split("/").at(-1) ?? "file",
-      ] as const,
-      file,
-    }));
+    .map((file) =>
+      fileNode(
+        [String(file.resourceId), String(file.versionId), file.path.split("/").at(-1) ?? "file"],
+        fileMetadata(file),
+      ),
+    );
+}
+
+async function resolveSkillNode(
+  catalog: SkillFilesystemCatalog | undefined,
+  tenantId: TenantId,
+  segments: readonly string[],
+  includeChildren: boolean,
+): Promise<
+  { readonly target: FilesystemNode; readonly children: readonly FilesystemNode[] } | undefined
+> {
+  if (catalog === undefined) return undefined;
+  const relativeSegments = segments.slice(1);
+  const file = await catalog.resolveFile({ tenantId, segments: relativeSegments });
+  if (file !== undefined) {
+    assertSkillFilesystemFile(file);
+    return { target: fileNode(segments, file), children: [] };
+  }
+  const entries = await catalog.listDirectory({ tenantId, segments: relativeSegments });
+  if (entries === undefined) return undefined;
+  return {
+    target: directoryNode(segments),
+    children: includeChildren
+      ? entries.map((entry) => skillEntryNode(segments, entry)).sort(compareNodes)
+      : [],
+  };
+}
+
+function skillEntryNode(parent: readonly string[], entry: SkillFilesystemEntry): FilesystemNode {
+  assertSkillFilesystemEntry(entry);
+  const segments = [...parent, entry.name];
+  return entry.kind === "directory" ? directoryNode(segments) : fileNode(segments, entry);
+}
+
+function fileMetadata(file: ResourceFilesystemFile): FilesystemFileMetadata {
+  return Object.freeze({
+    mediaType: file.mediaType,
+    sizeBytes: file.sizeBytes,
+    contentDigest: file.object.sha256,
+  });
 }
 
 function propfindResponse(node: FilesystemNode): string {
-  const collection = node.kind !== "file";
+  const collection = node.kind === "directory";
   const suffix = node.segments.map(encodeURIComponent).join("/");
   const href = `${HTTP_ROOT}${suffix === "" ? "" : `/${suffix}`}${collection ? "/" : ""}`;
   const content =
     node.kind === "file"
-      ? `<d:getcontentlength>${node.file.sizeBytes}</d:getcontentlength><d:getcontenttype>${escapeXml(node.file.mediaType)}</d:getcontenttype><d:getetag>&quot;${node.file.object.sha256}&quot;</d:getetag>`
+      ? `<d:getcontentlength>${node.file.sizeBytes}</d:getcontentlength><d:getcontenttype>${escapeXml(node.file.mediaType)}</d:getcontenttype><d:getetag>&quot;${node.file.contentDigest}&quot;</d:getetag>`
       : "<d:resourcetype><d:collection/></d:resourcetype>";
   return `<d:response><d:href>${escapeXml(href)}</d:href><d:propstat><d:prop><d:displayname>${escapeXml(node.segments.at(-1) ?? RESOURCE_FILESYSTEM_ROOT)}</d:displayname>${content}</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`;
 }
@@ -301,6 +427,16 @@ function parseRange(
     return "invalid";
   }
   return { start, end: Math.min(requestedEnd, size - 1) };
+}
+
+function compareNodes(left: FilesystemNode, right: FilesystemNode): number {
+  const leftName = left.segments.at(-1) ?? "";
+  const rightName = right.segments.at(-1) ?? "";
+  return leftName < rightName ? -1 : leftName > rightName ? 1 : 0;
+}
+
+function sha256(value: Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function escapeXml(value: string): string {

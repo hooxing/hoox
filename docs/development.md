@@ -72,8 +72,9 @@ PPTX Skill 宣称预装的 Node.js、`pptxgenjs`、图标渲染和 LibreOffice/P
 
 `agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 必须严格等于 `DEV_AUTH_USER_A_TENANT_ID`，保证 `dev-user-a` 的 Web/API 创建结果由同一 Worker 消费。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
 
-VMware 内的 Cubelet 需要挂载附件时，不能直接访问只监听 Windows loopback 的 API。先为宿主虚拟网卡生成独立的
-开发 TLS 证书，把 CA 公钥安装到 Cubelet 节点系统信任库，再随 API 启动最小 ResourceFS Sidecar：
+VMware 内的 Cubelet 挂载附件与 `/resources/skills` 公开市场视图时，不能直接访问只监听 Windows loopback 的
+API。所有 Sandbox 工具现在都依赖该 ResourceFS 数据面。先为宿主虚拟网卡生成独立的开发 TLS 证书，把 CA 公钥
+安装到 Cubelet 节点系统信任库，再随 API 启动最小 ResourceFS Sidecar：
 
 ```powershell
 $env:RESOURCEFS_PROXY_LISTEN_HOST='<VMware host-only 宿主地址>'

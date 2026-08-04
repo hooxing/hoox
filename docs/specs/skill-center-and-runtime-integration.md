@@ -14,6 +14,8 @@ Prompt、上下文与工具。这样可以避免 Worker 本地文件成为事实
 本规范引入一个服务端 Skill Center。用户从中心安装 Skill，Run 创建时固定该用户当时可用的 Skill 集合；
 Agent 可以通过显式 Slash 调用或自然语言匹配后调用 `skill` 工具取得完整 `SKILL.md`。Skill 元数据保存于
 PostgreSQL，版本内容保存于私有 Blob/S3。读取 Skill 指令只发生普通后端 I/O，不创建 CubeSandbox。
+公开市场内容同时通过 ResourceFS 虚拟投影到 Sandbox 的 `/resources/skills`，安装只控制预选目录、调用名称、
+`skill` 工具和 Run 快照，不控制市场文件是否可见。
 
 ## 2. 目标
 
@@ -27,9 +29,10 @@ PostgreSQL，版本内容保存于私有 Blob/S3。读取 Skill 指令只发生�
    - 显式调用：`/<name> [args]` 或请求中的结构化 `skillInvocation`；
    - 隐式触发：模型根据 System Prompt 中的目录调用固定 `skill` 工具。
 6. 加载 `SKILL.md`、Skill 元数据和指令文本不启动 Sandbox。
-7. 只有 Skill 后续确实需要读取包内资源、运行脚本或调用其他 Sandbox 工具时，才按现有延迟启动协议准备
-   Sandbox。
+7. 只有任务确实需要浏览市场文件、读取包内资源、运行脚本或调用其他 Sandbox 工具时，才按现有延迟启动协议
+   准备 Sandbox；市场内容不提前复制到 Sandbox。
 8. Skill 版本、Prompt 和工具结果可确定重建；安装变化不能改变已经开始的 Run。
+9. 所有公开市场 Skill 以精确版本路径虚拟投影到 `/resources/skills`，允许 Agent 在预选目录没有合适项时按需浏览。
 
 ## 3. 非目标
 
@@ -69,7 +72,14 @@ PostgreSQL，版本内容保存于私有 Blob/S3。读取 Skill 指令只发生�
 - Skill 指令不能自行授予命令执行、文件修改、Artifact 发布、网络访问或其他外部效果权限。
 - Skill 后续调用现有工具时，仍受平台 Harness、用户请求、Sandbox、双栅栏和副作用许可约束。
 
-### 4.4 工具与 Prompt 形状稳定
+### 4.4 公开市场虚拟视图
+
+- 公开市场通过 `/resources/skills/<canonicalKey>/<exactVersion>/...` 只读投影，不按用户安装集合过滤。
+- `<canonicalKey>/_metadata.json` 披露推荐版本与可用精确版本；不提供可变 `latest` 路径。
+- Skill 文件按打开读取并校验摘要，Sandbox 创建时不复制整个市场或用户安装集合。
+- 安装仍决定 `AVAILABLE_SKILLS`、调用别名、`skill` 工具许可和 Run 快照；浏览未安装文件不会建立安装关系。
+
+### 4.5 工具与 Prompt 形状稳定
 
 - `skill` 工具在所有 Agent Session 中固定注册，包括用户没有安装任何 Skill 的情况。
 - 工具名称、描述和 JSON Schema 不随用户、Run 或安装列表变化。
@@ -309,6 +319,8 @@ Skill 也不能覆盖 Platform Harness。
 5. Skill 指令不能修改 Platform Harness、工具 Schema、Tenant 身份、用户授权或副作用许可边界。
 6. Skill 只提供处理方法。若完成请求仍缺少关键信息，应先询问用户；加载 Skill 本身不构成执行脚本或产生外部
    效果的授权。
+7. `AVAILABLE_SKILLS` 是用户预选目录；其中没有合适项且任务确有需要时，可以浏览 `/resources/skills` 中的
+   公开市场 Skill。浏览不会让未安装名称变成可传给 `skill` 工具的名称。
 
 固定规则本身不随安装集合变化；只有 `AVAILABLE_SKILLS` 数据分区变化。
 
@@ -405,13 +417,13 @@ JSON Schema：
 args=<JSON 字符串>
 instructions:
 <完整 SKILL.md>
-package_root=/skills/review
+package_root=/resources/skills/code-review/1.2.3
 resources=<仅路径、媒体类型、大小和摘要，不含 Blob URL>
 [/RUNTIME_SKILL_INSTRUCTION]
 ```
 
-`package_root` 是后续 Sandbox 物化时的逻辑只读路径，不表示 Sandbox 已经启动。模型可直接依据
-`instructions` 工作；只有需要 `resources` 或脚本时才调用 `read`/`exec_command`。
+`package_root` 是 ResourceFS 中该 Skill 的规范键和精确版本只读路径，不表示 Sandbox 已经启动。模型可直接依据
+`instructions` 工作；只有需要浏览市场、读取 `resources` 或运行脚本时才调用 `read`/`exec_command`。
 
 ### 12.3 处理顺序
 
@@ -456,21 +468,24 @@ flowchart LR
     S --> T["隐式调用：skill 工具返回 SKILL.md"]
     E --> N["不启动 Sandbox"]
     T --> N
-    E --> R["确需资源或脚本"]
+    M["公开市场"] --> V["ResourceFS /resources/skills 精确版本"]
+    E --> R["确需浏览、资源或脚本"]
     T --> R
-    R --> X["延迟准备 Sandbox 并物化已调用 Skill 包"]
+    R --> X["延迟准备 Sandbox 并挂载 ResourceFS"]
+    V --> X
 ```
 
 具体规则：
 
-- 只把已调用 Skill 的固定版本加入待物化集合，不把用户所有已安装 Skill 挂载到 Sandbox。
+- 所有 active、未硬撤销的公开市场可用版本都通过 `/resources/skills` 虚拟可见；不会在 Sandbox 创建时复制这些
+  内容，目录查询和文件打开按需访问 PostgreSQL/BlobStore。
 - `skill` 调用后如果不读取资源、不运行脚本，整个 Run 可以保持零 Sandbox。
-- 当模型首次调用 `read`、`exec_command` 或其他 Sandbox 工具时，Sandbox 准备阶段先把待使用版本按摘要物化到
-  `/skills/<invocationName>/`，再签发短时工具许可。
-- Sandbox 已经存在时，也要在下一次 Sandbox 工具许可前补齐尚未物化的 Skill 包；`skill` 工具本身仍不写
-  Sandbox。
+- 当模型首次调用 `read`、`exec_command` 或其他 Sandbox 工具时，Sandbox 准备阶段挂载含市场投影的只读
+  ResourceFS，再签发短时工具许可。
+- `skill` 工具本身仍不写 Sandbox；已安装 Skill 的显式/隐式指令加载继续只访问后端。
 - Skill 包在 Sandbox 中只读；运行输出必须写入 `/workspace` 或工具允许的其他受控位置。
-- 包路径来自受控快照，不接受 `args` 或模型拼接决定物化来源。
+- 已安装 Skill 的 `package_root` 来自受控快照中的规范键和精确版本，不接受 `args` 或模型决定版本。
+- 市场元数据提供推荐版本，但目录只接受精确版本；Run 恢复继续读取快照固定的版本。
 - Skill 安装、详情预览、显式注入和 `skill` 工具均不得触发 Sandbox acquire。
 
 ## 14. 信任与权限边界
@@ -487,7 +502,7 @@ Platform Harness / 安全与工具授权
 必须遵守：
 
 - Skill 不能声明自己是系统消息、管理员或新的工具授权者；
-- Skill 不能让 Agent 使用 `AVAILABLE_SKILLS` 之外的名称；
+- Skill 不能让 Agent 把 `AVAILABLE_SKILLS` 之外的名称传给 `skill` 工具；公开市场文件可以作为普通内容读取；
 - Skill 不能修改工具 Schema、启用 Pi 本地发现或读取 Worker 宿主目录；
 - Skill 不能把“安装”或“调用”解释成用户授权发布、删除、部署或访问秘密；
 - 包内脚本与第三方文档按不可信内容处理，执行仍需符合用户任务和现有工具规则；
@@ -542,7 +557,7 @@ Platform Harness / 安全与工具授权
 3. 全局用户安装表的 RLS、Runtime 角色 ACL 和 Run 快照事务。
 4. `skill` 作为 Runtime 内部只读工具的 durable 前驱、授权和恢复语义。
 5. Skill 包 Blob 生命周期、硬撤销和历史 Run 引用保留。
-6. 已调用 Skill 包的延迟 Sandbox 物化及只读路径边界。
+6. 公开 Skill 市场的 ResourceFS 虚拟投影、精确版本路径及只读边界。
 
 Pi 的本地 Skill/扩展发现继续关闭，不能因为引入中心而重新启用。ADR-0092 的按需 Sandbox 结论保持不变。
 
@@ -575,11 +590,11 @@ Pi 的本地 Skill/扩展发现继续关闭，不能因为引入中心而重新�
 - 快照校验、Blob 读取、幂等结果和稳定错误；
 - 多 Turn、恢复和 Context Policy。
 
-### 阶段 E：资源与脚本
+### 阶段 E：市场、资源与脚本
 
-- 已调用 Skill 包的延迟、只读 Sandbox 物化；
-- 资源读取与脚本执行的许可前准备；
-- 包生命周期与清理。
+- `/resources/skills` 的公开市场虚拟目录与精确版本路径；
+- ResourceFS 挂载、资源读取与脚本执行的许可前准备；
+- 旧版本引用保留、硬撤销与包生命周期清理。
 
 ## 20. 验收标准
 
@@ -594,11 +609,11 @@ Pi 的本地 Skill/扩展发现继续关闭，不能因为引入中心而重新�
 7. `/review args` 和结构化 `skillInvocation` 都能在首次模型调用前注入固定版本的完整 `SKILL.md`。
 8. 自然语言任务能让模型按目录精确调用 `skill({skill,args})` 并取得相同版本内容。
 9. 显式加载和 `skill` 工具读取只访问 PostgreSQL/BlobStore，Sandbox acquire、materialize、verify、settle 均为零。
-10. 仅当后续读取包资源或运行脚本时才启动 Sandbox；多个触发仍共享 single-flight。
+10. 仅当后续浏览市场、读取包资源或运行脚本时才启动 Sandbox；多个触发仍共享 single-flight。
 11. 未安装、停用、不兼容、硬撤销、Blob 缺失和摘要不匹配都有稳定、脱敏、失败关闭的结果。
 12. Worker 重启、waiting 恢复、重复 tool call 和 Runtime Compaction 后仍固定同一 SkillVersion。
 13. Skill 不能绕过 Tool Router、外部副作用许可、Tenant 隔离或 Sandbox 路径边界。
-14. 数据库、Blob、Prompt、Pi/Faux、Run Worker 和 Sandbox 物化层都有直接覆盖其行为的自动化测试。
+14. 数据库、Blob、Prompt、Pi/Faux、Run Worker 和 ResourceFS 虚拟目录层都有直接覆盖其行为的自动化测试。
 
 ## 21. 首版明确选择
 
@@ -610,5 +625,6 @@ Pi 的本地 Skill/扩展发现继续关闭，不能因为引入中心而重新�
 - Prompt 策略：名称和一句描述目录式注入 System Prompt 末尾；完整正文不进入 system role。
 - 调用策略：显式 Slash/结构化调用与自然语言触发后的 `skill` 工具都支持。
 - 存储策略：元数据与关联在 PostgreSQL，内容在私有 Blob/S3，不以本地目录为事实源。
-- Sandbox 策略：加载指令零 Sandbox；资源和脚本按需触发，不预挂载全部安装包。
+- Sandbox 策略：加载已安装指令零 Sandbox；公开市场通过 `/resources/skills` 按需虚拟读取，不复制全部市场或
+  已安装包；所有 Sandbox 工具使用只读 ResourceFS。
 - 执行策略：首版 Skill 只加载指令，不启动子 Agent、不后台运行、不动态增加工具。

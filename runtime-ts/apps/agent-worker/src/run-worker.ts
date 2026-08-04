@@ -403,7 +403,8 @@ export class RunWorker {
         }
         // acquire 后会先设置 ref，再继续物化 Workspace；并发调用必须等待同一个完整准备 Promise，
         // 不能仅因 ref 已可见就提前取得尚未 ready 的 Sandbox。
-        const requiresResourceFilesystem = request.reason === "attachment";
+        // /resources 同时承载附件与公开 Skill 市场；任何 Sandbox 工具都必须看到同一虚拟目录。
+        const requiresResourceFilesystem = true;
         if (sandboxPreparation !== undefined) {
           const prepared = await sandboxPreparation;
           if (requiresResourceFilesystem && !sandboxResourceFilesystemMounted) {

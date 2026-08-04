@@ -1,32 +1,34 @@
 import { randomUUID } from "node:crypto";
 import { isoTimestamp, runId, threadId, workspaceId } from "@cube-runtime/domain";
 import {
+  BlobSkillContentStore,
+  type CreateS3BlobStoreConfig,
   createApiPersistenceRuntime,
   createS3BlobStore,
   DurableResourceBlobWriter,
   DurableResourceUploadBlobAdapter,
   probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX,
-  type CreateS3BlobStoreConfig,
 } from "@cube-runtime/persistence";
+import { type ServiceAssemblyFactory, startServiceProcess } from "@cube-runtime/process-runtime";
 import {
   createResourceFilesystemCapabilityCodec,
   ResourceAttachmentResolver,
   ResourceUploadService,
 } from "@cube-runtime/resource";
 import { SkillCenterService } from "@cube-runtime/skill";
-import { startServiceProcess, type ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec, parseThreadCursorSigningKeys } from "./cursor.js";
+import type { ApiProcessConfiguration } from "./process-entry.js";
 import { createProductionJwtAuthResolver } from "./production-auth.js";
 import { loadProductionTlsCredentials, productionTrustProxy } from "./production-transport.js";
-import type { ApiProcessConfiguration } from "./process-entry.js";
 
 const cursorTtlMilliseconds = 15 * 60_000;
 const cursorMaximumTtlMilliseconds = 60 * 60_000;
 // 生产 HTTP API 只交付已完整校验的小对象；该边界独立于开发 fixture，避免把 provider 流直接暴露给浏览器。
 const productionApiMaxBlobSizeBytes = 16 * 1_024 * 1_024;
+const productionApiMaxSkillBlobSizeBytes = 32 * 1_024 * 1_024;
 
 /**
  * 真正的生产依赖图只在此模块构造：PostgreSQL、S3、HS256 JWT 与受限 TLS/proxy listener 缺一不可。
@@ -81,6 +83,10 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
         maximumTtlMilliseconds: cursorMaximumTtlMilliseconds,
       });
       const blobs = createS3BlobStore(objectStorage, persistence.blobLifecycle);
+      const skillBlobs = createS3BlobStore(
+        { ...objectStorage, maxBlobSizeBytes: productionApiMaxSkillBlobSizeBytes },
+        persistence.blobLifecycle,
+      );
       const resourceFilesystemCapabilities = createResourceFilesystemCapabilityCodec({
         secret: configuration.resourceFilesystemSigningKey,
       });
@@ -116,6 +122,10 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
           resourceFilesystem: {
             catalog: persistence.resourceFilesystem,
             capabilities: resourceFilesystemCapabilities,
+            skills: {
+              catalog: persistence.skillFilesystem,
+              contents: new BlobSkillContentStore(skillBlobs),
+            },
           },
           ...(configuration.threadContextV2ReadEnabled
             ? {

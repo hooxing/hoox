@@ -3,6 +3,7 @@ import { tenantId, userId } from "@cube-runtime/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgSkillCenterRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-center.js";
+import { PgSkillFilesystemCatalog } from "../../runtime-ts/packages/persistence/src/pg-skill-filesystem.js";
 import {
   createRunSkillSnapshot,
   readRunSkillSnapshot,
@@ -53,6 +54,7 @@ let admin!: Pool;
 let migrator!: Pool;
 let runtime!: Pool;
 let repository!: PgSkillCenterRepository;
+let filesystem!: PgSkillFilesystemCatalog;
 let schemaCreated = false;
 let migratorCreated = false;
 
@@ -122,8 +124,23 @@ beforeAll(async () => {
         [id, "b".repeat(64), `skills/${id}/1.0.0/SKILL.md`],
       );
     }
+    await client.query(
+      `INSERT INTO skill_versions(
+         skill_id,version,description,compatibility,package_digest,
+         entrypoint_path,entrypoint_digest,package_blob_ref,security_status,status
+       ) VALUES ('skill_review','0.9.0','旧版代码审阅工作流','runtime >= 1',$1,
+                 'SKILL.md',$2,$3,'verified','available')`,
+      ["d".repeat(64), "e".repeat(64), "skills/skill_review/0.9.0/package"],
+    );
+    await client.query(
+      `INSERT INTO skill_version_files(
+         skill_id,skill_version,normalized_path,media_type,size_bytes,content_digest,blob_ref
+       ) VALUES ('skill_review','0.9.0','SKILL.md','text/markdown',18,$1,$2)`,
+      ["e".repeat(64), "skills/skill_review/0.9.0/SKILL.md"],
+    );
   });
   repository = new PgSkillCenterRepository(runtime);
+  filesystem = new PgSkillFilesystemCatalog(runtime);
 });
 
 afterAll(async () => {
@@ -139,6 +156,42 @@ afterAll(async () => {
 });
 
 describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
+  it("所有 Tenant 无需安装即可浏览公开市场，并可解析仍然可用的精确旧版本", async () => {
+    const rootA = await filesystem.listDirectory({ tenantId: scopeA.tenantId, segments: [] });
+    const rootB = await filesystem.listDirectory({ tenantId: scopeB.tenantId, segments: [] });
+    expect(rootA).toEqual(rootB);
+    expect(rootA).toEqual([
+      { kind: "directory", name: "code-review" },
+      { kind: "directory", name: "deploy" },
+    ]);
+
+    const versions = await filesystem.listDirectory({
+      tenantId: scopeA.tenantId,
+      segments: ["code-review"],
+    });
+    expect(versions?.map((entry) => entry.name)).toEqual(["_metadata.json", "0.9.0", "1.0.0"]);
+    expect(
+      await filesystem.resolveFile({
+        tenantId: scopeA.tenantId,
+        segments: ["code-review", "0.9.0", "SKILL.md"],
+      }),
+    ).toMatchObject({
+      mediaType: "text/markdown",
+      source: { kind: "blob", blobRef: "skills/skill_review/0.9.0/SKILL.md" },
+    });
+
+    const metadata = await filesystem.resolveFile({
+      tenantId: scopeB.tenantId,
+      segments: ["code-review", "_metadata.json"],
+    });
+    if (metadata?.source.kind !== "inline") throw new Error("Skill 市场元数据缺失");
+    expect(JSON.parse(new TextDecoder().decode(metadata.source.body))).toMatchObject({
+      canonicalKey: "code-review",
+      recommendedVersion: "1.0.0",
+      availableVersions: ["0.9.0", "1.0.0"],
+    });
+  });
+
   it("受信发布者可导入目录，而 Runtime 只能在认证用户上下文读取", async () => {
     const page = await repository.listCatalog({
       context: scopeA,

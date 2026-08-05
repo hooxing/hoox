@@ -504,26 +504,26 @@ h2 {
   font-size: 11px;
   font-weight: 690;
 }
-.is-ready {
+.run-status.is-ready {
   color: #587065;
   background: #e8eeea;
 }
-.is-queued,
-.is-running {
-  color: #0f6654;
-  background: #d7f2e6;
+.run-status.is-queued,
+.run-status.is-running {
+  color: #555552;
+  background: #e7e7e4;
 }
-.is-waiting {
+.run-status.is-waiting {
   color: #865c0b;
   background: #fff0c9;
 }
-.is-succeeded {
+.run-status.is-succeeded {
   color: #176142;
   background: #d7f1e4;
 }
-.is-failed,
-.is-cancelled,
-.is-recovery-required {
+.run-status.is-failed,
+.run-status.is-cancelled,
+.run-status.is-recovery-required {
   color: #9e302e;
   background: #fde5e3;
 }
@@ -580,8 +580,8 @@ h2 {
   background: #f2f2f0;
 }
 .run-progress.is-active {
-  border-color: #d4ddd7;
-  background: linear-gradient(110deg, #f5f7f5, #edf4f0, #f5f7f5);
+  border-color: #dededb;
+  background: linear-gradient(110deg, #f4f4f2, #eaeae7, #f4f4f2);
   background-size: 220% 100%;
   animation: progress-sheen 2.8s ease-in-out infinite;
 }
@@ -620,7 +620,7 @@ h2 {
 }
 .run-progress-primary > svg {
   min-width: 16px;
-  color: #4f7665;
+  color: #777772;
 }
 .run-progress.is-failed .run-progress-primary > svg {
   color: #a64840;
@@ -679,17 +679,17 @@ h2 {
   color: #aaa9a3;
 }
 .run-todo-list li.is-in_progress {
-  color: #315f4b;
+  color: #3e3e3b;
   font-weight: 650;
 }
 .run-todo-list li.is-in_progress > svg {
-  color: #3d8062;
+  color: #777772;
 }
 .run-todo-list li.is-completed {
   color: #92918b;
 }
 .run-todo-list li.is-completed > svg {
-  color: #65927d;
+  color: #858580;
 }
 .run-thinking {
   min-width: 0;

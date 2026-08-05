@@ -1,6 +1,6 @@
 import type { CreateSkillSubmissionRequest, SkillSubmissionDto } from "@cube-runtime/protocol";
 import { describe, expect, it, vi } from "vitest";
-import { AdminApiError, filesToRequests, SkillAdminApi } from "./api.js";
+import { AdminApiError, filesToRequests, resolvePackagePaths, SkillAdminApi } from "./api.js";
 
 const digest = "a".repeat(64);
 
@@ -173,6 +173,7 @@ describe("技能发布管理 API", () => {
         contentBase64: "AAEC/w==",
       },
     ]);
+    expect(resolvePackagePaths([file])).toEqual(["SKILL.md"]);
   });
 
   it("不把服务端敏感错误细节传入界面", async () => {

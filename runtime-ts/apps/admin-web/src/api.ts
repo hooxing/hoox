@@ -190,6 +190,19 @@ export function resolvePackagePath(file: File): string {
   return (relativePath.length > 0 ? relativePath : file.name).replaceAll("\\", "/");
 }
 
+export function resolvePackagePaths(files: readonly File[]): readonly string[] {
+  const selectedPaths = files.map(resolvePackagePath);
+  const firstRoot = selectedPaths[0]?.split("/", 1)[0];
+  const hasDirectoryPickerRoot =
+    firstRoot !== undefined &&
+    firstRoot.length > 0 &&
+    selectedPaths.every((path) => path.startsWith(`${firstRoot}/`));
+  // webkitdirectory 会把用户选中的目录名附在每个相对路径前；包协议要求根目录本身不入包。
+  return selectedPaths.map((path) =>
+    hasDirectoryPickerRoot ? path.slice(firstRoot.length + 1) : path,
+  );
+}
+
 function encodeBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
   const chunks: string[] = [];
@@ -202,16 +215,7 @@ function encodeBase64(buffer: ArrayBuffer): string {
 export async function filesToRequests(
   files: readonly File[],
 ): Promise<readonly SkillSubmissionFileRequest[]> {
-  const selectedPaths = files.map(resolvePackagePath);
-  const firstRoot = selectedPaths[0]?.split("/", 1)[0];
-  const hasDirectoryPickerRoot =
-    firstRoot !== undefined &&
-    firstRoot.length > 0 &&
-    selectedPaths.every((path) => path.startsWith(`${firstRoot}/`));
-  // webkitdirectory 会把用户选中的目录名附在每个相对路径前；包协议要求 SKILL.md 位于根级。
-  const packagePaths = selectedPaths.map((path) =>
-    hasDirectoryPickerRoot ? path.slice(firstRoot.length + 1) : path,
-  );
+  const packagePaths = resolvePackagePaths(files);
   const paths = new Set<string>();
   return Promise.all(
     files.map(async (file, index) => {

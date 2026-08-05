@@ -11,6 +11,7 @@ import {
   SkillAdminApi,
   type SkillAdminApiContract,
 } from "./api.js";
+import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadata.js";
 
 const defaultApi = new SkillAdminApi();
 const maxSubmissionFiles = 256;
@@ -163,6 +164,50 @@ function CreateSubmissionForm({
   const [form, setForm] = useState<CreateFormState>(emptyCreateForm);
   const [files, setFiles] = useState<readonly File[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [metadataFeedback, setMetadataFeedback] = useState<
+    Readonly<{ kind: "success" | "notice"; message: string }> | undefined
+  >();
+
+  useEffect(() => {
+    let active = true;
+    if (files.length === 0) {
+      setMetadataFeedback(undefined);
+      return () => {
+        active = false;
+      };
+    }
+    void extractSkillMetadataPrefill(files)
+      .then((prefill) => {
+        if (!active) return;
+        if (prefill.recognizedLabels.length === 0) {
+          setMetadataFeedback({
+            kind: "notice",
+            message: "已找到 SKILL.md，但没有可自动填写的标准元数据。",
+          });
+          return;
+        }
+        setForm((current) => ({ ...current, ...prefill.values }));
+        setMetadataFeedback({
+          kind: "success",
+          message: `已从 SKILL.md 自动填写：${prefill.recognizedLabels.join("、")}。请核对后提交。${
+            prefill.licenseNotice === undefined ? "" : ` ${prefill.licenseNotice}`
+          }`,
+        });
+      })
+      .catch((reason: unknown) => {
+        if (!active) return;
+        setMetadataFeedback({
+          kind: "notice",
+          message:
+            reason instanceof SkillMetadataError
+              ? reason.message
+              : "SKILL.md 元数据自动识别失败，请手动填写。",
+        });
+      });
+    return () => {
+      active = false;
+    };
+  }, [files]);
 
   const update = (field: keyof CreateFormState, value: string) => {
     setForm((current) => ({ ...current, [field]: value }));
@@ -328,6 +373,14 @@ function CreateSubmissionForm({
                   files.reduce((sum, file) => sum + file.size, 0),
                 )}`}
           </div>
+          {metadataFeedback !== undefined && (
+            <div
+              className={`metadata-feedback metadata-feedback-${metadataFeedback.kind}`}
+              role="status"
+            >
+              {metadataFeedback.message}
+            </div>
+          )}
           {files.length > 0 && (
             <ul className="selected-file-list">
               {files.slice(0, 8).map((file) => (

@@ -225,6 +225,54 @@ describe("技能发布管理界面", () => {
     });
   });
 
+  it("选择标准 Skill 目录后从 SKILL.md 自动预填元数据", async () => {
+    const container = mount(apiFixture(submission("draft")));
+    await settle();
+    const markdown = `---
+name: docx
+description: "Create, edit, and inspect Word documents."
+license: Proprietary. LICENSE.txt has complete terms
+---
+
+# DOCX`;
+    const entrypoint = new File([markdown], "SKILL.md", { type: "text/markdown" });
+    Object.defineProperty(entrypoint, "webkitRelativePath", {
+      configurable: true,
+      value: "docx/SKILL.md",
+    });
+    Object.defineProperty(entrypoint, "arrayBuffer", {
+      configurable: true,
+      value: async () => new TextEncoder().encode(markdown).buffer,
+    });
+    const directoryInput = container.querySelector<HTMLInputElement>("input[webkitdirectory]");
+    if (directoryInput === null) throw new Error("未找到目录选择器");
+    Object.defineProperty(directoryInput, "files", {
+      configurable: true,
+      value: [entrypoint],
+    });
+    act(() => directoryInput.dispatchEvent(new Event("change", { bubbles: true })));
+    await settle();
+
+    const controlValue = (labelText: string) => {
+      const label = [...container.querySelectorAll("label")].find((candidate) =>
+        candidate.textContent?.includes(labelText),
+      );
+      return label?.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+        "input:not([type='file']), textarea",
+      )?.value;
+    };
+    expect(controlValue("规范键")).toBe("docx");
+    expect(controlValue("显示名称")).toBe("docx");
+    expect(controlValue("描述")).toBe("Create, edit, and inspect Word documents.");
+    expect(controlValue("SPDX 许可证")).toBe("LicenseRef-Proprietary");
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "已从 SKILL.md 自动填写",
+    );
+    expect(container.querySelector('[role="status"]')?.textContent).toContain(
+      "完整条款仍以包内 LICENSE 文件",
+    );
+  });
+
   it("创建表单提交全部元数据和浏览器编码后的多文件内容", async () => {
     const listed = submission("draft");
     const created = { ...listed, submissionId: "submission_created" };

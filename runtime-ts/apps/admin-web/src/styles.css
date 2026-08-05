@@ -291,6 +291,26 @@ textarea {
   font-size: 13px;
 }
 
+.metadata-feedback {
+  margin-top: 10px;
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.metadata-feedback-success {
+  border: 1px solid #b9d7c3;
+  background: #edf8f0;
+  color: #205f38;
+}
+
+.metadata-feedback-notice {
+  border: 1px solid #d9d4bd;
+  background: #faf8ef;
+  color: #685f39;
+}
+
 .selected-file-list {
   max-height: 140px;
   overflow: auto;

@@ -8,6 +8,8 @@ import type {
   Sha256Digest,
   TenantId,
   ThreadId,
+  TodoSnapshot,
+  TodoWriteCommand,
   Workspace,
   WorkspaceId,
   WorkspaceRevisionId,
@@ -847,6 +849,11 @@ export interface AgentSessionFactoryPort {
     readonly authorizeToolEffect: (
       call: ExternalEffectCall,
     ) => Promise<ConsumedExternalEffectAuthorization>;
+    /** 持久化 Agent 自主维护的 Run 级完整 Todo 快照；不授权或阻止其他工具。 */
+    readonly writeTodo: (input: {
+      readonly callId: string;
+      readonly command: TodoWriteCommand;
+    }) => Promise<TodoSnapshot>;
   }): Promise<WorkerAgentSessionPort>;
 }
 

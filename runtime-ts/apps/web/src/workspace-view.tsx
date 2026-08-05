@@ -2,6 +2,7 @@ import {
   Archive,
   Check,
   ChevronRight,
+  Circle,
   Download,
   Eye,
   FileText,
@@ -114,6 +115,7 @@ export function RunTimeline({
   const showActivity = isRunning || isQueued;
   const elapsed = useElapsedSeconds(run);
   const isFailure = recoveryRequired || run.status === "failed" || run.status === "cancelled";
+  const completedTodos = progress.todo?.todos.filter((todo) => todo.status === "completed").length;
   const summary = recoveryRequired
     ? "执行已中断"
     : run.status === "cancelled"
@@ -148,6 +150,37 @@ export function RunTimeline({
           </div>
         </div>
       </div>
+      {progress.todo !== undefined && (
+        <section className="run-todo" aria-label="任务清单">
+          <div className="run-todo-heading">
+            <span>任务清单</span>
+            <span>
+              {completedTodos}/{progress.todo.todos.length}
+            </span>
+          </div>
+          <ol className="run-todo-list">
+            {progress.todo.todos.map((todo) => (
+              <li className={`is-${todo.status}`} key={todo.id}>
+                {todo.status === "completed" ? (
+                  <Check size={14} aria-hidden="true" />
+                ) : todo.status === "in_progress" ? (
+                  <LoaderCircle className="spin" size={14} aria-hidden="true" />
+                ) : (
+                  <Circle size={14} aria-hidden="true" />
+                )}
+                <span className="sr-only">
+                  {todo.status === "completed"
+                    ? "已完成："
+                    : todo.status === "in_progress"
+                      ? "执行中："
+                      : "待处理："}
+                </span>
+                <span>{todo.content}</span>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
     </section>
   );
 }

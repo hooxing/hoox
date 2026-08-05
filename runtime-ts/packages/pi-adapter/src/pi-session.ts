@@ -48,6 +48,7 @@ import {
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
 import { createSkillPiTool, type SkillPiToolExecutorPort } from "./skill-tool.js";
+import { createTodoWritePiTool, type TodoWritePiToolExecutorPort } from "./todo-write-tool.js";
 import {
   assertThreadActiveHistory,
   providerVisibleThreadHistoryMessages,
@@ -454,6 +455,8 @@ export interface CreateSafePiSessionOptions {
   }>[];
   /** 固定注册 skill schema；未配置时只返回稳定的服务不可用结果。 */
   skillToolExecutor?: SkillPiToolExecutorPort;
+  /** Run 级 Todo 写入器；生产 Session 必须提供，独立适配器测试可省略。 */
+  todoWriteToolExecutor?: TodoWritePiToolExecutorPort;
   rolloutProjection?: ControlledRolloutProjection;
   /** Thread 级历史只接受 Runtime 从持久事实重建的窄协议，不接受客户端 messages。 */
   threadActiveHistory?: ThreadActiveHistoryV1;
@@ -592,6 +595,7 @@ export async function createSafePiSession(
     tools: [
       ...SANDBOX_TOOL_NAMES,
       "skill",
+      ...(options.todoWriteToolExecutor === undefined ? [] : ["todo_write"]),
       ...(options.deliverFileToolRouter === undefined ? [] : ["deliver_file"]),
     ],
     excludeTools: ["bash", "grep", "find", "ls"],
@@ -890,6 +894,17 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
         toolContinuationRejected = true;
       },
     ),
+    ...(options.todoWriteToolExecutor === undefined
+      ? []
+      : [
+          createTodoWritePiTool(
+            options.todoWriteToolExecutor,
+            observedSandboxTools.recordControlledReceipt,
+            () => {
+              toolContinuationRejected = true;
+            },
+          ),
+        ]),
     ...(options.deliverFileToolRouter === undefined
       ? []
       : [

@@ -172,6 +172,7 @@ const publicAgentEventTypes = new Set([
   "tool.started",
   "tool.updated",
   "tool.completed",
+  "todo.updated",
   "queue.updated",
   "compaction.forbidden",
   "error",

@@ -107,7 +107,23 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
   async create(
     input: Parameters<AgentSessionFactoryPort["create"]>[0],
   ): Promise<WorkerAgentSessionPort> {
+    const runtimeCallId = (providerCallId: string): string => {
+      if (input.agent === undefined || input.agent.agentKind === "root") return providerCallId;
+      return `${input.agent.agentThreadId}:${input.agent.agentTurnId}:${sha256Digest(providerCallId).slice(0, 32)}`;
+    };
+    const projectAgentControlError = (error: unknown) => {
+      const message = error instanceof Error ? error.message : "子 Agent 控制面暂时不可用";
+      return Object.freeze({
+        status: "failed" as const,
+        code: message.startsWith("AGENT_") ? message : "AGENT_CONTROL_FAILED",
+        message,
+        correctable: true,
+        fatal: false,
+      });
+    };
     const attemptWireTraces = this.modelWireTraces?.createAttempt();
+    const skillEnabled = input.enabledToolNames?.includes("skill") ?? true;
+    const agentControl = input.agentControl;
     const prepareInput = async (userInput: AgentUserInput): Promise<PreparedAgentUserInput> => {
       let images: PreparedAgentUserInput["images"] = Object.freeze([]);
       if (this.model.input.includes("image") && userInput.attachments.length > 0) {
@@ -263,6 +279,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       try {
         return await input.authorizeToolEffect({
           ...call,
+          callId: runtimeCallId(call.callId),
           argsDigest: sha256Digest(call.argsDigest),
         });
       } catch (error) {
@@ -291,7 +308,10 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       sandboxPreparationRequested.add(call.callId);
       await recordStartedTool({ toolCallId: call.callId, toolName: call.toolName });
       try {
-        return await input.ensureSandboxReady({ reason: "tool", call });
+        return await input.ensureSandboxReady({
+          reason: "tool",
+          call: { ...call, callId: runtimeCallId(call.callId) },
+        });
       } catch (error) {
         let resolve: () => void = () => undefined;
         const completed = new Promise<void>((done) => {
@@ -361,7 +381,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         const instruction = await this.requireSkillRuntime().loadInstruction({
           binding: skillBinding,
           source: "tool",
-          callId: request.callId,
+          callId: runtimeCallId(request.callId),
           invocationName: request.skill,
           ...(request.args === undefined ? {} : { args: request.args }),
         });
@@ -450,13 +470,34 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       skillSnapshotDigest: skillSnapshot.digest,
       skillToolExecutor,
       todoWriteToolExecutor,
-      recoveredSkillInstructions: recoveredForSession.map((instruction) => ({
-        name: instruction.name,
-        version: instruction.version,
-        digest: instruction.digest,
-        modelText: instruction.modelText,
-      })),
-      ...(explicitSkillInstruction === undefined
+      ...(input.enabledToolNames === undefined ? {} : { enabledToolNames: input.enabledToolNames }),
+      ...(agentControl === undefined || input.agent?.agentKind === "subagent"
+        ? {}
+        : {
+            agentControlToolExecutor: {
+              spawn: (call: Parameters<NonNullable<typeof agentControl>["spawn"]>[0]) =>
+                agentControl.spawn(call),
+              sendMessage: (call: Parameters<NonNullable<typeof agentControl>["sendMessage"]>[0]) =>
+                agentControl.sendMessage(call),
+              followUp: (call: Parameters<NonNullable<typeof agentControl>["followUp"]>[0]) =>
+                agentControl.followUp(call),
+              interrupt: (call: Parameters<NonNullable<typeof agentControl>["interrupt"]>[0]) =>
+                agentControl.interrupt(call),
+              list: () => agentControl.list(),
+              wait: (call: Parameters<NonNullable<typeof agentControl>["wait"]>[0]) =>
+                agentControl.wait(call),
+              projectError: projectAgentControlError,
+            },
+          }),
+      recoveredSkillInstructions: skillEnabled
+        ? recoveredForSession.map((instruction) => ({
+            name: instruction.name,
+            version: instruction.version,
+            digest: instruction.digest,
+            modelText: instruction.modelText,
+          }))
+        : [],
+      ...(!skillEnabled || explicitSkillInstruction === undefined
         ? {}
         : {
             explicitSkillInstruction: {
@@ -514,7 +555,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     const recoveredThreadHistory =
       input.threadActiveHistory ?? (await this.prepareThreadHistory?.(input, compatibility));
     const initialThreadHistory =
-      recoveredThreadHistory === undefined || this.prepareRuntimeCompaction === undefined
+      recoveredThreadHistory === undefined ||
+      this.prepareRuntimeCompaction === undefined ||
+      input.agent?.agentKind === "subagent"
         ? recoveredThreadHistory
         : await runRuntimeCompaction(
             input,
@@ -522,6 +565,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             recoveredThreadHistory,
             availableThreadHistoryTokens,
           );
+    input.agentControl?.setParentHistory(initialThreadHistory);
     controller = await createSafePiSession({
       ...sessionMaterial,
       rolloutProjection: activeRolloutProjection,
@@ -586,8 +630,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       prepareInput,
       runPrompt: async (prepared, authorization): Promise<AgentTurnOutcome> => {
         const { permit } = authorization;
+        const allowedModelPermit =
+          input.agent?.agentKind === "subagent"
+            ? permit.effect === "agent_model_start"
+            : permit.effect === "model_start" || permit.effect === "model_continue";
         if (
-          (permit.effect !== "model_start" && permit.effect !== "model_continue") ||
+          !allowedModelPermit ||
           permit.scope.tenantId !== input.scope.tenantId ||
           permit.scope.threadId !== input.scope.threadId ||
           permit.scope.runId !== input.scope.runId ||
@@ -637,7 +685,19 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           await Promise.all([...rejectedToolReceipts.values()].map((item) => item.completed));
         }
       },
-      subscribe: (listener) => controller.subscribe(listener),
+      subscribe: (listener) =>
+        controller.subscribe((event) => {
+          if (
+            input.agent?.agentKind === "subagent" &&
+            (event.type === "tool.started" ||
+              event.type === "tool.updated" ||
+              event.type === "tool.completed")
+          ) {
+            listener({ ...event, callId: runtimeCallId(event.callId) });
+            return;
+          }
+          listener(event);
+        }),
       dispose: () => {
         unsubscribeToolGate();
         startedToolCalls.clear();

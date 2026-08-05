@@ -38,6 +38,11 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import {
+  createAgentControlPiTools,
+  type AgentControlPiToolExecutorPort,
+  type DelegablePiToolName,
+} from "./agent-control-tools.js";
+import {
   isTrustedModelTokenizerCapability,
   type TrustedModelTokenizerCapability,
 } from "./deepseek-v4-tokenizer.js";
@@ -56,7 +61,6 @@ import {
 } from "./thread-history.js";
 import {
   createObservedSandboxTools,
-  SANDBOX_TOOL_NAMES,
   type SandboxToolEffectAuthorizer,
   type SandboxToolHandleProvider,
   type ToolContinuationFailure,
@@ -457,6 +461,10 @@ export interface CreateSafePiSessionOptions {
   skillToolExecutor?: SkillPiToolExecutorPort;
   /** Run 级 Todo 写入器；生产 Session 必须提供，独立适配器测试可省略。 */
   todoWriteToolExecutor?: TodoWritePiToolExecutorPort;
+  /** 只向 root Session 注册；子 Session 不得获得递归创建 Agent 的能力。 */
+  agentControlToolExecutor?: AgentControlPiToolExecutorPort;
+  /** 子 Session 的实际工具白名单；省略时保持 root 的完整现有工具集合。 */
+  enabledToolNames?: readonly DelegablePiToolName[];
   rolloutProjection?: ControlledRolloutProjection;
   /** Thread 级历史只接受 Runtime 从持久事实重建的窄协议，不接受客户端 messages。 */
   threadActiveHistory?: ThreadActiveHistoryV1;
@@ -592,12 +600,7 @@ export async function createSafePiSession(
     customTools,
     // 双重白名单：即便 Pi 将来新增默认工具，也不会把宿主机工具暴露给模型。
     noTools: "all",
-    tools: [
-      ...SANDBOX_TOOL_NAMES,
-      "skill",
-      ...(options.todoWriteToolExecutor === undefined ? [] : ["todo_write"]),
-      ...(options.deliverFileToolRouter === undefined ? [] : ["deliver_file"]),
-    ],
+    tools: customTools.map((tool) => tool.name),
     excludeTools: ["bash", "grep", "find", "ls"],
   });
   assertPiSessionCapabilityManifest({
@@ -885,16 +888,28 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
       toolContinuationFailure ??= failure;
     },
   );
+  const enabled =
+    options.enabledToolNames === undefined
+      ? undefined
+      : new Set<DelegablePiToolName>(options.enabledToolNames);
+  const isEnabled = (name: DelegablePiToolName) => enabled === undefined || enabled.has(name);
+  const selectedSandboxTools = observedSandboxTools.tools.filter((tool) =>
+    isEnabled(tool.name as DelegablePiToolName),
+  );
   const customTools = [
-    ...observedSandboxTools.tools,
-    createSkillPiTool(
-      options.skillToolExecutor ?? unavailableSkillToolExecutor,
-      observedSandboxTools.recordControlledReceipt,
-      () => {
-        toolContinuationRejected = true;
-      },
-    ),
-    ...(options.todoWriteToolExecutor === undefined
+    ...selectedSandboxTools,
+    ...(isEnabled("skill")
+      ? [
+          createSkillPiTool(
+            options.skillToolExecutor ?? unavailableSkillToolExecutor,
+            observedSandboxTools.recordControlledReceipt,
+            () => {
+              toolContinuationRejected = true;
+            },
+          ),
+        ]
+      : []),
+    ...(enabled !== undefined || options.todoWriteToolExecutor === undefined
       ? []
       : [
           createTodoWritePiTool(
@@ -905,7 +920,7 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
             },
           ),
         ]),
-    ...(options.deliverFileToolRouter === undefined
+    ...(enabled !== undefined || options.deliverFileToolRouter === undefined
       ? []
       : [
           createDeliverFilePiTool(
@@ -916,6 +931,12 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
             },
           ),
         ]),
+    ...(enabled !== undefined || options.agentControlToolExecutor === undefined
+      ? []
+      : createAgentControlPiTools(
+          options.agentControlToolExecutor,
+          observedSandboxTools.recordControlledReceipt,
+        )),
   ];
   // 能力清单从即将传给 Pi 的同一组真实工具派生，不能维护第二份易漂移的硬编码列表。
   const builtPrompt = buildRuntimeSystemPrompt({
@@ -925,7 +946,7 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
       description: tool.description,
       inputSchemaDigest: digestCanonicalToolInputSchema(tool.parameters),
     })),
-    availableSkills: options.availableSkills ?? [],
+    availableSkills: isEnabled("skill") ? (options.availableSkills ?? []) : [],
     untrusted: options.untrustedPromptContent ?? { tenant: [], skill: [], user: [] },
   });
   const serializedToolDefinitions = JSON.stringify(

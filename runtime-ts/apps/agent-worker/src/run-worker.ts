@@ -21,6 +21,7 @@ import {
   workspaceChangeDigest,
 } from "./mutation-protocol.js";
 import type {
+  AgentControlPersistencePort,
   AgentSessionFactoryPort,
   ArtifactPublicationPort,
   CancellationPort,
@@ -55,6 +56,7 @@ import type {
   WorkspaceRevisionVerifierPort,
 } from "./ports.js";
 import { assertProtocolSize } from "./ports.js";
+import { AgentSupervisor, rootAgentThreadId } from "./agent-supervisor.js";
 import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
 import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 
@@ -71,6 +73,7 @@ export interface RunWorkerOptions {
   readonly threadContextWriteEnabled?: boolean;
   readonly threadInputRoutingV2Enabled?: boolean;
   readonly threadSandboxSessionReuseEnabled?: boolean;
+  readonly subagentsEnabled?: boolean;
 }
 
 export type RunWorkerResult =
@@ -107,6 +110,7 @@ interface WorkerDependencies {
   readonly continuityMetrics?: ThreadContinuityMetricsPort;
   /** development 敏感诊断镜像；失败不得改变 durable Run 语义。 */
   readonly runEventDiagnostics?: RunEventDiagnosticsPort;
+  readonly agentControl?: AgentControlPersistencePort;
 }
 
 interface ExecutionContext {
@@ -194,6 +198,9 @@ export class RunWorker {
       dependencies.threadSandboxes === undefined
     ) {
       throw new Error("Thread Sandbox 复用已启用但缺少 lifecycle persistence");
+    }
+    if (options.subagentsEnabled === true && dependencies.agentControl === undefined) {
+      throw new Error("SubAgent 已启用但缺少控制面 persistence");
     }
   }
 
@@ -603,6 +610,66 @@ export class RunWorker {
 
       const preSession = await this.stopPoint(context, cancellation);
       if (preSession) return await this.finishStopped(context, preSession);
+      const agentSupervisor =
+        this.options.subagentsEnabled !== true || this.dependencies.agentControl === undefined
+          ? undefined
+          : new AgentSupervisor({
+              persistence: this.dependencies.agentControl,
+              rootAgentThreadId: rootAgentThreadId(context.attemptId),
+              attemptId: context.attemptId,
+              fence: context.fence,
+              createSession: async (child) =>
+                await this.dependencies.sessions.create({
+                  scope,
+                  attemptId: context.attemptId,
+                  fence: context.fence,
+                  agent: child.identity,
+                  enabledToolNames: child.tools,
+                  ensureSandboxReady,
+                  rolloutProjection: Object.freeze({
+                    schemaVersion: 2 as const,
+                    checkpointId: `${child.identity.agentThreadId}:${child.identity.agentTurnId}`,
+                    items: Object.freeze([]),
+                  }),
+                  ...(claim.snapshot.skills === undefined
+                    ? {}
+                    : { skillSnapshot: claim.snapshot.skills }),
+                  ...(child.history === undefined ? {} : { threadActiveHistory: child.history }),
+                  authorizeToolEffect: (call) =>
+                    this.authorizeToolEffectAfterStarted(context, cancellation, call),
+                  writeTodo: async () => {
+                    throw new Error("SUBAGENT_TODO_FORBIDDEN");
+                  },
+                }),
+              authorizeModelStart: (child) =>
+                this.authorizeEffect(context, cancellation, "agent_model_start", {
+                  callId: `${child.identity.agentThreadId}:${child.identity.agentTurnId}:model`,
+                  toolName: "pi_model",
+                  argsDigest: digestCanonical({ prompt: child.prompt, attachments: [] }),
+                }),
+              onToolStarted: async (_identity, event) => {
+                const gate = registerToolStarted(context, event);
+                try {
+                  const persisted = await this.applyMutation(context, {
+                    idempotencyKey: `${context.attemptId}/subagent/tool/${event.callId}`,
+                    events: [],
+                    outbox: [],
+                    effectInvocation: { callId: event.callId, toolName: event.name },
+                  });
+                  if (!isApplied(persisted)) {
+                    closeEventAcceptance(context);
+                    context.stopped =
+                      persisted.outcome === "fence_lost" || persisted.outcome === "scope_mismatch"
+                        ? "fence_lost"
+                        : "unavailable";
+                    throw new Error("SubAgent tool.started 持久化失败");
+                  }
+                } finally {
+                  gate.resolve();
+                }
+              },
+            });
+      await agentSupervisor?.initialize();
       session = await this.dependencies.sessions.create({
         scope,
         attemptId: context.attemptId,
@@ -690,10 +757,14 @@ export class RunWorker {
         authorizeToolEffect: (call) =>
           this.authorizeToolEffectAfterStarted(context, cancellation, call),
         writeTodo: (call) => this.writeTodoAfterStarted(context, cancellation, call),
+        ...(agentSupervisor === undefined ? {} : { agentControl: agentSupervisor }),
       });
       context.abortSession = async () => {
         await session?.drainRejectedToolReceipts?.();
-        await session?.abort().catch(() => undefined);
+        await Promise.all([
+          session?.abort().catch(() => undefined),
+          agentSupervisor?.abortAll().catch(() => undefined),
+        ]);
       };
       const postSession = await this.stopPoint(context, cancellation);
       if (postSession) return await this.finishStopped(context, postSession, sandbox);
@@ -856,6 +927,9 @@ export class RunWorker {
           }
         }
 
+        await agentSupervisor?.drain();
+        const postAgents = await this.stopPoint(context, cancellation);
+        if (postAgents) return await this.finishStopped(context, postAgents, sandbox);
         const modelSettled = await this.applyMutation(context, {
           idempotencyKey:
             correctionRound === 0

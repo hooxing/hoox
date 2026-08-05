@@ -1,4 +1,5 @@
 import type {
+  AgentThreadId,
   IsoTimestamp,
   ResourceId,
   ResourceVersionId,
@@ -30,6 +31,152 @@ export interface ExecutionScope {
   readonly rootRunId: RunId;
   readonly workspaceId: WorkspaceId;
   readonly baseRevisionId?: WorkspaceRevisionId;
+}
+
+export type AgentKind = "root" | "subagent";
+
+export interface AgentExecutionIdentity {
+  readonly agentThreadId: AgentThreadId;
+  readonly agentTurnId: string;
+  readonly agentKind: AgentKind;
+}
+
+export const DELEGABLE_AGENT_TOOL_NAMES = [
+  "exec_command",
+  "read",
+  "edit",
+  "write",
+  "skill",
+] as const;
+export type DelegableAgentToolName = (typeof DELEGABLE_AGENT_TOOL_NAMES)[number];
+export type AgentForkTurns = "none" | "all" | number;
+
+export interface AgentSummary {
+  readonly agentThreadId: AgentThreadId;
+  readonly path: string;
+  readonly task: string;
+  readonly status: "running" | "idle" | "interrupted" | "failed";
+  readonly turnOrdinal: number;
+  readonly tools: readonly DelegableAgentToolName[];
+}
+
+export interface AgentMailboxUpdate {
+  readonly sequence: number;
+  readonly senderPath: string;
+  readonly kind: "message" | "final_answer" | "error";
+  readonly payload: string;
+}
+
+/** Root Pi 工具只依赖该进程内控制面；Workspace 与 Sandbox 所有权仍由 RunWorker 持有。 */
+export interface AgentControlPort {
+  spawn(input: {
+    readonly callId: string;
+    readonly task: string;
+    readonly tools: readonly DelegableAgentToolName[];
+    readonly forkTurns: AgentForkTurns;
+  }): Promise<AgentSummary>;
+  sendMessage(input: {
+    readonly callId: string;
+    readonly target: string;
+    readonly message: string;
+  }): Promise<void>;
+  followUp(input: {
+    readonly callId: string;
+    readonly target: string;
+    readonly task: string;
+  }): Promise<AgentSummary>;
+  interrupt(input: { readonly callId: string; readonly target: string }): Promise<AgentSummary>;
+  list(): Promise<readonly AgentSummary[]>;
+  wait(input: {
+    readonly afterSequence: number;
+    readonly timeoutMs: number;
+    readonly signal?: AbortSignal;
+  }): Promise<readonly AgentMailboxUpdate[]>;
+  /** Session Factory 在完成可信历史恢复后设置 fork 来源；它不进入模型工具协议。 */
+  setParentHistory(history: ThreadActiveHistoryV1 | undefined): void;
+}
+
+export interface AgentThreadPersistenceSnapshot {
+  readonly agentThreadId: AgentThreadId;
+  readonly parentAgentThreadId: AgentThreadId;
+  readonly canonicalPath: string;
+  readonly task: string;
+  readonly tools: readonly DelegableAgentToolName[];
+  readonly forkTurns: AgentForkTurns;
+  readonly turnId: string;
+  readonly turnOrdinal: number;
+}
+
+/** AgentSupervisor 的 durable 窄端口；每个命令都必须在同一事务重验当前 Attempt 双栅栏。 */
+export interface AgentControlPersistencePort {
+  initializeRoot(input: {
+    readonly fence: ExecutionFence;
+    readonly attemptId: string;
+    readonly rootAgentThreadId: AgentThreadId;
+  }): Promise<"ready" | "not_authorized" | "conflict" | "unavailable">;
+  spawn(input: {
+    readonly fence: ExecutionFence;
+    readonly attemptId: string;
+    readonly commandId: string;
+    readonly argsDigest: Sha256Digest;
+    readonly snapshot: AgentThreadPersistenceSnapshot;
+    readonly maxThreads: number;
+    readonly maxActiveSubagents: number;
+  }): Promise<
+    | {
+        readonly outcome: "created" | "replayed";
+        readonly snapshot: AgentThreadPersistenceSnapshot;
+      }
+    | { readonly outcome: "capacity" | "conflict" | "not_authorized" | "unavailable" }
+  >;
+  queueFollowUp(input: {
+    readonly fence: ExecutionFence;
+    readonly attemptId: string;
+    readonly callerAgentThreadId: AgentThreadId;
+    readonly commandId: string;
+    readonly argsDigest: Sha256Digest;
+    readonly agentThreadId: AgentThreadId;
+    readonly turnId: string;
+    readonly turnOrdinal: number;
+    readonly task: string;
+    readonly maxActiveSubagents: number;
+  }): Promise<"created" | "replayed" | "busy" | "conflict" | "not_authorized" | "unavailable">;
+  startTurn(input: {
+    readonly fence: ExecutionFence;
+    readonly attemptId: string;
+    readonly agentThreadId: AgentThreadId;
+    readonly turnId: string;
+  }): Promise<"started" | "replayed" | "conflict" | "not_authorized" | "unavailable">;
+  settleTurn(input: {
+    readonly fence: ExecutionFence;
+    readonly attemptId: string;
+    readonly agentThreadId: AgentThreadId;
+    readonly turnId: string;
+    readonly status: "completed" | "interrupted" | "failed";
+    readonly finalAnswer?: string;
+    readonly errorCode?: string;
+  }): Promise<"settled" | "replayed" | "conflict" | "not_authorized" | "unavailable">;
+  appendMailbox(input: {
+    readonly fence: ExecutionFence;
+    readonly attemptId: string;
+    readonly commandId: string;
+    readonly recipientAgentThreadId: AgentThreadId;
+    readonly senderAgentThreadId: AgentThreadId;
+    readonly kind: AgentMailboxUpdate["kind"];
+    readonly payload: string;
+  }): Promise<
+    | { readonly outcome: "created" | "replayed"; readonly sequence: number }
+    | { readonly outcome: "conflict" | "not_authorized" | "unavailable" }
+  >;
+  recordCommand(input: {
+    readonly fence: ExecutionFence;
+    readonly attemptId: string;
+    readonly callerAgentThreadId: AgentThreadId;
+    readonly commandId: string;
+    readonly kind: "send_message" | "interrupt";
+    readonly argsDigest: Sha256Digest;
+    readonly result: Readonly<Record<string, unknown>>;
+  }): Promise<"recorded" | "replayed" | "conflict" | "not_authorized" | "unavailable">;
 }
 
 /** 由 API 授权并持久化的当前 user turn 附件身份；文件内容永不进入调度表。 */
@@ -172,7 +319,7 @@ export interface ExternalEffectPermit {
   readonly workspaceRootRunId: RunId;
   readonly workspaceLeaseEpoch: number;
   readonly attemptVersion: number;
-  readonly effect: "model_start" | "model_continue" | "tool_execution";
+  readonly effect: "model_start" | "model_continue" | "agent_model_start" | "tool_execution";
   readonly callId: string;
   readonly toolName: string;
   readonly argsDigest: Sha256Digest;
@@ -818,6 +965,12 @@ export interface AgentSessionFactoryPort {
     readonly attemptId: string;
     /** 当前 claim 的完整双栅栏；生产 Rollout 装配只从该能力回到 PG 推导 actor。 */
     readonly fence: ExecutionFence;
+    /** 省略时为现有 root Session；子 Session 必须提供稳定的 Agent/Turn 身份。 */
+    readonly agent?: AgentExecutionIdentity;
+    /** 仅对子 Session 生效；工具集合已经由 AgentSupervisor 与父 Agent 能力取交集。 */
+    readonly enabledToolNames?: readonly DelegableAgentToolName[];
+    /** 只向 root Session 注册协作工具，子 Session 不得递归获得该能力。 */
+    readonly agentControl?: AgentControlPort;
     /**
      * Session 创建不再隐式创建 Sandbox。附件或工具确认需要文件系统时，通过这个窄能力
      * 单次初始化并物化当前 Workspace；实现必须对并发调用 single-flight。

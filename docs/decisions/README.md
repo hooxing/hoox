@@ -112,10 +112,15 @@
 | [ADR-0113](0113-agent-todo-writer-and-run-progress.md) | Agent Todo Writer 与运行进度清单 | 已接受 | 2026-08-05 |
 | [ADR-0114](0114-skill-frontmatter-metadata-prefill.md) | Skill Front Matter 元数据预填 | 已接受 | 2026-08-05 |
 | [ADR-0115](0115-system-compatibility-optional-provenance-and-skills-cli.md) | 系统兼容性、可选上游来源与 Skills CLI 导入边界 | 已接受 | 2026-08-05 |
+<<<<<<< HEAD
 | [ADR-0116](0116-long-user-request-layout-boundary.md) | 超长用户请求的对话布局边界 | 已接受 | 2026-08-06 |
 | [ADR-0117](0117-long-user-request-default-collapse.md) | 超长用户请求默认折叠 | 已接受 | 2026-08-06 |
 | [ADR-0118](0118-history-files-virtual-directory-and-task-ownership.md) | 历史任务文件虚拟目录与个人/团队任务归属 | 已接受 | 2026-08-07 |
 | [ADR-0119](0119-personal-history-files-first-release-scope.md) | 个人历史文件虚拟目录首期范围 | 已接受 | 2026-08-07 |
+=======
+| [ADR-0116](0116-single-activity-direct-disclosure.md) | 单个已结束活动移除冗余外层折叠 | 已接受 | 2026-08-05 |
+| [ADR-0117](0117-shared-sandbox-subagent-control-plane.md) | 共享 Sandbox 的 SubAgent 控制面 | 已接受 | 2026-08-05 |
+>>>>>>> cfbe0e6 (实现共享 Sandbox 的 SubAgent 控制面)
 
 ## 何时必须记录
 

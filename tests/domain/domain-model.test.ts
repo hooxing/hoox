@@ -7,6 +7,7 @@ import {
   archiveThread,
   artifactId,
   createAgentTree,
+  queueAgentTurn,
   createArtifact,
   createMembership,
   createPersonalTenant,
@@ -42,6 +43,7 @@ import {
   tenantId,
   threadId,
   transitionAgentThread,
+  transitionAgentTurn,
   transitionArtifact,
   transitionPlan,
   transitionPlanStep,
@@ -806,5 +808,37 @@ describe("不可变版本与 Agent Tree", () => {
       transitionAgentThread({ tree, id: tree.rootId, target: "completed", now: later }).agents[0]
         ?.status,
     ).toBe("completed");
+  });
+
+  it("Agent Turn 完成后 Thread 仍可排队 follow-up", () => {
+    const run = runningRun("agent_turns");
+    let tree = createAgentTree({ run, rootId: agentThreadId("agt_turn_root"), now });
+    tree = spawnAgentThread({
+      tree,
+      parentId: tree.rootId,
+      id: agentThreadId("agt_turn_child"),
+      now,
+    });
+    const child = tree.agents.find((agent) => agent.id === agentThreadId("agt_turn_child"));
+    if (child === undefined) throw new Error("测试缺少子 Agent");
+    let first = queueAgentTurn({
+      thread: child,
+      id: "turn_1",
+      ordinal: 1,
+      trigger: "spawn",
+      now,
+    });
+    first = transitionAgentTurn({ turn: first, target: "running", now: later });
+    first = transitionAgentTurn({ turn: first, target: "completed", now: later });
+    expect(first.status).toBe("completed");
+    expect(
+      queueAgentTurn({
+        thread: child,
+        id: "turn_2",
+        ordinal: 2,
+        trigger: "follow_up",
+        now: later,
+      }).status,
+    ).toBe("queued");
   });
 });

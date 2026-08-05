@@ -1348,6 +1348,16 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           ) {
             return { outcome: "conflict" } as const;
           }
+          if (input.effect === "agent_model_start") {
+            const childTurn = await client.query(
+              `SELECT 1 FROM runtime_agent_turns
+                WHERE tenant_id=$1 AND attempt_id=$2 AND status='running'
+                  AND $3 = agent_thread_id || ':' || agent_turn_id || ':model'
+                LIMIT 1`,
+              [input.fence.scope.tenantId, row?.attempt_id, input.call.callId],
+            );
+            if (childTurn.rowCount !== 1) return { outcome: "conflict" } as const;
+          }
           if (input.effect === "model_continue") {
             const steer =
               row?.attempt_stage === "model_execution_started"

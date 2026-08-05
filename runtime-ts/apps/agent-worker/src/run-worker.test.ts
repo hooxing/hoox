@@ -15,6 +15,7 @@ import {
   workspaceChangeDigest,
 } from "./mutation-protocol.js";
 import type {
+  AgentControlPersistencePort,
   ExecutionScope,
   RuntimeEventV1,
   RuntimeMutation,
@@ -48,6 +49,19 @@ const successfulEvents: readonly RuntimeAgentEvent[] = [
   { type: "agent.settled" },
 ];
 
+function fakeAgentControlPersistence(): AgentControlPersistencePort {
+  let sequence = 0;
+  return {
+    initializeRoot: async () => "ready",
+    spawn: async (input) => ({ outcome: "created", snapshot: input.snapshot }),
+    queueFollowUp: async () => "created",
+    startTurn: async () => "started",
+    settleTurn: async () => "settled",
+    appendMailbox: async () => ({ outcome: "created", sequence: ++sequence }),
+    recordCommand: async () => "recorded",
+  };
+}
+
 function harness(
   sessions: Array<ScriptedAgentSession | BlockingAgentSession>,
   seed = fakeSeed(),
@@ -72,6 +86,7 @@ function harness(
   };
   const threadContextBodies = new FakeThreadContextBodies();
   const threadSandboxes = new FakeThreadSandboxLifecycle();
+  const agentControl = fakeAgentControlPersistence();
   const worker = new RunWorker(
     {
       persistence,
@@ -88,6 +103,7 @@ function harness(
       ...(runEventDiagnostics === undefined ? {} : { runEventDiagnostics }),
       ...(workerOptions.threadContextWriteEnabled === true ? { threadContextBodies } : {}),
       ...(workerOptions.threadSandboxSessionReuseEnabled === true ? { threadSandboxes } : {}),
+      ...(workerOptions.subagentsEnabled === true ? { agentControl } : {}),
     },
     {
       workerId: "worker-test",
@@ -112,6 +128,7 @@ function harness(
     continuityMetrics,
     threadContextBodies,
     threadSandboxes,
+    agentControl,
     runEventDiagnostics,
   };
 }
@@ -138,6 +155,57 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.persistence.record(h.scope).outbox).not.toContainEqual(
       expect.objectContaining({ kind: "sandbox_cleanup" }),
     );
+  });
+
+  it("root 与 SubAgent 的独立 Session 复用同一个已物化 Sandbox", async () => {
+    const root = new BlockingAgentSession();
+    const child = new ScriptedAgentSession([
+      { type: "agent.started" },
+      { type: "message.completed", stopReason: "stop" },
+      {
+        type: "turn.completed",
+        assistant: {
+          content: [{ type: "text", text: "子任务完成" }],
+          api: "test",
+          provider: "test",
+          model: "test",
+          stopReason: "stop",
+          timestamp: 1,
+        },
+        toolResults: [],
+      },
+      { type: "agent.settled" },
+    ]);
+    const h = sandboxHarness([root, child], fakeSeed("subagent-shared-sandbox"), {
+      subagentsEnabled: true,
+    });
+    const execution = h.worker.execute(h.scope);
+    await vi.waitFor(() => expect(root.prompts).toHaveLength(1));
+    const control = h.factory.agentControls[0];
+    if (control === undefined) throw new Error("测试缺少 root AgentControl");
+
+    const spawned = await control.spawn({
+      callId: "call_spawn_shared_sandbox",
+      task: "读取共享工作区",
+      tools: ["read"],
+      forkTurns: "none",
+    });
+    const delivered = await control.wait({ afterSequence: 0, timeoutMs: 1_000 });
+    expect(delivered[0]).toMatchObject({
+      senderPath: spawned.path,
+      kind: "final_answer",
+      payload: "子任务完成",
+    });
+
+    root.emit({ type: "message.completed", stopReason: "stop" });
+    root.complete();
+    await expect(execution).resolves.toEqual({ outcome: "succeeded" });
+    expect(h.factory.agentIdentities[0]).toBeUndefined();
+    expect(h.factory.agentIdentities[1]).toMatchObject({ agentKind: "subagent" });
+    expect(h.factory.preparedSandboxes).toHaveLength(2);
+    expect(h.factory.preparedSandboxes[0]).toBe(h.factory.preparedSandboxes[1]);
+    expect(h.sandboxes.acquireCount).toBe(1);
+    expect(h.revisions.materializeCount).toBe(1);
   });
 
   it("在 todo_write started 持久化后写入完整 Todo 快照，不影响其他工具授权", async () => {

@@ -412,6 +412,37 @@ describe("工作台展示组件", () => {
     expect(html).not.toContain("received runtime event");
   });
 
+  it("在运行进度区域展示 Agent 的 Todo 步骤和完成情况", () => {
+    const events: readonly RunEvent[] = [
+      {
+        eventId: "event-todo",
+        sequence: 1,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "todo.updated",
+        payload: {
+          snapshot: {
+            schemaVersion: 1,
+            version: 2,
+            todos: [
+              { id: "confirm", content: "确认目标", status: "completed" },
+              { id: "deliver", content: "完成交付", status: "in_progress" },
+            ],
+          },
+        },
+      },
+    ];
+
+    const html = renderToStaticMarkup(<RunTimeline run={running} events={events} />);
+
+    expect(html).toContain('aria-label="任务清单"');
+    expect(html).toContain("1/2");
+    expect(html).toContain("确认目标");
+    expect(html).toContain("完成交付");
+    expect(html).toContain("is-completed");
+    expect(html).toContain("is-in_progress");
+  });
+
   it("运行中与失败后的部分正文始终在状态卡外完整可见", () => {
     const events: readonly RunEvent[] = [
       {

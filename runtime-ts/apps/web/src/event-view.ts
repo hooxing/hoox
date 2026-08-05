@@ -7,9 +7,19 @@ export type UserFacingStep = {
   readonly count: number;
 };
 
+export type UserFacingTodo = {
+  readonly version: number;
+  readonly todos: readonly {
+    readonly id: string;
+    readonly content: string;
+    readonly status: "pending" | "in_progress" | "completed";
+  }[];
+};
+
 export type RunProgress = {
   readonly currentAction: string;
   readonly steps: readonly UserFacingStep[];
+  readonly todo: UserFacingTodo | undefined;
   readonly thinking:
     | { readonly text: string; readonly status: "running" | "completed" }
     | undefined;
@@ -79,6 +89,52 @@ function waitingQuestionText(value: unknown): string | undefined {
 
 function normalizedWholeText(value: string): string {
   return value.trim().replace(/\s+/gu, " ");
+}
+
+function todoSnapshot(value: unknown): UserFacingTodo | undefined {
+  const snapshot = object(value);
+  const version = snapshot?.version;
+  const rawTodos = snapshot?.todos;
+  if (
+    snapshot?.schemaVersion !== 1 ||
+    !Number.isSafeInteger(version) ||
+    (version as number) < 1 ||
+    !Array.isArray(rawTodos) ||
+    rawTodos.length < 1 ||
+    rawTodos.length > 20
+  ) {
+    return undefined;
+  }
+  const ids = new Set<string>();
+  let inProgressCount = 0;
+  const todos = rawTodos.flatMap((raw) => {
+    const todo = object(raw);
+    const id = todo?.id;
+    const content = todo?.content;
+    const status = todo?.status;
+    if (
+      typeof id !== "string" ||
+      !/^[a-z][a-z0-9_]{0,63}$/u.test(id) ||
+      ids.has(id) ||
+      typeof content !== "string" ||
+      content.trim().length === 0 ||
+      content.trim().length > 240 ||
+      (status !== "pending" && status !== "in_progress" && status !== "completed")
+    ) {
+      return [];
+    }
+    ids.add(id);
+    if (status === "in_progress") inProgressCount += 1;
+    return [
+      {
+        id,
+        content: content.trim(),
+        status: status as "pending" | "in_progress" | "completed",
+      },
+    ];
+  });
+  if (todos.length !== rawTodos.length || inProgressCount > 1) return undefined;
+  return { version: version as number, todos };
 }
 
 /** 工具名只用于归类，不把调用标识或工具协议直接暴露给用户。 */
@@ -298,6 +354,7 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
   let thinkingActive = false;
   let messageActive = false;
   let waitingQuestion: string | undefined;
+  let todo: UserFacingTodo | undefined;
 
   for (const event of events) {
     if (event.type === "thinking.started") {
@@ -345,6 +402,11 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
         waitingQuestionText(object(event.payload)?.question) ?? "请补充所需信息后继续。";
       continue;
     }
+    if (event.type === "todo.updated") {
+      const snapshot = todoSnapshot(object(event.payload)?.snapshot);
+      if (snapshot !== undefined) todo = snapshot;
+      continue;
+    }
     const descriptor = toolDescriptor(event);
     if (descriptor === undefined) continue;
     const index = byTool.get(descriptor.key);
@@ -386,6 +448,7 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
         ? "正在思考…"
         : (active?.label ?? (messageActive ? "正在回复…" : "正在准备任务…")),
     steps: compacted,
+    todo,
     thinking:
       thinkingText.length === 0
         ? undefined

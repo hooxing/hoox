@@ -108,6 +108,7 @@
 | [ADR-0105](0105-development-resourcefs-https-sidecar.md) | 开发环境 ResourceFS 最小 HTTPS Sidecar | 已接受 | 2026-08-04 |
 | [ADR-0106](0106-expired-attempt-convergence-and-long-running-sandbox.md) | 过期 Attempt 自动收敛与长任务 Sandbox 时限 | 已接受 | 2026-08-04 |
 | [ADR-0107](0107-public-skill-market-virtual-filesystem.md) | 公开 Skill 市场虚拟文件系统 | 已接受 | 2026-08-04 |
+| [ADR-0112](0112-agent-todo-writer-and-run-progress.md) | Agent Todo Writer 与运行进度清单 | 已接受 | 2026-08-05 |
 
 ## 何时必须记录
 

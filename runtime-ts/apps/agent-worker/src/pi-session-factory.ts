@@ -8,7 +8,12 @@ import {
   type ToolObservationRolloutPort,
   type TraceBlobPersistencePort,
 } from "@cube-runtime/context-policy";
-import { sha256Digest, type TenantId } from "@cube-runtime/domain";
+import {
+  DomainError,
+  sha256Digest,
+  type TenantId,
+  type TodoWriteCommand,
+} from "@cube-runtime/domain";
 import {
   assessSafePiSessionContext,
   bindTrustedPiModelContextCapability,
@@ -373,6 +378,27 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         });
       },
     };
+    const todoWriteToolExecutor = {
+      write: async (request: { readonly callId: string; readonly command: TodoWriteCommand }) => {
+        if (startedToolCalls.get(request.callId) !== "todo_write") {
+          throw new Error("TODO_PROTOCOL");
+        }
+        if (!durableToolCalls.has(request.callId)) {
+          await recordStartedTool({ toolCallId: request.callId, toolName: "todo_write" });
+        }
+        return await input.writeTodo(request);
+      },
+      projectError: (error: unknown) => {
+        const correctable = error instanceof DomainError;
+        return Object.freeze({
+          status: "failed" as const,
+          code: correctable ? "TODO_INVALID_STATE" : "TODO_PERSISTENCE_UNAVAILABLE",
+          message: correctable ? error.message : "任务清单暂时无法保存",
+          correctable,
+          fatal: !correctable,
+        });
+      },
+    };
     const sessionMaterial = {
       model: this.model,
       modelContext: this.modelContext,
@@ -423,6 +449,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       })),
       skillSnapshotDigest: skillSnapshot.digest,
       skillToolExecutor,
+      todoWriteToolExecutor,
       recoveredSkillInstructions: recoveredForSession.map((instruction) => ({
         name: instruction.name,
         version: instruction.version,

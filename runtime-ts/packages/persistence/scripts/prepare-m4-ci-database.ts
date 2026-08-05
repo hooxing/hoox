@@ -31,9 +31,11 @@ if (adminUrl.pathname !== "/agent_runtime_ci") {
 const databaseName = "agent_runtime_ci";
 const runtimeRole = identifier("DATABASE_RUNTIME_ROLE");
 const migratorRole = identifier("DATABASE_MIGRATOR_ROLE");
+const skillPublisherRole = identifier("DATABASE_SKILL_PUBLISHER_ROLE");
 const schema = identifier("DATABASE_SCHEMA");
 const runtimePassword = required("M4_DATABASE_RUNTIME_PASSWORD");
 const migratorPassword = required("M4_DATABASE_MIGRATOR_PASSWORD");
+const skillPublisherPassword = required("M4_DATABASE_SKILL_PUBLISHER_PASSWORD");
 const pool = new Pool({ connectionString: adminUrl.toString(), max: 1 });
 
 try {
@@ -52,7 +54,7 @@ try {
        ) OR EXISTS (
          SELECT 1 FROM pg_namespace WHERE nspname=$2
        ) AS present`,
-      [[runtimeRole, migratorRole], schema],
+      [[runtimeRole, migratorRole, skillPublisherRole], schema],
     );
     if (existing.rows[0]?.present !== false) {
       throw new Error("M4 CI 目标角色或 Schema 已存在，拒绝复用未知状态");
@@ -64,13 +66,17 @@ try {
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${migratorRole}" LOGIN PASSWORD ${literal(migratorPassword)}
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-       GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}", "${migratorRole}";
+       CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD ${literal(skillPublisherPassword)}
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       GRANT CONNECT ON DATABASE "${databaseName}"
+         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
     );
     const safety = await client.query<{
       readonly runtime_safe: boolean;
       readonly migrator_safe: boolean;
       readonly schema_owned: boolean;
+      readonly publisher_safe: boolean;
     }>(
       `SELECT
          NOT (runtime.rolsuper OR runtime.rolcreatedb OR runtime.rolcreaterole
@@ -84,13 +90,21 @@ try {
            AND NOT has_schema_privilege(migrator.oid, 'public', 'CREATE')
            AS migrator_safe,
          target.nspowner=migrator.oid AS schema_owned
-       FROM pg_roles runtime, pg_roles migrator, pg_namespace target
-       WHERE runtime.rolname=$1 AND migrator.rolname=$2 AND target.nspname=$3`,
-      [runtimeRole, migratorRole, schema],
+         ,NOT (publisher.rolsuper OR publisher.rolcreatedb OR publisher.rolcreaterole
+           OR publisher.rolreplication OR publisher.rolbypassrls OR publisher.rolinherit)
+           AND publisher.rolcanlogin
+           AND NOT has_database_privilege(publisher.oid, current_database(), 'CREATE')
+           AND NOT has_database_privilege(publisher.oid, current_database(), 'TEMP')
+           AS publisher_safe
+       FROM pg_roles runtime, pg_roles migrator, pg_roles publisher, pg_namespace target
+       WHERE runtime.rolname=$1 AND migrator.rolname=$2 AND publisher.rolname=$4
+         AND target.nspname=$3`,
+      [runtimeRole, migratorRole, schema, skillPublisherRole],
     );
     if (
       safety.rows[0]?.runtime_safe !== true ||
       safety.rows[0]?.migrator_safe !== true ||
+      safety.rows[0]?.publisher_safe !== true ||
       safety.rows[0]?.schema_owned !== true
     ) {
       throw new Error("M4 CI 受限角色或 Schema 安全断言失败");

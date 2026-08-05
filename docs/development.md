@@ -32,6 +32,8 @@ corepack pnpm config:check
 | `runtime-ts/apps/agent-worker` | Agent 执行循环和运行协调 |
 | `runtime-ts/apps/scheduler` | 回收、清理等可重试后台工作 |
 | `runtime-ts/apps/web` | 浏览器应用入口，只消费公开协议 |
+| `runtime-ts/apps/skill-admin-api` | Skill 提交、复核、发布和撤销的独立管理 API |
+| `runtime-ts/apps/admin-web` | 独立 Skill 发布管理界面，只消费管理协议 |
 
 ### 共享包
 
@@ -67,6 +69,49 @@ corepack pnpm config:check
 `runtime-ts/apps/api` 在 `RUNTIME_ENV=development`、显式启用开发身份时可选择内建的开发装配：它打开真实 PostgreSQL Repository 和 HTTP listener，可用 `pnpm dev:api` 启动。迁移后先显式执行 `pnpm dev:identity:provision`，该命令幂等创建配置的两个 User、个人 Tenant 和 owner Membership；服务启动本身绝不写入授权数据。该装配和初始化命令都不支持 production，也不会退化到内存 Fake。
 
 需要测试 Skill Center 时，可显式执行 `pnpm dev:skill:publish:pptx`。该命令只接受 `RUNTIME_ENV=development`，把固定提交的 Anthropic PPTX 测试包幂等写入私有对象存储并原子发布到受管目录；API 启动不会隐式发布目录内容。该 fixture 受专有许可证约束，不属于生产目录或发布制品。
+
+### 管理员 Skill 上架
+
+一般 Skill 不再通过修改代码或普通 Runtime API 上架。管理员发布面是独立的 `skill-admin-api` 与
+`admin-web`，日常状态流为：
+
+```text
+publisher 创建草稿并上传包 -> publisher 提交 -> reviewer 批准/驳回
+-> admin 发布到技能中心 -> admin 必要时硬撤销
+```
+
+发布者不能审核自己的申请；首次公开某个规范键时必须勾选“设为推荐版本”。驳回申请为终态，修订内容需要创建
+新的申请。每次写操作都有独立幂等键，状态推进还使用界面返回的版本令牌，409 表示页面状态已过期，应刷新后再
+决定操作，不能盲目重放成另一请求。
+
+开发环境准备顺序如下：
+
+1. 由 Database Admin 创建与 Runtime/Migrator 互异的 `DATABASE_SKILL_PUBLISHER_ROLE` 登录角色。该角色必须
+   `NOINHERIT`，不能拥有任何角色成员、数据库/Schema/关系/routine ownership、`CREATE` 或 `TEMPORARY`；只授予
+   目标数据库 `CONNECT`。把它的连接串写入忽略的 `.env` 中的 `SKILL_PUBLISHER_DATABASE_URL`。
+2. 为发布服务配置独立的 `SKILL_PUBLISHER_S3_*` 凭据；该凭据不能复用普通 API/Worker 的 S3 身份。执行
+   `pnpm db:migrate:up`，迁移会从空 ACL 重建发布角色的精确白名单并验证 Runtime 对管理表零权限。
+3. 先执行 `pnpm dev:identity:provision` 创建开发 User。再由受控数据库运维事务向
+   `platform_skill_operators(user_id, role, status)` 配置 `publisher`、`reviewer`、`admin`；管理 API 故意不提供
+   自助提权路由。单进程本地完整流程可把 `DEV_SKILL_ADMIN_USER_ID` 配置为 `admin`；职责分离测试应使用不同用户与
+   进程。operator 变更必须进入数据库运维审计。
+4. `.env` 中为管理 API 设置 `DEV_SKILL_ADMIN_USER_ID` 与至少 16 字符的
+   `DEV_SKILL_ADMIN_TOKEN`。开发 Vite 代理只在服务端注入该 Token，不会把它编译进浏览器静态资源。
+5. 在两个终端分别启动：
+
+```powershell
+corepack pnpm dev:skill-admin:api
+corepack pnpm dev:skill-admin:web
+```
+
+浏览器访问 `http://127.0.0.1:4174`。上传包必须包含根级、严格 UTF-8 的 `SKILL.md`，最多 256 个文件、总计
+32 MiB、入口最多 64 KiB；界面同时采集来源 URL、不可变 revision 和 SPDX 许可证。确定性校验通过后的版本仍标记
+为 `restricted`，管理员必须人工检查来源、入口正文和文件摘要；它不等价于恶意软件或脚本行为检测。
+
+production 管理服务必须单独注入 `SKILL_ADMIN_JWT_*`、`SKILL_PUBLISHER_DATABASE_URL` 与
+`SKILL_PUBLISHER_S3_*`，且 JWT audience 不能复用普通 API。静态管理 Web 与 API 由同源身份网关托管：网关必须
+剥离浏览器伪造的 Authorization，根据已登录管理会话注入短期管理 JWT。没有该网关时不得把 development Token
+或固定生产 Token 写入 Web 构建。完整边界见 [ADR-0112](decisions/0112-managed-skill-admin-publication.md)。
 
 PPTX Skill 宣称预装的 Node.js、`pptxgenjs`、图标渲染和 LibreOffice/Poppler 依赖必须由 Sandbox 模板提供，不能在 Run 内临时安装。开发模板从 `deploy/cubesandbox/agent-sandbox-pptx.Dockerfile` 构建；发布镜像后用 CubeSandbox `Template.build({ image })` 创建不可变模板，并把返回的模板 ID 写入本地 `.env` 的 `CUBESANDBOX_TEMPLATE_ID`。基础镜像使用摘要固定，Node 模块使用精确版本；每次发布使用新的不可变镜像标签，不在既有标签上依赖 `Template.rebuild` 刷新。命令服务会净化进程环境，因此模板同时提供根级 `/node_modules` 解析路径，不能只依赖镜像中的 `NODE_PATH`。旧模板保留到新模板完成真实 `.pptx` 生成及 pause/resume 冒烟后再回收。
 
@@ -114,13 +159,13 @@ corepack pnpm test:production-worker:container
 
 业务 Schema 迁移不能替代数据库级 bootstrap。首次准备专用数据库时，由不进入应用进程的 Database Admin 完成以下一次性操作：
 
-1. 创建无 `SUPERUSER/CREATEDB/CREATEROLE/BYPASSRLS/REPLICATION` 的 Migrator 与 Runtime 登录角色，并保证两者都没有任何上游角色成员关系；Runtime 即使设置为 `NOINHERIT` 也不能保留可 `SET ROLE` 的成员关系；
-2. 从 `PUBLIC`、Migrator 和 Runtime 撤销目标数据库的全部权限，再只向 Migrator 和 Runtime 授予 `CONNECT`；Runtime 不得通过 `PUBLIC` 获得 `CREATE` 或 `TEMPORARY`；
+1. 创建无 `SUPERUSER/CREATEDB/CREATEROLE/BYPASSRLS/REPLICATION` 的 Migrator、Runtime 与 Skill Publisher 登录角色，并保证三者互异且都没有任何上游或下游角色成员关系；Runtime 和 Skill Publisher 必须为 `NOINHERIT`，不能保留可 `SET ROLE` 的成员关系；
+2. 从 `PUBLIC`、Migrator、Runtime 和 Skill Publisher 撤销目标数据库的全部权限，再只向三个角色授予 `CONNECT`；Runtime 与 Skill Publisher 不得通过 `PUBLIC` 获得 `CREATE` 或 `TEMPORARY`；
 3. 创建专用业务 Schema，并只让 Migrator 成为该 Schema owner；Database Admin 继续作为数据库 owner；
-4. 确认 Runtime 不是数据库、Schema、表或序列 owner；Migrator 不是数据库 owner，且只拥有配置的业务 Schema；
-5. 分别写入本机忽略文件中的 `DATABASE_BOOTSTRAP_URL`、`MIGRATION_DATABASE_URL`、`DATABASE_URL`、`DATABASE_RUNTIME_ROLE`、`DATABASE_MIGRATOR_ROLE` 与 `DATABASE_SCHEMA`。Bootstrap URL 只用于本地权限集成测试或受控运维，不能进入服务进程。
+4. 确认 Runtime 与 Skill Publisher 都不是数据库、Schema、表、序列或 routine owner；Migrator 不是数据库 owner，且只拥有配置的业务 Schema；
+5. 分别写入本机忽略文件中的 `DATABASE_BOOTSTRAP_URL`、`MIGRATION_DATABASE_URL`、`DATABASE_URL`、`SKILL_PUBLISHER_DATABASE_URL`、`DATABASE_RUNTIME_ROLE`、`DATABASE_MIGRATOR_ROLE`、`DATABASE_SKILL_PUBLISHER_ROLE` 与 `DATABASE_SCHEMA`。Bootstrap/Migration URL 只用于本地权限集成测试或受控运维，不能进入常驻服务进程。
 
-`pnpm db:migrate:up` 会在任何 DDL 前同时验证 Runtime、当前 Migrator、Schema owner 与精确 `search_path`，并拒绝 Runtime 的目标 Schema `CREATE`、数据库 `TEMPORARY`、Migrator 对无关 Schema 的有效 `CREATE`、额外非系统 ownership、任何 routine default ACL 记录及任何目标 Schema routine。Schema migration、迁移记录、最小 ACL bootstrap 和结束白名单断言共用同一事务。首版 routine manifest 为空；runner 完全不修改 routine 的全局或局部 default ACL，并在迁移 SQL 后、提交前再次断言目标 routine 集合仍为空，任何 migration 创建 routine 都会整体回滚。bootstrap 撤销 Runtime 和 `PUBLIC` 在业务 Schema、全部业务表、迁移表及 sequence 上的权限，并对逐表全部 DML/DDL、routine `EXECUTE` 及数据库、Schema 有效权限执行白名单断言。未来引入函数、过程或聚合前，必须单独设计 manifest 并显式审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 和调用权限。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作；down SQL、ACL 回收和结束断言同样共用一个事务，任一步失败都整体回滚。down 不修改 routine default ACL，也不会删除角色或回滚 Database Admin bootstrap。
+`pnpm db:migrate:up` 会在任何 DDL 前同时验证 Runtime、当前 Migrator、Skill Publisher、Schema owner 与精确 `search_path`，并拒绝 Runtime/Skill Publisher 的目标 Schema `CREATE`、数据库 `TEMPORARY`、角色继承/成员关系/ownership、Migrator 对无关 Schema 的有效 `CREATE`、额外非系统 ownership、任何 routine default ACL 记录及任何目标 Schema routine。Schema migration、迁移记录、最小 ACL bootstrap 和结束白名单断言共用同一事务。首版 routine manifest 为空；runner 完全不修改 routine 的全局或局部 default ACL，并在迁移 SQL 后、提交前再次断言目标 routine 集合仍为空，任何 migration 创建 routine 都会整体回滚。bootstrap 从空集合重建 Runtime 与 Skill Publisher 的精确 ACL，并对逐表全部 DML/DDL、routine `EXECUTE` 及数据库、Schema 有效权限执行白名单断言。未来引入函数、过程或聚合前，必须单独设计 manifest 并显式审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 和调用权限。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作；down SQL、ACL 回收和结束断言同样共用一个事务，任一步失败都整体回滚。down 不修改 routine default ACL，也不会删除角色或回滚 Database Admin bootstrap。
 
 ## HTTP API 开发边界
 

@@ -1,0 +1,24 @@
+{
+  "name": "@cube-runtime/skill-admin-api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@cube-runtime/api": "workspace:*",
+    "@cube-runtime/domain": "workspace:*",
+    "@cube-runtime/persistence": "workspace:*",
+    "@cube-runtime/process-runtime": "workspace:*",
+    "@cube-runtime/protocol": "workspace:*",
+    "@cube-runtime/skill": "workspace:*",
+    "@sinclair/typebox": "0.34.52",
+    "fastify": "5.10.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "tsc -b tsconfig.json --clean",
+    "dev": "node --env-file-if-exists=../../../.env dist/development-main.js",
+    "start:production": "node dist/production-main.js",
+    "test": "vitest run --root ../../.. runtime-ts/apps/skill-admin-api/src",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

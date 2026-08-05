@@ -126,6 +126,10 @@ export async function migrateUp(
       );
       // 安全检查必须早于迁移表和任何业务 DDL，失败时数据库保持原状。
       await assertMigrationContextSafe(client, options);
+      // 迁移脚本只读取事务级固定值，不能从会话或 SQL 文本动态选择发布角色。
+      await client.query("SELECT set_config('app.skill_publisher_role', $1, true)", [
+        options.skillPublisherRole,
+      ]);
       await ensureMigrationTable(client);
       const applied = await appliedMigrations(client);
       for (const record of applied) {
@@ -180,6 +184,9 @@ export async function migrateDown(
       );
       // 与 up 使用同一套 Runtime/Migrator/Schema preflight，且必须早于迁移表 DDL。
       await assertMigrationContextSafe(client, options);
+      await client.query("SELECT set_config('app.skill_publisher_role', $1, true)", [
+        options.skillPublisherRole,
+      ]);
       await ensureMigrationTable(client);
       const applied = await appliedMigrations(client);
       for (const record of [...applied].reverse()) {

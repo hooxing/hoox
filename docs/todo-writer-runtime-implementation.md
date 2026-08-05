@@ -51,7 +51,7 @@ Todo 是否存在，也不会因为没有 `in_progress` 而拒绝读取、搜索
 - RunWorker 使用领域函数生成单调版本 `TodoSnapshot`，通过现有 mutation lane 追加 `todo.updated`。
 - 工具成功或失败继续进入既有 durable Tool Observation，保证 Rollout 中的 tool call/result 可恢复配对。
 - API 公开 `todo.updated`；Web 忽略无效快照，只选择最新有效快照。
-- “运行进度”卡片显示完成数、待办、执行中和已完成状态；清单可以手动折叠，执行中默认展开，成功、失败或取消后默认收起；既有工具历史仍留在对话活动区域。
+- “运行进度”卡片显示完成数、待办、执行中和已完成状态；清单可以手动折叠，执行中默认展开，成功、失败或取消后默认收起，折叠时仍显示当前步骤和完成比例；既有工具历史仍留在对话活动区域。
 
 `todo.updated` 示例：
 

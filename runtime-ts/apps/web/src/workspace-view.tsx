@@ -116,6 +116,7 @@ export function RunTimeline({
   const elapsed = useElapsedSeconds(run);
   const isFailure = recoveryRequired || run.status === "failed" || run.status === "cancelled";
   const completedTodos = progress.todo?.todos.filter((todo) => todo.status === "completed").length;
+  const currentTodo = progress.todo?.todos.find((todo) => todo.status === "in_progress");
   const defaultProgressExpanded = isRunning || isQueued || isWaiting;
   const progressDisclosureKey = `${run.id}:${run.status}:${run.executionStatus ?? "normal"}`;
   const [progressDisclosure, setProgressDisclosure] = useState(() => ({
@@ -151,8 +152,14 @@ export function RunTimeline({
         <ChevronRight size={16} aria-hidden="true" />
       )}
       <div>
-        <strong>{summary}</strong>
-        {isRunning && <span>已运行 {elapsedLabel(elapsed)}</span>}
+        <strong>{currentTodo?.content ?? summary}</strong>
+        {progress.todo !== undefined ? (
+          <span>
+            {completedTodos}/{progress.todo.todos.length}
+          </span>
+        ) : (
+          isRunning && <span>已运行 {elapsedLabel(elapsed)}</span>
+        )}
       </div>
     </div>
   );

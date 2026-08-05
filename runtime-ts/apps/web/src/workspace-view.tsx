@@ -116,6 +116,17 @@ export function RunTimeline({
   const elapsed = useElapsedSeconds(run);
   const isFailure = recoveryRequired || run.status === "failed" || run.status === "cancelled";
   const completedTodos = progress.todo?.todos.filter((todo) => todo.status === "completed").length;
+  const currentTodo = progress.todo?.todos.find((todo) => todo.status === "in_progress");
+  const defaultProgressExpanded = isRunning || isQueued || isWaiting;
+  const progressDisclosureKey = `${run.id}:${run.status}:${run.executionStatus ?? "normal"}`;
+  const [progressDisclosure, setProgressDisclosure] = useState(() => ({
+    key: progressDisclosureKey,
+    open: defaultProgressExpanded,
+  }));
+  const progressExpanded =
+    progressDisclosure.key === progressDisclosureKey
+      ? progressDisclosure.open
+      : defaultProgressExpanded;
   const summary = recoveryRequired
     ? "执行已中断"
     : run.status === "cancelled"
@@ -131,55 +142,78 @@ export function RunTimeline({
               : run.status === "succeeded"
                 ? "已完成"
                 : "就绪";
+  const summaryContent = (
+    <div className="run-progress-primary">
+      {progress.todo !== undefined ? (
+        <ChevronRight className="run-progress-chevron" size={16} aria-hidden="true" />
+      ) : showActivity ? (
+        <LoaderCircle className="spin" size={16} aria-hidden="true" />
+      ) : (
+        <ChevronRight size={16} aria-hidden="true" />
+      )}
+      <div>
+        <strong>{currentTodo?.content ?? summary}</strong>
+        {progress.todo !== undefined ? (
+          <span>
+            {completedTodos}/{progress.todo.todos.length}
+          </span>
+        ) : (
+          isRunning && <span>已运行 {elapsedLabel(elapsed)}</span>
+        )}
+      </div>
+    </div>
+  );
+  const todoContent =
+    progress.todo === undefined ? undefined : (
+      <section className="run-todo" aria-label="任务清单">
+        <div className="run-todo-heading">
+          <span>任务清单</span>
+          <span>
+            {completedTodos}/{progress.todo.todos.length}
+          </span>
+        </div>
+        <ol className="run-todo-list">
+          {progress.todo.todos.map((todo) => (
+            <li className={`is-${todo.status}`} key={todo.id}>
+              {todo.status === "completed" ? (
+                <Check size={14} aria-hidden="true" />
+              ) : todo.status === "in_progress" ? (
+                <LoaderCircle className="spin" size={14} aria-hidden="true" />
+              ) : (
+                <Circle size={14} aria-hidden="true" />
+              )}
+              <span className="sr-only">
+                {todo.status === "completed"
+                  ? "已完成："
+                  : todo.status === "in_progress"
+                    ? "执行中："
+                    : "待处理："}
+              </span>
+              <span>{todo.content}</span>
+            </li>
+          ))}
+        </ol>
+      </section>
+    );
   return (
     <section
       className={`run-progress ${showActivity ? "is-active" : ""} ${isFailure ? "is-failed" : ""}`}
       aria-label="运行进度"
       aria-live="polite"
     >
-      <div className="run-progress-summary">
-        <div className="run-progress-primary">
-          {showActivity ? (
-            <LoaderCircle className="spin" size={16} aria-hidden="true" />
-          ) : (
-            <ChevronRight size={16} aria-hidden="true" />
-          )}
-          <div>
-            <strong>{summary}</strong>
-            {isRunning && <span>已运行 {elapsedLabel(elapsed)}</span>}
-          </div>
-        </div>
-      </div>
-      {progress.todo !== undefined && (
-        <section className="run-todo" aria-label="任务清单">
-          <div className="run-todo-heading">
-            <span>任务清单</span>
-            <span>
-              {completedTodos}/{progress.todo.todos.length}
-            </span>
-          </div>
-          <ol className="run-todo-list">
-            {progress.todo.todos.map((todo) => (
-              <li className={`is-${todo.status}`} key={todo.id}>
-                {todo.status === "completed" ? (
-                  <Check size={14} aria-hidden="true" />
-                ) : todo.status === "in_progress" ? (
-                  <LoaderCircle className="spin" size={14} aria-hidden="true" />
-                ) : (
-                  <Circle size={14} aria-hidden="true" />
-                )}
-                <span className="sr-only">
-                  {todo.status === "completed"
-                    ? "已完成："
-                    : todo.status === "in_progress"
-                      ? "执行中："
-                      : "待处理："}
-                </span>
-                <span>{todo.content}</span>
-              </li>
-            ))}
-          </ol>
-        </section>
+      {todoContent === undefined ? (
+        <div className="run-progress-summary">{summaryContent}</div>
+      ) : (
+        <details
+          className="run-progress-details"
+          open={progressExpanded}
+          onToggle={(event) =>
+            setProgressDisclosure({ key: progressDisclosureKey, open: event.currentTarget.open })
+          }
+        >
+          <summary className="run-progress-summary">{summaryContent}</summary>
+          {todoContent}
+        </details>
       )}
     </section>
   );

@@ -226,7 +226,9 @@ describe("技能发布管理界面", () => {
   });
 
   it("选择标准 Skill 目录后从 SKILL.md 自动预填元数据", async () => {
-    const container = mount(apiFixture(submission("draft")));
+    const listed = submission("draft");
+    const createSubmission = vi.fn(async () => listed);
+    const container = mount(apiFixture(listed, { createSubmission }));
     await settle();
     const markdown = `---
 name: docx
@@ -271,6 +273,32 @@ license: Proprietary. LICENSE.txt has complete terms
     expect(container.querySelector('[role="status"]')?.textContent).toContain(
       "完整条款仍以包内 LICENSE 文件",
     );
+
+    const publisherControl = [...container.querySelectorAll("label")]
+      .find((candidate) => candidate.textContent?.includes("发布者"))
+      ?.querySelector<HTMLInputElement>("input");
+    const versionControl = [...container.querySelectorAll("label")]
+      .find((candidate) => candidate.textContent?.includes("版本"))
+      ?.querySelector<HTMLInputElement>("input");
+    if (publisherControl == null || versionControl == null) {
+      throw new Error("未找到发布者或版本输入框");
+    }
+    act(() => {
+      changeControl(publisherControl, "Cube");
+      changeControl(versionControl, "1.0.0");
+    });
+    const form = container.querySelector<HTMLFormElement>(".create-form");
+    if (form === null) throw new Error("未找到创建表单");
+    await act(async () =>
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await settle();
+    expect(createSubmission).toHaveBeenCalledWith(
+      expect.not.objectContaining({
+        compatibility: expect.anything(),
+        sourceUrl: expect.anything(),
+      }),
+    );
   });
 
   it("创建表单提交全部元数据和浏览器编码后的多文件内容", async () => {
@@ -287,9 +315,8 @@ license: Proprietary. LICENSE.txt has complete terms
       发布者: "Cube",
       版本: "2.0.0",
       描述: "新的技能说明",
-      兼容性: "Cube Runtime >= 1",
-      来源地址: "https://example.com/new-skill",
-      来源修订: "v2.0.0",
+      上游仓库地址: "https://example.com/new-skill",
+      "上游提交/版本": "v2.0.0",
       "SPDX 许可证": "Apache-2.0",
     };
     for (const [labelText, value] of Object.entries(values)) {
@@ -336,7 +363,6 @@ license: Proprietary. LICENSE.txt has complete terms
       publisher: "Cube",
       version: "2.0.0",
       description: "新的技能说明",
-      compatibility: "Cube Runtime >= 1",
       sourceUrl: "https://example.com/new-skill",
       sourceRevision: "v2.0.0",
       licenseSpdx: "Apache-2.0",

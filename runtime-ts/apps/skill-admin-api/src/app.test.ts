@@ -180,6 +180,33 @@ describe("Skill 管理 API", () => {
     await app.close();
   });
 
+  it("本地上传由系统补充格式兼容性并允许不声明上游来源", async () => {
+    const { app } = fixture();
+    const {
+      compatibility: _compatibility,
+      sourceUrl: _sourceUrl,
+      sourceRevision: _sourceRevision,
+      ...localPayload
+    } = createPayload;
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/admin/skill-submissions",
+      headers: {
+        authorization: "Bearer publisher",
+        "content-type": "application/json",
+        "idempotency-key": "skill-admin-create-local-0001",
+      },
+      payload: localPayload,
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().data).toMatchObject({
+      compatibility: "Agent Skills 标准格式",
+      sourceUrl: "",
+      sourceRevision: "",
+    });
+    await app.close();
+  });
+
   it("完成发布者提交、审核者批准、管理员发布和撤销闭环", async () => {
     const { app } = fixture();
     const created = await app.inject({

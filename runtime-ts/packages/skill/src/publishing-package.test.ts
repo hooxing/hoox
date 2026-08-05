@@ -85,6 +85,15 @@ describe("管理员 Skill 发布包校验", () => {
     ).toThrow("描述");
   });
 
+  it("允许本地上传不声明上游来源", () => {
+    expect(
+      validateSkillPublicationPackage({
+        metadata: { ...metadata, sourceUrl: "", sourceRevision: "" },
+        files: [file("SKILL.md", "# Review\n", "text/markdown")],
+      }).metadata,
+    ).toMatchObject({ sourceUrl: "", sourceRevision: "" });
+  });
+
   it("接受带受控参数的标准媒体类型", () => {
     expect(
       validateSkillPublicationPackage({

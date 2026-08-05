@@ -12,7 +12,6 @@ export interface SkillMetadataPrefill {
     publisher?: string;
     version?: string;
     description?: string;
-    compatibility?: string;
     sourceUrl?: string;
     sourceRevision?: string;
     licenseSpdx?: string;
@@ -66,7 +65,6 @@ export function prefillFromSkillMarkdown(markdown: string): SkillMetadataPrefill
     versionCandidate !== undefined && versionPattern.test(versionCandidate)
       ? versionCandidate
       : undefined;
-  const compatibility = bounded(metadata.compatibility, 500);
   const sourceUrl = safeSourceUrl(metadata.source_url ?? metadata.source);
   const sourceRevision = bounded(metadata.source_revision ?? metadata.revision, 200);
   const license = bounded(metadata.license, 2_048);
@@ -78,7 +76,6 @@ export function prefillFromSkillMarkdown(markdown: string): SkillMetadataPrefill
     ...(publisher === undefined ? {} : { publisher }),
     ...(version === undefined ? {} : { version }),
     ...(description === undefined ? {} : { description }),
-    ...(compatibility === undefined ? {} : { compatibility }),
     ...(sourceUrl === undefined ? {} : { sourceUrl }),
     ...(sourceRevision === undefined ? {} : { sourceRevision }),
     ...(licenseSpdx === undefined ? {} : { licenseSpdx }),
@@ -90,9 +87,8 @@ export function prefillFromSkillMarkdown(markdown: string): SkillMetadataPrefill
       [publisher, "发布者"],
       [version, "版本"],
       [description, "描述"],
-      [compatibility, "兼容性"],
-      [sourceUrl, "来源地址"],
-      [sourceRevision, "来源修订"],
+      [sourceUrl, "上游仓库地址"],
+      [sourceRevision, "上游提交/版本"],
       [licenseSpdx, "许可证"],
     ]
       .filter(([value]) => value !== undefined)

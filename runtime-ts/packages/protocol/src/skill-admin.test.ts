@@ -90,7 +90,7 @@ describe("管理员 Skill 发布协议", () => {
     expect(Value.Check(SkillPublicationStatusSchema, "active")).toBe(false);
   });
 
-  it("创建请求沿用 Skill key/version 规则并严格约束来源元数据与文件", () => {
+  it("创建请求沿用 Skill key/version 规则，并允许系统补充兼容性与可选来源", () => {
     expect(Value.Check(CreateSkillSubmissionRequestSchema, createRequest)).toBe(true);
     expect(
       Value.Check(CreateSkillSubmissionRequestSchema, { ...createRequest, canonicalKey: "ACME" }),
@@ -98,8 +98,13 @@ describe("管理员 Skill 发布协议", () => {
     expect(
       Value.Check(CreateSkillSubmissionRequestSchema, { ...createRequest, version: ".1.0" }),
     ).toBe(false);
-    const { sourceRevision: _sourceRevision, ...missingSourceRevision } = createRequest;
-    expect(Value.Check(CreateSkillSubmissionRequestSchema, missingSourceRevision)).toBe(false);
+    const {
+      compatibility: _compatibility,
+      sourceUrl: _sourceUrl,
+      sourceRevision: _sourceRevision,
+      ...minimalRequest
+    } = createRequest;
+    expect(Value.Check(CreateSkillSubmissionRequestSchema, minimalRequest)).toBe(true);
     expect(
       Value.Check(CreateSkillSubmissionRequestSchema, { ...createRequest, unknown: true }),
     ).toBe(false);
@@ -115,6 +120,16 @@ describe("管理员 Skill 发布协议", () => {
         files: [{ ...fileRequest, path: "../SKILL.md" }],
       }),
     ).toBe(false);
+  });
+
+  it("发布申请响应允许来源未声明", () => {
+    expect(
+      Value.Check(SkillSubmissionDtoSchema, {
+        ...submission,
+        sourceUrl: "",
+        sourceRevision: "",
+      }),
+    ).toBe(true);
   });
 
   it("创建请求限制 256 个文件和单项 45 MiB Base64 字符", () => {

@@ -23,7 +23,11 @@ import {
   type RevokeSkillSubmissionRequest,
   type SubmitSkillSubmissionRequest,
 } from "@cube-runtime/protocol";
-import { type SkillPublicationService, SkillServiceError } from "@cube-runtime/skill";
+import {
+  DEFAULT_SKILL_PUBLICATION_COMPATIBILITY,
+  type SkillPublicationService,
+  SkillServiceError,
+} from "@cube-runtime/skill";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { Type, type Static } from "@sinclair/typebox";
 
@@ -184,13 +188,18 @@ export function createSkillAdminApiApp(
     async (request) => {
       requireJson(request);
       const userId = await authenticate(request, dependencies.auth);
-      const { files, ...metadata } = request.body;
+      const { files, compatibility, sourceUrl, sourceRevision, ...metadata } = request.body;
       return success(
         request,
         await dependencies.publications.create({
           userId,
           submissionId: nextSubmissionId(),
-          metadata,
+          metadata: {
+            ...metadata,
+            compatibility: compatibility ?? DEFAULT_SKILL_PUBLICATION_COMPATIBILITY,
+            sourceUrl: sourceUrl ?? "",
+            sourceRevision: sourceRevision ?? "",
+          },
           files,
           idempotencyKey: requireIdempotencyKey(request),
         }),

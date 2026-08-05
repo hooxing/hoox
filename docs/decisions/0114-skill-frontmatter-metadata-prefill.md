@@ -22,7 +22,7 @@
 - 标准 `name` 预填规范键和显示名称；规范键经过确定性规范化。
 - `description` 预填描述。
 - `license` 为单个许可证标识时预填许可证字段；以 `Proprietary` 开头时映射为 `LicenseRef-Proprietary`，完整声明仍保留在 `SKILL.md` 和包内许可证文件中。
-- 若包显式声明 `display_name`、`publisher`、`version`、`compatibility`、`source_url`、`source_revision` 等扩展标量，在通过本地形状检查后也可预填。
+- 若包显式声明 `display_name`、`publisher`、`version`、`source_url`、`source_revision` 等扩展标量，在通过本地形状检查后也可预填。兼容性不再由上传者填写。
 - 发布者、版本、兼容性和来源无法可靠推断时保持为空，必须由管理员确认。
 
 解析器不执行通用 YAML 标签、锚点或对象反序列化。预填只是便利功能，创建请求、确定性包摘要和服务端发布校验保持不变。

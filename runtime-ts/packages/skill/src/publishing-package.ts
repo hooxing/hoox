@@ -10,6 +10,7 @@ import { SkillServiceError, skillInvariant } from "./errors.js";
 export const MAX_SKILL_PUBLICATION_FILES = 256;
 export const MAX_SKILL_PUBLICATION_PACKAGE_BYTES = 32 * 1024 * 1024;
 export const MAX_SKILL_PUBLICATION_ENTRYPOINT_BYTES = 64 * 1024;
+export const DEFAULT_SKILL_PUBLICATION_COMPATIBILITY = "Agent Skills 标准格式";
 
 const canonicalKeyPattern = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
 const versionPattern = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/u;
@@ -148,8 +149,9 @@ function validateMetadata(metadata: SkillPublicationMetadata): void {
   plainText(metadata.publisher, 200, "Skill 发布者无效");
   plainText(metadata.description, 2_048, "Skill 描述无效");
   plainText(metadata.compatibility, 500, "Skill 兼容性无效");
-  plainText(metadata.sourceRevision, 200, "Skill 来源版本无效");
+  optionalPlainText(metadata.sourceRevision, 200, "Skill 来源版本无效");
   skillInvariant(spdxPattern.test(metadata.licenseSpdx), "INVALID_REQUEST", "Skill 许可证无效");
+  if (metadata.sourceUrl.length === 0) return;
   let source: URL;
   try {
     source = new URL(metadata.sourceUrl);
@@ -164,6 +166,11 @@ function validateMetadata(metadata: SkillPublicationMetadata): void {
     "INVALID_REQUEST",
     "Skill 来源地址无效",
   );
+}
+
+function optionalPlainText(value: string, maxLength: number, message: string): void {
+  if (value.length === 0) return;
+  plainText(value, maxLength, message);
 }
 
 function validatePath(value: string): string {

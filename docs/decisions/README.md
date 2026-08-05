@@ -111,6 +111,7 @@
 | [ADR-0112](0112-managed-skill-admin-publication.md) | 受管 Skill 管理发布与独立权限面 | 已接受 | 2026-08-05 |
 | [ADR-0113](0113-agent-todo-writer-and-run-progress.md) | Agent Todo Writer 与运行进度清单 | 已接受 | 2026-08-05 |
 | [ADR-0114](0114-skill-frontmatter-metadata-prefill.md) | Skill Front Matter 元数据预填 | 已接受 | 2026-08-05 |
+| [ADR-0115](0115-system-compatibility-optional-provenance-and-skills-cli.md) | 系统兼容性、可选上游来源与 Skills CLI 导入边界 | 已接受 | 2026-08-05 |
 
 ## 何时必须记录
 

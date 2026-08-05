@@ -213,6 +213,26 @@ button:disabled {
   font-weight: 650;
 }
 
+.advanced-metadata {
+  margin-top: 16px;
+  border: 1px solid #dce2de;
+  border-radius: 11px;
+  padding: 12px 14px;
+  background: #fbfcfb;
+}
+
+.advanced-metadata summary {
+  cursor: pointer;
+  color: #314138;
+  font-weight: 750;
+}
+
+.advanced-metadata > p {
+  margin: 9px 0 13px;
+  color: #66736b;
+  font-size: 13px;
+}
+
 .wide-field {
   grid-column: 1 / -1;
 }

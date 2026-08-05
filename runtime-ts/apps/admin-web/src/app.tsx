@@ -33,11 +33,29 @@ const emptyCreateForm: CreateFormState = {
   publisher: "",
   version: "",
   description: "",
-  compatibility: "",
   sourceUrl: "",
   sourceRevision: "",
   licenseSpdx: "",
 };
+
+function prepareCreateMetadata(form: CreateFormState): CreateFormState {
+  const { compatibility, sourceUrl, sourceRevision, ...required } = form;
+  const normalizedCompatibility = compatibility?.trim();
+  const normalizedSourceUrl = sourceUrl?.trim();
+  const normalizedSourceRevision = sourceRevision?.trim();
+  return {
+    ...required,
+    ...(normalizedCompatibility === undefined || normalizedCompatibility.length === 0
+      ? {}
+      : { compatibility: normalizedCompatibility }),
+    ...(normalizedSourceUrl === undefined || normalizedSourceUrl.length === 0
+      ? {}
+      : { sourceUrl: normalizedSourceUrl }),
+    ...(normalizedSourceRevision === undefined || normalizedSourceRevision.length === 0
+      ? {}
+      : { sourceRevision: normalizedSourceRevision }),
+  };
+}
 
 function presentError(reason: unknown): AdminApiError {
   return reason instanceof AdminApiError
@@ -229,7 +247,10 @@ function CreateSubmissionForm({
     setSubmitting(true);
     try {
       const preparedFiles = await filesToRequests(files);
-      const submission = await api.createSubmission({ ...form, files: [...preparedFiles] });
+      const submission = await api.createSubmission({
+        ...prepareCreateMetadata(form),
+        files: [...preparedFiles],
+      });
       setForm(emptyCreateForm);
       setFiles([]);
       onCreated(submission);
@@ -299,37 +320,6 @@ function CreateSubmissionForm({
               onChange={(event) => update("description", event.target.value)}
             />
           </label>
-          <label className="wide-field">
-            兼容性
-            <input
-              required
-              maxLength={500}
-              placeholder="Cube Runtime >= 1.0"
-              value={form.compatibility}
-              onChange={(event) => update("compatibility", event.target.value)}
-            />
-          </label>
-          <label className="wide-field">
-            来源地址
-            <input
-              required
-              type="url"
-              maxLength={2048}
-              placeholder="https://example.com/repository"
-              value={form.sourceUrl}
-              onChange={(event) => update("sourceUrl", event.target.value)}
-            />
-          </label>
-          <label>
-            来源修订
-            <input
-              required
-              maxLength={200}
-              placeholder="commit SHA 或 tag"
-              value={form.sourceRevision}
-              onChange={(event) => update("sourceRevision", event.target.value)}
-            />
-          </label>
           <label>
             SPDX 许可证
             <input
@@ -341,6 +331,31 @@ function CreateSubmissionForm({
             />
           </label>
         </div>
+        <details className="advanced-metadata">
+          <summary>高级溯源信息（可选）</summary>
+          <p>从 Git 仓库导入时由系统记录；本地目录上传可以留空，实际文件身份由包摘要保证。</p>
+          <div className="form-grid">
+            <label className="wide-field">
+              上游仓库地址
+              <input
+                type="url"
+                maxLength={2048}
+                placeholder="https://github.com/owner/repository"
+                value={form.sourceUrl ?? ""}
+                onChange={(event) => update("sourceUrl", event.target.value)}
+              />
+            </label>
+            <label>
+              上游提交/版本
+              <input
+                maxLength={200}
+                placeholder="commit SHA 或 tag"
+                value={form.sourceRevision ?? ""}
+                onChange={(event) => update("sourceRevision", event.target.value)}
+              />
+            </label>
+          </div>
+        </details>
         <fieldset className="file-picker">
           <legend>技能包文件</legend>
           <p>选择多个文件或整个目录；目录上传会保留相对路径，并以 SKILL.md 作为入口。</p>
@@ -575,7 +590,7 @@ function SubmissionDetail({
         <h3>元数据</h3>
         <dl className="metadata-grid">
           <div>
-            <dt>兼容性</dt>
+            <dt>格式兼容性</dt>
             <dd>{submission.compatibility}</dd>
           </div>
           <div>
@@ -583,13 +598,15 @@ function SubmissionDetail({
             <dd>{submission.licenseSpdx}</dd>
           </div>
           <div>
-            <dt>来源修订</dt>
-            <dd>{submission.sourceRevision}</dd>
+            <dt>上游提交/版本</dt>
+            <dd>{submission.sourceRevision || "未声明"}</dd>
           </div>
           <div>
             <dt>来源地址</dt>
             <dd>
-              {sourceUrl === undefined ? (
+              {submission.sourceUrl.length === 0 ? (
+                "未声明"
+              ) : sourceUrl === undefined ? (
                 submission.sourceUrl
               ) : (
                 <a href={sourceUrl} target="_blank" rel="noreferrer">

@@ -34,6 +34,8 @@ const unique = `${process.pid}_${Date.now().toString(36)}`;
 const schema = `it_skill_${unique}`;
 const migratorRole = `it_sk_mg_${unique}`;
 const migratorPassword = randomBytes(24).toString("hex");
+const skillPublisherRole = `it_sk_pub_${unique}`;
+const skillPublisherPassword = randomBytes(24).toString("hex");
 const testMigrationUrl = new URL(migrationDatabaseUrl);
 if (testMigrationUrl.username !== configuredMigratorRole) {
   throw new Error("MIGRATION_DATABASE_URL 与 DATABASE_MIGRATOR_ROLE 不一致");
@@ -80,7 +82,9 @@ beforeAll(async () => {
   await admin.query(
     `CREATE ROLE "${migratorRole}" LOGIN PASSWORD '${migratorPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}";
+     CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migratorCreated = true;
@@ -93,7 +97,7 @@ beforeAll(async () => {
   runtime = createPostgresPool({ connectionString: runtimeDatabaseUrl, schema, maxConnections: 8 });
   const contract = await loadPostgreSqlMigrationContract();
   expect(
-    (await migrateUp(migrator, { runtimeRole, migratorRole, schema })).map(
+    (await migrateUp(migrator, { runtimeRole, migratorRole, skillPublisherRole, schema })).map(
       (record) => record.version,
     ),
   ).toEqual(contract.versions);
@@ -149,7 +153,9 @@ afterAll(async () => {
   if (schemaCreated) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (migratorCreated) {
     await admin.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}"; DROP ROLE "${migratorRole}"`,
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+       DROP ROLE "${skillPublisherRole}";
+       DROP ROLE "${migratorRole}"`,
     );
   }
   if (admin !== undefined) await admin.end();

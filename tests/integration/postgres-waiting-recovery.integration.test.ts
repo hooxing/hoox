@@ -47,12 +47,14 @@ const unique = `${process.pid}_${Date.now().toString(36)}`;
 const schema = `it_waiting_${unique}`;
 const migratorRole = `it_wait_mg_${unique}`;
 const migratorPassword = randomBytes(24).toString("hex");
+const skillPublisherRole = `it_wait_pub_${unique}`;
+const skillPublisherPassword = randomBytes(24).toString("hex");
 const testMigrationUrl = new URL(migrationUrl);
 if (testMigrationUrl.username !== configuredMigrator) throw new Error("迁移角色配置不一致");
 testMigrationUrl.username = migratorRole;
 testMigrationUrl.password = migratorPassword;
 const databaseName = new URL(bootstrapUrl).pathname.slice(1);
-const migrationSecurity = { runtimeRole, migratorRole, schema } as const;
+const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
 
 const scope = {
   tenantId: tenantId(`wait_tenant_${unique}`),
@@ -268,7 +270,9 @@ beforeAll(async () => {
   await admin.query(
     `CREATE ROLE "${migratorRole}" LOGIN PASSWORD '${migratorPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}";
+     CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   roleCreated = true;
@@ -452,7 +456,9 @@ afterAll(async () => {
   if (schemaCreated) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (roleCreated) {
     await admin.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}"; DROP ROLE "${migratorRole}"`,
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+       DROP ROLE "${skillPublisherRole}";
+       DROP ROLE "${migratorRole}"`,
     );
   }
   if (admin) await admin.end();

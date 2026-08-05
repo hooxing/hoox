@@ -112,6 +112,13 @@ const skillRuntimeTables = new Set([
   "run_skill_snapshot_items",
   "skill_invocations",
 ]);
+const skillPublicationTables = new Set([
+  "platform_skill_operators",
+  "skill_publication_submissions",
+  "skill_publication_files",
+  "skill_publication_commands",
+  "skill_publication_audits",
+]);
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
@@ -203,6 +210,12 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["run_skill_snapshots", new Set(["SELECT", "INSERT"])],
   ["run_skill_snapshot_items", new Set(["SELECT", "INSERT"])],
   ["skill_invocations", new Set(["SELECT", "INSERT"])],
+  // 管理发布只能由独立数据库角色访问，Runtime 对五张管理表保持零 ACL。
+  ["platform_skill_operators", new Set()],
+  ["skill_publication_submissions", new Set()],
+  ["skill_publication_files", new Set()],
+  ["skill_publication_commands", new Set()],
+  ["skill_publication_audits", new Set()],
   [migrationTable, new Set()],
 ]);
 
@@ -528,6 +541,18 @@ async function hasSkillRuntimeState(client: PoolClient, schema: string): Promise
   return result.rows[0]?.present === true;
 }
 
+async function hasSkillPublicationState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.platform_skill_operators', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.skill_publication_submissions', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.skill_publication_files', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.skill_publication_commands', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.skill_publication_audits', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRunWorkerState(client: PoolClient): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     "SELECT to_regclass(format('%I.run_execution_inputs', current_schema())) IS NOT NULL AS present",
@@ -771,6 +796,9 @@ async function activeTablePolicy(
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
+  if (!(await hasSkillPublicationState(client, schema))) {
+    for (const table of skillPublicationTables) policy.delete(table);
+  }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
   }
@@ -906,6 +934,7 @@ async function activeColumnUpdatePolicy(
 export interface MigrationSecurityContext {
   readonly runtimeRole: string;
   readonly migratorRole: string;
+  readonly skillPublisherRole: string;
   readonly schema: string;
 }
 
@@ -917,9 +946,13 @@ function quoteIdentifier(value: string): string {
 function validateContext(context: MigrationSecurityContext): void {
   quoteIdentifier(context.runtimeRole);
   quoteIdentifier(context.migratorRole);
+  quoteIdentifier(context.skillPublisherRole);
   assertSafeSchemaName(context.schema);
-  if (context.runtimeRole === context.migratorRole) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "Runtime 与 Migrator 必须使用不同角色");
+  if (new Set([context.runtimeRole, context.migratorRole, context.skillPublisherRole]).size !== 3) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      "Runtime、Migrator 与 Skill Publisher 必须使用不同角色",
+    );
   }
 }
 
@@ -947,6 +980,20 @@ interface MigrationContextSafetyRow {
   readonly target_schema_has_prohibited_owned_object: boolean;
   readonly migrator_owns_cross_schema_routine: boolean;
   readonly migrator_owns_cross_schema_object: boolean;
+  readonly publisher_missing: boolean;
+  readonly publisher_cannot_login: boolean;
+  readonly publisher_has_parent: boolean;
+  readonly publisher_has_member: boolean;
+  readonly publisher_dangerous: boolean;
+  readonly publisher_inherits: boolean;
+  readonly publisher_owns_database: boolean;
+  readonly publisher_owns_schema: boolean;
+  readonly publisher_owns_relation: boolean;
+  readonly publisher_owns_routine: boolean;
+  readonly publisher_owns_object: boolean;
+  readonly publisher_can_create_database_object: boolean;
+  readonly publisher_can_create_schema_object: boolean;
+  readonly publisher_can_create_temporary_object: boolean;
   readonly schema_missing: boolean;
   readonly migrator_is_not_schema_owner: boolean;
   readonly current_schema_mismatch: boolean;
@@ -967,6 +1014,8 @@ async function inspectMigrationContext(
        SELECT * FROM pg_roles WHERE rolname = $1
      ), migrator AS (
        SELECT * FROM pg_roles WHERE rolname = $2
+     ), publisher AS (
+       SELECT * FROM pg_roles WHERE rolname = $4
      ), target_schema AS (
        SELECT * FROM pg_namespace WHERE nspname = $3
      )
@@ -1103,13 +1152,58 @@ async function inspectMigrationContext(
             AND schema_state.nspname <> 'information_schema'
             AND schema_state.nspname !~ '^pg_'
        ) AS migrator_owns_cross_schema_object,
+       NOT EXISTS (SELECT 1 FROM publisher) AS publisher_missing,
+       EXISTS (SELECT 1 FROM publisher WHERE NOT rolcanlogin) AS publisher_cannot_login,
+       EXISTS (SELECT 1 FROM pg_auth_members WHERE member = (SELECT oid FROM publisher))
+         AS publisher_has_parent,
+       EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid = (SELECT oid FROM publisher))
+         AS publisher_has_member,
+       EXISTS (
+         SELECT 1 FROM publisher
+          WHERE rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole OR rolreplication
+       ) AS publisher_dangerous,
+       EXISTS (SELECT 1 FROM publisher WHERE rolinherit) AS publisher_inherits,
+       EXISTS (
+         SELECT 1 FROM pg_database
+          WHERE datdba = (SELECT oid FROM publisher)
+       ) AS publisher_owns_database,
+       EXISTS (
+         SELECT 1 FROM pg_namespace WHERE nspowner = (SELECT oid FROM publisher)
+       ) AS publisher_owns_schema,
+       EXISTS (
+         SELECT 1 FROM pg_class WHERE relowner = (SELECT oid FROM publisher)
+       ) AS publisher_owns_relation,
+       EXISTS (
+         SELECT 1 FROM pg_proc WHERE proowner = (SELECT oid FROM publisher)
+       ) AS publisher_owns_routine,
+       EXISTS (
+         SELECT 1
+           FROM (
+             SELECT typowner AS owner_oid FROM pg_type
+             UNION ALL SELECT oprowner FROM pg_operator
+             UNION ALL SELECT conowner FROM pg_conversion
+             UNION ALL SELECT collowner FROM pg_collation
+             UNION ALL SELECT cfgowner FROM pg_ts_config
+             UNION ALL SELECT dictowner FROM pg_ts_dict
+           ) owned_object
+          WHERE owned_object.owner_oid = (SELECT oid FROM publisher)
+       ) AS publisher_owns_object,
+       COALESCE(has_database_privilege(
+         (SELECT oid FROM publisher), current_database(), 'CREATE'
+       ), false) AS publisher_can_create_database_object,
+       COALESCE(has_schema_privilege(
+         (SELECT oid FROM publisher), $3, 'CREATE'
+       ), false) AS publisher_can_create_schema_object,
+       COALESCE(has_database_privilege(
+         (SELECT oid FROM publisher), current_database(), 'TEMP'
+       ), false) AS publisher_can_create_temporary_object,
        NOT EXISTS (SELECT 1 FROM target_schema) AS schema_missing,
        NOT EXISTS (
          SELECT 1 FROM target_schema WHERE nspowner = (SELECT oid FROM migrator)
        ) AS migrator_is_not_schema_owner,
        current_schema() IS DISTINCT FROM $3 AS current_schema_mismatch,
        current_setting('search_path') IS DISTINCT FROM $3 AS search_path_mismatch`,
-    [context.runtimeRole, context.migratorRole, context.schema],
+    [context.runtimeRole, context.migratorRole, context.schema, context.skillPublisherRole],
   );
   return result.rows[0];
 }
@@ -1241,6 +1335,123 @@ async function assertRoutinePrivilegeBoundary(
   }
 }
 
+async function assertSkillPublisherBoundary(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+  enabled: boolean,
+): Promise<void> {
+  const allowed = new Map<string, ReadonlySet<string>>(
+    enabled
+      ? [
+          ["platform_skill_operators", new Set(["SELECT"])],
+          ["skill_publication_submissions", new Set(["SELECT", "INSERT"])],
+          ["skill_publication_files", new Set(["SELECT", "INSERT"])],
+          ["skill_publication_commands", new Set(["SELECT", "INSERT"])],
+          ["skill_publication_audits", new Set(["SELECT", "INSERT"])],
+          ["skills", new Set(["INSERT", "SELECT"])],
+          ["skill_versions", new Set(["SELECT", "INSERT"])],
+          ["skill_version_files", new Set(["SELECT", "INSERT"])],
+        ]
+      : [],
+  );
+  const relations = await client.query<{ readonly table_name: string }>(
+    `SELECT relname AS table_name FROM pg_class
+      WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','p')`,
+  );
+  const privileges = await client.query<PrivilegeRow>(
+    `SELECT target.table_name, requested.privilege,
+            has_table_privilege(
+              $1, format('%I.%I', $2::text, target.table_name), requested.privilege
+            ) AS allowed
+       FROM unnest($3::text[]) AS target(table_name)
+       CROSS JOIN unnest($4::text[]) AS requested(privilege)`,
+    [
+      context.skillPublisherRole,
+      context.schema,
+      relations.rows.map((row) => row.table_name),
+      tablePrivileges,
+    ],
+  );
+  for (const row of privileges.rows) {
+    if (row.allowed !== (allowed.get(row.table_name)?.has(row.privilege) ?? false)) {
+      throw new PersistenceError("CONSTRAINT_VIOLATION", "Skill Publisher 表权限偏离白名单");
+    }
+  }
+
+  const updateColumns = new Map<string, ReadonlySet<string>>(
+    enabled
+      ? [
+          [
+            "skill_publication_submissions",
+            new Set([
+              "status",
+              "version_token",
+              "reviewed_by",
+              "rejection_reason",
+              "published_skill_id",
+              "updated_at",
+            ]),
+          ],
+          ["skills", new Set(["display_name", "recommended_version", "status", "updated_at"])],
+          ["skill_versions", new Set(["status"])],
+        ]
+      : [],
+  );
+  const columns = await client.query<{
+    readonly table_name: string;
+    readonly column_name: string;
+    readonly allowed: boolean;
+  }>(
+    `SELECT column_state.table_name,column_state.column_name,
+            has_column_privilege(
+              $1,format('%I.%I',$2::text,column_state.table_name),column_state.column_name,'UPDATE'
+            ) AS allowed
+       FROM information_schema.columns column_state
+      WHERE column_state.table_schema=$2`,
+    [context.skillPublisherRole, context.schema],
+  );
+  for (const row of columns.rows) {
+    if (row.allowed !== (updateColumns.get(row.table_name)?.has(row.column_name) ?? false)) {
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        "Skill Publisher 列级 UPDATE 权限偏离白名单",
+      );
+    }
+  }
+
+  const sequences = await client.query<{ readonly allowed: boolean }>(
+    `SELECT has_sequence_privilege(
+              $1,format('%I.%I',$2::text,relation.relname),requested.privilege
+            ) AS allowed
+       FROM pg_class relation
+       CROSS JOIN unnest($3::text[]) requested(privilege)
+      WHERE relation.relnamespace=current_schema()::regnamespace AND relation.relkind='S'`,
+    [context.skillPublisherRole, context.schema, sequencePrivileges],
+  );
+  const boundary = await client.query<EffectiveBoundaryRow>(
+    `SELECT has_schema_privilege($1,$2,'USAGE') AS schema_usage,
+            has_schema_privilege($1,$2,'CREATE') AS schema_create,
+            has_database_privilege($1,current_database(),'CONNECT') AS database_connect,
+            has_database_privilege($1,current_database(),'CREATE') AS database_create,
+            has_database_privilege($1,current_database(),'TEMP') AS database_temporary`,
+    [context.skillPublisherRole, context.schema],
+  );
+  const state = boundary.rows[0];
+  if (
+    sequences.rows.some((row) => row.allowed) ||
+    state?.schema_usage !== enabled ||
+    state.schema_create !== false ||
+    state.database_connect !== true ||
+    state.database_create !== false ||
+    state.database_temporary !== false
+  ) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      "Skill Publisher 数据库或 Schema 权限偏离白名单",
+    );
+  }
+}
+
 async function assertActiveRuntimeWhitelist(
   client: PoolClient,
   context: MigrationSecurityContext,
@@ -1315,6 +1526,11 @@ async function assertActiveRuntimeWhitelist(
   await assertNoPublicRelationPrivileges(client);
   await assertNoPublicSchemaPrivileges(client);
   await assertRoutinePrivilegeBoundary(client, context);
+  await assertSkillPublisherBoundary(
+    client,
+    context,
+    await hasSkillPublicationState(client, context.schema),
+  );
 }
 
 async function assertRuntimeAccessRemoved(
@@ -1363,6 +1579,7 @@ async function assertRuntimeAccessRemoved(
   await assertNoPublicRelationPrivileges(client);
   await assertNoPublicSchemaPrivileges(client);
   await assertRoutinePrivilegeBoundary(client, context);
+  await assertSkillPublisherBoundary(client, context, false);
 }
 
 /** 在既有迁移事务中收敛 ACL，供 down 保证 DDL 与权限回收原子提交。 */

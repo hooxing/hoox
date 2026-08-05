@@ -44,10 +44,12 @@ const unique = `${process.pid}_${Date.now().toString(36)}`;
 const schema = `it_artifact_${unique}`;
 const migratorRole = `it_af_mg_${unique}`;
 const migratorPassword = randomBytes(24).toString("hex");
+const skillPublisherRole = `it_af_pub_${unique}`;
+const skillPublisherPassword = randomBytes(24).toString("hex");
 if (migrationUrl.username !== configuredMigratorRole) throw new Error("迁移角色配置不一致");
 migrationUrl.username = migratorRole;
 migrationUrl.password = migratorPassword;
-const migrationSecurity = { runtimeRole, migratorRole, schema } as const;
+const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
 
 const ids = {
   tenant: tenantId(`artifact_tenant_${unique}`),
@@ -267,7 +269,9 @@ beforeAll(async () => {
   await admin.query(
     `CREATE ROLE "${migratorRole}" LOGIN PASSWORD '${migratorPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}";
+     CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migrator = createPostgresPool({
@@ -438,7 +442,9 @@ afterAll(async () => {
   if (admin !== undefined) {
     await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await admin.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}"; DROP ROLE IF EXISTS "${migratorRole}"`,
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+       DROP ROLE IF EXISTS "${skillPublisherRole}";
+       DROP ROLE IF EXISTS "${migratorRole}"`,
     );
     await admin.end();
   }

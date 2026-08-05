@@ -21,6 +21,7 @@ export * from "./pg-sandbox-cleanup-consumer.js";
 export * from "./pg-skill-center.js";
 export * from "./pg-skill-filesystem.js";
 export * from "./pg-skill-runtime.js";
+export * from "./pg-skill-publication.js";
 export { PgThreadCreation } from "./pg-thread-creation.js";
 export * from "./pg-thread-input.js";
 export * from "./pg-thread-sandbox-lifecycle-consumer.js";
@@ -37,6 +38,7 @@ export {
 } from "./postgres.js";
 export * from "./resource-blob-persistence-adapter.js";
 export * from "./resource-upload-adapter.js";
+export * from "./skill-publication-object-store.js";
 export * from "./runtime.js";
 export type { CreateS3BlobStoreConfig } from "./s3-blob-store.js";
 export {

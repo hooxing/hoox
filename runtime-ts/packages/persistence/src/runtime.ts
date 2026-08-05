@@ -56,7 +56,10 @@ export interface PersistenceRuntime {
 export interface MigrationRuntime {
   up(): Promise<readonly MigrationRecord[]>;
   down(
-    options: Omit<MigrationDownOptions, "directory" | "runtimeRole" | "migratorRole" | "schema">,
+    options: Omit<
+      MigrationDownOptions,
+      "directory" | "runtimeRole" | "migratorRole" | "skillPublisherRole" | "schema"
+    >,
   ): Promise<readonly MigrationRecord[]>;
   probe(): Promise<void>;
   close(): Promise<void>;
@@ -322,6 +325,7 @@ export function createMigrationRuntime(
   options: PostgresPoolOptions & {
     readonly runtimeRole: string;
     readonly migratorRole: string;
+    readonly skillPublisherRole: string;
     readonly schema: string;
   },
 ): MigrationRuntime {
@@ -329,6 +333,7 @@ export function createMigrationRuntime(
   const security = {
     runtimeRole: options.runtimeRole,
     migratorRole: options.migratorRole,
+    skillPublisherRole: options.skillPublisherRole,
     schema: options.schema,
   } as const;
   return {

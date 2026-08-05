@@ -3,3 +3,4 @@ export * from "./dto.js";
 export * from "./envelopes.js";
 export * from "./schemas.js";
 export * from "./skill.js";
+export * from "./skill-admin.js";

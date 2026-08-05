@@ -439,8 +439,18 @@ describe("工作台展示组件", () => {
     expect(html).toContain("1/2");
     expect(html).toContain("确认目标");
     expect(html).toContain("完成交付");
+    expect(html).toContain("<strong>完成交付</strong><span>1/2</span>");
     expect(html).toContain("is-completed");
     expect(html).toContain("is-in_progress");
+    expect(html).toContain("run-progress-details");
+    expect(html).toContain("<summary");
+    expect(html).toContain('open=""');
+
+    const completedHtml = renderToStaticMarkup(
+      <RunTimeline run={{ ...running, status: "succeeded" }} events={events} />,
+    );
+    expect(completedHtml).toContain('<details class="run-progress-details">');
+    expect(completedHtml).not.toContain('open=""');
   });
 
   it("运行中与失败后的部分正文始终在状态卡外完整可见", () => {

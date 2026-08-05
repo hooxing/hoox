@@ -41,7 +41,7 @@ Todo 的目的仅是帮助 Agent 在复杂或长程任务中先形成步骤并�
 - 固定 Platform Harness 指示 Agent：复杂或长程任务自主使用，简单任务跳过；首次列出全部步骤，开始、完成步骤时更新完整清单；
 - 不限制 Todo 前后可调用哪些读取、搜索、修改或执行工具，不因 Todo 状态拒绝其他工具；
 - Worker 在匹配的 `tool.started` 持久化后，将 `todo.updated` 完整快照追加到现有 `run_events`，然后工具返回；
-- API 将 `todo.updated` 作为公开 Agent 事件；Web 在“运行进度”区域展示最新快照、步骤状态和完成数量；
+- API 将 `todo.updated` 作为公开 Agent 事件；Web 在“运行进度”区域展示最新快照、步骤状态和完成数量；清单支持手动折叠，执行中默认展开，终态默认收起，折叠标题保留当前步骤和完成比例；
 - 工具历史继续使用既有对话展示，不复制到运行进度清单。
 
 ## 数据流与一致性
@@ -82,7 +82,7 @@ Thread 间继承 Todo，也不为 Todo 新增可变数据库聚合；Run 事件�
 - Pi Adapter 测试覆盖 Schema、成功/失败 durable Tool Observation 和用户可读工具展示；
 - RunWorker 测试覆盖 `tool.started` 后追加 `todo.updated` 完整快照；
 - API 测试覆盖公开读取 `todo.updated`；
-- Web 投影与组件测试覆盖最新快照、完成比例以及运行进度区域中的三种状态；
+- Web 投影与组件测试覆盖最新快照、完成比例、运行进度区域中的三种状态，以及执行中默认展开、终态默认收起；
 - Prompt Golden 测试覆盖 v8 固定规则与摘要。
 
 ## 可逆性与回退

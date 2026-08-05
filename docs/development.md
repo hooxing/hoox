@@ -108,6 +108,12 @@ corepack pnpm dev:skill-admin:web
 32 MiB、入口最多 64 KiB；界面同时采集来源 URL、不可变 revision 和 SPDX 许可证。确定性校验通过后的版本仍标记
 为 `restricted`，管理员必须人工检查来源、入口正文和文件摘要；它不等价于恶意软件或脚本行为检测。
 
+选择文件或目录后，管理 Web 会在本地解析 `SKILL.md` 的受限 YAML Front Matter，并自动预填 `name`、
+`description`、`license` 以及已显式声明的扩展发布字段。`Proprietary` 声明映射为
+`LicenseRef-Proprietary`，完整条款仍以包内声明为准。浏览器无法从本地目录获得可信仓库来源和提交身份，因此未声明的
+发布者、版本、兼容性、来源 URL 与 revision 不会被猜测，仍须人工确认。该预填不替代服务端包校验，边界见
+[ADR-0114](decisions/0114-skill-frontmatter-metadata-prefill.md)。
+
 production 管理服务必须单独注入 `SKILL_ADMIN_JWT_*`、`SKILL_PUBLISHER_DATABASE_URL` 与
 `SKILL_PUBLISHER_S3_*`，且 JWT audience 不能复用普通 API。静态管理 Web 与 API 由同源身份网关托管：网关必须
 剥离浏览器伪造的 Authorization，根据已登录管理会话注入短期管理 JWT。没有该网关时不得把 development Token

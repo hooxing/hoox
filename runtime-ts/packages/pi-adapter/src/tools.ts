@@ -25,7 +25,7 @@ const MAX_INLINE_IMAGE_BYTES = 32 * 1_024 * 1_024;
 const IMAGE_SNIFF_BYTES = 4_100;
 const INVALID_ARGUMENT_PATH_PREFIX = "/workspace/.runtime-invalid/";
 const strictSchema = { additionalProperties: false } as const;
-const sandboxFileMutationQueues = new WeakMap<SandboxHandle, Map<string, Promise<void>>>();
+const sandboxActiveFileMutations = new WeakMap<SandboxHandle, Set<string>>();
 const SANDBOX_INFRASTRUCTURE_FAILURE_LIMIT = 3;
 export type ToolContinuationFailure = "SANDBOX_FAILED";
 type RejectModelContinuation = (failure?: ToolContinuationFailure) => void;
@@ -690,24 +690,21 @@ async function withSandboxFileMutation<T>(
   path: string,
   operation: () => Promise<T>,
 ): Promise<T> {
-  let queues = sandboxFileMutationQueues.get(sandbox);
-  if (queues === undefined) {
-    queues = new Map();
-    sandboxFileMutationQueues.set(sandbox, queues);
+  let activePaths = sandboxActiveFileMutations.get(sandbox);
+  if (activePaths === undefined) {
+    activePaths = new Set();
+    sandboxActiveFileMutations.set(sandbox, activePaths);
   }
-  const previous = queues.get(path) ?? Promise.resolve();
-  let release: () => void = () => undefined;
-  const current = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const tail = previous.then(() => current);
-  queues.set(path, tail);
-  await previous;
+  if (activePaths.has(path)) {
+    throw new FileToolUsageError("FILE_BUSY", "有其他 Agent 或进程正在编辑该文件，请稍后重试");
+  }
+  // 这里只覆盖结构化 edit/write 的实际重叠时间；不维护 Agent 级 writer token，
+  // 也不引入文件版本 CAS、自动合并或对 exec_command 的命令语义猜测。
+  activePaths.add(path);
   try {
     return await operation();
   } finally {
-    release();
-    if (queues.get(path) === tail) queues.delete(path);
+    activePaths.delete(path);
   }
 }
 

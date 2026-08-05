@@ -1185,6 +1185,10 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
     Parameters<AgentSessionFactoryPort["create"]>[0]["authorizeToolEffect"]
   > = [];
   readonly todoWriters: Array<Parameters<AgentSessionFactoryPort["create"]>[0]["writeTodo"]> = [];
+  readonly agentControls: Array<Parameters<AgentSessionFactoryPort["create"]>[0]["agentControl"]> =
+    [];
+  readonly agentIdentities: Array<Parameters<AgentSessionFactoryPort["create"]>[0]["agent"]> = [];
+  readonly preparedSandboxes: SandboxSessionRef[] = [];
 
   constructor(
     private readonly queue: WorkerAgentSessionPort[],
@@ -1202,6 +1206,8 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
     this.projections.push(input.rolloutProjection);
     this.toolAuthorizers.push(input.authorizeToolEffect);
     this.todoWriters.push(input.writeTodo);
+    this.agentControls.push(input.agentControl);
+    this.agentIdentities.push(input.agent);
     let safePointChain = Promise.resolve();
     const unsubscribe =
       input.onTurnSafePoint === undefined
@@ -1226,7 +1232,7 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
             input.ensureSandboxReady({ reason: "attachment" }),
           );
         } else if (this.prepareSandboxBeforeInput) {
-          await input.ensureSandboxReady({ reason: "attachment" });
+          this.preparedSandboxes.push(await input.ensureSandboxReady({ reason: "attachment" }));
         }
         return await session.prepareInput(userInput);
       },

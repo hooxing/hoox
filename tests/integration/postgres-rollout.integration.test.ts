@@ -10,6 +10,7 @@ import {
 import type { ExecutionFence } from "@cube-runtime/run-contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { PgAgentControlRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-control.js";
 import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
 import {
   createPostgresPool,
@@ -701,6 +702,152 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
         ),
       ),
     ).rejects.toBeDefined();
+  });
+
+  it("SubAgent 控制面创建独立 Rollout，并保持命令重放与 JSONB 结果稳定", async () => {
+    const controls = new PgAgentControlRepository(runtime);
+    const childId = agentThreadId(`rollout_child_${unique}`);
+    const childTurnId = `rollout_child_turn_${unique}`;
+    const childContext = {
+      ...context,
+      scope: { ...scope, agentThreadId: childId },
+    };
+    try {
+      expect(
+        await controls.initializeRoot({
+          fence,
+          attemptId: scope.attemptId,
+          rootAgentThreadId: scope.agentThreadId,
+        }),
+      ).toBe("ready");
+      expect(
+        await controls.spawn({
+          fence,
+          attemptId: scope.attemptId,
+          commandId: `spawn_child_${unique}`,
+          argsDigest: hash("5"),
+          snapshot: {
+            agentThreadId: childId,
+            parentAgentThreadId: scope.agentThreadId,
+            canonicalPath: `/root/child_${unique}`,
+            task: "验证独立 Rollout",
+            tools: ["read"],
+            forkTurns: "none",
+            turnId: childTurnId,
+            turnOrdinal: 1,
+          },
+          maxThreads: 16,
+          maxActiveSubagents: 3,
+        }),
+      ).toMatchObject({ outcome: "created" });
+      expect(
+        await repository.openAgentStreamFromClaim({
+          fence,
+          attemptId: scope.attemptId,
+          compatibility,
+          agentThreadId: childId,
+          agentKind: "subagent",
+        }),
+      ).toMatchObject({ outcome: "ready" });
+      expect(
+        (
+          await repository.append({
+            context: childContext,
+            idempotencyKey: `append_child_${unique}`,
+            entries: [{ kind: "user", body: { text: "child-only" } }],
+          })
+        ).outcome,
+      ).toBe("created");
+      const childRecovery = await repository.loadRecovery({
+        context: childContext,
+        compatibility,
+      });
+      expect(childRecovery).toMatchObject({
+        outcome: "loaded",
+        tail: [{ sequence: 0, kind: "user", body: { text: "child-only" } }],
+      });
+
+      expect(
+        await controls.startTurn({
+          fence,
+          attemptId: scope.attemptId,
+          agentThreadId: childId,
+          turnId: childTurnId,
+        }),
+      ).toBe("started");
+      expect(
+        await controls.settleTurn({
+          fence,
+          attemptId: scope.attemptId,
+          agentThreadId: childId,
+          turnId: childTurnId,
+          status: "completed",
+          finalAnswer: "完成",
+        }),
+      ).toBe("settled");
+      expect(
+        await controls.queueFollowUp({
+          fence,
+          attemptId: scope.attemptId,
+          callerAgentThreadId: scope.agentThreadId,
+          commandId: `follow_child_${unique}`,
+          argsDigest: hash("6"),
+          agentThreadId: childId,
+          turnId: `rollout_child_turn_2_${unique}`,
+          turnOrdinal: 2,
+          task: "继续验证",
+          maxActiveSubagents: 3,
+        }),
+      ).toBe("created");
+      const command = {
+        fence,
+        attemptId: scope.attemptId,
+        callerAgentThreadId: scope.agentThreadId,
+        commandId: `send_child_${unique}`,
+        kind: "send_message" as const,
+        argsDigest: hash("7"),
+      };
+      expect(await controls.recordCommand({ ...command, result: { left: 1, right: 2 } })).toBe(
+        "recorded",
+      );
+      expect(await controls.recordCommand({ ...command, result: { right: 2, left: 1 } })).toBe(
+        "replayed",
+      );
+    } finally {
+      await withTenantTransaction(migrator, databaseContext, async (client) => {
+        for (const table of [
+          "runtime_rollout_checkpoint_commands",
+          "runtime_rollout_checkpoints",
+          "runtime_rollout_replacements",
+          "runtime_rollout_append_commands",
+        ]) {
+          await client.query(
+            `DELETE FROM ${table} WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3`,
+            [scope.tenantId, scope.attemptId, childId],
+          );
+        }
+        await client.query(
+          "DELETE FROM runtime_rollout_entries WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_rollout_streams WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_agent_commands WHERE tenant_id=$1 AND attempt_id=$2 AND (caller_agent_thread_id=$3 OR result->>'agentThreadId'=$3)",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_agent_turns WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_agent_threads WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+      });
+    }
   });
 
   it("每次 append 都重验未释放 claim、实时 workspace lease 与接管后的新 token", async () => {

@@ -70,11 +70,20 @@ export function createPgDurableObservationSession(input: {
       ) {
         throw new Error("PG Tool Observation fence 与当前 Session 不匹配");
       }
-      const opened = await input.rolloutRepository.openRootStreamFromClaim({
-        fence: session.fence,
-        attemptId: session.attemptId,
-        compatibility,
-      });
+      const opened =
+        session.agent === undefined
+          ? await input.rolloutRepository.openRootStreamFromClaim({
+              fence: session.fence,
+              attemptId: session.attemptId,
+              compatibility,
+            })
+          : await input.rolloutRepository.openAgentStreamFromClaim({
+              fence: session.fence,
+              attemptId: session.attemptId,
+              compatibility,
+              agentThreadId: session.agent.agentThreadId,
+              agentKind: session.agent.agentKind,
+            });
       if (opened.outcome !== "ready") throw new Error("PG Tool Observation root stream 未就绪");
       prepared.set(session, opened.context);
       const loaded = await input.rolloutRepository.loadRecovery({

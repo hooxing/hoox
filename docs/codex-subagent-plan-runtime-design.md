@@ -16,11 +16,10 @@ Codex 中名为“Plan”的机制实际包含三个彼此独立的概念：
 
 当前 Cube Runtime 已有 `AgentTree` 和 `Plan` 领域对象，但它们只在领域测试中使用，尚未接入 Worker、PostgreSQL、Pi Adapter、API 或 Web。真实运行路径仍是“一个 Attempt、一个 root Rollout、一个 Pi Session、一个 `modelCompleted` 状态”。数据库迁移甚至明确限制每个 Attempt 只能有一个 `root` Agent Stream。因此不能只增加几个模型工具；必须补齐 Agent 控制面、持久化图、多 Session 调度、Agent 级副作用身份、mailbox 和恢复协议。
 
-推荐顺序是：
-
-- 先实现 Plan Mode 与 `request_user_input`，验证“模式快照—能力清单—持久 waiting—专用 UI”闭环。
-- 再实现**只读 Subagent**，默认最多 4 个并发 Agent（含 root），MVP 最大深度为 1。
-- 最后才开放可写 Subagent；每个可写子 Agent 必须使用隔离 Workspace/Revision，并经过显式合并，不能并发写同一个 `/workspace`。
+本仓库的 SubAgent 决策与 Codex 的默认建议有一处有意差异：root 与所有 SubAgent 共享当前 Run/Attempt 的同一个
+CubeSandbox，子 Agent 可使用的工具由 root 在 `spawn_agent` 时显式选择。系统不增加 Agent writer token、文件版本
+CAS 或自动合并器；结构化 `edit/write` 只在同一路径实际重叠时向后到调用返回 `FILE_BUSY`。默认最多 4 个并发
+Agent（含 root），首版最大深度为 1。具体实施约束见 [ADR-0117](decisions/0117-shared-sandbox-subagent-control-plane.md)。
 
 ## 2. Codex Subagent 是如何实现的
 
@@ -103,7 +102,9 @@ Codex 的 Agent 状态包括 `PendingInit`、`Running`、`Completed`、`Interrup
 
 Codex 的官方建议偏向并行、读取密集且边界清晰的任务；多个 Agent 同时修改同一文件会增加冲突风险。子 Agent 继承父 Agent 的沙箱和审批策略，角色配置只能进一步调整受允许的模型与指令，不能绕过宿主权限。
 
-对 Cube Runtime 来说还要更严格：现有 Run 只有一个 Workspace lease、一个候选 Revision 和一个最终提交路径。即使工具调用在数据库中串行落库，也无法保证多个 Session 对同一文件系统的逻辑修改可合并。因此首版只能给子 Agent 只读能力。
+Cube Runtime 保留一个 Workspace lease、一个共享 Sandbox 和一个最终 Revision 提交路径。多个 Session 不各自提交
+候选 Revision；RunWorker 在所有 SubAgent 结束后，对共享 Sandbox 统一 verify/publish。并发编辑的产品边界不是
+“Runtime 自动合并”，而是 root 选择工具与划分任务所有权，结构化同路径重叠写入得到短暂 `FILE_BUSY`。
 
 ## 3. Codex Plan 是如何实现的
 
@@ -183,7 +184,8 @@ Plan turn 结束后，TUI 弹出三个动作：
 5. 子 Agent 的 Provider/tool call ID 在进入持久层前必须加入 Agent/turn namespace。
 6. Agent 原始思考和工具日志只写自己的 Rollout；父 Agent 只收到有界 mailbox 消息和 final answer。
 7. 只有 root 能请求用户输入、批准 Plan、发布 Artifact 或提交最终 Workspace Revision。
-8. MVP 子 Agent 只读；任何写工具、通用 shell、交付工具和外部副作用工具都不进入其 capability manifest。
+8. 子 Agent capability manifest 只包含 root 在 `spawn_agent.tools` 中选择且服务端允许委派的工具；`todo_write`、
+   `deliver_file`、用户交互与最终发布不允许委派。
 9. 关闭/取消 Run 必须级联中断所有活跃子 turn；失去 Attempt 或 Workspace fence 后任何 Agent 都不能继续产生副作用。
 10. prompt、tool schema 和 collaboration mode 模板保持稳定、版本化，并进入现有兼容性 hash。
 
@@ -196,8 +198,8 @@ flowchart TD
     Supervisor --> Store["Agent Graph / Turns / Mailbox"]
     Supervisor --> Limit["并发与预算限制"]
     Supervisor --> RootSession["Root Pi Session"]
-    Supervisor --> ChildSession1["只读 Child Pi Session"]
-    Supervisor --> ChildSession2["只读 Child Pi Session"]
+    Supervisor --> ChildSession1["Child Pi Session：root 选择工具"]
+    Supervisor --> ChildSession2["Child Pi Session：root 选择工具"]
     RootSession --> RootRollout["Root Rollout"]
     ChildSession1 --> ChildRollout1["Child Rollout"]
     ChildSession2 --> ChildRollout2["Child Rollout"]
@@ -302,28 +304,40 @@ MVP 默认参数建议为：总并发 4（含 root）、最大深度 1、单 Run
 
 ### 5.6 上下文 fork
 
-首版只支持两种模式即可：
+首版支持三种模式：
 
-- `none`：子 Agent 只收到任务说明、稳定 Harness、角色 instruction 和必要的只读 Workspace 信息；
-- `all`：从父 Agent 已提交的 durable Rollout/Thread Active History 构建 snapshot。
+- `none`：子 Agent 只收到任务说明、稳定 Harness 和所选工具；
+- `all`：从父 Agent 已提交的 durable Rollout/Thread Active History 构建 snapshot；
+- 最近 N 个 user turn：从同一可信历史截取最近 N 轮完整消息。
 
-最近 N turn 可以后置。无论哪种模式，都必须复用 Context Policy 生成新的合法历史，并过滤 Agent mailbox、临时工具 usage hint、未完成 tool call 和父 Agent 私有控制消息。禁止直接复制 Pi 内存里的 `state.messages`，因为它不是 Runtime 事实源。
+无论哪种模式，都必须复用 Context Policy 生成新的合法历史，并过滤 Agent mailbox、临时工具 usage hint、未完成
+tool call 和父 Agent 私有控制消息。禁止直接复制 Pi 内存里的 `state.messages`，因为它不是 Runtime 事实源。fork
+完成后父子上下文独立演进，父 Agent 的后续消息不会自动复制给子 Agent。
 
-### 5.7 只读 Subagent 工具面
+### 5.7 root 选择 SubAgent 工具面
 
-当前 `exec_command` 可通过 Shell 修改文件，不适合作为“只读”工具。推荐新增边界明确的工具：
+root 保留当前完整工具列表并新增协作工具。`spawn_agent` 必须显式提交 `tools`（允许空列表），Runtime 再与可委派
+白名单取交集。
+当前可委派工具为：
 
-- `list_workspace`：有界目录枚举；
-- `search_workspace`：有界文本搜索；
-- 复用现有 `read`：有界文件读取。
+- `exec_command`；
+- `read`；
+- `edit`；
+- `write`；
+- `skill`。
 
-首版子 Agent 不注册 `exec_command`、`edit`、`write`、`deliver_file`、artifact、用户输入和任何有外部副作用的工具。Plan Mode root 也使用同一只读工具集。后续若需要只读 shell，应由 CubeSandbox 提供操作系统级只读文件系统和无网络/无进程副作用策略，而不是解析命令字符串做黑名单。
+`todo_write`、`deliver_file`、Artifact 发布、用户输入和 Agent 控制工具只属于 root。子 Agent 不获得递归
+`spawn_agent` 能力。工具限制由真实 Session capability manifest 强制执行，不依赖任务提示词。
 
-### 5.8 可写 Subagent 的后续方案
+### 5.8 共享写入边界
 
-可写子 Agent 必须各自工作在从同一 base revision 派生的隔离 Workspace branch 中，产出不可变 candidate revision。root 只接收变更摘要和 candidate identity，再通过显式 merge/rebase 服务合并；冲突必须回到 root 处理。
+root 与 SubAgent 使用同一 `SandboxSessionRef`，不建立独立 Workspace branch、文件版本表或自动合并服务。不同路径
+的结构化 `edit/write` 可并发；同一 Sandbox 对象与规范化路径的调用实际重叠时，后到调用在领取副作用许可前得到
+`FILE_BUSY`，模型可等待、重读或把冲突报告 root。
 
-在实现 branch/merge 协议前，不应允许多个 Session 共享当前 `/workspace` 写权限。数据库中的 tool serialization 不能解决文件内容层面的 lost update。
+该机制不是完整的 lost-update 检测：`exec_command` 可以执行任意文件写入，Runtime 不解析 shell 命令；两个 Agent
+先后基于旧业务假设修改同一逻辑区域也可能产生语义冲突。因此 root 必须通过工具选择、任务说明和文件/模块所有权
+降低冲突。RunWorker 仍只在所有 Agent 结束后对共享 Sandbox 统一 verify/publish 一次。
 
 ## 6. Plan Mode 在 Cube Runtime 的实现方案
 
@@ -416,7 +430,7 @@ Plan markdown 是用户/模型内容，应以引用事实进入 user/custom cont
 | `packages/run-contracts` | 增加 `AgentExecutionIdentity`、`AgentControlPort`、Agent 级 Session create 参数、mailbox/wakeup、Agent 级 permit 与 cancellation 契约 |
 | `packages/persistence` | 新增 Agent threads/turns/mailbox/commands/proposed plans 迁移与 repository；泛化 rollout stream；修改 model permit 唯一键和 RLS |
 | `packages/prompt-builder` | 增加版本化 Collaboration Mode 模板与 mode-aware capability manifest；升级 prompt version 和恢复兼容 hash |
-| `packages/pi-adapter` | 新增协作工具、`request_user_input`、`update_plan`、proposed plan parser；按 root/child/mode 组装不同工具集 |
+| `packages/pi-adapter` | 新增协作工具；按 root 选择的白名单组装 child 工具集；同路径结构化写入返回 `FILE_BUSY` |
 | `apps/agent-worker` | 抽出 `AgentSupervisor`；把单 Session 状态改为 Agent/turn map；并发运行只读 child；mailbox 安全点注入；级联 abort 与恢复 |
 | `apps/api` | 接收 mode snapshot；提交结构化 answer；Plan accept；读取 Agent Tree/Plan 投影 |
 | `apps/web` | composer 模式切换、结构化提问、Plan card/接受动作、Subagent 面板；root 对话不混入 child 原始 trace |
@@ -445,22 +459,22 @@ Plan markdown 是用户/模型内容，应以引用事实进入 user/custom cont
 
 这一阶段不需要多 Agent，但能先验证最难复用的 waiting、恢复、mode-aware tools 和 UI 协议。
 
-### 阶段 2：只读 Subagent
+### 阶段 2：共享 Sandbox SubAgent
 
 - Agent Graph/turn/mailbox/command tables；
 - 多 rollout stream 和 Agent 级 permit；
 - `AgentSupervisor` 与协作工具；
 - `none/all` fork；
-- 默认 4 槽、深度 1；
+- root 选择 child 工具、共享同一 Sandbox、默认 4 槽、深度 1；
 - Web Agent Tree/状态面板；
 - 崩溃恢复、幂等和级联取消。
 
-### 阶段 3：隔离写入与合并
+### 阶段 3：运维与可观测性增强
 
-- 每子 Agent 独立 Workspace branch/candidate revision；
-- root-controlled merge/rebase；
-- 冲突事件和 UI；
-- 写权限、artifact 和发布权限逐项开放，默认仍由 root 独占最终提交。
+- Agent Tree 公开只读投影与 Web 状态面板；
+- Provider/token Run 级预算；
+- `FILE_BUSY`、未消费 final answer 和子 Agent 失败指标；
+- 根据真实冲突数据决定是否另立 ADR 设计隔离 Workspace branch；不预设文件版本 CAS 或自动合并。
 
 ## 9. 测试矩阵与验收标准
 
@@ -471,7 +485,8 @@ Plan markdown 是用户/模型内容，应以引用事实进入 user/custom cont
 | Domain | Thread completed turn 后可 follow-up；关闭 Thread 不可启动新 turn；父子路径唯一；深度/数量限制 |
 | 幂等 | 相同 `spawn_agent` call 重放只得到同一 child；同 key 不同 digest 冲突 |
 | 并发 | 两个 spawn 抢最后一个槽只有一个成功；同一 child 不能并发 turn |
-| 隔离 | child capability manifest 不含 write/exec/deliver；跨 tenant/attempt/agent permit 全部拒绝 |
+| 能力 | child capability manifest 精确等于 root 选择与服务端白名单的交集；永不包含 deliver/todo/agent-control；跨 tenant/attempt/agent permit 全部拒绝 |
+| 共享写入 | root/child 获得同一 Sandbox 对象；不同路径可并发；同路径重叠 edit/write 的后到调用得到 `FILE_BUSY` |
 | Rollout | root/child sequence 独立；未完成 tool pair 不能 fork；恢复选择正确 agent stream |
 | Mailbox | send 不触发 turn；follow-up 触发；final answer 唤醒 wait；steer/cancel 能打断 wait |
 | Recovery | spawn 提交后 Worker 崩溃；child 模型完成但通知未消费；过期 lease 下的 running turn 收敛 |
@@ -483,12 +498,13 @@ Plan markdown 是用户/模型内容，应以引用事实进入 user/custom cont
 
 ### 9.2 完成标准
 
-只读 Subagent 可视为可发布，至少需要满足：
+共享 Sandbox SubAgent 可视为可发布，至少需要满足：
 
 - 一个 root 能并行启动三个 child，收到三个有 sender/path 的 durable final answer；
 - Worker 在任一持久化边界崩溃并重启后，不重复创建 child、不重复调用已确认的工具副作用；
 - root Run 终态前不存在活跃 child turn；
-- child 无法写 Workspace、发布 Artifact、请求用户输入或获得不属于自己的许可；
+- child 只能使用 root 选择的可委派工具，无法发布 Artifact、请求用户输入或获得不属于自己的许可；
+- root/child 共享同一个 Sandbox；系统不存在 Agent writer token、文件版本 CAS 和自动合并器；
 - root/child Rollout 都能单独恢复和审计，Thread 用户对话只包含 root 事实与有界 child 汇总；
 - 现有单 Agent Run 在 feature flag 关闭时行为、prompt hash 和恢复路径保持兼容。
 
@@ -508,7 +524,7 @@ Plan Mode 可视为可发布，至少需要满足：
 - **复用现有 `AgentThread.completed` 作为永久终态**：无法支持 Codex 的 follow-up 复用语义。
 - **把 Plan Mode 等同于 `domain.Plan` 或 `update_plan`**：会混淆方案审批与执行进度。
 - **仅用 prompt 禁止 Plan/Subagent 写文件**：`exec_command` 仍可修改文件，安全边界不成立。
-- **让多个子 Agent 共享可写 `/workspace`**：会产生无法可靠检测的 lost update。
+- **把 `FILE_BUSY` 描述成完整冲突证明**：它只覆盖结构化同路径调用的实际重叠窗口，不能覆盖 shell 写入或语义冲突。
 - **把 child 全量 trace 写入 Thread Active History**：会迅速膨胀 root 上下文，并把内部推理暴露成用户对话。
 - **轮询子 Agent 状态实现 wait**：浪费资源且响应 steer 较慢，应等待 mailbox activity/cancellation。
 

@@ -50,6 +50,16 @@ describe("Pi 运行事件映射", () => {
     ).toMatchObject({
       presentation: { action: "deliver", title: "DeepSeek介绍.pptx" },
     });
+    expect(
+      mapPiEvent({
+        type: "tool_execution_start",
+        toolCallId: "call-todo",
+        toolName: "todo_write",
+        args: { todos: [{ id: "first", content: "第一步", status: "pending" }] },
+      }),
+    ).toMatchObject({
+      presentation: { action: "other", title: "更新任务清单" },
+    });
   });
 
   it("把 Runtime turn hook 错误归类为协议错误，不误报 Provider", () => {

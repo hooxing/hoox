@@ -1,9 +1,12 @@
-import type {
-  IsoTimestamp,
-  Run,
-  Sha256Digest,
-  Workspace,
-  WorkspaceRevisionId,
+import {
+  applyTodoWrite,
+  type IsoTimestamp,
+  type Run,
+  type Sha256Digest,
+  type TodoSnapshot,
+  type TodoWriteCommand,
+  type Workspace,
+  type WorkspaceRevisionId,
 } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import { WorkspaceApplicationError, WorkspaceDependencyError } from "@cube-runtime/workspace";
@@ -122,6 +125,7 @@ interface ExecutionContext {
   readonly durableLane: DurableOperationLane;
   readonly toolStartedGates: Map<string, ToolStartedGate>;
   readonly cleanupFacts: Map<string, CleanupReceiptFacts>;
+  todo?: TodoSnapshot;
   stopped?: "cancelled" | "shutdown" | "timeout" | "fence_lost" | "unavailable" | "scope_mismatch";
   agentFailure?: StableWorkerErrorCode;
   modelCompleted: boolean;
@@ -137,6 +141,7 @@ interface ToolStartedGate {
   readonly name: string;
   readonly committed: Promise<void>;
   authorizationRequested: boolean;
+  todoWriteRequested: boolean;
   resolve(): void;
 }
 
@@ -684,6 +689,7 @@ export class RunWorker {
             }),
         authorizeToolEffect: (call) =>
           this.authorizeToolEffectAfterStarted(context, cancellation, call),
+        writeTodo: (call) => this.writeTodoAfterStarted(context, cancellation, call),
       });
       context.abortSession = async () => {
         await session?.drainRejectedToolReceipts?.();
@@ -1145,6 +1151,42 @@ export class RunWorker {
     // callId 在 Attempt 内永久一次性；即使后续授权失败，也不能重新领取许可。
     gate.authorizationRequested = true;
     return await this.authorizeEffect(context, cancellation, "tool_execution", call);
+  }
+
+  private async writeTodoAfterStarted(
+    context: ExecutionContext,
+    cancellation: AbortSignal,
+    call: { readonly callId: string; readonly command: TodoWriteCommand },
+  ): Promise<TodoSnapshot> {
+    const gate = context.toolStartedGates.get(call.callId);
+    if (gate === undefined || gate.name !== "todo_write") {
+      throw new Error("TODO_PROTOCOL");
+    }
+    await gate.committed;
+    if (gate.todoWriteRequested || context.adapterRejected || !context.eventAcceptanceOpen) {
+      throw new Error("TODO_PROTOCOL");
+    }
+    gate.todoWriteRequested = true;
+    refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
+    if (context.stopped) throw new Error("TODO_WRITE_STOPPED");
+
+    const snapshot = applyTodoWrite(context.todo, call.command);
+    const encoded = agentEvent(context, { type: "todo.updated", snapshot });
+    const persisted = await this.applyMutation(context, {
+      idempotencyKey: `${context.attemptId}/todo/${call.callId}`,
+      events: [encoded],
+      outbox: [],
+    });
+    if (!isApplied(persisted)) {
+      closeEventAcceptance(context);
+      context.stopped =
+        persisted.outcome === "fence_lost" || persisted.outcome === "scope_mismatch"
+          ? "fence_lost"
+          : "unavailable";
+      throw new Error("TODO_PERSISTENCE_UNAVAILABLE");
+    }
+    context.todo = snapshot;
+    return snapshot;
   }
 
   private async authorizeEffect(
@@ -2024,7 +2066,13 @@ function registerToolStarted(
   const committed = new Promise<void>((done) => {
     resolve = done;
   });
-  const gate = { name: event.name, committed, authorizationRequested: false, resolve };
+  const gate = {
+    name: event.name,
+    committed,
+    authorizationRequested: false,
+    todoWriteRequested: false,
+    resolve,
+  };
   context.toolStartedGates.set(event.callId, gate);
   return gate;
 }

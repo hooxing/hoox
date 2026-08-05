@@ -397,19 +397,15 @@ POST /v1/threads/{threadId}/plans/{planId}/accept
 
 Plan markdown 是用户/模型内容，应以引用事实进入 user/custom context，不能拼入系统提示词。
 
-### 6.5 `update_plan` 与现有 `domain.Plan`
+### 6.5 `todo_write` 与现有 `domain.Plan`
 
-建议将当前未接线的 `domain.Plan` 重命名或替换为 `ExecutionChecklist`，不要用于 Collaboration Plan Mode。
+当前未接线的 `domain.Plan` 不用于本次功能。本仓库实现独立的 Run 级 `todo_write`：Agent 根据复杂度自主决定是否
+使用，首次创建全 pending，之后以完整快照更新 pending/in_progress/completed。Runtime 只校验 Todo 自身一致性，
+不把 Todo 变成读取、搜索、修改、执行或交付工具的前置门禁。
 
-`update_plan` 首版只需：
-
-- 在 Default Mode 注册；
-- 校验 step 非空、状态为 `pending/in_progress/completed`、最多一个 `in_progress`；
-- 发布并持久化 `execution_plan.updated` Run event；
-- Web 渲染为执行中清单；
-- Plan Mode 调用返回稳定协议错误。
-
-它不需要独立数据库 aggregate；`run_events` 足以作为本次 Run 的 UI 投影事实。若未来需要跨 Run 的项目计划，再单独设计领域生命周期。
+每次成功更新发布并持久化 `todo.updated` Run event，Web 在“运行进度”区域投影最新快照；既有工具历史继续在原位置
+展示。它不需要独立数据库 aggregate，`run_events` 足以作为本次 Run 的 UI 与审计事实源。若未来需要跨 Run 的项目
+计划，再单独设计领域生命周期。完整实施说明见 [Todo Writer Runtime 实现说明](todo-writer-runtime-implementation.md)。
 
 ## 7. 按模块的修改清单
 

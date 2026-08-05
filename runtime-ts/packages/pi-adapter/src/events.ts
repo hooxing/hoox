@@ -1,4 +1,5 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { TodoSnapshot } from "@cube-runtime/domain";
 
 export type ToolPresentation = {
   readonly action:
@@ -24,6 +25,7 @@ export type RuntimeAgentEvent =
   | { type: "tool.started"; callId: string; name: string; presentation?: ToolPresentation }
   | { type: "tool.updated"; callId: string; name: string }
   | { type: "tool.completed"; callId: string; name: string; isError: boolean }
+  | { type: "todo.updated"; snapshot: TodoSnapshot }
   | {
       /** 只在完整 turn_end 后发布；RunWorker 将其写入 Thread Context，不写入 UI run_events。 */
       type: "turn.completed";
@@ -238,6 +240,7 @@ function projectToolPresentation(name: string, unsafeArgs: unknown): ToolPresent
     const title = safeText(args?.name, 255) ?? workspacePath(args?.path);
     return { action: "deliver", ...(title === undefined ? {} : { title }) };
   }
+  if (name === "todo_write") return { action: "other", title: "更新任务清单" };
   if (name === "publish_artifact") {
     const title = safeText(args?.name, 255);
     return { action: "deliver", ...(title === undefined ? {} : { title }) };

@@ -140,6 +140,53 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
   });
 
+  it("在 todo_write started 持久化后写入完整 Todo 快照，不影响其他工具授权", async () => {
+    const session = new BlockingAgentSession();
+    const h = harness([session], fakeSeed("todo-write"));
+    const execution = h.worker.execute(h.scope);
+    await vi.waitFor(() => expect(session.prompts).toHaveLength(1));
+
+    session.emit({ type: "tool.started", callId: "call-todo", name: "todo_write" });
+    const snapshot = await h.factory.todoWriters[0]?.({
+      callId: "call-todo",
+      command: {
+        todos: [
+          { id: "confirm", content: "确认目标", status: "pending" },
+          { id: "deliver", content: "完成交付", status: "pending" },
+        ],
+      },
+    });
+    session.emit({
+      type: "tool.completed",
+      callId: "call-todo",
+      name: "todo_write",
+      isError: false,
+    });
+    session.emit({ type: "message.completed", stopReason: "stop" });
+    session.complete();
+
+    await expect(execution).resolves.toEqual({ outcome: "succeeded" });
+    expect(snapshot).toMatchObject({ schemaVersion: 1, version: 1 });
+    const todoEvent = h.persistence
+      .record(h.scope)
+      .events.find(
+        (event) => event.kind === "agent_event" && event.payload.type === "todo.updated",
+      );
+    expect(todoEvent).toMatchObject({
+      payload: {
+        type: "todo.updated",
+        snapshot: {
+          version: 1,
+          todos: [
+            { id: "confirm", status: "pending" },
+            { id: "deliver", status: "pending" },
+          ],
+        },
+      },
+    });
+    expect(h.factory.toolAuthorizers).toHaveLength(1);
+  });
+
   it("模型确认上下文过大时终止 Run 并释放队列，不进入人工恢复", async () => {
     const session = new ScriptedAgentSession([], {
       kind: "context_too_large",

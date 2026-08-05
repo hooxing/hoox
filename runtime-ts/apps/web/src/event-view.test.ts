@@ -213,4 +213,39 @@ describe("用户运行进度投影", () => {
   it("为未识别工具提供安全的通用动作", () => {
     expect(toolActionLabel("private_tool")).toBe("正在处理任务…");
   });
+
+  it("只使用最新的有效 todo.updated 快照作为运行清单", () => {
+    const progress = buildRunProgress([
+      event(1, "todo.updated", {
+        snapshot: {
+          schemaVersion: 1,
+          version: 1,
+          todos: [
+            { id: "first", content: "确认目标", status: "pending" },
+            { id: "second", content: "完成交付", status: "pending" },
+          ],
+        },
+      }),
+      event(2, "todo.updated", { snapshot: { version: 2, todos: [] } }),
+      event(3, "todo.updated", {
+        snapshot: {
+          schemaVersion: 1,
+          version: 2,
+          todos: [
+            { id: "first", content: "确认目标", status: "completed" },
+            { id: "second", content: "完成交付", status: "in_progress" },
+          ],
+        },
+      }),
+    ]);
+
+    expect(progress.todo).toEqual({
+      version: 2,
+      todos: [
+        { id: "first", content: "确认目标", status: "completed" },
+        { id: "second", content: "完成交付", status: "in_progress" },
+      ],
+    });
+    expect(progress.steps).toEqual([]);
+  });
 });

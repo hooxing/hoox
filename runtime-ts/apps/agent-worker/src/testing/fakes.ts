@@ -1184,6 +1184,7 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
   readonly toolAuthorizers: Array<
     Parameters<AgentSessionFactoryPort["create"]>[0]["authorizeToolEffect"]
   > = [];
+  readonly todoWriters: Array<Parameters<AgentSessionFactoryPort["create"]>[0]["writeTodo"]> = [];
 
   constructor(
     private readonly queue: WorkerAgentSessionPort[],
@@ -1200,6 +1201,7 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
     this.createCount += 1;
     this.projections.push(input.rolloutProjection);
     this.toolAuthorizers.push(input.authorizeToolEffect);
+    this.todoWriters.push(input.writeTodo);
     let safePointChain = Promise.resolve();
     const unsubscribe =
       input.onTurnSafePoint === undefined

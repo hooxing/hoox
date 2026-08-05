@@ -700,6 +700,19 @@ function fixture(
                     payload: { type: "thinking.completed" },
                     occurredAt: baseTime,
                   },
+                  {
+                    sequence: 6,
+                    kind: "agent_event",
+                    payload: {
+                      type: "todo.updated",
+                      snapshot: {
+                        schemaVersion: 1,
+                        version: 1,
+                        todos: [{ id: "first", content: "第一步", status: "pending" }],
+                      },
+                    },
+                    occurredAt: baseTime,
+                  },
                 ]
                   .filter((event) => event.sequence > after)
                   .slice(0, limit),
@@ -1459,6 +1472,18 @@ describe("Fastify API 契约", () => {
           sequence: 5,
           kind: "agent_event",
           type: "thinking.completed",
+        },
+        {
+          eventId: "attempt_1-6",
+          sequence: 6,
+          kind: "agent_event",
+          type: "todo.updated",
+          payload: {
+            snapshot: {
+              version: 1,
+              todos: [{ id: "first", content: "第一步", status: "pending" }],
+            },
+          },
         },
       ],
     });

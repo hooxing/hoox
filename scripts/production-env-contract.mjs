@@ -2,6 +2,7 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "RUNTIME_ENV",
   "DATABASE_URL",
   "DATABASE_RUNTIME_ROLE",
+  "DATABASE_SKILL_PUBLISHER_ROLE",
   "DATABASE_SCHEMA",
   "PROCESS_SHUTDOWN_TIMEOUT_MS",
   "THREAD_CURSOR_ACTIVE_KID",
@@ -41,6 +42,22 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "S3_ACCESS_KEY_ID",
   "S3_SECRET_ACCESS_KEY",
   "S3_FORCE_PATH_STYLE",
+  "SKILL_PUBLISHER_DATABASE_URL",
+  "SKILL_ADMIN_LISTEN_HOST",
+  "SKILL_ADMIN_LISTEN_PORT",
+  "SKILL_ADMIN_TLS_MODE",
+  "SKILL_ADMIN_TLS_TRUSTED_PROXY_CIDRS",
+  "SKILL_ADMIN_JWT_ISSUER",
+  "SKILL_ADMIN_JWT_AUDIENCE",
+  "SKILL_ADMIN_JWT_SIGNING_KEYS",
+  "SKILL_ADMIN_JWT_CLOCK_SKEW_SECONDS",
+  "SKILL_ADMIN_JWT_MAX_LIFETIME_SECONDS",
+  "SKILL_PUBLISHER_S3_ENDPOINT",
+  "SKILL_PUBLISHER_S3_BUCKET",
+  "SKILL_PUBLISHER_S3_REGION",
+  "SKILL_PUBLISHER_S3_ACCESS_KEY_ID",
+  "SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY",
+  "SKILL_PUBLISHER_S3_FORCE_PATH_STYLE",
   "CUBESANDBOX_API_URL",
   "CUBESANDBOX_TEMPLATE_ID",
   "CUBESANDBOX_API_KEY",
@@ -72,10 +89,14 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
 
 const secretKeys = new Set([
   "DATABASE_URL",
+  "SKILL_PUBLISHER_DATABASE_URL",
   "THREAD_CURSOR_SIGNING_KEYS",
   "API_JWT_SIGNING_KEYS",
+  "SKILL_ADMIN_JWT_SIGNING_KEYS",
   "S3_ACCESS_KEY_ID",
   "S3_SECRET_ACCESS_KEY",
+  "SKILL_PUBLISHER_S3_ACCESS_KEY_ID",
+  "SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY",
   "CUBESANDBOX_TEMPLATE_ID",
   "CUBESANDBOX_API_KEY",
   "MODEL_API_KEY",
@@ -105,7 +126,7 @@ function parseLines(source) {
 }
 
 function obviousPlaceholder(key, value) {
-  if (key === "DATABASE_URL") {
+  if (key === "DATABASE_URL" || key === "SKILL_PUBLISHER_DATABASE_URL") {
     try {
       return new URL(value).password === "replace-me";
     } catch {
@@ -155,9 +176,11 @@ export function validateProductionEnvironmentExample(source) {
   }
   for (const key of [
     "API_JWT_ISSUER",
+    "SKILL_ADMIN_JWT_ISSUER",
     "API_PUBLIC_ORIGIN",
     "S3_ENDPOINT",
     "S3_PUBLIC_ENDPOINT",
+    "SKILL_PUBLISHER_S3_ENDPOINT",
     "CUBESANDBOX_API_URL",
     "MODEL_BASE_URL",
   ]) {

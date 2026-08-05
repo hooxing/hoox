@@ -114,8 +114,12 @@ const runtimeRole = preprovisionedDatabase
 const migratorRole = preprovisionedDatabase
   ? (process.env.DATABASE_MIGRATOR_ROLE ?? "")
   : `it_rw_mg_${suffix}`;
+const skillPublisherRole = preprovisionedDatabase
+  ? (process.env.DATABASE_SKILL_PUBLISHER_ROLE ?? "")
+  : `it_rw_pub_${suffix}`;
 const runtimePassword = randomBytes(24).toString("hex");
 const migratorPassword = randomBytes(24).toString("hex");
+const skillPublisherPassword = randomBytes(24).toString("hex");
 const safePgIdentifier = /^[a-z][a-z0-9_]{0,62}$/u;
 let admin!: Pool;
 let migrator!: Pool;
@@ -423,7 +427,10 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${migratorRole}" LOGIN PASSWORD '${migratorPassword}'
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-       GRANT CONNECT ON DATABASE "${databaseName}" TO "${runtimeRole}", "${migratorRole}";
+       CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       GRANT CONNECT ON DATABASE "${databaseName}"
+         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
       );
     }
@@ -434,9 +441,11 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         !schema.startsWith("m4_ci_") ||
         !runtimeRole.startsWith("m4_ci_") ||
         !migratorRole.startsWith("m4_ci_") ||
+        !skillPublisherRole.startsWith("m4_ci_") ||
         !safePgIdentifier.test(schema) ||
         !safePgIdentifier.test(runtimeRole) ||
         !safePgIdentifier.test(migratorRole) ||
+        !safePgIdentifier.test(skillPublisherRole) ||
         migratorUrl.username !== migratorRole ||
         runtimeUrl.username !== runtimeRole ||
         schema.length === 0
@@ -452,7 +461,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     runtimeConnectionString = runtimeUrl.toString();
     migrator = createPostgresPool({ connectionString: migratorUrl.toString(), schema });
     runtime = createPostgresPool({ connectionString: runtimeConnectionString, schema });
-    await migrateUp(migrator, { runtimeRole, migratorRole, schema });
+    await migrateUp(migrator, { runtimeRole, migratorRole, skillPublisherRole, schema });
     const dispatchAcl = await admin.query<{ readonly allowed: boolean; readonly version: number }>(
       `SELECT has_table_privilege($1::text, format('%I.api_idempotency_records', $2::text), 'SELECT') AS allowed,
               (SELECT max(version) FROM "${schema}".runtime_schema_migrations)::int AS version`,
@@ -484,11 +493,14 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     await admin
       ?.query(
         `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
-       REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${runtimeRole}", "${migratorRole}"`,
+       REVOKE CONNECT ON DATABASE "${databaseName}"
+         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}"`,
       )
       .catch(() => undefined);
     await admin?.query(
-      `DROP ROLE IF EXISTS "${runtimeRole}"; DROP ROLE IF EXISTS "${migratorRole}"`,
+      `DROP ROLE IF EXISTS "${runtimeRole}";
+       DROP ROLE IF EXISTS "${skillPublisherRole}";
+       DROP ROLE IF EXISTS "${migratorRole}"`,
     );
     await admin?.end();
   });
@@ -5963,6 +5975,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     const artifactDown = await migrateDown(migrator, {
       runtimeRole,
       migratorRole,
+      skillPublisherRole,
       schema,
       targetVersion: 15,
       allowDestructive: true,
@@ -6001,7 +6014,12 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       [[legacyArtifactId, legacyCorrectionId]],
     );
     expect(legacyFactsAfter.rows[0]?.count).toBe(0);
-    const restored = await migrateUp(migrator, { runtimeRole, migratorRole, schema });
+    const restored = await migrateUp(migrator, {
+      runtimeRole,
+      migratorRole,
+      skillPublisherRole,
+      schema,
+    });
     expect(restored.at(-1)?.version).toBe(migrationContract.latestVersion);
     const acl = await admin.query<{
       readonly select_allowed: boolean;

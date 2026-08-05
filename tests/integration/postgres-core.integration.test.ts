@@ -74,6 +74,8 @@ const databaseOwnerRole = new URL(bootstrapDatabaseUrl).username;
 const databaseName = new URL(bootstrapDatabaseUrl).pathname.slice(1);
 const migratorRole = `it_mg_${process.pid}_${Date.now().toString(36)}`;
 const migratorPassword = randomBytes(24).toString("hex");
+const skillPublisherRole = `it_pub_${process.pid}_${Date.now().toString(36)}`;
+const skillPublisherPassword = randomBytes(24).toString("hex");
 const testMigrationUrl = new URL(migrationDatabaseUrl);
 if (testMigrationUrl.username !== configuredMigratorRole) {
   throw new Error("MIGRATION_DATABASE_URL 与 DATABASE_MIGRATOR_ROLE 不一致");
@@ -84,7 +86,7 @@ if (!/^[a-z_][a-z0-9_]{0,62}$/.test(databaseOwnerRole)) {
   throw new Error("数据库 Owner 角色名称无效");
 }
 if (!/^[a-z_][a-z0-9_]{0,62}$/.test(databaseName)) throw new Error("测试数据库名称无效");
-const migrationSecurity = { runtimeRole, migratorRole, schema } as const;
+const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
 const sourceMigrationDirectory = fileURLToPath(
   new URL("../../runtime-ts/packages/persistence/migrations/", import.meta.url),
 );
@@ -182,6 +184,7 @@ interface IsolatedMigrationTarget {
   readonly context: {
     readonly runtimeRole: string;
     readonly migratorRole: string;
+    readonly skillPublisherRole: string;
     readonly schema: string;
   };
   close(): Promise<void>;
@@ -191,6 +194,7 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
   isolatedMigrationCounter += 1;
   const isolatedSuffix = `${process.pid}_${isolatedMigrationCounter}`;
   const isolatedRole = `it_mg_${isolatedSuffix}`;
+  const isolatedPublisherRole = `it_pub_${isolatedSuffix}`;
   const isolatedSchema = `it_${suffix}_${isolatedSuffix}`;
   const password = randomBytes(24).toString("hex");
   const url = new URL(migrationDatabaseUrl);
@@ -199,7 +203,9 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
   await administrativePool.query(
     `CREATE ROLE "${isolatedRole}" LOGIN PASSWORD '${password}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}";
+     CREATE ROLE "${isolatedPublisherRole}" LOGIN PASSWORD '${password}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}", "${isolatedPublisherRole}";
      CREATE SCHEMA "${isolatedSchema}" AUTHORIZATION "${isolatedRole}"`,
   );
   const pool = createPostgresPool({
@@ -211,14 +217,20 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
   return {
     pool,
     connectionString: url.toString(),
-    context: { runtimeRole, migratorRole: isolatedRole, schema: isolatedSchema },
+    context: {
+      runtimeRole,
+      migratorRole: isolatedRole,
+      skillPublisherRole: isolatedPublisherRole,
+      schema: isolatedSchema,
+    },
     close: async () => {
       if (closed) return;
       closed = true;
       await pool.end();
       await administrativePool.query(
         `DROP SCHEMA "${isolatedSchema}" CASCADE;
-         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}";
+         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}", "${isolatedPublisherRole}";
+         DROP ROLE "${isolatedPublisherRole}";
          DROP ROLE "${isolatedRole}"`,
       );
     },
@@ -234,7 +246,9 @@ beforeAll(async () => {
   await administrativePool.query(
     `CREATE ROLE "${migratorRole}" LOGIN PASSWORD '${migratorPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}";
+     CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migratorCreated = true;
@@ -266,7 +280,8 @@ afterAll(async () => {
   if (schemaCreated) await administrativePool.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (migratorCreated) {
     await administrativePool.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}";
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+       DROP ROLE "${skillPublisherRole}";
        DROP ROLE "${migratorRole}"`,
     );
   }
@@ -1398,6 +1413,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         migrateUp(databaseOwnerPool, {
           runtimeRole,
           migratorRole: databaseOwnerRole,
+          skillPublisherRole: target.context.skillPublisherRole,
           schema: target.context.schema,
         }),
       ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });

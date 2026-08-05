@@ -101,13 +101,15 @@ const schema = `it_blob_${process.pid}_${Date.now()}`;
 const databaseName = new URL(bootstrapDatabaseUrl).pathname.slice(1);
 const migratorRole = `it_bl_mg_${process.pid}_${Date.now().toString(36)}`;
 const migratorPassword = randomBytes(24).toString("hex");
+const skillPublisherRole = `it_bl_pub_${process.pid}_${Date.now().toString(36)}`;
+const skillPublisherPassword = randomBytes(24).toString("hex");
 const testMigrationUrl = new URL(migrationDatabaseUrl);
 if (testMigrationUrl.username !== configuredMigratorRole) {
   throw new Error("MIGRATION_DATABASE_URL 与 DATABASE_MIGRATOR_ROLE 不一致");
 }
 testMigrationUrl.username = migratorRole;
 testMigrationUrl.password = migratorPassword;
-const migrationSecurity = { runtimeRole, migratorRole, schema } as const;
+const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
 
 let administrativePool!: Pool;
 let migratorPool!: Pool;
@@ -232,7 +234,9 @@ beforeAll(async () => {
   await administrativePool.query(
     `CREATE ROLE "${migratorRole}" LOGIN PASSWORD '${migratorPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}";
+     CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migratorCreated = true;
@@ -279,7 +283,9 @@ afterAll(async () => {
   if (schemaCreated) await administrativePool.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (migratorCreated) {
     await administrativePool.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}"; DROP ROLE "${migratorRole}"`,
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+       DROP ROLE "${skillPublisherRole}";
+       DROP ROLE "${migratorRole}"`,
     );
   }
   if (administrativePool !== undefined) await administrativePool.end();

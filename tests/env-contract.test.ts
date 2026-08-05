@@ -7,7 +7,8 @@ function validExample(): string {
       if (
         key === "DATABASE_URL" ||
         key === "DATABASE_BOOTSTRAP_URL" ||
-        key === "MIGRATION_DATABASE_URL"
+        key === "MIGRATION_DATABASE_URL" ||
+        key === "SKILL_PUBLISHER_DATABASE_URL"
       ) {
         return `${key}=postgresql://user:replace-me@localhost/db`;
       }
@@ -22,6 +23,7 @@ function validExample(): string {
         key.endsWith("API_KEY") ||
         key.endsWith("SIGNING_KEY") ||
         key.endsWith("SIGNING_KEYS") ||
+        key.endsWith("TOKEN") ||
         key.endsWith("TEMPLATE_ID") ||
         key === "RESOURCEFS_PROXY_TLS_KEY_PATH" ||
         key === "RESOURCEFS_PROXY_TLS_CERT_PATH" ||
@@ -64,6 +66,9 @@ describe("环境变量示例契约", () => {
         "MODEL_WIRE_TRACE_ENABLED",
         "MODEL_WIRE_TRACE_RETENTION_DAYS",
         "MODEL_WIRE_TRACE_MAX_BYTES",
+        "DATABASE_SKILL_PUBLISHER_ROLE",
+        "SKILL_PUBLISHER_DATABASE_URL",
+        "DEV_SKILL_ADMIN_TOKEN",
       ]),
     );
     expect(validateEnvironmentExample(validExample())).toEqual([]);

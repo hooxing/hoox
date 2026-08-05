@@ -11,6 +11,7 @@ if (direction !== "up" && direction !== "down") {
   const connectionString = process.env.MIGRATION_DATABASE_URL;
   const runtimeRole = process.env.DATABASE_RUNTIME_ROLE;
   const migratorRole = process.env.DATABASE_MIGRATOR_ROLE;
+  const skillPublisherRole = process.env.DATABASE_SKILL_PUBLISHER_ROLE;
   const schema = process.env.DATABASE_SCHEMA;
   if (connectionString === undefined || connectionString.length === 0) {
     console.error("迁移失败：缺少 MIGRATION_DATABASE_URL");
@@ -20,6 +21,9 @@ if (direction !== "up" && direction !== "down") {
     process.exitCode = 2;
   } else if (migratorRole === undefined || migratorRole.length === 0) {
     console.error("迁移失败：缺少 DATABASE_MIGRATOR_ROLE");
+    process.exitCode = 2;
+  } else if (skillPublisherRole === undefined || skillPublisherRole.length === 0) {
+    console.error("迁移失败：缺少 DATABASE_SKILL_PUBLISHER_ROLE");
     process.exitCode = 2;
   } else if (schema === undefined || schema.length === 0) {
     console.error("迁移失败：缺少 DATABASE_SCHEMA");
@@ -32,7 +36,7 @@ if (direction !== "up" && direction !== "down") {
     });
     try {
       await probePostgres(pool);
-      const security = { runtimeRole, migratorRole, schema } as const;
+      const security = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
       let records: Awaited<ReturnType<typeof migrateUp>>;
       if (direction === "up") {
         records = await migrateUp(pool, security);

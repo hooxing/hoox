@@ -208,6 +208,114 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.revisions.materializeCount).toBe(1);
   });
 
+  it("SubAgent 工具 started 与 Attempt invocation 原子提交并保留完整生命周期", async () => {
+    const root = new BlockingAgentSession();
+    const child = new BlockingAgentSession();
+    const h = sandboxHarness([root, child], fakeSeed("subagent-tool-lifecycle"), {
+      subagentsEnabled: true,
+    });
+    const execution = h.worker.execute(h.scope);
+    await vi.waitFor(() => expect(root.prompts).toHaveLength(1));
+    const control = h.factory.agentControls[0];
+    if (control === undefined) throw new Error("测试缺少 root AgentControl");
+
+    const spawned = await control.spawn({
+      callId: "call_spawn_tool_lifecycle",
+      task: "执行受控命令",
+      tools: ["exec_command"],
+      forkTurns: "none",
+    });
+    await vi.waitFor(() => expect(child.prompts).toHaveLength(1));
+    const runtimeCallIds = [
+      `${spawned.agentThreadId}:turn-test:child-command-1`,
+      `${spawned.agentThreadId}:turn-test:child-command-2`,
+    ];
+    child.emit({ type: "message.completed", stopReason: "toolUse" });
+    for (const runtimeCallId of runtimeCallIds) {
+      child.emit({ type: "tool.started", callId: runtimeCallId, name: "exec_command" });
+    }
+    const authorizations = await Promise.all(
+      runtimeCallIds.map(async (runtimeCallId, index) =>
+        h.factory.toolAuthorizers[1]?.({
+          callId: runtimeCallId,
+          toolName: "exec_command",
+          argsDigest: sha256Digest(`${index + 1}`.repeat(64)),
+        }),
+      ),
+    );
+    expect(authorizations.map((authorization) => authorization?.permit)).toEqual(
+      runtimeCallIds.map((runtimeCallId) =>
+        expect.objectContaining({
+          effect: "tool_execution",
+          callId: runtimeCallId,
+          toolName: "exec_command",
+        }),
+      ),
+    );
+    for (const runtimeCallId of runtimeCallIds) {
+      child.emit({
+        type: "tool.completed",
+        callId: runtimeCallId,
+        name: "exec_command",
+        isError: false,
+      });
+    }
+    child.emit({ type: "message.completed", stopReason: "stop" });
+    child.emit({
+      type: "turn.completed",
+      assistant: {
+        content: [{ type: "text", text: "命令执行完成" }],
+        api: "test",
+        provider: "test",
+        model: "test",
+        stopReason: "stop",
+        timestamp: 1,
+      },
+      toolResults: [
+        {
+          toolCallId: runtimeCallIds[0] ?? "missing-call-1",
+          toolName: "exec_command",
+          text: "ok-1",
+          isError: false,
+          timestamp: 1,
+        },
+        {
+          toolCallId: runtimeCallIds[1] ?? "missing-call-2",
+          toolName: "exec_command",
+          text: "ok-2",
+          isError: false,
+          timestamp: 1,
+        },
+      ],
+    });
+    child.emit({ type: "agent.settled" });
+    child.complete();
+
+    const delivered = await control.wait({ afterSequence: 0, timeoutMs: 1_000 });
+    expect(delivered[0]).toMatchObject({ kind: "final_answer", payload: "命令执行完成" });
+    root.emit({ type: "message.completed", stopReason: "stop" });
+    root.complete();
+    await expect(execution).resolves.toEqual({ outcome: "succeeded" });
+
+    const toolEvents = h.persistence
+      .record(h.scope)
+      .events.filter(
+        (event) =>
+          event.kind === "agent_event" &&
+          (event.payload.type === "tool.started" || event.payload.type === "tool.completed"),
+      );
+    expect(toolEvents).toEqual(
+      [
+        ...runtimeCallIds.map((runtimeCallId) => ({ type: "tool.started", runtimeCallId })),
+        ...runtimeCallIds.map((runtimeCallId) => ({ type: "tool.completed", runtimeCallId })),
+      ].map(({ type, runtimeCallId }) =>
+        expect.objectContaining({
+          payload: expect.objectContaining({ type, callId: runtimeCallId }),
+        }),
+      ),
+    );
+  });
+
   it("在 todo_write started 持久化后写入完整 Todo 快照，不影响其他工具授权", async () => {
     const session = new BlockingAgentSession();
     const h = harness([session], fakeSeed("todo-write"));

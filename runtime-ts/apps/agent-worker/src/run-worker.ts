@@ -610,6 +610,7 @@ export class RunWorker {
 
       const preSession = await this.stopPoint(context, cancellation);
       if (preSession) return await this.finishStopped(context, preSession);
+      let subagentToolEventChain = Promise.resolve();
       const agentSupervisor =
         this.options.subagentsEnabled !== true || this.dependencies.agentControl === undefined
           ? undefined
@@ -647,26 +648,37 @@ export class RunWorker {
                   toolName: "pi_model",
                   argsDigest: digestCanonical({ prompt: child.prompt, attachments: [] }),
                 }),
-              onToolStarted: async (_identity, event) => {
-                const gate = registerToolStarted(context, event);
-                try {
-                  const persisted = await this.applyMutation(context, {
-                    idempotencyKey: `${context.attemptId}/subagent/tool/${event.callId}`,
-                    events: [],
-                    outbox: [],
-                    effectInvocation: { callId: event.callId, toolName: event.name },
-                  });
-                  if (!isApplied(persisted)) {
-                    closeEventAcceptance(context);
-                    context.stopped =
-                      persisted.outcome === "fence_lost" || persisted.outcome === "scope_mismatch"
-                        ? "fence_lost"
-                        : "unavailable";
-                    throw new Error("SubAgent tool.started 持久化失败");
+              onToolEvent: async (_identity, event) => {
+                const gate =
+                  event.type === "tool.started" ? registerToolStarted(context, event) : undefined;
+                const persistence = subagentToolEventChain.then(async () => {
+                  try {
+                    if (!context.eventAcceptanceOpen) {
+                      throw new Error("SubAgent 工具事件入口已关闭");
+                    }
+                    const encoded = agentEvent(context, event);
+                    const persisted = await this.applyMutation(context, {
+                      idempotencyKey: `${context.attemptId}/subagent/tool/${event.callId}/${event.type}`,
+                      events: [encoded],
+                      outbox: [],
+                      ...(event.type === "tool.started"
+                        ? { effectInvocation: { callId: event.callId, toolName: event.name } }
+                        : {}),
+                    });
+                    if (!isApplied(persisted)) {
+                      closeEventAcceptance(context);
+                      context.stopped =
+                        persisted.outcome === "fence_lost" || persisted.outcome === "scope_mismatch"
+                          ? "fence_lost"
+                          : "unavailable";
+                      throw new Error(`SubAgent ${event.type} 持久化失败`);
+                    }
+                  } finally {
+                    gate?.resolve();
                   }
-                } finally {
-                  gate.resolve();
-                }
+                });
+                subagentToolEventChain = persistence.catch(() => undefined);
+                return persistence;
               },
             });
       await agentSupervisor?.initialize();

@@ -51,9 +51,9 @@ interface AgentSupervisorDependencies {
     readonly identity: AgentExecutionIdentity;
     readonly prompt: string;
   }) => Promise<ConsumedExternalEffectAuthorization>;
-  readonly onToolStarted: (
+  readonly onToolEvent: (
     identity: AgentExecutionIdentity,
-    event: Extract<RuntimeAgentEvent, { type: "tool.started" }>,
+    event: Extract<RuntimeAgentEvent, { type: "tool.started" | "tool.completed" }>,
   ) => Promise<void>;
 }
 
@@ -379,7 +379,7 @@ export class AgentSupervisor implements AgentControlPort {
     let completedTurn: Extract<RuntimeAgentEvent, { type: "turn.completed" }> | undefined;
     let completedTurnCount = 0;
     let toolFailure: Error | undefined;
-    const pendingToolStarts = new Set<Promise<void>>();
+    const pendingToolEvents = new Set<Promise<void>>();
     try {
       const started = await this.dependencies.persistence.startTurn({
         fence: this.dependencies.fence,
@@ -410,23 +410,23 @@ export class AgentSupervisor implements AgentControlPort {
           child.history = appendTurnHistory(child.history, turnPrompt, event);
           completedTurn = event;
         }
-        if (event.type === "tool.started") {
+        if (event.type === "tool.started" || event.type === "tool.completed") {
           const persistence = this.dependencies
-            .onToolStarted(identity, event)
+            .onToolEvent(identity, event)
             .catch((error) => {
               toolFailure =
                 error instanceof Error ? error : new Error("AGENT_TOOL_PERSISTENCE_FAILED");
               void session?.abort().catch(() => undefined);
             })
-            .finally(() => pendingToolStarts.delete(persistence));
-          pendingToolStarts.add(persistence);
+            .finally(() => pendingToolEvents.delete(persistence));
+          pendingToolEvents.add(persistence);
         }
       });
       try {
         const prepared = await session.prepareInput({ text: prompt, attachments: [] });
         const authorization = await this.dependencies.authorizeModelStart({ identity, prompt });
         const outcome = await session.runPrompt(prepared, authorization);
-        while (pendingToolStarts.size > 0) await Promise.all([...pendingToolStarts]);
+        while (pendingToolEvents.size > 0) await Promise.all([...pendingToolEvents]);
         if (toolFailure !== undefined) throw toolFailure;
         if (outcome.kind !== "completed" || completedTurn === undefined) {
           throw new Error(`AGENT_TURN_${outcome.kind.toUpperCase()}`);

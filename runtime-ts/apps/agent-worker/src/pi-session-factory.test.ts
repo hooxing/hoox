@@ -5,8 +5,16 @@ import {
   createArtifactExecutionAuthorizationAuthority,
   type PublishArtifactCommand,
 } from "@cube-runtime/artifact";
-import { artifactId, resourceId, resourceVersionId, sha256Digest } from "@cube-runtime/domain";
+import {
+  agentThreadId,
+  artifactId,
+  isoTimestamp,
+  resourceId,
+  resourceVersionId,
+  sha256Digest,
+} from "@cube-runtime/domain";
 import { SandboxRuntimeError } from "@cube-runtime/sandbox";
+import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import {
   digestRunSkillSnapshot,
   type SkillInvocationTarget,
@@ -31,6 +39,11 @@ import {
   createDurableObservationRecorderFactory,
   PiWorkerSessionFactory,
 } from "./pi-session-factory.js";
+import type {
+  ConsumedExternalEffectAuthorization,
+  ExternalEffectCall,
+  SandboxSessionRef,
+} from "./ports.js";
 import { RunWorker } from "./run-worker.js";
 import {
   FakeArtifactPublication,
@@ -44,6 +57,144 @@ import {
 } from "./testing/fakes.js";
 
 describe("PiWorkerSessionFactory 持久操作门控", () => {
+  it("SubAgent 工具事件和副作用许可使用稳定的 Agent/Turn callId namespace", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-subagent-tool-call-id"));
+    const claimed = await persistence.claim({
+      scope,
+      workerId: "pi-subagent-tool-call-id-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("测试未取得 Attempt fence");
+
+    const faux = fauxProvider({
+      api: `faux-worker-subagent-call-id-${Date.now()}`,
+      provider: `faux-worker-subagent-call-id-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    const providerCallId = "call_child_command";
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall("exec_command", { cmd: "echo child" }, { id: providerCallId }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("子任务完成"),
+    ]);
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+    });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+
+    const observationOperations: string[] = [];
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      (_input, outputs) => ({
+        recordStarted: async (call) => {
+          observationOperations.push(`call:${call.toolCallId}`);
+          return "recorded" as const;
+        },
+        record: async (call) => {
+          const observation = await outputs.readControlledReceipt(call);
+          if (observation === undefined) return { outcome: "conflict" as const };
+          observationOperations.push(`result:${call.toolCallId}`);
+          return { outcome: "recorded" as const, observation, isTruncated: false };
+        },
+      }),
+    );
+    const sandboxes = new FakeSandboxRegistry();
+    const sandbox: SandboxSessionRef = {
+      registryId: "registry-subagent-call-id",
+      providerSandboxId: sandboxes.handle.id,
+      mode: "created",
+      sandbox: sandboxes.handle,
+    };
+    const identity = {
+      agentThreadId: agentThreadId("agent-subagent-call-id"),
+      agentTurnId: "turn-subagent-call-id",
+      agentKind: "subagent" as const,
+    };
+    const consumedAt = isoTimestamp("2026-07-26T00:00:01.000Z");
+    const authorize = (
+      effect: ConsumedExternalEffectAuthorization["permit"]["effect"],
+      call: ExternalEffectCall,
+    ): ConsumedExternalEffectAuthorization => ({
+      permit: {
+        permitId: `permit-${call.callId}`,
+        scope,
+        runClaimToken: claimed.fence.runClaim.token,
+        runClaimEpoch: claimed.fence.runClaim.epoch,
+        workspaceRootRunId: claimed.fence.workspaceLease.rootRunId,
+        workspaceLeaseEpoch: claimed.fence.workspaceLease.epoch,
+        attemptVersion: claimed.snapshot.attempt.version,
+        effect,
+        callId: call.callId,
+        toolName: call.toolName,
+        argsDigest: call.argsDigest,
+        issuedAt: consumedAt,
+        expiresAt: claimed.fence.runClaim.expiresAt,
+      },
+      consumedAt,
+      consumedAtMonotonicMs: performance.now(),
+      maxContinuationDelayMs: 1_000,
+    });
+    const authorizedToolCalls: ExternalEffectCall[] = [];
+    const session = await sessions.create({
+      scope,
+      attemptId: claimed.snapshot.attempt.attemptId,
+      fence: claimed.fence,
+      agent: identity,
+      enabledToolNames: ["exec_command"],
+      ensureSandboxReady: async () => sandbox,
+      rolloutProjection: {
+        schemaVersion: 2,
+        checkpointId: "checkpoint-subagent-call-id",
+        items: [],
+      },
+      authorizeToolEffect: async (call) => {
+        authorizedToolCalls.push(call);
+        return authorize("tool_execution", call);
+      },
+      writeTodo: async () => {
+        throw new Error("SUBAGENT_TODO_FORBIDDEN");
+      },
+    });
+    const events: RuntimeAgentEvent[] = [];
+    const unsubscribe = session.subscribe((event) => events.push(event));
+    try {
+      const prepared = await session.prepareInput({ text: "执行子任务", attachments: [] });
+      const modelCall: ExternalEffectCall = {
+        callId: `${identity.agentThreadId}:${identity.agentTurnId}:model`,
+        toolName: "pi_model",
+        argsDigest: sha256Digest("a".repeat(64)),
+      };
+      await expect(
+        session.runPrompt(prepared, authorize("agent_model_start", modelCall)),
+      ).resolves.toEqual({ kind: "completed" });
+    } finally {
+      unsubscribe();
+      session.dispose();
+    }
+
+    const expectedCallId = `${identity.agentThreadId}:${identity.agentTurnId}:${createHash("sha256")
+      .update(providerCallId, "utf8")
+      .digest("hex")
+      .slice(0, 32)}`;
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "tool.started", callId: expectedCallId }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "tool.completed", callId: expectedCallId, isError: false }),
+    );
+    expect(events.some((event) => event.type === "turn.completed")).toBe(true);
+    expect(authorizedToolCalls).toEqual([
+      expect.objectContaining({ callId: expectedCallId, toolName: "exec_command" }),
+    ]);
+    expect(observationOperations).toEqual([`call:${providerCallId}`, `result:${providerCallId}`]);
+  });
+
   it("显式 Skill 在首个模型请求前由后端注入，纯指令任务保持零 Sandbox", async () => {
     const body = new TextEncoder().encode("# Review\n按检查清单处理。\n");
     const entrypointDigest = createHash("sha256").update(body).digest("hex");

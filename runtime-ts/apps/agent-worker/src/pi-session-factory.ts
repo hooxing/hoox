@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@cube-runtime/artifact";
 import {
   type ControlledToolReceiptSource,
@@ -109,7 +110,8 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
   ): Promise<WorkerAgentSessionPort> {
     const runtimeCallId = (providerCallId: string): string => {
       if (input.agent === undefined || input.agent.agentKind === "root") return providerCallId;
-      return `${input.agent.agentThreadId}:${input.agent.agentTurnId}:${sha256Digest(providerCallId).slice(0, 32)}`;
+      const providerCallDigest = createHash("sha256").update(providerCallId, "utf8").digest("hex");
+      return `${input.agent.agentThreadId}:${input.agent.agentTurnId}:${providerCallDigest.slice(0, 32)}`;
     };
     const projectAgentControlError = (error: unknown) => {
       const message = error instanceof Error ? error.message : "子 Agent 控制面暂时不可用";

@@ -17,6 +17,8 @@ import {
   ThreadCreate,
   ThreadHeader,
   ThreadTranscript,
+  shouldInitiallyCollapseUserRequest,
+  userRequestCollapsedHeight,
 } from "./workspace-view.js";
 
 // 已移除的抽屉交互用例暂留作历史说明，不再参与当前界面契约。
@@ -111,6 +113,50 @@ describe("工作台展示组件", () => {
     const container = document.createElement("div");
     container.innerHTML = html;
     expect(container.querySelector(".user-request .message-avatar")).toBeNull();
+    expect(container.querySelector(".user-request-toggle")).toBeNull();
+    expect(container.textContent).not.toContain("你的请求");
+  });
+
+  it("短用户消息完整展示，长用户消息默认折叠并可展开", () => {
+    expect(shouldInitiallyCollapseUserRequest("简短请求")).toBe(false);
+    expect(shouldInitiallyCollapseUserRequest("x".repeat(601))).toBe(true);
+    expect(userRequestCollapsedHeight).toBe(264);
+
+    const scrollHeight = vi
+      .spyOn(HTMLElement.prototype, "scrollHeight", "get")
+      .mockReturnValue(600);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    act(() =>
+      root.render(
+        <ThreadTranscript
+          messages={[
+            {
+              sequence: 1,
+              role: "user",
+              text: "x".repeat(601),
+              createdAt: "2026-08-06T00:00:00.000Z",
+            },
+          ]}
+        />,
+      ),
+    );
+
+    const content = container.querySelector(".user-request-content");
+    const toggle = container.querySelector<HTMLButtonElement>(".user-request-toggle");
+    expect(content?.classList.contains("is-collapsed")).toBe(true);
+    expect(toggle?.textContent).toContain("展开");
+    expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+
+    act(() => toggle?.click());
+
+    expect(content?.classList.contains("is-collapsed")).toBe(false);
+    expect(toggle?.textContent).toContain("收起");
+    expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+
+    act(() => root.unmount());
+    scrollHeight.mockRestore();
   });
 
   it("隐藏重复的运行完成通知，但保留失败等需要用户关注的状态", () => {

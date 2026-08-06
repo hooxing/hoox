@@ -4,7 +4,7 @@ import type {
   ExecutionFence,
 } from "@cube-runtime/run-contracts";
 import type { Pool, PoolClient } from "pg";
-import { withTenantTransaction } from "./postgres.js";
+import { withRetriedSerializableTenantTransaction, withTenantTransaction } from "./postgres.js";
 
 const identifier = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u;
 
@@ -63,7 +63,7 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
   ): ReturnType<AgentControlPersistencePort["initializeRoot"]> {
     if (!validIdentifier(input.rootAgentThreadId)) return "conflict";
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.fence.scope.tenantId },
         async (client) => {
@@ -93,7 +93,6 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
             ? ("ready" as const)
             : ("conflict" as const);
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch {
       return "unavailable";
@@ -113,7 +112,7 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
       return { outcome: "conflict" };
     }
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.fence.scope.tenantId },
         async (client) => {
@@ -205,7 +204,6 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
           );
           return { outcome: "created", snapshot } as const;
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch {
       return { outcome: "unavailable" };
@@ -217,7 +215,7 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
   ): ReturnType<AgentControlPersistencePort["queueFollowUp"]> {
     if (!validIdentifier(input.commandId) || !validIdentifier(input.turnId)) return "conflict";
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.fence.scope.tenantId },
         async (client) => {
@@ -278,7 +276,6 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
           );
           return "created" as const;
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch {
       return "unavailable";

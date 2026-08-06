@@ -13,7 +13,11 @@ import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
-import { withTenantTransaction } from "./postgres.js";
+import {
+  withRetriedRepeatableReadTenantTransaction,
+  withRetriedSerializableTenantTransaction,
+  withTenantTransaction,
+} from "./postgres.js";
 
 const HASH = /^[0-9a-f]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u;
@@ -415,7 +419,7 @@ export class PgRuntimeRolloutRepository {
     assertIdentifier(input.agentThreadId, "Agent Thread ID");
     assertCompatibility(input.compatibility);
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: fence.scope.tenantId },
         async (client) => {
@@ -495,7 +499,6 @@ export class PgRuntimeRolloutRepository {
             ? ({ outcome: "ready", context } as const)
             : ({ outcome: opened } as const);
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch (error) {
       throw mapPersistenceError(error, "从执行 claim 打开 Runtime Rollout stream");
@@ -1005,7 +1008,7 @@ export class PgRuntimeRolloutRepository {
       assertHash(hash, "Rollout compatibility hash");
     }
     try {
-      return await withTenantTransaction(
+      return await withRetriedRepeatableReadTenantTransaction(
         this.pool,
         { tenantId: input.context.scope.tenantId, userId: input.context.userId },
         async (client) => {
@@ -1151,7 +1154,6 @@ export class PgRuntimeRolloutRepository {
             tail: Object.freeze(row.tail_entries.map((entry) => mapEntry(entry as EntryRow))),
           });
         },
-        { isolationLevel: "REPEATABLE READ" },
       );
     } catch (error) {
       throw mapPersistenceError(error, "恢复 Runtime Rollout");

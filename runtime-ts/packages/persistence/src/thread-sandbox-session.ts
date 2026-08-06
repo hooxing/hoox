@@ -11,7 +11,7 @@ import type {
 } from "@cube-runtime/run-contracts";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import type { Pool, PoolClient } from "pg";
-import { withTenantTransaction } from "./postgres.js";
+import { withRetriedSerializableTenantTransaction, withTenantTransaction } from "./postgres.js";
 
 interface SessionRow {
   readonly session_id: string;
@@ -242,11 +242,10 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     for (;;) {
       let prepared: PreparedAcquisition;
       try {
-        prepared = await withTenantTransaction(
+        prepared = await withRetriedSerializableTenantTransaction(
           this.pool,
           { tenantId: input.scope.tenantId },
           (client) => this.prepareExisting(client, input),
-          { isolationLevel: "SERIALIZABLE" },
         );
       } catch {
         return { outcome: "failed", code: "PERSISTENCE_UNAVAILABLE" };
@@ -489,7 +488,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     input: Parameters<ThreadSandboxSessionLifecyclePort["attestMaterialized"]>[0],
   ): Promise<"attested" | "lease_lost" | "unavailable"> {
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.scope.tenantId },
         async (client) => {
@@ -509,7 +508,6 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           );
           return updated.rowCount === 1 ? ("attested" as const) : ("lease_lost" as const);
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch {
       return "unavailable";
@@ -520,7 +518,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     input: Parameters<ThreadSandboxSessionLifecyclePort["renew"]>[0],
   ): Promise<"renewed" | "lease_lost" | "unavailable"> {
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.scope.tenantId },
         async (client) => {
@@ -544,7 +542,6 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           );
           return renewed.rowCount === 1 ? ("renewed" as const) : ("lease_lost" as const);
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch {
       return "unavailable";
@@ -588,7 +585,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     const effectId = `sandbox-effect-${randomUUID()}`;
     const operationId = `${input.attemptId}/sandbox/${input.lease.sessionId}/terminate/${input.reason}`;
     try {
-      const prepared = await withTenantTransaction(
+      const prepared = await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.scope.tenantId },
         async (client) => {
@@ -612,7 +609,6 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           );
           return true;
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
       if (!prepared) return "lease_lost";
       if (
@@ -796,7 +792,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     const effectId = `sandbox-effect-${randomUUID()}`;
     const operationId = `${input.attemptId}/sandbox/create/${generation}`;
     try {
-      await withTenantTransaction(
+      await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.scope.tenantId },
         async (client) => {
@@ -825,7 +821,6 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
             ],
           );
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch {
       return { outcome: "failed", code: "PERSISTENCE_UNAVAILABLE" };
@@ -846,7 +841,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
         : { outcome: "failed", code: created.code };
     }
     try {
-      const lease = await withTenantTransaction(
+      const lease = await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.scope.tenantId },
         async (client) => {
@@ -889,7 +884,6 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           if (effect.rowCount !== 1) throw new Error("Sandbox create receipt CAS 冲突");
           return lease;
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
       return {
         outcome: "ready",
@@ -920,7 +914,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     prepared: Extract<PreparedAcquisition, { kind: "connect" }>,
   ): Promise<boolean> {
     if (prepared.effectId === undefined) return true;
-    return withTenantTransaction(
+    return withRetriedSerializableTenantTransaction(
       this.pool,
       { tenantId: scope.tenantId },
       async (client) => {
@@ -949,7 +943,6 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           throw new Error("Sandbox resume receipt CAS 冲突");
         return true;
       },
-      { isolationLevel: "SERIALIZABLE" },
     );
   }
 

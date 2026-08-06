@@ -88,6 +88,9 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
 
     const observationOperations: string[] = [];
+    const prepareThreadHistory = vi.fn(async () => {
+      throw new Error("fork_turns=none 不得回退读取 Thread Context");
+    });
     const sessions = new PiWorkerSessionFactory(
       faux.getModel(),
       modelRuntime,
@@ -103,6 +106,11 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
           return { outcome: "recorded" as const, observation, isTruncated: false };
         },
       }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      prepareThreadHistory,
     );
     const sandboxes = new FakeSandboxRegistry();
     const sandbox: SandboxSessionRef = {
@@ -193,6 +201,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       expect.objectContaining({ callId: expectedCallId, toolName: "exec_command" }),
     ]);
     expect(observationOperations).toEqual([`call:${providerCallId}`, `result:${providerCallId}`]);
+    expect(prepareThreadHistory).not.toHaveBeenCalled();
   });
 
   it("显式 Skill 在首个模型请求前由后端注入，纯指令任务保持零 Sandbox", async () => {

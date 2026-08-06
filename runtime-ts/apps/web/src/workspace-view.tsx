@@ -1,7 +1,9 @@
 import {
   Archive,
   Check,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Circle,
   Download,
   Eye,
@@ -48,6 +50,13 @@ export const pollingRunStatuses = new Set<RunStatus>(["queued", "running"]);
 export const timedRunStatuses = new Set<RunStatus>(["running"]);
 export const compactWorkspaceMedia = "(max-width: 820px)";
 export const composerTextareaResize = "none";
+export const userRequestCollapsedHeight = 264;
+export const userRequestCollapseCharacterThreshold = 600;
+
+export function shouldInitiallyCollapseUserRequest(text: string): boolean {
+  const visualLines = text.split(/\r?\n/u).length;
+  return text.length > userRequestCollapseCharacterThreshold || visualLines > 11;
+}
 
 export function canCreateThread(title: string, actionLoading: boolean): boolean {
   return title.trim().length > 0 && !actionLoading;
@@ -383,6 +392,65 @@ function AgentTurn({
   );
 }
 
+function UserRequestMessage({
+  text,
+  pendingInput,
+}: {
+  readonly text: string;
+  readonly pendingInput?: PendingThreadInputView;
+}) {
+  const contentRef = useRef<HTMLParagraphElement>(null);
+  const [isOverflowing, setIsOverflowing] = useState(() =>
+    shouldInitiallyCollapseUserRequest(text),
+  );
+  const [expanded, setExpanded] = useState(false);
+
+  // Thread 用户输入一经创建不可改写；宽度变化由观察器重新测量，避免每次展开状态变化都重建观察器。
+  useEffect(() => {
+    const content = contentRef.current;
+    if (content === null) return;
+    const updateOverflow = () => {
+      setIsOverflowing(content.scrollHeight > userRequestCollapsedHeight + 1);
+    };
+    updateOverflow();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(updateOverflow);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, []);
+
+  const collapsed = isOverflowing && !expanded;
+  return (
+    <article className={`message user-request${pendingInput === undefined ? "" : " is-pending"}`}>
+      <div className="message-card">
+        <p ref={contentRef} className={`user-request-content${collapsed ? " is-collapsed" : ""}`}>
+          {text}
+        </p>
+        {isOverflowing && (
+          <button
+            type="button"
+            className="user-request-toggle"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((current) => !current)}
+          >
+            {expanded ? "收起" : "展开"}
+            {expanded ? (
+              <ChevronUp size={15} aria-hidden="true" />
+            ) : (
+              <ChevronDown size={15} aria-hidden="true" />
+            )}
+          </button>
+        )}
+        {pendingInput !== undefined && (
+          <small className={`conversation-input-status is-${pendingInput.disposition}`}>
+            {threadInputDispositionLabel(pendingInput)}
+          </small>
+        )}
+      </div>
+    </article>
+  );
+}
+
 export function ThreadTranscript({
   messages,
   pendingInputs = [],
@@ -401,12 +469,7 @@ export function ThreadTranscript({
     <section className="assistant-transcript" aria-label="Thread 连续对话">
       {messages.map((message) =>
         message.role === "user" ? (
-          <article className="message user-request" key={message.sequence}>
-            <div className="message-card">
-              <span className="message-label">你的请求</span>
-              <p>{message.text}</p>
-            </div>
-          </article>
+          <UserRequestMessage text={message.text} key={message.sequence} />
         ) : message.role === "assistant" ? (
           (() => {
             const turnKey = message.runId ?? `message-${message.sequence}`;
@@ -445,15 +508,7 @@ export function ThreadTranscript({
         ) : null,
       )}
       {pendingInputs.map((input) => (
-        <article className="message user-request is-pending" key={input.localId}>
-          <div className="message-card">
-            <span className="message-label">你的请求</span>
-            <p>{input.text}</p>
-            <small className={`conversation-input-status is-${input.disposition}`}>
-              {threadInputDispositionLabel(input)}
-            </small>
-          </div>
-        </article>
+        <UserRequestMessage text={input.text} pendingInput={input} key={input.localId} />
       ))}
     </section>
   );

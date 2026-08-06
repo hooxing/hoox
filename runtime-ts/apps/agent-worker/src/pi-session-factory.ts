@@ -555,7 +555,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       throw new ContextBudgetAdmissionError("reserved_context_exceeds_window");
     }
     const recoveredThreadHistory =
-      input.threadActiveHistory ?? (await this.prepareThreadHistory?.(input, compatibility));
+      input.agent?.agentKind === "subagent"
+        ? input.threadActiveHistory
+        : (input.threadActiveHistory ?? (await this.prepareThreadHistory?.(input, compatibility)));
     const initialThreadHistory =
       recoveredThreadHistory === undefined ||
       this.prepareRuntimeCompaction === undefined ||

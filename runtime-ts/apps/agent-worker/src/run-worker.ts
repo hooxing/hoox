@@ -610,7 +610,6 @@ export class RunWorker {
 
       const preSession = await this.stopPoint(context, cancellation);
       if (preSession) return await this.finishStopped(context, preSession);
-      let subagentToolEventChain = Promise.resolve();
       const agentSupervisor =
         this.options.subagentsEnabled !== true || this.dependencies.agentControl === undefined
           ? undefined
@@ -651,7 +650,9 @@ export class RunWorker {
               onToolEvent: async (_identity, event) => {
                 const gate =
                   event.type === "tool.started" ? registerToolStarted(context, event) : undefined;
-                const persistence = subagentToolEventChain.then(async () => {
+                // root 与 Child 共享 Attempt event sequence；必须共用一条编码队列，禁止在进入
+                // durable lane 前分别读取同一个 nextEventSequence 并制造伪 conflict。
+                const persistence = eventChain.then(async () => {
                   try {
                     if (!context.eventAcceptanceOpen) {
                       throw new Error("SubAgent 工具事件入口已关闭");
@@ -677,7 +678,7 @@ export class RunWorker {
                     gate?.resolve();
                   }
                 });
-                subagentToolEventChain = persistence.catch(() => undefined);
+                eventChain = persistence.catch(() => undefined);
                 return persistence;
               },
             });

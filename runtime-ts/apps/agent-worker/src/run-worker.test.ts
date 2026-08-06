@@ -231,9 +231,17 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       `${spawned.agentThreadId}:turn-test:child-command-2`,
     ];
     child.emit({ type: "message.completed", stopReason: "toolUse" });
-    for (const runtimeCallId of runtimeCallIds) {
-      child.emit({ type: "tool.started", callId: runtimeCallId, name: "exec_command" });
-    }
+    child.emit({
+      type: "tool.started",
+      callId: runtimeCallIds[0] ?? "missing-call-1",
+      name: "exec_command",
+    });
+    root.emit({ type: "thinking.started" });
+    child.emit({
+      type: "tool.started",
+      callId: runtimeCallIds[1] ?? "missing-call-2",
+      name: "exec_command",
+    });
     const authorizations = await Promise.all(
       runtimeCallIds.map(async (runtimeCallId, index) =>
         h.factory.toolAuthorizers[1]?.({
@@ -293,6 +301,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
     const delivered = await control.wait({ afterSequence: 0, timeoutMs: 1_000 });
     expect(delivered[0]).toMatchObject({ kind: "final_answer", payload: "命令执行完成" });
+    root.emit({ type: "thinking.completed" });
     root.emit({ type: "message.completed", stopReason: "stop" });
     root.complete();
     await expect(execution).resolves.toEqual({ outcome: "succeeded" });

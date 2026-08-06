@@ -193,10 +193,13 @@ function requestDigest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
+let fakeThreadSandboxProviderSequence = 0;
+
 function fakeThreadSandboxProvider(
   gateway: FakeSandboxGateway,
   resourceFilesystemRequirements?: boolean[],
 ): ThreadSandboxProviderPort {
+  const providerPrefix = `thread-provider-${process.pid}-${++fakeThreadSandboxProviderSequence}`;
   return {
     create: async (input) => {
       resourceFilesystemRequirements?.push(input.requiresResourceFilesystem);
@@ -208,11 +211,16 @@ function fakeThreadSandboxProvider(
         },
         { signal: input.signal },
       );
+      const providerSandboxId = `${providerPrefix}-${sandbox.id}`;
+      // Fake gateway 每个实例都会从 fake-1 起号，而 Provider capability 在数据库中全局唯一。
+      // 以进程内 provider 身份加前缀，避免不同测试 gateway 伪造同一个远端 Sandbox。
+      gateway.sandboxes.set(providerSandboxId, sandbox);
+      gateway.sandboxes.delete(sandbox.id);
       return {
         outcome: "ready",
         session: {
           registryId: input.registryId,
-          providerSandboxId: sandbox.id,
+          providerSandboxId,
           mode: "created",
           sandbox,
         },
@@ -227,7 +235,7 @@ function fakeThreadSandboxProvider(
           outcome: "ready",
           session: {
             registryId: input.registryId,
-            providerSandboxId: sandbox.id,
+            providerSandboxId: input.providerSandboxId,
             mode: "connected",
             sandbox,
           },
@@ -1438,6 +1446,71 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     });
     expect(nextDispatches.map((item) => item.scope.runId)).toEqual([secondRun.id]);
     expect(nextDispatches[0]?.scope.baseRevisionId).toBe(revision);
+  });
+
+  it("Thread Sandbox acquire 遇到已回滚的 SERIALIZABLE 事务时重试完整准备流程", async () => {
+    const f = await serialQueueFixture(`sandbox-acquire-retry-${suffix}`);
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const sandboxPersistence = new PgExecutionPersistence(runtime, {
+      threadSandboxSessionReuseEnabled: true,
+      threadSandboxHandoffLeaseMs: 30_000,
+    });
+    const run = createRun({
+      id: runId(`sandbox-acquire-retry-${suffix}`),
+      thread: f.thread,
+      now: isoTimestamp("2099-07-26T00:00:00.000Z"),
+    });
+    await expect(
+      creation.createQueuedRun({
+        scope: f.tenantScope,
+        run,
+        thread: f.thread,
+        inputText: "Thread Sandbox acquire retry",
+        idempotency: {
+          key: `sandbox-acquire-retry-key-${suffix}`,
+          requestHash: requestDigest("Thread Sandbox acquire retry"),
+        },
+      }),
+    ).resolves.toMatchObject({ outcome: "created" });
+    const dispatch = (
+      await runDispatchOutbox.claim({
+        tenantId: f.tenantScope.tenantId,
+        dispatcherId: "sandbox-acquire-retry-dispatcher",
+        limit: 10,
+        leaseMilliseconds: 30_000,
+      })
+    )[0];
+    if (dispatch === undefined) throw new Error("Thread Sandbox retry dispatch 缺失");
+    const claimed = await sandboxPersistence.claim({
+      scope: dispatch.scope as ExecutionScope,
+      workerId: "sandbox-acquire-retry-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("Thread Sandbox retry claim 失败");
+    await runDispatchOutbox.acknowledge({ claim: dispatch, outcome: "dispatched" });
+
+    const injected = withOneSerializationFailure(runtime, "FROM thread_sandbox_sessions");
+    const lifecycle = new PgThreadSandboxSessionLifecycle(
+      injected.pool,
+      fakeThreadSandboxProvider(new FakeSandboxGateway()),
+      { pausedRetentionSeconds: 600, transitionWaitMs: 1_000 },
+    );
+    await expect(
+      lifecycle.acquire({
+        scope: claimed.fence.scope,
+        attemptId: claimed.snapshot.attempt.attemptId,
+        owner: "sandbox-acquire-retry-worker",
+        leaseDurationMs: 30_000,
+        signal: new AbortController().signal,
+        requiresResourceFilesystem: true,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "ready",
+      source: "cold_created",
+      resourceFilesystemMounted: true,
+      requiresMaterialization: true,
+    });
+    expect(injected.rejectionCount()).toBe(1);
   });
 
   it("阶段 5 在真实 PG 并发 terminal/follow-up 只产生 handoff 或 pause intent，且复用同一 Sandbox", async () => {
@@ -4078,6 +4151,82 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         }),
       ),
     ).resolves.toEqual({ outcome: "idempotency_conflict" });
+  });
+
+  it("Heartbeat、副作用许可签发和消费自动重试已回滚的 SERIALIZABLE 事务", async () => {
+    const f = await fixture(`permit-serializable-retry-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "permit-serializable-retry-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("claim 失败");
+    const heartbeatFailure = withOneSerializationFailure(
+      runtime,
+      "UPDATE run_claims SET expires_at",
+    );
+    const heartbeatRetrying = new PgExecutionPersistence(heartbeatFailure.pool);
+    const renewed = await heartbeatRetrying.inspectAndRenew({
+      fence: claimed.fence,
+      leaseDurationMs: 30_000,
+    });
+    expect(renewed.outcome).toBe("active");
+    expect(heartbeatFailure.rejectionCount()).toBe(1);
+    if (renewed.outcome !== "active") throw new Error("heartbeat 续租失败");
+    const activeFence = renewed.fence;
+    const call = {
+      callId: "call-permit-serializable-retry",
+      toolName: "sandbox_write_file",
+      argsDigest: sha256Digest("e".repeat(64)),
+    };
+    const registered = await persistence.mutate(
+      signed({
+        idempotencyKey: `${claimed.snapshot.attempt.attemptId}/permit-serializable-retry/event`,
+        fence: activeFence,
+        expectedAttemptVersion: 0,
+        events: [
+          {
+            schemaVersion: 1,
+            kind: "agent_event",
+            sequence: 0,
+            payload: { type: "tool.started", callId: call.callId, name: call.toolName },
+          },
+        ],
+        outbox: [],
+        effectInvocation: { callId: call.callId, toolName: call.toolName },
+      }),
+    );
+    expect(registered.outcome).toBe("applied");
+
+    const issueFailure = withOneSerializationFailure(
+      runtime,
+      "INSERT INTO external_effect_permits",
+    );
+    const issueRetrying = new PgExecutionPersistence(issueFailure.pool);
+    const permit = await issueRetrying.issueExternalEffectPermit({
+      fence: activeFence,
+      expectedAttemptVersion: 1,
+      effect: "tool_execution",
+      call,
+      permitDurationMs: 3_000,
+    });
+    expect(permit.outcome).toBe("authorized");
+    expect(issueFailure.rejectionCount()).toBe(1);
+    if (permit.outcome !== "authorized") throw new Error("permit 失败");
+
+    const consumeFailure = withOneSerializationFailure(
+      runtime,
+      "UPDATE external_effect_permits SET consumed_at",
+    );
+    const consumeRetrying = new PgExecutionPersistence(consumeFailure.pool);
+    await expect(
+      consumeRetrying.consumeExternalEffectPermit({
+        fence: activeFence,
+        expectedAttemptVersion: 1,
+        permit: permit.permit,
+      }),
+    ).resolves.toMatchObject({ outcome: "consumed" });
+    expect(consumeFailure.rejectionCount()).toBe(1);
   });
 
   it("COMMIT 响应丢失后按原 scope+key 精确读回不可变 receipt", async () => {

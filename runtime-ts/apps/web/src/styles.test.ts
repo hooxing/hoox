@@ -46,4 +46,20 @@ describe("工作台滚动区域样式", () => {
     expect(styles).not.toContain(".when-expanded");
     expect(styles).toContain(".run-thinking-content:focus-visible");
   });
+
+  it("超长用户请求不会按最小内容宽度撑开消息行", () => {
+    expect(styles).toMatch(/\.message\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*0;/su);
+    expect(styles).toMatch(
+      /\.user-request \.message-card\s*\{[^}]*max-width:\s*min\(78%, 700px\);[^}]*overflow-wrap:\s*anywhere;/su,
+    );
+  });
+
+  it("超长用户请求采用接近 ChatGPT 的默认折叠高度和渐隐范围", () => {
+    expect(styles).toMatch(
+      /\.user-request-content\.is-collapsed\s*\{[^}]*max-height:\s*264px;[^}]*overflow:\s*clip;[^}]*mask-image:\s*linear-gradient\(#000 calc\(100% - 48px\), transparent\);/su,
+    );
+    expect(styles).toMatch(
+      /\.user-request-toggle\s*\{[^}]*min-height:\s*24px;[^}]*margin-top:\s*6px;/su,
+    );
+  });
 });

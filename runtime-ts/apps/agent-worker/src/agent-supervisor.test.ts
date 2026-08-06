@@ -168,7 +168,7 @@ describe("AgentSupervisor", () => {
         return completedSession("子任务答案");
       },
       authorizeModelStart: async () => authorization,
-      onToolStarted: async () => undefined,
+      onToolEvent: async () => undefined,
     });
     await supervisor.initialize();
     supervisor.setParentHistory(parentHistory());
@@ -208,7 +208,7 @@ describe("AgentSupervisor", () => {
         prompts.push(input.prompt);
         return authorization;
       },
-      onToolStarted: async () => undefined,
+      onToolEvent: async () => undefined,
     });
     await supervisor.initialize();
     const child = await supervisor.spawn({
@@ -274,7 +274,7 @@ describe("AgentSupervisor", () => {
       fence,
       createSession,
       authorizeModelStart: async () => authorization,
-      onToolStarted: async () => undefined,
+      onToolEvent: async () => undefined,
     });
     await supervisor.initialize();
     await Promise.all(
@@ -316,7 +316,7 @@ describe("AgentSupervisor", () => {
       maxThreads: 2,
       createSession: async () => completedSession("完成"),
       authorizeModelStart: async () => authorization,
-      onToolStarted: async () => undefined,
+      onToolEvent: async () => undefined,
     });
     await supervisor.initialize();
     const first = await supervisor.spawn({
@@ -349,7 +349,7 @@ describe("AgentSupervisor", () => {
     const persisted = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const onToolStarted = vi.fn(async () => await persisted);
+    const onToolEvent = vi.fn(async () => await persisted);
     const supervisor = new AgentSupervisor({
       persistence: persistence(),
       rootAgentThreadId: agentThreadId("root_agent_tool_gate"),
@@ -362,7 +362,7 @@ describe("AgentSupervisor", () => {
           name: "read",
         }),
       authorizeModelStart: async () => authorization,
-      onToolStarted,
+      onToolEvent,
     });
     await supervisor.initialize();
     await supervisor.spawn({
@@ -371,7 +371,7 @@ describe("AgentSupervisor", () => {
       tools: ["read"],
       forkTurns: "none",
     });
-    await vi.waitFor(() => expect(onToolStarted).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(onToolEvent).toHaveBeenCalledOnce());
     expect(await supervisor.wait({ afterSequence: 0, timeoutMs: 1 })).toEqual([]);
 
     release();

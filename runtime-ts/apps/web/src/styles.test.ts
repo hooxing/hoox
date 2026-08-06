@@ -46,4 +46,11 @@ describe("工作台滚动区域样式", () => {
     expect(styles).not.toContain(".when-expanded");
     expect(styles).toContain(".run-thinking-content:focus-visible");
   });
+
+  it("超长用户请求不会按最小内容宽度撑开消息行", () => {
+    expect(styles).toMatch(/\.message\s*\{[^}]*width:\s*100%;[^}]*min-width:\s*0;/su);
+    expect(styles).toMatch(
+      /\.user-request \.message-card\s*\{[^}]*max-width:\s*min\(78%, 700px\);[^}]*overflow-wrap:\s*anywhere;/su,
+    );
+  });
 });

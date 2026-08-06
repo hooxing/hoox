@@ -752,6 +752,8 @@ h2 {
 }
 .message {
   display: flex;
+  width: 100%;
+  min-width: 0;
   align-items: flex-start;
   gap: 10px;
 }
@@ -770,6 +772,7 @@ h2 {
   border: 1px solid #dededb;
   border-radius: 15px 5px 15px 15px;
   background: #f0f0ee;
+  overflow-wrap: anywhere;
 }
 .message-avatar {
   display: grid;

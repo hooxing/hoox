@@ -114,6 +114,7 @@
 | [ADR-0115](0115-system-compatibility-optional-provenance-and-skills-cli.md) | 系统兼容性、可选上游来源与 Skills CLI 导入边界 | 已接受 | 2026-08-05 |
 | [ADR-0116](0116-long-user-request-layout-boundary.md) | 超长用户请求的对话布局边界 | 已接受 | 2026-08-06 |
 | [ADR-0117](0117-long-user-request-default-collapse.md) | 超长用户请求默认折叠 | 已接受 | 2026-08-06 |
+| [ADR-0118](0118-history-files-virtual-directory-and-task-ownership.md) | 历史任务文件虚拟目录与个人/团队任务归属 | 已接受 | 2026-08-07 |
 
 ## 何时必须记录
 

@@ -58,9 +58,7 @@ export interface HistoryFilesystemCatalog {
   listRecentDirectories(input: {
     readonly tenantId: TenantId;
   }): Promise<readonly HistoryFilesystemDirectory[] | undefined>;
-  listThreadFileThreadIds(input: {
-    readonly tenantId: TenantId;
-  }): Promise<readonly string[] | undefined>;
+  listThreadIds(input: { readonly tenantId: TenantId }): Promise<readonly string[] | undefined>;
   resolveDirectory(input: {
     readonly tenantId: TenantId;
     readonly directoryName: string;

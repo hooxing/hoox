@@ -501,9 +501,10 @@ async function resolveInternalThreadNode(
     return undefined;
   }
   // dot 根在普通 `ls` 中仍隐藏，但 WebDAV 必须枚举每一级父目录，rclone/FUSE 才能解析已知子路径。
-  // Thread ID 不是授权边界；只列出已有历史文件的 personal Thread，真正隔离仍由 Tenant capability 与 RLS 提供。
+  // 所有 personal Thread 都预声明稳定目录，首个附件只新增文件节点，不改变 rclone 已缓存的父目录拓扑。
+  // Thread ID 不是授权边界；真正隔离仍由 Tenant capability 与 RLS 提供。
   if (segments.length === 1) {
-    const threadIds = await catalog.listThreadFileThreadIds({ tenantId });
+    const threadIds = await catalog.listThreadIds({ tenantId });
     return threadIds === undefined
       ? undefined
       : {

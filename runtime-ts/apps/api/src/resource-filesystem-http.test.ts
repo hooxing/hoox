@@ -158,6 +158,7 @@ describe("Resource WebDAV HTTP 边界", () => {
     expect(response.body).toContain("resource-http-test");
     await fixture.app.close();
   });
+  const emptyThreadId = "thread-empty-before-first-attachment";
 
   it("为 personal Tenant 投影最近历史目录、稳定 Thread 入口和按需文件读取", async () => {
     const history: HistoryFilesystemCatalog = {
@@ -170,7 +171,7 @@ describe("Resource WebDAV HTTP 边界", () => {
           fileCount: 1,
         },
       ]),
-      listThreadFileThreadIds: vi.fn(async () => [historyFile.threadId]),
+      listThreadIds: vi.fn(async () => [historyFile.threadId, emptyThreadId]),
       resolveDirectory: vi.fn(async ({ directoryName }) =>
         directoryName === historyDirectoryName
           ? {
@@ -183,7 +184,11 @@ describe("Resource WebDAV HTTP 边界", () => {
           : undefined,
       ),
       listThreadFiles: vi.fn(async ({ threadId }) =>
-        threadId === historyFile.threadId ? [historyFile] : undefined,
+        threadId === historyFile.threadId
+          ? [historyFile]
+          : threadId === emptyThreadId
+            ? []
+            : undefined,
       ),
       resolveHistoryFile: vi.fn(async ({ directoryName, entryName }) =>
         directoryName === historyDirectoryName && entryName === historyEntryName
@@ -224,6 +229,17 @@ describe("Resource WebDAV HTTP 边界", () => {
     );
 
     expect(directory.body).toContain(encodeURIComponent(historyDirectoryName));
+    expect(hiddenRoot.body).toContain(`/v1/resource-filesystem/.thread-files/${emptyThreadId}/`);
+
+    const emptyThreadFiles = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: `/v1/resource-filesystem/.thread-files/${emptyThreadId}/files`,
+      headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "1" },
+    });
+    expect(emptyThreadFiles.statusCode).toBe(207);
+    expect(emptyThreadFiles.body).toContain(
+      `/v1/resource-filesystem/.thread-files/${emptyThreadId}/files/`,
+    );
 
     const threadFiles = await fixture.app.inject({
       method: "PROPFIND" as "GET",
@@ -247,7 +263,7 @@ describe("Resource WebDAV HTTP 边界", () => {
     const teamHistory: HistoryFilesystemCatalog = {
       listRecentDirectories: vi.fn(async () => undefined),
       resolveDirectory: vi.fn(async () => undefined),
-      listThreadFileThreadIds: vi.fn(async () => undefined),
+      listThreadIds: vi.fn(async () => undefined),
       listThreadFiles: vi.fn(async () => undefined),
       resolveHistoryFile: vi.fn(async () => undefined),
       resolveThreadFile: vi.fn(async () => undefined),

@@ -22,7 +22,7 @@ class ScriptedResourceFilesystemClient {
     if (sql.includes("SELECT kind FROM tenants")) {
       return { rows: [{ kind: this.tenantKind }], rowCount: 1 };
     }
-    if (sql.includes("SELECT DISTINCT entry.thread_id")) {
+    if (sql.includes("SELECT thread.id AS thread_id")) {
       return {
         rows: [{ thread_id: "thread-a" }, { thread_id: "thread-b" }],
         rowCount: 2,
@@ -43,18 +43,20 @@ function poolFor(client: ScriptedResourceFilesystemClient): Pool {
 }
 
 describe("PostgreSQL ResourceFS 稳定 Thread 入口", () => {
-  it("personal Tenant 只枚举有历史文件的 Thread ID，不加载 Blob 或 ResourceVersion", async () => {
+  it("personal Tenant 预声明全部 Thread ID，不依赖是否已有历史文件", async () => {
     const client = new ScriptedResourceFilesystemClient("personal");
     const catalog = new PgResourceFilesystemCatalog(poolFor(client));
 
-    await expect(
-      catalog.listThreadFileThreadIds({ tenantId: tenantId("tenant-a") }),
-    ).resolves.toEqual(["thread-a", "thread-b"]);
+    await expect(catalog.listThreadIds({ tenantId: tenantId("tenant-a") })).resolves.toEqual([
+      "thread-a",
+      "thread-b",
+    ]);
 
     const query = client.statements.find((statement) =>
-      statement.sql.includes("SELECT DISTINCT entry.thread_id"),
+      statement.sql.includes("SELECT thread.id AS thread_id"),
     );
-    expect(query?.sql).toContain("FROM thread_history_file_entries entry");
+    expect(query?.sql).toContain("FROM threads thread");
+    expect(query?.sql).not.toContain("thread_history_file_entries");
     expect(query?.sql).not.toContain("resource_versions");
     expect(query?.sql).not.toContain("blob_references");
   });
@@ -64,11 +66,11 @@ describe("PostgreSQL ResourceFS 稳定 Thread 入口", () => {
     const catalog = new PgResourceFilesystemCatalog(poolFor(client));
 
     await expect(
-      catalog.listThreadFileThreadIds({ tenantId: tenantId("tenant-team") }),
+      catalog.listThreadIds({ tenantId: tenantId("tenant-team") }),
     ).resolves.toBeUndefined();
     expect(
       client.statements.some((statement) =>
-        statement.sql.includes("SELECT DISTINCT entry.thread_id"),
+        statement.sql.includes("SELECT thread.id AS thread_id"),
       ),
     ).toBe(false);
   });

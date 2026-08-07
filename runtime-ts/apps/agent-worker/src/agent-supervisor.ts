@@ -25,13 +25,14 @@ interface ChildState {
   readonly path: string;
   readonly task: string;
   readonly tools: readonly DelegableAgentToolName[];
+  readonly toolManifestDigest: ReturnType<typeof digestCanonical>;
   readonly forkTurns: AgentForkTurns;
   turnOrdinal: number;
   status: AgentSummary["status"];
   history: ThreadActiveHistoryV1 | undefined;
   session: WorkerAgentSessionPort | undefined;
   interruptRequested: boolean;
-  readonly pendingMessages: string[];
+  readonly pendingSteers: string[];
   readonly activeMessages: string[];
 }
 
@@ -147,7 +148,31 @@ export class AgentSupervisor implements AgentControlPort {
       attemptId: this.dependencies.attemptId,
       rootAgentThreadId: this.dependencies.rootAgentThreadId,
     });
-    if (result !== "ready") throw new Error(`AGENT_ROOT_${result.toUpperCase()}`);
+    if (result.outcome !== "ready") {
+      throw new Error(`AGENT_ROOT_${result.outcome.toUpperCase()}`);
+    }
+    for (const conversation of result.conversations) {
+      if (conversation.toolManifestDigest !== digestCanonical({ tools: conversation.tools })) {
+        throw new Error("AGENT_TOOL_MANIFEST_CONFLICT");
+      }
+      const child: ChildState = {
+        agentThreadId: conversation.agentThreadId,
+        path: conversation.canonicalPath,
+        task: conversation.task,
+        tools: conversation.tools,
+        toolManifestDigest: conversation.toolManifestDigest,
+        forkTurns: conversation.forkTurns,
+        turnOrdinal: conversation.turnOrdinal,
+        status: "idle",
+        history: conversation.history,
+        session: undefined,
+        interruptRequested: false,
+        pendingSteers: [],
+        activeMessages: [],
+      };
+      this.#children.set(child.agentThreadId, child);
+      this.#paths.set(child.path, child.agentThreadId);
+    }
   }
 
   setParentHistory(history: ThreadActiveHistoryV1 | undefined): void {
@@ -165,20 +190,31 @@ export class AgentSupervisor implements AgentControlPort {
     const task = boundedText(input.task, MAX_MESSAGE_BYTES);
     if (!task.trim()) throw new Error("AGENT_TASK_INVALID");
     const tools = this.#validateTools(input.tools);
+    const toolManifestDigest = digestCanonical({ tools });
     const commandId = stableId("cmd", "spawn", input.callId);
-    const childId = agentThreadId(stableId("agent", this.dependencies.attemptId, commandId));
+    const childId = agentThreadId(
+      stableId(
+        "agent",
+        this.dependencies.fence.scope.threadId,
+        this.dependencies.fence.scope.runId,
+        commandId,
+      ),
+    );
     if (!this.#children.has(childId)) this.#assertCapacity();
     const turnId = stableId("turn", childId, "1");
     const path = `/root/${childId.slice(0, 18)}`;
+    const history = forkHistory(this.#parentHistory, input.forkTurns);
     const snapshot = {
       agentThreadId: childId,
       parentAgentThreadId: this.dependencies.rootAgentThreadId,
       canonicalPath: path,
       task,
       tools,
+      toolManifestDigest,
       forkTurns: input.forkTurns,
       turnId,
       turnOrdinal: 1,
+      ...(history === undefined ? {} : { history }),
     } as const;
     const persisted = await this.dependencies.persistence.spawn({
       fence: this.dependencies.fence,
@@ -187,6 +223,7 @@ export class AgentSupervisor implements AgentControlPort {
       argsDigest: digestCanonical({
         task,
         tools,
+        toolManifestDigest,
         forkTurns: input.forkTurns,
       }),
       snapshot,
@@ -204,13 +241,14 @@ export class AgentSupervisor implements AgentControlPort {
         path,
         task,
         tools,
+        toolManifestDigest,
         forkTurns: input.forkTurns,
         turnOrdinal: 1,
         status: "running",
-        history: forkHistory(this.#parentHistory, input.forkTurns),
+        history,
         session: undefined,
         interruptRequested: false,
-        pendingMessages: [],
+        pendingSteers: [],
         activeMessages: [],
       };
       this.#children.set(childId, child);
@@ -222,6 +260,9 @@ export class AgentSupervisor implements AgentControlPort {
 
   async sendMessage(input: Parameters<AgentControlPort["sendMessage"]>[0]): Promise<void> {
     const child = this.#requireChild(input.target);
+    if (child.status !== "running") {
+      throw new Error("AGENT_NOT_RUNNING");
+    }
     const message = boundedText(input.message, MAX_MESSAGE_BYTES);
     const commandId = stableId("cmd", "send", input.callId);
     const recorded = await this.dependencies.persistence.recordCommand({
@@ -231,7 +272,7 @@ export class AgentSupervisor implements AgentControlPort {
       commandId,
       kind: "send_message",
       argsDigest: digestCanonical({ target: child.agentThreadId, message }),
-      result: Object.freeze({ queued: true }),
+      result: Object.freeze({ delivered: true }),
     });
     if (recorded !== "recorded" && recorded !== "replayed") {
       throw new Error(`AGENT_MESSAGE_${recorded.toUpperCase()}`);
@@ -249,27 +290,30 @@ export class AgentSupervisor implements AgentControlPort {
       throw new Error(`AGENT_MESSAGE_${mailbox.outcome.toUpperCase()}`);
     }
     if (mailbox.outcome === "replayed") return;
-    if (child.status === "running" && child.session !== undefined) {
-      child.activeMessages.push(message);
-      try {
-        await child.session.steer({ text: message, attachments: [] });
-      } catch (error) {
-        child.activeMessages.pop();
-        throw error;
-      }
-    } else {
-      child.pendingMessages.push(message);
+    child.activeMessages.push(message);
+    if (child.session === undefined) {
+      child.pendingSteers.push(message);
+      return;
+    }
+    try {
+      await child.session.steer({ text: message, attachments: [] });
+    } catch (error) {
+      child.activeMessages.pop();
+      throw error;
     }
   }
 
   async followUp(input: Parameters<AgentControlPort["followUp"]>[0]): Promise<AgentSummary> {
     if (this.#stopping) throw new Error("AGENT_SUPERVISOR_STOPPING");
     const child = this.#requireChild(input.target);
+    if (child.status === "running" || child.session !== undefined) {
+      throw new Error("AGENT_BUSY");
+    }
     const ordinal = child.turnOrdinal + 1;
     const turnId = stableId("turn", child.agentThreadId, String(ordinal));
     const task = boundedText(input.task, MAX_MESSAGE_BYTES);
     if (!task.trim()) throw new Error("AGENT_TASK_INVALID");
-    const prompt = boundedText([...child.pendingMessages, task].join("\n\n"), MAX_MESSAGE_BYTES);
+    const prompt = task;
     const persisted = await this.dependencies.persistence.queueFollowUp({
       fence: this.dependencies.fence,
       attemptId: this.dependencies.attemptId,
@@ -286,7 +330,6 @@ export class AgentSupervisor implements AgentControlPort {
       throw new Error(`AGENT_FOLLOW_UP_${persisted.toUpperCase()}`);
     }
     if (persisted === "replayed") return this.#summary(child);
-    child.pendingMessages.length = 0;
     child.turnOrdinal = ordinal;
     child.status = "running";
     child.interruptRequested = false;
@@ -377,6 +420,7 @@ export class AgentSupervisor implements AgentControlPort {
     });
     let session: WorkerAgentSessionPort | undefined;
     let completedTurn: Extract<RuntimeAgentEvent, { type: "turn.completed" }> | undefined;
+    let completedHistory = child.history;
     let completedTurnCount = 0;
     let toolFailure: Error | undefined;
     const pendingToolEvents = new Set<Promise<void>>();
@@ -397,6 +441,9 @@ export class AgentSupervisor implements AgentControlPort {
         ...(child.history === undefined ? {} : { history: child.history }),
       });
       child.session = session;
+      for (const message of child.pendingSteers.splice(0)) {
+        await session.steer({ text: message, attachments: [] });
+      }
       if (this.#stopping) {
         child.interruptRequested = true;
         await session.abort().catch(() => undefined);
@@ -407,7 +454,7 @@ export class AgentSupervisor implements AgentControlPort {
           const turnPrompt =
             completedTurnCount === 0 ? prompt : (child.activeMessages.shift() ?? "继续执行任务");
           completedTurnCount += 1;
-          child.history = appendTurnHistory(child.history, turnPrompt, event);
+          completedHistory = appendTurnHistory(completedHistory, turnPrompt, event);
           completedTurn = event;
         }
         if (event.type === "tool.started" || event.type === "tool.completed") {
@@ -434,6 +481,7 @@ export class AgentSupervisor implements AgentControlPort {
       } finally {
         unsubscribe();
       }
+      if (completedHistory === undefined) throw new Error("AGENT_HISTORY_MISSING");
       const answer = finalText(completedTurn);
       const settled = await this.dependencies.persistence.settleTurn({
         fence: this.dependencies.fence,
@@ -442,10 +490,12 @@ export class AgentSupervisor implements AgentControlPort {
         turnId,
         status: "completed",
         finalAnswer: answer,
+        history: completedHistory,
       });
       if (settled !== "settled" && settled !== "replayed") {
         throw new Error(`AGENT_TURN_SETTLE_${settled.toUpperCase()}`);
       }
+      child.history = completedHistory;
       child.status = "idle";
       await this.#publish(child, turnId, "final_answer", answer);
     } catch (error) {
@@ -467,8 +517,8 @@ export class AgentSupervisor implements AgentControlPort {
         .catch(() => undefined);
       await this.#publish(child, turnId, "error", message).catch(() => undefined);
     } finally {
-      child.pendingMessages.push(...child.activeMessages);
       child.activeMessages.length = 0;
+      child.pendingSteers.length = 0;
       child.session = undefined;
       session?.dispose();
     }

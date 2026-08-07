@@ -1,10 +1,10 @@
-# ADR-0119：SubAgent 执行链路事务并发冲突重试
+# ADR-0124：SubAgent 执行链路事务并发冲突重试
 
 - 状态：已接受
 - 日期：2026-08-06
 - 决策者：Runtime 团队
 - 关联任务/PR：修复 `spawn_agent`、Child Rollout、共享 Thread Sandbox acquire 及 Child 工具许可间歇失败
-- 替代关系：细化 ADR-0117 的 Agent 控制面和独立 Rollout 持久化并发语义，不替代其余结论
+- 替代关系：细化 ADR-0122 的 Agent 控制面和独立 Rollout 持久化并发语义，不替代其余结论
 
 ## 背景
 

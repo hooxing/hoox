@@ -1,10 +1,10 @@
-# ADR-0118：SubAgent 工具调用身份与持久生命周期
+# ADR-0123：SubAgent 工具调用身份与持久生命周期
 
 - 状态：已接受
 - 日期：2026-08-06
 - 决策者：Runtime 团队
 - 关联任务/PR：修复 SubAgent Provider 工具调用在 Attempt 副作用许可前失败
-- 替代关系：细化 ADR-0117 第 6 条的工具 call ID namespace 和持久化边界，不替代其余结论
+- 替代关系：细化 ADR-0122 第 6 条的工具 call ID namespace 和持久化边界，不替代其余结论
 
 ## 背景
 

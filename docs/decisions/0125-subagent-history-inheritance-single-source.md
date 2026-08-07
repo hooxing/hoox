@@ -1,10 +1,10 @@
-# ADR-0120：SubAgent 历史继承的单一来源
+# ADR-0125：SubAgent 历史继承的单一来源
 
 - 状态：已接受
 - 日期：2026-08-06
 - 决策者：Runtime 团队
 - 关联任务/PR：修复 `fork_turns=none` 的 Child Session 错误读取 root Thread Context
-- 替代关系：细化 ADR-0117 的独立 Agent 上下文语义，不替代其余结论
+- 替代关系：细化 ADR-0122 的独立 Agent 上下文语义，不替代其余结论
 
 ## 背景
 

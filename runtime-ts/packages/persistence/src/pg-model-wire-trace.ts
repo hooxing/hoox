@@ -19,6 +19,8 @@ export interface ModelWireTraceContext {
   readonly threadId: string;
   readonly runId: string;
   readonly attemptId: string;
+  readonly agentThreadId?: string;
+  readonly agentTurnId?: string;
 }
 
 export interface ModelWireTracePort {
@@ -1392,11 +1394,16 @@ function assertIdentity(input: {
   readonly part: string;
   readonly httpStatus?: number;
 }): void {
+  const agentIdentity = [input.context.agentThreadId, input.context.agentTurnId];
+  if (agentIdentity.filter((value) => value !== undefined).length === 1) {
+    throw new TypeError("模型网络诊断子 Agent 身份不完整");
+  }
   for (const value of [
     input.context.tenantId,
     input.context.threadId,
     input.context.runId,
     input.context.attemptId,
+    ...agentIdentity.filter((item): item is string => item !== undefined),
   ]) {
     if (Buffer.byteLength(value, "utf8") < 1 || Buffer.byteLength(value, "utf8") > 200)
       throw new TypeError("模型网络诊断身份长度无效");

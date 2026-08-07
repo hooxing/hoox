@@ -19,6 +19,7 @@ import type {
 } from "./ports.js";
 import { describe, expect, it, vi } from "vitest";
 import { AgentSupervisor } from "./agent-supervisor.js";
+import { digestCanonical } from "./mutation-protocol.js";
 
 const scope = {
   tenantId: tenantId("tenant_agent_supervisor"),
@@ -84,7 +85,7 @@ function persistence(): AgentControlPersistencePort {
   const mailbox = new Map<string, number>();
   const commands = new Set<string>();
   return {
-    initializeRoot: async () => "ready",
+    initializeRoot: async () => ({ outcome: "ready", conversations: [] }),
     spawn: async (input) => {
       const previous = spawned.get(input.commandId);
       if (previous !== undefined) return { outcome: "replayed", snapshot: previous };
@@ -218,16 +219,13 @@ describe("AgentSupervisor", () => {
       forkTurns: "none",
     });
     await supervisor.drain();
-    await supervisor.sendMessage({
-      callId: "call_send_idle",
-      target: child.path,
-      message: "补充背景",
-    });
-    await supervisor.sendMessage({
-      callId: "call_send_idle",
-      target: child.path,
-      message: "补充背景",
-    });
+    await expect(
+      supervisor.sendMessage({
+        callId: "call_send_idle",
+        target: child.path,
+        message: "补充背景",
+      }),
+    ).rejects.toThrow("AGENT_NOT_RUNNING");
     expect(sessions).toHaveLength(1);
 
     await supervisor.followUp({
@@ -243,12 +241,72 @@ describe("AgentSupervisor", () => {
     });
 
     expect(sessions).toHaveLength(2);
-    expect(prompts[1]).toBe("补充背景\n\n继续分析");
+    expect(prompts[1]).toBe("继续分析");
     expect(sessions[1]?.history?.messages.some((message) => message.role === "assistant")).toBe(
       true,
     );
     expect((await supervisor.wait({ afterSequence: 1, timeoutMs: 1_000 }))[0]?.payload).toBe(
       "补充答案",
+    );
+  });
+
+  it("下一次 Root Run 可恢复同一主 Thread 的闲置对话，并沿用固定工具和历史", async () => {
+    const history = parentHistory();
+    const storedAgentId = agentThreadId("agent_persisted_conversation");
+    const storedTools = ["read"] as const;
+    const durable = persistence();
+    durable.initializeRoot = async () => ({
+      outcome: "ready",
+      conversations: [
+        {
+          agentThreadId: storedAgentId,
+          canonicalPath: "/root/persisted",
+          task: "首次任务",
+          tools: storedTools,
+          toolManifestDigest: digestCanonical({ tools: storedTools }),
+          forkTurns: "none",
+          turnOrdinal: 2,
+          history,
+        },
+      ],
+    });
+    const sessions: Parameters<
+      ConstructorParameters<typeof AgentSupervisor>[0]["createSession"]
+    >[0][] = [];
+    const supervisor = new AgentSupervisor({
+      persistence: durable,
+      rootAgentThreadId: agentThreadId("root_agent_next_run"),
+      attemptId: "attempt_agent_next_run",
+      fence,
+      createSession: async (input) => {
+        sessions.push(input);
+        return completedSession("跨 Run 补充答案");
+      },
+      authorizeModelStart: async () => authorization,
+      onToolEvent: async () => undefined,
+    });
+
+    await supervisor.initialize();
+    expect(await supervisor.list()).toEqual([
+      expect.objectContaining({
+        agentThreadId: storedAgentId,
+        status: "idle",
+        turnOrdinal: 2,
+        tools: ["read"],
+      }),
+    ]);
+    await supervisor.followUp({
+      callId: "call_cross_run_followup",
+      target: storedAgentId,
+      task: "在新 Run 中继续",
+    });
+    await supervisor.drain();
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]?.tools).toEqual(["read"]);
+    expect(sessions[0]?.history).toBe(history);
+    expect((await supervisor.list())[0]).toEqual(
+      expect.objectContaining({ status: "idle", turnOrdinal: 3, tools: ["read"] }),
     );
   });
 

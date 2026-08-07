@@ -52,7 +52,7 @@ const successfulEvents: readonly RuntimeAgentEvent[] = [
 function fakeAgentControlPersistence(): AgentControlPersistencePort {
   let sequence = 0;
   return {
-    initializeRoot: async () => "ready",
+    initializeRoot: async () => ({ outcome: "ready", conversations: [] }),
     spawn: async (input) => ({ outcome: "created", snapshot: input.snapshot }),
     queueFollowUp: async () => "created",
     startTurn: async () => "started",

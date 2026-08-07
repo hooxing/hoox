@@ -102,9 +102,23 @@ export interface AgentThreadPersistenceSnapshot {
   readonly canonicalPath: string;
   readonly task: string;
   readonly tools: readonly DelegableAgentToolName[];
+  readonly toolManifestDigest: Sha256Digest;
   readonly forkTurns: AgentForkTurns;
   readonly turnId: string;
   readonly turnOrdinal: number;
+  readonly history?: ThreadActiveHistoryV1;
+}
+
+/** 跟随主 Thread 持久化的子 Agent 对话；活动执行仍只属于当前 Root Run。 */
+export interface SubAgentConversationSnapshot {
+  readonly agentThreadId: AgentThreadId;
+  readonly canonicalPath: string;
+  readonly task: string;
+  readonly tools: readonly DelegableAgentToolName[];
+  readonly toolManifestDigest: Sha256Digest;
+  readonly forkTurns: AgentForkTurns;
+  readonly turnOrdinal: number;
+  readonly history?: ThreadActiveHistoryV1;
 }
 
 /** AgentSupervisor 的 durable 窄端口；每个命令都必须在同一事务重验当前 Attempt 双栅栏。 */
@@ -113,7 +127,13 @@ export interface AgentControlPersistencePort {
     readonly fence: ExecutionFence;
     readonly attemptId: string;
     readonly rootAgentThreadId: AgentThreadId;
-  }): Promise<"ready" | "not_authorized" | "conflict" | "unavailable">;
+  }): Promise<
+    | {
+        readonly outcome: "ready";
+        readonly conversations: readonly SubAgentConversationSnapshot[];
+      }
+    | { readonly outcome: "not_authorized" | "conflict" | "unavailable" }
+  >;
   spawn(input: {
     readonly fence: ExecutionFence;
     readonly attemptId: string;
@@ -155,6 +175,8 @@ export interface AgentControlPersistencePort {
     readonly status: "completed" | "interrupted" | "failed";
     readonly finalAnswer?: string;
     readonly errorCode?: string;
+    /** 只有 completed turn 可以提交新的可复用对话历史。 */
+    readonly history?: ThreadActiveHistoryV1;
   }): Promise<"settled" | "replayed" | "conflict" | "not_authorized" | "unavailable">;
   appendMailbox(input: {
     readonly fence: ExecutionFence;

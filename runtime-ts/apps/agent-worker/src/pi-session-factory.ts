@@ -123,7 +123,19 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         fatal: false,
       });
     };
-    const attemptWireTraces = this.modelWireTraces?.createAttempt();
+    const attemptWireTraces = this.modelWireTraces?.createAttempt(input.attemptId);
+    const wireTraceContext = Object.freeze({
+      tenantId: input.scope.tenantId,
+      threadId: input.scope.threadId,
+      runId: input.scope.runId,
+      attemptId: input.attemptId,
+      ...(input.agent?.agentKind === "subagent"
+        ? {
+            agentThreadId: input.agent.agentThreadId,
+            agentTurnId: input.agent.agentTurnId,
+          }
+        : {}),
+    });
     const skillEnabled = input.enabledToolNames?.includes("skill") ?? true;
     const agentControl = input.agentControl;
     const prepareInput = async (userInput: AgentUserInput): Promise<PreparedAgentUserInput> => {
@@ -159,15 +171,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       const result =
         attemptWireTraces === undefined
           ? await invoke()
-          : await attemptWireTraces.run(
-              {
-                tenantId: input.scope.tenantId,
-                threadId: input.scope.threadId,
-                runId: input.scope.runId,
-                attemptId: input.attemptId,
-              },
-              invoke,
-            );
+          : await attemptWireTraces.run(wireTraceContext, invoke);
       return result ?? history;
     };
     const startedToolCalls = new Map<string, string>();
@@ -521,15 +525,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         ? {}
         : {
             withProviderInvocation: <T>(operation: () => T) =>
-              attemptWireTraces.run(
-                {
-                  tenantId: input.scope.tenantId,
-                  threadId: input.scope.threadId,
-                  runId: input.scope.runId,
-                  attemptId: input.attemptId,
-                },
-                operation,
-              ),
+              attemptWireTraces.run(wireTraceContext, operation),
           }),
       ...(deliverFileToolRouter === undefined ? {} : { deliverFileToolRouter }),
     };
@@ -711,6 +707,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         durableToolCalls.clear();
         rejectedToolReceipts.clear();
         controller.dispose();
+        attemptWireTraces?.release();
       },
     };
   }

@@ -1,7 +1,11 @@
-import type {
-  AgentControlPersistencePort,
-  AgentThreadPersistenceSnapshot,
-  ExecutionFence,
+import { sha256Digest } from "@cube-runtime/domain";
+import {
+  DELEGABLE_AGENT_TOOL_NAMES,
+  type DelegableAgentToolName,
+  type AgentControlPersistencePort,
+  type AgentThreadPersistenceSnapshot,
+  type ExecutionFence,
+  type SubAgentConversationSnapshot,
 } from "@cube-runtime/run-contracts";
 import type { Pool, PoolClient } from "pg";
 import { withRetriedSerializableTenantTransaction, withTenantTransaction } from "./postgres.js";
@@ -14,6 +18,56 @@ function validIdentifier(value: string): boolean {
 
 function forkValue(value: AgentThreadPersistenceSnapshot["forkTurns"]): string {
   return typeof value === "number" ? String(value) : value;
+}
+
+function parseForkValue(value: string): AgentThreadPersistenceSnapshot["forkTurns"] {
+  if (value === "none" || value === "all") return value;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 1_000_000) {
+    throw new TypeError("SubAgent fork_turns 持久化值无效");
+  }
+  return parsed;
+}
+
+function parseTools(value: unknown): readonly DelegableAgentToolName[] {
+  if (!Array.isArray(value)) throw new TypeError("SubAgent 工具清单不是数组");
+  const allowed = new Set<string>(DELEGABLE_AGENT_TOOL_NAMES);
+  if (value.some((tool) => typeof tool !== "string" || !allowed.has(tool))) {
+    throw new TypeError("SubAgent 工具清单含未知能力");
+  }
+  return Object.freeze([...new Set(value as DelegableAgentToolName[])]);
+}
+
+interface ConversationRow {
+  readonly agent_thread_id: string;
+  readonly canonical_path: string;
+  readonly task: string;
+  readonly enabled_tools: unknown;
+  readonly tool_manifest_digest: string;
+  readonly fork_turns: string;
+  readonly turn_ordinal: number;
+  readonly history: unknown;
+  readonly history_digest: string | null;
+}
+
+function conversationSnapshot(row: ConversationRow): SubAgentConversationSnapshot {
+  const history =
+    row.history === null || row.history === undefined
+      ? undefined
+      : (row.history as NonNullable<SubAgentConversationSnapshot["history"]>);
+  if ((history?.digest ?? null) !== row.history_digest) {
+    throw new TypeError("SubAgent 对话历史 digest 不匹配");
+  }
+  return Object.freeze({
+    agentThreadId: row.agent_thread_id as SubAgentConversationSnapshot["agentThreadId"],
+    canonicalPath: row.canonical_path,
+    task: row.task,
+    tools: parseTools(row.enabled_tools),
+    toolManifestDigest: sha256Digest(row.tool_manifest_digest),
+    forkTurns: parseForkValue(row.fork_turns),
+    turnOrdinal: row.turn_ordinal,
+    ...(history === undefined ? {} : { history }),
+  });
 }
 
 async function lockActiveFence(
@@ -61,14 +115,14 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
   async initializeRoot(
     input: Parameters<AgentControlPersistencePort["initializeRoot"]>[0],
   ): ReturnType<AgentControlPersistencePort["initializeRoot"]> {
-    if (!validIdentifier(input.rootAgentThreadId)) return "conflict";
+    if (!validIdentifier(input.rootAgentThreadId)) return { outcome: "conflict" };
     try {
       return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.fence.scope.tenantId },
         async (client) => {
           if (!(await lockActiveFence(client, input.fence, input.attemptId))) {
-            return "not_authorized" as const;
+            return { outcome: "not_authorized" } as const;
           }
           const inserted = await client.query(
             `INSERT INTO runtime_agent_threads(
@@ -83,19 +137,52 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
               input.rootAgentThreadId,
             ],
           );
-          if (inserted.rowCount === 1) return "ready" as const;
-          const existing = await client.query<{ kind: string; canonical_path: string }>(
-            `SELECT kind,canonical_path FROM runtime_agent_threads
-              WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3`,
-            [input.fence.scope.tenantId, input.attemptId, input.rootAgentThreadId],
+          if (inserted.rowCount !== 1) {
+            const existing = await client.query<{ kind: string; canonical_path: string }>(
+              `SELECT kind,canonical_path FROM runtime_agent_threads
+                WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3`,
+              [input.fence.scope.tenantId, input.attemptId, input.rootAgentThreadId],
+            );
+            if (existing.rows[0]?.kind !== "root" || existing.rows[0]?.canonical_path !== "/root") {
+              return { outcome: "conflict" } as const;
+            }
+          }
+          const conversations = await client.query<ConversationRow>(
+            `SELECT agent_thread_id,canonical_path,task,enabled_tools,tool_manifest_digest,
+                    fork_turns,turn_ordinal,history,history_digest
+               FROM runtime_subagent_conversations
+              WHERE tenant_id=$1 AND thread_id=$2
+              ORDER BY canonical_path`,
+            [input.fence.scope.tenantId, input.fence.scope.threadId],
           );
-          return existing.rows[0]?.kind === "root" && existing.rows[0]?.canonical_path === "/root"
-            ? ("ready" as const)
-            : ("conflict" as const);
+          await client.query(
+            `INSERT INTO runtime_agent_threads(
+               tenant_id,thread_id,run_id,attempt_id,agent_thread_id,parent_agent_thread_id,
+               canonical_path,kind,status,task,enabled_tools,fork_turns
+             )
+             SELECT conversation.tenant_id,conversation.thread_id,$3,$4,
+                    conversation.agent_thread_id,$5,conversation.canonical_path,
+                    'subagent','open',conversation.task,conversation.enabled_tools,
+                    conversation.fork_turns
+               FROM runtime_subagent_conversations conversation
+              WHERE conversation.tenant_id=$1 AND conversation.thread_id=$2
+             ON CONFLICT DO NOTHING`,
+            [
+              input.fence.scope.tenantId,
+              input.fence.scope.threadId,
+              input.fence.scope.runId,
+              input.attemptId,
+              input.rootAgentThreadId,
+            ],
+          );
+          return {
+            outcome: "ready",
+            conversations: Object.freeze(conversations.rows.map(conversationSnapshot)),
+          } as const;
         },
       );
     } catch {
-      return "unavailable";
+      return { outcome: "unavailable" };
     }
   }
 
@@ -120,7 +207,7 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
             return { outcome: "not_authorized" } as const;
           }
           await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-            `${input.fence.scope.tenantId}:${input.attemptId}:agent-control`,
+            `${input.fence.scope.tenantId}:${input.fence.scope.threadId}:subagent-control`,
           ]);
           const replay = await client.query<{ args_digest: string; child_id: string }>(
             `SELECT args_digest,result->>'agentThreadId' AS child_id
@@ -140,17 +227,18 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
               : ({ outcome: "conflict" } as const);
           }
           const capacity = await client.query<{ total: string; active: string }>(
-            `SELECT count(*) FILTER (WHERE kind='subagent')::text AS total,
-                    count(*) FILTER (WHERE kind='subagent' AND EXISTS (
-                      SELECT 1 FROM runtime_agent_turns turn_state
-                       WHERE turn_state.tenant_id=runtime_agent_threads.tenant_id
-                         AND turn_state.attempt_id=runtime_agent_threads.attempt_id
-                         AND turn_state.agent_thread_id=runtime_agent_threads.agent_thread_id
-                         AND turn_state.status IN ('queued','running')
-                    ))::text AS active
-               FROM runtime_agent_threads
-              WHERE tenant_id=$1 AND attempt_id=$2`,
-            [input.fence.scope.tenantId, input.attemptId],
+            `SELECT (
+                      SELECT count(*)::text
+                        FROM runtime_subagent_conversations
+                       WHERE tenant_id=$1 AND thread_id=$2
+                    ) AS total,
+                    (
+                      SELECT count(*)::text
+                        FROM runtime_agent_turns
+                       WHERE tenant_id=$1 AND attempt_id=$3
+                         AND status IN ('queued','running')
+                    ) AS active`,
+            [input.fence.scope.tenantId, input.fence.scope.threadId, input.attemptId],
           );
           if (
             Number(capacity.rows[0]?.total) >= input.maxThreads ||
@@ -158,6 +246,27 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
           ) {
             return { outcome: "capacity" } as const;
           }
+          const conversation = await client.query(
+            `INSERT INTO runtime_subagent_conversations(
+               tenant_id,thread_id,agent_thread_id,canonical_path,task,enabled_tools,
+               tool_manifest_digest,fork_turns,turn_ordinal,history,history_digest
+             ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11)
+             ON CONFLICT DO NOTHING`,
+            [
+              input.fence.scope.tenantId,
+              input.fence.scope.threadId,
+              snapshot.agentThreadId,
+              snapshot.canonicalPath,
+              snapshot.task,
+              JSON.stringify(snapshot.tools),
+              snapshot.toolManifestDigest,
+              forkValue(snapshot.forkTurns),
+              snapshot.turnOrdinal,
+              snapshot.history === undefined ? null : JSON.stringify(snapshot.history),
+              snapshot.history?.digest ?? null,
+            ],
+          );
+          if (conversation.rowCount !== 1) return { outcome: "conflict" } as const;
           await client.query(
             `INSERT INTO runtime_agent_threads(
                tenant_id,thread_id,run_id,attempt_id,agent_thread_id,parent_agent_thread_id,
@@ -223,7 +332,7 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
             return "not_authorized" as const;
           }
           await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-            `${input.fence.scope.tenantId}:${input.attemptId}:agent-control`,
+            `${input.fence.scope.tenantId}:${input.fence.scope.threadId}:subagent-control`,
           ]);
           const replay = await client.query<{ args_digest: string }>(
             `SELECT args_digest FROM runtime_agent_commands
@@ -247,6 +356,46 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
           if (Number(active.rows[0]?.count) >= input.maxActiveSubagents) {
             return "busy" as const;
           }
+          const conversation = await client.query<{ turn_ordinal: number }>(
+            `SELECT turn_ordinal
+               FROM runtime_subagent_conversations
+              WHERE tenant_id=$1 AND thread_id=$2 AND agent_thread_id=$3
+              FOR UPDATE`,
+            [input.fence.scope.tenantId, input.fence.scope.threadId, input.agentThreadId],
+          );
+          if (conversation.rows[0]?.turn_ordinal !== input.turnOrdinal - 1) {
+            return "conflict" as const;
+          }
+          const materialized = await client.query(
+            `INSERT INTO runtime_agent_threads(
+               tenant_id,thread_id,run_id,attempt_id,agent_thread_id,parent_agent_thread_id,
+               canonical_path,kind,status,task,enabled_tools,fork_turns
+             )
+             SELECT conversation.tenant_id,conversation.thread_id,$4,$5,
+                    conversation.agent_thread_id,$6,conversation.canonical_path,
+                    'subagent','open',conversation.task,conversation.enabled_tools,
+                    conversation.fork_turns
+               FROM runtime_subagent_conversations conversation
+              WHERE conversation.tenant_id=$1 AND conversation.thread_id=$2
+                AND conversation.agent_thread_id=$3
+             ON CONFLICT DO NOTHING`,
+            [
+              input.fence.scope.tenantId,
+              input.fence.scope.threadId,
+              input.agentThreadId,
+              input.fence.scope.runId,
+              input.attemptId,
+              input.callerAgentThreadId,
+            ],
+          );
+          if (materialized.rowCount !== 1) {
+            const existing = await client.query(
+              `SELECT 1 FROM runtime_agent_threads
+                WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3 AND kind='subagent'`,
+              [input.fence.scope.tenantId, input.attemptId, input.agentThreadId],
+            );
+            if (existing.rowCount !== 1) return "conflict" as const;
+          }
           const inserted = await client.query(
             `INSERT INTO runtime_agent_turns(
                tenant_id,attempt_id,agent_thread_id,agent_turn_id,ordinal,trigger,status,prompt_text
@@ -262,6 +411,17 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
             ],
           );
           if (inserted.rowCount !== 1) return "busy" as const;
+          await client.query(
+            `UPDATE runtime_subagent_conversations
+                SET turn_ordinal=$4,updated_at=clock_timestamp()
+              WHERE tenant_id=$1 AND thread_id=$2 AND agent_thread_id=$3`,
+            [
+              input.fence.scope.tenantId,
+              input.fence.scope.threadId,
+              input.agentThreadId,
+              input.turnOrdinal,
+            ],
+          );
           await client.query(
             `INSERT INTO runtime_agent_commands(
                tenant_id,attempt_id,caller_agent_thread_id,command_id,kind,args_digest,result
@@ -302,7 +462,8 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
           if (updated.rowCount === 1) return "started" as const;
           const existing = await client.query<{ status: string }>(
             `SELECT status FROM runtime_agent_turns
-              WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3 AND agent_turn_id=$4`,
+              WHERE turn_state.tenant_id=$1 AND turn_state.attempt_id=$2
+                AND turn_state.agent_thread_id=$3 AND turn_state.agent_turn_id=$4`,
             [input.fence.scope.tenantId, input.attemptId, input.agentThreadId, input.turnId],
           );
           return existing.rows[0]?.status === "running"
@@ -318,13 +479,28 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
   async settleTurn(
     input: Parameters<AgentControlPersistencePort["settleTurn"]>[0],
   ): ReturnType<AgentControlPersistencePort["settleTurn"]> {
+    if (
+      (input.status === "completed" && input.history === undefined) ||
+      (input.status !== "completed" && input.history !== undefined)
+    ) {
+      return "conflict";
+    }
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.fence.scope.tenantId },
         async (client) => {
           if (!(await lockActiveFence(client, input.fence, input.attemptId))) {
             return "not_authorized" as const;
+          }
+          if (input.status === "completed") {
+            const conversation = await client.query(
+              `SELECT 1 FROM runtime_subagent_conversations
+                WHERE tenant_id=$1 AND thread_id=$2 AND agent_thread_id=$3
+                FOR UPDATE`,
+              [input.fence.scope.tenantId, input.fence.scope.threadId, input.agentThreadId],
+            );
+            if (conversation.rowCount !== 1) return "conflict" as const;
           }
           const updated = await client.query(
             `UPDATE runtime_agent_turns
@@ -341,13 +517,42 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
               input.errorCode ?? null,
             ],
           );
-          if (updated.rowCount === 1) return "settled" as const;
-          const existing = await client.query<{ status: string }>(
-            `SELECT status FROM runtime_agent_turns
+          if (updated.rowCount === 1) {
+            if (input.status === "completed") {
+              await client.query(
+                `UPDATE runtime_subagent_conversations
+                    SET history=$4::jsonb,history_digest=$5,updated_at=clock_timestamp()
+                  WHERE tenant_id=$1 AND thread_id=$2 AND agent_thread_id=$3`,
+                [
+                  input.fence.scope.tenantId,
+                  input.fence.scope.threadId,
+                  input.agentThreadId,
+                  JSON.stringify(input.history),
+                  input.history?.digest,
+                ],
+              );
+            }
+            return "settled" as const;
+          }
+          const existing = await client.query<{ status: string; history_digest: string | null }>(
+            `SELECT turn_state.status,conversation.history_digest
+               FROM runtime_agent_turns turn_state
+               LEFT JOIN runtime_subagent_conversations conversation
+                 ON conversation.tenant_id=turn_state.tenant_id
+                AND conversation.thread_id=$5
+                AND conversation.agent_thread_id=turn_state.agent_thread_id
               WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3 AND agent_turn_id=$4`,
-            [input.fence.scope.tenantId, input.attemptId, input.agentThreadId, input.turnId],
+            [
+              input.fence.scope.tenantId,
+              input.attemptId,
+              input.agentThreadId,
+              input.turnId,
+              input.fence.scope.threadId,
+            ],
           );
-          return existing.rows[0]?.status === input.status
+          return existing.rows[0]?.status === input.status &&
+            (input.status !== "completed" ||
+              existing.rows[0]?.history_digest === input.history?.digest)
             ? ("replayed" as const)
             : ("conflict" as const);
         },

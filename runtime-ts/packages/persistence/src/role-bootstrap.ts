@@ -84,6 +84,7 @@ const runtimeAgentControlTables = new Set([
   "runtime_agent_mailbox_messages",
   "runtime_agent_commands",
 ]);
+const runtimeSubagentConversationTables = new Set(["runtime_subagent_conversations"]);
 const waitingRecoveryTables = new Set([
   "waiting_recovery_checkpoints",
   "waiting_recovery_effect_outbox",
@@ -205,6 +206,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["runtime_rollout_checkpoints", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_checkpoint_commands", new Set(["SELECT", "INSERT"])],
   ["runtime_agent_threads", new Set(["SELECT", "INSERT"])],
+  ["runtime_subagent_conversations", new Set(["SELECT", "INSERT"])],
   ["runtime_agent_turns", new Set(["SELECT", "INSERT"])],
   ["runtime_agent_mailbox_messages", new Set(["SELECT", "INSERT"])],
   ["runtime_agent_commands", new Set(["SELECT", "INSERT"])],
@@ -265,6 +267,10 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ["run_execution_inputs", new Set(["answer_text", "updated_at"])],
   ["skill_invocations", new Set(["status", "instruction_digest", "failure_code", "updated_at"])],
   ["runtime_agent_threads", new Set(["status", "updated_at"])],
+  [
+    "runtime_subagent_conversations",
+    new Set(["turn_ordinal", "history", "history_digest", "updated_at"]),
+  ],
   [
     "runtime_agent_turns",
     new Set(["status", "final_answer", "error_code", "started_at", "completed_at"]),
@@ -746,6 +752,17 @@ async function hasRuntimeAgentControlState(client: PoolClient, schema: string): 
   return result.rows[0]?.present === true;
 }
 
+async function hasRuntimeSubagentConversationState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.runtime_subagent_conversations', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function activeTablePolicy(
   client: PoolClient,
   schema: string,
@@ -798,6 +815,9 @@ async function activeTablePolicy(
   }
   if (!(await hasRuntimeAgentControlState(client, schema))) {
     for (const table of runtimeAgentControlTables) policy.delete(table);
+  }
+  if (!(await hasRuntimeSubagentConversationState(client, schema))) {
+    for (const table of runtimeSubagentConversationTables) policy.delete(table);
   }
   if (!(await hasWaitingRecoveryState(client, schema))) {
     for (const table of waitingRecoveryTables) policy.delete(table);
@@ -930,6 +950,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasRuntimeAgentControlState(client, schema))) {
     for (const table of runtimeAgentControlTables) policy.delete(table);
+  }
+  if (!(await hasRuntimeSubagentConversationState(client, schema))) {
+    for (const table of runtimeSubagentConversationTables) policy.delete(table);
   }
   if (!(await hasWaitingRecoveryState(client, schema))) {
     for (const table of waitingRecoveryTables) policy.delete(table);
@@ -1818,6 +1841,15 @@ export async function bootstrapRuntimeAccessOnClient(
     await client.query(
       `GRANT UPDATE(status,final_answer,error_code,started_at,completed_at)
          ON TABLE ${schema}.runtime_agent_turns TO ${role}`,
+    );
+  }
+  if (await hasRuntimeSubagentConversationState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.runtime_subagent_conversations TO ${role}`,
+    );
+    await client.query(
+      `GRANT UPDATE(turn_ordinal,history,history_digest,updated_at)
+         ON TABLE ${schema}.runtime_subagent_conversations TO ${role}`,
     );
   }
   if (await hasWaitingRecoveryState(client, context.schema)) {

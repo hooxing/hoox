@@ -7,7 +7,9 @@ import {
   threadId,
   userId,
 } from "@cube-runtime/domain";
+import { threadActiveHistoryDigest } from "@cube-runtime/pi-adapter";
 import type { ExecutionFence } from "@cube-runtime/run-contracts";
+import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgAgentControlRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-control.js";
@@ -48,6 +50,16 @@ testMigrationUrl.password = migratorPassword;
 const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
 
 const hash = (character: string) => sha256Digest(character.repeat(64));
+const reusableSubagentHistoryUnsigned = Object.freeze({
+  schemaVersion: 1 as const,
+  projectionSchemaVersion: 1 as const,
+  throughSequence: 0,
+  messages: Object.freeze([]),
+});
+const reusableSubagentHistory = Object.freeze({
+  ...reusableSubagentHistoryUnsigned,
+  digest: threadActiveHistoryDigest(reusableSubagentHistoryUnsigned),
+});
 const attemptId = `rollout_attempt_${unique}`;
 const executionScope = {
   tenantId: tenantId(`rollout_tenant_${unique}`),
@@ -747,7 +759,7 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
           attemptId: scope.attemptId,
           rootAgentThreadId: scope.agentThreadId,
         }),
-      ).toBe("ready");
+      ).toEqual({ outcome: "ready", conversations: [] });
       expect(
         await controls.spawn({
           fence,
@@ -760,6 +772,7 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
             canonicalPath: `/root/child_${unique}`,
             task: "验证独立 Rollout",
             tools: ["read"],
+            toolManifestDigest: digestCanonical({ tools: ["read"] }),
             forkTurns: "none",
             turnId: childTurnId,
             turnOrdinal: 1,
@@ -811,8 +824,26 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
           turnId: childTurnId,
           status: "completed",
           finalAnswer: "完成",
+          history: reusableSubagentHistory,
         }),
       ).toBe("settled");
+      expect(
+        await controls.initializeRoot({
+          fence,
+          attemptId: scope.attemptId,
+          rootAgentThreadId: scope.agentThreadId,
+        }),
+      ).toEqual({
+        outcome: "ready",
+        conversations: [
+          expect.objectContaining({
+            agentThreadId: childId,
+            tools: ["read"],
+            turnOrdinal: 1,
+            history: reusableSubagentHistory,
+          }),
+        ],
+      });
       expect(
         await controls.queueFollowUp({
           fence,
@@ -874,6 +905,10 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
           "DELETE FROM runtime_agent_threads WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
           [scope.tenantId, scope.attemptId, childId],
         );
+        await client.query(
+          "DELETE FROM runtime_subagent_conversations WHERE tenant_id=$1 AND thread_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.threadId, childId],
+        );
       });
     }
   });
@@ -912,6 +947,7 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
         canonicalPath: `/root/retry_child_${unique}`,
         task: "验证 SERIALIZABLE 重试",
         tools: [],
+        toolManifestDigest: digestCanonical({ tools: [] }),
         forkTurns: "none",
         turnId: `rollout_retry_turn_${unique}`,
         turnOrdinal: 1,
@@ -1025,6 +1061,10 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
         await client.query(
           "DELETE FROM runtime_agent_threads WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
           [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_subagent_conversations WHERE tenant_id=$1 AND thread_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.threadId, childId],
         );
       });
     }

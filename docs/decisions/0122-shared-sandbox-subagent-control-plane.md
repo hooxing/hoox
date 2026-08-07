@@ -1,4 +1,4 @@
-# ADR-0117：共享 Sandbox 的 SubAgent 控制面
+# ADR-0122：共享 Sandbox 的 SubAgent 控制面
 
 - 状态：已接受
 - 日期：2026-08-05

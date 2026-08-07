@@ -193,7 +193,7 @@ export function createAgentControlPiTools(
       name: "spawn_agent",
       label: "启动子 Agent",
       description:
-        "为边界清晰、可独立完成的子任务启动一条独立对话。子 Agent 与你共享同一 Sandbox；必须显式选择它能使用的工具。",
+        "为边界清晰、可独立完成的子任务创建可复用的独立对话并启动当前 turn。子 Agent 与你共享同一 Sandbox；必须显式选择工具，创建后工具清单不可修改。",
       executionMode: "parallel",
       parameters: SpawnArgumentsSchema,
       prepareArguments: spawnArguments.prepareArguments,
@@ -212,7 +212,7 @@ export function createAgentControlPiTools(
       name: "send_message",
       label: "发送子 Agent 消息",
       description:
-        "向子 Agent 投递消息；若其当前正在运行，会在模型安全边界进入其对话，但不会为闲置 Agent 自动启动新 turn。",
+        "向当前正在运行的子 Agent 追加消息，不启动新 turn；目标已闲置或结束时调用会失败，应改用 followup_task。",
       executionMode: "parallel",
       parameters: TargetMessageArgumentsSchema,
       prepareArguments: messageArguments.prepareArguments,
@@ -220,13 +220,14 @@ export function createAgentControlPiTools(
         executeObserved(callId, "send_message", record, executor, async () => {
           assertArguments(messageArguments.consume(args));
           await executor.sendMessage({ callId, target: args.target, message: args.message });
-          return { outcome: "queued" };
+          return { outcome: "delivered" };
         }),
     }),
     defineTool({
       name: "followup_task",
       label: "追加子 Agent 任务",
-      description: "复用一个闲置子 Agent 的独立对话并启动新的 turn；正在运行时调用会失败。",
+      description:
+        "复用同一主 Thread 中已保存的闲置子 Agent 对话并启动新的 turn，可跨主 Agent Run 使用；沿用创建时的固定工具清单，正在运行时调用会失败。",
       executionMode: "parallel",
       parameters: FollowUpArgumentsSchema,
       prepareArguments: followUpArguments.prepareArguments,
@@ -240,7 +241,7 @@ export function createAgentControlPiTools(
       name: "wait_agent",
       label: "等待子 Agent",
       description:
-        "等待子 Agent mailbox 的新消息、完成通知或超时。使用返回的最大 sequence 继续等待可避免重复结果。",
+        "等待当前 Root Run 中子 Agent mailbox 的新消息、完成通知或超时。使用返回的最大 sequence 继续等待可避免重复结果。",
       executionMode: "parallel",
       parameters: WaitArgumentsSchema,
       prepareArguments: waitArguments.prepareArguments,
@@ -257,7 +258,8 @@ export function createAgentControlPiTools(
     defineTool({
       name: "interrupt_agent",
       label: "中断子 Agent",
-      description: "中断目标子 Agent 当前 turn，但保留其独立对话以便后续 follow-up。",
+      description:
+        "中断目标子 Agent 在当前 Root Run 中的 turn；未完成内容不写入可复用历史，对话仍保留以便后续 follow-up。",
       executionMode: "parallel",
       parameters: TargetArgumentsSchema,
       prepareArguments: targetArguments.prepareArguments,
@@ -270,7 +272,8 @@ export function createAgentControlPiTools(
     defineTool({
       name: "list_agents",
       label: "列出子 Agent",
-      description: "列出当前 Run 内的子 Agent、状态、turn 序号和工具能力。",
+      description:
+        "列出当前主 Thread 中可复用的子 Agent 对话、当前 Root Run 状态、turn 序号和固定工具能力。",
       executionMode: "parallel",
       parameters: EmptyArgumentsSchema,
       prepareArguments: emptyArguments.prepareArguments,

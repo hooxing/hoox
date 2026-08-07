@@ -126,6 +126,7 @@
 | [ADR-0127](0127-thread-scoped-subagent-conversation.md) | Thread 级 SubAgent 对话与 Run 级执行 | 已接受 | 2026-08-07 |
 | [ADR-0128](0128-resourcefs-hidden-thread-parent-traversal.md) | ResourceFS 隐藏 Thread 父目录的 WebDAV 可遍历性 | 已接受 | 2026-08-07 |
 | [ADR-0129](0129-predeclared-thread-filesystem-entrypoint.md) | 预声明 Thread 文件系统稳定入口 | 已接受 | 2026-08-07 |
+| [ADR-0130](0130-personal-history-file-library-and-composer-reference.md) | 个人历史文件云盘与输入框引用 | 已接受（试验分支） | 2026-08-07 |
 
 ## 何时必须记录
 

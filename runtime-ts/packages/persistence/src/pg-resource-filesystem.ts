@@ -1,5 +1,9 @@
 import { resourceId, resourceVersionId, tenantId } from "@cube-runtime/domain";
 import {
+  type HistoryFileLibraryCatalog,
+  type HistoryFileLibraryFile,
+  type HistoryFileLibraryPage,
+  type HistoryFileLibraryTask,
   type HistoryFilesystemCatalog,
   type HistoryFilesystemDirectory,
   type HistoryFilesystemFile,
@@ -34,11 +38,12 @@ interface HistoryFileRow extends ResourceFileRow {
   readonly thread_id: string;
   readonly directory_name: string;
   readonly directory_entry_name: string;
+  readonly last_attached_at: Date | string;
 }
 
 /** 宿主 ResourceFS 只读取 searchable 的不可变版本，并且永不向 Cube Volume/Sandbox 暴露对象键。 */
 export class PgResourceFilesystemCatalog
-  implements ResourceFilesystemCatalog, HistoryFilesystemCatalog
+  implements ResourceFilesystemCatalog, HistoryFilesystemCatalog, HistoryFileLibraryCatalog
 {
   constructor(private readonly pool: Pool) {}
 
@@ -107,6 +112,180 @@ export class PgResourceFilesystemCatalog
       );
     } catch (error) {
       throw mapPersistenceError(error, "列出个人历史目录");
+    }
+  }
+
+  async listTaskPage(
+    input: Parameters<HistoryFileLibraryCatalog["listTaskPage"]>[0],
+  ): Promise<HistoryFileLibraryPage | undefined> {
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        input,
+        async (client) => {
+          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          const rows = await client.query<HistoryDirectoryRow>(
+            `SELECT directory.thread_id,directory.directory_name,
+                    directory.directory_timestamp,directory.last_file_at,
+                    directory.file_count::text
+               FROM thread_history_directories directory
+              WHERE directory.tenant_id=$1
+                AND directory.naming_state IN ('ready','fallback')
+                AND directory.file_count > 0
+                AND ($2::timestamptz IS NULL OR directory.last_file_at >= $2::timestamptz)
+                AND ($3::timestamptz IS NULL OR directory.last_file_at < $3::timestamptz)
+                AND (
+                  $4::timestamptz IS NULL
+                  OR directory.last_file_at < $4::timestamptz
+                  OR (directory.last_file_at = $4::timestamptz AND directory.thread_id < $5)
+                )
+                AND (
+                  $6 = ''
+                  OR position(lower($6) in lower(directory.directory_name)) > 0
+                  OR EXISTS (
+                    SELECT 1
+                      FROM thread_history_file_entries matched_entry
+                      JOIN resources matched_resource
+                        ON matched_resource.tenant_id=matched_entry.tenant_id
+                       AND matched_resource.id=matched_entry.resource_id
+                       AND matched_resource.visibility='searchable'
+                     WHERE matched_entry.tenant_id=directory.tenant_id
+                       AND matched_entry.thread_id=directory.thread_id
+                       AND (
+                         position(lower($6) in lower(matched_entry.directory_entry_name)) > 0
+                         OR position(lower($6) in lower(matched_resource.name)) > 0
+                       )
+                  )
+                )
+              ORDER BY directory.last_file_at DESC,directory.thread_id DESC
+              LIMIT $7`,
+            [
+              input.tenantId,
+              input.activeAfter ?? null,
+              input.activeBefore ?? null,
+              input.before?.lastFileAt ?? null,
+              input.before?.threadId ?? null,
+              input.query,
+              input.limit + 1,
+            ],
+          );
+          const hasMore = rows.rows.length > input.limit;
+          const pageRows = rows.rows.slice(0, input.limit);
+          const threadIds = pageRows.map((row) => row.thread_id);
+          const filesByThread = new Map<string, HistoryFileLibraryFile[]>();
+          if (threadIds.length > 0) {
+            const files = await client.query<HistoryFileRow>(
+              `${historyFileQuery}
+                WHERE entry.tenant_id=$1 AND entry.thread_id=ANY($2::text[])
+                  AND (
+                    $3 = ''
+                    OR position(lower($3) in lower(directory.directory_name)) > 0
+                    OR position(lower($3) in lower(entry.directory_entry_name)) > 0
+                    OR position(lower($3) in lower(resource.name)) > 0
+                  )
+                ORDER BY entry.thread_id,entry.last_attached_at DESC,entry.directory_entry_name`,
+              [input.tenantId, threadIds, input.query],
+            );
+            for (const row of files.rows) {
+              const mapped = mapHistoryLibraryFile(input.tenantId, row);
+              const current = filesByThread.get(row.thread_id);
+              if (current === undefined) filesByThread.set(row.thread_id, [mapped]);
+              else current.push(mapped);
+            }
+          }
+          let hasOlder = false;
+          if (input.activeAfter !== undefined) {
+            const older = await client.query<{ readonly present: boolean }>(
+              `SELECT EXISTS (
+                   SELECT 1
+                     FROM thread_history_directories directory
+                    WHERE directory.tenant_id=$1
+                      AND directory.naming_state IN ('ready','fallback')
+                      AND directory.file_count > 0
+                      AND directory.last_file_at < $2::timestamptz
+                      AND (
+                        $3 = ''
+                        OR position(lower($3) in lower(directory.directory_name)) > 0
+                        OR EXISTS (
+                          SELECT 1
+                            FROM thread_history_file_entries matched_entry
+                            JOIN resources matched_resource
+                              ON matched_resource.tenant_id=matched_entry.tenant_id
+                             AND matched_resource.id=matched_entry.resource_id
+                             AND matched_resource.visibility='searchable'
+                           WHERE matched_entry.tenant_id=directory.tenant_id
+                             AND matched_entry.thread_id=directory.thread_id
+                             AND (
+                               position(lower($3) in lower(matched_entry.directory_entry_name)) > 0
+                               OR position(lower($3) in lower(matched_resource.name)) > 0
+                             )
+                        )
+                      )
+                 ) AS present`,
+              [input.tenantId, input.activeAfter, input.query],
+            );
+            hasOlder = older.rows[0]?.present === true;
+          }
+          const items: HistoryFileLibraryTask[] = pageRows.map((row) => {
+            const directory = mapDirectory(row);
+            return Object.freeze({
+              threadId: directory.threadId,
+              name: directory.name,
+              createdAt: directory.createdAt,
+              lastFileAt: directory.lastFileAt,
+              fileCount: directory.fileCount,
+              files: Object.freeze(filesByThread.get(directory.threadId) ?? []),
+            });
+          });
+          const tail = pageRows.at(-1);
+          return Object.freeze({
+            items: Object.freeze(items),
+            range: Object.freeze({
+              ...(input.activeAfter === undefined ? {} : { activeAfter: input.activeAfter }),
+              ...(input.activeBefore === undefined ? {} : { activeBefore: input.activeBefore }),
+            }),
+            hasMore,
+            hasOlder,
+            ...(hasMore && tail !== undefined
+              ? {
+                  next: Object.freeze({
+                    lastFileAt: timestamp(tail.last_file_at),
+                    threadId: tail.thread_id,
+                  }),
+                }
+              : {}),
+          });
+        },
+        { readOnly: true },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "浏览个人历史文件");
+    }
+  }
+
+  async resolveLibraryFile(
+    input: Parameters<HistoryFileLibraryCatalog["resolveLibraryFile"]>[0],
+  ): Promise<HistoryFileLibraryFile | undefined> {
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        input,
+        async (client) => {
+          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          const result = await client.query<HistoryFileRow>(
+            `${historyFileQuery}
+              WHERE entry.tenant_id=$1 AND entry.resource_id=$2 AND entry.resource_version_id=$3
+              ORDER BY entry.last_attached_at DESC,entry.thread_id
+              LIMIT 1`,
+            [input.tenantId, input.resourceId, input.versionId],
+          );
+          const row = result.rows[0];
+          return row === undefined ? undefined : mapHistoryLibraryFile(input.tenantId, row);
+        },
+        { readOnly: true },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "解析个人历史文件下载");
     }
   }
 
@@ -256,7 +435,7 @@ const baseQuery = `SELECT resource.id AS resource_id,version.id AS version_id,re
                       AND reference.physical_object_key=version.physical_object_key`;
 
 const historyFileQuery = `SELECT entry.thread_id,directory.directory_name,
-                                 entry.directory_entry_name,
+                                 entry.directory_entry_name,entry.last_attached_at,
                                  resource.id AS resource_id,version.id AS version_id,resource.name,
                                  version.media_type,version.size::text,version.digest,
                                  version.blob_incarnation_id::text,version.physical_object_key
@@ -327,6 +506,14 @@ function mapDirectory(row: HistoryDirectoryRow): HistoryFilesystemDirectory {
     createdAt: timestamp(row.directory_timestamp),
     lastFileAt: timestamp(row.last_file_at),
     fileCount,
+  });
+}
+
+function mapHistoryLibraryFile(rawTenantId: string, row: HistoryFileRow): HistoryFileLibraryFile {
+  return Object.freeze({
+    ...mapHistoryFile(rawTenantId, row),
+    taskName: row.directory_name,
+    attachedAt: timestamp(row.last_attached_at),
   });
 }
 

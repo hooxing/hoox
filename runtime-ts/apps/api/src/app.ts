@@ -32,6 +32,12 @@ import {
   type ErrorEnvelope,
   ErrorEnvelopeSchema,
   HealthSuccessEnvelopeSchema,
+  type HistoryFileDownloadPath,
+  HistoryFileDownloadPathSchema,
+  HistoryFileDownloadSuccessEnvelopeSchema,
+  type HistoryFileListQuery,
+  HistoryFileListQuerySchema,
+  HistoryFilePageSuccessEnvelopeSchema,
   type InstallSkillRequest,
   InstallSkillRequestSchema,
   MAX_RUN_INPUT_UTF8_BYTES,
@@ -79,6 +85,8 @@ import {
 } from "@cube-runtime/protocol";
 import {
   type ResourceAttachmentResolverPort,
+  type HistoryFileLibraryFile,
+  type HistoryFileLibraryService,
   type HistoryFilesystemCatalog,
   type ResourceFilesystemCapabilityCodec,
   type ResourceFilesystemCatalog,
@@ -136,6 +144,7 @@ export interface ApiDependencies {
   readonly threadContinuity?: ThreadContinuityReadPort;
   readonly resourceUploads?: ResourceUploadPort;
   readonly resourceAttachments?: ResourceAttachmentResolverPort;
+  readonly historyFiles?: HistoryFileLibraryService;
   readonly resourceFilesystem?: Readonly<{
     catalog: ResourceFilesystemCatalog;
     capabilities: ResourceFilesystemCapabilityCodec;
@@ -604,6 +613,113 @@ export function createApiApp(
         return success(request, {
           canonicalKey: request.params.canonicalKey,
           uninstalled: true as const,
+        });
+      },
+    );
+  }
+
+  if (
+    normalizedDependencies.historyFiles !== undefined &&
+    normalizedDependencies.blobs !== undefined
+  ) {
+    const historyFiles = normalizedDependencies.historyFiles;
+    const blobs = normalizedDependencies.blobs;
+    app.get<{ Querystring: HistoryFileListQuery }>(
+      "/v1/me/history-files",
+      {
+        schema: {
+          querystring: HistoryFileListQuerySchema,
+          response: {
+            200: HistoryFilePageSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        if (
+          (request.query.beforeLastFileAt === undefined) !==
+          (request.query.beforeThreadId === undefined)
+        ) {
+          throw new ApiFailure("bad_request");
+        }
+        const page = await historyFiles.list({
+          context: auth.scope,
+          ...(request.query.q === undefined ? {} : { query: request.query.q }),
+          ...(request.query.activeAfter === undefined
+            ? {}
+            : { activeAfter: request.query.activeAfter }),
+          ...(request.query.activeBefore === undefined
+            ? {}
+            : { activeBefore: request.query.activeBefore }),
+          ...(request.query.beforeLastFileAt === undefined ||
+          request.query.beforeThreadId === undefined
+            ? {}
+            : {
+                before: {
+                  lastFileAt: request.query.beforeLastFileAt,
+                  threadId: request.query.beforeThreadId,
+                },
+              }),
+          ...(request.query.limit === undefined ? {} : { limit: request.query.limit }),
+        });
+        return success(request, {
+          ...page,
+          items: page.items.map((task) => ({
+            ...task,
+            files: task.files.map(historyFileDto),
+          })),
+        });
+      },
+    );
+
+    app.get<{ Params: HistoryFileDownloadPath }>(
+      "/v1/me/history-files/:resourceId/versions/:versionId/download",
+      {
+        schema: {
+          params: HistoryFileDownloadPathSchema,
+          response: {
+            200: HistoryFileDownloadSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request, reply) => {
+        void reply.header("cache-control", "private, no-store");
+        void reply.header("pragma", "no-cache");
+        const auth = await authenticate(request);
+        const file = await historyFiles.resolve({
+          context: auth.scope,
+          resourceId: request.params.resourceId,
+          versionId: request.params.versionId,
+        });
+        const delivery = await blobs.presignDownload({
+          scope: { tenantId: auth.scope.tenantId },
+          blob: { kind: "stable", ...file.object },
+          ttlSeconds: 300,
+          responseMediaType: file.mediaType,
+          delivery: "artifact-download",
+          downloadName: safeArtifactDownloadName(file.entryName, file.resourceId),
+        });
+        // 签名后重读历史关系；成员撤销或文件关系漂移时不得留下可用下载 URL。
+        const confirmed = await historyFiles.resolve({
+          context: auth.scope,
+          resourceId: request.params.resourceId,
+          versionId: request.params.versionId,
+        });
+        if (!sameHistoryFileAuthorization(file, confirmed)) throw new ApiFailure("not_found");
+        return success(request, {
+          file: historyFileDto(file),
+          url: validateArtifactDeliveryUrl(delivery),
+          expiresInSeconds: 300,
         });
       },
     );
@@ -1408,6 +1524,40 @@ function sameTraceBodyAuthorization(expected: ModelWireTraceBody, confirmed: Mod
     expected.blob.mediaType === confirmed.blob.mediaType &&
     expected.blob.incarnationId === confirmed.blob.incarnationId &&
     expected.blob.physicalObjectKey === confirmed.blob.physicalObjectKey
+  );
+}
+
+function historyFileDto(file: HistoryFileLibraryFile) {
+  return {
+    threadId: file.threadId,
+    taskName: file.taskName,
+    resourceId: file.resourceId,
+    versionId: file.versionId,
+    name: file.name,
+    entryName: file.entryName,
+    path: file.path,
+    mediaType: file.mediaType,
+    sizeBytes: file.sizeBytes,
+    attachedAt: file.attachedAt,
+  };
+}
+
+function sameHistoryFileAuthorization(
+  expected: HistoryFileLibraryFile,
+  confirmed: HistoryFileLibraryFile,
+): boolean {
+  return (
+    expected.threadId === confirmed.threadId &&
+    expected.resourceId === confirmed.resourceId &&
+    expected.versionId === confirmed.versionId &&
+    expected.entryName === confirmed.entryName &&
+    expected.attachedAt === confirmed.attachedAt &&
+    expected.object.tenantId === confirmed.object.tenantId &&
+    expected.object.sha256 === confirmed.object.sha256 &&
+    expected.object.size === confirmed.object.size &&
+    expected.object.mediaType === confirmed.object.mediaType &&
+    expected.object.incarnationId === confirmed.object.incarnationId &&
+    expected.object.physicalObjectKey === confirmed.object.physicalObjectKey
   );
 }
 

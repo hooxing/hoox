@@ -2,6 +2,7 @@ export * from "./capability.js";
 export * from "./contracts.js";
 export * from "./cursor.js";
 export * from "./errors.js";
+export * from "./history-library.js";
 export * from "./path.js";
 export * from "./resource-filesystem.js";
 export * from "./service.js";

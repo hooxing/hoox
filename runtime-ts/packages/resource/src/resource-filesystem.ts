@@ -140,6 +140,9 @@ export class ResourceAttachmentResolver implements ResourceAttachmentResolverPor
  * 附件事实只追加到最新 user turn；调用方不得把返回文本拼入 system/developer prompt。
  * JSON 字符串化文件名，避免文件名中的换行或 Markdown 被误解释成额外指令。
  */
+const attachmentFactMarker = "\n\n# 用户在本轮提供的文件\n";
+const legacyAttachmentFactMarker = "\n\n# 用户在本轮上传的文件\n";
+
 export function appendAttachmentsToLatestUserPrompt(
   prompt: string,
   attachments: readonly ResourceAttachment[],
@@ -148,14 +151,16 @@ export function appendAttachmentsToLatestUserPrompt(
   const facts = attachments.map((attachment) =>
     JSON.stringify({ 文件名: attachment.name, 文件地址: attachment.path }),
   );
-  const prefix = prompt.trim().length === 0 ? "请处理本轮上传的文件。" : prompt;
-  return `${prefix}\n\n# 用户在本轮上传的文件\n${facts.map((fact) => `- ${fact}`).join("\n")}`;
+  const prefix = prompt.trim().length === 0 ? "请处理本轮提供的文件。" : prompt;
+  return `${prefix}${attachmentFactMarker}${facts.map((fact) => `- ${fact}`).join("\n")}`;
 }
 
 /** API 对话投影隐藏 Runtime 追加的附件事实，模型侧持久历史仍保留完整最新 user turn。 */
 export function stripAttachmentsFromUserFacingPrompt(prompt: string): string {
-  const marker = "\n\n# 用户在本轮上传的文件\n";
-  const index = prompt.lastIndexOf(marker);
+  const index = Math.max(
+    prompt.lastIndexOf(attachmentFactMarker),
+    prompt.lastIndexOf(legacyAttachmentFactMarker),
+  );
   return index < 0 ? prompt : prompt.slice(0, index);
 }
 

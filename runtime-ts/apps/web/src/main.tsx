@@ -12,6 +12,7 @@ import { createRoot } from "react-dom/client";
 import {
   ApiError,
   type ArtifactPreview,
+  type HistoryFile,
   type Run,
   type RunStatus,
   RuntimeApi,
@@ -136,6 +137,12 @@ function resolveSkillCenterApi(client: WorkspaceApi): SkillCenterApi | undefined
     installSkill: installSkill.bind(client),
     setSkillEnabled: setSkillEnabled.bind(client),
     uninstallSkill: uninstallSkill.bind(client),
+    ...(client.listHistoryFiles === undefined
+      ? {}
+      : { listHistoryFiles: client.listHistoryFiles.bind(client) }),
+    ...(client.downloadHistoryFile === undefined
+      ? {}
+      : { downloadHistoryFile: client.downloadHistoryFile.bind(client) }),
   };
 }
 
@@ -183,6 +190,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [input, setInput] = useState("");
   const [uploadFiles, setUploadFiles] = useState<readonly File[]>([]);
+  const [historyFiles, setHistoryFiles] = useState<readonly HistoryFile[]>([]);
   const [pendingInputs, setPendingInputs] = useState<readonly PendingConversationInput[]>([]);
   const [continuity, setContinuity] =
     useState<Awaited<ReturnType<RuntimeApi["getThreadContinuity"]>>>();
@@ -217,6 +225,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     currentRunPollRef.current.invalidate();
     dispatch({ type: "select", threadId });
     setPendingInputs([]);
+    setHistoryFiles([]);
     setError(undefined);
     setNavigationOpen(false);
   }, []);
@@ -534,13 +543,17 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
 
   const createConversation = () => selectThread(undefined);
   const send = async (mode: "auto" | "follow_up" = "auto") => {
-    if ((!input.trim() && uploadFiles.length === 0) || actionLoading || sendInFlightRef.current)
+    if (
+      (!input.trim() && uploadFiles.length === 0 && historyFiles.length === 0) ||
+      actionLoading ||
+      sendInFlightRef.current
+    )
       return;
     sendInFlightRef.current = true;
     const expectedNavigation = navigationRef.current.capture();
     setActionLoading(true);
     try {
-      const request = input.trim() || "请处理本轮上传的文件。";
+      const request = input.trim() || "请处理本轮提供的文件。";
       const expectedUserOccurrence = nextExpectedUserOccurrence(
         state.threadContext ?? [],
         pendingInputs,
@@ -557,6 +570,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           return apiClient.uploadResource(file, idempotencyKey);
         }),
       );
+      const attachments = [...uploaded, ...historyFiles];
       let threadId = state.selectedThreadId;
       if (threadId === undefined) {
         const thread = await apiClient.createThread(deriveThreadTitle(request));
@@ -577,7 +591,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
               request,
               mode,
               state.run?.status === "running" ? state.run.id : undefined,
-              uploaded,
+              attachments,
             );
       const run =
         receipt === undefined
@@ -602,6 +616,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       if (run === undefined || state.run?.status === "running") {
         setInput("");
         setUploadFiles([]);
+        setHistoryFiles([]);
         setError(undefined);
         return;
       }
@@ -615,6 +630,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       dispatch({ type: "startRun", run });
       setInput("");
       setUploadFiles([]);
+      setHistoryFiles([]);
       setError(undefined);
     } catch (reason) {
       if (navigationRef.current.isCurrent(expectedNavigation)) setError(reason as ApiError);
@@ -884,6 +900,11 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         <ConversationComposer
           input={input}
           files={uploadFiles}
+          selectedHistoryFiles={historyFiles}
+          onHistoryFilesChange={setHistoryFiles}
+          {...(apiClient.listHistoryFiles === undefined
+            ? {}
+            : { historyFileApi: { listHistoryFiles: apiClient.listHistoryFiles.bind(apiClient) } })}
           disabled={actionLoading}
           onChange={setInput}
           onFilesChange={setUploadFiles}
@@ -909,7 +930,20 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         </dialog>
       )}
       {skillCenterOpen && skillCenterApi !== undefined && (
-        <SkillCenterDialog api={skillCenterApi} onClose={() => setSkillCenterOpen(false)} />
+        <SkillCenterDialog
+          api={skillCenterApi}
+          selectedFiles={historyFiles}
+          onSelectFile={(file) =>
+            setHistoryFiles((current) =>
+              current.some(
+                (item) => item.resourceId === file.resourceId && item.versionId === file.versionId,
+              ) || current.length + uploadFiles.length >= 20
+                ? current
+                : [...current, file],
+            )
+          }
+          onClose={() => setSkillCenterOpen(false)}
+        />
       )}
     </main>
   );

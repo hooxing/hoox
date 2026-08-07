@@ -333,6 +333,9 @@ describe("API 进程入口", () => {
     expect(parseApiProcessEnvironment(developmentEnvironment()).historyFilesystemEnabled).toBe(
       false,
     );
+    expect(parseApiProcessEnvironment(developmentEnvironment()).historyTitleGenerationEnabled).toBe(
+      false,
+    );
     expect(parseApiProcessEnvironment(developmentEnvironment()).historyDirectoryTimeZone).toBe(
       "Asia/Shanghai",
     );
@@ -341,12 +344,19 @@ describe("API 进程入口", () => {
         developmentEnvironment({
           HISTORY_FILESYSTEM_ENABLED: "true",
           HISTORY_DIRECTORY_TIME_ZONE: "America/Los_Angeles",
+          HISTORY_TITLE_GENERATION_ENABLED: "true",
         }),
       ),
     ).toMatchObject({
       historyFilesystemEnabled: true,
       historyDirectoryTimeZone: "America/Los_Angeles",
+      historyTitleGenerationEnabled: true,
     });
+    expect(() =>
+      parseApiProcessEnvironment(
+        developmentEnvironment({ HISTORY_TITLE_GENERATION_ENABLED: "true" }),
+      ),
+    ).toThrow("HISTORY_TITLE_GENERATION_ENABLED 依赖");
     expect(() =>
       parseApiProcessEnvironment(developmentEnvironment({ HISTORY_DIRECTORY_TIME_ZONE: "Mars" })),
     ).toThrow("HISTORY_DIRECTORY_TIME_ZONE 无效");

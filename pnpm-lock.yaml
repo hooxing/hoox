@@ -176,6 +176,9 @@ importers:
       '@cube-runtime/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
+      '@cube-runtime/thread-title':
+        specifier: workspace:*
+        version: link:../../packages/thread-title
 
   runtime-ts/apps/skill-admin-api:
     dependencies:
@@ -288,6 +291,9 @@ importers:
       '@cube-runtime/skill':
         specifier: workspace:*
         version: link:../skill
+      '@cube-runtime/thread-title':
+        specifier: workspace:*
+        version: link:../thread-title
       '@cube-runtime/workspace':
         specifier: workspace:*
         version: link:../workspace
@@ -394,6 +400,8 @@ importers:
         version: link:../domain
 
   runtime-ts/packages/testing: {}
+
+  runtime-ts/packages/thread-title: {}
 
   runtime-ts/packages/tool-router:
     dependencies:

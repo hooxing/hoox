@@ -16,6 +16,7 @@ vi.mock("@cube-runtime/persistence", () => ({
 }));
 
 vi.mock("@cube-runtime/sandbox", () => ({
+  PgThreadTitleGenerationStore: class {},
   CubeSandboxGateway: class {
     constructor() {
       mocks.gatewayConstructed();

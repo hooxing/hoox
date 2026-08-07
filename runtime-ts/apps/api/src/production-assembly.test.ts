@@ -95,6 +95,7 @@ describe("生产 API 默认装配", () => {
         serialQueueV2Enabled: true,
         historyDirectoryTimeZone: "Asia/Shanghai",
         historyFilesystemEnabled: false,
+        historyTitleGenerationEnabled: false,
         blobLifecycle: { objectPrefix: "agent-worker" },
       });
       expect(mocks.createS3BlobStore).toHaveBeenNthCalledWith(

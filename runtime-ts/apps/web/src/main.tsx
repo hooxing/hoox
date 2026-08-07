@@ -113,6 +113,7 @@ type WorkspaceApi = Pick<
   | "uploadResource"
 > & {
   readonly listThreadContext?: RuntimeApi["listThreadContext"];
+  readonly getThread?: RuntimeApi["getThread"];
   readonly getThreadContinuity?: RuntimeApi["getThreadContinuity"];
   readonly submitThreadInput?: RuntimeApi["submitThreadInput"];
   readonly getThreadInputReceipt?: RuntimeApi["getThreadInputReceipt"];
@@ -393,6 +394,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
           modelWireTraceTail,
           threadContext,
           continuityStatus,
+          threadSnapshot,
         ] = await Promise.all([
           drainEventPages(
             (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
@@ -410,11 +412,15 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
             Promise.resolve(undefined),
           apiClient.getThreadContinuity?.(threadId).catch(() => undefined) ??
             Promise.resolve(undefined),
+          apiClient.getThread?.(threadId).catch(() => undefined) ?? Promise.resolve(undefined),
         ]);
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           eventAttemptRef.current = eventPage.attemptId;
           eventAfterRef.current = eventPage.nextAfter;
           dispatch({ type: "run", run: latest });
+          if (threadSnapshot !== undefined) {
+            dispatch({ type: "threadUpdated", thread: threadSnapshot });
+          }
           dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
           if (apiClient.listThreadContext !== undefined) {

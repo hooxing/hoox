@@ -15,7 +15,9 @@ function validExample(): string {
       if (key === "DATABASE_DOCKER_URL") {
         return `${key}=postgresql://user:replace-me@database/db`;
       }
-      if (key === "MODEL_BASE_URL") return `${key}=https://provider.example.invalid/v1`;
+      if (key === "MODEL_BASE_URL" || key === "HISTORY_TITLE_MODEL_BASE_URL") {
+        return `${key}=https://provider.example.invalid/v1`;
+      }
       if (
         key.endsWith("PASSWORD") ||
         key.endsWith("SECRET_ACCESS_KEY") ||
@@ -28,7 +30,8 @@ function validExample(): string {
         key === "RESOURCEFS_PROXY_TLS_KEY_PATH" ||
         key === "RESOURCEFS_PROXY_TLS_CERT_PATH" ||
         key === "MINIO_ROOT_USER" ||
-        key === "MODEL_ID"
+        key === "MODEL_ID" ||
+        key === "HISTORY_TITLE_MODEL_ID"
       ) {
         return `${key}=replace-with-value`;
       }
@@ -63,6 +66,9 @@ describe("环境变量示例契约", () => {
         "RESOURCE_FILESYSTEM_SIGNING_KEY",
         "HISTORY_FILESYSTEM_ENABLED",
         "HISTORY_DIRECTORY_TIME_ZONE",
+        "HISTORY_TITLE_GENERATION_ENABLED",
+        "HISTORY_TITLE_MODEL_BASE_URL",
+        "HISTORY_TITLE_MODEL_ID",
         "RESOURCEFS_PROXY_TLS_KEY_PATH",
         "RESOURCEFS_PROXY_TLS_CERT_PATH",
         "MODEL_WIRE_TRACE_ENABLED",
@@ -92,7 +98,7 @@ describe("环境变量示例契约", () => {
   it("拒绝疑似真实密钥且错误信息不泄漏配置值", () => {
     const liveLikeValue = "sk-live-like-value-for-test";
     const source = validExample().replace(
-      "MODEL_API_KEY=replace-with-value",
+      /^MODEL_API_KEY=replace-with-value$/mu,
       `MODEL_API_KEY=${liveLikeValue}`,
     );
     const issues = validateEnvironmentExample(source);

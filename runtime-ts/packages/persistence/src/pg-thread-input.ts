@@ -16,6 +16,10 @@ import type {
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 import { createRunSkillSnapshot, SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
 import {
+  enqueuePersonalThreadTitleGeneration,
+  pendingHistoryDirectoryName,
+} from "./pg-thread-title-generation.js";
+import {
   activateNextThreadRun,
   LegacyRunDrainRequiredError,
   lockOrCreateThreadExecutionHead,
@@ -135,11 +139,13 @@ export function decideThreadInputRoute(
 export interface PgThreadInputRoutingOptions {
   readonly historyDirectoryTimeZone?: string;
   readonly historyFilesystemEnabled?: boolean;
+  readonly historyTitleGenerationEnabled?: boolean;
 }
 /** 阶段 3 的统一输入入口；不实现 waiting resume、compaction 或 Sandbox 复用。 */
 export class PgThreadInputRouting implements ThreadInputRoutingPort {
   private readonly historyDirectoryTimeZone: string;
   private readonly historyFilesystemEnabled: boolean;
+  private readonly historyTitleGenerationEnabled: boolean;
 
   constructor(
     private readonly pool: Pool,
@@ -147,6 +153,10 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
   ) {
     this.historyDirectoryTimeZone = options.historyDirectoryTimeZone ?? "Asia/Shanghai";
     this.historyFilesystemEnabled = options.historyFilesystemEnabled ?? false;
+    this.historyTitleGenerationEnabled = options.historyTitleGenerationEnabled ?? false;
+    if (this.historyTitleGenerationEnabled && !this.historyFilesystemEnabled) {
+      throw new TypeError("历史标题生成依赖个人历史文件系统");
+    }
     historyFilesystemTimestamp(new Date(0), this.historyDirectoryTimeZone);
   }
 
@@ -346,6 +356,14 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
               });
             }
           }
+          if (this.historyTitleGenerationEnabled && action !== "reject") {
+            await enqueuePersonalThreadTitleGeneration(client, {
+              tenantId: input.scope.tenantId,
+              threadId: input.thread.id,
+              receiptId,
+            });
+          }
+
           if (
             this.historyFilesystemEnabled &&
             action !== "reject" &&
@@ -357,6 +375,7 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
               receiptId,
               attachments: input.attachments,
               timeZone: this.historyDirectoryTimeZone,
+              titleGenerationEnabled: this.historyTitleGenerationEnabled,
             });
           }
           const receipt = await this.readReceipt(client, input.thread.id, receiptId);
@@ -697,6 +716,7 @@ interface PersonalHistoryInput {
   readonly receiptId: string;
   readonly attachments: readonly { readonly resourceId: string; readonly versionId: string }[];
   readonly timeZone: string;
+  readonly titleGenerationEnabled: boolean;
 }
 
 async function upsertPersonalHistoryFiles(
@@ -709,13 +729,17 @@ async function upsertPersonalHistoryFiles(
     readonly title_source: "deterministic" | "model" | "user";
     readonly thread_created_at: Date;
     readonly receipt_created_at: Date;
+    readonly title_generation_state: string | null;
   }>(
     `SELECT tenant.kind,thread.title,thread.title_source,
-            thread.created_at AS thread_created_at,receipt.created_at AS receipt_created_at
+            thread.created_at AS thread_created_at,receipt.created_at AS receipt_created_at,
+            title_outbox.state AS title_generation_state
        FROM tenants tenant
        JOIN threads thread ON thread.tenant_id=tenant.id
        JOIN thread_input_receipts receipt
          ON receipt.tenant_id=thread.tenant_id AND receipt.thread_id=thread.id
+       LEFT JOIN thread_title_generation_outbox title_outbox
+         ON title_outbox.tenant_id=thread.tenant_id AND title_outbox.thread_id=thread.id
       WHERE tenant.id=$1 AND thread.id=$2 AND receipt.receipt_id=$3`,
     [input.tenantId, input.threadId, input.receiptId],
   );
@@ -735,16 +759,21 @@ async function upsertPersonalHistoryFiles(
   );
   let directoryName = existingDirectory.rows[0]?.directory_name;
   if (directoryName === undefined) {
+    const titlePending =
+      input.titleGenerationEnabled &&
+      (row.title_generation_state === "pending" || row.title_generation_state === "claimed");
     const baseName = historyFilesystemDirectoryName({
       createdAt: row.thread_created_at,
       title: row.title,
       timeZone: input.timeZone,
     });
-    directoryName = await allocateHistoryName(client, {
-      tenantId: input.tenantId,
-      baseName,
-      table: "directory",
-    });
+    directoryName = titlePending
+      ? pendingHistoryDirectoryName(input.threadId)
+      : await allocateHistoryName(client, {
+          tenantId: input.tenantId,
+          baseName,
+          table: "directory",
+        });
     await client.query(
       `INSERT INTO thread_history_directories(
          tenant_id,thread_id,directory_name,directory_timestamp,directory_time_zone,naming_state,
@@ -756,7 +785,11 @@ async function upsertPersonalHistoryFiles(
         directoryName,
         row.thread_created_at,
         input.timeZone,
-        row.title_source === "model" ? "ready" : "fallback",
+        titlePending
+          ? "pending"
+          : row.title_source === "model" || row.title_source === "user"
+            ? "ready"
+            : "fallback",
         row.receipt_created_at,
       ],
     );

@@ -354,6 +354,9 @@ export class RuntimeApi {
   async listThreads(): Promise<readonly Thread[]> {
     return asArray(await this.request<unknown>("/v1/threads?limit=100")) as readonly Thread[];
   }
+  getThread(threadId: string): Promise<Thread> {
+    return this.request(`/v1/threads/${encodeURIComponent(threadId)}`);
+  }
 
   async listSkills(query = ""): Promise<SkillCatalogPage> {
     const suffix = query.trim().length === 0 ? "" : `?q=${encodeURIComponent(query.trim())}`;

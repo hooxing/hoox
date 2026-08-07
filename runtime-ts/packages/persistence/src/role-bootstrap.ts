@@ -38,6 +38,7 @@ const historyFilesystemTables = new Set([
   "thread_history_directories",
   "thread_history_file_entries",
 ]);
+const threadTitleGenerationTables = new Set(["thread_title_generation_outbox"]);
 const runWorkspaceResultTables = new Set(["run_workspace_results"]);
 const threadContextTables = new Set([
   "thread_context_streams",
@@ -174,6 +175,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["thread_input_receipt_events", new Set(["SELECT", "INSERT"])],
   ["thread_history_directories", new Set(["SELECT", "INSERT"])],
   ["thread_history_file_entries", new Set(["SELECT", "INSERT"])],
+  ["thread_title_generation_outbox", new Set(["SELECT", "INSERT"])],
   ["run_workspace_results", new Set(["SELECT", "INSERT"])],
   ["thread_context_streams", new Set(["SELECT", "INSERT"])],
   ["thread_context_entries", new Set(["SELECT", "INSERT"])],
@@ -332,9 +334,36 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ],
   [
     "thread_history_directories",
-    new Set(["first_file_at", "last_file_at", "file_count", "version", "updated_at"]),
+    new Set([
+      "directory_name",
+      "naming_state",
+      "first_file_at",
+      "last_file_at",
+      "file_count",
+      "version",
+      "updated_at",
+    ]),
   ],
   ["thread_history_file_entries", new Set(["last_attached_at", "attachment_count", "updated_at"])],
+  [
+    "thread_title_generation_outbox",
+    new Set([
+      "state",
+      "claim_token",
+      "claim_generation",
+      "claimed_by",
+      "claim_expires_at",
+      "attempt_count",
+      "next_attempt_at",
+      "last_error_code",
+      "model_key",
+      "prompt_tokens",
+      "completion_tokens",
+      "duration_ms",
+      "completed_at",
+      "updated_at",
+    ]),
+  ],
   ["rollout_projections", new Set(["attempt_id", "version", "projection", "digest", "updated_at"])],
   ["sandbox_registry", new Set(["state", "actual_ttl_seconds", "updated_at"])],
   [
@@ -630,6 +659,14 @@ async function hasHistoryFilesystemState(client: PoolClient, schema: string): Pr
   );
   return result.rows[0]?.present === true;
 }
+async function hasThreadTitleGenerationState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.thread_title_generation_outbox', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
 async function hasRunWorkspaceResultState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.run_workspace_results', $1::text)) IS NOT NULL AS present`,
@@ -765,6 +802,9 @@ async function activeTablePolicy(
   if (!(await hasHistoryFilesystemState(client, schema))) {
     for (const table of historyFilesystemTables) policy.delete(table);
   }
+  if (!(await hasThreadTitleGenerationState(client, schema))) {
+    for (const table of threadTitleGenerationTables) policy.delete(table);
+  }
   if (!(await hasRunWorkspaceResultState(client, schema))) {
     for (const table of runWorkspaceResultTables) policy.delete(table);
   }
@@ -881,6 +921,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasHistoryFilesystemState(client, schema))) {
     for (const table of historyFilesystemTables) policy.delete(table);
+  }
+  if (!(await hasThreadTitleGenerationState(client, schema))) {
+    for (const table of threadTitleGenerationTables) policy.delete(table);
   }
   if (!(await hasRunWorkspaceResultState(client, schema))) {
     for (const table of runWorkspaceResultTables) policy.delete(table);
@@ -1722,10 +1765,21 @@ export async function bootstrapRuntimeAccessOnClient(
       `GRANT SELECT, INSERT ON TABLE
          ${schema}.thread_history_directories,
          ${schema}.thread_history_file_entries TO ${role};
-       GRANT UPDATE(first_file_at,last_file_at,file_count,version,updated_at)
+       GRANT UPDATE(
+         directory_name,naming_state,first_file_at,last_file_at,file_count,version,updated_at)
          ON TABLE ${schema}.thread_history_directories TO ${role};
        GRANT UPDATE(last_attached_at,attachment_count,updated_at)
          ON TABLE ${schema}.thread_history_file_entries TO ${role}`,
+    );
+  }
+  if (await hasThreadTitleGenerationState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.thread_title_generation_outbox TO ${role};
+       GRANT UPDATE(
+         state,claim_token,claim_generation,claimed_by,claim_expires_at,attempt_count,
+         next_attempt_at,last_error_code,model_key,prompt_tokens,completion_tokens,duration_ms,
+         completed_at,updated_at
+       ) ON TABLE ${schema}.thread_title_generation_outbox TO ${role}`,
     );
   }
   if (await hasRunWorkspaceResultState(client, context.schema)) {

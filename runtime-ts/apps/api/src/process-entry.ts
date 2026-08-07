@@ -114,6 +114,7 @@ const apiEnvironmentSchema = Object.freeze({
   S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
   RESOURCE_FILESYSTEM_SIGNING_KEY: stringEnvironmentField({ secret: true, maxLength: 256 }),
   HISTORY_FILESYSTEM_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
+  HISTORY_TITLE_GENERATION_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
   HISTORY_DIRECTORY_TIME_ZONE: stringEnvironmentField({
     requiredIn: optionalEnvironments,
     maxLength: 128,
@@ -170,6 +171,7 @@ export interface ApiProcessConfiguration {
   }>;
   readonly resourceFilesystemSigningKey: string;
   readonly historyFilesystemEnabled: boolean;
+  readonly historyTitleGenerationEnabled: boolean;
   readonly historyDirectoryTimeZone: string;
   readonly developmentResourceFilesystemProxy?: Readonly<{
     readonly listenHost: string;
@@ -313,6 +315,11 @@ export function parseApiProcessEnvironment(
     throw new TypeError("THREAD_INPUT_ROUTING_V2_ENABLED 依赖串行队列与 V2 Context read");
   }
   const historyFilesystemEnabled = parsed.values.HISTORY_FILESYSTEM_ENABLED ?? false;
+  const historyTitleGenerationEnabled = parsed.values.HISTORY_TITLE_GENERATION_ENABLED ?? false;
+  if (historyTitleGenerationEnabled && (!historyFilesystemEnabled || !inputRoutingEnabled)) {
+    throw new TypeError("HISTORY_TITLE_GENERATION_ENABLED 依赖历史文件系统与 V2 输入路由");
+  }
+
   const historyDirectoryTimeZone = parsed.values.HISTORY_DIRECTORY_TIME_ZONE ?? "Asia/Shanghai";
   try {
     new Intl.DateTimeFormat("en-CA", { timeZone: historyDirectoryTimeZone }).format(new Date(0));
@@ -339,6 +346,7 @@ export function parseApiProcessEnvironment(
     listenPort,
     objectStorage,
     historyFilesystemEnabled,
+    historyTitleGenerationEnabled,
     historyDirectoryTimeZone,
     resourceFilesystemSigningKey: readRequiredEnvironmentValue(
       parsed,

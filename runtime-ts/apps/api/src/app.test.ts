@@ -40,6 +40,7 @@ import {
   type ThreadInputRoutingPort,
   type Versioned,
 } from "@cube-runtime/persistence";
+import { HistoryFileLibraryService, type HistoryFileLibraryFile } from "@cube-runtime/resource";
 import type { FastifyInstance } from "fastify";
 import {
   SkillCenterService,
@@ -513,6 +514,8 @@ function fixture(
     readonly resourceAttachments?: ApiDependencies["resourceAttachments"];
     readonly resourceUploads?: ApiDependencies["resourceUploads"];
     readonly skillCenter?: ApiDependencies["skillCenter"];
+    readonly historyFiles?: ApiDependencies["historyFiles"];
+    readonly historyBlobs?: BlobStore;
   } = {},
 ) {
   const state = new FakeApiState();
@@ -611,6 +614,8 @@ function fixture(
       : { resourceAttachments: options.resourceAttachments }),
     ...(options.resourceUploads === undefined ? {} : { resourceUploads: options.resourceUploads }),
     ...(options.skillCenter === undefined ? {} : { skillCenter: options.skillCenter }),
+    ...(options.historyFiles === undefined ? {} : { historyFiles: options.historyFiles }),
+    ...(options.historyBlobs === undefined ? {} : { blobs: options.historyBlobs }),
     ...(options.enableThreadContext === true
       ? {
           threadContext: {
@@ -1032,6 +1037,125 @@ describe("Fastify API 契约", () => {
     });
     expect(conflict.statusCode).toBe(409);
     await app.close();
+  });
+
+  it("历史文件云盘默认查询最近六个月，并只为当前个人空间签发下载地址", async () => {
+    const file: HistoryFileLibraryFile = {
+      threadId: "thread_history",
+      taskName: "采购合同审查",
+      resourceId: "resource_history",
+      versionId: "version_history",
+      name: "采购合同.docx",
+      entryName: "采购合同.docx",
+      path: "/resources/resource_history/version_history/采购合同.docx",
+      mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      sizeBytes: 128,
+      attachedAt: "2026-08-07T08:00:00.000Z",
+      object: {
+        tenantId: tenantId("tenant_owner_a"),
+        purpose: "resource",
+        sha256: "a".repeat(64),
+        size: 128,
+        mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        incarnationId: "00000000-0000-4000-8000-000000000001",
+        physicalObjectKey: "opaque-history-object",
+      },
+    };
+    const listTaskPage = vi.fn(async (input) =>
+      input.tenantId === "tenant_owner_a"
+        ? {
+            items: [
+              {
+                threadId: file.threadId,
+                name: file.taskName,
+                createdAt: "2026-08-07T07:00:00.000Z",
+                lastFileAt: file.attachedAt,
+                fileCount: 1,
+                files: [file],
+              },
+            ],
+            range: {
+              ...(input.activeAfter === undefined ? {} : { activeAfter: input.activeAfter }),
+              ...(input.activeBefore === undefined ? {} : { activeBefore: input.activeBefore }),
+            },
+            hasMore: false,
+            hasOlder: false,
+          }
+        : undefined,
+    );
+    const resolveLibraryFile = vi.fn(async (input) =>
+      input.tenantId === "tenant_owner_a" &&
+      input.resourceId === file.resourceId &&
+      input.versionId === file.versionId
+        ? file
+        : undefined,
+    );
+    const presignDownload = vi.fn(async () => "http://127.0.0.1:19000/history-download");
+    const { app } = fixture({
+      historyFiles: new HistoryFileLibraryService(
+        { listTaskPage, resolveLibraryFile },
+        () => new Date("2026-08-07T12:00:00.000Z"),
+      ),
+      historyBlobs: { presignDownload } as unknown as BlobStore,
+    });
+    openApps.push(app);
+
+    const list = await app.inject({
+      method: "GET",
+      url: "/v1/me/history-files?q=%E5%90%88%E5%90%8C&limit=8",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().data.items[0]).toMatchObject({
+      name: "采购合同审查",
+      files: [{ resourceId: file.resourceId, entryName: file.entryName }],
+    });
+    expect(list.json().data.items[0].files[0]).not.toHaveProperty("object");
+    expect(listTaskPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: "tenant_owner_a",
+        query: "合同",
+        activeAfter: "2026-02-07T12:00:00.000Z",
+        limit: 8,
+      }),
+    );
+
+    const invalidCursor = await app.inject({
+      method: "GET",
+      url: "/v1/me/history-files?beforeThreadId=thread_cursor",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(invalidCursor.statusCode).toBe(400);
+
+    const download = await app.inject({
+      method: "GET",
+      url: "/v1/me/history-files/resource_history/versions/version_history/download",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(download.statusCode).toBe(200);
+    expect(download.headers["cache-control"]).toBe("private, no-store");
+    expect(download.json().data).toMatchObject({
+      url: "http://127.0.0.1:19000/history-download",
+      expiresInSeconds: 300,
+      file: { resourceId: file.resourceId, versionId: file.versionId },
+    });
+    expect(presignDownload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: { tenantId: "tenant_owner_a" },
+        ttlSeconds: 300,
+        delivery: "artifact-download",
+        downloadName: "采购合同.docx",
+      }),
+    );
+    expect(resolveLibraryFile).toHaveBeenCalledTimes(2);
+
+    const crossTenant = await app.inject({
+      method: "GET",
+      url: "/v1/me/history-files/resource_history/versions/version_history/download",
+      headers: { authorization: "Bearer token-b" },
+    });
+    expect(crossTenant.statusCode).toBe(404);
+    expect(presignDownload).toHaveBeenCalledTimes(1);
   });
 
   it("按 Run 列出模型轮次与 HTTP 尝试，且诊断响应禁止缓存与嗅探", async () => {
@@ -2156,7 +2280,7 @@ describe("Fastify API 契约", () => {
 
     expect(response.statusCode).toBe(200);
     expect(state.submittedInputTexts).toEqual([
-      `请按说明实现\n\n# 用户在本轮上传的文件\n- ${JSON.stringify({
+      `请按说明实现\n\n# 用户在本轮提供的文件\n- ${JSON.stringify({
         文件名: "需求说明.md",
         文件地址: "/resources/resource_attachment_1/resource_version_attachment_1/需求说明.md",
       })}`,

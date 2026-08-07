@@ -4,8 +4,9 @@ import { act, createRef, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { Artifact, ModelWireTraceRecord, Run, RunEvent } from "./api.js";
+import type { Artifact, HistoryFile, ModelWireTraceRecord, Run, RunEvent } from "./api.js";
 import {
+  activeHistoryMention,
   ConversationComposer,
   formatArtifactSize,
   formatArtifactType,
@@ -817,6 +818,91 @@ describe("工作台展示组件", () => {
     );
 
     expect(html).toContain("resize:none");
+  });
+
+  it("只把输入末尾的 @ 查询识别为历史文件选择", () => {
+    expect(activeHistoryMention("@合同")).toEqual({ start: 0, end: 3, query: "合同" });
+    expect(activeHistoryMention("请比较 @采购合同")).toEqual({
+      start: 4,
+      end: 9,
+      query: "采购合同",
+    });
+    expect(activeHistoryMention("邮箱 user@example.com")).toBeUndefined();
+    expect(activeHistoryMention("@合同 后续文字")).toBeUndefined();
+  });
+
+  it("输入 @ 可按需搜索云盘文件并作为结构化附件选中", async () => {
+    vi.useFakeTimers();
+    const historyFile: HistoryFile = {
+      threadId: "thread_contract",
+      taskName: "采购合同审查",
+      resourceId: "resource_contract",
+      versionId: "version_contract",
+      name: "采购合同.docx",
+      entryName: "采购合同.docx",
+      path: "/resources/resource_contract/version_contract/采购合同.docx",
+      mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      sizeBytes: 2048,
+      attachedAt: "2026-08-07T08:00:00.000Z",
+    };
+    const listHistoryFiles = vi.fn(async () => ({
+      items: [
+        {
+          threadId: historyFile.threadId,
+          name: historyFile.taskName,
+          createdAt: "2026-08-07T07:00:00.000Z",
+          lastFileAt: historyFile.attachedAt,
+          fileCount: 1,
+          files: [historyFile],
+        },
+      ],
+      range: { activeAfter: "2026-02-07T00:00:00.000Z" },
+      hasMore: false,
+      hasOlder: false,
+    }));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    function Harness() {
+      const [value, setValue] = useState("请分析 @采购");
+      const [selected, setSelected] = useState<readonly HistoryFile[]>([]);
+      return (
+        <ConversationComposer
+          input={value}
+          files={[]}
+          selectedHistoryFiles={selected}
+          historyFileApi={{ listHistoryFiles }}
+          disabled={false}
+          showQueueAction={false}
+          onChange={setValue}
+          onFilesChange={() => undefined}
+          onHistoryFilesChange={setSelected}
+          onQueue={() => undefined}
+          onSubmit={() => undefined}
+        />
+      );
+    }
+
+    act(() => root.render(<Harness />));
+    await act(async () => {
+      vi.advanceTimersByTime(180);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(listHistoryFiles).toHaveBeenCalledWith({ query: "采购", limit: 8 });
+    const option = container.querySelector<HTMLButtonElement>('[role="option"]');
+    expect(option?.textContent).toContain("采购合同.docx");
+    act(() => option?.click());
+    expect(container.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe(
+      "请分析 @采购合同.docx ",
+    );
+    expect(container.querySelector(".composer-file.is-history")?.textContent).toContain(
+      "@采购合同.docx",
+    );
+
+    act(() => root.unmount());
+    container.remove();
+    vi.useRealTimers();
   });
 
   it("无论屏幕尺寸，无产物时默认收起右侧产物栏", () => {

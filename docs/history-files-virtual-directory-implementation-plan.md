@@ -1,9 +1,9 @@
 # 个人历史任务文件虚拟目录实施方案
 
 - 文档性质：跨 Domain、PostgreSQL、ResourceFS、Sandbox、Worker、标题服务和 Web 的实施总计划
-- 状态：核心虚拟目录与低成本标题模型已实现；可变目录别名和规模性能 Gate 后续实施
+- 状态：核心虚拟目录与低成本标题模型已实现；`test/cloud-drive-history-files` 增加 Web 云盘与 `@` 文件引用试验；可变目录别名和规模性能 Gate 后续实施
 - 日期：2026-08-07
-- 核心决策：[ADR-0118](decisions/0118-history-files-virtual-directory-and-task-ownership.md)、[ADR-0119](decisions/0119-personal-history-files-first-release-scope.md)、[ADR-0120](decisions/0120-personal-history-filesystem-implementation-slice.md)、[ADR-0121](decisions/0121-low-cost-thread-title-generation.md)
+- 核心决策：[ADR-0118](decisions/0118-history-files-virtual-directory-and-task-ownership.md)、[ADR-0119](decisions/0119-personal-history-files-first-release-scope.md)、[ADR-0120](decisions/0120-personal-history-filesystem-implementation-slice.md)、[ADR-0121](decisions/0121-low-cost-thread-title-generation.md)、[ADR-0130](decisions/0130-personal-history-file-library-and-composer-reference.md)
 - 相关决策：ADR-0005、ADR-0077、ADR-0079、ADR-0103、ADR-0107
 
 ## 1. 目标
@@ -50,6 +50,21 @@
 ResourceFS 历史路径当前与既有 ResourceFS HTTP 装配在同一进程内；接口边界保持独立，后续若吞吐或故障域需要，可拆成独立
 子模块或服务，不改变 `/history`、`/thread-files` 和 Tenant Volume 契约。
 
+### 1.2 Web 云盘与 `@` 文件引用试验切片
+
+`test/cloud-drive-history-files` 在不改变 Sandbox 虚拟目录、数据库 Schema 和对象存储布局的前提下，复用个人历史关系增加用户侧入口：
+
+- `GET /v1/me/history-files` 默认列出最近六个日历月有文件的个人任务，按 `lastFileAt + threadId` 游标分页；
+- 支持任务标题、目录入口文件名和 Resource 原名的子串搜索；
+- “加载更早任务”以当前窗口起点作为下一窗口上界，允许按需浏览六个月以前的个人历史，但 `/history` 的目录枚举窗口仍保持最近六个月；
+- 下载只为当前 personal Tenant 已存在的历史关系签发 300 秒地址，DTO 不返回对象键或存储凭据；
+- 技能中心增加“云盘”标签，按月份和语义任务组织文件；
+- 输入框末尾输入 `@查询` 时按需搜索，选中结果以 `resourceId + versionId` 结构化附件提交；
+- 历史文件与新上传文件使用同一个 Thread Input 附件协议，Agent 继续通过固定 ResourceFS 路径按需读取；
+- 动态文件名、目录、ID、路径和查询结果不进入 System/developer Prompt 或工具 Schema。
+
+该试验切片的接口、安全、性能和回退边界见 ADR-0130。未来若把 ResourceFS 查询拆为独立服务，Web API 与附件契约保持不变。
+
 ## 2. 非目标
 
 本期不实现：
@@ -58,7 +73,7 @@ ResourceFS 历史路径当前与既有 ResourceFS HTTP 装配在同一进程内�
 - 团队成员角色、共享/私有任务或成员级目录过滤；
 - personal → team 发布、复制、转移、lineage、授权 API 或 UI；
 - 跨多个 Tenant 聚合当前用户的历史文件；
-- 超过最近六个月的全生命周期历史目录；
+- `/history` 目录枚举超过最近六个月的全生命周期历史；Web 云盘试验允许用户显式加载更早记录，但不扩大全局挂载目录；
 - 独立 `search_history_files`、全文索引或向量检索工具；
 - 对所有 Office/PDF 文件进行预解析或 OCR；
 - 每用户或每 Thread Cube Volume；
@@ -635,6 +650,8 @@ threadId、标题或文件名作为高基数标签。
 ### 阶段 5：Web 与原生工具体验
 
 - Web 展示 personal 任务的模型标题及 fallback 状态；
+- Web 云盘试验按月份/任务浏览、搜索、加载更早、下载并加入当前输入；
+- 输入框 `@` 选择历史文件后沿用统一结构化附件协议；
 - Sandbox 模板 Gate 验证 `find`、`rg`，决定是否加入 `fd`；
 - 静态 Prompt 只说明固定目录与先按文件名缩小范围，不注入动态内容；
 - 增加黑盒 E2E：上传 → 新个人 Thread → `find/rg --files` → 读取历史文件。
@@ -669,6 +686,8 @@ threadId、标题或文件名作为高基数标签。
 - 保留段与旧 Resource 路径兼容；
 - 文件 GET/HEAD/Range/ETag；
 - 未授权 Tenant 404；
+- 历史文件列表默认六个月、游标成对校验、旧窗口加载与响应脱敏；
+- 历史文件下载短期签名、签名前后双重授权和跨 Tenant 404；
 - team Tenant 不暴露本功能的历史根；
 - 标题 pending、过期历史和 exact path；
 - 所有写方法失败。
@@ -692,6 +711,8 @@ threadId、标题或文件名作为高基数标签。
 → Agent 通过 /history 找到旧文件
 → 读取成功、写入失败
 → 超过/模拟六个月后不再枚举
+→ Web 云盘搜索旧文件并通过 @ 选择到新任务
+→ 结构化附件进入当前 user turn，Agent 从固定路径读取
 → 原 Resource 与当前 Thread 稳定入口仍符合约定
 ```
 

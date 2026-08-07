@@ -550,4 +550,71 @@ describe("RuntimeApi", () => {
     expect(canPreviewArtifact("application/zip")).toBe(false);
     expect(canPreviewArtifact(undefined)).toBe(false);
   });
+
+  it("历史文件列表保留搜索、时间和游标，下载使用个人云盘路由", async () => {
+    const file = {
+      threadId: "thread_history",
+      taskName: "合同审查",
+      resourceId: "resource_history",
+      versionId: "version_history",
+      name: "合同.docx",
+      entryName: "合同.docx",
+      path: "/resources/resource_history/version_history/合同.docx",
+      mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      sizeBytes: 128,
+      attachedAt: "2026-08-07T08:00:00.000Z",
+    };
+    const page = {
+      items: [
+        {
+          threadId: file.threadId,
+          name: file.taskName,
+          createdAt: "2026-08-07T07:00:00.000Z",
+          lastFileAt: file.attachedAt,
+          fileCount: 1,
+          files: [file],
+        },
+      ],
+      range: { activeBefore: "2026-02-07T00:00:00.000Z" },
+      hasMore: false,
+      hasOlder: false,
+    };
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ version: "v1", requestId: "req-list", data: page }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            version: "v1",
+            requestId: "req-download",
+            data: { file, url: "http://127.0.0.1:19000/history-download", expiresInSeconds: 300 },
+          }),
+          { status: 200 },
+        ),
+      );
+    const api = new RuntimeApi(fetcher, "/api");
+
+    await expect(
+      api.listHistoryFiles({
+        query: " 合同 ",
+        activeBefore: "2026-02-07T00:00:00.000Z",
+        before: { lastFileAt: "2026-01-31T00:00:00.000Z", threadId: "thread_cursor" },
+        limit: 8,
+      }),
+    ).resolves.toEqual(page);
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "/api/v1/me/history-files?q=%E5%90%88%E5%90%8C&activeBefore=2026-02-07T00%3A00%3A00.000Z&beforeLastFileAt=2026-01-31T00%3A00%3A00.000Z&beforeThreadId=thread_cursor&limit=8",
+    );
+
+    await expect(api.downloadHistoryFile(file)).resolves.toBe(
+      "http://127.0.0.1:19000/history-download",
+    );
+    expect(fetcher.mock.calls[1]?.[0]).toBe(
+      "/api/v1/me/history-files/resource_history/versions/version_history/download",
+    );
+  });
 });

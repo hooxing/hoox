@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   type Artifact,
+  type HistoryFile,
   type ModelWireTraceRecord,
   type Run,
   type Thread,
@@ -299,6 +300,83 @@ describe("Agent 工作台恢复接入", () => {
     expect(apiClient.createThread).toHaveBeenCalledTimes(1);
     expect(apiClient.createRun).toHaveBeenCalledWith(createdThread.id, "生成一份周报");
     expect(container.querySelector("h1")?.textContent).toBe(createdThread.title);
+  });
+
+  it("通过 @ 选择历史文件后使用统一结构化附件提交，且不重新上传", async () => {
+    vi.useFakeTimers();
+    const active = thread("thread_history_target");
+    const historyFile: HistoryFile = {
+      threadId: "thread_history_source",
+      taskName: "采购合同审查",
+      resourceId: "resource_contract",
+      versionId: "version_contract",
+      name: "采购合同.docx",
+      entryName: "采购合同.docx",
+      path: "/resources/resource_contract/version_contract/采购合同.docx",
+      mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      sizeBytes: 2048,
+      attachedAt: "2026-08-07T08:00:00.000Z",
+    };
+    const submitThreadInput = vi.fn(async () => ({
+      receiptId: "input_history",
+      inputSequence: 1,
+      requestedMode: "auto" as const,
+      disposition: "queued" as const,
+      createdAt: "2026-08-07T08:01:00.000Z",
+      updatedAt: "2026-08-07T08:01:00.000Z",
+    }));
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [active]),
+      listLatestRuns: vi.fn(async () => []),
+      listHistoryFiles: vi.fn(async () => ({
+        items: [
+          {
+            threadId: historyFile.threadId,
+            name: historyFile.taskName,
+            createdAt: "2026-08-07T07:00:00.000Z",
+            lastFileAt: historyFile.attachedAt,
+            fileCount: 1,
+            files: [historyFile],
+          },
+        ],
+        range: { activeAfter: "2026-02-07T00:00:00.000Z" },
+        hasMore: false,
+        hasOlder: false,
+      })),
+      submitThreadInput,
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+    if (textarea === null) throw new Error("未渲染任务输入区");
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+      setter?.call(textarea, "@采购");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(180);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const option = container.querySelector<HTMLButtonElement>('[role="option"]');
+    expect(option?.textContent).toContain("采购合同.docx");
+    act(() => option?.click());
+    expect(container.querySelector(".composer-file.is-history")?.textContent).toContain(
+      "@采购合同.docx",
+    );
+
+    const form = textarea.closest("form");
+    await act(async () =>
+      form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await settleEffects();
+    expect(submitThreadInput).toHaveBeenCalledWith(active.id, "@采购合同.docx", "auto", undefined, [
+      historyFile,
+    ]);
+    expect(apiClient.uploadResource).not.toHaveBeenCalled();
+    expect(container.querySelector(".composer-file.is-history")).toBeNull();
   });
 
   it("刷新后稳定选择第一个活跃 Thread，恢复最新 Run 并启动投影读取", async () => {

@@ -13,6 +13,7 @@ import {
 import { type ServiceAssemblyFactory, startServiceProcess } from "@cube-runtime/process-runtime";
 import {
   createResourceFilesystemCapabilityCodec,
+  HistoryFileLibraryService,
   ResourceAttachmentResolver,
   ResourceUploadService,
 } from "@cube-runtime/resource";
@@ -121,6 +122,9 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
           blobs,
           resourceUploads,
           resourceAttachments: new ResourceAttachmentResolver(persistence.resourceCatalog),
+          ...(configuration.historyFilesystemEnabled
+            ? { historyFiles: new HistoryFileLibraryService(persistence.resourceFilesystem) }
+            : {}),
           skillCenter: new SkillCenterService(persistence.skillCenter),
           resourceFilesystem: {
             catalog: persistence.resourceFilesystem,

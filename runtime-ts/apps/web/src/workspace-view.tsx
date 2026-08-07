@@ -27,12 +27,14 @@ import {
 import {
   type Artifact,
   canPreviewArtifact,
+  type HistoryFile,
   type Run,
   type RunEvent,
   type RunStatus,
   type Thread,
   type ThreadContextMessage,
   type ThreadContinuityStatus,
+  type RuntimeApi,
 } from "./api.js";
 import {
   buildConversationBlocks,
@@ -703,6 +705,9 @@ export function ConversationComposer({
   onSubmit,
   showQueueAction,
   onQueue,
+  selectedHistoryFiles = [],
+  onHistoryFilesChange,
+  historyFileApi,
 }: {
   readonly input: string;
   readonly files: readonly File[];
@@ -712,11 +717,87 @@ export function ConversationComposer({
   readonly onSubmit: FormEventHandler<HTMLFormElement>;
   readonly showQueueAction: boolean;
   readonly onQueue: () => void;
+  readonly selectedHistoryFiles?: readonly HistoryFile[];
+  readonly onHistoryFilesChange?: (files: readonly HistoryFile[]) => void;
+  readonly historyFileApi?: Pick<RuntimeApi, "listHistoryFiles">;
 }) {
+  const [mentionFiles, setMentionFiles] = useState<readonly HistoryFile[]>([]);
+  const [mentionLoading, setMentionLoading] = useState(false);
+  const mention = activeHistoryMention(input);
+  const mentionQuery = mention?.query;
+
+  useEffect(() => {
+    if (historyFileApi === undefined || mentionQuery === undefined) {
+      setMentionFiles([]);
+      setMentionLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setMentionLoading(true);
+    const timer = window.setTimeout(() => {
+      void historyFileApi
+        .listHistoryFiles({ query: mentionQuery, limit: 8 })
+        .then((page) => {
+          if (cancelled) return;
+          const seen = new Set<string>();
+          setMentionFiles(
+            page.items
+              .flatMap((task) => task.files)
+              .filter((file) => {
+                const key = composerHistoryFileKey(file);
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+              })
+              .slice(0, 8),
+          );
+        })
+        .catch(() => {
+          if (!cancelled) setMentionFiles([]);
+        })
+        .finally(() => {
+          if (!cancelled) setMentionLoading(false);
+        });
+    }, 180);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [historyFileApi, mentionQuery]);
+
+  const selectMention = (file: HistoryFile) => {
+    if (mention === undefined || onHistoryFilesChange === undefined) return;
+    const exists = selectedHistoryFiles.some(
+      (selected) => composerHistoryFileKey(selected) === composerHistoryFileKey(file),
+    );
+    if (!exists && selectedHistoryFiles.length + files.length < 20)
+      onHistoryFilesChange([...selectedHistoryFiles, file]);
+    onChange(`${input.slice(0, mention.start)}@${file.entryName} ${input.slice(mention.end)}`);
+    setMentionFiles([]);
+  };
+
+  const hasInput = input.trim().length > 0 || files.length > 0 || selectedHistoryFiles.length > 0;
   return (
     <form className="composer" onSubmit={onSubmit}>
-      {files.length > 0 && (
-        <ul className="composer-files" aria-label="待上传文件">
+      {(files.length > 0 || selectedHistoryFiles.length > 0) && (
+        <ul className="composer-files" aria-label="待发送文件">
+          {selectedHistoryFiles.map((file, index) => (
+            <li className="composer-file is-history" key={composerHistoryFileKey(file)}>
+              <span title={file.entryName}>@{file.entryName}</span>
+              <button
+                type="button"
+                aria-label={`移除历史文件 ${file.entryName}`}
+                disabled={disabled}
+                onClick={() =>
+                  onHistoryFilesChange?.(
+                    selectedHistoryFiles.filter((_candidate, ordinal) => ordinal !== index),
+                  )
+                }
+              >
+                <X size={13} />
+              </button>
+            </li>
+          ))}
           {files.map((file, index) => (
             <li className="composer-file" key={composerFileKey(file)}>
               <span title={file.name}>{file.name}</span>
@@ -734,6 +815,32 @@ export function ConversationComposer({
           ))}
         </ul>
       )}
+      {mention !== undefined &&
+        historyFileApi !== undefined &&
+        (mentionLoading || mentionFiles.length > 0) && (
+          <div className="history-mention-menu" role="listbox" aria-label="选择历史文件">
+            {mentionLoading && mentionFiles.length === 0 ? (
+              <span>
+                <LoaderCircle className="spin" size={15} /> 正在搜索云盘
+              </span>
+            ) : (
+              mentionFiles.map((file) => (
+                <button
+                  type="button"
+                  role="option"
+                  key={composerHistoryFileKey(file)}
+                  onClick={() => selectMention(file)}
+                >
+                  <FileText size={16} />
+                  <span>
+                    <strong>{file.entryName}</strong>
+                    <small>{file.taskName}</small>
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        )}
       <label className="sr-only" htmlFor="agent-request">
         发送给 Agent 的任务
       </label>
@@ -741,7 +848,7 @@ export function ConversationComposer({
         id="agent-request"
         value={input}
         onChange={(event) => onChange(event.target.value)}
-        placeholder="描述你希望 Agent 完成的任务…"
+        placeholder="描述任务，输入 @ 可选择云盘文件…"
         rows={2}
         disabled={disabled}
         style={{ resize: composerTextareaResize }}
@@ -781,7 +888,7 @@ export function ConversationComposer({
           <button
             type="button"
             className="queue-button"
-            disabled={disabled || (!input.trim() && files.length === 0)}
+            disabled={disabled || !hasInput}
             onClick={onQueue}
           >
             排队下一任务
@@ -792,7 +899,7 @@ export function ConversationComposer({
           className="send-button"
           title="发送"
           aria-label="发送任务"
-          disabled={disabled || (!input.trim() && files.length === 0)}
+          disabled={disabled || !hasInput}
         >
           <Send size={16} />
           <span className="send-label">发送</span>
@@ -800,6 +907,20 @@ export function ConversationComposer({
       </div>
     </form>
   );
+}
+
+export function activeHistoryMention(
+  input: string,
+): { readonly start: number; readonly end: number; readonly query: string } | undefined {
+  const match = /(?:^|\s)@([^\s@]*)$/u.exec(input);
+  if (match === null) return undefined;
+  const query = match[1] ?? "";
+  const atOffset = match[0].lastIndexOf("@");
+  return { start: match.index + atOffset, end: input.length, query };
+}
+
+function composerHistoryFileKey(file: Pick<HistoryFile, "resourceId" | "versionId">): string {
+  return `${file.resourceId}\0${file.versionId}`;
 }
 
 function composerFileKey(file: File): string {

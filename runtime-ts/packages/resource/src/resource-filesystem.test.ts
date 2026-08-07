@@ -56,9 +56,14 @@ describe("Resource 只读文件系统", () => {
         sizeBytes: 12,
       },
     ]);
-    expect(projected).toContain("分析一下\n\n# 用户在本轮上传的文件");
+    expect(projected).toContain("分析一下\n\n# 用户在本轮提供的文件");
     expect(projected).toContain(JSON.stringify({ 文件名: "设计稿.png", 文件地址: path }));
     expect(stripAttachmentsFromUserFacingPrompt(projected)).toBe("分析一下");
+    expect(
+      stripAttachmentsFromUserFacingPrompt(
+        '旧请求\n\n# 用户在本轮上传的文件\n- {"文件名":"旧文件.txt"}',
+      ),
+    ).toBe("旧请求");
   });
 
   it("按固化时区生成可排序的语义历史目录与文件名", () => {

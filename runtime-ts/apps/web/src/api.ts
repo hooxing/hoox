@@ -42,6 +42,44 @@ export type UploadedResource = {
   readonly sizeBytes: number;
 };
 
+export type HistoryFile = {
+  readonly threadId: string;
+  readonly taskName: string;
+  readonly resourceId: string;
+  readonly versionId: string;
+  readonly name: string;
+  readonly entryName: string;
+  readonly path: string;
+  readonly mediaType: string;
+  readonly sizeBytes: number;
+  readonly attachedAt: string;
+};
+
+export type HistoryFileTask = {
+  readonly threadId: string;
+  readonly name: string;
+  readonly createdAt: string;
+  readonly lastFileAt: string;
+  readonly fileCount: number;
+  readonly files: readonly HistoryFile[];
+};
+
+export type HistoryFilePage = {
+  readonly items: readonly HistoryFileTask[];
+  readonly range: Readonly<{ activeAfter?: string; activeBefore?: string }>;
+  readonly hasMore: boolean;
+  readonly hasOlder: boolean;
+  readonly next?: Readonly<{ lastFileAt: string; threadId: string }>;
+};
+
+export type HistoryFileListOptions = {
+  readonly query?: string;
+  readonly activeAfter?: string;
+  readonly activeBefore?: string;
+  readonly before?: Readonly<{ lastFileAt: string; threadId: string }>;
+  readonly limit?: number;
+};
+
 export type SkillCatalogItem = {
   readonly canonicalKey: string;
   readonly displayName: string;
@@ -356,6 +394,29 @@ export class RuntimeApi {
   }
   getThread(threadId: string): Promise<Thread> {
     return this.request(`/v1/threads/${encodeURIComponent(threadId)}`);
+  }
+
+  async listHistoryFiles(options: HistoryFileListOptions = {}): Promise<HistoryFilePage> {
+    const query = new URLSearchParams();
+    if (options.query?.trim()) query.set("q", options.query.trim());
+    if (options.activeAfter !== undefined) query.set("activeAfter", options.activeAfter);
+    if (options.activeBefore !== undefined) query.set("activeBefore", options.activeBefore);
+    if (options.before !== undefined) {
+      query.set("beforeLastFileAt", options.before.lastFileAt);
+      query.set("beforeThreadId", options.before.threadId);
+    }
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.size === 0 ? "" : `?${query.toString()}`;
+    return this.request<HistoryFilePage>(`/v1/me/history-files${suffix}`);
+  }
+
+  async downloadHistoryFile(file: Pick<HistoryFile, "resourceId" | "versionId">): Promise<string> {
+    const data = await this.request<unknown>(
+      `/v1/me/history-files/${encodeURIComponent(file.resourceId)}/versions/${encodeURIComponent(file.versionId)}/download`,
+    );
+    const candidate = record(data)?.url;
+    if (typeof candidate === "string") return candidate;
+    throw new ApiError("历史文件下载地址格式无效", 502, true);
   }
 
   async listSkills(query = ""): Promise<SkillCatalogPage> {

@@ -70,6 +70,34 @@ describe("项目模型报文本地镜像", () => {
     expect(await readFile(join(directory, files[0] as string), "utf8")).toBe('{"first":true}');
   });
 
+  it("将子 Agent 请求体保存到独立 Agent/Turn 目录", async () => {
+    const root = await temporaryRoot();
+    const mirror = new ProjectModelWireTraceMirror(root);
+    await mirror.persist(
+      record({
+        context: {
+          tenantId: "tenant_dev_1",
+          threadId: "thread_dev_1",
+          runId: "run_dev_1",
+          attemptId: "attempt_dev_1",
+          agentThreadId: "agent_child_1",
+          agentTurnId: "turn_child_2",
+        },
+      }),
+    );
+
+    const directory = join(
+      root,
+      "run_dev_1",
+      "attempt_dev_1",
+      "subagents",
+      "agent_child_1",
+      "turn_child_2",
+    );
+    expect(await readdir(directory)).toEqual(["model-turn-03-transport-2-request-complete.json"]);
+    expect(await readdir(join(root, "run_dev_1", "attempt_dev_1"))).toEqual(["subagents"]);
+  });
+
   it("镜像失败不影响权威持久化，production 不创建本地镜像", async () => {
     const authoritativePersist = vi.fn(async () => undefined);
     const authoritativeCaptureFailed = vi.fn(async () => undefined);
@@ -207,16 +235,18 @@ async function createDirectoryLink(target: string, path: string): Promise<void> 
 }
 
 function record(
-  input: Partial<Pick<ModelWireTraceRecord, "part" | "status" | "body">> = {},
+  input: Partial<Pick<ModelWireTraceRecord, "context" | "part" | "status" | "body">> = {},
 ): ModelWireTraceRecord {
   const body = input.body ?? new TextEncoder().encode('{"ok":true}');
   return {
-    context: {
-      tenantId: "tenant_dev_1",
-      threadId: "thread_dev_1",
-      runId: "run_dev_1",
-      attemptId: "attempt_dev_1",
-    },
+    context:
+      input.context ??
+      Object.freeze({
+        tenantId: "tenant_dev_1",
+        threadId: "thread_dev_1",
+        runId: "run_dev_1",
+        attemptId: "attempt_dev_1",
+      }),
     modelTurn: 3,
     transportAttempt: 2,
     part: input.part ?? "request",

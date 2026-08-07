@@ -233,4 +233,48 @@ export async function withTenantTransaction<T>(
   );
 }
 
+const transactionRetryDelaysMs = Object.freeze([5, 15, 45]);
+
+async function withRetriedTenantTransaction<T>(
+  pool: Pool,
+  context: DatabaseTenantContext,
+  operation: (client: PoolClient) => Promise<T>,
+  isolationLevel: "REPEATABLE READ" | "SERIALIZABLE",
+): Promise<T> {
+  for (let retry = 0; ; retry += 1) {
+    try {
+      return await withTenantTransaction(pool, context, operation, { isolationLevel });
+    } catch (error) {
+      const retryDelay = transactionRetryDelaysMs[retry];
+      const code = postgresCode(error);
+      if ((code === "40001" || code === "40P01") && retryDelay !== undefined) {
+        await new Promise<void>((resolve) => setTimeout(resolve, retryDelay));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
+/**
+ * 仅供已经审计为可完整重放的事务显式选择；不会改变普通 withTenantTransaction 的一次性语义。
+ * 只重试 PostgreSQL 已明确回滚的 serialization/deadlock，绝不重试 COMMIT 响应未知。
+ */
+export async function withRetriedSerializableTenantTransaction<T>(
+  pool: Pool,
+  context: DatabaseTenantContext,
+  operation: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  return await withRetriedTenantTransaction(pool, context, operation, "SERIALIZABLE");
+}
+
+/** 仅供包含 fence 锁且已经审计为可完整重放的 REPEATABLE READ 读取显式选择。 */
+export async function withRetriedRepeatableReadTenantTransaction<T>(
+  pool: Pool,
+  context: DatabaseTenantContext,
+  operation: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  return await withRetriedTenantTransaction(pool, context, operation, "REPEATABLE READ");
+}
+
 export type { Pool, PoolClient } from "pg";

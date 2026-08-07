@@ -47,7 +47,7 @@ ResourceFS、Sandbox 入口和 Web 标题体验。当前交付要求进一步聚
 
 采用方案 B，并冻结以下实现：
 
-1. 迁移 `0034_personal_history_filesystem` 创建 `thread_history_directories` 和
+1. 迁移 `0036_personal_history_filesystem` 创建 `thread_history_directories` 和
    `thread_history_file_entries`，使用 `tenant_id` 作为 RLS 与身份边界，并回填 personal Tenant 中已进入 durable receipt 的附件。
 2. `HISTORY_FILESYSTEM_ENABLED` 同时控制 API 历史关系写入、ResourceFS 历史投影和 Worker 固定入口；任一进程关闭后不得暴露半套
    Agent 契约。

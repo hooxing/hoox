@@ -117,6 +117,13 @@
 | [ADR-0118](0118-history-files-virtual-directory-and-task-ownership.md) | 历史任务文件虚拟目录与个人/团队任务归属 | 已接受 | 2026-08-07 |
 | [ADR-0119](0119-personal-history-files-first-release-scope.md) | 个人历史文件虚拟目录首期范围 | 已接受 | 2026-08-07 |
 | [ADR-0120](0120-personal-history-filesystem-implementation-slice.md) | 个人历史文件虚拟目录实现切片 | 已接受 | 2026-08-07 |
+| [ADR-0121](0121-low-cost-thread-title-generation.md) | personal Thread 低成本标题 Outbox 与异步目录就绪 | 已接受 | 2026-08-07 |
+| [ADR-0122](0122-shared-sandbox-subagent-control-plane.md) | 共享 Sandbox 的 SubAgent 控制面 | 已接受 | 2026-08-05 |
+| [ADR-0123](0123-subagent-tool-call-identity-and-durable-lifecycle.md) | SubAgent 工具调用身份与持久生命周期 | 已接受 | 2026-08-06 |
+| [ADR-0124](0124-subagent-control-serializable-retry.md) | SubAgent 执行链路事务并发冲突重试 | 已接受 | 2026-08-06 |
+| [ADR-0125](0125-subagent-history-inheritance-single-source.md) | SubAgent 历史继承的单一来源 | 已接受 | 2026-08-06 |
+| [ADR-0126](0126-root-child-run-event-sequencing.md) | Root 与 Child 的 Run 事件共享编码队列 | 已接受 | 2026-08-06 |
+| [ADR-0127](0127-thread-scoped-subagent-conversation.md) | Thread 级 SubAgent 对话与 Run 级执行 | 已接受 | 2026-08-07 |
 
 ## 何时必须记录
 

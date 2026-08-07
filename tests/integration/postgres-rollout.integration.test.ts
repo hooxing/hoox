@@ -7,9 +7,12 @@ import {
   threadId,
   userId,
 } from "@cube-runtime/domain";
+import { threadActiveHistoryDigest } from "@cube-runtime/pi-adapter";
 import type { ExecutionFence } from "@cube-runtime/run-contracts";
+import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { PgAgentControlRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-control.js";
 import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
 import {
   createPostgresPool,
@@ -47,6 +50,16 @@ testMigrationUrl.password = migratorPassword;
 const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
 
 const hash = (character: string) => sha256Digest(character.repeat(64));
+const reusableSubagentHistoryUnsigned = Object.freeze({
+  schemaVersion: 1 as const,
+  projectionSchemaVersion: 1 as const,
+  throughSequence: 0,
+  messages: Object.freeze([]),
+});
+const reusableSubagentHistory = Object.freeze({
+  ...reusableSubagentHistoryUnsigned,
+  digest: threadActiveHistoryDigest(reusableSubagentHistoryUnsigned),
+});
 const attemptId = `rollout_attempt_${unique}`;
 const executionScope = {
   tenantId: tenantId(`rollout_tenant_${unique}`),
@@ -126,6 +139,34 @@ function pausingFenceLockPool(upstream: Pool): {
     },
   }) as Pool;
   return { pool, locked, release: releaseLock };
+}
+
+function observingFenceLockPool(upstream: Pool): {
+  readonly pool: Pool;
+  readonly lockRequested: Promise<void>;
+} {
+  let signalLockRequested!: () => void;
+  const lockRequested = new Promise<void>((resolve) => {
+    signalLockRequested = resolve;
+  });
+  const originalConnect = upstream.connect.bind(upstream);
+  const pool = new Proxy(upstream, {
+    get(target, property, receiver) {
+      if (property !== "connect") return Reflect.get(target, property, receiver);
+      return async () => {
+        const client = await originalConnect();
+        const originalQuery = client.query.bind(client);
+        client.query = (async (...args: unknown[]) => {
+          if (typeof args[0] === "string" && args[0].includes("FOR SHARE OF attempt,claim,lease")) {
+            signalLockRequested();
+          }
+          return (originalQuery as (...queryArgs: unknown[]) => Promise<unknown>)(...args);
+        }) as typeof client.query;
+        return client;
+      };
+    },
+  }) as Pool;
+  return { pool, lockRequested };
 }
 
 function synchronizingRolloutWriteLockPool(upstream: Pool): {
@@ -701,6 +742,332 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
         ),
       ),
     ).rejects.toBeDefined();
+  });
+
+  it("SubAgent 控制面创建独立 Rollout，并保持命令重放与 JSONB 结果稳定", async () => {
+    const controls = new PgAgentControlRepository(runtime);
+    const childId = agentThreadId(`rollout_child_${unique}`);
+    const childTurnId = `rollout_child_turn_${unique}`;
+    const childContext = {
+      ...context,
+      scope: { ...scope, agentThreadId: childId },
+    };
+    try {
+      expect(
+        await controls.initializeRoot({
+          fence,
+          attemptId: scope.attemptId,
+          rootAgentThreadId: scope.agentThreadId,
+        }),
+      ).toEqual({ outcome: "ready", conversations: [] });
+      expect(
+        await controls.spawn({
+          fence,
+          attemptId: scope.attemptId,
+          commandId: `spawn_child_${unique}`,
+          argsDigest: hash("5"),
+          snapshot: {
+            agentThreadId: childId,
+            parentAgentThreadId: scope.agentThreadId,
+            canonicalPath: `/root/child_${unique}`,
+            task: "验证独立 Rollout",
+            tools: ["read"],
+            toolManifestDigest: digestCanonical({ tools: ["read"] }),
+            forkTurns: "none",
+            turnId: childTurnId,
+            turnOrdinal: 1,
+          },
+          maxThreads: 16,
+          maxActiveSubagents: 3,
+        }),
+      ).toMatchObject({ outcome: "created" });
+      expect(
+        await repository.openAgentStreamFromClaim({
+          fence,
+          attemptId: scope.attemptId,
+          compatibility,
+          agentThreadId: childId,
+          agentKind: "subagent",
+        }),
+      ).toMatchObject({ outcome: "ready" });
+      expect(
+        (
+          await repository.append({
+            context: childContext,
+            idempotencyKey: `append_child_${unique}`,
+            entries: [{ kind: "user", body: { text: "child-only" } }],
+          })
+        ).outcome,
+      ).toBe("created");
+      const childRecovery = await repository.loadRecovery({
+        context: childContext,
+        compatibility,
+      });
+      expect(childRecovery).toMatchObject({
+        outcome: "loaded",
+        tail: [{ sequence: 0, kind: "user", body: { text: "child-only" } }],
+      });
+
+      expect(
+        await controls.startTurn({
+          fence,
+          attemptId: scope.attemptId,
+          agentThreadId: childId,
+          turnId: childTurnId,
+        }),
+      ).toBe("started");
+      expect(
+        await controls.settleTurn({
+          fence,
+          attemptId: scope.attemptId,
+          agentThreadId: childId,
+          turnId: childTurnId,
+          status: "completed",
+          finalAnswer: "完成",
+          history: reusableSubagentHistory,
+        }),
+      ).toBe("settled");
+      expect(
+        await controls.initializeRoot({
+          fence,
+          attemptId: scope.attemptId,
+          rootAgentThreadId: scope.agentThreadId,
+        }),
+      ).toEqual({
+        outcome: "ready",
+        conversations: [
+          expect.objectContaining({
+            agentThreadId: childId,
+            tools: ["read"],
+            turnOrdinal: 1,
+            history: reusableSubagentHistory,
+          }),
+        ],
+      });
+      expect(
+        await controls.queueFollowUp({
+          fence,
+          attemptId: scope.attemptId,
+          callerAgentThreadId: scope.agentThreadId,
+          commandId: `follow_child_${unique}`,
+          argsDigest: hash("6"),
+          agentThreadId: childId,
+          turnId: `rollout_child_turn_2_${unique}`,
+          turnOrdinal: 2,
+          task: "继续验证",
+          maxActiveSubagents: 3,
+        }),
+      ).toBe("created");
+      const command = {
+        fence,
+        attemptId: scope.attemptId,
+        callerAgentThreadId: scope.agentThreadId,
+        commandId: `send_child_${unique}`,
+        kind: "send_message" as const,
+        argsDigest: hash("7"),
+      };
+      expect(await controls.recordCommand({ ...command, result: { left: 1, right: 2 } })).toBe(
+        "recorded",
+      );
+      expect(await controls.recordCommand({ ...command, result: { right: 2, left: 1 } })).toBe(
+        "replayed",
+      );
+    } finally {
+      await withTenantTransaction(migrator, databaseContext, async (client) => {
+        for (const table of [
+          "runtime_rollout_checkpoint_commands",
+          "runtime_rollout_checkpoints",
+          "runtime_rollout_replacements",
+          "runtime_rollout_append_commands",
+        ]) {
+          await client.query(
+            `DELETE FROM ${table} WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3`,
+            [scope.tenantId, scope.attemptId, childId],
+          );
+        }
+        await client.query(
+          "DELETE FROM runtime_rollout_entries WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_rollout_streams WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_agent_commands WHERE tenant_id=$1 AND attempt_id=$2 AND (caller_agent_thread_id=$3 OR result->>'agentThreadId'=$3)",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_agent_turns WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_agent_threads WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_subagent_conversations WHERE tenant_id=$1 AND thread_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.threadId, childId],
+        );
+      });
+    }
+  });
+
+  it("SubAgent spawn、Rollout 打开与恢复遇到并发 Attempt 更新时重试已回滚事务", async () => {
+    const childId = agentThreadId(`rollout_retry_child_${unique}`);
+    const commandId = `spawn_retry_child_${unique}`;
+    let releaseUpdate!: () => void;
+    let signalUpdated!: () => void;
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
+    const updated = new Promise<void>((resolve) => {
+      signalUpdated = resolve;
+    });
+    const update = withTenantTransaction(runtime, databaseContext, async (client) => {
+      await client.query(
+        "UPDATE execution_attempts SET updated_at=clock_timestamp() WHERE tenant_id=$1 AND attempt_id=$2",
+        [scope.tenantId, scope.attemptId],
+      );
+      signalUpdated();
+      await updateGate;
+    });
+    await updated;
+
+    const observed = observingFenceLockPool(runtime);
+    const controls = new PgAgentControlRepository(observed.pool);
+    const spawn = controls.spawn({
+      fence,
+      attemptId: scope.attemptId,
+      commandId,
+      argsDigest: hash("8"),
+      snapshot: {
+        agentThreadId: childId,
+        parentAgentThreadId: scope.agentThreadId,
+        canonicalPath: `/root/retry_child_${unique}`,
+        task: "验证 SERIALIZABLE 重试",
+        tools: [],
+        toolManifestDigest: digestCanonical({ tools: [] }),
+        forkTurns: "none",
+        turnId: `rollout_retry_turn_${unique}`,
+        turnOrdinal: 1,
+      },
+      maxThreads: 16,
+      maxActiveSubagents: 3,
+    });
+    await observed.lockRequested;
+    releaseUpdate();
+    await update;
+
+    try {
+      await expect(spawn).resolves.toMatchObject({ outcome: "created" });
+      const facts = await withTenantTransaction(runtime, databaseContext, async (client) => {
+        const threads = await client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM runtime_agent_threads WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        const turns = await client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM runtime_agent_turns WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        const commands = await client.query<{ count: string }>(
+          "SELECT count(*)::text AS count FROM runtime_agent_commands WHERE tenant_id=$1 AND attempt_id=$2 AND command_id=$3",
+          [scope.tenantId, scope.attemptId, commandId],
+        );
+        return {
+          threads: threads.rows[0]?.count,
+          turns: turns.rows[0]?.count,
+          commands: commands.rows[0]?.count,
+        };
+      });
+      expect(facts).toEqual({ threads: "1", turns: "1", commands: "1" });
+
+      let releaseRolloutUpdate!: () => void;
+      let signalRolloutUpdated!: () => void;
+      const rolloutUpdateGate = new Promise<void>((resolve) => {
+        releaseRolloutUpdate = resolve;
+      });
+      const rolloutUpdated = new Promise<void>((resolve) => {
+        signalRolloutUpdated = resolve;
+      });
+      const rolloutUpdate = withTenantTransaction(runtime, databaseContext, async (client) => {
+        await client.query(
+          "UPDATE execution_attempts SET updated_at=clock_timestamp() WHERE tenant_id=$1 AND attempt_id=$2",
+          [scope.tenantId, scope.attemptId],
+        );
+        signalRolloutUpdated();
+        await rolloutUpdateGate;
+      });
+      await rolloutUpdated;
+      const observedRollout = observingFenceLockPool(runtime);
+      const rollout = new PgRuntimeRolloutRepository(observedRollout.pool).openAgentStreamFromClaim(
+        {
+          fence,
+          attemptId: scope.attemptId,
+          compatibility,
+          agentThreadId: childId,
+          agentKind: "subagent",
+        },
+      );
+      await observedRollout.lockRequested;
+      releaseRolloutUpdate();
+      await rolloutUpdate;
+      await expect(rollout).resolves.toMatchObject({ outcome: "ready" });
+
+      let releaseRecoveryUpdate!: () => void;
+      let signalRecoveryUpdated!: () => void;
+      const recoveryUpdateGate = new Promise<void>((resolve) => {
+        releaseRecoveryUpdate = resolve;
+      });
+      const recoveryUpdated = new Promise<void>((resolve) => {
+        signalRecoveryUpdated = resolve;
+      });
+      const recoveryUpdate = withTenantTransaction(runtime, databaseContext, async (client) => {
+        await client.query(
+          "UPDATE execution_attempts SET updated_at=clock_timestamp() WHERE tenant_id=$1 AND attempt_id=$2",
+          [scope.tenantId, scope.attemptId],
+        );
+        signalRecoveryUpdated();
+        await recoveryUpdateGate;
+      });
+      await recoveryUpdated;
+      const observedRecovery = observingFenceLockPool(runtime);
+      const childContext = {
+        ...context,
+        scope: { ...scope, agentThreadId: childId },
+      };
+      const recovered = new PgRuntimeRolloutRepository(observedRecovery.pool).loadRecovery({
+        context: childContext,
+        compatibility,
+      });
+      await observedRecovery.lockRequested;
+      releaseRecoveryUpdate();
+      await recoveryUpdate;
+      await expect(recovered).resolves.toMatchObject({ outcome: "loaded", tail: [] });
+    } finally {
+      await withTenantTransaction(migrator, databaseContext, async (client) => {
+        await client.query(
+          "DELETE FROM runtime_rollout_streams WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_agent_commands WHERE tenant_id=$1 AND attempt_id=$2 AND (caller_agent_thread_id=$3 OR result->>'agentThreadId'=$3)",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_agent_turns WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_agent_threads WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.attemptId, childId],
+        );
+        await client.query(
+          "DELETE FROM runtime_subagent_conversations WHERE tenant_id=$1 AND thread_id=$2 AND agent_thread_id=$3",
+          [scope.tenantId, scope.threadId, childId],
+        );
+      });
+    }
   });
 
   it("每次 append 都重验未释放 claim、实时 workspace lease 与接管后的新 token", async () => {

@@ -98,6 +98,66 @@ describe("模型网络原始报文诊断", () => {
     }
   });
 
+  it("同一 Attempt 的 root 与子 Agent Session 共享模型轮次分配器且保留独立身份", async () => {
+    installModelWireFetchInstrumentation();
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end("data: [DONE]\n\n");
+    });
+    const port = await listen(server);
+    const traces = new TracePort();
+    const root = new ModelWireTraceSession(traces, 1024, `http://127.0.0.1:${port}/v1`);
+    const rootAttempt = root.createAttempt();
+    const childAttempt = root.createAttempt();
+    try {
+      const rootResponse = await rootAttempt.run(
+        {
+          tenantId: "tenant_shared",
+          threadId: "thread_shared",
+          runId: "run_shared",
+          attemptId: "attempt_shared",
+        },
+        () =>
+          fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+            method: "POST",
+            body: "root-request",
+          }),
+      );
+      const childResponse = await childAttempt.run(
+        {
+          tenantId: "tenant_shared",
+          threadId: "thread_shared",
+          runId: "run_shared",
+          attemptId: "attempt_shared",
+          agentThreadId: "agent_shared",
+          agentTurnId: "turn_shared",
+        },
+        () =>
+          fetch(`http://127.0.0.1:${port}/v1/chat/completions`, {
+            method: "POST",
+            body: "child-request",
+          }),
+      );
+      await rootResponse.text();
+      await childResponse.text();
+      await Promise.all([rootAttempt.drain(), childAttempt.drain()]);
+
+      const requests = traces.records
+        .filter((entry) => entry.part === "request")
+        .sort((left, right) => left.modelTurn - right.modelTurn);
+      expect(requests.map((entry) => entry.modelTurn)).toEqual([0, 1]);
+      expect(requests[0]?.context.agentThreadId).toBeUndefined();
+      expect(requests[1]?.context).toMatchObject({
+        agentThreadId: "agent_shared",
+        agentTurnId: "turn_shared",
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
   it("达到上限、非 2xx 与中断时只影响诊断状态，不替换实际 Response 语义", async () => {
     installModelWireFetchInstrumentation();
     const server = createServer((_request, response) => {

@@ -42,7 +42,11 @@ import { parseWorkspaceManifest } from "@cube-runtime/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { lockThreadExecutionHead, settleActiveThreadRun } from "./pg-thread-run-queue.js";
 import { readRunSkillSnapshot } from "./pg-skill-runtime.js";
-import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
+import {
+  TransactionCommitUnknownError,
+  withRetriedSerializableTenantTransaction,
+  withTenantTransaction,
+} from "./postgres.js";
 import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
 import { appendThreadContext } from "./thread-context.js";
 import { applyThreadSandboxTerminal } from "./thread-sandbox-session.js";
@@ -1173,7 +1177,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
   }): Promise<FenceInspectionResult> {
     const leaseDurationMs = boundedDuration(input.leaseDurationMs, "leaseDurationMs");
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.fence.scope.tenantId },
         async (client) => {
@@ -1309,7 +1313,6 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             workspace: state.workspace,
           } as const;
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch {
       return { outcome: "unavailable" };
@@ -1332,7 +1335,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
       return { outcome: "conflict" };
     }
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.fence.scope.tenantId },
         async (client) => {
@@ -1348,6 +1351,16 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               row?.attempt_stage !== "model_execution_started")
           ) {
             return { outcome: "conflict" } as const;
+          }
+          if (input.effect === "agent_model_start") {
+            const childTurn = await client.query(
+              `SELECT 1 FROM runtime_agent_turns
+                WHERE tenant_id=$1 AND attempt_id=$2 AND status='running'
+                  AND $3 = agent_thread_id || ':' || agent_turn_id || ':model'
+                LIMIT 1`,
+              [input.fence.scope.tenantId, row?.attempt_id, input.call.callId],
+            );
+            if (childTurn.rowCount !== 1) return { outcome: "conflict" } as const;
           }
           if (input.effect === "model_continue") {
             const steer =
@@ -1468,7 +1481,6 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             },
           } as const;
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch (error) {
       if (isPgCode(error, "23505") || isPgCode(error, "23503") || isPgCode(error, "23514")) {
@@ -1540,7 +1552,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     readonly permit: ExternalEffectPermit;
   }): ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]> {
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: input.fence.scope.tenantId },
         async (client) => {
@@ -1573,7 +1585,6 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           );
           return { outcome: "consumed", databaseNow } as const;
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch {
       return { outcome: "unavailable" };

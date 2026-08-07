@@ -31,6 +31,9 @@ importers:
       '@cube-runtime/persistence':
         specifier: workspace:*
         version: link:runtime-ts/packages/persistence
+      '@cube-runtime/pi-adapter':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/pi-adapter
       '@cube-runtime/protocol-mapper':
         specifier: workspace:*
         version: link:runtime-ts/packages/protocol-mapper

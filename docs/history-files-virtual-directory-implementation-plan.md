@@ -27,8 +27,8 @@
 
 当前已落地虚拟目录与低成本标题主链路：
 
-- 迁移 `0034_personal_history_filesystem` 创建个人历史目录、文件关系、RLS、最小 ACL 和已有 receipt 回填；
-- 迁移 `0035_thread_title_generation` 创建 personal Thread 标题 Outbox、claim fencing、pending 目录状态与最小 ACL；
+- 迁移 `0036_personal_history_filesystem` 创建个人历史目录、文件关系、RLS、最小 ACL 和已有 receipt 回填；
+- 迁移 `0037_thread_title_generation` 创建 personal Thread 标题 Outbox、claim fencing、pending 目录状态与最小 ACL；
 - API 在首条 durable 输入事务内幂等写标题 Outbox，Scheduler 使用独立低成本模型异步生成标题并以 CAS 更新 Thread；
 - Web 在 Run 轮询期间读取最新 Thread，使模型标题异步替换确定性标题；
 - durable Thread 输入接受附件时，在同一事务内幂等维护历史关系；
@@ -468,7 +468,7 @@ Sandbox；只有工具调用需要 Sandbox 时才 acquire。若未来 Skill 不�
 
 ## 9. 标题服务实施
 
-本节已按 ADR-0121 实现。`0035_thread_title_generation` 增加单 Thread Outbox、claim fencing 与 pending 目录状态；API 在
+本节已按 ADR-0121 实现。`0037_thread_title_generation` 增加单 Thread Outbox、claim fencing 与 pending 目录状态；API 在
 首条 durable 输入事务中幂等创建任务，Scheduler 使用独立低成本模型异步生成标题，Web 在 Run 轮询期间读取最新 Thread。
 
 标题生成只服务 personal 历史目录和同一任务的 UI 标题，当前作为现有 Scheduler 中的独立 consumer 运行，不立即拆新服务；

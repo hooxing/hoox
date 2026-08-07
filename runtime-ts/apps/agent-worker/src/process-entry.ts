@@ -16,6 +16,7 @@ import {
   DurableTraceBlobPersistenceAdapter,
   DurableWorkspaceCandidateBlobWriter,
   PgBackedSandboxSessionRegistry,
+  PgAgentControlRepository,
   PgBlobLifecycleRepository,
   PgExecutionPersistence,
   PgModelWireTraceRepository,
@@ -173,6 +174,7 @@ const workerEnvironmentSchema = Object.freeze({
   }),
   THREAD_SANDBOX_SESSION_REUSE_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
   HISTORY_FILESYSTEM_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  SUBAGENTS_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
   CUBESANDBOX_SESSION_TTL_SECONDS: integerEnvironmentField({
     minimum: 1,
     maximum: 86_400,
@@ -268,6 +270,7 @@ export interface WorkerProcessConfiguration {
     lifecycleTimeoutMs: number;
   }>;
   readonly historyFilesystemEnabled: boolean;
+  readonly subagents: Readonly<{ enabled: boolean }>;
   readonly development?: Readonly<{
     readonly userATenantId: string;
   }>;
@@ -337,6 +340,7 @@ export function parseWorkerProcessEnvironment(
   const compactionEnabled = parsed.values.THREAD_CONTEXT_COMPACTION_ENABLED ?? true;
   const sandboxSessionReuseEnabled = parsed.values.THREAD_SANDBOX_SESSION_REUSE_ENABLED ?? true;
   const historyFilesystemEnabled = parsed.values.HISTORY_FILESYSTEM_ENABLED ?? false;
+  const subagentsEnabled = parsed.values.SUBAGENTS_ENABLED ?? true;
   const runTimeoutMs = parsed.values.AGENT_WORKER_RUN_TIMEOUT_MS ?? 12 * 60 * 60_000;
   const sessionTtlSeconds = parsed.values.CUBESANDBOX_SESSION_TTL_SECONDS ?? 12 * 60 * 60 + 600;
   const sandboxLifecycleTimeoutMs = parsed.values.THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS ?? 90_000;
@@ -475,6 +479,7 @@ export function parseWorkerProcessEnvironment(
       lifecycleTimeoutMs: sandboxLifecycleTimeoutMs,
     }),
     historyFilesystemEnabled,
+    subagents: Object.freeze({ enabled: subagentsEnabled }),
     ...(parsed.runtimeEnvironment === "development"
       ? {
           development: Object.freeze({
@@ -943,6 +948,9 @@ async function assembleWorkerRuntime(
         ...(runEventDiagnostics === undefined ? {} : { runEventDiagnostics }),
         ...(configuration.threadContext.writeEnabled ? { threadContextBodies } : {}),
         ...(configuration.threadSandbox.reuseEnabled ? { threadSandboxes } : {}),
+        ...(configuration.subagents.enabled
+          ? { agentControl: new PgAgentControlRepository(pool) }
+          : {}),
       },
       {
         workerId: configuration.worker.workerId,
@@ -953,6 +961,7 @@ async function assembleWorkerRuntime(
         threadInputRoutingV2Enabled: configuration.threadContext.inputRoutingEnabled,
         threadSandboxSessionReuseEnabled: configuration.threadSandbox.reuseEnabled,
         historyFilesystemEnabled: configuration.historyFilesystemEnabled,
+        subagentsEnabled: configuration.subagents.enabled,
       },
     );
     const loop = new AgentWorkerPollingLoop(new PgRunDispatchOutbox(pool), worker, {

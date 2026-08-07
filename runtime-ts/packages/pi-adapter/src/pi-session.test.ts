@@ -550,6 +550,26 @@ describe("Pi 安全适配", () => {
     },
   );
 
+  it("子 Session 的真实 capability manifest 只包含父 Agent 选择的工具", async () => {
+    const { controller } = await harness(
+      [],
+      new FakeSandboxHandle("pi-subagent-tools"),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      ["read"],
+    );
+
+    expect(controller.getDiagnostics().activeToolNames).toEqual(["read"]);
+  });
+
   it.runIf(process.platform === "linux")(
     "完整工具定义与低信任 custom entry 参与计量，当前超大输入在调用 Provider 前拒绝",
     async () => {
@@ -1375,6 +1395,7 @@ async function harness(
   prepareNextTurnHistory?: Parameters<typeof createSafePiSession>[0]["prepareNextTurnHistory"],
   availableSkills?: Parameters<typeof createSafePiSession>[0]["availableSkills"],
   skillToolExecutor?: Parameters<typeof createSafePiSession>[0]["skillToolExecutor"],
+  enabledToolNames?: Parameters<typeof createSafePiSession>[0]["enabledToolNames"],
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
@@ -1423,6 +1444,7 @@ async function harness(
     ...(prepareNextTurnHistory === undefined ? {} : { prepareNextTurnHistory }),
     ...(availableSkills === undefined ? {} : { availableSkills }),
     ...(skillToolExecutor === undefined ? {} : { skillToolExecutor }),
+    ...(enabledToolNames === undefined ? {} : { enabledToolNames }),
   });
   disposers.push(() => controller.dispose());
   const events: RuntimeAgentEvent[] = [];

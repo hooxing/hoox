@@ -83,6 +83,13 @@ const runtimeRolloutTables = new Set([
   "runtime_rollout_checkpoints",
   "runtime_rollout_checkpoint_commands",
 ]);
+const runtimeAgentControlTables = new Set([
+  "runtime_agent_threads",
+  "runtime_agent_turns",
+  "runtime_agent_mailbox_messages",
+  "runtime_agent_commands",
+]);
+const runtimeSubagentConversationTables = new Set(["runtime_subagent_conversations"]);
 const waitingRecoveryTables = new Set([
   "waiting_recovery_checkpoints",
   "waiting_recovery_effect_outbox",
@@ -206,6 +213,11 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["runtime_rollout_replacements", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_checkpoints", new Set(["SELECT", "INSERT"])],
   ["runtime_rollout_checkpoint_commands", new Set(["SELECT", "INSERT"])],
+  ["runtime_agent_threads", new Set(["SELECT", "INSERT"])],
+  ["runtime_subagent_conversations", new Set(["SELECT", "INSERT"])],
+  ["runtime_agent_turns", new Set(["SELECT", "INSERT"])],
+  ["runtime_agent_mailbox_messages", new Set(["SELECT", "INSERT"])],
+  ["runtime_agent_commands", new Set(["SELECT", "INSERT"])],
   ["waiting_recovery_checkpoints", new Set(["SELECT", "INSERT"])],
   ["waiting_recovery_effect_outbox", new Set(["SELECT", "INSERT"])],
   ["runtime_recovery_metrics", new Set(["SELECT", "INSERT"])],
@@ -262,6 +274,15 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ["workspace_revision_candidate_files", new Set(["manifest_digest"])],
   ["run_execution_inputs", new Set(["answer_text", "updated_at"])],
   ["skill_invocations", new Set(["status", "instruction_digest", "failure_code", "updated_at"])],
+  ["runtime_agent_threads", new Set(["status", "updated_at"])],
+  [
+    "runtime_subagent_conversations",
+    new Set(["turn_ordinal", "history", "history_digest", "updated_at"]),
+  ],
+  [
+    "runtime_agent_turns",
+    new Set(["status", "final_answer", "error_code", "started_at", "completed_at"]),
+  ],
   [
     "execution_attempts",
     new Set([
@@ -776,6 +797,29 @@ async function hasRuntimeRolloutState(client: PoolClient, schema: string): Promi
   return result.rows[0]?.present === true;
 }
 
+async function hasRuntimeAgentControlState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.runtime_agent_threads', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.runtime_agent_turns', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.runtime_agent_mailbox_messages', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.runtime_agent_commands', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasRuntimeSubagentConversationState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.runtime_subagent_conversations', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function activeTablePolicy(
   client: PoolClient,
   schema: string,
@@ -831,6 +875,12 @@ async function activeTablePolicy(
   }
   if (!(await hasRuntimeRolloutState(client, schema))) {
     for (const table of runtimeRolloutTables) policy.delete(table);
+  }
+  if (!(await hasRuntimeAgentControlState(client, schema))) {
+    for (const table of runtimeAgentControlTables) policy.delete(table);
+  }
+  if (!(await hasRuntimeSubagentConversationState(client, schema))) {
+    for (const table of runtimeSubagentConversationTables) policy.delete(table);
   }
   if (!(await hasWaitingRecoveryState(client, schema))) {
     for (const table of waitingRecoveryTables) policy.delete(table);
@@ -966,6 +1016,12 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasRuntimeRolloutState(client, schema))) {
     for (const table of runtimeRolloutTables) policy.delete(table);
+  }
+  if (!(await hasRuntimeAgentControlState(client, schema))) {
+    for (const table of runtimeAgentControlTables) policy.delete(table);
+  }
+  if (!(await hasRuntimeSubagentConversationState(client, schema))) {
+    for (const table of runtimeSubagentConversationTables) policy.delete(table);
   }
   if (!(await hasWaitingRecoveryState(client, schema))) {
     for (const table of waitingRecoveryTables) policy.delete(table);
@@ -1859,6 +1915,32 @@ export async function bootstrapRuntimeAccessOnClient(
          ${schema}.runtime_rollout_checkpoints,
          ${schema}.runtime_rollout_checkpoint_commands
        TO ${role}`,
+    );
+  }
+  if (await hasRuntimeAgentControlState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.runtime_agent_threads,
+         ${schema}.runtime_agent_turns,
+         ${schema}.runtime_agent_mailbox_messages,
+         ${schema}.runtime_agent_commands
+       TO ${role}`,
+    );
+    await client.query(
+      `GRANT UPDATE(status,updated_at) ON TABLE ${schema}.runtime_agent_threads TO ${role}`,
+    );
+    await client.query(
+      `GRANT UPDATE(status,final_answer,error_code,started_at,completed_at)
+         ON TABLE ${schema}.runtime_agent_turns TO ${role}`,
+    );
+  }
+  if (await hasRuntimeSubagentConversationState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.runtime_subagent_conversations TO ${role}`,
+    );
+    await client.query(
+      `GRANT UPDATE(turn_ordinal,history,history_digest,updated_at)
+         ON TABLE ${schema}.runtime_subagent_conversations TO ${role}`,
     );
   }
   if (await hasWaitingRecoveryState(client, context.schema)) {

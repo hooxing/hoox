@@ -4,7 +4,7 @@ import { pendingHistoryDirectoryName } from "./pg-thread-title-generation.js";
 
 async function migration(direction: "up" | "down") {
   return readFile(
-    new URL(`../migrations/0035_thread_title_generation.${direction}.sql`, import.meta.url),
+    new URL(`../migrations/0037_thread_title_generation.${direction}.sql`, import.meta.url),
     "utf8",
   );
 }

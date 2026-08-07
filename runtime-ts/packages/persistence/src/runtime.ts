@@ -92,6 +92,7 @@ export function createApiPersistenceRuntime(
     readonly blobLifecycle?: PgBlobLifecycleOptions;
     readonly historyDirectoryTimeZone?: string;
     readonly historyFilesystemEnabled?: boolean;
+    readonly historyTitleGenerationEnabled?: boolean;
   },
 ): ApiPersistenceRuntime {
   const pool = createPostgresPool(options);
@@ -101,6 +102,7 @@ export function createApiPersistenceRuntime(
     threadCreation: new PgThreadCreation(pool),
     runDispatchCreation: new PgRunDispatchCreation(pool, {
       serialQueueV2Enabled: options.serialQueueV2Enabled ?? false,
+      historyTitleGenerationEnabled: options.historyTitleGenerationEnabled ?? false,
     }),
     threadInputs: new PgThreadInputRouting(pool, {
       ...(options.historyDirectoryTimeZone === undefined
@@ -109,6 +111,9 @@ export function createApiPersistenceRuntime(
       ...(options.historyFilesystemEnabled === undefined
         ? {}
         : { historyFilesystemEnabled: options.historyFilesystemEnabled }),
+      ...(options.historyTitleGenerationEnabled === undefined
+        ? {}
+        : { historyTitleGenerationEnabled: options.historyTitleGenerationEnabled }),
     }),
     experience: new PgRunExperienceReadRepository(pool),
     modelWireTraces: new PgModelWireTraceReadRepository(pool),

@@ -1,9 +1,9 @@
 # 个人历史任务文件虚拟目录实施方案
 
 - 文档性质：跨 Domain、PostgreSQL、ResourceFS、Sandbox、Worker、标题服务和 Web 的实施总计划
-- 状态：核心虚拟目录已实现；标题模型、可变目录别名和规模性能 Gate 后续实施
+- 状态：核心虚拟目录与低成本标题模型已实现；可变目录别名和规模性能 Gate 后续实施
 - 日期：2026-08-07
-- 核心决策：[ADR-0118](decisions/0118-history-files-virtual-directory-and-task-ownership.md)、[ADR-0119](decisions/0119-personal-history-files-first-release-scope.md)、[ADR-0120](decisions/0120-personal-history-filesystem-implementation-slice.md)
+- 核心决策：[ADR-0118](decisions/0118-history-files-virtual-directory-and-task-ownership.md)、[ADR-0119](decisions/0119-personal-history-files-first-release-scope.md)、[ADR-0120](decisions/0120-personal-history-filesystem-implementation-slice.md)、[ADR-0121](decisions/0121-low-cost-thread-title-generation.md)
 - 相关决策：ADR-0005、ADR-0077、ADR-0079、ADR-0103、ADR-0107
 
 ## 1. 目标
@@ -25,9 +25,12 @@
 
 ### 1.1 本次实际交付切片
 
-本次只落地虚拟目录主链路：
+当前已落地虚拟目录与低成本标题主链路：
 
 - 迁移 `0034_personal_history_filesystem` 创建个人历史目录、文件关系、RLS、最小 ACL 和已有 receipt 回填；
+- 迁移 `0035_thread_title_generation` 创建 personal Thread 标题 Outbox、claim fencing、pending 目录状态与最小 ACL；
+- API 在首条 durable 输入事务内幂等写标题 Outbox，Scheduler 使用独立低成本模型异步生成标题并以 CAS 更新 Thread；
+- Web 在 Run 轮询期间读取最新 Thread，使模型标题异步替换确定性标题；
 - durable Thread 输入接受附件时，在同一事务内幂等维护历史关系；
 - ResourceFS 增加 `/resources/history/...` 和不参与普通根枚举的
   `/resources/.thread-files/<threadId>/files/...`；
@@ -36,10 +39,7 @@
 - 使用一个 `HISTORY_FILESYSTEM_ENABLED` 开关同时控制 API 关系写入、ResourceFS 投影和 Worker 入口准备；
 - System Prompt 仅增加字节稳定的固定目录说明，不注入 Tenant、Thread、目录名或文件名等请求级事实。
 
-为保持本次范围聚焦，以下能力明确后置：
-
-- 低成本标题模型、标题 outbox/consumer 和 Web 异步标题更新；当前目录使用现有可信 `threads.title`，并记录
-  `title_source` 供后续演进；
+以下能力继续后置：
 - UI 改名后的新目录与旧路径兼容别名；
 - `hasRecentHistory` 条件挂载与 Session generation 升级。当前 Skill 文件系统已经要求同一 Tenant ResourceFS Volume，历史目录
   直接复用该挂载，不新增 Volume、FUSE 进程或 Blob 副本；
@@ -468,11 +468,11 @@ Sandbox；只有工具调用需要 Sandbox 时才 acquire。若未来 Skill 不�
 
 ## 9. 标题服务实施
 
-本节已后置，不属于本次虚拟目录代码切片。当前目录使用 Thread 已有标题；迁移预留 `title_source`、`title_generated_at` 和
-`title_generation_version`，避免以后增加模型标题时再次改变目录关系主键。
+本节已按 ADR-0121 实现。`0035_thread_title_generation` 增加单 Thread Outbox、claim fencing 与 pending 目录状态；API 在
+首条 durable 输入事务中幂等创建任务，Scheduler 使用独立低成本模型异步生成标题，Web 在 Run 轮询期间读取最新 Thread。
 
-后续标题生成只服务 personal 历史目录和同一任务的 UI 标题。建议先作为现有 Scheduler/Worker 体系中的独立 outbox consumer，
-不立即拆新服务；边界通过端口隔离，后续吞吐、限流或故障域需要时可以独立部署。
+标题生成只服务 personal 历史目录和同一任务的 UI 标题，当前作为现有 Scheduler 中的独立 consumer 运行，不立即拆新服务；
+边界通过 `@cube-runtime/thread-title` 端口隔离，后续吞吐、限流或故障域需要时可以独立部署。
 
 处理规则：
 
@@ -518,7 +518,8 @@ UI 不等待标题模型完成：先显示确定性标题，收到 Thread 更新
 - `/history` PROPFIND 返回当前 personal Tenant 最近六个月全部有文件任务目录；
 - 文件打开后占用 rclone VFS cache；
 - 历史目录复用既有 ResourceFS attach，只增加路径定向元数据查询；
-- 标题模型调用成本为零；该成本推迟到标题服务阶段。
+- 每个新 personal Thread 产生一次标题任务；模型失败时按配置有界重试，输入只含受限首条原文与附件名称/媒体类型，不读取
+  Blob 正文。
 
 本期不产生 Team Tenant 历史索引、团队成员映射或跨 Tenant 文件复制成本。
 
@@ -573,10 +574,10 @@ threadId、标题或文件名作为高基数标签。
 
 - 阶段 0：已完成 Feature Flag、固定路径与静态 Prompt 契约；性能基线后续补充；
 - 阶段 1：已完成迁移、personal Gate、事务双写和一次性迁移回填；分批回填工具后续按生产数据规模决定；
-- 阶段 2：已后置，不阻塞虚拟目录；
+- 阶段 2：已完成标题 Outbox、低成本模型、CAS 更新、pending 目录就绪与 fallback；
 - 阶段 3：已完成路径定向 Catalog、WebDAV 列举/精确读取、Range/ETag 复用和 team 关闭；
 - 阶段 4：已完成固定入口和可信 Tenant Gate；因为现有 Skill Volume 已常驻，未实现 `hasRecentHistory` 条件挂载；
-- 阶段 5：已完成字节稳定的静态 Prompt 说明；真实 Cube 黑盒、规模性能 Gate 和 Web 标题体验后续实施。
+- 阶段 5：已完成字节稳定的静态 Prompt 说明与 Web 异步标题刷新；真实 Cube 黑盒和规模性能 Gate 后续实施。
 
 下面保留完整目标阶段，未完成项继续作为后续验收清单。
 

@@ -62,6 +62,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
       serialQueueV2Enabled: configuration.serialQueueV2Enabled,
       historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
       historyFilesystemEnabled: configuration.historyFilesystemEnabled,
+      historyTitleGenerationEnabled: configuration.historyTitleGenerationEnabled,
       // PG 签发的 canonical physicalObjectKey 必须与 S3 客户端使用同一持久前缀。
       blobLifecycle: { objectPrefix: RUNTIME_BLOB_OBJECT_PREFIX },
     });

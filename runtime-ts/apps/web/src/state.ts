@@ -63,6 +63,7 @@ export function workspaceReducer(
   action:
     | { readonly type: "threads"; readonly threads: readonly Thread[] }
     | { readonly type: "threadCreated"; readonly thread: Thread }
+    | { readonly type: "threadUpdated"; readonly thread: Thread }
     | { readonly type: "threadArchived"; readonly threadId: string }
     | { readonly type: "select"; readonly threadId: string | undefined }
     | {
@@ -95,6 +96,13 @@ export function workspaceReducer(
           action.thread,
           ...state.threads.filter((thread) => thread.id !== action.thread.id),
         ],
+      };
+    case "threadUpdated":
+      return {
+        ...state,
+        threads: state.threads.map((thread) =>
+          thread.id === action.thread.id ? action.thread : thread,
+        ),
       };
     case "threadArchived":
       return {

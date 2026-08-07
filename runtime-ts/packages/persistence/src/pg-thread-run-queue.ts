@@ -86,7 +86,7 @@ export interface EnqueueThreadFollowUpInput {
 export async function enqueueThreadFollowUp(
   client: PoolClient,
   input: EnqueueThreadFollowUpInput,
-): Promise<void> {
+): Promise<string> {
   const head = await lockOrCreateThreadExecutionHead(client, input.tenantId, input.threadId);
   const inputSequence = safeSequence(head.next_input_sequence, "input sequence");
   // queue/turn 使用全局 input 顺序；steer 会留下合法空洞，terminal fallback 仍可回到原顺序。
@@ -153,6 +153,7 @@ export async function enqueueThreadFollowUp(
   if (head.active_run_id === null) {
     await activateNextThreadRun(client, input.tenantId, input.threadId);
   }
+  return receiptId;
 }
 
 export class LegacyRunDrainRequiredError extends Error {

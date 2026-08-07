@@ -99,6 +99,46 @@ describe("Scheduler 进程入口", () => {
       pausedRetentionSeconds: 1_800,
     });
   });
+  it("低成本标题模型独立配置，并保证 claim lease 覆盖模型超时", () => {
+    expect(
+      parseSchedulerProcessEnvironment({
+        ...productionEnvironment(),
+        HISTORY_TITLE_GENERATION_ENABLED: "true",
+        HISTORY_TITLE_MODEL_BASE_URL: "https://title-model.invalid/v1",
+        HISTORY_TITLE_MODEL_API_KEY: "secret",
+        HISTORY_TITLE_MODEL_ID: "cheap-title-model",
+        HISTORY_TITLE_MODEL_TIMEOUT_MS: "20000",
+        HISTORY_TITLE_INPUT_MAX_BYTES: "4096",
+        HISTORY_TITLE_MAX_OUTPUT_TOKENS: "128",
+        HISTORY_TITLE_MAX_ATTEMPTS: "3",
+        HISTORY_TITLE_RETRY_BASE_MS: "5000",
+        HISTORY_TITLE_POLL_INTERVAL_MS: "1000",
+        HISTORY_TITLE_CLAIM_LEASE_MS: "60000",
+      }).titleGeneration,
+    ).toEqual({
+      baseUrl: "https://title-model.invalid/v1",
+      apiKey: "secret",
+      modelId: "cheap-title-model",
+      timeoutMs: 20_000,
+      inputMaximumBytes: 4_096,
+      maximumOutputTokens: 128,
+      maximumAttempts: 3,
+      retryBaseMs: 5_000,
+      pollIntervalMs: 1_000,
+      claimLeaseMs: 60_000,
+    });
+    expect(() =>
+      parseSchedulerProcessEnvironment({
+        ...developmentEnvironment(),
+        HISTORY_TITLE_GENERATION_ENABLED: "true",
+        HISTORY_TITLE_MODEL_BASE_URL: "http://127.0.0.1:18081/v1",
+        HISTORY_TITLE_MODEL_API_KEY: "secret",
+        HISTORY_TITLE_MODEL_ID: "cheap-title-model",
+        HISTORY_TITLE_MODEL_TIMEOUT_MS: "20000",
+        HISTORY_TITLE_CLAIM_LEASE_MS: "24000",
+      }),
+    ).toThrow("HISTORY_TITLE_CLAIM_LEASE_MS");
+  });
 
   it("Scheduler 支持部分显式 Proxy 配置，显式 scheme 优先于 443 默认", () => {
     expect(

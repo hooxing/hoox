@@ -7,7 +7,8 @@
     "@cube-runtime/domain": "workspace:*",
     "@cube-runtime/persistence": "workspace:*",
     "@cube-runtime/process-runtime": "workspace:*",
-    "@cube-runtime/sandbox": "workspace:*"
+    "@cube-runtime/sandbox": "workspace:*",
+    "@cube-runtime/thread-title": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

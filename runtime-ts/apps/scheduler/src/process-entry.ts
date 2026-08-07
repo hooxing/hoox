@@ -2,6 +2,7 @@ import { tenantId } from "@cube-runtime/domain";
 import {
   createPostgresPool,
   PgSandboxCleanupConsumerStore,
+  PgThreadTitleGenerationStore,
   PgThreadContinuityMetrics,
   PgThreadSandboxLifecycleConsumerStore,
   probePostgres,
@@ -22,6 +23,11 @@ import {
   stringEnvironmentField,
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
+import {
+  OpenAiCompatibleThreadTitleGenerator,
+  ThreadTitleGenerationConsumer,
+  ThreadTitleGenerationPollingLoop,
+} from "@cube-runtime/thread-title";
 import { CubeSandboxGateway, resolveCubeProxyRouting } from "@cube-runtime/sandbox";
 import {
   CubeSandboxCleanupResolver,
@@ -52,6 +58,45 @@ const schedulerEnvironmentSchema = Object.freeze({
   SCHEDULER_WORKER_ID: stringEnvironmentField({ maxLength: 200 }),
   CLEANUP_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 50, maximum: 600_000 }),
   CLEANUP_LEASE_MS: integerEnvironmentField({ minimum: 210_000, maximum: 600_000 }),
+  HISTORY_TITLE_GENERATION_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  HISTORY_TITLE_MODEL_BASE_URL: urlEnvironmentField({ requiredIn: [] }),
+  HISTORY_TITLE_MODEL_API_KEY: stringEnvironmentField({
+    secret: true,
+    maxLength: 8_192,
+    requiredIn: [],
+  }),
+  HISTORY_TITLE_MODEL_ID: stringEnvironmentField({ maxLength: 512, requiredIn: [] }),
+  HISTORY_TITLE_MODEL_TIMEOUT_MS: integerEnvironmentField({
+    minimum: 1_000,
+    maximum: 120_000,
+    requiredIn: [],
+  }),
+  HISTORY_TITLE_INPUT_MAX_BYTES: integerEnvironmentField({
+    minimum: 256,
+    maximum: 32_768,
+    requiredIn: [],
+  }),
+  HISTORY_TITLE_MAX_OUTPUT_TOKENS: integerEnvironmentField({
+    minimum: 32,
+    maximum: 512,
+    requiredIn: [],
+  }),
+  HISTORY_TITLE_MAX_ATTEMPTS: integerEnvironmentField({ minimum: 1, maximum: 10, requiredIn: [] }),
+  HISTORY_TITLE_RETRY_BASE_MS: integerEnvironmentField({
+    minimum: 100,
+    maximum: 600_000,
+    requiredIn: [],
+  }),
+  HISTORY_TITLE_POLL_INTERVAL_MS: integerEnvironmentField({
+    minimum: 50,
+    maximum: 600_000,
+    requiredIn: [],
+  }),
+  HISTORY_TITLE_CLAIM_LEASE_MS: integerEnvironmentField({
+    minimum: 5_000,
+    maximum: 600_000,
+    requiredIn: [],
+  }),
   THREAD_SANDBOX_RETENTION_SCHEDULER_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
   THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS: integerEnvironmentField({
     minimum: 1,
@@ -88,6 +133,18 @@ export interface SchedulerProcessConfiguration {
     workerId: string;
     pollIntervalMs: number;
     leaseMs: number;
+  }>;
+  readonly titleGeneration?: Readonly<{
+    baseUrl: string;
+    apiKey: string;
+    modelId: string;
+    timeoutMs: number;
+    inputMaximumBytes: number;
+    maximumOutputTokens: number;
+    maximumAttempts: number;
+    retryBaseMs: number;
+    pollIntervalMs: number;
+    claimLeaseMs: number;
   }>;
   readonly threadSandbox: Readonly<{
     retentionSchedulerEnabled: boolean;
@@ -150,6 +207,31 @@ export function parseSchedulerProcessEnvironment(
   if (parsed.runtimeEnvironment === "production" && proxyRouting.proxyScheme !== "https") {
     throw new TypeError("CUBESANDBOX_PROXY_SCHEME 在 production 必须为 https");
   }
+  const titleGenerationEnabled = parsed.values.HISTORY_TITLE_GENERATION_ENABLED ?? false;
+  let titleGeneration: SchedulerProcessConfiguration["titleGeneration"];
+  if (titleGenerationEnabled) {
+    const baseUrl = readRequiredEnvironmentValue(parsed, "HISTORY_TITLE_MODEL_BASE_URL");
+    if (parsed.runtimeEnvironment === "production") {
+      assertProductionHttpsEndpoint(baseUrl, "HISTORY_TITLE_MODEL_BASE_URL");
+    }
+    const timeoutMs = parsed.values.HISTORY_TITLE_MODEL_TIMEOUT_MS ?? 20_000;
+    const claimLeaseMs = parsed.values.HISTORY_TITLE_CLAIM_LEASE_MS ?? 60_000;
+    if (claimLeaseMs < timeoutMs + 5_000) {
+      throw new TypeError("HISTORY_TITLE_CLAIM_LEASE_MS 必须覆盖模型超时与状态写回余量");
+    }
+    titleGeneration = Object.freeze({
+      baseUrl,
+      apiKey: readRequiredEnvironmentValue(parsed, "HISTORY_TITLE_MODEL_API_KEY"),
+      modelId: readRequiredEnvironmentValue(parsed, "HISTORY_TITLE_MODEL_ID"),
+      timeoutMs,
+      inputMaximumBytes: parsed.values.HISTORY_TITLE_INPUT_MAX_BYTES ?? 4_096,
+      maximumOutputTokens: parsed.values.HISTORY_TITLE_MAX_OUTPUT_TOKENS ?? 128,
+      maximumAttempts: parsed.values.HISTORY_TITLE_MAX_ATTEMPTS ?? 3,
+      retryBaseMs: parsed.values.HISTORY_TITLE_RETRY_BASE_MS ?? 5_000,
+      pollIntervalMs: parsed.values.HISTORY_TITLE_POLL_INTERVAL_MS ?? 1_000,
+      claimLeaseMs,
+    });
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
@@ -169,6 +251,7 @@ export function parseSchedulerProcessEnvironment(
       pollIntervalMs: readRequiredEnvironmentValue(parsed, "CLEANUP_POLL_INTERVAL_MS"),
       leaseMs: readRequiredEnvironmentValue(parsed, "CLEANUP_LEASE_MS"),
     }),
+    ...(titleGeneration === undefined ? {} : { titleGeneration }),
     threadSandbox: Object.freeze({
       retentionSchedulerEnabled: parsed.values.THREAD_SANDBOX_RETENTION_SCHEDULER_ENABLED ?? true,
       lifecycleTimeoutMs: parsed.values.THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS ?? 90_000,
@@ -253,11 +336,38 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
         configuration.cleanup.tenantId,
         configuration.cleanup.pollIntervalMs,
       );
+      const titleGenerationLoop =
+        configuration.titleGeneration === undefined
+          ? undefined
+          : new ThreadTitleGenerationPollingLoop(
+              new ThreadTitleGenerationConsumer(
+                new PgThreadTitleGenerationStore(pool),
+                new OpenAiCompatibleThreadTitleGenerator({
+                  baseUrl: configuration.titleGeneration.baseUrl,
+                  apiKey: configuration.titleGeneration.apiKey,
+                  modelId: configuration.titleGeneration.modelId,
+                  timeoutMs: configuration.titleGeneration.timeoutMs,
+                  inputMaximumBytes: configuration.titleGeneration.inputMaximumBytes,
+                  maximumOutputTokens: configuration.titleGeneration.maximumOutputTokens,
+                }),
+                configuration.cleanup.workerId,
+                configuration.titleGeneration.claimLeaseMs,
+                configuration.titleGeneration.maximumAttempts,
+                configuration.titleGeneration.retryBaseMs,
+              ),
+              configuration.cleanup.tenantId,
+              configuration.titleGeneration.pollIntervalMs,
+            );
       loop.start();
+      titleGenerationLoop?.start();
       threadSandboxLoop.start();
       const assembly = Object.freeze({
         stopAccepting: async () => {
-          await Promise.all([loop.close(), threadSandboxLoop.close()]);
+          await Promise.all([
+            loop.close(),
+            threadSandboxLoop.close(),
+            titleGenerationLoop?.close(),
+          ]);
         },
         // loop 必须先停止并等待在途远端调用，再关闭连接池。
         resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),

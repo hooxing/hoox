@@ -34,7 +34,7 @@
       },
       {
         "name": "cube:lockfile-sha256",
-        "value": "d7f2b56b36b0739ee5b4f0a60adae419cb1a6b1baebe3fe6ab9eb4fc286bfd29"
+        "value": "18ac42812e6ce60628607736e9d54afcd597c8cf3d09ad46bbea3d5822dd539e"
       }
     ]
   },
@@ -860,6 +860,23 @@
         {
           "name": "cube:workspace-path",
           "value": "runtime-ts/packages/skill"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40cube-runtime/thread-title@0.0.0",
+      "name": "@cube-runtime/thread-title",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40cube-runtime/thread-title@0.0.0",
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "cube:workspace-path",
+          "value": "runtime-ts/packages/thread-title"
         }
       ]
     },
@@ -4244,6 +4261,7 @@
         "pkg:npm/%40cube-runtime/run-contracts@0.0.0",
         "pkg:npm/%40cube-runtime/sandbox@0.0.0",
         "pkg:npm/%40cube-runtime/skill@0.0.0",
+        "pkg:npm/%40cube-runtime/thread-title@0.0.0",
         "pkg:npm/%40cube-runtime/workspace@0.0.0",
         "pkg:npm/%40cubesandbox/sdk@0.3.0-cube.local.1",
         "pkg:npm/%40earendil-works/pi-agent-core@0.82.1",

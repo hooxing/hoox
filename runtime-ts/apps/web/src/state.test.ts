@@ -145,6 +145,9 @@ describe("mergeEvents", () => {
       selectedThreadId: "thread_1",
       threads: [thread],
     });
+    const renamed = { ...thread, title: "采购合同付款风险", updatedAt: "2026-01-01T00:00:01Z" };
+    const afterTitle = workspaceReducer(afterCreate, { type: "threadUpdated", thread: renamed });
+    expect(afterTitle).toMatchObject({ selectedThreadId: "thread_1", threads: [renamed] });
     expect(
       workspaceReducer(afterCreate, { type: "threadArchived", threadId: "thread_2" }),
     ).toMatchObject({ selectedThreadId: "thread_1", threads: [] });

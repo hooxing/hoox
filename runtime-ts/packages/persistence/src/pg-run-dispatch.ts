@@ -6,6 +6,7 @@ import { mapPersistenceError } from "./errors.js";
 import type { EnqueueOutboxPort, IdempotentRunEnqueueResult } from "./ports.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 import { createRunSkillSnapshot, SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
+import { enqueuePersonalThreadTitleGeneration } from "./pg-thread-title-generation.js";
 import {
   enqueueThreadFollowUp,
   LegacyRunDrainRequiredError,
@@ -61,6 +62,7 @@ export interface PgRunDispatchCreationOptions {
   readonly afterCommit?: (operation: "create_run") => void | Promise<void>;
   /** 默认关闭；关闭只影响新入口，Worker 仍会 drain 已经接受的 V2 queue item。 */
   readonly serialQueueV2Enabled?: boolean;
+  readonly historyTitleGenerationEnabled?: boolean;
 }
 
 /**
@@ -72,7 +74,11 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
   constructor(
     private readonly pool: Pool,
     private readonly options: PgRunDispatchCreationOptions = {},
-  ) {}
+  ) {
+    if (options.historyTitleGenerationEnabled === true && options.serialQueueV2Enabled !== true) {
+      throw new TypeError("历史标题生成依赖 V2 串行队列 receipt");
+    }
+  }
 
   async createQueuedRun(
     input: Parameters<EnqueueOutboxPort["createQueuedRun"]>[0],
@@ -136,7 +142,7 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
             : { explicitInvocation: input.skillInvocation }),
         });
         if (this.options.serialQueueV2Enabled === true) {
-          await enqueueThreadFollowUp(client, {
+          const receiptId = await enqueueThreadFollowUp(client, {
             tenantId: input.scope.tenantId,
             threadId: input.run.threadId,
             runId: input.run.id,
@@ -145,6 +151,13 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
             inputText: input.inputText,
             inputDigest: digest,
           });
+          if (this.options.historyTitleGenerationEnabled === true) {
+            await enqueuePersonalThreadTitleGeneration(client, {
+              tenantId: input.scope.tenantId,
+              threadId: input.run.threadId,
+              receiptId,
+            });
+          }
         } else {
           // 兼容路径仍在创建时绑定 base；V2 开启后只由激活事务执行下面两项写入。
           const workspace = await client.query<{

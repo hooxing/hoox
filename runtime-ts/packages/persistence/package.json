@@ -21,6 +21,7 @@
     "@cube-runtime/resource": "workspace:*",
     "@cube-runtime/run-contracts": "workspace:*",
     "@cube-runtime/skill": "workspace:*",
+    "@cube-runtime/thread-title": "workspace:*",
     "@cube-runtime/workspace": "workspace:*",
     "@aws-sdk/client-s3": "3.1095.0",
     "@aws-sdk/s3-request-presigner": "3.1095.0",

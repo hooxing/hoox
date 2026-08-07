@@ -105,34 +105,39 @@ ensure_link() {
 ensure_link /history "$history_target"
 prepare_thread_entrypoint() {
   link='/thread-files'
-  if [ -d "$thread_target" ]; then
-    if [ -L "$link" ]; then
-      [ "$(readlink "$link")" = "$thread_target" ] || exit 73
-    elif [ -d "$link" ]; then
-      [ -z "$(find "$link" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 74
-      rmdir "$link"
-      ln -s "$thread_target" "$link"
-    elif [ -e "$link" ]; then
-      exit 74
-    else
-      ln -s "$thread_target" "$link"
-    fi
+  if [ -L "$link" ]; then
+    [ "$(readlink "$link")" = "$thread_target" ] || exit 73
+  elif [ -d "$link" ]; then
+    [ -z "$(find "$link" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 74
+    rmdir "$link"
+    ln -s "$thread_target" "$link"
+  elif [ -e "$link" ]; then
+    exit 74
   else
-    if [ -L "$link" ]; then
-      exit 72
-    elif [ -d "$link" ]; then
-      [ -z "$(find "$link" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 74
-    elif [ -e "$link" ]; then
-      exit 74
-    else
-      install -d -m 0555 "$link"
-    fi
+    ln -s "$thread_target" "$link"
   fi
 }
 prepare_thread_entrypoint`;
-  const result = await sandbox.command(command, { signal, timeoutMs: 30_000 });
-  if (result.exitCode !== 0) throw new Error("个人历史目录固定入口准备失败");
+  const result = await sandbox.command(command, { signal, timeoutMs: 30_000 }).catch((error) => {
+    console.warn(`HISTORY_ENTRYPOINT_FAILED category=${historyEntrypointFailureCategory(error)}`);
+    throw error;
+  });
+  if (result.exitCode !== 0) {
+    console.warn(`HISTORY_ENTRYPOINT_FAILED category=exit_${result.exitCode}`);
+    throw new Error("个人历史目录固定入口准备失败");
+  }
 }
+
+function historyEntrypointFailureCategory(error: unknown): string {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return "command_exception";
+  }
+  const code = (error as { readonly code?: unknown }).code;
+  return typeof code === "string" && /^[A-Z_]{1,64}$/u.test(code)
+    ? code.toLowerCase()
+    : "command_exception";
+}
+
 export type RunWorkerResult =
   | { readonly outcome: "succeeded" | "waiting" | "failed" | "cancelled" }
   | { readonly outcome: "recovery_required"; readonly code: StableWorkerErrorCode }

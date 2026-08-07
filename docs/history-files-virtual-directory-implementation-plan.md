@@ -34,7 +34,8 @@
 - durable Thread 输入接受附件时，在同一事务内幂等维护历史关系；
 - ResourceFS 增加 `/resources/history/...` 和 WebDAV/FUSE 可遍历的隐藏
   `/resources/.thread-files/<threadId>/files/...`；dot 根只用于父目录解析，Agent-facing 路径仍不暴露 Thread ID；
-- 没有历史文件关系的当前 Thread 使用只读空 `/thread-files`，后续出现首个文件时可升级为稳定软链接；
+- ResourceFS 为全部 personal Thread 预声明空的稳定 `files` 目录，使首个附件只新增文件节点，不改变 rclone 已缓存的父目录拓扑；
+- Worker 始终把 `/thread-files` 映射到稳定远端路径；旧 Sandbox 遗留的本地空目录会原地升级为软链接；
 - Worker 仅依据领取事务提供的可信 `tenantKind=personal` 创建 `/history` 与 `/thread-files` 固定只读入口；
 - `/history` 只枚举最近六个月目录，但已经知道的旧语义路径仍可精确读取，避免历史消息中的路径立即失效；
 - 使用一个 `HISTORY_FILESYSTEM_ENABLED` 开关同时控制 API 关系写入、ResourceFS 投影和 Worker 入口准备；

@@ -4,7 +4,7 @@
 - 日期：2026-08-07
 - 决策者：Runtime 团队
 - 关联任务/PR：修复 personal Thread 固定文件入口导致的 Sandbox 失败
-- 替代关系：修正 ADR-0120 中“隐藏稳定 Thread 视图不参与根目录枚举”的实现假设；不改变 Agent-facing `/thread-files` 契约
+- 替代关系：修正 ADR-0120 中“隐藏稳定 Thread 视图不参与根目录枚举”的实现假设；“只枚举有文件 Thread”与本地空目录回退由 ADR-0129 修正
 
 ## 背景
 
@@ -43,7 +43,7 @@
 
 ### 枚举受限隐藏父目录，并为空 Thread 提供本地空目录
 
-采用。WebDAV 根返回 dot 目录 `.thread-files`；隐藏根只枚举 personal Tenant 中已经存在历史文件关系的 Thread ID，不加载
+采用。WebDAV 根返回 dot 目录 `.thread-files`；本 ADR 首版让隐藏根只枚举 personal Tenant 中已经存在历史文件关系的 Thread ID，不加载
 ResourceVersion 或 Blob。Worker 仍只用可信领取快照拼接内部目标，并把它映射为 Agent-facing `/thread-files`。若当前 Thread
 没有历史文件关系，Worker 创建只读空目录；后续同一 Sandbox 出现首个附件时，允许把仍为空的本地目录原子替换为稳定软链接。
 
@@ -60,6 +60,9 @@ ResourceVersion 或 Blob。Worker 仍只用可信领取快照拼接内部目标�
    删除并替换为软链接；非空目录、普通文件、错误软链接继续失败关闭。
 6. `/history` 最近六个月语义目录规则不变。已知旧语义路径在 rclone 父目录缓存下的精确可达性仍需后续独立解决，本 ADR 不扩大
    历史发现窗口。
+
+后续真实“空 Thread 首次上传附件并复用暂停 Sandbox”黑盒证明，第 2、5 项仍会让 rclone 缓存动态父目录。
+ADR-0129 因此改为预声明全部 personal Thread，并取消本地空目录作为正常路径。
 
 ## 影响
 

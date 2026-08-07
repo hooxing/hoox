@@ -110,6 +110,33 @@ export class PgResourceFilesystemCatalog
     }
   }
 
+  async listThreadFileThreadIds(
+    input: Parameters<HistoryFilesystemCatalog["listThreadFileThreadIds"]>[0],
+  ): Promise<readonly string[] | undefined> {
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        input,
+        async (client) => {
+          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          // WebDAV/FUSE 必须能从父目录枚举到子目录，才能解析已知的隐藏 Thread 路径。
+          // 这里只返回有文件的 Thread ID，不加载 ResourceVersion、Blob 或语义目录正文。
+          const result = await client.query<{ readonly thread_id: string }>(
+            `SELECT DISTINCT entry.thread_id
+               FROM thread_history_file_entries entry
+              WHERE entry.tenant_id=$1
+              ORDER BY entry.thread_id`,
+            [input.tenantId],
+          );
+          return Object.freeze(result.rows.map((row) => row.thread_id));
+        },
+        { readOnly: true },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "列出稳定任务文件入口");
+    }
+  }
+
   async resolveDirectory(
     input: Parameters<HistoryFilesystemCatalog["resolveDirectory"]>[0],
   ): Promise<HistoryFilesystemDirectory | undefined> {

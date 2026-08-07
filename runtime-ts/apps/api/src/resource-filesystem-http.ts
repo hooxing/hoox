@@ -103,7 +103,12 @@ async function handlePropfind(
         ...(dependencies.skills === undefined
           ? []
           : [directoryNode([SKILL_FILESYSTEM_ROOT_SEGMENT])]),
-        ...(history === undefined ? [] : [directoryNode([HISTORY_FILESYSTEM_ROOT_SEGMENT])]),
+        ...(history === undefined
+          ? []
+          : [
+              directoryNode([HISTORY_FILESYSTEM_ROOT_SEGMENT]),
+              directoryNode([THREAD_FILESYSTEM_INTERNAL_ROOT_SEGMENT]),
+            ]),
       ].sort(compareNodes);
     }
   } else if (segments[0] === SKILL_FILESYSTEM_ROOT_SEGMENT) {
@@ -495,12 +500,18 @@ async function resolveInternalThreadNode(
   if (catalog === undefined || segments[0] !== THREAD_FILESYSTEM_INTERNAL_ROOT_SEGMENT) {
     return undefined;
   }
-  // 内部稳定根不参与普通根目录枚举，也不列出 Thread ID；Worker 只按当前可信 Scope 建固定软链接。
+  // dot 根在普通 `ls` 中仍隐藏，但 WebDAV 必须枚举每一级父目录，rclone/FUSE 才能解析已知子路径。
+  // Thread ID 不是授权边界；只列出已有历史文件的 personal Thread，真正隔离仍由 Tenant capability 与 RLS 提供。
   if (segments.length === 1) {
-    const directories = await catalog.listRecentDirectories({ tenantId });
-    return directories === undefined
+    const threadIds = await catalog.listThreadFileThreadIds({ tenantId });
+    return threadIds === undefined
       ? undefined
-      : { target: directoryNode(segments), children: [] };
+      : {
+          target: directoryNode(segments),
+          children: includeChildren
+            ? threadIds.map((threadId) => directoryNode([...segments, threadId]))
+            : [],
+        };
   }
   const threadId = segments[1] ?? "";
   const files = await catalog.listThreadFiles({ tenantId, threadId });

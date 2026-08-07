@@ -2565,7 +2565,8 @@ it("personal Tenant 在模型执行前获得固定历史目录入口", async () 
 
   expect(h.sandboxes.handle.commands).toHaveLength(1);
   expect(h.sandboxes.handle.commands[0]).toContain("ensure_link /history");
-  expect(h.sandboxes.handle.commands[0]).toContain("ensure_link /thread-files");
+  expect(h.sandboxes.handle.commands[0]).toContain("prepare_thread_entrypoint");
+  expect(h.sandboxes.handle.commands[0]).toContain('install -d -m 0555 "$link"');
   expect(h.sandboxes.handle.commands[0]).toContain(
     `/resources/.thread-files/${h.scope.threadId}/files`,
   );

@@ -22,7 +22,10 @@ export class FakeSandboxGateway implements SandboxGateway {
 
   constructor(private readonly operationDelayMs = 0) {}
 
-  async create(input: SandboxCreateInput, control: OperationControl = {}): Promise<SandboxHandle> {
+  async create(
+    input: SandboxCreateInput,
+    control: OperationControl = {},
+  ): Promise<FakeSandboxHandle> {
     validateTemplateId(input.templateId);
     validateTtl(input.ttlSeconds, 120);
     validateEnvironment(input.env);
@@ -32,7 +35,7 @@ export class FakeSandboxGateway implements SandboxGateway {
     return handle;
   }
 
-  async connect(id: string, control: OperationControl = {}): Promise<SandboxHandle> {
+  async connect(id: string, control: OperationControl = {}): Promise<FakeSandboxHandle> {
     validateSandboxId(id);
     if (control.signal?.aborted) throw new SandboxRuntimeError("CANCELLED", "连接已取消");
     const handle = this.sandboxes.get(id);

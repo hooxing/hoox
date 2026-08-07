@@ -166,6 +166,15 @@ describe("Agent Worker 进程入口", () => {
     expect(parseWorkerProcessEnvironment(productionEnvironment()).worker.runTimeoutMs).toBe(
       43_200_000,
     );
+    expect(parseWorkerProcessEnvironment(productionEnvironment()).subagents).toEqual({
+      enabled: true,
+    });
+    expect(
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        SUBAGENTS_ENABLED: "false",
+      }).subagents,
+    ).toEqual({ enabled: false });
     expect(() =>
       parseWorkerProcessEnvironment({
         ...productionEnvironment(),

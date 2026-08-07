@@ -56,10 +56,15 @@ export class ProjectModelWireTraceMirror implements ModelWireTracePort {
 
   async persist(record: ModelWireTraceRecord): Promise<void> {
     assertMirrorRecord(record);
+    const agentSegments =
+      record.context.agentThreadId === undefined
+        ? []
+        : ["subagents", record.context.agentThreadId, record.context.agentTurnId as string];
     const directory = await openMirrorDirectory(this.#trustedBase, [
       ...this.#rootSegments,
       record.context.runId,
       record.context.attemptId,
+      ...agentSegments,
     ]);
     try {
       const extension = record.part === "request" ? "json" : "sse";

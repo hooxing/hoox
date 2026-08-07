@@ -9,6 +9,8 @@ export interface ModelWireTraceContext {
   readonly threadId: string;
   readonly runId: string;
   readonly attemptId: string;
+  readonly agentThreadId?: string;
+  readonly agentTurnId?: string;
 }
 
 export interface ModelWireTraceRecord {
@@ -50,8 +52,24 @@ interface ActiveTrace {
 }
 
 interface TraceState {
-  nextTurn: number;
   readonly tasks: Set<Promise<void>>;
+}
+
+interface TraceTurnAllocator {
+  nextTurn: number;
+}
+
+interface TraceAttemptAllocator extends TraceTurnAllocator {
+  activeSessions: number;
+}
+
+interface TraceAttemptAllocators {
+  readonly byAttempt: Map<string, TraceAttemptAllocator>;
+}
+
+interface TraceAttemptAllocation {
+  readonly attemptId: string;
+  readonly allocator: TraceAttemptAllocator;
 }
 
 interface ProviderBoundary {
@@ -103,24 +121,37 @@ export function installModelWireFetchInstrumentation(): void {
 }
 
 export class ModelWireTraceSession {
-  private readonly state: TraceState = { nextTurn: 0, tasks: new Set() };
+  private readonly state: TraceState = { tasks: new Set() };
   private readonly provider: ProviderBoundary;
+  private released = false;
 
   constructor(
     private readonly port: ModelWireTracePort,
     private readonly maxBytes: number,
     providerBaseUrl: string,
+    private readonly allocator: TraceTurnAllocator = { nextTurn: 0 },
+    private readonly attemptAllocators: TraceAttemptAllocators = { byAttempt: new Map() },
+    private readonly attemptAllocation?: TraceAttemptAllocation,
   ) {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1)
       throw new TypeError("模型网络报文上限无效");
     this.provider = providerBoundary(providerBaseUrl);
   }
 
-  createAttempt(): ModelWireTraceSession {
+  createAttempt(attemptId = "default"): ModelWireTraceSession {
+    let allocator = this.attemptAllocators.byAttempt.get(attemptId);
+    if (allocator === undefined) {
+      allocator = { nextTurn: 0, activeSessions: 0 };
+      this.attemptAllocators.byAttempt.set(attemptId, allocator);
+    }
+    allocator.activeSessions += 1;
     return new ModelWireTraceSession(
       this.port,
       this.maxBytes,
       `${this.provider.origin}${this.provider.completionsPath.replace(/\/chat\/completions$/u, "")}`,
+      allocator,
+      this.attemptAllocators,
+      { attemptId, allocator },
     );
   }
 
@@ -133,7 +164,7 @@ export class ModelWireTraceSession {
         state: this.state,
         provider: this.provider,
         maxBytes: this.maxBytes,
-        modelTurn: this.state.nextTurn++,
+        modelTurn: this.allocator.nextTurn++,
         nextTransportAttempt: 0,
       },
       operation,
@@ -156,6 +187,20 @@ export class ModelWireTraceSession {
       deadline,
     ]);
     if (timer !== undefined) clearTimeout(timer);
+  }
+
+  /** Pi Session dispose 时释放 Attempt allocator；Root 与 Child 都释放后才允许回收。 */
+  release(): void {
+    if (this.released || this.attemptAllocation === undefined) return;
+    this.released = true;
+    this.attemptAllocation.allocator.activeSessions -= 1;
+    if (
+      this.attemptAllocation.allocator.activeSessions === 0 &&
+      this.attemptAllocators.byAttempt.get(this.attemptAllocation.attemptId) ===
+        this.attemptAllocation.allocator
+    ) {
+      this.attemptAllocators.byAttempt.delete(this.attemptAllocation.attemptId);
+    }
   }
 }
 
@@ -324,7 +369,17 @@ function isAbort(error: unknown): boolean {
 }
 
 export function assertModelWireTraceContext(context: ModelWireTraceContext): void {
-  for (const value of [context.tenantId, context.threadId, context.runId, context.attemptId]) {
+  const agentIdentity = [context.agentThreadId, context.agentTurnId];
+  if (agentIdentity.filter((value) => value !== undefined).length === 1) {
+    throw new TypeError("模型网络诊断子 Agent 身份不完整");
+  }
+  for (const value of [
+    context.tenantId,
+    context.threadId,
+    context.runId,
+    context.attemptId,
+    ...agentIdentity.filter((item): item is string => item !== undefined),
+  ]) {
     if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u.test(value))
       throw new TypeError("模型网络诊断作用域无效");
   }

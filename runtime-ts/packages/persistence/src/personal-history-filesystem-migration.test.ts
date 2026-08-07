@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 async function migration(direction: "up" | "down") {
   return readFile(
-    new URL(`../migrations/0034_personal_history_filesystem.${direction}.sql`, import.meta.url),
+    new URL(`../migrations/0036_personal_history_filesystem.${direction}.sql`, import.meta.url),
     "utf8",
   );
 }

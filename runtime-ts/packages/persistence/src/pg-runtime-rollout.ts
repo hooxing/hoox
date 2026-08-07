@@ -13,7 +13,11 @@ import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
-import { withTenantTransaction } from "./postgres.js";
+import {
+  withRetriedRepeatableReadTenantTransaction,
+  withRetriedSerializableTenantTransaction,
+  withTenantTransaction,
+} from "./postgres.js";
 
 const HASH = /^[0-9a-f]{64}$/u;
 const IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/u;
@@ -37,6 +41,11 @@ export interface OpenRootRolloutFromClaimInput {
   readonly fence: ExecutionFence;
   readonly attemptId: string;
   readonly compatibility: RolloutCompatibilityIdentity;
+}
+
+export interface OpenAgentRolloutFromClaimInput extends OpenRootRolloutFromClaimInput {
+  readonly agentThreadId: ReturnType<typeof agentThreadId>;
+  readonly agentKind: "root" | "subagent";
 }
 
 export type OpenRootRolloutFromClaimResult =
@@ -370,6 +379,19 @@ export class PgRuntimeRolloutRepository {
   async openRootStreamFromClaim(
     input: OpenRootRolloutFromClaimInput,
   ): Promise<OpenRootRolloutFromClaimResult> {
+    return await this.openAgentStreamFromClaim({
+      ...input,
+      agentThreadId: agentThreadId(
+        `root_${createHash("sha256").update(input.attemptId, "utf8").digest("hex")}`,
+      ),
+      agentKind: "root",
+    });
+  }
+
+  /** 子 Agent 与 root 共享执行双栅栏，但使用独立 agent_thread_id 和 Rollout sequence。 */
+  async openAgentStreamFromClaim(
+    input: OpenAgentRolloutFromClaimInput,
+  ): Promise<OpenRootRolloutFromClaimResult> {
     const { fence } = input;
     for (const [label, value] of [
       ["Tenant ID", fence.scope.tenantId],
@@ -394,13 +416,10 @@ export class PgRuntimeRolloutRepository {
     ) {
       throw new TypeError("执行栅栏 epoch 格式无效");
     }
-    const rootAgentThreadId = agentThreadId(
-      `root_${createHash("sha256").update(input.attemptId, "utf8").digest("hex")}`,
-    );
-    assertIdentifier(rootAgentThreadId, "Agent Thread ID");
+    assertIdentifier(input.agentThreadId, "Agent Thread ID");
     assertCompatibility(input.compatibility);
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         { tenantId: fence.scope.tenantId },
         async (client) => {
@@ -457,7 +476,7 @@ export class PgRuntimeRolloutRepository {
               threadId: fence.scope.threadId,
               runId: fence.scope.runId,
               attemptId: input.attemptId,
-              agentThreadId: rootAgentThreadId,
+              agentThreadId: input.agentThreadId,
             }),
             userId: userId(actorUserId),
             fence: Object.freeze({
@@ -466,17 +485,20 @@ export class PgRuntimeRolloutRepository {
               workspaceLease: Object.freeze({ ...fence.workspaceLease }),
             }),
           });
-          const opened = await this.openRootStreamLocked(client, {
-            context,
-            workspaceId: fence.scope.workspaceId,
-            rootRunId: fence.scope.rootRunId,
-            compatibility: input.compatibility,
-          });
+          const opened = await this.openStreamLocked(
+            client,
+            {
+              context,
+              workspaceId: fence.scope.workspaceId,
+              rootRunId: fence.scope.rootRunId,
+              compatibility: input.compatibility,
+            },
+            input.agentKind,
+          );
           return opened === "created" || opened === "already_exists"
             ? ({ outcome: "ready", context } as const)
             : ({ outcome: opened } as const);
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch (error) {
       throw mapPersistenceError(error, "从执行 claim 打开 Runtime Rollout stream");
@@ -502,7 +524,7 @@ export class PgRuntimeRolloutRepository {
         { tenantId: input.context.scope.tenantId, userId: input.context.userId },
         async (client) => {
           if (!(await lockActiveExecutionFence(client, input.context))) return "not_authorized";
-          return await this.openRootStreamLocked(client, input);
+          return await this.openStreamLocked(client, input, "root");
         },
       );
     } catch (error) {
@@ -510,17 +532,50 @@ export class PgRuntimeRolloutRepository {
     }
   }
 
-  private async openRootStreamLocked(
+  private async openStreamLocked(
     client: PoolClient,
     input: OpenRootRolloutInput,
+    agentKind: "root" | "subagent",
   ): Promise<"created" | "already_exists" | "conflict" | "not_found"> {
     const params = scopeParams(input.context);
+    if (agentKind === "root") {
+      await client.query(
+        `INSERT INTO runtime_agent_threads(
+           tenant_id,thread_id,run_id,attempt_id,agent_thread_id,canonical_path,kind,status
+         ) VALUES ($1,$2,$3,$4,$5,'/root','root','open')
+         ON CONFLICT DO NOTHING`,
+        params,
+      );
+      const root = await client.query<{ agent_thread_id: string; kind: string }>(
+        `SELECT agent_thread_id,kind FROM runtime_agent_threads
+          WHERE tenant_id=$1 AND attempt_id=$2 AND canonical_path='/root'`,
+        [input.context.scope.tenantId, input.context.scope.attemptId],
+      );
+      if (
+        root.rows[0]?.agent_thread_id !== input.context.scope.agentThreadId ||
+        root.rows[0]?.kind !== "root"
+      ) {
+        return "conflict";
+      }
+    } else {
+      const child = await client.query<{ kind: string }>(
+        `SELECT kind FROM runtime_agent_threads
+          WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3`,
+        [
+          input.context.scope.tenantId,
+          input.context.scope.attemptId,
+          input.context.scope.agentThreadId,
+        ],
+      );
+      if (child.rows[0] === undefined) return "not_found";
+      if (child.rows[0].kind !== "subagent") return "conflict";
+    }
     const inserted = await client.query(
       `INSERT INTO runtime_rollout_streams(
                tenant_id, thread_id, run_id, attempt_id, workspace_id, root_run_id,
                agent_thread_id, agent_kind, model_id, model_compatibility_hash,
                prompt_policy_hash, tool_schema_hash, skill_manifest_hash
-             ) VALUES ($1,$2,$3,$4,$6,$7,$5,'root',$8,$9,$10,$11,$12)
+             ) VALUES ($1,$2,$3,$4,$6,$7,$5,$13,$8,$9,$10,$11,$12)
              ON CONFLICT DO NOTHING`,
       [
         ...params,
@@ -531,6 +586,7 @@ export class PgRuntimeRolloutRepository {
         input.compatibility.promptPolicyHash,
         input.compatibility.toolSchemaHash,
         input.compatibility.skillManifestHash,
+        agentKind,
       ],
     );
     if (inserted.rowCount === 1) return "created";
@@ -551,8 +607,12 @@ export class PgRuntimeRolloutRepository {
                     agent_kind, model_id, model_compatibility_hash,
                     prompt_policy_hash, tool_schema_hash, skill_manifest_hash
                FROM runtime_rollout_streams
-              WHERE tenant_id=$1 AND attempt_id=$2`,
-      [input.context.scope.tenantId, input.context.scope.attemptId],
+              WHERE tenant_id=$1 AND attempt_id=$2 AND agent_thread_id=$3`,
+      [
+        input.context.scope.tenantId,
+        input.context.scope.attemptId,
+        input.context.scope.agentThreadId,
+      ],
     );
     const row = existing.rows[0];
     if (row === undefined) return "not_found";
@@ -561,7 +621,7 @@ export class PgRuntimeRolloutRepository {
       row.agent_thread_id === input.context.scope.agentThreadId &&
       row.workspace_id === input.workspaceId &&
       row.root_run_id === input.rootRunId &&
-      row.agent_kind === "root" &&
+      row.agent_kind === agentKind &&
       row.model_id === input.compatibility.modelId &&
       row.model_compatibility_hash === input.compatibility.modelCompatibilityHash &&
       row.prompt_policy_hash === input.compatibility.promptPolicyHash &&
@@ -948,7 +1008,7 @@ export class PgRuntimeRolloutRepository {
       assertHash(hash, "Rollout compatibility hash");
     }
     try {
-      return await withTenantTransaction(
+      return await withRetriedRepeatableReadTenantTransaction(
         this.pool,
         { tenantId: input.context.scope.tenantId, userId: input.context.userId },
         async (client) => {
@@ -1094,7 +1154,6 @@ export class PgRuntimeRolloutRepository {
             tail: Object.freeze(row.tail_entries.map((entry) => mapEntry(entry as EntryRow))),
           });
         },
-        { isolationLevel: "REPEATABLE READ" },
       );
     } catch (error) {
       throw mapPersistenceError(error, "恢复 Runtime Rollout");

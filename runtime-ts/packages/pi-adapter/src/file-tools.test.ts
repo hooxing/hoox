@@ -499,7 +499,7 @@ describe("Sandbox 文件工具", () => {
     });
   });
 
-  it("write 对同一 Sandbox 路径串行化并发修改", async () => {
+  it("write 对同一 Sandbox 路径的重叠修改立即返回 FILE_BUSY", async () => {
     let releaseFirst: () => void = () => undefined;
     let markFirstStarted: () => void = () => undefined;
     const firstStarted = new Promise<void>((resolve) => {
@@ -540,12 +540,11 @@ describe("Sandbox 文件工具", () => {
       () => undefined,
       {} as never,
     );
-    await Promise.resolve();
-
+    await expect(second).rejects.toThrow('"code":"FILE_BUSY"');
     expect(tested.authorized.map((call) => call.callId)).toEqual(["call_write_first"]);
     releaseFirst();
-    await Promise.all([first, second]);
-    expect(writes).toEqual(["first", "second"]);
+    await first;
+    expect(writes).toEqual(["first"]);
   });
 
   it.each(["read", "edit", "write"] as const)(

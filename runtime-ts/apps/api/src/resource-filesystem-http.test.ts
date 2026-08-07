@@ -170,6 +170,7 @@ describe("Resource WebDAV HTTP 边界", () => {
           fileCount: 1,
         },
       ]),
+      listThreadFileThreadIds: vi.fn(async () => [historyFile.threadId]),
       resolveDirectory: vi.fn(async ({ directoryName }) =>
         directoryName === historyDirectoryName
           ? {
@@ -204,7 +205,7 @@ describe("Resource WebDAV HTTP 边界", () => {
     });
     expect(root.statusCode).toBe(207);
     expect(root.body).toContain("/v1/resource-filesystem/history/");
-    expect(root.body).not.toContain(".thread-files");
+    expect(root.body).toContain("/v1/resource-filesystem/.thread-files/");
 
     const directory = await fixture.app.inject({
       method: "PROPFIND" as "GET",
@@ -212,6 +213,16 @@ describe("Resource WebDAV HTTP 边界", () => {
       headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "1" },
     });
     expect(directory.statusCode).toBe(207);
+    const hiddenRoot = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: "/v1/resource-filesystem/.thread-files",
+      headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "1" },
+    });
+    expect(hiddenRoot.statusCode).toBe(207);
+    expect(hiddenRoot.body).toContain(
+      `/v1/resource-filesystem/.thread-files/${historyFile.threadId}/`,
+    );
+
     expect(directory.body).toContain(encodeURIComponent(historyDirectoryName));
 
     const threadFiles = await fixture.app.inject({
@@ -236,6 +247,7 @@ describe("Resource WebDAV HTTP 边界", () => {
     const teamHistory: HistoryFilesystemCatalog = {
       listRecentDirectories: vi.fn(async () => undefined),
       resolveDirectory: vi.fn(async () => undefined),
+      listThreadFileThreadIds: vi.fn(async () => undefined),
       listThreadFiles: vi.fn(async () => undefined),
       resolveHistoryFile: vi.fn(async () => undefined),
       resolveThreadFile: vi.fn(async () => undefined),

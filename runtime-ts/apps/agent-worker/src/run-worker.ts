@@ -91,7 +91,6 @@ async function preparePersonalHistoryEntrypoints(
 history_target='/resources/history'
 thread_target='${internalTarget}'
 [ -d "$history_target" ] || exit 71
-[ -d "$thread_target" ] || exit 72
 ensure_link() {
   link="$1"
   target="$2"
@@ -104,7 +103,33 @@ ensure_link() {
   fi
 }
 ensure_link /history "$history_target"
-ensure_link /thread-files "$thread_target"`;
+prepare_thread_entrypoint() {
+  link='/thread-files'
+  if [ -d "$thread_target" ]; then
+    if [ -L "$link" ]; then
+      [ "$(readlink "$link")" = "$thread_target" ] || exit 73
+    elif [ -d "$link" ]; then
+      [ -z "$(find "$link" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 74
+      rmdir "$link"
+      ln -s "$thread_target" "$link"
+    elif [ -e "$link" ]; then
+      exit 74
+    else
+      ln -s "$thread_target" "$link"
+    fi
+  else
+    if [ -L "$link" ]; then
+      exit 72
+    elif [ -d "$link" ]; then
+      [ -z "$(find "$link" -mindepth 1 -maxdepth 1 -print -quit)" ] || exit 74
+    elif [ -e "$link" ]; then
+      exit 74
+    else
+      install -d -m 0555 "$link"
+    fi
+  fi
+}
+prepare_thread_entrypoint`;
   const result = await sandbox.command(command, { signal, timeoutMs: 30_000 });
   if (result.exitCode !== 0) throw new Error("个人历史目录固定入口准备失败");
 }

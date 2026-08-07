@@ -1,18 +1,18 @@
-# 历史任务文件虚拟目录与个人/团队任务归属实施方案
+# 个人历史任务文件虚拟目录实施方案
 
 - 文档性质：跨 Domain、PostgreSQL、ResourceFS、Sandbox、Worker、标题服务和 Web 的实施总计划
-- 状态：已完成设计，尚未实施
+- 状态：已完成个人范围设计，尚未实施
 - 日期：2026-08-07
-- 核心决策：[ADR-0118](decisions/0118-history-files-virtual-directory-and-task-ownership.md)
+- 核心决策：[ADR-0118](decisions/0118-history-files-virtual-directory-and-task-ownership.md)、[ADR-0119](decisions/0119-personal-history-files-first-release-scope.md)
 - 相关决策：ADR-0005、ADR-0077、ADR-0079、ADR-0103、ADR-0107
 
 ## 1. 目标
 
-在继续使用每 Tenant 一个 Cube Volume 的前提下，为 Agent 提供接近本地只读目录的历史文件体验：
+在继续使用每 Tenant 一个 Cube Volume 的前提下，只为 `tenant.kind=personal` 的任务提供接近本地只读目录的历史文件体验：
 
 ```text
-/history       当前 Tenant 最近六个月有文件的历史任务
-/thread-files  当前 Thread 的稳定历史文件入口
+/history       当前个人 Tenant 最近六个月有文件的历史任务
+/thread-files  当前个人 Thread 的稳定历史文件入口
 /resources     ResourceFS 底层只读资源与 Skill 视图
 /workspace     当前 Thread 可写 Workspace
 ```
@@ -20,26 +20,22 @@
 目录必须支持普通 POSIX 工具和应用读取，不复制未使用文件，不暴露 Thread/Resource/Version ID 作为主要路径，也不把动态历史
 目录注入 system/developer prompt。
 
-任务所有权采用 Tenant 边界：
-
-```text
-personal Tenant 中的 Thread = 个人任务
-team Tenant 中的 Thread     = 团队任务
-```
-
-个人任务发布到团队时创建目标 Team Tenant 中的新任务副本并保留来源，不原地修改 `tenant_id`。
+本期只实现个人历史目录。`team` Tenant 不获得 `/history` 投影，不做团队任务目录、成员可见性、个人转团队或跨 Tenant 文件转移。
+数据模型和端口继续以 `tenant_id` 为隔离边界，避免未来增加团队能力时重做资源身份、RLS、路径解析和 Volume 契约。
 
 ## 2. 非目标
 
-第一阶段不实现：
+本期不实现：
 
+- `team` Tenant 的历史任务目录；
+- 团队成员角色、共享/私有任务或成员级目录过滤；
+- personal → team 发布、复制、转移、lineage、授权 API 或 UI；
+- 跨多个 Tenant 聚合当前用户的历史文件；
 - 超过最近六个月的全生命周期历史目录；
 - 独立 `search_history_files`、全文索引或向量检索工具；
 - 对所有 Office/PDF 文件进行预解析或 OCR；
 - 每用户或每 Thread Cube Volume；
-- UI 标题变化立即重命名历史目录；
-- personal → team 跨 Tenant 发布的生产启用；
-- 同一 Team Tenant 内的“个人私有 Thread”目录过滤；个人任务必须位于 personal Tenant。
+- UI 标题变化立即重命名历史目录。
 
 ## 3. 已验证现状
 
@@ -58,18 +54,21 @@ team Tenant 中的 Thread     = 团队任务
 - durable `thread_input_receipts.input_attachments` 保存 Resource/Version 身份和顺序；
 - 上传接口本身不绑定 Thread，只有附件随 Thread 输入提交后才形成“用户把文件用于这个任务”的事实。
 
-### 3.3 Tenant 与安全
+### 3.3 Tenant 与未来扩展边界
 
 - Tenant 已区分 `personal` 与 `team`；
 - 所有核心聚合、RLS 和 Blob 引用都以 `tenant_id` 为边界；
 - 当前 host-volume capability 只有 Tenant 身份，没有用户身份；
-- 因此单个 Team Tenant mount 上的 userId 目录过滤只能改善导航，不能构成个人私有数据安全边界。
+- 本期 Feature Gate 必须读取可信的 Tenant 类型，只允许 `personal` Tenant 创建和枚举历史目录；
+- `team` Tenant 继续保留现有附件与 ResourceFS 行为，但本功能不为其生成 `/history` 或 `/thread-files` 历史投影。
+
+这些约束只用于保证本期边界和未来兼容性，不代表本期已经实现团队任务、成员隔离或个人转团队能力。
 
 ## 4. 产品语义
 
 ### 4.1 `/history`
 
-`/history` 是当前 Sandbox 所属 Tenant 的滚动历史发现视图：
+`/history` 是当前 Sandbox 所属个人 Tenant 的滚动历史发现视图：
 
 ```text
 /history/
@@ -82,7 +81,7 @@ team Tenant 中的 Thread     = 团队任务
         └── 2026-07-18_09-11-16_销售数据.xlsx
 ```
 
-只枚举满足以下条件的任务：
+只枚举同一 `personal` Tenant 中满足以下条件的任务：
 
 ```text
 file_count > 0
@@ -90,7 +89,7 @@ last_file_at >= 数据库当前时间 - 6个月
 ```
 
 Thread 创建时间决定目录名前缀，`last_file_at` 只决定是否出现在滚动视图中。旧 Thread 最近新增文件后会重新出现，但路径
-不会移动。
+不会移动。目录不会跨 Tenant 聚合；`team` Tenant 在本期没有 `/history` 投影。
 
 ### 4.2 `/thread-files`
 
@@ -132,17 +131,18 @@ Thread 创建时间决定目录名前缀，`last_file_at` 只决定是否出现�
 
 `/thread-files` 始终走稳定 Thread 视图，不参与标题别名切换。
 
-### 4.4 personal 与 team
+### 4.4 本期 personal 范围
 
-历史目录不做“当前登录用户跨所有 Tenant 聚合”。它遵循当前 Sandbox 的 Tenant：
+历史目录不做“当前登录用户跨所有 Tenant 聚合”。本期唯一启用形态为：
 
 | 当前任务位置 | `/history` 内容 | `/thread-files` 内容 |
 |---|---|---|
-| personal Tenant | 该用户个人 Tenant 最近半年任务 | 当前个人任务文件 |
-| team Tenant | 该团队 Tenant 最近半年团队任务 | 当前团队任务文件 |
+| personal Tenant | 该个人 Tenant 最近半年有文件的任务 | 当前个人任务文件 |
+| team Tenant | 不由本功能创建或暴露 | 不由本功能创建历史投影 |
 
-这意味着在团队任务里使用个人历史文件时，必须先显式发布或导入到团队 Tenant；不能让 Team Sandbox 直接挂个人 Tenant 的
-Volume，也不能让 personal Sandbox 读取团队 Volume。
+`personal` Tenant 仍通过现有 owner 关系归属于用户，但 Agent-facing 路径不包含 userId、tenantId 或 threadId。未来团队任务继续使用
+独立 `team` Tenant；若产品支持“个人任务转团队”，应创建 Team Tenant 中的新任务副本并保留来源，不能原地修改来源 Thread 的
+`tenant_id`。该规则只是扩展约束，不在本期实现。
 
 ## 5. 命名规则
 
@@ -261,8 +261,8 @@ ready/fallback 时 directory_name 非空
 (tenant_id, directory_name)
 ```
 
-personal 所有权由 `tenant.kind=personal + owner_user_id` 表达，team 所有权由 `tenant.kind=team` 表达，不在该表重复建立无法执行
-的 userId 安全边界。
+本期只为 `tenant.kind=personal` 写入和查询该表，个人归属继续由 personal Tenant 的现有 owner 关系表达。表内仍保留 `tenant_id`
+作为身份、唯一约束和 RLS 边界，不增加仅适用于个人目录的 `user_id`，也不建立尚无法执行的 Team 成员级安全边界。
 
 ### 6.3 `thread_history_file_entries`
 
@@ -404,20 +404,24 @@ rg '违约责任' /history
 
 ### 8.1 Volume 需求
 
-为保证用户能在新 Thread 中访问旧任务，需求信号调整为：
+为保证用户能在新个人 Thread 中访问旧任务，需求信号调整为：
 
 ```text
 requiresResourceFilesystem =
   当前输入包含附件
-  OR 当前 Tenant 最近六个月存在历史文件
+  OR (
+    tenant.kind = personal
+    AND 当前 personal Tenant 最近六个月存在历史文件
+  )
 ```
 
-`hasRecentHistory` 必须是命中索引的 `EXISTS` 查询，不能统计全部目录。纯文本响应仍不创建 Sandbox；只有工具调用需要 Sandbox
-时才 acquire。已有未挂载 Thread Session 继续按 ADR-0107 的 generation 升级规则退役重建，不做未验证热挂载。
+`hasRecentHistory` 必须是命中索引的 `EXISTS` 查询，不能统计全部目录。`team` Tenant 不因本功能的历史关系请求 ResourceFS，
+其当前输入附件仍沿用既有规则。纯文本响应仍不创建 Sandbox；只有工具调用需要 Sandbox 时才 acquire。已有未挂载 Thread Session
+继续按 ADR-0107 的 generation 升级规则退役重建，不做未验证热挂载。
 
 ### 8.2 固定入口准备
 
-Sandbox acquire 成功且 ResourceFS 已挂载后：
+当可信 Tenant 类型为 `personal`，且 Sandbox acquire 成功、ResourceFS 已挂载后：
 
 1. 验证 `/resources/history` 是只读目录；
 2. 在 Sandbox 临时运行区域准备 `/history` 固定入口；
@@ -425,7 +429,7 @@ Sandbox acquire 成功且 ResourceFS 已挂载后：
 4. 验证两个入口均不能写入；
 5. 不把入口或软链接写入 `/workspace`，避免进入 Workspace Revision。
 
-准备失败必须失败关闭，不能继续让模型相信历史目录存在。
+准备失败必须失败关闭，不能继续让模型相信历史目录存在。`team` Tenant 不执行这组历史入口准备逻辑。
 
 ### 8.3 生命周期
 
@@ -437,12 +441,12 @@ Sandbox acquire 成功且 ResourceFS 已挂载后：
 
 ## 9. 标题服务实施
 
-建议先作为现有 Scheduler/Worker 体系中的独立 outbox consumer，不立即拆新服务。边界通过端口隔离，后续吞吐、限流或故障域需要
-时可以独立部署。
+标题生成只服务本期 personal 历史目录和同一任务的 UI 标题。建议先作为现有 Scheduler/Worker 体系中的独立 outbox consumer，
+不立即拆新服务；边界通过端口隔离，后续吞吐、限流或故障域需要时可以独立部署。
 
 处理规则：
 
-1. durable 首条输入提交后写 outbox；
+1. personal Tenant 的 durable 首条输入提交后写 outbox；
 2. consumer claim 后读取受限原文和附件名；
 3. 调用配置的低成本文本模型；
 4. 保存脱敏的模型、延迟、token 数与结果分类指标，不保存完整请求正文；
@@ -451,82 +455,23 @@ Sandbox acquire 成功且 ResourceFS 已挂载后：
 7. 标记目录 ready；
 8. 失败按有界重试，最终写 fallback，不能让历史目录永久 pending。
 
-UI 不等待标题模型完成：先显示确定性标题，收到 Thread 更新后替换。目录只在模型标题或 fallback 已经确定后出现。
+UI 不等待标题模型完成：先显示确定性标题，收到 Thread 更新后替换。目录只在模型标题或 fallback 已经确定后出现。`team` Tenant
+不由本功能创建标题 outbox 或历史目录事实。
 
-## 10. 个人任务发布到团队
+## 10. 未来团队扩展约束（不在本期实施范围）
 
-### 10.1 语义
+本期不创建任何团队相关表、角色、授权、发布 API、跨 Tenant Saga、Web UI、指标或后台任务。为了避免个人版本形成未来障碍，
+当前实现只需遵守以下稳定约束：
 
-“转为团队任务”在产品上表现为发布，但数据上是跨 Tenant fork：
+- 历史目录、文件关系、ResourceVersion 和 Blob 引用始终以 `tenant_id` 为安全与身份边界；
+- Agent-facing 路径不编码“个人”专用的 userId，也不把 Thread ID 作为主要目录名；
+- Domain 和 ResourceFS 端口显式接收 Tenant 上下文，不从路径文字推导授权；
+- Feature Gate 对 `tenant.kind=personal` 明确开放、对 `tenant.kind=team` 明确关闭；
+- 不增加跨 Tenant 普通外键、隐式读取或可被未来误用的共享 capability；
+- 个人任务未来转为团队任务时，采用向目标 Team Tenant 创建新任务副本并保留来源的语义，不原地修改 `tenant_id`。
 
-```text
-personal Tenant / source Thread 保留
-                 ↓ 显式发布
-team Tenant / new target Thread 创建
-```
-
-不允许原地更新 source Thread 的 `tenant_id`，也不自动删除、归档或隐藏个人来源。
-
-### 10.2 授权
-
-发布请求必须同时证明：
-
-- 请求用户是 personal Tenant owner；
-- 请求用户是目标 team Tenant 的 active member；
-- 其角色满足目标团队发布策略；
-- source Thread 仍属于 personal Tenant 且状态允许快照；
-- 用户明确确认将哪些消息、Workspace 文件、附件和 Artifact 暴露给团队。
-
-团队权限模型尚未最终确定前，此 API 和 UI 必须保持关闭。
-
-### 10.3 发布快照
-
-发布开始时冻结：
-
-```text
-source thread context through-sequence
-source workspace revision
-included resource/version manifest
-included artifact manifest
-source thread title
-request digest
-```
-
-默认建议是“完整任务副本”，但 UI 必须展示数量和敏感性确认。若后续产品选择只发布文件或摘要，需要单独 ADR，不得静默省略
-上下文导致目标 Agent 误解来源。
-
-### 10.4 跨 Tenant Saga
-
-建议阶段：
-
-```text
-authorize
-→ create transfer intent
-→ freeze source snapshot
-→ stage target Blob/Resource references
-→ create target Thread/Workspace/Context
-→ create target history relations and title directory
-→ atomically mark target visible
-→ record source/target lineage
-```
-
-目标 Tenant 必须获得独立逻辑 BlobReference 和 ResourceVersion。对象存储可在受控边界使用 server-side copy 或内容去重，但不能
-让目标持有来源 Tenant 的 capability、reference ID 或对象授权。
-
-普通 Runtime 数据库角色不能跨两个 RLS Tenant 完成该操作。需要独立 transfer application port、最小数据库角色和双租户授权
-审计；失败时目标保持不可见并由 outbox 补偿清理 staging，source 永不受损。
-
-### 10.5 幂等与 lineage
-
-重复相同发布请求返回同一 target Thread；相同幂等键不同 manifest 必须冲突。来源和目标记录不可变 lineage，但不建立要求跨
-Tenant 级联删除的普通业务外键。
-
-发布完成后：
-
-- personal `/history` 继续包含来源；
-- team `/history` 包含新目标任务；
-- 目标目录时间使用目标 Thread 创建/发布时间；
-- 目标标题默认沿用来源语义标题，团队中冲突时由时间和极端序号解决。
+团队能力启动前必须另立 ADR，冻结成员角色、私有/共享任务、双 Tenant 授权、复制范围、Blob 策略、lineage、审计、回滚和 UI
+确认流程；这些内容不进入本期估算、迁移或验收。
 
 ## 11. 性能与资源预算
 
@@ -539,12 +484,13 @@ Tenant 级联删除的普通业务外键。
 
 ### 11.2 增加的成本
 
-- 每个 Thread/ResourceVersion 关系一条 PostgreSQL 元数据；
-- `/history` PROPFIND 返回最近六个月全部有文件任务目录；
+- 每个个人 Thread/ResourceVersion 关系一条 PostgreSQL 元数据；
+- `/history` PROPFIND 返回当前 personal Tenant 最近六个月全部有文件任务目录；
 - 文件打开后占用 rclone VFS cache；
-- 当前 Tenant 有历史文件时，工具 Sandbox 依赖 ResourceFS attach；
-- 每个 Thread 最多一次低成本标题调用；
-- personal → team 发布可能产生目标 Tenant 对象副本或独立引用。
+- 当前 personal Tenant 有历史文件时，工具 Sandbox 依赖 ResourceFS attach；
+- 每个 personal Thread 最多一次低成本标题调用。
+
+本期不产生 Team Tenant 历史索引、团队成员映射或跨 Tenant 文件复制成本。
 
 ### 11.3 查询约束
 
@@ -584,9 +530,10 @@ history_title_generation_duration_ms
 history_title_generation_tokens_total
 history_directory_collision_total
 history_stale_alias_read_total          # TODO 改名阶段
-thread_team_publish_total{outcome}      # 团队阶段
-thread_team_publish_bytes_total         # 团队阶段
 ```
+
+关键指标应带受控的 `tenantKind` 或结果分类维度，用来验证 personal 请求被启用、team 请求被 Gate 拒绝；不得使用 tenantId、userId、
+threadId、标题或文件名作为高基数标签。
 
 日志只记录 Tenant/Thread 的受控内部标识、计数、耗时和结果分类，不记录完整标题模型输入、文件正文、签名 URL 或对象键。
 
@@ -594,76 +541,62 @@ thread_team_publish_bytes_total         # 团队阶段
 
 ### 阶段 0：ADR、性能基线和 Feature Flag
 
-- 接受 ADR-0118；
+- 接受 ADR-0118，并以 ADR-0119 收窄首期范围；
 - 增加 `HISTORY_FILESYSTEM_ENABLED` 与标题生成配置契约；
+- Feature Gate 同时要求开关开启且可信 `tenant.kind=personal`；
 - 对当前 ResourceFS PROPFIND 和 Volume attach 建立基线；
 - 冻结 Agent-facing `/history`、`/thread-files` 和时间命名规则。
 
-验收：配置关闭时行为与当前完全一致。
+验收：配置关闭或 Tenant 类型为 `team` 时，行为与当前完全一致。
 
-### 阶段 1：规范化历史关系
+### 阶段 1：规范化个人历史关系
 
 - 增加历史目录和文件关系迁移、RLS、ACL、回退 Gate；
-- Thread 输入提交事务幂等写关系；
+- 仅对 personal Tenant 的 Thread 输入提交事务幂等写关系；
 - 维护 `file_count/first_file_at/last_file_at`；
-- 为已有 receipt 提供一次性可审计回填命令，不在在线迁移中无界扫描。
+- 只为已有 personal receipt 做分批、可暂停、可重跑回填。
 
-验收：新旧输入、重复附件、取消/失败 Run、跨 Tenant 访问和回填重跑全部收敛。
+验收：重复附件、取消/失败 Run、personal Tenant 隔离和回填重跑全部收敛，team 数据不产生历史关系。
 
-### 阶段 2：标题生成
+### 阶段 2：个人标题生成
 
 - 增加 title outbox、consumer、严格模型适配器和 fallback；
+- 只为 personal Tenant 触发历史标题生成；
 - Web 接收异步标题更新；
 - 标题和目录分配使用 CAS，不覆盖用户标题；
 - 标题模型 wire trace 默认关闭或严格脱敏。
 
 验收：模型超时、非法输出、重复消费、用户并发改名和 Provider 不可用均有确定结果。
 
-### 阶段 3：ResourceFS 历史目录
+### 阶段 3：ResourceFS 个人历史目录
 
 - 新增 `history` 根段与路径定向 catalog；
-- 实现最近六个月目录、Thread 文件目录和 exact file read；
+- 只对 personal Tenant 实现最近六个月目录、Thread 文件目录和 exact file read；
 - 复用 Range、ETag、Blob 完整性和只读方法限制；
 - 删除历史路径上的全 Tenant `catalog.list` 依赖。
 
-验收：协议测试、PostgreSQL 集成测试、10,000 目录性能 Gate。
+验收：协议测试、PostgreSQL 集成测试、10,000 目录性能 Gate，并证明 team Tenant 不暴露历史根。
 
 ### 阶段 4：Sandbox 固定入口与需求信号
 
-- 按当前 Tenant `hasRecentHistory` 决定 ResourceFS 能力；
+- 仅在可信 `tenant.kind=personal` 时按 `hasRecentHistory` 决定 ResourceFS 能力；
 - 创建 `/history` 与稳定 `/thread-files`；
 - 处理 Thread Session 无挂载到有挂载 generation 升级；
 - 验证 pause/resume、冷建、当前轮新增附件和只读权限。
 
-验收：新 Thread 可用旧历史、标题变化不破坏 `/thread-files`、无历史 Tenant 的普通工具任务不 attach。
+验收：新个人 Thread 可用旧历史、标题变化不破坏 `/thread-files`、无历史 personal Tenant 的普通工具任务不 attach，team Tenant
+不会因历史功能新增 attach。
 
 ### 阶段 5：Web 与原生工具体验
 
-- Web 展示模型标题及 fallback 状态；
+- Web 展示 personal 任务的模型标题及 fallback 状态；
 - Sandbox 模板 Gate 验证 `find`、`rg`，决定是否加入 `fd`；
 - 静态 Prompt 只说明固定目录与先按文件名缩小范围，不注入动态内容；
-- 增加黑盒 E2E：上传 → 新 Thread → `find/rg --files` → 读取历史文件。
+- 增加黑盒 E2E：上传 → 新个人 Thread → `find/rg --files` → 读取历史文件。
 
-验收：模型无需 ID 或专用搜索工具即可定位并读取文件。
+验收：模型无需 ID 或专用搜索工具即可定位并读取个人历史文件。
 
-### 阶段 6：标题改名 TODO
-
-- 新增别名表和原子切换状态机；
-- 旧路径跨活跃 Sandbox 和缓存窗口继续解析；
-- `/thread-files` 证明不依赖标题别名；
-- 增加别名数量、命中和退休指标。
-
-该阶段单独 ADR 后实施。
-
-### 阶段 7：个人任务发布到团队
-
-- 冻结 Team Tenant 角色和 Thread 可见性模型；
-- 完成威胁模型、双 Tenant 授权、transfer role 和 API；
-- 实现源快照、目标 staging、Blob/Resource 转移、目标原子可见和 lineage；
-- Web 提供包含内容清单与敏感性确认；
-- Feature Flag 灰度后再开放。
-
-该阶段必须单独 ADR，不与历史目录首发捆绑。
+标题改名兼容别名和团队能力均不属于本期实施阶段，分别在后续 ADR 中排期。
 
 ## 14. 测试矩阵
 
@@ -673,14 +606,15 @@ thread_team_publish_bytes_total         # 团队阶段
 - 同秒冲突分配；
 - 标题 source 状态与用户修改优先级；
 - 同 ResourceVersion 去重和 attachment count；
-- 六个月边界。
+- 六个月边界；
+- 非 personal Tenant 不创建历史事实。
 
 ### Persistence
 
-- 关系写入与 receipt 同事务；
+- personal 关系写入与 receipt 同事务；
 - RLS 和复合外键；
 - 覆盖索引查询计划；
-- 回填幂等；
+- personal 回填幂等且跳过 team 数据；
 - directory summary 并发更新；
 - 标题 outbox claim/fencing/CAS。
 
@@ -690,12 +624,14 @@ thread_team_publish_bytes_total         # 团队阶段
 - 保留段与旧 Resource 路径兼容；
 - 文件 GET/HEAD/Range/ETag；
 - 未授权 Tenant 404；
+- team Tenant 不暴露本功能的历史根；
 - 标题 pending、过期历史和 exact path；
 - 所有写方法失败。
 
 ### Worker/Sandbox
 
-- 有/无历史时 Volume 需求；
+- personal Tenant 有/无历史时的 Volume 需求；
+- team Tenant 不因历史功能 attach，当前附件行为不回归；
 - `/history` 与 `/thread-files` 只读；
 - pause/resume 与冷恢复；
 - 当前输入新增附件立即可见；
@@ -714,37 +650,43 @@ thread_team_publish_bytes_total         # 团队阶段
 → 原 Resource 与当前 Thread 稳定入口仍符合约定
 ```
 
-团队发布 E2E 在阶段 7 独立增加。
+另加负向 E2E：相同 Feature Flag 下，team Tenant 不出现 personal 历史目录，也不能借该功能跨 Tenant 读取文件。
 
 ## 15. 灰度与回滚
 
 建议开关顺序：
 
 ```text
-history relation dual-write
-→ shadow query 对比 receipt
+personal history relation dual-write
+→ shadow query 对比 personal receipt
 → ResourceFS history root 仅内部 Gate
 → development 黑盒
-→ 小比例 Tenant 可见
-→ 默认开启
+→ 小比例 personal Tenant 可见
+→ personal Tenant 默认开启
 ```
 
 回滚顺序：
 
-1. 停止 `/history` 和 `/thread-files` 投影；
+1. 停止 personal `/history` 和 `/thread-files` 投影；
 2. Worker 恢复只按当前附件请求 ResourceFS；
-3. 保留历史关系 dual-write 或停止新增，但不删除数据；
+3. 保留个人历史关系 dual-write 或停止新增，但不删除数据；
 4. 标题服务可独立关闭并回退确定性标题；
-5. 旧 canonical Resource 路径继续工作。
-
-团队发布一旦目标 Thread 对外可见，只能归档目标并保留审计，不能删除来源或伪装为从未发布。
+5. 旧 canonical Resource 路径继续工作；
+6. `team` Tenant 不需要回滚，因为本期未启用团队历史功能。
 
 ## 16. 待后续 ADR 冻结的事项
 
-- UI 手动改名后的别名保留时长；
-- 用户/团队展示时区来源和变更策略；
+与个人历史目录直接相关，但不属于本期首发：
+
+- UI 手动改名后的别名保留时长与运行中 Sandbox 兼容；
+- 个人展示时区来源和变更策略；
 - 10,000 半年任务性能 Gate 未达标时采用分层、流式 readdir 还是受控上限；
-- Artifact 是否进入 `files`，还是增加 `artifacts` 子目录；
-- Team Tenant 的成员角色、私有/共享 Thread 和发布权限；
+- Artifact 是否进入 `files`，还是增加 `artifacts` 子目录。
+
+未来团队扩展另立 ADR，不进入本期实现计划：
+
+- Team Tenant 的成员角色、私有/共享 Thread 和成员级可见性；
+- 团队 `/history` 的授权与目录投影方式；
 - personal → team 发布是完整 Context、摘要还是用户选择内容；
-- 跨 Tenant Blob 使用 server-side copy 还是受控全局内容去重。
+- 跨 Tenant Blob 使用 server-side copy 还是受控全局内容去重；
+- 发布 lineage、审计、幂等、失败补偿、回滚和 UI 确认流程。

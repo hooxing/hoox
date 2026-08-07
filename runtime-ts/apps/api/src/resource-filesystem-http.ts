@@ -2,7 +2,11 @@ import { createHash } from "node:crypto";
 import { resourceId, resourceVersionId, type TenantId } from "@cube-runtime/domain";
 import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
 import {
+  HISTORY_FILESYSTEM_ROOT_SEGMENT,
   RESOURCE_FILESYSTEM_ROOT,
+  THREAD_FILESYSTEM_INTERNAL_ROOT_SEGMENT,
+  type HistoryFilesystemCatalog,
+  type HistoryFilesystemFile,
   type ResourceFilesystemCapabilityCodec,
   type ResourceFilesystemCatalog,
   type ResourceFilesystemFile,
@@ -23,6 +27,11 @@ interface ResourceFilesystemHttpDependencies {
   readonly catalog: ResourceFilesystemCatalog;
   readonly blobs: BlobStore;
   readonly capabilities: ResourceFilesystemCapabilityCodec;
+  /**
+   * TODO: 历史目录吞吐或故障域需要独立治理时，可拆为 ResourceFS 子模块/服务；
+   * 对外继续保持同一 Tenant Volume 与 /history、/thread-files 路径契约。
+   */
+  readonly history?: HistoryFilesystemCatalog;
   readonly skills?: Readonly<{
     catalog: SkillFilesystemCatalog;
     contents: SkillContentStore;
@@ -85,17 +94,39 @@ async function handlePropfind(
   if (segments.length === 0) {
     target = directoryNode([]);
     if (depth === "1") {
-      const files = await dependencies.catalog.list({ tenantId: capability.tenantId });
+      const [files, history] = await Promise.all([
+        dependencies.catalog.list({ tenantId: capability.tenantId }),
+        dependencies.history?.listRecentDirectories({ tenantId: capability.tenantId }),
+      ]);
       children = [
         ...resourceRootChildren(files),
         ...(dependencies.skills === undefined
           ? []
           : [directoryNode([SKILL_FILESYSTEM_ROOT_SEGMENT])]),
+        ...(history === undefined ? [] : [directoryNode([HISTORY_FILESYSTEM_ROOT_SEGMENT])]),
       ].sort(compareNodes);
     }
   } else if (segments[0] === SKILL_FILESYSTEM_ROOT_SEGMENT) {
     const resolved = await resolveSkillNode(
       dependencies.skills?.catalog,
+      capability.tenantId,
+      segments,
+      depth === "1",
+    );
+    target = resolved?.target;
+    children = resolved?.children ?? [];
+  } else if (segments[0] === HISTORY_FILESYSTEM_ROOT_SEGMENT) {
+    const resolved = await resolveHistoryNode(
+      dependencies.history,
+      capability.tenantId,
+      segments,
+      depth === "1",
+    );
+    target = resolved?.target;
+    children = resolved?.children ?? [];
+  } else if (segments[0] === THREAD_FILESYSTEM_INTERNAL_ROOT_SEGMENT) {
+    const resolved = await resolveInternalThreadNode(
+      dependencies.history,
       capability.tenantId,
       segments,
       depth === "1",
@@ -122,7 +153,6 @@ async function handlePropfind(
     .type("application/xml; charset=utf-8")
     .send(xml);
 }
-
 async function handleRead(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -136,6 +166,13 @@ async function handleRead(
   const segments = requestSegments(request.url);
   if (segments[0] === SKILL_FILESYSTEM_ROOT_SEGMENT) {
     await handleSkillRead(request, reply, dependencies.skills, capability.tenantId, segments);
+    return;
+  }
+  if (
+    segments[0] === HISTORY_FILESYSTEM_ROOT_SEGMENT ||
+    segments[0] === THREAD_FILESYSTEM_INTERNAL_ROOT_SEGMENT
+  ) {
+    await handleHistoryRead(request, reply, dependencies, capability.tenantId, segments);
     return;
   }
   if (segments.length !== 3) {
@@ -160,16 +197,70 @@ async function handleRead(
     void reply.code(404).send();
     return;
   }
+  await sendResourceFile(request, reply, dependencies.blobs, capability.tenantId, file);
+}
+
+async function handleHistoryRead(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  dependencies: ResourceFilesystemHttpDependencies,
+  tenantId: TenantId,
+  segments: readonly string[],
+): Promise<void> {
+  const history = dependencies.history;
+  if (history === undefined) {
+    void reply.code(404).send();
+    return;
+  }
+  let file: HistoryFilesystemFile | undefined;
+  if (
+    segments[0] === HISTORY_FILESYSTEM_ROOT_SEGMENT &&
+    segments.length === 4 &&
+    segments[2] === "files"
+  ) {
+    file = await history.resolveHistoryFile({
+      tenantId,
+      directoryName: segments[1] ?? "",
+      entryName: segments[3] ?? "",
+    });
+  } else if (
+    segments[0] === THREAD_FILESYSTEM_INTERNAL_ROOT_SEGMENT &&
+    segments.length === 4 &&
+    segments[2] === "files"
+  ) {
+    file = await history.resolveThreadFile({
+      tenantId,
+      threadId: segments[1] ?? "",
+      entryName: segments[3] ?? "",
+    });
+  } else {
+    const resolved =
+      segments[0] === HISTORY_FILESYSTEM_ROOT_SEGMENT
+        ? await resolveHistoryNode(history, tenantId, segments, false)
+        : await resolveInternalThreadNode(history, tenantId, segments, false);
+    void reply.code(resolved === undefined ? 404 : 405).send();
+    return;
+  }
+  if (file === undefined) {
+    void reply.code(404).send();
+    return;
+  }
+  await sendResourceFile(request, reply, dependencies.blobs, tenantId, file);
+}
+
+async function sendResourceFile(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  blobs: BlobStore,
+  tenantId: TenantId,
+  file: ResourceFilesystemFile,
+): Promise<void> {
   await sendFile(request, reply, fileMetadata(file), async () => {
-    const bytes = await dependencies.blobs.getBytes(
-      { tenantId: capability.tenantId },
-      stableBlob(file),
-    );
+    const bytes = await blobs.getBytes({ tenantId }, stableBlob(file));
     if (bytes.byteLength !== file.sizeBytes) throw new Error("Resource 文件内容大小不一致");
     return bytes;
   });
 }
-
 async function handleSkillRead(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -340,6 +431,105 @@ function resourceChildren(
         fileMetadata(file),
       ),
     );
+}
+
+async function resolveHistoryNode(
+  catalog: HistoryFilesystemCatalog | undefined,
+  tenantId: TenantId,
+  segments: readonly string[],
+  includeChildren: boolean,
+): Promise<
+  { readonly target: FilesystemNode; readonly children: readonly FilesystemNode[] } | undefined
+> {
+  if (catalog === undefined || segments[0] !== HISTORY_FILESYSTEM_ROOT_SEGMENT) return undefined;
+  if (segments.length === 1) {
+    const directories = await catalog.listRecentDirectories({ tenantId });
+    if (directories === undefined) return undefined;
+    return {
+      target: directoryNode(segments),
+      children: includeChildren
+        ? directories.map((directory) => directoryNode([...segments, directory.name]))
+        : [],
+    };
+  }
+  const directoryName = segments[1] ?? "";
+  const directory = await catalog.resolveDirectory({ tenantId, directoryName });
+  if (directory === undefined) return undefined;
+  if (segments.length === 2) {
+    return {
+      target: directoryNode(segments),
+      children: includeChildren ? [directoryNode([...segments, "files"])] : [],
+    };
+  }
+  if (segments.length === 3 && segments[2] === "files") {
+    const files = await catalog.listThreadFiles({ tenantId, threadId: directory.threadId });
+    if (files === undefined) return undefined;
+    return {
+      target: directoryNode(segments),
+      children: includeChildren
+        ? files.map((file) => fileNode([...segments, file.entryName], fileMetadata(file)))
+        : [],
+    };
+  }
+  if (segments.length === 4 && segments[2] === "files") {
+    const file = await catalog.resolveHistoryFile({
+      tenantId,
+      directoryName,
+      entryName: segments[3] ?? "",
+    });
+    return file === undefined
+      ? undefined
+      : { target: fileNode(segments, fileMetadata(file)), children: [] };
+  }
+  return undefined;
+}
+
+async function resolveInternalThreadNode(
+  catalog: HistoryFilesystemCatalog | undefined,
+  tenantId: TenantId,
+  segments: readonly string[],
+  includeChildren: boolean,
+): Promise<
+  { readonly target: FilesystemNode; readonly children: readonly FilesystemNode[] } | undefined
+> {
+  if (catalog === undefined || segments[0] !== THREAD_FILESYSTEM_INTERNAL_ROOT_SEGMENT) {
+    return undefined;
+  }
+  // 内部稳定根不参与普通根目录枚举，也不列出 Thread ID；Worker 只按当前可信 Scope 建固定软链接。
+  if (segments.length === 1) {
+    const directories = await catalog.listRecentDirectories({ tenantId });
+    return directories === undefined
+      ? undefined
+      : { target: directoryNode(segments), children: [] };
+  }
+  const threadId = segments[1] ?? "";
+  const files = await catalog.listThreadFiles({ tenantId, threadId });
+  if (files === undefined) return undefined;
+  if (segments.length === 2) {
+    return {
+      target: directoryNode(segments),
+      children: includeChildren ? [directoryNode([...segments, "files"])] : [],
+    };
+  }
+  if (segments.length === 3 && segments[2] === "files") {
+    return {
+      target: directoryNode(segments),
+      children: includeChildren
+        ? files.map((file) => fileNode([...segments, file.entryName], fileMetadata(file)))
+        : [],
+    };
+  }
+  if (segments.length === 4 && segments[2] === "files") {
+    const file = await catalog.resolveThreadFile({
+      tenantId,
+      threadId,
+      entryName: segments[3] ?? "",
+    });
+    return file === undefined
+      ? undefined
+      : { target: fileNode(segments, fileMetadata(file)), children: [] };
+  }
+  return undefined;
 }
 
 async function resolveSkillNode(

@@ -4,6 +4,8 @@ import type { ResourceCatalog, TrustedResourceContext } from "./contracts.js";
 import { ResourceServiceError, resourceInvariant } from "./errors.js";
 
 export const RESOURCE_FILESYSTEM_ROOT = "/resources" as const;
+export const HISTORY_FILESYSTEM_ROOT_SEGMENT = "history" as const;
+export const THREAD_FILESYSTEM_INTERNAL_ROOT_SEGMENT = ".thread-files" as const;
 export const MAX_ATTACHMENTS_PER_INPUT = 20;
 
 export interface ResourceAttachmentReference {
@@ -32,6 +34,48 @@ export interface ResourceFilesystemStoredObject {
 
 export interface ResourceFilesystemFile extends ResourceAttachment {
   readonly object: ResourceFilesystemStoredObject;
+}
+
+export interface HistoryFilesystemDirectory {
+  readonly threadId: string;
+  readonly name: string;
+  readonly createdAt: string;
+  readonly lastFileAt: string;
+  readonly fileCount: number;
+}
+
+export interface HistoryFilesystemFile extends ResourceFilesystemFile {
+  readonly threadId: string;
+  readonly directoryName: string;
+  readonly entryName: string;
+}
+
+/**
+ * 历史目录只通过路径定向查询读取，不能退化为加载 Tenant 全部 Resource 后在内存中过滤。
+ * `undefined` 表示当前 Tenant 不具备个人历史目录能力，空数组表示能力存在但目录为空。
+ */
+export interface HistoryFilesystemCatalog {
+  listRecentDirectories(input: {
+    readonly tenantId: TenantId;
+  }): Promise<readonly HistoryFilesystemDirectory[] | undefined>;
+  resolveDirectory(input: {
+    readonly tenantId: TenantId;
+    readonly directoryName: string;
+  }): Promise<HistoryFilesystemDirectory | undefined>;
+  listThreadFiles(input: {
+    readonly tenantId: TenantId;
+    readonly threadId: string;
+  }): Promise<readonly HistoryFilesystemFile[] | undefined>;
+  resolveHistoryFile(input: {
+    readonly tenantId: TenantId;
+    readonly directoryName: string;
+    readonly entryName: string;
+  }): Promise<HistoryFilesystemFile | undefined>;
+  resolveThreadFile(input: {
+    readonly tenantId: TenantId;
+    readonly threadId: string;
+    readonly entryName: string;
+  }): Promise<HistoryFilesystemFile | undefined>;
 }
 
 export interface ResourceFilesystemCatalog {
@@ -135,6 +179,63 @@ export function resourceFilesystemFileName(name: string): string {
   return bounded.length === 0 ? "file" : bounded;
 }
 
+const historyTimestampFormatter = new Map<string, Intl.DateTimeFormat>();
+
+export function historyFilesystemTimestamp(value: string | Date, timeZone: string): string {
+  const date = value instanceof Date ? value : new Date(value);
+  resourceInvariant(!Number.isNaN(date.valueOf()), "INVALID_REQUEST", "历史文件时间无效");
+  let formatter = historyTimestampFormatter.get(timeZone);
+  if (formatter === undefined) {
+    try {
+      formatter = new Intl.DateTimeFormat("en-CA", {
+        timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23",
+      });
+    } catch {
+      throw new ResourceServiceError("INVALID_REQUEST", "历史目录时区无效");
+    }
+    historyTimestampFormatter.set(timeZone, formatter);
+  }
+  const values = new Map(formatter.formatToParts(date).map((part) => [part.type, part.value]));
+  const required = ["year", "month", "day", "hour", "minute", "second"] as const;
+  resourceInvariant(
+    required.every((part) => /^\d{2,4}$/u.test(values.get(part) ?? "")),
+    "INVALID_REQUEST",
+    "历史文件时间格式化失败",
+  );
+  return `${values.get("year")}-${values.get("month")}-${values.get("day")}_${values.get("hour")}-${values.get("minute")}-${values.get("second")}`;
+}
+
+export function historyFilesystemDirectoryName(input: {
+  readonly createdAt: string | Date;
+  readonly title: string;
+  readonly timeZone: string;
+}): string {
+  return `${historyFilesystemTimestamp(input.createdAt, input.timeZone)}_${resourceFilesystemFileName(input.title)}`;
+}
+
+export function historyFilesystemEntryName(input: {
+  readonly attachedAt: string | Date;
+  readonly name: string;
+  readonly timeZone: string;
+}): string {
+  return `${historyFilesystemTimestamp(input.attachedAt, input.timeZone)}_${resourceFilesystemFileName(input.name)}`;
+}
+
+export function historyFilesystemCollisionName(baseName: string, ordinal: number): string {
+  resourceInvariant(
+    Number.isSafeInteger(ordinal) && ordinal >= 1,
+    "INVALID_REQUEST",
+    "历史目录冲突序号无效",
+  );
+  return ordinal === 1 ? baseName : `${baseName}-${ordinal}`;
+}
 export interface SandboxResourceFilesystemCapability {
   readonly tenantId: TenantId;
   readonly sandboxId: string;

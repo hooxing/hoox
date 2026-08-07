@@ -52,6 +52,8 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
       expectedRuntimeRole: configuration.databaseRuntimeRole,
       applicationName: "cube-runtime-api-production",
       serialQueueV2Enabled: configuration.serialQueueV2Enabled,
+      historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
+      historyFilesystemEnabled: configuration.historyFilesystemEnabled,
       // PG 签发的 canonical physicalObjectKey 必须与 S3 客户端使用同一持久前缀。
       blobLifecycle: { objectPrefix: RUNTIME_BLOB_OBJECT_PREFIX },
     });
@@ -122,6 +124,9 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
           resourceFilesystem: {
             catalog: persistence.resourceFilesystem,
             capabilities: resourceFilesystemCapabilities,
+            ...(configuration.historyFilesystemEnabled
+              ? { history: persistence.resourceFilesystem }
+              : {}),
             skills: {
               catalog: persistence.skillFilesystem,
               contents: new BlobSkillContentStore(skillBlobs),

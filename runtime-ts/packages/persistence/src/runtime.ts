@@ -90,6 +90,8 @@ export function createApiPersistenceRuntime(
   options: PostgresPoolOptions & {
     readonly serialQueueV2Enabled?: boolean;
     readonly blobLifecycle?: PgBlobLifecycleOptions;
+    readonly historyDirectoryTimeZone?: string;
+    readonly historyFilesystemEnabled?: boolean;
   },
 ): ApiPersistenceRuntime {
   const pool = createPostgresPool(options);
@@ -100,7 +102,14 @@ export function createApiPersistenceRuntime(
     runDispatchCreation: new PgRunDispatchCreation(pool, {
       serialQueueV2Enabled: options.serialQueueV2Enabled ?? false,
     }),
-    threadInputs: new PgThreadInputRouting(pool),
+    threadInputs: new PgThreadInputRouting(pool, {
+      ...(options.historyDirectoryTimeZone === undefined
+        ? {}
+        : { historyDirectoryTimeZone: options.historyDirectoryTimeZone }),
+      ...(options.historyFilesystemEnabled === undefined
+        ? {}
+        : { historyFilesystemEnabled: options.historyFilesystemEnabled }),
+    }),
     experience: new PgRunExperienceReadRepository(pool),
     modelWireTraces: new PgModelWireTraceReadRepository(pool),
     blobLifecycle: new PgBlobLifecycleRepository(pool, options.blobLifecycle),

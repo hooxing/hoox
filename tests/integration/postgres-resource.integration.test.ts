@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { resourceId, resourceVersionId, tenantId, userId } from "@cube-runtime/domain";
 import {
   type AuthorizedAgentResourceContext,
@@ -8,6 +8,7 @@ import {
   type TrustedResourceContext,
 } from "@cube-runtime/resource";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { PgResourceFilesystemCatalog } from "../../runtime-ts/packages/persistence/src/pg-resource-filesystem.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
 import {
@@ -83,6 +84,7 @@ let admin!: Pool;
 let migrator!: Pool;
 let runtime!: Pool;
 let catalog!: PgResourceCatalog;
+let filesystem!: PgResourceFilesystemCatalog;
 let promotions!: PgResourcePromotionRepository;
 let tenantA!: TenantFixture;
 let tenantB!: TenantFixture;
@@ -379,6 +381,7 @@ beforeAll(async () => {
     migrationContract.versions,
   );
   catalog = new PgResourceCatalog(runtime);
+  filesystem = new PgResourceFilesystemCatalog(runtime);
   promotions = new PgResourcePromotionRepository(runtime, promotionCapabilities.verifier);
   tenantA = await seedTenant(scopeA, "a");
   tenantB = await seedTenant(scopeB, "b");
@@ -1039,5 +1042,109 @@ describe("Resource Library PostgreSQL 与 RLS", () => {
         ]),
       ),
     ).rejects.toMatchObject({ code: "42501" });
+  });
+  it("个人历史目录按路径查询最近六个月关系并复用稳定 Resource Blob", async () => {
+    const promotion = await seedPromotion(tenantA, "history-filesystem");
+    const input = command(tenantA, promotion, {
+      key: `idem-history-filesystem-${unique}`,
+      resource: `resource_history_filesystem_${unique}`,
+      version: `resource_version_history_filesystem_${unique}`,
+      name: "采购合同.docx",
+    });
+    expect((await promotions.commitPromotedVersion(input)).outcome).toBe("committed");
+
+    const receiptId = `receipt-history-filesystem-${unique}`;
+    const requestId = `request-history-filesystem-${unique}`;
+    const inputText = "把采购合同用于历史目录测试";
+    const digest = createHash("sha256").update(inputText).digest("hex");
+    const directoryName = `2026-08-07_14-32-08_采购合同风险审查_${unique}`;
+    const entryName = `2026-08-07_14-33-10_采购合同_${unique}.docx`;
+    await withTenantTransaction(runtime, tenantA.scope, async (client) => {
+      await client.query(
+        `INSERT INTO thread_input_receipts(
+           tenant_id,thread_id,receipt_id,client_request_id,request_digest,requested_mode,
+           state,disposition,queued_run_id,queue_sequence,input_sequence,input_text,
+           input_attachments,body_digest,body_size_bytes
+         ) VALUES (
+           $1,$2,$3,$4,$5,'follow_up','pending','queued',$6,1,1,$7,
+           jsonb_build_object($8::text,jsonb_build_object($9::text,0)),$5,$10
+         )`,
+        [
+          tenantA.scope.tenantId,
+          tenantA.threadId,
+          receiptId,
+          requestId,
+          digest,
+          tenantA.runId,
+          inputText,
+          input.resourceId,
+          input.resourceVersionId,
+          Buffer.byteLength(inputText, "utf8"),
+        ],
+      );
+      await client.query(
+        `INSERT INTO thread_history_directories(
+           tenant_id,thread_id,directory_name,directory_timestamp,directory_time_zone,naming_state,
+           first_file_at,last_file_at,file_count
+         )
+         SELECT $1,$2,$3,thread.created_at,'Asia/Shanghai','fallback',
+                clock_timestamp(),clock_timestamp(),1
+           FROM threads thread WHERE thread.tenant_id=$1 AND thread.id=$2`,
+        [tenantA.scope.tenantId, tenantA.threadId, directoryName],
+      );
+      await client.query(
+        `INSERT INTO thread_history_file_entries(
+           tenant_id,thread_id,resource_id,resource_version_id,relation_type,directory_entry_name,
+           first_receipt_id,first_attached_at,last_attached_at,attachment_count
+         ) VALUES (
+           $1,$2,$3,$4,'user_attachment',$5,$6,clock_timestamp(),clock_timestamp(),1
+         )`,
+        [
+          tenantA.scope.tenantId,
+          tenantA.threadId,
+          input.resourceId,
+          input.resourceVersionId,
+          entryName,
+          receiptId,
+        ],
+      );
+    });
+
+    const directories = await filesystem.listRecentDirectories({
+      tenantId: tenantA.scope.tenantId,
+    });
+    expect(directories).toEqual([
+      expect.objectContaining({
+        threadId: tenantA.threadId,
+        name: directoryName,
+        fileCount: 1,
+      }),
+    ]);
+    const files = await filesystem.listThreadFiles({
+      tenantId: tenantA.scope.tenantId,
+      threadId: tenantA.threadId,
+    });
+    expect(files).toEqual([
+      expect.objectContaining({
+        resourceId: input.resourceId,
+        versionId: input.resourceVersionId,
+        directoryName,
+        entryName,
+      }),
+    ]);
+    await expect(
+      filesystem.resolveHistoryFile({
+        tenantId: tenantA.scope.tenantId,
+        directoryName,
+        entryName,
+      }),
+    ).resolves.toMatchObject({
+      resourceId: input.resourceId,
+      versionId: input.resourceVersionId,
+      object: { physicalObjectKey: promotion.physicalObjectKey },
+    });
+    await expect(
+      filesystem.listRecentDirectories({ tenantId: tenantB.scope.tenantId }),
+    ).resolves.toEqual([]);
   });
 });

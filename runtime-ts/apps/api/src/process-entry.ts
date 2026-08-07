@@ -113,6 +113,11 @@ const apiEnvironmentSchema = Object.freeze({
   S3_SECRET_ACCESS_KEY: stringEnvironmentField({ secret: true, maxLength: 4_096 }),
   S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
   RESOURCE_FILESYSTEM_SIGNING_KEY: stringEnvironmentField({ secret: true, maxLength: 256 }),
+  HISTORY_FILESYSTEM_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
+  HISTORY_DIRECTORY_TIME_ZONE: stringEnvironmentField({
+    requiredIn: optionalEnvironments,
+    maxLength: 128,
+  }),
   // 仅供本地 Cubelet 访问开发 API 的 ResourceFS HTTPS 边界，production 显式拒绝。
   RESOURCEFS_PROXY_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
   RESOURCEFS_PROXY_LISTEN_HOST: stringEnvironmentField({
@@ -164,6 +169,8 @@ export interface ApiProcessConfiguration {
     readonly forcePathStyle: boolean;
   }>;
   readonly resourceFilesystemSigningKey: string;
+  readonly historyFilesystemEnabled: boolean;
+  readonly historyDirectoryTimeZone: string;
   readonly developmentResourceFilesystemProxy?: Readonly<{
     readonly listenHost: string;
     readonly listenPort: number;
@@ -305,6 +312,13 @@ export function parseApiProcessEnvironment(
   if (inputRoutingEnabled && (!serialQueueV2Enabled || !contextReadEnabled)) {
     throw new TypeError("THREAD_INPUT_ROUTING_V2_ENABLED 依赖串行队列与 V2 Context read");
   }
+  const historyFilesystemEnabled = parsed.values.HISTORY_FILESYSTEM_ENABLED ?? false;
+  const historyDirectoryTimeZone = parsed.values.HISTORY_DIRECTORY_TIME_ZONE ?? "Asia/Shanghai";
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: historyDirectoryTimeZone }).format(new Date(0));
+  } catch {
+    throw new TypeError("HISTORY_DIRECTORY_TIME_ZONE 无效");
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
@@ -324,6 +338,8 @@ export function parseApiProcessEnvironment(
     listenHost,
     listenPort,
     objectStorage,
+    historyFilesystemEnabled,
+    historyDirectoryTimeZone,
     resourceFilesystemSigningKey: readRequiredEnvironmentValue(
       parsed,
       "RESOURCE_FILESYSTEM_SIGNING_KEY",

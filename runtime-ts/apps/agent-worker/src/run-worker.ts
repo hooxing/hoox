@@ -9,6 +9,7 @@ import {
   type WorkspaceRevisionId,
 } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
+import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { WorkspaceApplicationError, WorkspaceDependencyError } from "@cube-runtime/workspace";
 import { DurableOperationLane } from "./durable-operation-lane.js";
 import {
@@ -71,8 +72,39 @@ export interface RunWorkerOptions {
   readonly threadContextWriteEnabled?: boolean;
   readonly threadInputRoutingV2Enabled?: boolean;
   readonly threadSandboxSessionReuseEnabled?: boolean;
+  readonly historyFilesystemEnabled?: boolean;
 }
 
+const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+
+async function preparePersonalHistoryEntrypoints(
+  sandbox: SandboxHandle,
+  threadId: string,
+  signal: AbortSignal,
+): Promise<void> {
+  if (!THREAD_ID_PATTERN.test(threadId)) throw new Error("历史目录 Thread ID 无效");
+  const internalTarget = `/resources/.thread-files/${threadId}/files`;
+  const command = `set -eu
+history_target='/resources/history'
+thread_target='${internalTarget}'
+[ -d "$history_target" ] || exit 71
+[ -d "$thread_target" ] || exit 72
+ensure_link() {
+  link="$1"
+  target="$2"
+  if [ -L "$link" ]; then
+    [ "$(readlink "$link")" = "$target" ] || exit 73
+  elif [ -e "$link" ]; then
+    exit 74
+  else
+    ln -s "$target" "$link"
+  fi
+}
+ensure_link /history "$history_target"
+ensure_link /thread-files "$thread_target"`;
+  const result = await sandbox.command(command, { signal, timeoutMs: 30_000 });
+  if (result.exitCode !== 0) throw new Error("个人历史目录固定入口准备失败");
+}
 export type RunWorkerResult =
   | { readonly outcome: "succeeded" | "waiting" | "failed" | "cancelled" }
   | { readonly outcome: "recovery_required"; readonly code: StableWorkerErrorCode }
@@ -593,6 +625,21 @@ export class RunWorker {
             reportWorkspaceMaterializeFailure(error);
             context.agentFailure = "WORKSPACE_CONFLICT";
             throw new Error("Workspace 物化失败");
+          }
+          if (
+            this.options.historyFilesystemEnabled === true &&
+            claim.snapshot.tenantKind === "personal"
+          ) {
+            try {
+              await preparePersonalHistoryEntrypoints(
+                acquired.sandbox,
+                scope.threadId,
+                executionAbort.signal,
+              );
+            } catch {
+              context.agentFailure = "SANDBOX_FAILED";
+              throw new Error("个人历史目录固定入口准备失败");
+            }
           }
           const postMaterialize = await this.stopPoint(context, cancellation);
           if (postMaterialize) throw new Error("Workspace 物化后运行已停止");

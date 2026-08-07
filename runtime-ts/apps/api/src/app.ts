@@ -79,6 +79,7 @@ import {
 } from "@cube-runtime/protocol";
 import {
   type ResourceAttachmentResolverPort,
+  type HistoryFilesystemCatalog,
   type ResourceFilesystemCapabilityCodec,
   type ResourceFilesystemCatalog,
   ResourceServiceError,
@@ -138,6 +139,7 @@ export interface ApiDependencies {
   readonly resourceFilesystem?: Readonly<{
     catalog: ResourceFilesystemCatalog;
     capabilities: ResourceFilesystemCapabilityCodec;
+    history?: HistoryFilesystemCatalog;
     skills?: Readonly<{
       catalog: SkillFilesystemCatalog;
       contents: SkillContentStore;

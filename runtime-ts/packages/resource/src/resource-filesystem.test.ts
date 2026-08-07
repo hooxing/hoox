@@ -13,6 +13,10 @@ import type { ResourceCatalog, TrustedResourceContext } from "./contracts.js";
 import {
   appendAttachmentsToLatestUserPrompt,
   createResourceFilesystemCapabilityCodec,
+  historyFilesystemCollisionName,
+  historyFilesystemDirectoryName,
+  historyFilesystemEntryName,
+  historyFilesystemTimestamp,
   ResourceAttachmentResolver,
   resourceFilesystemFileName,
   resourceFilesystemPath,
@@ -55,6 +59,29 @@ describe("Resource 只读文件系统", () => {
     expect(projected).toContain("分析一下\n\n# 用户在本轮上传的文件");
     expect(projected).toContain(JSON.stringify({ 文件名: "设计稿.png", 文件地址: path }));
     expect(stripAttachmentsFromUserFacingPrompt(projected)).toBe("分析一下");
+  });
+
+  it("按固化时区生成可排序的语义历史目录与文件名", () => {
+    expect(historyFilesystemTimestamp("2026-08-07T06:32:08.000Z", "Asia/Shanghai")).toBe(
+      "2026-08-07_14-32-08",
+    );
+    expect(
+      historyFilesystemDirectoryName({
+        createdAt: "2026-08-07T06:32:08.000Z",
+        title: "../采购/合同\n审查 ",
+        timeZone: "Asia/Shanghai",
+      }),
+    ).toBe("2026-08-07_14-32-08_.._采购_合同_审查");
+    expect(
+      historyFilesystemEntryName({
+        attachedAt: "2026-08-07T06:33:10.000Z",
+        name: "采购合同.docx",
+        timeZone: "Asia/Shanghai",
+      }),
+    ).toBe("2026-08-07_14-33-10_采购合同.docx");
+    expect(historyFilesystemCollisionName("2026-08-07_14-32-08_合同审查", 2)).toBe(
+      "2026-08-07_14-32-08_合同审查-2",
+    );
   });
 
   it("capability 绑定 tenant、sandbox 和过期时间，篡改或过期即失败", () => {

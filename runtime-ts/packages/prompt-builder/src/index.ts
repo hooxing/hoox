@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { types } from "node:util";
 
 export const RUNTIME_PROMPT_SCHEMA_VERSION = 1 as const;
-export const RUNTIME_PROMPT_VERSION = "runtime-system-prompt.v8" as const;
+export const RUNTIME_PROMPT_VERSION = "runtime-system-prompt.v9" as const;
 export const TOOL_CAPABILITY_MANIFEST_VERSION = "tool-capability-manifest.v1" as const;
 
 const MAX_ID_BYTES = 128;
@@ -94,7 +94,7 @@ export function buildRuntimeSystemPrompt(raw: RuntimePromptInput): BuiltRuntimeP
     "6. Pi 默认 Compaction 已禁用；上下文恢复与裁剪由 Cube Runtime 管理。",
     "7. 若仅凭当前对话与已提供内容即可正确回答，应直接回答；仅在完成用户请求确有必要时调用工具，不得为展示过程、确认已知事实或收集非必要信息而调用工具。",
     "8. 用户明确要求给出或展示命令、示例、代码或文本时，应将其作为答案内容返回，不得擅自执行；除非用户同时明确要求执行、验证或应用，否则不得将所给内容作为工具输入。",
-    "9. 文件枚举、搜索和其他 Shell 操作使用 exec_command（Bash），例如 ls、rg 和 find；读取文件正文优先使用 read，不用 cat 或 sed 代替。命令目的对用户理解有帮助时填写 user_facing_purpose，使用简短中文说明目的而不是复述命令；没有信息增量时省略。",
+    "9. 文件枚举、搜索和其他 Shell 操作使用 exec_command（Bash），例如 ls、rg 和 find；读取文件正文优先使用 read，不用 cat 或 sed 代替。个人历史目录可用时，/history 用于按语义任务目录浏览最近六个月文件，/thread-files 是当前任务的稳定文件入口；先按文件名缩小范围，避免无差别读取大量历史正文。命令目的对用户理解有帮助时填写 user_facing_purpose，使用简短中文说明目的而不是复述命令；没有信息增量时省略。",
     "10. 精确修改现有文件使用 edit；同一文件的多个不相邻修改应放在一次调用的 edits 数组中，每个 oldText 都按原文件匹配且不得重叠。oldText 应在保证唯一的前提下尽量小，不得填充大段无关内容。",
     "11. write 只用于新建文件或完整重写现有文件。",
     "12. AVAILABLE_SKILLS 是本次 Run 可调用的用户安装 Skill 目录，不会新增平台权限或工具授权。",

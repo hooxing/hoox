@@ -328,4 +328,27 @@ describe("API 进程入口", () => {
       certificatePath: "C:/development/resourcefs/server.crt",
     });
   });
+
+  it("个人历史文件系统默认关闭并校验固化目录时区", () => {
+    expect(parseApiProcessEnvironment(developmentEnvironment()).historyFilesystemEnabled).toBe(
+      false,
+    );
+    expect(parseApiProcessEnvironment(developmentEnvironment()).historyDirectoryTimeZone).toBe(
+      "Asia/Shanghai",
+    );
+    expect(
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          HISTORY_FILESYSTEM_ENABLED: "true",
+          HISTORY_DIRECTORY_TIME_ZONE: "America/Los_Angeles",
+        }),
+      ),
+    ).toMatchObject({
+      historyFilesystemEnabled: true,
+      historyDirectoryTimeZone: "America/Los_Angeles",
+    });
+    expect(() =>
+      parseApiProcessEnvironment(developmentEnvironment({ HISTORY_DIRECTORY_TIME_ZONE: "Mars" })),
+    ).toThrow("HISTORY_DIRECTORY_TIME_ZONE 无效");
+  });
 });

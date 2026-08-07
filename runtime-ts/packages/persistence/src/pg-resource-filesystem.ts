@@ -1,5 +1,8 @@
 import { resourceId, resourceVersionId, tenantId } from "@cube-runtime/domain";
 import {
+  type HistoryFilesystemCatalog,
+  type HistoryFilesystemDirectory,
+  type HistoryFilesystemFile,
   type ResourceFilesystemCatalog,
   type ResourceFilesystemFile,
   resourceFilesystemPath,
@@ -19,8 +22,24 @@ interface ResourceFileRow {
   readonly physical_object_key: string;
 }
 
+interface HistoryDirectoryRow {
+  readonly thread_id: string;
+  readonly directory_name: string;
+  readonly directory_timestamp: Date | string;
+  readonly last_file_at: Date | string;
+  readonly file_count: string;
+}
+
+interface HistoryFileRow extends ResourceFileRow {
+  readonly thread_id: string;
+  readonly directory_name: string;
+  readonly directory_entry_name: string;
+}
+
 /** 宿主 ResourceFS 只读取 searchable 的不可变版本，并且永不向 Cube Volume/Sandbox 暴露对象键。 */
-export class PgResourceFilesystemCatalog implements ResourceFilesystemCatalog {
+export class PgResourceFilesystemCatalog
+  implements ResourceFilesystemCatalog, HistoryFilesystemCatalog
+{
   constructor(private readonly pool: Pool) {}
 
   async list(
@@ -60,6 +79,138 @@ export class PgResourceFilesystemCatalog implements ResourceFilesystemCatalog {
       throw mapPersistenceError(error, "解析 Resource 文件系统路径");
     }
   }
+
+  async listRecentDirectories(
+    input: Parameters<HistoryFilesystemCatalog["listRecentDirectories"]>[0],
+  ): Promise<readonly HistoryFilesystemDirectory[] | undefined> {
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        input,
+        async (client) => {
+          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          const result = await client.query<HistoryDirectoryRow>(
+            `SELECT directory.thread_id,directory.directory_name,
+                    directory.directory_timestamp,directory.last_file_at,
+                    directory.file_count::text
+               FROM thread_history_directories directory
+              WHERE directory.tenant_id=$1
+                AND directory.naming_state IN ('ready','fallback')
+                AND directory.file_count > 0
+                AND directory.last_file_at >= clock_timestamp() - interval '6 months'
+              ORDER BY directory.directory_timestamp DESC,directory.thread_id`,
+            [input.tenantId],
+          );
+          return Object.freeze(result.rows.map(mapDirectory));
+        },
+        { readOnly: true },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "列出个人历史目录");
+    }
+  }
+
+  async resolveDirectory(
+    input: Parameters<HistoryFilesystemCatalog["resolveDirectory"]>[0],
+  ): Promise<HistoryFilesystemDirectory | undefined> {
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        input,
+        async (client) => {
+          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          const result = await client.query<HistoryDirectoryRow>(
+            `SELECT directory.thread_id,directory.directory_name,
+                    directory.directory_timestamp,directory.last_file_at,
+                    directory.file_count::text
+               FROM thread_history_directories directory
+              WHERE directory.tenant_id=$1 AND directory.directory_name=$2
+                AND directory.naming_state IN ('ready','fallback')`,
+            [input.tenantId, input.directoryName],
+          );
+          const row = result.rows[0];
+          return row === undefined ? undefined : mapDirectory(row);
+        },
+        { readOnly: true },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "解析个人历史目录");
+    }
+  }
+
+  async listThreadFiles(
+    input: Parameters<HistoryFilesystemCatalog["listThreadFiles"]>[0],
+  ): Promise<readonly HistoryFilesystemFile[] | undefined> {
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        input,
+        async (client) => {
+          if (!(await isPersonalThread(client, input.tenantId, input.threadId))) return undefined;
+          const result = await client.query<HistoryFileRow>(
+            `${historyFileQuery}
+              WHERE entry.tenant_id=$1 AND entry.thread_id=$2
+              ORDER BY entry.first_attached_at,entry.directory_entry_name`,
+            [input.tenantId, input.threadId],
+          );
+          return Object.freeze(result.rows.map((row) => mapHistoryFile(input.tenantId, row)));
+        },
+        { readOnly: true },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "列出任务历史文件");
+    }
+  }
+
+  async resolveHistoryFile(
+    input: Parameters<HistoryFilesystemCatalog["resolveHistoryFile"]>[0],
+  ): Promise<HistoryFilesystemFile | undefined> {
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        input,
+        async (client) => {
+          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          const result = await client.query<HistoryFileRow>(
+            `${historyFileQuery}
+              WHERE entry.tenant_id=$1 AND directory.directory_name=$2
+                AND entry.directory_entry_name=$3`,
+            [input.tenantId, input.directoryName, input.entryName],
+          );
+          const row = result.rows[0];
+          return row === undefined ? undefined : mapHistoryFile(input.tenantId, row);
+        },
+        { readOnly: true },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "解析个人历史文件");
+    }
+  }
+
+  async resolveThreadFile(
+    input: Parameters<HistoryFilesystemCatalog["resolveThreadFile"]>[0],
+  ): Promise<HistoryFilesystemFile | undefined> {
+    try {
+      return await withTenantTransaction(
+        this.pool,
+        input,
+        async (client) => {
+          if (!(await isPersonalThread(client, input.tenantId, input.threadId))) return undefined;
+          const result = await client.query<HistoryFileRow>(
+            `${historyFileQuery}
+              WHERE entry.tenant_id=$1 AND entry.thread_id=$2
+                AND entry.directory_entry_name=$3`,
+            [input.tenantId, input.threadId, input.entryName],
+          );
+          const row = result.rows[0];
+          return row === undefined ? undefined : mapHistoryFile(input.tenantId, row);
+        },
+        { readOnly: true },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "解析当前任务历史文件");
+    }
+  }
 }
 
 const baseQuery = `SELECT resource.id AS resource_id,version.id AS version_id,resource.name,
@@ -77,6 +228,31 @@ const baseQuery = `SELECT resource.id AS resource_id,version.id AS version_id,re
                       AND reference.incarnation_id=version.blob_incarnation_id
                       AND reference.physical_object_key=version.physical_object_key`;
 
+const historyFileQuery = `SELECT entry.thread_id,directory.directory_name,
+                                 entry.directory_entry_name,
+                                 resource.id AS resource_id,version.id AS version_id,resource.name,
+                                 version.media_type,version.size::text,version.digest,
+                                 version.blob_incarnation_id::text,version.physical_object_key
+                            FROM thread_history_file_entries entry
+                            JOIN thread_history_directories directory
+                              ON directory.tenant_id=entry.tenant_id
+                             AND directory.thread_id=entry.thread_id
+                            JOIN resources resource
+                              ON resource.tenant_id=entry.tenant_id
+                             AND resource.id=entry.resource_id
+                             AND resource.visibility='searchable'
+                            JOIN resource_versions version
+                              ON version.tenant_id=entry.tenant_id
+                             AND version.resource_id=entry.resource_id
+                             AND version.id=entry.resource_version_id
+                            JOIN blob_references reference
+                              ON reference.tenant_id=version.tenant_id
+                             AND reference.reference_id=version.blob_reference_id
+                             AND reference.state='stable' AND reference.purpose='resource'
+                             AND reference.sha256=version.digest AND reference.size=version.size
+                             AND reference.incarnation_id=version.blob_incarnation_id
+                             AND reference.physical_object_key=version.physical_object_key`;
+
 async function findFile(
   client: PoolClient,
   input: Parameters<ResourceFilesystemCatalog["resolve"]>[0],
@@ -89,6 +265,51 @@ async function findFile(
   );
   const row = result.rows[0];
   return row === undefined ? undefined : mapFile(input.tenantId, row);
+}
+
+async function isPersonalTenant(client: PoolClient, rawTenantId: string): Promise<boolean> {
+  const result = await client.query<{ readonly kind: string }>(
+    "SELECT kind FROM tenants WHERE id=$1",
+    [rawTenantId],
+  );
+  return result.rows[0]?.kind === "personal";
+}
+
+async function isPersonalThread(
+  client: PoolClient,
+  rawTenantId: string,
+  rawThreadId: string,
+): Promise<boolean> {
+  const result = await client.query(
+    `SELECT 1 FROM threads thread
+       JOIN tenants tenant ON tenant.id=thread.tenant_id AND tenant.kind='personal'
+      WHERE thread.tenant_id=$1 AND thread.id=$2`,
+    [rawTenantId, rawThreadId],
+  );
+  return result.rowCount === 1;
+}
+
+function mapDirectory(row: HistoryDirectoryRow): HistoryFilesystemDirectory {
+  const fileCount = Number(row.file_count);
+  if (!Number.isSafeInteger(fileCount) || fileCount < 0) {
+    throw new TypeError("历史目录文件数量无效");
+  }
+  return Object.freeze({
+    threadId: row.thread_id,
+    name: row.directory_name,
+    createdAt: timestamp(row.directory_timestamp),
+    lastFileAt: timestamp(row.last_file_at),
+    fileCount,
+  });
+}
+
+function mapHistoryFile(rawTenantId: string, row: HistoryFileRow): HistoryFilesystemFile {
+  return Object.freeze({
+    ...mapFile(rawTenantId, row),
+    threadId: row.thread_id,
+    directoryName: row.directory_name,
+    entryName: row.directory_entry_name,
+  });
 }
 
 function mapFile(rawTenantId: string, row: ResourceFileRow): ResourceFilesystemFile {
@@ -114,4 +335,8 @@ function mapFile(rawTenantId: string, row: ResourceFileRow): ResourceFilesystemF
       physicalObjectKey: row.physical_object_key,
     }),
   });
+}
+
+function timestamp(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }

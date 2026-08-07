@@ -3,6 +3,8 @@ import { resourceId, resourceVersionId, tenantId } from "@cube-runtime/domain";
 import type { BlobStore } from "@cube-runtime/persistence";
 import {
   createResourceFilesystemCapabilityCodec,
+  type HistoryFilesystemCatalog,
+  type HistoryFilesystemFile,
   type ResourceFilesystemCatalog,
   type ResourceFilesystemFile,
 } from "@cube-runtime/resource";
@@ -35,6 +37,14 @@ const file: ResourceFilesystemFile = {
     incarnationId: "11111111-1111-4111-8111-111111111111",
     physicalObjectKey: "resource/http/object",
   },
+};
+const historyDirectoryName = "2026-08-07_14-32-08_采购合同风险审查";
+const historyEntryName = "2026-08-07_14-33-10_说明 文档.txt";
+const historyFile: HistoryFilesystemFile = {
+  ...file,
+  threadId: "thread-history-test",
+  directoryName: historyDirectoryName,
+  entryName: historyEntryName,
 };
 
 describe("Resource WebDAV HTTP 边界", () => {
@@ -148,9 +158,123 @@ describe("Resource WebDAV HTTP 边界", () => {
     expect(response.body).toContain("resource-http-test");
     await fixture.app.close();
   });
+
+  it("为 personal Tenant 投影最近历史目录、稳定 Thread 入口和按需文件读取", async () => {
+    const history: HistoryFilesystemCatalog = {
+      listRecentDirectories: vi.fn(async () => [
+        {
+          threadId: historyFile.threadId,
+          name: historyDirectoryName,
+          createdAt: "2026-08-07T06:32:08.000Z",
+          lastFileAt: "2026-08-07T06:33:10.000Z",
+          fileCount: 1,
+        },
+      ]),
+      resolveDirectory: vi.fn(async ({ directoryName }) =>
+        directoryName === historyDirectoryName
+          ? {
+              threadId: historyFile.threadId,
+              name: historyDirectoryName,
+              createdAt: "2026-08-07T06:32:08.000Z",
+              lastFileAt: "2026-08-07T06:33:10.000Z",
+              fileCount: 1,
+            }
+          : undefined,
+      ),
+      listThreadFiles: vi.fn(async ({ threadId }) =>
+        threadId === historyFile.threadId ? [historyFile] : undefined,
+      ),
+      resolveHistoryFile: vi.fn(async ({ directoryName, entryName }) =>
+        directoryName === historyDirectoryName && entryName === historyEntryName
+          ? historyFile
+          : undefined,
+      ),
+      resolveThreadFile: vi.fn(async ({ threadId, entryName }) =>
+        threadId === historyFile.threadId && entryName === historyEntryName
+          ? historyFile
+          : undefined,
+      ),
+    };
+    const fixture = await appFixture(history);
+
+    const root = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: "/v1/resource-filesystem/",
+      headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "1" },
+    });
+    expect(root.statusCode).toBe(207);
+    expect(root.body).toContain("/v1/resource-filesystem/history/");
+    expect(root.body).not.toContain(".thread-files");
+
+    const directory = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: "/v1/resource-filesystem/history",
+      headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "1" },
+    });
+    expect(directory.statusCode).toBe(207);
+    expect(directory.body).toContain(encodeURIComponent(historyDirectoryName));
+
+    const threadFiles = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: `/v1/resource-filesystem/.thread-files/${historyFile.threadId}/files`,
+      headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "1" },
+    });
+    expect(threadFiles.statusCode).toBe(207);
+    expect(threadFiles.body).toContain(encodeURIComponent(historyEntryName));
+
+    const read = await fixture.app.inject({
+      method: "GET",
+      url: `/v1/resource-filesystem/history/${encodeURIComponent(historyDirectoryName)}/files/${encodeURIComponent(historyEntryName)}`,
+      headers: { authorization: `Bearer ${fixture.hostToken}`, range: "bytes=1-3" },
+    });
+    expect(read.statusCode).toBe(206);
+    expect(read.body).toBe("bcd");
+    await fixture.app.close();
+  });
+
+  it("team Tenant 的 Catalog 明确关闭历史根和内部稳定视图", async () => {
+    const teamHistory: HistoryFilesystemCatalog = {
+      listRecentDirectories: vi.fn(async () => undefined),
+      resolveDirectory: vi.fn(async () => undefined),
+      listThreadFiles: vi.fn(async () => undefined),
+      resolveHistoryFile: vi.fn(async () => undefined),
+      resolveThreadFile: vi.fn(async () => undefined),
+    };
+    const fixture = await appFixture(teamHistory);
+    const root = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: "/v1/resource-filesystem/",
+      headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "1" },
+    });
+    expect(root.body).not.toContain("/v1/resource-filesystem/history/");
+    const hiddenRoot = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: "/v1/resource-filesystem/.thread-files",
+      headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "0" },
+    });
+    expect(hiddenRoot.statusCode).toBe(404);
+    await fixture.app.close();
+  });
+
+  it("未启用个人历史 Catalog 时不暴露历史根或内部 Thread 视图", async () => {
+    const fixture = await appFixture();
+    const root = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: "/v1/resource-filesystem/",
+      headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "1" },
+    });
+    expect(root.body).not.toContain("/v1/resource-filesystem/history/");
+    const hidden = await fixture.app.inject({
+      method: "PROPFIND" as "GET",
+      url: "/v1/resource-filesystem/.thread-files/thread-history-test/files",
+      headers: { authorization: `Bearer ${fixture.hostToken}`, depth: "1" },
+    });
+    expect(hidden.statusCode).toBe(404);
+    await fixture.app.close();
+  });
 });
 
-async function appFixture() {
+async function appFixture(history?: HistoryFilesystemCatalog) {
   const capabilities = createResourceFilesystemCapabilityCodec({
     secret: "resource-filesystem-http-test-key-32-bytes",
     now: () => 1_000,
@@ -237,6 +361,7 @@ async function appFixture() {
     catalog,
     blobs,
     capabilities,
+    ...(history === undefined ? {} : { history }),
     skills: { catalog: skillCatalog, contents: skillContents },
   });
   app.setErrorHandler((error, _request, reply) => {

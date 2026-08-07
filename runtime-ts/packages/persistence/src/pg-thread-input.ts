@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isoTimestamp, type Run, rehydrateRun } from "@cube-runtime/domain";
+import {
+  historyFilesystemCollisionName,
+  historyFilesystemDirectoryName,
+  historyFilesystemEntryName,
+  historyFilesystemTimestamp,
+} from "@cube-runtime/resource";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {
@@ -126,9 +132,23 @@ export function decideThreadInputRoute(
   };
 }
 
+export interface PgThreadInputRoutingOptions {
+  readonly historyDirectoryTimeZone?: string;
+  readonly historyFilesystemEnabled?: boolean;
+}
 /** 阶段 3 的统一输入入口；不实现 waiting resume、compaction 或 Sandbox 复用。 */
 export class PgThreadInputRouting implements ThreadInputRoutingPort {
-  constructor(private readonly pool: Pool) {}
+  private readonly historyDirectoryTimeZone: string;
+  private readonly historyFilesystemEnabled: boolean;
+
+  constructor(
+    private readonly pool: Pool,
+    options: PgThreadInputRoutingOptions = {},
+  ) {
+    this.historyDirectoryTimeZone = options.historyDirectoryTimeZone ?? "Asia/Shanghai";
+    this.historyFilesystemEnabled = options.historyFilesystemEnabled ?? false;
+    historyFilesystemTimestamp(new Date(0), this.historyDirectoryTimeZone);
+  }
 
   async submit(
     input: Parameters<ThreadInputRoutingPort["submit"]>[0],
@@ -325,6 +345,19 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
                 rejectionCode,
               });
             }
+          }
+          if (
+            this.historyFilesystemEnabled &&
+            action !== "reject" &&
+            input.attachments.length > 0
+          ) {
+            await upsertPersonalHistoryFiles(client, {
+              tenantId: input.scope.tenantId,
+              threadId: input.thread.id,
+              receiptId,
+              attachments: input.attachments,
+              timeZone: this.historyDirectoryTimeZone,
+            });
           }
           const receipt = await this.readReceipt(client, input.thread.id, receiptId);
           if (receipt === undefined) throw new TypeError("输入 receipt 写后不可见");
@@ -656,4 +689,182 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
       })),
     };
   }
+}
+
+interface PersonalHistoryInput {
+  readonly tenantId: string;
+  readonly threadId: string;
+  readonly receiptId: string;
+  readonly attachments: readonly { readonly resourceId: string; readonly versionId: string }[];
+  readonly timeZone: string;
+}
+
+async function upsertPersonalHistoryFiles(
+  client: PoolClient,
+  input: PersonalHistoryInput,
+): Promise<void> {
+  const context = await client.query<{
+    readonly kind: string;
+    readonly title: string;
+    readonly title_source: "deterministic" | "model" | "user";
+    readonly thread_created_at: Date;
+    readonly receipt_created_at: Date;
+  }>(
+    `SELECT tenant.kind,thread.title,thread.title_source,
+            thread.created_at AS thread_created_at,receipt.created_at AS receipt_created_at
+       FROM tenants tenant
+       JOIN threads thread ON thread.tenant_id=tenant.id
+       JOIN thread_input_receipts receipt
+         ON receipt.tenant_id=thread.tenant_id AND receipt.thread_id=thread.id
+      WHERE tenant.id=$1 AND thread.id=$2 AND receipt.receipt_id=$3`,
+    [input.tenantId, input.threadId, input.receiptId],
+  );
+  const row = context.rows[0];
+  if (row === undefined || row.kind !== "personal") return;
+
+  // 不同 Thread 可能在同一秒得到相同标题；Tenant 级命名锁只保护语义名称分配，
+  // 文件关系仍由 Thread head 的行锁串行化。
+  await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [
+    `${input.tenantId}\u001fpersonal-history-names`,
+  ]);
+
+  const existingDirectory = await client.query<{ readonly directory_name: string }>(
+    `SELECT directory_name FROM thread_history_directories
+      WHERE tenant_id=$1 AND thread_id=$2`,
+    [input.tenantId, input.threadId],
+  );
+  let directoryName = existingDirectory.rows[0]?.directory_name;
+  if (directoryName === undefined) {
+    const baseName = historyFilesystemDirectoryName({
+      createdAt: row.thread_created_at,
+      title: row.title,
+      timeZone: input.timeZone,
+    });
+    directoryName = await allocateHistoryName(client, {
+      tenantId: input.tenantId,
+      baseName,
+      table: "directory",
+    });
+    await client.query(
+      `INSERT INTO thread_history_directories(
+         tenant_id,thread_id,directory_name,directory_timestamp,directory_time_zone,naming_state,
+         first_file_at,last_file_at,file_count
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$7,0)`,
+      [
+        input.tenantId,
+        input.threadId,
+        directoryName,
+        row.thread_created_at,
+        input.timeZone,
+        row.title_source === "model" ? "ready" : "fallback",
+        row.receipt_created_at,
+      ],
+    );
+  }
+
+  for (const attachment of input.attachments) {
+    const existing = await client.query(
+      `SELECT 1 FROM thread_history_file_entries
+        WHERE tenant_id=$1 AND thread_id=$2 AND resource_id=$3
+          AND resource_version_id=$4 AND relation_type='user_attachment'`,
+      [input.tenantId, input.threadId, attachment.resourceId, attachment.versionId],
+    );
+    if (existing.rowCount === 1) {
+      await client.query(
+        `UPDATE thread_history_file_entries
+            SET last_attached_at=GREATEST(last_attached_at,$5),
+                attachment_count=attachment_count+1,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND thread_id=$2 AND resource_id=$3
+            AND resource_version_id=$4 AND relation_type='user_attachment'`,
+        [
+          input.tenantId,
+          input.threadId,
+          attachment.resourceId,
+          attachment.versionId,
+          row.receipt_created_at,
+        ],
+      );
+      continue;
+    }
+    const resource = await client.query<{ readonly name: string }>(
+      `SELECT resource.name FROM resources resource
+        JOIN resource_versions version
+          ON version.tenant_id=resource.tenant_id AND version.resource_id=resource.id
+       WHERE resource.tenant_id=$1 AND resource.id=$2 AND version.id=$3
+         AND resource.visibility='searchable'`,
+      [input.tenantId, attachment.resourceId, attachment.versionId],
+    );
+    const resourceName = resource.rows[0]?.name;
+    if (resourceName === undefined) throw new TypeError("历史附件 ResourceVersion 不可见");
+    const baseEntryName = historyFilesystemEntryName({
+      attachedAt: row.receipt_created_at,
+      name: resourceName,
+      timeZone: input.timeZone,
+    });
+    const entryName = await allocateHistoryName(client, {
+      tenantId: input.tenantId,
+      threadId: input.threadId,
+      baseName: baseEntryName,
+      table: "entry",
+    });
+    await client.query(
+      `INSERT INTO thread_history_file_entries(
+         tenant_id,thread_id,resource_id,resource_version_id,relation_type,directory_entry_name,
+         first_receipt_id,first_attached_at,last_attached_at,attachment_count
+       ) VALUES ($1,$2,$3,$4,'user_attachment',$5,$6,$7,$7,1)`,
+      [
+        input.tenantId,
+        input.threadId,
+        attachment.resourceId,
+        attachment.versionId,
+        entryName,
+        input.receiptId,
+        row.receipt_created_at,
+      ],
+    );
+  }
+
+  await client.query(
+    `UPDATE thread_history_directories directory
+        SET first_file_at=summary.first_file_at,last_file_at=summary.last_file_at,
+            file_count=summary.file_count,version=directory.version+1,updated_at=clock_timestamp()
+       FROM (
+         SELECT tenant_id,thread_id,min(first_attached_at) AS first_file_at,
+                max(last_attached_at) AS last_file_at,count(*)::bigint AS file_count
+           FROM thread_history_file_entries
+          WHERE tenant_id=$1 AND thread_id=$2 GROUP BY tenant_id,thread_id
+       ) summary
+      WHERE directory.tenant_id=summary.tenant_id AND directory.thread_id=summary.thread_id`,
+    [input.tenantId, input.threadId],
+  );
+}
+
+async function allocateHistoryName(
+  client: PoolClient,
+  input:
+    | { readonly table: "directory"; readonly tenantId: string; readonly baseName: string }
+    | {
+        readonly table: "entry";
+        readonly tenantId: string;
+        readonly threadId: string;
+        readonly baseName: string;
+      },
+): Promise<string> {
+  for (let ordinal = 1; ordinal <= 10_000; ordinal += 1) {
+    const candidate = historyFilesystemCollisionName(input.baseName, ordinal);
+    const found =
+      input.table === "directory"
+        ? await client.query(
+            `SELECT 1 FROM thread_history_directories
+              WHERE tenant_id=$1 AND directory_name=$2`,
+            [input.tenantId, candidate],
+          )
+        : await client.query(
+            `SELECT 1 FROM thread_history_file_entries
+              WHERE tenant_id=$1 AND thread_id=$2 AND directory_entry_name=$3`,
+            [input.tenantId, input.threadId, candidate],
+          );
+    if (found.rowCount === 0) return candidate;
+  }
+  throw new TypeError("历史文件语义名称冲突过多");
 }

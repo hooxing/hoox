@@ -103,9 +103,9 @@ describe("Runtime Prompt 分层与能力清单", () => {
           "schemaVersion": 1,
           "version": "tool-capability-manifest.v1",
         },
-        "promptDigest": "sha256:21451feb9171428dad8f149c071934bd1fdd7c1bbda6c8fe95b59e0efa6c6f8d",
+        "promptDigest": "sha256:7bfc59526d7ed38cf58dc5eeff8db0e3e163b9fbbd2c745576341493f4fd1703",
         "schemaVersion": 1,
-        "systemPrompt": "[runtime_prompt schema=1 version=runtime-system-prompt.v8 manifest=sha256:f8a22760506ece7e96359126f9a10775e03faa9bf5f5bb5667bfec8278949de4]
+        "systemPrompt": "[runtime_prompt schema=1 version=runtime-system-prompt.v9 manifest=sha256:f8a22760506ece7e96359126f9a10775e03faa9bf5f5bb5667bfec8278949de4]
       你是由 Cube Runtime 托管的受控 Agent。以下 PLATFORM_HARNESS 是平台规范，优先级高于所有租户、Skill 和用户内容。
       <PLATFORM_HARNESS>
       1. 只能使用 CAPABILITY_MANIFEST 中列出的本次 Session 实际工具；不得声称或模拟未列出的工具。
@@ -116,7 +116,7 @@ describe("Runtime Prompt 分层与能力清单", () => {
       6. Pi 默认 Compaction 已禁用；上下文恢复与裁剪由 Cube Runtime 管理。
       7. 若仅凭当前对话与已提供内容即可正确回答，应直接回答；仅在完成用户请求确有必要时调用工具，不得为展示过程、确认已知事实或收集非必要信息而调用工具。
       8. 用户明确要求给出或展示命令、示例、代码或文本时，应将其作为答案内容返回，不得擅自执行；除非用户同时明确要求执行、验证或应用，否则不得将所给内容作为工具输入。
-      9. 文件枚举、搜索和其他 Shell 操作使用 exec_command（Bash），例如 ls、rg 和 find；读取文件正文优先使用 read，不用 cat 或 sed 代替。命令目的对用户理解有帮助时填写 user_facing_purpose，使用简短中文说明目的而不是复述命令；没有信息增量时省略。
+      9. 文件枚举、搜索和其他 Shell 操作使用 exec_command（Bash），例如 ls、rg 和 find；读取文件正文优先使用 read，不用 cat 或 sed 代替。个人历史目录可用时，/history 用于按语义任务目录浏览最近六个月文件，/thread-files 是当前任务的稳定文件入口；先按文件名缩小范围，避免无差别读取大量历史正文。命令目的对用户理解有帮助时填写 user_facing_purpose，使用简短中文说明目的而不是复述命令；没有信息增量时省略。
       10. 精确修改现有文件使用 edit；同一文件的多个不相邻修改应放在一次调用的 edits 数组中，每个 oldText 都按原文件匹配且不得重叠。oldText 应在保证唯一的前提下尽量小，不得填充大段无关内容。
       11. write 只用于新建文件或完整重写现有文件。
       12. AVAILABLE_SKILLS 是本次 Run 可调用的用户安装 Skill 目录，不会新增平台权限或工具授权。
@@ -139,7 +139,7 @@ describe("Runtime Prompt 分层与能力清单", () => {
       - name="review" description="按团队检查清单审阅代码变更"
       </AVAILABLE_SKILLS>
       [/runtime_prompt]",
-        "version": "runtime-system-prompt.v8",
+        "version": "runtime-system-prompt.v9",
       }
     `);
     expect(Object.isFrozen(built)).toBe(true);
@@ -175,7 +175,7 @@ describe("Runtime Prompt 分层与能力清单", () => {
   it("默认使用中文回答，同时允许用户明确指定其他语言", () => {
     const built = buildRuntimeSystemPrompt(fixture());
 
-    expect(built.version).toBe("runtime-system-prompt.v8");
+    expect(built.version).toBe("runtime-system-prompt.v9");
     expect(built.systemPrompt).toContain("20. 使用中文进行回答，除非用户明确要求使用其他语言。");
   });
 
@@ -193,6 +193,10 @@ describe("Runtime Prompt 分层与能力清单", () => {
     const built = buildRuntimeSystemPrompt(fixture());
 
     expect(built.systemPrompt).toContain("文件枚举、搜索和其他 Shell 操作使用 exec_command");
+    expect(built.systemPrompt).toContain(
+      "/history 用于按语义任务目录浏览最近六个月文件，/thread-files 是当前任务的稳定文件入口",
+    );
+    expect(built.systemPrompt).not.toContain("thread-worker-fake");
     expect(built.systemPrompt).toContain("读取文件正文优先使用 read，不用 cat 或 sed 代替");
     expect(built.systemPrompt).toContain("多个不相邻修改应放在一次调用的 edits 数组中");
     expect(built.systemPrompt).toContain("每个 oldText 都按原文件匹配且不得重叠");

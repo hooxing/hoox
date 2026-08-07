@@ -1144,6 +1144,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             outcome: "claimed",
             snapshot: {
               run: state.run,
+              tenantKind: row.tenant_kind === "personal" ? "personal" : "team",
               workspace: state.workspace,
               attempt: state.attempt,
               input: String(row.input_text),

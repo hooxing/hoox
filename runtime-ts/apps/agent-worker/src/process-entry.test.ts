@@ -504,3 +504,10 @@ describe("Agent Worker 进程入口", () => {
     );
   });
 });
+expect(parseWorkerProcessEnvironment(productionEnvironment()).historyFilesystemEnabled).toBe(false);
+expect(
+  parseWorkerProcessEnvironment({
+    ...productionEnvironment(),
+    HISTORY_FILESYSTEM_ENABLED: "true",
+  }).historyFilesystemEnabled,
+).toBe(true);

@@ -2368,3 +2368,53 @@ function signedMutation(
   const unsigned = { ...input, schemaVersion: 1 as const };
   return { ...unsigned, commandDigest: runtimeMutationDigest(unsigned) };
 }
+
+it("personal Tenant 在模型执行前获得固定历史目录入口", async () => {
+  const h = sandboxHarness(
+    [new ScriptedAgentSession(successfulEvents)],
+    fakeSeed("personal-history-entrypoints"),
+    { historyFilesystemEnabled: true },
+  );
+
+  await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+  expect(h.sandboxes.handle.commands).toHaveLength(1);
+  expect(h.sandboxes.handle.commands[0]).toContain("ensure_link /history");
+  expect(h.sandboxes.handle.commands[0]).toContain("ensure_link /thread-files");
+  expect(h.sandboxes.handle.commands[0]).toContain(
+    `/resources/.thread-files/${h.scope.threadId}/files`,
+  );
+});
+
+it("team Tenant 即使总开关开启也不创建个人历史目录入口", async () => {
+  const seed = {
+    ...fakeSeed("team-history-entrypoints"),
+    tenantKind: "team" as const,
+  };
+  const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)], seed, {
+    historyFilesystemEnabled: true,
+  });
+
+  await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+  expect(h.sandboxes.handle.commands).toEqual([]);
+});
+
+it("personal 历史固定入口准备失败时不启动模型并失败关闭", async () => {
+  const session = new ScriptedAgentSession(successfulEvents);
+  const h = sandboxHarness([session], fakeSeed("personal-history-entrypoints-failure"), {
+    historyFilesystemEnabled: true,
+  });
+  vi.spyOn(h.sandboxes.handle, "command").mockResolvedValue({
+    stdout: "",
+    stderr: "history root missing",
+    exitCode: 71,
+  });
+
+  await expect(h.worker.execute(h.scope)).resolves.toEqual({
+    outcome: "recovery_required",
+    code: "SANDBOX_FAILED",
+  });
+
+  expect(session.prompts).toEqual([]);
+});

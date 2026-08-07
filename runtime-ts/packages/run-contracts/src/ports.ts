@@ -88,6 +88,8 @@ export interface ExecutionAttemptSnapshot {
 
 export interface ClaimedExecutionSnapshot {
   readonly run: Run;
+  /** 由领取事务从可信 Tenant 事实投影；旧快照缺失时必须按未启用历史目录处理。 */
+  readonly tenantKind?: "personal" | "team";
   readonly workspace: Workspace;
   readonly attempt: ExecutionAttemptSnapshot;
   readonly input: string;

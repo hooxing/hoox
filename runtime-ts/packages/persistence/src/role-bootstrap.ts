@@ -34,6 +34,10 @@ const threadCreationTables = new Set(["api_thread_idempotency_records"]);
 const threadHeadTables = new Set(["thread_execution_heads"]);
 const threadInputQueueTables = new Set(["thread_input_receipts", "thread_follow_up_queue"]);
 const threadInputRoutingTables = new Set(["thread_input_receipt_events"]);
+const historyFilesystemTables = new Set([
+  "thread_history_directories",
+  "thread_history_file_entries",
+]);
 const runWorkspaceResultTables = new Set(["run_workspace_results"]);
 const threadContextTables = new Set([
   "thread_context_streams",
@@ -168,6 +172,8 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["thread_input_receipts", new Set(["SELECT", "INSERT"])],
   ["thread_follow_up_queue", new Set(["SELECT", "INSERT"])],
   ["thread_input_receipt_events", new Set(["SELECT", "INSERT"])],
+  ["thread_history_directories", new Set(["SELECT", "INSERT"])],
+  ["thread_history_file_entries", new Set(["SELECT", "INSERT"])],
   ["run_workspace_results", new Set(["SELECT", "INSERT"])],
   ["thread_context_streams", new Set(["SELECT", "INSERT"])],
   ["thread_context_entries", new Set(["SELECT", "INSERT"])],
@@ -324,6 +330,11 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
       "finished_at",
     ]),
   ],
+  [
+    "thread_history_directories",
+    new Set(["first_file_at", "last_file_at", "file_count", "version", "updated_at"]),
+  ],
+  ["thread_history_file_entries", new Set(["last_attached_at", "attachment_count", "updated_at"])],
   ["rollout_projections", new Set(["attempt_id", "version", "projection", "digest", "updated_at"])],
   ["sandbox_registry", new Set(["state", "actual_ttl_seconds", "updated_at"])],
   [
@@ -610,6 +621,15 @@ async function hasThreadInputRoutingState(client: PoolClient, schema: string): P
   return result.rows[0]?.present === true;
 }
 
+async function hasHistoryFilesystemState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.thread_history_directories', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_history_file_entries', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
 async function hasRunWorkspaceResultState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.run_workspace_results', $1::text)) IS NOT NULL AS present`,
@@ -742,6 +762,9 @@ async function activeTablePolicy(
   if (!(await hasThreadInputRoutingState(client, schema))) {
     for (const table of threadInputRoutingTables) policy.delete(table);
   }
+  if (!(await hasHistoryFilesystemState(client, schema))) {
+    for (const table of historyFilesystemTables) policy.delete(table);
+  }
   if (!(await hasRunWorkspaceResultState(client, schema))) {
     for (const table of runWorkspaceResultTables) policy.delete(table);
   }
@@ -855,6 +878,9 @@ async function activeColumnUpdatePolicy(
         ),
       );
     }
+  }
+  if (!(await hasHistoryFilesystemState(client, schema))) {
+    for (const table of historyFilesystemTables) policy.delete(table);
   }
   if (!(await hasRunWorkspaceResultState(client, schema))) {
     for (const table of runWorkspaceResultTables) policy.delete(table);
@@ -1689,6 +1715,17 @@ export async function bootstrapRuntimeAccessOnClient(
   if (await hasThreadInputRoutingState(client, context.schema)) {
     await client.query(
       `GRANT SELECT, INSERT ON TABLE ${schema}.thread_input_receipt_events TO ${role}`,
+    );
+  }
+  if (await hasHistoryFilesystemState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.thread_history_directories,
+         ${schema}.thread_history_file_entries TO ${role};
+       GRANT UPDATE(first_file_at,last_file_at,file_count,version,updated_at)
+         ON TABLE ${schema}.thread_history_directories TO ${role};
+       GRANT UPDATE(last_attached_at,attachment_count,updated_at)
+         ON TABLE ${schema}.thread_history_file_entries TO ${role}`,
     );
   }
   if (await hasRunWorkspaceResultState(client, context.schema)) {

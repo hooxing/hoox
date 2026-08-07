@@ -78,6 +78,7 @@ import type { RunSkillSnapshot } from "@cube-runtime/skill";
 
 interface FakeRecord {
   readonly scope: ExecutionScope;
+  readonly tenantKind: "personal" | "team";
   run: Run;
   workspace: Workspace;
   readonly input: string;
@@ -164,6 +165,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     const scope = scopeFrom(seed.run, seed.workspace);
     this.records.set(scopeKey(scope), {
       scope,
+      tenantKind: seed.tenantKind ?? "personal",
       run: seed.run,
       workspace: seed.workspace,
       input: seed.input,
@@ -235,6 +237,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       outcome: "claimed",
       snapshot: {
         run: record.run,
+        tenantKind: record.tenantKind,
         workspace: record.workspace,
         attempt,
         input: record.input,
@@ -1354,6 +1357,7 @@ export class FakeThreadContextBodies implements ThreadContextBodyPersistencePort
 
 export interface FakeSeed {
   readonly run: Run;
+  readonly tenantKind?: "personal" | "team";
   readonly workspace: Workspace;
   readonly input: string;
   readonly attachments?: readonly UserInputAttachmentReference[];

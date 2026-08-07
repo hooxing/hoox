@@ -52,6 +52,7 @@ export class FakeSandboxGateway implements SandboxGateway {
 
 export class FakeSandboxHandle implements SandboxHandle {
   readonly files = new Map<string, string>();
+  readonly commands: string[] = [];
   paused = false;
   killed = false;
 
@@ -62,6 +63,7 @@ export class FakeSandboxHandle implements SandboxHandle {
 
   async command(command: string, control: OperationControl = {}): Promise<CommandOutput> {
     validateText(command, "命令");
+    this.commands.push(command);
     return this.execute("Fake 命令", control, async () => ({
       stdout: `${command}\n`,
       stderr: "",

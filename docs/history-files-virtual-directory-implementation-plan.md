@@ -1,9 +1,9 @@
 # 个人历史任务文件虚拟目录实施方案
 
 - 文档性质：跨 Domain、PostgreSQL、ResourceFS、Sandbox、Worker、标题服务和 Web 的实施总计划
-- 状态：已完成个人范围设计，尚未实施
+- 状态：核心虚拟目录已实现；标题模型、可变目录别名和规模性能 Gate 后续实施
 - 日期：2026-08-07
-- 核心决策：[ADR-0118](decisions/0118-history-files-virtual-directory-and-task-ownership.md)、[ADR-0119](decisions/0119-personal-history-files-first-release-scope.md)
+- 核心决策：[ADR-0118](decisions/0118-history-files-virtual-directory-and-task-ownership.md)、[ADR-0119](decisions/0119-personal-history-files-first-release-scope.md)、[ADR-0120](decisions/0120-personal-history-filesystem-implementation-slice.md)
 - 相关决策：ADR-0005、ADR-0077、ADR-0079、ADR-0103、ADR-0107
 
 ## 1. 目标
@@ -22,6 +22,31 @@
 
 本期只实现个人历史目录。`team` Tenant 不获得 `/history` 投影，不做团队任务目录、成员可见性、个人转团队或跨 Tenant 文件转移。
 数据模型和端口继续以 `tenant_id` 为隔离边界，避免未来增加团队能力时重做资源身份、RLS、路径解析和 Volume 契约。
+
+### 1.1 本次实际交付切片
+
+本次只落地虚拟目录主链路：
+
+- 迁移 `0034_personal_history_filesystem` 创建个人历史目录、文件关系、RLS、最小 ACL 和已有 receipt 回填；
+- durable Thread 输入接受附件时，在同一事务内幂等维护历史关系；
+- ResourceFS 增加 `/resources/history/...` 和不参与普通根枚举的
+  `/resources/.thread-files/<threadId>/files/...`；
+- Worker 仅依据领取事务提供的可信 `tenantKind=personal` 创建 `/history` 与 `/thread-files` 固定只读入口；
+- `/history` 只枚举最近六个月目录，但已经知道的旧语义路径仍可精确读取，避免历史消息中的路径立即失效；
+- 使用一个 `HISTORY_FILESYSTEM_ENABLED` 开关同时控制 API 关系写入、ResourceFS 投影和 Worker 入口准备；
+- System Prompt 仅增加字节稳定的固定目录说明，不注入 Tenant、Thread、目录名或文件名等请求级事实。
+
+为保持本次范围聚焦，以下能力明确后置：
+
+- 低成本标题模型、标题 outbox/consumer 和 Web 异步标题更新；当前目录使用现有可信 `threads.title`，并记录
+  `title_source` 供后续演进；
+- UI 改名后的新目录与旧路径兼容别名；
+- `hasRecentHistory` 条件挂载与 Session generation 升级。当前 Skill 文件系统已经要求同一 Tenant ResourceFS Volume，历史目录
+  直接复用该挂载，不新增 Volume、FUSE 进程或 Blob 副本；
+- 10,000 目录性能 Gate、真实 Cube `find/rg` 黑盒和产品 UI 验收。
+
+ResourceFS 历史路径当前与既有 ResourceFS HTTP 装配在同一进程内；接口边界保持独立，后续若吞吐或故障域需要，可拆成独立
+子模块或服务，不改变 `/history`、`/thread-files` 和 Tenant Volume 契约。
 
 ## 2. 非目标
 
@@ -297,6 +322,9 @@ attachment_count > 0
 
 ### 6.4 标题生成 Outbox
 
+本节为后续阶段设计，本次未创建标题 outbox 或调用模型。迁移只预留 Thread 标题来源和生成版本字段，目录分配使用当前已有
+`threads.title`，确定性标题记为 `fallback`。
+
 标题请求至少需要：
 
 ```text
@@ -404,20 +432,19 @@ rg '违约责任' /history
 
 ### 8.1 Volume 需求
 
-为保证用户能在新个人 Thread 中访问旧任务，需求信号调整为：
+当前 Skill 市场已经让需要 Sandbox 的任务复用 Tenant 级 ResourceFS Volume，因此本次历史目录不再新增第二套 Volume 或
+`hasRecentHistory` attach 判断：
 
 ```text
-requiresResourceFilesystem =
-  当前输入包含附件
-  OR (
-    tenant.kind = personal
-    AND 当前 personal Tenant 最近六个月存在历史文件
-  )
+现有 Tenant ResourceFS Volume
+  ├── /resources/skills
+  ├── /resources/history
+  └── /resources/.thread-files/<trustedThreadId>/files
 ```
 
-`hasRecentHistory` 必须是命中索引的 `EXISTS` 查询，不能统计全部目录。`team` Tenant 不因本功能的历史关系请求 ResourceFS，
-其当前输入附件仍沿用既有规则。纯文本响应仍不创建 Sandbox；只有工具调用需要 Sandbox 时才 acquire。已有未挂载 Thread Session
-继续按 ADR-0107 的 generation 升级规则退役重建，不做未验证热挂载。
+这意味着历史能力只增加目录元数据查询，不增加每 Tenant Volume 数、FUSE/rclone 进程数和未读取 Blob 下载。纯文本响应仍不创建
+Sandbox；只有工具调用需要 Sandbox 时才 acquire。若未来 Skill 不再默认依赖 ResourceFS，才恢复 `hasRecentHistory` 的索引
+`EXISTS` 需求信号和 Session generation 升级设计。
 
 ### 8.2 固定入口准备
 
@@ -441,7 +468,10 @@ requiresResourceFilesystem =
 
 ## 9. 标题服务实施
 
-标题生成只服务本期 personal 历史目录和同一任务的 UI 标题。建议先作为现有 Scheduler/Worker 体系中的独立 outbox consumer，
+本节已后置，不属于本次虚拟目录代码切片。当前目录使用 Thread 已有标题；迁移预留 `title_source`、`title_generated_at` 和
+`title_generation_version`，避免以后增加模型标题时再次改变目录关系主键。
+
+后续标题生成只服务 personal 历史目录和同一任务的 UI 标题。建议先作为现有 Scheduler/Worker 体系中的独立 outbox consumer，
 不立即拆新服务；边界通过端口隔离，后续吞吐、限流或故障域需要时可以独立部署。
 
 处理规则：
@@ -487,8 +517,8 @@ UI 不等待标题模型完成：先显示确定性标题，收到 Thread 更新
 - 每个个人 Thread/ResourceVersion 关系一条 PostgreSQL 元数据；
 - `/history` PROPFIND 返回当前 personal Tenant 最近六个月全部有文件任务目录；
 - 文件打开后占用 rclone VFS cache；
-- 当前 personal Tenant 有历史文件时，工具 Sandbox 依赖 ResourceFS attach；
-- 每个 personal Thread 最多一次低成本标题调用。
+- 历史目录复用既有 ResourceFS attach，只增加路径定向元数据查询；
+- 标题模型调用成本为零；该成本推迟到标题服务阶段。
 
 本期不产生 Team Tenant 历史索引、团队成员映射或跨 Tenant 文件复制成本。
 
@@ -538,6 +568,18 @@ threadId、标题或文件名作为高基数标签。
 日志只记录 Tenant/Thread 的受控内部标识、计数、耗时和结果分类，不记录完整标题模型输入、文件正文、签名 URL 或对象键。
 
 ## 13. 实施阶段
+
+截至 2026-08-07 的完成状态：
+
+- 阶段 0：已完成 Feature Flag、固定路径与静态 Prompt 契约；性能基线后续补充；
+- 阶段 1：已完成迁移、personal Gate、事务双写和一次性迁移回填；分批回填工具后续按生产数据规模决定；
+- 阶段 2：已后置，不阻塞虚拟目录；
+- 阶段 3：已完成路径定向 Catalog、WebDAV 列举/精确读取、Range/ETag 复用和 team 关闭；
+- 阶段 4：已完成固定入口和可信 Tenant Gate；因为现有 Skill Volume 已常驻，未实现 `hasRecentHistory` 条件挂载；
+- 阶段 5：已完成字节稳定的静态 Prompt 说明；真实 Cube 黑盒、规模性能 Gate 和 Web 标题体验后续实施。
+
+下面保留完整目标阶段，未完成项继续作为后续验收清单。
+
 
 ### 阶段 0：ADR、性能基线和 Feature Flag
 

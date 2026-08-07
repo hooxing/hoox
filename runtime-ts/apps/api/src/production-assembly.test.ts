@@ -93,6 +93,8 @@ describe("生产 API 默认装配", () => {
         expectedRuntimeRole: "runtime",
         applicationName: "cube-runtime-api-production",
         serialQueueV2Enabled: true,
+        historyDirectoryTimeZone: "Asia/Shanghai",
+        historyFilesystemEnabled: false,
         blobLifecycle: { objectPrefix: "agent-worker" },
       });
       expect(mocks.createS3BlobStore).toHaveBeenNthCalledWith(

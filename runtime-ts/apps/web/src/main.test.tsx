@@ -149,7 +149,7 @@ afterEach(() => {
 });
 
 describe("Agent 工作台恢复接入", () => {
-  it("技能中心固定显示在新建会话下方、任务列表上方", async () => {
+  it("技能中心与云盘作为侧栏独立入口显示在任务列表上方", async () => {
     const { container } = mount(
       apiFixture({
         listSkills: vi.fn(async () => ({ items: [] })),
@@ -163,6 +163,13 @@ describe("Agent 工作台恢复接入", () => {
         uninstallSkill: vi.fn(async () => {
           throw new Error("不应卸载技能");
         }),
+        listHistoryFiles: vi.fn(async () => ({
+          items: [],
+          range: { activeAfter: "2026-02-07T00:00:00.000Z" },
+          hasMore: false,
+          hasOlder: false,
+        })),
+        downloadHistoryFile: vi.fn(async () => "http://127.0.0.1/history-download"),
       }),
     );
 
@@ -170,11 +177,14 @@ describe("Agent 工作台恢复接入", () => {
 
     const createEntry = container.querySelector(".thread-create");
     const skillCenterEntry = container.querySelector(".skill-center-entry");
+    const cloudDriveEntry = container.querySelector(".cloud-drive-entry");
     const taskHeading = container.querySelector(".thread-heading");
     expect(createEntry).not.toBeNull();
     expect(skillCenterEntry).not.toBeNull();
+    expect(cloudDriveEntry).not.toBeNull();
     expect(createEntry?.nextElementSibling).toBe(skillCenterEntry);
-    expect(skillCenterEntry?.nextElementSibling).toBe(taskHeading);
+    expect(skillCenterEntry?.nextElementSibling).toBe(cloudDriveEntry);
+    expect(cloudDriveEntry?.nextElementSibling).toBe(taskHeading);
   });
 
   it("重复文本只计算尚未落入 Thread 上下文的消息，拒绝项不占用序号", () => {
@@ -363,18 +373,20 @@ describe("Agent 工作台恢复接入", () => {
     const option = container.querySelector<HTMLButtonElement>('[role="option"]');
     expect(option?.textContent).toContain("采购合同.docx");
     act(() => option?.click());
-    expect(container.querySelector(".composer-file.is-history")?.textContent).toContain(
-      "@采购合同.docx",
-    );
+    expect(container.querySelector(".composer-file.is-history")?.textContent).toBe("采购合同.docx");
 
     const form = textarea.closest("form");
     await act(async () =>
       form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
     );
     await settleEffects();
-    expect(submitThreadInput).toHaveBeenCalledWith(active.id, "@采购合同.docx", "auto", undefined, [
-      historyFile,
-    ]);
+    expect(submitThreadInput).toHaveBeenCalledWith(
+      active.id,
+      "请处理本轮提供的文件。",
+      "auto",
+      undefined,
+      [historyFile],
+    );
     expect(apiClient.uploadResource).not.toHaveBeenCalled();
     expect(container.querySelector(".composer-file.is-history")).toBeNull();
   });

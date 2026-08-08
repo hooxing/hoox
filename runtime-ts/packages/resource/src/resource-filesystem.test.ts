@@ -15,6 +15,7 @@ import {
   createResourceFilesystemCapabilityCodec,
   historyFilesystemCollisionName,
   historyFilesystemDirectoryName,
+  historyFilesystemEntryCollisionName,
   historyFilesystemEntryName,
   historyFilesystemTimestamp,
   ResourceAttachmentResolver,
@@ -66,27 +67,16 @@ describe("Resource 只读文件系统", () => {
     ).toBe("旧请求");
   });
 
-  it("按固化时区生成可排序的语义历史目录与文件名", () => {
+  it("历史路径使用面向人的语义名称，重名时才增加序号", () => {
     expect(historyFilesystemTimestamp("2026-08-07T06:32:08.000Z", "Asia/Shanghai")).toBe(
       "2026-08-07_14-32-08",
     );
-    expect(
-      historyFilesystemDirectoryName({
-        createdAt: "2026-08-07T06:32:08.000Z",
-        title: "../采购/合同\n审查 ",
-        timeZone: "Asia/Shanghai",
-      }),
-    ).toBe("2026-08-07_14-32-08_.._采购_合同_审查");
-    expect(
-      historyFilesystemEntryName({
-        attachedAt: "2026-08-07T06:33:10.000Z",
-        name: "采购合同.docx",
-        timeZone: "Asia/Shanghai",
-      }),
-    ).toBe("2026-08-07_14-33-10_采购合同.docx");
-    expect(historyFilesystemCollisionName("2026-08-07_14-32-08_合同审查", 2)).toBe(
-      "2026-08-07_14-32-08_合同审查-2",
+    expect(historyFilesystemDirectoryName({ title: "../采购/合同\n审查 " })).toBe(
+      ".._采购_合同_审查",
     );
+    expect(historyFilesystemEntryName({ name: "采购合同.docx" })).toBe("采购合同.docx");
+    expect(historyFilesystemCollisionName("合同审查", 2)).toBe("合同审查-2");
+    expect(historyFilesystemEntryCollisionName("采购合同.docx", 2)).toBe("采购合同-2.docx");
   });
 
   it("capability 绑定 tenant、sandbox 和过期时间，篡改或过期即失败", () => {

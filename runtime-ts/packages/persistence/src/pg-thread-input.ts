@@ -3,6 +3,7 @@ import { isoTimestamp, type Run, rehydrateRun } from "@cube-runtime/domain";
 import {
   historyFilesystemCollisionName,
   historyFilesystemDirectoryName,
+  historyFilesystemEntryCollisionName,
   historyFilesystemEntryName,
   historyFilesystemTimestamp,
 } from "@cube-runtime/resource";
@@ -762,11 +763,7 @@ async function upsertPersonalHistoryFiles(
     const titlePending =
       input.titleGenerationEnabled &&
       (row.title_generation_state === "pending" || row.title_generation_state === "claimed");
-    const baseName = historyFilesystemDirectoryName({
-      createdAt: row.thread_created_at,
-      title: row.title,
-      timeZone: input.timeZone,
-    });
+    const baseName = historyFilesystemDirectoryName({ title: row.title });
     directoryName = titlePending
       ? pendingHistoryDirectoryName(input.threadId)
       : await allocateHistoryName(client, {
@@ -829,11 +826,7 @@ async function upsertPersonalHistoryFiles(
     );
     const resourceName = resource.rows[0]?.name;
     if (resourceName === undefined) throw new TypeError("历史附件 ResourceVersion 不可见");
-    const baseEntryName = historyFilesystemEntryName({
-      attachedAt: row.receipt_created_at,
-      name: resourceName,
-      timeZone: input.timeZone,
-    });
+    const baseEntryName = historyFilesystemEntryName({ name: resourceName });
     const entryName = await allocateHistoryName(client, {
       tenantId: input.tenantId,
       threadId: input.threadId,
@@ -884,7 +877,10 @@ async function allocateHistoryName(
       },
 ): Promise<string> {
   for (let ordinal = 1; ordinal <= 10_000; ordinal += 1) {
-    const candidate = historyFilesystemCollisionName(input.baseName, ordinal);
+    const candidate =
+      input.table === "directory"
+        ? historyFilesystemCollisionName(input.baseName, ordinal)
+        : historyFilesystemEntryCollisionName(input.baseName, ordinal);
     const found =
       input.table === "directory"
         ? await client.query(

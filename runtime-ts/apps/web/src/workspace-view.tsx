@@ -723,6 +723,7 @@ export function ConversationComposer({
 }) {
   const [mentionFiles, setMentionFiles] = useState<readonly HistoryFile[]>([]);
   const [mentionLoading, setMentionLoading] = useState(false);
+  const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
   const mention = activeHistoryMention(input);
   const mentionQuery = mention?.query;
 
@@ -730,6 +731,7 @@ export function ConversationComposer({
     if (historyFileApi === undefined || mentionQuery === undefined) {
       setMentionFiles([]);
       setMentionLoading(false);
+      setMentionActiveIndex(0);
       return;
     }
     let cancelled = false;
@@ -740,20 +742,23 @@ export function ConversationComposer({
         .then((page) => {
           if (cancelled) return;
           const seen = new Set<string>();
-          setMentionFiles(
-            page.items
-              .flatMap((task) => task.files)
-              .filter((file) => {
-                const key = composerHistoryFileKey(file);
-                if (seen.has(key)) return false;
-                seen.add(key);
-                return true;
-              })
-              .slice(0, 8),
-          );
+          const files = page.items
+            .flatMap((task) => task.files)
+            .filter((file) => {
+              const key = composerHistoryFileKey(file);
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            })
+            .slice(0, 8);
+          setMentionFiles(files);
+          setMentionActiveIndex(0);
         })
         .catch(() => {
-          if (!cancelled) setMentionFiles([]);
+          if (!cancelled) {
+            setMentionFiles([]);
+            setMentionActiveIndex(0);
+          }
         })
         .finally(() => {
           if (!cancelled) setMentionLoading(false);
@@ -772,8 +777,9 @@ export function ConversationComposer({
     );
     if (!exists && selectedHistoryFiles.length + files.length < 20)
       onHistoryFilesChange([...selectedHistoryFiles, file]);
-    onChange(`${input.slice(0, mention.start)}@${file.entryName} ${input.slice(mention.end)}`);
+    onChange(removeActiveHistoryMention(input, mention));
     setMentionFiles([]);
+    setMentionActiveIndex(0);
   };
 
   const hasInput = input.trim().length > 0 || files.length > 0 || selectedHistoryFiles.length > 0;
@@ -783,7 +789,7 @@ export function ConversationComposer({
         <ul className="composer-files" aria-label="待发送文件">
           {selectedHistoryFiles.map((file, index) => (
             <li className="composer-file is-history" key={composerHistoryFileKey(file)}>
-              <span title={file.entryName}>@{file.entryName}</span>
+              <span title={file.name}>{file.name}</span>
               <button
                 type="button"
                 aria-label={`移除历史文件 ${file.entryName}`}
@@ -824,16 +830,19 @@ export function ConversationComposer({
                 <LoaderCircle className="spin" size={15} /> 正在搜索云盘
               </span>
             ) : (
-              mentionFiles.map((file) => (
+              mentionFiles.map((file, index) => (
                 <button
                   type="button"
                   role="option"
+                  aria-selected={index === mentionActiveIndex}
+                  className={index === mentionActiveIndex ? "is-active" : undefined}
                   key={composerHistoryFileKey(file)}
+                  onMouseEnter={() => setMentionActiveIndex(index)}
                   onClick={() => selectMention(file)}
                 >
                   <FileText size={16} />
                   <span>
-                    <strong>{file.entryName}</strong>
+                    <strong>{file.name}</strong>
                     <small>{file.taskName}</small>
                   </span>
                 </button>
@@ -853,6 +862,22 @@ export function ConversationComposer({
         disabled={disabled}
         style={{ resize: composerTextareaResize }}
         onKeyDown={(event) => {
+          if (mention !== undefined && mentionFiles.length > 0) {
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault();
+              const direction = event.key === "ArrowDown" ? 1 : -1;
+              setMentionActiveIndex(
+                (current) => (current + direction + mentionFiles.length) % mentionFiles.length,
+              );
+              return;
+            }
+            if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.shiftKey) {
+              event.preventDefault();
+              const selected = mentionFiles[mentionActiveIndex];
+              if (selected !== undefined) selectMention(selected);
+              return;
+            }
+          }
           if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
             event.preventDefault();
             event.currentTarget.form?.requestSubmit();
@@ -907,6 +932,15 @@ export function ConversationComposer({
       </div>
     </form>
   );
+}
+
+export function removeActiveHistoryMention(
+  input: string,
+  mention: { readonly start: number; readonly end: number },
+): string {
+  const before = input.slice(0, mention.start).trimEnd();
+  const after = input.slice(mention.end).trimStart();
+  return before.length > 0 && after.length > 0 ? `${before} ${after}` : before || after;
 }
 
 export function activeHistoryMention(

@@ -1,34 +1,18 @@
-import { Check, Cloud, LoaderCircle, Puzzle, Search, ShieldCheck, X } from "lucide-react";
+import { Check, LoaderCircle, Search, ShieldCheck, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import {
-  ApiError,
-  type HistoryFile,
-  type RuntimeApi,
-  type SkillCatalogItem,
-  type SkillInstallation,
-} from "./api.js";
-import { CloudDrivePanel } from "./cloud-drive.js";
+import { ApiError, type RuntimeApi, type SkillCatalogItem, type SkillInstallation } from "./api.js";
 
 export interface SkillCenterDialogProps {
   readonly api: SkillCenterApi;
   readonly onClose: () => void;
-  readonly selectedFiles?: readonly HistoryFile[];
-  readonly onSelectFile?: (file: HistoryFile) => void;
 }
 
 export type SkillCenterApi = Pick<
   RuntimeApi,
   "listSkills" | "listInstalledSkills" | "installSkill" | "setSkillEnabled" | "uninstallSkill"
-> &
-  Partial<Pick<RuntimeApi, "listHistoryFiles" | "downloadHistoryFile">>;
+>;
 
-export function SkillCenterDialog({
-  api,
-  onClose,
-  selectedFiles = [],
-  onSelectFile,
-}: SkillCenterDialogProps) {
-  const [tab, setTab] = useState<"skills" | "drive">("skills");
+export function SkillCenterDialog({ api, onClose }: SkillCenterDialogProps) {
   const [skills, setSkills] = useState<readonly SkillCatalogItem[]>([]);
   const [installations, setInstallations] = useState<readonly SkillInstallation[]>([]);
   const [query, setQuery] = useState("");
@@ -132,145 +116,109 @@ export function SkillCenterDialog({
         <header className="skill-center-header">
           <div>
             <h2 id="skill-center-title">技能中心</h2>
-            <p>管理可复用的技能与历史文件，让每个任务都能快速调用。</p>
+            <p>管理可复用的技能，让每个任务都能快速调用。</p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="关闭技能中心">
             <X size={18} />
           </button>
         </header>
 
-        <nav className="skill-center-tabs" aria-label="技能中心功能">
-          <button
-            type="button"
-            className={tab === "skills" ? "is-active" : ""}
-            onClick={() => setTab("skills")}
-          >
-            <Puzzle size={16} />
-            技能
-          </button>
-          <button
-            type="button"
-            className={tab === "drive" ? "is-active" : ""}
-            onClick={() => setTab("drive")}
-          >
-            <Cloud size={16} />
-            云盘
-          </button>
-        </nav>
-
-        {tab === "skills" ? (
-          <>
-            <form className="skill-search" onSubmit={submitSearch}>
-              <Search size={17} aria-hidden="true" />
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索技能"
-                aria-label="搜索技能"
-              />
-              <button type="submit">搜索</button>
-            </form>
-
-            {error !== undefined && (
-              <div className="skill-center-error" role="alert">
-                {error}
-              </div>
-            )}
-
-            <div className="skill-center-list">
-              {loading ? (
-                <div className="skill-center-empty">
-                  <LoaderCircle className="spin" size={20} /> 正在加载技能
-                </div>
-              ) : skills.length === 0 ? (
-                <div className="skill-center-empty">没有找到可安装的技能。</div>
-              ) : (
-                skills.map((skill) => {
-                  const installed = installedByKey.get(skill.canonicalKey);
-                  const busy = mutating === skill.canonicalKey;
-                  return (
-                    <article className="skill-card" key={skill.canonicalKey}>
-                      <div className="skill-card-main">
-                        <div className="skill-card-title">
-                          <h3>{skill.displayName}</h3>
-                          {skill.securityStatus === "verified" && (
-                            <span className="skill-verified" title="已验证">
-                              <ShieldCheck size={15} /> 已验证
-                            </span>
-                          )}
-                        </div>
-                        <p>{skill.description}</p>
-                        <small>
-                          {skill.publisher} · {skill.recommendedVersion} · {skill.compatibility}
-                        </small>
-                        {installed !== undefined && (
-                          <div className="skill-installation-meta">
-                            <Check size={14} /> /{installed.invocationName} ·{" "}
-                            {installed.status === "enabled" ? "已启用" : "已停用"}
-                          </div>
-                        )}
-                        {installed === undefined && (
-                          <label className="skill-invocation-input">
-                            <span>/</span>
-                            <input
-                              value={invocationNames[skill.canonicalKey] ?? skill.canonicalKey}
-                              onChange={(event) =>
-                                setInvocationNames((current) => ({
-                                  ...current,
-                                  [skill.canonicalKey]: event.target.value,
-                                }))
-                              }
-                              aria-label={`${skill.displayName}调用名称`}
-                              maxLength={128}
-                            />
-                          </label>
-                        )}
-                      </div>
-                      <div className="skill-card-actions">
-                        {installed === undefined ? (
-                          <button type="button" disabled={busy} onClick={() => void install(skill)}>
-                            {busy ? "安装中" : "安装"}
-                          </button>
-                        ) : (
-                          <>
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() =>
-                                void setEnabled(installed, installed.status !== "enabled")
-                              }
-                            >
-                              {installed.status === "enabled" ? "停用" : "启用"}
-                            </button>
-                            <button
-                              type="button"
-                              className="danger-text"
-                              disabled={busy}
-                              onClick={() => void uninstall(installed)}
-                            >
-                              卸载
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </article>
-                  );
-                })
-              )}
-            </div>
-          </>
-        ) : api.listHistoryFiles !== undefined && api.downloadHistoryFile !== undefined ? (
-          <CloudDrivePanel
-            api={{
-              listHistoryFiles: api.listHistoryFiles.bind(api),
-              downloadHistoryFile: api.downloadHistoryFile.bind(api),
-            }}
-            selectedFiles={selectedFiles}
-            {...(onSelectFile === undefined ? {} : { onSelectFile })}
+        <form className="skill-search" onSubmit={submitSearch}>
+          <Search size={17} aria-hidden="true" />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="搜索技能"
+            aria-label="搜索技能"
           />
-        ) : (
-          <div className="skill-center-empty">云盘功能暂未启用</div>
+          <button type="submit">搜索</button>
+        </form>
+
+        {error !== undefined && (
+          <div className="skill-center-error" role="alert">
+            {error}
+          </div>
         )}
+
+        <div className="skill-center-list">
+          {loading ? (
+            <div className="skill-center-empty">
+              <LoaderCircle className="spin" size={20} /> 正在加载技能
+            </div>
+          ) : skills.length === 0 ? (
+            <div className="skill-center-empty">没有找到可安装的技能。</div>
+          ) : (
+            skills.map((skill) => {
+              const installed = installedByKey.get(skill.canonicalKey);
+              const busy = mutating === skill.canonicalKey;
+              return (
+                <article className="skill-card" key={skill.canonicalKey}>
+                  <div className="skill-card-main">
+                    <div className="skill-card-title">
+                      <h3>{skill.displayName}</h3>
+                      {skill.securityStatus === "verified" && (
+                        <span className="skill-verified" title="已验证">
+                          <ShieldCheck size={15} /> 已验证
+                        </span>
+                      )}
+                    </div>
+                    <p>{skill.description}</p>
+                    <small>
+                      {skill.publisher} · {skill.recommendedVersion} · {skill.compatibility}
+                    </small>
+                    {installed !== undefined && (
+                      <div className="skill-installation-meta">
+                        <Check size={14} /> /{installed.invocationName} ·{" "}
+                        {installed.status === "enabled" ? "已启用" : "已停用"}
+                      </div>
+                    )}
+                    {installed === undefined && (
+                      <label className="skill-invocation-input">
+                        <span>/</span>
+                        <input
+                          value={invocationNames[skill.canonicalKey] ?? skill.canonicalKey}
+                          onChange={(event) =>
+                            setInvocationNames((current) => ({
+                              ...current,
+                              [skill.canonicalKey]: event.target.value,
+                            }))
+                          }
+                          aria-label={`${skill.displayName}调用名称`}
+                          maxLength={128}
+                        />
+                      </label>
+                    )}
+                  </div>
+                  <div className="skill-card-actions">
+                    {installed === undefined ? (
+                      <button type="button" disabled={busy} onClick={() => void install(skill)}>
+                        {busy ? "安装中" : "安装"}
+                      </button>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void setEnabled(installed, installed.status !== "enabled")}
+                        >
+                          {installed.status === "enabled" ? "停用" : "启用"}
+                        </button>
+                        <button
+                          type="button"
+                          className="danger-text"
+                          disabled={busy}
+                          onClick={() => void uninstall(installed)}
+                        >
+                          卸载
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </article>
+              );
+            })
+          )}
+        </div>
       </section>
     </div>
   );

@@ -831,7 +831,7 @@ describe("工作台展示组件", () => {
     expect(activeHistoryMention("@合同 后续文字")).toBeUndefined();
   });
 
-  it("输入 @ 可按需搜索云盘文件并作为结构化附件选中", async () => {
+  it("输入 @ 后可用上下键选择云盘文件，选中后只保留文件框", async () => {
     vi.useFakeTimers();
     const historyFile: HistoryFile = {
       threadId: "thread_contract",
@@ -845,6 +845,15 @@ describe("工作台展示组件", () => {
       sizeBytes: 2048,
       attachedAt: "2026-08-07T08:00:00.000Z",
     };
+    const secondHistoryFile: HistoryFile = {
+      ...historyFile,
+      resourceId: "resource_attachment",
+      versionId: "version_attachment",
+      name: "采购附件.xlsx",
+      entryName: "采购附件.xlsx",
+      path: "/resources/resource_attachment/version_attachment/采购附件.xlsx",
+      mediaType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    };
     const listHistoryFiles = vi.fn(async () => ({
       items: [
         {
@@ -853,7 +862,7 @@ describe("工作台展示组件", () => {
           createdAt: "2026-08-07T07:00:00.000Z",
           lastFileAt: historyFile.attachedAt,
           fileCount: 1,
-          files: [historyFile],
+          files: [historyFile, secondHistoryFile],
         },
       ],
       range: { activeAfter: "2026-02-07T00:00:00.000Z" },
@@ -890,15 +899,22 @@ describe("工作台展示组件", () => {
       await Promise.resolve();
     });
     expect(listHistoryFiles).toHaveBeenCalledWith({ query: "采购", limit: 8 });
-    const option = container.querySelector<HTMLButtonElement>('[role="option"]');
-    expect(option?.textContent).toContain("采购合同.docx");
-    act(() => option?.click());
-    expect(container.querySelector<HTMLTextAreaElement>("textarea")?.value).toBe(
-      "请分析 @采购合同.docx ",
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+    const options = container.querySelectorAll<HTMLButtonElement>('[role="option"]');
+    expect(options).toHaveLength(2);
+    expect(options[0]?.getAttribute("aria-selected")).toBe("true");
+    act(() =>
+      textarea?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })),
     );
+    expect(options[1]?.getAttribute("aria-selected")).toBe("true");
+    act(() =>
+      textarea?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+    );
+    expect(textarea?.value).toBe("请分析");
     expect(container.querySelector(".composer-file.is-history")?.textContent).toContain(
-      "@采购合同.docx",
+      "采购附件.xlsx",
     );
+    expect(container.querySelector(".composer-file.is-history")?.textContent).not.toContain("@");
 
     act(() => root.unmount());
     container.remove();

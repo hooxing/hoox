@@ -128,7 +128,8 @@ textarea:focus-visible {
 .new-thread-button:hover {
   background: #e7e7e5;
 }
-.skill-center-entry {
+.skill-center-entry,
+.cloud-drive-entry {
   display: flex;
   min-height: 38px;
   align-items: center;
@@ -141,7 +142,8 @@ textarea:focus-visible {
   font-size: 13px;
   font-weight: 680;
 }
-.skill-center-entry:hover {
+.skill-center-entry:hover,
+.cloud-drive-entry:hover {
   background: #e7e7e5;
 }
 input,
@@ -1718,7 +1720,8 @@ h2 {
   background: transparent;
   text-align: left;
 }
-.history-mention-menu button:hover {
+.history-mention-menu button:hover,
+.history-mention-menu button.is-active {
   background: #f0f5f2;
 }
 .history-mention-menu button span {

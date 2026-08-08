@@ -6,6 +6,7 @@ import {
   LoaderCircle,
   Plus,
   Search,
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { ApiError, type HistoryFile, type HistoryFilePage, type RuntimeApi } from "./api.js";
@@ -13,6 +14,44 @@ import { openResolvedUrl } from "./popup.js";
 import { formatArtifactSize, formatArtifactType } from "./workspace-view.js";
 
 export type CloudDriveApi = Pick<RuntimeApi, "listHistoryFiles" | "downloadHistoryFile">;
+
+export function CloudDriveDialog({
+  api,
+  selectedFiles = [],
+  onSelectFile,
+  onClose,
+}: {
+  readonly api: CloudDriveApi;
+  readonly selectedFiles?: readonly HistoryFile[];
+  readonly onSelectFile?: (file: HistoryFile) => void;
+  readonly onClose: () => void;
+}) {
+  return (
+    <div className="skill-center-backdrop">
+      <section
+        className="skill-center-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="cloud-drive-title"
+      >
+        <header className="skill-center-header">
+          <div>
+            <h2 id="cloud-drive-title">云盘</h2>
+            <p>浏览并复用个人历史任务中的文件。</p>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭云盘">
+            <X size={18} />
+          </button>
+        </header>
+        <CloudDrivePanel
+          api={api}
+          selectedFiles={selectedFiles}
+          {...(onSelectFile === undefined ? {} : { onSelectFile })}
+        />
+      </section>
+    </div>
+  );
+}
 
 export function CloudDrivePanel({
   api,

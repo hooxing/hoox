@@ -73,17 +73,8 @@ class ScriptedTitleClient {
         rowCount: 1,
       };
     }
-    if (sql.includes("SELECT naming_state,directory_timestamp,directory_time_zone")) {
-      return {
-        rows: [
-          {
-            naming_state: "pending",
-            directory_timestamp: new Date("2026-08-07T08:00:00.000Z"),
-            directory_time_zone: "Asia/Shanghai",
-          },
-        ],
-        rowCount: 1,
-      };
+    if (sql.includes("SELECT naming_state")) {
+      return { rows: [{ naming_state: "pending" }], rowCount: 1 };
     }
     if (sql.includes("SELECT 1 FROM thread_history_directories")) {
       return { rows: [], rowCount: 0 };

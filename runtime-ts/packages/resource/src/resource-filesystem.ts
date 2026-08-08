@@ -218,20 +218,12 @@ export function historyFilesystemTimestamp(value: string | Date, timeZone: strin
   return `${values.get("year")}-${values.get("month")}-${values.get("day")}_${values.get("hour")}-${values.get("minute")}-${values.get("second")}`;
 }
 
-export function historyFilesystemDirectoryName(input: {
-  readonly createdAt: string | Date;
-  readonly title: string;
-  readonly timeZone: string;
-}): string {
-  return `${historyFilesystemTimestamp(input.createdAt, input.timeZone)}_${resourceFilesystemFileName(input.title)}`;
+export function historyFilesystemDirectoryName(input: { readonly title: string }): string {
+  return resourceFilesystemFileName(input.title);
 }
 
-export function historyFilesystemEntryName(input: {
-  readonly attachedAt: string | Date;
-  readonly name: string;
-  readonly timeZone: string;
-}): string {
-  return `${historyFilesystemTimestamp(input.attachedAt, input.timeZone)}_${resourceFilesystemFileName(input.name)}`;
+export function historyFilesystemEntryName(input: { readonly name: string }): string {
+  return resourceFilesystemFileName(input.name);
 }
 
 export function historyFilesystemCollisionName(baseName: string, ordinal: number): string {
@@ -241,6 +233,19 @@ export function historyFilesystemCollisionName(baseName: string, ordinal: number
     "历史目录冲突序号无效",
   );
   return ordinal === 1 ? baseName : `${baseName}-${ordinal}`;
+}
+
+export function historyFilesystemEntryCollisionName(baseName: string, ordinal: number): string {
+  resourceInvariant(
+    Number.isSafeInteger(ordinal) && ordinal >= 1,
+    "INVALID_REQUEST",
+    "历史文件冲突序号无效",
+  );
+  if (ordinal === 1) return baseName;
+  const dot = baseName.lastIndexOf(".");
+  return dot > 0
+    ? `${baseName.slice(0, dot)}-${ordinal}${baseName.slice(dot)}`
+    : `${baseName}-${ordinal}`;
 }
 export interface SandboxResourceFilesystemCapability {
   readonly tenantId: TenantId;

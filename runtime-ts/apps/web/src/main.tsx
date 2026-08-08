@@ -1,4 +1,4 @@
-import { LoaderCircle, PanelLeftOpen, Puzzle, RotateCw } from "lucide-react";
+import { Cloud, LoaderCircle, PanelLeftOpen, Puzzle, RotateCw } from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -24,6 +24,7 @@ import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
+import { CloudDriveDialog, type CloudDriveApi } from "./cloud-drive.js";
 import { SkillCenterDialog, type SkillCenterApi } from "./skill-center.js";
 import "./styles.css";
 import {
@@ -118,7 +119,7 @@ type WorkspaceApi = Pick<
   readonly getThreadContinuity?: RuntimeApi["getThreadContinuity"];
   readonly submitThreadInput?: RuntimeApi["submitThreadInput"];
   readonly getThreadInputReceipt?: RuntimeApi["getThreadInputReceipt"];
-} & Partial<SkillCenterApi>;
+} & Partial<SkillCenterApi & CloudDriveApi>;
 
 function resolveSkillCenterApi(client: WorkspaceApi): SkillCenterApi | undefined {
   const { listSkills, listInstalledSkills, installSkill, setSkillEnabled, uninstallSkill } = client;
@@ -137,12 +138,15 @@ function resolveSkillCenterApi(client: WorkspaceApi): SkillCenterApi | undefined
     installSkill: installSkill.bind(client),
     setSkillEnabled: setSkillEnabled.bind(client),
     uninstallSkill: uninstallSkill.bind(client),
-    ...(client.listHistoryFiles === undefined
-      ? {}
-      : { listHistoryFiles: client.listHistoryFiles.bind(client) }),
-    ...(client.downloadHistoryFile === undefined
-      ? {}
-      : { downloadHistoryFile: client.downloadHistoryFile.bind(client) }),
+  };
+}
+
+function resolveCloudDriveApi(client: WorkspaceApi): CloudDriveApi | undefined {
+  const { listHistoryFiles, downloadHistoryFile } = client;
+  if (listHistoryFiles === undefined || downloadHistoryFile === undefined) return undefined;
+  return {
+    listHistoryFiles: listHistoryFiles.bind(client),
+    downloadHistoryFile: downloadHistoryFile.bind(client),
   };
 }
 
@@ -203,6 +207,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const [isCompact, setIsCompact] = useState(initialCompact);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [skillCenterOpen, setSkillCenterOpen] = useState(false);
+  const [cloudDriveOpen, setCloudDriveOpen] = useState(false);
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
   const modelWireTracePaginationAdvancedRef = useRef(false);
@@ -219,6 +224,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const initialSelectionAppliedRef = useRef(false);
   runExecutionStatusRef.current = state.run?.executionStatus;
   const skillCenterApi = useMemo(() => resolveSkillCenterApi(apiClient), [apiClient]);
+  const cloudDriveApi = useMemo(() => resolveCloudDriveApi(apiClient), [apiClient]);
 
   const selectThread = useCallback((threadId: string | undefined) => {
     navigationRef.current.navigate(threadId);
@@ -772,6 +778,19 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
             技能中心
           </button>
         )}
+        {cloudDriveApi !== undefined && (
+          <button
+            type="button"
+            className="cloud-drive-entry"
+            onClick={() => {
+              setCloudDriveOpen(true);
+              setNavigationOpen(false);
+            }}
+          >
+            <Cloud size={17} />
+            云盘
+          </button>
+        )}
         <div className="thread-heading">
           <span>任务</span>
           <span>{state.threads.length}</span>
@@ -930,8 +949,11 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         </dialog>
       )}
       {skillCenterOpen && skillCenterApi !== undefined && (
-        <SkillCenterDialog
-          api={skillCenterApi}
+        <SkillCenterDialog api={skillCenterApi} onClose={() => setSkillCenterOpen(false)} />
+      )}
+      {cloudDriveOpen && cloudDriveApi !== undefined && (
+        <CloudDriveDialog
+          api={cloudDriveApi}
           selectedFiles={historyFiles}
           onSelectFile={(file) =>
             setHistoryFiles((current) =>
@@ -942,7 +964,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
                 : [...current, file],
             )
           }
-          onClose={() => setSkillCenterOpen(false)}
+          onClose={() => setCloudDriveOpen(false)}
         />
       )}
     </main>

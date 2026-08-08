@@ -57,6 +57,7 @@ describe("技能中心界面", () => {
       await Promise.resolve();
     });
     expect(container.textContent).toContain("代码审阅");
+    expect(container.textContent).not.toContain("云盘");
     const installButton = [...container.querySelectorAll("button")].find(
       (button) => button.textContent === "安装",
     );

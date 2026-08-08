@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { HistoryFile, HistoryFilePage } from "./api.js";
-import { CloudDrivePanel, type CloudDriveApi } from "./cloud-drive.js";
+import { CloudDriveDialog, CloudDrivePanel, type CloudDriveApi } from "./cloud-drive.js";
 
 const file: HistoryFile = {
   threadId: "thread_contract",
@@ -124,6 +124,21 @@ describe("云盘历史文件面板", () => {
       activeBefore: "2026-02-07T00:00:00.000Z",
       limit: 24,
     });
+  });
+
+  it("云盘使用独立对话框并可关闭", async () => {
+    const onClose = vi.fn();
+    const api: CloudDriveApi = {
+      listHistoryFiles: vi.fn(async () => page()),
+      downloadHistoryFile: vi.fn(async () => "http://127.0.0.1/history-download"),
+    };
+    await act(async () => root.render(<CloudDriveDialog api={api} onClose={onClose} />));
+    await settle();
+
+    expect(container.querySelector("#cloud-drive-title")?.textContent).toBe("云盘");
+    expect(container.textContent).not.toContain("技能中心");
+    act(() => container.querySelector<HTMLButtonElement>('[aria-label="关闭云盘"]')?.click());
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it("下载先同步打开空窗，再写入后端返回的短期地址", async () => {

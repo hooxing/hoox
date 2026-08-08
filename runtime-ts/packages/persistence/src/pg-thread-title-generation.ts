@@ -98,10 +98,8 @@ async function finalizePendingDirectory(
 ): Promise<void> {
   const directory = await client.query<{
     readonly naming_state: "pending" | "ready" | "fallback";
-    readonly directory_timestamp: Date;
-    readonly directory_time_zone: string;
   }>(
-    `SELECT naming_state,directory_timestamp,directory_time_zone
+    `SELECT naming_state
        FROM thread_history_directories
       WHERE tenant_id=$1 AND thread_id=$2 FOR UPDATE`,
     [input.tenantId, input.threadId],
@@ -111,11 +109,7 @@ async function finalizePendingDirectory(
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [
     `${input.tenantId}\u001fpersonal-history-names`,
   ]);
-  const baseName = historyFilesystemDirectoryName({
-    createdAt: row.directory_timestamp,
-    title: input.thread.title,
-    timeZone: row.directory_time_zone,
-  });
+  const baseName = historyFilesystemDirectoryName({ title: input.thread.title });
   const directoryName = await allocateDirectoryName(client, {
     tenantId: input.tenantId,
     threadId: input.threadId,

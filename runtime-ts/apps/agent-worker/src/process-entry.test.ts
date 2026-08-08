@@ -513,10 +513,30 @@ describe("Agent Worker 进程入口", () => {
     );
   });
 });
-expect(parseWorkerProcessEnvironment(productionEnvironment()).historyFilesystemEnabled).toBe(false);
-expect(
-  parseWorkerProcessEnvironment({
-    ...productionEnvironment(),
-    HISTORY_FILESYSTEM_ENABLED: "true",
-  }).historyFilesystemEnabled,
-).toBe(true);
+describe("个人历史目录配置", () => {
+  it("默认关闭挂载并使用上海时区，显式配置会进入 Worker", () => {
+    expect(parseWorkerProcessEnvironment(productionEnvironment())).toMatchObject({
+      historyFilesystemEnabled: false,
+      historyDirectoryTimeZone: "Asia/Shanghai",
+    });
+    expect(
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        HISTORY_FILESYSTEM_ENABLED: "true",
+        HISTORY_DIRECTORY_TIME_ZONE: "America/Los_Angeles",
+      }),
+    ).toMatchObject({
+      historyFilesystemEnabled: true,
+      historyDirectoryTimeZone: "America/Los_Angeles",
+    });
+  });
+
+  it("拒绝无效历史目录时区", () => {
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        HISTORY_DIRECTORY_TIME_ZONE: "Mars/Base",
+      }),
+    ).toThrow("HISTORY_DIRECTORY_TIME_ZONE 无效");
+  });
+});

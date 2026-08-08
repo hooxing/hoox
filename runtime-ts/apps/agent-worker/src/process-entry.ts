@@ -15,6 +15,7 @@ import {
   DurableResourceBlobWriter,
   DurableTraceBlobPersistenceAdapter,
   DurableWorkspaceCandidateBlobWriter,
+  DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
   PgBackedSandboxSessionRegistry,
   PgAgentControlRepository,
   PgBlobLifecycleRepository,
@@ -174,6 +175,7 @@ const workerEnvironmentSchema = Object.freeze({
   }),
   THREAD_SANDBOX_SESSION_REUSE_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
   HISTORY_FILESYSTEM_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  HISTORY_DIRECTORY_TIME_ZONE: stringEnvironmentField({ requiredIn: [], maxLength: 128 }),
   SUBAGENTS_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
   CUBESANDBOX_SESSION_TTL_SECONDS: integerEnvironmentField({
     minimum: 1,
@@ -270,6 +272,7 @@ export interface WorkerProcessConfiguration {
     lifecycleTimeoutMs: number;
   }>;
   readonly historyFilesystemEnabled: boolean;
+  readonly historyDirectoryTimeZone: string;
   readonly subagents: Readonly<{ enabled: boolean }>;
   readonly development?: Readonly<{
     readonly userATenantId: string;
@@ -340,6 +343,13 @@ export function parseWorkerProcessEnvironment(
   const compactionEnabled = parsed.values.THREAD_CONTEXT_COMPACTION_ENABLED ?? true;
   const sandboxSessionReuseEnabled = parsed.values.THREAD_SANDBOX_SESSION_REUSE_ENABLED ?? true;
   const historyFilesystemEnabled = parsed.values.HISTORY_FILESYSTEM_ENABLED ?? false;
+  const historyDirectoryTimeZone =
+    parsed.values.HISTORY_DIRECTORY_TIME_ZONE ?? DEFAULT_HISTORY_DIRECTORY_TIME_ZONE;
+  try {
+    new Intl.DateTimeFormat("en-CA", { timeZone: historyDirectoryTimeZone }).format(new Date(0));
+  } catch {
+    throw new TypeError("HISTORY_DIRECTORY_TIME_ZONE 无效");
+  }
   const subagentsEnabled = parsed.values.SUBAGENTS_ENABLED ?? true;
   const runTimeoutMs = parsed.values.AGENT_WORKER_RUN_TIMEOUT_MS ?? 12 * 60 * 60_000;
   const sessionTtlSeconds = parsed.values.CUBESANDBOX_SESSION_TTL_SECONDS ?? 12 * 60 * 60 + 600;
@@ -479,6 +489,7 @@ export function parseWorkerProcessEnvironment(
       lifecycleTimeoutMs: sandboxLifecycleTimeoutMs,
     }),
     historyFilesystemEnabled,
+    historyDirectoryTimeZone,
     subagents: Object.freeze({ enabled: subagentsEnabled }),
     ...(parsed.runtimeEnvironment === "development"
       ? {
@@ -934,6 +945,8 @@ async function assembleWorkerRuntime(
           threadInputRoutingV2Enabled: configuration.threadContext.inputRoutingEnabled,
           threadSandboxSessionReuseEnabled: configuration.threadSandbox.reuseEnabled,
           threadSandboxHandoffLeaseMs: configuration.worker.runLeaseMs,
+          historyFilesystemEnabled: configuration.historyFilesystemEnabled,
+          historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
         }),
         revisions: workspaceRuntime,
         sandboxes,

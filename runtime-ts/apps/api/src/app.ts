@@ -1553,6 +1553,7 @@ function sameHistoryFileAuthorization(
     expected.entryName === confirmed.entryName &&
     expected.attachedAt === confirmed.attachedAt &&
     expected.object.tenantId === confirmed.object.tenantId &&
+    expected.object.purpose === confirmed.object.purpose &&
     expected.object.sha256 === confirmed.object.sha256 &&
     expected.object.size === confirmed.object.size &&
     expected.object.mediaType === confirmed.object.mediaType &&

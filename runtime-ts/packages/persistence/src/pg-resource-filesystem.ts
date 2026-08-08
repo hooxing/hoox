@@ -24,6 +24,7 @@ interface ResourceFileRow {
   readonly digest: string;
   readonly blob_incarnation_id: string;
   readonly physical_object_key: string;
+  readonly blob_purpose: "resource" | "workspace";
 }
 
 interface HistoryDirectoryRow {
@@ -41,7 +42,7 @@ interface HistoryFileRow extends ResourceFileRow {
   readonly last_attached_at: Date | string;
 }
 
-/** 宿主 ResourceFS 只读取 searchable 的不可变版本，并且永不向 Cube Volume/Sandbox 暴露对象键。 */
+/** 宿主 ResourceFS 只读取 searchable 的不可变版本；Resource 与正式交付物复用原 Blob，不向 Sandbox 暴露对象键。 */
 export class PgResourceFilesystemCatalog
   implements ResourceFilesystemCatalog, HistoryFilesystemCatalog, HistoryFileLibraryCatalog
 {
@@ -420,7 +421,7 @@ export class PgResourceFilesystemCatalog
 }
 
 const baseQuery = `SELECT resource.id AS resource_id,version.id AS version_id,resource.name,
-                          version.media_type,version.size::text,version.digest,
+                          version.media_type,version.size::text,version.digest,version.blob_purpose,
                           version.blob_incarnation_id::text,version.physical_object_key
                      FROM resources resource
                      JOIN resource_versions version
@@ -429,7 +430,7 @@ const baseQuery = `SELECT resource.id AS resource_id,version.id AS version_id,re
                      JOIN blob_references reference
                        ON reference.tenant_id=version.tenant_id
                       AND reference.reference_id=version.blob_reference_id
-                      AND reference.state='stable' AND reference.purpose='resource'
+                      AND reference.state='stable' AND reference.purpose=version.blob_purpose
                       AND reference.sha256=version.digest AND reference.size=version.size
                       AND reference.incarnation_id=version.blob_incarnation_id
                       AND reference.physical_object_key=version.physical_object_key`;
@@ -437,7 +438,7 @@ const baseQuery = `SELECT resource.id AS resource_id,version.id AS version_id,re
 const historyFileQuery = `SELECT entry.thread_id,directory.directory_name,
                                  entry.directory_entry_name,entry.last_attached_at,
                                  resource.id AS resource_id,version.id AS version_id,resource.name,
-                                 version.media_type,version.size::text,version.digest,
+                                 version.media_type,version.size::text,version.digest,version.blob_purpose,
                                  version.blob_incarnation_id::text,version.physical_object_key
                             FROM thread_history_file_entries entry
                             JOIN thread_history_directories directory
@@ -454,7 +455,7 @@ const historyFileQuery = `SELECT entry.thread_id,directory.directory_name,
                             JOIN blob_references reference
                               ON reference.tenant_id=version.tenant_id
                              AND reference.reference_id=version.blob_reference_id
-                             AND reference.state='stable' AND reference.purpose='resource'
+                             AND reference.state='stable' AND reference.purpose=version.blob_purpose
                              AND reference.sha256=version.digest AND reference.size=version.size
                              AND reference.incarnation_id=version.blob_incarnation_id
                              AND reference.physical_object_key=version.physical_object_key`;
@@ -541,7 +542,7 @@ function mapFile(rawTenantId: string, row: ResourceFileRow): ResourceFilesystemF
     sizeBytes: size,
     object: Object.freeze({
       tenantId: tenant,
-      purpose: "resource" as const,
+      purpose: row.blob_purpose,
       sha256: row.digest,
       size,
       mediaType: row.media_type,

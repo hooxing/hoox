@@ -24,7 +24,7 @@ export interface ResourceAttachment {
 
 export interface ResourceFilesystemStoredObject {
   readonly tenantId: string;
-  readonly purpose: "resource";
+  readonly purpose: "resource" | "workspace";
   readonly sha256: string;
   readonly size: number;
   readonly mediaType: string;

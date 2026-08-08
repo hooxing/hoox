@@ -48,6 +48,11 @@ import {
   withTenantTransaction,
 } from "./postgres.js";
 import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
+import {
+  DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
+  insertPersonalHistoryAgentDeliverable,
+  shouldIndexArtifactInPersonalHistory,
+} from "./pg-personal-history.js";
 import { appendThreadContext } from "./thread-context.js";
 import { applyThreadSandboxTerminal } from "./thread-sandbox-session.js";
 import { workspaceArtifactMediaType } from "./workspace-artifact-media.js";
@@ -72,6 +77,8 @@ export interface PgRunWorkerStateOptions {
   readonly threadInputRoutingV2Enabled?: boolean;
   readonly threadSandboxSessionReuseEnabled?: boolean;
   readonly threadSandboxHandoffLeaseMs?: number;
+  readonly historyFilesystemEnabled?: boolean;
+  readonly historyDirectoryTimeZone?: string;
 }
 
 const mutationSerializableRetryDelaysMs = Object.freeze([5, 15, 45]);
@@ -2096,6 +2103,9 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         rootRunId: change.rootRunId,
         revisionId: change.revisionId,
         databaseNow,
+        historyFilesystemEnabled: this.options.historyFilesystemEnabled ?? false,
+        historyDirectoryTimeZone:
+          this.options.historyDirectoryTimeZone ?? DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
       });
       const uploadedCount = await client.query<{ readonly count: string }>(
         `SELECT count(*)::text AS count FROM workspace_revision_candidate_files
@@ -2795,6 +2805,8 @@ async function settleWorkspaceArtifactIntents(
     readonly rootRunId: string;
     readonly revisionId: string;
     readonly databaseNow: ReturnType<typeof isoTimestamp>;
+    readonly historyFilesystemEnabled: boolean;
+    readonly historyDirectoryTimeZone: string;
   },
 ): Promise<void> {
   const intents = await client.query<{
@@ -2982,6 +2994,23 @@ async function settleWorkspaceArtifactIntents(
        VALUES($1,$2,'published',$3)`,
       [input.tenantId, intent.artifact_id, input.databaseNow],
     );
+    if (
+      shouldIndexArtifactInPersonalHistory({
+        historyFilesystemEnabled: input.historyFilesystemEnabled,
+        purpose: intent.purpose,
+      })
+    ) {
+      await insertPersonalHistoryAgentDeliverable(client, {
+        tenantId: input.tenantId,
+        threadId: input.threadId,
+        artifactId: intent.artifact_id,
+        resourceId: intent.resource_id,
+        resourceVersionId: intent.resource_version_id,
+        resourceName: intent.resource_name,
+        publishedAt: input.databaseNow,
+        timeZone: input.historyDirectoryTimeZone,
+      });
+    }
   }
 }
 

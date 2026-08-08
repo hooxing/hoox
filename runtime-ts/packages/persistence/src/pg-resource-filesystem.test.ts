@@ -37,6 +37,8 @@ class ScriptedResourceFilesystemClient {
 class ScriptedHistoryLibraryClient {
   readonly statements: Statement[] = [];
 
+  constructor(private readonly blobPurpose: "resource" | "workspace" = "resource") {}
+
   async query(sql: string, values?: readonly unknown[]) {
     this.statements.push({ sql, ...(values === undefined ? {} : { values }) });
     if (sql.startsWith("BEGIN") || sql === "COMMIT" || sql === "ROLLBACK") {
@@ -71,7 +73,7 @@ class ScriptedHistoryLibraryClient {
       return { rows: [{ present: true }], rowCount: 1 };
     }
     if (sql.includes("FROM thread_history_file_entries entry")) {
-      return { rows: [historyFileRow()], rowCount: 1 };
+      return { rows: [historyFileRow(this.blobPurpose)], rowCount: 1 };
     }
     return { rows: [], rowCount: 0 };
   }
@@ -79,7 +81,7 @@ class ScriptedHistoryLibraryClient {
   release() {}
 }
 
-function historyFileRow() {
+function historyFileRow(blobPurpose: "resource" | "workspace") {
   return {
     thread_id: "thread-contract",
     directory_name: "采购合同审查",
@@ -91,6 +93,7 @@ function historyFileRow() {
     media_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     size: "2048",
     digest: "a".repeat(64),
+    blob_purpose: blobPurpose,
     blob_incarnation_id: "00000000-0000-4000-8000-000000000001",
     physical_object_key: "opaque-history-object",
   };
@@ -207,5 +210,25 @@ describe("PostgreSQL ResourceFS 稳定 Thread 入口", () => {
       },
     });
     expect(file?.path).not.toContain("opaque-history-object");
+    const query = client.statements.find((statement) =>
+      statement.sql.includes("FROM thread_history_file_entries entry"),
+    );
+    expect(query?.sql).toContain("reference.purpose=version.blob_purpose");
+  });
+
+  it("Agent deliverable 直接复用 workspace Stable Blob", async () => {
+    const client = new ScriptedHistoryLibraryClient("workspace");
+    const catalog = new PgResourceFilesystemCatalog(poolFor(client));
+
+    const file = await catalog.resolveLibraryFile({
+      tenantId: tenantId("tenant-a"),
+      resourceId: "resource-contract",
+      versionId: "version-contract",
+    });
+
+    expect(file?.object).toMatchObject({
+      purpose: "workspace",
+      physicalObjectKey: "opaque-history-object",
+    });
   });
 });

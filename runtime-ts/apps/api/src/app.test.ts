@@ -1053,7 +1053,7 @@ describe("Fastify API 契约", () => {
       attachedAt: "2026-08-07T08:00:00.000Z",
       object: {
         tenantId: tenantId("tenant_owner_a"),
-        purpose: "resource",
+        purpose: "workspace",
         sha256: "a".repeat(64),
         size: 128,
         mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1142,6 +1142,7 @@ describe("Fastify API 契约", () => {
     expect(presignDownload).toHaveBeenCalledWith(
       expect.objectContaining({
         scope: { tenantId: "tenant_owner_a" },
+        blob: expect.objectContaining({ purpose: "workspace" }),
         ttlSeconds: 300,
         delivery: "artifact-download",
         downloadName: "采购合同.docx",

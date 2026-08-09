@@ -1172,7 +1172,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     },
   );
 
-  it("exec_command 数据面连续失败时三次熔断并进入可结束的恢复态", async () => {
+  it("exec_command 数据面连续失败时三次熔断、回复用户并保留失败终态", async () => {
     const persistence = new FakeExecutionPersistence();
     const scope = persistence.addSeed(fakeSeed("pi-exec-infrastructure-circuit"));
     const sandboxes = new FakeSandboxRegistry();
@@ -1194,7 +1194,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       commandTurn("one"),
       commandTurn("two"),
       commandTurn("three"),
-      commandTurn("must-not-reach"),
+      fauxAssistantMessage("Sandbox 连续调用失败，本次任务无法继续。"),
     ]);
     const modelRuntime = await ModelRuntime.create({
       credentials: new InMemoryCredentialStore(),
@@ -1230,14 +1230,32 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       { workerId: "pi-exec-circuit-worker", runTimeoutMs: 60_000 },
     );
 
-    await expect(worker.execute(scope)).resolves.toEqual({
-      outcome: "recovery_required",
-      code: "SANDBOX_FAILED",
-    });
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "failed" });
     expect(commandCalls).toBe(3);
-    expect(faux.state.callCount).toBe(3);
+    expect(faux.state.callCount).toBe(4);
     expect(sandboxes.settleCount).toBe(1);
-    expect(persistence.record(scope).attempt?.status).toBe("recovery_required");
+    expect(persistence.record(scope).run.status).toBe("failed");
+    expect(persistence.record(scope).attempt?.status).toBe("failed");
+    expect(
+      persistence
+        .record(scope)
+        .events.some(
+          (event) => event.kind === "agent_event" && event.payload.type === "runtime.notice",
+        ),
+    ).toBe(false);
+    expect(
+      persistence
+        .record(scope)
+        .events.filter(
+          (event) => event.kind === "agent_event" && event.payload.type === "message.delta",
+        )
+        .map((event) =>
+          event.kind === "agent_event" && event.payload.type === "message.delta"
+            ? event.payload.delta
+            : "",
+        )
+        .join(""),
+    ).toContain("Sandbox 连续调用失败");
   });
 
   it.skip("旧 Artifact 工具授权链路已由 deliver_file 纵向用例替代", async () => {

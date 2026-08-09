@@ -38,8 +38,10 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
           : { outcome: "unknown" as const };
       },
     }),
-    (failure) => {
+    () => {
       continuationRejected = true;
+    },
+    (failure) => {
       continuationFailure = failure;
     },
   );
@@ -270,7 +272,7 @@ describe("exec_command", () => {
       ).rejects.toThrow("EXEC_UNAVAILABLE");
     }
 
-    expect(tested.continuationRejected()).toBe(true);
+    expect(tested.continuationRejected()).toBe(false);
     expect(tested.continuationFailure()).toBe("SANDBOX_FAILED");
     await expect(
       tested.execute(

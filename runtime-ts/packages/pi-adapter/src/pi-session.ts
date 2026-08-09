@@ -63,7 +63,7 @@ import {
   createObservedSandboxTools,
   type SandboxToolEffectAuthorizer,
   type SandboxToolHandleProvider,
-  type ToolContinuationFailure,
+  type ToolReportOnlyFailure,
 } from "./tools.js";
 
 interface PiSessionPort {
@@ -110,6 +110,8 @@ export interface PiSessionDiagnostics {
   activeSessionEntryCount: number;
   pendingMessageCount: number;
   contextBudget: Readonly<PiContextBudgetDiagnostics>;
+  /** durable 工具失败后已关闭全部工具；模型仍可完成一次只读说明。 */
+  reportOnlyFailure?: ToolReportOnlyFailure | undefined;
 }
 
 export interface PiSessionController {
@@ -119,6 +121,8 @@ export interface PiSessionController {
   abort(): Promise<void>;
   dispose(): void;
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void;
+  /** 只回复模式完成后供 Worker 保留真实失败终态，不得据此伪造成功。 */
+  getReportOnlyFailure(): ToolReportOnlyFailure | undefined;
   getDiagnostics(): Readonly<PiSessionDiagnostics>;
 }
 
@@ -348,6 +352,10 @@ class PiSessionControllerImpl implements PiSessionController {
       thinkingBuffer = "";
       unsubscribe();
     };
+  }
+
+  getReportOnlyFailure(): ToolReportOnlyFailure | undefined {
+    return this.#diagnostics().reportOnlyFailure;
   }
 
   getDiagnostics(): Readonly<PiSessionDiagnostics> {
@@ -608,6 +616,10 @@ export async function createSafePiSession(
     expected: builtPrompt.manifest,
     dispose: () => session.dispose(),
   });
+  material.bindReportOnlyMode(() => {
+    // durable 工具失败后不伪造成功，也不继续执行副作用；下一轮仅允许模型解释失败。
+    session.setActiveToolsByName([]);
+  });
   if (options.prepareNextTurnHistory !== undefined) {
     const previousPrepareNextTurn = session.agent.prepareNextTurnWithContext;
     session.agent.prepareNextTurnWithContext = async (turn, signal) => {
@@ -658,6 +670,9 @@ export async function createSafePiSession(
       activeSessionEntryCount: session.sessionManager.buildContextEntries().length,
       pendingMessageCount: session.pendingMessageCount,
       contextBudget: contextBudgetDiagnostics(latestContextBudgetDecision),
+      ...(material.getReportOnlyFailure() === undefined
+        ? {}
+        : { reportOnlyFailure: material.getReportOnlyFailure() }),
     }),
     (text) =>
       assertCurrentInputFits(
@@ -871,7 +886,17 @@ function toPiHistoryMessage(
 
 function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
   let toolContinuationRejected = false;
-  let toolContinuationFailure: ToolContinuationFailure | undefined;
+  let reportOnlyFailure: ToolReportOnlyFailure | undefined;
+  let applyReportOnlyMode: () => void = () => undefined;
+  const enterReportOnlyMode = (failure: ToolReportOnlyFailure) => {
+    reportOnlyFailure ??= failure;
+    try {
+      applyReportOnlyMode();
+    } catch {
+      // 若 Pi 无法切换为无工具模式，下一 Provider 请求必须失败关闭，由 Runtime 兜底回复。
+      toolContinuationRejected = true;
+    }
+  };
   const sandboxTarget =
     options.prepareSandboxTool === undefined
       ? options.sandbox
@@ -883,10 +908,10 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
       authorizeToolEffect: options.authorizeToolEffect,
     },
     options.createToolObservationRecorder,
-    (failure) => {
+    () => {
       toolContinuationRejected = true;
-      toolContinuationFailure ??= failure;
     },
+    enterReportOnlyMode,
   );
   const enabled =
     options.enabledToolNames === undefined
@@ -904,7 +929,7 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
             options.skillToolExecutor ?? unavailableSkillToolExecutor,
             observedSandboxTools.recordControlledReceipt,
             () => {
-              toolContinuationRejected = true;
+              enterReportOnlyMode("TOOL_FAILED");
             },
           ),
         ]
@@ -916,7 +941,7 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
             options.todoWriteToolExecutor,
             observedSandboxTools.recordControlledReceipt,
             () => {
-              toolContinuationRejected = true;
+              enterReportOnlyMode("TOOL_FAILED");
             },
           ),
         ]),
@@ -927,7 +952,7 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
             options.deliverFileToolRouter,
             observedSandboxTools.recordControlledReceipt,
             () => {
-              toolContinuationRejected = true;
+              enterReportOnlyMode("TOOL_FAILED");
             },
           ),
         ]),
@@ -962,12 +987,14 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     serializedToolDefinitions,
     assertModelRequestAllowed: () => {
       if (toolContinuationRejected) {
-        if (toolContinuationFailure === "SANDBOX_FAILED") {
-          throw new SandboxToolCircuitOpenError();
-        }
-        throw new Error("Tool durable 失败回执完成后禁止继续模型轮次");
+        throw new Error("Tool durable 事实不完整，禁止继续模型轮次");
       }
     },
+    bindReportOnlyMode: (handler: () => void) => {
+      applyReportOnlyMode = handler;
+      if (reportOnlyFailure !== undefined) handler();
+    },
+    getReportOnlyFailure: () => reportOnlyFailure,
   };
 }
 

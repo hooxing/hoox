@@ -718,6 +718,18 @@ function fixture(
                     },
                     occurredAt: baseTime,
                   },
+                  {
+                    sequence: 7,
+                    kind: "agent_event",
+                    payload: {
+                      type: "runtime.notice",
+                      level: "error",
+                      code: "PROVIDER",
+                      message: "模型服务调用失败，本次任务未能完成，请稍后重试。",
+                      source: "terminal_fallback",
+                    },
+                    occurredAt: baseTime,
+                  },
                 ]
                   .filter((event) => event.sequence > after)
                   .slice(0, limit),
@@ -1608,6 +1620,17 @@ describe("Fastify API 契约", () => {
               version: 1,
               todos: [{ id: "first", content: "第一步", status: "pending" }],
             },
+          },
+        },
+        {
+          eventId: "attempt_1-7",
+          sequence: 7,
+          kind: "agent_event",
+          type: "runtime.notice",
+          payload: {
+            code: "PROVIDER",
+            message: "模型服务调用失败，本次任务未能完成，请稍后重试。",
+            source: "terminal_fallback",
           },
         },
       ],

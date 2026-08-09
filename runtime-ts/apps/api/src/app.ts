@@ -185,6 +185,7 @@ const publicAgentEventTypes = new Set([
   "tool.completed",
   "todo.updated",
   "queue.updated",
+  "runtime.notice",
   "compaction.forbidden",
   "error",
 ]);

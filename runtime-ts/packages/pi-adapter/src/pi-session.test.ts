@@ -23,7 +23,6 @@ import {
   createSafePiSession,
   digestCanonicalToolInputSchema,
   type PiSessionController,
-  SandboxToolCircuitOpenError,
 } from "./pi-session.js";
 import { type ThreadActiveHistoryV1, threadActiveHistoryDigest } from "./thread-history.js";
 import { SANDBOX_TOOL_NAMES } from "./tools.js";
@@ -995,7 +994,7 @@ describe("Pi 安全适配", () => {
     );
   });
 
-  it("exec_command 连续三次基础设施失败后阻止第四次 Provider 请求", async () => {
+  it("exec_command 连续三次基础设施失败后关闭工具并让 Agent 回复用户", async () => {
     const sandbox = new FakeSandboxHandle("pi-exec-circuit");
     let sandboxCalls = 0;
     sandbox.command = async () => {
@@ -1007,21 +1006,31 @@ describe("Pi 安全适配", () => {
         stopReason: "toolUse",
       });
     const { controller, faux, events } = await harness(
-      [toolTurn("one"), toolTurn("two"), toolTurn("three"), toolTurn("must-not-reach")],
+      [
+        toolTurn("one"),
+        toolTurn("two"),
+        toolTurn("three"),
+        fauxAssistantMessage("Sandbox 连续调用失败，本次任务无法继续。"),
+      ],
       sandbox,
     );
 
-    await expect(controller.prompt("执行命令")).rejects.toBeInstanceOf(SandboxToolCircuitOpenError);
+    await expect(controller.prompt("执行命令")).resolves.toBeUndefined();
 
     expect(sandboxCalls).toBe(3);
-    expect(faux.state.callCount).toBe(3);
+    expect(faux.state.callCount).toBe(4);
+    expect(controller.getDiagnostics().activeToolNames).toEqual([]);
     expect(
       events.filter((event) => event.type === "tool.completed" && event.name === "exec_command"),
     ).toHaveLength(3);
+    expect(events).toContainEqual({
+      type: "message.completed",
+      stopReason: "stop",
+    });
   });
 
   it.runIf(process.platform === "linux")(
-    "deliver_file fatal 失败回执完成后关闭下一次 Provider 请求",
+    "deliver_file fatal 失败回执完成后关闭工具并让 Agent 回复用户",
     async () => {
       let routerCalls = 0;
       const { controller, events, faux } = await harness(
@@ -1029,7 +1038,7 @@ describe("Pi 安全适配", () => {
           fauxAssistantMessage(fauxToolCall("deliver_file", { path: "/workspace/report.pdf" }), {
             stopReason: "toolUse",
           }),
-          fauxAssistantMessage("不应触达"),
+          fauxAssistantMessage("文件发布结果未知，本次交付未确认成功。"),
         ],
         new FakeSandboxHandle("pi-deliver-fatal"),
         undefined,
@@ -1052,15 +1061,14 @@ describe("Pi 安全适配", () => {
         },
       );
 
-      await expect(controller.prompt("交付文件")).rejects.toThrow();
+      await expect(controller.prompt("交付文件")).resolves.toBeUndefined();
       expect(routerCalls).toBe(1);
-      expect(faux.state.callCount).toBe(1);
+      expect(faux.state.callCount).toBe(2);
+      expect(controller.getDiagnostics().activeToolNames).toEqual([]);
       expect(events).toContainEqual(
         expect.objectContaining({ type: "tool.completed", name: "deliver_file", isError: true }),
       );
-      expect(
-        events.some((event) => event.type === "message.completed" && event.stopReason === "stop"),
-      ).toBe(false);
+      expect(events).toContainEqual({ type: "message.completed", stopReason: "stop" });
     },
   );
 

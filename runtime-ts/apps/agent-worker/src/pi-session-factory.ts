@@ -24,7 +24,6 @@ import {
   deriveSafePiSessionCompatibility,
   type PiSessionController,
   providerVisibleUserInputTokens,
-  SandboxToolCircuitOpenError,
   type ThreadActiveHistoryV1,
   type TrustedPiModelContextCapability,
 } from "@cube-runtime/pi-adapter";
@@ -676,15 +675,19 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           if (observationRecoveryCode !== undefined) {
             return { kind: "recovery_required", code: observationRecoveryCode };
           }
-          if (error instanceof SandboxToolCircuitOpenError) {
-            return { kind: "recovery_required", code: "SANDBOX_FAILED" };
-          }
           if (error instanceof ContextBudgetAdmissionError)
             return { kind: "context_too_large", action: "rebuild_context" };
           throw error;
         }
         if (observationRecoveryCode !== undefined) {
           return { kind: "recovery_required", code: observationRecoveryCode };
+        }
+        const reportOnlyFailure = controller.getReportOnlyFailure();
+        if (reportOnlyFailure !== undefined) {
+          return {
+            kind: "failed_with_response",
+            code: reportOnlyFailure === "SANDBOX_FAILED" ? "SANDBOX_FAILED" : "INTERNAL",
+          };
         }
         return { kind: "completed" };
       },

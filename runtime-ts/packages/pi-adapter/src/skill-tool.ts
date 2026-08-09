@@ -43,7 +43,7 @@ export function createSkillPiTool(
     toolName: string,
     outcome: "succeeded" | "failed",
   ) => Promise<ToolObservationResult>,
-  rejectModelContinuation: () => void = () => undefined,
+  enterReportOnlyMode: () => void = () => undefined,
 ) {
   const invalidArguments = createSchemaInvalidArgumentsBridge<SkillToolArguments>(
     SkillToolArgumentsSchema,
@@ -90,7 +90,7 @@ export function createSkillPiTool(
       if (observation.outcome !== "recorded" && observation.outcome !== "replayed") {
         throw new Error("skill Tool Observation 未能形成 durable 事实");
       }
-      if (failure?.fatal === true) rejectModelContinuation();
+      if (failure?.fatal === true) enterReportOnlyMode();
       if (failure !== undefined) throw new Error(JSON.stringify(failure));
       return { content: [{ type: "text" as const, text: text ?? "" }], details: {} };
     },

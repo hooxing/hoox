@@ -230,6 +230,62 @@ export function RunTimeline({
   );
 }
 
+function terminalFallbackAnswer(
+  run: Run,
+  events: readonly RunEvent[],
+  blocks: readonly ConversationBlock[],
+): Extract<ConversationBlock, { type: "answer" }> | undefined {
+  if (blocks.some((block) => block.type === "answer")) return undefined;
+  const terminal =
+    run.status === "failed" ||
+    run.status === "cancelled" ||
+    run.executionStatus === "recovery_required";
+  if (!terminal) return undefined;
+  const code = [...events]
+    .reverse()
+    .map((event) => (event.type === "attempt_state_changed" ? event.payload : undefined))
+    .map((payload) =>
+      typeof payload === "object" && payload !== null && "code" in payload
+        ? (payload as { readonly code?: unknown }).code
+        : undefined,
+    )
+    .find((candidate): candidate is string => typeof candidate === "string");
+  return {
+    id: `runtime-terminal-fallback-${run.id}`,
+    type: "answer",
+    text: terminalFallbackText(run, code),
+    status: "completed",
+  };
+}
+
+function terminalFallbackText(run: Run, code: string | undefined): string {
+  if (run.status === "cancelled" || code === "CANCELLED") {
+    return "任务已取消；未完成或未提交的工作不视为成功。";
+  }
+  const messages: Readonly<Record<string, string>> = {
+    CONTEXT_TOO_LARGE: "上下文仍然超出模型窗口，本次任务未能完成。",
+    TIMEOUT: "任务运行超时，本次任务未能完成。",
+    PROVIDER: "模型服务调用失败，本次任务未能完成，请稍后重试。",
+    PROTOCOL: "模型响应未形成有效终态，本次任务未能完成。",
+    EVENT_REJECTED: "运行事件无法可靠保存，本次任务已中断。",
+    WORKER_SHUTDOWN: "执行 Worker 已停止，本次任务已中断。",
+    PERSISTENCE_UNAVAILABLE: "运行状态暂时无法可靠保存，本次任务已中断。",
+    FENCE_LOST: "运行执行权已转移，本次任务已中断，未确认的工作不视为成功。",
+    SANDBOX_UNKNOWN: "Sandbox 状态无法确认，本次任务已中断，未确认的修改不视为成功。",
+    SANDBOX_FAILED: "Sandbox 连续调用失败，本次任务未能完成。",
+    WORKSPACE_CONFLICT: "工作区验证或提交发生冲突，本次修改未确认成功。",
+    ARTIFACT_NOT_READY: "交付文件尚未可靠发布，本次交付未确认成功。",
+    IDEMPOTENCY_CONFLICT: "运行状态发生幂等冲突，本次任务已中断。",
+    INTERNAL: "系统内部处理失败，本次任务未能完成。",
+  };
+  return (
+    (code === undefined ? undefined : messages[code]) ??
+    (run.executionStatus === "recovery_required"
+      ? "系统遇到无法安全继续的异常，本次任务已中断。"
+      : "系统执行失败，本次任务未能完成。")
+  );
+}
+
 export function RunTranscript({
   run,
   events,
@@ -238,9 +294,12 @@ export function RunTranscript({
   readonly events: readonly RunEvent[];
 }) {
   const progress = buildRunProgress(events);
-  const blocks = buildConversationBlocks(events);
+  const projectedBlocks = buildConversationBlocks(events);
+  const fallback = terminalFallbackAnswer(run, events, projectedBlocks);
+  const blocks = fallback === undefined ? projectedBlocks : [...projectedBlocks, fallback];
   if (
     progress.thinking === undefined &&
+    blocks.length === 0 &&
     progress.finalMessage === undefined &&
     progress.waitingQuestion === undefined
   )

@@ -338,8 +338,15 @@ export class RunWorker {
         expectedAttemptVersion: claim.snapshot.attempt.version,
         nextAttemptStatus: "recovery_required",
         events: [
+          agentEventAt(claim.snapshot.attempt.nextEventSequence, {
+            type: "runtime.notice",
+            level: "error",
+            code: "PROTOCOL",
+            message: terminalFailureMessage("recovery_required", "PROTOCOL"),
+            source: "terminal_fallback",
+          }),
           rawAttemptEvent(
-            claim.snapshot.attempt.nextEventSequence,
+            claim.snapshot.attempt.nextEventSequence + 1,
             "recovery_required",
             "claimed",
             "PROTOCOL",
@@ -976,6 +983,16 @@ export class RunWorker {
         }
         if (turn.kind === "recovery_required") {
           return await this.recoverWithCleanup(context, sandbox, turn.code, cancellation);
+        }
+        if (turn.kind === "failed_with_response") {
+          return await this.finalizeWithCleanup(
+            context,
+            sandbox,
+            "failed",
+            turn.code,
+            cancellation,
+            true,
+          );
         }
         if (context.agentFailure) {
           return await this.finalizeWithCleanup(
@@ -1812,6 +1829,7 @@ export class RunWorker {
     runStatus: "failed" | "cancelled",
     code: StableWorkerErrorCode,
     cancellation: AbortSignal,
+    responseAlreadyProvided = false,
   ): Promise<RunWorkerResult> {
     if (context.abortPromise) await context.abortPromise;
     const retainThreadSandbox =
@@ -1835,7 +1853,13 @@ export class RunWorker {
         return await this.finishStopped(context, stopped, sandbox);
       const finalizing = await this.prepareThreadSandboxTerminal(context);
       if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
-      return await this.finalizeWithoutRevision(context, runStatus, code, sandbox);
+      return await this.finalizeWithoutRevision(
+        context,
+        runStatus,
+        code,
+        sandbox,
+        responseAlreadyProvided,
+      );
     }
     if (sandbox !== undefined) {
       const settled = await this.settleSandbox(context, sandbox, "close");
@@ -1845,7 +1869,13 @@ export class RunWorker {
     if (stopped === "cancelled")
       return await this.finalizeWithoutRevision(context, "cancelled", "CANCELLED");
     if (stopped && stopped !== "timeout") return await this.finishStopped(context, stopped);
-    return await this.finalizeWithoutRevision(context, runStatus, code);
+    return await this.finalizeWithoutRevision(
+      context,
+      runStatus,
+      code,
+      undefined,
+      responseAlreadyProvided,
+    );
   }
 
   private async finalizeWithoutRevision(
@@ -1853,13 +1883,14 @@ export class RunWorker {
     runStatus: "failed" | "cancelled",
     code: StableWorkerErrorCode,
     retainedSandbox?: SandboxSessionRef,
+    responseAlreadyProvided = false,
   ): Promise<RunWorkerResult> {
     if (context.abortPromise) await context.abortPromise;
     const final = await this.applyMutation(context, {
       idempotencyKey: `${context.attemptId}/final/${runStatus}`,
       nextAttemptStatus: runStatus,
       nextStage: "finished",
-      events: [attemptEvent(context, runStatus, "finished", code)],
+      events: terminalFailureEvents(context, runStatus, "finished", code, responseAlreadyProvided),
       outbox: [],
       nextRunStatus: runStatus,
       releaseFences: true,
@@ -1867,7 +1898,7 @@ export class RunWorker {
         ? {}
         : { threadSandboxTerminal: terminalSandboxCommand(context.threadSandboxLease) }),
       ...(this.options.threadContextWriteEnabled === true
-        ? { threadContextAppend: terminalContextAppend(context, runStatus) }
+        ? { threadContextAppend: terminalContextAppend(context, runStatus, undefined, code) }
         : {}),
     });
     if (!isApplied(final)) return await this.handleMutationFailure(final);
@@ -1923,7 +1954,13 @@ export class RunWorker {
     const mutation = await this.applyMutation(context, {
       idempotencyKey: `${context.attemptId}/recovery/${code}`,
       nextAttemptStatus: "recovery_required",
-      events: [attemptEvent(context, "recovery_required", context.actualCommittedStage, code)],
+      events: terminalFailureEvents(
+        context,
+        "recovery_required",
+        context.actualCommittedStage,
+        code,
+        false,
+      ),
       outbox: [...outbox, alertOutbox(context, code)],
       releaseFences: true,
     });
@@ -1970,6 +2007,53 @@ export class RunWorker {
   }
 }
 
+function terminalFailureEvents(
+  context: ExecutionContext,
+  status: "failed" | "cancelled" | "recovery_required",
+  stage: ExecutionStage,
+  code: StableWorkerErrorCode,
+  responseAlreadyProvided: boolean,
+): readonly RuntimeEventV1[] {
+  if (responseAlreadyProvided) return [attemptEvent(context, status, stage, code)];
+  return [
+    agentEventAt(context.nextEventSequence, {
+      type: "runtime.notice",
+      level: "error",
+      code,
+      message: terminalFailureMessage(status, code),
+      source: "terminal_fallback",
+    }),
+    rawAttemptEvent(context.nextEventSequence + 1, status, stage, code),
+  ];
+}
+
+function terminalFailureMessage(
+  status: "failed" | "cancelled" | "recovery_required" | "waiting" | "succeeded",
+  code: StableWorkerErrorCode,
+): string {
+  if (status === "cancelled" || code === "CANCELLED") {
+    return "任务已取消；未完成或未提交的工作不视为成功。";
+  }
+  const messages: Readonly<Record<StableWorkerErrorCode, string>> = {
+    CANCELLED: "任务已取消；未完成或未提交的工作不视为成功。",
+    CONTEXT_TOO_LARGE: "上下文仍然超出模型窗口，本次任务未能完成。",
+    TIMEOUT: "任务运行超时，本次任务未能完成。",
+    PROVIDER: "模型服务调用失败，本次任务未能完成，请稍后重试。",
+    PROTOCOL: "模型响应未形成有效终态，本次任务未能完成。",
+    EVENT_REJECTED: "运行事件无法可靠保存，本次任务已中断。",
+    WORKER_SHUTDOWN: "执行 Worker 已停止，本次任务已中断。",
+    PERSISTENCE_UNAVAILABLE: "运行状态暂时无法可靠保存，本次任务已中断。",
+    FENCE_LOST: "运行执行权已转移，本次任务已中断，未确认的工作不视为成功。",
+    SANDBOX_UNKNOWN: "Sandbox 状态无法确认，本次任务已中断，未确认的修改不视为成功。",
+    SANDBOX_FAILED: "Sandbox 连续调用失败，本次任务未能完成。",
+    WORKSPACE_CONFLICT: "工作区验证或提交发生冲突，本次修改未确认成功。",
+    ARTIFACT_NOT_READY: "交付文件尚未可靠发布，本次交付未确认成功。",
+    IDEMPOTENCY_CONFLICT: "运行状态发生幂等冲突，本次任务已中断。",
+    INTERNAL: "系统内部处理失败，本次任务未能完成。",
+  };
+  return messages[code];
+}
+
 function rawAttemptEvent(
   sequence: number,
   status: ExecutionAttemptStatus,
@@ -2014,6 +2098,7 @@ function terminalContextAppend(
   context: ExecutionContext,
   status: "waiting" | "succeeded" | "failed" | "cancelled",
   workspaceChange?: ValidatedWorkspaceChange,
+  code?: StableWorkerErrorCode,
 ): ThreadContextAppendCommandV1 {
   const key = `${context.attemptId}/context/final/${status}`;
   const entries: ThreadContextAppendCommandV1["entries"][number][] = [];
@@ -2028,7 +2113,12 @@ function terminalContextAppend(
       body: inlineContextBody(workspaceBody),
     });
   }
-  const terminalBody = { status };
+  const terminalBody = {
+    status,
+    ...(code === undefined
+      ? {}
+      : { code, userFacingMessage: terminalFailureMessage(status, code) }),
+  };
   entries.push({
     entryId: `${key}/terminal`,
     kind: "run_terminal",
@@ -2047,10 +2137,14 @@ function inlineContextBody(value: Readonly<Record<string, unknown>>) {
 }
 
 function agentEvent(context: ExecutionContext, payload: RuntimeAgentEvent): RuntimeEventV1 {
+  return agentEventAt(context.nextEventSequence, payload);
+}
+
+function agentEventAt(sequence: number, payload: RuntimeAgentEvent): RuntimeEventV1 {
   const event: RuntimeEventV1 = {
     schemaVersion: 1,
     kind: "agent_event",
-    sequence: context.nextEventSequence,
+    sequence,
     payload: sanitizeAgentEvent(payload),
   };
   assertProtocolSize(event);

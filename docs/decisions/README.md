@@ -127,6 +127,9 @@
 | [ADR-0128](0128-resourcefs-hidden-thread-parent-traversal.md) | ResourceFS 隐藏 Thread 父目录的 WebDAV 可遍历性 | 已接受 | 2026-08-07 |
 | [ADR-0129](0129-predeclared-thread-filesystem-entrypoint.md) | 预声明 Thread 文件系统稳定入口 | 已接受 | 2026-08-07 |
 | [ADR-0130](0130-personal-history-file-library-and-composer-reference.md) | 个人历史文件云盘与输入框引用 | 已接受（试验分支） | 2026-08-07 |
+| [ADR-0131](0131-independent-cloud-drive-semantic-paths.md) | 独立云盘语义路径 | 已接受（试验分支） | 2026-08-08 |
+| [ADR-0132](0132-agent-deliverables-in-history.md) | Agent 正式交付物进入个人历史云盘 | 已接受（试验分支） | 2026-08-08 |
+| [ADR-0133](0133-auto-compaction-full-window-and-incoming-projection.md) | 自动压缩采用整窗摘要与入站输入投影 | 已接受（试验分支） | 2026-08-09 |
 
 ## 何时必须记录
 

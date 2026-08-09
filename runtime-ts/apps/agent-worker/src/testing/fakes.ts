@@ -11,10 +11,10 @@ import {
   membershipId,
   prepareWorkspaceRevision,
   type Run,
-  type Sha256Digest,
   releaseWorkspaceLease,
   renewWorkspaceLease,
   runId,
+  type Sha256Digest,
   sha256Digest,
   tenantId,
   threadId,
@@ -27,6 +27,7 @@ import {
 } from "@cube-runtime/domain";
 import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
+import type { RunSkillSnapshot } from "@cube-runtime/skill";
 import { createWorkspaceManifest } from "@cube-runtime/workspace";
 import {
   digestCanonical,
@@ -65,16 +66,15 @@ import type {
   SandboxSessionRegistryPort,
   SandboxSettlementResult,
   ScheduledTask,
-  WorkerAgentSessionPort,
-  WorkspaceRevisionCandidate,
-  WorkspaceRevisionVerifierPort,
   ThreadContextBodyPersistencePort,
   ThreadSandboxAcquireResult,
   ThreadSandboxLeaseRefV1,
   ThreadSandboxSessionLifecyclePort,
   UserInputAttachmentReference,
+  WorkerAgentSessionPort,
+  WorkspaceRevisionCandidate,
+  WorkspaceRevisionVerifierPort,
 } from "../ports.js";
-import type { RunSkillSnapshot } from "@cube-runtime/skill";
 
 interface FakeRecord {
   readonly scope: ExecutionScope;
@@ -1191,6 +1191,9 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
   readonly agentControls: Array<Parameters<AgentSessionFactoryPort["create"]>[0]["agentControl"]> =
     [];
   readonly agentIdentities: Array<Parameters<AgentSessionFactoryPort["create"]>[0]["agent"]> = [];
+  readonly initialInputTexts: Array<
+    Parameters<AgentSessionFactoryPort["create"]>[0]["initialInputText"]
+  > = [];
   readonly preparedSandboxes: SandboxSessionRef[] = [];
 
   constructor(
@@ -1211,6 +1214,7 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
     this.todoWriters.push(input.writeTodo);
     this.agentControls.push(input.agentControl);
     this.agentIdentities.push(input.agent);
+    this.initialInputTexts.push(input.initialInputText);
     let safePointChain = Promise.resolve();
     const unsubscribe =
       input.onTurnSafePoint === undefined

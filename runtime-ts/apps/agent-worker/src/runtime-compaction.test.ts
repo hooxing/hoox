@@ -1,14 +1,14 @@
-import { describe, expect, it, vi } from "vitest";
+import { sha256Digest } from "@cube-runtime/domain";
+import {
+  type ThreadActiveHistoryV1,
+  type TrustedPiModelContextCapability,
+  threadActiveHistoryDigest,
+} from "@cube-runtime/pi-adapter";
 import type {
   ThreadContextCompactionCommitPort,
   ThreadContinuityMetricsPort,
 } from "@cube-runtime/run-contracts";
-import { sha256Digest } from "@cube-runtime/domain";
-import {
-  threadActiveHistoryDigest,
-  type ThreadActiveHistoryV1,
-  type TrustedPiModelContextCapability,
-} from "@cube-runtime/pi-adapter";
+import { describe, expect, it, vi } from "vitest";
 import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
 
 const model = {
@@ -98,6 +98,67 @@ describe("RuntimeCompactionCoordinator", () => {
         unit: "tokens",
       }),
     );
+  });
+
+  it("首轮输入会占用目标余量，并在旧历史单独未达阈值时提前压缩", async () => {
+    const commit = vi.fn(async (input) => ({
+      outcome: "applied" as const,
+      checkpointId: input.checkpointId,
+      windowNumber: 1,
+      checkpointFactSequence: input.replacement.throughSequence + 1,
+    }));
+    const compact = vi.fn(async () => "短摘要");
+    const coordinator = new RuntimeCompactionCoordinator(
+      {
+        enabled: true,
+        path: "remote",
+        softLimitPercent: 20,
+        targetPercent: 19,
+        recentUserTokens: 1,
+        maxOutputTokens: 100,
+        timeoutMs: 1_000,
+      },
+      model,
+      {} as never,
+      modelContext,
+      { commit },
+      { compact },
+    );
+    const old = active(
+      [
+        { sequence: 1, role: "user", text: "单用户目标", timestamp: 1 },
+        {
+          sequence: 2,
+          role: "assistant",
+          content: [{ type: "text", text: "x".repeat(1_100) }],
+          api: "openai-completions",
+          provider: "test",
+          model: "test-model",
+          stopReason: "stop",
+          timestamp: 2,
+        },
+      ],
+      2,
+    );
+    const withoutIncoming = await coordinator.prepare({
+      fence,
+      attemptId: "attempt-without-incoming",
+      compatibilityDigest: "b".repeat(64),
+      history: old,
+    });
+    expect(withoutIncoming).toBe(old);
+    expect(compact).not.toHaveBeenCalled();
+
+    const prepared = await coordinator.prepare({
+      fence,
+      attemptId: "attempt-with-incoming",
+      compatibilityDigest: "b".repeat(64),
+      history: old,
+      additionalVisibleTokens: 1_000,
+    });
+    expect(compact).toHaveBeenCalledOnce();
+    expect(commit).toHaveBeenCalledOnce();
+    expect(prepared.messages.map((message) => message.role)).toEqual(["user", "compactionHandoff"]);
   });
 
   it("连续三次 checkpoint 都基于前一 replacement，并在 DB receipt 后推进在线 cursor", async () => {

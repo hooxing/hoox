@@ -5,20 +5,20 @@ import type {
   ExecutionScope,
   ThreadContextAppendCommandV1,
   ThreadContextBodyPersistencePort,
-  ThreadContextCompactionCommitPort,
   ThreadContextBodyV1,
+  ThreadContextCompactionCommitPort,
   ThreadContextHistoryPort,
 } from "@cube-runtime/run-contracts";
 import {
   assertThreadActiveHistory,
-  threadActiveHistoryDigest,
   type ThreadActiveHistoryV1,
   type ThreadHistoryMessageV1,
+  threadActiveHistoryDigest,
 } from "@cube-runtime/run-contracts";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import type { Pool, PoolClient } from "pg";
 import type { BlobStore, StableBlobRef } from "./blob-store.js";
-import type { ThreadContextReadPort, ThreadContextMessageView } from "./ports.js";
+import type { ThreadContextMessageView, ThreadContextReadPort } from "./ports.js";
 import { withTenantTransaction } from "./postgres.js";
 import { isThreadV2ReadEnabled } from "./thread-continuity-rollout.js";
 
@@ -364,6 +364,10 @@ export class PgThreadContextCompactionRepository implements ThreadContextCompact
   ): ReturnType<ThreadContextCompactionCommitPort["commit"]> {
     try {
       assertThreadActiveHistory(input.replacement);
+      const replacementHandoffs = input.replacement.messages.filter(
+        (message) => message.role === "compactionHandoff",
+      );
+      const replacementHandoff = replacementHandoffs[0];
       if (
         !bounded(input.operationId, 480) ||
         !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(input.checkpointId) ||
@@ -376,8 +380,10 @@ export class PgThreadContextCompactionRepository implements ThreadContextCompact
         !positiveSafe(input.sourceFromSequence) ||
         !positiveSafe(input.sourceThroughSequence) ||
         input.sourceThroughSequence > input.replacement.throughSequence ||
-        input.replacement.messages[0]?.role !== "compactionHandoff" ||
-        input.replacement.messages[0].checkpointId !== input.checkpointId
+        replacementHandoffs.length !== 1 ||
+        replacementHandoff?.checkpointId !== input.checkpointId ||
+        replacementHandoff.sourceFromSequence !== input.sourceFromSequence ||
+        replacementHandoff.sourceThroughSequence !== input.sourceThroughSequence
       ) {
         return { outcome: "conflict" };
       }

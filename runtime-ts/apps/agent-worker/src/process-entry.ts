@@ -12,12 +12,12 @@ import {
   createPostgresPool,
   createS3BlobStore,
   createS3StableBlobGarbageCollector,
+  DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
   DurableResourceBlobWriter,
   DurableTraceBlobPersistenceAdapter,
   DurableWorkspaceCandidateBlobWriter,
-  DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
-  PgBackedSandboxSessionRegistry,
   PgAgentControlRepository,
+  PgBackedSandboxSessionRegistry,
   PgBlobLifecycleRepository,
   PgExecutionPersistence,
   PgModelWireTraceRepository,
@@ -924,13 +924,14 @@ async function assembleWorkerRuntime(
           }
         : undefined,
       configuration.threadContext.compaction.enabled
-        ? async (input, compatibility, history, availableHistoryTokens) =>
+        ? async (input, compatibility, history, availableHistoryTokens, additionalVisibleTokens) =>
             await runtimeCompaction.prepare({
               fence: input.fence,
               attemptId: input.attemptId,
               compatibilityDigest: digestCanonical(compatibility),
               history,
               availableHistoryTokens,
+              additionalVisibleTokens,
             })
         : undefined,
       new BlobPromptImageLoader(new PgResourceFilesystemCatalog(pool), blobs),

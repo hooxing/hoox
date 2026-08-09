@@ -13,8 +13,12 @@ import {
   resourceVersionId,
   sha256Digest,
 } from "@cube-runtime/domain";
+import {
+  type RuntimeAgentEvent,
+  type ThreadActiveHistoryV1,
+  threadActiveHistoryDigest,
+} from "@cube-runtime/pi-adapter";
 import { SandboxRuntimeError } from "@cube-runtime/sandbox";
-import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import {
   digestRunSkillSnapshot,
   type SkillInvocationTarget,
@@ -57,6 +61,96 @@ import {
 } from "./testing/fakes.js";
 
 describe("PiWorkerSessionFactory 持久操作门控", () => {
+  it("Session 创建时把首轮 user 文本 token 投影传给 Runtime compaction", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-initial-compaction-budget"));
+    const claimed = await persistence.claim({
+      scope,
+      workerId: "pi-initial-compaction-budget-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("测试未取得 Attempt fence");
+    const faux = fauxProvider({
+      api: `faux-worker-initial-compaction-${Date.now()}`,
+      provider: `faux-worker-initial-compaction-${Date.now()}`,
+    });
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+    });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const messages: ThreadActiveHistoryV1["messages"] = [
+      { sequence: 1, role: "user", text: "旧目标", timestamp: 1 },
+      {
+        sequence: 2,
+        role: "assistant",
+        content: [{ type: "text", text: "旧进展" }],
+        api: "openai-completions",
+        provider: "test",
+        model: "test-model",
+        stopReason: "stop",
+        timestamp: 2,
+      },
+    ];
+    const unsigned = {
+      schemaVersion: 1 as const,
+      projectionSchemaVersion: 1 as const,
+      throughSequence: 2,
+      messages,
+    };
+    const history = { ...unsigned, digest: threadActiveHistoryDigest(unsigned) };
+    const prepareRuntimeCompaction = vi.fn(
+      async (
+        _input: unknown,
+        _compatibility: unknown,
+        current: ThreadActiveHistoryV1,
+        _availableHistoryTokens: number,
+        _additionalVisibleTokens: number,
+      ) => current,
+    );
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      () => ({
+        recordStarted: async () => "recorded" as const,
+        record: async () => ({ outcome: "recorded" as const, observation: "", isTruncated: false }),
+      }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () => history,
+      prepareRuntimeCompaction,
+    );
+    const session = await sessions.create({
+      scope,
+      attemptId: claimed.snapshot.attempt.attemptId,
+      fence: claimed.fence,
+      ensureSandboxReady: async () => {
+        throw new Error("纯文本 Session 不应准备 Sandbox");
+      },
+      rolloutProjection: {
+        schemaVersion: 2,
+        checkpointId: "checkpoint-initial-compaction-budget",
+        items: [],
+      },
+      initialInputText: "这是即将发送的新用户输入🙂",
+      authorizeToolEffect: async () => {
+        throw new Error("测试不执行工具");
+      },
+      writeTodo: async () => {
+        throw new Error("测试不写 Todo");
+      },
+    });
+    try {
+      expect(prepareRuntimeCompaction).toHaveBeenCalledOnce();
+      expect(prepareRuntimeCompaction.mock.calls[0]?.[4]).toBeGreaterThan(0);
+    } finally {
+      session.dispose();
+    }
+  });
+
   it("SubAgent 工具事件和副作用许可使用稳定的 Agent/Turn callId namespace", async () => {
     const persistence = new FakeExecutionPersistence();
     const scope = persistence.addSeed(fakeSeed("pi-subagent-tool-call-id"));

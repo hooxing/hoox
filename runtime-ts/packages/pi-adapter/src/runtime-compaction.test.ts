@@ -5,7 +5,7 @@ import {
   providerVisibleThreadHistoryTokens,
   serializeRuntimeCompactionSource,
 } from "./runtime-compaction.js";
-import { threadActiveHistoryDigest, type ThreadActiveHistoryV1 } from "./thread-history.js";
+import { type ThreadActiveHistoryV1, threadActiveHistoryDigest } from "./thread-history.js";
 
 const tokenizer = {
   identity: "test-byte-v1",
@@ -43,6 +43,7 @@ describe("Runtime compaction 纯策略", () => {
     const serialized = serializeRuntimeCompactionSource({
       sourceFromSequence: 1,
       sourceThroughSequence: 2,
+      retainedPrefix: [],
       prefix: [visible, auditOnly],
       retainedSuffix: [],
     });
@@ -90,6 +91,103 @@ describe("Runtime compaction 纯策略", () => {
     expect(decision.source.retainedSuffix).toEqual([
       { sequence: 5, role: "user", text: "最近用户原文", timestamp: 4 },
     ]);
+  });
+
+  it("单用户长任务会压缩整个已完成窗口，并把真实用户原文放在摘要之前", () => {
+    const source = history([
+      { sequence: 1, role: "user", text: "实现一个长任务", timestamp: 1 },
+      {
+        sequence: 2,
+        role: "assistant",
+        content: [{ type: "text", text: "处理中".repeat(200) }],
+        api: "openai-completions",
+        provider: "test",
+        model: "m",
+        stopReason: "stop",
+        timestamp: 2,
+      },
+    ]);
+    const policy = {
+      schemaVersion: 1 as const,
+      softLimitTokens: 3_000,
+      targetTokens: 1_000,
+      recentUserTokens: 1,
+    };
+    const decision = decideRuntimeCompaction(
+      source,
+      { ...policy, softLimitTokens: 10, targetTokens: 9 },
+      tokenizer,
+    );
+    expect(decision.outcome).toBe("compact");
+    if (decision.outcome !== "compact") return;
+    expect(decision.source.prefix).toEqual(source.messages);
+    expect(decision.source.retainedPrefix).toEqual([source.messages[0]]);
+    expect(decision.source.retainedSuffix).toEqual([]);
+
+    const built = buildRuntimeCompactionReplacement({
+      previousHistory: source,
+      source: decision.source,
+      checkpointId: "checkpoint-single-user",
+      summary: "已经完成的工作摘要",
+      timestamp: 3,
+      policy,
+      tokenizer,
+    });
+    expect(built.outcome).toBe("ready");
+    if (built.outcome !== "ready") return;
+    expect(built.history.messages.map((message) => message.role)).toEqual([
+      "user",
+      "compactionHandoff",
+    ]);
+    expect(built.history.messages[0]).toMatchObject({ text: "实现一个长任务" });
+    expect(built.history.messages[1]).toMatchObject({
+      sourceFromSequence: 1,
+      sourceThroughSequence: 2,
+    });
+  });
+
+  it("即将追加的用户输入会参与 soft limit 投影触发", () => {
+    const source = history([
+      { sequence: 1, role: "user", text: "旧目标", timestamp: 1 },
+      {
+        sequence: 2,
+        role: "assistant",
+        content: [{ type: "text", text: "已有进展" }],
+        api: "openai-completions",
+        provider: "test",
+        model: "m",
+        stopReason: "stop",
+        timestamp: 2,
+      },
+    ]);
+    const historyTokens = providerVisibleThreadHistoryTokens(source.messages, tokenizer);
+    const withoutIncoming = decideRuntimeCompaction(
+      source,
+      {
+        schemaVersion: 1,
+        softLimitTokens: historyTokens + 20,
+        targetTokens: historyTokens + 10,
+        recentUserTokens: 1,
+      },
+      tokenizer,
+    );
+    expect(withoutIncoming.outcome).toBe("below_limit");
+    const withIncoming = decideRuntimeCompaction(
+      source,
+      {
+        schemaVersion: 1,
+        softLimitTokens: historyTokens + 20,
+        targetTokens: historyTokens + 10,
+        recentUserTokens: 1,
+      },
+      tokenizer,
+      20,
+    );
+    expect(withIncoming).toMatchObject({
+      outcome: "compact",
+      tokens: historyTokens,
+      projectedTokens: historyTokens + 20,
+    });
   });
 
   it("replacement 保留真实 user 原文并以独立低信任 handoff kind 替换前缀", () => {

@@ -2,9 +2,9 @@ import type { TokenizerPort } from "@cube-runtime/context-policy";
 import {
   assertThreadActiveHistory,
   providerVisibleThreadHistoryMessages,
-  threadActiveHistoryDigest,
   type ThreadActiveHistoryV1,
   type ThreadHistoryMessageV1,
+  threadActiveHistoryDigest,
 } from "./thread-history.js";
 
 export interface RuntimeCompactionPolicyV1 {
@@ -20,18 +20,30 @@ export interface RuntimeCompactionPolicyV1 {
 export interface RuntimeCompactionSourceV1 {
   readonly sourceFromSequence: number;
   readonly sourceThroughSequence: number;
+  /** Codex 风格整窗压缩时，逐字保留并排在摘要之前的近期真实用户消息。 */
+  readonly retainedPrefix: readonly Extract<ThreadHistoryMessageV1, { role: "user" }>[];
   readonly prefix: readonly ThreadHistoryMessageV1[];
+  /** 历史恰好停在 user 边界时，保留摘要之后尚未执行的完整尾部。 */
   readonly retainedSuffix: readonly ThreadHistoryMessageV1[];
 }
 
 export type RuntimeCompactionTriggerDecision =
-  | { readonly outcome: "below_limit"; readonly tokens: number }
+  | {
+      readonly outcome: "below_limit";
+      readonly tokens: number;
+      readonly projectedTokens: number;
+    }
   | {
       readonly outcome: "compact";
       readonly tokens: number;
+      readonly projectedTokens: number;
       readonly source: RuntimeCompactionSourceV1;
     }
-  | { readonly outcome: "no_safe_prefix"; readonly tokens: number };
+  | {
+      readonly outcome: "no_safe_prefix";
+      readonly tokens: number;
+      readonly projectedTokens: number;
+    };
 
 /**
  * 对最终 Provider 可见的 history message 形状计数。审计专用事实先被过滤，tokenizer
@@ -50,44 +62,92 @@ export function providerVisibleThreadHistoryTokens(
   return tokens;
 }
 
+/** 与 Pi 首轮/steer admission 使用相同的 Provider 可见 user message 形状。 */
+export function providerVisibleUserInputTokens(text: string, tokenizer: TokenizerPort): number {
+  const tokens = tokenizer.countTokens(JSON.stringify({ role: "user", content: text }));
+  if (!Number.isSafeInteger(tokens) || tokens < 0 || (text.length > 0 && tokens === 0)) {
+    throw new TypeError("Provider 可见用户输入 token 计数无效");
+  }
+  return tokens;
+}
+
 export function decideRuntimeCompaction(
   history: ThreadActiveHistoryV1,
   policy: RuntimeCompactionPolicyV1,
   tokenizer: TokenizerPort,
+  additionalVisibleTokens = 0,
 ): RuntimeCompactionTriggerDecision {
   assertThreadActiveHistory(history);
   assertPolicy(policy);
+  if (!Number.isSafeInteger(additionalVisibleTokens) || additionalVisibleTokens < 0) {
+    throw new TypeError("Runtime compaction 追加 token 预算无效");
+  }
   const tokens = providerVisibleThreadHistoryTokens(history.messages, tokenizer);
-  if (tokens < policy.softLimitTokens) return { outcome: "below_limit", tokens };
+  const projectedTokens = tokens + additionalVisibleTokens;
+  if (!Number.isSafeInteger(projectedTokens)) {
+    throw new TypeError("Runtime compaction 投影 token 聚合溢出");
+  }
+  if (projectedTokens < policy.softLimitTokens) {
+    return { outcome: "below_limit", tokens, projectedTokens };
+  }
 
-  let earliestRetainedUser = -1;
+  const retainedUserMessages: Array<Extract<ThreadHistoryMessageV1, { role: "user" }>> = [];
   let retainedUserTokens = 0;
   for (let index = history.messages.length - 1; index >= 0; index -= 1) {
     const message = history.messages[index];
     if (message?.role !== "user") continue;
-    earliestRetainedUser = index;
+    retainedUserMessages.push(message);
     retainedUserTokens += tokenizer.countTokens(
       JSON.stringify(providerVisibleHistoryMessage(message)),
     );
     // 至少保留最近一条真实用户原文；预算是可配置下限，不是切分许可。
     if (retainedUserTokens >= policy.recentUserTokens) break;
   }
-  if (earliestRetainedUser <= 0) return { outcome: "no_safe_prefix", tokens };
-  const prefix = history.messages.slice(0, earliestRetainedUser);
-  const retainedSuffix = history.messages.slice(earliestRetainedUser);
-  const lastPrefix = prefix.at(-1);
-  if (lastPrefix === undefined) return { outcome: "no_safe_prefix", tokens };
+  retainedUserMessages.reverse();
+  const lastSource = history.messages.at(-1);
+  const lastRetainedUser = retainedUserMessages.at(-1);
+  if (retainedUserMessages.length === 0 || lastSource === undefined) {
+    return { outcome: "no_safe_prefix", tokens, projectedTokens };
+  }
+  const priorHandoff = history.messages.find((message) => message.role === "compactionHandoff");
   const first = history.messages[0];
   const sourceFromSequence =
-    first?.role === "compactionHandoff" ? first.sourceFromSequence : (first?.sequence ?? 1);
+    priorHandoff?.role === "compactionHandoff"
+      ? priorHandoff.sourceFromSequence
+      : (first?.sequence ?? 1);
+  if (lastSource.sequence <= (lastRetainedUser?.sequence ?? 0)) {
+    const earliestRetainedSequence = retainedUserMessages[0]?.sequence;
+    const earliestRetainedIndex = history.messages.findIndex(
+      (message) => message.sequence === earliestRetainedSequence,
+    );
+    const prefix = history.messages.slice(0, earliestRetainedIndex);
+    const lastPrefix = prefix.at(-1);
+    if (earliestRetainedIndex <= 0 || lastPrefix === undefined) {
+      return { outcome: "no_safe_prefix", tokens, projectedTokens };
+    }
+    return {
+      outcome: "compact",
+      tokens,
+      projectedTokens,
+      source: Object.freeze({
+        sourceFromSequence,
+        sourceThroughSequence: lastPrefix.sequence,
+        retainedPrefix: Object.freeze([]),
+        prefix: Object.freeze(prefix),
+        retainedSuffix: Object.freeze(history.messages.slice(earliestRetainedIndex)),
+      }),
+    };
+  }
   return {
     outcome: "compact",
     tokens,
+    projectedTokens,
     source: Object.freeze({
       sourceFromSequence,
-      sourceThroughSequence: lastPrefix.sequence,
-      prefix: Object.freeze(prefix),
-      retainedSuffix: Object.freeze(retainedSuffix),
+      sourceThroughSequence: lastSource.sequence,
+      retainedPrefix: Object.freeze(retainedUserMessages),
+      prefix: Object.freeze([...history.messages]),
+      retainedSuffix: Object.freeze([]),
     }),
   };
 }
@@ -116,6 +176,7 @@ export function buildRuntimeCompactionReplacement(input: {
     throw new TypeError("Runtime compaction handoff 无效");
   }
   const messages: readonly ThreadHistoryMessageV1[] = Object.freeze([
+    ...input.source.retainedPrefix,
     {
       sequence: input.source.sourceThroughSequence,
       role: "compactionHandoff" as const,
@@ -149,6 +210,7 @@ export function serializeRuntimeCompactionSource(source: RuntimeCompactionSource
     schemaVersion: 1,
     sourceFromSequence: source.sourceFromSequence,
     sourceThroughSequence: source.sourceThroughSequence,
+    retainedUserSequences: source.retainedPrefix.map((message) => message.sequence),
     messages: providerVisibleThreadHistoryMessages(source.prefix),
   });
 }

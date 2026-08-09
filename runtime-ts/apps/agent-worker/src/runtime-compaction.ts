@@ -4,9 +4,9 @@ import {
   decideRuntimeCompaction,
   providerVisibleThreadHistoryTokens,
   serializeRuntimeCompactionSource,
-  threadActiveHistoryDigest,
   type ThreadActiveHistoryV1,
   type TrustedPiModelContextCapability,
+  threadActiveHistoryDigest,
 } from "@cube-runtime/pi-adapter";
 import type {
   ExecutionFence,
@@ -63,6 +63,8 @@ export class RuntimeCompactionCoordinator {
     readonly compatibilityDigest: string;
     readonly history: ThreadActiveHistoryV1;
     readonly availableHistoryTokens?: number;
+    /** 即将追加到 history 后的首轮或 steer user 输入，仅参与触发与目标余量计算。 */
+    readonly additionalVisibleTokens?: number;
   }): Promise<ThreadActiveHistoryV1> {
     if (!this.configuration.enabled) return input.history;
     const visibleTokens = providerVisibleThreadHistoryTokens(
@@ -82,8 +84,26 @@ export class RuntimeCompactionCoordinator {
       })
       .catch(() => undefined);
     const budgetTokens = input.availableHistoryTokens ?? this.modelContext.descriptor.contextWindow;
+    const additionalVisibleTokens = input.additionalVisibleTokens ?? 0;
+    if (!Number.isSafeInteger(additionalVisibleTokens) || additionalVisibleTokens < 0) {
+      throw new TypeError("Runtime compaction 追加 token 预算无效");
+    }
+    if (additionalVisibleTokens >= budgetTokens) return input.history;
     const softLimitTokens = Math.floor((budgetTokens * this.configuration.softLimitPercent) / 100);
-    const targetTokens = Math.floor((budgetTokens * this.configuration.targetPercent) / 100);
+    const configuredTargetTokens = Math.floor(
+      (budgetTokens * this.configuration.targetPercent) / 100,
+    );
+    const targetRemainder = configuredTargetTokens - additionalVisibleTokens;
+    const softLimitRemainder = softLimitTokens - additionalVisibleTokens;
+    const admissionRemainder = budgetTokens - additionalVisibleTokens;
+    // 优先把“旧历史 + 即将发送的 user 输入”压到 target；超大单条输入至少要为它留出
+    // soft-limit 或最终 admission 空间，不能生成摘要后仍立即撞窗。
+    const targetTokens =
+      targetRemainder > 0
+        ? targetRemainder
+        : softLimitRemainder > 0
+          ? softLimitRemainder
+          : admissionRemainder;
     if (targetTokens < 1 || softLimitTokens <= targetTokens) return input.history;
     const policy = {
       schemaVersion: 1 as const,
@@ -91,7 +111,12 @@ export class RuntimeCompactionCoordinator {
       targetTokens,
       recentUserTokens: this.configuration.recentUserTokens,
     };
-    const decision = decideRuntimeCompaction(input.history, policy, this.modelContext.tokenizer);
+    const decision = decideRuntimeCompaction(
+      input.history,
+      policy,
+      this.modelContext.tokenizer,
+      additionalVisibleTokens,
+    );
     if (decision.outcome !== "compact") return input.history;
     const checkpointId = checkpointIdentity(input.attemptId, input.history);
     const startedAt = Date.now();

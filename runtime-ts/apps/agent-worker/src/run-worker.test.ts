@@ -144,10 +144,12 @@ function sandboxHarness(
 
 describe("Run Worker 双栅栏与恢复状态机", () => {
   it("纯文本回答不 acquire、materialize、verify 或 settle Sandbox", async () => {
-    const h = harness([new ScriptedAgentSession(successfulEvents)], fakeSeed("no-sandbox"));
+    const seed = fakeSeed("no-sandbox");
+    const h = harness([new ScriptedAgentSession(successfulEvents)], seed);
 
     await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
 
+    expect(h.factory.initialInputTexts).toEqual([seed.input]);
     expect(h.sandboxes.acquireCount).toBe(0);
     expect(h.sandboxes.settleCount).toBe(0);
     expect(h.revisions.materializeCount).toBe(0);

@@ -151,6 +151,11 @@ textarea:focus-visible {
   border-radius: 10px;
   background: #ececea;
 }
+.team-switcher-header {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
 .team-switcher-summary {
   display: flex;
   width: 100%;
@@ -165,6 +170,11 @@ textarea:focus-visible {
   text-align: left;
   font-size: 13px;
   font-weight: 680;
+}
+.team-switcher-header .team-switcher-summary {
+  min-width: 0;
+  flex: 1;
+  width: auto;
 }
 .team-switcher-summary > span {
   min-width: 0;
@@ -191,8 +201,7 @@ textarea:focus-visible {
   grid-template-columns: minmax(0, 1fr) 34px;
   gap: 6px;
 }
-.team-switcher-controls > button,
-.new-team-thread-button {
+.team-switcher-controls > button {
   display: inline-flex;
   min-height: 32px;
   align-items: center;
@@ -204,8 +213,22 @@ textarea:focus-visible {
   background: #f8f8f7;
   font-size: 12px;
 }
-.new-team-thread-button {
-  width: 100%;
+.team-new-thread-shortcut {
+  display: inline-flex;
+  min-width: 82px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 8px;
+  color: #426052;
+  background: transparent;
+  font-size: 11px;
+  font-weight: 650;
+}
+.team-new-thread-shortcut:hover {
+  background: #e2e8e4;
 }
 .team-task-heading {
   display: flex;
@@ -1845,6 +1868,81 @@ h2 {
   flex: 1;
   flex-direction: column;
 }
+.cloud-drive-dialog {
+  width: min(900px, 100%);
+}
+.cloud-drive-global-search {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(150px, auto) auto;
+  align-items: center;
+  gap: 8px;
+  margin: 0 24px 14px;
+  padding-left: 11px;
+  border: 1px solid #d2d7d2;
+  border-radius: 10px;
+  background: #fff;
+}
+.cloud-drive-global-search input {
+  min-width: 0;
+  padding-left: 0;
+  border: 0;
+  outline: 0;
+}
+.cloud-drive-global-search select {
+  min-height: 34px;
+  border: 0;
+  border-left: 1px solid #e0e3e0;
+  padding: 0 8px;
+  color: #4d5b54;
+  background: #fff;
+}
+.cloud-drive-global-search button {
+  min-height: 34px;
+  padding: 0 14px;
+  margin-right: 4px;
+  border: 0;
+  border-radius: 8px;
+  color: #284137;
+  background: #e9f1ed;
+  font-size: 13px;
+  font-weight: 650;
+}
+.cloud-drive-tabs {
+  display: flex;
+  min-height: 44px;
+  align-items: end;
+  gap: 4px;
+  padding: 0 24px;
+  border-bottom: 1px solid #e3e3df;
+}
+.cloud-drive-tabs button {
+  min-height: 38px;
+  padding: 0 15px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: #74746f;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 650;
+}
+.cloud-drive-tabs button.is-active {
+  border-bottom-color: #4f7664;
+  color: #29483b;
+}
+.cloud-drive-tabs > span {
+  overflow: hidden;
+  margin: 0 0 12px auto;
+  color: #74746f;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cloud-drive-content {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+}
 .cloud-drive-search {
   margin-top: 14px;
 }
@@ -1855,6 +1953,10 @@ h2 {
   padding: 0 24px 12px;
   color: #777773;
   font-size: 12px;
+}
+.cloud-drive-content > .cloud-drive-panel > .cloud-drive-summary,
+.cloud-drive-team-view > .cloud-drive-panel > .cloud-drive-summary {
+  padding-top: 14px;
 }
 .cloud-drive-list {
   min-height: 0;
@@ -1872,36 +1974,14 @@ h2 {
   background: #fafaf9;
   font-size: 12px;
 }
-.cloud-drive-scopes {
-  display: grid;
-  min-height: 0;
-  flex: 1;
-  overflow: hidden;
-}
-.skill-center-dialog:has(.cloud-drive-scopes.has-team) {
-  width: min(1180px, 100%);
-}
-.cloud-drive-scopes.has-team {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  border-top: 1px solid #e3e3df;
-}
-.cloud-drive-scopes > section {
+.cloud-drive-team-view {
   display: flex;
+  width: 100%;
   min-width: 0;
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
 }
-.cloud-drive-scopes.has-team > section + section {
-  border-left: 1px solid #e3e3df;
-}
-.cloud-drive-scopes > section > h3 {
-  margin: 0;
-  padding: 11px 24px 0;
-  color: #4c5d54;
-  font-size: 13px;
-}
-
 .cloud-drive-team-selector {
   display: flex;
   align-items: center;
@@ -1912,7 +1992,6 @@ h2 {
   font-size: 13px;
   font-weight: 650;
 }
-
 .cloud-drive-team-selector select {
   min-width: 148px;
   border: 1px solid #d8d8d3;
@@ -1920,6 +1999,30 @@ h2 {
   padding: 6px 9px;
   background: #fff;
   color: #30302d;
+}
+.cloud-drive-search-results {
+  display: flex;
+  width: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+.cloud-drive-search-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 24px 10px;
+  color: #777773;
+  font-size: 12px;
+}
+.cloud-drive-search-results > .skill-center-error {
+  margin-right: 24px;
+  margin-left: 24px;
+}
+.cloud-drive-search-list {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 24px 20px;
 }
 .cloud-task {
   margin-bottom: 8px;
@@ -2058,13 +2161,25 @@ h2 {
   color: #7a7a75;
 }
 @media (max-width: 640px) {
-  .cloud-drive-scopes.has-team {
-    grid-template-columns: 1fr;
-    overflow-y: auto;
+  .cloud-drive-global-search {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    margin: 0 16px 12px;
   }
-  .cloud-drive-scopes.has-team > section + section {
-    border-top: 1px solid #e3e3df;
-    border-left: 0;
+  .cloud-drive-global-search label {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    margin: 0 4px 7px 28px;
+  }
+  .cloud-drive-global-search select {
+    width: 100%;
+    border: 1px solid #e0e3e0;
+    border-radius: 7px;
+  }
+  .cloud-drive-tabs,
+  .cloud-drive-search-summary,
+  .cloud-drive-search-list {
+    padding-right: 16px;
+    padding-left: 16px;
   }
   .cloud-file-list {
     padding-left: 12px;

@@ -141,7 +141,7 @@ describe("云盘历史文件面板", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
-  it("个人空间的团队云盘只展示一个团队并允许下拉切换", async () => {
+  it("个人与团队云盘使用标签切换，团队标签内只展示一个团队", async () => {
     const onSwitch = vi.fn();
     const api: CloudDriveApi = {
       listHistoryFiles: vi.fn(async () => page()),
@@ -151,24 +151,28 @@ describe("云盘历史文件面板", () => {
       root.render(
         <CloudDriveDialog
           api={api}
-          team={{
-            id: "tenant_product",
-            name: "产品团队",
-            api,
-            choices: [
-              { id: "tenant_product", name: "产品团队" },
-              { id: "tenant_sales", name: "销售团队" },
-            ],
-            onSwitch,
-          }}
+          teams={[
+            { id: "tenant_product", name: "产品团队", api },
+            { id: "tenant_sales", name: "销售团队", api },
+          ]}
+          selectedTeamId="tenant_product"
+          onSwitchTeam={onSwitch}
           onClose={() => undefined}
         />,
       ),
     );
     await settle();
 
+    expect(container.querySelectorAll('.cloud-drive-tabs [role="tab"]')).toHaveLength(2);
+    expect(container.querySelector('[aria-label="个人云盘历史文件"]')).not.toBeNull();
+    const teamTab = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find(
+      (button) => button.textContent === "团队云盘",
+    );
+    await act(async () => teamTab?.click());
+    await settle();
     const select = container.querySelector<HTMLSelectElement>(".cloud-drive-team-selector select");
     expect(select?.value).toBe("tenant_product");
+    expect(container.querySelectorAll(".cloud-drive-team-view .cloud-drive-panel")).toHaveLength(1);
     await act(async () => {
       if (select !== null) {
         select.value = "tenant_sales";
@@ -176,6 +180,84 @@ describe("云盘历史文件面板", () => {
       }
     });
     expect(onSwitch).toHaveBeenCalledWith("tenant_sales");
+  });
+
+  it("独立搜索可按范围查询个人及全部团队文件", async () => {
+    const personalList = vi.fn(async () => page());
+    const productList = vi.fn(async () => page());
+    const salesList = vi.fn(async () => page());
+    const downloadHistoryFile = vi.fn(async () => "http://127.0.0.1/history-download");
+    await act(async () =>
+      root.render(
+        <CloudDriveDialog
+          api={{ listHistoryFiles: personalList, downloadHistoryFile }}
+          teams={[
+            {
+              id: "tenant_product",
+              name: "产品团队",
+              api: { listHistoryFiles: productList, downloadHistoryFile },
+            },
+            {
+              id: "tenant_sales",
+              name: "销售团队",
+              api: { listHistoryFiles: salesList, downloadHistoryFile },
+            },
+          ]}
+          onClose={() => undefined}
+        />,
+      ),
+    );
+    await settle();
+
+    const range = container.querySelector<HTMLSelectElement>('[aria-label="搜索范围"]');
+    expect(Array.from(range?.options ?? []).map((option) => option.text)).toEqual([
+      "全部空间",
+      "仅个人云盘",
+      "全部团队",
+      "产品团队",
+      "销售团队",
+    ]);
+    const search = container.querySelector<HTMLInputElement>('[aria-label="搜索个人及团队文件"]');
+    if (search === null) throw new Error("未渲染跨空间搜索框");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+        search,
+        "合同",
+      );
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () =>
+      search
+        .closest("form")
+        ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await settle();
+
+    expect(personalList).toHaveBeenLastCalledWith({ query: "合同", limit: 24 });
+    expect(productList).toHaveBeenLastCalledWith({ query: "合同", limit: 24 });
+    expect(salesList).toHaveBeenLastCalledWith({ query: "合同", limit: 24 });
+    expect(container.textContent).toContain("已搜索 3 个空间");
+    expect(container.textContent).toContain("个人云盘");
+    expect(container.textContent).toContain("产品团队云盘");
+    expect(container.textContent).toContain("销售团队云盘");
+    expect(
+      container.querySelectorAll(".cloud-drive-search-results .cloud-drive-panel"),
+    ).toHaveLength(0);
+
+    const personalCallCount = personalList.mock.calls.length;
+    const productCallCount = productList.mock.calls.length;
+    const salesCallCount = salesList.mock.calls.length;
+    await act(async () => {
+      if (range !== null) {
+        range.value = "teams";
+        range.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    await settle();
+    expect(personalList).toHaveBeenCalledTimes(personalCallCount);
+    expect(productList).toHaveBeenCalledTimes(productCallCount + 1);
+    expect(salesList).toHaveBeenCalledTimes(salesCallCount + 1);
+    expect(container.textContent).toContain("已搜索 2 个空间");
   });
 
   it("下载先同步打开空窗，再写入后端返回的短期地址", async () => {

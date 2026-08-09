@@ -59,6 +59,11 @@ describe("团队空间切换器", () => {
     expect(container.textContent).toContain("产品团队");
     expect(container.textContent).not.toContain("销售团队");
     expect(container.querySelector("select")).toBeNull();
+    const create = container.querySelector<HTMLButtonElement>(".team-new-thread-shortcut");
+    expect(create?.textContent).toContain("新增对话");
+    expect(container.textContent).not.toContain("新建团队对话");
+    await act(async () => create?.click());
+    expect(onNewTeamThread).toHaveBeenCalledOnce();
 
     const summary = container.querySelector<HTMLButtonElement>(".team-switcher-summary");
     await act(async () => summary?.click());
@@ -78,12 +83,6 @@ describe("团队空间切换器", () => {
       }
     });
     expect(onSwitch).toHaveBeenCalledWith("tenant_sales");
-
-    const create = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("新建团队对话"),
-    );
-    await act(async () => create?.click());
-    expect(onNewTeamThread).toHaveBeenCalledOnce();
   });
 
   it("没有团队时直接打开团队中心，不展开空任务栏", async () => {

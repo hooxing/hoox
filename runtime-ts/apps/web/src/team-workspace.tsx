@@ -50,31 +50,43 @@ export function TeamSwitcher({
 
   return (
     <section className="team-switcher" aria-label="团队空间">
-      <button
-        type="button"
-        className="team-switcher-summary"
-        aria-expanded={hasTeams ? expanded : undefined}
-        onClick={() => {
-          if (!hasTeams) {
-            onOpenTeamCenter();
-            return;
-          }
-          setExpanded((value) => !value);
-        }}
-      >
-        {hasTeams ? (
-          expanded ? (
-            <ChevronDown size={16} />
+      <div className="team-switcher-header">
+        <button
+          type="button"
+          className="team-switcher-summary"
+          aria-expanded={hasTeams ? expanded : undefined}
+          onClick={() => {
+            if (!hasTeams) {
+              onOpenTeamCenter();
+              return;
+            }
+            setExpanded((value) => !value);
+          }}
+        >
+          {hasTeams ? (
+            expanded ? (
+              <ChevronDown size={16} />
+            ) : (
+              <ChevronRight size={16} />
+            )
           ) : (
-            <ChevronRight size={16} />
-          )
-        ) : (
-          <Plus size={16} />
+            <Plus size={16} />
+          )}
+          {hasTeams ? <Users size={17} /> : <Building2 size={17} />}
+          <span>{selected?.displayName ?? "创建或加入团队"}</span>
+        </button>
+        {selected !== undefined && (
+          <button
+            type="button"
+            className="team-new-thread-shortcut"
+            aria-label={`在${selected.displayName}新增对话`}
+            onClick={onNewTeamThread}
+          >
+            <Plus size={14} />
+            <span>新增对话</span>
+          </button>
         )}
-        {hasTeams ? <Users size={17} /> : <Building2 size={17} />}
-        <span>{selected?.displayName ?? "创建或加入团队"}</span>
-        {selected !== undefined && <small>切换团队</small>}
-      </button>
+      </div>
       {expanded && selected !== undefined && (
         <div className="team-switcher-body">
           <div className="team-switcher-controls">
@@ -96,9 +108,6 @@ export function TeamSwitcher({
               <Settings size={15} />
             </button>
           </div>
-          <button type="button" className="new-team-thread-button" onClick={onNewTeamThread}>
-            <Plus size={14} /> 新建团队对话
-          </button>
           <div className="team-task-heading">
             <span>团队任务</span>
             <span>{taskCount}</span>

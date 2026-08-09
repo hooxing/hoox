@@ -35,6 +35,8 @@ describe("团队协作迁移", () => {
     expect(sql).toContain("actor.role IN ('owner','admin')");
     const bootstrap = await readFile(new URL("./role-bootstrap.ts", import.meta.url), "utf8");
     expect(bootstrap).toContain("旧用户级安装表仅保留为回滚数据，不再授予 Runtime");
+    expect(bootstrap).toContain("policy.set(table, new Set())");
+    expect(bootstrap).toContain('policy.set("user_skill_installations", new Set())');
   });
 
   it("已有团队、分支或 Skill 事实时拒绝破坏性回滚", async () => {

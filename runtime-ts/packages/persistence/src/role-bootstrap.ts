@@ -952,7 +952,7 @@ async function activeTablePolicy(
     for (const table of teamCollaborationTables) policy.delete(table);
   } else {
     // 0041 已完成 Tenant 级迁移后，旧用户级安装表仅保留为回滚数据，不再授予 Runtime。
-    for (const table of legacySkillInstallationTables) policy.delete(table);
+    for (const table of legacySkillInstallationTables) policy.set(table, new Set());
   }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
@@ -1098,7 +1098,8 @@ async function activeColumnUpdatePolicy(
   if (!(await hasTeamCollaborationState(client, schema))) {
     for (const table of teamCollaborationTables) policy.delete(table);
   } else {
-    for (const table of legacySkillInstallationTables) policy.delete(table);
+    // 物理表仍存在时保留零权限断言，不能把“未检查”误当成“无权限”。
+    policy.set("user_skill_installations", new Set());
   }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);

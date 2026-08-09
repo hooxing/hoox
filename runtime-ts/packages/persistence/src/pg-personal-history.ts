@@ -9,21 +9,21 @@ import { pendingHistoryDirectoryName } from "./pg-thread-title-generation.js";
 
 export const DEFAULT_HISTORY_DIRECTORY_TIME_ZONE = "Asia/Shanghai";
 
-export function shouldIndexArtifactInPersonalHistory(input: {
+export function shouldIndexArtifactInHistory(input: {
   readonly historyFilesystemEnabled: boolean;
   readonly purpose: "deliverable" | "diagnostic" | "trace";
 }): boolean {
   return input.historyFilesystemEnabled && input.purpose === "deliverable";
 }
 
-interface PersonalHistoryDirectoryContext {
+interface HistoryDirectoryContext {
   readonly title: string;
   readonly title_source: "deterministic" | "model" | "user";
   readonly thread_created_at: Date;
   readonly title_generation_state: string | null;
 }
 
-export async function ensurePersonalHistoryDirectory(
+export async function ensureHistoryDirectory(
   client: PoolClient,
   input: {
     readonly tenantId: string;
@@ -32,11 +32,11 @@ export async function ensurePersonalHistoryDirectory(
     readonly timeZone: string;
   },
 ): Promise<boolean> {
-  const context = await client.query<PersonalHistoryDirectoryContext>(
+  const context = await client.query<HistoryDirectoryContext>(
     `SELECT thread.title,thread.title_source,thread.created_at AS thread_created_at,
             title_outbox.state AS title_generation_state
        FROM threads thread
-       JOIN tenants tenant ON tenant.id=thread.tenant_id AND tenant.kind='personal'
+       JOIN tenants tenant ON tenant.id=thread.tenant_id AND tenant.kind IN ('personal','team')
        LEFT JOIN thread_title_generation_outbox title_outbox
          ON title_outbox.tenant_id=thread.tenant_id AND title_outbox.thread_id=thread.id
       WHERE thread.tenant_id=$1 AND thread.id=$2`,
@@ -60,7 +60,7 @@ export async function ensurePersonalHistoryDirectory(
   const baseName = historyFilesystemDirectoryName({ title: row.title });
   const directoryName = titlePending
     ? pendingHistoryDirectoryName(input.threadId)
-    : await allocatePersonalHistoryName(client, {
+    : await allocateHistoryName(client, {
         tenantId: input.tenantId,
         baseName,
         table: "directory",
@@ -87,7 +87,7 @@ export async function ensurePersonalHistoryDirectory(
   return true;
 }
 
-export async function insertPersonalHistoryAgentDeliverable(
+export async function insertHistoryAgentDeliverable(
   client: PoolClient,
   input: {
     readonly tenantId: string;
@@ -100,7 +100,7 @@ export async function insertPersonalHistoryAgentDeliverable(
     readonly timeZone: string;
   },
 ): Promise<void> {
-  const enabled = await ensurePersonalHistoryDirectory(client, {
+  const enabled = await ensureHistoryDirectory(client, {
     tenantId: input.tenantId,
     threadId: input.threadId,
     observedAt: input.publishedAt,
@@ -116,7 +116,7 @@ export async function insertPersonalHistoryAgentDeliverable(
   );
   if (existing.rowCount === 1) return;
 
-  const entryName = await allocatePersonalHistoryName(client, {
+  const entryName = await allocateHistoryName(client, {
     tenantId: input.tenantId,
     threadId: input.threadId,
     baseName: historyFilesystemEntryName({ name: input.resourceName }),
@@ -137,10 +137,10 @@ export async function insertPersonalHistoryAgentDeliverable(
       input.publishedAt,
     ],
   );
-  await refreshPersonalHistoryDirectorySummary(client, input.tenantId, input.threadId);
+  await refreshHistoryDirectorySummary(client, input.tenantId, input.threadId);
 }
 
-export async function allocatePersonalHistoryName(
+export async function allocateHistoryName(
   client: PoolClient,
   input:
     | { readonly table: "directory"; readonly tenantId: string; readonly baseName: string }
@@ -173,7 +173,7 @@ export async function allocatePersonalHistoryName(
   throw new TypeError("历史文件语义名称冲突过多");
 }
 
-export async function refreshPersonalHistoryDirectorySummary(
+export async function refreshHistoryDirectorySummary(
   client: PoolClient,
   tenantId: string,
   threadId: string,

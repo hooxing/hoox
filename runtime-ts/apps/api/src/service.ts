@@ -112,14 +112,16 @@ export class ApiService {
   ): Promise<AuthContext> {
     const principal = await this.dependencies.auth.resolve({ authorization, requestId });
     if (principal === undefined) throw new ApiFailure("unauthorized");
+    if (tenantSelector.kind === "invalid") throw new ApiFailure("bad_request");
     let selectedTenantId = principal.tenantId;
-    if (selectedTenantId === undefined) {
-      if (tenantSelector.kind !== "selected") throw new ApiFailure("bad_request");
+    if (tenantSelector.kind === "selected") {
       try {
         selectedTenantId = tenantId(tenantSelector.value);
       } catch {
         throw new ApiFailure("bad_request");
       }
+    } else if (selectedTenantId === undefined) {
+      throw new ApiFailure("bad_request");
     }
     // JWT 只能证明 userId；X-Tenant-Id 只是候选 scope，Repository 会用 Membership 与 RLS 复核。
     const scope = { tenantId: selectedTenantId, userId: principal.userId } as const;

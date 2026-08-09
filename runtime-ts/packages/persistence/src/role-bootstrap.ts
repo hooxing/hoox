@@ -119,10 +119,22 @@ const skillCenterTables = new Set([
   "user_skill_installation_commands",
   "user_skill_installation_audits",
 ]);
+const legacySkillInstallationTables = new Set([
+  "user_skill_installations",
+  "user_skill_installation_commands",
+  "user_skill_installation_audits",
+]);
 const skillRuntimeTables = new Set([
   "run_skill_snapshots",
   "run_skill_snapshot_items",
   "skill_invocations",
+]);
+const teamCollaborationTables = new Set([
+  "team_member_directory",
+  "thread_forks",
+  "tenant_skill_installations",
+  "tenant_skill_installation_commands",
+  "tenant_skill_installation_audits",
 ]);
 const skillPublicationTables = new Set([
   "platform_skill_operators",
@@ -227,6 +239,11 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["user_skill_installations", new Set(["SELECT", "INSERT"])],
   ["user_skill_installation_commands", new Set(["SELECT", "INSERT"])],
   ["user_skill_installation_audits", new Set(["SELECT", "INSERT"])],
+  ["team_member_directory", new Set(["SELECT", "INSERT"])],
+  ["thread_forks", new Set(["SELECT", "INSERT"])],
+  ["tenant_skill_installations", new Set(["SELECT", "INSERT"])],
+  ["tenant_skill_installation_commands", new Set(["SELECT", "INSERT"])],
+  ["tenant_skill_installation_audits", new Set(["SELECT", "INSERT"])],
   ["run_skill_snapshots", new Set(["SELECT", "INSERT"])],
   ["run_skill_snapshot_items", new Set(["SELECT", "INSERT"])],
   ["skill_invocations", new Set(["SELECT", "INSERT"])],
@@ -505,6 +522,18 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
       "updated_at",
     ]),
   ],
+  ["team_member_directory", new Set(["role", "status", "updated_at"])],
+  [
+    "tenant_skill_installations",
+    new Set([
+      "skill_version",
+      "invocation_name",
+      "status",
+      "version_token",
+      "installed_at",
+      "updated_at",
+    ]),
+  ],
 ]);
 
 async function hasWaitingRecoveryState(client: PoolClient, schema: string): Promise<boolean> {
@@ -586,6 +615,19 @@ async function hasSkillCenterState(client: PoolClient, schema: string): Promise<
             AND to_regclass(format('%I.user_skill_installations', $1::text)) IS NOT NULL
             AND to_regclass(format('%I.user_skill_installation_commands', $1::text)) IS NOT NULL
             AND to_regclass(format('%I.user_skill_installation_audits', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasTeamCollaborationState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.team_member_directory', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_forks', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.tenant_skill_installations', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.tenant_skill_installation_commands', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.tenant_skill_installation_audits', $1::text)) IS NOT NULL
             AS present`,
     [schema],
   );
@@ -906,6 +948,12 @@ async function activeTablePolicy(
   if (!(await hasSkillCenterState(client, schema))) {
     for (const table of skillCenterTables) policy.delete(table);
   }
+  if (!(await hasTeamCollaborationState(client, schema))) {
+    for (const table of teamCollaborationTables) policy.delete(table);
+  } else {
+    // 0041 已完成 Tenant 级迁移后，旧用户级安装表仅保留为回滚数据，不再授予 Runtime。
+    for (const table of legacySkillInstallationTables) policy.delete(table);
+  }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
@@ -924,10 +972,13 @@ async function activeColumnUpdatePolicy(
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
-  policy.set(
-    "memberships",
-    (await hasMembershipLockMarker(client)) ? new Set(["lock_marker"]) : new Set(),
-  );
+  const membershipUpdateColumns = new Set<string>();
+  if (await hasMembershipLockMarker(client)) membershipUpdateColumns.add("lock_marker");
+  if (await hasTeamCollaborationState(client, schema)) {
+    membershipUpdateColumns.add("role");
+    membershipUpdateColumns.add("status");
+  }
+  policy.set("memberships", membershipUpdateColumns);
   if (!(await hasRunWorkerState(client))) {
     for (const table of runWorkerTables) policy.delete(table);
   }
@@ -1043,6 +1094,11 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasSkillCenterState(client, schema))) {
     for (const table of skillCenterTables) policy.delete(table);
+  }
+  if (!(await hasTeamCollaborationState(client, schema))) {
+    for (const table of teamCollaborationTables) policy.delete(table);
+  } else {
+    for (const table of legacySkillInstallationTables) policy.delete(table);
   }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
@@ -1729,6 +1785,23 @@ export async function bootstrapRuntimeAccessOnClient(
   if (await hasMembershipLockMarker(client)) {
     await client.query(`GRANT UPDATE(lock_marker) ON TABLE ${schema}.memberships TO ${role}`);
   }
+  if (await hasTeamCollaborationState(client, context.schema)) {
+    await client.query(
+      `GRANT UPDATE(role,status) ON TABLE ${schema}.memberships TO ${role};
+       GRANT SELECT,INSERT ON TABLE
+         ${schema}.team_member_directory,
+         ${schema}.thread_forks,
+         ${schema}.tenant_skill_installations,
+         ${schema}.tenant_skill_installation_commands,
+         ${schema}.tenant_skill_installation_audits
+       TO ${role};
+       GRANT UPDATE(role,status,updated_at)
+         ON TABLE ${schema}.team_member_directory TO ${role};
+       GRANT UPDATE(
+         skill_version,invocation_name,status,version_token,installed_at,updated_at
+       ) ON TABLE ${schema}.tenant_skill_installations TO ${role}`,
+    );
+  }
   await client.query(
     `GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}.threads, ${schema}.runs, ${schema}.workspaces TO ${role}`,
   );
@@ -2015,22 +2088,26 @@ export async function bootstrapRuntimeAccessOnClient(
     );
   }
   if (await hasSkillCenterState(client, context.schema)) {
-    // Skill 内容由受信发布流程写入；Runtime 只读中心元数据并维护当前用户自己的安装事实。
+    // Skill 内容由受信发布流程写入；安装事实由当前 Schema 版本决定是旧用户级还是 Tenant 级。
     await client.query(
       `GRANT SELECT ON TABLE
          ${schema}.skills,
          ${schema}.skill_versions,
          ${schema}.skill_version_files
-       TO ${role};
-       GRANT SELECT, INSERT ON TABLE
-         ${schema}.user_skill_installation_commands,
-         ${schema}.user_skill_installation_audits
-       TO ${role};
-       GRANT SELECT, INSERT ON TABLE ${schema}.user_skill_installations TO ${role};
-       GRANT UPDATE(
-         skill_version,invocation_name,status,version_token,installed_at,updated_at
-       ) ON TABLE ${schema}.user_skill_installations TO ${role}`,
+       TO ${role}`,
     );
+    if (!(await hasTeamCollaborationState(client, context.schema))) {
+      await client.query(
+        `GRANT SELECT, INSERT ON TABLE
+           ${schema}.user_skill_installation_commands,
+           ${schema}.user_skill_installation_audits
+         TO ${role};
+         GRANT SELECT, INSERT ON TABLE ${schema}.user_skill_installations TO ${role};
+         GRANT UPDATE(
+           skill_version,invocation_name,status,version_token,installed_at,updated_at
+         ) ON TABLE ${schema}.user_skill_installations TO ${role}`,
+      );
+    }
   }
   if (await hasSkillRuntimeState(client, context.schema)) {
     await client.query(

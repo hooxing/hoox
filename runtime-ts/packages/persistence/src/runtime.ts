@@ -21,6 +21,7 @@ import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-sta
 import { PgSkillCenterRepository } from "./pg-skill-center.js";
 import { PgSkillFilesystemCatalog } from "./pg-skill-filesystem.js";
 import { PgThreadCreation } from "./pg-thread-creation.js";
+import { PgTeamCollaborationRepository, PgThreadForkRepository } from "./pg-team-collaboration.js";
 import { PgThreadInputRouting } from "./pg-thread-input.js";
 import type {
   ArchiveThreadCommandPort,
@@ -70,6 +71,8 @@ export interface ApiPersistenceRuntime {
   readonly repositories: CoreRepositories;
   readonly archiveThread: ArchiveThreadCommandPort;
   readonly threadCreation: PgThreadCreation;
+  readonly teamCollaboration: PgTeamCollaborationRepository;
+  readonly threadForks: PgThreadForkRepository;
   readonly runDispatchCreation: PgRunDispatchCreation;
   readonly threadInputs: PgThreadInputRouting;
   readonly experience: RunExperienceReadPort;
@@ -100,6 +103,8 @@ export function createApiPersistenceRuntime(
     repositories: new PgCoreRepositories(pool),
     archiveThread: new PgArchiveThreadCommand(pool),
     threadCreation: new PgThreadCreation(pool),
+    teamCollaboration: new PgTeamCollaborationRepository(pool),
+    threadForks: new PgThreadForkRepository(pool),
     runDispatchCreation: new PgRunDispatchCreation(pool, {
       serialQueueV2Enabled: options.serialQueueV2Enabled ?? false,
       historyTitleGenerationEnabled: options.historyTitleGenerationEnabled ?? false,

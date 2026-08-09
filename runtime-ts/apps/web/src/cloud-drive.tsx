@@ -17,11 +17,20 @@ export type CloudDriveApi = Pick<RuntimeApi, "listHistoryFiles" | "downloadHisto
 
 export function CloudDriveDialog({
   api,
+  team,
   selectedFiles = [],
   onSelectFile,
   onClose,
 }: {
   readonly api: CloudDriveApi;
+  readonly team?: Readonly<{
+    readonly id: string;
+    readonly name: string;
+    readonly api: CloudDriveApi;
+    readonly choices?: readonly Readonly<{ readonly id: string; readonly name: string }>[];
+    readonly onSwitch?: (teamId: string) => void;
+    readonly onSelectFile?: (file: HistoryFile) => void;
+  }>;
   readonly selectedFiles?: readonly HistoryFile[];
   readonly onSelectFile?: (file: HistoryFile) => void;
   readonly onClose: () => void;
@@ -37,17 +46,47 @@ export function CloudDriveDialog({
         <header className="skill-center-header">
           <div>
             <h2 id="cloud-drive-title">云盘</h2>
-            <p>浏览并复用个人历史任务中的文件。</p>
+            <p>个人文件与当前团队文件保持独立权限边界。</p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="关闭云盘">
             <X size={18} />
           </button>
         </header>
-        <CloudDrivePanel
-          api={api}
-          selectedFiles={selectedFiles}
-          {...(onSelectFile === undefined ? {} : { onSelectFile })}
-        />
+        <div className={team === undefined ? "cloud-drive-scopes" : "cloud-drive-scopes has-team"}>
+          <section>
+            <h3>个人云盘</h3>
+            <CloudDrivePanel
+              api={api}
+              selectedFiles={selectedFiles}
+              {...(onSelectFile === undefined ? {} : { onSelectFile })}
+            />
+          </section>
+          {team !== undefined && (
+            <section>
+              {team.choices !== undefined &&
+              team.choices.length > 1 &&
+              team.onSwitch !== undefined ? (
+                <label className="cloud-drive-team-selector">
+                  <span>团队云盘</span>
+                  <select value={team.id} onChange={(event) => team.onSwitch?.(event.target.value)}>
+                    {team.choices.map((choice) => (
+                      <option key={choice.id} value={choice.id}>
+                        {choice.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <h3>{team.name}云盘</h3>
+              )}
+              <CloudDrivePanel
+                api={team.api}
+                selectedFiles={selectedFiles}
+                {...(team.onSelectFile === undefined ? {} : { onSelectFile: team.onSelectFile })}
+              />
+            </section>
+          )}
+        </div>
       </section>
     </div>
   );

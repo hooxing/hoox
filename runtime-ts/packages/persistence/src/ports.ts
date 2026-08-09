@@ -247,6 +247,80 @@ export interface TenantRepository {
   get(scope: TenantScope): Promise<TenantBundle | undefined>;
 }
 
+export interface TeamSummaryView {
+  readonly id: TenantId;
+  readonly displayName: string;
+  readonly role: "owner" | "admin" | "member";
+  readonly joinedAt: string;
+}
+
+export interface TeamMemberView {
+  readonly membershipId: string;
+  readonly userId: UserId;
+  readonly role: "owner" | "admin" | "member";
+  readonly joinedAt: string;
+}
+
+export type TeamMutationResult<T> =
+  | { readonly outcome: "succeeded"; readonly value: T }
+  | {
+      readonly outcome:
+        | "not_found"
+        | "not_authorized"
+        | "conflict"
+        | "last_owner"
+        | "user_not_found";
+    };
+
+/** 团队目录可跨 Tenant 枚举；具体读写仍在目标团队 Membership 与 RLS 下二次授权。 */
+export interface TeamCollaborationPort {
+  listForUser(input: { readonly scope: TenantScope }): Promise<readonly TeamSummaryView[]>;
+  create(input: {
+    readonly scope: TenantScope;
+    readonly teamId: TenantId;
+    readonly membershipId: Membership["id"];
+    readonly displayName: string;
+    readonly createdAt: string;
+  }): Promise<TeamMutationResult<TeamSummaryView>>;
+  listMembers(input: {
+    readonly scope: TenantScope;
+  }): Promise<readonly TeamMemberView[] | undefined>;
+  addMember(input: {
+    readonly scope: TenantScope;
+    readonly targetUserId: UserId;
+    readonly membershipId: Membership["id"];
+    readonly role: "admin" | "member";
+    readonly createdAt: string;
+  }): Promise<TeamMutationResult<TeamMemberView>>;
+  changeRole(input: {
+    readonly scope: TenantScope;
+    readonly targetUserId: UserId;
+    readonly role: "owner" | "admin" | "member";
+  }): Promise<TeamMutationResult<TeamMemberView>>;
+  removeMember(input: {
+    readonly scope: TenantScope;
+    readonly targetUserId: UserId;
+  }): Promise<TeamMutationResult<undefined>>;
+  dissolve(input: { readonly scope: TenantScope }): Promise<TeamMutationResult<undefined>>;
+}
+
+export interface ForkedThreadMessage {
+  readonly role: "user" | "assistant";
+  readonly text: string;
+  readonly createdAt: string;
+}
+
+export interface ThreadForkPort {
+  seed(input: {
+    readonly scope: TenantScope;
+    readonly childThreadId: ThreadId;
+    readonly sourceTenantId: TenantId;
+    readonly sourceThreadId: ThreadId;
+    readonly kind: "branch" | "team_publish";
+    readonly messages: readonly ForkedThreadMessage[];
+  }): Promise<"seeded" | "not_authorized" | "not_found" | "conflict">;
+}
+
 export interface ThreadRepository {
   create(scope: TenantScope, thread: Thread): Promise<VersionedCreateResult>;
   get(scope: TenantScope, id: ThreadId): Promise<Versioned<Thread> | undefined>;

@@ -16,6 +16,7 @@ import {
   type Run,
   type RunStatus,
   RuntimeApi,
+  type TeamSummary,
   type Thread,
   type ThreadInputReceipt,
   type UploadedResource,
@@ -26,6 +27,7 @@ import { openResolvedUrl, PopupBlockedError } from "./popup.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
 import { CloudDriveDialog, type CloudDriveApi } from "./cloud-drive.js";
 import { SkillCenterDialog, type SkillCenterApi } from "./skill-center.js";
+import { TeamManagementDialog, TeamSwitcher, type TeamWorkspaceApi } from "./team-workspace.js";
 import "./styles.css";
 import {
   ConversationComposer,
@@ -121,6 +123,20 @@ type WorkspaceApi = Pick<
   readonly getThreadInputReceipt?: RuntimeApi["getThreadInputReceipt"];
 } & Partial<SkillCenterApi & CloudDriveApi>;
 
+type TeamAwareWorkspaceApi = WorkspaceApi &
+  Partial<
+    TeamWorkspaceApi &
+      Pick<
+        RuntimeApi,
+        | "forkThread"
+        | "downloadHistoryFileForTenant"
+        | "getTenantId"
+        | "importTeamFile"
+        | "listHistoryFilesForTenant"
+        | "setTenantId"
+      >
+  >;
+
 function resolveSkillCenterApi(client: WorkspaceApi): SkillCenterApi | undefined {
   const { listSkills, listInstalledSkills, installSkill, setSkillEnabled, uninstallSkill } = client;
   if (
@@ -147,6 +163,38 @@ function resolveCloudDriveApi(client: WorkspaceApi): CloudDriveApi | undefined {
   return {
     listHistoryFiles: listHistoryFiles.bind(client),
     downloadHistoryFile: downloadHistoryFile.bind(client),
+  };
+}
+
+function resolveTeamWorkspaceApi(client: TeamAwareWorkspaceApi): TeamWorkspaceApi | undefined {
+  const {
+    listTeams,
+    createTeam,
+    listTeamMembers,
+    addTeamMember,
+    changeTeamMemberRole,
+    removeTeamMember,
+    dissolveTeam,
+  } = client;
+  if (
+    listTeams === undefined ||
+    createTeam === undefined ||
+    listTeamMembers === undefined ||
+    addTeamMember === undefined ||
+    changeTeamMemberRole === undefined ||
+    removeTeamMember === undefined ||
+    dissolveTeam === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    listTeams: listTeams.bind(client),
+    createTeam: createTeam.bind(client),
+    listTeamMembers: listTeamMembers.bind(client),
+    addTeamMember: addTeamMember.bind(client),
+    changeTeamMemberRole: changeTeamMemberRole.bind(client),
+    removeTeamMember: removeTeamMember.bind(client),
+    dissolveTeam: dissolveTeam.bind(client),
   };
 }
 
@@ -189,7 +237,7 @@ export function shouldFollowLatest(
   return scrollHeight - scrollTop - clientHeight <= threshold;
 }
 
-export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) {
+export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspaceApi }) {
   const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [input, setInput] = useState("");
@@ -208,6 +256,11 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [skillCenterOpen, setSkillCenterOpen] = useState(false);
   const [cloudDriveOpen, setCloudDriveOpen] = useState(false);
+  const [teams, setTeams] = useState<readonly TeamSummary[]>([]);
+  const [teamsLoading, setTeamsLoading] = useState(false);
+  const [activeTeamId, setActiveTeamId] = useState<string>();
+  const [cloudTeamId, setCloudTeamId] = useState<string>();
+  const [teamManagementOpen, setTeamManagementOpen] = useState(false);
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
   const modelWireTracePaginationAdvancedRef = useRef(false);
@@ -225,6 +278,42 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   runExecutionStatusRef.current = state.run?.executionStatus;
   const skillCenterApi = useMemo(() => resolveSkillCenterApi(apiClient), [apiClient]);
   const cloudDriveApi = useMemo(() => resolveCloudDriveApi(apiClient), [apiClient]);
+  const teamWorkspaceApi = useMemo(() => resolveTeamWorkspaceApi(apiClient), [apiClient]);
+  const activeTeam = teams.find((team) => team.id === activeTeamId);
+  const cloudTeam = activeTeam ?? teams.find((team) => team.id === cloudTeamId) ?? teams[0];
+  const personalCloudDriveApi = useMemo<CloudDriveApi | undefined>(() => {
+    if (
+      apiClient.listHistoryFilesForTenant !== undefined &&
+      apiClient.downloadHistoryFileForTenant !== undefined
+    ) {
+      return {
+        listHistoryFiles: (options) =>
+          apiClient.listHistoryFilesForTenant?.(undefined, options) as ReturnType<
+            CloudDriveApi["listHistoryFiles"]
+          >,
+        downloadHistoryFile: (file) =>
+          apiClient.downloadHistoryFileForTenant?.(undefined, file) as Promise<string>,
+      };
+    }
+    return activeTeamId === undefined ? cloudDriveApi : undefined;
+  }, [activeTeamId, apiClient, cloudDriveApi]);
+  const teamCloudDriveApi = useMemo<CloudDriveApi | undefined>(() => {
+    if (
+      cloudTeam === undefined ||
+      apiClient.listHistoryFilesForTenant === undefined ||
+      apiClient.downloadHistoryFileForTenant === undefined
+    ) {
+      return undefined;
+    }
+    return {
+      listHistoryFiles: (options) =>
+        apiClient.listHistoryFilesForTenant?.(cloudTeam.id, options) as ReturnType<
+          CloudDriveApi["listHistoryFiles"]
+        >,
+      downloadHistoryFile: (file) =>
+        apiClient.downloadHistoryFileForTenant?.(cloudTeam.id, file) as Promise<string>,
+    };
+  }, [apiClient, cloudTeam]);
 
   const selectThread = useCallback((threadId: string | undefined) => {
     navigationRef.current.navigate(threadId);
@@ -236,6 +325,18 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     setNavigationOpen(false);
   }, []);
 
+  const switchWorkspace = useCallback(
+    (teamId: string | undefined) => {
+      apiClient.setTenantId?.(teamId);
+      setActiveTeamId(teamId);
+      if (teamId !== undefined) setCloudTeamId(teamId);
+      initialSelectionAppliedRef.current = false;
+      dispatch({ type: "threads", threads: [] });
+      selectThread(undefined);
+    },
+    [apiClient, selectThread],
+  );
+
   useEffect(() => {
     const media = window.matchMedia(compactWorkspaceMedia);
     const updateLayout = (event: MediaQueryListEvent) => {
@@ -245,6 +346,22 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     media.addEventListener("change", updateLayout);
     return () => media.removeEventListener("change", updateLayout);
   }, []);
+
+  const refreshTeams = useCallback(async () => {
+    if (teamWorkspaceApi === undefined) return;
+    setTeamsLoading(true);
+    try {
+      setTeams(await teamWorkspaceApi.listTeams());
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason : new ApiError("加载团队失败", 0, true));
+    } finally {
+      setTeamsLoading(false);
+    }
+  }, [teamWorkspaceApi]);
+
+  useEffect(() => {
+    void refreshTeams();
+  }, [refreshTeams]);
 
   useEffect(() => {
     eventAfterRef.current = state.events.at(-1)?.sequence ?? -1;
@@ -263,6 +380,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
   ]);
 
   const refreshThreads = useCallback(async () => {
+    void activeTeamId;
     const expectedNavigation = navigationRef.current.capture();
     setLoading(true);
     try {
@@ -287,7 +405,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     } finally {
       setLoading(false);
     }
-  }, [apiClient, selectThread]);
+  }, [activeTeamId, apiClient, selectThread]);
 
   useEffect(() => {
     void refreshThreads();
@@ -547,7 +665,23 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
     };
   }, [apiClient, pendingInputs, state.selectedThreadId]);
 
-  const createConversation = () => selectThread(undefined);
+  const createConversation = () => {
+    if (activeTeamId !== undefined) switchWorkspace(undefined);
+    else selectThread(undefined);
+  };
+  const createTeam = async (displayName: string) => {
+    if (teamWorkspaceApi === undefined) return;
+    apiClient.setTenantId?.(undefined);
+    try {
+      const team = await teamWorkspaceApi.createTeam(displayName);
+      setTeams((current) => [...current.filter((item) => item.id !== team.id), team]);
+      switchWorkspace(team.id);
+    } catch (reason) {
+      apiClient.setTenantId?.(activeTeamId);
+      setError(reason instanceof ApiError ? reason : new ApiError("创建团队失败", 0, true));
+      throw reason;
+    }
+  };
   const send = async (mode: "auto" | "follow_up" = "auto") => {
     if (
       (!input.trim() && uploadFiles.length === 0 && historyFiles.length === 0) ||
@@ -665,6 +799,68 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
       setActionLoading(false);
     }
   };
+  const fork = async (targetTeamId?: string) => {
+    if (state.selectedThreadId === undefined || apiClient.forkThread === undefined) return;
+    const sourceThreadId = state.selectedThreadId;
+    setActionLoading(true);
+    try {
+      const child = await apiClient.forkThread(sourceThreadId, targetTeamId);
+      if (targetTeamId !== undefined && targetTeamId !== activeTeamId) {
+        switchWorkspace(targetTeamId);
+      }
+      dispatch({ type: "threadCreated", thread: child });
+      selectThread(child.id);
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason : new ApiError("创建任务分支失败", 0, true));
+    } finally {
+      setActionLoading(false);
+    }
+  };
+  const publishToTeam = () => {
+    if (teams.length === 0) {
+      setError(new ApiError("请先创建或加入一个团队", 422, false));
+      return;
+    }
+    const selectedName =
+      teams.length === 1
+        ? teams[0]?.displayName
+        : window.prompt("发布到哪个团队？请输入团队名称", teams[0]?.displayName);
+    const target = teams.find((team) => team.displayName === selectedName);
+    if (target === undefined) return;
+    void fork(target.id);
+  };
+  const selectTeamCloudFile = async (file: HistoryFile) => {
+    if (cloudTeam === undefined) return;
+    if (activeTeamId === cloudTeam.id) {
+      setHistoryFiles((current) =>
+        current.some(
+          (item) => item.resourceId === file.resourceId && item.versionId === file.versionId,
+        ) || current.length + uploadFiles.length >= 20
+          ? current
+          : [...current, file],
+      );
+      return;
+    }
+    if (apiClient.importTeamFile === undefined) return;
+    setActionLoading(true);
+    try {
+      const imported = await apiClient.importTeamFile(cloudTeam.id, file);
+      const personalSnapshot: HistoryFile = {
+        ...file,
+        resourceId: imported.resourceId,
+        versionId: imported.versionId,
+        name: imported.name,
+        path: imported.path,
+        mediaType: imported.mediaType,
+        sizeBytes: imported.sizeBytes,
+      };
+      setHistoryFiles((current) => [...current, personalSnapshot]);
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason : new ApiError("导入团队文件失败", 0, true));
+    } finally {
+      setActionLoading(false);
+    }
+  };
   const cancel = async () => {
     if (!state.run || !state.selectedThreadId) return;
     const cancelledRun = state.run;
@@ -775,7 +971,7 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
             }}
           >
             <Puzzle size={17} />
-            技能中心
+            {activeTeam === undefined ? "技能中心" : "团队技能"}
           </button>
         )}
         {cloudDriveApi !== undefined && (
@@ -791,8 +987,19 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
             云盘
           </button>
         )}
+        {teamWorkspaceApi !== undefined && (
+          <TeamSwitcher
+            teams={teams}
+            {...(activeTeamId === undefined ? {} : { activeTeamId })}
+            loading={teamsLoading}
+            onSwitch={switchWorkspace}
+            onCreate={createTeam}
+            onNewTeamThread={() => selectThread(undefined)}
+            onManage={() => setTeamManagementOpen(true)}
+          />
+        )}
         <div className="thread-heading">
-          <span>任务</span>
+          <span>{activeTeam === undefined ? "个人任务" : `${activeTeam.displayName}任务`}</span>
           <span>{state.threads.length}</span>
         </div>
         <ThreadNavigation>
@@ -871,6 +1078,11 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
               actionLoading={actionLoading}
               onArchive={() => void archive()}
               onCancel={() => void cancel()}
+              {...(apiClient.forkThread === undefined
+                ? {}
+                : activeTeam === undefined
+                  ? { onPublishToTeam: publishToTeam }
+                  : { onFork: () => void fork() })}
             />
             <section
               ref={runAreaRef}
@@ -949,22 +1161,60 @@ export function App({ apiClient = api }: { readonly apiClient?: WorkspaceApi }) 
         </dialog>
       )}
       {skillCenterOpen && skillCenterApi !== undefined && (
-        <SkillCenterDialog api={skillCenterApi} onClose={() => setSkillCenterOpen(false)} />
+        <SkillCenterDialog
+          api={skillCenterApi}
+          {...(activeTeam === undefined
+            ? {}
+            : { scopeName: activeTeam.displayName, readOnly: activeTeam.role === "member" })}
+          onClose={() => setSkillCenterOpen(false)}
+        />
       )}
-      {cloudDriveOpen && cloudDriveApi !== undefined && (
+      {cloudDriveOpen && personalCloudDriveApi !== undefined && (
         <CloudDriveDialog
-          api={cloudDriveApi}
+          api={personalCloudDriveApi}
           selectedFiles={historyFiles}
-          onSelectFile={(file) =>
-            setHistoryFiles((current) =>
-              current.some(
-                (item) => item.resourceId === file.resourceId && item.versionId === file.versionId,
-              ) || current.length + uploadFiles.length >= 20
-                ? current
-                : [...current, file],
-            )
-          }
+          {...(activeTeamId === undefined
+            ? {
+                onSelectFile: (file: HistoryFile) =>
+                  setHistoryFiles((current) =>
+                    current.some(
+                      (item) =>
+                        item.resourceId === file.resourceId && item.versionId === file.versionId,
+                    ) || current.length + uploadFiles.length >= 20
+                      ? current
+                      : [...current, file],
+                  ),
+              }
+            : {})}
+          {...(cloudTeam === undefined || teamCloudDriveApi === undefined
+            ? {}
+            : {
+                team: {
+                  id: cloudTeam.id,
+                  name: cloudTeam.displayName,
+                  api: teamCloudDriveApi,
+                  ...(activeTeamId === undefined
+                    ? {
+                        choices: teams.map((team) => ({ id: team.id, name: team.displayName })),
+                        onSwitch: setCloudTeamId,
+                      }
+                    : {}),
+                  onSelectFile: (file: HistoryFile) => void selectTeamCloudFile(file),
+                },
+              })}
           onClose={() => setCloudDriveOpen(false)}
+        />
+      )}
+      {teamManagementOpen && activeTeam !== undefined && teamWorkspaceApi !== undefined && (
+        <TeamManagementDialog
+          api={teamWorkspaceApi}
+          team={activeTeam}
+          onDissolved={() => {
+            setTeamManagementOpen(false);
+            setTeams((current) => current.filter((team) => team.id !== activeTeam.id));
+            switchWorkspace(undefined);
+          }}
+          onClose={() => setTeamManagementOpen(false)}
         />
       )}
     </main>

@@ -141,6 +141,43 @@ describe("云盘历史文件面板", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it("个人空间的团队云盘只展示一个团队并允许下拉切换", async () => {
+    const onSwitch = vi.fn();
+    const api: CloudDriveApi = {
+      listHistoryFiles: vi.fn(async () => page()),
+      downloadHistoryFile: vi.fn(async () => "http://127.0.0.1/history-download"),
+    };
+    await act(async () =>
+      root.render(
+        <CloudDriveDialog
+          api={api}
+          team={{
+            id: "tenant_product",
+            name: "产品团队",
+            api,
+            choices: [
+              { id: "tenant_product", name: "产品团队" },
+              { id: "tenant_sales", name: "销售团队" },
+            ],
+            onSwitch,
+          }}
+          onClose={() => undefined}
+        />,
+      ),
+    );
+    await settle();
+
+    const select = container.querySelector<HTMLSelectElement>(".cloud-drive-team-selector select");
+    expect(select?.value).toBe("tenant_product");
+    await act(async () => {
+      if (select !== null) {
+        select.value = "tenant_sales";
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    expect(onSwitch).toHaveBeenCalledWith("tenant_sales");
+  });
+
   it("下载先同步打开空窗，再写入后端返回的短期地址", async () => {
     const replace = vi.fn();
     const popup = { close: vi.fn(), location: { replace }, opener: {} };

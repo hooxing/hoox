@@ -80,7 +80,7 @@ export interface RunWorkerOptions {
 
 const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 
-async function preparePersonalHistoryEntrypoints(
+async function prepareHistoryEntrypoints(
   sandbox: SandboxHandle,
   threadId: string,
   signal: AbortSignal,
@@ -124,7 +124,7 @@ prepare_thread_entrypoint`;
   });
   if (result.exitCode !== 0) {
     console.warn(`HISTORY_ENTRYPOINT_FAILED category=exit_${result.exitCode}`);
-    throw new Error("个人历史目录固定入口准备失败");
+    throw new Error("历史目录固定入口准备失败");
   }
 }
 
@@ -663,19 +663,16 @@ export class RunWorker {
             context.agentFailure = "WORKSPACE_CONFLICT";
             throw new Error("Workspace 物化失败");
           }
-          if (
-            this.options.historyFilesystemEnabled === true &&
-            claim.snapshot.tenantKind === "personal"
-          ) {
+          if (this.options.historyFilesystemEnabled === true) {
             try {
-              await preparePersonalHistoryEntrypoints(
+              await prepareHistoryEntrypoints(
                 acquired.sandbox,
                 scope.threadId,
                 executionAbort.signal,
               );
             } catch {
               context.agentFailure = "SANDBOX_FAILED";
-              throw new Error("个人历史目录固定入口准备失败");
+              throw new Error("历史目录固定入口准备失败");
             }
           }
           const postMaterialize = await this.stopPoint(context, cancellation);

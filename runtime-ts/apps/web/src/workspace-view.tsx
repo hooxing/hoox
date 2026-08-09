@@ -8,12 +8,14 @@ import {
   Download,
   Eye,
   FileText,
+  GitBranch,
   LoaderCircle,
   MessageSquarePlus,
   PanelLeftClose,
   Paperclip,
   Send,
   Square,
+  Users,
   X,
 } from "lucide-react";
 import {
@@ -1075,6 +1077,8 @@ export function ThreadHeader({
   actionLoading,
   onArchive,
   onCancel,
+  onFork,
+  onPublishToTeam,
 }: {
   readonly thread: Thread;
   readonly run: Run | undefined;
@@ -1086,6 +1090,8 @@ export function ThreadHeader({
   readonly actionLoading: boolean;
   readonly onArchive: () => void;
   readonly onCancel: () => void;
+  readonly onFork?: () => void;
+  readonly onPublishToTeam?: () => void;
   readonly onOpenArtifacts?: () => void;
   readonly artifactTriggerRef?: RefObject<HTMLButtonElement | null>;
 }) {
@@ -1108,6 +1114,23 @@ export function ThreadHeader({
         </div>
       </div>
       <div className="header-actions">
+        {onFork !== undefined && (
+          <button type="button" className="quiet-button" onClick={onFork} disabled={actionLoading}>
+            <GitBranch size={15} />
+            <span>新建分支</span>
+          </button>
+        )}
+        {onPublishToTeam !== undefined && (
+          <button
+            type="button"
+            className="quiet-button"
+            onClick={onPublishToTeam}
+            disabled={actionLoading}
+          >
+            <Users size={15} />
+            <span>发布到团队</span>
+          </button>
+        )}
         {run && cancellableRunStatuses.has(run.status) && (
           <button
             type="button"

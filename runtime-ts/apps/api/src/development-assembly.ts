@@ -139,6 +139,8 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
             principals,
           }),
           repositories: persistence.repositories,
+          teamCollaboration: persistence.teamCollaboration,
+          threadForks: persistence.threadForks,
           createCapability: createApiCreateCapability({
             threadCreation: persistence.threadCreation,
             enqueueOutbox: persistence.runDispatchCreation,

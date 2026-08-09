@@ -5,6 +5,8 @@ import { ApiError, type RuntimeApi, type SkillCatalogItem, type SkillInstallatio
 export interface SkillCenterDialogProps {
   readonly api: SkillCenterApi;
   readonly onClose: () => void;
+  readonly scopeName?: string;
+  readonly readOnly?: boolean;
 }
 
 export type SkillCenterApi = Pick<
@@ -12,7 +14,12 @@ export type SkillCenterApi = Pick<
   "listSkills" | "listInstalledSkills" | "installSkill" | "setSkillEnabled" | "uninstallSkill"
 >;
 
-export function SkillCenterDialog({ api, onClose }: SkillCenterDialogProps) {
+export function SkillCenterDialog({
+  api,
+  onClose,
+  scopeName,
+  readOnly = false,
+}: SkillCenterDialogProps) {
   const [skills, setSkills] = useState<readonly SkillCatalogItem[]>([]);
   const [installations, setInstallations] = useState<readonly SkillInstallation[]>([]);
   const [query, setQuery] = useState("");
@@ -115,8 +122,14 @@ export function SkillCenterDialog({ api, onClose }: SkillCenterDialogProps) {
       >
         <header className="skill-center-header">
           <div>
-            <h2 id="skill-center-title">技能中心</h2>
-            <p>管理可复用的技能，让每个任务都能快速调用。</p>
+            <h2 id="skill-center-title">
+              {scopeName === undefined ? "技能中心" : `${scopeName}技能`}
+            </h2>
+            <p>
+              {readOnly
+                ? "团队成员可使用这些技能；Owner 或管理员负责变更。"
+                : "管理可复用的技能，让当前空间的每个任务都能快速调用。"}
+            </p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="关闭技能中心">
             <X size={18} />
@@ -172,7 +185,7 @@ export function SkillCenterDialog({ api, onClose }: SkillCenterDialogProps) {
                         {installed.status === "enabled" ? "已启用" : "已停用"}
                       </div>
                     )}
-                    {installed === undefined && (
+                    {installed === undefined && !readOnly && (
                       <label className="skill-invocation-input">
                         <span>/</span>
                         <input
@@ -190,7 +203,9 @@ export function SkillCenterDialog({ api, onClose }: SkillCenterDialogProps) {
                     )}
                   </div>
                   <div className="skill-card-actions">
-                    {installed === undefined ? (
+                    {readOnly ? (
+                      <span>{installed === undefined ? "未安装" : "团队可用"}</span>
+                    ) : installed === undefined ? (
                       <button type="button" disabled={busy} onClick={() => void install(skill)}>
                         {busy ? "安装中" : "安装"}
                       </button>

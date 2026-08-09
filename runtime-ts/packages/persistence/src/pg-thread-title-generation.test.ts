@@ -2,7 +2,7 @@ import type { ThreadTitleGenerationClaim } from "@cube-runtime/thread-title";
 import type { Pool, PoolClient } from "pg";
 import { describe, expect, it } from "vitest";
 import {
-  enqueuePersonalThreadTitleGeneration,
+  enqueueThreadTitleGeneration,
   PgThreadTitleGenerationStore,
 } from "./pg-thread-title-generation.js";
 import { PgRunDispatchCreation } from "./pg-run-dispatch.js";
@@ -117,7 +117,7 @@ describe("PostgreSQL 低成本 Thread 标题任务", () => {
     ).toThrow("历史标题生成依赖 V2 串行队列 receipt");
   });
 
-  it("只为 personal、确定性标题和已接受首条 receipt 幂等创建任务", async () => {
+  it("只为可用空间、确定性标题和已接受首条 receipt 幂等创建任务", async () => {
     const statements: Statement[] = [];
     const client = {
       async query(sql: string, values?: readonly unknown[]) {
@@ -126,14 +126,14 @@ describe("PostgreSQL 低成本 Thread 标题任务", () => {
       },
     } as unknown as PoolClient;
 
-    await enqueuePersonalThreadTitleGeneration(client, {
+    await enqueueThreadTitleGeneration(client, {
       tenantId: "tenant-a",
       threadId: "thread-a",
       receiptId: "receipt-a",
     });
 
     expect(statements).toHaveLength(1);
-    expect(statements[0]?.sql).toContain("tenant.kind='personal'");
+    expect(statements[0]?.sql).toContain("tenant.kind IN ('personal','team')");
     expect(statements[0]?.sql).toContain("thread.title_source='deterministic'");
     expect(statements[0]?.sql).toContain(
       "receipt.disposition IN ('queued','pending_steer','steered')",

@@ -516,6 +516,8 @@ function fixture(
     readonly skillCenter?: ApiDependencies["skillCenter"];
     readonly historyFiles?: ApiDependencies["historyFiles"];
     readonly historyBlobs?: BlobStore;
+    readonly teamCollaboration?: ApiDependencies["teamCollaboration"];
+    readonly threadForks?: ApiDependencies["threadForks"];
   } = {},
 ) {
   const state = new FakeApiState();
@@ -616,6 +618,10 @@ function fixture(
     ...(options.skillCenter === undefined ? {} : { skillCenter: options.skillCenter }),
     ...(options.historyFiles === undefined ? {} : { historyFiles: options.historyFiles }),
     ...(options.historyBlobs === undefined ? {} : { blobs: options.historyBlobs }),
+    ...(options.teamCollaboration === undefined
+      ? {}
+      : { teamCollaboration: options.teamCollaboration }),
+    ...(options.threadForks === undefined ? {} : { threadForks: options.threadForks }),
     ...(options.enableThreadContext === true
       ? {
           threadContext: {
@@ -945,7 +951,125 @@ afterEach(async () => {
 });
 
 describe("Fastify API 契约", () => {
-  it("技能中心按认证用户隔离安装，并以同一幂等键稳定回放", async () => {
+  it("团队入口支持单一切换目录、成员读取与 Owner 解散", async () => {
+    let dissolved = false;
+    const teamCollaboration: NonNullable<ApiDependencies["teamCollaboration"]> = {
+      listForUser: async () => [
+        {
+          id: tenantId("tenant_product_team"),
+          displayName: "产品团队",
+          role: "owner",
+          joinedAt: baseTime,
+        },
+      ],
+      create: async (input) => ({
+        outcome: "succeeded",
+        value: {
+          id: input.teamId,
+          displayName: input.displayName,
+          role: "owner",
+          joinedAt: input.createdAt,
+        },
+      }),
+      listMembers: async () => [
+        {
+          membershipId: "membership_product_owner",
+          userId: userId("user_owner_a"),
+          role: "owner",
+          joinedAt: baseTime,
+        },
+      ],
+      addMember: async () => ({ outcome: "not_found" }),
+      changeRole: async () => ({ outcome: "not_found" }),
+      removeMember: async () => ({ outcome: "not_found" }),
+      dissolve: async () => {
+        dissolved = true;
+        return { outcome: "succeeded", value: undefined };
+      },
+    };
+    const { app, ownerA, state } = fixture({ teamCollaboration });
+    openApps.push(app);
+    const team = rehydrateTenant(
+      {
+        id: "tenant_product_team",
+        kind: "team",
+        displayName: "产品团队",
+        createdByUserId: ownerA.user.id,
+        createdAt: baseTime,
+      },
+      ownerA.user,
+    );
+    const teamOwner = teamBundle({
+      suffix: "product_team_owner",
+      tenant: team,
+      user: ownerA.user,
+      role: "owner",
+    });
+    state.tenants.set(
+      key({ tenantId: team.id, userId: ownerA.user.id }, ownerA.user.id),
+      teamOwner,
+    );
+
+    const directory = await app.inject({
+      method: "GET",
+      url: "/v1/me/teams",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(directory.json().data.items).toHaveLength(1);
+    const members = await app.inject({
+      method: "GET",
+      url: `/v1/teams/${team.id}/members`,
+      headers: { authorization: "Bearer token-a", "x-tenant-id": team.id },
+    });
+    expect(members.json().data.items[0].role).toBe("owner");
+    const dissolve = await app.inject({
+      method: "DELETE",
+      url: `/v1/teams/${team.id}`,
+      headers: { authorization: "Bearer token-a", "x-tenant-id": team.id },
+    });
+    expect(dissolve.json().data).toEqual({ dissolved: true });
+    expect(dissolved).toBe(true);
+  });
+
+  it("任务分支复制可见消息快照，并创建独立 Thread", async () => {
+    const seeded: Array<Parameters<NonNullable<ApiDependencies["threadForks"]>["seed"]>[0]> = [];
+    const { app } = fixture({
+      enableThreadContext: true,
+      threadForks: {
+        seed: async (input) => {
+          seeded.push(input);
+          return "seeded";
+        },
+      },
+    });
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "fork-source-thread" },
+      payload: { title: "源任务" },
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/threads/thread_1/forks",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "fork-child-thread" },
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toMatchObject({ id: "thread_2", title: "源任务 · 分支" });
+    expect(seeded[0]).toMatchObject({
+      childThreadId: "thread_2",
+      sourceThreadId: "thread_1",
+      kind: "branch",
+      messages: [
+        { role: "user", text: "Run A" },
+        { role: "assistant", text: "Run A 回复" },
+      ],
+    });
+  });
+
+  it("技能中心按当前 Tenant 隔离安装，并以同一幂等键稳定回放", async () => {
     const installations = new Map<string, SkillInstallation>();
     const commands = new Map<
       string,
@@ -966,11 +1090,11 @@ describe("Fastify API 契约", () => {
         ],
       }),
       listInstallations: async ({ context }) => {
-        const item = installations.get(context.userId);
+        const item = installations.get(context.tenantId);
         return item === undefined ? [] : [item];
       },
       install: async (input) => {
-        const commandKey = `${input.context.userId}:${input.idempotencyKey}`;
+        const commandKey = `${input.context.tenantId}:${input.idempotencyKey}`;
         const previous = commands.get(commandKey);
         if (previous !== undefined) {
           return previous.digest === input.requestDigest
@@ -989,7 +1113,7 @@ describe("Fastify API 契约", () => {
           installedAt: baseTime,
           updatedAt: baseTime,
         };
-        installations.set(input.context.userId, item);
+        installations.set(input.context.tenantId, item);
         commands.set(commandKey, { digest: input.requestDigest, item });
         return { outcome: "installed", installation: item };
       },
@@ -1157,6 +1281,95 @@ describe("Fastify API 契约", () => {
     });
     expect(crossTenant.statusCode).toBe(404);
     expect(presignDownload).toHaveBeenCalledTimes(1);
+  });
+
+  it("团队文件先复制为个人快照；退出后旧副本保留但不能再次读取团队源文件", async () => {
+    const sourceTeamId = tenantId("tenant_file_team");
+    const sourceFile: HistoryFileLibraryFile = {
+      threadId: "thread_team_file",
+      taskName: "团队资料",
+      resourceId: "resource_team_file",
+      versionId: "version_team_file",
+      name: "方案.md",
+      entryName: "方案.md",
+      path: "/resources/resource_team_file/version_team_file/方案.md",
+      mediaType: "text/markdown",
+      sizeBytes: 4,
+      attachedAt: baseTime,
+      object: {
+        tenantId: sourceTeamId,
+        purpose: "resource",
+        sha256: "b".repeat(64),
+        size: 4,
+        mediaType: "text/markdown",
+        incarnationId: "00000000-0000-4000-8000-000000000011",
+        physicalObjectKey: "opaque-team-file",
+      },
+    };
+    const upload = vi.fn(async () => ({
+      resourceId: resourceId("resource_personal_snapshot"),
+      versionId: resourceVersionId("version_personal_snapshot"),
+      name: sourceFile.name,
+      path: "/resources/resource_personal_snapshot/version_personal_snapshot/方案.md",
+      mediaType: sourceFile.mediaType,
+      sizeBytes: sourceFile.sizeBytes,
+    }));
+    const { app, ownerA, state } = fixture({
+      historyFiles: new HistoryFileLibraryService({
+        listTaskPage: async () => undefined,
+        resolveLibraryFile: async (input) =>
+          input.tenantId === sourceTeamId ? sourceFile : undefined,
+      }),
+      historyBlobs: {
+        getBytes: async () => new TextEncoder().encode("方案"),
+      } as unknown as BlobStore,
+      resourceUploads: { upload },
+    });
+    openApps.push(app);
+    const team = rehydrateTenant(
+      {
+        id: sourceTeamId,
+        kind: "team",
+        displayName: "文件团队",
+        createdByUserId: ownerA.user.id,
+        createdAt: baseTime,
+      },
+      ownerA.user,
+    );
+    state.tenants.set(
+      key({ tenantId: sourceTeamId, userId: ownerA.user.id }, ownerA.user.id),
+      teamBundle({ suffix: "file_team_owner", tenant: team, user: ownerA.user, role: "owner" }),
+    );
+    const request = {
+      method: "POST" as const,
+      url: "/v1/me/team-files/import",
+      headers: {
+        authorization: "Bearer token-a",
+        "idempotency-key": "team-file-import-0001",
+      },
+      payload: {
+        sourceTeamId,
+        resourceId: sourceFile.resourceId,
+        versionId: sourceFile.versionId,
+      },
+    };
+    const imported = await app.inject(request);
+    expect(imported.statusCode).toBe(200);
+    expect(imported.json().data.resourceId).toBe("resource_personal_snapshot");
+    expect(upload).toHaveBeenCalledWith(
+      expect.objectContaining({
+        context: { tenantId: ownerA.tenant.id, userId: ownerA.user.id },
+        name: sourceFile.name,
+      }),
+    );
+
+    state.revokeMembership({ tenantId: sourceTeamId, userId: ownerA.user.id });
+    const afterExit = await app.inject({
+      ...request,
+      headers: { ...request.headers, "idempotency-key": "team-file-import-0002" },
+    });
+    expect(afterExit.statusCode).toBe(404);
+    expect(upload).toHaveBeenCalledTimes(1);
   });
 
   it("按 Run 列出模型轮次与 HTTP 尝试，且诊断响应禁止缓存与嗅探", async () => {
@@ -2091,6 +2304,36 @@ describe("Fastify API 契约", () => {
     expect(crossTenant.json().error.code).toBe("NOT_FOUND");
     const unauthenticated = await app.inject({ method: "GET", url: "/v1/threads/thread_1" });
     expect(unauthenticated.statusCode).toBe(401);
+  });
+
+  it("开发 principal 的默认个人 Tenant 可被已授权团队选择器覆盖", async () => {
+    const { app, ownerA, state } = fixture();
+    openApps.push(app);
+    const team = rehydrateTenant(
+      {
+        id: "tenant_switchable_team",
+        kind: "team",
+        displayName: "可切换团队",
+        createdByUserId: ownerA.user.id,
+        createdAt: baseTime,
+      },
+      ownerA.user,
+    );
+    const teamOwner = teamBundle({
+      suffix: "switchable_team_owner",
+      tenant: team,
+      user: ownerA.user,
+      role: "owner",
+    });
+    const teamScope = { tenantId: team.id, userId: ownerA.user.id };
+    state.tenants.set(key(teamScope, ownerA.user.id), teamOwner);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "x-tenant-id": team.id },
+    });
+    expect(response.statusCode).toBe(200);
   });
 
   it("生产 JWT user principal 只能把 X-Tenant-Id 当作经 Membership/RLS 二次验证的选择器", async () => {

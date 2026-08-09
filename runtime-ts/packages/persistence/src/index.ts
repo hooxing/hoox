@@ -25,6 +25,7 @@ export * from "./pg-skill-filesystem.js";
 export * from "./pg-skill-runtime.js";
 export * from "./pg-skill-publication.js";
 export { PgThreadCreation } from "./pg-thread-creation.js";
+export * from "./pg-team-collaboration.js";
 export * from "./pg-thread-input.js";
 export * from "./pg-thread-title-generation.js";
 export * from "./pg-thread-sandbox-lifecycle-consumer.js";

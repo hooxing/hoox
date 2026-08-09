@@ -50,8 +50,8 @@ import {
 import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
 import {
   DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
-  insertPersonalHistoryAgentDeliverable,
-  shouldIndexArtifactInPersonalHistory,
+  insertHistoryAgentDeliverable,
+  shouldIndexArtifactInHistory,
 } from "./pg-personal-history.js";
 import { appendThreadContext } from "./thread-context.js";
 import { applyThreadSandboxTerminal } from "./thread-sandbox-session.js";
@@ -2995,12 +2995,12 @@ async function settleWorkspaceArtifactIntents(
       [input.tenantId, intent.artifact_id, input.databaseNow],
     );
     if (
-      shouldIndexArtifactInPersonalHistory({
+      shouldIndexArtifactInHistory({
         historyFilesystemEnabled: input.historyFilesystemEnabled,
         purpose: intent.purpose,
       })
     ) {
-      await insertPersonalHistoryAgentDeliverable(client, {
+      await insertHistoryAgentDeliverable(client, {
         tenantId: input.tenantId,
         threadId: input.threadId,
         artifactId: intent.artifact_id,

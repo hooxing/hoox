@@ -1,9 +1,25 @@
 export type Thread = {
   readonly id: string;
+  readonly tenantId?: string;
+  readonly createdByUserId?: string;
   readonly title: string;
   readonly status: "active" | "archived";
   readonly createdAt: string;
   readonly updatedAt: string;
+};
+
+export type TeamSummary = {
+  readonly id: string;
+  readonly displayName: string;
+  readonly role: "owner" | "admin" | "member";
+  readonly joinedAt: string;
+};
+
+export type TeamMember = {
+  readonly membershipId: string;
+  readonly userId: string;
+  readonly role: "owner" | "admin" | "member";
+  readonly joinedAt: string;
 };
 
 export type RunStatus = "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
@@ -336,15 +352,30 @@ export function normalizeRunEvent(value: unknown): RunEvent | undefined {
 }
 
 export class RuntimeApi {
+  private activeTenantId: string | undefined;
+
   constructor(
     private readonly fetcher: typeof fetch = defaultFetcher,
     private readonly baseUrl = "/api",
   ) {}
 
-  private async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  setTenantId(tenantId: string | undefined): void {
+    this.activeTenantId = tenantId;
+  }
+
+  getTenantId(): string | undefined {
+    return this.activeTenantId;
+  }
+
+  private async request<T>(
+    path: string,
+    init: RequestInit = {},
+    tenantId: string | undefined = this.activeTenantId,
+  ): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("Authorization", "Bearer dev-user-a");
     headers.set("Accept", "application/json");
+    if (tenantId !== undefined) headers.set("X-Tenant-ID", tenantId);
     if (init.body !== undefined) headers.set("Content-Type", "application/json");
     if (["POST", "PUT", "PATCH", "DELETE"].includes(init.method ?? "GET")) {
       headers.set("Idempotency-Key", createKey());
@@ -367,11 +398,12 @@ export class RuntimeApi {
     return envelope<T>(body);
   }
 
-  private async requestBytes(path: string): Promise<Uint8Array> {
+  private async requestBytes(path: string, tenantId = this.activeTenantId): Promise<Uint8Array> {
     const headers = new Headers({
       Authorization: "Bearer dev-user-a",
       Accept: "application/octet-stream",
     });
+    if (tenantId !== undefined) headers.set("X-Tenant-ID", tenantId);
     let response: Response;
     try {
       response = await this.fetcher(`${this.baseUrl}${path}`, { headers });
@@ -392,11 +424,68 @@ export class RuntimeApi {
   async listThreads(): Promise<readonly Thread[]> {
     return asArray(await this.request<unknown>("/v1/threads?limit=100")) as readonly Thread[];
   }
+
+  async listTeams(): Promise<readonly TeamSummary[]> {
+    return asArray(await this.request<unknown>("/v1/me/teams")) as readonly TeamSummary[];
+  }
+
+  createTeam(displayName: string): Promise<TeamSummary> {
+    return this.request("/v1/teams", {
+      method: "POST",
+      body: JSON.stringify({ displayName }),
+    });
+  }
+
+  async listTeamMembers(teamId: string): Promise<readonly TeamMember[]> {
+    return asArray(
+      await this.request<unknown>(`/v1/teams/${encodeURIComponent(teamId)}/members`),
+    ) as readonly TeamMember[];
+  }
+
+  addTeamMember(
+    teamId: string,
+    userId: string,
+    role: "admin" | "member" = "member",
+  ): Promise<TeamMember> {
+    return this.request(`/v1/teams/${encodeURIComponent(teamId)}/members`, {
+      method: "POST",
+      body: JSON.stringify({ userId, role }),
+    });
+  }
+
+  changeTeamMemberRole(
+    teamId: string,
+    userId: string,
+    role: TeamMember["role"],
+  ): Promise<TeamMember> {
+    return this.request(
+      `/v1/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}`,
+      { method: "PATCH", body: JSON.stringify({ role }) },
+    );
+  }
+
+  async removeTeamMember(teamId: string, userId: string): Promise<void> {
+    await this.request(
+      `/v1/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}`,
+      { method: "DELETE" },
+    );
+  }
+
+  async dissolveTeam(teamId: string): Promise<void> {
+    await this.request(`/v1/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" });
+  }
   getThread(threadId: string): Promise<Thread> {
     return this.request(`/v1/threads/${encodeURIComponent(threadId)}`);
   }
 
   async listHistoryFiles(options: HistoryFileListOptions = {}): Promise<HistoryFilePage> {
+    return this.listHistoryFilesForTenant(this.activeTenantId, options);
+  }
+
+  async listHistoryFilesForTenant(
+    tenantId: string | undefined,
+    options: HistoryFileListOptions = {},
+  ): Promise<HistoryFilePage> {
     const query = new URLSearchParams();
     if (options.query?.trim()) query.set("q", options.query.trim());
     if (options.activeAfter !== undefined) query.set("activeAfter", options.activeAfter);
@@ -407,12 +496,21 @@ export class RuntimeApi {
     }
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-    return this.request<HistoryFilePage>(`/v1/me/history-files${suffix}`);
+    return this.request<HistoryFilePage>(`/v1/me/history-files${suffix}`, {}, tenantId);
   }
 
   async downloadHistoryFile(file: Pick<HistoryFile, "resourceId" | "versionId">): Promise<string> {
+    return this.downloadHistoryFileForTenant(this.activeTenantId, file);
+  }
+
+  async downloadHistoryFileForTenant(
+    tenantId: string | undefined,
+    file: Pick<HistoryFile, "resourceId" | "versionId">,
+  ): Promise<string> {
     const data = await this.request<unknown>(
       `/v1/me/history-files/${encodeURIComponent(file.resourceId)}/versions/${encodeURIComponent(file.versionId)}/download`,
+      {},
+      tenantId,
     );
     const candidate = record(data)?.url;
     if (typeof candidate === "string") return candidate;
@@ -506,6 +604,22 @@ export class RuntimeApi {
   createThread(title: string): Promise<Thread> {
     return this.request("/v1/threads", { method: "POST", body: JSON.stringify({ title }) });
   }
+  forkThread(threadId: string, targetTeamId?: string): Promise<Thread> {
+    return this.request(`/v1/threads/${encodeURIComponent(threadId)}/forks`, {
+      method: "POST",
+      body: JSON.stringify(targetTeamId === undefined ? {} : { targetTeamId }),
+    });
+  }
+
+  importTeamFile(
+    sourceTeamId: string,
+    file: Pick<HistoryFile, "resourceId" | "versionId">,
+  ): Promise<UploadedResource> {
+    return this.request("/v1/me/team-files/import", {
+      method: "POST",
+      body: JSON.stringify({ sourceTeamId, ...file }),
+    });
+  }
   archiveThread(threadId: string): Promise<Thread> {
     return this.request(`/v1/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" });
   }
@@ -565,6 +679,7 @@ export class RuntimeApi {
       "X-File-Name": encodeURIComponent(file.name),
       "X-File-Media-Type": file.type || "application/octet-stream",
     });
+    if (this.activeTenantId !== undefined) headers.set("X-Tenant-ID", this.activeTenantId);
     let response: Response;
     try {
       response = await this.fetcher(`${this.baseUrl}/v1/resources/uploads`, {

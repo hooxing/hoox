@@ -10,12 +10,12 @@ import type {
 } from "./ports.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 import {
-  allocatePersonalHistoryName,
-  ensurePersonalHistoryDirectory,
-  refreshPersonalHistoryDirectorySummary,
+  allocateHistoryName,
+  ensureHistoryDirectory,
+  refreshHistoryDirectorySummary,
 } from "./pg-personal-history.js";
 import { createRunSkillSnapshot, SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
-import { enqueuePersonalThreadTitleGeneration } from "./pg-thread-title-generation.js";
+import { enqueueThreadTitleGeneration } from "./pg-thread-title-generation.js";
 import {
   activateNextThreadRun,
   LegacyRunDrainRequiredError,
@@ -152,7 +152,7 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
     this.historyFilesystemEnabled = options.historyFilesystemEnabled ?? false;
     this.historyTitleGenerationEnabled = options.historyTitleGenerationEnabled ?? false;
     if (this.historyTitleGenerationEnabled && !this.historyFilesystemEnabled) {
-      throw new TypeError("历史标题生成依赖个人历史文件系统");
+      throw new TypeError("历史标题生成依赖历史文件系统");
     }
     historyFilesystemTimestamp(new Date(0), this.historyDirectoryTimeZone);
   }
@@ -354,7 +354,7 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
             }
           }
           if (this.historyTitleGenerationEnabled && action !== "reject") {
-            await enqueuePersonalThreadTitleGeneration(client, {
+            await enqueueThreadTitleGeneration(client, {
               tenantId: input.scope.tenantId,
               threadId: input.thread.id,
               receiptId,
@@ -366,7 +366,7 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
             action !== "reject" &&
             input.attachments.length > 0
           ) {
-            await upsertPersonalHistoryFiles(client, {
+            await upsertHistoryFiles(client, {
               tenantId: input.scope.tenantId,
               threadId: input.thread.id,
               receiptId,
@@ -706,7 +706,7 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
   }
 }
 
-interface PersonalHistoryInput {
+interface HistoryInput {
   readonly tenantId: string;
   readonly threadId: string;
   readonly receiptId: string;
@@ -714,10 +714,7 @@ interface PersonalHistoryInput {
   readonly timeZone: string;
 }
 
-async function upsertPersonalHistoryFiles(
-  client: PoolClient,
-  input: PersonalHistoryInput,
-): Promise<void> {
+async function upsertHistoryFiles(client: PoolClient, input: HistoryInput): Promise<void> {
   const context = await client.query<{
     readonly kind: string;
     readonly receipt_created_at: Date;
@@ -731,9 +728,9 @@ async function upsertPersonalHistoryFiles(
     [input.tenantId, input.threadId, input.receiptId],
   );
   const row = context.rows[0];
-  if (row === undefined || row.kind !== "personal") return;
+  if (row === undefined || (row.kind !== "personal" && row.kind !== "team")) return;
 
-  await ensurePersonalHistoryDirectory(client, {
+  await ensureHistoryDirectory(client, {
     tenantId: input.tenantId,
     threadId: input.threadId,
     observedAt: row.receipt_created_at,
@@ -775,7 +772,7 @@ async function upsertPersonalHistoryFiles(
     const resourceName = resource.rows[0]?.name;
     if (resourceName === undefined) throw new TypeError("历史附件 ResourceVersion 不可见");
     const baseEntryName = historyFilesystemEntryName({ name: resourceName });
-    const entryName = await allocatePersonalHistoryName(client, {
+    const entryName = await allocateHistoryName(client, {
       tenantId: input.tenantId,
       threadId: input.threadId,
       baseName: baseEntryName,
@@ -798,5 +795,5 @@ async function upsertPersonalHistoryFiles(
     );
   }
 
-  await refreshPersonalHistoryDirectorySummary(client, input.tenantId, input.threadId);
+  await refreshHistoryDirectorySummary(client, input.tenantId, input.threadId);
 }

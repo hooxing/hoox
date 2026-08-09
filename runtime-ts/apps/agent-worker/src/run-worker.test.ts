@@ -2574,7 +2574,7 @@ it("personal Tenant 在模型执行前获得固定历史目录入口", async () 
   );
 });
 
-it("team Tenant 即使总开关开启也不创建个人历史目录入口", async () => {
+it("team Tenant 与个人空间一样获得当前 Tenant 的历史目录入口", async () => {
   const seed = {
     ...fakeSeed("team-history-entrypoints"),
     tenantKind: "team" as const,
@@ -2585,7 +2585,11 @@ it("team Tenant 即使总开关开启也不创建个人历史目录入口", asyn
 
   await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
 
-  expect(h.sandboxes.handle.commands).toEqual([]);
+  expect(h.sandboxes.handle.commands).toHaveLength(1);
+  expect(h.sandboxes.handle.commands[0]).toContain("ensure_link /history");
+  expect(h.sandboxes.handle.commands[0]).toContain(
+    `/resources/.thread-files/${h.scope.threadId}/files`,
+  );
 });
 
 it("personal 历史固定入口准备失败时不启动模型并失败关闭", async () => {

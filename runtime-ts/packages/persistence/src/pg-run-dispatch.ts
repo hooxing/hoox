@@ -6,7 +6,7 @@ import { mapPersistenceError } from "./errors.js";
 import type { EnqueueOutboxPort, IdempotentRunEnqueueResult } from "./ports.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 import { createRunSkillSnapshot, SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
-import { enqueuePersonalThreadTitleGeneration } from "./pg-thread-title-generation.js";
+import { enqueueThreadTitleGeneration } from "./pg-thread-title-generation.js";
 import {
   enqueueThreadFollowUp,
   LegacyRunDrainRequiredError,
@@ -152,7 +152,7 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
             inputDigest: digest,
           });
           if (this.options.historyTitleGenerationEnabled === true) {
-            await enqueuePersonalThreadTitleGeneration(client, {
+            await enqueueThreadTitleGeneration(client, {
               tenantId: input.scope.tenantId,
               threadId: input.run.threadId,
               receiptId,

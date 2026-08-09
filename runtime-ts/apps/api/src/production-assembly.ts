@@ -109,6 +109,8 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
         {
           auth: createProductionJwtAuthResolver(configuration.production.jwt),
           repositories: persistence.repositories,
+          teamCollaboration: persistence.teamCollaboration,
+          threadForks: persistence.threadForks,
           createCapability: createApiCreateCapability({
             threadCreation: persistence.threadCreation,
             enqueueOutbox: persistence.runDispatchCreation,

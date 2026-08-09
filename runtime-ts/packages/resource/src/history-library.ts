@@ -104,7 +104,7 @@ export class HistoryFileLibraryService {
       limit,
     });
     if (page === undefined) {
-      throw new ResourceServiceError("NOT_FOUND", "当前空间不支持个人历史文件");
+      throw new ResourceServiceError("NOT_FOUND", "当前空间不支持历史文件");
     }
     return page;
   }

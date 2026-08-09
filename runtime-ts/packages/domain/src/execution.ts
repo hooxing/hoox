@@ -59,7 +59,9 @@ export function rehydrateThread(
   user: User,
   membership: Membership,
 ): Thread {
-  assertActiveMembership(tenant, user, membership);
+  // 创建者 Membership 是历史归属证明；退出团队后仍需反序列化团队持有的任务。
+  assertSameTenant(tenant.id, membership.tenantId);
+  domainInvariant(membership.userId === user.id, "OWNERSHIP_MISMATCH", "任务创建者成员关联无效");
   const raw = recordValue(snapshot, "Thread");
   const restoredTenantId = tenantId(stringValue(raw, "tenantId"));
   assertSameTenant(restoredTenantId, tenant.id);

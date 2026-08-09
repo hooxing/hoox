@@ -30,7 +30,7 @@ interface ThreadTitleRow {
   readonly created_at: Date;
 }
 
-export async function enqueuePersonalThreadTitleGeneration(
+export async function enqueueThreadTitleGeneration(
   client: PoolClient,
   input: { readonly tenantId: string; readonly threadId: string; readonly receiptId: string },
 ): Promise<void> {
@@ -41,7 +41,7 @@ export async function enqueuePersonalThreadTitleGeneration(
      SELECT thread.tenant_id,thread.id,receipt.receipt_id,receipt.request_digest,
             thread.title_generation_version
        FROM threads thread
-       JOIN tenants tenant ON tenant.id=thread.tenant_id AND tenant.kind='personal'
+       JOIN tenants tenant ON tenant.id=thread.tenant_id AND tenant.kind IN ('personal','team')
        JOIN thread_input_receipts receipt
          ON receipt.tenant_id=thread.tenant_id AND receipt.thread_id=thread.id
       WHERE thread.tenant_id=$1 AND thread.id=$2 AND receipt.receipt_id=$3

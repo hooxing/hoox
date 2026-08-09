@@ -52,7 +52,7 @@ export interface HistoryFilesystemFile extends ResourceFilesystemFile {
 
 /**
  * 历史目录只通过路径定向查询读取，不能退化为加载 Tenant 全部 Resource 后在内存中过滤。
- * `undefined` 表示当前 Tenant 不具备个人历史目录能力，空数组表示能力存在但目录为空。
+ * `undefined` 表示当前 Tenant 不具备历史目录能力，空数组表示能力存在但目录为空。
  */
 export interface HistoryFilesystemCatalog {
   listRecentDirectories(input: {

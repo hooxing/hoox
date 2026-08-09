@@ -1,5 +1,14 @@
-import { ChevronDown, ChevronRight, Plus, Settings, Users, X } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import {
+  Building2,
+  ChevronDown,
+  ChevronRight,
+  Plus,
+  RefreshCw,
+  Settings,
+  Users,
+  X,
+} from "lucide-react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { ApiError, type TeamMember, type TeamSummary } from "./api.js";
 
 export interface TeamWorkspaceApi {
@@ -18,95 +27,204 @@ export interface TeamWorkspaceApi {
 
 export function TeamSwitcher({
   teams,
-  activeTeamId,
+  selectedTeamId,
   loading,
   onSwitch,
-  onCreate,
   onNewTeamThread,
-  onManage,
+  onOpenTeamCenter,
+  taskCount,
+  children,
 }: {
   readonly teams: readonly TeamSummary[];
-  readonly activeTeamId?: string;
+  readonly selectedTeamId?: string;
   readonly loading: boolean;
-  readonly onSwitch: (teamId: string | undefined) => void;
-  readonly onCreate: (displayName: string) => Promise<void>;
+  readonly onSwitch: (teamId: string) => void;
   readonly onNewTeamThread: () => void;
-  readonly onManage: () => void;
+  readonly onOpenTeamCenter: () => void;
+  readonly taskCount: number;
+  readonly children?: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [creating, setCreating] = useState(false);
-  const [displayName, setDisplayName] = useState("");
-  const active = teams.find((team) => team.id === activeTeamId);
-
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!displayName.trim()) return;
-    await onCreate(displayName.trim());
-    setDisplayName("");
-    setCreating(false);
-    setExpanded(true);
-  };
+  const selected = teams.find((team) => team.id === selectedTeamId) ?? teams[0];
+  const hasTeams = selected !== undefined;
 
   return (
     <section className="team-switcher" aria-label="团队空间">
       <button
         type="button"
         className="team-switcher-summary"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
+        aria-expanded={hasTeams ? expanded : undefined}
+        onClick={() => {
+          if (!hasTeams) {
+            onOpenTeamCenter();
+            return;
+          }
+          setExpanded((value) => !value);
+        }}
       >
-        {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        <Users size={17} />
-        <span>{active?.displayName ?? "团队"}</span>
-        {active !== undefined && <small>{active.role}</small>}
-      </button>
-      {expanded && (
-        <div className="team-switcher-body">
-          <label>
-            <span className="sr-only">切换团队</span>
-            <select
-              value={activeTeamId ?? ""}
-              disabled={loading}
-              onChange={(event) => onSwitch(event.target.value || undefined)}
-            >
-              <option value="">个人空间</option>
-              {teams.map((team) => (
-                <option key={team.id} value={team.id}>
-                  {team.displayName}
-                </option>
-              ))}
-            </select>
-          </label>
-          {active !== undefined && (
-            <div className="team-switcher-actions">
-              <button type="button" onClick={onNewTeamThread}>
-                <Plus size={14} /> 新建团队对话
-              </button>
-              <button type="button" onClick={onManage} aria-label="管理当前团队">
-                <Settings size={14} /> 管理
-              </button>
-            </div>
-          )}
-          {creating ? (
-            <form className="team-create-form" onSubmit={(event) => void submit(event)}>
-              <input
-                value={displayName}
-                maxLength={200}
-                placeholder="团队名称"
-                onChange={(event) => setDisplayName(event.target.value)}
-              />
-              <button type="submit" disabled={!displayName.trim()}>
-                创建
-              </button>
-            </form>
+        {hasTeams ? (
+          expanded ? (
+            <ChevronDown size={16} />
           ) : (
-            <button type="button" className="team-create-trigger" onClick={() => setCreating(true)}>
-              <Plus size={14} /> 创建团队
+            <ChevronRight size={16} />
+          )
+        ) : (
+          <Plus size={16} />
+        )}
+        {hasTeams ? <Users size={17} /> : <Building2 size={17} />}
+        <span>{selected?.displayName ?? "创建或加入团队"}</span>
+        {selected !== undefined && <small>切换团队</small>}
+      </button>
+      {expanded && selected !== undefined && (
+        <div className="team-switcher-body">
+          <div className="team-switcher-controls">
+            <label>
+              <span className="sr-only">切换团队</span>
+              <select
+                value={selected.id}
+                disabled={loading}
+                onChange={(event) => onSwitch(event.target.value)}
+              >
+                {teams.map((team) => (
+                  <option key={team.id} value={team.id}>
+                    {team.displayName}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button type="button" onClick={onOpenTeamCenter} aria-label="打开团队中心">
+              <Settings size={15} />
             </button>
-          )}
+          </div>
+          <button type="button" className="new-team-thread-button" onClick={onNewTeamThread}>
+            <Plus size={14} /> 新建团队对话
+          </button>
+          <div className="team-task-heading">
+            <span>团队任务</span>
+            <span>{taskCount}</span>
+          </div>
+          <div className="team-task-list">{children}</div>
         </div>
       )}
     </section>
+  );
+}
+
+export function TeamCenterDialog({
+  teams,
+  selectedTeamId,
+  loading,
+  onSelectTeam,
+  onCreate,
+  onRefresh,
+  onManage,
+  onClose,
+}: {
+  readonly teams: readonly TeamSummary[];
+  readonly selectedTeamId?: string;
+  readonly loading: boolean;
+  readonly onSelectTeam: (teamId: string) => void;
+  readonly onCreate: (displayName: string) => Promise<void>;
+  readonly onRefresh: () => Promise<void>;
+  readonly onManage: (teamId: string) => void;
+  readonly onClose: () => void;
+}) {
+  const [displayName, setDisplayName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string>();
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!displayName.trim() || submitting) return;
+    setSubmitting(true);
+    try {
+      await onCreate(displayName.trim());
+      setDisplayName("");
+      setError(undefined);
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason.message : "创建团队失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="skill-center-backdrop">
+      <section className="team-center-dialog" role="dialog" aria-modal="true">
+        <header className="skill-center-header">
+          <div>
+            <h2>团队中心</h2>
+            <p>创建、加入和管理团队；侧栏只负责切换当前查看的团队。</p>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭团队中心">
+            <X size={18} />
+          </button>
+        </header>
+        {error !== undefined && <div className="skill-center-error">{error}</div>}
+        <div className="team-center-content">
+          <section className="team-center-panel" aria-labelledby="my-teams-heading">
+            <div className="team-center-panel-heading">
+              <div>
+                <h3 id="my-teams-heading">我的团队</h3>
+                <p>选择后，侧栏团队任务栏会展示该团队。</p>
+              </div>
+              <button
+                type="button"
+                className="team-center-refresh"
+                disabled={loading}
+                onClick={() => void onRefresh()}
+              >
+                <RefreshCw className={loading ? "spin" : undefined} size={14} /> 刷新
+              </button>
+            </div>
+            {teams.length === 0 ? (
+              <div className="team-center-empty">你还没有加入任何团队。</div>
+            ) : (
+              <div className="team-center-list">
+                {teams.map((team) => (
+                  <article
+                    key={team.id}
+                    className={team.id === selectedTeamId ? "selected" : undefined}
+                  >
+                    <button type="button" onClick={() => onSelectTeam(team.id)}>
+                      <span>{team.displayName}</span>
+                      <small>{team.role}</small>
+                    </button>
+                    <button type="button" onClick={() => onManage(team.id)}>
+                      管理
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+          <section className="team-center-panel team-center-actions" aria-label="创建或加入团队">
+            <div>
+              <h3>创建团队</h3>
+              <p>创建后会成为 Owner，并自动成为侧栏当前团队。</p>
+              <form onSubmit={(event) => void submit(event)}>
+                <input
+                  value={displayName}
+                  maxLength={200}
+                  placeholder="团队名称"
+                  onChange={(event) => setDisplayName(event.target.value)}
+                />
+                <button type="submit" disabled={!displayName.trim() || submitting}>
+                  <Plus size={14} /> {submitting ? "创建中…" : "创建团队"}
+                </button>
+              </form>
+            </div>
+            <div className="team-center-join">
+              <h3>加入团队</h3>
+              <p>请让团队 Owner 或管理员通过你的用户 ID 添加成员。受邀后在这里刷新即可。</p>
+              <button type="button" disabled={loading} onClick={() => void onRefresh()}>
+                <RefreshCw className={loading ? "spin" : undefined} size={14} /> 刷新加入状态
+              </button>
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
   );
 }
 

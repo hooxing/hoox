@@ -187,6 +187,58 @@ describe("Agent 工作台恢复接入", () => {
     expect(cloudDriveEntry?.nextElementSibling).toBe(taskHeading);
   });
 
+  it("个人任务永久保留，团队切换只改变团队任务栏，新建会话始终回到个人空间", async () => {
+    const personalThread = thread("personal_task");
+    const teamThread = thread("team_task");
+    const teamSummary = {
+      id: "tenant_product",
+      displayName: "产品团队",
+      role: "owner" as const,
+      joinedAt: "2026-08-09T08:00:00.000Z",
+    };
+    const setTenantId = vi.fn();
+    const apiClient = apiFixture({
+      listThreadsForTenant: vi.fn(async (teamId?: string) =>
+        teamId === teamSummary.id ? [teamThread] : [personalThread],
+      ),
+      setTenantId,
+      listTeams: vi.fn(async () => [teamSummary]),
+      createTeam: vi.fn(async () => teamSummary),
+      listTeamMembers: vi.fn(async () => []),
+      addTeamMember: vi.fn(async () => {
+        throw new Error("本测试不添加成员");
+      }),
+      changeTeamMemberRole: vi.fn(async () => {
+        throw new Error("本测试不修改角色");
+      }),
+      removeTeamMember: vi.fn(async () => undefined),
+      dissolveTeam: vi.fn(async () => undefined),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+
+    const personalNavigation = container.querySelector<HTMLElement>(
+      'nav[aria-label="个人任务列表"]',
+    );
+    expect(personalNavigation?.textContent).toContain("会话 personal_task");
+
+    const teamSummaryButton = container.querySelector<HTMLButtonElement>(".team-switcher-summary");
+    await act(async () => teamSummaryButton?.click());
+    await settleEffects();
+    const teamNavigation = container.querySelector<HTMLElement>('nav[aria-label="团队任务列表"]');
+    expect(teamNavigation?.textContent).toContain("会话 team_task");
+    expect(container.querySelectorAll(".thread-heading")[0]?.textContent).toContain("个人任务");
+
+    const teamTaskButton = teamNavigation?.querySelector<HTMLButtonElement>(".thread");
+    await act(async () => teamTaskButton?.click());
+    expect(setTenantId).toHaveBeenLastCalledWith(teamSummary.id);
+    expect(personalNavigation?.textContent).toContain("会话 personal_task");
+
+    const newConversation = container.querySelector<HTMLButtonElement>(".new-thread-button");
+    await act(async () => newConversation?.click());
+    expect(setTenantId).toHaveBeenLastCalledWith(undefined);
+  });
+
   it("重复文本只计算尚未落入 Thread 上下文的消息，拒绝项不占用序号", () => {
     expect(
       nextExpectedUserOccurrence(

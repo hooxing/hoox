@@ -44,6 +44,29 @@ describe("RuntimeApi", () => {
     expect(headers.get("idempotency-key")).toMatch(/^[-a-z0-9]{8,}$/iu);
   });
 
+  it("可并行读取个人与团队任务列表且不改变当前活动租户", async () => {
+    const fetcher = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ version: "v1", requestId: "req_1", data: { items: [] } }), {
+          status: 200,
+        }),
+      ),
+    );
+    const api = new RuntimeApi(fetcher, "/api");
+    api.setTenantId("tenant_active");
+
+    await api.listThreadsForTenant(undefined);
+    await api.listThreadsForTenant("tenant_product");
+
+    const personalRequest = fetcher.mock.calls[0] as [string, RequestInit];
+    const teamRequest = fetcher.mock.calls[1] as [string, RequestInit];
+    const personalHeaders = new Headers(personalRequest[1].headers);
+    const teamHeaders = new Headers(teamRequest[1].headers);
+    expect(personalHeaders.has("x-tenant-id")).toBe(false);
+    expect(teamHeaders.get("x-tenant-id")).toBe("tenant_product");
+    expect(api.getTenantId()).toBe("tenant_active");
+  });
+
   it("统一输入发送 auto/expected Run，并在入口关闭时回退 legacy follow-up", async () => {
     const receipt = {
       receiptId: "input-1",

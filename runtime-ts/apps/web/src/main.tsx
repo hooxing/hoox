@@ -294,7 +294,6 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
   const activeTeam = teams.find((team) => team.id === activeTeamId);
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? teams[0];
   const managedTeam = teams.find((team) => team.id === selectedTeamId);
-  const cloudTeam = activeTeam ?? teams.find((team) => team.id === cloudTeamId) ?? selectedTeam;
   const personalCloudDriveApi = useMemo<CloudDriveApi | undefined>(() => {
     if (
       apiClient.listHistoryFilesForTenant !== undefined &&
@@ -311,23 +310,27 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
     }
     return activeTeamId === undefined ? cloudDriveApi : undefined;
   }, [activeTeamId, apiClient, cloudDriveApi]);
-  const teamCloudDriveApi = useMemo<CloudDriveApi | undefined>(() => {
+  const teamCloudDriveSources = useMemo(() => {
     if (
-      cloudTeam === undefined ||
       apiClient.listHistoryFilesForTenant === undefined ||
       apiClient.downloadHistoryFileForTenant === undefined
     ) {
-      return undefined;
+      return [];
     }
-    return {
-      listHistoryFiles: (options) =>
-        apiClient.listHistoryFilesForTenant?.(cloudTeam.id, options) as ReturnType<
-          CloudDriveApi["listHistoryFiles"]
-        >,
-      downloadHistoryFile: (file) =>
-        apiClient.downloadHistoryFileForTenant?.(cloudTeam.id, file) as Promise<string>,
-    };
-  }, [apiClient, cloudTeam]);
+    return teams.map((team) => ({
+      id: team.id,
+      name: team.displayName,
+      selectable: activeTeamId === undefined || activeTeamId === team.id,
+      api: {
+        listHistoryFiles: (options: Parameters<CloudDriveApi["listHistoryFiles"]>[0]) =>
+          apiClient.listHistoryFilesForTenant?.(team.id, options) as ReturnType<
+            CloudDriveApi["listHistoryFiles"]
+          >,
+        downloadHistoryFile: (file: Parameters<CloudDriveApi["downloadHistoryFile"]>[0]) =>
+          apiClient.downloadHistoryFileForTenant?.(team.id, file) as Promise<string>,
+      },
+    }));
+  }, [activeTeamId, apiClient, teams]);
 
   const selectThread = useCallback((threadId: string | undefined) => {
     navigationRef.current.navigate(threadId);
@@ -909,38 +912,51 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
     if (target === undefined) return;
     void fork(target.id);
   };
-  const selectTeamCloudFile = async (file: HistoryFile) => {
-    if (cloudTeam === undefined) return;
-    if (activeTeamId === cloudTeam.id) {
+  const selectPersonalCloudFile = useCallback(
+    (file: HistoryFile) =>
       setHistoryFiles((current) =>
         current.some(
           (item) => item.resourceId === file.resourceId && item.versionId === file.versionId,
         ) || current.length + uploadFiles.length >= 20
           ? current
           : [...current, file],
-      );
-      return;
-    }
-    if (apiClient.importTeamFile === undefined) return;
-    setActionLoading(true);
-    try {
-      const imported = await apiClient.importTeamFile(cloudTeam.id, file);
-      const personalSnapshot: HistoryFile = {
-        ...file,
-        resourceId: imported.resourceId,
-        versionId: imported.versionId,
-        name: imported.name,
-        path: imported.path,
-        mediaType: imported.mediaType,
-        sizeBytes: imported.sizeBytes,
-      };
-      setHistoryFiles((current) => [...current, personalSnapshot]);
-    } catch (reason) {
-      setError(reason instanceof ApiError ? reason : new ApiError("导入团队文件失败", 0, true));
-    } finally {
-      setActionLoading(false);
-    }
-  };
+      ),
+    [uploadFiles.length],
+  );
+  const selectTeamCloudFile = useCallback(
+    async (teamId: string, file: HistoryFile) => {
+      if (activeTeamId === teamId) {
+        setHistoryFiles((current) =>
+          current.some(
+            (item) => item.resourceId === file.resourceId && item.versionId === file.versionId,
+          ) || current.length + uploadFiles.length >= 20
+            ? current
+            : [...current, file],
+        );
+        return;
+      }
+      if (activeTeamId !== undefined || apiClient.importTeamFile === undefined) return;
+      setActionLoading(true);
+      try {
+        const imported = await apiClient.importTeamFile(teamId, file);
+        const personalSnapshot: HistoryFile = {
+          ...file,
+          resourceId: imported.resourceId,
+          versionId: imported.versionId,
+          name: imported.name,
+          path: imported.path,
+          mediaType: imported.mediaType,
+          sizeBytes: imported.sizeBytes,
+        };
+        setHistoryFiles((current) => [...current, personalSnapshot]);
+      } catch (reason) {
+        setError(reason instanceof ApiError ? reason : new ApiError("导入团队文件失败", 0, true));
+      } finally {
+        setActionLoading(false);
+      }
+    },
+    [activeTeamId, apiClient, uploadFiles.length],
+  );
   const cancel = async () => {
     if (!state.run || !state.selectedThreadId) return;
     const cancelledRun = state.run;
@@ -1292,33 +1308,13 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
           selectedFiles={historyFiles}
           {...(activeTeamId === undefined
             ? {
-                onSelectFile: (file: HistoryFile) =>
-                  setHistoryFiles((current) =>
-                    current.some(
-                      (item) =>
-                        item.resourceId === file.resourceId && item.versionId === file.versionId,
-                    ) || current.length + uploadFiles.length >= 20
-                      ? current
-                      : [...current, file],
-                  ),
+                onSelectFile: selectPersonalCloudFile,
               }
             : {})}
-          {...(cloudTeam === undefined || teamCloudDriveApi === undefined
-            ? {}
-            : {
-                team: {
-                  id: cloudTeam.id,
-                  name: cloudTeam.displayName,
-                  api: teamCloudDriveApi,
-                  ...(activeTeamId === undefined
-                    ? {
-                        choices: teams.map((team) => ({ id: team.id, name: team.displayName })),
-                        onSwitch: setCloudTeamId,
-                      }
-                    : {}),
-                  onSelectFile: (file: HistoryFile) => void selectTeamCloudFile(file),
-                },
-              })}
+          teams={teamCloudDriveSources}
+          {...(cloudTeamId === undefined ? {} : { selectedTeamId: cloudTeamId })}
+          onSwitchTeam={setCloudTeamId}
+          onSelectTeamFile={selectTeamCloudFile}
           onClose={() => setCloudDriveOpen(false)}
         />
       )}

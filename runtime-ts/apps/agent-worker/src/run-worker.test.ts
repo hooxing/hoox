@@ -477,6 +477,64 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     });
   });
 
+  it("主模型命中输出上限后只续跑一次，并以独立 model_continue 许可完成任务", async () => {
+    const lengthEvents: readonly RuntimeAgentEvent[] = [
+      { type: "agent.started" },
+      { type: "thinking.delta", delta: "尚未完成" },
+      { type: "message.completed", stopReason: "length" },
+      { type: "agent.settled" },
+    ];
+    const session = new ScriptedAgentSession(lengthEvents, { kind: "completed" }, [
+      { events: successfulEvents },
+    ]);
+    const h = sandboxHarness([session], fakeSeed(), {
+      threadSandboxSessionReuseEnabled: true,
+    });
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(session.prompts).toHaveLength(2);
+    expect(session.prompts[1]).toContain("上一轮因模型输出长度上限中止");
+    expect(h.persistence.permits.map(({ permit }) => permit.effect)).toEqual([
+      "model_start",
+      "model_continue",
+    ]);
+    expect(h.persistence.permits[1]?.permit.callId).toBe("attempt-1/model/output-limit/1");
+    expect(h.threadSandboxes.terminalEffectCount).toBe(1);
+    expect(h.threadSandboxes.terminateCount).toBe(0);
+    expect(h.sandboxes.settleCount).toBe(0);
+  });
+
+  it("主模型连续两次命中输出上限时失败但暂停 Thread Sandbox，保留未提交工作", async () => {
+    const lengthEvents: readonly RuntimeAgentEvent[] = [
+      { type: "agent.started" },
+      { type: "thinking.delta", delta: "输出仍未完成" },
+      { type: "message.completed", stopReason: "length" },
+      { type: "agent.settled" },
+    ];
+    const session = new ScriptedAgentSession(lengthEvents, { kind: "completed" }, [
+      { events: lengthEvents },
+    ]);
+    const h = sandboxHarness([session], fakeSeed(), {
+      threadSandboxSessionReuseEnabled: true,
+    });
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "failed" });
+
+    expect(session.prompts).toHaveLength(2);
+    expect(h.persistence.record(h.scope).run.status).toBe("failed");
+    expect(h.threadSandboxes.terminalEffectCount).toBe(1);
+    expect(h.threadSandboxes.terminateCount).toBe(0);
+    expect(h.sandboxes.settleCount).toBe(0);
+    const terminal = h.persistence.mutationCommands.find((mutation) =>
+      mutation.idempotencyKey.endsWith("/final/failed"),
+    );
+    expect(terminal?.threadSandboxTerminal).toMatchObject({
+      sessionId: h.threadSandboxes.lease.sessionId,
+      generation: h.threadSandboxes.lease.generation,
+    });
+  });
+
   it("Workspace 物化期间 heartbeat 同时续租 Thread Sandbox，避免首个工具因租约过期中断", async () => {
     let markMaterializeStarted: () => void = () => undefined;
     const materializeStarted = new Promise<void>((resolve) => {

@@ -686,8 +686,8 @@ export interface ExecutionPersistencePort {
   }): Promise<FenceInspectionResult>;
   /**
    * model_start 只能在首次模型 checkpoint 后签发；model_continue 只能引用已持久化的
-   * Artifact 修正轮次；tool_execution 必须引用本 Attempt 已登记且尚未签发过许可的
-   * EffectInvocation。同一 effect+callId 的重复签发必须返回 conflict。
+   * Thread steer、Artifact 修正轮次或主模型 length 终态后的单次续跑；tool_execution 必须引用
+   * 本 Attempt 已登记且尚未签发过许可的 EffectInvocation。同一 effect+callId 的重复签发必须返回 conflict。
    */
   issueExternalEffectPermit(input: {
     readonly fence: ExecutionFence;

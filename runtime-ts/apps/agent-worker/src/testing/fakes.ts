@@ -371,9 +371,17 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
           input.call.callId ===
             `${record.attempt?.attemptId}/model/steer/${mutation.receipt.threadSteer.receiptId}`,
       );
+      const outputLimitContinuation = record.events.some(
+        (event) =>
+          event.kind === "agent_event" &&
+          event.payload.type === "message.completed" &&
+          event.payload.stopReason === "length" &&
+          input.call.callId === `${record.attempt?.attemptId}/model/output-limit/1`,
+      );
       if (
         !(
-          (record.attempt.stage === "model_execution_started" && steer !== undefined) ||
+          (record.attempt.stage === "model_execution_started" &&
+            (steer !== undefined || outputLimitContinuation)) ||
           (record.attempt.stage === "workspace_verified" && correction !== undefined)
         )
       ) {
@@ -1095,10 +1103,15 @@ export class ScriptedAgentSession implements WorkerAgentSessionPort {
   disposeCount = 0;
   beforeAbortReturn?: () => void | Promise<void>;
   private readonly listeners = new Set<(event: RuntimeAgentEvent) => void>();
+  private turnIndex = 0;
 
   constructor(
     private readonly events: readonly RuntimeAgentEvent[],
     private readonly outcome: AgentTurnOutcome = { kind: "completed" },
+    private readonly subsequentTurns: readonly {
+      readonly events: readonly RuntimeAgentEvent[];
+      readonly outcome?: AgentTurnOutcome;
+    }[] = [],
   ) {}
 
   async prepareInput(input: Parameters<WorkerAgentSessionPort["prepareInput"]>[0]) {
@@ -1111,8 +1124,16 @@ export class ScriptedAgentSession implements WorkerAgentSessionPort {
   ): Promise<AgentTurnOutcome> {
     this.prompts.push(input.text);
     this.modelPermits.push(authorization.permit.permitId);
-    for (const event of this.events) for (const listener of this.listeners) listener(event);
-    return this.outcome;
+    const scripted =
+      this.turnIndex === 0
+        ? { events: this.events, outcome: this.outcome }
+        : (this.subsequentTurns[this.turnIndex - 1] ?? {
+            events: this.events,
+            outcome: this.outcome,
+          });
+    this.turnIndex += 1;
+    for (const event of scripted.events) for (const listener of this.listeners) listener(event);
+    return scripted.outcome ?? { kind: "completed" };
   }
 
   async steer(input: Parameters<WorkerAgentSessionPort["steer"]>[0]): Promise<void> {

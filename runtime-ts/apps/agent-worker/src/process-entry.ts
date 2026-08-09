@@ -477,8 +477,7 @@ export function parseWorkerProcessEnvironment(
         targetPercent: compactionTargetPercent,
         recentUserTokens: parsed.values.THREAD_CONTEXT_COMPACTION_RECENT_USER_TOKENS ?? 4_096,
         maxOutputTokens:
-          parsed.values.THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS ??
-          Math.min(2_048, maxOutputTokens),
+          parsed.values.THREAD_CONTEXT_COMPACTION_MAX_OUTPUT_TOKENS ?? maxOutputTokens,
         timeoutMs: parsed.values.THREAD_CONTEXT_COMPACTION_TIMEOUT_MS ?? 60_000,
       }),
     }),

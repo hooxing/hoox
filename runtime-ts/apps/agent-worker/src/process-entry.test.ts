@@ -93,7 +93,7 @@ describe("Agent Worker 进程入口", () => {
         softLimitPercent: 80,
         targetPercent: 55,
         recentUserTokens: 4096,
-        maxOutputTokens: 2048,
+        maxOutputTokens: 16384,
         timeoutMs: 60000,
       },
     });

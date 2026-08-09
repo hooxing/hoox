@@ -130,6 +130,7 @@
 | [ADR-0131](0131-independent-cloud-drive-semantic-paths.md) | 独立云盘语义路径 | 已接受（试验分支） | 2026-08-08 |
 | [ADR-0132](0132-agent-deliverables-in-history.md) | Agent 正式交付物进入个人历史云盘 | 已接受（试验分支） | 2026-08-08 |
 | [ADR-0133](0133-auto-compaction-full-window-and-incoming-projection.md) | 自动压缩采用整窗摘要与入站输入投影 | 已接受（试验分支） | 2026-08-09 |
+| [ADR-0134](0134-compaction-output-budget-and-terminal-parsing.md) | 压缩沿用模型输出预算并容忍推理终态 | 已接受（试验分支） | 2026-08-09 |
 
 ## 何时必须记录
 

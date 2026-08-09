@@ -326,6 +326,307 @@ describe("RuntimeCompactionCoordinator", () => {
     expect(streamCall.mock.calls[0]?.[2]).toMatchObject({ maxTokens: 100, maxRetries: 0 });
   });
 
+  it("local compactor 忽略 thinking 并接受同一终态中的最终正文", async () => {
+    const commit = vi.fn(async (input) => ({
+      outcome: "applied" as const,
+      checkpointId: input.checkpointId,
+      windowNumber: 1,
+      checkpointFactSequence: input.replacement.throughSequence + 1,
+    }));
+    const stream = {
+      async *[Symbol.asyncIterator]() {
+        yield { type: "done" };
+      },
+      result: async () => ({
+        stopReason: "stop",
+        content: [
+          { type: "thinking", thinking: "内部推理不进入摘要" },
+          { type: "text", text: "可用交接摘要" },
+        ],
+      }),
+    };
+    const coordinator = new RuntimeCompactionCoordinator(
+      {
+        enabled: true,
+        path: "local",
+        softLimitPercent: 20,
+        targetPercent: 10,
+        recentUserTokens: 1,
+        maxOutputTokens: 100,
+        timeoutMs: 1_000,
+      },
+      model,
+      { stream: vi.fn(() => stream) } as never,
+      modelContext,
+      { commit },
+    );
+    const old = active(
+      [
+        { sequence: 1, role: "user", text: "目标", timestamp: 1 },
+        {
+          sequence: 2,
+          role: "assistant",
+          content: [{ type: "text", text: "x".repeat(2_500) }],
+          api: "openai-completions",
+          provider: "test",
+          model: "test-model",
+          stopReason: "stop",
+          timestamp: 2,
+        },
+      ],
+      2,
+    );
+
+    const prepared = await coordinator.prepare({
+      fence,
+      attemptId: "attempt-thinking",
+      compatibilityDigest: "e".repeat(64),
+      history: old,
+    });
+
+    expect(commit).toHaveBeenCalledOnce();
+    expect(prepared.messages.at(-1)).toMatchObject({
+      role: "compactionHandoff",
+      text: "可用交接摘要",
+    });
+  });
+
+  it("local compactor 达到长度上限时用精简提示重试", async () => {
+    const results = [
+      {
+        stopReason: "length",
+        content: [{ type: "text", text: "第一次截断摘要" }],
+      },
+      {
+        stopReason: "stop",
+        content: [
+          { type: "thinking", thinking: "忽略" },
+          { type: "text", text: "第二次完整摘要" },
+        ],
+      },
+    ];
+    const streamCall = vi.fn((_model: unknown, _context: unknown, _options: unknown) => {
+      const result = results.shift();
+      if (result === undefined) throw new Error("unexpected extra compaction call");
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: "done" };
+        },
+        result: async () => result,
+      };
+    });
+    const coordinator = new RuntimeCompactionCoordinator(
+      {
+        enabled: true,
+        path: "local",
+        softLimitPercent: 20,
+        targetPercent: 10,
+        recentUserTokens: 1,
+        maxOutputTokens: 100,
+        timeoutMs: 1_000,
+      },
+      model,
+      { stream: streamCall } as never,
+      modelContext,
+      {
+        commit: vi.fn(async (input) => ({
+          outcome: "applied" as const,
+          checkpointId: input.checkpointId,
+          windowNumber: 1,
+          checkpointFactSequence: input.replacement.throughSequence + 1,
+        })),
+      },
+    );
+    const old = active(
+      [
+        { sequence: 1, role: "user", text: "目标", timestamp: 1 },
+        {
+          sequence: 2,
+          role: "assistant",
+          content: [{ type: "text", text: "x".repeat(2_500) }],
+          api: "openai-completions",
+          provider: "test",
+          model: "test-model",
+          stopReason: "stop",
+          timestamp: 2,
+        },
+      ],
+      2,
+    );
+
+    const prepared = await coordinator.prepare({
+      fence,
+      attemptId: "attempt-length-retry",
+      compatibilityDigest: "f".repeat(64),
+      history: old,
+    });
+
+    expect(streamCall).toHaveBeenCalledTimes(2);
+    expect(streamCall.mock.calls[1]?.[1]).toMatchObject({
+      systemPrompt: expect.stringContaining("立即输出更短的最终交接摘要"),
+    });
+    expect(prepared.messages.at(-1)).toMatchObject({
+      role: "compactionHandoff",
+      text: "第二次完整摘要",
+    });
+  });
+
+  it("两次都达到长度上限时使用最长的可用正文", async () => {
+    const results = [
+      { stopReason: "length", content: [{ type: "text", text: "较完整的截断摘要" }] },
+      { stopReason: "length", content: [{ type: "text", text: "短摘要" }] },
+    ];
+    const streamCall = vi.fn((_model: unknown, _context: unknown, _options: unknown) => {
+      const result = results.shift();
+      if (result === undefined) throw new Error("unexpected extra compaction call");
+      return {
+        async *[Symbol.asyncIterator]() {
+          yield { type: "done" };
+        },
+        result: async () => result,
+      };
+    });
+    const coordinator = new RuntimeCompactionCoordinator(
+      {
+        enabled: true,
+        path: "local",
+        softLimitPercent: 20,
+        targetPercent: 10,
+        recentUserTokens: 1,
+        maxOutputTokens: 100,
+        timeoutMs: 1_000,
+      },
+      model,
+      { stream: streamCall } as never,
+      modelContext,
+      {
+        commit: vi.fn(async (input) => ({
+          outcome: "applied" as const,
+          checkpointId: input.checkpointId,
+          windowNumber: 1,
+          checkpointFactSequence: input.replacement.throughSequence + 1,
+        })),
+      },
+    );
+    const old = active(
+      [
+        { sequence: 1, role: "user", text: "目标", timestamp: 1 },
+        {
+          sequence: 2,
+          role: "assistant",
+          content: [{ type: "text", text: "x".repeat(2_500) }],
+          api: "openai-completions",
+          provider: "test",
+          model: "test-model",
+          stopReason: "stop",
+          timestamp: 2,
+        },
+      ],
+      2,
+    );
+
+    const prepared = await coordinator.prepare({
+      fence,
+      attemptId: "attempt-length-fallback",
+      compatibilityDigest: "1".repeat(64),
+      history: old,
+    });
+
+    expect(prepared.messages.at(-1)).toMatchObject({
+      role: "compactionHandoff",
+      text: "较完整的截断摘要",
+    });
+  });
+
+  it("尚未撞硬窗口时 compactor 失败仍保留旧 history", async () => {
+    const old = active(
+      [
+        { sequence: 1, role: "user", text: "目标", timestamp: 1 },
+        {
+          sequence: 2,
+          role: "assistant",
+          content: [{ type: "text", text: "x".repeat(2_500) }],
+          api: "openai-completions",
+          provider: "test",
+          model: "test-model",
+          stopReason: "stop",
+          timestamp: 2,
+        },
+      ],
+      2,
+    );
+    const coordinator = new RuntimeCompactionCoordinator(
+      {
+        enabled: true,
+        path: "remote",
+        softLimitPercent: 20,
+        targetPercent: 10,
+        recentUserTokens: 1,
+        maxOutputTokens: 100,
+        timeoutMs: 1_000,
+      },
+      model,
+      {} as never,
+      modelContext,
+      { commit: vi.fn() },
+      { compact: vi.fn(async () => Promise.reject(new Error("provider failed"))) },
+    );
+
+    await expect(
+      coordinator.prepare({
+        fence,
+        attemptId: "attempt-soft-failure",
+        compatibilityDigest: "3".repeat(64),
+        history: old,
+      }),
+    ).resolves.toBe(old);
+  });
+
+  it("投影已撞硬窗口时不再静默吞掉 compactor 失败", async () => {
+    const old = active(
+      [
+        { sequence: 1, role: "user", text: "目标", timestamp: 1 },
+        {
+          sequence: 2,
+          role: "assistant",
+          content: [{ type: "text", text: "x".repeat(2_500) }],
+          api: "openai-completions",
+          provider: "test",
+          model: "test-model",
+          stopReason: "stop",
+          timestamp: 2,
+        },
+      ],
+      2,
+    );
+    const coordinator = new RuntimeCompactionCoordinator(
+      {
+        enabled: true,
+        path: "remote",
+        softLimitPercent: 20,
+        targetPercent: 10,
+        recentUserTokens: 1,
+        maxOutputTokens: 100,
+        timeoutMs: 1_000,
+      },
+      model,
+      {} as never,
+      modelContext,
+      { commit: vi.fn() },
+      { compact: vi.fn(async () => Promise.reject(new Error("provider failed"))) },
+    );
+
+    await expect(
+      coordinator.prepare({
+        fence,
+        attemptId: "attempt-hard-window",
+        compatibilityDigest: "2".repeat(64),
+        history: old,
+        availableHistoryTokens: 2_000,
+      }),
+    ).rejects.toThrow("硬窗口准入前生成失败");
+  });
+
   it("首轮前 checkpoint 越过 claim 已追加 tail 时不把当前 user 重复安装进 Session", async () => {
     const coordinator = new RuntimeCompactionCoordinator(
       {
@@ -382,7 +683,7 @@ describe("RuntimeCompactionCoordinator", () => {
     expect(JSON.stringify(installed.messages)).not.toContain("当前 Run user");
   });
 
-  it("compactor 或 checkpoint 提交失败时返回完全相同的旧 history", async () => {
+  it("checkpoint 提交冲突时返回完全相同的旧 history", async () => {
     const old = active(
       [
         { sequence: 1, role: "user", text: "旧", timestamp: 1 },

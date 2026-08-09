@@ -11,6 +11,7 @@ import {
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { WorkspaceApplicationError, WorkspaceDependencyError } from "@cube-runtime/workspace";
+import { AgentSupervisor, rootAgentThreadId } from "./agent-supervisor.js";
 import { DurableOperationLane } from "./durable-operation-lane.js";
 import {
   assertControlledRolloutProjection,
@@ -57,7 +58,6 @@ import type {
   WorkspaceRevisionVerifierPort,
 } from "./ports.js";
 import { assertProtocolSize } from "./ports.js";
-import { AgentSupervisor, rootAgentThreadId } from "./agent-supervisor.js";
 import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
 import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 
@@ -685,6 +685,10 @@ export class RunWorker {
         return await sandboxPreparation;
       };
 
+      let promptInput = {
+        text: claim.snapshot.answer ?? claim.snapshot.input,
+        attachments: claim.snapshot.answer === undefined ? (claim.snapshot.attachments ?? []) : [],
+      };
       const preSession = await this.stopPoint(context, cancellation);
       if (preSession) return await this.finishStopped(context, preSession);
       const agentSupervisor =
@@ -766,6 +770,7 @@ export class RunWorker {
         fence: context.fence,
         ensureSandboxReady,
         rolloutProjection: claim.snapshot.rolloutProjection,
+        initialInputText: promptInput.text,
         ...(claim.snapshot.skills === undefined ? {} : { skillSnapshot: claim.snapshot.skills }),
         ...(claim.snapshot.contextThroughSequence === undefined
           ? {}
@@ -912,10 +917,6 @@ export class RunWorker {
       });
       if (!isApplied(modelCheckpoint)) return await this.handleMutationFailure(modelCheckpoint);
 
-      let promptInput = {
-        text: claim.snapshot.answer ?? claim.snapshot.input,
-        attachments: claim.snapshot.answer === undefined ? (claim.snapshot.attachments ?? []) : [],
-      };
       let steerReceiptId: string | undefined;
       const correctionRound = 0;
       let workspaceChange: ValidatedWorkspaceChange | undefined;

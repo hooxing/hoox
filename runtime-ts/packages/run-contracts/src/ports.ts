@@ -1005,6 +1005,8 @@ export interface AgentSessionFactoryPort {
         | { readonly reason: "tool"; readonly call: ExternalEffectCall },
     ) => Promise<SandboxSessionRef>;
     readonly rolloutProjection: ControlledRolloutProjection;
+    /** Session 创建前已知的首轮文本，只用于把即将追加的 user turn 计入自动压缩触发。 */
+    readonly initialInputText?: string;
     readonly skillSnapshot?: RunSkillSnapshot;
     readonly contextThroughSequence?: number;
     readonly threadActiveHistory?: ThreadActiveHistoryV1;

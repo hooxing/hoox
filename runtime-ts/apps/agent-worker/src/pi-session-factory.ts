@@ -23,6 +23,7 @@ import {
   createSafePiSession,
   deriveSafePiSessionCompatibility,
   type PiSessionController,
+  providerVisibleUserInputTokens,
   SandboxToolCircuitOpenError,
   type ThreadActiveHistoryV1,
   type TrustedPiModelContextCapability,
@@ -97,6 +98,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       compatibility: ReturnType<typeof deriveSafePiSessionCompatibility>,
       history: ThreadActiveHistoryV1,
       availableHistoryTokens: number,
+      additionalVisibleTokens: number,
     ) => Promise<ThreadActiveHistoryV1>,
     private readonly promptImages?: PromptImageLoaderPort,
     private readonly skillRuntime?: SkillRuntimeService,
@@ -160,6 +162,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       compatibility: ReturnType<typeof deriveSafePiSessionCompatibility>,
       history: ThreadActiveHistoryV1,
       availableHistoryTokens: number,
+      additionalVisibleTokens = 0,
     ) => {
       const invoke = () =>
         this.prepareRuntimeCompaction?.(
@@ -167,6 +170,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           compatibility,
           history,
           availableHistoryTokens,
+          additionalVisibleTokens,
         );
       const result =
         attemptWireTraces === undefined
@@ -564,6 +568,9 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             compatibility,
             recoveredThreadHistory,
             availableThreadHistoryTokens,
+            input.initialInputText === undefined
+              ? 0
+              : providerVisibleUserInputTokens(input.initialInputText, this.modelContext.tokenizer),
           );
     input.agentControl?.setParentHistory(initialThreadHistory);
     controller = await createSafePiSession({
@@ -594,6 +601,12 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                         compatibility,
                         rebuilt,
                         availableThreadHistoryTokens,
+                        persisted.steer === undefined
+                          ? 0
+                          : providerVisibleUserInputTokens(
+                              persisted.steer.inputText,
+                              this.modelContext.tokenizer,
+                            ),
                       );
               }
               if (persisted.steer !== undefined) {

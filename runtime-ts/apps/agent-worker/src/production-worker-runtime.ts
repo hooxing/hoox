@@ -1,5 +1,10 @@
 import { randomUUID } from "node:crypto";
-import type { PgClaimedRunDispatch, PgRunDispatchOutbox } from "@cube-runtime/persistence";
+import type {
+  PgClaimedRunDispatch,
+  PgClaimedWorkerTenantAssignment,
+  PgRunDispatchOutbox,
+  PgWorkerTenantAssignments,
+} from "@cube-runtime/persistence";
 import type {
   ArtifactPublicationPort,
   CancellationPort,
@@ -395,22 +400,31 @@ interface DispatchQueue {
   }): Promise<void>;
 }
 
-/** 单租户生产消费闭环：领取 durable dispatch，事务外执行 RunWorker，再以 dispatch fence ack。 */
+interface TenantAssignmentQueue {
+  claim(input: {
+    readonly workerId: string;
+    readonly leaseMilliseconds: number;
+  }): ReturnType<PgWorkerTenantAssignments["claim"]>;
+  settle(assignment: PgClaimedWorkerTenantAssignment): Promise<boolean>;
+}
+
+/** 动态 Tenant 消费闭环：先领控制面租约，再在对应 Tenant RLS 内领取 durable dispatch。 */
 export class AgentWorkerPollingLoop {
   private closed = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private inFlight: Promise<void> = Promise.resolve();
 
   constructor(
+    private readonly tenantAssignments: TenantAssignmentQueue,
     private readonly queue: DispatchQueue,
     private readonly worker: Pick<RunWorker, "execute">,
     private readonly options: {
-      readonly tenantId: string;
       readonly workerId: string;
       readonly pollIntervalMs: number;
+      readonly tenantAssignmentLeaseMs: number;
       readonly dispatchLeaseMs: number;
       /** 周期性收敛已具 durable anchor 的维护任务；失败不阻塞 dispatch，下一 tick 重试。 */
-      readonly maintenance?: () => Promise<unknown>;
+      readonly maintenance?: (tenantId: string) => Promise<unknown>;
     },
   ) {}
 
@@ -444,21 +458,43 @@ export class AgentWorkerPollingLoop {
   }
 
   private async tick(): Promise<void> {
+    let assignment: PgClaimedWorkerTenantAssignment | undefined;
     try {
-      await this.options.maintenance?.();
-    } catch {
-      // 维护任务必须保持幂等 durable anchor；当前 tick 失败后由下一 tick 重试。
-    }
-    let claims: readonly PgClaimedRunDispatch[];
-    try {
-      claims = await this.queue.claim({
-        tenantId: this.options.tenantId,
-        dispatcherId: this.options.workerId,
-        limit: 1,
-        leaseMilliseconds: this.options.dispatchLeaseMs,
+      assignment = await this.tenantAssignments.claim({
+        workerId: this.options.workerId,
+        leaseMilliseconds: this.options.tenantAssignmentLeaseMs,
       });
     } catch {
       return;
+    }
+    if (assignment === undefined) return;
+    let claims: readonly PgClaimedRunDispatch[] = [];
+    try {
+      if (this.closed) {
+        return;
+      }
+      try {
+        await this.options.maintenance?.(assignment.tenantId);
+      } catch {
+        // 维护任务必须保持幂等 durable anchor；失败不阻塞当前 Tenant 的 dispatch。
+      }
+      try {
+        claims = await this.queue.claim({
+          tenantId: assignment.tenantId,
+          dispatcherId: this.options.workerId,
+          limit: 1,
+          leaseMilliseconds: this.options.dispatchLeaseMs,
+        });
+      } catch {
+        return;
+      }
+    } finally {
+      try {
+        // Tenant 租约只负责发现和公平分配，不能包住模型执行而串行化不同 Thread。
+        await this.tenantAssignments.settle(assignment);
+      } catch {
+        // 控制面租约会过期；迟到 settle 受 generation/token 栅栏保护。
+      }
     }
     for (const claim of claims) {
       if (this.closed) {

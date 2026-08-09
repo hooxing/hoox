@@ -9,6 +9,7 @@ import type {
   ThreadForkPort,
 } from "./ports.js";
 import { withTenantTransaction } from "./postgres.js";
+import { cancelThreadQueuedRun, lockThreadExecutionHead } from "./pg-thread-run-queue.js";
 
 interface TeamDirectoryRow extends QueryResultRow {
   readonly team_id: string;
@@ -312,6 +313,7 @@ export class PgTeamCollaborationRepository implements TeamCollaborationPort {
           if ((await actorRole(client, input.scope.tenantId, input.scope.userId)) !== "owner") {
             return { outcome: "not_authorized" } as const;
           }
+          await cancelTeamPendingWork(client, input.scope.tenantId);
           await client.query(
             `UPDATE team_member_directory SET status='revoked',updated_at=clock_timestamp()
               WHERE team_id=$1 AND status='active'`,
@@ -330,6 +332,102 @@ export class PgTeamCollaborationRepository implements TeamCollaborationPort {
       throw mapPersistenceError(error, "解散团队");
     }
   }
+}
+
+interface NonterminalTeamRunRow extends QueryResultRow {
+  readonly id: string;
+}
+
+/**
+ * 解散必须先让投递与 Run 收敛，再撤销最后一个 Membership；否则 Worker 已无法装载聚合，
+ * claimed dispatch 会持续 defer。锁序与普通 Run 终态保持 Thread → execution head → Run。
+ */
+async function cancelTeamPendingWork(client: PoolClient, tenantId: string): Promise<void> {
+  // 先封停 outbox，避免持有 Run 锁后再等待迟到 ack 当前持有的 outbox 锁而形成反向等待。
+  // state 与 claim shape 在同一次 UPDATE 中改变；任何旧 token/generation 的 ack 提交后只会 no-op。
+  await cancelTeamDispatches(client, tenantId);
+
+  const threads = await client.query<{ readonly id: string }>(
+    `SELECT thread.id
+       FROM threads thread
+      WHERE thread.tenant_id=$1
+        AND EXISTS (
+          SELECT 1 FROM runs run
+           WHERE run.tenant_id=thread.tenant_id AND run.thread_id=thread.id
+             AND run.status IN ('queued','running','waiting')
+        )
+      ORDER BY thread.id
+      FOR UPDATE OF thread`,
+    [tenantId],
+  );
+  for (const thread of threads.rows) {
+    // active Run 的取消会把尚未落定的 steer 转成 fallback Run；循环直到这些新 Run 也进入终态。
+    for (;;) {
+      const head = await lockThreadExecutionHead(client, tenantId, thread.id);
+      const runs = await client.query<NonterminalTeamRunRow>(
+        `SELECT run.id
+           FROM runs run
+          WHERE run.tenant_id=$1 AND run.thread_id=$2
+            AND run.status IN ('queued','running','waiting')
+          ORDER BY run.created_at,run.id
+          FOR UPDATE OF run`,
+        [tenantId, thread.id],
+      );
+      if (runs.rows.length === 0) break;
+      await client.query(
+        `UPDATE runs
+            SET status='cancelled',version=version+1,updated_at=clock_timestamp()
+          WHERE tenant_id=$1 AND thread_id=$2
+            AND status IN ('queued','running','waiting')`,
+        [tenantId, thread.id],
+      );
+
+      const orderedRuns =
+        head?.active_run_id === null || head?.active_run_id === undefined
+          ? runs.rows
+          : [
+              ...runs.rows.filter((run) => run.id === head.active_run_id),
+              ...runs.rows.filter((run) => run.id !== head.active_run_id),
+            ];
+      for (const run of orderedRuns) {
+        await cancelThreadQueuedRun(client, {
+          tenantId,
+          threadId: thread.id,
+          runId: run.id,
+        });
+      }
+    }
+  }
+
+  // settleActiveThreadRun 可能曾短暂为 steer fallback 新建 outbox；成员撤销前再做一次封口。
+  await cancelTeamDispatches(client, tenantId);
+  await client.query(
+    `UPDATE worker_tenant_assignments
+        SET state='idle',
+            generation=CASE
+              WHEN generation < 9007199254740991 THEN generation+1
+              ELSE generation
+            END,
+            claim_token=NULL,claimed_by=NULL,lease_expires_at=NULL,
+            next_attempt_at=clock_timestamp(),updated_at=clock_timestamp()
+      WHERE tenant_id=$1`,
+    [tenantId],
+  );
+}
+
+async function cancelTeamDispatches(client: PoolClient, tenantId: string): Promise<void> {
+  await client.query(
+    `UPDATE run_dispatch_outbox
+        SET state='cancelled',
+            generation=CASE
+              WHEN generation < 9007199254740991 THEN generation+1
+              ELSE generation
+            END,
+            claim_token=NULL,claimed_by=NULL,lease_expires_at=NULL,
+            last_error_code='team_dissolved',updated_at=clock_timestamp()
+      WHERE tenant_id=$1 AND state IN ('ready','claimed')`,
+    [tenantId],
+  );
 }
 
 export class PgThreadForkRepository implements ThreadForkPort {

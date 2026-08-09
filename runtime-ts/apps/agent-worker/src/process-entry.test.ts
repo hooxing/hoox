@@ -15,6 +15,9 @@ function productionEnvironment(): Record<string, string> {
     RUNTIME_ENV: "production",
     DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_RUNTIME_ROLE: "runtime",
+    DATABASE_WORKER_COORDINATOR_URL:
+      "postgresql://worker_coordinator:credential@database:5432/runtime?sslmode=verify-full",
+    DATABASE_WORKER_COORDINATOR_ROLE: "worker_coordinator",
     DATABASE_SCHEMA: "runtime",
     S3_ENDPOINT: "https://object-storage.example.invalid:9000",
     S3_BUCKET: "runtime-artifacts",
@@ -71,6 +74,9 @@ describe("Agent Worker 进程入口", () => {
       API_JWT_SIGNING_KEYS: "api-only-secret-canary",
     });
     expect(projected).toMatchObject({
+      DATABASE_WORKER_COORDINATOR_URL:
+        "postgresql://worker_coordinator:credential@database:5432/runtime?sslmode=verify-full",
+      DATABASE_WORKER_COORDINATOR_ROLE: "worker_coordinator",
       MODEL_WIRE_TRACE_ENABLED: "false",
       MODEL_WIRE_TRACE_RETENTION_DAYS: "7",
       MODEL_WIRE_TRACE_MAX_BYTES: "1048576",
@@ -214,6 +220,7 @@ describe("Agent Worker 进程入口", () => {
     const databaseFailure = new Error("POSTGRES_RUNTIME_ROLE_UNSAFE");
     const probes = {
       postgres: vi.fn(async () => Promise.reject(databaseFailure)),
+      workerCoordinatorPostgres: vi.fn(async () => undefined),
       objectStorage: vi.fn(async () => undefined),
       sandbox: vi.fn(async () => undefined),
       model: vi.fn(async () => undefined),
@@ -226,6 +233,24 @@ describe("Agent Worker 进程入口", () => {
     expect(probes.sandbox).not.toHaveBeenCalled();
     expect(probes.model).not.toHaveBeenCalled();
     expect(startLoop).not.toHaveBeenCalled();
+  });
+
+  it("Worker Coordinator 必须使用独立角色和独立连接配置", () => {
+    const parsed = parseWorkerProcessEnvironment(productionEnvironment());
+    expect(parsed.databaseWorkerCoordinatorRole).toBe("worker_coordinator");
+    expect(parsed.databaseWorkerCoordinatorUrl).toContain("worker_coordinator");
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        DATABASE_WORKER_COORDINATOR_ROLE: "runtime",
+      }),
+    ).toThrow("必须与 DATABASE_RUNTIME_ROLE 不同");
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        DATABASE_WORKER_COORDINATOR_ROLE: "Worker-Coordinator",
+      }),
+    ).toThrow("DATABASE_WORKER_COORDINATOR_ROLE 格式无效");
   });
 
   it("生产入口固定使用内建真实装配器，拒绝调用方注入 Fake", async () => {

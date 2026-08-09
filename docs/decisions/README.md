@@ -127,6 +127,12 @@
 | [ADR-0128](0128-resourcefs-hidden-thread-parent-traversal.md) | ResourceFS 隐藏 Thread 父目录的 WebDAV 可遍历性 | 已接受 | 2026-08-07 |
 | [ADR-0129](0129-predeclared-thread-filesystem-entrypoint.md) | 预声明 Thread 文件系统稳定入口 | 已接受 | 2026-08-07 |
 | [ADR-0130](0130-personal-history-file-library-and-composer-reference.md) | 个人历史文件云盘与输入框引用 | 已接受（试验分支） | 2026-08-07 |
+| [ADR-0131](0131-independent-cloud-drive-semantic-paths.md) | 独立云盘入口、语义路径与无文本文件选择 | 已接受（试验分支） | 2026-08-08 |
+| [ADR-0132](0132-agent-deliverables-in-history.md) | Agent 正式交付物进入个人历史云盘 | 已接受（试验分支） | 2026-08-08 |
+| [ADR-0133](0133-team-workspace-and-snapshot-boundary.md) | 团队工作空间、任务分支与跨空间文件快照 | 已接受（试验版） | 2026-08-09 |
+| [ADR-0134](0134-dual-task-navigation-and-team-center.md) | 个人与团队双任务导航及团队中心边界 | 已接受（试验版） | 2026-08-09 |
+| [ADR-0135](0135-tabbed-cloud-drive-and-cross-scope-search.md) | 标签式云盘与跨空间范围搜索 | 已接受（试验版） | 2026-08-09 |
+| [ADR-0136](0136-dynamic-worker-tenant-assignment.md) | 动态 Worker Tenant 分配与团队任务调度 | 已接受（试验版） | 2026-08-10 |
 
 ## 何时必须记录
 

@@ -4,6 +4,8 @@ export const expectedEnvironmentKeys = Object.freeze([
   "DATABASE_BOOTSTRAP_URL",
   "MIGRATION_DATABASE_URL",
   "DATABASE_RUNTIME_ROLE",
+  "DATABASE_WORKER_COORDINATOR_URL",
+  "DATABASE_WORKER_COORDINATOR_ROLE",
   "DATABASE_MIGRATOR_ROLE",
   "DATABASE_SKILL_PUBLISHER_ROLE",
   "DATABASE_SCHEMA",
@@ -110,6 +112,7 @@ export const expectedEnvironmentKeys = Object.freeze([
 
 const placeholderOnlyKeys = new Set([
   "DATABASE_URL",
+  "DATABASE_WORKER_COORDINATOR_URL",
   "DATABASE_DOCKER_URL",
   "DATABASE_BOOTSTRAP_URL",
   "MIGRATION_DATABASE_URL",
@@ -139,6 +142,7 @@ const nullablePlaceholderKeys = new Set(["CUBESANDBOX_API_KEY"]);
 function looksLikePlaceholder(key, value) {
   if (
     key === "DATABASE_URL" ||
+    key === "DATABASE_WORKER_COORDINATOR_URL" ||
     key === "DATABASE_DOCKER_URL" ||
     key === "DATABASE_BOOTSTRAP_URL" ||
     key === "MIGRATION_DATABASE_URL" ||

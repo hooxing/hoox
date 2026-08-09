@@ -30,6 +30,7 @@ export * from "./pg-thread-input.js";
 export * from "./pg-thread-title-generation.js";
 export * from "./pg-thread-sandbox-lifecycle-consumer.js";
 export * from "./pg-waiting-recovery.js";
+export * from "./pg-worker-tenant-assignment.js";
 export * from "./pg-workspace-candidate.js";
 export * from "./pg-workspace-manifest.js";
 export * from "./ports.js";

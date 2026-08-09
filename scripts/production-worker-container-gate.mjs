@@ -115,6 +115,8 @@ try {
     "RUNTIME_ENV=production",
     `DATABASE_URL=postgresql://runtime:${secretCanary}@127.0.0.1:1/runtime?sslmode=verify-full`,
     "DATABASE_RUNTIME_ROLE=runtime",
+    `DATABASE_WORKER_COORDINATOR_URL=postgresql://worker_coordinator:${secretCanary}@127.0.0.1:1/runtime?sslmode=verify-full`,
+    "DATABASE_WORKER_COORDINATOR_ROLE=worker_coordinator",
     "DATABASE_SCHEMA=runtime",
     "S3_ENDPOINT=https://object-storage.invalid",
     "S3_BUCKET=runtime-artifacts",

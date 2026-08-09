@@ -130,6 +130,10 @@ export async function migrateUp(
       await client.query("SELECT set_config('app.skill_publisher_role', $1, true)", [
         options.skillPublisherRole,
       ]);
+      await client.query("SELECT set_config('app.runtime_role', $1, true)", [options.runtimeRole]);
+      await client.query("SELECT set_config('app.worker_coordinator_role', $1, true)", [
+        options.workerCoordinatorRole,
+      ]);
       await ensureMigrationTable(client);
       const applied = await appliedMigrations(client);
       for (const record of applied) {
@@ -186,6 +190,10 @@ export async function migrateDown(
       await assertMigrationContextSafe(client, options);
       await client.query("SELECT set_config('app.skill_publisher_role', $1, true)", [
         options.skillPublisherRole,
+      ]);
+      await client.query("SELECT set_config('app.runtime_role', $1, true)", [options.runtimeRole]);
+      await client.query("SELECT set_config('app.worker_coordinator_role', $1, true)", [
+        options.workerCoordinatorRole,
       ]);
       await ensureMigrationTable(client);
       const applied = await appliedMigrations(client);

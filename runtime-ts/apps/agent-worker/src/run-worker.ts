@@ -195,6 +195,7 @@ interface ExecutionContext {
   stopped?: "cancelled" | "shutdown" | "timeout" | "fence_lost" | "unavailable" | "scope_mismatch";
   agentFailure?: StableWorkerErrorCode;
   modelCompleted: boolean;
+  modelStopReason?: "stop" | "length" | "toolUse";
   eventAcceptanceOpen: boolean;
   adapterRejected: boolean;
   contextTurnOrdinal: number;
@@ -202,6 +203,9 @@ interface ExecutionContext {
   abortSession?: () => Promise<void>;
   threadSandboxLease?: ThreadSandboxLeaseRefV1;
 }
+
+const OUTPUT_LIMIT_CONTINUATION_PROMPT =
+  "上一轮因模型输出长度上限中止。请从当前状态继续：若任务尚未完成，继续使用工具完成剩余工作；若已完成，只给出简洁最终答复。不要重复已经完成的步骤。";
 
 interface ToolStartedGate {
   readonly name: string;
@@ -918,6 +922,8 @@ export class RunWorker {
       if (!isApplied(modelCheckpoint)) return await this.handleMutationFailure(modelCheckpoint);
 
       let steerReceiptId: string | undefined;
+      let outputLimitContinuationRound = 0;
+      let outputLimitContinuationUsed = false;
       const correctionRound = 0;
       let workspaceChange: ValidatedWorkspaceChange | undefined;
 
@@ -925,11 +931,16 @@ export class RunWorker {
       for (;;) {
         const preModel = await this.stopPoint(context, cancellation);
         if (preModel) return await this.finishStopped(context, preModel, sandbox);
-        const modelEffect = steerReceiptId === undefined ? "model_start" : "model_continue";
+        const modelEffect =
+          steerReceiptId === undefined && outputLimitContinuationRound === 0
+            ? "model_start"
+            : "model_continue";
         const modelCallId =
-          steerReceiptId === undefined
-            ? `${context.attemptId}/model/start`
-            : `${context.attemptId}/model/steer/${steerReceiptId}`;
+          outputLimitContinuationRound > 0
+            ? `${context.attemptId}/model/output-limit/${outputLimitContinuationRound}`
+            : steerReceiptId === undefined
+              ? `${context.attemptId}/model/start`
+              : `${context.attemptId}/model/steer/${steerReceiptId}`;
         const preparedInput = await session.prepareInput(promptInput);
         const modelAuthorization = await this.authorizeEffect(context, cancellation, modelEffect, {
           callId: modelCallId,
@@ -940,6 +951,7 @@ export class RunWorker {
           }),
         });
         context.modelCompleted = false;
+        delete context.modelStopReason;
         const turn = await session.runPrompt(preparedInput, modelAuthorization);
         await eventChain;
         if (context.abortPromise) await context.abortPromise;
@@ -974,6 +986,18 @@ export class RunWorker {
             cancellation,
           );
         }
+        if (
+          turn.kind === "completed" &&
+          context.modelStopReason === "length" &&
+          !outputLimitContinuationUsed
+        ) {
+          // Provider 已完整提交 length 终态；追加一次有界续跑，避免把推理预算耗尽误报为协议损坏。
+          outputLimitContinuationRound = 1;
+          outputLimitContinuationUsed = true;
+          steerReceiptId = undefined;
+          promptInput = { text: OUTPUT_LIMIT_CONTINUATION_PROMPT, attachments: [] };
+          continue;
+        }
         if (turn.kind === "completed" && !context.modelCompleted) {
           return await this.finalizeWithCleanup(
             context,
@@ -983,6 +1007,7 @@ export class RunWorker {
             cancellation,
           );
         }
+        outputLimitContinuationRound = 0;
 
         if (this.options.threadInputRoutingV2Enabled === true) {
           const pending = await this.dependencies.persistence.readPendingThreadSteer({
@@ -1789,6 +1814,29 @@ export class RunWorker {
     cancellation: AbortSignal,
   ): Promise<RunWorkerResult> {
     if (context.abortPromise) await context.abortPromise;
+    const retainThreadSandbox =
+      sandbox !== undefined &&
+      context.threadSandboxLease !== undefined &&
+      runStatus === "failed" &&
+      code === "PROTOCOL" &&
+      context.modelStopReason === "length";
+    if (retainThreadSandbox && sandbox !== undefined) {
+      const stopped = await this.stopPoint(context, cancellation);
+      if (stopped === "cancelled") {
+        return await this.finalizeWithCleanup(
+          context,
+          sandbox,
+          "cancelled",
+          "CANCELLED",
+          cancellation,
+        );
+      }
+      if (stopped && stopped !== "timeout")
+        return await this.finishStopped(context, stopped, sandbox);
+      const finalizing = await this.prepareThreadSandboxTerminal(context);
+      if (!isApplied(finalizing)) return await this.handleMutationFailure(finalizing);
+      return await this.finalizeWithoutRevision(context, runStatus, code, sandbox);
+    }
     if (sandbox !== undefined) {
       const settled = await this.settleSandbox(context, sandbox, "close");
       if (settled.outcome !== "settled") return settled.result;
@@ -1804,6 +1852,7 @@ export class RunWorker {
     context: ExecutionContext,
     runStatus: "failed" | "cancelled",
     code: StableWorkerErrorCode,
+    retainedSandbox?: SandboxSessionRef,
   ): Promise<RunWorkerResult> {
     if (context.abortPromise) await context.abortPromise;
     const final = await this.applyMutation(context, {
@@ -1814,11 +1863,18 @@ export class RunWorker {
       outbox: [],
       nextRunStatus: runStatus,
       releaseFences: true,
+      ...(retainedSandbox === undefined || context.threadSandboxLease === undefined
+        ? {}
+        : { threadSandboxTerminal: terminalSandboxCommand(context.threadSandboxLease) }),
       ...(this.options.threadContextWriteEnabled === true
         ? { threadContextAppend: terminalContextAppend(context, runStatus) }
         : {}),
     });
-    return isApplied(final) ? { outcome: runStatus } : await this.handleMutationFailure(final);
+    if (!isApplied(final)) return await this.handleMutationFailure(final);
+    if (retainedSandbox !== undefined) {
+      await this.completeThreadSandboxTerminalEffect(context, retainedSandbox, final);
+    }
+    return { outcome: runStatus };
   }
 
   private async finishStopped(
@@ -2206,8 +2262,9 @@ function workspaceDependencyCategory(error: WorkspaceDependencyError): string {
 }
 
 function updateAgentState(context: ExecutionContext, event: RuntimeAgentEvent): void {
-  if (event.type === "message.completed" && event.stopReason === "stop") {
-    context.modelCompleted = true;
+  if (event.type === "message.completed") {
+    context.modelStopReason = event.stopReason;
+    context.modelCompleted = event.stopReason === "stop";
   }
   if (event.type === "error") {
     context.agentFailure = event.code === "ABORTED" ? "CANCELLED" : event.code;

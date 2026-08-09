@@ -1695,7 +1695,9 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
           entries: expect.arrayContaining([
             expect.objectContaining({
               kind: "run_terminal",
-              body: expect.objectContaining({ value: { status: "cancelled" } }),
+              body: expect.objectContaining({
+                value: expect.objectContaining({ status: "cancelled", code: "CANCELLED" }),
+              }),
             }),
           ]),
         }),
@@ -1774,7 +1776,21 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     const agentEvents = h.persistence
       .record(h.scope)
       .events.filter((event) => event.kind === "agent_event");
-    expect(agentEvents).toHaveLength(1);
+    expect(agentEvents).toHaveLength(2);
+    expect(agentEvents).toContainEqual(
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          type: "runtime.notice",
+          code: "EVENT_REJECTED",
+          source: "terminal_fallback",
+        }),
+      }),
+    );
+    expect(
+      agentEvents.some(
+        (event) => event.kind === "agent_event" && event.payload.type === "message.completed",
+      ),
+    ).toBe(false);
     expect(session.abortCompleted).toBe(true);
   });
 
@@ -1815,13 +1831,25 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(record.attempt?.status).toBe("failed");
     expect(record.workspace.currentRevisionId).toBeUndefined();
     expect(JSON.stringify(record.events)).not.toContain("上游私有");
+    expect(record.events).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_event",
+        payload: expect.objectContaining({
+          type: "runtime.notice",
+          code: "PROVIDER",
+          message: "模型服务调用失败，本次任务未能完成，请稍后重试。",
+        }),
+      }),
+    );
     expect(commands).toContainEqual(
       expect.objectContaining({
         threadContextAppend: expect.objectContaining({
           entries: expect.arrayContaining([
             expect.objectContaining({
               kind: "run_terminal",
-              body: expect.objectContaining({ value: { status: "failed" } }),
+              body: expect.objectContaining({
+                value: expect.objectContaining({ status: "failed", code: "PROVIDER" }),
+              }),
             }),
           ]),
         }),

@@ -61,6 +61,14 @@ export type RuntimeAgentEvent =
       }[];
     }
   | { type: "queue.updated"; steering: readonly string[]; followUp: readonly string[] }
+  | {
+      /** Runtime 在模型无法安全继续时生成的用户可见兜底；不伪装成模型原话。 */
+      type: "runtime.notice";
+      level: "error";
+      code: string;
+      message: string;
+      source: "terminal_fallback";
+    }
   | { type: "compaction.forbidden"; source: "pi" }
   | {
       type: "error";

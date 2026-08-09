@@ -27,8 +27,9 @@ const INVALID_ARGUMENT_PATH_PREFIX = "/workspace/.runtime-invalid/";
 const strictSchema = { additionalProperties: false } as const;
 const sandboxActiveFileMutations = new WeakMap<SandboxHandle, Set<string>>();
 const SANDBOX_INFRASTRUCTURE_FAILURE_LIMIT = 3;
-export type ToolContinuationFailure = "SANDBOX_FAILED";
-type RejectModelContinuation = (failure?: ToolContinuationFailure) => void;
+export type ToolReportOnlyFailure = "SANDBOX_FAILED" | "TOOL_FAILED";
+type RejectModelContinuation = () => void;
+type EnterReportOnlyMode = (failure: ToolReportOnlyFailure) => void;
 const ExecCommandArgumentsSchema = Type.Object(
   {
     cmd: Type.String({ minLength: 1 }),
@@ -161,6 +162,7 @@ export function createObservedSandboxTools(
     }): Promise<ToolObservationResult>;
   },
   rejectModelContinuation: RejectModelContinuation = () => undefined,
+  enterReportOnlyMode: EnterReportOnlyMode = () => undefined,
 ): {
   readonly tools: ReturnType<typeof createSandboxTools>;
   readonly outputs: ControlledToolReceiptSource;
@@ -197,7 +199,13 @@ export function createObservedSandboxTools(
     }
   };
   return {
-    tools: createSandboxToolsInternal(sandbox, authorizer, capture, rejectModelContinuation),
+    tools: createSandboxToolsInternal(
+      sandbox,
+      authorizer,
+      capture,
+      rejectModelContinuation,
+      enterReportOnlyMode,
+    ),
     outputs: source,
     recordControlledReceipt: (callId, toolName, outcome) =>
       capture(callId, toolName, encodeControlledToolReceipt(toolName, outcome)),
@@ -209,6 +217,7 @@ function createSandboxToolsInternal(
   authorizer: SandboxToolEffectAuthorizer,
   capture?: (callId: string, name: string, text: string) => Promise<ToolObservationResult>,
   rejectModelContinuation: RejectModelContinuation = () => undefined,
+  enterReportOnlyMode: EnterReportOnlyMode = () => undefined,
 ) {
   const execInfrastructureCircuit = createSandboxInfrastructureCircuit();
   const execArguments = createSchemaInvalidArgumentsBridge<ExecCommandArguments>(
@@ -241,6 +250,7 @@ function createSandboxToolsInternal(
       execArguments,
       capture,
       rejectModelContinuation,
+      enterReportOnlyMode,
       execInfrastructureCircuit,
     ),
     createReadTool(sandbox, authorizer, readArguments, capture, rejectModelContinuation),
@@ -257,6 +267,7 @@ function createExecCommandTool(
     | ((callId: string, name: string, text: string) => Promise<ToolObservationResult>)
     | undefined,
   rejectModelContinuation: RejectModelContinuation,
+  enterReportOnlyMode: EnterReportOnlyMode,
   infrastructureCircuit: SandboxInfrastructureCircuit,
 ) {
   // TODO(codex-alignment): 同步 MVP 暂无 PTY、yield/session、write_stdin、shell/login 参数；
@@ -283,7 +294,7 @@ function createExecCommandTool(
       }
       if (infrastructureCircuit.isOpen()) {
         await persistReceipt(callId, "exec_command", "failed", capture);
-        rejectModelContinuation("SANDBOX_FAILED");
+        enterReportOnlyMode("SANDBOX_FAILED");
         throw new Error(execUnavailableError());
       }
       let effectRejected = false;
@@ -319,8 +330,8 @@ function createExecCommandTool(
           infrastructureCircuit.recordFailure()
         ) {
           // 同一 Sandbox 的命令数据面连续失败后不会靠模型改写命令恢复；持久化第三个
-          // 失败回执后关闭下一次 Provider 请求，避免无界消耗 token 和副作用许可。
-          rejectModelContinuation("SANDBOX_FAILED");
+          // 失败回执后移除全部工具，让下一次 Provider 请求只能向用户解释失败。
+          enterReportOnlyMode("SANDBOX_FAILED");
         }
         throw new Error(projectInfrastructureError(error, timeoutMs));
       }

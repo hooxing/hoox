@@ -236,6 +236,20 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
         blocks[activeAnswer] = { ...block, text: `${block.text}${delta}` };
       continue;
     }
+    if (event.type === "runtime.notice") {
+      activeThinking = undefined;
+      activeAnswer = undefined;
+      const message = text(payload?.message);
+      if (message !== undefined) {
+        blocks.push({
+          id: event.eventId,
+          type: "answer",
+          text: message,
+          status: "completed",
+        });
+      }
+      continue;
+    }
     if (event.type === "message.completed") {
       const answerIndex = activeAnswer;
       const answer = answerIndex === undefined ? undefined : blocks[answerIndex];

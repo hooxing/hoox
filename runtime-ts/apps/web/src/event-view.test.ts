@@ -40,6 +40,26 @@ describe("用户运行进度投影", () => {
     });
   });
 
+  it("把 Runtime 终态兜底作为已完成的用户可见回复", () => {
+    const blocks = buildConversationBlocks([
+      event(1, "runtime.notice", {
+        level: "error",
+        code: "PROVIDER",
+        message: "模型服务调用失败，本次任务未能完成，请稍后重试。",
+        source: "terminal_fallback",
+      }),
+    ]);
+
+    expect(blocks).toEqual([
+      {
+        id: "event-1",
+        type: "answer",
+        text: "模型服务调用失败，本次任务未能完成，请稍后重试。",
+        status: "completed",
+      },
+    ]);
+  });
+
   it("不把工具原始参数作为展示标题", () => {
     const blocks = buildConversationBlocks([
       event(1, "tool.started", {

@@ -79,6 +79,54 @@ describe("工作台展示组件", () => {
     expect(transcript).toContain("中断前的思考。");
   });
 
+  it("失败运行没有模型回复时仍显示按稳定错误码生成的兜底回复", () => {
+    const failed: Run = { ...running, status: "failed" };
+    const html = renderToStaticMarkup(
+      <RunTranscript
+        run={failed}
+        events={[
+          {
+            eventId: "failed-state",
+            sequence: 1,
+            occurredAt: "",
+            kind: "attempt_state_changed",
+            type: "attempt_state_changed",
+            payload: { status: "failed", stage: "finished", code: "SANDBOX_FAILED" },
+          },
+        ]}
+      />,
+    );
+
+    expect(html).toContain("Sandbox 连续调用失败，本次任务未能完成。");
+  });
+
+  it("已有 Runtime 兜底回复时不再追加第二条页面兜底", () => {
+    const failed: Run = { ...running, status: "failed" };
+    const message = "模型服务调用失败，本次任务未能完成，请稍后重试。";
+    const html = renderToStaticMarkup(
+      <RunTranscript
+        run={failed}
+        events={[
+          {
+            eventId: "runtime-notice",
+            sequence: 1,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "runtime.notice",
+            payload: {
+              level: "error",
+              code: "PROVIDER",
+              message,
+              source: "terminal_fallback",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(html.match(new RegExp(message, "gu"))).toHaveLength(1);
+  });
+
   it("把 steer 与 follow-up 作为对话中的用户消息展示，而不是替换当前任务", () => {
     const html = renderToStaticMarkup(
       <ThreadTranscript

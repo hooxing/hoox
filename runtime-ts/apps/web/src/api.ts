@@ -370,12 +370,12 @@ export class RuntimeApi {
   private async request<T>(
     path: string,
     init: RequestInit = {},
-    tenantId: string | undefined = this.activeTenantId,
+    tenantId: string | null | undefined = this.activeTenantId,
   ): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("Authorization", "Bearer dev-user-a");
     headers.set("Accept", "application/json");
-    if (tenantId !== undefined) headers.set("X-Tenant-ID", tenantId);
+    if (tenantId !== undefined && tenantId !== null) headers.set("X-Tenant-ID", tenantId);
     if (init.body !== undefined) headers.set("Content-Type", "application/json");
     if (["POST", "PUT", "PATCH", "DELETE"].includes(init.method ?? "GET")) {
       headers.set("Idempotency-Key", createKey());
@@ -422,7 +422,13 @@ export class RuntimeApi {
   }
 
   async listThreads(): Promise<readonly Thread[]> {
-    return asArray(await this.request<unknown>("/v1/threads?limit=100")) as readonly Thread[];
+    return this.listThreadsForTenant(this.activeTenantId);
+  }
+
+  async listThreadsForTenant(tenantId: string | undefined): Promise<readonly Thread[]> {
+    return asArray(
+      await this.request<unknown>("/v1/threads?limit=100", {}, tenantId ?? null),
+    ) as readonly Thread[];
   }
 
   async listTeams(): Promise<readonly TeamSummary[]> {
@@ -496,7 +502,7 @@ export class RuntimeApi {
     }
     if (options.limit !== undefined) query.set("limit", String(options.limit));
     const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-    return this.request<HistoryFilePage>(`/v1/me/history-files${suffix}`, {}, tenantId);
+    return this.request<HistoryFilePage>(`/v1/me/history-files${suffix}`, {}, tenantId ?? null);
   }
 
   async downloadHistoryFile(file: Pick<HistoryFile, "resourceId" | "versionId">): Promise<string> {
@@ -510,7 +516,7 @@ export class RuntimeApi {
     const data = await this.request<unknown>(
       `/v1/me/history-files/${encodeURIComponent(file.resourceId)}/versions/${encodeURIComponent(file.versionId)}/download`,
       {},
-      tenantId,
+      tenantId ?? null,
     );
     const candidate = record(data)?.url;
     if (typeof candidate === "string") return candidate;

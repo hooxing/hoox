@@ -963,9 +963,15 @@ function composerFileKey(file: File): string {
   return `${file.name}\0${file.size}\0${file.type}\0${file.lastModified}`;
 }
 
-export function ThreadNavigation({ children }: { readonly children: ReactNode }) {
+export function ThreadNavigation({
+  children,
+  ariaLabel = "会话列表",
+}: {
+  readonly children: ReactNode;
+  readonly ariaLabel?: string;
+}) {
   return (
-    <nav className="thread-list" aria-label="会话列表">
+    <nav className="thread-list" aria-label={ariaLabel}>
       {children}
     </nav>
   );

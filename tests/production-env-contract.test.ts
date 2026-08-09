@@ -36,6 +36,8 @@ describe("production 部署配置契约", () => {
         "MODEL_WIRE_TRACE_ENABLED",
         "MODEL_WIRE_TRACE_RETENTION_DAYS",
         "MODEL_WIRE_TRACE_MAX_BYTES",
+        "DATABASE_WORKER_COORDINATOR_URL",
+        "DATABASE_WORKER_COORDINATOR_ROLE",
       ]),
     );
     expect(validateProductionEnvironmentExample(example)).toEqual([]);

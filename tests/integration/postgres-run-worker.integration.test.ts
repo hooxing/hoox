@@ -65,6 +65,7 @@ import {
   PgRunDispatchCreation,
   PgRunDispatchOutbox,
 } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
+import { PgWorkerTenantAssignments } from "../../runtime-ts/packages/persistence/src/pg-worker-tenant-assignment.js";
 import {
   PgBackedSandboxSessionRegistry,
   PgExecutionPersistence,
@@ -87,6 +88,7 @@ import {
   createPostgresPool,
   type Pool,
   withTenantTransaction,
+  withTransaction,
 } from "../../runtime-ts/packages/persistence/src/postgres.js";
 import { PgThreadContextHistoryRepository } from "../../runtime-ts/packages/persistence/src/thread-context.js";
 import {
@@ -106,6 +108,7 @@ const bootstrapUrl = process.env.DATABASE_BOOTSTRAP_URL ?? "";
 const preprovisionedDatabase = process.env.M4_PREPROVISIONED_DATABASE === "true";
 const adminUrl = preprovisionedDatabase ? (process.env.M4_DATABASE_ADMIN_URL ?? "") : bootstrapUrl;
 const configuredRuntimeUrl = process.env.DATABASE_URL ?? "";
+const configuredWorkerCoordinatorUrl = process.env.DATABASE_WORKER_COORDINATOR_URL ?? "";
 const suffix = `${process.pid}_${Date.now().toString(36)}`;
 const schema = preprovisionedDatabase ? (process.env.DATABASE_SCHEMA ?? "") : `it_rw_${suffix}`;
 const runtimeRole = preprovisionedDatabase
@@ -117,19 +120,25 @@ const migratorRole = preprovisionedDatabase
 const skillPublisherRole = preprovisionedDatabase
   ? (process.env.DATABASE_SKILL_PUBLISHER_ROLE ?? "")
   : `it_rw_pub_${suffix}`;
+const workerCoordinatorRole = preprovisionedDatabase
+  ? (process.env.DATABASE_WORKER_COORDINATOR_ROLE ?? "")
+  : `it_rw_coord_${suffix}`;
 const runtimePassword = randomBytes(24).toString("hex");
 const migratorPassword = randomBytes(24).toString("hex");
 const skillPublisherPassword = randomBytes(24).toString("hex");
+const workerCoordinatorPassword = randomBytes(24).toString("hex");
 const safePgIdentifier = /^[a-z][a-z0-9_]{0,62}$/u;
 let admin!: Pool;
 let migrator!: Pool;
 let runtime!: Pool;
+let workerCoordinator!: Pool;
 let runtimeConnectionString = "";
 let repositories!: PgCoreRepositories;
 let setup!: PgRunExecutionSetup;
 let persistence!: PgExecutionPersistence;
 let runDispatchCreation!: PgRunDispatchCreation;
 let runDispatchOutbox!: PgRunDispatchOutbox;
+let workerTenantAssignments!: PgWorkerTenantAssignments;
 let migrationContract!: PostgreSqlMigrationContract;
 let databaseName = "";
 
@@ -437,25 +446,33 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       CREATE ROLE "${workerCoordinatorRole}" LOGIN PASSWORD '${workerCoordinatorPassword}'
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        GRANT CONNECT ON DATABASE "${databaseName}"
-         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}";
+         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
       );
     }
     const migratorUrl = new URL(bootstrapUrl);
     const runtimeUrl = new URL(preprovisionedDatabase ? configuredRuntimeUrl : bootstrapUrl);
+    const workerCoordinatorUrl = new URL(
+      preprovisionedDatabase ? configuredWorkerCoordinatorUrl : bootstrapUrl,
+    );
     if (preprovisionedDatabase) {
       if (
         !schema.startsWith("m4_ci_") ||
         !runtimeRole.startsWith("m4_ci_") ||
         !migratorRole.startsWith("m4_ci_") ||
         !skillPublisherRole.startsWith("m4_ci_") ||
+        !workerCoordinatorRole.startsWith("m4_ci_") ||
         !safePgIdentifier.test(schema) ||
         !safePgIdentifier.test(runtimeRole) ||
         !safePgIdentifier.test(migratorRole) ||
         !safePgIdentifier.test(skillPublisherRole) ||
+        !safePgIdentifier.test(workerCoordinatorRole) ||
         migratorUrl.username !== migratorRole ||
         runtimeUrl.username !== runtimeRole ||
+        workerCoordinatorUrl.username !== workerCoordinatorRole ||
         schema.length === 0
       ) {
         throw new Error("M4 预置数据库角色、连接或 Schema 配置不一致");
@@ -465,11 +482,23 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       migratorUrl.password = migratorPassword;
       runtimeUrl.username = runtimeRole;
       runtimeUrl.password = runtimePassword;
+      workerCoordinatorUrl.username = workerCoordinatorRole;
+      workerCoordinatorUrl.password = workerCoordinatorPassword;
     }
     runtimeConnectionString = runtimeUrl.toString();
     migrator = createPostgresPool({ connectionString: migratorUrl.toString(), schema });
     runtime = createPostgresPool({ connectionString: runtimeConnectionString, schema });
-    await migrateUp(migrator, { runtimeRole, migratorRole, skillPublisherRole, schema });
+    workerCoordinator = createPostgresPool({
+      connectionString: workerCoordinatorUrl.toString(),
+      schema,
+    });
+    await migrateUp(migrator, {
+      runtimeRole,
+      migratorRole,
+      skillPublisherRole,
+      workerCoordinatorRole,
+      schema,
+    });
     const dispatchAcl = await admin.query<{ readonly allowed: boolean; readonly version: number }>(
       `SELECT has_table_privilege($1::text, format('%I.api_idempotency_records', $2::text), 'SELECT') AS allowed,
               (SELECT max(version) FROM "${schema}".runtime_schema_migrations)::int AS version`,
@@ -490,10 +519,15 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     persistence = new PgExecutionPersistence(runtime);
     runDispatchCreation = new PgRunDispatchCreation(runtime);
     runDispatchOutbox = new PgRunDispatchOutbox(runtime);
+    workerTenantAssignments = new PgWorkerTenantAssignments({
+      runtime,
+      coordinator: workerCoordinator,
+    });
   });
 
   afterAll(async () => {
     await runtime?.end();
+    await workerCoordinator?.end();
     await migrator?.end();
     if (!(schema.startsWith("it_rw_") || schema.startsWith("m4_ci_"))) {
       throw new Error("拒绝清理非测试 Schema");
@@ -502,11 +536,12 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       ?.query(
         `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
        REVOKE CONNECT ON DATABASE "${databaseName}"
-         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}"`,
+         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}"`,
       )
       .catch(() => undefined);
     await admin?.query(
       `DROP ROLE IF EXISTS "${runtimeRole}";
+       DROP ROLE IF EXISTS "${workerCoordinatorRole}";
        DROP ROLE IF EXISTS "${skillPublisherRole}";
        DROP ROLE IF EXISTS "${migratorRole}"`,
     );
@@ -1143,6 +1178,26 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       }),
     ).resolves.toEqual({ outcome: "key_conflict" });
 
+    const assignment = await workerTenantAssignments.claim({
+      workerId: "dynamic-dispatch-worker",
+      leaseMilliseconds: 30_000,
+    });
+    expect(assignment).toMatchObject({ tenantId: scope.tenantId, generation: 1 });
+    if (assignment === undefined) throw new Error("没有动态 Tenant assignment claim 胜者");
+    await expect(workerTenantAssignments.settle(assignment)).resolves.toBe(true);
+
+    const runtimeGlobalCount = await withTransaction(runtime, async (client) => {
+      // 旧原型使用过这个 GUC；独立角色策略必须保证普通 Runtime 无法借它打开全局视图。
+      await client.query("SELECT set_config('app.worker_id','forged-runtime-worker',true)");
+      return client.query<{ readonly count: number }>(
+        "SELECT count(*)::int AS count FROM worker_tenant_assignments",
+      );
+    });
+    expect(runtimeGlobalCount.rows[0]?.count).toBe(0);
+    await expect(workerCoordinator.query("SELECT id FROM runs LIMIT 1")).rejects.toMatchObject({
+      code: "42501",
+    });
+
     const claims = await Promise.all([
       runDispatchOutbox.claim({
         tenantId: scope.tenantId,
@@ -1181,6 +1236,58 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         leaseMilliseconds: 30_000,
       }),
     ).resolves.toEqual([]);
+  });
+
+  it("0042 回退后可从 durable outbox 重建动态 Tenant 控制面及双角色 ACL", async () => {
+    const label = `dynamic-migration-${suffix}`;
+    const f = await serialQueueFixture(label);
+    const now = isoTimestamp("2099-07-26T00:00:00.000Z");
+    const inputText = "迁移往返后仍可发现的动态 Tenant 任务";
+    const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
+    const created = await creation.createQueuedRun({
+      scope: f.tenantScope,
+      run: createRun({ id: runId(`dynamic-migration-run-${suffix}`), thread: f.thread, now }),
+      thread: f.thread,
+      inputText,
+      idempotency: {
+        key: `dynamic-migration-key-${suffix}`,
+        requestHash: requestDigest(`${f.thread.id}\u0000${inputText}`),
+      },
+    });
+    expect(created.outcome).toBe("created");
+
+    const down = await migrateDown(migrator, {
+      runtimeRole,
+      migratorRole,
+      skillPublisherRole,
+      workerCoordinatorRole,
+      schema,
+      targetVersion: 41,
+      allowDestructive: true,
+      environment: "test",
+    });
+    expect(down.at(-1)?.version).toBe(41);
+    const removed = await admin.query<{ readonly present: boolean }>(
+      "SELECT to_regclass(format('%I.worker_tenant_assignments',$1::text)) IS NOT NULL AS present",
+      [schema],
+    );
+    expect(removed.rows[0]?.present).toBe(false);
+
+    const restored = await migrateUp(migrator, {
+      runtimeRole,
+      migratorRole,
+      skillPublisherRole,
+      workerCoordinatorRole,
+      schema,
+    });
+    expect(restored.at(-1)?.version).toBe(migrationContract.latestVersion);
+    const assignment = await workerTenantAssignments.claim({
+      workerId: "dynamic-migration-worker",
+      leaseMilliseconds: 30_000,
+    });
+    expect(assignment).toMatchObject({ tenantId: f.tenantScope.tenantId, generation: 1 });
+    if (assignment === undefined) throw new Error("迁移回填没有恢复动态 Tenant assignment");
+    await expect(workerTenantAssignments.settle(assignment)).resolves.toBe(true);
   });
 
   it("V2 并发 100 次 follow-up 只激活一个 Run，重试不复制 receipt、Run 或 dispatch", async () => {
@@ -6125,6 +6232,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       runtimeRole,
       migratorRole,
       skillPublisherRole,
+      workerCoordinatorRole,
       schema,
       targetVersion: 15,
       allowDestructive: true,
@@ -6167,6 +6275,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       runtimeRole,
       migratorRole,
       skillPublisherRole,
+      workerCoordinatorRole,
       schema,
     });
     expect(restored.at(-1)?.version).toBe(migrationContract.latestVersion);

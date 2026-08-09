@@ -49,12 +49,20 @@ const migratorRole = `it_wait_mg_${unique}`;
 const migratorPassword = randomBytes(24).toString("hex");
 const skillPublisherRole = `it_wait_pub_${unique}`;
 const skillPublisherPassword = randomBytes(24).toString("hex");
+const workerCoordinatorRole = `it_wait_coord_${unique}`;
+const workerCoordinatorPassword = randomBytes(24).toString("hex");
 const testMigrationUrl = new URL(migrationUrl);
 if (testMigrationUrl.username !== configuredMigrator) throw new Error("迁移角色配置不一致");
 testMigrationUrl.username = migratorRole;
 testMigrationUrl.password = migratorPassword;
 const databaseName = new URL(bootstrapUrl).pathname.slice(1);
-const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
+const migrationSecurity = {
+  runtimeRole,
+  migratorRole,
+  skillPublisherRole,
+  workerCoordinatorRole,
+  schema,
+} as const;
 
 const scope = {
   tenantId: tenantId(`wait_tenant_${unique}`),
@@ -272,7 +280,9 @@ beforeAll(async () => {
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
+     CREATE ROLE "${workerCoordinatorRole}" LOGIN PASSWORD '${workerCoordinatorPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   roleCreated = true;
@@ -456,7 +466,8 @@ afterAll(async () => {
   if (schemaCreated) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (roleCreated) {
     await admin.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}";
+       DROP ROLE "${workerCoordinatorRole}";
        DROP ROLE "${skillPublisherRole}";
        DROP ROLE "${migratorRole}"`,
     );

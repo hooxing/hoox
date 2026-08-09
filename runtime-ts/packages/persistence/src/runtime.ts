@@ -59,7 +59,12 @@ export interface MigrationRuntime {
   down(
     options: Omit<
       MigrationDownOptions,
-      "directory" | "runtimeRole" | "migratorRole" | "skillPublisherRole" | "schema"
+      | "directory"
+      | "runtimeRole"
+      | "migratorRole"
+      | "skillPublisherRole"
+      | "workerCoordinatorRole"
+      | "schema"
     >,
   ): Promise<readonly MigrationRecord[]>;
   probe(): Promise<void>;
@@ -345,6 +350,7 @@ export function createMigrationRuntime(
     readonly runtimeRole: string;
     readonly migratorRole: string;
     readonly skillPublisherRole: string;
+    readonly workerCoordinatorRole: string;
     readonly schema: string;
   },
 ): MigrationRuntime {
@@ -353,6 +359,7 @@ export function createMigrationRuntime(
     runtimeRole: options.runtimeRole,
     migratorRole: options.migratorRole,
     skillPublisherRole: options.skillPublisherRole,
+    workerCoordinatorRole: options.workerCoordinatorRole,
     schema: options.schema,
   } as const;
   return {

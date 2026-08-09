@@ -42,13 +42,21 @@ const migratorRole = `it_rs_mg_${unique}`;
 const migratorPassword = randomBytes(24).toString("hex");
 const skillPublisherRole = `it_rs_pub_${unique}`;
 const skillPublisherPassword = randomBytes(24).toString("hex");
+const workerCoordinatorRole = `it_rs_coord_${unique}`;
+const workerCoordinatorPassword = randomBytes(24).toString("hex");
 const testMigrationUrl = new URL(migrationDatabaseUrl);
 if (testMigrationUrl.username !== configuredMigratorRole) {
   throw new Error("MIGRATION_DATABASE_URL 与 DATABASE_MIGRATOR_ROLE 不一致");
 }
 testMigrationUrl.username = migratorRole;
 testMigrationUrl.password = migratorPassword;
-const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
+const migrationSecurity = {
+  runtimeRole,
+  migratorRole,
+  skillPublisherRole,
+  workerCoordinatorRole,
+  schema,
+} as const;
 
 const scopeA: TrustedResourceContext = {
   tenantId: tenantId(`resource_tenant_a_${unique}`),
@@ -361,7 +369,9 @@ beforeAll(async () => {
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
+     CREATE ROLE "${workerCoordinatorRole}" LOGIN PASSWORD '${workerCoordinatorPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migratorCreated = true;
@@ -407,7 +417,8 @@ afterAll(async () => {
   if (schemaCreated) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (migratorCreated) {
     await admin.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}";
+       DROP ROLE "${workerCoordinatorRole}";
        DROP ROLE "${skillPublisherRole}";
        DROP ROLE "${migratorRole}"`,
     );

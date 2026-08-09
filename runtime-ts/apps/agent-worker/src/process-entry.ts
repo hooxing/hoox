@@ -30,6 +30,7 @@ import {
   PgThreadContextHistoryRepository,
   PgThreadContinuityMetrics,
   PgThreadSandboxSessionLifecycle,
+  PgWorkerTenantAssignments,
   PgWorkspaceCandidateHandoff,
   PgWorkspaceManifestRepository,
   PgWorkspaceStableBlobAccess,
@@ -99,6 +100,13 @@ const workerEnvironmentSchema = Object.freeze({
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
   DATABASE_RUNTIME_ROLE: stringEnvironmentField({ maxLength: 63 }),
+  DATABASE_WORKER_COORDINATOR_URL: urlEnvironmentField({
+    secret: true,
+    protocols: ["postgres:", "postgresql:"],
+    allowCredentials: true,
+    maxLength: 8_192,
+  }),
+  DATABASE_WORKER_COORDINATOR_ROLE: stringEnvironmentField({ maxLength: 63 }),
   S3_ENDPOINT: urlEnvironmentField(),
   S3_BUCKET: stringEnvironmentField({ maxLength: 255 }),
   S3_REGION: stringEnvironmentField({ maxLength: 128 }),
@@ -209,9 +217,13 @@ export interface WorkerProcessConfiguration {
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
   readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
+  readonly databaseWorkerCoordinatorUrl: string;
+  readonly databaseWorkerCoordinatorSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly databaseSchema: string;
   /** 仅用于启动时证明连接 URL 未误用 Migrator/Owner；服务永不 SET ROLE。 */
   readonly databaseRuntimeRole: string;
+  /** 仅登录无业务载荷的全局 assignment claim 控制面。 */
+  readonly databaseWorkerCoordinatorRole: string;
   readonly objectStorage: Readonly<{
     endpoint: string;
     bucket: string;
@@ -297,9 +309,17 @@ export function parseWorkerProcessEnvironment(
   }
   const proxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
   const configuredDatabaseUrl = readRequiredEnvironmentValue(parsed, "DATABASE_URL");
+  const configuredWorkerCoordinatorUrl = readRequiredEnvironmentValue(
+    parsed,
+    "DATABASE_WORKER_COORDINATOR_URL",
+  );
   const productionDatabase =
     parsed.runtimeEnvironment === "production"
       ? parseProductionPostgresTransport(configuredDatabaseUrl)
+      : undefined;
+  const productionWorkerCoordinatorDatabase =
+    parsed.runtimeEnvironment === "production"
+      ? parseProductionPostgresTransport(configuredWorkerCoordinatorUrl)
       : undefined;
   if (proxyScheme !== undefined && proxyScheme !== "http" && proxyScheme !== "https") {
     throw new TypeError("CUBESANDBOX_PROXY_SCHEME 只能是 http 或 https");
@@ -324,6 +344,16 @@ export function parseWorkerProcessEnvironment(
   const configuredRuntimeRole = readRequiredEnvironmentValue(parsed, "DATABASE_RUNTIME_ROLE");
   if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(configuredRuntimeRole)) {
     throw new TypeError("DATABASE_RUNTIME_ROLE 格式无效");
+  }
+  const configuredWorkerCoordinatorRole = readRequiredEnvironmentValue(
+    parsed,
+    "DATABASE_WORKER_COORDINATOR_ROLE",
+  );
+  if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(configuredWorkerCoordinatorRole)) {
+    throw new TypeError("DATABASE_WORKER_COORDINATOR_ROLE 格式无效");
+  }
+  if (configuredWorkerCoordinatorRole === configuredRuntimeRole) {
+    throw new TypeError("DATABASE_WORKER_COORDINATOR_ROLE 必须与 DATABASE_RUNTIME_ROLE 不同");
   }
   const contextWindow = readRequiredEnvironmentValue(parsed, "MODEL_CONTEXT_WINDOW");
   const maxOutputTokens = readRequiredEnvironmentValue(parsed, "MODEL_MAX_OUTPUT_TOKENS");
@@ -419,8 +449,14 @@ export function parseWorkerProcessEnvironment(
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
     ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
+    databaseWorkerCoordinatorUrl:
+      productionWorkerCoordinatorDatabase?.connectionString ?? configuredWorkerCoordinatorUrl,
+    ...(productionWorkerCoordinatorDatabase === undefined
+      ? {}
+      : { databaseWorkerCoordinatorSsl: productionWorkerCoordinatorDatabase.ssl }),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
     databaseRuntimeRole: configuredRuntimeRole,
+    databaseWorkerCoordinatorRole: configuredWorkerCoordinatorRole,
     objectStorage: Object.freeze({
       endpoint: readRequiredEnvironmentValue(parsed, "S3_ENDPOINT"),
       bucket: readRequiredEnvironmentValue(parsed, "S3_BUCKET"),
@@ -590,6 +626,7 @@ export function assembleModelWireTraceIfEnabled<T>(
 
 interface WorkerStartupProbes {
   readonly postgres: () => Promise<void>;
+  readonly workerCoordinatorPostgres: () => Promise<void>;
   readonly objectStorage: () => Promise<void>;
   readonly sandbox: () => Promise<void>;
   readonly model: () => Promise<void>;
@@ -602,11 +639,13 @@ export async function startWorkerLoopAfterDependencyProbes(
   startLoop: () => void,
 ): Promise<void> {
   if (runtimeMode === "production") {
-    await probes.postgres();
+    // 两个数据库登录身份都必须先证明为预期的非特权角色，再触达携带其他秘密的远端依赖。
+    await Promise.all([probes.postgres(), probes.workerCoordinatorPostgres()]);
     await Promise.all([probes.objectStorage(), probes.sandbox(), probes.model()]);
   } else {
     await Promise.all([
       probes.postgres(),
+      probes.workerCoordinatorPostgres(),
       probes.objectStorage(),
       probes.sandbox(),
       probes.model(),
@@ -624,7 +663,8 @@ const productionWorkerAssembler: ServiceAssemblyFactory<WorkerProcessConfigurati
     if (
       configuration.runtimeEnvironment !== "production" ||
       configuration.development !== undefined ||
-      configuration.databaseSsl === undefined
+      configuration.databaseSsl === undefined ||
+      configuration.databaseWorkerCoordinatorSsl === undefined
     ) {
       throw new Error("PRODUCTION_WORKER_ASSEMBLY_FORBIDDEN");
     }
@@ -646,6 +686,19 @@ async function assembleWorkerRuntime(
       runtimeMode === "production"
         ? "cube-runtime-agent-worker-production"
         : "cube-runtime-agent-worker-development",
+  });
+  const coordinatorPool = createPostgresPool({
+    connectionString: configuration.databaseWorkerCoordinatorUrl,
+    ...(configuration.databaseWorkerCoordinatorSsl === undefined
+      ? {}
+      : { ssl: configuration.databaseWorkerCoordinatorSsl }),
+    schema: configuration.databaseSchema,
+    expectedRuntimeRole: configuration.databaseWorkerCoordinatorRole,
+    applicationName:
+      runtimeMode === "production"
+        ? "cube-runtime-agent-worker-coordinator-production"
+        : "cube-runtime-agent-worker-coordinator-development",
+    maxConnections: 2,
   });
   try {
     const blobRepository = new PgBlobLifecycleRepository(pool, {
@@ -977,20 +1030,33 @@ async function assembleWorkerRuntime(
         subagentsEnabled: configuration.subagents.enabled,
       },
     );
-    const loop = new AgentWorkerPollingLoop(new PgRunDispatchOutbox(pool), worker, {
-      tenantId: configuration.worker.tenantId,
-      workerId: configuration.worker.workerId,
-      pollIntervalMs: configuration.worker.pollIntervalMs,
-      dispatchLeaseMs: configuration.worker.dispatchLeaseMs,
-      maintenance: () =>
-        resourceBlobWriter.recoverPending({
-          tenantId: configuration.worker.tenantId,
-          limit: 16,
-          orphanGraceSeconds: 300,
-        }),
+    const tenantAssignments = new PgWorkerTenantAssignments({
+      runtime: pool,
+      coordinator: coordinatorPool,
     });
+    // 兼容固定 Tenant 部署的启动维护，同时所有新 dispatch 都会在同一事务动态唤醒其 Tenant。
+    await tenantAssignments.wake(configuration.worker.tenantId);
+    const loop = new AgentWorkerPollingLoop(
+      tenantAssignments,
+      new PgRunDispatchOutbox(pool),
+      worker,
+      {
+        workerId: configuration.worker.workerId,
+        pollIntervalMs: configuration.worker.pollIntervalMs,
+        tenantAssignmentLeaseMs: configuration.worker.dispatchLeaseMs,
+        dispatchLeaseMs: configuration.worker.dispatchLeaseMs,
+        maintenance: (tenantId) =>
+          resourceBlobWriter.recoverPending({
+            tenantId,
+            limit: 16,
+            orphanGraceSeconds: 300,
+          }),
+      },
+    );
     const probes = Object.freeze({
       postgres: () => probePostgres(pool, configuration.databaseRuntimeRole),
+      workerCoordinatorPostgres: () =>
+        probePostgres(coordinatorPool, configuration.databaseWorkerCoordinatorRole),
       objectStorage: () => probeS3BlobStore(s3Config),
       sandbox: () => upstreamSandboxes.probe(),
       model: () => probeOpenAiCompatibleModel(configuration.model, runtimeMode),
@@ -1002,16 +1068,26 @@ async function assembleWorkerRuntime(
         shutdown.request();
         await loop.drain();
       },
-      resources: Object.freeze([Object.freeze({ name: "postgres", close: () => pool.end() })]),
+      resources: Object.freeze([
+        Object.freeze({ name: "postgres", close: () => pool.end() }),
+        Object.freeze({ name: "worker-coordinator-postgres", close: () => coordinatorPool.end() }),
+      ]),
       readiness: Object.freeze([
         Object.freeze({ name: "postgres", probe: probes.postgres }),
+        Object.freeze({
+          name: "worker-coordinator-postgres",
+          probe: probes.workerCoordinatorPostgres,
+        }),
         Object.freeze({ name: "object-storage", probe: probes.objectStorage }),
         Object.freeze({ name: "sandbox", probe: probes.sandbox }),
         Object.freeze({ name: "model-runtime", probe: probes.model }),
       ]),
     });
   } catch (error) {
-    await pool.end().catch(() => undefined);
+    await Promise.all([
+      pool.end().catch(() => undefined),
+      coordinatorPool.end().catch(() => undefined),
+    ]);
     throw error;
   }
 }
@@ -1036,6 +1112,16 @@ export async function probeDevelopmentWorkerDependencies(
     schema: configuration.databaseSchema,
     expectedRuntimeRole: configuration.databaseRuntimeRole,
     applicationName: "cube-runtime-agent-worker-preflight",
+  });
+  const coordinatorPool = createPostgresPool({
+    connectionString: configuration.databaseWorkerCoordinatorUrl,
+    ...(configuration.databaseWorkerCoordinatorSsl === undefined
+      ? {}
+      : { ssl: configuration.databaseWorkerCoordinatorSsl }),
+    schema: configuration.databaseSchema,
+    expectedRuntimeRole: configuration.databaseWorkerCoordinatorRole,
+    applicationName: "cube-runtime-agent-worker-coordinator-preflight",
+    maxConnections: 1,
   });
   try {
     const s3Config = {
@@ -1077,12 +1163,16 @@ export async function probeDevelopmentWorkerDependencies(
     );
     await Promise.all([
       probePostgres(pool, configuration.databaseRuntimeRole),
+      probePostgres(coordinatorPool, configuration.databaseWorkerCoordinatorRole),
       probeS3BlobStore(s3Config),
       sandbox.probe(),
       probeOpenAiCompatibleModel(configuration.model, "development"),
     ]);
   } finally {
-    await pool.end().catch(() => undefined);
+    await Promise.all([
+      pool.end().catch(() => undefined),
+      coordinatorPool.end().catch(() => undefined),
+    ]);
   }
 }
 

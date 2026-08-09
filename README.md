@@ -40,8 +40,11 @@ corepack pnpm dev:worker
 
 两条命令都只接受 `RUNTIME_ENV=development`。前者会依次只读探测真实 PostgreSQL、MinIO、CubeSandbox 与
 模型 Provider 后退出，不会启动 polling 或领取 Run；后者使用同一装配持续轮询 PostgreSQL dispatch。它不会使用内存队列、
-Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 必须等于
-`DEV_AUTH_USER_A_TENANT_ID`，因此用 `Bearer dev-user-a` 创建的 Thread/Run 会被同一 Worker 消费。
+Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 在 development 仍必须等于
+`DEV_AUTH_USER_A_TENANT_ID`，但它只作为启动兼容 Tenant，不再限制 Worker 的消费范围。个人或团队 Tenant
+创建 dispatch 时会在同一事务唤醒动态控制面；Worker 通过 `DATABASE_WORKER_COORDINATOR_URL` 对应的独立
+`DATABASE_WORKER_COORDINATOR_ROLE` 只领取 Tenant 租约，再回到普通 Runtime 连接和 Tenant RLS 内读取任务。
+Coordinator 角色不得复用 `DATABASE_RUNTIME_ROLE`，也不得拥有 Run、Thread、成员或文件表权限。
 
 模型 Provider 必须兼容 OpenAI `/models`。开发模式强制从
 `MODEL_CONTEXT_WINDOW` 和 `MODEL_MAX_OUTPUT_TOKENS` 读取 Pi 的预算，并只要求 `/models` 返回配置的

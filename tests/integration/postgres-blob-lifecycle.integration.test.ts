@@ -66,6 +66,7 @@ import {
   PgModelWireTraceCleanupRepository,
   PgModelWireTraceRepository,
   PgRunDispatchOutbox,
+  PgWorkerTenantAssignments,
   type StableBlobLifecycleAllocation,
   type StableBlobRef,
   type StagedBlobRef,
@@ -103,17 +104,29 @@ const migratorRole = `it_bl_mg_${process.pid}_${Date.now().toString(36)}`;
 const migratorPassword = randomBytes(24).toString("hex");
 const skillPublisherRole = `it_bl_pub_${process.pid}_${Date.now().toString(36)}`;
 const skillPublisherPassword = randomBytes(24).toString("hex");
+const workerCoordinatorRole = `it_bl_coord_${process.pid}_${Date.now().toString(36)}`;
+const workerCoordinatorPassword = randomBytes(24).toString("hex");
 const testMigrationUrl = new URL(migrationDatabaseUrl);
 if (testMigrationUrl.username !== configuredMigratorRole) {
   throw new Error("MIGRATION_DATABASE_URL 与 DATABASE_MIGRATOR_ROLE 不一致");
 }
 testMigrationUrl.username = migratorRole;
 testMigrationUrl.password = migratorPassword;
-const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
+const workerCoordinatorDatabaseUrl = new URL(migrationDatabaseUrl);
+workerCoordinatorDatabaseUrl.username = workerCoordinatorRole;
+workerCoordinatorDatabaseUrl.password = workerCoordinatorPassword;
+const migrationSecurity = {
+  runtimeRole,
+  migratorRole,
+  skillPublisherRole,
+  workerCoordinatorRole,
+  schema,
+} as const;
 
 let administrativePool!: Pool;
 let migratorPool!: Pool;
 let runtimePool!: Pool;
+let workerCoordinatorPool!: Pool;
 let repository!: PgBlobLifecycleRepository;
 let schemaCreated = false;
 let migratorCreated = false;
@@ -236,7 +249,9 @@ beforeAll(async () => {
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
+     CREATE ROLE "${workerCoordinatorRole}" LOGIN PASSWORD '${workerCoordinatorPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migratorCreated = true;
@@ -250,6 +265,11 @@ beforeAll(async () => {
     connectionString: runtimeDatabaseUrl,
     schema,
     maxConnections: 12,
+  });
+  workerCoordinatorPool = createPostgresPool({
+    connectionString: workerCoordinatorDatabaseUrl.toString(),
+    schema,
+    maxConnections: 2,
   });
   await migrateUp(migratorPool, migrationSecurity);
   await seedTenant(scopeA, "a");
@@ -265,6 +285,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (runtimePool !== undefined) await runtimePool.end();
+  if (workerCoordinatorPool !== undefined) await workerCoordinatorPool.end();
   if (migratorPool !== undefined) {
     await migrateDown(migratorPool, {
       ...migrationSecurity,
@@ -283,7 +304,8 @@ afterAll(async () => {
   if (schemaCreated) await administrativePool.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (migratorCreated) {
     await administrativePool.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}";
+       DROP ROLE "${workerCoordinatorRole}";
        DROP ROLE "${skillPublisherRole}";
        DROP ROLE "${migratorRole}"`,
     );
@@ -800,12 +822,22 @@ describe("PostgreSQL stable blob 生命周期", () => {
         },
         { workerId: `worker-${label}`, leaseDurationMs: 30_000, heartbeatMs: 10_000 },
       );
-      const loop = new AgentWorkerPollingLoop(new PgRunDispatchOutbox(runtimePool), worker, {
-        tenantId: scopeA.tenantId,
-        workerId: `dispatcher-${label}`,
-        pollIntervalMs: 25,
-        dispatchLeaseMs: 30_000,
+      const tenantAssignments = new PgWorkerTenantAssignments({
+        runtime: runtimePool,
+        coordinator: workerCoordinatorPool,
       });
+      await tenantAssignments.wake(scopeA.tenantId);
+      const loop = new AgentWorkerPollingLoop(
+        tenantAssignments,
+        new PgRunDispatchOutbox(runtimePool),
+        worker,
+        {
+          workerId: `dispatcher-${label}`,
+          pollIntervalMs: 25,
+          tenantAssignmentLeaseMs: 30_000,
+          dispatchLeaseMs: 30_000,
+        },
+      );
       loop.start();
       try {
         let status = "queued";

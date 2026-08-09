@@ -28,13 +28,21 @@ const migratorRole = `it_wr_mg_${unique}`;
 const migratorPassword = randomBytes(24).toString("hex");
 const skillPublisherRole = `it_wr_pub_${unique}`;
 const skillPublisherPassword = randomBytes(24).toString("hex");
+const workerCoordinatorRole = `it_wr_coord_${unique}`;
+const workerCoordinatorPassword = randomBytes(24).toString("hex");
 const databaseName = new URL(bootstrapDatabaseUrl).pathname.slice(1);
 if (migrationDatabaseUrl.username !== configuredMigratorRole) {
   throw new Error("MIGRATION_DATABASE_URL 与 DATABASE_MIGRATOR_ROLE 不一致");
 }
 migrationDatabaseUrl.username = migratorRole;
 migrationDatabaseUrl.password = migratorPassword;
-const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
+const migrationSecurity = {
+  runtimeRole,
+  migratorRole,
+  skillPublisherRole,
+  workerCoordinatorRole,
+  schema,
+} as const;
 
 const ids = {
   tenant: tenantId(`wire_read_tenant_${unique}`),
@@ -65,7 +73,9 @@ beforeAll(async () => {
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
+     CREATE ROLE "${workerCoordinatorRole}" LOGIN PASSWORD '${workerCoordinatorPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migratorCreated = true;
@@ -190,7 +200,8 @@ afterAll(async () => {
   if (schemaCreated) await administrativePool.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (migratorCreated) {
     await administrativePool.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}";
+       DROP ROLE "${workerCoordinatorRole}";
        DROP ROLE "${skillPublisherRole}";
        DROP ROLE "${migratorRole}"`,
     );

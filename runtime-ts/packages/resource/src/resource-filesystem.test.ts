@@ -25,8 +25,8 @@ import {
 } from "./resource-filesystem.js";
 import {
   type PersistedResourceUpload,
-  ResourceUploadService,
   type ResourceUploadRepository,
+  ResourceUploadService,
 } from "./upload.js";
 
 const context: TrustedResourceContext = {
@@ -153,7 +153,7 @@ describe("Resource 只读文件系统", () => {
 });
 
 describe("Resource 上传服务", () => {
-  it("先持久化 Blob，再提交不可变首版并返回统一 /resources 路径", async () => {
+  it("规范化兼容字符后持久化 Blob，并返回统一 /resources 路径", async () => {
     const persisted: PersistedResourceUpload = {
       referenceId: "blob-reference-upload",
       object: {
@@ -200,7 +200,7 @@ describe("Resource 上传服务", () => {
     const result = await service.upload({
       context,
       idempotencyKey: "upload-test-key-0001",
-      name: "说明.txt",
+      name: "说明（简洁）.txt",
       mediaType: "TEXT/PLAIN",
       body: new Uint8Array([1, 2, 3]),
     });
@@ -208,11 +208,11 @@ describe("Resource 上传服务", () => {
     expect(blobs.persist).toHaveBeenCalledOnce();
     expect(repository.commit).toHaveBeenCalledOnce();
     expect(result).toMatchObject({
-      name: "说明.txt",
+      name: "说明(简洁).txt",
       mediaType: "text/plain",
       sizeBytes: 3,
     });
-    expect(result.path).toBe(`/resources/${result.resourceId}/${result.versionId}/说明.txt`);
+    expect(result.path).toBe(`/resources/${result.resourceId}/${result.versionId}/说明(简洁).txt`);
   });
 
   it("拒绝超限文件和幂等键冲突", async () => {
@@ -270,6 +270,66 @@ describe("Resource 上传服务", () => {
         body: new Uint8Array([1]),
       }),
     ).rejects.toEqual(expect.objectContaining({ code: "CONFLICT" }));
+  });
+
+  it("规范名继续拒绝不可见字符与超长名称", async () => {
+    const blobs = { persist: vi.fn() };
+    const repository = { commit: vi.fn() };
+    const service = new ResourceUploadService(blobs, repository, {
+      maxBytes: 8,
+      now: () => now,
+    });
+
+    for (const name of ["　", "坏\u200b名字.txt", "坏\ud800名字.txt", `${"a".repeat(256)}.txt`]) {
+      await expect(
+        service.upload({
+          context,
+          idempotencyKey: "upload-test-key-invalid-name",
+          name,
+          mediaType: "text/plain",
+          body: new Uint8Array([1]),
+        }),
+      ).rejects.toEqual(expect.objectContaining({ code: "INVALID_REQUEST" }));
+    }
+    expect(blobs.persist).not.toHaveBeenCalled();
+    expect(repository.commit).not.toHaveBeenCalled();
+  });
+
+  it("NFKC 等价名称共享上传请求摘要", async () => {
+    const persisted: PersistedResourceUpload = {
+      referenceId: "blob-reference-normalized-name",
+      object: {
+        tenantId: context.tenantId,
+        purpose: "resource",
+        sha256: "c".repeat(64),
+        size: 1,
+        mediaType: "application/pdf",
+        incarnationId: "33333333-3333-4333-8333-333333333333",
+        physicalObjectKey: "resource/upload/normalized-name",
+      },
+    };
+    const repository: ResourceUploadRepository = {
+      commit: vi.fn(async () => ({ outcome: "key_conflict" as const })),
+    };
+    const service = new ResourceUploadService({ persist: async () => persisted }, repository, {
+      maxBytes: 8,
+      now: () => now,
+    });
+    const upload = (name: string) =>
+      service.upload({
+        context,
+        idempotencyKey: "upload-test-key-normalized-name",
+        name,
+        mediaType: "application/pdf",
+        body: new Uint8Array([1]),
+      });
+
+    await expect(upload("报告（简洁）.pdf")).rejects.toMatchObject({ code: "CONFLICT" });
+    await expect(upload("报告(简洁).pdf")).rejects.toMatchObject({ code: "CONFLICT" });
+    const [first, second] = vi.mocked(repository.commit).mock.calls;
+    expect(first?.[0].requestDigest).toBe(second?.[0].requestDigest);
+    expect(first?.[0].name).toBe("报告(简洁).pdf");
+    expect(second?.[0].name).toBe("报告(简洁).pdf");
   });
 });
 

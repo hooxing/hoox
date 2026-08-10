@@ -68,8 +68,8 @@ const installationProjection = `
   installation.installed_at, installation.updated_at`;
 
 /**
- * Skill 目录是全局只读数据，安装关系只属于当前认证用户。所有访问仍携带 Tenant/User
- * 事务上下文，让 PostgreSQL RLS 在 Repository 之外再执行一次用户隔离。
+ * Skill 目录是全局只读数据，安装关系属于当前 Tenant。个人空间保持个人安装，团队空间由
+ * Owner/Admin 管理并供全部有效成员使用。
  */
 export class PgSkillCenterRepository implements SkillCenterPort {
   constructor(private readonly pool: Pool) {}
@@ -127,15 +127,15 @@ export class PgSkillCenterRepository implements SkillCenterPort {
         async (client) => {
           const result = await client.query<InstallationRow>(
             `SELECT ${installationProjection}
-               FROM user_skill_installations installation
+               FROM tenant_skill_installations installation
                JOIN skills skill ON skill.id=installation.skill_id
                JOIN skill_versions version
                  ON version.skill_id=installation.skill_id
                 AND version.version=installation.skill_version
-              WHERE installation.user_id=$1
+              WHERE installation.tenant_id=$1
                 AND installation.status IN ('enabled', 'disabled')
               ORDER BY installation.invocation_name ASC`,
-            [context.userId],
+            [context.tenantId],
           );
           return Object.freeze(result.rows.map(mapInstallation));
         },
@@ -154,8 +154,13 @@ export class PgSkillCenterRepository implements SkillCenterPort {
         this.pool,
         command.context,
         async (client) => {
-          await lockUserCommands(client, command.context.userId, command.idempotencyKey);
-          const replay = await readCommand(client, command.context.userId, command.idempotencyKey);
+          if (!(await isSkillManager(client, command.context))) return { outcome: "not_found" };
+          await lockScopeCommands(client, command.context.tenantId, command.idempotencyKey);
+          const replay = await readCommand(
+            client,
+            command.context.tenantId,
+            command.idempotencyKey,
+          );
           if (replay !== undefined) {
             if (replay.operation !== "install" || replay.request_digest !== command.requestDigest) {
               return { outcome: "key_conflict" };
@@ -171,27 +176,29 @@ export class PgSkillCenterRepository implements SkillCenterPort {
           if (target === undefined) return { outcome: "not_found" };
           const current = await findMutableInstallation(
             client,
-            command.context.userId,
+            command.context.tenantId,
             target.skill_id,
           );
           if (current !== undefined && current.status !== "uninstalled") {
             return { outcome: "already_installed" };
           }
-          if (await invocationNameExists(client, command.context.userId, command.invocationName)) {
+          if (
+            await invocationNameExists(client, command.context.tenantId, command.invocationName)
+          ) {
             return { outcome: "name_conflict" };
           }
-          if ((await activeInstallationCount(client, command.context.userId)) >= 64) {
+          if ((await activeInstallationCount(client, command.context.tenantId)) >= 64) {
             return { outcome: "limit_exceeded" };
           }
 
           if (current === undefined) {
             await client.query(
-              `INSERT INTO user_skill_installations(
-                 user_id,skill_id,skill_version,invocation_name,status,
+              `INSERT INTO tenant_skill_installations(
+                 tenant_id,skill_id,skill_version,invocation_name,status,
                  version_token,installed_at,updated_at
                ) VALUES ($1,$2,$3,$4,'enabled',0,clock_timestamp(),clock_timestamp())`,
               [
-                command.context.userId,
+                command.context.tenantId,
                 target.skill_id,
                 target.skill_version,
                 command.invocationName,
@@ -199,13 +206,13 @@ export class PgSkillCenterRepository implements SkillCenterPort {
             );
           } else {
             await client.query(
-              `UPDATE user_skill_installations
+              `UPDATE tenant_skill_installations
                   SET skill_version=$3,invocation_name=$4,status='enabled',
                       version_token=version_token+1,
                       installed_at=clock_timestamp(),updated_at=clock_timestamp()
-                WHERE user_id=$1 AND skill_id=$2`,
+                WHERE tenant_id=$1 AND skill_id=$2`,
               [
-                command.context.userId,
+                command.context.tenantId,
                 target.skill_id,
                 target.skill_version,
                 command.invocationName,
@@ -214,18 +221,18 @@ export class PgSkillCenterRepository implements SkillCenterPort {
           }
           const installation = await requireInstallation(
             client,
-            command.context.userId,
+            command.context.tenantId,
             target.skill_id,
           );
           await recordSuccessfulCommand(client, {
-            userId: command.context.userId,
+            tenantId: command.context.tenantId,
             key: command.idempotencyKey,
             operation: "install",
             requestDigest: command.requestDigest,
             result: installation,
           });
           await recordAudit(client, {
-            userId: command.context.userId,
+            tenantId: command.context.tenantId,
             eventId: `install:${command.idempotencyKey}`,
             skillId: target.skill_id,
             operation: "install",
@@ -251,8 +258,13 @@ export class PgSkillCenterRepository implements SkillCenterPort {
         this.pool,
         command.context,
         async (client) => {
-          await lockUserCommands(client, command.context.userId, command.idempotencyKey);
-          const replay = await readCommand(client, command.context.userId, command.idempotencyKey);
+          if (!(await isSkillManager(client, command.context))) return { outcome: "not_found" };
+          await lockScopeCommands(client, command.context.tenantId, command.idempotencyKey);
+          const replay = await readCommand(
+            client,
+            command.context.tenantId,
+            command.idempotencyKey,
+          );
           if (replay !== undefined) {
             if (
               replay.operation !== "configure" ||
@@ -266,7 +278,7 @@ export class PgSkillCenterRepository implements SkillCenterPort {
           if (skill === undefined) return { outcome: "not_found" };
           const current = await findMutableInstallation(
             client,
-            command.context.userId,
+            command.context.tenantId,
             skill.skill_id,
           );
           if (current === undefined || current.status === "uninstalled") {
@@ -298,7 +310,7 @@ export class PgSkillCenterRepository implements SkillCenterPort {
                 : "disabled";
           if (
             invocationName !== current.invocation_name &&
-            (await invocationNameExists(client, command.context.userId, invocationName))
+            (await invocationNameExists(client, command.context.tenantId, invocationName))
           ) {
             return { outcome: "name_conflict" };
           }
@@ -309,13 +321,13 @@ export class PgSkillCenterRepository implements SkillCenterPort {
             status !== current.status;
           if (changed) {
             const updated = await client.query(
-              `UPDATE user_skill_installations
+              `UPDATE tenant_skill_installations
                   SET skill_version=$4,invocation_name=$5,status=$6,
                       version_token=version_token+1,updated_at=clock_timestamp()
-                WHERE user_id=$1 AND skill_id=$2 AND version_token=$3
+                WHERE tenant_id=$1 AND skill_id=$2 AND version_token=$3
                   AND status IN ('enabled','disabled')`,
               [
-                command.context.userId,
+                command.context.tenantId,
                 skill.skill_id,
                 command.expectedVersionToken,
                 version,
@@ -327,11 +339,11 @@ export class PgSkillCenterRepository implements SkillCenterPort {
           }
           const installation = await requireInstallation(
             client,
-            command.context.userId,
+            command.context.tenantId,
             skill.skill_id,
           );
           await recordSuccessfulCommand(client, {
-            userId: command.context.userId,
+            tenantId: command.context.tenantId,
             key: command.idempotencyKey,
             operation: "configure",
             requestDigest: command.requestDigest,
@@ -339,7 +351,7 @@ export class PgSkillCenterRepository implements SkillCenterPort {
           });
           if (changed) {
             await recordAudit(client, {
-              userId: command.context.userId,
+              tenantId: command.context.tenantId,
               eventId: `configure:${command.idempotencyKey}`,
               skillId: skill.skill_id,
               operation: "configure",
@@ -366,8 +378,13 @@ export class PgSkillCenterRepository implements SkillCenterPort {
         this.pool,
         command.context,
         async (client) => {
-          await lockUserCommands(client, command.context.userId, command.idempotencyKey);
-          const replay = await readCommand(client, command.context.userId, command.idempotencyKey);
+          if (!(await isSkillManager(client, command.context))) return { outcome: "not_found" };
+          await lockScopeCommands(client, command.context.tenantId, command.idempotencyKey);
+          const replay = await readCommand(
+            client,
+            command.context.tenantId,
+            command.idempotencyKey,
+          );
           if (replay !== undefined) {
             return replay.operation === "uninstall" &&
               replay.request_digest === command.requestDigest
@@ -378,7 +395,7 @@ export class PgSkillCenterRepository implements SkillCenterPort {
           if (skill === undefined) return { outcome: "not_found" };
           const current = await findMutableInstallation(
             client,
-            command.context.userId,
+            command.context.tenantId,
             skill.skill_id,
           );
           if (current === undefined || current.status === "uninstalled") {
@@ -388,29 +405,29 @@ export class PgSkillCenterRepository implements SkillCenterPort {
             return { outcome: "version_conflict" };
           }
           const updated = await client.query<{ readonly version_token: string }>(
-            `UPDATE user_skill_installations
+            `UPDATE tenant_skill_installations
                 SET status='uninstalled',version_token=version_token+1,updated_at=clock_timestamp()
-              WHERE user_id=$1 AND skill_id=$2 AND version_token=$3
+              WHERE tenant_id=$1 AND skill_id=$2 AND version_token=$3
                 AND status IN ('enabled','disabled')
               RETURNING version_token`,
-            [command.context.userId, skill.skill_id, command.expectedVersionToken],
+            [command.context.tenantId, skill.skill_id, command.expectedVersionToken],
           );
           const updatedRow = updated.rows[0];
           if (updatedRow === undefined) return { outcome: "version_conflict" };
           await recordSuccessfulCommand(client, {
-            userId: command.context.userId,
+            tenantId: command.context.tenantId,
             key: command.idempotencyKey,
             operation: "uninstall",
             requestDigest: command.requestDigest,
             result: {},
           });
           await client.query(
-            `INSERT INTO user_skill_installation_audits(
-               user_id,event_id,skill_id,operation,before_status,after_status,
+            `INSERT INTO tenant_skill_installation_audits(
+               tenant_id,event_id,skill_id,operation,before_status,after_status,
                skill_version,invocation_name,version_token,created_at
              ) VALUES ($1,$2,$3,'uninstall',$4,'uninstalled',$5,$6,$7,clock_timestamp())`,
             [
-              command.context.userId,
+              command.context.tenantId,
               `uninstall:${command.idempotencyKey}`,
               skill.skill_id,
               current.status,
@@ -542,30 +559,39 @@ function toTimestamp(value: Date | string): ReturnType<typeof isoTimestamp> {
   return isoTimestamp(value instanceof Date ? value.toISOString() : new Date(value).toISOString());
 }
 
-async function lockUserCommands(
+async function isSkillManager(client: PoolClient, context: TrustedSkillContext): Promise<boolean> {
+  const result = await client.query(
+    `SELECT 1 FROM memberships
+      WHERE tenant_id=$1 AND user_id=$2 AND status='active' AND role IN ('owner','admin')`,
+    [context.tenantId, context.userId],
+  );
+  return result.rowCount === 1;
+}
+
+async function lockScopeCommands(
   client: PoolClient,
-  userId: string,
+  tenantId: string,
   idempotencyKey: string,
 ): Promise<void> {
-  // 用户级锁覆盖安装上限与调用名称唯一性；命令锁使同幂等键只产生一条审计事实。
+  // Tenant 级锁覆盖安装上限与调用名称唯一性；命令锁使同幂等键只产生一条审计事实。
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-    `skill-user|${userId}`,
+    `skill-tenant|${tenantId}`,
   ]);
   await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [
-    `skill-command|${userId}|${idempotencyKey}`,
+    `skill-command|${tenantId}|${idempotencyKey}`,
   ]);
 }
 
 async function readCommand(
   client: PoolClient,
-  userId: string,
+  tenantId: string,
   key: string,
 ): Promise<CommandRow | undefined> {
   const result = await client.query<CommandRow>(
     `SELECT operation,request_digest,result
-       FROM user_skill_installation_commands
-      WHERE user_id=$1 AND idempotency_key=$2`,
-    [userId, key],
+       FROM tenant_skill_installation_commands
+      WHERE tenant_id=$1 AND idempotency_key=$2`,
+    [tenantId, key],
   );
   return result.rows[0];
 }
@@ -600,58 +626,58 @@ async function findSkillByCanonicalKey(
 
 async function findMutableInstallation(
   client: PoolClient,
-  userId: string,
+  tenantId: string,
   skillId: string,
 ): Promise<MutableInstallationRow | undefined> {
   const result = await client.query<MutableInstallationRow>(
     `SELECT skill_id,skill_version,invocation_name,status,version_token
-       FROM user_skill_installations
-      WHERE user_id=$1 AND skill_id=$2
+       FROM tenant_skill_installations
+      WHERE tenant_id=$1 AND skill_id=$2
       FOR UPDATE`,
-    [userId, skillId],
+    [tenantId, skillId],
   );
   return result.rows[0];
 }
 
 async function invocationNameExists(
   client: PoolClient,
-  userId: string,
+  tenantId: string,
   invocationName: string,
 ): Promise<boolean> {
   const result = await client.query<{ readonly present: boolean }>(
     `SELECT EXISTS(
-       SELECT 1 FROM user_skill_installations
-        WHERE user_id=$1 AND invocation_name=$2 AND status IN ('enabled','disabled')
+       SELECT 1 FROM tenant_skill_installations
+        WHERE tenant_id=$1 AND invocation_name=$2 AND status IN ('enabled','disabled')
      ) AS present`,
-    [userId, invocationName],
+    [tenantId, invocationName],
   );
   return result.rows[0]?.present === true;
 }
 
-async function activeInstallationCount(client: PoolClient, userId: string): Promise<number> {
+async function activeInstallationCount(client: PoolClient, tenantId: string): Promise<number> {
   const result = await client.query<{ readonly count: string }>(
-    `SELECT count(*)::text AS count FROM user_skill_installations
-      WHERE user_id=$1 AND status IN ('enabled','disabled')`,
-    [userId],
+    `SELECT count(*)::text AS count FROM tenant_skill_installations
+      WHERE tenant_id=$1 AND status IN ('enabled','disabled')`,
+    [tenantId],
   );
   return Number(result.rows[0]?.count ?? "0");
 }
 
 async function requireInstallation(
   client: PoolClient,
-  userId: string,
+  tenantId: string,
   skillId: string,
 ): Promise<SkillInstallation> {
   const result = await client.query<InstallationRow>(
     `SELECT ${installationProjection}
-       FROM user_skill_installations installation
+       FROM tenant_skill_installations installation
        JOIN skills skill ON skill.id=installation.skill_id
        JOIN skill_versions version
          ON version.skill_id=installation.skill_id
         AND version.version=installation.skill_version
-      WHERE installation.user_id=$1 AND installation.skill_id=$2
+      WHERE installation.tenant_id=$1 AND installation.skill_id=$2
         AND installation.status IN ('enabled','disabled')`,
-    [userId, skillId],
+    [tenantId, skillId],
   );
   const row = result.rows[0];
   if (row === undefined) throw new TypeError("Skill 安装提交后不可见");
@@ -661,7 +687,7 @@ async function requireInstallation(
 async function recordSuccessfulCommand(
   client: PoolClient,
   input: {
-    readonly userId: string;
+    readonly tenantId: string;
     readonly key: string;
     readonly operation: CommandRow["operation"];
     readonly requestDigest: string;
@@ -669,17 +695,17 @@ async function recordSuccessfulCommand(
   },
 ): Promise<void> {
   await client.query(
-    `INSERT INTO user_skill_installation_commands(
-       user_id,idempotency_key,operation,request_digest,result,created_at
+    `INSERT INTO tenant_skill_installation_commands(
+       tenant_id,idempotency_key,operation,request_digest,result,created_at
      ) VALUES ($1,$2,$3,$4,$5::jsonb,clock_timestamp())`,
-    [input.userId, input.key, input.operation, input.requestDigest, JSON.stringify(input.result)],
+    [input.tenantId, input.key, input.operation, input.requestDigest, JSON.stringify(input.result)],
   );
 }
 
 async function recordAudit(
   client: PoolClient,
   input: {
-    readonly userId: string;
+    readonly tenantId: string;
     readonly eventId: string;
     readonly skillId: string;
     readonly operation: "install" | "configure";
@@ -688,12 +714,12 @@ async function recordAudit(
   },
 ): Promise<void> {
   await client.query(
-    `INSERT INTO user_skill_installation_audits(
-       user_id,event_id,skill_id,operation,before_status,after_status,
+    `INSERT INTO tenant_skill_installation_audits(
+       tenant_id,event_id,skill_id,operation,before_status,after_status,
        skill_version,invocation_name,version_token,created_at
      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,clock_timestamp())`,
     [
-      input.userId,
+      input.tenantId,
       input.eventId,
       input.skillId,
       input.operation,

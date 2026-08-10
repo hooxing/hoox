@@ -30,6 +30,7 @@ const runWorkerTables = new Set([
   "mutation_receipts",
 ]);
 const runDispatchTables = new Set(["api_idempotency_records", "run_dispatch_outbox"]);
+const workerTenantAssignmentTables = new Set(["worker_tenant_assignments"]);
 const threadCreationTables = new Set(["api_thread_idempotency_records"]);
 const threadHeadTables = new Set(["thread_execution_heads"]);
 const threadInputQueueTables = new Set(["thread_input_receipts", "thread_follow_up_queue"]);
@@ -119,10 +120,22 @@ const skillCenterTables = new Set([
   "user_skill_installation_commands",
   "user_skill_installation_audits",
 ]);
+const legacySkillInstallationTables = new Set([
+  "user_skill_installations",
+  "user_skill_installation_commands",
+  "user_skill_installation_audits",
+]);
 const skillRuntimeTables = new Set([
   "run_skill_snapshots",
   "run_skill_snapshot_items",
   "skill_invocations",
+]);
+const teamCollaborationTables = new Set([
+  "team_member_directory",
+  "thread_forks",
+  "tenant_skill_installations",
+  "tenant_skill_installation_commands",
+  "tenant_skill_installation_audits",
 ]);
 const skillPublicationTables = new Set([
   "platform_skill_operators",
@@ -176,6 +189,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["api_idempotency_records", new Set(["SELECT", "INSERT"])],
   ["api_thread_idempotency_records", new Set(["SELECT", "INSERT"])],
   ["run_dispatch_outbox", new Set(["SELECT", "INSERT"])],
+  ["worker_tenant_assignments", new Set(["SELECT", "INSERT"])],
   ["thread_execution_heads", new Set(["SELECT", "INSERT"])],
   ["thread_input_receipts", new Set(["SELECT", "INSERT"])],
   ["thread_follow_up_queue", new Set(["SELECT", "INSERT"])],
@@ -227,6 +241,11 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["user_skill_installations", new Set(["SELECT", "INSERT"])],
   ["user_skill_installation_commands", new Set(["SELECT", "INSERT"])],
   ["user_skill_installation_audits", new Set(["SELECT", "INSERT"])],
+  ["team_member_directory", new Set(["SELECT", "INSERT"])],
+  ["thread_forks", new Set(["SELECT", "INSERT"])],
+  ["tenant_skill_installations", new Set(["SELECT", "INSERT"])],
+  ["tenant_skill_installation_commands", new Set(["SELECT", "INSERT"])],
+  ["tenant_skill_installation_audits", new Set(["SELECT", "INSERT"])],
   ["run_skill_snapshots", new Set(["SELECT", "INSERT"])],
   ["run_skill_snapshot_items", new Set(["SELECT", "INSERT"])],
   ["skill_invocations", new Set(["SELECT", "INSERT"])],
@@ -453,6 +472,18 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
     ]),
   ],
   [
+    "worker_tenant_assignments",
+    new Set([
+      "state",
+      "generation",
+      "claim_token",
+      "claimed_by",
+      "lease_expires_at",
+      "next_attempt_at",
+      "updated_at",
+    ]),
+  ],
+  [
     "resources",
     new Set(["visibility", "latest_version_number", "latest_version_id", "updated_at"]),
   ],
@@ -496,6 +527,18 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ],
   [
     "user_skill_installations",
+    new Set([
+      "skill_version",
+      "invocation_name",
+      "status",
+      "version_token",
+      "installed_at",
+      "updated_at",
+    ]),
+  ],
+  ["team_member_directory", new Set(["role", "status", "updated_at"])],
+  [
+    "tenant_skill_installations",
     new Set([
       "skill_version",
       "invocation_name",
@@ -592,6 +635,19 @@ async function hasSkillCenterState(client: PoolClient, schema: string): Promise<
   return result.rows[0]?.present === true;
 }
 
+async function hasTeamCollaborationState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.team_member_directory', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.thread_forks', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.tenant_skill_installations', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.tenant_skill_installation_commands', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.tenant_skill_installation_audits', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasSkillRuntimeState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.run_skill_snapshots', $1::text)) IS NOT NULL
@@ -633,6 +689,18 @@ async function hasRunDispatchState(client: PoolClient, schema: string): Promise<
           AND column_state.attname='outbox_id' AND column_state.attnum > 0
           AND NOT column_state.attisdropped
      ) AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasWorkerTenantAssignmentState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.worker_tenant_assignments', $1::text)) IS NOT NULL
+            AS present`,
     [schema],
   );
   return result.rows[0]?.present === true;
@@ -831,6 +899,9 @@ async function activeTablePolicy(
   if (!(await hasRunDispatchState(client, schema))) {
     for (const table of runDispatchTables) policy.delete(table);
   }
+  if (!(await hasWorkerTenantAssignmentState(client, schema))) {
+    for (const table of workerTenantAssignmentTables) policy.delete(table);
+  }
   if (!(await hasThreadCreationState(client, schema))) {
     for (const table of threadCreationTables) policy.delete(table);
   }
@@ -906,6 +977,14 @@ async function activeTablePolicy(
   if (!(await hasSkillCenterState(client, schema))) {
     for (const table of skillCenterTables) policy.delete(table);
   }
+  if (!(await hasTeamCollaborationState(client, schema))) {
+    for (const table of teamCollaborationTables) policy.delete(table);
+  } else {
+    // 0041 已完成 Tenant 级迁移后，旧用户级安装表仅保留为回滚数据，不再授予 Runtime。
+    for (const table of legacySkillInstallationTables) policy.set(table, new Set());
+    // 团队目录与 Membership 变更只向独立 Team Coordinator 开放。
+    policy.set("team_member_directory", new Set());
+  }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
@@ -924,15 +1003,17 @@ async function activeColumnUpdatePolicy(
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
-  policy.set(
-    "memberships",
-    (await hasMembershipLockMarker(client)) ? new Set(["lock_marker"]) : new Set(),
-  );
+  const membershipUpdateColumns = new Set<string>();
+  if (await hasMembershipLockMarker(client)) membershipUpdateColumns.add("lock_marker");
+  policy.set("memberships", membershipUpdateColumns);
   if (!(await hasRunWorkerState(client))) {
     for (const table of runWorkerTables) policy.delete(table);
   }
   if (!(await hasRunDispatchState(client, schema))) {
     for (const table of runDispatchTables) policy.delete(table);
+  }
+  if (!(await hasWorkerTenantAssignmentState(client, schema))) {
+    for (const table of workerTenantAssignmentTables) policy.delete(table);
   }
   if (!(await hasThreadCreationState(client, schema))) {
     for (const table of threadCreationTables) policy.delete(table);
@@ -1044,6 +1125,13 @@ async function activeColumnUpdatePolicy(
   if (!(await hasSkillCenterState(client, schema))) {
     for (const table of skillCenterTables) policy.delete(table);
   }
+  if (!(await hasTeamCollaborationState(client, schema))) {
+    for (const table of teamCollaborationTables) policy.delete(table);
+  } else {
+    // 物理表仍存在时保留零权限断言，不能把“未检查”误当成“无权限”。
+    policy.set("user_skill_installations", new Set());
+    policy.set("team_member_directory", new Set());
+  }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
@@ -1060,6 +1148,8 @@ export interface MigrationSecurityContext {
   readonly runtimeRole: string;
   readonly migratorRole: string;
   readonly skillPublisherRole: string;
+  readonly workerCoordinatorRole: string;
+  readonly teamCoordinatorRole: string;
   readonly schema: string;
 }
 
@@ -1072,12 +1162,110 @@ function validateContext(context: MigrationSecurityContext): void {
   quoteIdentifier(context.runtimeRole);
   quoteIdentifier(context.migratorRole);
   quoteIdentifier(context.skillPublisherRole);
+  quoteIdentifier(context.workerCoordinatorRole);
+  quoteIdentifier(context.teamCoordinatorRole);
   assertSafeSchemaName(context.schema);
-  if (new Set([context.runtimeRole, context.migratorRole, context.skillPublisherRole]).size !== 3) {
+  if (
+    new Set([
+      context.runtimeRole,
+      context.migratorRole,
+      context.skillPublisherRole,
+      context.workerCoordinatorRole,
+      context.teamCoordinatorRole,
+    ]).size !== 5
+  ) {
     throw new PersistenceError(
       "CONSTRAINT_VIOLATION",
-      "Runtime、Migrator 与 Skill Publisher 必须使用不同角色",
+      "Runtime、Migrator、Skill Publisher、Worker Coordinator 与 Team Coordinator 必须使用不同角色",
     );
+  }
+}
+
+interface WorkerCoordinatorSafetyRow {
+  readonly coordinator_missing: boolean;
+  readonly coordinator_cannot_login: boolean;
+  readonly coordinator_has_parent: boolean;
+  readonly coordinator_has_member: boolean;
+  readonly coordinator_dangerous: boolean;
+  readonly coordinator_inherits: boolean;
+  readonly coordinator_owns_database: boolean;
+  readonly coordinator_owns_schema: boolean;
+  readonly coordinator_owns_relation: boolean;
+  readonly coordinator_owns_routine: boolean;
+  readonly coordinator_owns_object: boolean;
+  readonly coordinator_can_create_database_object: boolean;
+  readonly coordinator_can_create_schema_object: boolean;
+  readonly coordinator_can_create_temporary_object: boolean;
+}
+
+async function inspectWorkerCoordinator(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<WorkerCoordinatorSafetyRow | undefined> {
+  const result = await client.query<WorkerCoordinatorSafetyRow>(
+    `WITH coordinator AS (SELECT * FROM pg_roles WHERE rolname=$1)
+     SELECT
+       NOT EXISTS (SELECT 1 FROM coordinator) AS coordinator_missing,
+       EXISTS (SELECT 1 FROM coordinator WHERE NOT rolcanlogin) AS coordinator_cannot_login,
+       EXISTS (SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM coordinator))
+         AS coordinator_has_parent,
+       EXISTS (SELECT 1 FROM pg_auth_members WHERE roleid=(SELECT oid FROM coordinator))
+         AS coordinator_has_member,
+       EXISTS (
+         SELECT 1 FROM coordinator
+          WHERE rolsuper OR rolbypassrls OR rolcreatedb OR rolcreaterole OR rolreplication
+       ) AS coordinator_dangerous,
+       EXISTS (SELECT 1 FROM coordinator WHERE rolinherit) AS coordinator_inherits,
+       EXISTS (
+         SELECT 1 FROM pg_database WHERE datdba=(SELECT oid FROM coordinator)
+       ) AS coordinator_owns_database,
+       EXISTS (
+         SELECT 1 FROM pg_namespace WHERE nspowner=(SELECT oid FROM coordinator)
+       ) AS coordinator_owns_schema,
+       EXISTS (
+         SELECT 1 FROM pg_class WHERE relowner=(SELECT oid FROM coordinator)
+       ) AS coordinator_owns_relation,
+       EXISTS (
+         SELECT 1 FROM pg_proc WHERE proowner=(SELECT oid FROM coordinator)
+       ) AS coordinator_owns_routine,
+       EXISTS (
+         SELECT 1 FROM (
+           SELECT typowner AS owner_oid FROM pg_type
+           UNION ALL SELECT oprowner FROM pg_operator
+           UNION ALL SELECT conowner FROM pg_conversion
+           UNION ALL SELECT collowner FROM pg_collation
+           UNION ALL SELECT cfgowner FROM pg_ts_config
+           UNION ALL SELECT dictowner FROM pg_ts_dict
+         ) owned_object WHERE owned_object.owner_oid=(SELECT oid FROM coordinator)
+       ) AS coordinator_owns_object,
+       COALESCE(has_database_privilege(
+         (SELECT oid FROM coordinator),current_database(),'CREATE'
+       ),false) AS coordinator_can_create_database_object,
+       COALESCE(has_schema_privilege(
+         (SELECT oid FROM coordinator),$2,'CREATE'
+       ),false) AS coordinator_can_create_schema_object,
+       COALESCE(has_database_privilege(
+         (SELECT oid FROM coordinator),current_database(),'TEMP'
+       ),false) AS coordinator_can_create_temporary_object`,
+    [context.workerCoordinatorRole, context.schema],
+  );
+  return result.rows[0];
+}
+
+async function assertWorkerCoordinatorContextSafe(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+  allowSchemaCreate = false,
+): Promise<void> {
+  const state = await inspectWorkerCoordinator(client, context);
+  if (
+    state === undefined ||
+    Object.entries(state).some(
+      ([name, unsafe]) =>
+        unsafe && !(allowSchemaCreate && name === "coordinator_can_create_schema_object"),
+    )
+  ) {
+    throw new PersistenceError("CONSTRAINT_VIOLATION", "Worker Coordinator 数据库角色边界不安全");
   }
 }
 
@@ -1316,9 +1504,15 @@ async function inspectMigrationContext(
        COALESCE(has_database_privilege(
          (SELECT oid FROM publisher), current_database(), 'CREATE'
        ), false) AS publisher_can_create_database_object,
-       COALESCE(has_schema_privilege(
-         (SELECT oid FROM publisher), $3, 'CREATE'
-       ), false) AS publisher_can_create_schema_object,
+       EXISTS (
+         SELECT 1
+           FROM target_schema
+           CROSS JOIN LATERAL aclexplode(
+             COALESCE(target_schema.nspacl, acldefault('n'::"char", target_schema.nspowner))
+           ) acl
+          WHERE acl.grantee = (SELECT oid FROM publisher)
+            AND acl.privilege_type = 'CREATE'
+       ) AS publisher_can_create_schema_object,
        COALESCE(has_database_privilege(
          (SELECT oid FROM publisher), current_database(), 'TEMP'
        ), false) AS publisher_can_create_temporary_object,
@@ -1353,6 +1547,11 @@ export async function assertMigrationContextSafe(
   context: MigrationSecurityContext,
 ): Promise<void> {
   assertInspectedContextSafe(await inspectMigrationContext(client, context), false);
+  await assertWorkerCoordinatorContextSafe(client, context);
+  await assertWorkerCoordinatorContextSafe(client, {
+    ...context,
+    workerCoordinatorRole: context.teamCoordinatorRole,
+  });
 }
 
 async function assertBootstrapContextSafe(
@@ -1361,6 +1560,15 @@ async function assertBootstrapContextSafe(
 ): Promise<void> {
   // 独立修复 ACL 时允许先清理来自 PUBLIC/直接授权的目标 Schema CREATE；其余边界不放宽。
   assertInspectedContextSafe(await inspectMigrationContext(client, context), true);
+  await assertWorkerCoordinatorContextSafe(client, context, true);
+  await assertWorkerCoordinatorContextSafe(
+    client,
+    {
+      ...context,
+      workerCoordinatorRole: context.teamCoordinatorRole,
+    },
+    true,
+  );
 }
 
 interface PrivilegeRow {
@@ -1375,6 +1583,135 @@ interface EffectiveBoundaryRow {
   readonly database_connect: boolean;
   readonly database_create: boolean;
   readonly database_temporary: boolean;
+}
+
+async function activeTeamCoordinatorTablePolicy(
+  client: PoolClient,
+  schema: string,
+): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
+  if (!(await hasTeamCollaborationState(client, schema))) return new Map();
+  const policy = new Map(await activeTablePolicy(client, schema));
+  policy.set("team_member_directory", new Set(["SELECT", "INSERT"]));
+  return policy;
+}
+
+async function activeTeamCoordinatorColumnUpdatePolicy(
+  client: PoolClient,
+  schema: string,
+): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
+  if (!(await hasTeamCollaborationState(client, schema))) return new Map();
+  const policy = new Map(await activeColumnUpdatePolicy(client, schema));
+  const membershipColumns = new Set(policy.get("memberships") ?? []);
+  membershipColumns.add("role");
+  membershipColumns.add("status");
+  policy.set("memberships", membershipColumns);
+  policy.set("team_member_directory", new Set(["role", "status", "updated_at"]));
+  return policy;
+}
+
+async function grantTeamCoordinatorAccess(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<void> {
+  const tablePolicy = await activeTeamCoordinatorTablePolicy(client, context.schema);
+  if (tablePolicy.size === 0) return;
+  const role = quoteIdentifier(context.teamCoordinatorRole);
+  const schema = quoteIdentifier(context.schema);
+  await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
+  for (const [table, privileges] of tablePolicy) {
+    if (privileges.size === 0) continue;
+    await client.query(
+      `GRANT ${[...privileges].join(", ")} ON TABLE ${schema}.${quoteIdentifier(table)} TO ${role}`,
+    );
+  }
+  const columnPolicy = await activeTeamCoordinatorColumnUpdatePolicy(client, context.schema);
+  for (const [table, columns] of columnPolicy) {
+    if (columns.size === 0) continue;
+    await client.query(
+      `GRANT UPDATE(${[...columns].map(quoteIdentifier).join(", ")}) ON TABLE ${schema}.${quoteIdentifier(table)} TO ${role}`,
+    );
+  }
+}
+
+async function assertTeamCoordinatorBoundary(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+  enabled: boolean,
+): Promise<void> {
+  const tablePolicy = enabled
+    ? await activeTeamCoordinatorTablePolicy(client, context.schema)
+    : new Map<string, ReadonlySet<string>>();
+  const relations = await client.query<{ readonly table_name: string }>(
+    `SELECT relname AS table_name FROM pg_class
+      WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','p')`,
+  );
+  const privileges = await client.query<PrivilegeRow>(
+    `SELECT target.table_name,requested.privilege,
+            has_table_privilege(
+              $1,format('%I.%I',$2::text,target.table_name),requested.privilege
+            ) AS allowed
+       FROM unnest($3::text[]) AS target(table_name)
+       CROSS JOIN unnest($4::text[]) AS requested(privilege)`,
+    [
+      context.teamCoordinatorRole,
+      context.schema,
+      relations.rows.map((row) => row.table_name),
+      tablePrivileges,
+    ],
+  );
+  for (const row of privileges.rows) {
+    if (row.allowed !== (tablePolicy.get(row.table_name)?.has(row.privilege) ?? false)) {
+      throw new PersistenceError("CONSTRAINT_VIOLATION", "Team Coordinator 表权限偏离白名单");
+    }
+  }
+
+  const columnPolicy = enabled
+    ? await activeTeamCoordinatorColumnUpdatePolicy(client, context.schema)
+    : new Map<string, ReadonlySet<string>>();
+  if (columnPolicy.size > 0) {
+    const updates = await client.query<{
+      readonly table_name: string;
+      readonly column_name: string;
+      readonly allowed: boolean;
+    }>(
+      `SELECT column_state.table_name,column_state.column_name,
+              has_column_privilege(
+                $1,format('%I.%I',$2::text,column_state.table_name),
+                column_state.column_name,'UPDATE'
+              ) AS allowed
+         FROM information_schema.columns column_state
+        WHERE column_state.table_schema=$2
+          AND column_state.table_name=ANY($3::text[])`,
+      [context.teamCoordinatorRole, context.schema, [...columnPolicy.keys()]],
+    );
+    for (const row of updates.rows) {
+      if (row.allowed !== columnPolicy.get(row.table_name)?.has(row.column_name)) {
+        throw new PersistenceError(
+          "CONSTRAINT_VIOLATION",
+          "Team Coordinator 列级 UPDATE 权限偏离白名单",
+        );
+      }
+    }
+  }
+
+  const sequences = await client.query<PrivilegeRow>(
+    `SELECT relation.relname AS table_name,requested.privilege,
+            has_sequence_privilege(
+              $1,format('%I.%I',$2::text,relation.relname),requested.privilege
+            ) AS allowed
+       FROM pg_class relation
+       CROSS JOIN unnest($3::text[]) AS requested(privilege)
+      WHERE relation.relnamespace=current_schema()::regnamespace AND relation.relkind='S'`,
+    [context.teamCoordinatorRole, context.schema, sequencePrivileges],
+  );
+  if (sequences.rows.some((row) => row.allowed)) {
+    throw new PersistenceError("CONSTRAINT_VIOLATION", "Team Coordinator 不得持有 sequence 权限");
+  }
+  await assertDatabaseAndSchemaBoundary(
+    client,
+    { ...context, runtimeRole: context.teamCoordinatorRole },
+    enabled,
+  );
 }
 
 async function assertDatabaseAndSchemaBoundary(
@@ -1443,8 +1780,11 @@ async function assertRoutinePrivilegeBoundary(
     `SELECT count(*)::text AS count
        FROM pg_proc routine
       WHERE routine.pronamespace = current_schema()::regnamespace
-        AND has_function_privilege($1, routine.oid, 'EXECUTE')`,
-    [context.runtimeRole],
+        AND (
+          has_function_privilege($1, routine.oid, 'EXECUTE')
+          OR has_function_privilege($2, routine.oid, 'EXECUTE')
+        )`,
+    [context.runtimeRole, context.teamCoordinatorRole],
   );
   const publicPrivileges = await client.query<{ count: string }>(
     `SELECT count(*)::text AS count
@@ -1577,6 +1917,106 @@ async function assertSkillPublisherBoundary(
   }
 }
 
+async function assertWorkerCoordinatorBoundary(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+  enabled: boolean,
+): Promise<void> {
+  const relations = await client.query<{ readonly table_name: string }>(
+    `SELECT relname AS table_name FROM pg_class
+      WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','p')`,
+  );
+  const tableNames = relations.rows.map((row) => row.table_name);
+  const privileges = await client.query<PrivilegeRow>(
+    `SELECT target.table_name,requested.privilege,
+            has_table_privilege(
+              $1,format('%I.%I',$2::text,target.table_name),requested.privilege
+            ) AS allowed
+       FROM unnest($3::text[]) AS target(table_name)
+       CROSS JOIN unnest($4::text[]) AS requested(privilege)`,
+    [context.workerCoordinatorRole, context.schema, tableNames, tablePrivileges],
+  );
+  for (const row of privileges.rows) {
+    const expected =
+      enabled && row.table_name === "worker_tenant_assignments" && row.privilege === "SELECT";
+    if (row.allowed !== expected) {
+      throw new PersistenceError("CONSTRAINT_VIOLATION", "Worker Coordinator 表权限偏离白名单");
+    }
+  }
+
+  const allowedUpdateColumns = new Set([
+    "state",
+    "generation",
+    "claim_token",
+    "claimed_by",
+    "lease_expires_at",
+    "updated_at",
+  ]);
+  const columnUpdates = await client.query<{
+    readonly column_name: string;
+    readonly allowed: boolean;
+  }>(
+    `SELECT column_state.column_name,
+            has_column_privilege(
+              $1,format('%I.worker_tenant_assignments',$2::text),
+              column_state.column_name,'UPDATE'
+            ) AS allowed
+       FROM information_schema.columns column_state
+      WHERE column_state.table_schema=$2
+        AND column_state.table_name='worker_tenant_assignments'
+      ORDER BY column_state.ordinal_position`,
+    [context.workerCoordinatorRole, context.schema],
+  );
+  for (const row of columnUpdates.rows) {
+    if (row.allowed !== (enabled && allowedUpdateColumns.has(row.column_name))) {
+      throw new PersistenceError(
+        "CONSTRAINT_VIOLATION",
+        "Worker Coordinator claim 列权限偏离白名单",
+      );
+    }
+  }
+
+  const sequences = await client.query<PrivilegeRow>(
+    `SELECT relation.relname AS table_name,requested.privilege,
+            has_sequence_privilege(
+              $1,format('%I.%I',$2::text,relation.relname),requested.privilege
+            ) AS allowed
+       FROM pg_class relation
+       CROSS JOIN unnest($3::text[]) AS requested(privilege)
+      WHERE relation.relnamespace=current_schema()::regnamespace AND relation.relkind='S'`,
+    [context.workerCoordinatorRole, context.schema, sequencePrivileges],
+  );
+  const routines = await client.query<{ readonly count: string }>(
+    `SELECT count(*)::text AS count FROM pg_proc routine
+      WHERE routine.pronamespace=current_schema()::regnamespace
+        AND has_function_privilege($1,routine.oid,'EXECUTE')`,
+    [context.workerCoordinatorRole],
+  );
+  const boundary = await client.query<EffectiveBoundaryRow>(
+    `SELECT has_schema_privilege($1,$2,'USAGE') AS schema_usage,
+            has_schema_privilege($1,$2,'CREATE') AS schema_create,
+            has_database_privilege($1,current_database(),'CONNECT') AS database_connect,
+            has_database_privilege($1,current_database(),'CREATE') AS database_create,
+            has_database_privilege($1,current_database(),'TEMP') AS database_temporary`,
+    [context.workerCoordinatorRole, context.schema],
+  );
+  const state = boundary.rows[0];
+  if (
+    sequences.rows.some((row) => row.allowed) ||
+    routines.rows[0]?.count !== "0" ||
+    state?.schema_usage !== enabled ||
+    state.schema_create !== false ||
+    state.database_connect !== true ||
+    state.database_create !== false ||
+    state.database_temporary !== false
+  ) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      "Worker Coordinator 数据库或 Schema 权限偏离白名单",
+    );
+  }
+}
+
 async function assertActiveRuntimeWhitelist(
   client: PoolClient,
   context: MigrationSecurityContext,
@@ -1656,6 +2096,16 @@ async function assertActiveRuntimeWhitelist(
     context,
     await hasSkillPublicationState(client, context.schema),
   );
+  await assertWorkerCoordinatorBoundary(
+    client,
+    context,
+    await hasWorkerTenantAssignmentState(client, context.schema),
+  );
+  await assertTeamCoordinatorBoundary(
+    client,
+    context,
+    await hasTeamCollaborationState(client, context.schema),
+  );
 }
 
 async function assertRuntimeAccessRemoved(
@@ -1705,6 +2155,8 @@ async function assertRuntimeAccessRemoved(
   await assertNoPublicSchemaPrivileges(client);
   await assertRoutinePrivilegeBoundary(client, context);
   await assertSkillPublisherBoundary(client, context, false);
+  await assertWorkerCoordinatorBoundary(client, context, false);
+  await assertTeamCoordinatorBoundary(client, context, false);
 }
 
 /** 在既有迁移事务中收敛 ACL，供 down 保证 DDL 与权限回收原子提交。 */
@@ -1714,13 +2166,19 @@ export async function bootstrapRuntimeAccessOnClient(
 ): Promise<void> {
   await assertBootstrapContextSafe(client, context);
   const role = quoteIdentifier(context.runtimeRole);
+  const coordinatorRole = quoteIdentifier(context.workerCoordinatorRole);
+  const teamCoordinatorRole = quoteIdentifier(context.teamCoordinatorRole);
   const schema = quoteIdentifier(context.schema);
-  await client.query(`REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM PUBLIC, ${role}`);
   await client.query(
-    `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema} FROM PUBLIC, ${role}`,
+    `REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
   );
   await client.query(
-    `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema} FROM PUBLIC, ${role}`,
+    `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema}
+       FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
+  );
+  await client.query(
+    `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema}
+       FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
   );
   await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
   await client.query(
@@ -1728,6 +2186,19 @@ export async function bootstrapRuntimeAccessOnClient(
   );
   if (await hasMembershipLockMarker(client)) {
     await client.query(`GRANT UPDATE(lock_marker) ON TABLE ${schema}.memberships TO ${role}`);
+  }
+  if (await hasTeamCollaborationState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE
+         ${schema}.thread_forks,
+         ${schema}.tenant_skill_installations,
+         ${schema}.tenant_skill_installation_commands,
+         ${schema}.tenant_skill_installation_audits
+       TO ${role};
+       GRANT UPDATE(
+         skill_version,invocation_name,status,version_token,installed_at,updated_at
+       ) ON TABLE ${schema}.tenant_skill_installations TO ${role}`,
+    );
   }
   await client.query(
     `GRANT SELECT, INSERT, UPDATE ON TABLE ${schema}.threads, ${schema}.runs, ${schema}.workspaces TO ${role}`,
@@ -1780,6 +2251,18 @@ export async function bootstrapRuntimeAccessOnClient(
          ${schema}.api_idempotency_records,
          ${schema}.run_dispatch_outbox
        TO ${role}`,
+    );
+  }
+  if (await hasWorkerTenantAssignmentState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE ${schema}.worker_tenant_assignments TO ${role}`,
+    );
+    await client.query(
+      `GRANT USAGE ON SCHEMA ${schema} TO ${coordinatorRole};
+       GRANT SELECT ON TABLE ${schema}.worker_tenant_assignments TO ${coordinatorRole};
+       GRANT UPDATE(
+         state,generation,claim_token,claimed_by,lease_expires_at,updated_at
+       ) ON TABLE ${schema}.worker_tenant_assignments TO ${coordinatorRole}`,
     );
   }
   if (await hasThreadCreationState(client, context.schema)) {
@@ -2015,22 +2498,26 @@ export async function bootstrapRuntimeAccessOnClient(
     );
   }
   if (await hasSkillCenterState(client, context.schema)) {
-    // Skill 内容由受信发布流程写入；Runtime 只读中心元数据并维护当前用户自己的安装事实。
+    // Skill 内容由受信发布流程写入；安装事实由当前 Schema 版本决定是旧用户级还是 Tenant 级。
     await client.query(
       `GRANT SELECT ON TABLE
          ${schema}.skills,
          ${schema}.skill_versions,
          ${schema}.skill_version_files
-       TO ${role};
-       GRANT SELECT, INSERT ON TABLE
-         ${schema}.user_skill_installation_commands,
-         ${schema}.user_skill_installation_audits
-       TO ${role};
-       GRANT SELECT, INSERT ON TABLE ${schema}.user_skill_installations TO ${role};
-       GRANT UPDATE(
-         skill_version,invocation_name,status,version_token,installed_at,updated_at
-       ) ON TABLE ${schema}.user_skill_installations TO ${role}`,
+       TO ${role}`,
     );
+    if (!(await hasTeamCollaborationState(client, context.schema))) {
+      await client.query(
+        `GRANT SELECT, INSERT ON TABLE
+           ${schema}.user_skill_installation_commands,
+           ${schema}.user_skill_installation_audits
+         TO ${role};
+         GRANT SELECT, INSERT ON TABLE ${schema}.user_skill_installations TO ${role};
+         GRANT UPDATE(
+           skill_version,invocation_name,status,version_token,installed_at,updated_at
+         ) ON TABLE ${schema}.user_skill_installations TO ${role}`,
+      );
+    }
   }
   if (await hasSkillRuntimeState(client, context.schema)) {
     await client.query(
@@ -2089,6 +2576,13 @@ export async function bootstrapRuntimeAccessOnClient(
        ) ON TABLE ${schema}.run_dispatch_outbox TO ${role}`,
     );
   }
+  if (await hasWorkerTenantAssignmentState(client, context.schema)) {
+    await client.query(
+      `GRANT UPDATE(
+         state,generation,claim_token,claimed_by,lease_expires_at,next_attempt_at,updated_at
+       ) ON TABLE ${schema}.worker_tenant_assignments TO ${role}`,
+    );
+  }
   if (await hasThreadHeadState(client, context.schema)) {
     const inputRouting = await hasThreadInputRoutingState(client, context.schema);
     await client.query(
@@ -2130,6 +2624,7 @@ export async function bootstrapRuntimeAccessOnClient(
          ON TABLE ${schema}.resource_promotion_authorizations TO ${role}`,
     );
   }
+  await grantTeamCoordinatorAccess(client, context);
   await assertActiveRuntimeWhitelist(client, context);
 }
 
@@ -2151,13 +2646,19 @@ export async function teardownRuntimeSchemaAccessOnClient(
   context: MigrationSecurityContext,
 ): Promise<void> {
   const role = quoteIdentifier(context.runtimeRole);
+  const coordinatorRole = quoteIdentifier(context.workerCoordinatorRole);
+  const teamCoordinatorRole = quoteIdentifier(context.teamCoordinatorRole);
   const schema = quoteIdentifier(context.schema);
   await client.query(
-    `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema} FROM PUBLIC, ${role}`,
+    `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema}
+       FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
   );
   await client.query(
-    `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema} FROM PUBLIC, ${role}`,
+    `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema}
+       FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
   );
-  await client.query(`REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM PUBLIC, ${role}`);
+  await client.query(
+    `REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
+  );
   await assertRuntimeAccessRemoved(client, context);
 }

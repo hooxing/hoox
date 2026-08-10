@@ -1,0 +1,4 @@
+Copyright (c) Cube Agent contributors.
+
+This first-party development fixture is licensed under LicenseRef-Cube-Internal.
+It is not a third-party redistribution package.

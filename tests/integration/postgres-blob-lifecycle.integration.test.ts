@@ -66,6 +66,7 @@ import {
   PgModelWireTraceCleanupRepository,
   PgModelWireTraceRepository,
   PgRunDispatchOutbox,
+  PgWorkerTenantAssignments,
   type StableBlobLifecycleAllocation,
   type StableBlobRef,
   type StagedBlobRef,
@@ -73,7 +74,11 @@ import {
   type TenantBlobScope,
   transitionBlobCommit,
 } from "../../runtime-ts/packages/persistence/src/index.js";
-import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import {
+  loadMigrations,
+  migrateDown,
+  migrateUp,
+} from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgBlobLifecycleRepository } from "../../runtime-ts/packages/persistence/src/pg-blob-lifecycle.js";
 import { PgRuntimeRolloutRepository } from "../../runtime-ts/packages/persistence/src/pg-runtime-rollout.js";
 import {
@@ -103,17 +108,32 @@ const migratorRole = `it_bl_mg_${process.pid}_${Date.now().toString(36)}`;
 const migratorPassword = randomBytes(24).toString("hex");
 const skillPublisherRole = `it_bl_pub_${process.pid}_${Date.now().toString(36)}`;
 const skillPublisherPassword = randomBytes(24).toString("hex");
+const workerCoordinatorRole = `it_bl_coord_${process.pid}_${Date.now().toString(36)}`;
+const teamCoordinatorRole = workerCoordinatorRole.replace("_coord_", "_team_");
+const workerCoordinatorPassword = randomBytes(24).toString("hex");
+const teamCoordinatorPassword = randomBytes(24).toString("hex");
 const testMigrationUrl = new URL(migrationDatabaseUrl);
 if (testMigrationUrl.username !== configuredMigratorRole) {
   throw new Error("MIGRATION_DATABASE_URL 与 DATABASE_MIGRATOR_ROLE 不一致");
 }
 testMigrationUrl.username = migratorRole;
 testMigrationUrl.password = migratorPassword;
-const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
+const workerCoordinatorDatabaseUrl = new URL(migrationDatabaseUrl);
+workerCoordinatorDatabaseUrl.username = workerCoordinatorRole;
+workerCoordinatorDatabaseUrl.password = workerCoordinatorPassword;
+const migrationSecurity = {
+  runtimeRole,
+  migratorRole,
+  skillPublisherRole,
+  workerCoordinatorRole,
+  teamCoordinatorRole,
+  schema,
+} as const;
 
 let administrativePool!: Pool;
 let migratorPool!: Pool;
 let runtimePool!: Pool;
+let workerCoordinatorPool!: Pool;
 let repository!: PgBlobLifecycleRepository;
 let schemaCreated = false;
 let migratorCreated = false;
@@ -236,7 +256,11 @@ beforeAll(async () => {
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
+     CREATE ROLE "${workerCoordinatorRole}" LOGIN PASSWORD '${workerCoordinatorPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     CREATE ROLE "${teamCoordinatorRole}" LOGIN PASSWORD '${teamCoordinatorPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migratorCreated = true;
@@ -250,6 +274,11 @@ beforeAll(async () => {
     connectionString: runtimeDatabaseUrl,
     schema,
     maxConnections: 12,
+  });
+  workerCoordinatorPool = createPostgresPool({
+    connectionString: workerCoordinatorDatabaseUrl.toString(),
+    schema,
+    maxConnections: 2,
   });
   await migrateUp(migratorPool, migrationSecurity);
   await seedTenant(scopeA, "a");
@@ -265,6 +294,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (runtimePool !== undefined) await runtimePool.end();
+  if (workerCoordinatorPool !== undefined) await workerCoordinatorPool.end();
   if (migratorPool !== undefined) {
     await migrateDown(migratorPool, {
       ...migrationSecurity,
@@ -283,7 +313,9 @@ afterAll(async () => {
   if (schemaCreated) await administrativePool.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (migratorCreated) {
     await administrativePool.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
+       DROP ROLE "${teamCoordinatorRole}";
+       DROP ROLE "${workerCoordinatorRole}";
        DROP ROLE "${skillPublisherRole}";
        DROP ROLE "${migratorRole}"`,
     );
@@ -556,12 +588,12 @@ describe("PostgreSQL stable blob 生命周期", () => {
   it("开发 Agent Worker 入口装配真实 PG、S3 Observation 与 Pi 恢复依赖", async () => {
     const dependencyServer = createServer((request, response) => {
       response.setHeader("content-type", "application/json");
-      if (request.url === "/sandbox/v2/sandboxes") {
+      if (request.url === "/sandbox/v2/sandboxes" || request.url === "/sandbox/volumes") {
         response.end("[]");
         return;
       }
       if (request.url === "/model/v1/models") {
-        response.end(JSON.stringify({ data: [{ id: "integration-model" }] }));
+        response.end(JSON.stringify({ data: [{ id: "deepseek-v4-flash" }] }));
         return;
       }
       response.statusCode = 404;
@@ -581,6 +613,8 @@ describe("PostgreSQL stable blob 生命周期", () => {
           DATABASE_URL: runtimeDatabaseUrl,
           DATABASE_SCHEMA: schema,
           DATABASE_RUNTIME_ROLE: requiredEnvironment("DATABASE_RUNTIME_ROLE"),
+          DATABASE_WORKER_COORDINATOR_URL: workerCoordinatorDatabaseUrl.toString(),
+          DATABASE_WORKER_COORDINATOR_ROLE: workerCoordinatorRole,
           S3_ENDPOINT: requiredEnvironment("S3_ENDPOINT"),
           S3_BUCKET: requiredEnvironment("S3_BUCKET"),
           S3_REGION: requiredEnvironment("S3_REGION"),
@@ -589,12 +623,13 @@ describe("PostgreSQL stable blob 生命周期", () => {
           S3_FORCE_PATH_STYLE: "true",
           CUBESANDBOX_API_URL: `http://127.0.0.1:${address.port}/sandbox`,
           CUBESANDBOX_TEMPLATE_ID: "integration-template",
+          CUBESANDBOX_RESOURCE_VOLUME_DRIVER: "runtime-resourcefs",
           MODEL_BASE_URL: `http://127.0.0.1:${address.port}/model/v1/`,
           MODEL_API_KEY: "integration-model-key",
-          MODEL_ID: "integration-model",
+          MODEL_ID: "deepseek-v4-flash",
           MODEL_SUPPORTS_IMAGES: "false",
-          MODEL_CONTEXT_WINDOW: "128000",
-          MODEL_MAX_OUTPUT_TOKENS: "16384",
+          MODEL_CONTEXT_WINDOW: "1048576",
+          MODEL_MAX_OUTPUT_TOKENS: "65536",
           MODEL_WIRE_TRACE_ENABLED: "false",
           MODEL_WIRE_TRACE_RETENTION_DAYS: "7",
           MODEL_WIRE_TRACE_MAX_BYTES: "1048576",
@@ -800,12 +835,22 @@ describe("PostgreSQL stable blob 生命周期", () => {
         },
         { workerId: `worker-${label}`, leaseDurationMs: 30_000, heartbeatMs: 10_000 },
       );
-      const loop = new AgentWorkerPollingLoop(new PgRunDispatchOutbox(runtimePool), worker, {
-        tenantId: scopeA.tenantId,
-        workerId: `dispatcher-${label}`,
-        pollIntervalMs: 25,
-        dispatchLeaseMs: 30_000,
+      const tenantAssignments = new PgWorkerTenantAssignments({
+        runtime: runtimePool,
+        coordinator: workerCoordinatorPool,
       });
+      await tenantAssignments.wake(scopeA.tenantId);
+      const loop = new AgentWorkerPollingLoop(
+        tenantAssignments,
+        new PgRunDispatchOutbox(runtimePool),
+        worker,
+        {
+          workerId: `dispatcher-${label}`,
+          pollIntervalMs: 25,
+          tenantAssignmentLeaseMs: 30_000,
+          dispatchLeaseMs: 30_000,
+        },
+      );
       loop.start();
       try {
         let status = "queued";
@@ -2462,7 +2507,8 @@ describe("PostgreSQL stable blob 生命周期", () => {
       tombstones: null,
       identity_constraint: null,
     });
-    expect((await migrateUp(migratorPool, migrationSecurity)).at(-1)?.version).toBe(17);
+    const latestVersion = (await loadMigrations()).at(-1)?.version;
+    expect((await migrateUp(migratorPool, migrationSecurity)).at(-1)?.version).toBe(latestVersion);
     const restored = await migratorPool.query<{
       table_name: string;
       rls: boolean;

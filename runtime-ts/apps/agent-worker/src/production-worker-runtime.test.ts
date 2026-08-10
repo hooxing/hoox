@@ -1,4 +1,7 @@
-import type { PgClaimedRunDispatch } from "@cube-runtime/persistence";
+import type {
+  PgClaimedRunDispatch,
+  PgClaimedWorkerTenantAssignment,
+} from "@cube-runtime/persistence";
 import type { ExecutionScope, SandboxSessionRef } from "@cube-runtime/run-contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -32,13 +35,30 @@ function claim(): PgClaimedRunDispatch {
   };
 }
 
+function tenantAssignment(): PgClaimedWorkerTenantAssignment {
+  return {
+    tenantId: "tenant-worker-loop",
+    generation: 1,
+    claimToken: "tenant-claim-worker-loop",
+    workerId: "worker-loop",
+  };
+}
+
 describe("Agent Worker production polling loop", () => {
   it("领取 durable dispatch 后执行 RunWorker 并以同一 dispatch fence 确认终态", async () => {
     const acknowledged = deferred<void>();
     const expected = claim();
     let claimed = false;
     const acknowledgements: unknown[] = [];
+    const settled: PgClaimedWorkerTenantAssignment[] = [];
     const loop = new AgentWorkerPollingLoop(
+      {
+        claim: async () => (claimed ? undefined : tenantAssignment()),
+        settle: async (assignment) => {
+          settled.push(assignment);
+          return true;
+        },
+      },
       {
         claim: async () => {
           if (claimed) return [];
@@ -52,9 +72,9 @@ describe("Agent Worker production polling loop", () => {
       },
       { execute: async () => ({ outcome: "succeeded" }) },
       {
-        tenantId: expected.scope.tenantId,
         workerId: "worker-loop",
         pollIntervalMs: 10,
+        tenantAssignmentLeaseMs: 30_000,
         dispatchLeaseMs: 30_000,
       },
     );
@@ -62,6 +82,126 @@ describe("Agent Worker production polling loop", () => {
     await acknowledged.promise;
     await loop.close();
     expect(acknowledgements).toEqual([{ claim: expected, outcome: "terminal" }]);
+    expect(settled).toEqual([tenantAssignment()]);
+  });
+
+  it("在模型执行前释放 Tenant 调度租约，避免同团队不同 Thread 被长任务串行化", async () => {
+    const executionStarted = deferred<void>();
+    const finishExecution = deferred<void>();
+    const events: string[] = [];
+    let assignmentClaimed = false;
+    const loop = new AgentWorkerPollingLoop(
+      {
+        claim: async () => {
+          if (assignmentClaimed) return undefined;
+          assignmentClaimed = true;
+          return tenantAssignment();
+        },
+        settle: async () => {
+          events.push("settle-assignment");
+          return true;
+        },
+      },
+      {
+        claim: async () => {
+          events.push("claim-dispatch");
+          return [claim()];
+        },
+        acknowledge: async () => undefined,
+      },
+      {
+        execute: async () => {
+          events.push("execute-run");
+          executionStarted.resolve();
+          await finishExecution.promise;
+          return { outcome: "succeeded" };
+        },
+      },
+      {
+        workerId: "worker-loop",
+        pollIntervalMs: 10,
+        tenantAssignmentLeaseMs: 30_000,
+        dispatchLeaseMs: 30_000,
+      },
+    );
+
+    loop.start();
+    await executionStarted.promise;
+    expect(events).toEqual(["claim-dispatch", "settle-assignment", "execute-run"]);
+    finishExecution.resolve();
+    await loop.close();
+  });
+
+  it("Tenant 控制面领取失败时不进入任何业务 Tenant 队列", async () => {
+    const claimAttempted = deferred<void>();
+    let dispatchClaims = 0;
+    const loop = new AgentWorkerPollingLoop(
+      {
+        claim: async () => {
+          claimAttempted.resolve();
+          throw new Error("控制面暂时不可用");
+        },
+        settle: async () => true,
+      },
+      {
+        claim: async () => {
+          dispatchClaims += 1;
+          return [];
+        },
+        acknowledge: async () => undefined,
+      },
+      { execute: async () => ({ outcome: "succeeded" }) },
+      {
+        workerId: "worker-loop",
+        pollIntervalMs: 10,
+        tenantAssignmentLeaseMs: 30_000,
+        dispatchLeaseMs: 30_000,
+      },
+    );
+
+    loop.start();
+    await claimAttempted.promise;
+    await loop.close();
+    expect(dispatchClaims).toBe(0);
+  });
+
+  it("Tenant settle 暂时失败不丢弃已经取得的 dispatch", async () => {
+    const acknowledged = deferred<void>();
+    let assignmentClaimed = false;
+    let executions = 0;
+    const loop = new AgentWorkerPollingLoop(
+      {
+        claim: async () => {
+          if (assignmentClaimed) return undefined;
+          assignmentClaimed = true;
+          return tenantAssignment();
+        },
+        settle: async () => {
+          throw new Error("settle 暂时不可用");
+        },
+      },
+      {
+        claim: async () => [claim()],
+        acknowledge: async () => acknowledged.resolve(),
+      },
+      {
+        execute: async () => {
+          executions += 1;
+          return { outcome: "succeeded" };
+        },
+      },
+      {
+        workerId: "worker-loop",
+        pollIntervalMs: 10,
+        tenantAssignmentLeaseMs: 30_000,
+        dispatchLeaseMs: 30_000,
+      },
+    );
+
+    loop.start();
+    await acknowledged.promise;
+    await loop.close();
+    expect(executions).toBe(1);
   });
 
   it("stopAccepting 停止新领取并等待在途 RunWorker 与 ack 完成", async () => {
@@ -70,7 +210,16 @@ describe("Agent Worker production polling loop", () => {
     const closed = deferred<void>();
     let claimCount = 0;
     let ackCount = 0;
+    let assignmentClaimed = false;
     const loop = new AgentWorkerPollingLoop(
+      {
+        claim: async () => {
+          if (assignmentClaimed) return undefined;
+          assignmentClaimed = true;
+          return tenantAssignment();
+        },
+        settle: async () => true,
+      },
       {
         claim: async () => {
           claimCount += 1;
@@ -88,9 +237,9 @@ describe("Agent Worker production polling loop", () => {
         },
       },
       {
-        tenantId: "tenant-worker-loop",
         workerId: "worker-loop",
         pollIntervalMs: 10,
+        tenantAssignmentLeaseMs: 30_000,
         dispatchLeaseMs: 30_000,
       },
     );
@@ -116,7 +265,16 @@ describe("Agent Worker production polling loop", () => {
     const expected = claim();
     let executions = 0;
     const acknowledgements: unknown[] = [];
+    let assignmentClaimed = false;
     const loop = new AgentWorkerPollingLoop(
+      {
+        claim: async () => {
+          if (assignmentClaimed) return undefined;
+          assignmentClaimed = true;
+          return tenantAssignment();
+        },
+        settle: async () => true,
+      },
       {
         claim: async () => {
           claimStarted.resolve();
@@ -134,9 +292,9 @@ describe("Agent Worker production polling loop", () => {
         },
       },
       {
-        tenantId: expected.scope.tenantId,
         workerId: "worker-loop",
         pollIntervalMs: 10,
+        tenantAssignmentLeaseMs: 30_000,
         dispatchLeaseMs: 30_000,
       },
     );
@@ -158,6 +316,10 @@ describe("Agent Worker production polling loop", () => {
     let claimCalls = 0;
     const loop = new AgentWorkerPollingLoop(
       {
+        claim: async () => tenantAssignment(),
+        settle: async () => true,
+      },
+      {
         claim: async () => {
           claimCalls += 1;
           return [];
@@ -166,11 +328,12 @@ describe("Agent Worker production polling loop", () => {
       },
       { execute: async () => ({ outcome: "succeeded" }) },
       {
-        tenantId: "tenant-worker-loop",
         workerId: "worker-loop",
         pollIntervalMs: 10,
+        tenantAssignmentLeaseMs: 30_000,
         dispatchLeaseMs: 30_000,
-        maintenance: async () => {
+        maintenance: async (tenantId) => {
+          expect(tenantId).toBe("tenant-worker-loop");
           maintenanceCalls += 1;
           if (maintenanceCalls === 1) throw new Error("维护依赖暂时不可用");
           recovered.resolve();

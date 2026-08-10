@@ -8,6 +8,9 @@ function productionEnvironment(): Record<string, string> {
     DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_SCHEMA: "runtime",
     DATABASE_RUNTIME_ROLE: "runtime",
+    DATABASE_TEAM_COORDINATOR_URL:
+      "postgresql://team_coordinator:credential@database:5432/runtime?sslmode=verify-full",
+    DATABASE_TEAM_COORDINATOR_ROLE: "team_coordinator",
     THREAD_CURSOR_ACTIVE_KID: "current",
     THREAD_CURSOR_SIGNING_KEYS: "current:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     THREAD_SERIAL_QUEUE_V2_ENABLED: "true",
@@ -266,6 +269,18 @@ describe("API 进程入口", () => {
         DATABASE_RUNTIME_ROLE: "Runtime-Owner",
       }),
     ).toThrow("DATABASE_RUNTIME_ROLE 格式无效");
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        DATABASE_TEAM_COORDINATOR_ROLE: "Team-Coordinator",
+      }),
+    ).toThrow("DATABASE_TEAM_COORDINATOR_ROLE 格式无效");
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        DATABASE_TEAM_COORDINATOR_ROLE: "runtime",
+      }),
+    ).toThrow("DATABASE_TEAM_COORDINATOR_ROLE 必须与 DATABASE_RUNTIME_ROLE 不同");
     expect(() =>
       parseApiProcessEnvironment({
         ...productionEnvironment(),

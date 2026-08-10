@@ -1035,6 +1035,7 @@ export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecycle
   terminalEffectCount = 0;
   terminateCount = 0;
   nextAcquire: ThreadSandboxAcquireResult | undefined;
+  nextRenew: "renewed" | "lease_lost" | "unavailable" | undefined;
   nextTerminalEffect: "settled" | "unknown" | "not_owner" | undefined;
   readonly handle = new FakeSandboxHandle("thread-worker-fake");
   readonly lease: ThreadSandboxLeaseRefV1 = {
@@ -1076,9 +1077,13 @@ export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecycle
     return "attested";
   }
 
-  async renew(): Promise<"renewed"> {
+  async renew(
+    _input: Parameters<ThreadSandboxSessionLifecyclePort["renew"]>[0],
+  ): Promise<"renewed" | "lease_lost" | "unavailable"> {
     this.renewCount += 1;
-    return "renewed";
+    const result = this.nextRenew ?? "renewed";
+    this.nextRenew = undefined;
+    return result;
   }
 
   async completeTerminalEffect(): Promise<"settled" | "unknown" | "not_owner"> {
@@ -1088,7 +1093,9 @@ export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecycle
     return result;
   }
 
-  async terminate(): Promise<"settled"> {
+  async terminate(
+    _input: Parameters<ThreadSandboxSessionLifecyclePort["terminate"]>[0],
+  ): Promise<"settled"> {
     this.terminateCount += 1;
     return "settled";
   }

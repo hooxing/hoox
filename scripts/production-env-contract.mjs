@@ -2,6 +2,10 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "RUNTIME_ENV",
   "DATABASE_URL",
   "DATABASE_RUNTIME_ROLE",
+  "DATABASE_WORKER_COORDINATOR_URL",
+  "DATABASE_WORKER_COORDINATOR_ROLE",
+  "DATABASE_TEAM_COORDINATOR_URL",
+  "DATABASE_TEAM_COORDINATOR_ROLE",
   "DATABASE_SKILL_PUBLISHER_ROLE",
   "DATABASE_SCHEMA",
   "PROCESS_SHUTDOWN_TIMEOUT_MS",
@@ -103,6 +107,8 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
 
 const secretKeys = new Set([
   "DATABASE_URL",
+  "DATABASE_WORKER_COORDINATOR_URL",
+  "DATABASE_TEAM_COORDINATOR_URL",
   "SKILL_PUBLISHER_DATABASE_URL",
   "THREAD_CURSOR_SIGNING_KEYS",
   "API_JWT_SIGNING_KEYS",
@@ -142,7 +148,12 @@ function parseLines(source) {
 }
 
 function obviousPlaceholder(key, value) {
-  if (key === "DATABASE_URL" || key === "SKILL_PUBLISHER_DATABASE_URL") {
+  if (
+    key === "DATABASE_URL" ||
+    key === "DATABASE_WORKER_COORDINATOR_URL" ||
+    key === "DATABASE_TEAM_COORDINATOR_URL" ||
+    key === "SKILL_PUBLISHER_DATABASE_URL"
+  ) {
     try {
       return new URL(value).password === "replace-me";
     } catch {

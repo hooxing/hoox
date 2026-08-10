@@ -58,6 +58,8 @@ function developmentEnvironment(): Record<string, string> {
   return {
     RUNTIME_ENV: "development",
     DATABASE_URL: "postgresql://runtime:credential@database/runtime",
+    DATABASE_TEAM_COORDINATOR_URL: "postgresql://team_coordinator:credential@database/runtime",
+    DATABASE_TEAM_COORDINATOR_ROLE: "team_coordinator",
     DATABASE_SCHEMA: "runtime",
     THREAD_CURSOR_ACTIVE_KID: "current",
     THREAD_CURSOR_SIGNING_KEYS: "current:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -92,6 +94,12 @@ describe("开发 API 默认装配", () => {
     try {
       expect(mocks.createApiPersistenceRuntime).toHaveBeenCalledWith(
         expect.objectContaining({
+          teamCoordinator: {
+            connectionString: "postgresql://team_coordinator:credential@database/runtime",
+            schema: "runtime",
+            expectedRuntimeRole: "team_coordinator",
+            applicationName: "cube-runtime-api-team-coordinator-development",
+          },
           blobLifecycle: { objectPrefix: "agent-worker" },
         }),
       );

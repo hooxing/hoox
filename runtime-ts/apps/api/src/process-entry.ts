@@ -48,6 +48,16 @@ const apiEnvironmentSchema = Object.freeze({
     requiredIn: productionEnvironment,
     maxLength: 63,
   }),
+  DATABASE_TEAM_COORDINATOR_URL: urlEnvironmentField({
+    secret: true,
+    protocols: ["postgres:", "postgresql:"],
+    allowCredentials: true,
+    maxLength: 8_192,
+  }),
+  DATABASE_TEAM_COORDINATOR_ROLE: stringEnvironmentField({
+    requiredIn: productionEnvironment,
+    maxLength: 63,
+  }),
   THREAD_CURSOR_ACTIVE_KID: stringEnvironmentField({ maxLength: 128 }),
   THREAD_CURSOR_SIGNING_KEYS: stringEnvironmentField({ secret: true, maxLength: 16_384 }),
   THREAD_SERIAL_QUEUE_V2_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
@@ -149,8 +159,11 @@ export interface ApiProcessConfiguration {
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
   readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
+  readonly databaseTeamCoordinatorUrl: string;
+  readonly databaseTeamCoordinatorSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly databaseSchema: string;
   readonly databaseRuntimeRole?: string;
+  readonly databaseTeamCoordinatorRole?: string;
   readonly cursorActiveKeyId: string;
   readonly cursorSigningKeys: string;
   readonly serialQueueV2Enabled: boolean;
@@ -214,9 +227,17 @@ export function parseApiProcessEnvironment(
       ? false
       : readRequiredEnvironmentValue(parsed, "DEV_AUTH_ENABLED");
   const configuredDatabaseUrl = readRequiredEnvironmentValue(parsed, "DATABASE_URL");
+  const configuredTeamCoordinatorUrl = readRequiredEnvironmentValue(
+    parsed,
+    "DATABASE_TEAM_COORDINATOR_URL",
+  );
   const productionDatabase =
     parsed.runtimeEnvironment === "production"
       ? parseProductionPostgresTransport(configuredDatabaseUrl)
+      : undefined;
+  const productionTeamCoordinatorDatabase =
+    parsed.runtimeEnvironment === "production"
+      ? parseProductionPostgresTransport(configuredTeamCoordinatorUrl)
       : undefined;
   // 开发身份只有明确开启时才进入配置对象；生产环境由共享解析器直接拒绝。
   const developmentPrincipals = developmentAuthEnabled
@@ -242,6 +263,16 @@ export function parseApiProcessEnvironment(
   const databaseRuntimeRole = parsed.values.DATABASE_RUNTIME_ROLE;
   if (databaseRuntimeRole !== undefined && !/^[a-z_][a-z0-9_]{0,62}$/u.test(databaseRuntimeRole)) {
     throw new TypeError("DATABASE_RUNTIME_ROLE 格式无效");
+  }
+  const databaseTeamCoordinatorRole = parsed.values.DATABASE_TEAM_COORDINATOR_ROLE;
+  if (
+    databaseTeamCoordinatorRole !== undefined &&
+    !/^[a-z_][a-z0-9_]{0,62}$/u.test(databaseTeamCoordinatorRole)
+  ) {
+    throw new TypeError("DATABASE_TEAM_COORDINATOR_ROLE 格式无效");
+  }
+  if (databaseRuntimeRole !== undefined && databaseTeamCoordinatorRole === databaseRuntimeRole) {
+    throw new TypeError("DATABASE_TEAM_COORDINATOR_ROLE 必须与 DATABASE_RUNTIME_ROLE 不同");
   }
   const listenPort = parsed.values.API_LISTEN_PORT ?? DEVELOPMENT_API_DEFAULT_PORT;
   const developmentResourceFilesystemProxy = createDevelopmentResourceFilesystemProxy({
@@ -330,8 +361,14 @@ export function parseApiProcessEnvironment(
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
     ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
+    databaseTeamCoordinatorUrl:
+      productionTeamCoordinatorDatabase?.connectionString ?? configuredTeamCoordinatorUrl,
+    ...(productionTeamCoordinatorDatabase === undefined
+      ? {}
+      : { databaseTeamCoordinatorSsl: productionTeamCoordinatorDatabase.ssl }),
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
     ...(databaseRuntimeRole === undefined ? {} : { databaseRuntimeRole }),
+    ...(databaseTeamCoordinatorRole === undefined ? {} : { databaseTeamCoordinatorRole }),
     cursorActiveKeyId: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_ACTIVE_KID"),
     cursorSigningKeys: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_SIGNING_KEYS"),
     serialQueueV2Enabled,

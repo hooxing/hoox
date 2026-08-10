@@ -6,7 +6,8 @@ import { mapPersistenceError } from "./errors.js";
 import type { EnqueueOutboxPort, IdempotentRunEnqueueResult } from "./ports.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 import { createRunSkillSnapshot, SkillSnapshotUnavailableError } from "./pg-skill-runtime.js";
-import { enqueuePersonalThreadTitleGeneration } from "./pg-thread-title-generation.js";
+import { scheduleWorkerTenant, wakeWorkerTenant } from "./pg-worker-tenant-assignment.js";
+import { enqueueThreadTitleGeneration } from "./pg-thread-title-generation.js";
 import {
   enqueueThreadFollowUp,
   LegacyRunDrainRequiredError,
@@ -152,7 +153,7 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
             inputDigest: digest,
           });
           if (this.options.historyTitleGenerationEnabled === true) {
-            await enqueuePersonalThreadTitleGeneration(client, {
+            await enqueueThreadTitleGeneration(client, {
               tenantId: input.scope.tenantId,
               threadId: input.run.threadId,
               receiptId,
@@ -200,6 +201,7 @@ export class PgRunDispatchCreation implements EnqueueOutboxPort {
               digest,
             ],
           );
+          await wakeWorkerTenant(client, input.scope.tenantId);
         }
         await client.query(
           `INSERT INTO api_idempotency_records(tenant_id,user_id,operation,idempotency_key,request_hash,run_id)
@@ -470,6 +472,11 @@ export class PgRunDispatchOutbox {
             WHERE tenant_id=$1 AND outbox_id=$2`,
             // defer 分支已经完成严格验证；默认值仅帮助 TypeScript 穿过异步回调边界。
             [input.claim.scope.tenantId, input.claim.outboxId, retryAfterMilliseconds ?? 0],
+          );
+          await scheduleWorkerTenant(
+            client,
+            input.claim.scope.tenantId,
+            retryAfterMilliseconds ?? 0,
           );
           return;
         }

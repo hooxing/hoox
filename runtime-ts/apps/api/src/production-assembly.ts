@@ -42,7 +42,9 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
       configuration.production === undefined ||
       configuration.developmentPrincipals !== undefined ||
       configuration.databaseRuntimeRole === undefined ||
-      configuration.databaseSsl === undefined
+      configuration.databaseTeamCoordinatorRole === undefined ||
+      configuration.databaseSsl === undefined ||
+      configuration.databaseTeamCoordinatorSsl === undefined
     ) {
       throw new Error("PRODUCTION_API_ASSEMBLY_FORBIDDEN");
     }
@@ -52,6 +54,13 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
       schema: configuration.databaseSchema,
       expectedRuntimeRole: configuration.databaseRuntimeRole,
       applicationName: "cube-runtime-api-production",
+      teamCoordinator: {
+        connectionString: configuration.databaseTeamCoordinatorUrl,
+        ssl: configuration.databaseTeamCoordinatorSsl,
+        schema: configuration.databaseSchema,
+        expectedRuntimeRole: configuration.databaseTeamCoordinatorRole,
+        applicationName: "cube-runtime-api-team-coordinator-production",
+      },
       serialQueueV2Enabled: configuration.serialQueueV2Enabled,
       historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
       historyFilesystemEnabled: configuration.historyFilesystemEnabled,
@@ -109,6 +118,10 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
         {
           auth: createProductionJwtAuthResolver(configuration.production.jwt),
           repositories: persistence.repositories,
+          ...(persistence.teamCollaboration === undefined
+            ? {}
+            : { teamCollaboration: persistence.teamCollaboration }),
+          threadForks: persistence.threadForks,
           createCapability: createApiCreateCapability({
             threadCreation: persistence.threadCreation,
             enqueueOutbox: persistence.runDispatchCreation,

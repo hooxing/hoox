@@ -132,6 +132,18 @@
 | [ADR-0133](0133-auto-compaction-full-window-and-incoming-projection.md) | 自动压缩采用整窗摘要与入站输入投影 | 已接受（试验分支） | 2026-08-09 |
 | [ADR-0134](0134-compaction-output-budget-and-terminal-parsing.md) | 压缩沿用模型输出预算并容忍推理终态 | 已接受（试验分支） | 2026-08-09 |
 | [ADR-0135](0135-model-output-limit-continuation-and-sandbox-retention.md) | 主模型输出上限有界续跑与失败现场保留 | 已接受（试验分支） | 2026-08-09 |
+| [ADR-0136](0136-failure-reply-and-runtime-terminal-fallback.md) | 失败回注 Agent 与 Runtime 用户终态兜底 | 已接受（部分已替代） | 2026-08-10 |
+| [ADR-0137](0137-durable-tool-failure-model-adaptation.md) | Durable 工具失败保留能力并回传模型自适应 | 已接受（试验分支） | 2026-08-10 |
+| [ADR-0138](0138-deepseek-v4-flash-official-pi-profile.md) | DeepSeek V4 Flash 0731 官方 Pi 模型配置 | 已接受（试验分支） | 2026-08-10 |
+| [ADR-0139](0139-team-workspace-and-snapshot-boundary.md) | 团队工作空间、任务分支与跨空间文件快照 | 已接受（试验版） | 2026-08-09 |
+| [ADR-0140](0140-dual-task-navigation-and-team-center.md) | 个人与团队双任务导航及团队中心边界 | 已接受（试验版） | 2026-08-09 |
+| [ADR-0141](0141-tabbed-cloud-drive-and-cross-scope-search.md) | 标签式云盘与跨空间范围搜索 | 已接受（试验版） | 2026-08-09 |
+| [ADR-0142](0142-dynamic-worker-tenant-assignment.md) | 动态 Worker Tenant 分配与团队任务调度 | 已接受（试验版） | 2026-08-10 |
+| [ADR-0143](0143-upload-resource-name-canonicalization.md) | 上传资源名称规范化与幂等边界 | 已接受（试验版） | 2026-08-10 |
+| [ADR-0144](0144-managed-csv-to-pdf-skill.md) | 固定模板依赖与受管 CSV 转 PDF Skill | 已接受（试验版） | 2026-08-10 |
+| [ADR-0145](0145-thread-sandbox-resourcefs-data-plane-recovery.md) | Thread Sandbox 复用时 ResourceFS 数据面自检与单次冷恢复 | 已接受（试验版） | 2026-08-10 |
+| [ADR-0146](0146-team-directory-personal-scope-recovery.md) | 团队目录个人作用域与失效 Tenant 自愈 | 已接受（试验版） | 2026-08-10 |
+| [ADR-0147](0147-team-coordinator-database-role.md) | 团队协作使用独立数据库协调角色 | 已接受（试验版） | 2026-08-10 |
 
 ## 何时必须记录
 

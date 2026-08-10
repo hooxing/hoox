@@ -76,23 +76,38 @@ const migratorRole = `it_mg_${process.pid}_${Date.now().toString(36)}`;
 const migratorPassword = randomBytes(24).toString("hex");
 const skillPublisherRole = `it_pub_${process.pid}_${Date.now().toString(36)}`;
 const skillPublisherPassword = randomBytes(24).toString("hex");
+const workerCoordinatorRole = `it_coord_${process.pid}_${Date.now().toString(36)}`;
+const teamCoordinatorRole = workerCoordinatorRole.replace("_coord_", "_team_");
+const workerCoordinatorPassword = randomBytes(24).toString("hex");
+const teamCoordinatorPassword = randomBytes(24).toString("hex");
 const testMigrationUrl = new URL(migrationDatabaseUrl);
+const teamCoordinatorDatabaseUrl = new URL(migrationDatabaseUrl);
 if (testMigrationUrl.username !== configuredMigratorRole) {
   throw new Error("MIGRATION_DATABASE_URL 与 DATABASE_MIGRATOR_ROLE 不一致");
 }
 testMigrationUrl.username = migratorRole;
 testMigrationUrl.password = migratorPassword;
+teamCoordinatorDatabaseUrl.username = teamCoordinatorRole;
+teamCoordinatorDatabaseUrl.password = teamCoordinatorPassword;
 if (!/^[a-z_][a-z0-9_]{0,62}$/.test(databaseOwnerRole)) {
   throw new Error("数据库 Owner 角色名称无效");
 }
 if (!/^[a-z_][a-z0-9_]{0,62}$/.test(databaseName)) throw new Error("测试数据库名称无效");
-const migrationSecurity = { runtimeRole, migratorRole, skillPublisherRole, schema } as const;
+const migrationSecurity = {
+  runtimeRole,
+  migratorRole,
+  skillPublisherRole,
+  workerCoordinatorRole,
+  teamCoordinatorRole,
+  schema,
+} as const;
 const sourceMigrationDirectory = fileURLToPath(
   new URL("../../runtime-ts/packages/persistence/migrations/", import.meta.url),
 );
 let administrativePool!: Pool;
 let migratorPool!: Pool;
 let runtimePool!: Pool;
+let teamCoordinatorPool!: Pool;
 let repositories!: CoreRepositories;
 let schemaCreated = false;
 let migratorCreated = false;
@@ -185,6 +200,8 @@ interface IsolatedMigrationTarget {
     readonly runtimeRole: string;
     readonly migratorRole: string;
     readonly skillPublisherRole: string;
+    readonly workerCoordinatorRole: string;
+    readonly teamCoordinatorRole: string;
     readonly schema: string;
   };
   close(): Promise<void>;
@@ -195,6 +212,8 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
   const isolatedSuffix = `${process.pid}_${isolatedMigrationCounter}`;
   const isolatedRole = `it_mg_${isolatedSuffix}`;
   const isolatedPublisherRole = `it_pub_${isolatedSuffix}`;
+  const isolatedCoordinatorRole = `it_coord_${isolatedSuffix}`;
+  const isolatedTeamCoordinatorRole = `it_team_${isolatedSuffix}`;
   const isolatedSchema = `it_${suffix}_${isolatedSuffix}`;
   const password = randomBytes(24).toString("hex");
   const url = new URL(migrationDatabaseUrl);
@@ -205,7 +224,11 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${isolatedPublisherRole}" LOGIN PASSWORD '${password}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}", "${isolatedPublisherRole}";
+     CREATE ROLE "${isolatedCoordinatorRole}" LOGIN PASSWORD '${password}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     CREATE ROLE "${isolatedTeamCoordinatorRole}" LOGIN PASSWORD '${password}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}";
      CREATE SCHEMA "${isolatedSchema}" AUTHORIZATION "${isolatedRole}"`,
   );
   const pool = createPostgresPool({
@@ -221,6 +244,8 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
       runtimeRole,
       migratorRole: isolatedRole,
       skillPublisherRole: isolatedPublisherRole,
+      workerCoordinatorRole: isolatedCoordinatorRole,
+      teamCoordinatorRole: isolatedTeamCoordinatorRole,
       schema: isolatedSchema,
     },
     close: async () => {
@@ -229,7 +254,9 @@ async function createIsolatedMigrationTarget(suffix: string): Promise<IsolatedMi
       await pool.end();
       await administrativePool.query(
         `DROP SCHEMA "${isolatedSchema}" CASCADE;
-         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}", "${isolatedPublisherRole}";
+         REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${isolatedRole}", "${isolatedPublisherRole}", "${isolatedCoordinatorRole}", "${isolatedTeamCoordinatorRole}";
+         DROP ROLE "${isolatedTeamCoordinatorRole}";
+         DROP ROLE "${isolatedCoordinatorRole}";
          DROP ROLE "${isolatedPublisherRole}";
          DROP ROLE "${isolatedRole}"`,
       );
@@ -248,7 +275,11 @@ beforeAll(async () => {
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
+     CREATE ROLE "${workerCoordinatorRole}" LOGIN PASSWORD '${workerCoordinatorPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     CREATE ROLE "${teamCoordinatorRole}" LOGIN PASSWORD '${teamCoordinatorPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migratorCreated = true;
@@ -263,6 +294,11 @@ beforeAll(async () => {
     schema,
     maxConnections: 8,
   });
+  teamCoordinatorPool = createPostgresPool({
+    connectionString: teamCoordinatorDatabaseUrl.toString(),
+    schema,
+    maxConnections: 4,
+  });
   const concurrent = await Promise.all([
     migrateUp(migratorPool, migrationSecurity),
     migrateUp(migratorPool, migrationSecurity),
@@ -275,12 +311,15 @@ beforeAll(async () => {
 
 afterAll(async () => {
   if (runtimePool !== undefined) await runtimePool.end();
+  if (teamCoordinatorPool !== undefined) await teamCoordinatorPool.end();
   if (migratorPool !== undefined) await migratorPool.end();
   if (!schema.startsWith(`it_${process.pid}_`)) throw new Error("拒绝删除非测试 Schema");
   if (schemaCreated) await administrativePool.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (migratorCreated) {
     await administrativePool.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
+       DROP ROLE "${teamCoordinatorRole}";
+       DROP ROLE "${workerCoordinatorRole}";
        DROP ROLE "${skillPublisherRole}";
        DROP ROLE "${migratorRole}"`,
     );
@@ -453,6 +492,26 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         ),
       ).rejects.toMatchObject({ code: "42501" });
     }
+  });
+
+  it("Team Coordinator 只在独立连接中更新 Membership 授权列", async () => {
+    const fixture = await createFixture("team_coordinator_membership_acl");
+    await expect(
+      withTenantTransaction(teamCoordinatorPool, fixture.scope, (client) =>
+        client.query(
+          "UPDATE memberships SET role=role,status=status WHERE tenant_id=$1 AND user_id=$2",
+          [fixture.scope.tenantId, fixture.scope.userId],
+        ),
+      ),
+    ).resolves.toMatchObject({ rowCount: 1 });
+    await expect(
+      withTenantTransaction(teamCoordinatorPool, fixture.scope, (client) =>
+        client.query(
+          "UPDATE memberships SET created_at=clock_timestamp() WHERE tenant_id=$1 AND user_id=$2",
+          [fixture.scope.tenantId, fixture.scope.userId],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
   });
 
   it("归档等待 Thread 锁后使用数据库时间，并保持 updated_at 单调", async () => {
@@ -1414,6 +1473,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           runtimeRole,
           migratorRole: databaseOwnerRole,
           skillPublisherRole: target.context.skillPublisherRole,
+          workerCoordinatorRole: target.context.workerCoordinatorRole,
+          teamCoordinatorRole: target.context.teamCoordinatorRole,
           schema: target.context.schema,
         }),
       ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });

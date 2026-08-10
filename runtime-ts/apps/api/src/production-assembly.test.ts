@@ -51,8 +51,11 @@ function productionEnvironment(): Record<string, string> {
   return {
     RUNTIME_ENV: "production",
     DATABASE_URL: "postgresql://runtime:credential@database:5432/runtime?sslmode=verify-full",
+    DATABASE_TEAM_COORDINATOR_URL:
+      "postgresql://team_coordinator:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_SCHEMA: "runtime",
     DATABASE_RUNTIME_ROLE: "runtime",
+    DATABASE_TEAM_COORDINATOR_ROLE: "team_coordinator",
     THREAD_CURSOR_ACTIVE_KID: "current",
     THREAD_CURSOR_SIGNING_KEYS: "current:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     THREAD_SERIAL_QUEUE_V2_ENABLED: "true",
@@ -92,6 +95,13 @@ describe("生产 API 默认装配", () => {
         schema: "runtime",
         expectedRuntimeRole: "runtime",
         applicationName: "cube-runtime-api-production",
+        teamCoordinator: {
+          connectionString: "postgresql://team_coordinator:credential@database:5432/runtime",
+          ssl: { rejectUnauthorized: true },
+          schema: "runtime",
+          expectedRuntimeRole: "team_coordinator",
+          applicationName: "cube-runtime-api-team-coordinator-production",
+        },
         serialQueueV2Enabled: true,
         historyDirectoryTimeZone: "Asia/Shanghai",
         historyFilesystemEnabled: false,

@@ -1,8 +1,8 @@
 import type { PoolClient } from "pg";
 import { describe, expect, it } from "vitest";
 import {
-  insertPersonalHistoryAgentDeliverable,
-  shouldIndexArtifactInPersonalHistory,
+  insertHistoryAgentDeliverable,
+  shouldIndexArtifactInHistory,
 } from "./pg-personal-history.js";
 
 interface Statement {
@@ -14,12 +14,12 @@ class ScriptedPersonalHistoryClient {
   readonly statements: Statement[] = [];
   private entryCandidateChecks = 0;
 
-  constructor(private readonly personal = true) {}
+  constructor(private readonly supportedTenant = true) {}
 
   async query(sql: string, values?: readonly unknown[]) {
     this.statements.push({ sql, ...(values === undefined ? {} : { values }) });
     if (sql.includes("SELECT thread.title")) {
-      return this.personal
+      return this.supportedTenant
         ? {
             rows: [
               {
@@ -55,28 +55,28 @@ function client(value: ScriptedPersonalHistoryClient): PoolClient {
   return value as unknown as PoolClient;
 }
 
-describe("Agent 正式交付物个人历史目录", () => {
+describe("Agent 正式交付物历史目录", () => {
   it("只允许启用后的 deliverable 进入历史目录", () => {
     expect(
-      shouldIndexArtifactInPersonalHistory({
+      shouldIndexArtifactInHistory({
         historyFilesystemEnabled: true,
         purpose: "deliverable",
       }),
     ).toBe(true);
     expect(
-      shouldIndexArtifactInPersonalHistory({
+      shouldIndexArtifactInHistory({
         historyFilesystemEnabled: true,
         purpose: "diagnostic",
       }),
     ).toBe(false);
     expect(
-      shouldIndexArtifactInPersonalHistory({
+      shouldIndexArtifactInHistory({
         historyFilesystemEnabled: true,
         purpose: "trace",
       }),
     ).toBe(false);
     expect(
-      shouldIndexArtifactInPersonalHistory({
+      shouldIndexArtifactInHistory({
         historyFilesystemEnabled: false,
         purpose: "deliverable",
       }),
@@ -85,7 +85,7 @@ describe("Agent 正式交付物个人历史目录", () => {
 
   it("创建语义任务目录并以 artifact 身份写入 deliverable，文件重名在扩展名前编号", async () => {
     const scripted = new ScriptedPersonalHistoryClient();
-    await insertPersonalHistoryAgentDeliverable(client(scripted), {
+    await insertHistoryAgentDeliverable(client(scripted), {
       tenantId: "tenant-a",
       threadId: "thread-a",
       artifactId: "artifact-a",
@@ -129,9 +129,9 @@ describe("Agent 正式交付物个人历史目录", () => {
     ).toBe(true);
   });
 
-  it("团队 Tenant 不创建个人历史目录关系", async () => {
-    const scripted = new ScriptedPersonalHistoryClient(false);
-    await insertPersonalHistoryAgentDeliverable(client(scripted), {
+  it("个人和团队 Tenant 共用同一份隔离的历史目录规则", async () => {
+    const scripted = new ScriptedPersonalHistoryClient();
+    await insertHistoryAgentDeliverable(client(scripted), {
       tenantId: "tenant-team",
       threadId: "thread-team",
       artifactId: "artifact-team",
@@ -144,8 +144,13 @@ describe("Agent 正式交付物个人历史目录", () => {
 
     expect(
       scripted.statements.some((statement) =>
+        statement.sql.includes("tenant.kind IN ('personal','team')"),
+      ),
+    ).toBe(true);
+    expect(
+      scripted.statements.some((statement) =>
         statement.sql.includes("INSERT INTO thread_history_file_entries"),
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 });

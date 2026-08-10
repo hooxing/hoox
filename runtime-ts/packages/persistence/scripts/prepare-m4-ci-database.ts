@@ -32,10 +32,14 @@ const databaseName = "agent_runtime_ci";
 const runtimeRole = identifier("DATABASE_RUNTIME_ROLE");
 const migratorRole = identifier("DATABASE_MIGRATOR_ROLE");
 const skillPublisherRole = identifier("DATABASE_SKILL_PUBLISHER_ROLE");
+const workerCoordinatorRole = identifier("DATABASE_WORKER_COORDINATOR_ROLE");
+const teamCoordinatorRole = identifier("DATABASE_TEAM_COORDINATOR_ROLE");
 const schema = identifier("DATABASE_SCHEMA");
 const runtimePassword = required("M4_DATABASE_RUNTIME_PASSWORD");
 const migratorPassword = required("M4_DATABASE_MIGRATOR_PASSWORD");
 const skillPublisherPassword = required("M4_DATABASE_SKILL_PUBLISHER_PASSWORD");
+const workerCoordinatorPassword = required("M4_DATABASE_WORKER_COORDINATOR_PASSWORD");
+const teamCoordinatorPassword = required("M4_DATABASE_TEAM_COORDINATOR_PASSWORD");
 const pool = new Pool({ connectionString: adminUrl.toString(), max: 1 });
 
 try {
@@ -54,7 +58,10 @@ try {
        ) OR EXISTS (
          SELECT 1 FROM pg_namespace WHERE nspname=$2
        ) AS present`,
-      [[runtimeRole, migratorRole, skillPublisherRole], schema],
+      [
+        [runtimeRole, migratorRole, skillPublisherRole, workerCoordinatorRole, teamCoordinatorRole],
+        schema,
+      ],
     );
     if (existing.rows[0]?.present !== false) {
       throw new Error("M4 CI 目标角色或 Schema 已存在，拒绝复用未知状态");
@@ -68,8 +75,12 @@ try {
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD ${literal(skillPublisherPassword)}
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       CREATE ROLE "${workerCoordinatorRole}" LOGIN PASSWORD ${literal(workerCoordinatorPassword)}
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       CREATE ROLE "${teamCoordinatorRole}" LOGIN PASSWORD ${literal(teamCoordinatorPassword)}
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        GRANT CONNECT ON DATABASE "${databaseName}"
-         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}";
+         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
     );
     const safety = await client.query<{
@@ -77,6 +88,8 @@ try {
       readonly migrator_safe: boolean;
       readonly schema_owned: boolean;
       readonly publisher_safe: boolean;
+      readonly coordinator_safe: boolean;
+      readonly team_coordinator_safe: boolean;
     }>(
       `SELECT
          NOT (runtime.rolsuper OR runtime.rolcreatedb OR runtime.rolcreaterole
@@ -96,15 +109,40 @@ try {
            AND NOT has_database_privilege(publisher.oid, current_database(), 'CREATE')
            AND NOT has_database_privilege(publisher.oid, current_database(), 'TEMP')
            AS publisher_safe
-       FROM pg_roles runtime, pg_roles migrator, pg_roles publisher, pg_namespace target
+         ,NOT (coordinator.rolsuper OR coordinator.rolcreatedb OR coordinator.rolcreaterole
+           OR coordinator.rolreplication OR coordinator.rolbypassrls OR coordinator.rolinherit)
+           AND coordinator.rolcanlogin
+           AND NOT has_database_privilege(coordinator.oid, current_database(), 'CREATE')
+           AND NOT has_database_privilege(coordinator.oid, current_database(), 'TEMP')
+           AS coordinator_safe
+         ,NOT (team_coordinator.rolsuper OR team_coordinator.rolcreatedb
+           OR team_coordinator.rolcreaterole OR team_coordinator.rolreplication
+           OR team_coordinator.rolbypassrls OR team_coordinator.rolinherit)
+           AND team_coordinator.rolcanlogin
+           AND NOT has_database_privilege(team_coordinator.oid, current_database(), 'CREATE')
+           AND NOT has_database_privilege(team_coordinator.oid, current_database(), 'TEMP')
+           AS team_coordinator_safe
+       FROM pg_roles runtime, pg_roles migrator, pg_roles publisher, pg_roles coordinator,
+            pg_roles team_coordinator,
+            pg_namespace target
        WHERE runtime.rolname=$1 AND migrator.rolname=$2 AND publisher.rolname=$4
+         AND coordinator.rolname=$5 AND team_coordinator.rolname=$6
          AND target.nspname=$3`,
-      [runtimeRole, migratorRole, schema, skillPublisherRole],
+      [
+        runtimeRole,
+        migratorRole,
+        schema,
+        skillPublisherRole,
+        workerCoordinatorRole,
+        teamCoordinatorRole,
+      ],
     );
     if (
       safety.rows[0]?.runtime_safe !== true ||
       safety.rows[0]?.migrator_safe !== true ||
       safety.rows[0]?.publisher_safe !== true ||
+      safety.rows[0]?.coordinator_safe !== true ||
+      safety.rows[0]?.team_coordinator_safe !== true ||
       safety.rows[0]?.schema_owned !== true
     ) {
       throw new Error("M4 CI 受限角色或 Schema 安全断言失败");

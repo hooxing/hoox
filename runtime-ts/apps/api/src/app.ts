@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { runId, threadId } from "@cube-runtime/domain";
+import { createHash, randomUUID } from "node:crypto";
+import { membershipId, runId, tenantId, threadId, userId } from "@cube-runtime/domain";
 import type {
   BlobStore,
   CoreRepositories,
@@ -10,6 +10,8 @@ import type {
   RunExperienceReadPort,
   ThreadContextReadPort,
   ThreadContinuityReadPort,
+  TeamCollaborationPort,
+  ThreadForkPort,
 } from "@cube-runtime/persistence";
 import {
   assertBlobRef,
@@ -28,6 +30,8 @@ import {
   CreateThreadInputRequestSchema,
   type CreateThreadRequest,
   CreateThreadRequestSchema,
+  type CreateTeamRequest,
+  CreateTeamRequestSchema,
   createErrorEnvelope,
   type ErrorEnvelope,
   ErrorEnvelopeSchema,
@@ -38,6 +42,8 @@ import {
   type HistoryFileListQuery,
   HistoryFileListQuerySchema,
   HistoryFilePageSuccessEnvelopeSchema,
+  type ImportTeamFileRequest,
+  ImportTeamFileRequestSchema,
   type InstallSkillRequest,
   InstallSkillRequestSchema,
   MAX_RUN_INPUT_UTF8_BYTES,
@@ -78,6 +84,23 @@ import {
   ThreadRunListQuerySchema,
   ThreadRunPageSuccessEnvelopeSchema,
   ThreadSuccessEnvelopeSchema,
+  type AddTeamMemberRequest,
+  AddTeamMemberRequestSchema,
+  type ChangeTeamMemberRoleRequest,
+  ChangeTeamMemberRoleRequestSchema,
+  type ForkThreadRequest,
+  ForkThreadRequestSchema,
+  TeamDissolveSuccessEnvelopeSchema,
+  TeamListSuccessEnvelopeSchema,
+  TeamMemberListSuccessEnvelopeSchema,
+  TeamMemberRemovalSuccessEnvelopeSchema,
+  type TeamMemberPath,
+  TeamMemberPathSchema,
+  TeamMembershipSuccessEnvelopeSchema,
+  type TeamPath,
+  TeamPathSchema,
+  TeamSuccessEnvelopeSchema,
+  ThreadForkSuccessEnvelopeSchema,
   type UninstallSkillQuery,
   UninstallSkillQuerySchema,
   type UploadedResourceDto,
@@ -142,6 +165,8 @@ export interface ApiDependencies {
   readonly blobs?: BlobStore;
   readonly threadContext?: ThreadContextReadPort;
   readonly threadContinuity?: ThreadContinuityReadPort;
+  readonly teamCollaboration?: TeamCollaborationPort;
+  readonly threadForks?: ThreadForkPort;
   readonly resourceUploads?: ResourceUploadPort;
   readonly resourceAttachments?: ResourceAttachmentResolverPort;
   readonly historyFiles?: HistoryFileLibraryService;
@@ -324,6 +349,61 @@ function errorEnvelope(id: string, kind: ApiFailureKind): ErrorEnvelope {
   return createErrorEnvelope(id, { kind });
 }
 
+function requireTeamScope(
+  auth: Readonly<{
+    scope: Readonly<{ tenantId: string }>;
+    tenant: Readonly<{ tenant: Readonly<{ kind: "personal" | "team" }> }>;
+  }>,
+  teamId: string,
+): void {
+  if (auth.tenant.tenant.kind !== "team" || auth.scope.tenantId !== teamId) {
+    throw new ApiFailure("not_found");
+  }
+}
+
+function teamMutationFailure(
+  outcome: "not_found" | "not_authorized" | "conflict" | "last_owner" | "user_not_found",
+): ApiFailure {
+  if (outcome === "conflict") return new ApiFailure("conflict");
+  if (outcome === "last_owner") return new ApiFailure("invalid_state");
+  return new ApiFailure("not_found");
+}
+
+async function readForkMessages(
+  reader: ThreadContextReadPort,
+  scope: Readonly<{
+    tenantId: import("@cube-runtime/domain").TenantId;
+    userId: import("@cube-runtime/domain").UserId;
+  }>,
+  sourceThreadId: import("@cube-runtime/domain").ThreadId,
+) {
+  const messages: Array<{
+    role: "user" | "assistant";
+    text: string;
+    createdAt: string;
+  }> = [];
+  let after = 0;
+  for (let page = 0; page < 10; page += 1) {
+    const result = await reader.listMessages({
+      scope,
+      threadId: sourceThreadId,
+      after,
+      limit: 500,
+    });
+    if (result.outcome === "not_found") throw new ApiFailure("not_found");
+    for (const item of result.items) {
+      if (item.role === "runtime") continue;
+      messages.push({ role: item.role, text: item.text, createdAt: item.createdAt });
+    }
+    const tail = result.items.at(-1);
+    if (!result.hasMore) return Object.freeze(messages);
+    if (tail === undefined) throw new ApiFailure("internal");
+    after = tail.sequence;
+  }
+  // 首个试验版本拒绝复制超大上下文，避免在 HTTP 请求内制造无界事务。
+  throw new ApiFailure("invalid_state");
+}
+
 export function createApiApp(
   dependencies: ApiDependencies,
   options: ApiAppOptions = {},
@@ -373,6 +453,11 @@ export function createApiApp(
   const service = new ApiService(normalizedDependencies);
   const authenticate = async (request: FastifyRequest) =>
     service.authenticate(authorization(request), requestId(request), tenantSelector(request));
+  const authenticateSelectedTenant = async (request: FastifyRequest, selectedTenantId: string) =>
+    service.authenticate(authorization(request), requestId(request), {
+      kind: "selected",
+      value: selectedTenantId,
+    });
 
   if (normalizedDependencies.resourceUploads !== undefined) {
     app.addContentTypeParser(
@@ -462,6 +547,227 @@ export function createApiApp(
       checkedAt: normalizedDependencies.clock.now(),
     });
   });
+
+  if (normalizedDependencies.teamCollaboration !== undefined) {
+    const teams = normalizedDependencies.teamCollaboration;
+    app.get(
+      "/v1/me/teams",
+      {
+        schema: {
+          response: {
+            200: TeamListSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        return success(request, { items: await teams.listForUser({ scope: auth.scope }) });
+      },
+    );
+
+    app.post<{ Body: CreateTeamRequest }>(
+      "/v1/teams",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: {
+          body: CreateTeamRequestSchema,
+          response: {
+            200: TeamSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            415: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        if (auth.tenant.tenant.kind !== "personal") throw new ApiFailure("invalid_state");
+        const displayName = request.body.displayName.trim();
+        if (displayName.length === 0 || displayName.length > 200) {
+          throw new ApiFailure("bad_request");
+        }
+        const key = requireIdempotencyKey(request);
+        const identity = createHash("sha256")
+          .update(`${auth.scope.userId}\0${key}`, "utf8")
+          .digest("hex")
+          .slice(0, 40);
+        const targetTeamId = tenantId(`team_${identity}`);
+        const result = await teams.create({
+          scope: auth.scope,
+          teamId: targetTeamId,
+          membershipId: membershipId(`membership_${identity}`),
+          displayName,
+          createdAt: normalizedDependencies.clock.now(),
+        });
+        if (result.outcome === "succeeded") return success(request, result.value);
+        if (result.outcome === "conflict") {
+          const replay = (await teams.listForUser({ scope: auth.scope })).find(
+            (item) => item.id === targetTeamId,
+          );
+          if (replay !== undefined && replay.displayName === displayName) {
+            return success(request, replay);
+          }
+        }
+        throw teamMutationFailure(result.outcome);
+      },
+    );
+
+    app.get<{ Params: TeamPath }>(
+      "/v1/teams/:teamId/members",
+      {
+        schema: {
+          params: TeamPathSchema,
+          response: {
+            200: TeamMemberListSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        requireTeamScope(auth, request.params.teamId);
+        const items = await teams.listMembers({ scope: auth.scope });
+        if (items === undefined) throw new ApiFailure("not_found");
+        return success(request, { items });
+      },
+    );
+
+    app.post<{ Params: TeamPath; Body: AddTeamMemberRequest }>(
+      "/v1/teams/:teamId/members",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: {
+          params: TeamPathSchema,
+          body: AddTeamMemberRequestSchema,
+          response: {
+            200: TeamMembershipSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            415: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        requireTeamScope(auth, request.params.teamId);
+        const identity = createHash("sha256")
+          .update(`${auth.scope.tenantId}\0${request.body.userId}`, "utf8")
+          .digest("hex")
+          .slice(0, 40);
+        const result = await teams.addMember({
+          scope: auth.scope,
+          targetUserId: userId(request.body.userId),
+          membershipId: membershipId(`membership_${identity}`),
+          role: request.body.role,
+          createdAt: normalizedDependencies.clock.now(),
+        });
+        if (result.outcome !== "succeeded") throw teamMutationFailure(result.outcome);
+        return success(request, result.value);
+      },
+    );
+
+    app.patch<{ Params: TeamMemberPath; Body: ChangeTeamMemberRoleRequest }>(
+      "/v1/teams/:teamId/members/:userId",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: {
+          params: TeamMemberPathSchema,
+          body: ChangeTeamMemberRoleRequestSchema,
+          response: {
+            200: TeamMembershipSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            415: ErrorEnvelopeSchema,
+            422: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        requireTeamScope(auth, request.params.teamId);
+        const result = await teams.changeRole({
+          scope: auth.scope,
+          targetUserId: userId(request.params.userId),
+          role: request.body.role,
+        });
+        if (result.outcome !== "succeeded") throw teamMutationFailure(result.outcome);
+        return success(request, result.value);
+      },
+    );
+
+    app.delete<{ Params: TeamMemberPath }>(
+      "/v1/teams/:teamId/members/:userId",
+      {
+        schema: {
+          params: TeamMemberPathSchema,
+          response: {
+            200: TeamMemberRemovalSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            422: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        requireTeamScope(auth, request.params.teamId);
+        const result = await teams.removeMember({
+          scope: auth.scope,
+          targetUserId: userId(request.params.userId),
+        });
+        if (result.outcome !== "succeeded") throw teamMutationFailure(result.outcome);
+        return success(request, { removed: true as const });
+      },
+    );
+
+    app.delete<{ Params: TeamPath }>(
+      "/v1/teams/:teamId",
+      {
+        schema: {
+          params: TeamPathSchema,
+          response: {
+            200: TeamDissolveSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        requireTeamScope(auth, request.params.teamId);
+        const result = await teams.dissolve({ scope: auth.scope });
+        if (result.outcome !== "succeeded") throw teamMutationFailure(result.outcome);
+        return success(request, { dissolved: true as const });
+      },
+    );
+  }
 
   if (normalizedDependencies.skillCenter !== undefined) {
     const skillCenter = normalizedDependencies.skillCenter;
@@ -727,6 +1033,60 @@ export function createApiApp(
   }
 
   if (
+    normalizedDependencies.historyFiles !== undefined &&
+    normalizedDependencies.blobs !== undefined &&
+    normalizedDependencies.resourceUploads !== undefined
+  ) {
+    app.post<{ Body: ImportTeamFileRequest }>(
+      "/v1/me/team-files/import",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: {
+          body: ImportTeamFileRequestSchema,
+          response: {
+            200: UploadedResourceSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            415: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const personalAuth = await authenticate(request);
+        if (personalAuth.tenant.tenant.kind !== "personal") {
+          throw new ApiFailure("invalid_state");
+        }
+        const teamAuth = await authenticateSelectedTenant(request, request.body.sourceTeamId);
+        if (teamAuth.tenant.tenant.kind !== "team") throw new ApiFailure("not_found");
+        const source = await normalizedDependencies.historyFiles?.resolve({
+          context: teamAuth.scope,
+          resourceId: request.body.resourceId,
+          versionId: request.body.versionId,
+        });
+        if (source === undefined) throw new ApiFailure("not_found");
+        const body = await normalizedDependencies.blobs?.getBytes(
+          { tenantId: teamAuth.scope.tenantId },
+          { kind: "stable", ...source.object },
+        );
+        if (body === undefined) throw new ApiFailure("not_found");
+        const imported = await normalizedDependencies.resourceUploads?.upload({
+          context: personalAuth.scope,
+          idempotencyKey: requireIdempotencyKey(request),
+          name: source.name,
+          mediaType: source.mediaType,
+          body,
+        });
+        if (imported === undefined) throw new ApiFailure("internal");
+        return success(request, imported satisfies UploadedResourceDto);
+      },
+    );
+  }
+
+  if (
     normalizedDependencies.resourceFilesystem !== undefined &&
     normalizedDependencies.blobs !== undefined
   ) {
@@ -801,6 +1161,69 @@ export function createApiApp(
         );
       },
     );
+
+    const threadForks = normalizedDependencies.threadForks;
+    const forkContext = normalizedDependencies.threadContext;
+    if (threadForks !== undefined && forkContext !== undefined) {
+      app.post<{ Params: ThreadPath; Body: ForkThreadRequest }>(
+        "/v1/threads/:threadId/forks",
+        {
+          preValidation: async (request) => requireJsonContentType(request),
+          schema: {
+            params: ThreadPathSchema,
+            body: ForkThreadRequestSchema,
+            response: {
+              200: ThreadForkSuccessEnvelopeSchema,
+              400: ErrorEnvelopeSchema,
+              401: ErrorEnvelopeSchema,
+              404: ErrorEnvelopeSchema,
+              409: ErrorEnvelopeSchema,
+              415: ErrorEnvelopeSchema,
+              422: ErrorEnvelopeSchema,
+              500: ErrorEnvelopeSchema,
+              503: ErrorEnvelopeSchema,
+            },
+          },
+        },
+        async (request) => {
+          const sourceAuth = await authenticate(request);
+          const source = await service.getThread(sourceAuth, request.params.threadId);
+          const targetAuth =
+            request.body.targetTeamId === undefined
+              ? sourceAuth
+              : await authenticateSelectedTenant(request, request.body.targetTeamId);
+          if (request.body.targetTeamId !== undefined && targetAuth.tenant.tenant.kind !== "team") {
+            throw new ApiFailure("not_found");
+          }
+          const kind =
+            targetAuth.scope.tenantId === sourceAuth.scope.tenantId
+              ? ("branch" as const)
+              : ("team_publish" as const);
+          const messages = await readForkMessages(
+            forkContext,
+            sourceAuth.scope,
+            threadId(source.id),
+          );
+          const title = request.body.title?.trim() || `${source.title} · 分支`;
+          const child = await service.createThread(
+            targetAuth,
+            title,
+            requireIdempotencyKey(request),
+          );
+          const seeded = await threadForks.seed({
+            scope: targetAuth.scope,
+            childThreadId: threadId(child.id),
+            sourceTenantId: sourceAuth.scope.tenantId,
+            sourceThreadId: threadId(source.id),
+            kind,
+            messages,
+          });
+          if (seeded === "conflict") throw new ApiFailure("conflict");
+          if (seeded !== "seeded") throw new ApiFailure("not_found");
+          return success(request, child);
+        },
+      );
+    }
 
     app.post<{ Params: ThreadPath; Body: CreateRunRequest }>(
       "/v1/threads/:threadId/runs",

@@ -52,6 +52,7 @@ import type {
   ThreadContinuityMetricsPort,
   ThreadSandboxLeaseRefV1,
   ThreadSandboxSessionLifecyclePort,
+  UserInputAttachmentReference,
   ValidatedWorkspaceChange,
   WorkerAgentSessionPort,
   WorkspaceRevisionCandidate,
@@ -79,8 +80,100 @@ export interface RunWorkerOptions {
 }
 
 const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
+const ATTACHMENT_FACT_MARKERS = Object.freeze([
+  "\n\n# 用户在本轮提供的文件\n",
+  "\n\n# 用户在本轮上传的文件\n",
+]);
 
-async function preparePersonalHistoryEntrypoints(
+type ResourceFilesystemProbeResult =
+  | { readonly outcome: "ready" }
+  | { readonly outcome: "missing"; readonly category: string }
+  | { readonly outcome: "failed"; readonly category: string };
+
+function directAttachmentProbePaths(
+  input: string,
+  attachments: readonly UserInputAttachmentReference[],
+): readonly string[] {
+  if (attachments.length === 0) return Object.freeze([]);
+  const markerIndex = Math.max(
+    ...ATTACHMENT_FACT_MARKERS.map((marker) => input.lastIndexOf(marker)),
+  );
+  // 老 Run 只有附件 ID、没有 API 追加的结构化路径事实；兼容读取，但不能猜测文件名。
+  if (markerIndex < 0) return Object.freeze([]);
+  const candidates: string[] = [];
+  for (const line of input.slice(markerIndex).split("\n")) {
+    if (!line.startsWith("- ")) continue;
+    try {
+      const fact: unknown = JSON.parse(line.slice(2));
+      if (typeof fact !== "object" || fact === null || Array.isArray(fact)) continue;
+      const path = (fact as Readonly<Record<string, unknown>>).文件地址;
+      if (typeof path === "string") candidates.push(path);
+    } catch {
+      // marker 后的事实由 API 生成；解析失败最终会按缺失可信路径拒绝，而不是采用部分结果。
+    }
+  }
+  const paths = attachments.map((attachment) => {
+    const prefix = `/resources/${attachment.resourceId}/${attachment.versionId}/`;
+    const matches = candidates.filter((path) => {
+      if (!path.startsWith(prefix) || path.length > 1_024) return false;
+      const fileName = path.slice(prefix.length);
+      return (
+        fileName.length > 0 && !fileName.includes("/") && !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(fileName)
+      );
+    });
+    if (matches.length !== 1) throw new Error("当前输入附件路径事实不完整");
+    return matches[0] as string;
+  });
+  if (new Set(paths).size !== paths.length) throw new Error("当前输入附件路径事实重复");
+  return Object.freeze(paths);
+}
+
+async function probeResourceFilesystemDataPlane(
+  sandbox: SandboxHandle,
+  input: {
+    readonly threadId: string;
+    readonly historyFilesystemEnabled: boolean;
+    readonly directAttachmentPaths: readonly string[];
+    readonly signal: AbortSignal;
+  },
+): Promise<ResourceFilesystemProbeResult> {
+  if (!THREAD_ID_PATTERN.test(input.threadId)) {
+    return { outcome: "failed", category: "invalid_thread_id" };
+  }
+  const checks = ["[ -d '/resources' ] || exit 70"];
+  if (input.historyFilesystemEnabled) {
+    checks.push("[ -d '/resources/history' ] || exit 71");
+    checks.push(
+      `[ -d ${shellSingleQuote(`/resources/.thread-files/${input.threadId}/files`)} ] || exit 72`,
+    );
+  }
+  for (const path of input.directAttachmentPaths) {
+    checks.push(`[ -f ${shellSingleQuote(path)} ] || exit 75`);
+  }
+  let result: Awaited<ReturnType<SandboxHandle["command"]>>;
+  try {
+    result = await sandbox.command(["set -u", ...checks].join("\n"), {
+      signal: input.signal,
+      timeoutMs: 30_000,
+    });
+  } catch (error) {
+    const category = historyEntrypointFailureCategory(error);
+    console.warn(`RESOURCEFS_REUSE_PROBE_FAILED category=${category}`);
+    return { outcome: "failed", category };
+  }
+  if (result.exitCode === 0) return { outcome: "ready" };
+  const category = `exit_${result.exitCode}`;
+  console.warn(`RESOURCEFS_REUSE_PROBE_FAILED category=${category}`);
+  return [70, 71, 72, 75].includes(result.exitCode)
+    ? { outcome: "missing", category }
+    : { outcome: "failed", category };
+}
+
+function shellSingleQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+async function prepareHistoryEntrypoints(
   sandbox: SandboxHandle,
   threadId: string,
   signal: AbortSignal,
@@ -124,7 +217,7 @@ prepare_thread_entrypoint`;
   });
   if (result.exitCode !== 0) {
     console.warn(`HISTORY_ENTRYPOINT_FAILED category=exit_${result.exitCode}`);
-    throw new Error("个人历史目录固定入口准备失败");
+    throw new Error("历史目录固定入口准备失败");
   }
 }
 
@@ -442,14 +535,16 @@ export class RunWorker {
             });
             if (inspected.outcome === "active" && inspectionMatches(context, inspected)) {
               acceptInspection(context, inspected);
-              if (context.threadSandboxLease !== undefined) {
+              const renewingSandboxLease = context.threadSandboxLease;
+              if (renewingSandboxLease !== undefined) {
                 const renewed = await this.dependencies.threadSandboxes?.renew({
                   scope: context.scope,
                   attemptId: context.attemptId,
-                  lease: context.threadSandboxLease,
+                  lease: renewingSandboxLease,
                   leaseDurationMs: this.#leaseDurationMs,
                 });
-                if (renewed !== "renewed") {
+                // 冷恢复会替换 lease；旧 renew 的迟到失败只能约束它发出时的同一对象。
+                if (renewed !== "renewed" && context.threadSandboxLease === renewingSandboxLease) {
                   context.stopped = renewed === "lease_lost" ? "fence_lost" : "unavailable";
                 }
               }
@@ -480,6 +575,15 @@ export class RunWorker {
         assertControlledRolloutProjection(claim.snapshot.rolloutProjection);
       } catch {
         return await this.requireRecovery(context, "EVENT_REJECTED", []);
+      }
+      let directAttachmentPaths: readonly string[];
+      try {
+        directAttachmentPaths = directAttachmentProbePaths(
+          claim.snapshot.input,
+          claim.snapshot.answer === undefined ? (claim.snapshot.attachments ?? []) : [],
+        );
+      } catch {
+        return await this.requireRecovery(context, "PROTOCOL", []);
       }
       const ensureSandboxReady: Parameters<
         AgentSessionFactoryPort["create"]
@@ -524,7 +628,7 @@ export class RunWorker {
           if (this.options.threadSandboxSessionReuseEnabled === true) {
             const lifecycle = this.dependencies.threadSandboxes;
             if (lifecycle === undefined) throw new Error("Thread Sandbox lifecycle 缺失");
-            const acquisition = await lifecycle.acquire({
+            let acquisition = await lifecycle.acquire({
               scope,
               attemptId: context.attemptId,
               owner: this.options.workerId,
@@ -541,6 +645,82 @@ export class RunWorker {
             sandboxResourceFilesystemMounted = acquisition.resourceFilesystemMounted;
             context.threadSandboxLease = acquisition.lease;
             requiresMaterialization = acquisition.requiresMaterialization;
+            if (!acquisition.resourceFilesystemMounted) {
+              context.agentFailure = "SANDBOX_FAILED";
+              throw new Error("Thread Sandbox ResourceFS 能力事实缺失");
+            }
+            if (acquisition.source !== "cold_created") {
+              const probe = await probeResourceFilesystemDataPlane(acquisition.session.sandbox, {
+                threadId: scope.threadId,
+                historyFilesystemEnabled: this.options.historyFilesystemEnabled === true,
+                directAttachmentPaths,
+                signal: executionAbort.signal,
+              });
+              if (probe.outcome === "failed") {
+                context.agentFailure = "SANDBOX_FAILED";
+                throw new Error("复用 Thread Sandbox 的 ResourceFS 数据面验证失败");
+              }
+              if (probe.outcome === "missing") {
+                const stale = acquisition;
+                delete context.threadSandboxLease;
+                const retired = await lifecycle
+                  .terminate({
+                    scope,
+                    attemptId: context.attemptId,
+                    session: stale.session,
+                    lease: stale.lease,
+                    reason: "resource_filesystem_data_plane_missing",
+                  })
+                  .catch(() => "unknown" as const);
+                sandbox = undefined;
+                sandboxResourceFilesystemMounted = false;
+                if (retired !== "settled") {
+                  context.agentFailure =
+                    retired === "unknown" ? "SANDBOX_UNKNOWN" : "SANDBOX_FAILED";
+                  throw new Error("失效 Thread Sandbox generation 退役失败");
+                }
+                acquisition = await lifecycle.acquire({
+                  scope,
+                  attemptId: context.attemptId,
+                  owner: this.options.workerId,
+                  leaseDurationMs: this.#leaseDurationMs,
+                  signal: executionAbort.signal,
+                  requiresResourceFilesystem,
+                });
+                if (acquisition.outcome !== "ready") {
+                  context.agentFailure =
+                    acquisition.outcome === "unknown" ? "SANDBOX_UNKNOWN" : acquisition.code;
+                  throw new Error("Thread Sandbox 冷恢复 acquire 失败");
+                }
+                sandbox = acquisition.session;
+                sandboxResourceFilesystemMounted = acquisition.resourceFilesystemMounted;
+                context.threadSandboxLease = acquisition.lease;
+                requiresMaterialization = acquisition.requiresMaterialization;
+                if (
+                  acquisition.source !== "cold_created" ||
+                  acquisition.lease.generation <= stale.lease.generation ||
+                  acquisition.lease.sessionId === stale.lease.sessionId ||
+                  !acquisition.resourceFilesystemMounted ||
+                  !acquisition.requiresMaterialization
+                ) {
+                  context.agentFailure = "SANDBOX_FAILED";
+                  throw new Error("Thread Sandbox 冷恢复没有切换到新的完整 generation");
+                }
+                const recoveredProbe = await probeResourceFilesystemDataPlane(
+                  acquisition.session.sandbox,
+                  {
+                    threadId: scope.threadId,
+                    historyFilesystemEnabled: this.options.historyFilesystemEnabled === true,
+                    directAttachmentPaths,
+                    signal: executionAbort.signal,
+                  },
+                );
+                if (recoveredProbe.outcome !== "ready") {
+                  context.agentFailure = "SANDBOX_FAILED";
+                  throw new Error("冷恢复 Thread Sandbox 的 ResourceFS 数据面仍不可用");
+                }
+              }
+            }
           } else {
             let acquisition: Awaited<ReturnType<SandboxSessionRegistryPort["acquire"]>>;
             try {
@@ -674,19 +854,16 @@ export class RunWorker {
             context.agentFailure = "WORKSPACE_CONFLICT";
             throw new Error("Workspace 物化失败");
           }
-          if (
-            this.options.historyFilesystemEnabled === true &&
-            claim.snapshot.tenantKind === "personal"
-          ) {
+          if (this.options.historyFilesystemEnabled === true) {
             try {
-              await preparePersonalHistoryEntrypoints(
+              await prepareHistoryEntrypoints(
                 acquired.sandbox,
                 scope.threadId,
                 executionAbort.signal,
               );
             } catch {
               context.agentFailure = "SANDBOX_FAILED";
-              throw new Error("个人历史目录固定入口准备失败");
+              throw new Error("历史目录固定入口准备失败");
             }
           }
           const postMaterialize = await this.stopPoint(context, cancellation);

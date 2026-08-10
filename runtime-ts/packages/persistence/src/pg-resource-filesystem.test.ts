@@ -126,18 +126,19 @@ describe("PostgreSQL ResourceFS 稳定 Thread 入口", () => {
     expect(query?.sql).not.toContain("blob_references");
   });
 
-  it("team Tenant 不暴露个人 Thread 入口", async () => {
+  it("team Tenant 只从当前 Tenant 枚举团队 Thread 入口", async () => {
     const client = new ScriptedResourceFilesystemClient("team");
     const catalog = new PgResourceFilesystemCatalog(poolFor(client));
 
-    await expect(
-      catalog.listThreadIds({ tenantId: tenantId("tenant-team") }),
-    ).resolves.toBeUndefined();
-    expect(
-      client.statements.some((statement) =>
-        statement.sql.includes("SELECT thread.id AS thread_id"),
-      ),
-    ).toBe(false);
+    await expect(catalog.listThreadIds({ tenantId: tenantId("tenant-team") })).resolves.toEqual([
+      "thread-a",
+      "thread-b",
+    ]);
+    const query = client.statements.find((statement) =>
+      statement.sql.includes("SELECT thread.id AS thread_id"),
+    );
+    expect(query?.values).toEqual(["tenant-team"]);
+    expect(query?.sql).toContain("thread.tenant_id=$1");
   });
 
   it("个人云盘按活跃时间和稳定游标分页，并只读取当前页任务文件", async () => {

@@ -118,7 +118,7 @@ export async function createRunSkillSnapshot(
             entrypoint.content_digest AS entrypoint_file_digest,
             entrypoint.size_bytes::text AS entrypoint_size_bytes,
             entrypoint.blob_ref AS entrypoint_blob_ref
-       FROM user_skill_installations installation
+       FROM tenant_skill_installations installation
        JOIN skills skill ON skill.id=installation.skill_id
        JOIN skill_versions version
          ON version.skill_id=installation.skill_id
@@ -127,9 +127,9 @@ export async function createRunSkillSnapshot(
          ON entrypoint.skill_id=version.skill_id
         AND entrypoint.skill_version=version.version
         AND entrypoint.normalized_path=version.entrypoint_path
-      WHERE installation.user_id=$1 AND installation.status='enabled'
+      WHERE installation.tenant_id=$1 AND installation.status='enabled'
       ORDER BY installation.invocation_name COLLATE "C"`,
-    [input.userId],
+    [input.tenantId],
   );
   if (
     rows.rows.length > 64 ||

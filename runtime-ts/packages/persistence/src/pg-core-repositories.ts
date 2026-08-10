@@ -64,8 +64,7 @@ const threadJoins = `
   JOIN app_users thread_creator ON thread_creator.id = th.created_by_user_id
   JOIN memberships thread_creator_membership
     ON thread_creator_membership.tenant_id = th.tenant_id
-   AND thread_creator_membership.user_id = th.created_by_user_id
-   AND thread_creator_membership.status = 'active'`;
+   AND thread_creator_membership.user_id = th.created_by_user_id`;
 
 function isUniqueViolation(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "23505";

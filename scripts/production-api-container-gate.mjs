@@ -170,6 +170,8 @@ try {
     DATABASE_URL: `postgresql://runtime:${secretCanary}@127.0.0.1:1/runtime?sslmode=verify-full`,
     DATABASE_SCHEMA: "runtime",
     DATABASE_RUNTIME_ROLE: "runtime",
+    DATABASE_TEAM_COORDINATOR_URL: `postgresql://team_coordinator:${secretCanary}@127.0.0.1:1/runtime?sslmode=verify-full`,
+    DATABASE_TEAM_COORDINATOR_ROLE: "team_coordinator",
     THREAD_CURSOR_ACTIVE_KID: "current",
     THREAD_CURSOR_SIGNING_KEYS: "current:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     API_JWT_ISSUER: "https://issuer.example.invalid/runtime",

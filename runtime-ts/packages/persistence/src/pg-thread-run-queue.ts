@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ControlledRolloutProjection } from "@cube-runtime/run-contracts";
 import { rolloutProjectionDigest } from "@cube-runtime/run-contracts/mutation-protocol";
 import type { PoolClient } from "pg";
+import { wakeWorkerTenant } from "./pg-worker-tenant-assignment.js";
 
 export const legacyInitialProjection = Object.freeze({
   schemaVersion: 2 as const,
@@ -270,6 +271,7 @@ export async function activateNextThreadRun(
      ) VALUES ($1,$2,$3,$4,$5,$3,$6,'ready')`,
     [tenantId, randomUUID(), row.run_id, threadId, workspaceRow.id, row.body_digest],
   );
+  await wakeWorkerTenant(client, tenantId);
   const activatedQueue = await client.query(
     `UPDATE thread_follow_up_queue
         SET state='active',activated_at=clock_timestamp()

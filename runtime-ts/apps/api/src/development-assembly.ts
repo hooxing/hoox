@@ -60,6 +60,14 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
       connectionString: configuration.databaseUrl,
       schema: configuration.databaseSchema,
       applicationName: "cube-runtime-api-development",
+      teamCoordinator: {
+        connectionString: configuration.databaseTeamCoordinatorUrl,
+        schema: configuration.databaseSchema,
+        ...(configuration.databaseTeamCoordinatorRole === undefined
+          ? {}
+          : { expectedRuntimeRole: configuration.databaseTeamCoordinatorRole }),
+        applicationName: "cube-runtime-api-team-coordinator-development",
+      },
       serialQueueV2Enabled: configuration.serialQueueV2Enabled,
       historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
       historyFilesystemEnabled: configuration.historyFilesystemEnabled,
@@ -139,6 +147,10 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
             principals,
           }),
           repositories: persistence.repositories,
+          ...(persistence.teamCollaboration === undefined
+            ? {}
+            : { teamCollaboration: persistence.teamCollaboration }),
+          threadForks: persistence.threadForks,
           createCapability: createApiCreateCapability({
             threadCreation: persistence.threadCreation,
             enqueueOutbox: persistence.runDispatchCreation,

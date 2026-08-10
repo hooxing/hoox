@@ -94,7 +94,7 @@ export class PgResourceFilesystemCatalog
         this.pool,
         input,
         async (client) => {
-          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          if (!(await isHistoryTenant(client, input.tenantId))) return undefined;
           const result = await client.query<HistoryDirectoryRow>(
             `SELECT directory.thread_id,directory.directory_name,
                     directory.directory_timestamp,directory.last_file_at,
@@ -112,7 +112,7 @@ export class PgResourceFilesystemCatalog
         { readOnly: true },
       );
     } catch (error) {
-      throw mapPersistenceError(error, "列出个人历史目录");
+      throw mapPersistenceError(error, "列出历史目录");
     }
   }
 
@@ -124,7 +124,7 @@ export class PgResourceFilesystemCatalog
         this.pool,
         input,
         async (client) => {
-          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          if (!(await isHistoryTenant(client, input.tenantId))) return undefined;
           const rows = await client.query<HistoryDirectoryRow>(
             `SELECT directory.thread_id,directory.directory_name,
                     directory.directory_timestamp,directory.last_file_at,
@@ -260,7 +260,7 @@ export class PgResourceFilesystemCatalog
         { readOnly: true },
       );
     } catch (error) {
-      throw mapPersistenceError(error, "浏览个人历史文件");
+      throw mapPersistenceError(error, "浏览历史文件");
     }
   }
 
@@ -272,7 +272,7 @@ export class PgResourceFilesystemCatalog
         this.pool,
         input,
         async (client) => {
-          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          if (!(await isHistoryTenant(client, input.tenantId))) return undefined;
           const result = await client.query<HistoryFileRow>(
             `${historyFileQuery}
               WHERE entry.tenant_id=$1 AND entry.resource_id=$2 AND entry.resource_version_id=$3
@@ -286,7 +286,7 @@ export class PgResourceFilesystemCatalog
         { readOnly: true },
       );
     } catch (error) {
-      throw mapPersistenceError(error, "解析个人历史文件下载");
+      throw mapPersistenceError(error, "解析历史文件下载");
     }
   }
 
@@ -298,7 +298,7 @@ export class PgResourceFilesystemCatalog
         this.pool,
         input,
         async (client) => {
-          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          if (!(await isHistoryTenant(client, input.tenantId))) return undefined;
           // WebDAV/FUSE 必须能从父目录枚举到子目录，才能解析已知的隐藏 Thread 路径。
           // 空 Thread 也必须预声明稳定目录，避免首个附件使持久 rclone mount 新增父目录并命中旧缓存。
           const result = await client.query<{ readonly thread_id: string }>(
@@ -325,7 +325,7 @@ export class PgResourceFilesystemCatalog
         this.pool,
         input,
         async (client) => {
-          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          if (!(await isHistoryTenant(client, input.tenantId))) return undefined;
           const result = await client.query<HistoryDirectoryRow>(
             `SELECT directory.thread_id,directory.directory_name,
                     directory.directory_timestamp,directory.last_file_at,
@@ -341,7 +341,7 @@ export class PgResourceFilesystemCatalog
         { readOnly: true },
       );
     } catch (error) {
-      throw mapPersistenceError(error, "解析个人历史目录");
+      throw mapPersistenceError(error, "解析历史目录");
     }
   }
 
@@ -353,7 +353,7 @@ export class PgResourceFilesystemCatalog
         this.pool,
         input,
         async (client) => {
-          if (!(await isPersonalThread(client, input.tenantId, input.threadId))) return undefined;
+          if (!(await isHistoryThread(client, input.tenantId, input.threadId))) return undefined;
           const result = await client.query<HistoryFileRow>(
             `${historyFileQuery}
               WHERE entry.tenant_id=$1 AND entry.thread_id=$2
@@ -377,7 +377,7 @@ export class PgResourceFilesystemCatalog
         this.pool,
         input,
         async (client) => {
-          if (!(await isPersonalTenant(client, input.tenantId))) return undefined;
+          if (!(await isHistoryTenant(client, input.tenantId))) return undefined;
           const result = await client.query<HistoryFileRow>(
             `${historyFileQuery}
               WHERE entry.tenant_id=$1 AND directory.directory_name=$2
@@ -390,7 +390,7 @@ export class PgResourceFilesystemCatalog
         { readOnly: true },
       );
     } catch (error) {
-      throw mapPersistenceError(error, "解析个人历史文件");
+      throw mapPersistenceError(error, "解析历史文件");
     }
   }
 
@@ -402,7 +402,7 @@ export class PgResourceFilesystemCatalog
         this.pool,
         input,
         async (client) => {
-          if (!(await isPersonalThread(client, input.tenantId, input.threadId))) return undefined;
+          if (!(await isHistoryThread(client, input.tenantId, input.threadId))) return undefined;
           const result = await client.query<HistoryFileRow>(
             `${historyFileQuery}
               WHERE entry.tenant_id=$1 AND entry.thread_id=$2
@@ -474,22 +474,22 @@ async function findFile(
   return row === undefined ? undefined : mapFile(input.tenantId, row);
 }
 
-async function isPersonalTenant(client: PoolClient, rawTenantId: string): Promise<boolean> {
+async function isHistoryTenant(client: PoolClient, rawTenantId: string): Promise<boolean> {
   const result = await client.query<{ readonly kind: string }>(
     "SELECT kind FROM tenants WHERE id=$1",
     [rawTenantId],
   );
-  return result.rows[0]?.kind === "personal";
+  return result.rows[0]?.kind === "personal" || result.rows[0]?.kind === "team";
 }
 
-async function isPersonalThread(
+async function isHistoryThread(
   client: PoolClient,
   rawTenantId: string,
   rawThreadId: string,
 ): Promise<boolean> {
   const result = await client.query(
     `SELECT 1 FROM threads thread
-       JOIN tenants tenant ON tenant.id=thread.tenant_id AND tenant.kind='personal'
+       JOIN tenants tenant ON tenant.id=thread.tenant_id AND tenant.kind IN ('personal','team')
       WHERE thread.tenant_id=$1 AND thread.id=$2`,
     [rawTenantId, rawThreadId],
   );

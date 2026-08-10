@@ -21,6 +21,7 @@ import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-sta
 import { PgSkillCenterRepository } from "./pg-skill-center.js";
 import { PgSkillFilesystemCatalog } from "./pg-skill-filesystem.js";
 import { PgThreadCreation } from "./pg-thread-creation.js";
+import { PgTeamCollaborationRepository, PgThreadForkRepository } from "./pg-team-collaboration.js";
 import { PgThreadInputRouting } from "./pg-thread-input.js";
 import type {
   ArchiveThreadCommandPort,
@@ -58,7 +59,13 @@ export interface MigrationRuntime {
   down(
     options: Omit<
       MigrationDownOptions,
-      "directory" | "runtimeRole" | "migratorRole" | "skillPublisherRole" | "schema"
+      | "directory"
+      | "runtimeRole"
+      | "migratorRole"
+      | "skillPublisherRole"
+      | "workerCoordinatorRole"
+      | "teamCoordinatorRole"
+      | "schema"
     >,
   ): Promise<readonly MigrationRecord[]>;
   probe(): Promise<void>;
@@ -70,6 +77,8 @@ export interface ApiPersistenceRuntime {
   readonly repositories: CoreRepositories;
   readonly archiveThread: ArchiveThreadCommandPort;
   readonly threadCreation: PgThreadCreation;
+  readonly teamCollaboration?: PgTeamCollaborationRepository;
+  readonly threadForks: PgThreadForkRepository;
   readonly runDispatchCreation: PgRunDispatchCreation;
   readonly threadInputs: PgThreadInputRouting;
   readonly experience: RunExperienceReadPort;
@@ -93,13 +102,20 @@ export function createApiPersistenceRuntime(
     readonly historyDirectoryTimeZone?: string;
     readonly historyFilesystemEnabled?: boolean;
     readonly historyTitleGenerationEnabled?: boolean;
+    readonly teamCoordinator?: PostgresPoolOptions;
   },
 ): ApiPersistenceRuntime {
   const pool = createPostgresPool(options);
+  const teamCoordinatorPool =
+    options.teamCoordinator === undefined ? undefined : createPostgresPool(options.teamCoordinator);
   return Object.freeze({
     repositories: new PgCoreRepositories(pool),
     archiveThread: new PgArchiveThreadCommand(pool),
     threadCreation: new PgThreadCreation(pool),
+    ...(teamCoordinatorPool === undefined
+      ? {}
+      : { teamCollaboration: new PgTeamCollaborationRepository(teamCoordinatorPool) }),
+    threadForks: new PgThreadForkRepository(pool),
     runDispatchCreation: new PgRunDispatchCreation(pool, {
       serialQueueV2Enabled: options.serialQueueV2Enabled ?? false,
       historyTitleGenerationEnabled: options.historyTitleGenerationEnabled ?? false,
@@ -125,8 +141,20 @@ export function createApiPersistenceRuntime(
     skillCenter: new PgSkillCenterRepository(pool),
     skillFilesystem: new PgSkillFilesystemCatalog(pool),
     threadContext: (blobs: BlobStore) => new PgThreadContextReadRepository(pool, blobs),
-    probe: () => probePostgres(pool, options.expectedRuntimeRole),
-    close: () => pool.end(),
+    probe: async () => {
+      await Promise.all([
+        probePostgres(pool, options.expectedRuntimeRole),
+        ...(teamCoordinatorPool === undefined
+          ? []
+          : [probePostgres(teamCoordinatorPool, options.teamCoordinator?.expectedRuntimeRole)]),
+      ]);
+    },
+    close: async () => {
+      await Promise.all([
+        pool.end(),
+        ...(teamCoordinatorPool === undefined ? [] : [teamCoordinatorPool.end()]),
+      ]);
+    },
   });
 }
 
@@ -340,6 +368,8 @@ export function createMigrationRuntime(
     readonly runtimeRole: string;
     readonly migratorRole: string;
     readonly skillPublisherRole: string;
+    readonly workerCoordinatorRole: string;
+    readonly teamCoordinatorRole: string;
     readonly schema: string;
   },
 ): MigrationRuntime {
@@ -348,6 +378,8 @@ export function createMigrationRuntime(
     runtimeRole: options.runtimeRole,
     migratorRole: options.migratorRole,
     skillPublisherRole: options.skillPublisherRole,
+    workerCoordinatorRole: options.workerCoordinatorRole,
+    teamCoordinatorRole: options.teamCoordinatorRole,
     schema: options.schema,
   } as const;
   return {

@@ -124,7 +124,7 @@ production 管理服务必须单独注入 `SKILL_ADMIN_JWT_*`、`SKILL_PUBLISHER
 
 PPTX Skill 宣称预装的 Node.js、`pptxgenjs`、图标渲染和 LibreOffice/Poppler 依赖必须由 Sandbox 模板提供，不能在 Run 内临时安装。开发模板从 `deploy/cubesandbox/agent-sandbox-pptx.Dockerfile` 构建；发布镜像后用 CubeSandbox `Template.build({ image })` 创建不可变模板，并把返回的模板 ID 写入本地 `.env` 的 `CUBESANDBOX_TEMPLATE_ID`。基础镜像使用摘要固定，Node 模块使用精确版本；每次发布使用新的不可变镜像标签，不在既有标签上依赖 `Template.rebuild` 刷新。命令服务会净化进程环境，因此模板同时提供根级 `/node_modules` 解析路径，不能只依赖镜像中的 `NODE_PATH`。旧模板保留到新模板完成真实 `.pptx` 生成及 pause/resume 冒烟后再回收。
 
-`agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 必须严格等于 `DEV_AUTH_USER_A_TENANT_ID`，保证 `dev-user-a` 的 Web/API 创建结果由同一 Worker 消费。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
+`agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 仍严格等于 `DEV_AUTH_USER_A_TENANT_ID`，但只用于启动兼容；个人与团队 dispatch 都会原子唤醒动态 Tenant 控制面。`DATABASE_WORKER_COORDINATOR_URL` 必须使用独立的 `DATABASE_WORKER_COORDINATOR_ROLE` 登录，该角色只能领取无业务载荷的 Tenant 租约；实际任务始终回到 `DATABASE_URL` 对应的 Runtime 角色和 Tenant RLS 内读取。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它会同时检查两个数据库身份，但不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
 
 VMware 内的 Cubelet 挂载附件与 `/resources/skills` 公开市场视图时，不能直接访问只监听 Windows loopback 的
 API。所有 Sandbox 工具现在都依赖该 ResourceFS 数据面。先为宿主虚拟网卡生成独立的开发 TLS 证书，把 CA 公钥
@@ -168,13 +168,13 @@ corepack pnpm test:production-worker:container
 
 业务 Schema 迁移不能替代数据库级 bootstrap。首次准备专用数据库时，由不进入应用进程的 Database Admin 完成以下一次性操作：
 
-1. 创建无 `SUPERUSER/CREATEDB/CREATEROLE/BYPASSRLS/REPLICATION` 的 Migrator、Runtime 与 Skill Publisher 登录角色，并保证三者互异且都没有任何上游或下游角色成员关系；Runtime 和 Skill Publisher 必须为 `NOINHERIT`，不能保留可 `SET ROLE` 的成员关系；
-2. 从 `PUBLIC`、Migrator、Runtime 和 Skill Publisher 撤销目标数据库的全部权限，再只向三个角色授予 `CONNECT`；Runtime 与 Skill Publisher 不得通过 `PUBLIC` 获得 `CREATE` 或 `TEMPORARY`；
+1. 创建无 `SUPERUSER/CREATEDB/CREATEROLE/BYPASSRLS/REPLICATION` 的 Migrator、Runtime、Skill Publisher、Worker Coordinator 与 Team Coordinator 登录角色，并保证五者互异且都没有任何上游或下游角色成员关系；Runtime、Skill Publisher、Worker Coordinator 和 Team Coordinator 必须为 `NOINHERIT`，不能保留可 `SET ROLE` 的成员关系；
+2. 从 `PUBLIC` 和五个角色撤销目标数据库的全部权限，再只向五个角色授予 `CONNECT`；Runtime、Skill Publisher、Worker Coordinator 与 Team Coordinator 不得通过 `PUBLIC` 获得 `CREATE` 或 `TEMPORARY`；
 3. 创建专用业务 Schema，并只让 Migrator 成为该 Schema owner；Database Admin 继续作为数据库 owner；
-4. 确认 Runtime 与 Skill Publisher 都不是数据库、Schema、表、序列或 routine owner；Migrator 不是数据库 owner，且只拥有配置的业务 Schema；
-5. 分别写入本机忽略文件中的 `DATABASE_BOOTSTRAP_URL`、`MIGRATION_DATABASE_URL`、`DATABASE_URL`、`SKILL_PUBLISHER_DATABASE_URL`、`DATABASE_RUNTIME_ROLE`、`DATABASE_MIGRATOR_ROLE`、`DATABASE_SKILL_PUBLISHER_ROLE` 与 `DATABASE_SCHEMA`。Bootstrap/Migration URL 只用于本地权限集成测试或受控运维，不能进入常驻服务进程。
+4. 确认 Runtime、Skill Publisher、Worker Coordinator 与 Team Coordinator 都不是数据库、Schema、表、序列或 routine owner；Migrator 不是数据库 owner，且只拥有配置的业务 Schema；
+5. 分别写入本机忽略文件中的 `DATABASE_BOOTSTRAP_URL`、`MIGRATION_DATABASE_URL`、`DATABASE_URL`、`DATABASE_WORKER_COORDINATOR_URL`、`DATABASE_TEAM_COORDINATOR_URL`、`SKILL_PUBLISHER_DATABASE_URL`、五个数据库角色名与 `DATABASE_SCHEMA`。Bootstrap/Migration URL 只用于本地权限集成测试或受控运维；Worker 常驻进程只接收 Runtime 与 Worker Coordinator 两个受限连接，API 只把 Team Coordinator 连接交给团队协作 Repository。
 
-`pnpm db:migrate:up` 会在任何 DDL 前同时验证 Runtime、当前 Migrator、Skill Publisher、Schema owner 与精确 `search_path`，并拒绝 Runtime/Skill Publisher 的目标 Schema `CREATE`、数据库 `TEMPORARY`、角色继承/成员关系/ownership、Migrator 对无关 Schema 的有效 `CREATE`、额外非系统 ownership、任何 routine default ACL 记录及任何目标 Schema routine。Schema migration、迁移记录、最小 ACL bootstrap 和结束白名单断言共用同一事务。首版 routine manifest 为空；runner 完全不修改 routine 的全局或局部 default ACL，并在迁移 SQL 后、提交前再次断言目标 routine 集合仍为空，任何 migration 创建 routine 都会整体回滚。bootstrap 从空集合重建 Runtime 与 Skill Publisher 的精确 ACL，并对逐表全部 DML/DDL、routine `EXECUTE` 及数据库、Schema 有效权限执行白名单断言。未来引入函数、过程或聚合前，必须单独设计 manifest 并显式审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 和调用权限。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作；down SQL、ACL 回收和结束断言同样共用一个事务，任一步失败都整体回滚。down 不修改 routine default ACL，也不会删除角色或回滚 Database Admin bootstrap。
+`pnpm db:migrate:up` 会在任何 DDL 前同时验证 Runtime、当前 Migrator、Skill Publisher、Worker Coordinator、Team Coordinator、Schema owner 与精确 `search_path`，并拒绝四个常驻角色的目标 Schema `CREATE`、数据库 `TEMPORARY`、角色继承/成员关系/ownership、Migrator 对无关 Schema 的有效 `CREATE`、额外非系统 ownership、任何 routine default ACL 记录及任何目标 Schema routine。Schema migration、迁移记录、最小 ACL bootstrap 和结束白名单断言共用同一事务。首版 routine manifest 为空；runner 完全不修改 routine 的全局或局部 default ACL，并在迁移 SQL 后、提交前再次断言目标 routine 集合仍为空，任何 migration 创建 routine 都会整体回滚。bootstrap 从空集合重建四种常驻角色的精确 ACL：Worker Coordinator 仅能全局读取 assignment 并更新 claim 栅栏列，不能读取业务表；Team Coordinator 只供 API 团队协作 Repository 使用，在 Runtime 白名单基础上额外获得团队目录及 Membership 授权列的最小权限。未来引入函数、过程或聚合前，必须单独设计 manifest 并显式审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 和调用权限。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作；down SQL、ACL 回收和结束断言同样共用一个事务，任一步失败都整体回滚。down 不修改 routine default ACL，也不会删除角色或回滚 Database Admin bootstrap。
 
 ## HTTP API 开发边界
 
@@ -184,7 +184,7 @@ corepack pnpm test:production-worker:container
 
 `PgThreadCreation` 与 `PgRunDispatchCreation` 分别提供 Thread+初始 Workspace、Run+不可变输入+Dispatch Outbox 的原子 PostgreSQL 适配；两者均以租户事务、成员资格重验、advisory lock 和幂等记录收敛首次并发竞争。COMMIT 响应未知或提交后响应丢失时，只允许按同一 scope+idempotency key+request hash 精确读回，禁止再次写入。只有 `createApiCreateCapability` 同时签发两个原子端口时才注册 POST；签发和 App 创建都会快照能力，运行中替换对象无效。不注入能力时服务保持可读、可归档、可取消且 `/ready` 正常。`ArchiveThreadCommandPort` 已有 PostgreSQL 适配，必须保持 Membership `FOR SHARE`→Thread `FOR UPDATE` 锁序、事务内角色重验和数据库单调时间，禁止退化为 API 层 Repository 读改写。
 
-Runtime 对 Membership 只有 SELECT、INSERT 和恒定 `lock_marker` 的单列 UPDATE，不允许表级 UPDATE，也不允许更新 `status`、`role`、租户/用户关联、ID 或创建时间。`lock_marker` 由 CHECK 约束为 `false`，只用于满足 PostgreSQL `FOR SHARE` 的列权限前提。不得把它改造成业务状态；成员变更必须由独立权限边界完成。
+Runtime 对 Membership 只有 SELECT、INSERT 和恒定 `lock_marker` 的单列 UPDATE，不允许表级 UPDATE，也不允许更新 `status`、`role`、租户/用户关联、ID 或创建时间。`lock_marker` 由 CHECK 约束为 `false`，只用于满足 PostgreSQL `FOR SHARE` 的列权限前提。不得把它改造成业务状态；成员变更只能经独立 Team Coordinator 连接完成，详见 ADR-0147。
 
 0003 才引入 `lock_marker`。ACL bootstrap 与白名单断言必须按数据库实际列集合工作，partial down 到 0002 时不能引用该列，再次 up 到 0003 后必须恢复单列权限。新增版本相关 ACL 时必须同时增加真实 PostgreSQL 的 `最新→旧版→最新` 往返测试。
 

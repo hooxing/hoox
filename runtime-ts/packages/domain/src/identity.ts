@@ -26,7 +26,6 @@ interface PersonalTenantData {
 }
 export type PersonalTenant = Entity<"PersonalTenant", PersonalTenantData>;
 
-// 团队 Tenant 只保留领域形态，首版不开放创建入口和团队权限策略。
 interface TeamTenantData {
   readonly id: TenantId;
   readonly kind: "team";
@@ -68,6 +67,37 @@ export function createPersonalTenant(input: {
     id: input.id,
     kind: "personal" as const,
     ownerUserId: input.owner.id,
+    createdAt: input.createdAt,
+  });
+  const ownerMembership = sealEntity("Membership", {
+    id: input.ownerMembershipId,
+    tenantId: tenant.id,
+    userId: input.owner.id,
+    role: "owner" as const,
+    status: "active" as const,
+    createdAt: input.createdAt,
+  });
+  return Object.freeze({ tenant, ownerMembership });
+}
+
+export function createTeamTenant(input: {
+  readonly id: TenantId;
+  readonly ownerMembershipId: MembershipId;
+  readonly owner: User;
+  readonly displayName: string;
+  readonly createdAt: IsoTimestamp;
+}): { readonly tenant: TeamTenant; readonly ownerMembership: Membership } {
+  const displayName = input.displayName.trim();
+  domainInvariant(
+    displayName.length > 0 && displayName.length <= 200,
+    "INVALID_ARGUMENT",
+    "团队名称长度无效",
+  );
+  const tenant = sealEntity("TeamTenant", {
+    id: input.id,
+    kind: "team" as const,
+    displayName,
+    createdByUserId: input.owner.id,
     createdAt: input.createdAt,
   });
   const ownerMembership = sealEntity("Membership", {
@@ -166,6 +196,26 @@ export function revokeMembership(membership: Membership): Membership {
     "INVALID_STATE_TRANSITION",
     "不能撤销租户所有者的成员资格",
   );
+  domainInvariant(membership.status === "active", "INVALID_STATE_TRANSITION", "成员资格已经失效");
+  return sealEntity("Membership", { ...membership, status: "revoked" as const });
+}
+
+export function changeTeamMembershipRole(
+  tenant: TeamTenant,
+  membership: Membership,
+  role: MembershipRole,
+): Membership {
+  assertSameTenant(tenant.id, membership.tenantId);
+  domainInvariant(membership.status === "active", "INVALID_STATE_TRANSITION", "成员资格已经失效");
+  return sealEntity("Membership", { ...membership, role });
+}
+
+/** 解散是唯一允许同时撤销 Owner 的路径；普通移除仍由 revokeMembership 拒绝。 */
+export function revokeMembershipForTeamDissolution(
+  tenant: TeamTenant,
+  membership: Membership,
+): Membership {
+  assertSameTenant(tenant.id, membership.tenantId);
   domainInvariant(membership.status === "active", "INVALID_STATE_TRANSITION", "成员资格已经失效");
   return sealEntity("Membership", { ...membership, status: "revoked" as const });
 }

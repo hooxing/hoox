@@ -51,9 +51,10 @@ function isWindowsReservedName(segment: string): boolean {
 
 export function assertResourceName(value: string): string {
   const normalized = value.normalize("NFKC").trim();
+  // Resource 名称是展示元数据而不是可执行路径；在上传边界统一兼容字符，
+  // 避免全角括号等常见中文文件名被误判，同时后续路径仍只使用安全化副本。
   if (
     normalized.length === 0 ||
-    normalized !== value.trim() ||
     Buffer.byteLength(normalized, "utf8") > 255 ||
     containsForbiddenUnicode(normalized)
   ) {

@@ -6,6 +6,8 @@ function validExample(): string {
     .map((key) => {
       if (
         key === "DATABASE_URL" ||
+        key === "DATABASE_WORKER_COORDINATOR_URL" ||
+        key === "DATABASE_TEAM_COORDINATOR_URL" ||
         key === "DATABASE_BOOTSTRAP_URL" ||
         key === "MIGRATION_DATABASE_URL" ||
         key === "SKILL_PUBLISHER_DATABASE_URL"
@@ -76,6 +78,10 @@ describe("环境变量示例契约", () => {
         "MODEL_WIRE_TRACE_RETENTION_DAYS",
         "MODEL_WIRE_TRACE_MAX_BYTES",
         "DATABASE_SKILL_PUBLISHER_ROLE",
+        "DATABASE_WORKER_COORDINATOR_URL",
+        "DATABASE_WORKER_COORDINATOR_ROLE",
+        "DATABASE_TEAM_COORDINATOR_URL",
+        "DATABASE_TEAM_COORDINATOR_ROLE",
         "SKILL_PUBLISHER_DATABASE_URL",
         "DEV_SKILL_ADMIN_TOKEN",
       ]),

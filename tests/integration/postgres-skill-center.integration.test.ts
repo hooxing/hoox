@@ -1,6 +1,8 @@
 import { randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { tenantId, userId } from "@cube-runtime/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { publishDevelopmentCsvPdfSkill } from "../../runtime-ts/packages/persistence/src/development-csv-pdf-publisher.js";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgSkillCenterRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-center.js";
 import { PgSkillFilesystemCatalog } from "../../runtime-ts/packages/persistence/src/pg-skill-filesystem.js";
@@ -36,6 +38,21 @@ const migratorRole = `it_sk_mg_${unique}`;
 const migratorPassword = randomBytes(24).toString("hex");
 const skillPublisherRole = `it_sk_pub_${unique}`;
 const skillPublisherPassword = randomBytes(24).toString("hex");
+const workerCoordinatorRole = `it_sk_coord_${unique}`;
+const teamCoordinatorRole = workerCoordinatorRole.replace("_coord_", "_team_");
+const workerCoordinatorPassword = randomBytes(24).toString("hex");
+const teamCoordinatorPassword = randomBytes(24).toString("hex");
+const csvPdfSourceRoot = fileURLToPath(
+  new URL("../../runtime-ts/managed-skills/csv-to-pdf/", import.meta.url),
+);
+const csvPdfObjectStorage = {
+  endpoint: requiredEnvironment("SKILL_PUBLISHER_S3_ENDPOINT"),
+  bucket: requiredEnvironment("SKILL_PUBLISHER_S3_BUCKET"),
+  region: requiredEnvironment("SKILL_PUBLISHER_S3_REGION"),
+  accessKeyId: requiredEnvironment("SKILL_PUBLISHER_S3_ACCESS_KEY_ID"),
+  secretAccessKey: requiredEnvironment("SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY"),
+  forcePathStyle: requiredEnvironment("SKILL_PUBLISHER_S3_FORCE_PATH_STYLE") === "true",
+} as const;
 const testMigrationUrl = new URL(migrationDatabaseUrl);
 if (testMigrationUrl.username !== configuredMigratorRole) {
   throw new Error("MIGRATION_DATABASE_URL 与 DATABASE_MIGRATOR_ROLE 不一致");
@@ -50,6 +67,10 @@ const scopeA = {
 const scopeB = {
   tenantId: tenantId(`skill_tenant_b_${unique}`),
   userId: userId(`skill_user_b_${unique}`),
+};
+const teamScope = {
+  tenantId: tenantId(`skill_team_${unique}`),
+  userId: scopeA.userId,
 };
 
 let admin!: Pool;
@@ -77,6 +98,20 @@ async function seedPrincipal(scope: typeof scopeA): Promise<void> {
   });
 }
 
+async function seedTeam(scope: typeof teamScope): Promise<void> {
+  await withTenantTransaction(runtime, scope, async (client) => {
+    await client.query(
+      "INSERT INTO tenants(id,kind,display_name,created_by_user_id,created_at) VALUES ($1,'team','Skill 集成测试团队',$2,clock_timestamp())",
+      [scope.tenantId, scope.userId],
+    );
+    await client.query(
+      `INSERT INTO memberships(tenant_id,id,user_id,role,status,created_at)
+       VALUES ($1,$2,$3,'owner','active',clock_timestamp())`,
+      [scope.tenantId, `membership_${scope.tenantId}`, scope.userId],
+    );
+  });
+}
+
 beforeAll(async () => {
   admin = createPostgresPool({ connectionString: bootstrapDatabaseUrl, maxConnections: 2 });
   await admin.query(
@@ -84,7 +119,11 @@ beforeAll(async () => {
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${skillPublisherRole}" LOGIN PASSWORD '${skillPublisherPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}";
+     CREATE ROLE "${workerCoordinatorRole}" LOGIN PASSWORD '${workerCoordinatorPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     CREATE ROLE "${teamCoordinatorRole}" LOGIN PASSWORD '${teamCoordinatorPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migratorCreated = true;
@@ -97,11 +136,25 @@ beforeAll(async () => {
   runtime = createPostgresPool({ connectionString: runtimeDatabaseUrl, schema, maxConnections: 8 });
   const contract = await loadPostgreSqlMigrationContract();
   expect(
-    (await migrateUp(migrator, { runtimeRole, migratorRole, skillPublisherRole, schema })).map(
-      (record) => record.version,
-    ),
+    (
+      await migrateUp(migrator, {
+        runtimeRole,
+        migratorRole,
+        skillPublisherRole,
+        workerCoordinatorRole,
+        teamCoordinatorRole,
+        schema,
+      })
+    ).map((record) => record.version),
   ).toEqual(contract.versions);
   await Promise.all([seedPrincipal(scopeA), seedPrincipal(scopeB)]);
+  await seedTeam(teamScope);
+
+  await publishDevelopmentCsvPdfSkill({
+    sourceRoot: csvPdfSourceRoot,
+    pool: migrator,
+    objectStorage: csvPdfObjectStorage,
+  });
 
   await withTransaction(migrator, async (client) => {
     for (const [id, canonicalKey, displayName] of [
@@ -153,7 +206,9 @@ afterAll(async () => {
   if (schemaCreated) await admin.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (migratorCreated) {
     await admin.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}";
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
+       DROP ROLE "${teamCoordinatorRole}";
+       DROP ROLE "${workerCoordinatorRole}";
        DROP ROLE "${skillPublisherRole}";
        DROP ROLE "${migratorRole}"`,
     );
@@ -162,12 +217,45 @@ afterAll(async () => {
 });
 
 describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
+  it("固定 CSV 转 PDF publisher 重复发布保持同一目录版本与文件清单", async () => {
+    const first = await publishDevelopmentCsvPdfSkill({
+      sourceRoot: csvPdfSourceRoot,
+      pool: migrator,
+      objectStorage: csvPdfObjectStorage,
+    });
+    const second = await publishDevelopmentCsvPdfSkill({
+      sourceRoot: csvPdfSourceRoot,
+      pool: migrator,
+      objectStorage: csvPdfObjectStorage,
+    });
+
+    expect(first).toEqual(second);
+    expect(first).toEqual({
+      version: "1.1.0",
+      fileCount: 3,
+      packageDigest: "4c14b62df37308eb6f8cdea5a4d37b0da2dc42bee9094ff3149ff1775ed7fad6",
+    });
+    expect(
+      await migrator.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM skill_versions
+          WHERE skill_id='skill_cube_csv_to_pdf' AND version='1.1.0'`,
+      ),
+    ).toMatchObject({ rows: [{ count: "1" }] });
+    expect(
+      await migrator.query<{ count: string }>(
+        `SELECT count(*)::text AS count FROM skill_version_files
+          WHERE skill_id='skill_cube_csv_to_pdf' AND skill_version='1.1.0'`,
+      ),
+    ).toMatchObject({ rows: [{ count: "3" }] });
+  });
+
   it("所有 Tenant 无需安装即可浏览公开市场，并可解析仍然可用的精确旧版本", async () => {
     const rootA = await filesystem.listDirectory({ tenantId: scopeA.tenantId, segments: [] });
     const rootB = await filesystem.listDirectory({ tenantId: scopeB.tenantId, segments: [] });
     expect(rootA).toEqual(rootB);
     expect(rootA).toEqual([
       { kind: "directory", name: "code-review" },
+      { kind: "directory", name: "csv-to-pdf" },
       { kind: "directory", name: "deploy" },
     ]);
 
@@ -204,7 +292,11 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       normalizedQuery: "",
       limit: 10,
     });
-    expect(page.items.map((item) => item.canonicalKey)).toEqual(["code-review", "deploy"]);
+    expect(page.items.map((item) => item.canonicalKey)).toEqual([
+      "code-review",
+      "csv-to-pdf",
+      "deploy",
+    ]);
     expect((await runtime.query("SELECT canonical_key FROM skills")).rows).toEqual([]);
     await expect(
       withTenantTransaction(runtime, scopeA, (client) =>
@@ -327,5 +419,56 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       readRunSkillSnapshot(client, scopeB.tenantId, candidateRunId),
     );
     expect(after).toEqual(before);
+  });
+
+  it("团队 Owner 启用 Skill 后，新 Run 快照包含团队的精确安装版本", async () => {
+    expect(
+      await repository.install({
+        context: teamScope,
+        canonicalKey: "csv-to-pdf",
+        versionSelector: "1.1.0",
+        invocationName: "csv-to-pdf",
+        idempotencyKey: "skill-install-team-0001",
+        requestDigest: "4".repeat(64),
+      }),
+    ).toMatchObject({
+      outcome: "installed",
+      installation: { status: "enabled", skillVersion: "1.1.0" },
+    });
+
+    const candidateRunId = `skill-team-run-${unique}`;
+    await withTenantTransaction(runtime, teamScope, (client) =>
+      createRunSkillSnapshot(client, {
+        tenantId: teamScope.tenantId,
+        runId: candidateRunId,
+        userId: teamScope.userId,
+      }),
+    );
+    expect(
+      await withTenantTransaction(runtime, teamScope, (client) =>
+        readRunSkillSnapshot(client, teamScope.tenantId, candidateRunId),
+      ),
+    ).toMatchObject({
+      items: [
+        {
+          invocationName: "csv-to-pdf",
+          canonicalKey: "csv-to-pdf",
+          skillVersion: "1.1.0",
+        },
+      ],
+    });
+  });
+
+  it("固定 publisher 拒绝既有目录发布者漂移", async () => {
+    await migrator.query(
+      "UPDATE skills SET publisher='Drift Publisher' WHERE id='skill_cube_csv_to_pdf'",
+    );
+    await expect(
+      publishDevelopmentCsvPdfSkill({
+        sourceRoot: csvPdfSourceRoot,
+        pool: migrator,
+        objectStorage: csvPdfObjectStorage,
+      }),
+    ).rejects.toThrow("CSV 转 PDF Skill 目录键已被其他发布者占用");
   });
 });

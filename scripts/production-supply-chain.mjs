@@ -219,6 +219,43 @@ function runPnpmLicenses(packageName) {
   }
 }
 
+const clipboardPlatformPackagePattern = /^@mariozechner\/clipboard-(?:darwin|linux|win32)-/u;
+const canonicalProductionClipboardPackages = Object.freeze([
+  "@mariozechner/clipboard-linux-x64-gnu",
+  "@mariozechner/clipboard-linux-x64-musl",
+]);
+
+/**
+ * pnpm licenses 只报告当前宿主链接的 optional native 包；生产目标固定为 Linux x64，
+ * 因此必须把开发机的 Windows/macOS 变体规范化为相同的生产闭包。
+ */
+export function canonicalizeProductionPlatformComponents(components) {
+  const platformComponents = components.filter((item) =>
+    clipboardPlatformPackagePattern.test(item.name),
+  );
+  if (platformComponents.length === 0) return components;
+  const versions = new Set(platformComponents.map((item) => item.version));
+  const licenses = new Set(
+    platformComponents.map((item) => item.licenses?.[0]?.license?.id).filter(Boolean),
+  );
+  if (versions.size !== 1 || licenses.size !== 1) {
+    throw new Error("PRODUCTION_SBOM_PLATFORM_COMPONENT_CONFLICT");
+  }
+  const [version] = versions;
+  const [license] = licenses;
+  return [
+    ...components.filter((item) => !clipboardPlatformPackagePattern.test(item.name)),
+    ...canonicalProductionClipboardPackages.map((name) =>
+      component({
+        name,
+        version,
+        license,
+        properties: { "cube:origin": "registry" },
+      }),
+    ),
+  ];
+}
+
 function externalComponents(packageNames) {
   const components = [];
   for (const packageName of packageNames) {
@@ -246,7 +283,7 @@ function externalComponents(packageNames) {
       }
     }
   }
-  return components;
+  return canonicalizeProductionPlatformComponents(components);
 }
 
 function uniqueSortedComponents(components) {

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   buildCycloneDx,
+  canonicalizeProductionPlatformComponents,
   canonicalVendorTreeSha256,
   evaluateLicensePolicy,
   productionSbomTargets,
@@ -143,6 +144,30 @@ describe("生产供应链契约", () => {
       lockfileSha256: "a".repeat(64),
     });
     expect(JSON.stringify(left)).toBe(JSON.stringify(right));
+  });
+
+  it("宿主平台 native optional 包规范化为 Linux x64 生产闭包", () => {
+    const normalized = canonicalizeProductionPlatformComponents([
+      component("@mariozechner/clipboard", "MIT"),
+      component("@mariozechner/clipboard-win32-x64-msvc", "MIT"),
+      component("portable", "Apache-2.0"),
+    ]);
+
+    expect(normalized.map((item) => item.name).sort()).toEqual([
+      "@mariozechner/clipboard",
+      "@mariozechner/clipboard-linux-x64-gnu",
+      "@mariozechner/clipboard-linux-x64-musl",
+      "portable",
+    ]);
+    expect(() =>
+      canonicalizeProductionPlatformComponents([
+        component("@mariozechner/clipboard-win32-x64-msvc", "MIT"),
+        {
+          ...component("@mariozechner/clipboard-linux-x64-gnu", "MIT"),
+          version: "0.0.2",
+        },
+      ]),
+    ).toThrow("PRODUCTION_SBOM_PLATFORM_COMPONENT_CONFLICT");
   });
 
   it("deny-list 与未知许可证都失败关闭", () => {

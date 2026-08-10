@@ -61,7 +61,6 @@ export function createTodoWritePiTool(
     toolName: "todo_write",
     outcome: "succeeded" | "failed",
   ) => Promise<ToolObservationResult>,
-  enterReportOnlyMode: () => void = () => undefined,
 ) {
   const invalidArguments = createSchemaInvalidArgumentsBridge<TodoWriteToolArguments>(
     TodoWriteToolArgumentsSchema,
@@ -109,7 +108,6 @@ export function createTodoWritePiTool(
       if (observation.outcome !== "recorded" && observation.outcome !== "replayed") {
         throw new Error("todo_write Tool Observation 未能形成 durable 事实");
       }
-      if (failure?.fatal === true) enterReportOnlyMode();
       if (failure !== undefined) throw new Error(JSON.stringify(failure));
       return {
         content: [{ type: "text" as const, text: JSON.stringify(snapshot) }],

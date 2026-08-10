@@ -51,6 +51,10 @@ PostgreSQL/S3/CubeSandbox/Pi/Workspace/Artifact 依赖图；它绝不会复用 d
 `MODEL_SUPPORTS_IMAGES` 是必须显式配置的模型输入能力：设为 `true` 时，Worker 会把当前 user turn 的 PNG、
 JPEG、GIF 与 WebP 附件以内联图片输入直接提交给模型；设为 `false` 时不读取图片字节，模型仍可从 user turn
 中的稳定 `/resources/...` 路径按需使用文件。该开关不能依赖 Provider 失败后自动降级。
+当 `MODEL_ID=deepseek-v4-flash` 时，Worker 使用 DeepSeek 官方 0731 Oh My Pi profile，并严格要求
+`MODEL_CONTEXT_WINDOW=1048576`、`MODEL_MAX_OUTPUT_TOKENS=65536`、`MODEL_SUPPORTS_IMAGES=false`；
+reasoning、high thinking、`max_tokens` 与工具调用重放兼容项由代码中的可信 profile 固定。`MODEL_BASE_URL`
+和 API Key 仍是部署传输配置，可以指向已验证会暴露该官方 model ID 的兼容网关。
 
 `/resources` 要求 CubeSandbox 0.6+ 的 `runtime-resourcefs` Volume driver：Worker 只通过 Cube Volume API
 确保 Tenant 卷并在创建时绑定，rclone/FUSE 运行于 Cubelet 宿主机而不是 Sandbox 模板。该只读卷同时提供

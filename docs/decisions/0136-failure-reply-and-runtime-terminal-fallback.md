@@ -1,10 +1,10 @@
 # ADR-0136：失败回注 Agent 与 Runtime 用户终态兜底
 
-- 状态：已接受（试验分支）
+- 状态：已接受（试验分支；“只回复模式”已由 ADR-0137 替代，Runtime/Web 兜底继续有效）
 - 日期：2026-08-09
 - 决策者：Runtime 团队
 - 关联任务/PR：`feat/resilient-user-final-response`
-- 关联决策：ADR-0069、ADR-0094、ADR-0135
+- 关联决策：ADR-0069、ADR-0094、ADR-0135、ADR-0137
 
 ## 背景
 

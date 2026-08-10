@@ -994,7 +994,7 @@ describe("Pi 安全适配", () => {
     );
   });
 
-  it("exec_command 连续三次基础设施失败后关闭工具并让 Agent 回复用户", async () => {
+  it("exec_command 连续三次基础设施失败后保留工具并把熔断错误继续返回 Agent", async () => {
     const sandbox = new FakeSandboxHandle("pi-exec-circuit");
     let sandboxCalls = 0;
     sandbox.command = async () => {
@@ -1010,6 +1010,7 @@ describe("Pi 安全适配", () => {
         toolTurn("one"),
         toolTurn("two"),
         toolTurn("three"),
+        toolTurn("after-circuit"),
         fauxAssistantMessage("Sandbox 连续调用失败，本次任务无法继续。"),
       ],
       sandbox,
@@ -1018,11 +1019,11 @@ describe("Pi 安全适配", () => {
     await expect(controller.prompt("执行命令")).resolves.toBeUndefined();
 
     expect(sandboxCalls).toBe(3);
-    expect(faux.state.callCount).toBe(4);
-    expect(controller.getDiagnostics().activeToolNames).toEqual([]);
+    expect(faux.state.callCount).toBe(5);
+    expect(controller.getDiagnostics().activeToolNames).toContain("exec_command");
     expect(
       events.filter((event) => event.type === "tool.completed" && event.name === "exec_command"),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     expect(events).toContainEqual({
       type: "message.completed",
       stopReason: "stop",
@@ -1030,7 +1031,7 @@ describe("Pi 安全适配", () => {
   });
 
   it.runIf(process.platform === "linux")(
-    "deliver_file fatal 失败回执完成后关闭工具并让 Agent 回复用户",
+    "deliver_file fatal 失败回执完成后保留工具并让 Agent 回复用户",
     async () => {
       let routerCalls = 0;
       const { controller, events, faux } = await harness(
@@ -1064,7 +1065,7 @@ describe("Pi 安全适配", () => {
       await expect(controller.prompt("交付文件")).resolves.toBeUndefined();
       expect(routerCalls).toBe(1);
       expect(faux.state.callCount).toBe(2);
-      expect(controller.getDiagnostics().activeToolNames).toEqual([]);
+      expect(controller.getDiagnostics().activeToolNames).toContain("deliver_file");
       expect(events).toContainEqual(
         expect.objectContaining({ type: "tool.completed", name: "deliver_file", isError: true }),
       );

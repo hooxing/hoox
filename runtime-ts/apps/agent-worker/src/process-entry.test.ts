@@ -487,6 +487,34 @@ describe("Agent Worker 进程入口", () => {
     expect(JSON.stringify(model)).not.toContain(configuration.model.apiKey);
   });
 
+  it("DeepSeek V4 Flash 使用官方 0731 模型能力和 Pi 兼容配置", async () => {
+    const configuration = parseWorkerProcessEnvironment({
+      ...productionEnvironment(),
+      MODEL_ID: "deepseek-v4-flash",
+      MODEL_SUPPORTS_IMAGES: "false",
+      MODEL_CONTEXT_WINDOW: "1048576",
+      MODEL_MAX_OUTPUT_TOKENS: "65536",
+    });
+
+    const { model } = await createDevelopmentOpenAiCompatibleModel(configuration.model);
+
+    expect(model).toMatchObject({
+      id: "deepseek-v4-flash",
+      reasoning: true,
+      input: ["text"],
+      contextWindow: 1_048_576,
+      maxTokens: 65_536,
+      compat: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+        maxTokensField: "max_tokens",
+        requiresReasoningContentOnAssistantMessages: true,
+        thinkingFormat: "deepseek",
+      },
+    });
+  });
+
   it("开发 readiness 只要求 /models 返回已配置 model id", async () => {
     const model = parseWorkerProcessEnvironment({
       ...productionEnvironment(),

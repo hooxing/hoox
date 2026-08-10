@@ -39,8 +39,11 @@ import {
   ThreadContextBodyPersistence,
 } from "@cube-runtime/persistence";
 import {
+  assertOfficialDeepSeekV4FlashCapabilities,
   bindTrustedPiModelContextCapability,
+  isOfficialDeepSeekV4FlashModel,
   loadTrustedModelTokenizerCapability,
+  officialDeepSeekV4FlashModelProtocol,
 } from "@cube-runtime/pi-adapter";
 import {
   assertProductionInheritedEnvironment,
@@ -521,6 +524,7 @@ export async function createOpenAiCompatibleModel(
     model: Model<"openai-completions">;
   }>
 > {
+  assertOfficialDeepSeekV4FlashCapabilities(configuration);
   const modelRuntime = await ModelRuntime.create({
     credentials: new InMemoryCredentialStore(),
     modelsPath: null,
@@ -535,7 +539,9 @@ export async function createOpenAiCompatibleModel(
         id: configuration.modelId,
         name: configuration.modelId,
         api: "openai-completions",
-        reasoning: false,
+        ...(isOfficialDeepSeekV4FlashModel(configuration.modelId)
+          ? officialDeepSeekV4FlashModelProtocol()
+          : { reasoning: false }),
         input: configuration.supportsImages ? ["text", "image"] : ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: configuration.contextWindow,

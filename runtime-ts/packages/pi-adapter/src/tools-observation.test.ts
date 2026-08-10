@@ -16,7 +16,6 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
   const receipts: string[] = [];
   let authorizationCalls = 0;
   let continuationRejected = false;
-  let continuationFailure: string | undefined;
   const observed = createObservedSandboxTools(
     sandbox,
     {
@@ -41,9 +40,6 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
     () => {
       continuationRejected = true;
     },
-    (failure) => {
-      continuationFailure = failure;
-    },
   );
   const tool = observed.tools[0];
   if (tool === undefined) throw new Error("测试缺少 exec_command");
@@ -55,7 +51,6 @@ function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown"
     receipts,
     authorizationCalls: () => authorizationCalls,
     continuationRejected: () => continuationRejected,
-    continuationFailure: () => continuationFailure,
   };
 }
 
@@ -273,7 +268,6 @@ describe("exec_command", () => {
     }
 
     expect(tested.continuationRejected()).toBe(false);
-    expect(tested.continuationFailure()).toBe("SANDBOX_FAILED");
     await expect(
       tested.execute(
         "call_exec_after_circuit",

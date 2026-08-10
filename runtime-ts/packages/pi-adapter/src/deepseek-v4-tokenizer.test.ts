@@ -6,7 +6,7 @@ import {
 
 describe("DeepSeek V4 固定 tokenizer", () => {
   it("从固定资源离线加载并按模型 token 计数", async () => {
-    const tokenizer = await loadTrustedModelTokenizerCapability("deepseek-v4-flash-0731");
+    const tokenizer = await loadTrustedModelTokenizerCapability("deepseek-v4-flash");
 
     expect(tokenizer).toMatchObject({
       modelFamily: "deepseek-v4",

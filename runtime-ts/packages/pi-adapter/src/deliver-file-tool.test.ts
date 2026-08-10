@@ -78,7 +78,7 @@ describe("deliver_file Pi 工具", () => {
     expect(outcomes).toEqual(["failed", "failed", "failed"]);
   });
 
-  it("fatal Router 结果先写 durable 失败回执，再关闭后续模型轮次", async () => {
+  it("fatal Router 结果先写 durable 失败回执，再作为 Tool Error 返回模型", async () => {
     const order: string[] = [];
     const tool = createDeliverFilePiTool(
       {
@@ -97,9 +97,6 @@ describe("deliver_file Pi 工具", () => {
         order.push(`receipt:${outcome}`);
         return { outcome: "recorded", observation: "recorded", isTruncated: false };
       },
-      () => {
-        order.push("continuation:rejected");
-      },
     );
 
     await expect(
@@ -111,6 +108,6 @@ describe("deliver_file Pi 工具", () => {
         {} as never,
       ),
     ).rejects.toThrow("PUBLICATION_RESULT_UNKNOWN");
-    expect(order).toEqual(["receipt:failed", "continuation:rejected"]);
+    expect(order).toEqual(["receipt:failed"]);
   });
 });

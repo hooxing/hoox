@@ -545,7 +545,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       ?.query(
         `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
        REVOKE CONNECT ON DATABASE "${databaseName}"
-         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}"`,
+         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}"`,
       )
       .catch(() => undefined);
     await admin?.query(

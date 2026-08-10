@@ -5,6 +5,8 @@ WORKDIR /opt/process-gate
 COPY runtime-ts/packages/process-runtime/dist/index.js ./process-runtime/index.js
 COPY runtime-ts/packages/process-runtime/dist/environment.js ./process-runtime/environment.js
 COPY runtime-ts/packages/process-runtime/dist/lifecycle.js ./process-runtime/lifecycle.js
+COPY runtime-ts/packages/process-runtime/dist/production-inherited-environment.js ./process-runtime/production-inherited-environment.js
+COPY runtime-ts/packages/process-runtime/dist/production-postgres-transport.js ./process-runtime/production-postgres-transport.js
 COPY runtime-ts/packages/process-runtime/dist/service-process.js ./process-runtime/service-process.js
 COPY runtime-ts/packages/process-runtime/package.json ./process-runtime/package.json
 COPY scripts/process-container-gate.mjs ./process-container-gate.mjs

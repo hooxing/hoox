@@ -25,6 +25,9 @@ export const productionSbomTargets: readonly Readonly<{
 
 export function canonicalVendorTreeSha256(directory: string): string;
 export function verifyReverseApplicablePatch(patchPath: string): boolean;
+export function canonicalizeProductionPlatformComponents(
+  components: readonly CycloneDxComponent[],
+): readonly CycloneDxComponent[];
 
 export function buildCycloneDx(input: {
   readonly root: { readonly name: string; readonly version: string };

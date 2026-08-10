@@ -21,12 +21,12 @@ import {
   type ThreadInputReceipt,
   type UploadedResource,
 } from "./api.js";
+import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
+import { type SkillCenterApi, SkillCenterDialog } from "./skill-center.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
-import { CloudDriveDialog, type CloudDriveApi } from "./cloud-drive.js";
-import { SkillCenterDialog, type SkillCenterApi } from "./skill-center.js";
 import {
   TeamCenterDialog,
   TeamManagementDialog,
@@ -40,6 +40,7 @@ import {
   EmptyConversation,
   InlineArtifactDelivery,
   NavigationSidebar,
+  type PendingThreadInputView,
   pollingRunStatuses,
   RunRecoveryLoading,
   RunTimeline,
@@ -48,7 +49,6 @@ import {
   ThreadHeader,
   ThreadNavigation,
   ThreadTranscript,
-  type PendingThreadInputView,
 } from "./workspace-view.js";
 
 const api = new RuntimeApi();
@@ -379,15 +379,25 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
     try {
       const items = await teamWorkspaceApi.listTeams();
       setTeams(items);
+      // 团队目录属于个人身份；退出、解散或测试库重建后，旧活动 Tenant 必须立即失效，
+      // 否则后续全局请求会继续携带不可恢复的 X-Tenant-ID。
+      if (activeTeamId !== undefined && !items.some((team) => team.id === activeTeamId)) {
+        apiClient.setTenantId?.(undefined);
+        setActiveTeamId(undefined);
+      }
       setSelectedTeamId((current) =>
         current !== undefined && items.some((team) => team.id === current) ? current : items[0]?.id,
       );
+      setCloudTeamId((current) =>
+        current !== undefined && items.some((team) => team.id === current) ? current : items[0]?.id,
+      );
+      setError(undefined);
     } catch (reason) {
       setError(reason instanceof ApiError ? reason : new ApiError("加载团队失败", 0, true));
     } finally {
       setTeamsLoading(false);
     }
-  }, [teamWorkspaceApi]);
+  }, [activeTeamId, apiClient, teamWorkspaceApi]);
 
   useEffect(() => {
     void refreshTeams();

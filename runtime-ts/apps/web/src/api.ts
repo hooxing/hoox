@@ -432,19 +432,23 @@ export class RuntimeApi {
   }
 
   async listTeams(): Promise<readonly TeamSummary[]> {
-    return asArray(await this.request<unknown>("/v1/me/teams")) as readonly TeamSummary[];
+    return asArray(await this.request<unknown>("/v1/me/teams", {}, null)) as readonly TeamSummary[];
   }
 
   createTeam(displayName: string): Promise<TeamSummary> {
-    return this.request("/v1/teams", {
-      method: "POST",
-      body: JSON.stringify({ displayName }),
-    });
+    return this.request(
+      "/v1/teams",
+      {
+        method: "POST",
+        body: JSON.stringify({ displayName }),
+      },
+      null,
+    );
   }
 
   async listTeamMembers(teamId: string): Promise<readonly TeamMember[]> {
     return asArray(
-      await this.request<unknown>(`/v1/teams/${encodeURIComponent(teamId)}/members`),
+      await this.request<unknown>(`/v1/teams/${encodeURIComponent(teamId)}/members`, {}, teamId),
     ) as readonly TeamMember[];
   }
 
@@ -453,10 +457,14 @@ export class RuntimeApi {
     userId: string,
     role: "admin" | "member" = "member",
   ): Promise<TeamMember> {
-    return this.request(`/v1/teams/${encodeURIComponent(teamId)}/members`, {
-      method: "POST",
-      body: JSON.stringify({ userId, role }),
-    });
+    return this.request(
+      `/v1/teams/${encodeURIComponent(teamId)}/members`,
+      {
+        method: "POST",
+        body: JSON.stringify({ userId, role }),
+      },
+      teamId,
+    );
   }
 
   changeTeamMemberRole(
@@ -467,6 +475,7 @@ export class RuntimeApi {
     return this.request(
       `/v1/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}`,
       { method: "PATCH", body: JSON.stringify({ role }) },
+      teamId,
     );
   }
 
@@ -474,11 +483,12 @@ export class RuntimeApi {
     await this.request(
       `/v1/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(userId)}`,
       { method: "DELETE" },
+      teamId,
     );
   }
 
   async dissolveTeam(teamId: string): Promise<void> {
-    await this.request(`/v1/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" });
+    await this.request(`/v1/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" }, teamId);
   }
   getThread(threadId: string): Promise<Thread> {
     return this.request(`/v1/threads/${encodeURIComponent(threadId)}`);

@@ -682,13 +682,6 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         if (observationRecoveryCode !== undefined) {
           return { kind: "recovery_required", code: observationRecoveryCode };
         }
-        const reportOnlyFailure = controller.getReportOnlyFailure();
-        if (reportOnlyFailure !== undefined) {
-          return {
-            kind: "failed_with_response",
-            code: reportOnlyFailure === "SANDBOX_FAILED" ? "SANDBOX_FAILED" : "INTERNAL",
-          };
-        }
         return { kind: "completed" };
       },
       steer: async (userInput) => {

@@ -1172,7 +1172,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     },
   );
 
-  it("exec_command 数据面连续失败时三次熔断、回复用户并保留失败终态", async () => {
+  it("exec_command 数据面连续失败时熔断 Sandbox 调用但保留模型自适应与回复", async () => {
     const persistence = new FakeExecutionPersistence();
     const scope = persistence.addSeed(fakeSeed("pi-exec-infrastructure-circuit"));
     const sandboxes = new FakeSandboxRegistry();
@@ -1194,6 +1194,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       commandTurn("one"),
       commandTurn("two"),
       commandTurn("three"),
+      commandTurn("after-circuit"),
       fauxAssistantMessage("Sandbox 连续调用失败，本次任务无法继续。"),
     ]);
     const modelRuntime = await ModelRuntime.create({
@@ -1230,12 +1231,12 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       { workerId: "pi-exec-circuit-worker", runTimeoutMs: 60_000 },
     );
 
-    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "failed" });
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
     expect(commandCalls).toBe(3);
-    expect(faux.state.callCount).toBe(4);
+    expect(faux.state.callCount).toBe(5);
     expect(sandboxes.settleCount).toBe(1);
-    expect(persistence.record(scope).run.status).toBe("failed");
-    expect(persistence.record(scope).attempt?.status).toBe("failed");
+    expect(persistence.record(scope).run.status).toBe("succeeded");
+    expect(persistence.record(scope).attempt?.status).toBe("succeeded");
     expect(
       persistence
         .record(scope)

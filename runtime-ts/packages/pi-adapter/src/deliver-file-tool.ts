@@ -25,7 +25,7 @@ export interface DeliverFilePiToolExecutorPort {
     code: string;
     message: string;
     correctable: boolean;
-    /** 必须在 durable 失败回执后关闭工具能力，让下一轮模型只能解释失败。 */
+    /** 表示该次交付不能原调用重试；失败仍作为 Tool Error 返回模型自行调整。 */
     fatal: boolean;
   }>;
 }
@@ -40,7 +40,6 @@ export function createDeliverFilePiTool(
     toolName: "deliver_file",
     outcome: "succeeded" | "failed",
   ) => Promise<ToolObservationResult>,
-  enterReportOnlyMode: () => void = () => undefined,
 ) {
   const invalidArguments = createSchemaInvalidArgumentsBridge<DeliverFileToolArguments>(
     DeliverFileToolArgumentsSchema,
@@ -85,7 +84,6 @@ export function createDeliverFilePiTool(
       if (observation.outcome !== "recorded" && observation.outcome !== "replayed") {
         throw new Error("deliver_file Tool Observation 未能形成 durable 事实");
       }
-      if (failure?.fatal === true) enterReportOnlyMode();
       if (failure !== undefined) throw new Error(JSON.stringify(failure));
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],

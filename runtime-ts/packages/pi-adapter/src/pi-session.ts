@@ -43,6 +43,10 @@ import {
   type DelegablePiToolName,
 } from "./agent-control-tools.js";
 import {
+  normalizeOfficialDeepSeekV4FlashPayload,
+  officialModelThinkingLevel,
+} from "./deepseek-v4-model.js";
+import {
   isTrustedModelTokenizerCapability,
   type TrustedModelTokenizerCapability,
 } from "./deepseek-v4-tokenizer.js";
@@ -63,7 +67,6 @@ import {
   createObservedSandboxTools,
   type SandboxToolEffectAuthorizer,
   type SandboxToolHandleProvider,
-  type ToolReportOnlyFailure,
 } from "./tools.js";
 
 interface PiSessionPort {
@@ -110,8 +113,6 @@ export interface PiSessionDiagnostics {
   activeSessionEntryCount: number;
   pendingMessageCount: number;
   contextBudget: Readonly<PiContextBudgetDiagnostics>;
-  /** durable 工具失败后已关闭全部工具；模型仍可完成一次只读说明。 */
-  reportOnlyFailure?: ToolReportOnlyFailure | undefined;
 }
 
 export interface PiSessionController {
@@ -121,8 +122,6 @@ export interface PiSessionController {
   abort(): Promise<void>;
   dispose(): void;
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void;
-  /** 只回复模式完成后供 Worker 保留真实失败终态，不得据此伪造成功。 */
-  getReportOnlyFailure(): ToolReportOnlyFailure | undefined;
   getDiagnostics(): Readonly<PiSessionDiagnostics>;
 }
 
@@ -137,16 +136,6 @@ export class ContextBudgetAdmissionError extends Error {
   }
 }
 
-/** Sandbox 数据面熔断后由 Provider 同步入口携带回 Worker，不能伪装成模型故障。 */
-export class SandboxToolCircuitOpenError extends Error {
-  readonly code = "SANDBOX_FAILED" as const;
-
-  constructor() {
-    super("SANDBOX_FAILED");
-    this.name = "SandboxToolCircuitOpenError";
-  }
-}
-
 class ProviderBindingDriftError extends Error {
   readonly code = "PROVIDER_BINDING_DRIFT" as const;
 
@@ -157,10 +146,7 @@ class ProviderBindingDriftError extends Error {
 }
 
 class DeferredProviderFailure {
-  readonly #failures = new Map<
-    number,
-    ContextBudgetAdmissionError | ProviderBindingDriftError | SandboxToolCircuitOpenError
-  >();
+  readonly #failures = new Map<number, ContextBudgetAdmissionError | ProviderBindingDriftError>();
   #activeGeneration: number | undefined;
 
   begin(generation: number): void {
@@ -168,22 +154,14 @@ class DeferredProviderFailure {
     this.#activeGeneration = generation;
   }
 
-  reject<T>(
-    failure: ContextBudgetAdmissionError | ProviderBindingDriftError | SandboxToolCircuitOpenError,
-  ): T {
+  reject<T>(failure: ContextBudgetAdmissionError | ProviderBindingDriftError): T {
     const generation = this.#activeGeneration;
     if (generation === undefined) throw new ProviderBindingDriftError();
     if (!this.#failures.has(generation)) this.#failures.set(generation, failure);
     throw failure;
   }
 
-  consume(
-    generation: number,
-  ):
-    | ContextBudgetAdmissionError
-    | ProviderBindingDriftError
-    | SandboxToolCircuitOpenError
-    | undefined {
+  consume(generation: number): ContextBudgetAdmissionError | ProviderBindingDriftError | undefined {
     const failure = this.#failures.get(generation);
     this.#failures.delete(generation);
     return failure;
@@ -352,10 +330,6 @@ class PiSessionControllerImpl implements PiSessionController {
       thinkingBuffer = "";
       unsubscribe();
     };
-  }
-
-  getReportOnlyFailure(): ToolReportOnlyFailure | undefined {
-    return this.#diagnostics().reportOnlyFailure;
   }
 
   getDiagnostics(): Readonly<PiSessionDiagnostics> {
@@ -601,7 +575,7 @@ export async function createSafePiSession(
         latestContextBudgetDecision = decision;
       },
     ),
-    thinkingLevel: "off",
+    thinkingLevel: officialModelThinkingLevel(options.modelContext.model.id),
     sessionManager,
     settingsManager,
     resourceLoader,
@@ -615,10 +589,6 @@ export async function createSafePiSession(
     readTools: () => session.agent.state.tools,
     expected: builtPrompt.manifest,
     dispose: () => session.dispose(),
-  });
-  material.bindReportOnlyMode(() => {
-    // durable 工具失败后不伪造成功，也不继续执行副作用；下一轮仅允许模型解释失败。
-    session.setActiveToolsByName([]);
   });
   if (options.prepareNextTurnHistory !== undefined) {
     const previousPrepareNextTurn = session.agent.prepareNextTurnWithContext;
@@ -670,9 +640,6 @@ export async function createSafePiSession(
       activeSessionEntryCount: session.sessionManager.buildContextEntries().length,
       pendingMessageCount: session.pendingMessageCount,
       contextBudget: contextBudgetDiagnostics(latestContextBudgetDecision),
-      ...(material.getReportOnlyFailure() === undefined
-        ? {}
-        : { reportOnlyFailure: material.getReportOnlyFailure() }),
     }),
     (text) =>
       assertCurrentInputFits(
@@ -886,17 +853,6 @@ function toPiHistoryMessage(
 
 function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
   let toolContinuationRejected = false;
-  let reportOnlyFailure: ToolReportOnlyFailure | undefined;
-  let applyReportOnlyMode: () => void = () => undefined;
-  const enterReportOnlyMode = (failure: ToolReportOnlyFailure) => {
-    reportOnlyFailure ??= failure;
-    try {
-      applyReportOnlyMode();
-    } catch {
-      // 若 Pi 无法切换为无工具模式，下一 Provider 请求必须失败关闭，由 Runtime 兜底回复。
-      toolContinuationRejected = true;
-    }
-  };
   const sandboxTarget =
     options.prepareSandboxTool === undefined
       ? options.sandbox
@@ -911,7 +867,6 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     () => {
       toolContinuationRejected = true;
     },
-    enterReportOnlyMode,
   );
   const enabled =
     options.enabledToolNames === undefined
@@ -928,9 +883,6 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
           createSkillPiTool(
             options.skillToolExecutor ?? unavailableSkillToolExecutor,
             observedSandboxTools.recordControlledReceipt,
-            () => {
-              enterReportOnlyMode("TOOL_FAILED");
-            },
           ),
         ]
       : []),
@@ -940,9 +892,6 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
           createTodoWritePiTool(
             options.todoWriteToolExecutor,
             observedSandboxTools.recordControlledReceipt,
-            () => {
-              enterReportOnlyMode("TOOL_FAILED");
-            },
           ),
         ]),
     ...(enabled !== undefined || options.deliverFileToolRouter === undefined
@@ -951,9 +900,6 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
           createDeliverFilePiTool(
             options.deliverFileToolRouter,
             observedSandboxTools.recordControlledReceipt,
-            () => {
-              enterReportOnlyMode("TOOL_FAILED");
-            },
           ),
         ]),
     ...(enabled !== undefined || options.agentControlToolExecutor === undefined
@@ -990,11 +936,6 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
         throw new Error("Tool durable 事实不完整，禁止继续模型轮次");
       }
     },
-    bindReportOnlyMode: (handler: () => void) => {
-      applyReportOnlyMode = handler;
-      if (reportOnlyFailure !== undefined) handler();
-    },
-    getReportOnlyFailure: () => reportOnlyFailure,
   };
 }
 
@@ -1125,7 +1066,7 @@ function providerGatedRuntime(
               options.assertModelRequestAllowed?.();
               assertTrustedModelCapability(options);
               if (model !== options.modelContext.model) throw new ProviderBindingDriftError();
-              const { transformHeaders, apiKey, headers, env, ...dynamicOptions } =
+              const { transformHeaders, onPayload, apiKey, headers, env, ...dynamicOptions } =
                 streamOptions ?? {};
               if (apiKey !== undefined || headers !== undefined || env !== undefined)
                 throw new ProviderBindingDriftError();
@@ -1152,6 +1093,13 @@ function providerGatedRuntime(
                 );
               const preparedOptions = Object.freeze({
                 ...dynamicOptions,
+                onPayload: async (payload: unknown, payloadModel: Model<Api>) => {
+                  const transformed = await onPayload?.(payload, payloadModel);
+                  return normalizeOfficialDeepSeekV4FlashPayload(
+                    binding.model.id,
+                    transformed === undefined ? payload : transformed,
+                  );
+                },
                 ...(binding.auth.apiKey === undefined ? {} : { apiKey: binding.auth.apiKey }),
                 ...(transformedHeaders === undefined
                   ? {}
@@ -1169,10 +1117,7 @@ function providerGatedRuntime(
                 ? invoke()
                 : options.withProviderInvocation(invoke);
             } catch (error) {
-              if (
-                error instanceof ContextBudgetAdmissionError ||
-                error instanceof SandboxToolCircuitOpenError
-              ) {
+              if (error instanceof ContextBudgetAdmissionError) {
                 return providerFailure.reject(error);
               }
               return providerFailure.reject(

@@ -1,5 +1,6 @@
 export * from "./artifact-tools.js";
 export * from "./agent-control-tools.js";
+export * from "./deepseek-v4-model.js";
 export * from "./deepseek-v4-tokenizer.js";
 export * from "./deliver-file-tool.js";
 export * from "./empty-resource-loader.js";
@@ -17,7 +18,6 @@ export {
   type PiContextBudgetDiagnostics,
   type PiSessionController,
   type PiSessionDiagnostics,
-  SandboxToolCircuitOpenError,
   type TrustedPiModelContextCapability,
 } from "./pi-session.js";
 export * from "./rollout-recovery.js";

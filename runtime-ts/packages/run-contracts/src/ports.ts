@@ -949,11 +949,6 @@ export interface OrphanSandboxCleanupPort {
 
 export type AgentTurnOutcome =
   | { readonly kind: "completed" }
-  | {
-      /** Agent 已在禁用工具后向用户说明失败；运行仍必须保留真实失败终态。 */
-      readonly kind: "failed_with_response";
-      readonly code: "SANDBOX_FAILED" | "INTERNAL";
-    }
   | { readonly kind: "context_too_large"; readonly action: "rebuild_context" }
   | {
       /** Tool Observation 未形成可恢复的 durable 事实；本 Attempt 不能继续成功。 */

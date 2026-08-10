@@ -72,7 +72,7 @@ describe("todo_write Pi 工具", () => {
     expect(outcomes).toEqual(["failed"]);
   });
 
-  it("持久化未知会先记录失败再阻止模型继续", async () => {
+  it("持久化未知会先记录失败再作为 Tool Error 返回模型", async () => {
     const order: string[] = [];
     const tool = createTodoWritePiTool(
       {
@@ -91,7 +91,6 @@ describe("todo_write Pi 工具", () => {
         order.push(`receipt:${outcome}`);
         return { outcome: "recorded", observation: "recorded", isTruncated: false };
       },
-      () => order.push("continuation:rejected"),
     );
 
     await expect(
@@ -103,6 +102,6 @@ describe("todo_write Pi 工具", () => {
         {} as never,
       ),
     ).rejects.toThrow("TODO_PERSISTENCE_UNAVAILABLE");
-    expect(order).toEqual(["receipt:failed", "continuation:rejected"]);
+    expect(order).toEqual(["receipt:failed"]);
   });
 });

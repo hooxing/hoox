@@ -144,6 +144,7 @@
 | [ADR-0145](0145-thread-sandbox-resourcefs-data-plane-recovery.md) | Thread Sandbox 复用时 ResourceFS 数据面自检与单次冷恢复 | 已接受（试验版） | 2026-08-10 |
 | [ADR-0146](0146-team-directory-personal-scope-recovery.md) | 团队目录个人作用域与失效 Tenant 自愈 | 已接受（试验版） | 2026-08-10 |
 | [ADR-0147](0147-team-coordinator-database-role.md) | 团队协作使用独立数据库协调角色 | 已接受（试验版） | 2026-08-10 |
+| [ADR-0148](0148-production-sbom-platform-normalization.md) | 生产 SBOM 规范化宿主平台原生可选依赖 | 已接受 | 2026-08-10 |
 
 ## 何时必须记录
 

@@ -22,7 +22,6 @@ jobs:
         # pnpm/action-setup v4.1.0
         uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d
         with:
-          version: 10.15.1
           run_install: false
 
       - name: 安装 Node.js
@@ -95,7 +94,6 @@ jobs:
         # pnpm/action-setup v4.1.0
         uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d
         with:
-          version: 10.15.1
           run_install: false
 
       - name: 安装 Node.js
@@ -139,7 +137,6 @@ jobs:
         # pnpm/action-setup v4.1.0
         uses: pnpm/action-setup@7088e561eb65bb68695d245aa206f005ef30921d
         with:
-          version: 10.15.1
           run_install: false
 
       - name: 安装 Node.js

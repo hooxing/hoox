@@ -133,6 +133,7 @@
 | [ADR-0134](0134-dual-task-navigation-and-team-center.md) | 个人与团队双任务导航及团队中心边界 | 已接受（试验版） | 2026-08-09 |
 | [ADR-0135](0135-tabbed-cloud-drive-and-cross-scope-search.md) | 标签式云盘与跨空间范围搜索 | 已接受（试验版） | 2026-08-09 |
 | [ADR-0136](0136-dynamic-worker-tenant-assignment.md) | 动态 Worker Tenant 分配与团队任务调度 | 已接受（试验版） | 2026-08-10 |
+| [ADR-0137](0137-upload-resource-name-canonicalization.md) | 上传资源名称规范化与幂等边界 | 已接受（试验版） | 2026-08-10 |
 
 ## 何时必须记录
 

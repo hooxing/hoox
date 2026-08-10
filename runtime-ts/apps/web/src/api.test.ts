@@ -67,6 +67,38 @@ describe("RuntimeApi", () => {
     expect(api.getTenantId()).toBe("tenant_active");
   });
 
+  it("团队目录使用个人身份，团队管理请求显式绑定路径中的目标 Tenant", async () => {
+    const fetcher = vi
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({ version: "v1", requestId: "req_teams", data: { items: [] } }),
+            { status: 200 },
+          ),
+        ),
+      );
+    const api = new RuntimeApi(fetcher, "/api");
+    api.setTenantId("tenant_stale");
+
+    await api.listTeams();
+    await api.createTeam("新团队");
+    await api.listTeamMembers("tenant_target");
+    await api.dissolveTeam("tenant_target");
+
+    const requests = fetcher.mock.calls.map((call) => {
+      const [url, init] = call as [string, RequestInit];
+      return { url, tenantId: new Headers(init.headers).get("x-tenant-id") };
+    });
+    expect(requests).toEqual([
+      { url: "/api/v1/me/teams", tenantId: null },
+      { url: "/api/v1/teams", tenantId: null },
+      { url: "/api/v1/teams/tenant_target/members", tenantId: "tenant_target" },
+      { url: "/api/v1/teams/tenant_target", tenantId: "tenant_target" },
+    ]);
+    expect(api.getTenantId()).toBe("tenant_stale");
+  });
+
   it("统一输入发送 auto/expected Run，并在入口关闭时回退 legacy follow-up", async () => {
     const receipt = {
       receiptId: "input-1",

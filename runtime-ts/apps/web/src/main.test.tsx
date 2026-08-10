@@ -9,6 +9,7 @@ import {
   type HistoryFile,
   type ModelWireTraceRecord,
   type Run,
+  type TeamSummary,
   type Thread,
 } from "./api.js";
 import {
@@ -237,6 +238,68 @@ describe("Agent 工作台恢复接入", () => {
     const newConversation = container.querySelector<HTMLButtonElement>(".new-thread-button");
     await act(async () => newConversation?.click());
     expect(setTenantId).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it("团队目录刷新会清除已经退出或解散的活动 Tenant", async () => {
+    const oldTeam = {
+      id: "tenant_removed",
+      displayName: "旧团队",
+      role: "owner" as const,
+      joinedAt: "2026-08-09T08:00:00.000Z",
+    };
+    const replacementTeam = {
+      id: "tenant_replacement",
+      displayName: "新团队",
+      role: "member" as const,
+      joinedAt: "2026-08-10T08:00:00.000Z",
+    };
+    let directory: readonly TeamSummary[] = [oldTeam];
+    const setTenantId = vi.fn();
+    const apiClient = apiFixture({
+      listThreadsForTenant: vi.fn(async (teamId?: string) =>
+        teamId === oldTeam.id ? [thread("old_team_task")] : [],
+      ),
+      setTenantId,
+      listTeams: vi.fn(async () => directory),
+      createTeam: vi.fn(async () => replacementTeam),
+      listTeamMembers: vi.fn(async () => []),
+      addTeamMember: vi.fn(async () => {
+        throw new Error("本测试不添加成员");
+      }),
+      changeTeamMemberRole: vi.fn(async () => {
+        throw new Error("本测试不修改角色");
+      }),
+      removeTeamMember: vi.fn(async () => undefined),
+      dissolveTeam: vi.fn(async () => undefined),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>(".team-switcher-summary")?.click(),
+    );
+    await settleEffects();
+    await act(async () =>
+      container
+        .querySelector<HTMLElement>('nav[aria-label="团队任务列表"]')
+        ?.querySelector<HTMLButtonElement>(".thread")
+        ?.click(),
+    );
+    expect(setTenantId).toHaveBeenLastCalledWith(oldTeam.id);
+
+    directory = [replacementTeam];
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('button[aria-label="打开团队中心"]')?.click(),
+    );
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>(".team-center-refresh")?.click(),
+    );
+    await settleEffects();
+
+    expect(setTenantId).toHaveBeenLastCalledWith(undefined);
+    expect(
+      container.querySelector<HTMLSelectElement>(".team-switcher-controls select")?.value,
+    ).toBe(replacementTeam.id);
   });
 
   it("重复文本只计算尚未落入 Thread 上下文的消息，拒绝项不占用序号", () => {

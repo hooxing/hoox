@@ -50,9 +50,10 @@ describe("动态 Worker Tenant 调度迁移", () => {
   });
 
   it("迁移入口显式传入五个互异角色，不从 SQL 文本或普通 Runtime 推导 Coordinator", async () => {
-    const [migrations, cli] = await Promise.all([
+    const [migrations, cli, workflow] = await Promise.all([
       readFile(new URL("./migrations.ts", import.meta.url), "utf8"),
       readFile(new URL("./cli.ts", import.meta.url), "utf8"),
+      readFile(new URL("../../../../.github/workflows/ci.yml", import.meta.url), "utf8"),
     ]);
 
     expect(migrations).toContain("app.worker_coordinator_role");
@@ -61,6 +62,7 @@ describe("动态 Worker Tenant 调度迁移", () => {
     expect(cli).toContain("DATABASE_TEAM_COORDINATOR_ROLE");
     expect(cli).toContain("workerCoordinatorRole");
     expect(cli).toContain("teamCoordinatorRole");
+    expect(workflow.match(/DATABASE_TEAM_COORDINATOR_ROLE:/gu)).toHaveLength(2);
   });
 
   it("回退只删除可由 durable outbox 重建的派生控制面", async () => {

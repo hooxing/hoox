@@ -134,6 +134,9 @@
 | [ADR-0135](0135-tabbed-cloud-drive-and-cross-scope-search.md) | 标签式云盘与跨空间范围搜索 | 已接受（试验版） | 2026-08-09 |
 | [ADR-0136](0136-dynamic-worker-tenant-assignment.md) | 动态 Worker Tenant 分配与团队任务调度 | 已接受（试验版） | 2026-08-10 |
 | [ADR-0137](0137-upload-resource-name-canonicalization.md) | 上传资源名称规范化与幂等边界 | 已接受（试验版） | 2026-08-10 |
+| [ADR-0138](0138-managed-csv-to-pdf-skill.md) | 固定模板依赖与受管 CSV 转 PDF Skill | 已接受（试验版） | 2026-08-10 |
+| [ADR-0139](0139-thread-sandbox-resourcefs-data-plane-recovery.md) | Thread Sandbox 复用时 ResourceFS 数据面自检与单次冷恢复 | 已接受（试验版） | 2026-08-10 |
+| [ADR-0140](0140-team-directory-personal-scope-recovery.md) | 团队目录个人作用域与失效 Tenant 自愈 | 已接受（试验版） | 2026-08-10 |
 
 ## 何时必须记录
 

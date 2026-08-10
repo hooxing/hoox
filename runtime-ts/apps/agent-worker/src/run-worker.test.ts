@@ -1,6 +1,7 @@
-import { runId, sha256Digest, tenantId } from "@cube-runtime/domain";
+import { resourceId, resourceVersionId, runId, sha256Digest, tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
+import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import {
   createWorkspaceManifest,
   WorkspaceApplicationError,
@@ -526,7 +527,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         sandbox: h.threadSandboxes.handle,
       },
       lease: h.threadSandboxes.lease,
-      resourceFilesystemMounted: false,
+      resourceFilesystemMounted: true,
       requiresMaterialization: false,
       source: "running_handoff",
     };
@@ -537,6 +538,381 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.threadSandboxes.attestCount).toBe(0);
     expect(h.threadSandboxes.terminalEffectCount).toBe(0);
     expect(h.threadSandboxes.terminateCount).toBe(0);
+  });
+
+  it("复用 Thread Sandbox 前验证历史、当前任务目录与本轮直接附件路径", async () => {
+    const attachment = {
+      resourceId: resourceId("resource-resume-probe"),
+      versionId: resourceVersionId("version-resume-probe"),
+    };
+    const attachmentPath = "/resources/resource-resume-probe/version-resume-probe/数据(简洁).csv";
+    const seed = {
+      ...fakeSeed("resourcefs-resume-probe"),
+      input: `转换文件\n\n# 用户在本轮提供的文件\n- ${JSON.stringify({ 文件名: "数据（简洁）.csv", 文件地址: attachmentPath })}`,
+      attachments: [attachment],
+    };
+    const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)], seed, {
+      threadSandboxSessionReuseEnabled: true,
+      historyFilesystemEnabled: true,
+    });
+    h.threadSandboxes.nextAcquire = {
+      outcome: "ready",
+      session: {
+        registryId: "thread-registry-reused-probe",
+        providerSandboxId: h.threadSandboxes.handle.id,
+        mode: "connected",
+        sandbox: h.threadSandboxes.handle,
+      },
+      lease: h.threadSandboxes.lease,
+      resourceFilesystemMounted: true,
+      requiresMaterialization: false,
+      source: "paused_resumed",
+    };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(h.threadSandboxes.handle.commands).toHaveLength(2);
+    expect(h.threadSandboxes.handle.commands[0]).toContain("[ -d '/resources/history' ]");
+    expect(h.threadSandboxes.handle.commands[0]).toContain(
+      `/resources/.thread-files/${h.scope.threadId}/files`,
+    );
+    expect(h.threadSandboxes.handle.commands[0]).toContain(attachmentPath);
+    expect(h.revisions.materializeCount).toBe(0);
+    expect(h.threadSandboxes.terminateCount).toBe(0);
+  });
+
+  it("复用挂载缺失时退役旧 generation 并仅冷恢复一次", async () => {
+    const h = sandboxHarness(
+      [new ScriptedAgentSession(successfulEvents)],
+      fakeSeed("resourcefs-resume-rebuild"),
+      {
+        threadSandboxSessionReuseEnabled: true,
+        historyFilesystemEnabled: true,
+      },
+    );
+    const stale = {
+      outcome: "ready" as const,
+      session: {
+        registryId: "thread-registry-stale",
+        providerSandboxId: h.threadSandboxes.handle.id,
+        mode: "connected" as const,
+        sandbox: h.threadSandboxes.handle,
+      },
+      lease: h.threadSandboxes.lease,
+      resourceFilesystemMounted: true,
+      requiresMaterialization: false,
+      source: "paused_resumed" as const,
+    };
+    const recoveredHandle = new FakeSandboxHandle("thread-worker-recovered");
+    const recoveredLease = {
+      ...h.threadSandboxes.lease,
+      sessionId: "thread-session-recovered",
+      generation: 2,
+      leaseId: "sandbox-lease-recovered",
+      leaseToken: "sandbox-token-recovered",
+      leaseEpoch: 1,
+    };
+    const cold = {
+      outcome: "ready" as const,
+      session: {
+        registryId: "thread-registry-recovered",
+        providerSandboxId: recoveredHandle.id,
+        mode: "created" as const,
+        sandbox: recoveredHandle,
+      },
+      lease: recoveredLease,
+      resourceFilesystemMounted: true,
+      requiresMaterialization: true,
+      source: "cold_created" as const,
+    };
+    const acquire = vi
+      .spyOn(h.threadSandboxes, "acquire")
+      .mockResolvedValueOnce(stale)
+      .mockResolvedValueOnce(cold);
+    vi.spyOn(h.threadSandboxes.handle, "command").mockResolvedValueOnce({
+      stdout: "",
+      stderr: "history root missing",
+      exitCode: 71,
+    });
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(h.threadSandboxes.terminateCount).toBe(1);
+    expect(h.revisions.materializeCount).toBe(1);
+    expect(h.threadSandboxes.attestCount).toBe(1);
+    expect(recoveredHandle.commands).toHaveLength(2);
+    expect(recoveredHandle.commands[0]).toContain("[ -d '/resources/history' ]");
+    expect(recoveredHandle.commands[1]).toContain("ensure_link /history");
+  });
+
+  it("复用自检的非缺失错误失败关闭且不误判为可冷恢复", async () => {
+    const session = new ScriptedAgentSession(successfulEvents);
+    const h = sandboxHarness([session], fakeSeed("resourcefs-resume-probe-error"), {
+      threadSandboxSessionReuseEnabled: true,
+      historyFilesystemEnabled: true,
+    });
+    h.threadSandboxes.nextAcquire = {
+      outcome: "ready",
+      session: {
+        registryId: "thread-registry-probe-error",
+        providerSandboxId: h.threadSandboxes.handle.id,
+        mode: "connected",
+        sandbox: h.threadSandboxes.handle,
+      },
+      lease: h.threadSandboxes.lease,
+      resourceFilesystemMounted: true,
+      requiresMaterialization: false,
+      source: "running_handoff",
+    };
+    vi.spyOn(h.threadSandboxes.handle, "command").mockResolvedValueOnce({
+      stdout: "",
+      stderr: "unexpected entrypoint state",
+      exitCode: 73,
+    });
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "SANDBOX_FAILED",
+    });
+
+    expect(h.threadSandboxes.acquireCount).toBe(1);
+    expect(h.threadSandboxes.terminateCount).toBe(1);
+    expect(session.prompts).toEqual([]);
+  });
+
+  it("旧 generation 的 heartbeat renew 迟到失败不能误伤冷恢复后的新 lease", async () => {
+    const h = sandboxHarness(
+      [new ScriptedAgentSession(successfulEvents)],
+      fakeSeed("resourcefs-resume-stale-renew"),
+      {
+        threadSandboxSessionReuseEnabled: true,
+        historyFilesystemEnabled: true,
+      },
+    );
+    const recoveredHandle = new FakeSandboxHandle("thread-worker-stale-renew-recovered");
+    const recoveredLease = {
+      ...h.threadSandboxes.lease,
+      sessionId: "thread-session-stale-renew-recovered",
+      generation: 2,
+      leaseId: "sandbox-lease-stale-renew-recovered",
+      leaseToken: "sandbox-token-stale-renew-recovered",
+    };
+    const acquire = vi
+      .spyOn(h.threadSandboxes, "acquire")
+      .mockResolvedValueOnce({
+        outcome: "ready",
+        session: {
+          registryId: "thread-registry-stale-renew",
+          providerSandboxId: h.threadSandboxes.handle.id,
+          mode: "connected",
+          sandbox: h.threadSandboxes.handle,
+        },
+        lease: h.threadSandboxes.lease,
+        resourceFilesystemMounted: true,
+        requiresMaterialization: false,
+        source: "paused_resumed",
+      })
+      .mockResolvedValueOnce({
+        outcome: "ready",
+        session: {
+          registryId: "thread-registry-stale-renew-recovered",
+          providerSandboxId: recoveredHandle.id,
+          mode: "created",
+          sandbox: recoveredHandle,
+        },
+        lease: recoveredLease,
+        resourceFilesystemMounted: true,
+        requiresMaterialization: true,
+        source: "cold_created",
+      });
+    let markProbeStarted: () => void = () => undefined;
+    const probeStarted = new Promise<void>((resolve) => {
+      markProbeStarted = resolve;
+    });
+    let releaseProbe: () => void = () => undefined;
+    const probeRelease = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    vi.spyOn(h.threadSandboxes.handle, "command").mockImplementationOnce(async () => {
+      markProbeStarted();
+      await probeRelease;
+      return { stdout: "", stderr: "history root missing", exitCode: 71 };
+    });
+    let markRenewStarted: () => void = () => undefined;
+    const renewStarted = new Promise<void>((resolve) => {
+      markRenewStarted = resolve;
+    });
+    let releaseRenew: () => void = () => undefined;
+    const renewRelease = new Promise<void>((resolve) => {
+      releaseRenew = resolve;
+    });
+    const renew = vi
+      .spyOn(h.threadSandboxes, "renew")
+      .mockImplementationOnce(async (input) => {
+        expect(input.lease).toBe(h.threadSandboxes.lease);
+        markRenewStarted();
+        await renewRelease;
+        return "lease_lost";
+      })
+      .mockResolvedValue("renewed");
+
+    const execution = h.worker.execute(h.scope);
+    await probeStarted;
+    const heartbeat = h.clock.tickHeartbeat();
+    await renewStarted;
+    releaseProbe();
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(recoveredHandle.commands).toHaveLength(1));
+    releaseRenew();
+    await heartbeat;
+
+    await expect(execution).resolves.toEqual({ outcome: "succeeded" });
+    expect(renew).toHaveBeenCalledTimes(1);
+    expect(h.threadSandboxes.terminateCount).toBe(1);
+  });
+
+  it("冷恢复窗口内新 generation 的 renew 失败仍然立即失败关闭", async () => {
+    const session = new ScriptedAgentSession(successfulEvents);
+    const h = sandboxHarness([session], fakeSeed("resourcefs-resume-new-renew-failed"), {
+      threadSandboxSessionReuseEnabled: true,
+      historyFilesystemEnabled: true,
+    });
+    const recoveredHandle = new FakeSandboxHandle("thread-worker-new-renew-failed");
+    const recoveredLease = {
+      ...h.threadSandboxes.lease,
+      sessionId: "thread-session-new-renew-failed",
+      generation: 2,
+      leaseId: "sandbox-lease-new-renew-failed",
+      leaseToken: "sandbox-token-new-renew-failed",
+    };
+    vi.spyOn(h.threadSandboxes, "acquire")
+      .mockResolvedValueOnce({
+        outcome: "ready",
+        session: {
+          registryId: "thread-registry-new-renew-stale",
+          providerSandboxId: h.threadSandboxes.handle.id,
+          mode: "connected",
+          sandbox: h.threadSandboxes.handle,
+        },
+        lease: h.threadSandboxes.lease,
+        resourceFilesystemMounted: true,
+        requiresMaterialization: false,
+        source: "running_handoff",
+      })
+      .mockResolvedValueOnce({
+        outcome: "ready",
+        session: {
+          registryId: "thread-registry-new-renew-failed",
+          providerSandboxId: recoveredHandle.id,
+          mode: "created",
+          sandbox: recoveredHandle,
+        },
+        lease: recoveredLease,
+        resourceFilesystemMounted: true,
+        requiresMaterialization: true,
+        source: "cold_created",
+      });
+    vi.spyOn(h.threadSandboxes.handle, "command").mockResolvedValueOnce({
+      stdout: "",
+      stderr: "history root missing",
+      exitCode: 71,
+    });
+    let markRecoveredProbeStarted: () => void = () => undefined;
+    const recoveredProbeStarted = new Promise<void>((resolve) => {
+      markRecoveredProbeStarted = resolve;
+    });
+    let releaseRecoveredProbe: () => void = () => undefined;
+    const recoveredProbeRelease = new Promise<void>((resolve) => {
+      releaseRecoveredProbe = resolve;
+    });
+    vi.spyOn(recoveredHandle, "command").mockImplementationOnce(async () => {
+      markRecoveredProbeStarted();
+      await recoveredProbeRelease;
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    const renew = vi.spyOn(h.threadSandboxes, "renew").mockImplementationOnce(async (input) => {
+      expect(input.lease).toBe(recoveredLease);
+      return "lease_lost";
+    });
+
+    const execution = h.worker.execute(h.scope);
+    await recoveredProbeStarted;
+    await h.clock.tickHeartbeat();
+    releaseRecoveredProbe();
+
+    await expect(execution).resolves.toEqual({ outcome: "fence_lost" });
+    expect(renew).toHaveBeenCalledTimes(1);
+    expect(h.threadSandboxes.terminateCount).toBe(2);
+    expect(session.prompts).toEqual([]);
+  });
+
+  it("冷恢复后数据面仍缺失时失败关闭且不创建第三个 generation", async () => {
+    const session = new ScriptedAgentSession(successfulEvents);
+    const h = sandboxHarness([session], fakeSeed("resourcefs-resume-rebuild-failed"), {
+      threadSandboxSessionReuseEnabled: true,
+      historyFilesystemEnabled: true,
+    });
+    const recoveredHandle = new FakeSandboxHandle("thread-worker-recovered-missing");
+    const acquire = vi
+      .spyOn(h.threadSandboxes, "acquire")
+      .mockResolvedValueOnce({
+        outcome: "ready",
+        session: {
+          registryId: "thread-registry-stale-missing",
+          providerSandboxId: h.threadSandboxes.handle.id,
+          mode: "connected",
+          sandbox: h.threadSandboxes.handle,
+        },
+        lease: h.threadSandboxes.lease,
+        resourceFilesystemMounted: true,
+        requiresMaterialization: false,
+        source: "running_handoff",
+      })
+      .mockResolvedValueOnce({
+        outcome: "ready",
+        session: {
+          registryId: "thread-registry-recovered-missing",
+          providerSandboxId: recoveredHandle.id,
+          mode: "created",
+          sandbox: recoveredHandle,
+        },
+        lease: {
+          ...h.threadSandboxes.lease,
+          sessionId: "thread-session-recovered-missing",
+          generation: 2,
+          leaseId: "sandbox-lease-recovered-missing",
+          leaseToken: "sandbox-token-recovered-missing",
+        },
+        resourceFilesystemMounted: true,
+        requiresMaterialization: true,
+        source: "cold_created",
+      });
+    vi.spyOn(h.threadSandboxes.handle, "command").mockResolvedValueOnce({
+      stdout: "",
+      stderr: "history root missing",
+      exitCode: 71,
+    });
+    vi.spyOn(recoveredHandle, "command").mockResolvedValueOnce({
+      stdout: "",
+      stderr: "history root still missing",
+      exitCode: 71,
+    });
+    const terminate = vi.spyOn(h.threadSandboxes, "terminate");
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "SANDBOX_FAILED",
+    });
+
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(h.threadSandboxes.terminateCount).toBe(2);
+    expect(terminate.mock.calls[1]?.[0]).toMatchObject({
+      session: { providerSandboxId: recoveredHandle.id },
+      lease: { sessionId: "thread-session-recovered-missing", generation: 2 },
+    });
+    expect(h.revisions.materializeCount).toBe(0);
+    expect(session.prompts).toEqual([]);
   });
 
   it("阶段 3 在完整 turn 后原子消费 steer，并注入同一活跃 Session 的原生 steer 队列", async () => {

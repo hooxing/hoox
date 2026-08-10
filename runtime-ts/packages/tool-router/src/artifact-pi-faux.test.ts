@@ -173,6 +173,10 @@ describe("Pi Faux deliver_file 纵向链路", () => {
       try {
         expect(controller.getDiagnostics().activeToolNames).toEqual([
           "exec_command",
+          "read",
+          "edit",
+          "write",
+          "skill",
           "deliver_file",
         ]);
         await controller.prompt("生成并交付报告");

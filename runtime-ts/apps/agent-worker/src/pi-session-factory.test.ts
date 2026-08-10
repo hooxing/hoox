@@ -698,7 +698,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
   });
 
   it.runIf(process.platform === "linux")(
-    "内部工具循环预算拒绝映射为 Worker CONTEXT_TOO_LARGE/rebuild_context",
+    "内部工具循环预算拒绝收敛为 Worker failed/CONTEXT_TOO_LARGE",
     async () => {
       const persistence = new FakeExecutionPersistence();
       const scope = persistence.addSeed(fakeSeed("pi-context-too-large"));
@@ -711,12 +711,16 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       const faux = fauxProvider({
         api: `faux-worker-budget-${Date.now()}`,
         provider: `faux-worker-budget-${Date.now()}`,
+        models: [{ id: "faux-budget", contextWindow: 120_000, maxTokens: 4_096 }],
         tokensPerSecond: 10_000,
       });
       faux.setResponses([
-        fauxAssistantMessage(fauxToolCall("exec_command", { cmd: "cat /tmp/huge.txt" }), {
-          stopReason: "toolUse",
-        }),
+        fauxAssistantMessage(
+          fauxToolCall("exec_command", { cmd: "cat /tmp/huge.txt", max_output_tokens: 20_000 }),
+          {
+            stopReason: "toolUse",
+          },
+        ),
         fauxAssistantMessage("不应触达"),
       ]);
       const modelRuntime = await ModelRuntime.create({
@@ -747,10 +751,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
         { workerId: "pi-budget-worker", runTimeoutMs: 60_000 },
       );
 
-      await expect(worker.execute(scope)).resolves.toEqual({
-        outcome: "recovery_required",
-        code: "CONTEXT_TOO_LARGE",
-      });
+      await expect(worker.execute(scope)).resolves.toEqual({ outcome: "failed" });
       expect(faux.state.callCount).toBe(1);
       expect(
         persistence
@@ -1638,8 +1639,10 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       expect(sourceReads).toBe(1);
       expect(publications).toBe(1);
       expect(
-        persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
-      ).toHaveLength(1);
+        persistence.permits
+          .filter(({ permit }) => permit.effect === "tool_execution")
+          .map(({ permit }) => permit.callId),
+      ).toEqual(["call-pi-invalid-path", "call-pi-valid-path"]);
       expect(operations).toEqual([
         "call:call-pi-missing-path:deliver_file",
         "result:call-pi-missing-path:deliver_file",

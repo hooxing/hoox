@@ -147,6 +147,29 @@ export class CubeSandboxSessionRegistry
     await Promise.all([this.gateway.probe(), this.resourceVolume?.probe()]);
   }
 
+  /** 开发预检必须覆盖真实模板调度与数据面命令，避免管理面健康掩盖不可执行节点。 */
+  async probeExecution(): Promise<void> {
+    await this.probe();
+    const sandbox = await this.gateway.create(
+      { templateId: this.templateId, ttlSeconds: Math.min(this.ttlSeconds, 30) },
+      { timeoutMs: this.lifecycleTimeoutMs },
+    );
+    try {
+      const output = await sandbox.command("printf cube-runtime-sandbox-ready", {
+        timeoutMs: Math.min(this.lifecycleTimeoutMs, 5_000),
+      });
+      if (
+        output.exitCode !== 0 ||
+        output.stderr !== "" ||
+        output.stdout !== "cube-runtime-sandbox-ready"
+      ) {
+        throw new SandboxRuntimeError("PROTOCOL", "Sandbox 开发执行预检返回异常结果");
+      }
+    } finally {
+      await sandbox.kill({ timeoutMs: this.lifecycleTimeoutMs, ignoreNotFound: true });
+    }
+  }
+
   async acquire(input: {
     readonly scope: ExecutionScope;
     readonly signal: AbortSignal;

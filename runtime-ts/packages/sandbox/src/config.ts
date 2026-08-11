@@ -24,7 +24,7 @@ export function cubeConfigFromEnv(
   return {
     apiUrl: normalizedApiUrl,
     templateId,
-    apiKey: env.CUBESANDBOX_API_KEY ?? env.CUBE_API_KEY ?? null,
+    apiKey: normalizedOptionalText(env.CUBESANDBOX_API_KEY ?? env.CUBE_API_KEY) ?? null,
     ...proxyRouting,
   };
 }
@@ -77,4 +77,9 @@ function parseOptionalInt(value: string | undefined): number | undefined {
     throw new SandboxRuntimeError("INVALID_ARGUMENT", "CubeSandbox Proxy 端口非法");
   }
   return parsed;
+}
+
+function normalizedOptionalText(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
 }

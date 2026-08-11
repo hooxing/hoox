@@ -148,7 +148,12 @@ export class CubeSandboxGateway implements SandboxGateway {
       });
     } catch (error) {
       const mapped = mapSandboxError(error, "创建 Sandbox");
-      if (mapped.code === "AUTHENTICATION" || mapped.code === "NOT_FOUND") throw mapped;
+      if (
+        mapped.code === "AUTHENTICATION" ||
+        mapped.code === "NOT_FOUND" ||
+        mapped.code === "CREATE_UNAVAILABLE"
+      )
+        throw mapped;
       if (await this.reconcileFailedCreate(requestId, ttlSeconds, effectiveControl.timeoutMs))
         throw mapped;
       // CubeMaster 已明确报告 Volume attach 失败；对账未发现 Sandbox 后可按

@@ -145,8 +145,22 @@ class ProviderBindingDriftError extends Error {
   }
 }
 
+export class ModelContinuationRejectedError extends Error {
+  readonly code = "MODEL_CONTINUATION_REJECTED" as const;
+
+  constructor(readonly reason: "tool_observation_incomplete" | "tool_effect_rejected") {
+    super("MODEL_CONTINUATION_REJECTED");
+    this.name = "ModelContinuationRejectedError";
+  }
+}
+
+type DeferredModelFailure =
+  | ContextBudgetAdmissionError
+  | ProviderBindingDriftError
+  | ModelContinuationRejectedError;
+
 class DeferredProviderFailure {
-  readonly #failures = new Map<number, ContextBudgetAdmissionError | ProviderBindingDriftError>();
+  readonly #failures = new Map<number, DeferredModelFailure>();
   #activeGeneration: number | undefined;
 
   begin(generation: number): void {
@@ -154,14 +168,14 @@ class DeferredProviderFailure {
     this.#activeGeneration = generation;
   }
 
-  reject<T>(failure: ContextBudgetAdmissionError | ProviderBindingDriftError): T {
+  reject<T>(failure: DeferredModelFailure): T {
     const generation = this.#activeGeneration;
     if (generation === undefined) throw new ProviderBindingDriftError();
     if (!this.#failures.has(generation)) this.#failures.set(generation, failure);
     throw failure;
   }
 
-  consume(generation: number): ContextBudgetAdmissionError | ProviderBindingDriftError | undefined {
+  consume(generation: number): DeferredModelFailure | undefined {
     const failure = this.#failures.get(generation);
     this.#failures.delete(generation);
     return failure;
@@ -933,7 +947,7 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
     serializedToolDefinitions,
     assertModelRequestAllowed: () => {
       if (toolContinuationRejected) {
-        throw new Error("Tool durable 事实不完整，禁止继续模型轮次");
+        throw new ModelContinuationRejectedError("tool_observation_incomplete");
       }
     },
   };
@@ -1117,7 +1131,10 @@ function providerGatedRuntime(
                 ? invoke()
                 : options.withProviderInvocation(invoke);
             } catch (error) {
-              if (error instanceof ContextBudgetAdmissionError) {
+              if (
+                error instanceof ContextBudgetAdmissionError ||
+                error instanceof ModelContinuationRejectedError
+              ) {
                 return providerFailure.reject(error);
               }
               return providerFailure.reject(

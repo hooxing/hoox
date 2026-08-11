@@ -15,6 +15,7 @@ export {
   createSafePiSession,
   deriveSafePiSessionCompatibility,
   digestCanonicalToolInputSchema,
+  ModelContinuationRejectedError,
   type PiContextBudgetDiagnostics,
   type PiSessionController,
   type PiSessionDiagnostics,

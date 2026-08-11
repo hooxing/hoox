@@ -16,6 +16,7 @@ export type SandboxErrorCode =
   | "UNKNOWN"
   | "PROTOCOL"
   | "RESOURCE_VOLUME_FAILED"
+  | "CREATE_UNAVAILABLE"
   | "UPSTREAM";
 
 /** 对外只暴露稳定错误码，禁止业务层依赖上游 SDK 的类名或英文消息。 */
@@ -49,6 +50,19 @@ export function mapSandboxError(error: unknown, operation: string): SandboxRunti
     return new SandboxRuntimeError(
       "RESOURCE_VOLUME_FAILED",
       `${operation} 的 Resource Volume 挂载失败`,
+      error,
+    );
+  }
+
+  if (
+    error instanceof ApiError &&
+    /template[\s\S]*(?:not ready on any healthy node|has no ready replica)|no healthy nodes available for template creation/iu.test(
+      error.message,
+    )
+  ) {
+    return new SandboxRuntimeError(
+      "CREATE_UNAVAILABLE",
+      `${operation} 当前没有可用的模板副本`,
       error,
     );
   }

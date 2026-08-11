@@ -22,6 +22,7 @@ import {
   bindTrustedPiModelContextCapability,
   createSafePiSession,
   digestCanonicalToolInputSchema,
+  ModelContinuationRejectedError,
   type PiSessionController,
 } from "./pi-session.js";
 import { type ThreadActiveHistoryV1, threadActiveHistoryDigest } from "./thread-history.js";
@@ -842,6 +843,33 @@ describe("Pi 安全适配", () => {
     expect(() => assessSafePiSessionContext(options)).toThrow("未绑定当前可信");
   });
 
+  it("模型继续闩锁拒绝不会被误报为 Provider 绑定漂移", async () => {
+    const rejected = await harness(
+      [fauxAssistantMessage("不应调用")],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => {
+        throw new ModelContinuationRejectedError("tool_effect_rejected");
+      },
+    );
+
+    await expect(rejected.controller.prompt("继续模型轮次")).rejects.toMatchObject({
+      code: "MODEL_CONTINUATION_REJECTED",
+      reason: "tool_effect_rejected",
+    });
+    expect(rejected.faux.state.callCount).toBe(0);
+  });
+
   it.runIf(process.platform === "linux")(
     "已解析请求绑定后 Provider implementation 与 auth 漂移均失败关闭",
     async () => {
@@ -1405,6 +1433,9 @@ async function harness(
   availableSkills?: Parameters<typeof createSafePiSession>[0]["availableSkills"],
   skillToolExecutor?: Parameters<typeof createSafePiSession>[0]["skillToolExecutor"],
   enabledToolNames?: Parameters<typeof createSafePiSession>[0]["enabledToolNames"],
+  assertModelRequestAllowed?: Parameters<
+    typeof createSafePiSession
+  >[0]["assertModelRequestAllowed"],
 ): Promise<{
   controller: PiSessionController;
   events: RuntimeAgentEvent[];
@@ -1454,6 +1485,7 @@ async function harness(
     ...(availableSkills === undefined ? {} : { availableSkills }),
     ...(skillToolExecutor === undefined ? {} : { skillToolExecutor }),
     ...(enabledToolNames === undefined ? {} : { enabledToolNames }),
+    ...(assertModelRequestAllowed === undefined ? {} : { assertModelRequestAllowed }),
   });
   disposers.push(() => controller.dispose());
   const events: RuntimeAgentEvent[] = [];

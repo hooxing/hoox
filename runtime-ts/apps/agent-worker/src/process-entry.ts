@@ -1171,7 +1171,7 @@ export async function probeDevelopmentWorkerDependencies(
       probePostgres(pool, configuration.databaseRuntimeRole),
       probePostgres(coordinatorPool, configuration.databaseWorkerCoordinatorRole),
       probeS3BlobStore(s3Config),
-      sandbox.probe(),
+      sandbox.probeExecution(),
       probeOpenAiCompatibleModel(configuration.model, "development"),
     ]);
   } finally {

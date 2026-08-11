@@ -325,6 +325,34 @@ describe("Sandbox 稳定适配契约", () => {
     expect(events).toEqual([]);
   });
 
+  it("模板没有健康副本时按确定性不可用失败，不登记结果未知", async () => {
+    const events: unknown[] = [];
+    const sdk = fakeSdk({
+      create: vi.fn(async () => {
+        throw new ApiError(
+          "CubeMaster returned error code 130400: template tpl is not ready on any healthy node: template has no ready replica",
+          500,
+        );
+      }),
+      listV2: vi.fn(async () => []),
+    });
+    const gateway = new CubeSandboxGateway(
+      {
+        apiUrl: "http://cube",
+        onUncertainLifecycle: (event) => {
+          events.push(event);
+        },
+      },
+      sdk,
+    );
+
+    await expect(gateway.create({ templateId: "tpl" })).rejects.toMatchObject({
+      code: "CREATE_UNAVAILABLE",
+    });
+    expect(sdk.listV2).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+  });
+
   it("ResourceFS Volume attach 被 CubeMaster 明确拒绝时不误报 UNKNOWN", async () => {
     const events: unknown[] = [];
     const sdk = fakeSdk({

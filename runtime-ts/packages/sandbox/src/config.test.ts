@@ -35,6 +35,16 @@ describe("CubeSandbox Proxy 路由配置", () => {
     ).toEqual({ proxyNodeIp: "cube-api", proxyPort: 443, proxyScheme: "http" });
   });
 
+  it("空白 API key 按匿名配置处理，不覆盖 SDK 的显式 null 边界", () => {
+    expect(
+      cubeConfigFromEnv({
+        CUBESANDBOX_API_URL: "http://127.0.0.1:3000",
+        CUBESANDBOX_TEMPLATE_ID: "template-test",
+        CUBESANDBOX_API_KEY: "   ",
+      }),
+    ).toMatchObject({ apiKey: null });
+  });
+
   it("环境变量入口与 Worker 使用同一套默认规则", () => {
     expect(
       cubeConfigFromEnv({

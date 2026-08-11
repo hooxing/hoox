@@ -360,6 +360,67 @@ describe("Agent Worker production polling loop", () => {
   });
 });
 
+describe("Sandbox 开发执行预检", () => {
+  it("覆盖管理面、模板创建、数据面命令并始终清理临时 Sandbox", async () => {
+    const registry = new CubeSandboxSessionRegistry(
+      { apiUrl: "http://127.0.0.1:18080", defaultOperationTimeoutMs: 5_000 },
+      "template-development-preflight",
+      120,
+      90_000,
+      { ensure: vi.fn(), probe: vi.fn(async () => undefined) },
+    );
+    const probe = vi.spyOn(registry.gateway, "probe").mockResolvedValue();
+    const command = vi.fn(async () => ({
+      stdout: "cube-runtime-sandbox-ready",
+      stderr: "",
+      exitCode: 0,
+    }));
+    const kill = vi.fn(async () => undefined);
+    const create = vi.spyOn(registry.gateway, "create").mockResolvedValue({
+      id: "sandbox-development-preflight",
+      command,
+      runCode: async () => ({ stdout: [], stderr: [] }),
+      readFile: async () => "",
+      writeFile: async () => undefined,
+      pause: async () => undefined,
+      kill,
+    });
+
+    await expect(registry.probeExecution()).resolves.toBeUndefined();
+
+    expect(probe).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith(
+      { templateId: "template-development-preflight", ttlSeconds: 30 },
+      { timeoutMs: 90_000 },
+    );
+    expect(command).toHaveBeenCalledWith("printf cube-runtime-sandbox-ready", {
+      timeoutMs: 5_000,
+    });
+    expect(kill).toHaveBeenCalledWith({ timeoutMs: 90_000, ignoreNotFound: true });
+  });
+
+  it("数据面返回异常时仍清理临时 Sandbox并使预检失败", async () => {
+    const registry = new CubeSandboxSessionRegistry(
+      { apiUrl: "http://127.0.0.1:18080" },
+      "template-development-preflight-failed",
+    );
+    vi.spyOn(registry.gateway, "probe").mockResolvedValue();
+    const kill = vi.fn(async () => undefined);
+    vi.spyOn(registry.gateway, "create").mockResolvedValue({
+      id: "sandbox-development-preflight-failed",
+      command: async () => ({ stdout: "wrong", stderr: "", exitCode: 0 }),
+      runCode: async () => ({ stdout: [], stderr: [] }),
+      readFile: async () => "",
+      writeFile: async () => undefined,
+      pause: async () => undefined,
+      kill,
+    });
+
+    await expect(registry.probeExecution()).rejects.toMatchObject({ code: "PROTOCOL" });
+    expect(kill).toHaveBeenCalledOnce();
+  });
+});
+
 describe("生产 Workspace revision 安全下限", () => {
   it("Sandbox 只在附件要求 ResourceFS 时确保 Tenant Cube Volume 并绑定 /resources", async () => {
     const ensure = vi.fn(async () => ({

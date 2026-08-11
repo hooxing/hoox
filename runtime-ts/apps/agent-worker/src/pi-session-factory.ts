@@ -22,6 +22,7 @@ import {
   type ControlledRolloutProjection,
   createSafePiSession,
   deriveSafePiSessionCompatibility,
+  ModelContinuationRejectedError,
   type PiSessionController,
   providerVisibleUserInputTokens,
   type ThreadActiveHistoryV1,
@@ -518,10 +519,10 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           }),
       assertModelRequestAllowed: () => {
         if (observationRecoveryCode !== undefined) {
-          throw new Error("Tool Observation 恢复未完成，禁止继续模型轮次");
+          throw new ModelContinuationRejectedError("tool_observation_incomplete");
         }
         if (toolEffectRejected) {
-          throw new Error("Tool 失败回执完成后禁止继续模型轮次");
+          throw new ModelContinuationRejectedError("tool_effect_rejected");
         }
       },
       ...(attemptWireTraces === undefined

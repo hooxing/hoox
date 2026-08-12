@@ -9,14 +9,16 @@ function tools() {
     observation: "recorded",
     isTruncated: false,
   }));
+  const list = vi.fn(async () => []);
+  const wait = vi.fn(async () => ({ updates: [], nextAfterSequence: 0, timedOut: true }));
   const created = createAgentControlPiTools(
     {
       spawn,
       sendMessage: async () => undefined,
       followUp: async () => ({}),
       interrupt: async () => ({}),
-      list: async () => [],
-      wait: async () => ({ updates: [], nextAfterSequence: 0, timedOut: true }),
+      list,
+      wait,
       projectError: (error) => ({
         status: "failed",
         code: "AGENT_CONTROL_FAILED",
@@ -27,7 +29,7 @@ function tools() {
     },
     record,
   );
-  return { created, spawn, record };
+  return { created, spawn, list, wait, record };
 }
 
 describe("SubAgent Pi 协作工具", () => {
@@ -124,6 +126,58 @@ describe("SubAgent Pi 协作工具", () => {
     ).rejects.toThrow("AGENT_CONTROL_FAILED");
     expect(tested.record).toHaveBeenCalledWith("call_wait_missing_cursor", "wait_agent", "failed");
   });
+  it("同批合法与非法的无字符串参数调用不会互相错认", async () => {
+    const tested = tools();
+    const wait = tested.created.find((tool) => tool.name === "wait_agent");
+    const list = tested.created.find((tool) => tool.name === "list_agents");
+    if (
+      wait?.name !== "wait_agent" ||
+      wait.prepareArguments === undefined ||
+      list?.name !== "list_agents" ||
+      list.prepareArguments === undefined
+    ) {
+      throw new Error("测试缺少 wait_agent/list_agents schema 参数桥");
+    }
+
+    const validWait = structuredClone(
+      wait.prepareArguments({ after_sequence: 0, timeout_ms: 1 }),
+    ) as WaitArgumentsForTest;
+    const invalidWait = structuredClone(
+      wait.prepareArguments({ timeout_ms: 1 }),
+    ) as WaitArgumentsForTest;
+    const validList = structuredClone(list.prepareArguments({})) as EmptyArgumentsForTest;
+    const invalidList = structuredClone(
+      list.prepareArguments({ unexpected: true }),
+    ) as EmptyArgumentsForTest;
+
+    await expect(
+      wait.execute("call_wait_valid_first", validWait, undefined, () => undefined, {} as never),
+    ).resolves.toBeDefined();
+    await expect(
+      wait.execute(
+        "call_wait_invalid_second",
+        invalidWait,
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("AGENT_CONTROL_FAILED");
+    await expect(
+      list.execute("call_list_valid_first", validList, undefined, () => undefined, {} as never),
+    ).resolves.toBeDefined();
+    await expect(
+      list.execute(
+        "call_list_invalid_second",
+        invalidList,
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("AGENT_CONTROL_FAILED");
+
+    expect(tested.wait).toHaveBeenCalledTimes(1);
+    expect(tested.list).toHaveBeenCalledTimes(1);
+  });
   it("schema 错误不调用控制面，但仍形成 durable 失败回执", async () => {
     const tested = tools();
     const spawn = tested.created[0];
@@ -156,4 +210,8 @@ type SpawnArgumentsForTest = {
 type WaitArgumentsForTest = {
   readonly after_sequence: number;
   readonly timeout_ms?: number;
+};
+
+type EmptyArgumentsForTest = {
+  readonly runtime_invalid_arguments_token?: string;
 };

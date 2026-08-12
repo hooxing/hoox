@@ -44,7 +44,16 @@ const TargetArgumentsSchema = Type.Object(
   { target: Type.String({ minLength: 1, maxLength: 200 }) },
   strict,
 );
-const EmptyArgumentsSchema = Type.Object({}, strict);
+const RuntimeInvalidArgumentsTokenSchema = Type.Optional(
+  Type.String({
+    pattern: "^[0-9a-f-]{36}$",
+    description: "Runtime 内部保留字段，调用方不得提供。",
+  }),
+);
+const EmptyArgumentsSchema = Type.Object(
+  { runtime_invalid_arguments_token: RuntimeInvalidArgumentsTokenSchema },
+  strict,
+);
 const WaitArgumentsSchema = Type.Object(
   {
     after_sequence: Type.Integer({
@@ -53,6 +62,7 @@ const WaitArgumentsSchema = Type.Object(
       description: "首次等待传 0；后续必须传上次返回的 nextAfterSequence。",
     }),
     timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: 60_000 })),
+    runtime_invalid_arguments_token: RuntimeInvalidArgumentsTokenSchema,
   },
   strict,
 );
@@ -62,6 +72,7 @@ type TargetMessageArguments = Static<typeof TargetMessageArgumentsSchema>;
 type FollowUpArguments = Static<typeof FollowUpArgumentsSchema>;
 type TargetArguments = Static<typeof TargetArgumentsSchema>;
 type WaitArguments = Static<typeof WaitArgumentsSchema>;
+type EmptyArguments = Static<typeof EmptyArgumentsSchema>;
 
 const INVALID_ARGUMENT_PREFIX = "runtime-invalid-agent-control:";
 
@@ -178,23 +189,19 @@ export function createAgentControlPiTools(
     (token) => ({ target: invalidArgumentValue(token) }),
     (value) => invalidArgumentToken(value.target),
   );
-  const waitInvalidTokens: string[] = [];
   const waitArguments = createSchemaInvalidArgumentsBridge<WaitArguments>(
     WaitArgumentsSchema,
-    (token) => {
-      waitInvalidTokens.push(token);
-      return { after_sequence: 0, timeout_ms: 1 };
-    },
-    () => waitInvalidTokens.shift(),
+    (token) => ({
+      after_sequence: 0,
+      timeout_ms: 1,
+      runtime_invalid_arguments_token: token,
+    }),
+    (value) => value.runtime_invalid_arguments_token,
   );
-  const emptyInvalidTokens: string[] = [];
-  const emptyArguments = createSchemaInvalidArgumentsBridge<Record<string, never>>(
+  const emptyArguments = createSchemaInvalidArgumentsBridge<EmptyArguments>(
     EmptyArgumentsSchema,
-    (token) => {
-      emptyInvalidTokens.push(token);
-      return {};
-    },
-    () => emptyInvalidTokens.shift(),
+    (token) => ({ runtime_invalid_arguments_token: token }),
+    (value) => value.runtime_invalid_arguments_token,
   );
   const assertArguments = (invalid: boolean): void => {
     if (invalid) throw new Error("AGENT_CONTROL_INVALID_ARGUMENTS");
@@ -210,7 +217,9 @@ export function createAgentControlPiTools(
       prepareArguments: spawnArguments.prepareArguments,
       execute: async (callId, args: SpawnArguments) =>
         executeObserved(callId, "spawn_agent", record, executor, () => {
-          assertArguments(spawnArguments.consume(args));
+          assertArguments(
+            spawnArguments.consume(args) || invalidArgumentToken(args.task) !== undefined,
+          );
           return executor.spawn({
             callId,
             task: args.task,
@@ -229,7 +238,9 @@ export function createAgentControlPiTools(
       prepareArguments: messageArguments.prepareArguments,
       execute: async (callId, args: TargetMessageArguments) =>
         executeObserved(callId, "send_message", record, executor, async () => {
-          assertArguments(messageArguments.consume(args));
+          assertArguments(
+            messageArguments.consume(args) || invalidArgumentToken(args.target) !== undefined,
+          );
           await executor.sendMessage({ callId, target: args.target, message: args.message });
           return { outcome: "delivered" };
         }),
@@ -244,7 +255,9 @@ export function createAgentControlPiTools(
       prepareArguments: followUpArguments.prepareArguments,
       execute: async (callId, args: FollowUpArguments) =>
         executeObserved(callId, "followup_task", record, executor, () => {
-          assertArguments(followUpArguments.consume(args));
+          assertArguments(
+            followUpArguments.consume(args) || invalidArgumentToken(args.target) !== undefined,
+          );
           return executor.followUp({ callId, target: args.target, task: args.task });
         }),
     }),
@@ -258,7 +271,9 @@ export function createAgentControlPiTools(
       prepareArguments: waitArguments.prepareArguments,
       execute: async (callId, args: WaitArguments, signal) =>
         executeObserved(callId, "wait_agent", record, executor, () => {
-          assertArguments(waitArguments.consume(args));
+          assertArguments(
+            waitArguments.consume(args) || args.runtime_invalid_arguments_token !== undefined,
+          );
           return executor.wait({
             afterSequence: args.after_sequence,
             timeoutMs: args.timeout_ms ?? 30_000,
@@ -276,7 +291,9 @@ export function createAgentControlPiTools(
       prepareArguments: targetArguments.prepareArguments,
       execute: async (callId, args: TargetArguments) =>
         executeObserved(callId, "interrupt_agent", record, executor, () => {
-          assertArguments(targetArguments.consume(args));
+          assertArguments(
+            targetArguments.consume(args) || invalidArgumentToken(args.target) !== undefined,
+          );
           return executor.interrupt({ callId, target: args.target });
         }),
     }),
@@ -288,9 +305,11 @@ export function createAgentControlPiTools(
       executionMode: "sequential",
       parameters: EmptyArgumentsSchema,
       prepareArguments: emptyArguments.prepareArguments,
-      execute: async (callId, args: Record<string, never>) =>
+      execute: async (callId, args: EmptyArguments) =>
         executeObserved(callId, "list_agents", record, executor, () => {
-          assertArguments(emptyArguments.consume(args));
+          assertArguments(
+            emptyArguments.consume(args) || args.runtime_invalid_arguments_token !== undefined,
+          );
           return executor.list();
         }),
     }),

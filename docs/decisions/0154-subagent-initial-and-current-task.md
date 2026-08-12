@@ -74,4 +74,6 @@ down migration 删除 `current_task`。回退后首次任务仍保留，但当�
 ## 实施记录
 
 - 2026-08-12：迁移在回填期间临时关闭目标表 RLS，并在约束建立后恢复 ENABLE/FORCE，确保跨租户既有行全部得到一致回填。
+- 2026-08-12：将 `current_task` 纳入 Runtime 角色列级 UPDATE 白名单，保证 follow-up 可在同一事务推进 turn 序号与当前任务。
+- 2026-08-12：修正 spawn 持久写入，使首次任务与当前任务在创建事务中同时落库，并增加 PostgreSQL 集成断言。
 - 2026-08-12：增加当前任务持久字段并更新 AgentSummary 契约。

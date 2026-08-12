@@ -250,15 +250,16 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
           }
           const conversation = await client.query(
             `INSERT INTO runtime_subagent_conversations(
-               tenant_id,thread_id,agent_thread_id,canonical_path,task,enabled_tools,
+               tenant_id,thread_id,agent_thread_id,canonical_path,task,current_task,enabled_tools,
                tool_manifest_digest,fork_turns,turn_ordinal,history,history_digest
-             ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11)
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11::jsonb,$12)
              ON CONFLICT DO NOTHING`,
             [
               input.fence.scope.tenantId,
               input.fence.scope.threadId,
               snapshot.agentThreadId,
               snapshot.canonicalPath,
+              snapshot.task,
               snapshot.task,
               JSON.stringify(snapshot.tools),
               snapshot.toolManifestDigest,

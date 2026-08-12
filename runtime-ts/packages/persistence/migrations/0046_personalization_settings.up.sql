@@ -1,4 +1,4 @@
--- ADR-0166：个人与团队个性化分表持久化，Run 只读取当前版本的低信任偏好快照。
+-- ADR-0168：个人与团队个性化分表持久化，Run 只读取当前版本的低信任偏好快照。
 CREATE TABLE user_personalization_settings (
   user_id text PRIMARY KEY REFERENCES app_users(id) ON DELETE RESTRICT,
   content text NOT NULL,

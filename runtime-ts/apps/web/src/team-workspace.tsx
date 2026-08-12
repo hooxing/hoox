@@ -12,6 +12,24 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { ApiError, type TeamMember, type TeamPersonalization, type TeamSummary } from "./api.js";
 import { personalizationSize } from "./personalization.js";
 
+const TEAM_SWITCHER_EXPANDED_STORAGE_KEY = "cube-agent.team-switcher.expanded";
+
+function readTeamSwitcherExpanded(): boolean {
+  try {
+    return window.localStorage.getItem(TEAM_SWITCHER_EXPANDED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function persistTeamSwitcherExpanded(expanded: boolean): void {
+  try {
+    window.localStorage.setItem(TEAM_SWITCHER_EXPANDED_STORAGE_KEY, String(expanded));
+  } catch {
+    // 隐私模式或禁用存储时退化为当前页面内状态，不阻断团队导航。
+  }
+}
+
 export interface TeamWorkspaceApi {
   listTeams(): Promise<readonly TeamSummary[]>;
   createTeam(displayName: string): Promise<TeamSummary>;
@@ -50,7 +68,7 @@ export function TeamSwitcher({
   readonly taskCount: number;
   readonly children?: ReactNode;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(readTeamSwitcherExpanded);
   const selected = teams.find((team) => team.id === selectedTeamId) ?? teams[0];
   const hasTeams = selected !== undefined;
 
@@ -66,7 +84,11 @@ export function TeamSwitcher({
               onOpenTeamCenter();
               return;
             }
-            setExpanded((value) => !value);
+            setExpanded((value) => {
+              const next = !value;
+              persistTeamSwitcherExpanded(next);
+              return next;
+            });
           }}
         >
           {hasTeams ? (

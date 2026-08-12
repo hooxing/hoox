@@ -112,15 +112,18 @@ export function CloudDriveDialog({
             setSubmittedQuery(query.trim());
           }}
         >
-          <Search size={17} aria-hidden="true" />
-          <input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索个人及团队文件"
-            aria-label="搜索个人及团队文件"
-          />
-          <label>
-            <span className="sr-only">搜索范围</span>
+          <div className="cloud-drive-search-query">
+            <Search size={17} aria-hidden="true" />
+            <input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="搜索个人及团队文件"
+              aria-label="搜索个人及团队文件"
+            />
+            <button type="submit">搜索</button>
+          </div>
+          <label className="cloud-drive-search-scope">
+            <span>搜索范围</span>
             <select
               value={searchScope}
               aria-label="搜索范围"
@@ -136,7 +139,6 @@ export function CloudDriveDialog({
               ))}
             </select>
           </label>
-          <button type="submit">搜索</button>
         </form>
         <div className="cloud-drive-tabs" role="tablist" aria-label="云盘空间">
           <button
@@ -182,6 +184,7 @@ export function CloudDriveDialog({
                 <span>当前团队</span>
                 <select
                   value={selectedTeam.id}
+                  aria-label="选择团队"
                   onChange={(event) => onSwitchTeam?.(event.target.value)}
                 >
                   {teams.map((team) => (

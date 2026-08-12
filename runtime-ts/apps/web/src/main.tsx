@@ -377,12 +377,13 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
       apiClient.setTenantId?.(teamId);
       setActiveTeamId(teamId);
       if (teamId !== undefined) setCloudTeamId(teamId);
+      // 同一空间内新建空会话只清除选择，不清空已加载的导航投影；否则重复点击会让团队任务永久消失。
+      if (activeTeamId !== teamId) dispatch({ type: "threads", threads: [] });
       // 用户显式进入新会话时必须保持空白，不能被刷新逻辑自动选回已有任务。
       initialSelectionAppliedRef.current = true;
-      dispatch({ type: "threads", threads: [] });
       selectThread(threadId);
     },
-    [apiClient, selectThread],
+    [activeTeamId, apiClient, selectThread],
   );
 
   const selectWorkspaceThread = useCallback(
@@ -1219,6 +1220,7 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
           type="button"
           onClick={() => setNavigationOpen(true)}
           aria-label="打开会话导航"
+          hidden={navigationOpen}
         >
           <PanelLeftOpen size={18} />
         </button>

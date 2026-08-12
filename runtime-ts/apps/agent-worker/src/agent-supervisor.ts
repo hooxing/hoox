@@ -35,6 +35,7 @@ interface ChildState {
   lastMailboxSequence: number;
   history: ThreadActiveHistoryV1 | undefined;
   session: WorkerAgentSessionPort | undefined;
+  activeTurn: Promise<void> | undefined;
   interruptRequested: boolean;
   readonly pendingSteers: string[];
   readonly activeMessages: string[];
@@ -177,6 +178,7 @@ export class AgentSupervisor implements AgentControlPort {
         lastMailboxSequence: 0,
         history: conversation.history,
         session: undefined,
+        activeTurn: undefined,
         interruptRequested: false,
         pendingSteers: [],
         activeMessages: [],
@@ -261,6 +263,7 @@ export class AgentSupervisor implements AgentControlPort {
         lastMailboxSequence: 0,
         history,
         session: undefined,
+        activeTurn: undefined,
         interruptRequested: false,
         pendingSteers: [],
         activeMessages: [],
@@ -375,8 +378,11 @@ export class AgentSupervisor implements AgentControlPort {
     if (recorded !== "recorded" && recorded !== "replayed") {
       throw new Error(`AGENT_INTERRUPT_${recorded.toUpperCase()}`);
     }
+    const activeTurn = child.activeTurn;
     child.interruptRequested = true;
     await child.session.abort();
+    // interrupt_agent 返回前等待 turn 的 durable settle 与 mailbox 发布完成，避免向父 Agent 返回 running。
+    if (activeTurn !== undefined) await activeTurn;
     this.#interruptedCommands.set(commandId, child.agentThreadId);
     return this.#summary(child);
   }
@@ -427,8 +433,12 @@ export class AgentSupervisor implements AgentControlPort {
 
   #startTurn(child: ChildState, turnId: string, prompt: string): void {
     const task = this.#runTurn(child, turnId, prompt).catch(() => undefined);
+    child.activeTurn = task;
     this.#activeTasks.add(task);
-    void task.finally(() => this.#activeTasks.delete(task));
+    void task.finally(() => {
+      this.#activeTasks.delete(task);
+      if (child.activeTurn === task) child.activeTurn = undefined;
+    });
   }
 
   async #runTurn(child: ChildState, turnId: string, prompt: string): Promise<void> {

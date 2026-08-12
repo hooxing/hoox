@@ -252,7 +252,7 @@ export function createAgentControlPiTools(
       name: "wait_agent",
       label: "等待子 Agent",
       description:
-        "等待当前 Root Run 中子 Agent mailbox 的新消息、完成通知或超时。首次必须传 after_sequence=0，后续必须传上次返回的 nextAfterSequence。",
+        "等待当前 Root Run 中子 Agent mailbox 的新消息、完成通知或超时。首次必须传 after_sequence=0，后续必须传上次返回的 nextAfterSequence。sequence 是当前 Attempt 的全局 mailbox 序号；发往子 Agent 的反向消息不会出现在 updates 中，因此序号可以跳跃，空洞不表示丢消息。",
       executionMode: "sequential",
       parameters: WaitArgumentsSchema,
       prepareArguments: waitArguments.prepareArguments,

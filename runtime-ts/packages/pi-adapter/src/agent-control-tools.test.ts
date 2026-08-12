@@ -42,6 +42,9 @@ describe("SubAgent Pi 协作工具", () => {
       "list_agents",
     ]);
     expect(tested.created.map((tool) => tool.executionMode)).toEqual(Array(6).fill("sequential"));
+    expect(tested.created.find((tool) => tool.name === "wait_agent")?.description).toContain(
+      "序号可以跳跃，空洞不表示丢消息",
+    );
     const spawn = tested.created[0];
     if (spawn?.name !== "spawn_agent") throw new Error("测试缺少 spawn_agent");
     const result = await spawn.execute(

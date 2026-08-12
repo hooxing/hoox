@@ -1,7 +1,10 @@
+import { loadDevelopmentEnvironment } from "@cube-runtime/process-runtime";
 import { selectApiProcessEnvironment, startApiProcess } from "./process-entry.js";
 
 try {
-  const environment = selectApiProcessEnvironment(process.env);
+  const environment = selectApiProcessEnvironment(
+    await loadDevelopmentEnvironment(process.env, new URL("../../../../.env", import.meta.url)),
+  );
   const running = await startApiProcess({
     environment,
     onShutdownFailure: () => {

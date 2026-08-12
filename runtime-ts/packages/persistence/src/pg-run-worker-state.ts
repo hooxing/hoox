@@ -48,6 +48,7 @@ import {
   withTenantTransaction,
 } from "./postgres.js";
 import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
+import { enqueueMemoryIngestion } from "./pg-memory-ingestion.js";
 import {
   DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
   insertHistoryAgentDeliverable,
@@ -79,6 +80,7 @@ export interface PgRunWorkerStateOptions {
   readonly threadSandboxHandoffLeaseMs?: number;
   readonly historyFilesystemEnabled?: boolean;
   readonly historyDirectoryTimeZone?: string;
+  readonly memoryIngestionEnabled?: boolean;
 }
 
 const mutationSerializableRetryDelaysMs = Object.freeze([5, 15, 45]);
@@ -1156,6 +1158,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             snapshot: {
               run: state.run,
               tenantKind: row.tenant_kind === "personal" ? "personal" : "team",
+              memorySubjectUserId: String(row.owner_user_id ?? row.thread_created_by_user_id),
               workspace: state.workspace,
               attempt: state.attempt,
               input: String(row.input_text),
@@ -2344,6 +2347,19 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         ],
       );
       if (updated.rowCount !== 1) throw new RuntimeWriteAbort("conflict");
+    }
+
+    if (this.options.memoryIngestionEnabled === true && command.nextRunStatus === "succeeded") {
+      if (threadContextReceipt === undefined) {
+        throw new RuntimeWriteAbort("protocol_invalid");
+      }
+      await enqueueMemoryIngestion(client, {
+        tenantId: command.fence.scope.tenantId,
+        threadId: command.fence.scope.threadId,
+        runId: command.fence.scope.runId,
+        attemptId: String(row.attempt_id),
+        sourceThroughSequence: threadContextReceipt.lastSequence,
+      });
     }
 
     const nextStatus = command.nextAttemptStatus ?? row.attempt_status;

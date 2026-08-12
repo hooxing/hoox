@@ -8,6 +8,12 @@ import {
 } from "@cube-runtime/artifact";
 import { tenantId } from "@cube-runtime/domain";
 import {
+  type Mem0DevelopmentConfiguration,
+  Mem0PlatformMemoryProvider,
+  MemoryIngestionConsumer,
+  parseMem0DevelopmentEnvironment,
+} from "@cube-runtime/memory";
+import {
   BlobSkillContentStore,
   createPostgresPool,
   createS3BlobStore,
@@ -21,6 +27,7 @@ import {
   PgBlobLifecycleRepository,
   PgExecutionPersistence,
   PgModelWireTraceRepository,
+  PgMemoryIngestionStore,
   PgRecoveryMetrics,
   PgResourceFilesystemCatalog,
   PgRunDispatchOutbox,
@@ -141,6 +148,15 @@ const workerEnvironmentSchema = Object.freeze({
   MODEL_WIRE_TRACE_RETENTION_DAYS: integerEnvironmentField({ minimum: 1, maximum: 365 }),
   // 每个 request/response 原始字节独立上限；超过后保存精确前缀并标为 truncated。
   MODEL_WIRE_TRACE_MAX_BYTES: integerEnvironmentField({ minimum: 1, maximum: 8 * 1024 * 1024 }),
+  MEM0_MEMORY_ENABLED: booleanEnvironmentField({ requiredIn: [] }),
+  MEM0_API_BASE_URL: urlEnvironmentField({ requiredIn: [] }),
+  MEM0_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
+  MEM0_SCOPE_HMAC_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
+  MEM0_REQUEST_TIMEOUT_MS: integerEnvironmentField({
+    minimum: 100,
+    maximum: 120_000,
+    requiredIn: [],
+  }),
   AGENT_WORKER_TENANT_ID: stringEnvironmentField({ maxLength: 200 }),
   AGENT_WORKER_ID: stringEnvironmentField({ maxLength: 200 }),
   AGENT_WORKER_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 10, maximum: 60_000 }),
@@ -289,6 +305,7 @@ export interface WorkerProcessConfiguration {
   readonly historyFilesystemEnabled: boolean;
   readonly historyDirectoryTimeZone: string;
   readonly subagents: Readonly<{ enabled: boolean }>;
+  readonly memory: Mem0DevelopmentConfiguration;
   readonly development?: Readonly<{
     readonly userATenantId: string;
   }>;
@@ -306,6 +323,7 @@ export function parseWorkerProcessEnvironment(
   source: Readonly<Record<string, string | undefined>>,
 ): WorkerProcessConfiguration {
   assertProductionInheritedEnvironment(source);
+  const memory = parseMem0DevelopmentEnvironment(source);
   const parsed = parseStrictEnvironment(source, workerEnvironmentSchema);
   if (parsed.runtimeEnvironment === "production") {
     assertProductionHasNoDevelopmentIdentity(source);
@@ -529,6 +547,7 @@ export function parseWorkerProcessEnvironment(
     historyFilesystemEnabled,
     historyDirectoryTimeZone,
     subagents: Object.freeze({ enabled: subagentsEnabled }),
+    memory,
     ...(parsed.runtimeEnvironment === "development"
       ? {
           development: Object.freeze({
@@ -997,6 +1016,21 @@ async function assembleWorkerRuntime(
       modelContext,
     );
     const shutdown = new ProcessShutdown();
+    const memoryProvider = configuration.memory.enabled
+      ? new Mem0PlatformMemoryProvider(configuration.memory)
+      : undefined;
+    const memoryConsumer =
+      memoryProvider === undefined
+        ? undefined
+        : new MemoryIngestionConsumer(
+            new PgMemoryIngestionStore(pool, blobs),
+            memoryProvider,
+            `${configuration.worker.workerId}-memory`,
+            30_000,
+            5,
+            1_000,
+            2_000,
+          );
     const worker = new RunWorker(
       {
         persistence: new PgExecutionPersistence(pool, {
@@ -1006,6 +1040,7 @@ async function assembleWorkerRuntime(
           threadSandboxHandoffLeaseMs: configuration.worker.runLeaseMs,
           historyFilesystemEnabled: configuration.historyFilesystemEnabled,
           historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
+          memoryIngestionEnabled: configuration.memory.enabled,
         }),
         revisions: workspaceRuntime,
         sandboxes,
@@ -1023,6 +1058,7 @@ async function assembleWorkerRuntime(
         ...(configuration.subagents.enabled
           ? { agentControl: new PgAgentControlRepository(pool) }
           : {}),
+        ...(memoryProvider === undefined ? {} : { memoryRetriever: memoryProvider }),
       },
       {
         workerId: configuration.worker.workerId,
@@ -1051,12 +1087,17 @@ async function assembleWorkerRuntime(
         pollIntervalMs: configuration.worker.pollIntervalMs,
         tenantAssignmentLeaseMs: configuration.worker.dispatchLeaseMs,
         dispatchLeaseMs: configuration.worker.dispatchLeaseMs,
-        maintenance: (tenantId) =>
-          resourceBlobWriter.recoverPending({
-            tenantId,
-            limit: 16,
-            orphanGraceSeconds: 300,
-          }),
+        maintenance: async (tenantId) => {
+          const tasks: Promise<unknown>[] = [
+            resourceBlobWriter.recoverPending({
+              tenantId,
+              limit: 16,
+              orphanGraceSeconds: 300,
+            }),
+          ];
+          if (memoryConsumer !== undefined) tasks.push(memoryConsumer.drainTenant(tenantId));
+          await Promise.allSettled(tasks);
+        },
       },
     );
     const probes = Object.freeze({

@@ -7,14 +7,15 @@
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -b tsconfig.json --clean",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "dev": "tsc -p tsconfig.json && node --env-file-if-exists=../../../.env dist/development-main.js",
-    "dev:preflight": "node --env-file-if-exists=../../../.env dist/development-preflight-main.js",
+    "dev": "tsc -p tsconfig.json && node dist/development-main.js",
+    "dev:preflight": "node dist/development-preflight-main.js",
     "start:production": "node dist/production-main.js"
   },
   "dependencies": {
     "@cube-runtime/context-policy": "workspace:*",
     "@cube-runtime/artifact": "workspace:*",
     "@cube-runtime/domain": "workspace:*",
+    "@cube-runtime/memory": "workspace:*",
     "@cube-runtime/pi-adapter": "workspace:*",
     "@cube-runtime/persistence": "workspace:*",
     "@cube-runtime/process-runtime": "workspace:*",

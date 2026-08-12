@@ -1,7 +1,10 @@
+import { loadDevelopmentEnvironment } from "@cube-runtime/process-runtime";
 import { selectSchedulerProcessEnvironment, startSchedulerProcess } from "./process-entry.js";
 
 try {
-  const environment = selectSchedulerProcessEnvironment(process.env);
+  const environment = selectSchedulerProcessEnvironment(
+    await loadDevelopmentEnvironment(process.env, new URL("../../../../.env", import.meta.url)),
+  );
   if (environment.RUNTIME_ENV !== "development") throw new Error("DEVELOPMENT_SCHEDULER_ONLY");
   const running = await startSchedulerProcess({
     environment,

@@ -52,5 +52,14 @@ describe("管理员 Skill 发布迁移", () => {
     expect(bootstrap).toContain("publisher_has_parent");
     expect(bootstrap).toContain("publisher_owns_relation");
     expect(bootstrap).toContain("Skill Publisher 表权限偏离白名单");
+    expect(bootstrap).toContain("ALTER POLICY $" + "{quoteIdentifier(policy)}");
+    expect(bootstrap).toContain("grantSkillPublisherAccess");
+    expect(bootstrap).toContain(
+      "FROM PUBLIC, $" +
+        "{role}, $" +
+        "{publisherRole}, $" +
+        "{coordinatorRole}, $" +
+        "{teamCoordinatorRole}",
+    );
   });
 });

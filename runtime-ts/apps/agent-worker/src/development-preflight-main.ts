@@ -1,3 +1,4 @@
+import { loadDevelopmentEnvironment } from "@cube-runtime/process-runtime";
 import {
   parseWorkerProcessEnvironment,
   probeDevelopmentWorkerDependencies,
@@ -5,7 +6,9 @@ import {
 } from "./process-entry.js";
 
 try {
-  const environment = selectWorkerProcessEnvironment(process.env);
+  const environment = selectWorkerProcessEnvironment(
+    await loadDevelopmentEnvironment(process.env, new URL("../../../../.env", import.meta.url)),
+  );
   if (environment.RUNTIME_ENV !== "development") {
     throw new Error("DEVELOPMENT_WORKER_ONLY");
   }

@@ -16,7 +16,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -b tsconfig.json --clean",
-    "dev": "node --env-file-if-exists=../../../.env dist/development-main.js",
+    "dev": "node dist/development-main.js",
     "start:production": "node dist/production-main.js",
     "test": "vitest run --root ../../.. runtime-ts/apps/skill-admin-api/src",
     "typecheck": "tsc -p tsconfig.json --noEmit"

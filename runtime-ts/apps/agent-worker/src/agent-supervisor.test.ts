@@ -434,7 +434,7 @@ describe("AgentSupervisor", () => {
 
     await expect(
       supervisor.interrupt({ callId: "call_interrupt", target: child.agentThreadId }),
-    ).resolves.toMatchObject({ status: "running" });
+    ).resolves.toMatchObject({ status: "interrupted", lastMailboxSequence: 1 });
     await expect(
       supervisor.interrupt({ callId: "call_interrupt", target: child.agentThreadId }),
     ).resolves.toMatchObject({ agentThreadId: child.agentThreadId });

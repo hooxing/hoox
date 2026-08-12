@@ -192,7 +192,7 @@ export function createAgentControlPiTools(
       label: "启动子 Agent",
       description:
         "为边界清晰、可独立完成的子任务创建可复用的独立对话并启动当前 turn。子 Agent 与你共享同一 Sandbox；必须显式选择工具，创建后工具清单不可修改。",
-      executionMode: "parallel",
+      executionMode: "sequential",
       parameters: SpawnArgumentsSchema,
       prepareArguments: spawnArguments.prepareArguments,
       execute: async (callId, args: SpawnArguments) =>
@@ -211,7 +211,7 @@ export function createAgentControlPiTools(
       label: "发送子 Agent 消息",
       description:
         "向当前正在运行的子 Agent 追加消息，不启动新 turn；目标已闲置或结束时调用会失败，应改用 followup_task。",
-      executionMode: "parallel",
+      executionMode: "sequential",
       parameters: TargetMessageArgumentsSchema,
       prepareArguments: messageArguments.prepareArguments,
       execute: async (callId, args: TargetMessageArguments) =>
@@ -226,7 +226,7 @@ export function createAgentControlPiTools(
       label: "追加子 Agent 任务",
       description:
         "复用同一主 Thread 中已保存的闲置子 Agent 对话并启动新的 turn，可跨主 Agent Run 使用；沿用创建时的固定工具清单，正在运行时调用会失败。",
-      executionMode: "parallel",
+      executionMode: "sequential",
       parameters: FollowUpArgumentsSchema,
       prepareArguments: followUpArguments.prepareArguments,
       execute: async (callId, args: FollowUpArguments) =>
@@ -240,7 +240,7 @@ export function createAgentControlPiTools(
       label: "等待子 Agent",
       description:
         "等待当前 Root Run 中子 Agent mailbox 的新消息、完成通知或超时。使用返回的最大 sequence 继续等待可避免重复结果。",
-      executionMode: "parallel",
+      executionMode: "sequential",
       parameters: WaitArgumentsSchema,
       prepareArguments: waitArguments.prepareArguments,
       execute: async (callId, args: WaitArguments, signal) =>
@@ -258,7 +258,7 @@ export function createAgentControlPiTools(
       label: "中断子 Agent",
       description:
         "中断目标子 Agent 在当前 Root Run 中的 turn；未完成内容不写入可复用历史，对话仍保留以便后续 follow-up。",
-      executionMode: "parallel",
+      executionMode: "sequential",
       parameters: TargetArgumentsSchema,
       prepareArguments: targetArguments.prepareArguments,
       execute: async (callId, args: TargetArguments) =>
@@ -272,7 +272,7 @@ export function createAgentControlPiTools(
       label: "列出子 Agent",
       description:
         "列出当前主 Thread 中可复用的子 Agent 对话、当前 Root Run 状态、turn 序号和固定工具能力。",
-      executionMode: "parallel",
+      executionMode: "sequential",
       parameters: EmptyArgumentsSchema,
       prepareArguments: emptyArguments.prepareArguments,
       execute: async (callId, args: Record<string, never>) =>

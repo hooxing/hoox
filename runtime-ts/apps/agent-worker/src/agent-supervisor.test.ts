@@ -463,6 +463,95 @@ describe("AgentSupervisor", () => {
     });
   });
 
+  it("主动中断优先于 Pi completed，部分答案不得发布为成功终态", async () => {
+    let release: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const settled: Parameters<AgentControlPersistencePort["settleTurn"]>[0][] = [];
+    const durable = persistence();
+    durable.settleTurn = async (input) => {
+      settled.push(input);
+      return "settled";
+    };
+    const supervisor = new AgentSupervisor({
+      persistence: durable,
+      rootAgentThreadId: agentThreadId("root_agent_completed_after_interrupt"),
+      attemptId: "attempt_agent_completed_after_interrupt",
+      fence,
+      createSession: async () => {
+        const listeners = new Set<(event: RuntimeAgentEvent) => void>();
+        return {
+          prepareInput: async (input) => ({ text: input.text, images: [] }),
+          runPrompt: async () => {
+            await blocked;
+            for (const listener of listeners) {
+              listener({
+                type: "turn.completed",
+                assistant: {
+                  content: [{ type: "text", text: "只完成了中断前的部分任务" }],
+                  api: "test",
+                  provider: "test",
+                  model: "test",
+                  stopReason: "stop",
+                  timestamp: 10,
+                },
+                toolResults: [
+                  {
+                    toolCallId: "call_cancelled",
+                    toolName: "exec_command",
+                    text: '{"code":"EXEC_CANCELLED"}',
+                    isError: true,
+                    timestamp: 9,
+                  },
+                ],
+              });
+            }
+            return { kind: "completed" };
+          },
+          steer: async () => undefined,
+          abort: async () => release(),
+          subscribe: (listener) => {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+          },
+          dispose: () => undefined,
+        };
+      },
+      authorizeModelStart: async () => authorization,
+      onToolEvent: async () => undefined,
+    });
+    await supervisor.initialize();
+    const child = await supervisor.spawn({
+      callId: "call_completed_after_interrupt_spawn",
+      task: "执行长任务",
+      tools: ["exec_command"],
+      forkTurns: "none",
+    });
+    await vi.waitFor(async () => expect((await supervisor.list())[0]?.status).toBe("running"));
+
+    await expect(
+      supervisor.interrupt({
+        callId: "call_completed_after_interrupt",
+        target: child.agentThreadId,
+      }),
+    ).resolves.toMatchObject({ status: "interrupted", lastMailboxSequence: 1 });
+
+    expect(settled).toEqual([
+      expect.objectContaining({ status: "interrupted", errorCode: "INTERRUPTED" }),
+    ]);
+    expect(await supervisor.wait({ afterSequence: 0, timeoutMs: 1_000 })).toEqual({
+      updates: [
+        expect.objectContaining({
+          kind: "error",
+          status: "interrupted",
+          errorCode: "INTERRUPTED",
+        }),
+      ],
+      nextAfterSequence: 1,
+      timedOut: false,
+    });
+  });
   it("达到 Agent Thread 数量上限后仍可复用已有闲置 Agent", async () => {
     const supervisor = new AgentSupervisor({
       persistence: persistence(),

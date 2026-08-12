@@ -79,13 +79,34 @@ describe("SubAgent Pi 协作工具", () => {
     expect(tested.record).toHaveBeenCalledWith("call_spawn_full", "spawn_agent", "failed");
   });
 
+  it("fork_turns 缺失时由 schema 桥拒绝，不再隐式继承全部历史", async () => {
+    const tested = tools();
+    const spawn = tested.created[0];
+    if (spawn?.name !== "spawn_agent" || spawn.prepareArguments === undefined) {
+      throw new Error("测试缺少 spawn_agent schema 参数桥");
+    }
+    const prepared = spawn.prepareArguments({ task: "分析模块", tools: ["read"] });
+    expect(Value.Check(spawn.parameters, prepared)).toBe(true);
+
+    await expect(
+      spawn.execute(
+        "call_spawn_missing_fork",
+        prepared as SpawnArgumentsForTest,
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("AGENT_CONTROL_FAILED");
+    expect(tested.spawn).not.toHaveBeenCalled();
+  });
+
   it("schema 错误不调用控制面，但仍形成 durable 失败回执", async () => {
     const tested = tools();
     const spawn = tested.created[0];
     if (spawn?.name !== "spawn_agent" || spawn.prepareArguments === undefined) {
       throw new Error("测试缺少 spawn_agent schema 参数桥");
     }
-    const prepared = spawn.prepareArguments({ task: 123, tools: ["read"] });
+    const prepared = spawn.prepareArguments({ task: 123, tools: ["read"], fork_turns: "none" });
     expect(Value.Check(spawn.parameters, prepared)).toBe(true);
 
     await expect(
@@ -105,5 +126,5 @@ describe("SubAgent Pi 协作工具", () => {
 type SpawnArgumentsForTest = {
   readonly task: string;
   readonly tools: readonly ("exec_command" | "read" | "edit" | "write" | "skill")[];
-  readonly fork_turns?: string;
+  readonly fork_turns: string;
 };

@@ -798,6 +798,21 @@ describe("Runtime Rollout PostgreSQL 事实源", () => {
           maxActiveSubagents: 3,
         }),
       ).toMatchObject({ outcome: "created" });
+      const spawnedConversation = await withTenantTransaction(
+        runtime,
+        databaseContext,
+        async (client) =>
+          client.query<{ task: string; current_task: string }>(
+            `SELECT task,current_task
+               FROM runtime_subagent_conversations
+              WHERE tenant_id=$1 AND thread_id=$2 AND agent_thread_id=$3`,
+            [scope.tenantId, scope.threadId, childId],
+          ),
+      );
+      expect(spawnedConversation.rows[0]).toEqual({
+        task: "验证独立 Rollout",
+        current_task: "验证独立 Rollout",
+      });
       expect(
         await repository.openAgentStreamFromClaim({
           fence,

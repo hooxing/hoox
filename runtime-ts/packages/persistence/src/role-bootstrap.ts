@@ -296,7 +296,7 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
   ["runtime_agent_threads", new Set(["status", "updated_at"])],
   [
     "runtime_subagent_conversations",
-    new Set(["turn_ordinal", "history", "history_digest", "updated_at"]),
+    new Set(["turn_ordinal", "current_task", "history", "history_digest", "updated_at"]),
   ],
   [
     "runtime_agent_turns",
@@ -2422,7 +2422,7 @@ export async function bootstrapRuntimeAccessOnClient(
       `GRANT SELECT, INSERT ON TABLE ${schema}.runtime_subagent_conversations TO ${role}`,
     );
     await client.query(
-      `GRANT UPDATE(turn_ordinal,history,history_digest,updated_at)
+      `GRANT UPDATE(turn_ordinal,current_task,history,history_digest,updated_at)
          ON TABLE ${schema}.runtime_subagent_conversations TO ${role}`,
     );
   }

@@ -18,13 +18,11 @@ const SpawnArgumentsSchema = Type.Object(
   {
     task: Type.String({ minLength: 1, maxLength: 32 * 1024 }),
     tools: Type.Array(ToolNameSchema, { maxItems: DELEGABLE_PI_TOOL_NAMES.length }),
-    fork_turns: Type.Optional(
-      Type.String({
-        pattern: "^(none|all|[1-9][0-9]*)$",
-        maxLength: 6,
-        description: "none、all 或最近 N 个父 Agent turn；默认 all。",
-      }),
-    ),
+    fork_turns: Type.String({
+      pattern: "^(none|all|[1-9][0-9]*)$",
+      maxLength: 6,
+      description: "必须显式选择 none、all 或最近 N 个父 Agent turn。",
+    }),
   },
   strict,
 );
@@ -111,8 +109,8 @@ type ReceiptWriter = (
   outcome: "succeeded" | "failed",
 ) => Promise<ToolObservationResult>;
 
-function forkTurns(value: string | undefined): "none" | "all" | number {
-  if (value === undefined || value === "all") return "all";
+function forkTurns(value: string): "none" | "all" | number {
+  if (value === "all") return "all";
   if (value === "none") return "none";
   return Number(value);
 }

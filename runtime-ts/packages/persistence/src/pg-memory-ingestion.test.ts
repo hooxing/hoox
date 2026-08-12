@@ -141,6 +141,11 @@ describe("PostgreSQL 记忆 Outbox", () => {
         { role: "assistant", content: "助手回答" },
       ],
     });
+    const contextRead = client.statements.find((statement) =>
+      statement.sql.includes("FROM thread_context_entries"),
+    );
+    // sequence::text 只是驱动传输格式；排序必须继续使用 bigint 列，避免 10 排在 2 前面。
+    expect(contextRead?.sql).toContain("ORDER BY visible.sequence");
     if (claim === undefined) throw new Error("记忆任务领取失败");
     expect(
       await store.complete(claim, {

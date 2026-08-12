@@ -54,7 +54,8 @@ export type AgentForkTurns = "none" | "all" | number;
 export interface AgentSummary {
   readonly agentThreadId: AgentThreadId;
   readonly path: string;
-  readonly task: string;
+  readonly initialTask: string;
+  readonly currentTask: string;
   readonly status: "running" | "idle" | "interrupted" | "failed";
   readonly turnOrdinal: number;
   readonly tools: readonly DelegableAgentToolName[];
@@ -130,6 +131,7 @@ export interface SubAgentConversationSnapshot {
   readonly agentThreadId: AgentThreadId;
   readonly canonicalPath: string;
   readonly task: string;
+  readonly currentTask: string;
   readonly tools: readonly DelegableAgentToolName[];
   readonly toolManifestDigest: Sha256Digest;
   readonly forkTurns: AgentForkTurns;

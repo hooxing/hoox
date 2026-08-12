@@ -266,6 +266,7 @@ describe("AgentSupervisor", () => {
           agentThreadId: storedAgentId,
           canonicalPath: "/root/persisted",
           task: "首次任务",
+          currentTask: "上一轮任务",
           tools: storedTools,
           toolManifestDigest: digestCanonical({ tools: storedTools }),
           forkTurns: "none",
@@ -294,6 +295,8 @@ describe("AgentSupervisor", () => {
     expect(await supervisor.list()).toEqual([
       expect.objectContaining({
         agentThreadId: storedAgentId,
+        initialTask: "首次任务",
+        currentTask: "上一轮任务",
         status: "idle",
         turnOrdinal: 2,
         tools: ["read"],
@@ -310,7 +313,13 @@ describe("AgentSupervisor", () => {
     expect(sessions[0]?.tools).toEqual(["read"]);
     expect(sessions[0]?.history).toBe(history);
     expect((await supervisor.list())[0]).toEqual(
-      expect.objectContaining({ status: "idle", turnOrdinal: 3, tools: ["read"] }),
+      expect.objectContaining({
+        initialTask: "首次任务",
+        currentTask: "在新 Run 中继续",
+        status: "idle",
+        turnOrdinal: 3,
+        tools: ["read"],
+      }),
     );
   });
 

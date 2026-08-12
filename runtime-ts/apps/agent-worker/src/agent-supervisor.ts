@@ -23,7 +23,8 @@ import { DELEGABLE_AGENT_TOOL_NAMES } from "./ports.js";
 interface ChildState {
   readonly agentThreadId: AgentThreadId;
   readonly path: string;
-  readonly task: string;
+  readonly initialTask: string;
+  currentTask: string;
   readonly tools: readonly DelegableAgentToolName[];
   readonly toolManifestDigest: ReturnType<typeof digestCanonical>;
   readonly forkTurns: AgentForkTurns;
@@ -158,7 +159,8 @@ export class AgentSupervisor implements AgentControlPort {
       const child: ChildState = {
         agentThreadId: conversation.agentThreadId,
         path: conversation.canonicalPath,
-        task: conversation.task,
+        initialTask: conversation.task,
+        currentTask: conversation.currentTask,
         tools: conversation.tools,
         toolManifestDigest: conversation.toolManifestDigest,
         forkTurns: conversation.forkTurns,
@@ -239,7 +241,8 @@ export class AgentSupervisor implements AgentControlPort {
       child = {
         agentThreadId: childId,
         path,
-        task,
+        initialTask: task,
+        currentTask: task,
         tools,
         toolManifestDigest,
         forkTurns: input.forkTurns,
@@ -331,6 +334,7 @@ export class AgentSupervisor implements AgentControlPort {
     }
     if (persisted === "replayed") return this.#summary(child);
     child.turnOrdinal = ordinal;
+    child.currentTask = prompt;
     child.status = "running";
     child.interruptRequested = false;
     this.#startTurn(child, turnId, prompt);
@@ -594,7 +598,8 @@ export class AgentSupervisor implements AgentControlPort {
     return Object.freeze({
       agentThreadId: child.agentThreadId,
       path: child.path,
-      task: child.task,
+      initialTask: child.initialTask,
+      currentTask: child.currentTask,
       status: child.status,
       turnOrdinal: child.turnOrdinal,
       tools: child.tools,

@@ -299,6 +299,7 @@ interface ExecutionContext {
 
 const OUTPUT_LIMIT_CONTINUATION_PROMPT =
   "上一轮因模型输出长度上限中止。请从当前状态继续：若任务尚未完成，继续使用工具完成剩余工作；若已完成，只给出简洁最终答复。不要重复已经完成的步骤。";
+const INSPECTION_UNAVAILABLE_RETRY_DELAYS_MS = Object.freeze([5, 15, 45]);
 
 interface ToolStartedGate {
   readonly name: string;
@@ -526,40 +527,11 @@ export class RunWorker {
     const heartbeat = this.dependencies.clock.startHeartbeat(this.#heartbeatMs, () => {
       if (heartbeatInFlight) return heartbeatInFlight;
       const task = (async () => {
-        try {
-          await context.durableLane.run(async () => {
-            if (context.stopped) return;
-            const inspected = await this.dependencies.persistence.inspectAndRenew({
-              fence: context.fence,
-              leaseDurationMs: this.#leaseDurationMs,
-            });
-            if (inspected.outcome === "active" && inspectionMatches(context, inspected)) {
-              acceptInspection(context, inspected);
-              const renewingSandboxLease = context.threadSandboxLease;
-              if (renewingSandboxLease !== undefined) {
-                const renewed = await this.dependencies.threadSandboxes?.renew({
-                  scope: context.scope,
-                  attemptId: context.attemptId,
-                  lease: renewingSandboxLease,
-                  leaseDurationMs: this.#leaseDurationMs,
-                });
-                // 冷恢复会替换 lease；旧 renew 的迟到失败只能约束它发出时的同一对象。
-                if (renewed !== "renewed" && context.threadSandboxLease === renewingSandboxLease) {
-                  context.stopped = renewed === "lease_lost" ? "fence_lost" : "unavailable";
-                }
-              }
-              return;
-            }
-            context.stopped =
-              inspected.outcome === "active"
-                ? "scope_mismatch"
-                : inspected.outcome === "cancelled"
-                  ? "cancelled"
-                  : inspected.outcome;
-          });
-        } catch {
-          context.stopped = "unavailable";
-        }
+        await context.durableLane.run(async () => {
+          if (context.stopped) return;
+          const stopped = await this.renewHeartbeatWithUnavailableRetry(context);
+          if (stopped !== undefined) context.stopped = stopped;
+        });
         if (context.stopped) await requestAbort().catch(() => undefined);
       })();
       heartbeatInFlight = task;
@@ -1440,28 +1412,76 @@ export class RunWorker {
     return await context.durableLane.run(async () => {
       refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
       if (context.stopped) return context.stopped;
+      const inspected = await this.inspectAndRenewWithUnavailableRetry(context);
+      if (inspected.outcome === "active") {
+        if (!inspectionMatches(context, inspected)) {
+          context.stopped = "scope_mismatch";
+          return context.stopped;
+        }
+        acceptInspection(context, inspected);
+        refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
+        return context.stopped;
+      }
+      context.stopped = inspected.outcome === "cancelled" ? "cancelled" : inspected.outcome;
+      refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
+      return context.stopped;
+    });
+  }
+
+  private async renewHeartbeatWithUnavailableRetry(
+    context: ExecutionContext,
+  ): Promise<ExecutionContext["stopped"]> {
+    const inspected = await this.inspectAndRenewWithUnavailableRetry(context);
+    if (inspected.outcome !== "active") {
+      return inspected.outcome === "cancelled" ? "cancelled" : inspected.outcome;
+    }
+    if (!inspectionMatches(context, inspected)) return "scope_mismatch";
+    acceptInspection(context, inspected);
+
+    const renewingSandboxLease = context.threadSandboxLease;
+    if (renewingSandboxLease === undefined) return undefined;
+    for (let attempt = 0; ; attempt += 1) {
+      if (context.stopped || context.threadSandboxLease !== renewingSandboxLease) {
+        return context.stopped;
+      }
+      try {
+        const renewed = await this.dependencies.threadSandboxes?.renew({
+          scope: context.scope,
+          attemptId: context.attemptId,
+          lease: renewingSandboxLease,
+          leaseDurationMs: this.#leaseDurationMs,
+        });
+        if (context.threadSandboxLease !== renewingSandboxLease) return undefined;
+        if (renewed === "renewed") return undefined;
+        if (renewed === "lease_lost") return "fence_lost";
+      } catch {
+        // unavailable 会在下面统一进入有界重试；明确 lease_lost 绝不重试。
+      }
+      const retryDelay = INSPECTION_UNAVAILABLE_RETRY_DELAYS_MS[attempt];
+      if (retryDelay === undefined) return "unavailable";
+      await delay(retryDelay);
+    }
+  }
+
+  private async inspectAndRenewWithUnavailableRetry(
+    context: ExecutionContext,
+  ): Promise<Awaited<ReturnType<ExecutionPersistencePort["inspectAndRenew"]>>> {
+    for (let attempt = 0; ; attempt += 1) {
       try {
         const inspected = await this.dependencies.persistence.inspectAndRenew({
           fence: context.fence,
           leaseDurationMs: this.#leaseDurationMs,
         });
-        if (inspected.outcome === "active") {
-          if (!inspectionMatches(context, inspected)) {
-            context.stopped = "scope_mismatch";
-            return context.stopped;
-          }
-          acceptInspection(context, inspected);
-          refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
-          return context.stopped;
-        }
-        context.stopped = inspected.outcome === "cancelled" ? "cancelled" : inspected.outcome;
-        refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
+        if (inspected.outcome !== "unavailable") return inspected;
       } catch {
-        context.stopped = "unavailable";
-        refreshLocalStop(context, cancellation, this.dependencies.shutdownSignal);
+        // unavailable 会在下面统一进入有界重试；明确 fence/scope 结果绝不重试。
       }
-      return context.stopped;
-    });
+
+      const retryDelay = INSPECTION_UNAVAILABLE_RETRY_DELAYS_MS[attempt];
+      if (retryDelay === undefined) return { outcome: "unavailable" };
+      // 退避期间继续占用 durable lane，禁止旧 fence 与事件 mutation 或副作用许可交错。
+      await delay(retryDelay);
+    }
   }
 
   /** 清理状态推进忽略业务取消，但仍严格校验双栅栏与 scope/head checkpoint。 */
@@ -1478,25 +1498,18 @@ export class RunWorker {
       ) {
         return context.stopped;
       }
-      try {
-        const inspected = await this.dependencies.persistence.inspectAndRenew({
-          fence: context.fence,
-          leaseDurationMs: this.#leaseDurationMs,
-        });
-        if (this.dependencies.shutdownSignal?.aborted) {
-          context.stopped = "shutdown";
-          return "shutdown";
-        }
-        if (inspected.outcome === "active") {
-          if (!inspectionMatches(context, inspected)) return "scope_mismatch";
-          acceptInspection(context, inspected);
-          return undefined;
-        }
-        if (inspected.outcome === "cancelled") return undefined;
-        return inspected.outcome;
-      } catch {
-        return "unavailable";
+      const inspected = await this.inspectAndRenewWithUnavailableRetry(context);
+      if (this.dependencies.shutdownSignal?.aborted) {
+        context.stopped = "shutdown";
+        return "shutdown";
       }
+      if (inspected.outcome === "active") {
+        if (!inspectionMatches(context, inspected)) return "scope_mismatch";
+        acceptInspection(context, inspected);
+        return undefined;
+      }
+      if (inspected.outcome === "cancelled") return undefined;
+      return inspected.outcome;
     });
   }
 
@@ -2839,6 +2852,10 @@ function permitMatches(
 
 function assertScope(scope: ExecutionScope): void {
   if (scope.rootRunId !== scope.runId) throw new Error("单 Agent 阶段要求 rootRunId 等于 runId");
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function positive(value: number, name: string): number {

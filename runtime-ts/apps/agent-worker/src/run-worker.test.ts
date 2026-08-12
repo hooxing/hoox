@@ -2170,12 +2170,33 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(session.abortCompleted).toBe(true);
   });
 
-  it("heartbeat Promise reject 被捕获并触发 stop/abort，不形成未处理拒绝", async () => {
+  it("heartbeat 单次 Promise reject 会有界重试且不覆盖 Provider 失败", async () => {
     const session = new BlockingAgentSession();
     const h = harness([session]);
     const execution = h.worker.execute(h.scope);
     await eventually(() => h.factory.createCount === 1);
     h.persistence.rejectInspectNext = true;
+
+    await expect(h.clock.tickHeartbeat()).resolves.toBeUndefined();
+    expect(session.abortCount).toBe(0);
+    session.emit({ type: "error", code: "PROVIDER", message: "模型服务暂时不可用" });
+    session.emit({ type: "agent.settled" });
+    session.complete();
+    await expect(execution).resolves.toEqual({ outcome: "failed" });
+    expect(h.persistence.record(h.scope).events).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_event",
+        payload: expect.objectContaining({ type: "runtime.notice", code: "PROVIDER" }),
+      }),
+    );
+  });
+
+  it("heartbeat 持续不可用超过重试上限后才 stop/abort", async () => {
+    const session = new BlockingAgentSession();
+    const h = harness([session]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.createCount === 1);
+    h.persistence.forceInspectUnavailable = true;
 
     await expect(h.clock.tickHeartbeat()).resolves.toBeUndefined();
     await expect(execution).resolves.toEqual({

@@ -504,6 +504,10 @@ export class AgentSupervisor implements AgentControlPort {
         const outcome = await session.runPrompt(prepared, authorization);
         while (pendingToolEvents.size > 0) await Promise.all([...pendingToolEvents]);
         if (toolFailure !== undefined) throw toolFailure;
+        // Pi 在工具取消后仍可能以 completed 收敛；主动中断优先于模型流终态，禁止发布部分答案。
+        if (child.interruptRequested || this.#stopping) {
+          throw new Error("AGENT_TURN_INTERRUPTED");
+        }
         if (outcome.kind !== "completed" || completedTurn === undefined) {
           throw new Error(`AGENT_TURN_${outcome.kind.toUpperCase()}`);
         }

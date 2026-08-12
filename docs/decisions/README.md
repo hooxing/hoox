@@ -150,6 +150,7 @@
 | [ADR-0152](0152-development-mem0-platform-boundary.md) | 开发阶段使用 Mem0 Platform 的异步记忆边界 | 已接受 | 2026-08-12 |
 | [ADR-0153](0153-mem0-durable-ingestion-and-user-turn-retrieval.md) | Mem0 持久写入与 User Turn 检索闭环 | 已接受 | 2026-08-12 |
 | [ADR-0166](0166-team-navigation-browser-preference.md) | 团队任务导航的浏览器偏好与空会话切换边界 | 已接受（试验版） | 2026-08-12 |
+| [ADR-0167](0167-mobile-cloud-drive-space-selection-layout.md) | 移动云盘空间与团队选择布局 | 已接受（试验版） | 2026-08-12 |
 
 ## 何时必须记录
 

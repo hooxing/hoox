@@ -104,6 +104,9 @@ importers:
       '@cube-runtime/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@cube-runtime/memory':
+        specifier: workspace:*
+        version: link:../../packages/memory
       '@cube-runtime/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
@@ -287,6 +290,9 @@ importers:
       '@cube-runtime/domain':
         specifier: workspace:*
         version: link:../domain
+      '@cube-runtime/memory':
+        specifier: workspace:*
+        version: link:../memory
       '@cube-runtime/resource':
         specifier: workspace:*
         version: link:../resource

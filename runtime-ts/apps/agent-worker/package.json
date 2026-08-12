@@ -15,6 +15,7 @@
     "@cube-runtime/context-policy": "workspace:*",
     "@cube-runtime/artifact": "workspace:*",
     "@cube-runtime/domain": "workspace:*",
+    "@cube-runtime/memory": "workspace:*",
     "@cube-runtime/pi-adapter": "workspace:*",
     "@cube-runtime/persistence": "workspace:*",
     "@cube-runtime/process-runtime": "workspace:*",

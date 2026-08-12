@@ -1,6 +1,6 @@
 # Mem0 Platform 开发准备
 
-当前只使用 Mem0 Platform 验证长期记忆抽取，不上传生产数据。运行时接入完成前，配置保持关闭不会产生任何外部请求。
+当前只使用 Mem0 Platform 验证长期记忆抽取与召回，不上传生产数据。配置保持关闭不会产生任何外部请求。
 
 ## 需要准备的内容
 
@@ -26,4 +26,12 @@ MEM0_REQUEST_TIMEOUT_MS=5000
 
 ## 当前实现状态
 
-`@cube-runtime/memory` 已包含 Mem0 Platform V3 提交、事件查询、不可逆 scope 映射和两级异步消费者核心。PostgreSQL Outbox、Run 终态登记、检索以及向最新 user message 注入记忆仍需后续切片接入；在此之前打开环境变量不会让 Agent 自动使用记忆。
+`@cube-runtime/memory` 已包含 Mem0 Platform V3 提交、事件查询、检索、不可逆 scope 映射和两级异步消费者。0043 迁移提供 PostgreSQL Outbox；成功 Run 在终态事务只登记任务并唤醒后台调度，后续独立维护 tick 才调用 Mem0，回答路径不会等待第三方。每个真实用户输入会检索最多五条相关记忆，并将带低信任标记的结构化内容拼入当前 user message，不进入 system prompt。
+
+启用前必须先执行数据库迁移：
+
+```powershell
+corepack pnpm db:migrate:up
+```
+
+当前仍未提供面向用户的记忆查看、纠错、删除与导出接口，因此只允许合成或脱敏开发数据，production 固定拒绝启用。

@@ -271,6 +271,8 @@ importers:
 
   runtime-ts/packages/domain: {}
 
+  runtime-ts/packages/memory: {}
+
   runtime-ts/packages/persistence:
     dependencies:
       '@aws-sdk/client-s3':

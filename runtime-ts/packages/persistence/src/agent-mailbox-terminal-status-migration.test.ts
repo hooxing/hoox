@@ -10,11 +10,15 @@ const migration = (direction: "up" | "down") =>
 describe("Agent mailbox 终态 migration", () => {
   it("为完成、中断和失败消息持久化结构化终态", () => {
     const sql = migration("up");
+    expect(sql).toContain("NO FORCE ROW LEVEL SECURITY");
+    expect(sql).toContain("DISABLE ROW LEVEL SECURITY");
     expect(sql).toContain("ADD COLUMN terminal_status text");
     expect(sql).toContain("ADD COLUMN error_code text");
     expect(sql).toContain("LEGACY_SUBAGENT_ERROR");
     expect(sql).toContain("terminal_status = 'completed'");
     expect(sql).toContain("terminal_status IN ('interrupted', 'failed')");
+    expect(sql).toContain("ENABLE ROW LEVEL SECURITY");
+    expect(sql).toContain("FORCE ROW LEVEL SECURITY");
   });
 
   it("支持无损删除新增终态字段", () => {

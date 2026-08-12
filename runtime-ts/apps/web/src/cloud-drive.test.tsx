@@ -170,7 +170,11 @@ describe("云盘历史文件面板", () => {
     );
     await act(async () => teamTab?.click());
     await settle();
-    const select = container.querySelector<HTMLSelectElement>(".cloud-drive-team-selector select");
+    const scopeLabel = container.querySelector(".cloud-drive-search-scope > span");
+    expect(scopeLabel?.textContent).toBe("搜索范围");
+    const select = container.querySelector<HTMLSelectElement>(
+      '.cloud-drive-team-selector select[aria-label="选择团队"]',
+    );
     expect(select?.value).toBe("tenant_product");
     expect(container.querySelectorAll(".cloud-drive-team-view .cloud-drive-panel")).toHaveLength(1);
     await act(async () => {

@@ -84,6 +84,12 @@ export type AgentMailboxUpdate =
       readonly payload: string;
     };
 
+export interface AgentMailboxBatch {
+  readonly updates: readonly AgentMailboxUpdate[];
+  readonly nextAfterSequence: number;
+  readonly timedOut: boolean;
+}
+
 /** Root Pi 工具只依赖该进程内控制面；Workspace 与 Sandbox 所有权仍由 RunWorker 持有。 */
 export interface AgentControlPort {
   spawn(input: {
@@ -108,7 +114,7 @@ export interface AgentControlPort {
     readonly afterSequence: number;
     readonly timeoutMs: number;
     readonly signal?: AbortSignal;
-  }): Promise<readonly AgentMailboxUpdate[]>;
+  }): Promise<AgentMailboxBatch>;
   /** Session Factory 在完成可信历史恢复后设置 fork 来源；它不进入模型工具协议。 */
   setParentHistory(history: ThreadActiveHistoryV1 | undefined): void;
 }

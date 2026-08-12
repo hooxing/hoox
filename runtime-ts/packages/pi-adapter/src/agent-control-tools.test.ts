@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
 import { Value } from "typebox/value";
+import { describe, expect, it, vi } from "vitest";
 import { createAgentControlPiTools } from "./agent-control-tools.js";
 
 function tools() {
@@ -16,7 +16,7 @@ function tools() {
       followUp: async () => ({}),
       interrupt: async () => ({}),
       list: async () => [],
-      wait: async () => [],
+      wait: async () => ({ updates: [], nextAfterSequence: 0, timedOut: true }),
       projectError: (error) => ({
         status: "failed",
         code: "AGENT_CONTROL_FAILED",

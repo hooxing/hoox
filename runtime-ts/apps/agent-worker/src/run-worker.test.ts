@@ -194,7 +194,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       forkTurns: "none",
     });
     const delivered = await control.wait({ afterSequence: 0, timeoutMs: 1_000 });
-    expect(delivered[0]).toMatchObject({
+    expect(delivered.updates[0]).toMatchObject({
       senderPath: spawned.path,
       kind: "final_answer",
       payload: "子任务完成",
@@ -303,7 +303,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     child.complete();
 
     const delivered = await control.wait({ afterSequence: 0, timeoutMs: 1_000 });
-    expect(delivered[0]).toMatchObject({ kind: "final_answer", payload: "命令执行完成" });
+    expect(delivered.updates[0]).toMatchObject({ kind: "final_answer", payload: "命令执行完成" });
     root.emit({ type: "thinking.completed" });
     root.emit({ type: "message.completed", stopReason: "stop" });
     root.complete();

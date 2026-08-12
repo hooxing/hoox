@@ -12,6 +12,7 @@ import type {
   AgentControlPort,
   AgentExecutionIdentity,
   AgentForkTurns,
+  AgentMailboxBatch,
   AgentMailboxUpdate,
   AgentSummary,
   ConsumedExternalEffectAuthorization,
@@ -373,12 +374,14 @@ export class AgentSupervisor implements AgentControlPort {
     return Object.freeze([...this.#children.values()].map((child) => this.#summary(child)));
   }
 
-  async wait(
-    input: Parameters<AgentControlPort["wait"]>[0],
-  ): Promise<readonly AgentMailboxUpdate[]> {
-    const available = () => this.#updates.filter((item) => item.sequence > input.afterSequence);
-    const current = available();
-    if (current.length > 0 || input.timeoutMs <= 0 || input.signal?.aborted) return current;
+  async wait(input: Parameters<AgentControlPort["wait"]>[0]): Promise<AgentMailboxBatch> {
+    const batch = (timedOut: boolean): AgentMailboxBatch => {
+      const updates = this.#updates.filter((item) => item.sequence > input.afterSequence);
+      const nextAfterSequence = updates.at(-1)?.sequence ?? input.afterSequence;
+      return Object.freeze({ updates: Object.freeze(updates), nextAfterSequence, timedOut });
+    };
+    const current = batch(false);
+    if (current.updates.length > 0 || input.timeoutMs <= 0 || input.signal?.aborted) return current;
     await new Promise<void>((resolve) => {
       let settled = false;
       const finish = () => {
@@ -393,7 +396,8 @@ export class AgentSupervisor implements AgentControlPort {
       this.#waiters.add(finish);
       input.signal?.addEventListener("abort", finish, { once: true });
     });
-    return Object.freeze(available());
+    const completed = batch(false);
+    return completed.updates.length > 0 ? completed : batch(!input.signal?.aborted);
   }
 
   async drain(): Promise<void> {

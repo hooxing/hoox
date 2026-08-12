@@ -181,15 +181,19 @@ describe("AgentSupervisor", () => {
       forkTurns: 1,
     });
     expect(child.tools).toEqual(["read", "exec_command"]);
-    const updates = await supervisor.wait({ afterSequence: 0, timeoutMs: 1_000 });
+    const batch = await supervisor.wait({ afterSequence: 0, timeoutMs: 1_000 });
 
-    expect(updates).toEqual([
-      expect.objectContaining({
-        kind: "final_answer",
-        status: "completed",
-        payload: "子任务答案",
-      }),
-    ]);
+    expect(batch).toEqual({
+      updates: [
+        expect.objectContaining({
+          kind: "final_answer",
+          status: "completed",
+          payload: "子任务答案",
+        }),
+      ],
+      nextAfterSequence: 1,
+      timedOut: false,
+    });
     expect(created).toHaveLength(1);
     expect(created[0]?.history?.messages.map((message) => message.sequence)).toEqual([3, 4]);
     expect((await supervisor.list())[0]?.status).toBe("idle");
@@ -249,9 +253,9 @@ describe("AgentSupervisor", () => {
     expect(sessions[1]?.history?.messages.some((message) => message.role === "assistant")).toBe(
       true,
     );
-    expect((await supervisor.wait({ afterSequence: 1, timeoutMs: 1_000 }))[0]?.payload).toBe(
-      "补充答案",
-    );
+    expect(
+      (await supervisor.wait({ afterSequence: 1, timeoutMs: 1_000 })).updates[0]?.payload,
+    ).toBe("补充答案");
   });
 
   it("下一次 Root Run 可恢复同一主 Thread 的闲置对话，并沿用固定工具和历史", async () => {
@@ -430,13 +434,17 @@ describe("AgentSupervisor", () => {
     expect(recorded).toHaveLength(1);
     expect(recorded[0]?.argsDigest).toBe(digestCanonical({ target: child.agentThreadId }));
     expect((await supervisor.list())[0]?.status).toBe("interrupted");
-    expect(await supervisor.wait({ afterSequence: 0, timeoutMs: 1_000 })).toEqual([
-      expect.objectContaining({
-        kind: "error",
-        status: "interrupted",
-        errorCode: "INTERRUPTED",
-      }),
-    ]);
+    expect(await supervisor.wait({ afterSequence: 0, timeoutMs: 1_000 })).toEqual({
+      updates: [
+        expect.objectContaining({
+          kind: "error",
+          status: "interrupted",
+          errorCode: "INTERRUPTED",
+        }),
+      ],
+      nextAfterSequence: 1,
+      timedOut: false,
+    });
   });
 
   it("达到 Agent Thread 数量上限后仍可复用已有闲置 Agent", async () => {
@@ -504,12 +512,18 @@ describe("AgentSupervisor", () => {
       forkTurns: "none",
     });
     await vi.waitFor(() => expect(onToolEvent).toHaveBeenCalledOnce());
-    expect(await supervisor.wait({ afterSequence: 0, timeoutMs: 1 })).toEqual([]);
+    expect(await supervisor.wait({ afterSequence: 0, timeoutMs: 1 })).toEqual({
+      updates: [],
+      nextAfterSequence: 0,
+      timedOut: true,
+    });
 
     release();
     await supervisor.drain();
-    expect(await supervisor.wait({ afterSequence: 0, timeoutMs: 1_000 })).toEqual([
-      expect.objectContaining({ kind: "final_answer", payload: "工具任务完成" }),
-    ]);
+    expect(await supervisor.wait({ afterSequence: 0, timeoutMs: 1_000 })).toEqual({
+      updates: [expect.objectContaining({ kind: "final_answer", payload: "工具任务完成" })],
+      nextAfterSequence: 1,
+      timedOut: false,
+    });
   });
 });

@@ -1177,6 +1177,7 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
           type="button"
           onClick={() => setNavigationOpen(true)}
           aria-label="打开会话导航"
+          hidden={navigationOpen}
         >
           <PanelLeftOpen size={18} />
         </button>

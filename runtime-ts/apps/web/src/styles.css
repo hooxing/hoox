@@ -1745,6 +1745,9 @@ h2 {
     top: 11px;
     left: 12px;
   }
+  .mobile-nav-toggle[hidden] {
+    display: none;
+  }
   .conversation-header {
     padding-left: 58px;
   }

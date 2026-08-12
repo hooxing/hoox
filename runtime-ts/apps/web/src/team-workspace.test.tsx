@@ -27,6 +27,7 @@ describe("团队空间切换器", () => {
 
   beforeEach(() => {
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    window.localStorage.clear();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -83,6 +84,54 @@ describe("团队空间切换器", () => {
       }
     });
     expect(onSwitch).toHaveBeenCalledWith("tenant_sales");
+  });
+
+  it("刷新组件后保留用户选择的展开状态", async () => {
+    const renderSwitcher = () =>
+      root.render(
+        <TeamSwitcher
+          teams={teams}
+          selectedTeamId="tenant_product"
+          loading={false}
+          onSwitch={vi.fn()}
+          onNewTeamThread={vi.fn()}
+          onOpenTeamCenter={vi.fn()}
+          taskCount={1}
+        >
+          <button type="button">市场分析</button>
+        </TeamSwitcher>,
+      );
+
+    await act(async () => renderSwitcher());
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>(".team-switcher-summary")?.click(),
+    );
+    expect(container.querySelector(".team-switcher-body")).not.toBeNull();
+
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => renderSwitcher());
+
+    expect(container.querySelector(".team-switcher-body")).not.toBeNull();
+    expect(
+      container
+        .querySelector<HTMLButtonElement>(".team-switcher-summary")
+        ?.getAttribute("aria-expanded"),
+    ).toBe("true");
+
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>(".team-switcher-summary")?.click(),
+    );
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await act(async () => renderSwitcher());
+
+    expect(container.querySelector(".team-switcher-body")).toBeNull();
+    expect(
+      container
+        .querySelector<HTMLButtonElement>(".team-switcher-summary")
+        ?.getAttribute("aria-expanded"),
+    ).toBe("false");
   });
 
   it("没有团队时直接打开团队中心，不展开空任务栏", async () => {

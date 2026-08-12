@@ -7,19 +7,19 @@ import {
   workspaceId,
 } from "@cube-runtime/domain";
 import {
-  threadActiveHistoryDigest,
   type RuntimeAgentEvent,
   type ThreadActiveHistoryV1,
+  threadActiveHistoryDigest,
 } from "@cube-runtime/pi-adapter";
+import { describe, expect, it, vi } from "vitest";
+import { AgentSupervisor } from "./agent-supervisor.js";
+import { digestCanonical } from "./mutation-protocol.js";
 import type {
   AgentControlPersistencePort,
   ConsumedExternalEffectAuthorization,
   ExecutionFence,
   WorkerAgentSessionPort,
 } from "./ports.js";
-import { describe, expect, it, vi } from "vitest";
-import { AgentSupervisor } from "./agent-supervisor.js";
-import { digestCanonical } from "./mutation-protocol.js";
 
 const scope = {
   tenantId: tenantId("tenant_agent_supervisor"),
@@ -363,6 +363,60 @@ describe("AgentSupervisor", () => {
     ).rejects.toThrow("AGENT_CAPACITY_EXCEEDED");
     release();
     await supervisor.drain();
+  });
+
+  it("使用 canonical 参数摘要中断运行中的子 Agent，并保持命令幂等", async () => {
+    let release: () => void = () => undefined;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const abort = vi.fn(async () => release());
+    const recorded: Parameters<AgentControlPersistencePort["recordCommand"]>[0][] = [];
+    const durable = persistence();
+    durable.recordCommand = async (input) => {
+      recorded.push(input);
+      return recorded.length === 1 ? "recorded" : "replayed";
+    };
+    const supervisor = new AgentSupervisor({
+      persistence: durable,
+      rootAgentThreadId: agentThreadId("root_agent_interrupt"),
+      attemptId: "attempt_agent_interrupt",
+      fence,
+      createSession: async () => {
+        const session = completedSession("不应完成");
+        return {
+          ...session,
+          runPrompt: async () => {
+            await blocked;
+            throw new Error("SESSION_ABORTED");
+          },
+          abort,
+        };
+      },
+      authorizeModelStart: async () => authorization,
+      onToolEvent: async () => undefined,
+    });
+    await supervisor.initialize();
+    const child = await supervisor.spawn({
+      callId: "call_interrupt_spawn",
+      task: "等待中断",
+      tools: ["exec_command"],
+      forkTurns: "none",
+    });
+    await vi.waitFor(async () => expect((await supervisor.list())[0]?.status).toBe("running"));
+
+    await expect(
+      supervisor.interrupt({ callId: "call_interrupt", target: child.agentThreadId }),
+    ).resolves.toMatchObject({ status: "running" });
+    await expect(
+      supervisor.interrupt({ callId: "call_interrupt", target: child.agentThreadId }),
+    ).resolves.toMatchObject({ agentThreadId: child.agentThreadId });
+    await supervisor.drain();
+
+    expect(abort).toHaveBeenCalledOnce();
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]?.argsDigest).toBe(digestCanonical({ target: child.agentThreadId }));
+    expect((await supervisor.list())[0]?.status).toBe("interrupted");
   });
 
   it("达到 Agent Thread 数量上限后仍可复用已有闲置 Agent", async () => {

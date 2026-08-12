@@ -241,6 +241,36 @@ describe("Agent 工作台恢复接入", () => {
     expect(setTenantId).toHaveBeenLastCalledWith(undefined);
   });
 
+  it("移动会话导航展开时隐藏打开按钮并保留关闭入口", async () => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: vi.fn(() => ({
+        matches: true,
+        media: "(max-width: 820px)",
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
+    const { container } = mount(apiFixture());
+    await settleEffects();
+
+    const open = container.querySelector<HTMLButtonElement>('button[aria-label="打开会话导航"]');
+    expect(open).not.toBeNull();
+    await act(async () => open?.click());
+
+    expect(open?.hidden).toBe(true);
+    const close = container.querySelector<HTMLButtonElement>('button[aria-label="关闭会话导航"]');
+    expect(close).not.toBeNull();
+    await act(async () => close?.click());
+
+    expect(open?.hidden).toBe(false);
+    expect(document.activeElement).toBe(open);
+  });
+
   it("重复点击团队新增对话不会清空已加载的团队任务", async () => {
     const teamSummary: TeamSummary = {
       id: "tenant_product",

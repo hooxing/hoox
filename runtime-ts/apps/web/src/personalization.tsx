@@ -116,14 +116,23 @@ export function PersonalizationDialog({
             </div>
             {hasTeams && (
               <label className="personalization-team-toggle">
-                <input
-                  type="checkbox"
-                  checked={applyToTeamTasks}
-                  onChange={(event) => setApplyToTeamTasks(event.target.checked)}
-                />
-                <span>
-                  <strong>应用于团队任务</strong>
+                <span className="personalization-team-copy">
+                  <span className="personalization-team-title">
+                    <strong>应用于团队任务</strong>
+                    <small className="personalization-team-state">
+                      {applyToTeamTasks ? "已开启" : "已关闭"}
+                    </small>
+                  </span>
                   <small>开启后，你在团队中发起的任务会同时携带个人和团队个性化。</small>
+                </span>
+                <span className="personalization-switch">
+                  <input
+                    type="checkbox"
+                    aria-label="应用于团队任务"
+                    checked={applyToTeamTasks}
+                    onChange={(event) => setApplyToTeamTasks(event.target.checked)}
+                  />
+                  <span className="personalization-switch-track" aria-hidden="true" />
                 </span>
               </label>
             )}

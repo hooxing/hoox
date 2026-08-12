@@ -435,6 +435,8 @@ export interface CreateSafePiSessionOptions {
   prepareSandboxTool?: SandboxToolHandleProvider["prepareSandboxTool"];
   /** Tenant/Skill/User 只能进入低信任数据分区，不能直接替换系统 Harness。 */
   untrustedPromptContent?: RuntimePromptInput["untrusted"];
+  /** 团队与个人长期偏好作为 user/custom 上下文注入，不能替换稳定系统 Harness。 */
+  personalizationPromptContent?: RuntimePromptInput["personalization"];
   /** 只接受 Worker 从 RunSkillSnapshot 投影出的名称与一句描述。 */
   availableSkills?: readonly AvailableSkillPromptInput[];
   /** 内部兼容身份；不进入模型可见 AVAILABLE_SKILLS。 */
@@ -932,6 +934,9 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
       inputSchemaDigest: digestCanonicalToolInputSchema(tool.parameters),
     })),
     availableSkills: isEnabled("skill") ? (options.availableSkills ?? []) : [],
+    ...(options.personalizationPromptContent === undefined
+      ? {}
+      : { personalization: options.personalizationPromptContent }),
     untrusted: options.untrustedPromptContent ?? { tenant: [], skill: [], user: [] },
   });
   const serializedToolDefinitions = JSON.stringify(

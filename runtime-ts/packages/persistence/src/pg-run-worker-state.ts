@@ -1148,6 +1148,10 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             input.scope.tenantId,
             input.scope.runId,
           );
+          const requestUser = await client.query<{ readonly user_id: string }>(
+            `SELECT user_id FROM run_skill_snapshots WHERE tenant_id=$1 AND run_id=$2`,
+            [input.scope.tenantId, input.scope.runId],
+          );
           const fence: ExecutionFence = {
             scope: input.scope,
             runClaim: { token: claimToken, epoch: claimEpoch, expiresAt },
@@ -1159,6 +1163,9 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               run: state.run,
               tenantKind: row.tenant_kind === "personal" ? "personal" : "team",
               memorySubjectUserId: String(row.owner_user_id ?? row.thread_created_by_user_id),
+              requestedByUserId: String(
+                requestUser.rows[0]?.user_id ?? row.owner_user_id ?? row.thread_created_by_user_id,
+              ),
               workspace: state.workspace,
               attempt: state.attempt,
               input: String(row.input_text),

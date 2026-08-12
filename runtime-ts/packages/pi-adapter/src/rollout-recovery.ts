@@ -185,6 +185,9 @@ function safeSessionOptions(
     ...(options.untrustedPromptContent === undefined
       ? {}
       : { untrustedPromptContent: options.untrustedPromptContent }),
+    ...(options.personalizationPromptContent === undefined
+      ? {}
+      : { personalizationPromptContent: options.personalizationPromptContent }),
     ...(options.deliverFileToolRouter === undefined
       ? {}
       : { deliverFileToolRouter: options.deliverFileToolRouter }),

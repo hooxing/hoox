@@ -9,7 +9,8 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { ApiError, type TeamMember, type TeamSummary } from "./api.js";
+import { ApiError, type TeamMember, type TeamPersonalization, type TeamSummary } from "./api.js";
+import { personalizationSize } from "./personalization.js";
 
 export interface TeamWorkspaceApi {
   listTeams(): Promise<readonly TeamSummary[]>;
@@ -23,6 +24,11 @@ export interface TeamWorkspaceApi {
   ): Promise<TeamMember>;
   removeTeamMember(teamId: string, userId: string): Promise<void>;
   dissolveTeam(teamId: string): Promise<void>;
+  getTeamPersonalization?(teamId: string): Promise<TeamPersonalization>;
+  updateTeamPersonalization?(
+    teamId: string,
+    input: { readonly content: string; readonly expectedVersion: number },
+  ): Promise<TeamPersonalization>;
 }
 
 export function TeamSwitcher({
@@ -253,13 +259,28 @@ export function TeamManagementDialog({
   const [role, setRole] = useState<"admin" | "member">("member");
   const [error, setError] = useState<string>();
   const [loading, setLoading] = useState(true);
+  const [personalization, setPersonalization] = useState<TeamPersonalization>();
+  const [personalizationContent, setPersonalizationContent] = useState("");
+  const [savingPersonalization, setSavingPersonalization] = useState(false);
+  const personalizationLimit = personalizationSize(personalizationContent);
+  const personalizationTooLarge =
+    personalizationLimit.characters > 2_000 || personalizationLimit.bytes > 8 * 1_024;
 
   useEffect(() => {
     let stopped = false;
-    void api
-      .listTeamMembers(team.id)
-      .then((items) => {
-        if (!stopped) setMembers(items);
+    const personalizationRequest = api.getTeamPersonalization?.(team.id);
+    void Promise.all([
+      api.listTeamMembers(team.id),
+      personalizationRequest ?? Promise.resolve(undefined),
+    ])
+      .then(([items, setting]) => {
+        if (!stopped) {
+          setMembers(items);
+          if (setting !== undefined) {
+            setPersonalization(setting);
+            setPersonalizationContent(setting.content);
+          }
+        }
       })
       .catch((reason: unknown) => {
         if (!stopped) setError(reason instanceof ApiError ? reason.message : "加载团队成员失败");
@@ -285,6 +306,38 @@ export function TeamManagementDialog({
     }
   };
 
+  const savePersonalization = async () => {
+    if (
+      personalization === undefined ||
+      api.updateTeamPersonalization === undefined ||
+      !personalization.canEdit ||
+      personalizationTooLarge ||
+      savingPersonalization
+    ) {
+      return;
+    }
+    setSavingPersonalization(true);
+    try {
+      const value = await api.updateTeamPersonalization(team.id, {
+        content: personalizationContent,
+        expectedVersion: personalization.version,
+      });
+      setPersonalization(value);
+      setPersonalizationContent(value.content);
+      setError(undefined);
+    } catch (reason) {
+      setError(
+        reason instanceof ApiError && reason.status === 409
+          ? "团队个性化已被其他管理员更新，请关闭后重新打开。"
+          : reason instanceof ApiError
+            ? reason.message
+            : "保存团队个性化失败",
+      );
+    } finally {
+      setSavingPersonalization(false);
+    }
+  };
+
   return (
     <div className="skill-center-backdrop">
       <section className="team-management-dialog" role="dialog" aria-modal="true">
@@ -298,6 +351,40 @@ export function TeamManagementDialog({
           </button>
         </header>
         {error !== undefined && <div className="skill-center-error">{error}</div>}
+        {personalization !== undefined && (
+          <section
+            className="team-personalization-settings"
+            aria-labelledby="team-personalization-heading"
+          >
+            <div>
+              <h3 id="team-personalization-heading">团队个性化</h3>
+              <p>用于该团队之后发起的任务；当前任务要求可以覆盖这些偏好。</p>
+            </div>
+            <textarea
+              rows={6}
+              value={personalizationContent}
+              readOnly={!personalization.canEdit}
+              placeholder="例如团队默认技术栈、语言和协作习惯…"
+              onChange={(event) => setPersonalizationContent(event.target.value)}
+            />
+            <div className="team-personalization-actions">
+              <small className={personalizationTooLarge ? "invalid" : undefined}>
+                {personalizationLimit.characters} / 2000 字符
+              </small>
+              {personalization.canEdit ? (
+                <button
+                  type="button"
+                  disabled={savingPersonalization || personalizationTooLarge}
+                  onClick={() => void savePersonalization()}
+                >
+                  {savingPersonalization ? "保存中…" : "保存团队个性化"}
+                </button>
+              ) : (
+                <small>普通成员可查看，Owner 或管理员可以修改。</small>
+              )}
+            </div>
+          </section>
+        )}
         {team.role === "member" ? (
           <p className="team-management-readonly">
             普通成员可查看名单，成员变更由 Owner 或管理员处理。

@@ -3,6 +3,7 @@ import type {
   IsoTimestamp,
   ResourceId,
   ResourceVersionId,
+  RunPersonalizationSnapshot,
   Run,
   RunId,
   RunStatus,
@@ -290,6 +291,8 @@ export interface ClaimedExecutionSnapshot {
   readonly tenantKind?: "personal" | "team";
   /** 个人 Tenant 为 owner；团队 Tenant 仅作为审计主体，外部共享 scope 不使用该值。 */
   readonly memorySubjectUserId?: string;
+  /** 创建或提交该 Run 的用户；旧 Run 缺失时由 Worker 使用历史任务创建者兼容。 */
+  readonly requestedByUserId?: string;
   readonly workspace: Workspace;
   readonly attempt: ExecutionAttemptSnapshot;
   readonly input: string;
@@ -1039,6 +1042,8 @@ export interface AgentSessionFactoryPort {
     /** Session 创建前已知的首轮文本，只用于把即将追加的 user turn 计入自动压缩触发。 */
     readonly initialInputText?: string;
     readonly skillSnapshot?: RunSkillSnapshot;
+    /** Worker 在领取 Run 后读取一次；Root 与所有子 Agent 共用该不可变快照。 */
+    readonly personalizationSnapshot?: RunPersonalizationSnapshot;
     readonly contextThroughSequence?: number;
     readonly threadActiveHistory?: ThreadActiveHistoryV1;
     /**

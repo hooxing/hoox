@@ -10,6 +10,7 @@ import {
   type TraceBlobPersistencePort,
 } from "@cube-runtime/context-policy";
 import {
+  assertRunPersonalizationSnapshot,
   DomainError,
   sha256Digest,
   type TenantId,
@@ -232,6 +233,10 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         items: Object.freeze([]),
       });
     assertRunSkillSnapshot(skillSnapshot);
+    const personalizationSnapshot =
+      input.personalizationSnapshot === undefined
+        ? undefined
+        : assertRunPersonalizationSnapshot(input.personalizationSnapshot);
     const skillBinding: SkillExecutionBinding = Object.freeze({
       tenantId: input.scope.tenantId,
       threadId: input.scope.threadId,
@@ -508,6 +513,28 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         name: item.invocationName,
         description: item.description,
       })),
+      ...(personalizationSnapshot === undefined
+        ? {}
+        : {
+            personalizationPromptContent: {
+              ...(personalizationSnapshot.team === undefined
+                ? {}
+                : {
+                    team: {
+                      id: `team-personalization.v${personalizationSnapshot.team.version}`,
+                      content: personalizationSnapshot.team.content,
+                    },
+                  }),
+              ...(personalizationSnapshot.user === undefined
+                ? {}
+                : {
+                    user: {
+                      id: `user-personalization.v${personalizationSnapshot.user.version}`,
+                      content: personalizationSnapshot.user.content,
+                    },
+                  }),
+            },
+          }),
       skillSnapshotDigest: skillSnapshot.digest,
       skillToolExecutor,
       todoWriteToolExecutor,

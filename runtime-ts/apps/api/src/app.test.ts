@@ -517,6 +517,7 @@ function fixture(
     readonly historyFiles?: ApiDependencies["historyFiles"];
     readonly historyBlobs?: BlobStore;
     readonly teamCollaboration?: ApiDependencies["teamCollaboration"];
+    readonly personalizations?: ApiDependencies["personalizations"];
     readonly threadForks?: ApiDependencies["threadForks"];
   } = {},
 ) {
@@ -621,6 +622,9 @@ function fixture(
     ...(options.teamCollaboration === undefined
       ? {}
       : { teamCollaboration: options.teamCollaboration }),
+    ...(options.personalizations === undefined
+      ? {}
+      : { personalizations: options.personalizations }),
     ...(options.threadForks === undefined ? {} : { threadForks: options.threadForks }),
     ...(options.enableThreadContext === true
       ? {
@@ -963,6 +967,106 @@ afterEach(async () => {
 });
 
 describe("Fastify API 契约", () => {
+  it("个人与团队个性化执行版本冲突、作用域和可编辑权限契约", async () => {
+    let personal: Awaited<
+      ReturnType<NonNullable<ApiDependencies["personalizations"]>["getPersonal"]>
+    > = {
+      content: "",
+      applyToTeamTasks: true,
+      version: 0,
+    };
+    const personalizations: NonNullable<ApiDependencies["personalizations"]> = {
+      getPersonal: async () => personal,
+      updatePersonal: async (input) => {
+        if (input.expectedVersion !== personal.version) return { outcome: "conflict" };
+        personal = {
+          content: input.content,
+          applyToTeamTasks: input.applyToTeamTasks,
+          version: personal.version + 1,
+        };
+        return { outcome: "succeeded", value: personal };
+      },
+      getTeam: async ({ scope }) => ({
+        teamId: scope.tenantId,
+        content: "默认 TypeScript",
+        version: 2,
+        canEdit: true,
+      }),
+      updateTeam: async (input) =>
+        input.expectedVersion === 2
+          ? {
+              outcome: "succeeded",
+              value: {
+                teamId: input.scope.tenantId,
+                content: input.content,
+                version: 3,
+                canEdit: true,
+              },
+            }
+          : { outcome: "conflict" },
+    };
+    const { app, ownerA, state } = fixture({ personalizations });
+    openApps.push(app);
+    const team = rehydrateTenant(
+      {
+        id: "tenant_personalization_team",
+        kind: "team",
+        displayName: "研发团队",
+        createdByUserId: ownerA.user.id,
+        createdAt: baseTime,
+      },
+      ownerA.user,
+    );
+    state.tenants.set(
+      key({ tenantId: team.id, userId: ownerA.user.id }, ownerA.user.id),
+      teamBundle({
+        suffix: "personalization_team_owner",
+        tenant: team,
+        user: ownerA.user,
+        role: "owner",
+      }),
+    );
+
+    const initial = await app.inject({
+      method: "GET",
+      url: "/v1/me/personalization",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(initial.json().data).toEqual({ content: "", applyToTeamTasks: true, version: 0 });
+    const updated = await app.inject({
+      method: "PUT",
+      url: "/v1/me/personalization",
+      headers: { authorization: "Bearer token-a", "content-type": "application/json" },
+      payload: { content: "  默认中文\r\n简洁回答  ", applyToTeamTasks: false, expectedVersion: 0 },
+    });
+    expect(updated.json().data).toMatchObject({
+      content: "默认中文\n简洁回答",
+      applyToTeamTasks: false,
+      version: 1,
+    });
+    expect(
+      (
+        await app.inject({
+          method: "PUT",
+          url: "/v1/me/personalization",
+          headers: { authorization: "Bearer token-a", "content-type": "application/json" },
+          payload: { content: "冲突", applyToTeamTasks: true, expectedVersion: 0 },
+        })
+      ).statusCode,
+    ).toBe(409);
+
+    const teamSetting = await app.inject({
+      method: "GET",
+      url: `/v1/teams/${team.id}/personalization`,
+      headers: { authorization: "Bearer token-a", "x-tenant-id": team.id },
+    });
+    expect(teamSetting.json().data).toMatchObject({
+      teamId: team.id,
+      content: "默认 TypeScript",
+      canEdit: true,
+    });
+  });
+
   it("团队入口支持单一切换目录、成员读取与 Owner 解散", async () => {
     let dissolved = false;
     const teamCollaboration: NonNullable<ApiDependencies["teamCollaboration"]> = {

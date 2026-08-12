@@ -1,4 +1,13 @@
-import { resourceId, resourceVersionId, runId, sha256Digest, tenantId } from "@cube-runtime/domain";
+import {
+  resourceId,
+  resourceVersionId,
+  runId,
+  sha256Digest,
+  tenantId,
+  type RunPersonalizationSnapshot,
+  type TenantId,
+  type UserId,
+} from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { MemoryRetriever } from "@cube-runtime/memory";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
@@ -73,6 +82,11 @@ function harness(
     | boolean
     | ((ensure: () => Promise<SandboxSessionRef>) => Promise<void>) = false,
   memoryRetriever?: MemoryRetriever,
+  personalizations?: Readonly<{
+    resolveForRun(input: {
+      readonly scope: { readonly tenantId: TenantId; readonly userId: UserId };
+    }): Promise<RunPersonalizationSnapshot>;
+  }>,
 ) {
   const persistence = new FakeExecutionPersistence();
   const scope = persistence.addSeed(seed);
@@ -108,6 +122,7 @@ function harness(
       ...(workerOptions.threadSandboxSessionReuseEnabled === true ? { threadSandboxes } : {}),
       ...(workerOptions.subagentsEnabled === true ? { agentControl } : {}),
       ...(memoryRetriever === undefined ? {} : { memoryRetriever }),
+      ...(personalizations === undefined ? {} : { personalizations }),
     },
     {
       workerId: "worker-test",
@@ -206,6 +221,32 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       outcome: "succeeded",
     });
     expect(fallback.factory.initialInputTexts).toEqual(["执行任务"]);
+  });
+
+  it("领取 Run 后按实际发起用户读取一次个性化，并把同一快照交给 Session", async () => {
+    const seed = { ...fakeSeed("personalization"), requestedByUserId: "user-task-initiator" };
+    const snapshot: RunPersonalizationSnapshot = Object.freeze({
+      team: Object.freeze({ content: "团队默认使用 TypeScript", version: 4 }),
+      user: Object.freeze({ content: "回答保持简洁", version: 7 }),
+    });
+    const personalizations = {
+      resolveForRun: vi.fn(async () => snapshot),
+    };
+    const h = harness(
+      [new ScriptedAgentSession(successfulEvents)],
+      seed,
+      {},
+      undefined,
+      false,
+      undefined,
+      personalizations,
+    );
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(personalizations.resolveForRun).toHaveBeenCalledWith({
+      scope: { tenantId: seed.run.tenantId, userId: "user-task-initiator" },
+    });
+    expect(h.factory.personalizationSnapshots).toEqual([snapshot]);
   });
 
   it("root 与 SubAgent 的独立 Session 复用同一个已物化 Sandbox", async () => {

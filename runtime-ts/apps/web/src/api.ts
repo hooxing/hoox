@@ -22,6 +22,21 @@ export type TeamMember = {
   readonly joinedAt: string;
 };
 
+export type PersonalPersonalization = {
+  readonly content: string;
+  readonly applyToTeamTasks: boolean;
+  readonly version: number;
+  readonly updatedAt?: string;
+};
+
+export type TeamPersonalization = {
+  readonly teamId: string;
+  readonly content: string;
+  readonly version: number;
+  readonly canEdit: boolean;
+  readonly updatedAt?: string;
+};
+
 export type RunStatus = "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled";
 export type Run = {
   readonly id: string;
@@ -433,6 +448,37 @@ export class RuntimeApi {
 
   async listTeams(): Promise<readonly TeamSummary[]> {
     return asArray(await this.request<unknown>("/v1/me/teams", {}, null)) as readonly TeamSummary[];
+  }
+
+  getPersonalPersonalization(): Promise<PersonalPersonalization> {
+    return this.request("/v1/me/personalization", {}, null);
+  }
+
+  updatePersonalPersonalization(input: {
+    readonly content: string;
+    readonly applyToTeamTasks: boolean;
+    readonly expectedVersion: number;
+  }): Promise<PersonalPersonalization> {
+    return this.request(
+      "/v1/me/personalization",
+      { method: "PUT", body: JSON.stringify(input) },
+      null,
+    );
+  }
+
+  getTeamPersonalization(teamId: string): Promise<TeamPersonalization> {
+    return this.request(`/v1/teams/${encodeURIComponent(teamId)}/personalization`, {}, teamId);
+  }
+
+  updateTeamPersonalization(
+    teamId: string,
+    input: { readonly content: string; readonly expectedVersion: number },
+  ): Promise<TeamPersonalization> {
+    return this.request(
+      `/v1/teams/${encodeURIComponent(teamId)}/personalization`,
+      { method: "PUT", body: JSON.stringify(input) },
+      teamId,
+    );
   }
 
   createTeam(displayName: string): Promise<TeamSummary> {

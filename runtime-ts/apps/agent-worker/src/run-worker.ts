@@ -7,6 +7,8 @@ import {
   type TodoWriteCommand,
   type Workspace,
   type WorkspaceRevisionId,
+  userId,
+  type RunPersonalizationSnapshot,
 } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import { injectRetrievedMemories, type MemoryRetriever } from "@cube-runtime/memory";
@@ -270,6 +272,14 @@ interface WorkerDependencies {
   readonly agentControl?: AgentControlPersistencePort;
   /** 长期记忆是低信任可选上下文；任何失败都不得改变 Run 终态。 */
   readonly memoryRetriever?: MemoryRetriever;
+  readonly personalizations?: Readonly<{
+    resolveForRun(input: {
+      readonly scope: {
+        readonly tenantId: ExecutionScope["tenantId"];
+        readonly userId: ReturnType<typeof userId>;
+      };
+    }): Promise<RunPersonalizationSnapshot>;
+  }>;
 }
 
 interface ExecutionContext {
@@ -850,6 +860,20 @@ export class RunWorker {
       };
 
       const initialUserText = claim.snapshot.answer ?? claim.snapshot.input;
+      const personalizationUserId =
+        claim.snapshot.requestedByUserId ?? claim.snapshot.memorySubjectUserId;
+      if (this.dependencies.personalizations !== undefined && personalizationUserId === undefined) {
+        throw new Error("Run 缺少个性化用户身份");
+      }
+      const personalizationSnapshot =
+        this.dependencies.personalizations === undefined
+          ? undefined
+          : await this.dependencies.personalizations.resolveForRun({
+              scope: {
+                tenantId: scope.tenantId,
+                userId: userId(personalizationUserId as string),
+              },
+            });
       let promptInput = {
         text: await this.withRetrievedMemory(claim.snapshot, scope, initialUserText),
         attachments: claim.snapshot.answer === undefined ? (claim.snapshot.attachments ?? []) : [],
@@ -880,6 +904,7 @@ export class RunWorker {
                   ...(claim.snapshot.skills === undefined
                     ? {}
                     : { skillSnapshot: claim.snapshot.skills }),
+                  ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
                   ...(child.history === undefined ? {} : { threadActiveHistory: child.history }),
                   authorizeToolEffect: (call) =>
                     this.authorizeToolEffectAfterStarted(context, cancellation, call),
@@ -937,6 +962,7 @@ export class RunWorker {
         rolloutProjection: claim.snapshot.rolloutProjection,
         initialInputText: promptInput.text,
         ...(claim.snapshot.skills === undefined ? {} : { skillSnapshot: claim.snapshot.skills }),
+        ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
         ...(claim.snapshot.contextThroughSequence === undefined
           ? {}
           : { contextThroughSequence: claim.snapshot.contextThroughSequence }),

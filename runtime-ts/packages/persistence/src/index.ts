@@ -6,6 +6,7 @@ export * from "./model-wire-trace-read.js";
 export * from "./pg-blob-lifecycle.js";
 export { PgArchiveThreadCommand } from "./pg-core-repositories.js";
 export * from "./pg-model-wire-trace.js";
+export * from "./pg-personalization-settings.js";
 export * from "./pg-memory-ingestion.js";
 export * from "./pg-personal-history.js";
 export * from "./pg-recovery-metrics.js";

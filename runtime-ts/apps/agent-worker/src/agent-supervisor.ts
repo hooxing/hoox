@@ -31,6 +31,8 @@ interface ChildState {
   readonly forkTurns: AgentForkTurns;
   turnOrdinal: number;
   status: AgentSummary["status"];
+  activeStartedAtMs: number | undefined;
+  lastMailboxSequence: number;
   history: ThreadActiveHistoryV1 | undefined;
   session: WorkerAgentSessionPort | undefined;
   interruptRequested: boolean;
@@ -45,6 +47,7 @@ interface AgentSupervisorDependencies {
   readonly fence: Parameters<AgentControlPersistencePort["initializeRoot"]>[0]["fence"];
   readonly maxThreads?: number;
   readonly maxConcurrentAgents?: number;
+  readonly now?: () => number;
   readonly createSession: (input: {
     readonly identity: AgentExecutionIdentity;
     readonly tools: readonly DelegableAgentToolName[];
@@ -138,9 +141,12 @@ export class AgentSupervisor implements AgentControlPort {
   #parentHistory: ThreadActiveHistoryV1 | undefined;
   #stopping = false;
 
+  readonly #now: () => number;
+
   constructor(private readonly dependencies: AgentSupervisorDependencies) {
     this.#maxThreads = dependencies.maxThreads ?? 16;
     this.#maxActiveSubagents = (dependencies.maxConcurrentAgents ?? 4) - 1;
+    this.#now = dependencies.now ?? Date.now;
     if (this.#maxActiveSubagents < 1) throw new Error("AGENT_CAPACITY_INVALID");
   }
 
@@ -167,6 +173,8 @@ export class AgentSupervisor implements AgentControlPort {
         forkTurns: conversation.forkTurns,
         turnOrdinal: conversation.turnOrdinal,
         status: "idle",
+        activeStartedAtMs: undefined,
+        lastMailboxSequence: 0,
         history: conversation.history,
         session: undefined,
         interruptRequested: false,
@@ -249,6 +257,8 @@ export class AgentSupervisor implements AgentControlPort {
         forkTurns: input.forkTurns,
         turnOrdinal: 1,
         status: "running",
+        activeStartedAtMs: this.#now(),
+        lastMailboxSequence: 0,
         history,
         session: undefined,
         interruptRequested: false,
@@ -337,6 +347,7 @@ export class AgentSupervisor implements AgentControlPort {
     child.turnOrdinal = ordinal;
     child.currentTask = prompt;
     child.status = "running";
+    child.activeStartedAtMs = this.#now();
     child.interruptRequested = false;
     this.#startTurn(child, turnId, prompt);
     return this.#summary(child);
@@ -567,6 +578,7 @@ export class AgentSupervisor implements AgentControlPort {
     if (persisted.outcome !== "created" && persisted.outcome !== "replayed") {
       throw new Error(`AGENT_MAILBOX_${persisted.outcome.toUpperCase()}`);
     }
+    child.lastMailboxSequence = Math.max(child.lastMailboxSequence, persisted.sequence);
     this.#updates.push({ sequence: persisted.sequence, senderPath: child.path, ...update });
     this.#updates.sort((left, right) => left.sequence - right.sequence);
     for (const wake of this.#waiters) wake();
@@ -599,6 +611,7 @@ export class AgentSupervisor implements AgentControlPort {
   }
 
   #summary(child: ChildState): AgentSummary {
+    const activeStartedAtMs = child.status === "running" ? child.activeStartedAtMs : undefined;
     return Object.freeze({
       agentThreadId: child.agentThreadId,
       path: child.path,
@@ -606,6 +619,13 @@ export class AgentSupervisor implements AgentControlPort {
       currentTask: child.currentTask,
       status: child.status,
       turnOrdinal: child.turnOrdinal,
+      ...(activeStartedAtMs === undefined
+        ? {}
+        : {
+            startedAt: new Date(activeStartedAtMs).toISOString(),
+            activeForMs: Math.max(0, this.#now() - activeStartedAtMs),
+          }),
+      lastMailboxSequence: child.lastMailboxSequence,
       tools: child.tools,
     });
   }

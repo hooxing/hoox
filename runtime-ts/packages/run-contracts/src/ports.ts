@@ -60,12 +60,28 @@ export interface AgentSummary {
   readonly tools: readonly DelegableAgentToolName[];
 }
 
-export interface AgentMailboxUpdate {
-  readonly sequence: number;
-  readonly senderPath: string;
-  readonly kind: "message" | "final_answer" | "error";
-  readonly payload: string;
-}
+export type AgentMailboxUpdate =
+  | {
+      readonly sequence: number;
+      readonly senderPath: string;
+      readonly kind: "message";
+      readonly payload: string;
+    }
+  | {
+      readonly sequence: number;
+      readonly senderPath: string;
+      readonly kind: "final_answer";
+      readonly status: "completed";
+      readonly payload: string;
+    }
+  | {
+      readonly sequence: number;
+      readonly senderPath: string;
+      readonly kind: "error";
+      readonly status: "interrupted" | "failed";
+      readonly errorCode: string;
+      readonly payload: string;
+    };
 
 /** Root Pi 工具只依赖该进程内控制面；Workspace 与 Sandbox 所有权仍由 RunWorker 持有。 */
 export interface AgentControlPort {
@@ -185,6 +201,8 @@ export interface AgentControlPersistencePort {
     readonly recipientAgentThreadId: AgentThreadId;
     readonly senderAgentThreadId: AgentThreadId;
     readonly kind: AgentMailboxUpdate["kind"];
+    readonly terminalStatus?: "completed" | "interrupted" | "failed";
+    readonly errorCode?: string;
     readonly payload: string;
   }): Promise<
     | { readonly outcome: "created" | "replayed"; readonly sequence: number }

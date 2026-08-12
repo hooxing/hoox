@@ -11,6 +11,7 @@ import type {
   WorkspaceId,
   WorkspaceRevisionCommitPort,
   WorkspaceWriteScope,
+  RunPersonalizationSnapshot,
 } from "@cube-runtime/domain";
 import type { ResourceAttachmentReference } from "@cube-runtime/resource";
 import type { ExplicitSkillInvocation } from "@cube-runtime/skill";
@@ -259,6 +260,46 @@ export interface TeamMemberView {
   readonly userId: UserId;
   readonly role: "owner" | "admin" | "member";
   readonly joinedAt: string;
+}
+
+export interface PersonalPersonalizationView {
+  readonly content: string;
+  readonly applyToTeamTasks: boolean;
+  readonly version: number;
+  readonly updatedAt?: string;
+}
+
+export interface TeamPersonalizationView {
+  readonly teamId: TenantId;
+  readonly content: string;
+  readonly version: number;
+  readonly canEdit: boolean;
+  readonly updatedAt?: string;
+}
+
+export type PersonalizationUpdateResult<T> =
+  | { readonly outcome: "succeeded"; readonly value: T }
+  | { readonly outcome: "conflict" | "not_found" | "not_authorized" };
+
+export interface PersonalizationSettingsPort {
+  getPersonal(input: { readonly scope: TenantScope }): Promise<PersonalPersonalizationView>;
+  updatePersonal(input: {
+    readonly scope: TenantScope;
+    readonly content: string;
+    readonly applyToTeamTasks: boolean;
+    readonly expectedVersion: number;
+  }): Promise<PersonalizationUpdateResult<PersonalPersonalizationView>>;
+  getTeam(input: { readonly scope: TenantScope }): Promise<TeamPersonalizationView | undefined>;
+  updateTeam(input: {
+    readonly scope: TenantScope;
+    readonly content: string;
+    readonly expectedVersion: number;
+  }): Promise<PersonalizationUpdateResult<TeamPersonalizationView>>;
+}
+
+/** Worker 只拿到当前用户与当前 Tenant 可见的合并快照，不能取得设置写能力。 */
+export interface RunPersonalizationReadPort {
+  resolveForRun(input: { readonly scope: TenantScope }): Promise<RunPersonalizationSnapshot>;
 }
 
 export type TeamMutationResult<T> =

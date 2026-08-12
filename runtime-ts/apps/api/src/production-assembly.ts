@@ -118,6 +118,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
         {
           auth: createProductionJwtAuthResolver(configuration.production.jwt),
           repositories: persistence.repositories,
+          personalizations: persistence.personalizations,
           ...(persistence.teamCollaboration === undefined
             ? {}
             : { teamCollaboration: persistence.teamCollaboration }),

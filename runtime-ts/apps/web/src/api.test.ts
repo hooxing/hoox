@@ -99,6 +99,47 @@ describe("RuntimeApi", () => {
     expect(api.getTenantId()).toBe("tenant_stale");
   });
 
+  it("个人个性化固定使用个人身份，团队个性化固定绑定目标团队", async () => {
+    const fetcher = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            version: "v1",
+            requestId: "req_personalization",
+            data: { content: "", version: 0, applyToTeamTasks: true, canEdit: true },
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    const api = new RuntimeApi(fetcher, "/api");
+    api.setTenantId("tenant_active");
+
+    await api.getPersonalPersonalization();
+    await api.updatePersonalPersonalization({
+      content: "默认中文",
+      applyToTeamTasks: false,
+      expectedVersion: 0,
+    });
+    await api.getTeamPersonalization("tenant_product");
+    await api.updateTeamPersonalization("tenant_product", {
+      content: "默认 TypeScript",
+      expectedVersion: 0,
+    });
+
+    const requests = fetcher.mock.calls.map((call) => {
+      const [url, init] = call as [string, RequestInit];
+      return { url, tenantId: new Headers(init.headers).get("x-tenant-id") };
+    });
+    expect(requests).toEqual([
+      { url: "/api/v1/me/personalization", tenantId: null },
+      { url: "/api/v1/me/personalization", tenantId: null },
+      { url: "/api/v1/teams/tenant_product/personalization", tenantId: "tenant_product" },
+      { url: "/api/v1/teams/tenant_product/personalization", tenantId: "tenant_product" },
+    ]);
+    expect(api.getTenantId()).toBe("tenant_active");
+  });
+
   it("统一输入发送 auto/expected Run，并在入口关闭时回退 legacy follow-up", async () => {
     const receipt = {
       receiptId: "input-1",

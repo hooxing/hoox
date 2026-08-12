@@ -138,6 +138,10 @@ const teamCollaborationTables = new Set([
   "tenant_skill_installation_commands",
   "tenant_skill_installation_audits",
 ]);
+const personalizationSettingsTables = new Set([
+  "user_personalization_settings",
+  "team_personalization_settings",
+]);
 const skillPublicationTables = new Set([
   "platform_skill_operators",
   "skill_publication_submissions",
@@ -150,6 +154,8 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
   ["tenants", new Set(["SELECT", "INSERT"])],
   ["memberships", new Set(["SELECT", "INSERT"])],
+  ["user_personalization_settings", new Set(["SELECT", "INSERT"])],
+  ["team_personalization_settings", new Set(["SELECT"])],
   ["threads", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["runs", new Set(["SELECT", "INSERT", "UPDATE"])],
   ["workspaces", new Set(["SELECT", "INSERT", "UPDATE"])],
@@ -261,6 +267,10 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
 ]);
 
 const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
+  [
+    "user_personalization_settings",
+    new Set(["content", "apply_to_team_tasks", "version", "updated_at"]),
+  ],
   [
     "blob_lifecycles",
     new Set([
@@ -667,6 +677,19 @@ async function hasTeamCollaborationState(client: PoolClient, schema: string): Pr
   return result.rows[0]?.present === true;
 }
 
+async function hasPersonalizationSettingsState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.user_personalization_settings', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.team_personalization_settings', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasSkillRuntimeState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.run_skill_snapshots', $1::text)) IS NOT NULL
@@ -1014,6 +1037,9 @@ async function activeTablePolicy(
     // 团队目录与 Membership 变更只向独立 Team Coordinator 开放。
     policy.set("team_member_directory", new Set());
   }
+  if (!(await hasPersonalizationSettingsState(client, schema))) {
+    for (const table of personalizationSettingsTables) policy.delete(table);
+  }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
@@ -1035,6 +1061,9 @@ async function activeColumnUpdatePolicy(
   const membershipUpdateColumns = new Set<string>();
   if (await hasMembershipLockMarker(client)) membershipUpdateColumns.add("lock_marker");
   policy.set("memberships", membershipUpdateColumns);
+  if (!(await hasPersonalizationSettingsState(client, schema))) {
+    for (const table of personalizationSettingsTables) policy.delete(table);
+  }
   if (!(await hasRunWorkerState(client))) {
     for (const table of runWorkerTables) policy.delete(table);
   }
@@ -1668,6 +1697,9 @@ async function activeTeamCoordinatorTablePolicy(
   if (!(await hasTeamCollaborationState(client, schema))) return new Map();
   const policy = new Map(await activeTablePolicy(client, schema));
   policy.set("team_member_directory", new Set(["SELECT", "INSERT"]));
+  if (await hasPersonalizationSettingsState(client, schema)) {
+    policy.set("team_personalization_settings", new Set(["SELECT", "INSERT"]));
+  }
   return policy;
 }
 
@@ -1682,6 +1714,12 @@ async function activeTeamCoordinatorColumnUpdatePolicy(
   membershipColumns.add("status");
   policy.set("memberships", membershipColumns);
   policy.set("team_member_directory", new Set(["role", "status", "updated_at"]));
+  if (await hasPersonalizationSettingsState(client, schema)) {
+    policy.set(
+      "team_personalization_settings",
+      new Set(["content", "version", "updated_by_user_id", "updated_at"]),
+    );
+  }
   return policy;
 }
 
@@ -2343,6 +2381,14 @@ export async function bootstrapRuntimeAccessOnClient(
        GRANT UPDATE(
          skill_version,invocation_name,status,version_token,installed_at,updated_at
        ) ON TABLE ${schema}.tenant_skill_installations TO ${role}`,
+    );
+  }
+  if (await hasPersonalizationSettingsState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.user_personalization_settings TO ${role};
+       GRANT SELECT ON TABLE ${schema}.team_personalization_settings TO ${role};
+       GRANT UPDATE(content,apply_to_team_tasks,version,updated_at)
+         ON TABLE ${schema}.user_personalization_settings TO ${role}`,
     );
   }
   await client.query(

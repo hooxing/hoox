@@ -1,4 +1,11 @@
-import { Cloud, LoaderCircle, PanelLeftOpen, Puzzle, RotateCw } from "lucide-react";
+import {
+  Cloud,
+  LoaderCircle,
+  PanelLeftOpen,
+  Puzzle,
+  RotateCw,
+  SlidersHorizontal,
+} from "lucide-react";
 import {
   useCallback,
   useEffect,
@@ -25,6 +32,7 @@ import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
+import { type PersonalizationApi, PersonalizationDialog } from "./personalization.js";
 import { type SkillCenterApi, SkillCenterDialog } from "./skill-center.js";
 import { initialWorkspaceState, workspaceReducer } from "./state.js";
 import {
@@ -129,6 +137,7 @@ type WorkspaceApi = Pick<
 } & Partial<SkillCenterApi & CloudDriveApi>;
 
 type TeamAwareWorkspaceApi = WorkspaceApi &
+  Partial<PersonalizationApi> &
   Partial<
     TeamWorkspaceApi &
       Pick<
@@ -181,6 +190,8 @@ function resolveTeamWorkspaceApi(client: TeamAwareWorkspaceApi): TeamWorkspaceAp
     changeTeamMemberRole,
     removeTeamMember,
     dissolveTeam,
+    getTeamPersonalization,
+    updateTeamPersonalization,
   } = client;
   if (
     listTeams === undefined ||
@@ -201,6 +212,23 @@ function resolveTeamWorkspaceApi(client: TeamAwareWorkspaceApi): TeamWorkspaceAp
     changeTeamMemberRole: changeTeamMemberRole.bind(client),
     removeTeamMember: removeTeamMember.bind(client),
     dissolveTeam: dissolveTeam.bind(client),
+    ...(getTeamPersonalization === undefined
+      ? {}
+      : { getTeamPersonalization: getTeamPersonalization.bind(client) }),
+    ...(updateTeamPersonalization === undefined
+      ? {}
+      : { updateTeamPersonalization: updateTeamPersonalization.bind(client) }),
+  };
+}
+
+function resolvePersonalizationApi(client: TeamAwareWorkspaceApi): PersonalizationApi | undefined {
+  const { getPersonalPersonalization, updatePersonalPersonalization } = client;
+  if (getPersonalPersonalization === undefined || updatePersonalPersonalization === undefined) {
+    return undefined;
+  }
+  return {
+    getPersonalPersonalization: getPersonalPersonalization.bind(client),
+    updatePersonalPersonalization: updatePersonalPersonalization.bind(client),
   };
 }
 
@@ -262,6 +290,7 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [skillCenterOpen, setSkillCenterOpen] = useState(false);
   const [cloudDriveOpen, setCloudDriveOpen] = useState(false);
+  const [personalizationOpen, setPersonalizationOpen] = useState(false);
   const [teams, setTeams] = useState<readonly TeamSummary[]>([]);
   const [teamsLoading, setTeamsLoading] = useState(false);
   const [activeTeamId, setActiveTeamId] = useState<string>();
@@ -291,6 +320,7 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
   const skillCenterApi = useMemo(() => resolveSkillCenterApi(apiClient), [apiClient]);
   const cloudDriveApi = useMemo(() => resolveCloudDriveApi(apiClient), [apiClient]);
   const teamWorkspaceApi = useMemo(() => resolveTeamWorkspaceApi(apiClient), [apiClient]);
+  const personalizationApi = useMemo(() => resolvePersonalizationApi(apiClient), [apiClient]);
   const activeTeam = teams.find((team) => team.id === activeTeamId);
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? teams[0];
   const managedTeam = teams.find((team) => team.id === selectedTeamId);
@@ -1067,6 +1097,19 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
         onClose={() => setNavigationOpen(false)}
       >
         <ThreadCreate actionLoading={actionLoading} onCreate={createConversation} />
+        {personalizationApi !== undefined && (
+          <button
+            type="button"
+            className="personalization-entry"
+            onClick={() => {
+              setPersonalizationOpen(true);
+              setNavigationOpen(false);
+            }}
+          >
+            <SlidersHorizontal size={17} />
+            个性化
+          </button>
+        )}
         {skillCenterApi !== undefined && (
           <button
             type="button"
@@ -1310,6 +1353,13 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
             ? {}
             : { scopeName: activeTeam.displayName, readOnly: activeTeam.role === "member" })}
           onClose={() => setSkillCenterOpen(false)}
+        />
+      )}
+      {personalizationOpen && personalizationApi !== undefined && (
+        <PersonalizationDialog
+          api={personalizationApi}
+          hasTeams={teams.length > 0}
+          onClose={() => setPersonalizationOpen(false)}
         />
       )}
       {cloudDriveOpen && personalCloudDriveApi !== undefined && (

@@ -80,6 +80,7 @@ interface FakeRecord {
   readonly scope: ExecutionScope;
   readonly tenantKind: "personal" | "team";
   readonly memorySubjectUserId: string;
+  readonly requestedByUserId: string;
   run: Run;
   workspace: Workspace;
   readonly input: string;
@@ -168,6 +169,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       scope,
       tenantKind: seed.tenantKind ?? "personal",
       memorySubjectUserId: seed.memorySubjectUserId ?? "memory-user-test",
+      requestedByUserId: seed.requestedByUserId ?? seed.memorySubjectUserId ?? "memory-user-test",
       run: seed.run,
       workspace: seed.workspace,
       input: seed.input,
@@ -241,6 +243,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
         run: record.run,
         tenantKind: record.tenantKind,
         memorySubjectUserId: record.memorySubjectUserId,
+        requestedByUserId: record.requestedByUserId,
         workspace: record.workspace,
         attempt,
         input: record.input,
@@ -1225,6 +1228,9 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
   readonly initialInputTexts: Array<
     Parameters<AgentSessionFactoryPort["create"]>[0]["initialInputText"]
   > = [];
+  readonly personalizationSnapshots: Array<
+    Parameters<AgentSessionFactoryPort["create"]>[0]["personalizationSnapshot"]
+  > = [];
   readonly preparedSandboxes: SandboxSessionRef[] = [];
 
   constructor(
@@ -1246,6 +1252,7 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
     this.agentControls.push(input.agentControl);
     this.agentIdentities.push(input.agent);
     this.initialInputTexts.push(input.initialInputText);
+    this.personalizationSnapshots.push(input.personalizationSnapshot);
     let safePointChain = Promise.resolve();
     const unsubscribe =
       input.onTurnSafePoint === undefined
@@ -1400,6 +1407,7 @@ export interface FakeSeed {
   readonly run: Run;
   readonly tenantKind?: "personal" | "team";
   readonly memorySubjectUserId?: string;
+  readonly requestedByUserId?: string;
   readonly workspace: Workspace;
   readonly input: string;
   readonly attachments?: readonly UserInputAttachmentReference[];

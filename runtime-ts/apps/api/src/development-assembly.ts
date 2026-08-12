@@ -147,6 +147,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
             principals,
           }),
           repositories: persistence.repositories,
+          personalizations: persistence.personalizations,
           ...(persistence.teamCollaboration === undefined
             ? {}
             : { teamCollaboration: persistence.teamCollaboration }),

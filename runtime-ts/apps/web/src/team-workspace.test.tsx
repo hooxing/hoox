@@ -4,7 +4,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TeamSummary } from "./api.js";
-import { TeamCenterDialog, TeamSwitcher } from "./team-workspace.js";
+import {
+  TeamCenterDialog,
+  TeamManagementDialog,
+  TeamSwitcher,
+  type TeamWorkspaceApi,
+} from "./team-workspace.js";
 
 const teams: readonly TeamSummary[] = [
   {
@@ -148,5 +153,67 @@ describe("团队空间切换器", () => {
     );
     await act(async () => refreshJoin?.click());
     expect(onRefresh).toHaveBeenCalledOnce();
+  });
+
+  it("团队设置读取个性化并以当前版本保存管理员修改", async () => {
+    const updateTeamPersonalization = vi.fn(async () => ({
+      teamId: "tenant_product",
+      content: "默认使用中文并给出测试结果",
+      version: 4,
+      canEdit: true,
+    }));
+    const api: TeamWorkspaceApi = {
+      listTeams: async () => teams,
+      createTeam: async () => teams[0] as TeamSummary,
+      listTeamMembers: async () => [],
+      addTeamMember: async () => {
+        throw new Error("本测试不调用");
+      },
+      changeTeamMemberRole: async () => {
+        throw new Error("本测试不调用");
+      },
+      removeTeamMember: async () => undefined,
+      dissolveTeam: async () => undefined,
+      getTeamPersonalization: async () => ({
+        teamId: "tenant_product",
+        content: "默认使用中文",
+        version: 3,
+        canEdit: true,
+      }),
+      updateTeamPersonalization,
+    };
+    await act(async () =>
+      root.render(
+        <TeamManagementDialog
+          api={api}
+          team={teams[0] as TeamSummary}
+          onDissolved={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      ),
+    );
+    await act(async () => undefined);
+
+    const textarea = container.querySelector<HTMLTextAreaElement>(
+      ".team-personalization-settings textarea",
+    );
+    expect(textarea?.value).toBe("默认使用中文");
+    await act(async () => {
+      if (textarea !== null) {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+          textarea,
+          "默认使用中文并给出测试结果",
+        );
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    });
+    const save = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent === "保存团队个性化",
+    );
+    await act(async () => save?.click());
+    expect(updateTeamPersonalization).toHaveBeenCalledWith("tenant_product", {
+      content: "默认使用中文并给出测试结果",
+      expectedVersion: 3,
+    });
   });
 });

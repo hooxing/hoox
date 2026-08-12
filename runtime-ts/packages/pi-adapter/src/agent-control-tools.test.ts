@@ -101,6 +101,26 @@ describe("SubAgent Pi 协作工具", () => {
     expect(tested.spawn).not.toHaveBeenCalled();
   });
 
+  it("wait_agent 必须显式传入游标，避免遗漏后重复读取历史消息", async () => {
+    const tested = tools();
+    const wait = tested.created.find((tool) => tool.name === "wait_agent");
+    if (wait?.name !== "wait_agent" || wait.prepareArguments === undefined) {
+      throw new Error("测试缺少 wait_agent schema 参数桥");
+    }
+    const prepared = wait.prepareArguments({ timeout_ms: 1_000 });
+    expect(Value.Check(wait.parameters, prepared)).toBe(true);
+
+    await expect(
+      wait.execute(
+        "call_wait_missing_cursor",
+        prepared as WaitArgumentsForTest,
+        undefined,
+        () => undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow("AGENT_CONTROL_FAILED");
+    expect(tested.record).toHaveBeenCalledWith("call_wait_missing_cursor", "wait_agent", "failed");
+  });
   it("schema 错误不调用控制面，但仍形成 durable 失败回执", async () => {
     const tested = tools();
     const spawn = tested.created[0];
@@ -128,4 +148,9 @@ type SpawnArgumentsForTest = {
   readonly task: string;
   readonly tools: readonly ("exec_command" | "read" | "edit" | "write" | "skill")[];
   readonly fork_turns: string;
+};
+
+type WaitArgumentsForTest = {
+  readonly after_sequence: number;
+  readonly timeout_ms?: number;
 };

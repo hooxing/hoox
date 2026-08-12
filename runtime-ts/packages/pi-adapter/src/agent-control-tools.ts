@@ -47,7 +47,11 @@ const TargetArgumentsSchema = Type.Object(
 const EmptyArgumentsSchema = Type.Object({}, strict);
 const WaitArgumentsSchema = Type.Object(
   {
-    after_sequence: Type.Optional(Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER })),
+    after_sequence: Type.Integer({
+      minimum: 0,
+      maximum: Number.MAX_SAFE_INTEGER,
+      description: "首次等待传 0；后续必须传上次返回的 nextAfterSequence。",
+    }),
     timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: 60_000 })),
   },
   strict,
@@ -239,7 +243,7 @@ export function createAgentControlPiTools(
       name: "wait_agent",
       label: "等待子 Agent",
       description:
-        "等待当前 Root Run 中子 Agent mailbox 的新消息、完成通知或超时。使用返回的最大 sequence 继续等待可避免重复结果。",
+        "等待当前 Root Run 中子 Agent mailbox 的新消息、完成通知或超时。首次必须传 after_sequence=0，后续必须传上次返回的 nextAfterSequence。",
       executionMode: "sequential",
       parameters: WaitArgumentsSchema,
       prepareArguments: waitArguments.prepareArguments,
@@ -247,7 +251,7 @@ export function createAgentControlPiTools(
         executeObserved(callId, "wait_agent", record, executor, () => {
           assertArguments(waitArguments.consume(args));
           return executor.wait({
-            afterSequence: args.after_sequence ?? 0,
+            afterSequence: args.after_sequence,
             timeoutMs: args.timeout_ms ?? 30_000,
             ...(signal === undefined ? {} : { signal }),
           });

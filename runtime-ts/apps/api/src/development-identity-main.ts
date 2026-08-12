@@ -1,4 +1,5 @@
 import { createApiPersistenceRuntime } from "@cube-runtime/persistence";
+import { loadDevelopmentEnvironment } from "@cube-runtime/process-runtime";
 import {
   parseDevelopmentIdentityEnvironment,
   provisionDevelopmentIdentities,
@@ -6,8 +7,12 @@ import {
 } from "./development-identity.js";
 
 async function main(): Promise<void> {
+  const environment = await loadDevelopmentEnvironment(
+    process.env,
+    new URL("../../../../.env", import.meta.url),
+  );
   const configuration = parseDevelopmentIdentityEnvironment(
-    selectDevelopmentIdentityEnvironment(process.env),
+    selectDevelopmentIdentityEnvironment(environment),
   );
   if (
     configuration.runtimeEnvironment !== "development" ||

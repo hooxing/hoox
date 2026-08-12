@@ -1578,6 +1578,7 @@ export async function assertMigrationContextSafe(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<void> {
+  await assertDatabaseRolesCurrentDatabaseScoped(client, context);
   assertInspectedContextSafe(await inspectMigrationContext(client, context), false);
   await assertWorkerCoordinatorContextSafe(client, context);
   await assertWorkerCoordinatorContextSafe(client, {
@@ -1590,6 +1591,7 @@ async function assertBootstrapContextSafe(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<void> {
+  await assertDatabaseRolesCurrentDatabaseScoped(client, context);
   // 独立修复 ACL 时允许先清理来自 PUBLIC/直接授权的目标 Schema CREATE；其余边界不放宽。
   assertInspectedContextSafe(await inspectMigrationContext(client, context), true);
   await assertWorkerCoordinatorContextSafe(client, context, true);
@@ -1601,6 +1603,48 @@ async function assertBootstrapContextSafe(
     },
     true,
   );
+}
+
+interface RoleDatabaseScopeRow {
+  readonly role_name: string | null;
+  readonly outside_database_count: number;
+}
+
+/**
+ * PostgreSQL 登录角色和密码属于整个集群；不同数据库复用角色会让任一环境的密码轮换击穿其他环境。
+ * 迁移与 ACL 修复都必须在任何 DDL/GRANT 前拒绝这种共享，迫使部署使用数据库专属角色。
+ */
+export async function assertDatabaseRolesCurrentDatabaseScoped(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<void> {
+  const requestedRoles = [
+    context.runtimeRole,
+    context.migratorRole,
+    context.skillPublisherRole,
+    context.workerCoordinatorRole,
+    context.teamCoordinatorRole,
+  ];
+  const result = await client.query<RoleDatabaseScopeRow>(
+    `SELECT role.rolname AS role_name,
+            count(DISTINCT dependency.dbid) FILTER (
+              WHERE dependency.dbid<>0
+                AND dependency.dbid<>(SELECT oid FROM pg_database WHERE datname=current_database())
+            )::int AS outside_database_count
+       FROM unnest($1::text[]) requested(role_name)
+       LEFT JOIN pg_roles role ON role.rolname=requested.role_name
+       LEFT JOIN pg_shdepend dependency
+         ON dependency.refclassid='pg_authid'::regclass AND dependency.refobjid=role.oid
+      GROUP BY requested.role_name,role.rolname
+      ORDER BY requested.role_name`,
+    [requestedRoles],
+  );
+  if (
+    result.rows.length !== requestedRoles.length ||
+    result.rows.some((row) => row.role_name === null || row.outside_database_count !== 0)
+  ) {
+    throw new PersistenceError("CONSTRAINT_VIOLATION", "数据库应用角色不得被其他数据库复用");
+  }
 }
 
 interface PrivilegeRow {
@@ -2191,6 +2235,72 @@ async function assertRuntimeAccessRemoved(
   await assertTeamCoordinatorBoundary(client, context, false);
 }
 
+const skillPublisherPolicyBindings = Object.freeze([
+  ["platform_skill_operators", "platform_skill_operators_migrator_policy", "migrator"],
+  ["skill_publication_submissions", "skill_publication_submissions_migrator_policy", "migrator"],
+  ["skill_publication_files", "skill_publication_files_migrator_policy", "migrator"],
+  ["skill_publication_commands", "skill_publication_commands_migrator_policy", "migrator"],
+  ["skill_publication_audits", "skill_publication_audits_migrator_policy", "migrator"],
+  ["platform_skill_operators", "platform_skill_operators_publisher_read_policy", "publisher"],
+  ["skill_publication_submissions", "skill_publication_submissions_publisher_policy", "publisher"],
+  ["skill_publication_files", "skill_publication_files_publisher_policy", "publisher"],
+  ["skill_publication_commands", "skill_publication_commands_publisher_policy", "publisher"],
+  ["skill_publication_audits", "skill_publication_audits_publisher_policy", "publisher"],
+  ["skills", "skills_admin_publisher_policy", "publisher"],
+  ["skill_versions", "skill_versions_admin_publisher_policy", "publisher"],
+  ["skill_version_files", "skill_version_files_admin_publisher_policy", "publisher"],
+] as const);
+
+async function rebindRoleScopedPolicies(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<void> {
+  const schema = quoteIdentifier(context.schema);
+  if (await hasSkillPublicationState(client, context.schema)) {
+    for (const [table, policy, target] of skillPublisherPolicyBindings) {
+      const role = target === "migrator" ? context.migratorRole : context.skillPublisherRole;
+      await client.query(
+        `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
+      );
+    }
+  }
+  if (await hasWorkerTenantAssignmentState(client, context.schema)) {
+    await client.query(
+      `ALTER POLICY worker_tenant_assignments_runtime_policy
+         ON ${schema}.worker_tenant_assignments TO ${quoteIdentifier(context.runtimeRole)};
+       ALTER POLICY worker_tenant_assignments_coordinator_select_policy
+         ON ${schema}.worker_tenant_assignments TO ${quoteIdentifier(context.workerCoordinatorRole)};
+       ALTER POLICY worker_tenant_assignments_coordinator_claim_policy
+         ON ${schema}.worker_tenant_assignments TO ${quoteIdentifier(context.workerCoordinatorRole)}`,
+    );
+  }
+}
+
+async function grantSkillPublisherAccess(
+  client: PoolClient,
+  context: MigrationSecurityContext,
+): Promise<void> {
+  if (!(await hasSkillPublicationState(client, context.schema))) return;
+  const schema = quoteIdentifier(context.schema);
+  const publisher = quoteIdentifier(context.skillPublisherRole);
+  await client.query(
+    `GRANT USAGE ON SCHEMA ${schema} TO ${publisher};
+     GRANT SELECT ON TABLE ${schema}.platform_skill_operators TO ${publisher};
+     GRANT SELECT,INSERT ON TABLE
+       ${schema}.skill_publication_submissions,
+       ${schema}.skill_publication_files,
+       ${schema}.skill_publication_commands,
+       ${schema}.skill_publication_audits TO ${publisher};
+     GRANT UPDATE(status,version_token,reviewed_by,rejection_reason,published_skill_id,updated_at)
+       ON TABLE ${schema}.skill_publication_submissions TO ${publisher};
+     GRANT SELECT,INSERT ON TABLE
+       ${schema}.skills,${schema}.skill_versions,${schema}.skill_version_files TO ${publisher};
+     GRANT UPDATE(display_name,recommended_version,status,updated_at)
+       ON TABLE ${schema}.skills TO ${publisher};
+     GRANT UPDATE(status) ON TABLE ${schema}.skill_versions TO ${publisher}`,
+  );
+}
+
 /** 在既有迁移事务中收敛 ACL，供 down 保证 DDL 与权限回收原子提交。 */
 export async function bootstrapRuntimeAccessOnClient(
   client: PoolClient,
@@ -2198,20 +2308,23 @@ export async function bootstrapRuntimeAccessOnClient(
 ): Promise<void> {
   await assertBootstrapContextSafe(client, context);
   const role = quoteIdentifier(context.runtimeRole);
+  const publisherRole = quoteIdentifier(context.skillPublisherRole);
   const coordinatorRole = quoteIdentifier(context.workerCoordinatorRole);
   const teamCoordinatorRole = quoteIdentifier(context.teamCoordinatorRole);
   const schema = quoteIdentifier(context.schema);
   await client.query(
-    `REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
+    `REVOKE ALL PRIVILEGES ON SCHEMA ${schema}
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}`,
   );
+  await rebindRoleScopedPolicies(client, context);
   await client.query(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
   await client.query(
     `GRANT SELECT, INSERT ON TABLE ${schema}.app_users, ${schema}.tenants, ${schema}.memberships TO ${role}`,
@@ -2665,6 +2778,7 @@ export async function bootstrapRuntimeAccessOnClient(
          ON TABLE ${schema}.resource_promotion_authorizations TO ${role}`,
     );
   }
+  await grantSkillPublisherAccess(client, context);
   await grantTeamCoordinatorAccess(client, context);
   await assertActiveRuntimeWhitelist(client, context);
 }
@@ -2687,19 +2801,21 @@ export async function teardownRuntimeSchemaAccessOnClient(
   context: MigrationSecurityContext,
 ): Promise<void> {
   const role = quoteIdentifier(context.runtimeRole);
+  const publisherRole = quoteIdentifier(context.skillPublisherRole);
   const coordinatorRole = quoteIdentifier(context.workerCoordinatorRole);
   const teamCoordinatorRole = quoteIdentifier(context.teamCoordinatorRole);
   const schema = quoteIdentifier(context.schema);
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}`,
   );
   await client.query(
     `REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA ${schema}
-       FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}`,
   );
   await client.query(
-    `REVOKE ALL PRIVILEGES ON SCHEMA ${schema} FROM PUBLIC, ${role}, ${coordinatorRole}, ${teamCoordinatorRole}`,
+    `REVOKE ALL PRIVILEGES ON SCHEMA ${schema}
+       FROM PUBLIC, ${role}, ${publisherRole}, ${coordinatorRole}, ${teamCoordinatorRole}`,
   );
   await assertRuntimeAccessRemoved(client, context);
 }

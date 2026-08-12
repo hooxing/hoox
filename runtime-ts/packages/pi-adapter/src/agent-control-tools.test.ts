@@ -92,7 +92,7 @@ describe("SubAgent Pi 协作工具", () => {
     await expect(
       spawn.execute(
         "call_spawn_missing_fork",
-        prepared as SpawnArgumentsForTest,
+        structuredClone(prepared) as SpawnArgumentsForTest,
         undefined,
         () => undefined,
         {} as never,
@@ -113,7 +113,7 @@ describe("SubAgent Pi 协作工具", () => {
     await expect(
       wait.execute(
         "call_wait_missing_cursor",
-        prepared as WaitArgumentsForTest,
+        structuredClone(prepared) as WaitArgumentsForTest,
         undefined,
         () => undefined,
         {} as never,
@@ -133,7 +133,7 @@ describe("SubAgent Pi 协作工具", () => {
     await expect(
       spawn.execute(
         "call_spawn_invalid",
-        prepared as SpawnArgumentsForTest,
+        structuredClone(prepared) as SpawnArgumentsForTest,
         undefined,
         () => undefined,
         {} as never,

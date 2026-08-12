@@ -63,15 +63,16 @@ type FollowUpArguments = Static<typeof FollowUpArgumentsSchema>;
 type TargetArguments = Static<typeof TargetArgumentsSchema>;
 type WaitArguments = Static<typeof WaitArgumentsSchema>;
 
-const invalidArgumentsToken = Symbol("agent-control-invalid-arguments");
+const INVALID_ARGUMENT_PREFIX = "runtime-invalid-agent-control:";
 
-function invalidFallback<T extends object>(value: T, token: string): T {
-  Object.defineProperty(value, invalidArgumentsToken, { value: token });
-  return value;
+function invalidArgumentValue(token: string): string {
+  return `${INVALID_ARGUMENT_PREFIX}${token}`;
 }
 
-function invalidToken(value: object): string | undefined {
-  return (value as { readonly [invalidArgumentsToken]?: string })[invalidArgumentsToken];
+function invalidArgumentToken(value: string): string | undefined {
+  return value.startsWith(INVALID_ARGUMENT_PREFIX)
+    ? value.slice(INVALID_ARGUMENT_PREFIX.length)
+    : undefined;
 }
 
 export interface AgentControlPiToolExecutorPort {
@@ -159,33 +160,41 @@ export function createAgentControlPiTools(
 ) {
   const spawnArguments = createSchemaInvalidArgumentsBridge<SpawnArguments>(
     SpawnArgumentsSchema,
-    (token) => invalidFallback({ task: token, tools: ["read"], fork_turns: "none" }, token),
-    invalidToken,
+    (token) => ({ task: invalidArgumentValue(token), tools: ["read"], fork_turns: "none" }),
+    (value) => invalidArgumentToken(value.task),
   );
   const messageArguments = createSchemaInvalidArgumentsBridge<TargetMessageArguments>(
     TargetMessageArgumentsSchema,
-    (token) => invalidFallback({ target: token, message: token }, token),
-    invalidToken,
+    (token) => ({ target: invalidArgumentValue(token), message: invalidArgumentValue(token) }),
+    (value) => invalidArgumentToken(value.target),
   );
   const followUpArguments = createSchemaInvalidArgumentsBridge<FollowUpArguments>(
     FollowUpArgumentsSchema,
-    (token) => invalidFallback({ target: token, task: token }, token),
-    invalidToken,
+    (token) => ({ target: invalidArgumentValue(token), task: invalidArgumentValue(token) }),
+    (value) => invalidArgumentToken(value.target),
   );
   const targetArguments = createSchemaInvalidArgumentsBridge<TargetArguments>(
     TargetArgumentsSchema,
-    (token) => invalidFallback({ target: token }, token),
-    invalidToken,
+    (token) => ({ target: invalidArgumentValue(token) }),
+    (value) => invalidArgumentToken(value.target),
   );
+  const waitInvalidTokens: string[] = [];
   const waitArguments = createSchemaInvalidArgumentsBridge<WaitArguments>(
     WaitArgumentsSchema,
-    (token) => invalidFallback({ after_sequence: 0, timeout_ms: 1 }, token),
-    invalidToken,
+    (token) => {
+      waitInvalidTokens.push(token);
+      return { after_sequence: 0, timeout_ms: 1 };
+    },
+    () => waitInvalidTokens.shift(),
   );
+  const emptyInvalidTokens: string[] = [];
   const emptyArguments = createSchemaInvalidArgumentsBridge<Record<string, never>>(
     EmptyArgumentsSchema,
-    (token) => invalidFallback({}, token),
-    invalidToken,
+    (token) => {
+      emptyInvalidTokens.push(token);
+      return {};
+    },
+    () => emptyInvalidTokens.shift(),
   );
   const assertArguments = (invalid: boolean): void => {
     if (invalid) throw new Error("AGENT_CONTROL_INVALID_ARGUMENTS");

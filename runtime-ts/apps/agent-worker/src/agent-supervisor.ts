@@ -497,7 +497,11 @@ export class AgentSupervisor implements AgentControlPort {
       }
       child.history = completedHistory;
       child.status = "idle";
-      await this.#publish(child, turnId, "final_answer", answer);
+      await this.#publish(child, turnId, {
+        kind: "final_answer",
+        status: "completed",
+        payload: answer,
+      });
     } catch (error) {
       const interrupted = child.interruptRequested || this.#stopping;
       child.status = interrupted ? "interrupted" : "failed";
@@ -515,7 +519,12 @@ export class AgentSupervisor implements AgentControlPort {
           errorCode: interrupted ? "INTERRUPTED" : "SUBAGENT_FAILED",
         })
         .catch(() => undefined);
-      await this.#publish(child, turnId, "error", message).catch(() => undefined);
+      await this.#publish(child, turnId, {
+        kind: "error",
+        status: interrupted ? "interrupted" : "failed",
+        errorCode: interrupted ? "INTERRUPTED" : "SUBAGENT_FAILED",
+        payload: message,
+      }).catch(() => undefined);
     } finally {
       child.activeMessages.length = 0;
       child.pendingSteers.length = 0;
@@ -527,22 +536,30 @@ export class AgentSupervisor implements AgentControlPort {
   async #publish(
     child: ChildState,
     turnId: string,
-    kind: "final_answer" | "error",
-    payload: string,
+    update:
+      | Readonly<{ kind: "final_answer"; status: "completed"; payload: string }>
+      | Readonly<{
+          kind: "error";
+          status: "interrupted" | "failed";
+          errorCode: string;
+          payload: string;
+        }>,
   ): Promise<void> {
     const persisted = await this.dependencies.persistence.appendMailbox({
       fence: this.dependencies.fence,
       attemptId: this.dependencies.attemptId,
-      commandId: stableId("mail", child.agentThreadId, turnId, kind),
+      commandId: stableId("mail", child.agentThreadId, turnId, update.kind),
       recipientAgentThreadId: this.dependencies.rootAgentThreadId,
       senderAgentThreadId: child.agentThreadId,
-      kind,
-      payload,
+      kind: update.kind,
+      terminalStatus: update.status,
+      ...(update.kind === "error" ? { errorCode: update.errorCode } : {}),
+      payload: update.payload,
     });
     if (persisted.outcome !== "created" && persisted.outcome !== "replayed") {
       throw new Error(`AGENT_MAILBOX_${persisted.outcome.toUpperCase()}`);
     }
-    this.#updates.push({ sequence: persisted.sequence, senderPath: child.path, kind, payload });
+    this.#updates.push({ sequence: persisted.sequence, senderPath: child.path, ...update });
     this.#updates.sort((left, right) => left.sequence - right.sequence);
     for (const wake of this.#waiters) wake();
   }

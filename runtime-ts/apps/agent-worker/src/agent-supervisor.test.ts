@@ -184,7 +184,11 @@ describe("AgentSupervisor", () => {
     const updates = await supervisor.wait({ afterSequence: 0, timeoutMs: 1_000 });
 
     expect(updates).toEqual([
-      expect.objectContaining({ kind: "final_answer", payload: "子任务答案" }),
+      expect.objectContaining({
+        kind: "final_answer",
+        status: "completed",
+        payload: "子任务答案",
+      }),
     ]);
     expect(created).toHaveLength(1);
     expect(created[0]?.history?.messages.map((message) => message.sequence)).toEqual([3, 4]);
@@ -417,6 +421,13 @@ describe("AgentSupervisor", () => {
     expect(recorded).toHaveLength(1);
     expect(recorded[0]?.argsDigest).toBe(digestCanonical({ target: child.agentThreadId }));
     expect((await supervisor.list())[0]?.status).toBe("interrupted");
+    expect(await supervisor.wait({ afterSequence: 0, timeoutMs: 1_000 })).toEqual([
+      expect.objectContaining({
+        kind: "error",
+        status: "interrupted",
+        errorCode: "INTERRUPTED",
+      }),
+    ]);
   });
 
   it("达到 Agent Thread 数量上限后仍可复用已有闲置 Agent", async () => {

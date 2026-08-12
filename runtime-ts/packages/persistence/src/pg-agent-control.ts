@@ -1,9 +1,9 @@
 import { sha256Digest } from "@cube-runtime/domain";
 import {
-  DELEGABLE_AGENT_TOOL_NAMES,
-  type DelegableAgentToolName,
   type AgentControlPersistencePort,
   type AgentThreadPersistenceSnapshot,
+  DELEGABLE_AGENT_TOOL_NAMES,
+  type DelegableAgentToolName,
   type ExecutionFence,
   type SubAgentConversationSnapshot,
 } from "@cube-runtime/run-contracts";
@@ -581,9 +581,12 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
             recipient_agent_thread_id: string;
             sender_agent_thread_id: string;
             kind: string;
+            terminal_status: string | null;
+            error_code: string | null;
             payload: string;
           }>(
-            `SELECT sequence::text,recipient_agent_thread_id,sender_agent_thread_id,kind,payload
+            `SELECT sequence::text,recipient_agent_thread_id,sender_agent_thread_id,kind,
+                    terminal_status,error_code,payload
                FROM runtime_agent_mailbox_messages
               WHERE tenant_id=$1 AND attempt_id=$2 AND command_id=$3`,
             [input.fence.scope.tenantId, input.attemptId, input.commandId],
@@ -593,6 +596,8 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
             return replayRow.recipient_agent_thread_id === input.recipientAgentThreadId &&
               replayRow.sender_agent_thread_id === input.senderAgentThreadId &&
               replayRow.kind === input.kind &&
+              replayRow.terminal_status === (input.terminalStatus ?? null) &&
+              replayRow.error_code === (input.errorCode ?? null) &&
               replayRow.payload === input.payload
               ? ({ outcome: "replayed", sequence: Number(replayRow.sequence) } as const)
               : ({ outcome: "conflict" } as const);
@@ -600,8 +605,8 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
           const inserted = await client.query<{ sequence: string }>(
             `INSERT INTO runtime_agent_mailbox_messages(
                tenant_id,attempt_id,sequence,recipient_agent_thread_id,sender_agent_thread_id,
-               kind,payload,command_id
-             ) SELECT $1,$2,COALESCE(max(sequence),0)+1,$3,$4,$5,$6,$7
+               kind,terminal_status,error_code,payload,command_id
+             ) SELECT $1,$2,COALESCE(max(sequence),0)+1,$3,$4,$5,$6,$7,$8,$9
                  FROM runtime_agent_mailbox_messages
                 WHERE tenant_id=$1 AND attempt_id=$2
              RETURNING sequence::text`,
@@ -611,6 +616,8 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
               input.recipientAgentThreadId,
               input.senderAgentThreadId,
               input.kind,
+              input.terminalStatus ?? null,
+              input.errorCode ?? null,
               input.payload,
               input.commandId,
             ],

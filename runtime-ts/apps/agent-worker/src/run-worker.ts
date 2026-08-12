@@ -9,6 +9,7 @@ import {
   type WorkspaceRevisionId,
 } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
+import { injectRetrievedMemories, type MemoryRetriever } from "@cube-runtime/memory";
 import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { WorkspaceApplicationError, WorkspaceDependencyError } from "@cube-runtime/workspace";
 import { AgentSupervisor, rootAgentThreadId } from "./agent-supervisor.js";
@@ -27,6 +28,7 @@ import type {
   AgentSessionFactoryPort,
   ArtifactPublicationPort,
   CancellationPort,
+  ClaimedExecutionSnapshot,
   ClockPort,
   ConsumedExternalEffectAuthorization,
   ExecutionAttemptSnapshot,
@@ -266,6 +268,8 @@ interface WorkerDependencies {
   /** development 敏感诊断镜像；失败不得改变 durable Run 语义。 */
   readonly runEventDiagnostics?: RunEventDiagnosticsPort;
   readonly agentControl?: AgentControlPersistencePort;
+  /** 长期记忆是低信任可选上下文；任何失败都不得改变 Run 终态。 */
+  readonly memoryRetriever?: MemoryRetriever;
 }
 
 interface ExecutionContext {
@@ -845,8 +849,9 @@ export class RunWorker {
         return await sandboxPreparation;
       };
 
+      const initialUserText = claim.snapshot.answer ?? claim.snapshot.input;
       let promptInput = {
-        text: claim.snapshot.answer ?? claim.snapshot.input,
+        text: await this.withRetrievedMemory(claim.snapshot, scope, initialUserText),
         attachments: claim.snapshot.answer === undefined ? (claim.snapshot.attachments ?? []) : [],
       };
       const preSession = await this.stopPoint(context, cancellation);
@@ -1182,7 +1187,7 @@ export class RunWorker {
             });
             if (!isApplied(applied)) return await this.handleMutationFailure(applied);
             promptInput = {
-              text: pending.inputText,
+              text: await this.withRetrievedMemory(claim.snapshot, scope, pending.inputText),
               attachments: pending.attachments ?? [],
             };
             steerReceiptId = pending.receiptId;
@@ -1403,6 +1408,35 @@ export class RunWorker {
         outcome,
       })
       .catch(() => undefined);
+  }
+
+  private async withRetrievedMemory(
+    snapshot: Pick<ClaimedExecutionSnapshot, "tenantKind" | "memorySubjectUserId">,
+    scope: ExecutionScope,
+    userText: string,
+  ): Promise<string> {
+    const retriever = this.dependencies.memoryRetriever;
+    if (
+      retriever === undefined ||
+      snapshot.tenantKind === undefined ||
+      snapshot.memorySubjectUserId === undefined
+    ) {
+      return userText;
+    }
+    try {
+      const memories = await retriever.retrieve({
+        tenantId: scope.tenantId,
+        tenantKind: snapshot.tenantKind,
+        userId: snapshot.memorySubjectUserId,
+        threadId: scope.threadId,
+        runId: scope.runId,
+        query: userText,
+        topK: 5,
+      });
+      return injectRetrievedMemories(userText, memories);
+    } catch {
+      return userText;
+    }
   }
 
   private async stopPoint(

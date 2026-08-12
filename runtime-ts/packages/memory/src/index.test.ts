@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  injectRetrievedMemories,
   mem0ScopeIds,
   MemoryIngestionConsumer,
   Mem0PlatformMemoryProvider,
@@ -164,6 +165,41 @@ describe("Mem0 Platform Provider", () => {
       expect.objectContaining({ code: "INVALID_RESPONSE" }),
     );
   });
+
+  it("按同一不可逆 user scope 检索并校验结果", async () => {
+    let bodyText = "";
+    const provider = new Mem0PlatformMemoryProvider({
+      baseUrl: "https://api.mem0.example.invalid",
+      apiKey: "development-secret",
+      scopeHmacKey: scopeKey,
+      fetcher: async (_input, init) => {
+        bodyText = String(init?.body);
+        return new Response(
+          JSON.stringify({
+            results: [{ id: "memory-a", memory: "用户偏好简短回答", score: 0.82 }],
+          }),
+        );
+      },
+    });
+
+    await expect(
+      provider.retrieve({ ...source, query: "用户偏好是什么？", topK: 5 }),
+    ).resolves.toEqual([{ id: "memory-a", text: "用户偏好简短回答", score: 0.82 }]);
+    const body = JSON.parse(bodyText) as { readonly filters: { readonly user_id: string } };
+    expect(body.filters.user_id).toBe(mem0ScopeIds(source, scopeKey).userId);
+    expect(bodyText).not.toContain(source.tenantId);
+    expect(bodyText).not.toContain(source.userId);
+  });
+
+  it("检索记忆只形成带低信任标记的当前 user message", () => {
+    const injected = injectRetrievedMemories("继续完成任务", [
+      { id: "memory-a", text: "用户偏好简短回答", score: 0.9 },
+    ]);
+    expect(injected).toContain("低信任派生数据");
+    expect(injected).toContain(JSON.stringify({ text: "用户偏好简短回答" }));
+    expect(injected.endsWith("[当前用户消息]\n继续完成任务")).toBe(true);
+    expect(injectRetrievedMemories("继续完成任务", [])).toBe("继续完成任务");
+  });
 });
 
 class FakeIngestionStore implements MemoryIngestionStore {
@@ -253,6 +289,7 @@ describe("记忆异步 Outbox 消费器", () => {
       errorCode: "TIMEOUT",
       maximumAttempts: 5,
       retryBaseMs: 1_000,
+      retryable: true,
     });
   });
 
@@ -274,6 +311,10 @@ describe("记忆异步 Outbox 消费器", () => {
     );
 
     await expect(consumer.drainTenant("tenant-a")).rejects.toThrow("database unavailable");
+    expect(store.complete).toHaveBeenCalledWith(ingestionClaim, {
+      eventId,
+      status: "SUCCEEDED",
+    });
     expect(store.fail).not.toHaveBeenCalled();
   });
 });

@@ -65,6 +65,7 @@ import {
   PgRunDispatchCreation,
   PgRunDispatchOutbox,
 } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
+import { PgMemoryIngestionStore } from "../../runtime-ts/packages/persistence/src/pg-memory-ingestion.js";
 import { PgWorkerTenantAssignments } from "../../runtime-ts/packages/persistence/src/pg-worker-tenant-assignment.js";
 import {
   PgBackedSandboxSessionRegistry,
@@ -2110,6 +2111,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
     const contextPersistence = new PgExecutionPersistence(runtime, {
       threadContextWriteEnabled: true,
+      memoryIngestionEnabled: true,
     });
     const now = isoTimestamp("2099-07-26T00:00:00.000Z");
     const runA = createRun({ id: runId(`context-a-${suffix}`), thread: f.thread, now });
@@ -2295,6 +2297,31 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       ),
     ).toMatchObject({ outcome: "applied", run: { status: "succeeded" } });
 
+    const noBlobReads = {
+      getBytes: async () => {
+        throw new Error("内联记忆正文不应读取 Blob");
+      },
+    } as unknown as BlobStore;
+    const memoryStore = new PgMemoryIngestionStore(runtime, noBlobReads);
+    const memoryClaim = await memoryStore.claimNext({
+      tenantId: f.tenantScope.tenantId,
+      workerId: "context-memory-worker",
+      leaseMs: 30_000,
+    });
+    expect(memoryClaim).toMatchObject({
+      tenantId: f.tenantScope.tenantId,
+      tenantKind: "personal",
+      userId: f.user.id,
+      threadId: f.thread.id,
+      runId: runA.id,
+      messages: [
+        { role: "user", content: "Run A 用户输入" },
+        { role: "assistant", content: "Run A Assistant 最终回复" },
+      ],
+    });
+    if (memoryClaim === undefined) throw new Error("记忆 Outbox claim 缺失");
+    expect(await memoryStore.complete(memoryClaim)).toBe(true);
+
     const dispatchB = (
       await runDispatchOutbox.claim({
         tenantId: f.tenantScope.tenantId,
@@ -2314,11 +2341,6 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     const throughSequence = claimedB.snapshot.contextThroughSequence;
     if (throughSequence === undefined) throw new Error("Run B context cursor 缺失");
     const compatibilityDigest = sha256Digest("a".repeat(64));
-    const noBlobReads = {
-      getBytes: async () => {
-        throw new Error("不应读取 Blob");
-      },
-    } as unknown as BlobStore;
     const firstReader = new PgThreadContextHistoryRepository(runtime, noBlobReads);
     const first = await firstReader.readActiveHistory({
       scope: dispatchB.scope as ExecutionScope,

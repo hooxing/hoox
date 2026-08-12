@@ -1,5 +1,6 @@
 import { resourceId, resourceVersionId, runId, sha256Digest, tenantId } from "@cube-runtime/domain";
 import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
+import type { MemoryRetriever } from "@cube-runtime/memory";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
 import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import {
@@ -71,6 +72,7 @@ function harness(
   prepareSandboxBeforeInput:
     | boolean
     | ((ensure: () => Promise<SandboxSessionRef>) => Promise<void>) = false,
+  memoryRetriever?: MemoryRetriever,
 ) {
   const persistence = new FakeExecutionPersistence();
   const scope = persistence.addSeed(seed);
@@ -105,6 +107,7 @@ function harness(
       ...(workerOptions.threadContextWriteEnabled === true ? { threadContextBodies } : {}),
       ...(workerOptions.threadSandboxSessionReuseEnabled === true ? { threadSandboxes } : {}),
       ...(workerOptions.subagentsEnabled === true ? { agentControl } : {}),
+      ...(memoryRetriever === undefined ? {} : { memoryRetriever }),
     },
     {
       workerId: "worker-test",
@@ -158,6 +161,51 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.persistence.record(h.scope).outbox).not.toContainEqual(
       expect.objectContaining({ kind: "sandbox_cleanup" }),
     );
+  });
+
+  it("长期记忆检索结果只注入当前 user message，失败时降级为原消息", async () => {
+    const seed = fakeSeed("memory-retrieval");
+    const retriever = {
+      retrieve: vi.fn(async () => [{ id: "memory-a", text: "用户偏好简短回答", score: 0.9 }]),
+    } satisfies MemoryRetriever;
+    const h = harness(
+      [new ScriptedAgentSession(successfulEvents)],
+      seed,
+      {},
+      undefined,
+      false,
+      retriever,
+    );
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(retriever.retrieve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: seed.run.tenantId,
+        userId: seed.memorySubjectUserId,
+        query: seed.input,
+      }),
+    );
+    expect(h.factory.initialInputTexts[0]).toContain("低信任派生数据");
+    expect(h.factory.initialInputTexts[0]).toContain("用户偏好简短回答");
+    expect(h.factory.initialInputTexts[0]).toContain(seed.input);
+
+    const unavailable = {
+      retrieve: vi.fn(async () => {
+        throw new Error("provider unavailable");
+      }),
+    } satisfies MemoryRetriever;
+    const fallback = harness(
+      [new ScriptedAgentSession(successfulEvents)],
+      fakeSeed("memory-fallback"),
+      {},
+      undefined,
+      false,
+      unavailable,
+    );
+    await expect(fallback.worker.execute(fallback.scope)).resolves.toEqual({
+      outcome: "succeeded",
+    });
+    expect(fallback.factory.initialInputTexts).toEqual(["执行任务"]);
   });
 
   it("root 与 SubAgent 的独立 Session 复用同一个已物化 Sandbox", async () => {

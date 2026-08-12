@@ -259,6 +259,8 @@ export interface ClaimedExecutionSnapshot {
   readonly run: Run;
   /** 由领取事务从可信 Tenant 事实投影；旧快照缺失时必须按未启用历史目录处理。 */
   readonly tenantKind?: "personal" | "team";
+  /** 个人 Tenant 为 owner；团队 Tenant 仅作为审计主体，外部共享 scope 不使用该值。 */
+  readonly memorySubjectUserId?: string;
   readonly workspace: Workspace;
   readonly attempt: ExecutionAttemptSnapshot;
   readonly input: string;

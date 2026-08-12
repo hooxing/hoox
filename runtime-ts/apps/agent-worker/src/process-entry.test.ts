@@ -216,6 +216,41 @@ describe("Agent Worker 进程入口", () => {
     });
   });
 
+  it("Mem0 默认关闭，只允许 development 使用完整独立配置", () => {
+    expect(parseWorkerProcessEnvironment(productionEnvironment()).memory).toEqual({
+      enabled: false,
+    });
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        MEM0_MEMORY_ENABLED: "true",
+        MEM0_API_BASE_URL: "https://api.mem0.ai/",
+        MEM0_API_KEY: "test-api-key",
+        MEM0_SCOPE_HMAC_KEY: "memory-scope-key-at-least-32-bytes",
+        MEM0_REQUEST_TIMEOUT_MS: "5000",
+      }),
+    ).toThrow("只允许 development 启用");
+    expect(
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        RUNTIME_ENV: "development",
+        DEV_AUTH_ENABLED: "true",
+        DEV_AUTH_USER_A_TENANT_ID: "tenant-test-worker",
+        MEM0_MEMORY_ENABLED: "true",
+        MEM0_API_BASE_URL: "https://api.mem0.ai/",
+        MEM0_API_KEY: "test-api-key",
+        MEM0_SCOPE_HMAC_KEY: "memory-scope-key-at-least-32-bytes",
+        MEM0_REQUEST_TIMEOUT_MS: "5000",
+      }).memory,
+    ).toEqual({
+      enabled: true,
+      baseUrl: "https://api.mem0.ai/",
+      apiKey: "test-api-key",
+      scopeHmacKey: "memory-scope-key-at-least-32-bytes",
+      timeoutMs: 5000,
+    });
+  });
+
   it("production 的 PG 角色证明失败时不触达 S3、Cube、模型或消费循环", async () => {
     const databaseFailure = new Error("POSTGRES_RUNTIME_ROLE_UNSAFE");
     const probes = {

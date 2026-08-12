@@ -58,6 +58,9 @@ export interface AgentSummary {
   readonly currentTask: string;
   readonly status: "running" | "idle" | "interrupted" | "failed";
   readonly turnOrdinal: number;
+  readonly startedAt?: string;
+  readonly activeForMs?: number;
+  readonly lastMailboxSequence: number;
   readonly tools: readonly DelegableAgentToolName[];
 }
 

@@ -383,6 +383,7 @@ describe("AgentSupervisor", () => {
   });
 
   it("使用 canonical 参数摘要中断运行中的子 Agent，并保持命令幂等", async () => {
+    let now = 1_000;
     let release: () => void = () => undefined;
     const blocked = new Promise<void>((resolve) => {
       release = resolve;
@@ -399,6 +400,7 @@ describe("AgentSupervisor", () => {
       rootAgentThreadId: agentThreadId("root_agent_interrupt"),
       attemptId: "attempt_agent_interrupt",
       fence,
+      now: () => now,
       createSession: async () => {
         const session = completedSession("不应完成");
         return {
@@ -421,6 +423,14 @@ describe("AgentSupervisor", () => {
       forkTurns: "none",
     });
     await vi.waitFor(async () => expect((await supervisor.list())[0]?.status).toBe("running"));
+    now = 2_500;
+    expect((await supervisor.list())[0]).toEqual(
+      expect.objectContaining({
+        startedAt: "1970-01-01T00:00:01.000Z",
+        activeForMs: 1_500,
+        lastMailboxSequence: 0,
+      }),
+    );
 
     await expect(
       supervisor.interrupt({ callId: "call_interrupt", target: child.agentThreadId }),
@@ -433,7 +443,13 @@ describe("AgentSupervisor", () => {
     expect(abort).toHaveBeenCalledOnce();
     expect(recorded).toHaveLength(1);
     expect(recorded[0]?.argsDigest).toBe(digestCanonical({ target: child.agentThreadId }));
-    expect((await supervisor.list())[0]?.status).toBe("interrupted");
+    expect((await supervisor.list())[0]).toEqual(
+      expect.objectContaining({
+        status: "interrupted",
+        lastMailboxSequence: 1,
+      }),
+    );
+    expect((await supervisor.list())[0]).not.toHaveProperty("activeForMs");
     expect(await supervisor.wait({ afterSequence: 0, timeoutMs: 1_000 })).toEqual({
       updates: [
         expect.objectContaining({

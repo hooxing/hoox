@@ -42,6 +42,7 @@ interface ConversationRow {
   readonly agent_thread_id: string;
   readonly canonical_path: string;
   readonly task: string;
+  readonly current_task: string;
   readonly enabled_tools: unknown;
   readonly tool_manifest_digest: string;
   readonly fork_turns: string;
@@ -62,6 +63,7 @@ function conversationSnapshot(row: ConversationRow): SubAgentConversationSnapsho
     agentThreadId: row.agent_thread_id as SubAgentConversationSnapshot["agentThreadId"],
     canonicalPath: row.canonical_path,
     task: row.task,
+    currentTask: row.current_task,
     tools: parseTools(row.enabled_tools),
     toolManifestDigest: sha256Digest(row.tool_manifest_digest),
     forkTurns: parseForkValue(row.fork_turns),
@@ -148,7 +150,7 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
             }
           }
           const conversations = await client.query<ConversationRow>(
-            `SELECT agent_thread_id,canonical_path,task,enabled_tools,tool_manifest_digest,
+            `SELECT agent_thread_id,canonical_path,task,current_task,enabled_tools,tool_manifest_digest,
                     fork_turns,turn_ordinal,history,history_digest
                FROM runtime_subagent_conversations
               WHERE tenant_id=$1 AND thread_id=$2
@@ -413,13 +415,14 @@ export class PgAgentControlRepository implements AgentControlPersistencePort {
           if (inserted.rowCount !== 1) return "busy" as const;
           await client.query(
             `UPDATE runtime_subagent_conversations
-                SET turn_ordinal=$4,updated_at=clock_timestamp()
+                SET turn_ordinal=$4,current_task=$5,updated_at=clock_timestamp()
               WHERE tenant_id=$1 AND thread_id=$2 AND agent_thread_id=$3`,
             [
               input.fence.scope.tenantId,
               input.fence.scope.threadId,
               input.agentThreadId,
               input.turnOrdinal,
+              input.task,
             ],
           );
           await client.query(

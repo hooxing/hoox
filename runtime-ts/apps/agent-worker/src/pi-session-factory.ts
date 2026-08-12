@@ -50,6 +50,46 @@ import type {
   WorkerAgentSessionPort,
 } from "./ports.js";
 
+const AGENT_CONTROL_ERROR_MESSAGES = Object.freeze({
+  AGENT_NOT_FOUND: "目标子 Agent 不存在，请检查 target 或先调用 list_agents。",
+  AGENT_NOT_RUNNING: "目标子 Agent 当前没有运行中的 turn，不能执行该操作。",
+  AGENT_BUSY: "目标子 Agent 正在运行，请等待或中断当前 turn 后再追加任务。",
+  AGENT_CONTROL_INVALID_ARGUMENTS: "子 Agent 控制工具参数无效，请根据工具 schema 修正后重试。",
+  AGENT_CAPACITY_EXCEEDED: "子 Agent 数量或并发数已达到上限，请等待现有任务结束后重试。",
+  AGENT_TASK_INVALID: "子 Agent 任务不能为空或超出允许长度。",
+  AGENT_TOOLS_INVALID: "子 Agent 工具清单包含不支持的工具。",
+  AGENT_FORK_TURNS_INVALID: "fork_turns 必须是 none、all 或允许范围内的正整数。",
+} as const);
+
+export function projectAgentControlError(error: unknown): Readonly<{
+  status: "failed";
+  code: string;
+  message: string;
+  correctable: boolean;
+  fatal: boolean;
+}> {
+  const internalCode = error instanceof Error ? error.message : undefined;
+  const knownCode =
+    internalCode !== undefined && internalCode in AGENT_CONTROL_ERROR_MESSAGES
+      ? (internalCode as keyof typeof AGENT_CONTROL_ERROR_MESSAGES)
+      : undefined;
+  if (knownCode !== undefined) {
+    return Object.freeze({
+      status: "failed",
+      code: knownCode,
+      message: AGENT_CONTROL_ERROR_MESSAGES[knownCode],
+      correctable: true,
+      fatal: false,
+    });
+  }
+  return Object.freeze({
+    status: "failed",
+    code: "AGENT_CONTROL_FAILED",
+    message: "子 Agent 控制面暂时不可用，请稍后重试。",
+    correctable: true,
+    fatal: false,
+  });
+}
 export interface PromptImageLoaderPort {
   load(input: {
     readonly tenantId: TenantId;
@@ -115,16 +155,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       const providerCallDigest = createHash("sha256").update(providerCallId, "utf8").digest("hex");
       return `${input.agent.agentThreadId}:${input.agent.agentTurnId}:${providerCallDigest.slice(0, 32)}`;
     };
-    const projectAgentControlError = (error: unknown) => {
-      const message = error instanceof Error ? error.message : "子 Agent 控制面暂时不可用";
-      return Object.freeze({
-        status: "failed" as const,
-        code: message.startsWith("AGENT_") ? message : "AGENT_CONTROL_FAILED",
-        message,
-        correctable: true,
-        fatal: false,
-      });
-    };
+
     const attemptWireTraces = this.modelWireTraces?.createAttempt(input.attemptId);
     const wireTraceContext = Object.freeze({
       tenantId: input.scope.tenantId,

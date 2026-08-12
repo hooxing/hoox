@@ -128,6 +128,7 @@ async function settleEffects(): Promise<void> {
 
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+  window.localStorage.clear();
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: vi.fn(() => ({
@@ -238,6 +239,50 @@ describe("Agent 工作台恢复接入", () => {
     const newConversation = container.querySelector<HTMLButtonElement>(".new-thread-button");
     await act(async () => newConversation?.click());
     expect(setTenantId).toHaveBeenLastCalledWith(undefined);
+  });
+
+  it("重复点击团队新增对话不会清空已加载的团队任务", async () => {
+    const teamSummary: TeamSummary = {
+      id: "tenant_product",
+      displayName: "产品团队",
+      role: "owner",
+      joinedAt: "2026-08-09T08:00:00.000Z",
+    };
+    const teamThread = thread("team_task");
+    const apiClient = apiFixture({
+      listThreadsForTenant: vi.fn(async (teamId?: string) =>
+        teamId === teamSummary.id ? [teamThread] : [],
+      ),
+      setTenantId: vi.fn(),
+      listTeams: vi.fn(async () => [teamSummary]),
+      createTeam: vi.fn(async () => teamSummary),
+      listTeamMembers: vi.fn(async () => []),
+      addTeamMember: vi.fn(async () => {
+        throw new Error("本测试不添加成员");
+      }),
+      changeTeamMemberRole: vi.fn(async () => {
+        throw new Error("本测试不修改角色");
+      }),
+      removeTeamMember: vi.fn(async () => undefined),
+      dissolveTeam: vi.fn(async () => undefined),
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>(".team-switcher-summary")?.click(),
+    );
+    await settleEffects();
+    const teamNavigation = container.querySelector<HTMLElement>('nav[aria-label="团队任务列表"]');
+    expect(teamNavigation?.textContent).toContain("会话 team_task");
+
+    const create = container.querySelector<HTMLButtonElement>(".team-new-thread-shortcut");
+    await act(async () => create?.click());
+    await settleEffects();
+    await act(async () => create?.click());
+    await settleEffects();
+
+    expect(teamNavigation?.textContent).toContain("会话 team_task");
   });
 
   it("团队目录刷新会清除已经退出或解散的活动 Tenant", async () => {

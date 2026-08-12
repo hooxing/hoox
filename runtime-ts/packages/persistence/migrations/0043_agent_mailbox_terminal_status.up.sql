@@ -1,3 +1,6 @@
+ALTER TABLE runtime_agent_mailbox_messages NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE runtime_agent_mailbox_messages DISABLE ROW LEVEL SECURITY;
+
 ALTER TABLE runtime_agent_mailbox_messages
   ADD COLUMN terminal_status text,
   ADD COLUMN error_code text;
@@ -24,3 +27,6 @@ ALTER TABLE runtime_agent_mailbox_messages
       AND octet_length(error_code) BETWEEN 1 AND 200
     )
   );
+
+ALTER TABLE runtime_agent_mailbox_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE runtime_agent_mailbox_messages FORCE ROW LEVEL SECURITY;

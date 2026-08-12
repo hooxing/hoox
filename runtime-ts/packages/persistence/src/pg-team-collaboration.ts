@@ -47,10 +47,16 @@ function mapMember(row: TeamMemberRow): TeamMemberView {
   });
 }
 
-async function actorRole(client: PoolClient, tenantId: string, userId: string) {
+async function actorRole(
+  client: PoolClient,
+  tenantId: string,
+  userId: string,
+  options: Readonly<{ lock?: boolean }> = {},
+) {
+  const lockClause = options.lock === false ? "" : " FOR SHARE";
   const result = await client.query<{ readonly role: "owner" | "admin" | "member" }>(
     `SELECT role FROM memberships
-      WHERE tenant_id=$1 AND user_id=$2 AND status='active' FOR SHARE`,
+      WHERE tenant_id=$1 AND user_id=$2 AND status='active'${lockClause}`,
     [tenantId, userId],
   );
   return result.rows[0]?.role;
@@ -139,7 +145,11 @@ export class PgTeamCollaborationRepository implements TeamCollaborationPort {
         this.pool,
         input.scope,
         async (client) => {
-          if ((await actorRole(client, input.scope.tenantId, input.scope.userId)) === undefined) {
+          // 只读事务不能获取 PostgreSQL 行锁；成员列表仅需验证当前快照中的活跃身份。
+          if (
+            (await actorRole(client, input.scope.tenantId, input.scope.userId, { lock: false })) ===
+            undefined
+          ) {
             return undefined;
           }
           const result = await client.query<TeamMemberRow>(

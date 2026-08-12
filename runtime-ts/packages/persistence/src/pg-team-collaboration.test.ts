@@ -35,7 +35,26 @@ class ScriptedTeamCollaborationClient {
     }
     if (sql.includes("set_config('app.tenant_id'")) return { rows: [], rowCount: 1 };
     if (sql.includes("SELECT role FROM memberships")) {
+      if (
+        sql.includes("FOR SHARE") &&
+        this.statements.some((item) => item.sql.includes("READ ONLY"))
+      ) {
+        throw Object.assign(new Error("只读事务不能获取行锁"), { code: "25006" });
+      }
       return { rows: [{ role: this.actor }], rowCount: 1 };
+    }
+    if (sql.includes("SELECT id AS membership_id")) {
+      return {
+        rows: [
+          {
+            membership_id: "membership-owner",
+            user_id: String(values?.[0] === scope.tenantId ? scope.userId : "member"),
+            role: this.actor,
+            joined_at: "2026-08-12T00:00:00.000Z",
+          },
+        ],
+        rowCount: 1,
+      };
     }
     if (sql.includes("SELECT thread.id")) {
       const rows = Object.keys(this.runBatchesByThread).map((id) => ({ id }));
@@ -69,6 +88,29 @@ const scope = Object.freeze({
   userId: userId("owner-dissolve"),
 });
 
+describe("PostgreSQL 团队成员只读查询", () => {
+  it("活跃成员校验不在 READ ONLY 事务中申请 FOR SHARE 行锁", async () => {
+    const client = new ScriptedTeamCollaborationClient("owner");
+    const repository = new PgTeamCollaborationRepository(poolFor(client));
+
+    await expect(repository.listMembers({ scope })).resolves.toEqual([
+      {
+        membershipId: "membership-owner",
+        userId: scope.userId,
+        role: "owner",
+        joinedAt: "2026-08-12T00:00:00.000Z",
+      },
+    ]);
+
+    const roleQuery = client.statements.find((statement) =>
+      statement.sql.includes("SELECT role FROM memberships"),
+    );
+    expect(client.statements[0]?.sql).toContain("READ ONLY");
+    expect(roleQuery?.sql).not.toContain("FOR SHARE");
+    expect(client.statements.at(-1)?.sql).toBe("COMMIT");
+  });
+});
+
 describe("PostgreSQL 团队解散队列收敛", () => {
   beforeEach(() => {
     queueMocks.cancelThreadQueuedRun.mockReset();
@@ -88,6 +130,10 @@ describe("PostgreSQL 团队解散队列收敛", () => {
       value: undefined,
     });
 
+    const roleQuery = client.statements.find((statement) =>
+      statement.sql.includes("SELECT role FROM memberships"),
+    );
+    expect(roleQuery?.sql).toContain("FOR SHARE");
     const outboxIndexes = client.statements.flatMap((statement, index) =>
       statement.sql.includes("UPDATE run_dispatch_outbox") ? [index] : [],
     );

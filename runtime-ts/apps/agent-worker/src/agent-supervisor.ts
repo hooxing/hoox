@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
-import { agentThreadId, sha256Digest, type AgentThreadId } from "@cube-runtime/domain";
+import { type AgentThreadId, agentThreadId } from "@cube-runtime/domain";
 import {
-  threadActiveHistoryDigest,
   type RuntimeAgentEvent,
   type ThreadActiveHistoryV1,
   type ThreadHistoryMessageV1,
+  threadActiveHistoryDigest,
 } from "@cube-runtime/pi-adapter";
+import { digestCanonical } from "./mutation-protocol.js";
 import type {
   AgentControlPersistencePort,
   AgentControlPort,
@@ -18,7 +19,6 @@ import type {
   WorkerAgentSessionPort,
 } from "./ports.js";
 import { DELEGABLE_AGENT_TOOL_NAMES } from "./ports.js";
-import { digestCanonical } from "./mutation-protocol.js";
 
 interface ChildState {
   readonly agentThreadId: AgentThreadId;
@@ -353,7 +353,7 @@ export class AgentSupervisor implements AgentControlPort {
       callerAgentThreadId: this.dependencies.rootAgentThreadId,
       commandId,
       kind: "interrupt",
-      argsDigest: sha256Digest(child.agentThreadId),
+      argsDigest: digestCanonical({ target: child.agentThreadId }),
       result: Object.freeze({ interrupted: true }),
     });
     if (recorded !== "recorded" && recorded !== "replayed") {

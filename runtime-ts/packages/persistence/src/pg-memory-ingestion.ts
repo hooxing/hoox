@@ -138,7 +138,7 @@ export class PgMemoryIngestionStore implements MemoryIngestionStore {
                     AND kind IN ('user_message','assistant_message')
                   ORDER BY sequence DESC LIMIT 128
                ) visible
-              ORDER BY sequence`,
+              ORDER BY visible.sequence`,
             [input.tenantId, row.thread_id, row.run_id, row.source_through_sequence],
           );
           return { row, claimToken, generation, context: context.rows } as const;

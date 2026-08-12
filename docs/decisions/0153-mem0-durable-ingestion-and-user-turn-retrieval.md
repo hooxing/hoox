@@ -46,6 +46,7 @@ Thread Context 是 user、assistant 与工具事实的持久来源。成功 Run 
 - 合成数据线上冒烟覆盖 V3 提交、事件 `SUCCEEDED`、检索命中和测试记忆删除。
 - 单元测试覆盖不可逆 scope、搜索响应校验、低信任 user message 注入、检索失败降级、两阶段事件消费和本地写回失败边界。
 - 迁移测试覆盖 Run 幂等、RLS、claim fencing、最小 ACL 与非空回退拒绝。
+- 真实 PostgreSQL 集成测试覆盖成功 Run 原子登记、按 bigint sequence 恢复 user/assistant 对话，以及成功 event 的栅栏写回。
 
 ## 可逆性
 

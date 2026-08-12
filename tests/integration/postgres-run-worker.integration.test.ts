@@ -2320,7 +2320,12 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       ],
     });
     if (memoryClaim === undefined) throw new Error("记忆 Outbox claim 缺失");
-    expect(await memoryStore.complete(memoryClaim)).toBe(true);
+    expect(
+      await memoryStore.complete(memoryClaim, {
+        eventId: "b6c2d5f0-c65f-4f27-8f04-0adf25a69428",
+        status: "SUCCEEDED",
+      }),
+    ).toBe(true);
 
     const dispatchB = (
       await runDispatchOutbox.claim({
@@ -6258,6 +6263,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
          "${schema}".thread_input_receipt_events,
          "${schema}".thread_follow_up_queue,
          "${schema}".thread_input_receipts,
+         "${schema}".memory_ingestion_outbox,
          "${schema}".run_workspace_results,
          "${schema}".thread_context_entries
        CASCADE`,

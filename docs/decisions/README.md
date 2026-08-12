@@ -146,6 +146,7 @@
 | [ADR-0147](0147-team-coordinator-database-role.md) | 团队协作使用独立数据库协调角色 | 已接受（试验版） | 2026-08-10 |
 | [ADR-0148](0148-production-sbom-platform-normalization.md) | 生产 SBOM 规范化宿主平台原生可选依赖 | 已接受 | 2026-08-10 |
 | [ADR-0150](0150-heartbeat-transient-persistence-retry.md) | Worker 心跳瞬时持久层故障有界重试 | 已接受 | 2026-08-12 |
+| [ADR-0151](0151-development-worker-self-build.md) | 开发 Worker 启动前自编译应用入口 | 已接受 | 2026-08-12 |
 
 ## 何时必须记录
 

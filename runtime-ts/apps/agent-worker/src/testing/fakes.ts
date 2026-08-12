@@ -79,6 +79,7 @@ import type {
 interface FakeRecord {
   readonly scope: ExecutionScope;
   readonly tenantKind: "personal" | "team";
+  readonly memorySubjectUserId: string;
   run: Run;
   workspace: Workspace;
   readonly input: string;
@@ -166,6 +167,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     this.records.set(scopeKey(scope), {
       scope,
       tenantKind: seed.tenantKind ?? "personal",
+      memorySubjectUserId: seed.memorySubjectUserId ?? "memory-user-test",
       run: seed.run,
       workspace: seed.workspace,
       input: seed.input,
@@ -238,6 +240,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       snapshot: {
         run: record.run,
         tenantKind: record.tenantKind,
+        memorySubjectUserId: record.memorySubjectUserId,
         workspace: record.workspace,
         attempt,
         input: record.input,
@@ -1396,6 +1399,7 @@ export class FakeThreadContextBodies implements ThreadContextBodyPersistencePort
 export interface FakeSeed {
   readonly run: Run;
   readonly tenantKind?: "personal" | "team";
+  readonly memorySubjectUserId?: string;
   readonly workspace: Workspace;
   readonly input: string;
   readonly attachments?: readonly UserInputAttachmentReference[];
@@ -1423,6 +1427,7 @@ export function fakeSeed(prefix = "worker"): FakeSeed {
   });
   return {
     run: createRun({ id: runId(`run-${prefix}`), thread, now }),
+    memorySubjectUserId: user.id,
     workspace: createWorkspace({ id: workspaceId(`workspace-${prefix}`), thread, now }),
     input: "执行任务",
     rolloutProjection: { schemaVersion: 2, checkpointId: `checkpoint-${prefix}`, items: [] },

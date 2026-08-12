@@ -1,10 +1,13 @@
+import { loadDevelopmentEnvironment } from "@cube-runtime/process-runtime";
 import {
   selectSkillAdminApiProcessEnvironment,
   startSkillAdminApiProcess,
 } from "./process-entry.js";
 
 try {
-  const environment = selectSkillAdminApiProcessEnvironment(process.env);
+  const environment = selectSkillAdminApiProcessEnvironment(
+    await loadDevelopmentEnvironment(process.env, new URL("../../../../.env", import.meta.url)),
+  );
   if (environment.RUNTIME_ENV === "production") throw new Error("DEVELOPMENT_SKILL_ADMIN_ONLY");
   const running = await startSkillAdminApiProcess({
     environment,

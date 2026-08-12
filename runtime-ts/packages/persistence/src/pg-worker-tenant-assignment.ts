@@ -156,28 +156,42 @@ export class PgWorkerTenantAssignments {
           // 租约过期后可能已被新 Worker 接管；迟到 settle 不能覆盖新 generation。
           if (locked.rowCount !== 1) return false;
           const pending = await client.query<{ readonly next_attempt_at: Date | string | null }>(
-            `SELECT min(
-                      CASE
-                        WHEN outbox.state='ready' THEN greatest(
-                          outbox.next_attempt_at,statement_timestamp()
-                        )
-                        ELSE greatest(
-                          outbox.lease_expires_at + interval '1 millisecond',
-                          statement_timestamp()
-                        )
-                      END
-                    ) AS next_attempt_at
-               FROM run_dispatch_outbox outbox
-               LEFT JOIN thread_follow_up_queue queue
-                 ON queue.tenant_id=outbox.tenant_id AND queue.thread_id=outbox.thread_id
-                AND queue.run_id=outbox.run_id
-               LEFT JOIN thread_execution_heads head
-                 ON head.tenant_id=outbox.tenant_id AND head.thread_id=outbox.thread_id
-              WHERE outbox.tenant_id=$1
-                AND (queue.run_id IS NULL OR (
-                  queue.state='active' AND head.active_run_id=outbox.run_id
-                ))
-                AND outbox.state IN ('ready','claimed')`,
+            `SELECT min(candidate.next_attempt_at) AS next_attempt_at
+               FROM (
+                 SELECT CASE
+                          WHEN outbox.state='ready' THEN greatest(
+                            outbox.next_attempt_at,statement_timestamp()
+                          )
+                          ELSE greatest(
+                            outbox.lease_expires_at + interval '1 millisecond',
+                            statement_timestamp()
+                          )
+                        END AS next_attempt_at
+                   FROM run_dispatch_outbox outbox
+                   LEFT JOIN thread_follow_up_queue queue
+                     ON queue.tenant_id=outbox.tenant_id AND queue.thread_id=outbox.thread_id
+                    AND queue.run_id=outbox.run_id
+                   LEFT JOIN thread_execution_heads head
+                     ON head.tenant_id=outbox.tenant_id AND head.thread_id=outbox.thread_id
+                  WHERE outbox.tenant_id=$1
+                    AND (queue.run_id IS NULL OR (
+                      queue.state='active' AND head.active_run_id=outbox.run_id
+                    ))
+                    AND outbox.state IN ('ready','claimed')
+                 UNION ALL
+                 SELECT CASE
+                          WHEN memory.state IN ('pending','submitted') THEN greatest(
+                            memory.next_attempt_at,statement_timestamp()
+                          )
+                          ELSE greatest(
+                            memory.claim_expires_at + interval '1 millisecond',
+                            statement_timestamp()
+                          )
+                        END AS next_attempt_at
+                   FROM memory_ingestion_outbox memory
+                  WHERE memory.tenant_id=$1
+                    AND memory.state IN ('pending','claimed','submitted')
+               ) candidate`,
             [assignment.tenantId],
           );
           const nextAttemptAt = pending.rows[0]?.next_attempt_at ?? null;

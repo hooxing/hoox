@@ -40,6 +40,8 @@ describe("动态 Worker Tenant 调度迁移", () => {
       "state,generation,claim_token,claimed_by,lease_expires_at,updated_at",
     );
     expect(bootstrap).toContain("Worker Coordinator 表权限偏离白名单");
+    expect(bootstrap).toContain("ALTER POLICY worker_tenant_assignments_runtime_policy");
+    expect(bootstrap).toContain("worker_tenant_assignments_coordinator_select_policy");
     expect(bootstrap).toContain(
       "GRANT SELECT ON TABLE $" + "{schema}.worker_tenant_assignments TO $" + "{coordinatorRole}",
     );

@@ -147,6 +147,8 @@
 | [ADR-0148](0148-production-sbom-platform-normalization.md) | 生产 SBOM 规范化宿主平台原生可选依赖 | 已接受 | 2026-08-10 |
 | [ADR-0150](0150-heartbeat-transient-persistence-retry.md) | Worker 心跳瞬时持久层故障有界重试 | 已接受 | 2026-08-12 |
 | [ADR-0151](0151-development-worker-self-build.md) | 开发 Worker 启动前自编译应用入口 | 已接受 | 2026-08-12 |
+| [ADR-0152](0152-development-mem0-platform-boundary.md) | 开发阶段使用 Mem0 Platform 的异步记忆边界 | 已接受 | 2026-08-12 |
+| [ADR-0153](0153-mem0-durable-ingestion-and-user-turn-retrieval.md) | Mem0 持久写入与 User Turn 检索闭环 | 已接受 | 2026-08-12 |
 
 ## 何时必须记录
 

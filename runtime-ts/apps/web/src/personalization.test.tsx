@@ -51,9 +51,12 @@ describe("个人个性化弹窗", () => {
     );
     const checkbox = container.querySelector<HTMLInputElement>('input[type="checkbox"]');
     expect(checkbox?.checked).toBe(true);
+    expect(checkbox?.getAttribute("aria-label")).toBe("应用于团队任务");
     expect(container.textContent).toContain("应用于团队任务");
+    expect(container.textContent).toContain("已开启");
 
     await act(async () => checkbox?.click());
+    expect(container.textContent).toContain("已关闭");
     const form = container.querySelector("form");
     await act(async () =>
       form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),

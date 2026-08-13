@@ -154,6 +154,7 @@
 | [ADR-0168](0168-personalization-settings-and-run-snapshot.md) | 个人与团队个性化使用 Run 级低信任偏好快照 | 已接受 | 2026-08-12 |
 | [ADR-0169](0169-team-member-read-only-authorization-snapshot.md) | 团队成员读取在只读事务中使用无锁授权快照 | 已接受 | 2026-08-12 |
 | [ADR-0170](0170-gaia-native-runtime-evaluation.md) | 以普通 Thread/Run 接入 GAIA 原生能力评测 | 已接受 | 2026-08-13 |
+| [ADR-0171](0171-reconcile-published-migration-lineage.md) | 对已发布的 Mem0 迁移执行受限谱系换号 | 已接受 | 2026-08-13 |
 
 ## 何时必须记录
 

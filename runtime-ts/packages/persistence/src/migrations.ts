@@ -19,6 +19,19 @@ interface Migration {
   readonly checksum: string;
 }
 
+const legacyMemoryIngestionLineage = Object.freeze({
+  legacy: Object.freeze({
+    version: 43,
+    name: "memory_ingestion_outbox",
+    checksum: "175f914a06d706fe40fa9ef838235bf348513a4ebd65fdcdb7e39371064688c5",
+  }),
+  current: Object.freeze({
+    version: 45,
+    name: "memory_ingestion_outbox",
+    checksum: "8623caa030ded4431fac618166d9502d2df7c60b39aba422cebc14f55d57cbf5",
+  }),
+});
+
 export interface MigrationRecord {
   readonly version: number;
   readonly name: string;
@@ -114,6 +127,51 @@ async function appliedMigrations(client: PoolClient): Promise<readonly Migration
   return result.rows;
 }
 
+/**
+ * 0043 曾在并行分支中发布为 memory_ingestion_outbox，合并后被顺延到 0045。
+ * 只对已知历史指纹执行原子换号；任何未知 checksum 或目标占用仍交给严格校验拒绝。
+ */
+export async function reconcileKnownMigrationLineages(
+  client: Pick<PoolClient, "query">,
+  applied: readonly MigrationRecord[],
+  migrations: readonly Migration[],
+): Promise<void> {
+  const lineage = legacyMemoryIngestionLineage;
+  const legacy = applied.find((record) => record.version === lineage.legacy.version);
+  if (legacy?.name !== lineage.legacy.name || legacy.checksum !== lineage.legacy.checksum) {
+    return;
+  }
+  if (applied.some((record) => record.version === lineage.current.version)) {
+    throw new PersistenceError(
+      "MIGRATION_MISMATCH",
+      `迁移谱系目标 ${lineage.current.version} 已被占用`,
+    );
+  }
+  const current = migrations.find((migration) => migration.version === lineage.current.version);
+  if (current?.name !== lineage.current.name || current.checksum !== lineage.current.checksum) {
+    throw new PersistenceError(
+      "MIGRATION_MISMATCH",
+      `迁移谱系目标 ${lineage.current.version} 与已接受指纹不一致`,
+    );
+  }
+  const moved = await client.query(
+    `UPDATE runtime_schema_migrations
+        SET version=$4,name=$5,checksum=$6
+      WHERE version=$1 AND name=$2 AND checksum=$3`,
+    [
+      lineage.legacy.version,
+      lineage.legacy.name,
+      lineage.legacy.checksum,
+      lineage.current.version,
+      lineage.current.name,
+      lineage.current.checksum,
+    ],
+  );
+  if (moved.rowCount !== 1) {
+    throw new PersistenceError("MIGRATION_MISMATCH", "迁移谱系换号未命中唯一历史记录");
+  }
+}
+
 export async function migrateUp(
   pool: Pool,
   options: MigrationUpOptions,
@@ -135,6 +193,8 @@ export async function migrateUp(
         options.workerCoordinatorRole,
       ]);
       await ensureMigrationTable(client);
+      const beforeReconciliation = await appliedMigrations(client);
+      await reconcileKnownMigrationLineages(client, beforeReconciliation, migrations);
       const applied = await appliedMigrations(client);
       for (const record of applied) {
         const source = migrations.find((migration) => migration.version === record.version);

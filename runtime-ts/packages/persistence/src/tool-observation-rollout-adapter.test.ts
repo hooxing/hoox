@@ -139,6 +139,23 @@ describe("PostgreSQL Tool Observation adapter", () => {
     expect(calls[0]).toBe(calls[1]);
   });
 
+  it("连续连接重置后仍使用同一冻结命令有界收敛", async () => {
+    const calls: unknown[] = [];
+    const repository = {
+      append: async (input: unknown) => {
+        calls.push(input);
+        if (calls.length < 4) throw new PersistenceError("UNAVAILABLE", "连接被连续重置");
+        return { outcome: "replayed", value: [] } as const;
+      },
+    } as Pick<PgRuntimeRolloutRepository, "append">;
+
+    await expect(
+      new PgToolObservationRolloutAdapter(repository, context).appendToolResult(command),
+    ).resolves.toEqual({ outcome: "replayed" });
+    expect(calls).toHaveLength(4);
+    expect(new Set(calls).size).toBe(1);
+  });
+
   it("拒绝错装到另一执行 scope、Attempt、Agent Thread 或双栅栏的 adapter", async () => {
     let called = false;
     const repository = {

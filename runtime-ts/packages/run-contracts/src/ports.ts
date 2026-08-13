@@ -1174,6 +1174,8 @@ export interface ThreadContinuityMetricsPort {
 
 export interface CancellationPort {
   signalFor(scope: ExecutionScope): AbortSignal;
+  /** Run 执行结束后释放轮询、监听器等按 Run 分配的资源。 */
+  release?(scope: ExecutionScope): void;
 }
 
 export interface ScheduledTask {

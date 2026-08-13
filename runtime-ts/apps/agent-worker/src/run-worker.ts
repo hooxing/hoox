@@ -330,6 +330,7 @@ interface CleanupReceiptFacts {
 }
 
 type AppliedMutation = Extract<RuntimeMutationResult, { outcome: "applied" | "already_applied" }>;
+const MUTATION_READBACK_RETRY_DELAYS_MS = Object.freeze([0, 25, 100, 250]);
 
 export class RunWorker {
   readonly #leaseDurationMs: number;
@@ -1403,6 +1404,7 @@ export class RunWorker {
     } finally {
       timeout.cancel();
       cancellation.removeEventListener("abort", onCancel);
+      this.dependencies.cancellation.release?.(scope);
       shutdown?.removeEventListener("abort", onShutdown);
       closeEventAcceptance(context);
       // abort 完成后才允许取消订阅、释放 Session；cleanup 已由持久 Outbox/Saga 接管。
@@ -1779,14 +1781,21 @@ export class RunWorker {
       };
       let result = await this.dependencies.persistence.mutate(command);
       if (result.outcome === "response_unknown") {
-        // readback 必须使用原始完整 scope；Revision head 推进不能放宽查询。
-        const recovered = await this.dependencies.persistence.readMutation({
-          scope: context.scope,
-          idempotencyKey: input.idempotencyKey,
-        });
-        // not_found 不能证明事务未提交，保留 response_unknown 供孤儿清理和恢复指标分类。
-        if (recovered.outcome === "not_found") return { outcome: "response_unknown" };
-        result = recovered;
+        // COMMIT 回包未知后，远端端口映射可能同时重置第一次读回连接。完整 scope 下有界
+        // 重读是只读且幂等的；not_found 仍不能证明事务未提交。
+        for (const delayMs of MUTATION_READBACK_RETRY_DELAYS_MS) {
+          if (delayMs > 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+          }
+          const recovered = await this.dependencies.persistence.readMutation({
+            scope: context.scope,
+            idempotencyKey: input.idempotencyKey,
+          });
+          if (recovered.outcome === "unavailable" || recovered.outcome === "not_found") continue;
+          result = recovered;
+          break;
+        }
+        if (result.outcome === "response_unknown") return result;
       }
       if (isApplied(result)) {
         if (!receiptMatches(context, result, command)) return { outcome: "idempotency_conflict" };
@@ -1918,6 +1927,7 @@ export class RunWorker {
     context: ExecutionContext,
     sandbox: SandboxSessionRef,
     disposition: "pause" | "close",
+    primaryFailureCode?: StableWorkerErrorCode,
   ): Promise<
     | { readonly outcome: "settled" }
     | { readonly outcome: "recovery"; readonly result: RunWorkerResult }
@@ -1935,7 +1945,7 @@ export class RunWorker {
       if (lifecycle === undefined) {
         return {
           outcome: "recovery",
-          result: await this.requireRecovery(context, "SANDBOX_FAILED", []),
+          result: await this.requireRecovery(context, primaryFailureCode ?? "SANDBOX_FAILED", []),
         };
       }
       const settled = await lifecycle.terminate({
@@ -1950,7 +1960,7 @@ export class RunWorker {
         outcome: "recovery",
         result: await this.requireRecovery(
           context,
-          settled === "unknown" ? "SANDBOX_UNKNOWN" : "SANDBOX_FAILED",
+          primaryFailureCode ?? (settled === "unknown" ? "SANDBOX_UNKNOWN" : "SANDBOX_FAILED"),
           [],
         ),
       };
@@ -1986,7 +1996,7 @@ export class RunWorker {
       if (settlement.outcome === "unknown") {
         return {
           outcome: "recovery",
-          result: await this.requireRecovery(context, "SANDBOX_UNKNOWN", [
+          result: await this.requireRecovery(context, primaryFailureCode ?? "SANDBOX_UNKNOWN", [
             cleanupUnknownOutbox(context, settlement.event, sandbox, disposition),
           ]),
         };
@@ -2004,7 +2014,7 @@ export class RunWorker {
       // started 不能回退为 pending；保留 Saga checkpoint 交给恢复协调器处理。
       return {
         outcome: "recovery",
-        result: await this.requireRecovery(context, "SANDBOX_FAILED", []),
+        result: await this.requireRecovery(context, primaryFailureCode ?? "SANDBOX_FAILED", []),
       };
     }
   }
@@ -2055,7 +2065,7 @@ export class RunWorker {
   ): Promise<RunWorkerResult> {
     if (context.abortPromise) await context.abortPromise;
     if (sandbox !== undefined) {
-      const settled = await this.settleSandbox(context, sandbox, "close");
+      const settled = await this.settleSandbox(context, sandbox, "close", code);
       if (settled.outcome !== "settled") return settled.result;
     }
     const stopped = await this.stopPoint(context, cancellation);
@@ -2102,7 +2112,7 @@ export class RunWorker {
       );
     }
     if (sandbox !== undefined) {
-      const settled = await this.settleSandbox(context, sandbox, "close");
+      const settled = await this.settleSandbox(context, sandbox, "close", code);
       if (settled.outcome !== "settled") return settled.result;
     }
     const stopped = await this.stopPoint(context, cancellation);

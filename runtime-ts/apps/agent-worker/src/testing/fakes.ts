@@ -1311,6 +1311,10 @@ export class FakeCancellationPort implements CancellationPort {
     this.controller(scope.runId).abort("test_cancel");
   }
 
+  release(scope: ExecutionScope): void {
+    this.controllers.delete(scope.runId);
+  }
+
   private controller(run: string): AbortController {
     let controller = this.controllers.get(run);
     if (!controller) {

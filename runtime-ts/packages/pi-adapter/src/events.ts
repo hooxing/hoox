@@ -116,7 +116,9 @@ export function mapPiEvent(event: AgentSessionEvent): RuntimeAgentEvent | undefi
         // Pi 会把 turn hook 抛错包装成 assistant error；Runtime 自身协议错误不能伪装成 Provider 故障。
         if (
           event.message.errorMessage?.includes("THREAD_CONTEXT_") === true ||
-          event.message.errorMessage?.includes("Pi turn 安全点事件无效") === true
+          event.message.errorMessage?.includes("Pi turn 安全点事件无效") === true ||
+          event.message.errorMessage === "MODEL_CONTINUATION_REJECTED" ||
+          event.message.errorMessage === "PROVIDER_BINDING_DRIFT"
         ) {
           return { type: "error", code: "PROTOCOL", message: "模型协议响应无效" };
         }

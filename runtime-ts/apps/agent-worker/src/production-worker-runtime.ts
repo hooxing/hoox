@@ -53,13 +53,71 @@ export class SystemWorkerClock implements ClockPort {
   }
 }
 
-const NEVER_CANCELLED_SIGNAL = new AbortController().signal;
-
 /** 业务取消由 PostgreSQL Run 状态提供；进程信号绝不能伪装成用户取消。 */
 export class DatabaseRunCancellation implements CancellationPort {
-  signalFor(_scope: ExecutionScope): AbortSignal {
-    return NEVER_CANCELLED_SIGNAL;
+  private readonly entries = new Map<
+    string,
+    {
+      readonly controller: AbortController;
+      readonly timer: NodeJS.Timeout;
+      released: boolean;
+      probeInFlight: boolean;
+    }
+  >();
+
+  constructor(
+    private readonly isCancelled: (scope: ExecutionScope) => Promise<boolean> = async () => false,
+    private readonly pollIntervalMs = 1_000,
+  ) {
+    if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 10 || pollIntervalMs > 60_000) {
+      throw new TypeError("Run 取消轮询间隔无效");
+    }
   }
+
+  signalFor(scope: ExecutionScope): AbortSignal {
+    const key = cancellationKey(scope);
+    const existing = this.entries.get(key);
+    if (existing !== undefined) return existing.controller.signal;
+
+    const controller = new AbortController();
+    const entry = {
+      controller,
+      timer: undefined as unknown as NodeJS.Timeout,
+      released: false,
+      probeInFlight: false,
+    };
+    const probe = async () => {
+      if (entry.released || entry.probeInFlight || controller.signal.aborted) return;
+      entry.probeInFlight = true;
+      try {
+        if ((await this.isCancelled(scope)) && !entry.released) {
+          controller.abort("run_cancelled");
+        }
+      } catch {
+        // 短暂数据库故障不能伪造取消；下一轮继续探测，租约心跳仍负责 fail-closed。
+      } finally {
+        entry.probeInFlight = false;
+      }
+    };
+    entry.timer = setInterval(() => void probe(), this.pollIntervalMs);
+    entry.timer.unref();
+    this.entries.set(key, entry);
+    void probe();
+    return controller.signal;
+  }
+
+  release(scope: ExecutionScope): void {
+    const key = cancellationKey(scope);
+    const entry = this.entries.get(key);
+    if (entry === undefined) return;
+    entry.released = true;
+    clearInterval(entry.timer);
+    this.entries.delete(key);
+  }
+}
+
+function cancellationKey(scope: ExecutionScope): string {
+  return `${scope.tenantId}\u0000${scope.runId}`;
 }
 
 export class ProcessShutdown {

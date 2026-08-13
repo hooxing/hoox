@@ -1981,6 +1981,34 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
   });
 
+  it("业务失败后的 cleanup UNKNOWN 保留原始错误码并持久化补偿事实", async () => {
+    const h = sandboxHarness([
+      new ScriptedAgentSession([
+        { type: "agent.started" },
+        { type: "error", code: "PROVIDER", message: "模型服务暂时不可用" },
+        { type: "agent.settled" },
+      ]),
+    ]);
+    h.sandboxes.nextSettlement = { outcome: "unknown", event: uncertain("cleanup_after_create") };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "PROVIDER",
+    });
+
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("running");
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({ kind: "sandbox_cleanup", state: "unknown" }),
+    );
+    expect(record.events).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_event",
+        payload: expect.objectContaining({ type: "runtime.notice", code: "PROVIDER" }),
+      }),
+    );
+  });
+
   it("cleanup started 已决定 close 后，completed receipt 伪造成 pause 必须失败关闭", async () => {
     const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.persistence.rewriteNextCleanupReceiptDisposition = {
@@ -2199,6 +2227,23 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(record.outbox).toContainEqual(
       expect.objectContaining({ kind: "sandbox_cleanup", state: "pending" }),
     );
+  });
+
+  it("COMMIT 响应未知且首次读回不可用时继续幂等读回并完成 Run", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.persistence.responseUnknownNextMutation = true;
+    const originalRead = h.persistence.readMutation.bind(h.persistence);
+    let readCount = 0;
+    h.persistence.readMutation = async (input) => {
+      readCount += 1;
+      if (readCount === 1) return { outcome: "unavailable" };
+      return originalRead(input);
+    };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(readCount).toBe(2);
+    expect(h.persistence.record(h.scope).run.status).toBe("succeeded");
   });
 
   it("超大 adapter event 被版本协议拒绝后立即 abort，Attempt recovery_required", async () => {

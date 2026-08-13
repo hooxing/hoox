@@ -7,6 +7,8 @@ import { PersistenceError } from "./errors.js";
 import type { RolloutEntryDraft } from "./pg-runtime-rollout.js";
 import type { PgRuntimeRolloutRepository, TrustedRolloutContext } from "./pg-runtime-rollout.js";
 
+const OBSERVATION_REPLAY_DELAYS_MS = Object.freeze([0, 25, 100, 250]);
+
 /**
  * 将 Observation 核心的窄端口接到 PostgreSQL Rollout 事实源。它不接受调用方自造
  * trace identity；PgRuntimeRolloutRepository 会在同一租户事务中再次验证 stable/trace 引用。
@@ -54,7 +56,8 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
       entries: Object.freeze([frozenDraft]),
     });
     let result: Awaited<ReturnType<PgRuntimeRolloutRepository["append"]>> | undefined;
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (const [attempt, delayMs] of OBSERVATION_REPLAY_DELAYS_MS.entries()) {
+      if (delayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
       try {
         // 首次 committed-but-unknown 后必须用完全相同的幂等键与正文读回收敛，不能另造结果。
         result = await this.repository.append(command);
@@ -65,7 +68,7 @@ export class PgToolObservationRolloutAdapter implements ToolObservationRolloutPo
           (error.code === "CONFLICT" || error.code === "CONSTRAINT_VIOLATION")
         )
           return { outcome: "conflict" };
-        if (attempt === 1) return { outcome: "unknown" };
+        if (attempt === OBSERVATION_REPLAY_DELAYS_MS.length - 1) return { outcome: "unknown" };
       }
     }
     if (result === undefined) return { outcome: "unknown" };

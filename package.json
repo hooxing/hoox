@@ -27,6 +27,7 @@
     "dev:web": "pnpm --filter @cube-runtime/web dev",
     "dev:worker": "pnpm --filter @cube-runtime/agent-worker^... build && pnpm --filter @cube-runtime/agent-worker dev",
     "dev:worker:check": "pnpm --filter @cube-runtime/agent-worker^... build && pnpm --filter @cube-runtime/agent-worker dev:preflight",
+    "eval:gaia:native": "node --env-file-if-exists=.env scripts/gaia-native-eval.mjs",
     "format": "biome format --write .",
     "format:check": "biome format .",
     "lint": "biome lint .",

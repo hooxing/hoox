@@ -1,15 +1,15 @@
 import {
+  type RunPersonalizationSnapshot,
   resourceId,
   resourceVersionId,
   runId,
   sha256Digest,
-  tenantId,
-  type RunPersonalizationSnapshot,
   type TenantId,
+  tenantId,
   type UserId,
 } from "@cube-runtime/domain";
-import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { MemoryRetriever } from "@cube-runtime/memory";
+import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
 import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import {
@@ -1838,6 +1838,39 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(execution).resolves.toEqual({ outcome: "cancelled" });
   });
 
+  it("工具许可消费不可用时中止执行并把普通 Sandbox 原子转交清理消费者", async () => {
+    const session = new BlockingAgentSession();
+    const h = sandboxHarness([session]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.toolAuthorizers.length === 1);
+    const call = {
+      callId: "tool-call-consume-unavailable",
+      toolName: "sandbox_write_file",
+      argsDigest: sha256Digest("9".repeat(64)),
+    };
+    session.emit({ type: "tool.started", callId: call.callId, name: call.toolName });
+    h.persistence.unavailableNextPermitConsume = true;
+
+    await expect(h.factory.toolAuthorizers[0]?.(call)).rejects.toThrow(
+      "EXTERNAL_EFFECT_NOT_AUTHORIZED",
+    );
+    await expect(execution).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "PERSISTENCE_UNAVAILABLE",
+    });
+
+    const record = h.persistence.record(h.scope);
+    expect(h.sandboxes.settleCount).toBe(0);
+    expect(record.attempt).toMatchObject({ status: "recovery_required" });
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({
+        kind: "sandbox_cleanup",
+        state: "started",
+        payload: expect.objectContaining({ disposition: "close" }),
+      }),
+    );
+  });
+
   it.each([
     { replayName: "sandbox_write_file", label: "同名" },
     { replayName: "sandbox_read_file", label: "异名" },
@@ -2242,7 +2275,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
   });
 
-  it("流式事件持久化不可用时立即 abort，保留 cleanup intent 并等待 Attempt 恢复", async () => {
+  it("流式事件持久化不可用时立即 abort，并推进 cleanup intent 等待 Scheduler", async () => {
     const session = new ScriptedAgentSession(successfulEvents);
     const h = sandboxHarness([session]);
     h.persistence.responseUnknownKeyIncludes = "/sandbox/cleanup-intent";
@@ -2269,7 +2302,11 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(record.run.status).toBe("running");
     expect(record.workspace.currentRevisionId).toBeUndefined();
     expect(record.outbox).toContainEqual(
-      expect.objectContaining({ kind: "sandbox_cleanup", state: "pending" }),
+      expect.objectContaining({
+        kind: "sandbox_cleanup",
+        state: "started",
+        payload: expect.objectContaining({ disposition: "close" }),
+      }),
     );
   });
 

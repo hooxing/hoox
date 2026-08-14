@@ -3,6 +3,10 @@ export * from "./config.js";
 export * from "./cube-gateway.js";
 export * from "./cube-volume.js";
 export * from "./errors.js";
+export * from "./e2b-config.js";
+export * from "./e2b-errors.js";
+export * from "./e2b-gateway.js";
+export type * from "./lifecycle.js";
 export type * from "./types.js";
 export * from "./validation.js";
 export {

@@ -72,6 +72,9 @@ export const expectedEnvironmentKeys = Object.freeze([
   "CUBESANDBOX_PROXY_PORT",
   "CUBESANDBOX_PROXY_SCHEME",
   "CUBESANDBOX_RESOURCE_VOLUME_DRIVER",
+  "E2B_API_KEY",
+  "E2B_DOMAIN",
+  "E2B_TEMPLATE_ID",
   "RESOURCE_FILESYSTEM_SIGNING_KEY",
   "HISTORY_FILESYSTEM_ENABLED",
   "HISTORY_DIRECTORY_TIME_ZONE",
@@ -147,7 +150,7 @@ const placeholderOnlyKeys = new Set([
   "RESOURCEFS_PROXY_TLS_CERT_PATH",
   "DEV_SKILL_ADMIN_TOKEN",
 ]);
-const nullablePlaceholderKeys = new Set(["CUBESANDBOX_API_KEY"]);
+const nullablePlaceholderKeys = new Set(["CUBESANDBOX_API_KEY", "E2B_DOMAIN"]);
 
 function looksLikePlaceholder(key, value) {
   if (

@@ -153,6 +153,7 @@
 | [ADR-0167](0167-mobile-cloud-drive-space-selection-layout.md) | 移动云盘空间与团队选择布局 | 已接受（试验版） | 2026-08-12 |
 | [ADR-0168](0168-personalization-settings-and-run-snapshot.md) | 个人与团队个性化使用 Run 级低信任偏好快照 | 已接受 | 2026-08-12 |
 | [ADR-0169](0169-team-member-read-only-authorization-snapshot.md) | 团队成员读取在只读事务中使用无锁授权快照 | 已接受 | 2026-08-12 |
+| [ADR-0170](0170-e2b-provider-first-sdk-adapter.md) | E2B Provider 首期 SDK 适配与生产启用边界 | 已接受（首期适配） | 2026-08-14 |
 
 ## 何时必须记录
 

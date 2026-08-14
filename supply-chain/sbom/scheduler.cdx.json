@@ -34,7 +34,7 @@
       },
       {
         "name": "cube:lockfile-sha256",
-        "value": "c312f743591004918d99f457dc53f503c8b69b0bc679c8dba3067d2585aa4e4a"
+        "value": "5a7a5df538f57e4524457f658f603964d7ddbc5d424d59fbb9a0c99a3d9e3f7c"
       }
     ]
   },
@@ -661,6 +661,66 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/%40bufbuild/protobuf@2.14.0",
+      "name": "@bufbuild/protobuf",
+      "version": "2.14.0",
+      "purl": "pkg:npm/%40bufbuild/protobuf@2.14.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "(Apache-2.0 AND BSD-3-Clause)"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40connectrpc/connect-web@2.1.2",
+      "name": "@connectrpc/connect-web",
+      "version": "2.1.2",
+      "purl": "pkg:npm/%40connectrpc/connect-web@2.1.2",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40connectrpc/connect@2.1.2",
+      "name": "@connectrpc/connect",
+      "version": "2.1.2",
+      "purl": "pkg:npm/%40connectrpc/connect@2.1.2",
+      "licenses": [
+        {
+          "license": {
+            "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/%40cube-runtime/context-policy@0.0.0",
       "name": "@cube-runtime/context-policy",
       "version": "0.0.0",
@@ -690,6 +750,23 @@
         {
           "name": "cube:workspace-path",
           "value": "runtime-ts/packages/domain"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40cube-runtime/memory@0.0.0",
+      "name": "@cube-runtime/memory",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40cube-runtime/memory@0.0.0",
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "cube:workspace-path",
+          "value": "runtime-ts/packages/memory"
         }
       ]
     },
@@ -1029,6 +1106,26 @@
         {
           "license": {
             "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40isaacs/fs-minipass@4.0.1",
+      "name": "@isaacs/fs-minipass",
+      "version": "4.0.1",
+      "purl": "pkg:npm/%40isaacs/fs-minipass@4.0.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "ISC"
           }
         }
       ],
@@ -1761,6 +1858,46 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/chownr@3.0.0",
+      "name": "chownr",
+      "version": "3.0.0",
+      "purl": "pkg:npm/chownr@3.0.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "BlueOak-1.0.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/compare-versions@6.1.1",
+      "name": "compare-versions",
+      "version": "6.1.1",
+      "purl": "pkg:npm/compare-versions@6.1.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/cross-spawn@7.0.6",
       "name": "cross-spawn",
       "version": "7.0.6",
@@ -1829,6 +1966,46 @@
         {
           "license": {
             "id": "BSD-3-Clause"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/dockerfile-ast@0.7.1",
+      "name": "dockerfile-ast",
+      "version": "0.7.1",
+      "purl": "pkg:npm/dockerfile-ast@0.7.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/e2b@2.39.0",
+      "name": "e2b",
+      "version": "2.39.0",
+      "purl": "pkg:npm/e2b@2.39.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
           }
         }
       ],
@@ -2381,6 +2558,26 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/minizlib@3.1.0",
+      "name": "minizlib",
+      "version": "3.1.0",
+      "purl": "pkg:npm/minizlib@3.1.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/ms@2.1.3",
       "name": "ms",
       "version": "2.1.3",
@@ -2449,6 +2646,46 @@
         {
           "license": {
             "id": "Apache-2.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/openapi-fetch@0.14.1",
+      "name": "openapi-fetch",
+      "version": "0.14.1",
+      "purl": "pkg:npm/openapi-fetch@0.14.1",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/openapi-typescript-helpers@0.0.15",
+      "name": "openapi-typescript-helpers",
+      "version": "0.0.15",
+      "purl": "pkg:npm/openapi-typescript-helpers@0.0.15",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
           }
         }
       ],
@@ -2685,6 +2922,26 @@
       "name": "pgpass",
       "version": "1.0.5",
       "purl": "pkg:npm/pgpass@1.0.5",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/platform@1.3.6",
+      "name": "platform",
+      "version": "1.3.6",
+      "purl": "pkg:npm/platform@1.3.6",
       "licenses": [
         {
           "license": {
@@ -2981,6 +3238,26 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/tar@7.5.22",
+      "name": "tar",
+      "version": "7.5.22",
+      "purl": "pkg:npm/tar@7.5.22",
+      "licenses": [
+        {
+          "license": {
+            "id": "BlueOak-1.0.0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/ts-algebra@2.0.0",
       "name": "ts-algebra",
       "version": "2.0.0",
@@ -3081,10 +3358,70 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/undici@8.10.0",
+      "name": "undici",
+      "version": "8.10.0",
+      "purl": "pkg:npm/undici@8.10.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/undici@8.5.0",
       "name": "undici",
       "version": "8.5.0",
       "purl": "pkg:npm/undici@8.5.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/vscode-languageserver-textdocument@1.0.12",
+      "name": "vscode-languageserver-textdocument",
+      "version": "1.0.12",
+      "purl": "pkg:npm/vscode-languageserver-textdocument@1.0.12",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/vscode-languageserver-types@3.18.0",
+      "name": "vscode-languageserver-types",
+      "version": "3.18.0",
+      "purl": "pkg:npm/vscode-languageserver-types@3.18.0",
       "licenses": [
         {
           "license": {
@@ -3169,6 +3506,26 @@
         {
           "license": {
             "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/yallist@5.0.0",
+      "name": "yallist",
+      "version": "5.0.0",
+      "purl": "pkg:npm/yallist@5.0.0",
+      "licenses": [
+        {
+          "license": {
+            "id": "BlueOak-1.0.0"
           }
         }
       ],
@@ -3275,8 +3632,12 @@
         "pkg:npm/%40aws-sdk/xml-builder@3.972.37",
         "pkg:npm/%40aws/lambda-invoke-store@0.3.0",
         "pkg:npm/%40babel/runtime@7.29.7",
+        "pkg:npm/%40bufbuild/protobuf@2.14.0",
+        "pkg:npm/%40connectrpc/connect-web@2.1.2",
+        "pkg:npm/%40connectrpc/connect@2.1.2",
         "pkg:npm/%40cube-runtime/context-policy@0.0.0",
         "pkg:npm/%40cube-runtime/domain@0.0.0",
+        "pkg:npm/%40cube-runtime/memory@0.0.0",
         "pkg:npm/%40cube-runtime/persistence@0.0.0",
         "pkg:npm/%40cube-runtime/pi-adapter@0.0.0",
         "pkg:npm/%40cube-runtime/process-runtime@0.0.0",
@@ -3294,6 +3655,7 @@
         "pkg:npm/%40earendil-works/pi-tui@0.82.1",
         "pkg:npm/%40google/genai@1.52.0",
         "pkg:npm/%40huggingface/tokenizers@0.1.3",
+        "pkg:npm/%40isaacs/fs-minipass@4.0.1",
         "pkg:npm/%40mariozechner/clipboard-linux-x64-gnu@0.3.9",
         "pkg:npm/%40mariozechner/clipboard-linux-x64-musl@0.3.9",
         "pkg:npm/%40mariozechner/clipboard@0.3.9",
@@ -3330,10 +3692,14 @@
         "pkg:npm/brace-expansion@5.0.8",
         "pkg:npm/buffer-equal-constant-time@1.0.1",
         "pkg:npm/chalk@5.6.2",
+        "pkg:npm/chownr@3.0.0",
+        "pkg:npm/compare-versions@6.1.1",
         "pkg:npm/cross-spawn@7.0.6",
         "pkg:npm/data-uri-to-buffer@4.0.1",
         "pkg:npm/debug@4.4.3",
         "pkg:npm/diff@8.0.4",
+        "pkg:npm/dockerfile-ast@0.7.1",
+        "pkg:npm/e2b@2.39.0",
         "pkg:npm/ecdsa-sig-formatter@1.0.11",
         "pkg:npm/extend@3.0.2",
         "pkg:npm/fetch-blob@3.2.0",
@@ -3361,10 +3727,13 @@
         "pkg:npm/marked@18.0.5",
         "pkg:npm/minimatch@10.2.5",
         "pkg:npm/minipass@7.1.3",
+        "pkg:npm/minizlib@3.1.0",
         "pkg:npm/ms@2.1.3",
         "pkg:npm/node-domexception@1.0.0",
         "pkg:npm/node-fetch@3.3.2",
         "pkg:npm/openai@6.26.0",
+        "pkg:npm/openapi-fetch@0.14.1",
+        "pkg:npm/openapi-typescript-helpers@0.0.15",
         "pkg:npm/p-retry@4.6.2",
         "pkg:npm/partial-json@0.1.7",
         "pkg:npm/path-key@3.1.1",
@@ -3377,6 +3746,7 @@
         "pkg:npm/pg-types@2.2.0",
         "pkg:npm/pg@8.22.0",
         "pkg:npm/pgpass@1.0.5",
+        "pkg:npm/platform@1.3.6",
         "pkg:npm/postgres-array@2.0.0",
         "pkg:npm/postgres-bytea@1.0.1",
         "pkg:npm/postgres-date@1.0.7",
@@ -3391,16 +3761,21 @@
         "pkg:npm/shebang-regex@3.0.0",
         "pkg:npm/signal-exit@3.0.7",
         "pkg:npm/split2@4.2.0",
+        "pkg:npm/tar@7.5.22",
         "pkg:npm/ts-algebra@2.0.0",
         "pkg:npm/tslib@2.8.1",
         "pkg:npm/typebox@1.1.38",
         "pkg:npm/undici-types@6.21.0",
         "pkg:npm/undici@6.28.0",
+        "pkg:npm/undici@8.10.0",
         "pkg:npm/undici@8.5.0",
+        "pkg:npm/vscode-languageserver-textdocument@1.0.12",
+        "pkg:npm/vscode-languageserver-types@3.18.0",
         "pkg:npm/web-streams-polyfill@3.3.3",
         "pkg:npm/which@2.0.2",
         "pkg:npm/ws@8.21.1",
         "pkg:npm/xtend@4.0.2",
+        "pkg:npm/yallist@5.0.0",
         "pkg:npm/yaml@2.9.0",
         "pkg:npm/zod-to-json-schema@3.25.2",
         "pkg:npm/zod@4.4.3"

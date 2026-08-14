@@ -22,6 +22,7 @@
   "dependencies": {
     "@cube-runtime/domain": "workspace:*",
     "@cube-runtime/workspace": "workspace:*",
-    "@cubesandbox/sdk": "workspace:*"
+    "@cubesandbox/sdk": "workspace:*",
+    "e2b": "2.39.0"
   }
 }

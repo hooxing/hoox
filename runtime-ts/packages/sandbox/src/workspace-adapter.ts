@@ -12,13 +12,36 @@ import {
   WorkspaceDependencyError,
   workspaceRelativePath,
 } from "@cube-runtime/workspace";
-import type { CubeSdkSandbox } from "./cube-gateway.js";
 import { mapSandboxError, SandboxRuntimeError, settledOperation } from "./errors.js";
 
 const FILE_TYPE_FILE = "FILE_TYPE_FILE";
 const FILE_TYPE_DIRECTORY = "FILE_TYPE_DIRECTORY";
 const FILE_TYPE_SYMLINK = "FILE_TYPE_SYMLINK";
 const READ_PROTOCOL = "CUBEWS1";
+
+export interface SandboxWorkspaceSdk {
+  readonly sandboxId: string;
+  readonly commands: {
+    run(
+      command: string,
+      options?: { timeoutMs?: number; envs?: Record<string, string> },
+    ): Promise<unknown>;
+  };
+  readonly files: {
+    read(path: string): Promise<string>;
+    write(path: string, data: string | Uint8Array): Promise<void>;
+    list(path: string): Promise<Record<string, unknown>[]>;
+    stat(path: string): Promise<Record<string, unknown>>;
+    remove(path: string): Promise<void>;
+    rename(oldPath: string, newPath: string): Promise<Record<string, unknown>>;
+    makeDir(path: string): Promise<Record<string, unknown>>;
+  };
+}
+
+export type SandboxWorkspaceErrorMapper = (
+  error: unknown,
+  operation: string,
+) => SandboxRuntimeError;
 
 export interface TrustedSandboxWorkspaceBinding extends SandboxSessionIdentity {
   readonly scope: WorkspaceTrustedScope;
@@ -29,7 +52,7 @@ export interface TrustedSandboxSessionCapability {
   current(control?: { readonly signal?: AbortSignal }): Promise<TrustedSandboxWorkspaceBinding>;
 }
 
-export interface CubeWorkspaceAdapterOptions {
+export interface SandboxWorkspaceAdapterOptions {
   readonly maxEntries: number;
   readonly maxFileBytes: number;
   readonly maxTotalBytes: number;
@@ -40,11 +63,15 @@ export interface CubeWorkspaceAdapterOptions {
   readonly operationTimeoutMs: number;
 }
 
+export type CubeWorkspaceAdapterOptions = SandboxWorkspaceAdapterOptions;
+
 interface AdapterOpenInput {
   readonly capability: TrustedSandboxSessionCapability;
   readonly binding: TrustedSandboxWorkspaceBinding;
-  readonly sandbox: CubeSdkSandbox;
-  readonly options: CubeWorkspaceAdapterOptions;
+  readonly sandbox: SandboxWorkspaceSdk;
+  readonly options: SandboxWorkspaceAdapterOptions;
+  readonly errorMapper?: SandboxWorkspaceErrorMapper;
+  readonly dependencyPrefix?: string;
 }
 
 interface CapturedFile {
@@ -71,27 +98,29 @@ interface LiveRead {
   readonly fingerprint: string;
 }
 
-type AdapterConstructor = (input: AdapterOpenInput) => Promise<CubeSandboxWorkspacePort>;
+type AdapterConstructor = (input: AdapterOpenInput) => Promise<SandboxWorkspacePort>;
 
 // 测试入口需要绕过宿主平台判断，但不能因此公开可直接 new 的生产构造器。
 let constructWorkspaceAdapter!: AdapterConstructor;
 
 /**
- * CubeSandbox v0.6 的 `/workspace` 窄适配器。
+ * Sandbox Provider 共用的 `/workspace` 窄适配器。
  *
- * 根目录、服务 URL 与宿主路径均不属于公开参数。所有文件和命令都经 Cube SDK 在远端 Sandbox
+ * 根目录、服务 URL 与宿主路径均不属于公开参数。所有文件和命令都经 Provider SDK 在远端 Sandbox
  * 执行，Worker 宿主平台不会参与路径解析；所有调用在开始和结束时重验可信 session/generation。
  */
-export class CubeSandboxWorkspacePort implements WorkspacePort {
-  private readonly options: CubeWorkspaceAdapterOptions;
+export class SandboxWorkspacePort implements WorkspacePort {
+  private readonly options: SandboxWorkspaceAdapterOptions;
   private readonly snapshotsByOperation = new Map<string, SnapshotOperation>();
   private readonly snapshotsByToken = new Map<string, CapturedSnapshot>();
 
   private constructor(
     private readonly capability: TrustedSandboxSessionCapability,
     private readonly bound: TrustedSandboxWorkspaceBinding,
-    private readonly sandbox: CubeSdkSandbox,
-    options: CubeWorkspaceAdapterOptions,
+    private readonly sandbox: SandboxWorkspaceSdk,
+    options: SandboxWorkspaceAdapterOptions,
+    private readonly errorMapper: SandboxWorkspaceErrorMapper,
+    private readonly dependencyPrefix: string,
   ) {
     this.options = validateOptions(options);
   }
@@ -102,11 +131,13 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
       if (input.sandbox.sandboxId !== input.binding.sessionId) {
         throw known("SDK_SESSION_ID_MISMATCH");
       }
-      const adapter = new CubeSandboxWorkspacePort(
+      const adapter = new SandboxWorkspacePort(
         input.capability,
         freezeBinding(input.binding),
         input.sandbox,
         input.options,
+        input.errorMapper ?? mapSandboxError,
+        validateDependencyPrefix(input.dependencyPrefix ?? "CUBE"),
       );
       await adapter.currentSession();
       await adapter.probeSecureFilesystem();
@@ -115,7 +146,7 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
     };
   }
 
-  static async open(input: AdapterOpenInput): Promise<CubeSandboxWorkspacePort> {
+  static async open(input: AdapterOpenInput): Promise<SandboxWorkspacePort> {
     return constructWorkspaceAdapter(input);
   }
 
@@ -592,7 +623,7 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
       });
     } catch (error) {
       if (error instanceof WorkspaceDependencyError) throw error;
-      throw classify(error, false, operation);
+      throw classify(error, false, operation, this.errorMapper, this.dependencyPrefix);
     }
   }
 
@@ -608,7 +639,7 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
       });
     } catch (error) {
       if (error instanceof WorkspaceDependencyError) throw error;
-      throw classify(error, true, operation);
+      throw classify(error, true, operation, this.errorMapper, this.dependencyPrefix);
     }
   }
 
@@ -664,7 +695,7 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
         },
       );
     } catch (error) {
-      throw classify(error, true, operation);
+      throw classify(error, true, operation, this.errorMapper, this.dependencyPrefix);
     }
     if (!plainRecord(raw)) throw unknown("COMMAND_PROTOCOL_UNKNOWN");
     const { stdout, stderr, exitCode } = raw;
@@ -686,7 +717,7 @@ export class CubeSandboxWorkspacePort implements WorkspacePort {
   }
 }
 
-function validateOptions(options: CubeWorkspaceAdapterOptions): CubeWorkspaceAdapterOptions {
+function validateOptions(options: SandboxWorkspaceAdapterOptions): SandboxWorkspaceAdapterOptions {
   const values = Object.values(options);
   if (values.some((value) => !Number.isSafeInteger(value) || value <= 0)) {
     throw new SandboxRuntimeError("INVALID_ARGUMENT", "Workspace 适配器配额必须是正安全整数");
@@ -878,7 +909,7 @@ function parseReadOutput(stdout: string, maxBytes: number): LiveRead {
 
 async function collectBody(
   source: AsyncIterable<Uint8Array>,
-  options: CubeWorkspaceAdapterOptions,
+  options: SandboxWorkspaceAdapterOptions,
   signal?: AbortSignal,
 ): Promise<Uint8Array> {
   if (source === null || typeof source !== "object" || !(Symbol.asyncIterator in source)) {
@@ -943,13 +974,29 @@ function isNotFound(error: unknown): boolean {
   );
 }
 
-function classify(error: unknown, mutation: boolean, operation: string): WorkspaceDependencyError {
-  const mapped = mapSandboxError(error, operation);
+function classify(
+  error: unknown,
+  mutation: boolean,
+  operation: string,
+  errorMapper: SandboxWorkspaceErrorMapper,
+  dependencyPrefix: string,
+): WorkspaceDependencyError {
+  const mapped = errorMapper(error, operation);
   if (mapped.code === "NOT_FOUND") return known("NOT_FOUND");
   if (mapped.code === "AUTHENTICATION" || mapped.code === "INVALID_ARGUMENT") {
     return known(mapped.code);
   }
-  return new WorkspaceDependencyError(mutation ? "unknown" : "known", `CUBE_${mapped.code}`);
+  return new WorkspaceDependencyError(
+    mutation ? "unknown" : "known",
+    `${dependencyPrefix}_${mapped.code}`,
+  );
+}
+
+function validateDependencyPrefix(value: string): string {
+  if (!/^[A-Z][A-Z0-9_]{0,31}$/u.test(value)) {
+    throw new SandboxRuntimeError("INVALID_ARGUMENT", "Workspace Provider 错误前缀无效");
+  }
+  return value;
 }
 
 function known(code: string): WorkspaceDependencyError {
@@ -1238,3 +1285,6 @@ except SystemExit:
 except Exception:
     fail(70)
 PY`;
+
+/** @deprecated 使用 Provider 无关的 SandboxWorkspacePort。 */
+export { SandboxWorkspacePort as CubeSandboxWorkspacePort };

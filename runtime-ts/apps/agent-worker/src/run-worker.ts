@@ -2134,6 +2134,7 @@ export class RunWorker {
     code: StableWorkerErrorCode,
     retainedSandbox?: SandboxSessionRef,
     responseAlreadyProvided = false,
+    deferredCleanupOutbox: readonly RuntimeOutboxV1[] = [],
   ): Promise<RunWorkerResult> {
     if (context.abortPromise) await context.abortPromise;
     const final = await this.applyMutation(context, {
@@ -2141,7 +2142,7 @@ export class RunWorker {
       nextAttemptStatus: runStatus,
       nextStage: "finished",
       events: terminalFailureEvents(context, runStatus, "finished", code, responseAlreadyProvided),
-      outbox: [],
+      outbox: deferredCleanupOutbox,
       nextRunStatus: runStatus,
       releaseFences: true,
       ...(retainedSandbox === undefined || context.threadSandboxLease === undefined
@@ -2166,15 +2167,22 @@ export class RunWorker {
     closeEventAcceptance(context);
     if (context.abortPromise) await context.abortPromise;
     if (stopped === "cancelled") {
-      return sandbox
-        ? await this.finalizeWithCleanup(
-            context,
-            sandbox,
-            "cancelled",
-            "CANCELLED",
-            this.dependencies.cancellation.signalFor(context.scope),
-          )
-        : await this.finalizeWithoutRevision(context, "cancelled", "CANCELLED");
+      const retainedThreadSandbox =
+        sandbox !== undefined && context.threadSandboxLease !== undefined ? sandbox : undefined;
+      const deferredCleanupOutbox =
+        sandbox !== undefined && context.threadSandboxLease === undefined
+          ? [cleanupOutbox(context, sandbox, "started", "close")]
+          : [];
+      // API 已提交 cancelled 后，不能再等待外部 Sandbox settle；原子关闭 Attempt，并把
+      // 已 armed 的普通 Sandbox 推进为 started，交给 Scheduler 持久清理。
+      return await this.finalizeWithoutRevision(
+        context,
+        "cancelled",
+        "CANCELLED",
+        retainedThreadSandbox,
+        false,
+        deferredCleanupOutbox,
+      );
     }
     if (stopped === "timeout") {
       return sandbox

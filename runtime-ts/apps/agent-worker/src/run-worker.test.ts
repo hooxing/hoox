@@ -1501,6 +1501,50 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(first).resolves.toEqual({ outcome: "cancelled" });
   });
 
+  it("API 已提交 cancelled 后，原 Worker 仍原子关闭 Attempt 并释放栅栏", async () => {
+    const blocked = new BlockingAgentSession();
+    const h = harness([blocked]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.createCount === 1);
+
+    h.persistence.cancelRunExternally(h.scope);
+    h.cancellation.cancel(h.scope);
+
+    await expect(execution).resolves.toEqual({ outcome: "cancelled" });
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("cancelled");
+    expect(record.attempt).toMatchObject({ status: "cancelled", stage: "finished" });
+    expect(record.workspace.writerLease).toBeUndefined();
+    expect(record.events).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_event",
+        payload: expect.objectContaining({ type: "runtime.notice", code: "CANCELLED" }),
+      }),
+    );
+  });
+
+  it("运行中取消不等待普通 Sandbox settle，原子转交持久清理消费者", async () => {
+    const blocked = new BlockingAgentSession();
+    const h = sandboxHarness([blocked]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.createCount === 1);
+
+    h.persistence.cancelRunExternally(h.scope);
+    h.cancellation.cancel(h.scope);
+
+    await expect(execution).resolves.toEqual({ outcome: "cancelled" });
+    const record = h.persistence.record(h.scope);
+    expect(h.sandboxes.settleCount).toBe(0);
+    expect(record.attempt).toMatchObject({ status: "cancelled", stage: "finished" });
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({
+        kind: "sandbox_cleanup",
+        state: "started",
+        payload: expect.objectContaining({ disposition: "close" }),
+      }),
+    );
+  });
+
   it("进程停机中止在途 Session，但只提交恢复事实而不伪造用户 cancelled", async () => {
     const blocked = new BlockingAgentSession();
     const h = harness([blocked], fakeSeed("worker-shutdown"));

@@ -31,6 +31,7 @@ import type { RunSkillSnapshot } from "@cube-runtime/skill";
 import { createWorkspaceManifest } from "@cube-runtime/workspace";
 import {
   digestCanonical,
+  isExternalCancellationFinalizationMutation,
   outboxPayloadDigest,
   rolloutProjectionDigest,
   runtimeMutationDigest,
@@ -152,6 +153,11 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     readonly attachments?: readonly UserInputAttachmentReference[];
     readonly bodyDigest: Sha256Digest;
   }> = [];
+
+  cancelRunExternally(scope: ExecutionScope): void {
+    const record = this.requireRecord(scope);
+    record.run = transitionRun(record.run, "cancelled", this.databaseNow());
+  }
   rewriteNextCleanupReceiptDisposition:
     | {
         readonly state: "started" | "completed" | "unknown";
@@ -507,9 +513,13 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       return { outcome: "response_unknown" };
     }
     const now = this.databaseNow();
+    const externallyCancelled =
+      record.run.status === "cancelled" &&
+      record.attempt !== undefined &&
+      isExternalCancellationFinalizationMutation(command, record.attempt.attemptId);
     if (
       record.fence === undefined ||
-      record.run.status !== "running" ||
+      (record.run.status !== "running" && !externallyCancelled) ||
       expired(record.fence, now) ||
       record.workspace.writerLease?.rootRunId !== record.fence.workspaceLease.rootRunId ||
       record.workspace.writerLease.epoch !== record.fence.workspaceLease.epoch
@@ -647,7 +657,9 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       record.workspace = commit.workspace;
       this.revisionCreatedAt.push(commit.revision.createdAt);
     }
-    if (command.nextRunStatus) record.run = transitionRun(record.run, command.nextRunStatus, now);
+    if (command.nextRunStatus && !externallyCancelled) {
+      record.run = transitionRun(record.run, command.nextRunStatus, now);
+    }
     if (command.rolloutProjection) {
       record.rolloutProjection = command.rolloutProjection;
       record.projectionVersion += 1;

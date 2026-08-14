@@ -32,6 +32,7 @@ import type {
 import {
   assertControlledRolloutProjection,
   digestCanonical,
+  isExternalCancellationFinalizationMutation,
   outboxPayloadDigest,
   rolloutProjectionDigest,
   runtimeMutationDigest,
@@ -194,16 +195,20 @@ function scopeMatches(row: QueryResultRow, scope: ExecutionScope): boolean {
   );
 }
 
-function fenceMatches(row: QueryResultRow, fence: ExecutionFence): boolean {
-  const existingFenceMatches =
+function durableFenceIdentityMatches(row: QueryResultRow, fence: ExecutionFence): boolean {
+  return (
     scopeMatches(row, fence.scope) &&
     row.claim_token === fence.runClaim.token &&
     Number(row.claim_epoch) === fence.runClaim.epoch &&
     Number(row.claim_workspace_lease_epoch) === fence.workspaceLease.epoch &&
     Number(row.fence_lease_epoch) === fence.workspaceLease.epoch &&
     row.lease_root_run_id === fence.workspaceLease.rootRunId &&
-    Number(row.lease_row_epoch) === fence.workspaceLease.epoch;
-  if (!existingFenceMatches) return false;
+    Number(row.lease_row_epoch) === fence.workspaceLease.epoch
+  );
+}
+
+function fenceMatches(row: QueryResultRow, fence: ExecutionFence): boolean {
+  if (!durableFenceIdentityMatches(row, fence)) return false;
   if (row.queue_state === null || row.queue_state === undefined) return true;
   return (
     row.queue_state === "active" &&
@@ -1850,10 +1855,17 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     const row = await this.lockFenceState(client, command.fence.scope);
     if (row === undefined) return { outcome: "fence_lost" };
     if (!scopeMatches(row, command.fence.scope)) return { outcome: "scope_mismatch" };
-    if (!fenceMatches(row, command.fence)) return { outcome: "fence_lost" };
-    const fenceOutcome = await this.validateLockedFence(client, row, command.fence);
-    if (fenceOutcome !== "active") {
-      return { outcome: fenceOutcome === "cancelled" ? "fence_lost" : fenceOutcome };
+    const externallyCancelled =
+      row.run_status === "cancelled" &&
+      row.claim_released_at === null &&
+      durableFenceIdentityMatches(row, command.fence) &&
+      isExternalCancellationFinalizationMutation(command, String(row.attempt_id));
+    if (!externallyCancelled) {
+      if (!fenceMatches(row, command.fence)) return { outcome: "fence_lost" };
+      const fenceOutcome = await this.validateLockedFence(client, row, command.fence);
+      if (fenceOutcome !== "active") {
+        return { outcome: fenceOutcome === "cancelled" ? "fence_lost" : fenceOutcome };
+      }
     }
 
     // EffectInvocation 的永久唯一性高于 mutation key 幂等重放。
@@ -2342,7 +2354,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
       };
     }
 
-    if (command.nextRunStatus !== undefined) {
+    if (command.nextRunStatus !== undefined && !externallyCancelled) {
       const updated = await client.query(
         `UPDATE runs SET status=$3,version=version+1,updated_at=$4
           WHERE tenant_id=$1 AND id=$2 AND status='running'`,

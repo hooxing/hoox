@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
 import {
   isoTimestamp,
+  type Run,
   resourceId,
   resourceVersionId,
-  type Run,
   type Sha256Digest,
   type Workspace,
   workspaceRevisionId,
@@ -41,20 +41,21 @@ import {
 } from "@cube-runtime/run-contracts/mutation-protocol";
 import { parseWorkspaceManifest } from "@cube-runtime/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
-import { lockThreadExecutionHead, settleActiveThreadRun } from "./pg-thread-run-queue.js";
-import { readRunSkillSnapshot } from "./pg-skill-runtime.js";
-import {
-  TransactionCommitUnknownError,
-  withRetriedSerializableTenantTransaction,
-  withTenantTransaction,
-} from "./postgres.js";
-import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
+import { PersistenceError } from "./errors.js";
 import { enqueueMemoryIngestion } from "./pg-memory-ingestion.js";
 import {
   DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
   insertHistoryAgentDeliverable,
   shouldIndexArtifactInHistory,
 } from "./pg-personal-history.js";
+import { readRunSkillSnapshot } from "./pg-skill-runtime.js";
+import { lockThreadExecutionHead, settleActiveThreadRun } from "./pg-thread-run-queue.js";
+import {
+  TransactionCommitUnknownError,
+  withRetriedSerializableTenantTransaction,
+  withTenantTransaction,
+} from "./postgres.js";
+import { mapRun, mapTenant, mapThread, mapWorkspace } from "./row-mappers.js";
 import { appendThreadContext } from "./thread-context.js";
 import { applyThreadSandboxTerminal } from "./thread-sandbox-session.js";
 import { workspaceArtifactMediaType } from "./workspace-artifact-media.js";
@@ -85,6 +86,7 @@ export interface PgRunWorkerStateOptions {
 }
 
 const mutationSerializableRetryDelaysMs = Object.freeze([5, 15, 45]);
+const permitConsumptionRetryDelaysMs = Object.freeze([0, 25, 100, 250, 500]);
 
 export interface InitializeRunExecutionInput {
   readonly scope: ExecutionScope;
@@ -153,6 +155,27 @@ function validWorkspaceManifest(value: unknown, tenantId: string): boolean {
 
 function isPgCode(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === code;
+}
+
+function isRetryablePersistenceFailure(error: unknown): boolean {
+  if (error instanceof PersistenceError) return error.code === "UNAVAILABLE";
+  if (typeof error !== "object" || error === null || !("code" in error)) return false;
+  const code = String(error.code);
+  return (
+    code.startsWith("08") ||
+    code === "57P01" ||
+    [
+      "ECONNREFUSED",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "ETIMEDOUT",
+      "EHOSTUNREACH",
+      "ENETUNREACH",
+      "ECONNRESET",
+      "ECONNABORTED",
+      "EPIPE",
+    ].includes(code)
+  );
 }
 
 function dbTimestamp(value: unknown): ReturnType<typeof isoTimestamp> {
@@ -1588,43 +1611,71 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     readonly expectedAttemptVersion: number;
     readonly permit: ExternalEffectPermit;
   }): ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]> {
-    try {
-      return await withRetriedSerializableTenantTransaction(
-        this.pool,
-        { tenantId: input.fence.scope.tenantId },
-        async (client) => {
-          const row = await this.lockFenceState(client, input.fence.scope);
-          const fenceOutcome = await this.validateLockedFence(client, row, input.fence);
-          if (fenceOutcome !== "active") return { outcome: fenceOutcome } as const;
-          if (Number(row?.attempt_version) !== input.expectedAttemptVersion) {
-            return { outcome: "conflict" } as const;
-          }
-          const stored = await client.query(
-            `SELECT * FROM external_effect_permits
-              WHERE tenant_id=$1 AND permit_id=$2 FOR UPDATE`,
-            [input.fence.scope.tenantId, input.permit.permitId],
-          );
-          const permitRow = stored.rows[0];
-          if (permitRow === undefined) return { outcome: "fence_lost" } as const;
-          if (permitRow.consumed_at !== null) return { outcome: "already_consumed" } as const;
-          if (!storedPermitMatches(permitRow, row, input)) return { outcome: "conflict" } as const;
-          const nowResult = await client.query<{ database_now: Date }>(
-            "SELECT clock_timestamp() AS database_now",
-          );
-          const databaseNow = dbTimestamp(nowResult.rows[0]?.database_now);
-          if (Date.parse(dbTimestamp(permitRow.expires_at)) <= Date.parse(databaseNow)) {
-            return { outcome: "expired" } as const;
-          }
-          await client.query(
-            `UPDATE external_effect_permits SET consumed_at=$3
-              WHERE tenant_id=$1 AND permit_id=$2 AND consumed_at IS NULL`,
-            [input.fence.scope.tenantId, input.permit.permitId, databaseNow],
-          );
-          return { outcome: "consumed", databaseNow } as const;
-        },
-      );
-    } catch {
-      return { outcome: "unavailable" };
+    let commitOutcomeUnknown = false;
+    for (let retry = 0; ; retry += 1) {
+      try {
+        const result = await withRetriedSerializableTenantTransaction(
+          this.pool,
+          { tenantId: input.fence.scope.tenantId },
+          async (client) => {
+            const row = await this.lockFenceState(client, input.fence.scope);
+            const fenceOutcome = await this.validateLockedFence(client, row, input.fence);
+            if (fenceOutcome !== "active") return { outcome: fenceOutcome } as const;
+            if (Number(row?.attempt_version) !== input.expectedAttemptVersion) {
+              return { outcome: "conflict" } as const;
+            }
+            const stored = await client.query(
+              `SELECT * FROM external_effect_permits
+                WHERE tenant_id=$1 AND permit_id=$2 FOR UPDATE`,
+              [input.fence.scope.tenantId, input.permit.permitId],
+            );
+            const permitRow = stored.rows[0];
+            if (permitRow === undefined) return { outcome: "fence_lost" } as const;
+            if (!storedPermitMatches(permitRow, row, input)) {
+              return { outcome: "conflict" } as const;
+            }
+            if (permitRow.consumed_at !== null) {
+              return {
+                outcome: "already_consumed",
+                databaseNow: dbTimestamp(permitRow.consumed_at),
+              } as const;
+            }
+            const nowResult = await client.query<{ database_now: Date }>(
+              "SELECT clock_timestamp() AS database_now",
+            );
+            const databaseNow = dbTimestamp(nowResult.rows[0]?.database_now);
+            if (Date.parse(dbTimestamp(permitRow.expires_at)) <= Date.parse(databaseNow)) {
+              return { outcome: "expired" } as const;
+            }
+            await client.query(
+              `UPDATE external_effect_permits SET consumed_at=$3
+                WHERE tenant_id=$1 AND permit_id=$2 AND consumed_at IS NULL`,
+              [input.fence.scope.tenantId, input.permit.permitId, databaseNow],
+            );
+            return { outcome: "consumed", databaseNow } as const;
+          },
+        );
+        if (result.outcome === "already_consumed") {
+          // 只有本次调用已经遇到 COMMIT 响应未知时，读回 consumed 才能证明第一次提交成功。
+          // 独立的第二次调用仍返回 already_consumed，防止重复放行外部副作用。
+          return commitOutcomeUnknown
+            ? { outcome: "consumed", databaseNow: result.databaseNow }
+            : { outcome: "already_consumed" };
+        }
+        return result;
+      } catch (error) {
+        if (isPgCode(error, "23505") || isPgCode(error, "23503") || isPgCode(error, "23514")) {
+          return { outcome: "conflict" };
+        }
+        if (error instanceof TransactionCommitUnknownError) {
+          commitOutcomeUnknown = true;
+        } else if (!isRetryablePersistenceFailure(error)) {
+          return { outcome: "unavailable" };
+        }
+        const retryDelay = permitConsumptionRetryDelaysMs[retry];
+        if (retryDelay === undefined) return { outcome: "unavailable" };
+        await delay(retryDelay);
+      }
     }
   }
 

@@ -134,6 +134,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   forceFenceLost = false;
   threadSandboxHandoffRunId: ReturnType<typeof runId> | undefined;
   rejectNextPermit = false;
+  unavailableNextPermitConsume = false;
   beforePermitIssueReturn?: (
     input: Parameters<ExecutionPersistencePort["issueExternalEffectPermit"]>[0],
   ) => void | Promise<void>;
@@ -437,6 +438,10 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     input: Parameters<ExecutionPersistencePort["consumeExternalEffectPermit"]>[0],
   ): ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]> {
     this.durableOperations.push(`permit:consume:${input.permit.callId}`);
+    if (this.unavailableNextPermitConsume) {
+      this.unavailableNextPermitConsume = false;
+      return { outcome: "unavailable" };
+    }
     const record = this.find(input.fence.scope);
     if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
     const now = this.databaseNow();

@@ -2,16 +2,16 @@ import {
   applyTodoWrite,
   type IsoTimestamp,
   type Run,
+  type RunPersonalizationSnapshot,
   type Sha256Digest,
   type TodoSnapshot,
   type TodoWriteCommand,
+  userId,
   type Workspace,
   type WorkspaceRevisionId,
-  userId,
-  type RunPersonalizationSnapshot,
 } from "@cube-runtime/domain";
-import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import { injectRetrievedMemories, type MemoryRetriever } from "@cube-runtime/memory";
+import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { WorkspaceApplicationError, WorkspaceDependencyError } from "@cube-runtime/workspace";
 import { AgentSupervisor, rootAgentThreadId } from "./agent-supervisor.js";
@@ -2196,10 +2196,18 @@ export class RunWorker {
         : await this.finalizeWithoutRevision(context, "failed", "TIMEOUT");
     }
     if (stopped === "shutdown") {
-      return await this.requireRecovery(context, "WORKER_SHUTDOWN", []);
+      return await this.requireRecovery(
+        context,
+        "WORKER_SHUTDOWN",
+        recoveryCleanupOutbox(context, sandbox),
+      );
     }
     if (stopped === "fence_lost" || stopped === "scope_mismatch") return { outcome: "fence_lost" };
-    return await this.requireRecovery(context, "PERSISTENCE_UNAVAILABLE", []);
+    return await this.requireRecovery(
+      context,
+      "PERSISTENCE_UNAVAILABLE",
+      recoveryCleanupOutbox(context, sandbox),
+    );
   }
 
   private async requireRecovery(
@@ -2439,6 +2447,17 @@ function cleanupOutbox(
   if (state === "pending") return { ...base, state };
   if (disposition === undefined) throw new Error("started 后必须一次性决定 cleanup disposition");
   return { ...base, state, payload: { ...base.payload, disposition } };
+}
+
+function recoveryCleanupOutbox(
+  context: ExecutionContext,
+  sandbox: SandboxSessionRef | undefined,
+): readonly RuntimeOutboxV1[] {
+  // 普通 Sandbox 已有 pending intent；恢复终止与释放双栅栏必须在同一事务把它推进到
+  // started/close，Scheduler 才能立即领取。Thread Sandbox 由独立 lifecycle 状态机收敛。
+  return sandbox !== undefined && context.threadSandboxLease === undefined
+    ? [cleanupOutbox(context, sandbox, "started", "close")]
+    : [];
 }
 
 function terminalSandboxCommand(lease: ThreadSandboxLeaseRefV1) {

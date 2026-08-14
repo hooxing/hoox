@@ -28,6 +28,13 @@ BEGIN
     EXECUTE format('ALTER TABLE cleanup_outbox DROP CONSTRAINT %I', current_name);
   END IF;
 
+  SELECT conname INTO current_name FROM pg_constraint
+   WHERE conrelid='waiting_recovery_checkpoints'::regclass AND contype='f'
+     AND pg_get_constraintdef(oid) LIKE 'FOREIGN KEY (tenant_id, attempt_id, registry_id, provider_sandbox_id)%';
+  IF current_name IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE waiting_recovery_checkpoints DROP CONSTRAINT %I', current_name);
+  END IF;
+
   FOR current_name IN
     SELECT conname FROM pg_constraint
      WHERE conrelid='sandbox_registry'::regclass AND contype='u'
@@ -54,6 +61,11 @@ ALTER TABLE sandbox_registry
   UNIQUE (tenant_id,attempt_id,registry_id,provider_key,provider_sandbox_id);
 ALTER TABLE cleanup_outbox
   ADD CONSTRAINT cleanup_outbox_provider_registry_fkey
+  FOREIGN KEY (tenant_id,attempt_id,registry_id,provider_key,provider_sandbox_id)
+  REFERENCES sandbox_registry(tenant_id,attempt_id,registry_id,provider_key,provider_sandbox_id)
+  ON DELETE RESTRICT;
+ALTER TABLE waiting_recovery_checkpoints
+  ADD CONSTRAINT waiting_recovery_provider_registry_fkey
   FOREIGN KEY (tenant_id,attempt_id,registry_id,provider_key,provider_sandbox_id)
   REFERENCES sandbox_registry(tenant_id,attempt_id,registry_id,provider_key,provider_sandbox_id)
   ON DELETE RESTRICT;

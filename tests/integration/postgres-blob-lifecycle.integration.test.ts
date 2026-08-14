@@ -735,6 +735,7 @@ describe("PostgreSQL stable blob 生命周期", () => {
             outcome: "ready",
             session: {
               registryId: `registry-${label}-${sandboxSequence}`,
+              providerKey: "cube",
               providerSandboxId: sandbox.id,
               mode: "created",
               sandbox,

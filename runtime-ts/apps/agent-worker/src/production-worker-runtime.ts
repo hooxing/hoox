@@ -142,6 +142,10 @@ export class ProviderSandboxSessionRegistry
     }
   }
 
+  get defaultProviderKey(): SandboxProviderKey {
+    return this.gateway.providerKey;
+  }
+
   async probe(): Promise<void> {
     await Promise.all([this.gateway.probe(), this.resourceVolume?.probe()]);
   }

@@ -456,6 +456,7 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
     "sandbox_lifecycle_effects",
     new Set([
       "state",
+      "provider_key",
       "provider_sandbox_id",
       "resulting_session_state",
       "provider_receipt_digest",
@@ -578,6 +579,21 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
     ]),
   ],
 ]);
+
+async function hasRuntimeSubagentCurrentTaskState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_attribute
+        WHERE attrelid=to_regclass(format('%I.runtime_subagent_conversations',$1::text))
+          AND attname='current_task' AND attnum>0 AND NOT attisdropped
+     ) AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
 
 async function hasWaitingRecoveryState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
@@ -851,6 +867,21 @@ async function hasThreadSandboxSessionState(client: PoolClient, schema: string):
             AND to_regclass(format('%I.thread_sandbox_leases', $1::text)) IS NOT NULL
             AND to_regclass(format('%I.sandbox_lifecycle_effects', $1::text)) IS NOT NULL
             AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasSandboxProviderIdentityState(
+  client: PoolClient,
+  schema: string,
+): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM pg_attribute
+        WHERE attrelid=to_regclass(format('%I.sandbox_lifecycle_effects',$1::text))
+          AND attname='provider_key' AND attnum>0 AND NOT attisdropped
+     ) AS present`,
     [schema],
   );
   return result.rows[0]?.present === true;
@@ -1146,6 +1177,15 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasThreadSandboxSessionState(client, schema))) {
     for (const table of threadSandboxSessionTables) policy.delete(table);
+  } else if (!(await hasSandboxProviderIdentityState(client, schema))) {
+    policy.set(
+      "sandbox_lifecycle_effects",
+      new Set(
+        [...(policy.get("sandbox_lifecycle_effects") ?? [])].filter(
+          (column) => column !== "provider_key",
+        ),
+      ),
+    );
   }
   if (!(await hasThreadContinuityRolloutState(client, schema))) {
     for (const table of threadContinuityRolloutTables) policy.delete(table);
@@ -1164,6 +1204,15 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasRuntimeSubagentConversationState(client, schema))) {
     for (const table of runtimeSubagentConversationTables) policy.delete(table);
+  } else if (!(await hasRuntimeSubagentCurrentTaskState(client, schema))) {
+    policy.set(
+      "runtime_subagent_conversations",
+      new Set(
+        [...(policy.get("runtime_subagent_conversations") ?? [])].filter(
+          (column) => column !== "current_task",
+        ),
+      ),
+    );
   }
   if (!(await hasWaitingRecoveryState(client, schema))) {
     for (const table of waitingRecoveryTables) policy.delete(table);
@@ -2465,6 +2514,7 @@ export async function bootstrapRuntimeAccessOnClient(
     await client.query(`GRANT SELECT, INSERT ON TABLE ${schema}.thread_execution_heads TO ${role}`);
   }
   if (await hasThreadSandboxSessionState(client, context.schema)) {
+    const providerIdentity = await hasSandboxProviderIdentityState(client, context.schema);
     await client.query(
       `GRANT UPDATE(
          state,materialized_revision_id,materialization_attested,paused_at,
@@ -2473,7 +2523,7 @@ export async function bootstrapRuntimeAccessOnClient(
        GRANT UPDATE(attempt_id,owner,expires_at,released_at,updated_at)
          ON TABLE ${schema}.thread_sandbox_leases TO ${role};
        GRANT UPDATE(
-         state,provider_sandbox_id,resulting_session_state,provider_receipt_digest,
+         state,${providerIdentity ? "provider_key," : ""}provider_sandbox_id,resulting_session_state,provider_receipt_digest,
          claim_token,claimed_by,claim_generation,claim_expires_at,
          remote_call_started_at,updated_at,completed_at
        ) ON TABLE ${schema}.sandbox_lifecycle_effects TO ${role}`,
@@ -2618,11 +2668,12 @@ export async function bootstrapRuntimeAccessOnClient(
     );
   }
   if (await hasRuntimeSubagentConversationState(client, context.schema)) {
+    const currentTask = await hasRuntimeSubagentCurrentTaskState(client, context.schema);
     await client.query(
       `GRANT SELECT, INSERT ON TABLE ${schema}.runtime_subagent_conversations TO ${role}`,
     );
     await client.query(
-      `GRANT UPDATE(turn_ordinal,current_task,history,history_digest,updated_at)
+      `GRANT UPDATE(turn_ordinal,${currentTask ? "current_task," : ""}history,history_digest,updated_at)
          ON TABLE ${schema}.runtime_subagent_conversations TO ${role}`,
     );
   }

@@ -11,6 +11,7 @@ BEGIN
 END $$;
 
 ALTER TABLE cleanup_outbox DROP CONSTRAINT cleanup_outbox_provider_registry_fkey;
+ALTER TABLE waiting_recovery_checkpoints DROP CONSTRAINT waiting_recovery_provider_registry_fkey;
 ALTER TABLE sandbox_registry
   DROP CONSTRAINT sandbox_registry_provider_identity_key,
   DROP CONSTRAINT sandbox_registry_cleanup_identity_key;
@@ -21,6 +22,10 @@ ALTER TABLE sandbox_registry
   ADD UNIQUE (tenant_id,provider_sandbox_id),
   ADD UNIQUE (tenant_id,attempt_id,registry_id,provider_sandbox_id);
 ALTER TABLE cleanup_outbox
+  ADD FOREIGN KEY (tenant_id,attempt_id,registry_id,provider_sandbox_id)
+  REFERENCES sandbox_registry(tenant_id,attempt_id,registry_id,provider_sandbox_id)
+  ON DELETE RESTRICT;
+ALTER TABLE waiting_recovery_checkpoints
   ADD FOREIGN KEY (tenant_id,attempt_id,registry_id,provider_sandbox_id)
   REFERENCES sandbox_registry(tenant_id,attempt_id,registry_id,provider_sandbox_id)
   ON DELETE RESTRICT;

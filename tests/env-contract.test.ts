@@ -27,6 +27,7 @@ function validExample(): string {
         key.endsWith("API_KEY") ||
         key.endsWith("SIGNING_KEY") ||
         key.endsWith("SIGNING_KEYS") ||
+        key.endsWith("HMAC_KEY") ||
         key.endsWith("TOKEN") ||
         key.endsWith("TEMPLATE_ID") ||
         key === "RESOURCEFS_PROXY_TLS_KEY_PATH" ||

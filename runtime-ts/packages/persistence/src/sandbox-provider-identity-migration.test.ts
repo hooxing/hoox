@@ -22,9 +22,12 @@ describe("Sandbox Provider 身份迁移", () => {
     }
     expect(sql).toContain("CHECK (provider_key IN ('cube','e2b'))");
     expect(sql).toContain("UNIQUE (tenant_id,provider_key,provider_sandbox_id)");
-    expect(sql).toContain(
-      "FOREIGN KEY (tenant_id,attempt_id,registry_id,provider_key,provider_sandbox_id)",
-    );
+    expect(
+      sql.match(
+        /FOREIGN KEY \(tenant_id,attempt_id,registry_id,provider_key,provider_sandbox_id\)/gu,
+      ),
+    ).toHaveLength(2);
+    expect(sql).toContain("waiting_recovery_provider_registry_fkey");
     expect(sql).toContain("UNIQUE (provider_key,provider_sandbox_id)");
   });
 

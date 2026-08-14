@@ -28,11 +28,13 @@ describe("Thread 级 SubAgent 对话 migration", () => {
     expect(sql).not.toContain("pending_tool_manifest");
   });
 
-  it("Runtime 角色只能更新 turn 序号和完整完成历史", () => {
+  it("Runtime 角色只能更新当前任务、turn 序号和完整完成历史", () => {
     const source = roleBootstrap();
     expect(source).toContain('new Set(["runtime_subagent_conversations"])');
     expect(source).toMatch(/runtime_subagent_conversations TO \$\{role\}/u);
-    expect(source).toContain("GRANT UPDATE(turn_ordinal,history,history_digest,updated_at)");
+    expect(source).toMatch(
+      /\$\{currentTask \? "current_task," : ""\}history,history_digest,updated_at/u,
+    );
     expect(source).not.toContain("GRANT UPDATE(enabled_tools,tool_manifest_digest)");
   });
 

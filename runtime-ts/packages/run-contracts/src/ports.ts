@@ -920,6 +920,8 @@ export type ThreadSandboxAcquireResult =
 
 /** Provider 驱动不接触数据库；Thread lifecycle repository 独占 intent/receipt 与 lease。 */
 export interface ThreadSandboxProviderPort {
+  /** create intent 在远端调用前持久化，必须预先绑定部署级默认 Provider。 */
+  readonly defaultProviderKey: SandboxProviderKey;
   create(input: {
     readonly scope: ExecutionScope;
     readonly registryId: string;

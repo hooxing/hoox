@@ -16,6 +16,7 @@ export type {
   ResourcePromotionCommitResult,
 } from "./pg-resource-library.js";
 export * from "./pg-resource-upload.js";
+export * from "./pg-run-cancellation.js";
 export type { PgClaimedRunDispatch } from "./pg-run-dispatch.js";
 export { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 export * from "./pg-run-worker-state.js";

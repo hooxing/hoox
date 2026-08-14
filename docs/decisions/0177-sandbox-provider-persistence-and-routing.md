@@ -1,4 +1,4 @@
-# ADR-0171：Sandbox Provider 身份持久化与失败关闭路由
+# ADR-0177：Sandbox Provider 身份持久化与失败关闭路由
 
 - 状态：已接受
 - 日期：2026-08-14
@@ -35,3 +35,7 @@ E2B 当前也没有在本仓库中得到验证的、只读且不向 Sandbox 暴�
 ## 可逆性
 
 仅在所有 `provider_key` 仍为 `cube` 时允许回退迁移；一旦产生 E2B 事实，down 明确拒绝，必须先完成外部资源与持久事实迁移，不能丢弃 Provider 身份。
+
+## 合并记录
+
+与主分支合并后，本 ADR 顺延为 ADR-0177。`0047_sandbox_provider_identity.up.sql` 内的 ADR-0171 注释属于已应用迁移的校验内容，为保持迁移 checksum 与既有数据库一致而不改写。

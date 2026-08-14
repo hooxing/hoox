@@ -31,20 +31,25 @@ Invoke-RestMethod "http://$($env:API_LISTEN_HOST):$($env:API_LISTEN_PORT)/ready"
 
 ## 开发 Agent Worker
 
-完成数据库迁移和开发身份初始化后，在另一个 PowerShell 启动真实 Worker：
+完成数据库迁移和开发身份初始化后，在两个 PowerShell 分别启动真实 Worker 和 Scheduler：
 
 ```powershell
 corepack pnpm dev:worker:check
 corepack pnpm dev:worker
+corepack pnpm dev:scheduler
 ```
 
-两条命令都只接受 `RUNTIME_ENV=development`。前者会依次只读探测真实 PostgreSQL、MinIO、CubeSandbox 与
+上述开发命令都只接受 `RUNTIME_ENV=development`。`dev:worker:check` 会依次只读探测真实 PostgreSQL、MinIO、CubeSandbox 与
 模型 Provider 后退出，不会启动 polling 或领取 Run；后者使用同一装配持续轮询 PostgreSQL dispatch。它不会使用内存队列、
 Fake Sandbox 或 Faux Provider。`AGENT_WORKER_TENANT_ID` 在 development 仍必须等于
 `DEV_AUTH_USER_A_TENANT_ID`，但它只作为启动兼容 Tenant，不再限制 Worker 的消费范围。个人或团队 Tenant
 创建 dispatch 时会在同一事务唤醒动态控制面；Worker 通过 `DATABASE_WORKER_COORDINATOR_URL` 对应的独立
 `DATABASE_WORKER_COORDINATOR_ROLE` 只领取 Tenant 租约，再回到普通 Runtime 连接和 Tenant RLS 内读取任务。
 Coordinator 角色不得复用 `DATABASE_RUNTIME_ROLE`，也不得拥有 Run、Thread、成员或文件表权限。
+
+Scheduler 是完整开发拓扑的必需常驻进程，负责消费普通 Sandbox cleanup outbox、Thread Sandbox
+lifecycle effect 和可选标题生成任务。缺少 Scheduler 不会阻止 Worker 领取 Run，但失败或取消后留下的
+Sandbox 会停留在待清理状态；本地联调不能只启动 API、Web 和 Worker。
 
 API 的团队成员变更使用 `DATABASE_TEAM_COORDINATOR_URL` 对应的独立 `DATABASE_TEAM_COORDINATOR_ROLE`。普通
 Runtime 连接仍不能更新 Membership 的 `role` 或 `status`；Team Coordinator 连接只注入团队协作 Repository，

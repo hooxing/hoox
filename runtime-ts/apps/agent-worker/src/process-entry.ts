@@ -31,6 +31,7 @@ import {
   PgPersonalizationSettingsRepository,
   PgRecoveryMetrics,
   PgResourceFilesystemCatalog,
+  PgRunCancellationReader,
   PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
   PgSkillFilesystemCatalog,
@@ -1089,6 +1090,7 @@ async function assembleWorkerRuntime(
             1_000,
             2_000,
           );
+    const runCancellationReader = new PgRunCancellationReader(pool);
     const worker = new RunWorker(
       {
         persistence: new PgExecutionPersistence(pool, {
@@ -1105,7 +1107,10 @@ async function assembleWorkerRuntime(
         orphanSandboxes: sandboxes,
         sessions,
         personalizations: new PgPersonalizationSettingsRepository(pool),
-        cancellation: new DatabaseRunCancellation(),
+        cancellation: new DatabaseRunCancellation(
+          runCancellationReader.isCancelled.bind(runCancellationReader),
+          configuration.worker.pollIntervalMs,
+        ),
         shutdownSignal: shutdown.signal,
         artifacts: new ArtifactCompletionGateAdapter(artifactService),
         clock: new SystemWorkerClock(),

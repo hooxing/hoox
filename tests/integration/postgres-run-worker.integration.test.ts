@@ -60,13 +60,12 @@ import {
   PgArchiveThreadCommand,
   PgCoreRepositories,
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
+import { PgMemoryIngestionStore } from "../../runtime-ts/packages/persistence/src/pg-memory-ingestion.js";
 import { PgResourceCatalog } from "../../runtime-ts/packages/persistence/src/pg-resource-library.js";
 import {
   PgRunDispatchCreation,
   PgRunDispatchOutbox,
 } from "../../runtime-ts/packages/persistence/src/pg-run-dispatch.js";
-import { PgMemoryIngestionStore } from "../../runtime-ts/packages/persistence/src/pg-memory-ingestion.js";
-import { PgWorkerTenantAssignments } from "../../runtime-ts/packages/persistence/src/pg-worker-tenant-assignment.js";
 import {
   PgBackedSandboxSessionRegistry,
   PgExecutionPersistence,
@@ -77,6 +76,7 @@ import { PgSkillRuntimeRepository } from "../../runtime-ts/packages/persistence/
 import { PgThreadCreation } from "../../runtime-ts/packages/persistence/src/pg-thread-creation.js";
 import { PgThreadInputRouting } from "../../runtime-ts/packages/persistence/src/pg-thread-input.js";
 import { PgThreadSandboxLifecycleConsumerStore } from "../../runtime-ts/packages/persistence/src/pg-thread-sandbox-lifecycle-consumer.js";
+import { PgWorkerTenantAssignments } from "../../runtime-ts/packages/persistence/src/pg-worker-tenant-assignment.js";
 import {
   PgWorkspaceCandidateHandoff,
   workspaceCandidateOperationDigest,
@@ -430,6 +430,39 @@ function withOneSerializationFailure(
           throw Object.assign(new Error("模拟 SERIALIZABLE 事务被数据库明确回滚"), {
             code: "40001",
           });
+        }
+        return await originalQuery(...args);
+      }) as typeof client.query;
+      return client;
+    },
+  } as unknown as Pool;
+  return { pool, rejectionCount: () => rejectionCount };
+}
+
+function withOneTransientStatementFailure(
+  upstream: Pool,
+  statementFragment: string,
+): { readonly pool: Pool; readonly rejectionCount: () => number } {
+  let rejected = false;
+  let rejectionCount = 0;
+  const pool = {
+    connect: async () => {
+      const client = await upstream.connect();
+      const originalQuery = client.query.bind(client) as (
+        ...args: readonly unknown[]
+      ) => Promise<unknown>;
+      client.query = (async (...args: readonly unknown[]) => {
+        const first = args[0];
+        const sql =
+          typeof first === "string"
+            ? first
+            : typeof first === "object" && first !== null && "text" in first
+              ? String(first.text)
+              : "";
+        if (!rejected && sql.includes(statementFragment)) {
+          rejected = true;
+          rejectionCount += 1;
+          throw Object.assign(new Error("模拟许可消费连接被重置"), { code: "ECONNRESET" });
         }
         return await originalQuery(...args);
       }) as typeof client.query;
@@ -4377,6 +4410,111 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       }),
     ).resolves.toMatchObject({ outcome: "consumed" });
     expect(consumeFailure.rejectionCount()).toBe(1);
+  });
+
+  it("许可消费在瞬时连接失败和 COMMIT 响应丢失后安全收敛，独立重放仍被拒绝", async () => {
+    const f = await fixture(`permit-connection-recovery-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "permit-connection-recovery-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("claim 失败");
+    const firstCall = {
+      callId: "call-permit-transient-connection",
+      toolName: "sandbox_write_file",
+      argsDigest: sha256Digest("7".repeat(64)),
+    };
+    expect(
+      await persistence.mutate(
+        signed({
+          idempotencyKey: `${claimed.snapshot.attempt.attemptId}/permit-transient/event`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 0,
+          events: [
+            {
+              schemaVersion: 1,
+              kind: "agent_event",
+              sequence: 0,
+              payload: { type: "tool.started", callId: firstCall.callId, name: firstCall.toolName },
+            },
+          ],
+          outbox: [],
+          effectInvocation: { callId: firstCall.callId, toolName: firstCall.toolName },
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied", attemptVersion: 1 });
+    const firstPermit = await persistence.issueExternalEffectPermit({
+      fence: claimed.fence,
+      expectedAttemptVersion: 1,
+      effect: "tool_execution",
+      call: firstCall,
+      permitDurationMs: 3_000,
+    });
+    if (firstPermit.outcome !== "authorized") throw new Error("瞬时故障测试许可未签发");
+    const transient = withOneTransientStatementFailure(
+      runtime,
+      "UPDATE external_effect_permits SET consumed_at",
+    );
+    await expect(
+      new PgExecutionPersistence(transient.pool).consumeExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 1,
+        permit: firstPermit.permit,
+      }),
+    ).resolves.toMatchObject({ outcome: "consumed" });
+    expect(transient.rejectionCount()).toBe(1);
+
+    const secondCall = {
+      callId: "call-permit-lost-commit-response",
+      toolName: "sandbox_read_file",
+      argsDigest: sha256Digest("8".repeat(64)),
+    };
+    expect(
+      await persistence.mutate(
+        signed({
+          idempotencyKey: `${claimed.snapshot.attempt.attemptId}/permit-lost-commit/event`,
+          fence: claimed.fence,
+          expectedAttemptVersion: 1,
+          events: [
+            {
+              schemaVersion: 1,
+              kind: "agent_event",
+              sequence: 1,
+              payload: {
+                type: "tool.started",
+                callId: secondCall.callId,
+                name: secondCall.toolName,
+              },
+            },
+          ],
+          outbox: [],
+          effectInvocation: { callId: secondCall.callId, toolName: secondCall.toolName },
+        }),
+      ),
+    ).toMatchObject({ outcome: "applied", attemptVersion: 2 });
+    const secondPermit = await persistence.issueExternalEffectPermit({
+      fence: claimed.fence,
+      expectedAttemptVersion: 2,
+      effect: "tool_execution",
+      call: secondCall,
+      permitDurationMs: 3_000,
+    });
+    if (secondPermit.outcome !== "authorized") throw new Error("提交未知测试许可未签发");
+    await expect(
+      new PgExecutionPersistence(withLostCommitResponse(runtime)).consumeExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 2,
+        permit: secondPermit.permit,
+      }),
+    ).resolves.toMatchObject({ outcome: "consumed" });
+    await expect(
+      persistence.consumeExternalEffectPermit({
+        fence: claimed.fence,
+        expectedAttemptVersion: 2,
+        permit: secondPermit.permit,
+      }),
+    ).resolves.toEqual({ outcome: "already_consumed" });
   });
 
   it("COMMIT 响应丢失后按原 scope+key 精确读回不可变 receipt", async () => {

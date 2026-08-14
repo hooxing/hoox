@@ -31,6 +31,7 @@ import type { RunSkillSnapshot } from "@cube-runtime/skill";
 import { createWorkspaceManifest } from "@cube-runtime/workspace";
 import {
   digestCanonical,
+  isExternalCancellationFinalizationMutation,
   outboxPayloadDigest,
   rolloutProjectionDigest,
   runtimeMutationDigest,
@@ -126,6 +127,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   /** 模拟数据库连接在事务是否提交前断开，readback 也找不到 receipt。 */
   responseUnknownWithoutCommitKeyIncludes: string | undefined;
   unavailableNextMutation = false;
+  unavailableMutationAttempts = 0;
   fenceLostMutationKeyIncludes: string | undefined;
   idempotencyConflictKeyIncludes: string | undefined;
   forceInspectUnavailable = false;
@@ -133,6 +135,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   forceFenceLost = false;
   threadSandboxHandoffRunId: ReturnType<typeof runId> | undefined;
   rejectNextPermit = false;
+  unavailableNextPermitConsume = false;
   beforePermitIssueReturn?: (
     input: Parameters<ExecutionPersistencePort["issueExternalEffectPermit"]>[0],
   ) => void | Promise<void>;
@@ -152,6 +155,11 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     readonly attachments?: readonly UserInputAttachmentReference[];
     readonly bodyDigest: Sha256Digest;
   }> = [];
+
+  cancelRunExternally(scope: ExecutionScope): void {
+    const record = this.requireRecord(scope);
+    record.run = transitionRun(record.run, "cancelled", this.databaseNow());
+  }
   rewriteNextCleanupReceiptDisposition:
     | {
         readonly state: "started" | "completed" | "unknown";
@@ -431,6 +439,10 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     input: Parameters<ExecutionPersistencePort["consumeExternalEffectPermit"]>[0],
   ): ReturnType<ExecutionPersistencePort["consumeExternalEffectPermit"]> {
     this.durableOperations.push(`permit:consume:${input.permit.callId}`);
+    if (this.unavailableNextPermitConsume) {
+      this.unavailableNextPermitConsume = false;
+      return { outcome: "unavailable" };
+    }
     const record = this.find(input.fence.scope);
     if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
     const now = this.databaseNow();
@@ -457,6 +469,10 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   async mutate(command: RuntimeMutation): Promise<RuntimeMutationResult> {
     this.durableOperations.push(`mutate:${command.idempotencyKey}`);
     this.mutationCommands.push(command);
+    if (this.unavailableMutationAttempts > 0) {
+      this.unavailableMutationAttempts -= 1;
+      return { outcome: "unavailable" };
+    }
     if (this.unavailableNextMutation) {
       this.unavailableNextMutation = false;
       return { outcome: "unavailable" };
@@ -507,9 +523,13 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       return { outcome: "response_unknown" };
     }
     const now = this.databaseNow();
+    const externallyCancelled =
+      record.run.status === "cancelled" &&
+      record.attempt !== undefined &&
+      isExternalCancellationFinalizationMutation(command, record.attempt.attemptId);
     if (
       record.fence === undefined ||
-      record.run.status !== "running" ||
+      (record.run.status !== "running" && !externallyCancelled) ||
       expired(record.fence, now) ||
       record.workspace.writerLease?.rootRunId !== record.fence.workspaceLease.rootRunId ||
       record.workspace.writerLease.epoch !== record.fence.workspaceLease.epoch
@@ -647,7 +667,9 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
       record.workspace = commit.workspace;
       this.revisionCreatedAt.push(commit.revision.createdAt);
     }
-    if (command.nextRunStatus) record.run = transitionRun(record.run, command.nextRunStatus, now);
+    if (command.nextRunStatus && !externallyCancelled) {
+      record.run = transitionRun(record.run, command.nextRunStatus, now);
+    }
     if (command.rolloutProjection) {
       record.rolloutProjection = command.rolloutProjection;
       record.projectionVersion += 1;
@@ -1311,6 +1333,10 @@ export class FakeCancellationPort implements CancellationPort {
 
   cancel(scope: ExecutionScope): void {
     this.controller(scope.runId).abort("test_cancel");
+  }
+
+  release(scope: ExecutionScope): void {
+    this.controllers.delete(scope.runId);
   }
 
   private controller(run: string): AbortController {

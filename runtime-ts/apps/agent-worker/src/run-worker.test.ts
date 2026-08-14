@@ -1,15 +1,15 @@
 import {
+  type RunPersonalizationSnapshot,
   resourceId,
   resourceVersionId,
   runId,
   sha256Digest,
-  tenantId,
-  type RunPersonalizationSnapshot,
   type TenantId,
+  tenantId,
   type UserId,
 } from "@cube-runtime/domain";
-import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { MemoryRetriever } from "@cube-runtime/memory";
+import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
 import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
 import {
@@ -1517,6 +1517,50 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(first).resolves.toEqual({ outcome: "cancelled" });
   });
 
+  it("API 已提交 cancelled 后，原 Worker 仍原子关闭 Attempt 并释放栅栏", async () => {
+    const blocked = new BlockingAgentSession();
+    const h = harness([blocked]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.createCount === 1);
+
+    h.persistence.cancelRunExternally(h.scope);
+    h.cancellation.cancel(h.scope);
+
+    await expect(execution).resolves.toEqual({ outcome: "cancelled" });
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("cancelled");
+    expect(record.attempt).toMatchObject({ status: "cancelled", stage: "finished" });
+    expect(record.workspace.writerLease).toBeUndefined();
+    expect(record.events).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_event",
+        payload: expect.objectContaining({ type: "runtime.notice", code: "CANCELLED" }),
+      }),
+    );
+  });
+
+  it("运行中取消不等待普通 Sandbox settle，原子转交持久清理消费者", async () => {
+    const blocked = new BlockingAgentSession();
+    const h = sandboxHarness([blocked]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.createCount === 1);
+
+    h.persistence.cancelRunExternally(h.scope);
+    h.cancellation.cancel(h.scope);
+
+    await expect(execution).resolves.toEqual({ outcome: "cancelled" });
+    const record = h.persistence.record(h.scope);
+    expect(h.sandboxes.settleCount).toBe(0);
+    expect(record.attempt).toMatchObject({ status: "cancelled", stage: "finished" });
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({
+        kind: "sandbox_cleanup",
+        state: "started",
+        payload: expect.objectContaining({ disposition: "close" }),
+      }),
+    );
+  });
+
   it("进程停机中止在途 Session，但只提交恢复事实而不伪造用户 cancelled", async () => {
     const blocked = new BlockingAgentSession();
     const h = harness([blocked], fakeSeed("worker-shutdown"));
@@ -1590,7 +1634,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     async ({ failure, expected }) => {
       const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
       h.sandboxes.beforeAcquireReturn = () => {
-        if (failure === "unavailable") h.persistence.unavailableNextMutation = true;
+        if (failure === "unavailable") h.persistence.unavailableMutationAttempts = 4;
         if (failure === "response_unknown") {
           h.persistence.responseUnknownWithoutCommitKeyIncludes = "/sandbox/cleanup-intent";
         }
@@ -1810,6 +1854,39 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     await expect(execution).resolves.toEqual({ outcome: "cancelled" });
   });
 
+  it("工具许可消费不可用时中止执行并把普通 Sandbox 原子转交清理消费者", async () => {
+    const session = new BlockingAgentSession();
+    const h = sandboxHarness([session]);
+    const execution = h.worker.execute(h.scope);
+    await eventually(() => h.factory.toolAuthorizers.length === 1);
+    const call = {
+      callId: "tool-call-consume-unavailable",
+      toolName: "sandbox_write_file",
+      argsDigest: sha256Digest("9".repeat(64)),
+    };
+    session.emit({ type: "tool.started", callId: call.callId, name: call.toolName });
+    h.persistence.unavailableNextPermitConsume = true;
+
+    await expect(h.factory.toolAuthorizers[0]?.(call)).rejects.toThrow(
+      "EXTERNAL_EFFECT_NOT_AUTHORIZED",
+    );
+    await expect(execution).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "PERSISTENCE_UNAVAILABLE",
+    });
+
+    const record = h.persistence.record(h.scope);
+    expect(h.sandboxes.settleCount).toBe(0);
+    expect(record.attempt).toMatchObject({ status: "recovery_required" });
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({
+        kind: "sandbox_cleanup",
+        state: "started",
+        payload: expect.objectContaining({ disposition: "close" }),
+      }),
+    );
+  });
+
   it.each([
     { replayName: "sandbox_write_file", label: "同名" },
     { replayName: "sandbox_read_file", label: "异名" },
@@ -1997,6 +2074,34 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
   });
 
+  it("业务失败后的 cleanup UNKNOWN 保留原始错误码并持久化补偿事实", async () => {
+    const h = sandboxHarness([
+      new ScriptedAgentSession([
+        { type: "agent.started" },
+        { type: "error", code: "PROVIDER", message: "模型服务暂时不可用" },
+        { type: "agent.settled" },
+      ]),
+    ]);
+    h.sandboxes.nextSettlement = { outcome: "unknown", event: uncertain("cleanup_after_create") };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "PROVIDER",
+    });
+
+    const record = h.persistence.record(h.scope);
+    expect(record.run.status).toBe("running");
+    expect(record.outbox).toContainEqual(
+      expect.objectContaining({ kind: "sandbox_cleanup", state: "unknown" }),
+    );
+    expect(record.events).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_event",
+        payload: expect.objectContaining({ type: "runtime.notice", code: "PROVIDER" }),
+      }),
+    );
+  });
+
   it("cleanup started 已决定 close 后，completed receipt 伪造成 pause 必须失败关闭", async () => {
     const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.persistence.rewriteNextCleanupReceiptDisposition = {
@@ -2123,7 +2228,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.persistence.afterMutation = (command) => {
       if (command.idempotencyKey.includes("/stage/workspace-verified")) {
-        h.persistence.unavailableNextMutation = true;
+        h.persistence.unavailableMutationAttempts = 4;
       }
     };
 
@@ -2186,7 +2291,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
   });
 
-  it("流式事件持久化不可用时立即 abort，保留 cleanup intent 并等待 Attempt 恢复", async () => {
+  it("流式事件持久化单次不可用时重放同一幂等 mutation 并继续完成", async () => {
     const session = new ScriptedAgentSession(successfulEvents);
     const h = sandboxHarness([session]);
     h.persistence.responseUnknownKeyIncludes = "/sandbox/cleanup-intent";
@@ -2202,19 +2307,97 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       return result;
     };
 
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    const record = h.persistence.record(h.scope);
+    expect(checkpointRead).toBe(true);
+    expect(session.abortCount).toBe(0);
+    expect(record.run.status).toBe("succeeded");
+    const firstEventKey = h.persistence.durableOperations.find((operation) =>
+      operation.startsWith("mutate:attempt-1/event/"),
+    );
+    if (firstEventKey === undefined) throw new Error("首个流式事件 mutation 不存在");
+    expect(
+      h.persistence.durableOperations.filter((operation) => operation === firstEventKey),
+    ).toHaveLength(2);
+  });
+
+  it("流式事件持久化连续三次不可用时等待映射恢复并继续完成", async () => {
+    const session = new ScriptedAgentSession(successfulEvents);
+    const h = sandboxHarness([session]);
+    h.persistence.responseUnknownKeyIncludes = "/sandbox/cleanup-intent";
+    const originalRead = h.persistence.readMutation.bind(h.persistence);
+    let checkpointRead = false;
+    h.persistence.readMutation = async (input) => {
+      const result = await originalRead(input);
+      if (input.idempotencyKey.includes("sandbox/cleanup-intent")) {
+        checkpointRead = true;
+        h.persistence.unavailableMutationAttempts = 3;
+      }
+      return result;
+    };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    const record = h.persistence.record(h.scope);
+    expect(checkpointRead).toBe(true);
+    expect(session.abortCount).toBe(0);
+    expect(record.run.status).toBe("succeeded");
+    const firstEventKey = h.persistence.durableOperations.find((operation) =>
+      operation.startsWith("mutate:attempt-1/event/"),
+    );
+    if (firstEventKey === undefined) throw new Error("首个流式事件 mutation 不存在");
+    expect(
+      h.persistence.durableOperations.filter((operation) => operation === firstEventKey),
+    ).toHaveLength(4);
+  });
+
+  it("流式事件持久化持续不可用时中止，并推进 cleanup intent 等待 Scheduler", async () => {
+    const session = new ScriptedAgentSession(successfulEvents);
+    const h = sandboxHarness([session]);
+    h.persistence.responseUnknownKeyIncludes = "/sandbox/cleanup-intent";
+    const originalRead = h.persistence.readMutation.bind(h.persistence);
+    h.persistence.readMutation = async (input) => {
+      const result = await originalRead(input);
+      if (input.idempotencyKey.includes("sandbox/cleanup-intent")) {
+        h.persistence.unavailableMutationAttempts = 4;
+      }
+      return result;
+    };
+
     await expect(h.worker.execute(h.scope)).resolves.toEqual({
       outcome: "recovery_required",
       code: "PERSISTENCE_UNAVAILABLE",
     });
 
     const record = h.persistence.record(h.scope);
-    expect(checkpointRead).toBe(true);
     expect(session.abortCount).toBeGreaterThanOrEqual(1);
     expect(record.run.status).toBe("running");
     expect(record.workspace.currentRevisionId).toBeUndefined();
     expect(record.outbox).toContainEqual(
-      expect.objectContaining({ kind: "sandbox_cleanup", state: "pending" }),
+      expect.objectContaining({
+        kind: "sandbox_cleanup",
+        state: "started",
+        payload: expect.objectContaining({ disposition: "close" }),
+      }),
     );
+  });
+
+  it("COMMIT 响应未知且首次读回不可用时继续幂等读回并完成 Run", async () => {
+    const h = harness([new ScriptedAgentSession(successfulEvents)]);
+    h.persistence.responseUnknownNextMutation = true;
+    const originalRead = h.persistence.readMutation.bind(h.persistence);
+    let readCount = 0;
+    h.persistence.readMutation = async (input) => {
+      readCount += 1;
+      if (readCount === 1) return { outcome: "unavailable" };
+      return originalRead(input);
+    };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(readCount).toBe(2);
+    expect(h.persistence.record(h.scope).run.status).toBe("succeeded");
   });
 
   it("超大 adapter event 被版本协议拒绝后立即 abort，Attempt recovery_required", async () => {

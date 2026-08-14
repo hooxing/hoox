@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Config, type ConfigOptions, type CreateOptions, Sandbox } from "@cubesandbox/sdk";
 import { mapSandboxError, SandboxRuntimeError, settledOperation } from "./errors.js";
+import type { UncertainLifecycleEvent } from "./lifecycle.js";
 import type {
   CodeOutput,
   OperationControl,
@@ -19,7 +20,7 @@ import {
   validateTtl,
 } from "./validation.js";
 import {
-  CubeSandboxWorkspacePort,
+  SandboxWorkspacePort,
   type CubeWorkspaceAdapterOptions,
   resolveTrustedSandboxWorkspaceBinding,
   type TrustedSandboxSessionCapability,
@@ -58,15 +59,6 @@ const DEFAULT_SDK: CubeSdkFacade = {
   connect: (id, options) => Sandbox.connect(id, options),
   listV2: (config) => Sandbox.listV2(config),
 };
-
-export interface UncertainLifecycleEvent {
-  kind: "sandbox_create_outcome_unknown";
-  stage: "create_response" | "cleanup_after_create" | "cleanup_after_reconcile";
-  requestId: string;
-  sandboxId?: string;
-  actualTtlSeconds: number;
-  occurredAt: string;
-}
 
 export interface CubeGatewayOptions extends ConfigOptions {
   defaultOperationTimeoutMs?: number;
@@ -226,7 +218,7 @@ export class CubeSandboxGateway implements SandboxGateway {
     capability: TrustedSandboxSessionCapability,
     options: CubeWorkspaceAdapterOptions,
     control: OperationControl = {},
-  ): Promise<CubeSandboxWorkspacePort> {
+  ): Promise<SandboxWorkspacePort> {
     const effectiveControl = this.control(control);
     const binding = await resolveTrustedSandboxWorkspaceBinding(
       capability,
@@ -241,7 +233,7 @@ export class CubeSandboxGateway implements SandboxGateway {
         }),
       effectiveControl,
     );
-    return CubeSandboxWorkspacePort.open({
+    return SandboxWorkspacePort.open({
       capability,
       binding,
       sandbox,
@@ -598,3 +590,5 @@ function sandboxId(entry: Record<string, unknown>): string | undefined {
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
+
+export type { UncertainLifecycleEvent } from "./lifecycle.js";

@@ -1,6 +1,15 @@
 {
   "schemaVersion": 1,
-  "allowed": ["0BSD", "Apache-2.0", "BlueOak-1.0.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "MIT"],
+  "allowed": [
+    "(Apache-2.0 AND BSD-3-Clause)",
+    "0BSD",
+    "Apache-2.0",
+    "BlueOak-1.0.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT"
+  ],
   "denied": [
     "AGPL-1.0-only",
     "AGPL-3.0-only",

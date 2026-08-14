@@ -331,7 +331,7 @@ interface CleanupReceiptFacts {
 
 type AppliedMutation = Extract<RuntimeMutationResult, { outcome: "applied" | "already_applied" }>;
 const MUTATION_READBACK_RETRY_DELAYS_MS = Object.freeze([0, 25, 100, 250]);
-const MUTATION_UNAVAILABLE_RETRY_DELAYS_MS = Object.freeze([25, 100]);
+const MUTATION_UNAVAILABLE_RETRY_DELAYS_MS = Object.freeze([25, 100, 500]);
 
 export class RunWorker {
   readonly #leaseDurationMs: number;
@@ -1791,7 +1791,7 @@ export class RunWorker {
         const retryDelay = MUTATION_UNAVAILABLE_RETRY_DELAYS_MS[attempt];
         if (retryDelay === undefined) return result;
         // unavailable 明确表示事务没有提交；同一 durable lane 内只能重放字节相同的
-        // 幂等命令。两次重试的最坏连接等待仍小于 30 秒默认租约，避免阻塞 heartbeat 过期。
+        // 幂等命令。四次尝试的最坏连接等待仍小于 30 秒默认租约，避免阻塞 heartbeat 过期。
         await delay(retryDelay);
       }
       if (result.outcome === "response_unknown") {

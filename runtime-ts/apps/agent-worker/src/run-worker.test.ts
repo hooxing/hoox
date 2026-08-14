@@ -1618,7 +1618,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     async ({ failure, expected }) => {
       const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
       h.sandboxes.beforeAcquireReturn = () => {
-        if (failure === "unavailable") h.persistence.unavailableMutationAttempts = 3;
+        if (failure === "unavailable") h.persistence.unavailableMutationAttempts = 4;
         if (failure === "response_unknown") {
           h.persistence.responseUnknownWithoutCommitKeyIncludes = "/sandbox/cleanup-intent";
         }
@@ -2212,7 +2212,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.persistence.afterMutation = (command) => {
       if (command.idempotencyKey.includes("/stage/workspace-verified")) {
-        h.persistence.unavailableMutationAttempts = 3;
+        h.persistence.unavailableMutationAttempts = 4;
       }
     };
 
@@ -2306,6 +2306,36 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     ).toHaveLength(2);
   });
 
+  it("流式事件持久化连续三次不可用时等待映射恢复并继续完成", async () => {
+    const session = new ScriptedAgentSession(successfulEvents);
+    const h = sandboxHarness([session]);
+    h.persistence.responseUnknownKeyIncludes = "/sandbox/cleanup-intent";
+    const originalRead = h.persistence.readMutation.bind(h.persistence);
+    let checkpointRead = false;
+    h.persistence.readMutation = async (input) => {
+      const result = await originalRead(input);
+      if (input.idempotencyKey.includes("sandbox/cleanup-intent")) {
+        checkpointRead = true;
+        h.persistence.unavailableMutationAttempts = 3;
+      }
+      return result;
+    };
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    const record = h.persistence.record(h.scope);
+    expect(checkpointRead).toBe(true);
+    expect(session.abortCount).toBe(0);
+    expect(record.run.status).toBe("succeeded");
+    const firstEventKey = h.persistence.durableOperations.find((operation) =>
+      operation.startsWith("mutate:attempt-1/event/"),
+    );
+    if (firstEventKey === undefined) throw new Error("首个流式事件 mutation 不存在");
+    expect(
+      h.persistence.durableOperations.filter((operation) => operation === firstEventKey),
+    ).toHaveLength(4);
+  });
+
   it("流式事件持久化持续不可用时中止，并推进 cleanup intent 等待 Scheduler", async () => {
     const session = new ScriptedAgentSession(successfulEvents);
     const h = sandboxHarness([session]);
@@ -2314,7 +2344,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     h.persistence.readMutation = async (input) => {
       const result = await originalRead(input);
       if (input.idempotencyKey.includes("sandbox/cleanup-intent")) {
-        h.persistence.unavailableMutationAttempts = 3;
+        h.persistence.unavailableMutationAttempts = 4;
       }
       return result;
     };

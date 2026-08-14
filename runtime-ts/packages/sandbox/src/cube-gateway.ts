@@ -72,6 +72,7 @@ const MAX_CONFIGURABLE_SANDBOX_TTL_SECONDS = 86_400;
 type EffectiveOperationControl = Omit<OperationControl, "timeoutMs"> & { timeoutMs: number };
 
 export class CubeSandboxGateway implements SandboxGateway {
+  readonly providerKey = "cube" as const;
   private readonly baseConfig: ConfigOptions;
   private readonly defaultOperationTimeoutMs: number;
   private readonly maxCreateTtlSeconds: number;
@@ -296,10 +297,11 @@ export class CubeSandboxGateway implements SandboxGateway {
   }
 
   private async recordUnknownCreate(
-    event: Omit<UncertainLifecycleEvent, "kind" | "occurredAt">,
+    event: Omit<UncertainLifecycleEvent, "providerKey" | "kind" | "occurredAt">,
   ): Promise<void> {
     try {
       await this.onUncertainLifecycle?.({
+        providerKey: "cube",
         kind: "sandbox_create_outcome_unknown",
         ...event,
         occurredAt: new Date().toISOString(),

@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
+  ProviderSandboxSessionRegistry,
   DatabaseRunCancellation,
   FailClosedWorkspaceRevisionVerifier,
   ProcessShutdown,
@@ -608,6 +609,7 @@ describe("生产 Workspace revision 安全下限", () => {
       registry.connect({
         scope: claim().scope as ExecutionScope,
         registryId: "registry-connect-lifecycle-timeout",
+        providerKey: "cube",
         providerSandboxId: "sandbox-connect-lifecycle-timeout",
         signal,
       }),
@@ -633,6 +635,7 @@ describe("生产 Workspace revision 安全下限", () => {
       disposition: "pause",
       session: {
         registryId: "registry-lifecycle-timeout",
+        providerKey: "cube",
         providerSandboxId: "sandbox-lifecycle-timeout",
         mode: "created",
         sandbox: {
@@ -661,6 +664,7 @@ describe("生产 Workspace revision 安全下限", () => {
     const scope = claim().scope as ExecutionScope;
     const session: SandboxSessionRef = Object.freeze({
       registryId: "registry-bound",
+      providerKey: "cube",
       providerSandboxId: "sandbox-bound",
       mode: "created",
       sandbox: {
@@ -680,6 +684,7 @@ describe("生产 Workspace revision 安全下限", () => {
       }
     ).workspaceBindings.set(session, {
       registryId: session.registryId,
+      providerKey: "cube",
       providerSandboxId: session.providerSandboxId,
       scope: { ...scope },
     });
@@ -715,6 +720,7 @@ describe("生产 Workspace revision 安全下限", () => {
         scope: claim().scope as ExecutionScope,
         sandbox: {
           registryId: "registry-workspace",
+          providerKey: "cube",
           providerSandboxId: "sandbox-workspace",
           mode: "created",
           sandbox: {
@@ -741,6 +747,7 @@ describe("生产 Workspace revision 安全下限", () => {
           scope: claim().scope as ExecutionScope,
           sandbox: {
             registryId: "registry-workspace-preflight",
+            providerKey: "cube",
             providerSandboxId: "sandbox-workspace-preflight",
             mode: "created",
             sandbox: {
@@ -768,6 +775,7 @@ describe("生产 Workspace revision 安全下限", () => {
         expectedCurrentRevisionId: "revision-existing" as never,
         sandbox: {
           registryId: "registry-workspace-existing",
+          providerKey: "cube",
           providerSandboxId: "sandbox-workspace-existing",
           mode: "created",
           sandbox: {
@@ -796,6 +804,7 @@ describe("生产 Workspace revision 安全下限", () => {
       scope: claim().scope as ExecutionScope,
       sandbox: {
         registryId: "registry-workspace-command",
+        providerKey: "cube",
         providerSandboxId: "sandbox-workspace-command",
         mode: "created",
         sandbox: {
@@ -816,5 +825,24 @@ describe("生产 Workspace revision 安全下限", () => {
     expect(command).toContain("[ -L /workspace ]");
     expect(command).toContain("workspace_entry=$(find -P /workspace");
     expect(command).not.toContain("| grep");
+  });
+  it("E2B ResourceFS required 在远端 create 前失败关闭", async () => {
+    const create = vi.fn();
+    const registry = new ProviderSandboxSessionRegistry(
+      {
+        providerKey: "e2b",
+        create,
+      } as never,
+      "base",
+    );
+
+    await expect(
+      registry.acquire({
+        scope: claim().scope as ExecutionScope,
+        signal: new AbortController().signal,
+        requiresResourceFilesystem: true,
+      }),
+    ).resolves.toEqual({ outcome: "failed", code: "SANDBOX_FAILED" });
+    expect(create).not.toHaveBeenCalled();
   });
 });

@@ -56,6 +56,12 @@ describe("production 继承进程环境边界", () => {
     ).not.toThrow();
   });
 
+  it("显式声明的 E2B_API_KEY 不作为 ambient SDK 回退通道拒绝", () => {
+    expect(() =>
+      assertProductionInheritedEnvironment({ RUNTIME_ENV: "production", E2B_API_KEY: "opaque" }),
+    ).not.toThrow();
+  });
+
   it("对未来未列出的 NODE_* 默认失败关闭", () => {
     expect(() =>
       assertProductionInheritedEnvironment({
@@ -65,7 +71,7 @@ describe("production 继承进程环境边界", () => {
     ).toThrow("PRODUCTION_INHERITED_ENVIRONMENT_FORBIDDEN");
   });
 
-  it.each(["CUBE_API_KEY", "cube_api_url", "E2B_API_KEY"])("拒绝 vendor 环境回退通道 %s", (key) => {
+  it.each(["CUBE_API_KEY", "cube_api_url"])("拒绝 vendor 环境回退通道 %s", (key) => {
     expect(() =>
       assertProductionInheritedEnvironment({ RUNTIME_ENV: "production", [key]: "ambient" }),
     ).toThrow("PRODUCTION_INHERITED_ENVIRONMENT_FORBIDDEN");

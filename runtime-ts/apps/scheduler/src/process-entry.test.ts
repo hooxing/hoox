@@ -140,6 +140,20 @@ describe("Scheduler 进程入口", () => {
     ).toThrow("HISTORY_TITLE_CLAIM_LEASE_MS");
   });
 
+  it("Scheduler 显式启用 E2B 时构造 Provider 路由配置", () => {
+    const configuration = parseSchedulerProcessEnvironment({
+      ...productionEnvironment(),
+      SANDBOX_DEFAULT_PROVIDER: "e2b",
+      SANDBOX_ENABLED_PROVIDERS: "cube,e2b",
+      E2B_API_KEY: "opaque-e2b-test-key",
+    });
+    expect(configuration.sandbox).toMatchObject({
+      defaultProviderKey: "e2b",
+      enabledProviderKeys: ["cube", "e2b"],
+      e2b: { apiKey: "opaque-e2b-test-key" },
+    });
+  });
+
   it("Scheduler 支持部分显式 Proxy 配置，显式 scheme 优先于 443 默认", () => {
     expect(
       parseSchedulerProcessEnvironment({

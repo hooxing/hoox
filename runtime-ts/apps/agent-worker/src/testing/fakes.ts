@@ -1001,6 +1001,7 @@ export class FakeSandboxRegistry implements SandboxSessionRegistryPort, OrphanSa
     }
     const session: SandboxSessionRef = {
       registryId: "registry-test",
+      providerKey: "cube",
       providerSandboxId: this.handle.id,
       mode: this.known ? "connected" : "created",
       sandbox: this.handle,
@@ -1067,6 +1068,7 @@ export class FakeThreadSandboxLifecycle implements ThreadSandboxSessionLifecycle
       outcome: "ready",
       session: {
         registryId: "thread-registry-test",
+        providerKey: "cube",
         providerSandboxId: this.handle.id,
         mode: "created",
         sandbox: this.handle,
@@ -1503,6 +1505,7 @@ function fakeOutboxReceipt(record: FakeRecord, item: RuntimeOutboxV1): RuntimeOu
       armedAt: persisted.armedAt,
       identity: {
         registryId: item.payload.registryId,
+        providerKey: "cube",
         providerSandboxId: item.payload.providerSandboxId,
       },
       identityDigest: sandboxCleanupIdentityDigest(item),

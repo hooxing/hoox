@@ -17,6 +17,7 @@ import {
 } from "../validation.js";
 
 export class FakeSandboxGateway implements SandboxGateway {
+  readonly providerKey = "cube" as const;
   readonly sandboxes = new Map<string, FakeSandboxHandle>();
   private sequence = 0;
 

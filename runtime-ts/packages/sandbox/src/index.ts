@@ -7,11 +7,14 @@ export * from "./e2b-config.js";
 export * from "./e2b-errors.js";
 export * from "./e2b-gateway.js";
 export type * from "./lifecycle.js";
+export * from "./provider-registry.js";
 export type * from "./types.js";
 export * from "./validation.js";
 export {
   CubeSandboxWorkspacePort,
+  SandboxWorkspacePort,
   type CubeWorkspaceAdapterOptions,
+  type SandboxWorkspaceAdapterOptions,
   type TrustedSandboxSessionCapability,
   type TrustedSandboxWorkspaceBinding,
 } from "./workspace-adapter.js";

@@ -1,9 +1,13 @@
 import type { CleanupClaim } from "@cube-runtime/persistence";
-import { SandboxRuntimeError, type SandboxGateway } from "@cube-runtime/sandbox";
+import {
+  type SandboxGateway,
+  type SandboxProviderRegistry,
+  SandboxRuntimeError,
+} from "@cube-runtime/sandbox";
 
 export interface SandboxCleanupResolver {
   settle(
-    input: Pick<CleanupClaim, "registryId" | "providerSandboxId" | "disposition">,
+    input: Pick<CleanupClaim, "registryId" | "providerKey" | "providerSandboxId" | "disposition">,
   ): Promise<"settled" | "unknown">;
 }
 
@@ -20,20 +24,21 @@ export interface SandboxCleanupStore {
 }
 
 /**
- * 这里只通过 providerSandboxId 重新连接，不保存或复用 Worker 的内存 session。
- * 若上游明确返回不存在，资源已经不需要清理；任何其他错误都保持 unknown，交给人工核对。
+ * 这里只通过持久化 providerKey + providerSandboxId 重新连接，不保存或复用 Worker 的内存 session。
+ * Provider 未启用时 registry.require 失败并保持 unknown，禁止静默回退到默认 Provider。
  */
-export class CubeSandboxCleanupResolver implements SandboxCleanupResolver {
+export class SandboxCleanupRouterResolver implements SandboxCleanupResolver {
   constructor(
-    private readonly gateway: SandboxGateway,
+    private readonly providers: Pick<SandboxProviderRegistry, "require">,
     private readonly timeoutMs = 90_000,
   ) {}
 
   async settle(
-    input: Pick<CleanupClaim, "registryId" | "providerSandboxId" | "disposition">,
+    input: Pick<CleanupClaim, "registryId" | "providerKey" | "providerSandboxId" | "disposition">,
   ): Promise<"settled" | "unknown"> {
     try {
-      const sandbox = await this.gateway.connect(input.providerSandboxId, {
+      const gateway = this.providers.require(input.providerKey);
+      const sandbox = await gateway.connect(input.providerSandboxId, {
         timeoutMs: this.timeoutMs,
       });
       if (input.disposition === "pause") await sandbox.pause({ timeoutMs: this.timeoutMs });
@@ -49,6 +54,22 @@ export class CubeSandboxCleanupResolver implements SandboxCleanupResolver {
         return "settled";
       return "unknown";
     }
+  }
+}
+
+/** 兼容单 Cube 装配；生产多 Provider 路径使用 SandboxCleanupRouterResolver。 */
+export class CubeSandboxCleanupResolver extends SandboxCleanupRouterResolver {
+  constructor(gateway: SandboxGateway, timeoutMs = 90_000) {
+    super(
+      {
+        require(providerKey) {
+          if (providerKey !== "cube")
+            throw new SandboxRuntimeError("INVALID_ARGUMENT", "Sandbox Provider 未启用");
+          return gateway as ReturnType<SandboxProviderRegistry["require"]>;
+        },
+      },
+      timeoutMs,
+    );
   }
 }
 

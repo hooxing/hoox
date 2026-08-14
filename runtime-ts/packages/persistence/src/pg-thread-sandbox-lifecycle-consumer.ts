@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+import type { SandboxProviderKey } from "@cube-runtime/sandbox";
 import type { Pool } from "pg";
 import { withTenantTransaction } from "./postgres.js";
 
@@ -11,6 +12,7 @@ export interface ThreadSandboxLifecycleClaim {
   readonly generation: number;
   readonly effectId: string;
   readonly effectKind: "pause" | "resume" | "terminate";
+  readonly providerKey: SandboxProviderKey;
   readonly providerSandboxId: string;
   readonly mode: "execute" | "reconcile";
   readonly token: string;
@@ -77,9 +79,10 @@ export class PgThreadSandboxLifecycleConsumerStore {
           const expired = await client.query<{
             session_id: string;
             generation: string;
+            provider_key: SandboxProviderKey;
             provider_sandbox_id: string;
           }>(
-            `SELECT session_id,generation::text,provider_sandbox_id
+            `SELECT session_id,generation::text,provider_key,provider_sandbox_id
                FROM thread_sandbox_sessions session
               WHERE tenant_id=$1 AND state='paused'
                 AND retention_expires_at <= clock_timestamp()
@@ -98,8 +101,8 @@ export class PgThreadSandboxLifecycleConsumerStore {
             const effect = await client.query<{ effect_id: string }>(
               `INSERT INTO sandbox_lifecycle_effects(
                  tenant_id,effect_id,operation_id,request_digest,session_id,generation,
-                 effect_kind,state,provider_sandbox_id,expected_session_state
-               ) VALUES ($1,$2,$3,$4,$5,$6,'terminate','pending',$7,'paused')
+                 effect_kind,state,provider_key,provider_sandbox_id,expected_session_state
+               ) VALUES ($1,$2,$3,$4,$5,$6,'terminate','pending',$7,$8,'paused')
                ON CONFLICT (tenant_id,operation_id) DO UPDATE
                  SET updated_at=sandbox_lifecycle_effects.updated_at
                RETURNING effect_id`,
@@ -110,6 +113,7 @@ export class PgThreadSandboxLifecycleConsumerStore {
                 digestCanonical({ operationId }),
                 row.session_id,
                 Number(row.generation),
+                row.provider_key,
                 row.provider_sandbox_id,
               ],
             );
@@ -137,6 +141,7 @@ export class PgThreadSandboxLifecycleConsumerStore {
           generation: string;
           effect_id: string;
           effect_kind: "pause" | "resume" | "terminate";
+          provider_key: SandboxProviderKey;
           provider_sandbox_id: string;
           state: "pending" | "started" | "unknown";
           claim_generation: string;
@@ -144,7 +149,7 @@ export class PgThreadSandboxLifecycleConsumerStore {
           run_id: string | null;
         }>(
           `SELECT effect.session_id,effect.generation::text,effect.effect_id,effect.effect_kind,
-                  effect.provider_sandbox_id,effect.state,effect.claim_generation::text,
+                  session.provider_key,effect.provider_sandbox_id,effect.state,effect.claim_generation::text,
                   session.thread_id,effect.run_id
              FROM sandbox_lifecycle_effects effect
              JOIN thread_sandbox_sessions session
@@ -184,6 +189,7 @@ export class PgThreadSandboxLifecycleConsumerStore {
           generation: Number(row.generation),
           effectId: row.effect_id,
           effectKind: row.effect_kind,
+          providerKey: row.provider_key,
           providerSandboxId: row.provider_sandbox_id,
           mode: row.state === "unknown" ? "reconcile" : "execute",
           token,

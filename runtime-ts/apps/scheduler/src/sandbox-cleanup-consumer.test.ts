@@ -10,6 +10,7 @@ const claim: CleanupClaim = {
   tenantId: "tenant-a",
   attemptId: "attempt-a",
   registryId: "registry-a",
+  providerKey: "cube",
   providerSandboxId: "sandbox-a",
   idempotencyKey: "cleanup-a",
   disposition: "pause",

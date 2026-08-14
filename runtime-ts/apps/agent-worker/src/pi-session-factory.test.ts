@@ -209,6 +209,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     const sandboxes = new FakeSandboxRegistry();
     const sandbox: SandboxSessionRef = {
       registryId: "registry-subagent-call-id",
+      providerKey: "cube",
       providerSandboxId: sandboxes.handle.id,
       mode: "created",
       sandbox: sandboxes.handle,

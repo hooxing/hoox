@@ -589,8 +589,8 @@ export class PgBackedSandboxSessionRegistry
           const inserted = await client.query(
             `INSERT INTO sandbox_registry(
                tenant_id,registry_id,attempt_id,run_id,thread_id,workspace_id,root_run_id,
-               provider_sandbox_id,request_id,state,actual_ttl_seconds
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$2,'ready',$9)
+               provider_key,provider_sandbox_id,request_id,state,actual_ttl_seconds
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$2,'ready',$10)
              ON CONFLICT (tenant_id,registry_id) DO NOTHING`,
             [
               input.scope.tenantId,
@@ -600,6 +600,7 @@ export class PgBackedSandboxSessionRegistry
               input.scope.threadId,
               input.scope.workspaceId,
               input.scope.rootRunId,
+              result.session.providerKey,
               result.session.providerSandboxId,
               this.actualTtlSeconds,
             ],
@@ -2569,12 +2570,19 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     if (item.kind === "sandbox_cleanup") {
       const registry = await client.query(
         `SELECT 1 FROM sandbox_registry
-          WHERE tenant_id=$1 AND attempt_id=$2 AND registry_id=$3 AND provider_sandbox_id=$4`,
-        [tenant, attemptId, item.payload.registryId, item.payload.providerSandboxId],
+          WHERE tenant_id=$1 AND attempt_id=$2 AND registry_id=$3 AND provider_key=$4 AND provider_sandbox_id=$5`,
+        [
+          tenant,
+          attemptId,
+          item.payload.registryId,
+          item.payload.providerKey,
+          item.payload.providerSandboxId,
+        ],
       );
       if (registry.rowCount !== 1) throw new RuntimeWriteAbort("conflict");
       const existing = await client.query<{
         registry_id: string;
+        provider_key: string;
         provider_sandbox_id: string;
         state: "pending" | "started" | "completed" | "unknown";
         armed: boolean;
@@ -2582,7 +2590,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         identity_digest: string;
         disposition: "pause" | "close" | null;
       }>(
-        `SELECT registry_id,provider_sandbox_id,state,armed,armed_at,identity_digest,disposition
+        `SELECT registry_id,provider_key,provider_sandbox_id,state,armed,armed_at,identity_digest,disposition
            FROM cleanup_outbox
           WHERE tenant_id=$1 AND attempt_id=$2 AND idempotency_key=$3 FOR UPDATE`,
         [tenant, attemptId, item.idempotencyKey],
@@ -2598,6 +2606,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         if (
           previous.armed !== true ||
           previous.registry_id !== item.payload.registryId ||
+          previous.provider_key !== item.payload.providerKey ||
           previous.provider_sandbox_id !== item.payload.providerSandboxId ||
           previous.identity_digest !== identityDigest ||
           !cleanupTransitionAllowed(previous.state, item.state) ||
@@ -2620,6 +2629,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
             attemptId,
             item.idempotencyKey,
             item.payload.registryId,
+            item.payload.providerKey,
             item.payload.providerSandboxId,
             item.state,
             armedAt,
@@ -2655,6 +2665,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
         armedAt,
         identity: {
           registryId: item.payload.registryId,
+          providerKey: item.payload.providerKey,
           providerSandboxId: item.payload.providerSandboxId,
         },
         identityDigest,
@@ -2665,14 +2676,15 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     if (item.kind === "sandbox_lifecycle_unknown") {
       await client.query(
         `INSERT INTO sandbox_lifecycle_unknown(
-           tenant_id,attempt_id,idempotency_key,request_id,provider_sandbox_id,
+           tenant_id,attempt_id,idempotency_key,request_id,provider_key,provider_sandbox_id,
            actual_ttl_seconds,stage,event_payload,payload_digest,occurred_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10)`,
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11)`,
         [
           tenant,
           attemptId,
           item.idempotencyKey,
           item.payload.requestId,
+          item.payload.uncertainEvent.providerKey,
           item.payload.sandboxId ?? null,
           item.payload.actualTtlSeconds,
           item.payload.stage,

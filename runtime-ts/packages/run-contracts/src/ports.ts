@@ -21,7 +21,11 @@ import type {
   RuntimeAgentEvent,
   ThreadActiveHistoryV1,
 } from "@cube-runtime/pi-adapter";
-import type { SandboxHandle, UncertainLifecycleEvent } from "@cube-runtime/sandbox";
+import type {
+  SandboxHandle,
+  SandboxProviderKey,
+  UncertainLifecycleEvent,
+} from "@cube-runtime/sandbox";
 import type { RunSkillSnapshot } from "@cube-runtime/skill";
 import type { WorkspaceManifest } from "@cube-runtime/workspace";
 
@@ -510,6 +514,7 @@ interface SandboxCleanupOutboxBase {
   readonly armed: true;
   readonly payload: {
     readonly registryId: string;
+    readonly providerKey: SandboxProviderKey;
     readonly providerSandboxId: string;
   };
 }
@@ -656,6 +661,7 @@ export type RuntimeOutboxReceiptV1 =
       readonly armedAt: IsoTimestamp;
       readonly identity: {
         readonly registryId: string;
+        readonly providerKey: SandboxProviderKey;
         readonly providerSandboxId: string;
       };
       readonly identityDigest: Sha256Digest;
@@ -832,6 +838,7 @@ export type WorkspaceRuntimePort = WorkspaceRevisionVerifierPort;
 
 export interface SandboxSessionRef {
   readonly registryId: string;
+  readonly providerKey: SandboxProviderKey;
   readonly providerSandboxId: string;
   readonly mode: "created" | "connected";
   readonly sandbox: SandboxHandle;
@@ -923,6 +930,7 @@ export interface ThreadSandboxProviderPort {
   connect(input: {
     readonly scope: ExecutionScope;
     readonly registryId: string;
+    readonly providerKey: SandboxProviderKey;
     readonly providerSandboxId: string;
     readonly signal: AbortSignal;
   }): Promise<SandboxAcquireResult | { readonly outcome: "not_found" }>;

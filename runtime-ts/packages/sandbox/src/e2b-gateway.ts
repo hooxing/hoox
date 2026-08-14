@@ -107,6 +107,7 @@ export interface E2BGatewayOptions {
 }
 
 export class E2BSandboxGateway implements SandboxGateway {
+  readonly providerKey = "e2b" as const;
   private readonly apiKey: string;
   private readonly domain: string | undefined;
   private readonly defaultOperationTimeoutMs: number;
@@ -352,10 +353,11 @@ export class E2BSandboxGateway implements SandboxGateway {
   }
 
   private async recordUnknownCreate(
-    event: Omit<UncertainLifecycleEvent, "kind" | "occurredAt">,
+    event: Omit<UncertainLifecycleEvent, "providerKey" | "kind" | "occurredAt">,
   ): Promise<void> {
     try {
       await this.onUncertainLifecycle?.({
+        providerKey: "e2b",
         kind: "sandbox_create_outcome_unknown",
         ...event,
         occurredAt: new Date().toISOString(),

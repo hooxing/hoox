@@ -96,7 +96,11 @@ describe("Agent Worker 进程入口", () => {
     expect(configuration.sandbox).toMatchObject({
       defaultProviderKey: "e2b",
       enabledProviderKeys: ["cube", "e2b"],
-      e2b: { apiKey: "opaque-e2b-test-key", templateId: "base" },
+      e2b: {
+        apiKey: "opaque-e2b-test-key",
+        templateId: "base",
+        sessionTtlSeconds: 3_600,
+      },
     });
     expect(() =>
       parseWorkerProcessEnvironment({
@@ -106,6 +110,16 @@ describe("Agent Worker 进程入口", () => {
         E2B_TEMPLATE_ID: "base",
       }),
     ).toThrow("E2B_API_KEY");
+    expect(
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        SANDBOX_DEFAULT_PROVIDER: "e2b",
+        SANDBOX_ENABLED_PROVIDERS: "e2b",
+        E2B_API_KEY: "opaque-e2b-test-key",
+        E2B_TEMPLATE_ID: "base",
+        E2B_SESSION_TTL_SECONDS: "1800",
+      }).sandbox.e2b,
+    ).toMatchObject({ sessionTtlSeconds: 1_800 });
   });
 
   it("Thread Context flags 强制 read→shadow→write→serial，默认开启且阈值可配置", () => {

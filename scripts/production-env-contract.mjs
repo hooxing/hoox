@@ -68,6 +68,7 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "E2B_API_KEY",
   "E2B_DOMAIN",
   "E2B_TEMPLATE_ID",
+  "E2B_SESSION_TTL_SECONDS",
   "CUBESANDBOX_API_URL",
   "CUBESANDBOX_TEMPLATE_ID",
   "CUBESANDBOX_API_KEY",

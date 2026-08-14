@@ -1,15 +1,17 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import {
-  FileType,
+  CommandExitError,
   Sandbox as E2BSandbox,
   type SandboxConnectOpts as E2BSandboxConnectOptions,
+  type SandboxOpts as E2BSandboxCreateOptions,
   type SandboxInfo as E2BSandboxInfo,
   type SandboxListOpts as E2BSandboxListOptions,
-  type SandboxOpts as E2BSandboxCreateOptions,
+  FileType,
 } from "e2b";
 import { mapE2BError } from "./e2b-errors.js";
 import { SandboxRuntimeError, settledOperation } from "./errors.js";
+import type { UncertainLifecycleEvent } from "./lifecycle.js";
 import type {
   CodeOutput,
   OperationControl,
@@ -27,13 +29,12 @@ import {
   validateTtl,
 } from "./validation.js";
 import {
-  SandboxWorkspacePort,
-  type SandboxWorkspaceAdapterOptions,
   resolveTrustedSandboxWorkspaceBinding,
+  type SandboxWorkspaceAdapterOptions,
+  SandboxWorkspacePort,
   type SandboxWorkspaceSdk,
   type TrustedSandboxSessionCapability,
 } from "./workspace-adapter.js";
-import type { UncertainLifecycleEvent } from "./lifecycle.js";
 
 const CREATE_REQUEST_METADATA = "agentRuntimeCreateRequestId";
 const DEFAULT_MAX_TTL_SECONDS = 3_600;
@@ -420,11 +421,13 @@ class E2BSandboxHandle implements SandboxHandle {
     const output = await this.call(
       "执行 E2B Sandbox 命令",
       () =>
-        this.sandbox.commands.run(command, {
-          timeoutMs: effective.timeoutMs,
-          requestTimeoutMs: effective.timeoutMs,
-          ...(effective.signal === undefined ? {} : { signal: effective.signal }),
-        }),
+        normalizeE2BCommandResult(() =>
+          this.sandbox.commands.run(command, {
+            timeoutMs: effective.timeoutMs,
+            requestTimeoutMs: effective.timeoutMs,
+            ...(effective.signal === undefined ? {} : { signal: effective.signal }),
+          }),
+        ),
       effective,
     );
     return parseCommandOutput(output);
@@ -565,16 +568,33 @@ class E2BSandboxHandle implements SandboxHandle {
   }
 }
 
+async function normalizeE2BCommandResult(action: () => Promise<unknown>): Promise<unknown> {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof CommandExitError) {
+      return {
+        stdout: error.stdout,
+        stderr: error.stderr,
+        exitCode: error.exitCode,
+      };
+    }
+    throw error;
+  }
+}
+
 function workspaceSdk(sandbox: E2BSdkSandbox): SandboxWorkspaceSdk {
   return {
     sandboxId: sandbox.sandboxId,
     commands: {
       run: (command, options) =>
-        sandbox.commands.run(command, {
-          ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
-          ...(options?.timeoutMs === undefined ? {} : { requestTimeoutMs: options.timeoutMs }),
-          ...(options?.envs === undefined ? {} : { envs: options.envs }),
-        }),
+        normalizeE2BCommandResult(() =>
+          sandbox.commands.run(command, {
+            ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+            ...(options?.timeoutMs === undefined ? {} : { requestTimeoutMs: options.timeoutMs }),
+            ...(options?.envs === undefined ? {} : { envs: options.envs }),
+          }),
+        ),
     },
     files: {
       read: async (path) => {

@@ -36,6 +36,7 @@ import {
   type UncertainLifecycleEvent,
 } from "@cube-runtime/sandbox";
 import type { RunWorker, RunWorkerResult } from "./run-worker.js";
+import type { SandboxResourceFilesystemMaterializerPort } from "./sandbox-resource-filesystem-materializer.js";
 
 export class SystemWorkerClock implements ClockPort {
   schedule(delayMs: number, callback: () => void): ScheduledTask {
@@ -114,6 +115,36 @@ if [ -n "$workspace_entry" ]; then exit 73; fi`,
   if (result.exitCode !== 0) throw new Error("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
 }
 
+interface SandboxSessionInitializerPort {
+  initialize(input: {
+    readonly sandbox: SandboxSessionRef["sandbox"];
+    readonly signal: AbortSignal;
+  }): Promise<void>;
+}
+
+class E2BSandboxBaselineInitializer implements SandboxSessionInitializerPort {
+  constructor(private readonly timeoutMs: number) {}
+
+  async initialize(input: {
+    readonly sandbox: SandboxSessionRef["sandbox"];
+    readonly signal: AbortSignal;
+  }): Promise<void> {
+    const result = await input.sandbox.command(
+      `set -eu
+if [ -L /workspace ]; then exit 72; fi
+uid=$(id -u)
+gid=$(id -g)
+sudo install -d -o "$uid" -g "$gid" -m 0700 /workspace
+[ -d /workspace ]
+[ ! -L /workspace ]`,
+      { signal: input.signal, timeoutMs: this.timeoutMs },
+    );
+    if (result.exitCode !== 0 || result.stderr !== "") {
+      throw new SandboxRuntimeError("PROTOCOL", "E2B Workspace 根目录初始化失败");
+    }
+  }
+}
+
 /** Provider 无关的生产 Session registry；PG 包装器会在返回 Worker 前提交 registry 事实。 */
 export class ProviderSandboxSessionRegistry
   implements SandboxSessionRegistryPort, OrphanSandboxCleanupPort, ThreadSandboxProviderPort
@@ -131,6 +162,8 @@ export class ProviderSandboxSessionRegistry
     private readonly ttlSeconds = 120,
     private readonly lifecycleTimeoutMs = 90_000,
     private readonly resourceVolume?: TenantResourceVolumePort,
+    private readonly resourceFilesystemMaterializer?: SandboxResourceFilesystemMaterializerPort,
+    private readonly sandboxInitializer?: SandboxSessionInitializerPort,
     private readonly uncertainEvents?: { current: UncertainLifecycleEvent | undefined },
   ) {
     if (
@@ -158,6 +191,7 @@ export class ProviderSandboxSessionRegistry
       { timeoutMs: this.lifecycleTimeoutMs },
     );
     try {
+      await this.sandboxInitializer?.initialize({ sandbox, signal: NEVER_CANCELLED_SIGNAL });
       const output = await sandbox.command("printf cube-runtime-sandbox-ready", {
         timeoutMs: Math.min(this.lifecycleTimeoutMs, 5_000),
       });
@@ -181,8 +215,12 @@ export class ProviderSandboxSessionRegistry
     this.uncertainCreate = undefined;
     if (this.uncertainEvents !== undefined) this.uncertainEvents.current = undefined;
     try {
-      if (input.requiresResourceFilesystem && this.resourceVolume === undefined) {
-        throw new Error("ResourceFS Volume provider 未配置");
+      if (
+        input.requiresResourceFilesystem &&
+        this.resourceVolume === undefined &&
+        this.resourceFilesystemMaterializer === undefined
+      ) {
+        throw new Error("ResourceFS provider 未配置");
       }
       const volume = input.requiresResourceFilesystem
         ? await this.resourceVolume?.ensure({
@@ -197,6 +235,12 @@ export class ProviderSandboxSessionRegistry
           ...(volume === undefined ? {} : { volumeMounts: [volume] }),
         },
         { signal: input.signal, timeoutMs: this.lifecycleTimeoutMs },
+      );
+      await this.prepareCreatedSandbox(
+        input.scope,
+        sandbox,
+        input.signal,
+        input.requiresResourceFilesystem,
       );
       const session = this.bindSession(input.scope, `registry-${randomUUID()}`, sandbox, "created");
       return { outcome: "ready", session };
@@ -224,8 +268,12 @@ export class ProviderSandboxSessionRegistry
     this.uncertainCreate = undefined;
     if (this.uncertainEvents !== undefined) this.uncertainEvents.current = undefined;
     try {
-      if (input.requiresResourceFilesystem && this.resourceVolume === undefined) {
-        throw new Error("ResourceFS Volume provider 未配置");
+      if (
+        input.requiresResourceFilesystem &&
+        this.resourceVolume === undefined &&
+        this.resourceFilesystemMaterializer === undefined
+      ) {
+        throw new Error("ResourceFS provider 未配置");
       }
       const volume = input.requiresResourceFilesystem
         ? await this.resourceVolume?.ensure({
@@ -241,6 +289,12 @@ export class ProviderSandboxSessionRegistry
           ...(volume === undefined ? {} : { volumeMounts: [volume] }),
         },
         { signal: input.signal, timeoutMs: this.lifecycleTimeoutMs },
+      );
+      await this.prepareCreatedSandbox(
+        input.scope,
+        sandbox,
+        input.signal,
+        input.requiresResourceFilesystem,
       );
       return {
         outcome: "ready",
@@ -264,6 +318,39 @@ export class ProviderSandboxSessionRegistry
     }
   }
 
+  private async prepareCreatedSandbox(
+    scope: ExecutionScope,
+    sandbox: SandboxSessionRef["sandbox"],
+    signal: AbortSignal,
+    requiresResourceFilesystem: boolean,
+  ): Promise<void> {
+    try {
+      await this.sandboxInitializer?.initialize({ sandbox, signal });
+      if (requiresResourceFilesystem) {
+        await this.resourceFilesystemMaterializer?.materialize({ scope, sandbox, signal });
+      }
+    } catch (error) {
+      console.warn(`SANDBOX_PREPARE_FAILED category=${sandboxFailureCategory(error)}`);
+      try {
+        await sandbox.kill({ timeoutMs: this.lifecycleTimeoutMs, ignoreNotFound: true });
+      } catch (cleanupError) {
+        console.warn(
+          `SANDBOX_PREPARE_CLEANUP_FAILED category=${sandboxFailureCategory(cleanupError)}`,
+        );
+        const event = fallbackUncertainEvent(
+          this.gateway.providerKey,
+          `prepare-${randomUUID()}`,
+          this.ttlSeconds,
+          sandbox.id,
+        );
+        this.uncertainCreate = event;
+        if (this.uncertainEvents !== undefined) this.uncertainEvents.current = event;
+        throw new SandboxRuntimeError("UNKNOWN", "Sandbox 初始化失败且清理结果未知", cleanupError);
+      }
+      throw error;
+    }
+  }
+
   async connect(
     input: Parameters<ThreadSandboxProviderPort["connect"]>[0],
   ): Promise<SandboxAcquireResult | { readonly outcome: "not_found" }> {
@@ -275,6 +362,14 @@ export class ProviderSandboxSessionRegistry
         signal: input.signal,
         timeoutMs: this.lifecycleTimeoutMs,
       });
+      await this.sandboxInitializer?.initialize({ sandbox, signal: input.signal });
+      if (this.resourceFilesystemMaterializer !== undefined) {
+        await this.resourceFilesystemMaterializer.materialize({
+          scope: input.scope,
+          sandbox,
+          signal: input.signal,
+        });
+      }
       return {
         outcome: "ready",
         session: this.bindSession(input.scope, input.registryId, sandbox, "connected"),
@@ -409,7 +504,16 @@ export class CubeSandboxSessionRegistry extends ProviderSandboxSessionRegistry {
         uncertainEvents.current = event;
       },
     });
-    super(gateway, templateId, ttlSeconds, lifecycleTimeoutMs, resourceVolume, uncertainEvents);
+    super(
+      gateway,
+      templateId,
+      ttlSeconds,
+      lifecycleTimeoutMs,
+      resourceVolume,
+      undefined,
+      undefined,
+      uncertainEvents,
+    );
   }
 }
 
@@ -419,6 +523,7 @@ export class E2BSandboxSessionRegistry extends ProviderSandboxSessionRegistry {
     templateId: string,
     ttlSeconds = 120,
     lifecycleTimeoutMs = 90_000,
+    resourceFilesystemMaterializer?: SandboxResourceFilesystemMaterializerPort,
   ) {
     const uncertainEvents: { current: UncertainLifecycleEvent | undefined } = {
       current: undefined,
@@ -431,10 +536,27 @@ export class E2BSandboxSessionRegistry extends ProviderSandboxSessionRegistry {
         uncertainEvents.current = event;
       },
     });
-    // E2B 当前没有可证明只读且不暴露 Tenant 凭据的 ResourceFS 挂载，required 请求必须失败关闭。
-    super(gateway, templateId, ttlSeconds, lifecycleTimeoutMs, undefined, uncertainEvents);
+    // 受控快照只把 Tenant RLS 已授权的业务字节写入 E2B，不向 Sandbox 暴露数据库、S3 或签名凭据。
+    super(
+      gateway,
+      templateId,
+      ttlSeconds,
+      lifecycleTimeoutMs,
+      undefined,
+      resourceFilesystemMaterializer,
+      new E2BSandboxBaselineInitializer(lifecycleTimeoutMs),
+      uncertainEvents,
+    );
   }
 }
+function sandboxFailureCategory(error: unknown): string {
+  if (error instanceof SandboxRuntimeError) return error.code.toLowerCase();
+  if (error instanceof Error && error.name.trim().length > 0) {
+    return error.name.replaceAll(/[^a-zA-Z0-9_-]/g, "_").toLowerCase();
+  }
+  return "unknown";
+}
+
 /** 部署级 Session Router；创建走默认 Provider，恢复与清理严格使用持久化 providerKey。 */
 export class SandboxSessionRegistryRouter
   implements SandboxSessionRegistryPort, OrphanSandboxCleanupPort, ThreadSandboxProviderPort

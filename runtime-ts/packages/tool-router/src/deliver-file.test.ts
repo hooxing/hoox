@@ -56,6 +56,7 @@ function harness(read: DeliverFileReadResult, publicationError?: Error) {
       attemptId: "attempt-deliver",
       sandbox: {
         registryId: "registry-deliver",
+        providerKey: "cube",
         providerSandboxId: "sandbox-deliver",
         mode: "created",
         sandbox: {} as SandboxHandle,
@@ -185,6 +186,7 @@ describe("deliver_file Tool Router", () => {
         attemptId: "attempt-deliver",
         sandbox: {
           registryId: "registry-deliver",
+          providerKey: "cube",
           providerSandboxId: "sandbox-deliver",
           mode: "created",
           sandbox: {} as SandboxHandle,

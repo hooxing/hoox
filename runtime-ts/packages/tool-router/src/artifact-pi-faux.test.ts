@@ -93,6 +93,7 @@ describe("Pi Faux deliver_file 纵向链路", () => {
           attemptId: "attempt-faux-deliver",
           sandbox: {
             registryId: "registry-faux-deliver",
+            providerKey: "cube",
             providerSandboxId: "sandbox-faux-deliver",
             mode: "created",
             sandbox: new FakeSandboxHandle("faux-deliver"),

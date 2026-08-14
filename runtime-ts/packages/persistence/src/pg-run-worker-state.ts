@@ -2620,10 +2620,10 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
       if (previous === undefined) {
         await client.query(
           `INSERT INTO cleanup_outbox(
-             tenant_id,attempt_id,idempotency_key,registry_id,provider_sandbox_id,
+             tenant_id,attempt_id,idempotency_key,registry_id,provider_key,provider_sandbox_id,
              state,armed,armed_at,identity_digest,disposition,payload,payload_digest,
              created_at,updated_at
-           ) VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8,$9,$10::jsonb,$11,$7,$7)`,
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,true,$8,$9,$10,$11::jsonb,$12,$8,$8)`,
           [
             tenant,
             attemptId,

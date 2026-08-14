@@ -26,6 +26,17 @@ vi.mock("@cube-runtime/sandbox", () => ({
       return mocks.gatewayProbe();
     }
   },
+  E2BSandboxGateway: class {},
+  SandboxProviderRegistry: class {
+    constructor(
+      readonly defaultProviderKey: string,
+      private readonly gateways: readonly { probe(): Promise<void> }[],
+    ) {}
+
+    async probe() {
+      await Promise.all(this.gateways.map((gateway) => gateway.probe()));
+    }
+  },
   resolveCubeProxyRouting: () => ({
     proxyNodeIp: "cube-api.invalid",
     proxyPort: 443,

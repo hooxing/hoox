@@ -215,6 +215,7 @@ function fakeThreadSandboxProvider(
 ): ThreadSandboxProviderPort {
   const providerPrefix = `thread-provider-${process.pid}-${++fakeThreadSandboxProviderSequence}`;
   return {
+    defaultProviderKey: "cube",
     create: async (input) => {
       resourceFilesystemRequirements?.push(input.requiresResourceFilesystem);
       const sandbox = await gateway.create(
@@ -234,6 +235,7 @@ function fakeThreadSandboxProvider(
         outcome: "ready",
         session: {
           registryId: input.registryId,
+          providerKey: "cube",
           providerSandboxId,
           mode: "created",
           sandbox,
@@ -249,6 +251,7 @@ function fakeThreadSandboxProvider(
           outcome: "ready",
           session: {
             registryId: input.registryId,
+            providerKey: "cube",
             providerSandboxId: input.providerSandboxId,
             mode: "connected",
             sandbox,
@@ -3687,6 +3690,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
               outcome: "ready",
               session: {
                 registryId: `m4-registry-${label}-${sandboxSequence}`,
+                providerKey: "cube",
                 providerSandboxId: sandbox.id,
                 mode: "created",
                 sandbox,
@@ -4466,6 +4470,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     });
     if (claimed.outcome !== "claimed") throw new Error("claim 失败");
     const uncertainEvent = {
+      providerKey: "cube" as const,
       kind: "sandbox_create_outcome_unknown" as const,
       stage: "create_response" as const,
       requestId: "request-unknown-pg",
@@ -4535,6 +4540,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         outcome: "ready",
         session: {
           registryId: "registry-wrapper-pg",
+          providerKey: "cube",
           providerSandboxId: "sandbox-wrapper-pg",
           mode: "created",
           sandbox: {} as never,
@@ -4588,6 +4594,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       armed: true,
       payload: {
         registryId: acquired.session.registryId,
+        providerKey: "cube",
         providerSandboxId: acquired.session.providerSandboxId,
       },
     };
@@ -4693,6 +4700,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         outcome: "ready",
         session: {
           registryId: "registry-orphan-pg",
+          providerKey: "cube",
           providerSandboxId: "sandbox-orphan-pg",
           mode: "created",
           sandbox: {} as never,
@@ -4753,7 +4761,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       idempotencyKey: `${claimed.snapshot.attempt.attemptId}/sandbox/registry-pg/cleanup`,
       state: "pending",
       armed: true,
-      payload: { registryId: "registry-pg", providerSandboxId: "sandbox-pg" },
+      payload: { registryId: "registry-pg", providerKey: "cube", providerSandboxId: "sandbox-pg" },
     };
     const first = await persistence.mutate(
       signed({

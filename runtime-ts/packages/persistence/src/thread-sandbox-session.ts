@@ -81,10 +81,11 @@ export async function applyThreadSandboxTerminal(
   },
 ): Promise<ThreadSandboxTerminalReceiptV1> {
   const lease = await client.query<{
+    readonly provider_key: SandboxProviderKey;
     readonly provider_sandbox_id: string;
     readonly lease_epoch: string;
   }>(
-    `SELECT session.provider_sandbox_id,sandbox_lease.lease_epoch::text
+    `SELECT session.provider_key,session.provider_sandbox_id,sandbox_lease.lease_epoch::text
        FROM thread_sandbox_leases sandbox_lease
        JOIN thread_sandbox_sessions session
          ON session.tenant_id=sandbox_lease.tenant_id AND session.session_id=sandbox_lease.session_id
@@ -168,8 +169,8 @@ export async function applyThreadSandboxTerminal(
   await client.query(
     `INSERT INTO sandbox_lifecycle_effects(
        tenant_id,effect_id,operation_id,request_digest,session_id,generation,effect_kind,state,
-       run_id,attempt_id,provider_sandbox_id,expected_session_state,created_at,updated_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,'pause','pending',$7,$8,$9,'running',$10,$10)`,
+       run_id,attempt_id,provider_key,provider_sandbox_id,expected_session_state,created_at,updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,'pause','pending',$7,$8,$9,$10,'running',$11,$11)`,
     [
       input.scope.tenantId,
       effectId,
@@ -179,6 +180,7 @@ export async function applyThreadSandboxTerminal(
       input.command.generation,
       input.scope.runId,
       input.attemptId,
+      row.provider_key,
       row.provider_sandbox_id,
       input.databaseNow,
     ],
@@ -715,10 +717,10 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     await client.query(
       `INSERT INTO sandbox_lifecycle_effects(
          tenant_id,effect_id,operation_id,request_digest,session_id,generation,effect_kind,state,
-         run_id,attempt_id,provider_sandbox_id,expected_session_state,claim_token,claimed_by,
+         run_id,attempt_id,provider_key,provider_sandbox_id,expected_session_state,claim_token,claimed_by,
          claim_generation,claim_expires_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,'resume','started',$7,$8,$9,'paused',$10,$11,1,
-                 clock_timestamp()+($12::bigint*interval '1 millisecond'))`,
+       ) VALUES ($1,$2,$3,$4,$5,$6,'resume','started',$7,$8,$9,$10,'paused',$11,$12,1,
+                 clock_timestamp()+($13::bigint*interval '1 millisecond'))`,
       [
         input.scope.tenantId,
         effectId,
@@ -808,10 +810,10 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           await client.query(
             `INSERT INTO sandbox_lifecycle_effects(
                tenant_id,effect_id,operation_id,request_digest,session_id,generation,effect_kind,
-               state,run_id,attempt_id,expected_session_state,claim_token,claimed_by,
+               state,run_id,attempt_id,provider_key,expected_session_state,claim_token,claimed_by,
                claim_generation,claim_expires_at,remote_call_started_at
-             ) VALUES ($1,$2,$3,$4,$5,$6,'create','started',$7,$8,NULL,$9,$10,1,
-                       clock_timestamp()+($11::bigint*interval '1 millisecond'),clock_timestamp())`,
+             ) VALUES ($1,$2,$3,$4,$5,$6,'create','started',$7,$8,$9,NULL,$10,$11,1,
+                       clock_timestamp()+($12::bigint*interval '1 millisecond'),clock_timestamp())`,
             [
               input.scope.tenantId,
               effectId,
@@ -821,6 +823,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
               generation,
               input.scope.runId,
               input.attemptId,
+              this.provider.defaultProviderKey,
               `sandbox-create-claim-${randomUUID()}`,
               input.owner,
               this.#transitionWaitMs,
@@ -979,9 +982,9 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
       await client.query(
         `INSERT INTO sandbox_lifecycle_effects(
            tenant_id,effect_id,operation_id,request_digest,session_id,generation,effect_kind,state,
-           run_id,provider_sandbox_id,expected_session_state,resulting_session_state,
+           run_id,provider_key,provider_sandbox_id,expected_session_state,resulting_session_state,
            provider_receipt_digest,completed_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,'terminate','succeeded',$7,$8,$9,'terminated',$10,
+         ) VALUES ($1,$2,$3,$4,$5,$6,'terminate','succeeded',$7,$8,$9,$10,'terminated',$11,
                    clock_timestamp())`,
         [
           scope.tenantId,
@@ -1017,8 +1020,8 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
         await client.query(
           `INSERT INTO sandbox_lifecycle_effects(
              tenant_id,effect_id,operation_id,request_digest,session_id,generation,effect_kind,state,
-             run_id,provider_sandbox_id,expected_session_state,completed_at
-           ) VALUES ($1,$2,$3,$4,$5,$6,'resume','unknown',$7,$8,'running',clock_timestamp())`,
+             run_id,provider_key,provider_sandbox_id,expected_session_state,completed_at
+           ) VALUES ($1,$2,$3,$4,$5,$6,'resume','unknown',$7,$8,$9,'running',clock_timestamp())`,
           [
             scope.tenantId,
             effectId,

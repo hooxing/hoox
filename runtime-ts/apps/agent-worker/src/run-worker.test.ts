@@ -1618,7 +1618,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     async ({ failure, expected }) => {
       const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
       h.sandboxes.beforeAcquireReturn = () => {
-        if (failure === "unavailable") h.persistence.unavailableNextMutation = true;
+        if (failure === "unavailable") h.persistence.unavailableMutationAttempts = 3;
         if (failure === "response_unknown") {
           h.persistence.responseUnknownWithoutCommitKeyIncludes = "/sandbox/cleanup-intent";
         }
@@ -2212,7 +2212,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     const h = sandboxHarness([new ScriptedAgentSession(successfulEvents)]);
     h.persistence.afterMutation = (command) => {
       if (command.idempotencyKey.includes("/stage/workspace-verified")) {
-        h.persistence.unavailableNextMutation = true;
+        h.persistence.unavailableMutationAttempts = 3;
       }
     };
 
@@ -2275,7 +2275,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
   });
 
-  it("流式事件持久化不可用时立即 abort，并推进 cleanup intent 等待 Scheduler", async () => {
+  it("流式事件持久化单次不可用时重放同一幂等 mutation 并继续完成", async () => {
     const session = new ScriptedAgentSession(successfulEvents);
     const h = sandboxHarness([session]);
     h.persistence.responseUnknownKeyIncludes = "/sandbox/cleanup-intent";
@@ -2291,13 +2291,40 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       return result;
     };
 
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    const record = h.persistence.record(h.scope);
+    expect(checkpointRead).toBe(true);
+    expect(session.abortCount).toBe(0);
+    expect(record.run.status).toBe("succeeded");
+    const firstEventKey = h.persistence.durableOperations.find((operation) =>
+      operation.startsWith("mutate:attempt-1/event/"),
+    );
+    if (firstEventKey === undefined) throw new Error("首个流式事件 mutation 不存在");
+    expect(
+      h.persistence.durableOperations.filter((operation) => operation === firstEventKey),
+    ).toHaveLength(2);
+  });
+
+  it("流式事件持久化持续不可用时中止，并推进 cleanup intent 等待 Scheduler", async () => {
+    const session = new ScriptedAgentSession(successfulEvents);
+    const h = sandboxHarness([session]);
+    h.persistence.responseUnknownKeyIncludes = "/sandbox/cleanup-intent";
+    const originalRead = h.persistence.readMutation.bind(h.persistence);
+    h.persistence.readMutation = async (input) => {
+      const result = await originalRead(input);
+      if (input.idempotencyKey.includes("sandbox/cleanup-intent")) {
+        h.persistence.unavailableMutationAttempts = 3;
+      }
+      return result;
+    };
+
     await expect(h.worker.execute(h.scope)).resolves.toEqual({
       outcome: "recovery_required",
       code: "PERSISTENCE_UNAVAILABLE",
     });
 
     const record = h.persistence.record(h.scope);
-    expect(checkpointRead).toBe(true);
     expect(session.abortCount).toBeGreaterThanOrEqual(1);
     expect(record.run.status).toBe("running");
     expect(record.workspace.currentRevisionId).toBeUndefined();

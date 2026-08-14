@@ -127,6 +127,7 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   /** 模拟数据库连接在事务是否提交前断开，readback 也找不到 receipt。 */
   responseUnknownWithoutCommitKeyIncludes: string | undefined;
   unavailableNextMutation = false;
+  unavailableMutationAttempts = 0;
   fenceLostMutationKeyIncludes: string | undefined;
   idempotencyConflictKeyIncludes: string | undefined;
   forceInspectUnavailable = false;
@@ -468,6 +469,10 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
   async mutate(command: RuntimeMutation): Promise<RuntimeMutationResult> {
     this.durableOperations.push(`mutate:${command.idempotencyKey}`);
     this.mutationCommands.push(command);
+    if (this.unavailableMutationAttempts > 0) {
+      this.unavailableMutationAttempts -= 1;
+      return { outcome: "unavailable" };
+    }
     if (this.unavailableNextMutation) {
       this.unavailableNextMutation = false;
       return { outcome: "unavailable" };

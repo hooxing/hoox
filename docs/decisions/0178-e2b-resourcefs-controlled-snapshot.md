@@ -1,4 +1,4 @@
-# ADR-0172：E2B ResourceFS 受控快照物化
+# ADR-0178：E2B ResourceFS 受控快照物化
 
 - 状态：已接受
 - 日期：2026-08-14

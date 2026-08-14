@@ -153,7 +153,15 @@
 | [ADR-0167](0167-mobile-cloud-drive-space-selection-layout.md) | 移动云盘空间与团队选择布局 | 已接受（试验版） | 2026-08-12 |
 | [ADR-0168](0168-personalization-settings-and-run-snapshot.md) | 个人与团队个性化使用 Run 级低信任偏好快照 | 已接受 | 2026-08-12 |
 | [ADR-0169](0169-team-member-read-only-authorization-snapshot.md) | 团队成员读取在只读事务中使用无锁授权快照 | 已接受 | 2026-08-12 |
-| [ADR-0170](0170-e2b-provider-first-sdk-adapter.md) | E2B Provider 首期 SDK 适配与生产启用边界 | 已接受（首期适配） | 2026-08-14 |
+| [ADR-0170](0170-gaia-native-runtime-evaluation.md) | 以普通 Thread/Run 接入 GAIA 原生能力评测 | 已接受 | 2026-08-13 |
+| [ADR-0171](0171-reconcile-published-migration-lineage.md) | 对已发布的 Mem0 迁移执行受限谱系换号 | 已接受 | 2026-08-13 |
+| [ADR-0172](0172-runtime-failure-causality-and-cancellation-convergence.md) | 运行失败根因与取消信号必须有界收敛 | 已接受 | 2026-08-13 |
+| [ADR-0173](0173-external-effect-permit-consumption-recovery.md) | 外部副作用许可消费中断恢复 | 已接受 | 2026-08-13 |
+| [ADR-0174](0174-durable-mutation-transient-unavailable-retry.md) | Durable Mutation 瞬时不可用有界重试 | 已接受 | 2026-08-13 |
+| [ADR-0175](0175-durable-mutation-retry-window-covers-port-mapping-recovery.md) | Durable Mutation 重试窗口覆盖端口映射恢复 | 已接受 | 2026-08-14 |
+| [ADR-0176](0176-e2b-provider-first-sdk-adapter.md) | E2B Provider 首期 SDK 适配与生产启用边界 | 已接受（首期适配） | 2026-08-14 |
+| [ADR-0177](0177-sandbox-provider-persistence-and-routing.md) | Sandbox Provider 身份持久化与失败关闭路由 | 已接受 | 2026-08-14 |
+| [ADR-0178](0178-e2b-resourcefs-controlled-snapshot.md) | E2B ResourceFS 受控快照物化 | 已接受 | 2026-08-14 |
 
 ## 何时必须记录
 

@@ -2,16 +2,16 @@ import {
   applyTodoWrite,
   type IsoTimestamp,
   type Run,
+  type RunPersonalizationSnapshot,
   type Sha256Digest,
   type TodoSnapshot,
   type TodoWriteCommand,
+  userId,
   type Workspace,
   type WorkspaceRevisionId,
-  userId,
-  type RunPersonalizationSnapshot,
 } from "@cube-runtime/domain";
-import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import { injectRetrievedMemories, type MemoryRetriever } from "@cube-runtime/memory";
+import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
 import type { SandboxHandle } from "@cube-runtime/sandbox";
 import { WorkspaceApplicationError, WorkspaceDependencyError } from "@cube-runtime/workspace";
 import { AgentSupervisor, rootAgentThreadId } from "./agent-supervisor.js";
@@ -330,6 +330,8 @@ interface CleanupReceiptFacts {
 }
 
 type AppliedMutation = Extract<RuntimeMutationResult, { outcome: "applied" | "already_applied" }>;
+const MUTATION_READBACK_RETRY_DELAYS_MS = Object.freeze([0, 25, 100, 250]);
+const MUTATION_UNAVAILABLE_RETRY_DELAYS_MS = Object.freeze([25, 100, 500]);
 
 export class RunWorker {
   readonly #leaseDurationMs: number;
@@ -1403,6 +1405,7 @@ export class RunWorker {
     } finally {
       timeout.cancel();
       cancellation.removeEventListener("abort", onCancel);
+      this.dependencies.cancellation.release?.(scope);
       shutdown?.removeEventListener("abort", onShutdown);
       closeEventAcceptance(context);
       // abort 完成后才允许取消订阅、释放 Session；cleanup 已由持久 Outbox/Saga 接管。
@@ -1777,16 +1780,36 @@ export class RunWorker {
         ...unsigned,
         commandDigest: runtimeMutationDigest(unsigned),
       };
-      let result = await this.dependencies.persistence.mutate(command);
+      let result: RuntimeMutationResult;
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          result = await this.dependencies.persistence.mutate(command);
+        } catch {
+          result = { outcome: "unavailable" };
+        }
+        if (result.outcome !== "unavailable") break;
+        const retryDelay = MUTATION_UNAVAILABLE_RETRY_DELAYS_MS[attempt];
+        if (retryDelay === undefined) return result;
+        // unavailable 明确表示事务没有提交；同一 durable lane 内只能重放字节相同的
+        // 幂等命令。四次尝试的最坏连接等待仍小于 30 秒默认租约，避免阻塞 heartbeat 过期。
+        await delay(retryDelay);
+      }
       if (result.outcome === "response_unknown") {
-        // readback 必须使用原始完整 scope；Revision head 推进不能放宽查询。
-        const recovered = await this.dependencies.persistence.readMutation({
-          scope: context.scope,
-          idempotencyKey: input.idempotencyKey,
-        });
-        // not_found 不能证明事务未提交，保留 response_unknown 供孤儿清理和恢复指标分类。
-        if (recovered.outcome === "not_found") return { outcome: "response_unknown" };
-        result = recovered;
+        // COMMIT 回包未知后，远端端口映射可能同时重置第一次读回连接。完整 scope 下有界
+        // 重读是只读且幂等的；not_found 仍不能证明事务未提交。
+        for (const delayMs of MUTATION_READBACK_RETRY_DELAYS_MS) {
+          if (delayMs > 0) {
+            await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+          }
+          const recovered = await this.dependencies.persistence.readMutation({
+            scope: context.scope,
+            idempotencyKey: input.idempotencyKey,
+          });
+          if (recovered.outcome === "unavailable" || recovered.outcome === "not_found") continue;
+          result = recovered;
+          break;
+        }
+        if (result.outcome === "response_unknown") return result;
       }
       if (isApplied(result)) {
         if (!receiptMatches(context, result, command)) return { outcome: "idempotency_conflict" };
@@ -1918,6 +1941,7 @@ export class RunWorker {
     context: ExecutionContext,
     sandbox: SandboxSessionRef,
     disposition: "pause" | "close",
+    primaryFailureCode?: StableWorkerErrorCode,
   ): Promise<
     | { readonly outcome: "settled" }
     | { readonly outcome: "recovery"; readonly result: RunWorkerResult }
@@ -1935,7 +1959,7 @@ export class RunWorker {
       if (lifecycle === undefined) {
         return {
           outcome: "recovery",
-          result: await this.requireRecovery(context, "SANDBOX_FAILED", []),
+          result: await this.requireRecovery(context, primaryFailureCode ?? "SANDBOX_FAILED", []),
         };
       }
       const settled = await lifecycle.terminate({
@@ -1950,7 +1974,7 @@ export class RunWorker {
         outcome: "recovery",
         result: await this.requireRecovery(
           context,
-          settled === "unknown" ? "SANDBOX_UNKNOWN" : "SANDBOX_FAILED",
+          primaryFailureCode ?? (settled === "unknown" ? "SANDBOX_UNKNOWN" : "SANDBOX_FAILED"),
           [],
         ),
       };
@@ -1986,7 +2010,7 @@ export class RunWorker {
       if (settlement.outcome === "unknown") {
         return {
           outcome: "recovery",
-          result: await this.requireRecovery(context, "SANDBOX_UNKNOWN", [
+          result: await this.requireRecovery(context, primaryFailureCode ?? "SANDBOX_UNKNOWN", [
             cleanupUnknownOutbox(context, settlement.event, sandbox, disposition),
           ]),
         };
@@ -2004,7 +2028,7 @@ export class RunWorker {
       // started 不能回退为 pending；保留 Saga checkpoint 交给恢复协调器处理。
       return {
         outcome: "recovery",
-        result: await this.requireRecovery(context, "SANDBOX_FAILED", []),
+        result: await this.requireRecovery(context, primaryFailureCode ?? "SANDBOX_FAILED", []),
       };
     }
   }
@@ -2055,7 +2079,7 @@ export class RunWorker {
   ): Promise<RunWorkerResult> {
     if (context.abortPromise) await context.abortPromise;
     if (sandbox !== undefined) {
-      const settled = await this.settleSandbox(context, sandbox, "close");
+      const settled = await this.settleSandbox(context, sandbox, "close", code);
       if (settled.outcome !== "settled") return settled.result;
     }
     const stopped = await this.stopPoint(context, cancellation);
@@ -2102,7 +2126,7 @@ export class RunWorker {
       );
     }
     if (sandbox !== undefined) {
-      const settled = await this.settleSandbox(context, sandbox, "close");
+      const settled = await this.settleSandbox(context, sandbox, "close", code);
       if (settled.outcome !== "settled") return settled.result;
     }
     const stopped = await this.stopPoint(context, cancellation);
@@ -2124,6 +2148,7 @@ export class RunWorker {
     code: StableWorkerErrorCode,
     retainedSandbox?: SandboxSessionRef,
     responseAlreadyProvided = false,
+    deferredCleanupOutbox: readonly RuntimeOutboxV1[] = [],
   ): Promise<RunWorkerResult> {
     if (context.abortPromise) await context.abortPromise;
     const final = await this.applyMutation(context, {
@@ -2131,7 +2156,7 @@ export class RunWorker {
       nextAttemptStatus: runStatus,
       nextStage: "finished",
       events: terminalFailureEvents(context, runStatus, "finished", code, responseAlreadyProvided),
-      outbox: [],
+      outbox: deferredCleanupOutbox,
       nextRunStatus: runStatus,
       releaseFences: true,
       ...(retainedSandbox === undefined || context.threadSandboxLease === undefined
@@ -2156,15 +2181,22 @@ export class RunWorker {
     closeEventAcceptance(context);
     if (context.abortPromise) await context.abortPromise;
     if (stopped === "cancelled") {
-      return sandbox
-        ? await this.finalizeWithCleanup(
-            context,
-            sandbox,
-            "cancelled",
-            "CANCELLED",
-            this.dependencies.cancellation.signalFor(context.scope),
-          )
-        : await this.finalizeWithoutRevision(context, "cancelled", "CANCELLED");
+      const retainedThreadSandbox =
+        sandbox !== undefined && context.threadSandboxLease !== undefined ? sandbox : undefined;
+      const deferredCleanupOutbox =
+        sandbox !== undefined && context.threadSandboxLease === undefined
+          ? [cleanupOutbox(context, sandbox, "started", "close")]
+          : [];
+      // API 已提交 cancelled 后，不能再等待外部 Sandbox settle；原子关闭 Attempt，并把
+      // 已 armed 的普通 Sandbox 推进为 started，交给 Scheduler 持久清理。
+      return await this.finalizeWithoutRevision(
+        context,
+        "cancelled",
+        "CANCELLED",
+        retainedThreadSandbox,
+        false,
+        deferredCleanupOutbox,
+      );
     }
     if (stopped === "timeout") {
       return sandbox
@@ -2178,10 +2210,18 @@ export class RunWorker {
         : await this.finalizeWithoutRevision(context, "failed", "TIMEOUT");
     }
     if (stopped === "shutdown") {
-      return await this.requireRecovery(context, "WORKER_SHUTDOWN", []);
+      return await this.requireRecovery(
+        context,
+        "WORKER_SHUTDOWN",
+        recoveryCleanupOutbox(context, sandbox),
+      );
     }
     if (stopped === "fence_lost" || stopped === "scope_mismatch") return { outcome: "fence_lost" };
-    return await this.requireRecovery(context, "PERSISTENCE_UNAVAILABLE", []);
+    return await this.requireRecovery(
+      context,
+      "PERSISTENCE_UNAVAILABLE",
+      recoveryCleanupOutbox(context, sandbox),
+    );
   }
 
   private async requireRecovery(
@@ -2422,6 +2462,17 @@ function cleanupOutbox(
   if (state === "pending") return { ...base, state };
   if (disposition === undefined) throw new Error("started 后必须一次性决定 cleanup disposition");
   return { ...base, state, payload: { ...base.payload, disposition } };
+}
+
+function recoveryCleanupOutbox(
+  context: ExecutionContext,
+  sandbox: SandboxSessionRef | undefined,
+): readonly RuntimeOutboxV1[] {
+  // 普通 Sandbox 已有 pending intent；恢复终止与释放双栅栏必须在同一事务把它推进到
+  // started/close，Scheduler 才能立即领取。Thread Sandbox 由独立 lifecycle 状态机收敛。
+  return sandbox !== undefined && context.threadSandboxLease === undefined
+    ? [cleanupOutbox(context, sandbox, "started", "close")]
+    : [];
 }
 
 function terminalSandboxCommand(lease: ThreadSandboxLeaseRefV1) {

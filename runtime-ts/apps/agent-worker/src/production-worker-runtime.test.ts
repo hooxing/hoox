@@ -353,12 +353,28 @@ describe("Agent Worker production polling loop", () => {
   it("进程停机信号与业务取消信号相互独立", () => {
     const shutdown = new ProcessShutdown();
     const cancellation = new DatabaseRunCancellation();
-    const businessSignal = cancellation.signalFor(claim().scope as ExecutionScope);
+    const scope = claim().scope as ExecutionScope;
+    const businessSignal = cancellation.signalFor(scope);
 
     shutdown.request();
 
     expect(shutdown.signal.aborted).toBe(true);
     expect(businessSignal.aborted).toBe(false);
+    cancellation.release(scope);
+  });
+
+  it("轮询到数据库 Run cancelled 后实时中止业务信号并允许释放", async () => {
+    let cancelled = false;
+    const probe = vi.fn(async () => cancelled);
+    const cancellation = new DatabaseRunCancellation(probe, 10);
+    const scope = claim().scope as ExecutionScope;
+    const businessSignal = cancellation.signalFor(scope);
+
+    await vi.waitFor(() => expect(probe).toHaveBeenCalled());
+    cancelled = true;
+    await vi.waitFor(() => expect(businessSignal.aborted).toBe(true));
+
+    cancellation.release(scope);
   });
 });
 

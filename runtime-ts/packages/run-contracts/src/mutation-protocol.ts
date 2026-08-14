@@ -30,6 +30,45 @@ export function runtimeMutationDigest(
   });
 }
 
+/**
+ * API 已先把 Run 标记为 cancelled 时，只允许原 Worker 用原栅栏提交这一种终态收尾。
+ * 该窄门禁止在取消后继续写模型事件、Workspace 或 Rollout；可选 cleanup started 仅用于
+ * 把已 armed 的 Sandbox 交给持久清理消费者。
+ */
+export function isExternalCancellationFinalizationMutation(
+  command: RuntimeMutation,
+  attemptId: string,
+): boolean {
+  const [notice, attempt] = command.events;
+  return (
+    command.idempotencyKey === `${attemptId}/final/cancelled` &&
+    command.nextAttemptStatus === "cancelled" &&
+    command.nextStage === "finished" &&
+    command.nextRunStatus === "cancelled" &&
+    command.releaseFences === true &&
+    command.effectInvocation === undefined &&
+    command.rolloutProjection === undefined &&
+    command.expectedProjectionVersion === undefined &&
+    command.workspaceChange === undefined &&
+    command.threadSteer === undefined &&
+    command.events.length === 2 &&
+    notice?.kind === "agent_event" &&
+    notice.payload.type === "runtime.notice" &&
+    notice.payload.code === "CANCELLED" &&
+    attempt?.kind === "attempt_state_changed" &&
+    attempt.payload.status === "cancelled" &&
+    attempt.payload.stage === "finished" &&
+    attempt.payload.code === "CANCELLED" &&
+    command.outbox.length <= 1 &&
+    command.outbox.every(
+      (item) =>
+        item.kind === "sandbox_cleanup" &&
+        item.state === "started" &&
+        item.payload.disposition === "close",
+    )
+  );
+}
+
 export function outboxPayloadDigest(outbox: RuntimeOutboxV1, armedAt?: IsoTimestamp): Sha256Digest {
   if (outbox.kind === "sandbox_cleanup" && armedAt === undefined) {
     throw new Error("cleanup receipt digest 必须包含 armedAt");

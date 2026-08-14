@@ -19,6 +19,7 @@ const claim = (
   generation: 1,
   effectId: "sandbox-effect-test",
   effectKind: "pause",
+  providerKey: "cube",
   providerSandboxId: "fake-1",
   mode: "execute",
   token: "sandbox-effect-claim-test",

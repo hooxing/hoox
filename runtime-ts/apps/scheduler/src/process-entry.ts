@@ -28,15 +28,22 @@ import {
   ThreadTitleGenerationConsumer,
   ThreadTitleGenerationPollingLoop,
 } from "@cube-runtime/thread-title";
-import { CubeSandboxGateway, resolveCubeProxyRouting } from "@cube-runtime/sandbox";
 import {
-  CubeSandboxCleanupResolver,
+  CubeSandboxGateway,
+  E2BSandboxGateway,
+  type RuntimeSandboxGateway,
+  type SandboxProviderKey,
+  SandboxProviderRegistry,
+  resolveCubeProxyRouting,
+} from "@cube-runtime/sandbox";
+import {
   SandboxCleanupConsumer,
+  SandboxCleanupRouterResolver,
   SandboxCleanupPollingLoop,
 } from "./sandbox-cleanup-consumer.js";
 import {
-  CubeThreadSandboxLifecycleResolver,
   ThreadSandboxLifecycleConsumer,
+  ThreadSandboxLifecycleRouterResolver,
   ThreadSandboxLifecyclePollingLoop,
 } from "./thread-sandbox-lifecycle-consumer.js";
 
@@ -49,6 +56,10 @@ const schedulerEnvironmentSchema = Object.freeze({
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
   DATABASE_RUNTIME_ROLE: stringEnvironmentField({ maxLength: 63 }),
+  SANDBOX_DEFAULT_PROVIDER: stringEnvironmentField({ maxLength: 16, requiredIn: [] }),
+  SANDBOX_ENABLED_PROVIDERS: stringEnvironmentField({ maxLength: 64, requiredIn: [] }),
+  E2B_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
+  E2B_DOMAIN: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
   CUBESANDBOX_API_URL: urlEnvironmentField(),
   CUBESANDBOX_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
   CUBESANDBOX_PROXY_NODE_IP: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
@@ -122,6 +133,9 @@ export interface SchedulerProcessConfiguration {
   readonly databaseSchema: string;
   readonly databaseRuntimeRole: string;
   readonly sandbox: Readonly<{
+    defaultProviderKey: SandboxProviderKey;
+    enabledProviderKeys: readonly SandboxProviderKey[];
+    e2b?: Readonly<{ apiKey: string; domain?: string }>;
     apiUrl: string;
     apiKey?: string;
     proxyNodeIp?: string;
@@ -154,6 +168,24 @@ export interface SchedulerProcessConfiguration {
   readonly shutdownTimeoutMilliseconds: number;
 }
 
+function parseSandboxProviderKey(value: string): SandboxProviderKey {
+  if (value === "cube" || value === "e2b") return value;
+  throw new TypeError("SANDBOX_DEFAULT_PROVIDER 只能是 cube 或 e2b");
+}
+
+function parseEnabledSandboxProviders(value: string): readonly SandboxProviderKey[] {
+  const keys = value.split(",").map((item) => parseSandboxProviderKey(item.trim()));
+  if (keys.length === 0 || new Set(keys).size !== keys.length) {
+    throw new TypeError("SANDBOX_ENABLED_PROVIDERS 必须是非空且不重复的 Provider 列表");
+  }
+  return Object.freeze(keys);
+}
+
+function requireOptionalEnvironment(value: string | undefined, name: string): string {
+  if (value === undefined) throw new TypeError(`${name} 在启用 E2B Provider 时必填`);
+  return value;
+}
+
 export function selectSchedulerProcessEnvironment(
   source: NodeJS.ProcessEnv,
 ): Readonly<Record<string, string | undefined>> {
@@ -182,6 +214,21 @@ export function parseSchedulerProcessEnvironment(
   if (!/^[a-z_][a-z0-9_]{0,62}$/u.test(configuredRuntimeRole)) {
     throw new TypeError("DATABASE_RUNTIME_ROLE 格式无效");
   }
+  const defaultProviderKey = parseSandboxProviderKey(
+    parsed.values.SANDBOX_DEFAULT_PROVIDER ?? "cube",
+  );
+  const enabledProviderKeys = parseEnabledSandboxProviders(
+    parsed.values.SANDBOX_ENABLED_PROVIDERS ?? "cube",
+  );
+  if (!enabledProviderKeys.includes(defaultProviderKey)) {
+    throw new TypeError("SANDBOX_DEFAULT_PROVIDER 必须包含在 SANDBOX_ENABLED_PROVIDERS 中");
+  }
+  const e2b = enabledProviderKeys.includes("e2b")
+    ? Object.freeze({
+        apiKey: requireOptionalEnvironment(parsed.values.E2B_API_KEY, "E2B_API_KEY"),
+        ...(parsed.values.E2B_DOMAIN === undefined ? {} : { domain: parsed.values.E2B_DOMAIN }),
+      })
+    : undefined;
   const configuredProxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
   if (
     configuredProxyScheme !== undefined &&
@@ -239,6 +286,9 @@ export function parseSchedulerProcessEnvironment(
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
     databaseRuntimeRole: configuredRuntimeRole,
     sandbox: Object.freeze({
+      defaultProviderKey,
+      enabledProviderKeys,
+      ...(e2b === undefined ? {} : { e2b }),
       apiUrl: sandboxApiUrl,
       ...(parsed.values.CUBESANDBOX_API_KEY === undefined
         ? {}
@@ -291,25 +341,44 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
     try {
       // 角色身份和 RLS 绕过属性必须在 cleanup loop 产生任何远端副作用前证明安全。
       await probePostgres(pool, configuration.databaseRuntimeRole);
-      const gateway = new CubeSandboxGateway({
-        apiUrl: configuration.sandbox.apiUrl,
-        apiKey: configuration.sandbox.apiKey ?? null,
-        ...(configuration.sandbox.proxyNodeIp === undefined
-          ? {}
-          : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
-        ...(configuration.sandbox.proxyPort === undefined
-          ? {}
-          : { proxyPort: configuration.sandbox.proxyPort }),
-        ...(configuration.sandbox.proxyScheme === undefined
-          ? {}
-          : { proxyScheme: configuration.sandbox.proxyScheme }),
-        defaultOperationTimeoutMs: configuration.threadSandbox.lifecycleTimeoutMs,
-      });
-      // Cube 控制面凭据/端点必须在 cleanup loop 产生副作用前证明可用。
-      await gateway.probe();
+      const gateways: RuntimeSandboxGateway[] = [];
+      if (configuration.sandbox.enabledProviderKeys.includes("cube")) {
+        gateways.push(
+          new CubeSandboxGateway({
+            apiUrl: configuration.sandbox.apiUrl,
+            apiKey: configuration.sandbox.apiKey ?? null,
+            ...(configuration.sandbox.proxyNodeIp === undefined
+              ? {}
+              : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
+            ...(configuration.sandbox.proxyPort === undefined
+              ? {}
+              : { proxyPort: configuration.sandbox.proxyPort }),
+            ...(configuration.sandbox.proxyScheme === undefined
+              ? {}
+              : { proxyScheme: configuration.sandbox.proxyScheme }),
+            defaultOperationTimeoutMs: configuration.threadSandbox.lifecycleTimeoutMs,
+          }),
+        );
+      }
+      if (configuration.sandbox.enabledProviderKeys.includes("e2b")) {
+        const e2b = configuration.sandbox.e2b;
+        if (e2b === undefined) throw new TypeError("E2B Provider 配置缺失");
+        gateways.push(
+          new E2BSandboxGateway({
+            apiKey: e2b.apiKey,
+            ...(e2b.domain === undefined ? {} : { domain: e2b.domain }),
+            defaultOperationTimeoutMs: configuration.threadSandbox.lifecycleTimeoutMs,
+          }),
+        );
+      }
+      const providers = new SandboxProviderRegistry(
+        configuration.sandbox.defaultProviderKey,
+        gateways,
+      );
+      await providers.probe();
       const consumer = new SandboxCleanupConsumer(
         new PgSandboxCleanupConsumerStore(pool),
-        new CubeSandboxCleanupResolver(gateway),
+        new SandboxCleanupRouterResolver(providers),
         configuration.cleanup.workerId,
         configuration.cleanup.leaseMs,
       );
@@ -325,8 +394,8 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
             configuration.threadSandbox.pausedRetentionSeconds,
             configuration.threadSandbox.retentionSchedulerEnabled,
           ),
-          new CubeThreadSandboxLifecycleResolver(
-            gateway,
+          new ThreadSandboxLifecycleRouterResolver(
+            providers,
             configuration.threadSandbox.lifecycleTimeoutMs,
           ),
           configuration.cleanup.workerId,
@@ -376,7 +445,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
             name: "postgres",
             probe: () => probePostgres(pool, configuration.databaseRuntimeRole),
           }),
-          Object.freeze({ name: "cubesandbox", probe: () => gateway.probe() }),
+          Object.freeze({ name: "sandbox-providers", probe: () => providers.probe() }),
         ]),
       });
       return assembly;

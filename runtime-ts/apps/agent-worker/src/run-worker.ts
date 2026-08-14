@@ -2415,6 +2415,7 @@ function cleanupOutbox(
     armed: true,
     payload: {
       registryId: sandbox.registryId,
+      providerKey: sandbox.providerKey,
       providerSandboxId: sandbox.providerSandboxId,
     },
   } as const;
@@ -2472,6 +2473,7 @@ function cleanupUnknownOutbox(
     armed: true,
     payload: {
       registryId: sandbox.registryId,
+      providerKey: sandbox.providerKey,
       providerSandboxId: sandbox.providerSandboxId,
       disposition,
       uncertainEvent: event,

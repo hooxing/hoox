@@ -26,6 +26,7 @@ try {
   assertSettled(
     await resolver.settle({
       registryId: "smoke-pause",
+      providerKey: "cube",
       providerSandboxId: id,
       disposition: "pause",
     }),
@@ -44,6 +45,7 @@ try {
   assertSettled(
     await resolver.settle({
       registryId: "smoke-close",
+      providerKey: "cube",
       providerSandboxId: id,
       disposition: "close",
     }),

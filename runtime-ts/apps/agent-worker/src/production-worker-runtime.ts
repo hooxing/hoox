@@ -23,7 +23,14 @@ import type {
 import {
   type CubeGatewayOptions,
   CubeSandboxGateway,
+  type E2BGatewayOptions,
+  E2BSandboxGateway,
+  type OperationControl,
+  type RuntimeSandboxGateway,
+  type SandboxProviderKey,
   SandboxRuntimeError,
+  type SandboxWorkspaceAdapterOptions,
+  type SandboxWorkspacePort,
   type TenantResourceVolumePort,
   type TrustedSandboxSessionCapability,
   type UncertainLifecycleEvent,
@@ -107,11 +114,10 @@ if [ -n "$workspace_entry" ]; then exit 73; fi`,
   if (result.exitCode !== 0) throw new Error("WORKSPACE_REVISION_PUBLICATION_REQUIRED");
 }
 
-/** CubeSandbox 的生产 Session registry；PG 包装器会在返回 Worker 前提交 registry 事实。 */
-export class CubeSandboxSessionRegistry
+/** Provider 无关的生产 Session registry；PG 包装器会在返回 Worker 前提交 registry 事实。 */
+export class ProviderSandboxSessionRegistry
   implements SandboxSessionRegistryPort, OrphanSandboxCleanupPort, ThreadSandboxProviderPort
 {
-  readonly gateway: CubeSandboxGateway;
   private uncertainCreate: UncertainLifecycleEvent | undefined;
   /**
    * Workspace capability 不只绑定对象身份：必须绑定 acquire 时已经由 Run fence 审核过的完整
@@ -120,11 +126,12 @@ export class CubeSandboxSessionRegistry
   private readonly workspaceBindings = new WeakMap<object, WorkspaceCapabilityBinding>();
 
   constructor(
-    options: CubeGatewayOptions,
+    readonly gateway: RuntimeSandboxGateway,
     private readonly templateId: string,
     private readonly ttlSeconds = 120,
     private readonly lifecycleTimeoutMs = 90_000,
     private readonly resourceVolume?: TenantResourceVolumePort,
+    private readonly uncertainEvents?: { current: UncertainLifecycleEvent | undefined },
   ) {
     if (
       !Number.isSafeInteger(lifecycleTimeoutMs) ||
@@ -133,14 +140,6 @@ export class CubeSandboxSessionRegistry
     ) {
       throw new TypeError("Sandbox lifecycle timeout 无效");
     }
-    this.gateway = new CubeSandboxGateway({
-      ...options,
-      maxCreateTtlSeconds: ttlSeconds,
-      timeout: ttlSeconds,
-      onUncertainLifecycle: (event) => {
-        this.uncertainCreate = event;
-      },
-    });
   }
 
   async probe(): Promise<void> {
@@ -176,6 +175,7 @@ export class CubeSandboxSessionRegistry
     readonly requiresResourceFilesystem: boolean;
   }): Promise<SandboxAcquireResult> {
     this.uncertainCreate = undefined;
+    if (this.uncertainEvents !== undefined) this.uncertainEvents.current = undefined;
     try {
       if (input.requiresResourceFilesystem && this.resourceVolume === undefined) {
         throw new Error("ResourceFS Volume provider 未配置");
@@ -202,7 +202,12 @@ export class CubeSandboxSessionRegistry
           outcome: "unknown",
           event:
             this.uncertainCreate ??
-            fallbackUncertainEvent(`create-${randomUUID()}`, this.ttlSeconds),
+            this.uncertainEvents?.current ??
+            fallbackUncertainEvent(
+              this.gateway.providerKey,
+              `create-${randomUUID()}`,
+              this.ttlSeconds,
+            ),
         };
       }
       return { outcome: "failed", code: "SANDBOX_FAILED" };
@@ -213,6 +218,7 @@ export class CubeSandboxSessionRegistry
     input: Parameters<ThreadSandboxProviderPort["create"]>[0],
   ): Promise<SandboxAcquireResult> {
     this.uncertainCreate = undefined;
+    if (this.uncertainEvents !== undefined) this.uncertainEvents.current = undefined;
     try {
       if (input.requiresResourceFilesystem && this.resourceVolume === undefined) {
         throw new Error("ResourceFS Volume provider 未配置");
@@ -242,7 +248,12 @@ export class CubeSandboxSessionRegistry
           outcome: "unknown",
           event:
             this.uncertainCreate ??
-            fallbackUncertainEvent(`create-${randomUUID()}`, this.ttlSeconds),
+            this.uncertainEvents?.current ??
+            fallbackUncertainEvent(
+              this.gateway.providerKey,
+              `create-${randomUUID()}`,
+              this.ttlSeconds,
+            ),
         };
       }
       return { outcome: "failed", code: "SANDBOX_FAILED" };
@@ -252,6 +263,9 @@ export class CubeSandboxSessionRegistry
   async connect(
     input: Parameters<ThreadSandboxProviderPort["connect"]>[0],
   ): Promise<SandboxAcquireResult | { readonly outcome: "not_found" }> {
+    if (input.providerKey !== this.gateway.providerKey) {
+      throw new Error(`Sandbox Provider 路由不匹配: ${input.providerKey}`);
+    }
     try {
       const sandbox = await this.gateway.connect(input.providerSandboxId, {
         signal: input.signal,
@@ -266,7 +280,14 @@ export class CubeSandboxSessionRegistry
         return { outcome: "not_found" };
       }
       return error instanceof SandboxRuntimeError && error.code === "TIMEOUT"
-        ? { outcome: "unknown", event: fallbackUncertainEvent(input.registryId, this.ttlSeconds) }
+        ? {
+            outcome: "unknown",
+            event: fallbackUncertainEvent(
+              this.gateway.providerKey,
+              input.registryId,
+              this.ttlSeconds,
+            ),
+          }
         : { outcome: "failed", code: "SANDBOX_FAILED" };
     }
   }
@@ -288,6 +309,7 @@ export class CubeSandboxSessionRegistry
       return {
         outcome: "unknown",
         event: fallbackUncertainEvent(
+          input.session.providerKey,
           input.cleanupIntentId,
           this.ttlSeconds,
           input.session.providerSandboxId,
@@ -314,6 +336,7 @@ export class CubeSandboxSessionRegistry
   ): SandboxSessionRef {
     const session: SandboxSessionRef = Object.freeze({
       registryId,
+      providerKey: this.gateway.providerKey,
       providerSandboxId: sandbox.id,
       mode,
       sandbox,
@@ -322,6 +345,7 @@ export class CubeSandboxSessionRegistry
       session,
       Object.freeze({
         registryId,
+        providerKey: this.gateway.providerKey,
         providerSandboxId: sandbox.id,
         scope: freezeExecutionScope(scope),
       }),
@@ -337,6 +361,7 @@ export class CubeSandboxSessionRegistry
     if (
       recorded === undefined ||
       recorded.registryId !== input.session.registryId ||
+      recorded.providerKey !== input.session.providerKey ||
       recorded.providerSandboxId !== input.session.providerSandboxId ||
       input.session.sandbox.id !== input.session.providerSandboxId ||
       !sameExecutionScope(recorded.scope, input.scope)
@@ -361,8 +386,140 @@ export class CubeSandboxSessionRegistry
   }
 }
 
+export class CubeSandboxSessionRegistry extends ProviderSandboxSessionRegistry {
+  constructor(
+    options: CubeGatewayOptions,
+    templateId: string,
+    ttlSeconds = 120,
+    lifecycleTimeoutMs = 90_000,
+    resourceVolume?: TenantResourceVolumePort,
+  ) {
+    const uncertainEvents: { current: UncertainLifecycleEvent | undefined } = {
+      current: undefined,
+    };
+    const gateway = new CubeSandboxGateway({
+      ...options,
+      maxCreateTtlSeconds: ttlSeconds,
+      timeout: ttlSeconds,
+      onUncertainLifecycle: (event) => {
+        uncertainEvents.current = event;
+      },
+    });
+    super(gateway, templateId, ttlSeconds, lifecycleTimeoutMs, resourceVolume, uncertainEvents);
+  }
+}
+
+export class E2BSandboxSessionRegistry extends ProviderSandboxSessionRegistry {
+  constructor(
+    options: E2BGatewayOptions,
+    templateId: string,
+    ttlSeconds = 120,
+    lifecycleTimeoutMs = 90_000,
+  ) {
+    const uncertainEvents: { current: UncertainLifecycleEvent | undefined } = {
+      current: undefined,
+    };
+    const gateway = new E2BSandboxGateway({
+      ...options,
+      maxCreateTtlSeconds: ttlSeconds,
+      connectTtlSeconds: ttlSeconds,
+      onUncertainLifecycle: (event) => {
+        uncertainEvents.current = event;
+      },
+    });
+    // E2B 当前没有可证明只读且不暴露 Tenant 凭据的 ResourceFS 挂载，required 请求必须失败关闭。
+    super(gateway, templateId, ttlSeconds, lifecycleTimeoutMs, undefined, uncertainEvents);
+  }
+}
+/** 部署级 Session Router；创建走默认 Provider，恢复与清理严格使用持久化 providerKey。 */
+export class SandboxSessionRegistryRouter
+  implements SandboxSessionRegistryPort, OrphanSandboxCleanupPort, ThreadSandboxProviderPort
+{
+  private readonly registries: ReadonlyMap<SandboxProviderKey, ProviderSandboxSessionRegistry>;
+  private readonly workspaceOwners = new WeakMap<object, ProviderSandboxSessionRegistry>();
+
+  constructor(
+    readonly defaultProviderKey: SandboxProviderKey,
+    registries: readonly ProviderSandboxSessionRegistry[],
+  ) {
+    const indexed = new Map<SandboxProviderKey, ProviderSandboxSessionRegistry>();
+    for (const registry of registries) {
+      if (indexed.has(registry.gateway.providerKey))
+        throw new TypeError("Sandbox Provider registry 重复");
+      indexed.set(registry.gateway.providerKey, registry);
+    }
+    if (!indexed.has(defaultProviderKey)) throw new TypeError("默认 Sandbox Provider 未启用");
+    this.registries = indexed;
+  }
+
+  private require(providerKey: SandboxProviderKey): ProviderSandboxSessionRegistry {
+    const registry = this.registries.get(providerKey);
+    if (registry === undefined) throw new Error(`Sandbox Provider 未启用: ${providerKey}`);
+    return registry;
+  }
+
+  probe(): Promise<void> {
+    return Promise.all([...this.registries.values()].map((registry) => registry.probe())).then(
+      () => undefined,
+    );
+  }
+
+  probeExecution(): Promise<void> {
+    return this.require(this.defaultProviderKey).probeExecution();
+  }
+
+  acquire(
+    input: Parameters<SandboxSessionRegistryPort["acquire"]>[0],
+  ): Promise<SandboxAcquireResult> {
+    return this.require(this.defaultProviderKey).acquire(input);
+  }
+
+  create(input: Parameters<ThreadSandboxProviderPort["create"]>[0]): Promise<SandboxAcquireResult> {
+    return this.require(this.defaultProviderKey).create(input);
+  }
+
+  connect(
+    input: Parameters<ThreadSandboxProviderPort["connect"]>[0],
+  ): Promise<SandboxAcquireResult | { readonly outcome: "not_found" }> {
+    return this.require(input.providerKey).connect(input);
+  }
+
+  settle(
+    input: Parameters<SandboxSessionRegistryPort["settle"]>[0],
+  ): Promise<SandboxSettlementResult> {
+    return this.require(input.session.providerKey).settle(input);
+  }
+
+  closeOrphan(
+    input: Parameters<OrphanSandboxCleanupPort["closeOrphan"]>[0],
+  ): Promise<SandboxSettlementResult> {
+    return this.require(input.session.providerKey).closeOrphan(input);
+  }
+
+  workspaceCapability(input: {
+    readonly scope: ExecutionScope;
+    readonly session: SandboxSessionRef;
+  }): TrustedSandboxSessionCapability {
+    const registry = this.require(input.session.providerKey);
+    const capability = registry.workspaceCapability(input);
+    this.workspaceOwners.set(capability, registry);
+    return capability;
+  }
+
+  connectWorkspace(
+    capability: TrustedSandboxSessionCapability,
+    options: SandboxWorkspaceAdapterOptions,
+    control?: OperationControl,
+  ): Promise<SandboxWorkspacePort> {
+    const registry = this.workspaceOwners.get(capability);
+    if (registry === undefined) throw new Error("未授予 Sandbox Workspace capability");
+    return registry.gateway.connectWorkspace(capability, options, control);
+  }
+}
+
 interface WorkspaceCapabilityBinding {
   readonly registryId: string;
+  readonly providerKey: SandboxSessionRef["providerKey"];
   readonly providerSandboxId: string;
   readonly scope: ExecutionScope;
 }
@@ -390,11 +547,13 @@ function sameExecutionScope(left: ExecutionScope, right: ExecutionScope): boolea
 }
 
 function fallbackUncertainEvent(
+  providerKey: UncertainLifecycleEvent["providerKey"],
   requestId: string,
   actualTtlSeconds: number,
   sandboxId?: string,
 ): UncertainLifecycleEvent {
   return {
+    providerKey,
     kind: "sandbox_create_outcome_unknown",
     stage: sandboxId === undefined ? "create_response" : "cleanup_after_create",
     requestId,

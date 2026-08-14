@@ -72,7 +72,12 @@ import {
   urlEnvironmentField,
 } from "@cube-runtime/process-runtime";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
-import { CubeTenantResourceVolume, resolveCubeProxyRouting } from "@cube-runtime/sandbox";
+import {
+  CubeTenantResourceVolume,
+  type SandboxProviderKey,
+  type TenantResourceVolumePort,
+  resolveCubeProxyRouting,
+} from "@cube-runtime/sandbox";
 import { SkillRuntimeService } from "@cube-runtime/skill";
 import { DeliverFileToolRouterFactory } from "@cube-runtime/tool-router";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
@@ -85,7 +90,9 @@ import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
   DatabaseRunCancellation,
+  E2BSandboxSessionRegistry,
   ProcessShutdown,
+  SandboxSessionRegistryRouter,
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
 import {
@@ -124,6 +131,11 @@ const workerEnvironmentSchema = Object.freeze({
   S3_ACCESS_KEY_ID: stringEnvironmentField({ secret: true, maxLength: 1_024 }),
   S3_SECRET_ACCESS_KEY: stringEnvironmentField({ secret: true, maxLength: 4_096 }),
   S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
+  SANDBOX_DEFAULT_PROVIDER: stringEnvironmentField({ maxLength: 16, requiredIn: [] }),
+  SANDBOX_ENABLED_PROVIDERS: stringEnvironmentField({ maxLength: 64, requiredIn: [] }),
+  E2B_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
+  E2B_TEMPLATE_ID: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
+  E2B_DOMAIN: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
   CUBESANDBOX_API_URL: urlEnvironmentField(),
   CUBESANDBOX_TEMPLATE_ID: stringEnvironmentField({ maxLength: 255 }),
   CUBESANDBOX_API_KEY: stringEnvironmentField({
@@ -253,6 +265,9 @@ export interface WorkerProcessConfiguration {
     forcePathStyle: boolean;
   }>;
   readonly sandbox: Readonly<{
+    defaultProviderKey: SandboxProviderKey;
+    enabledProviderKeys: readonly SandboxProviderKey[];
+    e2b?: Readonly<{ apiKey: string; templateId: string; domain?: string }>;
     apiUrl: string;
     templateId: string;
     apiKey?: string;
@@ -313,6 +328,24 @@ export interface WorkerProcessConfiguration {
   readonly shutdownTimeoutMilliseconds: number;
 }
 
+function parseSandboxProviderKey(value: string): SandboxProviderKey {
+  if (value === "cube" || value === "e2b") return value;
+  throw new TypeError("SANDBOX_DEFAULT_PROVIDER 只能是 cube 或 e2b");
+}
+
+function parseEnabledSandboxProviders(value: string): readonly SandboxProviderKey[] {
+  const keys = value.split(",").map((item) => parseSandboxProviderKey(item.trim()));
+  if (keys.length === 0 || new Set(keys).size !== keys.length) {
+    throw new TypeError("SANDBOX_ENABLED_PROVIDERS 必须是非空且不重复的 Provider 列表");
+  }
+  return Object.freeze(keys);
+}
+
+function requireOptionalEnvironment(value: string | undefined, name: string): string {
+  if (value === undefined) throw new TypeError(`${name} 在启用 E2B Provider 时必填`);
+  return value;
+}
+
 export function selectWorkerProcessEnvironment(
   source: NodeJS.ProcessEnv,
 ): Readonly<Record<string, string | undefined>> {
@@ -329,6 +362,22 @@ export function parseWorkerProcessEnvironment(
   if (parsed.runtimeEnvironment === "production") {
     assertProductionHasNoDevelopmentIdentity(source);
   }
+  const defaultProviderKey = parseSandboxProviderKey(
+    parsed.values.SANDBOX_DEFAULT_PROVIDER ?? "cube",
+  );
+  const enabledProviderKeys = parseEnabledSandboxProviders(
+    parsed.values.SANDBOX_ENABLED_PROVIDERS ?? "cube",
+  );
+  if (!enabledProviderKeys.includes(defaultProviderKey)) {
+    throw new TypeError("SANDBOX_DEFAULT_PROVIDER 必须包含在 SANDBOX_ENABLED_PROVIDERS 中");
+  }
+  const e2b = enabledProviderKeys.includes("e2b")
+    ? Object.freeze({
+        apiKey: requireOptionalEnvironment(parsed.values.E2B_API_KEY, "E2B_API_KEY"),
+        templateId: requireOptionalEnvironment(parsed.values.E2B_TEMPLATE_ID, "E2B_TEMPLATE_ID"),
+        ...(parsed.values.E2B_DOMAIN === undefined ? {} : { domain: parsed.values.E2B_DOMAIN }),
+      })
+    : undefined;
   const proxyScheme = parsed.values.CUBESANDBOX_PROXY_SCHEME;
   const configuredDatabaseUrl = readRequiredEnvironmentValue(parsed, "DATABASE_URL");
   const configuredWorkerCoordinatorUrl = readRequiredEnvironmentValue(
@@ -488,6 +537,9 @@ export function parseWorkerProcessEnvironment(
       forcePathStyle: readRequiredEnvironmentValue(parsed, "S3_FORCE_PATH_STYLE"),
     }),
     sandbox: Object.freeze({
+      defaultProviderKey,
+      enabledProviderKeys,
+      ...(e2b === undefined ? {} : { e2b }),
       apiUrl: sandboxApiUrl,
       templateId: readRequiredEnvironmentValue(parsed, "CUBESANDBOX_TEMPLATE_ID"),
       ...(parsed.values.CUBESANDBOX_API_KEY === undefined
@@ -810,26 +862,7 @@ async function assembleWorkerRuntime(
       driver: configuration.sandbox.resourceVolumeDriver,
       requestTimeoutMs: 5_000,
     });
-    const upstreamSandboxes = new CubeSandboxSessionRegistry(
-      {
-        apiUrl: configuration.sandbox.apiUrl,
-        apiKey: configuration.sandbox.apiKey ?? null,
-        ...(configuration.sandbox.proxyNodeIp === undefined
-          ? {}
-          : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
-        ...(configuration.sandbox.proxyPort === undefined
-          ? {}
-          : { proxyPort: configuration.sandbox.proxyPort }),
-        ...(configuration.sandbox.proxyScheme === undefined
-          ? {}
-          : { proxyScheme: configuration.sandbox.proxyScheme }),
-        defaultOperationTimeoutMs: 5_000,
-      },
-      configuration.sandbox.templateId,
-      configuration.threadSandbox.sessionTtlSeconds,
-      configuration.threadSandbox.lifecycleTimeoutMs,
-      resourceVolume,
-    );
+    const upstreamSandboxes = createConfiguredSandboxRouter(configuration, resourceVolume);
     const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
     const threadSandboxes = new PgThreadSandboxSessionLifecycle(
       pool,
@@ -866,7 +899,7 @@ async function assembleWorkerRuntime(
       ),
       candidates: new PgWorkspaceCandidateHandoff(pool, workspacePolicy),
       openSandboxWorkspace: async (input) =>
-        upstreamSandboxes.gateway.connectWorkspace(
+        upstreamSandboxes.connectWorkspace(
           upstreamSandboxes.workspaceCapability({
             scope: input.executionScope,
             session: input.session,
@@ -894,7 +927,7 @@ async function assembleWorkerRuntime(
     const deliverFileTools = new DeliverFileToolRouterFactory({
       source: new SandboxDeliverFileSource(
         async ({ binding, signal }) =>
-          upstreamSandboxes.gateway.connectWorkspace(
+          upstreamSandboxes.connectWorkspace(
             upstreamSandboxes.workspaceCapability({
               scope: binding.scope,
               session: binding.sandbox,
@@ -1141,6 +1174,53 @@ async function assembleWorkerRuntime(
   }
 }
 
+function createConfiguredSandboxRouter(
+  configuration: WorkerProcessConfiguration,
+  resourceVolume?: TenantResourceVolumePort,
+): SandboxSessionRegistryRouter {
+  const registries = [];
+  if (configuration.sandbox.enabledProviderKeys.includes("cube")) {
+    registries.push(
+      new CubeSandboxSessionRegistry(
+        {
+          apiUrl: configuration.sandbox.apiUrl,
+          apiKey: configuration.sandbox.apiKey ?? null,
+          ...(configuration.sandbox.proxyNodeIp === undefined
+            ? {}
+            : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
+          ...(configuration.sandbox.proxyPort === undefined
+            ? {}
+            : { proxyPort: configuration.sandbox.proxyPort }),
+          ...(configuration.sandbox.proxyScheme === undefined
+            ? {}
+            : { proxyScheme: configuration.sandbox.proxyScheme }),
+          defaultOperationTimeoutMs: 5_000,
+        },
+        configuration.sandbox.templateId,
+        configuration.threadSandbox.sessionTtlSeconds,
+        configuration.threadSandbox.lifecycleTimeoutMs,
+        resourceVolume,
+      ),
+    );
+  }
+  if (configuration.sandbox.enabledProviderKeys.includes("e2b")) {
+    const e2b = configuration.sandbox.e2b;
+    if (e2b === undefined) throw new TypeError("E2B Provider 配置缺失");
+    registries.push(
+      new E2BSandboxSessionRegistry(
+        {
+          apiKey: e2b.apiKey,
+          ...(e2b.domain === undefined ? {} : { domain: e2b.domain }),
+        },
+        e2b.templateId,
+        configuration.threadSandbox.sessionTtlSeconds,
+        configuration.threadSandbox.lifecycleTimeoutMs,
+      ),
+    );
+  }
+  return new SandboxSessionRegistryRouter(configuration.sandbox.defaultProviderKey, registries);
+}
+
 /**
  * 开发预检只能读取依赖就绪状态；绝不能复用 assembler，因为后者会启动 polling loop，可能领取
  * 尚在队列中的真实 Run。这里不构造 RunWorker、Dispatch Outbox 或 Sandbox create 调用。
@@ -1185,24 +1265,8 @@ export async function probeDevelopmentWorkerDependencies(
       // Readiness 必须使用与真实 Worker 相同的绝对读取边界，避免预检成功、装配失败。
       maxBlobSizeBytes: WORKER_MAX_BLOB_SIZE_BYTES,
     } as const;
-    const sandbox = new CubeSandboxSessionRegistry(
-      {
-        apiUrl: configuration.sandbox.apiUrl,
-        apiKey: configuration.sandbox.apiKey ?? null,
-        ...(configuration.sandbox.proxyNodeIp === undefined
-          ? {}
-          : { proxyNodeIp: configuration.sandbox.proxyNodeIp }),
-        ...(configuration.sandbox.proxyPort === undefined
-          ? {}
-          : { proxyPort: configuration.sandbox.proxyPort }),
-        ...(configuration.sandbox.proxyScheme === undefined
-          ? {}
-          : { proxyScheme: configuration.sandbox.proxyScheme }),
-        defaultOperationTimeoutMs: 5_000,
-      },
-      configuration.sandbox.templateId,
-      undefined,
-      undefined,
+    const sandbox = createConfiguredSandboxRouter(
+      configuration,
       new CubeTenantResourceVolume({
         apiUrl: configuration.sandbox.apiUrl,
         apiKey: configuration.sandbox.apiKey ?? null,

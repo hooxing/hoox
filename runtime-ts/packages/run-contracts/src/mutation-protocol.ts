@@ -49,6 +49,7 @@ export function sandboxCleanupIdentityDigest(
 ): Sha256Digest {
   return digest({
     registryId: outbox.payload.registryId,
+    providerKey: outbox.payload.providerKey,
     providerSandboxId: outbox.payload.providerSandboxId,
   });
 }

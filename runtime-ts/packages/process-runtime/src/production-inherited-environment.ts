@@ -30,7 +30,6 @@ export function assertProductionInheritedEnvironment(
       return (
         forbiddenProductionInheritedEnvironmentKeys.has(normalizedKey) ||
         normalizedKey.startsWith("CUBE_") ||
-        normalizedKey === "E2B_API_KEY" ||
         (normalizedKey.startsWith("NODE_") &&
           !allowedProductionNodeEnvironmentKeys.has(normalizedKey))
       );

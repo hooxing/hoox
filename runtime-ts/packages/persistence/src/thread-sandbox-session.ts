@@ -10,12 +10,14 @@ import type {
   ThreadContinuityMetricsPort,
 } from "@cube-runtime/run-contracts";
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+import type { SandboxProviderKey } from "@cube-runtime/sandbox";
 import type { Pool, PoolClient } from "pg";
 import { withRetriedSerializableTenantTransaction, withTenantTransaction } from "./postgres.js";
 
 interface SessionRow {
   readonly session_id: string;
   readonly registry_id: string;
+  readonly provider_key: SandboxProviderKey;
   readonly provider_sandbox_id: string;
   readonly generation: string;
   readonly state: "running" | "pausing" | "paused" | "resuming";
@@ -271,6 +273,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
         const connected = await this.provider.connect({
           scope: input.scope,
           registryId: prepared.row.registry_id,
+          providerKey: prepared.row.provider_key,
           providerSandboxId: prepared.row.provider_sandbox_id,
           signal: input.signal,
         });
@@ -322,6 +325,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
       const connected = await this.provider.connect({
         scope: input.scope,
         registryId: prepared.row.registry_id,
+        providerKey: prepared.row.provider_key,
         providerSandboxId: prepared.row.provider_sandbox_id,
         signal: input.signal,
       });
@@ -593,8 +597,8 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           await client.query(
             `INSERT INTO sandbox_lifecycle_effects(
                tenant_id,effect_id,operation_id,request_digest,session_id,generation,effect_kind,
-               state,run_id,attempt_id,provider_sandbox_id,expected_session_state
-             ) VALUES ($1,$2,$3,$4,$5,$6,'terminate','pending',$7,$8,$9,'running')`,
+               state,run_id,attempt_id,provider_key,provider_sandbox_id,expected_session_state
+             ) VALUES ($1,$2,$3,$4,$5,$6,'terminate','pending',$7,$8,$9,$10,'running')`,
             [
               input.scope.tenantId,
               effectId,
@@ -604,6 +608,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
               input.lease.generation,
               input.scope.runId,
               input.attemptId,
+              input.session.providerKey,
               input.session.providerSandboxId,
             ],
           );
@@ -652,7 +657,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
       return { kind: "lease_conflict" };
     }
     const result = await client.query<SessionRow>(
-      `SELECT session_id,registry_id,provider_sandbox_id,generation::text,state,
+      `SELECT session_id,registry_id,provider_key,provider_sandbox_id,generation::text,state,
               materialized_revision_id,materialization_attested,resource_filesystem_mounted,paused_at,
               retention_expires_at,updated_at
          FROM thread_sandbox_sessions
@@ -723,6 +728,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
         Number(row.generation),
         input.scope.runId,
         input.attemptId,
+        row.provider_key,
         row.provider_sandbox_id,
         `sandbox-effect-claim-${randomUUID()}`,
         input.owner,
@@ -833,7 +839,12 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     });
     if (created.outcome !== "ready") {
       await (created.outcome === "unknown"
-        ? this.markCreateTerminal(input.scope.tenantId, effectId, "unknown")
+        ? this.markCreateTerminal(
+            input.scope.tenantId,
+            effectId,
+            "unknown",
+            created.event.providerKey,
+          )
         : this.markCreateTerminal(input.scope.tenantId, effectId, "failed_not_applied")
       ).catch(() => undefined);
       return created.outcome === "unknown"
@@ -850,15 +861,16 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           }
           await client.query(
             `INSERT INTO thread_sandbox_sessions(
-               tenant_id,session_id,thread_id,workspace_id,registry_id,provider_sandbox_id,
+               tenant_id,session_id,thread_id,workspace_id,registry_id,provider_key,provider_sandbox_id,
                generation,state,materialization_attested,resource_filesystem_mounted
-             ) VALUES ($1,$2,$3,$4,$5,$6,$7,'running',false,$8)`,
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'running',false,$9)`,
             [
               input.scope.tenantId,
               sessionId,
               input.scope.threadId,
               input.scope.workspaceId,
               registryId,
+              created.session.providerKey,
               created.session.providerSandboxId,
               generation,
               input.requiresResourceFilesystem,
@@ -867,13 +879,14 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           const lease = await insertLease(client, input, sessionId, generation, 1);
           const effect = await client.query(
             `UPDATE sandbox_lifecycle_effects
-                SET state='succeeded',provider_sandbox_id=$3,resulting_session_state='running',
-                    provider_receipt_digest=$4,claim_token=NULL,claimed_by=NULL,
+                SET state='succeeded',provider_key=$3,provider_sandbox_id=$4,resulting_session_state='running',
+                    provider_receipt_digest=$5,claim_token=NULL,claimed_by=NULL,
                     claim_expires_at=NULL,completed_at=clock_timestamp(),updated_at=clock_timestamp()
               WHERE tenant_id=$1 AND effect_id=$2 AND state='started'`,
             [
               input.scope.tenantId,
               effectId,
+              created.session.providerKey,
               created.session.providerSandboxId,
               digestCanonical({
                 outcome: "created",
@@ -978,6 +991,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
           prepared.row.session_id,
           Number(prepared.row.generation),
           scope.runId,
+          prepared.row.provider_key,
           prepared.row.provider_sandbox_id,
           prepared.row.state,
           digestCanonical({ outcome: "not_found" }),
@@ -1013,6 +1027,7 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
             prepared.row.session_id,
             Number(prepared.row.generation),
             scope.runId,
+            prepared.row.provider_key,
             prepared.row.provider_sandbox_id,
           ],
         );
@@ -1152,14 +1167,15 @@ export class PgThreadSandboxSessionLifecycle implements ThreadSandboxSessionLife
     tenantId: string,
     effectId: string,
     state: "failed_not_applied" | "unknown",
+    providerKey?: SandboxProviderKey,
   ): Promise<void> {
     await withTenantTransaction(this.pool, { tenantId }, (client) =>
       client.query(
         `UPDATE sandbox_lifecycle_effects
-            SET state=$3,claim_token=NULL,claimed_by=NULL,claim_expires_at=NULL,
+            SET state=$3,provider_key=COALESCE($4,provider_key),claim_token=NULL,claimed_by=NULL,claim_expires_at=NULL,
                 completed_at=clock_timestamp(),updated_at=clock_timestamp()
           WHERE tenant_id=$1 AND effect_id=$2 AND state='started'`,
-        [tenantId, effectId, state],
+        [tenantId, effectId, state, providerKey ?? null],
       ),
     );
   }

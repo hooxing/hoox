@@ -671,6 +671,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       outcome: "ready",
       session: {
         registryId: "thread-registry-reused",
+        providerKey: "cube" as const,
         providerSandboxId: h.threadSandboxes.handle.id,
         mode: "connected",
         sandbox: h.threadSandboxes.handle,
@@ -708,6 +709,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       outcome: "ready",
       session: {
         registryId: "thread-registry-reused-probe",
+        providerKey: "cube" as const,
         providerSandboxId: h.threadSandboxes.handle.id,
         mode: "connected",
         sandbox: h.threadSandboxes.handle,
@@ -743,6 +745,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       outcome: "ready" as const,
       session: {
         registryId: "thread-registry-stale",
+        providerKey: "cube" as const,
         providerSandboxId: h.threadSandboxes.handle.id,
         mode: "connected" as const,
         sandbox: h.threadSandboxes.handle,
@@ -765,6 +768,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       outcome: "ready" as const,
       session: {
         registryId: "thread-registry-recovered",
+        providerKey: "cube" as const,
         providerSandboxId: recoveredHandle.id,
         mode: "created" as const,
         sandbox: recoveredHandle,
@@ -805,6 +809,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       outcome: "ready",
       session: {
         registryId: "thread-registry-probe-error",
+        providerKey: "cube" as const,
         providerSandboxId: h.threadSandboxes.handle.id,
         mode: "connected",
         sandbox: h.threadSandboxes.handle,
@@ -853,6 +858,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         outcome: "ready",
         session: {
           registryId: "thread-registry-stale-renew",
+          providerKey: "cube" as const,
           providerSandboxId: h.threadSandboxes.handle.id,
           mode: "connected",
           sandbox: h.threadSandboxes.handle,
@@ -866,6 +872,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         outcome: "ready",
         session: {
           registryId: "thread-registry-stale-renew-recovered",
+          providerKey: "cube" as const,
           providerSandboxId: recoveredHandle.id,
           mode: "created",
           sandbox: recoveredHandle,
@@ -940,6 +947,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         outcome: "ready",
         session: {
           registryId: "thread-registry-new-renew-stale",
+          providerKey: "cube" as const,
           providerSandboxId: h.threadSandboxes.handle.id,
           mode: "connected",
           sandbox: h.threadSandboxes.handle,
@@ -953,6 +961,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         outcome: "ready",
         session: {
           registryId: "thread-registry-new-renew-failed",
+          providerKey: "cube" as const,
           providerSandboxId: recoveredHandle.id,
           mode: "created",
           sandbox: recoveredHandle,
@@ -1009,6 +1018,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         outcome: "ready",
         session: {
           registryId: "thread-registry-stale-missing",
+          providerKey: "cube" as const,
           providerSandboxId: h.threadSandboxes.handle.id,
           mode: "connected",
           sandbox: h.threadSandboxes.handle,
@@ -1022,6 +1032,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         outcome: "ready",
         session: {
           registryId: "thread-registry-recovered-missing",
+          providerKey: "cube" as const,
           providerSandboxId: recoveredHandle.id,
           mode: "created",
           sandbox: recoveredHandle,
@@ -1447,6 +1458,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
           armed: true,
           payload: {
             registryId: "registry-test",
+            providerKey: "cube" as const,
             providerSandboxId: "worker-fake",
           },
         },
@@ -1462,7 +1474,11 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         idempotencyKey: "attempt-1/sandbox/registry-test/cleanup",
         state: "pending",
         armed: true,
-        payload: { registryId: "registry-test", providerSandboxId: "worker-fake" },
+        payload: {
+          registryId: "registry-test",
+          providerKey: "cube",
+          providerSandboxId: "worker-fake",
+        },
       }),
     );
     const final = record.mutations.get("attempt-1/final/succeeded");
@@ -2927,6 +2943,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       armed: true as const,
       payload: {
         registryId: "registry-test",
+        providerKey: "cube" as const,
         providerSandboxId: "sandbox-test",
       },
     };
@@ -3104,6 +3121,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
 
 function uncertain(stage: UncertainLifecycleEvent["stage"]): UncertainLifecycleEvent {
   return {
+    providerKey: "cube",
     kind: "sandbox_create_outcome_unknown",
     stage,
     requestId: "request-test",

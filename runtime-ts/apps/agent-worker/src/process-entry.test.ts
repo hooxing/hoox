@@ -85,6 +85,29 @@ describe("Agent Worker 进程入口", () => {
     expect(JSON.stringify(projected)).not.toContain("api-only-secret-canary");
   });
 
+  it("显式启用 E2B 时校验默认 Provider、API Key 与模板", () => {
+    const configuration = parseWorkerProcessEnvironment({
+      ...productionEnvironment(),
+      SANDBOX_DEFAULT_PROVIDER: "e2b",
+      SANDBOX_ENABLED_PROVIDERS: "cube,e2b",
+      E2B_API_KEY: "opaque-e2b-test-key",
+      E2B_TEMPLATE_ID: "base",
+    });
+    expect(configuration.sandbox).toMatchObject({
+      defaultProviderKey: "e2b",
+      enabledProviderKeys: ["cube", "e2b"],
+      e2b: { apiKey: "opaque-e2b-test-key", templateId: "base" },
+    });
+    expect(() =>
+      parseWorkerProcessEnvironment({
+        ...productionEnvironment(),
+        SANDBOX_DEFAULT_PROVIDER: "e2b",
+        SANDBOX_ENABLED_PROVIDERS: "cube,e2b",
+        E2B_TEMPLATE_ID: "base",
+      }),
+    ).toThrow("E2B_API_KEY");
+  });
+
   it("Thread Context flags 强制 read→shadow→write→serial，默认开启且阈值可配置", () => {
     expect(parseWorkerProcessEnvironment(productionEnvironment()).threadContext).toEqual({
       serialQueueV2Enabled: true,

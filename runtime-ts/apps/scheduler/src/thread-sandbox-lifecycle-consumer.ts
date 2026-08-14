@@ -4,7 +4,11 @@ import type {
   ThreadSandboxLifecycleResolution,
 } from "@cube-runtime/persistence";
 import { runId, tenantId, threadId } from "@cube-runtime/domain";
-import { SandboxRuntimeError, type SandboxGateway } from "@cube-runtime/sandbox";
+import {
+  type SandboxGateway,
+  type SandboxProviderRegistry,
+  SandboxRuntimeError,
+} from "@cube-runtime/sandbox";
 
 export interface ThreadSandboxLifecycleStore {
   claimNext(input: {
@@ -19,15 +23,16 @@ export interface ThreadSandboxLifecycleStore {
   ): Promise<boolean>;
 }
 
-export class CubeThreadSandboxLifecycleResolver {
+export class ThreadSandboxLifecycleRouterResolver {
   constructor(
-    private readonly gateway: SandboxGateway,
+    private readonly providers: Pick<SandboxProviderRegistry, "require">,
     private readonly timeoutMs: number,
   ) {}
 
   async execute(claim: ThreadSandboxLifecycleClaim): Promise<ThreadSandboxLifecycleResolution> {
     try {
-      const sandbox = await this.gateway.connect(claim.providerSandboxId, {
+      const gateway = this.providers.require(claim.providerKey);
+      const sandbox = await gateway.connect(claim.providerSandboxId, {
         timeoutMs: this.timeoutMs,
       });
       if (claim.effectKind === "pause") {
@@ -46,7 +51,8 @@ export class CubeThreadSandboxLifecycleResolver {
 
   async reconcile(claim: ThreadSandboxLifecycleClaim): Promise<ThreadSandboxLifecycleResolution> {
     try {
-      const state = await this.gateway.inspect(claim.providerSandboxId, {
+      const gateway = this.providers.require(claim.providerKey);
+      const state = await gateway.inspect(claim.providerSandboxId, {
         timeoutMs: this.timeoutMs,
       });
       if (state === "not_found") return "terminated";
@@ -64,12 +70,28 @@ export class CubeThreadSandboxLifecycleResolver {
   }
 }
 
+/** 兼容单 Cube 装配；生产多 Provider 路径使用 ThreadSandboxLifecycleRouterResolver。 */
+export class CubeThreadSandboxLifecycleResolver extends ThreadSandboxLifecycleRouterResolver {
+  constructor(gateway: SandboxGateway, timeoutMs: number) {
+    super(
+      {
+        require(providerKey) {
+          if (providerKey !== "cube")
+            throw new SandboxRuntimeError("INVALID_ARGUMENT", "Sandbox Provider 未启用");
+          return gateway as ReturnType<SandboxProviderRegistry["require"]>;
+        },
+      },
+      timeoutMs,
+    );
+  }
+}
+
 export class ThreadSandboxLifecycleConsumer {
   private stopping = false;
 
   constructor(
     private readonly store: ThreadSandboxLifecycleStore,
-    private readonly resolver: CubeThreadSandboxLifecycleResolver,
+    private readonly resolver: Pick<ThreadSandboxLifecycleRouterResolver, "execute" | "reconcile">,
     private readonly workerId: string,
     private readonly leaseMs: number,
     private readonly metrics?: Pick<PgThreadContinuityMetrics, "record">,

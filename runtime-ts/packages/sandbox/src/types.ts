@@ -1,3 +1,5 @@
+export type SandboxProviderKey = "cube" | "e2b";
+
 export interface OperationControl {
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -39,6 +41,7 @@ export interface SandboxHandle {
 }
 
 export interface SandboxGateway {
+  readonly providerKey: SandboxProviderKey;
   create(input: SandboxCreateInput, control?: OperationControl): Promise<SandboxHandle>;
   connect(id: string, control?: OperationControl): Promise<SandboxHandle>;
   inspect(

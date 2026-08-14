@@ -1,5 +1,5 @@
+import { CommandExitError, type SandboxInfo, type SandboxOpts } from "e2b";
 import { describe, expect, it, vi } from "vitest";
-import type { SandboxInfo, SandboxOpts } from "e2b";
 import { E2BSandboxGateway, type E2BSdkFacade, type E2BSdkSandbox } from "./e2b-gateway.js";
 import { SandboxRuntimeError } from "./errors.js";
 
@@ -99,6 +99,24 @@ describe("E2B Sandbox Provider 适配", () => {
     expect(sdkSandbox.kill).toHaveBeenCalledTimes(1);
   });
 
+  it("E2B SDK 把 HTTP 400 timeout 上限包装成 SandboxError 时仍归为参数错误", async () => {
+    const list = vi.fn(async () => []);
+    const gateway = new E2BSandboxGateway(
+      { apiKey: API_KEY },
+      fakeFacade({
+        create: async () => {
+          throw new Error("400: Timeout cannot be greater than 1 hours");
+        },
+        list,
+      }),
+    );
+
+    await expect(
+      gateway.create({ templateId: "agent-template", ttlSeconds: 43_800 }),
+    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    expect(list).not.toHaveBeenCalled();
+  });
+
   it("create 响应丢失时按 request metadata 对账并清理，避免双重创建", async () => {
     let requestId = "";
     const reconciled = fakeSandbox("reconciled-sandbox");
@@ -145,6 +163,28 @@ describe("E2B Sandbox Provider 适配", () => {
       actualTtlSeconds: 9,
     });
     expect(JSON.stringify(events)).not.toContain(API_KEY);
+  });
+
+  it("E2B 非零命令退出归一化为 CommandOutput 而不是基础设施异常", async () => {
+    const sdkSandbox = fakeSandbox();
+    sdkSandbox.commands.run = async () => {
+      throw new CommandExitError({
+        stdout: "partial-output",
+        stderr: "expected-error",
+        exitCode: 41,
+        error: "exit status 41",
+      });
+    };
+    const sandbox = await new E2BSandboxGateway(
+      { apiKey: API_KEY },
+      fakeFacade({ create: async () => sdkSandbox }),
+    ).create({ templateId: "agent-template" });
+
+    await expect(sandbox.command("exit 41")).resolves.toEqual({
+      stdout: "partial-output",
+      stderr: "expected-error",
+      exitCode: 41,
+    });
   });
 
   it("拒绝畸形 command 响应且不透出上游私有字段", async () => {

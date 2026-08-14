@@ -7,10 +7,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AgentWorkerPollingLoop,
   CubeSandboxSessionRegistry,
-  ProviderSandboxSessionRegistry,
   DatabaseRunCancellation,
+  E2BSandboxSessionRegistry,
   FailClosedWorkspaceRevisionVerifier,
   ProcessShutdown,
+  ProviderSandboxSessionRegistry,
 } from "./production-worker-runtime.js";
 
 function deferred<T>() {
@@ -826,7 +827,85 @@ describe("生产 Workspace revision 安全下限", () => {
     expect(command).toContain("workspace_entry=$(find -P /workspace");
     expect(command).not.toContain("| grep");
   });
-  it("E2B ResourceFS required 在远端 create 前失败关闭", async () => {
+  it("E2B 创建后先建立安全 /workspace 根目录再返回 Session", async () => {
+    const commands: string[] = [];
+    const command = vi.fn(async (value: string) => {
+      commands.push(value);
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+    const kill = vi.fn(async () => undefined);
+    const registry = new E2BSandboxSessionRegistry(
+      { apiKey: "opaque-e2b-test-key" },
+      "base",
+      3_600,
+      90_000,
+    );
+    vi.spyOn(registry.gateway, "create").mockResolvedValue({
+      id: "sandbox-e2b-workspace-root",
+      command,
+      runCode: async () => ({ stdout: [], stderr: [] }),
+      readFile: async () => "",
+      writeFile: async () => undefined,
+      pause: async () => undefined,
+      kill,
+    });
+
+    await expect(
+      registry.create({
+        scope: claim().scope as ExecutionScope,
+        registryId: "registry-e2b-workspace-root",
+        signal: new AbortController().signal,
+        requiresResourceFilesystem: false,
+      }),
+    ).resolves.toMatchObject({ outcome: "ready" });
+    expect(command).toHaveBeenCalledOnce();
+    expect(commands[0]).toContain('sudo install -d -o "$uid" -g "$gid" -m 0700 /workspace');
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("Sandbox 初始化失败且清理未知时保留 providerSandboxId 供恢复清理路由", async () => {
+    const sandbox = {
+      id: "sandbox-e2b-prepare-unknown",
+      command: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      runCode: async () => ({ stdout: [], stderr: [] }),
+      readFile: async () => "",
+      writeFile: async () => undefined,
+      pause: async () => undefined,
+      kill: async () => {
+        throw new Error("cleanup unavailable");
+      },
+    };
+    const registry = new ProviderSandboxSessionRegistry(
+      { providerKey: "e2b", create: async () => sandbox } as never,
+      "base",
+      3_600,
+      90_000,
+      undefined,
+      undefined,
+      {
+        initialize: async () => {
+          throw new Error("prepare failed");
+        },
+      },
+    );
+
+    await expect(
+      registry.acquire({
+        scope: claim().scope as ExecutionScope,
+        signal: new AbortController().signal,
+        requiresResourceFilesystem: false,
+      }),
+    ).resolves.toMatchObject({
+      outcome: "unknown",
+      event: {
+        providerKey: "e2b",
+        stage: "cleanup_after_create",
+        sandboxId: "sandbox-e2b-prepare-unknown",
+      },
+    });
+  });
+
+  it("E2B ResourceFS required 缺少受控物化器时仍在远端 create 前失败关闭", async () => {
     const create = vi.fn();
     const registry = new ProviderSandboxSessionRegistry(
       {
@@ -844,5 +923,35 @@ describe("生产 Workspace revision 安全下限", () => {
       }),
     ).resolves.toEqual({ outcome: "failed", code: "SANDBOX_FAILED" });
     expect(create).not.toHaveBeenCalled();
+  });
+
+  it("E2B ResourceFS required 在 create 后完成受控物化再返回 Session", async () => {
+    const sandbox = {
+      id: "sandbox-e2b-materialized",
+      command: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+      runCode: async () => ({ stdout: [], stderr: [] }),
+      readFile: async () => "",
+      writeFile: async () => undefined,
+      pause: async () => undefined,
+      kill: async () => undefined,
+    };
+    const create = vi.fn(async () => sandbox);
+    const materialize = vi.fn(async () => undefined);
+    const registry = new ProviderSandboxSessionRegistry(
+      { providerKey: "e2b", create } as never,
+      "base",
+      120,
+      90_000,
+      undefined,
+      { materialize },
+    );
+    const signal = new AbortController().signal;
+    const runScope = claim().scope as ExecutionScope;
+
+    await expect(
+      registry.acquire({ scope: runScope, signal, requiresResourceFilesystem: true }),
+    ).resolves.toMatchObject({ outcome: "ready" });
+    expect(create).toHaveBeenCalledOnce();
+    expect(materialize).toHaveBeenCalledWith({ scope: runScope, sandbox, signal });
   });
 });

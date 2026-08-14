@@ -36,6 +36,11 @@ export function mapE2BError(error: unknown, operation: string): SandboxRuntimeEr
     return new SandboxRuntimeError("UPSTREAM", `${operation} 被 E2B 限流`, error);
   }
   const message = error instanceof Error ? error.message : String(error);
+  // E2B SDK 2.x 会把部分 HTTP 400（例如账户 timeout 上限）包装成 SandboxError；
+  // 必须先按明确的 400 响应归为参数错误，不能因正文含 timeout 而误报远端结果未知。
+  if (/^(?:[^\d\r\n]*\s)?400\s*:/iu.test(message)) {
+    return new SandboxRuntimeError("INVALID_ARGUMENT", `${operation} 的参数无效`, error);
+  }
   if (/abort|cancel/iu.test(message)) {
     return new SandboxRuntimeError("CANCELLED", `${operation} 已取消`, error);
   }

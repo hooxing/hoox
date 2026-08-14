@@ -26,13 +26,14 @@ import {
   PgBackedSandboxSessionRegistry,
   PgBlobLifecycleRepository,
   PgExecutionPersistence,
+  PgMemoryIngestionStore,
   PgModelWireTraceRepository,
   PgPersonalizationSettingsRepository,
-  PgMemoryIngestionStore,
   PgRecoveryMetrics,
   PgResourceFilesystemCatalog,
   PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
+  PgSkillFilesystemCatalog,
   PgSkillRuntimeRepository,
   PgThreadContextCompactionRepository,
   PgThreadContextHistoryRepository,
@@ -74,9 +75,9 @@ import {
 import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
 import {
   CubeTenantResourceVolume,
+  resolveCubeProxyRouting,
   type SandboxProviderKey,
   type TenantResourceVolumePort,
-  resolveCubeProxyRouting,
 } from "@cube-runtime/sandbox";
 import { SkillRuntimeService } from "@cube-runtime/skill";
 import { DeliverFileToolRouterFactory } from "@cube-runtime/tool-router";
@@ -102,6 +103,7 @@ import {
 import { BlobPromptImageLoader } from "./prompt-image-loader.js";
 import { RunWorker } from "./run-worker.js";
 import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
+import { ManagedResourceFilesystemSnapshotMaterializer } from "./sandbox-resource-filesystem-materializer.js";
 import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
 
 /** Artifact 服务请求的 TTL 必须不超过同一 Worker BlobStore 的预签名策略上限。 */
@@ -136,6 +138,11 @@ const workerEnvironmentSchema = Object.freeze({
   E2B_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192, requiredIn: [] }),
   E2B_TEMPLATE_ID: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
   E2B_DOMAIN: stringEnvironmentField({ maxLength: 255, requiredIn: [] }),
+  E2B_SESSION_TTL_SECONDS: integerEnvironmentField({
+    minimum: 1,
+    maximum: 86_400,
+    requiredIn: [],
+  }),
   CUBESANDBOX_API_URL: urlEnvironmentField(),
   CUBESANDBOX_TEMPLATE_ID: stringEnvironmentField({ maxLength: 255 }),
   CUBESANDBOX_API_KEY: stringEnvironmentField({
@@ -267,7 +274,12 @@ export interface WorkerProcessConfiguration {
   readonly sandbox: Readonly<{
     defaultProviderKey: SandboxProviderKey;
     enabledProviderKeys: readonly SandboxProviderKey[];
-    e2b?: Readonly<{ apiKey: string; templateId: string; domain?: string }>;
+    e2b?: Readonly<{
+      apiKey: string;
+      templateId: string;
+      domain?: string;
+      sessionTtlSeconds: number;
+    }>;
     apiUrl: string;
     templateId: string;
     apiKey?: string;
@@ -375,6 +387,7 @@ export function parseWorkerProcessEnvironment(
     ? Object.freeze({
         apiKey: requireOptionalEnvironment(parsed.values.E2B_API_KEY, "E2B_API_KEY"),
         templateId: requireOptionalEnvironment(parsed.values.E2B_TEMPLATE_ID, "E2B_TEMPLATE_ID"),
+        sessionTtlSeconds: parsed.values.E2B_SESSION_TTL_SECONDS ?? 3_600,
         ...(parsed.values.E2B_DOMAIN === undefined ? {} : { domain: parsed.values.E2B_DOMAIN }),
       })
     : undefined;
@@ -794,10 +807,10 @@ async function assembleWorkerRuntime(
       maxBlobSizeBytes: WORKER_MAX_BLOB_SIZE_BYTES,
     } as const;
     const blobs = createS3BlobStore(s3Config, blobRepository);
-    const skillRuntime = new SkillRuntimeService(
-      new PgSkillRuntimeRepository(pool),
-      new BlobSkillContentStore(blobs),
-    );
+    const resourceFilesystem = new PgResourceFilesystemCatalog(pool);
+    const skillFilesystem = new PgSkillFilesystemCatalog(pool);
+    const skillContents = new BlobSkillContentStore(blobs);
+    const skillRuntime = new SkillRuntimeService(new PgSkillRuntimeRepository(pool), skillContents);
     const rolloutRepository = new PgRuntimeRolloutRepository(pool);
     const durableObservation = createPgDurableObservationSession({
       blobRepository,
@@ -862,7 +875,18 @@ async function assembleWorkerRuntime(
       driver: configuration.sandbox.resourceVolumeDriver,
       requestTimeoutMs: 5_000,
     });
-    const upstreamSandboxes = createConfiguredSandboxRouter(configuration, resourceVolume);
+    const resourceFilesystemMaterializer = new ManagedResourceFilesystemSnapshotMaterializer({
+      resources: resourceFilesystem,
+      history: resourceFilesystem,
+      blobs,
+      skills: skillFilesystem,
+      skillContents,
+    });
+    const upstreamSandboxes = createConfiguredSandboxRouter(
+      configuration,
+      resourceVolume,
+      resourceFilesystemMaterializer,
+    );
     const sandboxes = new PgBackedSandboxSessionRegistry(pool, upstreamSandboxes);
     const threadSandboxes = new PgThreadSandboxSessionLifecycle(
       pool,
@@ -1045,7 +1069,7 @@ async function assembleWorkerRuntime(
               additionalVisibleTokens,
             })
         : undefined,
-      new BlobPromptImageLoader(new PgResourceFilesystemCatalog(pool), blobs),
+      new BlobPromptImageLoader(resourceFilesystem, blobs),
       skillRuntime,
       modelContext,
     );
@@ -1177,6 +1201,7 @@ async function assembleWorkerRuntime(
 function createConfiguredSandboxRouter(
   configuration: WorkerProcessConfiguration,
   resourceVolume?: TenantResourceVolumePort,
+  resourceFilesystemMaterializer?: ManagedResourceFilesystemSnapshotMaterializer,
 ): SandboxSessionRegistryRouter {
   const registries = [];
   if (configuration.sandbox.enabledProviderKeys.includes("cube")) {
@@ -1213,8 +1238,9 @@ function createConfiguredSandboxRouter(
           ...(e2b.domain === undefined ? {} : { domain: e2b.domain }),
         },
         e2b.templateId,
-        configuration.threadSandbox.sessionTtlSeconds,
+        e2b.sessionTtlSeconds,
         configuration.threadSandbox.lifecycleTimeoutMs,
+        resourceFilesystemMaterializer,
       ),
     );
   }

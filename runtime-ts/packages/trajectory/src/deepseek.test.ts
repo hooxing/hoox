@@ -88,6 +88,9 @@ describe("projectInternalTrajectory", () => {
       outputTokens: 20,
       cacheReadTokens: 80,
       cacheWriteTokens: 5,
+      modelDurationMs: 30,
+      outputTokensPerSecond: 20 / 0.03,
+      cacheHitRate: 80 / 180,
       durationMs: 65,
     });
     expect(projection.records.map((record) => record.eventType)).toEqual([
@@ -155,7 +158,15 @@ describe("projectInternalTrajectory", () => {
       event(7, 11, "turn_end", { type: "turn_end" }),
     ]);
 
-    expect(projection.stats).toMatchObject({ events: 7, records: 1, calls: 1, failedCalls: 0 });
+    expect(projection.stats).toMatchObject({
+      events: 7,
+      records: 1,
+      calls: 1,
+      failedCalls: 0,
+      modelDurationMs: 0,
+      outputTokensPerSecond: null,
+      cacheHitRate: null,
+    });
     expect(projection.records).toHaveLength(1);
     expect(projection.records[0]).toMatchObject({
       eventType: "tool_execution",

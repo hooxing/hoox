@@ -12,6 +12,11 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import type {
+  InternalTrajectoryDiagnosticRecord,
+  InternalTrajectoryDiagnosticsPort,
+  InternalTrajectoryEventV1,
+} from "@cube-runtime/trajectory";
 import {
   assertModelWireTraceContext,
   type ModelWireTracePort,
@@ -123,6 +128,53 @@ export class ProjectRunEventMirror implements RunEventDiagnosticsPort {
   }
 }
 
+/**
+ * Pi 原始事件逐条不可变保存；正文已经由 trajectory 包转换为无截断、可逆的 JSON 快照。
+ * root 与 subagent 使用独立目录，避免各 Session 的局部 sequence 冲突。
+ */
+export class ProjectInternalTrajectoryMirror implements InternalTrajectoryDiagnosticsPort {
+  readonly #trustedBase: string;
+  readonly #rootSegments: readonly string[];
+
+  constructor(root = PROJECT_MODEL_WIRE_TRACE_ROOT, trustedBase = dirname(root)) {
+    if (!isAbsolute(root) || !isAbsolute(trustedBase))
+      throw new TypeError("内部轨迹本地镜像根目录必须是绝对路径");
+    const lexicalBase = resolve(trustedBase);
+    const lexicalRoot = resolve(root);
+    const rootRelative = relative(lexicalBase, lexicalRoot);
+    if (!isContainedRelative(rootRelative))
+      throw new TypeError("内部轨迹本地镜像根目录越出受信边界");
+    const segments = rootRelative.split(sep).filter((segment) => segment.length > 0);
+    if (segments.length === 0 || segments.some((segment) => segment === "." || segment === ".."))
+      throw new TypeError("内部轨迹本地镜像根目录无效");
+    this.#trustedBase = lexicalBase;
+    this.#rootSegments = Object.freeze(segments);
+  }
+
+  async persist(record: InternalTrajectoryDiagnosticRecord): Promise<void> {
+    assertModelWireTraceContext(record.context);
+    assertInternalTrajectoryEvent(record.event);
+    const agentSegments =
+      record.context.agentThreadId === undefined
+        ? []
+        : ["subagents", record.context.agentThreadId, record.context.agentTurnId as string];
+    const directory = await openMirrorDirectory(this.#trustedBase, [
+      ...this.#rootSegments,
+      record.context.runId,
+      record.context.attemptId,
+      ...agentSegments,
+    ]);
+    try {
+      const sequence = String(record.event.sequence).padStart(8, "0");
+      const filename = `trajectory-event-${sequence}.json`;
+      const body = new TextEncoder().encode(`${canonicalJson(record.event)}\n`);
+      await writeOnceAtomically(directory, filename, body);
+    } finally {
+      await directory.close().catch(() => undefined);
+    }
+  }
+}
+
 /** 本地镜像永远是 best-effort；只有权威端口失败才能进入既有 durable 诊断失败语义。 */
 class BestEffortMirroredModelWireTracePort implements ModelWireTracePort {
   constructor(
@@ -164,6 +216,15 @@ export function createDevelopmentProjectRunEventMirror(
   createMirror: () => RunEventDiagnosticsPort = () =>
     new ProjectRunEventMirror(PROJECT_MODEL_WIRE_TRACE_ROOT, PROJECT_ROOT),
 ): RunEventDiagnosticsPort | undefined {
+  return runtimeMode === "development" && enabled ? createMirror() : undefined;
+}
+
+export function createDevelopmentProjectInternalTrajectoryMirror(
+  runtimeMode: "development" | "production",
+  enabled: boolean,
+  createMirror: () => InternalTrajectoryDiagnosticsPort = () =>
+    new ProjectInternalTrajectoryMirror(PROJECT_MODEL_WIRE_TRACE_ROOT, PROJECT_ROOT),
+): InternalTrajectoryDiagnosticsPort | undefined {
   return runtimeMode === "development" && enabled ? createMirror() : undefined;
 }
 
@@ -393,6 +454,15 @@ function assertRunEvent(event: RuntimeEventV1): void {
     throw new TypeError("Run 事件本地镜像协议无效");
   if (typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload))
     throw new TypeError("Run 事件本地镜像正文无效");
+}
+
+function assertInternalTrajectoryEvent(event: InternalTrajectoryEventV1): void {
+  if (event.schemaVersion !== 1 || !Number.isSafeInteger(event.sequence) || event.sequence < 1)
+    throw new TypeError("内部轨迹本地镜像序号无效");
+  if (!Number.isFinite(Date.parse(event.occurredAt)) || event.monotonicOffsetMs < 0)
+    throw new TypeError("内部轨迹本地镜像时间无效");
+  if ((event.source !== "pi" && event.source !== "runtime") || event.type.trim().length === 0)
+    throw new TypeError("内部轨迹本地镜像类型无效");
 }
 
 function canonicalJson(value: unknown): string {

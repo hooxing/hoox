@@ -2,11 +2,17 @@ import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { RuntimeEventV1 } from "@cube-runtime/run-contracts";
-import { type ObservedRuntimeEvent, projectTrajectory } from "@cube-runtime/trajectory";
+import {
+  type InternalTrajectoryEventV1,
+  type ObservedRuntimeEvent,
+  projectInternalTrajectory,
+  projectTrajectory,
+} from "@cube-runtime/trajectory";
 import { trajectoryHtml } from "./html.js";
 
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/u;
 const runtimeEventPattern = /^runtime-event-(\d{8})-([a-z_]+)\.json$/u;
+const trajectoryEventPattern = /^trajectory-event-(\d{8})\.json$/u;
 const wireFilePattern =
   /^model-turn-(\d+)-transport-(\d+)-(request|response)-([a-z_]+)\.(json|sse|bin)$/u;
 const maximumTraceFileBytes = 4 * 1024 * 1024;
@@ -69,6 +75,24 @@ function isRuntimeEvent(value: unknown): value is RuntimeEventV1 {
     typeof record.payload === "object" &&
     record.payload !== null &&
     !Array.isArray(record.payload)
+  );
+}
+
+function isInternalTrajectoryEvent(value: unknown): value is InternalTrajectoryEventV1 {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Readonly<Record<string, unknown>>;
+  return (
+    record.schemaVersion === 1 &&
+    Number.isSafeInteger(record.sequence) &&
+    typeof record.occurredAt === "string" &&
+    Number.isFinite(Date.parse(record.occurredAt)) &&
+    typeof record.monotonicOffsetMs === "number" &&
+    Number.isFinite(record.monotonicOffsetMs) &&
+    record.monotonicOffsetMs >= 0 &&
+    (record.source === "pi" || record.source === "runtime") &&
+    typeof record.type === "string" &&
+    record.type.length > 0 &&
+    "event" in record
   );
 }
 
@@ -140,6 +164,7 @@ export async function discoverRuns(rootInput: string): Promise<readonly RunDirec
 async function readAttempt(attempt: AttemptDirectory) {
   const entries = await readdir(attempt.path, { withFileTypes: true });
   const events: ObservedRuntimeEvent[] = [];
+  const internalEvents: InternalTrajectoryEventV1[] = [];
   const warnings: string[] = [];
   const wireFiles: Array<{
     name: string;
@@ -153,6 +178,7 @@ async function readAttempt(attempt: AttemptDirectory) {
   for (const entry of entries) {
     if (!entry.isFile() || entry.isSymbolicLink()) continue;
     const runtimeMatch = runtimeEventPattern.exec(entry.name);
+    const trajectoryMatch = trajectoryEventPattern.exec(entry.name);
     const wireMatch = wireFilePattern.exec(entry.name);
     const path = join(attempt.path, entry.name);
     if (runtimeMatch !== null) {
@@ -164,6 +190,24 @@ async function readAttempt(attempt: AttemptDirectory) {
           continue;
         }
         events.push({ event: value, observedAt: metadata.mtime.toISOString() });
+      } catch {
+        warnings.push(`${entry.name}: 无法读取或解析`);
+      }
+      continue;
+    }
+    if (trajectoryMatch !== null) {
+      try {
+        const metadata = await stat(path);
+        if (metadata.size > 64 * 1024 * 1024) {
+          warnings.push(`${entry.name}: 轨迹事件超过 64 MiB 查看上限`);
+          continue;
+        }
+        const value: unknown = JSON.parse(await readFile(path, "utf8"));
+        if (!isInternalTrajectoryEvent(value)) {
+          warnings.push(`${entry.name}: 内部轨迹格式无效`);
+          continue;
+        }
+        internalEvents.push(value);
       } catch {
         warnings.push(`${entry.name}: 无法读取或解析`);
       }
@@ -183,6 +227,7 @@ async function readAttempt(attempt: AttemptDirectory) {
     }
   }
   events.sort((left, right) => left.event.sequence - right.event.sequence);
+  internalEvents.sort((left, right) => left.sequence - right.sequence);
   wireFiles.sort(
     (left, right) =>
       left.modelTurn - right.modelTurn ||
@@ -193,6 +238,8 @@ async function readAttempt(attempt: AttemptDirectory) {
     attemptId: attempt.attemptId,
     updatedAt: attempt.updatedAt,
     trajectory: projectTrajectory(events),
+    internalTrajectory: projectInternalTrajectory(internalEvents),
+    rawEvents: internalEvents,
     wireFiles,
     warnings,
   };
@@ -212,7 +259,10 @@ async function summarizeAttempt(attempt: AttemptDirectory): Promise<{
 }> {
   const entries = await readdir(attempt.path, { withFileTypes: true });
   const eventFiles = entries.filter(
-    (entry) => entry.isFile() && !entry.isSymbolicLink() && runtimeEventPattern.test(entry.name),
+    (entry) =>
+      entry.isFile() &&
+      !entry.isSymbolicLink() &&
+      (runtimeEventPattern.test(entry.name) || trajectoryEventPattern.test(entry.name)),
   );
   let errorCount = 0;
   for (const entry of eventFiles) {
@@ -381,4 +431,4 @@ export function startTrajectoryServer(options: TrajectoryServerOptions) {
   });
 }
 
-export const internalTesting = Object.freeze({ safeTraceFile });
+export const internalTesting = Object.freeze({ safeTraceFile, readAttempt });

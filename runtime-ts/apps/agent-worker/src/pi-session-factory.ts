@@ -38,6 +38,10 @@ import {
   type SkillRuntimeService,
 } from "@cube-runtime/skill";
 import type { DeliverFileToolRouterFactoryPort } from "@cube-runtime/tool-router";
+import {
+  InternalTrajectoryAttemptRecorder,
+  type InternalTrajectoryDiagnosticsPort,
+} from "@cube-runtime/trajectory";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
@@ -144,6 +148,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     private readonly promptImages?: PromptImageLoaderPort,
     private readonly skillRuntime?: SkillRuntimeService,
     modelContext?: TrustedPiModelContextCapability,
+    private readonly internalTrajectoryDiagnostics?: InternalTrajectoryDiagnosticsPort,
   ) {
     this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
   }
@@ -158,6 +163,24 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     };
 
     const attemptWireTraces = this.modelWireTraces?.createAttempt(input.attemptId);
+    const trajectoryRecorder =
+      this.internalTrajectoryDiagnostics === undefined
+        ? undefined
+        : new InternalTrajectoryAttemptRecorder(
+            {
+              tenantId: input.scope.tenantId,
+              threadId: input.scope.threadId,
+              runId: input.scope.runId,
+              attemptId: input.attemptId,
+              ...(input.agent?.agentKind === "subagent"
+                ? {
+                    agentThreadId: input.agent.agentThreadId,
+                    agentTurnId: input.agent.agentTurnId,
+                  }
+                : {}),
+            },
+            this.internalTrajectoryDiagnostics,
+          );
     const wireTraceContext = Object.freeze({
       tenantId: input.scope.tenantId,
       threadId: input.scope.threadId,
@@ -688,6 +711,23 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       controller.dispose();
       throw error;
     }
+    trajectoryRecorder?.record("runtime", "session_created", {
+      type: "session_created",
+      model: {
+        api: this.model.api,
+        provider: this.model.provider,
+        id: this.model.id,
+      },
+      diagnostics: controller.getDiagnostics(),
+      agent: input.agent ?? { agentKind: "root" },
+    });
+    const unsubscribeTrajectory =
+      trajectoryRecorder === undefined
+        ? undefined
+        : controller.subscribeInternal((event) => {
+            // 原始 Pi 事件在公开 RuntimeAgentEvent 投影、thinking 合并及内容裁剪前完整快照。
+            trajectoryRecorder.record("pi", event.type, event);
+          });
     // 该订阅先于 RunWorker 的持久订阅注册，只负责证明 Pi 已真实发布 tool.started。
     const unsubscribeToolGate = controller.subscribe((event) => {
       if (event.type !== "tool.started") return;
@@ -723,12 +763,17 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           throw new Error("模型启动许可在本地 continuation 前已过期");
         }
         // 许可刚由 DB 一次性消费；校验后立即进入 prompt，中间不再插入异步窗口。
+        trajectoryRecorder?.record("runtime", "prompt", {
+          type: "prompt",
+          text: prepared.text,
+          images: prepared.images,
+        });
         try {
           try {
             await controller.prompt(prepared.text, prepared.images);
           } finally {
             // 即使 Provider 失败也只等待当前 Attempt 已创建的诊断任务，且不会改变原异常。
-            await attemptWireTraces?.drain();
+            await Promise.all([attemptWireTraces?.drain(), trajectoryRecorder?.drain()]);
           }
         } catch (error) {
           if (observationRecoveryCode !== undefined) {
@@ -745,6 +790,11 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       },
       steer: async (userInput) => {
         const prepared = await prepareInput(userInput);
+        trajectoryRecorder?.record("runtime", "steer", {
+          type: "steer",
+          text: prepared.text,
+          images: prepared.images,
+        });
         await controller.steer(prepared.text, prepared.images);
       },
       abort: () => controller.abort(),
@@ -767,6 +817,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           listener(event);
         }),
       dispose: () => {
+        unsubscribeTrajectory?.();
         unsubscribeToolGate();
         startedToolCalls.clear();
         invalidToolCalls.clear();
@@ -775,6 +826,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         durableToolCalls.clear();
         rejectedToolReceipts.clear();
         controller.dispose();
+        void trajectoryRecorder?.drain();
         attemptWireTraces?.release();
       },
     };

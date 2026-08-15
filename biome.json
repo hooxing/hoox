@@ -5,13 +5,15 @@
       "**",
       "!!.arts",
       "!!.codeartsdoer",
+      "!!.tmp",
       "!!exports",
       "!!model-wire-traces",
       "!!**/dist",
       "!!**/node_modules",
       "!!runtime-ts/vendor/cubesandbox-sdk",
       "!!runtime-ts/vendor/deepseek-v4-tokenizer/tokenizer.json",
-      "!!runtime-ts/vendor/deepseek-v4-tokenizer/tokenizer_config.json"
+      "!!runtime-ts/vendor/deepseek-v4-tokenizer/tokenizer_config.json",
+      "!!runtime-ts/vendor/deepseek-trajectory"
     ]
   },
   "formatter": {

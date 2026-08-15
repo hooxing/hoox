@@ -38,8 +38,8 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import {
-  createAgentControlPiTools,
   type AgentControlPiToolExecutorPort,
+  createAgentControlPiTools,
   type DelegablePiToolName,
 } from "./agent-control-tools.js";
 import {
@@ -57,12 +57,12 @@ import {
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
 import { createSkillPiTool, type SkillPiToolExecutorPort } from "./skill-tool.js";
-import { createTodoWritePiTool, type TodoWritePiToolExecutorPort } from "./todo-write-tool.js";
 import {
   assertThreadActiveHistory,
   providerVisibleThreadHistoryMessages,
   type ThreadActiveHistoryV1,
 } from "./thread-history.js";
+import { createTodoWritePiTool, type TodoWritePiToolExecutorPort } from "./todo-write-tool.js";
 import {
   createObservedSandboxTools,
   type SandboxToolEffectAuthorizer,
@@ -122,6 +122,8 @@ export interface PiSessionController {
   abort(): Promise<void>;
   dispose(): void;
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void;
+  /** @internal 在任何公开投影、聚合或截断前观察 Pi 原始事件。 */
+  subscribeInternal(listener: (event: AgentSessionEvent) => void): () => void;
   getDiagnostics(): Readonly<PiSessionDiagnostics>;
 }
 
@@ -344,6 +346,10 @@ class PiSessionControllerImpl implements PiSessionController {
       thinkingBuffer = "";
       unsubscribe();
     };
+  }
+
+  subscribeInternal(listener: (event: AgentSessionEvent) => void): () => void {
+    return this.#session.subscribe(listener);
   }
 
   getDiagnostics(): Readonly<PiSessionDiagnostics> {

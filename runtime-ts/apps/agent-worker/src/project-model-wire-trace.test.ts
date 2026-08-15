@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ModelWireTracePort, ModelWireTraceRecord } from "./model-wire-trace.js";
 import type { RuntimeEventV1 } from "./ports.js";
 import {
+  createDevelopmentProjectInternalTrajectoryMirror,
   createDevelopmentProjectRunEventMirror,
+  ProjectInternalTrajectoryMirror,
   ProjectModelWireTraceMirror,
   ProjectRunEventMirror,
   withDevelopmentProjectModelWireTraceMirror,
@@ -211,6 +213,63 @@ describe("项目模型报文本地镜像", () => {
         event: { ...event, payload: { type: "thinking.delta", delta: "不同正文" } },
       }),
     ).rejects.toThrow("LOCAL_MODEL_WIRE_TRACE_CONFLICT");
+  });
+
+  it("完整保存 Pi 原始事件并隔离 root 与 subagent sequence", async () => {
+    const root = await temporaryRoot();
+    const mirror = new ProjectInternalTrajectoryMirror(root);
+    const event = {
+      schemaVersion: 1 as const,
+      sequence: 1,
+      occurredAt: "2026-08-15T10:00:00.123Z",
+      monotonicOffsetMs: 12.5,
+      source: "pi" as const,
+      type: "tool_execution_end",
+      event: {
+        type: "tool_execution_end",
+        toolCallId: "call_1",
+        result: { content: [{ type: "text", text: "完整 stdout" }], details: { exitCode: 0 } },
+        isError: false,
+      },
+    };
+
+    await mirror.persist({ context: record().context, event });
+    await mirror.persist({
+      context: {
+        ...record().context,
+        agentThreadId: "agent_thread_1",
+        agentTurnId: "agent_turn_1",
+      },
+      event,
+    });
+
+    const rootFile = join(root, "run_dev_1", "attempt_dev_1", "trajectory-event-00000001.json");
+    const subagentFile = join(
+      root,
+      "run_dev_1",
+      "attempt_dev_1",
+      "subagents",
+      "agent_thread_1",
+      "agent_turn_1",
+      "trajectory-event-00000001.json",
+    );
+    expect(JSON.parse(await readFile(rootFile, "utf8"))).toEqual(event);
+    expect(JSON.parse(await readFile(subagentFile, "utf8"))).toEqual(event);
+  });
+
+  it("内部轨迹镜像只在 development 且显式敏感诊断开启时创建", () => {
+    const factory = vi.fn(() => ({ persist: async () => undefined }));
+    expect(
+      createDevelopmentProjectInternalTrajectoryMirror("development", true, factory),
+    ).toBeDefined();
+    expect(factory).toHaveBeenCalledOnce();
+    expect(
+      createDevelopmentProjectInternalTrajectoryMirror("development", false, factory),
+    ).toBeUndefined();
+    expect(
+      createDevelopmentProjectInternalTrajectoryMirror("production", true, factory),
+    ).toBeUndefined();
+    expect(factory).toHaveBeenCalledOnce();
   });
 
   it("Run 事件文件镜像只在 development 且显式诊断开启时创建", () => {

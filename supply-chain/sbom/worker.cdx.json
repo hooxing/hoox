@@ -34,7 +34,7 @@
       },
       {
         "name": "cube:lockfile-sha256",
-        "value": "5a7a5df538f57e4524457f658f603964d7ddbc5d424d59fbb9a0c99a3d9e3f7c"
+        "value": "4a6f6b63d443781bc80253894e71b05de374941bdcfe10d4b494a6477366966b"
       }
     ]
   },
@@ -954,6 +954,23 @@
         {
           "name": "cube:workspace-path",
           "value": "runtime-ts/packages/tool-router"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40cube-runtime/trajectory@0.0.0",
+      "name": "@cube-runtime/trajectory",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40cube-runtime/trajectory@0.0.0",
+      "properties": [
+        {
+          "name": "cube:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "cube:workspace-path",
+          "value": "runtime-ts/packages/trajectory"
         }
       ]
     },
@@ -3683,6 +3700,7 @@
         "pkg:npm/%40cube-runtime/skill@0.0.0",
         "pkg:npm/%40cube-runtime/thread-title@0.0.0",
         "pkg:npm/%40cube-runtime/tool-router@0.0.0",
+        "pkg:npm/%40cube-runtime/trajectory@0.0.0",
         "pkg:npm/%40cube-runtime/workspace@0.0.0",
         "pkg:npm/%40cubesandbox/sdk@0.3.0-cube.local.1",
         "pkg:npm/%40earendil-works/pi-agent-core@0.82.1",

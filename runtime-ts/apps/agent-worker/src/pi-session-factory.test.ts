@@ -182,6 +182,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
 
     const observationOperations: string[] = [];
+    const trajectoryRecords: Array<{ event: { type: string; event: unknown } }> = [];
     const prepareThreadHistory = vi.fn(async () => {
       throw new Error("fork_turns=none 不得回退读取 Thread Context");
     });
@@ -205,6 +206,11 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       undefined,
       undefined,
       prepareThreadHistory,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { persist: async (record) => void trajectoryRecords.push(record) },
     );
     const sandboxes = new FakeSandboxRegistry();
     const sandbox: SandboxSessionRef = {
@@ -297,6 +303,25 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     ]);
     expect(observationOperations).toEqual([`call:${providerCallId}`, `result:${providerCallId}`]);
     expect(prepareThreadHistory).not.toHaveBeenCalled();
+    const rawToolStart = trajectoryRecords.find(
+      (record) => record.event.type === "tool_execution_start",
+    );
+    const rawToolEnd = trajectoryRecords.find(
+      (record) => record.event.type === "tool_execution_end",
+    );
+    expect(rawToolStart?.event.event).toMatchObject({
+      type: "tool_execution_start",
+      toolCallId: providerCallId,
+      toolName: "exec_command",
+      args: { cmd: "echo child" },
+    });
+    expect(rawToolEnd?.event.event).toMatchObject({
+      type: "tool_execution_end",
+      toolCallId: providerCallId,
+      toolName: "exec_command",
+      isError: false,
+      result: { content: expect.any(Array), details: expect.any(Object) },
+    });
   });
 
   it("显式 Skill 在首个模型请求前由后端注入，纯指令任务保持零 Sandbox", async () => {

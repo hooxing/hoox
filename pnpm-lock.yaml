@@ -131,6 +131,9 @@ importers:
       '@cube-runtime/tool-router':
         specifier: workspace:*
         version: link:../../packages/tool-router
+      '@cube-runtime/trajectory':
+        specifier: workspace:*
+        version: link:../../packages/trajectory
       '@cube-runtime/workspace':
         specifier: workspace:*
         version: link:../../packages/workspace

@@ -98,6 +98,7 @@ import {
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
 import {
+  createDevelopmentProjectInternalTrajectoryMirror,
   createDevelopmentProjectRunEventMirror,
   withDevelopmentProjectModelWireTraceMirror,
 } from "./project-model-wire-trace.js";
@@ -845,6 +846,10 @@ async function assembleWorkerRuntime(
       runtimeMode,
       configuration.model.wireTraceEnabled,
     );
+    const internalTrajectoryDiagnostics = createDevelopmentProjectInternalTrajectoryMirror(
+      runtimeMode,
+      configuration.model.wireTraceEnabled,
+    );
     const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
     const modelTokenizer = await loadTrustedModelTokenizerCapability(model.id);
     const modelContext = bindTrustedPiModelContextCapability(modelRuntime, model, modelTokenizer);
@@ -1073,6 +1078,7 @@ async function assembleWorkerRuntime(
       new BlobPromptImageLoader(resourceFilesystem, blobs),
       skillRuntime,
       modelContext,
+      internalTrajectoryDiagnostics,
     );
     const shutdown = new ProcessShutdown();
     const memoryProvider = configuration.memory.enabled

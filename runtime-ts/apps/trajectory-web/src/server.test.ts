@@ -43,6 +43,72 @@ describe("trajectory diagnostics filesystem", () => {
     expect(runs[0]?.attempts.map((item) => item.attemptId)).toEqual(["attempt-1"]);
   });
 
+  it("从内部无损事件读取真实 Turn、工具参数、结果和耗时", async () => {
+    const root = await temporaryRoot();
+    const attemptPath = join(root, "run_1", "attempt-1");
+    await mkdir(attemptPath, { recursive: true });
+    const events = [
+      {
+        schemaVersion: 1,
+        sequence: 1,
+        occurredAt: "2026-08-15T10:00:00.000Z",
+        monotonicOffsetMs: 0,
+        source: "pi",
+        type: "turn_start",
+        event: { type: "turn_start" },
+      },
+      {
+        schemaVersion: 1,
+        sequence: 2,
+        occurredAt: "2026-08-15T10:00:00.010Z",
+        monotonicOffsetMs: 10,
+        source: "pi",
+        type: "tool_execution_start",
+        event: {
+          type: "tool_execution_start",
+          toolCallId: "call_1",
+          toolName: "read",
+          args: { path: "/workspace/log.txt" },
+        },
+      },
+      {
+        schemaVersion: 1,
+        sequence: 3,
+        occurredAt: "2026-08-15T10:00:00.035Z",
+        monotonicOffsetMs: 35,
+        source: "pi",
+        type: "tool_execution_end",
+        event: {
+          type: "tool_execution_end",
+          toolCallId: "call_1",
+          toolName: "read",
+          result: { content: [{ type: "text", text: "完整正文" }] },
+          isError: false,
+        },
+      },
+    ];
+    await Promise.all(
+      events.map((event, index) =>
+        writeFile(
+          join(attemptPath, `trajectory-event-${String(index + 1).padStart(8, "0")}.json`),
+          JSON.stringify(event),
+        ),
+      ),
+    );
+
+    const attempt = await internalTesting.readAttempt({
+      attemptId: "attempt-1",
+      path: attemptPath,
+      updatedAt: "2026-08-15T10:00:00.035Z",
+    });
+    expect(attempt.internalTrajectory.stats).toMatchObject({ events: 3, turns: 1, calls: 1 });
+    expect(attempt.internalTrajectory.records.at(-1)).toMatchObject({
+      eventType: "tool_execution_end",
+      durationMs: 25,
+      detail: { result: { content: [{ text: "完整正文", type: "text" }] } },
+    });
+  });
+
   it("模型报文读取拒绝路径逃逸和非白名单文件", async () => {
     const root = await temporaryRoot();
     const attempt = join(root, "run_1", "attempt-1");

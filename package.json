@@ -53,7 +53,8 @@
     "release:check": "node scripts/production-release-contract.mjs",
     "check:production": "pnpm config:check:production && pnpm supply-chain:check && pnpm license:check && pnpm release:check && pnpm test:production-api:container && pnpm test:production-scheduler:container && pnpm test:production-worker:container",
     "typecheck": "pnpm build && tsc -p tsconfig.json && pnpm --recursive --sort --if-present typecheck",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm config:check"
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm config:check",
+    "dev:trajectory": "pnpm --filter @cube-runtime/trajectory build && pnpm --filter @cube-runtime/trajectory-web build && node runtime-ts/apps/trajectory-web/dist/bin.js"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.82.1",

@@ -115,6 +115,22 @@ content-decoding 后、SSE 解析前的应用可见正文，不包含 TCP/chunk 
 - `GET /v1/threads/:threadId/runs/:runId/model-wire-traces/:attemptId/:modelTurn/:transportAttempt/:part/body`：
   读取 `request` 或 `response` 的 `application/octet-stream` 正文字节。
 
+### 内部轨迹查看器（development）
+
+开启上述模型网络诊断并产生 Run 后，可启动只监听本机回环地址的维护者轨迹查看器：
+
+```powershell
+corepack pnpm dev:trajectory
+```
+
+默认打开地址为 `http://127.0.0.1:4188`，数据源固定为仓库根目录 `model-wire-traces`。查看器按 Run/Attempt
+聚合 durable Run 事件，展示近似模型步骤、思考、回复、工具生命周期、Attempt 状态、稳定错误类别和模型
+request/response 原文。事件文件不包含 PostgreSQL `occurred_at`，所以页面耗时使用不可变文件 mtime 近似计算，
+只用于本地排障。可以使用 `-- --port 4190` 或 `-- --root <受控目录>` 覆盖默认值。
+
+该查看器不接入用户 Web、公开 API 或 production 装配，也不提供远程认证；禁止把它绑定、代理或转发到非回环地址。
+页面和本地文件都可能包含 Prompt、思考、工具参数及模型可见回执，应按敏感诊断数据处理。
+
 这两类接口沿用现有认证、Tenant Membership/RLS 与 Thread/Run 归属校验，不返回 S3 URL。正文可能包含完整
 Prompt、工具参数、模型生成的 tool call，以及下一轮请求中模型可见的工具回执，必须按敏感诊断数据处理。
 采集端口不接受 HTTP headers，因此不会保存 `Authorization`、Cookie 或 Provider 密钥。关闭

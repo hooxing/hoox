@@ -38,6 +38,9 @@ export default defineConfig({
       "@cube-runtime/skill": fileURLToPath(
         new URL("./runtime-ts/packages/skill/src/index.ts", import.meta.url),
       ),
+      "@cube-runtime/trajectory": fileURLToPath(
+        new URL("./runtime-ts/packages/trajectory/src/index.ts", import.meta.url),
+      ),
     },
   },
   test: {

@@ -213,6 +213,15 @@ importers:
         specifier: 5.10.0
         version: 5.10.0
 
+  runtime-ts/apps/trajectory-web:
+    dependencies:
+      '@cube-runtime/run-contracts':
+        specifier: workspace:*
+        version: link:../../packages/run-contracts
+      '@cube-runtime/trajectory':
+        specifier: workspace:*
+        version: link:../../packages/trajectory
+
   runtime-ts/apps/web:
     dependencies:
       lucide-react:
@@ -437,6 +446,12 @@ importers:
       typebox:
         specifier: 1.1.38
         version: 1.1.38
+
+  runtime-ts/packages/trajectory:
+    dependencies:
+      '@cube-runtime/run-contracts':
+        specifier: workspace:*
+        version: link:../run-contracts
 
   runtime-ts/packages/workspace: {}
 

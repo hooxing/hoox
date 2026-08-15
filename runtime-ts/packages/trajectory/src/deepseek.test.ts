@@ -20,83 +20,162 @@ function event(
 }
 
 describe("projectInternalTrajectory", () => {
-  it("按真实 turn、工具耗时和模型 usage 投影 DeepSeek 账本", () => {
+  it("将同一次 Assistant 流聚合为一个逻辑记录，同时保留原始事件统计和范围", () => {
     const projection = projectInternalTrajectory([
       event(1, 0, "session_created", {
         type: "session_created",
-        model: { provider: "deepseek", id: "deepseek-v4" },
+        model: { api: "openai-completions", provider: "deepseek", id: "deepseek-v4" },
       }),
       event(2, 5, "prompt", { type: "prompt", text: "检查失败原因" }),
       event(3, 10, "agent_start", { type: "agent_start" }),
       event(4, 12, "turn_start", { type: "turn_start" }),
-      event(5, 20, "message_update", {
+      event(5, 20, "message_start", {
+        type: "message_start",
+        message: { role: "assistant", content: [], responseId: "chatcmpl-1" },
+      }),
+      event(6, 30, "message_update", {
         type: "message_update",
-        assistantMessageEvent: { type: "thinking_delta", delta: "先读取日志" },
+        assistantMessageEvent: {
+          type: "thinking_delta",
+          delta: "先读取",
+          partial: {
+            role: "assistant",
+            responseId: "chatcmpl-1",
+            content: [{ type: "thinking", thinking: "先读取" }],
+          },
+        },
       }),
-      event(6, 30, "tool_execution_start", {
-        type: "tool_execution_start",
-        toolCallId: "call_1",
-        toolName: "exec_command",
-        args: { cmd: "cat log" },
+      event(7, 35, "message_update", {
+        type: "message_update",
+        assistantMessageEvent: {
+          type: "text_delta",
+          delta: "完成",
+          partial: {
+            role: "assistant",
+            responseId: "chatcmpl-1",
+            content: [
+              { type: "thinking", thinking: "先读取" },
+              { type: "text", text: "完成" },
+            ],
+          },
+        },
       }),
-      event(7, 80, "tool_execution_end", {
-        type: "tool_execution_end",
-        toolCallId: "call_1",
-        toolName: "exec_command",
-        result: { content: [{ type: "text", text: "完整输出" }], details: { exitCode: 0 } },
-        isError: false,
-      }),
-      event(8, 100, "message_end", {
+      event(8, 50, "message_end", {
         type: "message_end",
         message: {
           role: "assistant",
-          content: [{ type: "text", text: "定位完成" }],
+          api: "openai-completions",
+          responseId: "chatcmpl-1",
+          content: [
+            { type: "thinking", thinking: "先读取日志" },
+            { type: "text", text: "定位完成" },
+          ],
           usage: { input: 100, output: 20, cacheRead: 80, cacheWrite: 5 },
           stopReason: "stop",
         },
       }),
-      event(9, 110, "turn_end", { type: "turn_end" }),
+      event(9, 60, "turn_end", { type: "turn_end" }),
+      event(10, 65, "agent_end", { type: "agent_end" }),
     ]);
 
     expect(projection.stats).toEqual({
-      events: 9,
+      events: 10,
+      records: 3,
       turns: 1,
-      calls: 1,
+      calls: 0,
       failedCalls: 0,
       inputTokens: 100,
       outputTokens: 20,
       cacheReadTokens: 80,
       cacheWriteTokens: 5,
-      durationMs: 110,
+      durationMs: 65,
     });
-    expect(projection.turns.map((turn) => turn.turn)).toEqual([0, 1]);
-    expect(
-      projection.records.find((record) => record.eventType === "tool_execution_end"),
-    ).toMatchObject({
-      turn: 1,
-      lane: "tools",
-      label: "exec_command",
-      durationMs: 50,
-      isError: false,
-    });
-    expect(
-      projection.records.find((record) => record.eventType === "message_update"),
-    ).toMatchObject({
-      kind: "reasoning",
-      summary: "先读取日志",
+    expect(projection.records.map((record) => record.eventType)).toEqual([
+      "session_created",
+      "prompt",
+      "assistant_generation",
+    ]);
+    expect(projection.records.at(-1)).toMatchObject({
+      sequence: 5,
+      sequenceEnd: 8,
+      rawEventCount: 4,
+      kind: "assistant",
+      summary: "定位完成",
+      durationMs: 30,
+      detail: {
+        type: "assistant_generation",
+        responseId: "chatcmpl-1",
+        stream: {
+          sequenceStart: 5,
+          sequenceEnd: 8,
+          rawEventCount: 4,
+          firstDeltaSequence: 6,
+          timeToFirstDeltaMs: 10,
+          updateCounts: { thinking_delta: 1, text_delta: 1 },
+        },
+      },
     });
   });
 
-  it("保留失败工具的完整详情并标红", () => {
+  it("将工具 start、update、end 聚合为一个记录并保留完整结果", () => {
     const projection = projectInternalTrajectory([
       event(1, 0, "turn_start", { type: "turn_start" }),
       event(2, 2, "tool_execution_start", {
         type: "tool_execution_start",
-        toolCallId: "bad",
+        toolCallId: "call_1",
         toolName: "read",
-        args: { path: "/workspace/missing" },
+        args: { path: "/workspace/log.txt" },
       }),
-      event(3, 8, "tool_execution_end", {
+      event(3, 5, "tool_execution_update", {
+        type: "tool_execution_update",
+        toolCallId: "call_1",
+        toolName: "read",
+        partialResult: "读取中",
+      }),
+      event(4, 8, "tool_execution_end", {
+        type: "tool_execution_end",
+        toolCallId: "call_1",
+        toolName: "read",
+        result: { content: [{ type: "text", text: "完整正文" }] },
+        isError: false,
+      }),
+      event(5, 9, "message_start", {
+        type: "message_start",
+        message: { role: "toolResult", toolCallId: "call_1", toolName: "read" },
+      }),
+      event(6, 10, "message_end", {
+        type: "message_end",
+        message: {
+          role: "toolResult",
+          toolCallId: "call_1",
+          toolName: "read",
+          content: [{ type: "text", text: "完整正文" }],
+        },
+      }),
+      event(7, 11, "turn_end", { type: "turn_end" }),
+    ]);
+
+    expect(projection.stats).toMatchObject({ events: 7, records: 1, calls: 1, failedCalls: 0 });
+    expect(projection.records).toHaveLength(1);
+    expect(projection.records[0]).toMatchObject({
+      eventType: "tool_execution",
+      sequence: 2,
+      sequenceEnd: 4,
+      rawEventCount: 3,
+      label: "read",
+      durationMs: 6,
+      detail: {
+        type: "tool_execution",
+        callId: "call_1",
+        end: { result: { content: [{ text: "完整正文", type: "text" }] } },
+      },
+    });
+  });
+
+  it("保留失败工具并标红，缺少 start 时仍生成可诊断记录", () => {
+    const projection = projectInternalTrajectory([
+      event(1, 0, "turn_start", { type: "turn_start" }),
+      event(2, 8, "tool_execution_end", {
         type: "tool_execution_end",
         toolCallId: "bad",
         toolName: "read",
@@ -104,10 +183,14 @@ describe("projectInternalTrajectory", () => {
         isError: true,
       }),
     ]);
+
     expect(projection.stats.failedCalls).toBe(1);
-    expect(projection.records.at(-1)).toMatchObject({ isError: true, durationMs: 6 });
-    expect(projection.records.at(-1)?.detail).toMatchObject({
-      result: { content: [{ text: "ENOENT", type: "text" }] },
+    expect(projection.records[0]).toMatchObject({
+      isError: true,
+      durationMs: 0,
+      sequence: 2,
+      sequenceEnd: 2,
+      rawEventCount: 1,
     });
   });
 });

@@ -163,6 +163,8 @@
 | [ADR-0177](0177-sandbox-provider-persistence-and-routing.md) | Sandbox Provider 身份持久化与失败关闭路由 | 已接受 | 2026-08-14 |
 | [ADR-0178](0178-e2b-resourcefs-controlled-snapshot.md) | E2B ResourceFS 受控快照物化 | 已接受 | 2026-08-14 |
 | [ADR-20260815182655](20260815182655-local-internal-trajectory-viewer.md) | 使用本地不可变诊断镜像提供内部轨迹查看器 | 已接受 | 2026-08-15 |
+| [ADR-20260815193622](20260815193622-lossless-internal-trajectory-and-deepseek-adapter.md) | 内部无损 Session 轨迹与 DeepSeek Trajectory 适配 | 已接受 | 2026-08-15 |
+| [ADR-20260815214527](20260815214527-internal-events-and-logical-trajectory-records.md) | 内部无损事件与逻辑轨迹记录分层 | 已接受 | 2026-08-15 |
 
 ## 何时必须记录
 

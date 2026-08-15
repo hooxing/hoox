@@ -14,7 +14,11 @@ export type DeepSeekTrajectoryKind =
 export interface DeepSeekTrajectoryRecord {
   readonly id: string;
   readonly index: number;
+  /** 逻辑记录覆盖的首个原始事件 sequence，同时作为页面选择锚点。 */
   readonly sequence: number;
+  /** 逻辑记录覆盖的最后一个原始事件 sequence。 */
+  readonly sequenceEnd: number;
+  readonly rawEventCount: number;
   readonly turn: number;
   readonly lane: DeepSeekTrajectoryLane;
   readonly kind: DeepSeekTrajectoryKind;
@@ -47,7 +51,10 @@ export interface DeepSeekTrajectoryProjection {
   readonly turns: readonly DeepSeekTrajectoryTurn[];
   readonly records: readonly DeepSeekTrajectoryRecord[];
   readonly stats: {
+    /** 无损账本中的原始事件数量。 */
     readonly events: number;
+    /** 聚合后展示的业务记录数量。 */
+    readonly records: number;
     readonly turns: number;
     readonly calls: number;
     readonly failedCalls: number;
@@ -60,15 +67,37 @@ export interface DeepSeekTrajectoryProjection {
 }
 
 type JsonObject = Readonly<Record<string, InternalTrajectoryValue>>;
+type Usage = NonNullable<DeepSeekTrajectoryRecord["usage"]>;
+type RecordDraft = Omit<DeepSeekTrajectoryRecord, "id" | "index">;
+
+interface AssistantAccumulator {
+  readonly turn: number;
+  readonly start: InternalTrajectoryEventV1;
+  last: InternalTrajectoryEventV1;
+  rawEventCount: number;
+  firstDelta?: InternalTrajectoryEventV1;
+  lastPartial?: JsonObject;
+  readonly updateCounts: Record<string, number>;
+}
+
+interface ToolAccumulator {
+  readonly turn: number;
+  readonly start: InternalTrajectoryEventV1;
+  last: InternalTrajectoryEventV1;
+  rawEventCount: number;
+  readonly updates: InternalTrajectoryValue[];
+}
 
 export function projectInternalTrajectory(
   input: readonly InternalTrajectoryEventV1[],
 ): DeepSeekTrajectoryProjection {
   const events = [...input].sort((left, right) => left.sequence - right.sequence);
-  const records: DeepSeekTrajectoryRecord[] = [];
+  const drafts: RecordDraft[] = [];
   const turnStarts = new Map<number, InternalTrajectoryEventV1>();
   const turnEnds = new Map<number, InternalTrajectoryEventV1>();
-  const toolStarts = new Map<string, InternalTrajectoryEventV1>();
+  const activeTools = new Map<string, ToolAccumulator>();
+  const completedToolCalls = new Set<string>();
+  let activeAssistant: AssistantAccumulator | undefined;
   let turn = 0;
   let calls = 0;
   let failedCalls = 0;
@@ -77,182 +106,435 @@ export function projectInternalTrajectory(
   let cacheReadTokens = 0;
   let cacheWriteTokens = 0;
 
+  const finishAssistant = (end?: InternalTrajectoryEventV1) => {
+    if (activeAssistant === undefined) return;
+    if (end !== undefined) {
+      activeAssistant.last = end;
+      activeAssistant.rawEventCount += 1;
+    }
+    const record = assistantRecord(activeAssistant, end);
+    drafts.push(record);
+    if (record.usage !== undefined) {
+      inputTokens += record.usage.input;
+      outputTokens += record.usage.output;
+      cacheReadTokens += record.usage.cacheRead;
+      cacheWriteTokens += record.usage.cacheWrite;
+    }
+    activeAssistant = undefined;
+  };
+
   for (const event of events) {
     const body = objectValue(event.event);
     if (event.type === "turn_start") {
+      finishAssistant();
       if (turn === 0) turn = 1;
       else if (turnStarts.has(turn)) turn += 1;
       turnStarts.set(turn, event);
     } else if (turn === 0 && event.type !== "session_created") {
-      // prompt/agent_start 是首个 turn 的前导事件，但不能因此把随后真实 turn_start 计为第二轮。
+      // prompt 是首个 turn 的前导事件，随后真实 turn_start 仍应属于同一轮。
       turn = 1;
     }
     const effectiveTurn = Math.max(1, turn);
-    if (event.type === "turn_end") turnEnds.set(effectiveTurn, event);
 
-    const callId = stringValue(body?.toolCallId);
-    if (event.type === "tool_execution_start" && callId !== undefined) {
-      toolStarts.set(callId, event);
+    if (event.type === "turn_end") {
+      finishAssistant();
+      turnEnds.set(effectiveTurn, event);
+      continue;
+    }
+    if (
+      event.type === "turn_start" ||
+      event.type === "agent_start" ||
+      event.type === "agent_end" ||
+      event.type === "agent_settled"
+    ) {
+      // 生命周期边界用于 Turn 和耗时计算，不作为 DeepSeek 账本中的独立业务行。
+      continue;
+    }
+
+    if (event.type === "message_start") {
+      const message = objectValue(body?.message);
+      if (message?.role === "assistant") {
+        finishAssistant();
+        activeAssistant = {
+          turn: effectiveTurn,
+          start: event,
+          last: event,
+          rawEventCount: 1,
+          updateCounts: {},
+        };
+      }
+      // user 已由 runtime prompt/steer 表示；toolResult 已并入 tool_execution 记录。
+      continue;
+    }
+
+    if (event.type === "message_update") {
+      activeAssistant ??= {
+        turn: effectiveTurn,
+        start: event,
+        last: event,
+        rawEventCount: 0,
+        updateCounts: {},
+      };
+      activeAssistant.last = event;
+      activeAssistant.rawEventCount += 1;
+      const update = objectValue(body?.assistantMessageEvent);
+      const updateType = stringValue(update?.type) ?? "unknown";
+      activeAssistant.updateCounts[updateType] =
+        (activeAssistant.updateCounts[updateType] ?? 0) + 1;
+      const partial = objectValue(update?.partial);
+      if (partial !== undefined) activeAssistant.lastPartial = partial;
+      if (
+        activeAssistant.firstDelta === undefined &&
+        ((stringValue(update?.delta)?.length ?? 0) > 0 || updateType.endsWith("_delta"))
+      ) {
+        activeAssistant.firstDelta = event;
+      }
+      continue;
+    }
+
+    if (event.type === "message_end") {
+      const message = objectValue(body?.message);
+      if (message?.role === "assistant") {
+        activeAssistant ??= {
+          turn: effectiveTurn,
+          start: event,
+          last: event,
+          rawEventCount: 0,
+          updateCounts: {},
+        };
+        finishAssistant(event);
+      } else if (message?.role === "toolResult") {
+        const callId = stringValue(message.toolCallId);
+        if (callId === undefined || !completedToolCalls.has(callId)) {
+          drafts.push(messageRecord(event, effectiveTurn, message));
+        }
+      }
+      continue;
+    }
+
+    if (event.type === "tool_execution_start") {
+      const callId = stringValue(body?.toolCallId) ?? `sequence-${event.sequence}`;
+      activeTools.set(callId, {
+        turn: effectiveTurn,
+        start: event,
+        last: event,
+        rawEventCount: 1,
+        updates: [],
+      });
       calls += 1;
-    }
-    if (event.type === "tool_execution_end" && body?.isError === true) failedCalls += 1;
-
-    const message = objectValue(body?.message);
-    const usage = usageValue(message?.usage);
-    if (usage !== undefined && event.type === "message_end" && message?.role === "assistant") {
-      inputTokens += usage.input;
-      outputTokens += usage.output;
-      cacheReadTokens += usage.cacheRead;
-      cacheWriteTokens += usage.cacheWrite;
+      continue;
     }
 
-    const classification = classify(event, body);
-    const start =
-      event.type === "tool_execution_end" && callId !== undefined
-        ? toolStarts.get(callId)
-        : undefined;
-    records.push({
-      id: `trajectory-${event.sequence}`,
-      index: records.length + 1,
-      sequence: event.sequence,
-      turn: event.type === "session_created" ? 0 : effectiveTurn,
-      lane: classification.lane,
-      kind: classification.kind,
-      eventType: event.type,
-      label: classification.label,
-      summary: summarize(event, body),
-      startedAt: start?.occurredAt ?? event.occurredAt,
-      monotonicOffsetMs: start?.monotonicOffsetMs ?? event.monotonicOffsetMs,
-      durationMs:
-        start === undefined ? null : Math.max(0, event.monotonicOffsetMs - start.monotonicOffsetMs),
-      isError: body?.isError === true || hasMessageError(message),
-      detail: event.event,
-      ...(usage === undefined ? {} : { usage }),
-    });
+    if (event.type === "tool_execution_update") {
+      const callId = stringValue(body?.toolCallId) ?? `sequence-${event.sequence}`;
+      const active = activeTools.get(callId);
+      if (active === undefined) {
+        activeTools.set(callId, {
+          turn: effectiveTurn,
+          start: event,
+          last: event,
+          rawEventCount: 1,
+          updates: [event.event],
+        });
+        calls += 1;
+      } else {
+        active.last = event;
+        active.rawEventCount += 1;
+        active.updates.push(event.event);
+      }
+      continue;
+    }
+
+    if (event.type === "tool_execution_end") {
+      const callId = stringValue(body?.toolCallId) ?? `sequence-${event.sequence}`;
+      const existing = activeTools.get(callId);
+      if (existing === undefined) calls += 1;
+      const active = existing ?? {
+        turn: effectiveTurn,
+        start: event,
+        last: event,
+        rawEventCount: 0,
+        updates: [],
+      };
+      active.last = event;
+      active.rawEventCount += 1;
+      drafts.push(toolRecord(active, event));
+      activeTools.delete(callId);
+      completedToolCalls.add(callId);
+      if (body?.isError === true) failedCalls += 1;
+      continue;
+    }
+
+    drafts.push(simpleRecord(event, event.type === "session_created" ? 0 : effectiveTurn));
   }
 
-  const turns: DeepSeekTrajectoryTurn[] = [];
-  const turnNumbers = [...new Set(records.map((record) => record.turn))].sort((a, b) => a - b);
-  for (const number of turnNumbers) {
+  finishAssistant();
+  for (const active of activeTools.values()) drafts.push(toolRecord(active));
+
+  const records: DeepSeekTrajectoryRecord[] = drafts
+    .sort((left, right) => left.sequence - right.sequence || left.sequenceEnd - right.sequenceEnd)
+    .map((draft, index) => ({
+      ...draft,
+      id: `trajectory-${draft.sequence}-${draft.sequenceEnd}`,
+      index: index + 1,
+    }));
+
+  const turnNumbers = [
+    ...new Set([
+      ...records.map((record) => record.turn),
+      ...turnStarts.keys(),
+      ...(events.some((event) => event.type === "session_created") ? [0] : []),
+    ]),
+  ].sort((left, right) => left - right);
+  const turns: DeepSeekTrajectoryTurn[] = turnNumbers.map((number) => {
     const grouped = records.filter((record) => record.turn === number);
     const first =
-      turnStarts.get(number) ?? events.find((event) => event.sequence === grouped[0]?.sequence);
+      turnStarts.get(number) ??
+      events.find((event) => event.sequence === grouped[0]?.sequence) ??
+      events[0];
     const last = turnEnds.get(number);
     const durationMs =
       first === undefined || last === undefined
         ? undefined
         : Math.max(0, last.monotonicOffsetMs - first.monotonicOffsetMs);
-    turns.push({
+    return {
       turn: number,
-      startedAt: first?.occurredAt ?? grouped[0]?.startedAt ?? events[0]?.occurredAt ?? "",
+      startedAt: first?.occurredAt ?? new Date(0).toISOString(),
       ...(last === undefined ? {} : { completedAt: last.occurredAt }),
       ...(durationMs === undefined ? {} : { durationMs }),
       records: grouped,
-    });
-  }
+    };
+  });
 
   const firstEvent = events[0];
   const lastEvent = events.at(-1);
-  const durationMs =
-    firstEvent === undefined || lastEvent === undefined
-      ? 0
-      : Math.max(0, lastEvent.monotonicOffsetMs - firstEvent.monotonicOffsetMs);
   return {
     turns,
     records,
     stats: {
       events: events.length,
-      turns: turns.filter((item) => item.turn > 0).length,
+      records: records.length,
+      turns: turnStarts.size > 0 ? turnStarts.size : turns.filter((item) => item.turn !== 0).length,
       calls,
       failedCalls,
       inputTokens,
       outputTokens,
       cacheReadTokens,
       cacheWriteTokens,
-      durationMs,
+      durationMs:
+        firstEvent === undefined || lastEvent === undefined
+          ? 0
+          : Math.max(0, lastEvent.monotonicOffsetMs - firstEvent.monotonicOffsetMs),
     },
   };
 }
 
-function classify(
+function assistantRecord(
+  active: AssistantAccumulator,
+  end: InternalTrajectoryEventV1 | undefined,
+): RecordDraft {
+  const endBody = objectValue(end?.event);
+  const startBody = objectValue(active.start.event);
+  const message =
+    objectValue(endBody?.message) ?? active.lastPartial ?? objectValue(startBody?.message);
+  const usage = usageValue(message?.usage);
+  const sequenceEnd = active.last.sequence;
+  const updateCounts: Record<string, InternalTrajectoryValue> = {};
+  for (const [type, count] of Object.entries(active.updateCounts).sort(([left], [right]) =>
+    left.localeCompare(right),
+  )) {
+    updateCounts[type] = count;
+  }
+  const stream: Record<string, InternalTrajectoryValue> = {
+    sequenceStart: active.start.sequence,
+    sequenceEnd,
+    rawEventCount: active.rawEventCount,
+    updateCounts,
+  };
+  if (active.firstDelta !== undefined) {
+    stream.firstDeltaSequence = active.firstDelta.sequence;
+    stream.timeToFirstDeltaMs = Math.max(
+      0,
+      active.firstDelta.monotonicOffsetMs - active.start.monotonicOffsetMs,
+    );
+  }
+  const detail: Record<string, InternalTrajectoryValue> = {
+    type: "assistant_generation",
+    stream,
+    message: message ?? null,
+  };
+  const responseId = stringValue(message?.responseId);
+  if (responseId !== undefined) detail.responseId = responseId;
+  const api = stringValue(message?.api);
+  if (api !== undefined) detail.api = api;
+  const provider = stringValue(message?.provider);
+  if (provider !== undefined) detail.provider = provider;
+  const model = stringValue(message?.model);
+  if (model !== undefined) detail.model = model;
+  const stopReason = stringValue(message?.stopReason);
+  if (stopReason !== undefined) detail.stopReason = stopReason;
+
+  return {
+    sequence: active.start.sequence,
+    sequenceEnd,
+    rawEventCount: active.rawEventCount,
+    turn: active.turn,
+    lane: "model",
+    kind: "assistant",
+    eventType: "assistant_generation",
+    label: "ASSISTANT",
+    summary: assistantSummary(message),
+    startedAt: active.start.occurredAt,
+    monotonicOffsetMs: active.start.monotonicOffsetMs,
+    durationMs: Math.max(0, active.last.monotonicOffsetMs - active.start.monotonicOffsetMs),
+    isError: hasMessageError(message),
+    detail,
+    ...(usage === undefined ? {} : { usage }),
+  };
+}
+
+function toolRecord(active: ToolAccumulator, end?: InternalTrajectoryEventV1): RecordDraft {
+  const startBody = objectValue(active.start.event);
+  const endBody = objectValue(end?.event);
+  const name = stringValue(endBody?.toolName) ?? stringValue(startBody?.toolName) ?? "TOOL";
+  const callId = stringValue(endBody?.toolCallId) ?? stringValue(startBody?.toolCallId) ?? "";
+  const detail: Record<string, InternalTrajectoryValue> = {
+    type: "tool_execution",
+    sequenceStart: active.start.sequence,
+    sequenceEnd: active.last.sequence,
+    rawEventCount: active.rawEventCount,
+    callId,
+    name,
+    start: active.start.event,
+    updates: active.updates,
+    end: end?.event ?? null,
+  };
+  const isError = endBody?.isError === true;
+  return {
+    sequence: active.start.sequence,
+    sequenceEnd: active.last.sequence,
+    rawEventCount: active.rawEventCount,
+    turn: active.turn,
+    lane: "tools",
+    kind: "tool",
+    eventType: "tool_execution",
+    label: name,
+    summary: `${name} ${end === undefined ? "未结束" : isError ? "失败" : "完成"}`,
+    startedAt: active.start.occurredAt,
+    monotonicOffsetMs: active.start.monotonicOffsetMs,
+    durationMs: Math.max(0, active.last.monotonicOffsetMs - active.start.monotonicOffsetMs),
+    isError,
+    detail,
+  };
+}
+
+function messageRecord(
   event: InternalTrajectoryEventV1,
-  body: JsonObject | undefined,
+  turn: number,
+  message: JsonObject,
+): RecordDraft {
+  const role = stringValue(message.role) ?? "message";
+  const isTool = role === "toolResult";
+  return {
+    sequence: event.sequence,
+    sequenceEnd: event.sequence,
+    rawEventCount: 1,
+    turn,
+    lane: isTool ? "tools" : "input",
+    kind: isTool ? "tool" : "user",
+    eventType: isTool ? "tool_result" : "user_message",
+    label: isTool ? (stringValue(message.toolName) ?? "TOOL") : "USER",
+    summary: preview(messageText(message) || role),
+    startedAt: event.occurredAt,
+    monotonicOffsetMs: event.monotonicOffsetMs,
+    durationMs: null,
+    isError: message.isError === true,
+    detail: event.event,
+  };
+}
+
+function simpleRecord(event: InternalTrajectoryEventV1, turn: number): RecordDraft {
+  const body = objectValue(event.event);
+  const classification = classifySimple(event, body);
+  return {
+    sequence: event.sequence,
+    sequenceEnd: event.sequence,
+    rawEventCount: 1,
+    turn,
+    lane: classification.lane,
+    kind: classification.kind,
+    eventType: event.type,
+    label: classification.label,
+    summary: summarizeSimple(event, body),
+    startedAt: event.occurredAt,
+    monotonicOffsetMs: event.monotonicOffsetMs,
+    durationMs: null,
+    isError: body?.isError === true,
+    detail: event.event,
+  };
+}
+
+function classifySimple(
+  event: InternalTrajectoryEventV1,
+  _body: JsonObject | undefined,
 ): Pick<DeepSeekTrajectoryRecord, "lane" | "kind" | "label"> {
   if (event.type === "session_created") return { lane: "input", kind: "system", label: "SYSTEM" };
-  if (event.type === "prompt" || event.type === "steer")
+  if (event.type === "prompt" || event.type === "steer") {
     return { lane: "input", kind: "user", label: event.type === "prompt" ? "USER" : "STEER" };
-  if (event.type === "turn_start" || event.type === "agent_start" || event.type === "agent_settled")
-    return { lane: "input", kind: "context", label: "CONTEXT" };
-  if (event.type.startsWith("tool_execution_")) {
-    return {
-      lane: "tools",
-      kind: "tool",
-      label: stringValue(body?.toolName) ?? "TOOL",
-    };
   }
-  if (event.type === "message_update") {
-    const update = objectValue(body?.assistantMessageEvent);
-    if (stringValue(update?.type)?.startsWith("thinking") === true)
-      return { lane: "model", kind: "reasoning", label: "ASSISTANT" };
-    return { lane: "model", kind: "assistant", label: "ASSISTANT" };
-  }
-  if (event.type === "message_start" || event.type === "message_end") {
-    const role = stringValue(objectValue(body?.message)?.role);
-    if (role === "user") return { lane: "input", kind: "user", label: "USER" };
-    if (role === "toolResult") return { lane: "tools", kind: "tool", label: "TOOL" };
-    return { lane: "model", kind: "assistant", label: "ASSISTANT" };
-  }
-  if (event.type === "turn_end" || event.type === "agent_end")
-    return { lane: "model", kind: "assistant", label: "ASSISTANT" };
   return { lane: "input", kind: "runtime", label: "RUNTIME" };
 }
 
-function summarize(event: InternalTrajectoryEventV1, body: JsonObject | undefined): string {
+function summarizeSimple(event: InternalTrajectoryEventV1, body: JsonObject | undefined): string {
   if (event.type === "session_created") {
     const model = objectValue(body?.model);
     return [stringValue(model?.provider), stringValue(model?.id)].filter(Boolean).join(" / ");
   }
-  if (event.type === "prompt" || event.type === "steer")
+  if (event.type === "prompt" || event.type === "steer") {
     return preview(stringValue(body?.text) ?? "");
-  if (event.type.startsWith("tool_execution_")) {
-    const name = stringValue(body?.toolName) ?? "tool";
-    const callId = stringValue(body?.toolCallId) ?? "";
-    if (event.type === "tool_execution_start") return `${name} ${callId}`.trim();
-    if (event.type === "tool_execution_update") return `${name} 更新`;
-    return `${name} ${body?.isError === true ? "失败" : "完成"}`;
   }
-  if (event.type === "message_update") {
-    const update = objectValue(body?.assistantMessageEvent);
-    return preview(stringValue(update?.delta) ?? stringValue(update?.type) ?? event.type);
-  }
-  const message = objectValue(body?.message);
-  if (message !== undefined) {
-    const text = messageText(message);
-    const role = stringValue(message.role) ?? "message";
-    return preview(text === "" ? role : text);
-  }
-  if (event.type === "turn_start") return "Turn 开始";
-  if (event.type === "turn_end") return "Turn 完成";
-  if (event.type === "agent_start") return "Agent 开始";
-  if (event.type === "agent_end") return "Agent 完成";
-  if (event.type === "agent_settled") return "Agent 已收敛";
   return event.type;
 }
 
+function assistantSummary(message: JsonObject | undefined): string {
+  if (message === undefined) return "模型流未产生完整消息";
+  const text = messageTextByType(message, "text");
+  if (text !== "") return preview(text);
+  const toolNames = messageBlocks(message)
+    .filter((block) => stringValue(block.type) === "toolCall")
+    .map((block) => stringValue(block.name))
+    .filter((name): name is string => name !== undefined && name !== "");
+  if (toolNames.length > 0) return `调用 ${toolNames.join("、")}`;
+  const reasoning = messageTextByType(message, "thinking");
+  if (reasoning !== "") return preview(reasoning);
+  return stringValue(message.stopReason) ?? "assistant";
+}
+
 function messageText(message: JsonObject): string {
-  const content = message.content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .flatMap((item) => {
-      const block = objectValue(item);
-      return stringValue(block?.text) ?? stringValue(block?.thinking) ?? "";
-    })
+  return messageBlocks(message)
+    .flatMap((block) => [stringValue(block.text) ?? stringValue(block.thinking) ?? ""])
     .filter((item) => item !== "")
     .join("\n");
 }
 
-function usageValue(value: InternalTrajectoryValue | undefined) {
+function messageTextByType(message: JsonObject, type: "text" | "thinking"): string {
+  return messageBlocks(message)
+    .filter((block) => stringValue(block.type) === type)
+    .map((block) => (type === "text" ? stringValue(block.text) : stringValue(block.thinking)) ?? "")
+    .filter((item) => item !== "")
+    .join("\n");
+}
+
+function messageBlocks(message: JsonObject): JsonObject[] {
+  const content = message.content;
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((item) => {
+    const block = objectValue(item);
+    return block === undefined ? [] : [block];
+  });
+}
+
+function usageValue(value: InternalTrajectoryValue | undefined): Usage | undefined {
   const usage = objectValue(value);
   if (usage === undefined) return undefined;
   const input = numericValue(usage.input);

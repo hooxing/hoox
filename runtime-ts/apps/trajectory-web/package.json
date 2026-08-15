@@ -1,0 +1,17 @@
+{
+  "name": "@cube-runtime/trajectory-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@cube-runtime/trajectory": "workspace:*",
+    "@cube-runtime/run-contracts": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "tsc -b tsconfig.json --clean",
+    "dev": "node dist/bin.js",
+    "test": "vitest run --root ../../.. runtime-ts/apps/trajectory-web/src",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

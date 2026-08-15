@@ -1,0 +1,384 @@
+import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import type { RuntimeEventV1 } from "@cube-runtime/run-contracts";
+import { type ObservedRuntimeEvent, projectTrajectory } from "@cube-runtime/trajectory";
+import { trajectoryHtml } from "./html.js";
+
+const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/u;
+const runtimeEventPattern = /^runtime-event-(\d{8})-([a-z_]+)\.json$/u;
+const wireFilePattern =
+  /^model-turn-(\d+)-transport-(\d+)-(request|response)-([a-z_]+)\.(json|sse|bin)$/u;
+const maximumTraceFileBytes = 4 * 1024 * 1024;
+
+export interface TrajectoryServerOptions {
+  readonly root: string;
+  readonly host: "127.0.0.1" | "::1";
+  readonly port: number;
+}
+
+interface AttemptDirectory {
+  readonly attemptId: string;
+  readonly path: string;
+  readonly updatedAt: string;
+}
+
+interface RunDirectory {
+  readonly runId: string;
+  readonly path: string;
+  readonly updatedAt: string;
+  readonly attempts: readonly AttemptDirectory[];
+}
+
+function json(response: ServerResponse, status: number, value: unknown): void {
+  const body = JSON.stringify(value);
+  response.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(body),
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+  });
+  response.end(body);
+}
+
+function text(response: ServerResponse, status: number, value: string): void {
+  response.writeHead(status, {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Content-Length": Buffer.byteLength(value),
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(value);
+}
+
+function isRuntimeEvent(value: unknown): value is RuntimeEventV1 {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Readonly<Record<string, unknown>>;
+  return (
+    record.schemaVersion === 1 &&
+    Number.isSafeInteger(record.sequence) &&
+    typeof record.kind === "string" &&
+    [
+      "agent_event",
+      "attempt_state_changed",
+      "run_waiting",
+      "sandbox_recovery_decided",
+      "artifact_correction_requested",
+    ].includes(record.kind) &&
+    typeof record.payload === "object" &&
+    record.payload !== null &&
+    !Array.isArray(record.payload)
+  );
+}
+
+function isContained(root: string, candidate: string): boolean {
+  const path = relative(root, candidate);
+  return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !isAbsolute(path));
+}
+
+async function safeRootDirectory(rootInput: string): Promise<string | undefined> {
+  const root = resolve(rootInput);
+  try {
+    const metadata = await lstat(root);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) return undefined;
+    return await realpath(root);
+  } catch {
+    return undefined;
+  }
+}
+
+async function safeChildDirectory(parent: string, name: string): Promise<string | undefined> {
+  if (!identifierPattern.test(name)) return undefined;
+  const candidate = join(parent, name);
+  try {
+    const metadata = await lstat(candidate);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) return undefined;
+    const parentReal = await realpath(parent);
+    const childReal = await realpath(candidate);
+    return isContained(parentReal, childReal) ? childReal : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function discoverRuns(rootInput: string): Promise<readonly RunDirectory[]> {
+  const rootReal = await safeRootDirectory(rootInput);
+  if (rootReal === undefined) return [];
+  const entries = await readdir(rootReal, { withFileTypes: true });
+  const runs: RunDirectory[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink() || !identifierPattern.test(entry.name))
+      continue;
+    const runPath = await safeChildDirectory(rootReal, entry.name);
+    if (runPath === undefined) continue;
+    const attemptEntries = await readdir(runPath, { withFileTypes: true });
+    const attempts: AttemptDirectory[] = [];
+    for (const attemptEntry of attemptEntries) {
+      if (!attemptEntry.isDirectory() || attemptEntry.isSymbolicLink()) continue;
+      const attemptPath = await safeChildDirectory(runPath, attemptEntry.name);
+      if (attemptPath === undefined) continue;
+      const metadata = await stat(attemptPath);
+      attempts.push({
+        attemptId: attemptEntry.name,
+        path: attemptPath,
+        updatedAt: metadata.mtime.toISOString(),
+      });
+    }
+    attempts.sort((left, right) => left.updatedAt.localeCompare(right.updatedAt));
+    const metadata = await stat(runPath);
+    runs.push({
+      runId: entry.name,
+      path: runPath,
+      updatedAt: attempts.at(-1)?.updatedAt ?? metadata.mtime.toISOString(),
+      attempts,
+    });
+  }
+  return runs.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt)).slice(0, 500);
+}
+
+async function readAttempt(attempt: AttemptDirectory) {
+  const entries = await readdir(attempt.path, { withFileTypes: true });
+  const events: ObservedRuntimeEvent[] = [];
+  const warnings: string[] = [];
+  const wireFiles: Array<{
+    name: string;
+    modelTurn: number;
+    transportAttempt: number;
+    part: "request" | "response";
+    status: string;
+    size: number;
+    updatedAt: string;
+  }> = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || entry.isSymbolicLink()) continue;
+    const runtimeMatch = runtimeEventPattern.exec(entry.name);
+    const wireMatch = wireFilePattern.exec(entry.name);
+    const path = join(attempt.path, entry.name);
+    if (runtimeMatch !== null) {
+      try {
+        const [body, metadata] = await Promise.all([readFile(path, "utf8"), stat(path)]);
+        const value: unknown = JSON.parse(body);
+        if (!isRuntimeEvent(value)) {
+          warnings.push(`${entry.name}: 事件格式无效`);
+          continue;
+        }
+        events.push({ event: value, observedAt: metadata.mtime.toISOString() });
+      } catch {
+        warnings.push(`${entry.name}: 无法读取或解析`);
+      }
+      continue;
+    }
+    if (wireMatch !== null) {
+      const metadata = await stat(path);
+      wireFiles.push({
+        name: entry.name,
+        modelTurn: Number(wireMatch[1]),
+        transportAttempt: Number(wireMatch[2]),
+        part: wireMatch[3] as "request" | "response",
+        status: wireMatch[4] ?? "unknown",
+        size: metadata.size,
+        updatedAt: metadata.mtime.toISOString(),
+      });
+    }
+  }
+  events.sort((left, right) => left.event.sequence - right.event.sequence);
+  wireFiles.sort(
+    (left, right) =>
+      left.modelTurn - right.modelTurn ||
+      left.transportAttempt - right.transportAttempt ||
+      left.part.localeCompare(right.part),
+  );
+  return {
+    attemptId: attempt.attemptId,
+    updatedAt: attempt.updatedAt,
+    trajectory: projectTrajectory(events),
+    wireFiles,
+    warnings,
+  };
+}
+
+async function runDetails(run: RunDirectory) {
+  return {
+    runId: run.runId,
+    updatedAt: run.updatedAt,
+    attempts: await Promise.all(run.attempts.map(readAttempt)),
+  };
+}
+
+async function summarizeAttempt(attempt: AttemptDirectory): Promise<{
+  readonly eventCount: number;
+  readonly errorCount: number;
+}> {
+  const entries = await readdir(attempt.path, { withFileTypes: true });
+  const eventFiles = entries.filter(
+    (entry) => entry.isFile() && !entry.isSymbolicLink() && runtimeEventPattern.test(entry.name),
+  );
+  let errorCount = 0;
+  for (const entry of eventFiles) {
+    if (!entry.name.endsWith("-attempt_state_changed.json")) continue;
+    try {
+      const value: unknown = JSON.parse(await readFile(join(attempt.path, entry.name), "utf8"));
+      if (
+        isRuntimeEvent(value) &&
+        value.kind === "attempt_state_changed" &&
+        (value.payload.code !== undefined ||
+          ["failed", "cancelled", "abandoned", "recovery_required"].includes(value.payload.status))
+      ) {
+        errorCount = 1;
+      }
+    } catch {
+      // 列表页只提供快速概览；损坏文件由选中 Run 的详情页报告 warning。
+    }
+  }
+  return { eventCount: eventFiles.length, errorCount };
+}
+
+async function runSummaries(runs: readonly RunDirectory[]) {
+  return Promise.all(
+    runs.map(async (run) => {
+      const attempts = await Promise.all(run.attempts.map(summarizeAttempt));
+      return {
+        runId: run.runId,
+        updatedAt: run.updatedAt,
+        attemptCount: attempts.length,
+        eventCount: attempts.reduce((sum, attempt) => sum + attempt.eventCount, 0),
+        errorCount: attempts.reduce((sum, attempt) => sum + attempt.errorCount, 0),
+      };
+    }),
+  );
+}
+
+async function safeTraceFile(
+  root: string,
+  runId: string | null,
+  attemptId: string | null,
+  name: string | null,
+): Promise<string | undefined> {
+  if (
+    runId === null ||
+    attemptId === null ||
+    name === null ||
+    !identifierPattern.test(runId) ||
+    !identifierPattern.test(attemptId) ||
+    wireFilePattern.exec(name) === null ||
+    basename(name) !== name
+  ) {
+    return undefined;
+  }
+  const runPath = await safeChildDirectory(root, runId);
+  if (runPath === undefined) return undefined;
+  const attemptPath = await safeChildDirectory(runPath, attemptId);
+  if (attemptPath === undefined) return undefined;
+  const filePath = join(attemptPath, name);
+  try {
+    const metadata = await lstat(filePath);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > maximumTraceFileBytes) {
+      return undefined;
+    }
+    const actual = await realpath(filePath);
+    return isContained(attemptPath, actual) ? actual : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function handle(
+  request: IncomingMessage,
+  response: ServerResponse,
+  options: TrajectoryServerOptions,
+): Promise<void> {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    text(response, 405, "Method Not Allowed");
+    return;
+  }
+  const url = new URL(request.url ?? "/", `http://${options.host}:${options.port}`);
+  if (url.pathname === "/") {
+    response.writeHead(200, {
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Length": Buffer.byteLength(trajectoryHtml),
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Referrer-Policy": "no-referrer",
+      "Content-Security-Policy":
+        "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; img-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+    });
+    response.end(request.method === "HEAD" ? undefined : trajectoryHtml);
+    return;
+  }
+  const runs = await discoverRuns(options.root);
+  if (url.pathname === "/api/runs") {
+    json(response, 200, { items: await runSummaries(runs) });
+    return;
+  }
+  if (url.pathname.startsWith("/api/runs/")) {
+    const runId = decodeURIComponent(url.pathname.slice("/api/runs/".length));
+    const run = runs.find((candidate) => candidate.runId === runId);
+    if (run === undefined) {
+      json(response, 404, { error: "RUN_NOT_FOUND" });
+      return;
+    }
+    json(response, 200, await runDetails(run));
+    return;
+  }
+  if (url.pathname === "/api/files") {
+    const root = await safeRootDirectory(options.root);
+    const path =
+      root === undefined
+        ? undefined
+        : await safeTraceFile(
+            root,
+            url.searchParams.get("run"),
+            url.searchParams.get("attempt"),
+            url.searchParams.get("name"),
+          );
+    if (path === undefined) {
+      text(response, 404, "TRACE_FILE_NOT_FOUND");
+      return;
+    }
+    const body = await readFile(path);
+    response.writeHead(200, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Length": body.byteLength,
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Disposition": `inline; filename="${basename(path)}"`,
+    });
+    response.end(request.method === "HEAD" ? undefined : body);
+    return;
+  }
+  json(response, 404, { error: "NOT_FOUND" });
+}
+
+export function startTrajectoryServer(options: TrajectoryServerOptions) {
+  if (options.host !== "127.0.0.1" && options.host !== "::1") {
+    throw new TypeError("轨迹服务只允许监听回环地址");
+  }
+  if (!Number.isSafeInteger(options.port) || options.port < 1024 || options.port > 65_535) {
+    throw new TypeError("轨迹服务端口无效");
+  }
+  const server = createServer((request, response) => {
+    handle(request, response, options).catch(() => {
+      if (!response.headersSent) json(response, 500, { error: "INTERNAL" });
+      else response.destroy();
+    });
+  });
+  return new Promise<{
+    readonly url: string;
+    close(): Promise<void>;
+  }>((resolveStarted, reject) => {
+    server.once("error", reject);
+    server.listen(options.port, options.host, () => {
+      server.off("error", reject);
+      resolveStarted({
+        url: `http://${options.host}:${options.port}`,
+        close: () =>
+          new Promise<void>((resolveClosed, rejectClosed) =>
+            server.close((error) => (error === undefined ? resolveClosed() : rejectClosed(error))),
+          ),
+      });
+    });
+  });
+}
+
+export const internalTesting = Object.freeze({ safeTraceFile });

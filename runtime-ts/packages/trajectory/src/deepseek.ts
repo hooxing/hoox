@@ -62,6 +62,11 @@ export interface DeepSeekTrajectoryProjection {
     readonly outputTokens: number;
     readonly cacheReadTokens: number;
     readonly cacheWriteTokens: number;
+    /** Assistant 流从 message_start 到 message_end 的累计解码时长。 */
+    readonly modelDurationMs: number;
+    readonly outputTokensPerSecond: number | null;
+    /** cacheRead / (input + cacheRead)，无输入时为 null。 */
+    readonly cacheHitRate: number | null;
     readonly durationMs: number;
   };
 }
@@ -306,6 +311,10 @@ export function projectInternalTrajectory(
     };
   });
 
+  const modelDurationMs = records
+    .filter((record) => record.eventType === "assistant_generation")
+    .reduce((sum, record) => sum + (record.durationMs ?? 0), 0);
+  const cacheEligibleTokens = inputTokens + cacheReadTokens;
   const firstEvent = events[0];
   const lastEvent = events.at(-1);
   return {
@@ -321,6 +330,9 @@ export function projectInternalTrajectory(
       outputTokens,
       cacheReadTokens,
       cacheWriteTokens,
+      modelDurationMs,
+      outputTokensPerSecond: modelDurationMs > 0 ? outputTokens / (modelDurationMs / 1_000) : null,
+      cacheHitRate: cacheEligibleTokens > 0 ? cacheReadTokens / cacheEligibleTokens : null,
       durationMs:
         firstEvent === undefined || lastEvent === undefined
           ? 0

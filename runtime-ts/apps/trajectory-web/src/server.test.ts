@@ -162,6 +162,42 @@ describe("trajectory diagnostics filesystem", () => {
       }),
     ).resolves.toEqual({ eventCount: 1, errorCount: 0 });
   });
+  it("列表和详情使用对话标题增强 Run 元数据，读取失败时退回 runId", async () => {
+    const root = await temporaryRoot();
+    await mkdir(join(root, "run_1", "attempt-1"), { recursive: true });
+    const runs = await discoverRuns(root);
+    const metadata = {
+      resolve: async () =>
+        new Map([["run_1", { runId: "run_1", threadId: "thread_1", title: "轨迹性能诊断" }]]),
+    };
+
+    await expect(internalTesting.runSummaries(runs, metadata)).resolves.toEqual([
+      expect.objectContaining({
+        runId: "run_1",
+        threadId: "thread_1",
+        title: "轨迹性能诊断",
+      }),
+    ]);
+    const run = runs[0];
+    if (run === undefined) throw new Error("测试 Run 未被发现");
+    await expect(internalTesting.runDetails(run, metadata)).resolves.toEqual(
+      expect.objectContaining({
+        runId: "run_1",
+        threadId: "thread_1",
+        title: "轨迹性能诊断",
+      }),
+    );
+
+    const unavailable = {
+      resolve: async () => {
+        throw new Error("API unavailable");
+      },
+    };
+    await expect(internalTesting.runSummaries(runs, unavailable)).resolves.toEqual([
+      expect.not.objectContaining({ title: expect.anything() }),
+    ]);
+  });
+
   it("模型报文读取拒绝路径逃逸和非白名单文件", async () => {
     const root = await temporaryRoot();
     const attempt = join(root, "run_1", "attempt-1");

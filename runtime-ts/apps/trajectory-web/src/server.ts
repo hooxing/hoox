@@ -9,6 +9,7 @@ import {
   projectTrajectory,
 } from "@cube-runtime/trajectory";
 import { trajectoryHtml } from "./html.js";
+import type { RunDisplayMetadata, RunMetadataProvider } from "./runtime-metadata.js";
 
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/u;
 const runtimeEventPattern = /^runtime-event-(\d{8})-([a-z_]+)\.json$/u;
@@ -21,6 +22,7 @@ export interface TrajectoryServerOptions {
   readonly root: string;
   readonly host: "127.0.0.1" | "::1";
   readonly port: number;
+  readonly metadata?: RunMetadataProvider;
 }
 
 interface AttemptDirectory {
@@ -245,9 +247,24 @@ async function readAttempt(attempt: AttemptDirectory) {
   };
 }
 
-async function runDetails(run: RunDirectory) {
+async function resolveRunMetadata(
+  provider: RunMetadataProvider | undefined,
+  runIds: readonly string[],
+): Promise<ReadonlyMap<string, RunDisplayMetadata>> {
+  if (provider === undefined) return new Map();
+  try {
+    return await provider.resolve(runIds);
+  } catch {
+    // 元数据只增强诊断可读性，Runtime API 不可用时必须保留纯文件轨迹查看能力。
+    return new Map();
+  }
+}
+
+async function runDetails(run: RunDirectory, provider?: RunMetadataProvider) {
+  const metadata = (await resolveRunMetadata(provider, [run.runId])).get(run.runId);
   return {
     runId: run.runId,
+    ...(metadata === undefined ? {} : { threadId: metadata.threadId, title: metadata.title }),
     updatedAt: run.updatedAt,
     attempts: await Promise.all(run.attempts.map(readAttempt)),
   };
@@ -288,12 +305,18 @@ async function summarizeAttempt(attempt: AttemptDirectory): Promise<{
   };
 }
 
-async function runSummaries(runs: readonly RunDirectory[]) {
+async function runSummaries(runs: readonly RunDirectory[], provider?: RunMetadataProvider) {
+  const metadata = await resolveRunMetadata(
+    provider,
+    runs.map((run) => run.runId),
+  );
   return Promise.all(
     runs.map(async (run) => {
       const attempts = await Promise.all(run.attempts.map(summarizeAttempt));
+      const display = metadata.get(run.runId);
       return {
         runId: run.runId,
+        ...(display === undefined ? {} : { threadId: display.threadId, title: display.title }),
         updatedAt: run.updatedAt,
         attemptCount: attempts.length,
         eventCount: attempts.reduce((sum, attempt) => sum + attempt.eventCount, 0),
@@ -362,7 +385,7 @@ async function handle(
   }
   const runs = await discoverRuns(options.root);
   if (url.pathname === "/api/runs") {
-    json(response, 200, { items: await runSummaries(runs) });
+    json(response, 200, { items: await runSummaries(runs, options.metadata) });
     return;
   }
   if (url.pathname.startsWith("/api/runs/")) {
@@ -372,7 +395,7 @@ async function handle(
       json(response, 404, { error: "RUN_NOT_FOUND" });
       return;
     }
-    json(response, 200, await runDetails(run));
+    json(response, 200, await runDetails(run, options.metadata));
     return;
   }
   if (url.pathname === "/api/files") {
@@ -435,4 +458,10 @@ export function startTrajectoryServer(options: TrajectoryServerOptions) {
   });
 }
 
-export const internalTesting = Object.freeze({ safeTraceFile, readAttempt, summarizeAttempt });
+export const internalTesting = Object.freeze({
+  safeTraceFile,
+  readAttempt,
+  summarizeAttempt,
+  runDetails,
+  runSummaries,
+});

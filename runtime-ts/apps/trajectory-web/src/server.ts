@@ -258,14 +258,14 @@ async function summarizeAttempt(attempt: AttemptDirectory): Promise<{
   readonly errorCount: number;
 }> {
   const entries = await readdir(attempt.path, { withFileTypes: true });
-  const eventFiles = entries.filter(
-    (entry) =>
-      entry.isFile() &&
-      !entry.isSymbolicLink() &&
-      (runtimeEventPattern.test(entry.name) || trajectoryEventPattern.test(entry.name)),
+  const runtimeEventFiles = entries.filter(
+    (entry) => entry.isFile() && !entry.isSymbolicLink() && runtimeEventPattern.test(entry.name),
+  );
+  const trajectoryEventFiles = entries.filter(
+    (entry) => entry.isFile() && !entry.isSymbolicLink() && trajectoryEventPattern.test(entry.name),
   );
   let errorCount = 0;
-  for (const entry of eventFiles) {
+  for (const entry of runtimeEventFiles) {
     if (!entry.name.endsWith("-attempt_state_changed.json")) continue;
     try {
       const value: unknown = JSON.parse(await readFile(join(attempt.path, entry.name), "utf8"));
@@ -281,7 +281,11 @@ async function summarizeAttempt(attempt: AttemptDirectory): Promise<{
       // 列表页只提供快速概览；损坏文件由选中 Run 的详情页报告 warning。
     }
   }
-  return { eventCount: eventFiles.length, errorCount };
+  return {
+    eventCount:
+      trajectoryEventFiles.length > 0 ? trajectoryEventFiles.length : runtimeEventFiles.length,
+    errorCount,
+  };
 }
 
 async function runSummaries(runs: readonly RunDirectory[]) {
@@ -431,4 +435,4 @@ export function startTrajectoryServer(options: TrajectoryServerOptions) {
   });
 }
 
-export const internalTesting = Object.freeze({ safeTraceFile, readAttempt });
+export const internalTesting = Object.freeze({ safeTraceFile, readAttempt, summarizeAttempt });

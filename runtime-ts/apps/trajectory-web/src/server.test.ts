@@ -101,14 +101,67 @@ describe("trajectory diagnostics filesystem", () => {
       path: attemptPath,
       updatedAt: "2026-08-15T10:00:00.035Z",
     });
-    expect(attempt.internalTrajectory.stats).toMatchObject({ events: 3, turns: 1, calls: 1 });
+    expect(attempt.internalTrajectory.stats).toMatchObject({
+      events: 3,
+      records: 1,
+      turns: 1,
+      calls: 1,
+    });
     expect(attempt.internalTrajectory.records.at(-1)).toMatchObject({
-      eventType: "tool_execution_end",
+      eventType: "tool_execution",
+      sequence: 2,
+      sequenceEnd: 3,
+      rawEventCount: 2,
       durationMs: 25,
-      detail: { result: { content: [{ text: "完整正文", type: "text" }] } },
+      detail: { end: { result: { content: [{ text: "完整正文", type: "text" }] } } },
     });
   });
 
+  it("列表事件数优先使用内部无损轨迹，避免与 Runtime 镜像重复计数", async () => {
+    const root = await temporaryRoot();
+    const attemptPath = join(root, "run_1", "attempt-1");
+    await mkdir(attemptPath, { recursive: true });
+    await Promise.all([
+      writeFile(
+        join(attemptPath, "trajectory-event-00000001.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          sequence: 1,
+          occurredAt: "2026-08-15T10:00:00.000Z",
+          monotonicOffsetMs: 0,
+          source: "pi",
+          type: "agent_start",
+          event: { type: "agent_start" },
+        }),
+      ),
+      writeFile(
+        join(attemptPath, "runtime-event-00000000-agent_event.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          kind: "agent_event",
+          sequence: 0,
+          payload: { type: "agent.started" },
+        }),
+      ),
+      writeFile(
+        join(attemptPath, "runtime-event-00000001-agent_event.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          kind: "agent_event",
+          sequence: 1,
+          payload: { type: "agent.settled" },
+        }),
+      ),
+    ]);
+
+    await expect(
+      internalTesting.summarizeAttempt({
+        attemptId: "attempt-1",
+        path: attemptPath,
+        updatedAt: "2026-08-15T10:00:00.000Z",
+      }),
+    ).resolves.toEqual({ eventCount: 1, errorCount: 0 });
+  });
   it("模型报文读取拒绝路径逃逸和非白名单文件", async () => {
     const root = await temporaryRoot();
     const attempt = join(root, "run_1", "attempt-1");

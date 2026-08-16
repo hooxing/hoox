@@ -162,6 +162,106 @@ describe("trajectory diagnostics filesystem", () => {
       }),
     ).resolves.toEqual({ eventCount: 1, errorCount: 0 });
   });
+  it("按 Thread 聚合多个 Run，并把每个 Run 的用户输入连续编号为 Turn", async () => {
+    const root = await temporaryRoot();
+    const writeRun = async (runId: string, text: string, occurredAt: string) => {
+      const attemptPath = join(root, runId, "attempt-1");
+      await mkdir(attemptPath, { recursive: true });
+      const events = [
+        {
+          schemaVersion: 1,
+          sequence: 1,
+          occurredAt,
+          monotonicOffsetMs: 0,
+          source: "runtime",
+          type: "prompt",
+          event: { type: "prompt", text },
+        },
+        {
+          schemaVersion: 1,
+          sequence: 2,
+          occurredAt,
+          monotonicOffsetMs: 1,
+          source: "pi",
+          type: "turn_start",
+          event: { type: "turn_start" },
+        },
+        {
+          schemaVersion: 1,
+          sequence: 3,
+          occurredAt,
+          monotonicOffsetMs: 5,
+          source: "pi",
+          type: "turn_end",
+          event: { type: "turn_end" },
+        },
+      ];
+      await Promise.all(
+        events.map((event, index) =>
+          writeFile(
+            join(attemptPath, `trajectory-event-${String(index + 1).padStart(8, "0")}.json`),
+            JSON.stringify(event),
+          ),
+        ),
+      );
+    };
+    await writeRun("run_1", "第一条消息", "2026-08-16T12:00:00.000Z");
+    await writeRun("run_2", "第二条消息", "2026-08-16T12:05:00.000Z");
+    const runs = await discoverRuns(root);
+    const metadata = {
+      resolve: async () =>
+        new Map([
+          [
+            "run_1",
+            {
+              runId: "run_1",
+              threadId: "thread_1",
+              title: "可用工具清单",
+              createdAt: "2026-08-16T12:00:00.000Z",
+            },
+          ],
+          [
+            "run_2",
+            {
+              runId: "run_2",
+              threadId: "thread_1",
+              title: "可用工具清单",
+              createdAt: "2026-08-16T12:05:00.000Z",
+            },
+          ],
+        ]),
+    };
+
+    await expect(internalTesting.threadSummaries(runs, metadata)).resolves.toEqual([
+      expect.objectContaining({
+        id: "thread_1",
+        title: "可用工具清单",
+        runCount: 2,
+        attemptCount: 2,
+        eventCount: 6,
+        runIds: expect.arrayContaining(["run_1", "run_2"]),
+      }),
+    ]);
+    const details = await internalTesting.threadDetails("thread_1", runs, metadata);
+    expect(details?.runs.map((run) => run.runId)).toEqual(["run_1", "run_2"]);
+    expect(
+      details?.internalTrajectory.records
+        .filter((record) => record.eventType === "prompt")
+        .map((record) => ({ turn: record.turn, summary: record.summary, source: record.source })),
+    ).toEqual([
+      {
+        turn: 1,
+        summary: "第一条消息",
+        source: { runId: "run_1", attemptId: "attempt-1" },
+      },
+      {
+        turn: 2,
+        summary: "第二条消息",
+        source: { runId: "run_2", attemptId: "attempt-1" },
+      },
+    ]);
+  });
+
   it("列表和详情使用对话标题增强 Run 元数据，读取失败时退回 runId", async () => {
     const root = await temporaryRoot();
     await mkdir(join(root, "run_1", "attempt-1"), { recursive: true });

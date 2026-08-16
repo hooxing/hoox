@@ -20,7 +20,9 @@ describe("DevelopmentRuntimeApiMetadataProvider", () => {
           : response({ items: [] });
       }
       if (url.pathname === "/v1/threads/thread_1/runs") {
-        return response({ items: [{ id: "run_1", threadId: "thread_1" }] });
+        return response({
+          items: [{ id: "run_1", threadId: "thread_1", createdAt: "2026-08-16T12:00:00.000Z" }],
+        });
       }
       return response({}, 404);
     });
@@ -33,7 +35,17 @@ describe("DevelopmentRuntimeApiMetadataProvider", () => {
     });
 
     await expect(provider.resolve(["run_1", "run_missing"])).resolves.toEqual(
-      new Map([["run_1", { runId: "run_1", threadId: "thread_1", title: "轨迹聚合修复" }]]),
+      new Map([
+        [
+          "run_1",
+          {
+            runId: "run_1",
+            threadId: "thread_1",
+            title: "轨迹聚合修复",
+            createdAt: "2026-08-16T12:00:00.000Z",
+          },
+        ],
+      ]),
     );
     const calls = fetcher.mock.calls.length;
     now = 200;

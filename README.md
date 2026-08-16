@@ -218,6 +218,26 @@ tree hash 由 Gate 重算，exact patch 还必须通过 `git apply --reverse --c
 
 ## Windows PowerShell 启动与检查
 
+### 非首次一键启动
+
+已经完成依赖安装、数据库 bootstrap、迁移、开发身份初始化和 `.env` 配置后，可在仓库根目录双击 `start-development.cmd`，或执行：
+
+```powershell
+.\scripts\start-development.ps1
+```
+
+脚本会依次启动 MinIO、构建工作区、执行 Worker 只读预检，并在独立 PowerShell 窗口启动 API、Agent Worker、Scheduler、Web、Skill Admin API 和 Admin Web；全部就绪后打开 `http://127.0.0.1:4173` 与 `http://127.0.0.1:4174`。它不会执行依赖安装、数据库迁移或开发身份初始化，也不会自动终止端口占用进程。
+
+只启动核心 Runtime，或确认现有 `dist` 已是最新时，可以使用：
+
+```powershell
+.\scripts\start-development.ps1 -CoreOnly
+.\scripts\start-development.ps1 -SkipBuild
+.\scripts\start-development.ps1 -NoBrowser
+```
+
+### 首次启动与检查
+
 以下命令均在仓库根目录执行。先从 `.env.example` 创建只保存在本机的 `.env`，再填写自己的 PostgreSQL 角色、CubeSandbox 模板及其他配置；不要把真实凭据提交到 Git。
 
 ```powershell

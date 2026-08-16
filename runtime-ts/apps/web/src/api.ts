@@ -159,6 +159,7 @@ export type ThreadContextMessage = {
   readonly runId?: string;
   readonly role: "user" | "assistant" | "runtime";
   readonly text: string;
+  readonly phase?: "commentary" | "final_answer";
   readonly createdAt: string;
 };
 
@@ -883,6 +884,7 @@ function isThreadContextMessage(value: unknown): value is ThreadContextMessage {
     item.sequence > 0 &&
     (item.role === "user" || item.role === "assistant" || item.role === "runtime") &&
     typeof item.text === "string" &&
+    (item.phase === undefined || item.phase === "commentary" || item.phase === "final_answer") &&
     typeof item.createdAt === "string"
   );
 }

@@ -680,7 +680,15 @@ export class PgThreadContextReadRepository implements ThreadContextReadPort {
             items.push({ ...common, role: "user", text: requiredString(body.text) });
           } else if (row.kind === "assistant_message") {
             const text = stringValue(body.text);
-            if (text.length > 0) items.push({ ...common, role: "assistant", text });
+            const phase = assistantMessagePhase(body.phase);
+            if (text.length > 0) {
+              items.push({
+                ...common,
+                role: "assistant",
+                text,
+                ...(phase === undefined ? {} : { phase }),
+              });
+            }
           } else if (row.kind === "workspace_unchanged") {
             items.push({ ...common, role: "runtime", text: "本次运行未产生 Workspace revision。" });
           } else if (row.kind === "legacy_history_gap") {
@@ -983,17 +991,7 @@ async function projectRows(
       });
       activeAssistant = undefined;
     } else if (row.kind === "assistant_message") {
-      const assistantText = stringValue(body.text);
-      const message: Extract<ThreadHistoryMessageV1, { role: "assistant" }> = {
-        sequence,
-        role: "assistant",
-        content: assistantHistoryContent(body.content, assistantText),
-        api: requiredString(body.api),
-        provider: requiredString(body.provider),
-        model: requiredString(body.model),
-        stopReason: stopReason(body.stopReason),
-        timestamp: numberValue(body.timestamp, occurred),
-      };
+      const message = projectAssistantHistoryMessage(sequence, body, occurred);
       messages.push(message);
       activeAssistant = message;
     } else if (row.kind === "tool_call") {
@@ -1057,6 +1055,31 @@ async function projectRows(
     }
   }
   return messages;
+}
+
+function assistantMessagePhase(value: unknown): "commentary" | "final_answer" | undefined {
+  if (value === undefined) return undefined;
+  if (value === "commentary" || value === "final_answer") return value;
+  throw new TypeError("assistant message phase 无效");
+}
+
+/** 展示 phase 不属于 Provider 历史协议，任何时候都不得进入 Active History。 */
+export function projectAssistantHistoryMessage(
+  sequence: number,
+  body: Readonly<Record<string, unknown>>,
+  occurredAt: number,
+): Extract<ThreadHistoryMessageV1, { role: "assistant" }> {
+  const assistantText = stringValue(body.text);
+  return {
+    sequence,
+    role: "assistant",
+    content: assistantHistoryContent(body.content, assistantText),
+    api: requiredString(body.api),
+    provider: requiredString(body.provider),
+    model: requiredString(body.model),
+    stopReason: stopReason(body.stopReason),
+    timestamp: numberValue(body.timestamp, occurredAt),
+  };
 }
 
 async function loadBody(

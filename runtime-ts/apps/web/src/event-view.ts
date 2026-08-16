@@ -47,6 +47,12 @@ export type ConversationBlock =
       readonly title?: string;
       readonly status: "running" | "completed" | "failed";
       readonly callId: string;
+    }
+  | {
+      readonly id: string;
+      readonly type: "finalization";
+      readonly callId: string;
+      readonly status: "started" | "committed" | "cancelled";
     };
 
 export type ToolAction =
@@ -190,6 +196,7 @@ function toolPresentationTitle(payload: Readonly<Record<string, unknown>> | unde
 export function buildConversationBlocks(events: readonly RunEvent[]): readonly ConversationBlock[] {
   const blocks: ConversationBlock[] = [];
   const tools = new Map<string, number>();
+  const finalizations = new Map<string, number>();
   let activeThinking: number | undefined;
   let activeAnswer: number | undefined;
 
@@ -265,10 +272,38 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
       activeThinking = undefined;
       continue;
     }
+    if (event.type === "finalization.started") {
+      activeAnswer = undefined;
+      activeThinking = undefined;
+      const callId = text(payload?.callId);
+      if (callId === undefined) continue;
+      finalizations.set(callId, blocks.length);
+      blocks.push({
+        id: event.eventId,
+        type: "finalization",
+        callId,
+        status: "started",
+      });
+      continue;
+    }
+    if (event.type === "finalization.cancelled" || event.type === "final_answer.committed") {
+      const callId = text(payload?.callId);
+      const index = callId === undefined ? undefined : finalizations.get(callId);
+      const block = index === undefined ? undefined : blocks[index];
+      if (index !== undefined && block?.type === "finalization") {
+        blocks[index] = {
+          ...block,
+          status: event.type === "final_answer.committed" ? "committed" : "cancelled",
+        };
+      }
+      continue;
+    }
     if (!event.type.startsWith("tool.")) continue;
     activeAnswer = undefined;
     activeThinking = undefined;
     const name = text(payload?.name);
+    // 阶段标志由 finalization 事件展示，不能再出现一个误导性的普通工具卡片。
+    if (name === "begin_final_answer") continue;
     const callId = text(payload?.callId) ?? `${name ?? "unknown"}:${event.sequence}`;
     const index = tools.get(callId);
     const status =
@@ -301,7 +336,9 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
     }
   }
 
-  return blocks.filter((block) => block.type === "tool" || block.text.length > 0);
+  return blocks.filter(
+    (block) => block.type === "tool" || block.type === "finalization" || block.text.length > 0,
+  );
 }
 
 /**
@@ -325,7 +362,9 @@ export function buildConversationSections(
   };
 
   for (const block of blocks) {
-    if (block.type === "answer") {
+    if (block.type === "finalization") {
+      flush();
+    } else if (block.type === "answer") {
       flush();
       sections.push(block);
     } else if (
@@ -351,6 +390,7 @@ function toolDescriptor(
   if (!event.type.startsWith("tool.")) return undefined;
   const payload = object(event.payload);
   const name = text(payload?.name);
+  if (name === "begin_final_answer") return undefined;
   // callId 仅作前端聚合键，不能进入可见文案。
   const key = text(payload?.callId) ?? `${name ?? "unknown"}:${event.sequence}`;
   return { key, label: toolActionLabel(name) };

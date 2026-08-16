@@ -13,7 +13,7 @@ import {
   sha256Digest,
   tenantId,
   userId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import {
   type AuthorizedAgentResourceContext,
   assertResourceName,
@@ -24,7 +24,7 @@ import {
   type ResourceCatalogItem,
   type ResourceCatalogPage,
   type TrustedResourceContext,
-} from "@cube-runtime/resource";
+} from "@aisay/resource";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";

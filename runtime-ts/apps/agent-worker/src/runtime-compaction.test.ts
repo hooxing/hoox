@@ -1,13 +1,13 @@
-import { sha256Digest } from "@cube-runtime/domain";
+import { sha256Digest } from "@aisay/domain";
 import {
   type ThreadActiveHistoryV1,
   type TrustedPiModelContextCapability,
   threadActiveHistoryDigest,
-} from "@cube-runtime/pi-adapter";
+} from "@aisay/pi-adapter";
 import type {
   ThreadContextCompactionCommitPort,
   ThreadContinuityMetricsPort,
-} from "@cube-runtime/run-contracts";
+} from "@aisay/run-contracts";
 import { describe, expect, it, vi } from "vitest";
 import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
 

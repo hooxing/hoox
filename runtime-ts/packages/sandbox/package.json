@@ -1,5 +1,5 @@
 {
-  "name": "@cube-runtime/sandbox",
+  "name": "@aisay/sandbox",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -20,8 +20,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@cube-runtime/domain": "workspace:*",
-    "@cube-runtime/workspace": "workspace:*",
+    "@aisay/domain": "workspace:*",
+    "@aisay/workspace": "workspace:*",
     "@cubesandbox/sdk": "workspace:*",
     "e2b": "2.39.0"
   }

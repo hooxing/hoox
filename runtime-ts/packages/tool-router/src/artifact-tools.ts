@@ -6,21 +6,21 @@ import {
   type ArtifactPublicationSnapshot,
   type DeliverableDeclaration,
   type PublishArtifactCommand,
-} from "@cube-runtime/artifact";
+} from "@aisay/artifact";
 import {
   type ArtifactId,
   artifactId,
   type ResourceVersionId,
   resourceVersionId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import {
   DeclareDeliverablesToolArgumentsSchema,
   type PublishArtifactToolArguments,
   PublishArtifactToolArgumentsSchema,
-} from "@cube-runtime/pi-adapter";
-import type { ExecutionScope, ExternalEffectCall } from "@cube-runtime/run-contracts";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
-import { workspaceRelativePath } from "@cube-runtime/workspace";
+} from "@aisay/pi-adapter";
+import type { ExecutionScope, ExternalEffectCall } from "@aisay/run-contracts";
+import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
+import { workspaceRelativePath } from "@aisay/workspace";
 import type { Static, TSchema } from "typebox";
 import { Value } from "typebox/value";
 

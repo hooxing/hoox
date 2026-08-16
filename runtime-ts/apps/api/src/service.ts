@@ -10,31 +10,31 @@ import {
   tenantId,
   threadId,
   transitionRun,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import type {
   CoreRepositories,
   TenantBundle,
   TenantScope,
   ThreadListCursor,
-} from "@cube-runtime/persistence";
+} from "@aisay/persistence";
 import type {
   CreateThreadInputRequest,
   RunDto,
   ThreadDto,
   ThreadInputReceiptDto,
   ThreadPageDto,
-} from "@cube-runtime/protocol";
-import { MAX_RUN_INPUT_UTF8_BYTES } from "@cube-runtime/protocol";
-import { toRunDto, toThreadDto } from "@cube-runtime/protocol-mapper";
+} from "@aisay/protocol";
+import { MAX_RUN_INPUT_UTF8_BYTES } from "@aisay/protocol";
+import { toRunDto, toThreadDto } from "@aisay/protocol-mapper";
 import {
   appendAttachmentsToLatestUserPrompt,
   type ResourceAttachmentResolverPort,
-} from "@cube-runtime/resource";
+} from "@aisay/resource";
 import {
   resolveExplicitSkillInvocation,
   SkillRuntimeError,
   type ExplicitSkillInvocation,
-} from "@cube-runtime/skill";
+} from "@aisay/skill";
 import type { ApiCreateCapability } from "./capabilities.js";
 import { InvalidThreadCursorError } from "./cursor.js";
 import type {

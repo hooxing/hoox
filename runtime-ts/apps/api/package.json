@@ -1,5 +1,5 @@
 {
-  "name": "@cube-runtime/api",
+  "name": "@aisay/api",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -9,13 +9,13 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
-    "@cube-runtime/domain": "workspace:*",
-    "@cube-runtime/persistence": "workspace:*",
-    "@cube-runtime/process-runtime": "workspace:*",
-    "@cube-runtime/protocol": "workspace:*",
-    "@cube-runtime/protocol-mapper": "workspace:*",
-    "@cube-runtime/resource": "workspace:*",
-    "@cube-runtime/skill": "workspace:*",
+    "@aisay/domain": "workspace:*",
+    "@aisay/persistence": "workspace:*",
+    "@aisay/process-runtime": "workspace:*",
+    "@aisay/protocol": "workspace:*",
+    "@aisay/protocol-mapper": "workspace:*",
+    "@aisay/resource": "workspace:*",
+    "@aisay/skill": "workspace:*",
     "fastify": "5.10.0"
   },
   "scripts": {

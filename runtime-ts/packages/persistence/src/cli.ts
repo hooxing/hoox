@@ -39,7 +39,7 @@ if (direction !== "up" && direction !== "down") {
   } else {
     const pool = createPostgresPool({
       connectionString,
-      applicationName: "cube-runtime-migration",
+      applicationName: "aisay-runtime-migration",
       schema,
     });
     try {

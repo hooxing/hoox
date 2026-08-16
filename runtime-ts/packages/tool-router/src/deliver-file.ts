@@ -1,23 +1,16 @@
 import type {
   ArtifactExecutionAuthorization,
   ArtifactExecutionAuthorizationVerifierPort,
-} from "@cube-runtime/artifact";
+} from "@aisay/artifact";
 import {
   SimpleDeliveryCleanupResultUnknownError,
   SimpleDeliveryCommitResultUnknownError,
-} from "@cube-runtime/artifact";
-import type { ArtifactId, ResourceVersionId, Sha256Digest } from "@cube-runtime/domain";
-import {
-  type DeliverFileToolArguments,
-  DeliverFileToolArgumentsSchema,
-} from "@cube-runtime/pi-adapter";
-import type {
-  ExecutionScope,
-  ExternalEffectCall,
-  SandboxSessionRef,
-} from "@cube-runtime/run-contracts";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
-import { workspaceRelativePath } from "@cube-runtime/workspace";
+} from "@aisay/artifact";
+import type { ArtifactId, ResourceVersionId, Sha256Digest } from "@aisay/domain";
+import { type DeliverFileToolArguments, DeliverFileToolArgumentsSchema } from "@aisay/pi-adapter";
+import type { ExecutionScope, ExternalEffectCall, SandboxSessionRef } from "@aisay/run-contracts";
+import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
+import { workspaceRelativePath } from "@aisay/workspace";
 import { Value } from "typebox/value";
 
 export interface DeliverFileSessionBinding {

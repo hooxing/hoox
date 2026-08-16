@@ -2,7 +2,7 @@ import {
   createArtifactExecutionAuthorizationAuthority,
   SimpleDeliveryCleanupResultUnknownError,
   SimpleDeliveryCommitResultUnknownError,
-} from "@cube-runtime/artifact";
+} from "@aisay/artifact";
 import {
   artifactId,
   isoTimestamp,
@@ -12,12 +12,9 @@ import {
   tenantId,
   threadId,
   workspaceId,
-} from "@cube-runtime/domain";
-import type {
-  ConsumedExternalEffectAuthorization,
-  ExecutionScope,
-} from "@cube-runtime/run-contracts";
-import type { SandboxHandle } from "@cube-runtime/sandbox";
+} from "@aisay/domain";
+import type { ConsumedExternalEffectAuthorization, ExecutionScope } from "@aisay/run-contracts";
+import type { SandboxHandle } from "@aisay/sandbox";
 import { describe, expect, it } from "vitest";
 import { type DeliverFileReadResult, DeliverFileToolRouterFactory } from "./deliver-file.js";
 

@@ -1,4 +1,4 @@
-import type { IsoTimestamp, UserId } from "@cube-runtime/domain";
+import type { IsoTimestamp, UserId } from "@aisay/domain";
 
 export type SkillPublicationRole = "publisher" | "reviewer" | "admin";
 export type SkillPublicationStatus =

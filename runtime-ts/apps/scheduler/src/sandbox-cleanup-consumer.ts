@@ -1,9 +1,9 @@
-import type { CleanupClaim } from "@cube-runtime/persistence";
+import type { CleanupClaim } from "@aisay/persistence";
 import {
   type SandboxGateway,
   type SandboxProviderRegistry,
   SandboxRuntimeError,
-} from "@cube-runtime/sandbox";
+} from "@aisay/sandbox";
 
 export interface SandboxCleanupResolver {
   settle(

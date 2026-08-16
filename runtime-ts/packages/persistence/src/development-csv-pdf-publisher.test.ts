@@ -14,13 +14,13 @@ describe("development CSV 转 PDF Skill 发布包", () => {
     expect(skill.metadata).toEqual({
       canonicalKey: "csv-to-pdf",
       displayName: "CSV 转 PDF",
-      publisher: "Cube Agent",
-      version: "1.1.0",
+      publisher: "AISay",
+      version: "1.2.0",
       description: "将 UTF-8 CSV 或 TSV 表格转换为经过完整性校验的 PDF 并交付。",
-      compatibility: "Cube Agent development；LibreOffice Calc 7.4.7；Debian snapshot 20260202",
+      compatibility: "AISay development；LibreOffice Calc 7.4.7；Debian snapshot 20260202",
       sourceUrl: "",
-      sourceRevision: "internal-1.1.0",
-      licenseSpdx: "LicenseRef-Cube-Internal",
+      sourceRevision: "internal-1.2.0",
+      licenseSpdx: "LicenseRef-AISay-Internal",
     });
     expect(skill.files.map((file) => file.path)).toEqual([
       "LICENSE.txt",
@@ -47,12 +47,12 @@ describe("development CSV 转 PDF Skill 发布包", () => {
     expect(wrapperText).toContain('hashlib.sha256(f"{resource_id}\\0{version_id}"');
     expect(wrapperText).toContain("validate_pdf(output)");
     expect(skill.packageDigest).toBe(
-      "4c14b62df37308eb6f8cdea5a4d37b0da2dc42bee9094ff3149ff1775ed7fad6",
+      "57d6931e0b01e44d6a8aa81c0df45c61324e08b534268c7347eb15e1b8aa5c42",
     );
   });
 
   it("拒绝固定目录中的任意字节漂移", async () => {
-    const temporary = await mkdtemp(join(tmpdir(), "cube-csv-pdf-skill-"));
+    const temporary = await mkdtemp(join(tmpdir(), "aisay-csv-pdf-skill-"));
     try {
       await cp(sourceRoot, temporary, { recursive: true });
       const script = join(temporary, "scripts", "csv_to_pdf.py");

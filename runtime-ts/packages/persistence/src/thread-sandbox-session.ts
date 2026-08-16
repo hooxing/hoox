@@ -8,9 +8,9 @@ import type {
   ThreadSandboxTerminalCommandV1,
   ThreadSandboxTerminalReceiptV1,
   ThreadContinuityMetricsPort,
-} from "@cube-runtime/run-contracts";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
-import type { SandboxProviderKey } from "@cube-runtime/sandbox";
+} from "@aisay/run-contracts";
+import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
+import type { SandboxProviderKey } from "@aisay/sandbox";
 import type { Pool, PoolClient } from "pg";
 import { withRetriedSerializableTenantTransaction, withTenantTransaction } from "./postgres.js";
 

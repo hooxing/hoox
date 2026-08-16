@@ -6,13 +6,13 @@ import {
   tenantId,
   threadId,
   type WorkspaceRevisionId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import {
   type StableBlobRef,
   TransactionCommitUnknownError,
   withTenantTransaction,
-} from "@cube-runtime/persistence";
-import type { ExecutionScope } from "@cube-runtime/run-contracts";
+} from "@aisay/persistence";
+import type { ExecutionScope } from "@aisay/run-contracts";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type {
   ArtifactExecutionAuthorization,

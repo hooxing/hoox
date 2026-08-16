@@ -7,8 +7,8 @@ import {
   threadId,
   userId,
   workspaceId,
-} from "@cube-runtime/domain";
-import type { ExecutionFence } from "@cube-runtime/run-contracts";
+} from "@aisay/domain";
+import type { ExecutionFence } from "@aisay/run-contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   decideWaitingRecovery,

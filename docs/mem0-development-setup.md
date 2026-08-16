@@ -26,7 +26,7 @@ MEM0_REQUEST_TIMEOUT_MS=5000
 
 ## 当前实现状态
 
-`@cube-runtime/memory` 已包含 Mem0 Platform V3 提交、事件查询、检索、不可逆 scope 映射和两级异步消费者。0045 迁移提供 PostgreSQL Outbox；成功 Run 在终态事务只登记任务并唤醒后台调度，后续独立维护 tick 才调用 Mem0，回答路径不会等待第三方。每个真实用户输入会检索最多五条相关记忆，并将带低信任标记的结构化内容拼入当前 user message，不进入 system prompt。
+`@aisay/memory` 已包含 Mem0 Platform V3 提交、事件查询、检索、不可逆 scope 映射和两级异步消费者。0045 迁移提供 PostgreSQL Outbox；成功 Run 在终态事务只登记任务并唤醒后台调度，后续独立维护 tick 才调用 Mem0，回答路径不会等待第三方。每个真实用户输入会检索最多五条相关记忆，并将带低信任标记的结构化内容拼入当前 user message，不进入 system prompt。
 
 启用前必须先执行数据库迁移：
 

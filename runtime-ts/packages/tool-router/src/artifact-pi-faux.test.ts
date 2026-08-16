@@ -1,4 +1,4 @@
-import { createArtifactExecutionAuthorizationAuthority } from "@cube-runtime/artifact";
+import { createArtifactExecutionAuthorizationAuthority } from "@aisay/artifact";
 import {
   artifactId,
   isoTimestamp,
@@ -8,14 +8,14 @@ import {
   tenantId,
   threadId,
   workspaceId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import {
   bindTrustedPiModelContextCapability,
   createSafePiSession,
   type RuntimeAgentEvent,
-} from "@cube-runtime/pi-adapter";
-import type { ExternalEffectCall } from "@cube-runtime/run-contracts";
-import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
+} from "@aisay/pi-adapter";
+import type { ExternalEffectCall } from "@aisay/run-contracts";
+import { FakeSandboxHandle } from "@aisay/sandbox/testing";
 import {
   fauxAssistantMessage,
   fauxProvider,

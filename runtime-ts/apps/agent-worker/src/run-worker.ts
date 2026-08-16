@@ -9,11 +9,11 @@ import {
   userId,
   type Workspace,
   type WorkspaceRevisionId,
-} from "@cube-runtime/domain";
-import { injectRetrievedMemories, type MemoryRetriever } from "@cube-runtime/memory";
-import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
-import type { SandboxHandle } from "@cube-runtime/sandbox";
-import { WorkspaceApplicationError, WorkspaceDependencyError } from "@cube-runtime/workspace";
+} from "@aisay/domain";
+import { injectRetrievedMemories, type MemoryRetriever } from "@aisay/memory";
+import type { RuntimeAgentEvent } from "@aisay/pi-adapter";
+import type { SandboxHandle } from "@aisay/sandbox";
+import { WorkspaceApplicationError, WorkspaceDependencyError } from "@aisay/workspace";
 import { AgentSupervisor, rootAgentThreadId } from "./agent-supervisor.js";
 import { DurableOperationLane } from "./durable-operation-lane.js";
 import {

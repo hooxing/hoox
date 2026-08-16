@@ -1,5 +1,5 @@
 {
-  "name": "@cube-runtime/persistence",
+  "name": "@aisay/persistence",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -16,14 +16,14 @@
     "test:integration:minio": "vitest run --root ../../.. runtime-ts/packages/persistence/src/s3-minio.integration.test.ts"
   },
   "dependencies": {
-    "@cube-runtime/context-policy": "workspace:*",
-    "@cube-runtime/domain": "workspace:*",
-    "@cube-runtime/memory": "workspace:*",
-    "@cube-runtime/resource": "workspace:*",
-    "@cube-runtime/run-contracts": "workspace:*",
-    "@cube-runtime/skill": "workspace:*",
-    "@cube-runtime/thread-title": "workspace:*",
-    "@cube-runtime/workspace": "workspace:*",
+    "@aisay/context-policy": "workspace:*",
+    "@aisay/domain": "workspace:*",
+    "@aisay/memory": "workspace:*",
+    "@aisay/resource": "workspace:*",
+    "@aisay/run-contracts": "workspace:*",
+    "@aisay/skill": "workspace:*",
+    "@aisay/thread-title": "workspace:*",
+    "@aisay/workspace": "workspace:*",
     "@aws-sdk/client-s3": "3.1095.0",
     "@aws-sdk/s3-request-presigner": "3.1095.0",
     "pg": "8.22.0"

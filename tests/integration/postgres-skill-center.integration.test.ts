@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { tenantId, userId } from "@cube-runtime/domain";
+import { tenantId, userId } from "@aisay/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { publishDevelopmentCsvPdfSkill } from "../../runtime-ts/packages/persistence/src/development-csv-pdf-publisher.js";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
@@ -231,20 +231,20 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
 
     expect(first).toEqual(second);
     expect(first).toEqual({
-      version: "1.1.0",
+      version: "1.2.0",
       fileCount: 3,
-      packageDigest: "4c14b62df37308eb6f8cdea5a4d37b0da2dc42bee9094ff3149ff1775ed7fad6",
+      packageDigest: "57d6931e0b01e44d6a8aa81c0df45c61324e08b534268c7347eb15e1b8aa5c42",
     });
     expect(
       await migrator.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM skill_versions
-          WHERE skill_id='skill_cube_csv_to_pdf' AND version='1.1.0'`,
+          WHERE skill_id='skill_cube_csv_to_pdf' AND version='1.2.0'`,
       ),
     ).toMatchObject({ rows: [{ count: "1" }] });
     expect(
       await migrator.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM skill_version_files
-          WHERE skill_id='skill_cube_csv_to_pdf' AND skill_version='1.1.0'`,
+          WHERE skill_id='skill_cube_csv_to_pdf' AND skill_version='1.2.0'`,
       ),
     ).toMatchObject({ rows: [{ count: "3" }] });
   });
@@ -426,14 +426,14 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       await repository.install({
         context: teamScope,
         canonicalKey: "csv-to-pdf",
-        versionSelector: "1.1.0",
+        versionSelector: "1.2.0",
         invocationName: "csv-to-pdf",
         idempotencyKey: "skill-install-team-0001",
         requestDigest: "4".repeat(64),
       }),
     ).toMatchObject({
       outcome: "installed",
-      installation: { status: "enabled", skillVersion: "1.1.0" },
+      installation: { status: "enabled", skillVersion: "1.2.0" },
     });
 
     const candidateRunId = `skill-team-run-${unique}`;
@@ -453,7 +453,7 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         {
           invocationName: "csv-to-pdf",
           canonicalKey: "csv-to-pdf",
-          skillVersion: "1.1.0",
+          skillVersion: "1.2.0",
         },
       ],
     });

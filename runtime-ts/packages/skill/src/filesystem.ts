@@ -1,4 +1,4 @@
-import type { TenantId } from "@cube-runtime/domain";
+import type { TenantId } from "@aisay/domain";
 
 export const SKILL_FILESYSTEM_ROOT = "/resources/skills" as const;
 export const SKILL_FILESYSTEM_ROOT_SEGMENT = "skills" as const;

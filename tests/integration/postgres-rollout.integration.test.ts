@@ -1,15 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import {
-  agentThreadId,
-  runId,
-  sha256Digest,
-  tenantId,
-  threadId,
-  userId,
-} from "@cube-runtime/domain";
-import { threadActiveHistoryDigest } from "@cube-runtime/pi-adapter";
-import type { ExecutionFence } from "@cube-runtime/run-contracts";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+import { agentThreadId, runId, sha256Digest, tenantId, threadId, userId } from "@aisay/domain";
+import { threadActiveHistoryDigest } from "@aisay/pi-adapter";
+import type { ExecutionFence } from "@aisay/run-contracts";
+import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgAgentControlRepository } from "../../runtime-ts/packages/persistence/src/pg-agent-control.js";

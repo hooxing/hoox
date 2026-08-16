@@ -1,5 +1,5 @@
 {
-  "name": "@cube-runtime/process-runtime",
+  "name": "@aisay/process-runtime",
   "version": "0.0.0",
   "private": true,
   "type": "module",

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { resourceId, resourceVersionId, tenantId } from "@cube-runtime/domain";
-import type { ResourceFilesystemFile } from "@cube-runtime/resource";
-import type { ExecutionScope } from "@cube-runtime/run-contracts";
+import { resourceId, resourceVersionId, tenantId } from "@aisay/domain";
+import type { ResourceFilesystemFile } from "@aisay/resource";
+import type { ExecutionScope } from "@aisay/run-contracts";
 import { describe, expect, it, vi } from "vitest";
 import { ManagedResourceFilesystemSnapshotMaterializer } from "./sandbox-resource-filesystem-materializer.js";
 

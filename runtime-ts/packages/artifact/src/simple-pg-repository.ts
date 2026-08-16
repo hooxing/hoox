@@ -1,5 +1,5 @@
-import { artifactId, resourceVersionId, sha256Digest } from "@cube-runtime/domain";
-import { TransactionCommitUnknownError, withTenantTransaction } from "@cube-runtime/persistence";
+import { artifactId, resourceVersionId, sha256Digest } from "@aisay/domain";
+import { TransactionCommitUnknownError, withTenantTransaction } from "@aisay/persistence";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
 import type {

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { UserId } from "@cube-runtime/domain";
+import type { UserId } from "@aisay/domain";
 import { SkillServiceError, skillInvariant } from "./errors.js";
 import type {
   SkillPublicationAuthorizationPort,

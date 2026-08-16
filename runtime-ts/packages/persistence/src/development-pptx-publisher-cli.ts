@@ -19,7 +19,7 @@ if (environment !== "development") {
   } else {
     const pool = createPostgresPool({
       connectionString: configuration.databaseUrl,
-      applicationName: "cube-runtime-development-skill-publisher",
+      applicationName: "aisay-runtime-development-skill-publisher",
       schema: configuration.databaseSchema,
     });
     try {

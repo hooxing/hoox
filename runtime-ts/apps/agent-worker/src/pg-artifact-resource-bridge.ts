@@ -1,10 +1,10 @@
-import type { ArtifactExecutionAuthorization } from "@cube-runtime/artifact";
-import { resourceVersionId } from "@cube-runtime/domain";
-import { type Pool, withTenantTransaction } from "@cube-runtime/persistence";
+import type { ArtifactExecutionAuthorization } from "@aisay/artifact";
+import { resourceVersionId } from "@aisay/domain";
+import { type Pool, withTenantTransaction } from "@aisay/persistence";
 import type {
   ArtifactPublicationResourcePort,
   ArtifactPublicationSource,
-} from "@cube-runtime/tool-router";
+} from "@aisay/tool-router";
 
 /**
  * 已固定 ResourceVersion 的解析仍走 PG 事实源；Workspace 文件则由 intent + 最终

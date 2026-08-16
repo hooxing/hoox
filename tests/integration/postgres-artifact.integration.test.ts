@@ -10,9 +10,9 @@ import {
   userId,
   workspaceId,
   workspaceRevisionId,
-} from "@cube-runtime/domain";
-import type { RuntimeMutation } from "@cube-runtime/run-contracts";
-import { runtimeMutationDigest } from "@cube-runtime/run-contracts/mutation-protocol";
+} from "@aisay/domain";
+import type { RuntimeMutation } from "@aisay/run-contracts";
+import { runtimeMutationDigest } from "@aisay/run-contracts/mutation-protocol";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ArtifactExecutionAuthorization } from "../../runtime-ts/packages/artifact/src/authorization.js";
 import { PgArtifactDeliveryRepository } from "../../runtime-ts/packages/artifact/src/pg-repository.js";

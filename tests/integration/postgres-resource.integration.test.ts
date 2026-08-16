@@ -1,12 +1,12 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { resourceId, resourceVersionId, tenantId, userId } from "@cube-runtime/domain";
+import { resourceId, resourceVersionId, tenantId, userId } from "@aisay/domain";
 import {
   type AuthorizedAgentResourceContext,
   createPromotionCapabilityRegistry,
   normalizeSearchQuery,
   type PromoteResourceCapability,
   type TrustedResourceContext,
-} from "@cube-runtime/resource";
+} from "@aisay/resource";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PgResourceFilesystemCatalog } from "../../runtime-ts/packages/persistence/src/pg-resource-filesystem.js";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { WorkspaceCandidateIdentity } from "@cube-runtime/workspace";
+import type { WorkspaceCandidateIdentity } from "@aisay/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import {
   assertBlobOperationId,

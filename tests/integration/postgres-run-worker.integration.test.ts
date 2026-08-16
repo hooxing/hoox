@@ -17,7 +17,7 @@ import {
   userId,
   workspaceId,
   workspaceRevisionId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import type {
   ControlledRolloutProjection,
   ExecutionScope,
@@ -25,14 +25,14 @@ import type {
   RuntimeOutboxV1,
   SandboxSessionRegistryPort,
   ThreadSandboxProviderPort,
-} from "@cube-runtime/run-contracts";
-import { assertProtocolSize } from "@cube-runtime/run-contracts";
+} from "@aisay/run-contracts";
+import { assertProtocolSize } from "@aisay/run-contracts";
 import {
   digestCanonical,
   outboxPayloadDigest,
   runtimeMutationDigest,
-} from "@cube-runtime/run-contracts/mutation-protocol";
-import { FakeSandboxGateway } from "@cube-runtime/sandbox/testing";
+} from "@aisay/run-contracts/mutation-protocol";
+import { FakeSandboxGateway } from "@aisay/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";

@@ -1,4 +1,4 @@
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {

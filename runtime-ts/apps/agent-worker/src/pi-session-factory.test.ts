@@ -4,7 +4,7 @@ import {
   ArtifactCompletionGateAdapter,
   createArtifactExecutionAuthorizationAuthority,
   type PublishArtifactCommand,
-} from "@cube-runtime/artifact";
+} from "@aisay/artifact";
 import {
   agentThreadId,
   artifactId,
@@ -12,25 +12,25 @@ import {
   resourceId,
   resourceVersionId,
   sha256Digest,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import {
   type RuntimeAgentEvent,
   type ThreadActiveHistoryV1,
   threadActiveHistoryDigest,
-} from "@cube-runtime/pi-adapter";
-import { SandboxRuntimeError } from "@cube-runtime/sandbox";
+} from "@aisay/pi-adapter";
+import { SandboxRuntimeError } from "@aisay/sandbox";
 import {
   digestRunSkillSnapshot,
   type SkillInvocationTarget,
   type SkillRuntimeRepository,
   SkillRuntimeService,
-} from "@cube-runtime/skill";
+} from "@aisay/skill";
 import {
   type ArtifactPublicationResourcePort,
   ArtifactToolRouterFactory,
   type ArtifactToolServicePort,
   DeliverFileToolRouterFactory,
-} from "@cube-runtime/tool-router";
+} from "@aisay/tool-router";
 import {
   fauxAssistantMessage,
   fauxProvider,

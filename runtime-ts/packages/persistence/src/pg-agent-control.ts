@@ -1,4 +1,4 @@
-import { sha256Digest } from "@cube-runtime/domain";
+import { sha256Digest } from "@aisay/domain";
 import {
   type AgentControlPersistencePort,
   type AgentThreadPersistenceSnapshot,
@@ -6,7 +6,7 @@ import {
   type DelegableAgentToolName,
   type ExecutionFence,
   type SubAgentConversationSnapshot,
-} from "@cube-runtime/run-contracts";
+} from "@aisay/run-contracts";
 import type { Pool, PoolClient } from "pg";
 import { withRetriedSerializableTenantTransaction, withTenantTransaction } from "./postgres.js";
 

@@ -2,7 +2,7 @@ import type {
   EnqueueOutboxPort,
   ThreadCreationPort,
   ThreadInputRoutingPort,
-} from "@cube-runtime/persistence";
+} from "@aisay/persistence";
 
 const createCapabilityBrand: unique symbol = Symbol("ApiCreateCapability");
 const issuedCapabilities = new WeakSet<object>();

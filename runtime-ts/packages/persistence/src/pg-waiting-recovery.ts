@@ -6,9 +6,9 @@ import {
   threadId,
   workspaceId,
   workspaceRevisionId,
-} from "@cube-runtime/domain";
-import type { ExecutionScope } from "@cube-runtime/run-contracts";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+} from "@aisay/domain";
+import type { ExecutionScope } from "@aisay/run-contracts";
+import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
 import type { Pool, PoolClient } from "pg";
 import { withTenantTransaction } from "./postgres.js";
 

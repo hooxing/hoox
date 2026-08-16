@@ -1,5 +1,5 @@
-import type { AuthContextResolver } from "@cube-runtime/api";
-import { isoTimestamp, userId, type UserId } from "@cube-runtime/domain";
+import type { AuthContextResolver } from "@aisay/api";
+import { isoTimestamp, userId, type UserId } from "@aisay/domain";
 import {
   SkillPublicationService,
   type SkillPublicationAuthorizationPort,
@@ -8,7 +8,7 @@ import {
   type SkillPublicationRole,
   type SkillPublicationStatus,
   type SkillPublicationSubmission,
-} from "@cube-runtime/skill";
+} from "@aisay/skill";
 import { describe, expect, it } from "vitest";
 import { createSkillAdminApiApp } from "./app.js";
 

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@cube-runtime/domain";
+import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@aisay/domain";
 import {
   BlobSkillContentStore,
   createApiPersistenceRuntime,
@@ -7,15 +7,15 @@ import {
   DurableResourceBlobWriter,
   DurableResourceUploadBlobAdapter,
   RUNTIME_BLOB_OBJECT_PREFIX,
-} from "@cube-runtime/persistence";
-import type { ServiceAssemblyFactory } from "@cube-runtime/process-runtime";
+} from "@aisay/persistence";
+import type { ServiceAssemblyFactory } from "@aisay/process-runtime";
 import {
   createResourceFilesystemCapabilityCodec,
   HistoryFileLibraryService,
   ResourceAttachmentResolver,
   ResourceUploadService,
-} from "@cube-runtime/resource";
-import { SkillCenterService } from "@cube-runtime/skill";
+} from "@aisay/resource";
+import { SkillCenterService } from "@aisay/skill";
 import {
   startDevelopmentResourceFsProxy,
   type RunningDevelopmentResourceFsProxy,
@@ -59,14 +59,14 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
     const persistence = createApiPersistenceRuntime({
       connectionString: configuration.databaseUrl,
       schema: configuration.databaseSchema,
-      applicationName: "cube-runtime-api-development",
+      applicationName: "aisay-runtime-api-development",
       teamCoordinator: {
         connectionString: configuration.databaseTeamCoordinatorUrl,
         schema: configuration.databaseSchema,
         ...(configuration.databaseTeamCoordinatorRole === undefined
           ? {}
           : { expectedRuntimeRole: configuration.databaseTeamCoordinatorRole }),
-        applicationName: "cube-runtime-api-team-coordinator-development",
+        applicationName: "aisay-runtime-api-team-coordinator-development",
       },
       serialQueueV2Enabled: configuration.serialQueueV2Enabled,
       historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,

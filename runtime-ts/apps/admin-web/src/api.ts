@@ -7,7 +7,7 @@ import type {
   SkillSubmissionFileRequest,
   SkillSubmissionPageDto,
   SubmitSkillSubmissionRequest,
-} from "@cube-runtime/protocol";
+} from "@aisay/protocol";
 
 type SuccessEnvelope<T> = {
   readonly version: "v1";

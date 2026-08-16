@@ -1,5 +1,5 @@
 {
-  "name": "@cube-runtime/context-policy",
+  "name": "@aisay/context-policy",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
-    "@cube-runtime/domain": "workspace:*"
+    "@aisay/domain": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

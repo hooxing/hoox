@@ -1117,9 +1117,9 @@ export function NavigationSidebar({
       <div className="brand-row">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
-            C
+            A
           </span>
-          <span>Cube Agent</span>
+          <span>AISay</span>
         </div>
         <button
           className="mobile-only icon-button"

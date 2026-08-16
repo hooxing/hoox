@@ -5,40 +5,40 @@ export default defineConfig({
   resolve: {
     // Workspace 测试必须命中当前源码，不能误用上一次构建残留的 dist。
     alias: {
-      "@cube-runtime/sandbox/testing": fileURLToPath(
+      "@aisay/sandbox/testing": fileURLToPath(
         new URL("./runtime-ts/packages/sandbox/src/testing/fake.ts", import.meta.url),
       ),
-      "@cube-runtime/sandbox": fileURLToPath(
+      "@aisay/sandbox": fileURLToPath(
         new URL("./runtime-ts/packages/sandbox/src/index.ts", import.meta.url),
       ),
-      "@cube-runtime/pi-adapter": fileURLToPath(
+      "@aisay/pi-adapter": fileURLToPath(
         new URL("./runtime-ts/packages/pi-adapter/src/index.ts", import.meta.url),
       ),
-      "@cube-runtime/context-policy": fileURLToPath(
+      "@aisay/context-policy": fileURLToPath(
         new URL("./runtime-ts/packages/context-policy/src/index.ts", import.meta.url),
       ),
-      "@cube-runtime/run-contracts/mutation-protocol": fileURLToPath(
+      "@aisay/run-contracts/mutation-protocol": fileURLToPath(
         new URL("./runtime-ts/packages/run-contracts/src/mutation-protocol.ts", import.meta.url),
       ),
-      "@cube-runtime/run-contracts": fileURLToPath(
+      "@aisay/run-contracts": fileURLToPath(
         new URL("./runtime-ts/packages/run-contracts/src/index.ts", import.meta.url),
       ),
-      "@cube-runtime/domain": fileURLToPath(
+      "@aisay/domain": fileURLToPath(
         new URL("./runtime-ts/packages/domain/src/index.ts", import.meta.url),
       ),
-      "@cube-runtime/protocol": fileURLToPath(
+      "@aisay/protocol": fileURLToPath(
         new URL("./runtime-ts/packages/protocol/src/index.ts", import.meta.url),
       ),
-      "@cube-runtime/protocol-mapper": fileURLToPath(
+      "@aisay/protocol-mapper": fileURLToPath(
         new URL("./runtime-ts/packages/protocol-mapper/src/index.ts", import.meta.url),
       ),
-      "@cube-runtime/persistence": fileURLToPath(
+      "@aisay/persistence": fileURLToPath(
         new URL("./runtime-ts/packages/persistence/src/index.ts", import.meta.url),
       ),
-      "@cube-runtime/skill": fileURLToPath(
+      "@aisay/skill": fileURLToPath(
         new URL("./runtime-ts/packages/skill/src/index.ts", import.meta.url),
       ),
-      "@cube-runtime/trajectory": fileURLToPath(
+      "@aisay/trajectory": fileURLToPath(
         new URL("./runtime-ts/packages/trajectory/src/index.ts", import.meta.url),
       ),
     },

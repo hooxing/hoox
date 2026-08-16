@@ -7,7 +7,7 @@ import {
   sha256Digest,
   tenantId,
   userId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import { describe, expect, it, vi } from "vitest";
 import type { ResourceCatalog, TrustedResourceContext } from "./contracts.js";
 import {

@@ -6,8 +6,8 @@ import {
   resourceVersionId,
   type Sha256Digest,
   sha256Digest,
-} from "@cube-runtime/domain";
-import type { PersistResourceBlobResult } from "@cube-runtime/persistence";
+} from "@aisay/domain";
+import type { PersistResourceBlobResult } from "@aisay/persistence";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
 
 export interface SimpleDeliveredFileSnapshot {

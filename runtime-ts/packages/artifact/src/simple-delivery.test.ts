@@ -1,16 +1,6 @@
-import {
-  isoTimestamp,
-  runId,
-  sha256Digest,
-  tenantId,
-  threadId,
-  workspaceId,
-} from "@cube-runtime/domain";
-import type { StableBlobRef } from "@cube-runtime/persistence";
-import type {
-  ConsumedExternalEffectAuthorization,
-  ExecutionScope,
-} from "@cube-runtime/run-contracts";
+import { isoTimestamp, runId, sha256Digest, tenantId, threadId, workspaceId } from "@aisay/domain";
+import type { StableBlobRef } from "@aisay/persistence";
+import type { ConsumedExternalEffectAuthorization, ExecutionScope } from "@aisay/run-contracts";
 import { describe, expect, it } from "vitest";
 import { createArtifactExecutionAuthorizationAuthority } from "./authorization.js";
 import {

@@ -1,4 +1,6 @@
-# CubeSandbox Agent Runtime
+# AISay Runtime
+
+> 爱说 AISay —— 你说，它做。
 
 这是多租户 Agent Runtime 的 TypeScript Monorepo。旧 Python 原型仅作为行为参考，不是本仓库的运行时依赖，也不做数据兼容。
 

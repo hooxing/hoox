@@ -179,6 +179,7 @@ export async function migrateUp(
   const migrations = await loadMigrations(options);
   try {
     const records = await withTransaction(pool, async (client) => {
+      // 该 legacy key 是跨版本迁移进程的共同锁身份；品牌改名不能让新旧进程取得两把不同的锁。
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtext('cube_runtime_schema_migrations_v1'))",
       );
@@ -243,6 +244,7 @@ export async function migrateDown(
   const migrations = await loadMigrations(options);
   try {
     const records = await withTransaction(pool, async (client) => {
+      // down 必须与旧版和新版 up 共用同一 legacy 锁身份，不能随项目品牌改名。
       await client.query(
         "SELECT pg_advisory_xact_lock(hashtext('cube_runtime_schema_migrations_v1'))",
       );

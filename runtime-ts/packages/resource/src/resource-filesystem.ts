@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { ResourceId, ResourceVersionId, TenantId } from "@cube-runtime/domain";
+import type { ResourceId, ResourceVersionId, TenantId } from "@aisay/domain";
 import type { ResourceCatalog, TrustedResourceContext } from "./contracts.js";
 import { ResourceServiceError, resourceInvariant } from "./errors.js";
 

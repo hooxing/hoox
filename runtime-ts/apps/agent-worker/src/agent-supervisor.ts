@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { type AgentThreadId, agentThreadId } from "@cube-runtime/domain";
+import { type AgentThreadId, agentThreadId } from "@aisay/domain";
 import {
   type RuntimeAgentEvent,
   type ThreadActiveHistoryV1,
   type ThreadHistoryMessageV1,
   threadActiveHistoryDigest,
-} from "@cube-runtime/pi-adapter";
+} from "@aisay/pi-adapter";
 import { digestCanonical } from "./mutation-protocol.js";
 import type {
   AgentControlPersistencePort,

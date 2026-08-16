@@ -998,6 +998,8 @@ describe("工作台展示组件", () => {
 
     act(() => root.render(renderDrawer(true)));
     const input = container.querySelector<HTMLInputElement>("input");
+    expect(container.querySelector(".brand")?.textContent).toContain("AISay");
+    expect(container.querySelector(".brand-mark")?.textContent).toContain("A");
     expect(document.activeElement).toBe(input);
     act(() => input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
     expect(onClose).toHaveBeenCalledTimes(1);

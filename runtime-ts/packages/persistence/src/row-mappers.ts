@@ -11,7 +11,7 @@ import {
   type Thread,
   type User,
   type Workspace,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import type { QueryResultRow } from "pg";
 import type { TenantBundle } from "./ports.js";
 

@@ -1,4 +1,4 @@
-import { CubeSandboxGateway, cubeConfigFromEnv, type SandboxHandle } from "@cube-runtime/sandbox";
+import { CubeSandboxGateway, cubeConfigFromEnv, type SandboxHandle } from "@aisay/sandbox";
 import {
   fauxAssistantMessage,
   fauxProvider,

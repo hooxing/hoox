@@ -1,5 +1,5 @@
-import type { ToolObservationResult } from "@cube-runtime/context-policy";
-import type { TodoSnapshot, TodoWriteCommand } from "@cube-runtime/domain";
+import type { ToolObservationResult } from "@aisay/context-policy";
+import type { TodoSnapshot, TodoWriteCommand } from "@aisay/domain";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { createSchemaInvalidArgumentsBridge } from "./tools.js";

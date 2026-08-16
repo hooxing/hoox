@@ -1,4 +1,4 @@
-import type { TenantId } from "@cube-runtime/domain";
+import type { TenantId } from "@aisay/domain";
 import { SandboxRuntimeError } from "./errors.js";
 
 const VOLUME_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;

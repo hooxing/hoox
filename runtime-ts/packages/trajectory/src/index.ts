@@ -1,4 +1,4 @@
-import type { RuntimeEventV1 } from "@cube-runtime/run-contracts";
+import type { RuntimeEventV1 } from "@aisay/run-contracts";
 
 export type TrajectoryRecordKind =
   | "state"

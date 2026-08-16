@@ -1,5 +1,5 @@
-import { createApiPersistenceRuntime } from "@cube-runtime/persistence";
-import { loadDevelopmentEnvironment } from "@cube-runtime/process-runtime";
+import { createApiPersistenceRuntime } from "@aisay/persistence";
+import { loadDevelopmentEnvironment } from "@aisay/process-runtime";
 import {
   parseDevelopmentIdentityEnvironment,
   provisionDevelopmentIdentities,
@@ -24,7 +24,7 @@ async function main(): Promise<void> {
   const persistence = createApiPersistenceRuntime({
     connectionString: configuration.databaseUrl,
     schema: configuration.databaseSchema,
-    applicationName: "cube-runtime-development-identity-provision",
+    applicationName: "aisay-runtime-development-identity-provision",
   });
   try {
     const results = await provisionDevelopmentIdentities({

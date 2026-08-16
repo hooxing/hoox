@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { isoTimestamp, userId, type UserId } from "@cube-runtime/domain";
+import { isoTimestamp, userId, type UserId } from "@aisay/domain";
 import type {
   SkillPublicationAuthorizationPort,
   SkillPublicationCommandResult,
@@ -11,7 +11,7 @@ import type {
   SkillPublicationStatus,
   SkillPublicationSubmission,
   ValidatedSkillPublicationPackage,
-} from "@cube-runtime/skill";
+} from "@aisay/skill";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { TransactionCommitUnknownError, withTransaction } from "./postgres.js";

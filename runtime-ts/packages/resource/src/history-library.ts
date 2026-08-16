@@ -1,4 +1,4 @@
-import type { TenantId } from "@cube-runtime/domain";
+import type { TenantId } from "@aisay/domain";
 import type { TrustedResourceContext } from "./contracts.js";
 import { ResourceServiceError, resourceInvariant } from "./errors.js";
 import type { ResourceFilesystemStoredObject } from "./resource-filesystem.js";

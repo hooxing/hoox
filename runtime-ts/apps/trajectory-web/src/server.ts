@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { RuntimeEventV1 } from "@aisay/run-contracts";
 import {
+  combineDeepSeekTrajectoryProjections,
   type InternalTrajectoryEventV1,
   type ObservedRuntimeEvent,
   projectInternalTrajectory,
@@ -260,14 +261,24 @@ async function resolveRunMetadata(
   }
 }
 
-async function runDetails(run: RunDirectory, provider?: RunMetadataProvider) {
-  const metadata = (await resolveRunMetadata(provider, [run.runId])).get(run.runId);
+async function readRunDetails(run: RunDirectory, metadata?: RunDisplayMetadata) {
   return {
     runId: run.runId,
-    ...(metadata === undefined ? {} : { threadId: metadata.threadId, title: metadata.title }),
+    ...(metadata === undefined
+      ? {}
+      : {
+          threadId: metadata.threadId,
+          title: metadata.title,
+          ...(metadata.createdAt === undefined ? {} : { createdAt: metadata.createdAt }),
+        }),
     updatedAt: run.updatedAt,
     attempts: await Promise.all(run.attempts.map(readAttempt)),
   };
+}
+
+async function runDetails(run: RunDirectory, provider?: RunMetadataProvider) {
+  const metadata = (await resolveRunMetadata(provider, [run.runId])).get(run.runId);
+  return readRunDetails(run, metadata);
 }
 
 async function summarizeAttempt(attempt: AttemptDirectory): Promise<{
@@ -316,7 +327,13 @@ async function runSummaries(runs: readonly RunDirectory[], provider?: RunMetadat
       const display = metadata.get(run.runId);
       return {
         runId: run.runId,
-        ...(display === undefined ? {} : { threadId: display.threadId, title: display.title }),
+        ...(display === undefined
+          ? {}
+          : {
+              threadId: display.threadId,
+              title: display.title,
+              ...(display.createdAt === undefined ? {} : { createdAt: display.createdAt }),
+            }),
         updatedAt: run.updatedAt,
         attemptCount: attempts.length,
         eventCount: attempts.reduce((sum, attempt) => sum + attempt.eventCount, 0),
@@ -324,6 +341,94 @@ async function runSummaries(runs: readonly RunDirectory[], provider?: RunMetadat
       };
     }),
   );
+}
+
+interface MutableThreadSummary {
+  readonly id: string;
+  readonly threadId?: string;
+  readonly title?: string;
+  updatedAt: string;
+  runCount: number;
+  attemptCount: number;
+  eventCount: number;
+  errorCount: number;
+  readonly runIds: string[];
+}
+
+async function threadSummaries(runs: readonly RunDirectory[], provider?: RunMetadataProvider) {
+  const summaries = await runSummaries(runs, provider);
+  const grouped = new Map<string, MutableThreadSummary>();
+  for (const summary of summaries) {
+    const id = summary.threadId ?? summary.runId;
+    const existing = grouped.get(id);
+    if (existing === undefined) {
+      grouped.set(id, {
+        id,
+        ...(summary.threadId === undefined ? {} : { threadId: summary.threadId }),
+        ...(summary.title === undefined ? {} : { title: summary.title }),
+        updatedAt: summary.updatedAt,
+        runCount: 1,
+        attemptCount: summary.attemptCount,
+        eventCount: summary.eventCount,
+        errorCount: summary.errorCount,
+        runIds: [summary.runId],
+      });
+      continue;
+    }
+    existing.updatedAt =
+      existing.updatedAt.localeCompare(summary.updatedAt) >= 0
+        ? existing.updatedAt
+        : summary.updatedAt;
+    existing.runCount += 1;
+    existing.attemptCount += summary.attemptCount;
+    existing.eventCount += summary.eventCount;
+    existing.errorCount += summary.errorCount;
+    existing.runIds.push(summary.runId);
+  }
+  return [...grouped.values()].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+}
+
+async function threadDetails(
+  id: string,
+  runs: readonly RunDirectory[],
+  provider?: RunMetadataProvider,
+) {
+  const metadata = await resolveRunMetadata(
+    provider,
+    runs.map((run) => run.runId),
+  );
+  const selected = runs
+    .filter((run) => (metadata.get(run.runId)?.threadId ?? run.runId) === id)
+    .sort((left, right) => {
+      const leftTime = metadata.get(left.runId)?.createdAt ?? left.updatedAt;
+      const rightTime = metadata.get(right.runId)?.createdAt ?? right.updatedAt;
+      return leftTime.localeCompare(rightTime);
+    });
+  const first = selected[0];
+  if (first === undefined) return undefined;
+  const details = await Promise.all(
+    selected.map((run) => readRunDetails(run, metadata.get(run.runId))),
+  );
+  const segments = details.flatMap((run) => {
+    const attempt = run.attempts.at(-1);
+    return attempt === undefined
+      ? []
+      : [
+          {
+            runId: run.runId,
+            attemptId: attempt.attemptId,
+            projection: attempt.internalTrajectory,
+          },
+        ];
+  });
+  const display = metadata.get(first.runId);
+  return {
+    id,
+    ...(display === undefined ? {} : { threadId: display.threadId, title: display.title }),
+    updatedAt: selected.at(-1)?.updatedAt ?? first.updatedAt,
+    runs: details,
+    internalTrajectory: combineDeepSeekTrajectoryProjections(segments),
+  };
 }
 
 async function safeTraceFile(
@@ -384,6 +489,24 @@ async function handle(
     return;
   }
   const runs = await discoverRuns(options.root);
+  if (url.pathname === "/api/threads") {
+    json(response, 200, { items: await threadSummaries(runs, options.metadata) });
+    return;
+  }
+  if (url.pathname.startsWith("/api/threads/")) {
+    const threadId = decodeURIComponent(url.pathname.slice("/api/threads/".length));
+    if (!identifierPattern.test(threadId)) {
+      json(response, 404, { error: "THREAD_NOT_FOUND" });
+      return;
+    }
+    const thread = await threadDetails(threadId, runs, options.metadata);
+    if (thread === undefined) {
+      json(response, 404, { error: "THREAD_NOT_FOUND" });
+      return;
+    }
+    json(response, 200, thread);
+    return;
+  }
   if (url.pathname === "/api/runs") {
     json(response, 200, { items: await runSummaries(runs, options.metadata) });
     return;
@@ -464,4 +587,6 @@ export const internalTesting = Object.freeze({
   summarizeAttempt,
   runDetails,
   runSummaries,
+  threadDetails,
+  threadSummaries,
 });

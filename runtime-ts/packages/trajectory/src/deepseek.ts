@@ -11,6 +11,11 @@ export type DeepSeekTrajectoryKind =
   | "subtool"
   | "runtime";
 
+export interface DeepSeekTrajectoryRecordSource {
+  readonly runId: string;
+  readonly attemptId: string;
+}
+
 export interface DeepSeekTrajectoryRecord {
   readonly id: string;
   readonly index: number;
@@ -30,6 +35,7 @@ export interface DeepSeekTrajectoryRecord {
   readonly durationMs: number | null;
   readonly isError: boolean;
   readonly detail: InternalTrajectoryValue;
+  readonly source?: DeepSeekTrajectoryRecordSource;
   readonly usage?: Readonly<{
     input: number;
     output: number;
@@ -68,6 +74,91 @@ export interface DeepSeekTrajectoryProjection {
     /** cacheRead / (input + cacheRead)，无输入时为 null。 */
     readonly cacheHitRate: number | null;
     readonly durationMs: number;
+  };
+}
+
+export interface DeepSeekTrajectorySegment {
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly projection: DeepSeekTrajectoryProjection;
+}
+
+/**
+ * Thread 视图只组合逻辑投影，不改写任何 Run/Attempt 原始事件；原始 sequence 通过 source 保持可定位。
+ */
+export function combineDeepSeekTrajectoryProjections(
+  segments: readonly DeepSeekTrajectorySegment[],
+): DeepSeekTrajectoryProjection {
+  const records: DeepSeekTrajectoryRecord[] = [];
+  const turns = new Map<number, DeepSeekTrajectoryTurn>();
+  let turnOffset = 0;
+  let durationOffsetMs = 0;
+  let events = 0;
+  let calls = 0;
+  let failedCalls = 0;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
+  let modelDurationMs = 0;
+
+  for (const segment of segments) {
+    const mappedRecords = segment.projection.records.map((record) => {
+      const mapped: DeepSeekTrajectoryRecord = {
+        ...record,
+        id: `${segment.runId}/${segment.attemptId}/${record.id}`,
+        index: records.length + 1,
+        turn: record.turn === 0 ? 0 : record.turn + turnOffset,
+        monotonicOffsetMs: record.monotonicOffsetMs + durationOffsetMs,
+        source: { runId: segment.runId, attemptId: segment.attemptId },
+      };
+      records.push(mapped);
+      return mapped;
+    });
+
+    for (const sourceTurn of segment.projection.turns) {
+      const mappedTurn = sourceTurn.turn === 0 ? 0 : sourceTurn.turn + turnOffset;
+      const turnRecords = mappedRecords.filter((record) => record.turn === mappedTurn);
+      const existing = turns.get(mappedTurn);
+      if (existing === undefined) {
+        turns.set(mappedTurn, { ...sourceTurn, turn: mappedTurn, records: turnRecords });
+      } else {
+        turns.set(mappedTurn, { ...existing, records: [...existing.records, ...turnRecords] });
+      }
+    }
+
+    const stats = segment.projection.stats;
+    events += stats.events;
+    calls += stats.calls;
+    failedCalls += stats.failedCalls;
+    inputTokens += stats.inputTokens;
+    outputTokens += stats.outputTokens;
+    cacheReadTokens += stats.cacheReadTokens;
+    cacheWriteTokens += stats.cacheWriteTokens;
+    modelDurationMs += stats.modelDurationMs;
+    turnOffset += stats.turns;
+    durationOffsetMs += stats.durationMs;
+  }
+
+  const cacheEligibleTokens = inputTokens + cacheReadTokens;
+  return {
+    turns: [...turns.values()].sort((left, right) => left.turn - right.turn),
+    records,
+    stats: {
+      events,
+      records: records.length,
+      turns: turnOffset,
+      calls,
+      failedCalls,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      modelDurationMs,
+      outputTokensPerSecond: modelDurationMs > 0 ? outputTokens / (modelDurationMs / 1_000) : null,
+      cacheHitRate: cacheEligibleTokens > 0 ? cacheReadTokens / cacheEligibleTokens : null,
+      durationMs: durationOffsetMs,
+    },
   };
 }
 

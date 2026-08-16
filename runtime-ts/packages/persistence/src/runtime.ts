@@ -9,6 +9,7 @@ import {
 } from "./model-wire-trace-read.js";
 import { type PgBlobLifecycleOptions, PgBlobLifecycleRepository } from "./pg-blob-lifecycle.js";
 import { PgArchiveThreadCommand, PgCoreRepositories } from "./pg-core-repositories.js";
+import { PgLocalAccountRepository } from "./pg-local-account.js";
 import { PgPersonalizationSettingsRepository } from "./pg-personalization-settings.js";
 import { PgResourceFilesystemCatalog } from "./pg-resource-filesystem.js";
 import {
@@ -92,6 +93,7 @@ export interface ApiPersistenceRuntime {
   readonly skillCenter: PgSkillCenterRepository;
   readonly skillFilesystem: PgSkillFilesystemCatalog;
   readonly personalizations: PgPersonalizationSettingsRepository;
+  readonly localAccounts: PgLocalAccountRepository;
   threadContext(blobs: BlobStore): ThreadContextReadPort;
   probe(): Promise<void>;
   close(): Promise<void>;
@@ -143,6 +145,7 @@ export function createApiPersistenceRuntime(
     skillCenter: new PgSkillCenterRepository(pool),
     skillFilesystem: new PgSkillFilesystemCatalog(pool),
     personalizations: new PgPersonalizationSettingsRepository(pool, teamCoordinatorPool),
+    localAccounts: new PgLocalAccountRepository(pool),
     threadContext: (blobs: BlobStore) => new PgThreadContextReadRepository(pool, blobs),
     probe: async () => {
       await Promise.all([

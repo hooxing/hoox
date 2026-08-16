@@ -24,6 +24,13 @@ import type {
 } from "@aisay/persistence";
 import { assertBlobRef, BlobStoreError, PersistenceError, sha256Hex } from "@aisay/persistence";
 import {
+  AccountProfileSuccessEnvelopeSchema,
+  AccountSessionSuccessEnvelopeSchema,
+  type LoginAccountRequest,
+  LoginAccountRequestSchema,
+  LogoutAccountSuccessEnvelopeSchema,
+  type RegisterAccountRequest,
+  RegisterAccountRequestSchema,
   ArtifactDeliverySuccessEnvelopeSchema,
   ArtifactListSuccessEnvelopeSchema,
   type ConfigureSkillRequest,
@@ -159,10 +166,12 @@ import {
   ResourceFilesystemHttpError,
   registerResourceFilesystemHttp,
 } from "./resource-filesystem-http.js";
+import type { LocalAccountAuthService } from "./local-account-auth.js";
 import { ApiFailure, type ApiFailureKind, ApiService } from "./service.js";
 
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
+  readonly localAccounts?: LocalAccountAuthService;
   readonly repositories: CoreRepositories;
   readonly createCapability?: ApiCreateCapability;
   readonly archiveThread: ArchiveThreadCommandPort;
@@ -569,6 +578,78 @@ export function createApiApp(
       checkedAt: normalizedDependencies.clock.now(),
     });
   });
+
+  if (normalizedDependencies.localAccounts !== undefined) {
+    const localAccounts = normalizedDependencies.localAccounts;
+    const accountSessionResponses = {
+      200: AccountSessionSuccessEnvelopeSchema,
+      400: ErrorEnvelopeSchema,
+      401: ErrorEnvelopeSchema,
+      409: ErrorEnvelopeSchema,
+      415: ErrorEnvelopeSchema,
+      500: ErrorEnvelopeSchema,
+      503: ErrorEnvelopeSchema,
+    } as const;
+
+    app.post<{ Body: RegisterAccountRequest }>(
+      "/v1/auth/register",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: { body: RegisterAccountRequestSchema, response: accountSessionResponses },
+      },
+      async (request) => success(request, await localAccounts.register(request.body)),
+    );
+
+    app.post<{ Body: LoginAccountRequest }>(
+      "/v1/auth/login",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: { body: LoginAccountRequestSchema, response: accountSessionResponses },
+      },
+      async (request) => success(request, await localAccounts.login(request.body)),
+    );
+
+    app.get(
+      "/v1/auth/me",
+      {
+        schema: {
+          response: {
+            200: AccountProfileSuccessEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const principal = await localAccounts.resolve({
+          authorization: authorization(request),
+          requestId: requestId(request),
+        });
+        if (principal === undefined) throw new ApiFailure("unauthorized");
+        const accountProfile = await localAccounts.getProfile(principal);
+        if (accountProfile === undefined) throw new ApiFailure("unauthorized");
+        return success(request, accountProfile);
+      },
+    );
+
+    app.post(
+      "/v1/auth/logout",
+      {
+        schema: {
+          response: {
+            200: LogoutAccountSuccessEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        await localAccounts.logout(authorization(request));
+        return success(request, { loggedOut: true as const });
+      },
+    );
+  }
 
   if (normalizedDependencies.personalizations !== undefined) {
     const personalizations = normalizedDependencies.personalizations;

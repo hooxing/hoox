@@ -515,6 +515,7 @@ function fixture(
     readonly teamCollaboration?: ApiDependencies["teamCollaboration"];
     readonly personalizations?: ApiDependencies["personalizations"];
     readonly threadForks?: ApiDependencies["threadForks"];
+    readonly localAccounts?: ApiDependencies["localAccounts"];
   } = {},
 ) {
   const state = new FakeApiState();
@@ -583,6 +584,7 @@ function fixture(
           : Object.freeze({ userId: principal.userId });
       },
     },
+    ...(options.localAccounts === undefined ? {} : { localAccounts: options.localAccounts }),
     repositories: state.repositories,
     ...(options.enableCreate === false
       ? {}
@@ -963,6 +965,42 @@ afterEach(async () => {
 });
 
 describe("Fastify API 契约", () => {
+  it("仅在装配本地账号能力时暴露注册登录路由", async () => {
+    const session = {
+      profile: { id: "user_local", displayName: "林晓", email: "lin@example.com" },
+      accessToken: "hoox_session_test-token-with-more-than-thirty-two-characters",
+      expiresAt: "2099-08-25T08:00:00.000Z",
+    };
+    const localAccounts = {
+      register: vi.fn(async () => session),
+      login: vi.fn(async () => session),
+      resolve: vi.fn(async () => undefined),
+      getProfile: vi.fn(async () => undefined),
+      logout: vi.fn(async () => undefined),
+    } satisfies NonNullable<ApiDependencies["localAccounts"]>;
+    const enabled = fixture({ localAccounts });
+    openApps.push(enabled.app);
+
+    const response = await enabled.app.inject({
+      method: "POST",
+      url: "/v1/auth/register",
+      headers: { "content-type": "application/json" },
+      payload: { displayName: "林晓", email: "lin@example.com", password: "secret12" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data).toEqual(session);
+    expect(localAccounts.register).toHaveBeenCalledWith({
+      displayName: "林晓",
+      email: "lin@example.com",
+      password: "secret12",
+    });
+
+    const disabled = fixture();
+    openApps.push(disabled.app);
+    expect(
+      (await disabled.app.inject({ method: "POST", url: "/v1/auth/register" })).statusCode,
+    ).toBe(404);
+  });
   it("个人与团队个性化执行版本冲突、作用域和可编辑权限契约", async () => {
     let personal: Awaited<
       ReturnType<NonNullable<ApiDependencies["personalizations"]>["getPersonal"]>

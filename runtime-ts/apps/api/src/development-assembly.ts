@@ -24,6 +24,7 @@ import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec, parseThreadCursorSigningKeys } from "./cursor.js";
 import { createDevelopmentAuthResolver } from "./development-auth.js";
+import { createLocalAccountAuthService } from "./local-account-auth.js";
 import {
   assertDevelopmentPrincipalsIsolated,
   assertDevelopmentPublicObjectStorageEndpoint,
@@ -140,12 +141,18 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
         persistence.resourceUploads,
         { maxBytes: developmentApiMaxBlobSizeBytes, now: clock.now },
       );
+      const localAccounts = createLocalAccountAuthService({
+        repository: persistence.localAccounts,
+        clock,
+      });
       app = createApiApp(
         {
           auth: createDevelopmentAuthResolver({
             runtimeEnvironment: configuration.runtimeEnvironment,
             principals,
+            fallback: localAccounts,
           }),
+          localAccounts,
           repositories: persistence.repositories,
           personalizations: persistence.personalizations,
           ...(persistence.teamCollaboration === undefined

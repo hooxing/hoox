@@ -8,9 +8,11 @@ import {
   AccountMenu,
   clearAccountSession,
   developmentAccount,
+  developmentSession,
   persistAccountSession,
   readAccountSession,
-  type AccountProfile,
+  type AccountAccessApi,
+  type AccountSession,
 } from "./account-access.js";
 
 const roots: Root[] = [];
@@ -49,20 +51,23 @@ describe("本地账号会话", () => {
     clearAccountSession(window.localStorage);
     expect(readAccountSession(window.localStorage)).toBeUndefined();
 
-    const profile: AccountProfile = {
-      id: "local-user",
-      displayName: "林晓",
-      email: "lin@example.com",
-    };
-    persistAccountSession(window.localStorage, profile);
-    expect(readAccountSession(window.localStorage)).toEqual(profile);
+    persistAccountSession(window.localStorage, developmentSession);
+    expect(readAccountSession(window.localStorage)).toEqual(developmentSession);
   });
 
-  it("可注册本机账号，并在退出后使用同一邮箱和密码登录", async () => {
-    clearAccountSession(window.localStorage);
+  it("注册和登录都使用后端账号接口并持久化返回的会话", async () => {
+    const session: AccountSession = {
+      profile: { id: "user-local", displayName: "林晓", email: "lin@example.com" },
+      accessToken: "hoox_session_test-token-with-more-than-thirty-two-characters",
+      expiresAt: "2099-12-31T23:59:59.000Z",
+    };
+    const api: AccountAccessApi = {
+      registerAccount: vi.fn(async () => session),
+      loginAccount: vi.fn(async () => session),
+    };
     const authenticated = vi.fn();
     const container = mount(
-      <AccountAccess storage={window.localStorage} onAuthenticated={authenticated} />,
+      <AccountAccess api={api} storage={window.localStorage} onAuthenticated={authenticated} />,
     );
 
     act(() => {
@@ -77,11 +82,13 @@ describe("本地账号会话", () => {
     change(inputs[3] as HTMLInputElement, "secret12");
     act(() => container.querySelector<HTMLFormElement>("form")?.requestSubmit());
 
-    await vi.waitFor(() => expect(authenticated).toHaveBeenCalledTimes(1));
-    expect(authenticated.mock.calls[0]?.[0]).toMatchObject({
+    await vi.waitFor(() => expect(authenticated).toHaveBeenCalledWith(session));
+    expect(api.registerAccount).toHaveBeenCalledWith({
       displayName: "林晓",
       email: "lin@example.com",
+      password: "secret12",
     });
+    expect(readAccountSession(window.localStorage)).toEqual(session);
 
     clearAccountSession(window.localStorage);
     act(() => {
@@ -90,7 +97,7 @@ describe("本地账号会话", () => {
     });
     const login = vi.fn();
     const loginContainer = mount(
-      <AccountAccess storage={window.localStorage} onAuthenticated={login} />,
+      <AccountAccess api={api} storage={window.localStorage} onAuthenticated={login} />,
     );
     const loginInputs = loginContainer.querySelectorAll<HTMLInputElement>(
       ".account-access-form input",
@@ -99,8 +106,11 @@ describe("本地账号会话", () => {
     change(loginInputs[1] as HTMLInputElement, "secret12");
     act(() => loginContainer.querySelector<HTMLFormElement>("form")?.requestSubmit());
 
-    await vi.waitFor(() => expect(login).toHaveBeenCalledTimes(1));
-    expect(login.mock.calls[0]?.[0]).toMatchObject({ displayName: "林晓" });
+    await vi.waitFor(() => expect(login).toHaveBeenCalledWith(session));
+    expect(api.loginAccount).toHaveBeenCalledWith({
+      email: "lin@example.com",
+      password: "secret12",
+    });
   });
 });
 

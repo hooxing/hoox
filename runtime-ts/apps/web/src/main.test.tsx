@@ -3,7 +3,7 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { developmentAccount, persistAccountSession } from "./account-access.js";
+import { developmentSession, persistAccountSession } from "./account-access.js";
 import {
   ApiError,
   type Artifact,
@@ -130,7 +130,7 @@ async function settleEffects(): Promise<void> {
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   window.localStorage.clear();
-  persistAccountSession(window.localStorage, developmentAccount);
+  persistAccountSession(window.localStorage, developmentSession);
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: vi.fn(() => ({

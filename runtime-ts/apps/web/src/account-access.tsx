@@ -1,17 +1,29 @@
 import { Building2, ChevronUp, LogOut, ShieldCheck, UserRound, UsersRound, X } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type RefObject } from "react";
 
-const ACCOUNT_STORAGE_KEY = "hoox.local-account.v1";
-const SESSION_STORAGE_KEY = "hoox.local-session.v1";
+const SESSION_STORAGE_KEY = "hoox.auth-session.v2";
 export type AccountProfile = {
   readonly id: string;
   readonly displayName: string;
   readonly email: string;
 };
 
-type StoredAccount = AccountProfile & {
-  readonly passwordDigest: string;
-  readonly passwordSalt: string;
+export type AccountSession = {
+  readonly profile: AccountProfile;
+  readonly accessToken: string;
+  readonly expiresAt: string;
+};
+
+export type AccountAccessApi = {
+  registerAccount(input: {
+    readonly displayName: string;
+    readonly email: string;
+    readonly password: string;
+  }): Promise<AccountSession>;
+  loginAccount(input: {
+    readonly email: string;
+    readonly password: string;
+  }): Promise<AccountSession>;
 };
 
 export const developmentAccount: AccountProfile = Object.freeze({
@@ -20,68 +32,66 @@ export const developmentAccount: AccountProfile = Object.freeze({
   email: "dev-user-a@local.hoox",
 });
 
+export const developmentSession: AccountSession = Object.freeze({
+  profile: developmentAccount,
+  accessToken: "dev-user-a",
+  expiresAt: "2099-12-31T23:59:59.000Z",
+});
+
 function normalizeEmail(value: string): string {
   return value.trim().toLocaleLowerCase("en-US");
 }
 
-function parseProfile(value: string | null): AccountProfile | undefined {
+function parseSession(value: string | null): AccountSession | undefined {
   if (value === null) return undefined;
   try {
-    const candidate = JSON.parse(value) as Partial<AccountProfile>;
+    const candidate = JSON.parse(value) as {
+      readonly profile?: Partial<AccountProfile>;
+      readonly accessToken?: unknown;
+      readonly expiresAt?: unknown;
+    };
+    const profile = candidate.profile;
     if (
-      typeof candidate.id !== "string" ||
-      typeof candidate.displayName !== "string" ||
-      typeof candidate.email !== "string" ||
-      candidate.id.trim().length === 0 ||
-      candidate.displayName.trim().length === 0 ||
-      normalizeEmail(candidate.email).length === 0
+      profile === undefined ||
+      typeof profile.id !== "string" ||
+      typeof profile.displayName !== "string" ||
+      typeof profile.email !== "string" ||
+      profile.id.trim().length === 0 ||
+      profile.displayName.trim().length === 0 ||
+      normalizeEmail(profile.email).length === 0 ||
+      typeof candidate.accessToken !== "string" ||
+      candidate.accessToken.length === 0 ||
+      typeof candidate.expiresAt !== "string" ||
+      !Number.isFinite(Date.parse(candidate.expiresAt)) ||
+      Date.parse(candidate.expiresAt) <= Date.now()
     ) {
       return undefined;
     }
     return {
-      id: candidate.id,
-      displayName: candidate.displayName.trim(),
-      email: normalizeEmail(candidate.email),
+      profile: {
+        id: profile.id,
+        displayName: profile.displayName.trim(),
+        email: normalizeEmail(profile.email),
+      },
+      accessToken: candidate.accessToken,
+      expiresAt: candidate.expiresAt,
     };
   } catch {
     return undefined;
   }
 }
 
-function parseStoredAccount(value: string | null): StoredAccount | undefined {
-  const profile = parseProfile(value);
-  if (profile === undefined || value === null) return undefined;
+export function readAccountSession(storage: Storage): AccountSession | undefined {
   try {
-    const candidate = JSON.parse(value) as Partial<StoredAccount>;
-    if (
-      typeof candidate.passwordDigest !== "string" ||
-      candidate.passwordDigest.length === 0 ||
-      typeof candidate.passwordSalt !== "string" ||
-      candidate.passwordSalt.length === 0
-    ) {
-      return undefined;
-    }
-    return {
-      ...profile,
-      passwordDigest: candidate.passwordDigest,
-      passwordSalt: candidate.passwordSalt,
-    };
+    return parseSession(storage.getItem(SESSION_STORAGE_KEY));
   } catch {
     return undefined;
   }
 }
 
-export function readAccountSession(storage: Storage): AccountProfile | undefined {
+export function persistAccountSession(storage: Storage, session: AccountSession): void {
   try {
-    return parseProfile(storage.getItem(SESSION_STORAGE_KEY));
-  } catch {
-    return undefined;
-  }
-}
-
-export function persistAccountSession(storage: Storage, profile: AccountProfile): void {
-  try {
-    storage.setItem(SESSION_STORAGE_KEY, JSON.stringify(profile));
+    storage.setItem(SESSION_STORAGE_KEY, JSON.stringify(session));
   } catch {
     // 浏览器禁用持久化时仍允许当前页面保持登录状态。
   }
@@ -95,60 +105,30 @@ export function clearAccountSession(storage: Storage): void {
   }
 }
 
-function readStoredAccount(storage: Storage): StoredAccount | undefined {
-  try {
-    return parseStoredAccount(storage.getItem(ACCOUNT_STORAGE_KEY));
-  } catch {
-    return undefined;
-  }
-}
-
-function persistStoredAccount(storage: Storage, account: StoredAccount): void {
-  storage.setItem(ACCOUNT_STORAGE_KEY, JSON.stringify(account));
-}
-
-function bytesToBase64Url(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
-}
-
-function base64UrlToBytes(value: string): Uint8Array {
-  const padded = value
-    .replaceAll("-", "+")
-    .replaceAll("_", "/")
-    .padEnd(Math.ceil(value.length / 4) * 4, "=");
-  return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
-}
-
-async function derivePasswordDigest(password: string, salt: Uint8Array): Promise<string> {
-  const material = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(password),
-    "PBKDF2",
-    false,
-    ["deriveBits"],
-  );
-  const saltBuffer = Uint8Array.from(salt).buffer;
-  const bits = await crypto.subtle.deriveBits(
-    { name: "PBKDF2", hash: "SHA-256", salt: saltBuffer, iterations: 120_000 },
-    material,
-    256,
-  );
-  return bytesToBase64Url(new Uint8Array(bits));
-}
-
 function initials(displayName: string): string {
   const characters = Array.from(displayName.trim());
   return (characters[0] ?? "H").toLocaleUpperCase();
 }
 
+function accountErrorMessage(error: unknown, mode: "login" | "register"): string {
+  const status =
+    typeof error === "object" && error !== null && "status" in error
+      ? Number((error as { readonly status?: unknown }).status)
+      : 0;
+  if (status === 401) return "邮箱或密码不正确";
+  if (status === 409) return "该邮箱已注册，请直接登录";
+  if (status === 400) return "账号信息格式不正确";
+  return mode === "login" ? "登录失败，请稍后重试" : "注册失败，请稍后重试";
+}
+
 export function AccountAccess({
+  api,
   storage = window.localStorage,
   onAuthenticated,
 }: {
+  readonly api: AccountAccessApi;
   readonly storage?: Storage;
-  readonly onAuthenticated: (profile: AccountProfile) => void;
+  readonly onAuthenticated: (session: AccountSession) => void;
 }) {
   const [mode, setMode] = useState<"login" | "register">("login");
   const [displayName, setDisplayName] = useState("");
@@ -156,59 +136,56 @@ export function AccountAccess({
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [error, setError] = useState<string>();
+  const [submitting, setSubmitting] = useState(false);
 
-  const authenticate = (profile: AccountProfile) => {
-    persistAccountSession(storage, profile);
-    onAuthenticated(profile);
+  const authenticate = (session: AccountSession) => {
+    persistAccountSession(storage, session);
+    onAuthenticated(session);
   };
 
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
-    const normalizedEmail = normalizeEmail(email);
-    if (!normalizedEmail || password.length < 6) {
-      setError("请输入有效邮箱，密码至少 6 位。");
-      return;
-    }
-    if (mode === "login") {
-      const account = readStoredAccount(storage);
-      const passwordMatches =
-        account !== undefined &&
-        account.email === normalizedEmail &&
-        (await derivePasswordDigest(password, base64UrlToBytes(account.passwordSalt))) ===
-          account.passwordDigest;
-      if (!passwordMatches || account === undefined) {
-        setError("账号或密码不正确。若尚未创建本机账号，请先注册。");
-        return;
-      }
-      setError(undefined);
-      authenticate(account);
-      return;
-    }
-    const normalizedName = displayName.trim();
-    if (normalizedName.length < 2 || normalizedName.length > 32) {
-      setError("用户名需要 2 至 32 个字符。");
-      return;
-    }
-    if (password !== confirmation) {
-      setError("两次输入的密码不一致。");
-      return;
-    }
-    const salt = crypto.getRandomValues(new Uint8Array(16));
-    const account: StoredAccount = {
-      id: `local-${crypto.randomUUID()}`,
-      displayName: normalizedName,
-      email: normalizedEmail,
-      passwordDigest: await derivePasswordDigest(password, salt),
-      passwordSalt: bytesToBase64Url(salt),
-    };
-    try {
-      persistStoredAccount(storage, account);
-    } catch {
-      setError("浏览器未允许保存账号信息，请检查隐私或存储设置。");
-      return;
-    }
+  const switchMode = (nextMode: "login" | "register") => {
+    setMode(nextMode);
     setError(undefined);
-    authenticate(account);
+    setPassword("");
+    setConfirmation("");
+  };
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError(undefined);
+    const normalizedEmail = normalizeEmail(email);
+    if (normalizedEmail.length < 3 || !normalizedEmail.includes("@")) {
+      setError("请输入有效邮箱");
+      return;
+    }
+    if (password.length < 8) {
+      setError("密码至少需要 8 个字符");
+      return;
+    }
+    if (mode === "register" && displayName.trim().length < 2) {
+      setError("用户名至少需要 2 个字符");
+      return;
+    }
+    if (mode === "register" && password !== confirmation) {
+      setError("两次输入的密码不一致");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const session =
+        mode === "register"
+          ? await api.registerAccount({
+              displayName: displayName.trim(),
+              email: normalizedEmail,
+              password,
+            })
+          : await api.loginAccount({ email: normalizedEmail, password });
+      authenticate(session);
+    } catch (reason) {
+      setError(accountErrorMessage(reason, mode));
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -218,23 +195,16 @@ export function AccountAccess({
           H
         </div>
         <div className="account-access-heading">
-          <span>Hoox</span>
+          <span>HOOX WORKSPACE</span>
           <h1 id="account-access-title">{mode === "login" ? "欢迎回来" : "创建你的账号"}</h1>
-          <p>
-            {mode === "login"
-              ? "登录后继续处理任务、文件和团队协作。"
-              : "完成注册后，用户信息会显示在会话导航底部。"}
-          </p>
+          <p>{mode === "login" ? "登录后继续处理你的任务。" : "注册后会创建独立的个人空间。"}</p>
         </div>
         <div className="account-access-tabs" role="tablist" aria-label="账号操作">
           <button
             type="button"
             role="tab"
             aria-selected={mode === "login"}
-            onClick={() => {
-              setMode("login");
-              setError(undefined);
-            }}
+            onClick={() => switchMode("login")}
           >
             登录
           </button>
@@ -242,10 +212,7 @@ export function AccountAccess({
             type="button"
             role="tab"
             aria-selected={mode === "register"}
-            onClick={() => {
-              setMode("register");
-              setError(undefined);
-            }}
+            onClick={() => switchMode("register")}
           >
             注册
           </button>
@@ -253,17 +220,17 @@ export function AccountAccess({
         <form className="account-access-form" onSubmit={(event) => void submit(event)}>
           {mode === "register" && (
             <label>
-              <span>用户名</span>
+              用户名
               <input
                 autoComplete="name"
                 value={displayName}
                 onChange={(event) => setDisplayName(event.target.value)}
-                placeholder="例如：林晓"
+                placeholder="你的名字"
               />
             </label>
           )}
           <label>
-            <span>邮箱</span>
+            邮箱
             <input
               type="email"
               autoComplete="email"
@@ -273,18 +240,18 @@ export function AccountAccess({
             />
           </label>
           <label>
-            <span>密码</span>
+            密码
             <input
               type="password"
               autoComplete={mode === "login" ? "current-password" : "new-password"}
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              placeholder="至少 6 位"
+              placeholder="至少 8 个字符"
             />
           </label>
           {mode === "register" && (
             <label>
-              <span>确认密码</span>
+              确认密码
               <input
                 type="password"
                 autoComplete="new-password"
@@ -299,21 +266,21 @@ export function AccountAccess({
               {error}
             </div>
           )}
-          <button className="account-access-submit" type="submit">
-            {mode === "login" ? "登录" : "创建账号"}
+          <button className="account-access-submit" type="submit" disabled={submitting}>
+            {submitting ? "请稍候…" : mode === "login" ? "登录" : "创建账号"}
           </button>
         </form>
         {mode === "login" && (
           <button
             className="development-account-button"
             type="button"
-            onClick={() => authenticate(developmentAccount)}
+            onClick={() => authenticate(developmentSession)}
           >
             <ShieldCheck size={16} />
             使用本地开发身份继续
           </button>
         )}
-        <small>本地工作台账号仅保存在当前浏览器，不会上传密码。</small>
+        <small>账号和任务保存在本地开发后端；浏览器只保存会话令牌。</small>
       </section>
     </main>
   );

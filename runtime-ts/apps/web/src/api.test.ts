@@ -37,11 +37,46 @@ describe("RuntimeApi", () => {
         ),
       );
     const api = new RuntimeApi(fetcher, "/api");
+    api.setAccessToken("dev-user-a");
     await api.createThread("测试");
     const [, init] = fetcher.mock.calls[0] as [string, RequestInit];
     const headers = new Headers(init.headers);
     expect(headers.get("authorization")).toBe("Bearer dev-user-a");
     expect(headers.get("idempotency-key")).toMatch(/^[-a-z0-9]{8,}$/iu);
+  });
+
+  it("登录注册不携带旧身份，后续请求使用服务端返回的动态令牌", async () => {
+    const fetcher = vi.fn().mockImplementation((url: string) =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            version: "v1",
+            requestId: "req_auth",
+            data: url.endsWith("/v1/auth/login")
+              ? {
+                  profile: { id: "user_local", displayName: "林晓", email: "lin@example.com" },
+                  accessToken: "hoox_session_new",
+                  expiresAt: "2099-12-31T23:59:59.000Z",
+                }
+              : { items: [] },
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    const api = new RuntimeApi(fetcher, "/api");
+    api.setAccessToken("stale-token");
+
+    await api.loginAccount({ email: "lin@example.com", password: "secret12" });
+    expect(
+      new Headers((fetcher.mock.calls[0] as [string, RequestInit])[1].headers).get("authorization"),
+    ).toBeNull();
+
+    api.setAccessToken("hoox_session_new");
+    await api.listThreads();
+    expect(
+      new Headers((fetcher.mock.calls[1] as [string, RequestInit])[1].headers).get("authorization"),
+    ).toBe("Bearer hoox_session_new");
   });
 
   it("可并行读取个人与团队任务列表且不改变当前活动租户", async () => {

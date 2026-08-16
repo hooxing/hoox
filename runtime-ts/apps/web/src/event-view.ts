@@ -303,7 +303,9 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
     activeThinking = undefined;
     const name = text(payload?.name);
     // 阶段标志由 finalization 事件展示，不能再出现一个误导性的普通工具卡片。
-    if (name === "begin_final_answer") continue;
+    if (name === "collapse_process_for_final_answer" || name === "begin_final_answer") {
+      continue;
+    }
     const callId = text(payload?.callId) ?? `${name ?? "unknown"}:${event.sequence}`;
     const index = tools.get(callId);
     const status =
@@ -390,7 +392,9 @@ function toolDescriptor(
   if (!event.type.startsWith("tool.")) return undefined;
   const payload = object(event.payload);
   const name = text(payload?.name);
-  if (name === "begin_final_answer") return undefined;
+  if (name === "collapse_process_for_final_answer" || name === "begin_final_answer") {
+    return undefined;
+  }
   // callId 仅作前端聚合键，不能进入可见文案。
   const key = text(payload?.callId) ?? `${name ?? "unknown"}:${event.sequence}`;
   return { key, label: toolActionLabel(name) };

@@ -1272,7 +1272,12 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       type: "turn.completed",
       assistant: {
         content: [
-          { type: "toolCall", id: "call-final", name: "begin_final_answer", arguments: {} },
+          {
+            type: "toolCall",
+            id: "call-final",
+            name: "collapse_process_for_final_answer",
+            arguments: {},
+          },
         ],
         api: "openai-completions",
         provider: "test",
@@ -1283,7 +1288,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       toolResults: [
         {
           toolCallId: "call-final",
-          toolName: "begin_final_answer",
+          toolName: "collapse_process_for_final_answer",
           text: '{"status":"ready"}',
           isError: false,
           timestamp: 2,
@@ -1317,11 +1322,15 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     const session = new ScriptedAgentSession(
       [
         { type: "agent.started" },
-        { type: "tool.started", callId: "call-final", name: "begin_final_answer" },
+        {
+          type: "tool.started",
+          callId: "call-final",
+          name: "collapse_process_for_final_answer",
+        },
         {
           type: "tool.completed",
           callId: "call-final",
-          name: "begin_final_answer",
+          name: "collapse_process_for_final_answer",
           isError: false,
         },
         { type: "message.completed", stopReason: "toolUse" },
@@ -1386,7 +1395,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
             {
               type: "toolCall",
               id: "call-final-cancel",
-              name: "begin_final_answer",
+              name: "collapse_process_for_final_answer",
               arguments: {},
             },
           ],
@@ -1399,7 +1408,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
         toolResults: [
           {
             toolCallId: "call-final-cancel",
-            toolName: "begin_final_answer",
+            toolName: "collapse_process_for_final_answer",
             text: "ready",
             isError: false,
             timestamp: 2,

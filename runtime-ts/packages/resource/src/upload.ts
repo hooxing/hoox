@@ -7,7 +7,7 @@ import {
   type ResourceVersionId,
   resourceId,
   resourceVersionId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import type { TrustedResourceContext } from "./contracts.js";
 import { ResourceServiceError, resourceInvariant } from "./errors.js";
 import { assertResourceName } from "./path.js";

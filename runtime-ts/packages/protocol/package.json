@@ -1,5 +1,5 @@
 {
-  "name": "@cube-runtime/protocol",
+  "name": "@aisay/protocol",
   "version": "0.0.0",
   "private": true,
   "type": "module",

@@ -1,10 +1,10 @@
 {
-  "name": "@cube-runtime/skill",
+  "name": "@aisay/skill",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@cube-runtime/domain": "workspace:*"
+    "@aisay/domain": "workspace:*"
   },
   "exports": "./dist/index.js",
   "types": "./dist/index.d.ts",

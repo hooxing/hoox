@@ -5,7 +5,7 @@
     "types": ["node", "vitest/globals"],
     "baseUrl": ".",
     "paths": {
-      "@cube-runtime/context-policy": ["runtime-ts/packages/context-policy/src/index.ts"]
+      "@aisay/context-policy": ["runtime-ts/packages/context-policy/src/index.ts"]
     }
   },
   "include": [

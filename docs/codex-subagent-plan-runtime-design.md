@@ -1,8 +1,8 @@
-# Codex Subagent 与 Plan 机制调研及 Cube Runtime 实施方案
+# Codex Subagent 与 Plan 机制调研及 AISay Runtime 实施方案
 
 > 调研日期：2026-08-05
 > Codex 源码基线：`openai/codex@7ada37a15e1f6aa84f83b4b9410f9d29e66fefe4`（2026-08-04）
-> 目标仓库：`cubesandbox-agent-runtime`
+> 目标仓库：`aisay-runtime`
 
 ## 1. 结论摘要
 
@@ -14,7 +14,7 @@ Codex 中名为“Plan”的机制实际包含三个彼此独立的概念：
 2. **Proposed Plan**：模型最终输出的 `<proposed_plan>` 标记块，由流式解析器从普通正文中提取并以专用 UI 展示。
 3. **`update_plan`**：Default Mode 中更新执行清单的轻量工具；它不是 Plan Mode 的状态机，并且在 Plan Mode 中被明确拒绝。
 
-Cube Runtime 已完成 SubAgent 核心运行链路：Root Session 可以通过协作工具创建独立子 Session，Agent Thread/Turn、
+AISay Runtime 已完成 SubAgent 核心运行链路：Root Session 可以通过协作工具创建独立子 Session，Agent Thread/Turn、
 mailbox、命令、Rollout 和 Agent 级许可已经接入 PostgreSQL 与 Worker。主 Thread 还会保存已完成的子 Agent 对话，供下一次
 Root Run 继续使用。Plan Mode、Proposed Plan 和对应 Web 交互仍是后续范围。
 
@@ -105,7 +105,7 @@ Codex 的 Agent 状态包括 `PendingInit`、`Running`、`Completed`、`Interrup
 
 Codex 的官方建议偏向并行、读取密集且边界清晰的任务；多个 Agent 同时修改同一文件会增加冲突风险。子 Agent 继承父 Agent 的沙箱和审批策略，角色配置只能进一步调整受允许的模型与指令，不能绕过宿主权限。
 
-Cube Runtime 保留一个 Workspace lease、一个共享 Sandbox 和一个最终 Revision 提交路径。多个 Session 不各自提交
+AISay Runtime 保留一个 Workspace lease、一个共享 Sandbox 和一个最终 Revision 提交路径。多个 Session 不各自提交
 候选 Revision；RunWorker 在所有 SubAgent 结束后，对共享 Sandbox 统一 verify/publish。并发编辑的产品边界不是
 “Runtime 自动合并”，而是 root 选择工具与划分任务所有权，结构化同路径重叠写入得到短暂 `FILE_BUSY`。
 
@@ -155,9 +155,9 @@ Plan turn 结束后，TUI 弹出三个动作：
 
 `update_plan` 接收 `explanation` 和若干 `{step, status}`，然后发布 `PlanUpdate` 事件，工具结果固定为 `Plan updated`。它没有驱动 Plan Mode，也不负责 proposed plan 的批准与持久化；在 Plan Mode 调用会直接报错。
 
-因此 Cube Runtime 不应把现有 `domain.Plan` 同时用于“方案审批”和“执行进度”。两者的生命周期、事实源和 UI 都不同。
+因此 AISay Runtime 不应把现有 `domain.Plan` 同时用于“方案审批”和“执行进度”。两者的生命周期、事实源和 UI 都不同。
 
-## 4. 当前 Cube Runtime 的实施状态与剩余差距
+## 4. 当前 AISay Runtime 的实施状态与剩余差距
 
 | 层 | 当前实现 | 与目标的差距 |
 |---|---|---|
@@ -358,7 +358,7 @@ root 与 SubAgent 使用同一 `SandboxSessionRef`，不建立独立 Workspace b
 先后基于旧业务假设修改同一逻辑区域也可能产生语义冲突。因此 root 必须通过工具选择、任务说明和文件/模块所有权
 降低冲突。RunWorker 仍只在所有 Agent 结束后对共享 Sandbox 统一 verify/publish 一次。
 
-## 6. Plan Mode 在 Cube Runtime 的实现方案
+## 6. Plan Mode 在 AISay Runtime 的实现方案
 
 ### 6.1 协议与快照
 
@@ -399,7 +399,7 @@ interface UserInputRequestV1 {
 }
 ```
 
-Cube Runtime 不必复制 Codex 的内存 oneshot。更符合现有恢复模型的做法是：
+AISay Runtime 不必复制 Codex 的内存 oneshot。更符合现有恢复模型的做法是：
 
 1. tool handler 持久化未完成 tool call、结构化问题和 waiting checkpoint；
 2. `RunWorker` 原子进入 Run/Attempt waiting 并释放活跃 Session；

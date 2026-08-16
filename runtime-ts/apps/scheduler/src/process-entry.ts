@@ -1,4 +1,4 @@
-import { tenantId } from "@cube-runtime/domain";
+import { tenantId } from "@aisay/domain";
 import {
   createPostgresPool,
   PgSandboxCleanupConsumerStore,
@@ -6,7 +6,7 @@ import {
   PgThreadContinuityMetrics,
   PgThreadSandboxLifecycleConsumerStore,
   probePostgres,
-} from "@cube-runtime/persistence";
+} from "@aisay/persistence";
 import {
   assertProductionInheritedEnvironment,
   booleanEnvironmentField,
@@ -22,12 +22,12 @@ import {
   startServiceProcess,
   stringEnvironmentField,
   urlEnvironmentField,
-} from "@cube-runtime/process-runtime";
+} from "@aisay/process-runtime";
 import {
   OpenAiCompatibleThreadTitleGenerator,
   ThreadTitleGenerationConsumer,
   ThreadTitleGenerationPollingLoop,
-} from "@cube-runtime/thread-title";
+} from "@aisay/thread-title";
 import {
   CubeSandboxGateway,
   E2BSandboxGateway,
@@ -35,7 +35,7 @@ import {
   type SandboxProviderKey,
   SandboxProviderRegistry,
   resolveCubeProxyRouting,
-} from "@cube-runtime/sandbox";
+} from "@aisay/sandbox";
 import {
   SandboxCleanupConsumer,
   SandboxCleanupRouterResolver,
@@ -336,7 +336,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       ...(configuration.databaseSsl === undefined ? {} : { ssl: configuration.databaseSsl }),
       schema: configuration.databaseSchema,
       expectedRuntimeRole: configuration.databaseRuntimeRole,
-      applicationName: "cube-runtime-scheduler-cleanup",
+      applicationName: "aisay-runtime-scheduler-cleanup",
     });
     try {
       // 角色身份和 RLS 绕过属性必须在 cleanup loop 产生任何远端副作用前证明安全。

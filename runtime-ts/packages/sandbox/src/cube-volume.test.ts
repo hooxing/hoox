@@ -1,4 +1,4 @@
-import { tenantId } from "@cube-runtime/domain";
+import { tenantId } from "@aisay/domain";
 import { describe, expect, it, vi } from "vitest";
 import { CubeTenantResourceVolume } from "./cube-volume.js";
 

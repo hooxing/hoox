@@ -3,7 +3,7 @@ import {
   CubeSandboxGateway,
   SandboxRuntimeError,
   type SandboxHandle,
-} from "@cube-runtime/sandbox";
+} from "@aisay/sandbox";
 import { CubeSandboxCleanupResolver } from "./sandbox-cleanup-consumer.js";
 
 if (process.env.REAL_CUBE_CLEANUP_SMOKE !== "1") {

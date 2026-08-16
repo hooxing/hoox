@@ -1,5 +1,5 @@
 {
-  "name": "@cube-runtime/pi-adapter",
+  "name": "@aisay/pi-adapter",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -16,10 +16,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@cube-runtime/context-policy": "workspace:*",
-    "@cube-runtime/domain": "workspace:*",
-    "@cube-runtime/prompt-builder": "workspace:*",
-    "@cube-runtime/sandbox": "workspace:*",
+    "@aisay/context-policy": "workspace:*",
+    "@aisay/domain": "workspace:*",
+    "@aisay/prompt-builder": "workspace:*",
+    "@aisay/sandbox": "workspace:*",
     "@earendil-works/pi-ai": "0.82.1",
     "@earendil-works/pi-coding-agent": "0.82.1",
     "@huggingface/tokenizers": "0.1.3",

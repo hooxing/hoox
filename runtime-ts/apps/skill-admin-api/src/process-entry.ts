@@ -4,7 +4,7 @@ import {
   type ProductionJwtVerificationKey,
   parseProductionApiTransport,
   parseProductionJwtSigningKeys,
-} from "@cube-runtime/api";
+} from "@aisay/api";
 import {
   assertProductionInheritedEnvironment,
   booleanEnvironmentField,
@@ -21,7 +21,7 @@ import {
   startServiceProcess,
   stringEnvironmentField,
   urlEnvironmentField,
-} from "@cube-runtime/process-runtime";
+} from "@aisay/process-runtime";
 import {
   startDevelopmentSkillAdminApiProcess,
   startProductionSkillAdminApiProcess,
@@ -328,7 +328,7 @@ function createProductionConfiguration(input: {
   readonly privateKeyPath?: string;
   readonly trustedProxyCidrs?: string;
 }): NonNullable<SkillAdminApiProcessConfiguration["production"]> {
-  if (input.audience === "cube-runtime-api") {
+  if (input.audience === "aisay-runtime-api") {
     throw new TypeError("SKILL_ADMIN_JWT_AUDIENCE 必须与普通 API audience 隔离");
   }
   return Object.freeze({

@@ -8,16 +8,16 @@ import {
   type ModelBudgetDescriptor,
   parseControlledToolReceipt,
   type TokenizerPort,
-} from "@cube-runtime/context-policy";
-import { type RolloutCompatibilityIdentity, sha256Digest } from "@cube-runtime/domain";
+} from "@aisay/context-policy";
+import { type RolloutCompatibilityIdentity, sha256Digest } from "@aisay/domain";
 import {
   type AvailableSkillPromptInput,
   buildRuntimeSystemPrompt,
   buildToolCapabilityManifest,
   type RuntimePromptInput,
   type ToolCapabilityManifest,
-} from "@cube-runtime/prompt-builder";
-import type { SandboxHandle } from "@cube-runtime/sandbox";
+} from "@aisay/prompt-builder";
+import type { SandboxHandle } from "@aisay/sandbox";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 import type {
   Api,

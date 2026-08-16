@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { sha256Digest, workspaceRevisionId } from "@cube-runtime/domain";
-import { workspaceCandidateOperationDigest } from "@cube-runtime/persistence";
-import type { WorkspaceRuntimePort } from "@cube-runtime/run-contracts";
+import { sha256Digest, workspaceRevisionId } from "@aisay/domain";
+import { workspaceCandidateOperationDigest } from "@aisay/persistence";
+import type { WorkspaceRuntimePort } from "@aisay/run-contracts";
 import {
   createWorkspaceManifest,
   type SandboxSessionIdentity,
@@ -19,7 +19,7 @@ import {
   WorkspacePublisher,
   type WorkspaceStableBlobReadPort,
   type WorkspaceTrustedScope,
-} from "@cube-runtime/workspace";
+} from "@aisay/workspace";
 
 export interface WorkspaceRevisionFactPort {
   loadCurrentManifest(input: {

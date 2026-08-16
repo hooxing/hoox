@@ -1,4 +1,4 @@
-import type { ModelWireTraceCursor } from "@cube-runtime/persistence";
+import type { ModelWireTraceCursor } from "@aisay/persistence";
 
 const base64UrlPattern = /^[A-Za-z0-9_-]+$/u;
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u;

@@ -21,7 +21,7 @@ import {
   userId,
   type Workspace,
   workspaceId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import {
   type ArchiveThreadCommandPort,
   type BlobStore,
@@ -39,14 +39,10 @@ import {
   type ThreadInputReceiptView,
   type ThreadInputRoutingPort,
   type Versioned,
-} from "@cube-runtime/persistence";
-import { HistoryFileLibraryService, type HistoryFileLibraryFile } from "@cube-runtime/resource";
+} from "@aisay/persistence";
+import { HistoryFileLibraryService, type HistoryFileLibraryFile } from "@aisay/resource";
 import type { FastifyInstance } from "fastify";
-import {
-  SkillCenterService,
-  type SkillCenterPort,
-  type SkillInstallation,
-} from "@cube-runtime/skill";
+import { SkillCenterService, type SkillCenterPort, type SkillInstallation } from "@aisay/skill";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ApiDependencies, createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";

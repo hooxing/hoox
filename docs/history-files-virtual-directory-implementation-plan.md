@@ -489,7 +489,7 @@ Sandbox；只有工具调用需要 Sandbox 时才 acquire。若未来 Skill 不�
 首条 durable 输入事务中幂等创建任务，Scheduler 使用独立低成本模型异步生成标题，Web 在 Run 轮询期间读取最新 Thread。
 
 标题生成只服务 personal 历史目录和同一任务的 UI 标题，当前作为现有 Scheduler 中的独立 consumer 运行，不立即拆新服务；
-边界通过 `@cube-runtime/thread-title` 端口隔离，后续吞吐、限流或故障域需要时可以独立部署。
+边界通过 `@aisay/thread-title` 端口隔离，后续吞吐、限流或故障域需要时可以独立部署。
 
 处理规则：
 

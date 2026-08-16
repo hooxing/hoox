@@ -166,6 +166,8 @@
 | [ADR-20260815193622](20260815193622-lossless-internal-trajectory-and-deepseek-adapter.md) | 内部无损 Session 轨迹与 DeepSeek Trajectory 适配 | 已接受 | 2026-08-15 |
 | [ADR-20260815214527](20260815214527-internal-events-and-logical-trajectory-records.md) | 内部无损事件与逻辑轨迹记录分层 | 已接受 | 2026-08-15 |
 | [ADR-20260815232211](20260815232211-internal-trajectory-title-and-performance-metrics.md) | 内部轨迹标题与性能统计语义 | 已接受 | 2026-08-15 |
+| [ADR-20260816002622](20260816002622-aisay-runtime-project-identity.md) | 项目身份迁移为 AISay Runtime | 已接受 | 2026-08-16 |
+| [ADR-20260816114151](20260816114151-hoox-agent-product-brand.md) | 将用户面对的 Agent 产品命名为 Hoox | 已接受 | 2026-08-16 |
 
 ## 何时必须记录
 

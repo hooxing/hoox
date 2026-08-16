@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isoTimestamp, runId, threadId, workspaceId } from "@cube-runtime/domain";
+import { isoTimestamp, runId, threadId, workspaceId } from "@aisay/domain";
 import {
   BlobSkillContentStore,
   type CreateS3BlobStoreConfig,
@@ -9,15 +9,15 @@ import {
   DurableResourceUploadBlobAdapter,
   probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX,
-} from "@cube-runtime/persistence";
-import { type ServiceAssemblyFactory, startServiceProcess } from "@cube-runtime/process-runtime";
+} from "@aisay/persistence";
+import { type ServiceAssemblyFactory, startServiceProcess } from "@aisay/process-runtime";
 import {
   createResourceFilesystemCapabilityCodec,
   HistoryFileLibraryService,
   ResourceAttachmentResolver,
   ResourceUploadService,
-} from "@cube-runtime/resource";
-import { SkillCenterService } from "@cube-runtime/skill";
+} from "@aisay/resource";
+import { SkillCenterService } from "@aisay/skill";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec, parseThreadCursorSigningKeys } from "./cursor.js";
@@ -53,13 +53,13 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
       ssl: configuration.databaseSsl,
       schema: configuration.databaseSchema,
       expectedRuntimeRole: configuration.databaseRuntimeRole,
-      applicationName: "cube-runtime-api-production",
+      applicationName: "aisay-runtime-api-production",
       teamCoordinator: {
         connectionString: configuration.databaseTeamCoordinatorUrl,
         ssl: configuration.databaseTeamCoordinatorSsl,
         schema: configuration.databaseSchema,
         expectedRuntimeRole: configuration.databaseTeamCoordinatorRole,
-        applicationName: "cube-runtime-api-team-coordinator-production",
+        applicationName: "aisay-runtime-api-team-coordinator-production",
       },
       serialQueueV2Enabled: configuration.serialQueueV2Enabled,
       historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
@@ -202,7 +202,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
 export function startProductionApiProcess(
   configuration: ApiProcessConfiguration,
   options: Readonly<{
-    signalSource?: import("@cube-runtime/process-runtime").ProcessSignalSource;
+    signalSource?: import("@aisay/process-runtime").ProcessSignalSource;
     onShutdownFailure?: (error: Error) => void;
   }> = {},
 ) {

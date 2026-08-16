@@ -5,13 +5,13 @@ import {
   rehydrateResourceVersion,
   sha256Digest,
   tenantId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import {
   normalizeSearchQuery,
   type PersistedResourceUpload,
   type ResourceUploadCommitResult,
   type ResourceUploadRepository,
-} from "@cube-runtime/resource";
+} from "@aisay/resource";
 import type { Pool, PoolClient } from "pg";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";

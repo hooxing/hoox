@@ -1,4 +1,4 @@
-import { userId } from "@cube-runtime/domain";
+import { userId } from "@aisay/domain";
 import { describe, expect, it } from "vitest";
 import type { Pool } from "pg";
 import {

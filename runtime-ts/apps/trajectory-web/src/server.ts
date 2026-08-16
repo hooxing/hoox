@@ -1,13 +1,13 @@
 import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { RuntimeEventV1 } from "@cube-runtime/run-contracts";
+import type { RuntimeEventV1 } from "@aisay/run-contracts";
 import {
   type InternalTrajectoryEventV1,
   type ObservedRuntimeEvent,
   projectInternalTrajectory,
   projectTrajectory,
-} from "@cube-runtime/trajectory";
+} from "@aisay/trajectory";
 import { trajectoryHtml } from "./html.js";
 import type { RunDisplayMetadata, RunMetadataProvider } from "./runtime-metadata.js";
 

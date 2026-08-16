@@ -1,4 +1,4 @@
-import type { CleanupClaim } from "@cube-runtime/persistence";
+import type { CleanupClaim } from "@aisay/persistence";
 import { describe, expect, it } from "vitest";
 import {
   SandboxCleanupConsumer,

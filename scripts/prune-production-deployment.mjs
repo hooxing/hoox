@@ -21,9 +21,9 @@ if (!isAbsolute(targetArgument) || target === parse(target).root) {
 const rootPackagePath = join(target, "package.json");
 const rootPackage = JSON.parse(readFileSync(rootPackagePath, "utf8"));
 const expectedPackages = Object.freeze({
-  api: "@cube-runtime/api",
-  scheduler: "@cube-runtime/scheduler",
-  worker: "@cube-runtime/agent-worker",
+  api: "@aisay/api",
+  scheduler: "@aisay/scheduler",
+  worker: "@aisay/agent-worker",
 });
 if (
   rootPackage.name !== expectedPackages[service] ||
@@ -49,7 +49,7 @@ function isWorkspacePackage(directory) {
     const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
     return (
       typeof manifest.name === "string" &&
-      (manifest.name.startsWith("@cube-runtime/") || manifest.name === "@cubesandbox/sdk")
+      (manifest.name.startsWith("@aisay/") || manifest.name === "@cubesandbox/sdk")
     );
   } catch {
     return false;

@@ -2,7 +2,7 @@ import {
   assertRunPersonalizationSnapshot,
   normalizePersonalizationContent,
   type RunPersonalizationSnapshot,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import type { Pool, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {

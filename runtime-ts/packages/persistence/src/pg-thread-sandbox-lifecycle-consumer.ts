@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
-import type { SandboxProviderKey } from "@cube-runtime/sandbox";
+import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
+import type { SandboxProviderKey } from "@aisay/sandbox";
 import type { Pool } from "pg";
 import { withTenantTransaction } from "./postgres.js";
 

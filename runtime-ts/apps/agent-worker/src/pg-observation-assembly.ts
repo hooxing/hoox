@@ -1,8 +1,5 @@
-import type {
-  ControlledToolReceiptSource,
-  ToolObservationPolicy,
-} from "@cube-runtime/context-policy";
-import type { RolloutCompatibilityIdentity } from "@cube-runtime/domain";
+import type { ControlledToolReceiptSource, ToolObservationPolicy } from "@aisay/context-policy";
+import type { RolloutCompatibilityIdentity } from "@aisay/domain";
 import {
   type BlobStore,
   createDurableTraceBlobPersistence,
@@ -10,11 +7,8 @@ import {
   type PgRuntimeRolloutRepository,
   type TraceBlobCommitRepository,
   type TrustedRolloutContext,
-} from "@cube-runtime/persistence";
-import {
-  type ControlledRolloutProjection,
-  projectLoadedRuntimeRecovery,
-} from "@cube-runtime/pi-adapter";
+} from "@aisay/persistence";
+import { type ControlledRolloutProjection, projectLoadedRuntimeRecovery } from "@aisay/pi-adapter";
 import { createDurableObservationRecorderFactory } from "./pi-session-factory.js";
 import type { AgentSessionFactoryPort } from "./ports.js";
 

@@ -2,7 +2,7 @@ import type {
   CreateSkillSubmissionRequest,
   SkillPublicationStatus,
   SkillSubmissionDto,
-} from "@cube-runtime/protocol";
+} from "@aisay/protocol";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   AdminApiError,
@@ -788,10 +788,10 @@ export function App({ apiClient = defaultApi }: { readonly apiClient?: SkillAdmi
     <main className="admin-shell">
       <header className="topbar">
         <div className="brand-mark" aria-hidden="true">
-          C
+          A
         </div>
         <div>
-          <span className="eyebrow">Cube Runtime</span>
+          <span className="eyebrow">AISay Runtime</span>
           <h1>技能发布管理台</h1>
         </div>
         <button

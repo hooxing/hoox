@@ -3,13 +3,13 @@ import {
   historyFilesystemCollisionName,
   historyFilesystemDirectoryName,
   stripAttachmentsFromUserFacingPrompt,
-} from "@cube-runtime/resource";
+} from "@aisay/resource";
 import type {
   GeneratedThreadTitle,
   ThreadTitleGenerationClaim,
   ThreadTitleGenerationErrorCode,
   ThreadTitleGenerationStore,
-} from "@cube-runtime/thread-title";
+} from "@aisay/thread-title";
 import type { Pool, PoolClient } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";

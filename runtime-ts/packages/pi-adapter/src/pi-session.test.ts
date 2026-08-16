@@ -495,7 +495,7 @@ describe("Pi 安全适配", () => {
       },
     });
     expect([...controller.getDiagnostics().activeToolNames].sort()).toEqual(
-      [...SANDBOX_TOOL_NAMES, "begin_final_answer", "skill"].sort(),
+      [...SANDBOX_TOOL_NAMES, "collapse_process_for_final_answer", "skill"].sort(),
     );
     expect("compact" in controller).toBe(false);
     expect("session" in controller).toBe(false);
@@ -512,9 +512,11 @@ describe("Pi 安全适配", () => {
     }
   });
 
-  it("根 Agent 调用阶段标志后继续生成标准 assistant message", async () => {
+  it("根 Agent 选择折叠较长过程后继续生成标准 assistant message", async () => {
     const { controller, events, toolAuthorizationCount } = await harness([
-      fauxAssistantMessage(fauxToolCall("begin_final_answer", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("collapse_process_for_final_answer", {}), {
+        stopReason: "toolUse",
+      }),
       fauxAssistantMessage("这是最终答复。"),
     ]);
 
@@ -528,7 +530,7 @@ describe("Pi 安全适配", () => {
     expect(events).toContainEqual(
       expect.objectContaining({
         type: "tool.completed",
-        name: "begin_final_answer",
+        name: "collapse_process_for_final_answer",
         isError: false,
       }),
     );

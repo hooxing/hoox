@@ -2689,11 +2689,11 @@ function classifyFinalizationTurn(
   );
   const marker =
     toolCalls.length === 1 &&
-    toolCalls[0]?.name === "begin_final_answer" &&
+    toolCalls[0]?.name === "collapse_process_for_final_answer" &&
     Object.keys(toolCalls[0].arguments).length === 0 &&
     event.toolResults.length === 1 &&
     event.toolResults[0]?.toolCallId === toolCalls[0].id &&
-    event.toolResults[0].toolName === "begin_final_answer" &&
+    event.toolResults[0].toolName === "collapse_process_for_final_answer" &&
     !event.toolResults[0].isError
       ? toolCalls[0]
       : undefined;

@@ -64,9 +64,12 @@ describe("用户运行进度投影", () => {
     const blocks = buildConversationBlocks([
       event(1, "message.delta", { delta: "过程说明" }),
       event(2, "message.completed", { stopReason: "stop" }),
-      event(3, "tool.started", { name: "begin_final_answer", callId: "call-final" }),
+      event(3, "tool.started", {
+        name: "collapse_process_for_final_answer",
+        callId: "call-final",
+      }),
       event(4, "tool.completed", {
-        name: "begin_final_answer",
+        name: "collapse_process_for_final_answer",
         callId: "call-final",
         isError: false,
       }),
@@ -85,8 +88,16 @@ describe("用户运行进度投影", () => {
     expect(
       buildRunProgress([
         event(1, "tool.started", {
-          name: "begin_final_answer",
+          name: "collapse_process_for_final_answer",
           callId: "call-final",
+        }),
+      ]).steps,
+    ).toEqual([]);
+    expect(
+      buildRunProgress([
+        event(1, "tool.started", {
+          name: "begin_final_answer",
+          callId: "call-legacy-final",
         }),
       ]).steps,
     ).toEqual([]);

@@ -3,6 +3,7 @@
 import { act, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { developmentAccount, persistAccountSession } from "./account-access.js";
 import {
   ApiError,
   type Artifact,
@@ -129,6 +130,7 @@ async function settleEffects(): Promise<void> {
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   window.localStorage.clear();
+  persistAccountSession(window.localStorage, developmentAccount);
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
     value: vi.fn(() => ({
@@ -364,8 +366,14 @@ describe("Agent 工作台恢复接入", () => {
 
     directory = [replacementTeam];
     await act(async () =>
-      container.querySelector<HTMLButtonElement>('button[aria-label="打开团队中心"]')?.click(),
+      container.querySelector<HTMLButtonElement>(".account-menu-trigger")?.click(),
     );
+    await act(async () => {
+      const teamCenterEntry = Array.from(
+        container.querySelectorAll<HTMLButtonElement>(".account-menu-section button"),
+      ).find((button) => button.textContent?.includes("团队中心"));
+      teamCenterEntry?.click();
+    });
     await act(async () =>
       container.querySelector<HTMLButtonElement>(".team-center-refresh")?.click(),
     );

@@ -2,7 +2,11 @@ import { readFile } from "node:fs/promises";
 import { sha256Digest } from "@aisay/domain";
 import { describe, expect, it } from "vitest";
 import type { BlobStore } from "./blob-store.js";
-import { readThreadContextBody, ThreadContextBodyPersistence } from "./thread-context.js";
+import {
+  projectAssistantHistoryMessage,
+  readThreadContextBody,
+  ThreadContextBodyPersistence,
+} from "./thread-context.js";
 
 describe("Thread Context body persistence", () => {
   it("小正文内联，大工具输出必须先形成 exact Stable Blob identity", async () => {
@@ -85,5 +89,34 @@ describe("Thread Context body persistence", () => {
       const source = await readFile(new URL(relativePath, import.meta.url), "utf8");
       expect(source).toContain(qualifiedOrder);
     }
+  });
+
+  it("展示 phase 不进入 Active History 投影", () => {
+    expect(
+      projectAssistantHistoryMessage(
+        7,
+        {
+          role: "assistant",
+          text: "最终答复",
+          content: [{ type: "text", text: "最终答复" }],
+          api: "openai-completions",
+          provider: "test",
+          model: "test-model",
+          stopReason: "stop",
+          timestamp: 123,
+          phase: "final_answer",
+        },
+        100,
+      ),
+    ).toEqual({
+      sequence: 7,
+      role: "assistant",
+      content: [{ type: "text", text: "最终答复" }],
+      api: "openai-completions",
+      provider: "test",
+      model: "test-model",
+      stopReason: "stop",
+      timestamp: 123,
+    });
   });
 });

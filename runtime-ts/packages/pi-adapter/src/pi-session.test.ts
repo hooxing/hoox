@@ -495,7 +495,7 @@ describe("Pi 安全适配", () => {
       },
     });
     expect([...controller.getDiagnostics().activeToolNames].sort()).toEqual(
-      [...SANDBOX_TOOL_NAMES, "skill"].sort(),
+      [...SANDBOX_TOOL_NAMES, "begin_final_answer", "skill"].sort(),
     );
     expect("compact" in controller).toBe(false);
     expect("session" in controller).toBe(false);
@@ -510,6 +510,29 @@ describe("Pi 安全适配", () => {
       expect(modelContext).not.toMatch(hostPathPattern(process.cwd()));
       expect(modelContext).not.toMatch(hostPathPattern(process.cwd().replaceAll("\\", "/")));
     }
+  });
+
+  it("根 Agent 调用阶段标志后继续生成标准 assistant message", async () => {
+    const { controller, events, toolAuthorizationCount } = await harness([
+      fauxAssistantMessage(fauxToolCall("begin_final_answer", {}), { stopReason: "toolUse" }),
+      fauxAssistantMessage("这是最终答复。"),
+    ]);
+
+    await controller.prompt("完成任务后给出最终答复");
+
+    expect(toolAuthorizationCount()).toBe(0);
+    expect(events.filter((event) => event.type === "message.completed")).toEqual([
+      { type: "message.completed", stopReason: "toolUse" },
+      { type: "message.completed", stopReason: "stop" },
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool.completed",
+        name: "begin_final_answer",
+        isError: false,
+      }),
+    );
+    expect(events).toContainEqual({ type: "message.delta", delta: "这是最终答复。" });
   });
 
   it.runIf(process.platform === "linux")(

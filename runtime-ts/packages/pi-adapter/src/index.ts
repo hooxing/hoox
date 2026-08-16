@@ -1,5 +1,6 @@
 export * from "./artifact-tools.js";
 export * from "./agent-control-tools.js";
+export * from "./begin-final-answer-tool.js";
 export * from "./deepseek-v4-model.js";
 export * from "./deepseek-v4-tokenizer.js";
 export * from "./deliver-file-tool.js";

@@ -77,3 +77,21 @@ export async function drainEventPages(
   }
   return { attemptId, items, nextAfter: after, hasMore: true };
 }
+
+/** 历史过程只在用户展开时读取；游标必须持续推进，避免异常分页形成无界请求。 */
+export async function loadAllRunEvents(
+  listPage: (after: number, limit: number) => Promise<RunEventPage>,
+): Promise<readonly RunEvent[]> {
+  let after = -1;
+  let attemptId: string | undefined;
+  let items: RunEvent[] = [];
+  for (;;) {
+    const page = await drainEventPages(listPage, after, attemptId);
+    if (page.attemptId !== attemptId) items = [];
+    attemptId = page.attemptId;
+    items.push(...page.items);
+    if (!page.hasMore) return items;
+    if (page.nextAfter <= after) throw new Error("历史 Run 事件分页游标未推进");
+    after = page.nextAfter;
+  }
+}

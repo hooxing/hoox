@@ -642,6 +642,7 @@ function fixture(
                         runId: "run_1",
                         role: "assistant" as const,
                         text: "Run A 回复",
+                        phase: "final_answer" as const,
                         createdAt: baseTime,
                       },
                     ],
@@ -734,6 +735,12 @@ function fixture(
                       message: "模型服务调用失败，本次任务未能完成，请稍后重试。",
                       source: "terminal_fallback",
                     },
+                    occurredAt: baseTime,
+                  },
+                  {
+                    sequence: 8,
+                    kind: "agent_event",
+                    payload: { type: "final_answer.committed", callId: "call-final" },
                     occurredAt: baseTime,
                   },
                 ]
@@ -1946,6 +1953,13 @@ describe("Fastify API 契约", () => {
             source: "terminal_fallback",
           },
         },
+        {
+          eventId: "attempt_1-8",
+          sequence: 8,
+          kind: "agent_event",
+          type: "final_answer.committed",
+          payload: { callId: "call-final" },
+        },
       ],
     });
     const initial = await app.inject({
@@ -1985,6 +1999,7 @@ describe("Fastify API 契约", () => {
       "Run A",
       "Run A 回复",
     ]);
+    expect(response.json().data.items[1]).toMatchObject({ phase: "final_answer" });
     const crossTenant = await enabled.app.inject({
       method: "GET",
       url: "/v1/threads/thread_1/context",

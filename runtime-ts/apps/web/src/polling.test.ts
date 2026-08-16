@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { EVENT_PAGE_LIMIT, type RunEvent, type RunEventPage } from "./api.js";
-import { CurrentRunPoll, drainEventPages, MAX_EVENT_PAGES_PER_POLL } from "./polling.js";
+import {
+  CurrentRunPoll,
+  drainEventPages,
+  loadAllRunEvents,
+  MAX_EVENT_PAGES_PER_POLL,
+} from "./polling.js";
 
 function event(sequence: number): RunEvent {
   return {
@@ -96,5 +101,19 @@ describe("CurrentRunPoll", () => {
     current.invalidate();
 
     expect(current.isCurrent(oldRun)).toBe(false);
+  });
+});
+
+describe("loadAllRunEvents", () => {
+  it("历史过程展开时跨多轮拉空所有事件页", async () => {
+    const pages = Array.from({ length: MAX_EVENT_PAGES_PER_POLL + 1 }, (_, sequence) => ({
+      attemptId: "attempt_1",
+      items: [event(sequence)],
+      hasMore: sequence < MAX_EVENT_PAGES_PER_POLL,
+    }));
+    const listPage = vi.fn(async () => pages.shift() ?? { attemptId: "attempt_1", items: [] });
+
+    await expect(loadAllRunEvents(listPage)).resolves.toHaveLength(MAX_EVENT_PAGES_PER_POLL + 1);
+    expect(listPage).toHaveBeenCalledTimes(MAX_EVENT_PAGES_PER_POLL + 1);
   });
 });

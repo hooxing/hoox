@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => {
   const persistence = {
     blobLifecycle: {},
     repositories: {},
+    localAccounts: {},
     threadCreation: { createThread: vi.fn() },
     runDispatchCreation: {
       replayQueuedRun: vi.fn(),

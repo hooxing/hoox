@@ -32,6 +32,7 @@ import {
   AccountAccess,
   AccountMenu,
   type AccountProfile,
+  type AccountSession,
   clearAccountSession,
   readAccountSession,
 } from "./account-access.js";
@@ -157,6 +158,9 @@ type TeamAwareWorkspaceApi = WorkspaceApi &
         | "listThreadsForTenant"
         | "setTenantId"
       >
+  > &
+  Partial<
+    Pick<RuntimeApi, "loginAccount" | "logoutAccount" | "registerAccount" | "setAccessToken">
   >;
 
 function resolveSkillCenterApi(client: WorkspaceApi): SkillCenterApi | undefined {
@@ -1460,21 +1464,45 @@ function AuthenticatedWorkspace({
 }
 
 export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspaceApi }) {
-  const [accountProfile, setAccountProfile] = useState<AccountProfile | undefined>(() =>
+  const [accountSession, setAccountSession] = useState<AccountSession | undefined>(() =>
     readAccountSession(window.localStorage),
   );
+  useLayoutEffect(() => {
+    apiClient.setAccessToken?.(accountSession?.accessToken);
+  }, [accountSession?.accessToken, apiClient]);
 
-  if (accountProfile === undefined) {
-    return <AccountAccess onAuthenticated={setAccountProfile} />;
+  if (accountSession === undefined) {
+    return (
+      <AccountAccess
+        api={{
+          registerAccount: (input) => {
+            if (apiClient.registerAccount === undefined) {
+              return Promise.reject(new Error("ACCOUNT_API_UNAVAILABLE"));
+            }
+            return apiClient.registerAccount(input);
+          },
+          loginAccount: (input) => {
+            if (apiClient.loginAccount === undefined) {
+              return Promise.reject(new Error("ACCOUNT_API_UNAVAILABLE"));
+            }
+            return apiClient.loginAccount(input);
+          },
+        }}
+        onAuthenticated={setAccountSession}
+      />
+    );
   }
 
   return (
     <AuthenticatedWorkspace
       apiClient={apiClient}
-      accountProfile={accountProfile}
+      accountProfile={accountSession.profile}
       onSignOut={() => {
+        const logout = apiClient.logoutAccount?.();
         clearAccountSession(window.localStorage);
-        setAccountProfile(undefined);
+        apiClient.setAccessToken?.(undefined);
+        setAccountSession(undefined);
+        void logout?.catch(() => undefined);
       }}
     />
   );

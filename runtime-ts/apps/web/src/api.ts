@@ -1,3 +1,15 @@
+export type AccountProfile = {
+  readonly id: string;
+  readonly displayName: string;
+  readonly email: string;
+};
+
+export type AccountSession = {
+  readonly profile: AccountProfile;
+  readonly accessToken: string;
+  readonly expiresAt: string;
+};
+
 export type Thread = {
   readonly id: string;
   readonly tenantId?: string;
@@ -368,11 +380,16 @@ export function normalizeRunEvent(value: unknown): RunEvent | undefined {
 
 export class RuntimeApi {
   private activeTenantId: string | undefined;
+  private accessToken: string | undefined;
 
   constructor(
     private readonly fetcher: typeof fetch = defaultFetcher,
     private readonly baseUrl = "/api",
   ) {}
+
+  setAccessToken(accessToken: string | undefined): void {
+    this.accessToken = accessToken;
+  }
 
   setTenantId(tenantId: string | undefined): void {
     this.activeTenantId = tenantId;
@@ -386,9 +403,12 @@ export class RuntimeApi {
     path: string,
     init: RequestInit = {},
     tenantId: string | null | undefined = this.activeTenantId,
+    authenticated = true,
   ): Promise<T> {
     const headers = new Headers(init.headers);
-    headers.set("Authorization", "Bearer dev-user-a");
+    if (authenticated && this.accessToken !== undefined) {
+      headers.set("Authorization", `Bearer ${this.accessToken}`);
+    }
     headers.set("Accept", "application/json");
     if (tenantId !== undefined && tenantId !== null) headers.set("X-Tenant-ID", tenantId);
     if (init.body !== undefined) headers.set("Content-Type", "application/json");
@@ -414,10 +434,8 @@ export class RuntimeApi {
   }
 
   private async requestBytes(path: string, tenantId = this.activeTenantId): Promise<Uint8Array> {
-    const headers = new Headers({
-      Authorization: "Bearer dev-user-a",
-      Accept: "application/octet-stream",
-    });
+    const headers = new Headers({ Accept: "application/octet-stream" });
+    if (this.accessToken !== undefined) headers.set("Authorization", `Bearer ${this.accessToken}`);
     if (tenantId !== undefined) headers.set("X-Tenant-ID", tenantId);
     let response: Response;
     try {
@@ -434,6 +452,39 @@ export class RuntimeApi {
       );
     }
     return new Uint8Array(await response.arrayBuffer());
+  }
+
+  registerAccount(input: {
+    readonly displayName: string;
+    readonly email: string;
+    readonly password: string;
+  }): Promise<AccountSession> {
+    return this.request(
+      "/v1/auth/register",
+      { method: "POST", body: JSON.stringify(input) },
+      null,
+      false,
+    );
+  }
+
+  loginAccount(input: {
+    readonly email: string;
+    readonly password: string;
+  }): Promise<AccountSession> {
+    return this.request(
+      "/v1/auth/login",
+      { method: "POST", body: JSON.stringify(input) },
+      null,
+      false,
+    );
+  }
+
+  getCurrentAccount(): Promise<AccountProfile> {
+    return this.request("/v1/auth/me", {}, null);
+  }
+
+  async logoutAccount(): Promise<void> {
+    await this.request<{ readonly loggedOut: true }>("/v1/auth/logout", { method: "POST" }, null);
   }
 
   async listThreads(): Promise<readonly Thread[]> {
@@ -734,13 +785,13 @@ export class RuntimeApi {
   }
   async uploadResource(file: File, idempotencyKey = createKey()): Promise<UploadedResource> {
     const headers = new Headers({
-      Authorization: "Bearer dev-user-a",
       Accept: "application/json",
       "Content-Type": "application/octet-stream",
       "Idempotency-Key": idempotencyKey,
       "X-File-Name": encodeURIComponent(file.name),
       "X-File-Media-Type": file.type || "application/octet-stream",
     });
+    if (this.accessToken !== undefined) headers.set("Authorization", `Bearer ${this.accessToken}`);
     if (this.activeTenantId !== undefined) headers.set("X-Tenant-ID", this.activeTenantId);
     let response: Response;
     try {

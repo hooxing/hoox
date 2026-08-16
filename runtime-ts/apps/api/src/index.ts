@@ -4,6 +4,7 @@ export * from "./cursor.js";
 export * from "./development-auth.js";
 export * from "./development-boundary.js";
 export * from "./development-identity.js";
+export * from "./local-account-auth.js";
 export * from "./ports.js";
 export * from "./production-auth.js";
 export * from "./production-transport.js";

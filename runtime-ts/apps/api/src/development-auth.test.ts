@@ -21,6 +21,23 @@ describe("开发身份解析器", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("固定开发 Token 未命中时委托本地账号解析器", async () => {
+    const fallback = {
+      resolve: async () => ({ userId: userId("local-user"), tenantId: tenantId("local-tenant") }),
+    };
+    const resolver = createDevelopmentAuthResolver({
+      runtimeEnvironment: "test",
+      principals,
+      fallback,
+    });
+    await expect(
+      resolver.resolve({ authorization: "Bearer hoox_session_test", requestId: "r" }),
+    ).resolves.toEqual({ userId: "local-user", tenantId: "local-tenant" });
+    await expect(
+      resolver.resolve({ authorization: "Bearer dev-user-a", requestId: "r" }),
+    ).resolves.toEqual(principals[0]);
+  });
+
   it("生产环境不可构造", () => {
     expect(() =>
       createDevelopmentAuthResolver({ runtimeEnvironment: "production", principals }),

@@ -82,3 +82,4 @@
 
 - 2026-08-16：实现 Windows development 非首次一键启动脚本、双击入口和契约测试。
 - 2026-08-16：脚本固定使用 UTF-8 BOM 与 CRLF，保证 Windows PowerShell 5.1 不会按系统 ANSI 代码页误解中文字符串。
+- 2026-08-16：启动前先探测 MinIO、HTTP 端点和 Worker/Scheduler 进程，复用健康的已有服务，只启动缺失部分；端口被占用但健康检查失败时仍保持失败关闭。

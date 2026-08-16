@@ -200,6 +200,7 @@ export const ThreadContextMessageDtoSchema = Type.Object(
     runId: Type.Optional(IdSchema),
     role: Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("runtime")]),
     text: Type.String({ maxLength: 8 * 1024 * 1024 }),
+    phase: Type.Optional(Type.Union([Type.Literal("commentary"), Type.Literal("final_answer")])),
     createdAt: IsoTimestampSchema,
   },
   { ...strict, $id: "v1.ThreadContextMessageDto" },

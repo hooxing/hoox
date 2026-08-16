@@ -30,7 +30,7 @@ import {
 } from "./api.js";
 import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
-import { CurrentRunPoll, drainEventPages } from "./polling.js";
+import { CurrentRunPoll, drainEventPages, loadAllRunEvents } from "./polling.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
 import { type PersonalizationApi, PersonalizationDialog } from "./personalization.js";
 import { type SkillCenterApi, SkillCenterDialog } from "./skill-center.js";
@@ -1288,6 +1288,11 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
               <ThreadTranscript
                 messages={state.threadContext ?? []}
                 pendingInputs={visiblePendingInputs}
+                loadRunEvents={(runId) =>
+                  loadAllRunEvents((after, limit) =>
+                    apiClient.listEvents(selected.id, runId, after, limit),
+                  )
+                }
                 {...(state.run === undefined
                   ? {}
                   : { currentRun: state.run, currentRunEvents: state.events })}

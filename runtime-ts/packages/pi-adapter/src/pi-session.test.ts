@@ -470,7 +470,7 @@ describe("Pi 安全适配", () => {
       logicalCwd: "/workspace",
       activeToolNames: expect.arrayContaining([...SANDBOX_TOOL_NAMES]),
       promptSchemaVersion: 1,
-      promptVersion: "runtime-system-prompt.v12",
+      promptVersion: "runtime-system-prompt.v13",
       capabilityManifestDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       promptDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       compactionEnabled: false,
@@ -495,7 +495,7 @@ describe("Pi 安全适配", () => {
       },
     });
     expect([...controller.getDiagnostics().activeToolNames].sort()).toEqual(
-      [...SANDBOX_TOOL_NAMES, "skill"].sort(),
+      [...SANDBOX_TOOL_NAMES, "collapse_process_for_final_answer", "skill"].sort(),
     );
     expect("compact" in controller).toBe(false);
     expect("session" in controller).toBe(false);
@@ -510,6 +510,31 @@ describe("Pi 安全适配", () => {
       expect(modelContext).not.toMatch(hostPathPattern(process.cwd()));
       expect(modelContext).not.toMatch(hostPathPattern(process.cwd().replaceAll("\\", "/")));
     }
+  });
+
+  it("根 Agent 选择折叠较长过程后继续生成标准 assistant message", async () => {
+    const { controller, events, toolAuthorizationCount } = await harness([
+      fauxAssistantMessage(fauxToolCall("collapse_process_for_final_answer", {}), {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage("这是最终答复。"),
+    ]);
+
+    await controller.prompt("完成任务后给出最终答复");
+
+    expect(toolAuthorizationCount()).toBe(0);
+    expect(events.filter((event) => event.type === "message.completed")).toEqual([
+      { type: "message.completed", stopReason: "toolUse" },
+      { type: "message.completed", stopReason: "stop" },
+    ]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool.completed",
+        name: "collapse_process_for_final_answer",
+        isError: false,
+      }),
+    );
+    expect(events).toContainEqual({ type: "message.delta", delta: "这是最终答复。" });
   });
 
   it.runIf(process.platform === "linux")(

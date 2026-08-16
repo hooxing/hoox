@@ -42,6 +42,7 @@ import {
   createAgentControlPiTools,
   type DelegablePiToolName,
 } from "./agent-control-tools.js";
+import { createCollapseProcessForFinalAnswerPiTool } from "./collapse-process-for-final-answer-tool.js";
 import {
   normalizeOfficialDeepSeekV4FlashPayload,
   officialModelThinkingLevel,
@@ -900,6 +901,9 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
   );
   const customTools = [
     ...selectedSandboxTools,
+    ...(enabled === undefined
+      ? [createCollapseProcessForFinalAnswerPiTool(observedSandboxTools.recordControlledReceipt)]
+      : []),
     ...(isEnabled("skill")
       ? [
           createSkillPiTool(

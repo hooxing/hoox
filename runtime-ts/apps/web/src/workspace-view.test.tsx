@@ -28,6 +28,17 @@ const shouldOpenActivityPanel = (_isCompact: boolean) => false;
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+function agentEvent(sequence: number, type: string, payload: unknown): RunEvent {
+  return {
+    eventId: `agent-event-${sequence}`,
+    sequence,
+    occurredAt: "2026-08-16T00:00:00.000Z",
+    kind: "agent_event",
+    type,
+    payload,
+  };
+}
+
 describe("工作台展示组件", () => {
   const running: Run = {
     id: "run-1",
@@ -125,6 +136,103 @@ describe("工作台展示组件", () => {
     );
 
     expect(html.match(new RegExp(message, "gu"))).toHaveLength(1);
+  });
+
+  it("最终答复提交后默认折叠过程，并保持最终消息为普通正文", () => {
+    const completed: Run = { ...running, status: "succeeded" };
+    const html = renderToStaticMarkup(
+      <RunTranscript
+        run={completed}
+        events={[
+          agentEvent(1, "message.delta", { delta: "过程说明" }),
+          agentEvent(2, "message.completed", { stopReason: "stop" }),
+          agentEvent(3, "finalization.started", { callId: "call-final" }),
+          agentEvent(4, "message.delta", { delta: "清晰的最终答复" }),
+          agentEvent(5, "message.completed", { stopReason: "stop" }),
+          agentEvent(6, "final_answer.committed", { callId: "call-final" }),
+        ]}
+      />,
+    );
+    const container = document.createElement("div");
+    container.innerHTML = html;
+
+    const process = container.querySelector(".final-answer-process");
+    expect(process).not.toBeNull();
+    expect(process?.hasAttribute("open")).toBe(false);
+    expect(process?.textContent).toContain("过程说明");
+    expect(container.querySelector(".agent-turn-blocks > .agent-answer-block")?.textContent).toBe(
+      "清晰的最终答复",
+    );
+  });
+
+  it("阶段尚未提交时显示整理状态，异常终止后恢复展开全部过程", () => {
+    const phaseEvents = [
+      agentEvent(1, "message.delta", { delta: "尚未完成的过程" }),
+      agentEvent(2, "message.completed", { stopReason: "stop" }),
+      agentEvent(3, "finalization.started", { callId: "call-pending" }),
+    ];
+    const live = renderToStaticMarkup(<RunTranscript run={running} events={phaseEvents} />);
+    expect(live).toContain("查看执行过程");
+    expect(live).toContain("正在整理最终答复…");
+
+    const failed = renderToStaticMarkup(
+      <RunTranscript run={{ ...running, status: "failed" }} events={phaseEvents} />,
+    );
+    expect(failed).toContain("尚未完成的过程");
+    expect(failed).not.toContain("final-answer-process");
+    expect(failed).not.toContain("正在整理最终答复…");
+  });
+
+  it("历史最终答复先用 phase 折叠，用户展开后才加载完整过程事件", async () => {
+    const loadRunEvents = vi.fn(async () => [
+      agentEvent(1, "message.delta", { delta: "从原始事件恢复的过程" }),
+      agentEvent(2, "message.completed", { stopReason: "stop" }),
+      agentEvent(3, "finalization.started", { callId: "call-history" }),
+      agentEvent(4, "message.delta", { delta: "历史最终答复" }),
+      agentEvent(5, "message.completed", { stopReason: "stop" }),
+      agentEvent(6, "final_answer.committed", { callId: "call-history" }),
+    ]);
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    act(() =>
+      root.render(
+        <ThreadTranscript
+          messages={[
+            {
+              sequence: 1,
+              runId: "run-history",
+              role: "assistant",
+              text: "持久化过程摘要",
+              phase: "commentary",
+              createdAt: "2026-08-16T00:00:00.000Z",
+            },
+            {
+              sequence: 2,
+              runId: "run-history",
+              role: "assistant",
+              text: "历史最终答复",
+              phase: "final_answer",
+              createdAt: "2026-08-16T00:00:01.000Z",
+            },
+          ]}
+          loadRunEvents={loadRunEvents}
+        />,
+      ),
+    );
+
+    expect(loadRunEvents).not.toHaveBeenCalled();
+    const details = container.querySelector<HTMLDetailsElement>(".final-answer-process");
+    expect(details?.open).toBe(false);
+    await act(async () => {
+      if (details === null) throw new Error("测试缺少过程折叠区");
+      details.open = true;
+      details.dispatchEvent(new Event("toggle", { bubbles: false }));
+      await Promise.resolve();
+    });
+
+    expect(loadRunEvents).toHaveBeenCalledWith("run-history");
+    expect(container.textContent).toContain("从原始事件恢复的过程");
+    act(() => root.unmount());
   });
 
   it("把 steer 与 follow-up 作为对话中的用户消息展示，而不是替换当前任务", () => {

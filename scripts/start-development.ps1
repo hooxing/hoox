@@ -2,6 +2,7 @@
 param(
   [switch]$SkipBuild,
   [switch]$CoreOnly,
+  [switch]$IncludeSkill,
   [switch]$NoBrowser
 )
 
@@ -10,7 +11,6 @@ $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
 $environmentFile = Join-Path $repo ".env"
-$composeFile = Join-Path $repo "docker-compose.dev.yml"
 $runtimeDirectory = Join-Path $repo ".tmp\development-runtime"
 
 function Invoke-CheckedNative {
@@ -129,11 +129,7 @@ function Wait-HttpEndpoint {
 if (-not (Test-Path -LiteralPath $environmentFile -PathType Leaf)) {
   throw "缺少 $environmentFile。该脚本仅用于已经完成首次配置的开发环境。"
 }
-if (-not (Test-Path -LiteralPath $composeFile -PathType Leaf)) {
-  throw "缺少 $composeFile"
-}
-
-foreach ($commandName in @("node", "corepack", "docker")) {
+foreach ($commandName in @("node", "corepack")) {
   if ($null -eq (Get-Command $commandName -ErrorAction SilentlyContinue)) {
     throw "未找到必需命令：$commandName"
   }
@@ -146,7 +142,6 @@ $apiHost = Get-DotEnvValue -Name "API_LISTEN_HOST" -DefaultValue "127.0.0.1"
 $apiPortText = Get-DotEnvValue -Name "API_LISTEN_PORT" -DefaultValue "3001"
 $skillAdminHost = Get-DotEnvValue -Name "SKILL_ADMIN_LISTEN_HOST" -DefaultValue "127.0.0.1"
 $skillAdminPortText = Get-DotEnvValue -Name "SKILL_ADMIN_LISTEN_PORT" -DefaultValue "3002"
-$s3Endpoint = (Get-DotEnvValue -Name "S3_ENDPOINT" -DefaultValue "http://127.0.0.1:19000").TrimEnd("/")
 $apiPort = 0
 $skillAdminPort = 0
 if (-not [int]::TryParse($apiPortText, [ref]$apiPort) -or $apiPort -lt 1 -or $apiPort -gt 65535) {
@@ -160,31 +155,37 @@ $healthApiHost = if ($apiHost -in @("localhost", "::1")) { "127.0.0.1" } else { 
 $healthSkillAdminHost = if ($skillAdminHost -in @("localhost", "::1")) { "127.0.0.1" } else { $skillAdminHost }
 $apiBaseUrl = "http://${healthApiHost}:$apiPort"
 $skillAdminBaseUrl = "http://${healthSkillAdminHost}:$skillAdminPort"
-$minioHealthUrl = "$s3Endpoint/minio/health/live"
-
-Write-Host "[1/5] 检查 MinIO" -ForegroundColor Cyan
-if (Test-HttpEndpoint -Url $minioHealthUrl) {
-  Write-Host "[复用] MinIO 已在 $s3Endpoint 运行" -ForegroundColor Green
-} else {
-  Invoke-CheckedNative {
-    docker compose --env-file .env -f docker-compose.dev.yml up -d
-  } "MinIO 启动失败"
-  if (-not (Wait-HttpEndpoint -Name "MinIO" -Url $minioHealthUrl -TimeoutSeconds 60)) {
-    throw "MinIO 未在超时时间内就绪"
-  }
-}
-
 if (-not $SkipBuild) {
-  Write-Host "[2/5] 构建工作区" -ForegroundColor Cyan
+  Write-Host "[1/5] 构建工作区" -ForegroundColor Cyan
   Invoke-CheckedNative { corepack pnpm build } "工作区构建失败"
 } else {
-  Write-Host "[2/5] 已跳过构建" -ForegroundColor Yellow
+  Write-Host "[1/5] 已跳过构建" -ForegroundColor Yellow
 }
 
-Write-Host "[3/5] 执行 Worker 启动前检查" -ForegroundColor Cyan
+Write-Host "[2/5] 检查 .env 配置的 PostgreSQL、S3、CubeSandbox 与模型服务" -ForegroundColor Cyan
 Invoke-CheckedNative {
   node runtime-ts/apps/agent-worker/dist/development-preflight-main.js
-} "Worker 启动前检查失败"
+} ".env 外部服务预检失败，请检查 PostgreSQL、S3、CubeSandbox 与模型配置"
+
+$skillPrompt = "是否启动 Skill Admin API 和 Skill Admin Web？[y/N]"
+if ($CoreOnly -and $IncludeSkill) {
+  throw "-CoreOnly 与 -IncludeSkill 不能同时使用"
+}
+
+Write-Host "[3/5] 选择启动范围" -ForegroundColor Cyan
+if ($IncludeSkill) {
+  $startSkillServices = $true
+} elseif ($CoreOnly) {
+  $startSkillServices = $false
+} else {
+  $skillAnswer = Read-Host $skillPrompt
+  $startSkillServices = $skillAnswer.Trim() -match "^(y|yes|1|是)$"
+}
+if ($startSkillServices) {
+  Write-Host "[包含] 将启动 Skill 管理服务" -ForegroundColor Green
+} else {
+  Write-Host "[跳过] 默认不启动 Skill 管理服务" -ForegroundColor Yellow
+}
 
 $apiEntry = (Join-Path $repo "runtime-ts\apps\api\dist\development-main.js").Replace("'", "''")
 $workerEntry = (Join-Path $repo "runtime-ts\apps\agent-worker\dist\development-main.js").Replace("'", "''")
@@ -220,7 +221,7 @@ $services = @(
     ProcessPattern = "(@aisay[\\/]web|apps[\\/]+web|dev:web|vite(?:\\.js)?[^\\r\\n]*--port\\s+4173)"
   }
 )
-if (-not $CoreOnly) {
+if ($startSkillServices) {
   $services += @(
     [pscustomobject]@{
       Name = "Skill Admin API"
@@ -315,7 +316,7 @@ if (-not $allReady) {
 
 if (-not $NoBrowser) {
   Start-Process "http://127.0.0.1:4173"
-  if (-not $CoreOnly) {
+  if ($startSkillServices) {
     Start-Process "http://127.0.0.1:4174"
   }
 }
@@ -323,7 +324,7 @@ if (-not $NoBrowser) {
 Write-Host "开发环境已全部启动。" -ForegroundColor Green
 Write-Host "主 Web：http://127.0.0.1:4173"
 Write-Host "API：$apiBaseUrl"
-if (-not $CoreOnly) {
+if ($startSkillServices) {
   Write-Host "Skill Admin Web：http://127.0.0.1:4174"
 }
 Write-Host "启动状态：$(Join-Path $runtimeDirectory 'pids.json')"

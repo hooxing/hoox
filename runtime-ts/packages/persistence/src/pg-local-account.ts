@@ -188,16 +188,21 @@ export class PgLocalAccountRepository implements LocalAccountRepository {
         this.pool,
         { tenantId: input.personalTenantId, userId: input.userId },
         async (client) => {
+          // node-postgres 的参数化查询禁止一条 prepared statement 携带多个命令；
+          // 清理与签发仍处于同一事务，但必须分别发送。
+          await client.query("DELETE FROM user_sessions WHERE user_id=$1 AND expires_at <= $2", [
+            input.userId,
+            input.createdAt,
+          ]);
           await client.query(
-            `DELETE FROM user_sessions WHERE user_id=$1 AND expires_at <= $2;
-             INSERT INTO user_sessions(
+            `INSERT INTO user_sessions(
                token_digest,user_id,personal_tenant_id,created_at,expires_at
-             ) VALUES ($3,$1,$4,$2,$5)`,
+             ) VALUES ($1,$2,$3,$4,$5)`,
             [
-              input.userId,
-              input.createdAt,
               input.tokenDigest,
+              input.userId,
               input.personalTenantId,
+              input.createdAt,
               input.expiresAt,
             ],
           );

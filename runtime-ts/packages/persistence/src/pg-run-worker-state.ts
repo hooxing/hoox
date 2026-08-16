@@ -7,7 +7,7 @@ import {
   type Sha256Digest,
   type Workspace,
   workspaceRevisionId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import type {
   ClaimExecutionResult,
   ControlledRolloutProjection,
@@ -28,7 +28,7 @@ import type {
   SandboxSessionRegistryPort,
   SandboxSettlementResult,
   UserInputAttachmentReference,
-} from "@cube-runtime/run-contracts";
+} from "@aisay/run-contracts";
 import {
   assertControlledRolloutProjection,
   digestCanonical,
@@ -38,8 +38,8 @@ import {
   runtimeMutationDigest,
   sandboxCleanupIdentityDigest,
   workspaceChangeDigest,
-} from "@cube-runtime/run-contracts/mutation-protocol";
-import { parseWorkspaceManifest } from "@cube-runtime/workspace";
+} from "@aisay/run-contracts/mutation-protocol";
+import { parseWorkspaceManifest } from "@aisay/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { PersistenceError } from "./errors.js";
 import { enqueueMemoryIngestion } from "./pg-memory-ingestion.js";

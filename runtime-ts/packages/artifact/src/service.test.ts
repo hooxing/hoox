@@ -9,10 +9,10 @@ import {
   userId,
   workspaceId,
   workspaceRevisionId,
-} from "@cube-runtime/domain";
-import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
-import type { ExecutionScope } from "@cube-runtime/run-contracts";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+} from "@aisay/domain";
+import type { BlobStore, StableBlobRef } from "@aisay/persistence";
+import type { ExecutionScope } from "@aisay/run-contracts";
+import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ArtifactExecutionAuthorization,

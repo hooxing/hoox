@@ -4,7 +4,7 @@ import {
   type WorkspaceCandidateBlobWritePort,
   type WorkspaceCandidateIdentity,
   WorkspaceDependencyError,
-} from "@cube-runtime/workspace";
+} from "@aisay/workspace";
 import {
   type BlobCommitSnapshot,
   type BlobCommitStatePort,

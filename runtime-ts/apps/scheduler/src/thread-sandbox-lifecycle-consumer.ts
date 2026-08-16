@@ -2,13 +2,13 @@ import type {
   PgThreadContinuityMetrics,
   ThreadSandboxLifecycleClaim,
   ThreadSandboxLifecycleResolution,
-} from "@cube-runtime/persistence";
-import { runId, tenantId, threadId } from "@cube-runtime/domain";
+} from "@aisay/persistence";
+import { runId, tenantId, threadId } from "@aisay/domain";
 import {
   type SandboxGateway,
   type SandboxProviderRegistry,
   SandboxRuntimeError,
-} from "@cube-runtime/sandbox";
+} from "@aisay/sandbox";
 
 export interface ThreadSandboxLifecycleStore {
   claimNext(input: {

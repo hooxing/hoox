@@ -143,7 +143,7 @@ Sidecar 只接受 `/v1/resource-filesystem`，不得用它转发其他 API 路�
 忽略目录。节点 endpoint 使用该证书覆盖的 HTTPS 地址；未携带 ResourceFS capability 的探针应快速返回 401，
 而不是超时。配置与安全边界见 [ADR-0105](decisions/0105-development-resourcefs-https-sidecar.md)。
 
-production Worker 使用 `pnpm --filter @cube-runtime/agent-worker start:production` 或 `Dockerfile.production-worker-gate`，仅支持 Linux。公开入口固定模块内真实装配，不接受调用方注入的 Fake，且不改写 `runtimeEnvironment=production`；通用 `process-runtime` 只是受信代码的生命周期编排器，不是 JS 进程内调用方 ACL。启动前必须验证 `DATABASE_RUNTIME_ROLE`、部署 Tenant 分片、严格模型元数据和 TLS 端点；任一 `DEV_AUTH_*` 变量（包括 `DEV_AUTH_ENABLED=false`）都会失败关闭。生产装配已经接入持久化 Workspace revision/Artifact 发布闭环，但这不替代真实基础设施验收。
+production Worker 使用 `pnpm --filter @aisay/agent-worker start:production` 或 `Dockerfile.production-worker-gate`，仅支持 Linux。公开入口固定模块内真实装配，不接受调用方注入的 Fake，且不改写 `runtimeEnvironment=production`；通用 `process-runtime` 只是受信代码的生命周期编排器，不是 JS 进程内调用方 ACL。启动前必须验证 `DATABASE_RUNTIME_ROLE`、部署 Tenant 分片、严格模型元数据和 TLS 端点；任一 `DEV_AUTH_*` 变量（包括 `DEV_AUTH_ENABLED=false`）都会失败关闭。生产装配已经接入持久化 Workspace revision/Artifact 发布闭环，但这不替代真实基础设施验收。
 
 装配器按业务接收顺序实现 `stopAccepting`，将数据库连接池、HTTP listener、消费者和遥测等资源按确定顺序登记。关闭时先停止接收，再等待 `lifecycle.track()` 登记的在途操作，最后串行关闭资源。资源错误只上报稳定名称；库不调用 `process.exit`。部署平台的强制终止宽限期必须大于 `PROCESS_SHUTDOWN_TIMEOUT_MS`。
 

@@ -10,7 +10,7 @@ import {
 import type {
   SkillPublicationFileDescriptor,
   ValidatedSkillPublicationPackage,
-} from "@cube-runtime/skill";
+} from "@aisay/skill";
 import { RUNTIME_BLOB_OBJECT_PREFIX } from "./blob-storage-contract.js";
 import type { StableBlobRef } from "./blob-store.js";
 

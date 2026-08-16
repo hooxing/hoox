@@ -1,4 +1,4 @@
-import { loadDevelopmentEnvironment } from "@cube-runtime/process-runtime";
+import { loadDevelopmentEnvironment } from "@aisay/process-runtime";
 import { selectApiProcessEnvironment, startApiProcess } from "./process-entry.js";
 
 try {

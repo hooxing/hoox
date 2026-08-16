@@ -6,8 +6,8 @@ import {
   membershipId,
   tenantId,
   userId,
-} from "@cube-runtime/domain";
-import type { TenantBundle, TenantRepository } from "@cube-runtime/persistence";
+} from "@aisay/domain";
+import type { TenantBundle, TenantRepository } from "@aisay/persistence";
 import {
   booleanEnvironmentField,
   EnvironmentConfigurationError,
@@ -17,7 +17,7 @@ import {
   selectDeclaredEnvironment,
   stringEnvironmentField,
   urlEnvironmentField,
-} from "@cube-runtime/process-runtime";
+} from "@aisay/process-runtime";
 import {
   type ApiDevelopmentPrincipal,
   assertDevelopmentPrincipalsIsolated,

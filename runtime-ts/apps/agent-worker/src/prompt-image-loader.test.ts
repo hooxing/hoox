@@ -1,6 +1,6 @@
-import { resourceId, resourceVersionId, tenantId } from "@cube-runtime/domain";
-import type { BlobStore } from "@cube-runtime/persistence";
-import type { ResourceFilesystemCatalog, ResourceFilesystemFile } from "@cube-runtime/resource";
+import { resourceId, resourceVersionId, tenantId } from "@aisay/domain";
+import type { BlobStore } from "@aisay/persistence";
+import type { ResourceFilesystemCatalog, ResourceFilesystemFile } from "@aisay/resource";
 import { describe, expect, it, vi } from "vitest";
 import { BlobPromptImageLoader } from "./prompt-image-loader.js";
 

@@ -1,19 +1,19 @@
 import { createHash } from "node:crypto";
-import { resourceId, resourceVersionId, tenantId } from "@cube-runtime/domain";
-import type { BlobStore } from "@cube-runtime/persistence";
+import { resourceId, resourceVersionId, tenantId } from "@aisay/domain";
+import type { BlobStore } from "@aisay/persistence";
 import {
   createResourceFilesystemCapabilityCodec,
   type HistoryFilesystemCatalog,
   type HistoryFilesystemFile,
   type ResourceFilesystemCatalog,
   type ResourceFilesystemFile,
-} from "@cube-runtime/resource";
+} from "@aisay/resource";
 import type {
   SkillContentStore,
   SkillFilesystemCatalog,
   SkillFilesystemEntry,
   SkillFilesystemFile,
-} from "@cube-runtime/skill";
+} from "@aisay/skill";
 import Fastify from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import { registerResourceFilesystemHttp } from "./resource-filesystem-http.js";

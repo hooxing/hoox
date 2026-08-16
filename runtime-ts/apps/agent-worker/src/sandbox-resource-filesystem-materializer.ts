@@ -1,14 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { TenantId } from "@cube-runtime/domain";
-import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
+import type { TenantId } from "@aisay/domain";
+import type { BlobStore, StableBlobRef } from "@aisay/persistence";
 import type {
   HistoryFilesystemCatalog,
   ResourceFilesystemCatalog,
   ResourceFilesystemFile,
-} from "@cube-runtime/resource";
-import type { ExecutionScope } from "@cube-runtime/run-contracts";
-import type { SandboxHandle } from "@cube-runtime/sandbox";
-import type { SkillContentStore, SkillFilesystemCatalog } from "@cube-runtime/skill";
+} from "@aisay/resource";
+import type { ExecutionScope } from "@aisay/run-contracts";
+import type { SandboxHandle } from "@aisay/sandbox";
+import type { SkillContentStore, SkillFilesystemCatalog } from "@aisay/skill";
 
 const RESOURCE_ROOT = "/resources";
 const DEFAULT_MAX_FILES = 512;
@@ -85,7 +85,7 @@ export class ManagedResourceFilesystemSnapshotMaterializer
   }): Promise<void> {
     assertNotAborted(input.signal);
     const snapshot = await this.buildSnapshot(input.scope, input.signal);
-    const staging = `/tmp/cube-resourcefs-${randomUUID()}`;
+    const staging = `/tmp/aisay-resourcefs-${randomUUID()}`;
     const directories = snapshotDirectories(
       snapshot.files.map((file) => file.path),
       input.scope.threadId,

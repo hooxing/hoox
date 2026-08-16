@@ -1,16 +1,9 @@
-import {
-  agentThreadId,
-  isoTimestamp,
-  runId,
-  tenantId,
-  threadId,
-  workspaceId,
-} from "@cube-runtime/domain";
+import { agentThreadId, isoTimestamp, runId, tenantId, threadId, workspaceId } from "@aisay/domain";
 import {
   type RuntimeAgentEvent,
   type ThreadActiveHistoryV1,
   threadActiveHistoryDigest,
-} from "@cube-runtime/pi-adapter";
+} from "@aisay/pi-adapter";
 import { describe, expect, it, vi } from "vitest";
 import { AgentSupervisor } from "./agent-supervisor.js";
 import { digestCanonical } from "./mutation-protocol.js";

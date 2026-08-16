@@ -1,4 +1,4 @@
-import { resourceId, resourceVersionId, tenantId } from "@cube-runtime/domain";
+import { resourceId, resourceVersionId, tenantId } from "@aisay/domain";
 import {
   type HistoryFileLibraryCatalog,
   type HistoryFileLibraryFile,
@@ -10,7 +10,7 @@ import {
   type ResourceFilesystemCatalog,
   type ResourceFilesystemFile,
   resourceFilesystemPath,
-} from "@cube-runtime/resource";
+} from "@aisay/resource";
 import type { Pool, PoolClient } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";

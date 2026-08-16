@@ -1,4 +1,4 @@
-Copyright (c) Cube Agent contributors.
+Copyright (c) AISay contributors.
 
-This first-party development fixture is licensed under LicenseRef-Cube-Internal.
+This first-party development fixture is licensed under LicenseRef-AISay-Internal.
 It is not a third-party redistribution package.

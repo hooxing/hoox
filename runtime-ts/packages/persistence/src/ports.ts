@@ -12,9 +12,9 @@ import type {
   WorkspaceRevisionCommitPort,
   WorkspaceWriteScope,
   RunPersonalizationSnapshot,
-} from "@cube-runtime/domain";
-import type { ResourceAttachmentReference } from "@cube-runtime/resource";
-import type { ExplicitSkillInvocation } from "@cube-runtime/skill";
+} from "@aisay/domain";
+import type { ResourceAttachmentReference } from "@aisay/resource";
+import type { ExplicitSkillInvocation } from "@aisay/skill";
 import type { StableBlobRef } from "./blob-store.js";
 
 /** 由认证/授权层构造；Repository 不接受裸 tenantId 作为业务查询上下文。 */

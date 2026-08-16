@@ -14,7 +14,7 @@ import {
   startServiceProcess,
   stringEnvironmentField,
   urlEnvironmentField,
-} from "@cube-runtime/process-runtime";
+} from "@aisay/process-runtime";
 import { developmentApiAssembler } from "./development-assembly.js";
 import {
   type ApiDevelopmentPrincipal,

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { ArtifactExecutionAuthorizationIssuerPort } from "@cube-runtime/artifact";
+import type { ArtifactExecutionAuthorizationIssuerPort } from "@aisay/artifact";
 import {
   type ControlledToolReceiptSource,
   type ToolObservationBinding,
@@ -8,14 +8,14 @@ import {
   type ToolObservationResult,
   type ToolObservationRolloutPort,
   type TraceBlobPersistencePort,
-} from "@cube-runtime/context-policy";
+} from "@aisay/context-policy";
 import {
   assertRunPersonalizationSnapshot,
   DomainError,
   sha256Digest,
   type TenantId,
   type TodoWriteCommand,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import {
   assessSafePiSessionContext,
   bindTrustedPiModelContextCapability,
@@ -28,7 +28,7 @@ import {
   providerVisibleUserInputTokens,
   type ThreadActiveHistoryV1,
   type TrustedPiModelContextCapability,
-} from "@cube-runtime/pi-adapter";
+} from "@aisay/pi-adapter";
 import {
   assertRunSkillSnapshot,
   digestRunSkillSnapshot,
@@ -36,12 +36,12 @@ import {
   type SkillExecutionBinding,
   SkillRuntimeError,
   type SkillRuntimeService,
-} from "@cube-runtime/skill";
-import type { DeliverFileToolRouterFactoryPort } from "@cube-runtime/tool-router";
+} from "@aisay/skill";
+import type { DeliverFileToolRouterFactoryPort } from "@aisay/tool-router";
 import {
   InternalTrajectoryAttemptRecorder,
   type InternalTrajectoryDiagnosticsPort,
-} from "@cube-runtime/trajectory";
+} from "@aisay/trajectory";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
@@ -663,7 +663,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         : {
             prepareNextTurnHistory: async (
               event: Extract<
-                import("@cube-runtime/pi-adapter").RuntimeAgentEvent,
+                import("@aisay/pi-adapter").RuntimeAgentEvent,
                 { type: "turn.completed" }
               >,
             ) => {

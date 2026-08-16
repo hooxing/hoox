@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { resourceId, resourceVersionId, type TenantId } from "@cube-runtime/domain";
-import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
+import { resourceId, resourceVersionId, type TenantId } from "@aisay/domain";
+import type { BlobStore, StableBlobRef } from "@aisay/persistence";
 import {
   HISTORY_FILESYSTEM_ROOT_SEGMENT,
   RESOURCE_FILESYSTEM_ROOT,
@@ -10,7 +10,7 @@ import {
   type ResourceFilesystemCapabilityCodec,
   type ResourceFilesystemCatalog,
   type ResourceFilesystemFile,
-} from "@cube-runtime/resource";
+} from "@aisay/resource";
 import {
   assertSkillFilesystemEntry,
   assertSkillFilesystemFile,
@@ -18,7 +18,7 @@ import {
   type SkillContentStore,
   type SkillFilesystemCatalog,
   type SkillFilesystemEntry,
-} from "@cube-runtime/skill";
+} from "@aisay/skill";
 import type { FastifyInstance, FastifyReply, FastifyRequest, HTTPMethods } from "fastify";
 
 const HTTP_ROOT = "/v1/resource-filesystem";

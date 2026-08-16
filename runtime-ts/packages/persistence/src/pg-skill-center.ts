@@ -1,4 +1,4 @@
-import { isoTimestamp } from "@cube-runtime/domain";
+import { isoTimestamp } from "@aisay/domain";
 import type {
   SkillCatalogItem,
   SkillCatalogPage,
@@ -8,7 +8,7 @@ import type {
   SkillInstallation,
   SkillUninstallResult,
   TrustedSkillContext,
-} from "@cube-runtime/skill";
+} from "@aisay/skill";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";

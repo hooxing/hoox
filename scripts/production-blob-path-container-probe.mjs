@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { createS3BlobStore, RUNTIME_BLOB_OBJECT_PREFIX } from "@cube-runtime/persistence";
+import { createS3BlobStore, RUNTIME_BLOB_OBJECT_PREFIX } from "@aisay/persistence";
 
 const content = Buffer.from("production-artifact-container-gate", "utf8");
 const digest = createHash("sha256").update(content).digest("hex");

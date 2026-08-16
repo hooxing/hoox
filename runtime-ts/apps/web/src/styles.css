@@ -104,6 +104,21 @@ textarea:focus-visible {
   background: #242423;
   font-size: 13px;
 }
+.brand-copy {
+  display: grid;
+  gap: 1px;
+  line-height: 1.1;
+}
+.brand-copy strong {
+  font-size: 15px;
+  letter-spacing: -0.02em;
+}
+.brand-tagline {
+  color: #777773;
+  font-size: 10px;
+  font-weight: 520;
+  letter-spacing: 0.04em;
+}
 .identity-note {
   display: none;
 }

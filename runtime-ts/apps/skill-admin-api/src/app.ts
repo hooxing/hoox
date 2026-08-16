@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { AuthContextResolver } from "@cube-runtime/api";
-import type { UserId } from "@cube-runtime/domain";
+import type { AuthContextResolver } from "@aisay/api";
+import type { UserId } from "@aisay/domain";
 import {
   CreateSkillSubmissionRequestSchema,
   CreateSkillSubmissionSuccessEnvelopeSchema,
@@ -22,12 +22,12 @@ import {
   type ReviewSkillSubmissionRequest,
   type RevokeSkillSubmissionRequest,
   type SubmitSkillSubmissionRequest,
-} from "@cube-runtime/protocol";
+} from "@aisay/protocol";
 import {
   DEFAULT_SKILL_PUBLICATION_COMPATIBILITY,
   type SkillPublicationService,
   SkillServiceError,
-} from "@cube-runtime/skill";
+} from "@aisay/skill";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { Type, type Static } from "@sinclair/typebox";
 
@@ -90,11 +90,11 @@ export function createSkillAdminApiApp(
     ajv: {
       customOptions: { removeAdditional: false },
       onCreate: (ajv) => {
-        ajv.addFormat("cube-iso-utc-timestamp-v1", true);
+        ajv.addFormat("aisay-iso-utc-timestamp-v1", true);
       },
     },
     serializerOpts: {
-      ajv: { formats: { "cube-iso-utc-timestamp-v1": true } },
+      ajv: { formats: { "aisay-iso-utc-timestamp-v1": true } },
     },
   });
   const now = dependencies.now ?? (() => new Date());

@@ -1,4 +1,4 @@
-import type { ThreadTitleGenerationClaim } from "@cube-runtime/thread-title";
+import type { ThreadTitleGenerationClaim } from "@aisay/thread-title";
 import type { Pool, PoolClient } from "pg";
 import { describe, expect, it } from "vitest";
 import {

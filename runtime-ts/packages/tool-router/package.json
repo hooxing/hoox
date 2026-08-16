@@ -1,14 +1,14 @@
 {
-  "name": "@cube-runtime/tool-router",
+  "name": "@aisay/tool-router",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@cube-runtime/artifact": "workspace:*",
-    "@cube-runtime/domain": "workspace:*",
-    "@cube-runtime/pi-adapter": "workspace:*",
-    "@cube-runtime/run-contracts": "workspace:*",
-    "@cube-runtime/workspace": "workspace:*",
+    "@aisay/artifact": "workspace:*",
+    "@aisay/domain": "workspace:*",
+    "@aisay/pi-adapter": "workspace:*",
+    "@aisay/run-contracts": "workspace:*",
+    "@aisay/workspace": "workspace:*",
     "typebox": "1.1.38"
   },
   "exports": "./dist/index.js",

@@ -3,7 +3,7 @@ import type {
   StableTraceBlobIdentity,
   TraceBlobPersistencePort,
   TraceBlobPersistenceResult,
-} from "@cube-runtime/context-policy";
+} from "@aisay/context-policy";
 import {
   type BlobCommitSnapshot,
   type BlobCommitStatePort,

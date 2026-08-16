@@ -1,4 +1,4 @@
-import { sha256Digest } from "@cube-runtime/domain";
+import { sha256Digest } from "@aisay/domain";
 import { describe, expect, it } from "vitest";
 import {
   compareRecordedContextBudget,

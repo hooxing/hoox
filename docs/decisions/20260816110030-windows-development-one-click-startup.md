@@ -81,3 +81,4 @@
 ## 实施记录
 
 - 2026-08-16：实现 Windows development 非首次一键启动脚本、双击入口和契约测试。
+- 2026-08-16：脚本固定使用 UTF-8 BOM 与 CRLF，保证 Windows PowerShell 5.1 不会按系统 ANSI 代码页误解中文字符串。

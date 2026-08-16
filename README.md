@@ -230,7 +230,7 @@ tree hash 由 Gate 重算，exact patch 还必须通过 `git apply --reverse --c
 .\scripts\start-development.ps1
 ```
 
-脚本会依次启动 MinIO、构建工作区、执行 Worker 只读预检，并在独立 PowerShell 窗口启动 API、Agent Worker、Scheduler、Web、Skill Admin API 和 Admin Web；全部就绪后打开 `http://127.0.0.1:4173` 与 `http://127.0.0.1:4174`。它不会执行依赖安装、数据库迁移或开发身份初始化，也不会自动终止端口占用进程。
+脚本会先探测 `.env` 中的 MinIO、各 HTTP 健康端点以及 Worker/Scheduler 进程：已经运行且可用的服务直接复用，只为缺失服务打开新的 PowerShell 窗口。随后脚本构建工作区、执行 Worker 只读预检，并确认 API、Web、Skill Admin API 和 Admin Web 全部就绪；最后打开 `http://127.0.0.1:4173` 与 `http://127.0.0.1:4174`。它不会执行依赖安装、数据库迁移或开发身份初始化，也不会自动终止端口占用进程。
 
 只启动核心 Runtime，或确认现有 `dist` 已是最新时，可以使用：
 

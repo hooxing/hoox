@@ -163,6 +163,11 @@ describe("工作台展示组件", () => {
     container.innerHTML = html;
     expect(container.querySelector(".user-request .message-avatar")).toBeNull();
     expect(container.querySelector(".user-request-toggle")).toBeNull();
+    expect(container.querySelector(".assistant-message")?.getAttribute("aria-label")).toBe("Hoox");
+    expect(container.querySelector(".assistant-message .message-label")?.textContent).toBe("Hoox");
+    expect(container.querySelector(".assistant-message .message-avatar")?.textContent).toContain(
+      "H",
+    );
     expect(container.textContent).not.toContain("你的请求");
   });
 
@@ -998,8 +1003,9 @@ describe("工作台展示组件", () => {
 
     act(() => root.render(renderDrawer(true)));
     const input = container.querySelector<HTMLInputElement>("input");
-    expect(container.querySelector(".brand")?.textContent).toContain("AISay");
-    expect(container.querySelector(".brand-mark")?.textContent).toContain("A");
+    expect(container.querySelector(".brand")?.textContent).toContain("Hoox");
+    expect(container.querySelector(".brand")?.textContent).toContain("你说，它做。");
+    expect(container.querySelector(".brand-mark")?.textContent).toContain("H");
     expect(document.activeElement).toBe(input);
     act(() => input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
     expect(onClose).toHaveBeenCalledTimes(1);

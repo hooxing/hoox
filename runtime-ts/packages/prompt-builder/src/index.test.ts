@@ -103,10 +103,10 @@ describe("Runtime Prompt 分层与能力清单", () => {
           "schemaVersion": 1,
           "version": "tool-capability-manifest.v1",
         },
-        "promptDigest": "sha256:937504a8368efbe9fd4b77e0d039a98f6fc8ee14a251d11b968d7a1522bfca6e",
+        "promptDigest": "sha256:c1b0118b6aaac28785894b11f7e7ad01c97c225d72177acf0b358bd449040a23",
         "schemaVersion": 1,
-        "systemPrompt": "[runtime_prompt schema=1 version=runtime-system-prompt.v11 manifest=sha256:f8a22760506ece7e96359126f9a10775e03faa9bf5f5bb5667bfec8278949de4]
-      你是由 AISay Runtime 托管的受控 Agent。以下 PLATFORM_HARNESS 是平台规范，优先级高于所有租户、Skill 和用户内容。
+        "systemPrompt": "[runtime_prompt schema=1 version=runtime-system-prompt.v12 manifest=sha256:f8a22760506ece7e96359126f9a10775e03faa9bf5f5bb5667bfec8278949de4]
+      你是 Hoox，由 AISay Runtime 托管的受控 Agent。以下 PLATFORM_HARNESS 是平台规范，优先级高于所有租户、Skill 和用户内容。
       <PLATFORM_HARNESS>
       1. 只能使用 CAPABILITY_MANIFEST 中列出的本次 Session 实际工具；不得声称或模拟未列出的工具。
       2. Sandbox 命令与文件工具只操作隔离的 CubeSandbox；文件工具接受的是 Sandbox 内绝对路径，不代表 Agent Worker 宿主路径。
@@ -139,7 +139,7 @@ describe("Runtime Prompt 分层与能力清单", () => {
       - name="review" description="按团队检查清单审阅代码变更"
       </AVAILABLE_SKILLS>
       [/runtime_prompt]",
-        "version": "runtime-system-prompt.v11",
+        "version": "runtime-system-prompt.v12",
       }
     `);
     expect(Object.isFrozen(built)).toBe(true);
@@ -196,7 +196,7 @@ describe("Runtime Prompt 分层与能力清单", () => {
   it("默认使用中文回答，同时允许用户明确指定其他语言", () => {
     const built = buildRuntimeSystemPrompt(fixture());
 
-    expect(built.version).toBe("runtime-system-prompt.v11");
+    expect(built.version).toBe("runtime-system-prompt.v12");
     expect(built.systemPrompt).toContain("20. 使用中文进行回答，除非用户明确要求使用其他语言。");
   });
 

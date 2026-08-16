@@ -307,7 +307,7 @@ export function RunTranscript({
   )
     return null;
   return (
-    <section className="assistant-transcript" aria-label="Agent 正文">
+    <section className="assistant-transcript" aria-label="Hoox 正文">
       {blocks.length > 0 && <AgentTurn run={run} blocks={blocks} />}
       {progress.waitingQuestion !== undefined && (
         <AssistantMessage label="需要你的输入" text={progress.waitingQuestion} />
@@ -431,12 +431,12 @@ function AgentTurn({
 }) {
   const sections = buildConversationSections(blocks);
   return (
-    <article className="message assistant-message agent-turn" aria-label="Agent">
+    <article className="message assistant-message agent-turn" aria-label="Hoox">
       <span className="message-avatar" aria-hidden="true">
-        A
+        H
       </span>
       <div className="message-card">
-        <span className="message-label">Agent</span>
+        <span className="message-label">Hoox</span>
         <div className="agent-turn-blocks">
           {sections.map((section) =>
             section.type === "activity" ? (
@@ -614,7 +614,7 @@ function threadInputDispositionLabel(input: PendingThreadInputView): string {
 
 export function AssistantMessage({
   text,
-  label = "Agent",
+  label = "Hoox",
   contentBefore,
 }: {
   readonly text: string;
@@ -624,7 +624,7 @@ export function AssistantMessage({
   return (
     <article className="message assistant-message" aria-label={label}>
       <span className="message-avatar" aria-hidden="true">
-        A
+        H
       </span>
       <div className="message-card">
         <span className="message-label">{label}</span>
@@ -742,7 +742,7 @@ export function EmptyConversation() {
       </span>
       <div>
         <h2>从一个明确的目标开始</h2>
-        <p>描述希望 Agent 完成的任务。执行过程和可交付产物会在这里持续更新。</p>
+        <p>描述希望 Hoox 完成的任务。执行过程和可交付产物会在这里持续更新。</p>
       </div>
     </div>
   );
@@ -912,7 +912,7 @@ export function ConversationComposer({
           </div>
         )}
       <label className="sr-only" htmlFor="agent-request">
-        发送给 Agent 的任务
+        发送给 Hoox 的任务
       </label>
       <textarea
         id="agent-request"
@@ -1117,9 +1117,12 @@ export function NavigationSidebar({
       <div className="brand-row">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
-            A
+            H
           </span>
-          <span>AISay</span>
+          <span className="brand-copy">
+            <strong>Hoox</strong>
+            <span className="brand-tagline">你说，它做。</span>
+          </span>
         </div>
         <button
           className="mobile-only icon-button"

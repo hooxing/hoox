@@ -57,4 +57,15 @@ describe("AISay Runtime 项目身份契约", () => {
     expect(readText("scripts/production-supply-chain.mjs")).toContain('"aisay:origin"');
     expect(readText("scripts/production-supply-chain.mjs")).not.toContain('"cube:origin"');
   });
+
+  it("用户面对的 Agent 产品使用 Hoox 品牌与独立站点", () => {
+    expect(readText("README.md")).toContain("**Hoox** —— 你说，它做。");
+    expect(readText("README.md")).toContain("hoox.aisay.cc");
+    expect(readText("runtime-ts/apps/web/index.html")).toContain("<title>Hoox 工作台</title>");
+    expect(readText("runtime-ts/apps/web/src/workspace-view.tsx")).toContain(">Hoox<");
+    expect(readText("runtime-ts/apps/web/src/workspace-view.tsx")).toContain("你说，它做。");
+    expect(readText("runtime-ts/packages/prompt-builder/src/index.ts")).toContain(
+      "你是 Hoox，由 AISay Runtime 托管的受控 Agent",
+    );
+  });
 });

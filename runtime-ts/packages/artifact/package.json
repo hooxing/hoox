@@ -1,5 +1,5 @@
 {
-  "name": "@cube-runtime/artifact",
+  "name": "@aisay/artifact",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,9 +12,9 @@
     "test": "vitest run --root ../../.. runtime-ts/packages/artifact/src"
   },
   "dependencies": {
-    "@cube-runtime/domain": "workspace:*",
-    "@cube-runtime/persistence": "workspace:*",
-    "@cube-runtime/run-contracts": "workspace:*",
+    "@aisay/domain": "workspace:*",
+    "@aisay/persistence": "workspace:*",
+    "@aisay/run-contracts": "workspace:*",
     "pg": "8.22.0"
   },
   "devDependencies": {

@@ -1,4 +1,4 @@
-import type { RuntimeEventV1 } from "@cube-runtime/run-contracts";
+import type { RuntimeEventV1 } from "@aisay/run-contracts";
 import { describe, expect, it } from "vitest";
 import { type ObservedRuntimeEvent, projectTrajectory } from "./index.js";
 

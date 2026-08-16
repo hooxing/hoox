@@ -12,15 +12,15 @@ const sbomDirectory = join(repositoryRoot, "supply-chain", "sbom");
 const excludedVendorTreeDirectories = new Set(["dist", "node_modules", "coverage", ".tmp"]);
 
 export const productionSbomTargets = Object.freeze([
-  Object.freeze({ id: "api", packageName: "@cube-runtime/api", fileName: "api.cdx.json" }),
+  Object.freeze({ id: "api", packageName: "@aisay/api", fileName: "api.cdx.json" }),
   Object.freeze({
     id: "scheduler",
-    packageName: "@cube-runtime/scheduler",
+    packageName: "@aisay/scheduler",
     fileName: "scheduler.cdx.json",
   }),
   Object.freeze({
     id: "worker",
-    packageName: "@cube-runtime/agent-worker",
+    packageName: "@aisay/agent-worker",
     fileName: "worker.cdx.json",
   }),
 ]);
@@ -160,19 +160,19 @@ function workspaceClosure(rootPackageName, policy) {
         version: item.manifest.version,
         ...(evidence === undefined ? {} : { license: evidence.license }),
         properties: {
-          "cube:origin": evidence === undefined ? "workspace" : "vendor",
-          "cube:workspace-path": relative(repositoryRoot, dirname(item.path)).split(sep).join("/"),
+          "aisay:origin": evidence === undefined ? "workspace" : "vendor",
+          "aisay:workspace-path": relative(repositoryRoot, dirname(item.path)).split(sep).join("/"),
           ...(evidence === undefined
             ? {}
             : {
-                "cube:license-file": evidence.licenseFile,
-                "cube:upstream-source-commit": evidence.upstreamCommit,
-                "cube:source-file": evidence.sourceFile,
-                "cube:local-modified": "true",
-                "cube:local-patch-id": evidence.localPatchId,
-                "cube:local-patch-file": evidence.patchFile,
-                "cube:local-patch-sha256": evidence.patchSha256,
-                "cube:patched-tree-sha256": evidence.patchedTreeSha256,
+                "aisay:license-file": evidence.licenseFile,
+                "aisay:upstream-source-commit": evidence.upstreamCommit,
+                "aisay:source-file": evidence.sourceFile,
+                "aisay:local-modified": "true",
+                "aisay:local-patch-id": evidence.localPatchId,
+                "aisay:local-patch-file": evidence.patchFile,
+                "aisay:local-patch-sha256": evidence.patchSha256,
+                "aisay:patched-tree-sha256": evidence.patchedTreeSha256,
               }),
         },
       }),
@@ -250,7 +250,7 @@ export function canonicalizeProductionPlatformComponents(components) {
         name,
         version,
         license,
-        properties: { "cube:origin": "registry" },
+        properties: { "aisay:origin": "registry" },
       }),
     ),
   ];
@@ -276,7 +276,7 @@ function externalComponents(packageNames) {
               name: entry.name,
               version,
               license,
-              properties: { "cube:origin": "registry" },
+              properties: { "aisay:origin": "registry" },
             }),
           );
         }
@@ -319,16 +319,16 @@ export function buildCycloneDx(input) {
         components: Object.freeze([
           Object.freeze({
             type: "application",
-            name: "cube-runtime-offline-sbom-generator",
+            name: "aisay-runtime-offline-sbom-generator",
             version: "1",
           }),
         ]),
       }),
       properties: sortedProperties({
-        "cube:dependency-source": "pnpm production installed closure",
-        "cube:generator-network": "offline",
-        "cube:lockfile": "pnpm-lock.yaml",
-        "cube:lockfile-sha256": input.lockfileSha256,
+        "aisay:dependency-source": "pnpm production installed closure",
+        "aisay:generator-network": "offline",
+        "aisay:lockfile": "pnpm-lock.yaml",
+        "aisay:lockfile-sha256": input.lockfileSha256,
       }),
     }),
     components: Object.freeze(components),
@@ -346,7 +346,7 @@ export function evaluateLicensePolicy(components, policy) {
   const denied = new Set(policy.denied ?? []);
   const issues = [];
   for (const item of components) {
-    const origin = item.properties?.find((property) => property.name === "cube:origin")?.value;
+    const origin = item.properties?.find((property) => property.name === "aisay:origin")?.value;
     if (origin === "workspace") continue;
     const license = item.licenses?.[0]?.license?.id;
     if (typeof license !== "string") {

@@ -4,8 +4,8 @@ import {
   createProductionJwtAuthResolver,
   loadProductionTlsCredentials,
   productionTrustProxy,
-} from "@cube-runtime/api";
-import { userId } from "@cube-runtime/domain";
+} from "@aisay/api";
+import { userId } from "@aisay/domain";
 import {
   createPostgresPool,
   PgSkillPublicationAuthorization,
@@ -13,13 +13,13 @@ import {
   probePostgres,
   probeS3StableSkillPublisher,
   S3StableSkillPublisher,
-} from "@cube-runtime/persistence";
+} from "@aisay/persistence";
 import {
   type ProcessSignalSource,
   type ServiceAssemblyFactory,
   startServiceProcess,
-} from "@cube-runtime/process-runtime";
-import { SkillPublicationService } from "@cube-runtime/skill";
+} from "@aisay/process-runtime";
+import { SkillPublicationService } from "@aisay/skill";
 import {
   createSkillAdminApiApp,
   type SkillAdminApiAppOptions,
@@ -54,7 +54,7 @@ const productionSkillAdminApiAssembler: ServiceAssemblyFactory<SkillAdminApiProc
           ...(tls === undefined ? {} : { https: tls }),
         },
         expectedPublisherRole: configuration.databaseSkillPublisherRole,
-        applicationName: "cube-runtime-skill-admin-api-production",
+        applicationName: "aisay-runtime-skill-admin-api-production",
       });
     },
   };
@@ -76,7 +76,7 @@ const developmentSkillAdminApiAssembler: ServiceAssemblyFactory<SkillAdminApiPro
         ...(configuration.databaseSkillPublisherRole === undefined
           ? {}
           : { expectedPublisherRole: configuration.databaseSkillPublisherRole }),
-        applicationName: "cube-runtime-skill-admin-api-development",
+        applicationName: "aisay-runtime-skill-admin-api-development",
       });
     },
   };

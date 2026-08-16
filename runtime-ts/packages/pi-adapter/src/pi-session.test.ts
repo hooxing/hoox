@@ -1,7 +1,7 @@
-import type { TokenizerPort } from "@cube-runtime/context-policy";
-import { buildToolCapabilityManifest } from "@cube-runtime/prompt-builder";
-import { SandboxRuntimeError } from "@cube-runtime/sandbox";
-import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
+import type { TokenizerPort } from "@aisay/context-policy";
+import { buildToolCapabilityManifest } from "@aisay/prompt-builder";
+import { SandboxRuntimeError } from "@aisay/sandbox";
+import { FakeSandboxHandle } from "@aisay/sandbox/testing";
 import {
   type FauxProviderHandle,
   type FauxResponseStep,
@@ -470,7 +470,7 @@ describe("Pi 安全适配", () => {
       logicalCwd: "/workspace",
       activeToolNames: expect.arrayContaining([...SANDBOX_TOOL_NAMES]),
       promptSchemaVersion: 1,
-      promptVersion: "runtime-system-prompt.v10",
+      promptVersion: "runtime-system-prompt.v11",
       capabilityManifestDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       promptDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/u),
       compactionEnabled: false,
@@ -499,7 +499,7 @@ describe("Pi 安全适配", () => {
     );
     expect("compact" in controller).toBe(false);
     expect("session" in controller).toBe(false);
-    expect(modelContext).toContain("Cube Runtime 托管的受控 Agent");
+    expect(modelContext).toContain("AISay Runtime 托管的受控 Agent");
     expect(modelContext).toContain("/workspace");
     expect(modelContext).toContain("exec_command");
     expect(modelContext).not.toContain("request_user_input");

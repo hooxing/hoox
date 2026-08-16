@@ -4,7 +4,7 @@ import type {
   PgClaimedWorkerTenantAssignment,
   PgRunDispatchOutbox,
   PgWorkerTenantAssignments,
-} from "@cube-runtime/persistence";
+} from "@aisay/persistence";
 import type {
   ArtifactPublicationPort,
   CancellationPort,
@@ -19,7 +19,7 @@ import type {
   ScheduledTask,
   ThreadSandboxProviderPort,
   WorkspaceRevisionVerifierPort,
-} from "@cube-runtime/run-contracts";
+} from "@aisay/run-contracts";
 import {
   type CubeGatewayOptions,
   CubeSandboxGateway,
@@ -34,7 +34,7 @@ import {
   type TenantResourceVolumePort,
   type TrustedSandboxSessionCapability,
   type UncertainLifecycleEvent,
-} from "@cube-runtime/sandbox";
+} from "@aisay/sandbox";
 import type { RunWorker, RunWorkerResult } from "./run-worker.js";
 import type { SandboxResourceFilesystemMaterializerPort } from "./sandbox-resource-filesystem-materializer.js";
 
@@ -252,13 +252,13 @@ export class ProviderSandboxSessionRegistry
     );
     try {
       await this.sandboxInitializer?.initialize({ sandbox, signal: SANDBOX_PREFLIGHT_SIGNAL });
-      const output = await sandbox.command("printf cube-runtime-sandbox-ready", {
+      const output = await sandbox.command("printf aisay-runtime-sandbox-ready", {
         timeoutMs: Math.min(this.lifecycleTimeoutMs, 5_000),
       });
       if (
         output.exitCode !== 0 ||
         output.stderr !== "" ||
-        output.stdout !== "cube-runtime-sandbox-ready"
+        output.stdout !== "aisay-runtime-sandbox-ready"
       ) {
         throw new SandboxRuntimeError("PROTOCOL", "Sandbox 开发执行预检返回异常结果");
       }

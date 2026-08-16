@@ -24,11 +24,11 @@ import {
   type WorkspaceRevisionId,
   workspaceId,
   workspaceRevisionId,
-} from "@cube-runtime/domain";
-import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
-import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
-import type { RunSkillSnapshot } from "@cube-runtime/skill";
-import { createWorkspaceManifest } from "@cube-runtime/workspace";
+} from "@aisay/domain";
+import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@aisay/pi-adapter";
+import { FakeSandboxHandle } from "@aisay/sandbox/testing";
+import type { RunSkillSnapshot } from "@aisay/skill";
+import { createWorkspaceManifest } from "@aisay/workspace";
 import {
   digestCanonical,
   isExternalCancellationFinalizationMutation,

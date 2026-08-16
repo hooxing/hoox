@@ -19,33 +19,33 @@ importers:
         specifier: 1.1.38
         version: 1.1.38
     devDependencies:
+      '@aisay/domain':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/domain
+      '@aisay/persistence':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/persistence
+      '@aisay/pi-adapter':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/pi-adapter
+      '@aisay/protocol-mapper':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/protocol-mapper
+      '@aisay/resource':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/resource
+      '@aisay/run-contracts':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/run-contracts
+      '@aisay/sandbox':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/sandbox
       '@aws-sdk/client-s3':
         specifier: 3.1095.0
         version: 3.1095.0
       '@biomejs/biome':
         specifier: 2.5.5
         version: 2.5.5
-      '@cube-runtime/domain':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/domain
-      '@cube-runtime/persistence':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/persistence
-      '@cube-runtime/pi-adapter':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/pi-adapter
-      '@cube-runtime/protocol-mapper':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/protocol-mapper
-      '@cube-runtime/resource':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/resource
-      '@cube-runtime/run-contracts':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/run-contracts
-      '@cube-runtime/sandbox':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/sandbox
       '@sinclair/typebox':
         specifier: 0.34.52
         version: 0.34.52
@@ -67,7 +67,7 @@ importers:
 
   runtime-ts/apps/admin-web:
     dependencies:
-      '@cube-runtime/protocol':
+      '@aisay/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
       react:
@@ -95,46 +95,46 @@ importers:
 
   runtime-ts/apps/agent-worker:
     dependencies:
-      '@cube-runtime/artifact':
+      '@aisay/artifact':
         specifier: workspace:*
         version: link:../../packages/artifact
-      '@cube-runtime/context-policy':
+      '@aisay/context-policy':
         specifier: workspace:*
         version: link:../../packages/context-policy
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../../packages/domain
-      '@cube-runtime/memory':
+      '@aisay/memory':
         specifier: workspace:*
         version: link:../../packages/memory
-      '@cube-runtime/persistence':
+      '@aisay/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
-      '@cube-runtime/pi-adapter':
+      '@aisay/pi-adapter':
         specifier: workspace:*
         version: link:../../packages/pi-adapter
-      '@cube-runtime/process-runtime':
+      '@aisay/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
-      '@cube-runtime/resource':
+      '@aisay/resource':
         specifier: workspace:*
         version: link:../../packages/resource
-      '@cube-runtime/run-contracts':
+      '@aisay/run-contracts':
         specifier: workspace:*
         version: link:../../packages/run-contracts
-      '@cube-runtime/sandbox':
+      '@aisay/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
-      '@cube-runtime/skill':
+      '@aisay/skill':
         specifier: workspace:*
         version: link:../../packages/skill
-      '@cube-runtime/tool-router':
+      '@aisay/tool-router':
         specifier: workspace:*
         version: link:../../packages/tool-router
-      '@cube-runtime/trajectory':
+      '@aisay/trajectory':
         specifier: workspace:*
         version: link:../../packages/trajectory
-      '@cube-runtime/workspace':
+      '@aisay/workspace':
         specifier: workspace:*
         version: link:../../packages/workspace
       '@earendil-works/pi-ai':
@@ -146,25 +146,25 @@ importers:
 
   runtime-ts/apps/api:
     dependencies:
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../../packages/domain
-      '@cube-runtime/persistence':
+      '@aisay/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
-      '@cube-runtime/process-runtime':
+      '@aisay/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
-      '@cube-runtime/protocol':
+      '@aisay/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@cube-runtime/protocol-mapper':
+      '@aisay/protocol-mapper':
         specifier: workspace:*
         version: link:../../packages/protocol-mapper
-      '@cube-runtime/resource':
+      '@aisay/resource':
         specifier: workspace:*
         version: link:../../packages/resource
-      '@cube-runtime/skill':
+      '@aisay/skill':
         specifier: workspace:*
         version: link:../../packages/skill
       fastify:
@@ -173,40 +173,40 @@ importers:
 
   runtime-ts/apps/scheduler:
     dependencies:
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../../packages/domain
-      '@cube-runtime/persistence':
+      '@aisay/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
-      '@cube-runtime/process-runtime':
+      '@aisay/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
-      '@cube-runtime/sandbox':
+      '@aisay/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
-      '@cube-runtime/thread-title':
+      '@aisay/thread-title':
         specifier: workspace:*
         version: link:../../packages/thread-title
 
   runtime-ts/apps/skill-admin-api:
     dependencies:
-      '@cube-runtime/api':
+      '@aisay/api':
         specifier: workspace:*
         version: link:../api
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../../packages/domain
-      '@cube-runtime/persistence':
+      '@aisay/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
-      '@cube-runtime/process-runtime':
+      '@aisay/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
-      '@cube-runtime/protocol':
+      '@aisay/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@cube-runtime/skill':
+      '@aisay/skill':
         specifier: workspace:*
         version: link:../../packages/skill
       '@sinclair/typebox':
@@ -218,10 +218,10 @@ importers:
 
   runtime-ts/apps/trajectory-web:
     dependencies:
-      '@cube-runtime/run-contracts':
+      '@aisay/run-contracts':
         specifier: workspace:*
         version: link:../../packages/run-contracts
-      '@cube-runtime/trajectory':
+      '@aisay/trajectory':
         specifier: workspace:*
         version: link:../../packages/trajectory
 
@@ -261,13 +261,13 @@ importers:
 
   runtime-ts/packages/artifact:
     dependencies:
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../domain
-      '@cube-runtime/persistence':
+      '@aisay/persistence':
         specifier: workspace:*
         version: link:../persistence
-      '@cube-runtime/run-contracts':
+      '@aisay/run-contracts':
         specifier: workspace:*
         version: link:../run-contracts
       pg:
@@ -280,7 +280,7 @@ importers:
 
   runtime-ts/packages/context-policy:
     dependencies:
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../domain
 
@@ -290,36 +290,36 @@ importers:
 
   runtime-ts/packages/persistence:
     dependencies:
+      '@aisay/context-policy':
+        specifier: workspace:*
+        version: link:../context-policy
+      '@aisay/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@aisay/memory':
+        specifier: workspace:*
+        version: link:../memory
+      '@aisay/resource':
+        specifier: workspace:*
+        version: link:../resource
+      '@aisay/run-contracts':
+        specifier: workspace:*
+        version: link:../run-contracts
+      '@aisay/skill':
+        specifier: workspace:*
+        version: link:../skill
+      '@aisay/thread-title':
+        specifier: workspace:*
+        version: link:../thread-title
+      '@aisay/workspace':
+        specifier: workspace:*
+        version: link:../workspace
       '@aws-sdk/client-s3':
         specifier: 3.1095.0
         version: 3.1095.0
       '@aws-sdk/s3-request-presigner':
         specifier: 3.1095.0
         version: 3.1095.0
-      '@cube-runtime/context-policy':
-        specifier: workspace:*
-        version: link:../context-policy
-      '@cube-runtime/domain':
-        specifier: workspace:*
-        version: link:../domain
-      '@cube-runtime/memory':
-        specifier: workspace:*
-        version: link:../memory
-      '@cube-runtime/resource':
-        specifier: workspace:*
-        version: link:../resource
-      '@cube-runtime/run-contracts':
-        specifier: workspace:*
-        version: link:../run-contracts
-      '@cube-runtime/skill':
-        specifier: workspace:*
-        version: link:../skill
-      '@cube-runtime/thread-title':
-        specifier: workspace:*
-        version: link:../thread-title
-      '@cube-runtime/workspace':
-        specifier: workspace:*
-        version: link:../workspace
       pg:
         specifier: 8.22.0
         version: 8.22.0
@@ -330,16 +330,16 @@ importers:
 
   runtime-ts/packages/pi-adapter:
     dependencies:
-      '@cube-runtime/context-policy':
+      '@aisay/context-policy':
         specifier: workspace:*
         version: link:../context-policy
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../domain
-      '@cube-runtime/prompt-builder':
+      '@aisay/prompt-builder':
         specifier: workspace:*
         version: link:../prompt-builder
-      '@cube-runtime/sandbox':
+      '@aisay/sandbox':
         specifier: workspace:*
         version: link:../sandbox
       '@earendil-works/pi-ai':
@@ -367,10 +367,10 @@ importers:
 
   runtime-ts/packages/protocol-mapper:
     dependencies:
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../domain
-      '@cube-runtime/protocol':
+      '@aisay/protocol':
         specifier: workspace:*
         version: link:../protocol
       '@sinclair/typebox':
@@ -379,37 +379,37 @@ importers:
 
   runtime-ts/packages/resource:
     dependencies:
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../domain
 
   runtime-ts/packages/run-contracts:
     dependencies:
-      '@cube-runtime/context-policy':
+      '@aisay/context-policy':
         specifier: workspace:*
         version: link:../context-policy
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../domain
-      '@cube-runtime/pi-adapter':
+      '@aisay/pi-adapter':
         specifier: workspace:*
         version: link:../pi-adapter
-      '@cube-runtime/sandbox':
+      '@aisay/sandbox':
         specifier: workspace:*
         version: link:../sandbox
-      '@cube-runtime/skill':
+      '@aisay/skill':
         specifier: workspace:*
         version: link:../skill
-      '@cube-runtime/workspace':
+      '@aisay/workspace':
         specifier: workspace:*
         version: link:../workspace
 
   runtime-ts/packages/sandbox:
     dependencies:
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../domain
-      '@cube-runtime/workspace':
+      '@aisay/workspace':
         specifier: workspace:*
         version: link:../workspace
       '@cubesandbox/sdk':
@@ -421,7 +421,7 @@ importers:
 
   runtime-ts/packages/skill:
     dependencies:
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../domain
 
@@ -431,19 +431,19 @@ importers:
 
   runtime-ts/packages/tool-router:
     dependencies:
-      '@cube-runtime/artifact':
+      '@aisay/artifact':
         specifier: workspace:*
         version: link:../artifact
-      '@cube-runtime/domain':
+      '@aisay/domain':
         specifier: workspace:*
         version: link:../domain
-      '@cube-runtime/pi-adapter':
+      '@aisay/pi-adapter':
         specifier: workspace:*
         version: link:../pi-adapter
-      '@cube-runtime/run-contracts':
+      '@aisay/run-contracts':
         specifier: workspace:*
         version: link:../run-contracts
-      '@cube-runtime/workspace':
+      '@aisay/workspace':
         specifier: workspace:*
         version: link:../workspace
       typebox:
@@ -452,7 +452,7 @@ importers:
 
   runtime-ts/packages/trajectory:
     dependencies:
-      '@cube-runtime/run-contracts':
+      '@aisay/run-contracts':
         specifier: workspace:*
         version: link:../run-contracts
 
@@ -476,6 +476,8 @@ importers:
       vitest:
         specifier: ^2.0.5
         version: 2.1.9(@types/node@20.19.43)(jsdom@26.1.0)(lightningcss@1.33.0)
+
+  runtime-ts/vendor/deepseek-trajectory: {}
 
 packages:
 

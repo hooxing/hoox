@@ -1,4 +1,4 @@
-import { tenantId, userId } from "@cube-runtime/domain";
+import { tenantId, userId } from "@aisay/domain";
 import type { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { PgPersonalizationSettingsRepository } from "./pg-personalization-settings.js";

@@ -1,4 +1,4 @@
-import { tenantId, userId, isoTimestamp } from "@cube-runtime/domain";
+import { tenantId, userId, isoTimestamp } from "@aisay/domain";
 import { describe, expect, it } from "vitest";
 import type {
   SkillCenterPort,

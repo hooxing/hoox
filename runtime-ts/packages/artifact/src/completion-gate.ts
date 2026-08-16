@@ -1,5 +1,5 @@
-import type { WorkspaceRevisionId } from "@cube-runtime/domain";
-import type { ArtifactPublicationPort, ExecutionScope } from "@cube-runtime/run-contracts";
+import type { WorkspaceRevisionId } from "@aisay/domain";
+import type { ArtifactPublicationPort, ExecutionScope } from "@aisay/run-contracts";
 import { ArtifactDeliveryError, artifactError } from "./errors.js";
 
 /** ArtifactService 暴露给 RunWorker 的只读完成门，不把写能力带进 Worker 终态路径。 */

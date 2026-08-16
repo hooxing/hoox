@@ -1,8 +1,5 @@
-import type {
-  ToolObservationBinding,
-  ToolObservationRolloutPort,
-} from "@cube-runtime/context-policy";
-import { sha256Digest } from "@cube-runtime/domain";
+import type { ToolObservationBinding, ToolObservationRolloutPort } from "@aisay/context-policy";
+import { sha256Digest } from "@aisay/domain";
 import { PersistenceError } from "./errors.js";
 import type { RolloutEntryDraft } from "./pg-runtime-rollout.js";
 import type { PgRuntimeRolloutRepository, TrustedRolloutContext } from "./pg-runtime-rollout.js";

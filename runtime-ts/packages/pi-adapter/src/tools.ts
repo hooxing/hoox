@@ -1,11 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { posix } from "node:path";
-import type {
-  ControlledToolReceiptSource,
-  ToolObservationResult,
-} from "@cube-runtime/context-policy";
-import { encodeControlledToolReceipt } from "@cube-runtime/context-policy";
-import { type SandboxHandle, SandboxRuntimeError } from "@cube-runtime/sandbox";
+import type { ControlledToolReceiptSource, ToolObservationResult } from "@aisay/context-policy";
+import { encodeControlledToolReceipt } from "@aisay/context-policy";
+import { type SandboxHandle, SandboxRuntimeError } from "@aisay/sandbox";
 import { defineTool, truncateHead } from "@earendil-works/pi-coding-agent";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";

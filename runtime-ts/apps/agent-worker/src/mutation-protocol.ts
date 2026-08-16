@@ -1,1 +1,1 @@
-export * from "@cube-runtime/run-contracts/mutation-protocol";
+export * from "@aisay/run-contracts/mutation-protocol";

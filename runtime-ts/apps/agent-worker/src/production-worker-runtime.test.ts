@@ -1,8 +1,5 @@
-import type {
-  PgClaimedRunDispatch,
-  PgClaimedWorkerTenantAssignment,
-} from "@cube-runtime/persistence";
-import type { ExecutionScope, SandboxSessionRef } from "@cube-runtime/run-contracts";
+import type { PgClaimedRunDispatch, PgClaimedWorkerTenantAssignment } from "@aisay/persistence";
+import type { ExecutionScope, SandboxSessionRef } from "@aisay/run-contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   AgentWorkerPollingLoop,
@@ -389,7 +386,7 @@ describe("Sandbox 开发执行预检", () => {
     );
     const probe = vi.spyOn(registry.gateway, "probe").mockResolvedValue();
     const command = vi.fn(async () => ({
-      stdout: "cube-runtime-sandbox-ready",
+      stdout: "aisay-runtime-sandbox-ready",
       stderr: "",
       exitCode: 0,
     }));
@@ -411,7 +408,7 @@ describe("Sandbox 开发执行预检", () => {
       { templateId: "template-development-preflight", ttlSeconds: 30 },
       { timeoutMs: 90_000 },
     );
-    expect(command).toHaveBeenCalledWith("printf cube-runtime-sandbox-ready", {
+    expect(command).toHaveBeenCalledWith("printf aisay-runtime-sandbox-ready", {
       timeoutMs: 5_000,
     });
     expect(kill).toHaveBeenCalledWith({ timeoutMs: 90_000, ignoreNotFound: true });

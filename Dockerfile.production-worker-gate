@@ -14,9 +14,9 @@ COPY scripts/prune-production-deployment.mjs ./scripts/prune-production-deployme
 
 # 安装严格服从锁文件；deploy 只生成 Worker 的 production 闭包，随后移除源码、测试与构建产物。
 RUN --network=none pnpm install --offline --frozen-lockfile \
- && pnpm --filter @cube-runtime/agent-worker^... build \
- && pnpm --filter @cube-runtime/agent-worker build \
- && pnpm --filter @cube-runtime/agent-worker deploy --prod /opt/deploy \
+ && pnpm --filter @aisay/agent-worker^... build \
+ && pnpm --filter @aisay/agent-worker build \
+ && pnpm --filter @aisay/agent-worker deploy --prod /opt/deploy \
  && node scripts/prune-production-deployment.mjs /opt/deploy worker
 
 FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d

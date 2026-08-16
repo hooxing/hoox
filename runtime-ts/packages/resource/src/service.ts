@@ -3,7 +3,7 @@ import type {
   ResourceVersionId,
   WorkspaceId,
   WorkspaceRevisionId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import type {
   PromoteResourceRequest,
   PromoteResourceRequestResult,

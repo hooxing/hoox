@@ -1,4 +1,4 @@
-import type { IsoTimestamp, WorkspaceRevisionId } from "@cube-runtime/domain";
+import type { IsoTimestamp, WorkspaceRevisionId } from "@aisay/domain";
 import type { ExecutionScope } from "./ports.js";
 
 /**

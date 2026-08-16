@@ -1,5 +1,5 @@
 {
-  "name": "@cube-runtime/vendor-deepseek-trajectory",
+  "name": "@aisay/vendor-deepseek-trajectory",
   "version": "0.1.0-rc.5+47f943859bef",
   "private": true,
   "type": "module",

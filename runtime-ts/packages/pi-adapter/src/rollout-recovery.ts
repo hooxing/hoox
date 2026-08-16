@@ -8,13 +8,13 @@ import {
   encodeControlledToolReceipt,
   parseControlledToolReceipt,
   type RecordedContextBudgetIdentity,
-} from "@cube-runtime/context-policy";
+} from "@aisay/context-policy";
 import {
   type RolloutCompatibilityIdentity,
   type RuntimeRolloutCheckpoint,
   type RuntimeRolloutEntry,
   sha256Digest,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import {
   assessSafePiSessionContext,
   type ControlledRolloutProjection,

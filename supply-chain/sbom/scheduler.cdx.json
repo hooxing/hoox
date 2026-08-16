@@ -5,40 +5,261 @@
   "metadata": {
     "component": {
       "type": "application",
-      "bom-ref": "pkg:npm/%40cube-runtime/scheduler@0.0.0",
-      "name": "@cube-runtime/scheduler",
+      "bom-ref": "pkg:npm/%40aisay/scheduler@0.0.0",
+      "name": "@aisay/scheduler",
       "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/scheduler@0.0.0"
+      "purl": "pkg:npm/%40aisay/scheduler@0.0.0"
     },
     "tools": {
       "components": [
         {
           "type": "application",
-          "name": "cube-runtime-offline-sbom-generator",
+          "name": "aisay-runtime-offline-sbom-generator",
           "version": "1"
         }
       ]
     },
     "properties": [
       {
-        "name": "cube:dependency-source",
+        "name": "aisay:dependency-source",
         "value": "pnpm production installed closure"
       },
       {
-        "name": "cube:generator-network",
+        "name": "aisay:generator-network",
         "value": "offline"
       },
       {
-        "name": "cube:lockfile",
+        "name": "aisay:lockfile",
         "value": "pnpm-lock.yaml"
       },
       {
-        "name": "cube:lockfile-sha256",
-        "value": "4a6f6b63d443781bc80253894e71b05de374941bdcfe10d4b494a6477366966b"
+        "name": "aisay:lockfile-sha256",
+        "value": "7a3bdc728f04c24221c5a8e5b27052a5e7baaf5aa51e2f6855d73c0dd5bfba1c"
       }
     ]
   },
   "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/context-policy@0.0.0",
+      "name": "@aisay/context-policy",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/context-policy@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/context-policy"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/domain@0.0.0",
+      "name": "@aisay/domain",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/domain@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/domain"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/memory@0.0.0",
+      "name": "@aisay/memory",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/memory@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/memory"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/persistence@0.0.0",
+      "name": "@aisay/persistence",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/persistence@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/persistence"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/pi-adapter@0.0.0",
+      "name": "@aisay/pi-adapter",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/pi-adapter@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/pi-adapter"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/process-runtime@0.0.0",
+      "name": "@aisay/process-runtime",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/process-runtime@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/process-runtime"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/prompt-builder@0.0.0",
+      "name": "@aisay/prompt-builder",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/prompt-builder@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/prompt-builder"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/resource@0.0.0",
+      "name": "@aisay/resource",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/resource@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/resource"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/run-contracts@0.0.0",
+      "name": "@aisay/run-contracts",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/run-contracts@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/run-contracts"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/sandbox@0.0.0",
+      "name": "@aisay/sandbox",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/sandbox@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/sandbox"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/skill@0.0.0",
+      "name": "@aisay/skill",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/skill@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/skill"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/thread-title@0.0.0",
+      "name": "@aisay/thread-title",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/thread-title@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/thread-title"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40aisay/workspace@0.0.0",
+      "name": "@aisay/workspace",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40aisay/workspace@0.0.0",
+      "properties": [
+        {
+          "name": "aisay:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "aisay:workspace-path",
+          "value": "runtime-ts/packages/workspace"
+        }
+      ]
+    },
     {
       "type": "library",
       "bom-ref": "pkg:npm/%40anthropic-ai/sdk@0.91.1",
@@ -54,7 +275,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -74,7 +295,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -94,7 +315,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -114,7 +335,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -134,7 +355,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -154,7 +375,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -174,7 +395,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -194,7 +415,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -214,7 +435,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -234,7 +455,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -254,7 +475,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -274,7 +495,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -294,7 +515,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -314,7 +535,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -334,7 +555,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -354,7 +575,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -374,7 +595,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -394,7 +615,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -414,7 +635,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -434,7 +655,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -454,7 +675,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -474,7 +695,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -494,7 +715,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -514,7 +735,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -534,7 +755,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -554,7 +775,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -574,7 +795,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -594,7 +815,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -614,7 +835,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -634,7 +855,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -654,7 +875,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -674,7 +895,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -694,7 +915,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -714,229 +935,8 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/context-policy@0.0.0",
-      "name": "@cube-runtime/context-policy",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/context-policy@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/context-policy"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/domain@0.0.0",
-      "name": "@cube-runtime/domain",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/domain@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/domain"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/memory@0.0.0",
-      "name": "@cube-runtime/memory",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/memory@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/memory"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/persistence@0.0.0",
-      "name": "@cube-runtime/persistence",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/persistence@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/persistence"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/pi-adapter@0.0.0",
-      "name": "@cube-runtime/pi-adapter",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/pi-adapter@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/pi-adapter"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/process-runtime@0.0.0",
-      "name": "@cube-runtime/process-runtime",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/process-runtime@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/process-runtime"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/prompt-builder@0.0.0",
-      "name": "@cube-runtime/prompt-builder",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/prompt-builder@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/prompt-builder"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/resource@0.0.0",
-      "name": "@cube-runtime/resource",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/resource@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/resource"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/run-contracts@0.0.0",
-      "name": "@cube-runtime/run-contracts",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/run-contracts@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/run-contracts"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/sandbox@0.0.0",
-      "name": "@cube-runtime/sandbox",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/sandbox@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/sandbox"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/skill@0.0.0",
-      "name": "@cube-runtime/skill",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/skill@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/skill"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/thread-title@0.0.0",
-      "name": "@cube-runtime/thread-title",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/thread-title@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/thread-title"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40cube-runtime/workspace@0.0.0",
-      "name": "@cube-runtime/workspace",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40cube-runtime/workspace@0.0.0",
-      "properties": [
-        {
-          "name": "cube:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "cube:workspace-path",
-          "value": "runtime-ts/packages/workspace"
         }
       ]
     },
@@ -955,43 +955,43 @@
       ],
       "properties": [
         {
-          "name": "cube:license-file",
+          "name": "aisay:license-file",
           "value": "runtime-ts/vendor/cubesandbox-sdk/LICENSE"
         },
         {
-          "name": "cube:local-modified",
+          "name": "aisay:local-modified",
           "value": "true"
         },
         {
-          "name": "cube:local-patch-file",
+          "name": "aisay:local-patch-file",
           "value": "runtime-ts/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.patch"
         },
         {
-          "name": "cube:local-patch-id",
+          "name": "aisay:local-patch-id",
           "value": "CUBE-LOCAL-0001"
         },
         {
-          "name": "cube:local-patch-sha256",
+          "name": "aisay:local-patch-sha256",
           "value": "ac285a52b5b5994b2a4b4102cf0cf952c252e421d8bfb33aa3f79e058008bb8a"
         },
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "vendor"
         },
         {
-          "name": "cube:patched-tree-sha256",
+          "name": "aisay:patched-tree-sha256",
           "value": "4c496b33e88e3e375fca51fce0dacbc7fafc7fa20f862fe7fbd8d26ce8ad9c46"
         },
         {
-          "name": "cube:source-file",
+          "name": "aisay:source-file",
           "value": "runtime-ts/vendor/cubesandbox-sdk/SOURCE.md"
         },
         {
-          "name": "cube:upstream-source-commit",
+          "name": "aisay:upstream-source-commit",
           "value": "8721dd151971ce3c2966482bbd32904ad98f378e"
         },
         {
-          "name": "cube:workspace-path",
+          "name": "aisay:workspace-path",
           "value": "runtime-ts/vendor/cubesandbox-sdk"
         }
       ]
@@ -1011,7 +1011,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1031,7 +1031,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1051,7 +1051,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1071,7 +1071,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1091,7 +1091,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1111,7 +1111,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1131,7 +1131,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1151,7 +1151,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1171,7 +1171,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1191,7 +1191,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1211,7 +1211,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1231,7 +1231,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1251,7 +1251,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1271,7 +1271,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1291,7 +1291,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1311,7 +1311,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1331,7 +1331,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1351,7 +1351,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1371,7 +1371,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1391,7 +1391,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1411,7 +1411,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1431,7 +1431,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1451,7 +1451,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1471,7 +1471,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1491,7 +1491,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1511,7 +1511,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1531,7 +1531,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1551,7 +1551,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1571,7 +1571,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1591,7 +1591,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1611,7 +1611,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1631,7 +1631,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1651,7 +1651,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1671,7 +1671,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1691,7 +1691,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1711,7 +1711,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1731,7 +1731,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1751,7 +1751,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1771,7 +1771,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1791,7 +1791,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1811,7 +1811,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1831,7 +1831,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1851,7 +1851,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1871,7 +1871,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1891,7 +1891,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1911,7 +1911,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1931,7 +1931,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1951,7 +1951,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1971,7 +1971,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -1991,7 +1991,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2011,7 +2011,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2031,7 +2031,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2051,7 +2051,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2071,7 +2071,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2091,7 +2091,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2111,7 +2111,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2131,7 +2131,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2151,7 +2151,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2171,7 +2171,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2191,7 +2191,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2211,7 +2211,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2231,7 +2231,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2251,7 +2251,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2271,7 +2271,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2291,7 +2291,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2311,7 +2311,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2331,7 +2331,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2351,7 +2351,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2371,7 +2371,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2391,7 +2391,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2411,7 +2411,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2431,7 +2431,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2451,7 +2451,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2471,7 +2471,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2491,7 +2491,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2511,7 +2511,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2531,7 +2531,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2551,7 +2551,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2571,7 +2571,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2591,7 +2591,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2611,7 +2611,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2631,7 +2631,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2651,7 +2651,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2671,7 +2671,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2691,7 +2691,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2711,7 +2711,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2731,7 +2731,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2751,7 +2751,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2771,7 +2771,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2791,7 +2791,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2811,7 +2811,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2831,7 +2831,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2851,7 +2851,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2871,7 +2871,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2891,7 +2891,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2911,7 +2911,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2931,7 +2931,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2951,7 +2951,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2971,7 +2971,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -2991,7 +2991,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3011,7 +3011,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3031,7 +3031,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3051,7 +3051,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3071,7 +3071,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3091,7 +3091,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3111,7 +3111,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3131,7 +3131,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3151,7 +3151,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3171,7 +3171,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3191,7 +3191,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3211,7 +3211,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3231,7 +3231,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3251,7 +3251,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3271,7 +3271,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3291,7 +3291,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3311,7 +3311,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3331,7 +3331,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3351,7 +3351,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3371,7 +3371,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3391,7 +3391,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3411,7 +3411,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3431,7 +3431,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3451,7 +3451,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3471,7 +3471,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3491,7 +3491,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3511,7 +3511,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3531,7 +3531,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3551,7 +3551,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3571,7 +3571,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3591,7 +3591,7 @@
       ],
       "properties": [
         {
-          "name": "cube:origin",
+          "name": "aisay:origin",
           "value": "registry"
         }
       ]
@@ -3599,8 +3599,21 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:npm/%40cube-runtime/scheduler@0.0.0",
+      "ref": "pkg:npm/%40aisay/scheduler@0.0.0",
       "dependsOn": [
+        "pkg:npm/%40aisay/context-policy@0.0.0",
+        "pkg:npm/%40aisay/domain@0.0.0",
+        "pkg:npm/%40aisay/memory@0.0.0",
+        "pkg:npm/%40aisay/persistence@0.0.0",
+        "pkg:npm/%40aisay/pi-adapter@0.0.0",
+        "pkg:npm/%40aisay/process-runtime@0.0.0",
+        "pkg:npm/%40aisay/prompt-builder@0.0.0",
+        "pkg:npm/%40aisay/resource@0.0.0",
+        "pkg:npm/%40aisay/run-contracts@0.0.0",
+        "pkg:npm/%40aisay/sandbox@0.0.0",
+        "pkg:npm/%40aisay/skill@0.0.0",
+        "pkg:npm/%40aisay/thread-title@0.0.0",
+        "pkg:npm/%40aisay/workspace@0.0.0",
         "pkg:npm/%40anthropic-ai/sdk@0.91.1",
         "pkg:npm/%40aws-crypto/sha256-browser@5.2.0",
         "pkg:npm/%40aws-crypto/sha256-js@5.2.0",
@@ -3635,19 +3648,6 @@
         "pkg:npm/%40bufbuild/protobuf@2.14.0",
         "pkg:npm/%40connectrpc/connect-web@2.1.2",
         "pkg:npm/%40connectrpc/connect@2.1.2",
-        "pkg:npm/%40cube-runtime/context-policy@0.0.0",
-        "pkg:npm/%40cube-runtime/domain@0.0.0",
-        "pkg:npm/%40cube-runtime/memory@0.0.0",
-        "pkg:npm/%40cube-runtime/persistence@0.0.0",
-        "pkg:npm/%40cube-runtime/pi-adapter@0.0.0",
-        "pkg:npm/%40cube-runtime/process-runtime@0.0.0",
-        "pkg:npm/%40cube-runtime/prompt-builder@0.0.0",
-        "pkg:npm/%40cube-runtime/resource@0.0.0",
-        "pkg:npm/%40cube-runtime/run-contracts@0.0.0",
-        "pkg:npm/%40cube-runtime/sandbox@0.0.0",
-        "pkg:npm/%40cube-runtime/skill@0.0.0",
-        "pkg:npm/%40cube-runtime/thread-title@0.0.0",
-        "pkg:npm/%40cube-runtime/workspace@0.0.0",
         "pkg:npm/%40cubesandbox/sdk@0.3.0-cube.local.1",
         "pkg:npm/%40earendil-works/pi-agent-core@0.82.1",
         "pkg:npm/%40earendil-works/pi-ai@0.82.1",

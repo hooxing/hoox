@@ -27,13 +27,13 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("@cube-runtime/api", () => ({
+vi.mock("@aisay/api", () => ({
   createProductionJwtAuthResolver: mocks.createProductionAuth,
   loadProductionTlsCredentials: mocks.loadTls,
   productionTrustProxy: mocks.trustProxy,
 }));
 
-vi.mock("@cube-runtime/persistence", () => ({
+vi.mock("@aisay/persistence", () => ({
   createPostgresPool: mocks.createPool,
   probePostgres: mocks.probePostgres,
   probeS3StableSkillPublisher: mocks.probePublisher,
@@ -86,7 +86,7 @@ function productionConfiguration(): SkillAdminApiProcessConfiguration {
     production: {
       jwt: {
         issuer: "https://issuer.example.invalid/runtime",
-        audience: "cube-runtime-skill-admin-api",
+        audience: "aisay-runtime-skill-admin-api",
         keys: [{ kid: "skill-admin-current", secret: Buffer.alloc(32, 17) }],
         clockSkewSeconds: 60,
         maxTokenLifetimeSeconds: 1_800,
@@ -139,7 +139,7 @@ describe("Skill 管理 API 固定装配", () => {
         ssl: { rejectUnauthorized: true },
         schema: "runtime",
         expectedRuntimeRole: "skill_publisher",
-        applicationName: "cube-runtime-skill-admin-api-production",
+        applicationName: "aisay-runtime-skill-admin-api-production",
       });
       expect(mocks.publisherConstructed).toHaveBeenCalledWith(
         {

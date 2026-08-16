@@ -1,5 +1,5 @@
-import { sha256Digest } from "@cube-runtime/domain";
-import { TransactionCommitUnknownError, type Pool } from "@cube-runtime/persistence";
+import { sha256Digest } from "@aisay/domain";
+import { TransactionCommitUnknownError, type Pool } from "@aisay/persistence";
 import { describe, expect, it } from "vitest";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
 import {

@@ -1,9 +1,9 @@
-import type { ExecutionScope, SandboxSessionRef } from "@cube-runtime/run-contracts";
+import type { ExecutionScope, SandboxSessionRef } from "@aisay/run-contracts";
 import {
   type SandboxWorkspacePort,
   WorkspaceDependencyError,
   type WorkspaceExecutionPolicy,
-} from "@cube-runtime/workspace";
+} from "@aisay/workspace";
 import { describe, expect, it, vi } from "vitest";
 import {
   ManifestWorkspaceRuntime,

@@ -5,8 +5,8 @@ import {
   membershipId,
   tenantId,
   userId,
-} from "@cube-runtime/domain";
-import type { TenantBundle, TenantRepository, TenantScope } from "@cube-runtime/persistence";
+} from "@aisay/domain";
+import type { TenantBundle, TenantRepository, TenantScope } from "@aisay/persistence";
 import { describe, expect, it, vi } from "vitest";
 import {
   parseDevelopmentIdentityEnvironment,

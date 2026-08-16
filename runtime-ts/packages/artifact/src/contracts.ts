@@ -7,9 +7,9 @@ import type {
   ThreadId,
   UserId,
   WorkspaceRevisionId,
-} from "@cube-runtime/domain";
-import type { StableBlobRef } from "@cube-runtime/persistence";
-import type { ExecutionScope } from "@cube-runtime/run-contracts";
+} from "@aisay/domain";
+import type { StableBlobRef } from "@aisay/persistence";
+import type { ExecutionScope } from "@aisay/run-contracts";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
 
 export type ArtifactPurpose = "deliverable" | "diagnostic" | "trace";

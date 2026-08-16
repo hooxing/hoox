@@ -7,12 +7,8 @@ import type {
   SkillInvocationTarget,
   SkillPackageFile,
   SkillRuntimeRepository,
-} from "@cube-runtime/skill";
-import {
-  assertRunSkillSnapshot,
-  digestRunSkillSnapshot,
-  SkillRuntimeError,
-} from "@cube-runtime/skill";
+} from "@aisay/skill";
+import { assertRunSkillSnapshot, digestRunSkillSnapshot, SkillRuntimeError } from "@aisay/skill";
 import type { Pool, PoolClient } from "pg";
 import type { BlobStore, StableBlobRef } from "./blob-store.js";
 import { withTenantTransaction } from "./postgres.js";

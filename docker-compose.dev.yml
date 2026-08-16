@@ -1,4 +1,4 @@
-name: cubesandbox-agent-runtime-dev
+name: aisay-runtime-dev
 
 services:
   minio:
@@ -40,4 +40,4 @@ services:
 
 volumes:
   minio_data:
-    name: cubesandbox-agent-runtime-minio-data
+    name: aisay-runtime-minio-data

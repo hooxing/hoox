@@ -230,12 +230,18 @@ tree hash 由 Gate 重算，exact patch 还必须通过 `git apply --reverse --c
 .\scripts\start-development.ps1
 ```
 
-脚本会依次启动 MinIO、构建工作区、执行 Worker 只读预检，并在独立 PowerShell 窗口启动 API、Agent Worker、Scheduler、Web、Skill Admin API 和 Admin Web；全部就绪后打开 `http://127.0.0.1:4173` 与 `http://127.0.0.1:4174`。它不会执行依赖安装、数据库迁移或开发身份初始化，也不会自动终止端口占用进程。
+脚本不会启动或修改 PostgreSQL、S3/MinIO、CubeSandbox 和模型 Provider。它只使用 `.env` 执行 Worker 只读预检，任一外部服务不可用时直接报错。核心 Runtime 默认包含 API、Agent Worker、Scheduler 和 Web；已经运行且健康的应用会被复用，只为缺失应用打开新的 PowerShell 窗口。Skill Admin API 和 Skill Admin Web 默认不启动，脚本会交互询问 `是否启动 Skill Admin API 和 Skill Admin Web？[y/N]`，直接回车即跳过。
 
-只启动核心 Runtime，或确认现有 `dist` 已是最新时，可以使用：
+交互提示中输入 `y`、`yes`、`1` 或 `是` 才会启动 Skill 管理服务。自动化或非交互调用可以显式选择：
 
 ```powershell
+# 不询问，明确只启动核心 Runtime
 .\scripts\start-development.ps1 -CoreOnly
+
+# 不询问，明确包含 Skill 管理服务
+.\scripts\start-development.ps1 -IncludeSkill
+
+# 其他可选参数
 .\scripts\start-development.ps1 -SkipBuild
 .\scripts\start-development.ps1 -NoBrowser
 ```

@@ -1,7 +1,7 @@
 ---
 name: csv-to-pdf
 description: 将 UTF-8 CSV 或 TSV 表格转换为经过校验的 PDF，并作为任务文件交付。
-license: LicenseRef-Cube-Internal
+license: LicenseRef-AISay-Internal
 ---
 
 # CSV / TSV 转 PDF

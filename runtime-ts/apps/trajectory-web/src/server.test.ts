@@ -7,7 +7,7 @@ import { discoverRuns, internalTesting } from "./server.js";
 const roots: string[] = [];
 
 async function temporaryRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "cube-trajectory-"));
+  const root = await mkdtemp(join(tmpdir(), "aisay-trajectory-"));
   roots.push(root);
   return root;
 }

@@ -3,7 +3,7 @@ import {
   historyFilesystemDirectoryName,
   historyFilesystemEntryCollisionName,
   historyFilesystemEntryName,
-} from "@cube-runtime/resource";
+} from "@aisay/resource";
 import type { PoolClient } from "pg";
 import { pendingHistoryDirectoryName } from "./pg-thread-title-generation.js";
 

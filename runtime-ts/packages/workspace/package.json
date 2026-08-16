@@ -1,5 +1,5 @@
 {
-  "name": "@cube-runtime/workspace",
+  "name": "@aisay/workspace",
   "version": "0.0.0",
   "private": true,
   "type": "module",

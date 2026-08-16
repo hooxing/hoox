@@ -284,7 +284,7 @@ describe("项目模型报文本地镜像", () => {
 });
 
 async function temporaryRoot(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "cube-model-wire-traces-"));
+  const root = await mkdtemp(join(tmpdir(), "aisay-model-wire-traces-"));
   temporaryRoots.push(root);
   return root;
 }

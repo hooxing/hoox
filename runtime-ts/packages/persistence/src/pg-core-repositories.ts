@@ -5,8 +5,8 @@ import type {
   WorkspaceCommitResult,
   WorkspaceRevisionCommit,
   WorkspaceWriteScope,
-} from "@cube-runtime/domain";
-import { archiveThread, isoTimestamp } from "@cube-runtime/domain";
+} from "@aisay/domain";
+import { archiveThread, isoTimestamp } from "@aisay/domain";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {

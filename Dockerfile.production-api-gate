@@ -12,9 +12,9 @@ COPY runtime-ts ./runtime-ts
 COPY scripts/prune-production-deployment.mjs ./scripts/prune-production-deployment.mjs
 
 RUN --network=none pnpm install --offline --frozen-lockfile \
- && pnpm --filter @cube-runtime/api^... build \
- && pnpm --filter @cube-runtime/api build \
- && pnpm --filter @cube-runtime/api deploy --prod /opt/deploy \
+ && pnpm --filter @aisay/api^... build \
+ && pnpm --filter @aisay/api build \
+ && pnpm --filter @aisay/api deploy --prod /opt/deploy \
  && node scripts/prune-production-deployment.mjs /opt/deploy api
 
 FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d

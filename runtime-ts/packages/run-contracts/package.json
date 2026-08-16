@@ -1,5 +1,5 @@
 {
-  "name": "@cube-runtime/run-contracts",
+  "name": "@aisay/run-contracts",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -20,11 +20,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@cube-runtime/context-policy": "workspace:*",
-    "@cube-runtime/domain": "workspace:*",
-    "@cube-runtime/pi-adapter": "workspace:*",
-    "@cube-runtime/sandbox": "workspace:*",
-    "@cube-runtime/skill": "workspace:*",
-    "@cube-runtime/workspace": "workspace:*"
+    "@aisay/context-policy": "workspace:*",
+    "@aisay/domain": "workspace:*",
+    "@aisay/pi-adapter": "workspace:*",
+    "@aisay/sandbox": "workspace:*",
+    "@aisay/skill": "workspace:*",
+    "@aisay/workspace": "workspace:*"
   }
 }

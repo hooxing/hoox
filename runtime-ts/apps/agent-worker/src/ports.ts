@@ -1,1 +1,1 @@
-export * from "@cube-runtime/run-contracts";
+export * from "@aisay/run-contracts";

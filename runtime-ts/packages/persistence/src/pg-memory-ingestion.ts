@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { sha256Digest } from "@cube-runtime/domain";
+import { sha256Digest } from "@aisay/domain";
 import type {
   MemoryConversationMessage,
   MemoryIngestionClaim,
   MemoryIngestionStore,
   MemoryProviderErrorCode,
   MemorySubmission,
-} from "@cube-runtime/memory";
-import type { ThreadContextBodyV1 } from "@cube-runtime/run-contracts";
+} from "@aisay/memory";
+import type { ThreadContextBodyV1 } from "@aisay/run-contracts";
 import type { Pool, PoolClient } from "pg";
 import type { BlobStore } from "./blob-store.js";
 import { mapPersistenceError } from "./errors.js";

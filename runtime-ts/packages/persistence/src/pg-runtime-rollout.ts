@@ -6,10 +6,10 @@ import type {
   RuntimeRolloutEntryKind,
   Sha256Digest,
   UserId,
-} from "@cube-runtime/domain";
-import { agentThreadId, isoTimestamp, sha256Digest, userId } from "@cube-runtime/domain";
-import type { ExecutionFence } from "@cube-runtime/run-contracts";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+} from "@aisay/domain";
+import { agentThreadId, isoTimestamp, sha256Digest, userId } from "@aisay/domain";
+import type { ExecutionFence } from "@aisay/run-contracts";
+import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError, PersistenceError } from "./errors.js";

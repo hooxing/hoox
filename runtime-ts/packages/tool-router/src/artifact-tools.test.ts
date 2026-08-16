@@ -3,7 +3,7 @@ import {
   ArtifactDeliveryError,
   createArtifactExecutionAuthorizationAuthority,
   type PublishArtifactCommand,
-} from "@cube-runtime/artifact";
+} from "@aisay/artifact";
 import {
   artifactId,
   isoTimestamp,
@@ -13,13 +13,13 @@ import {
   tenantId,
   threadId,
   workspaceId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import type {
   ConsumedExternalEffectAuthorization,
   ExecutionScope,
   ExternalEffectCall,
-} from "@cube-runtime/run-contracts";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+} from "@aisay/run-contracts";
+import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
 import { describe, expect, it } from "vitest";
 import {
   type ArtifactPublicationResourcePort,

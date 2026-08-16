@@ -7,12 +7,12 @@ import {
   type ThreadActiveHistoryV1,
   type TrustedPiModelContextCapability,
   threadActiveHistoryDigest,
-} from "@cube-runtime/pi-adapter";
+} from "@aisay/pi-adapter";
 import type {
   ExecutionFence,
   ThreadContextCompactionCommitPort,
   ThreadContinuityMetricsPort,
-} from "@cube-runtime/run-contracts";
+} from "@aisay/run-contracts";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { digestCanonical } from "./mutation-protocol.js";

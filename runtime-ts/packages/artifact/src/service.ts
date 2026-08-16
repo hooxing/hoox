@@ -6,10 +6,10 @@ import {
   type ResourceVersionId,
   type RunId,
   type Sha256Digest,
-} from "@cube-runtime/domain";
-import type { BlobStore, StableBlobRef } from "@cube-runtime/persistence";
-import type { ArtifactPublicationPort, ExecutionScope } from "@cube-runtime/run-contracts";
-import { digestCanonical } from "@cube-runtime/run-contracts/mutation-protocol";
+} from "@aisay/domain";
+import type { BlobStore, StableBlobRef } from "@aisay/persistence";
+import type { ArtifactPublicationPort, ExecutionScope } from "@aisay/run-contracts";
+import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
 import type {
   ArtifactExecutionAuthorization,
   ArtifactExecutionAuthorizationVerifierPort,

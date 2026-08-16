@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { type Sha256Digest, sha256Digest } from "@cube-runtime/domain";
+import { type Sha256Digest, sha256Digest } from "@aisay/domain";
 
 /** 只接受可信 Provider/Pi 元数据投影；调用方不能用任意窗口数字伪造模型能力。 */
 export interface ModelBudgetDescriptor {

@@ -1,12 +1,12 @@
-import type { IsoTimestamp, Run, TenantId, Thread, UserId, Workspace } from "@cube-runtime/domain";
-import type { ThreadListCursor } from "@cube-runtime/persistence";
+import type { IsoTimestamp, Run, TenantId, Thread, UserId, Workspace } from "@aisay/domain";
+import type { ThreadListCursor } from "@aisay/persistence";
 export type {
   ArchiveThreadCommandPort,
   EnqueueOutboxPort,
   IdempotentCommand,
   IdempotentCreateResult,
   ThreadCreationPort,
-} from "@cube-runtime/persistence";
+} from "@aisay/persistence";
 
 export interface AuthPrincipal {
   readonly userId: UserId;

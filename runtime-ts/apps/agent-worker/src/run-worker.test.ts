@@ -7,16 +7,16 @@ import {
   type TenantId,
   tenantId,
   type UserId,
-} from "@cube-runtime/domain";
-import type { MemoryRetriever } from "@cube-runtime/memory";
-import type { RuntimeAgentEvent } from "@cube-runtime/pi-adapter";
-import type { UncertainLifecycleEvent } from "@cube-runtime/sandbox";
-import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
+} from "@aisay/domain";
+import type { MemoryRetriever } from "@aisay/memory";
+import type { RuntimeAgentEvent } from "@aisay/pi-adapter";
+import type { UncertainLifecycleEvent } from "@aisay/sandbox";
+import { FakeSandboxHandle } from "@aisay/sandbox/testing";
 import {
   createWorkspaceManifest,
   WorkspaceApplicationError,
   WorkspaceDependencyError,
-} from "@cube-runtime/workspace";
+} from "@aisay/workspace";
 import { describe, expect, it, vi } from "vitest";
 import {
   outboxPayloadDigest,

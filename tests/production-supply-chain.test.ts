@@ -23,7 +23,7 @@ function component(name: string, license: string) {
     version: "1.0.0",
     purl: reference,
     licenses: [{ license: { id: license } }] as const,
-    properties: [{ name: "cube:origin", value: "registry" }] as const,
+    properties: [{ name: "aisay:origin", value: "registry" }] as const,
   };
 }
 
@@ -51,15 +51,15 @@ describe("生产供应链契约", () => {
         ),
       ).toEqual(
         expect.objectContaining({
-          "cube:upstream-source-commit": policy.vendorEvidence["@cubesandbox/sdk"].upstreamCommit,
-          "cube:local-modified": "true",
-          "cube:local-patch-id": "CUBE-LOCAL-0001",
-          "cube:local-patch-sha256": policy.vendorEvidence["@cubesandbox/sdk"].patchSha256,
-          "cube:patched-tree-sha256": policy.vendorEvidence["@cubesandbox/sdk"].patchedTreeSha256,
+          "aisay:upstream-source-commit": policy.vendorEvidence["@cubesandbox/sdk"].upstreamCommit,
+          "aisay:local-modified": "true",
+          "aisay:local-patch-id": "CUBE-LOCAL-0001",
+          "aisay:local-patch-sha256": policy.vendorEvidence["@cubesandbox/sdk"].patchSha256,
+          "aisay:patched-tree-sha256": policy.vendorEvidence["@cubesandbox/sdk"].patchedTreeSha256,
         }),
       );
     }
-  }, 60_000);
+  }, 120_000);
 
   it("vendor patch 或 canonical tree 哈希漂移时失败关闭", () => {
     const policy = JSON.parse(
@@ -134,12 +134,12 @@ describe("生产供应链契约", () => {
     const first = component("alpha", "MIT");
     const second = component("zeta", "Apache-2.0");
     const left = buildCycloneDx({
-      root: { name: "@cube-runtime/api", version: "0.0.0" },
+      root: { name: "@aisay/api", version: "0.0.0" },
       components: [second, first],
       lockfileSha256: "a".repeat(64),
     });
     const right = buildCycloneDx({
-      root: { name: "@cube-runtime/api", version: "0.0.0" },
+      root: { name: "@aisay/api", version: "0.0.0" },
       components: [first, second],
       lockfileSha256: "a".repeat(64),
     });

@@ -50,7 +50,7 @@ description: >-
   并验证安全边界。
 publisher: Cube
 version: 2.1.0
-compatibility: Cube Runtime >= 1
+compatibility: AISay Runtime >= 1
 source_url: https://example.com/code-review
 source_revision: abc123
 license: Apache-2.0

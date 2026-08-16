@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { sha256Digest } from "@cube-runtime/domain";
+import { sha256Digest } from "@aisay/domain";
 import { describe, expect, it } from "vitest";
 import type { BlobStore } from "./blob-store.js";
 import { readThreadContextBody, ThreadContextBodyPersistence } from "./thread-context.js";

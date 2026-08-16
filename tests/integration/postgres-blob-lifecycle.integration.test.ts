@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { CopyObjectCommand, DeleteObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { encodeControlledToolReceipt, ToolObservationPipeline } from "@cube-runtime/context-policy";
+import { encodeControlledToolReceipt, ToolObservationPipeline } from "@aisay/context-policy";
 import {
   agentThreadId,
   artifactId,
@@ -12,14 +12,14 @@ import {
   threadId,
   userId,
   workspaceId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import type {
   ExecutionFence,
   ExecutionScope,
   SandboxSessionRegistryPort,
-} from "@cube-runtime/run-contracts";
-import { rolloutProjectionDigest } from "@cube-runtime/run-contracts/mutation-protocol";
-import { FakeSandboxGateway } from "@cube-runtime/sandbox/testing";
+} from "@aisay/run-contracts";
+import { rolloutProjectionDigest } from "@aisay/run-contracts/mutation-protocol";
+import { FakeSandboxGateway } from "@aisay/sandbox/testing";
 import {
   fauxAssistantMessage,
   fauxProvider,

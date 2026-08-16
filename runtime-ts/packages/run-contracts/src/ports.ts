@@ -15,19 +15,15 @@ import type {
   Workspace,
   WorkspaceId,
   WorkspaceRevisionId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import type {
   ControlledRolloutProjection,
   RuntimeAgentEvent,
   ThreadActiveHistoryV1,
-} from "@cube-runtime/pi-adapter";
-import type {
-  SandboxHandle,
-  SandboxProviderKey,
-  UncertainLifecycleEvent,
-} from "@cube-runtime/sandbox";
-import type { RunSkillSnapshot } from "@cube-runtime/skill";
-import type { WorkspaceManifest } from "@cube-runtime/workspace";
+} from "@aisay/pi-adapter";
+import type { SandboxHandle, SandboxProviderKey, UncertainLifecycleEvent } from "@aisay/sandbox";
+import type { RunSkillSnapshot } from "@aisay/skill";
+import type { WorkspaceManifest } from "@aisay/workspace";
 
 export interface ExecutionScope {
   readonly tenantId: TenantId;

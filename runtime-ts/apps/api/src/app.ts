@@ -7,7 +7,7 @@ import {
   tenantId,
   threadId,
   userId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import type {
   BlobStore,
   CoreRepositories,
@@ -21,13 +21,8 @@ import type {
   ThreadContinuityReadPort,
   TeamCollaborationPort,
   ThreadForkPort,
-} from "@cube-runtime/persistence";
-import {
-  assertBlobRef,
-  BlobStoreError,
-  PersistenceError,
-  sha256Hex,
-} from "@cube-runtime/persistence";
+} from "@aisay/persistence";
+import { assertBlobRef, BlobStoreError, PersistenceError, sha256Hex } from "@aisay/persistence";
 import {
   ArtifactDeliverySuccessEnvelopeSchema,
   ArtifactListSuccessEnvelopeSchema,
@@ -120,7 +115,7 @@ import {
   UninstallSkillQuerySchema,
   type UploadedResourceDto,
   UploadedResourceSuccessEnvelopeSchema,
-} from "@cube-runtime/protocol";
+} from "@aisay/protocol";
 import {
   type ResourceAttachmentResolverPort,
   type HistoryFileLibraryFile,
@@ -131,13 +126,13 @@ import {
   ResourceServiceError,
   type ResourceUploadPort,
   stripAttachmentsFromUserFacingPrompt,
-} from "@cube-runtime/resource";
+} from "@aisay/resource";
 import {
   type SkillCenterService,
   type SkillContentStore,
   type SkillFilesystemCatalog,
   SkillServiceError,
-} from "@cube-runtime/skill";
+} from "@aisay/skill";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -399,10 +394,10 @@ function personalizationContent(raw: string): string {
 async function readForkMessages(
   reader: ThreadContextReadPort,
   scope: Readonly<{
-    tenantId: import("@cube-runtime/domain").TenantId;
-    userId: import("@cube-runtime/domain").UserId;
+    tenantId: import("@aisay/domain").TenantId;
+    userId: import("@aisay/domain").UserId;
   }>,
-  sourceThreadId: import("@cube-runtime/domain").ThreadId,
+  sourceThreadId: import("@aisay/domain").ThreadId,
 ) {
   const messages: Array<{
     role: "user" | "assistant";
@@ -459,11 +454,11 @@ export function createApiApp(
     ajv: {
       customOptions: { removeAdditional: false },
       onCreate: (ajv) => {
-        ajv.addFormat("cube-iso-utc-timestamp-v1", true);
+        ajv.addFormat("aisay-iso-utc-timestamp-v1", true);
       },
     },
     serializerOpts: {
-      ajv: { formats: { "cube-iso-utc-timestamp-v1": true } },
+      ajv: { formats: { "aisay-iso-utc-timestamp-v1": true } },
     },
     logger:
       options.logger === false

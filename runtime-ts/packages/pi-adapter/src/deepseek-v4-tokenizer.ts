@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import type { TokenizerPort } from "@cube-runtime/context-policy";
+import type { TokenizerPort } from "@aisay/context-policy";
 import { Tokenizer } from "@huggingface/tokenizers";
 
 const TOKENIZER_JSON_SHA256 = "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf";

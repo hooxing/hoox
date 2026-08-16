@@ -13,7 +13,7 @@ import type {
   UserId,
   WorkspaceId,
   WorkspaceRevisionId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 
 /**
  * 只能接收认证层在重验 Membership 后提供的上下文；运行时格式校验是纵深防御，

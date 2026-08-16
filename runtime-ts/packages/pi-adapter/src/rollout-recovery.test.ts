@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { encodeControlledToolReceipt } from "@cube-runtime/context-policy";
-import { type RuntimeRolloutEntry, sha256Digest } from "@cube-runtime/domain";
-import { FakeSandboxHandle } from "@cube-runtime/sandbox/testing";
+import { encodeControlledToolReceipt } from "@aisay/context-policy";
+import { type RuntimeRolloutEntry, sha256Digest } from "@aisay/domain";
+import { FakeSandboxHandle } from "@aisay/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";

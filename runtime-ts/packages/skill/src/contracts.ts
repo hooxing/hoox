@@ -1,4 +1,4 @@
-import type { IsoTimestamp, TenantId, UserId } from "@cube-runtime/domain";
+import type { IsoTimestamp, TenantId, UserId } from "@aisay/domain";
 
 export interface TrustedSkillContext {
   readonly tenantId: TenantId;

@@ -6,7 +6,7 @@ import {
   threadId,
   userId,
   workspaceId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import { describe, expect, it } from "vitest";
 import { PersistenceError } from "./errors.js";
 import type { PgRuntimeRolloutRepository } from "./pg-runtime-rollout.js";

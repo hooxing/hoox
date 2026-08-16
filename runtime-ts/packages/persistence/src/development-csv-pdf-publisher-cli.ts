@@ -18,7 +18,7 @@ if (process.env.RUNTIME_ENV !== "development") {
   } else {
     const pool = createPostgresPool({
       connectionString: configuration.databaseUrl,
-      applicationName: "cube-runtime-development-csv-pdf-skill-publisher",
+      applicationName: "aisay-runtime-development-csv-pdf-skill-publisher",
       schema: configuration.databaseSchema,
     });
     try {

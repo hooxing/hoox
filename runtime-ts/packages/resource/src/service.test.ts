@@ -14,7 +14,7 @@ import {
   userId,
   workspaceId,
   workspaceRevisionId,
-} from "@cube-runtime/domain";
+} from "@aisay/domain";
 import { describe, expect, it } from "vitest";
 import { createPromotionCapabilityRegistry } from "./capability.js";
 import type {

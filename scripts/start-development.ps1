@@ -2,6 +2,7 @@
 param(
   [switch]$SkipBuild,
   [switch]$CoreOnly,
+  [switch]$IncludeSkill,
   [switch]$NoBrowser
 )
 
@@ -10,7 +11,6 @@ $ErrorActionPreference = "Stop"
 
 $repo = Split-Path -Parent $PSScriptRoot
 $environmentFile = Join-Path $repo ".env"
-$composeFile = Join-Path $repo "docker-compose.dev.yml"
 $runtimeDirectory = Join-Path $repo ".tmp\development-runtime"
 
 function Invoke-CheckedNative {
@@ -70,6 +70,36 @@ function Get-DotEnvValue {
   return $value
 }
 
+function Test-HttpEndpoint {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Url
+  )
+
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2
+    return $response.StatusCode -ge 200 -and $response.StatusCode -lt 300
+  } catch {
+    return $false
+  }
+}
+
+function Test-DevelopmentProcess {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Pattern
+  )
+
+  try {
+    return $null -ne (Get-CimInstance Win32_Process -ErrorAction Stop |
+      Where-Object { $_.CommandLine -match $Pattern } |
+      Select-Object -First 1)
+  } catch {
+    Write-Host "[警告] 无法检查已有进程，将按未启动处理：$($_.Exception.Message)" -ForegroundColor Yellow
+    return $false
+  }
+}
+
 function Wait-HttpEndpoint {
   param(
     [Parameter(Mandatory = $true)]
@@ -99,11 +129,7 @@ function Wait-HttpEndpoint {
 if (-not (Test-Path -LiteralPath $environmentFile -PathType Leaf)) {
   throw "缺少 $environmentFile。该脚本仅用于已经完成首次配置的开发环境。"
 }
-if (-not (Test-Path -LiteralPath $composeFile -PathType Leaf)) {
-  throw "缺少 $composeFile"
-}
-
-foreach ($commandName in @("node", "corepack", "docker")) {
+foreach ($commandName in @("node", "corepack")) {
   if ($null -eq (Get-Command $commandName -ErrorAction SilentlyContinue)) {
     throw "未找到必需命令：$commandName"
   }
@@ -111,23 +137,6 @@ foreach ($commandName in @("node", "corepack", "docker")) {
 
 Set-Location -LiteralPath $repo
 New-Item -ItemType Directory -Force -Path $runtimeDirectory | Out-Null
-
-Write-Host "[1/5] 启动 MinIO" -ForegroundColor Cyan
-Invoke-CheckedNative {
-  docker compose --env-file .env -f docker-compose.dev.yml up -d
-} "MinIO 启动失败"
-
-if (-not $SkipBuild) {
-  Write-Host "[2/5] 构建工作区" -ForegroundColor Cyan
-  Invoke-CheckedNative { corepack pnpm build } "工作区构建失败"
-} else {
-  Write-Host "[2/5] 已跳过构建" -ForegroundColor Yellow
-}
-
-Write-Host "[3/5] 执行 Worker 启动前检查" -ForegroundColor Cyan
-Invoke-CheckedNative {
-  node runtime-ts/apps/agent-worker/dist/development-preflight-main.js
-} "Worker 启动前检查失败"
 
 $apiHost = Get-DotEnvValue -Name "API_LISTEN_HOST" -DefaultValue "127.0.0.1"
 $apiPortText = Get-DotEnvValue -Name "API_LISTEN_PORT" -DefaultValue "3001"
@@ -142,40 +151,141 @@ if (-not [int]::TryParse($skillAdminPortText, [ref]$skillAdminPort) -or $skillAd
   throw "SKILL_ADMIN_LISTEN_PORT 不是有效端口"
 }
 
-$services = [ordered]@{
-  "API" = "node runtime-ts/apps/api/dist/development-main.js"
-  "Agent Worker" = "node runtime-ts/apps/agent-worker/dist/development-main.js"
-  "Scheduler" = "node runtime-ts/apps/scheduler/dist/development-main.js"
-  "Web" = "corepack pnpm --filter `"@cube-runtime/web`" dev"
-}
-if (-not $CoreOnly) {
-  $services["Skill Admin API"] = "node runtime-ts/apps/skill-admin-api/dist/development-main.js"
-  $services["Skill Admin Web"] = "corepack pnpm --filter `"@cube-runtime/admin-web`" dev"
-}
-
-$ports = @($apiPort, 4173)
-if (-not $CoreOnly) {
-  $ports += @($skillAdminPort, 4174)
-}
-$occupiedListeners = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-  Where-Object { $_.LocalPort -in $ports }
-if ($occupiedListeners) {
-  $description = $occupiedListeners |
-    Sort-Object LocalPort, OwningProcess -Unique |
-    ForEach-Object { "端口 $($_.LocalPort)（PID $($_.OwningProcess)）" }
-  throw "开发端口已被占用：$($description -join '、')。脚本不会自动终止已有进程。"
+$healthApiHost = if ($apiHost -in @("localhost", "::1")) { "127.0.0.1" } else { $apiHost }
+$healthSkillAdminHost = if ($skillAdminHost -in @("localhost", "::1")) { "127.0.0.1" } else { $skillAdminHost }
+$apiBaseUrl = "http://${healthApiHost}:$apiPort"
+$skillAdminBaseUrl = "http://${healthSkillAdminHost}:$skillAdminPort"
+if (-not $SkipBuild) {
+  Write-Host "[1/5] 构建工作区" -ForegroundColor Cyan
+  Invoke-CheckedNative { corepack pnpm build } "工作区构建失败"
+} else {
+  Write-Host "[1/5] 已跳过构建" -ForegroundColor Yellow
 }
 
-Write-Host "[4/5] 启动开发进程" -ForegroundColor Cyan
+Write-Host "[2/5] 检查 .env 配置的 PostgreSQL、S3、CubeSandbox 与模型服务" -ForegroundColor Cyan
+Invoke-CheckedNative {
+  node runtime-ts/apps/agent-worker/dist/development-preflight-main.js
+} ".env 外部服务预检失败，请检查 PostgreSQL、S3、CubeSandbox 与模型配置"
+
+$skillPrompt = "是否启动 Skill Admin API 和 Skill Admin Web？[y/N]"
+if ($CoreOnly -and $IncludeSkill) {
+  throw "-CoreOnly 与 -IncludeSkill 不能同时使用"
+}
+
+Write-Host "[3/5] 选择启动范围" -ForegroundColor Cyan
+if ($IncludeSkill) {
+  $startSkillServices = $true
+} elseif ($CoreOnly) {
+  $startSkillServices = $false
+} else {
+  $skillAnswer = Read-Host $skillPrompt
+  $startSkillServices = $skillAnswer.Trim() -match "^(y|yes|1|是)$"
+}
+if ($startSkillServices) {
+  Write-Host "[包含] 将启动 Skill 管理服务" -ForegroundColor Green
+} else {
+  Write-Host "[跳过] 默认不启动 Skill 管理服务" -ForegroundColor Yellow
+}
+
+$apiEntry = (Join-Path $repo "runtime-ts\apps\api\dist\development-main.js").Replace("'", "''")
+$workerEntry = (Join-Path $repo "runtime-ts\apps\agent-worker\dist\development-main.js").Replace("'", "''")
+$schedulerEntry = (Join-Path $repo "runtime-ts\apps\scheduler\dist\development-main.js").Replace("'", "''")
+$skillAdminEntry = (Join-Path $repo "runtime-ts\apps\skill-admin-api\dist\development-main.js").Replace("'", "''")
+$services = @(
+  [pscustomobject]@{
+    Name = "API"
+    Command = "& node '$apiEntry'"
+    HealthUrl = "$apiBaseUrl/live"
+    Port = $apiPort
+    ProcessPattern = "(@aisay[\\/]api|apps[\\/]+api|dev:api)"
+  },
+  [pscustomobject]@{
+    Name = "Agent Worker"
+    Command = "& node '$workerEntry'"
+    HealthUrl = $null
+    Port = $null
+    ProcessPattern = "(@aisay[\\/]agent-worker|apps[\\/]+agent-worker|dev:worker)"
+  },
+  [pscustomobject]@{
+    Name = "Scheduler"
+    Command = "& node '$schedulerEntry'"
+    HealthUrl = $null
+    Port = $null
+    ProcessPattern = "(@aisay[\\/]scheduler|apps[\\/]+scheduler|dev:scheduler)"
+  },
+  [pscustomobject]@{
+    Name = "Web"
+    Command = "corepack pnpm --filter `"@aisay/web`" dev"
+    HealthUrl = "http://127.0.0.1:4173"
+    Port = 4173
+    ProcessPattern = "(@aisay[\\/]web|apps[\\/]+web|dev:web|vite(?:\\.js)?[^\\r\\n]*--port\\s+4173)"
+  }
+)
+if ($startSkillServices) {
+  $services += @(
+    [pscustomobject]@{
+      Name = "Skill Admin API"
+      Command = "& node '$skillAdminEntry'"
+      HealthUrl = "$skillAdminBaseUrl/live"
+      Port = $skillAdminPort
+      ProcessPattern = "(@aisay[\\/]skill-admin-api|apps[\\/]+skill-admin-api|dev:skill-admin:api)"
+    },
+    [pscustomobject]@{
+      Name = "Skill Admin Web"
+      Command = "corepack pnpm --filter `"@aisay/admin-web`" dev"
+      HealthUrl = "http://127.0.0.1:4174"
+      Port = 4174
+      ProcessPattern = "(@aisay[\\/]admin-web|apps[\\/]+admin-web|dev:skill-admin:web|vite(?:\\.js)?[^\\r\\n]*--port\\s+4174)"
+    }
+  )
+}
+
+$servicesToStart = @()
+$reusedServices = @()
+foreach ($service in $services) {
+  $isRunning = $false
+  if ($null -ne $service.HealthUrl) {
+    $isRunning = Test-HttpEndpoint -Url $service.HealthUrl
+  }
+
+  $processExists = Test-DevelopmentProcess -Pattern $service.ProcessPattern
+  if (-not $isRunning -and $processExists -and $null -ne $service.HealthUrl) {
+    Write-Host "[等待] $($service.Name) 进程已存在，等待端点就绪" -ForegroundColor Yellow
+    $isRunning = Wait-HttpEndpoint -Name $service.Name -Url $service.HealthUrl -TimeoutSeconds 15
+    if (-not $isRunning) {
+      throw "$($service.Name) 进程已存在，但健康端点未就绪。请先检查已有进程窗口。"
+    }
+  } elseif (-not $isRunning -and $processExists) {
+    $isRunning = $true
+  }
+
+  if ($isRunning) {
+    Write-Host "[复用] $($service.Name) 已运行" -ForegroundColor Green
+    $reusedServices += $service.Name
+    continue
+  }
+
+  if ($null -ne $service.Port) {
+    $listener = Get-NetTCPConnection -State Listen -LocalPort $service.Port -ErrorAction SilentlyContinue |
+      Select-Object -First 1
+    if ($null -ne $listener) {
+      throw "$($service.Name) 需要的端口 $($service.Port) 已被 PID $($listener.OwningProcess) 占用，但对应健康端点不可用。脚本不会自动终止已有进程。"
+    }
+  }
+
+  $servicesToStart += $service
+}
+
+Write-Host "[4/5] 启动缺失的开发进程" -ForegroundColor Cyan
 $powerShellExecutable = Get-PowerShellExecutable
 $startedProcesses = [ordered]@{}
 $escapedRepo = $repo.Replace("'", "''")
-foreach ($entry in $services.GetEnumerator()) {
-  $escapedTitle = $entry.Key.Replace("'", "''")
+foreach ($service in $servicesToStart) {
+  $escapedTitle = $service.Name.Replace("'", "''")
   $windowLines = @(
     "Set-Location -LiteralPath '$escapedRepo'",
     "`$Host.UI.RawUI.WindowTitle = 'Cube Runtime - $escapedTitle'",
-    $entry.Value,
+    $service.Command,
     "if (`$LASTEXITCODE -ne 0) { Write-Host '进程异常退出，退出码：'`$LASTEXITCODE -ForegroundColor Red }"
   )
   $windowCommand = $windowLines -join [Environment]::NewLine
@@ -186,41 +296,27 @@ foreach ($entry in $services.GetEnumerator()) {
     -WorkingDirectory $repo `
     -WindowStyle Normal `
     -PassThru
-  $startedProcesses[$entry.Key] = $process.Id
+  $startedProcesses[$service.Name] = $process.Id
 }
-$startedProcesses | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runtimeDirectory "pids.json") -Encoding utf8
+[ordered]@{
+  launched = $startedProcesses
+  reused = $reusedServices
+} | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $runtimeDirectory "pids.json") -Encoding utf8
 
 Write-Host "[5/5] 等待 HTTP 服务就绪" -ForegroundColor Cyan
-$healthApiHost = if ($apiHost -in @("localhost", "::1")) { "127.0.0.1" } else { $apiHost }
-$apiBaseUrl = "http://${healthApiHost}:$apiPort"
-$healthChecks = @(
-  [ordered]@{ Name = "API live"; Url = "$apiBaseUrl/live" },
-  [ordered]@{ Name = "API ready"; Url = "$apiBaseUrl/ready" },
-  [ordered]@{ Name = "Web"; Url = "http://127.0.0.1:4173" }
-)
-if (-not $CoreOnly) {
-  $healthSkillAdminHost = if ($skillAdminHost -in @("localhost", "::1")) { "127.0.0.1" } else { $skillAdminHost }
-  $skillAdminBaseUrl = "http://${healthSkillAdminHost}:$skillAdminPort"
-  $healthChecks += @(
-    [ordered]@{ Name = "Skill Admin API live"; Url = "$skillAdminBaseUrl/live" },
-    [ordered]@{ Name = "Skill Admin API ready"; Url = "$skillAdminBaseUrl/ready" },
-    [ordered]@{ Name = "Skill Admin Web"; Url = "http://127.0.0.1:4174" }
-  )
-}
-
 $allReady = $true
-foreach ($healthCheck in $healthChecks) {
-  if (-not (Wait-HttpEndpoint -Name $healthCheck.Name -Url $healthCheck.Url)) {
+foreach ($service in $services | Where-Object { $null -ne $_.HealthUrl }) {
+  if (-not (Wait-HttpEndpoint -Name $service.Name -Url $service.HealthUrl)) {
     $allReady = $false
   }
 }
 if (-not $allReady) {
-  throw "至少一个开发服务未在超时时间内就绪，请查看新打开的进程窗口。"
+  throw "至少一个开发服务未在超时时间内就绪，请查看对应进程窗口。"
 }
 
 if (-not $NoBrowser) {
   Start-Process "http://127.0.0.1:4173"
-  if (-not $CoreOnly) {
+  if ($startSkillServices) {
     Start-Process "http://127.0.0.1:4174"
   }
 }
@@ -228,7 +324,7 @@ if (-not $NoBrowser) {
 Write-Host "开发环境已全部启动。" -ForegroundColor Green
 Write-Host "主 Web：http://127.0.0.1:4173"
 Write-Host "API：$apiBaseUrl"
-if (-not $CoreOnly) {
+if ($startSkillServices) {
   Write-Host "Skill Admin Web：http://127.0.0.1:4174"
 }
-Write-Host "进程 PID：$(Join-Path $runtimeDirectory 'pids.json')"
+Write-Host "启动状态：$(Join-Path $runtimeDirectory 'pids.json')"

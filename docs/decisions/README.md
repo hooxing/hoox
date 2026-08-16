@@ -170,6 +170,7 @@
 | [ADR-20260816110030](20260816110030-windows-development-one-click-startup.md) | Windows development 非首次一键启动边界 | 已替代 | 2026-08-16 |
 | [ADR-20260816152234](20260816152234-multi-machine-external-service-preflight-and-optional-skill-startup.md) | 多机开发外部服务预检与可选 Skill 启动 | 已接受 | 2026-08-16 |
 | [ADR-20260816114151](20260816114151-hoox-agent-product-brand.md) | 将用户面对的 Agent 产品命名为 Hoox | 已接受 | 2026-08-16 |
+| [ADR-20260816160557](20260816160557-local-account-shell-and-sidebar-user-menu.md) | 工作台本地账号入口与侧栏用户菜单边界 | 已接受 | 2026-08-16 |
 
 ## 何时必须记录
 

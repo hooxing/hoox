@@ -1,13 +1,4 @@
-import {
-  Building2,
-  ChevronDown,
-  ChevronRight,
-  Plus,
-  RefreshCw,
-  Settings,
-  Users,
-  X,
-} from "lucide-react";
+import { Building2, ChevronDown, ChevronRight, Plus, RefreshCw, Users, X } from "lucide-react";
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { ApiError, type TeamMember, type TeamPersonalization, type TeamSummary } from "./api.js";
 import { personalizationSize } from "./personalization.js";
@@ -132,9 +123,6 @@ export function TeamSwitcher({
                 ))}
               </select>
             </label>
-            <button type="button" onClick={onOpenTeamCenter} aria-label="打开团队中心">
-              <Settings size={15} />
-            </button>
           </div>
           <div className="team-task-heading">
             <span>团队任务</span>

@@ -28,6 +28,13 @@ import {
   type ThreadInputReceipt,
   type UploadedResource,
 } from "./api.js";
+import {
+  AccountAccess,
+  AccountMenu,
+  type AccountProfile,
+  clearAccountSession,
+  readAccountSession,
+} from "./account-access.js";
 import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages } from "./polling.js";
@@ -271,7 +278,15 @@ export function shouldFollowLatest(
   return scrollHeight - scrollTop - clientHeight <= threshold;
 }
 
-export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspaceApi }) {
+function AuthenticatedWorkspace({
+  apiClient,
+  accountProfile,
+  onSignOut,
+}: {
+  readonly apiClient: TeamAwareWorkspaceApi;
+  readonly accountProfile: AccountProfile;
+  readonly onSignOut: () => void;
+}) {
   const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [input, setInput] = useState("");
@@ -1137,7 +1152,7 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
             云盘
           </button>
         )}
-        {teamWorkspaceApi !== undefined && (
+        {teamWorkspaceApi !== undefined && teams.length > 0 && (
           <TeamSwitcher
             teams={teams}
             {...(selectedTeam === undefined ? {} : { selectedTeamId: selectedTeam.id })}
@@ -1212,6 +1227,31 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
             ))
           )}
         </ThreadNavigation>
+        <AccountMenu
+          profile={accountProfile}
+          {...(selectedTeam === undefined ? {} : { activeTeamName: selectedTeam.displayName })}
+          canManageActiveTeam={
+            selectedTeam !== undefined &&
+            (selectedTeam.role === "owner" || selectedTeam.role === "admin")
+          }
+          {...(teamWorkspaceApi === undefined
+            ? {}
+            : {
+                onOpenTeamCenter: () => {
+                  setTeamCenterOpen(true);
+                  if (isCompact) setNavigationOpen(false);
+                },
+                ...(selectedTeam === undefined
+                  ? {}
+                  : {
+                      onOpenTeamManagement: () => {
+                        setTeamManagementOpen(true);
+                        if (isCompact) setNavigationOpen(false);
+                      },
+                    }),
+              })}
+          onSignOut={onSignOut}
+        />
       </NavigationSidebar>
       <section className="content" aria-label="对话工作区">
         <button
@@ -1416,6 +1456,27 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
         />
       )}
     </main>
+  );
+}
+
+export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspaceApi }) {
+  const [accountProfile, setAccountProfile] = useState<AccountProfile | undefined>(() =>
+    readAccountSession(window.localStorage),
+  );
+
+  if (accountProfile === undefined) {
+    return <AccountAccess onAuthenticated={setAccountProfile} />;
+  }
+
+  return (
+    <AuthenticatedWorkspace
+      apiClient={apiClient}
+      accountProfile={accountProfile}
+      onSignOut={() => {
+        clearAccountSession(window.localStorage);
+        setAccountProfile(undefined);
+      }}
+    />
   );
 }
 

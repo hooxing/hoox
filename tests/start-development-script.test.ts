@@ -4,6 +4,11 @@ import { describe, expect, it } from "vitest";
 const scriptUrl = new URL("../scripts/start-development.ps1", import.meta.url);
 
 describe("Windows development 一键启动脚本", () => {
+  it("使用 Windows PowerShell 5.1 可识别的 UTF-8 BOM", async () => {
+    const scriptBytes = await readFile(scriptUrl);
+
+    expect([...scriptBytes.subarray(0, 3)]).toEqual([0xef, 0xbb, 0xbf]);
+  });
   it("只执行非首次启动动作并启动完整开发拓扑", async () => {
     const script = await readFile(scriptUrl, "utf8");
 

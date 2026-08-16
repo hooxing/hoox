@@ -49,6 +49,7 @@ export interface ThreadContextMessageView {
   readonly runId?: string;
   readonly role: "user" | "assistant" | "runtime";
   readonly text: string;
+  readonly phase?: "commentary" | "final_answer";
   readonly createdAt: string;
 }
 

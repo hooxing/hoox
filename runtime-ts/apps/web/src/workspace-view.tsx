@@ -425,11 +425,40 @@ function ActivityGroup({
 function AgentTurn({
   run,
   blocks,
+  onProcessExpand,
+  processLoading = false,
+  processLoadFailed = false,
 }: {
   readonly run: Run;
   readonly blocks: readonly ConversationBlock[];
+  readonly onProcessExpand?: () => void;
+  readonly processLoading?: boolean;
+  readonly processLoadFailed?: boolean;
 }) {
-  const sections = buildConversationSections(blocks);
+  const markerIndex = blocks.findLastIndex((block) => block.type === "finalization");
+  const marker = markerIndex < 0 ? undefined : blocks[markerIndex];
+  const runIsLive = run.status === "running" && run.executionStatus !== "recovery_required";
+  const finalizationActive =
+    marker?.type === "finalization" &&
+    (marker.status === "committed" || (marker.status === "started" && runIsLive));
+  const processBlocks = finalizationActive
+    ? blocks.slice(0, markerIndex).filter((block) => block.type !== "finalization")
+    : [];
+  const answerBlocks = finalizationActive
+    ? blocks.slice(markerIndex + 1).filter((block) => block.type !== "finalization")
+    : blocks.filter((block) => block.type !== "finalization");
+  const renderBlocks = (items: readonly ConversationBlock[]) =>
+    buildConversationSections(items).map((section) =>
+      section.type === "activity" ? (
+        <ActivityGroup key={section.id} run={run} items={section.items} />
+      ) : section.type === "answer" ? (
+        <div className="agent-answer-block" key={section.id}>
+          <AssistantMarkdown text={section.text} />
+        </div>
+      ) : (
+        <ToolActivity key={section.id} block={section} />
+      ),
+    );
   return (
     <article className="message assistant-message agent-turn" aria-label="Hoox">
       <span className="message-avatar" aria-hidden="true">
@@ -438,20 +467,115 @@ function AgentTurn({
       <div className="message-card">
         <span className="message-label">Hoox</span>
         <div className="agent-turn-blocks">
-          {sections.map((section) =>
-            section.type === "activity" ? (
-              <ActivityGroup key={section.id} run={run} items={section.items} />
-            ) : section.type === "answer" ? (
-              <div className="agent-answer-block" key={section.id}>
-                <AssistantMarkdown text={section.text} />
+          {finalizationActive && processBlocks.length > 0 && (
+            <details
+              className="final-answer-process"
+              onToggle={(event) => {
+                if (event.currentTarget.open) onProcessExpand?.();
+              }}
+            >
+              <summary>
+                <ChevronRight
+                  className="final-answer-process-chevron"
+                  size={14}
+                  aria-hidden="true"
+                />
+                <strong>{processLoading ? "正在加载执行过程" : "查看执行过程"}</strong>
+              </summary>
+              <div className="final-answer-process-content">
+                {renderBlocks(processBlocks)}
+                {processLoadFailed && (
+                  <small className="final-answer-process-error">
+                    过程详情加载失败，当前显示持久化摘要。
+                  </small>
+                )}
               </div>
-            ) : (
-              <ToolActivity key={section.id} block={section} />
-            ),
+            </details>
+          )}
+          {renderBlocks(answerBlocks)}
+          {finalizationActive && answerBlocks.length === 0 && marker.status === "started" && (
+            <div className="final-answer-placeholder">
+              <LoaderCircle className="spin" size={14} aria-hidden="true" />
+              <span>正在整理最终答复…</span>
+            </div>
           )}
         </div>
       </div>
     </article>
+  );
+}
+
+type AssistantThreadContextMessage = ThreadContextMessage & { readonly role: "assistant" };
+
+function HistoricalAgentTurn({
+  runId,
+  messages,
+  loadRunEvents,
+}: {
+  readonly runId: string;
+  readonly messages: readonly AssistantThreadContextMessage[];
+  readonly loadRunEvents?: (runId: string) => Promise<readonly RunEvent[]>;
+}) {
+  const [loadedEvents, setLoadedEvents] = useState<readonly RunEvent[] | undefined>();
+  const [loadState, setLoadState] = useState<"idle" | "loading" | "failed">("idle");
+  const finalMessages = messages.filter((message) => message.phase === "final_answer");
+  if (finalMessages.length === 0) {
+    return <AssistantMessage text={messages.map((message) => message.text).join("\n\n")} />;
+  }
+  const fallbackBlocks: ConversationBlock[] = [
+    ...messages
+      .filter((message) => message.phase !== "final_answer")
+      .map((message) => ({
+        id: `persisted-process-${message.sequence}`,
+        type: "answer" as const,
+        text: message.text,
+        status: "completed" as const,
+      })),
+    {
+      id: `persisted-finalization-${runId}`,
+      type: "finalization" as const,
+      callId: `persisted-${runId}`,
+      status: "committed" as const,
+    },
+    ...finalMessages.map((message) => ({
+      id: `persisted-final-${message.sequence}`,
+      type: "answer" as const,
+      text: message.text,
+      status: "completed" as const,
+    })),
+  ];
+  const projected = loadedEvents === undefined ? undefined : buildConversationBlocks(loadedEvents);
+  const blocks =
+    projected?.some((block) => block.type === "finalization" && block.status === "committed") ===
+    true
+      ? projected
+      : fallbackBlocks;
+  const loadProcess = () => {
+    if (loadRunEvents === undefined || loadedEvents !== undefined || loadState !== "idle") return;
+    setLoadState("loading");
+    void loadRunEvents(runId).then(
+      (events) => {
+        setLoadedEvents(events);
+        setLoadState("idle");
+      },
+      () => setLoadState("failed"),
+    );
+  };
+  const run: Run = {
+    id: runId,
+    threadId: "historical",
+    status: "succeeded",
+    createdAt: messages[0]?.createdAt ?? "",
+    updatedAt: messages.at(-1)?.createdAt ?? "",
+  };
+  return (
+    <AgentTurn
+      run={run}
+      blocks={blocks}
+      onProcessExpand={loadProcess}
+      processLoading={loadState === "loading"}
+      processLoadFailed={loadState === "failed"}
+    />
   );
 }
 
@@ -519,11 +643,13 @@ export function ThreadTranscript({
   pendingInputs = [],
   currentRun,
   currentRunEvents = [],
+  loadRunEvents,
 }: {
   readonly messages: readonly ThreadContextMessage[];
   readonly pendingInputs?: readonly PendingThreadInputView[];
   readonly currentRun?: Run;
   readonly currentRunEvents?: readonly RunEvent[];
+  readonly loadRunEvents?: (runId: string) => Promise<readonly RunEvent[]>;
 }) {
   if (messages.length === 0 && pendingInputs.length === 0) return null;
   const currentBlocks = currentRun === undefined ? [] : buildConversationBlocks(currentRunEvents);
@@ -539,6 +665,10 @@ export function ThreadTranscript({
             if (renderedAgentTurns.has(turnKey)) return null;
             renderedAgentTurns.add(turnKey);
             if (currentRun !== undefined && message.runId === currentRun.id) {
+              const persistedMessages = messages.filter(
+                (candidate): candidate is AssistantThreadContextMessage =>
+                  candidate.role === "assistant" && candidate.runId === message.runId,
+              );
               const blocks = currentBlocks.some((block) => block.type === "answer")
                 ? currentBlocks
                 : [
@@ -546,23 +676,27 @@ export function ThreadTranscript({
                     {
                       id: `persisted-${message.sequence}`,
                       type: "answer" as const,
-                      text: message.text,
+                      text: persistedMessages.map((candidate) => candidate.text).join("\n\n"),
                       status: "completed" as const,
                     },
                   ];
               return <AgentTurn key={message.sequence} run={currentRun} blocks={blocks} />;
             }
-            const text =
-              message.runId === undefined
-                ? message.text
-                : messages
-                    .filter(
-                      (candidate) =>
-                        candidate.role === "assistant" && candidate.runId === message.runId,
-                    )
-                    .map((candidate) => candidate.text)
-                    .join("\n\n");
-            return <AssistantMessage key={message.sequence} text={text} />;
+            if (message.runId === undefined) {
+              return <AssistantMessage key={message.sequence} text={message.text} />;
+            }
+            const historicalMessages = messages.filter(
+              (candidate): candidate is AssistantThreadContextMessage =>
+                candidate.role === "assistant" && candidate.runId === message.runId,
+            );
+            return (
+              <HistoricalAgentTurn
+                key={message.sequence}
+                runId={message.runId}
+                messages={historicalMessages}
+                {...(loadRunEvents === undefined ? {} : { loadRunEvents })}
+              />
+            );
           })()
         ) : shouldDisplayRuntimeContextMessage(message.text) ? (
           <p className="runtime-context-notice" key={message.sequence}>

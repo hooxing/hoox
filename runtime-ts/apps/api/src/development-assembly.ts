@@ -155,6 +155,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           localAccounts,
           repositories: persistence.repositories,
           personalizations: persistence.personalizations,
+          scheduledTasks: persistence.scheduledTasks,
           ...(persistence.teamCollaboration === undefined
             ? {}
             : { teamCollaboration: persistence.teamCollaboration }),

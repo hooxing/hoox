@@ -8,3 +8,4 @@ export * from "./schemas.js";
 export * from "./skill.js";
 export * from "./skill-admin.js";
 export * from "./team.js";
+export * from "./automation.js";

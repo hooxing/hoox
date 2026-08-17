@@ -34,6 +34,8 @@ import {
   PgRunCancellationReader,
   PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
+  PgScheduledTaskDueConsumer,
+  PgScheduledTaskRepository,
   PgSkillFilesystemCatalog,
   PgSkillRuntimeRepository,
   PgThreadContextCompactionRepository,
@@ -983,6 +985,11 @@ async function assembleWorkerRuntime(
       ),
       authorizationVerifier: artifactAuthorization.verifier,
     });
+    const scheduledTasks = new PgScheduledTaskRepository(pool);
+    const scheduledTaskConsumer = new PgScheduledTaskDueConsumer(pool, {
+      historyFilesystemEnabled: configuration.historyFilesystemEnabled,
+      historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
+    });
     const sessions = new PiWorkerSessionFactory(
       model,
       modelRuntime,
@@ -1079,6 +1086,19 @@ async function assembleWorkerRuntime(
       skillRuntime,
       modelContext,
       internalTrajectoryDiagnostics,
+      async (input) => {
+        const result = await scheduledTasks.mutateFromRun(input);
+        if (result.outcome === "applied" || result.outcome === "replayed") return result.task;
+        const code =
+          result.outcome === "not_found"
+            ? "AUTOMATION_NOT_FOUND"
+            : result.outcome === "not_authorized"
+              ? "AUTOMATION_NOT_AUTHORIZED"
+              : result.outcome === "invalid_state"
+                ? "AUTOMATION_INVALID_STATE"
+                : "AUTOMATION_KEY_CONFLICT";
+        throw new Error(code);
+      },
     );
     const shutdown = new ProcessShutdown();
     const memoryProvider = configuration.memory.enabled
@@ -1166,6 +1186,7 @@ async function assembleWorkerRuntime(
             }),
           ];
           if (memoryConsumer !== undefined) tasks.push(memoryConsumer.drainTenant(tenantId));
+          tasks.push(scheduledTaskConsumer.drainTenant(tenantId));
           await Promise.allSettled(tasks);
         },
       },

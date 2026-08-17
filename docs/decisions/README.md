@@ -173,6 +173,8 @@
 | [ADR-20260816160557](20260816160557-local-account-shell-and-sidebar-user-menu.md) | 工作台本地账号入口与侧栏用户菜单边界 | 已替代（账号认证部分） | 2026-08-16 |
 | [ADR-20260816165004](20260816165004-development-local-account-authentication.md) | 开发工作台使用服务端本地账号认证 | 已接受 | 2026-08-16 |
 
+| [ADR-20260817181138](20260817181138-thread-scheduled-tasks.md) | Thread 定时任务与按需 Sandbox 复用 | 已接受 | 2026-08-17 |
+
 ## 何时必须记录
 
 满足任一条件，就必须在合并代码前新增 ADR 或补充一条实施决策记录：

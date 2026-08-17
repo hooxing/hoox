@@ -94,6 +94,11 @@ type ResourceFilesystemProbeResult =
   | { readonly outcome: "missing"; readonly category: string }
   | { readonly outcome: "failed"; readonly category: string };
 
+type PendingThreadSteer = Extract<
+  Awaited<ReturnType<ExecutionPersistencePort["readPendingThreadSteers"]>>,
+  { readonly outcome: "pending" }
+>["items"][number];
+
 function directAttachmentProbePaths(
   input: string,
   attachments: readonly UserInputAttachmentReference[],
@@ -995,39 +1000,30 @@ export class RunWorker {
                 }
                 const throughSequence = persisted.receipt.threadContext.lastSequence;
                 if (this.options.threadInputRoutingV2Enabled !== true) return { throughSequence };
-                // 先持久化完整 assistant/tool 配对，再观察 steer；绝不把 user message 插进工具配对中间。
-                const pending = await this.dependencies.persistence.readPendingThreadSteer({
+                // 先持久化完整 assistant/tool 配对，再一次读取当前安全点已经排队的全部 steer；
+                // 新到达的输入留给后续安全点，避免持续写入让本次 Provider continuation 饥饿。
+                const pending = await this.dependencies.persistence.readPendingThreadSteers({
                   fence: context.fence,
                 });
                 if (pending.outcome === "pending") {
-                  const steered = await this.applyMutation(context, {
-                    idempotencyKey: `${context.attemptId}/steer/${pending.receiptId}`,
-                    events: [],
-                    outbox: [],
-                    threadSteer: {
-                      receiptId: pending.receiptId,
-                      targetTurnId: pending.targetTurnId,
-                      bodyDigest: pending.bodyDigest,
-                    },
-                  });
-                  if (!isApplied(steered)) {
-                    closeEventAcceptance(context);
-                    context.stopped =
-                      steered.outcome === "fence_lost" || steered.outcome === "scope_mismatch"
-                        ? "fence_lost"
-                        : "unavailable";
-                    throw new Error("Thread steer 安全点提交失败");
+                  const steers = [];
+                  for (const item of pending.items) {
+                    const steered = await this.applyThreadSteer(context, item);
+                    if (!isApplied(steered)) {
+                      closeEventAcceptance(context);
+                      context.stopped =
+                        steered.outcome === "fence_lost" || steered.outcome === "scope_mismatch"
+                          ? "fence_lost"
+                          : "unavailable";
+                      throw new Error("Thread steer 安全点提交失败");
+                    }
+                    steers.push({
+                      receiptId: item.receiptId,
+                      inputText: item.inputText,
+                      ...(item.attachments === undefined ? {} : { attachments: item.attachments }),
+                    });
                   }
-                  return {
-                    throughSequence,
-                    steer: {
-                      receiptId: pending.receiptId,
-                      inputText: pending.inputText,
-                      ...(pending.attachments === undefined
-                        ? {}
-                        : { attachments: pending.attachments }),
-                    },
-                  };
+                  return { throughSequence, steers };
                 }
                 if (pending.outcome !== "none") {
                   closeEventAcceptance(context);
@@ -1199,26 +1195,21 @@ export class RunWorker {
         outputLimitContinuationRound = 0;
 
         if (this.options.threadInputRoutingV2Enabled === true) {
-          const pending = await this.dependencies.persistence.readPendingThreadSteer({
+          const pending = await this.dependencies.persistence.readPendingThreadSteers({
             fence: context.fence,
           });
           if (pending.outcome === "pending") {
-            const applied = await this.applyMutation(context, {
-              idempotencyKey: `${context.attemptId}/steer/${pending.receiptId}`,
-              events: [],
-              outbox: [],
-              threadSteer: {
-                receiptId: pending.receiptId,
-                targetTurnId: pending.targetTurnId,
-                bodyDigest: pending.bodyDigest,
-              },
-            });
+            // Pi 已经 settled 时没有可承载批量 steering 的活跃 prompt；只消费队首，
+            // 其余 receipt 保持 pending，等这次 prompt 的安全点再合并进入后续请求。
+            const [item] = pending.items;
+            if (item === undefined) throw new Error("Thread steer 批次不能为空");
+            const applied = await this.applyThreadSteer(context, item);
             if (!isApplied(applied)) return await this.handleMutationFailure(applied);
             promptInput = {
-              text: await this.withRetrievedMemory(claim.snapshot, scope, pending.inputText),
-              attachments: pending.attachments ?? [],
+              text: await this.withRetrievedMemory(claim.snapshot, scope, item.inputText),
+              attachments: item.attachments ?? [],
             };
-            steerReceiptId = pending.receiptId;
+            steerReceiptId = item.receiptId;
             continue;
           }
           if (pending.outcome !== "none") {
@@ -1751,6 +1742,23 @@ export class RunWorker {
     if (!context.abortPromise) {
       context.abortPromise = context.abortSession?.() ?? Promise.resolve();
     }
+  }
+
+  /** 将一条已读取的 durable steer 作为真实 user fact 幂等提交。 */
+  private applyThreadSteer(
+    context: ExecutionContext,
+    item: PendingThreadSteer,
+  ): Promise<RuntimeMutationResult> {
+    return this.applyMutation(context, {
+      idempotencyKey: `${context.attemptId}/steer/${item.receiptId}`,
+      events: [],
+      outbox: [],
+      threadSteer: {
+        receiptId: item.receiptId,
+        targetTurnId: item.targetTurnId,
+        bodyDigest: item.bodyDigest,
+      },
+    });
   }
 
   private async applyMutation(

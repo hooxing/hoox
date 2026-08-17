@@ -41,7 +41,7 @@ API 先在 execution head 的短事务中决定 `pending_steer`、`queued` 或 `
 2. 每个请求先写不可变 `thread_input_receipts`，并分配 Thread 级 `input_sequence`。receipt 保存原文、摘要、requested mode、expected/target 身份、fallback candidate Run ID 和最终 disposition。
 3. `thread_execution_heads.active_turn_id` 在 Run 激活时设置为由持久 `turn_ordinal` 派生的稳定 ID；它不是 Worker Attempt ID。expected Run/Turn 只与锁定后的 head 比较。
 4. `auto` 仅对 `running` 的 regular active Run 产生 `pending_steer`。waiting、无 active Run 或不可 steer 阶段直接成为 follow-up；`auto` 不猜测 waiting answer。
-5. Worker 不在 Provider stream 中抢占或向 Pi 预排内存消息。完整 assistant/tool turn 收敛后才从数据库采样一条 pending receipt；在下一次 Provider 请求前先提交 steer user fact 与 receipt `steered`，再以同一 Pi Session 的新 `prompt` 继续当前 Run。
+5. Worker 不在 Provider stream 中抢占或向 Pi 预排内存消息。完整 assistant/tool turn 收敛后才从数据库采样 pending receipt；在下一次 Provider 请求前先提交 steer user fact 与 receipt `steered`，再以同一 Pi Session 继续当前 Run。最初的单条采样粒度已由 [同一安全点批量接纳 Durable Steer](20260817151138-safe-point-batched-durable-steer.md) 细化为快照内有序批次。
 6. Thread Context append 和 receipt `steered + applied_context_sequence` 使用同一个 Runtime mutation 事务。重复消费按 receipt/append 幂等键读回，不再次插入 user message。
 7. terminal/cancel 事务锁定同一 execution head。尚未应用的 `auto` 或允许 fallback 的 steer 按 `input_sequence` 各创建一个 queued Run；不允许 fallback 的显式 steer转为 `rejected`。输入不能同时 steered 和 queued。
 8. 显式 `follow_up` 及旧 `/runs` 都保持“一条输入、一个 Run、一个 FIFO queue item”。不调用 Pi `followUp()` 充当跨 Run 队列。

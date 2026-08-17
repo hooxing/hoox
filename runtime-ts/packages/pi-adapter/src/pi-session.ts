@@ -522,6 +522,8 @@ export async function createSafePiSession(
     {
       compaction: { enabled: false },
       retry: { enabled: false },
+      // Runtime 已在 durable 安全点冻结有序批次；Pi 必须把该批次一次送入下一请求。
+      steeringMode: "all",
     },
     { projectTrusted: false },
   );

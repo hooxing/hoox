@@ -1,10 +1,10 @@
 // @vitest-environment jsdom
 
-import { act, createRef, useRef, useState } from "react";
+import { act, createRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import type { Artifact, HistoryFile, ModelWireTraceRecord, Run, RunEvent } from "./api.js";
+import type { Artifact, HistoryFile, Run, RunEvent } from "./api.js";
 import {
   activeHistoryMention,
   ConversationComposer,
@@ -21,10 +21,6 @@ import {
   shouldInitiallyCollapseUserRequest,
   userRequestCollapsedHeight,
 } from "./workspace-view.js";
-
-// 已移除的抽屉交互用例暂留作历史说明，不再参与当前界面契约。
-const ActivityPanel = (_props: Record<string, unknown>) => null;
-const shouldOpenActivityPanel = (_isCompact: boolean) => false;
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -416,179 +412,6 @@ describe("工作台展示组件", () => {
     expect(html).not.toContain("上下文窗口");
     expect(html).not.toContain("运行 run-1");
     expect(html).not.toContain("providerSandboxId");
-  });
-
-  it.skip("只有模型报文时仍提供可重复打开诊断抽屉的外部入口", () => {
-    const trace: ModelWireTraceRecord = {
-      attemptId: "attempt_trace",
-      modelTurn: 0,
-      transportAttempt: 0,
-      part: "request",
-      captureStatus: "complete",
-      persistenceStatus: "stored",
-      bodyAvailable: true,
-      createdAt: "2026-07-30T00:00:00.000Z",
-      expiresAt: "2026-08-06T00:00:00.000Z",
-    };
-    const selectedThread = {
-      id: "thread-trace",
-      title: "诊断会话",
-      status: "active" as const,
-      createdAt: "2026-07-30T00:00:00.000Z",
-      updatedAt: "2026-07-30T00:00:00.000Z",
-    };
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    function Harness() {
-      const [open, setOpen] = useState(false);
-      const triggerRef = useRef<HTMLButtonElement>(null);
-      const fallbackRef = useRef<HTMLDivElement>(null);
-      return (
-        <div ref={fallbackRef} tabIndex={-1}>
-          <ThreadHeader
-            thread={selectedThread}
-            run={running}
-            artifactCount={0}
-            modelWireTraceCount={1}
-            actionLoading={false}
-            onArchive={() => undefined}
-            onCancel={() => undefined}
-            onOpenArtifacts={() => setOpen(true)}
-            artifactTriggerRef={triggerRef}
-          />
-          <ActivityPanel
-            isOpen={open}
-            artifacts={[]}
-            modelWireTraces={[trace]}
-            onToggle={() => setOpen(false)}
-            onPreview={() => undefined}
-            onDownload={() => undefined}
-            returnFocusRef={triggerRef}
-            fallbackFocusRef={fallbackRef}
-          />
-        </div>
-      );
-    }
-
-    act(() => root.render(<Harness />));
-    const trigger = container.querySelector<HTMLButtonElement>(
-      "[aria-label='打开本次运行模型网络诊断']",
-    );
-    if (trigger === null) throw new Error("未渲染诊断抽屉入口");
-    act(() => trigger.click());
-    const close = container.querySelector<HTMLButtonElement>("[aria-label='关闭诊断抽屉']");
-    expect(document.activeElement).toBe(close);
-    act(() => close?.click());
-    expect(document.activeElement).toBe(trigger);
-    act(() => trigger.click());
-    expect(container.querySelector("[aria-label='关闭诊断抽屉']")).not.toBeNull();
-    act(() => root.unmount());
-    container.remove();
-  });
-
-  it.skip("产物抽屉打开后接管焦点，Escape 或关闭按钮返回入口", () => {
-    const artifact: Artifact = {
-      id: "artifact-focus",
-      name: "focus.txt",
-      status: "published",
-      createdAt: "2026-07-30T00:00:00.000Z",
-      updatedAt: "2026-07-30T00:00:00.000Z",
-    };
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    function Harness() {
-      const [open, setOpen] = useState(false);
-      const triggerRef = useRef<HTMLButtonElement>(null);
-      const fallbackRef = useRef<HTMLDivElement>(null);
-      return (
-        <div ref={fallbackRef} tabIndex={-1}>
-          <button ref={triggerRef} type="button" onClick={() => setOpen(true)}>
-            产物 1
-          </button>
-          <ActivityPanel
-            isOpen={open}
-            artifacts={[artifact]}
-            onToggle={() => setOpen(false)}
-            onPreview={() => undefined}
-            onDownload={() => undefined}
-            returnFocusRef={triggerRef}
-            fallbackFocusRef={fallbackRef}
-          />
-        </div>
-      );
-    }
-
-    act(() => root.render(<Harness />));
-    const trigger = container.querySelector<HTMLButtonElement>("button");
-    if (trigger === null) throw new Error("未渲染产物入口");
-    act(() => trigger.click());
-    const close = container.querySelector<HTMLButtonElement>("[aria-label='关闭产物抽屉']");
-    expect(document.activeElement).toBe(close);
-    act(() => close?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
-    expect(document.activeElement).toBe(trigger);
-
-    act(() => trigger.click());
-    const closeAgain = container.querySelector<HTMLButtonElement>("[aria-label='关闭产物抽屉']");
-    act(() => closeAgain?.click());
-    expect(document.activeElement).toBe(trigger);
-    act(() => root.unmount());
-    container.remove();
-  });
-
-  it.skip("切换会话移除产物入口时，抽屉关闭后回退到中部工作区", () => {
-    const artifact: Artifact = {
-      id: "artifact-switch",
-      name: "switch.txt",
-      status: "published",
-      createdAt: "2026-07-30T00:00:00.000Z",
-      updatedAt: "2026-07-30T00:00:00.000Z",
-    };
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    function Harness() {
-      const [open, setOpen] = useState(false);
-      const [showArtifacts, setShowArtifacts] = useState(true);
-      const triggerRef = useRef<HTMLButtonElement>(null);
-      const fallbackRef = useRef<HTMLDivElement>(null);
-      return (
-        <div ref={fallbackRef} tabIndex={-1}>
-          <button type="button" onClick={() => setShowArtifacts(false)}>
-            切换会话
-          </button>
-          {showArtifacts && (
-            <button ref={triggerRef} type="button" onClick={() => setOpen(true)}>
-              产物 1
-            </button>
-          )}
-          <ActivityPanel
-            isOpen={open}
-            artifacts={showArtifacts ? [artifact] : []}
-            onToggle={() => setOpen(false)}
-            onPreview={() => undefined}
-            onDownload={() => undefined}
-            returnFocusRef={triggerRef}
-            fallbackFocusRef={fallbackRef}
-          />
-        </div>
-      );
-    }
-
-    act(() => root.render(<Harness />));
-    const trigger = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
-      button.textContent?.includes("产物"),
-    );
-    if (trigger === undefined) throw new Error("未渲染产物入口");
-    act(() => trigger.click());
-    const switchThread = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent?.includes("切换会话"),
-    );
-    act(() => switchThread?.click());
-    expect(document.activeElement).toBe(container.querySelector("div"));
-    act(() => root.unmount());
-    container.remove();
   });
 
   it("运行组件仅展示紧凑进度，隐藏内部事件和工具调用标识", () => {
@@ -1080,11 +903,6 @@ describe("工作台展示组件", () => {
     act(() => root.unmount());
     container.remove();
     vi.useRealTimers();
-  });
-
-  it("无论屏幕尺寸，无产物时默认收起右侧产物栏", () => {
-    expect(shouldOpenActivityPanel(true)).toBe(false);
-    expect(shouldOpenActivityPanel(false)).toBe(false);
   });
 
   it("移动会话抽屉管理 inert、Escape 与焦点往返", () => {

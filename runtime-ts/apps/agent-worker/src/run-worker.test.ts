@@ -1075,7 +1075,7 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(session.prompts).toEqual([]);
   });
 
-  it("阶段 3 在完整 turn 后原子消费 steer，并注入同一活跃 Session 的原生 steer 队列", async () => {
+  it("阶段 3 在完整 turn 后按序消费同一安全点的多条 steer，并合并注入活跃 Session", async () => {
     const completedTurn: RuntimeAgentEvent = {
       type: "turn.completed",
       assistant: {
@@ -1098,19 +1098,28 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
       threadContextWriteEnabled: true,
       threadInputRoutingV2Enabled: true,
     });
-    execution.persistence.pendingThreadSteers.push({
-      scope: execution.scope,
-      receiptId: "input-steer-1",
-      targetTurnId: "turn-1",
-      inputText: "不要改后端，只调整配色",
-      bodyDigest: sha256Digest("a".repeat(64)),
-    });
+    execution.persistence.pendingThreadSteers.push(
+      {
+        scope: execution.scope,
+        receiptId: "input-steer-1",
+        targetTurnId: "turn-1",
+        inputText: "不要改后端，只调整配色",
+        bodyDigest: sha256Digest("a".repeat(64)),
+      },
+      {
+        scope: execution.scope,
+        receiptId: "input-steer-2",
+        targetTurnId: "turn-1",
+        inputText: "保留现有字体",
+        bodyDigest: sha256Digest("b".repeat(64)),
+      },
+    );
 
     await expect(execution.worker.execute(execution.scope)).resolves.toEqual({
       outcome: "succeeded",
     });
     expect(session.prompts).toEqual(["执行任务"]);
-    expect(session.steers).toEqual(["不要改后端，只调整配色"]);
+    expect(session.steers).toEqual(["不要改后端，只调整配色", "保留现有字体"]);
     expect(execution.persistence.pendingThreadSteers).toHaveLength(0);
     expect(
       execution.persistence.durableOperations.some((item) =>

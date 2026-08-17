@@ -1236,17 +1236,24 @@ describe("Pi 安全适配", () => {
       const { controller, events, started, faux } = await harness([first, queued]);
       const prompting = controller.prompt("开始");
       await started;
-      await controller.steer("转向消息");
+      await controller.steer("转向消息一");
+      await controller.steer("转向消息二");
       await controller.followUp("追问消息");
       await prompting;
 
       const queueEvents = events.filter((event) => event.type === "queue.updated");
-      expect(queueEvents.some((event) => event.steering.includes("转向消息"))).toBe(true);
+      expect(
+        queueEvents.some(
+          (event) => event.steering.includes("转向消息一") && event.steering.includes("转向消息二"),
+        ),
+      ).toBe(true);
       expect(queueEvents.some((event) => event.followUp.includes("追问消息"))).toBe(true);
       // Pi 会把同一安全点的 steer/follow-up 合并进下一次模型上下文，而不是强制各发一次请求。
       expect(faux.state.callCount).toBe(2);
-      expect(queuedContext).toContain("转向消息");
+      expect(queuedContext).toContain("转向消息一");
+      expect(queuedContext).toContain("转向消息二");
       expect(queuedContext).toContain("追问消息");
+      expect(queuedContext.indexOf("转向消息一")).toBeLessThan(queuedContext.indexOf("转向消息二"));
       expect(events.at(-1)?.type).toBe("agent.settled");
     },
   );

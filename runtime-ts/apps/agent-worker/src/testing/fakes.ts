@@ -265,27 +265,29 @@ export class FakeExecutionPersistence implements ExecutionPersistencePort {
     };
   }
 
-  async readPendingThreadSteer(input: {
+  async readPendingThreadSteers(input: {
     readonly fence: ExecutionFence;
-  }): ReturnType<ExecutionPersistencePort["readPendingThreadSteer"]> {
+  }): ReturnType<ExecutionPersistencePort["readPendingThreadSteers"]> {
     this.durableOperations.push("steer:read");
     const record = this.find(input.fence.scope);
     if (record === "scope_mismatch") return { outcome: "scope_mismatch" };
     if (record === undefined || record.fence?.runClaim.token !== input.fence.runClaim.token) {
       return { outcome: "fence_lost" };
     }
-    const pending = this.pendingThreadSteers.find(
+    const pending = this.pendingThreadSteers.filter(
       (candidate) => scopeKey(candidate.scope) === scopeKey(input.fence.scope),
     );
-    return pending === undefined
+    return pending.length === 0
       ? { outcome: "none" }
       : {
           outcome: "pending",
-          receiptId: pending.receiptId,
-          targetTurnId: pending.targetTurnId,
-          inputText: pending.inputText,
-          ...(pending.attachments === undefined ? {} : { attachments: pending.attachments }),
-          bodyDigest: pending.bodyDigest,
+          items: pending.map((item) => ({
+            receiptId: item.receiptId,
+            targetTurnId: item.targetTurnId,
+            inputText: item.inputText,
+            ...(item.attachments === undefined ? {} : { attachments: item.attachments }),
+            bodyDigest: item.bodyDigest,
+          })),
         };
   }
 
@@ -1285,10 +1287,10 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
             if (event.type !== "turn.completed") return;
             safePointChain = safePointChain.then(async () => {
               const safePoint = await input.onTurnSafePoint?.(event);
-              if (safePoint?.steer !== undefined) {
+              for (const steer of safePoint?.steers ?? []) {
                 await session.steer({
-                  text: safePoint.steer.inputText,
-                  attachments: safePoint.steer.attachments ?? [],
+                  text: steer.inputText,
+                  attachments: steer.attachments ?? [],
                 });
               }
             });

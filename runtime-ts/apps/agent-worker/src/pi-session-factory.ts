@@ -682,23 +682,28 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                         compatibility,
                         rebuilt,
                         availableThreadHistoryTokens,
-                        persisted.steer === undefined
-                          ? 0
-                          : providerVisibleUserInputTokens(
-                              persisted.steer.inputText,
+                        (persisted.steers ?? []).reduce(
+                          (tokens, steer) =>
+                            tokens +
+                            providerVisibleUserInputTokens(
+                              steer.inputText,
                               this.modelContext.tokenizer,
                             ),
+                          0,
+                        ),
                       );
               }
-              if (persisted.steer !== undefined) {
+              if ((persisted.steers?.length ?? 0) > 0) {
                 if (controller === undefined) throw new Error("Pi Session steer 安全点尚未就绪");
-                // 有 replacement 时它截止到 assistant/tool turn；无重建器时也必须把已持久消费的
-                // steer 送入 Pi 原生队列，不能因可选的上下文投影能力关闭而丢失用户输入。
-                const preparedSteer = await prepareInput({
-                  text: persisted.steer.inputText,
-                  attachments: persisted.steer.attachments ?? [],
-                });
-                await controller.steer(preparedSteer.text, preparedSteer.images);
+                // replacement 截止到完整 assistant/tool turn；同一安全点已持久消费的 steer
+                // 按 input_sequence 依次进入 Pi 原生队列，由下一次 Provider 请求一起读取。
+                for (const steer of persisted.steers ?? []) {
+                  const preparedSteer = await prepareInput({
+                    text: steer.inputText,
+                    attachments: steer.attachments ?? [],
+                  });
+                  await controller.steer(preparedSteer.text, preparedSteer.images);
+                }
               }
               return replacement;
             },

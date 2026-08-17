@@ -60,6 +60,49 @@ describe("用户运行进度投影", () => {
     ]);
   });
 
+  it("隐藏阶段工具，并以 durable 标志分隔过程和最终答复", () => {
+    const blocks = buildConversationBlocks([
+      event(1, "message.delta", { delta: "过程说明" }),
+      event(2, "message.completed", { stopReason: "stop" }),
+      event(3, "tool.started", {
+        name: "collapse_process_for_final_answer",
+        callId: "call-final",
+      }),
+      event(4, "tool.completed", {
+        name: "collapse_process_for_final_answer",
+        callId: "call-final",
+        isError: false,
+      }),
+      event(5, "finalization.started", { callId: "call-final" }),
+      event(6, "message.delta", { delta: "最终答复" }),
+      event(7, "message.completed", { stopReason: "stop" }),
+      event(8, "final_answer.committed", { callId: "call-final" }),
+    ]);
+
+    expect(blocks).toMatchObject([
+      { type: "answer", text: "过程说明" },
+      { type: "finalization", callId: "call-final", status: "committed" },
+      { type: "answer", text: "最终答复" },
+    ]);
+    expect(blocks.some((block) => block.type === "tool")).toBe(false);
+    expect(
+      buildRunProgress([
+        event(1, "tool.started", {
+          name: "collapse_process_for_final_answer",
+          callId: "call-final",
+        }),
+      ]).steps,
+    ).toEqual([]);
+    expect(
+      buildRunProgress([
+        event(1, "tool.started", {
+          name: "begin_final_answer",
+          callId: "call-legacy-final",
+        }),
+      ]).steps,
+    ).toEqual([]);
+  });
+
   it("不把工具原始参数作为展示标题", () => {
     const blocks = buildConversationBlocks([
       event(1, "tool.started", {

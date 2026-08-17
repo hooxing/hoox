@@ -1276,6 +1276,222 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     );
   });
 
+  it("最终答复阶段在安全点开始，跨 length 续写后才提交", async () => {
+    const markerTurn: RuntimeAgentEvent = {
+      type: "turn.completed",
+      assistant: {
+        content: [
+          {
+            type: "toolCall",
+            id: "call-final",
+            name: "collapse_process_for_final_answer",
+            arguments: {},
+          },
+        ],
+        api: "openai-completions",
+        provider: "test",
+        model: "test-model",
+        stopReason: "toolUse",
+        timestamp: 1,
+      },
+      toolResults: [
+        {
+          toolCallId: "call-final",
+          toolName: "collapse_process_for_final_answer",
+          text: '{"status":"ready"}',
+          isError: false,
+          timestamp: 2,
+        },
+      ],
+    };
+    const partialTurn: RuntimeAgentEvent = {
+      type: "turn.completed",
+      assistant: {
+        content: [{ type: "text", text: "最终答复的前半段" }],
+        api: "openai-completions",
+        provider: "test",
+        model: "test-model",
+        stopReason: "length",
+        timestamp: 3,
+      },
+      toolResults: [],
+    };
+    const completedTurn: RuntimeAgentEvent = {
+      type: "turn.completed",
+      assistant: {
+        content: [{ type: "text", text: "，以及后半段。" }],
+        api: "openai-completions",
+        provider: "test",
+        model: "test-model",
+        stopReason: "stop",
+        timestamp: 4,
+      },
+      toolResults: [],
+    };
+    const session = new ScriptedAgentSession(
+      [
+        { type: "agent.started" },
+        {
+          type: "tool.started",
+          callId: "call-final",
+          name: "collapse_process_for_final_answer",
+        },
+        {
+          type: "tool.completed",
+          callId: "call-final",
+          name: "collapse_process_for_final_answer",
+          isError: false,
+        },
+        { type: "message.completed", stopReason: "toolUse" },
+        markerTurn,
+        { type: "message.delta", delta: "最终答复的前半段" },
+        { type: "message.completed", stopReason: "length" },
+        partialTurn,
+        { type: "agent.settled" },
+      ],
+      { kind: "completed" },
+      [
+        {
+          events: [
+            { type: "agent.started" },
+            { type: "message.delta", delta: "，以及后半段。" },
+            { type: "message.completed", stopReason: "stop" },
+            completedTurn,
+            { type: "agent.settled" },
+          ],
+        },
+      ],
+    );
+    const execution = harness([session], fakeSeed("final-answer-length"), {
+      threadContextWriteEnabled: true,
+    });
+
+    await expect(execution.worker.execute(execution.scope)).resolves.toEqual({
+      outcome: "succeeded",
+    });
+
+    expect(session.prompts).toHaveLength(2);
+    const phaseEvents = execution.persistence
+      .record(execution.scope)
+      .events.filter(
+        (event) =>
+          event.kind === "agent_event" &&
+          (event.payload.type === "finalization.started" ||
+            event.payload.type === "final_answer.committed"),
+      )
+      .map((event) => (event.kind === "agent_event" ? event.payload : undefined));
+    expect(phaseEvents).toEqual([
+      { type: "finalization.started", callId: "call-final" },
+      { type: "final_answer.committed", callId: "call-final" },
+    ]);
+    expect(
+      execution.threadContextBodies.values.filter((body) => body.role === "assistant"),
+    ).toEqual([
+      expect.objectContaining({ phase: "commentary", stopReason: "toolUse" }),
+      expect.objectContaining({ phase: "final_answer", text: "最终答复的前半段" }),
+      expect.objectContaining({ phase: "final_answer", text: "，以及后半段。" }),
+    ]);
+  });
+
+  it("阶段标志后重新调用工具会取消折叠，后续普通回复不冒充最终答复", async () => {
+    const session = new ScriptedAgentSession([
+      { type: "agent.started" },
+      { type: "message.completed", stopReason: "toolUse" },
+      {
+        type: "turn.completed",
+        assistant: {
+          content: [
+            {
+              type: "toolCall",
+              id: "call-final-cancel",
+              name: "collapse_process_for_final_answer",
+              arguments: {},
+            },
+          ],
+          api: "test",
+          provider: "test",
+          model: "test",
+          stopReason: "toolUse",
+          timestamp: 1,
+        },
+        toolResults: [
+          {
+            toolCallId: "call-final-cancel",
+            toolName: "collapse_process_for_final_answer",
+            text: "ready",
+            isError: false,
+            timestamp: 2,
+          },
+        ],
+      },
+      { type: "message.completed", stopReason: "toolUse" },
+      {
+        type: "turn.completed",
+        assistant: {
+          content: [
+            { type: "toolCall", id: "call-read-more", name: "read", arguments: { path: "a" } },
+          ],
+          api: "test",
+          provider: "test",
+          model: "test",
+          stopReason: "toolUse",
+          timestamp: 3,
+        },
+        toolResults: [
+          {
+            toolCallId: "call-read-more",
+            toolName: "read",
+            text: "ok",
+            isError: false,
+            timestamp: 4,
+          },
+        ],
+      },
+      { type: "message.delta", delta: "补充检查后完成。" },
+      { type: "message.completed", stopReason: "stop" },
+      {
+        type: "turn.completed",
+        assistant: {
+          content: [{ type: "text", text: "补充检查后完成。" }],
+          api: "test",
+          provider: "test",
+          model: "test",
+          stopReason: "stop",
+          timestamp: 5,
+        },
+        toolResults: [],
+      },
+      { type: "agent.settled" },
+    ]);
+    const execution = harness([session], fakeSeed("final-answer-cancel"), {
+      threadContextWriteEnabled: true,
+    });
+
+    await expect(execution.worker.execute(execution.scope)).resolves.toEqual({
+      outcome: "succeeded",
+    });
+    expect(
+      execution.persistence
+        .record(execution.scope)
+        .events.find(
+          (event) =>
+            event.kind === "agent_event" && event.payload.type === "finalization.cancelled",
+        ),
+    ).toMatchObject({
+      payload: {
+        type: "finalization.cancelled",
+        callId: "call-final-cancel",
+        reason: "tool_use",
+      },
+    });
+    expect(execution.threadContextBodies.values).toContainEqual(
+      expect.objectContaining({ text: "补充检查后完成。" }),
+    );
+    expect(
+      execution.threadContextBodies.values.find((body) => body.text === "补充检查后完成。"),
+    ).not.toHaveProperty("phase");
+  });
+
   it("turn 安全点先排空思考与消息公开事件，再提交 Thread Context", async () => {
     const turn: RuntimeAgentEvent = {
       type: "turn.completed",

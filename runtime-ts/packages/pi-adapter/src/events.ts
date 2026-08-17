@@ -258,6 +258,7 @@ function projectToolPresentation(name: string, unsafeArgs: unknown): ToolPresent
     return { action: "deliver", ...(title === undefined ? {} : { title }) };
   }
   if (name === "todo_write") return { action: "other", title: "更新任务清单" };
+  if (name === "automation_update") return { action: "other", title: "管理定时任务" };
   if (name === "publish_artifact") {
     const title = safeText(args?.name, 255);
     return { action: "deliver", ...(title === undefined ? {} : { title }) };

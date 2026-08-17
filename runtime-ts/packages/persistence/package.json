@@ -26,7 +26,8 @@
     "@aisay/workspace": "workspace:*",
     "@aws-sdk/client-s3": "3.1095.0",
     "@aws-sdk/s3-request-presigner": "3.1095.0",
-    "pg": "8.22.0"
+    "pg": "8.22.0",
+    "@aisay/automation": "workspace:*"
   },
   "devDependencies": {
     "@types/pg": "8.20.0"

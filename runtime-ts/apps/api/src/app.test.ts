@@ -516,6 +516,7 @@ function fixture(
     readonly personalizations?: ApiDependencies["personalizations"];
     readonly threadForks?: ApiDependencies["threadForks"];
     readonly localAccounts?: ApiDependencies["localAccounts"];
+    readonly scheduledTasks?: ApiDependencies["scheduledTasks"];
   } = {},
 ) {
   const state = new FakeApiState();
@@ -623,6 +624,7 @@ function fixture(
     ...(options.personalizations === undefined
       ? {}
       : { personalizations: options.personalizations }),
+    ...(options.scheduledTasks === undefined ? {} : { scheduledTasks: options.scheduledTasks }),
     ...(options.threadForks === undefined ? {} : { threadForks: options.threadForks }),
     ...(options.enableThreadContext === true
       ? {
@@ -3403,5 +3405,60 @@ describe("Thread 游标签名密钥轮换", () => {
     };
     expect(() => codec.encode(oversizedScope, maximumCursor)).toThrow("任务分页游标无效");
     expect(() => codec.decode(maximumScope, "a".repeat(2_000))).toThrow("任务分页游标无效");
+  });
+
+  it("定时任务 API 列表与创建共享 Tenant 身份和幂等命令", async () => {
+    const task = {
+      id: "automation_1",
+      tenantId: "tenant_owner_a",
+      ownerUserId: "user_owner_a",
+      sourceThreadId: "thread_1",
+      targetThreadId: "thread_1",
+      name: "每日摘要",
+      instruction: "生成摘要",
+      timezone: "Asia/Shanghai",
+      status: "active" as const,
+      overlapPolicy: "coalesce" as const,
+      nextRunAt: "2099-07-27T01:00:00.000Z",
+      currentRevision: 1,
+      createdAt: baseTime,
+      updatedAt: baseTime,
+    };
+    const scheduledTasks: NonNullable<ApiDependencies["scheduledTasks"]> = {
+      list: vi.fn(async () => [task]),
+      mutate: vi.fn(async () => ({ outcome: "applied" as const, task })),
+    };
+    const { app } = fixture({ scheduledTasks });
+    const list = await app.inject({
+      method: "GET",
+      url: "/v1/automations",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(list.statusCode).toBe(200);
+    expect(list.json().data.items).toHaveLength(1);
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/automations",
+      headers: {
+        authorization: "Bearer token-a",
+        "content-type": "application/json",
+        "idempotency-key": "automation-create-1",
+      },
+      payload: {
+        targetThreadId: "thread_1",
+        name: "每日摘要",
+        instruction: "生成摘要",
+        firstRunAt: "2099-07-27T01:00:00.000Z",
+        timezone: "Asia/Shanghai",
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    expect(scheduledTasks.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        commandId: "automation-create-1",
+        mutation: expect.objectContaining({ action: "create", targetThreadId: "thread_1" }),
+      }),
+    );
+    await app.close();
   });
 });

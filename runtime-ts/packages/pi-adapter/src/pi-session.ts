@@ -42,6 +42,10 @@ import {
   createAgentControlPiTools,
   type DelegablePiToolName,
 } from "./agent-control-tools.js";
+import {
+  createAutomationUpdatePiTool,
+  type AutomationUpdatePiToolExecutorPort,
+} from "./automation-update-tool.js";
 import { createCollapseProcessForFinalAnswerPiTool } from "./collapse-process-for-final-answer-tool.js";
 import {
   normalizeOfficialDeepSeekV4FlashPayload,
@@ -466,6 +470,8 @@ export interface CreateSafePiSessionOptions {
   skillToolExecutor?: SkillPiToolExecutorPort;
   /** Run 级 Todo 写入器；生产 Session 必须提供，独立适配器测试可省略。 */
   todoWriteToolExecutor?: TodoWritePiToolExecutorPort;
+  /** Run 级定时任务写入器；只向 root Session 注册。 */
+  automationUpdateToolExecutor?: AutomationUpdatePiToolExecutorPort;
   /** 只向 root Session 注册；子 Session 不得获得递归创建 Agent 的能力。 */
   agentControlToolExecutor?: AgentControlPiToolExecutorPort;
   /** 子 Session 的实际工具白名单；省略时保持 root 的完整现有工具集合。 */
@@ -927,6 +933,14 @@ function buildSafeSessionMaterial(options: CreateSafePiSessionOptions) {
       : [
           createDeliverFilePiTool(
             options.deliverFileToolRouter,
+            observedSandboxTools.recordControlledReceipt,
+          ),
+        ]),
+    ...(enabled !== undefined || options.automationUpdateToolExecutor === undefined
+      ? []
+      : [
+          createAutomationUpdatePiTool(
+            options.automationUpdateToolExecutor,
             observedSandboxTools.recordControlledReceipt,
           ),
         ]),

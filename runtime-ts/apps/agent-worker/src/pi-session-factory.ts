@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ArtifactExecutionAuthorizationIssuerPort } from "@aisay/artifact";
+import type { ScheduledTask, ScheduledTaskMutation } from "@aisay/automation";
 import {
   type ControlledToolReceiptSource,
   type ToolObservationBinding,
@@ -18,8 +19,10 @@ import {
 } from "@aisay/domain";
 import {
   assessSafePiSessionContext,
+  automationToolMutation,
   bindTrustedPiModelContextCapability,
   ContextBudgetAdmissionError,
+  type AutomationUpdateToolArguments,
   type ControlledRolloutProjection,
   createSafePiSession,
   deriveSafePiSessionCompatibility,
@@ -149,6 +152,13 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     private readonly skillRuntime?: SkillRuntimeService,
     modelContext?: TrustedPiModelContextCapability,
     private readonly internalTrajectoryDiagnostics?: InternalTrajectoryDiagnosticsPort,
+    private readonly updateScheduledTask?: (input: {
+      readonly tenantId: string;
+      readonly threadId: string;
+      readonly runId: string;
+      readonly commandId: string;
+      readonly mutation: ScheduledTaskMutation;
+    }) => Promise<ScheduledTask>,
   ) {
     this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
   }
@@ -467,6 +477,45 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         });
       },
     };
+    const updateScheduledTask = this.updateScheduledTask;
+    const automationUpdateToolExecutor =
+      updateScheduledTask === undefined || input.agent?.agentKind === "subagent"
+        ? undefined
+        : {
+            apply: async (request: {
+              readonly callId: string;
+              readonly arguments: AutomationUpdateToolArguments;
+            }) => {
+              await authorizeStartedTool({
+                callId: request.callId,
+                toolName: "automation_update",
+                argsDigest: digestCanonical(request.arguments),
+              });
+              return updateScheduledTask({
+                tenantId: input.scope.tenantId,
+                threadId: input.scope.threadId,
+                runId: input.scope.runId,
+                commandId: runtimeCallId(request.callId),
+                mutation: automationToolMutation(request.arguments, input.scope.threadId),
+              });
+            },
+            projectError: (error: unknown) => {
+              const message = error instanceof Error ? error.message : "";
+              const correctable = new Set([
+                "AUTOMATION_NOT_FOUND",
+                "AUTOMATION_NOT_AUTHORIZED",
+                "AUTOMATION_INVALID_STATE",
+                "AUTOMATION_KEY_CONFLICT",
+              ]).has(message);
+              return Object.freeze({
+                status: "failed" as const,
+                code: correctable ? message : "AUTOMATION_PERSISTENCE_UNAVAILABLE",
+                message: correctable ? "定时任务状态已变化，请刷新后重试" : "定时任务暂时无法保存",
+                correctable,
+                fatal: !correctable,
+              });
+            },
+          };
     const todoWriteToolExecutor = {
       write: async (request: { readonly callId: string; readonly command: TodoWriteCommand }) => {
         if (startedToolCalls.get(request.callId) !== "todo_write") {
@@ -561,6 +610,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       skillSnapshotDigest: skillSnapshot.digest,
       skillToolExecutor,
       todoWriteToolExecutor,
+      ...(automationUpdateToolExecutor === undefined ? {} : { automationUpdateToolExecutor }),
       ...(input.enabledToolNames === undefined ? {} : { enabledToolNames: input.enabledToolNames }),
       ...(agentControl === undefined || input.agent?.agentKind === "subagent"
         ? {}

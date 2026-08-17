@@ -167,6 +167,13 @@ describe("Agent 工作台恢复接入", () => {
         uninstallSkill: vi.fn(async () => {
           throw new Error("不应卸载技能");
         }),
+        listScheduledTasks: vi.fn(async () => []),
+        createScheduledTask: vi.fn(async () => {
+          throw new Error("不应创建定时任务");
+        }),
+        updateScheduledTask: vi.fn(async () => {
+          throw new Error("不应更新定时任务");
+        }),
         listHistoryFiles: vi.fn(async () => ({
           items: [],
           range: { activeAfter: "2026-02-07T00:00:00.000Z" },
@@ -181,13 +188,16 @@ describe("Agent 工作台恢复接入", () => {
 
     const createEntry = container.querySelector(".thread-create");
     const skillCenterEntry = container.querySelector(".skill-center-entry");
+    const automationEntry = container.querySelector(".automation-entry");
     const cloudDriveEntry = container.querySelector(".cloud-drive-entry");
     const taskHeading = container.querySelector(".thread-heading");
     expect(createEntry).not.toBeNull();
     expect(skillCenterEntry).not.toBeNull();
+    expect(automationEntry).not.toBeNull();
     expect(cloudDriveEntry).not.toBeNull();
     expect(createEntry?.nextElementSibling).toBe(skillCenterEntry);
-    expect(skillCenterEntry?.nextElementSibling).toBe(cloudDriveEntry);
+    expect(skillCenterEntry?.nextElementSibling).toBe(automationEntry);
+    expect(automationEntry?.nextElementSibling).toBe(cloudDriveEntry);
     expect(cloudDriveEntry?.nextElementSibling).toBe(taskHeading);
   });
 

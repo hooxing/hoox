@@ -451,6 +451,7 @@ export class SandboxWorkspacePort implements WorkspacePort {
         CUBE_WS_MAX_TOTAL_BYTES: String(this.options.maxTotalBytes),
         CUBE_WS_MAX_PATH_BYTES: String(this.options.maxPathUtf8Bytes),
         CUBE_WS_MAX_OUTPUT_BYTES: String(this.options.maxCommandOutputBytes),
+        CUBE_WS_EXCLUDED_DIRECTORY_NAMES: "node_modules",
       },
       "scan_workspace",
       undefined,
@@ -1129,6 +1130,7 @@ try:
             max_total = int(os.environ["CUBE_WS_MAX_TOTAL_BYTES"])
             max_path = int(os.environ["CUBE_WS_MAX_PATH_BYTES"])
             max_output = int(os.environ["CUBE_WS_MAX_OUTPUT_BYTES"])
+            excluded_directories = set(filter(None, os.environ.get("CUBE_WS_EXCLUDED_DIRECTORY_NAMES", "").split(",")))
             found, total = [], 0
             def walk(fd, prefix):
                 with os.scandir(fd) as entries:
@@ -1143,6 +1145,9 @@ try:
                     if len(rel_bytes) > max_path: fail(46)
                     value = os.stat(name, dir_fd=fd, follow_symlinks=False)
                     kind = classify(value.st_mode)
+                    # node_modules 是可由锁文件重建的依赖缓存；不进入 Revision，也不消耗用户文件配额。
+                    if kind == "FILE_TYPE_DIRECTORY" and name in excluded_directories:
+                        continue
                     item = {"relativePathB64": base64.b64encode(rel_bytes).decode("ascii"), "type": kind}
                     if kind == "FILE_TYPE_FILE":
                         if value.st_size > max_file: fail(45)

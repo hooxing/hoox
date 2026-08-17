@@ -311,6 +311,7 @@ interface ExecutionContext {
   eventAcceptanceOpen: boolean;
   adapterRejected: boolean;
   contextTurnOrdinal: number;
+  finalization?: { readonly callId: string };
   abortPromise?: Promise<void>;
   abortSession?: () => Promise<void>;
   threadSandboxLease?: ThreadSandboxLeaseRefV1;
@@ -983,10 +984,18 @@ export class RunWorker {
                 // 必须先排空已发布事件，禁止 Thread Context 越过 thinking/message 终态。
                 await eventChain;
                 if (!context.eventAcceptanceOpen) throw new Error("Thread Context 写入口已关闭");
-                const append = await this.prepareTurnContextAppend(context, event);
+                const finalization = classifyFinalizationTurn(context, event);
+                const append = await this.prepareTurnContextAppend(
+                  context,
+                  event,
+                  finalization.phase,
+                );
                 const persisted = await this.applyMutation(context, {
                   idempotencyKey: append.idempotencyKey,
-                  events: [],
+                  events:
+                    finalization.event === undefined
+                      ? []
+                      : [agentEvent(context, finalization.event)],
                   outbox: [],
                   threadContextAppend: append,
                 });
@@ -998,6 +1007,7 @@ export class RunWorker {
                       : "unavailable";
                   throw new Error("Thread Context turn 安全点提交失败");
                 }
+                applyFinalizationTransition(context, finalization);
                 const throughSequence = persisted.receipt.threadContext.lastSequence;
                 if (this.options.threadInputRoutingV2Enabled !== true) return { throughSequence };
                 // 先持久化完整 assistant/tool 配对，再一次读取当前安全点已经排队的全部 steer；
@@ -1857,6 +1867,7 @@ export class RunWorker {
   private async prepareTurnContextAppend(
     context: ExecutionContext,
     event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
+    phase?: "commentary" | "final_answer",
   ): Promise<ThreadContextAppendCommandV1> {
     const ordinal = context.contextTurnOrdinal;
     context.contextTurnOrdinal += 1;
@@ -1893,6 +1904,7 @@ export class RunWorker {
       model: event.assistant.model,
       stopReason: event.assistant.stopReason,
       timestamp: event.assistant.timestamp,
+      ...(phase === undefined ? {} : { phase }),
     };
     entries.push({
       entryId: `${key}/assistant`,
@@ -2665,6 +2677,79 @@ function updateAgentState(context: ExecutionContext, event: RuntimeAgentEvent): 
     context.agentFailure = event.code === "ABORTED" ? "CANCELLED" : event.code;
   }
   if (event.type === "compaction.forbidden") context.agentFailure = "PROTOCOL";
+}
+
+type FinalizationTransition = Readonly<{
+  phase?: "commentary" | "final_answer";
+  event?: Extract<
+    RuntimeAgentEvent,
+    { type: "finalization.started" | "finalization.cancelled" | "final_answer.committed" }
+  >;
+  next?: { readonly callId: string };
+}>;
+
+function classifyFinalizationTurn(
+  context: ExecutionContext,
+  event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
+): FinalizationTransition {
+  const toolCalls = event.assistant.content.filter(
+    (item): item is Extract<typeof item, { type: "toolCall" }> => item.type === "toolCall",
+  );
+  const marker =
+    toolCalls.length === 1 &&
+    toolCalls[0]?.name === "collapse_process_for_final_answer" &&
+    Object.keys(toolCalls[0].arguments).length === 0 &&
+    event.toolResults.length === 1 &&
+    event.toolResults[0]?.toolCallId === toolCalls[0].id &&
+    event.toolResults[0].toolName === "collapse_process_for_final_answer" &&
+    !event.toolResults[0].isError
+      ? toolCalls[0]
+      : undefined;
+  if (marker !== undefined) {
+    return {
+      phase: "commentary",
+      event: { type: "finalization.started", callId: marker.id },
+      next: { callId: marker.id },
+    };
+  }
+
+  const active = context.finalization;
+  if (active === undefined) return {};
+  if (toolCalls.length > 0 || event.assistant.stopReason === "toolUse") {
+    return {
+      phase: "commentary",
+      event: { type: "finalization.cancelled", callId: active.callId, reason: "tool_use" },
+    };
+  }
+  const text = event.assistant.content
+    .flatMap((item) => (item.type === "text" ? [item.text] : []))
+    .join("\n");
+  if (text.trim().length === 0) {
+    return event.assistant.stopReason === "stop"
+      ? {
+          event: {
+            type: "finalization.cancelled",
+            callId: active.callId,
+            reason: "empty_answer",
+          },
+        }
+      : { next: active };
+  }
+  if (event.assistant.stopReason === "length") {
+    return { phase: "final_answer", next: active };
+  }
+  return {
+    phase: "final_answer",
+    event: { type: "final_answer.committed", callId: active.callId },
+  };
+}
+
+function applyFinalizationTransition(
+  context: ExecutionContext,
+  transition: FinalizationTransition,
+): void {
+  if (transition.next === undefined) delete context.finalization;
+  else context.finalization = transition.next;
 }
 
 function registerToolStarted(

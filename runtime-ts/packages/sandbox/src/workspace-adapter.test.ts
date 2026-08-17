@@ -51,6 +51,26 @@ describe("CubeSandbox Workspace 适配器契约", () => {
     expect(fake.operations.filter((value) => value === "scan")).toHaveLength(1);
   });
 
+  it("快照排除可由锁文件重建的 node_modules 依赖缓存", async () => {
+    const fake = fakeWorkspaceSandbox({
+      "node_modules/package/index.js": "generated dependency",
+      "packages/app/node_modules/package/index.js": "nested generated dependency",
+      "packages/app/src/index.ts": "export const value = 1;",
+      "pnpm-lock.yaml": "lockfileVersion: '9.0'",
+    });
+    const adapter = await open(fake);
+    const snapshot = await adapter.captureSnapshot({
+      operationKey: "exclude-node-modules",
+      scope: SCOPE,
+    });
+
+    expect(await collect(adapter.listWorkspace(snapshot))).toEqual([
+      { relativePath: "packages/app/src/index.ts", kind: "file", size: 23 },
+      { relativePath: "pnpm-lock.yaml", kind: "file", size: 22 },
+    ]);
+    expect(fake.readPaths).toEqual(["packages/app/src/index.ts", "pnpm-lock.yaml"]);
+  });
+
   it("Session 与 Snapshot 只返回端口规定字段并可经严格 Journal JSON 往返", async () => {
     const fake = fakeWorkspaceSandbox({ "a.txt": "hello" });
     const adapter = await open(fake);
@@ -268,11 +288,19 @@ describe("CubeSandbox Workspace 适配器契约", () => {
         symlinkSync(outside, join(root, "escape"));
         mkdirSync(join(root, "tree", "child"), { recursive: true });
         writeFileSync(join(root, "tree", "child", "delete.txt"), "delete");
+        mkdirSync(join(root, "node_modules", "generated"), { recursive: true });
+        for (let index = 0; index < 20; index += 1) {
+          writeFileSync(join(root, "node_modules", "generated", `${index}.js`), "dependency");
+        }
         const script = fake.lastScript.replace(
           'ROOT = "/workspace"',
           `ROOT = ${JSON.stringify(root)}`,
         );
-        const run = (operation: string, relativePath = "") =>
+        const run = (
+          operation: string,
+          relativePath = "",
+          additionalEnvironment: Readonly<Record<string, string>> = {},
+        ) =>
           spawnSync("bash", [], {
             input: script,
             encoding: "utf8",
@@ -280,6 +308,7 @@ describe("CubeSandbox Workspace 适配器契约", () => {
               ...process.env,
               CUBE_WS_OP: operation,
               CUBE_WS_REL_B64: Buffer.from(relativePath).toString("base64"),
+              ...additionalEnvironment,
             },
           });
         expect(run("probe").status).toBe(0);
@@ -287,6 +316,21 @@ describe("CubeSandbox Workspace 适配器契约", () => {
         const escaped = run("stat", "escape/secret.txt");
         expect(escaped.status).not.toBe(0);
         expect(escaped.stdout).not.toContain("secret");
+
+        const scanned = run("scan", "", {
+          CUBE_WS_MAX_ENTRIES: "16",
+          CUBE_WS_MAX_FILE_BYTES: "1024",
+          CUBE_WS_MAX_TOTAL_BYTES: "4096",
+          CUBE_WS_MAX_PATH_BYTES: "256",
+          CUBE_WS_MAX_OUTPUT_BYTES: "4096",
+          CUBE_WS_EXCLUDED_DIRECTORY_NAMES: "node_modules",
+        });
+        expect(scanned.status).toBe(0);
+        const scannedPaths = (JSON.parse(scanned.stdout) as Array<{ relativePathB64: string }>).map(
+          (entry) => Buffer.from(entry.relativePathB64, "base64").toString("utf8"),
+        );
+        expect(scannedPaths).toContain("inside.txt");
+        expect(scannedPaths.some((path) => path.includes("node_modules"))).toBe(false);
 
         const mountpoint = join(root, "tree", "mounted");
         mkdirSync(mountpoint);
@@ -364,11 +408,16 @@ function fakeWorkspaceSandbox(initial: Record<string, string>) {
         operations.push(operation);
         if (operation === "scan") {
           await state.beforeScan?.();
-          const entries = [...files.entries()].map(([path, body]) => ({
-            relativePathB64: Buffer.from(path).toString("base64"),
-            type: "FILE_TYPE_FILE",
-            size: body.byteLength,
-          }));
+          const excludedDirectories = new Set(
+            (env.CUBE_WS_EXCLUDED_DIRECTORY_NAMES ?? "").split(",").filter(Boolean),
+          );
+          const entries = [...files.entries()]
+            .filter(([path]) => !path.split("/").some((part) => excludedDirectories.has(part)))
+            .map(([path, body]) => ({
+              relativePathB64: Buffer.from(path).toString("base64"),
+              type: "FILE_TYPE_FILE",
+              size: body.byteLength,
+            }));
           return { stdout: JSON.stringify(entries), stderr: "", exitCode: 0 };
         }
         if (operation === "stat") {

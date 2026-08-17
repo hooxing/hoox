@@ -176,7 +176,7 @@ describe("模型网络报文真实 Pi transport", () => {
       apiKey: "test-wire-secret",
       modelId: "wire-test-model",
       supportsImages: false,
-      contextWindow: 16_384,
+      contextWindow: 32_768,
       maxOutputTokens: 1_024,
     });
     const sessions = new PiWorkerSessionFactory(
@@ -233,7 +233,7 @@ async function createWorker(
     apiKey: "test-wire-secret",
     modelId: "wire-test-model",
     supportsImages: false,
-    contextWindow: 16_384,
+    contextWindow: 32_768,
     maxOutputTokens: 1_024,
   });
   if (providerMaxRetries !== undefined) {

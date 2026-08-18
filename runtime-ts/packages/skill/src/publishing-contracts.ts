@@ -1,4 +1,4 @@
-import type { IsoTimestamp, UserId } from "@aisay/domain";
+import type { IsoTimestamp, UserId } from "@hoox/domain";
 
 export type SkillPublicationRole = "publisher" | "reviewer" | "admin";
 export type SkillPublicationStatus =

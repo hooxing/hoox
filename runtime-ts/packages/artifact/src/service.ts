@@ -6,10 +6,10 @@ import {
   type ResourceVersionId,
   type RunId,
   type Sha256Digest,
-} from "@aisay/domain";
-import type { BlobStore, StableBlobRef } from "@aisay/persistence";
-import type { ArtifactPublicationPort, ExecutionScope } from "@aisay/run-contracts";
-import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
+} from "@hoox/domain";
+import type { BlobStore, StableBlobRef } from "@hoox/persistence";
+import type { ArtifactPublicationPort, ExecutionScope } from "@hoox/run-contracts";
+import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import type {
   ArtifactExecutionAuthorization,
   ArtifactExecutionAuthorizationVerifierPort,

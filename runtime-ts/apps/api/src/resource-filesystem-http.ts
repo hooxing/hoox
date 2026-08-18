@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { resourceId, resourceVersionId, type TenantId } from "@aisay/domain";
-import type { BlobStore, StableBlobRef } from "@aisay/persistence";
+import { resourceId, resourceVersionId, type TenantId } from "@hoox/domain";
+import type { BlobStore, StableBlobRef } from "@hoox/persistence";
 import {
   HISTORY_FILESYSTEM_ROOT_SEGMENT,
   RESOURCE_FILESYSTEM_ROOT,
@@ -10,7 +10,7 @@ import {
   type ResourceFilesystemCapabilityCodec,
   type ResourceFilesystemCatalog,
   type ResourceFilesystemFile,
-} from "@aisay/resource";
+} from "@hoox/resource";
 import {
   assertSkillFilesystemEntry,
   assertSkillFilesystemFile,
@@ -18,7 +18,7 @@ import {
   type SkillContentStore,
   type SkillFilesystemCatalog,
   type SkillFilesystemEntry,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import type { FastifyInstance, FastifyReply, FastifyRequest, HTTPMethods } from "fastify";
 
 const HTTP_ROOT = "/v1/resource-filesystem";

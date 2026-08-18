@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import type { ArtifactExecutionAuthorizationIssuerPort } from "@aisay/artifact";
-import type { ScheduledTask, ScheduledTaskMutation } from "@aisay/automation";
+import type { ArtifactExecutionAuthorizationIssuerPort } from "@hoox/artifact";
+import type { ScheduledTask, ScheduledTaskMutation } from "@hoox/automation";
 import {
   type ControlledToolReceiptSource,
   type ToolObservationBinding,
@@ -9,14 +9,14 @@ import {
   type ToolObservationResult,
   type ToolObservationRolloutPort,
   type TraceBlobPersistencePort,
-} from "@aisay/context-policy";
+} from "@hoox/context-policy";
 import {
   assertRunPersonalizationSnapshot,
   DomainError,
   sha256Digest,
   type TenantId,
   type TodoWriteCommand,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import {
   assessSafePiSessionContext,
   automationToolMutation,
@@ -31,7 +31,7 @@ import {
   providerVisibleUserInputTokens,
   type ThreadActiveHistoryV1,
   type TrustedPiModelContextCapability,
-} from "@aisay/pi-adapter";
+} from "@hoox/pi-adapter";
 import {
   assertRunSkillSnapshot,
   digestRunSkillSnapshot,
@@ -39,12 +39,12 @@ import {
   type SkillExecutionBinding,
   SkillRuntimeError,
   type SkillRuntimeService,
-} from "@aisay/skill";
-import type { DeliverFileToolRouterFactoryPort } from "@aisay/tool-router";
+} from "@hoox/skill";
+import type { DeliverFileToolRouterFactoryPort } from "@hoox/tool-router";
 import {
   InternalTrajectoryAttemptRecorder,
   type InternalTrajectoryDiagnosticsPort,
-} from "@aisay/trajectory";
+} from "@hoox/trajectory";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
@@ -713,7 +713,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         : {
             prepareNextTurnHistory: async (
               event: Extract<
-                import("@aisay/pi-adapter").RuntimeAgentEvent,
+                import("@hoox/pi-adapter").RuntimeAgentEvent,
                 { type: "turn.completed" }
               >,
             ) => {

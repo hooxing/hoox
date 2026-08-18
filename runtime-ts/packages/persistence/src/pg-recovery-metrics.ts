@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { RecoveryMetricsPort } from "@aisay/run-contracts";
+import type { RecoveryMetricsPort } from "@hoox/run-contracts";
 import type { Pool } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";

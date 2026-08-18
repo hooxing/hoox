@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import type { SkillPublicationStatus, SkillSubmissionDto } from "@aisay/protocol";
+import type { SkillPublicationStatus, SkillSubmissionDto } from "@hoox/protocol";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,7 +18,7 @@ function submission(status: SkillPublicationStatus = "draft"): SkillSubmissionDt
     publisher: "Cube",
     version: "1.2.3",
     description: "按团队清单检查代码变更与安全边界。",
-    compatibility: "AISay Runtime >= 1",
+    compatibility: "Hoox >= 1",
     sourceUrl: "https://example.com/code-review",
     sourceRevision: "abc123",
     licenseSpdx: "MIT",
@@ -132,7 +132,7 @@ describe("技能发布管理界面", () => {
     await settle();
 
     expect(container.querySelector(".brand-mark")?.textContent).toContain("A");
-    expect(container.querySelector(".eyebrow")?.textContent).toBe("AISay Runtime");
+    expect(container.querySelector(".eyebrow")?.textContent).toBe("Hoox");
     expect(api.listSubmissions).toHaveBeenCalledOnce();
     expect(api.getSubmission).toHaveBeenCalledWith(item.submissionId);
     expect(container.querySelector('[aria-label="发布申请列表"]')?.textContent).toContain(

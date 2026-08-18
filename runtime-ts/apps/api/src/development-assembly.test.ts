@@ -42,7 +42,7 @@ vi.mock("../development-resourcefs-proxy.mjs", () => ({
   startDevelopmentResourceFsProxy: mocks.startDevelopmentResourceFsProxy,
 }));
 
-vi.mock("@aisay/persistence", () => ({
+vi.mock("@hoox/persistence", () => ({
   BlobSkillContentStore: class {},
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
   createS3BlobStore: mocks.createS3BlobStore,
@@ -99,7 +99,7 @@ describe("开发 API 默认装配", () => {
             connectionString: "postgresql://team_coordinator:credential@database/runtime",
             schema: "runtime",
             expectedRuntimeRole: "team_coordinator",
-            applicationName: "aisay-runtime-api-team-coordinator-development",
+            applicationName: "hoox-api-team-coordinator-development",
           },
           blobLifecycle: { objectPrefix: "agent-worker" },
         }),

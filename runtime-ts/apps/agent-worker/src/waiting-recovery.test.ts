@@ -5,7 +5,7 @@ import {
   threadId,
   workspaceId,
   workspaceRevisionId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import { describe, expect, it } from "vitest";
 import {
   coordinateWaitingRecovery,

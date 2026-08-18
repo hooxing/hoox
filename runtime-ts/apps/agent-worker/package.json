@@ -1,5 +1,5 @@
 {
-  "name": "@aisay/agent-worker",
+  "name": "@hoox/agent-worker",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,22 +12,22 @@
     "start:production": "node dist/production-main.js"
   },
   "dependencies": {
-    "@aisay/artifact": "workspace:*",
-    "@aisay/context-policy": "workspace:*",
-    "@aisay/domain": "workspace:*",
-    "@aisay/memory": "workspace:*",
-    "@aisay/persistence": "workspace:*",
-    "@aisay/pi-adapter": "workspace:*",
-    "@aisay/process-runtime": "workspace:*",
-    "@aisay/resource": "workspace:*",
-    "@aisay/run-contracts": "workspace:*",
-    "@aisay/sandbox": "workspace:*",
-    "@aisay/skill": "workspace:*",
-    "@aisay/tool-router": "workspace:*",
-    "@aisay/trajectory": "workspace:*",
-    "@aisay/workspace": "workspace:*",
+    "@hoox/artifact": "workspace:*",
+    "@hoox/context-policy": "workspace:*",
+    "@hoox/domain": "workspace:*",
+    "@hoox/memory": "workspace:*",
+    "@hoox/persistence": "workspace:*",
+    "@hoox/pi-adapter": "workspace:*",
+    "@hoox/process-runtime": "workspace:*",
+    "@hoox/resource": "workspace:*",
+    "@hoox/run-contracts": "workspace:*",
+    "@hoox/sandbox": "workspace:*",
+    "@hoox/skill": "workspace:*",
+    "@hoox/tool-router": "workspace:*",
+    "@hoox/trajectory": "workspace:*",
+    "@hoox/workspace": "workspace:*",
     "@earendil-works/pi-ai": "0.82.1",
     "@earendil-works/pi-coding-agent": "0.82.1",
-    "@aisay/automation": "workspace:*"
+    "@hoox/automation": "workspace:*"
   }
 }

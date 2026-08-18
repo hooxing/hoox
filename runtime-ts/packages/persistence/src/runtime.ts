@@ -1,4 +1,4 @@
-import type { PromotionCapabilityVerifier, ResourceCatalog } from "@aisay/resource";
+import type { PromotionCapabilityVerifier, ResourceCatalog } from "@hoox/resource";
 import type { BlobStore } from "./blob-store.js";
 import { PersistenceError } from "./errors.js";
 import type { MigrationDownOptions, MigrationRecord } from "./migrations.js";
@@ -312,8 +312,8 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
             .map((row) => ({
               id: row.id,
               tenantId: input.scope.tenantId,
-              runId: row.run_id as import("@aisay/domain").RunId,
-              threadId: row.thread_id as import("@aisay/domain").ThreadId,
+              runId: row.run_id as import("@hoox/domain").RunId,
+              threadId: row.thread_id as import("@hoox/domain").ThreadId,
               resourceVersionId: row.resource_version_id,
               name: row.name,
               mediaType: row.media_type,

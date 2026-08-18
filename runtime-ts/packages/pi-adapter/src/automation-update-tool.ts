@@ -2,8 +2,8 @@ import {
   DEFAULT_AUTOMATION_TIME_ZONE,
   type ScheduledTask,
   type ScheduledTaskMutation,
-} from "@aisay/automation";
-import type { ToolObservationResult } from "@aisay/context-policy";
+} from "@hoox/automation";
+import type { ToolObservationResult } from "@hoox/context-policy";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { createSchemaInvalidArgumentsBridge } from "./tools.js";

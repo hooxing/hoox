@@ -1,8 +1,8 @@
 import type {
   ThreadSandboxLifecycleClaim,
   ThreadSandboxLifecycleResolution,
-} from "@aisay/persistence";
-import { FakeSandboxGateway } from "@aisay/sandbox/testing";
+} from "@hoox/persistence";
+import { FakeSandboxGateway } from "@hoox/sandbox/testing";
 import { describe, expect, it } from "vitest";
 import {
   CubeThreadSandboxLifecycleResolver,

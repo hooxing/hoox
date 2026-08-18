@@ -1,4 +1,4 @@
-import type { TenantId } from "@aisay/domain";
+import type { TenantId } from "@hoox/domain";
 
 export const SKILL_FILESYSTEM_ROOT = "/resources/skills" as const;
 export const SKILL_FILESYSTEM_ROOT_SEGMENT = "skills" as const;

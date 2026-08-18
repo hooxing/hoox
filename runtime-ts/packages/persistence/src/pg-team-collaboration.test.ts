@@ -1,4 +1,4 @@
-import { tenantId, userId } from "@aisay/domain";
+import { tenantId, userId } from "@hoox/domain";
 import type { Pool } from "pg";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 

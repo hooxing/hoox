@@ -1,4 +1,4 @@
-import { tenantId, userId } from "@aisay/domain";
+import { tenantId, userId } from "@hoox/domain";
 import type { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { PgPersonalizationSettingsRepository } from "./pg-personalization-settings.js";

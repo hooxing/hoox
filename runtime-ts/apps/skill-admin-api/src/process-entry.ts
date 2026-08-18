@@ -4,7 +4,7 @@ import {
   type ProductionJwtVerificationKey,
   parseProductionApiTransport,
   parseProductionJwtSigningKeys,
-} from "@aisay/api";
+} from "@hoox/api";
 import {
   assertProductionInheritedEnvironment,
   booleanEnvironmentField,
@@ -21,7 +21,7 @@ import {
   startServiceProcess,
   stringEnvironmentField,
   urlEnvironmentField,
-} from "@aisay/process-runtime";
+} from "@hoox/process-runtime";
 import {
   startDevelopmentSkillAdminApiProcess,
   startProductionSkillAdminApiProcess,
@@ -328,7 +328,7 @@ function createProductionConfiguration(input: {
   readonly privateKeyPath?: string;
   readonly trustedProxyCidrs?: string;
 }): NonNullable<SkillAdminApiProcessConfiguration["production"]> {
-  if (input.audience === "aisay-runtime-api") {
+  if (input.audience === "hoox-api") {
     throw new TypeError("SKILL_ADMIN_JWT_AUDIENCE 必须与普通 API audience 隔离");
   }
   return Object.freeze({

@@ -1,5 +1,5 @@
 {
-  "name": "@aisay/run-contracts",
+  "name": "@hoox/run-contracts",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -20,11 +20,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@aisay/context-policy": "workspace:*",
-    "@aisay/domain": "workspace:*",
-    "@aisay/pi-adapter": "workspace:*",
-    "@aisay/sandbox": "workspace:*",
-    "@aisay/skill": "workspace:*",
-    "@aisay/workspace": "workspace:*"
+    "@hoox/context-policy": "workspace:*",
+    "@hoox/domain": "workspace:*",
+    "@hoox/pi-adapter": "workspace:*",
+    "@hoox/sandbox": "workspace:*",
+    "@hoox/skill": "workspace:*",
+    "@hoox/workspace": "workspace:*"
   }
 }

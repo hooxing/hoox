@@ -39,7 +39,7 @@ if (direction !== "up" && direction !== "down") {
   } else {
     const pool = createPostgresPool({
       connectionString,
-      applicationName: "aisay-runtime-migration",
+      applicationName: "hoox-migration",
       schema,
     });
     try {

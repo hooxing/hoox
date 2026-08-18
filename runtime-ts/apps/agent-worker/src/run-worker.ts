@@ -9,11 +9,11 @@ import {
   userId,
   type Workspace,
   type WorkspaceRevisionId,
-} from "@aisay/domain";
-import { injectRetrievedMemories, type MemoryRetriever } from "@aisay/memory";
-import type { RuntimeAgentEvent } from "@aisay/pi-adapter";
-import type { SandboxHandle } from "@aisay/sandbox";
-import { WorkspaceApplicationError, WorkspaceDependencyError } from "@aisay/workspace";
+} from "@hoox/domain";
+import { injectRetrievedMemories, type MemoryRetriever } from "@hoox/memory";
+import type { RuntimeAgentEvent } from "@hoox/pi-adapter";
+import type { SandboxHandle } from "@hoox/sandbox";
+import { WorkspaceApplicationError, WorkspaceDependencyError } from "@hoox/workspace";
 import { AgentSupervisor, rootAgentThreadId } from "./agent-supervisor.js";
 import { DurableOperationLane } from "./durable-operation-lane.js";
 import {

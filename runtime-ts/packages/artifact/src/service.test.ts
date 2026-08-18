@@ -9,10 +9,10 @@ import {
   userId,
   workspaceId,
   workspaceRevisionId,
-} from "@aisay/domain";
-import type { BlobStore, StableBlobRef } from "@aisay/persistence";
-import type { ExecutionScope } from "@aisay/run-contracts";
-import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
+} from "@hoox/domain";
+import type { BlobStore, StableBlobRef } from "@hoox/persistence";
+import type { ExecutionScope } from "@hoox/run-contracts";
+import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ArtifactExecutionAuthorization,

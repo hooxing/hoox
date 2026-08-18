@@ -7,7 +7,7 @@ import {
   type Sha256Digest,
   type Workspace,
   workspaceRevisionId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type {
   ClaimExecutionResult,
   ControlledRolloutProjection,
@@ -28,7 +28,7 @@ import type {
   SandboxSessionRegistryPort,
   SandboxSettlementResult,
   UserInputAttachmentReference,
-} from "@aisay/run-contracts";
+} from "@hoox/run-contracts";
 import {
   assertControlledRolloutProjection,
   digestCanonical,
@@ -38,8 +38,8 @@ import {
   runtimeMutationDigest,
   sandboxCleanupIdentityDigest,
   workspaceChangeDigest,
-} from "@aisay/run-contracts/mutation-protocol";
-import { parseWorkspaceManifest } from "@aisay/workspace";
+} from "@hoox/run-contracts/mutation-protocol";
+import { parseWorkspaceManifest } from "@hoox/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { PersistenceError } from "./errors.js";
 import { enqueueMemoryIngestion } from "./pg-memory-ingestion.js";

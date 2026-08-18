@@ -19,7 +19,7 @@ if (environment !== "development") {
   } else {
     const pool = createPostgresPool({
       connectionString: configuration.databaseUrl,
-      applicationName: "aisay-runtime-development-skill-publisher",
+      applicationName: "hoox-development-skill-publisher",
       schema: configuration.databaseSchema,
     });
     try {

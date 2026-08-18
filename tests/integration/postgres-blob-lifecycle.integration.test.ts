@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { CopyObjectCommand, DeleteObjectCommand, S3Client } from "@aws-sdk/client-s3";
-import { encodeControlledToolReceipt, ToolObservationPipeline } from "@aisay/context-policy";
+import { encodeControlledToolReceipt, ToolObservationPipeline } from "@hoox/context-policy";
 import {
   agentThreadId,
   artifactId,
@@ -12,14 +12,14 @@ import {
   threadId,
   userId,
   workspaceId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type {
   ExecutionFence,
   ExecutionScope,
   SandboxSessionRegistryPort,
-} from "@aisay/run-contracts";
-import { rolloutProjectionDigest } from "@aisay/run-contracts/mutation-protocol";
-import { FakeSandboxGateway } from "@aisay/sandbox/testing";
+} from "@hoox/run-contracts";
+import { rolloutProjectionDigest } from "@hoox/run-contracts/mutation-protocol";
+import { FakeSandboxGateway } from "@hoox/sandbox/testing";
 import {
   fauxAssistantMessage,
   fauxProvider,

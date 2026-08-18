@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { encodeControlledToolReceipt } from "@aisay/context-policy";
-import { type RuntimeRolloutEntry, sha256Digest } from "@aisay/domain";
-import { FakeSandboxHandle } from "@aisay/sandbox/testing";
+import { encodeControlledToolReceipt } from "@hoox/context-policy";
+import { type RuntimeRolloutEntry, sha256Digest } from "@hoox/domain";
+import { FakeSandboxHandle } from "@hoox/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";

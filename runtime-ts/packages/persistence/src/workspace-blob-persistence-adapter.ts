@@ -4,7 +4,7 @@ import {
   type WorkspaceCandidateBlobWritePort,
   type WorkspaceCandidateIdentity,
   WorkspaceDependencyError,
-} from "@aisay/workspace";
+} from "@hoox/workspace";
 import {
   type BlobCommitSnapshot,
   type BlobCommitStatePort,

@@ -9,7 +9,7 @@
 
 已固定以下不变量：
 
-- 业务代码只依赖 `@aisay/sandbox`，不直接依赖厂商 SDK。
+- 业务代码只依赖 `@hoox/sandbox`，不直接依赖厂商 SDK。
 - Pi 不加载宿主机 `bash/read/write/edit/grep/find/ls`；模型只看到四个自定义 Sandbox 工具。
 - Pi 的扩展、Skill、Prompt、主题和 AGENTS 文件自动发现全部关闭，避免加载宿主机或租户未审查代码。
 - 生产 Agent Worker 仅支持 Linux；Windows 会因 Pi 的平台路径解析把 `/workspace` 改成宿主盘符路径，因此在创建 Session 前 fail-fast。

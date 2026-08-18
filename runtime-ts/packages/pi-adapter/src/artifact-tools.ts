@@ -1,6 +1,6 @@
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import type { ToolObservationResult } from "@aisay/context-policy";
+import type { ToolObservationResult } from "@hoox/context-policy";
 
 const strict = { additionalProperties: false } as const;
 const id = Type.String({ minLength: 3, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9_-]+$" });

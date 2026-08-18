@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { type IsoTimestamp, isoTimestamp, resourceId, tenantId, userId } from "@aisay/domain";
+import { type IsoTimestamp, isoTimestamp, resourceId, tenantId, userId } from "@hoox/domain";
 import type { ResourceCursorCodec } from "./contracts.js";
 import { ResourceServiceError, resourceInvariant } from "./errors.js";
 

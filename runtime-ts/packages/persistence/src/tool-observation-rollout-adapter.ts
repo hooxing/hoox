@@ -1,5 +1,5 @@
-import type { ToolObservationBinding, ToolObservationRolloutPort } from "@aisay/context-policy";
-import { sha256Digest } from "@aisay/domain";
+import type { ToolObservationBinding, ToolObservationRolloutPort } from "@hoox/context-policy";
+import { sha256Digest } from "@hoox/domain";
 import { PersistenceError } from "./errors.js";
 import type { RolloutEntryDraft } from "./pg-runtime-rollout.js";
 import type { PgRuntimeRolloutRepository, TrustedRolloutContext } from "./pg-runtime-rollout.js";

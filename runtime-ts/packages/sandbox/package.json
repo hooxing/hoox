@@ -1,5 +1,5 @@
 {
-  "name": "@aisay/sandbox",
+  "name": "@hoox/sandbox",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -20,8 +20,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@aisay/domain": "workspace:*",
-    "@aisay/workspace": "workspace:*",
+    "@hoox/domain": "workspace:*",
+    "@hoox/workspace": "workspace:*",
     "@cubesandbox/sdk": "workspace:*",
     "e2b": "2.39.0"
   }

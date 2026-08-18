@@ -1,4 +1,4 @@
-import { tenantId, userId, isoTimestamp } from "@aisay/domain";
+import { tenantId, userId, isoTimestamp } from "@hoox/domain";
 import { describe, expect, it } from "vitest";
 import type {
   SkillCenterPort,

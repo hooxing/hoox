@@ -1,10 +1,10 @@
-import { isoTimestamp } from "@aisay/domain";
+import { isoTimestamp } from "@hoox/domain";
 import type {
   LocalAccountPasswordRecord,
   LocalAccountProfileRecord,
   LocalAccountRepository,
   RegisterLocalAccountInput,
-} from "@aisay/persistence";
+} from "@hoox/persistence";
 import { describe, expect, it } from "vitest";
 import { createLocalAccountAuthService } from "./local-account-auth.js";
 import { ApiFailure } from "./service.js";

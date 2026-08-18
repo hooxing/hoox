@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { sha256Digest } from "@aisay/domain";
+import { sha256Digest } from "@hoox/domain";
 import type {
   MemoryConversationMessage,
   MemoryIngestionClaim,
   MemoryIngestionStore,
   MemoryProviderErrorCode,
   MemorySubmission,
-} from "@aisay/memory";
-import type { ThreadContextBodyV1 } from "@aisay/run-contracts";
+} from "@hoox/memory";
+import type { ThreadContextBodyV1 } from "@hoox/run-contracts";
 import type { Pool, PoolClient } from "pg";
 import type { BlobStore } from "./blob-store.js";
 import { mapPersistenceError } from "./errors.js";

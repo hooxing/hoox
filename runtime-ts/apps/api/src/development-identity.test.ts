@@ -5,8 +5,8 @@ import {
   membershipId,
   tenantId,
   userId,
-} from "@aisay/domain";
-import type { TenantBundle, TenantRepository, TenantScope } from "@aisay/persistence";
+} from "@hoox/domain";
+import type { TenantBundle, TenantRepository, TenantScope } from "@hoox/persistence";
 import { describe, expect, it, vi } from "vitest";
 import {
   parseDevelopmentIdentityEnvironment,

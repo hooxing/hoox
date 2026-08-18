@@ -7,7 +7,7 @@ import {
   type SkillFilesystemCatalog,
   type SkillFilesystemEntry,
   type SkillFilesystemFile,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import type { Pool, PoolClient } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";

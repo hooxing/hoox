@@ -1,4 +1,4 @@
-import { resourceId, resourceVersionId, tenantId } from "@aisay/domain";
+import { resourceId, resourceVersionId, tenantId } from "@hoox/domain";
 import {
   type HistoryFileLibraryCatalog,
   type HistoryFileLibraryFile,
@@ -10,7 +10,7 @@ import {
   type ResourceFilesystemCatalog,
   type ResourceFilesystemFile,
   resourceFilesystemPath,
-} from "@aisay/resource";
+} from "@hoox/resource";
 import type { Pool, PoolClient } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";

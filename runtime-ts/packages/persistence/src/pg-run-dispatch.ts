@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { isoTimestamp, type Run, rehydrateRun } from "@aisay/domain";
-import { rolloutProjectionDigest } from "@aisay/run-contracts/mutation-protocol";
+import { isoTimestamp, type Run, rehydrateRun } from "@hoox/domain";
+import { rolloutProjectionDigest } from "@hoox/run-contracts/mutation-protocol";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type { EnqueueOutboxPort, IdempotentRunEnqueueResult } from "./ports.js";

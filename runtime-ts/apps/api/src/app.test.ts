@@ -21,7 +21,7 @@ import {
   userId,
   type Workspace,
   workspaceId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import {
   type ArchiveThreadCommandPort,
   type BlobStore,
@@ -39,10 +39,10 @@ import {
   type ThreadInputReceiptView,
   type ThreadInputRoutingPort,
   type Versioned,
-} from "@aisay/persistence";
-import { HistoryFileLibraryService, type HistoryFileLibraryFile } from "@aisay/resource";
+} from "@hoox/persistence";
+import { HistoryFileLibraryService, type HistoryFileLibraryFile } from "@hoox/resource";
 import type { FastifyInstance } from "fastify";
-import { SkillCenterService, type SkillCenterPort, type SkillInstallation } from "@aisay/skill";
+import { SkillCenterService, type SkillCenterPort, type SkillInstallation } from "@hoox/skill";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ApiDependencies, createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";

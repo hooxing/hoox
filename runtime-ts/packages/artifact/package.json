@@ -1,5 +1,5 @@
 {
-  "name": "@aisay/artifact",
+  "name": "@hoox/artifact",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,9 +12,9 @@
     "test": "vitest run --root ../../.. runtime-ts/packages/artifact/src"
   },
   "dependencies": {
-    "@aisay/domain": "workspace:*",
-    "@aisay/persistence": "workspace:*",
-    "@aisay/run-contracts": "workspace:*",
+    "@hoox/domain": "workspace:*",
+    "@hoox/persistence": "workspace:*",
+    "@hoox/run-contracts": "workspace:*",
     "pg": "8.22.0"
   },
   "devDependencies": {

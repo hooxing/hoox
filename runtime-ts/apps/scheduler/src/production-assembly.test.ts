@@ -9,13 +9,13 @@ const mocks = vi.hoisted(() => ({
   loopStarted: vi.fn(),
 }));
 
-vi.mock("@aisay/persistence", () => ({
+vi.mock("@hoox/persistence", () => ({
   createPostgresPool: mocks.createPostgresPool,
   probePostgres: mocks.probePostgres,
   PgSandboxCleanupConsumerStore: class {},
 }));
 
-vi.mock("@aisay/sandbox", () => ({
+vi.mock("@hoox/sandbox", () => ({
   PgThreadTitleGenerationStore: class {},
   CubeSandboxGateway: class {
     constructor() {

@@ -1,4 +1,4 @@
-import type { ExecutionScope } from "@aisay/run-contracts";
+import type { ExecutionScope } from "@hoox/run-contracts";
 import type { Pool, PoolClient, QueryResult } from "pg";
 import { describe, expect, it, vi } from "vitest";
 import { PgRunCancellationReader } from "./pg-run-cancellation.js";

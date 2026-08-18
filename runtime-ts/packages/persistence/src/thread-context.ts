@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import type { TraceBlobPersistencePort } from "@aisay/context-policy";
-import { sha256Digest } from "@aisay/domain";
+import type { TraceBlobPersistencePort } from "@hoox/context-policy";
+import { sha256Digest } from "@hoox/domain";
 import type {
   ExecutionScope,
   ThreadContextAppendCommandV1,
@@ -8,14 +8,14 @@ import type {
   ThreadContextBodyV1,
   ThreadContextCompactionCommitPort,
   ThreadContextHistoryPort,
-} from "@aisay/run-contracts";
+} from "@hoox/run-contracts";
 import {
   assertThreadActiveHistory,
   type ThreadActiveHistoryV1,
   type ThreadHistoryMessageV1,
   threadActiveHistoryDigest,
-} from "@aisay/run-contracts";
-import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
+} from "@hoox/run-contracts";
+import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import type { Pool, PoolClient } from "pg";
 import type { BlobStore, StableBlobRef } from "./blob-store.js";
 import type { ThreadContextMessageView, ThreadContextReadPort } from "./ports.js";

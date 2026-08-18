@@ -7,7 +7,7 @@ import type {
   SkillSubmissionFileRequest,
   SkillSubmissionPageDto,
   SubmitSkillSubmissionRequest,
-} from "@aisay/protocol";
+} from "@hoox/protocol";
 
 type SuccessEnvelope<T> = {
   readonly version: "v1";

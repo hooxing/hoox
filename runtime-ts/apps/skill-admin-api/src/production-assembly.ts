@@ -4,8 +4,8 @@ import {
   createProductionJwtAuthResolver,
   loadProductionTlsCredentials,
   productionTrustProxy,
-} from "@aisay/api";
-import { userId } from "@aisay/domain";
+} from "@hoox/api";
+import { userId } from "@hoox/domain";
 import {
   createPostgresPool,
   PgSkillPublicationAuthorization,
@@ -13,13 +13,13 @@ import {
   probePostgres,
   probeS3StableSkillPublisher,
   S3StableSkillPublisher,
-} from "@aisay/persistence";
+} from "@hoox/persistence";
 import {
   type ProcessSignalSource,
   type ServiceAssemblyFactory,
   startServiceProcess,
-} from "@aisay/process-runtime";
-import { SkillPublicationService } from "@aisay/skill";
+} from "@hoox/process-runtime";
+import { SkillPublicationService } from "@hoox/skill";
 import {
   createSkillAdminApiApp,
   type SkillAdminApiAppOptions,
@@ -54,7 +54,7 @@ const productionSkillAdminApiAssembler: ServiceAssemblyFactory<SkillAdminApiProc
           ...(tls === undefined ? {} : { https: tls }),
         },
         expectedPublisherRole: configuration.databaseSkillPublisherRole,
-        applicationName: "aisay-runtime-skill-admin-api-production",
+        applicationName: "hoox-skill-admin-api-production",
       });
     },
   };
@@ -76,7 +76,7 @@ const developmentSkillAdminApiAssembler: ServiceAssemblyFactory<SkillAdminApiPro
         ...(configuration.databaseSkillPublisherRole === undefined
           ? {}
           : { expectedPublisherRole: configuration.databaseSkillPublisherRole }),
-        applicationName: "aisay-runtime-skill-admin-api-development",
+        applicationName: "hoox-skill-admin-api-development",
       });
     },
   };

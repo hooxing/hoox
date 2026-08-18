@@ -1,11 +1,11 @@
 {
-  "name": "@aisay/trajectory-web",
+  "name": "@hoox/trajectory-web",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@aisay/trajectory": "workspace:*",
-    "@aisay/run-contracts": "workspace:*"
+    "@hoox/trajectory": "workspace:*",
+    "@hoox/run-contracts": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

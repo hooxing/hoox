@@ -15,7 +15,7 @@ function productionEnvironment(): Record<string, string> {
     THREAD_CURSOR_SIGNING_KEYS: "current:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     THREAD_SERIAL_QUEUE_V2_ENABLED: "true",
     API_JWT_ISSUER: "https://issuer.example.invalid/runtime",
-    API_JWT_AUDIENCE: "aisay-runtime-api",
+    API_JWT_AUDIENCE: "hoox-api",
     API_JWT_SIGNING_KEYS: "current-key:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     API_JWT_CLOCK_SKEW_SECONDS: "60",
     API_JWT_MAX_LIFETIME_SECONDS: "3600",

@@ -1,5 +1,5 @@
-import { parseControlledToolReceipt } from "@aisay/context-policy";
-import type { SandboxHandle } from "@aisay/sandbox";
+import { parseControlledToolReceipt } from "@hoox/context-policy";
+import type { SandboxHandle } from "@hoox/sandbox";
 import { Value } from "typebox/value";
 import { describe, expect, it, vi } from "vitest";
 import { createObservedSandboxTools, createSandboxTools } from "./tools.js";

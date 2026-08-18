@@ -15,15 +15,15 @@ import type {
   Workspace,
   WorkspaceId,
   WorkspaceRevisionId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type {
   ControlledRolloutProjection,
   RuntimeAgentEvent,
   ThreadActiveHistoryV1,
-} from "@aisay/pi-adapter";
-import type { SandboxHandle, SandboxProviderKey, UncertainLifecycleEvent } from "@aisay/sandbox";
-import type { RunSkillSnapshot } from "@aisay/skill";
-import type { WorkspaceManifest } from "@aisay/workspace";
+} from "@hoox/pi-adapter";
+import type { SandboxHandle, SandboxProviderKey, UncertainLifecycleEvent } from "@hoox/sandbox";
+import type { RunSkillSnapshot } from "@hoox/skill";
+import type { WorkspaceManifest } from "@hoox/workspace";
 
 export interface ExecutionScope {
   readonly tenantId: TenantId;

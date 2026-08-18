@@ -3,5 +3,5 @@ export type {
   ControlledRolloutProjection,
   ThreadActiveHistoryV1,
   ThreadHistoryMessageV1,
-} from "@aisay/pi-adapter";
-export { assertThreadActiveHistory, threadActiveHistoryDigest } from "@aisay/pi-adapter";
+} from "@hoox/pi-adapter";
+export { assertThreadActiveHistory, threadActiveHistoryDigest } from "@hoox/pi-adapter";

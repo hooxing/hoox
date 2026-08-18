@@ -16,7 +16,7 @@ import type {
   InternalTrajectoryDiagnosticRecord,
   InternalTrajectoryDiagnosticsPort,
   InternalTrajectoryEventV1,
-} from "@aisay/trajectory";
+} from "@hoox/trajectory";
 import {
   assertModelWireTraceContext,
   type ModelWireTracePort,

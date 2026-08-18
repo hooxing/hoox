@@ -14,7 +14,7 @@ import {
   startServiceProcess,
   stringEnvironmentField,
   urlEnvironmentField,
-} from "@aisay/process-runtime";
+} from "@hoox/process-runtime";
 import { developmentApiAssembler } from "./development-assembly.js";
 import {
   type ApiDevelopmentPrincipal,

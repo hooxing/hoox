@@ -16,4 +16,4 @@
 - 任意 Agent 父节点进入终态前必须等待所有活跃后代显式结束，不进行隐式级联。
 - 所有权错误不携带实体 ID。公开层还必须把跨 Tenant 越权和实体不存在统一映射为 `NOT_FOUND`。
 
-领域对象是内存快照，不是 ORM 实体。Repository 与事务由后续任务实现；Domain/Protocol 转换和公共错误归一化统一通过 `@aisay/protocol-mapper`，调用方不得自行展开或恢复实体。
+领域对象是内存快照，不是 ORM 实体。Repository 与事务由后续任务实现；Domain/Protocol 转换和公共错误归一化统一通过 `@hoox/protocol-mapper`，调用方不得自行展开或恢复实体。

@@ -144,6 +144,7 @@ textarea:focus-visible {
   background: #e7e7e5;
 }
 .skill-center-entry,
+.automation-entry,
 .cloud-drive-entry,
 .personalization-entry {
   display: flex;
@@ -159,6 +160,7 @@ textarea:focus-visible {
   font-weight: 680;
 }
 .skill-center-entry:hover,
+.automation-entry:hover,
 .cloud-drive-entry:hover,
 .personalization-entry:hover {
   background: #e7e7e5;
@@ -2834,5 +2836,128 @@ h2 {
     right: 10px;
     bottom: 76px;
     left: 10px;
+  }
+}
+
+.automation-center-dialog {
+  width: min(900px, 100%);
+}
+.automation-create-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  margin: 0 24px 16px;
+  padding: 16px;
+  border: 1px solid #deded9;
+  border-radius: 12px;
+  background: #fff;
+}
+.automation-create-form label {
+  display: grid;
+  gap: 6px;
+  color: #5f5f5b;
+  font-size: 12px;
+  font-weight: 650;
+}
+.automation-create-form input,
+.automation-create-form select,
+.automation-create-form textarea {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #d2d7d2;
+  border-radius: 8px;
+  color: #292927;
+  background: #fff;
+  font: inherit;
+}
+.automation-create-form textarea {
+  min-height: 84px;
+  resize: vertical;
+}
+.automation-create-form .automation-instruction {
+  grid-column: 1 / -1;
+}
+.automation-create-form > button {
+  min-height: 38px;
+  align-self: end;
+  border: 1px solid #29483c;
+  border-radius: 9px;
+  color: #fff;
+  background: #29483c;
+  font-weight: 700;
+}
+.automation-list {
+  display: grid;
+  min-height: 0;
+  gap: 10px;
+  overflow-y: auto;
+  padding: 0 24px 24px;
+}
+.automation-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px;
+  border: 1px solid #deded9;
+  border-radius: 12px;
+  background: #fff;
+}
+.automation-card h3,
+.automation-card p {
+  margin: 0;
+}
+.automation-card p {
+  margin-top: 6px;
+  color: #565652;
+  white-space: pre-wrap;
+}
+.automation-card small {
+  display: block;
+  margin-top: 8px;
+  color: #787873;
+}
+.automation-card-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.automation-card-title span {
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: #296044;
+  background: #e2f2e8;
+  font-size: 11px;
+}
+.automation-card-title span[data-status="paused"],
+.automation-card-title span[data-status="completed"] {
+  color: #686862;
+  background: #ededeb;
+}
+.automation-card-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+.automation-card-actions button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 11px;
+  border: 1px solid #cbd4ce;
+  border-radius: 8px;
+  background: #fff;
+}
+@media (max-width: 720px) {
+  .automation-create-form {
+    grid-template-columns: 1fr;
+  }
+  .automation-create-form .automation-instruction {
+    grid-column: auto;
+  }
+  .automation-card {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

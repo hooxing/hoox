@@ -8,13 +8,13 @@ import {
   encodeControlledToolReceipt,
   parseControlledToolReceipt,
   type RecordedContextBudgetIdentity,
-} from "@aisay/context-policy";
+} from "@hoox/context-policy";
 import {
   type RolloutCompatibilityIdentity,
   type RuntimeRolloutCheckpoint,
   type RuntimeRolloutEntry,
   sha256Digest,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import {
   assessSafePiSessionContext,
   type ControlledRolloutProjection,

@@ -24,6 +24,29 @@ function leaseDuration(value: number): number {
  * 必须在已经设置 app.tenant_id 的业务事务内调用。唤醒与 durable dispatch 同事务提交，
  * 避免任务已经可见但全局控制面没有候选的丢唤醒窗口。
  */
+export async function scheduleWorkerTenantAt(
+  client: PoolClient,
+  tenantId: string,
+  nextAttemptAt: Date,
+): Promise<void> {
+  if (!Number.isFinite(nextAttemptAt.getTime())) throw new TypeError("Worker Tenant 调度时间无效");
+  await client.query(
+    `INSERT INTO worker_tenant_assignments(tenant_id,state,next_attempt_at)
+     VALUES ($1,'ready',GREATEST($2::timestamptz,clock_timestamp()))
+     ON CONFLICT (tenant_id) DO UPDATE
+       SET state=CASE
+             WHEN worker_tenant_assignments.state='claimed' THEN 'claimed'
+             ELSE 'ready'
+           END,
+           next_attempt_at=LEAST(
+             worker_tenant_assignments.next_attempt_at,
+             EXCLUDED.next_attempt_at
+           ),
+           updated_at=clock_timestamp()`,
+    [tenantId, nextAttemptAt],
+  );
+}
+
 export async function scheduleWorkerTenant(
   client: PoolClient,
   tenantId: string,
@@ -36,21 +59,7 @@ export async function scheduleWorkerTenant(
   ) {
     throw new TypeError("Worker Tenant 调度延迟无效");
   }
-  await client.query(
-    `INSERT INTO worker_tenant_assignments(tenant_id,state,next_attempt_at)
-     VALUES ($1,'ready',clock_timestamp()+($2::bigint * interval '1 millisecond'))
-     ON CONFLICT (tenant_id) DO UPDATE
-       SET state=CASE
-             WHEN worker_tenant_assignments.state='claimed' THEN 'claimed'
-             ELSE 'ready'
-           END,
-           next_attempt_at=LEAST(
-             worker_tenant_assignments.next_attempt_at,
-             EXCLUDED.next_attempt_at
-           ),
-           updated_at=clock_timestamp()`,
-    [tenantId, delayMilliseconds],
-  );
+  await scheduleWorkerTenantAt(client, tenantId, new Date(Date.now() + delayMilliseconds));
 }
 
 export async function wakeWorkerTenant(client: PoolClient, tenantId: string): Promise<void> {
@@ -191,6 +200,21 @@ export class PgWorkerTenantAssignments {
                    FROM memory_ingestion_outbox memory
                   WHERE memory.tenant_id=$1
                     AND memory.state IN ('pending','claimed','submitted')
+                 UNION ALL
+                 SELECT greatest(task.next_run_at,statement_timestamp()) AS next_attempt_at
+                   FROM scheduled_tasks task
+                  WHERE task.tenant_id=$1 AND task.status='active' AND task.next_run_at IS NOT NULL
+                 UNION ALL
+                 SELECT CASE
+                          WHEN occurrence.state='failed' THEN greatest(
+                            occurrence.next_attempt_at,statement_timestamp()
+                          )
+                          ELSE greatest(
+                            occurrence.updated_at+interval '5 minutes',statement_timestamp()
+                          )
+                        END AS next_attempt_at
+                   FROM scheduled_task_occurrences occurrence
+                  WHERE occurrence.tenant_id=$1 AND occurrence.state IN ('dispatching','failed')
                ) candidate`,
             [assignment.tenantId],
           );

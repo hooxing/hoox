@@ -1,14 +1,14 @@
 {
-  "name": "@aisay/scheduler",
+  "name": "@hoox/scheduler",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@aisay/domain": "workspace:*",
-    "@aisay/persistence": "workspace:*",
-    "@aisay/process-runtime": "workspace:*",
-    "@aisay/sandbox": "workspace:*",
-    "@aisay/thread-title": "workspace:*"
+    "@hoox/domain": "workspace:*",
+    "@hoox/persistence": "workspace:*",
+    "@hoox/process-runtime": "workspace:*",
+    "@hoox/sandbox": "workspace:*",
+    "@hoox/thread-title": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

@@ -1,5 +1,5 @@
 {
-  "name": "@aisay/persistence",
+  "name": "@hoox/persistence",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -16,17 +16,18 @@
     "test:integration:minio": "vitest run --root ../../.. runtime-ts/packages/persistence/src/s3-minio.integration.test.ts"
   },
   "dependencies": {
-    "@aisay/context-policy": "workspace:*",
-    "@aisay/domain": "workspace:*",
-    "@aisay/memory": "workspace:*",
-    "@aisay/resource": "workspace:*",
-    "@aisay/run-contracts": "workspace:*",
-    "@aisay/skill": "workspace:*",
-    "@aisay/thread-title": "workspace:*",
-    "@aisay/workspace": "workspace:*",
+    "@hoox/context-policy": "workspace:*",
+    "@hoox/domain": "workspace:*",
+    "@hoox/memory": "workspace:*",
+    "@hoox/resource": "workspace:*",
+    "@hoox/run-contracts": "workspace:*",
+    "@hoox/skill": "workspace:*",
+    "@hoox/thread-title": "workspace:*",
+    "@hoox/workspace": "workspace:*",
     "@aws-sdk/client-s3": "3.1095.0",
     "@aws-sdk/s3-request-presigner": "3.1095.0",
-    "pg": "8.22.0"
+    "pg": "8.22.0",
+    "@hoox/automation": "workspace:*"
   },
   "devDependencies": {
     "@types/pg": "8.20.0"

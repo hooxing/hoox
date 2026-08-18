@@ -1,5 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { userId, type UserId } from "@aisay/domain";
+import { userId, type UserId } from "@hoox/domain";
 import type { AuthContextResolver, AuthPrincipal } from "./ports.js";
 
 const keyIdPattern = /^[A-Za-z0-9_-]{3,64}$/u;

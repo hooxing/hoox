@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { isoTimestamp, type Run, rehydrateRun } from "@aisay/domain";
-import { historyFilesystemEntryName, historyFilesystemTimestamp } from "@aisay/resource";
+import { isoTimestamp, type Run, rehydrateRun } from "@hoox/domain";
+import { historyFilesystemEntryName, historyFilesystemTimestamp } from "@hoox/resource";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {

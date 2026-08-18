@@ -24,7 +24,7 @@ function productionEnvironment(): Record<string, string> {
     DATABASE_SKILL_PUBLISHER_ROLE: "skill_publisher",
     DATABASE_SCHEMA: "runtime",
     SKILL_ADMIN_JWT_ISSUER: "https://issuer.example.invalid/runtime",
-    SKILL_ADMIN_JWT_AUDIENCE: "aisay-runtime-skill-admin-api",
+    SKILL_ADMIN_JWT_AUDIENCE: "hoox-skill-admin-api",
     SKILL_ADMIN_JWT_SIGNING_KEYS: "skill-admin-current:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     SKILL_ADMIN_JWT_CLOCK_SKEW_SECONDS: "60",
     SKILL_ADMIN_JWT_MAX_LIFETIME_SECONDS: "1800",
@@ -69,7 +69,7 @@ describe("Skill 管理 API 进程入口", () => {
       DATABASE_URL: "postgresql://ordinary:secret@database:5432/runtime",
       DATABASE_RUNTIME_ROLE: "runtime",
       MIGRATOR_DATABASE_URL: "postgresql://migrator:secret@database:5432/runtime",
-      API_JWT_AUDIENCE: "aisay-runtime-api",
+      API_JWT_AUDIENCE: "hoox-api",
       S3_ENDPOINT: "https://ordinary-objects.example.invalid",
       S3_ACCESS_KEY_ID: "ordinary-access-key",
       S3_SECRET_ACCESS_KEY: "ordinary-secret",
@@ -77,7 +77,7 @@ describe("Skill 管理 API 进程入口", () => {
 
     expect(selected.SKILL_PUBLISHER_DATABASE_URL).toContain("skill_publisher");
     expect(selected.DATABASE_SKILL_PUBLISHER_ROLE).toBe("skill_publisher");
-    expect(selected.SKILL_ADMIN_JWT_AUDIENCE).toBe("aisay-runtime-skill-admin-api");
+    expect(selected.SKILL_ADMIN_JWT_AUDIENCE).toBe("hoox-skill-admin-api");
     expect(selected.SKILL_PUBLISHER_S3_ACCESS_KEY_ID).toBe("skill-publisher-access-key");
     expect(selected).not.toHaveProperty("DATABASE_URL");
     expect(selected).not.toHaveProperty("DATABASE_RUNTIME_ROLE");
@@ -106,7 +106,7 @@ describe("Skill 管理 API 进程入口", () => {
       production: {
         jwt: {
           issuer: "https://issuer.example.invalid/runtime",
-          audience: "aisay-runtime-skill-admin-api",
+          audience: "hoox-skill-admin-api",
           clockSkewSeconds: 60,
           maxTokenLifetimeSeconds: 1800,
         },
@@ -175,7 +175,7 @@ describe("Skill 管理 API 进程入口", () => {
     expect(() =>
       parseSkillAdminApiProcessEnvironment({
         ...productionEnvironment(),
-        SKILL_ADMIN_JWT_AUDIENCE: "aisay-runtime-api",
+        SKILL_ADMIN_JWT_AUDIENCE: "hoox-api",
       }),
     ).toThrow("必须与普通 API audience 隔离");
     expect(() =>

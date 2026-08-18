@@ -1,15 +1,15 @@
 {
-  "name": "@aisay/skill-admin-api",
+  "name": "@hoox/skill-admin-api",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@aisay/api": "workspace:*",
-    "@aisay/domain": "workspace:*",
-    "@aisay/persistence": "workspace:*",
-    "@aisay/process-runtime": "workspace:*",
-    "@aisay/protocol": "workspace:*",
-    "@aisay/skill": "workspace:*",
+    "@hoox/api": "workspace:*",
+    "@hoox/domain": "workspace:*",
+    "@hoox/persistence": "workspace:*",
+    "@hoox/process-runtime": "workspace:*",
+    "@hoox/protocol": "workspace:*",
+    "@hoox/skill": "workspace:*",
     "@sinclair/typebox": "0.34.52",
     "fastify": "5.10.0"
   },

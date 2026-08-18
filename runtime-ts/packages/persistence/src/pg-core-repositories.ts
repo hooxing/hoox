@@ -5,8 +5,8 @@ import type {
   WorkspaceCommitResult,
   WorkspaceRevisionCommit,
   WorkspaceWriteScope,
-} from "@aisay/domain";
-import { archiveThread, isoTimestamp } from "@aisay/domain";
+} from "@hoox/domain";
+import { archiveThread, isoTimestamp } from "@hoox/domain";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {

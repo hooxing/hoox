@@ -12,9 +12,9 @@ import type {
   WorkspaceRevisionCommitPort,
   WorkspaceWriteScope,
   RunPersonalizationSnapshot,
-} from "@aisay/domain";
-import type { ResourceAttachmentReference } from "@aisay/resource";
-import type { ExplicitSkillInvocation } from "@aisay/skill";
+} from "@hoox/domain";
+import type { ResourceAttachmentReference } from "@hoox/resource";
+import type { ExplicitSkillInvocation } from "@hoox/skill";
 import type { StableBlobRef } from "./blob-store.js";
 
 /** 由认证/授权层构造；Repository 不接受裸 tenantId 作为业务查询上下文。 */

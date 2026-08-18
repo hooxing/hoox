@@ -1,4 +1,4 @@
-import { loadDevelopmentEnvironment } from "@aisay/process-runtime";
+import { loadDevelopmentEnvironment } from "@hoox/process-runtime";
 import {
   selectSkillAdminApiProcessEnvironment,
   startSkillAdminApiProcess,

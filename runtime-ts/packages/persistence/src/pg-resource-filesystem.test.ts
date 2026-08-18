@@ -1,4 +1,4 @@
-import { tenantId } from "@aisay/domain";
+import { tenantId } from "@hoox/domain";
 import type { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { PgResourceFilesystemCatalog } from "./pg-resource-filesystem.js";

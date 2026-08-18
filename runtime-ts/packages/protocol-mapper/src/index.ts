@@ -18,7 +18,7 @@ import {
   type User,
   type Workspace,
   type WorkspaceRevision,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import {
   createErrorEnvelope,
   ProtocolConstructionError,
@@ -31,7 +31,7 @@ import {
   type ThreadDto,
   type UserDto,
   type WorkspaceRevisionDto,
-} from "@aisay/protocol";
+} from "@hoox/protocol";
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 

@@ -1,4 +1,4 @@
-import { isoTimestamp } from "@aisay/domain";
+import { isoTimestamp } from "@hoox/domain";
 import type {
   SkillCatalogItem,
   SkillCatalogPage,
@@ -8,7 +8,7 @@ import type {
   SkillInstallation,
   SkillUninstallResult,
   TrustedSkillContext,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";

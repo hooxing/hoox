@@ -19,7 +19,7 @@ if (connectionString === undefined || schema === undefined || runtimeRole === un
   const pool = createPostgresPool({
     connectionString,
     schema,
-    applicationName: "aisay-runtime-legacy-thread-anchor",
+    applicationName: "hoox-legacy-thread-anchor",
     expectedRuntimeRole: runtimeRole,
   });
   try {

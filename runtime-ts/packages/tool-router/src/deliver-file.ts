@@ -1,16 +1,16 @@
 import type {
   ArtifactExecutionAuthorization,
   ArtifactExecutionAuthorizationVerifierPort,
-} from "@aisay/artifact";
+} from "@hoox/artifact";
 import {
   SimpleDeliveryCleanupResultUnknownError,
   SimpleDeliveryCommitResultUnknownError,
-} from "@aisay/artifact";
-import type { ArtifactId, ResourceVersionId, Sha256Digest } from "@aisay/domain";
-import { type DeliverFileToolArguments, DeliverFileToolArgumentsSchema } from "@aisay/pi-adapter";
-import type { ExecutionScope, ExternalEffectCall, SandboxSessionRef } from "@aisay/run-contracts";
-import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
-import { workspaceRelativePath } from "@aisay/workspace";
+} from "@hoox/artifact";
+import type { ArtifactId, ResourceVersionId, Sha256Digest } from "@hoox/domain";
+import { type DeliverFileToolArguments, DeliverFileToolArgumentsSchema } from "@hoox/pi-adapter";
+import type { ExecutionScope, ExternalEffectCall, SandboxSessionRef } from "@hoox/run-contracts";
+import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
+import { workspaceRelativePath } from "@hoox/workspace";
 import { Value } from "typebox/value";
 
 export interface DeliverFileSessionBinding {

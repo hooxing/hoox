@@ -7,8 +7,8 @@ import type {
   SkillInvocationTarget,
   SkillPackageFile,
   SkillRuntimeRepository,
-} from "@aisay/skill";
-import { assertRunSkillSnapshot, digestRunSkillSnapshot, SkillRuntimeError } from "@aisay/skill";
+} from "@hoox/skill";
+import { assertRunSkillSnapshot, digestRunSkillSnapshot, SkillRuntimeError } from "@hoox/skill";
 import type { Pool, PoolClient } from "pg";
 import type { BlobStore, StableBlobRef } from "./blob-store.js";
 import { withTenantTransaction } from "./postgres.js";

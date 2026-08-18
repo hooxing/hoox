@@ -17,7 +17,7 @@ import {
   userId,
   workspaceId,
   workspaceRevisionId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type {
   ControlledRolloutProjection,
   ExecutionScope,
@@ -25,14 +25,14 @@ import type {
   RuntimeOutboxV1,
   SandboxSessionRegistryPort,
   ThreadSandboxProviderPort,
-} from "@aisay/run-contracts";
-import { assertProtocolSize } from "@aisay/run-contracts";
+} from "@hoox/run-contracts";
+import { assertProtocolSize } from "@hoox/run-contracts";
 import {
   digestCanonical,
   outboxPayloadDigest,
   runtimeMutationDigest,
-} from "@aisay/run-contracts/mutation-protocol";
-import { FakeSandboxGateway } from "@aisay/sandbox/testing";
+} from "@hoox/run-contracts/mutation-protocol";
+import { FakeSandboxGateway } from "@hoox/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -2488,31 +2488,58 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       outcome: "accepted",
       receipt: { disposition: "pending_steer", targetRunId: activeRun.id },
     });
-    const pending = await inputPersistence.readPendingThreadSteer({ fence: claimed.fence });
-    if (pending.outcome !== "pending") throw new Error("阶段 3 pending steer 缺失");
-    expect(pending.attachments).toEqual([steerAttachment]);
-    expect(
-      await inputPersistence.mutate(
-        signed({
-          idempotencyKey: `${claimed.snapshot.attempt.attemptId}/steer/${pending.receiptId}`,
-          fence: claimed.fence,
-          expectedAttemptVersion: 1,
-          events: [],
-          outbox: [],
-          threadSteer: {
-            receiptId: pending.receiptId,
-            targetTurnId: pending.targetTurnId,
-            bodyDigest: pending.bodyDigest,
-          },
-        }),
-      ),
-    ).toMatchObject({
-      outcome: "applied",
-      receipt: {
-        threadSteer: { receiptId: pending.receiptId },
-        threadContext: { entryCount: 1 },
+    const secondSteerText = "保留现有字体";
+    const secondSteer = await inputRouting.submit({
+      scope: f.tenantScope,
+      thread: f.thread,
+      fallbackRun: createRun({
+        id: runId(`input-steer-second-fallback-${suffix}`),
+        thread: f.thread,
+        now,
+      }),
+      inputText: secondSteerText,
+      attachments: [],
+      mode: "auto",
+      expectedRunId: activeRun.id,
+      expectedTurnId: "turn-1",
+      fallbackToFollowUp: false,
+      idempotency: {
+        key: `input-steer-second-key-${suffix}`,
+        requestHash: requestDigest(secondSteerText),
       },
     });
+    expect(secondSteer).toMatchObject({
+      outcome: "accepted",
+      receipt: { disposition: "pending_steer", targetRunId: activeRun.id },
+    });
+    const pending = await inputPersistence.readPendingThreadSteers({ fence: claimed.fence });
+    if (pending.outcome !== "pending") throw new Error("阶段 3 pending steer 缺失");
+    expect(pending.items.map((item) => item.inputText)).toEqual([steerText, secondSteerText]);
+    expect(pending.items[0]?.attachments).toEqual([steerAttachment]);
+    for (const [index, item] of pending.items.entries()) {
+      expect(
+        await inputPersistence.mutate(
+          signed({
+            idempotencyKey: `${claimed.snapshot.attempt.attemptId}/steer/${item.receiptId}`,
+            fence: claimed.fence,
+            expectedAttemptVersion: 1 + index,
+            events: [],
+            outbox: [],
+            threadSteer: {
+              receiptId: item.receiptId,
+              targetTurnId: item.targetTurnId,
+              bodyDigest: item.bodyDigest,
+            },
+          }),
+        ),
+      ).toMatchObject({
+        outcome: "applied",
+        receipt: {
+          threadSteer: { receiptId: item.receiptId },
+          threadContext: { entryCount: 1 },
+        },
+      });
+    }
 
     const strictText = "只允许当前 Run，结束后不要自动排队";
     const strict = await inputRouting.submit({
@@ -2572,7 +2599,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         signed({
           idempotencyKey: `${claimed.snapshot.attempt.attemptId}/finalizing-input-v2`,
           fence: claimed.fence,
-          expectedAttemptVersion: 2,
+          expectedAttemptVersion: 3,
           nextAttemptStatus: "finalizing",
           nextStage: "finalizing",
           events: [],
@@ -2585,7 +2612,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         signed({
           idempotencyKey: `${claimed.snapshot.attempt.attemptId}/terminal-input-v2`,
           fence: claimed.fence,
-          expectedAttemptVersion: 3,
+          expectedAttemptVersion: 4,
           nextAttemptStatus: "succeeded",
           nextStage: "finished",
           nextRunStatus: "succeeded",
@@ -2623,10 +2650,16 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       );
       return { receipts: receipts.rows, queue: queue.rows, userFacts: userFacts.rows };
     });
-    expect(snapshot.userFacts.map((item) => item.text)).toContain(steerText);
-    const steerReceipt = snapshot.receipts.find((item) => item.receipt_id === pending.receiptId);
-    expect(steerReceipt).toMatchObject({ disposition: "steered" });
-    expect(steerReceipt?.applied_context_sequence).not.toBeNull();
+    expect(snapshot.userFacts.map((item) => item.text)).toEqual(
+      expect.arrayContaining([steerText, secondSteerText]),
+    );
+    for (const item of pending.items) {
+      const steerReceipt = snapshot.receipts.find(
+        (receipt) => receipt.receipt_id === item.receiptId,
+      );
+      expect(steerReceipt).toMatchObject({ disposition: "steered" });
+      expect(steerReceipt?.applied_context_sequence).not.toBeNull();
+    }
     expect(
       snapshot.receipts.find((item) => item.receipt_id === strict.receipt.receiptId),
     ).toMatchObject({ disposition: "rejected", rejection_code: "target_run_finished" });

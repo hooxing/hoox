@@ -20,6 +20,47 @@ export type Thread = {
   readonly updatedAt: string;
 };
 
+export type ScheduledTask = {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly ownerUserId: string;
+  readonly sourceThreadId: string;
+  readonly targetThreadId: string;
+  readonly name: string;
+  readonly instruction: string;
+  readonly timezone: string;
+  readonly rrule?: string;
+  readonly status: "active" | "paused" | "completed" | "deleted";
+  readonly overlapPolicy: "coalesce" | "skip";
+  readonly nextRunAt?: string;
+  readonly lastRunAt?: string;
+  readonly currentRevision: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+};
+
+export type CreateScheduledTaskInput = {
+  readonly targetThreadId: string;
+  readonly name: string;
+  readonly instruction: string;
+  readonly firstRunAt: string;
+  readonly rrule?: string;
+  readonly timezone: string;
+  readonly overlapPolicy?: "coalesce" | "skip";
+};
+
+export type UpdateScheduledTaskInput =
+  | { readonly action: "pause" | "resume" | "delete" }
+  | {
+      readonly action: "update";
+      readonly name?: string;
+      readonly instruction?: string;
+      readonly firstRunAt?: string;
+      readonly rrule?: string | null;
+      readonly timezone?: string;
+      readonly overlapPolicy?: "coalesce" | "skip";
+    };
+
 export type TeamSummary = {
   readonly id: string;
   readonly displayName: string;
@@ -509,6 +550,21 @@ export class RuntimeApi {
     const candidate = record(data)?.url;
     if (typeof candidate === "string") return candidate;
     throw new ApiError("历史文件下载地址格式无效", 502, true);
+  }
+
+  async listScheduledTasks(): Promise<readonly ScheduledTask[]> {
+    return asArray(await this.request<unknown>("/v1/automations")) as readonly ScheduledTask[];
+  }
+
+  createScheduledTask(input: CreateScheduledTaskInput): Promise<ScheduledTask> {
+    return this.request("/v1/automations", { method: "POST", body: JSON.stringify(input) });
+  }
+
+  updateScheduledTask(taskId: string, input: UpdateScheduledTaskInput): Promise<ScheduledTask> {
+    return this.request(`/v1/automations/${encodeURIComponent(taskId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
   }
 
   async listSkills(query = ""): Promise<SkillCatalogPage> {

@@ -1,4 +1,4 @@
-import { userId } from "@aisay/domain";
+import { userId } from "@hoox/domain";
 import { describe, expect, it } from "vitest";
 import type { Pool } from "pg";
 import {

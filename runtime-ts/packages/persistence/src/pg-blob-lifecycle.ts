@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { WorkspaceCandidateIdentity } from "@aisay/workspace";
+import type { WorkspaceCandidateIdentity } from "@hoox/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import {
   assertBlobOperationId,

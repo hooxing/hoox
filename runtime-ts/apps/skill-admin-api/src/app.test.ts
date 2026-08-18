@@ -1,5 +1,5 @@
-import type { AuthContextResolver } from "@aisay/api";
-import { isoTimestamp, userId, type UserId } from "@aisay/domain";
+import type { AuthContextResolver } from "@hoox/api";
+import { isoTimestamp, userId, type UserId } from "@hoox/domain";
 import {
   SkillPublicationService,
   type SkillPublicationAuthorizationPort,
@@ -8,7 +8,7 @@ import {
   type SkillPublicationRole,
   type SkillPublicationStatus,
   type SkillPublicationSubmission,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import { describe, expect, it } from "vitest";
 import { createSkillAdminApiApp } from "./app.js";
 

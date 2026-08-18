@@ -14,7 +14,7 @@ import {
   userId,
   workspaceId,
   workspaceRevisionId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import { describe, expect, it } from "vitest";
 import { createPromotionCapabilityRegistry } from "./capability.js";
 import type {

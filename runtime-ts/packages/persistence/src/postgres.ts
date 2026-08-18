@@ -47,7 +47,7 @@ export function createPostgresPool(options: PostgresPoolOptions): Pool {
   const config: PoolConfig = {
     connectionString: options.connectionString,
     ...(options.ssl === undefined ? {} : { ssl: options.ssl }),
-    application_name: options.applicationName ?? "aisay-runtime",
+    application_name: options.applicationName ?? "hoox",
     max: boundedInteger(options.maxConnections, 10, 1, 100, "maxConnections"),
     idleTimeoutMillis: boundedInteger(
       options.idleTimeoutMs,

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@aisay/domain";
+import { isoTimestamp, runId, tenantId, threadId, userId, workspaceId } from "@hoox/domain";
 import {
   BlobSkillContentStore,
   createApiPersistenceRuntime,
@@ -7,15 +7,15 @@ import {
   DurableResourceBlobWriter,
   DurableResourceUploadBlobAdapter,
   RUNTIME_BLOB_OBJECT_PREFIX,
-} from "@aisay/persistence";
-import type { ServiceAssemblyFactory } from "@aisay/process-runtime";
+} from "@hoox/persistence";
+import type { ServiceAssemblyFactory } from "@hoox/process-runtime";
 import {
   createResourceFilesystemCapabilityCodec,
   HistoryFileLibraryService,
   ResourceAttachmentResolver,
   ResourceUploadService,
-} from "@aisay/resource";
-import { SkillCenterService } from "@aisay/skill";
+} from "@hoox/resource";
+import { SkillCenterService } from "@hoox/skill";
 import {
   startDevelopmentResourceFsProxy,
   type RunningDevelopmentResourceFsProxy,
@@ -60,14 +60,14 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
     const persistence = createApiPersistenceRuntime({
       connectionString: configuration.databaseUrl,
       schema: configuration.databaseSchema,
-      applicationName: "aisay-runtime-api-development",
+      applicationName: "hoox-api-development",
       teamCoordinator: {
         connectionString: configuration.databaseTeamCoordinatorUrl,
         schema: configuration.databaseSchema,
         ...(configuration.databaseTeamCoordinatorRole === undefined
           ? {}
           : { expectedRuntimeRole: configuration.databaseTeamCoordinatorRole }),
-        applicationName: "aisay-runtime-api-team-coordinator-development",
+        applicationName: "hoox-api-team-coordinator-development",
       },
       serialQueueV2Enabled: configuration.serialQueueV2Enabled,
       historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
@@ -155,6 +155,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           localAccounts,
           repositories: persistence.repositories,
           personalizations: persistence.personalizations,
+          scheduledTasks: persistence.scheduledTasks,
           ...(persistence.teamCollaboration === undefined
             ? {}
             : { teamCollaboration: persistence.teamCollaboration }),

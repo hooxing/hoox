@@ -19,33 +19,33 @@ importers:
         specifier: 1.1.38
         version: 1.1.38
     devDependencies:
-      '@aisay/domain':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/domain
-      '@aisay/persistence':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/persistence
-      '@aisay/pi-adapter':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/pi-adapter
-      '@aisay/protocol-mapper':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/protocol-mapper
-      '@aisay/resource':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/resource
-      '@aisay/run-contracts':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/run-contracts
-      '@aisay/sandbox':
-        specifier: workspace:*
-        version: link:runtime-ts/packages/sandbox
       '@aws-sdk/client-s3':
         specifier: 3.1095.0
         version: 3.1095.0
       '@biomejs/biome':
         specifier: 2.5.5
         version: 2.5.5
+      '@hoox/domain':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/domain
+      '@hoox/persistence':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/persistence
+      '@hoox/pi-adapter':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/pi-adapter
+      '@hoox/protocol-mapper':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/protocol-mapper
+      '@hoox/resource':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/resource
+      '@hoox/run-contracts':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/run-contracts
+      '@hoox/sandbox':
+        specifier: workspace:*
+        version: link:runtime-ts/packages/sandbox
       '@sinclair/typebox':
         specifier: 0.34.52
         version: 0.34.52
@@ -67,7 +67,7 @@ importers:
 
   runtime-ts/apps/admin-web:
     dependencies:
-      '@aisay/protocol':
+      '@hoox/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
       react:
@@ -95,76 +95,82 @@ importers:
 
   runtime-ts/apps/agent-worker:
     dependencies:
-      '@aisay/artifact':
-        specifier: workspace:*
-        version: link:../../packages/artifact
-      '@aisay/context-policy':
-        specifier: workspace:*
-        version: link:../../packages/context-policy
-      '@aisay/domain':
-        specifier: workspace:*
-        version: link:../../packages/domain
-      '@aisay/memory':
-        specifier: workspace:*
-        version: link:../../packages/memory
-      '@aisay/persistence':
-        specifier: workspace:*
-        version: link:../../packages/persistence
-      '@aisay/pi-adapter':
-        specifier: workspace:*
-        version: link:../../packages/pi-adapter
-      '@aisay/process-runtime':
-        specifier: workspace:*
-        version: link:../../packages/process-runtime
-      '@aisay/resource':
-        specifier: workspace:*
-        version: link:../../packages/resource
-      '@aisay/run-contracts':
-        specifier: workspace:*
-        version: link:../../packages/run-contracts
-      '@aisay/sandbox':
-        specifier: workspace:*
-        version: link:../../packages/sandbox
-      '@aisay/skill':
-        specifier: workspace:*
-        version: link:../../packages/skill
-      '@aisay/tool-router':
-        specifier: workspace:*
-        version: link:../../packages/tool-router
-      '@aisay/trajectory':
-        specifier: workspace:*
-        version: link:../../packages/trajectory
-      '@aisay/workspace':
-        specifier: workspace:*
-        version: link:../../packages/workspace
       '@earendil-works/pi-ai':
         specifier: 0.82.1
         version: 0.82.1(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
         specifier: 0.82.1
         version: 0.82.1(ws@8.21.1)(zod@4.4.3)
+      '@hoox/artifact':
+        specifier: workspace:*
+        version: link:../../packages/artifact
+      '@hoox/automation':
+        specifier: workspace:*
+        version: link:../../packages/automation
+      '@hoox/context-policy':
+        specifier: workspace:*
+        version: link:../../packages/context-policy
+      '@hoox/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@hoox/memory':
+        specifier: workspace:*
+        version: link:../../packages/memory
+      '@hoox/persistence':
+        specifier: workspace:*
+        version: link:../../packages/persistence
+      '@hoox/pi-adapter':
+        specifier: workspace:*
+        version: link:../../packages/pi-adapter
+      '@hoox/process-runtime':
+        specifier: workspace:*
+        version: link:../../packages/process-runtime
+      '@hoox/resource':
+        specifier: workspace:*
+        version: link:../../packages/resource
+      '@hoox/run-contracts':
+        specifier: workspace:*
+        version: link:../../packages/run-contracts
+      '@hoox/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
+      '@hoox/skill':
+        specifier: workspace:*
+        version: link:../../packages/skill
+      '@hoox/tool-router':
+        specifier: workspace:*
+        version: link:../../packages/tool-router
+      '@hoox/trajectory':
+        specifier: workspace:*
+        version: link:../../packages/trajectory
+      '@hoox/workspace':
+        specifier: workspace:*
+        version: link:../../packages/workspace
 
   runtime-ts/apps/api:
     dependencies:
-      '@aisay/domain':
+      '@hoox/automation':
+        specifier: workspace:*
+        version: link:../../packages/automation
+      '@hoox/domain':
         specifier: workspace:*
         version: link:../../packages/domain
-      '@aisay/persistence':
+      '@hoox/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
-      '@aisay/process-runtime':
+      '@hoox/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
-      '@aisay/protocol':
+      '@hoox/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@aisay/protocol-mapper':
+      '@hoox/protocol-mapper':
         specifier: workspace:*
         version: link:../../packages/protocol-mapper
-      '@aisay/resource':
+      '@hoox/resource':
         specifier: workspace:*
         version: link:../../packages/resource
-      '@aisay/skill':
+      '@hoox/skill':
         specifier: workspace:*
         version: link:../../packages/skill
       fastify:
@@ -173,40 +179,40 @@ importers:
 
   runtime-ts/apps/scheduler:
     dependencies:
-      '@aisay/domain':
+      '@hoox/domain':
         specifier: workspace:*
         version: link:../../packages/domain
-      '@aisay/persistence':
+      '@hoox/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
-      '@aisay/process-runtime':
+      '@hoox/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
-      '@aisay/sandbox':
+      '@hoox/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
-      '@aisay/thread-title':
+      '@hoox/thread-title':
         specifier: workspace:*
         version: link:../../packages/thread-title
 
   runtime-ts/apps/skill-admin-api:
     dependencies:
-      '@aisay/api':
+      '@hoox/api':
         specifier: workspace:*
         version: link:../api
-      '@aisay/domain':
+      '@hoox/domain':
         specifier: workspace:*
         version: link:../../packages/domain
-      '@aisay/persistence':
+      '@hoox/persistence':
         specifier: workspace:*
         version: link:../../packages/persistence
-      '@aisay/process-runtime':
+      '@hoox/process-runtime':
         specifier: workspace:*
         version: link:../../packages/process-runtime
-      '@aisay/protocol':
+      '@hoox/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
-      '@aisay/skill':
+      '@hoox/skill':
         specifier: workspace:*
         version: link:../../packages/skill
       '@sinclair/typebox':
@@ -218,10 +224,10 @@ importers:
 
   runtime-ts/apps/trajectory-web:
     dependencies:
-      '@aisay/run-contracts':
+      '@hoox/run-contracts':
         specifier: workspace:*
         version: link:../../packages/run-contracts
-      '@aisay/trajectory':
+      '@hoox/trajectory':
         specifier: workspace:*
         version: link:../../packages/trajectory
 
@@ -261,13 +267,13 @@ importers:
 
   runtime-ts/packages/artifact:
     dependencies:
-      '@aisay/domain':
+      '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
-      '@aisay/persistence':
+      '@hoox/persistence':
         specifier: workspace:*
         version: link:../persistence
-      '@aisay/run-contracts':
+      '@hoox/run-contracts':
         specifier: workspace:*
         version: link:../run-contracts
       pg:
@@ -278,9 +284,11 @@ importers:
         specifier: 8.20.0
         version: 8.20.0
 
+  runtime-ts/packages/automation: {}
+
   runtime-ts/packages/context-policy:
     dependencies:
-      '@aisay/domain':
+      '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
 
@@ -290,36 +298,39 @@ importers:
 
   runtime-ts/packages/persistence:
     dependencies:
-      '@aisay/context-policy':
-        specifier: workspace:*
-        version: link:../context-policy
-      '@aisay/domain':
-        specifier: workspace:*
-        version: link:../domain
-      '@aisay/memory':
-        specifier: workspace:*
-        version: link:../memory
-      '@aisay/resource':
-        specifier: workspace:*
-        version: link:../resource
-      '@aisay/run-contracts':
-        specifier: workspace:*
-        version: link:../run-contracts
-      '@aisay/skill':
-        specifier: workspace:*
-        version: link:../skill
-      '@aisay/thread-title':
-        specifier: workspace:*
-        version: link:../thread-title
-      '@aisay/workspace':
-        specifier: workspace:*
-        version: link:../workspace
       '@aws-sdk/client-s3':
         specifier: 3.1095.0
         version: 3.1095.0
       '@aws-sdk/s3-request-presigner':
         specifier: 3.1095.0
         version: 3.1095.0
+      '@hoox/automation':
+        specifier: workspace:*
+        version: link:../automation
+      '@hoox/context-policy':
+        specifier: workspace:*
+        version: link:../context-policy
+      '@hoox/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@hoox/memory':
+        specifier: workspace:*
+        version: link:../memory
+      '@hoox/resource':
+        specifier: workspace:*
+        version: link:../resource
+      '@hoox/run-contracts':
+        specifier: workspace:*
+        version: link:../run-contracts
+      '@hoox/skill':
+        specifier: workspace:*
+        version: link:../skill
+      '@hoox/thread-title':
+        specifier: workspace:*
+        version: link:../thread-title
+      '@hoox/workspace':
+        specifier: workspace:*
+        version: link:../workspace
       pg:
         specifier: 8.22.0
         version: 8.22.0
@@ -330,24 +341,27 @@ importers:
 
   runtime-ts/packages/pi-adapter:
     dependencies:
-      '@aisay/context-policy':
-        specifier: workspace:*
-        version: link:../context-policy
-      '@aisay/domain':
-        specifier: workspace:*
-        version: link:../domain
-      '@aisay/prompt-builder':
-        specifier: workspace:*
-        version: link:../prompt-builder
-      '@aisay/sandbox':
-        specifier: workspace:*
-        version: link:../sandbox
       '@earendil-works/pi-ai':
         specifier: 0.82.1
         version: 0.82.1(ws@8.21.1)(zod@4.4.3)
       '@earendil-works/pi-coding-agent':
         specifier: 0.82.1
         version: 0.82.1(ws@8.21.1)(zod@4.4.3)
+      '@hoox/automation':
+        specifier: workspace:*
+        version: link:../automation
+      '@hoox/context-policy':
+        specifier: workspace:*
+        version: link:../context-policy
+      '@hoox/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@hoox/prompt-builder':
+        specifier: workspace:*
+        version: link:../prompt-builder
+      '@hoox/sandbox':
+        specifier: workspace:*
+        version: link:../sandbox
       '@huggingface/tokenizers':
         specifier: 0.1.3
         version: 0.1.3
@@ -367,10 +381,10 @@ importers:
 
   runtime-ts/packages/protocol-mapper:
     dependencies:
-      '@aisay/domain':
+      '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
-      '@aisay/protocol':
+      '@hoox/protocol':
         specifier: workspace:*
         version: link:../protocol
       '@sinclair/typebox':
@@ -379,49 +393,49 @@ importers:
 
   runtime-ts/packages/resource:
     dependencies:
-      '@aisay/domain':
+      '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
 
   runtime-ts/packages/run-contracts:
     dependencies:
-      '@aisay/context-policy':
+      '@hoox/context-policy':
         specifier: workspace:*
         version: link:../context-policy
-      '@aisay/domain':
+      '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
-      '@aisay/pi-adapter':
+      '@hoox/pi-adapter':
         specifier: workspace:*
         version: link:../pi-adapter
-      '@aisay/sandbox':
+      '@hoox/sandbox':
         specifier: workspace:*
         version: link:../sandbox
-      '@aisay/skill':
+      '@hoox/skill':
         specifier: workspace:*
         version: link:../skill
-      '@aisay/workspace':
+      '@hoox/workspace':
         specifier: workspace:*
         version: link:../workspace
 
   runtime-ts/packages/sandbox:
     dependencies:
-      '@aisay/domain':
-        specifier: workspace:*
-        version: link:../domain
-      '@aisay/workspace':
-        specifier: workspace:*
-        version: link:../workspace
       '@cubesandbox/sdk':
         specifier: workspace:*
         version: link:../../vendor/cubesandbox-sdk
+      '@hoox/domain':
+        specifier: workspace:*
+        version: link:../domain
+      '@hoox/workspace':
+        specifier: workspace:*
+        version: link:../workspace
       e2b:
         specifier: 2.39.0
         version: 2.39.0
 
   runtime-ts/packages/skill:
     dependencies:
-      '@aisay/domain':
+      '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
 
@@ -431,19 +445,19 @@ importers:
 
   runtime-ts/packages/tool-router:
     dependencies:
-      '@aisay/artifact':
+      '@hoox/artifact':
         specifier: workspace:*
         version: link:../artifact
-      '@aisay/domain':
+      '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
-      '@aisay/pi-adapter':
+      '@hoox/pi-adapter':
         specifier: workspace:*
         version: link:../pi-adapter
-      '@aisay/run-contracts':
+      '@hoox/run-contracts':
         specifier: workspace:*
         version: link:../run-contracts
-      '@aisay/workspace':
+      '@hoox/workspace':
         specifier: workspace:*
         version: link:../workspace
       typebox:
@@ -452,7 +466,7 @@ importers:
 
   runtime-ts/packages/trajectory:
     dependencies:
-      '@aisay/run-contracts':
+      '@hoox/run-contracts':
         specifier: workspace:*
         version: link:../run-contracts
 

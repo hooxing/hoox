@@ -6,9 +6,9 @@ import {
   threadId,
   workspaceId,
   workspaceRevisionId,
-} from "@aisay/domain";
-import type { ExecutionScope } from "@aisay/run-contracts";
-import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
+} from "@hoox/domain";
+import type { ExecutionScope } from "@hoox/run-contracts";
+import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import type { Pool, PoolClient } from "pg";
 import { withTenantTransaction } from "./postgres.js";
 

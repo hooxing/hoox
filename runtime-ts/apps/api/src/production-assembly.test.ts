@@ -33,7 +33,7 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("@aisay/persistence", () => ({
+vi.mock("@hoox/persistence", () => ({
   BlobSkillContentStore: class {},
   createApiPersistenceRuntime: mocks.createApiPersistenceRuntime,
   createS3BlobStore: mocks.createS3BlobStore,
@@ -60,7 +60,7 @@ function productionEnvironment(): Record<string, string> {
     THREAD_CURSOR_SIGNING_KEYS: "current:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     THREAD_SERIAL_QUEUE_V2_ENABLED: "true",
     API_JWT_ISSUER: "https://issuer.example.invalid/runtime",
-    API_JWT_AUDIENCE: "aisay-runtime-api",
+    API_JWT_AUDIENCE: "hoox-api",
     API_JWT_SIGNING_KEYS: "current-key:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     API_JWT_CLOCK_SKEW_SECONDS: "60",
     API_JWT_MAX_LIFETIME_SECONDS: "3600",
@@ -94,13 +94,13 @@ describe("生产 API 默认装配", () => {
         ssl: { rejectUnauthorized: true },
         schema: "runtime",
         expectedRuntimeRole: "runtime",
-        applicationName: "aisay-runtime-api-production",
+        applicationName: "hoox-api-production",
         teamCoordinator: {
           connectionString: "postgresql://team_coordinator:credential@database:5432/runtime",
           ssl: { rejectUnauthorized: true },
           schema: "runtime",
           expectedRuntimeRole: "team_coordinator",
-          applicationName: "aisay-runtime-api-team-coordinator-production",
+          applicationName: "hoox-api-team-coordinator-production",
         },
         serialQueueV2Enabled: true,
         historyDirectoryTimeZone: "Asia/Shanghai",

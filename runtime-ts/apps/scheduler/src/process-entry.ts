@@ -1,4 +1,4 @@
-import { tenantId } from "@aisay/domain";
+import { tenantId } from "@hoox/domain";
 import {
   createPostgresPool,
   PgSandboxCleanupConsumerStore,
@@ -6,7 +6,7 @@ import {
   PgThreadContinuityMetrics,
   PgThreadSandboxLifecycleConsumerStore,
   probePostgres,
-} from "@aisay/persistence";
+} from "@hoox/persistence";
 import {
   assertProductionInheritedEnvironment,
   booleanEnvironmentField,
@@ -22,12 +22,12 @@ import {
   startServiceProcess,
   stringEnvironmentField,
   urlEnvironmentField,
-} from "@aisay/process-runtime";
+} from "@hoox/process-runtime";
 import {
   OpenAiCompatibleThreadTitleGenerator,
   ThreadTitleGenerationConsumer,
   ThreadTitleGenerationPollingLoop,
-} from "@aisay/thread-title";
+} from "@hoox/thread-title";
 import {
   CubeSandboxGateway,
   E2BSandboxGateway,
@@ -35,7 +35,7 @@ import {
   type SandboxProviderKey,
   SandboxProviderRegistry,
   resolveCubeProxyRouting,
-} from "@aisay/sandbox";
+} from "@hoox/sandbox";
 import {
   SandboxCleanupConsumer,
   SandboxCleanupRouterResolver,
@@ -336,7 +336,7 @@ const productionSchedulerAssembler: ServiceAssemblyFactory<SchedulerProcessConfi
       ...(configuration.databaseSsl === undefined ? {} : { ssl: configuration.databaseSsl }),
       schema: configuration.databaseSchema,
       expectedRuntimeRole: configuration.databaseRuntimeRole,
-      applicationName: "aisay-runtime-scheduler-cleanup",
+      applicationName: "hoox-scheduler-cleanup",
     });
     try {
       // 角色身份和 RLS 绕过属性必须在 cleanup loop 产生任何远端副作用前证明安全。

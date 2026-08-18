@@ -1,1 +1,1 @@
-export * from "@aisay/run-contracts/mutation-protocol";
+export * from "@hoox/run-contracts/mutation-protocol";

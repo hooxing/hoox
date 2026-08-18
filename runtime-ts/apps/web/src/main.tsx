@@ -1,4 +1,5 @@
 import {
+  CalendarClock,
   Cloud,
   LoaderCircle,
   PanelLeftOpen,
@@ -36,6 +37,7 @@ import {
   clearAccountSession,
   readAccountSession,
 } from "./account-access.js";
+import { type AutomationCenterApi, AutomationCenterDialog } from "./automation-center.js";
 import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages, loadAllRunEvents } from "./polling.js";
@@ -141,7 +143,7 @@ type WorkspaceApi = Pick<
   readonly getThreadContinuity?: RuntimeApi["getThreadContinuity"];
   readonly submitThreadInput?: RuntimeApi["submitThreadInput"];
   readonly getThreadInputReceipt?: RuntimeApi["getThreadInputReceipt"];
-} & Partial<SkillCenterApi & CloudDriveApi>;
+} & Partial<SkillCenterApi & CloudDriveApi & AutomationCenterApi>;
 
 type TeamAwareWorkspaceApi = WorkspaceApi &
   Partial<PersonalizationApi> &
@@ -179,6 +181,22 @@ function resolveSkillCenterApi(client: WorkspaceApi): SkillCenterApi | undefined
     installSkill: installSkill.bind(client),
     setSkillEnabled: setSkillEnabled.bind(client),
     uninstallSkill: uninstallSkill.bind(client),
+  };
+}
+
+function resolveAutomationCenterApi(client: WorkspaceApi): AutomationCenterApi | undefined {
+  const { listScheduledTasks, createScheduledTask, updateScheduledTask } = client;
+  if (
+    listScheduledTasks === undefined ||
+    createScheduledTask === undefined ||
+    updateScheduledTask === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    listScheduledTasks: listScheduledTasks.bind(client),
+    createScheduledTask: createScheduledTask.bind(client),
+    updateScheduledTask: updateScheduledTask.bind(client),
   };
 }
 
@@ -307,6 +325,7 @@ function AuthenticatedWorkspace({
   const [isCompact, setIsCompact] = useState(initialCompact);
   const [navigationOpen, setNavigationOpen] = useState(false);
   const [skillCenterOpen, setSkillCenterOpen] = useState(false);
+  const [automationCenterOpen, setAutomationCenterOpen] = useState(false);
   const [cloudDriveOpen, setCloudDriveOpen] = useState(false);
   const [personalizationOpen, setPersonalizationOpen] = useState(false);
   const [teams, setTeams] = useState<readonly TeamSummary[]>([]);
@@ -334,6 +353,7 @@ function AuthenticatedWorkspace({
   const initialSelectionAppliedRef = useRef(false);
   runExecutionStatusRef.current = state.run?.executionStatus;
   const skillCenterApi = useMemo(() => resolveSkillCenterApi(apiClient), [apiClient]);
+  const automationCenterApi = useMemo(() => resolveAutomationCenterApi(apiClient), [apiClient]);
   const cloudDriveApi = useMemo(() => resolveCloudDriveApi(apiClient), [apiClient]);
   const teamWorkspaceApi = useMemo(() => resolveTeamWorkspaceApi(apiClient), [apiClient]);
   const personalizationApi = useMemo(() => resolvePersonalizationApi(apiClient), [apiClient]);
@@ -586,6 +606,40 @@ function AuthenticatedWorkspace({
       stopped = true;
     };
   }, [apiClient, recoveryNonce, state.selectedThreadId, state.selectionGeneration]);
+
+  useEffect(() => {
+    const threadId = state.selectedThreadId;
+    if (threadId === undefined || pollingRunStatuses.has(state.run?.status ?? "succeeded")) return;
+    const expectedNavigation = navigationRef.current.capture();
+    let stopped = false;
+    let timer: number | undefined;
+    const discoverExternalRun = async () => {
+      try {
+        if (document.visibilityState !== "hidden") {
+          const [latest] = await apiClient.listLatestRuns(threadId, 1);
+          if (
+            !stopped &&
+            navigationRef.current.isCurrent(expectedNavigation) &&
+            latest !== undefined &&
+            latest.id !== state.run?.id
+          ) {
+            eventAfterRef.current = -1;
+            eventAttemptRef.current = undefined;
+            dispatch({ type: "startRun", run: latest });
+            return;
+          }
+        }
+      } catch {
+        // 外部 Run 发现是后台增强；短暂失败不能覆盖当前对话或打断用户输入。
+      }
+      if (!stopped) timer = window.setTimeout(() => void discoverExternalRun(), 2_500);
+    };
+    timer = window.setTimeout(() => void discoverExternalRun(), 2_500);
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [apiClient, state.run?.id, state.run?.status, state.selectedThreadId]);
 
   useEffect(() => {
     const threadId = state.selectedThreadId;
@@ -1108,6 +1162,19 @@ function AuthenticatedWorkspace({
             {activeTeam === undefined ? "技能中心" : "团队技能"}
           </button>
         )}
+        {automationCenterApi !== undefined && (
+          <button
+            type="button"
+            className="automation-entry"
+            onClick={() => {
+              setAutomationCenterOpen(true);
+              setNavigationOpen(false);
+            }}
+          >
+            <CalendarClock size={17} />
+            定时任务
+          </button>
+        )}
         {cloudDriveApi !== undefined && (
           <button
             type="button"
@@ -1369,6 +1436,16 @@ function AuthenticatedWorkspace({
             ? {}
             : { scopeName: activeTeam.displayName, readOnly: activeTeam.role === "member" })}
           onClose={() => setSkillCenterOpen(false)}
+        />
+      )}
+      {automationCenterOpen && automationCenterApi !== undefined && (
+        <AutomationCenterDialog
+          api={automationCenterApi}
+          threads={state.threads}
+          {...(state.selectedThreadId === undefined
+            ? {}
+            : { initialThreadId: state.selectedThreadId })}
+          onClose={() => setAutomationCenterOpen(false)}
         />
       )}
       {personalizationOpen && personalizationApi !== undefined && (

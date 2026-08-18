@@ -399,7 +399,7 @@ export class Mem0PlatformMemoryProvider implements MemoryProvider, MemoryRetriev
       run_id: scopes.runId,
       metadata: {
         schema_version: 1,
-        source: "aisay-runtime",
+        source: "hoox",
         scope_kind: source.tenantKind,
         source_thread_id: scopes.threadId,
         source_run_id: scopes.runId,

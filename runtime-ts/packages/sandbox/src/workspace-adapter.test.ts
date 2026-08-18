@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { WorkspaceDependencyError } from "@aisay/workspace";
+import type { WorkspaceDependencyError } from "@hoox/workspace";
 import { describe, expect, it } from "vitest";
 import type { CubeSdkSandbox } from "./cube-gateway.js";
 import {

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { WorkspaceDependencyError } from "@aisay/workspace";
+import { WorkspaceDependencyError } from "@hoox/workspace";
 import { describe, expect, it } from "vitest";
 import type { BlobCommitSnapshot } from "./blob-commit-protocol.js";
 import type { BlobStore } from "./blob-store.js";

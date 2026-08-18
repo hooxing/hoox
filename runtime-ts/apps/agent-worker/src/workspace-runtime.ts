@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { sha256Digest, workspaceRevisionId } from "@aisay/domain";
-import { workspaceCandidateOperationDigest } from "@aisay/persistence";
-import type { WorkspaceRuntimePort } from "@aisay/run-contracts";
+import { sha256Digest, workspaceRevisionId } from "@hoox/domain";
+import { workspaceCandidateOperationDigest } from "@hoox/persistence";
+import type { WorkspaceRuntimePort } from "@hoox/run-contracts";
 import {
   createWorkspaceManifest,
   type SandboxSessionIdentity,
@@ -19,7 +19,7 @@ import {
   WorkspacePublisher,
   type WorkspaceStableBlobReadPort,
   type WorkspaceTrustedScope,
-} from "@aisay/workspace";
+} from "@hoox/workspace";
 
 export interface WorkspaceRevisionFactPort {
   loadCurrentManifest(input: {

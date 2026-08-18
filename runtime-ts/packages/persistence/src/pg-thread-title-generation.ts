@@ -3,13 +3,13 @@ import {
   historyFilesystemCollisionName,
   historyFilesystemDirectoryName,
   stripAttachmentsFromUserFacingPrompt,
-} from "@aisay/resource";
+} from "@hoox/resource";
 import type {
   GeneratedThreadTitle,
   ThreadTitleGenerationClaim,
   ThreadTitleGenerationErrorCode,
   ThreadTitleGenerationStore,
-} from "@aisay/thread-title";
+} from "@hoox/thread-title";
 import type { Pool, PoolClient } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { withTenantTransaction } from "./postgres.js";

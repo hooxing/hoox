@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { SandboxProviderKey } from "@aisay/sandbox";
+import type { SandboxProviderKey } from "@hoox/sandbox";
 import { withTenantTransaction, type Pool } from "./postgres.js";
 
 export interface CleanupClaim {

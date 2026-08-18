@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { ScheduledTaskManagementPort, ScheduledTaskMutation } from "@hoox/automation";
 import {
   DomainError,
   membershipId,
@@ -7,7 +8,7 @@ import {
   tenantId,
   threadId,
   userId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type {
   BlobStore,
   CoreRepositories,
@@ -21,10 +22,18 @@ import type {
   ThreadContinuityReadPort,
   TeamCollaborationPort,
   ThreadForkPort,
-} from "@aisay/persistence";
-import { assertBlobRef, BlobStoreError, PersistenceError, sha256Hex } from "@aisay/persistence";
+} from "@hoox/persistence";
+import { assertBlobRef, BlobStoreError, PersistenceError, sha256Hex } from "@hoox/persistence";
 import {
   AccountProfileSuccessEnvelopeSchema,
+  CreateScheduledTaskRequestSchema,
+  type CreateScheduledTaskRequest,
+  ScheduledTaskListSuccessEnvelopeSchema,
+  ScheduledTaskPathSchema,
+  type ScheduledTaskPath,
+  ScheduledTaskSuccessEnvelopeSchema,
+  UpdateScheduledTaskRequestSchema,
+  type UpdateScheduledTaskRequest,
   AccountSessionSuccessEnvelopeSchema,
   type LoginAccountRequest,
   LoginAccountRequestSchema,
@@ -122,7 +131,7 @@ import {
   UninstallSkillQuerySchema,
   type UploadedResourceDto,
   UploadedResourceSuccessEnvelopeSchema,
-} from "@aisay/protocol";
+} from "@hoox/protocol";
 import {
   type ResourceAttachmentResolverPort,
   type HistoryFileLibraryFile,
@@ -133,13 +142,13 @@ import {
   ResourceServiceError,
   type ResourceUploadPort,
   stripAttachmentsFromUserFacingPrompt,
-} from "@aisay/resource";
+} from "@hoox/resource";
 import {
   type SkillCenterService,
   type SkillContentStore,
   type SkillFilesystemCatalog,
   SkillServiceError,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -186,6 +195,7 @@ export interface ApiDependencies {
   readonly threadContinuity?: ThreadContinuityReadPort;
   readonly teamCollaboration?: TeamCollaborationPort;
   readonly personalizations?: PersonalizationSettingsPort;
+  readonly scheduledTasks?: ScheduledTaskManagementPort;
   readonly threadForks?: ThreadForkPort;
   readonly resourceUploads?: ResourceUploadPort;
   readonly resourceAttachments?: ResourceAttachmentResolverPort;
@@ -406,10 +416,10 @@ function personalizationContent(raw: string): string {
 async function readForkMessages(
   reader: ThreadContextReadPort,
   scope: Readonly<{
-    tenantId: import("@aisay/domain").TenantId;
-    userId: import("@aisay/domain").UserId;
+    tenantId: import("@hoox/domain").TenantId;
+    userId: import("@hoox/domain").UserId;
   }>,
-  sourceThreadId: import("@aisay/domain").ThreadId,
+  sourceThreadId: import("@hoox/domain").ThreadId,
 ) {
   const messages: Array<{
     role: "user" | "assistant";
@@ -466,11 +476,11 @@ export function createApiApp(
     ajv: {
       customOptions: { removeAdditional: false },
       onCreate: (ajv) => {
-        ajv.addFormat("aisay-iso-utc-timestamp-v1", true);
+        ajv.addFormat("hoox-iso-utc-timestamp-v1", true);
       },
     },
     serializerOpts: {
-      ajv: { formats: { "aisay-iso-utc-timestamp-v1": true } },
+      ajv: { formats: { "hoox-iso-utc-timestamp-v1": true } },
     },
     logger:
       options.logger === false
@@ -582,6 +592,125 @@ export function createApiApp(
     });
   });
 
+  if (normalizedDependencies.scheduledTasks !== undefined) {
+    const scheduledTasks = normalizedDependencies.scheduledTasks;
+    const mutateScheduledTask = async (
+      request: FastifyRequest,
+      mutation: ScheduledTaskMutation,
+    ) => {
+      const auth = await authenticate(request);
+      const result = await scheduledTasks.mutate({
+        scope: auth.scope,
+        commandId: requireIdempotencyKey(request),
+        requestDigest: createHash("sha256").update(JSON.stringify(mutation)).digest("hex"),
+        mutation,
+      });
+      if (result.outcome === "applied" || result.outcome === "replayed") return result.task;
+      if (result.outcome === "key_conflict") throw new ApiFailure("conflict");
+      if (result.outcome === "not_found" || result.outcome === "not_authorized") {
+        throw new ApiFailure("not_found");
+      }
+      throw new ApiFailure("invalid_state");
+    };
+
+    app.get(
+      "/v1/automations",
+      {
+        schema: {
+          response: {
+            200: ScheduledTaskListSuccessEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const auth = await authenticate(request);
+        return success(request, { items: await scheduledTasks.list({ scope: auth.scope }) });
+      },
+    );
+
+    app.post<{ Body: CreateScheduledTaskRequest }>(
+      "/v1/automations",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: {
+          body: CreateScheduledTaskRequestSchema,
+          response: {
+            200: ScheduledTaskSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            415: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) =>
+        success(
+          request,
+          await mutateScheduledTask(request, {
+            action: "create",
+            sourceThreadId: request.body.targetThreadId,
+            targetThreadId: request.body.targetThreadId,
+            name: request.body.name,
+            instruction: request.body.instruction,
+            firstRunAt: request.body.firstRunAt,
+            ...(request.body.rrule === undefined ? {} : { rrule: request.body.rrule }),
+            timezone: request.body.timezone,
+            ...(request.body.overlapPolicy === undefined
+              ? {}
+              : { overlapPolicy: request.body.overlapPolicy }),
+          }),
+        ),
+    );
+
+    app.patch<{ Params: ScheduledTaskPath; Body: UpdateScheduledTaskRequest }>(
+      "/v1/automations/:taskId",
+      {
+        preValidation: async (request) => requireJsonContentType(request),
+        schema: {
+          params: ScheduledTaskPathSchema,
+          body: UpdateScheduledTaskRequestSchema,
+          response: {
+            200: ScheduledTaskSuccessEnvelopeSchema,
+            400: ErrorEnvelopeSchema,
+            401: ErrorEnvelopeSchema,
+            404: ErrorEnvelopeSchema,
+            409: ErrorEnvelopeSchema,
+            415: ErrorEnvelopeSchema,
+            500: ErrorEnvelopeSchema,
+            503: ErrorEnvelopeSchema,
+          },
+        },
+      },
+      async (request) => {
+        const mutation: ScheduledTaskMutation =
+          request.body.action === "update"
+            ? {
+                action: "update",
+                taskId: request.params.taskId,
+                ...(request.body.name === undefined ? {} : { name: request.body.name }),
+                ...(request.body.instruction === undefined
+                  ? {}
+                  : { instruction: request.body.instruction }),
+                ...(request.body.firstRunAt === undefined
+                  ? {}
+                  : { firstRunAt: request.body.firstRunAt }),
+                ...(request.body.rrule === undefined ? {} : { rrule: request.body.rrule }),
+                ...(request.body.timezone === undefined ? {} : { timezone: request.body.timezone }),
+                ...(request.body.overlapPolicy === undefined
+                  ? {}
+                  : { overlapPolicy: request.body.overlapPolicy }),
+              }
+            : { action: request.body.action, taskId: request.params.taskId };
+        return success(request, await mutateScheduledTask(request, mutation));
+      },
+    );
+  }
   if (normalizedDependencies.localAccounts !== undefined) {
     const localAccounts = normalizedDependencies.localAccounts;
     const accountSessionResponses = {

@@ -5,7 +5,7 @@ import {
   type SkillPublicationUploadFile,
   type ValidatedSkillPublicationPackage,
   validateSkillPublicationPackage,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import type { Pool, PoolClient } from "pg";
 import {
   S3StableSkillPublisher,
@@ -14,18 +14,19 @@ import {
 
 // 已发布目录的持久主键保留 legacy 值；品牌迁移通过不可变新版本表达，不能原地换主键分裂目录。
 const skillId = "skill_cube_csv_to_pdf";
-const expectedPackageDigest = "57d6931e0b01e44d6a8aa81c0df45c61324e08b534268c7347eb15e1b8aa5c42";
+const legacyPublisher = "AISay";
+const expectedPackageDigest = "84a8d48b82b54cbf24d60c140189ecb1a08cd02ad691f1782104f35b74c1c77c";
 const expectedPaths = Object.freeze(["LICENSE.txt", "SKILL.md", "scripts/csv_to_pdf.py"]);
 const metadata: SkillPublicationMetadata = Object.freeze({
   canonicalKey: "csv-to-pdf",
   displayName: "CSV 转 PDF",
-  publisher: "AISay",
-  version: "1.2.0",
+  publisher: "Hoox",
+  version: "1.3.0",
   description: "将 UTF-8 CSV 或 TSV 表格转换为经过完整性校验的 PDF 并交付。",
-  compatibility: "AISay development；LibreOffice Calc 7.4.7；Debian snapshot 20260202",
+  compatibility: "Hoox development；LibreOffice Calc 7.4.7；Debian snapshot 20260202",
   sourceUrl: "",
-  sourceRevision: "internal-1.2.0",
-  licenseSpdx: "LicenseRef-AISay-Internal",
+  sourceRevision: "internal-1.3.0",
+  licenseSpdx: "LicenseRef-Hoox-Internal",
 });
 
 export interface DevelopmentCsvPdfObjectStorageConfiguration {
@@ -139,7 +140,7 @@ async function publishCatalogRows(
       (current !== undefined &&
         (current.id !== skillId ||
           current.canonical_key !== metadata.canonicalKey ||
-          current.publisher !== metadata.publisher))
+          (current.publisher !== metadata.publisher && current.publisher !== legacyPublisher)))
     ) {
       throw new Error("CSV 转 PDF Skill 目录键已被其他发布者占用");
     }
@@ -187,9 +188,9 @@ async function publishCatalogRows(
     await assertFilesMatch(client, skill, stored);
     await client.query(
       `UPDATE skills
-          SET display_name=$2,recommended_version=$3,status='active',updated_at=clock_timestamp()
+          SET publisher=$2,display_name=$3,recommended_version=$4,status='active',updated_at=clock_timestamp()
         WHERE id=$1`,
-      [skillId, metadata.displayName, skill.version],
+      [skillId, metadata.publisher, metadata.displayName, skill.version],
     );
     await client.query("COMMIT");
   } catch (error) {

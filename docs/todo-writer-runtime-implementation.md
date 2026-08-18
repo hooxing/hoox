@@ -3,7 +3,7 @@
 ## 结论
 
 Pi `@earendil-works/pi-coding-agent@0.82.1` 没有内置 Plan/Todo 工具，默认工具只有 `read`、`bash`、`edit`、`write`、
-`grep`、`find` 和 `ls`。Pi 支持通过 `defineTool` 注册自定义工具，因此 AISay Runtime 以自定义 `todo_write` 实现
+`grep`、`find` 和 `ls`。Pi 支持通过 `defineTool` 注册自定义工具，因此 Hoox 以自定义 `todo_write` 实现
 Agent 自主规划，并复用现有 Run 事件、Tool Observation、API 增量读取和运行进度 UI。
 
 这不是强制工作流：系统提示词要求 Agent 只在复杂或长程任务中自主使用，简单任务可以直接完成。Runtime 不检查

@@ -1,10 +1,10 @@
 {
-  "name": "@aisay/skill",
+  "name": "@hoox/skill",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@aisay/domain": "workspace:*"
+    "@hoox/domain": "workspace:*"
   },
   "exports": "./dist/index.js",
   "types": "./dist/index.d.ts",

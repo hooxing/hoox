@@ -1,12 +1,12 @@
-import type { IsoTimestamp, Run, TenantId, Thread, UserId, Workspace } from "@aisay/domain";
-import type { ThreadListCursor } from "@aisay/persistence";
+import type { IsoTimestamp, Run, TenantId, Thread, UserId, Workspace } from "@hoox/domain";
+import type { ThreadListCursor } from "@hoox/persistence";
 export type {
   ArchiveThreadCommandPort,
   EnqueueOutboxPort,
   IdempotentCommand,
   IdempotentCreateResult,
   ThreadCreationPort,
-} from "@aisay/persistence";
+} from "@hoox/persistence";
 
 export interface AuthPrincipal {
   readonly userId: UserId;

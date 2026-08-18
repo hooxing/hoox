@@ -1,4 +1,4 @@
-import type { ExecutionScope } from "@aisay/run-contracts";
+import type { ExecutionScope } from "@hoox/run-contracts";
 import type { Pool } from "pg";
 import { withTenantTransaction } from "./postgres.js";
 

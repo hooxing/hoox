@@ -153,6 +153,13 @@ describe("Agent 工作台恢复接入", () => {
         uninstallSkill: vi.fn(async () => {
           throw new Error("不应卸载技能");
         }),
+        listScheduledTasks: vi.fn(async () => []),
+        createScheduledTask: vi.fn(async () => {
+          throw new Error("不应创建定时任务");
+        }),
+        updateScheduledTask: vi.fn(async () => {
+          throw new Error("不应更新定时任务");
+        }),
         listHistoryFiles: vi.fn(async () => ({
           items: [],
           range: { activeAfter: "2026-02-07T00:00:00.000Z" },
@@ -167,13 +174,16 @@ describe("Agent 工作台恢复接入", () => {
 
     const createEntry = container.querySelector(".thread-create");
     const skillCenterEntry = container.querySelector(".skill-center-entry");
+    const automationEntry = container.querySelector(".automation-entry");
     const cloudDriveEntry = container.querySelector(".cloud-drive-entry");
     const taskHeading = container.querySelector(".thread-heading");
     expect(createEntry).not.toBeNull();
     expect(skillCenterEntry).not.toBeNull();
+    expect(automationEntry).not.toBeNull();
     expect(cloudDriveEntry).not.toBeNull();
     expect(createEntry?.nextElementSibling).toBe(skillCenterEntry);
-    expect(skillCenterEntry?.nextElementSibling).toBe(cloudDriveEntry);
+    expect(skillCenterEntry?.nextElementSibling).toBe(automationEntry);
+    expect(automationEntry?.nextElementSibling).toBe(cloudDriveEntry);
     expect(cloudDriveEntry?.nextElementSibling).toBe(taskHeading);
   });
 
@@ -445,6 +455,32 @@ describe("Agent 工作台恢复接入", () => {
     await act(async () => vi.advanceTimersByTimeAsync(12_000));
     await settleEffects();
     expect(getRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("停留在终态任务页面时自动发现定时任务创建的新 Run", async () => {
+    vi.useFakeTimers();
+    const selectedThread = thread("thread_automation_refresh");
+    const initialRun = run("run_initial", selectedThread.id);
+    const scheduledRun = { ...run("run_scheduled", selectedThread.id), status: "running" as const };
+    let latestRun = initialRun;
+    const listLatestRuns = vi.fn(async () => [latestRun]);
+    const getRun = vi.fn(async (_threadId: string, runId: string) =>
+      runId === scheduledRun.id ? scheduledRun : initialRun,
+    );
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [selectedThread]),
+      listLatestRuns,
+      getRun,
+      listThreadContext: vi.fn(async () => []),
+    });
+    mount(apiClient);
+    await settleEffects();
+
+    latestRun = scheduledRun;
+    await act(async () => vi.advanceTimersByTimeAsync(2_500));
+    await settleEffects();
+
+    expect(getRun).toHaveBeenCalledWith(selectedThread.id, scheduledRun.id);
   });
 
   it("Run 终态后继续追踪 Sandbox 瞬时态，稳定或 UNKNOWN 后停止短轮询", () => {

@@ -1,8 +1,8 @@
-# AISay Runtime
+# Hoox
 
 > **Hoox** —— 你说，它做。
 
-Hoox 是面向用户的 Agent 产品，计划使用 `hoox.aisay.cc` 作为公开入口；AISay Runtime 是承载它的开源技术底座。
+Hoox 是统一的 Agent 产品与技术项目，计划使用 `hoox.aisay.cc` 作为公开入口。当前域名保留既有基础设施名称，不再区分产品品牌与技术底座品牌。
 
 这是多租户 Agent Runtime 的 TypeScript Monorepo。旧 Python 原型仅作为行为参考，不是本仓库的运行时依赖，也不做数据兼容。
 

@@ -1,5 +1,5 @@
-import type { BlobStore, StableBlobRef } from "@aisay/persistence";
-import type { ResourceFilesystemCatalog } from "@aisay/resource";
+import type { BlobStore, StableBlobRef } from "@hoox/persistence";
+import type { ResourceFilesystemCatalog } from "@hoox/resource";
 import type { PromptImageLoaderPort } from "./pi-session-factory.js";
 
 const DIRECT_IMAGE_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);

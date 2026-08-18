@@ -1,4 +1,4 @@
-import type { PromotionCapabilityVerifier, ResourceCatalog } from "@aisay/resource";
+import type { PromotionCapabilityVerifier, ResourceCatalog } from "@hoox/resource";
 import type { BlobStore } from "./blob-store.js";
 import { PersistenceError } from "./errors.js";
 import type { MigrationDownOptions, MigrationRecord } from "./migrations.js";
@@ -19,6 +19,7 @@ import {
 } from "./pg-resource-library.js";
 import { PgResourceUploadRepository } from "./pg-resource-upload.js";
 import { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
+import { PgScheduledTaskRepository } from "./pg-scheduled-tasks.js";
 import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-state.js";
 import { PgSkillCenterRepository } from "./pg-skill-center.js";
 import { PgSkillFilesystemCatalog } from "./pg-skill-filesystem.js";
@@ -93,6 +94,7 @@ export interface ApiPersistenceRuntime {
   readonly skillCenter: PgSkillCenterRepository;
   readonly skillFilesystem: PgSkillFilesystemCatalog;
   readonly personalizations: PgPersonalizationSettingsRepository;
+  readonly scheduledTasks: PgScheduledTaskRepository;
   readonly localAccounts: PgLocalAccountRepository;
   threadContext(blobs: BlobStore): ThreadContextReadPort;
   probe(): Promise<void>;
@@ -145,6 +147,7 @@ export function createApiPersistenceRuntime(
     skillCenter: new PgSkillCenterRepository(pool),
     skillFilesystem: new PgSkillFilesystemCatalog(pool),
     personalizations: new PgPersonalizationSettingsRepository(pool, teamCoordinatorPool),
+    scheduledTasks: new PgScheduledTaskRepository(pool),
     localAccounts: new PgLocalAccountRepository(pool),
     threadContext: (blobs: BlobStore) => new PgThreadContextReadRepository(pool, blobs),
     probe: async () => {
@@ -309,8 +312,8 @@ export class PgRunExperienceReadRepository implements RunExperienceReadPort {
             .map((row) => ({
               id: row.id,
               tenantId: input.scope.tenantId,
-              runId: row.run_id as import("@aisay/domain").RunId,
-              threadId: row.thread_id as import("@aisay/domain").ThreadId,
+              runId: row.run_id as import("@hoox/domain").RunId,
+              threadId: row.thread_id as import("@hoox/domain").ThreadId,
               resourceVersionId: row.resource_version_id,
               name: row.name,
               mediaType: row.media_type,

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { AuthContextResolver } from "@aisay/api";
-import type { UserId } from "@aisay/domain";
+import type { AuthContextResolver } from "@hoox/api";
+import type { UserId } from "@hoox/domain";
 import {
   CreateSkillSubmissionRequestSchema,
   CreateSkillSubmissionSuccessEnvelopeSchema,
@@ -22,12 +22,12 @@ import {
   type ReviewSkillSubmissionRequest,
   type RevokeSkillSubmissionRequest,
   type SubmitSkillSubmissionRequest,
-} from "@aisay/protocol";
+} from "@hoox/protocol";
 import {
   DEFAULT_SKILL_PUBLICATION_COMPATIBILITY,
   type SkillPublicationService,
   SkillServiceError,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { Type, type Static } from "@sinclair/typebox";
 
@@ -90,11 +90,11 @@ export function createSkillAdminApiApp(
     ajv: {
       customOptions: { removeAdditional: false },
       onCreate: (ajv) => {
-        ajv.addFormat("aisay-iso-utc-timestamp-v1", true);
+        ajv.addFormat("hoox-iso-utc-timestamp-v1", true);
       },
     },
     serializerOpts: {
-      ajv: { formats: { "aisay-iso-utc-timestamp-v1": true } },
+      ajv: { formats: { "hoox-iso-utc-timestamp-v1": true } },
     },
   });
   const now = dependencies.now ?? (() => new Date());

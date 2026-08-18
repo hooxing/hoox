@@ -1,4 +1,4 @@
-import { rehydrateThread, type Thread } from "@aisay/domain";
+import { rehydrateThread, type Thread } from "@hoox/domain";
 import type { QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type { IdempotentCreateResult, ThreadCreationPort } from "./ports.js";

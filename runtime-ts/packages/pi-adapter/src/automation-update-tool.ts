@@ -1,4 +1,8 @@
-import type { ScheduledTask, ScheduledTaskMutation } from "@aisay/automation";
+import {
+  DEFAULT_AUTOMATION_TIME_ZONE,
+  type ScheduledTask,
+  type ScheduledTaskMutation,
+} from "@aisay/automation";
 import type { ToolObservationResult } from "@aisay/context-policy";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
@@ -12,9 +16,20 @@ export const AutomationUpdateToolArgumentsSchema = Type.Union([
       action: Type.Literal("create"),
       name: Type.String({ minLength: 1, maxLength: 120 }),
       instruction: Type.String({ minLength: 1, maxLength: 16384 }),
-      first_run_at: Type.String({ minLength: 20, maxLength: 40 }),
+      first_run_at: Type.String({
+        minLength: 20,
+        maxLength: 40,
+        description:
+          "带时区偏移的 ISO 8601 时间；未指定 timezone 时按 Asia/Shanghai（UTC+08:00）换算并携带 +08:00。",
+      }),
       rrule: Type.Optional(Type.String({ minLength: 1, maxLength: 300 })),
-      timezone: Type.String({ minLength: 1, maxLength: 100 }),
+      timezone: Type.Optional(
+        Type.String({
+          minLength: 1,
+          maxLength: 100,
+          description: "IANA 时区；省略时默认为 Asia/Shanghai（UTC+08:00）。",
+        }),
+      ),
       overlap_policy: Type.Optional(OverlapSchema),
     },
     strict,
@@ -72,7 +87,7 @@ export function automationToolMutation(
       instruction: args.instruction,
       firstRunAt: args.first_run_at,
       ...(args.rrule === undefined ? {} : { rrule: args.rrule }),
-      timezone: args.timezone,
+      timezone: args.timezone ?? DEFAULT_AUTOMATION_TIME_ZONE,
       ...(args.overlap_policy === undefined ? {} : { overlapPolicy: args.overlap_policy }),
     };
   if (args.action !== "update") return { action: args.action, taskId: args.task_id };
@@ -109,7 +124,7 @@ export function createAutomationUpdatePiTool(
     label: "管理定时任务",
     executionMode: "sequential",
     description:
-      "创建、修改、暂停、恢复或删除当前对话的定时任务。仅在用户明确要求定时、周期或未来自动执行时调用。首次时间必须是带时区的 ISO 8601；重复规则首版支持 FREQ=MINUTELY、HOURLY、DAILY 与 INTERVAL。",
+      "创建、修改、暂停、恢复或删除当前对话的定时任务。仅在用户明确要求定时、周期或未来自动执行时调用。首次时间必须是带时区偏移的 ISO 8601；用户未指定时区时，timezone 可省略并默认为 Asia/Shanghai（UTC+08:00），first_run_at 应按东八区换算且携带 +08:00。重复规则首版支持 FREQ=MINUTELY、HOURLY、DAILY 与 INTERVAL。",
     parameters: AutomationUpdateToolArgumentsSchema,
     prepareArguments: invalid.prepareArguments,
     execute: async (callId, args, signal) => {

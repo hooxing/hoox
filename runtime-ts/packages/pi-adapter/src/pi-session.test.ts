@@ -998,7 +998,7 @@ describe("Pi 安全适配", () => {
 
       expect(systemPrompt.match(/<PLATFORM_HARNESS>/gu)).toHaveLength(1);
       expect(systemPrompt).toContain("若仅凭当前对话与已提供内容即可正确回答，应直接回答");
-      expect(systemPrompt).toContain("仅在完成用户请求确有必要时调用工具");
+      expect(systemPrompt).toContain("仅在完成用户请求确有必要时调用业务工具");
       expect(systemPrompt).toContain("不得擅自执行");
       expect(systemPrompt).not.toContain("注册 request_user_input");
       expect(systemPrompt).not.toContain("tenant-data");

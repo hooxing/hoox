@@ -1285,17 +1285,11 @@ export function ThreadHeader({
   readonly thread: Thread;
   readonly run: Run | undefined;
   readonly continuity?: ThreadContinuityStatus;
-  /** @deprecated 右侧活动栏已移除，仅为旧调用方提供无行为的迁移兼容。 */
-  readonly artifactCount?: number;
-  readonly modelWireTraceCount?: number;
-  readonly modelWireTraceUnavailable?: boolean;
   readonly actionLoading: boolean;
   readonly onArchive: () => void;
   readonly onCancel: () => void;
   readonly onFork?: () => void;
   readonly onPublishToTeam?: () => void;
-  readonly onOpenArtifacts?: () => void;
-  readonly artifactTriggerRef?: RefObject<HTMLButtonElement | null>;
 }) {
   const workspaceStateLabel =
     continuity?.sandboxState === "pausing"

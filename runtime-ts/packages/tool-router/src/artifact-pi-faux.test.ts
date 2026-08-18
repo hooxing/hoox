@@ -177,6 +177,7 @@ describe("Pi Faux deliver_file 纵向链路", () => {
           "read",
           "edit",
           "write",
+          "collapse_process_for_final_answer",
           "skill",
           "deliver_file",
         ]);

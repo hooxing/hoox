@@ -176,6 +176,7 @@
 | [ADR-20260817181138](20260817181138-thread-scheduled-tasks.md) | Thread 定时任务与按需 Sandbox 复用 | 已接受 | 2026-08-17 |
 
 | [ADR-20260818090007](20260818090007-scheduled-run-live-refresh-and-prompt-boundary.md) | 定时 Run 在线发现与触发消息边界 | 已接受 | 2026-08-18 |
+| [ADR-20260818114734](20260818114734-model-visible-prompt-metadata-and-tool-guidance-deduplication.md) | 模型可见 Prompt 元数据与工具指引去重 | 已接受 | 2026-08-18 |
 
 ## 何时必须记录
 

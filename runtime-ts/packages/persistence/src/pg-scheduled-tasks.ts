@@ -411,6 +411,18 @@ interface ClaimedOccurrence {
   readonly scheduledFor: string;
 }
 
+export function scheduledTaskInputText(input: {
+  readonly name: string;
+  readonly instruction: string;
+}): string {
+  return [
+    "[定时任务触发]",
+    `任务名称：${input.name}`,
+    "请执行以下指令，并在结果中说明本次实际完成内容：",
+    input.instruction,
+  ].join("\n");
+}
+
 export class PgScheduledTaskDueConsumer {
   private readonly repositories: PgCoreRepositories;
   private readonly routing: PgThreadInputRouting;
@@ -441,13 +453,10 @@ export class PgScheduledTaskDueConsumer {
         thread: thread.entity,
         now: isoTimestamp(new Date().toISOString()),
       });
-      const inputText = [
-        `[定时任务触发]`,
-        `任务名称：${claim.name}`,
-        `计划执行时间：${claim.scheduledFor}`,
-        "请执行以下指令，并在结果中说明本次实际完成内容：",
-        claim.instruction,
-      ].join("\n");
+      const inputText = scheduledTaskInputText({
+        name: claim.name,
+        instruction: claim.instruction,
+      });
       const requestHash = createHash("sha256")
         .update(JSON.stringify([claim.taskId, claim.occurrenceId, inputText]))
         .digest("hex");

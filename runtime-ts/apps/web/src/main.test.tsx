@@ -473,6 +473,32 @@ describe("Agent 工作台恢复接入", () => {
     expect(getRun).toHaveBeenCalledTimes(1);
   });
 
+  it("停留在终态任务页面时自动发现定时任务创建的新 Run", async () => {
+    vi.useFakeTimers();
+    const selectedThread = thread("thread_automation_refresh");
+    const initialRun = run("run_initial", selectedThread.id);
+    const scheduledRun = { ...run("run_scheduled", selectedThread.id), status: "running" as const };
+    let latestRun = initialRun;
+    const listLatestRuns = vi.fn(async () => [latestRun]);
+    const getRun = vi.fn(async (_threadId: string, runId: string) =>
+      runId === scheduledRun.id ? scheduledRun : initialRun,
+    );
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [selectedThread]),
+      listLatestRuns,
+      getRun,
+      listThreadContext: vi.fn(async () => []),
+    });
+    mount(apiClient);
+    await settleEffects();
+
+    latestRun = scheduledRun;
+    await act(async () => vi.advanceTimersByTimeAsync(2_500));
+    await settleEffects();
+
+    expect(getRun).toHaveBeenCalledWith(selectedThread.id, scheduledRun.id);
+  });
+
   it("Run 终态后继续追踪 Sandbox 瞬时态，稳定或 UNKNOWN 后停止短轮询", () => {
     expect(shouldContinueRunPolling(false, "succeeded", "pausing")).toBe(true);
     expect(shouldContinueRunPolling(false, "succeeded", "resuming")).toBe(true);

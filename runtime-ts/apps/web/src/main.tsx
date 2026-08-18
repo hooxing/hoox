@@ -623,6 +623,40 @@ function AuthenticatedWorkspace({
 
   useEffect(() => {
     const threadId = state.selectedThreadId;
+    if (threadId === undefined || pollingRunStatuses.has(state.run?.status ?? "succeeded")) return;
+    const expectedNavigation = navigationRef.current.capture();
+    let stopped = false;
+    let timer: number | undefined;
+    const discoverExternalRun = async () => {
+      try {
+        if (document.visibilityState !== "hidden") {
+          const [latest] = await apiClient.listLatestRuns(threadId, 1);
+          if (
+            !stopped &&
+            navigationRef.current.isCurrent(expectedNavigation) &&
+            latest !== undefined &&
+            latest.id !== state.run?.id
+          ) {
+            eventAfterRef.current = -1;
+            eventAttemptRef.current = undefined;
+            dispatch({ type: "startRun", run: latest });
+            return;
+          }
+        }
+      } catch {
+        // 外部 Run 发现是后台增强；短暂失败不能覆盖当前对话或打断用户输入。
+      }
+      if (!stopped) timer = window.setTimeout(() => void discoverExternalRun(), 2_500);
+    };
+    timer = window.setTimeout(() => void discoverExternalRun(), 2_500);
+    return () => {
+      stopped = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [apiClient, state.run?.id, state.run?.status, state.selectedThreadId]);
+
+  useEffect(() => {
+    const threadId = state.selectedThreadId;
     if (threadId === undefined || apiClient.listThreadContext === undefined) {
       dispatch({ type: "threadContext", items: undefined });
       return;

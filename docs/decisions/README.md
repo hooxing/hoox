@@ -172,6 +172,7 @@
 | [ADR-20260816114151](20260816114151-hoox-agent-product-brand.md) | 将用户面对的 Agent 产品命名为 Hoox | 已接受 | 2026-08-16 |
 | [ADR-20260816160557](20260816160557-local-account-shell-and-sidebar-user-menu.md) | 工作台本地账号入口与侧栏用户菜单边界 | 已替代（账号认证部分） | 2026-08-16 |
 | [ADR-20260816165004](20260816165004-development-local-account-authentication.md) | 开发工作台使用服务端本地账号认证 | 已接受 | 2026-08-16 |
+| [ADR-20260818001636](20260818001636-converge-model-wire-diagnostics-to-internal-viewer.md) | 收敛模型网络诊断到内部轨迹查看器 | 已接受 | 2026-08-18 |
 
 | [ADR-20260817181138](20260817181138-thread-scheduled-tasks.md) | Thread 定时任务与按需 Sandbox 复用 | 已接受 | 2026-08-17 |
 

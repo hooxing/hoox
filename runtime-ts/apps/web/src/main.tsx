@@ -134,7 +134,6 @@ type WorkspaceApi = Pick<
   | "listArtifacts"
   | "listEvents"
   | "listLatestRuns"
-  | "listModelWireTraces"
   | "listThreads"
   | "previewArtifact"
   | "uploadResource"
@@ -342,8 +341,6 @@ function AuthenticatedWorkspace({
   const [teamManagementOpen, setTeamManagementOpen] = useState(false);
   const eventAfterRef = useRef(-1);
   const eventAttemptRef = useRef<string | undefined>(undefined);
-  const modelWireTracePaginationAdvancedRef = useRef(false);
-  const modelWireTraceTailCursorRef = useRef<string | undefined>(undefined);
   const currentRunPollRef = useRef(new CurrentRunPoll());
   const runExecutionStatusRef = useRef<Run["executionStatus"]>(undefined);
   const navigationRef = useRef(new WorkspaceNavigation());
@@ -517,17 +514,6 @@ function AuthenticatedWorkspace({
     eventAfterRef.current = state.events.at(-1)?.sequence ?? -1;
     eventAttemptRef.current = state.eventAttemptId;
   }, [state.eventAttemptId, state.events]);
-
-  useEffect(() => {
-    modelWireTracePaginationAdvancedRef.current = state.modelWireTracePaginationAdvanced;
-    modelWireTraceTailCursorRef.current = state.modelWireTraceTailFollowing
-      ? state.modelWireTraceNextCursor
-      : undefined;
-  }, [
-    state.modelWireTraceNextCursor,
-    state.modelWireTracePaginationAdvanced,
-    state.modelWireTraceTailFollowing,
-  ]);
 
   const refreshThreads = useCallback(async () => {
     const requestedTeamId = activeTeamId;
@@ -714,34 +700,20 @@ function AuthenticatedWorkspace({
       try {
         const latest = await apiClient.getRun(threadId, runId);
         recoveryRequired = latest.executionStatus === "recovery_required";
-        const tailCursor = modelWireTraceTailCursorRef.current;
-        const [
-          eventPage,
-          artifacts,
-          modelWireTraces,
-          modelWireTraceTail,
-          threadContext,
-          continuityStatus,
-          threadSnapshot,
-        ] = await Promise.all([
-          drainEventPages(
-            (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
-            eventAfterRef.current,
-            eventAttemptRef.current,
-          ),
-          apiClient.listArtifacts(threadId, runId),
-          apiClient
-            .listModelWireTraces(threadId, runId)
-            .catch(() => ({ items: [], hasMore: false, unavailable: true })),
-          tailCursor === undefined
-            ? Promise.resolve(undefined)
-            : apiClient.listModelWireTraces(threadId, runId, tailCursor).catch(() => undefined),
-          apiClient.listThreadContext?.(threadId).catch(() => undefined) ??
-            Promise.resolve(undefined),
-          apiClient.getThreadContinuity?.(threadId).catch(() => undefined) ??
-            Promise.resolve(undefined),
-          apiClient.getThread?.(threadId).catch(() => undefined) ?? Promise.resolve(undefined),
-        ]);
+        const [eventPage, artifacts, threadContext, continuityStatus, threadSnapshot] =
+          await Promise.all([
+            drainEventPages(
+              (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
+              eventAfterRef.current,
+              eventAttemptRef.current,
+            ),
+            apiClient.listArtifacts(threadId, runId),
+            apiClient.listThreadContext?.(threadId).catch(() => undefined) ??
+              Promise.resolve(undefined),
+            apiClient.getThreadContinuity?.(threadId).catch(() => undefined) ??
+              Promise.resolve(undefined),
+            apiClient.getThread?.(threadId).catch(() => undefined) ?? Promise.resolve(undefined),
+          ]);
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
           eventAttemptRef.current = eventPage.attemptId;
           eventAfterRef.current = eventPage.nextAfter;
@@ -755,10 +727,6 @@ function AuthenticatedWorkspace({
             dispatch({ type: "threadContext", items: threadContext });
           }
           if (apiClient.getThreadContinuity !== undefined) setContinuity(continuityStatus);
-          dispatch({ type: "modelWireTraces", page: modelWireTraces, mode: "refreshHead" });
-          if (modelWireTraceTail !== undefined) {
-            dispatch({ type: "modelWireTraces", page: modelWireTraceTail, mode: "append" });
-          }
           if (
             !eventPage.hasMore &&
             (latest.status === "succeeded" ||
@@ -780,17 +748,14 @@ function AuthenticatedWorkspace({
               return;
             }
           }
-          // 终态也必须追完已抵达尾页后的跨页新增诊断；waiting 仍不因普通 Run 状态保持短轮询。
           if (
             !recoveryRequired &&
-            (shouldContinueRunPolling(
+            shouldContinueRunPolling(
               eventPage.hasMore,
               latest.status,
               continuityStatus?.sandboxState,
               latest.executionStatus,
-            ) ||
-              modelWireTraceTail?.hasMore === true ||
-              (modelWireTraces.hasMore && !modelWireTracePaginationAdvancedRef.current))
+            )
           ) {
             timer = window.setTimeout(() => void poll(), 1200);
           }

@@ -1,6 +1,8 @@
 export type ScheduledTaskStatus = "active" | "paused" | "completed" | "deleted";
 export type ScheduledTaskOverlapPolicy = "coalesce" | "skip";
 
+export const DEFAULT_AUTOMATION_TIME_ZONE = "Asia/Shanghai";
+
 export interface ScheduledTask {
   readonly id: string;
   readonly tenantId: string;

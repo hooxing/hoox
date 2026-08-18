@@ -1,6 +1,10 @@
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
-import { automationToolMutation, createAutomationUpdatePiTool } from "./automation-update-tool.js";
+import {
+  AutomationUpdateToolArgumentsSchema,
+  automationToolMutation,
+  createAutomationUpdatePiTool,
+} from "./automation-update-tool.js";
 
 const task = {
   id: "automation_1",
@@ -20,7 +24,18 @@ const task = {
 };
 
 describe("automation_update Pi 工具", () => {
-  it("把创建请求绑定到当前 Thread 并在 durable 回执后返回", async () => {
+  it("创建 schema 允许省略时区", () => {
+    expect(
+      Value.Check(AutomationUpdateToolArgumentsSchema, {
+        action: "create",
+        name: "日报",
+        instruction: "生成日报",
+        first_run_at: "2026-08-18T09:00:00.000+08:00",
+      }),
+    ).toBe(true);
+  });
+
+  it("把创建请求绑定到当前 Thread、默认使用东八区并在 durable 回执后返回", async () => {
     const order: string[] = [];
     const tool = createAutomationUpdatePiTool(
       {
@@ -30,6 +45,7 @@ describe("automation_update Pi 工具", () => {
             action: "create",
             sourceThreadId: "thread_1",
             targetThreadId: "thread_1",
+            timezone: "Asia/Shanghai",
           });
           return task;
         },
@@ -52,8 +68,7 @@ describe("automation_update Pi 工具", () => {
         action: "create",
         name: "日报",
         instruction: "生成日报",
-        first_run_at: "2026-08-18T01:00:00.000Z",
-        timezone: "Asia/Shanghai",
+        first_run_at: "2026-08-18T09:00:00.000+08:00",
       },
       undefined,
       () => undefined,
@@ -61,6 +76,21 @@ describe("automation_update Pi 工具", () => {
     );
     expect(order).toEqual(["apply", "automation_update:succeeded"]);
     expect(JSON.stringify(result)).toContain("automation_1");
+  });
+
+  it("创建请求显式指定时区时保留调用方选择", () => {
+    expect(
+      automationToolMutation(
+        {
+          action: "create",
+          name: "纽约提醒",
+          instruction: "发送提醒",
+          first_run_at: "2026-08-18T09:00:00.000-04:00",
+          timezone: "America/New_York",
+        },
+        "thread_1",
+      ),
+    ).toMatchObject({ timezone: "America/New_York" });
   });
 
   it("schema 无效时不触发写入并形成失败回执", async () => {

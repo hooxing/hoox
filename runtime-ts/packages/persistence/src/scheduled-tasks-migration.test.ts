@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
+import { scheduledTaskInputText } from "./pg-scheduled-tasks.js";
 
 describe("定时任务迁移", () => {
   it("建立任务、修订、触发记录、命令幂等与 Tenant RLS", async () => {
@@ -26,5 +27,13 @@ describe("定时任务迁移", () => {
     expect(roles).toContain('"scheduled_task_occurrences"');
     expect(assignments).toContain("FROM scheduled_tasks task");
     expect(assignments).toContain("occurrence.updated_at+interval '5 minutes'");
+  });
+
+  it("触发消息只发送任务语义，不把控制面的计划时间注入对话", () => {
+    const message = scheduledTaskInputText({ name: "每日摘要", instruction: "生成项目摘要" });
+    expect(message).toContain("任务名称：每日摘要");
+    expect(message).toContain("生成项目摘要");
+    expect(message).not.toContain("计划执行时间");
+    expect(message).not.toContain("2026-");
   });
 });

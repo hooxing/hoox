@@ -11,6 +11,7 @@ type DevelopmentAuthPrincipal = AuthPrincipal & Readonly<{ readonly tenantId: Te
 export function createDevelopmentAuthResolver(input: {
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly principals: readonly [DevelopmentAuthPrincipal, DevelopmentAuthPrincipal];
+  readonly fallback?: AuthContextResolver;
 }): AuthContextResolver {
   if (input.runtimeEnvironment === "production") {
     throw new Error("DEVELOPMENT_AUTH_FORBIDDEN_IN_PRODUCTION");
@@ -34,7 +35,9 @@ export function createDevelopmentAuthResolver(input: {
     ["Bearer dev-user-b", Object.freeze({ ...second })],
   ]);
   return Object.freeze({
-    resolve: async (input: { readonly authorization: string | undefined }) =>
-      accepted.get(input.authorization ?? ""),
+    resolve: async (context: {
+      readonly authorization: string | undefined;
+      readonly requestId: string;
+    }) => accepted.get(context.authorization ?? "") ?? input.fallback?.resolve(context),
   });
 }

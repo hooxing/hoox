@@ -28,6 +28,14 @@ import {
   type ThreadInputReceipt,
   type UploadedResource,
 } from "./api.js";
+import {
+  AccountAccess,
+  AccountMenu,
+  type AccountProfile,
+  type AccountSession,
+  clearAccountSession,
+  readAccountSession,
+} from "./account-access.js";
 import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages, loadAllRunEvents } from "./polling.js";
@@ -150,6 +158,9 @@ type TeamAwareWorkspaceApi = WorkspaceApi &
         | "listThreadsForTenant"
         | "setTenantId"
       >
+  > &
+  Partial<
+    Pick<RuntimeApi, "loginAccount" | "logoutAccount" | "registerAccount" | "setAccessToken">
   >;
 
 function resolveSkillCenterApi(client: WorkspaceApi): SkillCenterApi | undefined {
@@ -271,7 +282,15 @@ export function shouldFollowLatest(
   return scrollHeight - scrollTop - clientHeight <= threshold;
 }
 
-export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspaceApi }) {
+function AuthenticatedWorkspace({
+  apiClient,
+  accountProfile,
+  onSignOut,
+}: {
+  readonly apiClient: TeamAwareWorkspaceApi;
+  readonly accountProfile: AccountProfile;
+  readonly onSignOut: () => void;
+}) {
   const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
   const [input, setInput] = useState("");
@@ -1137,7 +1156,7 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
             云盘
           </button>
         )}
-        {teamWorkspaceApi !== undefined && (
+        {teamWorkspaceApi !== undefined && teams.length > 0 && (
           <TeamSwitcher
             teams={teams}
             {...(selectedTeam === undefined ? {} : { selectedTeamId: selectedTeam.id })}
@@ -1212,6 +1231,31 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
             ))
           )}
         </ThreadNavigation>
+        <AccountMenu
+          profile={accountProfile}
+          {...(selectedTeam === undefined ? {} : { activeTeamName: selectedTeam.displayName })}
+          canManageActiveTeam={
+            selectedTeam !== undefined &&
+            (selectedTeam.role === "owner" || selectedTeam.role === "admin")
+          }
+          {...(teamWorkspaceApi === undefined
+            ? {}
+            : {
+                onOpenTeamCenter: () => {
+                  setTeamCenterOpen(true);
+                  if (isCompact) setNavigationOpen(false);
+                },
+                ...(selectedTeam === undefined
+                  ? {}
+                  : {
+                      onOpenTeamManagement: () => {
+                        setTeamManagementOpen(true);
+                        if (isCompact) setNavigationOpen(false);
+                      },
+                    }),
+              })}
+          onSignOut={onSignOut}
+        />
       </NavigationSidebar>
       <section className="content" aria-label="对话工作区">
         <button
@@ -1421,6 +1465,51 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
         />
       )}
     </main>
+  );
+}
+
+export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspaceApi }) {
+  const [accountSession, setAccountSession] = useState<AccountSession | undefined>(() =>
+    readAccountSession(window.localStorage),
+  );
+  useLayoutEffect(() => {
+    apiClient.setAccessToken?.(accountSession?.accessToken);
+  }, [accountSession?.accessToken, apiClient]);
+
+  if (accountSession === undefined) {
+    return (
+      <AccountAccess
+        api={{
+          registerAccount: (input) => {
+            if (apiClient.registerAccount === undefined) {
+              return Promise.reject(new Error("ACCOUNT_API_UNAVAILABLE"));
+            }
+            return apiClient.registerAccount(input);
+          },
+          loginAccount: (input) => {
+            if (apiClient.loginAccount === undefined) {
+              return Promise.reject(new Error("ACCOUNT_API_UNAVAILABLE"));
+            }
+            return apiClient.loginAccount(input);
+          },
+        }}
+        onAuthenticated={setAccountSession}
+      />
+    );
+  }
+
+  return (
+    <AuthenticatedWorkspace
+      apiClient={apiClient}
+      accountProfile={accountSession.profile}
+      onSignOut={() => {
+        const logout = apiClient.logoutAccount?.();
+        clearAccountSession(window.localStorage);
+        apiClient.setAccessToken?.(undefined);
+        setAccountSession(undefined);
+        void logout?.catch(() => undefined);
+      }}
+    />
   );
 }
 

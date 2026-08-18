@@ -142,6 +142,7 @@ const personalizationSettingsTables = new Set([
   "user_personalization_settings",
   "team_personalization_settings",
 ]);
+const localAccountTables = new Set(["user_accounts", "user_sessions"]);
 const skillPublicationTables = new Set([
   "platform_skill_operators",
   "skill_publication_submissions",
@@ -152,6 +153,8 @@ const skillPublicationTables = new Set([
 
 const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["app_users", new Set(["SELECT", "INSERT"])],
+  ["user_accounts", new Set(["SELECT", "INSERT"])],
+  ["user_sessions", new Set(["SELECT", "INSERT", "DELETE"])],
   ["tenants", new Set(["SELECT", "INSERT"])],
   ["memberships", new Set(["SELECT", "INSERT"])],
   ["user_personalization_settings", new Set(["SELECT", "INSERT"])],
@@ -706,6 +709,15 @@ async function hasPersonalizationSettingsState(
   return result.rows[0]?.present === true;
 }
 
+async function hasLocalAccountState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.user_accounts', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.user_sessions', $1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasSkillRuntimeState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.run_skill_snapshots', $1::text)) IS NOT NULL
@@ -1070,6 +1082,9 @@ async function activeTablePolicy(
   }
   if (!(await hasPersonalizationSettingsState(client, schema))) {
     for (const table of personalizationSettingsTables) policy.delete(table);
+  }
+  if (!(await hasLocalAccountState(client, schema))) {
+    for (const table of localAccountTables) policy.delete(table);
   }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
@@ -1745,6 +1760,7 @@ async function activeTeamCoordinatorTablePolicy(
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   if (!(await hasTeamCollaborationState(client, schema))) return new Map();
   const policy = new Map(await activeTablePolicy(client, schema));
+  for (const table of localAccountTables) policy.set(table, new Set());
   policy.set("team_member_directory", new Set(["SELECT", "INSERT"]));
   if (await hasPersonalizationSettingsState(client, schema)) {
     policy.set("team_personalization_settings", new Set(["SELECT", "INSERT"]));
@@ -2438,6 +2454,12 @@ export async function bootstrapRuntimeAccessOnClient(
        GRANT SELECT ON TABLE ${schema}.team_personalization_settings TO ${role};
        GRANT UPDATE(content,apply_to_team_tasks,version,updated_at)
          ON TABLE ${schema}.user_personalization_settings TO ${role}`,
+    );
+  }
+  if (await hasLocalAccountState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.user_accounts TO ${role};
+       GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.user_sessions TO ${role}`,
     );
   }
   await client.query(

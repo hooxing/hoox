@@ -20,7 +20,7 @@ M7 当前切片已提供生产 API JWT 身份、API/Scheduler/Worker 固定真�
 - `GET /v1/threads/:threadId/runs/:runId/artifacts`：只列出已发布的 deliverable Artifact，不包含 diagnostic/trace。
 - `GET /v1/threads/:threadId/runs/:runId/artifacts/:artifactId/preview` 与 `/download`：使用短期 S3 预签名 URL；两者均在签名前后重验租户成员关系、Run/Thread 归属、授权修订和完整固定 Blob 身份。preview 仅允许纯文本、安全图片和 PDF inline；HTML/SVG/XML 等主动内容只能使用带净化文件名的 attachment 下载。
 
-所有接口复用 `Authorization: Bearer dev-user-a|dev-user-b` 的本地 fixture 身份，运行时从已认证身份重建 TenantScope，忽略任何客户端声明的 tenant。API 仍只监听回环地址。
+开发 API 同时支持两类本地身份：`Authorization: Bearer dev-user-a|dev-user-b` 继续用于固定黑盒 fixture；Web 注册/登录由 `/v1/auth/register` 与 `/v1/auth/login` 签发随机不透明会话，并为每个账号原子创建独立 User、个人 Tenant 与 owner Membership。运行时始终从已认证身份重建 TenantScope，忽略客户端声明的个人 tenant。API 仍只监听回环地址，本地账号端点不会装配到 production API。
 
 迁移完成后，用显式且可重复执行的命令初始化 `.env` 中两个开发身份，再启动开发 API：
 
@@ -31,7 +31,7 @@ Invoke-RestMethod "http://$($env:API_LISTEN_HOST):$($env:API_LISTEN_PORT)/live"
 Invoke-RestMethod "http://$($env:API_LISTEN_HOST):$($env:API_LISTEN_PORT)/ready"
 ```
 
-`dev:identity:provision` 仅允许 `RUNTIME_ENV=development` 且 `DEV_AUTH_ENABLED=true`，通过 Runtime 数据库角色、正式 Tenant Repository、事务和 RLS 创建两个个人 Tenant 及 owner Membership；A/B 必须同时使用不同 User 和不同 Tenant，重复执行会验证并保留完全匹配的聚合，发现占用或关系冲突会失败关闭。`THREAD_CURSOR_SIGNING_KEYS` 格式为逗号分隔的 `kid:base64url-key`，每个 key 解码后必须为 32 到 64 字节。开发凭据只接受 `Bearer dev-user-a` 和 `Bearer dev-user-b`；它们是本机 fixture 选择器，不是认证方案，因此 API 只允许监听字面回环地址 `127.0.0.1`、`::1` 或 `localhost`，其中 `localhost` 会直接规范化为 `127.0.0.1`，不会经过 DNS 或接受其他 hostname。`S3_PUBLIC_ENDPOINT` 同样必须为字面回环 origin，并与 API 和 Web（默认 `127.0.0.1:4173`）分离，推荐使用 `127.0.0.1:19000`。服务不会在启动时偷偷创建 Tenant 或 Membership，缺少开发身份数据时业务请求会返回 404。
+`dev:identity:provision` 仅允许 `RUNTIME_ENV=development` 且 `DEV_AUTH_ENABLED=true`，通过 Runtime 数据库角色、正式 Tenant Repository、事务和 RLS 创建两个个人 Tenant 及 owner Membership；A/B 必须同时使用不同 User 和不同 Tenant，重复执行会验证并保留完全匹配的聚合，发现占用或关系冲突会失败关闭。`THREAD_CURSOR_SIGNING_KEYS` 格式为逗号分隔的 `kid:base64url-key`，每个 key 解码后必须为 32 到 64 字节。固定开发凭据只接受 `Bearer dev-user-a` 和 `Bearer dev-user-b`；它们是本机 fixture 选择器。development Web 还可使用服务端本地账号会话，但该能力不属于生产认证方案。因此 API 只允许监听字面回环地址 `127.0.0.1`、`::1` 或 `localhost`，其中 `localhost` 会直接规范化为 `127.0.0.1`，不会经过 DNS 或接受其他 hostname。`S3_PUBLIC_ENDPOINT` 同样必须为字面回环 origin，并与 API 和 Web（默认 `127.0.0.1:4173`）分离，推荐使用 `127.0.0.1:19000`。服务不会在启动时偷偷创建 Tenant 或 Membership，缺少开发身份数据时业务请求会返回 404。
 
 ## 开发 Agent Worker
 

@@ -115,7 +115,7 @@ describe("PostgreSQL 记忆 Outbox", () => {
       2,
     ]);
     expect(outbox?.sql).not.toContain("input_text");
-    expect(wake?.values).toEqual(["tenant-memory", 0]);
+    expect(wake?.values).toEqual(["tenant-memory", expect.any(Date)]);
   });
 
   it("领取任务后仅从 Context 恢复 user 与 assistant 文本并保持 claim 栅栏", async () => {

@@ -206,7 +206,7 @@ describe("PostgreSQL 动态 Worker Tenant 调度", () => {
     expect(wake?.sql).toContain("ON CONFLICT (tenant_id) DO UPDATE");
     expect(wake?.sql).toContain("WHEN worker_tenant_assignments.state='claimed' THEN 'claimed'");
     expect(wake?.sql).toContain("LEAST(");
-    expect(wake?.values).toEqual(["team-dynamic", 0]);
+    expect(wake?.values).toEqual(["team-dynamic", expect.any(Date)]);
     expect(coordinator.statements).toEqual([]);
   });
 

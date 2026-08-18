@@ -13,7 +13,7 @@
 | 本机仓库目录 | `D:\hopesoft-hooxing\project\agent runtime\cubesandbox-agent-runtime` | `D:\hopesoft-hooxing\project\agent runtime\hoox` | 过渡期可建立旧路径 Junction |
 | 根 npm 包 | `aisay-runtime` | `hoox` | 不提供兼容包 |
 | 第一方包 scope | `@aisay/*` | `@hoox/*` | 必须整仓同步 |
-| GitHub 远端 | `https://github.com/hooxing/cubesandbox-agent-runtime.git` | 计划迁移到 `https://github.com/hooxing/hoox.git` | GitHub 仓库改名完成前保留旧 URL |
+| GitHub 远端 | `https://github.com/hooxing/cubesandbox-agent-runtime.git` | `https://github.com/hooxing/hoox.git` | 2026-08-18 已完成改名；旧 URL 仅作为 GitHub 重定向入口 |
 | 计划公开入口 | `hoox.aisay.cc` | 暂时保留 | 域名迁移需单独决策 |
 
 ## 不随品牌修改的标识
@@ -119,14 +119,14 @@ D:\hopesoft-hooxing\project\agent runtime\hoox
 
 ## GitHub 远端迁移
 
-GitHub 仓库完成改名后，每台电脑分别执行：
+GitHub 仓库已于 2026-08-18 从 `hooxing/cubesandbox-agent-runtime` 改名为 `hooxing/hoox`。仓库 ID、提交历史和默认分支保持在同一仓库中。每台电脑分别执行：
 
 ```powershell
 git -C 'D:\hopesoft-hooxing\project\agent runtime\hoox' remote set-url origin https://github.com/hooxing/hoox.git
 git -C 'D:\hopesoft-hooxing\project\agent runtime\hoox' remote -v
 ```
 
-Git remote 位于每个 clone 自己的 `.git/config`，不会通过普通 Git 提交同步。远端仓库尚未创建或改名时，不执行上述命令。
+Git remote 位于每个 clone 自己的 `.git/config`，不会通过普通 Git 提交同步。旧 URL 当前可由 GitHub 重定向，但不得依赖该兼容路径作为长期配置，也不要重新创建同名旧仓库。
 
 ## 第二台电脑同步
 

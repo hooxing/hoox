@@ -1,5 +1,5 @@
-import type { DeliverFileSessionBinding, DeliverFileSourcePort } from "@aisay/tool-router";
-import { type SandboxWorkspacePort, workspaceRelativePath } from "@aisay/workspace";
+import type { DeliverFileSessionBinding, DeliverFileSourcePort } from "@hoox/tool-router";
+import { type SandboxWorkspacePort, workspaceRelativePath } from "@hoox/workspace";
 
 /** 把 deliver_file 的绝对路径收窄为当前 CubeSandbox 的 /workspace 二进制读取。 */
 export class SandboxDeliverFileSource implements DeliverFileSourcePort {

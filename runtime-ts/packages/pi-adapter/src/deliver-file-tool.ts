@@ -1,4 +1,4 @@
-import type { ToolObservationResult } from "@aisay/context-policy";
+import type { ToolObservationResult } from "@hoox/context-policy";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { createSchemaInvalidArgumentsBridge } from "./tools.js";

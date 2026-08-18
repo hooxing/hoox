@@ -1,5 +1,5 @@
 import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
-import type { TodoSnapshot } from "@aisay/domain";
+import type { TodoSnapshot } from "@hoox/domain";
 
 export type ToolPresentation = {
   readonly action:

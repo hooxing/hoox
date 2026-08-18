@@ -1,4 +1,4 @@
-import type { CreateSkillSubmissionRequest, SkillSubmissionDto } from "@aisay/protocol";
+import type { CreateSkillSubmissionRequest, SkillSubmissionDto } from "@hoox/protocol";
 import { describe, expect, it, vi } from "vitest";
 import { AdminApiError, filesToRequests, resolvePackagePaths, SkillAdminApi } from "./api.js";
 
@@ -12,7 +12,7 @@ function submission(status: SkillSubmissionDto["status"] = "draft"): SkillSubmis
     publisher: "Cube",
     version: "1.2.3",
     description: "检查代码变更",
-    compatibility: "AISay Runtime >= 1",
+    compatibility: "Hoox >= 1",
     sourceUrl: "https://example.com/code-review",
     sourceRevision: "abc123",
     licenseSpdx: "MIT",

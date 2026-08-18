@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { UserId } from "@aisay/domain";
+import type { UserId } from "@hoox/domain";
 import { SkillServiceError, skillInvariant } from "./errors.js";
 import type {
   SkillPublicationAuthorizationPort,

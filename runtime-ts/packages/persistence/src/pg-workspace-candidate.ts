@@ -6,7 +6,7 @@ import {
   WorkspaceDependencyError,
   type WorkspaceExecutionPolicy,
   type WorkspaceManifest,
-} from "@aisay/workspace";
+} from "@hoox/workspace";
 import type { Pool, PoolClient } from "pg";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
 

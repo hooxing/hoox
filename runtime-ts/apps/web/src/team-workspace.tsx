@@ -3,7 +3,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { ApiError, type TeamMember, type TeamPersonalization, type TeamSummary } from "./api.js";
 import { personalizationSize } from "./personalization.js";
 
-const TEAM_SWITCHER_EXPANDED_STORAGE_KEY = "aisay.team-switcher.expanded";
+const TEAM_SWITCHER_EXPANDED_STORAGE_KEY = "hoox.team-switcher.expanded";
 
 function readTeamSwitcherExpanded(): boolean {
   try {

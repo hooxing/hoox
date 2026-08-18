@@ -8,16 +8,16 @@ import {
   type ModelBudgetDescriptor,
   parseControlledToolReceipt,
   type TokenizerPort,
-} from "@aisay/context-policy";
-import { type RolloutCompatibilityIdentity, sha256Digest } from "@aisay/domain";
+} from "@hoox/context-policy";
+import { type RolloutCompatibilityIdentity, sha256Digest } from "@hoox/domain";
 import {
   type AvailableSkillPromptInput,
   buildRuntimeSystemPrompt,
   buildToolCapabilityManifest,
   type RuntimePromptInput,
   type ToolCapabilityManifest,
-} from "@aisay/prompt-builder";
-import type { SandboxHandle } from "@aisay/sandbox";
+} from "@hoox/prompt-builder";
+import type { SandboxHandle } from "@hoox/sandbox";
 import { lazyStream } from "@earendil-works/pi-ai/api/lazy";
 import type {
   Api,

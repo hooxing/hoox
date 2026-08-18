@@ -18,7 +18,7 @@ describe("Windows development 一键启动脚本", () => {
     expect(script).toContain("runtime-ts\\apps\\api\\dist\\development-main.js");
     expect(script).toContain("runtime-ts\\apps\\agent-worker\\dist\\development-main.js");
     expect(script).toContain("runtime-ts\\apps\\scheduler\\dist\\development-main.js");
-    expect(script).toContain("@aisay/web");
+    expect(script).toContain("@hoox/web");
 
     expect(script).not.toContain("docker compose");
     expect(script).not.toContain("pnpm install");
@@ -43,7 +43,7 @@ describe("Windows development 一键启动脚本", () => {
     expect(script).toContain("是否启动 Skill Admin API 和 Skill Admin Web？[y/N]");
     expect(script).toContain('$skillAnswer.Trim() -match "^(y|yes|1|是)$"');
     expect(script).toContain("if ($startSkillServices)");
-    expect(script).toContain("@aisay/admin-web");
+    expect(script).toContain("@hoox/admin-web");
   });
 
   it("复用已运行的应用进程，只启动缺失服务", async () => {

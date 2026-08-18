@@ -1,5 +1,5 @@
-import type { ControlledToolReceiptSource, ToolObservationPolicy } from "@aisay/context-policy";
-import type { RolloutCompatibilityIdentity } from "@aisay/domain";
+import type { ControlledToolReceiptSource, ToolObservationPolicy } from "@hoox/context-policy";
+import type { RolloutCompatibilityIdentity } from "@hoox/domain";
 import {
   type BlobStore,
   createDurableTraceBlobPersistence,
@@ -7,8 +7,8 @@ import {
   type PgRuntimeRolloutRepository,
   type TraceBlobCommitRepository,
   type TrustedRolloutContext,
-} from "@aisay/persistence";
-import { type ControlledRolloutProjection, projectLoadedRuntimeRecovery } from "@aisay/pi-adapter";
+} from "@hoox/persistence";
+import { type ControlledRolloutProjection, projectLoadedRuntimeRecovery } from "@hoox/pi-adapter";
 import { createDurableObservationRecorderFactory } from "./pi-session-factory.js";
 import type { AgentSessionFactoryPort } from "./ports.js";
 

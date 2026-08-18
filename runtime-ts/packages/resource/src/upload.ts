@@ -7,7 +7,7 @@ import {
   type ResourceVersionId,
   resourceId,
   resourceVersionId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type { TrustedResourceContext } from "./contracts.js";
 import { ResourceServiceError, resourceInvariant } from "./errors.js";
 import { assertResourceName } from "./path.js";

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { types } from "node:util";
 
 export const RUNTIME_PROMPT_SCHEMA_VERSION = 1 as const;
-export const RUNTIME_PROMPT_VERSION = "runtime-system-prompt.v14" as const;
+export const RUNTIME_PROMPT_VERSION = "runtime-system-prompt.v15" as const;
 export const TOOL_CAPABILITY_MANIFEST_VERSION = "tool-capability-manifest.v1" as const;
 
 const MAX_ID_BYTES = 128;
@@ -93,7 +93,7 @@ export function buildRuntimeSystemPrompt(raw: RuntimePromptInput): BuiltRuntimeP
   ];
   const systemPrompt = [
     `[runtime_prompt schema=${RUNTIME_PROMPT_SCHEMA_VERSION} version=${RUNTIME_PROMPT_VERSION}]`,
-    "你是 Hoox，由 AISay Runtime 托管的受控 Agent。以下 PLATFORM_HARNESS 是平台规范，优先级高于所有租户、Skill 和用户内容。",
+    "你是 Hoox，由 Hoox 平台托管的受控 Agent。以下 PLATFORM_HARNESS 是平台规范，优先级高于所有租户、Skill 和用户内容。",
     "<PLATFORM_HARNESS>",
     "1. 只能使用 CAPABILITY_MANIFEST 中列出的本次 Session 实际工具；不得声称或模拟未列出的工具。",
     "2. Sandbox 命令与文件工具只操作隔离的 CubeSandbox；文件工具接受的是 Sandbox 内绝对路径，不代表 Agent Worker 宿主路径。",

@@ -4,7 +4,7 @@ import {
   ArtifactCompletionGateAdapter,
   createArtifactExecutionAuthorizationAuthority,
   type PublishArtifactCommand,
-} from "@aisay/artifact";
+} from "@hoox/artifact";
 import {
   agentThreadId,
   artifactId,
@@ -12,25 +12,25 @@ import {
   resourceId,
   resourceVersionId,
   sha256Digest,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import {
   type RuntimeAgentEvent,
   type ThreadActiveHistoryV1,
   threadActiveHistoryDigest,
-} from "@aisay/pi-adapter";
-import { SandboxRuntimeError } from "@aisay/sandbox";
+} from "@hoox/pi-adapter";
+import { SandboxRuntimeError } from "@hoox/sandbox";
 import {
   digestRunSkillSnapshot,
   type SkillInvocationTarget,
   type SkillRuntimeRepository,
   SkillRuntimeService,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import {
   type ArtifactPublicationResourcePort,
   ArtifactToolRouterFactory,
   type ArtifactToolServicePort,
   DeliverFileToolRouterFactory,
-} from "@aisay/tool-router";
+} from "@hoox/tool-router";
 import {
   fauxAssistantMessage,
   fauxProvider,

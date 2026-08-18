@@ -10,31 +10,31 @@ import {
   tenantId,
   threadId,
   transitionRun,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type {
   CoreRepositories,
   TenantBundle,
   TenantScope,
   ThreadListCursor,
-} from "@aisay/persistence";
+} from "@hoox/persistence";
 import type {
   CreateThreadInputRequest,
   RunDto,
   ThreadDto,
   ThreadInputReceiptDto,
   ThreadPageDto,
-} from "@aisay/protocol";
-import { MAX_RUN_INPUT_UTF8_BYTES } from "@aisay/protocol";
-import { toRunDto, toThreadDto } from "@aisay/protocol-mapper";
+} from "@hoox/protocol";
+import { MAX_RUN_INPUT_UTF8_BYTES } from "@hoox/protocol";
+import { toRunDto, toThreadDto } from "@hoox/protocol-mapper";
 import {
   appendAttachmentsToLatestUserPrompt,
   type ResourceAttachmentResolverPort,
-} from "@aisay/resource";
+} from "@hoox/resource";
 import {
   resolveExplicitSkillInvocation,
   SkillRuntimeError,
   type ExplicitSkillInvocation,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import type { ApiCreateCapability } from "./capabilities.js";
 import { InvalidThreadCursorError } from "./cursor.js";
 import type {

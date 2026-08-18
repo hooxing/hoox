@@ -10,7 +10,7 @@ import {
   type ScheduledTaskManagementPort,
   type ScheduledTaskMutation,
   type ScheduledTaskMutationResult,
-} from "@aisay/automation";
+} from "@hoox/automation";
 import {
   createRun,
   isoTimestamp,
@@ -18,7 +18,7 @@ import {
   tenantId as domainTenantId,
   threadId,
   userId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { PgCoreRepositories } from "./pg-core-repositories.js";

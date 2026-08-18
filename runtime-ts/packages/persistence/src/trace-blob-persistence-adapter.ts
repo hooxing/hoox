@@ -3,7 +3,7 @@ import type {
   StableTraceBlobIdentity,
   TraceBlobPersistencePort,
   TraceBlobPersistenceResult,
-} from "@aisay/context-policy";
+} from "@hoox/context-policy";
 import {
   type BlobCommitSnapshot,
   type BlobCommitStatePort,

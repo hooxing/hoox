@@ -2,7 +2,7 @@ import {
   createArtifactExecutionAuthorizationAuthority,
   SimpleDeliveryCleanupResultUnknownError,
   SimpleDeliveryCommitResultUnknownError,
-} from "@aisay/artifact";
+} from "@hoox/artifact";
 import {
   artifactId,
   isoTimestamp,
@@ -12,9 +12,9 @@ import {
   tenantId,
   threadId,
   workspaceId,
-} from "@aisay/domain";
-import type { ConsumedExternalEffectAuthorization, ExecutionScope } from "@aisay/run-contracts";
-import type { SandboxHandle } from "@aisay/sandbox";
+} from "@hoox/domain";
+import type { ConsumedExternalEffectAuthorization, ExecutionScope } from "@hoox/run-contracts";
+import type { SandboxHandle } from "@hoox/sandbox";
 import { describe, expect, it } from "vitest";
 import { type DeliverFileReadResult, DeliverFileToolRouterFactory } from "./deliver-file.js";
 

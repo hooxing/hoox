@@ -1,4 +1,4 @@
-# `@aisay/persistence`
+# `@hoox/persistence`
 
 本包保存 Runtime 的持久化边界。目前已实现核心业务 Repository、S3/MinIO Blob Store、ADR-0012 定义的 PostgreSQL stable blob 生命周期，以及 ADR-0014 定义的 Run Worker 执行事实与事务适配器。
 
@@ -16,7 +16,7 @@ Resource Library 已增加 PostgreSQL 目录与显式提升提交：生产装配
 - 普通 Worker 不能重领 running Run，双租约过期后由恢复协调器调用 `recoverExpiredAttempt`；
 - `PgBackedSandboxSessionRegistry` 负责把已取得的 Sandbox 先登记为数据库事实，再暴露给 Worker；本阶段不包含 cleanup Outbox consumer 和周期恢复扫描器。
 
-执行端口和协议位于 `@aisay/run-contracts`，应用目录只保留兼容导出。生产表全部 FORCE RLS，Runtime 角色使用表/列白名单且没有 routine 权限。
+执行端口和协议位于 `@hoox/run-contracts`，应用目录只保留兼容导出。生产表全部 FORCE RLS，Runtime 角色使用表/列白名单且没有 routine 权限。
 
 ## Workspace candidate 交接
 

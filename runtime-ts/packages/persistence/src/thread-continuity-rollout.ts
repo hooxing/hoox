@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ThreadContinuityMetricsPort } from "@aisay/run-contracts";
-import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
+import type { ThreadContinuityMetricsPort } from "@hoox/run-contracts";
+import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import type { Pool, PoolClient } from "pg";
 import type { ThreadContinuityReadPort, ThreadContinuityStatusView } from "./ports.js";
 import { withTenantTransaction } from "./postgres.js";

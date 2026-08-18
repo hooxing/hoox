@@ -7,16 +7,16 @@ import {
   type TenantId,
   tenantId,
   type UserId,
-} from "@aisay/domain";
-import type { MemoryRetriever } from "@aisay/memory";
-import type { RuntimeAgentEvent } from "@aisay/pi-adapter";
-import type { UncertainLifecycleEvent } from "@aisay/sandbox";
-import { FakeSandboxHandle } from "@aisay/sandbox/testing";
+} from "@hoox/domain";
+import type { MemoryRetriever } from "@hoox/memory";
+import type { RuntimeAgentEvent } from "@hoox/pi-adapter";
+import type { UncertainLifecycleEvent } from "@hoox/sandbox";
+import { FakeSandboxHandle } from "@hoox/sandbox/testing";
 import {
   createWorkspaceManifest,
   WorkspaceApplicationError,
   WorkspaceDependencyError,
-} from "@aisay/workspace";
+} from "@hoox/workspace";
 import { describe, expect, it, vi } from "vitest";
 import {
   outboxPayloadDigest,

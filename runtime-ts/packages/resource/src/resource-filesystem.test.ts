@@ -7,7 +7,7 @@ import {
   sha256Digest,
   tenantId,
   userId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import { describe, expect, it, vi } from "vitest";
 import type { ResourceCatalog, TrustedResourceContext } from "./contracts.js";
 import {

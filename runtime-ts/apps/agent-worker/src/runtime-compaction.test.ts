@@ -1,13 +1,13 @@
-import { sha256Digest } from "@aisay/domain";
+import { sha256Digest } from "@hoox/domain";
 import {
   type ThreadActiveHistoryV1,
   type TrustedPiModelContextCapability,
   threadActiveHistoryDigest,
-} from "@aisay/pi-adapter";
+} from "@hoox/pi-adapter";
 import type {
   ThreadContextCompactionCommitPort,
   ThreadContinuityMetricsPort,
-} from "@aisay/run-contracts";
+} from "@hoox/run-contracts";
 import { describe, expect, it, vi } from "vitest";
 import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
 

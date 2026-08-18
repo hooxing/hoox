@@ -2,7 +2,7 @@ import {
   assertRunPersonalizationSnapshot,
   normalizePersonalizationContent,
   type RunPersonalizationSnapshot,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type { Pool, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {

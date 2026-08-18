@@ -24,11 +24,11 @@ import {
   type WorkspaceRevisionId,
   workspaceId,
   workspaceRevisionId,
-} from "@aisay/domain";
-import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@aisay/pi-adapter";
-import { FakeSandboxHandle } from "@aisay/sandbox/testing";
-import type { RunSkillSnapshot } from "@aisay/skill";
-import { createWorkspaceManifest } from "@aisay/workspace";
+} from "@hoox/domain";
+import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@hoox/pi-adapter";
+import { FakeSandboxHandle } from "@hoox/sandbox/testing";
+import type { RunSkillSnapshot } from "@hoox/skill";
+import { createWorkspaceManifest } from "@hoox/workspace";
 import {
   digestCanonical,
   isExternalCancellationFinalizationMutation,

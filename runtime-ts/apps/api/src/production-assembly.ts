@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { isoTimestamp, runId, threadId, workspaceId } from "@aisay/domain";
+import { isoTimestamp, runId, threadId, workspaceId } from "@hoox/domain";
 import {
   BlobSkillContentStore,
   type CreateS3BlobStoreConfig,
@@ -9,15 +9,15 @@ import {
   DurableResourceUploadBlobAdapter,
   probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX,
-} from "@aisay/persistence";
-import { type ServiceAssemblyFactory, startServiceProcess } from "@aisay/process-runtime";
+} from "@hoox/persistence";
+import { type ServiceAssemblyFactory, startServiceProcess } from "@hoox/process-runtime";
 import {
   createResourceFilesystemCapabilityCodec,
   HistoryFileLibraryService,
   ResourceAttachmentResolver,
   ResourceUploadService,
-} from "@aisay/resource";
-import { SkillCenterService } from "@aisay/skill";
+} from "@hoox/resource";
+import { SkillCenterService } from "@hoox/skill";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec, parseThreadCursorSigningKeys } from "./cursor.js";
@@ -53,13 +53,13 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
       ssl: configuration.databaseSsl,
       schema: configuration.databaseSchema,
       expectedRuntimeRole: configuration.databaseRuntimeRole,
-      applicationName: "aisay-runtime-api-production",
+      applicationName: "hoox-api-production",
       teamCoordinator: {
         connectionString: configuration.databaseTeamCoordinatorUrl,
         ssl: configuration.databaseTeamCoordinatorSsl,
         schema: configuration.databaseSchema,
         expectedRuntimeRole: configuration.databaseTeamCoordinatorRole,
-        applicationName: "aisay-runtime-api-team-coordinator-production",
+        applicationName: "hoox-api-team-coordinator-production",
       },
       serialQueueV2Enabled: configuration.serialQueueV2Enabled,
       historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
@@ -203,7 +203,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
 export function startProductionApiProcess(
   configuration: ApiProcessConfiguration,
   options: Readonly<{
-    signalSource?: import("@aisay/process-runtime").ProcessSignalSource;
+    signalSource?: import("@hoox/process-runtime").ProcessSignalSource;
     onShutdownFailure?: (error: Error) => void;
   }> = {},
 ) {

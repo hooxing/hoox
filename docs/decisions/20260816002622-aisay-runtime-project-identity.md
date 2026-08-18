@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受，2026-08-16。该决策只修改本项目的品牌与发布身份，不替代既有 CubeSandbox、E2B 等 Sandbox Provider 技术边界。
+已替代，2026-08-18 由 ADR-20260818144124 替代。本文保留当时的项目身份迁移背景；CubeSandbox、E2B 等 Sandbox Provider 技术边界继续有效。
 
 ## 背景
 

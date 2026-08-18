@@ -7,12 +7,12 @@ import {
   type ThreadActiveHistoryV1,
   type TrustedPiModelContextCapability,
   threadActiveHistoryDigest,
-} from "@aisay/pi-adapter";
+} from "@hoox/pi-adapter";
 import type {
   ExecutionFence,
   ThreadContextCompactionCommitPort,
   ThreadContinuityMetricsPort,
-} from "@aisay/run-contracts";
+} from "@hoox/run-contracts";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { digestCanonical } from "./mutation-protocol.js";

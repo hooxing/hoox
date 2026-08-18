@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ScheduledTaskManagementPort, ScheduledTaskMutation } from "@aisay/automation";
+import type { ScheduledTaskManagementPort, ScheduledTaskMutation } from "@hoox/automation";
 import {
   DomainError,
   membershipId,
@@ -8,7 +8,7 @@ import {
   tenantId,
   threadId,
   userId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type {
   BlobStore,
   CoreRepositories,
@@ -22,8 +22,8 @@ import type {
   ThreadContinuityReadPort,
   TeamCollaborationPort,
   ThreadForkPort,
-} from "@aisay/persistence";
-import { assertBlobRef, BlobStoreError, PersistenceError, sha256Hex } from "@aisay/persistence";
+} from "@hoox/persistence";
+import { assertBlobRef, BlobStoreError, PersistenceError, sha256Hex } from "@hoox/persistence";
 import {
   AccountProfileSuccessEnvelopeSchema,
   CreateScheduledTaskRequestSchema,
@@ -131,7 +131,7 @@ import {
   UninstallSkillQuerySchema,
   type UploadedResourceDto,
   UploadedResourceSuccessEnvelopeSchema,
-} from "@aisay/protocol";
+} from "@hoox/protocol";
 import {
   type ResourceAttachmentResolverPort,
   type HistoryFileLibraryFile,
@@ -142,13 +142,13 @@ import {
   ResourceServiceError,
   type ResourceUploadPort,
   stripAttachmentsFromUserFacingPrompt,
-} from "@aisay/resource";
+} from "@hoox/resource";
 import {
   type SkillCenterService,
   type SkillContentStore,
   type SkillFilesystemCatalog,
   SkillServiceError,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import Fastify, {
   type FastifyInstance,
   type FastifyReply,
@@ -416,10 +416,10 @@ function personalizationContent(raw: string): string {
 async function readForkMessages(
   reader: ThreadContextReadPort,
   scope: Readonly<{
-    tenantId: import("@aisay/domain").TenantId;
-    userId: import("@aisay/domain").UserId;
+    tenantId: import("@hoox/domain").TenantId;
+    userId: import("@hoox/domain").UserId;
   }>,
-  sourceThreadId: import("@aisay/domain").ThreadId,
+  sourceThreadId: import("@hoox/domain").ThreadId,
 ) {
   const messages: Array<{
     role: "user" | "assistant";
@@ -476,11 +476,11 @@ export function createApiApp(
     ajv: {
       customOptions: { removeAdditional: false },
       onCreate: (ajv) => {
-        ajv.addFormat("aisay-iso-utc-timestamp-v1", true);
+        ajv.addFormat("hoox-iso-utc-timestamp-v1", true);
       },
     },
     serializerOpts: {
-      ajv: { formats: { "aisay-iso-utc-timestamp-v1": true } },
+      ajv: { formats: { "hoox-iso-utc-timestamp-v1": true } },
     },
     logger:
       options.logger === false

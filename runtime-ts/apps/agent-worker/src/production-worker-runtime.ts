@@ -4,7 +4,7 @@ import type {
   PgClaimedWorkerTenantAssignment,
   PgRunDispatchOutbox,
   PgWorkerTenantAssignments,
-} from "@aisay/persistence";
+} from "@hoox/persistence";
 import type {
   ArtifactPublicationPort,
   CancellationPort,
@@ -19,7 +19,7 @@ import type {
   ScheduledTask,
   ThreadSandboxProviderPort,
   WorkspaceRevisionVerifierPort,
-} from "@aisay/run-contracts";
+} from "@hoox/run-contracts";
 import {
   type CubeGatewayOptions,
   CubeSandboxGateway,
@@ -34,7 +34,7 @@ import {
   type TenantResourceVolumePort,
   type TrustedSandboxSessionCapability,
   type UncertainLifecycleEvent,
-} from "@aisay/sandbox";
+} from "@hoox/sandbox";
 import type { RunWorker, RunWorkerResult } from "./run-worker.js";
 import type { SandboxResourceFilesystemMaterializerPort } from "./sandbox-resource-filesystem-materializer.js";
 
@@ -252,14 +252,10 @@ export class ProviderSandboxSessionRegistry
     );
     try {
       await this.sandboxInitializer?.initialize({ sandbox, signal: SANDBOX_PREFLIGHT_SIGNAL });
-      const output = await sandbox.command("printf aisay-runtime-sandbox-ready", {
+      const output = await sandbox.command("printf hoox-sandbox-ready", {
         timeoutMs: Math.min(this.lifecycleTimeoutMs, 5_000),
       });
-      if (
-        output.exitCode !== 0 ||
-        output.stderr !== "" ||
-        output.stdout !== "aisay-runtime-sandbox-ready"
-      ) {
+      if (output.exitCode !== 0 || output.stderr !== "" || output.stdout !== "hoox-sandbox-ready") {
         throw new SandboxRuntimeError("PROTOCOL", "Sandbox 开发执行预检返回异常结果");
       }
     } finally {

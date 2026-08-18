@@ -6,8 +6,8 @@ import {
   membershipId,
   tenantId,
   userId,
-} from "@aisay/domain";
-import type { TenantBundle, TenantRepository } from "@aisay/persistence";
+} from "@hoox/domain";
+import type { TenantBundle, TenantRepository } from "@hoox/persistence";
 import {
   booleanEnvironmentField,
   EnvironmentConfigurationError,
@@ -17,7 +17,7 @@ import {
   selectDeclaredEnvironment,
   stringEnvironmentField,
   urlEnvironmentField,
-} from "@aisay/process-runtime";
+} from "@hoox/process-runtime";
 import {
   type ApiDevelopmentPrincipal,
   assertDevelopmentPrincipalsIsolated,

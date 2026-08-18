@@ -1,4 +1,4 @@
-import type { IsoTimestamp, TenantId, UserId } from "@aisay/domain";
+import type { IsoTimestamp, TenantId, UserId } from "@hoox/domain";
 
 export interface TrustedSkillContext {
   readonly tenantId: TenantId;

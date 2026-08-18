@@ -8,9 +8,9 @@ import type {
   ThreadSandboxTerminalCommandV1,
   ThreadSandboxTerminalReceiptV1,
   ThreadContinuityMetricsPort,
-} from "@aisay/run-contracts";
-import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
-import type { SandboxProviderKey } from "@aisay/sandbox";
+} from "@hoox/run-contracts";
+import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
+import type { SandboxProviderKey } from "@hoox/sandbox";
 import type { Pool, PoolClient } from "pg";
 import { withRetriedSerializableTenantTransaction, withTenantTransaction } from "./postgres.js";
 

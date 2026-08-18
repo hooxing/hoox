@@ -1,4 +1,4 @@
-import { isoTimestamp, userId, type UserId } from "@aisay/domain";
+import { isoTimestamp, userId, type UserId } from "@hoox/domain";
 import { describe, expect, it } from "vitest";
 import type {
   SkillPublicationAuthorizationPort,

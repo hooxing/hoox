@@ -1,6 +1,6 @@
 # Anthropic PPTX Skill 来源
 
-本目录仅作为 AISay 本地开发环境的受限测试 fixture，不构成生产分发授权。除本文件外，目录内容从上游固定提交机械复制，未做修改。
+本目录仅作为 Hoox 本地开发环境的受限测试 fixture，不构成生产分发授权。除本文件外，目录内容从上游固定提交机械复制，未做修改。
 
 - 上游仓库：`https://github.com/anthropics/skills`
 - 上游子目录：`skills/pptx`

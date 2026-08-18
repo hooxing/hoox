@@ -1,4 +1,4 @@
-import { tenantId } from "@aisay/domain";
+import { tenantId } from "@hoox/domain";
 import { describe, expect, it, vi } from "vitest";
 import { CubeTenantResourceVolume } from "./cube-volume.js";
 

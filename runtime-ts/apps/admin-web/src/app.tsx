@@ -2,7 +2,7 @@ import type {
   CreateSkillSubmissionRequest,
   SkillPublicationStatus,
   SkillSubmissionDto,
-} from "@aisay/protocol";
+} from "@hoox/protocol";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   AdminApiError,
@@ -791,7 +791,7 @@ export function App({ apiClient = defaultApi }: { readonly apiClient?: SkillAdmi
           A
         </div>
         <div>
-          <span className="eyebrow">AISay Runtime</span>
+          <span className="eyebrow">Hoox</span>
           <h1>技能发布管理台</h1>
         </div>
         <button

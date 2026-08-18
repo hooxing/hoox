@@ -70,3 +70,9 @@
 ## 可逆性与恢复
 
 代码身份可以整体回退本 ADR 对应提交，但写入新 JWT audience、Compose 卷、Mem0 source 或新 Skill 版本后，不得通过修改历史数据伪造旧身份。目录和多机恢复步骤记录在 `docs/operations/hoox-project-rename-recovery.md`；发生问题时优先恢复目录 Junction 或远端 URL，不直接编辑 Codex SQLite 和 Session 文件。
+
+## 实施记录
+
+- 2026-08-18：提交 `0d497b5` 完成第一方项目身份、包作用域、部署标识、Prompt v15、Skill 1.3.0、锁文件和 SBOM 迁移。
+- 2026-08-18：GitHub 私有仓库从 `hooxing/cubesandbox-agent-runtime` 原地改名为 `hooxing/hoox`，本机 `origin` 已更新为 `https://github.com/hooxing/hoox.git`。
+- 2026-08-18：本机真实目录迁移到 `D:\\hopesoft-hooxing\\project\\agent runtime\\hoox`，旧目录保留 Junction 兼容历史 Codex 任务。

@@ -1,19 +1,19 @@
 import { createHash } from "node:crypto";
-import { resourceId, resourceVersionId, tenantId } from "@aisay/domain";
-import type { BlobStore } from "@aisay/persistence";
+import { resourceId, resourceVersionId, tenantId } from "@hoox/domain";
+import type { BlobStore } from "@hoox/persistence";
 import {
   createResourceFilesystemCapabilityCodec,
   type HistoryFilesystemCatalog,
   type HistoryFilesystemFile,
   type ResourceFilesystemCatalog,
   type ResourceFilesystemFile,
-} from "@aisay/resource";
+} from "@hoox/resource";
 import type {
   SkillContentStore,
   SkillFilesystemCatalog,
   SkillFilesystemEntry,
   SkillFilesystemFile,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import Fastify from "fastify";
 import { describe, expect, it, vi } from "vitest";
 import { registerResourceFilesystemHttp } from "./resource-filesystem-http.js";

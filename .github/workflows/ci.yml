@@ -165,7 +165,7 @@ jobs:
           M4_DATABASE_WORKER_COORDINATOR_PASSWORD: ci-worker-coordinator-placeholder-password
           M4_DATABASE_TEAM_COORDINATOR_PASSWORD: ci-team-coordinator-placeholder-password
         # 超级用户凭据只在本步骤创建受限角色；迁移与黑盒测试均不再使用它。
-        run: pnpm --filter @aisay/persistence prepare:ci:m4
+        run: pnpm --filter @hoox/persistence prepare:ci:m4
 
       - name: 运行 M4 真实 PostgreSQL 黑盒 Gate
         env:

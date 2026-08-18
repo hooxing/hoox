@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { tenantId, userId } from "@aisay/domain";
+import { tenantId, userId } from "@hoox/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { publishDevelopmentCsvPdfSkill } from "../../runtime-ts/packages/persistence/src/development-csv-pdf-publisher.js";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
@@ -217,7 +217,12 @@ afterAll(async () => {
 });
 
 describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
-  it("固定 CSV 转 PDF publisher 重复发布保持同一目录版本与文件清单", async () => {
+  it("固定 CSV 转 PDF publisher 将旧品牌目录迁移到 Hoox，并保持新版本幂等", async () => {
+    await migrator.query(
+      `INSERT INTO skills(id,canonical_key,publisher,display_name,recommended_version,status)
+       VALUES ('skill_cube_csv_to_pdf','csv-to-pdf','AISay','CSV 转 PDF',NULL,'active')`,
+    );
+
     const first = await publishDevelopmentCsvPdfSkill({
       sourceRoot: csvPdfSourceRoot,
       pool: migrator,
@@ -230,21 +235,26 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
     });
 
     expect(first).toEqual(second);
+    expect(
+      await migrator.query<{ publisher: string; recommended_version: string }>(
+        "SELECT publisher,recommended_version FROM skills WHERE id='skill_cube_csv_to_pdf'",
+      ),
+    ).toMatchObject({ rows: [{ publisher: "Hoox", recommended_version: "1.3.0" }] });
     expect(first).toEqual({
-      version: "1.2.0",
+      version: "1.3.0",
       fileCount: 3,
-      packageDigest: "57d6931e0b01e44d6a8aa81c0df45c61324e08b534268c7347eb15e1b8aa5c42",
+      packageDigest: "84a8d48b82b54cbf24d60c140189ecb1a08cd02ad691f1782104f35b74c1c77c",
     });
     expect(
       await migrator.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM skill_versions
-          WHERE skill_id='skill_cube_csv_to_pdf' AND version='1.2.0'`,
+          WHERE skill_id='skill_cube_csv_to_pdf' AND version='1.3.0'`,
       ),
     ).toMatchObject({ rows: [{ count: "1" }] });
     expect(
       await migrator.query<{ count: string }>(
         `SELECT count(*)::text AS count FROM skill_version_files
-          WHERE skill_id='skill_cube_csv_to_pdf' AND skill_version='1.2.0'`,
+          WHERE skill_id='skill_cube_csv_to_pdf' AND skill_version='1.3.0'`,
       ),
     ).toMatchObject({ rows: [{ count: "3" }] });
   });
@@ -426,14 +436,14 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
       await repository.install({
         context: teamScope,
         canonicalKey: "csv-to-pdf",
-        versionSelector: "1.2.0",
+        versionSelector: "1.3.0",
         invocationName: "csv-to-pdf",
         idempotencyKey: "skill-install-team-0001",
         requestDigest: "4".repeat(64),
       }),
     ).toMatchObject({
       outcome: "installed",
-      installation: { status: "enabled", skillVersion: "1.2.0" },
+      installation: { status: "enabled", skillVersion: "1.3.0" },
     });
 
     const candidateRunId = `skill-team-run-${unique}`;
@@ -453,7 +463,7 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         {
           invocationName: "csv-to-pdf",
           canonicalKey: "csv-to-pdf",
-          skillVersion: "1.2.0",
+          skillVersion: "1.3.0",
         },
       ],
     });

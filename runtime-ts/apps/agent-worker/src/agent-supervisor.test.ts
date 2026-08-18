@@ -1,9 +1,9 @@
-import { agentThreadId, isoTimestamp, runId, tenantId, threadId, workspaceId } from "@aisay/domain";
+import { agentThreadId, isoTimestamp, runId, tenantId, threadId, workspaceId } from "@hoox/domain";
 import {
   type RuntimeAgentEvent,
   type ThreadActiveHistoryV1,
   threadActiveHistoryDigest,
-} from "@aisay/pi-adapter";
+} from "@hoox/pi-adapter";
 import { describe, expect, it, vi } from "vitest";
 import { AgentSupervisor } from "./agent-supervisor.js";
 import { digestCanonical } from "./mutation-protocol.js";

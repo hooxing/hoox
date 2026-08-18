@@ -197,28 +197,28 @@ $services = @(
     Command = "& node '$apiEntry'"
     HealthUrl = "$apiBaseUrl/live"
     Port = $apiPort
-    ProcessPattern = "(@aisay[\\/]api|apps[\\/]+api|dev:api)"
+    ProcessPattern = "(@hoox[\\/]api|apps[\\/]+api|dev:api)"
   },
   [pscustomobject]@{
     Name = "Agent Worker"
     Command = "& node '$workerEntry'"
     HealthUrl = $null
     Port = $null
-    ProcessPattern = "(@aisay[\\/]agent-worker|apps[\\/]+agent-worker|dev:worker)"
+    ProcessPattern = "(@hoox[\\/]agent-worker|apps[\\/]+agent-worker|dev:worker)"
   },
   [pscustomobject]@{
     Name = "Scheduler"
     Command = "& node '$schedulerEntry'"
     HealthUrl = $null
     Port = $null
-    ProcessPattern = "(@aisay[\\/]scheduler|apps[\\/]+scheduler|dev:scheduler)"
+    ProcessPattern = "(@hoox[\\/]scheduler|apps[\\/]+scheduler|dev:scheduler)"
   },
   [pscustomobject]@{
     Name = "Web"
-    Command = "corepack pnpm --filter `"@aisay/web`" dev"
+    Command = "corepack pnpm --filter `"@hoox/web`" dev"
     HealthUrl = "http://127.0.0.1:4173"
     Port = 4173
-    ProcessPattern = "(@aisay[\\/]web|apps[\\/]+web|dev:web|vite(?:\\.js)?[^\\r\\n]*--port\\s+4173)"
+    ProcessPattern = "(@hoox[\\/]web|apps[\\/]+web|dev:web|vite(?:\\.js)?[^\\r\\n]*--port\\s+4173)"
   }
 )
 if ($startSkillServices) {
@@ -228,14 +228,14 @@ if ($startSkillServices) {
       Command = "& node '$skillAdminEntry'"
       HealthUrl = "$skillAdminBaseUrl/live"
       Port = $skillAdminPort
-      ProcessPattern = "(@aisay[\\/]skill-admin-api|apps[\\/]+skill-admin-api|dev:skill-admin:api)"
+      ProcessPattern = "(@hoox[\\/]skill-admin-api|apps[\\/]+skill-admin-api|dev:skill-admin:api)"
     },
     [pscustomobject]@{
       Name = "Skill Admin Web"
-      Command = "corepack pnpm --filter `"@aisay/admin-web`" dev"
+      Command = "corepack pnpm --filter `"@hoox/admin-web`" dev"
       HealthUrl = "http://127.0.0.1:4174"
       Port = 4174
-      ProcessPattern = "(@aisay[\\/]admin-web|apps[\\/]+admin-web|dev:skill-admin:web|vite(?:\\.js)?[^\\r\\n]*--port\\s+4174)"
+      ProcessPattern = "(@hoox[\\/]admin-web|apps[\\/]+admin-web|dev:skill-admin:web|vite(?:\\.js)?[^\\r\\n]*--port\\s+4174)"
     }
   )
 }
@@ -284,7 +284,7 @@ foreach ($service in $servicesToStart) {
   $escapedTitle = $service.Name.Replace("'", "''")
   $windowLines = @(
     "Set-Location -LiteralPath '$escapedRepo'",
-    "`$Host.UI.RawUI.WindowTitle = 'Cube Runtime - $escapedTitle'",
+    "`$Host.UI.RawUI.WindowTitle = 'Hoox - $escapedTitle'",
     $service.Command,
     "if (`$LASTEXITCODE -ne 0) { Write-Host '进程异常退出，退出码：'`$LASTEXITCODE -ForegroundColor Red }"
   )

@@ -1,6 +1,6 @@
-import { isoTimestamp, runId, sha256Digest, tenantId, threadId, workspaceId } from "@aisay/domain";
-import type { StableBlobRef } from "@aisay/persistence";
-import type { ConsumedExternalEffectAuthorization, ExecutionScope } from "@aisay/run-contracts";
+import { isoTimestamp, runId, sha256Digest, tenantId, threadId, workspaceId } from "@hoox/domain";
+import type { StableBlobRef } from "@hoox/persistence";
+import type { ConsumedExternalEffectAuthorization, ExecutionScope } from "@hoox/run-contracts";
 import { describe, expect, it } from "vitest";
 import { createArtifactExecutionAuthorizationAuthority } from "./authorization.js";
 import {

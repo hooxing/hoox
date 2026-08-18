@@ -9,7 +9,7 @@ export const IdSchema = Type.String({
   pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$",
 });
 
-const isoUtcTimestampFormat = "aisay-iso-utc-timestamp-v1";
+const isoUtcTimestampFormat = "hoox-iso-utc-timestamp-v1";
 
 export function isIsoUtcTimestamp(value: string): boolean {
   const matched = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{3}))?Z$/u.exec(value);

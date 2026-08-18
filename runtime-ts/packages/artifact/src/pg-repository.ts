@@ -6,13 +6,13 @@ import {
   tenantId,
   threadId,
   type WorkspaceRevisionId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import {
   type StableBlobRef,
   TransactionCommitUnknownError,
   withTenantTransaction,
-} from "@aisay/persistence";
-import type { ExecutionScope } from "@aisay/run-contracts";
+} from "@hoox/persistence";
+import type { ExecutionScope } from "@hoox/run-contracts";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type {
   ArtifactExecutionAuthorization,

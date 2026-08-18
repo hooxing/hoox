@@ -5,14 +5,14 @@ import {
   PgArtifactDeliveryRepository,
   PgSimpleDeliveredFileRepository,
   SimpleArtifactDeliveryService,
-} from "@aisay/artifact";
-import { tenantId } from "@aisay/domain";
+} from "@hoox/artifact";
+import { tenantId } from "@hoox/domain";
 import {
   type Mem0DevelopmentConfiguration,
   Mem0PlatformMemoryProvider,
   MemoryIngestionConsumer,
   parseMem0DevelopmentEnvironment,
-} from "@aisay/memory";
+} from "@hoox/memory";
 import {
   BlobSkillContentStore,
   createPostgresPool,
@@ -34,6 +34,8 @@ import {
   PgRunCancellationReader,
   PgRunDispatchOutbox,
   PgRuntimeRolloutRepository,
+  PgScheduledTaskDueConsumer,
+  PgScheduledTaskRepository,
   PgSkillFilesystemCatalog,
   PgSkillRuntimeRepository,
   PgThreadContextCompactionRepository,
@@ -48,14 +50,14 @@ import {
   probeS3BlobStore,
   RUNTIME_BLOB_OBJECT_PREFIX,
   ThreadContextBodyPersistence,
-} from "@aisay/persistence";
+} from "@hoox/persistence";
 import {
   assertOfficialDeepSeekV4FlashCapabilities,
   bindTrustedPiModelContextCapability,
   isOfficialDeepSeekV4FlashModel,
   loadTrustedModelTokenizerCapability,
   officialDeepSeekV4FlashModelProtocol,
-} from "@aisay/pi-adapter";
+} from "@hoox/pi-adapter";
 import {
   assertProductionInheritedEnvironment,
   booleanEnvironmentField,
@@ -72,16 +74,16 @@ import {
   startServiceProcess,
   stringEnvironmentField,
   urlEnvironmentField,
-} from "@aisay/process-runtime";
-import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
+} from "@hoox/process-runtime";
+import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import {
   CubeTenantResourceVolume,
   resolveCubeProxyRouting,
   type SandboxProviderKey,
   type TenantResourceVolumePort,
-} from "@aisay/sandbox";
-import { SkillRuntimeService } from "@aisay/skill";
-import { DeliverFileToolRouterFactory } from "@aisay/tool-router";
+} from "@hoox/sandbox";
+import { SkillRuntimeService } from "@hoox/skill";
+import { DeliverFileToolRouterFactory } from "@hoox/tool-router";
 import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { SandboxDeliverFileSource } from "./deliver-file-source.js";
@@ -776,8 +778,8 @@ async function assembleWorkerRuntime(
     expectedRuntimeRole: configuration.databaseRuntimeRole,
     applicationName:
       runtimeMode === "production"
-        ? "aisay-runtime-agent-worker-production"
-        : "aisay-runtime-agent-worker-development",
+        ? "hoox-agent-worker-production"
+        : "hoox-agent-worker-development",
   });
   const coordinatorPool = createPostgresPool({
     connectionString: configuration.databaseWorkerCoordinatorUrl,
@@ -788,8 +790,8 @@ async function assembleWorkerRuntime(
     expectedRuntimeRole: configuration.databaseWorkerCoordinatorRole,
     applicationName:
       runtimeMode === "production"
-        ? "aisay-runtime-agent-worker-coordinator-production"
-        : "aisay-runtime-agent-worker-coordinator-development",
+        ? "hoox-agent-worker-coordinator-production"
+        : "hoox-agent-worker-coordinator-development",
     maxConnections: 2,
   });
   try {
@@ -983,6 +985,11 @@ async function assembleWorkerRuntime(
       ),
       authorizationVerifier: artifactAuthorization.verifier,
     });
+    const scheduledTasks = new PgScheduledTaskRepository(pool);
+    const scheduledTaskConsumer = new PgScheduledTaskDueConsumer(pool, {
+      historyFilesystemEnabled: configuration.historyFilesystemEnabled,
+      historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
+    });
     const sessions = new PiWorkerSessionFactory(
       model,
       modelRuntime,
@@ -1079,6 +1086,19 @@ async function assembleWorkerRuntime(
       skillRuntime,
       modelContext,
       internalTrajectoryDiagnostics,
+      async (input) => {
+        const result = await scheduledTasks.mutateFromRun(input);
+        if (result.outcome === "applied" || result.outcome === "replayed") return result.task;
+        const code =
+          result.outcome === "not_found"
+            ? "AUTOMATION_NOT_FOUND"
+            : result.outcome === "not_authorized"
+              ? "AUTOMATION_NOT_AUTHORIZED"
+              : result.outcome === "invalid_state"
+                ? "AUTOMATION_INVALID_STATE"
+                : "AUTOMATION_KEY_CONFLICT";
+        throw new Error(code);
+      },
     );
     const shutdown = new ProcessShutdown();
     const memoryProvider = configuration.memory.enabled
@@ -1166,6 +1186,7 @@ async function assembleWorkerRuntime(
             }),
           ];
           if (memoryConsumer !== undefined) tasks.push(memoryConsumer.drainTenant(tenantId));
+          tasks.push(scheduledTaskConsumer.drainTenant(tenantId));
           await Promise.allSettled(tasks);
         },
       },
@@ -1277,7 +1298,7 @@ export async function probeDevelopmentWorkerDependencies(
     ...(configuration.databaseSsl === undefined ? {} : { ssl: configuration.databaseSsl }),
     schema: configuration.databaseSchema,
     expectedRuntimeRole: configuration.databaseRuntimeRole,
-    applicationName: "aisay-runtime-agent-worker-preflight",
+    applicationName: "hoox-agent-worker-preflight",
   });
   const coordinatorPool = createPostgresPool({
     connectionString: configuration.databaseWorkerCoordinatorUrl,
@@ -1286,7 +1307,7 @@ export async function probeDevelopmentWorkerDependencies(
       : { ssl: configuration.databaseWorkerCoordinatorSsl }),
     schema: configuration.databaseSchema,
     expectedRuntimeRole: configuration.databaseWorkerCoordinatorRole,
-    applicationName: "aisay-runtime-agent-worker-coordinator-preflight",
+    applicationName: "hoox-agent-worker-coordinator-preflight",
     maxConnections: 1,
   });
   try {

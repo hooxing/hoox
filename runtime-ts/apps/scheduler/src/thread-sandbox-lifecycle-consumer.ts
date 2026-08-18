@@ -2,13 +2,13 @@ import type {
   PgThreadContinuityMetrics,
   ThreadSandboxLifecycleClaim,
   ThreadSandboxLifecycleResolution,
-} from "@aisay/persistence";
-import { runId, tenantId, threadId } from "@aisay/domain";
+} from "@hoox/persistence";
+import { runId, tenantId, threadId } from "@hoox/domain";
 import {
   type SandboxGateway,
   type SandboxProviderRegistry,
   SandboxRuntimeError,
-} from "@aisay/sandbox";
+} from "@hoox/sandbox";
 
 export interface ThreadSandboxLifecycleStore {
   claimNext(input: {

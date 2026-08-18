@@ -5,13 +5,13 @@ import {
   rehydrateResourceVersion,
   sha256Digest,
   tenantId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import {
   normalizeSearchQuery,
   type PersistedResourceUpload,
   type ResourceUploadCommitResult,
   type ResourceUploadRepository,
-} from "@aisay/resource";
+} from "@hoox/resource";
 import type { Pool, PoolClient } from "pg";
 import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";

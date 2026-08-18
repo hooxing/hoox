@@ -7,9 +7,9 @@ import type {
   ThreadId,
   UserId,
   WorkspaceRevisionId,
-} from "@aisay/domain";
-import type { StableBlobRef } from "@aisay/persistence";
-import type { ExecutionScope } from "@aisay/run-contracts";
+} from "@hoox/domain";
+import type { StableBlobRef } from "@hoox/persistence";
+import type { ExecutionScope } from "@hoox/run-contracts";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
 
 export type ArtifactPurpose = "deliverable" | "diagnostic" | "trace";

@@ -5,8 +5,8 @@ import {
   type IsoTimestamp,
   type TenantId,
   type UserId,
-} from "@aisay/domain";
-import type { ThreadListCursor } from "@aisay/persistence";
+} from "@hoox/domain";
+import type { ThreadListCursor } from "@hoox/persistence";
 import type { ThreadCursorCodec } from "./ports.js";
 
 const kidPattern = /^[A-Za-z0-9_-]{3,32}$/u;

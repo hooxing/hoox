@@ -6,21 +6,21 @@ import {
   type ArtifactPublicationSnapshot,
   type DeliverableDeclaration,
   type PublishArtifactCommand,
-} from "@aisay/artifact";
+} from "@hoox/artifact";
 import {
   type ArtifactId,
   artifactId,
   type ResourceVersionId,
   resourceVersionId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import {
   DeclareDeliverablesToolArgumentsSchema,
   type PublishArtifactToolArguments,
   PublishArtifactToolArgumentsSchema,
-} from "@aisay/pi-adapter";
-import type { ExecutionScope, ExternalEffectCall } from "@aisay/run-contracts";
-import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
-import { workspaceRelativePath } from "@aisay/workspace";
+} from "@hoox/pi-adapter";
+import type { ExecutionScope, ExternalEffectCall } from "@hoox/run-contracts";
+import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
+import { workspaceRelativePath } from "@hoox/workspace";
 import type { Static, TSchema } from "typebox";
 import { Value } from "typebox/value";
 

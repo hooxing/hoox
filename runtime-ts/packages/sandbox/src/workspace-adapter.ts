@@ -6,12 +6,12 @@ import type {
   SandboxWorkspaceSnapshot,
   SandboxWorkspacePort as WorkspacePort,
   WorkspaceTrustedScope,
-} from "@aisay/workspace";
+} from "@hoox/workspace";
 import {
   SANDBOX_WORKSPACE_ROOT,
   WorkspaceDependencyError,
   workspaceRelativePath,
-} from "@aisay/workspace";
+} from "@hoox/workspace";
 import { mapSandboxError, SandboxRuntimeError, settledOperation } from "./errors.js";
 
 const FILE_TYPE_FILE = "FILE_TYPE_FILE";
@@ -377,7 +377,7 @@ export class SandboxWorkspacePort implements WorkspacePort {
       .update(`${safeOperationKey(input.operationKey)}\0${relative}`)
       .digest("hex")
       .slice(0, 16);
-    const temporary = `/tmp/aisay-runtime-${suffix}-${randomUUID()}.tmp`;
+    const temporary = `/tmp/hoox-${suffix}-${randomUUID()}.tmp`;
 
     await this.mutateCall(
       "write_temporary_file",
@@ -1230,7 +1230,7 @@ try:
 
         elif OP == "finalize_write":
             tmp = decode_env("CUBE_WS_TEMP_B64")
-            if not tmp.startswith("/tmp/aisay-runtime-") or "/" in tmp[len("/tmp/"):]: fail(40)
+            if not tmp.startswith("/tmp/hoox-") or "/" in tmp[len("/tmp/"):]: fail(40)
             expected_size = int(os.environ["CUBE_WS_EXPECTED_SIZE"])
             expected_sha = os.environ["CUBE_WS_EXPECTED_SHA256"]
             try: source = os.open(tmp, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -1248,7 +1248,7 @@ try:
                 os.close(source)
             if len(body) != expected_size or hashlib.sha256(body).hexdigest() != expected_sha: fail(42)
             parent, name = open_parent(root, segments(decode_env("CUBE_WS_REL_B64")))
-            inner = ".aisay-runtime-" + expected_sha[:16] + "-" + secrets.token_hex(8) + ".tmp"
+            inner = ".hoox-" + expected_sha[:16] + "-" + secrets.token_hex(8) + ".tmp"
             created = False
             try:
                 try:
@@ -1275,7 +1275,7 @@ try:
 
         elif OP == "cleanup_temporary":
             tmp = decode_env("CUBE_WS_TEMP_B64")
-            if not tmp.startswith("/tmp/aisay-runtime-") or "/" in tmp[len("/tmp/"):]: fail(40)
+            if not tmp.startswith("/tmp/hoox-") or "/" in tmp[len("/tmp/"):]: fail(40)
             try: value = os.lstat(tmp)
             except FileNotFoundError:
                 emit_ok(); raise SystemExit(0)

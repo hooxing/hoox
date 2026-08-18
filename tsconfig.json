@@ -5,7 +5,7 @@
     "types": ["node", "vitest/globals"],
     "baseUrl": ".",
     "paths": {
-      "@aisay/context-policy": ["runtime-ts/packages/context-policy/src/index.ts"]
+      "@hoox/context-policy": ["runtime-ts/packages/context-policy/src/index.ts"]
     }
   },
   "include": [

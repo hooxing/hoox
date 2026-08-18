@@ -1,4 +1,4 @@
-import { createArtifactExecutionAuthorizationAuthority } from "@aisay/artifact";
+import { createArtifactExecutionAuthorizationAuthority } from "@hoox/artifact";
 import {
   artifactId,
   isoTimestamp,
@@ -8,14 +8,14 @@ import {
   tenantId,
   threadId,
   workspaceId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import {
   bindTrustedPiModelContextCapability,
   createSafePiSession,
   type RuntimeAgentEvent,
-} from "@aisay/pi-adapter";
-import type { ExternalEffectCall } from "@aisay/run-contracts";
-import { FakeSandboxHandle } from "@aisay/sandbox/testing";
+} from "@hoox/pi-adapter";
+import type { ExternalEffectCall } from "@hoox/run-contracts";
+import { FakeSandboxHandle } from "@hoox/sandbox/testing";
 import {
   fauxAssistantMessage,
   fauxProvider,

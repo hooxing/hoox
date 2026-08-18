@@ -4,7 +4,7 @@ import {
   HeadObjectCommand,
   PutObjectCommand,
 } from "@aws-sdk/client-s3";
-import { validateSkillPublicationPackage } from "@aisay/skill";
+import { validateSkillPublicationPackage } from "@hoox/skill";
 import { describe, expect, it } from "vitest";
 import {
   S3StableSkillPublisher,

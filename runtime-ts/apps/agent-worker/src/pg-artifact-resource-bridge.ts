@@ -1,10 +1,7 @@
-import type { ArtifactExecutionAuthorization } from "@aisay/artifact";
-import { resourceVersionId } from "@aisay/domain";
-import { type Pool, withTenantTransaction } from "@aisay/persistence";
-import type {
-  ArtifactPublicationResourcePort,
-  ArtifactPublicationSource,
-} from "@aisay/tool-router";
+import type { ArtifactExecutionAuthorization } from "@hoox/artifact";
+import { resourceVersionId } from "@hoox/domain";
+import { type Pool, withTenantTransaction } from "@hoox/persistence";
+import type { ArtifactPublicationResourcePort, ArtifactPublicationSource } from "@hoox/tool-router";
 
 /**
  * 已固定 ResourceVersion 的解析仍走 PG 事实源；Workspace 文件则由 intent + 最终

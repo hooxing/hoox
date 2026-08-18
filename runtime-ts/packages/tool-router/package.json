@@ -1,14 +1,14 @@
 {
-  "name": "@aisay/tool-router",
+  "name": "@hoox/tool-router",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "dependencies": {
-    "@aisay/artifact": "workspace:*",
-    "@aisay/domain": "workspace:*",
-    "@aisay/pi-adapter": "workspace:*",
-    "@aisay/run-contracts": "workspace:*",
-    "@aisay/workspace": "workspace:*",
+    "@hoox/artifact": "workspace:*",
+    "@hoox/domain": "workspace:*",
+    "@hoox/pi-adapter": "workspace:*",
+    "@hoox/run-contracts": "workspace:*",
+    "@hoox/workspace": "workspace:*",
     "typebox": "1.1.38"
   },
   "exports": "./dist/index.js",

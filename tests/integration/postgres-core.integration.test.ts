@@ -30,8 +30,8 @@ import {
   type Workspace,
   workspaceId,
   workspaceRevisionId,
-} from "@aisay/domain";
-import type { CoreRepositories, TenantScope, WorkspaceWriteScope } from "@aisay/persistence";
+} from "@hoox/domain";
+import type { CoreRepositories, TenantScope, WorkspaceWriteScope } from "@hoox/persistence";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApiApp } from "../../runtime-ts/apps/api/src/app.js";
 import { createThreadCursorCodec } from "../../runtime-ts/apps/api/src/cursor.js";
@@ -636,8 +636,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
   });
 
   it("checksum 同时绑定 down SQL，并拒绝孤立和重复版本", async () => {
-    const temporary = await mkdtemp(join(tmpdir(), "aisay-pg-migration-"));
-    const orphan = await mkdtemp(join(tmpdir(), "aisay-pg-orphan-"));
+    const temporary = await mkdtemp(join(tmpdir(), "hoox-pg-migration-"));
+    const orphan = await mkdtemp(join(tmpdir(), "hoox-pg-orphan-"));
     try {
       await Promise.all([
         copyFile(
@@ -1200,7 +1200,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
 
   it("migration SQL 创建 routine 时整次 up 回滚", async () => {
     const target = await createIsolatedMigrationTarget("migration_routine");
-    const temporary = await mkdtemp(join(tmpdir(), "aisay-pg-routine-migration-"));
+    const temporary = await mkdtemp(join(tmpdir(), "hoox-pg-routine-migration-"));
     try {
       const originalUp = await readFile(join(sourceMigrationDirectory, "0001_core.up.sql"), "utf8");
       await Promise.all([

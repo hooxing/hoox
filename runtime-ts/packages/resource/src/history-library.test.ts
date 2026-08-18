@@ -1,4 +1,4 @@
-import { tenantId, userId } from "@aisay/domain";
+import { tenantId, userId } from "@hoox/domain";
 import { describe, expect, it, vi } from "vitest";
 import { HistoryFileLibraryService, type HistoryFileLibraryCatalog } from "./history-library.js";
 

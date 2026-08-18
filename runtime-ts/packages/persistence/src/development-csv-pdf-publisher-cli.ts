@@ -18,7 +18,7 @@ if (process.env.RUNTIME_ENV !== "development") {
   } else {
     const pool = createPostgresPool({
       connectionString: configuration.databaseUrl,
-      applicationName: "aisay-runtime-development-csv-pdf-skill-publisher",
+      applicationName: "hoox-development-csv-pdf-skill-publisher",
       schema: configuration.databaseSchema,
     });
     try {

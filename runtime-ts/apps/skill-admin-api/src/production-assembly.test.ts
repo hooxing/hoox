@@ -27,13 +27,13 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("@aisay/api", () => ({
+vi.mock("@hoox/api", () => ({
   createProductionJwtAuthResolver: mocks.createProductionAuth,
   loadProductionTlsCredentials: mocks.loadTls,
   productionTrustProxy: mocks.trustProxy,
 }));
 
-vi.mock("@aisay/persistence", () => ({
+vi.mock("@hoox/persistence", () => ({
   createPostgresPool: mocks.createPool,
   probePostgres: mocks.probePostgres,
   probeS3StableSkillPublisher: mocks.probePublisher,
@@ -86,7 +86,7 @@ function productionConfiguration(): SkillAdminApiProcessConfiguration {
     production: {
       jwt: {
         issuer: "https://issuer.example.invalid/runtime",
-        audience: "aisay-runtime-skill-admin-api",
+        audience: "hoox-skill-admin-api",
         keys: [{ kid: "skill-admin-current", secret: Buffer.alloc(32, 17) }],
         clockSkewSeconds: 60,
         maxTokenLifetimeSeconds: 1_800,
@@ -139,7 +139,7 @@ describe("Skill 管理 API 固定装配", () => {
         ssl: { rejectUnauthorized: true },
         schema: "runtime",
         expectedRuntimeRole: "skill_publisher",
-        applicationName: "aisay-runtime-skill-admin-api-production",
+        applicationName: "hoox-skill-admin-api-production",
       });
       expect(mocks.publisherConstructed).toHaveBeenCalledWith(
         {

@@ -1,5 +1,5 @@
 {
-  "name": "@aisay/protocol-mapper",
+  "name": "@hoox/protocol-mapper",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -9,8 +9,8 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
-    "@aisay/domain": "workspace:*",
-    "@aisay/protocol": "workspace:*",
+    "@hoox/domain": "workspace:*",
+    "@hoox/protocol": "workspace:*",
     "@sinclair/typebox": "0.34.52"
   },
   "scripts": {

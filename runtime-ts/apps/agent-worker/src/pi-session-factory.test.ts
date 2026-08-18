@@ -4,7 +4,7 @@ import {
   ArtifactCompletionGateAdapter,
   createArtifactExecutionAuthorizationAuthority,
   type PublishArtifactCommand,
-} from "@aisay/artifact";
+} from "@hoox/artifact";
 import {
   agentThreadId,
   artifactId,
@@ -12,25 +12,25 @@ import {
   resourceId,
   resourceVersionId,
   sha256Digest,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import {
   type RuntimeAgentEvent,
   type ThreadActiveHistoryV1,
   threadActiveHistoryDigest,
-} from "@aisay/pi-adapter";
-import { SandboxRuntimeError } from "@aisay/sandbox";
+} from "@hoox/pi-adapter";
+import { SandboxRuntimeError } from "@hoox/sandbox";
 import {
   digestRunSkillSnapshot,
   type SkillInvocationTarget,
   type SkillRuntimeRepository,
   SkillRuntimeService,
-} from "@aisay/skill";
+} from "@hoox/skill";
 import {
   type ArtifactPublicationResourcePort,
   ArtifactToolRouterFactory,
   type ArtifactToolServicePort,
   DeliverFileToolRouterFactory,
-} from "@aisay/tool-router";
+} from "@hoox/tool-router";
 import {
   fauxAssistantMessage,
   fauxProvider,
@@ -57,6 +57,7 @@ import {
   FakeRecoveryMetrics,
   FakeRevisionVerifier,
   FakeSandboxRegistry,
+  FakeThreadContextBodies,
   fakeSeed,
 } from "./testing/fakes.js";
 
@@ -149,6 +150,79 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     } finally {
       session.dispose();
     }
+  });
+
+  it("同一安全点的多条 durable steer 进入下一次 Provider request body", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-batched-durable-steer"));
+    persistence.pendingThreadSteers.push(
+      {
+        scope,
+        receiptId: "input-batch-1",
+        targetTurnId: "turn-1",
+        inputText: "不要修改后端",
+        bodyDigest: sha256Digest("1".repeat(64)),
+      },
+      {
+        scope,
+        receiptId: "input-batch-2",
+        targetTurnId: "turn-1",
+        inputText: "保留现有字体",
+        bodyDigest: sha256Digest("2".repeat(64)),
+      },
+    );
+    let continuationMessages: readonly unknown[] = [];
+    const faux = fauxProvider({
+      api: `faux-worker-batched-steer-${Date.now()}`,
+      provider: `faux-worker-batched-steer-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage("第一步完成"),
+      (context) => {
+        continuationMessages = context.messages;
+        return fauxAssistantMessage("已采用两条补充输入");
+      },
+    ]);
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+    });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
+      recordStarted: async () => "recorded" as const,
+      record: async () => ({ outcome: "recorded" as const, observation: "", isTruncated: false }),
+    }));
+    const sandboxes = new FakeSandboxRegistry();
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+        threadContextBodies: new FakeThreadContextBodies(),
+      },
+      {
+        workerId: "pi-batched-durable-steer-worker",
+        runTimeoutMs: 60_000,
+        threadContextWriteEnabled: true,
+        threadInputRoutingV2Enabled: true,
+      },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(faux.state.callCount).toBe(2);
+    expect(continuationMessages.slice(-2)).toMatchObject([
+      { role: "user", content: [{ type: "text", text: "不要修改后端" }] },
+      { role: "user", content: [{ type: "text", text: "保留现有字体" }] },
+    ]);
+    expect(persistence.pendingThreadSteers).toHaveLength(0);
   });
 
   it("SubAgent 工具事件和副作用许可使用稳定的 Agent/Turn callId namespace", async () => {

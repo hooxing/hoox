@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { sha256Digest } from "@aisay/domain";
+import { sha256Digest } from "@hoox/domain";
 import { describe, expect, it } from "vitest";
 import type { BlobStore } from "./blob-store.js";
 import {

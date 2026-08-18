@@ -12,15 +12,15 @@ const sbomDirectory = join(repositoryRoot, "supply-chain", "sbom");
 const excludedVendorTreeDirectories = new Set(["dist", "node_modules", "coverage", ".tmp"]);
 
 export const productionSbomTargets = Object.freeze([
-  Object.freeze({ id: "api", packageName: "@aisay/api", fileName: "api.cdx.json" }),
+  Object.freeze({ id: "api", packageName: "@hoox/api", fileName: "api.cdx.json" }),
   Object.freeze({
     id: "scheduler",
-    packageName: "@aisay/scheduler",
+    packageName: "@hoox/scheduler",
     fileName: "scheduler.cdx.json",
   }),
   Object.freeze({
     id: "worker",
-    packageName: "@aisay/agent-worker",
+    packageName: "@hoox/agent-worker",
     fileName: "worker.cdx.json",
   }),
 ]);
@@ -160,19 +160,19 @@ function workspaceClosure(rootPackageName, policy) {
         version: item.manifest.version,
         ...(evidence === undefined ? {} : { license: evidence.license }),
         properties: {
-          "aisay:origin": evidence === undefined ? "workspace" : "vendor",
-          "aisay:workspace-path": relative(repositoryRoot, dirname(item.path)).split(sep).join("/"),
+          "hoox:origin": evidence === undefined ? "workspace" : "vendor",
+          "hoox:workspace-path": relative(repositoryRoot, dirname(item.path)).split(sep).join("/"),
           ...(evidence === undefined
             ? {}
             : {
-                "aisay:license-file": evidence.licenseFile,
-                "aisay:upstream-source-commit": evidence.upstreamCommit,
-                "aisay:source-file": evidence.sourceFile,
-                "aisay:local-modified": "true",
-                "aisay:local-patch-id": evidence.localPatchId,
-                "aisay:local-patch-file": evidence.patchFile,
-                "aisay:local-patch-sha256": evidence.patchSha256,
-                "aisay:patched-tree-sha256": evidence.patchedTreeSha256,
+                "hoox:license-file": evidence.licenseFile,
+                "hoox:upstream-source-commit": evidence.upstreamCommit,
+                "hoox:source-file": evidence.sourceFile,
+                "hoox:local-modified": "true",
+                "hoox:local-patch-id": evidence.localPatchId,
+                "hoox:local-patch-file": evidence.patchFile,
+                "hoox:local-patch-sha256": evidence.patchSha256,
+                "hoox:patched-tree-sha256": evidence.patchedTreeSha256,
               }),
         },
       }),
@@ -250,7 +250,7 @@ export function canonicalizeProductionPlatformComponents(components) {
         name,
         version,
         license,
-        properties: { "aisay:origin": "registry" },
+        properties: { "hoox:origin": "registry" },
       }),
     ),
   ];
@@ -276,7 +276,7 @@ function externalComponents(packageNames) {
               name: entry.name,
               version,
               license,
-              properties: { "aisay:origin": "registry" },
+              properties: { "hoox:origin": "registry" },
             }),
           );
         }
@@ -319,16 +319,16 @@ export function buildCycloneDx(input) {
         components: Object.freeze([
           Object.freeze({
             type: "application",
-            name: "aisay-runtime-offline-sbom-generator",
+            name: "hoox-offline-sbom-generator",
             version: "1",
           }),
         ]),
       }),
       properties: sortedProperties({
-        "aisay:dependency-source": "pnpm production installed closure",
-        "aisay:generator-network": "offline",
-        "aisay:lockfile": "pnpm-lock.yaml",
-        "aisay:lockfile-sha256": input.lockfileSha256,
+        "hoox:dependency-source": "pnpm production installed closure",
+        "hoox:generator-network": "offline",
+        "hoox:lockfile": "pnpm-lock.yaml",
+        "hoox:lockfile-sha256": input.lockfileSha256,
       }),
     }),
     components: Object.freeze(components),
@@ -346,7 +346,7 @@ export function evaluateLicensePolicy(components, policy) {
   const denied = new Set(policy.denied ?? []);
   const issues = [];
   for (const item of components) {
-    const origin = item.properties?.find((property) => property.name === "aisay:origin")?.value;
+    const origin = item.properties?.find((property) => property.name === "hoox:origin")?.value;
     if (origin === "workspace") continue;
     const license = item.licenses?.[0]?.license?.id;
     if (typeof license !== "string") {

@@ -1,5 +1,5 @@
-import type { TenantId } from "@aisay/domain";
-import type { RuntimeEnvironment } from "@aisay/process-runtime";
+import type { TenantId } from "@hoox/domain";
+import type { RuntimeEnvironment } from "@hoox/process-runtime";
 import type { AuthContextResolver, AuthPrincipal } from "./ports.js";
 
 type DevelopmentAuthPrincipal = AuthPrincipal & Readonly<{ readonly tenantId: TenantId }>;

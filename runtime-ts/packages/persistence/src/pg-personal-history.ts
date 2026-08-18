@@ -3,7 +3,7 @@ import {
   historyFilesystemDirectoryName,
   historyFilesystemEntryCollisionName,
   historyFilesystemEntryName,
-} from "@aisay/resource";
+} from "@hoox/resource";
 import type { PoolClient } from "pg";
 import { pendingHistoryDirectoryName } from "./pg-thread-title-generation.js";
 

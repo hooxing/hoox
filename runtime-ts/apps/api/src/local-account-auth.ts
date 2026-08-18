@@ -1,12 +1,12 @@
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
-import { tenantId, userId } from "@aisay/domain";
-import type { LocalAccountRepository } from "@aisay/persistence";
+import { tenantId, userId } from "@hoox/domain";
+import type { LocalAccountRepository } from "@hoox/persistence";
 import type {
   AccountProfileDto,
   AccountSessionDto,
   LoginAccountRequest,
   RegisterAccountRequest,
-} from "@aisay/protocol";
+} from "@hoox/protocol";
 import type { ApiClock, AuthContextResolver, AuthPrincipal } from "./ports.js";
 import { ApiFailure } from "./service.js";
 

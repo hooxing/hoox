@@ -1,5 +1,5 @@
 {
-  "name": "@aisay/api",
+  "name": "@hoox/api",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -9,14 +9,15 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
-    "@aisay/domain": "workspace:*",
-    "@aisay/persistence": "workspace:*",
-    "@aisay/process-runtime": "workspace:*",
-    "@aisay/protocol": "workspace:*",
-    "@aisay/protocol-mapper": "workspace:*",
-    "@aisay/resource": "workspace:*",
-    "@aisay/skill": "workspace:*",
-    "fastify": "5.10.0"
+    "@hoox/domain": "workspace:*",
+    "@hoox/persistence": "workspace:*",
+    "@hoox/process-runtime": "workspace:*",
+    "@hoox/protocol": "workspace:*",
+    "@hoox/protocol-mapper": "workspace:*",
+    "@hoox/resource": "workspace:*",
+    "@hoox/skill": "workspace:*",
+    "fastify": "5.10.0",
+    "@hoox/automation": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

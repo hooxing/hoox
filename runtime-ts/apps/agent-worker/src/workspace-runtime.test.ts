@@ -1,9 +1,9 @@
-import type { ExecutionScope, SandboxSessionRef } from "@aisay/run-contracts";
+import type { ExecutionScope, SandboxSessionRef } from "@hoox/run-contracts";
 import {
   type SandboxWorkspacePort,
   WorkspaceDependencyError,
   type WorkspaceExecutionPolicy,
-} from "@aisay/workspace";
+} from "@hoox/workspace";
 import { describe, expect, it, vi } from "vitest";
 import {
   ManifestWorkspaceRuntime,

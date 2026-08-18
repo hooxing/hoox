@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { runId, tenantId, threadId, userId, workspaceId } from "@aisay/domain";
+import { runId, tenantId, threadId, userId, workspaceId } from "@hoox/domain";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgModelWireTraceReadRepository } from "../../runtime-ts/packages/persistence/src/model-wire-trace-read.js";

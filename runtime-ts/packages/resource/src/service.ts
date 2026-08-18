@@ -1,9 +1,4 @@
-import type {
-  ResourceId,
-  ResourceVersionId,
-  WorkspaceId,
-  WorkspaceRevisionId,
-} from "@aisay/domain";
+import type { ResourceId, ResourceVersionId, WorkspaceId, WorkspaceRevisionId } from "@hoox/domain";
 import type {
   PromoteResourceRequest,
   PromoteResourceRequestResult,

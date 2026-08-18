@@ -1,9 +1,9 @@
-import type { CleanupClaim } from "@aisay/persistence";
+import type { CleanupClaim } from "@hoox/persistence";
 import {
   type SandboxGateway,
   type SandboxProviderRegistry,
   SandboxRuntimeError,
-} from "@aisay/sandbox";
+} from "@hoox/sandbox";
 
 export interface SandboxCleanupResolver {
   settle(

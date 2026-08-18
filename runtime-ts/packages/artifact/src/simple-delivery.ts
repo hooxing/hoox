@@ -6,8 +6,8 @@ import {
   resourceVersionId,
   type Sha256Digest,
   sha256Digest,
-} from "@aisay/domain";
-import type { PersistResourceBlobResult } from "@aisay/persistence";
+} from "@hoox/domain";
+import type { PersistResourceBlobResult } from "@hoox/persistence";
 import type { ArtifactExecutionAuthorization } from "./authorization.js";
 
 export interface SimpleDeliveredFileSnapshot {

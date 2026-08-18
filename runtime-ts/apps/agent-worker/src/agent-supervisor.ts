@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
-import { type AgentThreadId, agentThreadId } from "@aisay/domain";
+import { type AgentThreadId, agentThreadId } from "@hoox/domain";
 import {
   type RuntimeAgentEvent,
   type ThreadActiveHistoryV1,
   type ThreadHistoryMessageV1,
   threadActiveHistoryDigest,
-} from "@aisay/pi-adapter";
+} from "@hoox/pi-adapter";
 import { digestCanonical } from "./mutation-protocol.js";
 import type {
   AgentControlPersistencePort,

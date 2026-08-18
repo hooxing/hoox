@@ -143,6 +143,12 @@ const personalizationSettingsTables = new Set([
   "team_personalization_settings",
 ]);
 const localAccountTables = new Set(["user_accounts", "user_sessions"]);
+const scheduledTaskTables = new Set([
+  "scheduled_tasks",
+  "scheduled_task_revisions",
+  "scheduled_task_occurrences",
+  "scheduled_task_commands",
+]);
 const skillPublicationTables = new Set([
   "platform_skill_operators",
   "skill_publication_submissions",
@@ -208,6 +214,10 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["thread_history_file_entries", new Set(["SELECT", "INSERT"])],
   ["thread_title_generation_outbox", new Set(["SELECT", "INSERT"])],
   ["memory_ingestion_outbox", new Set(["SELECT", "INSERT"])],
+  ["scheduled_tasks", new Set(["SELECT", "INSERT"])],
+  ["scheduled_task_revisions", new Set(["SELECT", "INSERT"])],
+  ["scheduled_task_occurrences", new Set(["SELECT", "INSERT"])],
+  ["scheduled_task_commands", new Set(["SELECT", "INSERT"])],
   ["run_workspace_results", new Set(["SELECT", "INSERT"])],
   ["thread_context_streams", new Set(["SELECT", "INSERT"])],
   ["thread_context_entries", new Set(["SELECT", "INSERT"])],
@@ -416,6 +426,33 @@ const runtimeColumnUpdatePolicy = new Map<string, ReadonlySet<string>>([
       "completion_tokens",
       "duration_ms",
       "completed_at",
+      "updated_at",
+    ]),
+  ],
+  [
+    "scheduled_tasks",
+    new Set([
+      "name",
+      "instruction",
+      "timezone",
+      "rrule",
+      "status",
+      "overlap_policy",
+      "next_run_at",
+      "last_run_at",
+      "current_revision",
+      "updated_at",
+    ]),
+  ],
+  [
+    "scheduled_task_occurrences",
+    new Set([
+      "state",
+      "dispatch_attempts",
+      "next_attempt_at",
+      "run_id",
+      "receipt_id",
+      "failure_code",
       "updated_at",
     ]),
   ],
@@ -957,6 +994,18 @@ async function hasRuntimeRolloutState(client: PoolClient, schema: string): Promi
   return result.rows[0]?.present === true;
 }
 
+async function hasScheduledTaskState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.scheduled_tasks', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.scheduled_task_revisions', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.scheduled_task_occurrences', $1::text)) IS NOT NULL
+            AND to_regclass(format('%I.scheduled_task_commands', $1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRuntimeAgentControlState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.runtime_agent_threads', $1::text)) IS NOT NULL
@@ -1014,6 +1063,9 @@ async function activeTablePolicy(
   }
   if (!(await hasMemoryIngestionState(client, schema))) {
     for (const table of memoryIngestionTables) policy.delete(table);
+  }
+  if (!(await hasScheduledTaskState(client, schema))) {
+    for (const table of scheduledTaskTables) policy.delete(table);
   }
   if (!(await hasRunWorkspaceResultState(client, schema))) {
     for (const table of runWorkspaceResultTables) policy.delete(table);
@@ -1162,6 +1214,9 @@ async function activeColumnUpdatePolicy(
   }
   if (!(await hasMemoryIngestionState(client, schema))) {
     for (const table of memoryIngestionTables) policy.delete(table);
+  }
+  if (!(await hasScheduledTaskState(client, schema))) {
+    for (const table of scheduledTaskTables) policy.delete(table);
   }
   if (!(await hasRunWorkspaceResultState(client, schema))) {
     for (const table of runWorkspaceResultTables) policy.delete(table);
@@ -2591,6 +2646,22 @@ export async function bootstrapRuntimeAccessOnClient(
          state,provider_event_id,claim_token,claim_generation,claimed_by,claim_expires_at,
          attempt_count,next_attempt_at,last_error_code,submitted_at,completed_at,updated_at
        ) ON TABLE ${schema}.memory_ingestion_outbox TO ${role}`,
+    );
+  }
+  if (await hasScheduledTaskState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT, INSERT ON TABLE
+         ${schema}.scheduled_tasks,
+         ${schema}.scheduled_task_revisions,
+         ${schema}.scheduled_task_occurrences,
+         ${schema}.scheduled_task_commands TO ${role};
+       GRANT UPDATE(
+         name,instruction,timezone,rrule,status,overlap_policy,next_run_at,last_run_at,
+         current_revision,updated_at
+       ) ON TABLE ${schema}.scheduled_tasks TO ${role};
+       GRANT UPDATE(
+         state,dispatch_attempts,next_attempt_at,run_id,receipt_id,failure_code,updated_at
+       ) ON TABLE ${schema}.scheduled_task_occurrences TO ${role}`,
     );
   }
   if (await hasRunWorkspaceResultState(client, context.schema)) {

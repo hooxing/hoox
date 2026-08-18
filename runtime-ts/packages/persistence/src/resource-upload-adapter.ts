@@ -1,4 +1,4 @@
-import type { PersistedResourceUpload, ResourceUploadBlobWriter } from "@aisay/resource";
+import type { PersistedResourceUpload, ResourceUploadBlobWriter } from "@hoox/resource";
 import type {
   DurableResourceBlobWriter,
   PersistResourceBlobResult,

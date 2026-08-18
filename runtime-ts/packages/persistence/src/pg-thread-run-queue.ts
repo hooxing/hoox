@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { ControlledRolloutProjection } from "@aisay/run-contracts";
-import { rolloutProjectionDigest } from "@aisay/run-contracts/mutation-protocol";
+import type { ControlledRolloutProjection } from "@hoox/run-contracts";
+import { rolloutProjectionDigest } from "@hoox/run-contracts/mutation-protocol";
 import type { PoolClient } from "pg";
 import { wakeWorkerTenant } from "./pg-worker-tenant-assignment.js";
 

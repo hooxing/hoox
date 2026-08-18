@@ -7,7 +7,7 @@ import {
   type Sha256Digest,
   type Workspace,
   workspaceRevisionId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type {
   ClaimExecutionResult,
   ControlledRolloutProjection,
@@ -28,7 +28,7 @@ import type {
   SandboxSessionRegistryPort,
   SandboxSettlementResult,
   UserInputAttachmentReference,
-} from "@aisay/run-contracts";
+} from "@hoox/run-contracts";
 import {
   assertControlledRolloutProjection,
   digestCanonical,
@@ -38,8 +38,8 @@ import {
   runtimeMutationDigest,
   sandboxCleanupIdentityDigest,
   workspaceChangeDigest,
-} from "@aisay/run-contracts/mutation-protocol";
-import { parseWorkspaceManifest } from "@aisay/workspace";
+} from "@hoox/run-contracts/mutation-protocol";
+import { parseWorkspaceManifest } from "@hoox/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { PersistenceError } from "./errors.js";
 import { enqueueMemoryIngestion } from "./pg-memory-ingestion.js";
@@ -1551,9 +1551,9 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
     }
   }
 
-  async readPendingThreadSteer(input: {
+  async readPendingThreadSteers(input: {
     readonly fence: ExecutionFence;
-  }): ReturnType<ExecutionPersistencePort["readPendingThreadSteer"]> {
+  }): ReturnType<ExecutionPersistencePort["readPendingThreadSteers"]> {
     if (this.options.threadInputRoutingV2Enabled !== true) return { outcome: "none" };
     try {
       return await withTenantTransaction(
@@ -1580,7 +1580,7 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
                FROM thread_input_receipts
               WHERE tenant_id=$1 AND thread_id=$2 AND target_run_id=$3
                 AND target_turn_id=$4 AND state='pending' AND disposition='pending_steer'
-              ORDER BY input_sequence LIMIT 1 FOR UPDATE`,
+              ORDER BY input_sequence FOR UPDATE`,
             [
               input.fence.scope.tenantId,
               input.fence.scope.threadId,
@@ -1588,16 +1588,19 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
               row.head_active_turn_id,
             ],
           );
-          const pending = receipt.rows[0];
-          if (pending === undefined) return { outcome: "none" } as const;
-          const attachments = parseUserInputAttachments(pending.input_attachments);
+          if (receipt.rows.length === 0) return { outcome: "none" } as const;
           return {
             outcome: "pending",
-            receiptId: pending.receipt_id,
-            targetTurnId: pending.target_turn_id,
-            inputText: pending.input_text,
-            ...(attachments.length === 0 ? {} : { attachments }),
-            bodyDigest: pending.body_digest,
+            items: receipt.rows.map((pending) => {
+              const attachments = parseUserInputAttachments(pending.input_attachments);
+              return {
+                receiptId: pending.receipt_id,
+                targetTurnId: pending.target_turn_id,
+                inputText: pending.input_text,
+                ...(attachments.length === 0 ? {} : { attachments }),
+                bodyDigest: pending.body_digest,
+              };
+            }),
           } as const;
         },
         { isolationLevel: "SERIALIZABLE" },

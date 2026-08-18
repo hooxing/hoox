@@ -234,7 +234,7 @@ type ResourceProjection =
 
 ### 5.6 建议文件布局
 
-保持 `@aisay/sandbox` 包名，避免无收益的跨工作区重命名；只重组其内部边界：
+保持 `@hoox/sandbox` 包名，避免无收益的跨工作区重命名；只重组其内部边界：
 
 ```text
 runtime-ts/packages/sandbox/src/

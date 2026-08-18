@@ -5,295 +5,40 @@
   "metadata": {
     "component": {
       "type": "application",
-      "bom-ref": "pkg:npm/%40aisay/api@0.0.0",
-      "name": "@aisay/api",
+      "bom-ref": "pkg:npm/%40hoox/api@0.0.0",
+      "name": "@hoox/api",
       "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/api@0.0.0"
+      "purl": "pkg:npm/%40hoox/api@0.0.0"
     },
     "tools": {
       "components": [
         {
           "type": "application",
-          "name": "aisay-runtime-offline-sbom-generator",
+          "name": "hoox-offline-sbom-generator",
           "version": "1"
         }
       ]
     },
     "properties": [
       {
-        "name": "aisay:dependency-source",
+        "name": "hoox:dependency-source",
         "value": "pnpm production installed closure"
       },
       {
-        "name": "aisay:generator-network",
+        "name": "hoox:generator-network",
         "value": "offline"
       },
       {
-        "name": "aisay:lockfile",
+        "name": "hoox:lockfile",
         "value": "pnpm-lock.yaml"
       },
       {
-        "name": "aisay:lockfile-sha256",
-        "value": "7a3bdc728f04c24221c5a8e5b27052a5e7baaf5aa51e2f6855d73c0dd5bfba1c"
+        "name": "hoox:lockfile-sha256",
+        "value": "6bf08136c8df6c528521520c9f8579579dd11f5bb44fdbd6ed2bae4100bef499"
       }
     ]
   },
   "components": [
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/context-policy@0.0.0",
-      "name": "@aisay/context-policy",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/context-policy@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/context-policy"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/domain@0.0.0",
-      "name": "@aisay/domain",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/domain@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/domain"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/memory@0.0.0",
-      "name": "@aisay/memory",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/memory@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/memory"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/persistence@0.0.0",
-      "name": "@aisay/persistence",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/persistence@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/persistence"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/pi-adapter@0.0.0",
-      "name": "@aisay/pi-adapter",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/pi-adapter@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/pi-adapter"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/process-runtime@0.0.0",
-      "name": "@aisay/process-runtime",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/process-runtime@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/process-runtime"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/prompt-builder@0.0.0",
-      "name": "@aisay/prompt-builder",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/prompt-builder@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/prompt-builder"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/protocol-mapper@0.0.0",
-      "name": "@aisay/protocol-mapper",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/protocol-mapper@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/protocol-mapper"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/protocol@0.0.0",
-      "name": "@aisay/protocol",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/protocol@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/protocol"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/resource@0.0.0",
-      "name": "@aisay/resource",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/resource@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/resource"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/run-contracts@0.0.0",
-      "name": "@aisay/run-contracts",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/run-contracts@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/run-contracts"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/sandbox@0.0.0",
-      "name": "@aisay/sandbox",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/sandbox@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/sandbox"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/skill@0.0.0",
-      "name": "@aisay/skill",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/skill@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/skill"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/thread-title@0.0.0",
-      "name": "@aisay/thread-title",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/thread-title@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/thread-title"
-        }
-      ]
-    },
-    {
-      "type": "library",
-      "bom-ref": "pkg:npm/%40aisay/workspace@0.0.0",
-      "name": "@aisay/workspace",
-      "version": "0.0.0",
-      "purl": "pkg:npm/%40aisay/workspace@0.0.0",
-      "properties": [
-        {
-          "name": "aisay:origin",
-          "value": "workspace"
-        },
-        {
-          "name": "aisay:workspace-path",
-          "value": "runtime-ts/packages/workspace"
-        }
-      ]
-    },
     {
       "type": "library",
       "bom-ref": "pkg:npm/%40anthropic-ai/sdk@0.91.1",
@@ -309,7 +54,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -329,7 +74,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -349,7 +94,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -369,7 +114,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -389,7 +134,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -409,7 +154,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -429,7 +174,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -449,7 +194,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -469,7 +214,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -489,7 +234,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -509,7 +254,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -529,7 +274,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -549,7 +294,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -569,7 +314,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -589,7 +334,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -609,7 +354,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -629,7 +374,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -649,7 +394,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -669,7 +414,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -689,7 +434,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -709,7 +454,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -729,7 +474,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -749,7 +494,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -769,7 +514,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -789,7 +534,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -809,7 +554,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -829,7 +574,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -849,7 +594,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -869,7 +614,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -889,7 +634,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -909,7 +654,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -929,7 +674,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -949,7 +694,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -969,7 +714,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -989,43 +734,43 @@
       ],
       "properties": [
         {
-          "name": "aisay:license-file",
+          "name": "hoox:license-file",
           "value": "runtime-ts/vendor/cubesandbox-sdk/LICENSE"
         },
         {
-          "name": "aisay:local-modified",
+          "name": "hoox:local-modified",
           "value": "true"
         },
         {
-          "name": "aisay:local-patch-file",
+          "name": "hoox:local-patch-file",
           "value": "runtime-ts/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.patch"
         },
         {
-          "name": "aisay:local-patch-id",
+          "name": "hoox:local-patch-id",
           "value": "CUBE-LOCAL-0001"
         },
         {
-          "name": "aisay:local-patch-sha256",
+          "name": "hoox:local-patch-sha256",
           "value": "ac285a52b5b5994b2a4b4102cf0cf952c252e421d8bfb33aa3f79e058008bb8a"
         },
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "vendor"
         },
         {
-          "name": "aisay:patched-tree-sha256",
+          "name": "hoox:patched-tree-sha256",
           "value": "4c496b33e88e3e375fca51fce0dacbc7fafc7fa20f862fe7fbd8d26ce8ad9c46"
         },
         {
-          "name": "aisay:source-file",
+          "name": "hoox:source-file",
           "value": "runtime-ts/vendor/cubesandbox-sdk/SOURCE.md"
         },
         {
-          "name": "aisay:upstream-source-commit",
+          "name": "hoox:upstream-source-commit",
           "value": "8721dd151971ce3c2966482bbd32904ad98f378e"
         },
         {
-          "name": "aisay:workspace-path",
+          "name": "hoox:workspace-path",
           "value": "runtime-ts/vendor/cubesandbox-sdk"
         }
       ]
@@ -1045,7 +790,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1065,7 +810,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1085,7 +830,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1105,7 +850,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1125,7 +870,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1145,7 +890,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1165,7 +910,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1185,7 +930,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1205,7 +950,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1225,7 +970,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1245,8 +990,280 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/automation@0.0.0",
+      "name": "@hoox/automation",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/automation@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/automation"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/context-policy@0.0.0",
+      "name": "@hoox/context-policy",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/context-policy@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/context-policy"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/domain@0.0.0",
+      "name": "@hoox/domain",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/domain@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/domain"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/memory@0.0.0",
+      "name": "@hoox/memory",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/memory@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/memory"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/persistence@0.0.0",
+      "name": "@hoox/persistence",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/persistence@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/persistence"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/pi-adapter@0.0.0",
+      "name": "@hoox/pi-adapter",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/pi-adapter@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/pi-adapter"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/process-runtime@0.0.0",
+      "name": "@hoox/process-runtime",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/process-runtime@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/process-runtime"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/prompt-builder@0.0.0",
+      "name": "@hoox/prompt-builder",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/prompt-builder@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/prompt-builder"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/protocol-mapper@0.0.0",
+      "name": "@hoox/protocol-mapper",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/protocol-mapper@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/protocol-mapper"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/protocol@0.0.0",
+      "name": "@hoox/protocol",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/protocol@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/protocol"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/resource@0.0.0",
+      "name": "@hoox/resource",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/resource@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/resource"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/run-contracts@0.0.0",
+      "name": "@hoox/run-contracts",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/run-contracts@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/run-contracts"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/sandbox@0.0.0",
+      "name": "@hoox/sandbox",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/sandbox@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/sandbox"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/skill@0.0.0",
+      "name": "@hoox/skill",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/skill@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/skill"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/thread-title@0.0.0",
+      "name": "@hoox/thread-title",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/thread-title@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/thread-title"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/workspace@0.0.0",
+      "name": "@hoox/workspace",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/workspace@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/workspace"
         }
       ]
     },
@@ -1265,7 +1282,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1285,7 +1302,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1305,7 +1322,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1325,7 +1342,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1345,7 +1362,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1365,7 +1382,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1385,7 +1402,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1405,7 +1422,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1425,7 +1442,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1445,7 +1462,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1465,7 +1482,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1485,7 +1502,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1505,7 +1522,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1525,7 +1542,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1545,7 +1562,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1565,7 +1582,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1585,7 +1602,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1605,7 +1622,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1625,7 +1642,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1645,7 +1662,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1665,7 +1682,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1685,7 +1702,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1705,7 +1722,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1725,7 +1742,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1745,7 +1762,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1765,7 +1782,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1785,7 +1802,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1805,7 +1822,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1825,7 +1842,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1845,7 +1862,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1865,7 +1882,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1885,7 +1902,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1905,7 +1922,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1925,7 +1942,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1945,7 +1962,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1965,7 +1982,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -1985,7 +2002,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2005,7 +2022,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2025,7 +2042,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2045,7 +2062,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2065,7 +2082,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2085,7 +2102,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2105,7 +2122,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2125,7 +2142,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2145,7 +2162,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2165,7 +2182,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2185,7 +2202,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2205,7 +2222,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2225,7 +2242,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2245,7 +2262,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2265,7 +2282,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2285,7 +2302,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2305,7 +2322,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2325,7 +2342,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2345,7 +2362,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2365,7 +2382,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2385,7 +2402,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2405,7 +2422,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2425,7 +2442,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2445,7 +2462,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2465,7 +2482,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2485,7 +2502,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2505,7 +2522,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2525,7 +2542,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2545,7 +2562,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2565,7 +2582,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2585,7 +2602,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2605,7 +2622,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2625,7 +2642,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2645,7 +2662,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2665,7 +2682,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2685,7 +2702,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2705,7 +2722,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2725,7 +2742,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2745,7 +2762,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2765,7 +2782,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2785,7 +2802,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2805,7 +2822,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2825,7 +2842,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2845,7 +2862,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2865,7 +2882,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2885,7 +2902,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2905,7 +2922,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2925,7 +2942,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2945,7 +2962,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2965,7 +2982,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -2985,7 +3002,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3005,7 +3022,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3025,7 +3042,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3045,7 +3062,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3065,7 +3082,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3085,7 +3102,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3105,7 +3122,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3125,7 +3142,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3145,7 +3162,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3165,7 +3182,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3185,7 +3202,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3205,7 +3222,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3225,7 +3242,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3245,7 +3262,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3265,7 +3282,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3285,7 +3302,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3305,7 +3322,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3325,7 +3342,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3345,7 +3362,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3365,7 +3382,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3385,7 +3402,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3405,7 +3422,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3425,7 +3442,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3445,7 +3462,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3465,7 +3482,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3485,7 +3502,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3505,7 +3522,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3525,7 +3542,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3545,7 +3562,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3565,7 +3582,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3585,7 +3602,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3605,7 +3622,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3625,7 +3642,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3645,7 +3662,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3665,7 +3682,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3685,7 +3702,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3705,7 +3722,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3725,7 +3742,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3745,7 +3762,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3765,7 +3782,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3785,7 +3802,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3805,7 +3822,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3825,7 +3842,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3845,7 +3862,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3865,7 +3882,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3885,7 +3902,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3905,7 +3922,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3925,7 +3942,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3945,7 +3962,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3965,7 +3982,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -3985,7 +4002,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4005,7 +4022,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4025,7 +4042,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4045,7 +4062,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4065,7 +4082,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4085,7 +4102,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4105,7 +4122,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4125,7 +4142,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4145,7 +4162,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4165,7 +4182,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4185,7 +4202,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4205,7 +4222,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4225,7 +4242,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4245,7 +4262,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4265,7 +4282,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4285,7 +4302,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4305,7 +4322,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4325,7 +4342,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4345,7 +4362,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4365,7 +4382,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4385,7 +4402,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4405,7 +4422,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4425,7 +4442,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4445,7 +4462,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4465,7 +4482,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4485,7 +4502,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4505,7 +4522,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4525,7 +4542,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4545,7 +4562,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4565,7 +4582,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4585,7 +4602,7 @@
       ],
       "properties": [
         {
-          "name": "aisay:origin",
+          "name": "hoox:origin",
           "value": "registry"
         }
       ]
@@ -4593,23 +4610,8 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:npm/%40aisay/api@0.0.0",
+      "ref": "pkg:npm/%40hoox/api@0.0.0",
       "dependsOn": [
-        "pkg:npm/%40aisay/context-policy@0.0.0",
-        "pkg:npm/%40aisay/domain@0.0.0",
-        "pkg:npm/%40aisay/memory@0.0.0",
-        "pkg:npm/%40aisay/persistence@0.0.0",
-        "pkg:npm/%40aisay/pi-adapter@0.0.0",
-        "pkg:npm/%40aisay/process-runtime@0.0.0",
-        "pkg:npm/%40aisay/prompt-builder@0.0.0",
-        "pkg:npm/%40aisay/protocol-mapper@0.0.0",
-        "pkg:npm/%40aisay/protocol@0.0.0",
-        "pkg:npm/%40aisay/resource@0.0.0",
-        "pkg:npm/%40aisay/run-contracts@0.0.0",
-        "pkg:npm/%40aisay/sandbox@0.0.0",
-        "pkg:npm/%40aisay/skill@0.0.0",
-        "pkg:npm/%40aisay/thread-title@0.0.0",
-        "pkg:npm/%40aisay/workspace@0.0.0",
         "pkg:npm/%40anthropic-ai/sdk@0.91.1",
         "pkg:npm/%40aws-crypto/sha256-browser@5.2.0",
         "pkg:npm/%40aws-crypto/sha256-js@5.2.0",
@@ -4656,6 +4658,22 @@
         "pkg:npm/%40fastify/merge-json-schemas@0.2.1",
         "pkg:npm/%40fastify/proxy-addr@5.1.0",
         "pkg:npm/%40google/genai@1.52.0",
+        "pkg:npm/%40hoox/automation@0.0.0",
+        "pkg:npm/%40hoox/context-policy@0.0.0",
+        "pkg:npm/%40hoox/domain@0.0.0",
+        "pkg:npm/%40hoox/memory@0.0.0",
+        "pkg:npm/%40hoox/persistence@0.0.0",
+        "pkg:npm/%40hoox/pi-adapter@0.0.0",
+        "pkg:npm/%40hoox/process-runtime@0.0.0",
+        "pkg:npm/%40hoox/prompt-builder@0.0.0",
+        "pkg:npm/%40hoox/protocol-mapper@0.0.0",
+        "pkg:npm/%40hoox/protocol@0.0.0",
+        "pkg:npm/%40hoox/resource@0.0.0",
+        "pkg:npm/%40hoox/run-contracts@0.0.0",
+        "pkg:npm/%40hoox/sandbox@0.0.0",
+        "pkg:npm/%40hoox/skill@0.0.0",
+        "pkg:npm/%40hoox/thread-title@0.0.0",
+        "pkg:npm/%40hoox/workspace@0.0.0",
         "pkg:npm/%40huggingface/tokenizers@0.1.3",
         "pkg:npm/%40isaacs/fs-minipass@4.0.1",
         "pkg:npm/%40mariozechner/clipboard-linux-x64-gnu@0.3.9",

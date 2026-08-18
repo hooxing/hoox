@@ -7,8 +7,8 @@ import {
   threadId,
   userId,
   workspaceId,
-} from "@aisay/domain";
-import type { ExecutionFence } from "@aisay/run-contracts";
+} from "@hoox/domain";
+import type { ExecutionFence } from "@hoox/run-contracts";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   decideWaitingRecovery,

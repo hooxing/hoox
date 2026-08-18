@@ -1,4 +1,4 @@
-import type { TokenizerPort } from "@aisay/context-policy";
+import type { TokenizerPort } from "@hoox/context-policy";
 import {
   assertThreadActiveHistory,
   providerVisibleThreadHistoryMessages,

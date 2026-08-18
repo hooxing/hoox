@@ -15,15 +15,15 @@ import type {
   Workspace,
   WorkspaceId,
   WorkspaceRevisionId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type {
   ControlledRolloutProjection,
   RuntimeAgentEvent,
   ThreadActiveHistoryV1,
-} from "@aisay/pi-adapter";
-import type { SandboxHandle, SandboxProviderKey, UncertainLifecycleEvent } from "@aisay/sandbox";
-import type { RunSkillSnapshot } from "@aisay/skill";
-import type { WorkspaceManifest } from "@aisay/workspace";
+} from "@hoox/pi-adapter";
+import type { SandboxHandle, SandboxProviderKey, UncertainLifecycleEvent } from "@hoox/sandbox";
+import type { RunSkillSnapshot } from "@hoox/skill";
+import type { WorkspaceManifest } from "@hoox/workspace";
 
 export interface ExecutionScope {
   readonly tenantId: TenantId;
@@ -759,14 +759,16 @@ export interface ExecutionPersistencePort {
           | "scope_mismatch";
       }
   >;
-  readPendingThreadSteer(input: { readonly fence: ExecutionFence }): Promise<
+  readPendingThreadSteers(input: { readonly fence: ExecutionFence }): Promise<
     | {
         readonly outcome: "pending";
-        readonly receiptId: string;
-        readonly targetTurnId: string;
-        readonly inputText: string;
-        readonly attachments?: readonly UserInputAttachmentReference[];
-        readonly bodyDigest: Sha256Digest;
+        readonly items: readonly {
+          readonly receiptId: string;
+          readonly targetTurnId: string;
+          readonly inputText: string;
+          readonly attachments?: readonly UserInputAttachmentReference[];
+          readonly bodyDigest: Sha256Digest;
+        }[];
       }
     | {
         readonly outcome: "none" | "fence_lost" | "cancelled" | "unavailable" | "scope_mismatch";
@@ -1059,13 +1061,13 @@ export interface AgentSessionFactoryPort {
     readonly onTurnSafePoint?: (
       event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
     ) => Promise<{
-      /** 只覆盖已经完成的 assistant/tool turn；steer user fact 由 Pi 队列在其后注入。 */
+      /** 只覆盖已经完成的 assistant/tool turn；steer user fact 由 Pi 队列在其后按序注入。 */
       readonly throughSequence: number;
-      readonly steer?: {
+      readonly steers?: readonly {
         readonly receiptId: string;
         readonly inputText: string;
         readonly attachments?: readonly UserInputAttachmentReference[];
-      };
+      }[];
     }>;
     readonly authorizeToolEffect: (
       call: ExternalEffectCall,

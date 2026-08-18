@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import type { ArtifactExecutionAuthorizationIssuerPort } from "@aisay/artifact";
+import type { ArtifactExecutionAuthorizationIssuerPort } from "@hoox/artifact";
+import type { ScheduledTask, ScheduledTaskMutation } from "@hoox/automation";
 import {
   type ControlledToolReceiptSource,
   type ToolObservationBinding,
@@ -8,18 +9,20 @@ import {
   type ToolObservationResult,
   type ToolObservationRolloutPort,
   type TraceBlobPersistencePort,
-} from "@aisay/context-policy";
+} from "@hoox/context-policy";
 import {
   assertRunPersonalizationSnapshot,
   DomainError,
   sha256Digest,
   type TenantId,
   type TodoWriteCommand,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import {
   assessSafePiSessionContext,
+  automationToolMutation,
   bindTrustedPiModelContextCapability,
   ContextBudgetAdmissionError,
+  type AutomationUpdateToolArguments,
   type ControlledRolloutProjection,
   createSafePiSession,
   deriveSafePiSessionCompatibility,
@@ -28,7 +31,7 @@ import {
   providerVisibleUserInputTokens,
   type ThreadActiveHistoryV1,
   type TrustedPiModelContextCapability,
-} from "@aisay/pi-adapter";
+} from "@hoox/pi-adapter";
 import {
   assertRunSkillSnapshot,
   digestRunSkillSnapshot,
@@ -36,12 +39,12 @@ import {
   type SkillExecutionBinding,
   SkillRuntimeError,
   type SkillRuntimeService,
-} from "@aisay/skill";
-import type { DeliverFileToolRouterFactoryPort } from "@aisay/tool-router";
+} from "@hoox/skill";
+import type { DeliverFileToolRouterFactoryPort } from "@hoox/tool-router";
 import {
   InternalTrajectoryAttemptRecorder,
   type InternalTrajectoryDiagnosticsPort,
-} from "@aisay/trajectory";
+} from "@hoox/trajectory";
 import type { Api, Model } from "@earendil-works/pi-ai/compat";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import type { ModelWireTraceSession } from "./model-wire-trace.js";
@@ -149,6 +152,13 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     private readonly skillRuntime?: SkillRuntimeService,
     modelContext?: TrustedPiModelContextCapability,
     private readonly internalTrajectoryDiagnostics?: InternalTrajectoryDiagnosticsPort,
+    private readonly updateScheduledTask?: (input: {
+      readonly tenantId: string;
+      readonly threadId: string;
+      readonly runId: string;
+      readonly commandId: string;
+      readonly mutation: ScheduledTaskMutation;
+    }) => Promise<ScheduledTask>,
   ) {
     this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
   }
@@ -467,6 +477,45 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         });
       },
     };
+    const updateScheduledTask = this.updateScheduledTask;
+    const automationUpdateToolExecutor =
+      updateScheduledTask === undefined || input.agent?.agentKind === "subagent"
+        ? undefined
+        : {
+            apply: async (request: {
+              readonly callId: string;
+              readonly arguments: AutomationUpdateToolArguments;
+            }) => {
+              await authorizeStartedTool({
+                callId: request.callId,
+                toolName: "automation_update",
+                argsDigest: digestCanonical(request.arguments),
+              });
+              return updateScheduledTask({
+                tenantId: input.scope.tenantId,
+                threadId: input.scope.threadId,
+                runId: input.scope.runId,
+                commandId: runtimeCallId(request.callId),
+                mutation: automationToolMutation(request.arguments, input.scope.threadId),
+              });
+            },
+            projectError: (error: unknown) => {
+              const message = error instanceof Error ? error.message : "";
+              const correctable = new Set([
+                "AUTOMATION_NOT_FOUND",
+                "AUTOMATION_NOT_AUTHORIZED",
+                "AUTOMATION_INVALID_STATE",
+                "AUTOMATION_KEY_CONFLICT",
+              ]).has(message);
+              return Object.freeze({
+                status: "failed" as const,
+                code: correctable ? message : "AUTOMATION_PERSISTENCE_UNAVAILABLE",
+                message: correctable ? "定时任务状态已变化，请刷新后重试" : "定时任务暂时无法保存",
+                correctable,
+                fatal: !correctable,
+              });
+            },
+          };
     const todoWriteToolExecutor = {
       write: async (request: { readonly callId: string; readonly command: TodoWriteCommand }) => {
         if (startedToolCalls.get(request.callId) !== "todo_write") {
@@ -561,6 +610,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       skillSnapshotDigest: skillSnapshot.digest,
       skillToolExecutor,
       todoWriteToolExecutor,
+      ...(automationUpdateToolExecutor === undefined ? {} : { automationUpdateToolExecutor }),
       ...(input.enabledToolNames === undefined ? {} : { enabledToolNames: input.enabledToolNames }),
       ...(agentControl === undefined || input.agent?.agentKind === "subagent"
         ? {}
@@ -663,7 +713,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         : {
             prepareNextTurnHistory: async (
               event: Extract<
-                import("@aisay/pi-adapter").RuntimeAgentEvent,
+                import("@hoox/pi-adapter").RuntimeAgentEvent,
                 { type: "turn.completed" }
               >,
             ) => {
@@ -682,23 +732,28 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                         compatibility,
                         rebuilt,
                         availableThreadHistoryTokens,
-                        persisted.steer === undefined
-                          ? 0
-                          : providerVisibleUserInputTokens(
-                              persisted.steer.inputText,
+                        (persisted.steers ?? []).reduce(
+                          (tokens, steer) =>
+                            tokens +
+                            providerVisibleUserInputTokens(
+                              steer.inputText,
                               this.modelContext.tokenizer,
                             ),
+                          0,
+                        ),
                       );
               }
-              if (persisted.steer !== undefined) {
+              if ((persisted.steers?.length ?? 0) > 0) {
                 if (controller === undefined) throw new Error("Pi Session steer 安全点尚未就绪");
-                // 有 replacement 时它截止到 assistant/tool turn；无重建器时也必须把已持久消费的
-                // steer 送入 Pi 原生队列，不能因可选的上下文投影能力关闭而丢失用户输入。
-                const preparedSteer = await prepareInput({
-                  text: persisted.steer.inputText,
-                  attachments: persisted.steer.attachments ?? [],
-                });
-                await controller.steer(preparedSteer.text, preparedSteer.images);
+                // replacement 截止到完整 assistant/tool turn；同一安全点已持久消费的 steer
+                // 按 input_sequence 依次进入 Pi 原生队列，由下一次 Provider 请求一起读取。
+                for (const steer of persisted.steers ?? []) {
+                  const preparedSteer = await prepareInput({
+                    text: steer.inputText,
+                    attachments: steer.attachments ?? [],
+                  });
+                  await controller.steer(preparedSteer.text, preparedSteer.images);
+                }
               }
               return replacement;
             },

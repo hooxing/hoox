@@ -7,10 +7,7 @@ import {
   S3Client,
   type S3ClientConfig,
 } from "@aws-sdk/client-s3";
-import type {
-  SkillPublicationFileDescriptor,
-  ValidatedSkillPublicationPackage,
-} from "@aisay/skill";
+import type { SkillPublicationFileDescriptor, ValidatedSkillPublicationPackage } from "@hoox/skill";
 import { RUNTIME_BLOB_OBJECT_PREFIX } from "./blob-storage-contract.js";
 import type { StableBlobRef } from "./blob-store.js";
 

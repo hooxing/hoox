@@ -1,4 +1,4 @@
-Copyright (c) AISay contributors.
+Copyright (c) Hoox contributors.
 
-This first-party development fixture is licensed under LicenseRef-AISay-Internal.
+This first-party development fixture is licensed under LicenseRef-Hoox-Internal.
 It is not a third-party redistribution package.

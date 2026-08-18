@@ -55,7 +55,7 @@ import {
   toThreadDto,
   toUserDto,
   toWorkspaceRevisionDto,
-} from "@aisay/protocol-mapper";
+} from "@hoox/protocol-mapper";
 
 const now = isoTimestamp("2026-07-26T00:00:00.000Z");
 const runningAt = isoTimestamp("2026-07-26T00:01:00.000Z");

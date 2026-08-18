@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { assertControlledToolObservation, parseControlledToolReceipt } from "@aisay/context-policy";
-import { type IsoTimestamp, type Sha256Digest, sha256Digest } from "@aisay/domain";
-import type { ControlledRolloutProjection } from "@aisay/pi-adapter";
+import { assertControlledToolObservation, parseControlledToolReceipt } from "@hoox/context-policy";
+import { type IsoTimestamp, type Sha256Digest, sha256Digest } from "@hoox/domain";
+import type { ControlledRolloutProjection } from "@hoox/pi-adapter";
 import type { RuntimeMutation, RuntimeOutboxV1, ValidatedWorkspaceChange } from "./ports.js";
 
 /**

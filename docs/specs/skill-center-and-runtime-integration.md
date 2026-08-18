@@ -279,13 +279,7 @@ Skill 目录位于 System Prompt 的逻辑末尾：在 `CAPABILITY_MANIFEST` 之
 </AVAILABLE_SKILLS>
 ```
 
-没有可用 Skill 时仍输出固定空分区：
-
-```text
-<AVAILABLE_SKILLS schema=1>
-当前 Run 没有可用 Skill。
-</AVAILABLE_SKILLS>
-```
+没有可用 Skill 时不输出 `AVAILABLE_SKILLS` 分区，避免向模型发送无行为增量的空目录。
 
 ### 9.3 构造规则
 

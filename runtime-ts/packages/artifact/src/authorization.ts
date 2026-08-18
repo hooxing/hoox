@@ -1,5 +1,5 @@
-import type { IsoTimestamp, RunId, Sha256Digest } from "@aisay/domain";
-import type { ConsumedExternalEffectAuthorization, ExecutionScope } from "@aisay/run-contracts";
+import type { IsoTimestamp, RunId, Sha256Digest } from "@hoox/domain";
+import type { ConsumedExternalEffectAuthorization, ExecutionScope } from "@hoox/run-contracts";
 import { type ArtifactDeliveryError, artifactError } from "./errors.js";
 
 const constructionToken = Object.freeze({ kind: "artifact-execution-authorization" });

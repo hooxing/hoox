@@ -11,7 +11,7 @@ import {
   type WorkspaceStableBlobReadPort,
   type WorkspaceTrustedScope,
   type WorkspaceUnknownFact,
-} from "@aisay/workspace";
+} from "@hoox/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import type { BlobStore, StableBlobRef } from "./blob-store.js";
 import { BlobStoreError } from "./blob-store.js";

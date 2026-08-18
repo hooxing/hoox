@@ -37,7 +37,7 @@ function tamperSignature(token: string): string {
 function payload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     iss: "https://issuer.example.invalid/runtime",
-    aud: "aisay-runtime-api",
+    aud: "hoox-api",
     sub: "user_production_001",
     iat: nowSeconds - 30,
     nbf: nowSeconds - 30,
@@ -51,7 +51,7 @@ function resolver(
 ) {
   return createProductionJwtAuthResolver({
     issuer: "https://issuer.example.invalid/runtime",
-    audience: "aisay-runtime-api",
+    audience: "hoox-api",
     keys: parseProductionJwtSigningKeys(input.keys ?? `current-key:${encodedKey}`),
     clockSkewSeconds: input.skew ?? 60,
     maxTokenLifetimeSeconds: 3_600,
@@ -99,7 +99,7 @@ describe("生产 HS256 Bearer JWT 认证", () => {
     const header = { alg: "HS256", kid: "current-key" };
     const cases = [
       payload({ iss: "https://other.example.invalid" }),
-      payload({ aud: ["aisay-runtime-api"] }),
+      payload({ aud: ["hoox-api"] }),
       payload({ sub: "not a valid user id" }),
       payload({ iat: nowSeconds - 30.5 }),
       payload({ nbf: nowSeconds - 31, iat: nowSeconds - 30 }),
@@ -180,7 +180,7 @@ describe("生产 HS256 Bearer JWT 认证", () => {
   it("拒绝重复 JSON 声明和超长 token", async () => {
     const header = encoded({ alg: "HS256", kid: "current-key" });
     const duplicatePayload = Buffer.from(
-      `{"iss":"https://issuer.example.invalid/runtime","aud":"aisay-runtime-api","sub":"user_production_001","iat":${nowSeconds - 30},"nbf":${nowSeconds - 30},"exp":${nowSeconds + 300},"sub":"user_other_002"}`,
+      `{"iss":"https://issuer.example.invalid/runtime","aud":"hoox-api","sub":"user_production_001","iat":${nowSeconds - 30},"nbf":${nowSeconds - 30},"exp":${nowSeconds + 300},"sub":"user_other_002"}`,
       "utf8",
     ).toString("base64url");
     const signingInput = `${header}.${duplicatePayload}`;

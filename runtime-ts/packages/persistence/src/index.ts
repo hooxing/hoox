@@ -62,3 +62,5 @@ export * from "./thread-sandbox-session.js";
 export * from "./tool-observation-rollout-adapter.js";
 export * from "./trace-blob-persistence-adapter.js";
 export * from "./workspace-blob-persistence-adapter.js";
+
+export { PgScheduledTaskDueConsumer, PgScheduledTaskRepository } from "./pg-scheduled-tasks.js";

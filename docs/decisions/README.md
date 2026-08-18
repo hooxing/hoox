@@ -166,13 +166,19 @@
 | [ADR-20260815193622](20260815193622-lossless-internal-trajectory-and-deepseek-adapter.md) | 内部无损 Session 轨迹与 DeepSeek Trajectory 适配 | 已接受 | 2026-08-15 |
 | [ADR-20260815214527](20260815214527-internal-events-and-logical-trajectory-records.md) | 内部无损事件与逻辑轨迹记录分层 | 已接受 | 2026-08-15 |
 | [ADR-20260815232211](20260815232211-internal-trajectory-title-and-performance-metrics.md) | 内部轨迹标题与性能统计语义 | 已接受 | 2026-08-15 |
-| [ADR-20260816002622](20260816002622-aisay-runtime-project-identity.md) | 项目身份迁移为 AISay Runtime | 已接受 | 2026-08-16 |
+| [ADR-20260816002622](20260816002622-aisay-runtime-project-identity.md) | 项目身份迁移为 AISay Runtime | 已替代 | 2026-08-16 |
 | [ADR-20260816110030](20260816110030-windows-development-one-click-startup.md) | Windows development 非首次一键启动边界 | 已替代 | 2026-08-16 |
 | [ADR-20260816152234](20260816152234-multi-machine-external-service-preflight-and-optional-skill-startup.md) | 多机开发外部服务预检与可选 Skill 启动 | 已接受 | 2026-08-16 |
-| [ADR-20260816114151](20260816114151-hoox-agent-product-brand.md) | 将用户面对的 Agent 产品命名为 Hoox | 已接受 | 2026-08-16 |
+| [ADR-20260816114151](20260816114151-hoox-agent-product-brand.md) | 将用户面对的 Agent 产品命名为 Hoox | 已替代 | 2026-08-16 |
 | [ADR-20260816160557](20260816160557-local-account-shell-and-sidebar-user-menu.md) | 工作台本地账号入口与侧栏用户菜单边界 | 已替代（账号认证部分） | 2026-08-16 |
 | [ADR-20260816165004](20260816165004-development-local-account-authentication.md) | 开发工作台使用服务端本地账号认证 | 已接受 | 2026-08-16 |
 | [ADR-20260818001636](20260818001636-converge-model-wire-diagnostics-to-internal-viewer.md) | 收敛模型网络诊断到内部轨迹查看器 | 已接受 | 2026-08-18 |
+
+| [ADR-20260817181138](20260817181138-thread-scheduled-tasks.md) | Thread 定时任务与按需 Sandbox 复用 | 已接受 | 2026-08-17 |
+
+| [ADR-20260818090007](20260818090007-scheduled-run-live-refresh-and-prompt-boundary.md) | 定时 Run 在线发现与触发消息边界 | 已接受 | 2026-08-18 |
+| [ADR-20260818114734](20260818114734-model-visible-prompt-metadata-and-tool-guidance-deduplication.md) | 模型可见 Prompt 元数据与工具指引去重 | 已接受 | 2026-08-18 |
+| [ADR-20260818144124](20260818144124-unify-project-identity-as-hoox.md) | 统一项目身份为 Hoox | 已接受 | 2026-08-18 |
 
 ## 何时必须记录
 

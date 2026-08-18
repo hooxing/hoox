@@ -3,7 +3,7 @@ import {
   ArtifactDeliveryError,
   createArtifactExecutionAuthorizationAuthority,
   type PublishArtifactCommand,
-} from "@aisay/artifact";
+} from "@hoox/artifact";
 import {
   artifactId,
   isoTimestamp,
@@ -13,13 +13,13 @@ import {
   tenantId,
   threadId,
   workspaceId,
-} from "@aisay/domain";
+} from "@hoox/domain";
 import type {
   ConsumedExternalEffectAuthorization,
   ExecutionScope,
   ExternalEffectCall,
-} from "@aisay/run-contracts";
-import { digestCanonical } from "@aisay/run-contracts/mutation-protocol";
+} from "@hoox/run-contracts";
+import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import { describe, expect, it } from "vitest";
 import {
   type ArtifactPublicationResourcePort,

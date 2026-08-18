@@ -1,4 +1,4 @@
-name: aisay-runtime-dev
+name: hoox-dev
 
 services:
   minio:
@@ -40,4 +40,4 @@ services:
 
 volumes:
   minio_data:
-    name: aisay-runtime-minio-data
+    name: hoox-minio-data

@@ -28,3 +28,4 @@ export * from "./skill-tool.js";
 export * from "./thread-history.js";
 export * from "./todo-write-tool.js";
 export * from "./tools.js";
+export * from "./automation-update-tool.js";

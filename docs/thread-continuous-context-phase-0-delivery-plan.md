@@ -279,7 +279,7 @@ flowchart LR
 ### 范围
 
 - 在 `runtime-ts/packages/testing/src` 新增 `manual-clock.ts`、`async-barrier.ts`、`crash-point.ts`、`scripted-sandbox-lifecycle.ts`；
-- 从 `index.ts` 只导出测试 API；生产 workspace package 不新增对 `@aisay/testing` 的依赖；
+- 从 `index.ts` 只导出测试 API；生产 workspace package 不新增对 `@hoox/testing` 的依赖；
 - 为每个组件补充单元测试和中文不变量注释；
 - 更新测试解析别名/包脚本所需的最小配置。
 

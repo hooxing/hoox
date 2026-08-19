@@ -397,6 +397,13 @@ function ActivityGroup({
       : active?.type === "tool"
         ? `${toolActionText[active.action].running}${active.title === undefined ? "" : ` · ${active.title}`}`
         : completedSummary;
+  const onlyItem = active === undefined && items.length === 1 ? items[0] : undefined;
+  if (onlyItem?.type === "thinking") {
+    return <ThinkingActivity block={onlyItem} run={run} />;
+  }
+  if (onlyItem?.type === "tool") {
+    return <ToolActivity block={onlyItem} />;
+  }
   return (
     <details className={`activity-group ${active === undefined ? "is-completed" : "is-running"}`}>
       <summary>

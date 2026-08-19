@@ -509,7 +509,7 @@ describe("工作台展示组件", () => {
     }
   });
 
-  it("状态栏只展示当前状态，思考内容在 Agent 对话中默认折叠", () => {
+  it("状态栏只展示当前状态，单个已结束思考只保留一层折叠", () => {
     const baseEvents: readonly RunEvent[] = [
       {
         eventId: "thinking-start",
@@ -569,10 +569,85 @@ describe("工作台展示组件", () => {
     const settledDetails = settled.querySelector<HTMLDetailsElement>(".thinking-activity");
     expect(settledStatusHtml).toContain("已完成");
     expect(settledStatusHtml).not.toContain("已完成分析");
+    expect(settled.querySelector(".activity-group")).toBeNull();
     expect(settledDetails?.open).toBe(false);
     expect(settledDetails?.textContent).toContain("思考完成");
     expect(settledDetails?.querySelector("summary")?.textContent).toBe("思考完成");
     expect(settledDetails?.textContent).toContain("先检查依赖，再生成文档。");
+  });
+
+  it("单个已结束工具活动直接展示，多个活动仍使用执行阶段折叠区", () => {
+    const singleToolEvents: readonly RunEvent[] = [
+      {
+        eventId: "tool-start",
+        sequence: 1,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "tool.started",
+        payload: {
+          name: "read",
+          callId: "call-1",
+          presentation: { action: "read", title: "需求说明.md" },
+        },
+      },
+      {
+        eventId: "tool-end",
+        sequence: 2,
+        occurredAt: "",
+        kind: "agent_event",
+        type: "tool.completed",
+        payload: { name: "read", callId: "call-1", isError: false },
+      },
+    ];
+    const answerEvent: RunEvent = {
+      eventId: "answer",
+      sequence: 5,
+      occurredAt: "",
+      kind: "agent_event",
+      type: "message.delta",
+      payload: { delta: "处理完成。" },
+    };
+    const singleHtml = renderToStaticMarkup(
+      <RunTranscript
+        run={{ ...running, status: "succeeded" }}
+        events={[...singleToolEvents, answerEvent]}
+      />,
+    );
+    const multipleHtml = renderToStaticMarkup(
+      <RunTranscript
+        run={{ ...running, status: "succeeded" }}
+        events={[
+          {
+            eventId: "thinking-delta",
+            sequence: 1,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "thinking.delta",
+            payload: { delta: "先确认文件。" },
+          },
+          {
+            eventId: "thinking-end",
+            sequence: 2,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "thinking.completed",
+            payload: {},
+          },
+          ...singleToolEvents.map((event) => ({ ...event, sequence: event.sequence + 2 })),
+          answerEvent,
+        ]}
+      />,
+    );
+
+    const single = document.createElement("div");
+    single.innerHTML = singleHtml;
+    expect(single.querySelector(".activity-group")).toBeNull();
+    expect(single.querySelector(".tool-activity")?.textContent).toContain("已读取· 需求说明.md");
+
+    const multiple = document.createElement("div");
+    multiple.innerHTML = multipleHtml;
+    expect(multiple.querySelector(".activity-group")).not.toBeNull();
+    expect(multiple.querySelector(".thinking-activity")?.tagName).toBe("DETAILS");
   });
 
   it("当前 Run 的回答进入连续上下文后，思考仍与最终回答位于同一 Agent 消息", () => {

@@ -35,15 +35,19 @@ describe("Windows development 一键启动脚本", () => {
     expect(script).not.toContain("docker-compose.dev.yml");
   });
 
-  it("交互询问 Skill 服务且空回答默认不启动", async () => {
+  it("交互询问平台管理服务且空回答默认不启动", async () => {
     const script = await readFile(scriptUrl, "utf8");
 
     expect(script).toContain("[switch]$IncludeSkill");
     expect(script).toContain("Read-Host $skillPrompt");
-    expect(script).toContain("是否启动 Skill Admin API 和 Skill Admin Web？[y/N]");
+    expect(script).toContain("是否启动平台管理服务（Skill、Control 与 Admin Web）？[y/N]");
     expect(script).toContain('$skillAnswer.Trim() -match "^(y|yes|1|是)$"');
     expect(script).toContain("if ($startSkillServices)");
     expect(script).toContain("@hoox/admin-web");
+    expect(script).toContain(
+      String.raw`runtime-ts\apps\admin-control-api\dist\development-main.js`,
+    );
+    expect(script).toContain("ADMIN_CONTROL_LISTEN_PORT");
   });
 
   it("复用已运行的应用进程，只启动缺失服务", async () => {

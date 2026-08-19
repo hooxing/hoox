@@ -33,6 +33,7 @@ import {
   PgResourceFilesystemCatalog,
   PgRunCancellationReader,
   PgRunDispatchOutbox,
+  PgRuntimeControlConfigurationRepository,
   PgRuntimeRolloutRepository,
   PgScheduledTaskDueConsumer,
   PgScheduledTaskRepository,
@@ -106,6 +107,10 @@ import {
 } from "./project-model-wire-trace.js";
 import { BlobPromptImageLoader } from "./prompt-image-loader.js";
 import { RunWorker } from "./run-worker.js";
+import {
+  RuntimeConfiguredMemoryProvider,
+  RuntimeConfiguredSessionFactory,
+} from "./runtime-configured-providers.js";
 import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
 import { ManagedResourceFilesystemSnapshotMaterializer } from "./sandbox-resource-filesystem-materializer.js";
 import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
@@ -338,6 +343,10 @@ export interface WorkerProcessConfiguration {
   readonly historyDirectoryTimeZone: string;
   readonly subagents: Readonly<{ enabled: boolean }>;
   readonly memory: Mem0DevelopmentConfiguration;
+  readonly memoryDeploymentSecrets?: Readonly<{
+    readonly apiKey: string;
+    readonly scopeHmacKey: string;
+  }>;
   readonly development?: Readonly<{
     readonly userATenantId: string;
   }>;
@@ -512,6 +521,11 @@ export function parseWorkerProcessEnvironment(
   if (compactionTargetPercent >= compactionSoftLimitPercent) {
     throw new TypeError("THREAD_CONTEXT_COMPACTION_TARGET_PERCENT 必须小于 soft limit");
   }
+  const memoryApiKey = parsed.values.MEM0_API_KEY;
+  const memoryScopeHmacKey = parsed.values.MEM0_SCOPE_HMAC_KEY;
+  if ((memoryApiKey === undefined) !== (memoryScopeHmacKey === undefined)) {
+    throw new TypeError("MEM0_API_KEY 与 MEM0_SCOPE_HMAC_KEY 必须同时配置");
+  }
   const sandboxApiUrl = readRequiredEnvironmentValue(parsed, "CUBESANDBOX_API_URL");
   if (parsed.runtimeEnvironment === "production") {
     assertProductionWorkerTransport({
@@ -618,6 +632,14 @@ export function parseWorkerProcessEnvironment(
     historyDirectoryTimeZone,
     subagents: Object.freeze({ enabled: subagentsEnabled }),
     memory,
+    ...(memoryApiKey === undefined || memoryScopeHmacKey === undefined
+      ? {}
+      : {
+          memoryDeploymentSecrets: Object.freeze({
+            apiKey: memoryApiKey,
+            scopeHmacKey: memoryScopeHmacKey,
+          }),
+        }),
     ...(parsed.runtimeEnvironment === "development"
       ? {
           development: Object.freeze({
@@ -827,22 +849,23 @@ async function assembleWorkerRuntime(
       new DurableTraceBlobPersistenceAdapter(blobRepository, blobs),
       configuration.threadContext.inlineBodyMaxBytes,
     );
+    const createModelWireTraceSession = (baseUrl: string) =>
+      new ModelWireTraceSession(
+        withDevelopmentProjectModelWireTraceMirror(
+          runtimeMode,
+          new PgModelWireTraceRepository(
+            pool,
+            blobRepository,
+            blobs,
+            configuration.model.wireTraceRetentionDays,
+          ),
+        ),
+        configuration.model.wireTraceMaxBytes,
+        baseUrl,
+      );
     const modelWireTraces = assembleModelWireTraceIfEnabled(configuration.model.wireTraceEnabled, {
       installFetchInstrumentation: installModelWireFetchInstrumentation,
-      createSession: () =>
-        new ModelWireTraceSession(
-          withDevelopmentProjectModelWireTraceMirror(
-            runtimeMode,
-            new PgModelWireTraceRepository(
-              pool,
-              blobRepository,
-              blobs,
-              configuration.model.wireTraceRetentionDays,
-            ),
-          ),
-          configuration.model.wireTraceMaxBytes,
-          configuration.model.baseUrl,
-        ),
+      createSession: () => createModelWireTraceSession(configuration.model.baseUrl),
     });
     const runEventDiagnostics = createDevelopmentProjectRunEventMirror(
       runtimeMode,
@@ -990,7 +1013,7 @@ async function assembleWorkerRuntime(
       historyFilesystemEnabled: configuration.historyFilesystemEnabled,
       historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
     });
-    const sessions = new PiWorkerSessionFactory(
+    const deploymentSessions = new PiWorkerSessionFactory(
       model,
       modelRuntime,
       durableObservation.createRecorder,
@@ -1100,22 +1123,92 @@ async function assembleWorkerRuntime(
         throw new Error(code);
       },
     );
+    const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(pool);
+    const sessions = new RuntimeConfiguredSessionFactory(
+      deploymentSessions,
+      runtimeConfigurations,
+      async (snapshot) => {
+        const configuredModel = snapshot.model.configuration;
+        const dynamicModel = await createOpenAiCompatibleModel({
+          baseUrl: configuredModel.baseUrl,
+          apiKey: configuration.model.apiKey,
+          modelId: configuredModel.modelId,
+          supportsImages: configuredModel.supportsImages,
+          contextWindow: configuredModel.contextWindow,
+          maxOutputTokens: configuredModel.maxOutputTokens,
+        });
+        const tokenizer = await loadTrustedModelTokenizerCapability(dynamicModel.model.id);
+        const dynamicModelContext = bindTrustedPiModelContextCapability(
+          dynamicModel.modelRuntime,
+          dynamicModel.model,
+          tokenizer,
+        );
+        const dynamicSettings = snapshot.runtimeSettings?.configuration;
+        const dynamicCompaction = new RuntimeCompactionCoordinator(
+          {
+            ...configuration.threadContext.compaction,
+            ...(dynamicSettings === undefined
+              ? {}
+              : {
+                  softLimitPercent: dynamicSettings.compactionSoftLimitPercent,
+                  targetPercent: dynamicSettings.compactionTargetPercent,
+                  recentUserTokens: dynamicSettings.compactionRecentUserTokens,
+                  maxOutputTokens: dynamicSettings.compactionMaxOutputTokens,
+                  timeoutMs: dynamicSettings.compactionTimeoutMs,
+                }),
+          },
+          dynamicModel.model,
+          dynamicModel.modelRuntime,
+          dynamicModelContext,
+          new PgThreadContextCompactionRepository(pool, blobs),
+          undefined,
+          threadContinuityMetrics,
+        );
+        return deploymentSessions.withModel({
+          model: dynamicModel.model,
+          modelRuntime: dynamicModel.modelRuntime,
+          modelContext: dynamicModelContext,
+          modelWireTraces: configuration.model.wireTraceEnabled
+            ? createModelWireTraceSession(configuredModel.baseUrl)
+            : undefined,
+          prepareRuntimeCompaction: configuration.threadContext.compaction.enabled
+            ? async (
+                input,
+                compatibility,
+                history,
+                availableHistoryTokens,
+                additionalVisibleTokens,
+              ) =>
+                await dynamicCompaction.prepare({
+                  fence: input.fence,
+                  attemptId: input.attemptId,
+                  compatibilityDigest: digestCanonical(compatibility),
+                  history,
+                  availableHistoryTokens,
+                  additionalVisibleTokens,
+                })
+            : undefined,
+        });
+      },
+    );
     const shutdown = new ProcessShutdown();
-    const memoryProvider = configuration.memory.enabled
+    const deploymentMemoryProvider = configuration.memory.enabled
       ? new Mem0PlatformMemoryProvider(configuration.memory)
       : undefined;
-    const memoryConsumer =
-      memoryProvider === undefined
-        ? undefined
-        : new MemoryIngestionConsumer(
-            new PgMemoryIngestionStore(pool, blobs),
-            memoryProvider,
-            `${configuration.worker.workerId}-memory`,
-            30_000,
-            5,
-            1_000,
-            2_000,
-          );
+    const memoryProvider = new RuntimeConfiguredMemoryProvider(
+      runtimeConfigurations,
+      configuration.memoryDeploymentSecrets,
+      deploymentMemoryProvider,
+    );
+    const memoryConsumer = new MemoryIngestionConsumer(
+      new PgMemoryIngestionStore(pool, blobs),
+      memoryProvider,
+      `${configuration.worker.workerId}-memory`,
+      30_000,
+      5,
+      1_000,
+      2_000,
+    );
     const runCancellationReader = new PgRunCancellationReader(pool);
     const worker = new RunWorker(
       {
@@ -1126,7 +1219,8 @@ async function assembleWorkerRuntime(
           threadSandboxHandoffLeaseMs: configuration.worker.runLeaseMs,
           historyFilesystemEnabled: configuration.historyFilesystemEnabled,
           historyDirectoryTimeZone: configuration.historyDirectoryTimeZone,
-          memoryIngestionEnabled: configuration.memory.enabled,
+          // 没有 active memory 的 Run 会被 resolver 明确完成，避免配置切换形成悬挂 outbox。
+          memoryIngestionEnabled: true,
         }),
         revisions: workspaceRuntime,
         sandboxes,
@@ -1148,7 +1242,7 @@ async function assembleWorkerRuntime(
         ...(configuration.subagents.enabled
           ? { agentControl: new PgAgentControlRepository(pool) }
           : {}),
-        ...(memoryProvider === undefined ? {} : { memoryRetriever: memoryProvider }),
+        memoryRetriever: memoryProvider,
       },
       {
         workerId: configuration.worker.workerId,
@@ -1185,7 +1279,7 @@ async function assembleWorkerRuntime(
               orphanGraceSeconds: 300,
             }),
           ];
-          if (memoryConsumer !== undefined) tasks.push(memoryConsumer.drainTenant(tenantId));
+          tasks.push(memoryConsumer.drainTenant(tenantId));
           tasks.push(scheduledTaskConsumer.drainTenant(tenantId));
           await Promise.allSettled(tasks);
         },

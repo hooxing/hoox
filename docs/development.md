@@ -33,7 +33,8 @@ corepack pnpm config:check
 | `runtime-ts/apps/scheduler` | 回收、清理等可重试后台工作 |
 | `runtime-ts/apps/web` | 浏览器应用入口，只消费公开协议 |
 | `runtime-ts/apps/skill-admin-api` | Skill 提交、复核、发布和撤销的独立管理 API |
-| `runtime-ts/apps/admin-web` | 独立 Skill 发布管理界面，只消费管理协议 |
+| `runtime-ts/apps/admin-control-api` | 模型、记忆、运行参数与聚合统计的独立平台控制 API |
+| `runtime-ts/apps/admin-web` | 统一平台管理界面，按能力分别消费两个管理 API |
 
 ### 共享包
 
@@ -122,6 +123,40 @@ production 管理服务必须单独注入 `SKILL_ADMIN_JWT_*`、`SKILL_PUBLISHER
 剥离浏览器伪造的 Authorization，根据已登录管理会话注入短期管理 JWT。没有该网关时不得把 development Token
 或固定生产 Token 写入 Web 构建。完整边界见 [ADR-0112](decisions/0112-managed-skill-admin-publication.md)。
 
+### 平台控制面
+
+模型、记忆、运行参数和聚合统计由 `admin-control-api` 提供，Skill 模块仍使用上面的独立发布 API。管理 Web
+只有一套导航和静态资源，但两个服务继续使用不同 JWT audience、数据库连接与 PostgreSQL 角色，不能为了简化代理
+而合并凭据。
+
+首次准备开发环境时：
+
+1. 由 Database Admin 创建 `DATABASE_ADMIN_CONTROL_ROLE`，要求 `NOINHERIT`、无角色成员、无对象 ownership、
+   无 `CREATE`/`TEMPORARY`，并与 Migrator、Runtime、Skill Publisher、Worker Coordinator、Team Coordinator
+   角色互异。将该角色的连接串写入本机忽略文件中的 `ADMIN_CONTROL_DATABASE_URL`。
+2. 配置 `ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST`；模型和记忆草稿只能使用无凭据 HTTPS URL，连接探测只允许访问
+   该白名单。配置 `MODEL_API_KEY`、`MEM0_API_KEY` 和至少 32 字节的 `MEM0_SCOPE_HMAC_KEY`，页面与数据库只保存
+   固定 `secretRef`，不会读取或返回密钥值。
+3. 执行迁移与开发身份初始化后，由受控数据库运维事务向
+   `platform_control_operators(user_id,role,status)` 写入 `viewer`、`operator` 或 `admin`。控制 API 不提供自助提权
+   路由；operator 可创建草稿和探测，只有 admin 能发布或回滚。
+4. 配置 `DEV_ADMIN_CONTROL_USER_ID` 与至少 16 字符的 `DEV_ADMIN_CONTROL_TOKEN`，然后分别启动：
+
+```powershell
+corepack pnpm dev:admin-control:api
+corepack pnpm dev:skill-admin:api
+corepack pnpm dev:admin:web
+```
+
+浏览器仍访问 `http://127.0.0.1:4174`。发布配置会递增全局 generation；Worker 首次处理 Run 时将模型、记忆与
+运行参数 revision 固化到 `run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本。没有已发布
+模型时回退部署时 `MODEL_*` 配置。数据库连接、角色、JWT、TLS、S3、Sandbox 和监听地址只在页面展示“已配置/需
+重新部署”，不存在通用 ENV 写接口。完整边界见
+[ADR-20260819165254](decisions/20260819165254-independent-admin-control-plane.md)。
+
+使用一键开发脚本时，既有 `-IncludeSkill` 兼容开关现在会同时启动 Skill Admin API、Admin Control API 与统一
+Admin Web；默认核心拓扑仍不启动任何管理服务。
+
 PPTX Skill 宣称预装的 Node.js、`pptxgenjs`、图标渲染和 LibreOffice/Poppler 依赖必须由 Sandbox 模板提供，不能在 Run 内临时安装。开发模板从 `deploy/cubesandbox/agent-sandbox-pptx.Dockerfile` 构建；发布镜像后用 CubeSandbox `Template.build({ image })` 创建不可变模板，并把返回的模板 ID 写入本地 `.env` 的 `CUBESANDBOX_TEMPLATE_ID`。基础镜像使用摘要固定，Node 模块使用精确版本；每次发布使用新的不可变镜像标签，不在既有标签上依赖 `Template.rebuild` 刷新。命令服务会净化进程环境，因此模板同时提供根级 `/node_modules` 解析路径，不能只依赖镜像中的 `NODE_PATH`。旧模板保留到新模板完成真实 `.pptx` 生成及 pause/resume 冒烟后再回收。
 
 `agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 仍严格等于 `DEV_AUTH_USER_A_TENANT_ID`，但只用于启动兼容；个人与团队 dispatch 都会原子唤醒动态 Tenant 控制面。`DATABASE_WORKER_COORDINATOR_URL` 必须使用独立的 `DATABASE_WORKER_COORDINATOR_ROLE` 登录，该角色只能领取无业务载荷的 Tenant 租约；实际任务始终回到 `DATABASE_URL` 对应的 Runtime 角色和 Tenant RLS 内读取。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它会同时检查两个数据库身份，但不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
@@ -168,13 +203,13 @@ corepack pnpm test:production-worker:container
 
 业务 Schema 迁移不能替代数据库级 bootstrap。首次准备专用数据库时，由不进入应用进程的 Database Admin 完成以下一次性操作：
 
-1. 创建无 `SUPERUSER/CREATEDB/CREATEROLE/BYPASSRLS/REPLICATION` 的 Migrator、Runtime、Skill Publisher、Worker Coordinator 与 Team Coordinator 登录角色，并保证五者互异且都没有任何上游或下游角色成员关系；Runtime、Skill Publisher、Worker Coordinator 和 Team Coordinator 必须为 `NOINHERIT`，不能保留可 `SET ROLE` 的成员关系。PostgreSQL 角色和密码属于整个集群，不属于单个数据库；同一集群的不同开发库、预览库和生产库必须使用不同的五角色集合，建议统一加数据库或部署后缀；
-2. 从 `PUBLIC` 和五个角色撤销目标数据库的全部权限，再只向五个角色授予 `CONNECT`；Runtime、Skill Publisher、Worker Coordinator 与 Team Coordinator 不得通过 `PUBLIC` 获得 `CREATE` 或 `TEMPORARY`；
+1. 创建无 `SUPERUSER/CREATEDB/CREATEROLE/BYPASSRLS/REPLICATION` 的 Migrator、Runtime、Skill Publisher、Worker Coordinator、Team Coordinator 与 Admin Control 登录角色，并保证六者互异且都没有任何上游或下游角色成员关系；除 Migrator 外的五个常驻角色必须为 `NOINHERIT`，不能保留可 `SET ROLE` 的成员关系。PostgreSQL 角色和密码属于整个集群，不属于单个数据库；同一集群的不同开发库、预览库和生产库必须使用不同的六角色集合，建议统一加数据库或部署后缀；
+2. 从 `PUBLIC` 和六个角色撤销目标数据库的全部权限，再只向六个角色授予 `CONNECT`；五个常驻角色不得通过 `PUBLIC` 获得 `CREATE` 或 `TEMPORARY`；
 3. 创建专用业务 Schema，并只让 Migrator 成为该 Schema owner；Database Admin 继续作为数据库 owner；
-4. 确认 Runtime、Skill Publisher、Worker Coordinator 与 Team Coordinator 都不是数据库、Schema、表、序列或 routine owner；Migrator 不是数据库 owner，且只拥有配置的业务 Schema；
-5. 分别写入本机忽略文件中的 `DATABASE_BOOTSTRAP_URL`、`MIGRATION_DATABASE_URL`、`DATABASE_URL`、`DATABASE_WORKER_COORDINATOR_URL`、`DATABASE_TEAM_COORDINATOR_URL`、`SKILL_PUBLISHER_DATABASE_URL`、五个数据库角色名与 `DATABASE_SCHEMA`。Bootstrap/Migration URL 只用于本地权限集成测试或受控运维；Worker 常驻进程只接收 Runtime 与 Worker Coordinator 两个受限连接，API 只把 Team Coordinator 连接交给团队协作 Repository。
+4. 确认五个常驻角色都不是数据库、Schema、表、序列或 routine owner；Migrator 不是数据库 owner，且只拥有配置的业务 Schema；
+5. 分别写入本机忽略文件中的 `DATABASE_BOOTSTRAP_URL`、`MIGRATION_DATABASE_URL`、`DATABASE_URL`、`DATABASE_WORKER_COORDINATOR_URL`、`DATABASE_TEAM_COORDINATOR_URL`、`SKILL_PUBLISHER_DATABASE_URL`、`ADMIN_CONTROL_DATABASE_URL`、六个数据库角色名与 `DATABASE_SCHEMA`。Bootstrap/Migration URL 只用于本地权限集成测试或受控运维；Worker 常驻进程只接收 Runtime 与 Worker Coordinator 两个受限连接，API 分别把 Team Coordinator、Skill Publisher 和 Admin Control 连接交给对应 Repository。
 
-`pnpm db:migrate:up` 会在任何 DDL 前同时验证 Runtime、当前 Migrator、Skill Publisher、Worker Coordinator、Team Coordinator、Schema owner 与精确 `search_path`，并通过 `pg_shdepend` 拒绝任一应用角色被当前集群中的其他数据库依赖。它还会拒绝四个常驻角色的目标 Schema `CREATE`、数据库 `TEMPORARY`、角色继承/成员关系/ownership、Migrator 对无关 Schema 的有效 `CREATE`、额外非系统 ownership、任何 routine default ACL 记录及任何目标 Schema routine。Schema migration、迁移记录、角色定向 RLS policy 重绑定、最小 ACL bootstrap 和结束白名单断言共用同一事务。首版 routine manifest 为空；runner 完全不修改 routine 的全局或局部 default ACL，并在迁移 SQL 后、提交前再次断言目标 routine 集合仍为空，任何 migration 创建 routine 都会整体回滚。bootstrap 从空集合重建四种常驻角色的精确 ACL：Worker Coordinator 仅能全局读取 assignment 并更新 claim 栅栏列，不能读取业务表；Team Coordinator 只供 API 团队协作 Repository 使用，在 Runtime 白名单基础上额外获得团队目录及 Membership 授权列的最小权限；Skill Publisher 和动态 Worker policy 始终重绑定到本次显式配置的角色。未来引入函数、过程或聚合前，必须单独设计 manifest 并显式审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 和调用权限。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作；down SQL、ACL 回收和结束白名单断言同样共用一个事务，任一步失败都整体回滚。down 不修改 routine default ACL，也不会删除角色或回滚 Database Admin bootstrap。
+`pnpm db:migrate:up` 会在任何 DDL 前同时验证 Runtime、当前 Migrator、Skill Publisher、Worker Coordinator、Team Coordinator、Admin Control、Schema owner 与精确 `search_path`，并通过 `pg_shdepend` 拒绝任一应用角色被当前集群中的其他数据库依赖。它还会拒绝五个常驻角色的目标 Schema `CREATE`、数据库 `TEMPORARY`、角色继承/成员关系/ownership、Migrator 对无关 Schema 的有效 `CREATE`、额外非系统 ownership、任何 routine default ACL 记录及任何目标 Schema routine。Schema migration、迁移记录、角色定向 RLS policy 重绑定、最小 ACL bootstrap 和结束白名单断言共用同一事务。首版 routine manifest 为空；runner 完全不修改 routine 的全局或局部 default ACL，并在迁移 SQL 后、提交前再次断言目标 routine 集合仍为空，任何 migration 创建 routine 都会整体回滚。bootstrap 从空集合重建五种常驻角色的精确 ACL：Worker Coordinator 仅能全局读取 assignment 并更新 claim 栅栏列，不能读取业务表；Team Coordinator 只供 API 团队协作 Repository 使用，在 Runtime 白名单基础上额外获得团队目录及 Membership 授权列的最小权限；Skill Publisher 只操作发布事实与专用对象；Admin Control 只操作版本化配置并读取聚合统计；动态 Worker policy 始终重绑定到本次显式配置的角色。未来引入函数、过程或聚合前，必须单独设计 manifest 并显式审查 `SECURITY DEFINER`、owner、参数、固定 `search_path` 和调用权限。`pnpm db:migrate:down` 只在 development/test 加显式破坏开关时工作；down SQL、ACL 回收和结束白名单断言同样共用同一事务，任一步失败都整体回滚。down 不修改 routine default ACL，也不会删除角色或回滚 Database Admin bootstrap。
 
 ## HTTP API 开发边界
 

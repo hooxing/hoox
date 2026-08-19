@@ -30,8 +30,10 @@ const skillPublisherRole = `it_wr_pub_${unique}`;
 const skillPublisherPassword = randomBytes(24).toString("hex");
 const workerCoordinatorRole = `it_wr_coord_${unique}`;
 const teamCoordinatorRole = workerCoordinatorRole.replace("_coord_", "_team_");
+const adminControlRole = workerCoordinatorRole.replace("_coord_", "_control_");
 const workerCoordinatorPassword = randomBytes(24).toString("hex");
 const teamCoordinatorPassword = randomBytes(24).toString("hex");
+const adminControlPassword = randomBytes(24).toString("hex");
 const databaseName = new URL(bootstrapDatabaseUrl).pathname.slice(1);
 if (migrationDatabaseUrl.username !== configuredMigratorRole) {
   throw new Error("MIGRATION_DATABASE_URL 与 DATABASE_MIGRATOR_ROLE 不一致");
@@ -44,6 +46,7 @@ const migrationSecurity = {
   skillPublisherRole,
   workerCoordinatorRole,
   teamCoordinatorRole,
+  adminControlRole,
   schema,
 } as const;
 
@@ -80,7 +83,9 @@ beforeAll(async () => {
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${teamCoordinatorRole}" LOGIN PASSWORD '${teamCoordinatorPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
-     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
+     CREATE ROLE "${adminControlRole}" LOGIN PASSWORD '${adminControlPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     GRANT CONNECT ON DATABASE "${databaseName}" TO "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migratorCreated = true;
@@ -205,7 +210,8 @@ afterAll(async () => {
   if (schemaCreated) await administrativePool.query(`DROP SCHEMA "${schema}" CASCADE`);
   if (migratorCreated) {
     await administrativePool.query(
-      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
+      `REVOKE CONNECT ON DATABASE "${databaseName}" FROM "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}";
+       DROP ROLE "${adminControlRole}";
        DROP ROLE "${teamCoordinatorRole}";
        DROP ROLE "${workerCoordinatorRole}";
        DROP ROLE "${skillPublisherRole}";

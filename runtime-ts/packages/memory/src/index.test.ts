@@ -223,6 +223,25 @@ const ingestionClaim = Object.freeze({
 }) satisfies MemoryIngestionClaim;
 
 describe("记忆异步 Outbox 消费器", () => {
+  it("按 claim 解析 Provider，Run 配置关闭时直接完成而不出站", async () => {
+    const store = new FakeIngestionStore(ingestionClaim);
+    const resolver = { resolve: vi.fn(async () => undefined) };
+    const consumer = new MemoryIngestionConsumer(
+      store,
+      resolver,
+      "worker-a",
+      30_000,
+      5,
+      1_000,
+      2_000,
+    );
+
+    await expect(consumer.drainTenant("tenant-a")).resolves.toBe(1);
+    expect(resolver.resolve).toHaveBeenCalledWith(ingestionClaim);
+    expect(store.complete).toHaveBeenCalledWith(ingestionClaim);
+    expect(store.submitted).not.toHaveBeenCalled();
+  });
+
   it("首次提交只记录 Provider event，不把 PENDING 当作完成", async () => {
     const store = new FakeIngestionStore(ingestionClaim);
     const provider = {

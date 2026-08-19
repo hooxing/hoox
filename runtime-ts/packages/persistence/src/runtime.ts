@@ -68,6 +68,7 @@ export interface MigrationRuntime {
       | "skillPublisherRole"
       | "workerCoordinatorRole"
       | "teamCoordinatorRole"
+      | "adminControlRole"
       | "schema"
     >,
   ): Promise<readonly MigrationRecord[]>;
@@ -379,6 +380,7 @@ export function createMigrationRuntime(
     readonly skillPublisherRole: string;
     readonly workerCoordinatorRole: string;
     readonly teamCoordinatorRole: string;
+    readonly adminControlRole: string;
     readonly schema: string;
   },
 ): MigrationRuntime {
@@ -389,6 +391,7 @@ export function createMigrationRuntime(
     skillPublisherRole: options.skillPublisherRole,
     workerCoordinatorRole: options.workerCoordinatorRole,
     teamCoordinatorRole: options.teamCoordinatorRole,
+    adminControlRole: options.adminControlRole,
     schema: options.schema,
   } as const;
   return {

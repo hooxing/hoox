@@ -1,0 +1,91 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AdminControlApiProcessConfiguration } from "./process-entry.js";
+import { createProviderProbes } from "./production-assembly.js";
+
+const configuration: AdminControlApiProcessConfiguration = Object.freeze({
+  runtimeEnvironment: "test",
+  databaseUrl: "postgresql://control:secret@localhost/control",
+  databaseSchema: "agent_runtime",
+  listenHost: "127.0.0.1",
+  listenPort: 3_003,
+  shutdownTimeoutMilliseconds: 5_000,
+  providerHostAllowlist: new Set(["model.example.com", "memory.example.com"]),
+  providerSecrets: Object.freeze({ modelApiKey: "model-secret", memoryApiKey: "memory-secret" }),
+  runtimeDeploymentSettings: Object.freeze({
+    compactionEnabledConfigured: true,
+    compactionPathConfigured: true,
+    historyTimeZoneConfigured: true,
+  }),
+  developmentAuth: Object.freeze({ userId: "user_admin", token: "development-token" }),
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("Provider 连接探针", () => {
+  it("拒绝跟随重定向，避免白名单主机把请求转发到未授权地址", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ data: [{ id: "model-a" }] }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 200 }));
+    vi.stubGlobal("fetch", fetcher);
+    const probes = createProviderProbes(configuration);
+
+    await probes.probeModel({
+      providerKey: "main",
+      displayName: "主模型",
+      protocol: "openai-compatible",
+      baseUrl: "https://model.example.com/v1/",
+      secretRef: "deployment:model",
+      modelId: "model-a",
+      supportsImages: false,
+      contextWindow: 128_000,
+      maxOutputTokens: 8_192,
+    });
+    await probes.probeMemory({
+      providerKey: "memory",
+      displayName: "长期记忆",
+      providerKind: "mem0",
+      baseUrl: "https://memory.example.com/",
+      apiSecretRef: "deployment:memory-api",
+      scopeSecretRef: "deployment:memory-scope",
+      requestTimeoutMs: 5_000,
+      enabled: true,
+    });
+
+    expect(fetcher).toHaveBeenNthCalledWith(
+      1,
+      new URL("https://model.example.com/v1/models"),
+      expect.objectContaining({ redirect: "error" }),
+    );
+    expect(fetcher).toHaveBeenNthCalledWith(
+      2,
+      new URL("https://memory.example.com/"),
+      expect.objectContaining({ method: "HEAD", redirect: "error" }),
+    );
+  });
+
+  it("白名单外主机在发起网络请求前失败", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetcher);
+    const probes = createProviderProbes(configuration);
+
+    await expect(
+      probes.probeModel({
+        providerKey: "blocked",
+        displayName: "未授权模型",
+        protocol: "openai-compatible",
+        baseUrl: "https://blocked.example.com/v1/",
+        secretRef: "deployment:model",
+        modelId: "model-a",
+        supportsImages: false,
+        contextWindow: 128_000,
+        maxOutputTokens: 8_192,
+      }),
+    ).rejects.toThrow("PROVIDER_HOST_NOT_ALLOWED");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+});

@@ -127,11 +127,15 @@ const workerCoordinatorRole = preprovisionedDatabase
 const teamCoordinatorRole = preprovisionedDatabase
   ? (process.env.DATABASE_TEAM_COORDINATOR_ROLE ?? "")
   : `it_rw_team_${suffix}`;
+const adminControlRole = preprovisionedDatabase
+  ? (process.env.DATABASE_ADMIN_CONTROL_ROLE ?? "")
+  : `it_rw_control_${suffix}`;
 const runtimePassword = randomBytes(24).toString("hex");
 const migratorPassword = randomBytes(24).toString("hex");
 const skillPublisherPassword = randomBytes(24).toString("hex");
 const workerCoordinatorPassword = randomBytes(24).toString("hex");
 const teamCoordinatorPassword = randomBytes(24).toString("hex");
+const adminControlPassword = randomBytes(24).toString("hex");
 const safePgIdentifier = /^[a-z][a-z0-9_]{0,62}$/u;
 let admin!: Pool;
 let migrator!: Pool;
@@ -491,8 +495,10 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${teamCoordinatorRole}" LOGIN PASSWORD '${teamCoordinatorPassword}'
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       CREATE ROLE "${adminControlRole}" LOGIN PASSWORD '${adminControlPassword}'
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        GRANT CONNECT ON DATABASE "${databaseName}"
-         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
+         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
       );
     }
@@ -509,12 +515,14 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         !skillPublisherRole.startsWith("m4_ci_") ||
         !workerCoordinatorRole.startsWith("m4_ci_") ||
         !teamCoordinatorRole.startsWith("m4_ci_") ||
+        !adminControlRole.startsWith("m4_ci_") ||
         !safePgIdentifier.test(schema) ||
         !safePgIdentifier.test(runtimeRole) ||
         !safePgIdentifier.test(migratorRole) ||
         !safePgIdentifier.test(skillPublisherRole) ||
         !safePgIdentifier.test(workerCoordinatorRole) ||
         !safePgIdentifier.test(teamCoordinatorRole) ||
+        !safePgIdentifier.test(adminControlRole) ||
         migratorUrl.username !== migratorRole ||
         runtimeUrl.username !== runtimeRole ||
         workerCoordinatorUrl.username !== workerCoordinatorRole ||
@@ -543,6 +551,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       skillPublisherRole,
       workerCoordinatorRole,
       teamCoordinatorRole,
+      adminControlRole,
       schema,
     });
     const dispatchAcl = await admin.query<{ readonly allowed: boolean; readonly version: number }>(
@@ -582,13 +591,14 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       ?.query(
         `DROP SCHEMA IF EXISTS "${schema}" CASCADE;
        REVOKE CONNECT ON DATABASE "${databaseName}"
-         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}"`,
+         FROM "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}"`,
       )
       .catch(() => undefined);
     await admin?.query(
       `DROP ROLE IF EXISTS "${runtimeRole}";
        DROP ROLE IF EXISTS "${workerCoordinatorRole}";
        DROP ROLE IF EXISTS "${teamCoordinatorRole}";
+       DROP ROLE IF EXISTS "${adminControlRole}";
        DROP ROLE IF EXISTS "${skillPublisherRole}";
        DROP ROLE IF EXISTS "${migratorRole}"`,
     );
@@ -1309,6 +1319,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       skillPublisherRole,
       workerCoordinatorRole,
       teamCoordinatorRole,
+      adminControlRole,
       schema,
       targetVersion: 41,
       allowDestructive: true,
@@ -1327,6 +1338,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       skillPublisherRole,
       workerCoordinatorRole,
       teamCoordinatorRole,
+      adminControlRole,
       schema,
     });
     expect(restored.at(-1)?.version).toBe(migrationContract.latestVersion);
@@ -6453,6 +6465,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       skillPublisherRole,
       workerCoordinatorRole,
       teamCoordinatorRole,
+      adminControlRole,
       schema,
       targetVersion: 15,
       allowDestructive: true,
@@ -6497,6 +6510,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       skillPublisherRole,
       workerCoordinatorRole,
       teamCoordinatorRole,
+      adminControlRole,
       schema,
     });
     expect(restored.at(-1)?.version).toBe(migrationContract.latestVersion);

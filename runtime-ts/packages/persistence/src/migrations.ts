@@ -189,6 +189,9 @@ export async function migrateUp(
       await client.query("SELECT set_config('app.skill_publisher_role', $1, true)", [
         options.skillPublisherRole,
       ]);
+      await client.query("SELECT set_config('app.admin_control_role', $1, true)", [
+        options.adminControlRole,
+      ]);
       await client.query("SELECT set_config('app.runtime_role', $1, true)", [options.runtimeRole]);
       await client.query("SELECT set_config('app.worker_coordinator_role', $1, true)", [
         options.workerCoordinatorRole,
@@ -252,6 +255,9 @@ export async function migrateDown(
       await assertMigrationContextSafe(client, options);
       await client.query("SELECT set_config('app.skill_publisher_role', $1, true)", [
         options.skillPublisherRole,
+      ]);
+      await client.query("SELECT set_config('app.admin_control_role', $1, true)", [
+        options.adminControlRole,
       ]);
       await client.query("SELECT set_config('app.runtime_role', $1, true)", [options.runtimeRole]);
       await client.query("SELECT set_config('app.worker_coordinator_role', $1, true)", [

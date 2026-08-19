@@ -1,0 +1,462 @@
+import { randomUUID } from "node:crypto";
+import {
+  type AdminControlService,
+  AdminControlServiceError,
+  type ControlMutationContext,
+  digestControlRequest,
+  type MemoryProviderConfiguration,
+  type ModelProviderConfiguration,
+} from "@hoox/admin-control";
+import type { AuthContextResolver } from "@hoox/api";
+import {
+  AdminControlOverviewSuccessEnvelopeSchema,
+  ControlAuditListSuccessEnvelopeSchema,
+  ControlRevisionPathSchema,
+  CreateMemoryProviderDraftRequestSchema,
+  CreateModelProviderDraftRequestSchema,
+  CreateRuntimeSettingsDraftRequestSchema,
+  createErrorEnvelope,
+  ErrorEnvelopeSchema,
+  MemoryProviderRevisionListSuccessEnvelopeSchema,
+  MemoryProviderRevisionSuccessEnvelopeSchema,
+  ModelProviderRevisionListSuccessEnvelopeSchema,
+  ModelProviderRevisionSuccessEnvelopeSchema,
+  ProbeControlRevisionRequestSchema,
+  PublishControlRevisionRequestSchema,
+  RuntimeSettingsRevisionListSuccessEnvelopeSchema,
+  RuntimeSettingsRevisionSuccessEnvelopeSchema,
+  type ControlRevisionPath,
+  type CreateMemoryProviderDraftRequest,
+  type CreateModelProviderDraftRequest,
+  type CreateRuntimeSettingsDraftRequest,
+  type ProbeControlRevisionRequest,
+  type PublishControlRevisionRequest,
+} from "@hoox/protocol";
+import { Type } from "@sinclair/typebox";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+
+const strict = { additionalProperties: false } as const;
+const AuditQuerySchema = Type.Object(
+  { limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, default: 100 })) },
+  strict,
+);
+
+type ControlServiceContract = Pick<
+  AdminControlService,
+  | "overview"
+  | "listModelProviders"
+  | "listMemoryProviders"
+  | "listRuntimeSettings"
+  | "listAudits"
+  | "createModelDraft"
+  | "createMemoryDraft"
+  | "createRuntimeSettingsDraft"
+  | "probe"
+  | "publish"
+>;
+
+export interface AdminControlApiDependencies {
+  readonly auth: AuthContextResolver;
+  readonly control: ControlServiceContract;
+  readonly readiness: { probe(): Promise<void> };
+  readonly now?: () => Date;
+}
+
+export interface AdminControlApiAppOptions {
+  readonly logger?: boolean;
+  readonly trustProxy?: false | ((address: string, hop: number) => boolean);
+  readonly https?: Readonly<{
+    readonly key: Buffer;
+    readonly cert: Buffer;
+    readonly minVersion: "TLSv1.2";
+  }>;
+}
+
+export function createAdminControlApiApp(
+  dependencies: AdminControlApiDependencies,
+  options: AdminControlApiAppOptions = {},
+): FastifyInstance {
+  const app = Fastify({
+    logger:
+      options.logger === true
+        ? {
+            level: "info",
+            redact: {
+              paths: ["req.headers.authorization", "req.headers.cookie", "req.body"],
+              censor: "[REDACTED]",
+            },
+          }
+        : false,
+    bodyLimit: 128 * 1024,
+    requestTimeout: 15_000,
+    handlerTimeout: 15_000,
+    connectionTimeout: 5_000,
+    requestIdHeader: false,
+    genReqId: () => randomUUID(),
+    trustProxy: options.trustProxy ?? false,
+    ...(options.https === undefined ? {} : { https: options.https }),
+    onProtoPoisoning: "error",
+    onConstructorPoisoning: "error",
+    ajv: {
+      customOptions: { removeAdditional: false },
+      onCreate: (ajv) => ajv.addFormat("hoox-iso-utc-timestamp-v1", true),
+    },
+    serializerOpts: { ajv: { formats: { "hoox-iso-utc-timestamp-v1": true } } },
+  });
+  const now = dependencies.now ?? (() => new Date());
+
+  app.addHook("onSend", async (_request, reply) => {
+    void reply
+      .header("cache-control", "private, no-store, no-cache, must-revalidate")
+      .header("pragma", "no-cache")
+      .header("x-content-type-options", "nosniff")
+      .header("referrer-policy", "no-referrer");
+  });
+
+  app.setErrorHandler(async (error, request, reply) => {
+    const failure = failureKind(error);
+    request.log.warn({ failure, requestId: request.id }, "后台控制面请求失败");
+    const response = failureResponse(String(request.id), failure);
+    await reply.status(response.status).send(response.body);
+  });
+
+  app.get("/live", async (request) =>
+    success(request, { status: "ok" as const, checkedAt: now().toISOString() }),
+  );
+  app.get("/ready", async (request) => {
+    try {
+      await dependencies.readiness.probe();
+    } catch {
+      throw new AdminControlApiFailure("dependency_unavailable");
+    }
+    return success(request, { status: "ok" as const, checkedAt: now().toISOString() });
+  });
+
+  app.get(
+    "/v1/admin/control/overview",
+    { schema: { response: responseSchemas(AdminControlOverviewSuccessEnvelopeSchema) } },
+    async (request) => success(request, await dependencies.control.overview(await actor(request))),
+  );
+  app.get(
+    "/v1/admin/control/model-providers",
+    { schema: { response: responseSchemas(ModelProviderRevisionListSuccessEnvelopeSchema) } },
+    async (request) =>
+      success(request, {
+        items: await dependencies.control.listModelProviders(await actor(request)),
+      }),
+  );
+  app.get(
+    "/v1/admin/control/memory-providers",
+    { schema: { response: responseSchemas(MemoryProviderRevisionListSuccessEnvelopeSchema) } },
+    async (request) =>
+      success(request, {
+        items: await dependencies.control.listMemoryProviders(await actor(request)),
+      }),
+  );
+  app.get(
+    "/v1/admin/control/runtime-settings",
+    { schema: { response: responseSchemas(RuntimeSettingsRevisionListSuccessEnvelopeSchema) } },
+    async (request) =>
+      success(request, {
+        items: await dependencies.control.listRuntimeSettings(await actor(request)),
+      }),
+  );
+  app.get<{ Querystring: { readonly limit?: number } }>(
+    "/v1/admin/control/audits",
+    {
+      schema: {
+        querystring: AuditQuerySchema,
+        response: responseSchemas(ControlAuditListSuccessEnvelopeSchema),
+      },
+    },
+    async (request) =>
+      success(request, {
+        items: await dependencies.control.listAudits(await actor(request), request.query.limit),
+      }),
+  );
+
+  app.post<{ Body: CreateModelProviderDraftRequest }>(
+    "/v1/admin/control/model-providers",
+    {
+      schema: {
+        body: CreateModelProviderDraftRequestSchema,
+        response: responseSchemas(ModelProviderRevisionSuccessEnvelopeSchema),
+      },
+    },
+    async (request) => {
+      requireJson(request);
+      const userId = await actor(request);
+      return success(
+        request,
+        await dependencies.control.createModelDraft(mutationContext(request, userId), request.body),
+      );
+    },
+  );
+  app.post<{ Body: CreateMemoryProviderDraftRequest }>(
+    "/v1/admin/control/memory-providers",
+    {
+      schema: {
+        body: CreateMemoryProviderDraftRequestSchema,
+        response: responseSchemas(MemoryProviderRevisionSuccessEnvelopeSchema),
+      },
+    },
+    async (request) => {
+      requireJson(request);
+      const userId = await actor(request);
+      return success(
+        request,
+        await dependencies.control.createMemoryDraft(
+          mutationContext(request, userId),
+          request.body,
+        ),
+      );
+    },
+  );
+  app.post<{ Body: CreateRuntimeSettingsDraftRequest }>(
+    "/v1/admin/control/runtime-settings",
+    {
+      schema: {
+        body: CreateRuntimeSettingsDraftRequestSchema,
+        response: responseSchemas(RuntimeSettingsRevisionSuccessEnvelopeSchema),
+      },
+    },
+    async (request) => {
+      requireJson(request);
+      const userId = await actor(request);
+      return success(
+        request,
+        await dependencies.control.createRuntimeSettingsDraft(
+          mutationContext(request, userId),
+          request.body,
+        ),
+      );
+    },
+  );
+
+  registerProviderActions(app, dependencies, "model_provider", "model-providers");
+  registerProviderActions(app, dependencies, "memory_provider", "memory-providers");
+  app.post<{ Params: ControlRevisionPath; Body: PublishControlRevisionRequest }>(
+    "/v1/admin/control/runtime-settings/:providerKey/revisions/:revision/publish",
+    {
+      schema: {
+        params: ControlRevisionPathSchema,
+        body: PublishControlRevisionRequestSchema,
+        response: responseSchemas(RuntimeSettingsRevisionSuccessEnvelopeSchema),
+      },
+    },
+    async (request) => {
+      requireJson(request);
+      const userId = await actor(request);
+      return success(
+        request,
+        await dependencies.control.publish(mutationContext(request, userId), {
+          kind: "runtime_settings",
+          objectKey: request.params.providerKey,
+          revision: request.params.revision,
+          command: request.body,
+        }),
+      );
+    },
+  );
+
+  async function actor(request: FastifyRequest): Promise<string> {
+    const principal = await dependencies.auth.resolve({
+      authorization: singleHeader(request, "authorization"),
+      requestId: String(request.id),
+    });
+    if (principal === undefined) throw new AdminControlApiFailure("unauthorized");
+    return principal.userId;
+  }
+
+  return app;
+}
+
+function registerProviderActions(
+  app: FastifyInstance,
+  dependencies: AdminControlApiDependencies,
+  kind: "model_provider" | "memory_provider",
+  route: "model-providers" | "memory-providers",
+): void {
+  const response =
+    kind === "model_provider"
+      ? ModelProviderRevisionSuccessEnvelopeSchema
+      : MemoryProviderRevisionSuccessEnvelopeSchema;
+  app.post<{ Params: ControlRevisionPath; Body: ProbeControlRevisionRequest }>(
+    `/v1/admin/control/${route}/:providerKey/revisions/:revision/probe`,
+    {
+      schema: {
+        params: ControlRevisionPathSchema,
+        body: ProbeControlRevisionRequestSchema,
+        response: responseSchemas(response),
+      },
+    },
+    async (request) => {
+      requireJson(request);
+      const principal = await dependencies.auth.resolve({
+        authorization: singleHeader(request, "authorization"),
+        requestId: String(request.id),
+      });
+      if (principal === undefined) throw new AdminControlApiFailure("unauthorized");
+      const revisions =
+        kind === "model_provider"
+          ? await dependencies.control.listModelProviders(principal.userId)
+          : await dependencies.control.listMemoryProviders(principal.userId);
+      const revision = revisions.find(
+        (candidate) =>
+          candidate.configuration.providerKey === request.params.providerKey &&
+          candidate.revision === request.params.revision,
+      );
+      if (revision === undefined) throw new AdminControlApiFailure("not_found");
+      return success(
+        request,
+        await dependencies.control.probe(mutationContext(request, principal.userId), {
+          kind,
+          revision: revision as typeof revision & {
+            readonly configuration: ModelProviderConfiguration | MemoryProviderConfiguration;
+          },
+          expectedVersionToken: request.body.expectedVersionToken,
+          reason: request.body.reason,
+        }),
+      );
+    },
+  );
+  app.post<{ Params: ControlRevisionPath; Body: PublishControlRevisionRequest }>(
+    `/v1/admin/control/${route}/:providerKey/revisions/:revision/publish`,
+    {
+      schema: {
+        params: ControlRevisionPathSchema,
+        body: PublishControlRevisionRequestSchema,
+        response: responseSchemas(response),
+      },
+    },
+    async (request) => {
+      requireJson(request);
+      const principal = await dependencies.auth.resolve({
+        authorization: singleHeader(request, "authorization"),
+        requestId: String(request.id),
+      });
+      if (principal === undefined) throw new AdminControlApiFailure("unauthorized");
+      return success(
+        request,
+        await dependencies.control.publish(mutationContext(request, principal.userId), {
+          kind,
+          objectKey: request.params.providerKey,
+          revision: request.params.revision,
+          command: request.body,
+        }),
+      );
+    },
+  );
+}
+
+type FailureKind =
+  | "bad_request"
+  | "unsupported_media_type"
+  | "unauthorized"
+  | "not_found"
+  | "conflict"
+  | "dependency_unavailable"
+  | "internal";
+
+class AdminControlApiFailure extends Error {
+  constructor(readonly kind: FailureKind) {
+    super(kind);
+  }
+}
+
+function failureKind(error: unknown): FailureKind {
+  if (error instanceof AdminControlApiFailure) return error.kind;
+  if (error instanceof TypeError) return "bad_request";
+  if (error instanceof AdminControlServiceError) {
+    if (error.code === "NOT_AUTHORIZED") return "unauthorized";
+    if (error.code === "NOT_FOUND") return "not_found";
+    if (error.code === "CONFLICT" || error.code === "KEY_CONFLICT") return "conflict";
+    if (error.code === "PROBE_FAILED") return "dependency_unavailable";
+  }
+  const code =
+    typeof error === "object" && error !== null && "code" in error
+      ? String((error as { readonly code?: unknown }).code)
+      : undefined;
+  if (code === "FST_ERR_CTP_INVALID_MEDIA_TYPE") return "unsupported_media_type";
+  if (
+    (typeof error === "object" &&
+      error !== null &&
+      "validation" in error &&
+      Array.isArray((error as { readonly validation?: unknown }).validation)) ||
+    code === "FST_ERR_CTP_BODY_TOO_LARGE" ||
+    code === "FST_ERR_CTP_INVALID_JSON_BODY" ||
+    code === "FST_ERR_CTP_EMPTY_JSON_BODY"
+  ) {
+    return "bad_request";
+  }
+  if (code === "FST_ERR_HANDLER_TIMEOUT") return "dependency_unavailable";
+  return "internal";
+}
+
+function failureResponse(requestId: string, kind: FailureKind) {
+  const status = {
+    bad_request: 400,
+    unsupported_media_type: 415,
+    unauthorized: 401,
+    not_found: 404,
+    conflict: 409,
+    dependency_unavailable: 503,
+    internal: 500,
+  }[kind];
+  const protocolKind = kind === "unsupported_media_type" ? kind : kind;
+  return {
+    status,
+    body: createErrorEnvelope(requestId, {
+      kind: protocolKind === "internal" ? "internal" : protocolKind,
+    }),
+  } as const;
+}
+
+function responseSchemas(successSchema: object) {
+  return {
+    200: successSchema,
+    201: successSchema,
+    400: ErrorEnvelopeSchema,
+    401: ErrorEnvelopeSchema,
+    404: ErrorEnvelopeSchema,
+    409: ErrorEnvelopeSchema,
+    415: ErrorEnvelopeSchema,
+    500: ErrorEnvelopeSchema,
+    503: ErrorEnvelopeSchema,
+  };
+}
+
+function success(request: FastifyRequest, data: unknown) {
+  return { version: "v1" as const, requestId: String(request.id), data };
+}
+
+function singleHeader(request: FastifyRequest, name: string): string | undefined {
+  const value = request.headers[name];
+  if (value === undefined) return undefined;
+  if (Array.isArray(value)) throw new AdminControlApiFailure("bad_request");
+  return String(value);
+}
+
+function requireJson(request: FastifyRequest): void {
+  const type = request.headers["content-type"]?.split(";", 1)[0]?.trim().toLowerCase();
+  if (type !== "application/json") throw new AdminControlApiFailure("unsupported_media_type");
+}
+
+function mutationContext(request: FastifyRequest, actorUserId: string): ControlMutationContext {
+  const idempotencyKey = singleHeader(request, "idempotency-key");
+  if (
+    idempotencyKey === undefined ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u.test(idempotencyKey)
+  ) {
+    throw new AdminControlApiFailure("bad_request");
+  }
+  return Object.freeze({
+    actorUserId,
+    idempotencyKey,
+    requestDigest: digestControlRequest({
+      method: request.method,
+      url: request.url,
+      body: request.body,
+    }),
+  });
+}

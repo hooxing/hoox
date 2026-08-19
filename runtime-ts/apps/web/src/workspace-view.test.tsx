@@ -330,14 +330,21 @@ describe("工作台展示组件", () => {
           {
             sequence: 2,
             role: "runtime",
-            text: "运行失败；未提交工作不视为成功。",
+            text: "本次运行未产生 Workspace revision。",
             createdAt: "2026-08-01T00:00:01.000Z",
+          },
+          {
+            sequence: 3,
+            role: "runtime",
+            text: "运行失败；未提交工作不视为成功。",
+            createdAt: "2026-08-01T00:00:02.000Z",
           },
         ]}
       />,
     );
 
     expect(html).not.toContain("运行已完成。");
+    expect(html).not.toContain("本次运行未产生 Workspace revision。");
     expect(html).toContain("运行失败；未提交工作不视为成功。");
   });
 
@@ -650,6 +657,54 @@ describe("工作台展示组件", () => {
     expect(multiple.querySelector(".thinking-activity")?.tagName).toBe("DETAILS");
   });
 
+  it("正文后的新一轮思考不会留下多个正在思考状态", () => {
+    const html = renderToStaticMarkup(
+      <RunTranscript
+        run={running}
+        events={[
+          {
+            eventId: "thinking-first",
+            sequence: 1,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "thinking.delta",
+            payload: { delta: "先分析请求。" },
+          },
+          {
+            eventId: "answer",
+            sequence: 2,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "message.delta",
+            payload: { delta: "好的，我先执行工具。" },
+          },
+          {
+            eventId: "answer-end",
+            sequence: 3,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "message.completed",
+            payload: { stopReason: "toolUse" },
+          },
+          {
+            eventId: "thinking-second",
+            sequence: 4,
+            occurredAt: "",
+            kind: "agent_event",
+            type: "thinking.delta",
+            payload: { delta: "根据工具结果继续分析。" },
+          },
+        ]}
+      />,
+    );
+    const container = document.createElement("div");
+    container.innerHTML = html;
+
+    expect(container.querySelectorAll(".activity-group.is-running")).toHaveLength(1);
+    expect(container.textContent?.match(/正在思考/gu)).toHaveLength(1);
+    expect(container.querySelector(".thinking-activity > summary")?.textContent).toBe("思考完成");
+    expect(container.textContent).toContain("好的，我先执行工具。");
+  });
   it("当前 Run 的回答进入连续上下文后，思考仍与最终回答位于同一 Agent 消息", () => {
     const succeeded: Run = { ...running, status: "succeeded" };
     const html = renderToStaticMarkup(

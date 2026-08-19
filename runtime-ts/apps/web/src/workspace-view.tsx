@@ -719,7 +719,8 @@ export function ThreadTranscript({
 }
 
 export function shouldDisplayRuntimeContextMessage(text: string): boolean {
-  return text.trim() !== "运行已完成。";
+  const normalized = text.trim();
+  return normalized !== "运行已完成。" && normalized !== "本次运行未产生 Workspace revision。";
 }
 
 export type PendingThreadInputView = {

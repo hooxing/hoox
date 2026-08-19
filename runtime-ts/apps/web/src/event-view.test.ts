@@ -40,6 +40,31 @@ describe("用户运行进度投影", () => {
     });
   });
 
+  it("在正文或工具边界收敛旧思考，任意时刻最多保留一个运行块", () => {
+    const blocks = buildConversationBlocks([
+      event(1, "thinking.started", {}),
+      event(2, "thinking.delta", { delta: "第一轮分析。" }),
+      event(3, "message.delta", { delta: "我先执行工具。" }),
+      event(4, "message.completed", { stopReason: "toolUse" }),
+      event(5, "thinking.started", {}),
+      event(6, "thinking.delta", { delta: "第二轮分析。" }),
+    ]);
+    const thinking = blocks.filter((block) => block.type === "thinking");
+
+    expect(thinking.map((block) => block.status)).toEqual(["completed", "running"]);
+    expect(thinking.filter((block) => block.status === "running")).toHaveLength(1);
+    expect(buildConversationSections(blocks).map((section) => section.type)).toEqual([
+      "activity",
+      "answer",
+      "activity",
+    ]);
+
+    const toolBoundary = buildConversationBlocks([
+      event(1, "thinking.delta", { delta: "准备执行命令。" }),
+      event(2, "tool.started", { name: "exec_command", callId: "call-1" }),
+    ]);
+    expect(toolBoundary[0]).toMatchObject({ type: "thinking", status: "completed" });
+  });
   it("把 Runtime 终态兜底作为已完成的用户可见回复", () => {
     const blocks = buildConversationBlocks([
       event(1, "runtime.notice", {
@@ -221,6 +246,21 @@ describe("用户运行进度投影", () => {
     expect(progress.thinking).toEqual({ text: "兼容推理内容", status: "completed" });
   });
 
+  it("正文或工具开始时立即退出当前思考状态", () => {
+    const replying = buildRunProgress([
+      event(1, "thinking.delta", { delta: "先分析。" }),
+      event(2, "message.delta", { delta: "开始回复。" }),
+    ]);
+    expect(replying.thinking).toEqual({ text: "先分析。", status: "completed" });
+    expect(replying.currentAction).toBe("正在回复…");
+
+    const tooling = buildRunProgress([
+      event(1, "thinking.delta", { delta: "先分析。" }),
+      event(2, "tool.started", { name: "exec_command", callId: "call-1" }),
+    ]);
+    expect(tooling.thinking).toEqual({ text: "先分析。", status: "completed" });
+    expect(tooling.currentAction).toBe("正在执行代码…");
+  });
   it("保留独立空格、空行与代码围栏边界片段", () => {
     const progress = buildRunProgress([
       event(1, "message.delta", { delta: "正文" }),

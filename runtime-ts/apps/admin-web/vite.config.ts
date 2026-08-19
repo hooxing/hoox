@@ -4,20 +4,28 @@ import { defineConfig, loadEnv } from "vite";
 
 export default defineConfig(({ mode }) => {
   const environment = loadEnv(mode, resolve(import.meta.dirname, "../../.."), "");
-  const developmentToken = environment.DEV_SKILL_ADMIN_TOKEN;
+  const skillToken = environment.DEV_SKILL_ADMIN_TOKEN;
+  const controlToken = environment.DEV_ADMIN_CONTROL_TOKEN;
   return {
     plugins: [react()],
     server: {
       host: "127.0.0.1",
       port: 4174,
       proxy: {
-        "/v1": {
+        "/v1/admin/control": {
+          target: "http://127.0.0.1:3003",
+          changeOrigin: true,
+          ...(controlToken === undefined || controlToken.length === 0
+            ? {}
+            : { headers: { Authorization: `Bearer ${controlToken}` } }),
+        },
+        "/v1/admin/skill-submissions": {
           target: "http://127.0.0.1:3002",
           changeOrigin: true,
           // Token 只停留在 Vite 服务端代理，既不写入静态构建，也不暴露给浏览器脚本。
-          ...(developmentToken === undefined || developmentToken.length === 0
+          ...(skillToken === undefined || skillToken.length === 0
             ? {}
-            : { headers: { Authorization: `Bearer ${developmentToken}` } }),
+            : { headers: { Authorization: `Bearer ${skillToken}` } }),
         },
       },
     },

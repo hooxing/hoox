@@ -163,6 +163,40 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
   }
 
+  /** 复用工具、持久化和恢复边界，只替换由 Run 固定配置决定的模型相关能力。 */
+  withModel(input: {
+    readonly model: Model<Api>;
+    readonly modelRuntime: ModelRuntime;
+    readonly modelContext: TrustedPiModelContextCapability;
+    readonly modelWireTraces: ModelWireTraceSession | undefined;
+    readonly prepareRuntimeCompaction:
+      | ((
+          target: Parameters<AgentSessionFactoryPort["create"]>[0],
+          compatibility: ReturnType<typeof deriveSafePiSessionCompatibility>,
+          history: ThreadActiveHistoryV1,
+          availableHistoryTokens: number,
+          additionalVisibleTokens: number,
+        ) => Promise<ThreadActiveHistoryV1>)
+      | undefined;
+  }): PiWorkerSessionFactory {
+    return new PiWorkerSessionFactory(
+      input.model,
+      input.modelRuntime,
+      this.createObservationRecorder,
+      this.artifactAuthorizationIssuer,
+      this.prepareObservationSession,
+      input.modelWireTraces,
+      this.deliverFileTools,
+      this.prepareThreadHistory,
+      input.prepareRuntimeCompaction,
+      this.promptImages,
+      this.skillRuntime,
+      input.modelContext,
+      this.internalTrajectoryDiagnostics,
+      this.updateScheduledTask,
+    );
+  }
+
   async create(
     input: Parameters<AgentSessionFactoryPort["create"]>[0],
   ): Promise<WorkerAgentSessionPort> {

@@ -12,6 +12,7 @@
     "start:production": "node dist/production-main.js"
   },
   "dependencies": {
+    "@hoox/admin-control": "workspace:*",
     "@hoox/artifact": "workspace:*",
     "@hoox/context-policy": "workspace:*",
     "@hoox/domain": "workspace:*",

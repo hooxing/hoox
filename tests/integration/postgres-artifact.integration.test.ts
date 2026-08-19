@@ -48,8 +48,10 @@ const skillPublisherRole = `it_af_pub_${unique}`;
 const skillPublisherPassword = randomBytes(24).toString("hex");
 const workerCoordinatorRole = `it_af_coord_${unique}`;
 const teamCoordinatorRole = workerCoordinatorRole.replace("_coord_", "_team_");
+const adminControlRole = workerCoordinatorRole.replace("_coord_", "_control_");
 const workerCoordinatorPassword = randomBytes(24).toString("hex");
 const teamCoordinatorPassword = randomBytes(24).toString("hex");
+const adminControlPassword = randomBytes(24).toString("hex");
 if (migrationUrl.username !== configuredMigratorRole) throw new Error("迁移角色配置不一致");
 migrationUrl.username = migratorRole;
 migrationUrl.password = migratorPassword;
@@ -59,6 +61,7 @@ const migrationSecurity = {
   skillPublisherRole,
   workerCoordinatorRole,
   teamCoordinatorRole,
+  adminControlRole,
   schema,
 } as const;
 
@@ -286,8 +289,10 @@ beforeAll(async () => {
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
      CREATE ROLE "${teamCoordinatorRole}" LOGIN PASSWORD '${teamCoordinatorPassword}'
        NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+     CREATE ROLE "${adminControlRole}" LOGIN PASSWORD '${adminControlPassword}'
+       NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
      GRANT CONNECT ON DATABASE "${databaseName}"
-       TO "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
+       TO "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}";
      CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
   );
   migrator = createPostgresPool({
@@ -459,7 +464,9 @@ afterAll(async () => {
     await admin.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`);
     await admin.query(
       `REVOKE CONNECT ON DATABASE "${databaseName}"
-         FROM "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
+         FROM "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}";
+       DROP ROLE IF EXISTS "${adminControlRole}";
+       DROP ROLE IF EXISTS "${teamCoordinatorRole}";
        DROP ROLE IF EXISTS "${workerCoordinatorRole}";
        DROP ROLE IF EXISTS "${skillPublisherRole}";
        DROP ROLE IF EXISTS "${migratorRole}"`,

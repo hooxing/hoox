@@ -8,6 +8,7 @@ const context = Object.freeze({
   skillPublisherRole: "publisher_local",
   workerCoordinatorRole: "worker_local",
   teamCoordinatorRole: "team_local",
+  adminControlRole: "admin_control_local",
   schema: "agent_runtime",
 });
 
@@ -18,7 +19,7 @@ function clientWith(rows: readonly object[]): PoolClient {
 }
 
 describe("PostgreSQL 应用角色数据库作用域", () => {
-  it("五个角色只依赖当前数据库时通过，并查询集群级依赖目录", async () => {
+  it("六个角色只依赖当前数据库时通过，并查询集群级依赖目录", async () => {
     const client = clientWith(
       [
         context.runtimeRole,
@@ -26,6 +27,7 @@ describe("PostgreSQL 应用角色数据库作用域", () => {
         context.skillPublisherRole,
         context.workerCoordinatorRole,
         context.teamCoordinatorRole,
+        context.adminControlRole,
       ].map((role_name) => ({ role_name, outside_database_count: 0 })),
     );
 
@@ -40,6 +42,7 @@ describe("PostgreSQL 应用角色数据库作用域", () => {
         context.skillPublisherRole,
         context.workerCoordinatorRole,
         context.teamCoordinatorRole,
+        context.adminControlRole,
       ],
     ]);
   });
@@ -51,6 +54,7 @@ describe("PostgreSQL 应用角色数据库作用域", () => {
       { role_name: context.skillPublisherRole, outside_database_count: 0 },
       { role_name: context.workerCoordinatorRole, outside_database_count: 0 },
       { role_name: context.teamCoordinatorRole, outside_database_count: 0 },
+      { role_name: context.adminControlRole, outside_database_count: 0 },
     ]);
 
     await expect(assertDatabaseRolesCurrentDatabaseScoped(client, context)).rejects.toThrow(

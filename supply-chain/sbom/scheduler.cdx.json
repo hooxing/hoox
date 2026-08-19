@@ -34,7 +34,7 @@
       },
       {
         "name": "hoox:lockfile-sha256",
-        "value": "6bf08136c8df6c528521520c9f8579579dd11f5bb44fdbd6ed2bae4100bef499"
+        "value": "efb73f8f8ad444949efa54d1a70324e67ad671194c51f4d3d481c3e685393618"
       }
     ]
   },
@@ -872,6 +872,23 @@
         {
           "name": "hoox:origin",
           "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/admin-control@0.0.0",
+      "name": "@hoox/admin-control",
+      "version": "0.0.0",
+      "purl": "pkg:npm/%40hoox/admin-control@0.0.0",
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "workspace"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/packages/admin-control"
         }
       ]
     },
@@ -3658,6 +3675,7 @@
         "pkg:npm/%40earendil-works/pi-coding-agent@0.82.1",
         "pkg:npm/%40earendil-works/pi-tui@0.82.1",
         "pkg:npm/%40google/genai@1.52.0",
+        "pkg:npm/%40hoox/admin-control@0.0.0",
         "pkg:npm/%40hoox/automation@0.0.0",
         "pkg:npm/%40hoox/context-policy@0.0.0",
         "pkg:npm/%40hoox/domain@0.0.0",

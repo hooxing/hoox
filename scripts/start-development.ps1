@@ -142,19 +142,27 @@ $apiHost = Get-DotEnvValue -Name "API_LISTEN_HOST" -DefaultValue "127.0.0.1"
 $apiPortText = Get-DotEnvValue -Name "API_LISTEN_PORT" -DefaultValue "3001"
 $skillAdminHost = Get-DotEnvValue -Name "SKILL_ADMIN_LISTEN_HOST" -DefaultValue "127.0.0.1"
 $skillAdminPortText = Get-DotEnvValue -Name "SKILL_ADMIN_LISTEN_PORT" -DefaultValue "3002"
+$adminControlHost = Get-DotEnvValue -Name "ADMIN_CONTROL_LISTEN_HOST" -DefaultValue "127.0.0.1"
+$adminControlPortText = Get-DotEnvValue -Name "ADMIN_CONTROL_LISTEN_PORT" -DefaultValue "3003"
 $apiPort = 0
 $skillAdminPort = 0
+$adminControlPort = 0
 if (-not [int]::TryParse($apiPortText, [ref]$apiPort) -or $apiPort -lt 1 -or $apiPort -gt 65535) {
   throw "API_LISTEN_PORT 不是有效端口"
 }
 if (-not [int]::TryParse($skillAdminPortText, [ref]$skillAdminPort) -or $skillAdminPort -lt 1 -or $skillAdminPort -gt 65535) {
   throw "SKILL_ADMIN_LISTEN_PORT 不是有效端口"
 }
+if (-not [int]::TryParse($adminControlPortText, [ref]$adminControlPort) -or $adminControlPort -lt 1 -or $adminControlPort -gt 65535) {
+  throw "ADMIN_CONTROL_LISTEN_PORT 不是有效端口"
+}
 
 $healthApiHost = if ($apiHost -in @("localhost", "::1")) { "127.0.0.1" } else { $apiHost }
 $healthSkillAdminHost = if ($skillAdminHost -in @("localhost", "::1")) { "127.0.0.1" } else { $skillAdminHost }
+$healthAdminControlHost = if ($adminControlHost -in @("localhost", "::1")) { "127.0.0.1" } else { $adminControlHost }
 $apiBaseUrl = "http://${healthApiHost}:$apiPort"
 $skillAdminBaseUrl = "http://${healthSkillAdminHost}:$skillAdminPort"
+$adminControlBaseUrl = "http://${healthAdminControlHost}:$adminControlPort"
 if (-not $SkipBuild) {
   Write-Host "[1/5] 构建工作区" -ForegroundColor Cyan
   Invoke-CheckedNative { corepack pnpm build } "工作区构建失败"
@@ -167,7 +175,7 @@ Invoke-CheckedNative {
   node runtime-ts/apps/agent-worker/dist/development-preflight-main.js
 } ".env 外部服务预检失败，请检查 PostgreSQL、S3、CubeSandbox 与模型配置"
 
-$skillPrompt = "是否启动 Skill Admin API 和 Skill Admin Web？[y/N]"
+$skillPrompt = "是否启动平台管理服务（Skill、Control 与 Admin Web）？[y/N]"
 if ($CoreOnly -and $IncludeSkill) {
   throw "-CoreOnly 与 -IncludeSkill 不能同时使用"
 }
@@ -182,15 +190,16 @@ if ($IncludeSkill) {
   $startSkillServices = $skillAnswer.Trim() -match "^(y|yes|1|是)$"
 }
 if ($startSkillServices) {
-  Write-Host "[包含] 将启动 Skill 管理服务" -ForegroundColor Green
+  Write-Host "[包含] 将启动平台管理服务" -ForegroundColor Green
 } else {
-  Write-Host "[跳过] 默认不启动 Skill 管理服务" -ForegroundColor Yellow
+  Write-Host "[跳过] 默认不启动平台管理服务" -ForegroundColor Yellow
 }
 
 $apiEntry = (Join-Path $repo "runtime-ts\apps\api\dist\development-main.js").Replace("'", "''")
 $workerEntry = (Join-Path $repo "runtime-ts\apps\agent-worker\dist\development-main.js").Replace("'", "''")
 $schedulerEntry = (Join-Path $repo "runtime-ts\apps\scheduler\dist\development-main.js").Replace("'", "''")
 $skillAdminEntry = (Join-Path $repo "runtime-ts\apps\skill-admin-api\dist\development-main.js").Replace("'", "''")
+$adminControlEntry = (Join-Path $repo "runtime-ts\apps\admin-control-api\dist\development-main.js").Replace("'", "''")
 $services = @(
   [pscustomobject]@{
     Name = "API"
@@ -229,6 +238,13 @@ if ($startSkillServices) {
       HealthUrl = "$skillAdminBaseUrl/live"
       Port = $skillAdminPort
       ProcessPattern = "(@hoox[\\/]skill-admin-api|apps[\\/]+skill-admin-api|dev:skill-admin:api)"
+    },
+    [pscustomobject]@{
+      Name = "Admin Control API"
+      Command = "& node '$adminControlEntry'"
+      HealthUrl = "$adminControlBaseUrl/live"
+      Port = $adminControlPort
+      ProcessPattern = "(@hoox[\\/]admin-control-api|apps[\\/]+admin-control-api|dev:admin-control:api)"
     },
     [pscustomobject]@{
       Name = "Skill Admin Web"

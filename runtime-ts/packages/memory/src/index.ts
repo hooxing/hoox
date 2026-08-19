@@ -44,6 +44,10 @@ export interface MemoryProvider {
   getEvent(eventId: string): Promise<MemoryEventStatus>;
 }
 
+export interface MemoryProviderResolver {
+  resolve(source: MemoryIngestionSource): Promise<MemoryProvider | undefined>;
+}
+
 export interface MemoryRetrievalSource {
   readonly tenantId: string;
   readonly tenantKind: "personal" | "team";
@@ -94,7 +98,7 @@ export interface MemoryIngestionStore {
 export class MemoryIngestionConsumer {
   constructor(
     private readonly store: MemoryIngestionStore,
-    private readonly provider: MemoryProvider,
+    private readonly provider: MemoryProvider | MemoryProviderResolver,
     private readonly workerId: string,
     private readonly leaseMs: number,
     private readonly maximumAttempts: number,
@@ -123,10 +127,19 @@ export class MemoryIngestionConsumer {
     });
     if (claim === undefined) return 0;
 
+    let provider: MemoryProvider | undefined;
+    try {
+      provider = "resolve" in this.provider ? await this.provider.resolve(claim) : this.provider;
+    } catch (error) {
+      return await this.recordProviderFailure(claim, error);
+    }
+    // 当前 Run 的固定配置显式关闭记忆时，消费事实仍需完成，不能形成永久积压。
+    if (provider === undefined) return (await this.store.complete(claim)) ? 1 : 0;
+
     if (claim.providerEventId === undefined) {
       let submission: MemorySubmission;
       try {
-        submission = await this.provider.submit(claim);
+        submission = await provider.submit(claim);
       } catch (error) {
         return await this.recordProviderFailure(claim, error);
       }
@@ -135,7 +148,7 @@ export class MemoryIngestionConsumer {
 
     let event: MemoryEventStatus;
     try {
-      event = await this.provider.getEvent(claim.providerEventId);
+      event = await provider.getEvent(claim.providerEventId);
     } catch (error) {
       return await this.recordProviderFailure(claim, error);
     }

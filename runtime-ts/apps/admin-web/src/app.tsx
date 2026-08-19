@@ -11,6 +11,8 @@ import {
   SkillAdminApi,
   type SkillAdminApiContract,
 } from "./api.js";
+import type { AdminControlApiContract } from "./control-api.js";
+import { AdminControlConsole, type ControlView } from "./control-console.js";
 import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadata.js";
 
 const defaultApi = new SkillAdminApi();
@@ -693,7 +695,11 @@ function SubmissionDetail({
   );
 }
 
-export function App({ apiClient = defaultApi }: { readonly apiClient?: SkillAdminApiContract }) {
+export function SkillConsole({
+  apiClient = defaultApi,
+}: {
+  readonly apiClient?: SkillAdminApiContract;
+}) {
   const [submissions, setSubmissions] = useState<readonly SkillSubmissionDto[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
   const [selected, setSelected] = useState<SkillSubmissionDto>();
@@ -889,5 +895,62 @@ export function App({ apiClient = defaultApi }: { readonly apiClient?: SkillAdmi
         </section>
       </div>
     </main>
+  );
+}
+
+type AdminView = ControlView | "skills";
+
+const navigation: readonly { readonly key: AdminView; readonly label: string }[] = [
+  { key: "overview", label: "总览" },
+  { key: "models", label: "模型" },
+  { key: "memory", label: "记忆" },
+  { key: "skills", label: "Skills" },
+  { key: "settings", label: "配置" },
+];
+
+export function App({
+  apiClient,
+  controlApi,
+}: {
+  readonly apiClient?: SkillAdminApiContract;
+  readonly controlApi?: AdminControlApiContract;
+}) {
+  // 注入 Skill API 的旧测试和嵌入场景保持原入口；正常打开管理台先进入总览。
+  const [view, setView] = useState<AdminView>(apiClient === undefined ? "overview" : "skills");
+  return (
+    <div className="platform-admin">
+      <header className="platform-nav">
+        <button type="button" className="platform-brand" onClick={() => setView("overview")}>
+          <span className="platform-brand-mark" aria-hidden="true">
+            H
+          </span>
+          <span>
+            <strong>Hoox</strong>
+            <small>平台管理</small>
+          </span>
+        </button>
+        <nav aria-label="后台模块">
+          {navigation.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              className={view === item.key ? "selected" : ""}
+              aria-current={view === item.key ? "page" : undefined}
+              onClick={() => setView(item.key)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+      </header>
+      {view === "skills" ? (
+        <SkillConsole apiClient={apiClient ?? defaultApi} />
+      ) : (
+        <AdminControlConsole
+          view={view}
+          {...(controlApi === undefined ? {} : { api: controlApi })}
+        />
+      )}
+    </div>
   );
 }

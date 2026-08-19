@@ -1,0 +1,29 @@
+{
+  "name": "@hoox/admin-control-api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "types": "./src/app.ts",
+    "default": "./dist/app.js"
+  },
+  "types": "./src/app.ts",
+  "dependencies": {
+    "@hoox/admin-control": "workspace:*",
+    "@hoox/api": "workspace:*",
+    "@hoox/domain": "workspace:*",
+    "@hoox/persistence": "workspace:*",
+    "@hoox/process-runtime": "workspace:*",
+    "@hoox/protocol": "workspace:*",
+    "@sinclair/typebox": "0.34.52",
+    "fastify": "5.10.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "tsc -b tsconfig.json --clean",
+    "dev": "node --enable-source-maps --env-file-if-exists=../../../.env dist/development-main.js",
+    "start": "node --enable-source-maps dist/production-main.js",
+    "test": "vitest run --root ../../.. runtime-ts/apps/admin-control-api/src",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

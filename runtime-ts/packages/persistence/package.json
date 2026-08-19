@@ -16,6 +16,7 @@
     "test:integration:minio": "vitest run --root ../../.. runtime-ts/packages/persistence/src/s3-minio.integration.test.ts"
   },
   "dependencies": {
+    "@hoox/admin-control": "workspace:*",
     "@hoox/context-policy": "workspace:*",
     "@hoox/domain": "workspace:*",
     "@hoox/memory": "workspace:*",

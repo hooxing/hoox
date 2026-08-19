@@ -10,7 +10,8 @@ function validExample(): string {
         key === "DATABASE_TEAM_COORDINATOR_URL" ||
         key === "DATABASE_BOOTSTRAP_URL" ||
         key === "MIGRATION_DATABASE_URL" ||
-        key === "SKILL_PUBLISHER_DATABASE_URL"
+        key === "SKILL_PUBLISHER_DATABASE_URL" ||
+        key === "ADMIN_CONTROL_DATABASE_URL"
       ) {
         return `${key}=postgresql://user:replace-me@localhost/db`;
       }
@@ -83,7 +84,9 @@ describe("环境变量示例契约", () => {
         "DATABASE_WORKER_COORDINATOR_ROLE",
         "DATABASE_TEAM_COORDINATOR_URL",
         "DATABASE_TEAM_COORDINATOR_ROLE",
+        "DATABASE_ADMIN_CONTROL_ROLE",
         "SKILL_PUBLISHER_DATABASE_URL",
+        "ADMIN_CONTROL_DATABASE_URL",
         "DEV_SKILL_ADMIN_TOKEN",
       ]),
     );

@@ -199,11 +199,21 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
   const finalizations = new Map<string, number>();
   let activeThinking: number | undefined;
   let activeAnswer: number | undefined;
+  // Provider 可能缺少 thinking_end；进入后续语义阶段前必须先收敛旧思考。
+  const completeActiveThinking = () => {
+    const index = activeThinking;
+    const block = index === undefined ? undefined : blocks[index];
+    if (index !== undefined && block?.type === "thinking") {
+      blocks[index] = { ...block, status: "completed" };
+    }
+    activeThinking = undefined;
+  };
 
   for (const event of events) {
     const payload = object(event.payload);
     if (event.type === "thinking.started") {
       activeAnswer = undefined;
+      completeActiveThinking();
       activeThinking = blocks.length;
       blocks.push({ id: event.eventId, type: "thinking", text: "", status: "running" });
       continue;
@@ -222,16 +232,11 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
       continue;
     }
     if (event.type === "thinking.completed") {
-      const index = activeThinking;
-      const block = index === undefined ? undefined : blocks[index];
-      if (index !== undefined && block?.type === "thinking") {
-        blocks[index] = { ...block, status: "completed" };
-      }
-      activeThinking = undefined;
+      completeActiveThinking();
       continue;
     }
     if (event.type === "message.delta") {
-      activeThinking = undefined;
+      completeActiveThinking();
       const delta = payload?.delta;
       if (typeof delta !== "string") continue;
       if (activeAnswer === undefined) {
@@ -244,7 +249,7 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
       continue;
     }
     if (event.type === "runtime.notice") {
-      activeThinking = undefined;
+      completeActiveThinking();
       activeAnswer = undefined;
       const message = text(payload?.message);
       if (message !== undefined) {
@@ -263,18 +268,13 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
       if (answerIndex !== undefined && answer?.type === "answer") {
         blocks[answerIndex] = { ...answer, status: "completed" };
       }
-      const thinkingIndex = activeThinking;
-      const thinking = thinkingIndex === undefined ? undefined : blocks[thinkingIndex];
-      if (thinkingIndex !== undefined && thinking?.type === "thinking") {
-        blocks[thinkingIndex] = { ...thinking, status: "completed" };
-      }
+      completeActiveThinking();
       activeAnswer = undefined;
-      activeThinking = undefined;
       continue;
     }
     if (event.type === "finalization.started") {
       activeAnswer = undefined;
-      activeThinking = undefined;
+      completeActiveThinking();
       const callId = text(payload?.callId);
       if (callId === undefined) continue;
       finalizations.set(callId, blocks.length);
@@ -300,7 +300,7 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
     }
     if (!event.type.startsWith("tool.")) continue;
     activeAnswer = undefined;
-    activeThinking = undefined;
+    completeActiveThinking();
     const name = text(payload?.name);
     // 阶段标志由 finalization 事件展示，不能再出现一个误导性的普通工具卡片。
     if (name === "collapse_process_for_final_answer" || name === "begin_final_answer") {
@@ -413,6 +413,11 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
   let messageActive = false;
   let waitingQuestion: string | undefined;
   let todo: UserFacingTodo | undefined;
+  // 当前状态必须与对话投影共享“最多一个活动思考”的边界。
+  const completeThinking = () => {
+    thinkingActive = false;
+    activeThinkingBlock = -1;
+  };
 
   for (const event of events) {
     if (event.type === "thinking.started") {
@@ -435,11 +440,11 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
       continue;
     }
     if (event.type === "thinking.completed") {
-      thinkingActive = false;
-      activeThinkingBlock = -1;
+      completeThinking();
       continue;
     }
     if (event.type === "message.delta") {
+      completeThinking();
       const delta = object(event.payload)?.delta;
       // 每个字符串片段（包括独立空格和换行）都是 Markdown 结构的一部分。
       if (typeof delta === "string") {
@@ -450,8 +455,7 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
     }
     if (event.type === "message.completed") {
       // 兼容缺少 thinking_end 的 Provider：assistant message 结束即视为本轮思考结束。
-      thinkingActive = false;
-      activeThinkingBlock = -1;
+      completeThinking();
       messageActive = false;
       continue;
     }
@@ -464,6 +468,9 @@ export function buildRunProgress(events: readonly RunEvent[]): RunProgress {
       const snapshot = todoSnapshot(object(event.payload)?.snapshot);
       if (snapshot !== undefined) todo = snapshot;
       continue;
+    }
+    if (event.type.startsWith("tool.") || event.type === "finalization.started") {
+      completeThinking();
     }
     const descriptor = toolDescriptor(event);
     if (descriptor === undefined) continue;

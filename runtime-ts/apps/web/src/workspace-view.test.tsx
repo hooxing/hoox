@@ -330,14 +330,21 @@ describe("工作台展示组件", () => {
           {
             sequence: 2,
             role: "runtime",
-            text: "运行失败；未提交工作不视为成功。",
+            text: "本次运行未产生 Workspace revision。",
             createdAt: "2026-08-01T00:00:01.000Z",
+          },
+          {
+            sequence: 3,
+            role: "runtime",
+            text: "运行失败；未提交工作不视为成功。",
+            createdAt: "2026-08-01T00:00:02.000Z",
           },
         ]}
       />,
     );
 
     expect(html).not.toContain("运行已完成。");
+    expect(html).not.toContain("本次运行未产生 Workspace revision。");
     expect(html).toContain("运行失败；未提交工作不视为成功。");
   });
 

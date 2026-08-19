@@ -180,6 +180,7 @@
 | [ADR-20260818114734](20260818114734-model-visible-prompt-metadata-and-tool-guidance-deduplication.md) | 模型可见 Prompt 元数据与工具指引去重 | 已接受 | 2026-08-18 |
 | [ADR-20260818144124](20260818144124-unify-project-identity-as-hoox.md) | 统一项目身份为 Hoox | 已接受 | 2026-08-18 |
 | [ADR-20260819115118](20260819115118-thinking-lifecycle-boundary-convergence.md) | 思考生命周期在正文与工具边界收敛 | 已接受 | 2026-08-19 |
+| [ADR-20260819142015](20260819142015-hide-workspace-unchanged-runtime-notice.md) | 用户工作台隐藏 Workspace 未变化审计通知 | 已接受 | 2026-08-19 |
 
 ## 何时必须记录
 

@@ -1,5 +1,9 @@
 # Todo Writer Runtime 实现说明
 
+> [!NOTE]
+> 本文是实施计划或阶段拆解。当前行为以代码、自动化测试、当前架构文档和未被替代的 ADR 为准。
+
+
 ## 结论
 
 Pi `@earendil-works/pi-coding-agent@0.82.1` 没有内置 Plan/Todo 工具，默认工具只有 `read`、`bash`、`edit`、`write`、
@@ -81,4 +85,4 @@ Todo 是否存在，也不会因为没有 `in_progress` 而拒绝读取、搜索
 | API | `runtime-ts/apps/api/src/app.ts` | 公开 Todo 事件 |
 | Web | `runtime-ts/apps/web/src/event-view.ts`、`workspace-view.tsx` | 最新快照投影与运行进度展示 |
 
-架构决策见 [ADR-0113](decisions/0113-agent-todo-writer-and-run-progress.md)。
+架构决策见 [ADR-0113](../decisions/0113-agent-todo-writer-and-run-progress.md)。

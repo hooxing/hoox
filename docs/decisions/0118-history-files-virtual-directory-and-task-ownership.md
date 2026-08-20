@@ -141,7 +141,7 @@ Tenant 类型已经提供自然的个人/团队所有权边界，和现有 Postg
 
 ## 后续工作
 
-- 实施计划见 `docs/history-files-virtual-directory-implementation-plan.md`；
+- 实施计划见 `docs/plans/history-files-virtual-directory.md`；
 - 支持 UI 标题变化同步到新目录，并保留旧路径别名；
 - 根据真实半年任务量决定是否增加分层或受控查询能力；
 - 团队功能实施前新增个人发布到团队的专项 ADR 和威胁模型。

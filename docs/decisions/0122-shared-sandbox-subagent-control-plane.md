@@ -4,7 +4,7 @@
 - 日期：2026-08-05
 - 决策者：Runtime 团队
 - 关联任务/PR：SubAgent 独立对话与共享 Sandbox 实施
-- 替代关系：替代 `docs/codex-subagent-plan-runtime-design.md` 中“首版只读、隔离 Workspace 后才可写”的建议；不改变 ADR-0063 的产品 Thread 单写者边界
+- 替代关系：替代 `docs/plans/codex-subagent-runtime-design.md` 中“首版只读、隔离 Workspace 后才可写”的建议；不改变 ADR-0063 的产品 Thread 单写者边界
 
 ## 背景
 

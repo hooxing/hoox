@@ -1,19 +1,22 @@
 # 实施路线与阶段 Gate
 
+> [!NOTE]
+> 本文保留阶段目标和 Gate 的演进脉络，部分复选状态可能晚于实际实现。判断当前能力与生产缺口时，以[项目状态](project-status.md)、代码、自动化测试和未被替代的 ADR 为准。
+
 本文把已经确认的首版路径带入新仓库。它只保留阶段结果、依赖和进入下一阶段的证据；具体任务在开发前仍需按 ADR 模板补齐失败、幂等、验证和回滚。
 
 ## 当前实施基线
 
 - 新代码只在本仓库 `runtime-ts/` 开发，不修改或运行旧 Python 作为生产依赖；
 - Node.js `24.18.0`、pnpm `10.15.1`、TypeScript `5.9.3`、Pi `0.82.1`；
-- CubeSandbox v0.6 环境，Node SDK 固定到上游 `v0.6.0` 提交，正式复制和冒烟尚需完成；
+- Sandbox 通过 Provider 边界接入 CubeSandbox 与 E2B；真实账户、模板和生命周期仍需按目标环境显式冒烟；
 - PostgreSQL 是状态事实源，MinIO/S3 是私有 Blob 存储；
 - Pi 默认 Compaction 完全关闭，Runtime 自有 Context Policy；
-- 首版个人租户，Memory、团队、真实 FileSource 和丰富预览后置。
+- 个人 Tenant、团队协作、Memory、历史文件与多 Sandbox 能力按独立切片演进；当前范围以项目状态页为准。
 
-## 后续连续对话改造
+## 连续对话改造计划记录
 
-Thread 跨 Run 连续上下文、durable steer/follow-up、Runtime Context Compaction、按 Run 记录 Workspace 结果，以及 Sandbox 立即 pause、resume 与冷重建的完整改造范围，统一记录在 [Thread 连续上下文实施总计划](thread-continuous-context-implementation-plan.md)。后续相关任务必须先核对该总计划；本路线中既有的“10 分钟 warm Session”和 Attempt 级上下文描述只代表当前实现，不再代表目标产品语义。
+Thread 跨 Run 连续上下文、durable steer/follow-up、Runtime Context Compaction、按 Run 记录 Workspace 结果，以及 Sandbox pause、resume 与冷重建的完整改造范围，统一记录在 [Thread 连续上下文实施总计划](plans/thread-continuous-context.md)。该计划的阶段 1～6 已实施并进入验收与运行数据优化；后续修改仍需核对计划与相关 ADR。本路线中更早的“10 分钟 warm Session”和 Attempt 级上下文描述只代表历史阶段，不再代表目标产品语义。
 
 ## 开发 Ready Gate
 

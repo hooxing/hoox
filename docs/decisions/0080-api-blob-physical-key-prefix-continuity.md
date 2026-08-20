@@ -1,5 +1,9 @@
 # 0080 API Blob 物理键前缀连续性
 
+- 状态：已接受
+- 日期：2026-08-02
+
+
 ## 背景
 
 Resource 上传由 API 内的 `DurableResourceBlobWriter` 驱动。PostgreSQL Blob 生命周期仓库负责签发 canonical `physicalObjectKey`，S3 BlobStore 负责按该键完成 staging 到 stable 的提升。

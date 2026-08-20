@@ -13,7 +13,8 @@
       "!!runtime-ts/vendor/cubesandbox-sdk",
       "!!runtime-ts/vendor/deepseek-v4-tokenizer/tokenizer.json",
       "!!runtime-ts/vendor/deepseek-v4-tokenizer/tokenizer_config.json",
-      "!!runtime-ts/vendor/deepseek-trajectory"
+      "!!runtime-ts/vendor/deepseek-trajectory",
+      "!!runtime-ts/apps/admin-web/src/pi-model-catalog.generated.ts"
     ]
   },
   "formatter": {

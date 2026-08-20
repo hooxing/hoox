@@ -356,6 +356,19 @@ body {
   color: #718078;
 }
 
+.provider-catalog-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.provider-catalog-title > small {
+  border-radius: 999px;
+  padding: 2px 8px;
+  color: #24503d;
+  background: #e4eee9;
+}
+
 .provider-catalog-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(160px, 1fr));

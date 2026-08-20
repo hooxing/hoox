@@ -88,4 +88,23 @@ describe("后台控制 Web API", () => {
       expect.anything(),
     );
   });
+
+  it("后台不可用时从随前端发布的 Pi 快照读取目录", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      throw new TypeError("network unavailable");
+    });
+    const api = new AdminControlApi(fetcher);
+
+    await expect(api.listPiModelCatalogProviders()).resolves.toContainEqual(
+      expect.objectContaining({ providerId: "deepseek" }),
+    );
+    await expect(
+      api.findPiModelCatalogModels({ query: "DeepSeek V4 Pro", limit: 10 }),
+    ).resolves.toContainEqual(expect.objectContaining({ id: "deepseek-v4-pro" }));
+  });
+
+  it("权限错误不降级为本地目录", async () => {
+    const api = new AdminControlApi(vi.fn<typeof fetch>(async () => response({}, 403)));
+    await expect(api.listPiModelCatalogProviders()).rejects.toMatchObject({ status: 403 });
+  });
 });

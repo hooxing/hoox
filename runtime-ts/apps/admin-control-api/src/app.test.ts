@@ -54,9 +54,37 @@ function fixture() {
     })),
     publish: vi.fn(),
   } satisfies AdminControlApiDependencies["control"];
+  const modelCatalog: AdminControlApiDependencies["modelCatalog"] = {
+    listProviders: vi.fn(() => [
+      {
+        providerId: "deepseek",
+        displayName: "DeepSeek",
+        baseUrl: "https://api.deepseek.com",
+        modelCount: 1,
+      },
+    ]),
+    findModels: vi.fn(() => [
+      {
+        providerId: "deepseek",
+        providerName: "DeepSeek",
+        id: "deepseek-chat",
+        name: "DeepSeek Chat",
+        api: "openai-completions" as const,
+        reasoning: false,
+        input: ["text" as const],
+        contextWindow: 128_000,
+        maxTokens: 8_192,
+      },
+    ]),
+  };
   return {
     control,
-    app: createAdminControlApiApp({ auth, control, readiness: { async probe() {} } }),
+    app: createAdminControlApiApp({
+      auth,
+      control,
+      modelCatalog,
+      readiness: { async probe() {} },
+    }),
   };
 }
 
@@ -66,6 +94,32 @@ describe("后台控制 API", () => {
     const response = await app.inject({ method: "GET", url: "/v1/admin/control/model-providers" });
     expect(response.statusCode).toBe(401);
     expect(response.body).not.toContain("stack");
+    await app.close();
+  });
+
+  it("受认证保护地返回 Pi Provider，并支持自定义 Provider 按模型名查询", async () => {
+    const { app, control } = fixture();
+    const providers = await app.inject({
+      method: "GET",
+      url: "/v1/admin/control/model-catalog/providers",
+      headers: { authorization: "Bearer admin" },
+    });
+    expect(providers.statusCode).toBe(200);
+    expect(providers.json().data.items).toEqual([
+      expect.objectContaining({ providerId: "deepseek", modelCount: 1 }),
+    ]);
+
+    const models = await app.inject({
+      method: "GET",
+      url: "/v1/admin/control/model-catalog/models?query=DeepSeek%20Chat&limit=10",
+      headers: { authorization: "Bearer admin" },
+    });
+    expect(models.statusCode).toBe(200);
+    expect(models.json().data.items).toEqual([
+      expect.objectContaining({ id: "deepseek-chat", contextWindow: 128_000 }),
+    ]);
+    expect(control.listModelProviders).toHaveBeenCalledWith("user_admin");
+    expect(models.body).not.toContain("apiKey");
     await app.close();
   });
 

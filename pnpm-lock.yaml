@@ -67,6 +67,9 @@ importers:
 
   runtime-ts/apps/admin-control-api:
     dependencies:
+      '@earendil-works/pi-ai':
+        specifier: 0.82.1
+        version: 0.82.1(ws@8.21.1)(zod@4.4.3)
       '@hoox/admin-control':
         specifier: workspace:*
         version: link:../../packages/admin-control

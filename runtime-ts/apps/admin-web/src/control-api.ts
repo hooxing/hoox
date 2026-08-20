@@ -6,6 +6,8 @@ import type {
   CreateRuntimeSettingsDraftRequest,
   MemoryProviderRevisionDto,
   ModelProviderRevisionDto,
+  PiModelCatalogModelDto,
+  PiModelCatalogProviderDto,
   ProbeControlRevisionRequest,
   PublishControlRevisionRequest,
   RuntimeSettingsRevisionDto,
@@ -80,6 +82,27 @@ export class AdminControlApi {
     return (await this.request<ListEnvelope<ModelProviderRevisionDto>>("/model-providers")).items;
   }
 
+  async listPiModelCatalogProviders(): Promise<readonly PiModelCatalogProviderDto[]> {
+    return (await this.request<ListEnvelope<PiModelCatalogProviderDto>>("/model-catalog/providers"))
+      .items;
+  }
+
+  async findPiModelCatalogModels(input: {
+    readonly providerId?: string;
+    readonly query?: string;
+    readonly limit?: number;
+  }): Promise<readonly PiModelCatalogModelDto[]> {
+    const query = new URLSearchParams();
+    if (input.providerId !== undefined) query.set("providerId", input.providerId);
+    if (input.query !== undefined) query.set("query", input.query);
+    query.set("limit", String(input.limit ?? 50));
+    return (
+      await this.request<ListEnvelope<PiModelCatalogModelDto>>(
+        `/model-catalog/models?${query.toString()}`,
+      )
+    ).items;
+  }
+
   async listMemoryProviders(): Promise<readonly MemoryProviderRevisionDto[]> {
     return (await this.request<ListEnvelope<MemoryProviderRevisionDto>>("/memory-providers")).items;
   }
@@ -136,6 +159,8 @@ export type AdminControlApiContract = Pick<
   AdminControlApi,
   | "overview"
   | "listModelProviders"
+  | "listPiModelCatalogProviders"
+  | "findPiModelCatalogModels"
   | "listMemoryProviders"
   | "listRuntimeSettings"
   | "listAudits"

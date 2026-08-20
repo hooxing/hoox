@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { PiModelCatalogModelDto } from "@hoox/protocol";
 import { App } from "./app.js";
 import type { AdminControlApiContract } from "./control-api.js";
 
@@ -33,6 +34,15 @@ function fixture(): AdminControlApiContract {
   return {
     overview: vi.fn(async () => overview),
     listModelProviders: vi.fn(async () => []),
+    listPiModelCatalogProviders: vi.fn(async () => [
+      {
+        providerId: "deepseek",
+        displayName: "DeepSeek",
+        baseUrl: "https://api.deepseek.com",
+        modelCount: 2,
+      },
+    ]),
+    findPiModelCatalogModels: vi.fn(async () => []),
     listMemoryProviders: vi.fn(async () => []),
     listRuntimeSettings: vi.fn(async () => []),
     listAudits: vi.fn(async () => []),
@@ -122,8 +132,13 @@ describe("统一平台管理导航", () => {
     if (modelsNavigation === undefined) throw new Error("模型导航缺失");
     act(() => modelsNavigation.click());
     await settle();
+    const addCustomProvider = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.trim() === "添加自定义 Provider",
+    );
+    if (addCustomProvider === undefined) throw new Error("自定义 Provider 按钮缺失");
+    act(() => addCustomProvider.click());
     const addModel = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (item) => item.textContent?.trim() === "添加模型",
+      (item) => item.textContent?.trim() === "添加空白模型",
     );
     if (addModel === undefined) throw new Error("添加模型按钮缺失");
     act(() => addModel.click());
@@ -196,6 +211,134 @@ describe("统一平台管理导航", () => {
     container.remove();
   });
 
+  it("自定义 Provider 可按模型名称读取 Pi 元数据", async () => {
+    const api = fixture();
+    const catalogModel: PiModelCatalogModelDto = {
+      providerId: "deepseek",
+      providerName: "DeepSeek",
+      id: "deepseek-chat",
+      name: "DeepSeek Chat",
+      api: "openai-completions",
+      reasoning: false,
+      input: ["text"],
+      contextWindow: 128_000,
+      maxTokens: 8_192,
+    };
+    const lookupPromise = Promise.resolve<readonly PiModelCatalogModelDto[]>([catalogModel]);
+    vi.mocked(api.findPiModelCatalogModels).mockImplementationOnce(() => lookupPromise);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+
+    const modelsNavigation = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
+      (item) => item.textContent === "模型",
+    );
+    if (modelsNavigation === undefined) throw new Error("模型导航缺失");
+    act(() => modelsNavigation.click());
+    await settle();
+    const addCustomProvider = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.trim() === "添加自定义 Provider",
+    );
+    if (addCustomProvider === undefined) throw new Error("自定义 Provider 按钮缺失");
+    act(() => addCustomProvider.click());
+
+    const query = container.querySelector<HTMLInputElement>(
+      'input[placeholder="例如 deepseek-chat"]',
+    );
+    act(() => changeControl(requiredControl(query, "模型查询"), "DeepSeek Chat"));
+    const search = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.trim() === "从 Pi 查询",
+    );
+    if (search === undefined) throw new Error("Pi 查询按钮缺失");
+    await act(async () => {
+      search.click();
+      await lookupPromise;
+      await Promise.resolve();
+    });
+    const result = [
+      ...container.querySelectorAll<HTMLButtonElement>(".pi-search-results button"),
+    ].find((item) => item.textContent?.includes("deepseek-chat"));
+    if (result === undefined) throw new Error("Pi 查询结果缺失");
+    act(() => result.click());
+
+    expect(api.findPiModelCatalogModels).toHaveBeenCalledWith({
+      query: "DeepSeek Chat",
+      limit: 12,
+    });
+    expect(container.textContent).toContain("DeepSeek Chat");
+    expect(container.textContent).toContain("128,000 ctx");
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("内置 Provider 自动载入对应的 Pi 模型目录", async () => {
+    const api = fixture();
+    const piModels: readonly PiModelCatalogModelDto[] = [
+      {
+        providerId: "deepseek",
+        providerName: "DeepSeek",
+        id: "deepseek-chat",
+        name: "DeepSeek Chat",
+        api: "openai-completions",
+        reasoning: false,
+        input: ["text"],
+        contextWindow: 128_000,
+        maxTokens: 8_192,
+      },
+      {
+        providerId: "deepseek",
+        providerName: "DeepSeek",
+        id: "deepseek-reasoner",
+        name: "DeepSeek Reasoner",
+        api: "openai-completions",
+        reasoning: true,
+        input: ["text"],
+        contextWindow: 128_000,
+        maxTokens: 8_192,
+      },
+    ];
+    const lookupPromise = Promise.resolve(piModels);
+    vi.mocked(api.findPiModelCatalogModels).mockImplementationOnce(() => lookupPromise);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+
+    const modelsNavigation = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
+      (item) => item.textContent === "模型",
+    );
+    if (modelsNavigation === undefined) throw new Error("模型导航缺失");
+    act(() => modelsNavigation.click());
+    await settle();
+    const showCatalog = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.trim() === "添加内置 Provider",
+    );
+    if (showCatalog === undefined) throw new Error("内置 Provider 按钮缺失");
+    act(() => showCatalog.click());
+    const deepseek = container.querySelector<HTMLButtonElement>(".provider-catalog-grid button");
+    if (deepseek === null) throw new Error("DeepSeek Provider 缺失");
+    await act(async () => {
+      deepseek.click();
+      await lookupPromise;
+      await Promise.resolve();
+    });
+
+    expect(api.findPiModelCatalogModels).toHaveBeenCalledWith({
+      providerId: "deepseek",
+      limit: 100,
+    });
+    expect(container.querySelectorAll(".model-editor-row")).toHaveLength(2);
+    expect(container.textContent).toContain("DeepSeek Reasoner");
+    expect(container.textContent).toContain("已从 Pi 载入 2 个模型");
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it("控制 API 暂不可用时仍可查看模型目录表单", async () => {
     const api: AdminControlApiContract = {
       ...fixture(),
@@ -215,6 +358,12 @@ describe("统一平台管理导航", () => {
     if (modelsNavigation === undefined) throw new Error("模型导航缺失");
     act(() => modelsNavigation.click());
     await settle();
+
+    const addCustomProvider = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.trim() === "添加自定义 Provider",
+    );
+    if (addCustomProvider === undefined) throw new Error("自定义 Provider 按钮缺失");
+    act(() => addCustomProvider.click());
 
     expect(container.querySelector(".model-catalog-editor")).not.toBeNull();
     expect(container.textContent).toContain("操作未完成");

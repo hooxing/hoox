@@ -57,4 +57,35 @@ describe("后台控制 Web API", () => {
     expect((error as Error).message).toBe("Provider 探测失败或依赖暂时不可用。");
     expect((error as Error).message).not.toContain("secret");
   });
+
+  it("按 Provider 或模型名读取 Pi 模型目录", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      response({
+        data: {
+          items: [
+            {
+              providerId: "deepseek",
+              providerName: "DeepSeek",
+              id: "deepseek-chat",
+              name: "DeepSeek Chat",
+              api: "openai-completions",
+              reasoning: false,
+              input: ["text"],
+              contextWindow: 128_000,
+              maxTokens: 8_192,
+            },
+          ],
+        },
+      }),
+    );
+    const api = new AdminControlApi(fetcher);
+
+    await expect(
+      api.findPiModelCatalogModels({ query: "DeepSeek Chat", limit: 10 }),
+    ).resolves.toEqual([expect.objectContaining({ id: "deepseek-chat" })]);
+    expect(fetcher).toHaveBeenCalledWith(
+      "/v1/admin/control/model-catalog/models?query=DeepSeek+Chat&limit=10",
+      expect.anything(),
+    );
+  });
 });

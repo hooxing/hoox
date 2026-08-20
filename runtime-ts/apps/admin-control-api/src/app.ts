@@ -21,6 +21,8 @@ import {
   MemoryProviderRevisionSuccessEnvelopeSchema,
   ModelProviderRevisionListSuccessEnvelopeSchema,
   ModelProviderRevisionSuccessEnvelopeSchema,
+  PiModelCatalogModelListSuccessEnvelopeSchema,
+  PiModelCatalogProviderListSuccessEnvelopeSchema,
   ProbeControlRevisionRequestSchema,
   PublishControlRevisionRequestSchema,
   RuntimeSettingsRevisionListSuccessEnvelopeSchema,
@@ -34,10 +36,21 @@ import {
 } from "@hoox/protocol";
 import { Type } from "@sinclair/typebox";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import type { PiModelCatalogPort } from "./pi-model-catalog.js";
 
 const strict = { additionalProperties: false } as const;
 const AuditQuerySchema = Type.Object(
   { limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, default: 100 })) },
+  strict,
+);
+const PiModelCatalogQuerySchema = Type.Object(
+  {
+    providerId: Type.Optional(
+      Type.String({ pattern: "^[a-z0-9][a-z0-9._-]{0,63}$", maxLength: 64 }),
+    ),
+    query: Type.Optional(Type.String({ minLength: 1, maxLength: 255 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 50 })),
+  },
   strict,
 );
 
@@ -58,6 +71,7 @@ type ControlServiceContract = Pick<
 export interface AdminControlApiDependencies {
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
+  readonly modelCatalog: PiModelCatalogPort;
   readonly readiness: { probe(): Promise<void> };
   readonly now?: () => Date;
 }
@@ -144,6 +158,39 @@ export function createAdminControlApiApp(
       success(request, {
         items: await dependencies.control.listModelProviders(await actor(request)),
       }),
+  );
+  app.get(
+    "/v1/admin/control/model-catalog/providers",
+    { schema: { response: responseSchemas(PiModelCatalogProviderListSuccessEnvelopeSchema) } },
+    async (request) => {
+      const userId = await actor(request);
+      await dependencies.control.listModelProviders(userId);
+      return success(request, { items: dependencies.modelCatalog.listProviders() });
+    },
+  );
+  app.get<{
+    Querystring: { readonly providerId?: string; readonly query?: string; readonly limit?: number };
+  }>(
+    "/v1/admin/control/model-catalog/models",
+    {
+      schema: {
+        querystring: PiModelCatalogQuerySchema,
+        response: responseSchemas(PiModelCatalogModelListSuccessEnvelopeSchema),
+      },
+    },
+    async (request) => {
+      const userId = await actor(request);
+      await dependencies.control.listModelProviders(userId);
+      return success(request, {
+        items: dependencies.modelCatalog.findModels({
+          ...(request.query.providerId === undefined
+            ? {}
+            : { providerId: request.query.providerId }),
+          ...(request.query.query === undefined ? {} : { query: request.query.query }),
+          limit: request.query.limit ?? 50,
+        }),
+      });
+    },
   );
   app.get(
     "/v1/admin/control/memory-providers",

@@ -40,10 +40,18 @@ describe("Provider 连接探针", () => {
       protocol: "openai-compatible",
       baseUrl: "https://model.example.com/v1/",
       secretRef: "deployment:model",
-      modelId: "model-a",
-      supportsImages: false,
-      contextWindow: 128_000,
-      maxOutputTokens: 8_192,
+      defaultModelId: "model-a",
+      models: [
+        {
+          id: "model-a",
+          name: "Model A",
+          enabled: true,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 128_000,
+          maxTokens: 8_192,
+        },
+      ],
     });
     await probes.probeMemory({
       providerKey: "memory",
@@ -80,12 +88,68 @@ describe("Provider 连接探针", () => {
         protocol: "openai-compatible",
         baseUrl: "https://blocked.example.com/v1/",
         secretRef: "deployment:model",
-        modelId: "model-a",
-        supportsImages: false,
-        contextWindow: 128_000,
-        maxOutputTokens: 8_192,
+        defaultModelId: "model-a",
+        models: [
+          {
+            id: "model-a",
+            name: "Model A",
+            enabled: true,
+            reasoning: false,
+            input: ["text"],
+            contextWindow: 128_000,
+            maxTokens: 8_192,
+          },
+        ],
       }),
     ).rejects.toThrow("PROVIDER_HOST_NOT_ALLOWED");
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("要求所有启用模型存在，但忽略停用模型", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn<typeof fetch>()
+        .mockImplementation(
+          async () => new Response(JSON.stringify({ data: [{ id: "model-a" }] }), { status: 200 }),
+        ),
+    );
+    const probes = createProviderProbes(configuration);
+    const provider = {
+      providerKey: "main",
+      displayName: "主模型",
+      protocol: "openai-compatible" as const,
+      baseUrl: "https://model.example.com/v1/",
+      secretRef: "deployment:model" as const,
+      defaultModelId: "model-a",
+      models: [
+        {
+          id: "model-a",
+          name: "Model A",
+          enabled: true,
+          reasoning: false,
+          input: ["text" as const],
+          contextWindow: 128_000,
+          maxTokens: 8_192,
+        },
+        {
+          id: "model-b",
+          name: "Model B",
+          enabled: false,
+          reasoning: true,
+          input: ["text" as const],
+          contextWindow: 128_000,
+          maxTokens: 8_192,
+        },
+      ],
+    };
+
+    await expect(probes.probeModel(provider)).resolves.toBeUndefined();
+    await expect(
+      probes.probeModel({
+        ...provider,
+        models: provider.models.map((model) => ({ ...model, enabled: true })),
+      }),
+    ).rejects.toThrow("MODEL_METADATA_MISMATCH");
   });
 });

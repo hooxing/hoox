@@ -32,4 +32,17 @@ describe("后台控制面迁移", () => {
     expect(sql).toContain("后台控制面已有事实，禁止破坏性回退");
     expect(sql).toContain("run_runtime_config_snapshots");
   });
+
+  it("后续迁移把模型配置收紧为 Provider 模型目录并保护不可逆降级", () => {
+    const up = migration("0051_provider_model_catalog.up.sql");
+    expect(up).toContain("'defaultModelId','models'");
+    expect(up).toContain("jsonb_array_length(configuration->'models') BETWEEN 1 AND 100");
+    expect(up).toContain("@.enabled == true && @.id == $.defaultModelId");
+    expect(up).toContain("@.maxTokens <= @.contextWindow");
+    expect(up).not.toContain("MODEL_API_KEY");
+
+    const down = migration("0051_provider_model_catalog.down.sql");
+    expect(down).toContain("已有模型目录配置事实，禁止降级为单模型结构");
+    expect(down).toContain("object_kind='model_provider'");
+  });
 });

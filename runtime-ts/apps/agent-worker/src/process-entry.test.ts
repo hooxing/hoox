@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assembleModelWireTraceIfEnabled,
   createDevelopmentOpenAiCompatibleModel,
+  createOpenAiCompatibleProvider,
   parseWorkerProcessEnvironment,
   probeOpenAiCompatibleModel,
   selectWorkerProcessEnvironment,
@@ -582,6 +583,51 @@ describe("Agent Worker 进程入口", () => {
       input: ["text", "image"],
     });
     expect(JSON.stringify(model)).not.toContain(configuration.model.apiKey);
+  });
+
+  it("Pi Provider 只注册启用模型并选择显式默认模型", async () => {
+    const { modelRuntime, model } = await createOpenAiCompatibleProvider({
+      displayName: "主模型供应商",
+      baseUrl: "https://model.example.com/v1",
+      apiKey: "deployment-secret",
+      defaultModelId: "model-b",
+      models: [
+        {
+          id: "model-a",
+          name: "Model A",
+          enabled: true,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 64_000,
+          maxTokens: 4_096,
+        },
+        {
+          id: "model-b",
+          name: "Model B",
+          enabled: true,
+          reasoning: true,
+          input: ["text", "image"],
+          contextWindow: 128_000,
+          maxTokens: 8_192,
+        },
+        {
+          id: "model-disabled",
+          name: "Disabled",
+          enabled: false,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 32_000,
+          maxTokens: 2_048,
+        },
+      ],
+    });
+
+    expect(model.id).toBe("model-b");
+    expect(model.reasoning).toBe(true);
+    expect(modelRuntime.getProvider("runtime-openai-compatible")?.name).toBe("主模型供应商");
+    expect(
+      modelRuntime.getModels("runtime-openai-compatible").map((candidate) => candidate.id),
+    ).toEqual(["model-a", "model-b"]);
   });
 
   it("DeepSeek V4 Flash 使用官方 0731 模型能力和 Pi 兼容配置", async () => {

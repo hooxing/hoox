@@ -3,55 +3,114 @@ import {
   AdminControlService,
   type AdminControlServiceError,
   type AdminControlRepository,
+  type ModelProviderConfiguration,
   normalizeMemoryProviderConfiguration,
   normalizeModelProviderConfiguration,
   normalizeRuntimeSettingsConfiguration,
 } from "./index.js";
 
+function modelConfiguration(
+  overrides: Partial<ModelProviderConfiguration> = {},
+): ModelProviderConfiguration {
+  return {
+    providerKey: "main",
+    displayName: "主模型",
+    protocol: "openai-compatible",
+    baseUrl: "https://model.example.com/v1",
+    secretRef: "deployment:model",
+    defaultModelId: "model-a",
+    models: [
+      {
+        id: "model-a",
+        name: "Model A",
+        enabled: true,
+        reasoning: false,
+        input: ["text"],
+        contextWindow: 128_000,
+        maxTokens: 8_192,
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function firstModelConfiguration(): ModelProviderConfiguration["models"][number] {
+  const model = modelConfiguration().models[0];
+  if (model === undefined) throw new Error("模型测试夹具缺失");
+  return model;
+}
+
 describe("后台控制面领域规则", () => {
   it("规范化 OpenAI-compatible 模型配置并拒绝凭据 URL", () => {
     expect(
       normalizeModelProviderConfiguration({
+        ...modelConfiguration(),
         providerKey: " Main-Model ",
         displayName: " 主模型 ",
-        protocol: "openai-compatible",
         baseUrl: "https://model.example.com/v1#fragment",
-        secretRef: "deployment:model",
-        modelId: "model-a",
-        supportsImages: true,
-        contextWindow: 128_000,
-        maxOutputTokens: 16_384,
+        models: [
+          ...modelConfiguration().models,
+          {
+            id: "model-b",
+            name: "Model B",
+            enabled: true,
+            reasoning: true,
+            input: ["text", "image"],
+            contextWindow: 256_000,
+            maxTokens: 16_384,
+          },
+        ],
       }),
-    ).toMatchObject({ providerKey: "main-model", baseUrl: "https://model.example.com/v1" });
+    ).toMatchObject({
+      providerKey: "main-model",
+      baseUrl: "https://model.example.com/v1",
+      defaultModelId: "model-a",
+      models: [{ id: "model-a" }, { id: "model-b", reasoning: true }],
+    });
     expect(() =>
       normalizeModelProviderConfiguration({
-        providerKey: "model",
-        displayName: "模型",
-        protocol: "openai-compatible",
+        ...modelConfiguration(),
         baseUrl: "https://user:secret@example.com/v1",
-        secretRef: "deployment:model",
-        modelId: "model-a",
-        supportsImages: false,
-        contextWindow: 1_000,
-        maxOutputTokens: 100,
       }),
     ).toThrow("Provider 地址必须是无凭据 HTTPS URL");
   });
 
-  it("拒绝输出预算超过上下文窗口和未知记忆秘密引用", () => {
+  it("拒绝无启用模型、未启用默认模型、重复 ID 和超出窗口的输出预算", () => {
     expect(() =>
       normalizeModelProviderConfiguration({
-        providerKey: "model",
-        displayName: "模型",
-        protocol: "openai-compatible",
-        baseUrl: "https://example.com/v1",
-        secretRef: "deployment:model",
-        modelId: "model-a",
-        supportsImages: false,
-        contextWindow: 1_000,
-        maxOutputTokens: 1_001,
+        ...modelConfiguration(),
+        models: modelConfiguration().models.map((model) => ({ ...model, enabled: false })),
+      }),
+    ).toThrow("至少需要启用一个模型");
+    expect(() =>
+      normalizeModelProviderConfiguration({
+        ...modelConfiguration(),
+        defaultModelId: "model-disabled",
+        models: [
+          ...modelConfiguration().models,
+          {
+            ...firstModelConfiguration(),
+            id: "model-disabled",
+            enabled: false,
+          },
+        ],
+      }),
+    ).toThrow("默认模型必须引用已启用模型");
+    expect(() =>
+      normalizeModelProviderConfiguration({
+        ...modelConfiguration(),
+        models: [...modelConfiguration().models, firstModelConfiguration()],
+      }),
+    ).toThrow("Provider 内模型 ID 不能重复");
+    expect(() =>
+      normalizeModelProviderConfiguration({
+        ...modelConfiguration(),
+        models: [{ ...firstModelConfiguration(), contextWindow: 1_000, maxTokens: 1_001 }],
       }),
     ).toThrow("最大输出 Token 不能超过上下文窗口");
+  });
+
+  it("拒绝未知记忆秘密引用", () => {
     expect(() =>
       normalizeMemoryProviderConfiguration({
         providerKey: "memory",
@@ -117,15 +176,7 @@ describe("后台控制面领域规则", () => {
       service.createModelDraft(
         { actorUserId: "viewer", idempotencyKey: "control-key", requestDigest: "a".repeat(64) },
         {
-          providerKey: "main",
-          displayName: "主模型",
-          protocol: "openai-compatible",
-          baseUrl: "https://model.example.com/v1",
-          secretRef: "deployment:model",
-          modelId: "model-a",
-          supportsImages: false,
-          contextWindow: 128_000,
-          maxOutputTokens: 8_192,
+          ...modelConfiguration(),
           reason: "viewer 不应写入",
         },
       ),
@@ -146,17 +197,9 @@ describe("后台控制面领域规则", () => {
           createdBy: "admin",
           createdAt: "2026-08-19T00:00:00.000Z",
           updatedAt: "2026-08-19T00:00:00.000Z",
-          configuration: {
-            providerKey: "main",
-            displayName: "主模型",
-            protocol: "openai-compatible",
-            baseUrl: "https://model.example.com/v1",
-            secretRef: "deployment:model",
-            modelId: "model-a",
-            supportsImages: false,
-            contextWindow: 128_000,
-            maxOutputTokens: 1_024,
-          },
+          configuration: modelConfiguration({
+            models: [{ ...firstModelConfiguration(), maxTokens: 1_024 }],
+          }),
         },
       ],
       listRuntimeSettings: async () => [
@@ -217,17 +260,7 @@ describe("后台控制面领域规则", () => {
       createdBy: "admin",
       createdAt: "2026-08-19T00:00:00.000Z",
       updatedAt: "2026-08-19T00:01:00.000Z",
-      configuration: {
-        providerKey: "main",
-        displayName: "主模型",
-        protocol: "openai-compatible" as const,
-        baseUrl: "https://model.example.com/v1",
-        secretRef: "deployment:model" as const,
-        modelId: "model-a",
-        supportsImages: false,
-        contextWindow: 128_000,
-        maxOutputTokens: 8_192,
-      },
+      configuration: modelConfiguration(),
     };
     const repository = {
       resolveRole: async () => "operator" as const,

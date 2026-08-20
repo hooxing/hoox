@@ -6,6 +6,7 @@ import {
   PgSimpleDeliveredFileRepository,
   SimpleArtifactDeliveryService,
 } from "@hoox/artifact";
+import type { ModelProviderModelConfiguration } from "@hoox/admin-control";
 import { tenantId } from "@hoox/domain";
 import {
   type Mem0DevelopmentConfiguration,
@@ -671,32 +672,75 @@ export async function createOpenAiCompatibleModel(
     model: Model<"openai-completions">;
   }>
 > {
-  assertOfficialDeepSeekV4FlashCapabilities(configuration);
-  const modelRuntime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
-    modelsPath: null,
-  });
-  modelRuntime.registerProvider(openAiCompatibleProviderId, {
-    name: "Runtime OpenAI-compatible Provider",
+  return await createOpenAiCompatibleProvider({
     baseUrl: configuration.baseUrl,
     apiKey: configuration.apiKey,
-    api: "openai-completions",
+    defaultModelId: configuration.modelId,
     models: [
       {
         id: configuration.modelId,
         name: configuration.modelId,
-        api: "openai-completions",
-        ...(isOfficialDeepSeekV4FlashModel(configuration.modelId)
-          ? officialDeepSeekV4FlashModelProtocol()
-          : { reasoning: false }),
+        enabled: true,
+        reasoning: isOfficialDeepSeekV4FlashModel(configuration.modelId),
         input: configuration.supportsImages ? ["text", "image"] : ["text"],
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: configuration.contextWindow,
         maxTokens: configuration.maxOutputTokens,
       },
     ],
   });
-  const model = modelRuntime.getModel(openAiCompatibleProviderId, configuration.modelId);
+}
+
+/** Pi Provider 拥有启用模型目录；当前 Session 使用显式默认模型。 */
+export async function createOpenAiCompatibleProvider(configuration: {
+  readonly displayName?: string;
+  readonly baseUrl: string;
+  readonly apiKey: string;
+  readonly defaultModelId: string;
+  readonly models: readonly ModelProviderModelConfiguration[];
+}): Promise<
+  Readonly<{
+    modelRuntime: ModelRuntime;
+    model: Model<"openai-completions">;
+  }>
+> {
+  const enabledModels = configuration.models.filter((model) => model.enabled);
+  if (
+    enabledModels.length < 1 ||
+    !enabledModels.some((model) => model.id === configuration.defaultModelId)
+  ) {
+    throw new Error("模型 Provider 默认模型无效");
+  }
+  for (const model of enabledModels) {
+    assertOfficialDeepSeekV4FlashCapabilities({
+      modelId: model.id,
+      supportsImages: model.input.includes("image"),
+      contextWindow: model.contextWindow,
+      maxOutputTokens: model.maxTokens,
+    });
+  }
+  const modelRuntime = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(),
+    modelsPath: null,
+  });
+  modelRuntime.registerProvider(openAiCompatibleProviderId, {
+    name: configuration.displayName ?? "Runtime OpenAI-compatible Provider",
+    baseUrl: configuration.baseUrl,
+    apiKey: configuration.apiKey,
+    api: "openai-completions",
+    models: enabledModels.map((model) => ({
+      id: model.id,
+      name: model.name,
+      api: "openai-completions",
+      ...(isOfficialDeepSeekV4FlashModel(model.id)
+        ? officialDeepSeekV4FlashModelProtocol()
+        : { reasoning: model.reasoning }),
+      input: [...model.input],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+    })),
+  });
+  const model = modelRuntime.getModel(openAiCompatibleProviderId, configuration.defaultModelId);
   if (model?.api !== "openai-completions") throw new Error("模型配置无法解析");
   return Object.freeze({
     modelRuntime,
@@ -1128,14 +1172,13 @@ async function assembleWorkerRuntime(
       deploymentSessions,
       runtimeConfigurations,
       async (snapshot) => {
-        const configuredModel = snapshot.model.configuration;
-        const dynamicModel = await createOpenAiCompatibleModel({
-          baseUrl: configuredModel.baseUrl,
+        const configuredProvider = snapshot.model.configuration;
+        const dynamicModel = await createOpenAiCompatibleProvider({
+          displayName: configuredProvider.displayName,
+          baseUrl: configuredProvider.baseUrl,
           apiKey: configuration.model.apiKey,
-          modelId: configuredModel.modelId,
-          supportsImages: configuredModel.supportsImages,
-          contextWindow: configuredModel.contextWindow,
-          maxOutputTokens: configuredModel.maxOutputTokens,
+          defaultModelId: configuredProvider.defaultModelId,
+          models: configuredProvider.models,
         });
         const tokenizer = await loadTrustedModelTokenizerCapability(dynamicModel.model.id);
         const dynamicModelContext = bindTrustedPiModelContextCapability(
@@ -1169,7 +1212,7 @@ async function assembleWorkerRuntime(
           modelRuntime: dynamicModel.modelRuntime,
           modelContext: dynamicModelContext,
           modelWireTraces: configuration.model.wireTraceEnabled
-            ? createModelWireTraceSession(configuredModel.baseUrl)
+            ? createModelWireTraceSession(configuredProvider.baseUrl)
             : undefined,
           prepareRuntimeCompaction: configuration.threadContext.compaction.enabled
             ? async (

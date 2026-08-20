@@ -24,10 +24,18 @@ describe("后台控制 Web API", () => {
       protocol: "openai-compatible",
       baseUrl: "https://model.example.com/v1",
       secretRef: "deployment:model",
-      modelId: "model-a",
-      supportsImages: false,
-      contextWindow: 128_000,
-      maxOutputTokens: 8_192,
+      defaultModelId: "model-a",
+      models: [
+        {
+          id: "model-a",
+          name: "Model A",
+          enabled: true,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 128_000,
+          maxTokens: 8_192,
+        },
+      ],
       reason: "创建草稿",
     });
 

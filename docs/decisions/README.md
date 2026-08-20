@@ -182,6 +182,7 @@
 | [ADR-20260819115118](20260819115118-thinking-lifecycle-boundary-convergence.md) | 思考生命周期在正文与工具边界收敛 | 已接受 | 2026-08-19 |
 | [ADR-20260819142015](20260819142015-hide-workspace-unchanged-runtime-notice.md) | 用户工作台隐藏 Workspace 未变化审计通知 | 已接受 | 2026-08-19 |
 | [ADR-20260819165254](20260819165254-independent-admin-control-plane.md) | 独立后台控制面与版本化运行配置 | 已接受 | 2026-08-19 |
+| [ADR-20260820090402](20260820090402-provider-owned-model-catalog.md) | Provider 拥有可启用的模型目录 | 已接受 | 2026-08-20 |
 
 ## 何时必须记录
 

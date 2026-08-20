@@ -2139,6 +2139,9 @@ h2 {
   gap: 10px;
   margin: 0 24px 14px;
 }
+.cloud-drive-global-search.is-personal-only {
+  grid-template-columns: minmax(0, 1fr);
+}
 .cloud-drive-search-query {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;

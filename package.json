@@ -9,6 +9,8 @@
   },
   "scripts": {
     "build": "pnpm --recursive --sort --if-present build",
+    "admin:pi-catalog:generate": "node scripts/generate-admin-pi-model-catalog.mjs",
+    "admin:pi-catalog:check": "node scripts/generate-admin-pi-model-catalog.mjs --check",
     "clean": "pnpm --recursive --if-present clean",
     "config:check": "node scripts/validate-env-example.mjs && docker compose --env-file .env.example -f docker-compose.dev.yml config --quiet",
     "config:check:production": "node scripts/validate-production-env-example.mjs",
@@ -55,7 +57,7 @@
     "release:check": "node scripts/production-release-contract.mjs",
     "check:production": "pnpm config:check:production && pnpm supply-chain:check && pnpm license:check && pnpm release:check && pnpm test:production-api:container && pnpm test:production-scheduler:container && pnpm test:production-worker:container",
     "typecheck": "pnpm build && tsc -p tsconfig.json && pnpm --recursive --sort --if-present typecheck",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm config:check",
+    "check": "pnpm admin:pi-catalog:check && pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm build && pnpm config:check",
     "dev:trajectory": "pnpm --filter @hoox/trajectory build && pnpm --filter @hoox/trajectory-web build && node --env-file-if-exists=.env runtime-ts/apps/trajectory-web/dist/bin.js"
   },
   "dependencies": {

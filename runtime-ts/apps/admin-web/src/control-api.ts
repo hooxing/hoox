@@ -13,6 +13,10 @@ import type {
   RuntimeSettingsRevisionDto,
 } from "@hoox/protocol";
 import { AdminApiError } from "./api.js";
+import {
+  findLocalPiModelCatalogModels,
+  listLocalPiModelCatalogProviders,
+} from "./pi-model-catalog.js";
 
 interface SuccessEnvelope<T> {
   readonly data: T;
@@ -83,8 +87,14 @@ export class AdminControlApi {
   }
 
   async listPiModelCatalogProviders(): Promise<readonly PiModelCatalogProviderDto[]> {
-    return (await this.request<ListEnvelope<PiModelCatalogProviderDto>>("/model-catalog/providers"))
-      .items;
+    try {
+      return (
+        await this.request<ListEnvelope<PiModelCatalogProviderDto>>("/model-catalog/providers")
+      ).items;
+    } catch (reason) {
+      if (catalogServiceUnavailable(reason)) return listLocalPiModelCatalogProviders();
+      throw reason;
+    }
   }
 
   async findPiModelCatalogModels(input: {
@@ -96,11 +106,22 @@ export class AdminControlApi {
     if (input.providerId !== undefined) query.set("providerId", input.providerId);
     if (input.query !== undefined) query.set("query", input.query);
     query.set("limit", String(input.limit ?? 50));
-    return (
-      await this.request<ListEnvelope<PiModelCatalogModelDto>>(
-        `/model-catalog/models?${query.toString()}`,
-      )
-    ).items;
+    try {
+      return (
+        await this.request<ListEnvelope<PiModelCatalogModelDto>>(
+          `/model-catalog/models?${query.toString()}`,
+        )
+      ).items;
+    } catch (reason) {
+      if (catalogServiceUnavailable(reason)) {
+        return findLocalPiModelCatalogModels({
+          ...(input.providerId === undefined ? {} : { providerId: input.providerId }),
+          ...(input.query === undefined ? {} : { query: input.query }),
+          limit: input.limit ?? 50,
+        });
+      }
+      throw reason;
+    }
   }
 
   async listMemoryProviders(): Promise<readonly MemoryProviderRevisionDto[]> {
@@ -153,6 +174,13 @@ export class AdminControlApi {
       { method: "POST", body: JSON.stringify(input) },
     );
   }
+}
+
+function catalogServiceUnavailable(reason: unknown): reason is AdminApiError {
+  return (
+    reason instanceof AdminApiError &&
+    (reason.status === 0 || (reason.status >= 500 && reason.retryable))
+  );
 }
 
 export type AdminControlApiContract = Pick<

@@ -314,11 +314,7 @@ describe("统一平台管理导航", () => {
     if (modelsNavigation === undefined) throw new Error("模型导航缺失");
     act(() => modelsNavigation.click());
     await settle();
-    const showCatalog = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (item) => item.textContent?.trim() === "添加内置 Provider",
-    );
-    if (showCatalog === undefined) throw new Error("内置 Provider 按钮缺失");
-    act(() => showCatalog.click());
+    expect(container.textContent).toContain("Pi Provider 目录");
     const deepseek = container.querySelector<HTMLButtonElement>(".provider-catalog-grid button");
     if (deepseek === null) throw new Error("DeepSeek Provider 缺失");
     await act(async () => {
@@ -358,6 +354,9 @@ describe("统一平台管理导航", () => {
     if (modelsNavigation === undefined) throw new Error("模型导航缺失");
     act(() => modelsNavigation.click());
     await settle();
+
+    expect(container.textContent).toContain("DeepSeek");
+    expect(container.textContent).toContain("25 个可配置 Provider");
 
     const addCustomProvider = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (item) => item.textContent?.trim() === "添加自定义 Provider",

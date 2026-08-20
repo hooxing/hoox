@@ -11,6 +11,7 @@ import type {
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { AdminApiError } from "./api.js";
 import { AdminControlApi, type AdminControlApiContract } from "./control-api.js";
+import { listLocalPiModelCatalogProviders } from "./pi-model-catalog.js";
 
 export type ControlView = "overview" | "models" | "memory" | "settings";
 const defaultControlApi = new AdminControlApi();
@@ -776,7 +777,7 @@ function ModelProviderWorkspace({
   ) => Promise<void>;
 }) {
   const [editor, setEditor] = useState<ModelEditorState>();
-  const [showProviderCatalog, setShowProviderCatalog] = useState(false);
+  const [showProviderCatalog, setShowProviderCatalog] = useState(true);
   if (editor !== undefined) {
     return (
       <ModelDraftForm
@@ -808,7 +809,7 @@ function ModelProviderWorkspace({
             className="quiet-button"
             onClick={() => setShowProviderCatalog((visible) => !visible)}
           >
-            添加内置 Provider
+            {showProviderCatalog ? "收起 Pi Provider" : "浏览 Pi Provider"}
           </button>
           <button
             type="button"
@@ -822,11 +823,14 @@ function ModelProviderWorkspace({
       {showProviderCatalog && (
         <div className="provider-catalog-picker">
           <div>
-            <strong>选择 Pi Provider</strong>
-            <small>当前仅显示 Worker 已支持的 OpenAI Completions Provider。</small>
+            <span className="provider-catalog-title">
+              <strong>Pi Provider 目录</strong>
+              <small>{catalogProviders.length} 个可配置 Provider</small>
+            </span>
+            <small>选择后自动填入模型能力，所有字段仍可修改。</small>
           </div>
           {catalogProviders.length === 0 ? (
-            <p>Pi Provider 目录暂不可用，仍可使用自定义 Provider。</p>
+            <p>本地 Pi Provider 快照缺失，请重新构建后台页面。</p>
           ) : (
             <div className="provider-catalog-grid">
               {catalogProviders.map((provider) => (
@@ -1017,7 +1021,7 @@ export function AdminControlConsole({
   >([]);
   const [audits, setAudits] = useState<readonly ControlAuditEventDto[]>([]);
   const [catalogProviders, setCatalogProviders] = useState<readonly PiModelCatalogProviderDto[]>(
-    [],
+    listLocalPiModelCatalogProviders,
   );
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);

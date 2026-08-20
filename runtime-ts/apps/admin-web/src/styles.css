@@ -251,33 +251,292 @@ body {
   font-size: 12px;
 }
 
-.model-editor-row {
+.model-provider-workspace {
   display: grid;
-  grid-template-columns: repeat(4, minmax(130px, 1fr));
-  gap: 12px;
-  border: 1px solid #dce2de;
-  border-radius: 11px;
-  padding: 14px;
+  gap: 18px;
+}
+
+.provider-settings-heading,
+.model-editor-intro,
+.model-catalog-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.provider-settings-heading h2,
+.provider-settings-heading p {
+  margin: 0;
+}
+
+.provider-settings-heading p {
+  margin-top: 5px;
+  color: #718078;
+  font-size: 13px;
+}
+
+.provider-settings-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.provider-settings-list {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid #dce1de;
+  border-radius: 13px;
   background: #fff;
 }
 
-.model-editor-heading {
-  display: flex;
-  grid-column: 1 / -1;
+.provider-settings-list article,
+.provider-list-empty {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 1fr) minmax(180px, auto) auto auto;
+  gap: 14px;
   align-items: center;
-  gap: 12px;
+  padding: 15px 16px;
 }
 
-.model-editor-heading > button {
-  margin-left: auto;
+.provider-settings-list article + article {
+  border-top: 1px solid #e7ebe8;
+}
+
+.provider-list-empty {
+  grid-template-columns: auto 1fr;
+  min-height: 86px;
+}
+
+.provider-avatar {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 9px;
+  color: #24503d;
+  background: #e8f0ec;
+  font-weight: 800;
+}
+
+.provider-list-identity,
+.provider-list-metadata,
+.provider-list-empty > span:last-child,
+.model-editor-intro > div,
+.model-editor-intro > div > span:last-child,
+.model-catalog-toolbar > span,
+.provider-catalog-picker > div:first-child,
+.provider-catalog-grid button > span:last-child {
+  display: grid;
+  gap: 3px;
+}
+
+.provider-list-identity small,
+.provider-list-metadata small,
+.provider-list-empty small,
+.model-editor-intro small,
+.model-catalog-toolbar small,
+.provider-catalog-picker small,
+.provider-catalog-grid small {
+  color: #758079;
+  font-size: 12px;
+}
+
+.provider-catalog-picker {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #dce1de;
+  border-radius: 13px;
+  padding: 16px;
+  background: #f7f9f8;
+}
+
+.provider-catalog-picker > p {
+  margin: 0;
+  color: #718078;
+}
+
+.provider-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(160px, 1fr));
+  gap: 8px;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.provider-catalog-grid button,
+.pi-search-results button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #dce1de;
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: inherit;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+}
+
+.provider-catalog-grid button:hover,
+.pi-search-results button:hover {
+  border-color: #9eb6aa;
+  background: #f5f9f7;
+}
+
+.model-provider-editor {
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  margin-top: 0;
+}
+
+.model-provider-editor .wide {
+  grid-column: 1 / -1;
+}
+
+.model-provider-editor > .primary-button {
+  justify-self: end;
+}
+
+.model-editor-intro {
+  grid-column: 1 / -1;
+  border-bottom: 1px solid #e1e5e2;
+  padding-bottom: 16px;
+}
+
+.model-editor-intro > div {
+  grid-template-columns: auto 1fr;
+  align-items: center;
+}
+
+.model-catalog-toolbar > span {
+  gap: 2px;
+}
+
+.pi-model-search {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: end;
+  border-radius: 10px;
+  padding: 12px;
+  background: #eef2ef;
+}
+
+.pi-model-search button {
+  min-height: 38px;
+}
+
+.pi-search-results {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 7px;
+}
+
+.pi-search-results button {
+  justify-content: space-between;
+}
+
+.pi-search-results button:disabled {
+  opacity: 0.48;
+  cursor: default;
+}
+
+.pi-search-results button > span:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.catalog-message {
+  border-left: 3px solid #95aa9f;
+  padding: 7px 10px;
+  color: #56645c;
+  background: #f0f4f2;
+}
+
+.model-editor-row {
+  display: block;
+  border: 1px solid #dce2de;
+  border-radius: 11px;
+  background: #fff;
+}
+
+.model-editor-row.disabled {
+  opacity: 0.65;
+}
+
+.model-editor-heading {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto auto auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 13px;
+}
+
+.model-row-identity {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.model-row-identity code {
+  overflow: hidden;
+  color: #76817b;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-row-capabilities {
+  display: flex;
+  gap: 4px;
+}
+
+.model-row-capabilities small {
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: #536159;
+  background: #edf1ef;
+  white-space: nowrap;
 }
 
 .model-editor-heading .default-model-choice,
+.model-editor-heading .model-enabled-choice,
 .model-editor-row .checkbox {
   display: flex;
   align-items: center;
   gap: 7px;
   padding-top: 0;
+  white-space: nowrap;
+}
+
+.text-button {
+  border: 0;
+  padding: 4px;
+  color: #32624d;
+  background: transparent;
+  cursor: pointer;
+}
+
+.text-button.danger {
+  color: #a34a42;
+}
+
+.text-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.model-advanced-fields {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  gap: 12px;
+  border-top: 1px solid #e5e9e6;
+  padding: 14px;
+  background: #fafbfa;
+}
+
+.model-advanced-fields .checkbox.compact {
+  align-self: center;
 }
 
 .add-model-button {
@@ -478,9 +737,26 @@ body {
     display: grid;
   }
 
+  .provider-settings-heading,
+  .model-editor-intro,
+  .model-catalog-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .provider-settings-actions {
+    flex-wrap: wrap;
+  }
+
   .statistics-grid,
   .control-form,
-  .configuration-summary {
+  .configuration-summary,
+  .provider-catalog-grid,
+  .pi-search-results,
+  .pi-model-search,
+  .model-editor-heading,
+  .model-advanced-fields,
+  .provider-settings-list article {
     grid-template-columns: 1fr;
   }
 

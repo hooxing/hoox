@@ -152,7 +152,9 @@ corepack pnpm dev:admin:web
 运行参数 revision 固化到 `run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本。没有已发布
 模型时回退部署时 `MODEL_*` 配置。一个模型 Provider revision 可以维护 1～100 个 Pi 风格的模型条目，并允许
 同时启用多个模型；管理员必须从启用模型中指定默认模型，探针会核对所有启用模型都出现在 Provider 的
-`/models` 响应中，Worker 注册完整启用目录后为当前 Run 选择默认模型。数据库连接、角色、JWT、TLS、S3、
+`/models` 响应中，Worker 注册完整启用目录后为当前 Run 选择默认模型。管理页面可从锁定版本的 Pi Provider
+目录载入初始能力；内置 Provider 按 Provider ID 载入，自定义 Provider 可按模型 ID 或名称查询，管理员修改后才
+形成显式 revision，Worker 不会在运行时重新用 Pi 覆盖。数据库连接、角色、JWT、TLS、S3、
 Sandbox 和监听地址只在页面展示“已配置/需重新部署”，不存在通用 ENV 写接口。完整边界见
 [ADR-20260819165254](decisions/20260819165254-independent-admin-control-plane.md) 与
 [ADR-20260820090402](decisions/20260820090402-provider-owned-model-catalog.md)。

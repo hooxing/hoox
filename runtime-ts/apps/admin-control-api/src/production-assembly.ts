@@ -20,6 +20,7 @@ import {
   startServiceProcess,
 } from "@hoox/process-runtime";
 import { createAdminControlApiApp, type AdminControlApiAppOptions } from "./app.js";
+import { createPiModelCatalog } from "./pi-model-catalog.js";
 import type { AdminControlApiProcessConfiguration } from "./process-entry.js";
 
 interface ProcessOptions {
@@ -100,6 +101,7 @@ async function assembleRealService(
         createProviderProbes(configuration),
         deploymentSettings(configuration),
       ),
+      modelCatalog: createPiModelCatalog(),
       readiness: { probe: () => probePostgres(pool, input.expectedRole) },
     };
     app = createAdminControlApiApp(dependencies, input.appOptions);

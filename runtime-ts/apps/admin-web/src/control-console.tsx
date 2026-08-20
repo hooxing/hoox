@@ -4,6 +4,8 @@ import type {
   MemoryProviderRevisionDto,
   ModelProviderModelConfigurationDto,
   ModelProviderRevisionDto,
+  PiModelCatalogModelDto,
+  PiModelCatalogProviderDto,
   RuntimeSettingsRevisionDto,
 } from "@hoox/protocol";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
@@ -294,22 +296,29 @@ interface EditableModelRow {
   readonly maxTokens: string;
 }
 
-function newModelRow(): EditableModelRow {
+function newModelRow(
+  seed?: ModelProviderModelConfigurationDto | PiModelCatalogModelDto,
+  enabled = true,
+): EditableModelRow {
   return {
     clientId: crypto.randomUUID(),
-    id: "",
-    name: "",
-    enabled: true,
-    reasoning: false,
-    supportsImages: false,
-    contextWindow: "128000",
-    maxTokens: "8192",
+    id: seed?.id ?? "",
+    name: seed?.name ?? "",
+    enabled: seed !== undefined && "enabled" in seed ? seed.enabled : enabled,
+    reasoning: seed?.reasoning ?? false,
+    supportsImages: seed?.input.includes("image") ?? false,
+    contextWindow: String(seed?.contextWindow ?? 128_000),
+    maxTokens: String(seed?.maxTokens ?? 8_192),
   };
 }
 
 function ModelDraftForm({
   onCreate,
   busy,
+  api,
+  initialConfiguration,
+  catalogProvider,
+  onCancel,
 }: {
   readonly onCreate: (
     form: FormData,
@@ -317,11 +326,32 @@ function ModelDraftForm({
     defaultModelId: string,
   ) => Promise<void>;
   readonly busy: boolean;
+  readonly api: AdminControlApiContract;
+  readonly initialConfiguration?: ModelProviderRevisionDto["configuration"];
+  readonly catalogProvider?: PiModelCatalogProviderDto;
+  readonly onCancel: () => void;
 }) {
   const [catalog, setCatalog] = useState(() => {
-    const initial = newModelRow();
-    return { models: [initial], defaultClientId: initial.clientId };
+    const models = initialConfiguration?.models.map((model) => newModelRow(model)) ?? [
+      newModelRow(),
+    ];
+    const defaultClientId =
+      models.find((model) => model.id === initialConfiguration?.defaultModelId)?.clientId ??
+      models[0]?.clientId ??
+      "";
+    return { models, defaultClientId };
   });
+  const [expandedModels, setExpandedModels] = useState<ReadonlySet<string>>(() =>
+    initialConfiguration === undefined &&
+    catalogProvider === undefined &&
+    catalog.models[0] !== undefined
+      ? new Set([catalog.models[0].clientId])
+      : new Set(),
+  );
+  const [modelQuery, setModelQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<readonly PiModelCatalogModelDto[]>([]);
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const [catalogMessage, setCatalogMessage] = useState<string>();
   const updateModel = (clientId: string, patch: Partial<EditableModelRow>) => {
     setCatalog((current) => ({
       ...current,
@@ -352,9 +382,78 @@ function ModelDraftForm({
       return { models, defaultClientId };
     });
   };
+  const replaceWithPiModels = useCallback((models: readonly PiModelCatalogModelDto[]) => {
+    if (models.length === 0) {
+      setCatalogMessage("Pi 目录中没有当前运行时可用的模型，可继续手工添加。");
+      return;
+    }
+    const rows = models.map((model, index) => newModelRow(model, index === 0));
+    setCatalog({ models: rows, defaultClientId: rows[0]?.clientId ?? "" });
+    setExpandedModels(new Set());
+    setCatalogMessage(`已从 Pi 载入 ${rows.length} 个模型，所有字段仍可修改。`);
+  }, []);
+  const loadProviderModels = useCallback(async () => {
+    if (catalogProvider === undefined) return;
+    setCatalogBusy(true);
+    setCatalogMessage(undefined);
+    try {
+      replaceWithPiModels(
+        await api.findPiModelCatalogModels({ providerId: catalogProvider.providerId, limit: 100 }),
+      );
+    } catch {
+      setCatalogMessage("暂时无法读取 Pi 模型目录，可继续手工配置。");
+    } finally {
+      setCatalogBusy(false);
+    }
+  }, [api, catalogProvider, replaceWithPiModels]);
+  useEffect(() => {
+    if (catalogProvider !== undefined && initialConfiguration === undefined) {
+      void loadProviderModels();
+    }
+  }, [catalogProvider, initialConfiguration, loadProviderModels]);
+  const searchPiModels = async () => {
+    const query = modelQuery.trim();
+    if (query === "") return;
+    setCatalogBusy(true);
+    setCatalogMessage(undefined);
+    try {
+      const results = await api.findPiModelCatalogModels({ query, limit: 12 });
+      setSearchResults(results);
+      setCatalogMessage(
+        results.length === 0 ? "Pi 目录未找到匹配模型，可添加空白模型手工填写。" : undefined,
+      );
+    } catch {
+      setCatalogMessage("暂时无法查询 Pi 模型目录，可添加空白模型手工填写。");
+    } finally {
+      setCatalogBusy(false);
+    }
+  };
+  const addPiModel = (seed: PiModelCatalogModelDto) => {
+    setCatalog((current) => {
+      if (current.models.some((model) => model.id === seed.id)) return current;
+      const row = newModelRow(seed);
+      const only = current.models[0];
+      const models =
+        current.models.length === 1 && only?.id === "" && only.name === ""
+          ? [row]
+          : [...current.models, row];
+      return {
+        models,
+        defaultClientId:
+          current.defaultClientId === only?.clientId ? row.clientId : current.defaultClientId,
+      };
+    });
+    setSearchResults([]);
+    setModelQuery("");
+  };
+  const addBlankModel = () => {
+    const row = newModelRow();
+    setCatalog((current) => ({ ...current, models: [...current.models, row] }));
+    setExpandedModels((current) => new Set([...current, row.clientId]));
+  };
   return (
     <form
-      className="control-form"
+      className="control-form model-provider-editor"
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         const models = catalog.models.map<ModelProviderModelConfigurationDto>((model) => ({
@@ -372,13 +471,48 @@ function ModelDraftForm({
         void onCreate(new FormData(event.currentTarget), models, defaultModelId);
       }}
     >
+      <div className="model-editor-intro wide">
+        <div>
+          <span className="provider-avatar">
+            {(initialConfiguration?.displayName ?? catalogProvider?.displayName ?? "自").slice(
+              0,
+              1,
+            )}
+          </span>
+          <span>
+            <strong>
+              {initialConfiguration === undefined
+                ? (catalogProvider?.displayName ?? "自定义提供方")
+                : `编辑 ${initialConfiguration.displayName}`}
+            </strong>
+            <small>
+              {catalogProvider === undefined
+                ? "自定义 endpoint；模型仍可按名称复用 Pi 元数据"
+                : `Pi Provider · ${catalogProvider.providerId}`}
+            </small>
+          </span>
+        </div>
+        <button type="button" className="quiet-button" onClick={onCancel}>
+          取消
+        </button>
+      </div>
       <label>
         Provider Key
-        <input name="providerKey" required pattern="[a-z0-9][a-z0-9._-]{0,63}" />
+        <input
+          name="providerKey"
+          required
+          pattern="[a-z0-9][a-z0-9._-]{0,63}"
+          defaultValue={initialConfiguration?.providerKey ?? catalogProvider?.providerId ?? ""}
+        />
       </label>
       <label>
         显示名称
-        <input name="displayName" required maxLength={120} />
+        <input
+          name="displayName"
+          required
+          maxLength={120}
+          defaultValue={initialConfiguration?.displayName ?? catalogProvider?.displayName ?? ""}
+        />
       </label>
       <label className="wide">
         HTTPS Base URL
@@ -388,122 +522,209 @@ function ModelDraftForm({
           type="url"
           maxLength={2048}
           placeholder="https://api.example.com/v1/"
+          defaultValue={initialConfiguration?.baseUrl ?? catalogProvider?.baseUrl ?? ""}
         />
       </label>
       <fieldset className="model-catalog-editor wide">
         <legend>模型目录</legend>
-        <p>可同时启用多个模型；当前 Worker 使用标记为默认的启用模型。</p>
-        {catalog.models.map((model, index) => (
-          <div className="model-editor-row" key={model.clientId}>
-            <div className="model-editor-heading">
-              <strong>模型 {index + 1}</strong>
-              <label className="default-model-choice">
-                <input
-                  type="radio"
-                  name="defaultModel"
-                  aria-label={`模型 ${index + 1} 设为默认`}
-                  checked={catalog.defaultClientId === model.clientId}
-                  disabled={!model.enabled}
-                  onChange={() =>
-                    setCatalog((current) => ({
-                      ...current,
-                      defaultClientId: model.clientId,
-                    }))
-                  }
-                />
-                默认模型
-              </label>
+        <div className="model-catalog-toolbar">
+          <span>
+            <strong>{catalog.models.length} 个模型</strong>
+            <small>Pi 只提供初始值；启用、默认与所有能力都可修改。</small>
+          </span>
+          {catalogProvider !== undefined && (
+            <button
+              type="button"
+              className="quiet-button"
+              disabled={catalogBusy}
+              onClick={() => void loadProviderModels()}
+            >
+              {catalogBusy ? "正在读取…" : "从 Pi 重新载入"}
+            </button>
+          )}
+        </div>
+        <div className="pi-model-search">
+          <label>
+            按模型 ID 或名称获取信息
+            <input
+              value={modelQuery}
+              maxLength={255}
+              placeholder="例如 deepseek-chat"
+              onChange={(event) => setModelQuery(event.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="quiet-button"
+            disabled={catalogBusy || modelQuery.trim() === ""}
+            onClick={() => void searchPiModels()}
+          >
+            从 Pi 查询
+          </button>
+        </div>
+        {searchResults.length > 0 && (
+          <div className="pi-search-results">
+            {searchResults.map((result) => (
               <button
+                key={`${result.providerId}:${result.id}`}
                 type="button"
-                className="quiet-button"
-                disabled={catalog.models.length === 1}
-                onClick={() => removeModel(model.clientId)}
+                disabled={catalog.models.some((model) => model.id === result.id)}
+                onClick={() => addPiModel(result)}
               >
-                移除
+                <span>
+                  <strong>{result.name}</strong>
+                  <small>
+                    {result.providerName} · {result.id}
+                  </small>
+                </span>
+                <span>{result.contextWindow.toLocaleString()} ctx</span>
               </button>
-            </div>
-            <label>
-              模型 ID
-              <input
-                required
-                maxLength={255}
-                value={model.id}
-                onChange={(event) => updateModel(model.clientId, { id: event.target.value })}
-              />
-            </label>
-            <label>
-              模型名称
-              <input
-                required
-                maxLength={120}
-                value={model.name}
-                onChange={(event) => updateModel(model.clientId, { name: event.target.value })}
-              />
-            </label>
-            <label>
-              上下文窗口
-              <input
-                type="number"
-                min="1"
-                max="10000000"
-                required
-                value={model.contextWindow}
-                onChange={(event) =>
-                  updateModel(model.clientId, { contextWindow: event.target.value })
-                }
-              />
-            </label>
-            <label>
-              最大输出 Token
-              <input
-                type="number"
-                min="1"
-                max="10000000"
-                required
-                value={model.maxTokens}
-                onChange={(event) => updateModel(model.clientId, { maxTokens: event.target.value })}
-              />
-            </label>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                aria-label={`模型 ${index + 1} 启用`}
-                checked={model.enabled}
-                onChange={(event) => updateEnabled(model.clientId, event.target.checked)}
-              />
-              启用
-            </label>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={model.reasoning}
-                onChange={(event) =>
-                  updateModel(model.clientId, { reasoning: event.target.checked })
-                }
-              />
-              支持推理
-            </label>
-            <label className="checkbox">
-              <input
-                type="checkbox"
-                checked={model.supportsImages}
-                onChange={(event) =>
-                  updateModel(model.clientId, { supportsImages: event.target.checked })
-                }
-              />
-              支持图片
-            </label>
+            ))}
           </div>
-        ))}
+        )}
+        {catalogMessage !== undefined && <p className="catalog-message">{catalogMessage}</p>}
+        {catalog.models.map((model, index) => {
+          const expanded = expandedModels.has(model.clientId);
+          return (
+            <div
+              className={`model-editor-row ${model.enabled ? "enabled" : "disabled"}`}
+              key={model.clientId}
+            >
+              <div className="model-editor-heading">
+                <span className="model-row-identity">
+                  <strong>{model.name || `模型 ${index + 1}`}</strong>
+                  <code>{model.id || "等待填写模型 ID"}</code>
+                </span>
+                <span className="model-row-capabilities">
+                  {model.reasoning && <small>推理</small>}
+                  {model.supportsImages && <small>图片</small>}
+                  <small>{Number(model.contextWindow || 0).toLocaleString()} ctx</small>
+                </span>
+                <label className="model-enabled-choice">
+                  <input
+                    type="checkbox"
+                    aria-label={`模型 ${index + 1} 启用`}
+                    checked={model.enabled}
+                    onChange={(event) => updateEnabled(model.clientId, event.target.checked)}
+                  />
+                  启用
+                </label>
+                <label className="default-model-choice">
+                  <input
+                    type="radio"
+                    name="defaultModel"
+                    aria-label={`模型 ${index + 1} 设为默认`}
+                    checked={catalog.defaultClientId === model.clientId}
+                    disabled={!model.enabled}
+                    onChange={() =>
+                      setCatalog((current) => ({ ...current, defaultClientId: model.clientId }))
+                    }
+                  />
+                  默认
+                </label>
+                <button
+                  type="button"
+                  className="text-button"
+                  onClick={() =>
+                    setExpandedModels((current) => {
+                      const next = new Set(current);
+                      if (next.has(model.clientId)) next.delete(model.clientId);
+                      else next.add(model.clientId);
+                      return next;
+                    })
+                  }
+                >
+                  {expanded ? "收起" : "编辑"}
+                </button>
+                <button
+                  type="button"
+                  className="text-button danger"
+                  disabled={catalog.models.length === 1}
+                  onClick={() => removeModel(model.clientId)}
+                >
+                  删除
+                </button>
+              </div>
+              {expanded && (
+                <div className="model-advanced-fields">
+                  <label>
+                    模型 ID
+                    <input
+                      required
+                      maxLength={255}
+                      value={model.id}
+                      onChange={(event) => updateModel(model.clientId, { id: event.target.value })}
+                    />
+                  </label>
+                  <label>
+                    模型名称
+                    <input
+                      required
+                      maxLength={120}
+                      value={model.name}
+                      onChange={(event) =>
+                        updateModel(model.clientId, { name: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label>
+                    上下文窗口
+                    <input
+                      type="number"
+                      min="1"
+                      max="10000000"
+                      required
+                      value={model.contextWindow}
+                      onChange={(event) =>
+                        updateModel(model.clientId, { contextWindow: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label>
+                    最大输出 Token
+                    <input
+                      type="number"
+                      min="1"
+                      max="10000000"
+                      required
+                      value={model.maxTokens}
+                      onChange={(event) =>
+                        updateModel(model.clientId, { maxTokens: event.target.value })
+                      }
+                    />
+                  </label>
+                  <label className="checkbox compact">
+                    <input
+                      type="checkbox"
+                      checked={model.reasoning}
+                      onChange={(event) =>
+                        updateModel(model.clientId, { reasoning: event.target.checked })
+                      }
+                    />
+                    支持推理
+                  </label>
+                  <label className="checkbox compact">
+                    <input
+                      type="checkbox"
+                      checked={model.supportsImages}
+                      onChange={(event) =>
+                        updateModel(model.clientId, { supportsImages: event.target.checked })
+                      }
+                    />
+                    支持图片
+                  </label>
+                </div>
+              )}
+            </div>
+          );
+        })}
         <button
           type="button"
           className="quiet-button add-model-button"
           disabled={catalog.models.length >= 100}
-          onClick={() =>
-            setCatalog((current) => ({ ...current, models: [...current.models, newModelRow()] }))
-          }
+          onClick={addBlankModel}
         >
-          添加模型
+          添加空白模型
         </button>
       </fieldset>
       <label className="wide">
@@ -514,6 +735,174 @@ function ModelDraftForm({
         创建模型草稿
       </button>
     </form>
+  );
+}
+
+interface ModelEditorState {
+  readonly key: string;
+  readonly initialConfiguration?: ModelProviderRevisionDto["configuration"];
+  readonly catalogProvider?: PiModelCatalogProviderDto;
+}
+
+function latestModelRevisions(
+  revisions: readonly ModelProviderRevisionDto[],
+): readonly ModelProviderRevisionDto[] {
+  const latest = new Map<string, ModelProviderRevisionDto>();
+  for (const revision of revisions) {
+    const key = revision.configuration.providerKey;
+    const current = latest.get(key);
+    if (current === undefined || current.revision < revision.revision) latest.set(key, revision);
+  }
+  return [...latest.values()].sort((left, right) =>
+    left.configuration.displayName.localeCompare(right.configuration.displayName, "zh-CN"),
+  );
+}
+
+function ModelProviderWorkspace({
+  api,
+  revisions,
+  catalogProviders,
+  busy,
+  onCreate,
+}: {
+  readonly api: AdminControlApiContract;
+  readonly revisions: readonly ModelProviderRevisionDto[];
+  readonly catalogProviders: readonly PiModelCatalogProviderDto[];
+  readonly busy: boolean;
+  readonly onCreate: (
+    form: FormData,
+    models: ModelProviderModelConfigurationDto[],
+    defaultModelId: string,
+  ) => Promise<void>;
+}) {
+  const [editor, setEditor] = useState<ModelEditorState>();
+  const [showProviderCatalog, setShowProviderCatalog] = useState(false);
+  if (editor !== undefined) {
+    return (
+      <ModelDraftForm
+        key={editor.key}
+        api={api}
+        busy={busy}
+        {...(editor.initialConfiguration === undefined
+          ? {}
+          : { initialConfiguration: editor.initialConfiguration })}
+        {...(editor.catalogProvider === undefined
+          ? {}
+          : { catalogProvider: editor.catalogProvider })}
+        onCancel={() => setEditor(undefined)}
+        onCreate={onCreate}
+      />
+    );
+  }
+  const providers = latestModelRevisions(revisions);
+  return (
+    <div className="model-provider-workspace">
+      <div className="provider-settings-heading">
+        <span>
+          <h2>供应商</h2>
+          <p>从 Pi 载入模型能力作为初始值，发布前可以逐项修改。</p>
+        </span>
+        <span className="provider-settings-actions">
+          <button
+            type="button"
+            className="quiet-button"
+            onClick={() => setShowProviderCatalog((visible) => !visible)}
+          >
+            添加内置 Provider
+          </button>
+          <button
+            type="button"
+            className="primary-button"
+            onClick={() => setEditor({ key: `custom:${crypto.randomUUID()}` })}
+          >
+            添加自定义 Provider
+          </button>
+        </span>
+      </div>
+      {showProviderCatalog && (
+        <div className="provider-catalog-picker">
+          <div>
+            <strong>选择 Pi Provider</strong>
+            <small>当前仅显示 Worker 已支持的 OpenAI Completions Provider。</small>
+          </div>
+          {catalogProviders.length === 0 ? (
+            <p>Pi Provider 目录暂不可用，仍可使用自定义 Provider。</p>
+          ) : (
+            <div className="provider-catalog-grid">
+              {catalogProviders.map((provider) => (
+                <button
+                  type="button"
+                  key={provider.providerId}
+                  onClick={() =>
+                    setEditor({
+                      key: `catalog:${provider.providerId}`,
+                      catalogProvider: provider,
+                    })
+                  }
+                >
+                  <span className="provider-avatar">{provider.displayName.slice(0, 1)}</span>
+                  <span>
+                    <strong>{provider.displayName}</strong>
+                    <small>{provider.modelCount} 个 Pi 模型</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <div className="provider-settings-list">
+        {providers.length === 0 ? (
+          <div className="provider-list-empty">
+            <span className="provider-avatar">P</span>
+            <span>
+              <strong>尚未配置模型供应商</strong>
+              <small>添加内置 Provider，或连接一个 OpenAI-compatible 自定义网关。</small>
+            </span>
+          </div>
+        ) : (
+          providers.map((revision) => {
+            const configuration = revision.configuration;
+            const catalogProvider = catalogProviders.find(
+              (candidate) => candidate.providerId === configuration.providerKey,
+            );
+            const enabledCount = configuration.models.filter((model) => model.enabled).length;
+            return (
+              <article key={configuration.providerKey}>
+                <span className="provider-avatar">{configuration.displayName.slice(0, 1)}</span>
+                <span className="provider-list-identity">
+                  <strong>{configuration.displayName}</strong>
+                  <small>
+                    {configuration.providerKey}
+                    {catalogProvider === undefined ? " · 自定义" : " · Pi 内置"}
+                  </small>
+                </span>
+                <span className="provider-list-metadata">
+                  <small>{enabledCount} 个已启用</small>
+                  <small>默认：{configuration.defaultModelId}</small>
+                </span>
+                <span className={`status status-${revision.status}`}>{revision.status}</span>
+                <button
+                  type="button"
+                  className="text-button"
+                  aria-label={`编辑 ${configuration.displayName}`}
+                  onClick={() =>
+                    setEditor({
+                      key: `revision:${configuration.providerKey}:${revision.revision}`,
+                      initialConfiguration: configuration,
+                      ...(catalogProvider === undefined ? {} : { catalogProvider }),
+                    })
+                  }
+                >
+                  编辑
+                </button>
+              </article>
+            );
+          })
+        )}
+      </div>
+      <p className="boundary-note">API Key 仍由部署秘密管理，后台页面不会读取、保存或回显密钥。</p>
+    </div>
   );
 }
 
@@ -627,12 +1016,15 @@ export function AdminControlConsole({
     readonly (ModelProviderRevisionDto | MemoryProviderRevisionDto | RuntimeSettingsRevisionDto)[]
   >([]);
   const [audits, setAudits] = useState<readonly ControlAuditEventDto[]>([]);
+  const [catalogProviders, setCatalogProviders] = useState<readonly PiModelCatalogProviderDto[]>(
+    [],
+  );
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const [nextOverview, nextItems, nextAudits] = await Promise.all([
+      const [nextOverview, nextItems, nextAudits, nextCatalogProviders] = await Promise.all([
         api.overview(),
         view === "models"
           ? api.listModelProviders()
@@ -642,10 +1034,12 @@ export function AdminControlConsole({
               ? api.listRuntimeSettings()
               : Promise.resolve([]),
         view === "overview" ? api.listAudits(50) : Promise.resolve([]),
+        view === "models" ? api.listPiModelCatalogProviders() : Promise.resolve([]),
       ]);
       setOverview(nextOverview);
       setItems(nextItems);
       setAudits(nextAudits);
+      setCatalogProviders(nextCatalogProviders);
       setError(undefined);
     } catch (reason) {
       setError(errorMessage(reason));
@@ -686,7 +1080,7 @@ export function AdminControlConsole({
             {view === "overview"
               ? "总览与统计"
               : view === "models"
-                ? "模型供应商"
+                ? "模型"
                 : view === "memory"
                   ? "记忆供应商"
                   : "运行参数"}
@@ -720,15 +1114,22 @@ export function AdminControlConsole({
       ) : (
         <>
           <section className="control-panel">
-            <div className="panel-heading">
-              <div>
-                <span className="eyebrow">New revision</span>
-                <h2>创建配置草稿</h2>
+            {view !== "models" && (
+              <div className="panel-heading">
+                <div>
+                  <span className="eyebrow">New revision</span>
+                  <h2>创建配置草稿</h2>
+                </div>
               </div>
-            </div>
+            )}
             {view === "models" ? (
-              <ModelDraftForm
+              <ModelProviderWorkspace
+                api={api}
                 busy={busy}
+                catalogProviders={catalogProviders}
+                revisions={items.filter(
+                  (item): item is ModelProviderRevisionDto => "models" in item.configuration,
+                )}
                 onCreate={(form, models, defaultModelId) =>
                   operation(() =>
                     api.createModelDraft({

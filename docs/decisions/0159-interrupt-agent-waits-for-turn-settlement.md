@@ -1,5 +1,9 @@
 # ADR-0159：中断控制在 Turn 终态落地后返回
 
+- 状态：已接受
+- 日期：2026-08-12
+
+
 ## 背景
 
 `interrupt_agent` 原先在调用子 Session 的 `abort()` 后立即返回摘要。`abort()` 只发出取消信号，实际的子 Agent turn 仍需经过异常收敛、`runtime_agent_turns` 终态写入和 mailbox 发布。因此工具返回值可能仍是 `status: running`、`lastMailboxSequence: 0`，父 Agent 需要额外等待才能确认中断是否真正完成。

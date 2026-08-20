@@ -1,5 +1,9 @@
 # ADR-0110：Run 心跳同步续租 Thread Sandbox
 
+- 状态：已接受
+- 日期：2026-08-05
+
+
 ## 背景
 
 启用 Thread Sandbox 复用后，Worker 会为当前 Run 获取独立的 Sandbox 租约。此前周期心跳只续租 Run 写入栅栏，没有续租已经获取的 Sandbox 租约。首次工具调用需要创建 Sandbox 并物化 Workspace；当这一步超过租期时，物化虽已完成，后续 attestation 仍会因租约过期失败，导致命令尚未真正执行就把 Run 标记为需要恢复。

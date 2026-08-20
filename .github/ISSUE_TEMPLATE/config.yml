@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 私有安全漏洞报告
+    url: https://github.com/hooxing/hoox/security/advisories/new
+    about: 跨租户、凭据、沙箱逃逸、供应链和其他安全问题请勿公开提交。
+  - name: 支持说明
+    url: https://github.com/hooxing/hoox/blob/main/SUPPORT.md
+    about: 提交 Issue 前先确认支持范围和所需信息。

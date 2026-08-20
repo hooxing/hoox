@@ -187,6 +187,34 @@ describe("Agent 工作台恢复接入", () => {
     expect(cloudDriveEntry?.nextElementSibling).toBe(taskHeading);
   });
 
+  it("没有已加入团队时不显示发布到团队入口", async () => {
+    const personalThread = thread("personal_task");
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [personalThread]),
+      forkThread: vi.fn(async () => thread("published_task")),
+      listTeams: vi.fn(async () => []),
+      createTeam: vi.fn(async () => {
+        throw new Error("本测试不创建团队");
+      }),
+      listTeamMembers: vi.fn(async () => []),
+      addTeamMember: vi.fn(async () => {
+        throw new Error("本测试不添加成员");
+      }),
+      changeTeamMemberRole: vi.fn(async () => {
+        throw new Error("本测试不修改角色");
+      }),
+      removeTeamMember: vi.fn(async () => undefined),
+      dissolveTeam: vi.fn(async () => undefined),
+    });
+    const { container } = mount(apiClient);
+
+    await settleEffects();
+
+    expect(container.querySelector(".conversation-header")?.textContent).not.toContain(
+      "发布到团队",
+    );
+  });
+
   it("个人任务永久保留，团队切换只改变团队任务栏，新建会话始终回到个人空间", async () => {
     const personalThread = thread("personal_task");
     const teamThread = thread("team_task");

@@ -143,14 +143,22 @@ export function createProviderProbes(
         typeof payload !== "object" ||
         payload === null ||
         !("data" in payload) ||
-        !Array.isArray(payload.data) ||
-        !payload.data.some(
-          (entry) =>
-            typeof entry === "object" &&
-            entry !== null &&
-            "id" in entry &&
-            entry.id === model.modelId,
-        )
+        !Array.isArray(payload.data)
+      ) {
+        throw new Error("MODEL_METADATA_MISMATCH");
+      }
+      const available = new Set(
+        payload.data.flatMap((entry) =>
+          typeof entry === "object" &&
+          entry !== null &&
+          "id" in entry &&
+          typeof entry.id === "string"
+            ? [entry.id]
+            : [],
+        ),
+      );
+      if (
+        !model.models.filter((candidate) => candidate.enabled).every(({ id }) => available.has(id))
       ) {
         throw new Error("MODEL_METADATA_MISMATCH");
       }

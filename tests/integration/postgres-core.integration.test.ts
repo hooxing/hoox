@@ -381,10 +381,27 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           protocol: "openai-compatible",
           baseUrl: "https://model.example.invalid/v1",
           secretRef: "deployment:model",
-          modelId,
-          supportsImages: false,
-          contextWindow: 128_000,
-          maxOutputTokens: 8_192,
+          defaultModelId: modelId,
+          models: [
+            {
+              id: modelId,
+              name: modelId,
+              enabled: true,
+              reasoning: false,
+              input: ["text"],
+              contextWindow: 128_000,
+              maxTokens: 8_192,
+            },
+            {
+              id: `${modelId}-disabled`,
+              name: `${modelId} Disabled`,
+              enabled: false,
+              reasoning: false,
+              input: ["text"],
+              contextWindow: 64_000,
+              maxTokens: 4_096,
+            },
+          ],
           reason: `创建 ${modelId}`,
         });
         const runtimeDraft = await withTenantTransaction(
@@ -392,7 +409,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           firstRun.scope,
           async (client) =>
             await client.query(
-              "SELECT 1 FROM admin_control_config_revisions WHERE configuration->>'modelId'=$1",
+              "SELECT 1 FROM admin_control_config_revisions WHERE configuration->>'defaultModelId'=$1",
               [modelId],
             ),
         );
@@ -417,7 +434,8 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         tenantId: firstRun.scope.tenantId,
         runId: firstRun.run.id,
       });
-      expect(firstSnapshot?.model.configuration.modelId).toBe("model-a");
+      expect(firstSnapshot?.model.configuration.defaultModelId).toBe("model-a");
+      expect(firstSnapshot?.model.configuration.models).toHaveLength(2);
       await expect(
         adminControlPool.query("SELECT tenant_id,run_id FROM run_runtime_config_snapshots"),
       ).rejects.toMatchObject({ code: "42501" });
@@ -434,7 +452,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         tenantId: secondRun.scope.tenantId,
         runId: secondRun.run.id,
       });
-      expect(secondSnapshot?.model.configuration.modelId).toBe("model-b");
+      expect(secondSnapshot?.model.configuration.defaultModelId).toBe("model-b");
       expect(secondSnapshot?.generation).toBeGreaterThan(firstSnapshot?.generation ?? 0);
     } finally {
       await migratorPool.query(

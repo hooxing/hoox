@@ -207,7 +207,7 @@ body {
   padding-top: 30px;
 }
 
-.control-form input:not([type="checkbox"]),
+.control-form input:not([type="checkbox"]):not([type="radio"]),
 .control-form textarea,
 .revision-actions input {
   width: 100%;
@@ -225,6 +225,63 @@ body {
 
 .control-form > button {
   align-self: end;
+}
+
+.model-catalog-editor {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 12px;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid #d6ddd8;
+  border-radius: 12px;
+  padding: 16px;
+  background: #f8faf8;
+}
+
+.model-catalog-editor legend {
+  padding: 0 6px;
+  color: #26372e;
+  font-weight: 750;
+}
+
+.model-catalog-editor > p {
+  margin: 0;
+  color: #718078;
+  font-size: 12px;
+}
+
+.model-editor-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  gap: 12px;
+  border: 1px solid #dce2de;
+  border-radius: 11px;
+  padding: 14px;
+  background: #fff;
+}
+
+.model-editor-heading {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  gap: 12px;
+}
+
+.model-editor-heading > button {
+  margin-left: auto;
+}
+
+.model-editor-heading .default-model-choice,
+.model-editor-row .checkbox {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding-top: 0;
+}
+
+.add-model-button {
+  justify-self: start;
 }
 
 .revision-list {
@@ -276,6 +333,39 @@ body {
   margin: 3px 0 0;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.revision-model-catalog {
+  display: grid;
+  gap: 8px;
+  border: 0;
+  margin: 0 0 14px;
+  padding: 0;
+}
+
+.revision-model-catalog > div {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid #dce2de;
+  border-radius: 9px;
+  padding: 10px 12px;
+  background: #fff;
+}
+
+.revision-model-catalog > div.disabled {
+  opacity: 0.58;
+}
+
+.revision-model-catalog > div > span:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.revision-model-catalog span {
+  color: #647168;
+  font-size: 12px;
 }
 
 .revision-meta,
@@ -399,6 +489,8 @@ body {
   }
 
   .revision-actions,
+  .model-editor-row,
+  .revision-model-catalog > div,
   .deployment-list > div,
   .audit-list article {
     grid-template-columns: 1fr;

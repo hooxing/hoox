@@ -24,10 +24,18 @@ function snapshot(revision: number): RuntimeControlConfigurationSnapshot {
         protocol: "openai-compatible",
         baseUrl: "https://model.example.com/v1",
         secretRef: "deployment:model",
-        modelId: `model-${revision}`,
-        supportsImages: false,
-        contextWindow: 128_000,
-        maxOutputTokens: 8_192,
+        defaultModelId: `model-${revision}`,
+        models: [
+          {
+            id: `model-${revision}`,
+            name: `Model ${revision}`,
+            enabled: true,
+            reasoning: false,
+            input: ["text"],
+            contextWindow: 128_000,
+            maxTokens: 8_192,
+          },
+        ],
       },
     },
   };

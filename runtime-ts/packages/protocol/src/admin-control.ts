@@ -20,6 +20,26 @@ export const ProviderProbeStatusSchema = Type.Union([
   Type.Literal("failed"),
 ]);
 
+export const ModelProviderModelConfigurationDtoSchema = Type.Object(
+  {
+    id: Type.String({ minLength: 1, maxLength: 255 }),
+    name: Type.String({ minLength: 1, maxLength: 120 }),
+    enabled: Type.Boolean(),
+    reasoning: Type.Boolean(),
+    input: Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]), {
+      minItems: 1,
+      maxItems: 2,
+      uniqueItems: true,
+    }),
+    contextWindow: Type.Integer({ minimum: 1, maximum: 10_000_000 }),
+    maxTokens: Type.Integer({ minimum: 1, maximum: 10_000_000 }),
+  },
+  strict,
+);
+export type ModelProviderModelConfigurationDto = Static<
+  typeof ModelProviderModelConfigurationDtoSchema
+>;
+
 export const ModelProviderConfigurationDtoSchema = Type.Object(
   {
     providerKey: ProviderKeySchema,
@@ -27,10 +47,11 @@ export const ModelProviderConfigurationDtoSchema = Type.Object(
     protocol: Type.Literal("openai-compatible"),
     baseUrl: ProviderUrlSchema,
     secretRef: Type.Literal("deployment:model"),
-    modelId: Type.String({ minLength: 1, maxLength: 255 }),
-    supportsImages: Type.Boolean(),
-    contextWindow: Type.Integer({ minimum: 1, maximum: 10_000_000 }),
-    maxOutputTokens: Type.Integer({ minimum: 1, maximum: 10_000_000 }),
+    defaultModelId: Type.String({ minLength: 1, maxLength: 255 }),
+    models: Type.Array(ModelProviderModelConfigurationDtoSchema, {
+      minItems: 1,
+      maxItems: 100,
+    }),
   },
   strict,
 );

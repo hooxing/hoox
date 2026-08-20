@@ -2,6 +2,7 @@ import type {
   AdminControlOverviewDto,
   ControlAuditEventDto,
   MemoryProviderRevisionDto,
+  ModelProviderModelConfigurationDto,
   ModelProviderRevisionDto,
   RuntimeSettingsRevisionDto,
 } from "@hoox/protocol";
@@ -96,6 +97,9 @@ function RevisionCard({
   const configuration = item.configuration;
   const providerKey = "providerKey" in configuration ? configuration.providerKey : "global";
   const title = "displayName" in configuration ? configuration.displayName : "运行参数";
+  const modelConfiguration = "models" in configuration ? configuration : undefined;
+  const modelCatalog = modelConfiguration?.models;
+  const defaultModelId = modelConfiguration?.defaultModelId;
   return (
     <article className={`control-revision ${item.status === "active" ? "active" : ""}`}>
       <div className="control-revision-heading">
@@ -108,13 +112,37 @@ function RevisionCard({
         <span className={`status status-${item.status}`}>{item.status}</span>
       </div>
       <dl className="configuration-summary">
-        {Object.entries(configuration).map(([key, field]) => (
-          <div key={key}>
-            <dt>{key}</dt>
-            <dd>{typeof field === "boolean" ? (field ? "是" : "否") : String(field)}</dd>
-          </div>
-        ))}
+        {Object.entries(configuration)
+          .filter(([key]) => key !== "models")
+          .map(([key, field]) => (
+            <div key={key}>
+              <dt>{key}</dt>
+              <dd>{typeof field === "boolean" ? (field ? "是" : "否") : String(field)}</dd>
+            </div>
+          ))}
       </dl>
+      {modelCatalog !== undefined && (
+        <fieldset className="revision-model-catalog">
+          <legend className="visually-hidden">{providerKey} 模型目录</legend>
+          {modelCatalog.map((model) => (
+            <div key={model.id} className={model.enabled ? "enabled" : "disabled"}>
+              <span>
+                <strong>{model.name}</strong>
+                <code>{model.id}</code>
+              </span>
+              <span>
+                {model.enabled ? "已启用" : "已停用"}
+                {model.id === defaultModelId ? " · 默认" : ""}
+                {model.reasoning ? " · 推理" : ""}
+              </span>
+              <span>
+                {model.input.join(" + ")} · {model.contextWindow.toLocaleString()} /{" "}
+                {model.maxTokens.toLocaleString()}
+              </span>
+            </div>
+          ))}
+        </fieldset>
+      )}
       <p className="revision-meta">
         探测：{item.probeStatus} · 版本令牌 {item.versionToken}
       </p>
@@ -232,7 +260,12 @@ function Overview({
           <p>所有发布操作都形成不可变版本；新 Run 固化当前版本，进行中的 Run 不受影响。</p>
         </div>
         <div className="active-stack">
-          <span>模型：{overview.activeModel?.configuration.displayName ?? "尚未发布"}</span>
+          <span>
+            模型：
+            {overview.activeModel === undefined
+              ? "尚未发布"
+              : `${overview.activeModel.configuration.displayName} / ${overview.activeModel.configuration.defaultModelId}`}
+          </span>
           <span>记忆：{overview.activeMemory?.configuration.displayName ?? "未启用"}</span>
         </div>
       </section>
@@ -250,19 +283,93 @@ function Overview({
   );
 }
 
+interface EditableModelRow {
+  readonly clientId: string;
+  readonly id: string;
+  readonly name: string;
+  readonly enabled: boolean;
+  readonly reasoning: boolean;
+  readonly supportsImages: boolean;
+  readonly contextWindow: string;
+  readonly maxTokens: string;
+}
+
+function newModelRow(): EditableModelRow {
+  return {
+    clientId: crypto.randomUUID(),
+    id: "",
+    name: "",
+    enabled: true,
+    reasoning: false,
+    supportsImages: false,
+    contextWindow: "128000",
+    maxTokens: "8192",
+  };
+}
+
 function ModelDraftForm({
   onCreate,
   busy,
 }: {
-  readonly onCreate: (form: FormData) => Promise<void>;
+  readonly onCreate: (
+    form: FormData,
+    models: ModelProviderModelConfigurationDto[],
+    defaultModelId: string,
+  ) => Promise<void>;
   readonly busy: boolean;
 }) {
+  const [catalog, setCatalog] = useState(() => {
+    const initial = newModelRow();
+    return { models: [initial], defaultClientId: initial.clientId };
+  });
+  const updateModel = (clientId: string, patch: Partial<EditableModelRow>) => {
+    setCatalog((current) => ({
+      ...current,
+      models: current.models.map((model) =>
+        model.clientId === clientId ? { ...model, ...patch } : model,
+      ),
+    }));
+  };
+  const updateEnabled = (clientId: string, enabled: boolean) => {
+    setCatalog((current) => {
+      const models = current.models.map((model) =>
+        model.clientId === clientId ? { ...model, enabled } : model,
+      );
+      const defaultClientId =
+        !enabled && current.defaultClientId === clientId
+          ? (models.find((model) => model.enabled)?.clientId ?? "")
+          : current.defaultClientId;
+      return { models, defaultClientId };
+    });
+  };
+  const removeModel = (clientId: string) => {
+    setCatalog((current) => {
+      const models = current.models.filter((model) => model.clientId !== clientId);
+      const defaultClientId =
+        current.defaultClientId === clientId
+          ? (models.find((model) => model.enabled)?.clientId ?? "")
+          : current.defaultClientId;
+      return { models, defaultClientId };
+    });
+  };
   return (
     <form
       className="control-form"
       onSubmit={(event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
-        void onCreate(new FormData(event.currentTarget));
+        const models = catalog.models.map<ModelProviderModelConfigurationDto>((model) => ({
+          id: model.id.trim(),
+          name: model.name.trim(),
+          enabled: model.enabled,
+          reasoning: model.reasoning,
+          input: model.supportsImages ? ["text", "image"] : ["text"],
+          contextWindow: Number(model.contextWindow),
+          maxTokens: Number(model.maxTokens),
+        }));
+        const defaultModelId =
+          catalog.models.find((model) => model.clientId === catalog.defaultClientId)?.id.trim() ??
+          "";
+        void onCreate(new FormData(event.currentTarget), models, defaultModelId);
       }}
     >
       <label>
@@ -271,28 +378,134 @@ function ModelDraftForm({
       </label>
       <label>
         显示名称
-        <input name="displayName" required />
+        <input name="displayName" required maxLength={120} />
       </label>
       <label className="wide">
         HTTPS Base URL
-        <input name="baseUrl" required type="url" placeholder="https://api.example.com/v1/" />
+        <input
+          name="baseUrl"
+          required
+          type="url"
+          maxLength={2048}
+          placeholder="https://api.example.com/v1/"
+        />
       </label>
-      <label>
-        模型 ID
-        <input name="modelId" required />
-      </label>
-      <label>
-        上下文窗口
-        <input name="contextWindow" type="number" min="1" defaultValue="128000" required />
-      </label>
-      <label>
-        最大输出 Token
-        <input name="maxOutputTokens" type="number" min="1" defaultValue="8192" required />
-      </label>
-      <label className="checkbox">
-        <input name="supportsImages" type="checkbox" />
-        支持图片
-      </label>
+      <fieldset className="model-catalog-editor wide">
+        <legend>模型目录</legend>
+        <p>可同时启用多个模型；当前 Worker 使用标记为默认的启用模型。</p>
+        {catalog.models.map((model, index) => (
+          <div className="model-editor-row" key={model.clientId}>
+            <div className="model-editor-heading">
+              <strong>模型 {index + 1}</strong>
+              <label className="default-model-choice">
+                <input
+                  type="radio"
+                  name="defaultModel"
+                  aria-label={`模型 ${index + 1} 设为默认`}
+                  checked={catalog.defaultClientId === model.clientId}
+                  disabled={!model.enabled}
+                  onChange={() =>
+                    setCatalog((current) => ({
+                      ...current,
+                      defaultClientId: model.clientId,
+                    }))
+                  }
+                />
+                默认模型
+              </label>
+              <button
+                type="button"
+                className="quiet-button"
+                disabled={catalog.models.length === 1}
+                onClick={() => removeModel(model.clientId)}
+              >
+                移除
+              </button>
+            </div>
+            <label>
+              模型 ID
+              <input
+                required
+                maxLength={255}
+                value={model.id}
+                onChange={(event) => updateModel(model.clientId, { id: event.target.value })}
+              />
+            </label>
+            <label>
+              模型名称
+              <input
+                required
+                maxLength={120}
+                value={model.name}
+                onChange={(event) => updateModel(model.clientId, { name: event.target.value })}
+              />
+            </label>
+            <label>
+              上下文窗口
+              <input
+                type="number"
+                min="1"
+                max="10000000"
+                required
+                value={model.contextWindow}
+                onChange={(event) =>
+                  updateModel(model.clientId, { contextWindow: event.target.value })
+                }
+              />
+            </label>
+            <label>
+              最大输出 Token
+              <input
+                type="number"
+                min="1"
+                max="10000000"
+                required
+                value={model.maxTokens}
+                onChange={(event) => updateModel(model.clientId, { maxTokens: event.target.value })}
+              />
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                aria-label={`模型 ${index + 1} 启用`}
+                checked={model.enabled}
+                onChange={(event) => updateEnabled(model.clientId, event.target.checked)}
+              />
+              启用
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={model.reasoning}
+                onChange={(event) =>
+                  updateModel(model.clientId, { reasoning: event.target.checked })
+                }
+              />
+              支持推理
+            </label>
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={model.supportsImages}
+                onChange={(event) =>
+                  updateModel(model.clientId, { supportsImages: event.target.checked })
+                }
+              />
+              支持图片
+            </label>
+          </div>
+        ))}
+        <button
+          type="button"
+          className="quiet-button add-model-button"
+          disabled={catalog.models.length >= 100}
+          onClick={() =>
+            setCatalog((current) => ({ ...current, models: [...current.models, newModelRow()] }))
+          }
+        >
+          添加模型
+        </button>
+      </fieldset>
       <label className="wide">
         变更原因
         <textarea name="reason" required maxLength={500} />
@@ -498,10 +711,12 @@ export function AdminControlConsole({
           </button>
         </div>
       )}
-      {overview === undefined ? (
-        <p className="empty-state large">正在加载控制面…</p>
-      ) : view === "overview" ? (
-        <Overview value={overview} audits={audits} />
+      {view === "overview" ? (
+        overview === undefined ? (
+          <p className="empty-state large">正在加载控制面…</p>
+        ) : (
+          <Overview value={overview} audits={audits} />
+        )
       ) : (
         <>
           <section className="control-panel">
@@ -514,7 +729,7 @@ export function AdminControlConsole({
             {view === "models" ? (
               <ModelDraftForm
                 busy={busy}
-                onCreate={(form) =>
+                onCreate={(form, models, defaultModelId) =>
                   operation(() =>
                     api.createModelDraft({
                       providerKey: value(form, "providerKey"),
@@ -522,10 +737,8 @@ export function AdminControlConsole({
                       protocol: "openai-compatible",
                       baseUrl: value(form, "baseUrl"),
                       secretRef: "deployment:model",
-                      modelId: value(form, "modelId"),
-                      supportsImages: form.get("supportsImages") === "on",
-                      contextWindow: number(form, "contextWindow"),
-                      maxOutputTokens: number(form, "maxOutputTokens"),
+                      defaultModelId,
+                      models,
                       reason: value(form, "reason"),
                     }),
                   )
@@ -600,7 +813,7 @@ export function AdminControlConsole({
               })
             )}
           </section>
-          {view === "settings" && <DeploymentSettings items={overview.deploymentSettings} />}
+          {view === "settings" && <DeploymentSettings items={overview?.deploymentSettings ?? []} />}
         </>
       )}
     </main>

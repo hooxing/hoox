@@ -150,9 +150,12 @@ corepack pnpm dev:admin:web
 
 浏览器仍访问 `http://127.0.0.1:4174`。发布配置会递增全局 generation；Worker 首次处理 Run 时将模型、记忆与
 运行参数 revision 固化到 `run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本。没有已发布
-模型时回退部署时 `MODEL_*` 配置。数据库连接、角色、JWT、TLS、S3、Sandbox 和监听地址只在页面展示“已配置/需
-重新部署”，不存在通用 ENV 写接口。完整边界见
-[ADR-20260819165254](decisions/20260819165254-independent-admin-control-plane.md)。
+模型时回退部署时 `MODEL_*` 配置。一个模型 Provider revision 可以维护 1～100 个 Pi 风格的模型条目，并允许
+同时启用多个模型；管理员必须从启用模型中指定默认模型，探针会核对所有启用模型都出现在 Provider 的
+`/models` 响应中，Worker 注册完整启用目录后为当前 Run 选择默认模型。数据库连接、角色、JWT、TLS、S3、
+Sandbox 和监听地址只在页面展示“已配置/需重新部署”，不存在通用 ENV 写接口。完整边界见
+[ADR-20260819165254](decisions/20260819165254-independent-admin-control-plane.md) 与
+[ADR-20260820090402](decisions/20260820090402-provider-owned-model-catalog.md)。
 
 使用一键开发脚本时，既有 `-IncludeSkill` 兼容开关现在会同时启动 Skill Admin API、Admin Control API 与统一
 Admin Web；默认核心拓扑仍不启动任何管理服务。

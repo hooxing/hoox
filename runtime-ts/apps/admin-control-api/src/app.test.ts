@@ -17,10 +17,18 @@ const modelRevision = {
     protocol: "openai-compatible" as const,
     baseUrl: "https://model.example.com/v1",
     secretRef: "deployment:model" as const,
-    modelId: "model-a",
-    supportsImages: false,
-    contextWindow: 128_000,
-    maxOutputTokens: 8_192,
+    defaultModelId: "model-a",
+    models: [
+      {
+        id: "model-a",
+        name: "Model A",
+        enabled: true,
+        reasoning: false,
+        input: ["text" as const],
+        contextWindow: 128_000,
+        maxTokens: 8_192,
+      },
+    ],
   },
 };
 

@@ -8,6 +8,7 @@ import {
   type ControlObjectKind,
   type ControlOperatorRole,
   type ControlRevision,
+  defaultModelConfiguration,
   digestControlRequest,
   type MemoryProviderConfiguration,
   type ModelProviderConfiguration,
@@ -723,7 +724,7 @@ async function publishPairIsCompatible(
   return (
     model === undefined ||
     settings === undefined ||
-    settings.compactionMaxOutputTokens <= model.maxOutputTokens
+    settings.compactionMaxOutputTokens <= defaultModelConfiguration(model).maxTokens
   );
 }
 

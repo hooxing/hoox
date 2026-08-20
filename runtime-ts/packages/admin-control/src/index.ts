@@ -8,16 +8,27 @@ export type ProviderSecretRef =
   | "deployment:memory-api"
   | "deployment:memory-scope";
 
+export type ModelInputCapability = "text" | "image";
+
+/** 对齐 Pi Provider 模型的必要字段；enabled 是平台控制面的发布策略。 */
+export interface ModelProviderModelConfiguration {
+  readonly id: string;
+  readonly name: string;
+  readonly enabled: boolean;
+  readonly reasoning: boolean;
+  readonly input: readonly ModelInputCapability[];
+  readonly contextWindow: number;
+  readonly maxTokens: number;
+}
+
 export interface ModelProviderConfiguration {
   readonly providerKey: string;
   readonly displayName: string;
   readonly protocol: "openai-compatible";
   readonly baseUrl: string;
   readonly secretRef: "deployment:model";
-  readonly modelId: string;
-  readonly supportsImages: boolean;
-  readonly contextWindow: number;
-  readonly maxOutputTokens: number;
+  readonly defaultModelId: string;
+  readonly models: readonly ModelProviderModelConfiguration[];
 }
 
 export interface MemoryProviderConfiguration {
@@ -248,22 +259,68 @@ function boundedInteger(value: number, name: string, minimum: number, maximum: n
 export function normalizeModelProviderConfiguration(
   input: ModelProviderConfiguration,
 ): ModelProviderConfiguration {
-  const contextWindow = boundedInteger(input.contextWindow, "上下文窗口", 1, 10_000_000);
-  const maxOutputTokens = boundedInteger(input.maxOutputTokens, "最大输出 Token", 1, 10_000_000);
-  if (maxOutputTokens > contextWindow) throw new TypeError("最大输出 Token 不能超过上下文窗口");
   if (input.protocol !== "openai-compatible") throw new TypeError("模型协议不受支持");
   if (input.secretRef !== "deployment:model") throw new TypeError("模型 Secret Ref 不受支持");
+  if (!Array.isArray(input.models) || input.models.length < 1 || input.models.length > 100) {
+    throw new TypeError("Provider 模型数量无效");
+  }
+  const identifiers = new Set<string>();
+  const models = input.models.map((model) => {
+    const id = normalizedText(model.id, "模型 ID", 255);
+    if (identifiers.has(id)) throw new TypeError("Provider 内模型 ID 不能重复");
+    identifiers.add(id);
+    if (typeof model.enabled !== "boolean" || typeof model.reasoning !== "boolean") {
+      throw new TypeError("模型启用和推理能力必须是布尔值");
+    }
+    if (!Array.isArray(model.input) || model.input.length < 1 || model.input.length > 2) {
+      throw new TypeError("模型输入能力无效");
+    }
+    const capabilities = model.input.map((capability: ModelInputCapability) => {
+      if (capability !== "text" && capability !== "image") {
+        throw new TypeError("模型输入能力不受支持");
+      }
+      return capability;
+    });
+    if (new Set(capabilities).size !== capabilities.length || !capabilities.includes("text")) {
+      throw new TypeError("模型输入能力必须包含且不能重复 text");
+    }
+    const contextWindow = boundedInteger(model.contextWindow, "上下文窗口", 1, 10_000_000);
+    const maxTokens = boundedInteger(model.maxTokens, "最大输出 Token", 1, 10_000_000);
+    if (maxTokens > contextWindow) throw new TypeError("最大输出 Token 不能超过上下文窗口");
+    return Object.freeze({
+      id,
+      name: normalizedText(model.name, "模型名称", 120),
+      enabled: model.enabled,
+      reasoning: model.reasoning,
+      input: Object.freeze(capabilities),
+      contextWindow,
+      maxTokens,
+    });
+  });
+  if (!models.some((model) => model.enabled)) throw new TypeError("至少需要启用一个模型");
+  const defaultModelId = normalizedText(input.defaultModelId, "默认模型 ID", 255);
+  if (!models.some((model) => model.id === defaultModelId && model.enabled)) {
+    throw new TypeError("默认模型必须引用已启用模型");
+  }
   return Object.freeze({
     providerKey: normalizedProviderKey(input.providerKey),
     displayName: normalizedText(input.displayName, "显示名称", 120),
     protocol: "openai-compatible",
     baseUrl: normalizedHttpsUrl(input.baseUrl),
     secretRef: "deployment:model",
-    modelId: normalizedText(input.modelId, "模型 ID", 255),
-    supportsImages: input.supportsImages,
-    contextWindow,
-    maxOutputTokens,
+    defaultModelId,
+    models: Object.freeze(models),
   });
+}
+
+export function defaultModelConfiguration(
+  configuration: ModelProviderConfiguration,
+): ModelProviderModelConfiguration {
+  const model = configuration.models.find(
+    (candidate) => candidate.id === configuration.defaultModelId && candidate.enabled,
+  );
+  if (model === undefined) throw new TypeError("默认模型配置损坏");
+  return model;
 }
 
 export function normalizeMemoryProviderConfiguration(
@@ -520,7 +577,7 @@ export class AdminControlService {
         model !== undefined &&
         runtimeSettings !== undefined &&
         runtimeSettings.configuration.compactionMaxOutputTokens >
-          model.configuration.maxOutputTokens
+          defaultModelConfiguration(model.configuration).maxTokens
       ) {
         throw new AdminControlServiceError("CONFLICT");
       }

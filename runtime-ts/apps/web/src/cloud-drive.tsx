@@ -54,6 +54,7 @@ export function CloudDriveDialog({
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [searchScope, setSearchScope] = useState<CloudDriveSearchScope>("all");
+  const hasTeams = teams.length > 0;
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? teams[0];
   const searchSources = useMemo<readonly CloudDriveSearchSource[]>(
     () => [
@@ -99,14 +100,18 @@ export function CloudDriveDialog({
         <header className="skill-center-header">
           <div>
             <h2 id="cloud-drive-title">云盘</h2>
-            <p>统一搜索个人与团队文件，浏览时仍保持各空间的权限边界。</p>
+            <p>
+              {hasTeams
+                ? "统一搜索个人与团队文件，浏览时仍保持各空间的权限边界。"
+                : "搜索和浏览个人云盘文件。"}
+            </p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="关闭云盘">
             <X size={18} />
           </button>
         </header>
         <form
-          className="cloud-drive-global-search"
+          className={`cloud-drive-global-search${hasTeams ? "" : " is-personal-only"}`}
           onSubmit={(event) => {
             event.preventDefault();
             setSubmittedQuery(query.trim());
@@ -117,40 +122,42 @@ export function CloudDriveDialog({
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="搜索个人及团队文件"
-              aria-label="搜索个人及团队文件"
+              placeholder={hasTeams ? "搜索个人及团队文件" : "搜索个人文件"}
+              aria-label={hasTeams ? "搜索个人及团队文件" : "搜索个人文件"}
             />
             <button type="submit">搜索</button>
           </div>
-          <label className="cloud-drive-search-scope">
-            <span>搜索范围</span>
-            <select
-              value={searchScope}
-              aria-label="搜索范围"
-              onChange={(event) => setSearchScope(event.target.value as CloudDriveSearchScope)}
-            >
-              <option value="all">全部空间</option>
-              <option value="personal">仅个人云盘</option>
-              {teams.length > 0 && <option value="teams">全部团队</option>}
-              {teams.map((team) => (
-                <option key={team.id} value={`team:${team.id}`}>
-                  {team.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          {hasTeams && (
+            <label className="cloud-drive-search-scope">
+              <span>搜索范围</span>
+              <select
+                value={searchScope}
+                aria-label="搜索范围"
+                onChange={(event) => setSearchScope(event.target.value as CloudDriveSearchScope)}
+              >
+                <option value="all">全部空间</option>
+                <option value="personal">仅个人云盘</option>
+                <option value="teams">全部团队</option>
+                {teams.map((team) => (
+                  <option key={team.id} value={`team:${team.id}`}>
+                    {team.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </form>
-        <div className="cloud-drive-tabs" role="tablist" aria-label="云盘空间">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={activeTab === "personal" && !submittedQuery}
-            className={activeTab === "personal" && !submittedQuery ? "is-active" : undefined}
-            onClick={() => selectTab("personal")}
-          >
-            个人云盘
-          </button>
-          {teams.length > 0 && (
+        {hasTeams && (
+          <div className="cloud-drive-tabs" role="tablist" aria-label="云盘空间">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activeTab === "personal" && !submittedQuery}
+              className={activeTab === "personal" && !submittedQuery ? "is-active" : undefined}
+              onClick={() => selectTab("personal")}
+            >
+              个人云盘
+            </button>
             <button
               type="button"
               role="tab"
@@ -160,9 +167,9 @@ export function CloudDriveDialog({
             >
               团队云盘
             </button>
-          )}
-          {submittedQuery && <span>“{submittedQuery}”的搜索结果</span>}
-        </div>
+            {submittedQuery && <span>“{submittedQuery}”的搜索结果</span>}
+          </div>
+        )}
         <div className="cloud-drive-content">
           {submittedQuery ? (
             <CloudDriveSearchResults

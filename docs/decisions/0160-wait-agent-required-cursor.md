@@ -1,5 +1,9 @@
 # ADR-0160：wait_agent 强制显式传入 mailbox 游标
 
+- 状态：已接受
+- 日期：2026-08-12
+
+
 ## 背景
 
 `wait_agent` 已返回 `nextAfterSequence`，但输入 `after_sequence` 仍是可选字段并默认取 0。实测中父 Agent 首次等待后正确拿到游标 1，后续启动新 turn 时却遗漏该字段，于是再次从 0 读取，结果同时收到旧的中断消息和新的完成消息。

@@ -1,5 +1,9 @@
 # ADR-0158：子 Agent 控制工具按顺序形成 Rollout 事实
 
+- 状态：已接受
+- 日期：2026-08-12
+
+
 ## 背景
 
 Pi 允许模型在同一条 assistant 消息中发出多个工具调用。子 Agent 控制工具此前声明为 `parallel`，因此多个调用会并发执行并各自写入 durable `tool_call` / `tool_result`。

@@ -1,5 +1,8 @@
 # Skill Center 与 Agent Skill 接入规范
 
+> [!IMPORTANT]
+> **历史规范。** 本文记录 2026 年 8 月初以“个人全局安装”为前提的 Skill Center 目标设计。当前实现已经改为 Tenant 级安装，并由后续 ADR 扩展 Prompt、ResourceFS、管理发布和团队边界。当前行为见[Skill Runtime](../../architecture/skill-runtime.md)，请勿按本文的阶段计划或旧 Prompt 版本实施。
+
 - 状态：草案
 - 日期：2026-08-03
 - 范围：Skill 中心、用户安装、Run 快照、System Prompt 目录注入、显式调用与 `skill` 工具

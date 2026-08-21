@@ -325,6 +325,6 @@ Write-Host "开发环境已全部启动。" -ForegroundColor Green
 Write-Host "主 Web：http://127.0.0.1:4173"
 Write-Host "API：$apiBaseUrl"
 if ($startSkillServices) {
-  Write-Host "Skill Admin Web：http://127.0.0.1:4174"
+  Write-Host "Admin Web：http://127.0.0.1:4174"
 }
 Write-Host "启动状态：$(Join-Path $runtimeDirectory 'pids.json')"

@@ -44,6 +44,31 @@ function fixture() {
     listMemoryProviders: vi.fn(async () => []),
     listRuntimeSettings: vi.fn(async () => []),
     listAudits: vi.fn(async () => []),
+    listUsers: vi.fn(async () => ({
+      total: 1,
+      items: [
+        {
+          userId: "user_customer",
+          email: "customer@example.com",
+          displayName: "测试用户",
+          status: "active" as const,
+          createdAt: "2026-08-20T00:00:00.000Z",
+          activeSessions: 1,
+          conversationCount: 2,
+          runCount: 5,
+        },
+      ],
+    })),
+    updateUserStatus: vi.fn(async (_context, input) => ({
+      userId: input.targetUserId,
+      email: "customer@example.com",
+      displayName: "测试用户",
+      status: input.status,
+      createdAt: "2026-08-20T00:00:00.000Z",
+      activeSessions: 0,
+      conversationCount: 2,
+      runCount: 5,
+    })),
     createModelDraft: vi.fn(async () => modelRevision),
     createMemoryDraft: vi.fn(),
     createRuntimeSettingsDraft: vi.fn(),
@@ -195,6 +220,36 @@ describe("后台控制 API", () => {
     });
     expect(response.statusCode).toBe(200);
     expect(control.listAudits).toHaveBeenCalledWith("user_admin", 20);
+    await app.close();
+  });
+
+  it("用户目录和状态治理只使用认证管理员身份且不返回凭据材料", async () => {
+    const { app, control } = fixture();
+    const directory = await app.inject({
+      method: "GET",
+      url: "/v1/admin/control/users?query=customer&limit=20",
+      headers: { authorization: "Bearer admin" },
+    });
+    expect(directory.statusCode).toBe(200);
+    expect(control.listUsers).toHaveBeenCalledWith("user_admin", "customer", 20);
+    expect(directory.body).not.toContain("passwordHash");
+    expect(directory.body).not.toContain("tokenDigest");
+
+    const update = await app.inject({
+      method: "POST",
+      url: "/v1/admin/control/users/user_customer/status",
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "user-status-0001",
+      },
+      payload: { status: "disabled", reason: "风险账号处置" },
+    });
+    expect(update.statusCode).toBe(200);
+    expect(control.updateUserStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ actorUserId: "user_admin", idempotencyKey: "user-status-0001" }),
+      { targetUserId: "user_customer", status: "disabled", reason: "风险账号处置" },
+    );
     await app.close();
   });
 });

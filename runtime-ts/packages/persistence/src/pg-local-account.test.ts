@@ -16,6 +16,16 @@ class SessionClient {
 }
 
 describe("PostgreSQL 本地账号会话", () => {
+  it("登录和账号资料读取只接受 active 用户", async () => {
+    const client = new SessionClient();
+    const pool = { connect: async () => client } as unknown as Pool;
+    const repository = new PgLocalAccountRepository(pool);
+
+    await repository.findByNormalizedEmail("user@example.com");
+
+    expect(client.statements.some((statement) => statement.includes("status='active'"))).toBe(true);
+  });
+
   it("在同一事务中分别发送过期清理与会话插入，避免参数化多命令失败", async () => {
     const client = new SessionClient();
     const pool = { connect: async () => client } as unknown as Pool;

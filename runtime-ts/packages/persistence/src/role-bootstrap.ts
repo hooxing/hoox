@@ -165,6 +165,7 @@ const adminControlTables = new Set([
   "admin_control_commands",
   "admin_control_audits",
   "admin_control_generation",
+  "admin_user_account_audits",
   "run_runtime_config_snapshots",
 ]);
 
@@ -281,7 +282,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["run_skill_snapshots", new Set(["SELECT", "INSERT"])],
   ["run_skill_snapshot_items", new Set(["SELECT", "INSERT"])],
   ["skill_invocations", new Set(["SELECT", "INSERT"])],
-  // 管理发布只能由独立数据库角色访问，Runtime 对五张管理表保持零 ACL。
+  // 管理面事实只能由对应的独立数据库角色访问，Runtime 对审计与命令表保持零 ACL。
   ["platform_skill_operators", new Set()],
   ["skill_publication_submissions", new Set()],
   ["skill_publication_files", new Set()],
@@ -295,6 +296,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["admin_control_commands", new Set()],
   ["admin_control_audits", new Set()],
   ["admin_control_generation", new Set(["SELECT"])],
+  ["admin_user_account_audits", new Set()],
   ["run_runtime_config_snapshots", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
@@ -1032,6 +1034,16 @@ async function hasAdminControlState(client: PoolClient, schema: string): Promise
             AND to_regclass(format('%I.admin_control_config_revisions',$1::text)) IS NOT NULL
             AND to_regclass(format('%I.admin_control_active_configs',$1::text)) IS NOT NULL
             AND to_regclass(format('%I.run_runtime_config_snapshots',$1::text)) IS NOT NULL
+            AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
+async function hasAdminUserOperationsState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.admin_user_account_audits',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.admin_user_directory',$1::text)) IS NOT NULL
             AS present`,
     [schema],
   );
@@ -2004,6 +2016,8 @@ async function assertAdminControlBoundary(
   context: MigrationSecurityContext,
   enabled: boolean,
 ): Promise<void> {
+  const userOperationsEnabled =
+    enabled && (await hasAdminUserOperationsState(client, context.schema));
   const allowed = new Map<string, ReadonlySet<string>>(
     enabled
       ? [
@@ -2018,6 +2032,10 @@ async function assertAdminControlBoundary(
         ]
       : [],
   );
+  if (userOperationsEnabled) {
+    allowed.set("admin_user_account_audits", new Set(["SELECT", "INSERT"]));
+    allowed.set("user_sessions", new Set(["DELETE"]));
+  }
   const relations = await client.query<{ readonly table_name: string }>(
     `SELECT relname AS table_name FROM pg_class
       WHERE relnamespace=current_schema()::regnamespace AND relkind IN ('r','p')`,
@@ -2060,6 +2078,9 @@ async function assertAdminControlBoundary(
         ]
       : [],
   );
+  if (userOperationsEnabled) {
+    updatePolicy.set("user_accounts", new Set(["status", "updated_at"]));
+  }
   if (updatePolicy.size > 0) {
     const updates = await client.query<{
       readonly table_name: string;
@@ -2086,16 +2107,59 @@ async function assertAdminControlBoundary(
     }
   }
 
-  const viewPrivilege = await client.query<{ readonly allowed: boolean }>(
-    `SELECT CASE WHEN to_regclass(format('%I.admin_runtime_statistics',$2::text)) IS NULL
+  const selectPolicy = new Map<string, ReadonlySet<string>>();
+  if (userOperationsEnabled) {
+    selectPolicy.set("user_accounts", new Set(["user_id"]));
+    selectPolicy.set("user_sessions", new Set(["user_id"]));
+  }
+  if (selectPolicy.size > 0) {
+    const selects = await client.query<{
+      readonly table_name: string;
+      readonly column_name: string;
+      readonly allowed: boolean;
+    }>(
+      `SELECT column_state.table_name,column_state.column_name,
+              has_column_privilege(
+                $1,format('%I.%I',$2::text,column_state.table_name),
+                column_state.column_name,'SELECT'
+              ) AS allowed
+         FROM information_schema.columns column_state
+        WHERE column_state.table_schema=$2
+          AND column_state.table_name=ANY($3::text[])`,
+      [context.adminControlRole, context.schema, [...selectPolicy.keys()]],
+    );
+    for (const row of selects.rows) {
+      if (row.allowed !== selectPolicy.get(row.table_name)?.has(row.column_name)) {
+        throw new PersistenceError(
+          "CONSTRAINT_VIOLATION",
+          "Admin Control 列级 SELECT 权限偏离白名单",
+        );
+      }
+    }
+  }
+
+  const viewPrivileges = await client.query<{
+    readonly view_name: string;
+    readonly allowed: boolean;
+  }>(
+    `SELECT target.view_name,
+            CASE WHEN to_regclass(format('%I.%I',$2::text,target.view_name)) IS NULL
                  THEN false
                  ELSE has_table_privilege(
-                   $1,format('%I.admin_runtime_statistics',$2::text),'SELECT'
-                 ) END AS allowed`,
-    [context.adminControlRole, context.schema],
+                   $1,format('%I.%I',$2::text,target.view_name),'SELECT'
+                 ) END AS allowed
+       FROM unnest($3::text[]) AS target(view_name)`,
+    [
+      context.adminControlRole,
+      context.schema,
+      ["admin_runtime_statistics", "admin_user_directory"],
+    ],
   );
-  if (viewPrivilege.rows[0]?.allowed !== enabled) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "Admin Control 统计视图权限偏离白名单");
+  for (const row of viewPrivileges.rows) {
+    const expected = row.view_name === "admin_runtime_statistics" ? enabled : userOperationsEnabled;
+    if (row.allowed !== expected) {
+      throw new PersistenceError("CONSTRAINT_VIOLATION", "Admin Control 受限视图权限偏离白名单");
+    }
   }
   await assertDatabaseAndSchemaBoundary(
     client,
@@ -2601,6 +2665,13 @@ const adminControlPolicyBindings = Object.freeze([
   ["run_runtime_config_snapshots", "run_runtime_config_snapshots_runtime_policy", "runtime"],
 ] as const);
 
+const adminUserOperationsPolicyBindings = Object.freeze([
+  ["admin_user_account_audits", "admin_user_account_audits_migrator_policy", "migrator"],
+  ["admin_user_account_audits", "admin_user_account_audits_control_policy", "control"],
+  ["user_accounts", "user_accounts_admin_control_update_policy", "control"],
+  ["user_sessions", "user_sessions_admin_control_delete_policy", "control"],
+] as const);
+
 async function rebindRoleScopedPolicies(
   client: PoolClient,
   context: MigrationSecurityContext,
@@ -2635,6 +2706,14 @@ async function rebindRoleScopedPolicies(
       await client.query(
         `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
       );
+    }
+    if (await hasAdminUserOperationsState(client, context.schema)) {
+      for (const [table, policy, target] of adminUserOperationsPolicyBindings) {
+        const role = target === "migrator" ? context.migratorRole : context.adminControlRole;
+        await client.query(
+          `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
+        );
+      }
     }
   }
 }
@@ -2687,6 +2766,15 @@ async function grantAdminControlAccess(
      GRANT UPDATE(generation,updated_at) ON TABLE ${schema}.admin_control_generation TO ${control};
      GRANT SELECT ON TABLE ${schema}.admin_runtime_statistics TO ${control}`,
   );
+  if (await hasAdminUserOperationsState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.admin_user_account_audits TO ${control};
+       GRANT SELECT(user_id) ON TABLE ${schema}.user_accounts,${schema}.user_sessions TO ${control};
+       GRANT UPDATE(status,updated_at) ON TABLE ${schema}.user_accounts TO ${control};
+       GRANT DELETE ON TABLE ${schema}.user_sessions TO ${control};
+       GRANT SELECT ON TABLE ${schema}.admin_user_directory TO ${control}`,
+    );
+  }
 }
 
 /** 在既有迁移事务中收敛 ACL，供 down 保证 DDL 与权限回收原子提交。 */

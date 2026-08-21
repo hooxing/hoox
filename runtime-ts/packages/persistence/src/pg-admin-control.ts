@@ -19,6 +19,9 @@ import {
   type RuntimeControlConfigurationSnapshot,
   type RuntimeSettingsConfiguration,
   type RuntimeStatistics,
+  type PlatformUserPage,
+  type PlatformUserStatus,
+  type PlatformUserSummary,
 } from "@hoox/admin-control";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
@@ -50,6 +53,14 @@ interface CommandRow extends QueryResultRow {
 
 interface StatisticsRow extends QueryResultRow {
   readonly generated_at: Date | string;
+  readonly users_total: string;
+  readonly users_registered_24h: string;
+  readonly users_active_7d: string;
+  readonly users_disabled: string;
+  readonly conversations_total: string;
+  readonly conversations_created_24h: string;
+  readonly conversations_active_24h: string;
+  readonly conversations_archived: string;
   readonly runs_total: string;
   readonly runs_queued: string;
   readonly runs_running: string;
@@ -67,6 +78,18 @@ interface StatisticsRow extends QueryResultRow {
   readonly automation_failed_occurrences_24h: string;
   readonly skills_published: string;
   readonly skills_installed: string;
+}
+
+interface PlatformUserRow extends QueryResultRow {
+  readonly user_id: string;
+  readonly email: string;
+  readonly display_name: string;
+  readonly status: PlatformUserStatus;
+  readonly created_at: Date | string;
+  readonly last_active_at: Date | string | null;
+  readonly active_sessions: string;
+  readonly conversation_count: string;
+  readonly run_count: string;
 }
 
 function timestamp(value: Date | string): string {
@@ -101,6 +124,20 @@ function mapRevision<T extends Configuration>(row: RevisionRow): ControlRevision
     createdAt: timestamp(row.created_at),
     updatedAt: timestamp(row.updated_at),
     ...(row.activated_at === null ? {} : { activatedAt: timestamp(row.activated_at) }),
+  });
+}
+
+function mapPlatformUser(row: PlatformUserRow): PlatformUserSummary {
+  return Object.freeze({
+    userId: row.user_id,
+    email: row.email,
+    displayName: row.display_name,
+    status: row.status,
+    createdAt: timestamp(row.created_at),
+    ...(row.last_active_at === null ? {} : { lastActiveAt: timestamp(row.last_active_at) }),
+    activeSessions: safeInteger(row.active_sessions, "活跃会话数"),
+    conversationCount: safeInteger(row.conversation_count, "用户对话数"),
+    runCount: safeInteger(row.run_count, "用户运行数"),
   });
 }
 
@@ -559,6 +596,83 @@ export class PgAdminControlRepository
     });
   }
 
+  async listUsers(input: {
+    readonly actorUserId: string;
+    readonly query?: string;
+    readonly limit: number;
+  }): Promise<PlatformUserPage> {
+    return await this.readAs(input.actorUserId, async (client) => {
+      const parameters: (string | null)[] = [input.query ?? null];
+      const where = `WHERE $1::text IS NULL
+        OR strpos(lower(user_id),lower($1))>0
+        OR strpos(lower(email),lower($1))>0
+        OR strpos(lower(display_name),lower($1))>0`;
+      const [total, users] = await Promise.all([
+        client.query<{ readonly total: string }>(
+          `SELECT count(*)::text AS total FROM admin_user_directory ${where}`,
+          parameters,
+        ),
+        client.query<PlatformUserRow>(
+          `SELECT user_id,email,display_name,status,created_at,last_active_at,
+                  active_sessions::text,conversation_count::text,run_count::text
+             FROM admin_user_directory ${where}
+            ORDER BY status,last_active_at DESC NULLS LAST,created_at DESC,user_id
+            LIMIT $2`,
+          [input.query ?? null, input.limit],
+        ),
+      ]);
+      return Object.freeze({
+        items: Object.freeze(users.rows.map(mapPlatformUser)),
+        total: safeInteger(total.rows[0]?.total ?? "", "用户总数"),
+      });
+    });
+  }
+
+  async updateUserStatus(
+    input: Parameters<AdminControlRepository["updateUserStatus"]>[0],
+  ): ReturnType<AdminControlRepository["updateUserStatus"]> {
+    try {
+      return await withControlTransaction(
+        this.pool,
+        input.actorUserId,
+        async (client) =>
+          await idempotentMutation(client, input, async () => {
+            const current = await this.readPlatformUser(client, input.targetUserId);
+            if (current === undefined) return { outcome: "not_found" };
+            if (current.status === input.status) return { outcome: "applied", value: current };
+            await client.query(
+              "UPDATE user_accounts SET status=$2,updated_at=clock_timestamp() WHERE user_id=$1",
+              [input.targetUserId, input.status],
+            );
+            if (input.status === "disabled") {
+              await client.query("DELETE FROM user_sessions WHERE user_id=$1", [
+                input.targetUserId,
+              ]);
+            }
+            await client.query(
+              `INSERT INTO admin_user_account_audits(
+                 audit_id,actor_user_id,target_user_id,previous_status,status,reason
+               ) VALUES($1,$2,$3,$4,$5,$6)`,
+              [
+                `user_audit_${randomUUID().replaceAll("-", "")}`,
+                input.actorUserId,
+                input.targetUserId,
+                current.status,
+                input.status,
+                input.reason,
+              ],
+            );
+            const updated = await this.readPlatformUser(client, input.targetUserId);
+            if (updated === undefined) throw new Error("用户状态更新后投影缺失");
+            return { outcome: "applied", value: updated };
+          }),
+        { isolationLevel: "SERIALIZABLE" },
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "更新后台用户状态");
+    }
+  }
+
   async read(userId: string): Promise<RuntimeStatistics> {
     return await this.readAs(userId, async (client) => {
       const result = await client.query<StatisticsRow>("SELECT * FROM admin_runtime_statistics");
@@ -567,6 +681,18 @@ export class PgAdminControlRepository
       const count = (value: string) => safeInteger(value, "运行统计");
       return Object.freeze({
         generatedAt: timestamp(row.generated_at),
+        users: Object.freeze({
+          total: count(row.users_total),
+          registered24h: count(row.users_registered_24h),
+          active7d: count(row.users_active_7d),
+          disabled: count(row.users_disabled),
+        }),
+        conversations: Object.freeze({
+          total: count(row.conversations_total),
+          created24h: count(row.conversations_created_24h),
+          active24h: count(row.conversations_active_24h),
+          archived: count(row.conversations_archived),
+        }),
         runs: Object.freeze({
           total: count(row.runs_total),
           queued: count(row.runs_queued),
@@ -609,6 +735,20 @@ export class PgAdminControlRepository
     } catch (error) {
       throw mapPersistenceError(error, "读取后台控制面");
     }
+  }
+
+  private async readPlatformUser(
+    client: PoolClient,
+    targetUserId: string,
+  ): Promise<PlatformUserSummary | undefined> {
+    const result = await client.query<PlatformUserRow>(
+      `SELECT user_id,email,display_name,status,created_at,last_active_at,
+              active_sessions::text,conversation_count::text,run_count::text
+         FROM admin_user_directory WHERE user_id=$1`,
+      [targetUserId],
+    );
+    const row = result.rows[0];
+    return row === undefined ? undefined : mapPlatformUser(row);
   }
 
   private async listRevisions<T extends Configuration>(

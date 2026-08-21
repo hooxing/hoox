@@ -45,4 +45,36 @@ describe("后台控制面迁移", () => {
     expect(down).toContain("已有模型目录配置事实，禁止降级为单模型结构");
     expect(down).toContain("object_kind='model_provider'");
   });
+
+  it("用户治理通过受限目录、最小列权限和独立审计暴露", () => {
+    const up = migration("0052_admin_user_operations.up.sql");
+    const roleBootstrap = readFileSync(
+      fileURLToPath(new URL("./role-bootstrap.ts", import.meta.url)),
+      "utf8",
+    );
+    const schemaPlaceholder = "${" + "schema}";
+    const controlPlaceholder = "${" + "control}";
+    expect(up).toContain("CREATE VIEW admin_user_directory WITH (security_barrier=true)");
+    expect(up).toContain("CREATE TABLE admin_user_account_audits");
+    expect(up).toContain("user_accounts_admin_control_update_policy");
+    expect(up).toContain("user_sessions_admin_control_delete_policy");
+    expect(up).toContain("AS users_active_7d");
+    expect(up).toContain("AS conversations_active_24h");
+    expect(up).not.toContain("password_hash");
+    expect(up).not.toContain("token_digest");
+    expect(roleBootstrap).toContain("hasAdminUserOperationsState");
+    expect(roleBootstrap).toContain('["admin_user_account_audits", new Set()]');
+    expect(roleBootstrap).toContain(
+      `GRANT UPDATE(status,updated_at) ON TABLE ${schemaPlaceholder}.user_accounts TO ${controlPlaceholder}`,
+    );
+    expect(roleBootstrap).toContain(
+      `GRANT SELECT(user_id) ON TABLE ${schemaPlaceholder}.user_accounts,${schemaPlaceholder}.user_sessions TO ${controlPlaceholder}`,
+    );
+    expect(roleBootstrap).not.toContain(
+      `GRANT SELECT ON TABLE ${schemaPlaceholder}.user_accounts TO ${controlPlaceholder}`,
+    );
+
+    const down = migration("0052_admin_user_operations.down.sql");
+    expect(down).toContain("已有用户治理事实，禁止移除账号状态和审计");
+  });
 });

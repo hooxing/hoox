@@ -36,6 +36,7 @@ function productionEnvironment(): Record<string, string> {
     ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST: "model.example.invalid,api.mem0.ai",
     MODEL_API_KEY: "production-model-secret",
     MEM0_API_KEY: "production-memory-secret",
+    MEM0_SCOPE_HMAC_KEY: "production-memory-scope-key-at-least-32-bytes",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
   };
 }
@@ -52,6 +53,7 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
     DEV_ADMIN_CONTROL_TOKEN: "local-admin-control-token",
     MODEL_API_KEY: "development-model-secret",
     MEM0_API_KEY: "development-memory-secret",
+    MEM0_SCOPE_HMAC_KEY: "development-memory-scope-key-at-least-32-bytes",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
     ...overrides,
   };
@@ -86,6 +88,7 @@ describe("后台控制 API 进程入口", () => {
         modelApiKey: "production-model-secret",
         memoryApiKey: "production-memory-secret",
       },
+      runtimeDeploymentSettings: { memoryScopeKeyConfigured: true },
     });
     expect(configuration.providerHostAllowlist).toEqual(
       new Set(["model.example.invalid", "api.mem0.ai"]),

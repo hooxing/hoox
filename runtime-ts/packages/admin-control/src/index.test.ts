@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   AdminControlService,
   type AdminControlServiceError,
@@ -161,6 +161,8 @@ describe("后台控制面领域规则", () => {
       recordProbe: async () => ({ outcome: "not_found" as const }),
       publish,
       listAudits: async () => [],
+      listUsers: async () => ({ items: [], total: 0 }),
+      updateUserStatus: async () => ({ outcome: "not_found" as const }),
     } satisfies AdminControlRepository;
     const service = new AdminControlService(
       repository,
@@ -275,6 +277,8 @@ describe("后台控制面领域规则", () => {
       recordProbe: async () => ({ outcome: "replayed" as const, value: revision }),
       publish: async () => ({ outcome: "not_found" as const }),
       listAudits: async () => [],
+      listUsers: async () => ({ items: [], total: 0 }),
+      updateUserStatus: async () => ({ outcome: "not_found" as const }),
     } satisfies AdminControlRepository;
     const service = new AdminControlService(
       repository,
@@ -295,6 +299,64 @@ describe("后台控制面领域规则", () => {
       ),
     ).rejects.toEqual(
       expect.objectContaining<Partial<AdminControlServiceError>>({ code: "PROBE_FAILED" }),
+    );
+  });
+
+  it("只有管理员可读取用户目录，并禁止管理员停用自己", async () => {
+    const user = {
+      userId: "user_customer",
+      email: "customer@example.com",
+      displayName: "测试用户",
+      status: "disabled" as const,
+      createdAt: "2026-08-20T00:00:00.000Z",
+      activeSessions: 0,
+      conversationCount: 2,
+      runCount: 4,
+    };
+    const updateUserStatus = vi.fn(async () => ({ outcome: "applied" as const, value: user }));
+    const repository: AdminControlRepository = {
+      resolveRole: async () => "admin",
+      listModelProviders: async () => [],
+      listMemoryProviders: async () => [],
+      listRuntimeSettings: async () => [],
+      getActiveRuntimeSettings: async () => undefined,
+      generation: async () => 0,
+      createModelDraft: async () => ({ outcome: "not_found" }),
+      createMemoryDraft: async () => ({ outcome: "not_found" }),
+      createRuntimeSettingsDraft: async () => ({ outcome: "not_found" }),
+      recordProbe: async () => ({ outcome: "not_found" }),
+      publish: async () => ({ outcome: "not_found" }),
+      listAudits: async () => [],
+      listUsers: async () => ({ items: [user], total: 1 }),
+      updateUserStatus,
+    };
+    const service = new AdminControlService(
+      repository,
+      { read: async () => Promise.reject(new Error("unused")) },
+      { probeModel: async () => undefined, probeMemory: async () => undefined },
+      [],
+    );
+
+    await expect(service.listUsers("user_admin", "customer", 20)).resolves.toEqual({
+      items: [user],
+      total: 1,
+    });
+    await expect(
+      service.updateUserStatus(
+        { actorUserId: "user_admin", idempotencyKey: "user-status", requestDigest: "c".repeat(64) },
+        { targetUserId: "user_customer", status: "disabled", reason: "风险处置" },
+      ),
+    ).resolves.toEqual(user);
+    expect(updateUserStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ targetUserId: "user_customer", reason: "风险处置" }),
+    );
+    await expect(
+      service.updateUserStatus(
+        { actorUserId: "user_admin", idempotencyKey: "self-status", requestDigest: "d".repeat(64) },
+        { targetUserId: "user_admin", status: "disabled", reason: "误操作" },
+      ),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<AdminControlServiceError>>({ code: "CONFLICT" }),
     );
   });
 });

@@ -236,6 +236,12 @@ function deploymentSettings(
       "记忆 Provider 部署秘密，页面只保存引用",
     ),
     descriptor(
+      "MEM0_SCOPE_HMAC_KEY",
+      "secret",
+      configuration.runtimeDeploymentSettings.memoryScopeKeyConfigured,
+      "Mem0 租户与用户作用域匿名化密钥，必须与 API Key 独立生成",
+    ),
+    descriptor(
       "ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST",
       "restart_required",
       configuration.providerHostAllowlist.size > 0,

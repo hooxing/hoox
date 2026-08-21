@@ -140,28 +140,20 @@ New-Item -ItemType Directory -Force -Path $runtimeDirectory | Out-Null
 
 $apiHost = Get-DotEnvValue -Name "API_LISTEN_HOST" -DefaultValue "127.0.0.1"
 $apiPortText = Get-DotEnvValue -Name "API_LISTEN_PORT" -DefaultValue "3001"
-$skillAdminHost = Get-DotEnvValue -Name "SKILL_ADMIN_LISTEN_HOST" -DefaultValue "127.0.0.1"
-$skillAdminPortText = Get-DotEnvValue -Name "SKILL_ADMIN_LISTEN_PORT" -DefaultValue "3002"
 $adminControlHost = Get-DotEnvValue -Name "ADMIN_CONTROL_LISTEN_HOST" -DefaultValue "127.0.0.1"
 $adminControlPortText = Get-DotEnvValue -Name "ADMIN_CONTROL_LISTEN_PORT" -DefaultValue "3003"
 $apiPort = 0
-$skillAdminPort = 0
 $adminControlPort = 0
 if (-not [int]::TryParse($apiPortText, [ref]$apiPort) -or $apiPort -lt 1 -or $apiPort -gt 65535) {
   throw "API_LISTEN_PORT 不是有效端口"
-}
-if (-not [int]::TryParse($skillAdminPortText, [ref]$skillAdminPort) -or $skillAdminPort -lt 1 -or $skillAdminPort -gt 65535) {
-  throw "SKILL_ADMIN_LISTEN_PORT 不是有效端口"
 }
 if (-not [int]::TryParse($adminControlPortText, [ref]$adminControlPort) -or $adminControlPort -lt 1 -or $adminControlPort -gt 65535) {
   throw "ADMIN_CONTROL_LISTEN_PORT 不是有效端口"
 }
 
 $healthApiHost = if ($apiHost -in @("localhost", "::1")) { "127.0.0.1" } else { $apiHost }
-$healthSkillAdminHost = if ($skillAdminHost -in @("localhost", "::1")) { "127.0.0.1" } else { $skillAdminHost }
 $healthAdminControlHost = if ($adminControlHost -in @("localhost", "::1")) { "127.0.0.1" } else { $adminControlHost }
 $apiBaseUrl = "http://${healthApiHost}:$apiPort"
-$skillAdminBaseUrl = "http://${healthSkillAdminHost}:$skillAdminPort"
 $adminControlBaseUrl = "http://${healthAdminControlHost}:$adminControlPort"
 if (-not $SkipBuild) {
   Write-Host "[1/5] 构建工作区" -ForegroundColor Cyan
@@ -198,7 +190,6 @@ if ($startSkillServices) {
 $apiEntry = (Join-Path $repo "runtime-ts\apps\api\dist\development-main.js").Replace("'", "''")
 $workerEntry = (Join-Path $repo "runtime-ts\apps\agent-worker\dist\development-main.js").Replace("'", "''")
 $schedulerEntry = (Join-Path $repo "runtime-ts\apps\scheduler\dist\development-main.js").Replace("'", "''")
-$skillAdminEntry = (Join-Path $repo "runtime-ts\apps\skill-admin-api\dist\development-main.js").Replace("'", "''")
 $adminControlEntry = (Join-Path $repo "runtime-ts\apps\admin-control-api\dist\development-main.js").Replace("'", "''")
 $services = @(
   [pscustomobject]@{
@@ -233,25 +224,18 @@ $services = @(
 if ($startSkillServices) {
   $services += @(
     [pscustomobject]@{
-      Name = "Skill Admin API"
-      Command = "& node '$skillAdminEntry'"
-      HealthUrl = "$skillAdminBaseUrl/live"
-      Port = $skillAdminPort
-      ProcessPattern = "(@hoox[\\/]skill-admin-api|apps[\\/]+skill-admin-api|dev:skill-admin:api)"
-    },
-    [pscustomobject]@{
-      Name = "Admin Control API"
+      Name = "Admin API"
       Command = "& node '$adminControlEntry'"
       HealthUrl = "$adminControlBaseUrl/live"
       Port = $adminControlPort
       ProcessPattern = "(@hoox[\\/]admin-control-api|apps[\\/]+admin-control-api|dev:admin-control:api)"
     },
     [pscustomobject]@{
-      Name = "Skill Admin Web"
+      Name = "Admin Web"
       Command = "corepack pnpm --filter `"@hoox/admin-web`" dev"
       HealthUrl = "http://127.0.0.1:4174"
       Port = 4174
-      ProcessPattern = "(@hoox[\\/]admin-web|apps[\\/]+admin-web|dev:skill-admin:web|vite(?:\\.js)?[^\\r\\n]*--port\\s+4174)"
+      ProcessPattern = "(@hoox[\\/]admin-web|apps[\\/]+admin-web|dev:admin:web|vite(?:\\.js)?[^\\r\\n]*--port\\s+4174)"
     }
   )
 }

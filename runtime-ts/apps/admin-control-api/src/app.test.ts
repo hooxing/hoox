@@ -102,18 +102,43 @@ function fixture() {
       },
     ]),
   };
+  const publications = {
+    list: vi.fn(async () => ({ items: [] })),
+    get: vi.fn(),
+    create: vi.fn(),
+    submit: vi.fn(),
+    review: vi.fn(),
+    publish: vi.fn(),
+    revoke: vi.fn(),
+  } as unknown as AdminControlApiDependencies["skills"]["publications"];
   return {
     control,
+    publications,
     app: createAdminControlApiApp({
       auth,
       control,
       modelCatalog,
+      skills: { publications },
       readiness: { async probe() {} },
     }),
   };
 }
 
 describe("后台控制 API", () => {
+  it("在同一管理 API 实例提供 Skill 发布路由并复用管理身份", async () => {
+    const { app, publications } = fixture();
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/admin/skill-submissions?limit=20",
+      headers: { authorization: "Bearer admin" },
+    });
+
+    expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().data.items).toEqual([]);
+    expect(publications.list).toHaveBeenCalledWith({ userId: "user_admin", limit: 20 });
+    await app.close();
+  });
+
   it("拒绝未认证读取且不返回内部异常正文", async () => {
     const { app } = fixture();
     const response = await app.inject({ method: "GET", url: "/v1/admin/control/model-providers" });

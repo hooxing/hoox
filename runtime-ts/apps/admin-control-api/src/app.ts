@@ -9,6 +9,10 @@ import {
 } from "@hoox/admin-control";
 import type { AuthContextResolver } from "@hoox/api";
 import {
+  registerSkillAdminApiRoutes,
+  type SkillAdminApiRouteDependencies,
+} from "@hoox/skill-admin-api";
+import {
   AdminControlOverviewSuccessEnvelopeSchema,
   ControlAuditListSuccessEnvelopeSchema,
   ControlRevisionPathSchema,
@@ -81,6 +85,7 @@ export interface AdminControlApiDependencies {
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
   readonly modelCatalog: PiModelCatalogPort;
+  readonly skills: Omit<SkillAdminApiRouteDependencies, "auth">;
   readonly readiness: { probe(): Promise<void> };
   readonly now?: () => Date;
 }
@@ -111,8 +116,8 @@ export function createAdminControlApiApp(
           }
         : false,
     bodyLimit: 128 * 1024,
-    requestTimeout: 15_000,
-    handlerTimeout: 15_000,
+    requestTimeout: 60_000,
+    handlerTimeout: 60_000,
     connectionTimeout: 5_000,
     requestIdHeader: false,
     genReqId: () => randomUUID(),
@@ -356,6 +361,8 @@ export function createAdminControlApiApp(
       );
     },
   );
+
+  registerSkillAdminApiRoutes(app, { auth: dependencies.auth, ...dependencies.skills });
 
   async function actor(request: FastifyRequest): Promise<string> {
     const principal = await dependencies.auth.resolve({

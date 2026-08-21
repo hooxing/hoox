@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
-const applications = ["api", "agent-worker", "scheduler", "skill-admin-api"] as const;
+const applications = ["api", "agent-worker", "scheduler", "admin-control-api"] as const;
 
 describe("development 本地配置真源", () => {
   it.each(applications)(

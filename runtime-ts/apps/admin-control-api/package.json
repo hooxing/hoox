@@ -16,13 +16,15 @@
     "@hoox/persistence": "workspace:*",
     "@hoox/process-runtime": "workspace:*",
     "@hoox/protocol": "workspace:*",
+    "@hoox/skill": "workspace:*",
+    "@hoox/skill-admin-api": "workspace:*",
     "@sinclair/typebox": "0.34.52",
     "fastify": "5.10.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -b tsconfig.json --clean",
-    "dev": "node --enable-source-maps --env-file-if-exists=../../../.env dist/development-main.js",
+    "dev": "node --enable-source-maps dist/development-main.js",
     "start": "node --enable-source-maps dist/production-main.js",
     "test": "vitest run --root ../../.. runtime-ts/apps/admin-control-api/src",
     "typecheck": "tsc -p tsconfig.json --noEmit"

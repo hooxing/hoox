@@ -21,7 +21,10 @@ function productionEnvironment(): Record<string, string> {
     RUNTIME_ENV: "production",
     ADMIN_CONTROL_DATABASE_URL:
       "postgresql://admin_control:credential@database:5432/runtime?sslmode=verify-full",
+    SKILL_PUBLISHER_DATABASE_URL:
+      "postgresql://skill_publisher:credential@database:5432/runtime?sslmode=verify-full",
     DATABASE_ADMIN_CONTROL_ROLE: "admin_control",
+    DATABASE_SKILL_PUBLISHER_ROLE: "skill_publisher",
     DATABASE_SCHEMA: "runtime",
     ADMIN_CONTROL_LISTEN_HOST: "127.0.0.1",
     ADMIN_CONTROL_LISTEN_PORT: "3003",
@@ -34,6 +37,12 @@ function productionEnvironment(): Record<string, string> {
     ADMIN_CONTROL_TLS_MODE: "proxy",
     ADMIN_CONTROL_TLS_TRUSTED_PROXY_CIDRS: "127.0.0.1",
     ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST: "model.example.invalid,api.mem0.ai",
+    SKILL_PUBLISHER_S3_ENDPOINT: "https://skill-objects.example.invalid",
+    SKILL_PUBLISHER_S3_BUCKET: "runtime-skill-publications",
+    SKILL_PUBLISHER_S3_REGION: "us-east-1",
+    SKILL_PUBLISHER_S3_ACCESS_KEY_ID: "skill-publisher-access-key",
+    SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY: "opaque-skill-publisher-secret",
+    SKILL_PUBLISHER_S3_FORCE_PATH_STYLE: "true",
     MODEL_API_KEY: "production-model-secret",
     MEM0_API_KEY: "production-memory-secret",
     MEM0_SCOPE_HMAC_KEY: "production-memory-scope-key-at-least-32-bytes",
@@ -45,10 +54,17 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
   return {
     RUNTIME_ENV: "development",
     ADMIN_CONTROL_DATABASE_URL: "postgresql://admin_control:credential@127.0.0.1:5432/runtime",
+    SKILL_PUBLISHER_DATABASE_URL: "postgresql://skill_publisher:credential@127.0.0.1:5432/runtime",
     DATABASE_SCHEMA: "runtime",
     ADMIN_CONTROL_LISTEN_HOST: "127.0.0.1",
     ADMIN_CONTROL_LISTEN_PORT: "3003",
     ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST: "model.example.invalid,api.mem0.ai",
+    SKILL_PUBLISHER_S3_ENDPOINT: "http://127.0.0.1:19000",
+    SKILL_PUBLISHER_S3_BUCKET: "runtime-skill-publications",
+    SKILL_PUBLISHER_S3_REGION: "us-east-1",
+    SKILL_PUBLISHER_S3_ACCESS_KEY_ID: "local-skill-publisher",
+    SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY: "local-skill-publisher-secret",
+    SKILL_PUBLISHER_S3_FORCE_PATH_STYLE: "true",
     DEV_ADMIN_CONTROL_USER_ID: "user_admin_local",
     DEV_ADMIN_CONTROL_TOKEN: "local-admin-control-token",
     MODEL_API_KEY: "development-model-secret",
@@ -60,17 +76,16 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
 }
 
 describe("后台控制 API 进程入口", () => {
-  it("只投影控制面声明配置，不接收 Runtime 或 Migrator 凭据", () => {
+  it("只投影统一后台声明配置，不接收 Runtime 或 Migrator 凭据", () => {
     const selected = selectAdminControlApiProcessEnvironment({
       ...productionEnvironment(),
       DATABASE_URL: "postgresql://runtime:secret@database/runtime",
       MIGRATION_DATABASE_URL: "postgresql://migrator:secret@database/runtime",
-      SKILL_PUBLISHER_DATABASE_URL: "postgresql://publisher:secret@database/runtime",
     });
     expect(selected.ADMIN_CONTROL_DATABASE_URL).toContain("admin_control");
+    expect(selected.SKILL_PUBLISHER_DATABASE_URL).toContain("skill_publisher");
     expect(selected).not.toHaveProperty("DATABASE_URL");
     expect(selected).not.toHaveProperty("MIGRATION_DATABASE_URL");
-    expect(selected).not.toHaveProperty("SKILL_PUBLISHER_DATABASE_URL");
   });
 
   it("production 固定独立 PG、JWT、TLS、Provider 白名单且不含开发身份", () => {
@@ -78,7 +93,9 @@ describe("后台控制 API 进程入口", () => {
     expect(configuration).toMatchObject({
       runtimeEnvironment: "production",
       databaseAdminControlRole: "admin_control",
+      databaseSkillPublisherRole: "skill_publisher",
       databaseSsl: { rejectUnauthorized: true },
+      skillPublisherDatabaseSsl: { rejectUnauthorized: true },
       listenPort: 3003,
       production: {
         jwt: { audience: "hoox-admin-control-api" },
@@ -89,6 +106,10 @@ describe("后台控制 API 进程入口", () => {
         memoryApiKey: "production-memory-secret",
       },
       runtimeDeploymentSettings: { memoryScopeKeyConfigured: true },
+      objectStorage: {
+        endpoint: "https://skill-objects.example.invalid",
+        bucket: "runtime-skill-publications",
+      },
     });
     expect(configuration.providerHostAllowlist).toEqual(
       new Set(["model.example.invalid", "api.mem0.ai"]),

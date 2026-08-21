@@ -88,6 +88,12 @@ importers:
       '@hoox/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@hoox/skill':
+        specifier: workspace:*
+        version: link:../../packages/skill
+      '@hoox/skill-admin-api':
+        specifier: workspace:*
+        version: link:../skill-admin-api
       '@sinclair/typebox':
         specifier: 0.34.52
         version: 0.34.52

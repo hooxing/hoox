@@ -87,7 +87,7 @@ describe("环境变量示例契约", () => {
         "DATABASE_ADMIN_CONTROL_ROLE",
         "SKILL_PUBLISHER_DATABASE_URL",
         "ADMIN_CONTROL_DATABASE_URL",
-        "DEV_SKILL_ADMIN_TOKEN",
+        "DEV_ADMIN_CONTROL_TOKEN",
       ]),
     );
     expect(validateEnvironmentExample(validExample())).toEqual([]);

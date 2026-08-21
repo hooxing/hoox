@@ -310,8 +310,9 @@ const environmentConfigurationGroups = [
         description: "Sandbox 控制面和模板；本项目依赖 uu 端口映射，不在本机启动服务。",
       },
       {
-        key: "SKILL_PUBLISHER_DATABASE_URL / SKILL_PUBLISHER_S3_*",
-        description: "Skill 发布服务使用独立数据库与对象存储身份，不能复用 Runtime 凭据。",
+        key: "SKILL_PUBLISHER_DATABASE_URL / DATABASE_SKILL_PUBLISHER_ROLE / SKILL_PUBLISHER_S3_*",
+        description:
+          "统一后台内的 Skill 模块使用独立数据库角色与对象存储身份，不能复用 Runtime 凭据。",
       },
     ],
   },

@@ -40,7 +40,7 @@ describe("Hoox 项目身份契约", () => {
     expect(readText("docker-compose.dev.yml")).toContain("name: hoox-minio-data");
     expect(readText("deploy/production.env.example")).toContain("API_JWT_AUDIENCE=hoox-api");
     expect(readText("deploy/production.env.example")).toContain(
-      "SKILL_ADMIN_JWT_AUDIENCE=hoox-skill-admin-api",
+      "ADMIN_CONTROL_JWT_AUDIENCE=hoox-admin-control-api",
     );
 
     const sandboxManifest = readJson("runtime-ts/packages/sandbox/package.json");

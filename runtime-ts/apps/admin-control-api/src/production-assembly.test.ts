@@ -5,11 +5,20 @@ import { createProviderProbes } from "./production-assembly.js";
 const configuration: AdminControlApiProcessConfiguration = Object.freeze({
   runtimeEnvironment: "test",
   databaseUrl: "postgresql://control:secret@localhost/control",
+  skillPublisherDatabaseUrl: "postgresql://publisher:secret@localhost/control",
   databaseSchema: "agent_runtime",
   listenHost: "127.0.0.1",
   listenPort: 3_003,
   shutdownTimeoutMilliseconds: 5_000,
   providerHostAllowlist: new Set(["model.example.com", "memory.example.com"]),
+  objectStorage: Object.freeze({
+    endpoint: "http://127.0.0.1:19000",
+    bucket: "runtime-skill-publications",
+    region: "us-east-1",
+    accessKeyId: "publisher",
+    secretAccessKey: "publisher-secret",
+    forcePathStyle: true,
+  }),
   providerSecrets: Object.freeze({ modelApiKey: "model-secret", memoryApiKey: "memory-secret" }),
   runtimeDeploymentSettings: Object.freeze({
     compactionEnabledConfigured: true,

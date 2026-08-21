@@ -38,7 +38,17 @@ const environmentSchema = Object.freeze({
     allowCredentials: true,
     maxLength: 8_192,
   }),
+  SKILL_PUBLISHER_DATABASE_URL: urlEnvironmentField({
+    secret: true,
+    protocols: ["postgres:", "postgresql:"],
+    allowCredentials: true,
+    maxLength: 8_192,
+  }),
   DATABASE_ADMIN_CONTROL_ROLE: stringEnvironmentField({ requiredIn: production, maxLength: 63 }),
+  DATABASE_SKILL_PUBLISHER_ROLE: stringEnvironmentField({
+    requiredIn: production,
+    maxLength: 63,
+  }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
   ADMIN_CONTROL_LISTEN_HOST: stringEnvironmentField({ requiredIn: production, maxLength: 253 }),
   ADMIN_CONTROL_LISTEN_PORT: integerEnvironmentField({
@@ -75,6 +85,15 @@ const environmentSchema = Object.freeze({
     maxLength: 4_096,
   }),
   ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST: stringEnvironmentField({ maxLength: 8_192 }),
+  SKILL_PUBLISHER_S3_ENDPOINT: urlEnvironmentField(),
+  SKILL_PUBLISHER_S3_BUCKET: stringEnvironmentField({ maxLength: 255 }),
+  SKILL_PUBLISHER_S3_REGION: stringEnvironmentField({ maxLength: 128 }),
+  SKILL_PUBLISHER_S3_ACCESS_KEY_ID: stringEnvironmentField({ secret: true, maxLength: 1_024 }),
+  SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY: stringEnvironmentField({
+    secret: true,
+    maxLength: 4_096,
+  }),
+  SKILL_PUBLISHER_S3_FORCE_PATH_STYLE: booleanEnvironmentField(),
   DEV_ADMIN_CONTROL_USER_ID: stringEnvironmentField({
     requiredIn: developmentAndTest,
     maxLength: 128,
@@ -103,12 +122,23 @@ export interface AdminControlApiProcessConfiguration {
   readonly runtimeEnvironment: RuntimeEnvironment;
   readonly databaseUrl: string;
   readonly databaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
+  readonly skillPublisherDatabaseUrl: string;
+  readonly skillPublisherDatabaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly databaseSchema: string;
   readonly databaseAdminControlRole?: string;
+  readonly databaseSkillPublisherRole?: string;
   readonly listenHost: string;
   readonly listenPort: number;
   readonly shutdownTimeoutMilliseconds: number;
   readonly providerHostAllowlist: ReadonlySet<string>;
+  readonly objectStorage: Readonly<{
+    readonly endpoint: string;
+    readonly bucket: string;
+    readonly region: string;
+    readonly accessKeyId: string;
+    readonly secretAccessKey: string;
+    readonly forcePathStyle: boolean;
+  }>;
   readonly providerSecrets: Readonly<{
     readonly modelApiKey: string;
     readonly memoryApiKey?: string;
@@ -150,11 +180,23 @@ export function parseAdminControlApiProcessEnvironment(
     parsed.runtimeEnvironment === "production"
       ? parseProductionPostgresTransport(configuredDatabaseUrl)
       : undefined;
+  const configuredSkillPublisherDatabaseUrl = readRequiredEnvironmentValue(
+    parsed,
+    "SKILL_PUBLISHER_DATABASE_URL",
+  );
+  const productionSkillPublisherDatabase =
+    parsed.runtimeEnvironment === "production"
+      ? parseProductionPostgresTransport(configuredSkillPublisherDatabaseUrl)
+      : undefined;
   const databaseSchema = readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA");
   assertIdentifier(databaseSchema, "DATABASE_SCHEMA");
   const databaseAdminControlRole = parsed.values.DATABASE_ADMIN_CONTROL_ROLE;
   if (databaseAdminControlRole !== undefined) {
     assertIdentifier(databaseAdminControlRole, "DATABASE_ADMIN_CONTROL_ROLE");
+  }
+  const databaseSkillPublisherRole = parsed.values.DATABASE_SKILL_PUBLISHER_ROLE;
+  if (databaseSkillPublisherRole !== undefined) {
+    assertIdentifier(databaseSkillPublisherRole, "DATABASE_SKILL_PUBLISHER_ROLE");
   }
   const listenHost =
     parsed.runtimeEnvironment === "production"
@@ -164,6 +206,17 @@ export function parseAdminControlApiProcessEnvironment(
   const providerHostAllowlist = parseHostAllowlist(
     readRequiredEnvironmentValue(parsed, "ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST"),
   );
+  const objectStorage = Object.freeze({
+    endpoint: readRequiredEnvironmentValue(parsed, "SKILL_PUBLISHER_S3_ENDPOINT"),
+    bucket: readRequiredEnvironmentValue(parsed, "SKILL_PUBLISHER_S3_BUCKET"),
+    region: readRequiredEnvironmentValue(parsed, "SKILL_PUBLISHER_S3_REGION"),
+    accessKeyId: readRequiredEnvironmentValue(parsed, "SKILL_PUBLISHER_S3_ACCESS_KEY_ID"),
+    secretAccessKey: readRequiredEnvironmentValue(parsed, "SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY"),
+    forcePathStyle: readRequiredEnvironmentValue(parsed, "SKILL_PUBLISHER_S3_FORCE_PATH_STYLE"),
+  });
+  if (parsed.runtimeEnvironment === "production") {
+    assertProductionObjectStorageEndpoint(objectStorage.endpoint);
+  }
   const developmentAuth =
     parsed.runtimeEnvironment === "production"
       ? undefined
@@ -205,8 +258,14 @@ export function parseAdminControlApiProcessEnvironment(
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
     ...(productionDatabase === undefined ? {} : { databaseSsl: productionDatabase.ssl }),
+    skillPublisherDatabaseUrl:
+      productionSkillPublisherDatabase?.connectionString ?? configuredSkillPublisherDatabaseUrl,
+    ...(productionSkillPublisherDatabase === undefined
+      ? {}
+      : { skillPublisherDatabaseSsl: productionSkillPublisherDatabase.ssl }),
     databaseSchema,
     ...(databaseAdminControlRole === undefined ? {} : { databaseAdminControlRole }),
+    ...(databaseSkillPublisherRole === undefined ? {} : { databaseSkillPublisherRole }),
     listenHost,
     listenPort,
     shutdownTimeoutMilliseconds: readRequiredEnvironmentValue(
@@ -214,6 +273,7 @@ export function parseAdminControlApiProcessEnvironment(
       "PROCESS_SHUTDOWN_TIMEOUT_MS",
     ),
     providerHostAllowlist,
+    objectStorage,
     providerSecrets: Object.freeze({
       modelApiKey: readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),
       ...(parsed.values.MEM0_API_KEY === undefined
@@ -276,6 +336,13 @@ function assertNoDevelopmentAuth(source: Readonly<Record<string, string | undefi
 
 function assertIdentifier(value: string, key: string): void {
   if (!postgresIdentifierPattern.test(value)) throw new TypeError(`${key} 格式无效`);
+}
+
+function assertProductionObjectStorageEndpoint(value: string): void {
+  const endpoint = new URL(value);
+  if (endpoint.protocol !== "https:" || endpoint.username !== "" || endpoint.password !== "") {
+    throw new TypeError("SKILL_PUBLISHER_S3_ENDPOINT 在 production 必须为无凭据的 HTTPS URL");
+  }
 }
 
 function parseHostAllowlist(value: string): ReadonlySet<string> {

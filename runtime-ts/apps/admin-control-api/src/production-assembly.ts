@@ -13,12 +13,21 @@ import {
   productionTrustProxy,
 } from "@hoox/api";
 import { userId } from "@hoox/domain";
-import { createPostgresPool, PgAdminControlRepository, probePostgres } from "@hoox/persistence";
+import {
+  createPostgresPool,
+  PgAdminControlRepository,
+  PgSkillPublicationAuthorization,
+  PgSkillPublicationRepository,
+  probePostgres,
+  probeS3StableSkillPublisher,
+  S3StableSkillPublisher,
+} from "@hoox/persistence";
 import {
   type ProcessSignalSource,
   type ServiceAssemblyFactory,
   startServiceProcess,
 } from "@hoox/process-runtime";
+import { SkillPublicationService } from "@hoox/skill";
 import { createAdminControlApiApp, type AdminControlApiAppOptions } from "./app.js";
 import { createPiModelCatalog } from "./pi-model-catalog.js";
 import type { AdminControlApiProcessConfiguration } from "./process-entry.js";
@@ -35,7 +44,9 @@ const productionAssembler: ServiceAssemblyFactory<AdminControlApiProcessConfigur
       configuration.production === undefined ||
       configuration.developmentAuth !== undefined ||
       configuration.databaseAdminControlRole === undefined ||
-      configuration.databaseSsl === undefined
+      configuration.databaseSkillPublisherRole === undefined ||
+      configuration.databaseSsl === undefined ||
+      configuration.skillPublisherDatabaseSsl === undefined
     ) {
       throw new Error("PRODUCTION_ADMIN_CONTROL_ASSEMBLY_FORBIDDEN");
     }
@@ -48,6 +59,7 @@ const productionAssembler: ServiceAssemblyFactory<AdminControlApiProcessConfigur
         ...(tls === undefined ? {} : { https: tls }),
       },
       expectedRole: configuration.databaseAdminControlRole,
+      expectedPublisherRole: configuration.databaseSkillPublisherRole,
       applicationName: "hoox-admin-control-api-production",
     });
   },
@@ -69,6 +81,9 @@ const developmentAssembler: ServiceAssemblyFactory<AdminControlApiProcessConfigu
       ...(configuration.databaseAdminControlRole === undefined
         ? {}
         : { expectedRole: configuration.databaseAdminControlRole }),
+      ...(configuration.databaseSkillPublisherRole === undefined
+        ? {}
+        : { expectedPublisherRole: configuration.databaseSkillPublisherRole }),
       applicationName: "hoox-admin-control-api-development",
     });
   },
@@ -80,19 +95,44 @@ async function assembleRealService(
     readonly auth: AuthContextResolver;
     readonly appOptions: AdminControlApiAppOptions;
     readonly expectedRole?: string;
+    readonly expectedPublisherRole?: string;
     readonly applicationName: string;
   },
 ) {
-  const pool = createPostgresPool({
+  const controlPool = createPostgresPool({
     connectionString: configuration.databaseUrl,
     ...(configuration.databaseSsl === undefined ? {} : { ssl: configuration.databaseSsl }),
     schema: configuration.databaseSchema,
     ...(input.expectedRole === undefined ? {} : { expectedRuntimeRole: input.expectedRole }),
     applicationName: input.applicationName,
   });
+  const skillPublisherPool = createPostgresPool({
+    connectionString: configuration.skillPublisherDatabaseUrl,
+    ...(configuration.skillPublisherDatabaseSsl === undefined
+      ? {}
+      : { ssl: configuration.skillPublisherDatabaseSsl }),
+    schema: configuration.databaseSchema,
+    ...(input.expectedPublisherRole === undefined
+      ? {}
+      : { expectedRuntimeRole: input.expectedPublisherRole }),
+    applicationName: `${input.applicationName}-skill-publisher`,
+  });
+  let publisher: S3StableSkillPublisher | undefined;
   let app: ReturnType<typeof createAdminControlApiApp> | undefined;
   try {
-    const repository = new PgAdminControlRepository(pool);
+    publisher = new S3StableSkillPublisher({
+      endpoint: configuration.objectStorage.endpoint,
+      bucket: configuration.objectStorage.bucket,
+      region: configuration.objectStorage.region,
+      accessKeyId: configuration.objectStorage.accessKeyId,
+      secretAccessKey: configuration.objectStorage.secretAccessKey,
+      forcePathStyle: configuration.objectStorage.forcePathStyle,
+    });
+    const activePublisher = publisher;
+    const repository = new PgAdminControlRepository(controlPool);
+    const controlPostgresProbe = () => probePostgres(controlPool, input.expectedRole);
+    const skillPostgresProbe = () => probePostgres(skillPublisherPool, input.expectedPublisherRole);
+    const objectStorageProbe = () => probeS3StableSkillPublisher(activePublisher);
     const dependencies = {
       auth: input.auth,
       control: new AdminControlService(
@@ -102,7 +142,20 @@ async function assembleRealService(
         deploymentSettings(configuration),
       ),
       modelCatalog: createPiModelCatalog(),
-      readiness: { probe: () => probePostgres(pool, input.expectedRole) },
+      skills: {
+        publications: new SkillPublicationService(
+          new PgSkillPublicationAuthorization(skillPublisherPool),
+          new PgSkillPublicationRepository(skillPublisherPool, activePublisher),
+        ),
+      },
+      readiness: {
+        probe: async () => {
+          await controlPostgresProbe();
+          // 发布角色失效时不得继续携带对象存储凭据探测 MinIO/S3。
+          await skillPostgresProbe();
+          await objectStorageProbe();
+        },
+      },
     };
     app = createAdminControlApiApp(dependencies, input.appOptions);
     await dependencies.readiness.probe();
@@ -110,12 +163,28 @@ async function assembleRealService(
     const listeningApp = app;
     return Object.freeze({
       stopAccepting: () => listeningApp.close(),
-      resources: Object.freeze([{ name: "postgres", close: () => pool.end() }]),
-      readiness: Object.freeze([{ name: "postgres", probe: dependencies.readiness.probe }]),
+      resources: Object.freeze([
+        { name: "object-storage", close: async () => activePublisher.close() },
+        { name: "skill-publisher-postgres", close: () => skillPublisherPool.end() },
+        { name: "admin-control-postgres", close: () => controlPool.end() },
+      ]),
+      readiness: Object.freeze([
+        { name: "admin-control-postgres", probe: controlPostgresProbe },
+        { name: "skill-publisher-postgres", probe: skillPostgresProbe },
+        { name: "object-storage", probe: objectStorageProbe },
+      ]),
     });
   } catch (error) {
     if (app !== undefined) await app.close().catch(() => undefined);
-    await pool.end().catch(() => undefined);
+    if (publisher !== undefined) {
+      try {
+        publisher.close();
+      } catch {
+        // S3 客户端关闭失败不能阻止两个 PG pool 的启动失败清理。
+      }
+    }
+    await skillPublisherPool.end().catch(() => undefined);
+    await controlPool.end().catch(() => undefined);
     throw error;
   }
 }
@@ -221,6 +290,24 @@ function deploymentSettings(
       "bootstrap",
       configuration.databaseAdminControlRole !== undefined,
       "后台控制面最小权限数据库角色",
+    ),
+    descriptor(
+      "SKILL_PUBLISHER_DATABASE_URL",
+      "bootstrap",
+      true,
+      "Skill 发布专用数据库连接，与控制面角色隔离",
+    ),
+    descriptor(
+      "DATABASE_SKILL_PUBLISHER_ROLE",
+      "bootstrap",
+      configuration.databaseSkillPublisherRole !== undefined,
+      "Skill 发布最小权限数据库角色",
+    ),
+    descriptor(
+      "SKILL_PUBLISHER_S3_*",
+      "secret",
+      true,
+      "Skill 发布对象存储凭据，只能通过部署系统轮换",
     ),
     descriptor(
       "ADMIN_CONTROL_JWT_SIGNING_KEYS",

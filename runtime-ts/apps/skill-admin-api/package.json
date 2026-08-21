@@ -3,6 +3,11 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "types": "./src/index.ts",
+    "default": "./dist/index.js"
+  },
+  "types": "./src/index.ts",
   "dependencies": {
     "@hoox/api": "workspace:*",
     "@hoox/domain": "workspace:*",
@@ -16,8 +21,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "tsc -b tsconfig.json --clean",
-    "dev": "node dist/development-main.js",
-    "start:production": "node dist/production-main.js",
     "test": "vitest run --root ../../.. runtime-ts/apps/skill-admin-api/src",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   }

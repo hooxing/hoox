@@ -196,6 +196,8 @@ describe("统一平台管理导航", () => {
     await settle();
 
     expect(container.textContent).toContain("部署配置地图");
+    expect(container.textContent).toContain("DATABASE_SKILL_PUBLISHER_ROLE");
+    expect(container.textContent).toContain("统一后台内的 Skill 模块");
     expect(container.textContent).toContain("等待后台检测");
     expect(container.textContent).toContain("P0");
     expect(container.textContent).toContain("按契约确认");

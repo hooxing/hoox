@@ -32,9 +32,9 @@ corepack pnpm config:check
 | `runtime-ts/apps/agent-worker` | Agent 执行循环和运行协调 |
 | `runtime-ts/apps/scheduler` | 回收、清理等可重试后台工作 |
 | `runtime-ts/apps/web` | 浏览器应用入口，只消费公开协议 |
-| `runtime-ts/apps/skill-admin-api` | Skill 提交、复核、发布和撤销的独立管理 API |
-| `runtime-ts/apps/admin-control-api` | 模型、记忆、运行参数与聚合统计的独立平台控制 API |
-| `runtime-ts/apps/admin-web` | 统一平台管理界面，按能力分别消费两个管理 API |
+| `runtime-ts/apps/skill-admin-api` | 可复用的 Skill 提交、复核、发布和撤销 HTTP 路由模块，不再独立监听端口 |
+| `runtime-ts/apps/admin-control-api` | Skill、模型、记忆、运行参数与聚合统计的统一后台 API 进程 |
+| `runtime-ts/apps/admin-web` | 只消费统一后台 API 的平台管理界面 |
 
 ### 共享包
 
@@ -73,8 +73,8 @@ corepack pnpm config:check
 
 ### 管理员 Skill 上架
 
-一般 Skill 不再通过修改代码或普通 Runtime API 上架。管理员发布面是独立的 `skill-admin-api` 与
-`admin-web`，日常状态流为：
+一般 Skill 不再通过修改代码或普通 Runtime API 上架。Skill 发布路由由 `admin-control-api` 统一承载，
+`admin-web` 只访问这一套后台 API，日常状态流为：
 
 ```text
 publisher 创建草稿并上传包 -> publisher 提交 -> reviewer 批准/驳回
@@ -94,15 +94,15 @@ publisher 创建草稿并上传包 -> publisher 提交 -> reviewer 批准/驳回
    `pnpm db:migrate:up`，迁移会从空 ACL 重建发布角色的精确白名单并验证 Runtime 对管理表零权限。
 3. 先执行 `pnpm dev:identity:provision` 创建开发 User。再由受控数据库运维事务向
    `platform_skill_operators(user_id, role, status)` 配置 `publisher`、`reviewer`、`admin`；管理 API 故意不提供
-   自助提权路由。单进程本地完整流程可把 `DEV_SKILL_ADMIN_USER_ID` 配置为 `admin`；职责分离测试应使用不同用户与
-   进程。operator 变更必须进入数据库运维审计。
-4. `.env` 中为管理 API 设置 `DEV_SKILL_ADMIN_USER_ID` 与至少 16 字符的
-   `DEV_SKILL_ADMIN_TOKEN`。开发 Vite 代理只在服务端注入该 Token，不会把它编译进浏览器静态资源。
+   自助提权路由。开发环境可让 `DEV_ADMIN_CONTROL_USER_ID` 对应用户同时拥有 Skill `admin` 与控制面 `admin`；
+   职责分离测试仍应使用不同用户。operator 变更必须进入数据库运维审计。
+4. `.env` 中为统一后台设置 `DEV_ADMIN_CONTROL_USER_ID` 与至少 16 字符的
+   `DEV_ADMIN_CONTROL_TOKEN`。开发 Vite 代理只在服务端注入该 Token，不会把它编译进浏览器静态资源。
 5. 在两个终端分别启动：
 
 ```powershell
-corepack pnpm dev:skill-admin:api
-corepack pnpm dev:skill-admin:web
+corepack pnpm dev:admin-control:api
+corepack pnpm dev:admin:web
 ```
 
 浏览器访问 `http://127.0.0.1:4174`。上传包必须包含根级、严格 UTF-8 的 `SKILL.md`，最多 256 个文件、总计
@@ -118,16 +118,17 @@ corepack pnpm dev:skill-admin:web
 [ADR-0114](decisions/0114-skill-frontmatter-metadata-prefill.md) 和
 [ADR-0115](decisions/0115-system-compatibility-optional-provenance-and-skills-cli.md)。
 
-production 管理服务必须单独注入 `SKILL_ADMIN_JWT_*`、`SKILL_PUBLISHER_DATABASE_URL` 与
-`SKILL_PUBLISHER_S3_*`，且 JWT audience 不能复用普通 API。静态管理 Web 与 API 由同源身份网关托管：网关必须
+production 统一后台必须注入 `ADMIN_CONTROL_JWT_*`、`ADMIN_CONTROL_DATABASE_URL`、
+`SKILL_PUBLISHER_DATABASE_URL` 与 `SKILL_PUBLISHER_S3_*`，且管理 JWT audience 不能复用普通 API。静态管理 Web
+与 API 由同源身份网关托管：网关必须
 剥离浏览器伪造的 Authorization，根据已登录管理会话注入短期管理 JWT。没有该网关时不得把 development Token
 或固定生产 Token 写入 Web 构建。完整边界见 [ADR-0112](decisions/0112-managed-skill-admin-publication.md)。
 
 ### 平台控制面
 
-模型、记忆、运行参数和聚合统计由 `admin-control-api` 提供，Skill 模块仍使用上面的独立发布 API。管理 Web
-只有一套导航和静态资源，但两个服务继续使用不同 JWT audience、数据库连接与 PostgreSQL 角色，不能为了简化代理
-而合并凭据。
+模型、记忆、运行参数、聚合统计和 Skill 发布都由同一个 `admin-control-api` 进程提供。进程共用管理身份与监听端口，
+但内部继续创建 Admin Control 与 Skill Publisher 两个 PostgreSQL pool，后者还单独持有发布用 S3 凭据；合并的是
+进程和 HTTP 边界，不是数据库授权边界。
 
 首次准备开发环境时：
 
@@ -144,7 +145,6 @@ production 管理服务必须单独注入 `SKILL_ADMIN_JWT_*`、`SKILL_PUBLISHER
 
 ```powershell
 corepack pnpm dev:admin-control:api
-corepack pnpm dev:skill-admin:api
 corepack pnpm dev:admin:web
 ```
 
@@ -156,11 +156,12 @@ corepack pnpm dev:admin:web
 目录载入初始能力；内置 Provider 按 Provider ID 载入，自定义 Provider 可按模型 ID 或名称查询，管理员修改后才
 形成显式 revision，Worker 不会在运行时重新用 Pi 覆盖。数据库连接、角色、JWT、TLS、S3、
 Sandbox 和监听地址只在页面展示“已配置/需重新部署”，不存在通用 ENV 写接口。完整边界见
-[ADR-20260819165254](decisions/20260819165254-independent-admin-control-plane.md) 与
+[ADR-20260819165254](decisions/20260819165254-independent-admin-control-plane.md)、
+[ADR-20260821115221](decisions/20260821115221-unified-admin-api-process.md) 与
 [ADR-20260820090402](decisions/20260820090402-provider-owned-model-catalog.md)。
 
-使用一键开发脚本时，既有 `-IncludeSkill` 兼容开关现在会同时启动 Skill Admin API、Admin Control API 与统一
-Admin Web；默认核心拓扑仍不启动任何管理服务。
+使用一键开发脚本时，既有 `-IncludeSkill` 兼容开关现在会启动统一 Admin API 与 Admin Web；默认核心拓扑仍不启动
+任何管理服务。
 
 PPTX Skill 宣称预装的 Node.js、`pptxgenjs`、图标渲染和 LibreOffice/Poppler 依赖必须由 Sandbox 模板提供，不能在 Run 内临时安装。开发模板从 `deploy/cubesandbox/agent-sandbox-pptx.Dockerfile` 构建；发布镜像后用 CubeSandbox `Template.build({ image })` 创建不可变模板，并把返回的模板 ID 写入本地 `.env` 的 `CUBESANDBOX_TEMPLATE_ID`。基础镜像使用摘要固定，Node 模块使用精确版本；每次发布使用新的不可变镜像标签，不在既有标签上依赖 `Template.rebuild` 刷新。命令服务会净化进程环境，因此模板同时提供根级 `/node_modules` 解析路径，不能只依赖镜像中的 `NODE_PATH`。旧模板保留到新模板完成真实 `.pptx` 生成及 pause/resume 冒烟后再回收。
 

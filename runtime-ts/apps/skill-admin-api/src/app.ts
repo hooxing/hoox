@@ -28,7 +28,7 @@ import {
   type SkillPublicationService,
   SkillServiceError,
 } from "@hoox/skill";
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { Type, type Static } from "@sinclair/typebox";
 
 const strict = { additionalProperties: false } as const;
@@ -45,9 +45,20 @@ type ListQuery = Static<typeof ListQuerySchema>;
 
 export interface SkillAdminApiDependencies {
   readonly auth: AuthContextResolver;
-  readonly publications: SkillPublicationService;
+  readonly publications: SkillPublicationServiceContract;
   readonly readiness: { probe(): Promise<void> };
   readonly now?: () => Date;
+  readonly submissionId?: () => string;
+}
+
+export type SkillPublicationServiceContract = Pick<
+  SkillPublicationService,
+  "list" | "get" | "create" | "submit" | "review" | "publish" | "revoke"
+>;
+
+export interface SkillAdminApiRouteDependencies {
+  readonly auth: AuthContextResolver;
+  readonly publications: SkillPublicationServiceContract;
   readonly submissionId?: () => string;
 }
 
@@ -98,8 +109,6 @@ export function createSkillAdminApiApp(
     },
   });
   const now = dependencies.now ?? (() => new Date());
-  const nextSubmissionId =
-    dependencies.submissionId ?? (() => `submission_${randomUUID().replaceAll("-", "")}`);
 
   app.addHook("onSend", async (request, reply) => {
     void reply
@@ -111,19 +120,7 @@ export function createSkillAdminApiApp(
   });
 
   app.setErrorHandler(async (error, request, reply) => {
-    let failure: FailureKind = "internal";
-    if (error instanceof AdminApiFailure) failure = error.kind;
-    else if (error instanceof SkillServiceError) failure = skillFailure(error);
-    else if (isFastifyBadRequest(error)) failure = "bad_request";
-    else if (errorCode(error) === "FST_ERR_CTP_INVALID_MEDIA_TYPE") {
-      failure = "unsupported_media_type";
-    } else if (errorCode(error) === "FST_ERR_HANDLER_TIMEOUT") {
-      failure = "dependency_unavailable";
-    }
-    const response = failureResponse(request, failure);
-    // 管理端日志不能包含提交正文、入口指令、鉴权 Header 或对象存储细节。
-    request.log.warn({ failure, requestId: request.id }, "Skill 管理请求失败");
-    await reply.status(response.status).send(response.body);
+    await sendFailure(error, request, reply);
   });
 
   app.get("/live", async (request) =>
@@ -138,142 +135,168 @@ export function createSkillAdminApiApp(
     return success(request, { status: "ok" as const, checkedAt: now().toISOString() });
   });
 
-  app.get<{ Querystring: ListQuery }>(
-    "/v1/admin/skill-submissions",
-    {
-      schema: {
-        querystring: ListQuerySchema,
-        response: responseSchemas(SkillSubmissionPageSuccessEnvelopeSchema),
-      },
-    },
-    async (request) => {
-      const userId = await authenticate(request, dependencies.auth);
-      const page = await dependencies.publications.list({
-        userId,
-        ...(request.query.limit === undefined ? {} : { limit: request.query.limit }),
-        ...(request.query.cursor === undefined ? {} : { cursor: request.query.cursor }),
-      });
-      return success(request, {
-        items: page.items,
-        ...(page.nextSubmissionId === undefined ? {} : { nextCursor: page.nextSubmissionId }),
-      });
-    },
-  );
-
-  app.get<{ Params: SubmissionPath }>(
-    "/v1/admin/skill-submissions/:submissionId",
-    {
-      schema: {
-        params: SubmissionPathSchema,
-        response: responseSchemas(SkillSubmissionSuccessEnvelopeSchema),
-      },
-    },
-    async (request) => {
-      const userId = await authenticate(request, dependencies.auth);
-      return success(
-        request,
-        await dependencies.publications.get(userId, request.params.submissionId),
-      );
-    },
-  );
-
-  app.post<{ Body: CreateSkillSubmissionRequest }>(
-    "/v1/admin/skill-submissions",
-    {
-      schema: {
-        body: CreateSkillSubmissionRequestSchema,
-        response: responseSchemas(CreateSkillSubmissionSuccessEnvelopeSchema),
-      },
-    },
-    async (request) => {
-      requireJson(request);
-      const userId = await authenticate(request, dependencies.auth);
-      const { files, compatibility, sourceUrl, sourceRevision, ...metadata } = request.body;
-      return success(
-        request,
-        await dependencies.publications.create({
-          userId,
-          submissionId: nextSubmissionId(),
-          metadata: {
-            ...metadata,
-            compatibility: compatibility ?? DEFAULT_SKILL_PUBLICATION_COMPATIBILITY,
-            sourceUrl: sourceUrl ?? "",
-            sourceRevision: sourceRevision ?? "",
-          },
-          files,
-          idempotencyKey: requireIdempotencyKey(request),
-        }),
-      );
-    },
-  );
-
-  registerAction<SubmitSkillSubmissionRequest>(
-    app,
-    dependencies,
-    "submit",
-    SubmitSkillSubmissionRequestSchema,
-    SubmitSkillSubmissionSuccessEnvelopeSchema,
-    async (request, userId) =>
-      dependencies.publications.submit({
-        userId,
-        submissionId: request.params.submissionId,
-        expectedVersionToken: request.body.expectedVersionToken,
-        idempotencyKey: requireIdempotencyKey(request),
-      }),
-  );
-  registerAction<ReviewSkillSubmissionRequest>(
-    app,
-    dependencies,
-    "review",
-    ReviewSkillSubmissionRequestSchema,
-    ReviewSkillSubmissionSuccessEnvelopeSchema,
-    async (request, userId) =>
-      dependencies.publications.review({
-        userId,
-        submissionId: request.params.submissionId,
-        expectedVersionToken: request.body.expectedVersionToken,
-        decision: request.body.decision,
-        ...(request.body.reason === undefined ? {} : { reason: request.body.reason }),
-        idempotencyKey: requireIdempotencyKey(request),
-      }),
-  );
-  registerAction<PublishSkillSubmissionRequest>(
-    app,
-    dependencies,
-    "publish",
-    PublishSkillSubmissionRequestSchema,
-    PublishSkillSubmissionSuccessEnvelopeSchema,
-    async (request, userId) =>
-      dependencies.publications.publish({
-        userId,
-        submissionId: request.params.submissionId,
-        expectedVersionToken: request.body.expectedVersionToken,
-        recommended: request.body.recommended,
-        idempotencyKey: requireIdempotencyKey(request),
-      }),
-  );
-  registerAction<RevokeSkillSubmissionRequest>(
-    app,
-    dependencies,
-    "revoke",
-    RevokeSkillSubmissionRequestSchema,
-    RevokeSkillSubmissionSuccessEnvelopeSchema,
-    async (request, userId) =>
-      dependencies.publications.revoke({
-        userId,
-        submissionId: request.params.submissionId,
-        expectedVersionToken: request.body.expectedVersionToken,
-        reason: request.body.reason,
-        idempotencyKey: requireIdempotencyKey(request),
-      }),
-  );
+  registerSkillAdminApiRoutes(app, dependencies, options);
 
   return app;
 }
 
+/**
+ * 将 Skill 发布路由注册到任意管理 Fastify 实例。路由级错误处理与正文上限保持封装，
+ * 使统一后台进程能够复用发布能力而不继承独立 listener、JWT 或 TLS 配置。
+ */
+export function registerSkillAdminApiRoutes(
+  app: FastifyInstance,
+  dependencies: SkillAdminApiRouteDependencies,
+  options: Pick<SkillAdminApiAppOptions, "bodyLimitBytes"> = {},
+): void {
+  const bodyLimitBytes = options.bodyLimitBytes ?? 48 * 1024 * 1024;
+  const nextSubmissionId =
+    dependencies.submissionId ?? (() => `submission_${randomUUID().replaceAll("-", "")}`);
+
+  void app.register(async (routes) => {
+    routes.addHook("onSend", async (request, reply) => {
+      void reply.header("x-request-id", String(request.id));
+    });
+    routes.setErrorHandler(async (error, request, reply) => {
+      await sendFailure(error, request, reply);
+    });
+
+    routes.get<{ Querystring: ListQuery }>(
+      "/v1/admin/skill-submissions",
+      {
+        schema: {
+          querystring: ListQuerySchema,
+          response: responseSchemas(SkillSubmissionPageSuccessEnvelopeSchema),
+        },
+      },
+      async (request) => {
+        const userId = await authenticate(request, dependencies.auth);
+        const page = await dependencies.publications.list({
+          userId,
+          ...(request.query.limit === undefined ? {} : { limit: request.query.limit }),
+          ...(request.query.cursor === undefined ? {} : { cursor: request.query.cursor }),
+        });
+        return success(request, {
+          items: page.items,
+          ...(page.nextSubmissionId === undefined ? {} : { nextCursor: page.nextSubmissionId }),
+        });
+      },
+    );
+
+    routes.get<{ Params: SubmissionPath }>(
+      "/v1/admin/skill-submissions/:submissionId",
+      {
+        schema: {
+          params: SubmissionPathSchema,
+          response: responseSchemas(SkillSubmissionSuccessEnvelopeSchema),
+        },
+      },
+      async (request) => {
+        const userId = await authenticate(request, dependencies.auth);
+        return success(
+          request,
+          await dependencies.publications.get(userId, request.params.submissionId),
+        );
+      },
+    );
+
+    routes.post<{ Body: CreateSkillSubmissionRequest }>(
+      "/v1/admin/skill-submissions",
+      {
+        bodyLimit: bodyLimitBytes,
+        schema: {
+          body: CreateSkillSubmissionRequestSchema,
+          response: responseSchemas(CreateSkillSubmissionSuccessEnvelopeSchema),
+        },
+      },
+      async (request) => {
+        requireJson(request);
+        const userId = await authenticate(request, dependencies.auth);
+        const { files, compatibility, sourceUrl, sourceRevision, ...metadata } = request.body;
+        return success(
+          request,
+          await dependencies.publications.create({
+            userId,
+            submissionId: nextSubmissionId(),
+            metadata: {
+              ...metadata,
+              compatibility: compatibility ?? DEFAULT_SKILL_PUBLICATION_COMPATIBILITY,
+              sourceUrl: sourceUrl ?? "",
+              sourceRevision: sourceRevision ?? "",
+            },
+            files,
+            idempotencyKey: requireIdempotencyKey(request),
+          }),
+        );
+      },
+    );
+
+    registerAction<SubmitSkillSubmissionRequest>(
+      routes,
+      dependencies,
+      "submit",
+      SubmitSkillSubmissionRequestSchema,
+      SubmitSkillSubmissionSuccessEnvelopeSchema,
+      async (request, userId) =>
+        dependencies.publications.submit({
+          userId,
+          submissionId: request.params.submissionId,
+          expectedVersionToken: request.body.expectedVersionToken,
+          idempotencyKey: requireIdempotencyKey(request),
+        }),
+    );
+    registerAction<ReviewSkillSubmissionRequest>(
+      routes,
+      dependencies,
+      "review",
+      ReviewSkillSubmissionRequestSchema,
+      ReviewSkillSubmissionSuccessEnvelopeSchema,
+      async (request, userId) =>
+        dependencies.publications.review({
+          userId,
+          submissionId: request.params.submissionId,
+          expectedVersionToken: request.body.expectedVersionToken,
+          decision: request.body.decision,
+          ...(request.body.reason === undefined ? {} : { reason: request.body.reason }),
+          idempotencyKey: requireIdempotencyKey(request),
+        }),
+    );
+    registerAction<PublishSkillSubmissionRequest>(
+      routes,
+      dependencies,
+      "publish",
+      PublishSkillSubmissionRequestSchema,
+      PublishSkillSubmissionSuccessEnvelopeSchema,
+      async (request, userId) =>
+        dependencies.publications.publish({
+          userId,
+          submissionId: request.params.submissionId,
+          expectedVersionToken: request.body.expectedVersionToken,
+          recommended: request.body.recommended,
+          idempotencyKey: requireIdempotencyKey(request),
+        }),
+    );
+    registerAction<RevokeSkillSubmissionRequest>(
+      routes,
+      dependencies,
+      "revoke",
+      RevokeSkillSubmissionRequestSchema,
+      RevokeSkillSubmissionSuccessEnvelopeSchema,
+      async (request, userId) =>
+        dependencies.publications.revoke({
+          userId,
+          submissionId: request.params.submissionId,
+          expectedVersionToken: request.body.expectedVersionToken,
+          reason: request.body.reason,
+          idempotencyKey: requireIdempotencyKey(request),
+        }),
+    );
+  });
+}
+
 function registerAction<TBody>(
   app: FastifyInstance,
-  dependencies: SkillAdminApiDependencies,
+  dependencies: SkillAdminApiRouteDependencies,
   action: string,
   bodySchema: object,
   successSchema: object,
@@ -416,4 +439,24 @@ function failureResponse(request: FastifyRequest, failure: FailureKind) {
     status: status[failure],
     body: createErrorEnvelope(String(request.id), { kind: failure }),
   };
+}
+
+async function sendFailure(
+  error: unknown,
+  request: FastifyRequest,
+  reply: FastifyReply,
+): Promise<void> {
+  let failure: FailureKind = "internal";
+  if (error instanceof AdminApiFailure) failure = error.kind;
+  else if (error instanceof SkillServiceError) failure = skillFailure(error);
+  else if (isFastifyBadRequest(error)) failure = "bad_request";
+  else if (errorCode(error) === "FST_ERR_CTP_INVALID_MEDIA_TYPE") {
+    failure = "unsupported_media_type";
+  } else if (errorCode(error) === "FST_ERR_HANDLER_TIMEOUT") {
+    failure = "dependency_unavailable";
+  }
+  const response = failureResponse(request, failure);
+  // 管理端日志不能包含提交正文、入口指令、鉴权 Header 或对象存储细节。
+  request.log.warn({ failure, requestId: request.id }, "Skill 管理请求失败");
+  await reply.status(response.status).send(response.body);
 }

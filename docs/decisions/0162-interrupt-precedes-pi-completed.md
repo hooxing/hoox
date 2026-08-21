@@ -1,5 +1,9 @@
 # ADR-0162：主动中断优先于 Pi 的 completed 收敛
 
+- 状态：已接受
+- 日期：2026-08-12
+
+
 ## 背景
 
 真实 Pi Session 在正在执行的工具被取消后，可能先产生 `EXEC_CANCELLED` 工具结果，再以 `outcome.kind=completed` 和一个 `turn.completed` 事件收敛。Supervisor 原先只检查 Pi outcome 与 `turn.completed` 是否存在，因此会把中断前产生的部分文本保存为成功历史，并发布 `final_answer/completed`。

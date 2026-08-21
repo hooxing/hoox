@@ -1,0 +1,70 @@
+name: Bug 报告
+description: 报告可复现的 Hoox 缺陷
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢报告问题。请勿提交凭据、用户数据、签名 URL、对象键、内部地址或安全漏洞细节。安全问题请使用私有漏洞报告。
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题摘要
+      description: 简明说明发生了什么。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 提供最小、确定、可重复的步骤。
+      placeholder: |
+        1. 使用配置变量……
+        2. 执行命令……
+        3. 观察到……
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: 提交或版本
+      placeholder: git rev-parse --short HEAD
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: 操作系统、Node、pnpm、PostgreSQL、Sandbox Provider 和模型 Provider；不要填写密钥。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 已脱敏证据
+      description: 日志、截图或测试输出。请先删除秘密和用户内容。
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交确认
+      options:
+        - label: 我已搜索现有 Issue 和 PR。
+          required: true
+        - label: 这不是需要私下报告的安全漏洞。
+          required: true
+        - label: 我已删除凭据、用户数据和内部地址。
+          required: true

@@ -1,5 +1,9 @@
 # ADR-0164：wait_agent 明确全局 mailbox 序号允许空洞
 
+- 状态：已接受
+- 日期：2026-08-12
+
+
 ## 背景
 
 SubAgent mailbox 在同一 Attempt 内使用全局递增序号。`send_message` 会把 Root 发往子 Agent 的反向消息写入同一 mailbox，因此也占用 sequence；`wait_agent` 只向 Root 返回以 Root 为接收者的更新，不回显反向消息。

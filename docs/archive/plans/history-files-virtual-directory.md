@@ -1,9 +1,13 @@
 # 个人历史任务文件虚拟目录实施方案
 
+> [!IMPORTANT]
+> 状态：历史实施方案。个人历史文件与 ResourceFS 核心已经实现，当前行为见[历史文件与 ResourceFS](../../reference/history-files.md)；本文保留当时的跨模块拆解和未实施候选，不作为当前计划。
+
+
 - 文档性质：跨 Domain、PostgreSQL、ResourceFS、Sandbox、Worker、标题服务和 Web 的实施总计划
 - 状态：核心虚拟目录与低成本标题模型已实现；`test/cloud-drive-history-files` 增加 Web 云盘与 `@` 文件引用试验；可变目录别名和规模性能 Gate 后续实施
 - 日期：2026-08-07
-- 核心决策：[ADR-0118](decisions/0118-history-files-virtual-directory-and-task-ownership.md)、[ADR-0119](decisions/0119-personal-history-files-first-release-scope.md)、[ADR-0120](decisions/0120-personal-history-filesystem-implementation-slice.md)、[ADR-0121](decisions/0121-low-cost-thread-title-generation.md)、[ADR-0130](decisions/0130-personal-history-file-library-and-composer-reference.md)
+- 核心决策：[ADR-0118](../../decisions/0118-history-files-virtual-directory-and-task-ownership.md)、[ADR-0119](../../decisions/0119-personal-history-files-first-release-scope.md)、[ADR-0120](../../decisions/0120-personal-history-filesystem-implementation-slice.md)、[ADR-0121](../../decisions/0121-low-cost-thread-title-generation.md)、[ADR-0130](../../decisions/0130-personal-history-file-library-and-composer-reference.md)
 - 相关决策：ADR-0005、ADR-0077、ADR-0079、ADR-0103、ADR-0107
 
 ## 1. 目标

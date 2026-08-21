@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hoox Docs"
+  short_description: "维护 Hoox 文档的结构、语义、权威关系与生命周期"
+  default_prompt: "使用 $hoox-docs 创建、更新、审计或归档 Hoox 文档。"

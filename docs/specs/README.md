@@ -1,5 +1,5 @@
 # 功能规范
 
-本目录保存跨模块功能的目标契约。规范描述目标和边界，当前实现状态仍以代码、测试、项目状态和相关 ADR 为准。
+本目录只保存仍需要作为目标契约维护、且尚不能由当前说明和 ADR 完整表达的跨模块规范。
 
-- [Skill Center 与 Agent Skill 接入规范](skill-center-and-runtime-integration.md)
+当前没有活动规范。已经完成或被实现演进替代的规范保存在[历史规范](../archive/specs/README.md)；当前行为从[架构文档](../architecture/README.md)、[参考文档](../reference/README.md)和代码测试进入。

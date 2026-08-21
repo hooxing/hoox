@@ -1,0 +1,61 @@
+# 团队协作
+
+本文面向开发和维护团队空间能力的贡献者，说明当前团队、成员、任务、文件、Skill 和执行调度的边界。尚未完成的方向以[项目路线](../roadmap.md)为准。
+
+## 空间与授权
+
+Hoox 使用 Tenant 作为个人与团队资产的所有权边界。客户端任一时刻只有一个活动 Tenant；个人任务和当前选中团队的任务分别展示，创建团队任务前必须明确选择团队空间。
+
+`X-Tenant-ID` 只是请求的空间选择器，不是授权证明。API 每次请求都根据认证用户重新读取目标 Tenant 的有效 Membership，并由 PostgreSQL RLS 和服务角色权限继续约束数据访问。失效或已解散团队会从个人团队目录中移除，客户端必须回退到仍有效的空间。
+
+## 团队与成员
+
+当前 API 和 Web 支持：
+
+- 从个人空间创建团队并让创建者成为 Owner；
+- 列出当前用户仍有有效 Membership 的团队；
+- 列出成员，添加 Admin/Member，调整 Owner/Admin/Member 角色和移除成员；
+- 由 Owner 解散团队。
+
+Owner 可以管理全部角色；Admin 只能管理普通成员，不能授予或移除 Owner。最后一名 Owner 不能通过普通降级或移除流程消失，只能先增加其他 Owner，或显式解散团队。解散会先收敛团队待执行工作，再撤销目录和全部 Membership；历史 Tenant 数据保留为不可访问的审计事实。
+
+当前成员添加要求目标用户已经存在，不包含邀请链接、待接受邀请、域名发现或外部身份供应流程。
+
+## 团队任务与分支
+
+团队 Thread、Run、Workspace、Resource 和 Artifact 都属于团队 Tenant。成员退出后，其创建的团队任务仍归团队；后续读取只取决于访问者当前是否仍有有效 Membership。
+
+`POST /v1/threads/:threadId/forks` 创建新的 Thread：
+
+- 目标仍在来源 Tenant 时表示普通分支；
+- 指定一个已授权的目标 `targetTeamId` 且目标 Tenant 不同于来源时，表示发布到团队。
+
+两种操作都保留来源标识，并复制当前可见的 user/assistant 文本快照。源 Thread 不变，目标 Thread 拥有独立 Workspace、上下文流和执行队列，之后不做双向同步。工具轨迹、Run、Workspace revision 和来源 Tenant 的 Resource 引用不会被隐式复制；超出同步复制上限时失败关闭。
+
+## 文件边界
+
+个人与团队文件始终在各自 Tenant 下查询。个人任务使用团队文件时，`POST /v1/me/team-files/import` 会重新验证来源团队 Membership，并在个人 Tenant 中创建固定 ResourceVersion 副本；它不会保存长期跨 Tenant Blob 权限。
+
+因此，成员退出团队后已经导入的个人副本仍可使用，但不能继续浏览团队文件或创建新的导入。个人和当前团队云盘都使用当前 Tenant 的历史文件契约，详见[历史文件与 ResourceFS](../reference/history-files.md)。
+
+## 团队 Skill 与个性化
+
+Skill 安装按 Tenant 隔离。新团队从空安装集合开始，不继承任何成员的个人 Skill；团队 Owner/Admin 可以安装、配置和卸载，Member 可以读取并在团队 Run 中使用。Run 只快照当前 Tenant 的启用版本，详见[Skill Runtime](skill-runtime.md)。
+
+个人与团队个性化分别持久化，并在 Run 创建时形成低信任偏好快照。团队偏好与个人偏好同时存在且不与更高优先级指令冲突时，团队偏好优先；偏好不能扩大工具、身份或副作用授权。
+
+## 调度与失效处理
+
+Worker 通过数据库协调取得可服务 Tenant，不依赖固定开发 Tenant 列表。团队解散会让未开始和非终态工作按受控状态收敛，避免在 Membership 全部撤销后留下无法装载的投递。
+
+团队目录只是跨 Tenant 的可见索引，Membership 才是授权事实源。目录读取、成员变更和普通业务数据使用分离的数据库角色与事务边界，不能用目录存在替代目标团队授权。
+
+## 当前限制
+
+- 没有邀请、待接受、过期、撤销和未注册用户落地流程。
+- 没有团队重命名、专用所有权转移、恢复窗口或数据导出流程。
+- 任务发布是文本快照，不是可合并分支，也不复制完整运行轨迹和工作区状态。
+- 团队云盘治理、配额、回收站、Skill 审批、团队级模型/工具/网络策略仍未形成正式产品契约。
+- 团队能力仍需完成公开身份系统、完整越权矩阵和目标生产环境联合验收后，才能视为生产就绪。
+
+关键决策见 [ADR-0139](../decisions/0139-team-workspace-and-snapshot-boundary.md)、[ADR-0140](../decisions/0140-dual-task-navigation-and-team-center.md)、[ADR-0142](../decisions/0142-dynamic-worker-tenant-assignment.md)、[ADR-0146](../decisions/0146-team-directory-personal-scope-recovery.md)、[ADR-0147](../decisions/0147-team-coordinator-database-role.md)、[ADR-0168](../decisions/0168-personalization-settings-and-run-snapshot.md)和[ADR-0169](../decisions/0169-team-member-read-only-authorization-snapshot.md)。

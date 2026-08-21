@@ -1,7 +1,7 @@
 # Codex Subagent 与 Plan 机制调研及 Hoox 实施方案
 
-> [!NOTE]
-> 本文是实施计划或阶段拆解。当前行为以代码、自动化测试、当前架构文档和未被替代的 ADR 为准。
+> [!IMPORTANT]
+> 状态：历史实施方案。SubAgent 核心控制面已经实现，当前行为见[Agent 协作与 Todo](../../architecture/agent-collaboration.md)；本文保留 2026-08-05 的 Codex 调研和当时方案，不表示 Plan Mode 或 Proposed Plan 已进入当前承诺。
 
 
 > 调研日期：2026-08-05
@@ -25,8 +25,8 @@ Root Run 继续使用。Plan Mode、Proposed Plan 和对应 Web 交互仍是后�
 本仓库的 SubAgent 决策与 Codex 的默认建议有一处有意差异：root 与所有 SubAgent 共享当前 Run/Attempt 的同一个
 CubeSandbox，子 Agent 可使用的工具由 root 在 `spawn_agent` 时显式选择。系统不增加 Agent writer token、文件版本
 CAS 或自动合并器；结构化 `edit/write` 只在同一路径实际重叠时向后到调用返回 `FILE_BUSY`。默认最多 4 个并发
-Agent（含 root），首版最大深度为 1。具体实施约束见 [ADR-0122](../decisions/0122-shared-sandbox-subagent-control-plane.md)
-和 [ADR-0127](../decisions/0127-thread-scoped-subagent-conversation.md)。
+Agent（含 root），首版最大深度为 1。具体实施约束见 [ADR-0122](../../decisions/0122-shared-sandbox-subagent-control-plane.md)
+和 [ADR-0127](../../decisions/0127-thread-scoped-subagent-conversation.md)。
 
 ## 2. Codex Subagent 是如何实现的
 
@@ -165,14 +165,14 @@ Plan turn 结束后，TUI 弹出三个动作：
 
 | 层 | 当前实现 | 与目标的差距 |
 |---|---|---|
-| Domain | [`agents.ts`](../../runtime-ts/packages/domain/src/agents.ts) 保留通用 `AgentTree`；运行时使用稳定 Agent/Turn 身份 | Plan 领域对象仍未拆分 Proposed Plan 与执行清单 |
-| Worker | [`run-worker.ts`](../../runtime-ts/apps/agent-worker/src/run-worker.ts) 装配 `AgentSupervisor`，支持多 Session、mailbox、drain 与级联 abort | 尚无公开 Agent Tree UI 投影和永久删除对话能力 |
-| Session Port | [`ports.ts`](../../runtime-ts/packages/run-contracts/src/ports.ts) 已支持 Agent 身份、显式工具和 fork 历史 | 暂不支持子 Agent 递归创建或动态修改工具清单 |
+| Domain | [`agents.ts`](../../../runtime-ts/packages/domain/src/agents.ts) 保留通用 `AgentTree`；运行时使用稳定 Agent/Turn 身份 | Plan 领域对象仍未拆分 Proposed Plan 与执行清单 |
+| Worker | [`run-worker.ts`](../../../runtime-ts/apps/agent-worker/src/run-worker.ts) 装配 `AgentSupervisor`，支持多 Session、mailbox、drain 与级联 abort | 尚无公开 Agent Tree UI 投影和永久删除对话能力 |
+| Session Port | [`ports.ts`](../../../runtime-ts/packages/run-contracts/src/ports.ts) 已支持 Agent 身份、显式工具和 fork 历史 | 暂不支持子 Agent 递归创建或动态修改工具清单 |
 | Rollout | Root/Child 使用独立 Rollout stream，公开 Run event 使用共享 sequence 编码队列 | 尚未对外提供完整 Child Rollout 查询界面 |
 | 副作用许可 | SubAgent 每个 turn 使用 `agent_model_start`，工具 call ID 加 Agent/Turn namespace | Provider/token 的 Agent 级预算仍待增强 |
 | Pi Adapter | 已注册六个 Root 协作工具，Child capability manifest 由 Root 显式选择 | Plan 工具、mode-aware capability manifest 和 plan parser 尚未实现 |
-| Prompt | [`prompt-builder`](../../runtime-ts/packages/prompt-builder/src/index.ts) 生成稳定 Harness 和能力摘要 | 没有 Collaboration Mode 模板及 mode snapshot；不得把动态 mode 数据直接拼进稳定系统提示词 |
-| Waiting | Worker 已有 `Run waiting → answer → resume` 骨架 | [`pi-session-factory.ts`](../../runtime-ts/apps/agent-worker/src/pi-session-factory.ts) 明确标注 `request_user_input` 尚未实现；当前只有单个文本 question |
+| Prompt | [`prompt-builder`](../../../runtime-ts/packages/prompt-builder/src/index.ts) 生成稳定 Harness 和能力摘要 | 没有 Collaboration Mode 模板及 mode snapshot；不得把动态 mode 数据直接拼进稳定系统提示词 |
+| Waiting | Worker 已有 `Run waiting → answer → resume` 骨架 | [`pi-session-factory.ts`](../../../runtime-ts/apps/agent-worker/src/pi-session-factory.ts) 明确标注 `request_user_input` 尚未实现；当前只有单个文本 question |
 | API | `CreateRunRequest` 无 collaboration mode；Thread input 的 `mode` 表示 auto/steer/follow_up | 必须新增独立 `collaborationMode`，不能复用现有 routing mode 字段 |
 | Web | 只投影对话、工具和当前状态 | 没有 mode selector、Plan card、批准动作或 Agent Tree 面板 |
 
@@ -442,7 +442,7 @@ Plan markdown 是用户/模型内容，应以引用事实进入 user/custom cont
 
 每次成功更新发布并持久化 `todo.updated` Run event，Web 在“运行进度”区域投影最新快照；既有工具历史继续在原位置
 展示。它不需要独立数据库 aggregate，`run_events` 足以作为本次 Run 的 UI 与审计事实源。若未来需要跨 Run 的项目
-计划，再单独设计领域生命周期。完整实施说明见 [Todo Writer Runtime 实现说明](todo-writer-runtime.md)。
+计划，再单独设计领域生命周期。完整实施说明见 [Todo Writer Runtime 实现说明](../../reference/todo-write.md)。
 
 ## 7. 按模块的修改清单
 
@@ -579,9 +579,9 @@ Plan Mode 可视为可发布，至少需要满足：
 
 ### 本仓库相关决策
 
-- [ADR-0029：可信 Prompt 与能力清单](../decisions/0029-trusted-prompt-and-session-capability-manifest.md)
-- [ADR-0030：Runtime Rollout 事实源](../decisions/0030-runtime-rollout-checkpoint-fact-source.md)
-- [ADR-0063：Thread 单写者与 Follow-up](../decisions/0063-thread-writer-and-durable-follow-up-queue.md)
-- [ADR-0067：Durable Steer](../decisions/0067-durable-steer-and-unified-thread-input.md)
-- [ADR-0068：Runtime 持久 Compaction](../decisions/0068-runtime-owned-persistent-compaction.md)
-- [ADR-0089：当前状态 UI](../decisions/0089-conversation-thinking-and-current-status-only.md)
+- [ADR-0029：可信 Prompt 与能力清单](../../decisions/0029-trusted-prompt-and-session-capability-manifest.md)
+- [ADR-0030：Runtime Rollout 事实源](../../decisions/0030-runtime-rollout-checkpoint-fact-source.md)
+- [ADR-0063：Thread 单写者与 Follow-up](../../decisions/0063-thread-writer-and-durable-follow-up-queue.md)
+- [ADR-0067：Durable Steer](../../decisions/0067-durable-steer-and-unified-thread-input.md)
+- [ADR-0068：Runtime 持久 Compaction](../../decisions/0068-runtime-owned-persistent-compaction.md)
+- [ADR-0089：当前状态 UI](../../decisions/0089-conversation-thinking-and-current-status-only.md)

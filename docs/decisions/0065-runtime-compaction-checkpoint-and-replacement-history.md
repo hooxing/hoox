@@ -10,7 +10,7 @@
 
 当前 Pi compaction 固定关闭，Context Policy 在实际 Provider 调用前执行预算门禁。现有 `runtime_rollout_replacements` 是 Attempt 范围、单调前缀式的恢复结构，其 replacement item 只描述 `from/through`，不是整个 Thread 的可安装模型历史。它不能直接充当跨 Run Runtime Compaction 的实施规范。
 
-[Thread 连续上下文实施总计划](../plans/thread-continuous-context.md) 已确定：Runtime 是 compaction 事实源；原始 Thread facts 不删除；每个 checkpoint 保存不可变的完整 `replacement_history`；后一个 checkpoint 可以完全重组前一个窗口；Canonical Context 必须按当前可信配置重建。本 ADR 冻结该恢复协议，不固化阈值、预算或本地/远程路径选择。
+[Thread 连续上下文实施总计划](../archive/plans/thread-continuous-context.md) 已确定：Runtime 是 compaction 事实源；原始 Thread facts 不删除；每个 checkpoint 保存不可变的完整 `replacement_history`；后一个 checkpoint 可以完全重组前一个窗口；Canonical Context 必须按当前可信配置重建。本 ADR 冻结该恢复协议，不固化阈值、预算或本地/远程路径选择。
 
 ## 决策驱动因素
 

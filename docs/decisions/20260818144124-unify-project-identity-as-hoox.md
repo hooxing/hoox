@@ -69,7 +69,7 @@
 
 ## 可逆性与恢复
 
-代码身份可以整体回退本 ADR 对应提交，但写入新 JWT audience、Compose 卷、Mem0 source 或新 Skill 版本后，不得通过修改历史数据伪造旧身份。目录和多机恢复步骤记录在 `docs/operations/hoox-project-rename-recovery.md`；发生问题时优先恢复目录 Junction 或远端 URL，不直接编辑 Codex SQLite 和 Session 文件。
+代码身份可以整体回退本 ADR 对应提交，但写入新 JWT audience、Compose 卷、Mem0 source 或新 Skill 版本后，不得通过修改历史数据伪造旧身份。目录和多机恢复步骤记录在 `docs/archive/operations/hoox-project-rename-recovery.md`；发生问题时优先恢复目录 Junction 或远端 URL，不直接编辑 Codex SQLite 和 Session 文件。
 
 ## 实施记录
 

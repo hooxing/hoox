@@ -185,6 +185,7 @@
 | [ADR-20260820090402](20260820090402-provider-owned-model-catalog.md) | Provider 拥有可启用的模型目录 | 已接受 | 2026-08-20 |
 | [ADR-20260820095113](20260820095113-pi-catalog-seeds-admin-model-metadata.md) | Pi 模型目录为后台配置提供可覆盖的初始值 | 已接受 | 2026-08-20 |
 | [ADR-20260820101805](20260820101805-browser-bundled-pi-catalog-degrades-independently.md) | 浏览器内置 Pi 目录与后台配置服务独立降级 | 已接受 | 2026-08-20 |
+| [ADR-20260821004057](20260821004057-industrial-admin-operations-and-user-governance.md) | 工业化后台的信息架构、运营统计与用户治理边界 | 已接受 | 2026-08-21 |
 
 ## 何时必须记录
 

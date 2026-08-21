@@ -163,7 +163,7 @@ export class PgLocalAccountRepository implements LocalAccountRepository {
           const result = await client.query<AccountRow>(
             `SELECT user_id,personal_tenant_id,email,display_name,
                     password_algorithm,password_salt,password_hash
-               FROM user_accounts WHERE normalized_email=$1`,
+               FROM user_accounts WHERE normalized_email=$1 AND status='active'`,
             [normalizedEmail],
           );
           const row = result.rows[0];
@@ -238,7 +238,8 @@ export class PgLocalAccountRepository implements LocalAccountRepository {
           );
           const account = await client.query<AccountRow>(
             `SELECT user_id,personal_tenant_id,email,display_name
-               FROM user_accounts WHERE user_id=$1 AND personal_tenant_id=$2`,
+               FROM user_accounts
+              WHERE user_id=$1 AND personal_tenant_id=$2 AND status='active'`,
             [active.user_id, active.personal_tenant_id],
           );
           const row = account.rows[0];
@@ -262,7 +263,8 @@ export class PgLocalAccountRepository implements LocalAccountRepository {
         async (client) => {
           const result = await client.query<AccountRow>(
             `SELECT user_id,personal_tenant_id,email,display_name
-               FROM user_accounts WHERE user_id=$1 AND personal_tenant_id=$2`,
+               FROM user_accounts
+              WHERE user_id=$1 AND personal_tenant_id=$2 AND status='active'`,
             [userId, personalTenantId],
           );
           const row = result.rows[0];

@@ -86,6 +86,11 @@ const environmentSchema = Object.freeze({
   }),
   MODEL_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192 }),
   MEM0_API_KEY: stringEnvironmentField({ requiredIn: optional, secret: true, maxLength: 8_192 }),
+  MEM0_SCOPE_HMAC_KEY: stringEnvironmentField({
+    requiredIn: optional,
+    secret: true,
+    maxLength: 8_192,
+  }),
   THREAD_CONTEXT_COMPACTION_ENABLED: booleanEnvironmentField({ requiredIn: optional }),
   THREAD_CONTEXT_COMPACTION_PATH: stringEnvironmentField({ requiredIn: optional, maxLength: 16 }),
   HISTORY_DIRECTORY_TIME_ZONE: stringEnvironmentField({ requiredIn: optional, maxLength: 100 }),
@@ -112,6 +117,7 @@ export interface AdminControlApiProcessConfiguration {
     readonly compactionEnabledConfigured: boolean;
     readonly compactionPathConfigured: boolean;
     readonly historyTimeZoneConfigured: boolean;
+    readonly memoryScopeKeyConfigured: boolean;
   }>;
   readonly developmentAuth?: Readonly<{ readonly userId: string; readonly token: string }>;
   readonly production?: Readonly<{
@@ -218,6 +224,7 @@ export function parseAdminControlApiProcessEnvironment(
       compactionEnabledConfigured: parsed.values.THREAD_CONTEXT_COMPACTION_ENABLED !== undefined,
       compactionPathConfigured: parsed.values.THREAD_CONTEXT_COMPACTION_PATH !== undefined,
       historyTimeZoneConfigured: parsed.values.HISTORY_DIRECTORY_TIME_ZONE !== undefined,
+      memoryScopeKeyConfigured: parsed.values.MEM0_SCOPE_HMAC_KEY !== undefined,
     }),
     ...(developmentAuth === undefined ? {} : { developmentAuth }),
     ...(productionConfiguration === undefined ? {} : { production: productionConfiguration }),

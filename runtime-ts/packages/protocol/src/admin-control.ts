@@ -144,6 +144,24 @@ export type RuntimeSettingsRevisionDto = Static<typeof RuntimeSettingsRevisionDt
 export const RuntimeStatisticsDtoSchema = Type.Object(
   {
     generatedAt: IsoTimestampSchema,
+    users: Type.Object(
+      {
+        total: Type.Integer({ minimum: 0 }),
+        registered24h: Type.Integer({ minimum: 0 }),
+        active7d: Type.Integer({ minimum: 0 }),
+        disabled: Type.Integer({ minimum: 0 }),
+      },
+      strict,
+    ),
+    conversations: Type.Object(
+      {
+        total: Type.Integer({ minimum: 0 }),
+        created24h: Type.Integer({ minimum: 0 }),
+        active24h: Type.Integer({ minimum: 0 }),
+        archived: Type.Integer({ minimum: 0 }),
+      },
+      strict,
+    ),
     runs: Type.Object(
       {
         total: Type.Integer({ minimum: 0 }),
@@ -183,6 +201,31 @@ export const RuntimeStatisticsDtoSchema = Type.Object(
   strict,
 );
 export type RuntimeStatisticsDto = Static<typeof RuntimeStatisticsDtoSchema>;
+
+export const PlatformUserSummaryDtoSchema = Type.Object(
+  {
+    userId: IdSchema,
+    email: Type.String({ minLength: 3, maxLength: 254 }),
+    displayName: Type.String({ minLength: 2, maxLength: 32 }),
+    status: Type.Union([Type.Literal("active"), Type.Literal("disabled")]),
+    createdAt: IsoTimestampSchema,
+    lastActiveAt: Type.Optional(IsoTimestampSchema),
+    activeSessions: Type.Integer({ minimum: 0 }),
+    conversationCount: Type.Integer({ minimum: 0 }),
+    runCount: Type.Integer({ minimum: 0 }),
+  },
+  strict,
+);
+export type PlatformUserSummaryDto = Static<typeof PlatformUserSummaryDtoSchema>;
+
+export const PlatformUserPageDtoSchema = Type.Object(
+  {
+    items: Type.Array(PlatformUserSummaryDtoSchema, { maxItems: 200 }),
+    total: Type.Integer({ minimum: 0 }),
+  },
+  strict,
+);
+export type PlatformUserPageDto = Static<typeof PlatformUserPageDtoSchema>;
 
 export const DeploymentSettingDescriptorDtoSchema = Type.Object(
   {
@@ -244,6 +287,26 @@ export type ProbeControlRevisionRequest = Static<typeof ProbeControlRevisionRequ
 
 export const PublishControlRevisionRequestSchema = ProbeControlRevisionRequestSchema;
 export type PublishControlRevisionRequest = Static<typeof PublishControlRevisionRequestSchema>;
+
+export const UpdatePlatformUserStatusRequestSchema = Type.Object(
+  {
+    status: Type.Union([Type.Literal("active"), Type.Literal("disabled")]),
+    reason: ChangeReasonSchema,
+  },
+  strict,
+);
+export type UpdatePlatformUserStatusRequest = Static<typeof UpdatePlatformUserStatusRequestSchema>;
+
+export const PlatformUserPathSchema = Type.Object({ userId: IdSchema }, strict);
+export type PlatformUserPath = Static<typeof PlatformUserPathSchema>;
+
+export const PlatformUserQuerySchema = Type.Object(
+  {
+    query: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+    limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200 })),
+  },
+  strict,
+);
 
 export const ControlRevisionPathSchema = Type.Object(
   { providerKey: ProviderKeySchema, revision: RevisionNumberSchema },
@@ -329,4 +392,9 @@ export const PiModelCatalogProviderListSuccessEnvelopeSchema = successEnvelopeSc
 );
 export const PiModelCatalogModelListSuccessEnvelopeSchema = successEnvelopeSchema(
   PiModelCatalogModelListDtoSchema,
+);
+export const PlatformUserPageSuccessEnvelopeSchema =
+  successEnvelopeSchema(PlatformUserPageDtoSchema);
+export const PlatformUserSummarySuccessEnvelopeSchema = successEnvelopeSchema(
+  PlatformUserSummaryDtoSchema,
 );

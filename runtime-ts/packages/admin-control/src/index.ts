@@ -76,6 +76,18 @@ export interface ControlAuditEvent {
 
 export interface RuntimeStatistics {
   readonly generatedAt: string;
+  readonly users: Readonly<{
+    readonly total: number;
+    readonly registered24h: number;
+    readonly active7d: number;
+    readonly disabled: number;
+  }>;
+  readonly conversations: Readonly<{
+    readonly total: number;
+    readonly created24h: number;
+    readonly active24h: number;
+    readonly archived: number;
+  }>;
   readonly runs: Readonly<{
     readonly total: number;
     readonly queued: number;
@@ -96,6 +108,25 @@ export interface RuntimeStatistics {
     readonly failedOccurrences24h: number;
   }>;
   readonly skills: Readonly<{ readonly published: number; readonly installed: number }>;
+}
+
+export type PlatformUserStatus = "active" | "disabled";
+
+export interface PlatformUserSummary {
+  readonly userId: string;
+  readonly email: string;
+  readonly displayName: string;
+  readonly status: PlatformUserStatus;
+  readonly createdAt: string;
+  readonly lastActiveAt?: string;
+  readonly activeSessions: number;
+  readonly conversationCount: number;
+  readonly runCount: number;
+}
+
+export interface PlatformUserPage {
+  readonly items: readonly PlatformUserSummary[];
+  readonly total: number;
 }
 
 export interface DeploymentSettingDescriptor {
@@ -204,6 +235,18 @@ export interface AdminControlRepository {
     >
   >;
   listAudits(userId: string, limit: number): Promise<readonly ControlAuditEvent[]>;
+  listUsers(input: {
+    readonly actorUserId: string;
+    readonly query?: string;
+    readonly limit: number;
+  }): Promise<PlatformUserPage>;
+  updateUserStatus(
+    input: ControlMutationContext & {
+      readonly targetUserId: string;
+      readonly status: PlatformUserStatus;
+      readonly reason: string;
+    },
+  ): Promise<ControlMutationResult<PlatformUserSummary>>;
 }
 
 export interface AdminControlStatisticsPort {
@@ -237,6 +280,21 @@ function normalizedText(value: string, name: string, maximum: number): string {
 function normalizedProviderKey(value: string): string {
   const normalized = value.trim().toLowerCase();
   if (!providerKeyPattern.test(normalized)) throw new TypeError("Provider Key 格式无效");
+  return normalized;
+}
+
+function normalizedUserId(value: string): string {
+  const normalized = value.trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(normalized)) {
+    throw new TypeError("用户 ID 格式无效");
+  }
+  return normalized;
+}
+
+function normalizedUserQuery(value: string | undefined): string | undefined {
+  const normalized = value?.replace(/\s+/gu, " ").trim();
+  if (normalized === undefined || normalized.length === 0) return undefined;
+  if (Array.from(normalized).length > 120) throw new TypeError("用户查询条件过长");
   return normalized;
 }
 
@@ -444,6 +502,42 @@ export class AdminControlService {
   async listAudits(actorUserId: string, limit = 100) {
     requireRole(await this.repository.resolveRole(actorUserId), ["viewer", "operator", "admin"]);
     return await this.repository.listAudits(actorUserId, boundedInteger(limit, "审计条数", 1, 200));
+  }
+
+  async listUsers(actorUserId: string, query?: string, limit = 50): Promise<PlatformUserPage> {
+    requireRole(await this.repository.resolveRole(actorUserId), ["admin"]);
+    const normalizedQuery = normalizedUserQuery(query);
+    return await this.repository.listUsers({
+      actorUserId,
+      ...(normalizedQuery === undefined ? {} : { query: normalizedQuery }),
+      limit: boundedInteger(limit, "用户条数", 1, 200),
+    });
+  }
+
+  async updateUserStatus(
+    context: ControlMutationContext,
+    input: {
+      readonly targetUserId: string;
+      readonly status: PlatformUserStatus;
+      readonly reason: string;
+    },
+  ): Promise<PlatformUserSummary> {
+    requireRole(await this.repository.resolveRole(context.actorUserId), ["admin"]);
+    const targetUserId = normalizedUserId(input.targetUserId);
+    if (targetUserId === context.actorUserId) {
+      throw new AdminControlServiceError("CONFLICT");
+    }
+    if (input.status !== "active" && input.status !== "disabled") {
+      throw new TypeError("用户状态不受支持");
+    }
+    return unwrapMutation(
+      await this.repository.updateUserStatus({
+        ...context,
+        targetUserId,
+        status: input.status,
+        reason: normalizeChangeReason(input.reason),
+      }),
+    );
   }
 
   async createModelDraft(

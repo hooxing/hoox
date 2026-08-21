@@ -901,11 +901,13 @@ export function SkillConsole({
 type AdminView = ControlView | "skills";
 
 const navigation: readonly { readonly key: AdminView; readonly label: string }[] = [
-  { key: "overview", label: "总览" },
+  { key: "overview", label: "驾驶舱" },
+  { key: "analytics", label: "数据运营" },
+  { key: "users", label: "用户" },
   { key: "models", label: "模型" },
   { key: "memory", label: "记忆" },
   { key: "skills", label: "Skills" },
-  { key: "settings", label: "配置" },
+  { key: "settings", label: "运行配置" },
 ];
 
 export function App({

@@ -6,14 +6,20 @@ import type {
   ModelProviderRevisionDto,
   PiModelCatalogModelDto,
   PiModelCatalogProviderDto,
+  PlatformUserPageDto,
   RuntimeSettingsRevisionDto,
 } from "@hoox/protocol";
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { AdminApiError } from "./api.js";
 import { AdminControlApi, type AdminControlApiContract } from "./control-api.js";
 import { listLocalPiModelCatalogProviders } from "./pi-model-catalog.js";
+import {
+  ControlDataUnavailable,
+  OperationsDashboard,
+  UserManagementWorkspace,
+} from "./operations-console.js";
 
-export type ControlView = "overview" | "models" | "memory" | "settings";
+export type ControlView = "overview" | "analytics" | "users" | "models" | "memory" | "settings";
 const defaultControlApi = new AdminControlApi();
 
 function number(form: FormData, key: string): number {
@@ -83,6 +89,25 @@ function RevisionActions({
   );
 }
 
+const configurationFieldLabels: Readonly<Record<string, string>> = {
+  providerKey: "Provider 标识",
+  displayName: "显示名称",
+  protocol: "调用协议",
+  baseUrl: "服务地址",
+  secretRef: "模型密钥引用",
+  defaultModelId: "默认模型",
+  providerKind: "记忆服务",
+  apiSecretRef: "Mem0 API 密钥引用",
+  scopeSecretRef: "记忆作用域密钥引用",
+  requestTimeoutMs: "请求超时（ms）",
+  enabled: "已启用",
+  compactionSoftLimitPercent: "上下文压缩触发阈值（%）",
+  compactionTargetPercent: "压缩后目标占用（%）",
+  compactionRecentUserTokens: "优先保留用户 Token",
+  compactionMaxOutputTokens: "压缩输出预算",
+  compactionTimeoutMs: "压缩超时（ms）",
+};
+
 function RevisionCard({
   kind,
   item,
@@ -119,7 +144,7 @@ function RevisionCard({
           .filter(([key]) => key !== "models")
           .map(([key, field]) => (
             <div key={key}>
-              <dt>{key}</dt>
+              <dt>{configurationFieldLabels[key] ?? key}</dt>
               <dd>{typeof field === "boolean" ? (field ? "是" : "否") : String(field)}</dd>
             </div>
           ))}
@@ -169,27 +194,227 @@ function DeploymentSettings({
 }: {
   readonly items: AdminControlOverviewDto["deploymentSettings"];
 }) {
+  const configured = items.filter((item) => item.configured).length;
+  const categoryLabels = {
+    bootstrap: "启动基础设施",
+    secret: "部署秘密",
+    restart_required: "需重启生效",
+  } as const;
   return (
     <section className="control-panel">
       <div className="panel-heading">
         <div>
           <span className="eyebrow">Environment</span>
           <h2>部署配置</h2>
+          <p>只读检查部署层前置条件；可版本化参数在对应模块中修改。</p>
         </div>
+        <span className="count">{items.length === 0 ? "—" : `${configured}/${items.length}`}</span>
       </div>
-      <div className="deployment-list">
-        {items.map((setting) => (
-          <div key={setting.key}>
-            <code>{setting.key}</code>
-            <span>{setting.description}</span>
-            <span className={setting.configured ? "configured" : "missing"}>
-              {setting.configured ? "已配置" : "未配置"} · {setting.category}
-            </span>
-          </div>
-        ))}
-      </div>
+      {items.length === 0 ? (
+        <p className="empty-state">
+          后台控制服务连接后显示当前部署检测结果；上方配置地图仍可作为离线配置入口。
+        </p>
+      ) : (
+        <div className="deployment-list">
+          {items.map((setting) => (
+            <div key={setting.key}>
+              <code>{setting.key}</code>
+              <span>{setting.description}</span>
+              <span className={setting.configured ? "configured" : "missing"}>
+                {setting.configured ? "已配置" : "未配置"} · {categoryLabels[setting.category]}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
       <p className="boundary-note">
         Secret、数据库角色和监听地址只展示状态，不在网页中读取或修改真实值。
+      </p>
+    </section>
+  );
+}
+
+const environmentConfigurationGroups = [
+  {
+    priority: "P0",
+    title: "后台控制服务",
+    owner: "admin-control-api",
+    description: "先建立独立数据库身份、认证和监听边界，后台才可以读取真实状态。",
+    entries: [
+      {
+        key: "ADMIN_CONTROL_DATABASE_URL",
+        description: "独立最小权限数据库连接，不得复用 Runtime 或 Migrator 登录。",
+      },
+      {
+        key: "DATABASE_ADMIN_CONTROL_ROLE",
+        description: "用于启动时校验实际 PostgreSQL Role，生产环境必需。",
+      },
+      {
+        key: "pnpm db:migrate:up",
+        description: "应用数据库迁移并重建最小权限 ACL；必须先于控制服务启动。",
+      },
+      {
+        key: "platform_control_operators",
+        description: "由受控数据库运维事务写入首位 admin；控制 API 不提供自助提权。",
+      },
+      {
+        key: "ADMIN_CONTROL_LISTEN_HOST / ADMIN_CONTROL_LISTEN_PORT",
+        description: "管理 API 监听地址；开发默认 127.0.0.1:3003。",
+      },
+      {
+        key: "DEV_ADMIN_CONTROL_TOKEN / ADMIN_CONTROL_JWT_*",
+        description: "开发使用固定 Token；生产必须改用独立 issuer、audience 与签名密钥。",
+      },
+      {
+        key: "ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST",
+        description: "只允许控制服务向明确列出的模型或 Mem0 主机执行连接探测。",
+      },
+    ],
+  },
+  {
+    priority: "P0",
+    title: "模型与长期记忆",
+    owner: "admin-control-api + agent-worker",
+    description: "秘密由部署平台注入；地址、模型目录和超时等可审计参数由对应页面发布。",
+    entries: [
+      {
+        key: "MODEL_API_KEY",
+        description: "当前部署的模型凭据；模型地址、默认模型和能力从“模型”页发布。",
+      },
+      {
+        key: "MEM0_API_KEY",
+        description: "Mem0 Project API Key，必须与作用域密钥同时配置。",
+      },
+      {
+        key: "MEM0_SCOPE_HMAC_KEY",
+        description: "至少 32 字节，用于匿名化租户与用户作用域，不得复用 API Key。",
+      },
+    ],
+  },
+  {
+    priority: "P0",
+    title: "运行基础设施",
+    owner: "api + worker + scheduler",
+    description: "这些连接属于进程启动契约，后台只提供配置地图，不读取或回显真实凭据。",
+    entries: [
+      {
+        key: "DATABASE_URL / DATABASE_SCHEMA",
+        description: "Runtime 业务数据库与 Schema；迁移连接必须使用独立 MIGRATION_DATABASE_URL。",
+      },
+      {
+        key: "S3_ENDPOINT / S3_BUCKET / S3_*",
+        description: "工作区、附件和历史产物的对象存储；生产凭据由密钥系统注入。",
+      },
+      {
+        key: "CUBESANDBOX_API_URL / CUBESANDBOX_TEMPLATE_ID",
+        description: "Sandbox 控制面和模板；本项目依赖 uu 端口映射，不在本机启动服务。",
+      },
+      {
+        key: "SKILL_PUBLISHER_DATABASE_URL / SKILL_PUBLISHER_S3_*",
+        description: "Skill 发布服务使用独立数据库与对象存储身份，不能复用 Runtime 凭据。",
+      },
+    ],
+  },
+  {
+    priority: "P1",
+    title: "运行策略与时区",
+    owner: "agent-worker + scheduler",
+    description: "开关和执行路径需要重新部署；百分比与 Token 预算在本页形成 Revision。",
+    entries: [
+      {
+        key: "THREAD_CONTEXT_COMPACTION_ENABLED",
+        description: "上下文压缩总开关；关闭时，本页发布的百分比参数不会执行。",
+      },
+      {
+        key: "THREAD_CONTEXT_COMPACTION_PATH",
+        description: "压缩执行路径；与启用模型和 Worker 部署能力保持一致。",
+      },
+      {
+        key: "HISTORY_DIRECTORY_TIME_ZONE",
+        description: "历史目录与定时任务的业务时区，变更后需要重启相关进程。",
+      },
+    ],
+  },
+] as const;
+
+function EnvironmentConfigurationGuide({
+  items,
+}: {
+  readonly items: AdminControlOverviewDto["deploymentSettings"];
+}) {
+  return (
+    <section className="control-panel environment-guide">
+      <div className="environment-guide-heading">
+        <div>
+          <span className="eyebrow">Configuration map</span>
+          <h2>部署配置地图</h2>
+          <p>
+            从 P0 开始配置。开发环境以 `.env.example` 为契约，生产环境以
+            `deploy/production.env.example` 为契约。
+          </p>
+        </div>
+        <span className="environment-contract-state">
+          {items.length === 0 ? "等待后台检测" : `已检测 ${items.length} 项`}
+        </span>
+      </div>
+
+      <div className="configuration-source-grid">
+        <article>
+          <span>部署平台</span>
+          <strong>Secret 与基础设施连接</strong>
+          <small>只在环境变量或密钥系统中修改，网页永不读取真实值。</small>
+        </article>
+        <article>
+          <span>后台 Revision</span>
+          <strong>模型、Mem0 与运行参数</strong>
+          <small>创建草稿、探测、发布；新 Run 固定发布时的配置快照。</small>
+        </article>
+        <article>
+          <span>运行时检测</span>
+          <strong>只展示是否就绪</strong>
+          <small>“按契约确认”表示当前控制服务无法安全判断该进程的配置状态。</small>
+        </article>
+      </div>
+
+      <div className="environment-guide-groups">
+        {environmentConfigurationGroups.map((group) => (
+          <article key={group.title} className="environment-guide-group">
+            <header>
+              <span className={`configuration-priority ${group.priority.toLowerCase()}`}>
+                {group.priority}
+              </span>
+              <span>
+                <strong>{group.title}</strong>
+                <small>{group.owner}</small>
+              </span>
+            </header>
+            <p>{group.description}</p>
+            <div className="environment-guide-entries">
+              {group.entries.map((entry) => {
+                const state = deploymentState(items, entry.key);
+                return (
+                  <div key={entry.key}>
+                    <span>
+                      <code>{entry.key}</code>
+                      <small>{entry.description}</small>
+                    </span>
+                    <span className={`configuration-state ${state}`}>
+                      {state === "configured"
+                        ? "已配置"
+                        : state === "missing"
+                          ? "未配置"
+                          : "按契约确认"}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </article>
+        ))}
+      </div>
+      <p className="environment-guide-footer">
+        推荐顺序：数据库与身份 → 模型与 Mem0 秘密 → Sandbox / S3 → 本页运行策略 → Provider
+        探测与发布。
       </p>
     </section>
   );
@@ -236,31 +461,26 @@ function Overview({
 }) {
   const stats = overview.statistics;
   const cards = [
-    ["运行总数", stats.runs.total],
-    ["排队运行", stats.runs.queued],
-    ["正在执行", stats.runs.running],
-    ["24h 成功", stats.runs.succeeded24h],
-    ["24h 失败", stats.runs.failed24h],
-    ["24h 取消", stats.runs.cancelled24h],
-    ["待派发", stats.dispatch.pending],
-    ["派发处理中", stats.dispatch.claimed],
-    ["活跃沙箱", stats.sandboxes.active],
-    ["暂停沙箱", stats.sandboxes.paused],
-    ["待清理沙箱", stats.sandboxes.cleanupPending],
-    ["记忆积压", stats.memory.pending],
-    ["记忆失败", stats.memory.failed],
-    ["活跃定时任务", stats.automations.active],
-    ["24h 定时任务失败", stats.automations.failedOccurrences24h],
-    ["已发布 Skill", stats.skills.published],
-    ["已安装 Skill", stats.skills.installed],
+    ["累计用户", stats.users.total, `${stats.users.registered24h} 位 24h 新增`],
+    ["累计对话", stats.conversations.total, `${stats.conversations.active24h} 条 24h 活跃`],
+    ["累计 Run", stats.runs.total, `${stats.runs.running} 个正在执行`],
+    ["24h 成功", stats.runs.succeeded24h, `${stats.runs.failed24h} 个失败`],
+    ["活跃沙箱", stats.sandboxes.active, `${stats.sandboxes.cleanupPending} 个待清理`],
+    ["记忆队列", stats.memory.pending, `${stats.memory.failed} 个失败`],
+    [
+      "活跃定时任务",
+      stats.automations.active,
+      `${stats.automations.failedOccurrences24h} 个 24h 失败`,
+    ],
+    ["已发布 Skill", stats.skills.published, `${stats.skills.installed} 次安装`],
   ] as const;
   return (
     <>
       <section className="control-hero">
         <div>
           <span className="eyebrow">Generation {overview.generation}</span>
-          <h2>运行控制面</h2>
-          <p>所有发布操作都形成不可变版本；新 Run 固化当前版本，进行中的 Run 不受影响。</p>
+          <h2>平台运营驾驶舱</h2>
+          <p>配置、用户、对话与运行健康集中呈现；所有发布操作形成不可变版本并写入审计。</p>
         </div>
         <div className="active-stack">
           <span>
@@ -273,10 +493,11 @@ function Overview({
         </div>
       </section>
       <section className="statistics-grid" aria-label="运行统计">
-        {cards.map(([label, count]) => (
+        {cards.map(([label, count, note]) => (
           <article key={label}>
             <span>{label}</span>
             <strong>{count}</strong>
+            <small>{note}</small>
           </article>
         ))}
       </section>
@@ -910,56 +1131,201 @@ function ModelProviderWorkspace({
   );
 }
 
-function MemoryDraftForm({
+function deploymentState(
+  settings: AdminControlOverviewDto["deploymentSettings"],
+  key: string,
+): "configured" | "missing" | "unknown" {
+  const setting = settings.find((candidate) => candidate.key === key);
+  return setting === undefined ? "unknown" : setting.configured ? "configured" : "missing";
+}
+
+function DeploymentCheck({
+  label,
+  settingKey,
+  state,
+}: {
+  readonly label: string;
+  readonly settingKey: string;
+  readonly state: "configured" | "missing" | "unknown";
+}) {
+  return (
+    <div className={`memory-deployment-check ${state}`}>
+      <span aria-hidden="true">
+        {state === "configured" ? "✓" : state === "missing" ? "!" : "·"}
+      </span>
+      <span>
+        <strong>{label}</strong>
+        <code>{settingKey}</code>
+      </span>
+      <small>
+        {state === "configured" ? "已配置" : state === "missing" ? "未配置" : "待连接后台确认"}
+      </small>
+    </div>
+  );
+}
+
+function MemoryProviderWorkspace({
   onCreate,
   busy,
+  deploymentSettings,
+  activeMemory,
 }: {
   readonly onCreate: (form: FormData) => Promise<void>;
   readonly busy: boolean;
+  readonly deploymentSettings: AdminControlOverviewDto["deploymentSettings"];
+  readonly activeMemory: AdminControlOverviewDto["activeMemory"];
 }) {
   return (
-    <form
-      className="control-form"
-      onSubmit={(event: FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-        void onCreate(new FormData(event.currentTarget));
-      }}
-    >
-      <label>
-        Provider Key
-        <input name="providerKey" required pattern="[a-z0-9][a-z0-9._-]{0,63}" />
-      </label>
-      <label>
-        显示名称
-        <input name="displayName" required />
-      </label>
-      <label className="wide">
-        HTTPS Base URL
-        <input name="baseUrl" required type="url" />
-      </label>
-      <label>
-        请求超时（ms）
-        <input
-          name="requestTimeoutMs"
-          type="number"
-          min="100"
-          max="120000"
-          defaultValue="10000"
-          required
-        />
-      </label>
-      <label className="checkbox">
-        <input name="enabled" type="checkbox" defaultChecked />
-        启用
-      </label>
-      <label className="wide">
-        变更原因
-        <textarea name="reason" required maxLength={500} />
-      </label>
-      <button type="submit" className="primary-button" disabled={busy}>
-        创建记忆草稿
-      </button>
-    </form>
+    <div className="memory-provider-workspace">
+      <section className="memory-provider-hero">
+        <span className="mem0-mark" aria-hidden="true">
+          M
+        </span>
+        <div>
+          <span className="eyebrow">Managed memory provider</span>
+          <h2>Mem0 Platform</h2>
+          <p>
+            Hoox 使用 Mem0 承载跨对话长期记忆。Run
+            完成后通过可靠队列异步写入；下一轮按租户与用户作用域检索， 不把原始 userId
+            直接发送给外部服务。
+          </p>
+        </div>
+        <span
+          className={`memory-active-state ${activeMemory === undefined ? "inactive" : "active"}`}
+        >
+          {activeMemory === undefined ? "尚未发布" : `已启用 · Revision ${activeMemory.revision}`}
+        </span>
+      </section>
+
+      <section className="memory-setup-section">
+        <div className="memory-section-heading">
+          <span>
+            <span className="step-number">1</span>
+            <strong>准备部署秘密</strong>
+          </span>
+          <p>密钥只在部署环境中设置，后台页面只显示状态，不读取或回显真实值。</p>
+        </div>
+        <div className="memory-deployment-grid">
+          <DeploymentCheck
+            label="Mem0 Project API Key"
+            settingKey="MEM0_API_KEY"
+            state={deploymentState(deploymentSettings, "MEM0_API_KEY")}
+          />
+          <DeploymentCheck
+            label="作用域 HMAC Key"
+            settingKey="MEM0_SCOPE_HMAC_KEY"
+            state={deploymentState(deploymentSettings, "MEM0_SCOPE_HMAC_KEY")}
+          />
+          <DeploymentCheck
+            label="探针主机白名单"
+            settingKey="ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST"
+            state={deploymentState(deploymentSettings, "ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST")}
+          />
+        </div>
+        <p className="memory-security-note">
+          <strong>安全要求：</strong>HMAC Key 至少 32 字节，必须与 Mem0 API Key
+          独立生成；白名单需包含
+          <code>api.mem0.ai</code> 或实际自建网关域名。
+        </p>
+      </section>
+
+      <section className="memory-setup-section">
+        <div className="memory-section-heading">
+          <span>
+            <span className="step-number">2</span>
+            <strong>创建 Mem0 配置草稿</strong>
+          </span>
+          <p>草稿不会立即影响 Run。保存后先执行连接探测，再由管理员发布。</p>
+        </div>
+        <form
+          className="control-form memory-control-form"
+          onSubmit={(event: FormEvent<HTMLFormElement>) => {
+            event.preventDefault();
+            void onCreate(new FormData(event.currentTarget));
+          }}
+        >
+          <label>
+            Provider Key
+            <input
+              name="providerKey"
+              required
+              pattern="[a-z0-9][a-z0-9._-]{0,63}"
+              defaultValue="mem0"
+            />
+            <small>平台内稳定标识，发布后用于 Run 配置快照。</small>
+          </label>
+          <label>
+            显示名称
+            <input name="displayName" required defaultValue="Mem0 Platform" />
+            <small>管理员和审计记录中显示的名称。</small>
+          </label>
+          <label className="wide">
+            Mem0 HTTPS API 地址
+            <input name="baseUrl" required type="url" defaultValue="https://api.mem0.ai/" />
+            <small>可改为兼容的企业网关，但必须加入探针白名单。</small>
+          </label>
+          <label>
+            请求超时（ms）
+            <input
+              name="requestTimeoutMs"
+              type="number"
+              min="100"
+              max="120000"
+              defaultValue="10000"
+              required
+            />
+            <small>仅控制单次外部请求；队列重试由 Runtime 负责。</small>
+          </label>
+          <label className="checkbox memory-enabled-checkbox">
+            <input name="enabled" type="checkbox" defaultChecked />
+            发布后允许写入和检索长期记忆
+          </label>
+          <div className="memory-secret-refs wide">
+            <span>
+              <small>API Secret Ref</small>
+              <code>deployment:memory-api</code>
+            </span>
+            <span>
+              <small>Scope Secret Ref</small>
+              <code>deployment:memory-scope</code>
+            </span>
+          </div>
+          <label className="wide">
+            变更原因
+            <textarea
+              name="reason"
+              required
+              maxLength={500}
+              placeholder="例如：接入生产 Mem0 Project，完成密钥与域名白名单配置"
+            />
+            <small>原因会进入不可变审计记录。</small>
+          </label>
+          <button type="submit" className="primary-button" disabled={busy}>
+            创建 Mem0 配置草稿
+          </button>
+        </form>
+      </section>
+
+      <section className="memory-flow" aria-label="Mem0 发布流程">
+        <div>
+          <span>3</span>
+          <strong>探测连接</strong>
+          <small>验证域名白名单、密钥和服务可达性。</small>
+        </div>
+        <i aria-hidden="true">→</i>
+        <div>
+          <span>4</span>
+          <strong>发布版本</strong>
+          <small>新 Run 固化该 Revision，进行中的 Run 不切换。</small>
+        </div>
+        <i aria-hidden="true">→</i>
+        <div>
+          <span>5</span>
+          <strong>观察队列</strong>
+          <small>在数据运营页关注记忆积压和失败数。</small>
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -971,40 +1337,69 @@ function SettingsDraftForm({
   readonly busy: boolean;
 }) {
   return (
-    <form
-      className="control-form"
-      onSubmit={(event: FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-        void onCreate(new FormData(event.currentTarget));
-      }}
-    >
-      <label>
-        压缩软上限 %
-        <input name="compactionSoftLimitPercent" type="number" defaultValue="80" required />
-      </label>
-      <label>
-        压缩目标 %<input name="compactionTargetPercent" type="number" defaultValue="60" required />
-      </label>
-      <label>
-        保留用户 Token
-        <input name="compactionRecentUserTokens" type="number" defaultValue="16000" required />
-      </label>
-      <label>
-        压缩输出 Token
-        <input name="compactionMaxOutputTokens" type="number" defaultValue="4096" required />
-      </label>
-      <label>
-        压缩超时（ms）
-        <input name="compactionTimeoutMs" type="number" defaultValue="60000" required />
-      </label>
-      <label className="wide">
-        变更原因
-        <textarea name="reason" required maxLength={500} />
-      </label>
-      <button type="submit" className="primary-button" disabled={busy}>
-        创建参数草稿
-      </button>
-    </form>
+    <div className="runtime-settings-workspace">
+      <section className="runtime-settings-guide">
+        <div>
+          <span className="eyebrow">Context lifecycle</span>
+          <h2>上下文压缩策略</h2>
+          <p>控制 Thread 接近模型窗口上限时何时压缩、压到多少以及保留多少近期用户信息。</p>
+        </div>
+        <div className="runtime-setting-principles">
+          <span>
+            <strong>触发</strong>
+            <small>软上限越高，单轮上下文越完整，但越接近模型硬上限。</small>
+          </span>
+          <span>
+            <strong>目标</strong>
+            <small>目标必须低于软上限，二者差值决定压缩后的余量。</small>
+          </span>
+          <span>
+            <strong>预算</strong>
+            <small>Token 与超时共同限制压缩成本；发布前需与启用模型上限核对。</small>
+          </span>
+        </div>
+      </section>
+      <form
+        className="control-form"
+        onSubmit={(event: FormEvent<HTMLFormElement>) => {
+          event.preventDefault();
+          void onCreate(new FormData(event.currentTarget));
+        }}
+      >
+        <label>
+          压缩软上限 %
+          <input name="compactionSoftLimitPercent" type="number" defaultValue="80" required />
+          <small>推荐 75–85；达到该占用比例后进入压缩。</small>
+        </label>
+        <label>
+          压缩目标 %
+          <input name="compactionTargetPercent" type="number" defaultValue="60" required />
+          <small>推荐 55–65，必须低于软上限。</small>
+        </label>
+        <label>
+          保留用户 Token
+          <input name="compactionRecentUserTokens" type="number" defaultValue="16000" required />
+          <small>优先保留近期用户输入，避免压缩丢失当前任务。</small>
+        </label>
+        <label>
+          压缩输出 Token
+          <input name="compactionMaxOutputTokens" type="number" defaultValue="4096" required />
+          <small>不得超过当前启用模型的最大输出。</small>
+        </label>
+        <label>
+          压缩超时（ms）
+          <input name="compactionTimeoutMs" type="number" defaultValue="60000" required />
+          <small>超时后 Run 失败关闭，不静默丢弃上下文。</small>
+        </label>
+        <label className="wide">
+          变更原因
+          <textarea name="reason" required maxLength={500} />
+        </label>
+        <button type="submit" className="primary-button" disabled={busy}>
+          创建参数草稿
+        </button>
+      </form>
+    </div>
   );
 }
 
@@ -1023,32 +1418,45 @@ export function AdminControlConsole({
   const [catalogProviders, setCatalogProviders] = useState<readonly PiModelCatalogProviderDto[]>(
     listLocalPiModelCatalogProviders,
   );
+  const [users, setUsers] = useState<PlatformUserPageDto>();
+  const [userQuery, setUserQuery] = useState("");
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
+  const refreshSequence = useRef(0);
 
   const refresh = useCallback(async () => {
+    const sequence = refreshSequence.current + 1;
+    refreshSequence.current = sequence;
     try {
-      const [nextOverview, nextItems, nextAudits, nextCatalogProviders] = await Promise.all([
-        api.overview(),
-        view === "models"
-          ? api.listModelProviders()
-          : view === "memory"
-            ? api.listMemoryProviders()
-            : view === "settings"
-              ? api.listRuntimeSettings()
-              : Promise.resolve([]),
-        view === "overview" ? api.listAudits(50) : Promise.resolve([]),
-        view === "models" ? api.listPiModelCatalogProviders() : Promise.resolve([]),
-      ]);
+      const [nextOverview, nextItems, nextAudits, nextCatalogProviders, nextUsers] =
+        await Promise.all([
+          api.overview(),
+          view === "models"
+            ? api.listModelProviders()
+            : view === "memory"
+              ? api.listMemoryProviders()
+              : view === "settings"
+                ? api.listRuntimeSettings()
+                : Promise.resolve([]),
+          view === "overview" ? api.listAudits(50) : Promise.resolve([]),
+          view === "models" ? api.listPiModelCatalogProviders() : Promise.resolve([]),
+          view === "users"
+            ? api.listUsers({ ...(userQuery.length === 0 ? {} : { query: userQuery }), limit: 100 })
+            : Promise.resolve(undefined),
+        ]);
+      // 模块切换时旧请求可能晚于新请求返回；过期响应不能覆盖当前模块的数据。
+      if (sequence !== refreshSequence.current) return;
       setOverview(nextOverview);
       setItems(nextItems);
       setAudits(nextAudits);
-      setCatalogProviders(nextCatalogProviders);
+      if (view === "models") setCatalogProviders(nextCatalogProviders);
+      if (view === "users") setUsers(nextUsers);
       setError(undefined);
     } catch (reason) {
+      if (sequence !== refreshSequence.current) return;
       setError(errorMessage(reason));
     }
-  }, [api, view]);
+  }, [api, userQuery, view]);
 
   useEffect(() => {
     setItems([]);
@@ -1082,12 +1490,16 @@ export function AdminControlConsole({
           <span className="eyebrow">Hoox Admin</span>
           <h1>
             {view === "overview"
-              ? "总览与统计"
-              : view === "models"
-                ? "模型"
-                : view === "memory"
-                  ? "记忆供应商"
-                  : "运行参数"}
+              ? "运营驾驶舱"
+              : view === "analytics"
+                ? "数据运营"
+                : view === "users"
+                  ? "用户管理"
+                  : view === "models"
+                    ? "模型"
+                    : view === "memory"
+                      ? "记忆供应商"
+                      : "运行参数"}
           </h1>
         </div>
         <button
@@ -1111,14 +1523,47 @@ export function AdminControlConsole({
       )}
       {view === "overview" ? (
         overview === undefined ? (
-          <p className="empty-state large">正在加载控制面…</p>
+          error === undefined ? (
+            <p className="empty-state large">正在加载控制面…</p>
+          ) : (
+            <ControlDataUnavailable
+              title="运营数据暂不可用"
+              description="后台控制服务尚未连接 PostgreSQL；配置说明仍可浏览，但真实用户、对话和运行统计无法读取。"
+            />
+          )
         ) : (
           <Overview value={overview} audits={audits} />
         )
+      ) : view === "analytics" ? (
+        overview === undefined ? (
+          error === undefined ? (
+            <p className="empty-state large">正在加载运营数据…</p>
+          ) : (
+            <ControlDataUnavailable
+              title="真实统计暂不可用"
+              description="统计直接来自 PostgreSQL 受限聚合投影；请恢复 uu 端口映射和后台控制服务后重试。"
+            />
+          )
+        ) : (
+          <OperationsDashboard value={overview} />
+        )
+      ) : view === "users" ? (
+        <UserManagementWorkspace
+          value={users}
+          query={userQuery}
+          busy={busy}
+          onSearch={setUserQuery}
+          onStatusChange={(userId, status, reason) =>
+            operation(() => api.updateUserStatus(userId, { status, reason }))
+          }
+        />
       ) : (
         <>
+          {view === "settings" && (
+            <EnvironmentConfigurationGuide items={overview?.deploymentSettings ?? []} />
+          )}
           <section className="control-panel">
-            {view !== "models" && (
+            {view !== "models" && view !== "memory" && (
               <div className="panel-heading">
                 <div>
                   <span className="eyebrow">New revision</span>
@@ -1150,8 +1595,10 @@ export function AdminControlConsole({
                 }
               />
             ) : view === "memory" ? (
-              <MemoryDraftForm
+              <MemoryProviderWorkspace
                 busy={busy}
+                deploymentSettings={overview?.deploymentSettings ?? []}
+                activeMemory={overview?.activeMemory}
                 onCreate={(form) =>
                   operation(() =>
                     api.createMemoryDraft({

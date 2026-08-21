@@ -107,4 +107,38 @@ describe("后台控制 Web API", () => {
     const api = new AdminControlApi(vi.fn<typeof fetch>(async () => response({}, 403)));
     await expect(api.listPiModelCatalogProviders()).rejects.toMatchObject({ status: 403 });
   });
+
+  it("读取用户目录并用带幂等键的请求变更用户状态", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(response({ data: { items: [], total: 0 } }))
+      .mockResolvedValueOnce(
+        response({
+          data: {
+            userId: "user_customer",
+            email: "customer@example.com",
+            displayName: "测试用户",
+            status: "disabled",
+            createdAt: "2026-08-20T00:00:00.000Z",
+            activeSessions: 0,
+            conversationCount: 0,
+            runCount: 0,
+          },
+        }),
+      );
+    const api = new AdminControlApi(fetcher, "/v1/admin/control", () => "user-status-key");
+
+    await api.listUsers({ query: "customer", limit: 20 });
+    await api.updateUserStatus("user_customer", {
+      status: "disabled",
+      reason: "账号风险处置",
+    });
+
+    expect(fetcher.mock.calls[0]?.[0]).toBe("/v1/admin/control/users?limit=20&query=customer");
+    expect(fetcher.mock.calls[1]?.[0]).toBe("/v1/admin/control/users/user_customer/status");
+    expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get("Idempotency-Key")).toBe(
+      "user-status-key",
+    );
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).not.toContain("password");
+  });
 });

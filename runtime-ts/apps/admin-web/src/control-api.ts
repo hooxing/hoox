@@ -8,9 +8,12 @@ import type {
   ModelProviderRevisionDto,
   PiModelCatalogModelDto,
   PiModelCatalogProviderDto,
+  PlatformUserPageDto,
+  PlatformUserSummaryDto,
   ProbeControlRevisionRequest,
   PublishControlRevisionRequest,
   RuntimeSettingsRevisionDto,
+  UpdatePlatformUserStatusRequest,
 } from "@hoox/protocol";
 import { AdminApiError } from "./api.js";
 import {
@@ -137,6 +140,24 @@ export class AdminControlApi {
     return (await this.request<ListEnvelope<ControlAuditEventDto>>(`/audits?limit=${limit}`)).items;
   }
 
+  listUsers(
+    input: { readonly query?: string; readonly limit?: number } = {},
+  ): Promise<PlatformUserPageDto> {
+    const query = new URLSearchParams({ limit: String(input.limit ?? 100) });
+    if (input.query !== undefined) query.set("query", input.query);
+    return this.request(`/users?${query.toString()}`);
+  }
+
+  updateUserStatus(
+    userId: string,
+    input: UpdatePlatformUserStatusRequest,
+  ): Promise<PlatformUserSummaryDto> {
+    return this.request(`/users/${encodeURIComponent(userId)}/status`, {
+      method: "POST",
+      body: JSON.stringify(input),
+    });
+  }
+
   createModelDraft(input: CreateModelProviderDraftRequest): Promise<ModelProviderRevisionDto> {
     return this.request("/model-providers", { method: "POST", body: JSON.stringify(input) });
   }
@@ -192,6 +213,8 @@ export type AdminControlApiContract = Pick<
   | "listMemoryProviders"
   | "listRuntimeSettings"
   | "listAudits"
+  | "listUsers"
+  | "updateUserStatus"
   | "createModelDraft"
   | "createMemoryDraft"
   | "createRuntimeSettingsDraft"

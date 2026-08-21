@@ -15,6 +15,7 @@ const configuration: AdminControlApiProcessConfiguration = Object.freeze({
     compactionEnabledConfigured: true,
     compactionPathConfigured: true,
     historyTimeZoneConfigured: true,
+    memoryScopeKeyConfigured: true,
   }),
   developmentAuth: Object.freeze({ userId: "user_admin", token: "development-token" }),
 });

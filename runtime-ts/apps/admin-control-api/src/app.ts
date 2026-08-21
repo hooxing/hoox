@@ -23,16 +23,23 @@ import {
   ModelProviderRevisionSuccessEnvelopeSchema,
   PiModelCatalogModelListSuccessEnvelopeSchema,
   PiModelCatalogProviderListSuccessEnvelopeSchema,
+  PlatformUserPageSuccessEnvelopeSchema,
+  PlatformUserPathSchema,
+  PlatformUserQuerySchema,
+  PlatformUserSummarySuccessEnvelopeSchema,
   ProbeControlRevisionRequestSchema,
   PublishControlRevisionRequestSchema,
   RuntimeSettingsRevisionListSuccessEnvelopeSchema,
   RuntimeSettingsRevisionSuccessEnvelopeSchema,
+  UpdatePlatformUserStatusRequestSchema,
   type ControlRevisionPath,
   type CreateMemoryProviderDraftRequest,
   type CreateModelProviderDraftRequest,
   type CreateRuntimeSettingsDraftRequest,
   type ProbeControlRevisionRequest,
   type PublishControlRevisionRequest,
+  type PlatformUserPath,
+  type UpdatePlatformUserStatusRequest,
 } from "@hoox/protocol";
 import { Type } from "@sinclair/typebox";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
@@ -61,6 +68,8 @@ type ControlServiceContract = Pick<
   | "listMemoryProviders"
   | "listRuntimeSettings"
   | "listAudits"
+  | "listUsers"
+  | "updateUserStatus"
   | "createModelDraft"
   | "createMemoryDraft"
   | "createRuntimeSettingsDraft"
@@ -221,6 +230,26 @@ export function createAdminControlApiApp(
         items: await dependencies.control.listAudits(await actor(request), request.query.limit),
       }),
   );
+  app.get<{
+    Querystring: { readonly query?: string; readonly limit?: number };
+  }>(
+    "/v1/admin/control/users",
+    {
+      schema: {
+        querystring: PlatformUserQuerySchema,
+        response: responseSchemas(PlatformUserPageSuccessEnvelopeSchema),
+      },
+    },
+    async (request) =>
+      success(
+        request,
+        await dependencies.control.listUsers(
+          await actor(request),
+          request.query.query,
+          request.query.limit,
+        ),
+      ),
+  );
 
   app.post<{ Body: CreateModelProviderDraftRequest }>(
     "/v1/admin/control/model-providers",
@@ -236,6 +265,28 @@ export function createAdminControlApiApp(
       return success(
         request,
         await dependencies.control.createModelDraft(mutationContext(request, userId), request.body),
+      );
+    },
+  );
+  app.post<{ Params: PlatformUserPath; Body: UpdatePlatformUserStatusRequest }>(
+    "/v1/admin/control/users/:userId/status",
+    {
+      schema: {
+        params: PlatformUserPathSchema,
+        body: UpdatePlatformUserStatusRequestSchema,
+        response: responseSchemas(PlatformUserSummarySuccessEnvelopeSchema),
+      },
+    },
+    async (request) => {
+      requireJson(request);
+      const userId = await actor(request);
+      return success(
+        request,
+        await dependencies.control.updateUserStatus(mutationContext(request, userId), {
+          targetUserId: request.params.userId,
+          status: request.body.status,
+          reason: request.body.reason,
+        }),
       );
     },
   );

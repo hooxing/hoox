@@ -134,6 +134,11 @@ vendor
 ## 延伸阅读
 
 - [仓库导览](repository-map.md)
+- [Thread 连续上下文](thread-continuity.md)
+- [Agent 协作与 Todo](agent-collaboration.md)
+- [Sandbox Provider](sandbox-providers.md)
+- [Skill Runtime](skill-runtime.md)
+- [团队协作](team-collaboration.md)
 - [项目状态](../project-status.md)
 - [配置参考](../reference/configuration.md)
 - [开发 API 契约](../reference/development-api.md)

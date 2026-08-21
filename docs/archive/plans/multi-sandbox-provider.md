@@ -1,7 +1,7 @@
 # 多 Sandbox Provider 实施计划
 
-> [!NOTE]
-> 本文是实施计划或阶段拆解。当前行为以代码、自动化测试、当前架构文档和未被替代的 ADR 为准。
+> [!IMPORTANT]
+> 状态：历史实施方案。CubeSandbox/E2B 注册、持久身份和路由已经实现，当前行为见[Sandbox Provider](../../architecture/sandbox-providers.md)，生产缺口见[项目状态](../../project-status.md)。
 
 
 - 文档性质：跨 Sandbox、Worker、Persistence、配置、部署与生产 Gate 的实施总计划

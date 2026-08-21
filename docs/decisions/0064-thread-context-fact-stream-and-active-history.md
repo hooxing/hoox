@@ -10,7 +10,7 @@
 
 当前 `runtime_rollout_*`、`rollout_projections` 和 waiting recovery 都以 Run/Attempt 为恢复边界。新 Run 的 `initial_projection` 固定为空，因此这些事实能恢复一次 Attempt，却不能恢复整个业务 Thread 的连续对话。`run_events` 又承担 UI 流式展示，包含 partial/progress，不能直接作为跨 Run 模型历史。
 
-[Thread 连续上下文实施总计划](../plans/thread-continuous-context.md) 已确定 Thread 是连续对话边界、Run 是执行单元、Canonical Context 必须按当前可信配置重建。本 ADR 定义 Thread 事实流、活动历史和现有 Attempt rollout 的关系，不定义 compaction 算法。
+[Thread 连续上下文实施总计划](../archive/plans/thread-continuous-context.md) 已确定 Thread 是连续对话边界、Run 是执行单元、Canonical Context 必须按当前可信配置重建。本 ADR 定义 Thread 事实流、活动历史和现有 Attempt rollout 的关系，不定义 compaction 算法。
 
 ## 决策驱动因素
 

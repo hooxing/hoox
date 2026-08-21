@@ -8,8 +8,25 @@
 - Web 开发服务器通过同源代理访问 API，不启用宽松 CORS。
 - `Authorization: Bearer dev-user-a|dev-user-b` 只用于固定隔离测试 fixture。
 - `/v1/auth/register` 和 `/v1/auth/login` 提供 development 本地账号会话，并为新账号原子创建 User、个人 Tenant 和 owner Membership。
-- 服务端始终从已认证 User 和 PostgreSQL Membership 重建 TenantScope，忽略客户端声明的个人 Tenant。
+- 服务端始终从已认证 User 和 PostgreSQL Membership 重建 `TenantScope`。`X-Tenant-ID` 只选择个人或团队空间，不能替代 Membership 授权。
 - development 身份和本地账号端点不会装配到 production API。
+
+## 主题路由
+
+本页不复制完整 TypeBox Schema。需要修改某组接口时，先从下表找到事实拥有者，再核对 `runtime-ts/packages/protocol`、`runtime-ts/apps/api` 和对应测试。
+
+| 路由组 | 主要用途 | 当前说明 |
+| --- | --- | --- |
+| `/v1/threads`、`/:threadId/runs`、`/inputs`、`/context`、`/continuity` | 创建任务、执行 Run、统一输入、读取上下文和连续性状态 | [Thread 连续上下文](../architecture/thread-continuity.md) |
+| `/v1/threads/:threadId/forks` | 创建同空间分支或发布到已授权团队 | [团队协作](../architecture/team-collaboration.md) |
+| `/v1/me/teams`、`/v1/teams`、`/:teamId/members` | 团队目录、创建、成员角色和解散 | [团队协作](../architecture/team-collaboration.md) |
+| `/v1/skills`、`/v1/me/skills` | 浏览 Skill 目录并管理当前 Tenant 安装 | [Skill Runtime](../architecture/skill-runtime.md) |
+| `/v1/me/history-files`、`/v1/me/team-files/import` | 浏览当前 Tenant 云盘、下载固定版本和跨空间导入 | [历史文件与 ResourceFS](history-files.md) |
+| `/v1/me/personalization`、`/v1/teams/:teamId/personalization` | 读取和更新个人或团队偏好 | [团队协作](../architecture/team-collaboration.md) |
+| `/v1/automations` | 管理 Thread 定时任务 | `@hoox/automation`、Protocol Schema 和 API 测试 |
+| `/v1/resources/uploads` | 通过受控上传协议创建 ResourceVersion | [架构总览](../architecture/overview.md) |
+
+路径中的 `/me` 表示以当前认证用户发起操作，不必然表示数据属于全局个人空间；最终作用域仍由该路由的 `TenantScope` 和业务校验决定。
 
 ## 健康端点
 

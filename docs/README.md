@@ -1,46 +1,38 @@
 # Hoox 文档中心
 
-本目录描述 Hoox 的**当前行为和维护方式**。历史 ADR、实施计划与验证记录用于解释演进过程，不应替代当前架构、开发或运维文档。
+本目录帮助读者理解和维护 Hoox 的**当前行为**。历史 ADR、计划、Spike 和验证记录用于追溯理由或时点证据，不能代替当前架构、参考和运维说明。
 
-## 按角色阅读
+## 按任务阅读
 
-### 使用者与集成者
-
-1. [项目状态](project-status.md)：确认当前成熟度和已知缺口。
-2. [架构总览](architecture/overview.md)：理解 Hoox 解决的问题和核心运行链路。
-3. [开发环境准备](development.md)：在本地启动完整 development 链路。
-4. [配置参考](reference/configuration.md)：按服务配置 PostgreSQL、对象存储、Sandbox 与模型。
-5. [开发 API 契约](reference/development-api.md)：了解本地 Web 和集成入口。
-
-### 贡献者
-
-1. 仓库根目录的[贡献指南](../CONTRIBUTING.md)。
-2. [仓库导览](architecture/repository-map.md)：确定改动应落在哪个应用或包。
-3. [命令参考](reference/commands.md)：选择与改动范围相符的验证命令。
-4. [架构决策规则](decisions/README.md)：只在触及长期边界时新增 ADR。
-5. [项目路线图](roadmap.md)：了解阶段目标，不把未勾选计划误认为当前承诺。
-
-### 维护者与运维者
-
-1. [生产就绪说明](operations/production-readiness.md)。
-2. [生产发布清单](../deploy/production-release-checklist.md)。
-3. [内部诊断指南](maintainers/diagnostics.md)。
-4. [Thread 连续上下文运维](operations/thread-continuity.md)。
-5. [供应链证据](../supply-chain/README.md)。
-6. [首次公开发布检查清单](maintainers/open-source-release-checklist.md)。
+| 你要完成的任务 | 入口 |
+| --- | --- |
+| 判断仓库当前能做什么、离生产使用还缺什么 | [项目状态](project-status.md) |
+| 理解系统边界、领域关系和主运行链路 | [架构总览](architecture/overview.md) |
+| 理解多轮 Thread、输入、压缩、恢复与 Sandbox 保留 | [Thread 连续上下文](architecture/thread-continuity.md) |
+| 理解子 Agent、控制工具、共享 Sandbox 与 Todo | [Agent 协作与 Todo](architecture/agent-collaboration.md) |
+| 理解 CubeSandbox/E2B 的选择、路由与限制 | [Sandbox Provider](architecture/sandbox-providers.md) |
+| 理解 Skill 的安装、Run 快照、加载与资源边界 | [Skill Runtime](architecture/skill-runtime.md) |
+| 理解团队、成员、任务发布和跨空间文件边界 | [团队协作](architecture/team-collaboration.md) |
+| 准备本地环境并启动开发工作台 | [开发环境准备](development.md) |
+| 查找代码应修改的位置 | [仓库导览](architecture/repository-map.md) |
+| 配置服务、运行命令或调用 Development API | [配置参考](reference/configuration.md) · [命令参考](reference/commands.md) · [Development API](reference/development-api.md) |
+| 理解个人历史文件和 ResourceFS 路径 | [历史文件与 ResourceFS](reference/history-files.md) |
+| 理解 `todo_write` 协议和持久化语义 | [Todo Write](reference/todo-write.md) |
+| 部署、发布或排查运行问题 | [运维文档](operations/README.md) · [维护者文档](maintainers/README.md) |
+| 了解尚未完成的战略方向或有效实施计划 | [项目路线](roadmap.md) · [实施计划](plans/README.md) |
+| 追溯架构理由、实验、验收或失效资料 | [架构决策](decisions/README.md) · [Spike](spikes/README.md) · [验证与评测](verification/README.md) · [历史资料](archive/README.md) |
 
 ## 文档类型
 
 | 类型 | 目录或文件 | 权威范围 |
 | --- | --- | --- |
-| 当前说明 | `architecture/`、`reference/`、`operations/`、`development.md` | 描述当前代码与操作方式，发现漂移必须优先修正 |
-| 项目状态 | `project-status.md`、`roadmap.md` | 前者描述当前成熟度，后者描述阶段目标 |
-| 规范 | `specs/` | 跨模块功能的目标契约 |
-| 架构决策 | `decisions/` | 记录为什么选择当前方案以及替代关系 |
-| 实施计划 | `plans/` | 任务拆解和迁移顺序，可能被后续 ADR 或实现替代 |
-| 验证记录 | `verification/`、`spikes/`、`gaia-native-evaluation.md` | 某次实验或验收的时间点证据，不自动代表持续保证 |
-| 历史参考 | `archive/` | 不再作为当前实现入口，只保留追溯价值 |
-
+| 当前说明 | `architecture/`、`development/`、`reference/`、`operations/`、`maintainers/`、`project-status.md` | 描述仓库 HEAD 的行为、接口、维护和限制 |
+| 目标规范 | `specs/` | 描述跨模块能力必须满足的目标与约束，并明确实现状态 |
+| 架构决策 | `decisions/` | 保存选择理由、替代方案和替代关系 |
+| 实施计划 | `plans/` | 只保存仍可能指导后续工作的草案、进行中或阻塞计划 |
+| 战略方向 | `roadmap.md` | 只保存尚未完成的方向和阶段 Gate，不维护任务账本 |
+| 时点证据 | `verification/`、`spikes/` | 记录特定提交、环境或时间点的实验与验收 |
+| 历史资料 | `archive/` | 保存退出当前导航但仍有追溯价值的计划、路线和旧实现资料 |
 
 ## 分类入口
 
@@ -55,28 +47,15 @@
 - [Spike](spikes/README.md)
 - [验证与评测](verification/README.md)
 - [历史资料](archive/README.md)
-## 文档维护原则
 
-- 根 README 只负责项目定位、最短启动路径和导航。
-- 当前行为写入主题文档，不要求读者通过 ADR 拼装现状。
-- ADR 一经接受不改写历史结论；改变结论时新增替代 ADR。
-- 实施计划完成、废弃或被替代后，应保留历史标记并从主要导航降级。
-- 命令、路径、端口和环境变量必须能从仓库当前文件验证。
+## 维护原则
+
+- 根 README 只负责项目定位、最短启动路径和入口导航。
+- 当前行为写入主题文档，并由代码、配置和测试验证；不要求读者通过 ADR 或计划拼装现状。
+- 一个事实只保留一个主要归属，其他文档只保留完成局部任务所需的摘要和链接。
+- 已接受 ADR 不改写历史结论；结论变化时新增替代 ADR。
+- 计划完成、被替代或放弃后，先把最终行为写入当前说明，再移入 `archive/` 并更新全部入链。
+- 命令、路径、端口、环境变量和版本必须能从当前仓库验证。
 - 不在文档、示例、日志或截图中写入真实凭据、生产数据和内部服务秘密。
 
-## 快速索引
-
-- [项目状态](project-status.md)
-- [开发指南](development.md)
-- [架构总览](architecture/overview.md)
-- [仓库导览](architecture/repository-map.md)
-- [配置参考](reference/configuration.md)
-- [命令参考](reference/commands.md)
-- [开发 API 契约](reference/development-api.md)
-- [生产就绪说明](operations/production-readiness.md)
-- [诊断指南](maintainers/diagnostics.md)
-- [架构决策](decisions/README.md)
-- [实施路线](roadmap.md)
-- [历史资料说明](archive/README.md)
-- [项目治理](../GOVERNANCE.md)
-- [变更记录](../CHANGELOG.md)
+文档分类、生命周期和写作规则以 [`docs/AGENTS.md`](AGENTS.md) 为准。

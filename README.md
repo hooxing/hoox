@@ -119,6 +119,10 @@ tests/              跨包、集成和黑盒测试
 | 第一次了解项目 | [文档中心](docs/README.md) |
 | 准备本地开发环境 | [开发指南](docs/development.md) |
 | 理解系统边界 | [架构总览](docs/architecture/overview.md) |
+| 理解连续上下文与恢复 | [Thread 连续上下文](docs/architecture/thread-continuity.md) |
+| 理解子 Agent 与 Todo | [Agent 协作与 Todo](docs/architecture/agent-collaboration.md) |
+| 理解 Skill Runtime | [Skill Runtime](docs/architecture/skill-runtime.md) |
+| 理解团队协作边界 | [团队协作](docs/architecture/team-collaboration.md) |
 | 找到代码位置 | [仓库导览](docs/architecture/repository-map.md) |
 | 配置环境变量 | [配置参考](docs/reference/configuration.md) |
 | 查询开发命令 | [命令参考](docs/reference/commands.md) |

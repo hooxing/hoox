@@ -10,7 +10,7 @@
 
 当前 `PgRunDispatchCreation` 在每次 `POST /v1/threads/{threadId}/runs` 时立即读取 Workspace head、写入 `run_execution_inputs`，并创建状态为 `ready` 的 dispatch outbox。`PgRunDispatchOutbox` 按 outbox 时间领取，没有 Thread execution head。Workspace write lease 会阻止同一 Workspace 同时写入，但它既不能保证 follow-up 的持久 FIFO，也不能保证同一 Thread 只有一个模型上下文写者；排队 Run 还会过早固化旧的 Workspace base revision。
 
-[Thread 连续上下文实施总计划](../plans/thread-continuous-context.md) 已确定：同一 Thread 最多一个 active Run 和一个 Context writer；follow-up 必须持久、FIFO、逐项执行；Run 只有成为队首时才能绑定 Workspace 与 Context 基线。本 ADR 只冻结这组顺序语义，不决定 steer 安全点、Context 投影或 Sandbox Provider 细节。
+[Thread 连续上下文实施总计划](../archive/plans/thread-continuous-context.md) 已确定：同一 Thread 最多一个 active Run 和一个 Context writer；follow-up 必须持久、FIFO、逐项执行；Run 只有成为队首时才能绑定 Workspace 与 Context 基线。本 ADR 只冻结这组顺序语义，不决定 steer 安全点、Context 投影或 Sandbox Provider 细节。
 
 ## 决策驱动因素
 

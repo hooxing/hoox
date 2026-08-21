@@ -1,6 +1,6 @@
 # 项目状态
 
-Hoox 目前处于 `0.x` 开发阶段。本页只描述仓库当前能够证明的能力和仍需外部验收的缺口；阶段目标见[实施路线](roadmap.md)，具体历史取舍见[架构决策](decisions/README.md)。
+Hoox 目前处于 `0.x` 开发阶段。本页只描述仓库当前能够证明的能力和仍需外部验收的缺口；尚未完成的战略方向见[项目路线](roadmap.md)，如存在当前有效的实施拆解则见[实施计划](plans/README.md)，具体历史取舍见[架构决策](decisions/README.md)。
 
 ## 已实现的核心能力
 
@@ -12,6 +12,7 @@ Hoox 目前处于 `0.x` 开发阶段。本页只描述仓库当前能够证明�
 - CubeSandbox 与 E2B Provider 路由，以及受 Tool Router 约束的沙箱能力。
 - Scheduler 清理、恢复、定时任务与 Thread 标题生成。
 - Skill 管理、发布目录和独立管理面。
+- 个人/团队双空间、Owner/Admin/Member 管理、团队任务分支发布、跨空间文件副本、Tenant Skill 与动态 Worker 调度。
 - 内部无损轨迹、逻辑会话查看和受控模型报文诊断。
 - API、Scheduler、Worker 的生产配置契约、非 root runtime-only 容器 Gate、SBOM、许可证与发布清单。
 

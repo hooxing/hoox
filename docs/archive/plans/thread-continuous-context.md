@@ -1,7 +1,7 @@
 # Thread 连续上下文、输入续接、上下文压缩与 Sandbox 生命周期实施总计划
 
-> [!NOTE]
-> 本文是实施计划或阶段拆解。当前行为以代码、自动化测试、当前架构文档和未被替代的 ADR 为准。
+> [!IMPORTANT]
+> 状态：历史实施总计划。阶段 1～6 已完成并收口到当前说明；当前语义见[Thread 连续上下文](../../architecture/thread-continuity.md)，运维见[Thread 连续上下文运维](../../operations/thread-continuity.md)。
 
 
 - 文档性质：后续实现总计划，不是 ADR

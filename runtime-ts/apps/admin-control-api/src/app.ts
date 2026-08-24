@@ -21,6 +21,7 @@ import {
   CreateRuntimeSettingsDraftRequestSchema,
   createErrorEnvelope,
   ErrorEnvelopeSchema,
+  IdentityAdminConfigurationSuccessEnvelopeSchema,
   MemoryProviderRevisionListSuccessEnvelopeSchema,
   MemoryProviderRevisionSuccessEnvelopeSchema,
   ModelProviderRevisionListSuccessEnvelopeSchema,
@@ -35,6 +36,8 @@ import {
   PublishControlRevisionRequestSchema,
   RuntimeSettingsRevisionListSuccessEnvelopeSchema,
   RuntimeSettingsRevisionSuccessEnvelopeSchema,
+  UpdateIdentityAdminConfigurationRequestSchema,
+  type UpdateIdentityAdminConfigurationRequest,
   UpdatePlatformUserStatusRequestSchema,
   type ControlRevisionPath,
   type CreateMemoryProviderDraftRequest,
@@ -47,6 +50,7 @@ import {
 } from "@hoox/protocol";
 import { Type } from "@sinclair/typebox";
 import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import type { IdentityAdminService } from "./identity-configuration.js";
 import type { PiModelCatalogPort } from "./pi-model-catalog.js";
 
 const strict = { additionalProperties: false } as const;
@@ -84,6 +88,7 @@ type ControlServiceContract = Pick<
 export interface AdminControlApiDependencies {
   readonly auth: AuthContextResolver;
   readonly control: ControlServiceContract;
+  readonly identity: IdentityAdminService;
   readonly modelCatalog: PiModelCatalogPort;
   readonly skills: Omit<SkillAdminApiRouteDependencies, "auth">;
   readonly readiness: { probe(): Promise<void> };
@@ -164,6 +169,43 @@ export function createAdminControlApiApp(
     "/v1/admin/control/overview",
     { schema: { response: responseSchemas(AdminControlOverviewSuccessEnvelopeSchema) } },
     async (request) => success(request, await dependencies.control.overview(await actor(request))),
+  );
+  app.get(
+    "/v1/admin/control/identity",
+    { schema: { response: responseSchemas(IdentityAdminConfigurationSuccessEnvelopeSchema) } },
+    async (request) =>
+      success(request, identityDto(await dependencies.identity.read(await actor(request)))),
+  );
+  app.put<{ Body: UpdateIdentityAdminConfigurationRequest }>(
+    "/v1/admin/control/identity",
+    {
+      preValidation: async (request) => requireJson(request),
+      schema: {
+        body: UpdateIdentityAdminConfigurationRequestSchema,
+        response: responseSchemas(IdentityAdminConfigurationSuccessEnvelopeSchema),
+      },
+    },
+    async (request) => {
+      const providers = Object.fromEntries(
+        request.body.providers.map((provider) => [provider.key, provider]),
+      ) as Record<"google" | "github" | "wechat" | "qq", (typeof request.body.providers)[number]>;
+      if (
+        ["google", "github", "wechat", "qq"].some(
+          (key) => providers[key as keyof typeof providers] === undefined,
+        )
+      ) {
+        throw new AdminControlApiFailure("bad_request");
+      }
+      return success(
+        request,
+        identityDto(
+          await dependencies.identity.update(mutationContext(request, await actor(request)), {
+            ...request.body,
+            providers,
+          }),
+        ),
+      );
+    },
   );
   app.get(
     "/v1/admin/control/model-providers",
@@ -454,6 +496,26 @@ function registerProviderActions(
   );
 }
 
+function identityDto(configuration: import("@hoox/identity").IdentityConfiguration) {
+  return {
+    versionToken: configuration.versionToken,
+    emailPasswordEnabled: configuration.emailPasswordEnabled,
+    registrationEnabled: configuration.registrationEnabled,
+    phoneEnabled: configuration.phoneEnabled,
+    ...(configuration.smsWebhookUrl === undefined
+      ? {}
+      : { smsWebhookUrl: configuration.smsWebhookUrl }),
+    smsWebhookSecretConfigured: configuration.smsWebhookSecretConfigured,
+    providers: (["google", "github", "wechat", "qq"] as const).map((key) => ({
+      key,
+      enabled: configuration.providers[key].enabled,
+      clientId: configuration.providers[key].clientId,
+      secretConfigured: configuration.providers[key].secretConfigured,
+    })),
+    ...(configuration.updatedAt === undefined ? {} : { updatedAt: configuration.updatedAt }),
+    ...(configuration.updatedBy === undefined ? {} : { updatedBy: configuration.updatedBy }),
+  };
+}
 type FailureKind =
   | "bad_request"
   | "unsupported_media_type"
@@ -471,6 +533,10 @@ class AdminControlApiFailure extends Error {
 
 function failureKind(error: unknown): FailureKind {
   if (error instanceof AdminControlApiFailure) return error.kind;
+  if (error instanceof Error && error.message === "IDENTITY_ADMIN_NOT_AUTHORIZED")
+    return "unauthorized";
+  if (error instanceof Error && error.message === "IDENTITY_ADMIN_CONFLICT") return "conflict";
+  if (error instanceof TypeError && error.message.startsWith("IDENTITY_")) return "bad_request";
   if (error instanceof TypeError) return "bad_request";
   if (error instanceof AdminControlServiceError) {
     if (error.code === "NOT_AUTHORIZED") return "unauthorized";

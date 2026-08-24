@@ -68,6 +68,8 @@ function productionEnvironment(): Record<string, string> {
     API_LISTEN_HOST: "127.0.0.1",
     API_LISTEN_PORT: "3001",
     API_PUBLIC_ORIGIN: "https://app.example.invalid",
+    BETTER_AUTH_SECRET: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    BETTER_AUTH_TRUSTED_ORIGINS: "https://app.example.invalid",
     API_TLS_MODE: "proxy",
     API_TRUSTED_PROXY_CIDRS: "127.0.0.1",
     S3_ENDPOINT: "https://object-storage.example.invalid:9000",

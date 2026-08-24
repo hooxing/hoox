@@ -2964,3 +2964,30 @@ h2 {
     flex-direction: column;
   }
 }
+
+.account-access-methods,
+.account-social-providers {
+  display: flex;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+.account-access-methods button,
+.account-social-providers button {
+  border: 1px solid var(--border-color, #d7dce5);
+  border-radius: 10px;
+  background: transparent;
+  padding: 0.65rem 0.9rem;
+  cursor: pointer;
+}
+.account-access-methods button.active {
+  border-color: #335cff;
+  color: #335cff;
+}
+.account-social-providers {
+  margin-top: 1rem;
+}
+.account-social-providers > span {
+  flex-basis: 100%;
+  color: #687085;
+  font-size: 0.82rem;
+}

@@ -14,6 +14,14 @@ export type AccountSession = {
   readonly expiresAt: string;
 };
 
+export type IdentityProviderKey = "google" | "github" | "wechat" | "qq";
+export type IdentityAuthConfiguration = {
+  readonly emailPasswordEnabled: boolean;
+  readonly registrationEnabled: boolean;
+  readonly phoneEnabled: boolean;
+  readonly providers: readonly { readonly key: IdentityProviderKey; readonly enabled: boolean }[];
+};
+
 export type AccountAccessApi = {
   registerAccount(input: {
     readonly displayName: string;
@@ -24,6 +32,19 @@ export type AccountAccessApi = {
     readonly email: string;
     readonly password: string;
   }): Promise<AccountSession>;
+  getIdentityConfiguration?(): Promise<IdentityAuthConfiguration>;
+  signUpWithEmail?(input: {
+    readonly displayName: string;
+    readonly email: string;
+    readonly password: string;
+  }): Promise<AccountSession>;
+  signInWithEmail?(input: {
+    readonly email: string;
+    readonly password: string;
+  }): Promise<AccountSession>;
+  beginSocialSignIn?(provider: IdentityProviderKey, callbackURL: string): Promise<string>;
+  sendPhoneOtp?(phoneNumber: string): Promise<void>;
+  verifyPhoneOtp?(phoneNumber: string, code: string): Promise<AccountSession>;
 };
 
 export const developmentAccount: AccountProfile = Object.freeze({
@@ -131,12 +152,35 @@ export function AccountAccess({
   readonly onAuthenticated: (session: AccountSession) => void;
 }) {
   const [mode, setMode] = useState<"login" | "register">("login");
+  const [method, setMethod] = useState<"email" | "phone">("email");
+  const [configuration, setConfiguration] = useState<IdentityAuthConfiguration>({
+    emailPasswordEnabled: true,
+    registrationEnabled: true,
+    phoneEnabled: false,
+    providers: [],
+  });
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [phoneCode, setPhoneCode] = useState("");
+  const [phoneCodeSent, setPhoneCodeSent] = useState(false);
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void api
+      .getIdentityConfiguration?.()
+      .then((value) => {
+        if (active) setConfiguration(value);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [api]);
 
   const authenticate = (session: AccountSession) => {
     persistAccountSession(storage, session);
@@ -145,6 +189,7 @@ export function AccountAccess({
 
   const switchMode = (nextMode: "login" | "register") => {
     setMode(nextMode);
+    setMethod("email");
     setError(undefined);
     setPassword("");
     setConfirmation("");
@@ -153,6 +198,33 @@ export function AccountAccess({
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(undefined);
+    if (method === "phone") {
+      const normalizedPhone = phoneNumber.trim();
+      if (!/^\+[1-9][0-9]{7,14}$/u.test(normalizedPhone)) {
+        setError("请输入带国家区号的手机号，例如 +8613800138000");
+        return;
+      }
+      setSubmitting(true);
+      try {
+        if (!phoneCodeSent) {
+          if (api.sendPhoneOtp === undefined) throw new Error("PHONE_AUTH_UNAVAILABLE");
+          await api.sendPhoneOtp(normalizedPhone);
+          setPhoneCodeSent(true);
+        } else {
+          if (api.verifyPhoneOtp === undefined || phoneCode.trim().length === 0) {
+            setError("请输入短信验证码");
+            return;
+          }
+          authenticate(await api.verifyPhoneOtp(normalizedPhone, phoneCode.trim()));
+        }
+      } catch (reason) {
+        setError(accountErrorMessage(reason, "login"));
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
+
     const normalizedEmail = normalizeEmail(email);
     if (normalizedEmail.length < 3 || !normalizedEmail.includes("@")) {
       setError("请输入有效邮箱");
@@ -174,12 +246,15 @@ export function AccountAccess({
     try {
       const session =
         mode === "register"
-          ? await api.registerAccount({
+          ? await (api.signUpWithEmail ?? api.registerAccount)({
               displayName: displayName.trim(),
               email: normalizedEmail,
               password,
             })
-          : await api.loginAccount({ email: normalizedEmail, password });
+          : await (api.signInWithEmail ?? api.loginAccount)({
+              email: normalizedEmail,
+              password,
+            });
       authenticate(session);
     } catch (reason) {
       setError(accountErrorMessage(reason, mode));
@@ -188,6 +263,21 @@ export function AccountAccess({
     }
   };
 
+  const socialSignIn = async (provider: IdentityProviderKey) => {
+    if (api.beginSocialSignIn === undefined) return;
+    setSubmitting(true);
+    setError(undefined);
+    try {
+      const callbackURL = new URL(window.location.href);
+      callbackURL.searchParams.delete("error");
+      window.location.assign(await api.beginSocialSignIn(provider, callbackURL.href));
+    } catch (reason) {
+      setError(accountErrorMessage(reason, "login"));
+      setSubmitting(false);
+    }
+  };
+
+  const enabledProviders = configuration.providers.filter((provider) => provider.enabled);
   return (
     <main className="account-access-shell">
       <section className="account-access-card" aria-labelledby="account-access-title">
@@ -208,69 +298,146 @@ export function AccountAccess({
           >
             登录
           </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mode === "register"}
-            onClick={() => switchMode("register")}
-          >
-            注册
-          </button>
+          {configuration.registrationEnabled && configuration.emailPasswordEnabled && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === "register"}
+              onClick={() => switchMode("register")}
+            >
+              注册
+            </button>
+          )}
         </div>
-        <form className="account-access-form" onSubmit={(event) => void submit(event)}>
-          {mode === "register" && (
+        {mode === "login" && configuration.phoneEnabled && (
+          <div className="account-access-methods">
+            <button
+              type="button"
+              className={method === "email" ? "active" : ""}
+              onClick={() => setMethod("email")}
+            >
+              邮箱
+            </button>
+            <button
+              type="button"
+              className={method === "phone" ? "active" : ""}
+              onClick={() => setMethod("phone")}
+            >
+              手机号
+            </button>
+          </div>
+        )}
+        {method === "email" && configuration.emailPasswordEnabled ? (
+          <form className="account-access-form" onSubmit={(event) => void submit(event)}>
+            {mode === "register" && (
+              <label>
+                用户名
+                <input
+                  autoComplete="name"
+                  value={displayName}
+                  onChange={(event) => setDisplayName(event.target.value)}
+                  placeholder="你的名字"
+                />
+              </label>
+            )}
             <label>
-              用户名
+              邮箱
               <input
-                autoComplete="name"
-                value={displayName}
-                onChange={(event) => setDisplayName(event.target.value)}
-                placeholder="你的名字"
+                type="email"
+                autoComplete="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="name@example.com"
               />
             </label>
-          )}
-          <label>
-            邮箱
-            <input
-              type="email"
-              autoComplete="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="name@example.com"
-            />
-          </label>
-          <label>
-            密码
-            <input
-              type="password"
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="至少 8 个字符"
-            />
-          </label>
-          {mode === "register" && (
             <label>
-              确认密码
+              密码
               <input
                 type="password"
-                autoComplete="new-password"
-                value={confirmation}
-                onChange={(event) => setConfirmation(event.target.value)}
-                placeholder="再次输入密码"
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                placeholder="至少 8 个字符"
               />
             </label>
-          )}
-          {error !== undefined && (
-            <div className="account-access-error" role="alert">
-              {error}
-            </div>
-          )}
-          <button className="account-access-submit" type="submit" disabled={submitting}>
-            {submitting ? "请稍候…" : mode === "login" ? "登录" : "创建账号"}
-          </button>
-        </form>
-        {mode === "login" && (
+            {mode === "register" && (
+              <label>
+                确认密码
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={confirmation}
+                  onChange={(event) => setConfirmation(event.target.value)}
+                  placeholder="再次输入密码"
+                />
+              </label>
+            )}
+            {error !== undefined && (
+              <div className="account-access-error" role="alert">
+                {error}
+              </div>
+            )}
+            <button className="account-access-submit" type="submit" disabled={submitting}>
+              {submitting ? "请稍候…" : mode === "login" ? "登录" : "创建账号"}
+            </button>
+          </form>
+        ) : method === "phone" && configuration.phoneEnabled ? (
+          <form className="account-access-form" onSubmit={(event) => void submit(event)}>
+            <label>
+              手机号
+              <input
+                type="tel"
+                autoComplete="tel"
+                value={phoneNumber}
+                onChange={(event) => setPhoneNumber(event.target.value)}
+                placeholder="+8613800138000"
+              />
+            </label>
+            {phoneCodeSent && (
+              <label>
+                短信验证码
+                <input
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  value={phoneCode}
+                  onChange={(event) => setPhoneCode(event.target.value)}
+                />
+              </label>
+            )}
+            {error !== undefined && (
+              <div className="account-access-error" role="alert">
+                {error}
+              </div>
+            )}
+            <button className="account-access-submit" type="submit" disabled={submitting}>
+              {submitting ? "请稍候…" : phoneCodeSent ? "验证并登录" : "发送验证码"}
+            </button>
+          </form>
+        ) : (
+          <p className="empty-state">管理员尚未启用此登录方式。</p>
+        )}
+        {mode === "login" && enabledProviders.length > 0 && (
+          <div className="account-social-providers">
+            <span>或使用第三方账号</span>
+            {enabledProviders.map((provider) => (
+              <button
+                key={provider.key}
+                type="button"
+                disabled={submitting}
+                onClick={() => void socialSignIn(provider.key)}
+              >
+                {provider.key === "google"
+                  ? "Google"
+                  : provider.key === "github"
+                    ? "GitHub"
+                    : provider.key === "wechat"
+                      ? "微信"
+                      : "QQ"}
+              </button>
+            ))}
+          </div>
+        )}
+        {mode === "login" && api.getIdentityConfiguration === undefined && (
           <button
             className="development-account-button"
             type="button"
@@ -280,7 +447,7 @@ export function AccountAccess({
             使用本地开发身份继续
           </button>
         )}
-        <small>账号和任务保存在本地开发后端；浏览器只保存会话令牌。</small>
+        <small>认证由 Hoox 内嵌身份模块处理；浏览器只保存 Hoox 会话令牌。</small>
       </section>
     </main>
   );

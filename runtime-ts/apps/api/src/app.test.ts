@@ -983,6 +983,7 @@ describe("Fastify API 契约", () => {
     const localAccounts = {
       register: vi.fn(async () => session),
       login: vi.fn(async () => session),
+      exchangeBetterAuthIdentity: vi.fn(async () => session),
       resolve: vi.fn(async () => undefined),
       getProfile: vi.fn(async () => undefined),
       logout: vi.fn(async () => undefined),
@@ -1010,6 +1011,72 @@ describe("Fastify API 契约", () => {
       (await disabled.app.inject({ method: "POST", url: "/v1/auth/register" })).statusCode,
     ).toBe(404);
   });
+  it("代理 Better Auth 路由并公开启用状态，再交换为 Hoox 会话", async () => {
+    const session = {
+      profile: { id: "user_identity", displayName: "身份用户", email: "identity@example.com" },
+      accessToken: "hoox_session_identity-token-with-more-than-thirty-two-characters",
+      expiresAt: "2099-08-25T08:00:00.000Z",
+    };
+    const embeddedIdentity: NonNullable<ApiDependencies["embeddedIdentity"]> = {
+      handle: vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: {
+              "content-type": "application/json",
+              "set-cookie": "better-auth.session=test",
+            },
+          }),
+      ),
+      publicConfiguration: vi.fn(async () => ({
+        versionToken: 2,
+        emailPasswordEnabled: true,
+        registrationEnabled: false,
+        phoneEnabled: true,
+        smsWebhookSecretConfigured: true,
+        providers: {
+          google: { enabled: true, clientId: "google-client", secretConfigured: true },
+          github: { enabled: false, clientId: "", secretConfigured: false },
+          wechat: { enabled: false, clientId: "", secretConfigured: false },
+          qq: { enabled: false, clientId: "", secretConfigured: false },
+        },
+      })),
+      exchange: vi.fn(async () => session),
+    };
+    const base = fixture();
+    await base.app.close();
+    const app = createApiApp({ ...base.dependencies, embeddedIdentity }, { logger: false });
+    openApps.push(app);
+
+    const proxied = await app.inject({
+      method: "POST",
+      url: "/api/auth/sign-in/email",
+      headers: { "content-type": "application/json" },
+      payload: { email: "identity@example.com", password: "secret12" },
+    });
+    expect(proxied.statusCode).toBe(200);
+    expect(proxied.headers["set-cookie"]).toContain("better-auth.session=test");
+    expect(embeddedIdentity.handle).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "/api/auth/sign-in/email", method: "POST" }),
+    );
+
+    const config = await app.inject({ method: "GET", url: "/v1/auth/config" });
+    expect(config.json().data).toEqual({
+      emailPasswordEnabled: true,
+      registrationEnabled: false,
+      phoneEnabled: true,
+      providers: [
+        { key: "google", enabled: true },
+        { key: "github", enabled: false },
+        { key: "wechat", enabled: false },
+        { key: "qq", enabled: false },
+      ],
+    });
+    const exchange = await app.inject({ method: "POST", url: "/v1/auth/exchange" });
+    expect(exchange.statusCode).toBe(200);
+    expect(exchange.json().data).toEqual(session);
+  });
+
   it("个人与团队个性化执行版本冲突、作用域和可编辑权限契约", async () => {
     let personal: Awaited<
       ReturnType<NonNullable<ApiDependencies["personalizations"]>["getPersonal"]>

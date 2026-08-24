@@ -24,6 +24,7 @@ import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec, parseThreadCursorSigningKeys } from "./cursor.js";
 import { createDevelopmentAuthResolver } from "./development-auth.js";
+import { createEmbeddedIdentityAuthService } from "./embedded-identity-auth.js";
 import { createLocalAccountAuthService } from "./local-account-auth.js";
 import {
   assertDevelopmentPrincipalsIsolated,
@@ -145,6 +146,14 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
         repository: persistence.localAccounts,
         clock,
       });
+      const embeddedIdentity = createEmbeddedIdentityAuthService({
+        database: persistence.identityDatabase,
+        configurations: persistence.identityConfigurations,
+        localAccounts,
+        baseURL: configuration.identityAuth.baseURL,
+        secret: configuration.identityAuth.secret,
+        trustedOrigins: configuration.identityAuth.trustedOrigins,
+      });
       app = createApiApp(
         {
           auth: createDevelopmentAuthResolver({
@@ -153,6 +162,8 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
             fallback: localAccounts,
           }),
           localAccounts,
+          localAccountPasswordRoutes: true,
+          embeddedIdentity,
           repositories: persistence.repositories,
           personalizations: persistence.personalizations,
           scheduledTasks: persistence.scheduledTasks,

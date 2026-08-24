@@ -221,3 +221,5 @@
 | [后台模型用量指标与开发轨迹入口边界](20260824150132-admin-model-usage-metrics-and-development-trajectory-link.md) | 已接受 | 2026-08-24 |
 | [决策：领域聚合的一致性与修正语义](domain-aggregate-consistency.md) | 已接受 | 2026-07-26 |
 | [决策：协议运行时 Schema 使用 TypeBox](domain-schema-library.md) | 已接受 | 2026-07-26 |
+| [ADR-20260824115000：在 Hoox 进程内嵌 Better Auth 身份核心](20260824115000-embedded-better-auth-identity-core.md) | 已接受 | 2026-08-24 |
+| [ADR-20260824125500：内嵌身份会话交换与后台配置边界](20260824125500-embedded-identity-session-exchange-and-admin-configuration.md) | 已接受 | 2026-08-24 |

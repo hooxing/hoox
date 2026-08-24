@@ -21,6 +21,9 @@ import { SkillCenterService } from "@hoox/skill";
 import { createApiApp } from "./app.js";
 import { createApiCreateCapability } from "./capabilities.js";
 import { createThreadCursorCodec, parseThreadCursorSigningKeys } from "./cursor.js";
+import { createEmbeddedIdentityAuthService } from "./embedded-identity-auth.js";
+import { createLocalAccountAuthService } from "./local-account-auth.js";
+import type { AuthContextResolver } from "./ports.js";
 import type { ApiProcessConfiguration } from "./process-entry.js";
 import { createProductionJwtAuthResolver } from "./production-auth.js";
 import { loadProductionTlsCredentials, productionTrustProxy } from "./production-transport.js";
@@ -114,9 +117,29 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
         persistence.resourceUploads,
         { maxBytes: productionApiMaxBlobSizeBytes, now: clock.now },
       );
+      const localAccounts = createLocalAccountAuthService({
+        repository: persistence.localAccounts,
+        clock,
+      });
+      const jwtAuth = createProductionJwtAuthResolver(configuration.production.jwt);
+      const embeddedIdentity = createEmbeddedIdentityAuthService({
+        database: persistence.identityDatabase,
+        configurations: persistence.identityConfigurations,
+        localAccounts,
+        baseURL: configuration.identityAuth.baseURL,
+        secret: configuration.identityAuth.secret,
+        trustedOrigins: configuration.identityAuth.trustedOrigins,
+      });
+      const auth: AuthContextResolver = Object.freeze({
+        resolve: async (context: Parameters<AuthContextResolver["resolve"]>[0]) =>
+          (await localAccounts.resolve(context)) ?? (await jwtAuth.resolve(context)),
+      });
       app = createApiApp(
         {
-          auth: createProductionJwtAuthResolver(configuration.production.jwt),
+          auth,
+          localAccounts,
+          localAccountPasswordRoutes: false,
+          embeddedIdentity,
           repositories: persistence.repositories,
           personalizations: persistence.personalizations,
           scheduledTasks: persistence.scheduledTasks,

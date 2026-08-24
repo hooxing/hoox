@@ -160,6 +160,11 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
 [Provider 模型目录决策](../decisions/20260820090402-provider-owned-model-catalog.md)与
 [Pi 目录初始值决策](../decisions/20260820095113-pi-catalog-seeds-admin-model-metadata.md)。
 
+`admin-web` 保留 React 19 与 Vite，使用 Ant Design 统一控件和视觉，通过 React Router 暴露可复制的模块路径，并由
+TanStack Query 协调控制面读取、去重和失效。页面按工作台、运营、AI 能力和系统分组，操作审计拥有独立只读入口；
+现有类型化 API Client 仍是协议适配边界，浏览器路由、菜单可见性和 Query 缓存都不构成授权或审计事实。完整取舍见
+[后台管理 Web 外壳决策](../decisions/20260824115942-admin-web-routable-ant-design-shell.md)。
+
 使用一键开发脚本时，既有 `-IncludeSkill` 兼容开关会启动统一 Admin API 与 Admin Web；默认核心拓扑仍不启动任何
 管理服务。
 

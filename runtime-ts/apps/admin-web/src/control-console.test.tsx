@@ -120,6 +120,14 @@ function requiredControl<T extends HTMLInputElement | HTMLTextAreaElement>(
   return control;
 }
 
+function navigationItem(container: HTMLElement, label: string): HTMLElement {
+  const item = [...container.querySelectorAll<HTMLElement>(".ant-menu-item")].find(
+    (candidate) => candidate.textContent?.trim() === label,
+  );
+  if (item === undefined) throw new Error(`${label}导航缺失`);
+  return item;
+}
+
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 });
@@ -133,36 +141,29 @@ describe("统一平台管理导航", () => {
     act(() => root.render(<App controlApi={api} />));
     await settle();
 
-    const navigation = [...container.querySelectorAll("nav button")].map(
-      (item) => item.textContent,
+    const navigation = [...container.querySelectorAll(".ant-menu-item")].map((item) =>
+      item.textContent?.trim(),
     );
     expect(navigation).toEqual([
-      "驾驶舱",
+      "工作台",
       "数据运营",
-      "用户",
-      "模型",
-      "记忆",
+      "用户管理",
+      "模型服务",
+      "记忆服务",
       "Skills",
       "运行配置",
+      "操作审计",
     ]);
     expect(container.textContent).toContain("累计 Run12");
     expect(container.textContent).toContain("MODEL_API_KEY");
     expect(container.textContent).toContain("已配置 · 部署秘密");
     expect(container.textContent).not.toContain("production-model-secret");
 
-    const models = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
-      (item) => item.textContent === "模型",
-    );
-    if (models === undefined) throw new Error("模型导航缺失");
-    act(() => models.click());
+    act(() => navigationItem(container, "模型服务").click());
     await settle();
     expect(api.listModelProviders).toHaveBeenCalledOnce();
 
-    const settings = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
-      (item) => item.textContent === "运行配置",
-    );
-    if (settings === undefined) throw new Error("配置导航缺失");
-    act(() => settings.click());
+    act(() => navigationItem(container, "运行配置").click());
     await settle();
     expect(api.listRuntimeSettings).toHaveBeenCalledOnce();
     expect(container.textContent).toContain("MODEL_API_KEY");
@@ -170,6 +171,12 @@ describe("统一平台管理导航", () => {
     expect(container.textContent).toContain("CUBESANDBOX_API_URL / CUBESANDBOX_TEMPLATE_ID");
     expect(container.textContent).toContain("部署平台");
     expect(container.textContent).toContain("后台 Revision");
+
+    act(() => navigationItem(container, "操作审计").click());
+    await settle();
+    expect(api.listAudits).toHaveBeenCalledWith(100);
+    expect(container.textContent).toContain("控制面操作记录");
+    expect(container.textContent).toContain("不可变审计事实");
 
     act(() => root.unmount());
     container.remove();
@@ -188,11 +195,7 @@ describe("统一平台管理导航", () => {
     act(() => root.render(<App controlApi={api} />));
     await settle();
 
-    const settings = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
-      (item) => item.textContent === "运行配置",
-    );
-    if (settings === undefined) throw new Error("配置导航缺失");
-    act(() => settings.click());
+    act(() => navigationItem(container, "运行配置").click());
     await settle();
 
     expect(container.textContent).toContain("部署配置地图");
@@ -218,11 +221,7 @@ describe("统一平台管理导航", () => {
     act(() => root.render(<App controlApi={api} />));
     await settle();
 
-    const memory = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
-      (item) => item.textContent === "记忆",
-    );
-    if (memory === undefined) throw new Error("记忆导航缺失");
-    act(() => memory.click());
+    act(() => navigationItem(container, "记忆服务").click());
     await settle();
 
     expect(container.textContent).toContain("Mem0 Platform");
@@ -246,21 +245,13 @@ describe("统一平台管理导航", () => {
     act(() => root.render(<App controlApi={api} />));
     await settle();
 
-    const analytics = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
-      (item) => item.textContent === "数据运营",
-    );
-    if (analytics === undefined) throw new Error("数据运营导航缺失");
-    act(() => analytics.click());
+    act(() => navigationItem(container, "数据运营").click());
     await settle();
     expect(container.textContent).toContain("7 日活跃用户");
     expect(container.textContent).toContain("Thread.updated_at");
     expect(container.textContent).toContain("等待写入 Mem0");
 
-    const users = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
-      (item) => item.textContent === "用户",
-    );
-    if (users === undefined) throw new Error("用户导航缺失");
-    act(() => users.click());
+    act(() => navigationItem(container, "用户管理").click());
     await settle();
     expect(api.listUsers).toHaveBeenCalledWith({ limit: 100 });
     expect(container.textContent).toContain("customer@example.com");
@@ -299,11 +290,7 @@ describe("统一平台管理导航", () => {
     act(() => root.render(<App controlApi={api} />));
     await settle();
 
-    const modelsNavigation = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
-      (item) => item.textContent === "模型",
-    );
-    if (modelsNavigation === undefined) throw new Error("模型导航缺失");
-    act(() => modelsNavigation.click());
+    act(() => navigationItem(container, "模型服务").click());
     await settle();
     const addCustomProvider = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (item) => item.textContent?.trim() === "添加自定义 Provider",
@@ -405,11 +392,7 @@ describe("统一平台管理导航", () => {
     act(() => root.render(<App controlApi={api} />));
     await settle();
 
-    const modelsNavigation = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
-      (item) => item.textContent === "模型",
-    );
-    if (modelsNavigation === undefined) throw new Error("模型导航缺失");
-    act(() => modelsNavigation.click());
+    act(() => navigationItem(container, "模型服务").click());
     await settle();
     const addCustomProvider = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (item) => item.textContent?.trim() === "添加自定义 Provider",
@@ -481,11 +464,7 @@ describe("统一平台管理导航", () => {
     act(() => root.render(<App controlApi={api} />));
     await settle();
 
-    const modelsNavigation = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
-      (item) => item.textContent === "模型",
-    );
-    if (modelsNavigation === undefined) throw new Error("模型导航缺失");
-    act(() => modelsNavigation.click());
+    act(() => navigationItem(container, "模型服务").click());
     await settle();
     expect(container.textContent).toContain("Pi Provider 目录");
     const deepseek = container.querySelector<HTMLButtonElement>(".provider-catalog-grid button");
@@ -523,11 +502,7 @@ describe("统一平台管理导航", () => {
     act(() => root.render(<App controlApi={api} />));
     await act(async () => Promise.resolve());
 
-    const modelsNavigation = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
-      (item) => item.textContent === "模型",
-    );
-    if (modelsNavigation === undefined) throw new Error("模型导航缺失");
-    act(() => modelsNavigation.click());
+    act(() => navigationItem(container, "模型服务").click());
     await settle();
     expect(container.textContent).toContain("1 个可配置 Provider");
 
@@ -556,11 +531,7 @@ describe("统一平台管理导航", () => {
     act(() => root.render(<App controlApi={api} />));
     await settle();
 
-    const modelsNavigation = [...container.querySelectorAll<HTMLButtonElement>("nav button")].find(
-      (item) => item.textContent === "模型",
-    );
-    if (modelsNavigation === undefined) throw new Error("模型导航缺失");
-    act(() => modelsNavigation.click());
+    act(() => navigationItem(container, "模型服务").click());
     await settle();
 
     expect(container.textContent).toContain("DeepSeek");

@@ -12,9 +12,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@ant-design/icons": "6.3.2",
     "@hoox/protocol": "workspace:*",
+    "@tanstack/react-query": "5.102.2",
+    "antd": "6.6.1",
     "react": "19.1.1",
-    "react-dom": "19.1.1"
+    "react-dom": "19.1.1",
+    "react-router-dom": "7.18.2"
   },
   "devDependencies": {
     "@types/react": "19.1.13",

@@ -137,6 +137,11 @@ describe("云盘历史文件面板", () => {
 
     expect(container.querySelector("#cloud-drive-title")?.textContent).toBe("云盘");
     expect(container.textContent).not.toContain("技能中心");
+    expect(container.textContent).toContain("搜索和浏览个人云盘文件");
+    expect(container.querySelector('[aria-label="搜索个人文件"]')).not.toBeNull();
+    expect(container.querySelector('[aria-label="搜索范围"]')).toBeNull();
+    expect(container.querySelector('[aria-label="云盘空间"]')).toBeNull();
+    expect(container.querySelector(".cloud-drive-global-search.is-personal-only")).not.toBeNull();
     act(() => container.querySelector<HTMLButtonElement>('[aria-label="关闭云盘"]')?.click());
     expect(onClose).toHaveBeenCalledOnce();
   });

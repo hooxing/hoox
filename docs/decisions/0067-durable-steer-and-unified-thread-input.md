@@ -10,7 +10,7 @@
 
 阶段 1 已建立 Thread 单写者、持久 follow-up FIFO 和激活时基线绑定，阶段 2 已建立 Thread Context 事实流与跨 Run 读取。但运行中的补充输入仍只能创建新 Run，无法作为真实用户消息进入当前 Run；Pi 的进程内 `steer()`/`followUp()` 又不能承担数据库幂等、崩溃恢复和 terminal 竞态。
 
-[Thread 连续上下文实施总计划](../thread-continuous-context-implementation-plan.md) 要求统一输入入口、durable receipt、安全点 steer，以及结束竞态原子转 follow-up。本 ADR 只确定阶段 3 输入路由与消费边界，不实现 compaction、waiting answer 或 Sandbox 跨 Run 复用。
+[Thread 连续上下文实施总计划](../archive/plans/thread-continuous-context.md) 要求统一输入入口、durable receipt、安全点 steer，以及结束竞态原子转 follow-up。本 ADR 只确定阶段 3 输入路由与消费边界，不实现 compaction、waiting answer 或 Sandbox 跨 Run 复用。
 
 ## 决策驱动因素
 

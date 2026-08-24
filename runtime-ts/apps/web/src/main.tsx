@@ -1345,7 +1345,9 @@ function AuthenticatedWorkspace({
               {...(apiClient.forkThread === undefined
                 ? {}
                 : activeTeam === undefined
-                  ? { onPublishToTeam: publishToTeam }
+                  ? teams.length > 0
+                    ? { onPublishToTeam: publishToTeam }
+                    : {}
                   : { onFork: () => void fork() })}
             />
             <section

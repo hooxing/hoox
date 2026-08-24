@@ -4,8 +4,8 @@ import type { SkillPublicationStatus, SkillSubmissionDto } from "@hoox/protocol"
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { App } from "./app.js";
 import type { SkillAdminApiContract } from "./api.js";
+import { App, browserRouterBasename } from "./app.js";
 
 const digest = "b".repeat(64);
 const roots: Root[] = [];
@@ -125,6 +125,14 @@ afterEach(() => {
 });
 
 describe("技能发布管理界面", () => {
+  it("把 Demo 子路径转换为 BrowserRouter basename", () => {
+    expect(browserRouterBasename("/")).toBeUndefined();
+    expect(browserRouterBasename("/admin/")).toBe("/admin");
+    expect(() => browserRouterBasename("admin/")).toThrow(
+      "后台管理 base URL 必须是以斜杠包围的绝对路径",
+    );
+  });
+
   it("展示申请列表、摘要、SKILL.md、文件清单和驳回原因", async () => {
     const item = submission("rejected");
     const api = apiFixture(item);

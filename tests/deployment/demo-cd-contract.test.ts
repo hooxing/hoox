@@ -77,6 +77,7 @@ describe("Demo 持续部署契约", () => {
     const deploy = source("deploy/demo/remote-deploy.sh");
     expect(deploy).toContain("rollback()");
     expect(deploy).toContain("数据库迁移不会自动回退");
+    expect(deploy).toContain("up -d --force-recreate api web scheduler worker");
     expect(deploy).toContain("/api/api/auth/sign-in/email");
     expect(deploy).toContain("/api/v1/auth/exchange");
     expect(deploy).toContain("nginx_bootstrap_configuration");

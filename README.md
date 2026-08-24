@@ -5,7 +5,9 @@
 [![pnpm](https://img.shields.io/badge/pnpm-10.15.1-F69220?logo=pnpm&logoColor=white)](package.json)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-> **你说，它做。**
+> **Hoox** —— 你说，它做。
+
+Hoox 计划使用 hoox.aisay.cc 作为公开入口；域名上线仍需单独完成 DNS、TLS、反向代理和生产身份配置。
 
 Hoox 是一个面向可靠执行的多租户 Agent Runtime。它把对话、运行、工作区、沙箱、资源与最终交付物组织成可持久化、可恢复、可审计的执行系统，而不是把 Agent 简化为一次模型调用。
 

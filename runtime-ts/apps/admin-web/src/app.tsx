@@ -1,8 +1,3 @@
-import type {
-  CreateSkillSubmissionRequest,
-  SkillPublicationStatus,
-  SkillSubmissionDto,
-} from "@hoox/protocol";
 import {
   AppstoreOutlined,
   AuditOutlined,
@@ -16,9 +11,14 @@ import {
   SettingOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
+import type {
+  CreateSkillSubmissionRequest,
+  SkillPublicationStatus,
+  SkillSubmissionDto,
+} from "@hoox/protocol";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { App as AntApp, Button, ConfigProvider, Layout, Menu, Tag, Tooltip } from "antd";
 import type { MenuProps } from "antd";
+import { App as AntApp, Button, ConfigProvider, Layout, Menu, Tag, Tooltip } from "antd";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   BrowserRouter,
@@ -42,6 +42,14 @@ import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadat
 
 const defaultApi = new SkillAdminApi();
 const maxSubmissionFiles = 256;
+
+export function browserRouterBasename(baseUrl: string): string | undefined {
+  if (baseUrl === "/") return undefined;
+  if (!baseUrl.startsWith("/") || !baseUrl.endsWith("/")) {
+    throw new TypeError("后台管理 base URL 必须是以斜杠包围的绝对路径");
+  }
+  return baseUrl.slice(0, -1);
+}
 
 const statusLabels: Readonly<Record<SkillPublicationStatus, string>> = {
   draft: "草稿",
@@ -1232,6 +1240,8 @@ export function App({
     </ConfigProvider>
   );
 
+  const basename = browserRouterBasename(import.meta.env.BASE_URL);
+
   // 注入客户端时使用内存路由，隔离测试与嵌入场景的全局地址；真实管理台使用浏览器地址形成可复制入口。
   return apiClient !== undefined || controlApi !== undefined ? (
     <MemoryRouter
@@ -1242,6 +1252,6 @@ export function App({
       {platform}
     </MemoryRouter>
   ) : (
-    <BrowserRouter>{platform}</BrowserRouter>
+    <BrowserRouter {...(basename === undefined ? {} : { basename })}>{platform}</BrowserRouter>
   );
 }

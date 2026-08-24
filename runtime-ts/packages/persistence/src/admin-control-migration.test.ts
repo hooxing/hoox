@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { executableDownSql, loadMigrations } from "./migrations.js";
 
 function migration(name: string): string {
   return readFileSync(fileURLToPath(new URL(`../migrations/${name}`, import.meta.url)), "utf8");
@@ -31,9 +32,7 @@ describe("后台控制面迁移", () => {
     const sql = migration("0050_admin_control_plane.down.sql");
     expect(sql).toContain("后台控制面已有事实，禁止破坏性回退");
     expect(sql).toContain("run_runtime_config_snapshots");
-    expect(sql.indexOf("DROP POLICY runtime_control_revisions_read_policy")).toBeLessThan(
-      sql.indexOf("DROP TABLE run_runtime_config_snapshots"),
-    );
+    expect(sql).not.toContain("DROP POLICY runtime_control_revisions_read_policy");
   });
 
   it("后续迁移把模型配置收紧为 Provider 模型目录并保护不可逆降级", () => {
@@ -79,8 +78,8 @@ describe("后台控制面迁移", () => {
 
     const down = migration("0052_admin_user_operations.down.sql");
     expect(down).toContain("已有用户治理事实，禁止移除账号状态和审计");
-    expect(down.indexOf("DROP VIEW admin_runtime_statistics")).toBeLessThan(
-      down.indexOf("ALTER TABLE user_accounts DROP COLUMN status"),
+    expect(down.indexOf("ALTER TABLE user_accounts DROP COLUMN status")).toBeLessThan(
+      down.indexOf("DROP VIEW admin_runtime_statistics"),
     );
   });
 
@@ -98,13 +97,47 @@ describe("后台控制面迁移", () => {
 
     const down = migration("0053_model_usage_metrics.down.sql");
     expect(down).toContain("已有模型用量观测事实，禁止移除统计语义");
-    expect(down).toContain(
-      "DROP VIEW admin_runtime_statistics;\nCREATE VIEW admin_runtime_statistics",
-    );
-    expect(down).not.toContain("CREATE OR REPLACE VIEW admin_runtime_statistics");
+    expect(down).toContain("CREATE OR REPLACE VIEW admin_runtime_statistics");
 
     const index = migration("0054_model_usage_admin_index.up.sql");
     expect(index).toContain("CREATE INDEX model_usage_metrics_admin_query_idx");
     expect(index).toContain("metric_name,observed_at DESC");
+  });
+
+  it("保持已发布 checksum，并只在执行 down 时修复依赖顺序", async () => {
+    const migrations = await loadMigrations();
+    const byVersion = (version: number) => {
+      const source = migrations.find((migration) => migration.version === version);
+      if (source === undefined) throw new Error(`缺少迁移 ${version}`);
+      return source;
+    };
+
+    const migration50 = byVersion(50);
+    expect(migration50.checksum).toBe(
+      "799aee36463d5520efd57b03de3619678387d92024ed6c85f46dae54f6d019f8",
+    );
+    const executable50 = executableDownSql(migration50);
+    expect(executable50.indexOf("DROP POLICY runtime_control_revisions_read_policy")).toBeLessThan(
+      executable50.indexOf("DROP TABLE run_runtime_config_snapshots"),
+    );
+
+    const migration52 = byVersion(52);
+    expect(migration52.checksum).toBe(
+      "80a8293017276bedb2eda063e3ecd0c33a635d46810245a02d8a249cdee5ac7a",
+    );
+    const executable52 = executableDownSql(migration52);
+    expect(executable52.indexOf("DROP VIEW admin_runtime_statistics")).toBeLessThan(
+      executable52.indexOf("ALTER TABLE user_accounts DROP COLUMN status"),
+    );
+
+    const migration53 = byVersion(53);
+    expect(migration53.checksum).toBe(
+      "93d9244d34e54403e187867916f4a4ecc3b7f5ab856e17a2e1b26060fdbe1f54",
+    );
+    const executable53 = executableDownSql(migration53);
+    expect(executable53).toContain(
+      "DROP VIEW admin_runtime_statistics;\nCREATE VIEW admin_runtime_statistics",
+    );
+    expect(executable53).not.toContain("CREATE OR REPLACE VIEW admin_runtime_statistics");
   });
 });

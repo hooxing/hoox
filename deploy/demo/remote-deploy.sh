@@ -94,7 +94,8 @@ rollback() {
     release_dir="$previous_release"
     compose_file="$previous_release/docker-compose.yml"
     write_compose_env "$previous_image" "$existing_tenant"
-    docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" up -d api web scheduler worker || true
+    docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
+      up -d --force-recreate api web scheduler worker || true
     ln -sfn "$previous_release" "$root/current"
   fi
   echo "Hoox Demo 发布失败，已尝试恢复上一应用版本；数据库迁移不会自动回退" >&2

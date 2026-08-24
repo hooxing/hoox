@@ -61,3 +61,62 @@ export function assertDevelopmentPublicObjectStorageEndpoint(
     throw new Error("DEVELOPMENT_S3_PUBLIC_ENDPOINT_MUST_BE_ISOLATED");
   }
 }
+
+/**
+ * 公开 Demo 仅允许通过宿主机反向代理暴露：API 自身仍绑定字面回环地址，
+ * 身份入口只接受显式 HTTPS origin，对象交付也必须使用 HTTPS。
+ */
+export function assertDemoPublicAccessConfiguration(input: {
+  readonly listenHost: string;
+  readonly publicOrigin: string | undefined;
+  readonly publicObjectStorageEndpoint: string;
+  readonly trustedOrigins: readonly string[];
+}): void {
+  normalizeDevelopmentLoopbackHost(input.listenHost);
+  if (input.publicOrigin === undefined || input.trustedOrigins.length === 0) {
+    throw new Error("DEMO_PUBLIC_ACCESS_REQUIRES_PUBLIC_ORIGIN");
+  }
+  let publicOrigin: URL;
+  try {
+    publicOrigin = new URL(input.publicOrigin);
+  } catch {
+    throw new Error("DEMO_PUBLIC_ACCESS_REQUIRES_HTTPS_ORIGIN");
+  }
+  if (
+    publicOrigin.protocol !== "https:" ||
+    publicOrigin.username !== "" ||
+    publicOrigin.password !== "" ||
+    publicOrigin.pathname !== "/" ||
+    publicOrigin.search !== "" ||
+    publicOrigin.hash !== "" ||
+    publicOrigin.origin !== input.publicOrigin
+  ) {
+    throw new Error("DEMO_PUBLIC_ACCESS_REQUIRES_HTTPS_ORIGIN");
+  }
+  for (const origin of input.trustedOrigins) {
+    const parsed = new URL(origin);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.pathname !== "/" ||
+      parsed.search !== "" ||
+      parsed.hash !== ""
+    ) {
+      throw new Error("DEMO_PUBLIC_ACCESS_REQUIRES_HTTPS_ORIGINS");
+    }
+  }
+  if (!input.trustedOrigins.includes(publicOrigin.origin)) {
+    throw new Error("DEMO_PUBLIC_ORIGIN_MUST_BE_TRUSTED");
+  }
+  const publicEndpoint = new URL(input.publicObjectStorageEndpoint);
+  if (
+    publicEndpoint.protocol !== "https:" ||
+    publicEndpoint.username !== "" ||
+    publicEndpoint.password !== "" ||
+    publicEndpoint.search !== "" ||
+    publicEndpoint.hash !== ""
+  ) {
+    throw new Error("DEMO_PUBLIC_S3_ENDPOINT_REQUIRES_HTTPS");
+  }
+}

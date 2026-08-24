@@ -41,23 +41,25 @@ const developmentApiMaxSkillBlobSizeBytes = 32 * 1_024 * 1_024;
 
 export { parseThreadCursorSigningKeys } from "./cursor.js";
 
-/** 仅用于本地 development：真实 PG、固定开发身份和真实 TCP listener，不代表生产装配。 */
+/** development 装配默认只服务固定本地身份；公开 Demo 必须显式关闭固定身份并保持回环监听。 */
 export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = {
   async assemble(configuration) {
     if (
       configuration.runtimeEnvironment !== "development" ||
-      configuration.developmentPrincipals === undefined
+      (configuration.developmentPrincipals === undefined && !configuration.demoPublicAccessEnabled)
     ) {
       throw new Error("DEVELOPMENT_API_ASSEMBLY_FORBIDDEN");
     }
-    // 即使调用方绕过进程配置解析直接调用装配器，也不能扩大固定凭据的网络与身份边界。
-    assertDevelopmentPrincipalsIsolated(configuration.developmentPrincipals);
+    // 即使调用方绕过进程配置解析直接调用装配器，API 也只能由宿主机反向代理从回环地址转发。
     const listenHost = normalizeDevelopmentLoopbackHost(configuration.listenHost);
-    assertDevelopmentPublicObjectStorageEndpoint(
-      configuration.objectStorage.publicEndpoint,
-      listenHost,
-      configuration.listenPort,
-    );
+    if (configuration.developmentPrincipals !== undefined) {
+      assertDevelopmentPrincipalsIsolated(configuration.developmentPrincipals);
+      assertDevelopmentPublicObjectStorageEndpoint(
+        configuration.objectStorage.publicEndpoint,
+        listenHost,
+        configuration.listenPort,
+      );
+    }
     const persistence = createApiPersistenceRuntime({
       connectionString: configuration.databaseUrl,
       schema: configuration.databaseSchema,
@@ -81,17 +83,19 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
     let resourceFilesystemProxy: RunningDevelopmentResourceFsProxy | undefined;
     try {
       const clock = Object.freeze({ now: () => isoTimestamp(new Date().toISOString()) });
-      const [firstPrincipal, secondPrincipal] = configuration.developmentPrincipals;
-      const principals = Object.freeze([
-        Object.freeze({
-          userId: userId(firstPrincipal.userId),
-          tenantId: tenantId(firstPrincipal.tenantId),
-        }),
-        Object.freeze({
-          userId: userId(secondPrincipal.userId),
-          tenantId: tenantId(secondPrincipal.tenantId),
-        }),
-      ] as const);
+      const principals =
+        configuration.developmentPrincipals === undefined
+          ? undefined
+          : Object.freeze([
+              Object.freeze({
+                userId: userId(configuration.developmentPrincipals[0].userId),
+                tenantId: tenantId(configuration.developmentPrincipals[0].tenantId),
+              }),
+              Object.freeze({
+                userId: userId(configuration.developmentPrincipals[1].userId),
+                tenantId: tenantId(configuration.developmentPrincipals[1].tenantId),
+              }),
+            ] as const);
       const cursorCodec = createThreadCursorCodec({
         activeKid: configuration.cursorActiveKeyId,
         keys: parseThreadCursorSigningKeys(configuration.cursorSigningKeys),
@@ -156,13 +160,16 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
       });
       app = createApiApp(
         {
-          auth: createDevelopmentAuthResolver({
-            runtimeEnvironment: configuration.runtimeEnvironment,
-            principals,
-            fallback: localAccounts,
-          }),
+          auth:
+            principals === undefined
+              ? localAccounts
+              : createDevelopmentAuthResolver({
+                  runtimeEnvironment: configuration.runtimeEnvironment,
+                  principals,
+                  fallback: localAccounts,
+                }),
           localAccounts,
-          localAccountPasswordRoutes: true,
+          localAccountPasswordRoutes: principals !== undefined,
           embeddedIdentity,
           repositories: persistence.repositories,
           personalizations: persistence.personalizations,

@@ -223,3 +223,4 @@
 | [决策：协议运行时 Schema 使用 TypeBox](domain-schema-library.md) | 已接受 | 2026-07-26 |
 | [ADR-20260824115000：在 Hoox 进程内嵌 Better Auth 身份核心](20260824115000-embedded-better-auth-identity-core.md) | 已接受 | 2026-08-24 |
 | [ADR-20260824125500：内嵌身份会话交换与后台配置边界](20260824125500-embedded-identity-session-exchange-and-admin-configuration.md) | 已接受 | 2026-08-24 |
+| [ADR-20260824163556：单机 Demo 使用受控 development 装配持续部署](20260824163556-single-node-demo-continuous-deployment.md) | 已接受 | 2026-08-24 |

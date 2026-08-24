@@ -30,7 +30,7 @@ const mocks = vi.hoisted(() => {
   return {
     app,
     persistence,
-    createApiApp: vi.fn(() => app),
+    createApiApp: vi.fn((_dependencies: unknown) => app),
     createApiPersistenceRuntime: vi.fn(() => persistence),
     createS3BlobStore: vi.fn(() => ({})),
     resourceFilesystemProxy,
@@ -161,5 +161,31 @@ describe("开发 API 默认装配", () => {
     expect(mocks.resourceFilesystemProxy.close.mock.invocationCallOrder[0]).toBeLessThan(
       mocks.app.close.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY,
     );
+  });
+  it("公开 Demo 不装配固定开发 token，只保留真实账号认证并继续绑定回环地址", async () => {
+    const running = await startApiProcess({
+      environment: {
+        ...developmentEnvironment(),
+        DEV_AUTH_ENABLED: "false",
+        DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
+        BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
+        S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
+      },
+    });
+
+    try {
+      const dependencies = mocks.createApiApp.mock.calls[0]?.[0] as
+        | { readonly auth?: unknown; readonly localAccountPasswordRoutes?: boolean }
+        | undefined;
+      expect(dependencies?.auth).toEqual(
+        expect.objectContaining({ resolve: expect.any(Function) }),
+      );
+      expect(dependencies?.localAccountPasswordRoutes).toBe(false);
+      expect(dependencies?.auth).not.toHaveProperty("principals");
+      expect(mocks.app.listen).toHaveBeenCalledWith({ host: "127.0.0.1", port: 3001 });
+    } finally {
+      await running.close();
+    }
   });
 });

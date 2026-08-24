@@ -3,7 +3,31 @@ import type {
   SkillPublicationStatus,
   SkillSubmissionDto,
 } from "@hoox/protocol";
+import {
+  AppstoreOutlined,
+  AuditOutlined,
+  BarChartOutlined,
+  BulbOutlined,
+  DatabaseOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
+  RobotOutlined,
+  SettingOutlined,
+  TeamOutlined,
+} from "@ant-design/icons";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { App as AntApp, Button, ConfigProvider, Layout, Menu, Tag, Tooltip } from "antd";
+import type { MenuProps } from "antd";
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import {
+  BrowserRouter,
+  MemoryRouter,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 import {
   AdminApiError,
   filesToRequests,
@@ -12,7 +36,7 @@ import {
   type SkillAdminApiContract,
 } from "./api.js";
 import type { AdminControlApiContract } from "./control-api.js";
-import { AdminControlConsole, type ControlView } from "./control-console.js";
+import { AdminControlConsole } from "./control-console.js";
 import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadata.js";
 
 const defaultApi = new SkillAdminApi();
@@ -793,9 +817,6 @@ export function SkillConsole({
   return (
     <main className="admin-shell">
       <header className="topbar">
-        <div className="brand-mark" aria-hidden="true">
-          A
-        </div>
         <div>
           <span className="eyebrow">Hoox</span>
           <h1>技能发布管理台</h1>
@@ -898,17 +919,242 @@ export function SkillConsole({
   );
 }
 
-type AdminView = ControlView | "skills";
+const { Content, Header, Sider } = Layout;
 
-const navigation: readonly { readonly key: AdminView; readonly label: string }[] = [
-  { key: "overview", label: "驾驶舱" },
-  { key: "analytics", label: "数据运营" },
-  { key: "users", label: "用户" },
-  { key: "models", label: "模型" },
-  { key: "memory", label: "记忆" },
-  { key: "skills", label: "Skills" },
-  { key: "settings", label: "运行配置" },
+const navigation: NonNullable<MenuProps["items"]> = [
+  {
+    key: "/overview",
+    icon: <AppstoreOutlined />,
+    label: "工作台",
+  },
+  {
+    type: "group",
+    label: "运营",
+    children: [
+      { key: "/analytics", icon: <BarChartOutlined />, label: "数据运营" },
+      { key: "/users", icon: <TeamOutlined />, label: "用户管理" },
+    ],
+  },
+  {
+    type: "group",
+    label: "AI 能力",
+    children: [
+      { key: "/models", icon: <RobotOutlined />, label: "模型服务" },
+      { key: "/memory", icon: <BulbOutlined />, label: "记忆服务" },
+      { key: "/skills", icon: <DatabaseOutlined />, label: "Skills" },
+    ],
+  },
+  {
+    type: "group",
+    label: "系统",
+    children: [
+      { key: "/settings", icon: <SettingOutlined />, label: "运行配置" },
+      { key: "/audits", icon: <AuditOutlined />, label: "操作审计" },
+    ],
+  },
 ];
+
+const pageMetadata: Readonly<
+  Record<string, { readonly title: string; readonly description: string }>
+> = {
+  "/overview": {
+    title: "工作台",
+    description: "平台健康、关键指标与近期变更",
+  },
+  "/analytics": {
+    title: "数据运营",
+    description: "用户、对话与运行可靠性指标",
+  },
+  "/users": {
+    title: "用户管理",
+    description: "账号状态、使用情况与会话治理",
+  },
+  "/models": {
+    title: "模型服务",
+    description: "Provider、模型目录与配置版本",
+  },
+  "/memory": {
+    title: "记忆服务",
+    description: "Mem0 连接、作用域与异步链路",
+  },
+  "/skills": {
+    title: "Skills",
+    description: "技能提交、审核、发布与撤销",
+  },
+  "/settings": {
+    title: "运行配置",
+    description: "部署依赖、运行策略与版本发布",
+  },
+  "/audits": {
+    title: "操作审计",
+    description: "查看不可变的控制面变更记录",
+  },
+};
+
+const defaultPageMetadata = {
+  title: "工作台",
+  description: "平台健康、关键指标与近期变更",
+} as const;
+
+function AdminPlatform({
+  apiClient,
+  controlApi,
+}: {
+  readonly apiClient: SkillAdminApiContract;
+  readonly controlApi?: AdminControlApiContract;
+}) {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [collapsed, setCollapsed] = useState(false);
+  const metadata = pageMetadata[location.pathname] ?? defaultPageMetadata;
+  const environment = import.meta.env.MODE === "production" ? "生产环境" : "开发环境";
+
+  return (
+    <Layout className="platform-admin-shell">
+      <Sider
+        className="platform-sider"
+        width={248}
+        collapsedWidth={76}
+        collapsed={collapsed}
+        breakpoint="lg"
+        trigger={null}
+        onBreakpoint={setCollapsed}
+      >
+        <button
+          type="button"
+          className="platform-logo"
+          aria-label="返回工作台"
+          onClick={() => navigate("/overview")}
+        >
+          <span className="platform-logo-mark" aria-hidden="true">
+            H
+          </span>
+          {!collapsed && (
+            <span className="platform-logo-copy">
+              <strong>Hoox</strong>
+              <small>Runtime Console</small>
+            </span>
+          )}
+        </button>
+        <Menu
+          className="platform-menu"
+          mode="inline"
+          items={navigation}
+          selectedKeys={[location.pathname]}
+          onClick={({ key }) => navigate(key)}
+        />
+        <div className="platform-sider-footer">
+          <span className="service-health-dot" aria-hidden="true" />
+          {!collapsed && (
+            <span>
+              <strong>控制面</strong>
+              <small>连接状态以页面数据为准</small>
+            </span>
+          )}
+        </div>
+      </Sider>
+      <Layout className="platform-main-layout">
+        <Header className="platform-header">
+          <div className="platform-header-leading">
+            <Tooltip title={collapsed ? "展开导航" : "收起导航"}>
+              <Button
+                type="text"
+                className="platform-collapse-button"
+                aria-label={collapsed ? "展开导航" : "收起导航"}
+                icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                onClick={() => setCollapsed((value) => !value)}
+              />
+            </Tooltip>
+            <div className="platform-page-context">
+              <strong>{metadata.title}</strong>
+              <span>{metadata.description}</span>
+            </div>
+          </div>
+          <div className="platform-header-actions">
+            <Tag color={environment === "生产环境" ? "red" : "green"}>{environment}</Tag>
+            <span className="platform-operator">
+              <span className="platform-operator-avatar">A</span>
+              <span>
+                <strong>平台管理员</strong>
+                <small>权限由管理网关确认</small>
+              </span>
+            </span>
+          </div>
+        </Header>
+        <Content className="platform-content">
+          <Routes>
+            <Route
+              path="/overview"
+              element={
+                <AdminControlConsole
+                  view="overview"
+                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                />
+              }
+            />
+            <Route
+              path="/analytics"
+              element={
+                <AdminControlConsole
+                  view="analytics"
+                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                />
+              }
+            />
+            <Route
+              path="/users"
+              element={
+                <AdminControlConsole
+                  view="users"
+                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                />
+              }
+            />
+            <Route
+              path="/models"
+              element={
+                <AdminControlConsole
+                  view="models"
+                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                />
+              }
+            />
+            <Route
+              path="/memory"
+              element={
+                <AdminControlConsole
+                  view="memory"
+                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                />
+              }
+            />
+            <Route path="/skills" element={<SkillConsole apiClient={apiClient} />} />
+            <Route
+              path="/settings"
+              element={
+                <AdminControlConsole
+                  view="settings"
+                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                />
+              }
+            />
+            <Route
+              path="/audits"
+              element={
+                <AdminControlConsole
+                  view="audits"
+                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                />
+              }
+            />
+            <Route path="/" element={<Navigate to="/overview" replace />} />
+            <Route path="*" element={<Navigate to="/overview" replace />} />
+          </Routes>
+        </Content>
+      </Layout>
+    </Layout>
+  );
+}
 
 export function App({
   apiClient,
@@ -917,42 +1163,70 @@ export function App({
   readonly apiClient?: SkillAdminApiContract;
   readonly controlApi?: AdminControlApiContract;
 }) {
-  // 注入 Skill API 的旧测试和嵌入场景保持原入口；正常打开管理台先进入总览。
-  const [view, setView] = useState<AdminView>(apiClient === undefined ? "overview" : "skills");
-  return (
-    <div className="platform-admin">
-      <header className="platform-nav">
-        <button type="button" className="platform-brand" onClick={() => setView("overview")}>
-          <span className="platform-brand-mark" aria-hidden="true">
-            H
-          </span>
-          <span>
-            <strong>Hoox</strong>
-            <small>平台管理</small>
-          </span>
-        </button>
-        <nav aria-label="后台模块">
-          {navigation.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              className={view === item.key ? "selected" : ""}
-              aria-current={view === item.key ? "page" : undefined}
-              onClick={() => setView(item.key)}
-            >
-              {item.label}
-            </button>
-          ))}
-        </nav>
-      </header>
-      {view === "skills" ? (
-        <SkillConsole apiClient={apiClient ?? defaultApi} />
-      ) : (
-        <AdminControlConsole
-          view={view}
-          {...(controlApi === undefined ? {} : { api: controlApi })}
-        />
-      )}
-    </div>
+  const queryClient = useMemo(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            retry: false,
+            refetchOnWindowFocus: false,
+            staleTime: 10_000,
+          },
+          mutations: { retry: false },
+        },
+      }),
+    [],
+  );
+  const platform = (
+    <ConfigProvider
+      theme={{
+        token: {
+          colorPrimary: "#176b4d",
+          colorInfo: "#176b4d",
+          colorSuccess: "#21875f",
+          colorWarning: "#d18a32",
+          colorError: "#c65045",
+          colorText: "#17251f",
+          colorTextSecondary: "#66756d",
+          colorBgLayout: "#f3f6f4",
+          colorBorderSecondary: "#e4eae6",
+          borderRadius: 10,
+          borderRadiusLG: 16,
+          fontFamily:
+            'Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif',
+        },
+        components: {
+          Menu: {
+            itemBorderRadius: 10,
+            itemHeight: 42,
+            itemSelectedBg: "#e7f3ed",
+            itemSelectedColor: "#12563e",
+          },
+          Button: { controlHeight: 38 },
+        },
+      }}
+    >
+      <AntApp>
+        <QueryClientProvider client={queryClient}>
+          <AdminPlatform
+            apiClient={apiClient ?? defaultApi}
+            {...(controlApi === undefined ? {} : { controlApi })}
+          />
+        </QueryClientProvider>
+      </AntApp>
+    </ConfigProvider>
+  );
+
+  // 注入客户端时使用内存路由，隔离测试与嵌入场景的全局地址；真实管理台使用浏览器地址形成可复制入口。
+  return apiClient !== undefined || controlApi !== undefined ? (
+    <MemoryRouter
+      initialEntries={[
+        apiClient !== undefined && controlApi === undefined ? "/skills" : "/overview",
+      ]}
+    >
+      {platform}
+    </MemoryRouter>
+  ) : (
+    <BrowserRouter>{platform}</BrowserRouter>
   );
 }

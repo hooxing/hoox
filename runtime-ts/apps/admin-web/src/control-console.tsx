@@ -9,6 +9,7 @@ import type {
   PlatformUserPageDto,
   RuntimeSettingsRevisionDto,
 } from "@hoox/protocol";
+import { useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { AdminApiError } from "./api.js";
 import { AdminControlApi, type AdminControlApiContract } from "./control-api.js";
@@ -19,7 +20,14 @@ import {
   UserManagementWorkspace,
 } from "./operations-console.js";
 
-export type ControlView = "overview" | "analytics" | "users" | "models" | "memory" | "settings";
+export type ControlView =
+  | "overview"
+  | "analytics"
+  | "users"
+  | "models"
+  | "memory"
+  | "settings"
+  | "audits";
 const defaultControlApi = new AdminControlApi();
 
 function number(form: FormData, key: string): number {
@@ -1411,6 +1419,7 @@ export function AdminControlConsole({
   readonly view: ControlView;
   readonly api?: AdminControlApiContract;
 }) {
+  const queryClient = useQueryClient();
   const [overview, setOverview] = useState<AdminControlOverviewDto>();
   const [items, setItems] = useState<
     readonly (ModelProviderRevisionDto | MemoryProviderRevisionDto | RuntimeSettingsRevisionDto)[]
@@ -1431,18 +1440,53 @@ export function AdminControlConsole({
     try {
       const [nextOverview, nextItems, nextAudits, nextCatalogProviders, nextUsers] =
         await Promise.all([
-          api.overview(),
+          queryClient.fetchQuery({
+            queryKey: ["admin-control", "overview", view],
+            queryFn: () => api.overview(),
+            staleTime: 0,
+          }),
           view === "models"
-            ? api.listModelProviders()
+            ? queryClient.fetchQuery({
+                queryKey: ["admin-control", "model-providers"],
+                queryFn: () => api.listModelProviders(),
+                staleTime: 0,
+              })
             : view === "memory"
-              ? api.listMemoryProviders()
+              ? queryClient.fetchQuery({
+                  queryKey: ["admin-control", "memory-providers"],
+                  queryFn: () => api.listMemoryProviders(),
+                  staleTime: 0,
+                })
               : view === "settings"
-                ? api.listRuntimeSettings()
+                ? queryClient.fetchQuery({
+                    queryKey: ["admin-control", "runtime-settings"],
+                    queryFn: () => api.listRuntimeSettings(),
+                    staleTime: 0,
+                  })
                 : Promise.resolve([]),
-          view === "overview" ? api.listAudits(50) : Promise.resolve([]),
-          view === "models" ? api.listPiModelCatalogProviders() : Promise.resolve([]),
+          view === "overview" || view === "audits"
+            ? queryClient.fetchQuery({
+                queryKey: ["admin-control", "audits", view === "overview" ? 50 : 100],
+                queryFn: () => api.listAudits(view === "overview" ? 50 : 100),
+                staleTime: 0,
+              })
+            : Promise.resolve([]),
+          view === "models"
+            ? queryClient.fetchQuery({
+                queryKey: ["admin-control", "model-catalog-providers"],
+                queryFn: () => api.listPiModelCatalogProviders(),
+              })
+            : Promise.resolve([]),
           view === "users"
-            ? api.listUsers({ ...(userQuery.length === 0 ? {} : { query: userQuery }), limit: 100 })
+            ? queryClient.fetchQuery({
+                queryKey: ["admin-control", "users", userQuery],
+                queryFn: () =>
+                  api.listUsers({
+                    ...(userQuery.length === 0 ? {} : { query: userQuery }),
+                    limit: 100,
+                  }),
+                staleTime: 0,
+              })
             : Promise.resolve(undefined),
         ]);
       // 模块切换时旧请求可能晚于新请求返回；过期响应不能覆盖当前模块的数据。
@@ -1457,7 +1501,7 @@ export function AdminControlConsole({
       if (sequence !== refreshSequence.current) return;
       setError(errorMessage(reason));
     }
-  }, [api, userQuery, view]);
+  }, [api, queryClient, userQuery, view]);
 
   useEffect(() => {
     setItems([]);
@@ -1468,6 +1512,7 @@ export function AdminControlConsole({
     setBusy(true);
     try {
       await work();
+      await queryClient.invalidateQueries({ queryKey: ["admin-control"] });
       await refresh();
     } catch (reason) {
       const message = errorMessage(reason);
@@ -1500,7 +1545,9 @@ export function AdminControlConsole({
                     ? "模型"
                     : view === "memory"
                       ? "记忆供应商"
-                      : "运行参数"}
+                      : view === "audits"
+                        ? "操作审计"
+                        : "运行配置"}
           </h1>
         </div>
         <button
@@ -1558,6 +1605,18 @@ export function AdminControlConsole({
             operation(() => api.updateUserStatus(userId, { status, reason }))
           }
         />
+      ) : view === "audits" ? (
+        <div className="audit-workspace">
+          <section className="audit-workspace-hero">
+            <div>
+              <span className="eyebrow">Governance</span>
+              <h2>控制面操作记录</h2>
+              <p>配置探测、发布和治理动作由服务端记录；这里仅展示不可变审计事实。</p>
+            </div>
+            <span className="count">{audits.length}</span>
+          </section>
+          <AuditTrail items={audits} />
+        </div>
       ) : (
         <>
           {view === "settings" && (

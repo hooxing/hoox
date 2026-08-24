@@ -131,7 +131,7 @@ describe("技能发布管理界面", () => {
     const container = mount(api);
     await settle();
 
-    expect(container.querySelector(".brand-mark")?.textContent).toContain("A");
+    expect(container.querySelector(".platform-logo-mark")?.textContent).toContain("H");
     expect(container.querySelector(".eyebrow")?.textContent).toBe("Hoox");
     expect(api.listSubmissions).toHaveBeenCalledOnce();
     expect(api.getSubmission).toHaveBeenCalledWith(item.submissionId);

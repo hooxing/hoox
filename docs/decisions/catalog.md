@@ -217,5 +217,6 @@
 | [ADR-20260820153000：项目采用 Apache License 2.0 并建立公开文档分层](20260820153000-open-source-license-and-documentation-boundary.md) | 已接受 | 2026-08-20 |
 | [ADR-20260821004057：工业化后台的信息架构、运营统计与用户治理边界](20260821004057-industrial-admin-operations-and-user-governance.md) | 已接受 | 2026-08-21 |
 | [ADR-20260821115221：统一后台 API 进程并保留发布资源隔离](20260821115221-unified-admin-api-process.md) | 已接受 | 2026-08-21 |
+| [后台管理 Web 采用可路由的 Ant Design 应用外壳](20260824115942-admin-web-routable-ant-design-shell.md) | 已接受 | 2026-08-24 |
 | [决策：领域聚合的一致性与修正语义](domain-aggregate-consistency.md) | 已接受 | 2026-07-26 |
 | [决策：协议运行时 Schema 使用 TypeBox](domain-schema-library.md) | 已接受 | 2026-07-26 |

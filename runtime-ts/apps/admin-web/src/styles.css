@@ -17,8 +17,312 @@ body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  background:
-    radial-gradient(circle at 10% -10%, rgb(75 130 101 / 12%), transparent 32rem), #f1f3ef;
+  background: #f3f6f4;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.platform-admin-shell {
+  min-height: 100vh;
+  background: radial-gradient(circle at 88% -8%, rgb(52 133 94 / 9%), transparent 31rem), #f3f6f4;
+}
+
+.platform-sider.ant-layout-sider {
+  position: sticky;
+  z-index: 30;
+  top: 0;
+  height: 100vh;
+  overflow: hidden;
+  border-right: 1px solid #e3e9e5;
+  background: rgb(251 252 251 / 96%);
+  box-shadow: 10px 0 34px rgb(36 63 50 / 4%);
+  backdrop-filter: blur(18px);
+}
+
+.platform-sider .ant-layout-sider-children {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+
+.platform-logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 78px;
+  border: 0;
+  border-bottom: 1px solid #edf1ee;
+  padding: 0 20px;
+  color: #173f31;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.platform-logo-mark {
+  display: grid;
+  flex: 0 0 auto;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 12px;
+  color: #fff;
+  background: linear-gradient(145deg, #12583f, #23815d);
+  font-family: Georgia, serif;
+  font-size: 21px;
+  box-shadow: 0 10px 25px rgb(23 107 77 / 22%);
+}
+
+.platform-logo-copy,
+.platform-operator > span:last-child,
+.platform-sider-footer > span:last-child {
+  display: grid;
+  min-width: 0;
+}
+
+.platform-logo-copy strong {
+  font-size: 16px;
+  letter-spacing: -0.02em;
+}
+
+.platform-logo-copy small {
+  margin-top: 2px;
+  color: #829087;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.platform-menu.ant-menu {
+  flex: 1;
+  overflow-y: auto;
+  border-inline-end: 0;
+  padding: 14px 10px;
+  background: transparent;
+}
+
+.platform-menu .ant-menu-item-group-title {
+  padding: 15px 14px 7px;
+  color: #9aa59f;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.platform-sider.ant-layout-sider-collapsed .platform-menu .ant-menu-item-group-title {
+  display: none;
+}
+
+.platform-menu .ant-menu-item {
+  margin-block: 3px;
+  color: #4f5f56;
+  font-weight: 650;
+}
+
+.platform-menu .ant-menu-item .anticon {
+  color: #7b8b82;
+  font-size: 17px;
+}
+
+.platform-menu .ant-menu-item-selected {
+  box-shadow: inset 3px 0 #176b4d;
+}
+
+.platform-menu .ant-menu-item-selected .anticon {
+  color: #176b4d;
+}
+
+.platform-sider-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 68px;
+  margin: 10px;
+  border: 1px solid #e7ece9;
+  border-radius: 12px;
+  padding: 11px 12px;
+  color: #435249;
+  background: #f7f9f8;
+}
+
+.platform-sider-footer small {
+  overflow: hidden;
+  margin-top: 2px;
+  color: #8a968f;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-sider.ant-layout-sider-collapsed .platform-sider-footer {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.service-health-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #5c6d63;
+  box-shadow: 0 0 0 4px #e5eae7;
+}
+
+.platform-main-layout.ant-layout {
+  min-width: 0;
+  background: transparent;
+}
+
+.platform-header.ant-layout-header {
+  position: sticky;
+  z-index: 25;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  height: 78px;
+  border-bottom: 1px solid rgb(220 228 223 / 84%);
+  padding: 0 30px;
+  background: rgb(250 252 250 / 88%);
+  backdrop-filter: blur(18px);
+  line-height: 1.25;
+}
+
+.platform-header-leading,
+.platform-header-actions,
+.platform-operator {
+  display: flex;
+  align-items: center;
+}
+
+.platform-header-leading {
+  gap: 15px;
+  min-width: 0;
+}
+
+.platform-collapse-button {
+  flex: 0 0 auto;
+  color: #526158;
+  font-size: 18px;
+}
+
+.platform-page-context {
+  display: grid;
+  min-width: 0;
+}
+
+.platform-page-context strong {
+  color: #1a2b23;
+  font-size: 15px;
+}
+
+.platform-page-context span {
+  overflow: hidden;
+  margin-top: 2px;
+  color: #7e8b84;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platform-header-actions {
+  gap: 16px;
+}
+
+.platform-header-actions .ant-tag {
+  margin: 0;
+  border-radius: 999px;
+  padding-inline: 10px;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.platform-operator {
+  gap: 9px;
+  padding-left: 15px;
+  border-left: 1px solid #e1e7e3;
+}
+
+.platform-operator-avatar {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border-radius: 11px;
+  color: #176b4d;
+  background: #e7f3ed;
+  font-weight: 800;
+}
+
+.platform-operator strong {
+  color: #34463c;
+  font-size: 11px;
+}
+
+.platform-operator small {
+  color: #93a098;
+  font-size: 9px;
+}
+
+.platform-content {
+  min-width: 0;
+}
+
+.audit-workspace {
+  display: grid;
+  gap: 16px;
+}
+
+.audit-workspace-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border: 1px solid #d8e3dd;
+  border-radius: 16px;
+  padding: 24px 26px;
+  background: linear-gradient(120deg, #edf6f1, #fbfcfb 68%);
+}
+
+.audit-workspace-hero h2,
+.audit-workspace-hero p {
+  margin: 0;
+}
+
+.audit-workspace-hero p {
+  margin-top: 6px;
+  color: #68766e;
+}
+
+@media (width <= 900px) {
+  .platform-header {
+    padding-inline: 18px;
+  }
+
+  .platform-operator > span:last-child,
+  .platform-page-context span {
+    display: none;
+  }
+}
+
+@media (width <= 620px) {
+  .platform-header {
+    padding-inline: 10px;
+  }
+
+  .platform-header-actions .ant-tag {
+    display: none;
+  }
+
+  .platform-operator {
+    padding-left: 10px;
+  }
 }
 
 .platform-nav {

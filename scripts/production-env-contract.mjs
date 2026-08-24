@@ -34,6 +34,8 @@ export const expectedProductionEnvironmentKeys = Object.freeze([
   "API_LISTEN_HOST",
   "API_LISTEN_PORT",
   "API_PUBLIC_ORIGIN",
+  "BETTER_AUTH_SECRET",
+  "BETTER_AUTH_TRUSTED_ORIGINS",
   "API_TLS_MODE",
   "API_TRUSTED_PROXY_CIDRS",
   "API_JWT_ISSUER",
@@ -125,6 +127,7 @@ const secretKeys = new Set([
   "SKILL_PUBLISHER_DATABASE_URL",
   "ADMIN_CONTROL_DATABASE_URL",
   "THREAD_CURSOR_SIGNING_KEYS",
+  "BETTER_AUTH_SECRET",
   "API_JWT_SIGNING_KEYS",
   "ADMIN_CONTROL_JWT_SIGNING_KEYS",
   "S3_ACCESS_KEY_ID",
@@ -244,6 +247,30 @@ export function validateProductionEnvironmentExample(source) {
       }
     } catch {
       issues.push(`生产样例 URL 无效：${key}`);
+    }
+  }
+  const trustedOrigins = values.get("BETTER_AUTH_TRUSTED_ORIGINS")?.split(",") ?? [];
+  if (trustedOrigins.length === 0 || trustedOrigins.some((origin) => origin.trim() === "")) {
+    issues.push("生产样例 BETTER_AUTH_TRUSTED_ORIGINS 必须至少包含一个 origin");
+  } else {
+    for (const origin of trustedOrigins) {
+      try {
+        const url = new URL(origin.trim());
+        if (
+          url.protocol !== "https:" ||
+          url.username !== "" ||
+          url.password !== "" ||
+          url.pathname !== "/" ||
+          url.search !== "" ||
+          url.hash !== ""
+        ) {
+          issues.push("生产样例 BETTER_AUTH_TRUSTED_ORIGINS 必须全部为无凭据 HTTPS origin");
+          break;
+        }
+      } catch {
+        issues.push("生产样例 BETTER_AUTH_TRUSTED_ORIGINS 无效");
+        break;
+      }
     }
   }
   if (values.get("CUBESANDBOX_PROXY_SCHEME") !== "https") {

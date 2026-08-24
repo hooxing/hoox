@@ -9,6 +9,7 @@ import {
 } from "./model-wire-trace-read.js";
 import { type PgBlobLifecycleOptions, PgBlobLifecycleRepository } from "./pg-blob-lifecycle.js";
 import { PgArchiveThreadCommand, PgCoreRepositories } from "./pg-core-repositories.js";
+import { PgIdentityConfigurationRepository } from "./pg-identity-configuration.js";
 import { PgLocalAccountRepository } from "./pg-local-account.js";
 import { PgPersonalizationSettingsRepository } from "./pg-personalization-settings.js";
 import { PgResourceFilesystemCatalog } from "./pg-resource-filesystem.js";
@@ -76,7 +77,7 @@ export interface MigrationRuntime {
   close(): Promise<void>;
 }
 
-/** API 常驻进程所需的最小 PostgreSQL 能力集合，不把连接池泄漏到应用装配层。 */
+/** API 常驻进程所需的 PostgreSQL 能力集合；身份框架只获得专用数据库适配入口。 */
 export interface ApiPersistenceRuntime {
   readonly repositories: CoreRepositories;
   readonly archiveThread: ArchiveThreadCommandPort;
@@ -97,6 +98,8 @@ export interface ApiPersistenceRuntime {
   readonly personalizations: PgPersonalizationSettingsRepository;
   readonly scheduledTasks: PgScheduledTaskRepository;
   readonly localAccounts: PgLocalAccountRepository;
+  readonly identityConfigurations: PgIdentityConfigurationRepository;
+  readonly identityDatabase: Pool;
   threadContext(blobs: BlobStore): ThreadContextReadPort;
   probe(): Promise<void>;
   close(): Promise<void>;
@@ -150,6 +153,8 @@ export function createApiPersistenceRuntime(
     personalizations: new PgPersonalizationSettingsRepository(pool, teamCoordinatorPool),
     scheduledTasks: new PgScheduledTaskRepository(pool),
     localAccounts: new PgLocalAccountRepository(pool),
+    identityConfigurations: new PgIdentityConfigurationRepository(pool),
+    identityDatabase: pool,
     threadContext: (blobs: BlobStore) => new PgThreadContextReadRepository(pool, blobs),
     probe: async () => {
       await Promise.all([

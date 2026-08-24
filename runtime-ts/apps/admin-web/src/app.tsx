@@ -904,6 +904,7 @@ const navigation: readonly { readonly key: AdminView; readonly label: string }[]
   { key: "overview", label: "驾驶舱" },
   { key: "analytics", label: "数据运营" },
   { key: "users", label: "用户" },
+  { key: "identity", label: "登录与注册" },
   { key: "models", label: "模型" },
   { key: "memory", label: "记忆" },
   { key: "skills", label: "Skills" },

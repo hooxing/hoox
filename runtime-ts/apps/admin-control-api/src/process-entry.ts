@@ -50,6 +50,7 @@ const environmentSchema = Object.freeze({
     maxLength: 63,
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
+  BETTER_AUTH_SECRET: stringEnvironmentField({ secret: true, maxLength: 4096 }),
   ADMIN_CONTROL_LISTEN_HOST: stringEnvironmentField({ requiredIn: production, maxLength: 253 }),
   ADMIN_CONTROL_LISTEN_PORT: integerEnvironmentField({
     requiredIn: production,
@@ -125,6 +126,7 @@ export interface AdminControlApiProcessConfiguration {
   readonly skillPublisherDatabaseUrl: string;
   readonly skillPublisherDatabaseSsl?: Readonly<{ readonly rejectUnauthorized: true }>;
   readonly databaseSchema: string;
+  readonly betterAuthSecret: string;
   readonly databaseAdminControlRole?: string;
   readonly databaseSkillPublisherRole?: string;
   readonly listenHost: string;
@@ -254,6 +256,10 @@ export function parseAdminControlApiProcessEnvironment(
             : { trustedProxyCidrs: parsed.values.ADMIN_CONTROL_TLS_TRUSTED_PROXY_CIDRS }),
         })
       : undefined;
+  const betterAuthSecret = readRequiredEnvironmentValue(parsed, "BETTER_AUTH_SECRET");
+  if (Buffer.byteLength(betterAuthSecret, "utf8") < 32) {
+    throw new TypeError("INVALID:BETTER_AUTH_SECRET");
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
@@ -264,6 +270,7 @@ export function parseAdminControlApiProcessEnvironment(
       ? {}
       : { skillPublisherDatabaseSsl: productionSkillPublisherDatabase.ssl }),
     databaseSchema,
+    betterAuthSecret,
     ...(databaseAdminControlRole === undefined ? {} : { databaseAdminControlRole }),
     ...(databaseSkillPublisherRole === undefined ? {} : { databaseSkillPublisherRole }),
     listenHost,

@@ -111,13 +111,59 @@ function fixture() {
     publish: vi.fn(),
     revoke: vi.fn(),
   } as unknown as AdminControlApiDependencies["skills"]["publications"];
+  const identity: AdminControlApiDependencies["identity"] = {
+    read: vi.fn(async () => ({
+      versionToken: 0,
+      emailPasswordEnabled: true,
+      registrationEnabled: true,
+      phoneEnabled: false,
+      smsWebhookSecretConfigured: false,
+      providers: {
+        google: { enabled: false, clientId: "", secretConfigured: false },
+        github: { enabled: false, clientId: "", secretConfigured: false },
+        wechat: { enabled: false, clientId: "", secretConfigured: false },
+        qq: { enabled: false, clientId: "", secretConfigured: false },
+      },
+    })),
+    update: vi.fn(async (_context, input) => ({
+      versionToken: input.expectedVersionToken + 1,
+      emailPasswordEnabled: input.emailPasswordEnabled,
+      registrationEnabled: input.registrationEnabled,
+      phoneEnabled: input.phoneEnabled,
+      smsWebhookSecretConfigured: input.smsWebhookSecret !== undefined,
+      providers: {
+        google: {
+          enabled: input.providers.google.enabled,
+          clientId: input.providers.google.clientId,
+          secretConfigured: input.providers.google.clientSecret !== undefined,
+        },
+        github: {
+          enabled: input.providers.github.enabled,
+          clientId: input.providers.github.clientId,
+          secretConfigured: input.providers.github.clientSecret !== undefined,
+        },
+        wechat: {
+          enabled: input.providers.wechat.enabled,
+          clientId: input.providers.wechat.clientId,
+          secretConfigured: input.providers.wechat.clientSecret !== undefined,
+        },
+        qq: {
+          enabled: input.providers.qq.enabled,
+          clientId: input.providers.qq.clientId,
+          secretConfigured: input.providers.qq.clientSecret !== undefined,
+        },
+      },
+    })),
+  };
   return {
     control,
+    identity,
     publications,
     app: createAdminControlApiApp({
       auth,
       control,
       modelCatalog,
+      identity,
       skills: { publications },
       readiness: { async probe() {} },
     }),
@@ -136,6 +182,55 @@ describe("后台控制 API", () => {
     expect(response.statusCode, response.body).toBe(200);
     expect(response.json().data.items).toEqual([]);
     expect(publications.list).toHaveBeenCalledWith({ userId: "user_admin", limit: 20 });
+    await app.close();
+  });
+
+  it("读取和更新身份配置时不回显 Provider Secret", async () => {
+    const { app, identity } = fixture();
+    const read = await app.inject({
+      method: "GET",
+      url: "/v1/admin/control/identity",
+      headers: { authorization: "Bearer admin" },
+    });
+    expect(read.statusCode).toBe(200);
+    expect(read.body).not.toContain("clientSecret");
+
+    const update = await app.inject({
+      method: "PUT",
+      url: "/v1/admin/control/identity",
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "identity-config-0001",
+      },
+      payload: {
+        expectedVersionToken: 0,
+        emailPasswordEnabled: true,
+        registrationEnabled: true,
+        phoneEnabled: false,
+        providers: [
+          {
+            key: "google",
+            enabled: true,
+            clientId: "google-client",
+            clientSecret: "google-secret",
+          },
+          { key: "github", enabled: false, clientId: "" },
+          { key: "wechat", enabled: false, clientId: "" },
+          { key: "qq", enabled: false, clientId: "" },
+        ],
+        reason: "启用 Google 登录",
+      },
+    });
+    expect(update.statusCode, update.body).toBe(200);
+    expect(update.body).not.toContain("google-secret");
+    expect(identity.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actorUserId: "user_admin",
+        idempotencyKey: "identity-config-0001",
+      }),
+      expect.objectContaining({ reason: "启用 Google 登录" }),
+    );
     await app.close();
   });
 

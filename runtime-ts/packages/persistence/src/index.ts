@@ -8,6 +8,7 @@ export * from "./pg-admin-control.js";
 export { PgArchiveThreadCommand } from "./pg-core-repositories.js";
 export * from "./pg-model-wire-trace.js";
 export * from "./pg-local-account.js";
+export * from "./pg-identity-configuration.js";
 export * from "./pg-personalization-settings.js";
 export * from "./pg-memory-ingestion.js";
 export * from "./pg-personal-history.js";

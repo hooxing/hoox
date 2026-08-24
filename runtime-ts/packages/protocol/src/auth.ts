@@ -48,3 +48,28 @@ export const AccountProfileSuccessEnvelopeSchema = successEnvelopeSchema(Account
 export const LogoutAccountSuccessEnvelopeSchema = successEnvelopeSchema(
   Type.Object({ loggedOut: Type.Literal(true) }, strict),
 );
+
+export const IdentityProviderKeySchema = Type.Union([
+  Type.Literal("google"),
+  Type.Literal("github"),
+  Type.Literal("wechat"),
+  Type.Literal("qq"),
+]);
+export type IdentityProviderKeyDto = Static<typeof IdentityProviderKeySchema>;
+
+export const IdentityAuthConfigurationDtoSchema = Type.Object(
+  {
+    emailPasswordEnabled: Type.Boolean(),
+    registrationEnabled: Type.Boolean(),
+    phoneEnabled: Type.Boolean(),
+    providers: Type.Array(
+      Type.Object({ key: IdentityProviderKeySchema, enabled: Type.Boolean() }, strict),
+      { minItems: 4, maxItems: 4 },
+    ),
+  },
+  { ...strict, $id: "v1.IdentityAuthConfigurationDto" },
+);
+export type IdentityAuthConfigurationDto = Static<typeof IdentityAuthConfigurationDtoSchema>;
+export const IdentityAuthConfigurationSuccessEnvelopeSchema = successEnvelopeSchema(
+  IdentityAuthConfigurationDtoSchema,
+);

@@ -31,6 +31,8 @@ describe("production 部署配置契约", () => {
         "CUBESANDBOX_SESSION_TTL_SECONDS",
         "THREAD_SANDBOX_PAUSED_RETENTION_SECONDS",
         "THREAD_SANDBOX_LIFECYCLE_TIMEOUT_MS",
+        "BETTER_AUTH_SECRET",
+        "BETTER_AUTH_TRUSTED_ORIGINS",
         "RESOURCE_FILESYSTEM_SIGNING_KEY",
         "CUBESANDBOX_RESOURCE_VOLUME_DRIVER",
         "MODEL_WIRE_TRACE_ENABLED",
@@ -85,6 +87,22 @@ describe("production 部署配置契约", () => {
     );
     expect(validateProductionEnvironmentExample(source)).toContain(
       "S3_PUBLIC_ENDPOINT 必须使用独立对象 origin",
+    );
+  });
+
+  it("Better Auth 允许配置多个无凭据 HTTPS origin", () => {
+    const multipleOrigins = example.replace(
+      "BETTER_AUTH_TRUSTED_ORIGINS=https://app.example.invalid",
+      "BETTER_AUTH_TRUSTED_ORIGINS=https://app.example.invalid,https://admin.example.invalid",
+    );
+    expect(validateProductionEnvironmentExample(multipleOrigins)).toEqual([]);
+
+    const invalidOrigins = example.replace(
+      "BETTER_AUTH_TRUSTED_ORIGINS=https://app.example.invalid",
+      "BETTER_AUTH_TRUSTED_ORIGINS=https://app.example.invalid/path,http://admin.example.invalid",
+    );
+    expect(validateProductionEnvironmentExample(invalidOrigins)).toContain(
+      "生产样例 BETTER_AUTH_TRUSTED_ORIGINS 必须全部为无凭据 HTTPS origin",
     );
   });
 });

@@ -15,6 +15,14 @@ export type LocalAccountPasswordRecord = LocalAccountProfileRecord & {
   readonly passwordHash: Uint8Array;
 };
 
+export interface BetterAuthIdentityExchangeInput extends LocalAccountProfileRecord {
+  readonly betterAuthUserId: string;
+  readonly membershipId: string;
+  readonly sessionTokenDigest: string;
+  readonly createdAt: string;
+  readonly sessionExpiresAt: string;
+}
+
 export interface RegisterLocalAccountInput extends LocalAccountPasswordRecord {
   readonly membershipId: string;
   readonly sessionTokenDigest: string;
@@ -24,6 +32,9 @@ export interface RegisterLocalAccountInput extends LocalAccountPasswordRecord {
 
 export interface LocalAccountRepository {
   register(input: RegisterLocalAccountInput): Promise<"created" | "conflict">;
+  exchangeBetterAuthIdentity(
+    input: BetterAuthIdentityExchangeInput,
+  ): Promise<LocalAccountProfileRecord | "disabled" | "conflict">;
   findByNormalizedEmail(normalizedEmail: string): Promise<LocalAccountPasswordRecord | undefined>;
   createSession(input: {
     readonly tokenDigest: string;
@@ -45,9 +56,11 @@ type AccountRow = {
   readonly personal_tenant_id: string;
   readonly email: string;
   readonly display_name: string;
-  readonly password_algorithm?: string;
-  readonly password_salt?: Buffer;
-  readonly password_hash?: Buffer;
+  readonly password_algorithm?: string | null;
+  readonly password_salt?: Buffer | null;
+  readonly password_hash?: Buffer | null;
+  readonly better_auth_user_id?: string | null;
+  readonly status?: "active" | "disabled";
 };
 
 function profile(row: AccountRow): LocalAccountProfileRecord {
@@ -63,7 +76,9 @@ function passwordRecord(row: AccountRow): LocalAccountPasswordRecord {
   if (
     row.password_algorithm !== "scrypt-v1" ||
     row.password_salt === undefined ||
-    row.password_hash === undefined
+    row.password_salt === null ||
+    row.password_hash === undefined ||
+    row.password_hash === null
   ) {
     throw new Error("LOCAL_ACCOUNT_PASSWORD_RECORD_INVALID");
   }
@@ -86,7 +101,7 @@ function isUniqueViolation(error: unknown): boolean {
 
 async function setAuthenticationCandidate(
   client: PoolClient,
-  name: "app.auth_email" | "app.auth_session_digest",
+  name: "app.auth_email" | "app.auth_session_digest" | "app.auth_better_auth_user_id",
   value: string,
 ): Promise<void> {
   await client.query("SELECT set_config($1, $2, true)", [name, value]);
@@ -152,6 +167,116 @@ export class PgLocalAccountRepository implements LocalAccountRepository {
     }
   }
 
+  async exchangeBetterAuthIdentity(
+    input: BetterAuthIdentityExchangeInput,
+  ): Promise<LocalAccountProfileRecord | "disabled" | "conflict"> {
+    try {
+      return await withTransaction(this.pool, async (client) => {
+        await setAuthenticationCandidate(client, "app.auth_email", input.email);
+        await setAuthenticationCandidate(
+          client,
+          "app.auth_better_auth_user_id",
+          input.betterAuthUserId,
+        );
+        const existing = await client.query<AccountRow>(
+          `SELECT user_id,personal_tenant_id,email,display_name,better_auth_user_id,status
+             FROM user_accounts
+            WHERE normalized_email=$1 OR better_auth_user_id=$2
+            ORDER BY (better_auth_user_id=$2) DESC
+            LIMIT 1`,
+          [input.email, input.betterAuthUserId],
+        );
+        const row = existing.rows[0];
+        if (row !== undefined) {
+          if (row.status === "disabled") return "disabled" as const;
+          if (
+            row.better_auth_user_id !== null &&
+            row.better_auth_user_id !== undefined &&
+            row.better_auth_user_id !== input.betterAuthUserId
+          ) {
+            return "conflict" as const;
+          }
+          await client.query("SELECT set_config('app.user_id',$1,true)", [row.user_id]);
+          await client.query("SELECT set_config('app.tenant_id',$1,true)", [
+            row.personal_tenant_id,
+          ]);
+          await client.query(
+            `UPDATE user_accounts
+                SET better_auth_user_id=$3,display_name=$4,updated_at=$5
+              WHERE user_id=$1 AND personal_tenant_id=$2`,
+            [
+              row.user_id,
+              row.personal_tenant_id,
+              input.betterAuthUserId,
+              input.displayName,
+              input.createdAt,
+            ],
+          );
+          await client.query(
+            `INSERT INTO user_sessions(token_digest,user_id,personal_tenant_id,created_at,expires_at)
+             VALUES($1,$2,$3,$4,$5)`,
+            [
+              input.sessionTokenDigest,
+              row.user_id,
+              row.personal_tenant_id,
+              input.createdAt,
+              input.sessionExpiresAt,
+            ],
+          );
+          return profile({ ...row, display_name: input.displayName });
+        }
+        await client.query("SELECT set_config('app.user_id',$1,true)", [input.userId]);
+        await client.query("SELECT set_config('app.tenant_id',$1,true)", [input.personalTenantId]);
+        await client.query("INSERT INTO app_users(id,created_at) VALUES($1,$2)", [
+          input.userId,
+          input.createdAt,
+        ]);
+        await client.query(
+          `INSERT INTO tenants(id,kind,owner_user_id,created_at) VALUES($1,'personal',$2,$3)`,
+          [input.personalTenantId, input.userId, input.createdAt],
+        );
+        await client.query(
+          `INSERT INTO memberships(tenant_id,id,user_id,role,status,created_at)
+           VALUES($1,$2,$3,'owner','active',$4)`,
+          [input.personalTenantId, input.membershipId, input.userId, input.createdAt],
+        );
+        await client.query(
+          `INSERT INTO user_accounts(
+             user_id,personal_tenant_id,email,normalized_email,display_name,better_auth_user_id,
+             password_algorithm,password_salt,password_hash,created_at,updated_at
+           ) VALUES($1,$2,$3,$3,$4,$5,NULL,NULL,NULL,$6,$6)`,
+          [
+            input.userId,
+            input.personalTenantId,
+            input.email,
+            input.displayName,
+            input.betterAuthUserId,
+            input.createdAt,
+          ],
+        );
+        await client.query(
+          `INSERT INTO user_sessions(token_digest,user_id,personal_tenant_id,created_at,expires_at)
+           VALUES($1,$2,$3,$4,$5)`,
+          [
+            input.sessionTokenDigest,
+            input.userId,
+            input.personalTenantId,
+            input.createdAt,
+            input.sessionExpiresAt,
+          ],
+        );
+        return profile({
+          user_id: input.userId,
+          personal_tenant_id: input.personalTenantId,
+          email: input.email,
+          display_name: input.displayName,
+        });
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) return "conflict";
+      throw mapPersistenceError(error, "交换 Better Auth 身份");
+    }
+  }
   async findByNormalizedEmail(
     normalizedEmail: string,
   ): Promise<LocalAccountPasswordRecord | undefined> {
@@ -167,7 +292,9 @@ export class PgLocalAccountRepository implements LocalAccountRepository {
             [normalizedEmail],
           );
           const row = result.rows[0];
-          return row === undefined ? undefined : passwordRecord(row);
+          return row === undefined || row.password_algorithm === null
+            ? undefined
+            : passwordRecord(row);
         },
         { readOnly: true },
       );

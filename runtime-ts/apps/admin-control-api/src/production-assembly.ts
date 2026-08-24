@@ -16,6 +16,7 @@ import { userId } from "@hoox/domain";
 import {
   createPostgresPool,
   PgAdminControlRepository,
+  PgIdentityConfigurationRepository,
   PgSkillPublicationAuthorization,
   PgSkillPublicationRepository,
   probePostgres,
@@ -28,6 +29,7 @@ import {
   startServiceProcess,
 } from "@hoox/process-runtime";
 import { SkillPublicationService } from "@hoox/skill";
+import { createIdentityAdminService } from "./identity-configuration.js";
 import { createAdminControlApiApp, type AdminControlApiAppOptions } from "./app.js";
 import { createPiModelCatalog } from "./pi-model-catalog.js";
 import type { AdminControlApiProcessConfiguration } from "./process-entry.js";
@@ -135,6 +137,11 @@ async function assembleRealService(
     const objectStorageProbe = () => probeS3StableSkillPublisher(activePublisher);
     const dependencies = {
       auth: input.auth,
+      identity: createIdentityAdminService({
+        repository: new PgIdentityConfigurationRepository(controlPool),
+        roles: repository,
+        secret: configuration.betterAuthSecret,
+      }),
       control: new AdminControlService(
         repository,
         repository,

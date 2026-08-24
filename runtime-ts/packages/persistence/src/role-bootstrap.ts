@@ -143,6 +143,16 @@ const personalizationSettingsTables = new Set([
   "team_personalization_settings",
 ]);
 const localAccountTables = new Set(["user_accounts", "user_sessions"]);
+const embeddedIdentityTables = new Set([
+  "better_auth_users",
+  "better_auth_sessions",
+  "better_auth_accounts",
+  "better_auth_verifications",
+  "better_auth_rate_limits",
+  "identity_auth_configuration",
+  "identity_auth_audits",
+  "identity_auth_commands",
+]);
 const scheduledTaskTables = new Set([
   "scheduled_tasks",
   "scheduled_task_revisions",
@@ -296,6 +306,14 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["admin_control_commands", new Set()],
   ["admin_control_audits", new Set()],
   ["admin_control_generation", new Set(["SELECT"])],
+  ["better_auth_users", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
+  ["better_auth_sessions", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
+  ["better_auth_accounts", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
+  ["better_auth_verifications", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
+  ["better_auth_rate_limits", new Set(["SELECT", "INSERT", "UPDATE", "DELETE"])],
+  ["identity_auth_configuration", new Set(["SELECT"])],
+  ["identity_auth_audits", new Set()],
+  ["identity_auth_commands", new Set()],
   ["admin_user_account_audits", new Set()],
   ["run_runtime_config_snapshots", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
@@ -1028,6 +1046,15 @@ async function hasScheduledTaskState(client: PoolClient, schema: string): Promis
   return result.rows[0]?.present === true;
 }
 
+async function hasEmbeddedIdentityState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    `SELECT to_regclass(format('%I.better_auth_users',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.better_auth_sessions',$1::text)) IS NOT NULL
+            AND to_regclass(format('%I.identity_auth_configuration',$1::text)) IS NOT NULL AS present`,
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
 async function hasAdminControlState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.platform_control_operators',$1::text)) IS NOT NULL
@@ -1182,6 +1209,9 @@ async function activeTablePolicy(
   if (!(await hasLocalAccountState(client, schema))) {
     for (const table of localAccountTables) policy.delete(table);
   }
+  if (!(await hasEmbeddedIdentityState(client, schema))) {
+    for (const table of embeddedIdentityTables) policy.delete(table);
+  }
   if (!(await hasSkillRuntimeState(client, schema))) {
     for (const table of skillRuntimeTables) policy.delete(table);
   }
@@ -1202,6 +1232,9 @@ async function activeColumnUpdatePolicy(
   schema: string,
 ): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const policy = new Map(runtimeColumnUpdatePolicy);
+  if (await hasEmbeddedIdentityState(client, schema)) {
+    policy.set("user_accounts", new Set(["better_auth_user_id", "display_name", "updated_at"]));
+  }
   // 0003 之前不存在该列；partial down 后 ACL 必须回到 0002 的真实 Schema，而不是引用未来列。
   const membershipUpdateColumns = new Set<string>();
   if (await hasMembershipLockMarker(client)) membershipUpdateColumns.add("lock_marker");
@@ -2018,6 +2051,7 @@ async function assertAdminControlBoundary(
 ): Promise<void> {
   const userOperationsEnabled =
     enabled && (await hasAdminUserOperationsState(client, context.schema));
+  const identityEnabled = enabled && (await hasEmbeddedIdentityState(client, context.schema));
   const allowed = new Map<string, ReadonlySet<string>>(
     enabled
       ? [
@@ -2035,6 +2069,12 @@ async function assertAdminControlBoundary(
   if (userOperationsEnabled) {
     allowed.set("admin_user_account_audits", new Set(["SELECT", "INSERT"]));
     allowed.set("user_sessions", new Set(["DELETE"]));
+  }
+  if (identityEnabled) {
+    allowed.set("identity_auth_configuration", new Set(["SELECT", "INSERT", "UPDATE"]));
+    allowed.set("identity_auth_audits", new Set(["SELECT", "INSERT"]));
+    allowed.set("identity_auth_commands", new Set(["SELECT", "INSERT"]));
+    allowed.set("better_auth_sessions", new Set(["DELETE"]));
   }
   const relations = await client.query<{ readonly table_name: string }>(
     `SELECT relname AS table_name FROM pg_class
@@ -2109,7 +2149,10 @@ async function assertAdminControlBoundary(
 
   const selectPolicy = new Map<string, ReadonlySet<string>>();
   if (userOperationsEnabled) {
-    selectPolicy.set("user_accounts", new Set(["user_id"]));
+    selectPolicy.set(
+      "user_accounts",
+      new Set(identityEnabled ? ["user_id", "better_auth_user_id"] : ["user_id"]),
+    );
     selectPolicy.set("user_sessions", new Set(["user_id"]));
   }
   if (selectPolicy.size > 0) {
@@ -2665,6 +2708,26 @@ const adminControlPolicyBindings = Object.freeze([
   ["run_runtime_config_snapshots", "run_runtime_config_snapshots_runtime_policy", "runtime"],
 ] as const);
 
+const embeddedIdentityPolicyBindings = Object.freeze([
+  ["better_auth_users", "better_auth_users_migrator_policy", "migrator"],
+  ["better_auth_sessions", "better_auth_sessions_migrator_policy", "migrator"],
+  ["better_auth_accounts", "better_auth_accounts_migrator_policy", "migrator"],
+  ["better_auth_verifications", "better_auth_verifications_migrator_policy", "migrator"],
+  ["better_auth_rate_limits", "better_auth_rate_limits_migrator_policy", "migrator"],
+  ["identity_auth_configuration", "identity_auth_configuration_migrator_policy", "migrator"],
+  ["identity_auth_audits", "identity_auth_audits_migrator_policy", "migrator"],
+  ["identity_auth_commands", "identity_auth_commands_migrator_policy", "migrator"],
+  ["better_auth_users", "better_auth_users_runtime_policy", "runtime"],
+  ["better_auth_sessions", "better_auth_sessions_runtime_policy", "runtime"],
+  ["better_auth_accounts", "better_auth_accounts_runtime_policy", "runtime"],
+  ["better_auth_verifications", "better_auth_verifications_runtime_policy", "runtime"],
+  ["better_auth_rate_limits", "better_auth_rate_limits_runtime_policy", "runtime"],
+  ["identity_auth_configuration", "identity_auth_configuration_runtime_policy", "runtime"],
+  ["identity_auth_configuration", "identity_auth_configuration_control_policy", "control"],
+  ["identity_auth_audits", "identity_auth_audits_control_policy", "control"],
+  ["identity_auth_commands", "identity_auth_commands_control_policy", "control"],
+  ["better_auth_sessions", "better_auth_sessions_control_delete_policy", "control"],
+] as const);
 const adminUserOperationsPolicyBindings = Object.freeze([
   ["admin_user_account_audits", "admin_user_account_audits_migrator_policy", "migrator"],
   ["admin_user_account_audits", "admin_user_account_audits_control_policy", "control"],
@@ -2694,6 +2757,19 @@ async function rebindRoleScopedPolicies(
        ALTER POLICY worker_tenant_assignments_coordinator_claim_policy
          ON ${schema}.worker_tenant_assignments TO ${quoteIdentifier(context.workerCoordinatorRole)}`,
     );
+  }
+  if (await hasEmbeddedIdentityState(client, context.schema)) {
+    for (const [table, policy, target] of embeddedIdentityPolicyBindings) {
+      const role =
+        target === "migrator"
+          ? context.migratorRole
+          : target === "runtime"
+            ? context.runtimeRole
+            : context.adminControlRole;
+      await client.query(
+        `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
+      );
+    }
   }
   if (await hasAdminControlState(client, context.schema)) {
     for (const [table, policy, target] of adminControlPolicyBindings) {
@@ -2767,12 +2843,22 @@ async function grantAdminControlAccess(
      GRANT SELECT ON TABLE ${schema}.admin_runtime_statistics TO ${control}`,
   );
   if (await hasAdminUserOperationsState(client, context.schema)) {
+    const identityEnabled = await hasEmbeddedIdentityState(client, context.schema);
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.admin_user_account_audits TO ${control};
-       GRANT SELECT(user_id) ON TABLE ${schema}.user_accounts,${schema}.user_sessions TO ${control};
+       GRANT SELECT(user_id${identityEnabled ? ",better_auth_user_id" : ""}) ON TABLE ${schema}.user_accounts TO ${control};
+       GRANT SELECT(user_id) ON TABLE ${schema}.user_sessions TO ${control};
        GRANT UPDATE(status,updated_at) ON TABLE ${schema}.user_accounts TO ${control};
        GRANT DELETE ON TABLE ${schema}.user_sessions TO ${control};
        GRANT SELECT ON TABLE ${schema}.admin_user_directory TO ${control}`,
+    );
+  }
+  if (await hasEmbeddedIdentityState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT,UPDATE ON TABLE ${schema}.identity_auth_configuration TO ${control};
+       GRANT SELECT,INSERT ON TABLE
+         ${schema}.identity_auth_audits,${schema}.identity_auth_commands TO ${control};
+       GRANT DELETE ON TABLE ${schema}.better_auth_sessions TO ${control}`,
     );
   }
 }
@@ -2833,7 +2919,21 @@ export async function bootstrapRuntimeAccessOnClient(
   if (await hasLocalAccountState(client, context.schema)) {
     await client.query(
       `GRANT SELECT,INSERT ON TABLE ${schema}.user_accounts TO ${role};
+       ${
+         (await hasEmbeddedIdentityState(client, context.schema))
+           ? `GRANT UPDATE(better_auth_user_id,display_name,updated_at) ON TABLE ${schema}.user_accounts TO ${role};`
+           : ""
+}
        GRANT SELECT,INSERT,DELETE ON TABLE ${schema}.user_sessions TO ${role}`,
+    );
+  }
+  if (await hasEmbeddedIdentityState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT,UPDATE,DELETE ON TABLE
+         ${schema}.better_auth_users,${schema}.better_auth_sessions,
+         ${schema}.better_auth_accounts,${schema}.better_auth_verifications,
+         ${schema}.better_auth_rate_limits TO ${role};
+       GRANT SELECT ON TABLE ${schema}.identity_auth_configuration TO ${role}`,
     );
   }
   await client.query(
@@ -2982,6 +3082,19 @@ export async function bootstrapRuntimeAccessOnClient(
          state,dispatch_attempts,next_attempt_at,run_id,receipt_id,failure_code,updated_at
        ) ON TABLE ${schema}.scheduled_task_occurrences TO ${role}`,
     );
+  }
+  if (await hasEmbeddedIdentityState(client, context.schema)) {
+    for (const [table, policy, target] of embeddedIdentityPolicyBindings) {
+      const role =
+        target === "migrator"
+          ? context.migratorRole
+          : target === "runtime"
+            ? context.runtimeRole
+            : context.adminControlRole;
+      await client.query(
+        `ALTER POLICY ${quoteIdentifier(policy)} ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(role)}`,
+      );
+    }
   }
   if (await hasAdminControlState(client, context.schema)) {
     await client.query(

@@ -44,6 +44,11 @@ const apiEnvironmentSchema = Object.freeze({
     maxLength: 8_192,
   }),
   DATABASE_SCHEMA: stringEnvironmentField({ maxLength: 63 }),
+  BETTER_AUTH_SECRET: stringEnvironmentField({ secret: true, maxLength: 4096 }),
+  BETTER_AUTH_TRUSTED_ORIGINS: stringEnvironmentField({
+    requiredIn: optionalEnvironments,
+    maxLength: 8192,
+  }),
   DATABASE_RUNTIME_ROLE: stringEnvironmentField({
     requiredIn: productionEnvironment,
     maxLength: 63,
@@ -165,6 +170,11 @@ export interface ApiProcessConfiguration {
   readonly databaseRuntimeRole?: string;
   readonly databaseTeamCoordinatorRole?: string;
   readonly cursorActiveKeyId: string;
+  readonly identityAuth: Readonly<{
+    readonly secret: string;
+    readonly baseURL: string;
+    readonly trustedOrigins: readonly string[];
+  }>;
   readonly cursorSigningKeys: string;
   readonly serialQueueV2Enabled: boolean;
   readonly threadContextV2ReadEnabled: boolean;
@@ -357,6 +367,10 @@ export function parseApiProcessEnvironment(
   } catch {
     throw new TypeError("HISTORY_DIRECTORY_TIME_ZONE 无效");
   }
+  const betterAuthSecret = readRequiredEnvironmentValue(parsed, "BETTER_AUTH_SECRET");
+  if (Buffer.byteLength(betterAuthSecret, "utf8") < 32) {
+    throw new TypeError("INVALID:BETTER_AUTH_SECRET");
+  }
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
@@ -369,6 +383,19 @@ export function parseApiProcessEnvironment(
     databaseSchema: readRequiredEnvironmentValue(parsed, "DATABASE_SCHEMA"),
     ...(databaseRuntimeRole === undefined ? {} : { databaseRuntimeRole }),
     ...(databaseTeamCoordinatorRole === undefined ? {} : { databaseTeamCoordinatorRole }),
+    identityAuth: Object.freeze({
+      secret: betterAuthSecret,
+      baseURL:
+        production?.publicOrigin ??
+        `http://${listenHost === "0.0.0.0" || listenHost === "::" ? "127.0.0.1" : listenHost}:${listenPort}`,
+      trustedOrigins: Object.freeze(
+        (parsed.values.BETTER_AUTH_TRUSTED_ORIGINS ?? "")
+          .split(",")
+          .map((value) => value.trim())
+          .filter((value) => value.length > 0)
+          .map((value) => new URL(value).origin),
+      ),
+    }),
     cursorActiveKeyId: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_ACTIVE_KID"),
     cursorSigningKeys: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_SIGNING_KEYS"),
     serialQueueV2Enabled,

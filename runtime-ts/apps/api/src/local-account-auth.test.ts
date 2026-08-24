@@ -1,5 +1,6 @@
 import { isoTimestamp } from "@hoox/domain";
 import type {
+  BetterAuthIdentityExchangeInput,
   LocalAccountPasswordRecord,
   LocalAccountProfileRecord,
   LocalAccountRepository,
@@ -32,6 +33,27 @@ class MemoryLocalAccounts implements LocalAccountRepository {
     return "created";
   }
 
+  async exchangeBetterAuthIdentity(
+    input: BetterAuthIdentityExchangeInput,
+  ): Promise<LocalAccountProfileRecord | "disabled" | "conflict"> {
+    const existing = this.accounts.get(input.email);
+    if (existing !== undefined) return existing;
+    const account: LocalAccountPasswordRecord = {
+      userId: input.userId,
+      personalTenantId: input.personalTenantId,
+      email: input.email,
+      displayName: input.displayName,
+      passwordAlgorithm: "scrypt-v1",
+      passwordSalt: new Uint8Array(16),
+      passwordHash: new Uint8Array(32),
+    };
+    this.accounts.set(input.email, account);
+    this.sessions.set(input.sessionTokenDigest, {
+      profile: account,
+      expiresAt: input.sessionExpiresAt,
+    });
+    return account;
+  }
   async findByNormalizedEmail(email: string): Promise<LocalAccountPasswordRecord | undefined> {
     return this.accounts.get(email);
   }

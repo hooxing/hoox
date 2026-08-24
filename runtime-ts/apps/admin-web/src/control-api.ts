@@ -1,5 +1,7 @@
 import type {
   AdminControlOverviewDto,
+  IdentityAdminConfigurationDto,
+  UpdateIdentityAdminConfigurationRequest,
   ControlAuditEventDto,
   CreateMemoryProviderDraftRequest,
   CreateModelProviderDraftRequest,
@@ -83,6 +85,16 @@ export class AdminControlApi {
 
   overview(): Promise<AdminControlOverviewDto> {
     return this.request("/overview");
+  }
+
+  getIdentityConfiguration(): Promise<IdentityAdminConfigurationDto> {
+    return this.request("/identity");
+  }
+
+  updateIdentityConfiguration(
+    input: UpdateIdentityAdminConfigurationRequest,
+  ): Promise<IdentityAdminConfigurationDto> {
+    return this.request("/identity", { method: "PUT", body: JSON.stringify(input) });
   }
 
   async listModelProviders(): Promise<readonly ModelProviderRevisionDto[]> {
@@ -207,6 +219,8 @@ function catalogServiceUnavailable(reason: unknown): reason is AdminApiError {
 export type AdminControlApiContract = Pick<
   AdminControlApi,
   | "overview"
+  | "getIdentityConfiguration"
+  | "updateIdentityConfiguration"
   | "listModelProviders"
   | "listPiModelCatalogProviders"
   | "findPiModelCatalogModels"

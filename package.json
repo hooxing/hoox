@@ -1,7 +1,24 @@
 {
   "name": "hoox",
   "version": "0.0.0",
+  "description": "可靠、可恢复、可审计的多租户 Agent Runtime",
   "private": true,
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hooxing/hoox.git"
+  },
+  "homepage": "https://github.com/hooxing/hoox#readme",
+  "bugs": {
+    "url": "https://github.com/hooxing/hoox/issues"
+  },
+  "keywords": [
+    "agent-runtime",
+    "ai-agent",
+    "sandbox",
+    "multi-tenant",
+    "typescript"
+  ],
   "type": "module",
   "packageManager": "pnpm@10.15.1+sha512.34e538c329b5553014ca8e8f4535997f96180a1d0f614339357449935350d924e22f8614682191264ec33d1462ac21561aff97f6bb18065351c162c7e8f6de67",
   "engines": {

@@ -1,10 +1,14 @@
 # Thread 连续上下文改造：阶段 0 核对与实施拆解
 
+> [!IMPORTANT]
+> 状态：历史阶段拆解。阶段 0 及后续连续上下文能力已经实施，当前语义见[Thread 连续上下文](../../architecture/thread-continuity.md)，运维见[Thread 连续上下文运维](../../operations/thread-continuity.md)。
+
+
 - 文档性质：阶段 0 交付与后续小切片执行清单，不替代总计划或 ADR
-- 状态：阶段 0 进行中，尚未通过 Gate
+- 状态：历史阶段拆解；阶段 1～6 已按总计划实施，本页保留早期基线与验收脉络
 - 日期：2026-07-31
 - 代码基线：`8299fcf`
-- 总计划：[Thread 连续上下文、输入续接、上下文压缩与 Sandbox 生命周期实施总计划](thread-continuous-context-implementation-plan.md)
+- 总计划：[Thread 连续上下文、输入续接、上下文压缩与 Sandbox 生命周期实施总计划](thread-continuous-context.md)
 - 小型 ADR：ADR-0063、ADR-0064、ADR-0065、ADR-0066
 
 ## 1. 本轮边界与结论
@@ -66,8 +70,8 @@
 |---|---|---|---|---|
 | P0-01 | 基线事实核对 | `8299fcf`、总计划、相关 ADR | 本文第 2 节 | 已完成 |
 | P0-02 | 拆分四份小型 ADR | P0-01 | ADR-0063～0066 | 已完成，均为“提议”，待审阅 |
-| P0-03 | CubeSandbox lifecycle capability Spike | 可用测试环境、可回收测试模板 | [首轮证据](spikes/2026-07-31-thread-context-capability-spikes.md)、后续 retention/UNKNOWN 证据 | 部分完成；精确 TTL 上限、长 retention、平台版本和 UNKNOWN 未完成 |
-| P0-04 | Provider `/chat/completions` history compatibility Spike | 可用模型配置、wire trace 安全边界 | [首轮证据](spikes/2026-07-31-thread-context-capability-spikes.md)、最终 capability matrix | 部分完成；基础形状可传输，最终 handoff 语义与特殊 item 未决 |
+| P0-03 | CubeSandbox lifecycle capability Spike | 可用测试环境、可回收测试模板 | [首轮证据](../../spikes/2026-07-31-thread-context-capability-spikes.md)、后续 retention/UNKNOWN 证据 | 部分完成；精确 TTL 上限、长 retention、平台版本和 UNKNOWN 未完成 |
+| P0-04 | Provider `/chat/completions` history compatibility Spike | 可用模型配置、wire trace 安全边界 | [首轮证据](../../spikes/2026-07-31-thread-context-capability-spikes.md)、最终 capability matrix | 部分完成；基础形状可传输，最终 handoff 语义与特殊 item 未决 |
 | P0-05 | 共享测试基座 | ADR 状态机与测试端口 | manual clock、并发屏障、崩溃点、scripted effect receipt | 待开发 |
 | P0-06 | Feature Flag/Schema version 配置契约 | 四份 ADR | 各进程 flag 依赖、默认关闭、关闭时 drain 语义 | 本文已定义逻辑契约；代码接线待开发 |
 | P0-07 | 阶段 0 Gate 审阅 | P0-02～P0-06 | 审阅记录与是否进入阶段 1 的结论 | 待执行 |
@@ -76,7 +80,7 @@
 
 Spike 必须使用真实 CubeSandbox 环境，并在 `finally` 中按确定 provider ID 清理。输出只保留环境/平台版本、测试时间、候选参数、状态、延迟、结果码和匿名测试 ID，不输出 API URL 中的秘密、credential、文件正文或完整上游响应。
 
-2026-07-31 首轮实测已证明当前目标的即时 pause/connect、内存与文件恢复、短 TTL `onTimeout=pause` 以及 TTL 120～86400 create 接受；详细限制见 [能力 Spike 记录](spikes/2026-07-31-thread-context-capability-spikes.md)。这些结果没有证明精确最大 TTL 或长 paused retention。
+2026-07-31 首轮实测已证明当前目标的即时 pause/connect、内存与文件恢复、短 TTL `onTimeout=pause` 以及 TTL 120～86400 create 接受；详细限制见 [能力 Spike 记录](../../spikes/2026-07-31-thread-context-capability-spikes.md)。这些结果没有证明精确最大 TTL 或长 paused retention。
 
 必须覆盖：
 

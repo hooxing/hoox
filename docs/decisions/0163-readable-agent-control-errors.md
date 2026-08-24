@@ -1,5 +1,9 @@
 # ADR-0163：子 Agent 控制错误分离机器码与可读说明
 
+- 状态：已接受
+- 日期：2026-08-12
+
+
 ## 背景
 
 子 Agent 控制面此前直接把内部异常文本同时作为 `code` 和 `message`。例如目标空闲时返回 `AGENT_NOT_RUNNING/AGENT_NOT_RUNNING`，目标不存在时返回 `AGENT_NOT_FOUND/AGENT_NOT_FOUND`。父 Agent 虽能读取开发者机器码，但无法得到纠正建议，也无法可靠区分已知状态错误与未知平台故障。

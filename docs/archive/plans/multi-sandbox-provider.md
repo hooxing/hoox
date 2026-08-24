@@ -1,7 +1,11 @@
 # 多 Sandbox Provider 实施计划
 
+> [!IMPORTANT]
+> 状态：历史实施方案。CubeSandbox/E2B 注册、持久身份和路由已经实现，当前行为见[Sandbox Provider](../../architecture/sandbox-providers.md)，生产缺口见[项目状态](../../project-status.md)。
+
+
 - 文档性质：跨 Sandbox、Worker、Persistence、配置、部署与生产 Gate 的实施总计划
-- 状态：提议，尚未开始实施
+- 状态：首期 CubeSandbox/E2B Provider、持久化身份和失败关闭路由已实现；其他 Provider 与完整生产验收继续按独立切片推进
 - 日期：2026-08-14
 - 代码基线：`533972bfdcc55238ca4e9b719ed153fa2989b949`
 - 首批目标 Provider：CubeSandbox、OpenSandbox、E2B、Cloudflare Sandbox SDK

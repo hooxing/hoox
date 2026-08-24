@@ -44,6 +44,9 @@ describe("Demo 持续部署契约", () => {
     }
 
     const ci = source(".github/workflows/ci.yml");
+    expect(ci).toMatch(
+      /verify:\s+name: 工程基线校验\s+runs-on: ubuntu-latest\s+timeout-minutes: 2[0-9]/u,
+    );
     expect(ci.match(/DATABASE_ADMIN_CONTROL_ROLE: m4_ci_admin_control/gu)).toHaveLength(2);
     expect(ci).toContain(
       "M4_DATABASE_ADMIN_CONTROL_PASSWORD: ci-admin-control-placeholder-password",

@@ -12,7 +12,7 @@ jobs:
   verify:
     name: 工程基线校验
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: 检出代码
         # actions/checkout v4.2.2

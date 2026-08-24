@@ -21,7 +21,8 @@
    - `DEMO_SSH_HOST`：目标主机；
    - `DEMO_SSH_USER`：部署用户；
    - `DEMO_SSH_PRIVATE_KEY`：部署专用私钥；
-   - `DEMO_SSH_KNOWN_HOSTS`：经人工核对指纹后的完整 known-hosts 行。
+   - `DEMO_SSH_KNOWN_HOSTS`：经人工核对指纹后的完整 known-hosts 行；
+   - `DEMO_GHCR_TOKEN`：具备 `write:packages` 的部署专用令牌，用于发布和目标主机拉取 GHCR 镜像。
 5. 在 `/opt/hoox-demo/shared` 创建 `infra.env`、`migration.env`、`api.env`、`scheduler.env`、`worker.env` 和 `demo-account.env`，全部设为 `0600`。真实密码、连接串和 Provider Key 只能存在于目标主机秘密文件或 GitHub Secrets，不得进入仓库和发布日志。
 
 `deploy/demo/*.env.example` 只说明字段归属，不能直接作为凭据文件。API、Scheduler 和 Worker 必须各自只获得其进程需要的配置；MinIO root 与 PostgreSQL bootstrap 密码不得注入应用容器。
@@ -30,7 +31,7 @@
 
 `.github/workflows/cd-demo.yml` 执行以下步骤：
 
-1. 检出通过 CI 的实际提交，使用固定 commit 的 GitHub Action 构建 ARM64 镜像并推送 GHCR。
+1. 检出通过 CI 的实际提交，在 GitHub 托管 ARM64 Runner 上使用固定 commit 的 Action 构建镜像并推送 GHCR。
 2. 上传 `deploy/demo` 中的 Compose、初始化、Nginx 和远程发布契约到新的 release 目录。
 3. 目标主机拉取 digest，启动 PostgreSQL 与 MinIO，幂等创建对象桶，再执行只向前的数据库迁移。
 4. 启动 API 与 Web，验证本机探针后原子安装 Nginx 配置。

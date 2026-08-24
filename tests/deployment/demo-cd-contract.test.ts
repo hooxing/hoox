@@ -12,6 +12,10 @@ describe("Demo 持续部署契约", () => {
     expect(workflow).toContain("branches: [main]");
     expect(workflow).toContain("github.event.workflow_run.conclusion == 'success'");
     expect(workflow).toContain("HOOX_DEMO_IMAGE='$IMAGE_NAME@$IMAGE_DIGEST'");
+    expect(workflow).toContain("runs-on: ubuntu-24.04-arm");
+    expect(workflow).not.toContain("docker/setup-qemu-action");
+    expect(workflow.match(/secrets\.DEMO_GHCR_TOKEN/gu)).toHaveLength(2);
+    expect(workflow).not.toContain("secrets.GITHUB_TOKEN");
     const actions = [...workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gmu)].map((match) => match[1]);
     expect(actions.length).toBeGreaterThan(0);
     expect(actions.every((action) => /@[0-9a-f]{40}$/u.test(action ?? ""))).toBe(true);

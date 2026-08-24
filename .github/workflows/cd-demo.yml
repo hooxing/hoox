@@ -1,0 +1,139 @@
+name: Demo 持续部署
+
+on:
+  workflow_run:
+    workflows: ["持续集成"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 要部署的提交、分支或标签
+        required: false
+        default: main
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: hoox-demo-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: 构建 ARM64 镜像并发布 Demo
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: demo
+    env:
+      IMAGE_NAME: ghcr.io/hooxing/hoox-demo
+      HOOX_DEMO_ROOT: /opt/hoox-demo
+      HOOX_DEMO_DOMAIN: hoox.aisay.cc
+      HOOX_DEMO_BUCKET: agent-runtime-demo
+    steps:
+      - name: 解析发布提交
+        id: release
+        shell: bash
+        env:
+          DISPATCH_REF: ${{ inputs.ref }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -Eeuo pipefail
+          if [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+            printf 'ref=%s\n' "$WORKFLOW_RUN_SHA" >>"$GITHUB_OUTPUT"
+            printf 'release_id=%s\n' "$WORKFLOW_RUN_SHA" >>"$GITHUB_OUTPUT"
+          else
+            printf 'ref=%s\n' "$DISPATCH_REF" >>"$GITHUB_OUTPUT"
+            printf 'release_id=%s\n' "$GITHUB_SHA" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: 检出发布提交
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ steps.release.outputs.ref }}
+
+      - name: 使用实际提交覆盖发布 ID
+        id: revision
+        shell: bash
+        run: printf 'release_id=%s\n' "$(git rev-parse HEAD)" >>"$GITHUB_OUTPUT"
+
+      - name: 启用 ARM64 模拟
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+        with:
+          platforms: arm64
+
+      - name: 初始化 Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: 登录 GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送 Demo 镜像
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: Dockerfile.demo
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.revision.outputs.release_id }}
+          cache-from: type=gha,scope=hoox-demo-arm64
+          cache-to: type=gha,mode=max,scope=hoox-demo-arm64
+          provenance: true
+          sbom: true
+
+      - name: 配置 SSH
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.DEMO_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.DEMO_SSH_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" >"$HOME/.ssh/hoox-demo"
+          chmod 0600 "$HOME/.ssh/hoox-demo"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" >"$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/known_hosts"
+
+      - name: 上传部署契约
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.DEMO_SSH_HOST }}
+          SSH_USER: ${{ secrets.DEMO_SSH_USER }}
+          RELEASE_ID: ${{ steps.revision.outputs.release_id }}
+        run: |
+          set -Eeuo pipefail
+          archive="$RUNNER_TEMP/hoox-demo-deploy.tar.gz"
+          tar -C deploy/demo -czf "$archive" \
+            docker-compose.yml postgres-init.sh nginx.conf.template remote-deploy.sh
+          ssh -i "$HOME/.ssh/hoox-demo" "$SSH_USER@$SSH_HOST" \
+            "mkdir -p '$HOOX_DEMO_ROOT/releases/$RELEASE_ID'"
+          scp -i "$HOME/.ssh/hoox-demo" "$archive" "$SSH_USER@$SSH_HOST:/tmp/hoox-demo-deploy-$RELEASE_ID.tar.gz"
+          ssh -i "$HOME/.ssh/hoox-demo" "$SSH_USER@$SSH_HOST" \
+            "tar -xzf '/tmp/hoox-demo-deploy-$RELEASE_ID.tar.gz' -C '$HOOX_DEMO_ROOT/releases/$RELEASE_ID' && rm -f '/tmp/hoox-demo-deploy-$RELEASE_ID.tar.gz' && chmod 0555 '$HOOX_DEMO_ROOT/releases/$RELEASE_ID/remote-deploy.sh' '$HOOX_DEMO_ROOT/releases/$RELEASE_ID/postgres-init.sh'"
+
+      - name: 发布并验证
+        shell: bash
+        env:
+          SSH_HOST: ${{ secrets.DEMO_SSH_HOST }}
+          SSH_USER: ${{ secrets.DEMO_SSH_USER }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ steps.revision.outputs.release_id }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -Eeuo pipefail
+          printf '%s' "$GHCR_TOKEN" | ssh -i "$HOME/.ssh/hoox-demo" "$SSH_USER@$SSH_HOST" \
+            "docker login ghcr.io --username '$GITHUB_ACTOR' --password-stdin"
+          ssh -i "$HOME/.ssh/hoox-demo" "$SSH_USER@$SSH_HOST" \
+            "HOOX_DEMO_ROOT='$HOOX_DEMO_ROOT' RELEASE_ID='$RELEASE_ID' HOOX_DEMO_IMAGE='$IMAGE_NAME@$IMAGE_DIGEST' HOOX_DEMO_DOMAIN='$HOOX_DEMO_DOMAIN' HOOX_DEMO_BUCKET='$HOOX_DEMO_BUCKET' '$HOOX_DEMO_ROOT/releases/$RELEASE_ID/remote-deploy.sh'"
+          ssh -i "$HOME/.ssh/hoox-demo" "$SSH_USER@$SSH_HOST" "docker logout ghcr.io >/dev/null 2>&1 || true"
+          curl --fail --silent --show-error --retry 12 --retry-delay 5 "https://$HOOX_DEMO_DOMAIN/api/ready" >/dev/null
+          curl --fail --silent --show-error --retry 12 --retry-delay 5 "https://$HOOX_DEMO_DOMAIN/" >/dev/null

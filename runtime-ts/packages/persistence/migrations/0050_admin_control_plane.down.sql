@@ -18,6 +18,7 @@ BEGIN
 END $$;
 
 DROP VIEW admin_runtime_statistics;
+DROP POLICY runtime_control_revisions_read_policy ON admin_control_config_revisions;
 DROP TABLE run_runtime_config_snapshots;
 DROP TABLE admin_control_generation;
 DROP TABLE admin_control_audits;

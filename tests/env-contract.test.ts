@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { expectedEnvironmentKeys, validateEnvironmentExample } from "../scripts/env-contract.mjs";
+import {
+  expectedEnvironmentKeys,
+  optionalEnvironmentKeys,
+  validateEnvironmentExample,
+} from "../scripts/env-contract.mjs";
 
 function validExample(): string {
   return expectedEnvironmentKeys
@@ -88,9 +92,19 @@ describe("环境变量示例契约", () => {
         "SKILL_PUBLISHER_DATABASE_URL",
         "ADMIN_CONTROL_DATABASE_URL",
         "DEV_ADMIN_CONTROL_TOKEN",
+        "DEMO_PUBLIC_ACCESS_ENABLED",
       ]),
     );
     expect(validateEnvironmentExample(validExample())).toEqual([]);
+  });
+
+  it("允许只在公开 Demo 中使用的可选 origin，不强迫本地样例开启该能力", () => {
+    expect(optionalEnvironmentKeys).toContain("DEMO_PUBLIC_ORIGIN");
+    expect(
+      validateEnvironmentExample(
+        `${validExample()}\nDEMO_PUBLIC_ORIGIN=https://demo.example.invalid`,
+      ),
+    ).toEqual([]);
   });
 
   it("同时报告缺失项和未登记项", () => {

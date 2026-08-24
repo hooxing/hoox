@@ -29,6 +29,27 @@ describe("Demo 持续部署契约", () => {
     expect(dockerfile).toContain("CI=true");
   });
 
+  it("CD 所依赖的主 CI 同步 pnpm hook，并完整预置 Admin Control 数据库角色", () => {
+    for (const dockerfilePath of [
+      "Dockerfile.production-api-gate",
+      "Dockerfile.production-scheduler-gate",
+      "Dockerfile.production-worker-gate",
+    ]) {
+      expect(source(dockerfilePath)).toContain("tsconfig.base.json .pnpmfile.cjs ./");
+    }
+
+    const ci = source(".github/workflows/ci.yml");
+    expect(ci.match(/DATABASE_ADMIN_CONTROL_ROLE: m4_ci_admin_control/gu)).toHaveLength(2);
+    expect(ci).toContain(
+      "M4_DATABASE_ADMIN_CONTROL_PASSWORD: ci-admin-control-placeholder-password",
+    );
+
+    const prepare = source("runtime-ts/packages/persistence/scripts/prepare-m4-ci-database.ts");
+    expect(prepare).toContain('identifier("DATABASE_ADMIN_CONTROL_ROLE")');
+    expect(prepare).toContain('required("M4_DATABASE_ADMIN_CONTROL_PASSWORD")');
+    expect(prepare).toContain("AS admin_control_safe");
+  });
+
   it("数据库和对象存储只绑定回环，应用容器采用只读非特权运行边界", () => {
     const compose = source("deploy/demo/docker-compose.yml");
     expect(compose).toContain('"127.0.0.1:15432:5432"');

@@ -34,12 +34,14 @@ const migratorRole = identifier("DATABASE_MIGRATOR_ROLE");
 const skillPublisherRole = identifier("DATABASE_SKILL_PUBLISHER_ROLE");
 const workerCoordinatorRole = identifier("DATABASE_WORKER_COORDINATOR_ROLE");
 const teamCoordinatorRole = identifier("DATABASE_TEAM_COORDINATOR_ROLE");
+const adminControlRole = identifier("DATABASE_ADMIN_CONTROL_ROLE");
 const schema = identifier("DATABASE_SCHEMA");
 const runtimePassword = required("M4_DATABASE_RUNTIME_PASSWORD");
 const migratorPassword = required("M4_DATABASE_MIGRATOR_PASSWORD");
 const skillPublisherPassword = required("M4_DATABASE_SKILL_PUBLISHER_PASSWORD");
 const workerCoordinatorPassword = required("M4_DATABASE_WORKER_COORDINATOR_PASSWORD");
 const teamCoordinatorPassword = required("M4_DATABASE_TEAM_COORDINATOR_PASSWORD");
+const adminControlPassword = required("M4_DATABASE_ADMIN_CONTROL_PASSWORD");
 const pool = new Pool({ connectionString: adminUrl.toString(), max: 1 });
 
 try {
@@ -59,7 +61,14 @@ try {
          SELECT 1 FROM pg_namespace WHERE nspname=$2
        ) AS present`,
       [
-        [runtimeRole, migratorRole, skillPublisherRole, workerCoordinatorRole, teamCoordinatorRole],
+        [
+          runtimeRole,
+          migratorRole,
+          skillPublisherRole,
+          workerCoordinatorRole,
+          teamCoordinatorRole,
+          adminControlRole,
+        ],
         schema,
       ],
     );
@@ -79,8 +88,10 @@ try {
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        CREATE ROLE "${teamCoordinatorRole}" LOGIN PASSWORD ${literal(teamCoordinatorPassword)}
          NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+       CREATE ROLE "${adminControlRole}" LOGIN PASSWORD ${literal(adminControlPassword)}
+         NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
        GRANT CONNECT ON DATABASE "${databaseName}"
-         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}";
+         TO "${runtimeRole}", "${migratorRole}", "${skillPublisherRole}", "${workerCoordinatorRole}", "${teamCoordinatorRole}", "${adminControlRole}";
        CREATE SCHEMA "${schema}" AUTHORIZATION "${migratorRole}"`,
     );
     const safety = await client.query<{
@@ -90,6 +101,7 @@ try {
       readonly publisher_safe: boolean;
       readonly coordinator_safe: boolean;
       readonly team_coordinator_safe: boolean;
+      readonly admin_control_safe: boolean;
     }>(
       `SELECT
          NOT (runtime.rolsuper OR runtime.rolcreatedb OR runtime.rolcreaterole
@@ -122,12 +134,19 @@ try {
            AND NOT has_database_privilege(team_coordinator.oid, current_database(), 'CREATE')
            AND NOT has_database_privilege(team_coordinator.oid, current_database(), 'TEMP')
            AS team_coordinator_safe
+         ,NOT (admin_control.rolsuper OR admin_control.rolcreatedb
+           OR admin_control.rolcreaterole OR admin_control.rolreplication
+           OR admin_control.rolbypassrls OR admin_control.rolinherit)
+           AND admin_control.rolcanlogin
+           AND NOT has_database_privilege(admin_control.oid, current_database(), 'CREATE')
+           AND NOT has_database_privilege(admin_control.oid, current_database(), 'TEMP')
+           AS admin_control_safe
        FROM pg_roles runtime, pg_roles migrator, pg_roles publisher, pg_roles coordinator,
-            pg_roles team_coordinator,
+            pg_roles team_coordinator, pg_roles admin_control,
             pg_namespace target
        WHERE runtime.rolname=$1 AND migrator.rolname=$2 AND publisher.rolname=$4
          AND coordinator.rolname=$5 AND team_coordinator.rolname=$6
-         AND target.nspname=$3`,
+         AND admin_control.rolname=$7 AND target.nspname=$3`,
       [
         runtimeRole,
         migratorRole,
@@ -135,6 +154,7 @@ try {
         skillPublisherRole,
         workerCoordinatorRole,
         teamCoordinatorRole,
+        adminControlRole,
       ],
     );
     if (
@@ -143,6 +163,7 @@ try {
       safety.rows[0]?.publisher_safe !== true ||
       safety.rows[0]?.coordinator_safe !== true ||
       safety.rows[0]?.team_coordinator_safe !== true ||
+      safety.rows[0]?.admin_control_safe !== true ||
       safety.rows[0]?.schema_owned !== true
     ) {
       throw new Error("M4 CI 受限角色或 Schema 安全断言失败");

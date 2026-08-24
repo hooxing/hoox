@@ -46,6 +46,7 @@ import {
 import type {
   ConsumedExternalEffectAuthorization,
   ExternalEffectCall,
+  ModelUsageMetricsPort,
   SandboxSessionRef,
 } from "./ports.js";
 import { RunWorker } from "./run-worker.js";
@@ -223,6 +224,76 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       { role: "user", content: [{ type: "text", text: "保留现有字体" }] },
     ]);
     expect(persistence.pendingThreadSteers).toHaveLength(0);
+  });
+
+  it("模型完成时持久化不含正文的用量与生成时长", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-model-usage"));
+    const faux = fauxProvider({
+      api: `faux-worker-model-usage-${Date.now()}`,
+      provider: `faux-worker-model-usage-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([fauxAssistantMessage("模型用量观测完成")]);
+    const modelRuntime = await ModelRuntime.create({
+      credentials: new InMemoryCredentialStore(),
+      modelsPath: null,
+    });
+    modelRuntime.registerNativeProvider(faux.provider);
+    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const recordModelUsage = vi.fn(
+      async (_input: Parameters<ModelUsageMetricsPort["recordModelUsage"]>[0]) => undefined,
+    );
+    const modelUsageMetrics = { recordModelUsage };
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      () => ({
+        recordStarted: async () => "recorded" as const,
+        record: async () => ({ outcome: "recorded" as const, observation: "", isTruncated: false }),
+      }),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      modelUsageMetrics,
+    );
+    const sandboxes = new FakeSandboxRegistry();
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: "pi-model-usage-worker", runTimeoutMs: 60_000 },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(recordModelUsage).toHaveBeenCalledOnce();
+    expect(recordModelUsage.mock.calls[0]?.[0]).toMatchObject({
+      tenantId: scope.tenantId,
+      threadId: scope.threadId,
+      runId: scope.runId,
+      inputTokens: expect.any(Number),
+      outputTokens: expect.any(Number),
+      cacheReadTokens: expect.any(Number),
+      generationDurationMs: expect.any(Number),
+    });
+    expect(recordModelUsage.mock.calls[0]?.[0]).not.toHaveProperty("request");
+    expect(recordModelUsage.mock.calls[0]?.[0]).not.toHaveProperty("response");
   });
 
   it("SubAgent 工具事件和副作用许可使用稳定的 Agent/Turn callId namespace", async () => {

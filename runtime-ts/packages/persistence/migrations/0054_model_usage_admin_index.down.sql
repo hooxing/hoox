@@ -1,0 +1,1 @@
+DROP INDEX model_usage_metrics_admin_query_idx;

@@ -26,8 +26,24 @@ describe("后台运营协议", () => {
         memory: { pending: 0, failed: 0 },
         automations: { active: 1, failedOccurrences24h: 0 },
         skills: { published: 4, installed: 8 },
+        modelUsage24h: {
+          inputTokens: 12_000,
+          outputTokens: 2_400,
+          outputTokensPerSecond: 48,
+          cacheHitRate: 0.75,
+        },
       }),
     ).toBe(true);
+  });
+
+  it("没有用量样本时允许速率和缓存率保持未知", () => {
+    const emptyUsage = {
+      inputTokens: 0,
+      outputTokens: 0,
+      outputTokensPerSecond: null,
+      cacheHitRate: null,
+    };
+    expect(Value.Check(RuntimeStatisticsDtoSchema.properties.modelUsage24h, emptyUsage)).toBe(true);
   });
 
   it("用户目录不接受凭据材料且状态变更必须包含原因", () => {

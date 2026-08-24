@@ -197,6 +197,15 @@ export const RuntimeStatisticsDtoSchema = Type.Object(
       { published: Type.Integer({ minimum: 0 }), installed: Type.Integer({ minimum: 0 }) },
       strict,
     ),
+    modelUsage24h: Type.Object(
+      {
+        inputTokens: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+        outputTokens: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+        outputTokensPerSecond: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+        cacheHitRate: Type.Union([Type.Number({ minimum: 0, maximum: 1 }), Type.Null()]),
+      },
+      strict,
+    ),
   },
   strict,
 );

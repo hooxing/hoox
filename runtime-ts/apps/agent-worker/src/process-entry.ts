@@ -1166,6 +1166,7 @@ async function assembleWorkerRuntime(
                 : "AUTOMATION_KEY_CONFLICT";
         throw new Error(code);
       },
+      threadContinuityMetrics,
     );
     const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(pool);
     const sessions = new RuntimeConfiguredSessionFactory(

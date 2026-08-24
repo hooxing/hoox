@@ -78,6 +78,10 @@ interface StatisticsRow extends QueryResultRow {
   readonly automation_failed_occurrences_24h: string;
   readonly skills_published: string;
   readonly skills_installed: string;
+  readonly model_input_tokens_24h: string;
+  readonly model_output_tokens_24h: string;
+  readonly model_cache_read_tokens_24h: string;
+  readonly model_generation_duration_ms_24h: string;
 }
 
 interface PlatformUserRow extends QueryResultRow {
@@ -99,6 +103,12 @@ function timestamp(value: Date | string): string {
 function safeInteger(value: string, name: string, minimum = 0): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < minimum) throw new Error(`${name} 无效`);
+  return parsed;
+}
+
+function safeNonnegativeNumber(value: string, name: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${name} 无效`);
   return parsed;
 }
 
@@ -679,6 +689,17 @@ export class PgAdminControlRepository
       const row = result.rows[0];
       if (row === undefined) throw new Error("运行统计投影缺失");
       const count = (value: string) => safeInteger(value, "运行统计");
+      const uncachedInputTokens = count(row.model_input_tokens_24h);
+      const cacheReadTokens = count(row.model_cache_read_tokens_24h);
+      const inputTokens = safeInteger(
+        String(uncachedInputTokens + cacheReadTokens),
+        "模型总输入 Token",
+      );
+      const outputTokens = count(row.model_output_tokens_24h);
+      const generationDurationMs = safeNonnegativeNumber(
+        row.model_generation_duration_ms_24h,
+        "模型生成时长",
+      );
       return Object.freeze({
         generatedAt: timestamp(row.generated_at),
         users: Object.freeze({
@@ -721,6 +742,13 @@ export class PgAdminControlRepository
         skills: Object.freeze({
           published: count(row.skills_published),
           installed: count(row.skills_installed),
+        }),
+        modelUsage24h: Object.freeze({
+          inputTokens,
+          outputTokens,
+          outputTokensPerSecond:
+            generationDurationMs > 0 ? outputTokens / (generationDurationMs / 1_000) : null,
+          cacheHitRate: inputTokens > 0 ? cacheReadTokens / inputTokens : null,
         }),
       });
     });

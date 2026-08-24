@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { ThreadContinuityMetricsPort } from "@hoox/run-contracts";
+import type { ModelUsageMetricsPort, ThreadContinuityMetricsPort } from "@hoox/run-contracts";
 import { digestCanonical } from "@hoox/run-contracts/mutation-protocol";
 import type { Pool, PoolClient } from "pg";
 import type { ThreadContinuityReadPort, ThreadContinuityStatusView } from "./ports.js";
@@ -431,7 +431,9 @@ export class PgLegacyThreadContextAnchor {
   }
 }
 
-export class PgThreadContinuityMetrics implements ThreadContinuityMetricsPort {
+export class PgThreadContinuityMetrics
+  implements ThreadContinuityMetricsPort, ModelUsageMetricsPort
+{
   constructor(private readonly pool: Pool) {}
 
   async record(input: Parameters<ThreadContinuityMetricsPort["record"]>[0]): Promise<void> {
@@ -462,6 +464,44 @@ export class PgThreadContinuityMetrics implements ThreadContinuityMetricsPort {
           input.path ?? null,
           input.outcome ?? null,
           input.reason ?? null,
+        ],
+      );
+    });
+  }
+
+  async recordModelUsage(
+    input: Parameters<ModelUsageMetricsPort["recordModelUsage"]>[0],
+  ): Promise<void> {
+    const tokenValues = [input.inputTokens, input.outputTokens, input.cacheReadTokens];
+    if (
+      tokenValues.some((value) => !Number.isSafeInteger(value) || value < 0) ||
+      !Number.isFinite(input.generationDurationMs) ||
+      input.generationDurationMs < 0 ||
+      Buffer.byteLength(input.observationId, "utf8") < 8 ||
+      Buffer.byteLength(input.observationId, "utf8") > 440
+    ) {
+      throw new TypeError("模型用量观测无效");
+    }
+    await withTenantTransaction(this.pool, { tenantId: input.tenantId }, async (client) => {
+      // 四项事实在同一事务内落库，缓存率和吞吐量不会读取到半组样本。
+      await client.query(
+        `INSERT INTO thread_continuity_metric_observations(
+           tenant_id,observation_id,thread_id,run_id,metric_name,value,unit
+         ) VALUES
+           ($1,$2 || ':input',$3,$4,'model_input_tokens',$5,'tokens'),
+           ($1,$2 || ':output',$3,$4,'model_output_tokens',$6,'tokens'),
+           ($1,$2 || ':cache-read',$3,$4,'model_cache_read_tokens',$7,'tokens'),
+           ($1,$2 || ':duration',$3,$4,'model_generation_duration_ms',$8,'milliseconds')
+         ON CONFLICT (tenant_id,observation_id) DO NOTHING`,
+        [
+          input.tenantId,
+          input.observationId,
+          input.threadId,
+          input.runId,
+          input.inputTokens,
+          input.outputTokens,
+          input.cacheReadTokens,
+          input.generationDurationMs,
         ],
       );
     });

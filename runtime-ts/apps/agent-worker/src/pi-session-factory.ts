@@ -53,6 +53,7 @@ import type {
   AgentSessionFactoryPort,
   AgentTurnOutcome,
   AgentUserInput,
+  ModelUsageMetricsPort,
   PreparedAgentUserInput,
   UserInputAttachmentReference,
   WorkerAgentSessionPort,
@@ -159,6 +160,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       readonly commandId: string;
       readonly mutation: ScheduledTaskMutation;
     }) => Promise<ScheduledTask>,
+    private readonly modelUsageMetrics?: ModelUsageMetricsPort,
   ) {
     this.modelContext = modelContext ?? bindTrustedPiModelContextCapability(modelRuntime, model);
   }
@@ -194,6 +196,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       input.modelContext,
       this.internalTrajectoryDiagnostics,
       this.updateScheduledTask,
+      this.modelUsageMetrics,
     );
   }
 
@@ -810,6 +813,55 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       diagnostics: controller.getDiagnostics(),
       agent: input.agent ?? { agentKind: "root" },
     });
+    const modelUsageWrites = new Set<Promise<void>>();
+    let modelUsageSequence = 0;
+    let activeModelGeneration:
+      | Readonly<{ readonly sequence: number; readonly startedAt: number }>
+      | undefined;
+    const modelUsageNamespace =
+      input.agent?.agentKind === "subagent"
+        ? createHash("sha256")
+            .update(`${input.agent.agentThreadId}:${input.agent.agentTurnId}`, "utf8")
+            .digest("hex")
+            .slice(0, 16)
+        : "root";
+    const unsubscribeModelUsage =
+      this.modelUsageMetrics === undefined
+        ? undefined
+        : controller.subscribeInternal((event) => {
+            if (event.type === "message_start" && event.message.role === "assistant") {
+              modelUsageSequence += 1;
+              activeModelGeneration = {
+                sequence: modelUsageSequence,
+                startedAt: performance.now(),
+              };
+              return;
+            }
+            if (event.type !== "message_end" || event.message.role !== "assistant") return;
+            const generation = activeModelGeneration;
+            activeModelGeneration = undefined;
+            if (generation === undefined) return;
+            const usage = event.message.usage;
+            if (usage.input + usage.output + usage.cacheRead === 0) return;
+            const write = this.modelUsageMetrics
+              ?.recordModelUsage({
+                tenantId: input.scope.tenantId,
+                threadId: input.scope.threadId,
+                runId: input.scope.runId,
+                observationId: `${input.attemptId}:model-usage:${modelUsageNamespace}:${generation.sequence}`,
+                inputTokens: usage.input,
+                outputTokens: usage.output,
+                cacheReadTokens: usage.cacheRead,
+                generationDurationMs: Math.max(0, performance.now() - generation.startedAt),
+              })
+              .catch(() => undefined);
+            if (write === undefined) return;
+            modelUsageWrites.add(write);
+            void write.finally(() => modelUsageWrites.delete(write));
+          });
+    const drainModelUsage = async () => {
+      while (modelUsageWrites.size > 0) await Promise.all([...modelUsageWrites]);
+    };
     const unsubscribeTrajectory =
       trajectoryRecorder === undefined
         ? undefined
@@ -862,7 +914,11 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             await controller.prompt(prepared.text, prepared.images);
           } finally {
             // 即使 Provider 失败也只等待当前 Attempt 已创建的诊断任务，且不会改变原异常。
-            await Promise.all([attemptWireTraces?.drain(), trajectoryRecorder?.drain()]);
+            await Promise.all([
+              attemptWireTraces?.drain(),
+              trajectoryRecorder?.drain(),
+              drainModelUsage(),
+            ]);
           }
         } catch (error) {
           if (observationRecoveryCode !== undefined) {
@@ -906,6 +962,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           listener(event);
         }),
       dispose: () => {
+        unsubscribeModelUsage?.();
         unsubscribeTrajectory?.();
         unsubscribeToolGate();
         startedToolCalls.clear();
@@ -916,6 +973,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         rejectedToolReceipts.clear();
         controller.dispose();
         void trajectoryRecorder?.drain();
+        void drainModelUsage();
         attemptWireTraces?.release();
       },
     };

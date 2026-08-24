@@ -147,6 +147,101 @@ describe("API 进程入口", () => {
     ).toThrow("INVALID:API_LISTEN_PORT");
   });
 
+  it("公开 Demo 显式关闭固定开发身份，并保持回环监听与 HTTPS 外部边界", () => {
+    const parsed = parseApiProcessEnvironment(
+      developmentEnvironment({
+        DEV_AUTH_ENABLED: "false",
+        DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
+        BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
+        S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
+      }),
+    );
+    expect(parsed.developmentPrincipals).toBeUndefined();
+    expect(parsed.demoPublicAccessEnabled).toBe(true);
+    expect(parsed.listenHost).toBe("127.0.0.1");
+    expect(parsed.identityAuth.baseURL).toBe("https://hoox.example.invalid");
+  });
+
+  it("公开 origin 不能脱离 Demo 开关单独进入 development", () => {
+    expect(() =>
+      parseApiProcessEnvironment(
+        developmentEnvironment({ DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid" }),
+      ),
+    ).toThrow("DEMO_PUBLIC_ORIGIN_REQUIRES_DEMO_PUBLIC_ACCESS");
+  });
+
+  it.each([
+    [{ DEMO_PUBLIC_ACCESS_ENABLED: "true" }, "DEMO_PUBLIC_ACCESS_REQUIRES_DEV_AUTH_DISABLED"],
+    [
+      { DEV_AUTH_ENABLED: "false", DEMO_PUBLIC_ACCESS_ENABLED: "true" },
+      "DEMO_PUBLIC_ACCESS_REQUIRES_PUBLIC_ORIGIN",
+    ],
+    [
+      {
+        DEV_AUTH_ENABLED: "false",
+        DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
+        BETTER_AUTH_TRUSTED_ORIGINS: "http://hoox.example.invalid",
+        S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
+      },
+      "DEMO_PUBLIC_ACCESS_REQUIRES_HTTPS_ORIGINS",
+    ],
+    [
+      {
+        DEV_AUTH_ENABLED: "false",
+        DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid/path",
+        BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
+        S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
+      },
+      "DEMO_PUBLIC_ACCESS_REQUIRES_HTTPS_ORIGIN",
+    ],
+    [
+      {
+        DEV_AUTH_ENABLED: "false",
+        DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
+        BETTER_AUTH_TRUSTED_ORIGINS: "https://other.example.invalid",
+        S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
+      },
+      "DEMO_PUBLIC_ORIGIN_MUST_BE_TRUSTED",
+    ],
+    [
+      {
+        DEV_AUTH_ENABLED: "false",
+        DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
+        BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid/path",
+        S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
+      },
+      "DEMO_PUBLIC_ACCESS_REQUIRES_HTTPS_ORIGINS",
+    ],
+    [
+      {
+        DEV_AUTH_ENABLED: "false",
+        DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
+        BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
+        S3_PUBLIC_ENDPOINT: "http://hoox.example.invalid",
+      },
+      "DEMO_PUBLIC_S3_ENDPOINT_REQUIRES_HTTPS",
+    ],
+    [
+      {
+        DEV_AUTH_ENABLED: "false",
+        DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
+        BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
+        S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
+        API_LISTEN_HOST: "0.0.0.0",
+      },
+      "DEVELOPMENT_API_REQUIRES_LOOPBACK_LISTENER",
+    ],
+  ])("公开 Demo 拒绝扩大身份、监听或传输边界：%o", (overrides, errorCode) => {
+    expect(() => parseApiProcessEnvironment(developmentEnvironment(overrides))).toThrow(errorCode);
+  });
+
   it.each(["127.0.0.1", "::1", "localhost", "LOCALHOST"])(
     "固定开发身份接受字面回环监听地址 %s",
     (listenHost) => {
@@ -252,6 +347,18 @@ describe("API 进程入口", () => {
     expect(() =>
       parseApiProcessEnvironment({ ...productionEnvironment(), DEV_AUTH_ENABLED: "false" }),
     ).toThrow("FORBIDDEN_IN_PRODUCTION:DEV_AUTH_ENABLED");
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        DEMO_PUBLIC_ACCESS_ENABLED: "false",
+      }),
+    ).toThrow("FORBIDDEN_IN_PRODUCTION:DEMO_PUBLIC_ACCESS_ENABLED");
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
+      }),
+    ).toThrow("FORBIDDEN_IN_PRODUCTION:DEMO_PUBLIC_ORIGIN");
     expect(() =>
       parseApiProcessEnvironment({
         ...productionEnvironment(),

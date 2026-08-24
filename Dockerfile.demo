@@ -1,0 +1,26 @@
+# Demo 镜像只用于受控演示环境；生产发布继续使用三个 production gate Dockerfile。
+FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS build
+
+WORKDIR /opt/hoox
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 CI=true
+RUN corepack enable
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json tsconfig.base.json .pnpmfile.cjs ./
+RUN pnpm fetch --frozen-lockfile
+
+COPY runtime-ts ./runtime-ts
+COPY scripts/demo-static-server.mjs ./scripts/demo-static-server.mjs
+RUN --network=none pnpm install --offline --frozen-lockfile \
+ && pnpm --filter "@hoox/api..." --filter "@hoox/agent-worker..." --filter "@hoox/scheduler..." --filter "@hoox/web..." build \
+ && pnpm install --offline --prod --frozen-lockfile --force
+
+FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
+
+WORKDIR /opt/hoox
+ENV NODE_ENV=development
+LABEL org.opencontainers.image.source="https://github.com/hooxing/hoox" \
+      org.opencontainers.image.description="Hoox 单机测试演示运行时"
+COPY --from=build --chown=1000:1000 /opt/hoox /opt/hoox
+USER 1000:1000
+
+CMD ["node", "scripts/demo-static-server.mjs"]

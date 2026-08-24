@@ -31,6 +31,9 @@ describe("后台控制面迁移", () => {
     const sql = migration("0050_admin_control_plane.down.sql");
     expect(sql).toContain("后台控制面已有事实，禁止破坏性回退");
     expect(sql).toContain("run_runtime_config_snapshots");
+    expect(sql.indexOf("DROP POLICY runtime_control_revisions_read_policy")).toBeLessThan(
+      sql.indexOf("DROP TABLE run_runtime_config_snapshots"),
+    );
   });
 
   it("后续迁移把模型配置收紧为 Provider 模型目录并保护不可逆降级", () => {
@@ -76,6 +79,9 @@ describe("后台控制面迁移", () => {
 
     const down = migration("0052_admin_user_operations.down.sql");
     expect(down).toContain("已有用户治理事实，禁止移除账号状态和审计");
+    expect(down.indexOf("DROP VIEW admin_runtime_statistics")).toBeLessThan(
+      down.indexOf("ALTER TABLE user_accounts DROP COLUMN status"),
+    );
   });
 
   it("模型用量复用低基数指标账本并通过后台受限视图聚合", () => {
@@ -92,6 +98,10 @@ describe("后台控制面迁移", () => {
 
     const down = migration("0053_model_usage_metrics.down.sql");
     expect(down).toContain("已有模型用量观测事实，禁止移除统计语义");
+    expect(down).toContain(
+      "DROP VIEW admin_runtime_statistics;\nCREATE VIEW admin_runtime_statistics",
+    );
+    expect(down).not.toContain("CREATE OR REPLACE VIEW admin_runtime_statistics");
 
     const index = migration("0054_model_usage_admin_index.up.sql");
     expect(index).toContain("CREATE INDEX model_usage_metrics_admin_query_idx");

@@ -18,6 +18,7 @@ import {
 import { developmentApiAssembler } from "./development-assembly.js";
 import {
   type ApiDevelopmentPrincipal,
+  assertDemoPublicAccessConfiguration,
   assertDevelopmentPrincipalsIsolated,
   assertDevelopmentPublicObjectStorageEndpoint,
   DEVELOPMENT_API_DEFAULT_PORT,
@@ -90,6 +91,8 @@ const apiEnvironmentSchema = Object.freeze({
     maximum: 86_400,
   }),
   // production 中即使 false 也不能出现，显式检查位于 parseApiProcessEnvironment。
+  DEMO_PUBLIC_ACCESS_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
+  DEMO_PUBLIC_ORIGIN: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 2048 }),
   DEV_AUTH_ENABLED: booleanEnvironmentField({ requiredIn: developmentAndTestEnvironments }),
   DEV_AUTH_USER_A_ID: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 128 }),
   DEV_AUTH_USER_A_TENANT_ID: stringEnvironmentField({
@@ -180,6 +183,7 @@ export interface ApiProcessConfiguration {
   readonly threadContextV2ReadEnabled: boolean;
   readonly threadInputRoutingV2Enabled: boolean;
   readonly developmentPrincipals?: readonly [ApiDevelopmentPrincipal, ApiDevelopmentPrincipal];
+  readonly demoPublicAccessEnabled: boolean;
   readonly shutdownTimeoutMilliseconds: number;
   readonly listenHost: string;
   readonly listenPort: number;
@@ -236,6 +240,17 @@ export function parseApiProcessEnvironment(
     parsed.runtimeEnvironment === "production"
       ? false
       : readRequiredEnvironmentValue(parsed, "DEV_AUTH_ENABLED");
+  const demoPublicAccessEnabled =
+    parsed.runtimeEnvironment === "development"
+      ? (parsed.values.DEMO_PUBLIC_ACCESS_ENABLED ?? false)
+      : false;
+  if (demoPublicAccessEnabled && developmentAuthEnabled) {
+    throw new TypeError("DEMO_PUBLIC_ACCESS_REQUIRES_DEV_AUTH_DISABLED");
+  }
+  const configuredDemoPublicOrigin = parsed.values.DEMO_PUBLIC_ORIGIN;
+  if (configuredDemoPublicOrigin !== undefined && !demoPublicAccessEnabled) {
+    throw new TypeError("DEMO_PUBLIC_ORIGIN_REQUIRES_DEMO_PUBLIC_ACCESS");
+  }
   const configuredDatabaseUrl = readRequiredEnvironmentValue(parsed, "DATABASE_URL");
   const configuredTeamCoordinatorUrl = readRequiredEnvironmentValue(
     parsed,
@@ -371,6 +386,23 @@ export function parseApiProcessEnvironment(
   if (Buffer.byteLength(betterAuthSecret, "utf8") < 32) {
     throw new TypeError("INVALID:BETTER_AUTH_SECRET");
   }
+  const configuredTrustedOrigins = Object.freeze(
+    (parsed.values.BETTER_AUTH_TRUSTED_ORIGINS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0),
+  );
+  if (demoPublicAccessEnabled) {
+    assertDemoPublicAccessConfiguration({
+      listenHost,
+      publicOrigin: configuredDemoPublicOrigin,
+      publicObjectStorageEndpoint: objectStorage.publicEndpoint,
+      trustedOrigins: configuredTrustedOrigins,
+    });
+  }
+  const trustedOrigins = Object.freeze(
+    configuredTrustedOrigins.map((value) => new URL(value).origin),
+  );
   return Object.freeze({
     runtimeEnvironment: parsed.runtimeEnvironment,
     databaseUrl: productionDatabase?.connectionString ?? configuredDatabaseUrl,
@@ -387,14 +419,9 @@ export function parseApiProcessEnvironment(
       secret: betterAuthSecret,
       baseURL:
         production?.publicOrigin ??
+        configuredDemoPublicOrigin ??
         `http://${listenHost === "0.0.0.0" || listenHost === "::" ? "127.0.0.1" : listenHost}:${listenPort}`,
-      trustedOrigins: Object.freeze(
-        (parsed.values.BETTER_AUTH_TRUSTED_ORIGINS ?? "")
-          .split(",")
-          .map((value) => value.trim())
-          .filter((value) => value.length > 0)
-          .map((value) => new URL(value).origin),
-      ),
+      trustedOrigins,
     }),
     cursorActiveKeyId: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_ACTIVE_KID"),
     cursorSigningKeys: readRequiredEnvironmentValue(parsed, "THREAD_CURSOR_SIGNING_KEYS"),
@@ -402,6 +429,7 @@ export function parseApiProcessEnvironment(
     threadContextV2ReadEnabled: contextReadEnabled,
     threadInputRoutingV2Enabled: inputRoutingEnabled,
     ...(developmentPrincipals === undefined ? {} : { developmentPrincipals }),
+    demoPublicAccessEnabled,
     shutdownTimeoutMilliseconds: readRequiredEnvironmentValue(
       parsed,
       "PROCESS_SHUTDOWN_TIMEOUT_MS",
@@ -445,7 +473,7 @@ export async function startApiProcess(input: {
   const assembler =
     input.assembler ??
     (configuration.runtimeEnvironment === "development" &&
-    configuration.developmentPrincipals !== undefined
+    (configuration.developmentPrincipals !== undefined || configuration.demoPublicAccessEnabled)
       ? developmentApiAssembler
       : undefined);
   return startServiceProcess({
@@ -461,6 +489,8 @@ export async function startApiProcess(input: {
 }
 
 const developmentIdentityEnvironmentKeys = Object.freeze([
+  "DEMO_PUBLIC_ACCESS_ENABLED",
+  "DEMO_PUBLIC_ORIGIN",
   "DEV_AUTH_ENABLED",
   "DEV_AUTH_USER_A_ID",
   "DEV_AUTH_USER_A_TENANT_ID",

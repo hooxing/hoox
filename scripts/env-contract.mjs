@@ -121,12 +121,15 @@ export const expectedEnvironmentKeys = Object.freeze([
   "MODEL_WIRE_TRACE_ENABLED",
   "MODEL_WIRE_TRACE_RETENTION_DAYS",
   "MODEL_WIRE_TRACE_MAX_BYTES",
+  "DEMO_PUBLIC_ACCESS_ENABLED",
   "DEV_AUTH_ENABLED",
   "DEV_AUTH_USER_A_ID",
   "DEV_AUTH_USER_A_TENANT_ID",
   "DEV_AUTH_USER_B_ID",
   "DEV_AUTH_USER_B_TENANT_ID",
 ]);
+
+export const optionalEnvironmentKeys = Object.freeze(["DEMO_PUBLIC_ORIGIN"]);
 
 const placeholderOnlyKeys = new Set([
   "DATABASE_URL",
@@ -215,7 +218,7 @@ export function validateEnvironmentExample(source) {
     values.set(key, value);
   }
 
-  const expected = new Set(expectedEnvironmentKeys);
+  const expected = new Set([...expectedEnvironmentKeys, ...optionalEnvironmentKeys]);
   for (const key of expectedEnvironmentKeys) {
     if (!values.has(key)) issues.push(`缺少环境变量：${key}`);
   }

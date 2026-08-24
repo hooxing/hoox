@@ -12,7 +12,8 @@ BEGIN
 END
 $$;
 
-CREATE OR REPLACE VIEW admin_runtime_statistics WITH (security_barrier=true) AS
+DROP VIEW admin_runtime_statistics;
+CREATE VIEW admin_runtime_statistics WITH (security_barrier=true) AS
 SELECT
   clock_timestamp() AS generated_at,
   (SELECT count(*)::bigint FROM runs) AS runs_total,

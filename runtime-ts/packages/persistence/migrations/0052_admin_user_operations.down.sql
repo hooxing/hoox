@@ -15,9 +15,9 @@ DROP VIEW admin_user_directory;
 DROP POLICY user_sessions_admin_control_delete_policy ON user_sessions;
 DROP POLICY user_accounts_admin_control_update_policy ON user_accounts;
 DROP TABLE admin_user_account_audits;
+DROP VIEW admin_runtime_statistics;
 ALTER TABLE user_accounts DROP COLUMN status;
 
-DROP VIEW admin_runtime_statistics;
 CREATE VIEW admin_runtime_statistics WITH (security_barrier=true) AS
 SELECT
   clock_timestamp() AS generated_at,

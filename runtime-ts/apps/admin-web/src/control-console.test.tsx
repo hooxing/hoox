@@ -57,6 +57,20 @@ const overview = {
 function fixture(): AdminControlApiContract {
   return {
     overview: vi.fn(async () => overview),
+    getIdentityConfiguration: vi.fn(async () => ({
+      versionToken: 0,
+      emailPasswordEnabled: true,
+      registrationEnabled: true,
+      phoneEnabled: false,
+      smsWebhookSecretConfigured: false,
+      providers: [
+        { key: "google" as const, enabled: false, clientId: "", secretConfigured: false },
+        { key: "github" as const, enabled: false, clientId: "", secretConfigured: false },
+        { key: "wechat" as const, enabled: false, clientId: "", secretConfigured: false },
+        { key: "qq" as const, enabled: false, clientId: "", secretConfigured: false },
+      ],
+    })),
+    updateIdentityConfiguration: vi.fn(),
     listModelProviders: vi.fn(async () => []),
     listPiModelCatalogProviders: vi.fn(async () => [
       {
@@ -157,6 +171,7 @@ describe("统一平台管理导航", () => {
       "模型服务",
       "记忆服务",
       "Skills",
+      "身份与登录",
       "运行配置",
       "操作审计",
     ]);
@@ -214,6 +229,71 @@ describe("统一平台管理导航", () => {
     expect(container.textContent).toContain("pnpm db:migrate:up");
     expect(container.textContent).toContain("platform_control_operators");
     expect(container.textContent).toContain("数据库与身份 → 模型与 Mem0 秘密");
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("在身份与登录模块分区配置访问策略和第三方身份源", async () => {
+    const api = fixture();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+
+    act(() => navigationItem(container, "身份与登录").click());
+    await settle();
+
+    expect(api.getIdentityConfiguration).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain("登录入口控制");
+    expect(container.textContent).toContain("基础访问策略");
+    expect(container.textContent).toContain("第三方身份源");
+    expect(container.textContent).toContain("秘密材料只保存在服务端");
+    expect(container.querySelectorAll(".identity-provider-card")).toHaveLength(4);
+
+    const github = container.querySelector<HTMLElement>('[data-provider="github"]');
+    if (github === null) throw new Error("GitHub 身份源缺失");
+    const fields = github.querySelectorAll<HTMLInputElement>("input");
+    act(() => {
+      changeControl(requiredControl(fields[0], "GitHub Client ID"), "github-client");
+      changeControl(requiredControl(fields[1], "GitHub Client Secret"), "github-secret");
+      github.querySelector<HTMLButtonElement>('[role="switch"]')?.click();
+      changeControl(
+        requiredControl(
+          container.querySelector<HTMLInputElement>(
+            'input[placeholder="例如：为内部测试开放 GitHub 登录"]',
+          ),
+          "身份策略变更原因",
+        ),
+        "为内部测试开放 GitHub 登录",
+      );
+    });
+    const publish = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.trim() === "保存并立即生效",
+    );
+    if (publish === undefined) throw new Error("身份策略发布按钮缺失");
+    expect(publish.disabled).toBe(false);
+    await act(async () => publish.click());
+    await settle();
+
+    expect(api.updateIdentityConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedVersionToken: 0,
+        emailPasswordEnabled: true,
+        registrationEnabled: true,
+        phoneEnabled: false,
+        reason: "为内部测试开放 GitHub 登录",
+        providers: expect.arrayContaining([
+          expect.objectContaining({
+            key: "github",
+            enabled: true,
+            clientId: "github-client",
+            clientSecret: "github-secret",
+          }),
+        ]),
+      }),
+    );
 
     act(() => root.unmount());
     container.remove();

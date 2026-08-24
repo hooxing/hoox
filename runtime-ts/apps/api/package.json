@@ -9,7 +9,9 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
+    "@hoox/automation": "workspace:*",
     "@hoox/domain": "workspace:*",
+    "@hoox/identity": "workspace:*",
     "@hoox/persistence": "workspace:*",
     "@hoox/process-runtime": "workspace:*",
     "@hoox/protocol": "workspace:*",
@@ -17,7 +19,7 @@
     "@hoox/resource": "workspace:*",
     "@hoox/skill": "workspace:*",
     "fastify": "5.10.0",
-    "@hoox/automation": "workspace:*"
+    "jose": "6.2.10"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

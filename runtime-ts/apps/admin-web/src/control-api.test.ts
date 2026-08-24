@@ -47,6 +47,43 @@ describe("后台控制 Web API", () => {
     expect(String(fetcher.mock.calls[1]?.[1]?.body)).not.toContain("apiKey");
   });
 
+  it("身份配置写请求带幂等键且秘密只出现在请求体", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      response({
+        data: {
+          versionToken: 1,
+          emailPasswordEnabled: true,
+          registrationEnabled: true,
+          phoneEnabled: false,
+          smsWebhookSecretConfigured: false,
+          providers: [],
+        },
+      }),
+    );
+    const api = new AdminControlApi(fetcher, "/v1/admin/control", () => "identity-key-0001");
+    await api.updateIdentityConfiguration({
+      expectedVersionToken: 0,
+      emailPasswordEnabled: true,
+      registrationEnabled: true,
+      phoneEnabled: false,
+      providers: [
+        { key: "google", enabled: true, clientId: "google-client", clientSecret: "google-secret" },
+        { key: "github", enabled: false, clientId: "" },
+        { key: "wechat", enabled: false, clientId: "" },
+        { key: "qq", enabled: false, clientId: "" },
+      ],
+      reason: "启用 Google 登录",
+    });
+    expect(fetcher).toHaveBeenCalledWith(
+      "/v1/admin/control/identity",
+      expect.objectContaining({ method: "PUT" }),
+    );
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("Idempotency-Key")).toBe(
+      "identity-key-0001",
+    );
+    expect(String(fetcher.mock.calls[0]?.[1]?.body)).toContain("google-secret");
+  });
+
   it("不把服务端错误正文或 Provider 细节带入界面", async () => {
     const fetcher = vi.fn<typeof fetch>(async () =>
       response({ error: { message: "upstream secret response", retryable: true } }, 503),

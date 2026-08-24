@@ -10,6 +10,18 @@ export type AccountSession = {
   readonly expiresAt: string;
 };
 
+export type IdentityProviderKey = "google" | "github" | "wechat" | "qq";
+
+export type IdentityAuthConfiguration = {
+  readonly emailPasswordEnabled: boolean;
+  readonly registrationEnabled: boolean;
+  readonly phoneEnabled: boolean;
+  readonly providers: readonly {
+    readonly key: IdentityProviderKey;
+    readonly enabled: boolean;
+  }[];
+};
+
 export type Thread = {
   readonly id: string;
   readonly tenantId?: string;
@@ -376,6 +388,78 @@ export class RuntimeApi {
     return envelope<T>(body);
   }
 
+  private async betterAuthRequest<T>(path: string, body?: unknown): Promise<T> {
+    let response: Response;
+    try {
+      response = await this.fetcher(`${this.baseUrl}/api/auth${path}`, {
+        method: body === undefined ? "GET" : "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch {
+      throw new ApiError("无法连接身份服务", 0, true);
+    }
+    const value: unknown = await response.json().catch(() => undefined);
+    if (!response.ok) throw new ApiError("身份验证失败", response.status, response.status >= 500);
+    return value as T;
+  }
+
+  getIdentityConfiguration(): Promise<IdentityAuthConfiguration> {
+    return this.request("/v1/auth/config", {}, null, false);
+  }
+
+  exchangeIdentitySession(): Promise<AccountSession> {
+    return this.request("/v1/auth/exchange", { method: "POST" }, null, false);
+  }
+
+  async signUpWithEmail(input: {
+    readonly displayName: string;
+    readonly email: string;
+    readonly password: string;
+  }): Promise<AccountSession> {
+    await this.betterAuthRequest("/sign-up/email", {
+      name: input.displayName,
+      email: input.email,
+      password: input.password,
+    });
+    return this.exchangeIdentitySession();
+  }
+
+  async signInWithEmail(input: {
+    readonly email: string;
+    readonly password: string;
+  }): Promise<AccountSession> {
+    await this.betterAuthRequest("/sign-in/email", input);
+    return this.exchangeIdentitySession();
+  }
+
+  async beginSocialSignIn(provider: IdentityProviderKey, callbackURL: string): Promise<string> {
+    const result = await this.betterAuthRequest<{ readonly url?: unknown }>("/sign-in/social", {
+      provider,
+      callbackURL,
+      disableRedirect: true,
+    });
+    if (typeof result.url !== "string") throw new ApiError("身份服务未返回跳转地址", 502, true);
+    const url = new URL(result.url);
+    if (url.protocol !== "https:" && url.protocol !== "http:") {
+      throw new ApiError("身份服务返回了不安全的跳转地址", 502, false);
+    }
+    return url.href;
+  }
+
+  async sendPhoneOtp(phoneNumber: string): Promise<void> {
+    await this.betterAuthRequest("/phone-number/send-otp", { phoneNumber });
+  }
+
+  async verifyPhoneOtp(phoneNumber: string, code: string): Promise<AccountSession> {
+    await this.betterAuthRequest("/phone-number/verify", { phoneNumber, code });
+    return this.exchangeIdentitySession();
+  }
+
   registerAccount(input: {
     readonly displayName: string;
     readonly email: string;
@@ -406,7 +490,13 @@ export class RuntimeApi {
   }
 
   async logoutAccount(): Promise<void> {
-    await this.request<{ readonly loggedOut: true }>("/v1/auth/logout", { method: "POST" }, null);
+    const results = await Promise.allSettled([
+      this.request<{ readonly loggedOut: true }>("/v1/auth/logout", { method: "POST" }, null),
+      this.betterAuthRequest("/sign-out", {}),
+    ]);
+    if (results.every((result) => result.status === "rejected")) {
+      throw results[0]?.status === "rejected" ? results[0].reason : new Error("LOGOUT_FAILED");
+    }
   }
 
   async listThreads(): Promise<readonly Thread[]> {

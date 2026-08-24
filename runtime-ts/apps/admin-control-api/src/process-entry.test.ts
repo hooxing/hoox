@@ -19,6 +19,7 @@ import {
 function productionEnvironment(): Record<string, string> {
   return {
     RUNTIME_ENV: "production",
+    BETTER_AUTH_SECRET: "test-better-auth-secret-at-least-thirty-two-bytes",
     ADMIN_CONTROL_DATABASE_URL:
       "postgresql://admin_control:credential@database:5432/runtime?sslmode=verify-full",
     SKILL_PUBLISHER_DATABASE_URL:
@@ -53,6 +54,7 @@ function productionEnvironment(): Record<string, string> {
 function developmentEnvironment(overrides: Record<string, string> = {}): Record<string, string> {
   return {
     RUNTIME_ENV: "development",
+    BETTER_AUTH_SECRET: "test-better-auth-secret-at-least-thirty-two-bytes",
     ADMIN_CONTROL_DATABASE_URL: "postgresql://admin_control:credential@127.0.0.1:5432/runtime",
     SKILL_PUBLISHER_DATABASE_URL: "postgresql://skill_publisher:credential@127.0.0.1:5432/runtime",
     DATABASE_SCHEMA: "runtime",

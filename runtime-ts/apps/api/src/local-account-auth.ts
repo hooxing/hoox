@@ -96,6 +96,11 @@ function profile(input: {
 export interface LocalAccountAuthService extends AuthContextResolver {
   register(input: RegisterAccountRequest): Promise<AccountSessionDto>;
   login(input: LoginAccountRequest): Promise<AccountSessionDto>;
+  exchangeBetterAuthIdentity(input: {
+    readonly id: string;
+    readonly name: string;
+    readonly email: string;
+  }): Promise<AccountSessionDto>;
   getProfile(principal: AuthPrincipal): Promise<AccountProfileDto | undefined>;
   logout(authorization: string | undefined): Promise<void>;
 }
@@ -157,6 +162,36 @@ export function createLocalAccountAuthService(input: {
       return { profile: profile(account), accessToken, expiresAt };
     },
 
+    async exchangeBetterAuthIdentity(identity: {
+      readonly id: string;
+      readonly name: string;
+      readonly email: string;
+    }) {
+      const email = normalizeEmail(identity.email);
+      const rawName = identity.name.trim();
+      const displayName =
+        Array.from(rawName).length >= 2 && Array.from(rawName).length <= 32
+          ? rawName
+          : `Hoox 用户 ${identity.id.slice(-8)}`;
+      const createdAt = input.clock.now();
+      const expiresAt = sessionExpiry(createdAt);
+      const accessToken = createSessionToken();
+      const generated = randomUUID();
+      const result = await input.repository.exchangeBetterAuthIdentity({
+        betterAuthUserId: identity.id,
+        userId: `user_${generated}`,
+        personalTenantId: `tenant_personal_${generated}`,
+        membershipId: `membership_personal_${generated}`,
+        email,
+        displayName,
+        sessionTokenDigest: tokenDigest(accessToken),
+        createdAt,
+        sessionExpiresAt: expiresAt,
+      });
+      if (result === "disabled") throw new ApiFailure("unauthorized");
+      if (result === "conflict") throw new ApiFailure("conflict");
+      return { profile: profile(result), accessToken, expiresAt };
+    },
     async login(request: LoginAccountRequest) {
       const email = normalizeEmail(request.email);
       validatePassword(request.password);

@@ -12,6 +12,7 @@ import {
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   RobotOutlined,
+  SafetyCertificateOutlined,
   SettingOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
@@ -948,6 +949,7 @@ const navigation: NonNullable<MenuProps["items"]> = [
     type: "group",
     label: "系统",
     children: [
+      { key: "/identity", icon: <SafetyCertificateOutlined />, label: "身份与登录" },
       { key: "/settings", icon: <SettingOutlined />, label: "运行配置" },
       { key: "/audits", icon: <AuditOutlined />, label: "操作审计" },
     ],
@@ -968,6 +970,10 @@ const pageMetadata: Readonly<
   "/users": {
     title: "用户管理",
     description: "账号状态、使用情况与会话治理",
+  },
+  "/identity": {
+    title: "身份与登录",
+    description: "登录方式、开放注册与第三方身份源",
   },
   "/models": {
     title: "模型服务",
@@ -1106,6 +1112,15 @@ function AdminPlatform({
               element={
                 <AdminControlConsole
                   view="users"
+                  {...(controlApi === undefined ? {} : { api: controlApi })}
+                />
+              }
+            />
+            <Route
+              path="/identity"
+              element={
+                <AdminControlConsole
+                  view="identity"
                   {...(controlApi === undefined ? {} : { api: controlApi })}
                 />
               }

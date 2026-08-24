@@ -73,6 +73,8 @@ function developmentEnvironment(): Record<string, string> {
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",
     API_LISTEN_HOST: "127.0.0.1",
     API_LISTEN_PORT: "3001",
+    BETTER_AUTH_SECRET: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    BETTER_AUTH_TRUSTED_ORIGINS: "http://127.0.0.1:4173",
     S3_ENDPOINT: "http://object-storage:9000",
     S3_PUBLIC_ENDPOINT: "http://127.0.0.1:19000",
     S3_BUCKET: "runtime-artifacts",

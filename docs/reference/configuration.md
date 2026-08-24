@@ -29,7 +29,9 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 - `RUNTIME_ENV=development` 才允许启用开发身份。
 - API development 监听必须保持在字面回环地址。
 - 固定 `dev-user-a` / `dev-user-b` 只用于隔离夹具。
-- Web 本地账号会话不属于 production 身份方案。
+- Web 默认使用 API 进程内嵌的 Better Auth；development 可以显式保留旧本地账号端点和固定身份夹具。
+- `BETTER_AUTH_SECRET` 至少 32 字节，API 与 Admin Control 必须使用同值；它不能进入后台配置、Git 或日志。
+- `BETTER_AUTH_TRUSTED_ORIGINS` 是允许发起身份请求的逗号分隔 origin 列表；production 至少包含 Web 对外 origin。
 - 游标签名、ResourceFS 签名等密钥必须使用本机随机值，不能复用示例占位符。
 
 ### 对象存储
@@ -62,7 +64,8 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 
 ### 后台管理
 
-- 统一 Admin API 默认监听 `127.0.0.1:3003`，模型、记忆、配置、统计与 Skill 路由共用管理身份。
+- 统一 Admin API 默认监听 `127.0.0.1:3003`，模型、记忆、身份、配置、统计与 Skill 路由共用管理身份。
+- “身份与登录”配置保存后按版本动态生效；Provider 与短信秘密只返回已配置状态，不回显明文。
 - 进程内仍使用 Admin Control 与 Skill Publisher 两套数据库连接和角色，Skill Publisher 对象存储凭据不能复用普通 API/Worker 身份。
 - 开发发布 fixture 不等于生产 Skill 目录。
 - vendored Anthropic PPTX Skill 仅用于本地 development 测试，受其专有许可证约束。
@@ -79,10 +82,10 @@ production 示例是字段合集，不是共享 env 文件。部署平台应至�
 
 | 服务 | 必需类别 | 不应获得 |
 | --- | --- | --- |
-| API | PostgreSQL、JWT/身份、S3 下载签名、TLS/公开 origin | 模型密钥、Sandbox 执行密钥、MinIO root、迁移器凭据 |
+| API | PostgreSQL、Better Auth 根秘密、JWT 兼容身份、S3 下载签名、TLS/公开 origin | 模型密钥、Sandbox 执行密钥、MinIO root、迁移器凭据 |
 | Scheduler | PostgreSQL、Sandbox 生命周期、标题模型（启用时） | S3 读写密钥、主模型密钥、API JWT 私钥 |
 | Agent Worker | PostgreSQL、S3、Sandbox、主模型 | API 身份签名私钥、Admin 管理凭据 |
-| Admin API | 独立管理身份、Admin Control PG、Skill Publisher PG 与发布对象存储凭据 | 普通 Runtime 的全量秘密 |
+| Admin API | 独立管理身份、Admin Control PG、与 API 同值的 Better Auth 根秘密、Skill Publisher PG 与发布对象存储凭据 | 普通 Runtime 的其他全量秘密 |
 
 生产进程拒绝 development 变量、环境代理、危险 `NODE_*` 和 OpenSSL 配置覆盖；私有 CA 只能通过明确允许的通道注入。
 

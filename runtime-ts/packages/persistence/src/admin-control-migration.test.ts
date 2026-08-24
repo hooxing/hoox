@@ -77,4 +77,24 @@ describe("后台控制面迁移", () => {
     const down = migration("0052_admin_user_operations.down.sql");
     expect(down).toContain("已有用户治理事实，禁止移除账号状态和审计");
   });
+
+  it("模型用量复用低基数指标账本并通过后台受限视图聚合", () => {
+    const up = migration("0053_model_usage_metrics.up.sql");
+    expect(up).toContain("'model_input_tokens'");
+    expect(up).toContain("'model_output_tokens'");
+    expect(up).toContain("'model_cache_read_tokens'");
+    expect(up).toContain("'model_generation_duration_ms'");
+    expect(up).toContain("observed_at>=clock_timestamp()-interval '24 hours'");
+    expect(up).toContain("CREATE OR REPLACE VIEW admin_runtime_statistics");
+    expect(up).not.toContain("request_body");
+    expect(up).not.toContain("response_body");
+    expect(up).not.toContain("provider_id");
+
+    const down = migration("0053_model_usage_metrics.down.sql");
+    expect(down).toContain("已有模型用量观测事实，禁止移除统计语义");
+
+    const index = migration("0054_model_usage_admin_index.up.sql");
+    expect(index).toContain("CREATE INDEX model_usage_metrics_admin_query_idx");
+    expect(index).toContain("metric_name,observed_at DESC");
+  });
 });

@@ -18,17 +18,27 @@ function MetricCard({
   tone = "default",
 }: {
   readonly label: string;
-  readonly value: number;
+  readonly value: number | string;
   readonly note: string;
   readonly tone?: "default" | "positive" | "warning";
 }) {
   return (
     <article className={`operation-metric ${tone}`}>
       <span>{label}</span>
-      <strong>{value.toLocaleString("zh-CN")}</strong>
+      <strong>{typeof value === "number" ? value.toLocaleString("zh-CN") : value}</strong>
       <small>{note}</small>
     </article>
   );
+}
+
+function formatThroughput(value: number | null): string {
+  return value === null ? "—" : value.toLocaleString("zh-CN", { maximumFractionDigits: 1 });
+}
+
+function formatRate(value: number | null): string {
+  return value === null
+    ? "—"
+    : `${(value * 100).toLocaleString("zh-CN", { maximumFractionDigits: 1 })}%`;
 }
 
 export function ControlDataUnavailable({
@@ -52,6 +62,7 @@ export function ControlDataUnavailable({
 
 export function OperationsDashboard({ value }: { readonly value: AdminControlOverviewDto }) {
   const stats = value.statistics;
+  const usage = stats.modelUsage24h;
   return (
     <div className="operations-dashboard">
       <section className="operations-summary">
@@ -60,7 +71,47 @@ export function OperationsDashboard({ value }: { readonly value: AdminControlOve
           <h2>数据运营</h2>
           <p>指标直接来自 PostgreSQL 受限聚合投影，不读取对话正文或用户密码材料。</p>
         </div>
-        <time>数据生成于 {formatDate(stats.generatedAt)}</time>
+        <div className="operations-summary-actions">
+          <time>数据生成于 {formatDate(stats.generatedAt)}</time>
+          {import.meta.env.DEV && (
+            <a
+              className="trajectory-viewer-link"
+              href="http://127.0.0.1:4188"
+              target="_blank"
+              rel="noreferrer"
+            >
+              打开内部轨迹
+            </a>
+          )}
+        </div>
+      </section>
+
+      <section className="metric-section model-usage-section" aria-labelledby="model-usage-title">
+        <div className="metric-section-heading">
+          <div>
+            <span className="metric-icon">AI</span>
+            <span>
+              <h3 id="model-usage-title">模型用量与吞吐</h3>
+              <p>过去 24 小时已观测模型调用的聚合结果，不读取请求或响应正文。</p>
+            </span>
+          </div>
+          <span className="metric-window">24 小时</span>
+        </div>
+        <div className="operation-metric-grid model-usage-grid">
+          <MetricCard
+            label="Tokens/s"
+            value={formatThroughput(usage.outputTokensPerSecond)}
+            note="输出 Token ÷ Assistant 生成时长"
+            tone="positive"
+          />
+          <MetricCard
+            label="缓存命中率"
+            value={formatRate(usage.cacheHitRate)}
+            note="缓存读取 ÷ 全部输入 Token"
+          />
+          <MetricCard label="输入 Token" value={usage.inputTokens} note="未缓存输入 + 缓存读取" />
+          <MetricCard label="输出 Token" value={usage.outputTokens} note="模型生成总量" />
+        </div>
       </section>
 
       <section className="metric-section" aria-labelledby="user-metrics-title">
@@ -200,7 +251,16 @@ export function OperationsDashboard({ value }: { readonly value: AdminControlOve
           </div>
           <div>
             <dt>统计隔离</dt>
-            <dd>控制服务只能读取聚合视图；用户目录不含密码散列、盐或 Session 摘要。</dd>
+            <dd>
+              控制服务只能读取聚合视图；模型用量不含 Provider 身份、请求正文、响应正文或密钥。
+            </dd>
+          </div>
+          <div>
+            <dt>Tokens/s 与缓存率</dt>
+            <dd>
+              Tokens/s 使用聚合输出量除以聚合 Assistant
+              生成时长；缓存率使用缓存读取除以未缓存输入与缓存读取之和。
+            </dd>
           </div>
         </dl>
       </section>

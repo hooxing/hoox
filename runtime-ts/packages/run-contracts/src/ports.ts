@@ -1180,6 +1180,25 @@ export interface ThreadContinuityMetricsPort {
   }): Promise<void>;
 }
 
+/**
+ * 模型用量观测只保存计数和生成时长，不接收 Provider 身份、请求正文或响应正文。
+ * 同一次调用的四个数值必须由适配器原子写入，避免聚合比例读取到部分事实。
+ */
+export interface ModelUsageMetricsPort {
+  recordModelUsage(input: {
+    readonly tenantId: TenantId;
+    readonly threadId: ThreadId;
+    readonly runId: RunId;
+    readonly observationId: string;
+    /** Provider 报告的未命中缓存输入量。 */
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly cacheReadTokens: number;
+    /** Assistant message_start 到 message_end 的本地单调时钟跨度。 */
+    readonly generationDurationMs: number;
+  }): Promise<void>;
+}
+
 export interface CancellationPort {
   signalFor(scope: ExecutionScope): AbortSignal;
   /** Run 执行结束后释放轮询、监听器等按 Run 分配的资源。 */

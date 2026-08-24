@@ -77,6 +77,9 @@ http://127.0.0.1:4188
 
 查看器从仓库根目录 `model-wire-traces` 聚合 durable Run 事件，展示近似模型步骤、思考、回复、工具生命周期、Attempt 状态、稳定错误类别和 request/response 原文。
 
+development 管理 Web 的“数据运营”页可以显示“打开内部轨迹”链接。该链接只在新窗口打开回环地址，不把轨迹正文交给
+Admin API，也不代理或嵌入查看器；仍需维护者单独启动上述命令。
+
 可覆盖参数：
 
 ```powershell
@@ -89,7 +92,8 @@ corepack pnpm dev:trajectory -- --root <受控目录>
 ## 安全约束
 
 - 查看器只允许绑定本机回环地址，不得代理或转发到远程网络。
-- 不得把查看器接入用户 Web、公开 API 或 production 装配。
+- 不得把查看器嵌入用户 Web、管理 Web、公开 API 或 production 装配，也不得通过反向代理扩大其可达范围；development
+  管理页只允许提供回环新窗口链接。
 - 禁止将 `model-wire-traces`、截图或正文粘贴到公开 Issue。
 - 删除诊断数据前确认相关故障证据已经完成受控留存。
 - 关闭 `MODEL_WIRE_TRACE_ENABLED` 只停止新增采集，不自动删除既有记录。

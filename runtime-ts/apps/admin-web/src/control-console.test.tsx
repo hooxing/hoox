@@ -19,6 +19,12 @@ const overview = {
     memory: { pending: 3, failed: 0 },
     automations: { active: 4, failedOccurrences24h: 0 },
     skills: { published: 5, installed: 6 },
+    modelUsage24h: {
+      inputTokens: 12_500,
+      outputTokens: 2_500,
+      outputTokensPerSecond: 62.5,
+      cacheHitRate: 0.8,
+    },
   },
   deploymentSettings: [
     {
@@ -250,6 +256,15 @@ describe("统一平台管理导航", () => {
     expect(container.textContent).toContain("7 日活跃用户");
     expect(container.textContent).toContain("Thread.updated_at");
     expect(container.textContent).toContain("等待写入 Mem0");
+    expect(container.textContent).toContain("Tokens/s");
+    expect(container.textContent).toContain("62.5");
+    expect(container.textContent).toContain("80%");
+    expect(container.textContent).toContain("12,500");
+    expect(container.textContent).toContain("2,500");
+    const trajectoryLink = container.querySelector<HTMLAnchorElement>(".trajectory-viewer-link");
+    expect(trajectoryLink?.href).toBe("http://127.0.0.1:4188/");
+    expect(trajectoryLink?.target).toBe("_blank");
+    expect(container.querySelector("iframe")).toBeNull();
 
     act(() => navigationItem(container, "用户管理").click());
     await settle();

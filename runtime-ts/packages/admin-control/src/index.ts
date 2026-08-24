@@ -108,6 +108,13 @@ export interface RuntimeStatistics {
     readonly failedOccurrences24h: number;
   }>;
   readonly skills: Readonly<{ readonly published: number; readonly installed: number }>;
+  readonly modelUsage24h: Readonly<{
+    /** 未缓存输入与缓存读取之和。 */
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly outputTokensPerSecond: number | null;
+    readonly cacheHitRate: number | null;
+  }>;
 }
 
 export type PlatformUserStatus = "active" | "disabled";

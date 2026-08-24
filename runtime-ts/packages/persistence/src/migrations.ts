@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Pool, PoolClient } from "pg";
-import { PersistenceError, mapPersistenceError } from "./errors.js";
+import { mapPersistenceError, PersistenceError } from "./errors.js";
 import { withTransaction } from "./postgres.js";
 import {
   assertMigrationContextSafe,
@@ -18,6 +18,12 @@ interface Migration {
   readonly downSql: string;
   readonly checksum: string;
 }
+
+const historicalDownChecksums = Object.freeze({
+  adminControlPlane: "799aee36463d5520efd57b03de3619678387d92024ed6c85f46dae54f6d019f8",
+  adminUserOperations: "80a8293017276bedb2eda063e3ecd0c33a635d46810245a02d8a249cdee5ac7a",
+  modelUsageMetrics: "93d9244d34e54403e187867916f4a4ecc3b7f5ab856e17a2e1b26060fdbe1f54",
+});
 
 const legacyMemoryIngestionLineage = Object.freeze({
   legacy: Object.freeze({
@@ -107,6 +113,66 @@ export async function loadMigrations(
         return { version, name: pair.name, upSql, downSql, checksum };
       }),
   );
+}
+
+function replaceHistoricalDownFragment(
+  source: Migration,
+  pattern: RegExp,
+  replacement: string,
+): string {
+  const repaired = source.downSql.replace(pattern, replacement);
+  if (repaired === source.downSql) {
+    throw new PersistenceError(
+      "MIGRATION_MISMATCH",
+      `已发布迁移 ${source.version} 的回退兼容修复无法安全应用`,
+    );
+  }
+  return repaired;
+}
+
+/**
+ * 0050/0052/0053 的已发布 down SQL 存在 PostgreSQL 依赖顺序问题。迁移文件本身必须保持
+ * 不可变以匹配生产 checksum；仅在执行已知指纹的破坏性回退时修复语句顺序。
+ */
+export function executableDownSql(source: Migration): string {
+  if (
+    source.version === 50 &&
+    source.name === "admin_control_plane" &&
+    source.checksum === historicalDownChecksums.adminControlPlane
+  ) {
+    return replaceHistoricalDownFragment(
+      source,
+      /DROP VIEW admin_runtime_statistics;\r?\nDROP TABLE run_runtime_config_snapshots;/u,
+      "DROP VIEW admin_runtime_statistics;\n" +
+        "DROP POLICY runtime_control_revisions_read_policy ON admin_control_config_revisions;\n" +
+        "DROP TABLE run_runtime_config_snapshots;",
+    );
+  }
+  if (
+    source.version === 52 &&
+    source.name === "admin_user_operations" &&
+    source.checksum === historicalDownChecksums.adminUserOperations
+  ) {
+    return replaceHistoricalDownFragment(
+      source,
+      /DROP TABLE admin_user_account_audits;\r?\nALTER TABLE user_accounts DROP COLUMN status;\r?\n\r?\nDROP VIEW admin_runtime_statistics;/u,
+      "DROP TABLE admin_user_account_audits;\n" +
+        "DROP VIEW admin_runtime_statistics;\n" +
+        "ALTER TABLE user_accounts DROP COLUMN status;",
+    );
+  }
+  if (
+    source.version === 53 &&
+    source.name === "model_usage_metrics" &&
+    source.checksum === historicalDownChecksums.modelUsageMetrics
+  ) {
+    return replaceHistoricalDownFragment(
+      source,
+      /CREATE OR REPLACE VIEW admin_runtime_statistics/u,
+      "DROP VIEW admin_runtime_statistics;\nCREATE VIEW admin_runtime_statistics",
+    );
+  }
+  return source.downSql;
 }
 
 async function ensureMigrationTable(client: PoolClient): Promise<void> {
@@ -274,7 +340,7 @@ export async function migrateDown(
         // 某个 down migration 可能为冲刷自身约束临时切到 IMMEDIATE；下一项必须恢复
         // DEFERRABLE 约束的初始语义，避免一个迁移的会话状态污染后续回退脚本。
         await client.query("SET CONSTRAINTS ALL DEFERRED");
-        await client.query(source.downSql);
+        await client.query(executableDownSql(source));
         await client.query("DELETE FROM runtime_schema_migrations WHERE version = $1", [
           record.version,
         ]);

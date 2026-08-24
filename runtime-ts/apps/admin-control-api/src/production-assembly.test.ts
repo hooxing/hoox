@@ -7,6 +7,7 @@ const configuration: AdminControlApiProcessConfiguration = Object.freeze({
   databaseUrl: "postgresql://control:secret@localhost/control",
   skillPublisherDatabaseUrl: "postgresql://publisher:secret@localhost/control",
   databaseSchema: "agent_runtime",
+  betterAuthSecret: "test-better-auth-secret-at-least-thirty-two-bytes",
   listenHost: "127.0.0.1",
   listenPort: 3_003,
   shutdownTimeoutMilliseconds: 5_000,

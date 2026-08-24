@@ -2400,3 +2400,38 @@ td:first-child {
     flex-direction: column;
   }
 }
+
+.identity-configuration .panel-heading p {
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+}
+.identity-form .identity-switch {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.6rem;
+}
+.identity-form .identity-switch input {
+  width: auto;
+}
+.identity-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+.identity-provider-grid fieldset {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1rem;
+  display: grid;
+  gap: 0.8rem;
+}
+.identity-provider-grid legend {
+  padding: 0 0.4rem;
+  font-weight: 700;
+}
+@media (max-width: 760px) {
+  .identity-provider-grid {
+    grid-template-columns: 1fr;
+  }
+}

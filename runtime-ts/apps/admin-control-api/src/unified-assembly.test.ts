@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => {
     publisherConstructed: vi.fn(),
     publisherClose: vi.fn(),
     adminRepositoryConstructed: vi.fn(),
+    identityRepositoryConstructed: vi.fn(),
     authorizationConstructed: vi.fn(),
     publicationRepositoryConstructed: vi.fn(),
   };
@@ -32,6 +33,23 @@ vi.mock("@hoox/persistence", () => ({
   PgAdminControlRepository: class {
     constructor(pool: unknown) {
       mocks.adminRepositoryConstructed(pool);
+    }
+
+    resolveRole() {
+      return Promise.resolve("admin");
+    }
+  },
+  PgIdentityConfigurationRepository: class {
+    constructor(pool: unknown) {
+      mocks.identityRepositoryConstructed(pool);
+    }
+
+    read() {
+      return Promise.resolve(undefined);
+    }
+
+    save() {
+      return Promise.resolve("saved");
     }
   },
   PgSkillPublicationAuthorization: class {
@@ -68,6 +86,7 @@ function configuration(): AdminControlApiProcessConfiguration {
     databaseUrl: "postgresql://control:credential@127.0.0.1:5432/runtime",
     skillPublisherDatabaseUrl: "postgresql://publisher:credential@127.0.0.1:5432/runtime",
     databaseSchema: "runtime",
+    betterAuthSecret: "test-better-auth-secret-at-least-thirty-two-bytes",
     databaseAdminControlRole: "admin_control",
     databaseSkillPublisherRole: "skill_publisher",
     listenHost: "127.0.0.1",

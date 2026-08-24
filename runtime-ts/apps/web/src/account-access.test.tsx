@@ -114,6 +114,64 @@ describe("本地账号会话", () => {
   });
 });
 
+describe("内嵌身份登录方式", () => {
+  it("关闭邮箱注册时隐藏注册页签", async () => {
+    const api: AccountAccessApi = {
+      registerAccount: vi.fn(),
+      loginAccount: vi.fn(),
+      getIdentityConfiguration: vi.fn(async () => ({
+        emailPasswordEnabled: false,
+        registrationEnabled: true,
+        phoneEnabled: false,
+        providers: [
+          { key: "google" as const, enabled: false },
+          { key: "github" as const, enabled: false },
+          { key: "wechat" as const, enabled: false },
+          { key: "qq" as const, enabled: false },
+        ],
+      })),
+    };
+    const container = mount(<AccountAccess api={api} onAuthenticated={vi.fn()} />);
+    await vi.waitFor(() =>
+      expect(
+        Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]')).map(
+          (button) => button.textContent,
+        ),
+      ).toEqual(["登录"]),
+    );
+  });
+
+  it("只展示后台启用的手机号和第三方 Provider", async () => {
+    const api: AccountAccessApi = {
+      registerAccount: vi.fn(),
+      loginAccount: vi.fn(),
+      getIdentityConfiguration: vi.fn(async () => ({
+        emailPasswordEnabled: true,
+        registrationEnabled: false,
+        phoneEnabled: true,
+        providers: [
+          { key: "google" as const, enabled: true },
+          { key: "github" as const, enabled: false },
+          { key: "wechat" as const, enabled: true },
+          { key: "qq" as const, enabled: false },
+        ],
+      })),
+      sendPhoneOtp: vi.fn(async () => undefined),
+      verifyPhoneOtp: vi.fn(),
+      beginSocialSignIn: vi.fn(),
+    };
+    const container = mount(<AccountAccess api={api} onAuthenticated={vi.fn()} />);
+    await vi.waitFor(() => expect(container.textContent).toContain("手机号"));
+    expect(container.textContent).toContain("Google");
+    expect(container.textContent).toContain("微信");
+    expect(container.textContent).not.toContain("GitHub");
+    expect(container.textContent).not.toContain("QQ");
+    expect(
+      Array.from(container.querySelectorAll('[role="tab"]')).map((item) => item.textContent),
+    ).toEqual(["登录"]);
+  });
+});
+
 describe("侧栏用户设置菜单", () => {
   it("展示用户信息，并从弹出菜单进入团队管理或退出登录", () => {
     const openTeamCenter = vi.fn();

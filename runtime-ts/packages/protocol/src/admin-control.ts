@@ -398,3 +398,68 @@ export const PlatformUserPageSuccessEnvelopeSchema =
 export const PlatformUserSummarySuccessEnvelopeSchema = successEnvelopeSchema(
   PlatformUserSummaryDtoSchema,
 );
+
+const IdentityProviderKeyAdminSchema = Type.Union([
+  Type.Literal("google"),
+  Type.Literal("github"),
+  Type.Literal("wechat"),
+  Type.Literal("qq"),
+]);
+
+export const IdentityAdminConfigurationDtoSchema = Type.Object(
+  {
+    versionToken: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    emailPasswordEnabled: Type.Boolean(),
+    registrationEnabled: Type.Boolean(),
+    phoneEnabled: Type.Boolean(),
+    smsWebhookUrl: Type.Optional(ProviderUrlSchema),
+    smsWebhookSecretConfigured: Type.Boolean(),
+    providers: Type.Array(
+      Type.Object(
+        {
+          key: IdentityProviderKeyAdminSchema,
+          enabled: Type.Boolean(),
+          clientId: Type.String({ maxLength: 512 }),
+          secretConfigured: Type.Boolean(),
+        },
+        strict,
+      ),
+      { minItems: 4, maxItems: 4 },
+    ),
+    updatedAt: Type.Optional(IsoTimestampSchema),
+    updatedBy: Type.Optional(IdSchema),
+  },
+  strict,
+);
+export type IdentityAdminConfigurationDto = Static<typeof IdentityAdminConfigurationDtoSchema>;
+
+export const UpdateIdentityAdminConfigurationRequestSchema = Type.Object(
+  {
+    expectedVersionToken: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+    emailPasswordEnabled: Type.Boolean(),
+    registrationEnabled: Type.Boolean(),
+    phoneEnabled: Type.Boolean(),
+    smsWebhookUrl: Type.Optional(ProviderUrlSchema),
+    smsWebhookSecret: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
+    providers: Type.Array(
+      Type.Object(
+        {
+          key: IdentityProviderKeyAdminSchema,
+          enabled: Type.Boolean(),
+          clientId: Type.String({ maxLength: 512 }),
+          clientSecret: Type.Optional(Type.String({ minLength: 1, maxLength: 4096 })),
+        },
+        strict,
+      ),
+      { minItems: 4, maxItems: 4 },
+    ),
+    reason: ChangeReasonSchema,
+  },
+  strict,
+);
+export type UpdateIdentityAdminConfigurationRequest = Static<
+  typeof UpdateIdentityAdminConfigurationRequestSchema
+>;
+export const IdentityAdminConfigurationSuccessEnvelopeSchema = successEnvelopeSchema(
+  IdentityAdminConfigurationDtoSchema,
+);

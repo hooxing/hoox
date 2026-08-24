@@ -1,6 +1,7 @@
 import type {
   AdminControlOverviewDto,
   ControlAuditEventDto,
+  IdentityAdminConfigurationDto,
   MemoryProviderRevisionDto,
   ModelProviderModelConfigurationDto,
   ModelProviderRevisionDto,
@@ -12,6 +13,7 @@ import type {
 import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { AdminApiError } from "./api.js";
 import { AdminControlApi, type AdminControlApiContract } from "./control-api.js";
+import { IdentityConfigurationPanel } from "./identity-configuration-panel.js";
 import { listLocalPiModelCatalogProviders } from "./pi-model-catalog.js";
 import {
   ControlDataUnavailable,
@@ -19,7 +21,14 @@ import {
   UserManagementWorkspace,
 } from "./operations-console.js";
 
-export type ControlView = "overview" | "analytics" | "users" | "models" | "memory" | "settings";
+export type ControlView =
+  | "overview"
+  | "analytics"
+  | "users"
+  | "identity"
+  | "models"
+  | "memory"
+  | "settings";
 const defaultControlApi = new AdminControlApi();
 
 function number(form: FormData, key: string): number {
@@ -1420,6 +1429,7 @@ export function AdminControlConsole({
     listLocalPiModelCatalogProviders,
   );
   const [users, setUsers] = useState<PlatformUserPageDto>();
+  const [identity, setIdentity] = useState<IdentityAdminConfigurationDto>();
   const [userQuery, setUserQuery] = useState("");
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
@@ -1429,9 +1439,9 @@ export function AdminControlConsole({
     const sequence = refreshSequence.current + 1;
     refreshSequence.current = sequence;
     try {
-      const [nextOverview, nextItems, nextAudits, nextCatalogProviders, nextUsers] =
+      const [nextOverview, nextItems, nextAudits, nextCatalogProviders, nextUsers, nextIdentity] =
         await Promise.all([
-          api.overview(),
+          view === "identity" ? Promise.resolve(undefined) : api.overview(),
           view === "models"
             ? api.listModelProviders()
             : view === "memory"
@@ -1444,14 +1454,16 @@ export function AdminControlConsole({
           view === "users"
             ? api.listUsers({ ...(userQuery.length === 0 ? {} : { query: userQuery }), limit: 100 })
             : Promise.resolve(undefined),
+          view === "identity" ? api.getIdentityConfiguration() : Promise.resolve(undefined),
         ]);
       // 模块切换时旧请求可能晚于新请求返回；过期响应不能覆盖当前模块的数据。
       if (sequence !== refreshSequence.current) return;
-      setOverview(nextOverview);
+      if (nextOverview !== undefined) setOverview(nextOverview);
       setItems(nextItems);
       setAudits(nextAudits);
       if (view === "models") setCatalogProviders(nextCatalogProviders);
       if (view === "users") setUsers(nextUsers);
+      if (view === "identity") setIdentity(nextIdentity);
       setError(undefined);
     } catch (reason) {
       if (sequence !== refreshSequence.current) return;
@@ -1496,11 +1508,13 @@ export function AdminControlConsole({
                 ? "数据运营"
                 : view === "users"
                   ? "用户管理"
-                  : view === "models"
-                    ? "模型"
-                    : view === "memory"
-                      ? "记忆供应商"
-                      : "运行参数"}
+                  : view === "identity"
+                    ? "登录与注册"
+                    : view === "models"
+                      ? "模型"
+                      : view === "memory"
+                        ? "记忆供应商"
+                        : "运行参数"}
           </h1>
         </div>
         <button
@@ -1557,6 +1571,12 @@ export function AdminControlConsole({
           onStatusChange={(userId, status, reason) =>
             operation(() => api.updateUserStatus(userId, { status, reason }))
           }
+        />
+      ) : view === "identity" ? (
+        <IdentityConfigurationPanel
+          {...(identity === undefined ? {} : { value: identity })}
+          busy={busy}
+          onSave={(input) => operation(() => api.updateIdentityConfiguration(input))}
         />
       ) : (
         <>

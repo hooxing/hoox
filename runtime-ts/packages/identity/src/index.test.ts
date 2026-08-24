@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { getSchema } from "better-auth/db";
+import { describe, expect, it, vi } from "vitest";
 import {
+  createEmbeddedBetterAuthOptions,
   decryptIdentitySecrets,
   emptyIdentityConfiguration,
   encryptIdentitySecrets,
@@ -101,5 +103,101 @@ describe("身份配置", () => {
         { providerSecrets: {} },
       ).configuration.smsWebhookUrl,
     ).toBe("https://sms.example.invalid/send");
+  });
+
+  it("关闭注册时禁止邮箱、OAuth 和手机号隐式创建用户", async () => {
+    const database = {
+      query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
+    };
+    const configuration = normalizeEditableIdentityConfiguration(
+      {
+        expectedVersionToken: 0,
+        emailPasswordEnabled: true,
+        registrationEnabled: false,
+        phoneEnabled: true,
+        smsWebhookUrl: "https://sms.example.invalid/send",
+        providers: {
+          google: { enabled: true, clientId: "google-client" },
+          github: { enabled: false, clientId: "" },
+          wechat: { enabled: false, clientId: "" },
+          qq: { enabled: true, clientId: "qq-client" },
+        },
+      },
+      { providerSecrets: { google: "google-secret", qq: "qq-secret" } },
+    ).configuration;
+    const options = createEmbeddedBetterAuthOptions({
+      database: database as never,
+      baseURL: "http://127.0.0.1:3001",
+      secret,
+      configuration,
+      secrets: { providerSecrets: { google: "google-secret", qq: "qq-secret" } },
+    });
+    expect(options.emailAndPassword?.disableSignUp).toBe(true);
+    expect(options.socialProviders?.google).toMatchObject({ disableImplicitSignUp: true });
+    const plugins = options.plugins as unknown as readonly {
+      readonly id: string;
+      readonly options?: {
+        readonly config?: readonly { readonly disableImplicitSignUp?: boolean }[];
+        readonly signUpOnVerification?: unknown;
+        readonly sendOTP?: (input: {
+          readonly phoneNumber: string;
+          readonly code: string;
+        }) => Promise<void>;
+      };
+    }[];
+    expect(
+      plugins.find((plugin) => plugin.id === "generic-oauth")?.options?.config?.[0],
+    ).toMatchObject({ disableImplicitSignUp: true });
+    const phone = plugins.find((plugin) => plugin.id === "phone-number");
+    expect(phone?.options?.signUpOnVerification).toBeUndefined();
+    await expect(
+      phone?.options?.sendOTP?.({ phoneNumber: "+8613800138000", code: "123456" }),
+    ).rejects.toThrow("PHONE_REGISTRATION_DISABLED");
+    expect(database.query).toHaveBeenCalledWith(
+      "SELECT 1 FROM better_auth_users WHERE phone_number=$1 LIMIT 1",
+      ["+8613800138000"],
+    );
+  });
+
+  it("生成与固定 PostgreSQL 迁移一致的 Better Auth 表和字段", () => {
+    const configuration = normalizeEditableIdentityConfiguration(
+      {
+        expectedVersionToken: 0,
+        emailPasswordEnabled: true,
+        registrationEnabled: true,
+        phoneEnabled: true,
+        smsWebhookUrl: "https://sms.example.invalid/send",
+        providers: {
+          google: { enabled: false, clientId: "" },
+          github: { enabled: false, clientId: "" },
+          wechat: { enabled: false, clientId: "" },
+          qq: { enabled: false, clientId: "" },
+        },
+      },
+      { providerSecrets: {} },
+    ).configuration;
+    const schema = getSchema(
+      createEmbeddedBetterAuthOptions({
+        database: {} as never,
+        baseURL: "http://127.0.0.1:3001",
+        secret,
+        configuration,
+        secrets: { providerSecrets: {} },
+      }),
+    );
+    expect(Object.keys(schema)).toEqual([
+      "better_auth_users",
+      "better_auth_sessions",
+      "better_auth_accounts",
+      "better_auth_verifications",
+      "better_auth_rate_limits",
+    ]);
+    expect(Object.keys(schema.better_auth_users?.fields ?? {})).toContain("phone_number");
+    expect(Object.keys(schema.better_auth_accounts?.fields ?? {})).toContain("scope");
+    expect(Object.keys(schema.better_auth_rate_limits?.fields ?? {})).toEqual([
+      "key",
+      "count",
+      "last_request",
+    ]);
   });
 });

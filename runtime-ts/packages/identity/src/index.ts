@@ -307,7 +307,7 @@ async function sendSmsWebhook(input: {
   if (!response.ok) throw new Error("SMS_WEBHOOK_FAILED");
 }
 
-export function createEmbeddedBetterAuth(input: {
+export function createEmbeddedBetterAuthOptions(input: {
   readonly database: Pool;
   readonly baseURL: string;
   readonly secret: string;
@@ -325,12 +325,14 @@ export function createEmbeddedBetterAuth(input: {
     socialProviders.google = {
       clientId: configuration.providers.google.clientId,
       clientSecret: googleSecret,
+      disableImplicitSignUp: !configuration.registrationEnabled,
     };
   }
   if (githubSecret !== undefined) {
     socialProviders.github = {
       clientId: configuration.providers.github.clientId,
       clientSecret: githubSecret,
+      disableImplicitSignUp: !configuration.registrationEnabled,
     };
   }
   if (wechatSecret !== undefined) {
@@ -339,6 +341,7 @@ export function createEmbeddedBetterAuth(input: {
       clientSecret: wechatSecret,
       platformType: "WebsiteApp",
       lang: "cn",
+      disableImplicitSignUp: !configuration.registrationEnabled,
     };
   }
   const plugins: BetterAuthPlugin[] = [];
@@ -356,6 +359,7 @@ export function createEmbeddedBetterAuth(input: {
             tokenUrl: "https://graph.qq.com/oauth2.0/token",
             scopes: ["get_user_info"],
             pkce: false,
+            disableImplicitSignUp: !configuration.registrationEnabled,
             getToken: ({ code, redirectURI }) =>
               qqToken({ clientId, clientSecret: qqSecret, code, redirectURI }),
             getUserInfo: (tokens) => qqUserInfo(clientId, tokens),
@@ -378,22 +382,42 @@ export function createEmbeddedBetterAuth(input: {
       phoneNumber({
         requireVerification: true,
         phoneNumberValidator: (value) => phonePattern.test(value),
-        sendOTP: ({ phoneNumber: number, code }) =>
-          sendSmsWebhook({
+        sendOTP: async ({ phoneNumber: number, code }) => {
+          if (!configuration.registrationEnabled) {
+            const existing = await input.database.query(
+              "SELECT 1 FROM better_auth_users WHERE phone_number=$1 LIMIT 1",
+              [number],
+            );
+            if (existing.rowCount !== 1) throw new Error("PHONE_REGISTRATION_DISABLED");
+          }
+          await sendSmsWebhook({
             url: configuration.smsWebhookUrl as string,
             ...(secrets.smsWebhookSecret === undefined ? {} : { secret: secrets.smsWebhookSecret }),
             phoneNumber: number,
             code,
-          }),
-        signUpOnVerification: {
-          getTempEmail: (number) =>
-            `${createHash("sha256").update(number).digest("hex")}@phone.invalid`,
-          getTempName: (number) => `手机用户 ${number.slice(-4)}`,
+          });
+        },
+        ...(configuration.registrationEnabled
+          ? {
+              signUpOnVerification: {
+                getTempEmail: (number: string) =>
+                  `${createHash("sha256").update(number).digest("hex")}@phone.invalid`,
+                getTempName: (number: string) => `手机用户 ${number.slice(-4)}`,
+              },
+            }
+          : {}),
+        schema: {
+          user: {
+            fields: {
+              phoneNumber: "phone_number",
+              phoneNumberVerified: "phone_number_verified",
+            },
+          },
         },
       }),
     );
   }
-  return betterAuth({
+  return {
     appName: "Hoox",
     baseURL: input.baseURL,
     basePath: "/api/auth",
@@ -448,9 +472,25 @@ export function createEmbeddedBetterAuth(input: {
       storeIdentifier: "hashed",
       fields: { expiresAt: "expires_at", createdAt: "created_at", updatedAt: "updated_at" },
     },
-    advanced: { database: { generateId: "uuid" } },
-    rateLimit: { enabled: true, storage: "database", window: 60, max: 100 },
-  });
+    advanced: {
+      database: { generateId: "uuid" },
+      ipAddress: { ipAddressHeaders: ["x-hoox-client-ip"] },
+    },
+    rateLimit: {
+      enabled: true,
+      storage: "database",
+      window: 60,
+      max: 100,
+      modelName: "better_auth_rate_limits",
+      fields: { lastRequest: "last_request" },
+    },
+  } satisfies BetterAuthOptions;
+}
+
+export function createEmbeddedBetterAuth(
+  input: Parameters<typeof createEmbeddedBetterAuthOptions>[0],
+) {
+  return betterAuth(createEmbeddedBetterAuthOptions(input));
 }
 
 export type EmbeddedBetterAuth = ReturnType<typeof createEmbeddedBetterAuth>;

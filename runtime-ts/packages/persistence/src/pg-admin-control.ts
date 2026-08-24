@@ -648,6 +648,13 @@ export class PgAdminControlRepository
               await client.query("DELETE FROM user_sessions WHERE user_id=$1", [
                 input.targetUserId,
               ]);
+              await client.query(
+                `DELETE FROM better_auth_sessions
+                  WHERE user_id=(
+                    SELECT better_auth_user_id FROM user_accounts WHERE user_id=$1
+                  )`,
+                [input.targetUserId],
+              );
             }
             await client.query(
               `INSERT INTO admin_user_account_audits(

@@ -68,7 +68,7 @@ describe("后台控制面迁移", () => {
       `GRANT UPDATE(status,updated_at) ON TABLE ${schemaPlaceholder}.user_accounts TO ${controlPlaceholder}`,
     );
     expect(roleBootstrap).toContain(
-      `GRANT SELECT(user_id) ON TABLE ${schemaPlaceholder}.user_accounts,${schemaPlaceholder}.user_sessions TO ${controlPlaceholder}`,
+      `GRANT SELECT(user_id) ON TABLE ${schemaPlaceholder}.user_sessions TO ${controlPlaceholder}`,
     );
     expect(roleBootstrap).not.toContain(
       `GRANT SELECT ON TABLE ${schemaPlaceholder}.user_accounts TO ${controlPlaceholder}`,

@@ -6,6 +6,7 @@
 | --- | --- | --- |
 | [架构总览](overview.md) | 第一次理解 Hoox 或评估跨模块改动时 | 系统上下文、领域关系、运行链路和可靠性原则是什么 |
 | [仓库导览](repository-map.md) | 准备修改代码或新增模块时 | 应修改哪个应用或共享包，依赖边界是什么 |
+| [身份、账号与会话](identity-and-session.md) | 接入登录方式、维护账号映射或排查会话时 | Better Auth、Hoox 账号、Cookie、业务 Session 和后台配置如何分工 |
 | [Thread 连续上下文](thread-continuity.md) | 修改 Thread、Run、输入、Compaction、恢复或 Sandbox 生命周期时 | 连续上下文由谁持久化，何时压缩、恢复和释放 |
 | [Agent 协作与 Todo](agent-collaboration.md) | 修改子 Agent、协作控制面或任务计划展示时 | Agent 能调用哪些协作工具，隔离、并发、持久化和 Todo 约束是什么 |
 | [Sandbox Provider](sandbox-providers.md) | 配置、扩展或排查 CubeSandbox/E2B 时 | Provider 如何选择、路由和标识，ResourceFS 与失败边界是什么 |

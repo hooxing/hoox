@@ -51,6 +51,20 @@ const overview = {
 function fixture(): AdminControlApiContract {
   return {
     overview: vi.fn(async () => overview),
+    getIdentityConfiguration: vi.fn(async () => ({
+      versionToken: 0,
+      emailPasswordEnabled: true,
+      registrationEnabled: true,
+      phoneEnabled: false,
+      smsWebhookSecretConfigured: false,
+      providers: [
+        { key: "google" as const, enabled: false, clientId: "", secretConfigured: false },
+        { key: "github" as const, enabled: false, clientId: "", secretConfigured: false },
+        { key: "wechat" as const, enabled: false, clientId: "", secretConfigured: false },
+        { key: "qq" as const, enabled: false, clientId: "", secretConfigured: false },
+      ],
+    })),
+    updateIdentityConfiguration: vi.fn(),
     listModelProviders: vi.fn(async () => []),
     listPiModelCatalogProviders: vi.fn(async () => [
       {
@@ -140,6 +154,7 @@ describe("统一平台管理导航", () => {
       "驾驶舱",
       "数据运营",
       "用户",
+      "登录与注册",
       "模型",
       "记忆",
       "Skills",

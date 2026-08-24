@@ -74,6 +74,38 @@ describe("RuntimeApi", () => {
     ).toBe("Bearer hoox_session_new");
   });
 
+  it("邮箱身份先调用 Better Auth，再交换为 Hoox 会话", async () => {
+    const session = {
+      profile: { id: "user_identity", displayName: "身份用户", email: "identity@example.com" },
+      accessToken: "hoox_session_identity-token-with-more-than-thirty-two-characters",
+      expiresAt: "2099-12-31T23:59:59.000Z",
+    };
+    const fetcher = vi.fn<typeof fetch>().mockImplementation((input) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/sign-in/email")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ user: { id: "better-user" } }), { status: 200 }),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ version: "v1", requestId: "req_identity", data: session }), {
+          status: 200,
+        }),
+      );
+    });
+    const api = new RuntimeApi(fetcher, "/api");
+    await expect(
+      api.signInWithEmail({ email: "identity@example.com", password: "secret12" }),
+    ).resolves.toEqual(session);
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/api/auth/sign-in/email",
+      "/api/v1/auth/exchange",
+    ]);
+    const firstRequest = fetcher.mock.calls[0]?.[1];
+    expect(firstRequest).toBeDefined();
+    expect((firstRequest as RequestInit).credentials).toBe("same-origin");
+  });
+
   it("可并行读取个人与团队任务列表且不改变当前活动租户", async () => {
     const fetcher = vi.fn().mockImplementation(() =>
       Promise.resolve(

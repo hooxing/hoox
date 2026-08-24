@@ -258,6 +258,7 @@ export function canonicalizeProductionPlatformComponents(components) {
 
 function externalComponents(packageNames) {
   const components = [];
+  const localPackageNames = new Set(workspaceManifests().keys());
   for (const packageName of packageNames) {
     const licenseGroups = runPnpmLicenses(packageName);
     for (const [licenseGroup, entries] of Object.entries(licenseGroups)) {
@@ -266,6 +267,9 @@ function externalComponents(packageNames) {
         if (typeof entry.name !== "string" || !Array.isArray(entry.versions)) {
           throw new Error("PRODUCTION_SBOM_LICENSE_CLOSURE_INVALID");
         }
+        // pnpm 的注入式 workspace 依赖会以 file: 包出现在许可证闭包中；本地组件已由
+        // workspaceClosure 生成并携带 vendor 证据，这里只保留 registry 组件。
+        if (localPackageNames.has(entry.name)) continue;
         const license = typeof entry.license === "string" ? entry.license : licenseGroup;
         for (const version of entry.versions) {
           if (typeof version !== "string") {

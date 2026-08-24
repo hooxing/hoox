@@ -39,6 +39,12 @@ describe("生产供应链契约", () => {
         readFileSync(new URL(`../supply-chain/sbom/${target.fileName}`, import.meta.url), "utf8"),
       );
       expect(bom).toMatchObject({ bomFormat: "CycloneDX", specVersion: "1.6", version: 1 });
+      const componentNames = bom.components.map(
+        (component: { readonly name: string }) => component.name,
+      );
+      expect(componentNames).not.toEqual(
+        expect.arrayContaining(["react", "react-dom", "vite", "vitest", "lightningcss"]),
+      );
       const vendor = bom.components.find(
         (component: { readonly name: string }) => component.name === "@cubesandbox/sdk",
       );

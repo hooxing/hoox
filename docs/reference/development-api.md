@@ -7,9 +7,10 @@
 - development API 只允许监听字面回环地址 `127.0.0.1`、`::1` 或 `localhost`。
 - Web 开发服务器通过同源代理访问 API，不启用宽松 CORS。
 - `Authorization: Bearer dev-user-a|dev-user-b` 只用于固定隔离测试 fixture。
-- `/v1/auth/register` 和 `/v1/auth/login` 提供 development 本地账号会话，并为新账号原子创建 User、个人 Tenant 和 owner Membership。
+- `/api/auth/*` 承载内嵌 Better Auth 的邮箱、OAuth 和手机号协议；`/v1/auth/config` 返回公开启用状态，`/v1/auth/exchange` 把 Better Auth Cookie Session 交换为 Hoox 会话。
+- `/v1/auth/register` 和 `/v1/auth/login` 只在 development 显式保留，用于本地账号兼容和测试。
 - 服务端始终从已认证 User 和 PostgreSQL Membership 重建 `TenantScope`。`X-Tenant-ID` 只选择个人或团队空间，不能替代 Membership 授权。
-- development 身份和本地账号端点不会装配到 production API。
+- 固定 development 身份和旧本地注册登录端点不会装配到 production API；production 使用内嵌 Better Auth，并保留 JWT 解析作为非浏览器调用方的兼容后备。
 
 ## 主题路由
 
@@ -24,6 +25,7 @@
 | `/v1/me/history-files`、`/v1/me/team-files/import` | 浏览当前 Tenant 云盘、下载固定版本和跨空间导入 | [历史文件与 ResourceFS](history-files.md) |
 | `/v1/me/personalization`、`/v1/teams/:teamId/personalization` | 读取和更新个人或团队偏好 | [团队协作](../architecture/team-collaboration.md) |
 | `/v1/automations` | 管理 Thread 定时任务 | `@hoox/automation`、Protocol Schema 和 API 测试 |
+| `/api/auth/*`、`/v1/auth/config`、`/v1/auth/exchange` | 注册登录、OAuth/手机号流程和 Hoox 会话交换 | [身份、账号与会话](../architecture/identity-and-session.md) |
 | `/v1/resources/uploads` | 通过受控上传协议创建 ResourceVersion | [架构总览](../architecture/overview.md) |
 
 路径中的 `/me` 表示以当前认证用户发起操作，不必然表示数据属于全局个人空间；最终作用域仍由该路由的 `TenantScope` 和业务校验决定。

@@ -144,7 +144,7 @@ Hoox 的代码、维护者说明和 Git 提交使用中文；公共标识符、�
 
 ## 安全与生产使用
 
-开发身份、回环监听和本地账号只用于 development，不能替代生产身份系统。生产部署必须使用按服务分片的秘密、最小权限数据库角色、独立对象存储 origin、真实外部依赖 readiness 和可验证回滚记录。
+固定开发身份、回环监听和旧本地账号端点只用于 development。production 使用 API 内嵌 Better Auth，并由 Hoox Session、Membership 与 PostgreSQL RLS 完成业务授权；部署仍必须使用按服务分片的秘密、最小权限数据库角色、独立对象存储 origin、真实外部依赖 readiness 和可验证回滚记录。
 
 静态 Gate 能证明仓库和镜像满足既定契约，但不能替代真实基础设施验收。详见[生产就绪说明](docs/operations/production-readiness.md)。
 

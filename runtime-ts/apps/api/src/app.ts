@@ -56,6 +56,7 @@ import {
   type ErrorEnvelope,
   ErrorEnvelopeSchema,
   HealthSuccessEnvelopeSchema,
+  IdentityAuthConfigurationSuccessEnvelopeSchema,
   type HistoryFileDownloadPath,
   HistoryFileDownloadPathSchema,
   HistoryFileDownloadSuccessEnvelopeSchema,
@@ -175,12 +176,15 @@ import {
   ResourceFilesystemHttpError,
   registerResourceFilesystemHttp,
 } from "./resource-filesystem-http.js";
+import type { EmbeddedIdentityAuthService } from "./embedded-identity-auth.js";
 import type { LocalAccountAuthService } from "./local-account-auth.js";
 import { ApiFailure, type ApiFailureKind, ApiService } from "./service.js";
 
 export interface ApiDependencies {
   readonly auth: AuthContextResolver;
   readonly localAccounts?: LocalAccountAuthService;
+  readonly localAccountPasswordRoutes?: boolean;
+  readonly embeddedIdentity?: EmbeddedIdentityAuthService;
   readonly repositories: CoreRepositories;
   readonly createCapability?: ApiCreateCapability;
   readonly archiveThread: ArchiveThreadCommandPort;
@@ -711,6 +715,68 @@ export function createApiApp(
       },
     );
   }
+  if (normalizedDependencies.embeddedIdentity !== undefined) {
+    const identity = normalizedDependencies.embeddedIdentity;
+    app.all("/api/auth/*", async (request, reply) => {
+      const headers = new Headers();
+      for (let index = 0; index + 1 < request.raw.rawHeaders.length; index += 2) {
+        const name = request.raw.rawHeaders[index];
+        const value = request.raw.rawHeaders[index + 1];
+        if (name !== undefined && value !== undefined) headers.append(name, value);
+      }
+      headers.set("x-hoox-client-ip", request.ip);
+      const response = await identity.handle({
+        method: request.method,
+        path: request.raw.url ?? request.url,
+        headers,
+        ...(request.body === undefined
+          ? {}
+          : {
+              body: typeof request.body === "string" ? request.body : JSON.stringify(request.body),
+            }),
+      });
+      const setCookies = response.headers.getSetCookie();
+      for (const [name, value] of response.headers.entries()) {
+        if (name.toLowerCase() !== "set-cookie") void reply.header(name, value);
+      }
+      if (setCookies.length > 0) void reply.header("set-cookie", setCookies);
+      const payload = Buffer.from(await response.arrayBuffer());
+      return reply.status(response.status).send(payload.length === 0 ? null : payload);
+    });
+    app.get(
+      "/v1/auth/config",
+      { schema: { response: { 200: IdentityAuthConfigurationSuccessEnvelopeSchema } } },
+      async (request) => {
+        const configuration = await identity.publicConfiguration();
+        return success(request, {
+          emailPasswordEnabled: configuration.emailPasswordEnabled,
+          registrationEnabled: configuration.registrationEnabled,
+          phoneEnabled: configuration.phoneEnabled,
+          providers: ["google", "github", "wechat", "qq"].map((key) => ({
+            key,
+            enabled: configuration.providers[key as keyof typeof configuration.providers].enabled,
+          })),
+        });
+      },
+    );
+    app.post(
+      "/v1/auth/exchange",
+      {
+        schema: {
+          response: { 200: AccountSessionSuccessEnvelopeSchema, 401: ErrorEnvelopeSchema },
+        },
+      },
+      async (request) => {
+        const headers = new Headers();
+        for (let index = 0; index + 1 < request.raw.rawHeaders.length; index += 2) {
+          const name = request.raw.rawHeaders[index];
+          const value = request.raw.rawHeaders[index + 1];
+          if (name !== undefined && value !== undefined) headers.append(name, value);
+        }
+        return success(request, await identity.exchange(headers));
+      },
+    );
+  }
   if (normalizedDependencies.localAccounts !== undefined) {
     const localAccounts = normalizedDependencies.localAccounts;
     const accountSessionResponses = {
@@ -723,23 +789,28 @@ export function createApiApp(
       503: ErrorEnvelopeSchema,
     } as const;
 
-    app.post<{ Body: RegisterAccountRequest }>(
-      "/v1/auth/register",
-      {
-        preValidation: async (request) => requireJsonContentType(request),
-        schema: { body: RegisterAccountRequestSchema, response: accountSessionResponses },
-      },
-      async (request) => success(request, await localAccounts.register(request.body)),
-    );
+    if (
+      normalizedDependencies.localAccountPasswordRoutes ??
+      normalizedDependencies.embeddedIdentity === undefined
+    ) {
+      app.post<{ Body: RegisterAccountRequest }>(
+        "/v1/auth/register",
+        {
+          preValidation: async (request) => requireJsonContentType(request),
+          schema: { body: RegisterAccountRequestSchema, response: accountSessionResponses },
+        },
+        async (request) => success(request, await localAccounts.register(request.body)),
+      );
 
-    app.post<{ Body: LoginAccountRequest }>(
-      "/v1/auth/login",
-      {
-        preValidation: async (request) => requireJsonContentType(request),
-        schema: { body: LoginAccountRequestSchema, response: accountSessionResponses },
-      },
-      async (request) => success(request, await localAccounts.login(request.body)),
-    );
+      app.post<{ Body: LoginAccountRequest }>(
+        "/v1/auth/login",
+        {
+          preValidation: async (request) => requireJsonContentType(request),
+          schema: { body: LoginAccountRequestSchema, response: accountSessionResponses },
+        },
+        async (request) => success(request, await localAccounts.login(request.body)),
+      );
+    }
 
     app.get(
       "/v1/auth/me",

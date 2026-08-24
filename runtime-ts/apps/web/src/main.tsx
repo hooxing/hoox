@@ -35,6 +35,7 @@ import {
   type AccountProfile,
   type AccountSession,
   clearAccountSession,
+  persistAccountSession,
   readAccountSession,
 } from "./account-access.js";
 import { type AutomationCenterApi, AutomationCenterDialog } from "./automation-center.js";
@@ -161,7 +162,20 @@ type TeamAwareWorkspaceApi = WorkspaceApi &
       >
   > &
   Partial<
-    Pick<RuntimeApi, "loginAccount" | "logoutAccount" | "registerAccount" | "setAccessToken">
+    Pick<
+      RuntimeApi,
+      | "beginSocialSignIn"
+      | "exchangeIdentitySession"
+      | "getIdentityConfiguration"
+      | "loginAccount"
+      | "logoutAccount"
+      | "registerAccount"
+      | "sendPhoneOtp"
+      | "setAccessToken"
+      | "signInWithEmail"
+      | "signUpWithEmail"
+      | "verifyPhoneOtp"
+    >
   >;
 
 function resolveSkillCenterApi(client: WorkspaceApi): SkillCenterApi | undefined {
@@ -1516,14 +1530,65 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
   const [accountSession, setAccountSession] = useState<AccountSession | undefined>(() =>
     readAccountSession(window.localStorage),
   );
+  const [identityRecoveryPending, setIdentityRecoveryPending] = useState(
+    accountSession === undefined && apiClient.exchangeIdentitySession !== undefined,
+  );
+  useEffect(() => {
+    if (accountSession !== undefined || apiClient.exchangeIdentitySession === undefined) {
+      setIdentityRecoveryPending(false);
+      return;
+    }
+    let active = true;
+    void apiClient
+      .exchangeIdentitySession()
+      .then((session) => {
+        if (active) {
+          persistAccountSession(window.localStorage, session);
+          setAccountSession(session);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setIdentityRecoveryPending(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [accountSession, apiClient]);
   useLayoutEffect(() => {
     apiClient.setAccessToken?.(accountSession?.accessToken);
   }, [accountSession?.accessToken, apiClient]);
+
+  if (accountSession === undefined && identityRecoveryPending) {
+    return (
+      <main className="account-access-shell">
+        <p className="empty-state large">正在恢复登录状态…</p>
+      </main>
+    );
+  }
 
   if (accountSession === undefined) {
     return (
       <AccountAccess
         api={{
+          ...(apiClient.getIdentityConfiguration === undefined
+            ? {}
+            : { getIdentityConfiguration: apiClient.getIdentityConfiguration.bind(apiClient) }),
+          ...(apiClient.signUpWithEmail === undefined
+            ? {}
+            : { signUpWithEmail: apiClient.signUpWithEmail.bind(apiClient) }),
+          ...(apiClient.signInWithEmail === undefined
+            ? {}
+            : { signInWithEmail: apiClient.signInWithEmail.bind(apiClient) }),
+          ...(apiClient.beginSocialSignIn === undefined
+            ? {}
+            : { beginSocialSignIn: apiClient.beginSocialSignIn.bind(apiClient) }),
+          ...(apiClient.sendPhoneOtp === undefined
+            ? {}
+            : { sendPhoneOtp: apiClient.sendPhoneOtp.bind(apiClient) }),
+          ...(apiClient.verifyPhoneOtp === undefined
+            ? {}
+            : { verifyPhoneOtp: apiClient.verifyPhoneOtp.bind(apiClient) }),
           registerAccount: (input) => {
             if (apiClient.registerAccount === undefined) {
               return Promise.reject(new Error("ACCOUNT_API_UNAVAILABLE"));

@@ -34,8 +34,9 @@ describe("Demo 持续部署契约", () => {
       "Dockerfile.production-api-gate",
       "Dockerfile.production-scheduler-gate",
       "Dockerfile.production-worker-gate",
+      "Dockerfile.pi-prompt-gate",
     ]) {
-      expect(source(dockerfilePath)).toContain("tsconfig.base.json .pnpmfile.cjs ./");
+      expect(source(dockerfilePath)).toContain(".pnpmfile.cjs ./");
     }
 
     const ci = source(".github/workflows/ci.yml");

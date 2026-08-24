@@ -21,7 +21,7 @@ if [[ ! -f "$compose_file" || ! -f "$release_dir/postgres-init.sh" ]]; then
   echo "Demo 发布包不完整" >&2
   exit 2
 fi
-for file in infra.env migration.env api.env scheduler.env worker.env demo-account.env; do
+for file in infra.env migration.env api.env admin-control.env scheduler.env worker.env demo-account.env; do
   if [[ ! -f "$shared_dir/$file" ]]; then
     echo "Demo 服务器缺少共享配置：$file" >&2
     exit 2
@@ -37,6 +37,7 @@ fi
 write_compose_env() {
   local target_image="$1"
   local tenant_id="${2:-}"
+  local admin_user_id="${3:-}"
   local temporary="$compose_env.tmp"
   umask 077
   {
@@ -46,15 +47,20 @@ write_compose_env() {
     if [[ -n "$tenant_id" ]]; then
       printf 'DEMO_TENANT_ID=%s\n' "$tenant_id"
     fi
+    if [[ -n "$admin_user_id" ]]; then
+      printf 'DEMO_ADMIN_USER_ID=%s\n' "$admin_user_id"
+    fi
   } >"$temporary"
   mv -f "$temporary" "$compose_env"
 }
 
 existing_tenant=""
+existing_admin_user=""
 if [[ -f "$compose_env" ]]; then
   existing_tenant="$(sed -n 's/^DEMO_TENANT_ID=//p' "$compose_env" | tail -n 1)"
+  existing_admin_user="$(sed -n 's/^DEMO_ADMIN_USER_ID=//p' "$compose_env" | tail -n 1)"
 fi
-write_compose_env "$image" "$existing_tenant"
+write_compose_env "$image" "$existing_tenant" "$existing_admin_user"
 
 compose() {
   docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" "$@"
@@ -63,8 +69,13 @@ compose() {
 wait_http() {
   local url="$1"
   local attempts="${2:-60}"
+  local netrc_file="${3:-}"
+  local curl_options=(--fail --silent --show-error --max-time 5)
+  if [[ -n "$netrc_file" ]]; then
+    curl_options+=(--basic --netrc-file "$netrc_file")
+  fi
   for ((attempt = 1; attempt <= attempts; attempt += 1)); do
-    if curl --fail --silent --show-error --max-time 5 "$url" >/dev/null; then
+    if curl "${curl_options[@]}" "$url" >/dev/null; then
       return 0
     fi
     sleep 2
@@ -89,13 +100,21 @@ rollback() {
   if (( ${#temporary_files[@]} > 0 )); then
     rm -f -- "${temporary_files[@]}"
   fi
-  docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" stop api web scheduler worker >/dev/null 2>&1 || true
+  docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
+    stop admin-control admin-web >/dev/null 2>&1 || true
+  docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
+    stop api web scheduler worker >/dev/null 2>&1 || true
   if [[ -n "$previous_release" && -f "$previous_release/docker-compose.yml" && -n "$previous_image" ]]; then
     release_dir="$previous_release"
     compose_file="$previous_release/docker-compose.yml"
-    write_compose_env "$previous_image" "$existing_tenant"
+    write_compose_env "$previous_image" "$existing_tenant" "$existing_admin_user"
+    local -a restore_services=(api web scheduler worker)
+    if docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
+      config --services | grep -qx 'admin-control'; then
+      restore_services+=(admin-control admin-web)
+    fi
     docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
-      up -d --force-recreate api web scheduler worker || true
+      up -d --force-recreate "${restore_services[@]}" || true
     ln -sfn "$previous_release" "$root/current"
   fi
   echo "Hoox Demo 发布失败，已尝试恢复上一应用版本；数据库迁移不会自动回退" >&2
@@ -103,7 +122,7 @@ rollback() {
 }
 trap rollback ERR
 
-compose pull api web scheduler worker migrate
+compose pull api web admin-control admin-web scheduler worker migrate
 compose up -d postgres minio
 compose --profile ops run --rm minio-init
 compose --profile ops run --rm migrate
@@ -111,12 +130,36 @@ compose up -d api web
 wait_http "http://127.0.0.1:3001/live"
 wait_http "http://127.0.0.1:4173/"
 
+set -a
+# shellcheck disable=SC1091
+source "$shared_dir/infra.env"
+DEV_ADMIN_CONTROL_TOKEN="$(sed -n 's/^DEV_ADMIN_CONTROL_TOKEN=//p' "$shared_dir/admin-control.env" | tail -n 1)"
+# shellcheck disable=SC1091
+source "$shared_dir/demo-account.env"
+set +a
+if [[ ! "$DEV_ADMIN_CONTROL_TOKEN" =~ ^[A-Za-z0-9._~-]{32,512}$ ]]; then
+  echo "Demo Admin Control Token 格式无效" >&2
+  exit 1
+fi
+if [[ ! "$DEMO_ACCOUNT_EMAIL" =~ ^[^:[:space:]]+@[^:[:space:]]+$ ]]; then
+  echo "Demo 管理账号不适合作为 HTTP Basic 用户名" >&2
+  exit 1
+fi
+if [[ ! "$DEMO_ACCOUNT_PASSWORD" =~ ^[A-Za-z0-9._~-]{16,256}$ ]]; then
+  echo "Demo 管理密码必须使用 URL 安全字符" >&2
+  exit 1
+fi
+
 if ! sudo test -f "/etc/letsencrypt/live/$domain/fullchain.pem" || ! sudo test -f "/etc/letsencrypt/live/$domain/privkey.pem"; then
   echo "Demo TLS 证书尚未初始化" >&2
   exit 1
 fi
 nginx_candidate="$(mktemp)"
-temporary_files+=("$nginx_candidate")
+admin_htpasswd_candidate="$(mktemp)"
+admin_token_candidate="$(mktemp)"
+admin_netrc="$(mktemp)"
+temporary_files+=("$nginx_candidate" "$admin_htpasswd_candidate" "$admin_token_candidate" "$admin_netrc")
+chmod 0600 "$admin_netrc"
 if [[ -f /etc/nginx/conf.d/hoox-demo.conf ]]; then
   nginx_previous_configuration="$(mktemp)"
   cp /etc/nginx/conf.d/hoox-demo.conf "$nginx_previous_configuration"
@@ -129,6 +172,16 @@ if [[ -f /etc/nginx/conf.d/hoox-demo-bootstrap.conf ]]; then
 fi
 sed -e "s/@@DOMAIN@@/$domain/g" -e "s/@@BUCKET@@/$bucket/g" \
   "$release_dir/nginx.conf.template" >"$nginx_candidate"
+password_hash="$(printf '%s' "$DEMO_ACCOUNT_PASSWORD" | openssl passwd -apr1 -stdin)"
+printf '%s:%s\n' "$DEMO_ACCOUNT_EMAIL" "$password_hash" >"$admin_htpasswd_candidate"
+printf 'proxy_set_header Authorization "Bearer %s";\n' "$DEV_ADMIN_CONTROL_TOKEN" \
+  >"$admin_token_candidate"
+printf 'machine %s\nlogin %s\npassword %s\n' \
+  "$domain" "$DEMO_ACCOUNT_EMAIL" "$DEMO_ACCOUNT_PASSWORD" >"$admin_netrc"
+sudo install -o root -g www-data -m 0640 \
+  "$admin_htpasswd_candidate" /etc/nginx/hoox-demo-admin.htpasswd
+sudo install -o root -g root -m 0600 \
+  "$admin_token_candidate" /etc/nginx/hoox-demo-admin-token.conf
 sudo install -m 0644 "$nginx_candidate" /etc/nginx/conf.d/hoox-demo.conf
 nginx_configuration_touched=true
 sudo nginx -t
@@ -136,13 +189,6 @@ sudo rm -f /etc/nginx/conf.d/hoox-demo-bootstrap.conf
 sudo nginx -t
 sudo systemctl reload nginx
 wait_http "https://$domain/api/ready"
-
-set -a
-# shellcheck disable=SC1091
-source "$shared_dir/infra.env"
-# shellcheck disable=SC1091
-source "$shared_dir/demo-account.env"
-set +a
 
 account_payload="$(python3 - <<'PY'
 import json, os
@@ -195,22 +241,33 @@ if [[ "$exchange_status" != "200" ]]; then
   exit 1
 fi
 
-tenant_id="$(printf '%s\n' \
-  "SELECT personal_tenant_id FROM :\"runtime_schema\".user_accounts WHERE normalized_email=lower(:'demo_email') LIMIT 1;" \
+account_record="$(printf '%s\n' \
+  "SELECT user_id||'|'||personal_tenant_id FROM :\"runtime_schema\".user_accounts WHERE normalized_email=lower(:'demo_email') LIMIT 1;" \
   | compose exec -T postgres psql \
       --username "$POSTGRES_USER" \
       --dbname "$POSTGRES_DB" \
       --set=runtime_schema="$DATABASE_SCHEMA" \
       --set=demo_email="$DEMO_ACCOUNT_EMAIL" \
       --tuples-only --no-align)"
-if [[ ! "$tenant_id" =~ ^tenant_[a-zA-Z0-9_-]+$ ]]; then
-  echo "Demo Tenant 初始化失败" >&2
+IFS='|' read -r admin_user_id tenant_id <<<"$account_record"
+if [[ ! "$tenant_id" =~ ^tenant_[a-zA-Z0-9_-]+$ || ! "$admin_user_id" =~ ^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$ ]]; then
+  echo "Demo Tenant 或管理员初始化失败" >&2
   exit 1
 fi
-write_compose_env "$image" "$tenant_id"
-compose up -d scheduler worker
+printf '%s\n' \
+  "INSERT INTO :\"runtime_schema\".platform_control_operators(user_id,role,status) VALUES(:'demo_user_id','admin','active') ON CONFLICT (user_id) DO UPDATE SET role='admin',status='active',updated_at=clock_timestamp(); INSERT INTO :\"runtime_schema\".platform_skill_operators(user_id,role,status) VALUES(:'demo_user_id','admin','active') ON CONFLICT (user_id) DO UPDATE SET role='admin',status='active',version_token=platform_skill_operators.version_token+1,updated_at=clock_timestamp();" \
+  | compose exec -T postgres psql \
+      --username "$POSTGRES_USER" \
+      --dbname "$POSTGRES_DB" \
+      --set=runtime_schema="$DATABASE_SCHEMA" \
+      --set=demo_user_id="$admin_user_id" \
+      --quiet
+write_compose_env "$image" "$tenant_id" "$admin_user_id"
+compose up -d admin-control admin-web scheduler worker
+wait_http "http://127.0.0.1:3003/live"
+wait_http "http://127.0.0.1:4174/"
 sleep 10
-for service in api web scheduler worker; do
+for service in api web admin-control admin-web scheduler worker; do
   container_id="$(compose ps -q "$service")"
   if [[ -z "$container_id" || "$(docker inspect --format '{{.State.Running}}' "$container_id")" != "true" ]]; then
     echo "Demo 服务未保持运行：$service" >&2
@@ -219,7 +276,10 @@ for service in api web scheduler worker; do
   fi
 done
 wait_http "http://127.0.0.1:3001/ready"
+wait_http "http://127.0.0.1:3003/ready"
 wait_http "https://$domain/api/ready"
+wait_http "https://$domain/admin/" 60 "$admin_netrc"
+wait_http "https://$domain/v1/admin/control/overview" 60 "$admin_netrc"
 
 ln -sfn "$release_dir" "$root/current"
 if (( ${#temporary_files[@]} > 0 )); then

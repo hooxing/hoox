@@ -21,12 +21,14 @@ describe("Demo 持续部署契约", () => {
     expect(actions.every((action) => /@[0-9a-f]{40}$/u.test(action ?? ""))).toBe(true);
   });
 
-  it("Demo 镜像只构建实际运行服务，不被未部署的后台 Web 阻塞", () => {
+  it("Demo 镜像构建用户端、后台端及其统一 API", () => {
     const dockerfile = source("Dockerfile.demo");
     expect(dockerfile).toContain('--filter "@hoox/api..."');
     expect(dockerfile).toContain('--filter "@hoox/agent-worker..."');
     expect(dockerfile).toContain('--filter "@hoox/scheduler..."');
     expect(dockerfile).toContain('--filter "@hoox/web..."');
+    expect(dockerfile).toContain('--filter "@hoox/admin-control-api..."');
+    expect(dockerfile).toContain("pnpm --filter @hoox/admin-web build:demo");
     expect(dockerfile).not.toContain("&& pnpm build");
     expect(dockerfile).toContain("pnpm install --offline --prod --frozen-lockfile --force");
     expect(dockerfile).toContain("org.opencontainers.image.source");
@@ -58,11 +60,16 @@ describe("Demo 持续部署契约", () => {
     expect(prepare).toContain("AS admin_control_safe");
   });
 
-  it("数据库和对象存储只绑定回环，应用容器采用只读非特权运行边界", () => {
+  it("数据库和对象存储只绑定回环，六个应用容器采用只读非特权运行边界", () => {
     const compose = source("deploy/demo/docker-compose.yml");
     expect(compose).toContain('"127.0.0.1:15432:5432"');
     expect(compose).toContain('"127.0.0.1:19000:9000"');
     expect(compose).toContain('"127.0.0.1:19001:9001"');
+    expect(compose).toContain("admin-control:");
+    expect(compose).toContain("admin-web:");
+    expect(compose).toContain("shared/admin-control.env");
+    expect(compose).toContain("DEV_ADMIN_CONTROL_USER_ID: ${DEMO_ADMIN_USER_ID");
+    expect(compose).toContain("runtime-ts/apps/admin-web/dist");
     expect(compose).toContain("read_only: true");
     expect(compose).toContain("no-new-privileges:true");
     expect(compose).toContain(`cap_drop:
@@ -70,31 +77,53 @@ describe("Demo 持续部署契约", () => {
     expect(compose).not.toContain("privileged: true");
     expect(source("deploy/demo/postgres-init.sh")).toContain("LOGIN NOINHERIT PASSWORD");
     expect(compose).toContain('mc admin user add runtime "$${S3_ACCESS_KEY_ID}"');
+    expect(compose).toContain('mc admin user add runtime "$${SKILL_PUBLISHER_S3_ACCESS_KEY_ID}"');
     expect(compose).toContain("mc admin policy attach runtime readwrite");
   });
 
-  it("发布失败只回滚应用镜像，不自动执行数据库 down", () => {
+  it("发布初始化后台管理员，失败时只回滚应用镜像且兼容旧发布", () => {
     const deploy = source("deploy/demo/remote-deploy.sh");
+    expect(deploy).toContain("admin-control.env");
+    expect(deploy).toContain("DEMO_ADMIN_USER_ID");
+    expect(deploy).toContain("platform_control_operators");
+    expect(deploy).toContain("platform_skill_operators");
+    expect(deploy).toContain("restore_services+=(admin-control admin-web)");
+    expect(deploy).toContain("for service in api web admin-control admin-web scheduler worker");
     expect(deploy).toContain("rollback()");
     expect(deploy).toContain("数据库迁移不会自动回退");
-    expect(deploy).toContain("up -d --force-recreate api web scheduler worker");
     expect(deploy).toContain("/api/api/auth/sign-in/email");
     expect(deploy).toContain("/api/v1/auth/exchange");
     expect(deploy).toContain("nginx_bootstrap_configuration");
+    expect(deploy).toContain("/etc/nginx/hoox-demo-admin-token.conf");
+    expect(deploy).toContain("-o root -g root -m 0600");
+    expect(deploy).toContain("https://$domain/v1/admin/control/overview");
     expect(deploy).toContain("| compose exec -T postgres psql");
     expect(deploy).toContain("sudo rm -f /etc/nginx/conf.d/hoox-demo-bootstrap.conf");
     expect(deploy).not.toContain("db:migrate:down");
     expect(deploy).not.toContain('["node", "runtime-ts/packages/persistence/dist/cli.js", "down"]');
   });
 
-  it("同一 HTTPS 域名只通过明确路径转发 API 和 Demo 对象桶", () => {
+  it("同一 HTTPS 域名明确隔离用户 API、后台入口和 Demo 对象桶", () => {
     const nginx = source("deploy/demo/nginx.conf.template");
     const apiExample = source("deploy/demo/api.env.example");
+    const adminExample = source("deploy/demo/admin-control.env.example");
     expect(nginx).toContain("location /api/");
     expect(nginx).toContain("location ^~ /@@BUCKET@@/");
+    expect(nginx).toContain("location ^~ /admin/");
+    expect(nginx).toContain("location ^~ /v1/admin/");
+    expect(nginx.match(/auth_basic "Hoox Demo Admin";/gu)).toHaveLength(2);
+    expect(nginx).toContain("auth_basic_user_file /etc/nginx/hoox-demo-admin.htpasswd");
+    expect(nginx).toContain("include /etc/nginx/hoox-demo-admin-token.conf");
     expect(nginx).toContain("proxy_pass http://127.0.0.1:3001/");
+    expect(nginx).toContain("proxy_pass http://127.0.0.1:3003");
+    expect(nginx).toContain("proxy_pass http://127.0.0.1:4174/");
     expect(nginx).toContain("proxy_pass http://127.0.0.1:19000");
+    expect(nginx).not.toContain("DEV_ADMIN_CONTROL_TOKEN");
     expect(apiExample).toContain("DEMO_PUBLIC_ORIGIN=https://hoox.aisay.cc");
     expect(apiExample).toContain("DEV_AUTH_ENABLED=false");
+    expect(adminExample).toContain("ADMIN_CONTROL_DATABASE_URL=");
+    expect(adminExample).toContain("SKILL_PUBLISHER_DATABASE_URL=");
+    expect(adminExample).toContain("DEV_ADMIN_CONTROL_TOKEN=");
+    expect(source("deploy/demo/infra.env.example")).toContain("SKILL_PUBLISHER_S3_ACCESS_KEY_ID=");
   });
 });

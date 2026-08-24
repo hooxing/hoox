@@ -66,6 +66,8 @@ services:
         mc anonymous set none "runtime/$${S3_BUCKET}"
         mc admin user add runtime "$${S3_ACCESS_KEY_ID}" "$${S3_SECRET_ACCESS_KEY}"
         mc admin policy attach runtime readwrite --user "$${S3_ACCESS_KEY_ID}"
+        mc admin user add runtime "$${SKILL_PUBLISHER_S3_ACCESS_KEY_ID}" "$${SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY}"
+        mc admin policy attach runtime readwrite --user "$${SKILL_PUBLISHER_S3_ACCESS_KEY_ID}"
 
   migrate:
     <<: *runtime
@@ -94,6 +96,27 @@ services:
     environment:
       STATIC_LISTEN_HOST: 127.0.0.1
       STATIC_LISTEN_PORT: "4173"
+    command: ["node", "scripts/demo-static-server.mjs"]
+
+  admin-control:
+    <<: *runtime
+    env_file:
+      - ${HOOX_DEMO_ROOT:-/opt/hoox-demo}/shared/admin-control.env
+    environment:
+      DEV_ADMIN_CONTROL_USER_ID: ${DEMO_ADMIN_USER_ID:-user_demo_pending}
+    command: ["node", "runtime-ts/apps/admin-control-api/dist/development-main.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  admin-web:
+    <<: *runtime
+    environment:
+      STATIC_ROOT: /opt/hoox/runtime-ts/apps/admin-web/dist
+      STATIC_LISTEN_HOST: 127.0.0.1
+      STATIC_LISTEN_PORT: "4174"
     command: ["node", "scripts/demo-static-server.mjs"]
 
   scheduler:

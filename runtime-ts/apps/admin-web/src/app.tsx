@@ -29,6 +29,7 @@ import {
   useLocation,
   useNavigate,
 } from "react-router-dom";
+import { readAdminAccessToken } from "./admin-session.js";
 import {
   AdminApiError,
   filesToRequests,
@@ -1241,6 +1242,19 @@ export function App({
   );
 
   const basename = browserRouterBasename(import.meta.env.BASE_URL);
+
+  if (apiClient === undefined && controlApi === undefined && readAdminAccessToken() === undefined) {
+    return (
+      <main className="admin-login-required" aria-label="后台登录提示">
+        <section>
+          <p className="eyebrow">Hoox Admin</p>
+          <h1>请先登录 Hoox 工作台</h1>
+          <p>后台不再使用浏览器 Basic 密码框；仅 Demo 管理员的有效 Hoox 会话可以调用后台接口。</p>
+          <a href="/">前往工作台登录</a>
+        </section>
+      </main>
+    );
+  }
 
   // 注入客户端时使用内存路由，隔离测试与嵌入场景的全局地址；真实管理台使用浏览器地址形成可复制入口。
   return apiClient !== undefined || controlApi !== undefined ? (

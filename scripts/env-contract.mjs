@@ -130,7 +130,7 @@ export const expectedEnvironmentKeys = Object.freeze([
   "DEV_AUTH_USER_B_TENANT_ID",
 ]);
 
-export const optionalEnvironmentKeys = Object.freeze(["DEMO_PUBLIC_ORIGIN"]);
+export const optionalEnvironmentKeys = Object.freeze(["DEMO_PUBLIC_ORIGIN", "DEMO_ADMIN_USER_ID"]);
 
 const placeholderOnlyKeys = new Set([
   "DATABASE_URL",

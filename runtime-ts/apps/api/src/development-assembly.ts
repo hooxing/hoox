@@ -171,6 +171,9 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
           localAccounts,
           localAccountPasswordRoutes: principals !== undefined,
           embeddedIdentity,
+          ...(configuration.demoAdminUserId === undefined
+            ? {}
+            : { demoAdminUserId: configuration.demoAdminUserId }),
           repositories: persistence.repositories,
           personalizations: persistence.personalizations,
           scheduledTasks: persistence.scheduledTasks,

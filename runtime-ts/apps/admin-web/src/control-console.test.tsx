@@ -650,7 +650,7 @@ describe("统一平台管理导航", () => {
     container.remove();
   });
 
-  it("内置 Provider 自动载入模型并只要求选择默认模型", async () => {
+  it("内置 Provider 自动载入目录并只启用选择的模型", async () => {
     const api = fixture();
     const piModels: readonly PiModelCatalogModelDto[] = [
       {
@@ -738,7 +738,7 @@ describe("统一平台管理导航", () => {
         defaultModelId: "deepseek-reasoner",
         reason: "保存并使用模型配置",
         models: [
-          expect.objectContaining({ id: "deepseek-chat", enabled: true }),
+          expect.objectContaining({ id: "deepseek-chat", enabled: false }),
           expect.objectContaining({ id: "deepseek-reasoner", enabled: true }),
         ],
       }),

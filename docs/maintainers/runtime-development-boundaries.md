@@ -155,11 +155,13 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
    由领域服务执行，不能依赖管理页面按钮。
 
 模型配置以 Provider 为聚合根：一个 Provider revision 可以维护多个模型条目，并指定一个默认模型。管理 Web 从锁定版本的
-Pi Provider 目录载入内置 Provider 的模型能力；自定义 Provider 只要求填写地址、API Key 和模型 ID。管理员点击
+Pi Provider 目录载入内置 Provider 的模型能力；页面只启用管理员在“使用模型”中选中的默认模型，其他目录条目保持停用，
+不暗中参与运行或探测。自定义 Provider 只要求填写地址、API Key 和模型 ID。管理员点击
 “保存并使用”后形成显式 revision 并立即切换 active，
 Worker 不会在运行时重新用 Pi 目录覆盖已启用数据。模型页面不展示草稿、Revision 历史、独立探测操作或变更原因；
 这些仍存在的服务端事实只用于持久化、审计与 Run 快照。后台不可用时仍可浏览 Pi 目录和编辑初始值，但这些内容没有
-保存或生效。
+保存或生效。Worker 以 Run 固定 Revision 中的输入模态、上下文窗口和最大输出作为模型能力事实；模型家族 Profile
+只补充请求协议，不使用另一组硬编码能力值覆盖或拒绝已发布配置。
 
 启用配置会递增全局 generation；Worker 首次处理 Run 时将模型、记忆与运行参数 revision 固化到
 `run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本及其托管密钥。没有已启用模型时回退部署时
@@ -169,6 +171,7 @@ Worker 不会在运行时重新用 Pi 目录覆盖已启用数据。模型页面
 [模型配置保存即启用决策](../decisions/20260825180549-direct-model-configuration-activation.md)、
 [Provider 标识与启用门禁决策](../decisions/20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md)、
 [模型 Provider 凭据托管决策](../decisions/20260825173500-managed-model-provider-credentials.md)、
+[模型能力事实归属决策](../decisions/20260826000935-published-model-capabilities-are-runtime-facts.md)、
 [独立控制面决策](../decisions/20260819165254-independent-admin-control-plane.md)、
 [Provider 模型目录决策](../decisions/20260820090402-provider-owned-model-catalog.md)与
 [Pi 目录初始值决策](../decisions/20260820095113-pi-catalog-seeds-admin-model-metadata.md)。

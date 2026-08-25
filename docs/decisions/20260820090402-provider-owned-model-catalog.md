@@ -1,10 +1,11 @@
 # Provider 拥有可启用的模型目录
 
-- 状态：已接受
+- 状态：部分已替代（管理页面的内置 Provider 改为只启用所选默认模型；多模型结构与 Runtime 兼容继续有效）
 - 日期：2026-08-20
 - 决策者：Runtime 维护者
 - 关联任务/PR：后台控制面支持一个模型 Provider 配置多个模型
 - 替代关系：细化 ADR-20260819165254 的模型配置结构，不改变其权限与 Run 快照边界
+- 后续替代：[ADR-20260826000935](20260826000935-published-model-capabilities-are-runtime-facts.md) 收窄管理页面的多启用语义；API 数据结构、显式默认模型和 Worker 对历史多启用 Revision 的兼容不变
 
 ## 背景
 

@@ -631,23 +631,41 @@ describe("Agent Worker 进程入口", () => {
     ).toEqual(["model-a", "model-b"]);
   });
 
-  it("DeepSeek V4 Flash 使用官方 0731 模型能力和 Pi 兼容配置", async () => {
-    const configuration = parseWorkerProcessEnvironment({
-      ...productionEnvironment(),
-      MODEL_ID: "deepseek-v4-flash",
-      MODEL_SUPPORTS_IMAGES: "false",
-      MODEL_CONTEXT_WINDOW: "1048576",
-      MODEL_MAX_OUTPUT_TOKENS: "65536",
+  it("DeepSeek V4 当前目录值可组装，并只为 exact Flash 注入 Pi 兼容配置", async () => {
+    const { modelRuntime, model } = await createOpenAiCompatibleProvider({
+      displayName: "DeepSeek",
+      baseUrl: "https://model.example.com/v1",
+      apiKey: "deployment-secret",
+      defaultModelId: "deepseek-v4-flash-vision-exp",
+      models: [
+        {
+          id: "deepseek-v4-flash",
+          name: "DeepSeek V4 Flash",
+          enabled: true,
+          reasoning: true,
+          input: ["text"],
+          contextWindow: 1_000_000,
+          maxTokens: 384_000,
+        },
+        {
+          id: "deepseek-v4-flash-vision-exp",
+          name: "DeepSeek V4 Flash Vision Exp",
+          enabled: true,
+          reasoning: true,
+          input: ["text", "image"],
+          contextWindow: 1_000_000,
+          maxTokens: 384_000,
+        },
+      ],
     });
 
-    const { model } = await createDevelopmentOpenAiCompatibleModel(configuration.model);
-
-    expect(model).toMatchObject({
+    expect(model.id).toBe("deepseek-v4-flash-vision-exp");
+    expect(modelRuntime.getModel("runtime-openai-compatible", "deepseek-v4-flash")).toMatchObject({
       id: "deepseek-v4-flash",
       reasoning: true,
       input: ["text"],
-      contextWindow: 1_048_576,
-      maxTokens: 65_536,
+      contextWindow: 1_000_000,
+      maxTokens: 384_000,
       compat: {
         supportsStore: false,
         supportsDeveloperRole: false,

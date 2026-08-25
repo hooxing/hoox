@@ -50,3 +50,11 @@
 - 新增 ADR 时不得使用连续递增编号，统一使用创建时的北京时间时间戳：
   `YYYYMMDDHHmmss`。
 - 例如：`20260814172530-e2b-provider-first-sdk-adapter.md`
+
+
+
+## 代码同步规则
+
+同步代码后先运行 pnpm db:setup；
+已执行或已提交的 migration 永远不可修改；
+出现 checksum 不一致立即停止，不允许直接改迁移记录。

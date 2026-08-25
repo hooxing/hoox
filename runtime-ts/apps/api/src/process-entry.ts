@@ -93,6 +93,7 @@ const apiEnvironmentSchema = Object.freeze({
   // production 中即使 false 也不能出现，显式检查位于 parseApiProcessEnvironment。
   DEMO_PUBLIC_ACCESS_ENABLED: booleanEnvironmentField({ requiredIn: optionalEnvironments }),
   DEMO_PUBLIC_ORIGIN: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 2048 }),
+  DEMO_ADMIN_USER_ID: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 128 }),
   DEV_AUTH_ENABLED: booleanEnvironmentField({ requiredIn: developmentAndTestEnvironments }),
   DEV_AUTH_USER_A_ID: stringEnvironmentField({ requiredIn: optionalEnvironments, maxLength: 128 }),
   DEV_AUTH_USER_A_TENANT_ID: stringEnvironmentField({
@@ -184,6 +185,7 @@ export interface ApiProcessConfiguration {
   readonly threadInputRoutingV2Enabled: boolean;
   readonly developmentPrincipals?: readonly [ApiDevelopmentPrincipal, ApiDevelopmentPrincipal];
   readonly demoPublicAccessEnabled: boolean;
+  readonly demoAdminUserId?: string;
   readonly shutdownTimeoutMilliseconds: number;
   readonly listenHost: string;
   readonly listenPort: number;
@@ -250,6 +252,19 @@ export function parseApiProcessEnvironment(
   const configuredDemoPublicOrigin = parsed.values.DEMO_PUBLIC_ORIGIN;
   if (configuredDemoPublicOrigin !== undefined && !demoPublicAccessEnabled) {
     throw new TypeError("DEMO_PUBLIC_ORIGIN_REQUIRES_DEMO_PUBLIC_ACCESS");
+  }
+  const configuredDemoAdminUserId = parsed.values.DEMO_ADMIN_USER_ID;
+  if (configuredDemoAdminUserId !== undefined && !demoPublicAccessEnabled) {
+    throw new TypeError("DEMO_ADMIN_USER_ID_REQUIRES_DEMO_PUBLIC_ACCESS");
+  }
+  if (demoPublicAccessEnabled && configuredDemoAdminUserId === undefined) {
+    throw new TypeError("DEMO_PUBLIC_ACCESS_REQUIRES_ADMIN_USER_ID");
+  }
+  if (
+    configuredDemoAdminUserId !== undefined &&
+    !/^[A-Za-z0-9][A-Za-z0-9_-]{2,127}$/u.test(configuredDemoAdminUserId)
+  ) {
+    throw new TypeError("INVALID:DEMO_ADMIN_USER_ID");
   }
   const configuredDatabaseUrl = readRequiredEnvironmentValue(parsed, "DATABASE_URL");
   const configuredTeamCoordinatorUrl = readRequiredEnvironmentValue(
@@ -430,6 +445,9 @@ export function parseApiProcessEnvironment(
     threadInputRoutingV2Enabled: inputRoutingEnabled,
     ...(developmentPrincipals === undefined ? {} : { developmentPrincipals }),
     demoPublicAccessEnabled,
+    ...(configuredDemoAdminUserId === undefined
+      ? {}
+      : { demoAdminUserId: configuredDemoAdminUserId }),
     shutdownTimeoutMilliseconds: readRequiredEnvironmentValue(
       parsed,
       "PROCESS_SHUTDOWN_TIMEOUT_MS",
@@ -491,6 +509,7 @@ export async function startApiProcess(input: {
 const developmentIdentityEnvironmentKeys = Object.freeze([
   "DEMO_PUBLIC_ACCESS_ENABLED",
   "DEMO_PUBLIC_ORIGIN",
+  "DEMO_ADMIN_USER_ID",
   "DEV_AUTH_ENABLED",
   "DEV_AUTH_USER_A_ID",
   "DEV_AUTH_USER_A_TENANT_ID",

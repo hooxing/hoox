@@ -84,6 +84,8 @@ services:
     <<: *runtime
     env_file:
       - ${HOOX_DEMO_ROOT:-/opt/hoox-demo}/shared/api.env
+    environment:
+      DEMO_ADMIN_USER_ID: ${DEMO_ADMIN_USER_ID:-user_demo_pending}
     command: ["node", "runtime-ts/apps/api/dist/development-main.js"]
     depends_on:
       postgres:

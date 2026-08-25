@@ -100,9 +100,10 @@ describe("环境变量示例契约", () => {
 
   it("允许只在公开 Demo 中使用的可选 origin，不强迫本地样例开启该能力", () => {
     expect(optionalEnvironmentKeys).toContain("DEMO_PUBLIC_ORIGIN");
+    expect(optionalEnvironmentKeys).toContain("DEMO_ADMIN_USER_ID");
     expect(
       validateEnvironmentExample(
-        `${validExample()}\nDEMO_PUBLIC_ORIGIN=https://demo.example.invalid`,
+        `${validExample()}\nDEMO_PUBLIC_ORIGIN=https://demo.example.invalid\nDEMO_ADMIN_USER_ID=user_demo_admin`,
       ),
     ).toEqual([]);
   });

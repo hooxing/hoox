@@ -226,3 +226,4 @@
 | [ADR-20260824125500：内嵌身份会话交换与后台配置边界](20260824125500-embedded-identity-session-exchange-and-admin-configuration.md) | 已接受 | 2026-08-24 |
 | [ADR-20260824163556：单机 Demo 使用受控 development 装配持续部署](20260824163556-single-node-demo-continuous-deployment.md) | 已接受 | 2026-08-24 |
 | [ADR-20260825093437：Thread 消息附件使用结构化展示投影](20260825093437-thread-message-attachment-projection.md) | 已接受 | 2026-08-25 |
+| [ADR-20260825135525：Thread 图片预览按不可变附件身份保持稳定](20260825135525-stable-thread-attachment-preview.md) | 已接受 | 2026-08-25 |

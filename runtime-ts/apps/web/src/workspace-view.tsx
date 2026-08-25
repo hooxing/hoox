@@ -600,6 +600,9 @@ function UserRequestAttachment({
   readonly loadAttachmentUrl?: (attachment: ThreadContextAttachment) => Promise<string>;
 }) {
   const previewable = canPreviewUserAttachment(attachment);
+  const attachmentIdentity = `${attachment.resourceId}:${attachment.versionId}`;
+  const attachmentRef = useRef(attachment);
+  attachmentRef.current = attachment;
   const [url, setUrl] = useState<string>();
   const [failed, setFailed] = useState(false);
 
@@ -608,18 +611,21 @@ function UserRequestAttachment({
     let active = true;
     setUrl(undefined);
     setFailed(false);
-    void loadAttachmentUrl(attachment).then(
+    // Run 轮询会重建消息投影对象；预览只随不可变的 ResourceVersion 身份变化，避免重复清空图片。
+    void loadAttachmentUrl(attachmentRef.current).then(
       (resolved) => {
-        if (active) setUrl(resolved);
+        const currentIdentity = `${attachmentRef.current.resourceId}:${attachmentRef.current.versionId}`;
+        if (active && currentIdentity === attachmentIdentity) setUrl(resolved);
       },
       () => {
-        if (active) setFailed(true);
+        const currentIdentity = `${attachmentRef.current.resourceId}:${attachmentRef.current.versionId}`;
+        if (active && currentIdentity === attachmentIdentity) setFailed(true);
       },
     );
     return () => {
       active = false;
     };
-  }, [attachment, loadAttachmentUrl, previewable]);
+  }, [attachmentIdentity, loadAttachmentUrl, previewable]);
 
   return (
     <li className={`user-request-attachment${previewable ? " is-image" : ""}`}>

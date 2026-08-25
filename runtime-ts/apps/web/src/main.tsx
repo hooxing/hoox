@@ -372,6 +372,10 @@ function AuthenticatedWorkspace({
   const cloudDriveApi = useMemo(() => resolveCloudDriveApi(apiClient), [apiClient]);
   const teamWorkspaceApi = useMemo(() => resolveTeamWorkspaceApi(apiClient), [apiClient]);
   const personalizationApi = useMemo(() => resolvePersonalizationApi(apiClient), [apiClient]);
+  const attachmentPreviewLoader = useMemo(
+    () => apiClient.previewHistoryFile?.bind(apiClient),
+    [apiClient],
+  );
   const activeTeam = teams.find((team) => team.id === activeTeamId);
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? teams[0];
   const managedTeam = teams.find((team) => team.id === selectedTeamId);
@@ -1387,11 +1391,9 @@ function AuthenticatedWorkspace({
                     apiClient.listEvents(selected.id, runId, after, limit),
                   )
                 }
-                {...(apiClient.previewHistoryFile === undefined
+                {...(attachmentPreviewLoader === undefined
                   ? {}
-                  : {
-                      loadAttachmentUrl: apiClient.previewHistoryFile.bind(apiClient),
-                    })}
+                  : { loadAttachmentUrl: attachmentPreviewLoader })}
                 {...(state.run === undefined
                   ? {}
                   : { currentRun: state.run, currentRunEvents: state.events })}

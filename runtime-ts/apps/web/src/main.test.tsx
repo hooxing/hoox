@@ -615,6 +615,18 @@ describe("Agent 工作台恢复接入", () => {
       "https://example.test/sunflower-preview",
     );
     expect(container.querySelector(".composer-file")).toBeNull();
+
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+      setter?.call(textarea, "继续输入下一条消息");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await settleEffects();
+
+    expect(previewHistoryFile).toHaveBeenCalledTimes(1);
+    expect(container.querySelector<HTMLImageElement>(".user-request-attachment img")?.src).toBe(
+      "https://example.test/sunflower-preview",
+    );
   });
 
   it("通过 @ 选择历史文件后使用统一结构化附件提交，且不重新上传", async () => {

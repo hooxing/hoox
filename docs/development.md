@@ -40,7 +40,7 @@ Copy-Item .env.example .env
 
 完整分组见[配置参考](reference/configuration.md)。`.env` 被 Git 忽略，不得提交、截图或粘贴到公开 Issue。
 
-### PostgreSQL 一次性 bootstrap
+### PostgreSQL bootstrap 与迁移
 
 业务迁移不能创建集群级登录角色。首次准备专用数据库时，由 Database Admin：
 
@@ -49,6 +49,14 @@ Copy-Item .env.example .env
 3. 创建专用业务 Schema，并只让 Migrator 成为 Schema owner；
 4. 确认其他常驻角色不是数据库、Schema、表、序列或 routine owner；
 5. 将连接和角色名写入本机 `.env`。
+
+完成一次性数据库与 Schema 准备后，日常拉取包含新增应用角色的代码时运行：
+
+```powershell
+pnpm db:setup
+```
+
+该命令让仓库根 `.env` 覆盖长驻终端中的旧数据库变量，先通过 `DATABASE_BOOTSTRAP_URL` 补齐当前数据库缺少的应用登录角色，再对同一数据库执行迁移。补齐过程可重复执行，不修改已存在角色的密码或属性；如果角色被同一 PostgreSQL 集群中的其他数据库依赖，会在任何角色创建和迁移 DDL 前失败并报告具体角色与数据库。只需检查角色状态时可单独运行 `pnpm db:roles:bootstrap`。
 
 精确权限、不变量和迁移器校验见[维护者开发边界](maintainers/runtime-development-boundaries.md#postgresql-角色-bootstrap)。数据库角色属于整个 PostgreSQL 集群，同一集群的开发、预览和生产数据库应使用不同角色集合。
 

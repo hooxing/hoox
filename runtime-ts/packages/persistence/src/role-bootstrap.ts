@@ -1849,8 +1849,78 @@ async function assertBootstrapContextSafe(
 }
 
 interface RoleDatabaseScopeRow {
+  readonly requested_role: string;
   readonly role_name: string | null;
-  readonly outside_database_count: number;
+  readonly outside_database_names_json: string;
+}
+
+export interface DatabaseRoleScopeInspection {
+  readonly missingRoles: readonly string[];
+  readonly reusedRoles: ReadonlyArray<{
+    readonly role: string;
+    readonly databases: readonly string[];
+  }>;
+}
+
+export function databaseRoles(context: MigrationSecurityContext): readonly string[] {
+  return [
+    context.runtimeRole,
+    context.migratorRole,
+    context.skillPublisherRole,
+    context.workerCoordinatorRole,
+    context.teamCoordinatorRole,
+    context.adminControlRole,
+  ];
+}
+
+/** 返回角色缺失与跨库依赖的可操作诊断；结果只包含角色名和数据库名，不包含连接凭据。 */
+export async function inspectDatabaseRoleScope(
+  client: PoolClient,
+  requestedRoles: readonly string[],
+): Promise<DatabaseRoleScopeInspection> {
+  const result = await client.query<RoleDatabaseScopeRow>(
+    `SELECT requested.role_name AS requested_role,
+            role.rolname AS role_name,
+            coalesce(
+              jsonb_agg(DISTINCT database.datname ORDER BY database.datname) FILTER (
+                WHERE dependency.dbid<>0
+                  AND dependency.dbid<>(SELECT oid FROM pg_database WHERE datname=current_database())
+                  AND database.datname IS NOT NULL
+              ),
+              '[]'::jsonb
+            )::text AS outside_database_names_json
+       FROM unnest($1::text[]) requested(role_name)
+       LEFT JOIN pg_roles role ON role.rolname=requested.role_name
+       LEFT JOIN pg_shdepend dependency
+         ON dependency.refclassid='pg_authid'::regclass AND dependency.refobjid=role.oid
+       LEFT JOIN pg_database database ON database.oid=dependency.dbid
+      GROUP BY requested.role_name,role.rolname
+      ORDER BY requested.role_name`,
+    [requestedRoles],
+  );
+  if (result.rows.length !== requestedRoles.length) {
+    throw new PersistenceError("UNEXPECTED", "数据库角色作用域检查结果不完整");
+  }
+  const inspectedRows = result.rows.map((row) => {
+    let databases: unknown;
+    try {
+      databases = JSON.parse(row.outside_database_names_json);
+    } catch {
+      throw new PersistenceError("UNEXPECTED", "数据库角色作用域检查结果无法解析");
+    }
+    if (!Array.isArray(databases) || databases.some((database) => typeof database !== "string")) {
+      throw new PersistenceError("UNEXPECTED", "数据库角色作用域检查结果无法解析");
+    }
+    return { row, databases };
+  });
+  return {
+    missingRoles: inspectedRows
+      .filter(({ row }) => row.role_name === null)
+      .map(({ row }) => row.requested_role),
+    reusedRoles: inspectedRows
+      .filter(({ databases }) => databases.length > 0)
+      .map(({ row, databases }) => ({ role: row.requested_role, databases })),
+  };
 }
 
 /**
@@ -1861,33 +1931,21 @@ export async function assertDatabaseRolesCurrentDatabaseScoped(
   client: PoolClient,
   context: MigrationSecurityContext,
 ): Promise<void> {
-  const requestedRoles = [
-    context.runtimeRole,
-    context.migratorRole,
-    context.skillPublisherRole,
-    context.workerCoordinatorRole,
-    context.teamCoordinatorRole,
-    context.adminControlRole,
-  ];
-  const result = await client.query<RoleDatabaseScopeRow>(
-    `SELECT role.rolname AS role_name,
-            count(DISTINCT dependency.dbid) FILTER (
-              WHERE dependency.dbid<>0
-                AND dependency.dbid<>(SELECT oid FROM pg_database WHERE datname=current_database())
-            )::int AS outside_database_count
-       FROM unnest($1::text[]) requested(role_name)
-       LEFT JOIN pg_roles role ON role.rolname=requested.role_name
-       LEFT JOIN pg_shdepend dependency
-         ON dependency.refclassid='pg_authid'::regclass AND dependency.refobjid=role.oid
-      GROUP BY requested.role_name,role.rolname
-      ORDER BY requested.role_name`,
-    [requestedRoles],
-  );
-  if (
-    result.rows.length !== requestedRoles.length ||
-    result.rows.some((row) => row.role_name === null || row.outside_database_count !== 0)
-  ) {
-    throw new PersistenceError("CONSTRAINT_VIOLATION", "数据库应用角色不得被其他数据库复用");
+  const inspection = await inspectDatabaseRoleScope(client, databaseRoles(context));
+  if (inspection.missingRoles.length > 0) {
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `缺少数据库应用角色：${inspection.missingRoles.join(", ")}；请先运行 pnpm db:roles:bootstrap`,
+    );
+  }
+  if (inspection.reusedRoles.length > 0) {
+    const details = inspection.reusedRoles
+      .map(({ role, databases }) => `${role} -> ${databases.join("/")}`)
+      .join(", ");
+    throw new PersistenceError(
+      "CONSTRAINT_VIOLATION",
+      `数据库应用角色被其他数据库复用：${details}`,
+    );
   }
 }
 

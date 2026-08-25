@@ -12,6 +12,14 @@ const context = Object.freeze({
   schema: "agent_runtime",
 });
 
+function row(role: string, databases: readonly string[] = []): object {
+  return {
+    requested_role: role,
+    role_name: role,
+    outside_database_names_json: JSON.stringify(databases),
+  };
+}
+
 function clientWith(rows: readonly object[]): PoolClient {
   return {
     query: vi.fn(async () => ({ rows })),
@@ -20,16 +28,14 @@ function clientWith(rows: readonly object[]): PoolClient {
 
 describe("PostgreSQL 应用角色数据库作用域", () => {
   it("六个角色只依赖当前数据库时通过，并查询集群级依赖目录", async () => {
-    const client = clientWith(
-      [
-        context.runtimeRole,
-        context.migratorRole,
-        context.skillPublisherRole,
-        context.workerCoordinatorRole,
-        context.teamCoordinatorRole,
-        context.adminControlRole,
-      ].map((role_name) => ({ role_name, outside_database_count: 0 })),
-    );
+    const client = clientWith([
+      row(context.runtimeRole),
+      row(context.migratorRole),
+      row(context.skillPublisherRole),
+      row(context.workerCoordinatorRole),
+      row(context.teamCoordinatorRole),
+      row(context.adminControlRole),
+    ]);
 
     await expect(
       assertDatabaseRolesCurrentDatabaseScoped(client, context),
@@ -47,26 +53,45 @@ describe("PostgreSQL 应用角色数据库作用域", () => {
     ]);
   });
 
-  it("任一角色被其他数据库依赖时在 DDL 和 ACL 变更前失败", async () => {
+  it("任一角色被其他数据库依赖时报告角色和数据库", async () => {
     const client = clientWith([
-      { role_name: context.runtimeRole, outside_database_count: 1 },
-      { role_name: context.migratorRole, outside_database_count: 0 },
-      { role_name: context.skillPublisherRole, outside_database_count: 0 },
-      { role_name: context.workerCoordinatorRole, outside_database_count: 0 },
-      { role_name: context.teamCoordinatorRole, outside_database_count: 0 },
-      { role_name: context.adminControlRole, outside_database_count: 0 },
+      row(context.runtimeRole, ["other_dev"]),
+      row(context.migratorRole),
+      row(context.skillPublisherRole),
+      row(context.workerCoordinatorRole),
+      row(context.teamCoordinatorRole),
+      row(context.adminControlRole),
     ]);
 
     await expect(assertDatabaseRolesCurrentDatabaseScoped(client, context)).rejects.toThrow(
-      "数据库应用角色不得被其他数据库复用",
+      "数据库应用角色被其他数据库复用：runtime_local -> other_dev",
     );
   });
 
-  it("角色缺失时同样失败关闭", async () => {
-    const client = clientWith([{ role_name: context.runtimeRole, outside_database_count: 0 }]);
+  it("角色缺失时报告缺失角色和可执行修复命令", async () => {
+    const client = clientWith([
+      row(context.runtimeRole),
+      row(context.migratorRole),
+      row(context.skillPublisherRole),
+      row(context.workerCoordinatorRole),
+      row(context.teamCoordinatorRole),
+      {
+        requested_role: context.adminControlRole,
+        role_name: null,
+        outside_database_names_json: "[]",
+      },
+    ]);
 
     await expect(assertDatabaseRolesCurrentDatabaseScoped(client, context)).rejects.toThrow(
-      "数据库应用角色不得被其他数据库复用",
+      "缺少数据库应用角色：admin_control_local；请先运行 pnpm db:roles:bootstrap",
+    );
+  });
+
+  it("查询结果不完整时不误报为跨数据库复用", async () => {
+    const client = clientWith([row(context.runtimeRole)]);
+
+    await expect(assertDatabaseRolesCurrentDatabaseScoped(client, context)).rejects.toThrow(
+      "数据库角色作用域检查结果不完整",
     );
   });
 });

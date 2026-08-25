@@ -186,6 +186,7 @@ export interface ApiDependencies {
   readonly localAccounts?: LocalAccountAuthService;
   readonly localAccountPasswordRoutes?: boolean;
   readonly embeddedIdentity?: EmbeddedIdentityAuthService;
+  readonly demoAdminUserId?: string;
   readonly repositories: CoreRepositories;
   readonly createCapability?: ApiCreateCapability;
   readonly archiveThread: ArchiveThreadCommandPort;
@@ -811,6 +812,18 @@ export function createApiApp(
         },
         async (request) => success(request, await localAccounts.login(request.body)),
       );
+    }
+
+    if (normalizedDependencies.demoAdminUserId !== undefined) {
+      const demoAdminUserId = userId(normalizedDependencies.demoAdminUserId);
+      app.get("/v1/auth/demo-admin-access", async (request, reply) => {
+        const principal = await localAccounts.resolve({
+          authorization: authorization(request),
+          requestId: requestId(request),
+        });
+        if (principal?.userId !== demoAdminUserId) throw new ApiFailure("unauthorized");
+        return reply.status(204).send();
+      });
     }
 
     app.get(

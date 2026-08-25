@@ -69,10 +69,10 @@ compose() {
 wait_http() {
   local url="$1"
   local attempts="${2:-60}"
-  local netrc_file="${3:-}"
+  local curl_config="${3:-}"
   local curl_options=(--fail --silent --show-error --max-time 5)
-  if [[ -n "$netrc_file" ]]; then
-    curl_options+=(--basic --netrc-file "$netrc_file")
+  if [[ -n "$curl_config" ]]; then
+    curl_options+=(--config "$curl_config")
   fi
   for ((attempt = 1; attempt <= attempts; attempt += 1)); do
     if curl "${curl_options[@]}" "$url" >/dev/null; then
@@ -141,25 +141,15 @@ if [[ ! "$DEV_ADMIN_CONTROL_TOKEN" =~ ^[A-Za-z0-9._~-]{32,512}$ ]]; then
   echo "Demo Admin Control Token 格式无效" >&2
   exit 1
 fi
-if [[ ! "$DEMO_ACCOUNT_EMAIL" =~ ^[^:[:space:]]+@[^:[:space:]]+$ ]]; then
-  echo "Demo 管理账号不适合作为 HTTP Basic 用户名" >&2
-  exit 1
-fi
-if [[ ! "$DEMO_ACCOUNT_PASSWORD" =~ ^[A-Za-z0-9._~-]{16,256}$ ]]; then
-  echo "Demo 管理密码必须使用 URL 安全字符" >&2
-  exit 1
-fi
-
 if ! sudo test -f "/etc/letsencrypt/live/$domain/fullchain.pem" || ! sudo test -f "/etc/letsencrypt/live/$domain/privkey.pem"; then
   echo "Demo TLS 证书尚未初始化" >&2
   exit 1
 fi
 nginx_candidate="$(mktemp)"
-admin_htpasswd_candidate="$(mktemp)"
 admin_token_candidate="$(mktemp)"
-admin_netrc="$(mktemp)"
-temporary_files+=("$nginx_candidate" "$admin_htpasswd_candidate" "$admin_token_candidate" "$admin_netrc")
-chmod 0600 "$admin_netrc"
+admin_curl_config="$(mktemp)"
+temporary_files+=("$nginx_candidate" "$admin_token_candidate" "$admin_curl_config")
+chmod 0600 "$admin_curl_config"
 if [[ -f /etc/nginx/conf.d/hoox-demo.conf ]]; then
   nginx_previous_configuration="$(mktemp)"
   cp /etc/nginx/conf.d/hoox-demo.conf "$nginx_previous_configuration"
@@ -172,14 +162,8 @@ if [[ -f /etc/nginx/conf.d/hoox-demo-bootstrap.conf ]]; then
 fi
 sed -e "s/@@DOMAIN@@/$domain/g" -e "s/@@BUCKET@@/$bucket/g" \
   "$release_dir/nginx.conf.template" >"$nginx_candidate"
-password_hash="$(printf '%s' "$DEMO_ACCOUNT_PASSWORD" | openssl passwd -apr1 -stdin)"
-printf '%s:%s\n' "$DEMO_ACCOUNT_EMAIL" "$password_hash" >"$admin_htpasswd_candidate"
 printf 'proxy_set_header Authorization "Bearer %s";\n' "$DEV_ADMIN_CONTROL_TOKEN" \
   >"$admin_token_candidate"
-printf 'machine %s\nlogin %s\npassword %s\n' \
-  "$domain" "$DEMO_ACCOUNT_EMAIL" "$DEMO_ACCOUNT_PASSWORD" >"$admin_netrc"
-sudo install -o root -g www-data -m 0640 \
-  "$admin_htpasswd_candidate" /etc/nginx/hoox-demo-admin.htpasswd
 sudo install -o root -g root -m 0600 \
   "$admin_token_candidate" /etc/nginx/hoox-demo-admin-token.conf
 sudo install -m 0644 "$nginx_candidate" /etc/nginx/conf.d/hoox-demo.conf
@@ -235,11 +219,22 @@ fi
 exchange_status="$(curl --silent --show-error --output "$account_response" --write-out '%{http_code}' \
   --request POST --header "Origin: https://$domain" --cookie "$cookie_jar" \
   "https://$domain/api/v1/auth/exchange")"
-rm -f "$cookie_jar" "$account_response"
 if [[ "$exchange_status" != "200" ]]; then
   echo "Demo 账号 Session 交换失败" >&2
   exit 1
 fi
+admin_access_token="$(python3 - "$account_response" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as response_file:
+    payload = json.load(response_file)
+token = payload.get("data", {}).get("accessToken")
+if not isinstance(token, str) or not token.startswith("hoox_session_"):
+    raise SystemExit(1)
+print(token)
+PY
+)"
+printf 'header = "Authorization: Bearer %s"\n' "$admin_access_token" >"$admin_curl_config"
+rm -f "$cookie_jar" "$account_response"
 
 account_record="$(printf '%s\n' \
   "SELECT user_id||'|'||personal_tenant_id FROM :\"runtime_schema\".user_accounts WHERE normalized_email=lower(:'demo_email') LIMIT 1;" \
@@ -263,7 +258,7 @@ printf '%s\n' \
       --set=demo_user_id="$admin_user_id" \
       --quiet
 write_compose_env "$image" "$tenant_id" "$admin_user_id"
-compose up -d admin-control admin-web scheduler worker
+compose up -d --force-recreate api admin-control admin-web scheduler worker
 wait_http "http://127.0.0.1:3003/live"
 wait_http "http://127.0.0.1:4174/"
 sleep 10
@@ -278,8 +273,14 @@ done
 wait_http "http://127.0.0.1:3001/ready"
 wait_http "http://127.0.0.1:3003/ready"
 wait_http "https://$domain/api/ready"
-wait_http "https://$domain/admin/" 60 "$admin_netrc"
-wait_http "https://$domain/v1/admin/control/overview" 60 "$admin_netrc"
+wait_http "https://$domain/admin/"
+unauthorized_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  "https://$domain/v1/admin/control/overview")"
+if [[ "$unauthorized_status" != "401" ]]; then
+  echo "Demo 后台 API 未拒绝无会话请求" >&2
+  exit 1
+fi
+wait_http "https://$domain/v1/admin/control/overview" 60 "$admin_curl_config"
 
 ln -sfn "$release_dir" "$root/current"
 if (( ${#temporary_files[@]} > 0 )); then

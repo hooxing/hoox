@@ -140,6 +140,9 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
           localAccounts,
           localAccountPasswordRoutes: false,
           embeddedIdentity,
+          ...(configuration.demoAdminUserId === undefined
+            ? {}
+            : { demoAdminUserId: configuration.demoAdminUserId }),
           repositories: persistence.repositories,
           personalizations: persistence.personalizations,
           scheduledTasks: persistence.scheduledTasks,

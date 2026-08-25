@@ -197,4 +197,19 @@ describe("技能发布管理 API", () => {
     expect((error as Error).message).not.toContain("secret");
     expect((error as Error).message).not.toContain("internal-host");
   });
+  it("使用当前 Hoox 会话调用后台 API", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response(envelope({ items: [] })));
+    const api = new SkillAdminApi(
+      fetcher,
+      "/v1/admin/skill-submissions",
+      () => "unused-key",
+      () => "Bearer hoox_session_demo-token",
+    );
+
+    await api.listSubmissions();
+
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("Authorization")).toBe(
+      "Bearer hoox_session_demo-token",
+    );
+  });
 });

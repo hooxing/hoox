@@ -143,6 +143,53 @@ export class ResourceAttachmentResolver implements ResourceAttachmentResolverPor
 const attachmentFactMarker = "\n\n# 用户在本轮提供的文件\n";
 const legacyAttachmentFactMarker = "\n\n# 用户在本轮上传的文件\n";
 
+function latestAttachmentFactSection(
+  prompt: string,
+): Readonly<{ readonly index: number; readonly marker: string }> | undefined {
+  const currentIndex = prompt.lastIndexOf(attachmentFactMarker);
+  const legacyIndex = prompt.lastIndexOf(legacyAttachmentFactMarker);
+  if (currentIndex < 0 && legacyIndex < 0) return undefined;
+  return currentIndex >= legacyIndex
+    ? { index: currentIndex, marker: attachmentFactMarker }
+    : { index: legacyIndex, marker: legacyAttachmentFactMarker };
+}
+
+/** 从 Runtime 追加的文件事实恢复不可变 Resource 引用；非法或重复行直接忽略。 */
+export function attachmentReferencesFromUserPrompt(
+  prompt: string,
+): readonly ResourceAttachmentReference[] {
+  const section = latestAttachmentFactSection(prompt);
+  if (section === undefined) return Object.freeze([]);
+  const references: ResourceAttachmentReference[] = [];
+  const seen = new Set<string>();
+  for (const line of prompt.slice(section.index + section.marker.length).split(/\r?\n/u)) {
+    const encoded = line.replace(/^\s*-\s*/u, "").trim();
+    if (encoded.length === 0) continue;
+    let fact: unknown;
+    try {
+      fact = JSON.parse(encoded);
+    } catch {
+      continue;
+    }
+    if (typeof fact !== "object" || fact === null) continue;
+    const path = (fact as { readonly 文件地址?: unknown }).文件地址;
+    if (typeof path !== "string") continue;
+    const match = /^\/resources\/([^/]+)\/([^/]+)\/[^/]+$/u.exec(path);
+    if (match === null) continue;
+    const rawResourceId = match[1];
+    const rawVersionId = match[2];
+    if (rawResourceId === undefined || rawVersionId === undefined) continue;
+    const identity = `${rawResourceId}\0${rawVersionId}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    references.push({
+      resourceId: rawResourceId as ResourceId,
+      versionId: rawVersionId as ResourceVersionId,
+    });
+  }
+  return Object.freeze(references);
+}
+
 export function appendAttachmentsToLatestUserPrompt(
   prompt: string,
   attachments: readonly ResourceAttachment[],
@@ -157,11 +204,8 @@ export function appendAttachmentsToLatestUserPrompt(
 
 /** API 对话投影隐藏 Runtime 追加的附件事实，模型侧持久历史仍保留完整最新 user turn。 */
 export function stripAttachmentsFromUserFacingPrompt(prompt: string): string {
-  const index = Math.max(
-    prompt.lastIndexOf(attachmentFactMarker),
-    prompt.lastIndexOf(legacyAttachmentFactMarker),
-  );
-  return index < 0 ? prompt : prompt.slice(0, index);
+  const section = latestAttachmentFactSection(prompt);
+  return section === undefined ? prompt : prompt.slice(0, section.index);
 }
 
 export function resourceFilesystemPath(

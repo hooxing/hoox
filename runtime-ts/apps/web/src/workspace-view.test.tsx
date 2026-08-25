@@ -275,6 +275,50 @@ describe("工作台展示组件", () => {
     expect(container.textContent).not.toContain("你的请求");
   });
 
+  it("用户消息在发送后继续展示图片附件，并使用受控下载地址加载预览", async () => {
+    const loadAttachmentUrl = vi.fn(async () => "https://example.test/sunflower.png");
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <ThreadTranscript
+          messages={[
+            {
+              sequence: 1,
+              role: "user",
+              text: "这是啥东西",
+              attachments: [
+                {
+                  resourceId: "resource_sunflower",
+                  versionId: "version_sunflower",
+                  name: "向日葵.png",
+                  mediaType: "image/png",
+                  sizeBytes: 940,
+                },
+              ],
+              createdAt: "2026-08-25T00:00:00.000Z",
+            },
+          ]}
+          loadAttachmentUrl={loadAttachmentUrl}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(loadAttachmentUrl).toHaveBeenCalledWith(
+      expect.objectContaining({ resourceId: "resource_sunflower", versionId: "version_sunflower" }),
+    );
+    expect(container.querySelector<HTMLImageElement>(".user-request-attachment img")?.src).toBe(
+      "https://example.test/sunflower.png",
+    );
+    expect(container.querySelector(".user-request-attachment-meta")?.textContent).toContain(
+      "向日葵.png",
+    );
+    act(() => root.unmount());
+  });
+
   it("短用户消息完整展示，长用户消息默认折叠并可展开", () => {
     expect(shouldInitiallyCollapseUserRequest("简短请求")).toBe(false);
     expect(shouldInitiallyCollapseUserRequest("x".repeat(601))).toBe(true);

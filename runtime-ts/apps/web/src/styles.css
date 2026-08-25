@@ -1282,6 +1282,63 @@ h2 {
 .message-card p.user-request-content {
   margin: 0;
 }
+.user-request-attachments {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.user-request-attachment {
+  display: grid;
+  min-width: 220px;
+  overflow: hidden;
+  border: 1px solid #d7d7d3;
+  border-radius: 11px;
+  background: #fafaf8;
+}
+.user-request-attachment-placeholder {
+  display: grid;
+  min-height: 54px;
+  place-items: center;
+  color: #777773;
+  background: #eeeeeb;
+}
+.user-request-attachment.is-image .user-request-attachment-placeholder {
+  min-height: 160px;
+}
+.user-request-attachment > a {
+  display: block;
+  min-width: 0;
+  color: inherit;
+}
+.user-request-attachment img {
+  display: block;
+  width: 100%;
+  max-height: 360px;
+  object-fit: contain;
+  background: #ecece8;
+}
+.user-request-attachment-meta {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 9px;
+}
+.user-request-attachment-meta strong {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.user-request-attachment-meta small {
+  flex: none;
+  color: #777773;
+  font-size: 11px;
+}
 .user-request-content.is-collapsed {
   max-height: 264px;
   overflow: clip;

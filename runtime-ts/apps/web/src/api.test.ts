@@ -313,6 +313,27 @@ describe("RuntimeApi", () => {
     });
   });
 
+  it("图片附件预览使用历史文件的 inline 交付入口", async () => {
+    const fetcher = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          version: "v1",
+          requestId: "req_preview",
+          data: { url: "https://example.test/image-preview" },
+        }),
+        { status: 200 },
+      ),
+    );
+    const api = new RuntimeApi(fetcher);
+
+    await expect(
+      api.previewHistoryFile({ resourceId: "resource_image", versionId: "version_image" }),
+    ).resolves.toBe("https://example.test/image-preview");
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "/api/v1/me/history-files/resource_image/versions/version_image/preview",
+    );
+  });
+
   it("恢复读取走 Thread 嵌套的最新 Run 快照接口", async () => {
     const fetcher = vi
       .fn()
@@ -441,6 +462,15 @@ describe("RuntimeApi", () => {
                   runId: "run_a",
                   role: "user",
                   text: "A",
+                  attachments: [
+                    {
+                      resourceId: "resource_a",
+                      versionId: "version_a",
+                      name: "图.png",
+                      mediaType: "image/png",
+                      sizeBytes: 12,
+                    },
+                  ],
                   createdAt: "2026-07-31T00:00:00.000Z",
                 },
               ],
@@ -471,7 +501,11 @@ describe("RuntimeApi", () => {
       );
     const api = new RuntimeApi(fetcher);
     await expect(api.listThreadContext("thread_1")).resolves.toMatchObject([
-      { sequence: 1, text: "A" },
+      {
+        sequence: 1,
+        text: "A",
+        attachments: [{ resourceId: "resource_a", versionId: "version_a", name: "图.png" }],
+      },
       { sequence: 2, text: "B" },
     ]);
     expect(fetcher.mock.calls[1]?.[0]).toBe("/api/v1/threads/thread_1/context?after=1&limit=500");

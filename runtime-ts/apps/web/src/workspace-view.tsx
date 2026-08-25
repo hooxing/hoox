@@ -34,6 +34,7 @@ import {
   type RunEvent,
   type RunStatus,
   type Thread,
+  type ThreadContextAttachment,
   type ThreadContextMessage,
   type ThreadContinuityStatus,
   type RuntimeApi,
@@ -522,6 +523,7 @@ function HistoricalAgentTurn({
   readonly runId: string;
   readonly messages: readonly AssistantThreadContextMessage[];
   readonly loadRunEvents?: (runId: string) => Promise<readonly RunEvent[]>;
+  readonly loadAttachmentUrl?: (attachment: ThreadContextAttachment) => Promise<string>;
 }) {
   const [loadedEvents, setLoadedEvents] = useState<readonly RunEvent[] | undefined>();
   const [loadState, setLoadState] = useState<"idle" | "loading" | "failed">("idle");
@@ -586,11 +588,75 @@ function HistoricalAgentTurn({
   );
 }
 
+function canPreviewUserAttachment(attachment: ThreadContextAttachment): boolean {
+  return new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]).has(attachment.mediaType);
+}
+
+function UserRequestAttachment({
+  attachment,
+  loadAttachmentUrl,
+}: {
+  readonly attachment: ThreadContextAttachment;
+  readonly loadAttachmentUrl?: (attachment: ThreadContextAttachment) => Promise<string>;
+}) {
+  const previewable = canPreviewUserAttachment(attachment);
+  const [url, setUrl] = useState<string>();
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (!previewable || loadAttachmentUrl === undefined) return;
+    let active = true;
+    setUrl(undefined);
+    setFailed(false);
+    void loadAttachmentUrl(attachment).then(
+      (resolved) => {
+        if (active) setUrl(resolved);
+      },
+      () => {
+        if (active) setFailed(true);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [attachment, loadAttachmentUrl, previewable]);
+
+  return (
+    <li className={`user-request-attachment${previewable ? " is-image" : ""}`}>
+      {url === undefined ? (
+        <div
+          className="user-request-attachment-placeholder"
+          role="img"
+          aria-label={attachment.name}
+        >
+          {previewable && !failed ? (
+            <LoaderCircle className="spin" size={18} aria-hidden="true" />
+          ) : (
+            <FileText size={18} aria-hidden="true" />
+          )}
+        </div>
+      ) : (
+        <a href={url} target="_blank" rel="noreferrer" aria-label={`查看附件 ${attachment.name}`}>
+          <img src={url} alt={attachment.name} />
+        </a>
+      )}
+      <span className="user-request-attachment-meta">
+        <strong title={attachment.name}>{attachment.name}</strong>
+        <small>{formatArtifactSize(attachment.sizeBytes)}</small>
+      </span>
+    </li>
+  );
+}
+
 function UserRequestMessage({
   text,
+  attachments = [],
+  loadAttachmentUrl,
   pendingInput,
 }: {
   readonly text: string;
+  readonly attachments?: readonly ThreadContextAttachment[];
+  readonly loadAttachmentUrl?: (attachment: ThreadContextAttachment) => Promise<string>;
   readonly pendingInput?: PendingThreadInputView;
 }) {
   const contentRef = useRef<HTMLParagraphElement>(null);
@@ -620,6 +686,17 @@ function UserRequestMessage({
         <p ref={contentRef} className={`user-request-content${collapsed ? " is-collapsed" : ""}`}>
           {text}
         </p>
+        {attachments.length > 0 && (
+          <ul className="user-request-attachments" aria-label="消息附件">
+            {attachments.map((attachment) => (
+              <UserRequestAttachment
+                attachment={attachment}
+                {...(loadAttachmentUrl === undefined ? {} : { loadAttachmentUrl })}
+                key={`${attachment.resourceId}:${attachment.versionId}`}
+              />
+            ))}
+          </ul>
+        )}
         {isOverflowing && (
           <button
             type="button"
@@ -651,12 +728,14 @@ export function ThreadTranscript({
   currentRun,
   currentRunEvents = [],
   loadRunEvents,
+  loadAttachmentUrl,
 }: {
   readonly messages: readonly ThreadContextMessage[];
   readonly pendingInputs?: readonly PendingThreadInputView[];
   readonly currentRun?: Run;
   readonly currentRunEvents?: readonly RunEvent[];
   readonly loadRunEvents?: (runId: string) => Promise<readonly RunEvent[]>;
+  readonly loadAttachmentUrl?: (attachment: ThreadContextAttachment) => Promise<string>;
 }) {
   if (messages.length === 0 && pendingInputs.length === 0) return null;
   const currentBlocks = currentRun === undefined ? [] : buildConversationBlocks(currentRunEvents);
@@ -665,7 +744,12 @@ export function ThreadTranscript({
     <section className="assistant-transcript" aria-label="Thread 连续对话">
       {messages.map((message) =>
         message.role === "user" ? (
-          <UserRequestMessage text={message.text} key={message.sequence} />
+          <UserRequestMessage
+            text={message.text}
+            {...(message.attachments === undefined ? {} : { attachments: message.attachments })}
+            {...(loadAttachmentUrl === undefined ? {} : { loadAttachmentUrl })}
+            key={message.sequence}
+          />
         ) : message.role === "assistant" ? (
           (() => {
             const turnKey = message.runId ?? `message-${message.sequence}`;
@@ -712,7 +796,13 @@ export function ThreadTranscript({
         ) : null,
       )}
       {pendingInputs.map((input) => (
-        <UserRequestMessage text={input.text} pendingInput={input} key={input.localId} />
+        <UserRequestMessage
+          text={input.text}
+          {...(input.attachments === undefined ? {} : { attachments: input.attachments })}
+          {...(loadAttachmentUrl === undefined ? {} : { loadAttachmentUrl })}
+          pendingInput={input}
+          key={input.localId}
+        />
       ))}
     </section>
   );
@@ -726,6 +816,7 @@ export function shouldDisplayRuntimeContextMessage(text: string): boolean {
 export type PendingThreadInputView = {
   readonly localId: string;
   readonly text: string;
+  readonly attachments?: readonly ThreadContextAttachment[];
   readonly disposition:
     | "submitting"
     | "pending_steer"

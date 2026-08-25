@@ -558,6 +558,65 @@ describe("Agent 工作台恢复接入", () => {
     expect(container.querySelector("h1")?.textContent).toBe(createdThread.title);
   });
 
+  it("上传图片发送后保留在用户消息中并加载 inline 预览", async () => {
+    const active = thread("thread_image_upload");
+    const image = new File([new Uint8Array([1, 2, 3])], "向日葵.png", { type: "image/png" });
+    const uploaded = {
+      resourceId: "resource_sunflower",
+      versionId: "version_sunflower",
+      name: image.name,
+      path: "/resources/resource_sunflower/version_sunflower/向日葵.png",
+      mediaType: image.type,
+      sizeBytes: image.size,
+    };
+    const submitThreadInput = vi.fn(async () => ({
+      receiptId: "input_image",
+      inputSequence: 1,
+      requestedMode: "auto" as const,
+      disposition: "queued" as const,
+      createdAt: "2026-08-25T01:00:00.000Z",
+      updatedAt: "2026-08-25T01:00:00.000Z",
+    }));
+    const previewHistoryFile = vi.fn(async () => "https://example.test/sunflower-preview");
+    const apiClient = apiFixture({
+      listThreads: vi.fn(async () => [active]),
+      listLatestRuns: vi.fn(async () => []),
+      uploadResource: vi.fn(async () => uploaded),
+      submitThreadInput,
+      previewHistoryFile,
+    });
+    const { container } = mount(apiClient);
+    await settleEffects();
+
+    const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]');
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+    if (fileInput === null || textarea === null) throw new Error("未渲染附件输入区");
+    Object.defineProperty(fileInput, "files", { configurable: true, value: [image] });
+    act(() => fileInput.dispatchEvent(new Event("change", { bubbles: true })));
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+      setter?.call(textarea, "这是啥东西");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+
+    await act(async () =>
+      textarea
+        .closest("form")
+        ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await settleEffects();
+
+    expect(apiClient.uploadResource).toHaveBeenCalledWith(image, expect.any(String));
+    expect(submitThreadInput).toHaveBeenCalledWith(active.id, "这是啥东西", "auto", undefined, [
+      uploaded,
+    ]);
+    expect(previewHistoryFile).toHaveBeenCalledWith(uploaded);
+    expect(container.querySelector<HTMLImageElement>(".user-request-attachment img")?.src).toBe(
+      "https://example.test/sunflower-preview",
+    );
+    expect(container.querySelector(".composer-file")).toBeNull();
+  });
+
   it("通过 @ 选择历史文件后使用统一结构化附件提交，且不重新上传", async () => {
     vi.useFakeTimers();
     const active = thread("thread_history_target");
@@ -635,6 +694,9 @@ describe("Agent 工作台恢复接入", () => {
     );
     expect(apiClient.uploadResource).not.toHaveBeenCalled();
     expect(container.querySelector(".composer-file.is-history")).toBeNull();
+    expect(container.querySelector(".user-request-attachment-meta")?.textContent).toContain(
+      "采购合同.docx",
+    );
   });
 
   it("刷新后恢复最新 Run，并只读取工作台可见的事件与产物投影", async () => {

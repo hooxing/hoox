@@ -505,6 +505,7 @@ function fixture(
     readonly modelWireTraceListFailure?: PersistenceError;
     readonly modelWireTracePaginated?: boolean;
     readonly enableThreadContext?: boolean;
+    readonly threadContextUserText?: string;
     readonly enableThreadContinuity?: boolean;
     readonly enableThreadInputs?: boolean;
     readonly resourceAttachments?: ApiDependencies["resourceAttachments"];
@@ -638,7 +639,7 @@ function fixture(
                         sequence: 1,
                         runId: "run_1",
                         role: "user" as const,
-                        text: "Run A",
+                        text: options.threadContextUserText ?? "Run A",
                         createdAt: baseTime,
                       },
                       {
@@ -1395,10 +1396,10 @@ describe("Fastify API 契约", () => {
       taskName: "采购合同审查",
       resourceId: "resource_history",
       versionId: "version_history",
-      name: "采购合同.docx",
-      entryName: "采购合同.docx",
-      path: "/resources/resource_history/version_history/采购合同.docx",
-      mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      name: "合同扫描.png",
+      entryName: "合同扫描.png",
+      path: "/resources/resource_history/version_history/合同扫描.png",
+      mediaType: "image/png",
       sizeBytes: 128,
       attachedAt: "2026-08-07T08:00:00.000Z",
       object: {
@@ -1406,7 +1407,7 @@ describe("Fastify API 契约", () => {
         purpose: "workspace",
         sha256: "a".repeat(64),
         size: 128,
-        mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        mediaType: "image/png",
         incarnationId: "00000000-0000-4000-8000-000000000001",
         physicalObjectKey: "opaque-history-object",
       },
@@ -1495,10 +1496,27 @@ describe("Fastify API 契约", () => {
         blob: expect.objectContaining({ purpose: "workspace" }),
         ttlSeconds: 300,
         delivery: "artifact-download",
-        downloadName: "采购合同.docx",
+        downloadName: "合同扫描.png",
       }),
     );
-    expect(resolveLibraryFile).toHaveBeenCalledTimes(2);
+
+    const preview = await app.inject({
+      method: "GET",
+      url: "/v1/me/history-files/resource_history/versions/version_history/preview",
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(presignDownload).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        scope: { tenantId: "tenant_owner_a" },
+        ttlSeconds: 300,
+        delivery: "inline-preview",
+      }),
+    );
+    expect(presignDownload).toHaveBeenLastCalledWith(
+      expect.not.objectContaining({ downloadName: expect.anything() }),
+    );
+    expect(resolveLibraryFile).toHaveBeenCalledTimes(4);
 
     const crossTenant = await app.inject({
       method: "GET",
@@ -1506,7 +1524,7 @@ describe("Fastify API 契约", () => {
       headers: { authorization: "Bearer token-b" },
     });
     expect(crossTenant.statusCode).toBe(404);
-    expect(presignDownload).toHaveBeenCalledTimes(1);
+    expect(presignDownload).toHaveBeenCalledTimes(2);
   });
 
   it("团队文件先复制为个人快照；退出后旧副本保留但不能再次读取团队源文件", async () => {
@@ -2107,6 +2125,7 @@ describe("Fastify API 契约", () => {
       "Run A 回复",
     ]);
     expect(response.json().data.items[1]).toMatchObject({ phase: "final_answer" });
+    expect(response.json().data.items[0].attachments).toBeUndefined();
     const crossTenant = await enabled.app.inject({
       method: "GET",
       url: "/v1/threads/thread_1/context",
@@ -2155,6 +2174,65 @@ describe("Fastify API 契约", () => {
         })
       ).statusCode,
     ).toBe(404);
+  });
+
+  it("Thread 对话投影保留消息附件元数据并隐藏模型文件事实", async () => {
+    const resourceAttachments = {
+      resolve: vi.fn(async () => [
+        {
+          resourceId: resourceId("resource_sunflower"),
+          versionId: resourceVersionId("version_sunflower"),
+          name: "向日葵.png",
+          path: "/resources/resource_sunflower/version_sunflower/向日葵.png",
+          mediaType: "image/png",
+          sizeBytes: 940,
+        },
+      ]),
+    };
+    const projected =
+      '这是啥东西\n\n# 用户在本轮提供的文件\n- {"文件名":"向日葵.png","文件地址":"/resources/resource_sunflower/version_sunflower/向日葵.png"}';
+    const enabled = fixture({
+      enableThreadContext: true,
+      threadContextUserText: projected,
+      resourceAttachments,
+    });
+    openApps.push(enabled.app);
+    await enabled.app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "thread-context-file" },
+      payload: { title: "图片上下文" },
+    });
+
+    const response = await enabled.app.inject({
+      method: "GET",
+      url: "/v1/threads/thread_1/context",
+      headers: { authorization: "Bearer token-a" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.items[0]).toMatchObject({
+      role: "user",
+      text: "这是啥东西",
+      attachments: [
+        {
+          resourceId: "resource_sunflower",
+          versionId: "version_sunflower",
+          name: "向日葵.png",
+          mediaType: "image/png",
+          sizeBytes: 940,
+        },
+      ],
+    });
+    expect(resourceAttachments.resolve).toHaveBeenCalledWith({
+      context: { tenantId: "tenant_owner_a", userId: "user_owner_a" },
+      attachments: [
+        {
+          resourceId: "resource_sunflower",
+          versionId: "version_sunflower",
+        },
+      ],
+    });
   });
 
   it("UTF-8 纯文本预览经 API 返回安全文本而不暴露 S3 URL", async () => {

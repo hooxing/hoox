@@ -111,7 +111,26 @@ function fixture(): AdminControlApiContract {
       conversationCount: 3,
       runCount: 9,
     })),
-    createModelDraft: vi.fn(),
+    createModelDraft: vi.fn(
+      async (input: Parameters<AdminControlApiContract["createModelDraft"]>[0]) => ({
+        revision: 1,
+        versionToken: 2,
+        status: "draft" as const,
+        probeStatus: "untested" as const,
+        createdBy: "user_admin",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        updatedAt: "2026-08-25T00:00:00.000Z",
+        configuration: {
+          providerKey: input.providerKey,
+          displayName: input.displayName,
+          protocol: input.protocol,
+          baseUrl: input.baseUrl,
+          credentialConfigured: true,
+          defaultModelId: input.defaultModelId,
+          models: input.models,
+        },
+      }),
+    ),
     createMemoryDraft: vi.fn(),
     createRuntimeSettingsDraft: vi.fn(),
     probe: vi.fn(),
@@ -166,7 +185,12 @@ function changeControl(control: HTMLInputElement | HTMLTextAreaElement, value: s
   control.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
-function requiredControl<T extends HTMLInputElement | HTMLTextAreaElement>(
+function changeSelect(control: HTMLSelectElement, value: string): void {
+  Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set?.call(control, value);
+  control.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function requiredControl<T extends HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
   control: T | null | undefined,
   name: string,
 ): T {
@@ -217,9 +241,9 @@ describe("统一平台管理导航", () => {
     act(() => navigationItem(container, "模型服务").click());
     await settle();
     expect(api.listModelProviders).toHaveBeenCalledOnce();
-    expect(container.textContent).toContain("尚未启用后台模型配置");
-    expect(container.textContent).toContain("部署回退");
-    expect(container.textContent).toContain("已配置，值不可见");
+    expect(container.textContent).toContain("当前使用部署配置");
+    expect(container.textContent).toContain("部署默认");
+    expect(container.textContent).toContain("部署 API Key已配置");
 
     act(() => navigationItem(container, "运行配置").click());
     await settle();
@@ -414,7 +438,7 @@ describe("统一平台管理导航", () => {
     container.remove();
   });
 
-  it("一个 Provider 可添加多个模型并选择启用的默认模型", async () => {
+  it("自定义 Provider 填写一次后直接保存并使用", async () => {
     const api = fixture();
     const container = document.createElement("div");
     document.body.append(container);
@@ -430,32 +454,26 @@ describe("统一平台管理导航", () => {
     if (addCustomProvider === undefined) throw new Error("自定义 Provider 按钮缺失");
     act(() => addCustomProvider.click());
     const addModel = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (item) => item.textContent?.trim() === "添加空白模型",
+      (item) => item.textContent?.trim() === "添加模型",
     );
     if (addModel === undefined) throw new Error("添加模型按钮缺失");
     act(() => addModel.click());
 
-    const rows = [...container.querySelectorAll<HTMLElement>(".model-editor-row")];
+    const rows = [...container.querySelectorAll<HTMLElement>(".simple-model-row")];
     expect(rows).toHaveLength(2);
     const defaultChoices = rows.map((row) =>
       row.querySelector<HTMLInputElement>('input[type="radio"]'),
     );
     expect(defaultChoices.map((choice) => choice?.checked)).toEqual([true, false]);
     act(() => {
-      const firstInputs = rows[0]?.querySelectorAll<HTMLInputElement>(
-        'input:not([type="checkbox"]):not([type="radio"])',
-      );
-      const secondInputs = rows[1]?.querySelectorAll<HTMLInputElement>(
-        'input:not([type="checkbox"]):not([type="radio"])',
-      );
+      const firstInputs = rows[0]?.querySelectorAll<HTMLInputElement>('input:not([type="radio"])');
+      const secondInputs = rows[1]?.querySelectorAll<HTMLInputElement>('input:not([type="radio"])');
       if (firstInputs === undefined || secondInputs === undefined) throw new Error("模型字段缺失");
       changeControl(requiredControl(firstInputs[0], "首个模型 ID"), "model-a");
       changeControl(requiredControl(firstInputs[1], "首个模型名称"), "Model A");
       changeControl(requiredControl(secondInputs[0], "第二个模型 ID"), "model-b");
       changeControl(requiredControl(secondInputs[1], "第二个模型名称"), "Model B");
       rows[1]?.querySelector<HTMLInputElement>('input[type="radio"]')?.click();
-      const secondChecks = rows[1]?.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
-      secondChecks?.[1]?.click();
 
       const form = container.querySelector<HTMLFormElement>(".control-form");
       if (form === null) throw new Error("模型表单缺失");
@@ -478,11 +496,8 @@ describe("统一平台管理导航", () => {
         "https://model.example.com/v1",
       );
       changeControl(
-        requiredControl(
-          form.querySelector<HTMLTextAreaElement>('textarea[name="reason"]'),
-          "变更原因",
-        ),
-        "创建目录",
+        requiredControl(form.querySelector<HTMLInputElement>('input[name="apiKey"]'), "API Key"),
+        "test-provider-key",
       );
       form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
@@ -492,18 +507,25 @@ describe("统一平台管理导航", () => {
       expect.objectContaining({
         providerKey: "main",
         defaultModelId: "model-b",
+        reason: "保存并使用模型配置",
         models: [
           expect.objectContaining({ id: "model-a", enabled: true }),
-          expect.objectContaining({ id: "model-b", enabled: true, reasoning: true }),
+          expect.objectContaining({ id: "model-b", enabled: true }),
         ],
       }),
     );
+    expect(api.publish).toHaveBeenCalledWith("model-providers", "main", 1, {
+      expectedVersionToken: 2,
+      reason: "保存并使用模型配置",
+    });
+    expect(container.textContent).not.toContain("变更原因");
+    expect(container.textContent).not.toContain("探测连接");
 
     act(() => root.unmount());
     container.remove();
   });
 
-  it("直接展示当前生效模型、版本和新 Run 边界", async () => {
+  it("直接展示当前使用模型和新 Run 边界，不暴露内部版本", async () => {
     const api = fixture();
     const activeModel = { ...modelRevision("deepseek", "healthy"), status: "active" as const };
     vi.mocked(api.overview).mockResolvedValue({ ...overview, activeModel });
@@ -519,18 +541,18 @@ describe("统一平台管理导航", () => {
 
     const effectiveState = container.querySelector<HTMLElement>(".model-effective-state.active");
     if (effectiveState === null) throw new Error("当前模型生效状态缺失");
-    expect(effectiveState.textContent).toContain("当前生效");
+    expect(effectiveState.textContent).toContain("当前使用");
     expect(effectiveState.textContent).toContain("DeepSeek / model-a");
-    expect(effectiveState.textContent).toContain("Revision 1");
-    expect(effectiveState.textContent).toContain("Generation 3");
-    expect(effectiveState.textContent).toContain("只影响启用后创建的新 Run");
-    expect(effectiveState.textContent).toContain("值不可见");
+    expect(effectiveState.textContent).toContain("新 Run 使用这份配置");
+    expect(effectiveState.textContent).toContain("已经开始的 Run 保持不变");
+    expect(effectiveState.textContent).not.toContain("Revision");
+    expect(effectiveState.textContent).not.toContain("Generation");
 
     act(() => root.unmount());
     container.remove();
   });
 
-  it("未探测成功的 Provider 不能启用，健康版本可以启用", async () => {
+  it("模型页不再展示探测、启用原因和版本记录", async () => {
     const api = fixture();
     vi.mocked(api.listModelProviders).mockResolvedValue([
       modelRevision("deepseek", "failed"),
@@ -545,49 +567,20 @@ describe("统一平台管理导航", () => {
     act(() => navigationItem(container, "模型服务").click());
     await settle();
 
-    const failedCard = [...container.querySelectorAll<HTMLElement>(".control-revision")].find(
-      (item) => item.textContent?.includes("deepseek"),
-    );
-    const healthyCard = [...container.querySelectorAll<HTMLElement>(".control-revision")].find(
-      (item) => item.textContent?.includes("openrouter"),
-    );
-    if (failedCard === undefined || healthyCard === undefined) throw new Error("Provider 版本缺失");
-    act(() => {
-      changeControl(
-        requiredControl(failedCard.querySelector<HTMLInputElement>("input"), "失败版本原因"),
-        "重试启用",
-      );
-      changeControl(
-        requiredControl(healthyCard.querySelector<HTMLInputElement>("input"), "健康版本原因"),
-        "启用健康版本",
-      );
-    });
-
-    const failedPublish = [...failedCard.querySelectorAll<HTMLButtonElement>("button")].find(
-      (item) => item.textContent?.trim() === "启用此配置",
-    );
-    const healthyPublish = [...healthyCard.querySelectorAll<HTMLButtonElement>("button")].find(
-      (item) => item.textContent?.trim() === "启用此配置",
-    );
-    if (failedPublish === undefined || healthyPublish === undefined) {
-      throw new Error("Provider 启用按钮缺失");
-    }
-    expect(failedPublish.disabled).toBe(true);
-    expect(failedCard.textContent).toContain("重新探测成功后才能启用");
-    expect(healthyPublish.disabled).toBe(false);
-
-    await act(async () => healthyPublish.click());
-    await settle();
-    expect(api.publish).toHaveBeenCalledWith("model-providers", "openrouter", 1, {
-      expectedVersionToken: 2,
-      reason: "启用健康版本",
-    });
+    expect(container.querySelectorAll(".provider-settings-list article")).toHaveLength(2);
+    expect(container.textContent).toContain("DeepSeek");
+    expect(container.textContent).toContain("OpenRouter");
+    expect(container.querySelector(".control-revision")).toBeNull();
+    expect(container.textContent).not.toContain("版本记录");
+    expect(container.textContent).not.toContain("探测连接");
+    expect(container.textContent).not.toContain("启用此配置");
+    expect(container.textContent).not.toContain("变更原因");
 
     act(() => root.unmount());
     container.remove();
   });
 
-  it("隐藏历史疑似密钥，并在录入时立即清空", async () => {
+  it("不回显历史疑似密钥，并在录入时立即清空", async () => {
     const secretLikeIdentifier = `sk-${"a".repeat(32)}`;
     const api = fixture();
     vi.mocked(api.listModelProviders).mockResolvedValue([
@@ -603,7 +596,7 @@ describe("统一平台管理导航", () => {
     await settle();
     expect(container.textContent).not.toContain(secretLikeIdentifier);
     expect(container.textContent).toContain("疑似密钥（已隐藏）");
-    expect(container.textContent).toContain("页面已隐藏并禁止继续操作");
+    expect(container.textContent).toContain("已隔离");
 
     const addCustomProvider = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (item) => item.textContent?.trim() === "添加自定义 Provider",
@@ -618,9 +611,9 @@ describe("统一平台管理导航", () => {
     await settle();
 
     expect(providerKey.value).toBe("");
-    expect(container.textContent).toContain("检测到疑似 API Key，内容已清空");
+    expect(container.textContent).toContain("这里请填写名称，不是 API Key");
     const save = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (item) => item.textContent?.trim() === "保存待启用配置",
+      (item) => item.textContent?.trim() === "保存并使用",
     );
     expect(save?.disabled).toBe(true);
 
@@ -628,21 +621,8 @@ describe("统一平台管理导航", () => {
     container.remove();
   });
 
-  it("自定义 Provider 可按模型名称读取 Pi 元数据", async () => {
+  it("自定义 Provider 只展示保存所需字段", async () => {
     const api = fixture();
-    const catalogModel: PiModelCatalogModelDto = {
-      providerId: "deepseek",
-      providerName: "DeepSeek",
-      id: "deepseek-chat",
-      name: "DeepSeek Chat",
-      api: "openai-completions",
-      reasoning: false,
-      input: ["text"],
-      contextWindow: 128_000,
-      maxTokens: 8_192,
-    };
-    const lookupPromise = Promise.resolve<readonly PiModelCatalogModelDto[]>([catalogModel]);
-    vi.mocked(api.findPiModelCatalogModels).mockImplementationOnce(() => lookupPromise);
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -657,37 +637,20 @@ describe("统一平台管理导航", () => {
     if (addCustomProvider === undefined) throw new Error("自定义 Provider 按钮缺失");
     act(() => addCustomProvider.click());
 
-    const query = container.querySelector<HTMLInputElement>(
-      'input[placeholder="例如 deepseek-chat"]',
-    );
-    act(() => changeControl(requiredControl(query, "模型查询"), "DeepSeek Chat"));
-    const search = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (item) => item.textContent?.trim() === "从 Pi 查询",
-    );
-    if (search === undefined) throw new Error("Pi 查询按钮缺失");
-    await act(async () => {
-      search.click();
-      await lookupPromise;
-      await Promise.resolve();
-    });
-    const result = [
-      ...container.querySelectorAll<HTMLButtonElement>(".pi-search-results button"),
-    ].find((item) => item.textContent?.includes("deepseek-chat"));
-    if (result === undefined) throw new Error("Pi 查询结果缺失");
-    act(() => result.click());
-
-    expect(api.findPiModelCatalogModels).toHaveBeenCalledWith({
-      query: "DeepSeek Chat",
-      limit: 12,
-    });
-    expect(container.textContent).toContain("DeepSeek Chat");
-    expect(container.textContent).toContain("128,000 ctx");
+    expect(container.querySelector('input[name="providerKey"]')).not.toBeNull();
+    expect(container.querySelector('input[name="displayName"]')).not.toBeNull();
+    expect(container.querySelector('input[name="baseUrl"]')).not.toBeNull();
+    expect(container.querySelector('input[name="apiKey"]')).not.toBeNull();
+    expect(container.querySelector(".simple-model-row")).not.toBeNull();
+    expect(container.textContent).not.toContain("从 Pi 查询");
+    expect(container.textContent).not.toContain("上下文窗口");
+    expect(container.textContent).not.toContain("最大输出 Token");
 
     act(() => root.unmount());
     container.remove();
   });
 
-  it("内置 Provider 自动载入对应的 Pi 模型目录", async () => {
+  it("内置 Provider 自动载入模型并只要求选择默认模型", async () => {
     const api = fixture();
     const piModels: readonly PiModelCatalogModelDto[] = [
       {
@@ -736,9 +699,54 @@ describe("统一平台管理导航", () => {
       providerId: "deepseek",
       limit: 100,
     });
-    expect(container.querySelectorAll(".model-editor-row")).toHaveLength(2);
+    expect(
+      container.querySelectorAll<HTMLSelectElement>(".model-primary-choice select option"),
+    ).toHaveLength(2);
     expect(container.textContent).toContain("DeepSeek Reasoner");
-    expect(container.textContent).toContain("已从 Pi 载入 2 个模型");
+    expect(container.textContent).toContain("直接选择要使用的模型即可");
+    expect(container.querySelector<HTMLInputElement>('input[name="providerKey"]')?.type).toBe(
+      "hidden",
+    );
+    expect(container.textContent).not.toContain("Provider 内部标识");
+    expect(container.textContent).not.toContain("变更原因");
+
+    const modelSelect = requiredControl(
+      container.querySelector<HTMLSelectElement>(".model-primary-choice select"),
+      "默认模型",
+    );
+    const secondModel = modelSelect.options[1];
+    if (secondModel === undefined) throw new Error("第二个模型缺失");
+    act(() => {
+      changeSelect(modelSelect, secondModel.value);
+      changeControl(
+        requiredControl(
+          container.querySelector<HTMLInputElement>('input[name="apiKey"]'),
+          "API Key",
+        ),
+        "test-deepseek-key",
+      );
+      const form = container.querySelector<HTMLFormElement>(".control-form");
+      if (form === null) throw new Error("模型表单缺失");
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+
+    expect(api.createModelDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerKey: "deepseek",
+        apiKey: "test-deepseek-key",
+        defaultModelId: "deepseek-reasoner",
+        reason: "保存并使用模型配置",
+        models: [
+          expect.objectContaining({ id: "deepseek-chat", enabled: true }),
+          expect.objectContaining({ id: "deepseek-reasoner", enabled: true }),
+        ],
+      }),
+    );
+    expect(api.publish).toHaveBeenCalledWith("model-providers", "deepseek", 1, {
+      expectedVersionToken: 2,
+      reason: "保存并使用模型配置",
+    });
 
     act(() => root.unmount());
     container.remove();
@@ -794,7 +802,7 @@ describe("统一平台管理导航", () => {
     expect(container.textContent).toContain("DeepSeek");
     expect(container.textContent).toContain("25 个可配置 Provider");
     expect(container.textContent).toContain("无法确认当前实际使用的模型");
-    expect(container.textContent).toContain("Pi 目录只能用于准备配置");
+    expect(container.textContent).toContain("暂时无法读取或保存模型配置");
 
     const addCustomProvider = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (item) => item.textContent?.trim() === "添加自定义 Provider",

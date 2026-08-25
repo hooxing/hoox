@@ -142,7 +142,7 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
 1. 由 Database Admin 创建 `DATABASE_ADMIN_CONTROL_ROLE`，要求 `NOINHERIT`、无角色成员、无对象 ownership、
    无 `CREATE`/`TEMPORARY`，并与 Migrator、Runtime、Skill Publisher、Worker Coordinator、Team Coordinator
    角色互异。将该角色的连接串写入本机忽略文件中的 `ADMIN_CONTROL_DATABASE_URL`。
-2. 配置 `ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST`；模型和记忆待启用配置只能使用受控 Provider 地址，连接探测只允许
+2. 配置 `ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST`；模型配置和记忆待启用配置只能使用受控 Provider 地址，连接探测只允许
    访问该白名单。`providerKey` 只是平台内部标识，不是 API Key：领域入口拒绝常见密钥形态，页面会清空新输入并
    遮蔽、隔离历史异常标识，控制 API 的列表、概览和审计读取投影也只返回固定脱敏占位符。模型密钥由页面一次性写入，
    Admin API 使用平台级主密钥加密后绑定到具体 Provider Revision；页面、控制 API、审计和错误响应只返回
@@ -150,19 +150,23 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
    必须在 Provider 侧轮换，不能把响应脱敏视为秘密已经从历史事实中删除。
 3. 执行迁移与开发身份初始化后，由受控数据库运维事务向
    `platform_control_operators(user_id, role, status)` 写入 `viewer`、`operator` 或 `admin`。控制 API 不提供自助提权
-   路由；operator 可保存待启用配置和执行探测，只有 admin 能启用或回滚。模型与记忆 Provider 必须探测成功后才能
-   启用，该门禁由领域服务执行，不能依赖管理页面按钮。
+   路由；operator 可保存记忆待启用配置和执行探测，只有 admin 能保存并启用模型配置、启用记忆配置或执行回滚。
+   模型配置在页面点击“保存并使用”后直接启用，不要求预先探测；记忆 Provider 仍必须探测成功后才能启用，该门禁
+   由领域服务执行，不能依赖管理页面按钮。
 
-模型配置以 Provider 为聚合根：一个 Provider revision 可以维护多个模型条目并启用其中任意子集，管理员必须从启用
-模型中指定默认模型。管理 Web 从锁定版本的 Pi Provider 目录载入可覆盖的能力初始值；内置 Provider 按 Provider ID
-载入，自定义 Provider 可按模型 ID 或名称查询。管理员修改后才形成显式 revision，Worker 不会在运行时重新用 Pi
-目录覆盖已启用数据。后台不可用时仍可浏览 Pi 目录和编辑初始值，但这些内容没有保存、探测或生效。
+模型配置以 Provider 为聚合根：一个 Provider revision 可以维护多个模型条目，并指定一个默认模型。管理 Web 从锁定版本的
+Pi Provider 目录载入内置 Provider 的模型能力；自定义 Provider 只要求填写地址、API Key 和模型 ID。管理员点击
+“保存并使用”后形成显式 revision 并立即切换 active，
+Worker 不会在运行时重新用 Pi 目录覆盖已启用数据。模型页面不展示草稿、Revision 历史、独立探测操作或变更原因；
+这些仍存在的服务端事实只用于持久化、审计与 Run 快照。后台不可用时仍可浏览 Pi 目录和编辑初始值，但这些内容没有
+保存或生效。
 
 启用配置会递增全局 generation；Worker 首次处理 Run 时将模型、记忆与运行参数 revision 固化到
 `run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本及其托管密钥。没有已启用模型时回退部署时
-`MODEL_*` 配置。模型页面必须直接显示 active revision 或部署回退，并标明只影响新 Run；Provider 密钥只显示配置状态，
+`MODEL_*` 配置。模型页面必须直接显示当前 Provider 与默认模型或部署回退，并标明只影响新 Run；Provider 密钥只显示配置状态，
 不显示值。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 只是部署级加密根，不是 Provider 调用密钥。数据库连接、角色、JWT、TLS、S3、Sandbox 和监听地址只在页面展示“已配置/需重新部署”，不存在通用 ENV
 写接口。完整边界见
+[模型配置保存即启用决策](../decisions/20260825180549-direct-model-configuration-activation.md)、
 [Provider 标识与启用门禁决策](../decisions/20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md)、
 [模型 Provider 凭据托管决策](../decisions/20260825173500-managed-model-provider-credentials.md)、
 [独立控制面决策](../decisions/20260819165254-independent-admin-control-plane.md)、

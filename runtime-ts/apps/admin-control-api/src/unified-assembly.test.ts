@@ -30,6 +30,7 @@ vi.mock("@hoox/persistence", () => ({
   createPostgresPool: mocks.createPool,
   probePostgres: mocks.probePostgres,
   probeS3StableSkillPublisher: mocks.probePublisher,
+  ModelProviderCredentialCipher: class {},
   PgAdminControlRepository: class {
     constructor(pool: unknown) {
       mocks.adminRepositoryConstructed(pool);

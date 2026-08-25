@@ -367,22 +367,64 @@ describe("后台控制面领域规则", () => {
     );
   });
 
-  it("模型与记忆 Provider 只有探测成功后才允许启用", async () => {
-    const revision = {
-      revision: 1,
-      versionToken: 2,
-      status: "draft" as const,
-      probeStatus: "failed" as "failed" | "healthy",
-      createdBy: "admin",
-      createdAt: "2026-08-25T00:00:00.000Z",
-      updatedAt: "2026-08-25T00:01:00.000Z",
-      configuration: modelConfiguration(),
-    };
-    const publish = vi.fn(async () => ({ outcome: "applied" as const, value: revision }));
+  it.each(["untested", "failed"] as const)(
+    "模型 Provider 无需探测即可启用（%s）",
+    async (probeStatus) => {
+      const revision = {
+        revision: 1,
+        versionToken: 2,
+        status: "draft" as const,
+        probeStatus,
+        createdBy: "admin",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        updatedAt: "2026-08-25T00:01:00.000Z",
+        configuration: modelConfiguration(),
+      };
+      const publish = vi.fn(async () => ({ outcome: "applied" as const, value: revision }));
+      const repository = {
+        resolveRole: async () => "admin" as const,
+        resolveModelCredential: async () => "test-model-key",
+        listModelProviders: async () => [revision],
+        listMemoryProviders: async () => [],
+        listRuntimeSettings: async () => [],
+        getActiveRuntimeSettings: async () => undefined,
+        generation: async () => 0,
+        createModelDraft: async () => ({ outcome: "not_found" as const }),
+        createMemoryDraft: async () => ({ outcome: "not_found" as const }),
+        createRuntimeSettingsDraft: async () => ({ outcome: "not_found" as const }),
+        recordProbe: async () => ({ outcome: "not_found" as const }),
+        publish,
+        listAudits: async () => [],
+        listUsers: async () => ({ items: [], total: 0 }),
+        updateUserStatus: async () => ({ outcome: "not_found" as const }),
+      } satisfies AdminControlRepository;
+      const service = new AdminControlService(
+        repository,
+        { read: async () => Promise.reject(new Error("unused")) },
+        { probeModel: async () => undefined, probeMemory: async () => undefined },
+        [],
+      );
+
+      await expect(
+        service.publish(
+          { actorUserId: "admin", idempotencyKey: "publish-model", requestDigest: "e".repeat(64) },
+          {
+            kind: "model_provider",
+            objectKey: "main",
+            revision: 1,
+            command: { expectedVersionToken: 2, reason: "保存后直接启用" },
+          },
+        ),
+      ).resolves.toBe(revision);
+      expect(publish).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("未探测的记忆 Provider 仍禁止启用", async () => {
     const repository = {
       resolveRole: async () => "admin" as const,
       resolveModelCredential: async () => "test-model-key",
-      listModelProviders: async () => [revision],
+      listModelProviders: async () => [],
       listMemoryProviders: async () => [],
       listRuntimeSettings: async () => [],
       getActiveRuntimeSettings: async () => undefined,
@@ -391,55 +433,14 @@ describe("后台控制面领域规则", () => {
       createMemoryDraft: async () => ({ outcome: "not_found" as const }),
       createRuntimeSettingsDraft: async () => ({ outcome: "not_found" as const }),
       recordProbe: async () => ({ outcome: "not_found" as const }),
-      publish,
+      publish: async () => ({ outcome: "not_found" as const }),
       listAudits: async () => [],
       listUsers: async () => ({ items: [], total: 0 }),
       updateUserStatus: async () => ({ outcome: "not_found" as const }),
     } satisfies AdminControlRepository;
-    const service = new AdminControlService(
-      repository,
-      { read: async () => Promise.reject(new Error("unused")) },
-      { probeModel: async () => undefined, probeMemory: async () => undefined },
-      [],
-    );
-
-    await expect(
-      service.publish(
-        { actorUserId: "admin", idempotencyKey: "publish-model", requestDigest: "e".repeat(64) },
-        {
-          kind: "model_provider",
-          objectKey: "main",
-          revision: 1,
-          command: { expectedVersionToken: 2, reason: "启用失败探针" },
-        },
-      ),
-    ).rejects.toEqual(
-      expect.objectContaining<Partial<AdminControlServiceError>>({ code: "CONFLICT" }),
-    );
-    expect(publish).not.toHaveBeenCalled();
-
-    revision.probeStatus = "healthy";
-    await expect(
-      service.publish(
-        {
-          actorUserId: "admin",
-          idempotencyKey: "publish-healthy-model",
-          requestDigest: "f".repeat(64),
-        },
-        {
-          kind: "model_provider",
-          objectKey: "main",
-          revision: 1,
-          command: { expectedVersionToken: 2, reason: "启用健康探针" },
-        },
-      ),
-    ).resolves.toBe(revision);
-    expect(publish).toHaveBeenCalledOnce();
-
     const memoryPublish = vi.fn(async () => ({ outcome: "not_found" as const }));
     const memoryRepository = {
       ...repository,
-      listModelProviders: async () => [],
       listMemoryProviders: async () => [
         {
           revision: 1,

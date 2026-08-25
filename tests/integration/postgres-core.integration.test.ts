@@ -49,6 +49,7 @@ import {
   PgAdminControlRepository,
   PgRuntimeControlConfigurationRepository,
 } from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
+import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
 import {
   createPostgresPool,
   type Pool,
@@ -355,14 +356,17 @@ afterAll(async () => {
 });
 
 describe("PostgreSQL 迁移与强权限边界", () => {
-  it("Admin Control 版本发布后新 Run 固化 active revision，旧 Run 在切换后保持不变", async () => {
+  it("模型保存可直接启用并由新 Run 固化，旧 Run 在切换后保持不变", async () => {
     const firstRun = await createFixture("control_first");
     await migratorPool.query(
       "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
       [firstRun.user.id],
     );
     try {
-      const repository = new PgAdminControlRepository(adminControlPool);
+      const credentialCipher = new ModelProviderCredentialCipher(
+        "integration-model-credential-root-at-least-32-bytes",
+      );
+      const repository = new PgAdminControlRepository(adminControlPool, credentialCipher);
       const service = new AdminControlService(
         repository,
         repository,
@@ -374,13 +378,34 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         idempotencyKey: `control-${suffix}-0001`,
         requestDigest: "a".repeat(64),
       });
+      const memoryDraft = await service.createMemoryDraft(context("create-memory"), {
+        providerKey: "memory",
+        displayName: "Mem0",
+        providerKind: "mem0",
+        baseUrl: "https://memory.example.invalid/v1",
+        apiSecretRef: "deployment:memory-api",
+        scopeSecretRef: "deployment:memory-scope",
+        requestTimeoutMs: 10_000,
+        enabled: true,
+        reason: "创建记忆配置",
+      });
+      await expect(
+        repository.publish({
+          ...context("publish-memory-without-probe"),
+          kind: "memory_provider",
+          objectKey: "memory",
+          revision: memoryDraft.revision,
+          expectedVersionToken: memoryDraft.versionToken,
+          reason: "未探测时不得启用",
+        }),
+      ).resolves.toEqual({ outcome: "conflict" });
       const createModel = async (modelId: string, suffix: string) => {
         const draft = await service.createModelDraft(context(`create-${suffix}`), {
           providerKey: "main",
           displayName: "主模型",
           protocol: "openai-compatible",
           baseUrl: "https://model.example.invalid/v1",
-          secretRef: "deployment:model",
+          apiKey: "integration-model-api-key",
           defaultModelId: modelId,
           models: [
             {
@@ -414,22 +439,19 @@ describe("PostgreSQL 迁移与强权限边界", () => {
             ),
         );
         expect(runtimeDraft.rowCount).toBe(0);
-        const probed = await service.probe(context(`probe-${suffix}`), {
-          kind: "model_provider",
-          revision: draft,
-          expectedVersionToken: draft.versionToken,
-          reason: `检查 ${modelId}`,
-        });
         return await service.publish(context(`publish-${suffix}`), {
           kind: "model_provider",
           objectKey: "main",
-          revision: probed.revision,
-          command: { expectedVersionToken: probed.versionToken, reason: `发布 ${modelId}` },
+          revision: draft.revision,
+          command: { expectedVersionToken: draft.versionToken, reason: `保存并使用 ${modelId}` },
         });
       };
 
       await createModel("model-a", "a");
-      const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(runtimePool);
+      const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(
+        runtimePool,
+        credentialCipher,
+      );
       const firstSnapshot = await runtimeConfigurations.resolveForRun({
         tenantId: firstRun.scope.tenantId,
         runId: firstRun.run.id,

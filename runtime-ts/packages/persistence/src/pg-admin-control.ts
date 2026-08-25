@@ -588,7 +588,8 @@ export class PgAdminControlRepository
             if (safeInteger(current.version_token, "版本令牌", 1) !== input.expectedVersionToken) {
               return { outcome: "conflict" };
             }
-            if (input.kind !== "runtime_settings" && current.probe_status !== "healthy") {
+            if (input.kind === "memory_provider" && current.probe_status !== "healthy") {
+              // 模型配置保存后直接启用；只有记忆服务继续保留独立连接探测门禁。
               return { outcome: "conflict" };
             }
             if (!(await publishPairIsCompatible(client, input.kind, current))) {

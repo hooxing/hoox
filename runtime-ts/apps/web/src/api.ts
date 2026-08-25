@@ -219,11 +219,17 @@ export type RunEventPage = {
   readonly hasMore?: boolean;
 };
 
+export type ThreadContextAttachment = Pick<
+  UploadedResource,
+  "resourceId" | "versionId" | "name" | "mediaType" | "sizeBytes"
+>;
+
 export type ThreadContextMessage = {
   readonly sequence: number;
   readonly runId?: string;
   readonly role: "user" | "assistant" | "runtime";
   readonly text: string;
+  readonly attachments?: readonly ThreadContextAttachment[];
   readonly phase?: "commentary" | "final_answer";
   readonly createdAt: string;
 };
@@ -628,6 +634,15 @@ export class RuntimeApi {
     return this.downloadHistoryFileForTenant(this.activeTenantId, file);
   }
 
+  async previewHistoryFile(file: Pick<HistoryFile, "resourceId" | "versionId">): Promise<string> {
+    const data = await this.request<unknown>(
+      `/v1/me/history-files/${encodeURIComponent(file.resourceId)}/versions/${encodeURIComponent(file.versionId)}/preview`,
+    );
+    const candidate = record(data)?.url;
+    if (typeof candidate === "string") return candidate;
+    throw new ApiError("历史图片预览地址格式无效", 502, true);
+  }
+
   async downloadHistoryFileForTenant(
     tenantId: string | undefined,
     file: Pick<HistoryFile, "resourceId" | "versionId">,
@@ -916,6 +931,19 @@ export class RuntimeApi {
   }
 }
 
+function isThreadContextAttachment(value: unknown): value is ThreadContextAttachment {
+  const item = record(value);
+  return (
+    item !== undefined &&
+    typeof item.resourceId === "string" &&
+    typeof item.versionId === "string" &&
+    typeof item.name === "string" &&
+    typeof item.mediaType === "string" &&
+    Number.isSafeInteger(item.sizeBytes) &&
+    (item.sizeBytes as number) >= 0
+  );
+}
+
 function isThreadContextMessage(value: unknown): value is ThreadContextMessage {
   const item = record(value);
   return (
@@ -925,6 +953,8 @@ function isThreadContextMessage(value: unknown): value is ThreadContextMessage {
     item.sequence > 0 &&
     (item.role === "user" || item.role === "assistant" || item.role === "runtime") &&
     typeof item.text === "string" &&
+    (item.attachments === undefined ||
+      (Array.isArray(item.attachments) && item.attachments.every(isThreadContextAttachment))) &&
     (item.phase === undefined || item.phase === "commentary" || item.phase === "final_answer") &&
     typeof item.createdAt === "string"
   );

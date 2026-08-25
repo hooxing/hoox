@@ -140,6 +140,7 @@ type WorkspaceApi = Pick<
   | "uploadResource"
 > & {
   readonly listThreadContext?: RuntimeApi["listThreadContext"];
+  readonly previewHistoryFile?: RuntimeApi["previewHistoryFile"];
   readonly getThread?: RuntimeApi["getThread"];
   readonly getThreadContinuity?: RuntimeApi["getThreadContinuity"];
   readonly submitThreadInput?: RuntimeApi["submitThreadInput"];
@@ -922,6 +923,7 @@ function AuthenticatedWorkspace({
         {
           localId,
           text: request,
+          attachments,
           expectedUserOccurrence,
           disposition: receipt?.disposition ?? "queued",
           ...(receipt === undefined ? {} : { receipt }),
@@ -1385,6 +1387,11 @@ function AuthenticatedWorkspace({
                     apiClient.listEvents(selected.id, runId, after, limit),
                   )
                 }
+                {...(apiClient.previewHistoryFile === undefined
+                  ? {}
+                  : {
+                      loadAttachmentUrl: apiClient.previewHistoryFile.bind(apiClient),
+                    })}
                 {...(state.run === undefined
                   ? {}
                   : { currentRun: state.run, currentRunEvents: state.events })}

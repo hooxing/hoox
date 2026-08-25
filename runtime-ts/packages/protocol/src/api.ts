@@ -194,12 +194,25 @@ export const RunEventPageDtoSchema = Type.Object(
 );
 export type RunEventPageDto = Static<typeof RunEventPageDtoSchema>;
 
+export const ThreadContextAttachmentDtoSchema = Type.Object(
+  {
+    resourceId: IdSchema,
+    versionId: IdSchema,
+    name: Type.String({ minLength: 1, maxLength: 512 }),
+    mediaType: Type.String({ minLength: 1, maxLength: 256 }),
+    sizeBytes: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
+  },
+  { ...strict, $id: "v1.ThreadContextAttachmentDto" },
+);
+export type ThreadContextAttachmentDto = Static<typeof ThreadContextAttachmentDtoSchema>;
+
 export const ThreadContextMessageDtoSchema = Type.Object(
   {
     sequence: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
     runId: Type.Optional(IdSchema),
     role: Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("runtime")]),
     text: Type.String({ maxLength: 8 * 1024 * 1024 }),
+    attachments: Type.Optional(Type.Array(ThreadContextAttachmentDtoSchema, { maxItems: 20 })),
     phase: Type.Optional(Type.Union([Type.Literal("commentary"), Type.Literal("final_answer")])),
     createdAt: IsoTimestampSchema,
   },

@@ -142,6 +142,7 @@ import {
   type ResourceFilesystemCatalog,
   ResourceServiceError,
   type ResourceUploadPort,
+  attachmentReferencesFromUserPrompt,
   stripAttachmentsFromUserFacingPrompt,
 } from "@hoox/resource";
 import {
@@ -1402,52 +1403,63 @@ export function createApiApp(
       },
     );
 
-    app.get<{ Params: HistoryFileDownloadPath }>(
-      "/v1/me/history-files/:resourceId/versions/:versionId/download",
-      {
-        schema: {
-          params: HistoryFileDownloadPathSchema,
-          response: {
-            200: HistoryFileDownloadSuccessEnvelopeSchema,
-            400: ErrorEnvelopeSchema,
-            401: ErrorEnvelopeSchema,
-            404: ErrorEnvelopeSchema,
-            500: ErrorEnvelopeSchema,
-            503: ErrorEnvelopeSchema,
+    for (const [path, disposition] of [
+      ["/v1/me/history-files/:resourceId/versions/:versionId/download", "download"],
+      ["/v1/me/history-files/:resourceId/versions/:versionId/preview", "preview"],
+    ] as const) {
+      app.get<{ Params: HistoryFileDownloadPath }>(
+        path,
+        {
+          schema: {
+            params: HistoryFileDownloadPathSchema,
+            response: {
+              200: HistoryFileDownloadSuccessEnvelopeSchema,
+              400: ErrorEnvelopeSchema,
+              401: ErrorEnvelopeSchema,
+              404: ErrorEnvelopeSchema,
+              422: ErrorEnvelopeSchema,
+              500: ErrorEnvelopeSchema,
+              503: ErrorEnvelopeSchema,
+            },
           },
         },
-      },
-      async (request, reply) => {
-        void reply.header("cache-control", "private, no-store");
-        void reply.header("pragma", "no-cache");
-        const auth = await authenticate(request);
-        const file = await historyFiles.resolve({
-          context: auth.scope,
-          resourceId: request.params.resourceId,
-          versionId: request.params.versionId,
-        });
-        const delivery = await blobs.presignDownload({
-          scope: { tenantId: auth.scope.tenantId },
-          blob: { kind: "stable", ...file.object },
-          ttlSeconds: 300,
-          responseMediaType: file.mediaType,
-          delivery: "artifact-download",
-          downloadName: safeArtifactDownloadName(file.entryName, file.resourceId),
-        });
-        // 签名后重读历史关系；成员撤销或文件关系漂移时不得留下可用下载 URL。
-        const confirmed = await historyFiles.resolve({
-          context: auth.scope,
-          resourceId: request.params.resourceId,
-          versionId: request.params.versionId,
-        });
-        if (!sameHistoryFileAuthorization(file, confirmed)) throw new ApiFailure("not_found");
-        return success(request, {
-          file: historyFileDto(file),
-          url: validateArtifactDeliveryUrl(delivery),
-          expiresInSeconds: 300,
-        });
-      },
-    );
+        async (request, reply) => {
+          void reply.header("cache-control", "private, no-store");
+          void reply.header("pragma", "no-cache");
+          const auth = await authenticate(request);
+          const file = await historyFiles.resolve({
+            context: auth.scope,
+            resourceId: request.params.resourceId,
+            versionId: request.params.versionId,
+          });
+          if (disposition === "preview" && !isInlineBinaryPreviewMediaType(file.mediaType)) {
+            throw new ApiFailure("invalid_state");
+          }
+          const delivery = await blobs.presignDownload({
+            scope: { tenantId: auth.scope.tenantId },
+            blob: { kind: "stable", ...file.object },
+            ttlSeconds: 300,
+            responseMediaType: file.mediaType,
+            delivery: disposition === "preview" ? "inline-preview" : "artifact-download",
+            ...(disposition === "download"
+              ? { downloadName: safeArtifactDownloadName(file.entryName, file.resourceId) }
+              : {}),
+          });
+          // 签名后重读历史关系；成员撤销或文件关系漂移时不得留下可用交付 URL。
+          const confirmed = await historyFiles.resolve({
+            context: auth.scope,
+            resourceId: request.params.resourceId,
+            versionId: request.params.versionId,
+          });
+          if (!sameHistoryFileAuthorization(file, confirmed)) throw new ApiFailure("not_found");
+          return success(request, {
+            file: historyFileDto(file),
+            url: validateArtifactDeliveryUrl(delivery),
+            expiresInSeconds: 300,
+          });
+        },
+      );
+    }
   }
 
   if (
@@ -1908,14 +1920,49 @@ export function createApiApp(
           limit: request.query.limit ?? 100,
         });
         if (read === undefined || read.outcome === "not_found") throw new ApiFailure("not_found");
-        return success(request, {
-          items: read.items.map((item) =>
-            item.role === "user"
-              ? { ...item, text: stripAttachmentsFromUserFacingPrompt(item.text) }
-              : item,
-          ),
-          hasMore: read.hasMore,
-        });
+        const items = await Promise.all(
+          read.items.map(async (item) => {
+            if (item.role !== "user") return item;
+            const references = attachmentReferencesFromUserPrompt(item.text);
+            const attachments =
+              normalizedDependencies.resourceAttachments === undefined
+                ? []
+                : (
+                    await Promise.all(
+                      references.map(async (attachment) => {
+                        try {
+                          return (
+                            await normalizedDependencies.resourceAttachments?.resolve({
+                              context: auth.scope,
+                              attachments: [attachment],
+                            })
+                          )?.[0];
+                        } catch (error) {
+                          // 历史消息正文仍需可读；已删除或失去可见性的附件只从展示投影中省略。
+                          if (error instanceof ResourceServiceError && error.code === "NOT_FOUND") {
+                            return undefined;
+                          }
+                          throw error;
+                        }
+                      }),
+                    )
+                  )
+                    .filter((attachment) => attachment !== undefined)
+                    .map(({ resourceId, versionId, name, mediaType, sizeBytes }) => ({
+                      resourceId,
+                      versionId,
+                      name,
+                      mediaType,
+                      sizeBytes,
+                    }));
+            return {
+              ...item,
+              text: stripAttachmentsFromUserFacingPrompt(item.text),
+              ...(attachments.length === 0 ? {} : { attachments }),
+            };
+          }),
+        );
+        return success(request, { items, hasMore: read.hasMore });
       },
     );
   }

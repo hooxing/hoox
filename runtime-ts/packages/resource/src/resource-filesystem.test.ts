@@ -12,6 +12,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ResourceCatalog, TrustedResourceContext } from "./contracts.js";
 import {
   appendAttachmentsToLatestUserPrompt,
+  attachmentReferencesFromUserPrompt,
   createResourceFilesystemCapabilityCodec,
   historyFilesystemCollisionName,
   historyFilesystemDirectoryName,
@@ -60,11 +61,22 @@ describe("Resource 只读文件系统", () => {
     expect(projected).toContain("分析一下\n\n# 用户在本轮提供的文件");
     expect(projected).toContain(JSON.stringify({ 文件名: "设计稿.png", 文件地址: path }));
     expect(stripAttachmentsFromUserFacingPrompt(projected)).toBe("分析一下");
+    expect(attachmentReferencesFromUserPrompt(projected)).toEqual([
+      {
+        resourceId: "resource-path-test",
+        versionId: "version-path-test",
+      },
+    ]);
     expect(
       stripAttachmentsFromUserFacingPrompt(
         '旧请求\n\n# 用户在本轮上传的文件\n- {"文件名":"旧文件.txt"}',
       ),
     ).toBe("旧请求");
+    expect(
+      attachmentReferencesFromUserPrompt(
+        `${projected}\n- 非法 JSON\n- ${JSON.stringify({ 文件地址: "/workspace/not-resource.png" })}`,
+      ),
+    ).toEqual([{ resourceId: "resource-path-test", versionId: "version-path-test" }]);
   });
 
   it("历史路径使用面向人的语义名称，重名时才增加序号", () => {

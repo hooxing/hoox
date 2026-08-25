@@ -144,8 +144,9 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
    角色互异。将该角色的连接串写入本机忽略文件中的 `ADMIN_CONTROL_DATABASE_URL`。
 2. 配置 `ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST`；模型和记忆待启用配置只能使用受控 Provider 地址，连接探测只允许
    访问该白名单。`providerKey` 只是平台内部标识，不是 API Key：领域入口拒绝常见密钥形态，页面会清空新输入并
-   遮蔽、隔离历史异常标识，控制 API 的列表、概览和审计读取投影也只返回固定脱敏占位符。模型和记忆凭据继续通过
-   部署秘密引用，页面、数据库、审计和错误响应都不会主动读取或返回部署秘密值；一旦密钥曾被误填到普通字段，
+   遮蔽、隔离历史异常标识，控制 API 的列表、概览和审计读取投影也只返回固定脱敏占位符。模型密钥由页面一次性写入，
+   Admin API 使用平台级主密钥加密后绑定到具体 Provider Revision；页面、控制 API、审计和错误响应只返回
+   `credentialConfigured`，不返回明文或密文。记忆凭据仍使用部署秘密引用；一旦密钥曾被误填到普通字段，
    必须在 Provider 侧轮换，不能把响应脱敏视为秘密已经从历史事实中删除。
 3. 执行迁移与开发身份初始化后，由受控数据库运维事务向
    `platform_control_operators(user_id, role, status)` 写入 `viewer`、`operator` 或 `admin`。控制 API 不提供自助提权
@@ -158,11 +159,12 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
 目录覆盖已启用数据。后台不可用时仍可浏览 Pi 目录和编辑初始值，但这些内容没有保存、探测或生效。
 
 启用配置会递增全局 generation；Worker 首次处理 Run 时将模型、记忆与运行参数 revision 固化到
-`run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本。没有已启用模型时回退部署时 `MODEL_*`
-配置。模型页面必须直接显示 active revision 或部署回退，并标明只影响新 Run；`MODEL_API_KEY` 只显示配置状态，
-不显示值。数据库连接、角色、JWT、TLS、S3、Sandbox 和监听地址只在页面展示“已配置/需重新部署”，不存在通用 ENV
+`run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本及其托管密钥。没有已启用模型时回退部署时
+`MODEL_*` 配置。模型页面必须直接显示 active revision 或部署回退，并标明只影响新 Run；Provider 密钥只显示配置状态，
+不显示值。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 只是部署级加密根，不是 Provider 调用密钥。数据库连接、角色、JWT、TLS、S3、Sandbox 和监听地址只在页面展示“已配置/需重新部署”，不存在通用 ENV
 写接口。完整边界见
 [Provider 标识与启用门禁决策](../decisions/20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md)、
+[模型 Provider 凭据托管决策](../decisions/20260825173500-managed-model-provider-credentials.md)、
 [独立控制面决策](../decisions/20260819165254-independent-admin-control-plane.md)、
 [Provider 模型目录决策](../decisions/20260820090402-provider-owned-model-catalog.md)与
 [Pi 目录初始值决策](../decisions/20260820095113-pi-catalog-seeds-admin-model-metadata.md)。

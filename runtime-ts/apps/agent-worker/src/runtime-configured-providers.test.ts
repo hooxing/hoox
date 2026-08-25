@@ -10,6 +10,7 @@ import {
 function snapshot(revision: number): RuntimeControlConfigurationSnapshot {
   return {
     generation: revision,
+    modelApiKey: "managed-model-key",
     model: {
       revision,
       versionToken: 1,
@@ -23,7 +24,7 @@ function snapshot(revision: number): RuntimeControlConfigurationSnapshot {
         displayName: "主模型",
         protocol: "openai-compatible",
         baseUrl: "https://model.example.com/v1",
-        secretRef: "deployment:model",
+        credentialConfigured: true,
         defaultModelId: `model-${revision}`,
         models: [
           {

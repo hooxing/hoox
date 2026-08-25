@@ -101,7 +101,10 @@ function configuration(): AdminControlApiProcessConfiguration {
       secretAccessKey: "publisher-secret",
       forcePathStyle: true,
     },
-    providerSecrets: { modelApiKey: "model-secret" },
+    providerSecrets: {
+      modelApiKey: "model-secret",
+      modelCredentialEncryptionKey: "model-credential-encryption-key-at-least-32-bytes",
+    },
     runtimeDeploymentSettings: {
       compactionEnabledConfigured: true,
       compactionPathConfigured: true,

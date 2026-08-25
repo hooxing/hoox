@@ -16,6 +16,7 @@ import { userId } from "@hoox/domain";
 import {
   createPostgresPool,
   PgAdminControlRepository,
+  ModelProviderCredentialCipher,
   PgIdentityConfigurationRepository,
   PgSkillPublicationAuthorization,
   PgSkillPublicationRepository,
@@ -131,7 +132,11 @@ async function assembleRealService(
       forcePathStyle: configuration.objectStorage.forcePathStyle,
     });
     const activePublisher = publisher;
-    const repository = new PgAdminControlRepository(controlPool);
+    const repository = new PgAdminControlRepository(
+      controlPool,
+      new ModelProviderCredentialCipher(configuration.providerSecrets.modelCredentialEncryptionKey),
+      configuration.providerSecrets.modelApiKey,
+    );
     const controlPostgresProbe = () => probePostgres(controlPool, input.expectedRole);
     const skillPostgresProbe = () => probePostgres(skillPublisherPool, input.expectedPublisherRole);
     const objectStorageProbe = () => probeS3StableSkillPublisher(activePublisher);
@@ -207,11 +212,11 @@ export function createProviderProbes(
     return url;
   };
   return Object.freeze({
-    probeModel: async (model: ModelProviderConfiguration) => {
+    probeModel: async (model: ModelProviderConfiguration, apiKey: string) => {
       const base = assertAllowed(model.baseUrl);
       const endpoint = new URL("models", base.href.endsWith("/") ? base : `${base.href}/`);
       const response = await fetch(endpoint, {
-        headers: { authorization: `Bearer ${configuration.providerSecrets.modelApiKey}` },
+        headers: { authorization: `Bearer ${apiKey}` },
         redirect: "error",
         signal: AbortSignal.timeout(5_000),
       });
@@ -322,7 +327,13 @@ function deploymentSettings(
       configuration.production !== undefined,
       "管理身份签名密钥，只能轮换部署",
     ),
-    descriptor("MODEL_API_KEY", "secret", true, "模型 Provider 部署秘密，页面只保存引用"),
+    descriptor(
+      "MODEL_CREDENTIAL_ENCRYPTION_KEY",
+      "secret",
+      true,
+      "模型凭据加密主密钥；仅用于解密后台托管密文，不能调用任何 Provider",
+    ),
+    descriptor("MODEL_API_KEY", "secret", true, "没有 active 模型配置时的兼容回退凭据"),
     descriptor(
       "MEM0_API_KEY",
       "secret",

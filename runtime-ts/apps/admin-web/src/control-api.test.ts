@@ -10,7 +10,7 @@ function response(data: unknown, status = 200): Response {
 }
 
 describe("后台控制 Web API", () => {
-  it("读请求不带幂等键，写请求使用同源路径且不传秘密值", async () => {
+  it("读请求不带幂等键，写入密钥只进入一次性请求体", async () => {
     const fetcher = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(response({ data: { items: [] } }))
@@ -23,7 +23,7 @@ describe("后台控制 Web API", () => {
       displayName: "主模型",
       protocol: "openai-compatible",
       baseUrl: "https://model.example.com/v1",
-      secretRef: "deployment:model",
+      apiKey: "test-model-key",
       defaultModelId: "model-a",
       models: [
         {
@@ -44,7 +44,7 @@ describe("后台控制 Web API", () => {
     expect(new Headers(fetcher.mock.calls[1]?.[1]?.headers).get("Idempotency-Key")).toBe(
       "control-key-0001",
     );
-    expect(String(fetcher.mock.calls[1]?.[1]?.body)).not.toContain("apiKey");
+    expect(String(fetcher.mock.calls[1]?.[1]?.body)).toContain('"apiKey":"test-model-key"');
   });
 
   it("身份配置写请求带幂等键且秘密只出现在请求体", async () => {

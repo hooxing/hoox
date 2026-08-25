@@ -136,7 +136,7 @@ function modelRevision(
       displayName: providerKey === "openrouter" ? "OpenRouter" : "DeepSeek",
       protocol: "openai-compatible",
       baseUrl: "https://model.example.com/v1",
-      secretRef: "deployment:model",
+      credentialConfigured: true,
       defaultModelId: "model-a",
       models: [
         {

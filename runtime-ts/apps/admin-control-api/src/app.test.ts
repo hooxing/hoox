@@ -16,7 +16,7 @@ const modelRevision = {
     displayName: "主模型",
     protocol: "openai-compatible" as const,
     baseUrl: "https://model.example.com/v1",
-    secretRef: "deployment:model" as const,
+    credentialConfigured: true,
     defaultModelId: "model-a",
     models: [
       {
@@ -270,6 +270,8 @@ describe("后台控制 API", () => {
 
   it("写操作要求 JSON 和幂等键，actor 只来自认证主体", async () => {
     const { app, control } = fixture();
+    const { credentialConfigured: _credentialConfigured, ...configuration } =
+      modelRevision.configuration;
     const response = await app.inject({
       method: "POST",
       url: "/v1/admin/control/model-providers",
@@ -278,7 +280,7 @@ describe("后台控制 API", () => {
         "content-type": "application/json",
         "idempotency-key": "control-create-0001",
       },
-      payload: { ...modelRevision.configuration, reason: "切换正式模型" },
+      payload: { ...configuration, apiKey: "write-only-model-key", reason: "切换正式模型" },
     });
     expect(response.statusCode).toBe(200);
     expect(control.createModelDraft).toHaveBeenCalledWith(
@@ -315,6 +317,8 @@ describe("后台控制 API", () => {
 
   it("把领域层配置校验失败稳定映射为 400", async () => {
     const { app, control } = fixture();
+    const { credentialConfigured: _credentialConfigured, ...configuration } =
+      modelRevision.configuration;
     control.createModelDraft.mockRejectedValueOnce(new TypeError("Provider 地址必须使用 HTTPS"));
     const response = await app.inject({
       method: "POST",
@@ -324,7 +328,7 @@ describe("后台控制 API", () => {
         "content-type": "application/json",
         "idempotency-key": "control-create-0002",
       },
-      payload: { ...modelRevision.configuration, reason: "验证错误映射" },
+      payload: { ...configuration, apiKey: "write-only-model-key", reason: "验证错误映射" },
     });
     expect(response.statusCode).toBe(400);
     expect(response.body).not.toContain("HTTPS");

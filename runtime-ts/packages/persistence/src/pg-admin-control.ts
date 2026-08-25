@@ -25,6 +25,11 @@ import {
 } from "@hoox/admin-control";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
+import {
+  isEncryptedModelProviderCredential,
+  type EncryptedModelProviderCredential,
+  type ModelProviderCredentialCipher,
+} from "./model-provider-credential.js";
 import { withTenantTransaction, withTransaction } from "./postgres.js";
 
 type Configuration =
@@ -115,7 +120,15 @@ function safeNonnegativeNumber(value: string, name: string): number {
 function mapConfiguration(kind: ControlObjectKind, value: unknown): Configuration {
   if (typeof value !== "object" || value === null) throw new Error("控制面配置损坏");
   if (kind === "model_provider") {
-    return normalizeModelProviderConfiguration(value as ModelProviderConfiguration);
+    const {
+      credential,
+      secretRef: _legacySecretRef,
+      ...configuration
+    } = value as Record<string, unknown>;
+    return normalizeModelProviderConfiguration({
+      ...configuration,
+      credentialConfigured: isEncryptedModelProviderCredential(credential),
+    } as unknown as ModelProviderConfiguration);
   }
   if (kind === "memory_provider") {
     return normalizeMemoryProviderConfiguration(value as MemoryProviderConfiguration);
@@ -294,7 +307,11 @@ async function idempotentMutation<T>(
 export class PgAdminControlRepository
   implements AdminControlRepository, AdminControlStatisticsPort
 {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly credentialCipher: ModelProviderCredentialCipher,
+    private readonly legacyModelApiKey?: string,
+  ) {}
 
   async resolveRole(userId: string): Promise<ControlOperatorRole | undefined> {
     try {
@@ -344,13 +361,106 @@ export class PgAdminControlRepository
   }
 
   async createModelDraft(input: Parameters<AdminControlRepository["createModelDraft"]>[0]) {
-    const { reason, ...configuration } = input.command;
-    return await this.createDraft<ModelProviderConfiguration>(
-      input,
-      "model_provider",
-      configuration,
-      reason,
-    );
+    const { reason, apiKey, reuseCredentialFromRevision, ...configuration } = input.command;
+    const key = configuration.providerKey;
+    try {
+      return await withControlTransaction(
+        this.pool,
+        input.actorUserId,
+        async (client) =>
+          await idempotentMutation(client, input, async () => {
+            await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+              `model_provider:${key}`,
+            ]);
+            let credential: EncryptedModelProviderCredential | undefined;
+            if (apiKey !== undefined) {
+              credential = this.credentialCipher.encrypt(key, apiKey);
+            } else if (reuseCredentialFromRevision !== undefined) {
+              const source = await client.query<{ readonly configuration: unknown }>(
+                `SELECT configuration FROM admin_control_config_revisions
+                  WHERE object_kind='model_provider' AND object_key=$1 AND revision=$2`,
+                [key, reuseCredentialFromRevision],
+              );
+              const raw = source.rows[0]?.configuration;
+              const candidate =
+                typeof raw === "object" && raw !== null
+                  ? (raw as Record<string, unknown>).credential
+                  : undefined;
+              if (!isEncryptedModelProviderCredential(candidate)) return { outcome: "conflict" };
+              credential = candidate;
+            }
+            if (credential === undefined) return { outcome: "conflict" };
+            const storedConfiguration = {
+              ...configuration,
+              credential,
+            };
+            const configurationDigest = digestControlRequest({
+              configuration,
+              credentialFingerprint: credential.ciphertext,
+            });
+            const duplicate = await client.query(
+              `SELECT 1 FROM admin_control_config_revisions
+                WHERE object_kind='model_provider' AND object_key=$1 AND configuration_digest=$2`,
+              [key, configurationDigest],
+            );
+            if ((duplicate.rowCount ?? 0) > 0) return { outcome: "conflict" };
+            const next = await client.query<{ readonly revision: string }>(
+              `SELECT (COALESCE(max(revision),0)+1)::text AS revision
+                 FROM admin_control_config_revisions
+                WHERE object_kind='model_provider' AND object_key=$1`,
+              [key],
+            );
+            const revision = safeInteger(next.rows[0]?.revision ?? "", "下一个 Revision", 1);
+            await client.query(
+              `INSERT INTO admin_control_config_revisions(
+                 object_kind,object_key,revision,configuration,configuration_digest,created_by
+               ) VALUES('model_provider',$1,$2,$3::jsonb,$4,$5)`,
+              [
+                key,
+                revision,
+                JSON.stringify(storedConfiguration),
+                configurationDigest,
+                input.actorUserId,
+              ],
+            );
+            await recordAudit(client, {
+              actorUserId: input.actorUserId,
+              kind: "model_provider",
+              key,
+              revision,
+              action: "create_draft",
+              reason,
+              outcome: "succeeded",
+            });
+            const projected = await projectedRevision(client, "model_provider", key, revision);
+            if (projected === undefined) throw new Error("草稿配置投影缺失");
+            return {
+              outcome: "applied",
+              value: mapRevision<ModelProviderConfiguration>(projected),
+            };
+          }),
+      );
+    } catch (error) {
+      throw mapPersistenceError(error, "创建模型 Provider 草稿");
+    }
+  }
+
+  async resolveModelCredential(userId: string, providerKey: string, revision: number) {
+    return await this.readAs(userId, async (client) => {
+      const result = await client.query<{ readonly configuration: unknown }>(
+        `SELECT configuration FROM admin_control_config_revisions
+          WHERE object_kind='model_provider' AND object_key=$1 AND revision=$2`,
+        [providerKey, revision],
+      );
+      const raw = result.rows[0]?.configuration;
+      const credential =
+        typeof raw === "object" && raw !== null
+          ? (raw as Record<string, unknown>).credential
+          : undefined;
+      return isEncryptedModelProviderCredential(credential)
+        ? this.credentialCipher.decrypt(providerKey, credential)
+        : this.legacyModelApiKey;
+    });
   }
 
   async createMemoryDraft(input: Parameters<AdminControlRepository["createMemoryDraft"]>[0]) {
@@ -967,7 +1077,11 @@ function snapshotRevision<T extends Configuration>(input: {
   });
 }
 
-function mapRuntimeSnapshot(row: ActiveConfigurationRow): RuntimeControlConfigurationSnapshot {
+function mapRuntimeSnapshot(
+  row: ActiveConfigurationRow,
+  credentialCipher: ModelProviderCredentialCipher,
+  legacyModelApiKey?: string,
+): RuntimeControlConfigurationSnapshot {
   const modelConfiguration = mapConfiguration("model_provider", row.model_configuration);
   const memoryConfiguration =
     row.memory_configuration === null
@@ -977,8 +1091,15 @@ function mapRuntimeSnapshot(row: ActiveConfigurationRow): RuntimeControlConfigur
     row.settings_configuration === null
       ? undefined
       : mapConfiguration("runtime_settings", row.settings_configuration);
+  const rawModel = row.model_configuration as Record<string, unknown>;
+  const encryptedCredential = rawModel.credential;
+  const modelApiKey = isEncryptedModelProviderCredential(encryptedCredential)
+    ? credentialCipher.decrypt(row.model_key, encryptedCredential)
+    : legacyModelApiKey;
+  if (modelApiKey === undefined) throw new Error("MODEL_CREDENTIAL_UNAVAILABLE");
   return Object.freeze({
     generation: safeInteger(row.generation, "运行配置 Generation", 1),
+    modelApiKey,
     model: snapshotRevision({
       configuration: modelConfiguration as ModelProviderConfiguration,
       revision: safeInteger(row.model_revision, "模型 Revision", 1),
@@ -1016,7 +1137,11 @@ function mapRuntimeSnapshot(row: ActiveConfigurationRow): RuntimeControlConfigur
 
 /** Runtime 只能读取已发布配置并为自己的 Tenant/Run 固定一次快照。 */
 export class PgRuntimeControlConfigurationRepository implements RuntimeControlConfigurationPort {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly credentialCipher: ModelProviderCredentialCipher,
+    private readonly legacyModelApiKey?: string,
+  ) {}
 
   async resolveForRun(input: { readonly tenantId: string; readonly runId: string }) {
     try {
@@ -1047,7 +1172,10 @@ export class PgRuntimeControlConfigurationRepository implements RuntimeControlCo
             row.settings_revision,
           ],
         );
-        return (await this.readSnapshot(client, input)) ?? mapRuntimeSnapshot(row);
+        return (
+          (await this.readSnapshot(client, input)) ??
+          mapRuntimeSnapshot(row, this.credentialCipher, this.legacyModelApiKey)
+        );
       });
     } catch (error) {
       throw mapPersistenceError(error, "解析 Run 固定运行配置");
@@ -1085,6 +1213,8 @@ export class PgRuntimeControlConfigurationRepository implements RuntimeControlCo
       [input.tenantId, input.runId],
     );
     const row = result.rows[0];
-    return row === undefined ? undefined : mapRuntimeSnapshot(row);
+    return row === undefined
+      ? undefined
+      : mapRuntimeSnapshot(row, this.credentialCipher, this.legacyModelApiKey);
   }
 }

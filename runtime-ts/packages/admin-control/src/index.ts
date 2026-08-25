@@ -26,7 +26,8 @@ export interface ModelProviderConfiguration {
   readonly displayName: string;
   readonly protocol: "openai-compatible";
   readonly baseUrl: string;
-  readonly secretRef: "deployment:model";
+  /** 只表示该 Revision 已绑定托管凭据，任何读取接口都不得返回凭据值。 */
+  readonly credentialConfigured: boolean;
   readonly defaultModelId: string;
   readonly models: readonly ModelProviderModelConfiguration[];
 }
@@ -156,7 +157,12 @@ export interface AdminControlOverview {
 
 export type ControlObjectKind = ControlAuditEvent["objectKind"];
 
-export interface CreateModelProviderDraftCommand extends ModelProviderConfiguration {
+export interface CreateModelProviderDraftCommand
+  extends Omit<ModelProviderConfiguration, "credentialConfigured"> {
+  /** 写入后即加密，绝不能进入配置投影、响应或日志。 */
+  readonly apiKey?: string;
+  /** 编辑时允许复用同一 Provider 的既有密文，不需要回显密钥。 */
+  readonly reuseCredentialFromRevision?: number;
   readonly reason: string;
 }
 
@@ -206,6 +212,11 @@ export interface AdminControlRepository {
   createModelDraft(
     input: ControlMutationContext & { readonly command: CreateModelProviderDraftCommand },
   ): Promise<ControlMutationResult<ControlRevision<ModelProviderConfiguration>>>;
+  resolveModelCredential(
+    userId: string,
+    providerKey: string,
+    revision: number,
+  ): Promise<string | undefined>;
   createMemoryDraft(
     input: ControlMutationContext & { readonly command: CreateMemoryProviderDraftCommand },
   ): Promise<ControlMutationResult<ControlRevision<MemoryProviderConfiguration>>>;
@@ -261,7 +272,7 @@ export interface AdminControlStatisticsPort {
 }
 
 export interface ProviderProbePort {
-  probeModel(configuration: ModelProviderConfiguration): Promise<void>;
+  probeModel(configuration: ModelProviderConfiguration, apiKey: string): Promise<void>;
   probeMemory(configuration: MemoryProviderConfiguration): Promise<void>;
 }
 
@@ -357,7 +368,7 @@ export function normalizeModelProviderConfiguration(
   input: ModelProviderConfiguration,
 ): ModelProviderConfiguration {
   if (input.protocol !== "openai-compatible") throw new TypeError("模型协议不受支持");
-  if (input.secretRef !== "deployment:model") throw new TypeError("模型 Secret Ref 不受支持");
+  if (typeof input.credentialConfigured !== "boolean") throw new TypeError("模型凭据状态无效");
   if (!Array.isArray(input.models) || input.models.length < 1 || input.models.length > 100) {
     throw new TypeError("Provider 模型数量无效");
   }
@@ -404,7 +415,7 @@ export function normalizeModelProviderConfiguration(
     displayName: normalizedText(input.displayName, "显示名称", 120),
     protocol: "openai-compatible",
     baseUrl: normalizedHttpsUrl(input.baseUrl),
-    secretRef: "deployment:model",
+    credentialConfigured: input.credentialConfigured,
     defaultModelId,
     models: Object.freeze(models),
   });
@@ -586,12 +597,42 @@ export class AdminControlService {
     command: CreateModelProviderDraftCommand,
   ) {
     requireRole(await this.repository.resolveRole(context.actorUserId), ["operator", "admin"]);
-    const { reason, ...configuration } = command;
+    const { reason, apiKey, reuseCredentialFromRevision, ...configuration } = command;
+    const hasApiKey = apiKey !== undefined;
+    const hasReuse = reuseCredentialFromRevision !== undefined;
+    if (hasApiKey === hasReuse) throw new TypeError("必须输入新模型密钥或明确复用既有密钥");
+    if (apiKey !== undefined) {
+      if (
+        apiKey.length < 1 ||
+        Buffer.byteLength(apiKey, "utf8") > 8_192 ||
+        /[\r\n\0]/u.test(apiKey)
+      ) {
+        throw new TypeError("模型密钥格式无效");
+      }
+    }
+    const normalizedReuse =
+      reuseCredentialFromRevision === undefined
+        ? undefined
+        : boundedInteger(
+            reuseCredentialFromRevision,
+            "复用凭据 Revision",
+            1,
+            Number.MAX_SAFE_INTEGER,
+          );
+    const normalized = normalizeModelProviderConfiguration({
+      ...configuration,
+      credentialConfigured: true,
+    });
+    const { credentialConfigured: _credentialConfigured, ...persistedConfiguration } = normalized;
     return unwrapMutation(
       await this.repository.createModelDraft({
         ...context,
         command: {
-          ...normalizeModelProviderConfiguration(configuration),
+          ...persistedConfiguration,
+          ...(apiKey === undefined ? {} : { apiKey }),
+          ...(normalizedReuse === undefined
+            ? {}
+            : { reuseCredentialFromRevision: normalizedReuse }),
           reason: normalizeChangeReason(reason),
         },
       }),
@@ -657,7 +698,16 @@ export class AdminControlService {
     let status: Exclude<ProviderProbeStatus, "untested"> = "healthy";
     try {
       if (input.kind === "model_provider") {
-        await this.probes.probeModel(input.revision.configuration as ModelProviderConfiguration);
+        const apiKey = await this.repository.resolveModelCredential(
+          context.actorUserId,
+          objectKey,
+          input.revision.revision,
+        );
+        if (apiKey === undefined) throw new Error("MODEL_CREDENTIAL_UNAVAILABLE");
+        await this.probes.probeModel(
+          input.revision.configuration as ModelProviderConfiguration,
+          apiKey,
+        );
       } else {
         await this.probes.probeMemory(input.revision.configuration as MemoryProviderConfiguration);
       }
@@ -763,6 +813,8 @@ export class AdminControlService {
 export interface RuntimeControlConfigurationSnapshot {
   readonly generation: number;
   readonly model: ControlRevision<ModelProviderConfiguration>;
+  /** 仅存在于 Worker 内存中的解密结果，不属于任何控制面 DTO。 */
+  readonly modelApiKey: string;
   readonly memory?: ControlRevision<MemoryProviderConfiguration>;
   readonly runtimeSettings?: ControlRevision<RuntimeSettingsConfiguration>;
 }

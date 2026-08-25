@@ -706,7 +706,10 @@ function ModelDraftForm({
         const models = catalog.models.map<ModelProviderModelConfigurationDto>((model) => ({
           id: model.id.trim(),
           name: model.name.trim() || model.id.trim(),
-          enabled: true,
+          enabled:
+            catalogProvider === undefined
+              ? model.enabled || model.clientId === catalog.defaultClientId
+              : model.clientId === catalog.defaultClientId,
           reasoning: model.reasoning,
           input: model.supportsImages ? ["text", "image"] : ["text"],
           contextWindow: Number(model.contextWindow),

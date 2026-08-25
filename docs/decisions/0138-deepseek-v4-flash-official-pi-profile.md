@@ -1,10 +1,11 @@
 # ADR-0138：DeepSeek V4 Flash 0731 官方 Pi 模型配置
 
-- 状态：已接受
+- 状态：部分已替代（固定请求协议继续有效，能力固定值与阻断性装配校验已被 ADR-20260826000935 替代）
 - 日期：2026-08-10
 - 决策者：Runtime 团队
 - 关联任务/PR：`feat/resilient-user-final-response`
 - 关联决策：ADR-0078、ADR-0100、ADR-0134、ADR-0135
+- 替代关系：上下文窗口、最大输出、图片能力的固定值及阻断性装配校验已被 [ADR-20260826000935](20260826000935-published-model-capabilities-are-runtime-facts.md) 替代；模型 ID 与请求协议决策继续有效
 
 ## 背景
 

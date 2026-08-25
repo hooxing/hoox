@@ -55,7 +55,6 @@ import {
   ThreadContextBodyPersistence,
 } from "@hoox/persistence";
 import {
-  assertOfficialDeepSeekV4FlashCapabilities,
   bindTrustedPiModelContextCapability,
   isOfficialDeepSeekV4FlashModel,
   loadTrustedModelTokenizerCapability,
@@ -719,14 +718,6 @@ export async function createOpenAiCompatibleProvider(configuration: {
     !enabledModels.some((model) => model.id === configuration.defaultModelId)
   ) {
     throw new Error("模型 Provider 默认模型无效");
-  }
-  for (const model of enabledModels) {
-    assertOfficialDeepSeekV4FlashCapabilities({
-      modelId: model.id,
-      supportsImages: model.input.includes("image"),
-      contextWindow: model.contextWindow,
-      maxOutputTokens: model.maxTokens,
-    });
   }
   const modelRuntime = await ModelRuntime.create({
     credentials: new InMemoryCredentialStore(),

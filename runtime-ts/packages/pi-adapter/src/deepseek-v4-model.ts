@@ -1,10 +1,7 @@
 import type { Model, ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 
-/** DeepSeek 官方 Oh My Pi 集成给出的稳定模型 ID 与 0731 版本能力。 */
+/** DeepSeek 官方 Oh My Pi 集成使用的稳定模型 ID。 */
 export const DEEPSEEK_V4_FLASH_MODEL_ID = "deepseek-v4-flash";
-export const DEEPSEEK_V4_FLASH_CONTEXT_WINDOW = 1_048_576;
-export const DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS = 65_536;
-export const DEEPSEEK_V4_FLASH_SUPPORTS_IMAGES = false;
 export const DEEPSEEK_V4_FLASH_DEFAULT_THINKING_LEVEL = "high" as const;
 
 const reasoningEffortMap = Object.freeze<ThinkingLevelMap>({
@@ -19,22 +16,6 @@ const reasoningEffortMap = Object.freeze<ThinkingLevelMap>({
 
 export function isOfficialDeepSeekV4FlashModel(modelId: string): boolean {
   return modelId === DEEPSEEK_V4_FLASH_MODEL_ID;
-}
-
-export function assertOfficialDeepSeekV4FlashCapabilities(input: {
-  readonly modelId: string;
-  readonly contextWindow: number;
-  readonly maxOutputTokens: number;
-  readonly supportsImages: boolean;
-}): void {
-  if (!isOfficialDeepSeekV4FlashModel(input.modelId)) return;
-  if (
-    input.contextWindow !== DEEPSEEK_V4_FLASH_CONTEXT_WINDOW ||
-    input.maxOutputTokens !== DEEPSEEK_V4_FLASH_MAX_OUTPUT_TOKENS ||
-    input.supportsImages !== DEEPSEEK_V4_FLASH_SUPPORTS_IMAGES
-  ) {
-    throw new TypeError("DeepSeek V4 Flash 模型能力必须使用官方 0731 配置");
-  }
 }
 
 export function officialDeepSeekV4FlashModelProtocol(): Readonly<

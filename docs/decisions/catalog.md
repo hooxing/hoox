@@ -142,7 +142,7 @@
 | [ADR-0135：主模型输出上限有界续跑与失败现场保留](0135-model-output-limit-continuation-and-sandbox-retention.md) | 已接受（16K 主模型输出配置已由 ADR-0138 替代，长度续跑与 Sandbox 保留继续有效）（试验分支） | 2026-08-09 |
 | [ADR-0136：失败回注 Agent 与 Runtime 用户终态兜底](0136-failure-reply-and-runtime-terminal-fallback.md) | 已接受（试验分支；“只回复模式”已由 ADR-0137 替代，Runtime/Web 兜底继续有效） | 2026-08-09 |
 | [ADR-0137：Durable 工具失败保留能力并回传模型自适应](0137-durable-tool-failure-model-adaptation.md) | 已接受 | 2026-08-10 |
-| [ADR-0138：DeepSeek V4 Flash 0731 官方 Pi 模型配置](0138-deepseek-v4-flash-official-pi-profile.md) | 已接受 | 2026-08-10 |
+| [ADR-0138：DeepSeek V4 Flash 0731 官方 Pi 模型配置](0138-deepseek-v4-flash-official-pi-profile.md) | 部分已替代（能力固定值与装配门禁） | 2026-08-10 |
 | [ADR-0139：团队工作空间、任务分支与跨空间文件快照](0139-team-workspace-and-snapshot-boundary.md) | 已接受（试验版） | 2026-08-09 |
 | [ADR-0140：个人与团队双任务导航及团队中心边界](0140-dual-task-navigation-and-team-center.md) | 已接受（试验版） | 2026-08-09 |
 | [ADR-0141：标签式云盘与跨空间范围搜索](0141-tabbed-cloud-drive-and-cross-scope-search.md) | 已接受（试验版） | 2026-08-09 |
@@ -210,7 +210,7 @@
 | [ADR-20260819115118：思考生命周期在正文与工具边界收敛](20260819115118-thinking-lifecycle-boundary-convergence.md) | 已接受 | 2026-08-19 |
 | [ADR-20260819142015：用户工作台隐藏 Workspace 未变化审计通知](20260819142015-hide-workspace-unchanged-runtime-notice.md) | 已接受 | 2026-08-19 |
 | [ADR-20260819165254：独立后台控制面与版本化运行配置](20260819165254-independent-admin-control-plane.md) | 已接受（进程边界及模型配置流程已被部分替代） | 2026-08-19 |
-| [ADR-20260820090402：Provider 拥有可启用的模型目录](20260820090402-provider-owned-model-catalog.md) | 已接受 | 2026-08-20 |
+| [ADR-20260820090402：Provider 拥有可启用的模型目录](20260820090402-provider-owned-model-catalog.md) | 部分已替代（管理页面多启用语义） | 2026-08-20 |
 | [无团队成员关系时隐藏团队操作](20260820092801-hide-team-controls-without-membership.md) | 已采纳 | 2026-08-20 |
 | [ADR-20260820095113：Pi 模型目录为后台配置提供可覆盖的初始值](20260820095113-pi-catalog-seeds-admin-model-metadata.md) | 已接受（模型配置流程已被部分替代） | 2026-08-20 |
 | [ADR-20260820101805：浏览器内置 Pi 目录与后台配置服务独立降级](20260820101805-browser-bundled-pi-catalog-degrades-independently.md) | 已接受（模型配置流程已被部分替代） | 2026-08-20 |
@@ -230,3 +230,4 @@
 | [ADR-20260825164722：Provider 内部标识防密钥误填与探测后启用门禁](20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md) | 部分已替代（模型启用门禁与页面流程） | 2026-08-25 |
 | [ADR-20260825173500：模型 Provider 凭据按 Revision 加密托管](20260825173500-managed-model-provider-credentials.md) | 已接受（模型配置流程已被部分替代） | 2026-08-25 |
 | [ADR-20260825180549：模型配置保存即启用并隐藏内部版本流程](20260825180549-direct-model-configuration-activation.md) | 已接受 | 2026-08-25 |
+| [模型页面只启用所选模型，已发布能力驱动运行](20260826000935-published-model-capabilities-are-runtime-facts.md) | 已接受 | 2026-08-26 |

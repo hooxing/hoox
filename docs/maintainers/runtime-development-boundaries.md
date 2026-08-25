@@ -142,21 +142,28 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
 1. 由 Database Admin 创建 `DATABASE_ADMIN_CONTROL_ROLE`，要求 `NOINHERIT`、无角色成员、无对象 ownership、
    无 `CREATE`/`TEMPORARY`，并与 Migrator、Runtime、Skill Publisher、Worker Coordinator、Team Coordinator
    角色互异。将该角色的连接串写入本机忽略文件中的 `ADMIN_CONTROL_DATABASE_URL`。
-2. 配置 `ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST`；模型和记忆草稿只能使用受控 Provider 地址，连接探测只允许访问
-   该白名单。模型和记忆凭据继续通过部署秘密引用，页面、数据库、审计和错误响应都不会读取或返回密钥值。
+2. 配置 `ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST`；模型和记忆待启用配置只能使用受控 Provider 地址，连接探测只允许
+   访问该白名单。`providerKey` 只是平台内部标识，不是 API Key：领域入口拒绝常见密钥形态，页面会清空新输入并
+   遮蔽、隔离历史异常标识，控制 API 的列表、概览和审计读取投影也只返回固定脱敏占位符。模型和记忆凭据继续通过
+   部署秘密引用，页面、数据库、审计和错误响应都不会主动读取或返回部署秘密值；一旦密钥曾被误填到普通字段，
+   必须在 Provider 侧轮换，不能把响应脱敏视为秘密已经从历史事实中删除。
 3. 执行迁移与开发身份初始化后，由受控数据库运维事务向
    `platform_control_operators(user_id, role, status)` 写入 `viewer`、`operator` 或 `admin`。控制 API 不提供自助提权
-   路由；operator 可创建草稿和探测，只有 admin 能发布或回滚。
+   路由；operator 可保存待启用配置和执行探测，只有 admin 能启用或回滚。模型与记忆 Provider 必须探测成功后才能
+   启用，该门禁由领域服务执行，不能依赖管理页面按钮。
 
 模型配置以 Provider 为聚合根：一个 Provider revision 可以维护多个模型条目并启用其中任意子集，管理员必须从启用
 模型中指定默认模型。管理 Web 从锁定版本的 Pi Provider 目录载入可覆盖的能力初始值；内置 Provider 按 Provider ID
 载入，自定义 Provider 可按模型 ID 或名称查询。管理员修改后才形成显式 revision，Worker 不会在运行时重新用 Pi
-目录覆盖已发布数据。
+目录覆盖已启用数据。后台不可用时仍可浏览 Pi 目录和编辑初始值，但这些内容没有保存、探测或生效。
 
-发布配置会递增全局 generation；Worker 首次处理 Run 时将模型、记忆与运行参数 revision 固化到
-`run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本。没有已发布模型时回退部署时 `MODEL_*`
-配置。数据库连接、角色、JWT、TLS、S3、Sandbox 和监听地址只在页面展示“已配置/需重新部署”，不存在通用 ENV
-写接口。完整边界见[独立控制面决策](../decisions/20260819165254-independent-admin-control-plane.md)、
+启用配置会递增全局 generation；Worker 首次处理 Run 时将模型、记忆与运行参数 revision 固化到
+`run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本。没有已启用模型时回退部署时 `MODEL_*`
+配置。模型页面必须直接显示 active revision 或部署回退，并标明只影响新 Run；`MODEL_API_KEY` 只显示配置状态，
+不显示值。数据库连接、角色、JWT、TLS、S3、Sandbox 和监听地址只在页面展示“已配置/需重新部署”，不存在通用 ENV
+写接口。完整边界见
+[Provider 标识与启用门禁决策](../decisions/20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md)、
+[独立控制面决策](../decisions/20260819165254-independent-admin-control-plane.md)、
 [Provider 模型目录决策](../decisions/20260820090402-provider-owned-model-catalog.md)与
 [Pi 目录初始值决策](../decisions/20260820095113-pi-catalog-seeds-admin-model-metadata.md)。
 

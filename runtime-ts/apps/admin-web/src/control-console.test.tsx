@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { PiModelCatalogModelDto } from "@hoox/protocol";
+import type { ModelProviderRevisionDto, PiModelCatalogModelDto } from "@hoox/protocol";
 import { App } from "./app.js";
 import type { AdminControlApiContract } from "./control-api.js";
 
@@ -119,6 +119,40 @@ function fixture(): AdminControlApiContract {
   };
 }
 
+function modelRevision(
+  providerKey: string,
+  probeStatus: ModelProviderRevisionDto["probeStatus"],
+): ModelProviderRevisionDto {
+  return {
+    revision: 1,
+    versionToken: 2,
+    status: "draft",
+    probeStatus,
+    createdBy: "user_admin",
+    createdAt: "2026-08-25T00:00:00.000Z",
+    updatedAt: "2026-08-25T00:01:00.000Z",
+    configuration: {
+      providerKey,
+      displayName: providerKey === "openrouter" ? "OpenRouter" : "DeepSeek",
+      protocol: "openai-compatible",
+      baseUrl: "https://model.example.com/v1",
+      secretRef: "deployment:model",
+      defaultModelId: "model-a",
+      models: [
+        {
+          id: "model-a",
+          name: "Model A",
+          enabled: true,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 128_000,
+          maxTokens: 8_192,
+        },
+      ],
+    },
+  };
+}
+
 async function settle(): Promise<void> {
   for (let index = 0; index < 5; index += 1) await act(async () => Promise.resolve());
 }
@@ -183,6 +217,9 @@ describe("统一平台管理导航", () => {
     act(() => navigationItem(container, "模型服务").click());
     await settle();
     expect(api.listModelProviders).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain("尚未启用后台模型配置");
+    expect(container.textContent).toContain("部署回退");
+    expect(container.textContent).toContain("已配置，值不可见");
 
     act(() => navigationItem(container, "运行配置").click());
     await settle();
@@ -466,6 +503,131 @@ describe("统一平台管理导航", () => {
     container.remove();
   });
 
+  it("直接展示当前生效模型、版本和新 Run 边界", async () => {
+    const api = fixture();
+    const activeModel = { ...modelRevision("deepseek", "healthy"), status: "active" as const };
+    vi.mocked(api.overview).mockResolvedValue({ ...overview, activeModel });
+    vi.mocked(api.listModelProviders).mockResolvedValue([activeModel]);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+
+    act(() => navigationItem(container, "模型服务").click());
+    await settle();
+
+    const effectiveState = container.querySelector<HTMLElement>(".model-effective-state.active");
+    if (effectiveState === null) throw new Error("当前模型生效状态缺失");
+    expect(effectiveState.textContent).toContain("当前生效");
+    expect(effectiveState.textContent).toContain("DeepSeek / model-a");
+    expect(effectiveState.textContent).toContain("Revision 1");
+    expect(effectiveState.textContent).toContain("Generation 3");
+    expect(effectiveState.textContent).toContain("只影响启用后创建的新 Run");
+    expect(effectiveState.textContent).toContain("值不可见");
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("未探测成功的 Provider 不能启用，健康版本可以启用", async () => {
+    const api = fixture();
+    vi.mocked(api.listModelProviders).mockResolvedValue([
+      modelRevision("deepseek", "failed"),
+      modelRevision("openrouter", "healthy"),
+    ]);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+
+    act(() => navigationItem(container, "模型服务").click());
+    await settle();
+
+    const failedCard = [...container.querySelectorAll<HTMLElement>(".control-revision")].find(
+      (item) => item.textContent?.includes("deepseek"),
+    );
+    const healthyCard = [...container.querySelectorAll<HTMLElement>(".control-revision")].find(
+      (item) => item.textContent?.includes("openrouter"),
+    );
+    if (failedCard === undefined || healthyCard === undefined) throw new Error("Provider 版本缺失");
+    act(() => {
+      changeControl(
+        requiredControl(failedCard.querySelector<HTMLInputElement>("input"), "失败版本原因"),
+        "重试启用",
+      );
+      changeControl(
+        requiredControl(healthyCard.querySelector<HTMLInputElement>("input"), "健康版本原因"),
+        "启用健康版本",
+      );
+    });
+
+    const failedPublish = [...failedCard.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.trim() === "启用此配置",
+    );
+    const healthyPublish = [...healthyCard.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.trim() === "启用此配置",
+    );
+    if (failedPublish === undefined || healthyPublish === undefined) {
+      throw new Error("Provider 启用按钮缺失");
+    }
+    expect(failedPublish.disabled).toBe(true);
+    expect(failedCard.textContent).toContain("重新探测成功后才能启用");
+    expect(healthyPublish.disabled).toBe(false);
+
+    await act(async () => healthyPublish.click());
+    await settle();
+    expect(api.publish).toHaveBeenCalledWith("model-providers", "openrouter", 1, {
+      expectedVersionToken: 2,
+      reason: "启用健康版本",
+    });
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("隐藏历史疑似密钥，并在录入时立即清空", async () => {
+    const secretLikeIdentifier = `sk-${"a".repeat(32)}`;
+    const api = fixture();
+    vi.mocked(api.listModelProviders).mockResolvedValue([
+      modelRevision(secretLikeIdentifier, "failed"),
+    ]);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+
+    act(() => navigationItem(container, "模型服务").click());
+    await settle();
+    expect(container.textContent).not.toContain(secretLikeIdentifier);
+    expect(container.textContent).toContain("疑似密钥（已隐藏）");
+    expect(container.textContent).toContain("页面已隐藏并禁止继续操作");
+
+    const addCustomProvider = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.trim() === "添加自定义 Provider",
+    );
+    if (addCustomProvider === undefined) throw new Error("自定义 Provider 按钮缺失");
+    act(() => addCustomProvider.click());
+    const providerKey = requiredControl(
+      container.querySelector<HTMLInputElement>('input[name="providerKey"]'),
+      "Provider 内部标识",
+    );
+    act(() => changeControl(providerKey, secretLikeIdentifier));
+    await settle();
+
+    expect(providerKey.value).toBe("");
+    expect(container.textContent).toContain("检测到疑似 API Key，内容已清空");
+    const save = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (item) => item.textContent?.trim() === "保存待启用配置",
+    );
+    expect(save?.disabled).toBe(true);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it("自定义 Provider 可按模型名称读取 Pi 元数据", async () => {
     const api = fixture();
     const catalogModel: PiModelCatalogModelDto = {
@@ -631,6 +793,8 @@ describe("统一平台管理导航", () => {
 
     expect(container.textContent).toContain("DeepSeek");
     expect(container.textContent).toContain("25 个可配置 Provider");
+    expect(container.textContent).toContain("无法确认当前实际使用的模型");
+    expect(container.textContent).toContain("Pi 目录只能用于准备配置");
 
     const addCustomProvider = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (item) => item.textContent?.trim() === "添加自定义 Provider",

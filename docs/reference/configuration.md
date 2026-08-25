@@ -52,7 +52,7 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 ### 模型与上下文
 
 - `MODEL_BASE_URL`、`MODEL_API_KEY` 和 `MODEL_ID` 定义没有 active 后台配置时的兼容回退模型。
-- 日常 Provider 密钥在后台模型页面写入并按 Revision 加密托管；`MODEL_CREDENTIAL_ENCRYPTION_KEY` 是 Admin API 与 Worker 共享的稳定加密根，production 至少 32 字节且不能用于调用模型。
+- 日常 Provider 密钥在后台模型页面写入；点击“保存并使用”会创建内部 Revision、加密托管密钥并立即切换新 Run 使用的 active 配置。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 是 Admin API 与 Worker 共享的稳定加密根，production 至少 32 字节且不能用于调用模型。
 - Context window、最大输出和图片能力是显式可信配置，不能只依赖模型名称猜测。
 - Thread Context、Compaction、Sandbox 复用和 Subagent 功能使用独立 feature flag。
 - 标题生成可以使用独立低成本模型，且只接收受限输入。
@@ -67,7 +67,7 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 
 - 统一 Admin API 默认监听 `127.0.0.1:3003`，模型、记忆、身份、配置、统计与 Skill 路由共用管理身份。
 - “身份与登录”配置保存后按版本动态生效；Provider 与短信秘密只返回已配置状态，不回显明文。
-- 模型 Provider 的 API Key 是写入型字段：首次配置必填，编辑时可保留旧密钥或替换；探测和新 Run 都使用目标 Revision 绑定的密钥。
+- 模型 Provider 的 API Key 是写入型字段：首次配置必填，编辑时可保留旧密钥或替换。模型页面不要求填写变更原因，也不展示草稿、版本记录或独立探测步骤；保存成功后，新 Run 使用目标 Revision 绑定的密钥，已有 Run 继续使用自己的配置快照。
 - 进程内仍使用 Admin Control 与 Skill Publisher 两套数据库连接和角色，Skill Publisher 对象存储凭据不能复用普通 API/Worker 身份。
 - 开发发布 fixture 不等于生产 Skill 目录。
 - vendored Anthropic PPTX Skill 仅用于本地 development 测试，受其专有许可证约束。

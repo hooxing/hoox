@@ -753,21 +753,15 @@ export class AdminControlService {
         ? this.repository.listRuntimeSettings(context.actorUserId)
         : Promise.resolve([]),
     ]);
-    const providerRevision =
-      input.kind === "model_provider"
-        ? models.find(
+    const memoryRevision =
+      input.kind === "memory_provider"
+        ? memories.find(
             (candidate) =>
               candidate.configuration.providerKey === objectKey && candidate.revision === revision,
           )
-        : input.kind === "memory_provider"
-          ? memories.find(
-              (candidate) =>
-                candidate.configuration.providerKey === objectKey &&
-                candidate.revision === revision,
-            )
-          : undefined;
-    if (providerRevision !== undefined && providerRevision.probeStatus !== "healthy") {
-      // 连接探测是启用 Provider 的安全前置条件，不能由管理 Web 或其他调用方自行约定。
+        : undefined;
+    if (memoryRevision !== undefined && memoryRevision.probeStatus !== "healthy") {
+      // 记忆服务仍依赖独立探测确认其读写语义；模型配置则允许保存后直接启用。
       throw new AdminControlServiceError("CONFLICT");
     }
     if (input.kind === "model_provider" || input.kind === "runtime_settings") {

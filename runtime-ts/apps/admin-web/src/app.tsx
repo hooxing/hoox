@@ -985,7 +985,7 @@ const pageMetadata: Readonly<
   },
   "/models": {
     title: "模型服务",
-    description: "Provider、模型目录与配置版本",
+    description: "Provider、API Key 与默认模型",
   },
   "/memory": {
     title: "记忆服务",

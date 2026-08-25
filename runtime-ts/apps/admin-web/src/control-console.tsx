@@ -618,7 +618,7 @@ function ModelDraftForm({
     form: FormData,
     models: ModelProviderModelConfigurationDto[],
     defaultModelId: string,
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   readonly busy: boolean;
   readonly api: AdminControlApiContract;
   readonly initialConfiguration?: ModelProviderRevisionDto["configuration"];
@@ -643,15 +643,6 @@ function ModelDraftForm({
       "";
     return { models, defaultClientId };
   });
-  const [expandedModels, setExpandedModels] = useState<ReadonlySet<string>>(() =>
-    initialConfiguration === undefined &&
-    catalogProvider === undefined &&
-    catalog.models[0] !== undefined
-      ? new Set([catalog.models[0].clientId])
-      : new Set(),
-  );
-  const [modelQuery, setModelQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<readonly PiModelCatalogModelDto[]>([]);
   const [catalogBusy, setCatalogBusy] = useState(false);
   const [catalogMessage, setCatalogMessage] = useState<string>();
   const updateModel = (clientId: string, patch: Partial<EditableModelRow>) => {
@@ -662,24 +653,12 @@ function ModelDraftForm({
       ),
     }));
   };
-  const updateEnabled = (clientId: string, enabled: boolean) => {
-    setCatalog((current) => {
-      const models = current.models.map((model) =>
-        model.clientId === clientId ? { ...model, enabled } : model,
-      );
-      const defaultClientId =
-        !enabled && current.defaultClientId === clientId
-          ? (models.find((model) => model.enabled)?.clientId ?? "")
-          : current.defaultClientId;
-      return { models, defaultClientId };
-    });
-  };
   const removeModel = (clientId: string) => {
     setCatalog((current) => {
       const models = current.models.filter((model) => model.clientId !== clientId);
       const defaultClientId =
         current.defaultClientId === clientId
-          ? (models.find((model) => model.enabled)?.clientId ?? "")
+          ? (models[0]?.clientId ?? "")
           : current.defaultClientId;
       return { models, defaultClientId };
     });
@@ -689,10 +668,9 @@ function ModelDraftForm({
       setCatalogMessage("Pi 目录中没有当前运行时可用的模型，可继续手工添加。");
       return;
     }
-    const rows = models.map((model, index) => newModelRow(model, index === 0));
+    const rows = models.map((model) => newModelRow(model, true));
     setCatalog({ models: rows, defaultClientId: rows[0]?.clientId ?? "" });
-    setExpandedModels(new Set());
-    setCatalogMessage(`已从 Pi 载入 ${rows.length} 个模型，所有字段仍可修改。`);
+    setCatalogMessage(undefined);
   }, []);
   const loadProviderModels = useCallback(async () => {
     if (catalogProvider === undefined) return;
@@ -713,45 +691,12 @@ function ModelDraftForm({
       void loadProviderModels();
     }
   }, [catalogProvider, initialConfiguration, loadProviderModels]);
-  const searchPiModels = async () => {
-    const query = modelQuery.trim();
-    if (query === "") return;
-    setCatalogBusy(true);
-    setCatalogMessage(undefined);
-    try {
-      const results = await api.findPiModelCatalogModels({ query, limit: 12 });
-      setSearchResults(results);
-      setCatalogMessage(
-        results.length === 0 ? "Pi 目录未找到匹配模型，可添加空白模型手工填写。" : undefined,
-      );
-    } catch {
-      setCatalogMessage("暂时无法查询 Pi 模型目录，可添加空白模型手工填写。");
-    } finally {
-      setCatalogBusy(false);
-    }
-  };
-  const addPiModel = (seed: PiModelCatalogModelDto) => {
-    setCatalog((current) => {
-      if (current.models.some((model) => model.id === seed.id)) return current;
-      const row = newModelRow(seed);
-      const only = current.models[0];
-      const models =
-        current.models.length === 1 && only?.id === "" && only.name === ""
-          ? [row]
-          : [...current.models, row];
-      return {
-        models,
-        defaultClientId:
-          current.defaultClientId === only?.clientId ? row.clientId : current.defaultClientId,
-      };
-    });
-    setSearchResults([]);
-    setModelQuery("");
-  };
   const addBlankModel = () => {
     const row = newModelRow();
-    setCatalog((current) => ({ ...current, models: [...current.models, row] }));
-    setExpandedModels((current) => new Set([...current, row.clientId]));
+    setCatalog((current) => ({
+      models: [...current.models, row],
+      defaultClientId: current.defaultClientId || row.clientId,
+    }));
   };
   return (
     <form
@@ -760,8 +705,8 @@ function ModelDraftForm({
         event.preventDefault();
         const models = catalog.models.map<ModelProviderModelConfigurationDto>((model) => ({
           id: model.id.trim(),
-          name: model.name.trim(),
-          enabled: model.enabled,
+          name: model.name.trim() || model.id.trim(),
+          enabled: true,
           reasoning: model.reasoning,
           input: model.supportsImages ? ["text", "image"] : ["text"],
           contextWindow: Number(model.contextWindow),
@@ -770,7 +715,9 @@ function ModelDraftForm({
         const defaultModelId =
           catalog.models.find((model) => model.clientId === catalog.defaultClientId)?.id.trim() ??
           "";
-        void onCreate(new FormData(event.currentTarget), models, defaultModelId);
+        void onCreate(new FormData(event.currentTarget), models, defaultModelId).then((saved) => {
+          if (saved) onCancel();
+        });
       }}
     >
       <div className="model-editor-intro wide">
@@ -798,44 +745,55 @@ function ModelDraftForm({
           取消
         </button>
       </div>
-      <label>
-        Provider 内部标识（不是 API Key）
-        <input
-          name="providerKey"
-          required
-          pattern="[a-z0-9][a-z0-9._-]{0,63}"
-          placeholder="例如 deepseek 或 openrouter"
-          autoComplete="off"
-          value={providerKey}
-          aria-invalid={providerKeyRejected}
-          onChange={(event) => {
-            const next = event.target.value;
-            if (isSecretLikeProviderKey(next)) {
-              setProviderKey("");
-              setProviderKeyRejected(true);
-              return;
-            }
-            setProviderKey(next);
-            setProviderKeyRejected(false);
-          }}
-        />
-        <small className={providerKeyRejected ? "field-error" : undefined}>
-          {providerKeyRejected
-            ? "检测到疑似 API Key，内容已清空。请立即轮换该密钥，并填写平台内部标识。"
-            : "仅用于版本、路由和审计；不要在这里粘贴 API Key。"}
-        </small>
-      </label>
-      <label>
-        显示名称
-        <input
-          name="displayName"
-          required
-          maxLength={120}
-          defaultValue={initialConfiguration?.displayName ?? catalogProvider?.displayName ?? ""}
-        />
-      </label>
+      {catalogProvider === undefined ? (
+        <>
+          <label>
+            Provider 标识
+            <input
+              name="providerKey"
+              required
+              pattern="[a-z0-9][a-z0-9._-]{0,63}"
+              placeholder="例如 deepseek 或 openrouter"
+              autoComplete="off"
+              value={providerKey}
+              aria-invalid={providerKeyRejected}
+              onChange={(event) => {
+                const next = event.target.value;
+                if (isSecretLikeProviderKey(next)) {
+                  setProviderKey("");
+                  setProviderKeyRejected(true);
+                  return;
+                }
+                setProviderKey(next);
+                setProviderKeyRejected(false);
+              }}
+            />
+            {providerKeyRejected && (
+              <small className="field-error">这里请填写名称，不是 API Key。</small>
+            )}
+          </label>
+          <label>
+            显示名称
+            <input
+              name="displayName"
+              required
+              maxLength={120}
+              defaultValue={initialConfiguration?.displayName ?? ""}
+            />
+          </label>
+        </>
+      ) : (
+        <>
+          <input type="hidden" name="providerKey" value={catalogProvider.providerId} />
+          <input
+            type="hidden"
+            name="displayName"
+            value={initialConfiguration?.displayName ?? catalogProvider.displayName}
+          />
+        </>
+      )}
       <label className="wide">
-        HTTPS Base URL
+        接口地址
         <input
           name="baseUrl"
           required
@@ -859,7 +817,11 @@ function ModelDraftForm({
               : "留空则保留当前密钥；输入新值则替换"
           }
         />
-        <small>密钥只提交一次并加密保存；页面、列表、接口和审计日志都不会回显。</small>
+        <small>
+          {reuseCredentialFromRevision === undefined
+            ? "在这里配置这个 Provider 的密钥。"
+            : "留空会继续使用当前密钥。"}
+        </small>
       </label>
       {reuseCredentialFromRevision !== undefined && (
         <input
@@ -868,218 +830,98 @@ function ModelDraftForm({
           value={reuseCredentialFromRevision}
         />
       )}
-      <fieldset className="model-catalog-editor wide">
-        <legend>模型目录</legend>
-        <div className="model-catalog-toolbar">
-          <span>
-            <strong>{catalog.models.length} 个模型</strong>
-            <small>Pi 只提供初始值；启用、默认与所有能力都可修改。</small>
-          </span>
-          {catalogProvider !== undefined && (
-            <button
-              type="button"
-              className="quiet-button"
-              disabled={catalogBusy}
-              onClick={() => void loadProviderModels()}
-            >
-              {catalogBusy ? "正在读取…" : "从 Pi 重新载入"}
-            </button>
-          )}
-        </div>
-        <div className="pi-model-search">
-          <label>
-            按模型 ID 或名称获取信息
-            <input
-              value={modelQuery}
-              maxLength={255}
-              placeholder="例如 deepseek-chat"
-              onChange={(event) => setModelQuery(event.target.value)}
-            />
-          </label>
+      {catalogProvider !== undefined ? (
+        <label className="wide model-primary-choice">
+          使用模型
+          <select
+            required
+            value={catalog.defaultClientId}
+            disabled={catalogBusy || catalog.models.length === 0}
+            onChange={(event) =>
+              setCatalog((current) => ({ ...current, defaultClientId: event.target.value }))
+            }
+          >
+            {catalog.models.length === 0 && <option value="">正在读取模型…</option>}
+            {catalog.models.map((model) => (
+              <option key={model.clientId} value={model.clientId}>
+                {model.name} · {model.id}
+              </option>
+            ))}
+          </select>
+          <small>Pi 已提供模型信息，直接选择要使用的模型即可。</small>
+          {catalogMessage !== undefined && <small className="field-error">{catalogMessage}</small>}
+        </label>
+      ) : (
+        <fieldset className="model-catalog-editor simple-model-list wide">
+          <legend>模型</legend>
+          <p>至少填写一个模型；选中的模型会作为默认模型。</p>
+          {catalog.models.map((model, index) => (
+            <div className="simple-model-row" key={model.clientId}>
+              <label>
+                模型 ID
+                <input
+                  required
+                  maxLength={255}
+                  aria-label={`模型 ${index + 1} ID`}
+                  placeholder="例如 deepseek-chat"
+                  value={model.id}
+                  onChange={(event) => updateModel(model.clientId, { id: event.target.value })}
+                />
+              </label>
+              <label>
+                显示名称
+                <input
+                  maxLength={120}
+                  aria-label={`模型 ${index + 1} 名称`}
+                  placeholder="不填则使用模型 ID"
+                  value={model.name}
+                  onChange={(event) => updateModel(model.clientId, { name: event.target.value })}
+                />
+              </label>
+              <label className="default-model-choice">
+                <input
+                  type="radio"
+                  name="defaultModel"
+                  aria-label={`模型 ${index + 1} 设为默认`}
+                  checked={catalog.defaultClientId === model.clientId}
+                  onChange={() =>
+                    setCatalog((current) => ({ ...current, defaultClientId: model.clientId }))
+                  }
+                />
+                默认
+              </label>
+              <button
+                type="button"
+                className="text-button danger"
+                disabled={catalog.models.length === 1}
+                onClick={() => removeModel(model.clientId)}
+              >
+                删除
+              </button>
+            </div>
+          ))}
           <button
             type="button"
-            className="quiet-button"
-            disabled={catalogBusy || modelQuery.trim() === ""}
-            onClick={() => void searchPiModels()}
+            className="quiet-button add-model-button"
+            disabled={catalog.models.length >= 100}
+            onClick={addBlankModel}
           >
-            从 Pi 查询
+            添加模型
           </button>
-        </div>
-        {searchResults.length > 0 && (
-          <div className="pi-search-results">
-            {searchResults.map((result) => (
-              <button
-                key={`${result.providerId}:${result.id}`}
-                type="button"
-                disabled={catalog.models.some((model) => model.id === result.id)}
-                onClick={() => addPiModel(result)}
-              >
-                <span>
-                  <strong>{result.name}</strong>
-                  <small>
-                    {result.providerName} · {result.id}
-                  </small>
-                </span>
-                <span>{result.contextWindow.toLocaleString()} ctx</span>
-              </button>
-            ))}
-          </div>
-        )}
-        {catalogMessage !== undefined && <p className="catalog-message">{catalogMessage}</p>}
-        {catalog.models.map((model, index) => {
-          const expanded = expandedModels.has(model.clientId);
-          return (
-            <div
-              className={`model-editor-row ${model.enabled ? "enabled" : "disabled"}`}
-              key={model.clientId}
-            >
-              <div className="model-editor-heading">
-                <span className="model-row-identity">
-                  <strong>{model.name || `模型 ${index + 1}`}</strong>
-                  <code>{model.id || "等待填写模型 ID"}</code>
-                </span>
-                <span className="model-row-capabilities">
-                  {model.reasoning && <small>推理</small>}
-                  {model.supportsImages && <small>图片</small>}
-                  <small>{Number(model.contextWindow || 0).toLocaleString()} ctx</small>
-                </span>
-                <label className="model-enabled-choice">
-                  <input
-                    type="checkbox"
-                    aria-label={`模型 ${index + 1} 启用`}
-                    checked={model.enabled}
-                    onChange={(event) => updateEnabled(model.clientId, event.target.checked)}
-                  />
-                  启用
-                </label>
-                <label className="default-model-choice">
-                  <input
-                    type="radio"
-                    name="defaultModel"
-                    aria-label={`模型 ${index + 1} 设为默认`}
-                    checked={catalog.defaultClientId === model.clientId}
-                    disabled={!model.enabled}
-                    onChange={() =>
-                      setCatalog((current) => ({ ...current, defaultClientId: model.clientId }))
-                    }
-                  />
-                  默认
-                </label>
-                <button
-                  type="button"
-                  className="text-button"
-                  onClick={() =>
-                    setExpandedModels((current) => {
-                      const next = new Set(current);
-                      if (next.has(model.clientId)) next.delete(model.clientId);
-                      else next.add(model.clientId);
-                      return next;
-                    })
-                  }
-                >
-                  {expanded ? "收起" : "编辑"}
-                </button>
-                <button
-                  type="button"
-                  className="text-button danger"
-                  disabled={catalog.models.length === 1}
-                  onClick={() => removeModel(model.clientId)}
-                >
-                  删除
-                </button>
-              </div>
-              {expanded && (
-                <div className="model-advanced-fields">
-                  <label>
-                    模型 ID
-                    <input
-                      required
-                      maxLength={255}
-                      value={model.id}
-                      onChange={(event) => updateModel(model.clientId, { id: event.target.value })}
-                    />
-                  </label>
-                  <label>
-                    模型名称
-                    <input
-                      required
-                      maxLength={120}
-                      value={model.name}
-                      onChange={(event) =>
-                        updateModel(model.clientId, { name: event.target.value })
-                      }
-                    />
-                  </label>
-                  <label>
-                    上下文窗口
-                    <input
-                      type="number"
-                      min="1"
-                      max="10000000"
-                      required
-                      value={model.contextWindow}
-                      onChange={(event) =>
-                        updateModel(model.clientId, { contextWindow: event.target.value })
-                      }
-                    />
-                  </label>
-                  <label>
-                    最大输出 Token
-                    <input
-                      type="number"
-                      min="1"
-                      max="10000000"
-                      required
-                      value={model.maxTokens}
-                      onChange={(event) =>
-                        updateModel(model.clientId, { maxTokens: event.target.value })
-                      }
-                    />
-                  </label>
-                  <label className="checkbox compact">
-                    <input
-                      type="checkbox"
-                      checked={model.reasoning}
-                      onChange={(event) =>
-                        updateModel(model.clientId, { reasoning: event.target.checked })
-                      }
-                    />
-                    支持推理
-                  </label>
-                  <label className="checkbox compact">
-                    <input
-                      type="checkbox"
-                      checked={model.supportsImages}
-                      onChange={(event) =>
-                        updateModel(model.clientId, { supportsImages: event.target.checked })
-                      }
-                    />
-                    支持图片
-                  </label>
-                </div>
-              )}
-            </div>
-          );
-        })}
-        <button
-          type="button"
-          className="quiet-button add-model-button"
-          disabled={catalog.models.length >= 100}
-          onClick={addBlankModel}
-        >
-          添加空白模型
-        </button>
-      </fieldset>
-      <label className="wide">
-        变更原因
-        <textarea name="reason" required maxLength={500} />
-      </label>
+        </fieldset>
+      )}
       <button
         type="submit"
         className="primary-button"
-        disabled={busy || providerKeyRejected || providerKey.trim() === ""}
+        disabled={
+          busy ||
+          catalogBusy ||
+          providerKeyRejected ||
+          providerKey.trim() === "" ||
+          catalog.defaultClientId === ""
+        }
       >
-        保存待启用配置
+        {busy ? "正在保存…" : "保存并使用"}
       </button>
     </form>
   );
@@ -1124,8 +966,8 @@ function ModelEffectiveState({
           <strong>{unavailable ? "无法确认当前实际使用的模型" : "正在读取当前生效配置"}</strong>
           <p>
             {unavailable
-              ? "控制服务不可用；下面的 Pi 目录只能用于准备配置，不代表已经保存或生效。请恢复 uu 端口映射与后台控制服务后重试。"
-              : "正在读取 active revision、Generation 与部署凭据状态。"}
+              ? "控制服务不可用，暂时无法读取或保存模型配置。请恢复 uu 端口映射与后台控制服务后重试。"
+              : "正在读取当前模型配置。"}
           </p>
         </div>
       </section>
@@ -1145,25 +987,25 @@ function ModelEffectiveState({
       aria-label="当前模型生效状态"
     >
       <span className="model-effective-badge">
-        {active === undefined ? "部署回退" : "当前生效"}
+        {active === undefined ? "部署默认" : "当前使用"}
       </span>
       <div>
         <strong>
           {active === undefined
-            ? "尚未启用后台模型配置"
+            ? "当前使用部署配置"
             : `${active.configuration.displayName} / ${active.configuration.defaultModelId}`}
         </strong>
         <p>
           {active === undefined
-            ? "待启用配置不会影响实际调用；新 Run 继续使用部署环境中的 MODEL_BASE_URL 与 MODEL_ID。"
-            : `Provider ${displayedProviderKey(active.configuration.providerKey)} · Revision ${active.revision} · Generation ${overview.generation}。只影响启用后创建的新 Run，已有 Run 继续使用固定快照。`}
+            ? "添加并保存 Provider 后，新 Run 会直接使用保存的模型。"
+            : `Provider ${displayedProviderKey(active.configuration.providerKey)}。新 Run 使用这份配置，已经开始的 Run 保持不变。`}
         </p>
       </div>
       <span className={`model-credential-state ${credentialState}`}>
-        {active === undefined ? "部署回退 API Key" : "Provider API Key"}
+        {active === undefined ? "部署 API Key" : "Provider API Key"}
         <small>
           {credentialState === "configured"
-            ? "已配置，值不可见"
+            ? "已配置"
             : credentialState === "missing"
               ? "未配置"
               : "状态未知"}
@@ -1192,7 +1034,7 @@ function ModelProviderWorkspace({
     form: FormData,
     models: ModelProviderModelConfigurationDto[],
     defaultModelId: string,
-  ) => Promise<void>;
+  ) => Promise<boolean>;
 }) {
   const [editor, setEditor] = useState<ModelEditorState>();
   const [showProviderCatalog, setShowProviderCatalog] = useState(true);
@@ -1226,7 +1068,7 @@ function ModelProviderWorkspace({
       <div className="provider-settings-heading">
         <span>
           <h2>供应商</h2>
-          <p>从 Pi 载入可编辑初始值；保存后必须探测成功并启用，才会影响新 Run。</p>
+          <p>选择 Provider，填入 API Key 和模型，保存后直接用于新 Run。</p>
         </span>
         <span className="provider-settings-actions">
           <button
@@ -1312,7 +1154,7 @@ function ModelProviderWorkspace({
                   <small>默认：{configuration.defaultModelId}</small>
                 </span>
                 <span className={`status status-${revision.status}`}>
-                  {revisionStatusLabels[revision.status]}
+                  {revision.status === "active" ? "当前使用" : "已配置"}
                 </span>
                 <button
                   type="button"
@@ -1340,7 +1182,7 @@ function ModelProviderWorkspace({
         )}
       </div>
       <p className="boundary-note">
-        每个 Provider Revision 绑定自己的加密密钥；页面只显示配置状态，不读取或回显真实值。
+        编辑并保存任一 Provider 后，它会立即成为新 Run 使用的模型配置。
       </p>
     </div>
   );
@@ -1741,19 +1583,24 @@ export function AdminControlConsole({
     void refresh();
   }, [refresh]);
 
-  const operation = async (work: () => Promise<unknown>) => {
+  const performOperation = async (work: () => Promise<unknown>): Promise<boolean> => {
     setBusy(true);
     try {
       await work();
       await queryClient.invalidateQueries({ queryKey: ["admin-control"] });
       await refresh();
+      return true;
     } catch (reason) {
       const message = errorMessage(reason);
       await refresh();
       setError(message);
+      return false;
     } finally {
       setBusy(false);
     }
+  };
+  const operation = async (work: () => Promise<unknown>): Promise<void> => {
+    await performOperation(work);
   };
 
   const kind =
@@ -1883,8 +1730,8 @@ export function AdminControlConsole({
                   (item): item is ModelProviderRevisionDto => "models" in item.configuration,
                 )}
                 onCreate={(form, models, defaultModelId) =>
-                  operation(() =>
-                    api.createModelDraft({
+                  performOperation(async () => {
+                    const draft = await api.createModelDraft({
                       providerKey: value(form, "providerKey"),
                       displayName: value(form, "displayName"),
                       protocol: "openai-compatible",
@@ -1899,9 +1746,18 @@ export function AdminControlConsole({
                             ),
                           }
                         : { apiKey: secretValue(form, "apiKey") }),
-                      reason: value(form, "reason"),
-                    }),
-                  )
+                      reason: "保存并使用模型配置",
+                    });
+                    await api.publish(
+                      "model-providers",
+                      draft.configuration.providerKey,
+                      draft.revision,
+                      {
+                        expectedVersionToken: draft.versionToken,
+                        reason: "保存并使用模型配置",
+                      },
+                    );
+                  })
                 }
               />
             ) : view === "memory" ? (
@@ -1943,38 +1799,40 @@ export function AdminControlConsole({
               />
             )}
           </section>
-          <section className="control-panel revision-list">
-            <div className="panel-heading">
-              <div>
-                <span className="eyebrow">History</span>
-                <h2>版本记录</h2>
+          {view !== "models" && (
+            <section className="control-panel revision-list">
+              <div className="panel-heading">
+                <div>
+                  <span className="eyebrow">History</span>
+                  <h2>版本记录</h2>
+                </div>
+                <span className="count">{items.length}</span>
               </div>
-              <span className="count">{items.length}</span>
-            </div>
-            {items.length === 0 ? (
-              <p className="empty-state">尚未创建配置版本。</p>
-            ) : (
-              items.map((item) => {
-                const providerKey =
-                  "providerKey" in item.configuration ? item.configuration.providerKey : "global";
-                return (
-                  <RevisionCard
-                    key={`${providerKey}:${item.revision}`}
-                    kind={kind}
-                    item={item}
-                    busy={busy}
-                    onAction={(action, input) =>
-                      operation(() =>
-                        action === "probe" && kind !== "runtime-settings"
-                          ? api.probe(kind, providerKey, item.revision, input)
-                          : api.publish(kind, providerKey, item.revision, input),
-                      )
-                    }
-                  />
-                );
-              })
-            )}
-          </section>
+              {items.length === 0 ? (
+                <p className="empty-state">尚未创建配置版本。</p>
+              ) : (
+                items.map((item) => {
+                  const providerKey =
+                    "providerKey" in item.configuration ? item.configuration.providerKey : "global";
+                  return (
+                    <RevisionCard
+                      key={`${providerKey}:${item.revision}`}
+                      kind={kind}
+                      item={item}
+                      busy={busy}
+                      onAction={(action, input) =>
+                        operation(() =>
+                          action === "probe" && kind !== "runtime-settings"
+                            ? api.probe(kind, providerKey, item.revision, input)
+                            : api.publish(kind, providerKey, item.revision, input),
+                        )
+                      }
+                    />
+                  );
+                })
+              )}
+            </section>
+          )}
           {view === "settings" && <DeploymentSettings items={overview?.deploymentSettings ?? []} />}
         </>
       )}

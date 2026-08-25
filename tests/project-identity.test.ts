@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const root = new URL("../", import.meta.url);
@@ -15,7 +15,8 @@ function workspaceManifestPaths(): readonly string[] {
   return ["runtime-ts/apps", "runtime-ts/packages"].flatMap((directory) =>
     readdirSync(new URL(directory, root), { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => `${directory}/${entry.name}/package.json`),
+      .map((entry) => `${directory}/${entry.name}/package.json`)
+      .filter((path) => existsSync(new URL(path, root))),
   );
 }
 

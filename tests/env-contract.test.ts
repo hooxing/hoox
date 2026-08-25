@@ -35,6 +35,7 @@ function validExample(): string {
         key.endsWith("HMAC_KEY") ||
         key.endsWith("TOKEN") ||
         key.endsWith("TEMPLATE_ID") ||
+        key === "MODEL_CREDENTIAL_ENCRYPTION_KEY" ||
         key === "RESOURCEFS_PROXY_TLS_KEY_PATH" ||
         key === "RESOURCEFS_PROXY_TLS_CERT_PATH" ||
         key === "MINIO_ROOT_USER" ||

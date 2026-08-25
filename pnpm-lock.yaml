@@ -470,9 +470,6 @@ importers:
       '@hoox/protocol':
         specifier: workspace:*
         version: link:../protocol
-      '@sinclair/typebox':
-        specifier: 0.34.52
-        version: 0.34.52
 
   runtime-ts/packages/resource:
     dependencies:
@@ -521,8 +518,6 @@ importers:
       '@hoox/domain':
         specifier: workspace:*
         version: link:../domain
-
-  runtime-ts/packages/testing: {}
 
   runtime-ts/packages/thread-title: {}
 

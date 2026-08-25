@@ -45,7 +45,7 @@ corepack pnpm config:check
 | --- | --- |
 | `domain` | Tenant、Thread、Run 等领域实体与不变量 |
 | `protocol` | API、事件和进程间消息契约 |
-| `protocol-mapper` | Domain 与 Protocol 的显式映射及公共错误归一化 |
+| `protocol-mapper` | Domain 到 Protocol 的显式投影及公共错误归一化 |
 | `persistence` | PostgreSQL 仓储、事务与迁移适配 |
 | `process-runtime` | 严格进程配置、信号、排空、关闭和健康状态语义 |
 | `prompt-builder` | 可审计、可复现的系统提示词组装 |
@@ -55,9 +55,8 @@ corepack pnpm config:check
 | `workspace` | Thread 私有工作区及版本快照 |
 | `resource` | 跨 Thread 资源和不可变版本 |
 | `artifact` | Agent 明确发布的最终交付物 |
-| `testing` | Fake、夹具和跨包测试工具，仅供测试使用 |
 
-应用依赖共享包时，必须通过 pnpm Workspace 依赖显式声明，不能使用跨目录相对导入。共享进程包不拥有业务依赖，也不提供测试 Fake 作为生产默认值。
+应用依赖共享包时，必须通过 pnpm Workspace 依赖显式声明，不能使用跨目录相对导入。共享进程包不拥有业务依赖，也不提供测试 Fake 作为生产默认值；测试夹具与其消费方共置。
 
 ## 配置安全
 

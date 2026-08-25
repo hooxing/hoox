@@ -1,22 +1,12 @@
 import {
   DomainError,
-  rehydrateArtifact,
-  rehydrateMembership,
-  rehydrateResourceVersion,
-  rehydrateRun,
-  rehydrateTenant,
-  rehydrateThread,
-  rehydrateUser,
-  rehydrateWorkspaceRevision,
   type Artifact,
   type Membership,
-  type Resource,
   type ResourceVersion,
   type Run,
   type Tenant,
   type Thread,
   type User,
-  type Workspace,
   type WorkspaceRevision,
 } from "@hoox/domain";
 import {
@@ -32,27 +22,11 @@ import {
   type UserDto,
   type WorkspaceRevisionDto,
 } from "@hoox/protocol";
-import type { Static, TSchema } from "@sinclair/typebox";
-import { Value } from "@sinclair/typebox/value";
-
-export function decodeDtoJson<T extends TSchema>(schema: T, json: string): Static<T> {
-  let value: unknown;
-  try {
-    value = JSON.parse(json);
-  } catch {
-    throw new ProtocolConstructionError("JSON 格式无效");
-  }
-  if (!Value.Check(schema, value)) {
-    throw new ProtocolConstructionError("DTO 未通过协议校验");
-  }
-  return value as Static<T>;
-}
 
 export const toUserDto = (entity: User): UserDto => ({
   id: entity.id,
   createdAt: entity.createdAt,
 });
-export const fromUserDto = (dto: UserDto): User => rehydrateUser(dto);
 
 export function toTenantDto(entity: Tenant): TenantDto {
   return entity.kind === "personal"
@@ -70,8 +44,6 @@ export function toTenantDto(entity: Tenant): TenantDto {
         createdAt: entity.createdAt,
       };
 }
-export const fromTenantDto = (dto: TenantDto, relatedUser: User): Tenant =>
-  rehydrateTenant(dto, relatedUser);
 
 export const toMembershipDto = (entity: Membership): MembershipDto => ({
   id: entity.id,
@@ -81,8 +53,6 @@ export const toMembershipDto = (entity: Membership): MembershipDto => ({
   status: entity.status,
   createdAt: entity.createdAt,
 });
-export const fromMembershipDto = (dto: MembershipDto, tenant: Tenant, user: User): Membership =>
-  rehydrateMembership(dto, tenant, user);
 
 export const toThreadDto = (entity: Thread): ThreadDto => ({
   id: entity.id,
@@ -93,12 +63,6 @@ export const toThreadDto = (entity: Thread): ThreadDto => ({
   createdAt: entity.createdAt,
   updatedAt: entity.updatedAt,
 });
-export const fromThreadDto = (
-  dto: ThreadDto,
-  tenant: Tenant,
-  user: User,
-  membership: Membership,
-): Thread => rehydrateThread(dto, tenant, user, membership);
 
 export const toRunDto = (entity: Run, executionStatus?: RunDto["executionStatus"]): RunDto => ({
   id: entity.id,
@@ -109,7 +73,6 @@ export const toRunDto = (entity: Run, executionStatus?: RunDto["executionStatus"
   createdAt: entity.createdAt,
   updatedAt: entity.updatedAt,
 });
-export const fromRunDto = (dto: RunDto, thread: Thread): Run => rehydrateRun(dto, thread);
 
 export const toWorkspaceRevisionDto = (entity: WorkspaceRevision): WorkspaceRevisionDto => ({
   id: entity.id,
@@ -124,11 +87,6 @@ export const toWorkspaceRevisionDto = (entity: WorkspaceRevision): WorkspaceRevi
   digest: entity.digest,
   createdAt: entity.createdAt,
 });
-export const fromWorkspaceRevisionDto = (
-  dto: WorkspaceRevisionDto,
-  workspace: Workspace,
-  rootRun: Run,
-): WorkspaceRevision => rehydrateWorkspaceRevision(dto, workspace, rootRun);
 
 export const toResourceVersionDto = (entity: ResourceVersion): ResourceVersionDto => ({
   id: entity.id,
@@ -142,10 +100,6 @@ export const toResourceVersionDto = (entity: ResourceVersion): ResourceVersionDt
   sizeBytes: entity.sizeBytes,
   createdAt: entity.createdAt,
 });
-export const fromResourceVersionDto = (
-  dto: ResourceVersionDto,
-  resource: Resource,
-): ResourceVersion => rehydrateResourceVersion(dto, resource);
 
 export const toArtifactDto = (entity: Artifact): ArtifactDto => ({
   id: entity.id,
@@ -161,12 +115,6 @@ export const toArtifactDto = (entity: Artifact): ArtifactDto => ({
   createdAt: entity.createdAt,
   updatedAt: entity.updatedAt,
 });
-export const fromArtifactDto = (
-  dto: ArtifactDto,
-  run: Run,
-  resourceVersion: ResourceVersion,
-  replaces?: Artifact,
-): Artifact => rehydrateArtifact(dto, run, resourceVersion, replaces);
 
 function assertNever(value: never): never {
   throw new ProtocolConstructionError(`未映射的领域错误码：${String(value)}`);

@@ -275,6 +275,9 @@ export class AdminControlServiceError extends Error {
 }
 
 const providerKeyPattern = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
+const secretLikeProviderKeyPattern =
+  /^(?:(?:sk|rk|pk)[._-][a-z0-9_-]{16,}|(?:gh[pousr]|xox[baprs]|hf)[_-][a-z0-9_-]{16,})$/iu;
+const redactedProviderKey = "sensitive-identifier-redacted";
 
 function normalizedText(value: string, name: string, maximum: number): string {
   const normalized = value.replace(/\s+/gu, " ").trim();
@@ -285,9 +288,38 @@ function normalizedText(value: string, name: string, maximum: number): string {
 }
 
 function normalizedProviderKey(value: string): string {
-  const normalized = value.trim().toLowerCase();
+  const trimmed = value.trim();
+  if (secretLikeProviderKeyPattern.test(trimmed)) {
+    throw new TypeError("Provider 内部标识疑似包含 API Key");
+  }
+  const normalized = trimmed.toLowerCase();
   if (!providerKeyPattern.test(normalized)) throw new TypeError("Provider Key 格式无效");
   return normalized;
+}
+
+function redactedModelRevision(
+  value: ControlRevision<ModelProviderConfiguration>,
+): ControlRevision<ModelProviderConfiguration> {
+  if (!secretLikeProviderKeyPattern.test(value.configuration.providerKey)) return value;
+  return {
+    ...value,
+    configuration: { ...value.configuration, providerKey: redactedProviderKey },
+  };
+}
+
+function redactedMemoryRevision(
+  value: ControlRevision<MemoryProviderConfiguration>,
+): ControlRevision<MemoryProviderConfiguration> {
+  if (!secretLikeProviderKeyPattern.test(value.configuration.providerKey)) return value;
+  return {
+    ...value,
+    configuration: { ...value.configuration, providerKey: redactedProviderKey },
+  };
+}
+
+function redactedAuditEvent(value: ControlAuditEvent): ControlAuditEvent {
+  if (!secretLikeProviderKeyPattern.test(value.objectKey)) return value;
+  return { ...value, objectKey: redactedProviderKey };
 }
 
 function normalizedUserId(value: string): string {
@@ -483,8 +515,8 @@ export class AdminControlService {
     const activeMemory = memories.find((revision) => revision.status === "active");
     return Object.freeze({
       generation,
-      ...(activeModel === undefined ? {} : { activeModel }),
-      ...(activeMemory === undefined ? {} : { activeMemory }),
+      ...(activeModel === undefined ? {} : { activeModel: redactedModelRevision(activeModel) }),
+      ...(activeMemory === undefined ? {} : { activeMemory: redactedMemoryRevision(activeMemory) }),
       ...(activeRuntimeSettings === undefined ? {} : { activeRuntimeSettings }),
       statistics,
       deploymentSettings: this.deploymentSettings,
@@ -493,12 +525,12 @@ export class AdminControlService {
 
   async listModelProviders(actorUserId: string) {
     requireRole(await this.repository.resolveRole(actorUserId), ["viewer", "operator", "admin"]);
-    return await this.repository.listModelProviders(actorUserId);
+    return (await this.repository.listModelProviders(actorUserId)).map(redactedModelRevision);
   }
 
   async listMemoryProviders(actorUserId: string) {
     requireRole(await this.repository.resolveRole(actorUserId), ["viewer", "operator", "admin"]);
-    return await this.repository.listMemoryProviders(actorUserId);
+    return (await this.repository.listMemoryProviders(actorUserId)).map(redactedMemoryRevision);
   }
 
   async listRuntimeSettings(actorUserId: string) {
@@ -508,7 +540,9 @@ export class AdminControlService {
 
   async listAudits(actorUserId: string, limit = 100) {
     requireRole(await this.repository.resolveRole(actorUserId), ["viewer", "operator", "admin"]);
-    return await this.repository.listAudits(actorUserId, boundedInteger(limit, "审计条数", 1, 200));
+    return (
+      await this.repository.listAudits(actorUserId, boundedInteger(limit, "审计条数", 1, 200))
+    ).map(redactedAuditEvent);
   }
 
   async listUsers(actorUserId: string, query?: string, limit = 50): Promise<PlatformUserPage> {
@@ -610,6 +644,7 @@ export class AdminControlService {
     },
   ) {
     requireRole(await this.repository.resolveRole(context.actorUserId), ["operator", "admin"]);
+    const objectKey = normalizedProviderKey(input.revision.configuration.providerKey);
     const expectedVersionToken = boundedInteger(
       input.expectedVersionToken,
       "版本令牌",
@@ -633,7 +668,7 @@ export class AdminControlService {
       await this.repository.recordProbe({
         ...context,
         kind: input.kind,
-        objectKey: input.revision.configuration.providerKey,
+        objectKey,
         revision: input.revision.revision,
         expectedVersionToken,
         reason: normalizeChangeReason(input.reason),
@@ -657,11 +692,35 @@ export class AdminControlService {
     requireRole(await this.repository.resolveRole(context.actorUserId), ["admin"]);
     const objectKey = normalizedProviderKey(input.objectKey);
     const revision = boundedInteger(input.revision, "Revision", 1, Number.MAX_SAFE_INTEGER);
+    const [models, memories, settings] = await Promise.all([
+      input.kind === "model_provider" || input.kind === "runtime_settings"
+        ? this.repository.listModelProviders(context.actorUserId)
+        : Promise.resolve([]),
+      input.kind === "memory_provider"
+        ? this.repository.listMemoryProviders(context.actorUserId)
+        : Promise.resolve([]),
+      input.kind === "model_provider" || input.kind === "runtime_settings"
+        ? this.repository.listRuntimeSettings(context.actorUserId)
+        : Promise.resolve([]),
+    ]);
+    const providerRevision =
+      input.kind === "model_provider"
+        ? models.find(
+            (candidate) =>
+              candidate.configuration.providerKey === objectKey && candidate.revision === revision,
+          )
+        : input.kind === "memory_provider"
+          ? memories.find(
+              (candidate) =>
+                candidate.configuration.providerKey === objectKey &&
+                candidate.revision === revision,
+            )
+          : undefined;
+    if (providerRevision !== undefined && providerRevision.probeStatus !== "healthy") {
+      // 连接探测是启用 Provider 的安全前置条件，不能由管理 Web 或其他调用方自行约定。
+      throw new AdminControlServiceError("CONFLICT");
+    }
     if (input.kind === "model_provider" || input.kind === "runtime_settings") {
-      const [models, settings] = await Promise.all([
-        this.repository.listModelProviders(context.actorUserId),
-        this.repository.listRuntimeSettings(context.actorUserId),
-      ]);
       const model =
         input.kind === "model_provider"
           ? models.find(

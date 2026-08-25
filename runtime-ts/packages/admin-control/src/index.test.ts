@@ -73,6 +73,12 @@ describe("后台控制面领域规则", () => {
         baseUrl: "https://user:secret@example.com/v1",
       }),
     ).toThrow("Provider 地址必须是无凭据 HTTPS URL");
+    expect(() =>
+      normalizeModelProviderConfiguration({
+        ...modelConfiguration(),
+        providerKey: `sk-${"a".repeat(32)}`,
+      }),
+    ).toThrow("Provider 内部标识疑似包含 API Key");
   });
 
   it("拒绝无启用模型、未启用默认模型、重复 ID 和超出窗口的输出预算", () => {
@@ -144,6 +150,62 @@ describe("后台控制面领域规则", () => {
         compactionTimeoutMs: 60_000,
       }),
     ).toThrow("保留用户 Token 超出允许范围");
+  });
+
+  it("读取投影会遮蔽历史上误填到 Provider 标识的疑似密钥", async () => {
+    const secretLikeIdentifier = `sk-${"a".repeat(32)}`;
+    const modelRevision = {
+      revision: 1,
+      versionToken: 2,
+      status: "draft" as const,
+      probeStatus: "failed" as const,
+      createdBy: "admin",
+      createdAt: "2026-08-25T00:00:00.000Z",
+      updatedAt: "2026-08-25T00:01:00.000Z",
+      configuration: modelConfiguration({ providerKey: secretLikeIdentifier }),
+    };
+    const repository = {
+      resolveRole: async () => "viewer" as const,
+      listModelProviders: async () => [modelRevision],
+      listMemoryProviders: async () => [],
+      listRuntimeSettings: async () => [],
+      getActiveRuntimeSettings: async () => undefined,
+      generation: async () => 0,
+      createModelDraft: async () => ({ outcome: "not_found" as const }),
+      createMemoryDraft: async () => ({ outcome: "not_found" as const }),
+      createRuntimeSettingsDraft: async () => ({ outcome: "not_found" as const }),
+      recordProbe: async () => ({ outcome: "not_found" as const }),
+      publish: async () => ({ outcome: "not_found" as const }),
+      listAudits: async () => [
+        {
+          auditId: "audit_sensitive_provider",
+          actorUserId: "admin",
+          objectKind: "model_provider" as const,
+          objectKey: secretLikeIdentifier,
+          revision: 1,
+          action: "create_draft" as const,
+          reason: "历史误填",
+          outcome: "succeeded" as const,
+          createdAt: "2026-08-25T00:00:00.000Z",
+        },
+      ],
+      listUsers: async () => ({ items: [], total: 0 }),
+      updateUserStatus: async () => ({ outcome: "not_found" as const }),
+    } satisfies AdminControlRepository;
+    const service = new AdminControlService(
+      repository,
+      { read: async () => Promise.reject(new Error("unused")) },
+      { probeModel: async () => undefined, probeMemory: async () => undefined },
+      [],
+    );
+
+    const [models, audits] = await Promise.all([
+      service.listModelProviders("viewer"),
+      service.listAudits("viewer"),
+    ]);
+    expect(models[0]?.configuration.providerKey).toBe("sensitive-identifier-redacted");
+    expect(audits[0]?.objectKey).toBe("sensitive-identifier-redacted");
+    expect(JSON.stringify({ models, audits })).not.toContain(secretLikeIdentifier);
   });
 
   it("viewer 不能创建草稿，发布时拒绝超过 active 模型上限的压缩预算", async () => {
@@ -300,6 +362,127 @@ describe("后台控制面领域规则", () => {
     ).rejects.toEqual(
       expect.objectContaining<Partial<AdminControlServiceError>>({ code: "PROBE_FAILED" }),
     );
+  });
+
+  it("模型与记忆 Provider 只有探测成功后才允许启用", async () => {
+    const revision = {
+      revision: 1,
+      versionToken: 2,
+      status: "draft" as const,
+      probeStatus: "failed" as "failed" | "healthy",
+      createdBy: "admin",
+      createdAt: "2026-08-25T00:00:00.000Z",
+      updatedAt: "2026-08-25T00:01:00.000Z",
+      configuration: modelConfiguration(),
+    };
+    const publish = vi.fn(async () => ({ outcome: "applied" as const, value: revision }));
+    const repository = {
+      resolveRole: async () => "admin" as const,
+      listModelProviders: async () => [revision],
+      listMemoryProviders: async () => [],
+      listRuntimeSettings: async () => [],
+      getActiveRuntimeSettings: async () => undefined,
+      generation: async () => 0,
+      createModelDraft: async () => ({ outcome: "not_found" as const }),
+      createMemoryDraft: async () => ({ outcome: "not_found" as const }),
+      createRuntimeSettingsDraft: async () => ({ outcome: "not_found" as const }),
+      recordProbe: async () => ({ outcome: "not_found" as const }),
+      publish,
+      listAudits: async () => [],
+      listUsers: async () => ({ items: [], total: 0 }),
+      updateUserStatus: async () => ({ outcome: "not_found" as const }),
+    } satisfies AdminControlRepository;
+    const service = new AdminControlService(
+      repository,
+      { read: async () => Promise.reject(new Error("unused")) },
+      { probeModel: async () => undefined, probeMemory: async () => undefined },
+      [],
+    );
+
+    await expect(
+      service.publish(
+        { actorUserId: "admin", idempotencyKey: "publish-model", requestDigest: "e".repeat(64) },
+        {
+          kind: "model_provider",
+          objectKey: "main",
+          revision: 1,
+          command: { expectedVersionToken: 2, reason: "启用失败探针" },
+        },
+      ),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<AdminControlServiceError>>({ code: "CONFLICT" }),
+    );
+    expect(publish).not.toHaveBeenCalled();
+
+    revision.probeStatus = "healthy";
+    await expect(
+      service.publish(
+        {
+          actorUserId: "admin",
+          idempotencyKey: "publish-healthy-model",
+          requestDigest: "f".repeat(64),
+        },
+        {
+          kind: "model_provider",
+          objectKey: "main",
+          revision: 1,
+          command: { expectedVersionToken: 2, reason: "启用健康探针" },
+        },
+      ),
+    ).resolves.toBe(revision);
+    expect(publish).toHaveBeenCalledOnce();
+
+    const memoryPublish = vi.fn(async () => ({ outcome: "not_found" as const }));
+    const memoryRepository = {
+      ...repository,
+      listModelProviders: async () => [],
+      listMemoryProviders: async () => [
+        {
+          revision: 1,
+          versionToken: 3,
+          status: "draft" as const,
+          probeStatus: "untested" as const,
+          createdBy: "admin",
+          createdAt: "2026-08-25T00:00:00.000Z",
+          updatedAt: "2026-08-25T00:01:00.000Z",
+          configuration: {
+            providerKey: "memory",
+            displayName: "Mem0",
+            providerKind: "mem0" as const,
+            baseUrl: "https://api.mem0.ai/",
+            apiSecretRef: "deployment:memory-api" as const,
+            scopeSecretRef: "deployment:memory-scope" as const,
+            requestTimeoutMs: 10_000,
+            enabled: true,
+          },
+        },
+      ],
+      publish: memoryPublish,
+    } satisfies AdminControlRepository;
+    const memoryService = new AdminControlService(
+      memoryRepository,
+      { read: async () => Promise.reject(new Error("unused")) },
+      { probeModel: async () => undefined, probeMemory: async () => undefined },
+      [],
+    );
+    await expect(
+      memoryService.publish(
+        {
+          actorUserId: "admin",
+          idempotencyKey: "publish-memory",
+          requestDigest: "1".repeat(64),
+        },
+        {
+          kind: "memory_provider",
+          objectKey: "memory",
+          revision: 1,
+          command: { expectedVersionToken: 3, reason: "启用未探测记忆" },
+        },
+      ),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<AdminControlServiceError>>({ code: "CONFLICT" }),
+    );
+    expect(memoryPublish).not.toHaveBeenCalled();
   });
 
   it("只有管理员可读取用户目录，并禁止管理员停用自己", async () => {

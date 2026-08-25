@@ -45,12 +45,47 @@ function errorMessage(reason: unknown): string {
   return reason instanceof AdminApiError ? reason.message : "操作未完成，请刷新后重试。";
 }
 
+const secretLikeProviderKeyPattern =
+  /^(?:(?:sk|rk|pk)[._-][a-z0-9_-]{16,}|(?:gh[pousr]|xox[baprs]|hf)[_-][a-z0-9_-]{16,})$/iu;
+const redactedProviderKey = "sensitive-identifier-redacted";
+
+function isSecretLikeProviderKey(value: string): boolean {
+  const normalized = value.trim();
+  return normalized === redactedProviderKey || secretLikeProviderKeyPattern.test(normalized);
+}
+
+function displayedProviderKey(value: string): string {
+  return isSecretLikeProviderKey(value) ? "疑似密钥（已隐藏）" : value;
+}
+
+const revisionStatusLabels = {
+  draft: "待启用",
+  active: "当前生效",
+  retired: "已停用",
+} as const;
+
+const probeStatusLabels = {
+  untested: "尚未探测",
+  healthy: "连接正常",
+  failed: "探测失败",
+} as const;
+
+function configurationDisplayValue(key: string, field: unknown): string {
+  if (key === "providerKey" && typeof field === "string") return displayedProviderKey(field);
+  if (key === "secretRef" || key === "apiSecretRef" || key === "scopeSecretRef") {
+    return "部署环境（值不可见）";
+  }
+  return typeof field === "boolean" ? (field ? "是" : "否") : String(field);
+}
+
 function RevisionActions({
   kind,
   providerKey,
   revision,
   versionToken,
+  probeStatus,
   probe,
+  sensitiveIdentifier,
   busy,
   onAction,
 }: {
@@ -58,7 +93,9 @@ function RevisionActions({
   readonly providerKey: string;
   readonly revision: number;
   readonly versionToken: number;
+  readonly probeStatus: ModelProviderRevisionDto["probeStatus"];
   readonly probe: boolean;
+  readonly sensitiveIdentifier: boolean;
   readonly busy: boolean;
   readonly onAction: (
     action: "probe" | "publish",
@@ -66,20 +103,21 @@ function RevisionActions({
   ) => Promise<void>;
 }) {
   const [reason, setReason] = useState("");
+  const activationBlocked = probe && probeStatus !== "healthy";
   return (
     <div className="revision-actions">
       <input
-        aria-label={`${providerKey} 变更原因`}
+        aria-label={`${displayedProviderKey(providerKey)} 变更原因`}
         value={reason}
         maxLength={500}
-        placeholder="填写探测或发布原因"
+        placeholder="填写探测或启用原因"
         onChange={(event) => setReason(event.target.value)}
       />
       {probe && (
         <button
           type="button"
           className="quiet-button"
-          disabled={busy || reason.trim().length === 0}
+          disabled={busy || sensitiveIdentifier || reason.trim().length === 0}
           onClick={() => void onAction("probe", { expectedVersionToken: versionToken, reason })}
         >
           探测连接
@@ -88,11 +126,20 @@ function RevisionActions({
       <button
         type="button"
         className="primary-button"
-        disabled={busy || reason.trim().length === 0}
+        disabled={busy || sensitiveIdentifier || activationBlocked || reason.trim().length === 0}
         onClick={() => void onAction("publish", { expectedVersionToken: versionToken, reason })}
       >
-        发布此版本
+        启用此配置
       </button>
+      {(sensitiveIdentifier || activationBlocked) && (
+        <small className="revision-action-note" role="status">
+          {sensitiveIdentifier
+            ? "Provider 标识疑似包含密钥，已隔离；请轮换密钥并新建配置。"
+            : probeStatus === "failed"
+              ? "上次探测失败；重新探测成功后才能启用。"
+              : "请先完成连接探测，再启用此配置。"}
+        </small>
+      )}
       <span className="visually-hidden">
         {kind} revision {revision}
       </span>
@@ -101,11 +148,11 @@ function RevisionActions({
 }
 
 const configurationFieldLabels: Readonly<Record<string, string>> = {
-  providerKey: "Provider 标识",
+  providerKey: "Provider 内部标识",
   displayName: "显示名称",
   protocol: "调用协议",
   baseUrl: "服务地址",
-  secretRef: "模型密钥引用",
+  secretRef: "凭据来源",
   defaultModelId: "默认模型",
   providerKind: "记忆服务",
   apiSecretRef: "Mem0 API 密钥引用",
@@ -139,16 +186,17 @@ function RevisionCard({
   const modelConfiguration = "models" in configuration ? configuration : undefined;
   const modelCatalog = modelConfiguration?.models;
   const defaultModelId = modelConfiguration?.defaultModelId;
+  const sensitiveIdentifier = isSecretLikeProviderKey(providerKey);
   return (
     <article className={`control-revision ${item.status === "active" ? "active" : ""}`}>
       <div className="control-revision-heading">
         <div>
           <span className="eyebrow">
-            {providerKey} · Revision {item.revision}
+            {displayedProviderKey(providerKey)} · Revision {item.revision}
           </span>
           <h3>{title}</h3>
         </div>
-        <span className={`status status-${item.status}`}>{item.status}</span>
+        <span className={`status status-${item.status}`}>{revisionStatusLabels[item.status]}</span>
       </div>
       <dl className="configuration-summary">
         {Object.entries(configuration)
@@ -156,13 +204,13 @@ function RevisionCard({
           .map(([key, field]) => (
             <div key={key}>
               <dt>{configurationFieldLabels[key] ?? key}</dt>
-              <dd>{typeof field === "boolean" ? (field ? "是" : "否") : String(field)}</dd>
+              <dd>{configurationDisplayValue(key, field)}</dd>
             </div>
           ))}
       </dl>
       {modelCatalog !== undefined && (
         <fieldset className="revision-model-catalog">
-          <legend className="visually-hidden">{providerKey} 模型目录</legend>
+          <legend className="visually-hidden">{displayedProviderKey(providerKey)} 模型目录</legend>
           {modelCatalog.map((model) => (
             <div key={model.id} className={model.enabled ? "enabled" : "disabled"}>
               <span>
@@ -183,15 +231,22 @@ function RevisionCard({
         </fieldset>
       )}
       <p className="revision-meta">
-        探测：{item.probeStatus} · 版本令牌 {item.versionToken}
+        探测：{probeStatusLabels[item.probeStatus]} · 版本令牌 {item.versionToken}
       </p>
+      {sensitiveIdentifier && (
+        <p className="sensitive-identifier-warning" role="alert">
+          此历史版本的 Provider 标识疑似包含密钥，页面已隐藏并禁止继续操作。
+        </p>
+      )}
       {item.status !== "active" && (
         <RevisionActions
           kind={kind}
           providerKey={providerKey}
           revision={item.revision}
           versionToken={item.versionToken}
+          probeStatus={item.probeStatus}
           probe={kind !== "runtime-settings"}
+          sensitiveIdentifier={sensitiveIdentifier}
           busy={busy}
           onAction={onAction}
         />
@@ -450,7 +505,7 @@ function AuditTrail({ items }: { readonly items: readonly ControlAuditEventDto[]
             <article key={item.auditId}>
               <div>
                 <strong>
-                  {item.action} · {item.objectKey} #{item.revision}
+                  {item.action} · {displayedProviderKey(item.objectKey)} #{item.revision}
                 </strong>
                 <span>{item.reason}</span>
               </div>
@@ -565,6 +620,13 @@ function ModelDraftForm({
   readonly catalogProvider?: PiModelCatalogProviderDto;
   readonly onCancel: () => void;
 }) {
+  const initialProviderKey = initialConfiguration?.providerKey ?? catalogProvider?.providerId ?? "";
+  const [providerKey, setProviderKey] = useState(() =>
+    isSecretLikeProviderKey(initialProviderKey) ? "" : initialProviderKey,
+  );
+  const [providerKeyRejected, setProviderKeyRejected] = useState(() =>
+    isSecretLikeProviderKey(initialProviderKey),
+  );
   const [catalog, setCatalog] = useState(() => {
     const models = initialConfiguration?.models.map((model) => newModelRow(model)) ?? [
       newModelRow(),
@@ -731,13 +793,31 @@ function ModelDraftForm({
         </button>
       </div>
       <label>
-        Provider Key
+        Provider 内部标识（不是 API Key）
         <input
           name="providerKey"
           required
           pattern="[a-z0-9][a-z0-9._-]{0,63}"
-          defaultValue={initialConfiguration?.providerKey ?? catalogProvider?.providerId ?? ""}
+          placeholder="例如 deepseek 或 openrouter"
+          autoComplete="off"
+          value={providerKey}
+          aria-invalid={providerKeyRejected}
+          onChange={(event) => {
+            const next = event.target.value;
+            if (isSecretLikeProviderKey(next)) {
+              setProviderKey("");
+              setProviderKeyRejected(true);
+              return;
+            }
+            setProviderKey(next);
+            setProviderKeyRejected(false);
+          }}
         />
+        <small className={providerKeyRejected ? "field-error" : undefined}>
+          {providerKeyRejected
+            ? "检测到疑似 API Key，内容已清空。请立即轮换该密钥，并填写平台内部标识。"
+            : "仅用于版本、路由和审计；模型密钥始终由部署环境注入。"}
+        </small>
       </label>
       <label>
         显示名称
@@ -965,8 +1045,12 @@ function ModelDraftForm({
         变更原因
         <textarea name="reason" required maxLength={500} />
       </label>
-      <button type="submit" className="primary-button" disabled={busy}>
-        创建模型草稿
+      <button
+        type="submit"
+        className="primary-button"
+        disabled={busy || providerKeyRejected || providerKey.trim() === ""}
+      >
+        保存待启用配置
       </button>
     </form>
   );
@@ -992,16 +1076,82 @@ function latestModelRevisions(
   );
 }
 
+function ModelEffectiveState({
+  overview,
+  unavailable,
+}: {
+  readonly overview?: AdminControlOverviewDto;
+  readonly unavailable: boolean;
+}) {
+  if (overview === undefined) {
+    return (
+      <section
+        className={`model-effective-state ${unavailable ? "unavailable" : "loading"}`}
+        aria-label="当前模型生效状态"
+      >
+        <span className="model-effective-badge">{unavailable ? "状态未知" : "读取中"}</span>
+        <div>
+          <strong>{unavailable ? "无法确认当前实际使用的模型" : "正在读取当前生效配置"}</strong>
+          <p>
+            {unavailable
+              ? "控制服务不可用；下面的 Pi 目录只能用于准备配置，不代表已经保存或生效。请恢复 uu 端口映射与后台控制服务后重试。"
+              : "正在读取 active revision、Generation 与部署凭据状态。"}
+          </p>
+        </div>
+      </section>
+    );
+  }
+
+  const active = overview.activeModel;
+  const credentialState = deploymentState(overview.deploymentSettings, "MODEL_API_KEY");
+  return (
+    <section
+      className={`model-effective-state ${active === undefined ? "fallback" : "active"}`}
+      aria-label="当前模型生效状态"
+    >
+      <span className="model-effective-badge">
+        {active === undefined ? "部署回退" : "当前生效"}
+      </span>
+      <div>
+        <strong>
+          {active === undefined
+            ? "尚未启用后台模型配置"
+            : `${active.configuration.displayName} / ${active.configuration.defaultModelId}`}
+        </strong>
+        <p>
+          {active === undefined
+            ? "待启用配置不会影响实际调用；新 Run 继续使用部署环境中的 MODEL_BASE_URL 与 MODEL_ID。"
+            : `Provider ${displayedProviderKey(active.configuration.providerKey)} · Revision ${active.revision} · Generation ${overview.generation}。只影响启用后创建的新 Run，已有 Run 继续使用固定快照。`}
+        </p>
+      </div>
+      <span className={`model-credential-state ${credentialState}`}>
+        MODEL_API_KEY
+        <small>
+          {credentialState === "configured"
+            ? "已配置，值不可见"
+            : credentialState === "missing"
+              ? "未配置"
+              : "状态未知"}
+        </small>
+      </span>
+    </section>
+  );
+}
+
 function ModelProviderWorkspace({
   api,
   revisions,
   catalogProviders,
+  overview,
+  controlUnavailable,
   busy,
   onCreate,
 }: {
   readonly api: AdminControlApiContract;
   readonly revisions: readonly ModelProviderRevisionDto[];
   readonly catalogProviders: readonly PiModelCatalogProviderDto[];
+  readonly overview?: AdminControlOverviewDto;
+  readonly controlUnavailable: boolean;
   readonly busy: boolean;
   readonly onCreate: (
     form: FormData,
@@ -1031,10 +1181,14 @@ function ModelProviderWorkspace({
   const providers = latestModelRevisions(revisions);
   return (
     <div className="model-provider-workspace">
+      <ModelEffectiveState
+        {...(overview === undefined ? {} : { overview })}
+        unavailable={controlUnavailable}
+      />
       <div className="provider-settings-heading">
         <span>
           <h2>供应商</h2>
-          <p>从 Pi 载入模型能力作为初始值，发布前可以逐项修改。</p>
+          <p>从 Pi 载入可编辑初始值；保存后必须探测成功并启用，才会影响新 Run。</p>
         </span>
         <span className="provider-settings-actions">
           <button
@@ -1100,6 +1254,7 @@ function ModelProviderWorkspace({
         ) : (
           providers.map((revision) => {
             const configuration = revision.configuration;
+            const sensitiveIdentifier = isSecretLikeProviderKey(configuration.providerKey);
             const catalogProvider = catalogProviders.find(
               (candidate) => candidate.providerId === configuration.providerKey,
             );
@@ -1110,7 +1265,7 @@ function ModelProviderWorkspace({
                 <span className="provider-list-identity">
                   <strong>{configuration.displayName}</strong>
                   <small>
-                    {configuration.providerKey}
+                    {displayedProviderKey(configuration.providerKey)}
                     {catalogProvider === undefined ? " · 自定义" : " · Pi 内置"}
                   </small>
                 </span>
@@ -1118,11 +1273,18 @@ function ModelProviderWorkspace({
                   <small>{enabledCount} 个已启用</small>
                   <small>默认：{configuration.defaultModelId}</small>
                 </span>
-                <span className={`status status-${revision.status}`}>{revision.status}</span>
+                <span className={`status status-${revision.status}`}>
+                  {revisionStatusLabels[revision.status]}
+                </span>
                 <button
                   type="button"
                   className="text-button"
-                  aria-label={`编辑 ${configuration.displayName}`}
+                  aria-label={
+                    sensitiveIdentifier
+                      ? `${configuration.displayName} 已隔离`
+                      : `编辑 ${configuration.displayName}`
+                  }
+                  disabled={sensitiveIdentifier}
                   onClick={() =>
                     setEditor({
                       key: `revision:${configuration.providerKey}:${revision.revision}`,
@@ -1131,14 +1293,17 @@ function ModelProviderWorkspace({
                     })
                   }
                 >
-                  编辑
+                  {sensitiveIdentifier ? "已隔离" : "编辑"}
                 </button>
               </article>
             );
           })
         )}
       </div>
-      <p className="boundary-note">API Key 仍由部署秘密管理，后台页面不会读取、保存或回显密钥。</p>
+      <p className="boundary-note">
+        Provider 内部标识不是 API
+        Key。密钥只由部署环境管理；页面仅显示是否已配置，不读取、保存或回显真实值。
+      </p>
     </div>
   );
 }
@@ -1187,6 +1352,8 @@ function MemoryProviderWorkspace({
   readonly deploymentSettings: AdminControlOverviewDto["deploymentSettings"];
   readonly activeMemory: AdminControlOverviewDto["activeMemory"];
 }) {
+  const [providerKey, setProviderKey] = useState("mem0");
+  const [providerKeyRejected, setProviderKeyRejected] = useState(false);
   return (
     <div className="memory-provider-workspace">
       <section className="memory-provider-hero">
@@ -1205,7 +1372,7 @@ function MemoryProviderWorkspace({
         <span
           className={`memory-active-state ${activeMemory === undefined ? "inactive" : "active"}`}
         >
-          {activeMemory === undefined ? "尚未发布" : `已启用 · Revision ${activeMemory.revision}`}
+          {activeMemory === undefined ? "尚未启用" : `已启用 · Revision ${activeMemory.revision}`}
         </span>
       </section>
 
@@ -1245,9 +1412,9 @@ function MemoryProviderWorkspace({
         <div className="memory-section-heading">
           <span>
             <span className="step-number">2</span>
-            <strong>创建 Mem0 配置草稿</strong>
+            <strong>创建 Mem0 待启用配置</strong>
           </span>
-          <p>草稿不会立即影响 Run。保存后先执行连接探测，再由管理员发布。</p>
+          <p>待启用配置不会立即影响 Run。保存后先执行连接探测，再由管理员启用。</p>
         </div>
         <form
           className="control-form memory-control-form"
@@ -1257,14 +1424,30 @@ function MemoryProviderWorkspace({
           }}
         >
           <label>
-            Provider Key
+            Provider 内部标识（不是 API Key）
             <input
               name="providerKey"
               required
               pattern="[a-z0-9][a-z0-9._-]{0,63}"
-              defaultValue="mem0"
+              autoComplete="off"
+              value={providerKey}
+              aria-invalid={providerKeyRejected}
+              onChange={(event) => {
+                const next = event.target.value;
+                if (isSecretLikeProviderKey(next)) {
+                  setProviderKey("");
+                  setProviderKeyRejected(true);
+                  return;
+                }
+                setProviderKey(next);
+                setProviderKeyRejected(false);
+              }}
             />
-            <small>平台内稳定标识，发布后用于 Run 配置快照。</small>
+            <small className={providerKeyRejected ? "field-error" : undefined}>
+              {providerKeyRejected
+                ? "检测到疑似 API Key，内容已清空；请立即轮换该密钥。"
+                : "平台内稳定标识，启用后用于 Run 配置快照；不得填写任何密钥。"}
+            </small>
           </label>
           <label>
             显示名称
@@ -1290,7 +1473,7 @@ function MemoryProviderWorkspace({
           </label>
           <label className="checkbox memory-enabled-checkbox">
             <input name="enabled" type="checkbox" defaultChecked />
-            发布后允许写入和检索长期记忆
+            启用后允许写入和检索长期记忆
           </label>
           <div className="memory-secret-refs wide">
             <span>
@@ -1312,13 +1495,17 @@ function MemoryProviderWorkspace({
             />
             <small>原因会进入不可变审计记录。</small>
           </label>
-          <button type="submit" className="primary-button" disabled={busy}>
-            创建 Mem0 配置草稿
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={busy || providerKeyRejected || providerKey.trim() === ""}
+          >
+            保存 Mem0 待启用配置
           </button>
         </form>
       </section>
 
-      <section className="memory-flow" aria-label="Mem0 发布流程">
+      <section className="memory-flow" aria-label="Mem0 启用流程">
         <div>
           <span>3</span>
           <strong>探测连接</strong>
@@ -1327,7 +1514,7 @@ function MemoryProviderWorkspace({
         <i aria-hidden="true">→</i>
         <div>
           <span>4</span>
-          <strong>发布版本</strong>
+          <strong>启用配置</strong>
           <small>新 Run 固化该 Revision，进行中的 Run 不切换。</small>
         </div>
         <i aria-hidden="true">→</i>
@@ -1652,6 +1839,8 @@ export function AdminControlConsole({
                 api={api}
                 busy={busy}
                 catalogProviders={catalogProviders}
+                {...(overview === undefined ? {} : { overview })}
+                controlUnavailable={overview === undefined && error !== undefined}
                 revisions={items.filter(
                   (item): item is ModelProviderRevisionDto => "models" in item.configuration,
                 )}

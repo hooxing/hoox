@@ -275,34 +275,35 @@ describe("工作台展示组件", () => {
     expect(container.textContent).not.toContain("你的请求");
   });
 
-  it("用户消息在发送后继续展示图片附件，并使用受控下载地址加载预览", async () => {
+  it("用户消息在发送后继续展示图片附件，并在等价消息刷新时复用预览", async () => {
     const loadAttachmentUrl = vi.fn(async () => "https://example.test/sunflower.png");
     const container = document.createElement("div");
     const root = createRoot(container);
+    const renderTranscript = () => (
+      <ThreadTranscript
+        messages={[
+          {
+            sequence: 1,
+            role: "user",
+            text: "这是啥东西",
+            attachments: [
+              {
+                resourceId: "resource_sunflower",
+                versionId: "version_sunflower",
+                name: "向日葵.png",
+                mediaType: "image/png",
+                sizeBytes: 940,
+              },
+            ],
+            createdAt: "2026-08-25T00:00:00.000Z",
+          },
+        ]}
+        loadAttachmentUrl={loadAttachmentUrl}
+      />
+    );
 
     await act(async () => {
-      root.render(
-        <ThreadTranscript
-          messages={[
-            {
-              sequence: 1,
-              role: "user",
-              text: "这是啥东西",
-              attachments: [
-                {
-                  resourceId: "resource_sunflower",
-                  versionId: "version_sunflower",
-                  name: "向日葵.png",
-                  mediaType: "image/png",
-                  sizeBytes: 940,
-                },
-              ],
-              createdAt: "2026-08-25T00:00:00.000Z",
-            },
-          ]}
-          loadAttachmentUrl={loadAttachmentUrl}
-        />,
-      );
+      root.render(renderTranscript());
       await Promise.resolve();
       await Promise.resolve();
     });
@@ -315,6 +316,16 @@ describe("工作台展示组件", () => {
     );
     expect(container.querySelector(".user-request-attachment-meta")?.textContent).toContain(
       "向日葵.png",
+    );
+
+    await act(async () => {
+      root.render(renderTranscript());
+      await Promise.resolve();
+    });
+
+    expect(loadAttachmentUrl).toHaveBeenCalledTimes(1);
+    expect(container.querySelector<HTMLImageElement>(".user-request-attachment img")?.src).toBe(
+      "https://example.test/sunflower.png",
     );
     act(() => root.unmount());
   });

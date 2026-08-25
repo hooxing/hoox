@@ -1,21 +1,26 @@
+import { loadDatabaseDevelopmentEnvironment } from "./development-database-environment.js";
 import { PersistenceError } from "./errors.js";
 import { migrateDown, migrateUp } from "./migrations.js";
 import { assertDestructiveMigrationAllowed } from "./migration-safety.js";
 import { createPostgresPool, probePostgres } from "./postgres.js";
 
+const environment = await loadDatabaseDevelopmentEnvironment(
+  process.env,
+  new URL("../../../../.env", import.meta.url),
+);
 const direction = process.argv[2];
 if (direction !== "up" && direction !== "down") {
   console.error("用法：迁移命令需要指定 up 或 down");
   process.exitCode = 2;
 } else {
-  const connectionString = process.env.MIGRATION_DATABASE_URL;
-  const runtimeRole = process.env.DATABASE_RUNTIME_ROLE;
-  const migratorRole = process.env.DATABASE_MIGRATOR_ROLE;
-  const skillPublisherRole = process.env.DATABASE_SKILL_PUBLISHER_ROLE;
-  const workerCoordinatorRole = process.env.DATABASE_WORKER_COORDINATOR_ROLE;
-  const teamCoordinatorRole = process.env.DATABASE_TEAM_COORDINATOR_ROLE;
-  const adminControlRole = process.env.DATABASE_ADMIN_CONTROL_ROLE;
-  const schema = process.env.DATABASE_SCHEMA;
+  const connectionString = environment.MIGRATION_DATABASE_URL;
+  const runtimeRole = environment.DATABASE_RUNTIME_ROLE;
+  const migratorRole = environment.DATABASE_MIGRATOR_ROLE;
+  const skillPublisherRole = environment.DATABASE_SKILL_PUBLISHER_ROLE;
+  const workerCoordinatorRole = environment.DATABASE_WORKER_COORDINATOR_ROLE;
+  const teamCoordinatorRole = environment.DATABASE_TEAM_COORDINATOR_ROLE;
+  const adminControlRole = environment.DATABASE_ADMIN_CONTROL_ROLE;
+  const schema = environment.DATABASE_SCHEMA;
   if (connectionString === undefined || connectionString.length === 0) {
     console.error("迁移失败：缺少 MIGRATION_DATABASE_URL");
     process.exitCode = 2;
@@ -61,11 +66,11 @@ if (direction !== "up" && direction !== "down") {
       if (direction === "up") {
         records = await migrateUp(pool, security);
       } else {
-        const environment = process.env.RUNTIME_ENV;
-        assertDestructiveMigrationAllowed(process.argv, environment);
+        const runtimeEnvironment = environment.RUNTIME_ENV;
+        assertDestructiveMigrationAllowed(process.argv, runtimeEnvironment);
         records = await migrateDown(pool, {
           allowDestructive: true,
-          environment,
+          environment: runtimeEnvironment,
           ...security,
         });
       }

@@ -25,6 +25,10 @@ date: 2026-08-25
 
 这些问题，才是从个人助手走向云端 Agent 时真正容易踩坑的地方。
 
+先说明标题里的“真正难的不是隔离”：这并不是说强隔离已经毫无难度，更不是说选一个容器镜像就万事大吉。只是到了今天，Firecracker、gVisor 以及成熟云厂商提供的隔离计算服务，已经让团队不必从零实现 Hypervisor 或系统调用隔离。它们回答的是“不同任务能不能互相越界”，却不会替 Runtime 回答“这台机器属于谁、谁现在有权使用、超时后该不该重试、机器消失后状态从哪里恢复”。
+
+隔离是底座，隔离之上的所有权、生命周期和失败契约，才是业务逻辑最容易翻车的部分。
+
 ## 先看一个典型失败路径
 
 假设一名律师在手机上提交任务：
@@ -118,6 +122,10 @@ Sandbox 可以继续存在，但旧 Attempt 的 capability 必须失效。
 
 这里已经不是容器访问问题，而是分布式所有权问题。
 
+> **Show me the code：执行权如何收回**
+>
+> Hoox 的 [`RunWorker.execute`](https://github.com/hooxing/hoox/blob/main/runtime-ts/apps/agent-worker/src/run-worker.ts) 先从 PostgreSQL 领取带期限的执行 fence；[`PgExecutionPersistence`](https://github.com/hooxing/hoox/blob/main/runtime-ts/packages/persistence/src/pg-run-worker-state.ts) 使用 claim token、epoch 和 Workspace lease 做持久化校验；真正访问 `/workspace` 时，[`SandboxWorkspacePort`](https://github.com/hooxing/hoox/blob/main/runtime-ts/packages/sandbox/src/workspace-adapter.ts) 还会通过 `TrustedSandboxSessionCapability` 重新验证 session 与 generation。旧 Worker 即使仍然持有 Sandbox ID，也无法把这个 ID 继续当作执行权限。
+
 ### 假设二：Provider 显示 running，Sandbox 就可以使用
 
 Provider 控制面返回 `running`，只能证明它认为资源仍然存在，不代表数据面已经准备好。
@@ -144,6 +152,10 @@ Current Attempt Authorized
 同样，命令返回超时也不代表进程已经停止。一个超时的 Python、FFmpeg 或依赖安装进程，可能仍然在 Sandbox 内继续写文件。如果 Runtime 直接重试，就可能同时运行两个相同任务。
 
 普通的容器封装关心“命令有没有返回”，云端 Agent Runtime 还必须关心“进程是否仍然存在，以及谁有权决定它的后续命运”。
+
+> **Show me the code：未知结果如何收敛**
+>
+> [`coordinateWaitingRecovery`](https://github.com/hooxing/hoox/blob/main/runtime-ts/apps/agent-worker/src/waiting-recovery.ts) 要求 connect、create、materialize 等外部副作用先写入独立 intent，返回 `unknown` 时不会盲目自动重放；[`ThreadSandboxLifecycleConsumer`](https://github.com/hooxing/hoox/blob/main/runtime-ts/apps/scheduler/src/thread-sandbox-lifecycle-consumer.ts) 则负责 pause、terminate 等生命周期操作的执行与远端状态对账。
 
 ### 假设三：`/workspace` 就是用户工作的事实源
 
@@ -182,6 +194,10 @@ Sandbox 可以被销毁，只要平台仍然保存最新 Revision 和必要 Reso
 而 Agent 在 `/workspace` 中生成了 `report.docx`，也不代表用户已经拿到了它。文件还需要离开临时 Sandbox，进入持久存储，绑定正确的租户、Thread 和版本，并获得下载授权。
 
 > **文件存在是计算事实，文件交付是产品事实。**
+
+> **Show me the code：Sandbox 如何与持久 Workspace 解耦**
+>
+> [`WorkspaceMaterializer`](https://github.com/hooxing/hoox/blob/main/runtime-ts/packages/workspace/src/materializer.ts) 根据目标 Manifest 把稳定对象物化到 `/workspace`；Worker 侧的 [`ManifestWorkspaceRuntime`](https://github.com/hooxing/hoox/blob/main/runtime-ts/apps/agent-worker/src/workspace-runtime.ts) 负责加载当前 Revision、打开受限 Sandbox Workspace，并把修改发布成候选 Revision；[`ArtifactCompletionGateAdapter`](https://github.com/hooxing/hoox/blob/main/runtime-ts/packages/artifact/src/completion-gate.ts) 则把 Artifact 发布结果纳入任务完成条件。
 
 ## 一台 Sandbox 到底应该属于谁
 
@@ -280,6 +296,8 @@ Hoox 当前采用的是一种折中：Sandbox 的连续性主要跟随 Thread，
 
 ## 延伸阅读
 
+- [Firecracker：安全、快速的微型虚拟机](https://firecracker-microvm.github.io/)
+- [gVisor：容器应用沙箱](https://gvisor.dev/docs/)
 - [Manus：了解 Manus Sandbox——您的云计算机](https://manus.im/zh-cn/blog/manus-sandbox)
 - [OpenClaw：Security](https://docs.openclaw.ai/gateway/security)
 - [OpenClaw：Sandboxing](https://docs.openclaw.ai/gateway/sandboxing)

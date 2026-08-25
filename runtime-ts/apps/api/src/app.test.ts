@@ -517,6 +517,7 @@ function fixture(
     readonly personalizations?: ApiDependencies["personalizations"];
     readonly threadForks?: ApiDependencies["threadForks"];
     readonly localAccounts?: ApiDependencies["localAccounts"];
+    readonly demoAdminUserId?: string;
     readonly scheduledTasks?: ApiDependencies["scheduledTasks"];
   } = {},
 ) {
@@ -587,6 +588,7 @@ function fixture(
       },
     },
     ...(options.localAccounts === undefined ? {} : { localAccounts: options.localAccounts }),
+    ...(options.demoAdminUserId === undefined ? {} : { demoAdminUserId: options.demoAdminUserId }),
     repositories: state.repositories,
     ...(options.enableCreate === false
       ? {}
@@ -1012,6 +1014,49 @@ describe("Fastify API 契约", () => {
       (await disabled.app.inject({ method: "POST", url: "/v1/auth/register" })).statusCode,
     ).toBe(404);
   });
+  it("Demo 后台访问探针只接受配置管理员的有效 Hoox 会话", async () => {
+    const localAccounts = {
+      register: vi.fn(),
+      login: vi.fn(),
+      exchangeBetterAuthIdentity: vi.fn(),
+      resolve: vi.fn(
+        async ({
+          authorization,
+        }: {
+          readonly authorization: string | undefined;
+          readonly requestId: string;
+        }) =>
+          authorization === "Bearer hoox_session_admin"
+            ? { userId: userId("user_demo_admin") }
+            : authorization === "Bearer hoox_session_other"
+              ? { userId: userId("user_other") }
+              : undefined,
+      ),
+      getProfile: vi.fn(),
+      logout: vi.fn(),
+    } satisfies NonNullable<ApiDependencies["localAccounts"]>;
+    const enabled = fixture({ localAccounts, demoAdminUserId: "user_demo_admin" });
+    openApps.push(enabled.app);
+
+    expect(
+      (
+        await enabled.app.inject({
+          method: "GET",
+          url: "/v1/auth/demo-admin-access",
+          headers: { authorization: "Bearer hoox_session_admin" },
+        })
+      ).statusCode,
+    ).toBe(204);
+    for (const authorization of [undefined, "Bearer hoox_session_other"]) {
+      const response = await enabled.app.inject({
+        method: "GET",
+        url: "/v1/auth/demo-admin-access",
+        ...(authorization === undefined ? {} : { headers: { authorization } }),
+      });
+      expect(response.statusCode).toBe(401);
+    }
+  });
+
   it("代理 Better Auth 路由并公开启用状态，再交换为 Hoox 会话", async () => {
     const session = {
       profile: { id: "user_identity", displayName: "身份用户", email: "identity@example.com" },

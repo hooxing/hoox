@@ -178,4 +178,19 @@ describe("后台控制 Web API", () => {
     );
     expect(String(fetcher.mock.calls[1]?.[1]?.body)).not.toContain("password");
   });
+  it("使用当前 Hoox 会话调用控制 API", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response({ data: {} }));
+    const api = new AdminControlApi(
+      fetcher,
+      "/v1/admin/control",
+      () => "unused-key",
+      () => "Bearer hoox_session_demo-token",
+    );
+
+    await api.overview();
+
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("Authorization")).toBe(
+      "Bearer hoox_session_demo-token",
+    );
+  });
 });

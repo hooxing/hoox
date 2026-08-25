@@ -125,6 +125,21 @@ afterEach(() => {
 });
 
 describe("技能发布管理界面", () => {
+  it("真实后台缺少 Hoox 会话时展示工作台登录入口", () => {
+    localStorage.clear();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    roots.push(root);
+
+    act(() => root.render(<App />));
+
+    expect(container.querySelector('[aria-label="后台登录提示"]')?.textContent).toContain(
+      "请先登录 Hoox 工作台",
+    );
+    expect(container.querySelector<HTMLAnchorElement>("a")?.getAttribute("href")).toBe("/");
+  });
+
   it("把 Demo 子路径转换为 BrowserRouter basename", () => {
     expect(browserRouterBasename("/")).toBeUndefined();
     expect(browserRouterBasename("/admin/")).toBe("/admin");

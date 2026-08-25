@@ -152,6 +152,7 @@ describe("API 进程入口", () => {
       developmentEnvironment({
         DEV_AUTH_ENABLED: "false",
         DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_ADMIN_USER_ID: "user_demo_admin",
         DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
         BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
         S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
@@ -159,8 +160,38 @@ describe("API 进程入口", () => {
     );
     expect(parsed.developmentPrincipals).toBeUndefined();
     expect(parsed.demoPublicAccessEnabled).toBe(true);
+    expect(parsed.demoAdminUserId).toBe("user_demo_admin");
     expect(parsed.listenHost).toBe("127.0.0.1");
     expect(parsed.identityAuth.baseURL).toBe("https://hoox.example.invalid");
+  });
+
+  it("Demo 管理员用户 ID 不能脱离公开 Demo，且公开 Demo 必须提供合法 ID", () => {
+    expect(() =>
+      parseApiProcessEnvironment(developmentEnvironment({ DEMO_ADMIN_USER_ID: "user_demo_admin" })),
+    ).toThrow("DEMO_ADMIN_USER_ID_REQUIRES_DEMO_PUBLIC_ACCESS");
+    expect(() =>
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          DEV_AUTH_ENABLED: "false",
+          DEMO_PUBLIC_ACCESS_ENABLED: "true",
+          DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
+          BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
+          S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
+        }),
+      ),
+    ).toThrow("DEMO_PUBLIC_ACCESS_REQUIRES_ADMIN_USER_ID");
+    expect(() =>
+      parseApiProcessEnvironment(
+        developmentEnvironment({
+          DEV_AUTH_ENABLED: "false",
+          DEMO_PUBLIC_ACCESS_ENABLED: "true",
+          DEMO_ADMIN_USER_ID: "bad user",
+          DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
+          BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
+          S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
+        }),
+      ),
+    ).toThrow("INVALID:DEMO_ADMIN_USER_ID");
   });
 
   it("公开 origin 不能脱离 Demo 开关单独进入 development", () => {
@@ -174,13 +205,18 @@ describe("API 进程入口", () => {
   it.each([
     [{ DEMO_PUBLIC_ACCESS_ENABLED: "true" }, "DEMO_PUBLIC_ACCESS_REQUIRES_DEV_AUTH_DISABLED"],
     [
-      { DEV_AUTH_ENABLED: "false", DEMO_PUBLIC_ACCESS_ENABLED: "true" },
+      {
+        DEV_AUTH_ENABLED: "false",
+        DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_ADMIN_USER_ID: "user_demo_admin",
+      },
       "DEMO_PUBLIC_ACCESS_REQUIRES_PUBLIC_ORIGIN",
     ],
     [
       {
         DEV_AUTH_ENABLED: "false",
         DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_ADMIN_USER_ID: "user_demo_admin",
         DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
         BETTER_AUTH_TRUSTED_ORIGINS: "http://hoox.example.invalid",
         S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
@@ -191,6 +227,7 @@ describe("API 进程入口", () => {
       {
         DEV_AUTH_ENABLED: "false",
         DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_ADMIN_USER_ID: "user_demo_admin",
         DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid/path",
         BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
         S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
@@ -201,6 +238,7 @@ describe("API 进程入口", () => {
       {
         DEV_AUTH_ENABLED: "false",
         DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_ADMIN_USER_ID: "user_demo_admin",
         DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
         BETTER_AUTH_TRUSTED_ORIGINS: "https://other.example.invalid",
         S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
@@ -211,6 +249,7 @@ describe("API 进程入口", () => {
       {
         DEV_AUTH_ENABLED: "false",
         DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_ADMIN_USER_ID: "user_demo_admin",
         DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
         BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid/path",
         S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
@@ -221,6 +260,7 @@ describe("API 进程入口", () => {
       {
         DEV_AUTH_ENABLED: "false",
         DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_ADMIN_USER_ID: "user_demo_admin",
         DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
         BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
         S3_PUBLIC_ENDPOINT: "http://hoox.example.invalid",
@@ -231,6 +271,7 @@ describe("API 进程入口", () => {
       {
         DEV_AUTH_ENABLED: "false",
         DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_ADMIN_USER_ID: "user_demo_admin",
         DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
         BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
         S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
@@ -359,6 +400,12 @@ describe("API 进程入口", () => {
         DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
       }),
     ).toThrow("FORBIDDEN_IN_PRODUCTION:DEMO_PUBLIC_ORIGIN");
+    expect(() =>
+      parseApiProcessEnvironment({
+        ...productionEnvironment(),
+        DEMO_ADMIN_USER_ID: "user_demo_admin",
+      }),
+    ).toThrow("FORBIDDEN_IN_PRODUCTION:DEMO_ADMIN_USER_ID");
     expect(() =>
       parseApiProcessEnvironment({
         ...productionEnvironment(),

@@ -40,7 +40,6 @@
 | --- | --- |
 | `persistence` | PostgreSQL、迁移、事务、Outbox 和 S3/MinIO |
 | `process-runtime` | 配置、健康、信号、排空和关闭 |
-| `testing` | 测试工具和夹具，不提供生产默认实现 |
 
 应用入口只装配这些包。Domain 与 Protocol 有意解耦；宿主机命令和工作目录访问必须经过 Tool Router 与 Sandbox 边界。
 

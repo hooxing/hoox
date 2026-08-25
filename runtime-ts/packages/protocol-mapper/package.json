@@ -10,8 +10,7 @@
   "types": "./src/index.ts",
   "dependencies": {
     "@hoox/domain": "workspace:*",
-    "@hoox/protocol": "workspace:*",
-    "@sinclair/typebox": "0.34.52"
+    "@hoox/protocol": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

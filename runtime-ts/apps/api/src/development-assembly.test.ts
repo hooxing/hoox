@@ -168,6 +168,7 @@ describe("开发 API 默认装配", () => {
         ...developmentEnvironment(),
         DEV_AUTH_ENABLED: "false",
         DEMO_PUBLIC_ACCESS_ENABLED: "true",
+        DEMO_ADMIN_USER_ID: "user_demo_admin",
         DEMO_PUBLIC_ORIGIN: "https://hoox.example.invalid",
         BETTER_AUTH_TRUSTED_ORIGINS: "https://hoox.example.invalid",
         S3_PUBLIC_ENDPOINT: "https://hoox.example.invalid",
@@ -176,12 +177,17 @@ describe("开发 API 默认装配", () => {
 
     try {
       const dependencies = mocks.createApiApp.mock.calls[0]?.[0] as
-        | { readonly auth?: unknown; readonly localAccountPasswordRoutes?: boolean }
+        | {
+            readonly auth?: unknown;
+            readonly localAccountPasswordRoutes?: boolean;
+            readonly demoAdminUserId?: string;
+          }
         | undefined;
       expect(dependencies?.auth).toEqual(
         expect.objectContaining({ resolve: expect.any(Function) }),
       );
       expect(dependencies?.localAccountPasswordRoutes).toBe(false);
+      expect(dependencies?.demoAdminUserId).toBe("user_demo_admin");
       expect(dependencies?.auth).not.toHaveProperty("principals");
       expect(mocks.app.listen).toHaveBeenCalledWith({ host: "127.0.0.1", port: 3001 });
     } finally {

@@ -219,7 +219,8 @@
 | [ADR-20260821115221：统一后台 API 进程并保留发布资源隔离](20260821115221-unified-admin-api-process.md) | 已接受 | 2026-08-21 |
 | [后台管理 Web 采用可路由的 Ant Design 应用外壳](20260824115942-admin-web-routable-ant-design-shell.md) | 已接受 | 2026-08-24 |
 | [后台模型用量指标与开发轨迹入口边界](20260824150132-admin-model-usage-metrics-and-development-trajectory-link.md) | 已接受 | 2026-08-24 |
-| [ADR-20260824222258：Demo 后台使用同源受保护路由](20260824222258-demo-admin-protected-same-origin-route.md) | 已接受 | 2026-08-24 |
+| [ADR-20260824222258：Demo 后台使用同源受保护路由](20260824222258-demo-admin-protected-same-origin-route.md) | 已接受（HTTP Basic 入口已被 ADR-20260825145416 部分替代） | 2026-08-24 |
+| [ADR-20260825145416：Demo 后台使用 Hoox 会话闸门](20260825145416-demo-admin-uses-hoox-session-gate.md) | 已接受 | 2026-08-25 |
 | [决策：领域聚合的一致性与修正语义](domain-aggregate-consistency.md) | 已接受 | 2026-07-26 |
 | [决策：协议运行时 Schema 使用 TypeBox](domain-schema-library.md) | 已接受 | 2026-07-26 |
 | [ADR-20260824115000：在 Hoox 进程内嵌 Better Auth 身份核心](20260824115000-embedded-better-auth-identity-core.md) | 已接受 | 2026-08-24 |

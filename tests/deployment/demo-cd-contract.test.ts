@@ -68,12 +68,12 @@ describe("Demo 持续部署契约", () => {
     expect(compose).toContain("admin-control:");
     expect(compose).toContain("admin-web:");
     expect(compose).toContain("shared/admin-control.env");
+    expect(compose).toContain("DEMO_ADMIN_USER_ID: ${DEMO_ADMIN_USER_ID");
     expect(compose).toContain("DEV_ADMIN_CONTROL_USER_ID: ${DEMO_ADMIN_USER_ID");
     expect(compose).toContain("runtime-ts/apps/admin-web/dist");
     expect(compose).toContain("read_only: true");
     expect(compose).toContain("no-new-privileges:true");
-    expect(compose).toContain(`cap_drop:
-    - ALL`);
+    expect(compose).toMatch(/cap_drop:\s*\n\s+- ALL/u);
     expect(compose).not.toContain("privileged: true");
     expect(source("deploy/demo/postgres-init.sh")).toContain("LOGIN NOINHERIT PASSWORD");
     expect(compose).toContain('mc admin user add runtime "$${S3_ACCESS_KEY_ID}"');
@@ -97,6 +97,10 @@ describe("Demo 持续部署契约", () => {
     expect(deploy).toContain("/etc/nginx/hoox-demo-admin-token.conf");
     expect(deploy).toContain("-o root -g root -m 0600");
     expect(deploy).toContain("https://$domain/v1/admin/control/overview");
+    expect(deploy).toContain("admin_access_token");
+    expect(deploy).toContain("--force-recreate api admin-control admin-web scheduler worker");
+    expect(deploy).not.toContain("admin_netrc");
+    expect(deploy).not.toContain("openssl passwd");
     expect(deploy).toContain("| compose exec -T postgres psql");
     expect(deploy).toContain("sudo rm -f /etc/nginx/conf.d/hoox-demo-bootstrap.conf");
     expect(deploy).not.toContain("db:migrate:down");
@@ -111,8 +115,10 @@ describe("Demo 持续部署契约", () => {
     expect(nginx).toContain("location ^~ /@@BUCKET@@/");
     expect(nginx).toContain("location ^~ /admin/");
     expect(nginx).toContain("location ^~ /v1/admin/");
-    expect(nginx.match(/auth_basic "Hoox Demo Admin";/gu)).toHaveLength(2);
-    expect(nginx).toContain("auth_basic_user_file /etc/nginx/hoox-demo-admin.htpasswd");
+    expect(nginx).not.toContain("auth_basic");
+    expect(nginx).toContain("location = /_hoox_demo_admin_access");
+    expect(nginx).toContain("auth_request /_hoox_demo_admin_access");
+    expect(nginx).toContain("proxy_set_header Authorization $http_authorization");
     expect(nginx).toContain("include /etc/nginx/hoox-demo-admin-token.conf");
     expect(nginx).toContain("proxy_pass http://127.0.0.1:3001/");
     expect(nginx).toContain("proxy_pass http://127.0.0.1:3003");
@@ -120,6 +126,7 @@ describe("Demo 持续部署契约", () => {
     expect(nginx).toContain("proxy_pass http://127.0.0.1:19000");
     expect(nginx).not.toContain("DEV_ADMIN_CONTROL_TOKEN");
     expect(apiExample).toContain("DEMO_PUBLIC_ORIGIN=https://hoox.aisay.cc");
+    expect(apiExample).toContain("DEMO_ADMIN_USER_ID=user_demo_pending");
     expect(apiExample).toContain("DEV_AUTH_ENABLED=false");
     expect(adminExample).toContain("ADMIN_CONTROL_DATABASE_URL=");
     expect(adminExample).toContain("SKILL_PUBLISHER_DATABASE_URL=");

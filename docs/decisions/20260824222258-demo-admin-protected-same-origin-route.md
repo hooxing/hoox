@@ -2,7 +2,7 @@
 
 ## 状态
 
-已接受，2026-08-24。补充 [ADR-20260824163556](20260824163556-single-node-demo-continuous-deployment.md) 的单机 Demo 拓扑，不改变生产后台身份、TLS 与发布契约。
+已接受，2026-08-24；HTTP Basic 入口保护、发布验收和相关运维契约已于 2026-08-25 被 [ADR-20260825145416](20260825145416-demo-admin-uses-hoox-session-gate.md) 部分替代。补充 [ADR-20260824163556](20260824163556-single-node-demo-continuous-deployment.md) 的单机 Demo 拓扑，不改变生产后台身份、TLS 与发布契约。
 
 ## 背景
 

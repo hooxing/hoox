@@ -1,3 +1,4 @@
+import { adminAuthorizationHeader } from "./admin-session.js";
 import type {
   CreateSkillSubmissionRequest,
   PublishSkillSubmissionRequest,
@@ -64,11 +65,14 @@ export class SkillAdminApi {
     private readonly fetcher: typeof fetch = defaultFetcher,
     private readonly baseUrl = "/v1/admin/skill-submissions",
     private readonly createIdempotencyKey: () => string = defaultIdempotencyKey,
+    private readonly authorizationHeader: () => string | undefined = adminAuthorizationHeader,
   ) {}
 
   private async request<T>(path = "", init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers);
     headers.set("Accept", "application/json");
+    const authorizationHeader = this.authorizationHeader();
+    if (authorizationHeader !== undefined) headers.set("Authorization", authorizationHeader);
     if (init.body !== undefined) headers.set("Content-Type", "application/json");
     const method = init.method ?? "GET";
     let requestFingerprint: string | undefined;

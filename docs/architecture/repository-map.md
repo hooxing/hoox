@@ -39,7 +39,7 @@
 | --- | --- |
 | `@hoox/domain` | Tenant、Thread、Run、Workspace 等领域实体、品牌类型和状态机不变量 |
 | `@hoox/protocol` | HTTP DTO、事件、错误信封和运行时 Schema |
-| `@hoox/protocol-mapper` | Domain 与 Protocol 的显式映射、rehydrate 和公共错误归一化 |
+| `@hoox/protocol-mapper` | Domain 到 Protocol 的显式投影和公共错误归一化 |
 | `@hoox/run-contracts` | Worker 执行所需端口、事实和运行期契约 |
 
 ### Runtime 编排
@@ -71,7 +71,6 @@
 | --- | --- |
 | `@hoox/persistence` | PostgreSQL Repository、事务、迁移、Outbox 和 S3/MinIO Blob 适配 |
 | `@hoox/process-runtime` | 严格配置、健康状态、信号、排空和进程关闭 |
-| `@hoox/testing` | 跨包测试工具和夹具，不提供生产默认实现 |
 
 ## 常见改动落点
 

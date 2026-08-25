@@ -1,3 +1,4 @@
+import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import {
   acquireWorkspaceLease,
@@ -37,15 +38,6 @@ import {
   WorkspaceRevisionDtoSchema,
 } from "../../runtime-ts/packages/protocol/src/index.js";
 import {
-  decodeDtoJson,
-  fromArtifactDto,
-  fromMembershipDto,
-  fromResourceVersionDto,
-  fromRunDto,
-  fromTenantDto,
-  fromThreadDto,
-  fromUserDto,
-  fromWorkspaceRevisionDto,
   mapDomainError,
   toArtifactDto,
   toMembershipDto,
@@ -75,7 +67,7 @@ function fixture() {
     tenant,
     user,
     membership: ownerMembership,
-    title: "Mapper 往返",
+    title: "Mapper 投影",
     now,
   });
   const run = transitionRun(
@@ -86,41 +78,32 @@ function fixture() {
   return { user, tenant, ownerMembership, thread, run };
 }
 
-describe("Domain 与 Protocol 显式 Mapper", () => {
-  it("身份、任务和运行完成 Domain→DTO→JSON→Schema→DTO→Domain 往返", () => {
+describe("Domain 到 Protocol 的显式 Mapper", () => {
+  it("身份、任务和运行投影符合公开 Schema", () => {
     const source = fixture();
-    const userDto = decodeDtoJson(UserDtoSchema, JSON.stringify(toUserDto(source.user)));
-    const user = fromUserDto(userDto);
-    const tenantDto = decodeDtoJson(TenantDtoSchema, JSON.stringify(toTenantDto(source.tenant)));
-    const tenant = fromTenantDto(tenantDto, user);
-    const membershipDto = decodeDtoJson(
-      MembershipDtoSchema,
-      JSON.stringify(toMembershipDto(source.ownerMembership)),
-    );
-    const membership = fromMembershipDto(membershipDto, tenant, user);
-    const threadDto = decodeDtoJson(ThreadDtoSchema, JSON.stringify(toThreadDto(source.thread)));
-    const thread = fromThreadDto(threadDto, tenant, user, membership);
-    const runDto = decodeDtoJson(RunDtoSchema, JSON.stringify(toRunDto(source.run)));
-    const run = fromRunDto(runDto, thread);
+    const projections = [
+      [UserDtoSchema, toUserDto(source.user)],
+      [TenantDtoSchema, toTenantDto(source.tenant)],
+      [MembershipDtoSchema, toMembershipDto(source.ownerMembership)],
+      [ThreadDtoSchema, toThreadDto(source.thread)],
+      [RunDtoSchema, toRunDto(source.run)],
+    ] as const;
 
-    expect(toUserDto(user)).toEqual(toUserDto(source.user));
-    expect(toTenantDto(tenant)).toEqual(toTenantDto(source.tenant));
-    expect(toMembershipDto(membership)).toEqual(toMembershipDto(source.ownerMembership));
-    expect(toThreadDto(thread)).toEqual(toThreadDto(source.thread));
-    expect(toRunDto(run)).toEqual(toRunDto(source.run));
+    for (const [schema, dto] of projections) {
+      expect(Value.Check(schema, dto)).toBe(true);
+    }
   });
 
-  it("恢复投影不改写 Domain Run 的 running 事实", () => {
+  it("恢复投影只增加执行状态，不改写 Domain Run 状态", () => {
     const source = fixture();
-    const dto = decodeDtoJson(
-      RunDtoSchema,
-      JSON.stringify(toRunDto(source.run, "recovery_required")),
-    );
+    const dto = toRunDto(source.run, "recovery_required");
+
+    expect(Value.Check(RunDtoSchema, dto)).toBe(true);
     expect(dto).toMatchObject({ status: "running", executionStatus: "recovery_required" });
-    expect(fromRunDto(dto, source.thread).status).toBe("running");
+    expect(source.run.status).toBe("running");
   });
 
-  it("版本和交付物往返时重新校验所有关联", () => {
+  it("版本和交付物投影符合公开 Schema", () => {
     const source = fixture();
     const workspace = acquireWorkspaceLease({
       workspace: createWorkspace({
@@ -142,21 +125,14 @@ describe("Domain 与 Protocol 显式 Mapper", () => {
       digest,
       now: runningAt,
     });
-    const revisionDto = decodeDtoJson(
-      WorkspaceRevisionDtoSchema,
-      JSON.stringify(toWorkspaceRevisionDto(commit.revision)),
-    );
-    const revision = fromWorkspaceRevisionDto(revisionDto, commit.workspace, source.run);
-
-    const resource = createResource({
-      id: resourceId("resource_mapper"),
-      tenantId: source.tenant.id,
-      name: "Mapper 资源",
-      origin: "artifact",
-      now,
-    });
     const resourceResult = appendResourceVersion({
-      resource,
+      resource: createResource({
+        id: resourceId("resource_mapper"),
+        tenantId: source.tenant.id,
+        name: "Mapper 资源",
+        origin: "artifact",
+        now,
+      }),
       tenantId: source.tenant.id,
       versionId: resourceVersionId("resource_version_mapper"),
       expectedLatestVersionNumber: 0,
@@ -166,35 +142,25 @@ describe("Domain 与 Protocol 显式 Mapper", () => {
       sizeBytes: 12,
       now,
     });
-    const versionDto = decodeDtoJson(
-      ResourceVersionDtoSchema,
-      JSON.stringify(toResourceVersionDto(resourceResult.version)),
-    );
-    const version = fromResourceVersionDto(versionDto, resourceResult.resource);
     const published = transitionArtifact(
       createArtifact({
         id: artifactId("artifact_mapper"),
         run: source.run,
-        resourceVersion: version,
+        resourceVersion: resourceResult.version,
         name: "Mapper 交付物",
         now,
       }),
       "published",
       runningAt,
     );
-    const artifactDto = decodeDtoJson(ArtifactDtoSchema, JSON.stringify(toArtifactDto(published)));
-    const artifact = fromArtifactDto(artifactDto, source.run, version);
 
-    expect(toWorkspaceRevisionDto(revision)).toEqual(toWorkspaceRevisionDto(commit.revision));
-    expect(toResourceVersionDto(version)).toEqual(toResourceVersionDto(resourceResult.version));
-    expect(toArtifactDto(artifact)).toEqual(toArtifactDto(published));
-  });
-
-  it("Schema 合法但关联被篡改的 DTO 仍被 Domain 拒绝", () => {
-    const source = fixture();
-    const dto = { ...toRunDto(source.run), tenantId: "tenant_attacker" };
-    const decoded = decodeDtoJson(RunDtoSchema, JSON.stringify(dto));
-    expect(() => fromRunDto(decoded, source.thread)).toThrow("资源不属于当前租户");
+    expect(Value.Check(WorkspaceRevisionDtoSchema, toWorkspaceRevisionDto(commit.revision))).toBe(
+      true,
+    );
+    expect(
+      Value.Check(ResourceVersionDtoSchema, toResourceVersionDto(resourceResult.version)),
+    ).toBe(true);
+    expect(Value.Check(ArtifactDtoSchema, toArtifactDto(published))).toBe(true);
   });
 
   it("公共错误穷尽映射且不透传领域消息", () => {

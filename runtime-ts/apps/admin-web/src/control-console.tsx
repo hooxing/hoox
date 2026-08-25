@@ -41,6 +41,10 @@ function value(form: FormData, key: string): string {
   return String(form.get(key) ?? "").trim();
 }
 
+function secretValue(form: FormData, key: string): string {
+  return String(form.get(key) ?? "");
+}
+
 function errorMessage(reason: unknown): string {
   return reason instanceof AdminApiError ? reason.message : "操作未完成，请刷新后重试。";
 }
@@ -606,6 +610,7 @@ function ModelDraftForm({
   busy,
   api,
   initialConfiguration,
+  reuseCredentialFromRevision,
   catalogProvider,
   onCancel,
 }: {
@@ -617,6 +622,7 @@ function ModelDraftForm({
   readonly busy: boolean;
   readonly api: AdminControlApiContract;
   readonly initialConfiguration?: ModelProviderRevisionDto["configuration"];
+  readonly reuseCredentialFromRevision?: number;
   readonly catalogProvider?: PiModelCatalogProviderDto;
   readonly onCancel: () => void;
 }) {
@@ -816,7 +822,7 @@ function ModelDraftForm({
         <small className={providerKeyRejected ? "field-error" : undefined}>
           {providerKeyRejected
             ? "检测到疑似 API Key，内容已清空。请立即轮换该密钥，并填写平台内部标识。"
-            : "仅用于版本、路由和审计；模型密钥始终由部署环境注入。"}
+            : "仅用于版本、路由和审计；不要在这里粘贴 API Key。"}
         </small>
       </label>
       <label>
@@ -839,6 +845,29 @@ function ModelDraftForm({
           defaultValue={initialConfiguration?.baseUrl ?? catalogProvider?.baseUrl ?? ""}
         />
       </label>
+      <label className="wide">
+        API Key
+        <input
+          name="apiKey"
+          type="password"
+          autoComplete="new-password"
+          maxLength={8192}
+          required={reuseCredentialFromRevision === undefined}
+          placeholder={
+            reuseCredentialFromRevision === undefined
+              ? "输入此 Provider 的 API Key"
+              : "留空则保留当前密钥；输入新值则替换"
+          }
+        />
+        <small>密钥只提交一次并加密保存；页面、列表、接口和审计日志都不会回显。</small>
+      </label>
+      {reuseCredentialFromRevision !== undefined && (
+        <input
+          type="hidden"
+          name="reuseCredentialFromRevision"
+          value={reuseCredentialFromRevision}
+        />
+      )}
       <fieldset className="model-catalog-editor wide">
         <legend>模型目录</legend>
         <div className="model-catalog-toolbar">
@@ -1060,6 +1089,7 @@ interface ModelEditorState {
   readonly key: string;
   readonly initialConfiguration?: ModelProviderRevisionDto["configuration"];
   readonly catalogProvider?: PiModelCatalogProviderDto;
+  readonly reuseCredentialFromRevision?: number;
 }
 
 function latestModelRevisions(
@@ -1103,7 +1133,12 @@ function ModelEffectiveState({
   }
 
   const active = overview.activeModel;
-  const credentialState = deploymentState(overview.deploymentSettings, "MODEL_API_KEY");
+  const credentialState =
+    active === undefined
+      ? deploymentState(overview.deploymentSettings, "MODEL_API_KEY")
+      : active.configuration.credentialConfigured
+        ? "configured"
+        : "missing";
   return (
     <section
       className={`model-effective-state ${active === undefined ? "fallback" : "active"}`}
@@ -1125,7 +1160,7 @@ function ModelEffectiveState({
         </p>
       </div>
       <span className={`model-credential-state ${credentialState}`}>
-        MODEL_API_KEY
+        {active === undefined ? "部署回退 API Key" : "Provider API Key"}
         <small>
           {credentialState === "configured"
             ? "已配置，值不可见"
@@ -1173,6 +1208,9 @@ function ModelProviderWorkspace({
         {...(editor.catalogProvider === undefined
           ? {}
           : { catalogProvider: editor.catalogProvider })}
+        {...(editor.reuseCredentialFromRevision === undefined
+          ? {}
+          : { reuseCredentialFromRevision: editor.reuseCredentialFromRevision })}
         onCancel={() => setEditor(undefined)}
         onCreate={onCreate}
       />
@@ -1289,6 +1327,7 @@ function ModelProviderWorkspace({
                     setEditor({
                       key: `revision:${configuration.providerKey}:${revision.revision}`,
                       initialConfiguration: configuration,
+                      reuseCredentialFromRevision: revision.revision,
                       ...(catalogProvider === undefined ? {} : { catalogProvider }),
                     })
                   }
@@ -1301,8 +1340,7 @@ function ModelProviderWorkspace({
         )}
       </div>
       <p className="boundary-note">
-        Provider 内部标识不是 API
-        Key。密钥只由部署环境管理；页面仅显示是否已配置，不读取、保存或回显真实值。
+        每个 Provider Revision 绑定自己的加密密钥；页面只显示配置状态，不读取或回显真实值。
       </p>
     </div>
   );
@@ -1851,9 +1889,16 @@ export function AdminControlConsole({
                       displayName: value(form, "displayName"),
                       protocol: "openai-compatible",
                       baseUrl: value(form, "baseUrl"),
-                      secretRef: "deployment:model",
                       defaultModelId,
                       models,
+                      ...(secretValue(form, "apiKey") === ""
+                        ? {
+                            reuseCredentialFromRevision: number(
+                              form,
+                              "reuseCredentialFromRevision",
+                            ),
+                          }
+                        : { apiKey: secretValue(form, "apiKey") }),
                       reason: value(form, "reason"),
                     }),
                   )

@@ -105,6 +105,11 @@ const environmentSchema = Object.freeze({
     maxLength: 512,
   }),
   MODEL_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192 }),
+  MODEL_CREDENTIAL_ENCRYPTION_KEY: stringEnvironmentField({
+    requiredIn: production,
+    secret: true,
+    maxLength: 4_096,
+  }),
   MEM0_API_KEY: stringEnvironmentField({ requiredIn: optional, secret: true, maxLength: 8_192 }),
   MEM0_SCOPE_HMAC_KEY: stringEnvironmentField({
     requiredIn: optional,
@@ -143,6 +148,7 @@ export interface AdminControlApiProcessConfiguration {
   }>;
   readonly providerSecrets: Readonly<{
     readonly modelApiKey: string;
+    readonly modelCredentialEncryptionKey: string;
     readonly memoryApiKey?: string;
   }>;
   readonly runtimeDeploymentSettings: Readonly<{
@@ -283,6 +289,9 @@ export function parseAdminControlApiProcessEnvironment(
     objectStorage,
     providerSecrets: Object.freeze({
       modelApiKey: readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),
+      modelCredentialEncryptionKey:
+        parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY ??
+        readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),
       ...(parsed.values.MEM0_API_KEY === undefined
         ? {}
         : { memoryApiKey: parsed.values.MEM0_API_KEY }),

@@ -17,7 +17,7 @@ function modelConfiguration(
     displayName: "主模型",
     protocol: "openai-compatible",
     baseUrl: "https://model.example.com/v1",
-    secretRef: "deployment:model",
+    credentialConfigured: true,
     defaultModelId: "model-a",
     models: [
       {
@@ -166,6 +166,7 @@ describe("后台控制面领域规则", () => {
     };
     const repository = {
       resolveRole: async () => "viewer" as const,
+      resolveModelCredential: async () => "test-model-key",
       listModelProviders: async () => [modelRevision],
       listMemoryProviders: async () => [],
       listRuntimeSettings: async () => [],
@@ -212,6 +213,7 @@ describe("后台控制面领域规则", () => {
     const publish = async () => ({ outcome: "not_found" as const });
     const repository = {
       resolveRole: async () => "viewer" as const,
+      resolveModelCredential: async () => "test-model-key",
       listModelProviders: async () => [],
       listMemoryProviders: async () => [],
       listRuntimeSettings: async () => [],
@@ -328,6 +330,7 @@ describe("后台控制面领域规则", () => {
     };
     const repository = {
       resolveRole: async () => "operator" as const,
+      resolveModelCredential: async () => "test-model-key",
       listModelProviders: async () => [],
       listMemoryProviders: async () => [],
       listRuntimeSettings: async () => [],
@@ -378,6 +381,7 @@ describe("后台控制面领域规则", () => {
     const publish = vi.fn(async () => ({ outcome: "applied" as const, value: revision }));
     const repository = {
       resolveRole: async () => "admin" as const,
+      resolveModelCredential: async () => "test-model-key",
       listModelProviders: async () => [revision],
       listMemoryProviders: async () => [],
       listRuntimeSettings: async () => [],
@@ -499,6 +503,7 @@ describe("后台控制面领域规则", () => {
     const updateUserStatus = vi.fn(async () => ({ outcome: "applied" as const, value: user }));
     const repository: AdminControlRepository = {
       resolveRole: async () => "admin",
+      resolveModelCredential: async () => "test-model-key",
       listModelProviders: async () => [],
       listMemoryProviders: async () => [],
       listRuntimeSettings: async () => [],

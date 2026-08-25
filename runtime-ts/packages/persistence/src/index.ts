@@ -3,6 +3,7 @@ export * from "./blob-storage-contract.js";
 export * from "./blob-store.js";
 export * from "./errors.js";
 export * from "./model-wire-trace-read.js";
+export * from "./model-provider-credential.js";
 export * from "./pg-blob-lifecycle.js";
 export * from "./pg-admin-control.js";
 export { PgArchiveThreadCommand } from "./pg-core-repositories.js";

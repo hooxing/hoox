@@ -48,6 +48,17 @@ describe("后台控制面迁移", () => {
     expect(down).toContain("object_kind='model_provider'");
   });
 
+  it("托管模型密钥只以加密包进入 Revision，并阻止有事实时降级", () => {
+    const up = migration("0056_managed_model_provider_credentials.up.sql");
+    expect(up).toContain("'version','nonce','ciphertext','authTag'");
+    expect(up).toContain("configuration->>'secretRef'='deployment:model'");
+    expect(up).not.toContain("apiKey");
+    expect(up).not.toContain("MODEL_API_KEY");
+
+    const down = migration("0056_managed_model_provider_credentials.down.sql");
+    expect(down).toContain("DOWN_MIGRATION_BLOCKED:managed_model_provider_credentials_exist");
+  });
+
   it("用户治理通过受限目录、最小列权限和独立审计暴露", () => {
     const up = migration("0052_admin_user_operations.up.sql");
     const roleBootstrap = readFileSync(

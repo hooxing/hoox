@@ -46,7 +46,7 @@ export const ModelProviderConfigurationDtoSchema = Type.Object(
     displayName: Type.String({ minLength: 1, maxLength: 120 }),
     protocol: Type.Literal("openai-compatible"),
     baseUrl: ProviderUrlSchema,
-    secretRef: Type.Literal("deployment:model"),
+    credentialConfigured: Type.Boolean(),
     defaultModelId: Type.String({ minLength: 1, maxLength: 255 }),
     models: Type.Array(ModelProviderModelConfigurationDtoSchema, {
       minItems: 1,
@@ -267,7 +267,17 @@ export const AdminControlOverviewDtoSchema = Type.Object(
 export type AdminControlOverviewDto = Static<typeof AdminControlOverviewDtoSchema>;
 
 export const CreateModelProviderDraftRequestSchema = Type.Composite(
-  [ModelProviderConfigurationDtoSchema, Type.Object({ reason: ChangeReasonSchema }, strict)],
+  [
+    Type.Omit(ModelProviderConfigurationDtoSchema, ["credentialConfigured"]),
+    Type.Object(
+      {
+        apiKey: Type.Optional(Type.String({ minLength: 1, maxLength: 8_192 })),
+        reuseCredentialFromRevision: Type.Optional(RevisionNumberSchema),
+        reason: ChangeReasonSchema,
+      },
+      strict,
+    ),
+  ],
   strict,
 );
 export type CreateModelProviderDraftRequest = Static<typeof CreateModelProviderDraftRequestSchema>;

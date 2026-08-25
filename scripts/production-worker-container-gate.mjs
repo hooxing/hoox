@@ -130,6 +130,7 @@ try {
     "CUBESANDBOX_RESOURCE_VOLUME_DRIVER=runtime-resourcefs",
     "MODEL_BASE_URL=https://model.invalid/v1",
     `MODEL_API_KEY=${secretCanary}`,
+    "MODEL_CREDENTIAL_ENCRYPTION_KEY=production-model-credential-root-at-least-32-bytes",
     "MODEL_ID=model-placeholder",
     "MODEL_SUPPORTS_IMAGES=false",
     "MODEL_CONTEXT_WINDOW=128000",

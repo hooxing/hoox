@@ -45,6 +45,7 @@ function productionEnvironment(): Record<string, string> {
     SKILL_PUBLISHER_S3_SECRET_ACCESS_KEY: "opaque-skill-publisher-secret",
     SKILL_PUBLISHER_S3_FORCE_PATH_STYLE: "true",
     MODEL_API_KEY: "production-model-secret",
+    MODEL_CREDENTIAL_ENCRYPTION_KEY: "production-model-credential-root-at-least-32-bytes",
     MEM0_API_KEY: "production-memory-secret",
     MEM0_SCOPE_HMAC_KEY: "production-memory-scope-key-at-least-32-bytes",
     PROCESS_SHUTDOWN_TIMEOUT_MS: "15000",

@@ -20,7 +20,11 @@ const configuration: AdminControlApiProcessConfiguration = Object.freeze({
     secretAccessKey: "publisher-secret",
     forcePathStyle: true,
   }),
-  providerSecrets: Object.freeze({ modelApiKey: "model-secret", memoryApiKey: "memory-secret" }),
+  providerSecrets: Object.freeze({
+    modelApiKey: "model-secret",
+    modelCredentialEncryptionKey: "model-credential-encryption-key-at-least-32-bytes",
+    memoryApiKey: "memory-secret",
+  }),
   runtimeDeploymentSettings: Object.freeze({
     compactionEnabledConfigured: true,
     compactionPathConfigured: true,
@@ -44,26 +48,30 @@ describe("Provider 连接探针", () => {
       .mockResolvedValueOnce(new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", fetcher);
     const probes = createProviderProbes(configuration);
+    const apiKey = configuration.providerSecrets.modelApiKey;
 
-    await probes.probeModel({
-      providerKey: "main",
-      displayName: "主模型",
-      protocol: "openai-compatible",
-      baseUrl: "https://model.example.com/v1/",
-      secretRef: "deployment:model",
-      defaultModelId: "model-a",
-      models: [
-        {
-          id: "model-a",
-          name: "Model A",
-          enabled: true,
-          reasoning: false,
-          input: ["text"],
-          contextWindow: 128_000,
-          maxTokens: 8_192,
-        },
-      ],
-    });
+    await probes.probeModel(
+      {
+        providerKey: "main",
+        displayName: "主模型",
+        protocol: "openai-compatible",
+        baseUrl: "https://model.example.com/v1/",
+        credentialConfigured: true,
+        defaultModelId: "model-a",
+        models: [
+          {
+            id: "model-a",
+            name: "Model A",
+            enabled: true,
+            reasoning: false,
+            input: ["text"],
+            contextWindow: 128_000,
+            maxTokens: 8_192,
+          },
+        ],
+      },
+      apiKey,
+    );
     await probes.probeMemory({
       providerKey: "memory",
       displayName: "长期记忆",
@@ -91,27 +99,31 @@ describe("Provider 连接探针", () => {
     const fetcher = vi.fn<typeof fetch>();
     vi.stubGlobal("fetch", fetcher);
     const probes = createProviderProbes(configuration);
+    const apiKey = configuration.providerSecrets.modelApiKey;
 
     await expect(
-      probes.probeModel({
-        providerKey: "blocked",
-        displayName: "未授权模型",
-        protocol: "openai-compatible",
-        baseUrl: "https://blocked.example.com/v1/",
-        secretRef: "deployment:model",
-        defaultModelId: "model-a",
-        models: [
-          {
-            id: "model-a",
-            name: "Model A",
-            enabled: true,
-            reasoning: false,
-            input: ["text"],
-            contextWindow: 128_000,
-            maxTokens: 8_192,
-          },
-        ],
-      }),
+      probes.probeModel(
+        {
+          providerKey: "blocked",
+          displayName: "未授权模型",
+          protocol: "openai-compatible",
+          baseUrl: "https://blocked.example.com/v1/",
+          credentialConfigured: true,
+          defaultModelId: "model-a",
+          models: [
+            {
+              id: "model-a",
+              name: "Model A",
+              enabled: true,
+              reasoning: false,
+              input: ["text"],
+              contextWindow: 128_000,
+              maxTokens: 8_192,
+            },
+          ],
+        },
+        apiKey,
+      ),
     ).rejects.toThrow("PROVIDER_HOST_NOT_ALLOWED");
     expect(fetcher).not.toHaveBeenCalled();
   });
@@ -126,12 +138,13 @@ describe("Provider 连接探针", () => {
         ),
     );
     const probes = createProviderProbes(configuration);
+    const apiKey = configuration.providerSecrets.modelApiKey;
     const provider = {
       providerKey: "main",
       displayName: "主模型",
       protocol: "openai-compatible" as const,
       baseUrl: "https://model.example.com/v1/",
-      secretRef: "deployment:model" as const,
+      credentialConfigured: true,
       defaultModelId: "model-a",
       models: [
         {
@@ -155,12 +168,15 @@ describe("Provider 连接探针", () => {
       ],
     };
 
-    await expect(probes.probeModel(provider)).resolves.toBeUndefined();
+    await expect(probes.probeModel(provider, apiKey)).resolves.toBeUndefined();
     await expect(
-      probes.probeModel({
-        ...provider,
-        models: provider.models.map((model) => ({ ...model, enabled: true })),
-      }),
+      probes.probeModel(
+        {
+          ...provider,
+          models: provider.models.map((model) => ({ ...model, enabled: true })),
+        },
+        apiKey,
+      ),
     ).rejects.toThrow("MODEL_METADATA_MISMATCH");
   });
 });

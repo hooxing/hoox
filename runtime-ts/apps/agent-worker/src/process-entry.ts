@@ -20,6 +20,7 @@ import {
   createS3BlobStore,
   createS3StableBlobGarbageCollector,
   DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
+  ModelProviderCredentialCipher,
   DurableResourceBlobWriter,
   DurableTraceBlobPersistenceAdapter,
   DurableWorkspaceCandidateBlobWriter,
@@ -170,6 +171,11 @@ const workerEnvironmentSchema = Object.freeze({
   CUBESANDBOX_RESOURCE_VOLUME_DRIVER: stringEnvironmentField({ maxLength: 128 }),
   MODEL_BASE_URL: urlEnvironmentField(),
   MODEL_API_KEY: stringEnvironmentField({ secret: true, maxLength: 8_192 }),
+  MODEL_CREDENTIAL_ENCRYPTION_KEY: stringEnvironmentField({
+    requiredIn: ["production"],
+    secret: true,
+    maxLength: 4_096,
+  }),
   MODEL_ID: stringEnvironmentField({ maxLength: 255 }),
   MODEL_SUPPORTS_IMAGES: booleanEnvironmentField(),
   MODEL_CONTEXT_WINDOW: integerEnvironmentField({ minimum: 1, maximum: 10_000_000 }),
@@ -301,6 +307,7 @@ export interface WorkerProcessConfiguration {
   readonly model: Readonly<{
     baseUrl: string;
     apiKey: string;
+    credentialEncryptionKey: string;
     modelId: string;
     supportsImages: boolean;
     contextWindow: number;
@@ -586,6 +593,9 @@ export function parseWorkerProcessEnvironment(
     model: Object.freeze({
       baseUrl: readRequiredEnvironmentValue(parsed, "MODEL_BASE_URL"),
       apiKey: readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),
+      credentialEncryptionKey:
+        parsed.values.MODEL_CREDENTIAL_ENCRYPTION_KEY ??
+        readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),
       modelId: readRequiredEnvironmentValue(parsed, "MODEL_ID"),
       supportsImages: readRequiredEnvironmentValue(parsed, "MODEL_SUPPORTS_IMAGES"),
       contextWindow,
@@ -1168,7 +1178,11 @@ async function assembleWorkerRuntime(
       },
       threadContinuityMetrics,
     );
-    const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(pool);
+    const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(
+      pool,
+      new ModelProviderCredentialCipher(configuration.model.credentialEncryptionKey),
+      configuration.model.apiKey,
+    );
     const sessions = new RuntimeConfiguredSessionFactory(
       deploymentSessions,
       runtimeConfigurations,
@@ -1177,7 +1191,7 @@ async function assembleWorkerRuntime(
         const dynamicModel = await createOpenAiCompatibleProvider({
           displayName: configuredProvider.displayName,
           baseUrl: configuredProvider.baseUrl,
-          apiKey: configuration.model.apiKey,
+          apiKey: snapshot.modelApiKey,
           defaultModelId: configuredProvider.defaultModelId,
           models: configuredProvider.models,
         });

@@ -10,103 +10,57 @@ import { createSchemaInvalidArgumentsBridge } from "./tools.js";
 
 const strict = { additionalProperties: false } as const;
 const OverlapSchema = Type.Union([Type.Literal("coalesce"), Type.Literal("skip")]);
-export const AutomationUpdateToolArgumentsSchema = Type.Union([
-  Type.Object(
-    {
-      action: Type.Literal("create"),
-      name: Type.String({ minLength: 1, maxLength: 120 }),
-      instruction: Type.String({ minLength: 1, maxLength: 16384 }),
-      first_run_at: Type.String({
-        minLength: 20,
-        maxLength: 40,
-        description:
-          "带时区偏移的 ISO 8601 时间；未指定 timezone 时按 Asia/Shanghai（UTC+08:00）换算并携带 +08:00。",
-      }),
-      rrule: Type.Optional(Type.String({ minLength: 1, maxLength: 300 })),
-      timezone: Type.Optional(
-        Type.String({
-          minLength: 1,
-          maxLength: 100,
-          description: "IANA 时区；省略时默认为 Asia/Shanghai（UTC+08:00）。",
-        }),
-      ),
-      overlap_policy: Type.Optional(OverlapSchema),
-    },
-    strict,
-  ),
-  Type.Object(
-    {
-      action: Type.Literal("update"),
-      task_id: Type.String({ minLength: 1, maxLength: 200 }),
-      name: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
-      instruction: Type.Optional(Type.String({ minLength: 1, maxLength: 16384 })),
-      first_run_at: Type.Optional(Type.String({ minLength: 20, maxLength: 40 })),
-      rrule: Type.Optional(
-        Type.Union([Type.String({ minLength: 1, maxLength: 300 }), Type.Null()]),
-      ),
-      timezone: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
-      overlap_policy: Type.Optional(OverlapSchema),
-    },
-    strict,
-  ),
-  Type.Object(
-    {
-      action: Type.Union([Type.Literal("pause"), Type.Literal("resume"), Type.Literal("delete")]),
-      task_id: Type.String({ minLength: 1, maxLength: 200 }),
-    },
-    strict,
-  ),
-]);
-export type AutomationUpdateToolArguments = Static<typeof AutomationUpdateToolArgumentsSchema>;
-
-export const AutomationUpdateToolProviderSchema = Type.Object(
-  {
-    action: Type.Union(
-      [
-        Type.Literal("create"),
-        Type.Literal("update"),
-        Type.Literal("pause"),
-        Type.Literal("resume"),
-        Type.Literal("delete"),
-      ],
+export const AutomationUpdateToolArgumentsSchema = Type.Union(
+  [
+    Type.Object(
       {
-        description:
-          "操作类型。create 还需 name、instruction、first_run_at；其余操作还需 task_id。",
+        action: Type.Literal("create"),
+        name: Type.String({ minLength: 1, maxLength: 120 }),
+        instruction: Type.String({ minLength: 1, maxLength: 16384 }),
+        first_run_at: Type.String({
+          minLength: 20,
+          maxLength: 40,
+          description:
+            "带时区偏移的 ISO 8601 时间；未指定 timezone 时按 Asia/Shanghai（UTC+08:00）换算并携带 +08:00。",
+        }),
+        rrule: Type.Optional(Type.String({ minLength: 1, maxLength: 300 })),
+        timezone: Type.Optional(
+          Type.String({
+            minLength: 1,
+            maxLength: 100,
+            description: "IANA 时区；省略时默认为 Asia/Shanghai（UTC+08:00）。",
+          }),
+        ),
+        overlap_policy: Type.Optional(OverlapSchema),
       },
+      strict,
     ),
-    task_id: Type.Optional(
-      Type.String({
-        minLength: 1,
-        maxLength: 200,
-        description: "update、pause、resume、delete 必填；create 省略。",
-      }),
+    Type.Object(
+      {
+        action: Type.Literal("update"),
+        task_id: Type.String({ minLength: 1, maxLength: 200 }),
+        name: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+        instruction: Type.Optional(Type.String({ minLength: 1, maxLength: 16384 })),
+        first_run_at: Type.Optional(Type.String({ minLength: 20, maxLength: 40 })),
+        rrule: Type.Optional(
+          Type.Union([Type.String({ minLength: 1, maxLength: 300 }), Type.Null()]),
+        ),
+        timezone: Type.Optional(Type.String({ minLength: 1, maxLength: 100 })),
+        overlap_policy: Type.Optional(OverlapSchema),
+      },
+      strict,
     ),
-    name: Type.Optional(
-      Type.String({ minLength: 1, maxLength: 120, description: "create 必填；update 可选。" }),
+    Type.Object(
+      {
+        action: Type.Union([Type.Literal("pause"), Type.Literal("resume"), Type.Literal("delete")]),
+        task_id: Type.String({ minLength: 1, maxLength: 200 }),
+      },
+      strict,
     ),
-    instruction: Type.Optional(
-      Type.String({ minLength: 1, maxLength: 16384, description: "create 必填；update 可选。" }),
-    ),
-    first_run_at: Type.Optional(
-      Type.String({
-        minLength: 20,
-        maxLength: 40,
-        description:
-          "create 必填、update 可选。使用带时区偏移的 ISO 8601；未指定 timezone 时按 Asia/Shanghai（UTC+08:00）换算并携带 +08:00。",
-      }),
-    ),
-    rrule: Type.Optional(Type.Union([Type.String({ minLength: 1, maxLength: 300 }), Type.Null()])),
-    timezone: Type.Optional(
-      Type.String({
-        minLength: 1,
-        maxLength: 100,
-        description: "IANA 时区；省略时默认为 Asia/Shanghai（UTC+08:00）。",
-      }),
-    ),
-    overlap_policy: Type.Optional(OverlapSchema),
-  },
-  strict,
+  ],
+  { type: "object" },
 );
+export type AutomationUpdateToolArguments = Static<typeof AutomationUpdateToolArgumentsSchema>;
 
 export interface AutomationUpdatePiToolExecutorPort {
   apply(input: {
@@ -174,14 +128,12 @@ export function createAutomationUpdatePiTool(
     executionMode: "sequential",
     description:
       "创建、修改、暂停、恢复或删除当前对话的定时任务。仅在用户明确要求定时、周期或未来自动执行时调用。首次时间必须是带时区偏移的 ISO 8601；用户未指定时区时，timezone 可省略并默认为 Asia/Shanghai（UTC+08:00），first_run_at 应按东八区换算且携带 +08:00。重复规则首版支持 FREQ=MINUTELY、HOURLY、DAILY 与 INTERVAL。",
-    // OpenAI-compatible Provider 要求函数参数的顶层明确为 object；action 分支的严格约束继续由参数桥执行。
-    parameters: AutomationUpdateToolProviderSchema,
+    parameters: AutomationUpdateToolArgumentsSchema,
     prepareArguments: invalid.prepareArguments,
     execute: async (callId, args, signal) => {
-      const validatedArgs = args as AutomationUpdateToolArguments;
       let task: ScheduledTask | undefined;
       let failure: ReturnType<AutomationUpdatePiToolExecutorPort["projectError"]> | undefined;
-      if (invalid.consume(validatedArgs))
+      if (invalid.consume(args))
         failure = {
           status: "failed",
           code: "AUTOMATION_ARGUMENTS_INVALID",
@@ -193,7 +145,7 @@ export function createAutomationUpdatePiTool(
         try {
           task = await executor.apply({
             callId,
-            arguments: validatedArgs,
+            arguments: args,
             ...(signal === undefined ? {} : { signal }),
           });
         } catch (error) {

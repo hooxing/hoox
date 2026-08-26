@@ -54,10 +54,10 @@ describe("Provider 连接探针", () => {
 
     await probes.probeModel(
       {
-        providerKey: "main",
-        displayName: "主模型",
+        providerKey: "custom-newapi",
+        displayName: "自建 New API",
         protocol: "openai-compatible",
-        baseUrl: "https://model.example.com/v1/",
+        baseUrl: "https://newapi.example.net/openai/v1/",
         credentialConfigured: true,
         defaultModelId: "model-a",
         models: [
@@ -87,55 +87,13 @@ describe("Provider 连接探针", () => {
 
     expect(fetcher).toHaveBeenNthCalledWith(
       1,
-      new URL("https://model.example.com/v1/chat/completions"),
+      new URL("https://newapi.example.net/openai/v1/chat/completions"),
       expect.objectContaining({ method: "POST", redirect: "error" }),
     );
     expect(fetcher).toHaveBeenNthCalledWith(
       2,
       new URL("https://memory.example.com/"),
       expect.objectContaining({ method: "HEAD", redirect: "error" }),
-    );
-  });
-
-  it("允许探测管理员配置的任意合法 HTTPS Provider 主机", async () => {
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        new Response(
-          JSON.stringify({ choices: [{ message: { role: "assistant", content: "OK" } }] }),
-          { status: 200 },
-        ),
-      );
-    vi.stubGlobal("fetch", fetcher);
-    const probes = createProviderProbes(configuration);
-    const apiKey = configuration.providerSecrets.modelApiKey;
-
-    await probes.probeModel(
-      {
-        providerKey: "custom-newapi",
-        displayName: "自建 New API",
-        protocol: "openai-compatible",
-        baseUrl: "https://newapi.example.net/openai/v1/",
-        credentialConfigured: true,
-        defaultModelId: "model-a",
-        models: [
-          {
-            id: "model-a",
-            name: "Model A",
-            enabled: true,
-            reasoning: false,
-            input: ["text"],
-            contextWindow: 128_000,
-            maxTokens: 8_192,
-          },
-        ],
-      },
-      apiKey,
-    );
-
-    expect(fetcher).toHaveBeenCalledWith(
-      new URL("https://newapi.example.net/openai/v1/chat/completions"),
-      expect.objectContaining({ method: "POST", redirect: "error" }),
     );
   });
 

@@ -11,7 +11,6 @@ const configuration: AdminControlApiProcessConfiguration = Object.freeze({
   listenHost: "127.0.0.1",
   listenPort: 3_003,
   shutdownTimeoutMilliseconds: 5_000,
-  providerHostAllowlist: new Set(["model.example.com", "memory.example.com"]),
   objectStorage: Object.freeze({
     endpoint: "http://127.0.0.1:19000",
     bucket: "runtime-skill-publications",
@@ -39,7 +38,7 @@ afterEach(() => {
 });
 
 describe("Provider 连接探针", () => {
-  it("拒绝跟随重定向，避免白名单主机把请求转发到未授权地址", async () => {
+  it("直接请求配置的自定义 Provider 地址，并拒绝跟随重定向", async () => {
     const fetcher = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
@@ -98,37 +97,46 @@ describe("Provider 连接探针", () => {
     );
   });
 
-  it("白名单外主机在发起网络请求前失败", async () => {
-    const fetcher = vi.fn<typeof fetch>();
+  it("允许探测管理员配置的任意合法 HTTPS Provider 主机", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ choices: [{ message: { role: "assistant", content: "OK" } }] }),
+          { status: 200 },
+        ),
+      );
     vi.stubGlobal("fetch", fetcher);
     const probes = createProviderProbes(configuration);
     const apiKey = configuration.providerSecrets.modelApiKey;
 
-    await expect(
-      probes.probeModel(
-        {
-          providerKey: "blocked",
-          displayName: "未授权模型",
-          protocol: "openai-compatible",
-          baseUrl: "https://blocked.example.com/v1/",
-          credentialConfigured: true,
-          defaultModelId: "model-a",
-          models: [
-            {
-              id: "model-a",
-              name: "Model A",
-              enabled: true,
-              reasoning: false,
-              input: ["text"],
-              contextWindow: 128_000,
-              maxTokens: 8_192,
-            },
-          ],
-        },
-        apiKey,
-      ),
-    ).rejects.toThrow("PROVIDER_HOST_NOT_ALLOWED");
-    expect(fetcher).not.toHaveBeenCalled();
+    await probes.probeModel(
+      {
+        providerKey: "custom-newapi",
+        displayName: "自建 New API",
+        protocol: "openai-compatible",
+        baseUrl: "https://newapi.example.net/openai/v1/",
+        credentialConfigured: true,
+        defaultModelId: "model-a",
+        models: [
+          {
+            id: "model-a",
+            name: "Model A",
+            enabled: true,
+            reasoning: false,
+            input: ["text"],
+            contextWindow: 128_000,
+            maxTokens: 8_192,
+          },
+        ],
+      },
+      apiKey,
+    );
+
+    expect(fetcher).toHaveBeenCalledWith(
+      new URL("https://newapi.example.net/openai/v1/chat/completions"),
+      expect.objectContaining({ method: "POST", redirect: "error" }),
+    );
   });
 
   it("向默认模型发送最小文本生成请求，不依赖 Provider 的模型目录", async () => {

@@ -6,9 +6,7 @@ import { fileURLToPath } from "node:url";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 export const productionNodeBaseDigest =
   "sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d";
-const pinnedNodeImage = `node:24.18.0-bookworm-slim@${productionNodeBaseDigest}`;
-const pinnedPackageManager =
-  "pnpm@10.15.1+sha512.34e538c329b5553014ca8e8f4535997f96180a1d0f614339357449935350d924e22f8614682191264ec33d1462ac21561aff97f6bb18065351c162c7e8f6de67";
+const pinnedPackageManagerPattern = /^pnpm@\d+\.\d+\.\d+\+sha512\.[A-Za-z0-9+/=]+$/u;
 const requiredGates = Object.freeze([
   "config:check:production",
   "supply-chain:check",
@@ -53,6 +51,7 @@ function readRepositoryInputs() {
 
 export function validateProductionReleaseInputs(input) {
   const issues = [];
+  const pinnedNodeImage = `node:${input.packageJson.engines?.node}-bookworm-slim@${productionNodeBaseDigest}`;
   if (!/^\/exports\s*$/mu.test(input.dockerignore)) {
     issues.push("Docker build context 未排除根级 exports 运行证据");
   }
@@ -120,7 +119,7 @@ export function validateProductionReleaseInputs(input) {
   }
 
   const manifest = input.manifest;
-  if (input.packageJson.packageManager !== pinnedPackageManager) {
+  if (!pinnedPackageManagerPattern.test(input.packageJson.packageManager ?? "")) {
     issues.push("packageManager 缺少固定 registry integrity");
   }
   if (manifest.schemaVersion !== 1 || manifest.releaseId !== "<release-id>") {

@@ -197,8 +197,10 @@ function runPnpmLicenses(packageName) {
   const pnpmArguments = ["--filter", packageName, "licenses", "list", "--prod", "--json"];
   const windows = process.platform === "win32";
   const result = spawnSync(
-    windows ? (process.env.ComSpec ?? "cmd.exe") : "pnpm",
-    windows ? ["/d", "/s", "/c", `pnpm ${pnpmArguments.join(" ")}`] : pnpmArguments,
+    windows ? (process.env.ComSpec ?? "cmd.exe") : "corepack",
+    windows
+      ? ["/d", "/s", "/c", `corepack pnpm ${pnpmArguments.join(" ")}`]
+      : ["pnpm", ...pnpmArguments],
     {
       cwd: repositoryRoot,
       encoding: "utf8",

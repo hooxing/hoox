@@ -13,6 +13,7 @@
 | `corepack pnpm format:check` | 只检查格式 |
 | `corepack pnpm lint` | 执行 Biome lint |
 | `corepack pnpm typecheck` | 构建并执行根与各包类型检查 |
+| `corepack pnpm toolchain:check` | 校验 Node.js、pnpm、CI 与 Docker 工具链版本契约 |
 
 ## 测试与工程 Gate
 

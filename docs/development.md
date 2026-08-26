@@ -12,7 +12,7 @@
 - 至少一个可用 Sandbox Provider：CubeSandbox 或 E2B。
 - OpenAI-compatible 模型 Provider，并支持 `/models`。
 
-版本固定在 `package.json`、`.node-version`、`.nvmrc` 和 CI。依赖必须使用锁文件中的精确版本。
+`package.json#engines.node` 是 Node.js 运行时版本契约，`.node-version`、`.nvmrc`、CI 和 Docker 镜像必须与其一致；CI 直接读取 `.node-version`。`@types/node` 使用 npm 已发布的相同主版本，并与其他依赖一样精确固定。执行 `corepack pnpm toolchain:check` 可检查这些约束。
 
 ## 1. 获取依赖
 

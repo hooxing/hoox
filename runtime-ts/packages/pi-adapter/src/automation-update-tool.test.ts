@@ -1,6 +1,7 @@
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import {
+  AutomationUpdateToolProviderSchema,
   AutomationUpdateToolArgumentsSchema,
   automationToolMutation,
   createAutomationUpdatePiTool,
@@ -24,6 +25,12 @@ const task = {
 };
 
 describe("automation_update Pi 工具", () => {
+  it("向 Provider 暴露顶层 object schema，并保留 action 分支严格校验", () => {
+    expect((AutomationUpdateToolProviderSchema as { type?: unknown }).type).toBe("object");
+    expect(Value.Check(AutomationUpdateToolProviderSchema, { action: "create" })).toBe(true);
+    expect(Value.Check(AutomationUpdateToolArgumentsSchema, { action: "create" })).toBe(false);
+  });
+
   it("创建 schema 允许省略时区", () => {
     expect(
       Value.Check(AutomationUpdateToolArgumentsSchema, {

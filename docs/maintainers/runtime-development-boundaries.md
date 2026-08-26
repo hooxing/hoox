@@ -195,6 +195,8 @@ PPTX Skill 宣称预装的 Node.js、`pptxgenjs`、图标渲染和 LibreOffice/P
 
 `agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 仍严格等于 `DEV_AUTH_USER_A_TENANT_ID`，但只用于启动兼容；个人与团队 dispatch 都会原子唤醒动态 Tenant 控制面。`DATABASE_WORKER_COORDINATOR_URL` 必须使用独立的 `DATABASE_WORKER_COORDINATOR_ROLE` 登录，该角色只能领取无业务载荷的 Tenant 租约；实际任务始终回到 `DATABASE_URL` 对应的 Runtime 角色和 Tenant RLS 内读取。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它会同时检查两个数据库身份，但不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
 
+发送给 OpenAI-compatible Provider 的函数参数 Schema 顶层必须明确声明为 `object`。含多个 action 的工具可以在模型侧暴露稳定的公共字段集合，但执行前仍须按 action 使用严格 Schema 校验必填字段、字段范围和多余字段；Provider 兼容层不能替代 Runtime 校验。`automation_update` 采用这一双层边界，详见[工具参数 Schema 兼容决策](../decisions/20260826164658-provider-object-tool-schema.md)。
+
 VMware 内的 Cubelet 挂载附件与 `/resources/skills` 公开市场视图时，不能直接访问只监听 Windows loopback 的
 API。所有 Sandbox 工具现在都依赖该 ResourceFS 数据面。先为宿主虚拟网卡生成独立的开发 TLS 证书，把 CA 公钥
 安装到 Cubelet 节点系统信任库，再随 API 启动最小 ResourceFS Sidecar：

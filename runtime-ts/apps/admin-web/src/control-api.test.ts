@@ -36,7 +36,6 @@ describe("后台控制 Web API", () => {
           maxTokens: 8_192,
         },
       ],
-      reason: "创建草稿",
     });
 
     expect(fetcher.mock.calls[0]?.[0]).toBe("/v1/admin/control/model-providers");
@@ -93,6 +92,25 @@ describe("后台控制 Web API", () => {
     expect(error).toBeInstanceOf(AdminApiError);
     expect((error as Error).message).toBe("Provider 探测失败或依赖暂时不可用。");
     expect((error as Error).message).not.toContain("secret");
+  });
+
+  it("模型字段校验失败时展示服务端的安全说明", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      response(
+        {
+          error: {
+            message: "Provider 地址必须是无凭据 HTTPS URL",
+            retryable: false,
+          },
+        },
+        400,
+      ),
+    );
+    const api = new AdminControlApi(fetcher);
+
+    const error = await api.overview().catch((reason: unknown) => reason);
+    expect(error).toBeInstanceOf(AdminApiError);
+    expect((error as Error).message).toBe("Provider 地址必须是无凭据 HTTPS URL");
   });
 
   it("按 Provider 或模型名读取 Pi 模型目录", async () => {

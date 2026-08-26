@@ -141,8 +141,8 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
 1. 由 Database Admin 创建 `DATABASE_ADMIN_CONTROL_ROLE`，要求 `NOINHERIT`、无角色成员、无对象 ownership、
    无 `CREATE`/`TEMPORARY`，并与 Migrator、Runtime、Skill Publisher、Worker Coordinator、Team Coordinator
    角色互异。将该角色的连接串写入本机忽略文件中的 `ADMIN_CONTROL_DATABASE_URL`。
-2. 配置 `ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST`；模型配置和记忆待启用配置只能使用受控 Provider 地址，连接探测只允许
-   访问该白名单。`providerKey` 只是平台内部标识，不是 API Key：领域入口拒绝常见密钥形态，页面会清空新输入并
+2. 配置 `ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST`；模型配置和记忆待启用配置只能使用受控 Provider 地址，连接测试只允许
+   访问该白名单。`providerKey` 只是平台内部标识，不是 API Key：模型页面不提供该输入，领域入口仍拒绝常见密钥形态，并
    遮蔽、隔离历史异常标识，控制 API 的列表、概览和审计读取投影也只返回固定脱敏占位符。模型密钥由页面一次性写入，
    Admin API 使用平台级主密钥加密后绑定到具体 Provider Revision；页面、控制 API、审计和错误响应只返回
    `credentialConfigured`，不返回明文或密文。记忆凭据仍使用部署秘密引用；一旦密钥曾被误填到普通字段，
@@ -150,17 +150,17 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
    继续验证完整配置结构，但必须先允许既有对象键进入受控投影，不能在脱敏前把整次概览读取变成服务端错误。
 3. 执行迁移与开发身份初始化后，由受控数据库运维事务向
    `platform_control_operators(user_id, role, status)` 写入 `viewer`、`operator` 或 `admin`。控制 API 不提供自助提权
-   路由；operator 可保存记忆待启用配置和执行探测，只有 admin 能保存并启用模型配置、启用记忆配置或执行回滚。
-   模型配置在页面点击“保存并使用”后直接启用，不要求预先探测；记忆 Provider 仍必须探测成功后才能启用，该门禁
+   路由；operator 可保存模型与记忆配置并执行测试，只有 admin 能启用模型配置、启用记忆配置或执行回滚。
+   模型配置可跳过测试直接启用；记忆 Provider 仍必须探测成功后才能启用，该门禁
    由领域服务执行，不能依赖管理页面按钮。
 
-模型配置以 Provider 为聚合根：一个 Provider revision 可以维护多个模型条目，并指定一个默认模型。管理 Web 从锁定版本的
-Pi Provider 目录载入内置 Provider 的模型能力；页面只启用管理员在“使用模型”中选中的默认模型，其他目录条目保持停用，
-不暗中参与运行或探测。自定义 Provider 只要求填写地址、API Key 和模型 ID。管理员点击
-“保存并使用”后形成显式 revision 并立即切换 active，
-Worker 不会在运行时重新用 Pi 目录覆盖已启用数据。模型页面不展示草稿、Revision 历史、独立探测操作或变更原因；
-这些仍存在的服务端事实只用于持久化、审计与 Run 快照。后台不可用时仍可浏览 Pi 目录和编辑初始值，但这些内容没有
-保存或生效。Worker 以 Run 固定 Revision 中的输入模态、上下文窗口和最大输出作为模型能力事实；模型家族 Profile
+模型配置以 Provider 为聚合根：一个 Provider revision 可以维护多个模型条目，并指定一个默认模型。管理 Web 左侧列出
+持久化 Provider，右侧用同一编辑器处理 Pi 与自定义 Provider；Pi 目录只填入初始模型能力，模型 ID、名称、图片输入、推理、
+上下文窗口和最大输出都可修改，也可手工添加目录外模型。页面只启用管理员选中的默认模型，其他条目保持停用，不暗中参与
+运行或测试。管理员可分别保存、向默认模型发送受限 `chat/completions` 文本测试、设为当前，或点击“保存并使用”；测试不依赖
+`/models`，也不是切换门禁。Worker 不会在运行时重新用 Pi 目录覆盖已保存数据。模型页面不展示 Revision 历史或变更原因；
+这些仍存在的服务端事实只用于持久化、审计与 Run 快照。后台不可用时仍可浏览 Pi 目录和编辑初始值，但这些内容没有保存、
+测试或生效。Worker 以 Run 固定 Revision 中的输入模态、上下文窗口和最大输出作为模型能力事实；模型家族 Profile
 只补充请求协议，不使用另一组硬编码能力值覆盖或拒绝已发布配置。
 
 启用配置会递增全局 generation；Worker 首次处理 Run 时将模型、记忆与运行参数 revision 固化到
@@ -168,6 +168,7 @@ Worker 不会在运行时重新用 Pi 目录覆盖已启用数据。模型页面
 `MODEL_*` 配置。模型页面必须直接显示当前 Provider 与默认模型或部署回退，并标明只影响新 Run；Provider 密钥只显示配置状态，
 不显示值。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 只是部署级加密根，不是 Provider 调用密钥。数据库连接、角色、JWT、TLS、S3、Sandbox 和监听地址只在页面展示“已配置/需重新部署”，不存在通用 ENV
 写接口。完整边界见
+[模型供应商列表、编辑、测试与切换决策](../decisions/20260826115031-model-provider-list-edit-test-switch.md)、
 [模型配置保存即启用决策](../decisions/20260825180549-direct-model-configuration-activation.md)、
 [Provider 标识与启用门禁决策](../decisions/20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md)、
 [模型 Provider 凭据托管决策](../decisions/20260825173500-managed-model-provider-credentials.md)、

@@ -24,6 +24,7 @@ import {
   IdentityAdminConfigurationSuccessEnvelopeSchema,
   MemoryProviderRevisionListSuccessEnvelopeSchema,
   MemoryProviderRevisionSuccessEnvelopeSchema,
+  ModelProviderControlRevisionRequestSchema,
   ModelProviderRevisionListSuccessEnvelopeSchema,
   ModelProviderRevisionSuccessEnvelopeSchema,
   PiModelCatalogModelListSuccessEnvelopeSchema,
@@ -43,6 +44,7 @@ import {
   type CreateMemoryProviderDraftRequest,
   type CreateModelProviderDraftRequest,
   type CreateRuntimeSettingsDraftRequest,
+  type ModelProviderControlRevisionRequest,
   type ProbeControlRevisionRequest,
   type PublishControlRevisionRequest,
   type PlatformUserPath,
@@ -149,7 +151,11 @@ export function createAdminControlApiApp(
   app.setErrorHandler(async (error, request, reply) => {
     const failure = failureKind(error);
     request.log.warn({ failure, requestId: request.id }, "后台控制面请求失败");
-    const response = failureResponse(String(request.id), failure);
+    const response = failureResponse(
+      String(request.id),
+      failure,
+      modelConfigurationValidationMessage(error, request, failure),
+    );
     await reply.status(response.status).send(response.body);
   });
 
@@ -428,12 +434,18 @@ function registerProviderActions(
     kind === "model_provider"
       ? ModelProviderRevisionSuccessEnvelopeSchema
       : MemoryProviderRevisionSuccessEnvelopeSchema;
-  app.post<{ Params: ControlRevisionPath; Body: ProbeControlRevisionRequest }>(
+  app.post<{
+    Params: ControlRevisionPath;
+    Body: ProbeControlRevisionRequest | ModelProviderControlRevisionRequest;
+  }>(
     `/v1/admin/control/${route}/:providerKey/revisions/:revision/probe`,
     {
       schema: {
         params: ControlRevisionPathSchema,
-        body: ProbeControlRevisionRequestSchema,
+        body:
+          kind === "model_provider"
+            ? ModelProviderControlRevisionRequestSchema
+            : ProbeControlRevisionRequestSchema,
         response: responseSchemas(response),
       },
     },
@@ -462,17 +474,25 @@ function registerProviderActions(
             readonly configuration: ModelProviderConfiguration | MemoryProviderConfiguration;
           },
           expectedVersionToken: request.body.expectedVersionToken,
-          reason: request.body.reason,
+          ...(kind === "model_provider"
+            ? {}
+            : { reason: (request.body as ProbeControlRevisionRequest).reason }),
         }),
       );
     },
   );
-  app.post<{ Params: ControlRevisionPath; Body: PublishControlRevisionRequest }>(
+  app.post<{
+    Params: ControlRevisionPath;
+    Body: PublishControlRevisionRequest | ModelProviderControlRevisionRequest;
+  }>(
     `/v1/admin/control/${route}/:providerKey/revisions/:revision/publish`,
     {
       schema: {
         params: ControlRevisionPathSchema,
-        body: PublishControlRevisionRequestSchema,
+        body:
+          kind === "model_provider"
+            ? ModelProviderControlRevisionRequestSchema
+            : PublishControlRevisionRequestSchema,
         response: responseSchemas(response),
       },
     },
@@ -489,7 +509,13 @@ function registerProviderActions(
           kind,
           objectKey: request.params.providerKey,
           revision: request.params.revision,
-          command: request.body,
+          command:
+            kind === "model_provider"
+              ? {
+                  expectedVersionToken: request.body.expectedVersionToken,
+                  reason: "切换当前模型配置",
+                }
+              : (request.body as PublishControlRevisionRequest),
         }),
       );
     },
@@ -564,7 +590,17 @@ function failureKind(error: unknown): FailureKind {
   return "internal";
 }
 
-function failureResponse(requestId: string, kind: FailureKind) {
+function modelConfigurationValidationMessage(
+  error: unknown,
+  request: FastifyRequest,
+  kind: FailureKind,
+): string | undefined {
+  if (kind !== "bad_request" || !request.url.includes("/model-providers")) return undefined;
+  if (error instanceof TypeError) return error.message;
+  return "模型配置字段不符合要求，请检查必填项、地址和数值范围";
+}
+
+function failureResponse(requestId: string, kind: FailureKind, message?: string) {
   const status = {
     bad_request: 400,
     unsupported_media_type: 415,
@@ -575,11 +611,12 @@ function failureResponse(requestId: string, kind: FailureKind) {
     internal: 500,
   }[kind];
   const protocolKind = kind === "unsupported_media_type" ? kind : kind;
+  const envelope = createErrorEnvelope(requestId, {
+    kind: protocolKind === "internal" ? "internal" : protocolKind,
+  });
   return {
     status,
-    body: createErrorEnvelope(requestId, {
-      kind: protocolKind === "internal" ? "internal" : protocolKind,
-    }),
+    body: message === undefined ? envelope : { ...envelope, error: { ...envelope.error, message } },
   } as const;
 }
 

@@ -230,6 +230,7 @@
 | [ADR-20260825135525：Thread 图片预览按不可变附件身份保持稳定](20260825135525-stable-thread-attachment-preview.md) | 已接受 | 2026-08-25 |
 | [ADR-20260825164722：Provider 内部标识防密钥误填与探测后启用门禁](20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md) | 部分已替代（模型启用门禁与页面流程） | 2026-08-25 |
 | [ADR-20260825173500：模型 Provider 凭据按 Revision 加密托管](20260825173500-managed-model-provider-credentials.md) | 已接受（模型配置流程已被部分替代） | 2026-08-25 |
-| [ADR-20260825180549：模型配置保存即启用并隐藏内部版本流程](20260825180549-direct-model-configuration-activation.md) | 已接受 | 2026-08-25 |
+| [ADR-20260825180549：模型配置保存即启用并隐藏内部版本流程](20260825180549-direct-model-configuration-activation.md) | 部分已替代（单一页面流程） | 2026-08-25 |
 | [模型页面只启用所选模型，已发布能力驱动运行](20260826000935-published-model-capabilities-are-runtime-facts.md) | 已接受 | 2026-08-26 |
 | [Demo 数据 epoch 与 Provider 持久化读取边界](20260826091622-demo-data-epoch-and-stored-provider-read-boundary.md) | 已接受 | 2026-08-26 |
+| [ADR-20260826115031：模型供应商采用列表、统一编辑器、真实测试与显式切换](20260826115031-model-provider-list-edit-test-switch.md) | 已接受 | 2026-08-26 |

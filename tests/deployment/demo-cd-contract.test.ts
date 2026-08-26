@@ -79,14 +79,19 @@ describe("Demo 持续部署契约", () => {
     expect(compose).toContain('mc admin user add runtime "$${S3_ACCESS_KEY_ID}"');
     expect(compose).toContain('mc admin user add runtime "$${SKILL_PUBLISHER_S3_ACCESS_KEY_ID}"');
     expect(compose).toContain("mc admin policy attach runtime readwrite");
+    expect(compose).toContain("name: hoox-demo-postgres-data-20260826");
+    expect(compose).toContain("name: hoox-demo-minio-data-20260826");
+    expect(compose).not.toMatch(/^\s*name: hoox-demo-(?:postgres|minio)-data\s*$/gmu);
   });
 
-  it("发布初始化后台管理员，失败时只回滚应用镜像且兼容旧发布", () => {
+  it("发布初始化后台管理员，失败时回滚应用与基础服务且兼容旧发布", () => {
     const deploy = source("deploy/demo/remote-deploy.sh");
     expect(deploy).toContain("admin-control.env");
     expect(deploy).toContain("DEMO_ADMIN_USER_ID");
     expect(deploy).toContain("platform_control_operators");
     expect(deploy).toContain("platform_skill_operators");
+    expect(deploy).toContain("restore_services=(postgres minio api web scheduler worker)");
+    expect(deploy).toContain('up -d --force-recreate "${restore_services[@]}"');
     expect(deploy).toContain("restore_services+=(admin-control admin-web)");
     expect(deploy).toContain("for service in api web admin-control admin-web scheduler worker");
     expect(deploy).toContain("rollback()");
@@ -99,6 +104,7 @@ describe("Demo 持续部署契约", () => {
     expect(deploy).toContain("https://$domain/v1/admin/control/overview");
     expect(deploy).toContain("admin_access_token");
     expect(deploy).toContain("--force-recreate api admin-control admin-web scheduler worker");
+    expect(deploy).toContain("compose up -d --force-recreate postgres minio");
     expect(deploy).not.toContain("admin_netrc");
     expect(deploy).not.toContain("openssl passwd");
     expect(deploy).toContain("| compose exec -T postgres psql");

@@ -108,7 +108,7 @@ rollback() {
     release_dir="$previous_release"
     compose_file="$previous_release/docker-compose.yml"
     write_compose_env "$previous_image" "$existing_tenant" "$existing_admin_user"
-    local -a restore_services=(api web scheduler worker)
+    local -a restore_services=(postgres minio api web scheduler worker)
     if docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
       config --services | grep -qx 'admin-control'; then
       restore_services+=(admin-control admin-web)
@@ -123,7 +123,7 @@ rollback() {
 trap rollback ERR
 
 compose pull api web admin-control admin-web scheduler worker migrate
-compose up -d postgres minio
+compose up -d --force-recreate postgres minio
 compose --profile ops run --rm minio-init
 compose --profile ops run --rm migrate
 compose up -d api web

@@ -7,6 +7,8 @@ import {
   normalizeMemoryProviderConfiguration,
   normalizeModelProviderConfiguration,
   normalizeRuntimeSettingsConfiguration,
+  normalizeStoredMemoryProviderConfiguration,
+  normalizeStoredModelProviderConfiguration,
 } from "./index.js";
 
 function modelConfiguration(
@@ -77,6 +79,34 @@ describe("后台控制面领域规则", () => {
       normalizeModelProviderConfiguration({
         ...modelConfiguration(),
         providerKey: `sk-${"a".repeat(32)}`,
+      }),
+    ).toThrow("Provider 内部标识疑似包含 API Key");
+  });
+
+  it("持久化读取允许历史异常标识进入脱敏投影，写入入口仍拒绝", () => {
+    const historicalProviderKey = `sk-${"a".repeat(32)}`;
+    expect(
+      normalizeStoredModelProviderConfiguration({
+        ...modelConfiguration(),
+        providerKey: historicalProviderKey,
+      }).providerKey,
+    ).toBe(historicalProviderKey);
+    expect(
+      normalizeStoredMemoryProviderConfiguration({
+        providerKey: historicalProviderKey,
+        displayName: "记忆",
+        providerKind: "mem0",
+        baseUrl: "https://api.mem0.ai/",
+        apiSecretRef: "deployment:memory-api",
+        scopeSecretRef: "deployment:memory-scope",
+        requestTimeoutMs: 5_000,
+        enabled: true,
+      }).providerKey,
+    ).toBe(historicalProviderKey);
+    expect(() =>
+      normalizeModelProviderConfiguration({
+        ...modelConfiguration(),
+        providerKey: historicalProviderKey,
       }),
     ).toThrow("Provider 内部标识疑似包含 API Key");
   });

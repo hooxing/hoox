@@ -492,6 +492,90 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     }
   });
 
+  it("真实 PostgreSQL 读取历史异常 Provider 标识时完成脱敏而不是返回失败", async () => {
+    const fixture = await createFixture("control_historical_provider");
+    const historicalProviderKey = `sk-${"a".repeat(32)}`;
+    const configuration = {
+      providerKey: historicalProviderKey,
+      displayName: "历史测试模型",
+      protocol: "openai-compatible",
+      baseUrl: "https://model.example.invalid/v1",
+      secretRef: "deployment:model",
+      defaultModelId: "model-history",
+      models: [
+        {
+          id: "model-history",
+          name: "Model History",
+          enabled: true,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 128_000,
+          maxTokens: 8_192,
+        },
+      ],
+    };
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      [fixture.user.id],
+    );
+    try {
+      await migratorPool.query(
+        `INSERT INTO admin_control_config_revisions(
+           object_kind,object_key,revision,configuration,configuration_digest,created_by
+         ) VALUES('model_provider',$1,1,$2::jsonb,$3,$4)`,
+        [historicalProviderKey, JSON.stringify(configuration), "f".repeat(64), fixture.user.id],
+      );
+      await migratorPool.query(
+        `INSERT INTO admin_control_active_configs(
+           object_kind,object_key,revision,generation,activated_by,reason
+         ) VALUES('model_provider',$1,1,1,$2,'历史测试配置')`,
+        [historicalProviderKey, fixture.user.id],
+      );
+      await migratorPool.query(
+        `UPDATE admin_control_generation
+            SET generation=1,updated_at=clock_timestamp() WHERE singleton='global'`,
+      );
+      const credentialCipher = new ModelProviderCredentialCipher(
+        "integration-model-credential-root-at-least-32-bytes",
+      );
+      const repository = new PgAdminControlRepository(adminControlPool, credentialCipher);
+      const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(
+        runtimePool,
+        credentialCipher,
+        "integration-legacy-model-api-key",
+      );
+      const service = new AdminControlService(
+        repository,
+        repository,
+        { probeModel: async () => undefined, probeMemory: async () => undefined },
+        [],
+      );
+
+      const [models, overview] = await Promise.all([
+        service.listModelProviders(fixture.user.id),
+        service.overview(fixture.user.id),
+      ]);
+      expect(models[0]?.configuration.providerKey).toBe("sensitive-identifier-redacted");
+      expect(overview.activeModel?.configuration.providerKey).toBe("sensitive-identifier-redacted");
+      expect(JSON.stringify({ models, overview })).not.toContain(historicalProviderKey);
+      const runtimeSnapshot = await runtimeConfigurations.resolveForRun({
+        tenantId: fixture.scope.tenantId,
+        runId: fixture.run.id,
+      });
+      expect(runtimeSnapshot?.model.configuration.providerKey).toBe(historicalProviderKey);
+      expect(runtimeSnapshot?.model.configuration.defaultModelId).toBe("model-history");
+    } finally {
+      await migratorPool.query(
+        `DELETE FROM run_runtime_config_snapshots;
+         DELETE FROM admin_control_active_configs;
+         DELETE FROM admin_control_config_revisions;
+         DELETE FROM platform_control_operators;
+         UPDATE admin_control_generation
+            SET generation=0,updated_at=clock_timestamp() WHERE singleton='global'`,
+      );
+    }
+  });
+
   it("HTTP API 经真实 PostgreSQL RLS 隔离 Thread/Run 并完成取消", async () => {
     const left = await createFixture("api_left");
     const right = await createFixture("api_right");

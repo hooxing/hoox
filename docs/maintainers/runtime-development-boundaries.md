@@ -146,7 +146,8 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
    遮蔽、隔离历史异常标识，控制 API 的列表、概览和审计读取投影也只返回固定脱敏占位符。模型密钥由页面一次性写入，
    Admin API 使用平台级主密钥加密后绑定到具体 Provider Revision；页面、控制 API、审计和错误响应只返回
    `credentialConfigured`，不返回明文或密文。记忆凭据仍使用部署秘密引用；一旦密钥曾被误填到普通字段，
-   必须在 Provider 侧轮换，不能把响应脱敏视为秘密已经从历史事实中删除。
+   必须在 Provider 侧轮换，不能把响应脱敏视为秘密已经从历史事实中删除。疑似密钥启发式只约束新写入；持久化读取
+   继续验证完整配置结构，但必须先允许既有对象键进入受控投影，不能在脱敏前把整次概览读取变成服务端错误。
 3. 执行迁移与开发身份初始化后，由受控数据库运维事务向
    `platform_control_operators(user_id, role, status)` 写入 `viewer`、`operator` 或 `admin`。控制 API 不提供自助提权
    路由；operator 可保存记忆待启用配置和执行探测，只有 admin 能保存并启用模型配置、启用记忆配置或执行回滚。
@@ -171,6 +172,7 @@ Worker 不会在运行时重新用 Pi 目录覆盖已启用数据。模型页面
 [Provider 标识与启用门禁决策](../decisions/20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md)、
 [模型 Provider 凭据托管决策](../decisions/20260825173500-managed-model-provider-credentials.md)、
 [模型能力事实归属决策](../decisions/20260826000935-published-model-capabilities-are-runtime-facts.md)、
+[Demo 数据 epoch 与持久化读取决策](../decisions/20260826091622-demo-data-epoch-and-stored-provider-read-boundary.md)、
 [独立控制面决策](../decisions/20260819165254-independent-admin-control-plane.md)、
 [Provider 模型目录决策](../decisions/20260820090402-provider-owned-model-catalog.md)与
 [Pi 目录初始值决策](../decisions/20260820095113-pi-catalog-seeds-admin-model-metadata.md)。

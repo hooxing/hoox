@@ -303,7 +303,11 @@ function normalizedProviderKey(value: string): string {
   if (secretLikeProviderKeyPattern.test(trimmed)) {
     throw new TypeError("Provider 内部标识疑似包含 API Key");
   }
-  const normalized = trimmed.toLowerCase();
+  return normalizedStoredProviderKey(trimmed);
+}
+
+function normalizedStoredProviderKey(value: string): string {
+  const normalized = value.trim().toLowerCase();
   if (!providerKeyPattern.test(normalized)) throw new TypeError("Provider Key 格式无效");
   return normalized;
 }
@@ -364,8 +368,9 @@ function boundedInteger(value: number, name: string, minimum: number, maximum: n
   return value;
 }
 
-export function normalizeModelProviderConfiguration(
+function normalizedModelProviderConfiguration(
   input: ModelProviderConfiguration,
+  providerKey: string,
 ): ModelProviderConfiguration {
   if (input.protocol !== "openai-compatible") throw new TypeError("模型协议不受支持");
   if (typeof input.credentialConfigured !== "boolean") throw new TypeError("模型凭据状态无效");
@@ -411,7 +416,7 @@ export function normalizeModelProviderConfiguration(
     throw new TypeError("默认模型必须引用已启用模型");
   }
   return Object.freeze({
-    providerKey: normalizedProviderKey(input.providerKey),
+    providerKey,
     displayName: normalizedText(input.displayName, "显示名称", 120),
     protocol: "openai-compatible",
     baseUrl: normalizedHttpsUrl(input.baseUrl),
@@ -419,6 +424,22 @@ export function normalizeModelProviderConfiguration(
     defaultModelId,
     models: Object.freeze(models),
   });
+}
+
+export function normalizeModelProviderConfiguration(
+  input: ModelProviderConfiguration,
+): ModelProviderConfiguration {
+  return normalizedModelProviderConfiguration(input, normalizedProviderKey(input.providerKey));
+}
+
+/** 持久化读取保留历史对象键；写入期疑似密钥门禁不得阻断已有 Revision 的安全投影。 */
+export function normalizeStoredModelProviderConfiguration(
+  input: ModelProviderConfiguration,
+): ModelProviderConfiguration {
+  return normalizedModelProviderConfiguration(
+    input,
+    normalizedStoredProviderKey(input.providerKey),
+  );
 }
 
 export function defaultModelConfiguration(
@@ -431,8 +452,9 @@ export function defaultModelConfiguration(
   return model;
 }
 
-export function normalizeMemoryProviderConfiguration(
+function normalizedMemoryProviderConfiguration(
   input: MemoryProviderConfiguration,
+  providerKey: string,
 ): MemoryProviderConfiguration {
   if (input.providerKind !== "mem0") throw new TypeError("记忆 Provider 类型不受支持");
   if (
@@ -442,7 +464,7 @@ export function normalizeMemoryProviderConfiguration(
     throw new TypeError("记忆 Secret Ref 不受支持");
   }
   return Object.freeze({
-    providerKey: normalizedProviderKey(input.providerKey),
+    providerKey,
     displayName: normalizedText(input.displayName, "显示名称", 120),
     providerKind: "mem0",
     baseUrl: normalizedHttpsUrl(input.baseUrl),
@@ -451,6 +473,22 @@ export function normalizeMemoryProviderConfiguration(
     requestTimeoutMs: boundedInteger(input.requestTimeoutMs, "记忆请求超时", 100, 120_000),
     enabled: input.enabled,
   });
+}
+
+export function normalizeMemoryProviderConfiguration(
+  input: MemoryProviderConfiguration,
+): MemoryProviderConfiguration {
+  return normalizedMemoryProviderConfiguration(input, normalizedProviderKey(input.providerKey));
+}
+
+/** 持久化读取保留历史对象键；写入期疑似密钥门禁不得阻断已有 Revision 的安全投影。 */
+export function normalizeStoredMemoryProviderConfiguration(
+  input: MemoryProviderConfiguration,
+): MemoryProviderConfiguration {
+  return normalizedMemoryProviderConfiguration(
+    input,
+    normalizedStoredProviderKey(input.providerKey),
+  );
 }
 
 export function normalizeRuntimeSettingsConfiguration(

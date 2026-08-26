@@ -343,10 +343,6 @@ const environmentConfigurationGroups = [
         key: "DEV_ADMIN_CONTROL_TOKEN / ADMIN_CONTROL_JWT_*",
         description: "开发使用固定 Token；生产必须改用独立 issuer、audience 与签名密钥。",
       },
-      {
-        key: "ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST",
-        description: "只允许控制服务向明确列出的模型或 Mem0 主机执行连接探测。",
-      },
     ],
   },
   {
@@ -1432,16 +1428,9 @@ function MemoryProviderWorkspace({
             settingKey="MEM0_SCOPE_HMAC_KEY"
             state={deploymentState(deploymentSettings, "MEM0_SCOPE_HMAC_KEY")}
           />
-          <DeploymentCheck
-            label="探针主机白名单"
-            settingKey="ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST"
-            state={deploymentState(deploymentSettings, "ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST")}
-          />
         </div>
         <p className="memory-security-note">
-          <strong>安全要求：</strong>HMAC Key 至少 32 字节，必须与 Mem0 API Key
-          独立生成；白名单需包含
-          <code>api.mem0.ai</code> 或实际自建网关域名。
+          <strong>安全要求：</strong>HMAC Key 至少 32 字节，必须与 Mem0 API Key 独立生成。
         </p>
       </section>
 

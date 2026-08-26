@@ -141,8 +141,8 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
 1. 由 Database Admin 创建 `DATABASE_ADMIN_CONTROL_ROLE`，要求 `NOINHERIT`、无角色成员、无对象 ownership、
    无 `CREATE`/`TEMPORARY`，并与 Migrator、Runtime、Skill Publisher、Worker Coordinator、Team Coordinator
    角色互异。将该角色的连接串写入本机忽略文件中的 `ADMIN_CONTROL_DATABASE_URL`。
-2. 配置 `ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST`；模型配置和记忆待启用配置只能使用受控 Provider 地址，连接测试只允许
-   访问该白名单。`providerKey` 只是平台内部标识，不是 API Key：模型页面不提供该输入，领域入口仍拒绝常见密钥形态，并
+2. 模型与记忆连接探测直接请求对应 Revision 保存的无凭据 HTTPS 地址，不要求部署域名白名单或重启控制服务。探测仍
+   禁止跟随重定向、使用有界超时，模型响应正文也按大小限制读取。`providerKey` 只是平台内部标识，不是 API Key：模型页面不提供该输入，领域入口仍拒绝常见密钥形态，并
    遮蔽、隔离历史异常标识，控制 API 的列表、概览和审计读取投影也只返回固定脱敏占位符。模型密钥由页面一次性写入，
    Admin API 使用平台级主密钥加密后绑定到具体 Provider Revision；页面、控制 API、审计和错误响应只返回
    `credentialConfigured`，不返回明文或密文。记忆凭据仍使用部署秘密引用；一旦密钥曾被误填到普通字段，

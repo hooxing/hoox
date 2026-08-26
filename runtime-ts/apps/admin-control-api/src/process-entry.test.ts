@@ -37,7 +37,6 @@ function productionEnvironment(): Record<string, string> {
     ADMIN_CONTROL_JWT_MAX_LIFETIME_SECONDS: "1800",
     ADMIN_CONTROL_TLS_MODE: "proxy",
     ADMIN_CONTROL_TLS_TRUSTED_PROXY_CIDRS: "127.0.0.1",
-    ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST: "model.example.invalid,api.mem0.ai",
     SKILL_PUBLISHER_S3_ENDPOINT: "https://skill-objects.example.invalid",
     SKILL_PUBLISHER_S3_BUCKET: "runtime-skill-publications",
     SKILL_PUBLISHER_S3_REGION: "us-east-1",
@@ -61,7 +60,6 @@ function developmentEnvironment(overrides: Record<string, string> = {}): Record<
     DATABASE_SCHEMA: "runtime",
     ADMIN_CONTROL_LISTEN_HOST: "127.0.0.1",
     ADMIN_CONTROL_LISTEN_PORT: "3003",
-    ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST: "model.example.invalid,api.mem0.ai",
     SKILL_PUBLISHER_S3_ENDPOINT: "http://127.0.0.1:19000",
     SKILL_PUBLISHER_S3_BUCKET: "runtime-skill-publications",
     SKILL_PUBLISHER_S3_REGION: "us-east-1",
@@ -91,7 +89,7 @@ describe("后台控制 API 进程入口", () => {
     expect(selected).not.toHaveProperty("MIGRATION_DATABASE_URL");
   });
 
-  it("production 固定独立 PG、JWT、TLS、Provider 白名单且不含开发身份", () => {
+  it("production 固定独立 PG、JWT、TLS 且不含开发身份", () => {
     const configuration = parseAdminControlApiProcessEnvironment(productionEnvironment());
     expect(configuration).toMatchObject({
       runtimeEnvironment: "production",
@@ -114,9 +112,6 @@ describe("后台控制 API 进程入口", () => {
         bucket: "runtime-skill-publications",
       },
     });
-    expect(configuration.providerHostAllowlist).toEqual(
-      new Set(["model.example.invalid", "api.mem0.ai"]),
-    );
     expect(configuration).not.toHaveProperty("developmentAuth");
   });
 

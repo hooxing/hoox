@@ -204,16 +204,9 @@ async function assembleRealService(
 export function createProviderProbes(
   configuration: AdminControlApiProcessConfiguration,
 ): ProviderProbePort {
-  const assertAllowed = (value: string) => {
-    const url = new URL(value);
-    if (!configuration.providerHostAllowlist.has(url.hostname.toLowerCase())) {
-      throw new Error("PROVIDER_HOST_NOT_ALLOWED");
-    }
-    return url;
-  };
   return Object.freeze({
     probeModel: async (model: ModelProviderConfiguration, apiKey: string) => {
-      const base = assertAllowed(model.baseUrl);
+      const base = new URL(model.baseUrl);
       const endpoint = new URL(
         "chat/completions",
         base.href.endsWith("/") ? base : `${base.href}/`,
@@ -259,7 +252,7 @@ export function createProviderProbes(
     probeMemory: async (memory: MemoryProviderConfiguration) => {
       const apiKey = configuration.providerSecrets.memoryApiKey;
       if (apiKey === undefined) throw new Error("MEMORY_SECRET_UNAVAILABLE");
-      const response = await fetch(assertAllowed(memory.baseUrl), {
+      const response = await fetch(new URL(memory.baseUrl), {
         method: "HEAD",
         headers: { authorization: `Token ${apiKey}` },
         redirect: "error",
@@ -355,12 +348,6 @@ function deploymentSettings(
       "secret",
       configuration.runtimeDeploymentSettings.memoryScopeKeyConfigured,
       "Mem0 租户与用户作用域匿名化密钥，必须与 API Key 独立生成",
-    ),
-    descriptor(
-      "ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST",
-      "restart_required",
-      configuration.providerHostAllowlist.size > 0,
-      "允许执行连接探针的 Provider 主机白名单",
     ),
     descriptor(
       "THREAD_CONTEXT_COMPACTION_ENABLED",

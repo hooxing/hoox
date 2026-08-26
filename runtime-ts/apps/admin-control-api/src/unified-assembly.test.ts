@@ -93,7 +93,6 @@ function configuration(): AdminControlApiProcessConfiguration {
     listenHost: "127.0.0.1",
     listenPort: 3_003,
     shutdownTimeoutMilliseconds: 15_000,
-    providerHostAllowlist: new Set(["model.example.invalid"]),
     objectStorage: {
       endpoint: "http://127.0.0.1:19000",
       bucket: "runtime-skill-publications",

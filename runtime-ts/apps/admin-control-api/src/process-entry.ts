@@ -85,7 +85,6 @@ const environmentSchema = Object.freeze({
     requiredIn: optional,
     maxLength: 4_096,
   }),
-  ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST: stringEnvironmentField({ maxLength: 8_192 }),
   SKILL_PUBLISHER_S3_ENDPOINT: urlEnvironmentField(),
   SKILL_PUBLISHER_S3_BUCKET: stringEnvironmentField({ maxLength: 255 }),
   SKILL_PUBLISHER_S3_REGION: stringEnvironmentField({ maxLength: 128 }),
@@ -137,7 +136,6 @@ export interface AdminControlApiProcessConfiguration {
   readonly listenHost: string;
   readonly listenPort: number;
   readonly shutdownTimeoutMilliseconds: number;
-  readonly providerHostAllowlist: ReadonlySet<string>;
   readonly objectStorage: Readonly<{
     readonly endpoint: string;
     readonly bucket: string;
@@ -211,9 +209,6 @@ export function parseAdminControlApiProcessEnvironment(
       ? readRequiredEnvironmentValue(parsed, "ADMIN_CONTROL_LISTEN_HOST")
       : normalizeDevelopmentLoopbackHost(parsed.values.ADMIN_CONTROL_LISTEN_HOST ?? "127.0.0.1");
   const listenPort = parsed.values.ADMIN_CONTROL_LISTEN_PORT ?? 3_003;
-  const providerHostAllowlist = parseHostAllowlist(
-    readRequiredEnvironmentValue(parsed, "ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST"),
-  );
   const objectStorage = Object.freeze({
     endpoint: readRequiredEnvironmentValue(parsed, "SKILL_PUBLISHER_S3_ENDPOINT"),
     bucket: readRequiredEnvironmentValue(parsed, "SKILL_PUBLISHER_S3_BUCKET"),
@@ -285,7 +280,6 @@ export function parseAdminControlApiProcessEnvironment(
       parsed,
       "PROCESS_SHUTDOWN_TIMEOUT_MS",
     ),
-    providerHostAllowlist,
     objectStorage,
     providerSecrets: Object.freeze({
       modelApiKey: readRequiredEnvironmentValue(parsed, "MODEL_API_KEY"),
@@ -359,26 +353,6 @@ function assertProductionObjectStorageEndpoint(value: string): void {
   if (endpoint.protocol !== "https:" || endpoint.username !== "" || endpoint.password !== "") {
     throw new TypeError("SKILL_PUBLISHER_S3_ENDPOINT 在 production 必须为无凭据的 HTTPS URL");
   }
-}
-
-function parseHostAllowlist(value: string): ReadonlySet<string> {
-  const hosts = value
-    .split(",")
-    .map((host) => host.trim().toLowerCase())
-    .filter((host) => host.length > 0);
-  if (hosts.length < 1 || hosts.length > 100 || new Set(hosts).size !== hosts.length) {
-    throw new TypeError("ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST 无效");
-  }
-  for (const host of hosts) {
-    if (
-      !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(
-        host,
-      )
-    ) {
-      throw new TypeError("ADMIN_CONTROL_PROVIDER_HOST_ALLOWLIST 无效");
-    }
-  }
-  return new Set(hosts);
 }
 
 function createProductionConfiguration(input: {

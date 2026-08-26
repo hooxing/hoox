@@ -12,8 +12,8 @@ import {
   digestControlRequest,
   type MemoryProviderConfiguration,
   type ModelProviderConfiguration,
-  normalizeMemoryProviderConfiguration,
-  normalizeModelProviderConfiguration,
+  normalizeStoredMemoryProviderConfiguration,
+  normalizeStoredModelProviderConfiguration,
   normalizeRuntimeSettingsConfiguration,
   type RuntimeControlConfigurationPort,
   type RuntimeControlConfigurationSnapshot,
@@ -125,13 +125,13 @@ function mapConfiguration(kind: ControlObjectKind, value: unknown): Configuratio
       secretRef: _legacySecretRef,
       ...configuration
     } = value as Record<string, unknown>;
-    return normalizeModelProviderConfiguration({
+    return normalizeStoredModelProviderConfiguration({
       ...configuration,
       credentialConfigured: isEncryptedModelProviderCredential(credential),
     } as unknown as ModelProviderConfiguration);
   }
   if (kind === "memory_provider") {
-    return normalizeMemoryProviderConfiguration(value as MemoryProviderConfiguration);
+    return normalizeStoredMemoryProviderConfiguration(value as MemoryProviderConfiguration);
   }
   return normalizeRuntimeSettingsConfiguration(value as RuntimeSettingsConfiguration);
 }

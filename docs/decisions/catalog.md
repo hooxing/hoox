@@ -235,4 +235,5 @@
 | [Demo 数据 epoch 与 Provider 持久化读取边界](20260826091622-demo-data-epoch-and-stored-provider-read-boundary.md) | 已接受 | 2026-08-26 |
 | [ADR-20260826115031：模型供应商采用列表、统一编辑器、真实测试与显式切换](20260826115031-model-provider-list-edit-test-switch.md) | 已接受 | 2026-08-26 |
 | [ADR-20260826155935：自定义 Provider 探测直接使用已保存地址](20260826155935-custom-provider-probes-use-saved-url.md) | 已接受 | 2026-08-26 |
-| [ADR-20260826164658：Provider 工具参数使用顶层 object Schema](20260826164658-provider-object-tool-schema.md) | 已接受 | 2026-08-26 |
+| [ADR-20260826164658：Provider 工具参数使用顶层 object Schema](20260826164658-provider-object-tool-schema.md) | 已替代 | 2026-08-26 |
+| [ADR-20260826172009：Provider 工具 Schema 使用单一严格真源](20260826172009-single-source-provider-object-tool-schema.md) | 已接受 | 2026-08-26 |

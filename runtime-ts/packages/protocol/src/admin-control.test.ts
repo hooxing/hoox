@@ -1,12 +1,49 @@
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 import {
+  CreateModelProviderDraftRequestSchema,
+  ModelProviderControlRevisionRequestSchema,
   PlatformUserPageDtoSchema,
   RuntimeStatisticsDtoSchema,
   UpdatePlatformUserStatusRequestSchema,
 } from "./admin-control.js";
 
 describe("后台运营协议", () => {
+  it("模型配置允许正常大小写且保存、测试和切换均不接收变更原因", () => {
+    const draft = {
+      providerKey: "DeepSeek",
+      displayName: "DeepSeek",
+      protocol: "openai-compatible",
+      baseUrl: "https://api.deepseek.com/v1",
+      apiKey: "test-provider-key",
+      defaultModelId: "deepseek-v4-flash-vision-exp",
+      models: [
+        {
+          id: "deepseek-v4-flash-vision-exp",
+          name: "DeepSeek V4 Flash Vision",
+          enabled: true,
+          reasoning: false,
+          input: ["text", "image"],
+          contextWindow: 128_000,
+          maxTokens: 8_192,
+        },
+      ],
+    };
+    expect(Value.Check(CreateModelProviderDraftRequestSchema, draft)).toBe(true);
+    expect(
+      Value.Check(CreateModelProviderDraftRequestSchema, { ...draft, reason: "不应由用户填写" }),
+    ).toBe(false);
+    expect(
+      Value.Check(ModelProviderControlRevisionRequestSchema, { expectedVersionToken: 1 }),
+    ).toBe(true);
+    expect(
+      Value.Check(ModelProviderControlRevisionRequestSchema, {
+        expectedVersionToken: 1,
+        reason: "不应由用户填写",
+      }),
+    ).toBe(false);
+  });
+
   it("统计协议明确用户、对话和可靠性口径", () => {
     expect(
       Value.Check(RuntimeStatisticsDtoSchema, {

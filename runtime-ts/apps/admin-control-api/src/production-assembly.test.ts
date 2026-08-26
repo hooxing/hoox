@@ -43,7 +43,10 @@ describe("Provider 连接探针", () => {
     const fetcher = vi
       .fn<typeof fetch>()
       .mockResolvedValueOnce(
-        new Response(JSON.stringify({ data: [{ id: "model-a" }] }), { status: 200 }),
+        new Response(
+          JSON.stringify({ choices: [{ message: { role: "assistant", content: "OK" } }] }),
+          { status: 200 },
+        ),
       )
       .mockResolvedValueOnce(new Response(null, { status: 200 }));
     vi.stubGlobal("fetch", fetcher);
@@ -85,8 +88,8 @@ describe("Provider 连接探针", () => {
 
     expect(fetcher).toHaveBeenNthCalledWith(
       1,
-      new URL("https://model.example.com/v1/models"),
-      expect.objectContaining({ redirect: "error" }),
+      new URL("https://model.example.com/v1/chat/completions"),
+      expect.objectContaining({ method: "POST", redirect: "error" }),
     );
     expect(fetcher).toHaveBeenNthCalledWith(
       2,
@@ -128,15 +131,17 @@ describe("Provider 连接探针", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it("要求所有启用模型存在，但忽略停用模型", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi
-        .fn<typeof fetch>()
-        .mockImplementation(
-          async () => new Response(JSON.stringify({ data: [{ id: "model-a" }] }), { status: 200 }),
-        ),
-    );
+  it("向默认模型发送最小文本生成请求，不依赖 Provider 的模型目录", async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(
+        async () =>
+          new Response(
+            JSON.stringify({ choices: [{ message: { role: "assistant", content: "OK" } }] }),
+            { status: 200 },
+          ),
+      );
+    vi.stubGlobal("fetch", fetcher);
     const probes = createProviderProbes(configuration);
     const apiKey = configuration.providerSecrets.modelApiKey;
     const provider = {
@@ -168,7 +173,6 @@ describe("Provider 连接探针", () => {
       ],
     };
 
-    await expect(probes.probeModel(provider, apiKey)).resolves.toBeUndefined();
     await expect(
       probes.probeModel(
         {
@@ -177,6 +181,16 @@ describe("Provider 连接探针", () => {
         },
         apiKey,
       ),
-    ).rejects.toThrow("MODEL_METADATA_MISMATCH");
+    ).resolves.toBeUndefined();
+
+    expect(fetcher).toHaveBeenCalledOnce();
+    const request = fetcher.mock.calls[0];
+    expect(request?.[0]).toEqual(new URL("https://model.example.com/v1/chat/completions"));
+    expect(JSON.parse(String(request?.[1]?.body))).toMatchObject({
+      model: "model-a",
+      stream: false,
+      max_tokens: 32,
+      messages: [{ role: "user", content: "Reply with OK." }],
+    });
   });
 });

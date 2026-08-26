@@ -163,7 +163,6 @@ export interface CreateModelProviderDraftCommand
   readonly apiKey?: string;
   /** 编辑时允许复用同一 Provider 的既有密文，不需要回显密钥。 */
   readonly reuseCredentialFromRevision?: number;
-  readonly reason: string;
 }
 
 export interface CreateMemoryProviderDraftCommand extends MemoryProviderConfiguration {
@@ -210,7 +209,9 @@ export interface AdminControlRepository {
     userId: string,
   ): Promise<ControlRevision<RuntimeSettingsConfiguration> | undefined>;
   createModelDraft(
-    input: ControlMutationContext & { readonly command: CreateModelProviderDraftCommand },
+    input: ControlMutationContext & {
+      readonly command: CreateModelProviderDraftCommand & { readonly reason: string };
+    },
   ): Promise<ControlMutationResult<ControlRevision<ModelProviderConfiguration>>>;
   resolveModelCredential(
     userId: string,
@@ -353,7 +354,12 @@ function normalizedUserQuery(value: string | undefined): string | undefined {
 }
 
 function normalizedHttpsUrl(value: string): string {
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new TypeError("Provider 地址不是有效 URL");
+  }
   if (url.protocol !== "https:" || url.username !== "" || url.password !== "") {
     throw new TypeError("Provider 地址必须是无凭据 HTTPS URL");
   }
@@ -635,7 +641,7 @@ export class AdminControlService {
     command: CreateModelProviderDraftCommand,
   ) {
     requireRole(await this.repository.resolveRole(context.actorUserId), ["operator", "admin"]);
-    const { reason, apiKey, reuseCredentialFromRevision, ...configuration } = command;
+    const { apiKey, reuseCredentialFromRevision, ...configuration } = command;
     const hasApiKey = apiKey !== undefined;
     const hasReuse = reuseCredentialFromRevision !== undefined;
     if (hasApiKey === hasReuse) throw new TypeError("必须输入新模型密钥或明确复用既有密钥");
@@ -671,7 +677,7 @@ export class AdminControlService {
           ...(normalizedReuse === undefined
             ? {}
             : { reuseCredentialFromRevision: normalizedReuse }),
-          reason: normalizeChangeReason(reason),
+          reason: "保存模型供应商配置",
         },
       }),
     );
@@ -719,7 +725,7 @@ export class AdminControlService {
         | ControlRevision<ModelProviderConfiguration>
         | ControlRevision<MemoryProviderConfiguration>;
       readonly expectedVersionToken: number;
-      readonly reason: string;
+      readonly reason?: string;
     },
   ) {
     requireRole(await this.repository.resolveRole(context.actorUserId), ["operator", "admin"]);
@@ -759,7 +765,12 @@ export class AdminControlService {
         objectKey,
         revision: input.revision.revision,
         expectedVersionToken,
-        reason: normalizeChangeReason(input.reason),
+        reason:
+          input.kind === "model_provider"
+            ? status === "healthy"
+              ? "模型文本请求测试成功"
+              : "模型文本请求测试失败"
+            : normalizeChangeReason(input.reason ?? ""),
         status,
       }),
     );
@@ -836,7 +847,10 @@ export class AdminControlService {
           1,
           Number.MAX_SAFE_INTEGER,
         ),
-        reason: normalizeChangeReason(input.command.reason),
+        reason:
+          input.kind === "model_provider"
+            ? "切换当前模型配置"
+            : normalizeChangeReason(input.command.reason ?? ""),
       }),
     );
   }

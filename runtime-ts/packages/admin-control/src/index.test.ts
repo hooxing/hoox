@@ -273,7 +273,6 @@ describe("后台控制面领域规则", () => {
         { actorUserId: "viewer", idempotencyKey: "control-key", requestDigest: "a".repeat(64) },
         {
           ...modelConfiguration(),
-          reason: "viewer 不应写入",
         },
       ),
     ).rejects.toEqual(

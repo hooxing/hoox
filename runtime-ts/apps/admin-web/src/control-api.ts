@@ -7,6 +7,7 @@ import type {
   CreateModelProviderDraftRequest,
   CreateRuntimeSettingsDraftRequest,
   MemoryProviderRevisionDto,
+  ModelProviderControlRevisionRequest,
   ModelProviderRevisionDto,
   PiModelCatalogModelDto,
   PiModelCatalogProviderDto,
@@ -33,11 +34,11 @@ interface ListEnvelope<T> {
 }
 
 interface ErrorEnvelope {
-  readonly error?: { readonly retryable?: boolean };
+  readonly error?: { readonly message?: string; readonly retryable?: boolean };
 }
 
 function messageFor(status: number): string {
-  if (status === 400) return "配置内容不符合要求，请检查字段和变更原因。";
+  if (status === 400) return "配置内容不符合要求，请检查填写的字段。";
   if (status === 401 || status === 403) return "当前账号没有访问控制面的权限。";
   if (status === 404) return "配置版本不存在，请刷新后重试。";
   if (status === 409) return "配置版本已发生变化，请刷新后重试。";
@@ -76,7 +77,9 @@ export class AdminControlApi {
     if (!response.ok) {
       const failure = body as ErrorEnvelope | undefined;
       throw new AdminApiError(
-        messageFor(response.status),
+        response.status === 400 && failure?.error?.message !== undefined
+          ? failure.error.message
+          : messageFor(response.status),
         response.status,
         failure?.error?.retryable ?? response.status >= 500,
       );
@@ -192,7 +195,7 @@ export class AdminControlApi {
     kind: "model-providers" | "memory-providers",
     providerKey: string,
     revision: number,
-    input: ProbeControlRevisionRequest,
+    input: ProbeControlRevisionRequest | ModelProviderControlRevisionRequest,
   ): Promise<ModelProviderRevisionDto | MemoryProviderRevisionDto> {
     return this.request(`/${kind}/${encodeURIComponent(providerKey)}/revisions/${revision}/probe`, {
       method: "POST",
@@ -204,7 +207,7 @@ export class AdminControlApi {
     kind: "model-providers" | "memory-providers" | "runtime-settings",
     providerKey: string,
     revision: number,
-    input: PublishControlRevisionRequest,
+    input: PublishControlRevisionRequest | ModelProviderControlRevisionRequest,
   ): Promise<ModelProviderRevisionDto | MemoryProviderRevisionDto | RuntimeSettingsRevisionDto> {
     return this.request(
       `/${kind}/${encodeURIComponent(providerKey)}/revisions/${revision}/publish`,

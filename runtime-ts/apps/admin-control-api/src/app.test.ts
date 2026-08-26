@@ -280,12 +280,12 @@ describe("后台控制 API", () => {
         "content-type": "application/json",
         "idempotency-key": "control-create-0001",
       },
-      payload: { ...configuration, apiKey: "write-only-model-key", reason: "切换正式模型" },
+      payload: { ...configuration, apiKey: "write-only-model-key" },
     });
     expect(response.statusCode).toBe(200);
     expect(control.createModelDraft).toHaveBeenCalledWith(
       expect.objectContaining({ actorUserId: "user_admin", idempotencyKey: "control-create-0001" }),
-      expect.objectContaining({ reason: "切换正式模型" }),
+      expect.not.objectContaining({ reason: expect.anything() }),
     );
     expect(response.body).not.toContain("apiKey");
     await app.close();
@@ -301,7 +301,7 @@ describe("后台控制 API", () => {
         "content-type": "application/json",
         "idempotency-key": "control-probe-0001",
       },
-      payload: { expectedVersionToken: 1, reason: "发布前连接检查" },
+      payload: { expectedVersionToken: 1 },
     });
     expect(response.statusCode).toBe(200);
     expect(control.probe).toHaveBeenCalledWith(
@@ -328,10 +328,10 @@ describe("后台控制 API", () => {
         "content-type": "application/json",
         "idempotency-key": "control-create-0002",
       },
-      payload: { ...configuration, apiKey: "write-only-model-key", reason: "验证错误映射" },
+      payload: { ...configuration, apiKey: "write-only-model-key" },
     });
     expect(response.statusCode).toBe(400);
-    expect(response.body).not.toContain("HTTPS");
+    expect(response.json().error.message).toBe("Provider 地址必须使用 HTTPS");
     await app.close();
   });
 

@@ -403,6 +403,12 @@ body {
   padding: 6px 0;
 }
 
+.control-topbar > div > p {
+  margin-top: 5px;
+  color: #718078;
+  font-size: 13px;
+}
+
 .control-hero,
 .control-panel {
   border: 1px solid #d7ddd9;
@@ -1205,6 +1211,50 @@ body {
   gap: 18px;
 }
 
+.model-provider-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.75fr) minmax(560px, 1.65fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.provider-settings-pane,
+.model-editor-pane {
+  min-width: 0;
+  border: 1px solid #dce1de;
+  border-radius: 13px;
+  background: #fff;
+}
+
+.provider-settings-pane {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.model-editor-pane {
+  padding: 18px;
+}
+
+.model-editor-empty {
+  display: grid;
+  place-items: center;
+  min-height: 420px;
+  color: #68766e;
+  text-align: center;
+}
+
+.model-editor-empty .provider-avatar {
+  width: 42px;
+  height: 42px;
+  margin-bottom: 8px;
+}
+
+.model-editor-empty p {
+  margin: 5px 0 0;
+  font-size: 13px;
+}
+
 .model-effective-state {
   display: grid;
   grid-template-columns: auto minmax(260px, 1fr) auto;
@@ -1321,6 +1371,82 @@ body {
   border-top: 1px solid #e7ebe8;
 }
 
+.provider-settings-pane .provider-settings-list {
+  gap: 10px;
+  overflow: visible;
+  border: 0;
+}
+
+.provider-settings-pane .provider-settings-list article {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 9px 12px;
+  border: 1px solid #dce1de;
+  border-radius: 11px;
+  padding: 13px;
+}
+
+.provider-settings-pane .provider-settings-list article + article {
+  border-top: 1px solid #dce1de;
+}
+
+.provider-settings-pane .provider-settings-list article.selected {
+  border-color: #6f91ef;
+  box-shadow: 0 0 0 2px rgb(74 111 222 / 10%);
+}
+
+.provider-settings-pane .provider-settings-list article.active {
+  background: #f7fbf8;
+}
+
+.provider-select-button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  grid-row: 1 / span 2;
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.provider-select-button:disabled {
+  cursor: default;
+}
+
+.provider-row-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+  border-top: 1px solid #edf0ee;
+  padding-top: 8px;
+}
+
+.model-test-badge {
+  align-self: start;
+  border-radius: 999px;
+  padding: 4px 7px;
+  color: #82611f;
+  background: #fff5cf;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.model-test-badge.healthy {
+  color: #216745;
+  background: #e2f3e8;
+}
+
+.model-test-badge.failed {
+  color: #9e3f37;
+  background: #fae7e4;
+}
+
 .provider-list-empty {
   grid-template-columns: auto 1fr;
   min-height: 86px;
@@ -1368,6 +1494,21 @@ body {
   border-radius: 13px;
   padding: 16px;
   background: #f7f9f8;
+}
+
+.provider-catalog-picker.compact {
+  padding: 12px;
+}
+
+.provider-catalog-picker.compact > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.provider-catalog-picker.compact .provider-catalog-grid {
+  grid-template-columns: 1fr;
+  max-height: 340px;
 }
 
 .provider-catalog-picker > p {
@@ -1600,6 +1741,33 @@ body {
 
 .model-advanced-fields .checkbox.compact {
   align-self: center;
+}
+
+.model-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border-top: 1px solid #e3e7e4;
+  padding-top: 16px;
+}
+
+.model-test-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.model-test-state {
+  color: #77622d;
+}
+
+.model-test-state.healthy {
+  color: #216745;
+}
+
+.model-test-state.failed {
+  color: #9e3f37;
 }
 
 .add-model-button {
@@ -2056,6 +2224,16 @@ body {
   .model-advanced-fields,
   .provider-settings-list article {
     grid-template-columns: 1fr;
+  }
+
+  .model-provider-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .model-editor-footer,
+  .model-test-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .operations-summary,

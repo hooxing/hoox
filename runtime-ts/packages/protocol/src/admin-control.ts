@@ -3,7 +3,10 @@ import { successEnvelopeSchema } from "./envelopes.js";
 import { IdSchema, IsoTimestampSchema } from "./schemas.js";
 
 const strict = { additionalProperties: false } as const;
-const ProviderKeySchema = Type.String({ pattern: "^[a-z0-9][a-z0-9._-]{0,63}$", maxLength: 64 });
+const ProviderKeySchema = Type.String({
+  pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+  maxLength: 64,
+});
 const VersionTokenSchema = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
 const RevisionNumberSchema = Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER });
 const ChangeReasonSchema = Type.String({ minLength: 1, maxLength: 500 });
@@ -273,7 +276,6 @@ export const CreateModelProviderDraftRequestSchema = Type.Composite(
       {
         apiKey: Type.Optional(Type.String({ minLength: 1, maxLength: 8_192 })),
         reuseCredentialFromRevision: Type.Optional(RevisionNumberSchema),
-        reason: ChangeReasonSchema,
       },
       strict,
     ),
@@ -281,6 +283,14 @@ export const CreateModelProviderDraftRequestSchema = Type.Composite(
   strict,
 );
 export type CreateModelProviderDraftRequest = Static<typeof CreateModelProviderDraftRequestSchema>;
+
+export const ModelProviderControlRevisionRequestSchema = Type.Object(
+  { expectedVersionToken: VersionTokenSchema },
+  strict,
+);
+export type ModelProviderControlRevisionRequest = Static<
+  typeof ModelProviderControlRevisionRequestSchema
+>;
 
 export const CreateMemoryProviderDraftRequestSchema = Type.Composite(
   [MemoryProviderConfigurationDtoSchema, Type.Object({ reason: ChangeReasonSchema }, strict)],

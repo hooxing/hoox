@@ -214,9 +214,26 @@ export function createProviderProbes(
   return Object.freeze({
     probeModel: async (model: ModelProviderConfiguration, apiKey: string) => {
       const base = assertAllowed(model.baseUrl);
-      const endpoint = new URL("models", base.href.endsWith("/") ? base : `${base.href}/`);
+      const endpoint = new URL(
+        "chat/completions",
+        base.href.endsWith("/") ? base : `${base.href}/`,
+      );
+      const configuredModel = model.models.find(
+        (candidate) => candidate.id === model.defaultModelId && candidate.enabled,
+      );
+      if (configuredModel === undefined) throw new Error("MODEL_CONFIGURATION_INVALID");
       const response = await fetch(endpoint, {
-        headers: { authorization: `Bearer ${apiKey}` },
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: model.defaultModelId,
+          messages: [{ role: "user", content: "Reply with OK." }],
+          max_tokens: Math.min(configuredModel.maxTokens, 32),
+          stream: false,
+        }),
         redirect: "error",
         signal: AbortSignal.timeout(5_000),
       });
@@ -225,25 +242,18 @@ export function createProviderProbes(
       if (
         typeof payload !== "object" ||
         payload === null ||
-        !("data" in payload) ||
-        !Array.isArray(payload.data)
+        !("choices" in payload) ||
+        !Array.isArray(payload.choices) ||
+        !payload.choices.some((choice) => {
+          if (typeof choice !== "object" || choice === null || !("message" in choice)) return false;
+          const message = choice.message;
+          if (typeof message !== "object" || message === null) return false;
+          const content = "content" in message ? message.content : undefined;
+          const reasoning = "reasoning_content" in message ? message.reasoning_content : undefined;
+          return typeof content === "string" || typeof reasoning === "string";
+        })
       ) {
-        throw new Error("MODEL_METADATA_MISMATCH");
-      }
-      const available = new Set(
-        payload.data.flatMap((entry) =>
-          typeof entry === "object" &&
-          entry !== null &&
-          "id" in entry &&
-          typeof entry.id === "string"
-            ? [entry.id]
-            : [],
-        ),
-      );
-      if (
-        !model.models.filter((candidate) => candidate.enabled).every(({ id }) => available.has(id))
-      ) {
-        throw new Error("MODEL_METADATA_MISMATCH");
+        throw new Error("MODEL_RESPONSE_MISMATCH");
       }
     },
     probeMemory: async (memory: MemoryProviderConfiguration) => {

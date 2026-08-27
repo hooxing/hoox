@@ -38,7 +38,7 @@
 | [ADR-0032：Runtime Rollout 到 Pi 的恢复投影](0032-runtime-rollout-pi-recovery-projection.md) | 已接受 | 2026-07-28 |
 | [ADR-0033：waiting 与 SandboxSession 恢复安全边界](0033-waiting-sandbox-recovery.md) | 已接受 | 2026-07-28 |
 | [ADR-0034：M4 黑盒运行时依赖构建门禁](0034-m4-runtime-dependency-build-gate.md) | 已接受 | 2026-07-28 |
-| [ADR-0035：模型感知的 Context Budget](0035-model-aware-context-budget.md) | 已接受 | 2026-07-28 |
+| [ADR-0035：模型感知的 Context Budget](0035-model-aware-context-budget.md) | 部分已替代（未知模型默认计数） | 2026-07-28 |
 | [ADR-0036：waiting 恢复事实由已完成副作用证明推导](0036-waiting-recovery-proof-derived-facts.md) | 已替代（由 ADR-0037 替代普通 proof 信任边界） | 2026-07-28 |
 | [ADR-0037：waiting 恢复能力回执与只追加回退边界](0037-waiting-recovery-capability-and-append-only-rollback.md) | 已接受 | 2026-07-28 |
 | [ADR-0038：生产 Worker 的 Workspace 失败关闭边界](0038-production-worker-fail-closed-workspace-boundary.md) | 已接受 | 2026-07-28 |
@@ -103,7 +103,7 @@
 | [ADR-0097：development PPTX Skill 测试目录发布](0097-development-pptx-skill-fixture.md) | 已接受 | 2026-08-03 |
 | [ADR-0098：Worker Skill Blob 读取上限与预检一致性](0098-worker-skill-blob-size-boundary.md) | 已接受 | 2026-08-04 |
 | [ADR-0099：Skill 恢复查询的 PostgreSQL 稳定排序](0099-skill-recovery-stable-ordering.md) | 已接受 | 2026-08-04 |
-| [ADR-0100：Provider 可见历史过滤与 DeepSeek V4 精确 Tokenizer](0100-provider-visible-history-and-deepseek-tokenizer.md) | 已接受（16K 主模型输出配置已由 ADR-0138 替代，其余决策继续有效） | 2026-08-04 |
+| [ADR-0100：Provider 可见历史过滤与 DeepSeek V4 精确 Tokenizer](0100-provider-visible-history-and-deepseek-tokenizer.md) | 部分已替代（模型输出配置、未知模型失败关闭） | 2026-08-04 |
 | [ADR-0101：Sandbox acquire 显式使用 Lifecycle 超时](0101-sandbox-lifecycle-acquire-timeout.md) | 已接受 | 2026-08-04 |
 | [ADR-0102：确定性 Sandbox 创建失败直接终止 Run](0102-definitive-sandbox-create-failure.md) | 已接受 | 2026-08-04 |
 | [ADR-0103：一次性 Sandbox 按附件需求挂载 Resource Volume](0103-resource-volume-demand-signal.md) | 已接受；Thread Session 限制已由 ADR-0107 取代 | 2026-08-04 |
@@ -237,3 +237,4 @@
 | [ADR-20260826155935：自定义 Provider 探测直接使用已保存地址](20260826155935-custom-provider-probes-use-saved-url.md) | 已接受 | 2026-08-26 |
 | [ADR-20260826164658：Provider 工具参数使用顶层 object Schema](20260826164658-provider-object-tool-schema.md) | 已替代 | 2026-08-26 |
 | [ADR-20260826172009：Provider 工具 Schema 使用单一严格真源](20260826172009-single-source-provider-object-tool-schema.md) | 已接受 | 2026-08-26 |
+| [ADR-20260827110606：未知模型使用自动 Token 估算而不阻断 Provider](20260827110606-unknown-model-token-estimator-fallback.md) | 已接受 | 2026-08-27 |

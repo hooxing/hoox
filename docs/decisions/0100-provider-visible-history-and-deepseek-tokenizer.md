@@ -1,10 +1,10 @@
 # ADR-0100：Provider 可见历史过滤与 DeepSeek V4 精确 Tokenizer
 
-- 状态：已接受（16K 主模型输出配置已由 ADR-0138 替代，其余决策继续有效）
+- 状态：部分已替代（16K 主模型输出配置已由 ADR-0138 替代；未知模型失败关闭由 ADR-20260827110606 替代；Provider 可见历史过滤与 DeepSeek V4 精确 tokenizer 继续有效）
 - 日期：2026-08-04
 - 决策者：Runtime 维护者
 - 关联任务/PR：Agent 上下文误判与无效审计消息修复
-- 替代关系：细化模型预算和 Thread Context 的 Provider 投影边界
+- 替代关系：细化模型预算和 Thread Context 的 Provider 投影边界；未知模型失败关闭由 ADR-20260827110606 替代
 
 ## 背景
 

@@ -19,6 +19,7 @@
   },
   "requiredGates": [
     "config:check:production",
+    "security:audit:production",
     "supply-chain:check",
     "license:check",
     "release:check",

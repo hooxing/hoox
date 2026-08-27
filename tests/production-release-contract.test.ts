@@ -75,4 +75,24 @@ describe("生产发布与回滚契约", () => {
       }),
     ).toContain("Worker 运行闭包未固定为 root 所有且不可写");
   });
+
+  it("生产镜像必须随附项目法律文件，Worker 还必须随附 tokenizer 证据", () => {
+    const input = repositoryInputs();
+    const issues = validateProductionReleaseInputs({
+      ...input,
+      apiDockerfile: input.apiDockerfile
+        .replace("COPY --chown=0:0 LICENSE NOTICE THIRD_PARTY_NOTICES.md ./licenses/hoox/", "")
+        .replace(
+          "COPY --chown=0:0 third_party/pi/LICENSE third_party/pi/SOURCE.md ./licenses/third-party/pi/",
+          "",
+        ),
+      workerDockerfile: input.workerDockerfile.replace(
+        "COPY --chown=0:0 runtime-ts/vendor/deepseek-v4-tokenizer/LICENSE ./licenses/vendor/deepseek-v4-tokenizer/LICENSE",
+        "",
+      ),
+    });
+    expect(issues).toContain("API 缺少 Hoox LICENSE/NOTICE/第三方通知");
+    expect(issues).toContain("API 缺少 Pi LICENSE/SOURCE 镜像证据");
+    expect(issues).toContain("Worker 缺少 DeepSeek tokenizer LICENSE/SOURCE 镜像证据");
+  });
 });

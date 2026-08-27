@@ -36,7 +36,24 @@
         "runtime-ts/vendor/cubesandbox-sdk/test/sandbox.test.ts"
       ],
       "patchSha256": "ac285a52b5b5994b2a4b4102cf0cf952c252e421d8bfb33aa3f79e058008bb8a",
-      "patchedTreeSha256": "4c496b33e88e3e375fca51fce0dacbc7fafc7fa20f862fe7fbd8d26ce8ad9c46"
+      "patchedTreeSha256": "4c496b33e88e3e375fca51fce0dacbc7fafc7fa20f862fe7fbd8d26ce8ad9c46",
+      "localModified": true
+    },
+    "@hoox/vendor-deepseek-trajectory": {
+      "license": "MIT",
+      "licenseFile": "runtime-ts/vendor/deepseek-trajectory/LICENSE",
+      "sourceFile": "runtime-ts/vendor/deepseek-trajectory/SOURCE.md",
+      "upstreamCommit": "47f943859bef60e4160492346772ded9b24f765a",
+      "localModified": false,
+      "sourceTreeSha256": "f5b4a6c8f4d7c82d531d591d988f3c6f7c9afcf396240b20f346a85073c99f8d"
+    },
+    "@hoox/vendor-deepseek-v4-tokenizer": {
+      "license": "MIT",
+      "licenseFile": "runtime-ts/vendor/deepseek-v4-tokenizer/LICENSE",
+      "sourceFile": "runtime-ts/vendor/deepseek-v4-tokenizer/SOURCE.md",
+      "upstreamCommit": "a7aaed80dd2df27620eb534454253ea25eb11c7a",
+      "localModified": false,
+      "sourceTreeSha256": "a5b85b7884b1fa9ea1cb7478e0742961988a98f852aeb3570dc0f1211ac72d77"
     }
   }
 }

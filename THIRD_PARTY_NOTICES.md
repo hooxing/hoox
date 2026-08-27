@@ -1,9 +1,5 @@
 # Third-party notices
 
-## Anthropic PPTX Skill（仅 development fixture）
-
-`runtime-ts/vendor/anthropic-skills-pptx/` 从 Anthropic `skills/pptx` 的固定提交 `b29e7cf65e5cb78a5ac33d582270551bc74a14eb` 导入，仅供本地 development Skill Center 测试。其许可证为专有条款，完整许可证、来源和禁止生产发布的约束见该目录的 `LICENSE.txt` 与 `SOURCE.md`。
-
 ## CubeSandbox Node SDK
 
 已 vendoring 的 CubeSandbox Node SDK 来源于 TencentCloud/CubeSandbox，使用 Apache License 2.0。源码固定为标签 `v0.6.0`、提交 `8721dd151971ce3c2966482bbd32904ad98f378e` 下的 `sdk/node`；许可证、来源和同步要求见 `runtime-ts/vendor/cubesandbox-sdk/`。
@@ -15,3 +11,7 @@
 ## DeepSeek Harness Trajectory（仅内部 development 诊断）
 
 `runtime-ts/vendor/deepseek-trajectory/` 保存 DeepSeek Harness `packages/client/ui-trajectory` 的固定源码快照，来源提交为 `47f943859bef60e4160492346772ded9b24f765a`，上游包版本为 `0.1.0-rc.5`，许可证为 MIT，版权人为 DeepSeek。完整许可证、来源和集成边界见该目录的 `LICENSE` 与 `SOURCE.md`。该源码不进入用户产品面，也不引入 DeepSeek Harness 的运行时服务依赖。
+
+## DeepSeek V4 Tokenizer
+
+`runtime-ts/vendor/deepseek-v4-tokenizer/` 保存 DeepSeek V4 官方 tokenizer 的固定源码资源快照，来源提交为 `a7aaed80dd2df27620eb534454253ea25eb11c7a`，许可证为 MIT。完整许可证、来源与固定文件摘要见该目录的 `LICENSE`、`SOURCE.md` 及运行时校验代码；Worker 生产闭包与镜像会同时携带资源和许可证证据。

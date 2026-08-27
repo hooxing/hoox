@@ -70,7 +70,6 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 - 模型 Provider 的 API Key 是写入型字段：首次配置必填，编辑时可保留旧密钥或替换。模型页面保存多个 Provider，并提供编辑、真实文本测试和设为当前操作；这些操作不要求填写变更原因，也不展示内部 Revision。切换成功后，新 Run 使用目标 Revision 绑定的密钥，已有 Run 继续使用自己的配置快照。
 - 进程内仍使用 Admin Control 与 Skill Publisher 两套数据库连接和角色，Skill Publisher 对象存储凭据不能复用普通 API/Worker 身份。
 - 开发发布 fixture 不等于生产 Skill 目录。
-- vendored Anthropic PPTX Skill 仅用于本地 development 测试，受其专有许可证约束。
 
 ### 诊断
 

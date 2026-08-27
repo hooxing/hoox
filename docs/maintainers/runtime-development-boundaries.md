@@ -71,8 +71,6 @@ corepack pnpm config:check
 
 `runtime-ts/apps/api` 在 `RUNTIME_ENV=development`、显式启用开发身份时可选择内建的开发装配：它打开真实 PostgreSQL Repository 和 HTTP listener，可用 `pnpm dev:api` 启动。迁移后先显式执行 `pnpm dev:identity:provision`，该命令幂等创建配置的两个 User、个人 Tenant 和 owner Membership；服务启动本身绝不写入授权数据。该装配和初始化命令都不支持 production，也不会退化到内存 Fake。
 
-需要测试 Skill Center 时，可显式执行 `pnpm dev:skill:publish:pptx`。该命令只接受 `RUNTIME_ENV=development`，把固定提交的 Anthropic PPTX 测试包幂等写入私有对象存储并原子发布到受管目录；API 启动不会隐式发布目录内容。该 fixture 受专有许可证约束，不属于生产目录或发布制品。
-
 ### 管理员 Skill 上架
 
 一般 Skill 不再通过修改代码或普通 Runtime API 上架。`admin-control-api` 与 `admin-web` 组成独立于普通 Runtime
@@ -224,6 +222,7 @@ production Worker 使用 `pnpm --filter @hoox/agent-worker start:production` 或
 corepack pnpm test:process-runtime
 corepack pnpm test:process:container
 corepack pnpm config:check:production
+corepack pnpm security:audit:production
 corepack pnpm supply-chain:check
 corepack pnpm license:check
 corepack pnpm release:check
@@ -233,7 +232,7 @@ corepack pnpm test:production-worker:container
 ```
 
 第一条在 Windows/Linux 运行相同单元与入口测试；第二条需要 Docker，构建 Linux 非 root 最小镜像并验证配置、就绪和关闭顺序。
-后七条依次校验独立 production 配置、离线 SBOM、许可证、发布回滚以及 API/Scheduler/Worker runtime-only 容器边界；容器 Gate 故意不连接真实外部依赖。部署必须分片注入秘密：API 使用 PG/S3/JWT/TLS，Scheduler 只使用 PG/Cube，Worker 使用 PG/S3/Cube/模型，不能把共享 env 文件整包注入。部署前仍必须在 Linux 上用最小权限 Runtime 角色、真实 PostgreSQL/S3/CubeSandbox/模型完成 readiness 和其余 M7 Gate；Web/OIDC 产品身份仍是未完成的外部集成。
+后八条依次校验独立 production 配置、生产依赖漏洞、离线 SBOM、许可证、发布回滚以及 API/Scheduler/Worker runtime-only 容器边界；容器 Gate 故意不连接真实外部依赖。部署必须分片注入秘密：API 使用 PG/S3/JWT/TLS，Scheduler 只使用 PG/Cube，Worker 使用 PG/S3/Cube/模型，不能把共享 env 文件整包注入。部署前仍必须在 Linux 上用最小权限 Runtime 角色、真实 PostgreSQL/S3/CubeSandbox/模型完成 readiness 和其余 M7 Gate；Web/OIDC 产品身份仍是未完成的外部集成。
 
 ## PostgreSQL 角色 bootstrap
 

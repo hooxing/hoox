@@ -9,6 +9,8 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json tsconfig.base
 RUN pnpm fetch --frozen-lockfile
 
 COPY runtime-ts ./runtime-ts
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
+COPY third_party/pi ./licenses/third-party/pi
 COPY scripts/demo-static-server.mjs ./scripts/demo-static-server.mjs
 RUN --network=none pnpm install --offline --frozen-lockfile \
  && pnpm --filter "@hoox/api..." --filter "@hoox/agent-worker..." --filter "@hoox/scheduler..." --filter "@hoox/web..." --filter "@hoox/admin-control-api..." build \

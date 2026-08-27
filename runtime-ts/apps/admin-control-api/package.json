@@ -20,7 +20,7 @@
     "@hoox/skill": "workspace:*",
     "@hoox/skill-admin-api": "workspace:*",
     "@sinclair/typebox": "0.34.52",
-    "fastify": "5.10.0"
+    "fastify": "5.12.1"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

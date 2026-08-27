@@ -168,11 +168,15 @@ function workspaceClosure(rootPackageName, policy) {
                 "hoox:license-file": evidence.licenseFile,
                 "hoox:upstream-source-commit": evidence.upstreamCommit,
                 "hoox:source-file": evidence.sourceFile,
-                "hoox:local-modified": "true",
-                "hoox:local-patch-id": evidence.localPatchId,
-                "hoox:local-patch-file": evidence.patchFile,
-                "hoox:local-patch-sha256": evidence.patchSha256,
-                "hoox:patched-tree-sha256": evidence.patchedTreeSha256,
+                "hoox:local-modified": String(evidence.localModified === true),
+                ...(evidence.localModified === true
+                  ? {
+                      "hoox:local-patch-id": evidence.localPatchId,
+                      "hoox:local-patch-file": evidence.patchFile,
+                      "hoox:local-patch-sha256": evidence.patchSha256,
+                      "hoox:patched-tree-sha256": evidence.patchedTreeSha256,
+                    }
+                  : { "hoox:source-tree-sha256": evidence.sourceTreeSha256 }),
               }),
         },
       }),
@@ -368,8 +372,9 @@ export function evaluateLicensePolicy(components, policy) {
 
 export function validateVendorEvidence(policy) {
   const issues = [];
+  const registeredDirectories = new Set();
   for (const [packageName, evidence] of Object.entries(policy.vendorEvidence ?? {})) {
-    for (const key of ["licenseFile", "sourceFile", "patchFile"]) {
+    for (const key of ["licenseFile", "sourceFile"]) {
       const relativePath = evidence[key];
       const path = typeof relativePath === "string" ? join(repositoryRoot, relativePath) : "";
       if (path === "" || !existsSync(path) || readFileSync(path, "utf8").trim().length === 0) {
@@ -377,51 +382,100 @@ export function validateVendorEvidence(policy) {
       }
     }
     const sourcePath = join(repositoryRoot, evidence.sourceFile ?? "");
-    if (
-      existsSync(sourcePath) &&
-      (!readFileSync(sourcePath, "utf8").includes(evidence.upstreamCommit ?? "missing") ||
-        !readFileSync(sourcePath, "utf8").includes(evidence.localPatchId ?? "missing"))
-    ) {
-      issues.push(`vendor 来源或补丁登记不匹配：${packageName}`);
-    }
     const vendorDirectory = dirname(sourcePath);
-    const patchPath = resolve(repositoryRoot, evidence.patchFile ?? "");
-    const patchRoot = resolve(vendorDirectory, "PATCHES");
-    const patchText = existsSync(patchPath) ? readFileSync(patchPath, "utf8") : "";
-    const patchedPaths = [...patchText.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gmu)].map(
-      ([, left, right]) => (left === right ? left : ""),
-    );
-    const expectedPatchedPaths = Array.isArray(evidence.patchedFiles)
-      ? [...evidence.patchedFiles].sort(compareCodeUnits)
-      : [];
+    const vendorRelativeDirectory = relative(repositoryRoot, vendorDirectory).split(sep).join("/");
     if (
-      !patchPath.startsWith(`${patchRoot}${sep}`) ||
-      !/^CUBE-LOCAL-\d{4}-[a-z0-9-]+\.patch$/u.test(patchPath.slice(patchRoot.length + 1)) ||
-      !/^[a-f0-9]{64}$/u.test(evidence.patchSha256 ?? "") ||
-      !existsSync(patchPath) ||
-      sha256(readFileSync(patchPath)) !== evidence.patchSha256 ||
-      !patchText.startsWith(`Subject: [PATCH] ${evidence.localPatchId ?? "missing"}`) ||
-      !verifyReverseApplicablePatch(patchPath) ||
-      patchedPaths.includes("") ||
-      JSON.stringify([...patchedPaths].sort(compareCodeUnits)) !==
-        JSON.stringify(expectedPatchedPaths) ||
-      expectedPatchedPaths.some(
-        (path) =>
-          typeof path !== "string" ||
-          !path.startsWith("runtime-ts/vendor/cubesandbox-sdk/") ||
-          path.includes(".."),
-      )
+      !vendorRelativeDirectory.startsWith("runtime-ts/vendor/") ||
+      vendorRelativeDirectory.includes("..")
     ) {
-      issues.push(`vendor 补丁哈希不匹配：${packageName}`);
+      issues.push(`vendor 来源目录越界：${packageName}`);
+      continue;
+    }
+    registeredDirectories.add(vendorRelativeDirectory);
+    const sourceText = existsSync(sourcePath) ? readFileSync(sourcePath, "utf8") : "";
+    if (
+      typeof evidence.upstreamCommit !== "string" ||
+      !sourceText.includes(evidence.upstreamCommit)
+    ) {
+      issues.push(`vendor 来源登记不匹配：${packageName}`);
     }
     const manifestPath = join(vendorDirectory, "package.json");
+    const manifest = existsSync(manifestPath) ? readJson(manifestPath) : undefined;
     if (
-      !existsSync(manifestPath) ||
-      !readJson(manifestPath).version?.includes("-cube.local.") ||
-      !/^[a-f0-9]{64}$/u.test(evidence.patchedTreeSha256 ?? "") ||
-      canonicalVendorTreeSha256(vendorDirectory) !== evidence.patchedTreeSha256
+      manifest?.name !== packageName ||
+      manifest?.license !== evidence.license ||
+      typeof manifest?.version !== "string"
     ) {
-      issues.push(`vendor patched tree 不匹配：${packageName}`);
+      issues.push(`vendor package manifest 不匹配：${packageName}`);
+    }
+
+    if (evidence.localModified === true) {
+      for (const key of ["patchFile", "localPatchId", "patchSha256", "patchedTreeSha256"]) {
+        if (typeof evidence[key] !== "string" || evidence[key].length === 0) {
+          issues.push(`vendor 补丁证据缺失：${packageName}:${key}`);
+        }
+      }
+      const patchPath = resolve(repositoryRoot, evidence.patchFile ?? "");
+      const patchRoot = resolve(vendorDirectory, "PATCHES");
+      const patchText = existsSync(patchPath) ? readFileSync(patchPath, "utf8") : "";
+      const patchedPaths = [...patchText.matchAll(/^diff --git a\/(\S+) b\/(\S+)$/gmu)].map(
+        ([, left, right]) => (left === right ? left : ""),
+      );
+      const expectedPatchedPaths = Array.isArray(evidence.patchedFiles)
+        ? [...evidence.patchedFiles].sort(compareCodeUnits)
+        : [];
+      if (
+        !sourceText.includes(evidence.localPatchId ?? "missing") ||
+        !patchPath.startsWith(`${patchRoot}${sep}`) ||
+        !patchPath.endsWith(".patch") ||
+        !/^[a-f0-9]{64}$/u.test(evidence.patchSha256 ?? "") ||
+        !existsSync(patchPath) ||
+        sha256(readFileSync(patchPath)) !== evidence.patchSha256 ||
+        !patchText.startsWith(`Subject: [PATCH] ${evidence.localPatchId ?? "missing"}`) ||
+        !verifyReverseApplicablePatch(patchPath) ||
+        patchedPaths.includes("") ||
+        JSON.stringify([...patchedPaths].sort(compareCodeUnits)) !==
+          JSON.stringify(expectedPatchedPaths) ||
+        expectedPatchedPaths.some(
+          (path) =>
+            typeof path !== "string" ||
+            !path.startsWith(`${vendorRelativeDirectory}/`) ||
+            path.includes(".."),
+        )
+      ) {
+        issues.push(`vendor 补丁哈希不匹配：${packageName}`);
+      }
+      if (
+        !/^[a-f0-9]{64}$/u.test(evidence.patchedTreeSha256 ?? "") ||
+        canonicalVendorTreeSha256(vendorDirectory) !== evidence.patchedTreeSha256
+      ) {
+        issues.push(`vendor patched tree 不匹配：${packageName}`);
+      }
+    } else {
+      if (
+        evidence.patchFile !== undefined ||
+        evidence.localPatchId !== undefined ||
+        evidence.patchSha256 !== undefined ||
+        evidence.patchedFiles !== undefined ||
+        evidence.patchedTreeSha256 !== undefined
+      ) {
+        issues.push(`未修改 vendor 不得登记补丁：${packageName}`);
+      }
+      if (
+        !/^[a-f0-9]{64}$/u.test(evidence.sourceTreeSha256 ?? "") ||
+        canonicalVendorTreeSha256(vendorDirectory) !== evidence.sourceTreeSha256
+      ) {
+        issues.push(`vendor source tree 不匹配：${packageName}`);
+      }
+    }
+  }
+
+  const vendorRoot = join(repositoryRoot, "runtime-ts", "vendor");
+  for (const entry of readdirSync(vendorRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const relativeDirectory = `runtime-ts/vendor/${entry.name}`;
+    if (!registeredDirectories.has(relativeDirectory)) {
+      issues.push(`vendor 目录未登记：${relativeDirectory}`);
     }
   }
   return issues.sort();

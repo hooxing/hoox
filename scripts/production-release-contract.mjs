@@ -9,6 +9,7 @@ export const productionNodeBaseDigest =
 const pinnedPackageManagerPattern = /^pnpm@\d+\.\d+\.\d+\+sha512\.[A-Za-z0-9+/=]+$/u;
 const requiredGates = Object.freeze([
   "config:check:production",
+  "security:audit:production",
   "supply-chain:check",
   "license:check",
   "release:check",
@@ -99,6 +100,27 @@ export function validateProductionReleaseInputs(input) {
       !dockerfile.includes("runtime-ts/vendor/cubesandbox-sdk/PATCHES/")
     ) {
       issues.push(`${service} 缺少 vendor LICENSE/SOURCE/PATCHES 镜像证据`);
+    }
+    if (
+      !dockerfile.includes(
+        "COPY --chown=0:0 LICENSE NOTICE THIRD_PARTY_NOTICES.md ./licenses/hoox/",
+      )
+    ) {
+      issues.push(`${service} 缺少 Hoox LICENSE/NOTICE/第三方通知`);
+    }
+    if (
+      !dockerfile.includes(
+        "COPY --chown=0:0 third_party/pi/LICENSE third_party/pi/SOURCE.md ./licenses/third-party/pi/",
+      )
+    ) {
+      issues.push(`${service} 缺少 Pi LICENSE/SOURCE 镜像证据`);
+    }
+    if (
+      service === "Worker" &&
+      (!dockerfile.includes("runtime-ts/vendor/deepseek-v4-tokenizer/LICENSE") ||
+        !dockerfile.includes("runtime-ts/vendor/deepseek-v4-tokenizer/SOURCE.md"))
+    ) {
+      issues.push("Worker 缺少 DeepSeek tokenizer LICENSE/SOURCE 镜像证据");
     }
     if (
       !dockerfile.includes("RUN pnpm fetch --frozen-lockfile") ||

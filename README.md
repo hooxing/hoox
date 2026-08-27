@@ -72,7 +72,7 @@ flowchart LR
 Copy-Item .env.example .env
 corepack pnpm install --frozen-lockfile
 docker compose -f docker-compose.dev.yml --env-file .env up -d
-corepack pnpm db:migrate:up
+corepack pnpm db:setup
 corepack pnpm dev:identity:provision
 ```
 

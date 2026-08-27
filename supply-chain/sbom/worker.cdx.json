@@ -34,7 +34,7 @@
       },
       {
         "name": "hoox:lockfile-sha256",
-        "value": "54f49d3399e4785d3684f5462021e6a31264ef6be8d94823d2cc8344e9e57eeb"
+        "value": "26e87a86466f1341c31fd73a5a260c360c155260d9da12aace51d94ab717a4ed"
       }
     ]
   },
@@ -1383,6 +1383,50 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/%40hoox/vendor-deepseek-v4-tokenizer@0.0.0-a7aaed80",
+      "name": "@hoox/vendor-deepseek-v4-tokenizer",
+      "version": "0.0.0-a7aaed80",
+      "purl": "pkg:npm/%40hoox/vendor-deepseek-v4-tokenizer@0.0.0-a7aaed80",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "hoox:license-file",
+          "value": "runtime-ts/vendor/deepseek-v4-tokenizer/LICENSE"
+        },
+        {
+          "name": "hoox:local-modified",
+          "value": "false"
+        },
+        {
+          "name": "hoox:origin",
+          "value": "vendor"
+        },
+        {
+          "name": "hoox:source-file",
+          "value": "runtime-ts/vendor/deepseek-v4-tokenizer/SOURCE.md"
+        },
+        {
+          "name": "hoox:source-tree-sha256",
+          "value": "a5b85b7884b1fa9ea1cb7478e0742961988a98f852aeb3570dc0f1211ac72d77"
+        },
+        {
+          "name": "hoox:upstream-source-commit",
+          "value": "a7aaed80dd2df27620eb534454253ea25eb11c7a"
+        },
+        {
+          "name": "hoox:workspace-path",
+          "value": "runtime-ts/vendor/deepseek-v4-tokenizer"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/%40hoox/workspace@0.0.0",
       "name": "@hoox/workspace",
       "version": "0.0.0",
@@ -2200,10 +2244,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/brace-expansion@5.0.8",
+      "bom-ref": "pkg:npm/brace-expansion@5.0.9",
       "name": "brace-expansion",
-      "version": "5.0.8",
-      "purl": "pkg:npm/brace-expansion@5.0.8",
+      "version": "5.0.9",
+      "purl": "pkg:npm/brace-expansion@5.0.9",
       "licenses": [
         {
           "license": {
@@ -3900,26 +3944,6 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/undici@8.5.0",
-      "name": "undici",
-      "version": "8.5.0",
-      "purl": "pkg:npm/undici@8.5.0",
-      "licenses": [
-        {
-          "license": {
-            "id": "MIT"
-          }
-        }
-      ],
-      "properties": [
-        {
-          "name": "hoox:origin",
-          "value": "registry"
-        }
-      ]
-    },
-    {
-      "type": "library",
       "bom-ref": "pkg:npm/vscode-languageserver-textdocument@1.0.12",
       "name": "vscode-languageserver-textdocument",
       "version": "1.0.12",
@@ -4191,6 +4215,7 @@
         "pkg:npm/%40hoox/thread-title@0.0.0",
         "pkg:npm/%40hoox/tool-router@0.0.0",
         "pkg:npm/%40hoox/trajectory@0.0.0",
+        "pkg:npm/%40hoox/vendor-deepseek-v4-tokenizer@0.0.0-a7aaed80",
         "pkg:npm/%40hoox/workspace@0.0.0",
         "pkg:npm/%40huggingface/tokenizers@0.1.3",
         "pkg:npm/%40isaacs/fs-minipass@4.0.1",
@@ -4232,7 +4257,7 @@
         "pkg:npm/better-call@1.4.0",
         "pkg:npm/bignumber.js@9.3.1",
         "pkg:npm/bowser@2.14.1",
-        "pkg:npm/brace-expansion@5.0.8",
+        "pkg:npm/brace-expansion@5.0.9",
         "pkg:npm/buffer-equal-constant-time@1.0.1",
         "pkg:npm/chalk@5.6.2",
         "pkg:npm/chownr@3.0.0",
@@ -4317,7 +4342,6 @@
         "pkg:npm/undici-types@6.21.0",
         "pkg:npm/undici@6.28.0",
         "pkg:npm/undici@8.10.0",
-        "pkg:npm/undici@8.5.0",
         "pkg:npm/vscode-languageserver-textdocument@1.0.12",
         "pkg:npm/vscode-languageserver-types@3.18.0",
         "pkg:npm/web-streams-polyfill@3.3.3",

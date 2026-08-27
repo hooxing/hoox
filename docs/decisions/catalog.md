@@ -100,7 +100,7 @@
 | [ADR-0094：Skill Center 全局用户安装与受管目录边界](0094-skill-center-user-installation.md) | 已接受 | 2026-08-03 |
 | [ADR-0095：Skill Runtime 快照、后端注入与延迟物化](0095-skill-runtime-snapshot-and-lazy-materialization.md) | 已接受 | 2026-08-03 |
 | [ADR-0096：Skill Center 主导航入口位置](0096-skill-center-primary-navigation-placement.md) | 已接受 | 2026-08-03 |
-| [ADR-0097：development PPTX Skill 测试目录发布](0097-development-pptx-skill-fixture.md) | 已接受 | 2026-08-03 |
+| [ADR-0097：development PPTX Skill 测试目录发布](0097-development-pptx-skill-fixture.md) | 已被 ADR-20260827174210 替代 | 2026-08-03 |
 | [ADR-0098：Worker Skill Blob 读取上限与预检一致性](0098-worker-skill-blob-size-boundary.md) | 已接受 | 2026-08-04 |
 | [ADR-0099：Skill 恢复查询的 PostgreSQL 稳定排序](0099-skill-recovery-stable-ordering.md) | 已接受 | 2026-08-04 |
 | [ADR-0100：Provider 可见历史过滤与 DeepSeek V4 精确 Tokenizer](0100-provider-visible-history-and-deepseek-tokenizer.md) | 部分已替代（模型输出配置、未知模型失败关闭） | 2026-08-04 |
@@ -239,3 +239,5 @@
 | [ADR-20260826172009：Provider 工具 Schema 使用单一严格真源](20260826172009-single-source-provider-object-tool-schema.md) | 已接受 | 2026-08-26 |
 | [ADR-20260827110606：未知模型使用自动 Token 估算而不阻断 Provider](20260827110606-unknown-model-token-estimator-fallback.md) | 已接受 | 2026-08-27 |
 | [ADR-20260827143000：声明推理能力的模型默认启用思考](20260827143000-reasoning-model-default-thinking.md) | 已接受 | 2026-08-27 |
+| [ADR-20260825105258：开发数据库角色 bootstrap](20260825105258-development-database-role-bootstrap.md) | 已接受 | 2026-08-25 |
+| [ADR-20260827174210：开源分发许可证与生产供应链门禁](20260827174210-open-source-distribution-license-and-security-gates.md) | 已接受 | 2026-08-27 |

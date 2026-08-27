@@ -4,7 +4,7 @@ import {
   isOfficialDeepSeekV4FlashModel,
   normalizeOfficialDeepSeekV4FlashPayload,
   officialDeepSeekV4FlashModelProtocol,
-  officialModelThinkingLevel,
+  defaultModelThinkingLevel,
 } from "./deepseek-v4-model.js";
 
 describe("DeepSeek V4 Flash 官方协议配置", () => {
@@ -12,8 +12,12 @@ describe("DeepSeek V4 Flash 官方协议配置", () => {
     expect(DEEPSEEK_V4_FLASH_MODEL_ID).toBe("deepseek-v4-flash");
     expect(isOfficialDeepSeekV4FlashModel(DEEPSEEK_V4_FLASH_MODEL_ID)).toBe(true);
     expect(isOfficialDeepSeekV4FlashModel("deepseek-v4-flash-vision-exp")).toBe(false);
-    expect(officialModelThinkingLevel(DEEPSEEK_V4_FLASH_MODEL_ID)).toBe("high");
-    expect(officialModelThinkingLevel("deepseek-v4-flash-vision-exp")).toBe("off");
+    expect(defaultModelThinkingLevel({ id: DEEPSEEK_V4_FLASH_MODEL_ID, reasoning: true })).toBe(
+      "high",
+    );
+    expect(
+      defaultModelThinkingLevel({ id: "deepseek-v4-flash-vision-exp", reasoning: false }),
+    ).toBe("off");
     expect(officialDeepSeekV4FlashModelProtocol()).toMatchObject({
       reasoning: true,
       compat: {
@@ -25,6 +29,11 @@ describe("DeepSeek V4 Flash 官方协议配置", () => {
         thinkingFormat: "deepseek",
       },
     });
+  });
+
+  it("任意声明 reasoning 的已发布模型默认启用高等级思考", () => {
+    expect(defaultModelThinkingLevel({ id: "GLM-5.3-Flash", reasoning: true })).toBe("high");
+    expect(defaultModelThinkingLevel({ id: "custom-chat-model", reasoning: false })).toBe("off");
   });
 
   it("最终 payload 禁用 tool_choice 并补齐官方工具调用重放字段", () => {

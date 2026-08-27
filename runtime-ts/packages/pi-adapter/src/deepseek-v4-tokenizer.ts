@@ -2,28 +2,41 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { TokenizerPort } from "@hoox/context-policy";
 import { Tokenizer } from "@huggingface/tokenizers";
+import {
+  createEstimatedModelTokenizerCapability,
+  type EstimatedModelTokenizerCapability,
+} from "./model-token-estimator.js";
 
 const TOKENIZER_JSON_SHA256 = "8f9f37ca37fdc4f5fd36d5cf4d3b0e8392edb4e894fd10cc0d70b4957c8633cf";
 const TOKENIZER_CONFIG_SHA256 = "6ac8c8dc065ed118161d02dd532749ae3f52c243deac27872134fae2f50d8547";
 const DEEPSEEK_V4_MODEL_ID = /^deepseek-v4(?:-|$)/iu;
 const TRUSTED_TOKENIZERS = new WeakSet<object>();
 
-export interface TrustedModelTokenizerCapability extends TokenizerPort {
+export interface TrustedDeepSeekV4TokenizerCapability extends TokenizerPort {
+  readonly strategy: "exact";
   readonly modelFamily: "deepseek-v4";
   readonly sourceRevision: "a7aaed80dd2df27620eb534454253ea25eb11c7a";
 }
 
-let cachedDeepSeekV4Tokenizer: Promise<TrustedModelTokenizerCapability> | undefined;
+export type TrustedModelTokenizerCapability =
+  | TrustedDeepSeekV4TokenizerCapability
+  | EstimatedModelTokenizerCapability;
 
-/** Worker 装配只能从固定的模型/tokenizer 注册表取得能力，未知模型失败关闭。 */
-export function loadTrustedModelTokenizerCapability(
+let cachedDeepSeekV4Tokenizer: Promise<TrustedDeepSeekV4TokenizerCapability> | undefined;
+
+/** 已知模型使用固定 tokenizer；未知模型返回可信本地估算器，不阻断 Provider 装配。 */
+export async function loadTrustedModelTokenizerCapability(
   modelId: string,
 ): Promise<TrustedModelTokenizerCapability> {
-  if (!DEEPSEEK_V4_MODEL_ID.test(modelId)) {
-    throw new TypeError(`MODEL_TOKENIZER_UNSUPPORTED:${modelId}`);
+  let capability: TrustedModelTokenizerCapability;
+  if (DEEPSEEK_V4_MODEL_ID.test(modelId)) {
+    cachedDeepSeekV4Tokenizer ??= loadDeepSeekV4Tokenizer();
+    capability = await cachedDeepSeekV4Tokenizer;
+  } else {
+    capability = createEstimatedModelTokenizerCapability(modelId);
   }
-  cachedDeepSeekV4Tokenizer ??= loadDeepSeekV4Tokenizer();
-  return cachedDeepSeekV4Tokenizer;
+  TRUSTED_TOKENIZERS.add(capability);
+  return capability;
 }
 
 export function isTrustedModelTokenizerCapability(
@@ -32,7 +45,7 @@ export function isTrustedModelTokenizerCapability(
   return TRUSTED_TOKENIZERS.has(tokenizer as object);
 }
 
-async function loadDeepSeekV4Tokenizer(): Promise<TrustedModelTokenizerCapability> {
+async function loadDeepSeekV4Tokenizer(): Promise<TrustedDeepSeekV4TokenizerCapability> {
   const [tokenizerBytes, configurationBytes] = await Promise.all([
     readFile(new URL("../../../vendor/deepseek-v4-tokenizer/tokenizer.json", import.meta.url)),
     readFile(
@@ -45,7 +58,8 @@ async function loadDeepSeekV4Tokenizer(): Promise<TrustedModelTokenizerCapabilit
     JSON.parse(tokenizerBytes.toString("utf8")) as Record<string, unknown>,
     JSON.parse(configurationBytes.toString("utf8")) as Record<string, unknown>,
   );
-  const capability: TrustedModelTokenizerCapability = Object.freeze({
+  const capability: TrustedDeepSeekV4TokenizerCapability = Object.freeze({
+    strategy: "exact",
     modelFamily: "deepseek-v4",
     sourceRevision: "a7aaed80dd2df27620eb534454253ea25eb11c7a",
     identity: "deepseek-v4@a7aaed80-tokenizer-v1",
@@ -58,7 +72,6 @@ async function loadDeepSeekV4Tokenizer(): Promise<TrustedModelTokenizerCapabilit
       return count;
     },
   });
-  TRUSTED_TOKENIZERS.add(capability);
   return capability;
 }
 

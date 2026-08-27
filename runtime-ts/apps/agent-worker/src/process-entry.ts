@@ -59,6 +59,7 @@ import {
   isOfficialDeepSeekV4FlashModel,
   loadTrustedModelTokenizerCapability,
   officialDeepSeekV4FlashModelProtocol,
+  type TrustedPiModelContextCapability,
 } from "@hoox/pi-adapter";
 import {
   assertProductionInheritedEnvironment,
@@ -749,6 +750,15 @@ export async function createOpenAiCompatibleProvider(configuration: {
   });
 }
 
+/** 模型计数能力由 Worker 自动解析；未知模型使用本地估算，不能阻断已发布 Provider。 */
+export async function createOpenAiCompatibleModelContextCapability(
+  modelRuntime: ModelRuntime,
+  model: Model<"openai-completions">,
+): Promise<TrustedPiModelContextCapability> {
+  const tokenizer = await loadTrustedModelTokenizerCapability(model.id);
+  return bindTrustedPiModelContextCapability(modelRuntime, model, tokenizer);
+}
+
 /** 向后兼容本地开发测试的导出名；生产路径与固定开发身份无关。 */
 export const createDevelopmentOpenAiCompatibleModel = createOpenAiCompatibleModel;
 
@@ -921,8 +931,7 @@ async function assembleWorkerRuntime(
       configuration.model.wireTraceEnabled,
     );
     const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
-    const modelTokenizer = await loadTrustedModelTokenizerCapability(model.id);
-    const modelContext = bindTrustedPiModelContextCapability(modelRuntime, model, modelTokenizer);
+    const modelContext = await createOpenAiCompatibleModelContextCapability(modelRuntime, model);
     const threadContinuityMetrics = new PgThreadContinuityMetrics(pool);
     const runtimeCompaction = new RuntimeCompactionCoordinator(
       configuration.threadContext.compaction,
@@ -1186,11 +1195,9 @@ async function assembleWorkerRuntime(
           defaultModelId: configuredProvider.defaultModelId,
           models: configuredProvider.models,
         });
-        const tokenizer = await loadTrustedModelTokenizerCapability(dynamicModel.model.id);
-        const dynamicModelContext = bindTrustedPiModelContextCapability(
+        const dynamicModelContext = await createOpenAiCompatibleModelContextCapability(
           dynamicModel.modelRuntime,
           dynamicModel.model,
-          tokenizer,
         );
         const dynamicSettings = snapshot.runtimeSettings?.configuration;
         const dynamicCompaction = new RuntimeCompactionCoordinator(

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assembleModelWireTraceIfEnabled,
   createDevelopmentOpenAiCompatibleModel,
+  createOpenAiCompatibleModelContextCapability,
   createOpenAiCompatibleProvider,
   parseWorkerProcessEnvironment,
   probeOpenAiCompatibleModel,
@@ -629,6 +630,37 @@ describe("Agent Worker 进程入口", () => {
     expect(
       modelRuntime.getModels("runtime-openai-compatible").map((candidate) => candidate.id),
     ).toEqual(["model-a", "model-b"]);
+  });
+
+  it("未知模型自动绑定 new-api 估算器，不阻断 Worker 模型上下文装配", async () => {
+    const { modelRuntime, model } = await createOpenAiCompatibleProvider({
+      displayName: "自定义模型供应商",
+      baseUrl: "https://model.example.com/v1",
+      apiKey: "deployment-secret",
+      defaultModelId: "vendor-custom-chat",
+      models: [
+        {
+          id: "vendor-custom-chat",
+          name: "Vendor Custom Chat",
+          enabled: true,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 64_000,
+          maxTokens: 4_096,
+        },
+      ],
+    });
+
+    await expect(
+      createOpenAiCompatibleModelContextCapability(modelRuntime, model),
+    ).resolves.toMatchObject({
+      descriptor: { modelId: "vendor-custom-chat" },
+      tokenizer: {
+        strategy: "estimated",
+        modelFamily: "openai",
+        identity: "new-api-token-estimator:openai-v1",
+      },
+    });
   });
 
   it("DeepSeek V4 当前目录值可组装，并只为 exact Flash 注入 Pi 兼容配置", async () => {

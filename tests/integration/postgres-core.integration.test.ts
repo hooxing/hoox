@@ -427,7 +427,6 @@ describe("PostgreSQL 迁移与强权限边界", () => {
               maxTokens: 4_096,
             },
           ],
-          reason: `创建 ${modelId}`,
         });
         const runtimeDraft = await withTenantTransaction(
           runtimePool,

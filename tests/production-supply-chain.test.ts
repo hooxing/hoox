@@ -64,6 +64,32 @@ describe("生产供应链契约", () => {
           "hoox:patched-tree-sha256": policy.vendorEvidence["@cubesandbox/sdk"].patchedTreeSha256,
         }),
       );
+      if (target.id === "worker") {
+        const tokenizerVendor = bom.components.find(
+          (component: { readonly name: string }) =>
+            component.name === "@hoox/vendor-deepseek-v4-tokenizer",
+        );
+        expect(tokenizerVendor).toMatchObject({
+          version: "0.0.0-a7aaed80",
+          licenses: [{ license: { id: "MIT" } }],
+        });
+        expect(
+          Object.fromEntries(
+            tokenizerVendor.properties.map(
+              ({ name, value }: { readonly name: string; readonly value: string }) => [name, value],
+            ),
+          ),
+        ).toEqual(
+          expect.objectContaining({
+            "hoox:origin": "vendor",
+            "hoox:local-modified": "false",
+            "hoox:upstream-source-commit":
+              policy.vendorEvidence["@hoox/vendor-deepseek-v4-tokenizer"].upstreamCommit,
+            "hoox:source-tree-sha256":
+              policy.vendorEvidence["@hoox/vendor-deepseek-v4-tokenizer"].sourceTreeSha256,
+          }),
+        );
+      }
     }
   }, 120_000);
 
@@ -99,6 +125,29 @@ describe("生产供应链契约", () => {
         },
       }),
     ).toContain("vendor 补丁哈希不匹配：@cubesandbox/sdk");
+  });
+
+  it("所有 vendor 目录都必须登记，未修改快照必须固定 source tree", () => {
+    const policy = JSON.parse(
+      readFileSync(new URL("../supply-chain/license-policy.json", import.meta.url), "utf8"),
+    );
+    const withoutTokenizer = { ...policy.vendorEvidence };
+    Reflect.deleteProperty(withoutTokenizer, "@hoox/vendor-deepseek-v4-tokenizer");
+    expect(validateVendorEvidence({ ...policy, vendorEvidence: withoutTokenizer })).toContain(
+      "vendor 目录未登记：runtime-ts/vendor/deepseek-v4-tokenizer",
+    );
+    expect(
+      validateVendorEvidence({
+        ...policy,
+        vendorEvidence: {
+          ...policy.vendorEvidence,
+          "@hoox/vendor-deepseek-v4-tokenizer": {
+            ...policy.vendorEvidence["@hoox/vendor-deepseek-v4-tokenizer"],
+            sourceTreeSha256: "0".repeat(64),
+          },
+        },
+      }),
+    ).toContain("vendor source tree 不匹配：@hoox/vendor-deepseek-v4-tokenizer");
   });
 
   it("canonical tree 只排除 vendor 根级生成目录", () => {

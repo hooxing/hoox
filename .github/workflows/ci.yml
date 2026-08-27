@@ -65,8 +65,8 @@ jobs:
       - name: 冻结安装依赖
         run: pnpm install --frozen-lockfile
 
-      - name: Production 配置、SBOM、许可证与发布静态 Gate
-        run: pnpm config:check:production && pnpm supply-chain:check && pnpm license:check && pnpm release:check
+      - name: Production 配置、漏洞、SBOM、许可证与发布静态 Gate
+        run: pnpm config:check:production && pnpm security:audit:production && pnpm supply-chain:check && pnpm license:check && pnpm release:check
 
       - name: Production API 容器 Gate
         run: pnpm test:production-api:container

@@ -1,0 +1,19 @@
+{
+  "name": "@hoox/vendor-deepseek-v4-tokenizer",
+  "version": "0.0.0-a7aaed80",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "files": [
+    "LICENSE",
+    "SOURCE.md",
+    "tokenizer.json",
+    "tokenizer_config.json"
+  ],
+  "exports": {
+    "./LICENSE": "./LICENSE",
+    "./SOURCE.md": "./SOURCE.md",
+    "./tokenizer.json": "./tokenizer.json",
+    "./tokenizer_config.json": "./tokenizer_config.json"
+  }
+}

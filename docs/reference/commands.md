@@ -127,7 +127,6 @@ Remove-Item Env:RUN_MINIO_INTEGRATION
 
 | 命令 | 用途 |
 | --- | --- |
-| `corepack pnpm dev:skill:publish:pptx` | 发布固定的 development PPTX fixture，不得进入生产目录 |
 | `corepack pnpm dev:skill:publish:csv-pdf` | 发布仓库维护的 CSV-to-PDF Skill |
 
 ## 评测
@@ -141,6 +140,8 @@ corepack pnpm eval:gaia:native -- --limit 3
 ## 供应链与 Production Gate
 
 ```powershell
+corepack pnpm config:check:production
+corepack pnpm security:audit:production
 corepack pnpm supply-chain:check
 corepack pnpm license:check
 corepack pnpm release:check
@@ -149,4 +150,4 @@ corepack pnpm test:production-scheduler:container
 corepack pnpm test:production-worker:container
 ```
 
-`corepack pnpm check:production` 串联上述 production 配置、供应链、发布契约和三个容器 Gate。这些命令需要 Docker，但仍不能替代真实基础设施 readiness。见[生产就绪说明](../operations/production-readiness.md)。
+`corepack pnpm check:production` 串联上述 production 配置、生产依赖漏洞扫描、供应链、发布契约和三个容器 Gate。这些命令需要 Docker，但仍不能替代真实基础设施 readiness。见[生产就绪说明](../operations/production-readiness.md)。

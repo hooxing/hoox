@@ -108,8 +108,24 @@ try {
     imageId,
     "sh",
     "-ec",
-    'test "$(id -u)" = 1000; test -f /opt/runtime/dist/production-main.js; test -f /opt/runtime/sbom/cyclonedx.json; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/LICENSE; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/SOURCE.md; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.md; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.patch; ! command -v python; ! command -v python3; ! command -v npm; ! command -v npx; ! command -v corepack; ! command -v pnpm; test ! -e /usr/local/lib/node_modules/npm; test ! -e /usr/local/lib/node_modules/corepack; test ! -e /opt/runtime/.env.production-worker-gate-canary; test ! -e /opt/runtime/CubeSandbox; test ! -e /opt/runtime/cubesandbox-agent-lab; test ! -d /opt/runtime/src; test ! -e /opt/runtime/dist/development-main.js; test ! -e /opt/runtime/dist/development-preflight-main.js; for tool in biome tsc tsx vitest; do test -z "$(find /opt/runtime -path "*/node_modules/.bin/$tool" -print -quit)"; done; for pattern in "*.test.*" "*.spec.*" "*.ts" "*.tsx"; do test -z "$(find /opt/runtime -type f -name "$pattern" -print -quit)"; done; for directory in test tests testing __tests__; do test -z "$(find /opt/runtime -type d -name "$directory" -print -quit)"; done',
+    'test "$(id -u)" = 1000; test -f /opt/runtime/dist/production-main.js; test -f /opt/runtime/sbom/cyclonedx.json; test -f /opt/runtime/licenses/hoox/LICENSE; test -f /opt/runtime/licenses/hoox/NOTICE; test -f /opt/runtime/licenses/hoox/THIRD_PARTY_NOTICES.md; test -f /opt/runtime/licenses/third-party/pi/LICENSE; test -f /opt/runtime/licenses/third-party/pi/SOURCE.md; test -f /opt/runtime/licenses/vendor/deepseek-v4-tokenizer/LICENSE; test -f /opt/runtime/licenses/vendor/deepseek-v4-tokenizer/SOURCE.md; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/LICENSE; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/SOURCE.md; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.md; test -f /opt/runtime/licenses/vendor/cubesandbox-sdk/PATCHES/CUBE-LOCAL-0001-explicit-config-authority.patch; ! command -v python; ! command -v python3; ! command -v npm; ! command -v npx; ! command -v corepack; ! command -v pnpm; test ! -e /usr/local/lib/node_modules/npm; test ! -e /usr/local/lib/node_modules/corepack; test ! -e /opt/runtime/.env.production-worker-gate-canary; test ! -e /opt/runtime/CubeSandbox; test ! -e /opt/runtime/cubesandbox-agent-lab; test ! -d /opt/runtime/src; test ! -e /opt/runtime/dist/development-main.js; test ! -e /opt/runtime/dist/development-preflight-main.js; for tool in biome tsc tsx vitest; do test -z "$(find /opt/runtime -path "*/node_modules/.bin/$tool" -print -quit)"; done; for pattern in "*.test.*" "*.spec.*" "*.ts" "*.tsx"; do test -z "$(find /opt/runtime -type f -name "$pattern" -print -quit)"; done; for directory in test tests testing __tests__; do test -z "$(find /opt/runtime -type d -name "$directory" -print -quit)"; done',
   ]);
+
+  const tokenizerProbe = runDocker(
+    [
+      "run",
+      "--rm",
+      ...runtimeSandboxArguments,
+      "--entrypoint",
+      "node",
+      imageId,
+      "--input-type=module",
+      "-e",
+      "const { loadTrustedModelTokenizerCapability } = await import('@hoox/pi-adapter'); const tokenizer = await loadTrustedModelTokenizerCapability('deepseek-v4-flash'); process.stdout.write(String(tokenizer.countTokens('你好，世界🙂')));",
+    ],
+    { capture: true },
+  );
+  if (tokenizerProbe !== "5") throw new Error("DEEPSEEK_TOKENIZER_PRODUCTION_ASSET_INVALID");
 
   const baseEnvironment = [
     "RUNTIME_ENV=production",

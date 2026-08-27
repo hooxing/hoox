@@ -47,9 +47,9 @@ export function isTrustedModelTokenizerCapability(
 
 async function loadDeepSeekV4Tokenizer(): Promise<TrustedDeepSeekV4TokenizerCapability> {
   const [tokenizerBytes, configurationBytes] = await Promise.all([
-    readFile(new URL("../../../vendor/deepseek-v4-tokenizer/tokenizer.json", import.meta.url)),
+    readFile(new URL(import.meta.resolve("@hoox/vendor-deepseek-v4-tokenizer/tokenizer.json"))),
     readFile(
-      new URL("../../../vendor/deepseek-v4-tokenizer/tokenizer_config.json", import.meta.url),
+      new URL(import.meta.resolve("@hoox/vendor-deepseek-v4-tokenizer/tokenizer_config.json")),
     ),
   ]);
   assertDigest(tokenizerBytes, TOKENIZER_JSON_SHA256, "tokenizer.json");

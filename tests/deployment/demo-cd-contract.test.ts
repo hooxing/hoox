@@ -11,6 +11,8 @@ describe("Demo 持续部署契约", () => {
     expect(workflow).toContain('workflows: ["持续集成"]');
     expect(workflow).toContain("branches: [main]");
     expect(workflow).toContain("github.event.workflow_run.conclusion == 'success'");
+    expect(workflow).toContain("github.ref == 'refs/heads/main'");
+    expect(workflow).not.toContain("inputs.ref");
     expect(workflow).toContain("HOOX_DEMO_IMAGE='$IMAGE_NAME@$IMAGE_DIGEST'");
     expect(workflow).toContain("runs-on: ubuntu-24.04-arm");
     expect(workflow).not.toContain("docker/setup-qemu-action");
@@ -33,6 +35,9 @@ describe("Demo 持续部署契约", () => {
     expect(dockerfile).toContain("pnpm install --offline --prod --frozen-lockfile --force");
     expect(dockerfile).toContain("org.opencontainers.image.source");
     expect(dockerfile).toContain("CI=true");
+    expect(dockerfile).toContain("COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md ./");
+    expect(dockerfile).toContain("COPY third_party/pi ./licenses/third-party/pi");
+    expect(dockerfile).not.toContain("anthropic-skills-pptx");
   });
 
   it("CD 所依赖的主 CI 同步 pnpm hook，并完整预置 Admin Control 数据库角色", () => {
@@ -53,6 +58,7 @@ describe("Demo 持续部署契约", () => {
     expect(ci).toContain(
       "M4_DATABASE_ADMIN_CONTROL_PASSWORD: ci-admin-control-placeholder-password",
     );
+    expect(ci).toContain("pnpm security:audit:production");
 
     const prepare = source("runtime-ts/packages/persistence/scripts/prepare-m4-ci-database.ts");
     expect(prepare).toContain('identifier("DATABASE_ADMIN_CONTROL_ROLE")');
@@ -91,7 +97,7 @@ describe("Demo 持续部署契约", () => {
     expect(deploy).toContain("platform_control_operators");
     expect(deploy).toContain("platform_skill_operators");
     expect(deploy).toContain("restore_services=(postgres minio api web scheduler worker)");
-    expect(deploy).toContain('up -d --force-recreate "${restore_services[@]}"');
+    expect(deploy).toContain('up -d --force-recreate "' + "$" + '{restore_services[@]}"');
     expect(deploy).toContain("restore_services+=(admin-control admin-web)");
     expect(deploy).toContain("for service in api web admin-control admin-web scheduler worker");
     expect(deploy).toContain("rollback()");

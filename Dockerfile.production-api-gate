@@ -31,6 +31,8 @@ RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack 
 COPY --chown=0:0 scripts/production-entrypoint.sh /usr/local/bin/production-entrypoint
 RUN chmod 0555 /usr/local/bin/production-entrypoint
 COPY --from=build --chown=0:0 /opt/deploy/ ./
+COPY --chown=0:0 LICENSE NOTICE THIRD_PARTY_NOTICES.md ./licenses/hoox/
+COPY --chown=0:0 third_party/pi/LICENSE third_party/pi/SOURCE.md ./licenses/third-party/pi/
 COPY --chown=0:0 supply-chain/sbom/api.cdx.json ./sbom/cyclonedx.json
 COPY --chown=0:0 runtime-ts/vendor/cubesandbox-sdk/LICENSE ./licenses/vendor/cubesandbox-sdk/LICENSE
 COPY --chown=0:0 runtime-ts/vendor/cubesandbox-sdk/SOURCE.md ./licenses/vendor/cubesandbox-sdk/SOURCE.md

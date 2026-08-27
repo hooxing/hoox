@@ -238,3 +238,4 @@
 | [ADR-20260826164658：Provider 工具参数使用顶层 object Schema](20260826164658-provider-object-tool-schema.md) | 已替代 | 2026-08-26 |
 | [ADR-20260826172009：Provider 工具 Schema 使用单一严格真源](20260826172009-single-source-provider-object-tool-schema.md) | 已接受 | 2026-08-26 |
 | [ADR-20260827110606：未知模型使用自动 Token 估算而不阻断 Provider](20260827110606-unknown-model-token-estimator-fallback.md) | 已接受 | 2026-08-27 |
+| [ADR-20260827143000：声明推理能力的模型默认启用思考](20260827143000-reasoning-model-default-thinking.md) | 已接受 | 2026-08-27 |

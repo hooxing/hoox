@@ -1,4 +1,4 @@
-import type { Model, ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
+import type { Api, Model, ModelThinkingLevel, ThinkingLevelMap } from "@earendil-works/pi-ai";
 
 /** DeepSeek 官方 Oh My Pi 集成使用的稳定模型 ID。 */
 export const DEEPSEEK_V4_FLASH_MODEL_ID = "deepseek-v4-flash";
@@ -40,8 +40,12 @@ export function officialDeepSeekV4FlashModelProtocol(): Readonly<
   });
 }
 
-export function officialModelThinkingLevel(modelId: string): ModelThinkingLevel {
-  return isOfficialDeepSeekV4FlashModel(modelId) ? DEEPSEEK_V4_FLASH_DEFAULT_THINKING_LEVEL : "off";
+export function defaultModelThinkingLevel(
+  model: Pick<Model<Api>, "id" | "reasoning">,
+): ModelThinkingLevel {
+  return isOfficialDeepSeekV4FlashModel(model.id) || model.reasoning
+    ? DEEPSEEK_V4_FLASH_DEFAULT_THINKING_LEVEL
+    : "off";
 }
 
 /**

@@ -49,7 +49,7 @@ import {
 import { createCollapseProcessForFinalAnswerPiTool } from "./collapse-process-for-final-answer-tool.js";
 import {
   normalizeOfficialDeepSeekV4FlashPayload,
-  officialModelThinkingLevel,
+  defaultModelThinkingLevel,
 } from "./deepseek-v4-model.js";
 import {
   isTrustedModelTokenizerCapability,
@@ -606,7 +606,7 @@ export async function createSafePiSession(
         latestContextBudgetDecision = decision;
       },
     ),
-    thinkingLevel: officialModelThinkingLevel(options.modelContext.model.id),
+    thinkingLevel: defaultModelThinkingLevel(options.modelContext.model),
     sessionManager,
     settingsManager,
     resourceLoader,

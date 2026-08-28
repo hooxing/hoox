@@ -788,6 +788,8 @@ export class AgentWorkerPollingLoop {
   private started = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private pollInFlight: Promise<void> = Promise.resolve();
+  private pollActive = false;
+  private wakeRequested = false;
   private readonly executions = new Set<Promise<void>>();
   private concurrencySettings: WorkerRunConcurrencySettings = Object.freeze({
     workerMaxConcurrentRuns: DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
@@ -831,19 +833,41 @@ export class AgentWorkerPollingLoop {
     await Promise.all([...this.executions]);
   }
 
+  /** PostgreSQL 通知只缩短下一次 claim 等待；重复、迟到或丢失都不改变 durable 语义。 */
+  wake(): void {
+    if (this.closed || !this.started) return;
+    if (this.timer !== undefined) {
+      clearTimeout(this.timer);
+      this.timer = undefined;
+      this.schedule(0);
+      return;
+    }
+    if (this.pollActive) {
+      this.wakeRequested = true;
+      return;
+    }
+    this.schedule(0);
+  }
+
   private schedule(delay: number): void {
-    if (this.closed || this.timer !== undefined) return;
+    if (this.closed || this.timer !== undefined || this.pollActive) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
+      this.pollActive = true;
       let claimed = false;
       this.pollInFlight = this.tick()
         .then((result) => {
           claimed = result;
         })
         .finally(() => {
+          this.pollActive = false;
+          const wakeRequested = this.wakeRequested;
+          this.wakeRequested = false;
           const hasCapacity =
             this.executions.size < this.concurrencySettings.workerMaxConcurrentRuns;
-          this.schedule(claimed && hasCapacity ? 0 : this.options.pollIntervalMs);
+          this.schedule(
+            wakeRequested || (claimed && hasCapacity) ? 0 : this.options.pollIntervalMs,
+          );
         });
     }, delay);
   }
@@ -934,6 +958,7 @@ export class AgentWorkerPollingLoop {
     this.executions.add(execution);
     void execution.finally(() => {
       this.executions.delete(execution);
+      this.wake();
     });
   }
 

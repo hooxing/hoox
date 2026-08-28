@@ -1308,6 +1308,7 @@ export class FakeSessionFactory implements AgentSessionFactoryPort {
         return await session.prepareInput(userInput);
       },
       runPrompt: async (prepared, authorization) => {
+        input.startupTiming?.modelInvocationStarting();
         const outcome = await session.runPrompt(prepared, authorization);
         await safePointChain;
         return outcome;

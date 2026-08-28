@@ -84,6 +84,48 @@ describe("Agent Worker production polling loop", () => {
     expect(settled).toEqual([tenantAssignment()]);
   });
 
+  it("PostgreSQL 通知会跳过长轮询等待并立即重新领取 dispatch", async () => {
+    const firstPoll = deferred<void>();
+    const acknowledged = deferred<void>();
+    let ready = false;
+    let assignmentClaimed = false;
+    let assignmentCalls = 0;
+    const loop = new AgentWorkerPollingLoop(
+      {
+        claim: async () => {
+          assignmentCalls += 1;
+          if (assignmentCalls === 1) {
+            firstPoll.resolve();
+            return undefined;
+          }
+          if (!ready || assignmentClaimed) return undefined;
+          assignmentClaimed = true;
+          return tenantAssignment("notify");
+        },
+        settle: async () => true,
+      },
+      {
+        claim: async () => [claim("notify")],
+        acknowledge: async () => acknowledged.resolve(),
+      },
+      { execute: async () => ({ outcome: "succeeded" }) },
+      {
+        workerId: "worker-loop",
+        pollIntervalMs: 60_000,
+        tenantAssignmentLeaseMs: 30_000,
+        dispatchLeaseMs: 30_000,
+      },
+    );
+
+    loop.start();
+    await firstPoll.promise;
+    ready = true;
+    loop.wake();
+    await acknowledged.promise;
+    await loop.close();
+    expect(assignmentCalls).toBeGreaterThanOrEqual(2);
+  });
+
   it("按后台配置并行执行不同 Tenant 的 Run，并在 Worker 上限处停止继续领取", async () => {
     const assignments = [
       tenantAssignment("parallel-a"),

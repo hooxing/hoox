@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { projectInternalTrajectory } from "./deepseek.js";
+import { combineDeepSeekTrajectoryProjections, projectInternalTrajectory } from "./deepseek.js";
 import type { InternalTrajectoryEventV1 } from "./internal.js";
 
 function event(
@@ -202,6 +202,70 @@ describe("projectInternalTrajectory", () => {
       sequence: 2,
       sequenceEnd: 2,
       rawEventCount: 1,
+    });
+  });
+});
+
+describe("combineDeepSeekTrajectoryProjections", () => {
+  it("把同一 Thread 的多个 Run 连续编号为不同 Turn，并保留原始 Run/Attempt 定位", () => {
+    const projection = (text: string) =>
+      projectInternalTrajectory([
+        event(1, 0, "prompt", { type: "prompt", text }),
+        event(2, 1, "turn_start", { type: "turn_start" }),
+        event(3, 2, "message_start", {
+          type: "message_start",
+          message: { role: "assistant" },
+        }),
+        event(4, 7, "message_end", {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: `回答：${text}` }],
+            usage: { input: 20, output: 10, cacheRead: 30, cacheWrite: 0 },
+          },
+        }),
+        event(5, 10, "turn_end", { type: "turn_end" }),
+      ]);
+
+    const combined = combineDeepSeekTrajectoryProjections([
+      { runId: "run_1", attemptId: "attempt_1", projection: projection("第一条") },
+      { runId: "run_2", attemptId: "attempt_2", projection: projection("第二条") },
+    ]);
+
+    expect(combined.turns.map((turn) => turn.turn)).toEqual([1, 2]);
+    expect(
+      combined.records
+        .filter((record) => record.eventType === "prompt")
+        .map((record) => ({
+          turn: record.turn,
+          summary: record.summary,
+          source: record.source,
+          offset: record.monotonicOffsetMs,
+        })),
+    ).toEqual([
+      {
+        turn: 1,
+        summary: "第一条",
+        source: { runId: "run_1", attemptId: "attempt_1" },
+        offset: 0,
+      },
+      {
+        turn: 2,
+        summary: "第二条",
+        source: { runId: "run_2", attemptId: "attempt_2" },
+        offset: 10,
+      },
+    ]);
+    expect(combined.stats).toMatchObject({
+      turns: 2,
+      events: 10,
+      inputTokens: 40,
+      outputTokens: 20,
+      cacheReadTokens: 60,
+      modelDurationMs: 10,
+      outputTokensPerSecond: 2_000,
+      cacheHitRate: 0.6,
+      durationMs: 20,
     });
   });
 });

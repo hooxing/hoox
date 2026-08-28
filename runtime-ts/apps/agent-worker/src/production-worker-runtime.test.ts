@@ -19,26 +19,26 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function claim(): PgClaimedRunDispatch {
+function claim(suffix = "worker-loop"): PgClaimedRunDispatch {
   return {
-    outboxId: "outbox-worker-loop",
+    outboxId: `outbox-${suffix}`,
     generation: 1,
-    claimToken: "dispatch-claim-worker-loop",
+    claimToken: `dispatch-claim-${suffix}`,
     scope: {
-      tenantId: "tenant-worker-loop",
-      threadId: "thread-worker-loop",
-      runId: "run-worker-loop",
-      rootRunId: "run-worker-loop",
-      workspaceId: "workspace-worker-loop",
+      tenantId: `tenant-${suffix}`,
+      threadId: `thread-${suffix}`,
+      runId: `run-${suffix}`,
+      rootRunId: `run-${suffix}`,
+      workspaceId: `workspace-${suffix}`,
     },
   };
 }
 
-function tenantAssignment(): PgClaimedWorkerTenantAssignment {
+function tenantAssignment(suffix = "worker-loop"): PgClaimedWorkerTenantAssignment {
   return {
-    tenantId: "tenant-worker-loop",
+    tenantId: `tenant-${suffix}`,
     generation: 1,
-    claimToken: "tenant-claim-worker-loop",
+    claimToken: `tenant-claim-${suffix}`,
     workerId: "worker-loop",
   };
 }
@@ -82,6 +82,67 @@ describe("Agent Worker production polling loop", () => {
     await loop.close();
     expect(acknowledgements).toEqual([{ claim: expected, outcome: "terminal" }]);
     expect(settled).toEqual([tenantAssignment()]);
+  });
+
+  it("按后台配置并行执行不同 Tenant 的 Run，并在 Worker 上限处停止继续领取", async () => {
+    const assignments = [
+      tenantAssignment("parallel-a"),
+      tenantAssignment("parallel-b"),
+      tenantAssignment("parallel-c"),
+    ];
+    const releases = [deferred<void>(), deferred<void>(), deferred<void>()];
+    const startedTwo = deferred<void>();
+    let executions = 0;
+    let active = 0;
+    let maximumActive = 0;
+    const loop = new AgentWorkerPollingLoop(
+      {
+        claim: async () => assignments.shift(),
+        settle: async () => true,
+      },
+      {
+        claim: async ({ tenantId, userMaxConcurrentRunsPerTenant }) => {
+          expect(userMaxConcurrentRunsPerTenant).toBe(2);
+          const suffix = tenantId.replace("tenant-", "");
+          return [claim(suffix)];
+        },
+        acknowledge: async () => undefined,
+      },
+      {
+        execute: async () => {
+          const index = executions;
+          executions += 1;
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          if (executions === 2) startedTwo.resolve();
+          await releases[index]?.promise;
+          active -= 1;
+          return { outcome: "succeeded" };
+        },
+      },
+      {
+        workerId: "worker-loop",
+        pollIntervalMs: 10,
+        tenantAssignmentLeaseMs: 30_000,
+        dispatchLeaseMs: 30_000,
+        resolveConcurrencySettings: async () => ({
+          workerMaxConcurrentRuns: 2,
+          userMaxConcurrentRunsPerTenant: 2,
+        }),
+      },
+    );
+
+    loop.start();
+    await startedTwo.promise;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(executions).toBe(2);
+    expect(maximumActive).toBe(2);
+
+    releases[0]?.resolve();
+    await vi.waitFor(() => expect(executions).toBe(3));
+    releases[1]?.resolve();
+    releases[2]?.resolve();
+    await loop.close();
   });
 
   it("在模型执行前释放 Tenant 调度租约，避免同团队不同 Thread 被长任务串行化", async () => {

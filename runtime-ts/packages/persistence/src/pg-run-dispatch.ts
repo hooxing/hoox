@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT } from "@hoox/admin-control";
 import { isoTimestamp, type Run, rehydrateRun } from "@hoox/domain";
 import { rolloutProjectionDigest } from "@hoox/run-contracts/mutation-protocol";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
@@ -346,9 +347,19 @@ export class PgRunDispatchOutbox {
     readonly dispatcherId: string;
     readonly limit: number;
     readonly leaseMilliseconds: number;
+    readonly userMaxConcurrentRunsPerTenant?: number;
   }): Promise<readonly PgClaimedRunDispatch[]> {
+    const userMaxConcurrentRunsPerTenant =
+      input.userMaxConcurrentRunsPerTenant ?? DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT;
     if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
       throw new TypeError("Outbox claim limit 无效");
+    }
+    if (
+      !Number.isSafeInteger(userMaxConcurrentRunsPerTenant) ||
+      userMaxConcurrentRunsPerTenant < 1 ||
+      userMaxConcurrentRunsPerTenant > 100
+    ) {
+      throw new TypeError("单用户在 Tenant 内并行 Run 上限无效");
     }
     if (
       !Number.isSafeInteger(input.leaseMilliseconds) ||
@@ -358,30 +369,155 @@ export class PgRunDispatchOutbox {
       throw new TypeError("Outbox lease 无效");
     }
     const dispatcherId = dispatcherIdentity(input.dispatcherId);
+    const candidateLimit = Math.min(500, Math.max(100, input.limit * 10));
     return withTenantTransaction(this.pool, { tenantId: input.tenantId }, async (client) => {
+      // 同一 Tenant 的占槽事务必须串行复核 Thread 与 User 计数；只锁短事务，
+      // 不包住模型执行，因此不会形成 Tenant 运行并发上限。
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [
+        `${input.tenantId}\u001frun-dispatch-scheduling`,
+      ]);
       const rows = await client.query<QueryResultRow>(
-        `SELECT outbox.outbox_id,outbox.run_id,outbox.thread_id,outbox.workspace_id,
-                outbox.root_run_id,input.base_revision_id,outbox.generation
+        `WITH active_user_runs AS (
+           SELECT DISTINCT active.user_id,active.run_id
+             FROM (
+               SELECT COALESCE(snapshot.user_id,thread.created_by_user_id) AS user_id,
+                      claimed.run_id
+                 FROM run_dispatch_outbox claimed
+                 JOIN threads thread
+                   ON thread.tenant_id=claimed.tenant_id AND thread.id=claimed.thread_id
+                 LEFT JOIN run_skill_snapshots snapshot
+                   ON snapshot.tenant_id=claimed.tenant_id AND snapshot.run_id=claimed.run_id
+                WHERE claimed.tenant_id=$1 AND claimed.state='claimed'
+                  AND claimed.lease_expires_at>=clock_timestamp()
+               UNION
+               SELECT COALESCE(snapshot.user_id,thread.created_by_user_id) AS user_id,
+                      attempt.run_id
+                 FROM execution_attempts attempt
+                 JOIN run_claims claim
+                   ON claim.tenant_id=attempt.tenant_id AND claim.attempt_id=attempt.attempt_id
+                 JOIN threads thread
+                   ON thread.tenant_id=attempt.tenant_id AND thread.id=attempt.thread_id
+                 LEFT JOIN run_skill_snapshots snapshot
+                   ON snapshot.tenant_id=attempt.tenant_id AND snapshot.run_id=attempt.run_id
+                WHERE attempt.tenant_id=$1
+                  AND attempt.status IN ('claimed','running','finalizing')
+                  AND claim.released_at IS NULL AND claim.expires_at>=clock_timestamp()
+             ) active
+         ), active_user_counts AS (
+           SELECT user_id,count(*)::bigint AS active_run_count
+             FROM active_user_runs GROUP BY user_id
+         )
+         SELECT outbox.outbox_id,outbox.run_id,outbox.thread_id,outbox.workspace_id,
+                outbox.root_run_id,input.base_revision_id,outbox.generation,
+                COALESCE(snapshot.user_id,thread.created_by_user_id) AS user_id,
+                COALESCE(active.active_run_count,0)::text AS active_run_count
            FROM run_dispatch_outbox AS outbox
            JOIN run_execution_inputs AS input
              ON input.tenant_id=outbox.tenant_id AND input.run_id=outbox.run_id
-          LEFT JOIN thread_follow_up_queue queue
-            ON queue.tenant_id=outbox.tenant_id AND queue.thread_id=outbox.thread_id
-           AND queue.run_id=outbox.run_id
-          LEFT JOIN thread_execution_heads head
-            ON head.tenant_id=outbox.tenant_id AND head.thread_id=outbox.thread_id
+           JOIN threads thread
+             ON thread.tenant_id=outbox.tenant_id AND thread.id=outbox.thread_id
+           LEFT JOIN run_skill_snapshots snapshot
+             ON snapshot.tenant_id=outbox.tenant_id AND snapshot.run_id=outbox.run_id
+           LEFT JOIN active_user_counts active
+             ON active.user_id=COALESCE(snapshot.user_id,thread.created_by_user_id)
+           LEFT JOIN thread_follow_up_queue queue
+             ON queue.tenant_id=outbox.tenant_id AND queue.thread_id=outbox.thread_id
+            AND queue.run_id=outbox.run_id
+           LEFT JOIN thread_execution_heads head
+             ON head.tenant_id=outbox.tenant_id AND head.thread_id=outbox.thread_id
           WHERE outbox.tenant_id=$1
+            AND COALESCE(active.active_run_count,0)<$2
             AND (queue.run_id IS NULL OR (queue.state='active' AND head.active_run_id=outbox.run_id))
+            AND NOT EXISTS (
+              SELECT 1
+                FROM run_dispatch_outbox active_dispatch
+               WHERE active_dispatch.tenant_id=outbox.tenant_id
+                 AND active_dispatch.thread_id=outbox.thread_id
+                 AND active_dispatch.state='claimed'
+                 AND active_dispatch.lease_expires_at>=clock_timestamp()
+              UNION ALL
+              SELECT 1
+                FROM execution_attempts active_attempt
+                JOIN run_claims active_claim
+                  ON active_claim.tenant_id=active_attempt.tenant_id
+                 AND active_claim.attempt_id=active_attempt.attempt_id
+               WHERE active_attempt.tenant_id=outbox.tenant_id
+                 AND active_attempt.thread_id=outbox.thread_id
+                 AND active_attempt.status IN ('claimed','running','finalizing')
+                 AND active_claim.released_at IS NULL
+                 AND active_claim.expires_at>=clock_timestamp()
+            )
             AND (
               (outbox.state='ready' AND outbox.next_attempt_at <= clock_timestamp())
               OR (outbox.state='claimed' AND outbox.lease_expires_at < clock_timestamp())
             )
-          ORDER BY outbox.next_attempt_at,outbox.created_at
-          LIMIT $2 FOR UPDATE OF outbox SKIP LOCKED`,
-        [input.tenantId, input.limit],
+          ORDER BY COALESCE(active.active_run_count,0),outbox.next_attempt_at,outbox.created_at
+          LIMIT $3 FOR UPDATE OF outbox SKIP LOCKED`,
+        [input.tenantId, userMaxConcurrentRunsPerTenant, candidateLimit],
       );
       const claims: PgClaimedRunDispatch[] = [];
       for (const row of rows.rows) {
+        if (claims.length >= input.limit) break;
+        const requestedByUserId = String(row.user_id);
+        const activeThread = await client.query<{ readonly count: string }>(
+          `SELECT count(*)::text AS count
+             FROM (
+               SELECT active_dispatch.run_id
+                 FROM run_dispatch_outbox active_dispatch
+                WHERE active_dispatch.tenant_id=$1 AND active_dispatch.thread_id=$2
+                  AND active_dispatch.state='claimed'
+                  AND active_dispatch.lease_expires_at>=clock_timestamp()
+               UNION
+               SELECT active_attempt.run_id
+                 FROM execution_attempts active_attempt
+                 JOIN run_claims active_claim
+                   ON active_claim.tenant_id=active_attempt.tenant_id
+                  AND active_claim.attempt_id=active_attempt.attempt_id
+                WHERE active_attempt.tenant_id=$1 AND active_attempt.thread_id=$2
+                  AND active_attempt.status IN ('claimed','running','finalizing')
+                  AND active_claim.released_at IS NULL
+                  AND active_claim.expires_at>=clock_timestamp()
+             ) active`,
+          [input.tenantId, String(row.thread_id)],
+        );
+        const activeThreadCount = Number(activeThread.rows[0]?.count);
+        if (!Number.isSafeInteger(activeThreadCount)) {
+          throw new TypeError("Thread 活跃 Run 计数无效");
+        }
+        if (activeThreadCount >= 1) continue;
+        const active = await client.query<{ readonly count: string }>(
+          `SELECT count(*)::text AS count
+             FROM (
+               SELECT claimed.run_id
+                 FROM run_dispatch_outbox claimed
+                 JOIN threads thread
+                   ON thread.tenant_id=claimed.tenant_id AND thread.id=claimed.thread_id
+                 LEFT JOIN run_skill_snapshots snapshot
+                   ON snapshot.tenant_id=claimed.tenant_id AND snapshot.run_id=claimed.run_id
+                WHERE claimed.tenant_id=$1
+                  AND COALESCE(snapshot.user_id,thread.created_by_user_id)=$2
+                  AND claimed.state='claimed' AND claimed.lease_expires_at>=clock_timestamp()
+               UNION
+               SELECT attempt.run_id
+                 FROM execution_attempts attempt
+                 JOIN run_claims claim
+                   ON claim.tenant_id=attempt.tenant_id AND claim.attempt_id=attempt.attempt_id
+                 JOIN threads thread
+                   ON thread.tenant_id=attempt.tenant_id AND thread.id=attempt.thread_id
+                 LEFT JOIN run_skill_snapshots snapshot
+                   ON snapshot.tenant_id=attempt.tenant_id AND snapshot.run_id=attempt.run_id
+                WHERE attempt.tenant_id=$1
+                  AND COALESCE(snapshot.user_id,thread.created_by_user_id)=$2
+                  AND attempt.status IN ('claimed','running','finalizing')
+                  AND claim.released_at IS NULL AND claim.expires_at>=clock_timestamp()
+             ) active`,
+          [input.tenantId, requestedByUserId],
+        );
+        const activeCount = Number(active.rows[0]?.count);
+        if (!Number.isSafeInteger(activeCount)) {
+          throw new TypeError("用户活跃 Run 计数无效");
+        }
+        if (activeCount >= userMaxConcurrentRunsPerTenant) continue;
         const token = randomUUID();
         const updated = await client.query<QueryResultRow>(
           `UPDATE run_dispatch_outbox

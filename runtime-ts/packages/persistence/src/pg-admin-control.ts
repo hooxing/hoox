@@ -1144,6 +1144,26 @@ export class PgRuntimeControlConfigurationRepository implements RuntimeControlCo
     private readonly legacyModelApiKey?: string,
   ) {}
 
+  async resolveActiveRuntimeSettings(): Promise<RuntimeSettingsConfiguration | undefined> {
+    try {
+      const result = await this.pool.query<{ readonly configuration: unknown }>(
+        `SELECT revision.configuration
+           FROM admin_control_active_configs active
+           JOIN admin_control_config_revisions revision
+             ON revision.object_kind=active.object_kind
+            AND revision.object_key=active.object_key
+            AND revision.revision=active.revision
+          WHERE active.object_kind='runtime_settings' AND active.object_key='global'`,
+      );
+      const row = result.rows[0];
+      return row === undefined
+        ? undefined
+        : (mapConfiguration("runtime_settings", row.configuration) as RuntimeSettingsConfiguration);
+    } catch (error) {
+      throw mapPersistenceError(error, "读取已发布运行设置");
+    }
+  }
+
   async resolveForRun(input: { readonly tenantId: string; readonly runId: string }) {
     try {
       return await withTenantTransaction(this.pool, input, async (client) => {

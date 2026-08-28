@@ -59,7 +59,10 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 
 ### Scheduler 与 Worker
 
-- development Scheduler 和 Worker 都按明确 Tenant 分片。
+- Scheduler 仍按明确 Tenant 分片；Agent Worker 通过动态 Tenant assignment 发现可执行 Run，并始终在具体 Tenant RLS 中读取业务事实。
+- 已发布的后台运行设置包含 `workerMaxConcurrentRuns`（默认 `20`）和 `userMaxConcurrentRunsPerTenant`（默认 `2`）。没有 active Revision 或控制面暂时不可用时，Worker 使用内置 `20/2` 安全默认值或最近一次有效值。
+- 单用户上限按 `(tenant_id,user_id)` 统计；同一 Thread 始终最多一个活跃 Run，不设置固定 Tenant 最大运行数。
+- 调低上限不会取消在途 Run；新 dispatch 会等到 Worker 与用户活跃数低于新值后再领取。
 - Worker ID、轮询、Dispatch lease、Run lease 和超时必须符合测试覆盖的范围。
 - Scheduler 的清理 lease 和轮询不能被配置为绕过 Tenant/RLS 扫描。
 

@@ -85,6 +85,19 @@ sequenceDiagram
     A-->>U: 读取事件与交付物
 ```
 
+## Run 调度并发边界
+
+Agent Worker 使用有界并发而不是“单任务串行”或无限异步启动：
+
+- 同一 Thread 最多执行一个 Run，保护消息顺序、Thread Context 和 Workspace head；
+- 单 Worker 最大在途 Run 由已发布运行设置控制，默认 `20`；
+- 单用户在同一 Tenant 内最大在途 Run 由已发布运行设置控制，默认 `2`；
+- 不设置固定 Tenant 最大运行数，Tenant 实际并发由活跃用户槽位和 Worker 总槽共同决定；
+- 用户和 Thread 槽位由 PostgreSQL 在 Tenant RLS 短事务中统一占用，多 Worker 不依赖各自的内存计数；
+- 调低上限不会取消在途 Run，只会停止领取新 dispatch，直到活跃数自然回落。
+
+Tenant assignment 只负责发现和公平选择，必须在模型执行前释放。数据库中的短时调度锁不包住模型、Sandbox 或工具执行，因此不会把同一 Tenant 的不同 Thread 再次串行化。
+
 ## 进程职责
 
 | 进程 | 职责 | 不应承担的职责 |

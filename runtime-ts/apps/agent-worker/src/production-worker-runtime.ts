@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import {
+  DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
+  DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
+} from "@hoox/admin-control";
 import type {
   PgClaimedRunDispatch,
   PgClaimedWorkerTenantAssignment,
@@ -756,6 +760,7 @@ interface DispatchQueue {
     readonly dispatcherId: string;
     readonly limit: number;
     readonly leaseMilliseconds: number;
+    readonly userMaxConcurrentRunsPerTenant: number;
   }): ReturnType<PgRunDispatchOutbox["claim"]>;
   acknowledge(input: {
     readonly claim: PgClaimedRunDispatch;
@@ -772,11 +777,22 @@ interface TenantAssignmentQueue {
   settle(assignment: PgClaimedWorkerTenantAssignment): Promise<boolean>;
 }
 
-/** 动态 Tenant 消费闭环：先领控制面租约，再在对应 Tenant RLS 内领取 durable dispatch。 */
+export interface WorkerRunConcurrencySettings {
+  readonly workerMaxConcurrentRuns: number;
+  readonly userMaxConcurrentRunsPerTenant: number;
+}
+
+/** 动态 Tenant 消费闭环：Tenant 公平发现、用户全局占槽与 Worker 有界并发彼此独立。 */
 export class AgentWorkerPollingLoop {
   private closed = false;
+  private started = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
-  private inFlight: Promise<void> = Promise.resolve();
+  private pollInFlight: Promise<void> = Promise.resolve();
+  private readonly executions = new Set<Promise<void>>();
+  private concurrencySettings: WorkerRunConcurrencySettings = Object.freeze({
+    workerMaxConcurrentRuns: DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
+    userMaxConcurrentRunsPerTenant: DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
+  });
 
   constructor(
     private readonly tenantAssignments: TenantAssignmentQueue,
@@ -787,20 +803,21 @@ export class AgentWorkerPollingLoop {
       readonly pollIntervalMs: number;
       readonly tenantAssignmentLeaseMs: number;
       readonly dispatchLeaseMs: number;
+      readonly resolveConcurrencySettings?: () => Promise<WorkerRunConcurrencySettings>;
       /** 周期性收敛已具 durable anchor 的维护任务；失败不阻塞 dispatch，下一 tick 重试。 */
       readonly maintenance?: (tenantId: string) => Promise<unknown>;
     },
   ) {}
 
   start(): void {
-    if (this.closed || this.timer !== undefined)
-      throw new Error("Agent Worker polling loop 状态无效");
+    if (this.closed || this.started) throw new Error("Agent Worker polling loop 状态无效");
+    this.started = true;
     this.schedule(0);
   }
 
   async close(): Promise<void> {
     this.stopAccepting();
-    await this.inFlight;
+    await this.drain();
   }
 
   stopAccepting(): void {
@@ -809,19 +826,51 @@ export class AgentWorkerPollingLoop {
     this.timer = undefined;
   }
 
-  drain(): Promise<void> {
-    return this.inFlight;
+  async drain(): Promise<void> {
+    await this.pollInFlight;
+    await Promise.all([...this.executions]);
   }
 
   private schedule(delay: number): void {
-    if (this.closed) return;
+    if (this.closed || this.timer !== undefined) return;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      this.inFlight = this.tick().finally(() => this.schedule(this.options.pollIntervalMs));
+      let claimed = false;
+      this.pollInFlight = this.tick()
+        .then((result) => {
+          claimed = result;
+        })
+        .finally(() => {
+          const hasCapacity =
+            this.executions.size < this.concurrencySettings.workerMaxConcurrentRuns;
+          this.schedule(claimed && hasCapacity ? 0 : this.options.pollIntervalMs);
+        });
     }, delay);
   }
 
-  private async tick(): Promise<void> {
+  private async refreshConcurrencySettings(): Promise<void> {
+    if (this.options.resolveConcurrencySettings === undefined) return;
+    try {
+      const settings = await this.options.resolveConcurrencySettings();
+      if (
+        !Number.isSafeInteger(settings.workerMaxConcurrentRuns) ||
+        settings.workerMaxConcurrentRuns < 1 ||
+        settings.workerMaxConcurrentRuns > 100 ||
+        !Number.isSafeInteger(settings.userMaxConcurrentRunsPerTenant) ||
+        settings.userMaxConcurrentRunsPerTenant < 1 ||
+        settings.userMaxConcurrentRunsPerTenant > 100
+      ) {
+        return;
+      }
+      this.concurrencySettings = Object.freeze({ ...settings });
+    } catch {
+      // 控制面短暂不可用时保留最近一次有效值；初始值始终是安全的内置默认值。
+    }
+  }
+
+  private async tick(): Promise<boolean> {
+    await this.refreshConcurrencySettings();
+    if (this.executions.size >= this.concurrencySettings.workerMaxConcurrentRuns) return false;
     let assignment: PgClaimedWorkerTenantAssignment | undefined;
     try {
       assignment = await this.tenantAssignments.claim({
@@ -829,14 +878,12 @@ export class AgentWorkerPollingLoop {
         leaseMilliseconds: this.options.tenantAssignmentLeaseMs,
       });
     } catch {
-      return;
+      return false;
     }
-    if (assignment === undefined) return;
+    if (assignment === undefined) return false;
     let claims: readonly PgClaimedRunDispatch[] = [];
     try {
-      if (this.closed) {
-        return;
-      }
+      if (this.closed) return false;
       try {
         await this.options.maintenance?.(assignment.tenantId);
       } catch {
@@ -848,9 +895,10 @@ export class AgentWorkerPollingLoop {
           dispatcherId: this.options.workerId,
           limit: 1,
           leaseMilliseconds: this.options.dispatchLeaseMs,
+          userMaxConcurrentRunsPerTenant: this.concurrencySettings.userMaxConcurrentRunsPerTenant,
         });
       } catch {
-        return;
+        return false;
       }
     } finally {
       try {
@@ -862,24 +910,43 @@ export class AgentWorkerPollingLoop {
     }
     for (const claim of claims) {
       if (this.closed) {
-        try {
-          await this.queue.acknowledge({
-            claim,
-            outcome: "defer",
-            // 与 PgRunDispatchOutbox 的最小重试约束一致，确保 ack 真正释放 dispatch claim。
-            retryAfterMilliseconds: 1_000,
-          });
-        } catch {
-          // claim lease 会过期；关闭后的 claim 绝不交给 RunWorker 执行。
-        }
+        await this.deferClosedClaim(claim);
         continue;
       }
+      if (this.executions.size >= this.concurrencySettings.workerMaxConcurrentRuns) {
+        await this.deferClosedClaim(claim);
+        continue;
+      }
+      this.launchExecution(claim);
+    }
+    return claims.length > 0;
+  }
+
+  private launchExecution(claim: PgClaimedRunDispatch): void {
+    const execution = (async () => {
       const result = await this.executeSafely(claim.scope);
       try {
         await this.queue.acknowledge({ claim, ...acknowledgement(result) });
       } catch {
         // claim lease 会过期并由后续 tick 重领；RunWorker 的 Attempt claim 保证执行幂等。
       }
+    })();
+    this.executions.add(execution);
+    void execution.finally(() => {
+      this.executions.delete(execution);
+    });
+  }
+
+  private async deferClosedClaim(claim: PgClaimedRunDispatch): Promise<void> {
+    try {
+      await this.queue.acknowledge({
+        claim,
+        outcome: "defer",
+        // 与 PgRunDispatchOutbox 的最小重试约束一致，确保未执行的 dispatch claim 被释放。
+        retryAfterMilliseconds: 1_000,
+      });
+    } catch {
+      // claim lease 会过期；未进入 RunWorker 的 claim 绝不被当作已执行。
     }
   }
 

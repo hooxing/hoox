@@ -43,7 +43,12 @@ export interface MemoryProviderConfiguration {
   readonly enabled: boolean;
 }
 
+export const DEFAULT_WORKER_MAX_CONCURRENT_RUNS = 20;
+export const DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT = 2;
+
 export interface RuntimeSettingsConfiguration {
+  readonly workerMaxConcurrentRuns: number;
+  readonly userMaxConcurrentRunsPerTenant: number;
   readonly compactionSoftLimitPercent: number;
   readonly compactionTargetPercent: number;
   readonly compactionRecentUserTokens: number;
@@ -504,6 +509,18 @@ export function normalizeRuntimeSettingsConfiguration(
   const target = boundedInteger(input.compactionTargetPercent, "压缩目标", 20, 90);
   if (target >= softLimit) throw new TypeError("压缩目标必须低于软上限");
   return Object.freeze({
+    workerMaxConcurrentRuns: boundedInteger(
+      input.workerMaxConcurrentRuns,
+      "单 Worker 并行 Run 上限",
+      1,
+      100,
+    ),
+    userMaxConcurrentRunsPerTenant: boundedInteger(
+      input.userMaxConcurrentRunsPerTenant,
+      "单用户在 Tenant 内并行 Run 上限",
+      1,
+      100,
+    ),
     compactionSoftLimitPercent: softLimit,
     compactionTargetPercent: target,
     compactionRecentUserTokens: boundedInteger(

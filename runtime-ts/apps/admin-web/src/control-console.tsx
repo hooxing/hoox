@@ -171,6 +171,8 @@ const configurationFieldLabels: Readonly<Record<string, string>> = {
   scopeSecretRef: "记忆作用域密钥引用",
   requestTimeoutMs: "请求超时（ms）",
   enabled: "已启用",
+  workerMaxConcurrentRuns: "单 Worker 并行 Run 上限",
+  userMaxConcurrentRunsPerTenant: "单用户在 Tenant 内并行 Run 上限",
   compactionSoftLimitPercent: "上下文压缩触发阈值（%）",
   compactionTargetPercent: "压缩后目标占用（%）",
   compactionRecentUserTokens: "优先保留用户 Token",
@@ -1565,9 +1567,9 @@ function SettingsDraftForm({
     <div className="runtime-settings-workspace">
       <section className="runtime-settings-guide">
         <div>
-          <span className="eyebrow">Context lifecycle</span>
-          <h2>上下文压缩策略</h2>
-          <p>控制 Thread 接近模型窗口上限时何时压缩、压到多少以及保留多少近期用户信息。</p>
+          <span className="eyebrow">Runtime policy</span>
+          <h2>运行并发与上下文压缩策略</h2>
+          <p>控制 Worker 总执行容量、用户在单个 Tenant 内的并发，以及 Thread 上下文压缩边界。</p>
         </div>
         <div className="runtime-setting-principles">
           <span>
@@ -1591,6 +1593,30 @@ function SettingsDraftForm({
           void onCreate(new FormData(event.currentTarget));
         }}
       >
+        <label>
+          单 Worker 并行 Run 上限
+          <input
+            name="workerMaxConcurrentRuns"
+            type="number"
+            defaultValue="20"
+            min="1"
+            max="100"
+            required
+          />
+          <small>默认 20；降低后不会取消在途 Run，只暂停领取新任务。</small>
+        </label>
+        <label>
+          单用户在 Tenant 内并行 Run 上限
+          <input
+            name="userMaxConcurrentRunsPerTenant"
+            type="number"
+            defaultValue="2"
+            min="1"
+            max="100"
+            required
+          />
+          <small>默认 2；同一 Thread 仍固定串行，不受该值放宽。</small>
+        </label>
         <label>
           压缩软上限 %
           <input name="compactionSoftLimitPercent" type="number" defaultValue="80" required />
@@ -1952,6 +1978,11 @@ export function AdminControlConsole({
                 onCreate={(form) =>
                   operation(() =>
                     api.createRuntimeSettingsDraft({
+                      workerMaxConcurrentRuns: number(form, "workerMaxConcurrentRuns"),
+                      userMaxConcurrentRunsPerTenant: number(
+                        form,
+                        "userMaxConcurrentRunsPerTenant",
+                      ),
                       compactionSoftLimitPercent: number(form, "compactionSoftLimitPercent"),
                       compactionTargetPercent: number(form, "compactionTargetPercent"),
                       compactionRecentUserTokens: number(form, "compactionRecentUserTokens"),

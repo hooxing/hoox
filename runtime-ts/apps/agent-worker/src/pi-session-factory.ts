@@ -56,6 +56,7 @@ import type {
   AgentUserInput,
   ModelUsageMetricsPort,
   PreparedAgentUserInput,
+  SandboxSessionRef,
   UserInputAttachmentReference,
   WorkerAgentSessionPort,
 } from "./ports.js";
@@ -298,6 +299,18 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     });
     const skillEnabled = input.enabledToolNames?.includes("skill") ?? true;
     const agentControl = input.agentControl;
+    let attachmentSandboxPreparation: Promise<SandboxSessionRef> | undefined;
+    const startAttachmentSandboxPreparation = () => {
+      attachmentSandboxPreparation ??= input.ensureSandboxReady({ reason: "attachment" });
+      // 附件只负责提前启动准备；真正的等待点在 Sandbox 工具执行前或本次 prompt 收口时。
+      // 立即挂拒绝处理，避免 Provider 仍在运行时出现未处理的后台 Promise rejection。
+      void attachmentSandboxPreparation.catch(() => undefined);
+    };
+    const drainAttachmentSandboxPreparation = async () => {
+      if (attachmentSandboxPreparation !== undefined) {
+        await attachmentSandboxPreparation;
+      }
+    };
     const prepareInput = async (userInput: AgentUserInput): Promise<PreparedAgentUserInput> => {
       let images: PreparedAgentUserInput["images"] = Object.freeze([]);
       if (this.model.input.includes("image") && userInput.attachments.length > 0) {
@@ -309,9 +322,10 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           attachments: userInput.attachments,
         });
       }
-      // 全部附件都已作为视觉输入直送 Provider 时不需要文件系统；其余附件需要先挂载 /resources。
+      // 全部附件都已作为视觉输入直送 Provider 时不需要文件系统；其余附件提前准备 /resources，
+      // 但不能阻塞首个模型请求。依赖 Sandbox 的工具仍通过 ensureSandboxReady 等待同一准备任务。
       if (images.length !== userInput.attachments.length) {
-        await input.ensureSandboxReady({ reason: "attachment" });
+        startAttachmentSandboxPreparation();
       }
       return Object.freeze({ text: userInput.text, images: Object.freeze([...images]) });
     };
@@ -962,6 +976,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             ]);
           }
         } catch (error) {
+          await drainAttachmentSandboxPreparation().catch(() => undefined);
           if (observationRecoveryCode !== undefined) {
             return { kind: "recovery_required", code: observationRecoveryCode };
           }
@@ -969,6 +984,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
             return { kind: "context_too_large", action: "rebuild_context" };
           throw error;
         }
+        await drainAttachmentSandboxPreparation();
         if (observationRecoveryCode !== undefined) {
           return { kind: "recovery_required", code: observationRecoveryCode };
         }

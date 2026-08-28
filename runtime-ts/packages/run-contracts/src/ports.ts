@@ -1038,8 +1038,9 @@ export interface AgentSessionFactoryPort {
     /** 只向 root Session 注册协作工具，子 Session 不得递归获得该能力。 */
     readonly agentControl?: AgentControlPort;
     /**
-     * Session 创建不再隐式创建 Sandbox。附件或工具确认需要文件系统时，通过这个窄能力
-     * 单次初始化并物化当前 Workspace；实现必须对并发调用 single-flight。
+     * Session 创建不再隐式创建 Sandbox。附件可以通过这个窄能力提前启动准备，但不得阻塞
+     * 首个模型请求；依赖文件系统的工具在执行前等待同一任务，Session 收口前也必须排空它。
+     * 实现必须对并发调用 single-flight，并在准备失败时保持既有失败关闭语义。
      */
     readonly ensureSandboxReady: (
       input:

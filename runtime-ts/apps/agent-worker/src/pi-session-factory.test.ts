@@ -576,7 +576,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     expect(sandboxes.settleCount).toBe(0);
   });
 
-  it("skill 工具保持零 Sandbox，后续工具直接使用已挂载的市场虚拟目录", async () => {
+  it("skill 工具不等待附件触发的 Sandbox 准备，后续命令工具等待同一任务", async () => {
     const instruction = new TextEncoder().encode("# Review\n按检查清单处理。\n");
     const resource = new TextEncoder().encode("security\ncorrectness\n");
     const entrypointDigest = createHash("sha256").update(instruction).digest("hex");
@@ -635,6 +635,12 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     ];
     const scope = persistence.addSeed({
       ...seed,
+      attachments: [
+        {
+          resourceId: resourceId("resource-tool-skill"),
+          versionId: resourceVersionId("version-tool-skill"),
+        },
+      ],
       skills: {
         schemaVersion: 1,
         digest: digestRunSkillSnapshot({ items: skillItems }),
@@ -642,13 +648,24 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       },
     });
     const sandboxes = new FakeSandboxRegistry();
-    const faux = fauxProvider();
+    const revisions = new FakeRevisionVerifier();
+    let releaseAcquire: () => void = () => undefined;
+    const acquireBarrier = new Promise<void>((resolve) => {
+      releaseAcquire = resolve;
+    });
+    sandboxes.beforeAcquireReturn = () => acquireBarrier;
+    const faux = fauxProvider({
+      models: [{ id: "text-only", input: ["text"] }],
+    });
     faux.setResponses([
       fauxAssistantMessage(fauxToolCall("skill", { skill: "review" }), {
         stopReason: "toolUse",
       }),
       () => {
-        expect(sandboxes.acquireCount).toBe(0);
+        expect(loaded).toBe(true);
+        expect(sandboxes.acquireCount).toBe(1);
+        expect(revisions.materializeCount).toBe(0);
+        setTimeout(releaseAcquire, 10);
         return fauxAssistantMessage(fauxToolCall("exec_command", { cmd: "pwd" }), {
           stopReason: "toolUse",
         });
@@ -680,7 +697,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     const worker = new RunWorker(
       {
         persistence,
-        revisions: new FakeRevisionVerifier(),
+        revisions,
         sandboxes,
         orphanSandboxes: sandboxes,
         sessions,
@@ -776,7 +793,7 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     expect(sandboxes.settleCount).toBe(0);
   });
 
-  it("纯文本模型保留附件路径但不读取图片 Blob", async () => {
+  it("纯文本模型保留附件路径，并在 Sandbox 准备期间直接发起模型请求", async () => {
     const persistence = new FakeExecutionPersistence();
     const seed = fakeSeed("non-vision");
     const scope = persistence.addSeed({
@@ -791,7 +808,10 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     const faux = fauxProvider({
       models: [{ id: "text-only", input: ["text"] }],
     });
-    faux.setResponses([fauxAssistantMessage("按路径处理")]);
+    let releaseAcquire: () => void = () => undefined;
+    const acquireBarrier = new Promise<void>((resolve) => {
+      releaseAcquire = resolve;
+    });
     const modelRuntime = await ModelRuntime.create({
       credentials: new InMemoryCredentialStore(),
       modelsPath: null,
@@ -815,15 +835,27 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       { load },
     );
     const sandboxes = new FakeSandboxRegistry();
-    persistence.beforePermitIssueReturn = ({ effect }) => {
-      if (effect !== "model_start") return;
-      expect(sandboxes.acquireCount).toBe(1);
-      expect(sandboxes.settleCount).toBe(0);
+    const revisions = new FakeRevisionVerifier();
+    sandboxes.beforeAcquireReturn = () => acquireBarrier;
+    sandboxes.handle.command = async () => {
+      expect(revisions.materializeCount).toBe(1);
+      return { stdout: "/workspace\n", stderr: "", exitCode: 0 };
     };
+    faux.setResponses([
+      () => {
+        expect(sandboxes.acquireCount).toBe(1);
+        expect(revisions.materializeCount).toBe(0);
+        setTimeout(releaseAcquire, 10);
+        return fauxAssistantMessage(fauxToolCall("exec_command", { cmd: "pwd" }), {
+          stopReason: "toolUse",
+        });
+      },
+      fauxAssistantMessage("按路径处理"),
+    ]);
     const worker = new RunWorker(
       {
         persistence,
-        revisions: new FakeRevisionVerifier(),
+        revisions,
         sandboxes,
         orphanSandboxes: sandboxes,
         sessions,

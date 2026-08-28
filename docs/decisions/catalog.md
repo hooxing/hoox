@@ -242,3 +242,4 @@
 | [ADR-20260825105258：开发数据库角色 bootstrap](20260825105258-development-database-role-bootstrap.md) | 已接受 | 2026-08-25 |
 | [ADR-20260827174210：开源分发许可证与生产供应链门禁](20260827174210-open-source-distribution-license-and-security-gates.md) | 已接受 | 2026-08-27 |
 | [ADR-20260828111920：个人任务改名与软删除](20260828111920-personal-task-rename-and-soft-delete.md) | 已接受 | 2026-08-28 |
+| [ADR-20260828120133：任务输入附件支持粘贴与可视预览](20260828120133-composer-paste-and-file-preview.md) | 已接受 | 2026-08-28 |

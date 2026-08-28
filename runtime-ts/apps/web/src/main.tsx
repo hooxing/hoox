@@ -1504,7 +1504,14 @@ function AuthenticatedWorkspace({
           onHistoryFilesChange={setHistoryFiles}
           {...(apiClient.listHistoryFiles === undefined
             ? {}
-            : { historyFileApi: { listHistoryFiles: apiClient.listHistoryFiles.bind(apiClient) } })}
+            : {
+                historyFileApi: {
+                  listHistoryFiles: apiClient.listHistoryFiles.bind(apiClient),
+                  ...(attachmentPreviewLoader === undefined
+                    ? {}
+                    : { previewHistoryFile: attachmentPreviewLoader }),
+                },
+              })}
           disabled={actionLoading}
           onChange={setInput}
           onFilesChange={setUploadFiles}

@@ -1875,31 +1875,78 @@ h2 {
 .composer-files {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 7px;
   margin: 0;
-  padding: 4px 0 6px;
+  padding: 4px 0 7px;
   list-style: none;
 }
 .composer-file {
   display: inline-flex;
-  max-width: 260px;
+  min-width: 0;
+  max-width: 280px;
+  min-height: 44px;
   align-items: center;
-  gap: 5px;
-  padding: 5px 7px 5px 9px;
+  gap: 8px;
+  padding: 5px 6px;
   border: 1px solid #dededb;
-  border-radius: 9px;
+  border-radius: 10px;
   color: #4c514e;
   background: #f6f6f3;
   font-size: 12px;
 }
-.composer-file > span {
+.composer-file.is-image {
+  min-height: 58px;
+}
+.composer-file-visual {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 32px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 7px;
+  color: #596762;
+  background: #e8ece9;
+}
+.composer-file.is-image .composer-file-visual {
+  width: 46px;
+  height: 46px;
+  flex-basis: 46px;
+}
+.composer-file-visual.is-image {
+  color: #396b57;
+  background: #dceee5;
+}
+.composer-file-visual.is-sheet {
+  color: #28764e;
+  background: #def0e5;
+}
+.composer-file-visual.is-archive {
+  color: #846827;
+  background: #f2ead4;
+}
+.composer-file-visual.is-code {
+  color: #536b86;
+  background: #e4ebf2;
+}
+.composer-file-preview {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.composer-file-name {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .composer-file button {
-  min-width: 20px;
-  min-height: 20px;
+  width: 22px;
+  min-width: 22px;
+  min-height: 22px;
+  margin-left: 1px;
   padding: 0;
   border: 0;
   background: transparent;

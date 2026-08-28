@@ -6,7 +6,11 @@ import {
   PgSimpleDeliveredFileRepository,
   SimpleArtifactDeliveryService,
 } from "@hoox/artifact";
-import type { ModelProviderModelConfiguration } from "@hoox/admin-control";
+import {
+  DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
+  DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
+  type ModelProviderModelConfiguration,
+} from "@hoox/admin-control";
 import { tenantId } from "@hoox/domain";
 import {
   type Mem0DevelopmentConfiguration,
@@ -1327,6 +1331,16 @@ async function assembleWorkerRuntime(
         pollIntervalMs: configuration.worker.pollIntervalMs,
         tenantAssignmentLeaseMs: configuration.worker.dispatchLeaseMs,
         dispatchLeaseMs: configuration.worker.dispatchLeaseMs,
+        resolveConcurrencySettings: async () => {
+          const settings = await runtimeConfigurations.resolveActiveRuntimeSettings();
+          return {
+            workerMaxConcurrentRuns:
+              settings?.workerMaxConcurrentRuns ?? DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
+            userMaxConcurrentRunsPerTenant:
+              settings?.userMaxConcurrentRunsPerTenant ??
+              DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
+          };
+        },
         maintenance: async (tenantId) => {
           const tasks: Promise<unknown>[] = [
             resourceBlobWriter.recoverPending({

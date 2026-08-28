@@ -5,6 +5,7 @@
 - 决策者：Runtime 团队
 - 关联任务/PR：`codex/team-edition-prototype`
 - 替代关系：替代 ADR-0049 中“`AGENT_WORKER_TENANT_ID` 作为单一 durable dispatch 分片边界”的结论；细化 ADR-0011、ADR-0016 与 ADR-0139；不替代 ADR-0054 的生产安全约束
+- 被部分替代：ADR-20260828170014 以后台可配置的 Worker/User 槽替代“单 Worker loop 只能串行”的容量结论；本 ADR 的动态 Tenant 发现、RLS 和 assignment 短租约继续有效
 
 ## 背景
 

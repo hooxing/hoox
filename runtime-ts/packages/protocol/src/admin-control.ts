@@ -108,6 +108,8 @@ export type MemoryProviderConfigurationDto = Static<typeof MemoryProviderConfigu
 
 export const RuntimeSettingsConfigurationDtoSchema = Type.Object(
   {
+    workerMaxConcurrentRuns: Type.Integer({ minimum: 1, maximum: 100 }),
+    userMaxConcurrentRunsPerTenant: Type.Integer({ minimum: 1, maximum: 100 }),
     compactionSoftLimitPercent: Type.Integer({ minimum: 50, maximum: 95 }),
     compactionTargetPercent: Type.Integer({ minimum: 20, maximum: 90 }),
     compactionRecentUserTokens: Type.Integer({ minimum: 1, maximum: 1_000_000 }),

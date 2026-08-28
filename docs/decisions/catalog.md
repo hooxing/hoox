@@ -246,3 +246,4 @@
 | [ADR-20260828113059：定时任务工具分离 Provider 形状与可纠正错误语义](20260828113059-automation-tool-schema-and-error-semantics.md) | 已接受 | 2026-08-28 |
 | [ADR-20260828113100：Todo 首次快照允许原子进入执行状态](20260828113100-todo-initial-snapshot-can-start.md) | 已接受 | 2026-08-28 |
 | [ADR-20260828120133：任务输入附件支持粘贴与可视预览](20260828120133-composer-paste-and-file-preview.md) | 已接受 | 2026-08-28 |
+| [ADR-20260828163752：附件触发的 Sandbox 准备与首个模型请求并行](20260828163752-attachment-sandbox-preparation-parallels-first-model-request.md) | 已接受 | 2026-08-28 |

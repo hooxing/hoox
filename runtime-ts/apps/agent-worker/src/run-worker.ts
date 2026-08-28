@@ -43,6 +43,7 @@ import type {
   ExternalEffectPermit,
   OrphanSandboxCleanupPort,
   RecoveryMetricsPort,
+  RunStartupTimingPhase,
   RuntimeEventV1,
   RuntimeMutation,
   RuntimeMutationResult,
@@ -64,6 +65,10 @@ import type {
 } from "./ports.js";
 import { assertProtocolSize } from "./ports.js";
 import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
+import {
+  RunStartupTimingCollector,
+  type RunStartupTimingDiagnosticsPort,
+} from "./run-startup-diagnostics.js";
 import { WorkspaceMaterializationStageError } from "./workspace-runtime.js";
 
 export interface RunWorkerOptions {
@@ -274,6 +279,8 @@ interface WorkerDependencies {
   readonly continuityMetrics?: ThreadContinuityMetricsPort;
   /** development 敏感诊断镜像；失败不得改变 durable Run 语义。 */
   readonly runEventDiagnostics?: RunEventDiagnosticsPort;
+  /** development 首模前分段耗时诊断；失败不得阻塞模型请求或改变 Run 语义。 */
+  readonly startupTimingDiagnostics?: RunStartupTimingDiagnosticsPort;
   readonly agentControl?: AgentControlPersistencePort;
   /** 长期记忆是低信任可选上下文；任何失败都不得改变 Run 终态。 */
   readonly memoryRetriever?: MemoryRetriever;
@@ -388,6 +395,7 @@ export class RunWorker {
 
   async execute(scope: ExecutionScope): Promise<RunWorkerResult> {
     assertScope(scope);
+    const startupStartedAt = performance.now();
     const claim = await this.dependencies.persistence.claim({
       scope,
       workerId: this.options.workerId,
@@ -505,6 +513,33 @@ export class RunWorker {
       adapterRejected: false,
       contextTurnOrdinal: 0,
     };
+    const startupTiming =
+      this.dependencies.startupTimingDiagnostics === undefined
+        ? undefined
+        : new RunStartupTimingCollector(
+            {
+              tenantId: scope.tenantId,
+              threadId: scope.threadId,
+              runId: scope.runId,
+              attemptId: context.attemptId,
+            },
+            this.dependencies.startupTimingDiagnostics,
+            startupStartedAt,
+          );
+    startupTiming?.record("run_claim", performance.now() - startupStartedAt);
+    const measureStartup = <T>(
+      phase: RunStartupTimingPhase,
+      operation: () => Promise<T>,
+    ): Promise<T> =>
+      startupTiming === undefined ? operation() : startupTiming.measure(phase, operation);
+    const startupTimingObserver =
+      startupTiming === undefined
+        ? undefined
+        : {
+            record: (phase: RunStartupTimingPhase, durationMs: number) =>
+              startupTiming.record(phase, durationMs),
+            modelInvocationStarting: () => startupTiming.publish(),
+          };
     const cancellation = this.dependencies.cancellation.signalFor(scope);
     const shutdown = this.dependencies.shutdownSignal;
     let session: WorkerAgentSessionPort | undefined;
@@ -876,17 +911,25 @@ export class RunWorker {
       const personalizationSnapshot =
         this.dependencies.personalizations === undefined
           ? undefined
-          : await this.dependencies.personalizations.resolveForRun({
-              scope: {
-                tenantId: scope.tenantId,
-                userId: userId(personalizationUserId as string),
-              },
-            });
+          : await measureStartup(
+              "personalization_resolve",
+              () =>
+                this.dependencies.personalizations?.resolveForRun({
+                  scope: {
+                    tenantId: scope.tenantId,
+                    userId: userId(personalizationUserId as string),
+                  },
+                }) as Promise<RunPersonalizationSnapshot>,
+            );
       let promptInput = {
-        text: await this.withRetrievedMemory(claim.snapshot, scope, initialUserText),
+        text: await measureStartup("memory_retrieve", () =>
+          this.withRetrievedMemory(claim.snapshot, scope, initialUserText),
+        ),
         attachments: claim.snapshot.answer === undefined ? (claim.snapshot.attachments ?? []) : [],
       };
-      const preSession = await this.stopPoint(context, cancellation);
+      const preSession = await measureStartup("pre_session_stop_point", () =>
+        this.stopPoint(context, cancellation),
+      );
       if (preSession) return await this.finishStopped(context, preSession);
       const agentSupervisor =
         this.options.subagentsEnabled !== true || this.dependencies.agentControl === undefined
@@ -961,98 +1004,106 @@ export class RunWorker {
                 return persistence;
               },
             });
-      await agentSupervisor?.initialize();
-      session = await this.dependencies.sessions.create({
-        scope,
-        attemptId: context.attemptId,
-        fence: context.fence,
-        ensureSandboxReady,
-        rolloutProjection: claim.snapshot.rolloutProjection,
-        initialInputText: promptInput.text,
-        ...(claim.snapshot.skills === undefined ? {} : { skillSnapshot: claim.snapshot.skills }),
-        ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
-        ...(claim.snapshot.contextThroughSequence === undefined
-          ? {}
-          : { contextThroughSequence: claim.snapshot.contextThroughSequence }),
-        ...(this.options.threadContextWriteEnabled !== true
-          ? {}
-          : {
-              onTurnSafePoint: async (
-                event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
-              ) => {
-                // turn 安全点可能从 Pi 的 prepare hook 进入，而流式公开事件仍在异步持久化队列中。
-                // 必须先排空已发布事件，禁止 Thread Context 越过 thinking/message 终态。
-                await eventChain;
-                if (!context.eventAcceptanceOpen) throw new Error("Thread Context 写入口已关闭");
-                const finalization = classifyFinalizationTurn(context, event);
-                const append = await this.prepareTurnContextAppend(
-                  context,
-                  event,
-                  finalization.phase,
-                );
-                const persisted = await this.applyMutation(context, {
-                  idempotencyKey: append.idempotencyKey,
-                  events:
-                    finalization.event === undefined
-                      ? []
-                      : [agentEvent(context, finalization.event)],
-                  outbox: [],
-                  threadContextAppend: append,
-                });
-                if (!isApplied(persisted) || persisted.receipt.threadContext === undefined) {
-                  closeEventAcceptance(context);
-                  context.stopped =
-                    persisted.outcome === "fence_lost" || persisted.outcome === "scope_mismatch"
-                      ? "fence_lost"
-                      : "unavailable";
-                  throw new Error("Thread Context turn 安全点提交失败");
-                }
-                applyFinalizationTransition(context, finalization);
-                const throughSequence = persisted.receipt.threadContext.lastSequence;
-                if (this.options.threadInputRoutingV2Enabled !== true) return { throughSequence };
-                // 先持久化完整 assistant/tool 配对，再一次读取当前安全点已经排队的全部 steer；
-                // 新到达的输入留给后续安全点，避免持续写入让本次 Provider continuation 饥饿。
-                const pending = await this.dependencies.persistence.readPendingThreadSteers({
-                  fence: context.fence,
-                });
-                if (pending.outcome === "pending") {
-                  const steers = [];
-                  for (const item of pending.items) {
-                    const steered = await this.applyThreadSteer(context, item);
-                    if (!isApplied(steered)) {
-                      closeEventAcceptance(context);
-                      context.stopped =
-                        steered.outcome === "fence_lost" || steered.outcome === "scope_mismatch"
-                          ? "fence_lost"
-                          : "unavailable";
-                      throw new Error("Thread steer 安全点提交失败");
-                    }
-                    steers.push({
-                      receiptId: item.receiptId,
-                      inputText: item.inputText,
-                      ...(item.attachments === undefined ? {} : { attachments: item.attachments }),
-                    });
-                  }
-                  return { throughSequence, steers };
-                }
-                if (pending.outcome !== "none") {
-                  closeEventAcceptance(context);
-                  context.stopped =
-                    pending.outcome === "cancelled"
-                      ? "cancelled"
-                      : pending.outcome === "fence_lost" || pending.outcome === "scope_mismatch"
+      if (agentSupervisor !== undefined) {
+        await measureStartup("agent_supervisor_initialize", () => agentSupervisor.initialize());
+      }
+      const createdSession = await measureStartup("agent_session_create", () =>
+        this.dependencies.sessions.create({
+          scope,
+          attemptId: context.attemptId,
+          fence: context.fence,
+          ensureSandboxReady,
+          rolloutProjection: claim.snapshot.rolloutProjection,
+          initialInputText: promptInput.text,
+          ...(claim.snapshot.skills === undefined ? {} : { skillSnapshot: claim.snapshot.skills }),
+          ...(personalizationSnapshot === undefined ? {} : { personalizationSnapshot }),
+          ...(startupTimingObserver === undefined ? {} : { startupTiming: startupTimingObserver }),
+          ...(claim.snapshot.contextThroughSequence === undefined
+            ? {}
+            : { contextThroughSequence: claim.snapshot.contextThroughSequence }),
+          ...(this.options.threadContextWriteEnabled !== true
+            ? {}
+            : {
+                onTurnSafePoint: async (
+                  event: Extract<RuntimeAgentEvent, { type: "turn.completed" }>,
+                ) => {
+                  // turn 安全点可能从 Pi 的 prepare hook 进入，而流式公开事件仍在异步持久化队列中。
+                  // 必须先排空已发布事件，禁止 Thread Context 越过 thinking/message 终态。
+                  await eventChain;
+                  if (!context.eventAcceptanceOpen) throw new Error("Thread Context 写入口已关闭");
+                  const finalization = classifyFinalizationTurn(context, event);
+                  const append = await this.prepareTurnContextAppend(
+                    context,
+                    event,
+                    finalization.phase,
+                  );
+                  const persisted = await this.applyMutation(context, {
+                    idempotencyKey: append.idempotencyKey,
+                    events:
+                      finalization.event === undefined
+                        ? []
+                        : [agentEvent(context, finalization.event)],
+                    outbox: [],
+                    threadContextAppend: append,
+                  });
+                  if (!isApplied(persisted) || persisted.receipt.threadContext === undefined) {
+                    closeEventAcceptance(context);
+                    context.stopped =
+                      persisted.outcome === "fence_lost" || persisted.outcome === "scope_mismatch"
                         ? "fence_lost"
                         : "unavailable";
-                  throw new Error("Thread steer 安全点不可继续");
-                }
-                return { throughSequence };
-              },
-            }),
-        authorizeToolEffect: (call) =>
-          this.authorizeToolEffectAfterStarted(context, cancellation, call),
-        writeTodo: (call) => this.writeTodoAfterStarted(context, cancellation, call),
-        ...(agentSupervisor === undefined ? {} : { agentControl: agentSupervisor }),
-      });
+                    throw new Error("Thread Context turn 安全点提交失败");
+                  }
+                  applyFinalizationTransition(context, finalization);
+                  const throughSequence = persisted.receipt.threadContext.lastSequence;
+                  if (this.options.threadInputRoutingV2Enabled !== true) return { throughSequence };
+                  // 先持久化完整 assistant/tool 配对，再一次读取当前安全点已经排队的全部 steer；
+                  // 新到达的输入留给后续安全点，避免持续写入让本次 Provider continuation 饥饿。
+                  const pending = await this.dependencies.persistence.readPendingThreadSteers({
+                    fence: context.fence,
+                  });
+                  if (pending.outcome === "pending") {
+                    const steers = [];
+                    for (const item of pending.items) {
+                      const steered = await this.applyThreadSteer(context, item);
+                      if (!isApplied(steered)) {
+                        closeEventAcceptance(context);
+                        context.stopped =
+                          steered.outcome === "fence_lost" || steered.outcome === "scope_mismatch"
+                            ? "fence_lost"
+                            : "unavailable";
+                        throw new Error("Thread steer 安全点提交失败");
+                      }
+                      steers.push({
+                        receiptId: item.receiptId,
+                        inputText: item.inputText,
+                        ...(item.attachments === undefined
+                          ? {}
+                          : { attachments: item.attachments }),
+                      });
+                    }
+                    return { throughSequence, steers };
+                  }
+                  if (pending.outcome !== "none") {
+                    closeEventAcceptance(context);
+                    context.stopped =
+                      pending.outcome === "cancelled"
+                        ? "cancelled"
+                        : pending.outcome === "fence_lost" || pending.outcome === "scope_mismatch"
+                          ? "fence_lost"
+                          : "unavailable";
+                    throw new Error("Thread steer 安全点不可继续");
+                  }
+                  return { throughSequence };
+                },
+              }),
+          authorizeToolEffect: (call) =>
+            this.authorizeToolEffectAfterStarted(context, cancellation, call),
+          writeTodo: (call) => this.writeTodoAfterStarted(context, cancellation, call),
+          ...(agentSupervisor === undefined ? {} : { agentControl: agentSupervisor }),
+        }),
+      );
+      session = createdSession;
       context.abortSession = async () => {
         await session?.drainRejectedToolReceipts?.();
         await Promise.all([
@@ -1060,7 +1111,9 @@ export class RunWorker {
           agentSupervisor?.abortAll().catch(() => undefined),
         ]);
       };
-      const postSession = await this.stopPoint(context, cancellation);
+      const postSession = await measureStartup("post_session_stop_point", () =>
+        this.stopPoint(context, cancellation),
+      );
       if (postSession) return await this.finishStopped(context, postSession, sandbox);
 
       unsubscribe = session.subscribe((event) => {
@@ -1107,13 +1160,15 @@ export class RunWorker {
         });
       });
 
-      const modelCheckpoint = await this.applyMutation(context, {
-        idempotencyKey: `${context.attemptId}/stage/model-execution-started`,
-        nextAttemptStatus: "running",
-        nextStage: "model_execution_started",
-        events: [attemptEvent(context, "running", "model_execution_started")],
-        outbox: [],
-      });
+      const modelCheckpoint = await measureStartup("model_checkpoint", () =>
+        this.applyMutation(context, {
+          idempotencyKey: `${context.attemptId}/stage/model-execution-started`,
+          nextAttemptStatus: "running",
+          nextStage: "model_execution_started",
+          events: [attemptEvent(context, "running", "model_execution_started")],
+          outbox: [],
+        }),
+      );
       if (!isApplied(modelCheckpoint)) return await this.handleMutationFailure(modelCheckpoint);
 
       let steerReceiptId: string | undefined;
@@ -1124,7 +1179,9 @@ export class RunWorker {
 
       // TODO(codex-alignment): waiting 仍复用历史单轮循环骨架；后续清理不可达 correction 命名。
       for (;;) {
-        const preModel = await this.stopPoint(context, cancellation);
+        const preModel = await measureStartup("pre_model_stop_point", () =>
+          this.stopPoint(context, cancellation),
+        );
         if (preModel) return await this.finishStopped(context, preModel, sandbox);
         const modelEffect =
           steerReceiptId === undefined && outputLimitContinuationRound === 0
@@ -1136,15 +1193,19 @@ export class RunWorker {
             : steerReceiptId === undefined
               ? `${context.attemptId}/model/start`
               : `${context.attemptId}/model/steer/${steerReceiptId}`;
-        const preparedInput = await session.prepareInput(promptInput);
-        const modelAuthorization = await this.authorizeEffect(context, cancellation, modelEffect, {
-          callId: modelCallId,
-          toolName: "pi_model",
-          argsDigest: digestCanonical({
-            prompt: promptInput.text,
-            attachments: promptInput.attachments,
+        const preparedInput = await measureStartup("prepare_input", () =>
+          createdSession.prepareInput(promptInput),
+        );
+        const modelAuthorization = await measureStartup("model_authorization", () =>
+          this.authorizeEffect(context, cancellation, modelEffect, {
+            callId: modelCallId,
+            toolName: "pi_model",
+            argsDigest: digestCanonical({
+              prompt: promptInput.text,
+              attachments: promptInput.attachments,
+            }),
           }),
-        });
+        );
         context.modelCompleted = false;
         delete context.modelStopReason;
         const turn = await session.runPrompt(preparedInput, modelAuthorization);
@@ -1404,6 +1465,7 @@ export class RunWorker {
         ? await this.recoverWithCleanup(context, sandbox, "INTERNAL", cancellation)
         : await this.requireRecovery(context, "INTERNAL", []);
     } finally {
+      startupTiming?.publish();
       timeout.cancel();
       cancellation.removeEventListener("abort", onCancel);
       this.dependencies.cancellation.release?.(scope);
@@ -1415,6 +1477,7 @@ export class RunWorker {
       await context.durableLane.drain();
       await Promise.allSettled([context.abortPromise ?? Promise.resolve()]);
       await Promise.allSettled([
+        startupTiming?.drain() ?? Promise.resolve(),
         Promise.resolve().then(() => unsubscribe?.()),
         Promise.resolve().then(() => session?.dispose()),
       ]);

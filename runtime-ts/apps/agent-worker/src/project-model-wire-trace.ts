@@ -24,11 +24,35 @@ import {
 } from "./model-wire-trace.js";
 import type { RuntimeEventV1 } from "./ports.js";
 import type { RunEventDiagnosticRecord, RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
+import type {
+  RunStartupTimingDiagnosticRecord,
+  RunStartupTimingDiagnosticsPort,
+} from "./run-startup-diagnostics.js";
 
 const PROJECT_ROOT = fileURLToPath(new URL("../../../../", import.meta.url));
 export const PROJECT_MODEL_WIRE_TRACE_ROOT = join(PROJECT_ROOT, "model-wire-traces");
 const captureStatuses = new Set(["complete", "truncated", "aborted", "failed"]);
 const eventKinds = new Set(["agent_event", "attempt_state_changed", "run_waiting"]);
+const startupTimingPhases = new Set([
+  "run_claim",
+  "personalization_resolve",
+  "memory_retrieve",
+  "pre_session_stop_point",
+  "agent_supervisor_initialize",
+  "skill_recovery",
+  "explicit_skill_load",
+  "observation_projection",
+  "observation_revalidation",
+  "thread_history_read",
+  "runtime_compaction",
+  "pi_session_create",
+  "agent_session_create",
+  "post_session_stop_point",
+  "model_checkpoint",
+  "pre_model_stop_point",
+  "prepare_input",
+  "model_authorization",
+]);
 
 interface OpenMirrorDirectory {
   readonly path: string;
@@ -132,6 +156,44 @@ export class ProjectRunEventMirror implements RunEventDiagnosticsPort {
  * Pi 原始事件逐条不可变保存；正文已经由 trajectory 包转换为无截断、可逆的 JSON 快照。
  * root 与 subagent 使用独立目录，避免各 Session 的局部 sequence 冲突。
  */
+/** 将首个 Provider 请求前的低基数分段耗时保存为单个不可变快照。 */
+export class ProjectRunStartupTimingMirror implements RunStartupTimingDiagnosticsPort {
+  readonly #trustedBase: string;
+  readonly #rootSegments: readonly string[];
+
+  constructor(root = PROJECT_MODEL_WIRE_TRACE_ROOT, trustedBase = dirname(root)) {
+    if (!isAbsolute(root) || !isAbsolute(trustedBase))
+      throw new TypeError("启动耗时本地镜像根目录必须是绝对路径");
+    const lexicalBase = resolve(trustedBase);
+    const lexicalRoot = resolve(root);
+    const rootRelative = relative(lexicalBase, lexicalRoot);
+    if (!isContainedRelative(rootRelative))
+      throw new TypeError("启动耗时本地镜像根目录越出受信边界");
+    const segments = rootRelative.split(sep).filter((segment) => segment.length > 0);
+    if (segments.length === 0 || segments.some((segment) => segment === "." || segment === ".."))
+      throw new TypeError("启动耗时本地镜像根目录无效");
+    this.#trustedBase = lexicalBase;
+    this.#rootSegments = Object.freeze(segments);
+  }
+
+  async persist(record: RunStartupTimingDiagnosticRecord): Promise<void> {
+    assertModelWireTraceContext(record.context);
+    assertRunStartupTiming(record);
+    const directory = await openMirrorDirectory(this.#trustedBase, [
+      ...this.#rootSegments,
+      record.context.runId,
+      record.context.attemptId,
+    ]);
+    try {
+      const body = new TextEncoder().encode(`${canonicalJson(record)}
+`);
+      await writeOnceAtomically(directory, "startup-timings.json", body);
+    } finally {
+      await directory.close().catch(() => undefined);
+    }
+  }
+}
+
 export class ProjectInternalTrajectoryMirror implements InternalTrajectoryDiagnosticsPort {
   readonly #trustedBase: string;
   readonly #rootSegments: readonly string[];
@@ -216,6 +278,15 @@ export function createDevelopmentProjectRunEventMirror(
   createMirror: () => RunEventDiagnosticsPort = () =>
     new ProjectRunEventMirror(PROJECT_MODEL_WIRE_TRACE_ROOT, PROJECT_ROOT),
 ): RunEventDiagnosticsPort | undefined {
+  return runtimeMode === "development" && enabled ? createMirror() : undefined;
+}
+
+export function createDevelopmentProjectRunStartupTimingMirror(
+  runtimeMode: "development" | "production",
+  enabled: boolean,
+  createMirror: () => RunStartupTimingDiagnosticsPort = () =>
+    new ProjectRunStartupTimingMirror(PROJECT_MODEL_WIRE_TRACE_ROOT, PROJECT_ROOT),
+): RunStartupTimingDiagnosticsPort | undefined {
   return runtimeMode === "development" && enabled ? createMirror() : undefined;
 }
 
@@ -454,6 +525,19 @@ function assertRunEvent(event: RuntimeEventV1): void {
     throw new TypeError("Run 事件本地镜像协议无效");
   if (typeof event.payload !== "object" || event.payload === null || Array.isArray(event.payload))
     throw new TypeError("Run 事件本地镜像正文无效");
+}
+
+function assertRunStartupTiming(record: RunStartupTimingDiagnosticRecord): void {
+  if (!Number.isFinite(Date.parse(record.observedAt)))
+    throw new TypeError("启动耗时本地镜像观测时间无效");
+  if (!Number.isFinite(record.totalDurationMs) || record.totalDurationMs < 0)
+    throw new TypeError("启动耗时本地镜像总耗时无效");
+  if (!Array.isArray(record.spans)) throw new TypeError("启动耗时本地镜像阶段无效");
+  for (const span of record.spans) {
+    if (!startupTimingPhases.has(span.phase)) throw new TypeError("启动耗时本地镜像阶段名无效");
+    if (!Number.isFinite(span.durationMs) || span.durationMs < 0)
+      throw new TypeError("启动耗时本地镜像阶段耗时无效");
+  }
 }
 
 function assertInternalTrajectoryEvent(event: InternalTrajectoryEventV1): void {

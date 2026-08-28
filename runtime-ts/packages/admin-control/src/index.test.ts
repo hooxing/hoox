@@ -164,6 +164,8 @@ describe("后台控制面领域规则", () => {
   it("运行参数与 Worker 压缩不变量保持一致", () => {
     expect(() =>
       normalizeRuntimeSettingsConfiguration({
+        workerMaxConcurrentRuns: 20,
+        userMaxConcurrentRunsPerTenant: 2,
         compactionSoftLimitPercent: 80,
         compactionTargetPercent: 80,
         compactionRecentUserTokens: 4_096,
@@ -173,6 +175,8 @@ describe("后台控制面领域规则", () => {
     ).toThrow("压缩目标必须低于软上限");
     expect(() =>
       normalizeRuntimeSettingsConfiguration({
+        workerMaxConcurrentRuns: 20,
+        userMaxConcurrentRunsPerTenant: 2,
         compactionSoftLimitPercent: 80,
         compactionTargetPercent: 55,
         compactionRecentUserTokens: 0,
@@ -307,6 +311,8 @@ describe("后台控制面领域规则", () => {
           createdAt: "2026-08-19T00:00:00.000Z",
           updatedAt: "2026-08-19T00:00:00.000Z",
           configuration: {
+            workerMaxConcurrentRuns: 20,
+            userMaxConcurrentRunsPerTenant: 2,
             compactionSoftLimitPercent: 80,
             compactionTargetPercent: 55,
             compactionRecentUserTokens: 4_096,

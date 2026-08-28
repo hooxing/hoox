@@ -291,6 +291,68 @@ describe("后台控制 API", () => {
     await app.close();
   });
 
+  it("运行设置写接口要求并透传 Worker 与用户并发上限", async () => {
+    const { app, control } = fixture();
+    const revision = {
+      revision: 1,
+      versionToken: 1,
+      status: "draft" as const,
+      probeStatus: "untested" as const,
+      createdBy: "user_admin",
+      createdAt: "2026-08-28T00:00:00.000Z",
+      updatedAt: "2026-08-28T00:00:00.000Z",
+      configuration: {
+        workerMaxConcurrentRuns: 20,
+        userMaxConcurrentRunsPerTenant: 2,
+        compactionSoftLimitPercent: 80,
+        compactionTargetPercent: 60,
+        compactionRecentUserTokens: 16_000,
+        compactionMaxOutputTokens: 4_096,
+        compactionTimeoutMs: 60_000,
+      },
+    };
+    control.createRuntimeSettingsDraft.mockResolvedValueOnce(revision);
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/admin/control/runtime-settings",
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "runtime-settings-0001",
+      },
+      payload: { ...revision.configuration, reason: "调整执行容量" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(control.createRuntimeSettingsDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ actorUserId: "user_admin" }),
+      expect.objectContaining({
+        workerMaxConcurrentRuns: 20,
+        userMaxConcurrentRunsPerTenant: 2,
+      }),
+    );
+
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/v1/admin/control/runtime-settings",
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "runtime-settings-0002",
+      },
+      payload: {
+        compactionSoftLimitPercent: 80,
+        compactionTargetPercent: 60,
+        compactionRecentUserTokens: 16_000,
+        compactionMaxOutputTokens: 4_096,
+        compactionTimeoutMs: 60_000,
+        reason: "缺少并发字段",
+      },
+    });
+    expect(invalid.statusCode).toBe(400);
+    await app.close();
+  });
+
   it("探测路由只传递已读取 revision，不接受客户端伪造配置", async () => {
     const { app, control } = fixture();
     const response = await app.inject({

@@ -1,8 +1,11 @@
+import { EventEmitter } from "node:events";
 import type { Pool } from "pg";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  PgWorkerDispatchWakeListener,
   PgWorkerTenantAssignments,
   type PgClaimedWorkerTenantAssignment,
+  WORKER_DISPATCH_WAKE_CHANNEL,
 } from "./pg-worker-tenant-assignment.js";
 
 interface Statement {
@@ -207,7 +210,47 @@ describe("PostgreSQL 动态 Worker Tenant 调度", () => {
     expect(wake?.sql).toContain("WHEN worker_tenant_assignments.state='claimed' THEN 'claimed'");
     expect(wake?.sql).toContain("LEAST(");
     expect(wake?.values).toEqual(["team-dynamic", expect.any(Date)]);
+    const notification = client.statements.find((statement) => statement.sql.includes("pg_notify"));
+    expect(notification?.values).toEqual([WORKER_DISPATCH_WAKE_CHANNEL]);
+    expect(client.statements.indexOf(notification as Statement)).toBeGreaterThan(
+      client.statements.indexOf(wake as Statement),
+    );
     expect(coordinator.statements).toEqual([]);
+  });
+
+  it("监听事务提交后的无载荷通知并在关闭时释放独占连接", async () => {
+    class ListenerClient extends EventEmitter {
+      readonly statements: string[] = [];
+      released = false;
+
+      async query(sql: string) {
+        this.statements.push(sql);
+        return { rows: [], rowCount: 0 };
+      }
+
+      release() {
+        this.released = true;
+      }
+    }
+
+    const client = new ListenerClient();
+    const listener = new PgWorkerDispatchWakeListener(
+      { connect: async () => client } as unknown as Pool,
+      100,
+    );
+    const wake = vi.fn();
+    listener.start(wake);
+    await vi.waitFor(() =>
+      expect(client.statements).toContain(`LISTEN ${WORKER_DISPATCH_WAKE_CHANNEL}`),
+    );
+
+    client.emit("notification", { channel: "unrelated", payload: "" });
+    client.emit("notification", { channel: WORKER_DISPATCH_WAKE_CHANNEL, payload: "" });
+    expect(wake).toHaveBeenCalledOnce();
+
+    await listener.close();
+    expect(client.statements).toContain(`UNLISTEN ${WORKER_DISPATCH_WAKE_CHANNEL}`);
+    expect(client.released).toBe(true);
   });
 
   it("拒绝无界租约与空 Worker 身份", async () => {

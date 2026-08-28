@@ -63,7 +63,8 @@ Hoox 对配置采用“声明键、严格解析、失败关闭”的原则。dev
 - 已发布的后台运行设置包含 `workerMaxConcurrentRuns`（默认 `20`）和 `userMaxConcurrentRunsPerTenant`（默认 `2`）。没有 active Revision 或控制面暂时不可用时，Worker 使用内置 `20/2` 安全默认值或最近一次有效值。
 - 单用户上限按 `(tenant_id,user_id)` 统计；同一 Thread 始终最多一个活跃 Run，不设置固定 Tenant 最大运行数。
 - 调低上限不会取消在途 Run；新 dispatch 会等到 Worker 与用户活跃数低于新值后再领取。
-- Worker ID、轮询、Dispatch lease、Run lease 和超时必须符合测试覆盖的范围。
+- 新 dispatch 在提交 Worker Tenant assignment 的同一 PostgreSQL 事务中发送无载荷通知，Worker 使用独占连接立即唤醒 claim；通知重复、迟到、丢失或监听断线都不改变 durable 事实，定时轮询继续作为兜底。
+- Worker ID、轮询、Dispatch lease、Run lease 和超时必须符合测试覆盖的范围；轮询间隔同时决定无通知时的最长兜底等待和监听断线后的重连节奏，不是正常 dispatch 的固定排队延迟。
 - Scheduler 的清理 lease 和轮询不能被配置为绕过 Tenant/RLS 扫描。
 
 ### 后台管理

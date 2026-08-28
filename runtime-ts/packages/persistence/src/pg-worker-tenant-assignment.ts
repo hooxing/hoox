@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
-import type { Pool, PoolClient, QueryResultRow } from "pg";
+import type { Notification, Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import { withTenantTransaction, withTransaction } from "./postgres.js";
 
 const maximumLeaseMilliseconds = 300_000;
+export const WORKER_DISPATCH_WAKE_CHANNEL = "hoox_worker_dispatch";
 
 function workerIdentity(value: string): string {
   const normalized = value.trim();
@@ -45,6 +46,8 @@ export async function scheduleWorkerTenantAt(
            updated_at=clock_timestamp()`,
     [tenantId, nextAttemptAt],
   );
+  // pg_notify 与业务事务同提交：回滚时不发信号；丢通知或监听断线仍由定时轮询兜底。
+  await client.query("SELECT pg_notify($1, '')", [WORKER_DISPATCH_WAKE_CHANNEL]);
 }
 
 export async function scheduleWorkerTenant(
@@ -241,5 +244,114 @@ export class PgWorkerTenantAssignments {
     } catch (error) {
       throw mapPersistenceError(error, "收敛 Worker Tenant 调度租约");
     }
+  }
+}
+
+interface ActiveWakeListener {
+  readonly client: PoolClient;
+  readonly onNotification: (notification: Notification) => void;
+  readonly onError: () => void;
+}
+
+/**
+ * 使用独占 PostgreSQL 连接监听无载荷唤醒信号。通知只提示“可能有工作”，具体 Tenant、Run
+ * 和 Workspace 仍必须通过既有租约与 RLS claim 读取；监听失败时定时轮询继续保证正确性。
+ */
+export class PgWorkerDispatchWakeListener {
+  private closed = true;
+  private connecting = false;
+  private retryTimer: ReturnType<typeof setTimeout> | undefined;
+  private active: ActiveWakeListener | undefined;
+  private wake: (() => void) | undefined;
+
+  constructor(
+    private readonly pool: Pool,
+    private readonly retryIntervalMs = 1_000,
+  ) {
+    if (
+      !Number.isSafeInteger(retryIntervalMs) ||
+      retryIntervalMs < 100 ||
+      retryIntervalMs > 60_000
+    ) {
+      throw new TypeError("Worker dispatch 监听重连间隔无效");
+    }
+  }
+
+  start(wake: () => void): void {
+    if (!this.closed || this.connecting || this.active !== undefined) {
+      throw new Error("Worker dispatch 监听器状态无效");
+    }
+    this.closed = false;
+    this.wake = wake;
+    void this.connect();
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    this.wake = undefined;
+    if (this.retryTimer !== undefined) clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    const active = this.active;
+    this.active = undefined;
+    if (active === undefined) return;
+    active.client.off("notification", active.onNotification);
+    active.client.off("error", active.onError);
+    await active.client.query(`UNLISTEN ${WORKER_DISPATCH_WAKE_CHANNEL}`).catch(() => undefined);
+    active.client.release();
+  }
+
+  private async connect(): Promise<void> {
+    if (this.closed || this.connecting || this.active !== undefined) return;
+    this.connecting = true;
+    let client: PoolClient | undefined;
+    try {
+      client = await this.pool.connect();
+      if (this.closed) {
+        client.release();
+        return;
+      }
+      const activeClient = client;
+      const onNotification = (notification: Notification) => {
+        if (notification.channel === WORKER_DISPATCH_WAKE_CHANNEL) this.wake?.();
+      };
+      const onError = () => {
+        this.dropAndReconnect(activeClient);
+      };
+      activeClient.on("notification", onNotification);
+      activeClient.on("error", onError);
+      await activeClient.query(`LISTEN ${WORKER_DISPATCH_WAKE_CHANNEL}`);
+      if (this.closed) {
+        activeClient.off("notification", onNotification);
+        activeClient.off("error", onError);
+        await activeClient.query(`UNLISTEN ${WORKER_DISPATCH_WAKE_CHANNEL}`).catch(() => undefined);
+        activeClient.release();
+        return;
+      }
+      this.active = { client: activeClient, onNotification, onError };
+    } catch {
+      client?.release(true);
+      this.scheduleReconnect();
+    } finally {
+      this.connecting = false;
+    }
+  }
+
+  private dropAndReconnect(client: PoolClient): void {
+    const active = this.active;
+    if (active === undefined || active.client !== client) return;
+    this.active = undefined;
+    active.client.off("notification", active.onNotification);
+    active.client.off("error", active.onError);
+    active.client.release(true);
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closed || this.retryTimer !== undefined) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = undefined;
+      void this.connect();
+    }, this.retryIntervalMs);
+    this.retryTimer.unref();
   }
 }

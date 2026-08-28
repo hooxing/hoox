@@ -49,6 +49,7 @@ import {
   PgThreadContextHistoryRepository,
   PgThreadContinuityMetrics,
   PgThreadSandboxSessionLifecycle,
+  PgWorkerDispatchWakeListener,
   PgWorkerTenantAssignments,
   PgWorkspaceCandidateHandoff,
   PgWorkspaceManifestRepository,
@@ -109,6 +110,7 @@ import {
 import {
   createDevelopmentProjectInternalTrajectoryMirror,
   createDevelopmentProjectRunEventMirror,
+  createDevelopmentProjectRunStartupTimingMirror,
   withDevelopmentProjectModelWireTraceMirror,
 } from "./project-model-wire-trace.js";
 import { BlobPromptImageLoader } from "./prompt-image-loader.js";
@@ -934,6 +936,10 @@ async function assembleWorkerRuntime(
       runtimeMode,
       configuration.model.wireTraceEnabled,
     );
+    const startupTimingDiagnostics = createDevelopmentProjectRunStartupTimingMirror(
+      runtimeMode,
+      configuration.model.wireTraceEnabled,
+    );
     const { modelRuntime, model } = await createOpenAiCompatibleModel(configuration.model);
     const modelContext = await createOpenAiCompatibleModelContextCapability(modelRuntime, model);
     const threadContinuityMetrics = new PgThreadContinuityMetrics(pool);
@@ -1297,6 +1303,7 @@ async function assembleWorkerRuntime(
         metrics: new PgRecoveryMetrics(pool),
         continuityMetrics: threadContinuityMetrics,
         ...(runEventDiagnostics === undefined ? {} : { runEventDiagnostics }),
+        ...(startupTimingDiagnostics === undefined ? {} : { startupTimingDiagnostics }),
         ...(configuration.threadContext.writeEnabled ? { threadContextBodies } : {}),
         ...(configuration.threadSandbox.reuseEnabled ? { threadSandboxes } : {}),
         ...(configuration.subagents.enabled
@@ -1320,6 +1327,10 @@ async function assembleWorkerRuntime(
       runtime: pool,
       coordinator: coordinatorPool,
     });
+    const dispatchWakeListener = new PgWorkerDispatchWakeListener(
+      coordinatorPool,
+      configuration.worker.pollIntervalMs,
+    );
     // 兼容固定 Tenant 部署的启动维护，同时所有新 dispatch 都会在同一事务动态唤醒其 Tenant。
     await tenantAssignments.wake(configuration.worker.tenantId);
     const loop = new AgentWorkerPollingLoop(
@@ -1363,9 +1374,13 @@ async function assembleWorkerRuntime(
       sandbox: () => upstreamSandboxes.probe(),
       model: () => probeOpenAiCompatibleModel(configuration.model, runtimeMode),
     });
-    await startWorkerLoopAfterDependencyProbes(runtimeMode, probes, () => loop.start());
+    await startWorkerLoopAfterDependencyProbes(runtimeMode, probes, () => {
+      loop.start();
+      dispatchWakeListener.start(() => loop.wake());
+    });
     return Object.freeze({
       stopAccepting: async () => {
+        await dispatchWakeListener.close();
         loop.stopAccepting();
         shutdown.request();
         await loop.drain();

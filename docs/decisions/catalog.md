@@ -248,3 +248,4 @@
 | [ADR-20260828120133：任务输入附件支持粘贴与可视预览](20260828120133-composer-paste-and-file-preview.md) | 已接受 | 2026-08-28 |
 | [ADR-20260828163752：附件触发的 Sandbox 准备与首个模型请求并行](20260828163752-attachment-sandbox-preparation-parallels-first-model-request.md) | 已接受 | 2026-08-28 |
 | [ADR-20260828170014：后台可配置的用户级有界 Run 并发](20260828170014-configurable-user-run-concurrency.md) | 已接受 | 2026-08-28 |
+| [ADR-20260828174129：Worker 使用事务通知唤醒并记录首模启动分段耗时](20260828174129-worker-dispatch-notify-and-first-model-startup-timings.md) | 已接受 | 2026-08-28 |

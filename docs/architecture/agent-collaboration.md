@@ -23,7 +23,7 @@ Runtime 对可创建的子 Agent 总数和同时运行数量设置上限。Agent
 
 `todo_write` 是复杂或长程任务的可选规划工具，不是 Runtime 强制工作流。简单任务可以不创建 Todo；Runtime 不因缺少 `in_progress` 项而拒绝其他工具。
 
-工具每次提交完整快照而不是 patch。首次快照全部为 `pending`，同时最多一个 `in_progress`，已完成项不能改写；快照使用单调版本并作为 `todo.updated` 持久事实公开给 API 和 Web。完整参数和投影说明见[`todo_write` 参考](../reference/todo-write.md)。
+工具每次提交完整快照而不是 patch。首次快照可以原子标记当前 `in_progress` 和此前 `completed` 的步骤，同时最多一个 `in_progress`；后续快照中的已完成项不能改写。快照使用单调版本并作为 `todo.updated` 持久事实公开给 API 和 Web。完整参数和投影说明见[`todo_write` 参考](../reference/todo-write.md)。
 
 ## 事实归属
 

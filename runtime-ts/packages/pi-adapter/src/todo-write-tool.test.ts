@@ -27,7 +27,7 @@ describe("todo_write Pi 工具", () => {
 
     const result = await tool.execute(
       "call-todo",
-      { todos: [{ id: "first", content: "第一步", status: "pending" }] },
+      { todos: [{ id: "first", content: "第一步", status: "in_progress" }] },
       undefined,
       () => undefined,
       {} as never,
@@ -35,6 +35,7 @@ describe("todo_write Pi 工具", () => {
 
     expect(tool.name).toBe("todo_write");
     expect(tool.executionMode).toBe("sequential");
+    expect(tool.description).toContain("首次调用可直接把当前步骤设为 in_progress");
     expect(order).toEqual(["write", "todo_write:succeeded"]);
     expect(JSON.stringify(result)).toContain('\\"version\\":1');
   });
@@ -96,7 +97,7 @@ describe("todo_write Pi 工具", () => {
     await expect(
       tool.execute(
         "call-failed",
-        { todos: [{ id: "first", content: "第一步", status: "pending" }] },
+        { todos: [{ id: "first", content: "第一步", status: "in_progress" }] },
         undefined,
         () => undefined,
         {} as never,

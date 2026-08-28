@@ -3,23 +3,23 @@ import { DomainError } from "./errors.js";
 import { applyTodoWrite } from "./todo.js";
 
 describe("Todo 执行清单", () => {
-  it("首次写入要求全部 pending，并生成单调修订号", () => {
+  it("首次写入可原子标记当前步骤，并生成单调修订号", () => {
     const created = applyTodoWrite(undefined, {
       todos: [
-        { id: "collect_requirements", content: "确认目标", status: "pending" },
-        { id: "deliver_result", content: "完成交付", status: "pending" },
+        { id: "collect_requirements", content: "确认目标", status: "completed" },
+        { id: "deliver_result", content: "完成交付", status: "in_progress" },
       ],
     });
-    const started = applyTodoWrite(created, {
+    const completed = applyTodoWrite(created, {
       todos: [
-        { id: "collect_requirements", content: "确认目标", status: "in_progress" },
-        { id: "deliver_result", content: "完成交付", status: "pending" },
+        { id: "collect_requirements", content: "确认目标", status: "completed" },
+        { id: "deliver_result", content: "完成交付", status: "completed" },
       ],
     });
 
     expect(created.version).toBe(1);
-    expect(started.version).toBe(2);
-    expect(started.todos[0]?.status).toBe("in_progress");
+    expect(created.todos[1]?.status).toBe("in_progress");
+    expect(completed.version).toBe(2);
   });
 
   it("允许一次完成当前步骤并开始下一步骤", () => {
@@ -49,13 +49,7 @@ describe("Todo 执行清单", () => {
     ]);
   });
 
-  it("拒绝首次直接执行、多个执行中步骤和改写已完成步骤", () => {
-    expect(() =>
-      applyTodoWrite(undefined, {
-        todos: [{ id: "first", content: "第一步", status: "in_progress" }],
-      }),
-    ).toThrow(DomainError);
-
+  it("拒绝多个执行中步骤和改写已完成步骤", () => {
     const initial = applyTodoWrite(undefined, {
       todos: [
         { id: "first", content: "第一步", status: "pending" },

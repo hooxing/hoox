@@ -19,6 +19,7 @@ import {
 } from "@hoox/domain";
 import {
   assessSafePiSessionContext,
+  AutomationUpdateArgumentError,
   automationToolMutation,
   bindTrustedPiModelContextCapability,
   ContextBudgetAdmissionError,
@@ -97,6 +98,61 @@ export function projectAgentControlError(error: unknown): Readonly<{
     message: "子 Agent 控制面暂时不可用，请稍后重试。",
     correctable: true,
     fatal: false,
+  });
+}
+const AUTOMATION_STATE_ERROR_MESSAGES = Object.freeze({
+  AUTOMATION_NOT_FOUND: "定时任务不存在，请检查 task_id 后重试。",
+  AUTOMATION_INVALID_STATE: "当前定时任务状态不允许该操作，请刷新状态后重试。",
+  AUTOMATION_KEY_CONFLICT: "同一工具调用已绑定不同请求，请重新发起一次操作。",
+} as const);
+
+export function projectAutomationUpdateError(error: unknown): Readonly<{
+  status: "failed";
+  code: string;
+  message: string;
+  correctable: boolean;
+  fatal: boolean;
+  details?: readonly { readonly field: string; readonly reason: string }[];
+}> {
+  if (error instanceof AutomationUpdateArgumentError) {
+    return Object.freeze({
+      status: "failed",
+      code: error.code,
+      message: "定时任务字段值无效，请按 details 修正后重试。",
+      correctable: true,
+      fatal: false,
+      details: error.details,
+    });
+  }
+  const internalCode = error instanceof Error ? error.message : undefined;
+  if (internalCode === "AUTOMATION_NOT_AUTHORIZED") {
+    return Object.freeze({
+      status: "failed",
+      code: internalCode,
+      message: "当前会话无权管理该定时任务。",
+      correctable: false,
+      fatal: false,
+    });
+  }
+  const knownCode =
+    internalCode !== undefined && internalCode in AUTOMATION_STATE_ERROR_MESSAGES
+      ? (internalCode as keyof typeof AUTOMATION_STATE_ERROR_MESSAGES)
+      : undefined;
+  if (knownCode !== undefined) {
+    return Object.freeze({
+      status: "failed",
+      code: knownCode,
+      message: AUTOMATION_STATE_ERROR_MESSAGES[knownCode],
+      correctable: true,
+      fatal: false,
+    });
+  }
+  return Object.freeze({
+    status: "failed",
+    code: "AUTOMATION_PERSISTENCE_UNAVAILABLE",
+    message: "定时任务服务暂时不可用，请稍后重试。",
+    correctable: false,
+    fatal: true,
   });
 }
 export interface PromptImageLoaderPort {
@@ -536,22 +592,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
                 mutation: automationToolMutation(request.arguments, input.scope.threadId),
               });
             },
-            projectError: (error: unknown) => {
-              const message = error instanceof Error ? error.message : "";
-              const correctable = new Set([
-                "AUTOMATION_NOT_FOUND",
-                "AUTOMATION_NOT_AUTHORIZED",
-                "AUTOMATION_INVALID_STATE",
-                "AUTOMATION_KEY_CONFLICT",
-              ]).has(message);
-              return Object.freeze({
-                status: "failed" as const,
-                code: correctable ? message : "AUTOMATION_PERSISTENCE_UNAVAILABLE",
-                message: correctable ? "定时任务状态已变化，请刷新后重试" : "定时任务暂时无法保存",
-                correctable,
-                fatal: !correctable,
-              });
-            },
+            projectError: projectAutomationUpdateError,
           };
     const todoWriteToolExecutor = {
       write: async (request: { readonly callId: string; readonly command: TodoWriteCommand }) => {

@@ -74,7 +74,7 @@ export function createTodoWritePiTool(
     name: "todo_write",
     label: "更新任务清单",
     description:
-      "复杂或长程任务需要分成多个可验证步骤时，自主创建并持续更新执行清单；简单任务不要使用。首次调用时所有步骤均为 pending；开始步骤时更新为 in_progress，完成后更新为 completed。每次提交完整清单，同时最多一个 in_progress；调整步骤结构时使用 explanation 说明原因。",
+      "复杂或长程任务需要分成多个可验证步骤时，自主创建并持续更新执行清单；简单任务不要使用。首次调用可直接把当前步骤设为 in_progress，并按实际进度标记已完成步骤；完成当前步骤时更新为 completed。每次提交完整清单，同时最多一个 in_progress；调整步骤结构时使用 explanation 说明原因。",
     executionMode: "sequential",
     parameters: TodoWriteToolArgumentsSchema,
     prepareArguments: invalidArguments.prepareArguments,

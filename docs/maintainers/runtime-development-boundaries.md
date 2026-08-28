@@ -193,7 +193,7 @@ PPTX Skill 宣称预装的 Node.js、`pptxgenjs`、图标渲染和 LibreOffice/P
 
 `agent-worker` 的 `pnpm dev:worker` 同样仅支持 development：它使用真实 PostgreSQL dispatch、S3 durable observation、CubeSandbox 和 OpenAI-compatible Provider。`AGENT_WORKER_TENANT_ID` 仍严格等于 `DEV_AUTH_USER_A_TENANT_ID`，但只用于启动兼容；个人与团队 dispatch 都会原子唤醒动态 Tenant 控制面。`DATABASE_WORKER_COORDINATOR_URL` 必须使用独立的 `DATABASE_WORKER_COORDINATOR_ROLE` 登录，该角色只能领取无业务载荷的 Tenant 租约；实际任务始终回到 `DATABASE_URL` 对应的 Runtime 角色和 Tenant RLS 内读取。先用 `pnpm dev:worker:check` 执行不常驻、只读的完整 readiness；它会同时检查两个数据库身份，但不会启动 polling 或领取 dispatch。开发 Provider 的 `/models` 只需存在 `MODEL_ID`，但 `MODEL_CONTEXT_WINDOW` 与 `MODEL_MAX_OUTPUT_TOKENS` 仍为严格必填的显式预算。
 
-发送给 OpenAI-compatible Provider 的函数参数 Schema 顶层必须明确声明为 `object`。`automation_update` 在同一份严格联合 Schema 上显式声明该顶层类型，Provider 与 Runtime 因而共享 action 必填字段、字段范围和多余字段限制，不维护宽松的并行表示。详见[工具 Schema 单一真源决策](../decisions/20260826172009-single-source-provider-object-tool-schema.md)。
+发送给 OpenAI-compatible Provider 的函数参数 Schema 顶层必须明确声明为 `object`。`automation_update` 向 Provider 暴露不含顶层 `anyOf` 的稳定 object 形状，Runtime 再用复用同一组字段 Schema 的严格 action 联合校验必填字段和多余字段；Schema 错误必须返回字段级 `details`，字段值错误、权限拒绝、状态冲突与服务不可用使用不同稳定码。详见[定时任务工具 Schema 与错误语义决策](../decisions/20260828113059-automation-tool-schema-and-error-semantics.md)。
 
 VMware 内的 Cubelet 挂载附件与 `/resources/skills` 公开市场视图时，不能直接访问只监听 Windows loopback 的
 API。所有 Sandbox 工具现在都依赖该 ResourceFS 数据面。先为宿主虚拟网卡生成独立的开发 TLS 证书，把 CA 公钥

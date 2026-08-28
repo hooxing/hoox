@@ -7,7 +7,13 @@ import {
   Circle,
   Download,
   Eye,
+  FileArchive,
+  FileAudio,
+  FileCode2,
+  FileImage,
+  FileSpreadsheet,
   FileText,
+  FileVideo,
   GitBranch,
   LoaderCircle,
   MessageSquarePlus,
@@ -57,6 +63,57 @@ export const compactWorkspaceMedia = "(max-width: 820px)";
 export const composerTextareaResize = "none";
 export const userRequestCollapsedHeight = 264;
 export const userRequestCollapseCharacterThreshold = 600;
+const composerFileLimit = 20;
+
+type ComposerFileKind = "archive" | "audio" | "code" | "document" | "image" | "sheet" | "video";
+
+function composerFileKind(name: string, mediaType: string): ComposerFileKind {
+  const normalizedName = name.toLowerCase();
+  const normalizedMediaType = mediaType.toLowerCase();
+  if (normalizedMediaType.startsWith("image/")) return "image";
+  if (normalizedMediaType.startsWith("audio/")) return "audio";
+  if (normalizedMediaType.startsWith("video/")) return "video";
+  if (
+    normalizedMediaType.includes("spreadsheet") ||
+    normalizedMediaType.includes("excel") ||
+    /\.(?:csv|ods|xls|xlsx)$/u.test(normalizedName)
+  )
+    return "sheet";
+  if (
+    normalizedMediaType.includes("zip") ||
+    normalizedMediaType.includes("compressed") ||
+    /\.(?:7z|bz2|gz|rar|tar|tgz|zip)$/u.test(normalizedName)
+  )
+    return "archive";
+  if (
+    normalizedMediaType.includes("json") ||
+    normalizedMediaType.includes("javascript") ||
+    normalizedMediaType.includes("typescript") ||
+    normalizedMediaType.includes("xml") ||
+    /\.(?:c|cc|cpp|css|go|h|html|java|js|jsx|json|md|php|py|rb|rs|sh|sql|ts|tsx|vue|xml|yaml|yml)$/u.test(
+      normalizedName,
+    )
+  )
+    return "code";
+  return "document";
+}
+
+function ComposerFileIcon({
+  kind,
+  size = 20,
+}: {
+  readonly kind: ComposerFileKind;
+  readonly size?: number;
+}) {
+  const properties = { size, "aria-hidden": true as const };
+  if (kind === "image") return <FileImage {...properties} />;
+  if (kind === "audio") return <FileAudio {...properties} />;
+  if (kind === "video") return <FileVideo {...properties} />;
+  if (kind === "sheet") return <FileSpreadsheet {...properties} />;
+  if (kind === "archive") return <FileArchive {...properties} />;
+  if (kind === "code") return <FileCode2 {...properties} />;
+  return <FileText {...properties} />;
+}
 
 export function shouldInitiallyCollapseUserRequest(text: string): boolean {
   const visualLines = text.split(/\r?\n/u).length;
@@ -996,6 +1053,99 @@ export function RunRecoveryLoading() {
   );
 }
 
+type ComposerHistoryFileApi = Pick<RuntimeApi, "listHistoryFiles"> &
+  Partial<Pick<RuntimeApi, "previewHistoryFile">>;
+
+function appendComposerFiles(
+  currentFiles: readonly File[],
+  addedFiles: readonly File[],
+  reservedSlots: number,
+): readonly File[] {
+  const availableSlots = Math.max(0, composerFileLimit - reservedSlots);
+  return [...currentFiles, ...addedFiles]
+    .filter(
+      (file, index, combined) =>
+        combined.findIndex((candidate) => composerFileKey(candidate) === composerFileKey(file)) ===
+        index,
+    )
+    .slice(0, availableSlots);
+}
+
+function clipboardFileList(clipboardData: DataTransfer): readonly File[] {
+  const directFiles = Array.from(clipboardData.files);
+  if (directFiles.length > 0) return directFiles;
+  return Array.from(clipboardData.items ?? []).flatMap((item) => {
+    if (item.kind !== "file") return [];
+    const file = item.getAsFile();
+    return file === null ? [] : [file];
+  });
+}
+
+function ComposerFileVisual({
+  name,
+  mediaType,
+  previewUrl,
+}: {
+  readonly name: string;
+  readonly mediaType: string;
+  readonly previewUrl?: string | undefined;
+}) {
+  const kind = composerFileKind(name, mediaType);
+  return (
+    <span className={`composer-file-visual is-${kind}`} data-file-kind={kind}>
+      {previewUrl === undefined ? (
+        <ComposerFileIcon kind={kind} />
+      ) : (
+        <img className="composer-file-preview" src={previewUrl} alt="" />
+      )}
+    </span>
+  );
+}
+
+function ComposerLocalFileVisual({ file }: { readonly file: File }) {
+  const [previewUrl, setPreviewUrl] = useState<string>();
+  useEffect(() => {
+    if (composerFileKind(file.name, file.type) !== "image") {
+      setPreviewUrl(undefined);
+      return;
+    }
+    if (typeof URL.createObjectURL !== "function") return;
+    const nextPreviewUrl = URL.createObjectURL(file);
+    setPreviewUrl(nextPreviewUrl);
+    return () => {
+      if (typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(nextPreviewUrl);
+    };
+  }, [file]);
+  return <ComposerFileVisual name={file.name} mediaType={file.type} previewUrl={previewUrl} />;
+}
+
+function ComposerHistoryFileVisual({
+  file,
+  loadPreview,
+}: {
+  readonly file: HistoryFile;
+  readonly loadPreview?: RuntimeApi["previewHistoryFile"] | undefined;
+}) {
+  const [previewUrl, setPreviewUrl] = useState<string>();
+  useEffect(() => {
+    setPreviewUrl(undefined);
+    if (composerFileKind(file.name, file.mediaType) !== "image" || loadPreview === undefined)
+      return;
+    let cancelled = false;
+    void loadPreview(file)
+      .then((url) => {
+        if (!cancelled) setPreviewUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setPreviewUrl(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [file, loadPreview]);
+  return <ComposerFileVisual name={file.name} mediaType={file.mediaType} previewUrl={previewUrl} />;
+}
+
 export function ConversationComposer({
   input,
   files,
@@ -1019,7 +1169,7 @@ export function ConversationComposer({
   readonly onQueue: () => void;
   readonly selectedHistoryFiles?: readonly HistoryFile[];
   readonly onHistoryFilesChange?: (files: readonly HistoryFile[]) => void;
-  readonly historyFileApi?: Pick<RuntimeApi, "listHistoryFiles">;
+  readonly historyFileApi?: ComposerHistoryFileApi;
 }) {
   const [mentionFiles, setMentionFiles] = useState<readonly HistoryFile[]>([]);
   const [mentionLoading, setMentionLoading] = useState(false);
@@ -1084,12 +1234,32 @@ export function ConversationComposer({
 
   const hasInput = input.trim().length > 0 || files.length > 0 || selectedHistoryFiles.length > 0;
   return (
-    <form className="composer" onSubmit={onSubmit}>
+    <form
+      className="composer"
+      onSubmit={onSubmit}
+      onPaste={(event) => {
+        const pastedFiles = clipboardFileList(event.clipboardData);
+        if (pastedFiles.length === 0) return;
+        event.preventDefault();
+        onFilesChange(appendComposerFiles(files, pastedFiles, selectedHistoryFiles.length));
+      }}
+    >
       {(files.length > 0 || selectedHistoryFiles.length > 0) && (
         <ul className="composer-files" aria-label="待发送文件">
           {selectedHistoryFiles.map((file, index) => (
-            <li className="composer-file is-history" key={composerHistoryFileKey(file)}>
-              <span title={file.name}>{file.name}</span>
+            <li
+              className={`composer-file is-history ${
+                composerFileKind(file.name, file.mediaType) === "image" ? "is-image" : ""
+              }`}
+              key={composerHistoryFileKey(file)}
+            >
+              <ComposerHistoryFileVisual
+                file={file}
+                loadPreview={historyFileApi?.previewHistoryFile}
+              />
+              <span className="composer-file-name" title={file.name}>
+                {file.name}
+              </span>
               <button
                 type="button"
                 aria-label={`移除历史文件 ${file.entryName}`}
@@ -1105,8 +1275,16 @@ export function ConversationComposer({
             </li>
           ))}
           {files.map((file, index) => (
-            <li className="composer-file" key={composerFileKey(file)}>
-              <span title={file.name}>{file.name}</span>
+            <li
+              className={`composer-file ${
+                composerFileKind(file.name, file.type) === "image" ? "is-image" : ""
+              }`}
+              key={composerFileKey(file)}
+            >
+              <ComposerLocalFileVisual file={file} />
+              <span className="composer-file-name" title={file.name}>
+                {file.name}
+              </span>
               <button
                 type="button"
                 aria-label={`移除文件 ${file.name}`}
@@ -1157,7 +1335,7 @@ export function ConversationComposer({
         id="agent-request"
         value={input}
         onChange={(event) => onChange(event.target.value)}
-        placeholder="描述任务，输入 @ 可选择云盘文件…"
+        placeholder="描述任务，可粘贴图片或文件，输入 @ 选择云盘文件…"
         rows={2}
         disabled={disabled}
         style={{ resize: composerTextareaResize }}
@@ -1185,25 +1363,16 @@ export function ConversationComposer({
         }}
       />
       <div className="composer-footer">
-        <label className="attachment-button" title="上传文件">
+        <label className="attachment-button" title="上传文件，也可直接粘贴">
           <Paperclip size={16} aria-hidden="true" />
-          <span>上传文件</span>
+          <span>上传或粘贴</span>
           <input
             type="file"
             multiple
             disabled={disabled}
             onChange={(event) => {
               const selected = Array.from(event.target.files ?? []);
-              onFilesChange(
-                [...files, ...selected]
-                  .filter(
-                    (file, index, combined) =>
-                      combined.findIndex(
-                        (candidate) => composerFileKey(candidate) === composerFileKey(file),
-                      ) === index,
-                  )
-                  .slice(0, 20),
-              );
+              onFilesChange(appendComposerFiles(files, selected, selectedHistoryFiles.length));
               event.target.value = "";
             }}
           />

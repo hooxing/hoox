@@ -1,10 +1,10 @@
 # ADR-20260826172009：Provider 工具 Schema 使用单一严格真源
 
-- 状态：已接受
+- 状态：部分已替代（Provider 形状与 Runtime 严格联合重新分层）
 - 日期：2026-08-26
 - 决策者：项目维护者
 - 关联任务/PR：收敛 `automation_update` 的重复参数定义
-- 替代关系：替代 ADR-20260826164658 的双层 Schema 实现；顶层 object 兼容要求继续有效
+- 替代关系：替代 ADR-20260826164658 的双层 Schema 实现；Provider/Runtime 单一 Schema 部分被 ADR-20260828113059 替代，顶层 object 与字段复用要求继续有效
 
 ## 背景
 

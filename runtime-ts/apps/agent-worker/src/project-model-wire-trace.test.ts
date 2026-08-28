@@ -8,9 +8,11 @@ import type { RuntimeEventV1 } from "./ports.js";
 import {
   createDevelopmentProjectInternalTrajectoryMirror,
   createDevelopmentProjectRunEventMirror,
+  createDevelopmentProjectRunStartupTimingMirror,
   ProjectInternalTrajectoryMirror,
   ProjectModelWireTraceMirror,
   ProjectRunEventMirror,
+  ProjectRunStartupTimingMirror,
   withDevelopmentProjectModelWireTraceMirror,
 } from "./project-model-wire-trace.js";
 
@@ -255,6 +257,44 @@ describe("项目模型报文本地镜像", () => {
     );
     expect(JSON.parse(await readFile(rootFile, "utf8"))).toEqual(event);
     expect(JSON.parse(await readFile(subagentFile, "utf8"))).toEqual(event);
+  });
+
+  it("将首模前分段耗时写成可幂等重放的规范 JSON", async () => {
+    const root = await temporaryRoot();
+    const mirror = new ProjectRunStartupTimingMirror(root);
+    const timing = {
+      context: record().context,
+      observedAt: "2026-08-28T09:30:00.000Z",
+      totalDurationMs: 18.75,
+      spans: [
+        { phase: "run_claim" as const, durationMs: 0.5 },
+        { phase: "agent_session_create" as const, durationMs: 1.8 },
+      ],
+    };
+
+    await mirror.persist(timing);
+    await mirror.persist(timing);
+
+    const path = join(root, "run_dev_1", "attempt_dev_1", "startup-timings.json");
+    expect(JSON.parse(await readFile(path, "utf8"))).toEqual(timing);
+    await expect(mirror.persist({ ...timing, totalDurationMs: 19 })).rejects.toThrow(
+      "LOCAL_MODEL_WIRE_TRACE_CONFLICT",
+    );
+  });
+
+  it("启动耗时镜像只在 development 且显式敏感诊断开启时创建", () => {
+    const factory = vi.fn(() => ({ persist: async () => undefined }));
+    expect(
+      createDevelopmentProjectRunStartupTimingMirror("development", true, factory),
+    ).toBeDefined();
+    expect(factory).toHaveBeenCalledOnce();
+    expect(
+      createDevelopmentProjectRunStartupTimingMirror("development", false, factory),
+    ).toBeUndefined();
+    expect(
+      createDevelopmentProjectRunStartupTimingMirror("production", true, factory),
+    ).toBeUndefined();
+    expect(factory).toHaveBeenCalledOnce();
   });
 
   it("内部轨迹镜像只在 development 且显式敏感诊断开启时创建", () => {

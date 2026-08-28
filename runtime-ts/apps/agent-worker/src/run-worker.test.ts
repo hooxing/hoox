@@ -34,6 +34,7 @@ import type {
   ThreadContinuityMetricsPort,
 } from "./ports.js";
 import type { RunEventDiagnosticsPort } from "./run-event-diagnostics.js";
+import type { RunStartupTimingDiagnosticsPort } from "./run-startup-diagnostics.js";
 import { RunWorker, type RunWorkerOptions } from "./run-worker.js";
 import {
   BlockingAgentSession,
@@ -87,6 +88,7 @@ function harness(
       readonly scope: { readonly tenantId: TenantId; readonly userId: UserId };
     }): Promise<RunPersonalizationSnapshot>;
   }>,
+  startupTimingDiagnostics?: RunStartupTimingDiagnosticsPort,
 ) {
   const persistence = new FakeExecutionPersistence();
   const scope = persistence.addSeed(seed);
@@ -118,6 +120,7 @@ function harness(
       metrics,
       continuityMetrics,
       ...(runEventDiagnostics === undefined ? {} : { runEventDiagnostics }),
+      ...(startupTimingDiagnostics === undefined ? {} : { startupTimingDiagnostics }),
       ...(workerOptions.threadContextWriteEnabled === true ? { threadContextBodies } : {}),
       ...(workerOptions.threadSandboxSessionReuseEnabled === true ? { threadSandboxes } : {}),
       ...(workerOptions.subagentsEnabled === true ? { agentControl } : {}),
@@ -176,6 +179,41 @@ describe("Run Worker 双栅栏与恢复状态机", () => {
     expect(h.persistence.record(h.scope).outbox).not.toContainEqual(
       expect.objectContaining({ kind: "sandbox_cleanup" }),
     );
+  });
+
+  it("在首个模型请求前发布细分启动耗时且不包含后续阶段", async () => {
+    const persist = vi.fn<RunStartupTimingDiagnosticsPort["persist"]>(async () => undefined);
+    const h = harness(
+      [new ScriptedAgentSession(successfulEvents)],
+      fakeSeed("startup-timing"),
+      {},
+      undefined,
+      false,
+      undefined,
+      undefined,
+      { persist },
+    );
+
+    await expect(h.worker.execute(h.scope)).resolves.toEqual({ outcome: "succeeded" });
+
+    expect(persist).toHaveBeenCalledOnce();
+    const snapshot = persist.mock.calls[0]?.[0];
+    expect(snapshot?.context).toMatchObject({
+      runId: h.scope.runId,
+      threadId: h.scope.threadId,
+    });
+    expect(snapshot?.spans.map((span) => span.phase)).toEqual([
+      "run_claim",
+      "memory_retrieve",
+      "pre_session_stop_point",
+      "agent_session_create",
+      "post_session_stop_point",
+      "model_checkpoint",
+      "pre_model_stop_point",
+      "prepare_input",
+      "model_authorization",
+    ]);
+    expect(snapshot?.spans.every((span) => span.durationMs >= 0)).toBe(true);
   });
 
   it("长期记忆检索结果只注入当前 user message，失败时降级为原消息", async () => {

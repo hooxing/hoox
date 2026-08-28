@@ -265,6 +265,18 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       const providerCallDigest = createHash("sha256").update(providerCallId, "utf8").digest("hex");
       return `${input.agent.agentThreadId}:${input.agent.agentTurnId}:${providerCallDigest.slice(0, 32)}`;
     };
+    const measureStartup = async <T>(
+      phase: Parameters<NonNullable<typeof input.startupTiming>["record"]>[0],
+      operation: () => Promise<T>,
+    ): Promise<T> => {
+      if (input.startupTiming === undefined) return await operation();
+      const startedAt = performance.now();
+      try {
+        return await operation();
+      } finally {
+        input.startupTiming.record(phase, Math.max(0, performance.now() - startedAt));
+      }
+    };
 
     const attemptWireTraces = this.modelWireTraces?.createAttempt(input.attemptId);
     const trajectoryRecorder =
@@ -392,19 +404,25 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
       workspaceLeaseRootRunId: input.fence.workspaceLease.rootRunId,
       workspaceLeaseEpoch: input.fence.workspaceLease.epoch,
     });
+    const skillRuntime = this.skillRuntime;
     const recoveredSkillInstructions =
-      this.skillRuntime === undefined
+      skillRuntime === undefined
         ? Object.freeze([])
-        : await this.skillRuntime.recoverLoadedInstructions({ binding: skillBinding });
+        : await measureStartup("skill_recovery", () =>
+            skillRuntime.recoverLoadedInstructions({ binding: skillBinding }),
+          );
+    const explicitInvocation = skillSnapshot.explicitInvocation;
     const explicitSkillInstruction =
-      skillSnapshot.explicitInvocation === undefined
+      explicitInvocation === undefined
         ? undefined
-        : await this.requireSkillRuntime().loadInstruction({
-            binding: skillBinding,
-            source: "explicit",
-            invocationName: skillSnapshot.explicitInvocation.invocationName,
-            args: skillSnapshot.explicitInvocation.args,
-          });
+        : await measureStartup("explicit_skill_load", () =>
+            this.requireSkillRuntime().loadInstruction({
+              binding: skillBinding,
+              source: "explicit",
+              invocationName: explicitInvocation.invocationName,
+              args: explicitInvocation.args,
+            }),
+          );
     const recoveredForSession = recoveredSkillInstructions.filter(
       (instruction) =>
         explicitSkillInstruction === undefined ||
@@ -763,7 +781,13 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
         record: async () => ({ outcome: "unknown" as const }),
       }),
     });
-    const recoveredProjection = await this.prepareObservationSession?.(input, compatibility);
+    const prepareObservationSession = this.prepareObservationSession;
+    const recoveredProjection =
+      prepareObservationSession === undefined
+        ? undefined
+        : await measureStartup("observation_projection", () =>
+            prepareObservationSession(input, compatibility),
+          );
     const activeRolloutProjection = recoveredProjection ?? input.rolloutProjection;
     const baselineBudget = assessSafePiSessionContext({
       ...sessionMaterial,
@@ -777,83 +801,102 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
     if (availableThreadHistoryTokens < 1) {
       throw new ContextBudgetAdmissionError("reserved_context_exceeds_window");
     }
+    const prepareThreadHistory = this.prepareThreadHistory;
     const recoveredThreadHistory =
       input.agent?.agentKind === "subagent"
         ? input.threadActiveHistory
-        : (input.threadActiveHistory ?? (await this.prepareThreadHistory?.(input, compatibility)));
+        : (input.threadActiveHistory ??
+          (prepareThreadHistory === undefined
+            ? undefined
+            : await measureStartup("thread_history_read", () =>
+                prepareThreadHistory(input, compatibility),
+              )));
     const initialThreadHistory =
       recoveredThreadHistory === undefined ||
       this.prepareRuntimeCompaction === undefined ||
       input.agent?.agentKind === "subagent"
         ? recoveredThreadHistory
-        : await runRuntimeCompaction(
-            input,
-            compatibility,
-            recoveredThreadHistory,
-            availableThreadHistoryTokens,
-            input.initialInputText === undefined
-              ? 0
-              : providerVisibleUserInputTokens(input.initialInputText, this.modelContext.tokenizer),
+        : await measureStartup("runtime_compaction", () =>
+            runRuntimeCompaction(
+              input,
+              compatibility,
+              recoveredThreadHistory,
+              availableThreadHistoryTokens,
+              input.initialInputText === undefined
+                ? 0
+                : providerVisibleUserInputTokens(
+                    input.initialInputText,
+                    this.modelContext.tokenizer,
+                  ),
+            ),
           );
     input.agentControl?.setParentHistory(initialThreadHistory);
-    controller = await createSafePiSession({
-      ...sessionMaterial,
-      rolloutProjection: activeRolloutProjection,
-      ...(initialThreadHistory === undefined ? {} : { threadActiveHistory: initialThreadHistory }),
-      ...(input.onTurnSafePoint === undefined
-        ? {}
-        : {
-            prepareNextTurnHistory: async (
-              event: Extract<
-                import("@hoox/pi-adapter").RuntimeAgentEvent,
-                { type: "turn.completed" }
-              >,
-            ) => {
-              const persisted = await input.onTurnSafePoint?.(event);
-              if (persisted === undefined) return undefined;
-              let replacement: ThreadActiveHistoryV1 | undefined;
-              if (this.prepareThreadHistory !== undefined) {
-                const nextInput = { ...input, contextThroughSequence: persisted.throughSequence };
-                const rebuilt = await this.prepareThreadHistory(nextInput, compatibility);
-                if (rebuilt === undefined) throw new Error("Thread Context 安全点重建失败");
-                replacement =
-                  this.prepareRuntimeCompaction === undefined
-                    ? rebuilt
-                    : await runRuntimeCompaction(
-                        nextInput,
-                        compatibility,
-                        rebuilt,
-                        availableThreadHistoryTokens,
-                        (persisted.steers ?? []).reduce(
-                          (tokens, steer) =>
-                            tokens +
-                            providerVisibleUserInputTokens(
-                              steer.inputText,
-                              this.modelContext.tokenizer,
-                            ),
-                          0,
-                        ),
-                      );
-              }
-              if ((persisted.steers?.length ?? 0) > 0) {
-                if (controller === undefined) throw new Error("Pi Session steer 安全点尚未就绪");
-                // replacement 截止到完整 assistant/tool turn；同一安全点已持久消费的 steer
-                // 按 input_sequence 依次进入 Pi 原生队列，由下一次 Provider 请求一起读取。
-                for (const steer of persisted.steers ?? []) {
-                  const preparedSteer = await prepareInput({
-                    text: steer.inputText,
-                    attachments: steer.attachments ?? [],
-                  });
-                  await controller.steer(preparedSteer.text, preparedSteer.images);
+    controller = await measureStartup("pi_session_create", () =>
+      createSafePiSession({
+        ...sessionMaterial,
+        rolloutProjection: activeRolloutProjection,
+        ...(initialThreadHistory === undefined
+          ? {}
+          : { threadActiveHistory: initialThreadHistory }),
+        ...(input.onTurnSafePoint === undefined
+          ? {}
+          : {
+              prepareNextTurnHistory: async (
+                event: Extract<
+                  import("@hoox/pi-adapter").RuntimeAgentEvent,
+                  { type: "turn.completed" }
+                >,
+              ) => {
+                const persisted = await input.onTurnSafePoint?.(event);
+                if (persisted === undefined) return undefined;
+                let replacement: ThreadActiveHistoryV1 | undefined;
+                if (this.prepareThreadHistory !== undefined) {
+                  const nextInput = { ...input, contextThroughSequence: persisted.throughSequence };
+                  const rebuilt = await this.prepareThreadHistory(nextInput, compatibility);
+                  if (rebuilt === undefined) throw new Error("Thread Context 安全点重建失败");
+                  replacement =
+                    this.prepareRuntimeCompaction === undefined
+                      ? rebuilt
+                      : await runRuntimeCompaction(
+                          nextInput,
+                          compatibility,
+                          rebuilt,
+                          availableThreadHistoryTokens,
+                          (persisted.steers ?? []).reduce(
+                            (tokens, steer) =>
+                              tokens +
+                              providerVisibleUserInputTokens(
+                                steer.inputText,
+                                this.modelContext.tokenizer,
+                              ),
+                            0,
+                          ),
+                        );
                 }
-              }
-              return replacement;
-            },
-          }),
-    });
+                if ((persisted.steers?.length ?? 0) > 0) {
+                  if (controller === undefined) throw new Error("Pi Session steer 安全点尚未就绪");
+                  // replacement 截止到完整 assistant/tool turn；同一安全点已持久消费的 steer
+                  // 按 input_sequence 依次进入 Pi 原生队列，由下一次 Provider 请求一起读取。
+                  for (const steer of persisted.steers ?? []) {
+                    const preparedSteer = await prepareInput({
+                      text: steer.inputText,
+                      attachments: steer.attachments ?? [],
+                    });
+                    await controller.steer(preparedSteer.text, preparedSteer.images);
+                  }
+                }
+                return replacement;
+              },
+            }),
+      }),
+    );
     try {
       // Pi 构造可能执行异步初始化；返回可用 Session 前再次以同一 fence 进入 PG，关闭接管竞态窗口。
-      await this.prepareObservationSession?.(input, compatibility);
+      if (prepareObservationSession !== undefined) {
+        await measureStartup("observation_revalidation", () =>
+          prepareObservationSession(input, compatibility),
+        );
+      }
     } catch (error) {
       controller.dispose();
       throw error;
@@ -964,6 +1007,7 @@ export class PiWorkerSessionFactory implements AgentSessionFactoryPort {
           text: prepared.text,
           images: prepared.images,
         });
+        input.startupTiming?.modelInvocationStarting();
         try {
           try {
             await controller.prompt(prepared.text, prepared.images);

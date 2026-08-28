@@ -34,9 +34,12 @@ model-wire-traces/<runId>/<attemptId>/
 model-turn-00-transport-0-request-complete.json
 model-turn-00-transport-0-response-truncated.sse
 runtime-event-00000003-agent_event.json
+startup-timings.json
 ```
 
-文件使用同目录临时文件和原子发布；相同字节可以幂等重放，不同字节不会覆盖已有文件。本地镜像失败不改变模型调用或 PostgreSQL/MinIO 持久化结果。
+`startup-timings.json` 记录 Worker 开始领取 Run 到首个 Provider 请求即将发起之间的总耗时，以及 claim、个性化、记忆、停止点、AgentSupervisor、Skill 恢复、Observation、Thread 历史、Runtime compaction、Pi Session 创建、模型阶段持久化、输入准备和模型许可等低基数阶段。它不保存 Prompt、工具参数或用户正文；若 Run 在首模前失败，则在 Run 收口时保存截至失败点的部分快照。
+
+文件使用同目录临时文件和原子发布；相同字节可以幂等重放，不同字节不会覆盖已有文件。本地镜像写入在首模边界异步启动，失败不阻塞 Provider 请求，也不改变模型调用或 PostgreSQL/MinIO 持久化结果。
 
 该目录已被 Git 忽略，但不提供 ACL、自动删除或 retention 保证。PostgreSQL/MinIO 是产品能力的权威存储；production 不创建本地镜像。
 

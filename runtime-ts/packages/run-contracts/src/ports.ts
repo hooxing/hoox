@@ -1023,6 +1023,32 @@ export interface WorkerAgentSessionPort {
   dispose(): void;
 }
 
+export type RunStartupTimingPhase =
+  | "run_claim"
+  | "personalization_resolve"
+  | "memory_retrieve"
+  | "pre_session_stop_point"
+  | "agent_supervisor_initialize"
+  | "skill_recovery"
+  | "explicit_skill_load"
+  | "observation_projection"
+  | "observation_revalidation"
+  | "thread_history_read"
+  | "runtime_compaction"
+  | "pi_session_create"
+  | "agent_session_create"
+  | "post_session_stop_point"
+  | "model_checkpoint"
+  | "pre_model_stop_point"
+  | "prepare_input"
+  | "model_authorization";
+
+export interface RunStartupTimingObserver {
+  record(phase: RunStartupTimingPhase, durationMs: number): void;
+  /** 在真正进入 Provider 调用前发布当前快照；实现不得返回异步等待。 */
+  modelInvocationStarting(): void;
+}
+
 export interface AgentSessionFactoryPort {
   /** 工具许可拒绝会先形成 durable 失败回执，并在下一 Provider 轮次前失败关闭。 */
   readonly toolRejectionReceiptBarrier?: "durable";
@@ -1047,6 +1073,8 @@ export interface AgentSessionFactoryPort {
         | { readonly reason: "attachment" }
         | { readonly reason: "tool"; readonly call: ExternalEffectCall },
     ) => Promise<SandboxSessionRef>;
+    /** 只记录首个模型请求前的低基数阶段耗时；诊断失败不得影响 Session。 */
+    readonly startupTiming?: RunStartupTimingObserver;
     readonly rolloutProjection: ControlledRolloutProjection;
     /** Session 创建前已知的首轮文本，只用于把即将追加的 user turn 计入自动压缩触发。 */
     readonly initialInputText?: string;

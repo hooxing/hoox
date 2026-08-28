@@ -40,6 +40,8 @@ import {
   LogoutAccountSuccessEnvelopeSchema,
   type RegisterAccountRequest,
   RegisterAccountRequestSchema,
+  type RenamePersonalThreadRequest,
+  RenamePersonalThreadRequestSchema,
   ArtifactDeliverySuccessEnvelopeSchema,
   ArtifactListSuccessEnvelopeSchema,
   type ConfigureSkillRequest,
@@ -169,6 +171,7 @@ import type {
   ApiIdGenerator,
   ArchiveThreadCommandPort,
   AuthContextResolver,
+  RenamePersonalThreadCommandPort,
   ReadinessPort,
   TenantSelector,
   ThreadCursorCodec,
@@ -190,6 +193,7 @@ export interface ApiDependencies {
   readonly repositories: CoreRepositories;
   readonly createCapability?: ApiCreateCapability;
   readonly archiveThread: ArchiveThreadCommandPort;
+  readonly renamePersonalThread: RenamePersonalThreadCommandPort;
   readonly cursorCodec: ThreadCursorCodec;
   readonly readiness: ReadinessPort;
   readonly clock: ApiClock;
@@ -1807,6 +1811,33 @@ export function createApiApp(
     async (request) => {
       const auth = await authenticate(request);
       return success(request, await service.getThread(auth, request.params.threadId));
+    },
+  );
+
+  app.patch<{ Params: ThreadPath; Body: RenamePersonalThreadRequest }>(
+    "/v1/threads/:threadId",
+    {
+      preValidation: async (request) => requireJsonContentType(request),
+      schema: {
+        params: ThreadPathSchema,
+        body: RenamePersonalThreadRequestSchema,
+        response: {
+          200: ThreadSuccessEnvelopeSchema,
+          400: ErrorEnvelopeSchema,
+          401: ErrorEnvelopeSchema,
+          404: ErrorEnvelopeSchema,
+          415: ErrorEnvelopeSchema,
+          500: ErrorEnvelopeSchema,
+          503: ErrorEnvelopeSchema,
+        },
+      },
+    },
+    async (request) => {
+      const auth = await authenticate(request);
+      return success(
+        request,
+        await service.renamePersonalThread(auth, request.params.threadId, request.body.title),
+      );
     },
   );
 

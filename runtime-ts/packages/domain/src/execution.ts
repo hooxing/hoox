@@ -80,6 +80,13 @@ export function rehydrateThread(
   });
 }
 
+export function renameThread(thread: Thread, rawTitle: string, now: IsoTimestamp): Thread {
+  domainInvariant(thread.status === "active", "INVALID_STATE_TRANSITION", "已归档任务不能改名");
+  const title = rawTitle.trim();
+  domainInvariant(title.length > 0 && title.length <= 200, "INVALID_ARGUMENT", "任务标题长度无效");
+  return sealEntity("Thread", { ...thread, title, updatedAt: now });
+}
+
 export function archiveThread(thread: Thread, now: IsoTimestamp): Thread {
   domainInvariant(thread.status === "active", "INVALID_STATE_TRANSITION", "任务已经归档");
   return sealEntity("Thread", { ...thread, status: "archived" as const, updatedAt: now });

@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => {
     threadContinuity: {},
     modelWireTraces: {},
     archiveThread: {},
+    renamePersonalThread: {},
     experience: {},
     probe: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),

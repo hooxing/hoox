@@ -27,7 +27,7 @@ export interface TodoSnapshot {
 
 /**
  * Todo 是 Agent 自主维护的 Run 级执行清单，不是工具授权门禁。这里仅保证清单自身
- * 可审计：首次全 pending、单一 in_progress、已完成项不可被重写或删除。
+ * 可审计：同时最多一个 in_progress，已完成项不可被重写或删除。
  */
 export function applyTodoWrite(
   previous: TodoSnapshot | undefined,
@@ -37,11 +37,6 @@ export function applyTodoWrite(
   const explanation = normalizeExplanation(command.explanation);
 
   if (previous === undefined) {
-    domainInvariant(
-      todos.every((todo) => todo.status === "pending"),
-      "INVALID_STATE_TRANSITION",
-      "首次 Todo 清单的所有步骤必须为 pending",
-    );
     return freezeSnapshot({
       version: 1,
       todos,

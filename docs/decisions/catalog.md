@@ -117,7 +117,7 @@
 | [ADR-0110：Run 心跳同步续租 Thread Sandbox](0110-thread-sandbox-lease-heartbeat.md) | 已接受 | 2026-08-05 |
 | [ADR-0111：Agent 默认使用中文回答](0111-default-chinese-agent-response.md) | 已接受 | 2026-08-05 |
 | [ADR-0112：受管 Skill 管理发布与独立权限面](0112-managed-skill-admin-publication.md) | 已接受 | 2026-08-05 |
-| [ADR-0113：Agent Todo Writer 与运行进度清单](0113-agent-todo-writer-and-run-progress.md) | 已接受 | 2026-08-05 |
+| [ADR-0113：Agent Todo Writer 与运行进度清单](0113-agent-todo-writer-and-run-progress.md) | 部分已替代（首次快照状态） | 2026-08-05 |
 | [ADR-0114：Skill Front Matter 元数据预填](0114-skill-frontmatter-metadata-prefill.md) | 已接受 | 2026-08-05 |
 | [ADR-0115：系统兼容性、可选上游来源与 Skills CLI 导入边界](0115-system-compatibility-optional-provenance-and-skills-cli.md) | 已接受 | 2026-08-05 |
 | [ADR-0116：超长用户请求的对话布局边界](0116-long-user-request-layout-boundary.md) | 已接受 | 2026-08-06 |
@@ -236,8 +236,10 @@
 | [ADR-20260826115031：模型供应商采用列表、统一编辑器、真实测试与显式切换](20260826115031-model-provider-list-edit-test-switch.md) | 已接受 | 2026-08-26 |
 | [ADR-20260826155935：自定义 Provider 探测直接使用已保存地址](20260826155935-custom-provider-probes-use-saved-url.md) | 已接受 | 2026-08-26 |
 | [ADR-20260826164658：Provider 工具参数使用顶层 object Schema](20260826164658-provider-object-tool-schema.md) | 已替代 | 2026-08-26 |
-| [ADR-20260826172009：Provider 工具 Schema 使用单一严格真源](20260826172009-single-source-provider-object-tool-schema.md) | 已接受 | 2026-08-26 |
+| [ADR-20260826172009：Provider 工具 Schema 使用单一严格真源](20260826172009-single-source-provider-object-tool-schema.md) | 部分已替代（Provider/Runtime 分层） | 2026-08-26 |
 | [ADR-20260827110606：未知模型使用自动 Token 估算而不阻断 Provider](20260827110606-unknown-model-token-estimator-fallback.md) | 已接受 | 2026-08-27 |
 | [ADR-20260827143000：声明推理能力的模型默认启用思考](20260827143000-reasoning-model-default-thinking.md) | 已接受 | 2026-08-27 |
 | [ADR-20260825105258：开发数据库角色 bootstrap](20260825105258-development-database-role-bootstrap.md) | 已接受 | 2026-08-25 |
 | [ADR-20260827174210：开源分发许可证与生产供应链门禁](20260827174210-open-source-distribution-license-and-security-gates.md) | 已接受 | 2026-08-27 |
+| [ADR-20260828113059：定时任务工具分离 Provider 形状与可纠正错误语义](20260828113059-automation-tool-schema-and-error-semantics.md) | 已接受 | 2026-08-28 |
+| [ADR-20260828113100：Todo 首次快照允许原子进入执行状态](20260828113100-todo-initial-snapshot-can-start.md) | 已接受 | 2026-08-28 |

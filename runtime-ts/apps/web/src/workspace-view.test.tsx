@@ -989,6 +989,122 @@ describe("工作台展示组件", () => {
     expect(html).toContain("resize:none");
   });
 
+  it("支持从输入框粘贴上传，并为图片显示预览、为普通文件显示类型图标", async () => {
+    const createObjectURL = vi.fn(() => "blob:composer-preview");
+    const revokeObjectURL = vi.fn();
+    const createObjectUrlDescriptor = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+    const revokeObjectUrlDescriptor = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
+    Object.defineProperty(URL, "createObjectURL", { configurable: true, value: createObjectURL });
+    Object.defineProperty(URL, "revokeObjectURL", { configurable: true, value: revokeObjectURL });
+    const image = new File(["image"], "截图.png", { type: "image/png", lastModified: 1 });
+    const archive = new File(["archive"], "材料.zip", {
+      type: "application/zip",
+      lastModified: 2,
+    });
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    function Harness() {
+      const [files, setFiles] = useState<readonly File[]>([]);
+      return (
+        <ConversationComposer
+          input=""
+          files={files}
+          disabled={false}
+          showQueueAction={false}
+          onChange={() => undefined}
+          onFilesChange={setFiles}
+          onQueue={() => undefined}
+          onSubmit={() => undefined}
+        />
+      );
+    }
+
+    try {
+      act(() => root.render(<Harness />));
+      const textarea = container.querySelector<HTMLTextAreaElement>("textarea");
+      if (textarea === null) throw new Error("未渲染任务输入框");
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", {
+        value: { files: [image, archive], items: [] } as unknown as DataTransfer,
+      });
+      await act(async () => {
+        textarea.dispatchEvent(paste);
+        await Promise.resolve();
+      });
+
+      expect(paste.defaultPrevented).toBe(true);
+      const textPaste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(textPaste, "clipboardData", {
+        value: { files: [], items: [] } as unknown as DataTransfer,
+      });
+      act(() => textarea.dispatchEvent(textPaste));
+      expect(textPaste.defaultPrevented).toBe(false);
+      expect(container.querySelectorAll(".composer-file")).toHaveLength(2);
+      expect(createObjectURL).toHaveBeenCalledWith(image);
+      expect(container.querySelector<HTMLImageElement>(".composer-file-preview")?.src).toBe(
+        "blob:composer-preview",
+      );
+      expect(
+        container.querySelector('[data-file-kind="archive"] .lucide-file-archive'),
+      ).not.toBeNull();
+      expect(container.querySelector<HTMLButtonElement>(".send-button")?.disabled).toBe(false);
+    } finally {
+      act(() => root.unmount());
+      expect(revokeObjectURL).toHaveBeenCalledWith("blob:composer-preview");
+      if (createObjectUrlDescriptor === undefined)
+        delete (URL as { createObjectURL?: unknown }).createObjectURL;
+      else Object.defineProperty(URL, "createObjectURL", createObjectUrlDescriptor);
+      if (revokeObjectUrlDescriptor === undefined)
+        delete (URL as { revokeObjectURL?: unknown }).revokeObjectURL;
+      else Object.defineProperty(URL, "revokeObjectURL", revokeObjectUrlDescriptor);
+    }
+  });
+
+  it("为已选择的历史图片加载缩略图预览", async () => {
+    const historyImage: HistoryFile = {
+      threadId: "thread_image",
+      taskName: "图片分析",
+      resourceId: "resource_image",
+      versionId: "version_image",
+      name: "现场照片.jpg",
+      entryName: "现场照片.jpg",
+      path: "/resources/resource_image/version_image/现场照片.jpg",
+      mediaType: "image/jpeg",
+      sizeBytes: 1024,
+      attachedAt: "2026-08-28T01:00:00.000Z",
+    };
+    const previewHistoryFile = vi.fn(async () => "https://example.test/history-preview.jpg");
+    const container = document.createElement("div");
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <ConversationComposer
+          input=""
+          files={[]}
+          selectedHistoryFiles={[historyImage]}
+          historyFileApi={{ listHistoryFiles: vi.fn(), previewHistoryFile }}
+          disabled={false}
+          showQueueAction={false}
+          onChange={() => undefined}
+          onFilesChange={() => undefined}
+          onHistoryFilesChange={() => undefined}
+          onQueue={() => undefined}
+          onSubmit={() => undefined}
+        />,
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(previewHistoryFile).toHaveBeenCalledWith(historyImage);
+    expect(container.querySelector<HTMLImageElement>(".composer-file-preview")?.src).toBe(
+      "https://example.test/history-preview.jpg",
+    );
+    act(() => root.unmount());
+  });
+
   it("只把输入末尾的 @ 查询识别为历史文件选择", () => {
     expect(activeHistoryMention("@合同")).toEqual({ start: 0, end: 3, query: "合同" });
     expect(activeHistoryMention("请比较 @采购合同")).toEqual({

@@ -2,10 +2,12 @@ import {
   CalendarClock,
   Cloud,
   LoaderCircle,
+  Pencil,
   PanelLeftOpen,
   Puzzle,
   RotateCw,
   SlidersHorizontal,
+  Trash2,
 } from "lucide-react";
 import {
   useCallback,
@@ -159,6 +161,9 @@ type TeamAwareWorkspaceApi = WorkspaceApi &
         | "importTeamFile"
         | "listHistoryFilesForTenant"
         | "listThreadsForTenant"
+        | "archiveThreadForTenant"
+        | "renamePersonalThread"
+        | "renamePersonalThreadForTenant"
         | "setTenantId"
       >
   > &
@@ -378,6 +383,7 @@ function AuthenticatedWorkspace({
   );
   const activeTeam = teams.find((team) => team.id === activeTeamId);
   const selectedTeam = teams.find((team) => team.id === selectedTeamId) ?? teams[0];
+  const visiblePersonalThreads = personalThreads.filter((thread) => thread.status === "active");
   const managedTeam = teams.find((team) => team.id === selectedTeamId);
   const personalCloudDriveApi = useMemo<CloudDriveApi | undefined>(() => {
     if (
@@ -961,6 +967,51 @@ function AuthenticatedWorkspace({
       setActionLoading(false);
     }
   };
+  const renamePersonalTask = async (thread: Thread) => {
+    const requestedTitle = window.prompt("重命名个人任务", thread.title);
+    if (requestedTitle === null) return;
+    const title = requestedTitle.trim();
+    if (title.length === 0) {
+      setError(new ApiError("任务名称不能为空", 400, false));
+      return;
+    }
+    const rename = apiClient.renamePersonalThreadForTenant;
+    if (rename === undefined) return;
+    setActionLoading(true);
+    try {
+      const renamed = await rename.call(apiClient, thread.id, title, undefined);
+      setPersonalThreads((current) =>
+        current.map((item) => (item.id === renamed.id ? renamed : item)),
+      );
+      if (activeTeamId === undefined) dispatch({ type: "threadUpdated", thread: renamed });
+      setError(undefined);
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason : new ApiError("重命名任务失败", 0, true));
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const deletePersonalTask = async (thread: Thread) => {
+    if (!window.confirm(`删除“${thread.title}”？任务将从个人任务列表移除。`)) return;
+    const archiveForTenant = apiClient.archiveThreadForTenant;
+    if (archiveForTenant === undefined) return;
+    setActionLoading(true);
+    try {
+      await archiveForTenant.call(apiClient, thread.id, undefined);
+      setPersonalThreads((current) => current.filter((item) => item.id !== thread.id));
+      if (activeTeamId === undefined) {
+        dispatch({ type: "threadArchived", threadId: thread.id });
+        if (state.selectedThreadId === thread.id) selectThread(undefined);
+      }
+      setError(undefined);
+    } catch (reason) {
+      setError(reason instanceof ApiError ? reason : new ApiError("删除任务失败", 0, true));
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
   const archive = async () => {
     if (!state.selectedThreadId) return;
     const archivedThreadId = state.selectedThreadId;
@@ -1254,7 +1305,7 @@ function AuthenticatedWorkspace({
         )}
         <div className="thread-heading">
           <span>个人任务</span>
-          <span>{personalThreads.length}</span>
+          <span>{visiblePersonalThreads.length}</span>
         </div>
         <ThreadNavigation ariaLabel="个人任务列表">
           {personalThreadsLoading || (activeTeamId === undefined && loading) ? (
@@ -1262,24 +1313,48 @@ function AuthenticatedWorkspace({
               <LoaderCircle className="spin" size={18} />
               正在加载会话
             </div>
-          ) : personalThreads.length === 0 ? (
+          ) : visiblePersonalThreads.length === 0 ? (
             <div className="empty compact">创建第一个会话以开始工作。</div>
           ) : (
-            personalThreads.map((thread) => (
-              <button
-                type="button"
-                className={
-                  activeTeamId === undefined && thread.id === state.selectedThreadId
-                    ? "thread selected"
-                    : "thread"
-                }
-                key={thread.id}
-                onClick={() => selectWorkspaceThread(undefined, thread.id)}
-                aria-label={`${thread.title}${thread.status === "archived" ? "，已归档" : ""}`}
-              >
-                <span title={thread.title}>{compactThreadTitle(thread.title)}</span>
-                {thread.status === "archived" && <small>已归档</small>}
-              </button>
+            visiblePersonalThreads.map((thread) => (
+              <div className="personal-thread-row" key={thread.id}>
+                <button
+                  type="button"
+                  className={
+                    activeTeamId === undefined && thread.id === state.selectedThreadId
+                      ? "thread selected"
+                      : "thread"
+                  }
+                  onClick={() => selectWorkspaceThread(undefined, thread.id)}
+                  aria-label={thread.title}
+                >
+                  <span title={thread.title}>{compactThreadTitle(thread.title)}</span>
+                </button>
+                {apiClient.renamePersonalThreadForTenant !== undefined &&
+                  apiClient.archiveThreadForTenant !== undefined && (
+                    <div className="personal-thread-actions">
+                      <button
+                        type="button"
+                        title="重命名任务"
+                        aria-label={`重命名个人任务“${thread.title}”`}
+                        disabled={actionLoading}
+                        onClick={() => void renamePersonalTask(thread)}
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        className="danger"
+                        title="删除任务"
+                        aria-label={`删除个人任务“${thread.title}”`}
+                        disabled={actionLoading}
+                        onClick={() => void deletePersonalTask(thread)}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  )}
+              </div>
             ))
           )}
         </ThreadNavigation>
@@ -1429,7 +1504,14 @@ function AuthenticatedWorkspace({
           onHistoryFilesChange={setHistoryFiles}
           {...(apiClient.listHistoryFiles === undefined
             ? {}
-            : { historyFileApi: { listHistoryFiles: apiClient.listHistoryFiles.bind(apiClient) } })}
+            : {
+                historyFileApi: {
+                  listHistoryFiles: apiClient.listHistoryFiles.bind(apiClient),
+                  ...(attachmentPreviewLoader === undefined
+                    ? {}
+                    : { previewHistoryFile: attachmentPreviewLoader }),
+                },
+              })}
           disabled={actionLoading}
           onChange={setInput}
           onFilesChange={setUploadFiles}

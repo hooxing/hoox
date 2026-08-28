@@ -189,6 +189,7 @@ export const developmentApiAssembler: ServiceAssemblyFactory<ApiProcessConfigura
               : {}),
           }),
           archiveThread: persistence.archiveThread,
+          renamePersonalThread: persistence.renamePersonalThread,
           experience: persistence.experience,
           modelWireTraces: persistence.modelWireTraces,
           blobs,

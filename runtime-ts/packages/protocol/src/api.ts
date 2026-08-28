@@ -85,6 +85,12 @@ export const CreateThreadRequestSchema = Type.Object(
 );
 export type CreateThreadRequest = Static<typeof CreateThreadRequestSchema>;
 
+export const RenamePersonalThreadRequestSchema = Type.Object(
+  { title: Type.String({ minLength: 1, maxLength: 200 }) },
+  strict,
+);
+export type RenamePersonalThreadRequest = Static<typeof RenamePersonalThreadRequestSchema>;
+
 /** API 与数据库共同遵守的 UTF-8 字节上限；字符数不能替代此边界。 */
 export const MAX_RUN_INPUT_UTF8_BYTES = 1_048_576;
 

@@ -129,6 +129,42 @@ describe("RuntimeApi", () => {
     expect(api.getTenantId()).toBe("tenant_active");
   });
 
+  it("个人任务改名和删除可以显式忽略当前团队选择", async () => {
+    const fetcher = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            version: "v1",
+            requestId: "req_personal_task",
+            data: {
+              id: "thread_personal",
+              title: "新名称",
+              status: "active",
+              createdAt: "2026-08-28T00:00:00.000Z",
+              updatedAt: "2026-08-28T00:00:01.000Z",
+            },
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+    const api = new RuntimeApi(fetcher, "/api");
+    api.setTenantId("tenant_active_team");
+
+    await api.renamePersonalThreadForTenant("thread_personal", "新名称", undefined);
+    await api.archiveThreadForTenant("thread_personal", undefined);
+
+    const renameRequest = fetcher.mock.calls[0] as [string, RequestInit];
+    const deleteRequest = fetcher.mock.calls[1] as [string, RequestInit];
+    expect(renameRequest[0]).toBe("/api/v1/threads/thread_personal");
+    expect(renameRequest[1].method).toBe("PATCH");
+    expect(renameRequest[1].body).toBe(JSON.stringify({ title: "新名称" }));
+    expect(new Headers(renameRequest[1].headers).has("x-tenant-id")).toBe(false);
+    expect(deleteRequest[1].method).toBe("DELETE");
+    expect(new Headers(deleteRequest[1].headers).has("x-tenant-id")).toBe(false);
+    expect(api.getTenantId()).toBe("tenant_active_team");
+  });
+
   it("团队目录使用个人身份，团队管理请求显式绑定路径中的目标 Tenant", async () => {
     const fetcher = vi
       .fn()

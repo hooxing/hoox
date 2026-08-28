@@ -11,6 +11,7 @@ import {
   rehydrateTenant,
   resourceId,
   resourceVersionId,
+  renameThread,
   runId,
   type Tenant,
   type Thread,
@@ -30,6 +31,7 @@ import {
   type ModelWireTraceBody,
   type ModelWireTraceReadPort,
   PersistenceError,
+  type RenamePersonalThreadCommandPort,
   type RunReadSnapshot,
   type RunExperienceReadPort,
   sha256Hex,
@@ -140,7 +142,12 @@ function key(scope: TenantScope, id: string): string {
 }
 
 class FakeApiState
-  implements ThreadCreationPort, EnqueueOutboxPort, ArchiveThreadCommandPort, ThreadInputRoutingPort
+  implements
+    ThreadCreationPort,
+    EnqueueOutboxPort,
+    ArchiveThreadCommandPort,
+    RenamePersonalThreadCommandPort,
+    ThreadInputRoutingPort
 {
   readonly tenants = new Map<string, TenantBundle>();
   readonly principals = new Map<string, AuthPrincipal>();
@@ -168,6 +175,7 @@ class FakeApiState
   beforeThreadCreate: (() => Promise<void> | void) | undefined;
   beforeRunCreate: (() => Promise<void> | void) | undefined;
   beforeArchive: (() => Promise<void> | void) | undefined;
+  beforeRename: (() => Promise<void> | void) | undefined;
   private readonly mutex = new AsyncMutex();
 
   readonly repositories: CoreRepositories = {
@@ -390,6 +398,30 @@ class FakeApiState
     )?.receipt;
   }
 
+  async renamePersonalThread(
+    input: Parameters<RenamePersonalThreadCommandPort["renamePersonalThread"]>[0],
+  ): ReturnType<RenamePersonalThreadCommandPort["renamePersonalThread"]> {
+    await this.beforeRename?.();
+    return this.mutex.run(() => {
+      const bundle = this.tenants.get(key(input.scope, input.scope.userId));
+      if (bundle?.tenant.kind !== "personal" || this.activeRole(input.scope) !== "owner") {
+        return { outcome: "not_authorized" };
+      }
+      const storedKey = key(input.scope, input.threadId);
+      const current = this.threads.get(storedKey);
+      if (current === undefined || current.entity.status !== "active") {
+        return { outcome: "not_found" };
+      }
+      const entity = renameThread(
+        current.entity,
+        input.title,
+        isoTimestamp(new Date(Date.parse(current.entity.updatedAt) + 1_000).toISOString()),
+      );
+      this.threads.set(storedKey, { entity, version: current.version + 1n });
+      return { outcome: "renamed", entity };
+    });
+  }
+
   async archiveThread(
     input: Parameters<ArchiveThreadCommandPort["archiveThread"]>[0],
   ): ReturnType<ArchiveThreadCommandPort["archiveThread"]> {
@@ -600,6 +632,7 @@ function fixture(
           }),
         }),
     archiveThread: state,
+    renamePersonalThread: state,
     cursorCodec: createThreadCursorCodec({
       activeKid: "test-key",
       keys: [{ kid: "test-key", secret: Buffer.alloc(32, 7).toString("base64url") }],
@@ -2652,6 +2685,82 @@ describe("Fastify API 契约", () => {
       headers: { authorization: "Bearer token-a" },
     });
     expect(repeatedArchive.statusCode).toBe(200);
+  });
+
+  it("个人任务可以改名，空标题、团队任务和已归档任务统一失败关闭", async () => {
+    const { app, ownerA, state } = fixture();
+    openApps.push(app);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: { authorization: "Bearer token-a", "idempotency-key": "rename-personal-thread" },
+      payload: { title: "原任务名" },
+    });
+
+    const renamed = await app.inject({
+      method: "PATCH",
+      url: "/v1/threads/thread_1",
+      headers: { authorization: "Bearer token-a", "content-type": "application/json" },
+      payload: { title: "  新任务名  " },
+    });
+    expect(renamed.statusCode).toBe(200);
+    expect(renamed.json().data.title).toBe("新任务名");
+    expect(state.threads.get(`${ownerA.tenant.id}:thread_1`)?.entity.title).toBe("新任务名");
+
+    const blank = await app.inject({
+      method: "PATCH",
+      url: "/v1/threads/thread_1",
+      headers: { authorization: "Bearer token-a", "content-type": "application/json" },
+      payload: { title: "   " },
+    });
+    expect(blank.statusCode).toBe(400);
+
+    const team = rehydrateTenant(
+      {
+        id: "tenant_rename_team",
+        kind: "team",
+        displayName: "改名测试团队",
+        createdByUserId: ownerA.user.id,
+        createdAt: baseTime,
+      },
+      ownerA.user,
+    );
+    const teamOwner = teamBundle({
+      suffix: "rename_team_owner",
+      tenant: team,
+      user: ownerA.user,
+      role: "owner",
+    });
+    state.register("Bearer rename-team-owner", teamOwner);
+    await app.inject({
+      method: "POST",
+      url: "/v1/threads",
+      headers: {
+        authorization: "Bearer rename-team-owner",
+        "idempotency-key": "rename-team-thread",
+      },
+      payload: { title: "团队任务" },
+    });
+    const teamRename = await app.inject({
+      method: "PATCH",
+      url: "/v1/threads/thread_2",
+      headers: { authorization: "Bearer rename-team-owner", "content-type": "application/json" },
+      payload: { title: "不允许改名" },
+    });
+    expect(teamRename.statusCode).toBe(404);
+
+    await app.inject({
+      method: "DELETE",
+      url: "/v1/threads/thread_1",
+      headers: { authorization: "Bearer token-a" },
+    });
+    const archivedRename = await app.inject({
+      method: "PATCH",
+      url: "/v1/threads/thread_1",
+      headers: { authorization: "Bearer token-a", "content-type": "application/json" },
+      payload: { title: "归档后改名" },
+    });
+    expect(archivedRename.statusCode).toBe(404);
   });
 
   it("principal 与 Membership 决定 TenantScope，裸 tenant Header 不能越权", async () => {

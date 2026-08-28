@@ -198,6 +198,7 @@
 | [ADR：使用阶段标志生成最终答复](20260816164334-final-answer-phase-marker.md) | 已被 [ADR 20260816202624](./20260816202624-optional-long-process-collapse-marker.md) 修订 | 2026-08-16 |
 | [ADR-20260816165004：开发工作台使用服务端本地账号认证](20260816165004-development-local-account-authentication.md) | 已接受 | 2026-08-16 |
 | [ADR：将最终答复阶段标志收窄为可选的长过程折叠工具](20260816202624-optional-long-process-collapse-marker.md) | 已接受 | 2026-08-16 |
+| [ADR-20260816203749：内部轨迹以 Thread 作为对话 Session 聚合边界](20260816203749-thread-scoped-trajectory-session.md) | 已接受 | 2026-08-16 |
 | [ADR：Workspace Revision 排除 `node_modules` 依赖缓存](20260816232758-workspace-ignore-node-modules.md) | 已接受 | 2026-08-16 |
 | [ADR：平台 Harness 显式允许长过程折叠工具](20260816233057-final-answer-harness-guidance.md) | 已接受 | 2026-08-16 |
 | [ADR：同一安全点批量接纳 Durable Steer](20260817151138-safe-point-batched-durable-steer.md) | 已接受 | 2026-08-17 |

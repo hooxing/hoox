@@ -2,6 +2,7 @@ export interface RunDisplayMetadata {
   readonly runId: string;
   readonly threadId: string;
   readonly title: string;
+  readonly createdAt?: string;
 }
 
 export interface RunMetadataProvider {
@@ -124,9 +125,17 @@ export class DevelopmentRuntimeApiMetadataProvider implements RunMetadataProvide
         );
         return runs.flatMap((run) => {
           const runId = stringProperty(run, "id");
+          const createdAt = stringProperty(run, "createdAt");
           return runId === undefined || !identifierPattern.test(runId)
             ? []
-            : [{ runId, threadId, title: title.trim() } satisfies RunDisplayMetadata];
+            : [
+                {
+                  runId,
+                  threadId,
+                  title: title.trim(),
+                  ...(createdAt === undefined ? {} : { createdAt }),
+                } satisfies RunDisplayMetadata,
+              ];
         });
       }),
     );

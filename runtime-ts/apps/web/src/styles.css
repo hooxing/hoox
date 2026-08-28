@@ -691,6 +691,58 @@ input {
   background: #dededb;
   box-shadow: none;
 }
+.personal-thread-row {
+  position: relative;
+  min-width: 0;
+}
+.personal-thread-row > .thread {
+  width: 100%;
+  padding-right: 68px;
+}
+.personal-thread-actions {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transform: translateY(-50%);
+  transition: opacity 120ms ease;
+}
+.personal-thread-row:hover .personal-thread-actions,
+.personal-thread-row:focus-within .personal-thread-actions {
+  opacity: 1;
+}
+.personal-thread-actions button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  color: #666662;
+  background: #f4f4f2;
+}
+.personal-thread-actions button:hover:not(:disabled),
+.personal-thread-actions button:focus-visible {
+  color: #20201f;
+  background: #ffffff;
+}
+.personal-thread-actions button.danger:hover:not(:disabled),
+.personal-thread-actions button.danger:focus-visible {
+  color: #a93a35;
+  background: #fff2f1;
+}
+.personal-thread-actions button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+@media (hover: none) {
+  .personal-thread-actions {
+    opacity: 1;
+  }
+}
 small {
   color: #78877e;
   font-size: 11px;

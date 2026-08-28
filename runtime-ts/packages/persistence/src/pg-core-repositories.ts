@@ -6,7 +6,7 @@ import type {
   WorkspaceRevisionCommit,
   WorkspaceWriteScope,
 } from "@hoox/domain";
-import { archiveThread, isoTimestamp } from "@hoox/domain";
+import { archiveThread, isoTimestamp, renameThread } from "@hoox/domain";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import type {
@@ -14,6 +14,8 @@ import type {
   ArchiveThreadResult,
   CoreRepositories,
   CreateResult,
+  RenamePersonalThreadCommandPort,
+  RenamePersonalThreadResult,
   RunRepository,
   RunReadSnapshot,
   TenantBundle,
@@ -858,6 +860,79 @@ export class PgCoreRepositories implements CoreRepositories {
     this.threads = new PgThreadRepository(pool);
     this.runs = new PgRunRepository(pool);
     this.workspaces = new PgWorkspaceRepository(pool);
+  }
+}
+
+/**
+ * 个人任务标题是用户资产；命令在锁内重验 personal Tenant 与 owner Membership，
+ * 并把标题来源切为 user，阻止已经排队的异步标题生成覆盖用户输入。
+ */
+export class PgRenamePersonalThreadCommand implements RenamePersonalThreadCommandPort {
+  constructor(private readonly pool: Pool) {}
+
+  async renamePersonalThread(
+    input: Parameters<RenamePersonalThreadCommandPort["renamePersonalThread"]>[0],
+  ): Promise<RenamePersonalThreadResult> {
+    try {
+      return await withTenantTransaction(this.pool, input.scope, async (client) => {
+        const membership = await client.query<{
+          readonly kind: string;
+          readonly role: string;
+          readonly status: string;
+        }>(
+          `SELECT tenant.kind, membership.role, membership.status
+             FROM tenants AS tenant
+             JOIN memberships AS membership ON membership.tenant_id = tenant.id
+            WHERE tenant.id = $1 AND membership.user_id = $2
+            FOR SHARE OF tenant, membership`,
+          [input.scope.tenantId, input.scope.userId],
+        );
+        const authorization = membership.rows[0];
+        if (
+          authorization?.kind !== "personal" ||
+          authorization.status !== "active" ||
+          authorization.role !== "owner"
+        ) {
+          return { outcome: "not_authorized" };
+        }
+
+        const locked = await client.query<{ readonly status: string }>(
+          `SELECT status FROM threads
+            WHERE tenant_id = $1 AND id = $2
+            FOR UPDATE`,
+          [input.scope.tenantId, input.threadId],
+        );
+        if (locked.rows[0]?.status !== "active") return { outcome: "not_found" };
+        const current = await findThread(client, input.scope, input.threadId);
+        if (current === undefined) return { outcome: "not_found" };
+        const databaseClock = await client.query<{ readonly now: Date | string }>(
+          "SELECT clock_timestamp() AS now",
+        );
+        const databaseTimestamp = databaseClock.rows[0]?.now;
+        if (databaseTimestamp === undefined) throw new TypeError("任务改名未返回数据库时间");
+        const renamed = renameThread(
+          current.entity,
+          input.title,
+          isoTimestamp(
+            databaseTimestamp instanceof Date
+              ? databaseTimestamp.toISOString()
+              : new Date(databaseTimestamp).toISOString(),
+          ),
+        );
+        const updated = await client.query(
+          `UPDATE threads
+              SET title = $3, title_source = 'user', title_generated_at = $4,
+                  title_generation_version = title_generation_version + 1,
+                  updated_at = $4, version = version + 1
+            WHERE tenant_id = $1 AND id = $2 AND status = 'active'`,
+          [input.scope.tenantId, input.threadId, renamed.title, renamed.updatedAt],
+        );
+        if (updated.rowCount !== 1) return { outcome: "not_found" };
+        return { outcome: "renamed", entity: renamed };
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "个人任务改名");
+    }
   }
 }
 

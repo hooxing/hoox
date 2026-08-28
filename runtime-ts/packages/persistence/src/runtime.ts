@@ -8,7 +8,11 @@ import {
   PgModelWireTraceReadRepository,
 } from "./model-wire-trace-read.js";
 import { type PgBlobLifecycleOptions, PgBlobLifecycleRepository } from "./pg-blob-lifecycle.js";
-import { PgArchiveThreadCommand, PgCoreRepositories } from "./pg-core-repositories.js";
+import {
+  PgArchiveThreadCommand,
+  PgCoreRepositories,
+  PgRenamePersonalThreadCommand,
+} from "./pg-core-repositories.js";
 import { PgIdentityConfigurationRepository } from "./pg-identity-configuration.js";
 import { PgLocalAccountRepository } from "./pg-local-account.js";
 import { PgPersonalizationSettingsRepository } from "./pg-personalization-settings.js";
@@ -30,6 +34,7 @@ import { PgThreadInputRouting } from "./pg-thread-input.js";
 import type {
   ArchiveThreadCommandPort,
   CoreRepositories,
+  RenamePersonalThreadCommandPort,
   RunExperienceReadPort,
   ThreadContextReadPort,
   ThreadContinuityReadPort,
@@ -48,6 +53,7 @@ export interface PersistenceRuntime {
   readonly repositories: CoreRepositories;
   readonly blobLifecycle: PgBlobLifecycleRepository;
   readonly archiveThread: ArchiveThreadCommandPort;
+  readonly renamePersonalThread: RenamePersonalThreadCommandPort;
   readonly execution: PgExecutionPersistence;
   readonly runSetup: PgRunExecutionSetup;
   readonly runDispatchCreation: PgRunDispatchCreation;
@@ -81,6 +87,7 @@ export interface MigrationRuntime {
 export interface ApiPersistenceRuntime {
   readonly repositories: CoreRepositories;
   readonly archiveThread: ArchiveThreadCommandPort;
+  readonly renamePersonalThread: RenamePersonalThreadCommandPort;
   readonly threadCreation: PgThreadCreation;
   readonly teamCollaboration?: PgTeamCollaborationRepository;
   readonly threadForks: PgThreadForkRepository;
@@ -121,6 +128,7 @@ export function createApiPersistenceRuntime(
   return Object.freeze({
     repositories: new PgCoreRepositories(pool),
     archiveThread: new PgArchiveThreadCommand(pool),
+    renamePersonalThread: new PgRenamePersonalThreadCommand(pool),
     threadCreation: new PgThreadCreation(pool),
     ...(teamCoordinatorPool === undefined
       ? {}
@@ -364,6 +372,7 @@ export function createPersistenceRuntime(
     repositories: new PgCoreRepositories(pool),
     blobLifecycle: new PgBlobLifecycleRepository(pool, options.blobLifecycle),
     archiveThread: new PgArchiveThreadCommand(pool),
+    renamePersonalThread: new PgRenamePersonalThreadCommand(pool),
     execution: new PgExecutionPersistence(pool),
     runSetup: new PgRunExecutionSetup(pool),
     runDispatchCreation: new PgRunDispatchCreation(pool),

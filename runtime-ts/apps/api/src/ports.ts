@@ -5,6 +5,7 @@ export type {
   EnqueueOutboxPort,
   IdempotentCommand,
   IdempotentCreateResult,
+  RenamePersonalThreadCommandPort,
   ThreadCreationPort,
 } from "@hoox/persistence";
 

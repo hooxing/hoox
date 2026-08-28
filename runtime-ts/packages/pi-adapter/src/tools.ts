@@ -113,26 +113,35 @@ export interface ExecCommandResult {
  * 这里把原始 schema 不通过的输入换成一次性、schema 合法的内部占位参数；工具
  * execute 识别后只写 durable 失败回执，不得申请副作用许可或触碰外部端口。
  */
-export function createSchemaInvalidArgumentsBridge<T>(
+export function createSchemaInvalidArgumentsBridge<T, Details = never>(
   schema: TSchema,
   fallback: (token: string) => T,
   tokenOf: (value: T) => string | undefined,
+  diagnose?: (value: unknown) => Details,
 ): Readonly<{
   prepareArguments(value: unknown): T;
   consume(value: T): boolean;
+  consumeFailure(value: T): Readonly<{ readonly details?: Details }> | undefined;
 }> {
-  const pending = new Set<string>();
+  const pending = new Map<string, Details | undefined>();
+  const consumeFailure = (value: T): Readonly<{ readonly details?: Details }> | undefined => {
+    const token = tokenOf(value);
+    if (token === undefined || !pending.has(token)) return undefined;
+    const details = pending.get(token);
+    pending.delete(token);
+    return Object.freeze(details === undefined ? {} : { details });
+  };
   return Object.freeze({
     prepareArguments(value: unknown): T {
       if (Value.Check(schema, value)) return value as T;
       const token = randomUUID();
-      pending.add(token);
+      pending.set(token, diagnose?.(value));
       return fallback(token);
     },
     consume(value: T): boolean {
-      const token = tokenOf(value);
-      return token !== undefined && pending.delete(token);
+      return consumeFailure(value) !== undefined;
     },
+    consumeFailure,
   });
 }
 

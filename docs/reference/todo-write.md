@@ -16,7 +16,7 @@
 | `todos[].status` | `pending`、`in_progress` 或 `completed` |
 | `explanation` | 可选；结构调整或执行中回退时说明原因 |
 
-首次快照必须全部为 `pending`，同时最多一个 `in_progress`，已完成项不能改写。更新时提交完整的新快照，可以在完成当前项的同时把下一项设为 `in_progress`。
+首次快照可以直接反映当前实际进度，包括把当前步骤设为 `in_progress`、把此前已完成步骤设为 `completed`；任一快照同时最多一个 `in_progress`。后续更新中，已完成项不能改写或回退，可以在完成当前项的同时把下一项设为 `in_progress`。
 
 ```json
 {

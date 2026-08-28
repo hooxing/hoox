@@ -8,6 +8,15 @@ Hoox 使用 Tenant 作为个人与团队资产的所有权边界。客户端任�
 
 `X-Tenant-ID` 只是请求的空间选择器，不是授权证明。API 每次请求都根据认证用户重新读取目标 Tenant 的有效 Membership，并由 PostgreSQL RLS 和服务角色权限继续约束数据访问。失效或已解散团队会从个人团队目录中移除，客户端必须回退到仍有效的空间。
 
+## 个人任务管理
+
+个人任务侧栏只展示 active Thread。用户可以直接改名或删除个人任务；删除沿用 Thread 归档语义，任务会从导航中移除，
+但 Run、Workspace、历史文件和审计事实不会被物理级联删除。个人任务改名把标题来源标记为用户输入，异步标题生成不能覆盖；
+已分配的历史文件目录保持不变，当前任务继续通过稳定 `/thread-files` 入口访问。
+
+即使客户端当前打开团队空间，个人任务管理请求也必须显式回到个人 Tenant，不能继承团队 `X-Tenant-ID`。
+团队任务不使用个人任务改名接口。
+
 ## 团队与成员
 
 当前 API 和 Web 支持：
@@ -58,4 +67,4 @@ Worker 通过数据库协调取得可服务 Tenant，不依赖固定开发 Tenan
 - 团队云盘治理、配额、回收站、Skill 审批、团队级模型/工具/网络策略仍未形成正式产品契约。
 - 团队能力仍需完成公开身份系统、完整越权矩阵和目标生产环境联合验收后，才能视为生产就绪。
 
-关键决策见 [ADR-0139](../decisions/0139-team-workspace-and-snapshot-boundary.md)、[ADR-0140](../decisions/0140-dual-task-navigation-and-team-center.md)、[ADR-0142](../decisions/0142-dynamic-worker-tenant-assignment.md)、[ADR-0146](../decisions/0146-team-directory-personal-scope-recovery.md)、[ADR-0147](../decisions/0147-team-coordinator-database-role.md)、[ADR-0168](../decisions/0168-personalization-settings-and-run-snapshot.md)和[ADR-0169](../decisions/0169-team-member-read-only-authorization-snapshot.md)。
+关键决策见 [ADR-20260828111920](../decisions/20260828111920-personal-task-rename-and-soft-delete.md)、[ADR-0139](../decisions/0139-team-workspace-and-snapshot-boundary.md)、[ADR-0140](../decisions/0140-dual-task-navigation-and-team-center.md)、[ADR-0142](../decisions/0142-dynamic-worker-tenant-assignment.md)、[ADR-0146](../decisions/0146-team-directory-personal-scope-recovery.md)、[ADR-0147](../decisions/0147-team-coordinator-database-role.md)、[ADR-0168](../decisions/0168-personalization-settings-and-run-snapshot.md)和[ADR-0169](../decisions/0169-team-member-read-only-authorization-snapshot.md)。

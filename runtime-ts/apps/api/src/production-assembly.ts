@@ -158,6 +158,7 @@ const productionApiAssembler: ServiceAssemblyFactory<ApiProcessConfiguration> = 
               : {}),
           }),
           archiveThread: persistence.archiveThread,
+          renamePersonalThread: persistence.renamePersonalThread,
           experience: persistence.experience,
           modelWireTraces: persistence.modelWireTraces,
           blobs,

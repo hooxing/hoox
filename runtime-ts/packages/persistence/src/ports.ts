@@ -244,6 +244,19 @@ export interface ArchiveThreadCommandPort {
   }): Promise<ArchiveThreadResult>;
 }
 
+export type RenamePersonalThreadResult =
+  | { readonly outcome: "renamed"; readonly entity: Thread }
+  | { readonly outcome: "not_authorized" | "not_found" };
+
+/** 个人任务改名必须锁定 Membership→Thread，并把标题来源切换为 user 防止异步标题覆盖。 */
+export interface RenamePersonalThreadCommandPort {
+  renamePersonalThread(input: {
+    readonly scope: TenantScope;
+    readonly threadId: ThreadId;
+    readonly title: string;
+  }): Promise<RenamePersonalThreadResult>;
+}
+
 export interface TenantRepository {
   createPersonal(bundle: TenantBundle): Promise<CreateResult>;
   get(scope: TenantScope): Promise<TenantBundle | undefined>;

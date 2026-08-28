@@ -42,6 +42,7 @@ import type {
   ApiIdGenerator,
   ArchiveThreadCommandPort,
   AuthContextResolver,
+  RenamePersonalThreadCommandPort,
   AuthPrincipal,
   TenantSelector,
   ThreadCursorCodec,
@@ -75,6 +76,7 @@ interface ServiceDependencies {
   readonly repositories: CoreRepositories;
   readonly createCapability?: ApiCreateCapability;
   readonly archiveThread: ArchiveThreadCommandPort;
+  readonly renamePersonalThread: RenamePersonalThreadCommandPort;
   readonly cursorCodec: ThreadCursorCodec;
   readonly clock: ApiClock;
   readonly ids: ApiIdGenerator;
@@ -206,6 +208,27 @@ export class ApiService {
       items: page.items.map(({ entity }) => toThreadDto(entity)),
       ...(nextCursor === undefined ? {} : { nextCursor }),
     };
+  }
+
+  async renamePersonalThread(
+    auth: AuthContext,
+    rawThreadId: string,
+    rawTitle: string,
+  ): Promise<ThreadDto> {
+    if (auth.tenant.tenant.kind !== "personal") throw new ApiFailure("not_found");
+    const title = rawTitle.trim();
+    if (title.length === 0 || title.length > 200) throw new ApiFailure("bad_request");
+    try {
+      const result = await this.dependencies.renamePersonalThread.renamePersonalThread({
+        scope: auth.scope,
+        threadId: threadId(rawThreadId),
+        title,
+      });
+      if (result.outcome !== "renamed") throw new ApiFailure("not_found");
+      return toThreadDto(result.entity);
+    } catch (error) {
+      return mapDomainFailure(error);
+    }
   }
 
   async archiveThread(auth: AuthContext, rawThreadId: string): Promise<ThreadDto> {

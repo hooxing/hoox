@@ -267,6 +267,60 @@ describe("Agent 工作台恢复接入", () => {
     expect(setTenantId).toHaveBeenLastCalledWith(undefined);
   });
 
+  it("个人任务可以在侧栏改名和删除，归档任务不会重新出现在列表", async () => {
+    const personalThread = thread("personal_manage");
+    const archivedThread = thread("personal_archived", "archived");
+    const renamePersonalThreadForTenant = vi.fn(
+      async (_threadId: string, title: string, _teamId?: string) => ({
+        ...personalThread,
+        title,
+        updatedAt: "2026-08-28T01:00:00.000Z",
+      }),
+    );
+    const archiveThreadForTenant = vi.fn(async () => ({
+      ...personalThread,
+      status: "archived" as const,
+    }));
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue("新的个人任务名称");
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const { container } = mount(
+      apiFixture({
+        listThreadsForTenant: vi.fn(async () => [personalThread, archivedThread]),
+        renamePersonalThreadForTenant,
+        archiveThreadForTenant,
+      }),
+    );
+    await settleEffects();
+
+    const navigation = container.querySelector<HTMLElement>('nav[aria-label="个人任务列表"]');
+    expect(navigation?.querySelector('button[aria-label="会话 personal_manage"]')).not.toBeNull();
+    expect(navigation?.querySelector('button[aria-label="会话 personal_archived"]')).toBeNull();
+
+    const renameButton = navigation?.querySelector<HTMLButtonElement>(
+      'button[aria-label^="重命名个人任务"]',
+    );
+    await act(async () => renameButton?.click());
+    await settleEffects();
+    expect(renamePersonalThreadForTenant).toHaveBeenCalledWith(
+      personalThread.id,
+      "新的个人任务名称",
+      undefined,
+    );
+    expect(navigation?.querySelector('button[aria-label="新的个人任务名称"]')).not.toBeNull();
+
+    const deleteButton = navigation?.querySelector<HTMLButtonElement>(
+      'button[aria-label^="删除个人任务"]',
+    );
+    await act(async () => deleteButton?.click());
+    await settleEffects();
+    expect(confirm).toHaveBeenCalledWith("删除“新的个人任务名称”？任务将从个人任务列表移除。");
+    expect(archiveThreadForTenant).toHaveBeenCalledWith(personalThread.id, undefined);
+    expect(navigation?.querySelector('button[aria-label="新的个人任务名称"]')).toBeNull();
+
+    prompt.mockRestore();
+    confirm.mockRestore();
+  });
+
   it("移动会话导航展开时隐藏打开按钮并保留关闭入口", async () => {
     Object.defineProperty(window, "matchMedia", {
       configurable: true,

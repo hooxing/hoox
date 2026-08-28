@@ -776,7 +776,31 @@ export class RuntimeApi {
     });
   }
   archiveThread(threadId: string): Promise<Thread> {
-    return this.request(`/v1/threads/${encodeURIComponent(threadId)}`, { method: "DELETE" });
+    return this.archiveThreadForTenant(threadId, this.activeTenantId);
+  }
+
+  archiveThreadForTenant(threadId: string, tenantId: string | undefined): Promise<Thread> {
+    return this.request(
+      `/v1/threads/${encodeURIComponent(threadId)}`,
+      { method: "DELETE" },
+      tenantId ?? null,
+    );
+  }
+
+  renamePersonalThread(threadId: string, title: string): Promise<Thread> {
+    return this.renamePersonalThreadForTenant(threadId, title, this.activeTenantId);
+  }
+
+  renamePersonalThreadForTenant(
+    threadId: string,
+    title: string,
+    tenantId: string | undefined,
+  ): Promise<Thread> {
+    return this.request(
+      `/v1/threads/${encodeURIComponent(threadId)}`,
+      { method: "PATCH", body: JSON.stringify({ title }) },
+      tenantId ?? null,
+    );
   }
   createRun(threadId: string, input: string): Promise<Run> {
     return this.request(`/v1/threads/${encodeURIComponent(threadId)}/runs`, {

@@ -59,6 +59,21 @@ describe("后台控制面迁移", () => {
     expect(down).toContain("DOWN_MIGRATION_BLOCKED:managed_model_provider_credentials_exist");
   });
 
+  it("运行设置迁移回填并发默认值并建立用户领取索引", () => {
+    const up = migration("0057_user_run_concurrency.up.sql");
+    expect(up).toContain("'workerMaxConcurrentRuns',20");
+    expect(up).toContain("'userMaxConcurrentRunsPerTenant',2");
+    expect(up).toContain("'workerMaxConcurrentRuns','userMaxConcurrentRunsPerTenant'");
+    expect(up).toContain("BETWEEN 1 AND 100");
+    expect(up).toContain("CREATE INDEX run_skill_snapshots_user_run_idx");
+    expect(up).toContain("ON run_skill_snapshots(tenant_id,user_id,run_id)");
+
+    const down = migration("0057_user_run_concurrency.down.sql");
+    expect(down).toContain("DROP INDEX run_skill_snapshots_user_run_idx");
+    expect(down).toContain("configuration-ARRAY[");
+    expect(down).toContain("'workerMaxConcurrentRuns','userMaxConcurrentRunsPerTenant'");
+  });
+
   it("用户治理通过受限目录、最小列权限和独立审计暴露", () => {
     const up = migration("0052_admin_user_operations.up.sql");
     const roleBootstrap = readFileSync(

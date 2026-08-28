@@ -526,6 +526,53 @@ describe("统一平台管理导航", () => {
     container.remove();
   });
 
+  it("运行配置表单默认提交 Worker 20 和 Tenant 内单用户 2 个并发", async () => {
+    const api = fixture();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+
+    act(() => navigationItem(container, "运行配置").click());
+    await settle();
+
+    const workerLimit = container.querySelector<HTMLInputElement>(
+      'input[name="workerMaxConcurrentRuns"]',
+    );
+    const userLimit = container.querySelector<HTMLInputElement>(
+      'input[name="userMaxConcurrentRunsPerTenant"]',
+    );
+    expect(workerLimit?.value).toBe("20");
+    expect(userLimit?.value).toBe("2");
+    act(() => {
+      changeControl(requiredControl(workerLimit, "Worker 并发"), "24");
+      changeControl(requiredControl(userLimit, "用户并发"), "3");
+      changeControl(
+        requiredControl(
+          container.querySelector<HTMLTextAreaElement>('textarea[name="reason"]'),
+          "变更原因",
+        ),
+        "调整运行并发容量",
+      );
+    });
+    const submit = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.trim() === "创建参数草稿",
+    );
+    if (submit === undefined) throw new Error("运行参数提交按钮缺失");
+    await act(async () => submit.click());
+
+    expect(api.createRuntimeSettingsDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workerMaxConcurrentRuns: 24,
+        userMaxConcurrentRunsPerTenant: 3,
+        reason: "调整运行并发容量",
+      }),
+    );
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it("直接展示当前使用模型和新 Run 边界，不暴露内部版本", async () => {
     const api = fixture();
     const activeModel = { ...modelRevision("deepseek", "healthy"), status: "active" as const };

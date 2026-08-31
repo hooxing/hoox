@@ -158,7 +158,10 @@ describe("内嵌身份登录方式", () => {
         phoneEnabled: false,
         providers: [],
       })),
-      signUpWithEmail: vi.fn(async () => ({ emailVerificationRequired: true as const })),
+      signUpWithEmail: vi.fn(async () => ({
+        emailVerificationRequired: true as const,
+        emailVerificationCodeSent: true,
+      })),
       resendEmailVerificationOtp: vi.fn(async () => undefined),
       verifyEmailOtp: vi.fn(async () => session),
     };
@@ -177,9 +180,12 @@ describe("内嵌身份登录方式", () => {
     change(inputs[3] as HTMLInputElement, "secret12");
     act(() => container.querySelector<HTMLFormElement>("form")?.requestSubmit());
 
-    await vi.waitFor(() =>
-      expect(container.textContent).toContain("验证码已发送到 mail@example.com"),
+    await vi.waitFor(() => expect(container.textContent).toContain("查收邮箱验证码"));
+    expect(container.textContent).toContain("mail@example.com");
+    const resendButton = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find(
+      (button) => button.textContent?.includes("秒后可重新发送"),
     );
+    expect(resendButton?.disabled).toBe(true);
     expect(authenticated).not.toHaveBeenCalled();
     const otp = container.querySelector<HTMLInputElement>('input[autocomplete="one-time-code"]');
     if (otp === null) throw new Error("邮箱验证码输入框缺失");
@@ -188,6 +194,43 @@ describe("内嵌身份登录方式", () => {
 
     await vi.waitFor(() => expect(authenticated).toHaveBeenCalledWith(session));
     expect(api.verifyEmailOtp).toHaveBeenCalledWith("mail@example.com", "123456");
+  });
+
+  it("注册部分成功时直接进入待验证状态并说明首次发信结果未确认", async () => {
+    const api: AccountAccessApi = {
+      registerAccount: vi.fn(),
+      loginAccount: vi.fn(),
+      getIdentityConfiguration: vi.fn(async () => ({
+        emailPasswordEnabled: true,
+        emailVerificationEnabled: true,
+        registrationEnabled: true,
+        phoneEnabled: false,
+        providers: [],
+      })),
+      signUpWithEmail: vi.fn(async () => ({
+        emailVerificationRequired: true as const,
+        emailVerificationCodeSent: false,
+      })),
+      resendEmailVerificationOtp: vi.fn(async () => undefined),
+      verifyEmailOtp: vi.fn(),
+    };
+    const container = mount(<AccountAccess api={api} onAuthenticated={vi.fn()} />);
+    await vi.waitFor(() => expect(container.textContent).toContain("注册"));
+    act(() => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+        .find((button) => button.textContent === "注册")
+        ?.click();
+    });
+    const inputs = container.querySelectorAll<HTMLInputElement>(".account-access-form input");
+    change(inputs[0] as HTMLInputElement, "邮箱用户");
+    change(inputs[1] as HTMLInputElement, "mail@example.com");
+    change(inputs[2] as HTMLInputElement, "secret12");
+    change(inputs[3] as HTMLInputElement, "secret12");
+    act(() => container.querySelector<HTMLFormElement>("form")?.requestSubmit());
+
+    await vi.waitFor(() => expect(container.textContent).toContain("账号正在等待验证"));
+    expect(container.textContent).toContain("首次发送状态未确认");
+    expect(container.textContent).not.toContain("注册失败，请稍后重试");
   });
 
   it("只展示后台启用的手机号和第三方 Provider", async () => {

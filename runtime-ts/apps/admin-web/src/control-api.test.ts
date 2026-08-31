@@ -52,6 +52,10 @@ describe("后台控制 Web API", () => {
         data: {
           versionToken: 1,
           emailPasswordEnabled: true,
+          emailVerificationEnabled: false,
+          smtpPort: 465,
+          smtpSecure: true,
+          smtpPasswordConfigured: false,
           registrationEnabled: true,
           phoneEnabled: false,
           smsWebhookSecretConfigured: false,
@@ -63,6 +67,14 @@ describe("后台控制 Web API", () => {
     await api.updateIdentityConfiguration({
       expectedVersionToken: 0,
       emailPasswordEnabled: true,
+      emailVerificationEnabled: true,
+      emailFromAddress: "no-reply@example.com",
+      emailFromName: "Hoox",
+      smtpHost: "smtp.example.com",
+      smtpPort: 465,
+      smtpSecure: true,
+      smtpUsername: "mailer@example.com",
+      smtpPassword: "smtp-secret",
       registrationEnabled: true,
       phoneEnabled: false,
       providers: [
@@ -81,6 +93,7 @@ describe("后台控制 Web API", () => {
       "identity-key-0001",
     );
     expect(String(fetcher.mock.calls[0]?.[1]?.body)).toContain("google-secret");
+    expect(String(fetcher.mock.calls[0]?.[1]?.body)).toContain("smtp-secret");
   });
 
   it("不把服务端错误正文或 Provider 细节带入界面", async () => {

@@ -14,6 +14,7 @@ export type IdentityProviderKey = "google" | "github" | "wechat" | "qq";
 
 export type IdentityAuthConfiguration = {
   readonly emailPasswordEnabled: boolean;
+  readonly emailVerificationEnabled: boolean;
   readonly registrationEnabled: boolean;
   readonly phoneEnabled: boolean;
   readonly providers: readonly {
@@ -426,12 +427,25 @@ export class RuntimeApi {
     readonly displayName: string;
     readonly email: string;
     readonly password: string;
-  }): Promise<AccountSession> {
-    await this.betterAuthRequest("/sign-up/email", {
+  }): Promise<AccountSession | { readonly emailVerificationRequired: true }> {
+    const result = await this.betterAuthRequest<{ readonly token?: unknown }>("/sign-up/email", {
       name: input.displayName,
       email: input.email,
       password: input.password,
     });
+    if (result.token === null) return { emailVerificationRequired: true };
+    return this.exchangeIdentitySession();
+  }
+
+  async resendEmailVerificationOtp(email: string): Promise<void> {
+    await this.betterAuthRequest("/email-otp/send-verification-otp", {
+      email,
+      type: "email-verification",
+    });
+  }
+
+  async verifyEmailOtp(email: string, otp: string): Promise<AccountSession> {
+    await this.betterAuthRequest("/email-otp/verify-email", { email, otp });
     return this.exchangeIdentitySession();
   }
 

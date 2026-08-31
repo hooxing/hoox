@@ -17,6 +17,7 @@ export type AccountSession = {
 export type IdentityProviderKey = "google" | "github" | "wechat" | "qq";
 export type IdentityAuthConfiguration = {
   readonly emailPasswordEnabled: boolean;
+  readonly emailVerificationEnabled: boolean;
   readonly registrationEnabled: boolean;
   readonly phoneEnabled: boolean;
   readonly providers: readonly { readonly key: IdentityProviderKey; readonly enabled: boolean }[];
@@ -37,7 +38,9 @@ export type AccountAccessApi = {
     readonly displayName: string;
     readonly email: string;
     readonly password: string;
-  }): Promise<AccountSession>;
+  }): Promise<AccountSession | { readonly emailVerificationRequired: true }>;
+  resendEmailVerificationOtp?(email: string): Promise<void>;
+  verifyEmailOtp?(email: string, otp: string): Promise<AccountSession>;
   signInWithEmail?(input: {
     readonly email: string;
     readonly password: string;
@@ -155,6 +158,7 @@ export function AccountAccess({
   const [method, setMethod] = useState<"email" | "phone">("email");
   const [configuration, setConfiguration] = useState<IdentityAuthConfiguration>({
     emailPasswordEnabled: true,
+    emailVerificationEnabled: false,
     registrationEnabled: true,
     phoneEnabled: false,
     providers: [],
@@ -163,6 +167,9 @@ export function AccountAccess({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
+  const [emailVerificationPending, setEmailVerificationPending] = useState(false);
+  const [emailVerificationCodeSent, setEmailVerificationCodeSent] = useState(false);
+  const [emailVerificationCode, setEmailVerificationCode] = useState("");
   const [phoneNumber, setPhoneNumber] = useState("");
   const [phoneCode, setPhoneCode] = useState("");
   const [phoneCodeSent, setPhoneCodeSent] = useState(false);
@@ -193,11 +200,37 @@ export function AccountAccess({
     setError(undefined);
     setPassword("");
     setConfirmation("");
+    setEmailVerificationPending(false);
+    setEmailVerificationCodeSent(false);
+    setEmailVerificationCode("");
   };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError(undefined);
+    if (emailVerificationPending) {
+      if (emailVerificationCode.trim().length === 0) {
+        setError("请输入邮箱验证码");
+        return;
+      }
+      if (api.verifyEmailOtp === undefined) {
+        setError("邮箱验证服务不可用");
+        return;
+      }
+      setSubmitting(true);
+      try {
+        authenticate(await api.verifyEmailOtp(normalizeEmail(email), emailVerificationCode.trim()));
+      } catch (reason) {
+        const status =
+          typeof reason === "object" && reason !== null && "status" in reason
+            ? Number((reason as { readonly status?: unknown }).status)
+            : 0;
+        setError(status === 400 ? "验证码无效或已过期" : accountErrorMessage(reason, "register"));
+      } finally {
+        setSubmitting(false);
+      }
+      return;
+    }
     if (method === "phone") {
       const normalizedPhone = phoneNumber.trim();
       if (!/^\+[1-9][0-9]{7,14}$/u.test(normalizedPhone)) {
@@ -244,20 +277,55 @@ export function AccountAccess({
     }
     setSubmitting(true);
     try {
-      const session =
-        mode === "register"
-          ? await (api.signUpWithEmail ?? api.registerAccount)({
-              displayName: displayName.trim(),
-              email: normalizedEmail,
-              password,
-            })
-          : await (api.signInWithEmail ?? api.loginAccount)({
-              email: normalizedEmail,
-              password,
-            });
-      authenticate(session);
+      if (mode === "register") {
+        const result = await (api.signUpWithEmail ?? api.registerAccount)({
+          displayName: displayName.trim(),
+          email: normalizedEmail,
+          password,
+        });
+        if ("emailVerificationRequired" in result) {
+          setEmailVerificationPending(true);
+          setEmailVerificationCodeSent(true);
+          return;
+        }
+        authenticate(result);
+      } else {
+        authenticate(
+          await (api.signInWithEmail ?? api.loginAccount)({
+            email: normalizedEmail,
+            password,
+          }),
+        );
+      }
     } catch (reason) {
-      setError(accountErrorMessage(reason, mode));
+      const status =
+        typeof reason === "object" && reason !== null && "status" in reason
+          ? Number((reason as { readonly status?: unknown }).status)
+          : 0;
+      if (mode === "login" && configuration.emailVerificationEnabled && status === 403) {
+        setEmailVerificationPending(true);
+        setEmailVerificationCodeSent(false);
+        setError("该邮箱尚未验证，请先发送并填写验证码");
+      } else {
+        setError(accountErrorMessage(reason, mode));
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const resendEmailVerificationCode = async () => {
+    if (api.resendEmailVerificationOtp === undefined) {
+      setError("邮箱验证服务不可用");
+      return;
+    }
+    setSubmitting(true);
+    setError(undefined);
+    try {
+      await api.resendEmailVerificationOtp(normalizeEmail(email));
+      setEmailVerificationCodeSent(true);
+    } catch (reason) {
+      setError(accountErrorMessage(reason, "register"));
     } finally {
       setSubmitting(false);
     }
@@ -329,48 +397,68 @@ export function AccountAccess({
         )}
         {method === "email" && configuration.emailPasswordEnabled ? (
           <form className="account-access-form" onSubmit={(event) => void submit(event)}>
-            {mode === "register" && (
-              <label>
-                用户名
-                <input
-                  autoComplete="name"
-                  value={displayName}
-                  onChange={(event) => setDisplayName(event.target.value)}
-                  placeholder="你的名字"
-                />
-              </label>
-            )}
-            <label>
-              邮箱
-              <input
-                type="email"
-                autoComplete="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-                placeholder="name@example.com"
-              />
-            </label>
-            <label>
-              密码
-              <input
-                type="password"
-                autoComplete={mode === "login" ? "current-password" : "new-password"}
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                placeholder="至少 8 个字符"
-              />
-            </label>
-            {mode === "register" && (
-              <label>
-                确认密码
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  value={confirmation}
-                  onChange={(event) => setConfirmation(event.target.value)}
-                  placeholder="再次输入密码"
-                />
-              </label>
+            {emailVerificationPending ? (
+              <>
+                <p className="empty-state">
+                  验证码已发送到 {normalizeEmail(email)}，完成验证后即可进入 Hoox。
+                </p>
+                <label>
+                  邮箱验证码
+                  <input
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    value={emailVerificationCode}
+                    onChange={(event) => setEmailVerificationCode(event.target.value)}
+                    placeholder="6 位验证码"
+                  />
+                </label>
+              </>
+            ) : (
+              <>
+                {mode === "register" && (
+                  <label>
+                    用户名
+                    <input
+                      autoComplete="name"
+                      value={displayName}
+                      onChange={(event) => setDisplayName(event.target.value)}
+                      placeholder="你的名字"
+                    />
+                  </label>
+                )}
+                <label>
+                  邮箱
+                  <input
+                    type="email"
+                    autoComplete="email"
+                    value={email}
+                    onChange={(event) => setEmail(event.target.value)}
+                    placeholder="name@example.com"
+                  />
+                </label>
+                <label>
+                  密码
+                  <input
+                    type="password"
+                    autoComplete={mode === "login" ? "current-password" : "new-password"}
+                    value={password}
+                    onChange={(event) => setPassword(event.target.value)}
+                    placeholder="至少 8 个字符"
+                  />
+                </label>
+                {mode === "register" && (
+                  <label>
+                    确认密码
+                    <input
+                      type="password"
+                      autoComplete="new-password"
+                      value={confirmation}
+                      onChange={(event) => setConfirmation(event.target.value)}
+                      placeholder="再次输入密码"
+                    />
+                  </label>
+                )}
+              </>
             )}
             {error !== undefined && (
               <div className="account-access-error" role="alert">
@@ -378,8 +466,24 @@ export function AccountAccess({
               </div>
             )}
             <button className="account-access-submit" type="submit" disabled={submitting}>
-              {submitting ? "请稍候…" : mode === "login" ? "登录" : "创建账号"}
+              {submitting
+                ? "请稍候…"
+                : emailVerificationPending
+                  ? "验证并登录"
+                  : mode === "login"
+                    ? "登录"
+                    : "创建账号"}
             </button>
+            {emailVerificationPending && (
+              <button
+                type="button"
+                className="account-access-secondary"
+                disabled={submitting}
+                onClick={() => void resendEmailVerificationCode()}
+              >
+                {emailVerificationCodeSent ? "重新发送验证码" : "发送验证码"}
+              </button>
+            )}
           </form>
         ) : method === "phone" && configuration.phoneEnabled ? (
           <form className="account-access-form" onSubmit={(event) => void submit(event)}>

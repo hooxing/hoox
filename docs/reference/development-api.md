@@ -25,7 +25,7 @@
 | `/v1/me/history-files`、`/v1/me/team-files/import` | 浏览当前 Tenant 云盘、下载固定版本和跨空间导入 | [历史文件与 ResourceFS](history-files.md) |
 | `/v1/me/personalization`、`/v1/teams/:teamId/personalization` | 读取和更新个人或团队偏好 | [团队协作](../architecture/team-collaboration.md) |
 | `/v1/automations` | 管理 Thread 定时任务 | `@hoox/automation`、Protocol Schema 和 API 测试 |
-| `/api/auth/*`、`/v1/auth/config`、`/v1/auth/exchange` | 注册登录、OAuth/手机号流程和 Hoox 会话交换 | [身份、账号与会话](../architecture/identity-and-session.md) |
+| `/api/auth/*`、`/v1/auth/config`、`/v1/auth/exchange` | 注册登录、邮箱验证 OTP、OAuth/手机号流程和 Hoox 会话交换 | [身份、账号与会话](../architecture/identity-and-session.md) |
 | `/v1/resources/uploads` | 通过受控上传协议创建 ResourceVersion | [架构总览](../architecture/overview.md) |
 
 路径中的 `/me` 表示以当前认证用户发起操作，不必然表示数据属于全局个人空间；最终作用域仍由该路由的 `TenantScope` 和业务校验决定。

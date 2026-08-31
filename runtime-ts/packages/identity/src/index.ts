@@ -1,7 +1,8 @@
 import { createCipheriv, createDecipheriv, createHash, hkdfSync, randomBytes } from "node:crypto";
 import { betterAuth, type BetterAuthOptions, type BetterAuthPlugin } from "better-auth";
-import { genericOAuth, phoneNumber } from "better-auth/plugins";
+import { emailOTP, genericOAuth, phoneNumber } from "better-auth/plugins";
 import type { OAuth2Tokens } from "better-auth/oauth2";
+import { createTransport } from "nodemailer";
 import type { Pool } from "pg";
 
 export const identityProviderKeys = ["google", "github", "wechat", "qq"] as const;
@@ -17,6 +18,14 @@ export interface IdentityProviderConfiguration {
 export interface IdentityConfiguration {
   readonly versionToken: number;
   readonly emailPasswordEnabled: boolean;
+  readonly emailVerificationEnabled: boolean;
+  readonly emailFromAddress?: string;
+  readonly emailFromName?: string;
+  readonly smtpHost?: string;
+  readonly smtpPort: number;
+  readonly smtpSecure: boolean;
+  readonly smtpUsername?: string;
+  readonly smtpPasswordConfigured: boolean;
   readonly registrationEnabled: boolean;
   readonly phoneEnabled: boolean;
   readonly smsWebhookUrl?: string;
@@ -28,12 +37,21 @@ export interface IdentityConfiguration {
 
 export interface IdentityConfigurationSecrets {
   readonly providerSecrets: Partial<Record<IdentityProviderKey, string>>;
+  readonly smtpPassword?: string;
   readonly smsWebhookSecret?: string;
 }
 
 export interface EditableIdentityConfiguration {
   readonly expectedVersionToken: number;
   readonly emailPasswordEnabled: boolean;
+  readonly emailVerificationEnabled: boolean;
+  readonly emailFromAddress?: string;
+  readonly emailFromName?: string;
+  readonly smtpHost?: string;
+  readonly smtpPort: number;
+  readonly smtpSecure: boolean;
+  readonly smtpUsername?: string;
+  readonly smtpPassword?: string;
   readonly registrationEnabled: boolean;
   readonly phoneEnabled: boolean;
   readonly smsWebhookUrl?: string;
@@ -65,6 +83,10 @@ export function emptyIdentityConfiguration(): IdentityConfiguration {
   return Object.freeze({
     versionToken: 0,
     emailPasswordEnabled: true,
+    emailVerificationEnabled: false,
+    smtpPort: 465,
+    smtpSecure: true,
+    smtpPasswordConfigured: false,
     registrationEnabled: true,
     phoneEnabled: false,
     smsWebhookSecretConfigured: false,
@@ -73,6 +95,22 @@ export function emptyIdentityConfiguration(): IdentityConfiguration {
       github: Object.freeze({ enabled: false, clientId: "", secretConfigured: false }),
       wechat: Object.freeze({ enabled: false, clientId: "", secretConfigured: false }),
       qq: Object.freeze({ enabled: false, clientId: "", secretConfigured: false }),
+    }),
+  });
+}
+
+export function hydrateIdentityConfiguration(
+  stored: Partial<Omit<IdentityConfiguration, "updatedAt" | "updatedBy">>,
+): Omit<IdentityConfiguration, "updatedAt" | "updatedBy"> {
+  const defaults = emptyIdentityConfiguration();
+  return Object.freeze({
+    ...defaults,
+    ...stored,
+    providers: Object.freeze({
+      google: Object.freeze({ ...defaults.providers.google, ...stored.providers?.google }),
+      github: Object.freeze({ ...defaults.providers.github, ...stored.providers?.github }),
+      wechat: Object.freeze({ ...defaults.providers.wechat, ...stored.providers?.wechat }),
+      qq: Object.freeze({ ...defaults.providers.qq, ...stored.providers?.qq }),
     }),
   });
 }
@@ -102,6 +140,31 @@ function normalizeWebhookUrl(value: string | undefined): string | undefined {
   return url.href;
 }
 
+function normalizeSmtpHost(value: string | undefined): string | undefined {
+  const normalized = normalizedText(value, 253);
+  if (normalized === undefined) return undefined;
+  const url = new URL(`smtp://${normalized}`);
+  if (
+    url.hostname === "" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.port !== "" ||
+    url.pathname !== "" ||
+    url.search !== "" ||
+    url.hash !== ""
+  ) {
+    throw new TypeError("IDENTITY_SMTP_HOST_INVALID");
+  }
+  return url.hostname;
+}
+
+function normalizeEmailAddress(value: string | undefined): string | undefined {
+  const normalized = normalizedText(value, 320)?.toLocaleLowerCase("en-US");
+  if (normalized === undefined) return undefined;
+  if (!emailPattern.test(normalized)) throw new TypeError("IDENTITY_EMAIL_FROM_INVALID");
+  return normalized;
+}
+
 export function normalizeEditableIdentityConfiguration(
   input: EditableIdentityConfiguration,
   currentSecrets: IdentityConfigurationSecrets,
@@ -126,6 +189,27 @@ export function normalizeEditableIdentityConfiguration(
       return [key, Object.freeze({ enabled: candidate.enabled, clientId, secretConfigured })];
     }),
   ) as unknown as Record<IdentityProviderKey, IdentityProviderConfiguration>;
+  const emailFromAddress = normalizeEmailAddress(input.emailFromAddress);
+  const emailFromName = normalizedText(input.emailFromName, 128);
+  const smtpHost = normalizeSmtpHost(input.smtpHost);
+  if (!Number.isSafeInteger(input.smtpPort) || input.smtpPort < 1 || input.smtpPort > 65_535) {
+    throw new TypeError("IDENTITY_SMTP_PORT_INVALID");
+  }
+  const smtpUsername = normalizedText(input.smtpUsername, 512);
+  const replacementSmtpPassword = normalizedText(input.smtpPassword, 4_096);
+  const smtpPassword = replacementSmtpPassword ?? currentSecrets.smtpPassword;
+  if (input.emailVerificationEnabled && !input.emailPasswordEnabled) {
+    throw new TypeError("IDENTITY_EMAIL_VERIFICATION_REQUIRES_PASSWORD_AUTH");
+  }
+  if (
+    input.emailVerificationEnabled &&
+    (emailFromAddress === undefined ||
+      smtpHost === undefined ||
+      smtpUsername === undefined ||
+      smtpPassword === undefined)
+  ) {
+    throw new TypeError("IDENTITY_EMAIL_DELIVERY_INCOMPLETE");
+  }
   const smsWebhookUrl = normalizeWebhookUrl(input.smsWebhookUrl);
   const replacementSmsSecret = normalizedText(input.smsWebhookSecret, 4_096);
   const smsWebhookSecret = replacementSmsSecret ?? currentSecrets.smsWebhookSecret;
@@ -136,6 +220,14 @@ export function normalizeEditableIdentityConfiguration(
     configuration: Object.freeze({
       versionToken: input.expectedVersionToken + 1,
       emailPasswordEnabled: input.emailPasswordEnabled,
+      emailVerificationEnabled: input.emailVerificationEnabled,
+      ...(emailFromAddress === undefined ? {} : { emailFromAddress }),
+      ...(emailFromName === undefined ? {} : { emailFromName }),
+      ...(smtpHost === undefined ? {} : { smtpHost }),
+      smtpPort: input.smtpPort,
+      smtpSecure: input.smtpSecure,
+      ...(smtpUsername === undefined ? {} : { smtpUsername }),
+      smtpPasswordConfigured: smtpPassword !== undefined,
       registrationEnabled: input.registrationEnabled,
       phoneEnabled: input.phoneEnabled,
       ...(smsWebhookUrl === undefined ? {} : { smsWebhookUrl }),
@@ -144,6 +236,7 @@ export function normalizeEditableIdentityConfiguration(
     }),
     secrets: Object.freeze({
       providerSecrets: Object.freeze(providerSecrets),
+      ...(smtpPassword === undefined ? {} : { smtpPassword }),
       ...(smsWebhookSecret === undefined ? {} : { smsWebhookSecret }),
     }),
   });
@@ -182,6 +275,7 @@ export function decryptIdentitySecrets(
   ]).toString("utf8");
   const parsed = JSON.parse(plaintext) as {
     readonly providerSecrets?: Partial<Record<IdentityProviderKey, unknown>>;
+    readonly smtpPassword?: unknown;
     readonly smsWebhookSecret?: unknown;
   };
   const providerSecrets: Partial<Record<IdentityProviderKey, string>> = {};
@@ -191,6 +285,9 @@ export function decryptIdentitySecrets(
   }
   return Object.freeze({
     providerSecrets: Object.freeze(providerSecrets),
+    ...(typeof parsed.smtpPassword === "string" && parsed.smtpPassword.length > 0
+      ? { smtpPassword: parsed.smtpPassword }
+      : {}),
     ...(typeof parsed.smsWebhookSecret === "string" && parsed.smsWebhookSecret.length > 0
       ? { smsWebhookSecret: parsed.smsWebhookSecret }
       : {}),
@@ -307,6 +404,52 @@ async function sendSmsWebhook(input: {
   if (!response.ok) throw new Error("SMS_WEBHOOK_FAILED");
 }
 
+function createEmailOtpSender(
+  configuration: IdentityConfiguration,
+  secrets: IdentityConfigurationSecrets,
+) {
+  if (!configuration.emailVerificationEnabled) return undefined;
+  const smtpPassword = secrets.smtpPassword;
+  if (
+    configuration.emailFromAddress === undefined ||
+    configuration.smtpHost === undefined ||
+    configuration.smtpUsername === undefined ||
+    smtpPassword === undefined
+  ) {
+    throw new TypeError("IDENTITY_EMAIL_DELIVERY_SECRET_MISSING");
+  }
+  const transport = createTransport({
+    host: configuration.smtpHost,
+    port: configuration.smtpPort,
+    secure: configuration.smtpSecure,
+    requireTLS: !configuration.smtpSecure,
+    auth: { user: configuration.smtpUsername, pass: smtpPassword },
+    connectionTimeout: 15_000,
+    greetingTimeout: 15_000,
+    socketTimeout: 20_000,
+    tls: { minVersion: "TLSv1.2", rejectUnauthorized: true },
+  });
+  return async (input: {
+    readonly email: string;
+    readonly otp: string;
+    readonly type: "sign-in" | "email-verification" | "forget-password" | "change-email";
+  }): Promise<void> => {
+    if (input.type !== "email-verification") {
+      throw new Error("EMAIL_OTP_PURPOSE_UNSUPPORTED");
+    }
+    await transport.sendMail({
+      from: {
+        address: configuration.emailFromAddress as string,
+        name: configuration.emailFromName ?? "Hoox",
+      },
+      to: input.email,
+      subject: "Hoox 邮箱验证码",
+      text: `你的 Hoox 邮箱验证码是 ${input.otp}，10 分钟内有效。若非本人操作，请忽略此邮件。`,
+      html: `<p>你的 Hoox 邮箱验证码是：</p><p style="font-size:28px;font-weight:700;letter-spacing:6px">${input.otp}</p><p>验证码 10 分钟内有效。若非本人操作，请忽略此邮件。</p>`,
+    });
+  };
+}
+
 export function createEmbeddedBetterAuthOptions(input: {
   readonly database: Pool;
   readonly baseURL: string;
@@ -345,6 +488,20 @@ export function createEmbeddedBetterAuthOptions(input: {
     };
   }
   const plugins: BetterAuthPlugin[] = [];
+  const sendVerificationOTP = createEmailOtpSender(configuration, secrets);
+  if (sendVerificationOTP !== undefined) {
+    plugins.push(
+      emailOTP({
+        sendVerificationOTP,
+        overrideDefaultEmailVerification: true,
+        otpLength: 6,
+        expiresIn: 600,
+        allowedAttempts: 5,
+        storeOTP: "hashed",
+        rateLimit: { window: 60, max: 3 },
+      }),
+    );
+  }
   if (qqSecret !== undefined) {
     const clientId = configuration.providers.qq.clientId;
     plugins.push(
@@ -427,8 +584,20 @@ export function createEmbeddedBetterAuthOptions(input: {
     emailAndPassword: {
       enabled: configuration.emailPasswordEnabled,
       disableSignUp: !configuration.registrationEnabled,
+      requireEmailVerification: configuration.emailVerificationEnabled,
       minPasswordLength: 8,
       maxPasswordLength: 128,
+    },
+    emailVerification: { autoSignInAfterVerification: true, sendOnSignIn: false },
+    databaseHooks: {
+      user: {
+        create: {
+          before: async (user) =>
+            configuration.emailVerificationEnabled
+              ? undefined
+              : { data: { ...user, emailVerified: true } },
+        },
+      },
     },
     socialProviders,
     plugins,

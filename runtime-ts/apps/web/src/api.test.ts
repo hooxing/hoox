@@ -106,6 +106,50 @@ describe("RuntimeApi", () => {
     expect((firstRequest as RequestInit).credentials).toBe("same-origin");
   });
 
+  it("邮箱注册在验证码验证后才交换 Hoox 会话", async () => {
+    const session = {
+      profile: { id: "user_identity", displayName: "身份用户", email: "identity@example.com" },
+      accessToken: "hoox_session_identity-token-with-more-than-thirty-two-characters",
+      expiresAt: "2099-12-31T23:59:59.000Z",
+    };
+    const fetcher = vi.fn<typeof fetch>().mockImplementation((input) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/sign-up/email")) {
+        return Promise.resolve(new Response(JSON.stringify({ token: null }), { status: 200 }));
+      }
+      if (url.endsWith("/api/auth/email-otp/send-verification-otp")) {
+        return Promise.resolve(new Response(JSON.stringify({ success: true }), { status: 200 }));
+      }
+      if (url.endsWith("/api/auth/email-otp/verify-email")) {
+        return Promise.resolve(new Response(JSON.stringify({ status: true }), { status: 200 }));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ version: "v1", requestId: "req_identity", data: session }), {
+          status: 200,
+        }),
+      );
+    });
+    const api = new RuntimeApi(fetcher, "/api");
+
+    await expect(
+      api.signUpWithEmail({
+        displayName: "身份用户",
+        email: "identity@example.com",
+        password: "secret12",
+      }),
+    ).resolves.toEqual({ emailVerificationRequired: true });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await api.resendEmailVerificationOtp("identity@example.com");
+    await expect(api.verifyEmailOtp("identity@example.com", "123456")).resolves.toEqual(session);
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/api/auth/sign-up/email",
+      "/api/api/auth/email-otp/send-verification-otp",
+      "/api/api/auth/email-otp/verify-email",
+      "/api/v1/auth/exchange",
+    ]);
+  });
+
   it("可并行读取个人与团队任务列表且不改变当前活动租户", async () => {
     const fetcher = vi.fn().mockImplementation(() =>
       Promise.resolve(

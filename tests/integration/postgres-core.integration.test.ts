@@ -44,6 +44,7 @@ import {
 import {
   PgArchiveThreadCommand,
   PgCoreRepositories,
+  PgRenamePersonalThreadCommand,
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
 import {
   PgAdminControlRepository,
@@ -590,6 +591,7 @@ describe("PostgreSQL 迁移与强权限边界", () => {
         },
         repositories,
         archiveThread: new PgArchiveThreadCommand(runtimePool),
+        renamePersonalThread: new PgRenamePersonalThreadCommand(runtimePool),
         cursorCodec: createThreadCursorCodec({
           activeKid: "integration-key",
           keys: [

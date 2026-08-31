@@ -60,6 +60,10 @@ function fixture(): AdminControlApiContract {
     getIdentityConfiguration: vi.fn(async () => ({
       versionToken: 0,
       emailPasswordEnabled: true,
+      emailVerificationEnabled: false,
+      smtpPort: 465,
+      smtpSecure: true,
+      smtpPasswordConfigured: false,
       registrationEnabled: true,
       phoneEnabled: false,
       smsWebhookSecretConfigured: false,
@@ -305,8 +309,42 @@ describe("统一平台管理导航", () => {
     expect(container.textContent).toContain("登录入口控制");
     expect(container.textContent).toContain("基础访问策略");
     expect(container.textContent).toContain("第三方身份源");
+    expect(container.textContent).toContain("发信邮箱与 SMTP");
     expect(container.textContent).toContain("秘密材料只保存在服务端");
     expect(container.querySelectorAll(".identity-provider-card")).toHaveLength(4);
+
+    const emailVerificationToggle = container.querySelector<HTMLButtonElement>(
+      '[aria-label="开启邮箱验证码"]',
+    );
+    if (emailVerificationToggle === null) throw new Error("邮箱验证码开关缺失");
+    act(() => {
+      emailVerificationToggle.click();
+      changeControl(
+        requiredControl(
+          container.querySelector<HTMLInputElement>('input[placeholder="no-reply@example.com"]'),
+          "发件人邮箱",
+        ),
+        "no-reply@example.com",
+      );
+      changeControl(
+        requiredControl(
+          container.querySelector<HTMLInputElement>('input[placeholder="smtp.example.com"]'),
+          "SMTP 主机",
+        ),
+        "smtp.example.com",
+      );
+      const smtpUsers = container.querySelectorAll<HTMLInputElement>(
+        'input[placeholder="no-reply@example.com"]',
+      );
+      changeControl(requiredControl(smtpUsers[1], "SMTP 用户名"), "mailer@example.com");
+      changeControl(
+        requiredControl(
+          container.querySelector<HTMLInputElement>('input[placeholder="输入密码或授权码"]'),
+          "SMTP 密码",
+        ),
+        "smtp-secret",
+      );
+    });
 
     const github = container.querySelector<HTMLElement>('[data-provider="github"]');
     if (github === null) throw new Error("GitHub 身份源缺失");
@@ -337,6 +375,13 @@ describe("统一平台管理导航", () => {
       expect.objectContaining({
         expectedVersionToken: 0,
         emailPasswordEnabled: true,
+        emailVerificationEnabled: true,
+        emailFromAddress: "no-reply@example.com",
+        smtpHost: "smtp.example.com",
+        smtpPort: 465,
+        smtpSecure: true,
+        smtpUsername: "mailer@example.com",
+        smtpPassword: "smtp-secret",
         registrationEnabled: true,
         phoneEnabled: false,
         reason: "为内部测试开放 GitHub 登录",

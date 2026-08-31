@@ -3,7 +3,11 @@ import type {
   IdentityConfiguration,
   IdentityConfigurationSecrets,
 } from "@hoox/identity";
-import { decryptIdentitySecrets, encryptIdentitySecrets } from "@hoox/identity";
+import {
+  decryptIdentitySecrets,
+  encryptIdentitySecrets,
+  hydrateIdentityConfiguration,
+} from "@hoox/identity";
 import { randomUUID } from "node:crypto";
 import type { Pool, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
@@ -41,7 +45,9 @@ export interface IdentityConfigurationRepository {
 function configurationFromRow(row: IdentityConfigurationRow, secret: string) {
   const raw = row.configuration;
   if (typeof raw !== "object" || raw === null) throw new Error("IDENTITY_CONFIGURATION_INVALID");
-  const value = raw as Omit<IdentityConfiguration, "updatedAt" | "updatedBy">;
+  const value = hydrateIdentityConfiguration(
+    raw as Partial<Omit<IdentityConfiguration, "updatedAt" | "updatedBy">>,
+  );
   const versionToken = Number(row.version_token);
   if (
     !Number.isSafeInteger(versionToken) ||

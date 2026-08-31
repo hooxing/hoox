@@ -105,6 +105,7 @@ describe("Demo 持续部署契约", () => {
     expect(deploy).toContain("/api/api/auth/sign-in/email");
     expect(deploy).toContain("better_auth_users SET email_verified=true");
     expect(deploy).toContain("email_verified=true");
+    expect(deploy).toContain('demo_identity_verified" != "true"');
     expect(deploy.indexOf("email_verified=true")).toBeLessThan(
       deploy.indexOf("/api/api/auth/sign-in/email"),
     );

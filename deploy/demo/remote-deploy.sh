@@ -205,7 +205,7 @@ demo_identity_verified="$(printf '%s\n' \
       --set=runtime_schema="$DATABASE_SCHEMA" \
       --set=demo_email="$DEMO_ACCOUNT_EMAIL" \
       --tuples-only --no-align)"
-if [[ "$demo_identity_verified" != "t" ]]; then
+if [[ "$demo_identity_verified" != "true" ]]; then
   echo "Demo 账号邮箱验证初始化失败" >&2
   exit 1
 fi

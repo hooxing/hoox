@@ -69,6 +69,9 @@ describe("本地账号会话", () => {
     const container = mount(
       <AccountAccess api={api} storage={window.localStorage} onAuthenticated={authenticated} />,
     );
+    expect(
+      container.querySelector<HTMLImageElement>(".account-access-brand")?.getAttribute("src"),
+    ).toBe("/brand/hoox-app-icon.png");
 
     act(() => {
       Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))

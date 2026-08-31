@@ -1,5 +1,9 @@
 # Hoox
 
+<p align="center">
+  <img src="runtime-ts/public/brand/hoox-primary-horizontal.png" alt="Hoox" width="720" />
+</p>
+
 [![CI](https://github.com/hooxing/hoox/actions/workflows/ci.yml/badge.svg)](https://github.com/hooxing/hoox/actions/workflows/ci.yml)
 [![Node.js](https://img.shields.io/badge/Node.js-24.18.0-339933?logo=node.js&logoColor=white)](package.json)
 [![pnpm](https://img.shields.io/badge/pnpm-10.15.1-F69220?logo=pnpm&logoColor=white)](package.json)

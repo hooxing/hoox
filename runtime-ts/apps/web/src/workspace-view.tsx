@@ -45,6 +45,7 @@ import {
   type ThreadContinuityStatus,
   type RuntimeApi,
 } from "./api.js";
+import { HOOX_APP_ICON_PATH } from "./brand.js";
 import {
   buildConversationBlocks,
   buildConversationSections,
@@ -1524,9 +1525,7 @@ export function NavigationSidebar({
     >
       <div className="brand-row">
         <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            H
-          </span>
+          <img className="brand-mark" src={HOOX_APP_ICON_PATH} alt="" aria-hidden="true" />
           <span className="brand-copy">
             <strong>Hoox</strong>
             <span className="brand-tagline">你说，它做。</span>

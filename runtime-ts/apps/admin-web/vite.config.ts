@@ -7,6 +7,7 @@ export default defineConfig(({ mode }) => {
   const controlToken = environment.DEV_ADMIN_CONTROL_TOKEN;
   return {
     plugins: [react()],
+    publicDir: resolve(import.meta.dirname, "../../public"),
     server: {
       host: "127.0.0.1",
       port: 4174,

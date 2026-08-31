@@ -38,7 +38,7 @@
 2. 上传 `deploy/demo` 中的 Compose、初始化、Nginx 和远程发布契约到新的 release 目录。
 3. 目标主机拉取 digest，启动 PostgreSQL 与 MinIO，幂等创建对象桶，再执行只向前的数据库迁移。
 4. 以现有管理员用户 ID 或安全占位值启动 API 与用户 Web，验证本机探针后生成 root-only Admin Control Bearer Token 配置，再原子安装不含 HTTP Basic 的 Nginx 配置。
-5. 通过公开 HTTPS Better Auth 路径注册或登录 Demo 账号并交换 Hoox Session；随后查询其用户与个人 Tenant，将用户幂等提升为有效平台控制管理员和 Skill 发布管理员。发布脚本只在 `0600` 临时 curl 配置中保存本次验收使用的 Hoox access token。
+5. 通过公开 HTTPS Better Auth 路径注册 Demo 账号。该账号是部署脚本托管的固定演示管理员，脚本在受限数据库连接中将其邮箱状态幂等标记为已验证，再使用同一账号登录并交换 Hoox Session；普通用户仍必须通过 SMTP 验证码完成邮箱验证。随后查询其用户与个人 Tenant，将用户幂等提升为有效平台控制管理员和 Skill 发布管理员。发布脚本只在 `0600` 临时 curl 配置中保存本次验收使用的 Hoox access token。
 6. 将实际管理员用户同时注入 API 与 Admin Control，将个人 Tenant 注入 Scheduler 与 Worker，并强制重建这些应用容器。API 以该用户 ID 作为 Demo 后台会话闸门。
 7. 检查六个应用服务持续运行、用户端 readiness、后台 readiness、无需认证即可加载的后台静态页面、无会话后台 API 的 `401`，以及带管理员 Hoox 会话的后台概览 API，再切换 `/opt/hoox-demo/current`。只保留最近五个 release 目录。
 

@@ -756,6 +756,7 @@ export function createApiApp(
         const configuration = await identity.publicConfiguration();
         return success(request, {
           emailPasswordEnabled: configuration.emailPasswordEnabled,
+          emailVerificationEnabled: configuration.emailVerificationEnabled,
           registrationEnabled: configuration.registrationEnabled,
           phoneEnabled: configuration.phoneEnabled,
           providers: ["google", "github", "wechat", "qq"].map((key) => ({

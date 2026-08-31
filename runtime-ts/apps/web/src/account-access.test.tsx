@@ -121,6 +121,7 @@ describe("内嵌身份登录方式", () => {
       loginAccount: vi.fn(),
       getIdentityConfiguration: vi.fn(async () => ({
         emailPasswordEnabled: false,
+        emailVerificationEnabled: false,
         registrationEnabled: true,
         phoneEnabled: false,
         providers: [
@@ -141,12 +142,61 @@ describe("内嵌身份登录方式", () => {
     );
   });
 
+  it("邮箱注册必须填写收到的验证码后才持久化会话", async () => {
+    const session: AccountSession = {
+      profile: { id: "user-email", displayName: "邮箱用户", email: "mail@example.com" },
+      accessToken: "hoox_session_email-token-with-more-than-thirty-two-characters",
+      expiresAt: "2099-12-31T23:59:59.000Z",
+    };
+    const api: AccountAccessApi = {
+      registerAccount: vi.fn(),
+      loginAccount: vi.fn(),
+      getIdentityConfiguration: vi.fn(async () => ({
+        emailPasswordEnabled: true,
+        emailVerificationEnabled: true,
+        registrationEnabled: true,
+        phoneEnabled: false,
+        providers: [],
+      })),
+      signUpWithEmail: vi.fn(async () => ({ emailVerificationRequired: true as const })),
+      resendEmailVerificationOtp: vi.fn(async () => undefined),
+      verifyEmailOtp: vi.fn(async () => session),
+    };
+    const authenticated = vi.fn();
+    const container = mount(<AccountAccess api={api} onAuthenticated={authenticated} />);
+    await vi.waitFor(() => expect(container.textContent).toContain("注册"));
+    act(() => {
+      Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
+        .find((button) => button.textContent === "注册")
+        ?.click();
+    });
+    const inputs = container.querySelectorAll<HTMLInputElement>(".account-access-form input");
+    change(inputs[0] as HTMLInputElement, "邮箱用户");
+    change(inputs[1] as HTMLInputElement, "mail@example.com");
+    change(inputs[2] as HTMLInputElement, "secret12");
+    change(inputs[3] as HTMLInputElement, "secret12");
+    act(() => container.querySelector<HTMLFormElement>("form")?.requestSubmit());
+
+    await vi.waitFor(() =>
+      expect(container.textContent).toContain("验证码已发送到 mail@example.com"),
+    );
+    expect(authenticated).not.toHaveBeenCalled();
+    const otp = container.querySelector<HTMLInputElement>('input[autocomplete="one-time-code"]');
+    if (otp === null) throw new Error("邮箱验证码输入框缺失");
+    change(otp, "123456");
+    act(() => container.querySelector<HTMLFormElement>("form")?.requestSubmit());
+
+    await vi.waitFor(() => expect(authenticated).toHaveBeenCalledWith(session));
+    expect(api.verifyEmailOtp).toHaveBeenCalledWith("mail@example.com", "123456");
+  });
+
   it("只展示后台启用的手机号和第三方 Provider", async () => {
     const api: AccountAccessApi = {
       registerAccount: vi.fn(),
       loginAccount: vi.fn(),
       getIdentityConfiguration: vi.fn(async () => ({
         emailPasswordEnabled: true,
+        emailVerificationEnabled: false,
         registrationEnabled: false,
         phoneEnabled: true,
         providers: [

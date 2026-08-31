@@ -121,6 +121,14 @@ export function IdentityConfigurationPanel({
   readonly onSave: (input: UpdateIdentityAdminConfigurationRequest) => Promise<void>;
 }) {
   const [emailPasswordEnabled, setEmailPasswordEnabled] = useState(true);
+  const [emailVerificationEnabled, setEmailVerificationEnabled] = useState(false);
+  const [emailFromAddress, setEmailFromAddress] = useState("");
+  const [emailFromName, setEmailFromName] = useState("Hoox");
+  const [smtpHost, setSmtpHost] = useState("");
+  const [smtpPort, setSmtpPort] = useState("465");
+  const [smtpSecure, setSmtpSecure] = useState(true);
+  const [smtpUsername, setSmtpUsername] = useState("");
+  const [smtpPassword, setSmtpPassword] = useState("");
   const [registrationEnabled, setRegistrationEnabled] = useState(true);
   const [phoneEnabled, setPhoneEnabled] = useState(false);
   const [smsWebhookUrl, setSmsWebhookUrl] = useState("");
@@ -131,6 +139,14 @@ export function IdentityConfigurationPanel({
   useEffect(() => {
     if (value === undefined) return;
     setEmailPasswordEnabled(value.emailPasswordEnabled);
+    setEmailVerificationEnabled(value.emailVerificationEnabled);
+    setEmailFromAddress(value.emailFromAddress ?? "");
+    setEmailFromName(value.emailFromName ?? "Hoox");
+    setSmtpHost(value.smtpHost ?? "");
+    setSmtpPort(String(value.smtpPort));
+    setSmtpSecure(value.smtpSecure);
+    setSmtpUsername(value.smtpUsername ?? "");
+    setSmtpPassword("");
     setRegistrationEnabled(value.registrationEnabled);
     setPhoneEnabled(value.phoneEnabled);
     setSmsWebhookUrl(value.smsWebhookUrl ?? "");
@@ -164,9 +180,21 @@ export function IdentityConfigurationPanel({
       (provider.clientId.trim() === "" ||
         (!provider.secretConfigured && provider.clientSecret.trim() === "")),
   );
+  const parsedSmtpPort = Number(smtpPort);
+  const emailDeliveryIncomplete =
+    emailVerificationEnabled &&
+    (!emailPasswordEnabled ||
+      emailFromAddress.trim() === "" ||
+      smtpHost.trim() === "" ||
+      smtpUsername.trim() === "" ||
+      (!value.smtpPasswordConfigured && smtpPassword.trim() === "") ||
+      !Number.isSafeInteger(parsedSmtpPort) ||
+      parsedSmtpPort < 1 ||
+      parsedSmtpPort > 65_535);
   const saveDisabled =
     busy ||
     reason.trim() === "" ||
+    emailDeliveryIncomplete ||
     (phoneEnabled && smsWebhookUrl.trim() === "") ||
     invalidEnabledProvider;
 
@@ -176,6 +204,14 @@ export function IdentityConfigurationPanel({
     void onSave({
       expectedVersionToken: value.versionToken,
       emailPasswordEnabled,
+      emailVerificationEnabled,
+      ...(emailFromAddress.trim() === "" ? {} : { emailFromAddress: emailFromAddress.trim() }),
+      ...(emailFromName.trim() === "" ? {} : { emailFromName: emailFromName.trim() }),
+      ...(smtpHost.trim() === "" ? {} : { smtpHost: smtpHost.trim() }),
+      smtpPort: parsedSmtpPort,
+      smtpSecure,
+      ...(smtpUsername.trim() === "" ? {} : { smtpUsername: smtpUsername.trim() }),
+      ...(smtpPassword.trim() === "" ? {} : { smtpPassword: smtpPassword.trim() }),
       registrationEnabled,
       phoneEnabled,
       ...(smsWebhookUrl.trim() === "" ? {} : { smsWebhookUrl: smsWebhookUrl.trim() }),
@@ -238,6 +274,14 @@ export function IdentityConfigurationPanel({
             onChange={setEmailPasswordEnabled}
           />
           <MethodCard
+            icon={<SafetyCertificateOutlined />}
+            title="邮箱验证码"
+            description="注册及未验证账号登录时，必须通过发信邮箱发送的一次性验证码。"
+            checked={emailVerificationEnabled}
+            badge="账号所有权"
+            onChange={setEmailVerificationEnabled}
+          />
+          <MethodCard
             icon={<UserAddOutlined />}
             title="开放注册"
             description="关闭后仅允许已有账号登录，不再创建新用户。"
@@ -253,6 +297,94 @@ export function IdentityConfigurationPanel({
             badge="短信通道"
             onChange={setPhoneEnabled}
           />
+        </div>
+        <div className={`identity-mail-settings${emailVerificationEnabled ? " active" : ""}`}>
+          <div className="identity-inline-heading">
+            <span className="identity-inline-icon">
+              <MailOutlined />
+            </span>
+            <span>
+              <strong>发信邮箱与 SMTP</strong>
+              <small>
+                {emailVerificationEnabled
+                  ? "邮箱验证已开启，发布前需要完整填写 SMTP 发信配置。"
+                  : "可提前保存发信邮箱，开启邮箱验证码后生效。"}
+              </small>
+            </span>
+            <span className={`identity-state${emailVerificationEnabled ? " active" : ""}`}>
+              {emailVerificationEnabled ? "待发布" : "未启用"}
+            </span>
+          </div>
+          <div className="identity-field-grid identity-mail-field-grid">
+            <label>
+              <span>发件人名称</span>
+              <input
+                value={emailFromName}
+                placeholder="Hoox"
+                onChange={(event) => setEmailFromName(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>发件人邮箱</span>
+              <input
+                type="email"
+                value={emailFromAddress}
+                placeholder="no-reply@example.com"
+                onChange={(event) => setEmailFromAddress(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>SMTP 主机</span>
+              <input
+                value={smtpHost}
+                placeholder="smtp.example.com"
+                onChange={(event) => setSmtpHost(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>SMTP 端口</span>
+              <input
+                type="number"
+                min="1"
+                max="65535"
+                value={smtpPort}
+                onChange={(event) => setSmtpPort(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>SMTP 安全模式</span>
+              <select
+                value={smtpSecure ? "tls" : "starttls"}
+                onChange={(event) => setSmtpSecure(event.target.value === "tls")}
+              >
+                <option value="tls">隐式 TLS（常用端口 465）</option>
+                <option value="starttls">STARTTLS（常用端口 587）</option>
+              </select>
+            </label>
+            <label>
+              <span>SMTP 用户名</span>
+              <input
+                value={smtpUsername}
+                placeholder="no-reply@example.com"
+                onChange={(event) => setSmtpUsername(event.target.value)}
+              />
+            </label>
+            <label>
+              <span>SMTP 密码或授权码</span>
+              <span className="identity-secret-field">
+                <LockOutlined />
+                <input
+                  type="password"
+                  value={smtpPassword}
+                  placeholder={
+                    value.smtpPasswordConfigured ? "已配置 · 留空保持不变" : "输入密码或授权码"
+                  }
+                  onChange={(event) => setSmtpPassword(event.target.value)}
+                />
+              </span>
+              <small>密码使用现有身份根密钥加密保存，不会在页面回显。</small>
+            </label>
+          </div>
         </div>
         <div className={`identity-sms-settings${phoneEnabled ? " active" : ""}`}>
           <div className="identity-inline-heading">

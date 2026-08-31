@@ -55,7 +55,10 @@ const configuration = {
 
 function fixture() {
   const database = {
-    query: vi.fn(async () => ({ rows: [{ present: 1 }], rowCount: 1 })),
+    query: vi.fn(async (_text: string, _values?: readonly unknown[]) => ({
+      rows: [{ present: 1 }],
+      rowCount: 1,
+    })),
   };
   const localAccounts = {
     exchangeBetterAuthIdentity: vi.fn(async () => ({
@@ -123,6 +126,25 @@ describe("内嵌邮箱验证码边界", () => {
     });
     expect(verification.status).toBe(200);
     expect(authState.handler).toHaveBeenCalledOnce();
+  });
+
+  it("按收件邮箱限制验证码重发频率且限流键不保存明文邮箱", async () => {
+    const { service, database } = fixture();
+    database.query.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+
+    const response = await service.handle({
+      method: "POST",
+      path: "/api/auth/email-otp/send-verification-otp",
+      headers: new Headers({ "content-type": "application/json" }),
+      body: JSON.stringify({ email: "user@example.com", type: "email-verification" }),
+    });
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("60");
+    expect(authState.handler).not.toHaveBeenCalled();
+    const rateLimitCall = database.query.mock.calls[0];
+    expect(String(rateLimitCall?.[0])).toContain("better_auth_rate_limits");
+    expect(rateLimitCall?.[1]?.[0]).not.toContain("user@example.com");
   });
 
   it("拒绝为未验证的邮箱密码身份交换 Hoox 会话", async () => {

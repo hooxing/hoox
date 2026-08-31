@@ -2937,6 +2937,58 @@ h2 {
   border-color: #638c79;
   background: #fff;
 }
+.account-email-verification-status {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+  padding: 14px;
+  border: 1px solid #d7e5de;
+  border-radius: 13px;
+  color: #2e493d;
+  background: linear-gradient(135deg, #f1f7f4, #fafcfb);
+}
+.account-email-verification-status > span {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 12px;
+  color: #fff;
+  background: #456b5a;
+  box-shadow: 0 8px 18px rgb(69 107 90 / 18%);
+}
+.account-email-verification-status > div {
+  min-width: 0;
+}
+.account-email-verification-status strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #293f35;
+  font-size: 13px;
+}
+.account-email-verification-status p {
+  margin: 0;
+  color: #68776f;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.55;
+}
+.account-email-verification-status b {
+  display: block;
+  overflow: hidden;
+  color: #344d42;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-email-otp-field input {
+  text-align: center;
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 720;
+  letter-spacing: 0.18em;
+}
 .account-access-error {
   padding: 9px 11px;
   border: 1px solid #e5c4bf;
@@ -2964,6 +3016,44 @@ h2 {
 }
 .account-access-submit:hover {
   background: #293e35;
+}
+.account-email-verification-actions {
+  display: grid;
+  gap: 7px;
+}
+.account-access-secondary {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid #cbd8d1;
+  border-radius: 9px;
+  color: #3f6252;
+  background: #f6faf8;
+  font-size: 12px;
+  font-weight: 700;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease;
+}
+.account-access-secondary:hover:not(:disabled) {
+  border-color: #9fb8ac;
+  color: #2f5141;
+  background: #edf5f1;
+}
+.account-access-secondary:disabled {
+  cursor: not-allowed;
+  color: #8c9992;
+  background: #f3f5f4;
+  opacity: 0.78;
+}
+.account-email-verification-actions > small {
+  color: #8a938e;
+  text-align: center;
+  font-size: 10px;
+  line-height: 1.5;
 }
 .development-account-button {
   border: 1px solid #d7d7d2;

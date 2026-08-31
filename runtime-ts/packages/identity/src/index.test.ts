@@ -201,6 +201,7 @@ describe("身份配置", () => {
       options.plugins as readonly {
         readonly id: string;
         readonly options?: {
+          readonly rateLimit?: { readonly window: number; readonly max: number };
           readonly sendVerificationOTP?: (input: {
             readonly email: string;
             readonly otp: string;
@@ -209,6 +210,7 @@ describe("身份配置", () => {
         };
       }[]
     ).find((plugin) => plugin.id === "email-otp");
+    expect(emailPlugin?.options).toMatchObject({ rateLimit: { window: 60, max: 1 } });
     await emailPlugin?.options?.sendVerificationOTP?.({
       email: "user@example.com",
       otp: "123456",

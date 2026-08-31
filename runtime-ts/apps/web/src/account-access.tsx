@@ -1,4 +1,14 @@
-import { Building2, ChevronUp, LogOut, ShieldCheck, UserRound, UsersRound, X } from "lucide-react";
+import {
+  Building2,
+  ChevronUp,
+  LogOut,
+  MailCheck,
+  RefreshCw,
+  ShieldCheck,
+  UserRound,
+  UsersRound,
+  X,
+} from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type RefObject } from "react";
 
 const SESSION_STORAGE_KEY = "hoox.auth-session.v2";
@@ -38,7 +48,13 @@ export type AccountAccessApi = {
     readonly displayName: string;
     readonly email: string;
     readonly password: string;
-  }): Promise<AccountSession | { readonly emailVerificationRequired: true }>;
+  }): Promise<
+    | AccountSession
+    | {
+        readonly emailVerificationRequired: true;
+        readonly emailVerificationCodeSent: boolean;
+      }
+  >;
   resendEmailVerificationOtp?(email: string): Promise<void>;
   verifyEmailOtp?(email: string, otp: string): Promise<AccountSession>;
   signInWithEmail?(input: {
@@ -134,6 +150,12 @@ function initials(displayName: string): string {
   return (characters[0] ?? "H").toLocaleUpperCase();
 }
 
+function accountErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  const code = (error as { readonly code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
 function accountErrorMessage(error: unknown, mode: "login" | "register"): string {
   const status =
     typeof error === "object" && error !== null && "status" in error
@@ -170,11 +192,20 @@ export function AccountAccess({
   const [emailVerificationPending, setEmailVerificationPending] = useState(false);
   const [emailVerificationCodeSent, setEmailVerificationCodeSent] = useState(false);
   const [emailVerificationCode, setEmailVerificationCode] = useState("");
+  const [emailVerificationResendCooldown, setEmailVerificationResendCooldown] = useState(0);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [phoneCode, setPhoneCode] = useState("");
   const [phoneCodeSent, setPhoneCodeSent] = useState(false);
   const [error, setError] = useState<string>();
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    if (emailVerificationResendCooldown <= 0) return;
+    const timer = window.setInterval(() => {
+      setEmailVerificationResendCooldown((seconds) => Math.max(0, seconds - 1));
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, [emailVerificationResendCooldown]);
 
   useEffect(() => {
     let active = true;
@@ -203,6 +234,7 @@ export function AccountAccess({
     setEmailVerificationPending(false);
     setEmailVerificationCodeSent(false);
     setEmailVerificationCode("");
+    setEmailVerificationResendCooldown(0);
   };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -285,7 +317,11 @@ export function AccountAccess({
         });
         if ("emailVerificationRequired" in result) {
           setEmailVerificationPending(true);
-          setEmailVerificationCodeSent(true);
+          setEmailVerificationCodeSent(result.emailVerificationCodeSent);
+          setEmailVerificationResendCooldown(60);
+          if (!result.emailVerificationCodeSent) {
+            setError("账号已创建，但首次发送状态未确认；若未收到验证码，请稍后重新发送");
+          }
           return;
         }
         authenticate(result);
@@ -302,7 +338,12 @@ export function AccountAccess({
         typeof reason === "object" && reason !== null && "status" in reason
           ? Number((reason as { readonly status?: unknown }).status)
           : 0;
-      if (mode === "login" && configuration.emailVerificationEnabled && status === 403) {
+      if (
+        mode === "login" &&
+        configuration.emailVerificationEnabled &&
+        status === 403 &&
+        accountErrorCode(reason) === "EMAIL_NOT_VERIFIED"
+      ) {
         setEmailVerificationPending(true);
         setEmailVerificationCodeSent(false);
         setError("该邮箱尚未验证，请先发送并填写验证码");
@@ -324,8 +365,18 @@ export function AccountAccess({
     try {
       await api.resendEmailVerificationOtp(normalizeEmail(email));
       setEmailVerificationCodeSent(true);
+      setEmailVerificationResendCooldown(60);
     } catch (reason) {
-      setError(accountErrorMessage(reason, "register"));
+      const status =
+        typeof reason === "object" && reason !== null && "status" in reason
+          ? Number((reason as { readonly status?: unknown }).status)
+          : 0;
+      if (status === 429) {
+        setEmailVerificationResendCooldown(60);
+        setError("发送过于频繁，请在倒计时结束后重试");
+      } else {
+        setError(accountErrorMessage(reason, "register"));
+      }
     } finally {
       setSubmitting(false);
     }
@@ -399,17 +450,32 @@ export function AccountAccess({
           <form className="account-access-form" onSubmit={(event) => void submit(event)}>
             {emailVerificationPending ? (
               <>
-                <p className="empty-state">
-                  验证码已发送到 {normalizeEmail(email)}，完成验证后即可进入 Hoox。
-                </p>
-                <label>
+                <div className="account-email-verification-status" aria-live="polite">
+                  <span aria-hidden="true">
+                    <MailCheck size={20} />
+                  </span>
+                  <div>
+                    <strong>查收邮箱验证码</strong>
+                    <p>
+                      {emailVerificationCodeSent ? "验证码已发送至" : "账号正在等待验证"}
+                      <b>{normalizeEmail(email)}</b>
+                    </p>
+                  </div>
+                </div>
+                <label className="account-email-otp-field">
                   邮箱验证码
                   <input
                     inputMode="numeric"
                     autoComplete="one-time-code"
+                    maxLength={6}
+                    pattern="[0-9]{6}"
                     value={emailVerificationCode}
-                    onChange={(event) => setEmailVerificationCode(event.target.value)}
-                    placeholder="6 位验证码"
+                    onChange={(event) =>
+                      setEmailVerificationCode(
+                        event.target.value.replace(/[^0-9]/gu, "").slice(0, 6),
+                      )
+                    }
+                    placeholder="请输入 6 位验证码"
                   />
                 </label>
               </>
@@ -475,14 +541,22 @@ export function AccountAccess({
                     : "创建账号"}
             </button>
             {emailVerificationPending && (
-              <button
-                type="button"
-                className="account-access-secondary"
-                disabled={submitting}
-                onClick={() => void resendEmailVerificationCode()}
-              >
-                {emailVerificationCodeSent ? "重新发送验证码" : "发送验证码"}
-              </button>
+              <div className="account-email-verification-actions">
+                <button
+                  type="button"
+                  className="account-access-secondary"
+                  disabled={submitting || emailVerificationResendCooldown > 0}
+                  onClick={() => void resendEmailVerificationCode()}
+                >
+                  <RefreshCw size={15} />
+                  {emailVerificationResendCooldown > 0
+                    ? `${emailVerificationResendCooldown} 秒后可重新发送`
+                    : emailVerificationCodeSent
+                      ? "重新发送验证码"
+                      : "发送验证码"}
+                </button>
+                <small>验证码 10 分钟内有效；服务端与页面均限制发送频率，请勿重复点击。</small>
+              </div>
             )}
           </form>
         ) : method === "phone" && configuration.phoneEnabled ? (

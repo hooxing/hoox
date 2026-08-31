@@ -251,3 +251,4 @@
 | [ADR-20260828174129：Worker 使用事务通知唤醒并记录首模启动分段耗时](20260828174129-worker-dispatch-notify-and-first-model-startup-timings.md) | 已接受 | 2026-08-28 |
 | [ADR-20260831092112：Vendor Tree 摘要跨平台规范化换行](20260831092112-cross-platform-vendor-tree-digest.md) | 已接受 | 2026-08-31 |
 | [ADR-20260831143740：后台托管 SMTP 邮箱验证码并限制身份插件表面](20260831143740-admin-managed-smtp-email-verification.md) | 已接受 | 2026-08-31 |
+| [ADR-20260831162406：恢复邮箱注册部分成功并限制验证码重发](20260831162406-recover-partial-email-signup-and-throttle-resend.md) | 已接受 | 2026-08-31 |

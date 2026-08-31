@@ -137,7 +137,10 @@ describe("RuntimeApi", () => {
         email: "identity@example.com",
         password: "secret12",
       }),
-    ).resolves.toEqual({ emailVerificationRequired: true });
+    ).resolves.toEqual({
+      emailVerificationRequired: true,
+      emailVerificationCodeSent: true,
+    });
     expect(fetcher).toHaveBeenCalledTimes(1);
 
     await api.resendEmailVerificationOtp("identity@example.com");
@@ -147,6 +150,42 @@ describe("RuntimeApi", () => {
       "/api/api/auth/email-otp/send-verification-otp",
       "/api/api/auth/email-otp/verify-email",
       "/api/v1/auth/exchange",
+    ]);
+  });
+
+  it("注册请求在账号已创建但发信失败时恢复为待验证状态", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation((input) => {
+      const url = String(input);
+      if (url.endsWith("/api/auth/sign-up/email")) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ message: "SMTP failed" }), { status: 502 }),
+        );
+      }
+      if (url.endsWith("/api/auth/sign-in/email")) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({ code: "EMAIL_NOT_VERIFIED", message: "Email not verified" }),
+            { status: 403 },
+          ),
+        );
+      }
+      throw new Error(`未预期请求：${url}`);
+    });
+    const api = new RuntimeApi(fetcher, "/api");
+
+    await expect(
+      api.signUpWithEmail({
+        displayName: "身份用户",
+        email: "identity@example.com",
+        password: "secret12",
+      }),
+    ).resolves.toEqual({
+      emailVerificationRequired: true,
+      emailVerificationCodeSent: false,
+    });
+    expect(fetcher.mock.calls.map((call) => call[0])).toEqual([
+      "/api/api/auth/sign-up/email",
+      "/api/api/auth/sign-in/email",
     ]);
   });
 

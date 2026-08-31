@@ -250,3 +250,4 @@
 | [ADR-20260828170014：后台可配置的用户级有界 Run 并发](20260828170014-configurable-user-run-concurrency.md) | 已接受 | 2026-08-28 |
 | [ADR-20260828174129：Worker 使用事务通知唤醒并记录首模启动分段耗时](20260828174129-worker-dispatch-notify-and-first-model-startup-timings.md) | 已接受 | 2026-08-28 |
 | [ADR-20260831092112：Vendor Tree 摘要跨平台规范化换行](20260831092112-cross-platform-vendor-tree-digest.md) | 已接受 | 2026-08-31 |
+| [ADR-20260831143740：后台托管 SMTP 邮箱验证码并限制身份插件表面](20260831143740-admin-managed-smtp-email-verification.md) | 已接受 | 2026-08-31 |

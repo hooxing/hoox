@@ -526,6 +526,20 @@ function identityDto(configuration: import("@hoox/identity").IdentityConfigurati
   return {
     versionToken: configuration.versionToken,
     emailPasswordEnabled: configuration.emailPasswordEnabled,
+    emailVerificationEnabled: configuration.emailVerificationEnabled,
+    ...(configuration.emailFromAddress === undefined
+      ? {}
+      : { emailFromAddress: configuration.emailFromAddress }),
+    ...(configuration.emailFromName === undefined
+      ? {}
+      : { emailFromName: configuration.emailFromName }),
+    ...(configuration.smtpHost === undefined ? {} : { smtpHost: configuration.smtpHost }),
+    smtpPort: configuration.smtpPort,
+    smtpSecure: configuration.smtpSecure,
+    ...(configuration.smtpUsername === undefined
+      ? {}
+      : { smtpUsername: configuration.smtpUsername }),
+    smtpPasswordConfigured: configuration.smtpPasswordConfigured,
     registrationEnabled: configuration.registrationEnabled,
     phoneEnabled: configuration.phoneEnabled,
     ...(configuration.smsWebhookUrl === undefined

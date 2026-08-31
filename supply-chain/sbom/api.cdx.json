@@ -34,7 +34,7 @@
       },
       {
         "name": "hoox:lockfile-sha256",
-        "value": "26e87a86466f1341c31fd73a5a260c360c155260d9da12aace51d94ab717a4ed"
+        "value": "95c754c3f97ae399bd10acd30c87dc41823b80d760b4c9d46055ee7c85c26212"
       }
     ]
   },
@@ -3707,6 +3707,26 @@
     },
     {
       "type": "library",
+      "bom-ref": "pkg:npm/nodemailer@9.0.6",
+      "name": "nodemailer",
+      "version": "9.0.6",
+      "purl": "pkg:npm/nodemailer@9.0.6",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT-0"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "hoox:origin",
+          "value": "registry"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "pkg:npm/on-exit-leak-free@2.1.2",
       "name": "on-exit-leak-free",
       "version": "2.1.2",
@@ -5273,6 +5293,7 @@
         "pkg:npm/nanostores@1.5.2",
         "pkg:npm/node-domexception@1.0.0",
         "pkg:npm/node-fetch@3.3.2",
+        "pkg:npm/nodemailer@9.0.6",
         "pkg:npm/on-exit-leak-free@2.1.2",
         "pkg:npm/openai@6.26.0",
         "pkg:npm/openapi-fetch@0.14.1",

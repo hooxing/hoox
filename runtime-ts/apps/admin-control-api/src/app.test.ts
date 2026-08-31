@@ -115,6 +115,10 @@ function fixture() {
     read: vi.fn(async () => ({
       versionToken: 0,
       emailPasswordEnabled: true,
+      emailVerificationEnabled: false,
+      smtpPort: 465,
+      smtpSecure: true,
+      smtpPasswordConfigured: false,
       registrationEnabled: true,
       phoneEnabled: false,
       smsWebhookSecretConfigured: false,
@@ -128,6 +132,10 @@ function fixture() {
     update: vi.fn(async (_context, input) => ({
       versionToken: input.expectedVersionToken + 1,
       emailPasswordEnabled: input.emailPasswordEnabled,
+      emailVerificationEnabled: input.emailVerificationEnabled,
+      smtpPort: input.smtpPort,
+      smtpSecure: input.smtpSecure,
+      smtpPasswordConfigured: input.smtpPassword !== undefined,
       registrationEnabled: input.registrationEnabled,
       phoneEnabled: input.phoneEnabled,
       smsWebhookSecretConfigured: input.smsWebhookSecret !== undefined,
@@ -185,7 +193,7 @@ describe("后台控制 API", () => {
     await app.close();
   });
 
-  it("读取和更新身份配置时不回显 Provider Secret", async () => {
+  it("读取和更新身份配置时不回显 Provider 与 SMTP Secret", async () => {
     const { app, identity } = fixture();
     const read = await app.inject({
       method: "GET",
@@ -206,6 +214,14 @@ describe("后台控制 API", () => {
       payload: {
         expectedVersionToken: 0,
         emailPasswordEnabled: true,
+        emailVerificationEnabled: true,
+        emailFromAddress: "no-reply@example.com",
+        emailFromName: "Hoox",
+        smtpHost: "smtp.example.com",
+        smtpPort: 465,
+        smtpSecure: true,
+        smtpUsername: "mailer@example.com",
+        smtpPassword: "smtp-secret",
         registrationEnabled: true,
         phoneEnabled: false,
         providers: [
@@ -224,6 +240,7 @@ describe("后台控制 API", () => {
     });
     expect(update.statusCode, update.body).toBe(200);
     expect(update.body).not.toContain("google-secret");
+    expect(update.body).not.toContain("smtp-secret");
     expect(identity.update).toHaveBeenCalledWith(
       expect.objectContaining({
         actorUserId: "user_admin",

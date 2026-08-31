@@ -37,6 +37,7 @@ import {
   SkillAdminApi,
   type SkillAdminApiContract,
 } from "./api.js";
+import { HOOX_APP_ICON_PATH } from "./brand.js";
 import type { AdminControlApiContract } from "./control-api.js";
 import { AdminControlConsole } from "./control-console.js";
 import { extractSkillMetadataPrefill, SkillMetadataError } from "./skill-metadata.js";
@@ -1041,9 +1042,7 @@ function AdminPlatform({
           aria-label="返回工作台"
           onClick={() => navigate("/overview")}
         >
-          <span className="platform-logo-mark" aria-hidden="true">
-            H
-          </span>
+          <img className="platform-logo-mark" src={HOOX_APP_ICON_PATH} alt="" aria-hidden="true" />
           {!collapsed && (
             <span className="platform-logo-copy">
               <strong>Hoox</strong>

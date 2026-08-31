@@ -10,6 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type RefObject } from "react";
+import { HOOX_APP_ICON_PATH } from "./brand.js";
 
 const SESSION_STORAGE_KEY = "hoox.auth-session.v2";
 export type AccountProfile = {
@@ -400,9 +401,7 @@ export function AccountAccess({
   return (
     <main className="account-access-shell">
       <section className="account-access-card" aria-labelledby="account-access-title">
-        <div className="account-access-brand" aria-hidden="true">
-          H
-        </div>
+        <img className="account-access-brand" src={HOOX_APP_ICON_PATH} alt="" aria-hidden="true" />
         <div className="account-access-heading">
           <span>HOOX WORKSPACE</span>
           <h1 id="account-access-title">{mode === "login" ? "欢迎回来" : "创建你的账号"}</h1>

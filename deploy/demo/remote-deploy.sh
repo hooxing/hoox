@@ -197,6 +197,18 @@ if [[ "$signup_status" != "200" && "$signup_status" != "201" && "$signup_status"
   echo "Demo 账号注册失败" >&2
   exit 1
 fi
+demo_identity_verified="$(printf '%s\n' \
+  "WITH target AS (UPDATE :\"runtime_schema\".better_auth_users SET email_verified=true,updated_at=clock_timestamp() WHERE email=lower(:'demo_email') RETURNING email_verified) SELECT email_verified::text FROM target LIMIT 1;" \
+  | compose exec -T postgres psql \
+      --username "$POSTGRES_USER" \
+      --dbname "$POSTGRES_DB" \
+      --set=runtime_schema="$DATABASE_SCHEMA" \
+      --set=demo_email="$DEMO_ACCOUNT_EMAIL" \
+      --tuples-only --no-align)"
+if [[ "$demo_identity_verified" != "t" ]]; then
+  echo "Demo 账号邮箱验证初始化失败" >&2
+  exit 1
+fi
 signin_payload="$(python3 - <<'PY'
 import json, os
 print(json.dumps({

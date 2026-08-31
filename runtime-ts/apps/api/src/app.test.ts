@@ -1110,6 +1110,10 @@ describe("Fastify API 契约", () => {
       publicConfiguration: vi.fn(async () => ({
         versionToken: 2,
         emailPasswordEnabled: true,
+        emailVerificationEnabled: false,
+        smtpPort: 465,
+        smtpSecure: true,
+        smtpPasswordConfigured: false,
         registrationEnabled: false,
         phoneEnabled: true,
         smsWebhookSecretConfigured: true,
@@ -1142,6 +1146,7 @@ describe("Fastify API 契约", () => {
     const config = await app.inject({ method: "GET", url: "/v1/auth/config" });
     expect(config.json().data).toEqual({
       emailPasswordEnabled: true,
+      emailVerificationEnabled: false,
       registrationEnabled: false,
       phoneEnabled: true,
       providers: [

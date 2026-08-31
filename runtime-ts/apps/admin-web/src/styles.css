@@ -3334,6 +3334,7 @@ td:first-child {
   transform: translateX(16px);
 }
 
+.identity-mail-settings,
 .identity-sms-settings {
   overflow: hidden;
   margin-top: 12px;
@@ -3343,6 +3344,7 @@ td:first-child {
   transition: border-color 160ms ease;
 }
 
+.identity-mail-settings.active,
 .identity-sms-settings.active {
   border-color: #bfd7c9;
 }
@@ -3417,12 +3419,19 @@ td:first-child {
   font-weight: 500;
 }
 
-.identity-console input {
+.identity-console input,
+.identity-console select {
   min-height: 39px;
   border-color: #d3dad6;
   color: #24352c;
   background: #fff;
   font-size: 12px;
+}
+
+.identity-console select {
+  border: 1px solid #d3dad6;
+  border-radius: 8px;
+  padding: 0 10px;
 }
 
 .identity-console input::placeholder {

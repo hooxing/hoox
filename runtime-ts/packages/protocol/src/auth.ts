@@ -60,6 +60,7 @@ export type IdentityProviderKeyDto = Static<typeof IdentityProviderKeySchema>;
 export const IdentityAuthConfigurationDtoSchema = Type.Object(
   {
     emailPasswordEnabled: Type.Boolean(),
+    emailVerificationEnabled: Type.Boolean(),
     registrationEnabled: Type.Boolean(),
     phoneEnabled: Type.Boolean(),
     providers: Type.Array(

@@ -176,10 +176,12 @@ type TeamAwareWorkspaceApi = WorkspaceApi &
       | "loginAccount"
       | "logoutAccount"
       | "registerAccount"
+      | "resendEmailVerificationOtp"
       | "sendPhoneOtp"
       | "setAccessToken"
       | "signInWithEmail"
       | "signUpWithEmail"
+      | "verifyEmailOtp"
       | "verifyPhoneOtp"
     >
   >;
@@ -1671,6 +1673,14 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
           ...(apiClient.signInWithEmail === undefined
             ? {}
             : { signInWithEmail: apiClient.signInWithEmail.bind(apiClient) }),
+          ...(apiClient.resendEmailVerificationOtp === undefined
+            ? {}
+            : {
+                resendEmailVerificationOtp: apiClient.resendEmailVerificationOtp.bind(apiClient),
+              }),
+          ...(apiClient.verifyEmailOtp === undefined
+            ? {}
+            : { verifyEmailOtp: apiClient.verifyEmailOtp.bind(apiClient) }),
           ...(apiClient.beginSocialSignIn === undefined
             ? {}
             : { beginSocialSignIn: apiClient.beginSocialSignIn.bind(apiClient) }),

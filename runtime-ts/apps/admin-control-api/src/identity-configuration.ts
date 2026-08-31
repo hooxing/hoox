@@ -54,6 +54,16 @@ export function createIdentityAdminService(input: {
         {
           expectedVersionToken: command.expectedVersionToken,
           emailPasswordEnabled: command.emailPasswordEnabled,
+          emailVerificationEnabled: command.emailVerificationEnabled,
+          ...(command.emailFromAddress === undefined
+            ? {}
+            : { emailFromAddress: command.emailFromAddress }),
+          ...(command.emailFromName === undefined ? {} : { emailFromName: command.emailFromName }),
+          ...(command.smtpHost === undefined ? {} : { smtpHost: command.smtpHost }),
+          smtpPort: command.smtpPort,
+          smtpSecure: command.smtpSecure,
+          ...(command.smtpUsername === undefined ? {} : { smtpUsername: command.smtpUsername }),
+          ...(command.smtpPassword === undefined ? {} : { smtpPassword: command.smtpPassword }),
           registrationEnabled: command.registrationEnabled,
           phoneEnabled: command.phoneEnabled,
           ...(command.smsWebhookUrl === undefined ? {} : { smsWebhookUrl: command.smsWebhookUrl }),

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   createEmbeddedBetterAuth,
   emptyIdentityConfiguration,
@@ -8,6 +9,32 @@ import type { AccountSessionDto } from "@hoox/protocol";
 import type { IdentityConfigurationRepository, Pool } from "@hoox/persistence";
 import type { LocalAccountAuthService } from "./local-account-auth.js";
 import { ApiFailure } from "./service.js";
+
+const EMAIL_VERIFICATION_RESEND_COOLDOWN_MS = 60_000;
+
+async function consumeEmailVerificationResendCooldown(
+  database: Pool,
+  email: string,
+): Promise<boolean> {
+  const now = Date.now();
+  const recipientDigest = createHash("sha256")
+    .update(email.trim().toLocaleLowerCase("en-US"))
+    .digest("base64url");
+  const result = await database.query(
+    `INSERT INTO better_auth_rate_limits(id,key,count,last_request)
+       VALUES(gen_random_uuid()::text,$1,1,$2)
+     ON CONFLICT(key) DO UPDATE
+       SET count=1,last_request=EXCLUDED.last_request
+       WHERE better_auth_rate_limits.last_request <= $3
+     RETURNING key`,
+    [
+      `hoox:email-verification-recipient:${recipientDigest}`,
+      now,
+      now - EMAIL_VERIFICATION_RESEND_COOLDOWN_MS,
+    ],
+  );
+  return result.rowCount === 1;
+}
 
 export interface EmbeddedIdentityAuthService {
   handle(input: {
@@ -83,11 +110,22 @@ export function createEmbeddedIdentityAuthService(input: {
           typeof body !== "object" ||
           body === null ||
           !("type" in body) ||
-          body.type !== "email-verification"
+          body.type !== "email-verification" ||
+          !("email" in body) ||
+          typeof body.email !== "string"
         ) {
           return Response.json(
-            { code: "BAD_REQUEST", message: "Invalid purpose" },
+            { code: "BAD_REQUEST", message: "Invalid email verification request" },
             { status: 400 },
+          );
+        }
+        if (!(await consumeEmailVerificationResendCooldown(input.database, body.email))) {
+          return Response.json(
+            { code: "TOO_MANY_REQUESTS", message: "Too many verification requests" },
+            {
+              status: 429,
+              headers: { "retry-after": "60", "x-retry-after": "60" },
+            },
           );
         }
       }

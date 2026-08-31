@@ -498,7 +498,7 @@ export function createEmbeddedBetterAuthOptions(input: {
         expiresIn: 600,
         allowedAttempts: 5,
         storeOTP: "hashed",
-        rateLimit: { window: 60, max: 3 },
+        rateLimit: { window: 60, max: 1 },
       }),
     );
   }

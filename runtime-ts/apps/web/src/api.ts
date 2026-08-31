@@ -278,6 +278,7 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly retryable: boolean,
+    readonly code?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -411,7 +412,15 @@ export class RuntimeApi {
       throw new ApiError("无法连接身份服务", 0, true);
     }
     const value: unknown = await response.json().catch(() => undefined);
-    if (!response.ok) throw new ApiError("身份验证失败", response.status, response.status >= 500);
+    if (!response.ok) {
+      const error = record(value);
+      throw new ApiError(
+        typeof error?.message === "string" ? error.message : "身份验证失败",
+        response.status,
+        response.status >= 500,
+        typeof error?.code === "string" ? error.code : undefined,
+      );
+    }
     return value as T;
   }
 
@@ -427,14 +436,42 @@ export class RuntimeApi {
     readonly displayName: string;
     readonly email: string;
     readonly password: string;
-  }): Promise<AccountSession | { readonly emailVerificationRequired: true }> {
-    const result = await this.betterAuthRequest<{ readonly token?: unknown }>("/sign-up/email", {
-      name: input.displayName,
-      email: input.email,
-      password: input.password,
-    });
-    if (result.token === null) return { emailVerificationRequired: true };
-    return this.exchangeIdentitySession();
+  }): Promise<
+    | AccountSession
+    | {
+        readonly emailVerificationRequired: true;
+        readonly emailVerificationCodeSent: boolean;
+      }
+  > {
+    try {
+      const result = await this.betterAuthRequest<{ readonly token?: unknown }>("/sign-up/email", {
+        name: input.displayName,
+        email: input.email,
+        password: input.password,
+      });
+      if (result.token === null) {
+        return { emailVerificationRequired: true, emailVerificationCodeSent: true };
+      }
+      return this.exchangeIdentitySession();
+    } catch (signUpError) {
+      // SMTP 在用户落库后失败或反向代理提前超时时，使用原密码确认账号已进入待验证态，
+      // 避免把可恢复的部分成功错误呈现为“注册失败”并诱导用户反复创建账号。
+      try {
+        await this.betterAuthRequest("/sign-in/email", {
+          email: input.email,
+          password: input.password,
+        });
+      } catch (signInError) {
+        if (
+          signInError instanceof ApiError &&
+          signInError.status === 403 &&
+          signInError.code === "EMAIL_NOT_VERIFIED"
+        ) {
+          return { emailVerificationRequired: true, emailVerificationCodeSent: false };
+        }
+      }
+      throw signUpError;
+    }
   }
 
   async resendEmailVerificationOtp(email: string): Promise<void> {

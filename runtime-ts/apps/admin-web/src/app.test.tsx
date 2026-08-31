@@ -154,7 +154,9 @@ describe("技能发布管理界面", () => {
     const container = mount(api);
     await settle();
 
-    expect(container.querySelector(".platform-logo-mark")?.textContent).toContain("H");
+    expect(
+      container.querySelector<HTMLImageElement>(".platform-logo-mark")?.getAttribute("src"),
+    ).toBe("/brand/hoox-app-icon.png");
     expect(container.querySelector(".eyebrow")?.textContent).toBe("Hoox");
     expect(api.listSubmissions).toHaveBeenCalledOnce();
     expect(api.getSubmission).toHaveBeenCalledWith(item.submissionId);

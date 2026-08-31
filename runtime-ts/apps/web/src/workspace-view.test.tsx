@@ -1232,7 +1232,9 @@ describe("工作台展示组件", () => {
     const input = container.querySelector<HTMLInputElement>("input");
     expect(container.querySelector(".brand")?.textContent).toContain("Hoox");
     expect(container.querySelector(".brand")?.textContent).toContain("你说，它做。");
-    expect(container.querySelector(".brand-mark")?.textContent).toContain("H");
+    expect(container.querySelector<HTMLImageElement>(".brand-mark")?.getAttribute("src")).toBe(
+      "/brand/hoox-app-icon.png",
+    );
     expect(document.activeElement).toBe(input);
     act(() => input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
     expect(onClose).toHaveBeenCalledTimes(1);

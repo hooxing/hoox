@@ -63,16 +63,12 @@ body {
 }
 
 .platform-logo-mark {
-  display: grid;
+  display: block;
   flex: 0 0 auto;
   width: 38px;
   height: 38px;
-  place-items: center;
   border-radius: 12px;
-  color: #fff;
-  background: linear-gradient(145deg, #12583f, #23815d);
-  font-family: Georgia, serif;
-  font-size: 21px;
+  object-fit: cover;
   box-shadow: 0 10px 25px rgb(23 107 77 / 22%);
 }
 

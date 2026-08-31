@@ -253,3 +253,4 @@
 | [ADR-20260831143740：后台托管 SMTP 邮箱验证码并限制身份插件表面](20260831143740-admin-managed-smtp-email-verification.md) | 已接受 | 2026-08-31 |
 | [ADR-20260831162406：恢复邮箱注册部分成功并限制验证码重发](20260831162406-recover-partial-email-signup-and-throttle-resend.md) | 已接受 | 2026-08-31 |
 | [ADR-20260831170603：Demo 发布引导直接验证托管管理员邮箱](20260831170603-demo-bootstrap-verifies-managed-account.md) | 已接受 | 2026-08-31 |
+| [ADR-20260901003001：共享 Hoox 品牌资产并替代字母占位](20260901003001-shared-brand-assets-and-product-surfaces.md) | 已接受 | 2026-09-01 |

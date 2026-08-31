@@ -1,4 +1,5 @@
 import react from "@vitejs/plugin-react";
+import { resolve } from "node:path";
 import { defineConfig, loadEnv } from "vite";
 import { resolveApiTarget } from "./src/config.js";
 
@@ -7,6 +8,7 @@ export default defineConfig(({ mode }) => {
   const target = resolveApiTarget({ ...process.env, ...loadEnv(mode, process.cwd(), "VITE_") });
   return {
     plugins: [react()],
+    publicDir: resolve(import.meta.dirname, "../../public"),
     server: {
       proxy: {
         "/api": { target, changeOrigin: true, rewrite: (path) => path.replace(/^\/api/u, "") },

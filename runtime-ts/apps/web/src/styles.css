@@ -95,14 +95,11 @@ textarea:focus-visible {
   letter-spacing: -0.02em;
 }
 .brand-mark {
-  display: grid;
+  display: block;
   width: 25px;
   height: 25px;
-  place-items: center;
   border-radius: 7px;
-  color: #fff;
-  background: #242423;
-  font-size: 13px;
+  object-fit: cover;
 }
 .brand-copy {
   display: grid;
@@ -2862,15 +2859,11 @@ h2 {
   box-shadow: 0 24px 70px rgb(39 45 40 / 12%);
 }
 .account-access-brand {
-  display: grid;
+  display: block;
   width: 42px;
   height: 42px;
-  place-items: center;
   border-radius: 12px;
-  color: #fff;
-  background: #242423;
-  font-size: 19px;
-  font-weight: 760;
+  object-fit: cover;
 }
 .account-access-heading {
   display: grid;

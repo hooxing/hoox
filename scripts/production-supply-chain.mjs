@@ -58,7 +58,11 @@ export function canonicalVendorTreeSha256(directory) {
   visit(directory, "");
   const digest = createHash("sha256");
   for (const relativePath of files) {
-    const content = readFileSync(join(directory, ...relativePath.split("/")));
+    const rawContent = readFileSync(join(directory, ...relativePath.split("/")));
+    const decoded = rawContent.toString("utf8");
+    const content = Buffer.from(decoded, "utf8").equals(rawContent)
+      ? Buffer.from(decoded.replace(/\r\n?/gu, "\n"), "utf8")
+      : rawContent;
     digest.update(
       Buffer.from(
         `${Buffer.byteLength(relativePath, "utf8")}\n${relativePath}\n${content.length}\n`,

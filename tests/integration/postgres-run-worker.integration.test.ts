@@ -59,6 +59,7 @@ import { migrateDown, migrateUp } from "../../runtime-ts/packages/persistence/sr
 import {
   PgArchiveThreadCommand,
   PgCoreRepositories,
+  PgRenamePersonalThreadCommand,
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
 import { PgMemoryIngestionStore } from "../../runtime-ts/packages/persistence/src/pg-memory-ingestion.js";
 import { PgResourceCatalog } from "../../runtime-ts/packages/persistence/src/pg-resource-library.js";
@@ -2192,6 +2193,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       leaseDurationMs: 30_000,
     });
     if (claimedA.outcome !== "claimed") throw new Error("Run A claim 失败");
+    await runDispatchOutbox.acknowledge({ claim: dispatchA, outcome: "dispatched" });
     const assistantBody = {
       role: "assistant",
       text: "Run A Assistant 最终回复",
@@ -2390,6 +2392,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       leaseDurationMs: 30_000,
     });
     if (claimedB.outcome !== "claimed") throw new Error("Run B claim 失败");
+    await runDispatchOutbox.acknowledge({ claim: dispatchB, outcome: "dispatched" });
     expect(claimedB.snapshot.contextThroughSequence).toBe(14);
     const throughSequence = claimedB.snapshot.contextThroughSequence;
     if (throughSequence === undefined) throw new Error("Run B context cursor 缺失");
@@ -3580,6 +3583,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
           enqueueOutbox: runDispatchCreation,
         }),
         archiveThread: new PgArchiveThreadCommand(runtime),
+        renamePersonalThread: new PgRenamePersonalThreadCommand(runtime),
         cursorCodec: createThreadCursorCodec({
           activeKid: "integration-key",
           keys: [{ kid: "integration-key", secret: randomBytes(32).toString("base64url") }],
@@ -3674,6 +3678,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
             enqueueOutbox: runDispatchCreation,
           }),
           archiveThread: new PgArchiveThreadCommand(runtime),
+          renamePersonalThread: new PgRenamePersonalThreadCommand(runtime),
           cursorCodec: createThreadCursorCodec({
             activeKid: "m4-e2e-key",
             keys: [{ kid: "m4-e2e-key", secret: randomBytes(32).toString("base64url") }],

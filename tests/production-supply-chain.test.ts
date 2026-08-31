@@ -160,6 +160,10 @@ describe("生产供应链契约", () => {
       const initial = canonicalVendorTreeSha256(directory);
       writeFileSync(join(directory, "dist", "generated.js"), "ignored-two");
       expect(canonicalVendorTreeSha256(directory)).toBe(initial);
+      writeFileSync(join(directory, "src", "dist", "controlled.ts"), "line-one\r\nline-two\r\n");
+      const crlf = canonicalVendorTreeSha256(directory);
+      writeFileSync(join(directory, "src", "dist", "controlled.ts"), "line-one\nline-two\n");
+      expect(canonicalVendorTreeSha256(directory)).toBe(crlf);
       writeFileSync(join(directory, "src", "dist", "controlled.ts"), "controlled-two");
       expect(canonicalVendorTreeSha256(directory)).not.toBe(initial);
     } finally {

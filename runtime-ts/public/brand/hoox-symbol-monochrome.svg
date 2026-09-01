@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1254 1254">
+  <title>Hoox</title>
+  <defs>
+    <path
+      id="hoox-hook"
+      d="M838 500 553 219c-21-20-45-29-78-29H329c-100 0-180 90-180 200v375c0 141 110 256 248 256 97 0 174-62 174-141L439 750v92c0 28-18 48-40 48-62 0-114-53-114-125V386c0-42 21-70 63-70h91v211h399Z"
+    />
+  </defs>
+  <g fill="#19191a">
+    <use href="#hoox-hook" />
+    <use href="#hoox-hook" transform="rotate(180 650 606)" />
+  </g>
+</svg>

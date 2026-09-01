@@ -31,14 +31,17 @@ describe("工作台滚动区域样式", () => {
     expect(styles).toContain(".run-progress-dock + .composer");
   });
 
-  it("输入区以表面和阴影建立边界，并在键盘聚焦时保留可见反馈", () => {
+  it("输入区以表面和单层阴影建立边界，聚焦时不叠加描边", () => {
     expect(styles).toMatch(
       /\.composer\s*\{[^}]*border:\s*0;[^}]*background:\s*var\(--surface-raised\);[^}]*box-shadow:\s*var\(--shadow-control\);/su,
     );
     expect(styles).toMatch(
-      /\.composer:focus-within\s*\{[^}]*var\(--focus-color\)[^}]*var\(--focus-ring\)/su,
+      /\.composer:focus-within\s*\{[^}]*box-shadow:\s*0 4px 6px hsla\(0, 0%, 0%, 0\.2\);/su,
     );
-    expect(styles).toMatch(/\.composer textarea\s*\{[^}]*border:\s*0;[^}]*outline:\s*0;/su);
+    expect(styles).toMatch(
+      /\.composer textarea\s*\{[^}]*border:\s*0;[^}]*outline:\s*0;[^}]*box-shadow:\s*none;/su,
+    );
+    expect(styles).not.toMatch(/\.composer:focus-within\s*\{[^}]*(?:focus-color|focus-ring)/su);
   });
 
   it("外壳组件引用共享语义 Token 并提供明确禁用态", () => {

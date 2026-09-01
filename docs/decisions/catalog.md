@@ -257,3 +257,4 @@
 | [ADR-20260901104943：共享 UI 主题 Token 与渐进迁移边界](20260901104943-shared-ui-theme-token-boundary.md) | 已接受 | 2026-09-01 |
 | [ADR-20260901110046：固定品牌栅格衍生资产与入口尺寸](20260901110046-raster-brand-derivative-contract.md) | 已接受 | 2026-09-01 |
 | [ADR-20260901114930：手工几何重建品牌矢量候选](20260901114930-hand-rebuilt-brand-vector-candidates.md) | 提议 | 2026-09-01 |
+| [ADR-20260901155352：品牌绿稀缺使用并与操作语义解耦](20260901155352-brand-green-scarcity-and-action-separation.md) | 已接受 | 2026-09-01 |

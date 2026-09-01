@@ -45,7 +45,7 @@ import {
   type ThreadContinuityStatus,
   type RuntimeApi,
 } from "./api.js";
-import { HOOX_SYMBOL_PATH } from "./brand.js";
+import { HOOX_HORIZONTAL_PATH } from "./brand.js";
 import {
   buildConversationBlocks,
   buildConversationSections,
@@ -1062,9 +1062,7 @@ export function formatArtifactSize(sizeBytes: number): string {
 export function EmptyConversation() {
   return (
     <div className="conversation-empty welcome-empty">
-      <span className="welcome-mark" aria-hidden="true">
-        ✦
-      </span>
+      <img className="welcome-logo compact" src={HOOX_HORIZONTAL_PATH} alt="" aria-hidden="true" />
       <div>
         <h2>从一个明确的目标开始</h2>
         <p>描述希望 Hoox 完成的任务。执行过程和可交付产物会在这里持续更新。</p>
@@ -1553,11 +1551,7 @@ export function NavigationSidebar({
     >
       <div className="brand-row">
         <div className="brand">
-          <img className="brand-mark" src={HOOX_SYMBOL_PATH} alt="" aria-hidden="true" />
-          <span className="brand-copy">
-            <strong>Hoox</strong>
-            <span className="brand-tagline">你说，它做。</span>
-          </span>
+          <img className="brand-logo" src={HOOX_HORIZONTAL_PATH} alt="Hoox" />
         </div>
         <button
           className="mobile-only icon-button"

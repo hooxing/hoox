@@ -63,6 +63,7 @@ describe("共享 UI 主题", () => {
       "--surface-page",
       "--surface-sidebar",
       "--surface-hover",
+      "--brand-green",
       "--text-primary",
       "--text-secondary",
       "--border-strong",
@@ -72,6 +73,17 @@ describe("共享 UI 主题", () => {
     ]) {
       expect(declarations.has(token)).toBe(true);
     }
+  });
+
+  it("品牌绿保持稀缺，不承担通用操作、选中态或焦点", () => {
+    expect(
+      [...declarations.keys()].filter(
+        (name) => name !== undefined && /^--green-[0-9]+$/u.test(name),
+      ),
+    ).toEqual([]);
+    expect(resolveToken("--action-primary")).not.toBe(resolveToken("--brand-green"));
+    expect(resolveToken("--action-subtle")).toBe(resolveToken("--neutral-300"));
+    expect(resolveToken("--focus-color")).toBe(resolveToken("--info-500"));
   });
 
   it("普通文字、主要操作和浅色状态满足 4.5:1", () => {
@@ -95,5 +107,6 @@ describe("共享 UI 主题", () => {
 
   it("功能边框在抬升表面上满足 3:1", () => {
     expect(contrast("--border-strong", "--surface-raised")).toBeGreaterThanOrEqual(3);
+    expect(contrast("--focus-color", "--surface-page")).toBeGreaterThanOrEqual(3);
   });
 });

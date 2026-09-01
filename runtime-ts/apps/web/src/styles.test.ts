@@ -38,6 +38,19 @@ describe("工作台滚动区域样式", () => {
     expect(styles).toMatch(/\.send-button:disabled\s*\{[^}]*opacity:\s*1;/su);
   });
 
+  it("品牌绿只通过横版 Logo 稀缺出现，选中态与主要操作保持语义解耦", () => {
+    expect(styles).toMatch(
+      /\.brand-logo\s*\{[^}]*width:\s*132px;[^}]*height:\s*40px;[^}]*object-fit:\s*cover;/su,
+    );
+    expect(styles).toMatch(
+      /\.welcome-logo\s*\{[^}]*width:\s*184px;[^}]*height:\s*56px;[^}]*object-fit:\s*cover;/su,
+    );
+    expect(styles).not.toContain(".brand-copy");
+    expect(styles).not.toContain(".welcome-mark");
+    expect(styles).not.toContain("#177053");
+    expect(styles).not.toContain("#d9f2e4");
+  });
+
   it("外壳主要点击目标至少为 40px", () => {
     expect(styles).toMatch(/\.new-thread-button\s*\{[^}]*min-height:\s*40px;/su);
     expect(styles).toMatch(/\.icon-button\s*\{[^}]*width:\s*40px;[^}]*height:\s*40px;/su);

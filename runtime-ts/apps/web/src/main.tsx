@@ -41,6 +41,7 @@ import {
   readAccountSession,
 } from "./account-access.js";
 import { type AutomationCenterApi, AutomationCenterDialog } from "./automation-center.js";
+import { HOOX_HORIZONTAL_PATH } from "./brand.js";
 import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages, loadAllRunEvents } from "./polling.js";
@@ -1425,9 +1426,7 @@ function AuthenticatedWorkspace({
         )}
         {!selected ? (
           <div className="empty primary">
-            <span className="welcome-mark" aria-hidden="true">
-              ✦
-            </span>
+            <img className="welcome-logo" src={HOOX_HORIZONTAL_PATH} alt="" aria-hidden="true" />
             <h1>准备好协作了吗？</h1>
             <p>描述任务后会自动创建会话，并用首条请求作为标题。</p>
           </div>

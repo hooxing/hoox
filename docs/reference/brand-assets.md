@@ -21,8 +21,8 @@
 
 | 衍生文件 | 画布与模式 | 当前用途 |
 | --- | --- | --- |
-| `hoox-horizontal-transparent.png` | 1916 × 821，RGBA | 浅色或自定义背景的完整横版 |
-| `hoox-symbol-transparent.png` | 1254 × 1254，RGBA | Web 侧栏和不需要文字的透明标志 |
+| `hoox-horizontal-transparent.png` | 1916 × 821，RGBA | Web 侧栏、内容空状态及浅色或自定义背景的完整横版 |
+| `hoox-symbol-transparent.png` | 1254 × 1254，RGBA | 不需要文字的透明独立标志 |
 | `hoox-monochrome-black.png` | 1916 × 821，RGBA | 浅色背景单色横版 |
 | `hoox-monochrome-white.png` | 1916 × 821，RGBA | 深色背景单色横版 |
 | `favicon-16.png`、`favicon-32.png`、`favicon-48.png` | 对应固定尺寸，RGB | Web 与 Admin Web 浏览器入口 |
@@ -33,8 +33,8 @@
 
 Web 与 Admin Web 使用目标尺寸 favicon 和 Apple Touch 文件，不再让浏览器实时缩放 1254px
 源图。Web 的 `manifest.webmanifest` 引用 192/512px 与 Maskable 图标。账号入口与 Admin Web
-侧栏仍使用深色底 App 图标；Web 会话侧栏使用透明独立标志。完整横版不得压缩成 favicon 或侧栏
-小图标。
+侧栏仍使用深色底 App 图标；Web 会话侧栏和内容空状态使用透明横版，同一视口不再额外拼接文字版
+Hoox 与标语。完整横版不得压缩成 favicon 或固定小尺寸入口图标。
 
 透明资产从暖白底估算 Alpha，并按背景混色方程恢复抗锯齿前景，不能用单一色键重新生成。单色
 资产沿透明横版 Alpha mask 着纯黑或纯白。小尺寸图标从 App 图标按目标尺寸分别缩放和锐化；
@@ -75,7 +75,7 @@ Maskable 前景必须位于中心 80% 安全圆内。当前 PWA 512px 与 Maskab
 ## 更新规则
 
 更换品牌资产时应一次性检查四个源文件、十二个衍生文件、两个 Vite 构建、Web 与 Admin
-favicon、Apple Touch、PWA manifest、Web 透明侧栏标志以及账号和 Admin App 图标引用。资产文件名
+favicon、Apple Touch、PWA manifest、Web 透明横版侧栏与空状态，以及账号和 Admin App 图标引用。资产文件名
 属于当前静态接口；如需改名，必须同步修改 HTML、manifest、组件、测试和本文。设计过程文件、
 截图标注和生成器临时输出不得进入品牌真源目录。当前五个 SVG 仍是审阅候选；只有在原始矢量交付
 或手工几何复核通过后才能认定为正式真源，不得把自动描摹结果声明为真源。

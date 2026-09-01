@@ -12,15 +12,8 @@
   --neutral-800: hsl(30, 2%, 20%);
   --neutral-900: hsl(240, 2%, 10%);
 
-  --green-100: hsl(152.7, 52.4%, 95.9%);
-  --green-200: hsl(151.2, 49%, 90%);
-  --green-300: hsl(148.3, 44.5%, 76.7%);
-  --green-400: hsl(154.5, 42.3%, 46.9%);
-  --green-500: hsl(158.5, 67.4%, 27.6%);
-  --green-600: hsl(158.4, 68.3%, 24.7%);
-  --green-700: hsl(158.4, 68.8%, 21.4%);
-  --green-800: hsl(159, 68.2%, 17.3%);
-  --green-900: hsl(160.5, 70.5%, 12%);
+  /* 品牌绿是识别色，不承担通用操作与状态语义。 */
+  --brand-green: hsl(158.5, 67.4%, 27.6%);
 
   --info-100: hsl(217.1, 100%, 95.9%);
   --info-500: hsl(217.3, 68.9%, 46.7%);
@@ -89,23 +82,21 @@
   --text-secondary: var(--neutral-700);
   --text-tertiary: var(--neutral-600);
   --text-disabled: var(--neutral-500);
-  --text-on-brand: var(--neutral-100);
-
   --border-subtle: var(--neutral-300);
   --border-default: var(--neutral-400);
   --border-strong: var(--neutral-500);
 
-  --action-primary: var(--green-500);
-  --action-primary-hover: var(--green-600);
-  --action-primary-active: var(--green-700);
+  --action-primary: hsl(153.6, 19.4%, 25.3%);
+  --action-primary-hover: hsl(154.3, 20.4%, 20.2%);
+  --action-primary-active: hsl(153, 23.8%, 16.5%);
   --action-primary-text: var(--neutral-100);
-  --action-subtle: var(--green-200);
-  --action-subtle-text: var(--green-800);
+  --action-subtle: var(--neutral-300);
+  --action-subtle-text: var(--neutral-900);
   --action-disabled: var(--neutral-300);
   --action-disabled-text: var(--neutral-600);
 
-  --focus-color: var(--green-500);
-  --focus-ring: hsla(158.5, 67.4%, 27.6%, 0.22);
+  --focus-color: var(--info-500);
+  --focus-ring: hsla(217.3, 68.9%, 46.7%, 0.18);
 
   --status-info-surface: var(--info-100);
   --status-info-text: var(--info-800);

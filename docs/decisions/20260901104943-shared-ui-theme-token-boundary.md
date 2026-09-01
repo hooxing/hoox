@@ -5,7 +5,8 @@
 - 决策者：Hoox 维护者
 - 关联 Issue / PR：无
 - 替代：无
-- 被替代：无
+- 被替代：品牌色与通用操作的映射由
+  [ADR-20260901155352](20260901155352-brand-green-scarcity-and-action-separation.md) 部分替代；共享主题包与渐进迁移边界继续有效
 
 ## 背景
 

@@ -8,6 +8,7 @@ import type { Artifact, HistoryFile, Run, RunEvent } from "./api.js";
 import {
   activeHistoryMention,
   ConversationComposer,
+  EmptyConversation,
   formatArtifactSize,
   formatArtifactType,
   InlineArtifactDelivery,
@@ -50,6 +51,14 @@ describe("工作台展示组件", () => {
     expect(html).toContain("is-waiting");
     expect(html).toContain("<svg");
     expect(html).toContain('aria-hidden="true"');
+  });
+
+  it("会话空状态使用透明横版品牌图", () => {
+    const html = renderToStaticMarkup(<EmptyConversation />);
+
+    expect(html).toContain('class="welcome-logo compact"');
+    expect(html).toContain('src="/brand/hoox-horizontal-transparent.png"');
+    expect(html).not.toContain("✦");
   });
 
   it("recovery_required 不再显示执行动画或累计运行时间", () => {
@@ -1232,10 +1241,12 @@ describe("工作台展示组件", () => {
 
     act(() => root.render(renderDrawer(true)));
     const input = container.querySelector<HTMLInputElement>("input");
-    expect(container.querySelector(".brand")?.textContent).toContain("Hoox");
-    expect(container.querySelector(".brand")?.textContent).toContain("你说，它做。");
-    expect(container.querySelector<HTMLImageElement>(".brand-mark")?.getAttribute("src")).toBe(
-      "/brand/hoox-symbol-transparent.png",
+    expect(container.querySelector(".brand")?.textContent).toBe("");
+    expect(container.querySelector<HTMLImageElement>(".brand-logo")?.getAttribute("src")).toBe(
+      "/brand/hoox-horizontal-transparent.png",
+    );
+    expect(container.querySelector<HTMLImageElement>(".brand-logo")?.getAttribute("alt")).toBe(
+      "Hoox",
     );
     expect(document.activeElement).toBe(input);
     act(() => input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));

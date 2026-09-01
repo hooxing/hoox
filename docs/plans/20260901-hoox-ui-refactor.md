@@ -125,10 +125,11 @@ runtime-ts/public/brand/
   hoox-horizontal.svg
   hoox-symbol.svg
   hoox-horizontal-reversed.svg
+  hoox-horizontal-black.svg
   hoox-symbol-monochrome.svg
 ```
 
-上述四个文件已作为手工几何重建的审阅候选加入，但应用引用切换和正式矢量真源认定仍等待品牌方
+上述五个文件已作为手工几何重建的审阅候选加入，但应用引用切换和正式矢量真源认定仍等待品牌方
 复核；当前 PNG 接口与引用保持不变。
 
 新增文件名会形成静态接口；实施切片必须同步更新品牌参考、构建验证和资产契约测试。设计源文件、临时蒙版、中间描摹和截图不得进入 `runtime-ts/public/brand/`。

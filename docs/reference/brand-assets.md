@@ -57,6 +57,7 @@ Maskable 前景必须位于中心 80% 安全圆内。当前 PWA 512px 与 Maskab
 | `hoox-symbol.svg` | `0 0 1254 1254` | 透明背景彩色独立标志 |
 | `hoox-horizontal.svg` | `0 0 1916 821` | 透明背景彩色横版标识 |
 | `hoox-horizontal-reversed.svg` | `0 0 1925 817` | 透明背景纯白横版标识 |
+| `hoox-horizontal-black.svg` | `0 0 1925 817` | 与反白版同几何的透明背景碳黑横版标识 |
 | `hoox-symbol-monochrome.svg` | `0 0 1254 1254` | 透明背景碳黑独立标志 |
 
 这些文件当前只用于几何和视觉审阅，Web、Admin Web、README、favicon、PWA 与 Open Graph 仍引用
@@ -76,5 +77,5 @@ Maskable 前景必须位于中心 80% 安全圆内。当前 PWA 512px 与 Maskab
 更换品牌资产时应一次性检查四个源文件、十二个衍生文件、两个 Vite 构建、Web 与 Admin
 favicon、Apple Touch、PWA manifest、Web 透明侧栏标志以及账号和 Admin App 图标引用。资产文件名
 属于当前静态接口；如需改名，必须同步修改 HTML、manifest、组件、测试和本文。设计过程文件、
-截图标注和生成器临时输出不得进入品牌真源目录。当前四个 SVG 仍是审阅候选；只有在原始矢量交付
+截图标注和生成器临时输出不得进入品牌真源目录。当前五个 SVG 仍是审阅候选；只有在原始矢量交付
 或手工几何复核通过后才能认定为正式真源，不得把自动描摹结果声明为真源。

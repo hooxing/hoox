@@ -45,7 +45,7 @@ import {
   type ThreadContinuityStatus,
   type RuntimeApi,
 } from "./api.js";
-import { HOOX_APP_ICON_PATH } from "./brand.js";
+import { HOOX_SYMBOL_PATH } from "./brand.js";
 import {
   buildConversationBlocks,
   buildConversationSections,
@@ -134,6 +134,17 @@ const statusLabel: Record<RunStatus, string> = {
   cancelled: "已取消",
 };
 
+function RunStatusIcon({ status }: { readonly status: RunStatus | "ready" | "interrupted" }) {
+  const properties = { size: 12, "aria-hidden": true as const };
+  if (status === "running") return <LoaderCircle className="spin" {...properties} />;
+  if (status === "succeeded") return <Check {...properties} />;
+  if (status === "failed" || status === "cancelled" || status === "interrupted") {
+    return <X {...properties} />;
+  }
+  if (status === "waiting") return <Square {...properties} />;
+  return <Circle {...properties} />;
+}
+
 export function RunStatusBadge({
   status,
   executionStatus,
@@ -141,11 +152,28 @@ export function RunStatusBadge({
   readonly status: RunStatus | undefined;
   readonly executionStatus?: Run["executionStatus"];
 }) {
-  if (status === undefined) return <span className="run-status is-ready">就绪</span>;
-  if (executionStatus === "recovery_required") {
-    return <span className="run-status is-recovery-required">执行已中断</span>;
+  if (status === undefined) {
+    return (
+      <span className="run-status is-ready">
+        <RunStatusIcon status="ready" />
+        就绪
+      </span>
+    );
   }
-  return <span className={`run-status is-${status}`}>{statusLabel[status]}</span>;
+  if (executionStatus === "recovery_required") {
+    return (
+      <span className="run-status is-recovery-required">
+        <RunStatusIcon status="interrupted" />
+        执行已中断
+      </span>
+    );
+  }
+  return (
+    <span className={`run-status is-${status}`}>
+      <RunStatusIcon status={status} />
+      {statusLabel[status]}
+    </span>
+  );
 }
 
 function useElapsedSeconds(run: Run | undefined): number {
@@ -1525,7 +1553,7 @@ export function NavigationSidebar({
     >
       <div className="brand-row">
         <div className="brand">
-          <img className="brand-mark" src={HOOX_APP_ICON_PATH} alt="" aria-hidden="true" />
+          <img className="brand-mark" src={HOOX_SYMBOL_PATH} alt="" aria-hidden="true" />
           <span className="brand-copy">
             <strong>Hoox</strong>
             <span className="brand-tagline">你说，它做。</span>

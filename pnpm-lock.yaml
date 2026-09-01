@@ -120,6 +120,9 @@ importers:
       '@hoox/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+      '@hoox/ui-theme':
+        specifier: workspace:*
+        version: link:../../packages/ui-theme
       '@tanstack/react-query':
         specifier: 5.102.2
         version: 5.102.2(react@19.1.1)
@@ -301,6 +304,9 @@ importers:
 
   runtime-ts/apps/web:
     dependencies:
+      '@hoox/ui-theme':
+        specifier: workspace:*
+        version: link:../../packages/ui-theme
       lucide-react:
         specifier: 0.544.0
         version: 0.544.0(react@19.1.1)
@@ -562,6 +568,8 @@ importers:
       '@hoox/run-contracts':
         specifier: workspace:*
         version: link:../run-contracts
+
+  runtime-ts/packages/ui-theme: {}
 
   runtime-ts/packages/workspace: {}
 

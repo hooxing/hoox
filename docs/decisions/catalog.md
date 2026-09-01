@@ -254,3 +254,5 @@
 | [ADR-20260831162406：恢复邮箱注册部分成功并限制验证码重发](20260831162406-recover-partial-email-signup-and-throttle-resend.md) | 已接受 | 2026-08-31 |
 | [ADR-20260831170603：Demo 发布引导直接验证托管管理员邮箱](20260831170603-demo-bootstrap-verifies-managed-account.md) | 已接受 | 2026-08-31 |
 | [ADR-20260901003001：共享 Hoox 品牌资产并替代字母占位](20260901003001-shared-brand-assets-and-product-surfaces.md) | 已接受 | 2026-09-01 |
+| [ADR-20260901104943：共享 UI 主题 Token 与渐进迁移边界](20260901104943-shared-ui-theme-token-boundary.md) | 已接受 | 2026-09-01 |
+| [ADR-20260901110046：固定品牌栅格衍生资产与入口尺寸](20260901110046-raster-brand-derivative-contract.md) | 已接受 | 2026-09-01 |

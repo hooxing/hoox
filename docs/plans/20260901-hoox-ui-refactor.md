@@ -1,21 +1,23 @@
 # Hoox UI 重构实施计划
 
-- 状态：草案
+- 状态：进行中
 - 创建日期：2026-09-01
 - 适用范围：`runtime-ts/apps/web`、`runtime-ts/apps/admin-web`、共享品牌资产与后续 UI 基础包
 - 目标读者：负责 Hoox 品牌资产、Web 工作台、Admin Web 和视觉验收的开发者与维护者
 - 当前事实入口：[品牌资产参考](../reference/brand-assets.md)
 - 既有决策：[共享 Hoox 品牌资产并替代字母占位](../decisions/20260901003001-shared-brand-assets-and-product-surfaces.md)
+- 实施决策：[共享 UI 主题 Token 与渐进迁移边界](../decisions/20260901104943-shared-ui-theme-token-boundary.md)
+- 品牌衍生决策：[固定品牌栅格衍生资产与入口尺寸](../decisions/20260901110046-raster-brand-derivative-contract.md)
 
 ## 1. 生命周期与权威边界
 
 本文定义尚未实现的 UI 重构目标、实施顺序、资产生产约束和验收门槛，不描述当前界面已经具备的行为。当前品牌文件、构建路径和组件引用仍以品牌资产参考、既有 ADR、代码与测试为准。
 
-本计划在以下条件全部满足后转为“进行中”：
+本计划已于 2026-09-01 进入“进行中”，依据如下：
 
-1. 品牌方确认本计划中的三枚品牌锚点与 Logo 图形不变量；
-2. 新 ADR 接受共享 UI Token、主题映射和跨 Web/Admin 的所有权边界；
-3. 首个实施切片的范围、测试与回滚路径已确定。
+1. 维护者授权以本文和现有四枚 PNG 为依据开始重构，既有 Logo 图形不变量继续有效；
+2. 共享 UI Token、主题映射和跨 Web/Admin 的所有权边界已由实施 ADR 接受；
+3. 首个切片限定为品牌衍生资产契约、共享 Light Token 与 Web 应用外壳，测试与回滚路径见本文验收和实施 ADR。
 
 全部切片实现并验证后，稳定的品牌资产规则迁入品牌参考，稳定的 UI Token 与组件规则迁入新的当前参考；本文转为“已完成”并退出活动计划索引。若后续方案替换颜色、组件体系或资产真源，本文标记为“已替代”并链接替代入口。
 
@@ -108,10 +110,12 @@ runtime-ts/public/brand/
   hoox-monochrome-white.png
   favicon-16.png
   favicon-32.png
+  favicon-48.png
   apple-touch-icon-180.png
   pwa-icon-192.png
   pwa-icon-512.png
   pwa-icon-maskable-512.png
+  hoox-open-graph.png
 ```
 
 矢量真源在通过几何复核后再加入：

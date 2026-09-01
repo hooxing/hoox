@@ -22,6 +22,7 @@ const expectedAssets = {
 } as const;
 
 const expectedVectorAssets = {
+  "hoox-horizontal-black.svg": "0 0 1925 817",
   "hoox-horizontal-reversed.svg": "0 0 1925 817",
   "hoox-horizontal.svg": "0 0 1916 821",
   "hoox-symbol-monochrome.svg": "0 0 1254 1254",
@@ -116,7 +117,7 @@ describe("Hoox 品牌资产", () => {
     });
   }
 
-  it("四个矢量审阅资产只使用可维护路径且不嵌入栅格或字体", async () => {
+  it("五个矢量审阅资产只使用可维护路径且不嵌入栅格或字体", async () => {
     for (const [name, viewBox] of Object.entries(expectedVectorAssets)) {
       const content = await readFile(
         new URL(`../runtime-ts/public/brand/${name}`, import.meta.url),
@@ -131,11 +132,15 @@ describe("Hoox 品牌资产", () => {
       expect(content.match(/<path\b/g)?.length).toBeLessThanOrEqual(7);
     }
 
-    const [symbol, horizontal, reversed, monochrome] = await Promise.all([
+    const [symbol, horizontal, reversed, black, monochrome] = await Promise.all([
       readFile(new URL("../runtime-ts/public/brand/hoox-symbol.svg", import.meta.url), "utf8"),
       readFile(new URL("../runtime-ts/public/brand/hoox-horizontal.svg", import.meta.url), "utf8"),
       readFile(
         new URL("../runtime-ts/public/brand/hoox-horizontal-reversed.svg", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../runtime-ts/public/brand/hoox-horizontal-black.svg", import.meta.url),
         "utf8",
       ),
       readFile(
@@ -149,6 +154,9 @@ describe("Hoox 品牌资产", () => {
     }
     expect(reversed).toContain("#fff");
     expect(reversed).not.toContain("#177654");
+    expect(black).toContain("#19191a");
+    expect(black).not.toMatch(/#(?:177654|fff)/);
+    expect(black.replace("#19191a", "#fff")).toBe(reversed);
     expect(monochrome).toContain("#19191a");
     expect(monochrome).not.toContain("#177654");
 
@@ -158,7 +166,7 @@ describe("Hoox 品牌资产", () => {
       "m1682 380-24-30 58-71h52l-65 76Z",
       "m1611 408 24 27-58 71h-51l61-71Z",
     ];
-    for (const content of [horizontal, reversed]) {
+    for (const content of [horizontal, reversed, black]) {
       for (const path of auditedWordmarkPaths) expect(content).toContain(`d="${path}"`);
     }
   });

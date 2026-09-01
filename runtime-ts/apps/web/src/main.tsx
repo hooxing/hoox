@@ -54,6 +54,7 @@ import {
   TeamSwitcher,
   type TeamWorkspaceApi,
 } from "./team-workspace.js";
+import "@hoox/ui-theme/theme.css";
 import "./styles.css";
 import {
   ConversationComposer,

@@ -48,6 +48,8 @@ describe("工作台展示组件", () => {
 
     expect(html).toContain("等待输入");
     expect(html).toContain("is-waiting");
+    expect(html).toContain("<svg");
+    expect(html).toContain('aria-hidden="true"');
   });
 
   it("recovery_required 不再显示执行动画或累计运行时间", () => {
@@ -1233,7 +1235,7 @@ describe("工作台展示组件", () => {
     expect(container.querySelector(".brand")?.textContent).toContain("Hoox");
     expect(container.querySelector(".brand")?.textContent).toContain("你说，它做。");
     expect(container.querySelector<HTMLImageElement>(".brand-mark")?.getAttribute("src")).toBe(
-      "/brand/hoox-app-icon.png",
+      "/brand/hoox-symbol-transparent.png",
     );
     expect(document.activeElement).toBe(input);
     act(() => input?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));

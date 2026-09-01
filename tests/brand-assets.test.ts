@@ -21,6 +21,13 @@ const expectedAssets = {
   "pwa-icon-maskable-512.png": { width: 512, height: 512, colorType: 2 },
 } as const;
 
+const expectedVectorAssets = {
+  "hoox-horizontal-reversed.svg": "0 0 1925 817",
+  "hoox-horizontal.svg": "0 0 1916 821",
+  "hoox-symbol-monochrome.svg": "0 0 1254 1254",
+  "hoox-symbol.svg": "0 0 1254 1254",
+} as const;
+
 type Png = {
   readonly width: number;
   readonly height: number;
@@ -108,6 +115,43 @@ describe("Hoox 品牌资产", () => {
       if ("colorType" in dimensions) expect(png.colorType).toBe(dimensions.colorType);
     });
   }
+
+  it("四个矢量审阅资产只使用可维护路径且不嵌入栅格或字体", async () => {
+    for (const [name, viewBox] of Object.entries(expectedVectorAssets)) {
+      const content = await readFile(
+        new URL(`../runtime-ts/public/brand/${name}`, import.meta.url),
+        "utf8",
+      );
+      expect(content).toMatch(/^<svg\b/);
+      expect(content).toContain(`viewBox="${viewBox}"`);
+      expect(content).toMatch(/<path\b/);
+      expect(content).not.toMatch(/<(?:foreignObject|image|script|text)\b/i);
+      expect(content).not.toMatch(/(?:href|src)=["'](?:data:|https?:\/\/)/i);
+      expect(content).not.toMatch(/font-family/i);
+      expect(content.match(/<path\b/g)?.length).toBeLessThanOrEqual(7);
+    }
+
+    const [symbol, horizontal, reversed, monochrome] = await Promise.all([
+      readFile(new URL("../runtime-ts/public/brand/hoox-symbol.svg", import.meta.url), "utf8"),
+      readFile(new URL("../runtime-ts/public/brand/hoox-horizontal.svg", import.meta.url), "utf8"),
+      readFile(
+        new URL("../runtime-ts/public/brand/hoox-horizontal-reversed.svg", import.meta.url),
+        "utf8",
+      ),
+      readFile(
+        new URL("../runtime-ts/public/brand/hoox-symbol-monochrome.svg", import.meta.url),
+        "utf8",
+      ),
+    ]);
+    for (const content of [symbol, horizontal]) {
+      expect(content).toContain("#19191a");
+      expect(content).toContain("#177654");
+    }
+    expect(reversed).toContain("#fff");
+    expect(reversed).not.toContain("#177654");
+    expect(monochrome).toContain("#19191a");
+    expect(monochrome).not.toContain("#177654");
+  });
 
   it("四个原始 PNG 保持 RGB、尺寸和最低文件量级", async () => {
     for (const name of [

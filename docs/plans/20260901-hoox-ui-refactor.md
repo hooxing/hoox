@@ -8,6 +8,7 @@
 - 既有决策：[共享 Hoox 品牌资产并替代字母占位](../decisions/20260901003001-shared-brand-assets-and-product-surfaces.md)
 - 实施决策：[共享 UI 主题 Token 与渐进迁移边界](../decisions/20260901104943-shared-ui-theme-token-boundary.md)
 - 品牌衍生决策：[固定品牌栅格衍生资产与入口尺寸](../decisions/20260901110046-raster-brand-derivative-contract.md)
+- 矢量候选决策：[手工几何重建品牌矢量候选](../decisions/20260901114930-hand-rebuilt-brand-vector-candidates.md)
 
 ## 1. 生命周期与权威边界
 
@@ -126,6 +127,9 @@ runtime-ts/public/brand/
   hoox-horizontal-reversed.svg
   hoox-symbol-monochrome.svg
 ```
+
+上述四个文件已作为手工几何重建的审阅候选加入，但应用引用切换和正式矢量真源认定仍等待品牌方
+复核；当前 PNG 接口与引用保持不变。
 
 新增文件名会形成静态接口；实施切片必须同步更新品牌参考、构建验证和资产契约测试。设计源文件、临时蒙版、中间描摹和截图不得进入 `runtime-ts/public/brand/`。
 

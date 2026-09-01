@@ -31,6 +31,16 @@ describe("工作台滚动区域样式", () => {
     expect(styles).toContain(".run-progress-dock + .composer");
   });
 
+  it("输入区以表面和阴影建立边界，并在键盘聚焦时保留可见反馈", () => {
+    expect(styles).toMatch(
+      /\.composer\s*\{[^}]*border:\s*0;[^}]*background:\s*var\(--surface-raised\);[^}]*box-shadow:\s*var\(--shadow-control\);/su,
+    );
+    expect(styles).toMatch(
+      /\.composer:focus-within\s*\{[^}]*var\(--focus-color\)[^}]*var\(--focus-ring\)/su,
+    );
+    expect(styles).toMatch(/\.composer textarea\s*\{[^}]*border:\s*0;[^}]*outline:\s*0;/su);
+  });
+
   it("外壳组件引用共享语义 Token 并提供明确禁用态", () => {
     expect(styles).toMatch(/\.sidebar\s*\{[^}]*background:\s*var\(--surface-sidebar\)/su);
     expect(styles).toMatch(/\.thread\.selected\s*\{[^}]*var\(--action-subtle\)/su);
@@ -43,7 +53,7 @@ describe("工作台滚动区域样式", () => {
       /\.brand-logo\s*\{[^}]*width:\s*132px;[^}]*height:\s*40px;[^}]*object-fit:\s*cover;/su,
     );
     expect(styles).toMatch(
-      /\.welcome-logo\s*\{[^}]*width:\s*184px;[^}]*height:\s*56px;[^}]*object-fit:\s*cover;/su,
+      /\.welcome-logo\s*\{[^}]*width:\s*min\(256px, 100%\);[^}]*aspect-ratio:\s*4 \/ 1;[^}]*object-fit:\s*cover;/su,
     );
     expect(styles).not.toContain(".brand-copy");
     expect(styles).not.toContain(".welcome-mark");

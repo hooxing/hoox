@@ -1808,8 +1808,8 @@ h2 {
 }
 .welcome-logo {
   display: block;
-  width: 184px;
-  height: 56px;
+  width: min(256px, 100%);
+  aspect-ratio: 4 / 1;
   object-fit: cover;
   object-position: center;
 }
@@ -1844,10 +1844,16 @@ h2 {
   align-self: center;
   padding: 8px 10px 9px 14px;
   margin-bottom: 16px;
-  border: 1px solid var(--border-strong);
+  border: 0;
   border-radius: var(--radius-lg);
   background: var(--surface-raised);
   box-shadow: var(--shadow-control);
+}
+.composer:focus-within {
+  box-shadow:
+    0 0 0 2px var(--focus-color),
+    0 0 0 5px var(--focus-ring),
+    var(--shadow-control);
 }
 .run-progress-dock + .composer {
   border-radius: 0 0 var(--radius-lg) var(--radius-lg);

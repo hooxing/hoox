@@ -151,6 +151,16 @@ describe("Hoox 品牌资产", () => {
     expect(reversed).not.toContain("#177654");
     expect(monochrome).toContain("#19191a");
     expect(monochrome).not.toContain("#177654");
+
+    const auditedWordmarkPaths = [
+      "M727 279h42v96h130v-96h42v227h-42v-95H769v95h-42Z",
+      "M1523 279h53l190 227h-51Z",
+      "m1682 380-24-30 58-71h52l-65 76Z",
+      "m1611 408 24 27-58 71h-51l61-71Z",
+    ];
+    for (const content of [horizontal, reversed]) {
+      for (const path of auditedWordmarkPaths) expect(content).toContain(`d="${path}"`);
+    }
   });
 
   it("四个原始 PNG 保持 RGB、尺寸和最低文件量级", async () => {

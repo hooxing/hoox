@@ -61,7 +61,7 @@
 | [ADR-0055：模型网络报文诊断的受限保存](0055-model-wire-trace-diagnostics.md) | 已接受 | 2026-07-30 |
 | [ADR-0056：模型网络报文诊断的安全读取与原始字节呈现](0056-model-wire-trace-safe-reading.md) | 已接受 | 2026-07-30 |
 | [ADR-0057：单一 exec_command 与模型可见真实执行结果](0057-single-exec-command-model-observation.md) | 已接受 | 2026-07-30 |
-| [ADR-0058：面向模型的单一文件交付工具](0058-simple-deliver-file-tool.md) | 已接受 | 2026-07-30 |
+| [ADR-0058：面向模型的单一文件交付工具](0058-simple-deliver-file-tool.md) | 部分已替代（旧模型工具源码保留结论） | 2026-07-30 |
 | [ADR-0059：在 Agent 对话中内联交付 Artifact](0059-inline-artifact-delivery-in-conversation.md) | 已接受 | 2026-07-30 |
 | [ADR-0060：模型输出的安全 Markdown 展示边界](0060-safe-markdown-model-output.md) | 已接受 | 2026-07-30 |
 | [ADR-0061：面向用户的运行状态体验](0061-user-focused-running-experience.md) | 已接受 | 2026-07-30 |
@@ -258,3 +258,4 @@
 | [ADR-20260901110046：固定品牌栅格衍生资产与入口尺寸](20260901110046-raster-brand-derivative-contract.md) | 已接受 | 2026-09-01 |
 | [ADR-20260901114930：手工几何重建品牌矢量候选](20260901114930-hand-rebuilt-brand-vector-candidates.md) | 提议 | 2026-09-01 |
 | [ADR-20260901155352：品牌绿稀缺使用并与操作语义解耦](20260901155352-brand-green-scarcity-and-action-separation.md) | 已接受 | 2026-09-01 |
+| [ADR-20260902172021：删除已退役的 Artifact 模型工具链](20260902172021-remove-retired-artifact-tool-chain.md) | 已接受 | 2026-09-02 |

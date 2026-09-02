@@ -1,6 +1,6 @@
 # ADR-0036：waiting 恢复事实由已完成副作用证明推导
 
-- 状态：已替代（由 ADR-0037 替代普通 proof 信任边界）
+- 状态：已替代（普通 proof 信任边界由 [ADR-0037](../../decisions/0037-waiting-recovery-capability-and-append-only-rollback.md) 替代）
 - 日期：2026-07-28
 - 关联：ADR-0030、ADR-0033
 

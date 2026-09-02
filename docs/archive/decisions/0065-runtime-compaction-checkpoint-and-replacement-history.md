@@ -1,6 +1,6 @@
 # ADR-0065：Runtime Compaction 检查点与 Replacement History
 
-- 状态：提议
+- 状态：已替代（候选语义由 ADR-0068 接受并实施）
 - 日期：2026-07-31
 - 决策者：待指定
 - 关联任务/PR：阶段 0 语义冻结；ADR-0006、ADR-0030、ADR-0035、ADR-0064
@@ -10,7 +10,7 @@
 
 当前 Pi compaction 固定关闭，Context Policy 在实际 Provider 调用前执行预算门禁。现有 `runtime_rollout_replacements` 是 Attempt 范围、单调前缀式的恢复结构，其 replacement item 只描述 `from/through`，不是整个 Thread 的可安装模型历史。它不能直接充当跨 Run Runtime Compaction 的实施规范。
 
-[Thread 连续上下文实施总计划](../archive/plans/thread-continuous-context.md) 已确定：Runtime 是 compaction 事实源；原始 Thread facts 不删除；每个 checkpoint 保存不可变的完整 `replacement_history`；后一个 checkpoint 可以完全重组前一个窗口；Canonical Context 必须按当前可信配置重建。本 ADR 冻结该恢复协议，不固化阈值、预算或本地/远程路径选择。
+[Thread 连续上下文实施总计划](../plans/thread-continuous-context.md) 已确定：Runtime 是 compaction 事实源；原始 Thread facts 不删除；每个 checkpoint 保存不可变的完整 `replacement_history`；后一个 checkpoint 可以完全重组前一个窗口；Canonical Context 必须按当前可信配置重建。本 ADR 冻结该恢复协议，不固化阈值、预算或本地/远程路径选择。
 
 ## 决策驱动因素
 
@@ -118,5 +118,5 @@ Provider wire role 不是上述事实 schema。`compaction_handoff` 在事实层
 
 ## 实施记录
 
-- 阶段 4 的具体实施选择由 [ADR-0068](0068-runtime-owned-persistent-compaction.md) 接受；
+- 阶段 4 的具体实施选择由 [ADR-0068](../../decisions/0068-runtime-owned-persistent-compaction.md) 接受；
   本 ADR 保留为阶段 0 语义输入，不作为完整实施规范。Pi compaction 继续保持关闭。

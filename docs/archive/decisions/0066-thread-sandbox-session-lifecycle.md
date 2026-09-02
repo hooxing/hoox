@@ -1,6 +1,6 @@
 # ADR-0066：Thread Sandbox Session 生命周期
 
-- 状态：已替代（由 ADR-0069 实施）
+- 状态：已替代（由 [ADR-0069](../../decisions/0069-thread-sandbox-session-lifecycle-implementation.md) 实施）
 - 日期：2026-07-31
 - 决策者：待指定
 - 关联任务/PR：阶段 0 语义冻结；ADR-0033、ADR-0037、ADR-0063、ADR-0064
@@ -10,7 +10,7 @@
 
 当前生产 Registry 绑定 Attempt。Run 成功后调用 `settle(..., "close")`，只有 waiting 分支会 pause。数据库允许 `actual_ttl_seconds` 为 1～86400，但生产 `CubeSandboxGateway` 与 `CubeSandboxSessionRegistry` 当前把 create TTL 上限固定为 120 秒；waiting 决策允许最多十分钟，测试路径还存在 600 秒数据。三者不是同一个已验证的 Provider 能力。
 
-Vendored CubeSandbox SDK 的类型和单测表明 create 可传 `lifecycle.onTimeout="pause"`、`autoResume`，`connect` 声称会自动 resume，且 SDK 另有已弃用的 `resume()`。Runtime 的 `SandboxCreateInput` 尚未暴露 lifecycle。[2026-07-31 首轮真实 Spike](../spikes/2026-07-31-thread-context-capability-spikes.md) 已证明当前目标的即时 pause/connect、短 TTL auto-pause、内存/文件恢复和 TTL 至少接受到 86400 秒，但仍没有精确最大 TTL、长 paused retention、平台版本或 UNKNOWN 收敛证据。因此本 ADR 只冻结产品状态机和失败语义；具体 retention/TTL 必须配置化并随 capability 证据更新。
+Vendored CubeSandbox SDK 的类型和单测表明 create 可传 `lifecycle.onTimeout="pause"`、`autoResume`，`connect` 声称会自动 resume，且 SDK 另有已弃用的 `resume()`。Runtime 的 `SandboxCreateInput` 尚未暴露 lifecycle。[2026-07-31 首轮真实 Spike](../../spikes/2026-07-31-thread-context-capability-spikes.md) 已证明当前目标的即时 pause/connect、短 TTL auto-pause、内存/文件恢复和 TTL 至少接受到 86400 秒，但仍没有精确最大 TTL、长 paused retention、平台版本或 UNKNOWN 收敛证据。因此本 ADR 只冻结产品状态机和失败语义；具体 retention/TTL 必须配置化并随 capability 证据更新。
 
 ## 决策驱动因素
 
@@ -118,5 +118,5 @@ unknown + reconciliation ───────→ paused | terminated
 
 ## 实施记录
 
-- 阶段 5 已由 [ADR-0069](0069-thread-sandbox-session-lifecycle-implementation.md) 实施。具体事务、
+- 阶段 5 已由 [ADR-0069](../../decisions/0069-thread-sandbox-session-lifecycle-implementation.md) 实施。具体事务、
   迁移、Feature Flag、Scheduler 对账和参数边界以 ADR-0069 为准；本 ADR 保留阶段 0 的语义冻结历史。

@@ -1,6 +1,6 @@
 # ADR：使用阶段标志生成最终答复
 
-- 状态：已被 [ADR 20260816202624](./20260816202624-optional-long-process-collapse-marker.md) 修订
+- 状态：部分已替代（工具名称与使用条件由 [ADR-20260816202624](20260816202624-optional-long-process-collapse-marker.md) 替代；阶段协议继续有效）
 - 日期：2026-08-16
 
 ## 背景

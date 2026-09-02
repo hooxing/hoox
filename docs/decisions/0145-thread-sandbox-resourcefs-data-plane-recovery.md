@@ -4,7 +4,7 @@
 - 日期：2026-08-10
 - 决策者：Runtime 团队
 - 关联任务/PR：`codex/team-edition-prototype`
-- 替代关系：细化 ADR-0066、ADR-0107、ADR-0129；不改变 ResourceFS 授权、Thread Sandbox 生命周期状态机与 Workspace 事实源
+- 替代关系：细化 ADR-0066、[ADR-0107（托管 ResourceFS Sidecar）](0107-managed-resourcefs-sidecar-and-thread-sandbox-capability.md)、ADR-0129；不改变 ResourceFS 授权、Thread Sandbox 生命周期状态机与 Workspace 事实源
 
 ## 背景
 

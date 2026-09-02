@@ -1,6 +1,6 @@
 # ADR-0049：受审生产进程装配与 Worker 运行边界
 
-- 状态：已替代
+- 状态：已替代（当前生产装配边界见 [ADR-0054](../../decisions/0054-production-transport-and-reproducible-release.md)）
 - 日期：2026-07-29
 - 决策者：M7 生产 Gate 实施审阅
 - 关联任务：M7 production Worker、运行角色与部署 Gate

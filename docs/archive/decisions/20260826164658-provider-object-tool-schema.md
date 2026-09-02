@@ -1,6 +1,6 @@
 # ADR-20260826164658：Provider 工具参数使用顶层 object Schema
 
-- 状态：已替代（由 ADR-20260826172009 收敛为单一严格 Schema）
+- 状态：已替代（由 [ADR-20260826172009](../../decisions/20260826172009-single-source-provider-object-tool-schema.md) 收敛为单一严格 Schema）
 - 日期：2026-08-26
 - 决策者：项目维护者
 - 关联任务/PR：修复切换模型后新 Run 因工具 Schema 被 Provider 拒绝

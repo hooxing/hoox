@@ -6,6 +6,7 @@
 
 | 类别 | 内容 | 当前入口 |
 | --- | --- | --- |
+| [历史架构决策](decisions/README.md) | 已完全替代或未接受而后续方案已落地的决策记录 | [架构决策](../decisions/README.md)与[完整决策目录](../decisions/catalog.md) |
 | [历史实施计划](plans/README.md) | 已完成、被替代或不再指导实施的阶段拆解 | 每篇计划顶部列出的架构、参考或运维文档 |
 | [历史路线图](roadmaps/README.md) | 已退出当前导航的阶段目标和任务账本 | [项目状态](../project-status.md) · [项目路线](../roadmap.md) |
 | [历史功能规范](specs/README.md) | 已完成或被实现演进替代的目标规范 | 对应的当前架构、参考或运维文档 |

@@ -4,7 +4,7 @@
 - 日期：2026-08-16
 - 决策者：Runtime 维护者
 - 关联任务/PR：本地开发一键启动脚本
-- 替代关系：被 [ADR-20260816152234](20260816152234-multi-machine-external-service-preflight-and-optional-skill-startup.md) 替代
+- 替代关系：被 [ADR-20260816152234](../../decisions/20260816152234-multi-machine-external-service-preflight-and-optional-skill-startup.md) 替代
 
 ## 背景
 

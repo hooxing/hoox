@@ -1,6 +1,25 @@
 # 架构决策目录
 
-本目录按文件名列出全部历史决策。状态与替代关系以 ADR 正文为准；历史四位编号和重复编号不改名，新 ADR 统一使用北京时间时间戳。
+本目录保留全部 ADR 的历史账本，包括已移入 `archive/decisions` 的失效记录。解释当前行为时先读当前说明；状态与替代关系以 ADR 正文为准。历史四位编号和重复编号不改名，新 ADR 统一使用北京时间时间戳。
+
+## 容易误读的替代链
+
+| 主题 | 不应继续作为当前结论的记录 | 当前入口 |
+| --- | --- | --- |
+| Context Compaction | ADR-0065 的阶段 0 提议 | [Thread 连续上下文](../architecture/thread-continuity.md) · [ADR-0068](0068-runtime-owned-persistent-compaction.md) · [ADR-0133](0133-auto-compaction-full-window-and-incoming-projection.md) · [ADR-0134](0134-compaction-output-budget-and-terminal-parsing.md) |
+| Thread Sandbox 生命周期 | ADR-0066 的候选实现边界 | [Thread 连续上下文](../architecture/thread-continuity.md) · [ADR-0069](0069-thread-sandbox-session-lifecycle-implementation.md) |
+| 生产 Worker 装配 | ADR-0049 的包内 capability 安全声明和固定 Tenant 分片 | [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-0054](0054-production-transport-and-reproducible-release.md) · [ADR-0142](0142-dynamic-worker-tenant-assignment.md) |
+| 项目身份 | AISay Runtime 技术身份、Hoox/AISay 双重命名 | [项目 README](../../README.md) · [ADR-20260818144124](20260818144124-unify-project-identity-as-hoox.md) |
+| Windows 开发启动 | 只面向本机服务的旧一键启动假设 | [开发环境准备](../development.md) · [ADR-20260816152234](20260816152234-multi-machine-external-service-preflight-and-optional-skill-startup.md) |
+| 模型 Provider 管理 | 早期草稿/探测/发布页面流程 | [配置参考](../reference/configuration.md) · [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260825180549](20260825180549-direct-model-configuration-activation.md) · [ADR-20260826115031](20260826115031-model-provider-list-edit-test-switch.md) |
+| `automation_update` Schema | ADR-20260826164658 的双层定义和 ADR-20260826172009 的单一严格 Schema | [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260828113059](20260828113059-automation-tool-schema-and-error-semantics.md) |
+| Demo 后台身份 | ADR-20260824222258 的 HTTP Basic 入口 | [Demo 持续部署](../operations/demo-cd.md) · [ADR-20260825145416](20260825145416-demo-admin-uses-hoox-session-gate.md) |
+| Skill 分发 | ADR-0097 的专有 development fixture | [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260827174210](20260827174210-open-source-distribution-license-and-security-gates.md) |
+
+## 完整历史目录
+
+<details>
+<summary>展开全部决策</summary>
 
 | 决策 | 状态 | 日期 |
 | --- | --- | --- |
@@ -39,7 +58,7 @@
 | [ADR-0033：waiting 与 SandboxSession 恢复安全边界](0033-waiting-sandbox-recovery.md) | 已接受 | 2026-07-28 |
 | [ADR-0034：M4 黑盒运行时依赖构建门禁](0034-m4-runtime-dependency-build-gate.md) | 已接受 | 2026-07-28 |
 | [ADR-0035：模型感知的 Context Budget](0035-model-aware-context-budget.md) | 部分已替代（未知模型默认计数） | 2026-07-28 |
-| [ADR-0036：waiting 恢复事实由已完成副作用证明推导](0036-waiting-recovery-proof-derived-facts.md) | 已替代（由 ADR-0037 替代普通 proof 信任边界） | 2026-07-28 |
+| [ADR-0036：waiting 恢复事实由已完成副作用证明推导](../archive/decisions/0036-waiting-recovery-proof-derived-facts.md) | 已替代（由 ADR-0037 替代普通 proof 信任边界） | 2026-07-28 |
 | [ADR-0037：waiting 恢复能力回执与只追加回退边界](0037-waiting-recovery-capability-and-append-only-rollback.md) | 已接受 | 2026-07-28 |
 | [ADR-0038：生产 Worker 的 Workspace 失败关闭边界](0038-production-worker-fail-closed-workspace-boundary.md) | 已接受 | 2026-07-28 |
 | [ADR-0039：本地 Agent 工作台与公开 API 边界](0039-web-local-agent-workbench.md) | 已接受 | 2026-07-28 |
@@ -49,10 +68,10 @@
 | [ADR-0043：CubeSandbox 数据面缺省路由](0043-cubesandbox-proxy-default-routing.md) | 已接受 | 2026-07-28 |
 | [ADR-0044：Agent 工作台三段式信息架构](0044-agent-workbench-information-architecture.md) | 已接受 | 2026-07-28 |
 | [ADR-0045：Thread 最新 Run 恢复读取契约](0045-thread-latest-run-recovery-contract.md) | 已接受 | 2026-07-28 |
-| [ADR-0046：Workspace manifest Runtime 闭环](0046-workspace-manifest-runtime-closure.md) | 部分接受（Worker 发布启用延期） | 2026-07-29 |
+| [ADR-0046：Workspace manifest Runtime 闭环](0046-workspace-manifest-runtime-closure.md) | 已接受（数据边界；Worker 发布由 ADR-0047 收口） | 2026-07-29 |
 | [ADR-0047：Workspace candidate 原子交接与开发 Worker 启用](0047-workspace-candidate-atomic-handoff.md) | 已接受 | 2026-07-29 |
 | [ADR-0048：Workspace Revision 到 Artifact 的原子发布闭环](0048-workspace-artifact-runtime-closure.md) | 已接受 | 2026-07-29 |
-| [ADR-0049：受审生产进程装配与 Worker 运行边界](0049-audited-production-worker-assembly.md) | 已替代 | 2026-07-29 |
+| [ADR-0049：受审生产进程装配与 Worker 运行边界](../archive/decisions/0049-audited-production-worker-assembly.md) | 已替代 | 2026-07-29 |
 | [ADR-0050：生产 API 的 JWT 身份、租户选择与受审网络装配](0050-production-api-jwt-authentication.md) | 已接受 | 2026-07-29 |
 | [ADR-0051：Workspace 物化失败的脱敏诊断](0051-workspace-materialization-safe-diagnostics.md) | 已接受 | 2026-07-29 |
 | [ADR-0052：Artifact 工具许可与 Attempt 版本的单调边界](0052-artifact-permit-version-monotonicity.md) | 已接受 | 2026-07-30 |
@@ -68,8 +87,8 @@
 | [ADR-0062：简化 Web 工作台滚动与交付入口](0062-simplify-web-workspace-scrolling.md) | 已接受 | 2026-07-31 |
 | [ADR-0063：Thread 单写者与持久 Follow-up 队列](0063-thread-writer-and-durable-follow-up-queue.md) | 已接受 | 2026-07-31 |
 | [ADR-0064：Thread Context 事实流与活动历史](0064-thread-context-fact-stream-and-active-history.md) | 已接受（阶段 2） | 2026-07-31 |
-| [ADR-0065：Runtime Compaction 检查点与 Replacement History](0065-runtime-compaction-checkpoint-and-replacement-history.md) | 提议 | 2026-07-31 |
-| [ADR-0066：Thread Sandbox Session 生命周期](0066-thread-sandbox-session-lifecycle.md) | 已替代（由 ADR-0069 实施） | 2026-07-31 |
+| [ADR-0065：Runtime Compaction 检查点与 Replacement History](../archive/decisions/0065-runtime-compaction-checkpoint-and-replacement-history.md) | 已替代（由 ADR-0068 接受并实施） | 2026-07-31 |
+| [ADR-0066：Thread Sandbox Session 生命周期](../archive/decisions/0066-thread-sandbox-session-lifecycle.md) | 已替代（由 ADR-0069 实施） | 2026-07-31 |
 | [ADR-0067：Durable Steer 与统一 Thread 输入协议](0067-durable-steer-and-unified-thread-input.md) | 已接受（阶段 3） | 2026-07-31 |
 | [ADR-0068：Runtime 持久 Compaction 实施边界](0068-runtime-owned-persistent-compaction.md) | 已接受（阶段 4） | 2026-07-31 |
 | [ADR-0069：Thread Sandbox Session 生命周期实施边界](0069-thread-sandbox-session-lifecycle-implementation.md) | 已接受（阶段 5） | 2026-07-31 |
@@ -100,7 +119,7 @@
 | [ADR-0094：Skill Center 全局用户安装与受管目录边界](0094-skill-center-user-installation.md) | 已接受 | 2026-08-03 |
 | [ADR-0095：Skill Runtime 快照、后端注入与延迟物化](0095-skill-runtime-snapshot-and-lazy-materialization.md) | 已接受 | 2026-08-03 |
 | [ADR-0096：Skill Center 主导航入口位置](0096-skill-center-primary-navigation-placement.md) | 已接受 | 2026-08-03 |
-| [ADR-0097：development PPTX Skill 测试目录发布](0097-development-pptx-skill-fixture.md) | 已被 ADR-20260827174210 替代 | 2026-08-03 |
+| [ADR-0097：development PPTX Skill 测试目录发布](../archive/decisions/0097-development-pptx-skill-fixture.md) | 已替代（由 ADR-20260827174210 替代） | 2026-08-03 |
 | [ADR-0098：Worker Skill Blob 读取上限与预检一致性](0098-worker-skill-blob-size-boundary.md) | 已接受 | 2026-08-04 |
 | [ADR-0099：Skill 恢复查询的 PostgreSQL 稳定排序](0099-skill-recovery-stable-ordering.md) | 已接受 | 2026-08-04 |
 | [ADR-0100：Provider 可见历史过滤与 DeepSeek V4 精确 Tokenizer](0100-provider-visible-history-and-deepseek-tokenizer.md) | 部分已替代（模型输出配置、未知模型失败关闭） | 2026-08-04 |
@@ -186,16 +205,16 @@
 | [ADR-0176：E2B Provider 首期 SDK 适配与生产启用边界](0176-e2b-provider-first-sdk-adapter.md) | 已接受（首期适配） | 2026-08-14 |
 | [ADR-0177：Sandbox Provider 身份持久化与失败关闭路由](0177-sandbox-provider-persistence-and-routing.md) | 已接受 | 2026-08-14 |
 | [ADR-0178：E2B ResourceFS 受控快照物化](0178-e2b-resourcefs-controlled-snapshot.md) | 已接受 | 2026-08-14 |
-| [ADR-20260815182655：使用本地不可变诊断镜像提供内部轨迹查看器](20260815182655-local-internal-trajectory-viewer.md) | 已接受 | 2026-08-15 |
+| [ADR-20260815182655：使用本地不可变诊断镜像提供内部轨迹查看器](20260815182655-local-internal-trajectory-viewer.md) | 部分已替代（公开事件近似方案） | 2026-08-15 |
 | [ADR-20260815193622：内部无损 Session 轨迹与 DeepSeek Trajectory 适配](20260815193622-lossless-internal-trajectory-and-deepseek-adapter.md) | 已接受 | 2026-08-15 |
 | [ADR-20260815214527：内部无损事件与逻辑轨迹记录分层](20260815214527-internal-events-and-logical-trajectory-records.md) | 已接受 | 2026-08-15 |
 | [ADR-20260815232211：内部轨迹标题与性能统计语义](20260815232211-internal-trajectory-title-and-performance-metrics.md) | 已接受 | 2026-08-15 |
-| [ADR-20260816002622：项目身份迁移为 AISay Runtime](20260816002622-aisay-runtime-project-identity.md) | 已替代 | 2026-08-16 |
-| [ADR-20260816110030：Windows development 非首次一键启动边界](20260816110030-windows-development-one-click-startup.md) | 已替代 | 2026-08-16 |
-| [ADR-20260816114151：将用户面对的 Agent 产品命名为 Hoox](20260816114151-hoox-agent-product-brand.md) | 已替代 | 2026-08-16 |
+| [ADR-20260816002622：项目身份迁移为 AISay Runtime](../archive/decisions/20260816002622-aisay-runtime-project-identity.md) | 已替代 | 2026-08-16 |
+| [ADR-20260816110030：Windows development 非首次一键启动边界](../archive/decisions/20260816110030-windows-development-one-click-startup.md) | 已替代 | 2026-08-16 |
+| [ADR-20260816114151：将用户面对的 Agent 产品命名为 Hoox](../archive/decisions/20260816114151-hoox-agent-product-brand.md) | 已替代 | 2026-08-16 |
 | [ADR-20260816152234：多机开发外部服务预检与可选 Skill 启动](20260816152234-multi-machine-external-service-preflight-and-optional-skill-startup.md) | 已接受 | 2026-08-16 |
-| [ADR-20260816160557：工作台本地账号入口与侧栏用户菜单边界](20260816160557-local-account-shell-and-sidebar-user-menu.md) | 已替代（账号认证部分） | 2026-08-16 |
-| [ADR：使用阶段标志生成最终答复](20260816164334-final-answer-phase-marker.md) | 已被 [ADR 20260816202624](./20260816202624-optional-long-process-collapse-marker.md) 修订 | 2026-08-16 |
+| [ADR-20260816160557：工作台本地账号入口与侧栏用户菜单边界](20260816160557-local-account-shell-and-sidebar-user-menu.md) | 部分已替代（账号认证；布局继续有效） | 2026-08-16 |
+| [ADR：使用阶段标志生成最终答复](20260816164334-final-answer-phase-marker.md) | 部分已替代（工具名称与使用条件；阶段协议继续有效） | 2026-08-16 |
 | [ADR-20260816165004：开发工作台使用服务端本地账号认证](20260816165004-development-local-account-authentication.md) | 已接受 | 2026-08-16 |
 | [ADR：将最终答复阶段标志收窄为可选的长过程折叠工具](20260816202624-optional-long-process-collapse-marker.md) | 已接受 | 2026-08-16 |
 | [ADR-20260816203749：内部轨迹以 Thread 作为对话 Session 聚合边界](20260816203749-thread-scoped-trajectory-session.md) | 已接受 | 2026-08-16 |
@@ -206,21 +225,21 @@
 | [ADR-20260818001636：收敛模型网络诊断到内部轨迹查看器](20260818001636-converge-model-wire-diagnostics-to-internal-viewer.md) | 已接受 | 2026-08-18 |
 | [ADR-20260818090007：定时 Run 在线发现与触发消息边界](20260818090007-scheduled-run-live-refresh-and-prompt-boundary.md) | 已接受 | 2026-08-18 |
 | [ADR-20260818114734：模型可见 Prompt 元数据与工具指引去重](20260818114734-model-visible-prompt-metadata-and-tool-guidance-deduplication.md) | 已接受 | 2026-08-18 |
-| [ADR-20260818140646：对话定时任务默认使用东八区](20260818140646-automation-default-timezone.md) | 已采纳 | 2026-08-18 |
+| [ADR-20260818140646：对话定时任务默认使用东八区](20260818140646-automation-default-timezone.md) | 已接受 | 2026-08-18 |
 | [ADR-20260818144124：统一项目身份为 Hoox](20260818144124-unify-project-identity-as-hoox.md) | 已接受 | 2026-08-18 |
 | [ADR-20260819115118：思考生命周期在正文与工具边界收敛](20260819115118-thinking-lifecycle-boundary-convergence.md) | 已接受 | 2026-08-19 |
 | [ADR-20260819142015：用户工作台隐藏 Workspace 未变化审计通知](20260819142015-hide-workspace-unchanged-runtime-notice.md) | 已接受 | 2026-08-19 |
-| [ADR-20260819165254：独立后台控制面与版本化运行配置](20260819165254-independent-admin-control-plane.md) | 已接受（进程边界及模型配置流程已被部分替代） | 2026-08-19 |
+| [ADR-20260819165254：独立后台控制面与版本化运行配置](20260819165254-independent-admin-control-plane.md) | 部分已替代（进程边界与模型配置流程） | 2026-08-19 |
 | [ADR-20260820090402：Provider 拥有可启用的模型目录](20260820090402-provider-owned-model-catalog.md) | 部分已替代（管理页面多启用语义） | 2026-08-20 |
-| [无团队成员关系时隐藏团队操作](20260820092801-hide-team-controls-without-membership.md) | 已采纳 | 2026-08-20 |
-| [ADR-20260820095113：Pi 模型目录为后台配置提供可覆盖的初始值](20260820095113-pi-catalog-seeds-admin-model-metadata.md) | 已接受（模型配置流程已被部分替代） | 2026-08-20 |
-| [ADR-20260820101805：浏览器内置 Pi 目录与后台配置服务独立降级](20260820101805-browser-bundled-pi-catalog-degrades-independently.md) | 已接受（模型配置流程已被部分替代） | 2026-08-20 |
+| [无团队成员关系时隐藏团队操作](20260820092801-hide-team-controls-without-membership.md) | 已接受 | 2026-08-20 |
+| [ADR-20260820095113：Pi 模型目录为后台配置提供可覆盖的初始值](20260820095113-pi-catalog-seeds-admin-model-metadata.md) | 部分已替代（模型配置流程） | 2026-08-20 |
+| [ADR-20260820101805：浏览器内置 Pi 目录与后台配置服务独立降级](20260820101805-browser-bundled-pi-catalog-degrades-independently.md) | 部分已替代（模型配置流程） | 2026-08-20 |
 | [ADR-20260820153000：项目采用 Apache License 2.0 并建立公开文档分层](20260820153000-open-source-license-and-documentation-boundary.md) | 已接受 | 2026-08-20 |
 | [ADR-20260821004057：工业化后台的信息架构、运营统计与用户治理边界](20260821004057-industrial-admin-operations-and-user-governance.md) | 部分已替代（探针域名白名单展示） | 2026-08-21 |
 | [ADR-20260821115221：统一后台 API 进程并保留发布资源隔离](20260821115221-unified-admin-api-process.md) | 已接受 | 2026-08-21 |
-| [后台管理 Web 采用可路由的 Ant Design 应用外壳](20260824115942-admin-web-routable-ant-design-shell.md) | 已接受（模型页面工作流已被部分替代） | 2026-08-24 |
+| [后台管理 Web 采用可路由的 Ant Design 应用外壳](20260824115942-admin-web-routable-ant-design-shell.md) | 部分已替代（模型页面工作流） | 2026-08-24 |
 | [后台模型用量指标与开发轨迹入口边界](20260824150132-admin-model-usage-metrics-and-development-trajectory-link.md) | 已接受 | 2026-08-24 |
-| [ADR-20260824222258：Demo 后台使用同源受保护路由](20260824222258-demo-admin-protected-same-origin-route.md) | 已接受（HTTP Basic 入口已被 ADR-20260825145416 部分替代） | 2026-08-24 |
+| [ADR-20260824222258：Demo 后台使用同源受保护路由](20260824222258-demo-admin-protected-same-origin-route.md) | 部分已替代（HTTP Basic 入口） | 2026-08-24 |
 | [ADR-20260825145416：Demo 后台使用 Hoox 会话闸门](20260825145416-demo-admin-uses-hoox-session-gate.md) | 已接受 | 2026-08-25 |
 | [决策：领域聚合的一致性与修正语义](domain-aggregate-consistency.md) | 已接受 | 2026-07-26 |
 | [决策：协议运行时 Schema 使用 TypeBox](domain-schema-library.md) | 已接受 | 2026-07-26 |
@@ -230,13 +249,13 @@
 | [ADR-20260825093437：Thread 消息附件使用结构化展示投影](20260825093437-thread-message-attachment-projection.md) | 已接受 | 2026-08-25 |
 | [ADR-20260825135525：Thread 图片预览按不可变附件身份保持稳定](20260825135525-stable-thread-attachment-preview.md) | 已接受 | 2026-08-25 |
 | [ADR-20260825164722：Provider 内部标识防密钥误填与探测后启用门禁](20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md) | 部分已替代（模型启用门禁、页面流程与探针域名白名单） | 2026-08-25 |
-| [ADR-20260825173500：模型 Provider 凭据按 Revision 加密托管](20260825173500-managed-model-provider-credentials.md) | 已接受（模型配置流程已被部分替代） | 2026-08-25 |
+| [ADR-20260825173500：模型 Provider 凭据按 Revision 加密托管](20260825173500-managed-model-provider-credentials.md) | 部分已替代（模型配置流程） | 2026-08-25 |
 | [ADR-20260825180549：模型配置保存即启用并隐藏内部版本流程](20260825180549-direct-model-configuration-activation.md) | 部分已替代（单一页面流程） | 2026-08-25 |
 | [模型页面只启用所选模型，已发布能力驱动运行](20260826000935-published-model-capabilities-are-runtime-facts.md) | 已接受 | 2026-08-26 |
 | [Demo 数据 epoch 与 Provider 持久化读取边界](20260826091622-demo-data-epoch-and-stored-provider-read-boundary.md) | 已接受 | 2026-08-26 |
 | [ADR-20260826115031：模型供应商采用列表、统一编辑器、真实测试与显式切换](20260826115031-model-provider-list-edit-test-switch.md) | 已接受 | 2026-08-26 |
 | [ADR-20260826155935：自定义 Provider 探测直接使用已保存地址](20260826155935-custom-provider-probes-use-saved-url.md) | 已接受 | 2026-08-26 |
-| [ADR-20260826164658：Provider 工具参数使用顶层 object Schema](20260826164658-provider-object-tool-schema.md) | 已替代 | 2026-08-26 |
+| [ADR-20260826164658：Provider 工具参数使用顶层 object Schema](../archive/decisions/20260826164658-provider-object-tool-schema.md) | 已替代 | 2026-08-26 |
 | [ADR-20260826172009：Provider 工具 Schema 使用单一严格真源](20260826172009-single-source-provider-object-tool-schema.md) | 部分已替代（Provider/Runtime 分层） | 2026-08-26 |
 | [ADR-20260827110606：未知模型使用自动 Token 估算而不阻断 Provider](20260827110606-unknown-model-token-estimator-fallback.md) | 已接受 | 2026-08-27 |
 | [ADR-20260827143000：声明推理能力的模型默认启用思考](20260827143000-reasoning-model-default-thinking.md) | 已接受 | 2026-08-27 |
@@ -259,3 +278,5 @@
 | [ADR-20260901114930：手工几何重建品牌矢量候选](20260901114930-hand-rebuilt-brand-vector-candidates.md) | 提议 | 2026-09-01 |
 | [ADR-20260901155352：品牌绿稀缺使用并与操作语义解耦](20260901155352-brand-green-scarcity-and-action-separation.md) | 已接受 | 2026-09-01 |
 | [ADR-20260902172021：删除已退役的 Artifact 模型工具链](20260902172021-remove-retired-artifact-tool-chain.md) | 已接受 | 2026-09-02 |
+
+</details>

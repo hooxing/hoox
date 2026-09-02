@@ -32,4 +32,4 @@ Runtime 对可创建的子 Agent 总数和同时运行数量设置上限。Agent
 - 执行与恢复位于 `runtime-ts/apps/agent-worker/src/agent-supervisor.ts`。
 - 持久化命令、Turn、mailbox 和对话位于 `runtime-ts/packages/persistence`。
 
-设计边界见 ADR-0122、ADR-0127、ADR-0153 至 ADR-0164；Todo 设计见 ADR-0113。
+设计边界见 [ADR-0122](../decisions/0122-shared-sandbox-subagent-control-plane.md)、[ADR-0127](../decisions/0127-thread-scoped-subagent-conversation.md)、[ADR-0153（SubAgent mailbox）](../decisions/0153-subagent-mailbox-terminal-status.md)、[ADR-0154（SubAgent 任务摘要）](../decisions/0154-subagent-initial-and-current-task.md)以及 ADR-0155 至 ADR-0164；Todo 设计见 [ADR-0113](../decisions/0113-agent-todo-writer-and-run-progress.md)。

@@ -58,4 +58,4 @@ System Prompt 契约由 `@hoox/prompt-builder` 的 `RUNTIME_PROMPT_VERSION` 和 
 - API/Web 的当前 Tenant 选择、角色授权和稳定错误；
 - ResourceFS 的只读市场投影、Blob 完整性与延迟 Sandbox 行为。
 
-关键决策见 [ADR-0094](../decisions/0094-skill-center-user-installation.md)、[ADR-0095](../decisions/0095-skill-runtime-snapshot-and-lazy-materialization.md)、[ADR-0107](../decisions/0107-public-skill-market-virtual-filesystem.md)、[ADR-0112](../decisions/0112-managed-skill-admin-publication.md)、[统一后台 API 决策](../decisions/20260821115221-unified-admin-api-process.md)和[团队工作空间决策](../decisions/0139-team-workspace-and-snapshot-boundary.md)。
+关键决策见 [ADR-0094](../decisions/0094-skill-center-user-installation.md)、[ADR-0095](../decisions/0095-skill-runtime-snapshot-and-lazy-materialization.md)、[ADR-0107（公开 Skill 市场）](../decisions/0107-public-skill-market-virtual-filesystem.md)、[ADR-0112](../decisions/0112-managed-skill-admin-publication.md)、[统一后台 API 决策](../decisions/20260821115221-unified-admin-api-process.md)和[团队工作空间决策](../decisions/0139-team-workspace-and-snapshot-boundary.md)。

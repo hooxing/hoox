@@ -1,6 +1,6 @@
 # ADR-0046：Workspace manifest Runtime 闭环
 
-- 状态：部分接受（Worker 发布启用延期）
+- 状态：已接受（数据边界；Worker 发布启用由 ADR-0047 收口）
 - 日期：2026-07-29
 
 ## 背景

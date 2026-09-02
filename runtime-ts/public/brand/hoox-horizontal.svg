@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1916 821">
+  <title>Hoox</title>
+  <defs>
+    <path
+      id="hoox-hook"
+      d="M838 500 553 219c-21-20-45-29-78-29H329c-100 0-180 90-180 200v375c0 141 110 256 248 256 97 0 174-62 174-141L439 750v92c0 28-18 48-40 48-62 0-114-53-114-125V386c0-42 21-70 63-70h91v211h399Z"
+    />
+  </defs>
+  <g transform="translate(81.5 98.4) scale(.48 .477)">
+    <use href="#hoox-hook" fill="#19191a" />
+    <use href="#hoox-hook" fill="#177654" transform="rotate(180 650 606)" />
+  </g>
+  <g fill="#19191a">
+    <path d="M727 279h42v96h130v-96h42v227h-42v-95H769v95h-42Z" />
+    <path d="M1221 379a122 120 0 1 0 0 30h-43a80 79 0 1 1 0-30Z" />
+    <path d="M1264 379a122 120 0 1 1 0 30h42a80 79 0 1 0 0-30Z" />
+    <path d="M1523 279h53l190 227h-51Z" />
+    <path d="m1682 380-24-30 58-71h52l-65 76Z" />
+    <path d="m1611 408 24 27-58 71h-51l61-71Z" />
+  </g>
+</svg>

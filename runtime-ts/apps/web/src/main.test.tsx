@@ -139,6 +139,19 @@ afterEach(() => {
 });
 
 describe("Agent 工作台恢复接入", () => {
+  it("没有会话时使用透明横版品牌图作为欢迎标识", async () => {
+    const { container } = mount(apiFixture());
+
+    await settleEffects();
+
+    expect(
+      container
+        .querySelector<HTMLImageElement>(".empty.primary .welcome-logo")
+        ?.getAttribute("src"),
+    ).toBe("/brand/hoox-horizontal-transparent.png");
+    expect(container.querySelector(".empty.primary")?.textContent).not.toContain("✦");
+  });
+
   it("技能中心与云盘作为侧栏独立入口显示在任务列表上方", async () => {
     const { container } = mount(
       apiFixture({

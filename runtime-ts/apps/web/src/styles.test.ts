@@ -24,10 +24,54 @@ describe("工作台滚动区域样式", () => {
   });
 
   it("桌面端使用轻量任务栏、窄正文和与输入框衔接的进度区", () => {
-    expect(styles).toMatch(/grid-template-columns:\s*300px minmax\(0, 1fr\)/u);
-    expect(styles).toMatch(/\.run-area\s*\{[^}]*width:\s*min\(100%, 810px\)/su);
-    expect(styles).toMatch(/\.composer\s*\{[^}]*762px[^}]*border-radius:\s*20px/su);
+    expect(styles).toMatch(/grid-template-columns:\s*272px minmax\(0, 1fr\)/u);
+    expect(styles).toMatch(/\.run-area\s*\{[^}]*width:\s*min\(100%, 840px\)/su);
+    expect(styles).toMatch(/\.composer\s*\{[^}]*840px[^}]*border-radius:\s*var\(--radius-lg\)/su);
+    expect(styles).toMatch(/\.run-progress-dock\s*\{[^}]*840px/su);
     expect(styles).toContain(".run-progress-dock + .composer");
+  });
+
+  it("输入区以表面和单层阴影建立边界，聚焦时不叠加描边", () => {
+    expect(styles).toMatch(
+      /\.composer\s*\{[^}]*border:\s*0;[^}]*background:\s*var\(--surface-raised\);[^}]*box-shadow:\s*var\(--shadow-control\);/su,
+    );
+    expect(styles).toMatch(
+      /\.composer:focus-within\s*\{[^}]*box-shadow:\s*0 4px 6px hsla\(0, 0%, 0%, 0\.2\);/su,
+    );
+    expect(styles).toMatch(
+      /\.composer textarea\s*\{[^}]*border:\s*0;[^}]*outline:\s*0;[^}]*box-shadow:\s*none;/su,
+    );
+    expect(styles).not.toMatch(/\.composer:focus-within\s*\{[^}]*(?:focus-color|focus-ring)/su);
+  });
+
+  it("外壳组件引用共享语义 Token 并提供明确禁用态", () => {
+    expect(styles).toMatch(/\.sidebar\s*\{[^}]*background:\s*var\(--surface-sidebar\)/su);
+    expect(styles).toMatch(/\.thread\.selected\s*\{[^}]*var\(--action-subtle\)/su);
+    expect(styles).toMatch(/\.send-button\s*\{[^}]*var\(--action-primary\)/su);
+    expect(styles).toMatch(/\.send-button:disabled\s*\{[^}]*opacity:\s*1;/su);
+  });
+
+  it("品牌绿只通过横版 Logo 稀缺出现，选中态与主要操作保持语义解耦", () => {
+    expect(styles).toMatch(
+      /\.brand-logo\s*\{[^}]*width:\s*132px;[^}]*height:\s*40px;[^}]*object-fit:\s*cover;/su,
+    );
+    expect(styles).toMatch(
+      /\.welcome-logo\s*\{[^}]*width:\s*min\(256px, 100%\);[^}]*aspect-ratio:\s*4 \/ 1;[^}]*object-fit:\s*cover;/su,
+    );
+    expect(styles).not.toContain(".brand-copy");
+    expect(styles).not.toContain(".welcome-mark");
+    expect(styles).not.toContain("#177053");
+    expect(styles).not.toContain("#d9f2e4");
+  });
+
+  it("外壳主要点击目标至少为 40px", () => {
+    expect(styles).toMatch(/\.new-thread-button\s*\{[^}]*min-height:\s*40px;/su);
+    expect(styles).toMatch(/\.icon-button\s*\{[^}]*width:\s*40px;[^}]*height:\s*40px;/su);
+    expect(styles).toMatch(
+      /\.personal-thread-actions button\s*\{[^}]*width:\s*40px;[^}]*height:\s*40px;/su,
+    );
+    expect(styles).toMatch(/\.quiet-button\s*\{[^}]*min-height:\s*40px;/su);
+    expect(styles).toMatch(/\.send-button\s*\{[^}]*width:\s*40px;[^}]*min-height:\s*40px;/su);
   });
 
   it("状态栏不保留历史轨道，思考文本使用轻量披露区", () => {

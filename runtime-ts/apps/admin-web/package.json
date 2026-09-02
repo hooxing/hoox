@@ -15,6 +15,7 @@
   "dependencies": {
     "@ant-design/icons": "6.3.2",
     "@hoox/protocol": "workspace:*",
+    "@hoox/ui-theme": "workspace:*",
     "@tanstack/react-query": "5.102.2",
     "antd": "6.6.1",
     "react": "19.1.1",

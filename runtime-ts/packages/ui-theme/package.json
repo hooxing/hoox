@@ -1,0 +1,16 @@
+{
+  "name": "@hoox/ui-theme",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./theme.css": "./theme.css"
+  },
+  "files": [
+    "theme.css"
+  ],
+  "scripts": {
+    "test": "vitest run --root ../../.. runtime-ts/packages/ui-theme/theme.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}

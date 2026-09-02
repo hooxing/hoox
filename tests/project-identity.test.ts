@@ -74,8 +74,12 @@ describe("Hoox 项目身份契约", () => {
     expect(readText("runtime-ts/apps/trajectory-web/src/html.ts")).toContain(
       "<title>Hoox 内部轨迹</title>",
     );
-    expect(readText("runtime-ts/apps/web/src/workspace-view.tsx")).toContain(">Hoox<");
-    expect(readText("runtime-ts/apps/web/src/workspace-view.tsx")).toContain("你说，它做。");
+    const workspaceView = readText("runtime-ts/apps/web/src/workspace-view.tsx");
+    expect(workspaceView).toContain(">Hoox<");
+    expect(workspaceView).toContain('src={HOOX_HORIZONTAL_PATH} alt="Hoox"');
+    expect(readText("runtime-ts/apps/web/src/brand.ts")).toContain(
+      "brand/hoox-horizontal-transparent.png",
+    );
     expect(readText("runtime-ts/packages/prompt-builder/src/index.ts")).toContain(
       "你是 Hoox，由 Hoox 平台托管的受控 Agent",
     );

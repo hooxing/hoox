@@ -9,8 +9,9 @@ import {
   type SkillPublicationStatus,
   type SkillPublicationSubmission,
 } from "@hoox/skill";
+import Fastify from "fastify";
 import { describe, expect, it } from "vitest";
-import { createSkillAdminApiApp } from "./app.js";
+import { registerSkillAdminApiRoutes } from "./app.js";
 
 const publisher = userId("user_publisher");
 const reviewer = userId("user_reviewer");
@@ -106,6 +107,22 @@ class FakePublicationPort implements SkillPublicationPort {
   }
 }
 
+function createRouteTestApp(
+  dependencies: Parameters<typeof registerSkillAdminApiRoutes>[1],
+  options: Parameters<typeof registerSkillAdminApiRoutes>[2] = {},
+) {
+  const app = Fastify({
+    requestIdHeader: false,
+    ajv: {
+      customOptions: { removeAdditional: false },
+      onCreate: (ajv) => ajv.addFormat("hoox-iso-utc-timestamp-v1", true),
+    },
+    serializerOpts: { ajv: { formats: { "hoox-iso-utc-timestamp-v1": true } } },
+  });
+  registerSkillAdminApiRoutes(app, dependencies, options);
+  return app;
+}
+
 function fixture() {
   const port = new FakePublicationPort();
   const tokens = new Map([
@@ -119,12 +136,10 @@ function fixture() {
       return resolved === undefined ? undefined : { userId: resolved };
     },
   };
-  const app = createSkillAdminApiApp({
+  const app = createRouteTestApp({
     auth,
     publications: new SkillPublicationService(new FakeAuthorization(), port),
-    readiness: { async probe() {} },
     submissionId: () => "submission_http_test",
-    now: () => new Date("2099-08-05T00:00:00.000Z"),
   });
   return { app, port };
 }
@@ -302,7 +317,7 @@ describe("Skill 管理 API", () => {
     });
     expect(duplicateIdempotency.statusCode).toBe(400);
 
-    const constrained = createSkillAdminApiApp(
+    const constrained = createRouteTestApp(
       {
         auth: {
           async resolve() {
@@ -313,7 +328,6 @@ describe("Skill 管理 API", () => {
           new FakeAuthorization(),
           new FakePublicationPort(),
         ),
-        readiness: { async probe() {} },
       },
       { bodyLimitBytes: 64 },
     );

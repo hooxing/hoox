@@ -28,7 +28,7 @@ import {
   type SkillPublicationService,
   SkillServiceError,
 } from "@hoox/skill";
-import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Type, type Static } from "@sinclair/typebox";
 
 const strict = { additionalProperties: false } as const;
@@ -43,15 +43,7 @@ const ListQuerySchema = Type.Object(
 );
 type ListQuery = Static<typeof ListQuerySchema>;
 
-export interface SkillAdminApiDependencies {
-  readonly auth: AuthContextResolver;
-  readonly publications: SkillPublicationServiceContract;
-  readonly readiness: { probe(): Promise<void> };
-  readonly now?: () => Date;
-  readonly submissionId?: () => string;
-}
-
-export type SkillPublicationServiceContract = Pick<
+type SkillPublicationServiceContract = Pick<
   SkillPublicationService,
   "list" | "get" | "create" | "submit" | "review" | "publish" | "revoke"
 >;
@@ -62,82 +54,8 @@ export interface SkillAdminApiRouteDependencies {
   readonly submissionId?: () => string;
 }
 
-export interface SkillAdminApiAppOptions {
-  readonly logger?: boolean;
+interface SkillAdminApiRouteOptions {
   readonly bodyLimitBytes?: number;
-  readonly trustProxy?: false | ((address: string, hop: number) => boolean);
-  readonly https?: Readonly<{
-    readonly key: Buffer;
-    readonly cert: Buffer;
-    readonly minVersion: "TLSv1.2";
-  }>;
-}
-
-export function createSkillAdminApiApp(
-  dependencies: SkillAdminApiDependencies,
-  options: SkillAdminApiAppOptions = {},
-): FastifyInstance {
-  const app = Fastify({
-    logger:
-      options.logger === true
-        ? {
-            level: "info",
-            redact: {
-              paths: ["req.headers.authorization", "req.headers.cookie"],
-              censor: "[REDACTED]",
-            },
-          }
-        : false,
-    bodyLimit: options.bodyLimitBytes ?? 48 * 1024 * 1024,
-    requestTimeout: 60_000,
-    handlerTimeout: 60_000,
-    connectionTimeout: 5_000,
-    requestIdHeader: false,
-    genReqId: () => randomUUID(),
-    trustProxy: options.trustProxy ?? false,
-    ...(options.https === undefined ? {} : { https: options.https }),
-    onProtoPoisoning: "error",
-    onConstructorPoisoning: "error",
-    ajv: {
-      customOptions: { removeAdditional: false },
-      onCreate: (ajv) => {
-        ajv.addFormat("hoox-iso-utc-timestamp-v1", true);
-      },
-    },
-    serializerOpts: {
-      ajv: { formats: { "hoox-iso-utc-timestamp-v1": true } },
-    },
-  });
-  const now = dependencies.now ?? (() => new Date());
-
-  app.addHook("onSend", async (request, reply) => {
-    void reply
-      .header("x-request-id", String(request.id))
-      .header("cache-control", "private, no-store, no-cache, must-revalidate")
-      .header("pragma", "no-cache")
-      .header("x-content-type-options", "nosniff")
-      .header("referrer-policy", "no-referrer");
-  });
-
-  app.setErrorHandler(async (error, request, reply) => {
-    await sendFailure(error, request, reply);
-  });
-
-  app.get("/live", async (request) =>
-    success(request, { status: "ok" as const, checkedAt: now().toISOString() }),
-  );
-  app.get("/ready", async (request) => {
-    try {
-      await dependencies.readiness.probe();
-    } catch {
-      throw new AdminApiFailure("dependency_unavailable");
-    }
-    return success(request, { status: "ok" as const, checkedAt: now().toISOString() });
-  });
-
-  registerSkillAdminApiRoutes(app, dependencies, options);
-
-  return app;
 }
 
 /**
@@ -147,7 +65,7 @@ export function createSkillAdminApiApp(
 export function registerSkillAdminApiRoutes(
   app: FastifyInstance,
   dependencies: SkillAdminApiRouteDependencies,
-  options: Pick<SkillAdminApiAppOptions, "bodyLimitBytes"> = {},
+  options: SkillAdminApiRouteOptions = {},
 ): void {
   const bodyLimitBytes = options.bodyLimitBytes ?? 48 * 1024 * 1024;
   const nextSubmissionId =

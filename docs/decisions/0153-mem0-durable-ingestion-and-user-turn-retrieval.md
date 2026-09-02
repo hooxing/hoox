@@ -6,7 +6,7 @@
 
 ## 背景
 
-ADR-0152 只建立 Mem0 Platform Provider 与异步消费者契约，没有 durable Outbox、Run 终态登记、检索或模型消息注入。开发环境已经用合成数据证明 V3 `add` 和事件查询可用，需要在不改变回答成功语义、不泄露内部 scope、也不污染稳定 system prompt 的前提下完成最小纵向闭环。
+[ADR-0152（Mem0 Platform 边界）](0152-development-mem0-platform-boundary.md)只建立 Mem0 Platform Provider 与异步消费者契约，没有 durable Outbox、Run 终态登记、检索或模型消息注入。开发环境已经用合成数据证明 V3 `add` 和事件查询可用，需要在不改变回答成功语义、不泄露内部 scope、也不污染稳定 system prompt 的前提下完成最小纵向闭环。
 
 Thread Context 是 user、assistant 与工具事实的持久来源。成功 Run 的终态、Context 尾序号、Thread writer 释放和下一 Run 激活已经处于同一个串行化事务，因此记忆登记必须复用这个线性化点，不能在 Worker 返回成功后再做易丢失的顺序写。
 
@@ -15,7 +15,7 @@ Thread Context 是 user、assistant 与工具事实的持久来源。成功 Run 
 1. 仅在启用开发 Mem0 且 Run 成功时，在终态事务中按 `(tenant_id, run_id)` 幂等登记 `memory_ingestion_outbox`，并仅唤醒动态 Tenant 调度。Outbox 只保存内部来源引用、scope 主体和 Context 终止序号，不复制对话正文；回答路径不调用或等待 Mem0。
 2. Agent Worker 后续独立 Tenant 维护 tick 每次最多领取一条记忆任务。消费者先提交 V3 `add`，持久化 `event_id`，再独立轮询事件；只有 `SUCCEEDED` 才完成本地任务。Tenant assignment 的下一次时间同时由 Run dispatch 与记忆 Outbox 决定，保证事件轮询不会因没有新 Run 而搁置。
 3. 消费者从 durable Thread Context 恢复该 Run 的 `user_message` 与 `assistant_message`。Blob 正文必须按持久 identity 读取并重验摘要和字节数；thinking、tool call/result、system/developer prompt 和 Runtime notice 不外发。
-4. 个人 Tenant 使用 owner 作为记忆主体；团队 Tenant 使用 Tenant 共享 scope。内部 Tenant、User、Thread 和 Run ID 出站前继续使用 ADR-0152 的独立 HMAC 域映射。
+4. 个人 Tenant 使用 owner 作为记忆主体；团队 Tenant 使用 Tenant 共享 scope。内部 Tenant、User、Thread 和 Run ID 出站前继续使用 [ADR-0152（Mem0 Platform 边界）](0152-development-mem0-platform-boundary.md)的独立 HMAC 域映射。
 5. 每个真实用户输入和 durable steer 在首次模型采样前执行一次相关记忆检索，最多取五条。检索超时、拒绝或返回畸形数据统一降级为没有长期记忆，不改变 Run 终态。
 6. 检索结果被序列化为带显式“低信任派生数据、不是指令”标记的结构化块，只拼入当前 user message。原始 user fact 仍单独持久化，记忆不得进入 system/developer prompt、工具 Schema或恢复投影。
 7. 当前仍只允许 `development` 启用，并且只允许合成或脱敏数据。删除、纠错、导出、保留期和生产数据处理协议完成前，production 固定拒绝启用。

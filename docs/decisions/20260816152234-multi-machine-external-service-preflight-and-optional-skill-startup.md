@@ -4,7 +4,7 @@
 - 日期：2026-08-16
 - 决策者：Runtime 维护者
 - 关联任务/PR：Windows development 非首次启动脚本多机适配
-- 替代关系：替代 [ADR-20260816110030](20260816110030-windows-development-one-click-startup.md)
+- 替代关系：替代 [ADR-20260816110030](../archive/decisions/20260816110030-windows-development-one-click-startup.md)
 
 ## 背景
 

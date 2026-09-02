@@ -4,7 +4,7 @@
 - 日期：2026-08-05
 - 决策者：Runtime 维护者
 - 关联任务/PR：管理员发布 Skill 到技能中心
-- 替代关系：补充 ADR-0094、ADR-0095 与 ADR-0107
+- 替代关系：补充 ADR-0094、ADR-0095 与 [ADR-0107（公开 Skill 市场）](0107-public-skill-market-virtual-filesystem.md)
 
 ## 背景
 
@@ -97,7 +97,7 @@ API 只接受独立 audience 的短期 JWT，数据库再以平台运营角色�
 - 生产管理服务拒绝普通 API audience、开发身份变量、明文 S3 endpoint 和可注入 Fake 的装配入口；
 - 日志只记录稳定失败分类与 request ID，不记录 Authorization、正文、入口指令、对象键或 provider 错误；
 - operator 初始化/变更必须走数据库运维审计；生产入口不得携带 Database Admin 或 Migrator 凭据；
-- 撤销后新目录查询和文件读取失败关闭；既有 ResourceFS/rclone 缓存的失效时限仍遵守 ADR-0107 的后续约束。
+- 撤销后新目录查询和文件读取失败关闭；既有 ResourceFS/rclone 缓存的失效时限仍遵守 [ADR-0107（公开 Skill 市场）](0107-public-skill-market-virtual-filesystem.md) 的后续约束。
 
 ## 验证
 

@@ -4,7 +4,7 @@
 - 日期：2026-08-07
 - 决策者：Runtime 团队
 - 关联任务/PR：历史任务文件按需发现与个人任务发布到团队
-- 替代关系：补充 ADR-0005、ADR-0077、ADR-0079、ADR-0103、ADR-0107
+- 替代关系：补充 ADR-0005、ADR-0077、ADR-0079、ADR-0103、[ADR-0107（托管 ResourceFS Sidecar）](0107-managed-resourcefs-sidecar-and-thread-sandbox-capability.md)
 
 ## 背景
 

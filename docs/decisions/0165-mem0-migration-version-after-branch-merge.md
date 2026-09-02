@@ -3,7 +3,7 @@
 - 状态：已接受
 - 日期：2026-08-12
 - 决策者：Runtime 团队
-- 替代关系：仅替代 ADR-0153 中 Mem0 Outbox 使用 0043 版本号的实施细节，不改变其数据和运行语义
+- 替代关系：仅替代 [ADR-0153（Mem0 持久闭环）](0153-mem0-durable-ingestion-and-user-turn-retrieval.md) 中 Mem0 Outbox 使用 0043 版本号的实施细节，不改变其数据和运行语义
 
 ## 背景
 
@@ -25,7 +25,7 @@
 
 ## 决策
 
-采用方案 C：把 `memory_ingestion_outbox` 的 up/down 文件从 0043 顺延为 0045，并同步契约测试、开发说明与 ADR-0153 的实施版本引用。
+采用方案 C：把 `memory_ingestion_outbox` 的 up/down 文件从 0043 顺延为 0045，并同步契约测试、开发说明与 [ADR-0153（Mem0 持久闭环）](0153-mem0-durable-ingestion-and-user-turn-retrieval.md) 的实施版本引用。
 
 ## 影响
 

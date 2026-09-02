@@ -1,5 +1,8 @@
 # ADR-0055：模型网络报文诊断的受限保存
 
+- 状态：已接受
+- 日期：2026-07-30
+
 ## 背景
 
 维护 OpenAI-compatible `/chat/completions` 时，仅保存 Pi 的 payload 对象无法证明真正送往

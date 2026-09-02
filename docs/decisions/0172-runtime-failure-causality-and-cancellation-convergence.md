@@ -1,5 +1,8 @@
 # ADR-0172：运行失败根因与取消信号必须有界收敛
 
+- 状态：已接受
+- 日期：2026-08-13
+
 ## 背景
 
 真实 Runtime 批量执行暴露出四类可用性问题：API 已将 Run 标记为 cancelled，但生产 Worker 只能等待租约心跳发现；PostgreSQL COMMIT 回包未知后仅做一次读回，远端端口映射连续重置时会把已提交事实误判为不可恢复；Pi 会把 Runtime 本地续轮阻断包装成 assistant error，旧映射误报为 Provider 故障；业务失败后的 Sandbox 清理不确定会用 `SANDBOX_UNKNOWN` 覆盖原始错误码。

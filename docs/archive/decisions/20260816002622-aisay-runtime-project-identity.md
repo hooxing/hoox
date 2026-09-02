@@ -2,7 +2,7 @@
 
 ## 状态
 
-已替代，2026-08-18 由 ADR-20260818144124 替代。本文保留当时的项目身份迁移背景；CubeSandbox、E2B 等 Sandbox Provider 技术边界继续有效。
+已替代，2026-08-18 由 [ADR-20260818144124](../../decisions/20260818144124-unify-project-identity-as-hoox.md) 替代。本文保留当时的项目身份迁移背景；CubeSandbox、E2B 等 Sandbox Provider 技术边界继续有效。
 
 ## 背景
 

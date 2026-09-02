@@ -4,7 +4,7 @@
 - 日期：2026-08-03
 - 决策者：Runtime 维护者
 - 关联任务/PR：本地 Skill Center 安装测试
-- 替代关系：细化 ADR-0094 与 ADR-0095 的受信发布边界；已被 ADR-20260827174210 替代
+- 替代关系：细化 ADR-0094 与 ADR-0095 的受信发布边界；已被 [ADR-20260827174210](../../decisions/20260827174210-open-source-distribution-license-and-security-gates.md) 替代
 
 ## 背景
 

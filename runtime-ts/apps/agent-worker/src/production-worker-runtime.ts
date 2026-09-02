@@ -10,7 +10,6 @@ import type {
   PgWorkerTenantAssignments,
 } from "@hoox/persistence";
 import type {
-  ArtifactPublicationPort,
   CancellationPort,
   ClockPort,
   ExecutionScope,
@@ -747,11 +746,6 @@ function fallbackUncertainEvent(
     actualTtlSeconds,
     occurredAt: new Date().toISOString(),
   };
-}
-
-/** 未启用 Artifact Router 时不存在 required declaration，完成门确定通过。 */
-export class NoDeclaredArtifactCompletionGate implements ArtifactPublicationPort {
-  async assertReadyForCompletion(): Promise<void> {}
 }
 
 interface DispatchQueue {

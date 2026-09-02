@@ -11,8 +11,6 @@
   "dependencies": {
     "@hoox/api": "workspace:*",
     "@hoox/domain": "workspace:*",
-    "@hoox/persistence": "workspace:*",
-    "@hoox/process-runtime": "workspace:*",
     "@hoox/protocol": "workspace:*",
     "@hoox/skill": "workspace:*",
     "@sinclair/typebox": "0.34.52",

@@ -274,12 +274,6 @@ importers:
       '@hoox/domain':
         specifier: workspace:*
         version: link:../../packages/domain
-      '@hoox/persistence':
-        specifier: workspace:*
-        version: link:../../packages/persistence
-      '@hoox/process-runtime':
-        specifier: workspace:*
-        version: link:../../packages/process-runtime
       '@hoox/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol

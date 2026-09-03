@@ -165,4 +165,4 @@ volumes:
   minio_data:
     name: hoox-demo-minio-data-20260826
   trajectory_data:
-    name: hoox-demo-trajectory-${HOOX_DEMO_RELEASE_ID:?HOOX_DEMO_RELEASE_ID is required}
+    name: hoox-demo-trajectory-data-20260903

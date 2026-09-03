@@ -34,7 +34,7 @@
       },
       {
         "name": "hoox:lockfile-sha256",
-        "value": "b92d423de6967ed12bde4e6b3268f31c78a0eb5f025370e5353b635feae6d30e"
+        "value": "a48762f970492f5860e6ad786b082e618fca13f8f9e50da64003900dd7e9ce14"
       }
     ]
   },
@@ -2887,10 +2887,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/fast-uri@3.1.5",
+      "bom-ref": "pkg:npm/fast-uri@3.1.6",
       "name": "fast-uri",
-      "version": "3.1.5",
-      "purl": "pkg:npm/fast-uri@3.1.5",
+      "version": "3.1.6",
+      "purl": "pkg:npm/fast-uri@3.1.6",
       "licenses": [
         {
           "license": {
@@ -2907,10 +2907,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/fast-uri@4.1.2",
+      "bom-ref": "pkg:npm/fast-uri@4.1.3",
       "name": "fast-uri",
-      "version": "4.1.2",
-      "purl": "pkg:npm/fast-uri@4.1.2",
+      "version": "4.1.3",
+      "purl": "pkg:npm/fast-uri@4.1.3",
       "licenses": [
         {
           "license": {
@@ -5252,8 +5252,8 @@
         "pkg:npm/fast-deep-equal@3.1.3",
         "pkg:npm/fast-json-stringify@7.0.1",
         "pkg:npm/fast-querystring@1.1.2",
-        "pkg:npm/fast-uri@3.1.5",
-        "pkg:npm/fast-uri@4.1.2",
+        "pkg:npm/fast-uri@3.1.6",
+        "pkg:npm/fast-uri@4.1.3",
         "pkg:npm/fastify@5.12.1",
         "pkg:npm/fastq@1.20.1",
         "pkg:npm/fetch-blob@3.2.0",

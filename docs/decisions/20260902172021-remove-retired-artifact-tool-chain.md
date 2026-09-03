@@ -3,7 +3,6 @@
 - 状态：已接受
 - 日期：2026-09-02
 - 决策者：Runtime 维护者
-- 关联 Issue / PR：无
 - 部分替代：[ADR-0058](0058-simple-deliver-file-tool.md) 中暂留旧模型工具源码的结论
 - 被替代：无
 
@@ -98,9 +97,6 @@ ResourceVersion 准备端口和专用测试。`NoDeclaredArtifactCompletionGate`
 代码删除可通过单提交回退恢复，不涉及数据回写。若未来确需恢复旧工具，必须新增决策并重新验证模型协议、安全授权与生产接线；
 不得复用无操作完成门或假定旧 intent 数据已经排空。
 
-## 实施记录
+## 后续验证
 
-- Issue：无
-- PR：待创建
-- 提交：与本 ADR 同批提交
-- 后续验证：由 Pull Request CI 执行全量工程基线与生产容器 Gate
+- 由 Pull Request CI 执行全量工程基线与生产容器 Gate。

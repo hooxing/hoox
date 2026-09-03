@@ -2432,7 +2432,7 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     expect(active.rows[0]?.active_count).toBe("1");
   });
 
-  it("阶段 3 在真实 PG 原子 steer，terminal fallback 按原 input 顺序领先后到 follow-up", async () => {
+  it("阶段 3 在并发 head 写入时重试 auto steer，terminal fallback 保持原 input 顺序", async () => {
     const f = await serialQueueFixture(`input-v2-${suffix}`);
     const creation = new PgRunDispatchCreation(runtime, { serialQueueV2Enabled: true });
     const inputRouting = new PgThreadInputRouting(runtime);
@@ -2478,12 +2478,27 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       ),
     ).toMatchObject({ outcome: "applied" });
 
+    const blocker = await runtime.connect();
+    await blocker.query("BEGIN");
+    await blocker.query(
+      "SELECT set_config('app.tenant_id', $1, true), set_config('app.user_id', $2, true)",
+      [f.tenantScope.tenantId, f.tenantScope.userId],
+    );
+    const blockerPid = Number(
+      (await blocker.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]?.pid,
+    );
+    await blocker.query(
+      `UPDATE thread_execution_heads SET updated_at=clock_timestamp()
+        WHERE tenant_id=$1 AND thread_id=$2`,
+      [f.tenantScope.tenantId, f.thread.id],
+    );
+
     const steerText = "不要改后端，只调整配色";
     const steerAttachment = {
       resourceId: resourceId(`resource-input-steer-${suffix}`),
       versionId: resourceVersionId(`version-input-steer-${suffix}`),
     };
-    const steer = await inputRouting.submit({
+    const steerPromise = inputRouting.submit({
       scope: f.tenantScope,
       thread: f.thread,
       fallbackRun: createRun({
@@ -2495,10 +2510,34 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
       attachments: [steerAttachment],
       mode: "auto",
       expectedRunId: activeRun.id,
-      expectedTurnId: "turn-1",
       fallbackToFollowUp: false,
       idempotency: { key: `input-steer-key-${suffix}`, requestHash: requestDigest(steerText) },
     });
+    let submitWasBlocked = false;
+    let blockerCommitted = false;
+    try {
+      for (let poll = 0; poll < 100; poll += 1) {
+        const blocked = await admin.query<{ blocked: boolean }>(
+          `SELECT EXISTS(
+             SELECT 1 FROM pg_stat_activity
+              WHERE $1=ANY(pg_blocking_pids(pid))
+           ) AS blocked`,
+          [blockerPid],
+        );
+        if (blocked.rows[0]?.blocked === true) {
+          submitWasBlocked = true;
+          break;
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      await blocker.query("COMMIT");
+      blockerCommitted = true;
+    } finally {
+      if (!blockerCommitted) await blocker.query("ROLLBACK").catch(() => undefined);
+      blocker.release();
+    }
+    expect(submitWasBlocked).toBe(true);
+    const steer = await steerPromise;
     expect(steer).toMatchObject({
       outcome: "accepted",
       receipt: { disposition: "pending_steer", targetRunId: activeRun.id },

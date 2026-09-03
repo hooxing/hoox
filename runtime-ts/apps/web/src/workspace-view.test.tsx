@@ -16,20 +16,25 @@ import {
   RunStatusBadge,
   RunTimeline,
   RunTranscript,
+  shouldInitiallyCollapseUserRequest,
   ThreadCreate,
   ThreadHeader,
   ThreadTranscript,
-  shouldInitiallyCollapseUserRequest,
   userRequestCollapsedHeight,
 } from "./workspace-view.js";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-function agentEvent(sequence: number, type: string, payload: unknown): RunEvent {
+function agentEvent(
+  sequence: number,
+  type: string,
+  payload: unknown,
+  occurredAt = "2026-08-16T00:00:00.000Z",
+): RunEvent {
   return {
     eventId: `agent-event-${sequence}`,
     sequence,
-    occurredAt: "2026-08-16T00:00:00.000Z",
+    occurredAt,
     kind: "agent_event",
     type,
     payload,
@@ -844,6 +849,144 @@ describe("工作台展示组件", () => {
     expect(container.querySelectorAll(".message-avatar")).toHaveLength(1);
     expect(container.textContent).toContain("第一段回答。");
     expect(container.textContent).toContain("第二段回答。");
+  });
+
+  it("同一 Run 的 steer 用户消息切开前后 Agent 段并保持上下文顺序", () => {
+    const succeeded: Run = { ...running, status: "succeeded" };
+    const html = renderToStaticMarkup(
+      <ThreadTranscript
+        messages={[
+          {
+            sequence: 1,
+            runId: running.id,
+            role: "user",
+            text: "创建 hello.py",
+            createdAt: "2026-08-16T00:00:00.000Z",
+          },
+          {
+            sequence: 2,
+            runId: running.id,
+            role: "assistant",
+            text: "好的，我来创建文件。",
+            createdAt: "2026-08-16T00:00:01.000Z",
+          },
+          {
+            sequence: 3,
+            runId: running.id,
+            role: "user",
+            text: "算了，不要了",
+            createdAt: "2026-08-16T00:00:02.000Z",
+          },
+          {
+            sequence: 4,
+            runId: running.id,
+            role: "assistant",
+            text: "好的，已停止后续操作。",
+            createdAt: "2026-08-16T00:00:03.000Z",
+          },
+        ]}
+        currentRun={succeeded}
+        currentRunEvents={[
+          agentEvent(1, "thinking.delta", { delta: "准备创建文件。" }, "2026-08-16T00:00:00.200Z"),
+          agentEvent(2, "thinking.completed", {}, "2026-08-16T00:00:00.300Z"),
+          agentEvent(
+            3,
+            "message.delta",
+            { delta: "好的，我来创建文件。" },
+            "2026-08-16T00:00:00.400Z",
+          ),
+          agentEvent(4, "message.completed", { stopReason: "toolUse" }, "2026-08-16T00:00:00.500Z"),
+          agentEvent(
+            5,
+            "thinking.delta",
+            { delta: "用户取消了任务。" },
+            "2026-08-16T00:00:02.200Z",
+          ),
+          agentEvent(6, "thinking.completed", {}, "2026-08-16T00:00:02.300Z"),
+          agentEvent(
+            7,
+            "message.delta",
+            { delta: "好的，已停止后续操作。" },
+            "2026-08-16T00:00:02.400Z",
+          ),
+          agentEvent(8, "message.completed", { stopReason: "stop" }, "2026-08-16T00:00:02.500Z"),
+        ]}
+      />,
+    );
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    const transcript = container.querySelector(".assistant-transcript");
+    const messages = Array.from(transcript?.children ?? []);
+
+    expect(messages).toHaveLength(4);
+    expect(messages.map((message) => message.className)).toEqual([
+      "message user-request",
+      "message assistant-message agent-turn",
+      "message user-request",
+      "message assistant-message agent-turn",
+    ]);
+    expect(messages[1]?.textContent).toContain("准备创建文件。");
+    expect(messages[1]?.textContent).toContain("好的，我来创建文件。");
+    expect(messages[1]?.textContent).not.toContain("用户取消了任务。");
+    expect(messages[3]?.textContent).toContain("用户取消了任务。");
+    expect(messages[3]?.textContent).toContain("好的，已停止后续操作。");
+    expect(messages[3]?.textContent).not.toContain("准备创建文件。");
+  });
+
+  it("steer 后的新回复尚未写入上下文时仍显示在用户消息之后", () => {
+    const html = renderToStaticMarkup(
+      <ThreadTranscript
+        messages={[
+          {
+            sequence: 1,
+            runId: running.id,
+            role: "user",
+            text: "创建 hello.py",
+            createdAt: "2026-08-16T00:00:00.000Z",
+          },
+          {
+            sequence: 2,
+            runId: running.id,
+            role: "assistant",
+            text: "好的，我来创建文件。",
+            createdAt: "2026-08-16T00:00:01.000Z",
+          },
+          {
+            sequence: 3,
+            runId: running.id,
+            role: "user",
+            text: "算了，不要了",
+            createdAt: "2026-08-16T00:00:02.000Z",
+          },
+        ]}
+        currentRun={running}
+        currentRunEvents={[
+          agentEvent(
+            1,
+            "message.delta",
+            { delta: "好的，我来创建文件。" },
+            "2026-08-16T00:00:00.400Z",
+          ),
+          agentEvent(2, "message.completed", { stopReason: "toolUse" }, "2026-08-16T00:00:00.500Z"),
+          agentEvent(
+            3,
+            "message.delta",
+            { delta: "正在响应取消请求。" },
+            "2026-08-16T00:00:02.200Z",
+          ),
+        ]}
+      />,
+    );
+    const container = document.createElement("div");
+    container.innerHTML = html;
+    const transcript = container.querySelector(".assistant-transcript");
+    const messages = Array.from(transcript?.children ?? []);
+
+    expect(messages).toHaveLength(4);
+    expect(messages[1]?.textContent).toContain("好的，我来创建文件。");
+    expect(messages[1]?.textContent).not.toContain("正在响应取消请求。");
+    expect(messages[2]?.textContent).toContain("算了，不要了");
+    expect(messages[3]?.textContent).toContain("正在响应取消请求。");
   });
 
   it("执行阶段只展开已结束项目，并在状态更新时保持用户选择", () => {

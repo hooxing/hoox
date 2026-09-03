@@ -319,9 +319,7 @@ find "$root/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
   | awk 'NR>5 {print $2}' \
   | while IFS= read -r old_release; do
       if [[ "$old_release" != "$release_dir" && "$old_release" != "$previous_release" ]]; then
-        old_release_id="$(basename "$old_release")"
         rm -rf -- "$old_release"
-        docker volume rm "hoox-demo-trajectory-$old_release_id" >/dev/null 2>&1 || true
       fi
     done
 

@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { trajectoryHtml } from "./html.js";
 import { discoverRuns, internalTesting } from "./server.js";
 
 const roots: string[] = [];
@@ -15,6 +16,16 @@ async function temporaryRoot(): Promise<string> {
 afterEach(async () => {
   const { rm } = await import("node:fs/promises");
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("轨迹查看器 HTTP 页面", () => {
+  it("使用当前页面子路径请求 API，并只把同源 Hoox 会话用于网关鉴权", () => {
+    expect(trajectoryHtml).toContain("new URL(path,window.location.href)");
+    expect(trajectoryHtml).toContain("api('api/threads')");
+    expect(trajectoryHtml).toContain("localStorage.getItem('hoox.auth-session.v2')");
+    expect(trajectoryHtml).toContain("Authorization:'Bearer '+session.accessToken");
+    expect(trajectoryHtml).not.toContain("api('/api/threads')");
+  });
 });
 
 describe("trajectory diagnostics filesystem", () => {

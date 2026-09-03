@@ -8,7 +8,11 @@ import type {
   ThreadInputRoutingPort,
   ThreadInputSubmitResult,
 } from "./ports.js";
-import { TransactionCommitUnknownError, withTenantTransaction } from "./postgres.js";
+import {
+  TransactionCommitUnknownError,
+  withRetriedSerializableTenantTransaction,
+  withTenantTransaction,
+} from "./postgres.js";
 import {
   allocateHistoryName,
   ensureHistoryDirectory,
@@ -170,7 +174,7 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
     const digest = bodyDigest(input.inputText);
     const attachmentsJson = serializeAttachments(input.attachments);
     try {
-      return await withTenantTransaction(
+      return await withRetriedSerializableTenantTransaction(
         this.pool,
         input.scope,
         async (client) => {
@@ -414,7 +418,6 @@ export class PgThreadInputRouting implements ThreadInputRoutingPort {
             ...(queuedRun === undefined ? {} : { queuedRun }),
           } as const;
         },
-        { isolationLevel: "SERIALIZABLE" },
       );
     } catch (error) {
       if (error instanceof SkillSnapshotUnavailableError) {

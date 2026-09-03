@@ -12,8 +12,9 @@ COPY runtime-ts ./runtime-ts
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
 COPY third_party/pi ./licenses/third-party/pi
 COPY scripts/demo-static-server.mjs ./scripts/demo-static-server.mjs
+RUN mkdir -p model-wire-traces
 RUN --network=none pnpm install --offline --frozen-lockfile \
- && pnpm --filter "@hoox/api..." --filter "@hoox/agent-worker..." --filter "@hoox/scheduler..." --filter "@hoox/web..." --filter "@hoox/admin-control-api..." build \
+ && pnpm --filter "@hoox/api..." --filter "@hoox/agent-worker..." --filter "@hoox/scheduler..." --filter "@hoox/web..." --filter "@hoox/admin-control-api..." --filter "@hoox/trajectory-web..." build \
  && pnpm --filter @hoox/admin-web build:demo \
  && pnpm install --offline --prod --frozen-lockfile --force
 

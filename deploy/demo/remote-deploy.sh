@@ -44,6 +44,7 @@ write_compose_env() {
     printf 'HOOX_DEMO_IMAGE=%s\n' "$target_image"
     printf 'HOOX_DEMO_ROOT=%s\n' "$root"
     printf 'HOOX_DEMO_RELEASE_DIR=%s\n' "$release_dir"
+    printf 'HOOX_DEMO_RELEASE_ID=%s\n' "$(basename "$release_dir")"
     if [[ -n "$tenant_id" ]]; then
       printf 'DEMO_TENANT_ID=%s\n' "$tenant_id"
     fi
@@ -101,7 +102,7 @@ rollback() {
     rm -f -- "${temporary_files[@]}"
   fi
   docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
-    stop admin-control admin-web >/dev/null 2>&1 || true
+    stop admin-control admin-web trajectory >/dev/null 2>&1 || true
   docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
     stop api web scheduler worker >/dev/null 2>&1 || true
   if [[ -n "$previous_release" && -f "$previous_release/docker-compose.yml" && -n "$previous_image" ]]; then
@@ -113,6 +114,10 @@ rollback() {
       config --services | grep -qx 'admin-control'; then
       restore_services+=(admin-control admin-web)
     fi
+    if docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
+      config --services | grep -qx 'trajectory'; then
+      restore_services+=(trajectory)
+    fi
     docker compose --project-name hoox-demo --env-file "$compose_env" -f "$compose_file" \
       up -d --force-recreate "${restore_services[@]}" || true
     ln -sfn "$previous_release" "$root/current"
@@ -122,13 +127,14 @@ rollback() {
 }
 trap rollback ERR
 
-compose pull api web admin-control admin-web scheduler worker migrate
+compose pull api web admin-control admin-web trajectory scheduler worker migrate
 compose up -d --force-recreate postgres minio
 compose --profile ops run --rm minio-init
 compose --profile ops run --rm migrate
-compose up -d api web
+compose up -d api web trajectory
 wait_http "http://127.0.0.1:3001/live"
 wait_http "http://127.0.0.1:4173/"
+wait_http "http://127.0.0.1:4188/"
 
 set -a
 # shellcheck disable=SC1091
@@ -270,11 +276,11 @@ printf '%s\n' \
       --set=demo_user_id="$admin_user_id" \
       --quiet
 write_compose_env "$image" "$tenant_id" "$admin_user_id"
-compose up -d --force-recreate api admin-control admin-web scheduler worker
+compose up -d --force-recreate api admin-control admin-web trajectory scheduler worker
 wait_http "http://127.0.0.1:3003/live"
 wait_http "http://127.0.0.1:4174/"
 sleep 10
-for service in api web admin-control admin-web scheduler worker; do
+for service in api web admin-control admin-web trajectory scheduler worker; do
   container_id="$(compose ps -q "$service")"
   if [[ -z "$container_id" || "$(docker inspect --format '{{.State.Running}}' "$container_id")" != "true" ]]; then
     echo "Demo 服务未保持运行：$service" >&2
@@ -286,13 +292,21 @@ wait_http "http://127.0.0.1:3001/ready"
 wait_http "http://127.0.0.1:3003/ready"
 wait_http "https://$domain/api/ready"
 wait_http "https://$domain/admin/"
+wait_http "https://$domain/trajectory/"
 unauthorized_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
   "https://$domain/v1/admin/control/overview")"
 if [[ "$unauthorized_status" != "401" ]]; then
   echo "Demo 后台 API 未拒绝无会话请求" >&2
   exit 1
 fi
+trajectory_unauthorized_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+  "https://$domain/trajectory/api/threads")"
+if [[ "$trajectory_unauthorized_status" != "401" ]]; then
+  echo "Demo 轨迹 API 未拒绝无会话请求" >&2
+  exit 1
+fi
 wait_http "https://$domain/v1/admin/control/overview" 60 "$admin_curl_config"
+wait_http "https://$domain/trajectory/api/threads" 60 "$admin_curl_config"
 
 ln -sfn "$release_dir" "$root/current"
 if (( ${#temporary_files[@]} > 0 )); then
@@ -304,7 +318,11 @@ find "$root/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
   | sort -nr \
   | awk 'NR>5 {print $2}' \
   | while IFS= read -r old_release; do
-      [[ "$old_release" == "$release_dir" || "$old_release" == "$previous_release" ]] || rm -rf -- "$old_release"
+      if [[ "$old_release" != "$release_dir" && "$old_release" != "$previous_release" ]]; then
+        old_release_id="$(basename "$old_release")"
+        rm -rf -- "$old_release"
+        docker volume rm "hoox-demo-trajectory-$old_release_id" >/dev/null 2>&1 || true
+      fi
     done
 
 echo "Hoox Demo 发布完成：$release_id"

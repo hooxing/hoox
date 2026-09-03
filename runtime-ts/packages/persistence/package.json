@@ -13,6 +13,7 @@
     "clean": "tsc -b tsconfig.json --clean",
     "prepare:ci:m4": "tsx scripts/prepare-m4-ci-database.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p scripts/tsconfig.json",
+    "typecheck:built": "tsc -p scripts/tsconfig.json",
     "test:integration:minio": "vitest run --root ../../.. runtime-ts/packages/persistence/src/s3-minio.integration.test.ts"
   },
   "dependencies": {

@@ -278,6 +278,7 @@
 | [ADR-20260901114930：手工几何重建品牌矢量候选](20260901114930-hand-rebuilt-brand-vector-candidates.md) | 提议 | 2026-09-01 |
 | [ADR-20260901155352：品牌绿稀缺使用并与操作语义解耦](20260901155352-brand-green-scarcity-and-action-separation.md) | 已接受 | 2026-09-01 |
 | [ADR-20260902172021：删除已退役的 Artifact 模型工具链](20260902172021-remove-retired-artifact-tool-chain.md) | 已接受 | 2026-09-02 |
-| [ADR-20260903152652：Demo 默认部署受保护的内部轨迹查看器](20260903152652-demo-trajectory-default-deployment.md) | 已接受 | 2026-09-03 |
+| [ADR-20260903152652：Demo 默认部署受保护的内部轨迹查看器](20260903152652-demo-trajectory-default-deployment.md) | 部分已替代（轨迹卷生命周期） | 2026-09-03 |
+| [ADR-20260903171600：Demo 轨迹使用跨发布持久卷](20260903171600-demo-trajectory-cross-release-retention.md) | 已接受 | 2026-09-03 |
 
 </details>

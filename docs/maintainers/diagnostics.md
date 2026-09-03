@@ -82,7 +82,7 @@ http://127.0.0.1:4188
 
 development 管理 Web 的“数据运营”页显示“打开内部轨迹”链接。该链接在新窗口打开回环地址，不把轨迹正文交给 Admin API；仍需维护者单独启动上述命令。
 
-受控 Demo 默认在同一镜像中构建并启动查看器，入口为 `https://hoox.aisay.cc/trajectory/`。页面外壳不包含轨迹数据；列表、详情与模型报文 API 会读取同源 `hoox.auth-session.v2`，只有 Demo 管理员 Hoox Session 能通过 Nginx `auth_request`。鉴权后 Nginx 会清空转发给查看器的 `Authorization`。Demo Worker 与查看器共享按 release 隔离的轨迹卷，每次成功发布切换到新卷，回滚恢复上一 release 的卷。
+受控 Demo 默认在同一镜像中构建并启动查看器，入口为 `https://hoox.aisay.cc/trajectory/`。页面外壳不包含轨迹数据；列表、详情与模型报文 API 会读取同源 `hoox.auth-session.v2`，只有 Demo 管理员 Hoox Session 能通过 Nginx `auth_request`。鉴权后 Nginx 会清空转发给查看器的 `Authorization`。Demo Worker 与查看器共享固定数据 epoch 的轨迹卷；新 Run 产生的轨迹跨应用发布和回滚持续保留，旧 release 目录清理不得删除该卷。启用稳定卷以前的记录不自动回填。
 
 可覆盖参数：
 

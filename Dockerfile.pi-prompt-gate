@@ -1,18 +1,21 @@
-FROM node:24.18.0-bookworm-slim
+FROM node:24.18.0-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
 
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 RUN corepack enable && corepack prepare pnpm@10.15.1 --activate
 
 WORKDIR /opt/runtime
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json tsconfig.base.json vitest.config.ts .pnpmfile.cjs ./
 COPY vitest.integration.config.ts ./
+RUN pnpm fetch --frozen-lockfile
+
 COPY runtime-ts ./runtime-ts
 COPY tests ./tests
 
-RUN pnpm install --frozen-lockfile && pnpm build
+RUN --network=none pnpm install --offline --frozen-lockfile \
+ && pnpm --filter "@hoox/prompt-builder..." --filter "@hoox/pi-adapter..." --filter "@hoox/tool-router..." --filter "@hoox/agent-worker..." build
 RUN chown 1000:1000 /opt/runtime
 
-# 测试只读取构建结果与源码；运行阶段不需要 root，也不注入任何真实环境变量。
 USER 1000:1000
 
 CMD ["node", "./node_modules/vitest/vitest.mjs", "run", "runtime-ts/packages/prompt-builder/src/index.test.ts", "runtime-ts/packages/pi-adapter/src/pi-session.test.ts", "runtime-ts/packages/pi-adapter/src/rollout-recovery.test.ts", "runtime-ts/packages/tool-router/src/artifact-pi-faux.test.ts", "runtime-ts/apps/agent-worker/src/pi-session-factory.test.ts"]

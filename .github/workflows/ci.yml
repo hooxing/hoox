@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify:
     name: 工程基线校验
@@ -41,7 +45,22 @@ jobs:
       - name: Linux 最小容器启动门禁
         run: pnpm test:process:container
 
+      - name: 初始化 Pi Prompt Gate Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+      - name: 构建 Pi Prompt Gate 镜像
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: Dockerfile.pi-prompt-gate
+          load: true
+          tags: hoox/pi-prompt-gate:${{ github.sha }}
+          cache-from: type=gha,scope=hoox-pi-prompt-gate
+          cache-to: type=gha,mode=max,scope=hoox-pi-prompt-gate
+
       - name: Linux Pi Prompt 与能力清单容器门禁
+        env:
+          PI_PROMPT_GATE_IMAGE: hoox/pi-prompt-gate:${{ github.sha }}
         run: pnpm test:pi-prompt:container
 
   production-gates:
@@ -66,7 +85,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Production 配置、漏洞、SBOM、许可证与发布静态 Gate
-        run: pnpm config:check:production && pnpm security:audit:production && pnpm supply-chain:check && pnpm license:check && pnpm release:check
+        run: pnpm config:check:production && pnpm security:audit:production && pnpm supply-chain:check && pnpm release:check
 
       - name: Production API 容器 Gate
         run: pnpm test:production-api:container

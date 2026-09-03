@@ -121,6 +121,15 @@ services:
       STATIC_LISTEN_PORT: "4174"
     command: ["node", "scripts/demo-static-server.mjs"]
 
+  trajectory:
+    <<: *runtime
+    command: ["node", "runtime-ts/apps/trajectory-web/dist/bin.js"]
+    volumes:
+      - trajectory_data:/opt/hoox/model-wire-traces:ro
+    depends_on:
+      api:
+        condition: service_started
+
   scheduler:
     <<: *runtime
     env_file:
@@ -139,6 +148,9 @@ services:
     environment:
       AGENT_WORKER_TENANT_ID: ${DEMO_TENANT_ID:-tenant_demo_pending}
       DEV_AUTH_USER_A_TENANT_ID: ${DEMO_TENANT_ID:-tenant_demo_pending}
+      MODEL_WIRE_TRACE_ENABLED: "true"
+    volumes:
+      - trajectory_data:/opt/hoox/model-wire-traces
     command: ["node", "runtime-ts/apps/agent-worker/dist/development-main.js"]
     depends_on:
       postgres:
@@ -152,3 +164,5 @@ volumes:
     name: hoox-demo-postgres-data-20260826
   minio_data:
     name: hoox-demo-minio-data-20260826
+  trajectory_data:
+    name: hoox-demo-trajectory-${HOOX_DEMO_RELEASE_ID:?HOOX_DEMO_RELEASE_ID is required}

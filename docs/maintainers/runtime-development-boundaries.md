@@ -183,7 +183,7 @@ TanStack Query 协调控制面读取、去重和失效。页面按工作台、�
 
 数据运营页按最近 24 小时展示输入 Token、输出 Token、Assistant 生成吞吐和缓存命中率。Worker 只把未缓存输入、输出、
 缓存读取和生成时长原子写入租户隔离的低基数指标账本，不保存 Provider 身份或模型正文；控制服务只能读取跨 Tenant 的
-受限聚合视图。development 页面可新窗口打开回环轨迹查看器，但不嵌入、代理或读取完整轨迹，生产构建不显示该入口。
+受限聚合视图。development 页面新窗口打开回环轨迹查看器；受控 Demo 构建新窗口打开同源 `/trajectory/`，轨迹 API 由 Demo 管理员 Hoox Session 保护；其他 production 构建不显示该入口。
 统计口径和诊断边界见[后台模型用量指标决策](../decisions/20260824150132-admin-model-usage-metrics-and-development-trajectory-link.md)。
 
 使用一键开发脚本时，既有 `-IncludeSkill` 兼容开关会启动统一 Admin API 与 Admin Web；默认核心拓扑仍不启动任何

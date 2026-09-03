@@ -20,8 +20,8 @@
 | 命令 | 访问外部服务 | 适用场景 |
 | --- | --- | --- |
 | `corepack pnpm test` | 否 | 构建并运行普通 Vitest 测试 |
-| `corepack pnpm check` | Compose 配置解析 | 格式、lint、类型、测试、构建和 development 配置检查 |
-| `corepack pnpm check:clean-workspace` | Compose 配置解析 | 从无 `dist` 状态执行完整工程 Gate |
+| `corepack pnpm check` | Compose 配置解析 | 单次拓扑构建后复用产物执行格式、lint、补充类型检查、测试和 development 配置检查 |
+| `corepack pnpm check:clean-workspace` | Compose 配置解析 | 删除全部 Workspace `dist` 后执行单次构建的完整工程 Gate |
 | `corepack pnpm test:process-runtime` | 否 | API、Worker、Scheduler、统一 Admin API 的进程生命周期 |
 | `corepack pnpm test:process:container` | Docker | Linux 最小容器进程 Gate |
 | `corepack pnpm test:pi-prompt:container` | Docker | Pi Prompt 与能力清单容器 Gate |
@@ -150,4 +150,4 @@ corepack pnpm test:production-scheduler:container
 corepack pnpm test:production-worker:container
 ```
 
-`corepack pnpm check:production` 串联上述 production 配置、生产依赖漏洞扫描、供应链、发布契约和三个容器 Gate。这些命令需要 Docker，但仍不能替代真实基础设施 readiness。见[生产就绪说明](../operations/production-readiness.md)。
+`corepack pnpm check:production` 串联 production 配置、生产依赖漏洞扫描、供应链与许可证、发布契约和三个容器 Gate。`license:check` 是供应链检查的兼容入口，聚合 Gate 不会重复执行同一个扫描脚本。这些命令需要 Docker，但仍不能替代真实基础设施 readiness。见[生产就绪说明](../operations/production-readiness.md)。

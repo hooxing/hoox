@@ -12,12 +12,19 @@ function runDocker(arguments_, capture = false) {
   return result.stdout?.trim() ?? "";
 }
 
+const prebuiltImage = process.env.PI_PROMPT_GATE_IMAGE?.trim();
 let imageId;
+let removeImage = false;
 let primaryFailure;
 let cleanupFailure;
 
 try {
-  imageId = runDocker(["build", "--quiet", "--file", "Dockerfile.pi-prompt-gate", "."], true);
+  if (prebuiltImage === undefined || prebuiltImage.length === 0) {
+    imageId = runDocker(["build", "--quiet", "--file", "Dockerfile.pi-prompt-gate", "."], true);
+    removeImage = true;
+  } else {
+    imageId = runDocker(["image", "inspect", "--format", "{{.Id}}", prebuiltImage], true);
+  }
   if (!/^sha256:[a-f0-9]{64}$/u.test(imageId)) throw new Error("PI_PROMPT_IMAGE_ID_INVALID");
   const configuredUser = runDocker(
     ["image", "inspect", "--format", "{{.Config.User}}", imageId],
@@ -28,9 +35,8 @@ try {
 } catch (error) {
   primaryFailure = error;
 } finally {
-  if (imageId !== undefined) {
+  if (removeImage && imageId !== undefined) {
     try {
-      // 只删除本次 build 返回的精确镜像 ID，不使用标签或模糊匹配。
       runDocker(["image", "rm", imageId]);
     } catch (error) {
       cleanupFailure = error;

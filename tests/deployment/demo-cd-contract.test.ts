@@ -95,7 +95,8 @@ describe("Demo 持续部署契约", () => {
     expect(compose).toContain("mc admin policy attach runtime readwrite");
     expect(compose).toContain("name: hoox-demo-postgres-data-20260826");
     expect(compose).toContain("name: hoox-demo-minio-data-20260826");
-    expect(compose).toContain("name: hoox-demo-trajectory-${HOOX_DEMO_RELEASE_ID");
+    expect(compose).toContain("name: hoox-demo-trajectory-data-20260903");
+    expect(compose).not.toContain("name: hoox-demo-trajectory-${HOOX_DEMO_RELEASE_ID");
     expect(compose).not.toMatch(/^\s*name: hoox-demo-(?:postgres|minio)-data\s*$/gmu);
   });
 
@@ -134,7 +135,8 @@ describe("Demo 持续部署契约", () => {
     expect(deploy).toContain("HOOX_DEMO_RELEASE_ID");
     expect(deploy).toContain("https://$domain/trajectory/api/threads");
     expect(deploy).toContain("Demo 轨迹 API 未拒绝无会话请求");
-    expect(deploy).toContain('docker volume rm "hoox-demo-trajectory-$old_release_id"');
+    expect(deploy).not.toContain('docker volume rm "hoox-demo-trajectory-$old_release_id"');
+    expect(deploy).not.toContain('docker volume rm "hoox-demo-trajectory-data-20260903"');
     expect(deploy).not.toContain("admin_netrc");
     expect(deploy).not.toContain("openssl passwd");
     expect(deploy).toContain("| compose exec -T postgres psql");

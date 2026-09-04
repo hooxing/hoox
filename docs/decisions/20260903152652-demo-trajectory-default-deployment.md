@@ -1,9 +1,9 @@
 # ADR-20260903152652：Demo 默认部署受保护的内部轨迹查看器
 
-- 状态：已接受
+- 状态：部分已替代（轨迹卷的 release 级隔离与自动清理由 ADR-20260903171600 替代，其余部署与鉴权边界继续有效）
 - 日期：2026-09-03
 - 决策者：Runtime 维护者
-- 关联决策：部分替代 [ADR-20260815182655](20260815182655-local-internal-trajectory-viewer.md) 的禁止反向代理结论，以及[后台模型用量指标与开发轨迹入口边界](20260824150132-admin-model-usage-metrics-and-development-trajectory-link.md)的仅 development 构建入口结论
+- 关联决策：部分替代 [ADR-20260815182655](20260815182655-local-internal-trajectory-viewer.md) 的禁止反向代理结论，以及[后台模型用量指标与开发轨迹入口边界](20260824150132-admin-model-usage-metrics-and-development-trajectory-link.md)的仅 development 构建入口结论；轨迹卷生命周期由 [ADR-20260903171600](20260903171600-demo-trajectory-cross-release-retention.md) 替代
 
 ## 背景
 

@@ -41,8 +41,9 @@ async function eventually(predicate: () => boolean): Promise<void> {
 }
 
 describe("模型网络原始报文诊断", () => {
-  it("保存最终发送的 application request body 和 content-decoded SSE 字节，且不保存 Authorization", async () => {
+  it("只保存最终 request 字节，不复制或保存 response，且不保存 Authorization", async () => {
     installModelWireFetchInstrumentation();
+    const cloneResponse = vi.spyOn(Response.prototype, "clone");
     const server = createServer((request, response) => {
       void (async () => {
         const body: Buffer[] = [];
@@ -75,23 +76,20 @@ describe("模型网络原始报文诊断", () => {
       );
       expect(await response.text()).toBe('data: {"delta":"甲"}\n\ndata: [DONE]\n\n');
       await session.drain();
-      await eventually(() => traces.records.length === 2);
+      expect(traces.records).toHaveLength(1);
       expect(traces.failures).toEqual([]);
       const request = traces.records.find((entry) => entry.part === "request");
-      const sse = traces.records.find((entry) => entry.part === "response");
       expect(Buffer.from(request?.body ?? []).toString("utf8")).toBe('{ "message": "甲" }');
-      expect(Buffer.from(sse?.body ?? []).toString("utf8")).toBe(
-        'data: {"delta":"甲"}\n\ndata: [DONE]\n\n',
-      );
+      expect(cloneResponse).not.toHaveBeenCalled();
       expect(JSON.stringify(traces.records)).not.toContain("test-secret");
       expect(JSON.stringify(traces.records)).not.toContain("test-cookie-secret");
-      expect(sse).toMatchObject({
+      expect(request).toMatchObject({
         status: "complete",
-        httpStatus: 200,
         modelTurn: 0,
         transportAttempt: 0,
       });
     } finally {
+      cloneResponse.mockRestore();
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );
@@ -151,6 +149,7 @@ describe("模型网络原始报文诊断", () => {
         agentThreadId: "agent_shared",
         agentTurnId: "turn_shared",
       });
+      expect(traces.records.every((entry) => entry.part === "request")).toBe(true);
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
@@ -158,7 +157,45 @@ describe("模型网络原始报文诊断", () => {
     }
   });
 
-  it("达到上限、非 2xx 与中断时只影响诊断状态，不替换实际 Response 语义", async () => {
+  it("响应开始后断流仍由调用方收到错误，不旁路保存部分响应", async () => {
+    installModelWireFetchInstrumentation();
+    const traces = new TracePort();
+    let disconnect: (() => void) | undefined;
+    const server = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write("data: partial\n\n");
+      disconnect = () => response.destroy();
+    });
+    const port = await listen(server);
+    const session = new ModelWireTraceSession(traces, 1024, `http://127.0.0.1:${port}/v1`);
+    try {
+      const response = await session.run(
+        {
+          tenantId: "tenant_stream",
+          threadId: "thread_stream",
+          runId: "run_stream",
+          attemptId: "attempt_stream",
+        },
+        () =>
+          fetch(`http://127.0.0.1:${port}/v1/chat/completions`, { method: "POST", body: "stream" }),
+      );
+      const reader = response.body?.getReader();
+      if (reader === undefined) throw new Error("测试响应缺少正文");
+      const first = await reader.read();
+      expect(new TextDecoder().decode(first.value)).toBe("data: partial\n\n");
+      disconnect?.();
+      await expect(reader.read()).rejects.toBeInstanceOf(Error);
+      await session.drain();
+      expect(traces.records).toEqual([expect.objectContaining({ part: "request" })]);
+      expect(traces.failures).toEqual([]);
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it("请求达到上限仍保存前缀，非 2xx 响应原样透传且不保存正文", async () => {
     installModelWireFetchInstrumentation();
     const server = createServer((_request, response) => {
       response.writeHead(429, { "content-type": "text/event-stream" });
@@ -179,18 +216,10 @@ describe("模型网络原始报文诊断", () => {
       expect(response.status).toBe(429);
       expect(await response.text()).toBe("data: 0123456789\n\n");
       await session.drain();
-      await eventually(() => traces.records.length === 2);
-      expect(traces.records).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ part: "request", status: "truncated", size: 8 }),
-          expect.objectContaining({
-            part: "response",
-            status: "truncated",
-            size: 8,
-            httpStatus: 429,
-          }),
-        ]),
-      );
+      expect(traces.records).toEqual([
+        expect.objectContaining({ part: "request", status: "truncated", size: 8 }),
+      ]);
+      expect(Buffer.from(traces.records[0]?.body ?? []).toString("utf8")).toBe("01234567");
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
@@ -266,8 +295,8 @@ describe("模型网络原始报文诊断", () => {
       );
       expect(await response.text()).toBe("data: diagnostic-port-down\n\n");
       await session.drain();
-      expect(persistCalls).toBe(2);
-      expect(failureCalls).toBe(2);
+      expect(persistCalls).toBe(1);
+      expect(failureCalls).toBe(1);
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
@@ -302,7 +331,7 @@ describe("模型网络原始报文诊断", () => {
           }),
       );
       expect(await response.text()).toBe("provider-ok");
-      await eventually(() => persistStarted === 2);
+      await eventually(() => persistStarted === 1);
 
       vi.useFakeTimers();
       const completedBeforeDeadline = session.drain(5_000);

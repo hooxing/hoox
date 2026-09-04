@@ -2,6 +2,72 @@ import { describe, expect, it, vi } from "vitest";
 import { canPreviewArtifact, normalizeRunEvent, RuntimeApi } from "./api.js";
 
 describe("RuntimeApi", () => {
+  it("实时流携带现有身份与 Tenant 头，验证正文和结束帧", async () => {
+    const payload = {
+      run: { id: "run", threadId: "thread", status: "running" },
+      page: {
+        attemptId: "attempt",
+        hasMore: false,
+        items: [
+          {
+            sequence: 0,
+            eventId: "attempt-0",
+            kind: "agent_event",
+            type: "message.delta",
+            payload: { delta: "中文" },
+            occurredAt: "2026-09-04T00:00:00Z",
+          },
+        ],
+      },
+    };
+    const fetcher = vi.fn(
+      async () =>
+        new Response(
+          `event: run-events\ndata: ${JSON.stringify(payload)}\n\nevent: end\ndata: {"reason":"settled"}\n\n`,
+          { headers: { "content-type": "text/event-stream" } },
+        ),
+    );
+    const api = new RuntimeApi(fetcher, "/api");
+    api.setAccessToken("test-token");
+    api.setTenantId("tenant-test");
+    const receive = vi.fn();
+    expect(
+      await api.streamEvents(
+        "thread",
+        "run",
+        { after: -1, attemptId: undefined },
+        new AbortController().signal,
+        receive,
+      ),
+    ).toBe("settled");
+    expect(receive).toHaveBeenCalledOnce();
+    const call = fetcher.mock.calls[0] as unknown as [string, RequestInit];
+    expect(new Headers(call[1].headers).get("authorization")).toBe("Bearer test-token");
+    expect(new Headers(call[1].headers).get("x-tenant-id")).toBe("tenant-test");
+    expect(call[0]).toContain("/events/stream?after=-1");
+  });
+
+  it("缺失结束帧的 EOF 会要求重连，跨 Run 数据不能进入正文", async () => {
+    for (const body of [
+      "",
+      'event: run-events\ndata: {"run":{"id":"other","threadId":"thread","status":"running"},"page":{"items":[],"hasMore":false}}\n\n',
+    ]) {
+      const api = new RuntimeApi(
+        async () => new Response(body, { headers: { "content-type": "text/event-stream" } }),
+      );
+      const receive = vi.fn();
+      await expect(
+        api.streamEvents(
+          "thread",
+          "run",
+          { after: -1, attemptId: undefined },
+          new AbortController().signal,
+          receive,
+        ),
+      ).rejects.toMatchObject({ retryable: true });
+      expect(receive).not.toHaveBeenCalled();
+    }
+  });
   it("默认 fetch 保留浏览器全局 receiver，不会以 RuntimeApi 实例调用", async () => {
     const fetcher = vi.spyOn(globalThis, "fetch").mockImplementation(function (
       this: typeof globalThis,

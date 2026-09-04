@@ -1,0 +1,19 @@
+{
+  "name": "@hoox/vendor-deepseek-markdown",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    "types": "./src/incremental.ts",
+    "default": "./dist/incremental.js"
+  },
+  "types": "./src/incremental.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/mdast": "4.0.4"
+  }
+}

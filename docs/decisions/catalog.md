@@ -61,10 +61,10 @@
 | [ADR-0036：waiting 恢复事实由已完成副作用证明推导](../archive/decisions/0036-waiting-recovery-proof-derived-facts.md) | 已替代（由 ADR-0037 替代普通 proof 信任边界） | 2026-07-28 |
 | [ADR-0037：waiting 恢复能力回执与只追加回退边界](0037-waiting-recovery-capability-and-append-only-rollback.md) | 已接受 | 2026-07-28 |
 | [ADR-0038：生产 Worker 的 Workspace 失败关闭边界](0038-production-worker-fail-closed-workspace-boundary.md) | 已接受 | 2026-07-28 |
-| [ADR-0039：本地 Agent 工作台与公开 API 边界](0039-web-local-agent-workbench.md) | 已接受 | 2026-07-28 |
+| [ADR-0039：本地 Agent 工作台与公开 API 边界](0039-web-local-agent-workbench.md) | 部分已替代 | 2026-07-28 |
 | [ADR-0040：开发 Worker 的 Windows 运行与模型就绪边界](0040-development-worker-windows-and-model-readiness.md) | 已接受 | 2026-07-28 |
 | [ADR-0041：Worker 停机与工具拒绝的失败关闭边界](0041-worker-stop-and-tool-rejection-fail-closed.md) | 已接受 | 2026-07-28 |
-| [ADR-0042：本地 Web 体验的 Run 事件与 Artifact 读取契约](0042-local-web-experience-read-contract.md) | 已接受 | 2026-07-28 |
+| [ADR-0042：本地 Web 体验的 Run 事件与 Artifact 读取契约](0042-local-web-experience-read-contract.md) | 部分已替代 | 2026-07-28 |
 | [ADR-0043：CubeSandbox 数据面缺省路由](0043-cubesandbox-proxy-default-routing.md) | 已接受 | 2026-07-28 |
 | [ADR-0044：Agent 工作台三段式信息架构](0044-agent-workbench-information-architecture.md) | 已接受 | 2026-07-28 |
 | [ADR-0045：Thread 最新 Run 恢复读取契约](0045-thread-latest-run-recovery-contract.md) | 已接受 | 2026-07-28 |
@@ -281,5 +281,7 @@
 | [ADR-20260903152652：Demo 默认部署受保护的内部轨迹查看器](20260903152652-demo-trajectory-default-deployment.md) | 部分已替代（轨迹卷生命周期） | 2026-09-03 |
 | [ADR-20260903171600：Demo 轨迹使用跨发布持久卷](20260903171600-demo-trajectory-cross-release-retention.md) | 已接受 | 2026-09-03 |
 | [ADR-20260904085601：停止原始模型响应采集与轨迹展示](20260904085601-stop-raw-model-response-capture.md) | 已接受 | 2026-09-04 |
+
+| [ADR-20260904103315：持久 Run 事件推送与增量正文渲染](20260904103315-run-event-stream-and-incremental-rendering.md) | 已接受 | 2026-09-04 |
 
 </details>

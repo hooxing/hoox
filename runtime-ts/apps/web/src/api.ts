@@ -1,3 +1,5 @@
+import { readServerEvents } from "./server-events.js";
+
 export type AccountProfile = {
   readonly id: string;
   readonly displayName: string;
@@ -967,6 +969,66 @@ export class RuntimeApi {
         .filter((event): event is RunEvent => event !== undefined),
       ...(hasMore === undefined ? {} : { hasMore }),
     };
+  }
+  /** 使用请求头认证的 SSE；游标只在当前 Attempt 有效，EOF 不能冒充正常完成。 */
+  async streamEvents(
+    threadId: string,
+    runId: string,
+    cursor: { readonly after: number; readonly attemptId: string | undefined },
+    signal: AbortSignal,
+    onFrame: (page: RunEventPage, run: Run) => void,
+  ): Promise<"settled" | "renew"> {
+    const headers = new Headers({ Accept: "text/event-stream" });
+    if (this.accessToken !== undefined) headers.set("Authorization", `Bearer ${this.accessToken}`);
+    if (this.activeTenantId !== undefined) headers.set("X-Tenant-ID", this.activeTenantId);
+    const query = new URLSearchParams({ after: String(cursor.after) });
+    if (cursor.attemptId !== undefined) query.set("attemptId", cursor.attemptId);
+    const response = await this.fetcher(
+      `${this.baseUrl}/v1/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/events/stream?${query}`,
+      { headers, signal },
+    );
+    if (!response.ok) {
+      throw new ApiError("读取实时输出失败", response.status, response.status >= 500);
+    }
+    if (
+      !response.headers.get("content-type")?.startsWith("text/event-stream") ||
+      response.body === null
+    ) {
+      throw new ApiError("实时输出协议无效", 502, true);
+    }
+    for await (const frame of readServerEvents(response.body)) {
+      if (signal.aborted) throw signal.reason;
+      const value = record(frame.data);
+      if (frame.event === "end" && (value?.reason === "settled" || value?.reason === "renew"))
+        return value.reason;
+      if (frame.event !== "run-events") continue;
+      const page = record(value?.page);
+      const run = record(value?.run);
+      if (
+        page === undefined ||
+        !Array.isArray(page.items) ||
+        typeof page.hasMore !== "boolean" ||
+        (page.attemptId !== undefined && typeof page.attemptId !== "string") ||
+        run?.id !== runId ||
+        run.threadId !== threadId ||
+        !["queued", "running", "waiting", "succeeded", "failed", "cancelled"].includes(
+          String(run.status),
+        )
+      ) {
+        throw new ApiError("实时输出帧无效", 502, true);
+      }
+      const items = page.items.map(normalizeRunEvent);
+      if (items.some((item) => item === undefined)) throw new ApiError("实时事件无效", 502, true);
+      onFrame(
+        {
+          attemptId: page.attemptId as string | undefined,
+          items: items as RunEvent[],
+          hasMore: page.hasMore,
+        },
+        run as Run,
+      );
+    }
+    throw new ApiError("实时输出连接已中断", 0, true);
   }
   async listArtifacts(threadId: string, runId: string): Promise<readonly Artifact[]> {
     const data = await this.request<unknown>(

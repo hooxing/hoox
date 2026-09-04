@@ -40,6 +40,14 @@
       "patchedTreeSha256": "4c496b33e88e3e375fca51fce0dacbc7fafc7fa20f862fe7fbd8d26ce8ad9c46",
       "localModified": true
     },
+    "@hoox/vendor-deepseek-markdown": {
+      "license": "MIT",
+      "licenseFile": "runtime-ts/vendor/deepseek-markdown/LICENSE",
+      "sourceFile": "runtime-ts/vendor/deepseek-markdown/SOURCE.md",
+      "upstreamCommit": "76fda729799fe9b3848dbe2c211d4b231032b81e",
+      "localModified": false,
+      "sourceTreeSha256": "2189c6beeac3f26e1a147b243839df678f30f656b86d4c1d0c53eda9f9b904a5"
+    },
     "@hoox/vendor-deepseek-trajectory": {
       "license": "MIT",
       "licenseFile": "runtime-ts/vendor/deepseek-trajectory/LICENSE",

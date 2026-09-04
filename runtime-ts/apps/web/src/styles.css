@@ -1116,6 +1116,10 @@ h2 {
   flex: 0 0 auto;
   align-self: center;
 }
+.run-content {
+  flex: 0 0 auto;
+  min-width: 0;
+}
 .run-progress {
   display: grid;
   width: 100%;

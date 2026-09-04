@@ -12,6 +12,10 @@
 
 `runtime-ts/vendor/deepseek-trajectory/` 保存 DeepSeek Harness `packages/client/ui-trajectory` 的固定源码快照，来源提交为 `47f943859bef60e4160492346772ded9b24f765a`，上游包版本为 `0.1.0-rc.5`，许可证为 MIT，版权人为 DeepSeek。完整许可证、来源和集成边界见该目录的 `LICENSE` 与 `SOURCE.md`。该源码不进入用户产品面，也不引入 DeepSeek Harness 的运行时服务依赖。
 
+## DeepSeek Harness 增量 Markdown
+
+`runtime-ts/vendor/deepseek-markdown/` 保存 DeepSeek Harness `packages/client/ui-primitives/src/markdown/incremental.ts` 的固定源码，来源提交为 `76fda729799fe9b3848dbe2c211d4b231032b81e`，许可证为 MIT，版权人为 DeepSeek。完整许可证与来源见该目录的 `LICENSE` 和 `SOURCE.md`。该解析器进入用户 Web 的正文渲染，不引入 DeepSeek Harness 会话服务或其他 UI 组件。
+
 ## DeepSeek V4 Tokenizer
 
 `runtime-ts/vendor/deepseek-v4-tokenizer/` 保存 DeepSeek V4 官方 tokenizer 的固定源码资源快照，来源提交为 `a7aaed80dd2df27620eb534454253ea25eb11c7a`，许可证为 MIT。完整许可证、来源与固定文件摘要见该目录的 `LICENSE`、`SOURCE.md` 及运行时校验代码；Worker 生产闭包与镜像会同时携带资源和许可证证据。

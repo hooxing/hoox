@@ -25,6 +25,7 @@ import {
 import { PgResourceUploadRepository } from "./pg-resource-upload.js";
 import { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 import { PgScheduledTaskRepository } from "./pg-scheduled-tasks.js";
+import { PgRunEventWakeListener } from "./pg-run-event-wake.js";
 import { PgExecutionPersistence, PgRunExecutionSetup } from "./pg-run-worker-state.js";
 import { PgSkillCenterRepository } from "./pg-skill-center.js";
 import { PgSkillFilesystemCatalog } from "./pg-skill-filesystem.js";
@@ -38,6 +39,7 @@ import type {
   RunExperienceReadPort,
   ThreadContextReadPort,
   ThreadContinuityReadPort,
+  TenantScope,
 } from "./ports.js";
 import {
   createPostgresPool,
@@ -123,6 +125,9 @@ export function createApiPersistenceRuntime(
   },
 ): ApiPersistenceRuntime {
   const pool = createPostgresPool(options);
+  const eventWake = new PgRunEventWakeListener(
+    createPostgresPool({ ...options, maxConnections: 1 }),
+  );
   const teamCoordinatorPool =
     options.teamCoordinator === undefined ? undefined : createPostgresPool(options.teamCoordinator);
   return Object.freeze({
@@ -149,7 +154,7 @@ export function createApiPersistenceRuntime(
         ? {}
         : { historyTitleGenerationEnabled: options.historyTitleGenerationEnabled }),
     }),
-    experience: new PgRunExperienceReadRepository(pool),
+    experience: new PgRunExperienceReadRepository(pool, eventWake),
     modelWireTraces: new PgModelWireTraceReadRepository(pool),
     blobLifecycle: new PgBlobLifecycleRepository(pool, options.blobLifecycle),
     resourceCatalog: new PgResourceCatalog(pool),
@@ -173,6 +178,7 @@ export function createApiPersistenceRuntime(
       ]);
     },
     close: async () => {
+      await eventWake.close();
       await Promise.all([
         pool.end(),
         ...(teamCoordinatorPool === undefined ? [] : [teamCoordinatorPool.end()]),
@@ -182,7 +188,17 @@ export function createApiPersistenceRuntime(
 }
 
 export class PgRunExperienceReadRepository implements RunExperienceReadPort {
-  constructor(private readonly pool: Pool) {}
+  constructor(
+    private readonly pool: Pool,
+    private readonly eventWake?: PgRunEventWakeListener,
+  ) {}
+
+  watchEvents(
+    input: { readonly scope: TenantScope; readonly runId: string },
+    wake: () => void,
+  ): () => void {
+    return this.eventWake?.subscribe(input.scope.tenantId, input.runId, wake) ?? (() => {});
+  }
 
   async listEvents(
     input: Parameters<RunExperienceReadPort["listEvents"]>[0],

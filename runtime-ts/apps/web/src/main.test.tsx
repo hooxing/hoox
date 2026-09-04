@@ -139,6 +139,99 @@ afterEach(() => {
 });
 
 describe("Agent 工作台恢复接入", () => {
+  it("内容异步增高时跟随底部，重复通知和用户回看不重写滚动位置", async () => {
+    let resized: (() => void) | undefined;
+    const disconnect = vi.fn();
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        constructor(callback: () => void) {
+          resized = callback;
+        }
+        observe() {}
+        disconnect = disconnect;
+      },
+    );
+    try {
+      const active = run("run_scroll", "thread_scroll");
+      const { container } = mount(
+        apiFixture({
+          listThreads: vi.fn(async () => [thread(active.threadId)]),
+          listLatestRuns: vi.fn(async () => [active]),
+          getRun: vi.fn(async () => active),
+        }),
+      );
+      await settleEffects();
+      const area = container.querySelector<HTMLElement>(".run-area");
+      if (area === null) throw new Error("缺少滚动区域");
+      let height = 400;
+      let top = 0;
+      const writeTop = vi.fn((value: number) => {
+        top = value;
+      });
+      Object.defineProperties(area, {
+        scrollHeight: { get: () => height },
+        clientHeight: { get: () => 100 },
+        scrollTop: { get: () => top, set: writeTop },
+      });
+      act(() => resized?.());
+      expect(top).toBe(300);
+      act(() => resized?.());
+      expect(writeTop).toHaveBeenCalledOnce();
+      top = 40;
+      act(() => area.dispatchEvent(new Event("scroll", { bubbles: true })));
+      height = 600;
+      act(() => resized?.());
+      expect(top).toBe(40);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+  it("正文不等待辅助接口，完整排空前不跳到下一 Run，切走后取消连接", async () => {
+    const active = { ...run("run_stream", "thread_stream"), status: "running" as const };
+    const artifacts = deferred<Artifact[]>();
+    let connectionSignal: AbortSignal | undefined;
+    const api = apiFixture({
+      listThreads: vi.fn(async () => [thread(active.threadId)]),
+      listLatestRuns: vi.fn(async () => [active]),
+      getRun: vi.fn(async () => ({ ...active, status: "succeeded" as const })),
+      listArtifacts: vi.fn(() => artifacts.promise),
+      streamEvents: vi.fn(async (_thread, _run, _cursor, signal, receive) => {
+        connectionSignal = signal;
+        receive(
+          {
+            attemptId: "attempt_stream",
+            hasMore: false,
+            items: [
+              {
+                eventId: "attempt_stream-0",
+                sequence: 0,
+                kind: "agent_event",
+                type: "message.delta",
+                payload: { delta: "不等待附件的文字" },
+                occurredAt: active.createdAt,
+              },
+            ],
+          },
+          active,
+        );
+        await new Promise<void>((resolve) =>
+          signal.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        return "settled" as const;
+      }),
+    });
+    const { container, root } = mount(api);
+    await settleEffects();
+    expect(container.textContent).toContain("不等待附件的文字");
+    expect(api.listEvents).not.toHaveBeenCalled();
+    artifacts.resolve([]);
+    await settleEffects();
+    expect(api.listLatestRuns).toHaveBeenCalledOnce();
+    act(() => root.render(<div />));
+    expect(connectionSignal?.aborted).toBe(true);
+    await settleEffects();
+  });
   it("没有会话时使用透明横版品牌图作为欢迎标识", async () => {
     const { container } = mount(apiFixture());
 

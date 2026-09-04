@@ -193,7 +193,7 @@ function toolPresentationTitle(payload: Readonly<Record<string, unknown>> | unde
 /**
  * 保留模型回复、思考与工具调用的原始先后关系；callId 只用于更新对应工具块。
  */
-export function buildConversationBlocks(events: readonly RunEvent[]): readonly ConversationBlock[] {
+export function createConversationProjector() {
   const blocks: ConversationBlock[] = [];
   const tools = new Map<string, number>();
   const finalizations = new Map<string, number>();
@@ -209,138 +209,146 @@ export function buildConversationBlocks(events: readonly RunEvent[]): readonly C
     activeThinking = undefined;
   };
 
-  for (const event of events) {
-    const payload = object(event.payload);
-    if (event.type === "thinking.started") {
-      activeAnswer = undefined;
-      completeActiveThinking();
-      activeThinking = blocks.length;
-      blocks.push({ id: event.eventId, type: "thinking", text: "", status: "running" });
-      continue;
-    }
-    if (event.type === "thinking.delta") {
-      activeAnswer = undefined;
-      if (activeThinking === undefined) {
-        activeThinking = blocks.length;
-        blocks.push({ id: event.eventId, type: "thinking", text: "", status: "running" });
+  return {
+    append(events: readonly RunEvent[]): readonly ConversationBlock[] {
+      for (const event of events) {
+        const payload = object(event.payload);
+        if (event.type === "thinking.started") {
+          activeAnswer = undefined;
+          completeActiveThinking();
+          activeThinking = blocks.length;
+          blocks.push({ id: event.eventId, type: "thinking", text: "", status: "running" });
+          continue;
+        }
+        if (event.type === "thinking.delta") {
+          activeAnswer = undefined;
+          if (activeThinking === undefined) {
+            activeThinking = blocks.length;
+            blocks.push({ id: event.eventId, type: "thinking", text: "", status: "running" });
+          }
+          const block = blocks[activeThinking];
+          const delta = payload?.delta;
+          if (block?.type === "thinking" && typeof delta === "string") {
+            blocks[activeThinking] = { ...block, text: `${block.text}${delta}` };
+          }
+          continue;
+        }
+        if (event.type === "thinking.completed") {
+          completeActiveThinking();
+          continue;
+        }
+        if (event.type === "message.delta") {
+          completeActiveThinking();
+          const delta = payload?.delta;
+          if (typeof delta !== "string") continue;
+          if (activeAnswer === undefined) {
+            activeAnswer = blocks.length;
+            blocks.push({ id: event.eventId, type: "answer", text: "", status: "streaming" });
+          }
+          const block = blocks[activeAnswer];
+          if (block?.type === "answer")
+            blocks[activeAnswer] = { ...block, text: `${block.text}${delta}` };
+          continue;
+        }
+        if (event.type === "runtime.notice") {
+          completeActiveThinking();
+          activeAnswer = undefined;
+          const message = text(payload?.message);
+          if (message !== undefined) {
+            blocks.push({
+              id: event.eventId,
+              type: "answer",
+              text: message,
+              status: "completed",
+            });
+          }
+          continue;
+        }
+        if (event.type === "message.completed") {
+          const answerIndex = activeAnswer;
+          const answer = answerIndex === undefined ? undefined : blocks[answerIndex];
+          if (answerIndex !== undefined && answer?.type === "answer") {
+            blocks[answerIndex] = { ...answer, status: "completed" };
+          }
+          completeActiveThinking();
+          activeAnswer = undefined;
+          continue;
+        }
+        if (event.type === "finalization.started") {
+          activeAnswer = undefined;
+          completeActiveThinking();
+          const callId = text(payload?.callId);
+          if (callId === undefined) continue;
+          finalizations.set(callId, blocks.length);
+          blocks.push({
+            id: event.eventId,
+            type: "finalization",
+            callId,
+            status: "started",
+          });
+          continue;
+        }
+        if (event.type === "finalization.cancelled" || event.type === "final_answer.committed") {
+          const callId = text(payload?.callId);
+          const index = callId === undefined ? undefined : finalizations.get(callId);
+          const block = index === undefined ? undefined : blocks[index];
+          if (index !== undefined && block?.type === "finalization") {
+            blocks[index] = {
+              ...block,
+              status: event.type === "final_answer.committed" ? "committed" : "cancelled",
+            };
+          }
+          continue;
+        }
+        if (!event.type.startsWith("tool.")) continue;
+        activeAnswer = undefined;
+        completeActiveThinking();
+        const name = text(payload?.name);
+        // 阶段标志由 finalization 事件展示，不能再出现一个误导性的普通工具卡片。
+        if (name === "collapse_process_for_final_answer" || name === "begin_final_answer") {
+          continue;
+        }
+        const callId = text(payload?.callId) ?? `${name ?? "unknown"}:${event.sequence}`;
+        const index = tools.get(callId);
+        const status =
+          event.type === "tool.failed" || payload?.isError === true
+            ? "failed"
+            : event.type === "tool.completed"
+              ? "completed"
+              : "running";
+        if (index === undefined) {
+          const title = toolPresentationTitle(payload);
+          tools.set(callId, blocks.length);
+          blocks.push({
+            id: event.eventId,
+            type: "tool",
+            action: toolPresentationAction(payload) ?? toolAction(name),
+            status,
+            callId,
+            ...(title === undefined ? {} : { title }),
+          });
+        } else {
+          const block = blocks[index];
+          if (block?.type === "tool") {
+            const title = toolPresentationTitle(payload) ?? block.title;
+            blocks[index] = {
+              ...block,
+              status,
+              ...(title === undefined ? {} : { title }),
+            };
+          }
+        }
       }
-      const block = blocks[activeThinking];
-      const delta = payload?.delta;
-      if (block?.type === "thinking" && typeof delta === "string") {
-        blocks[activeThinking] = { ...block, text: `${block.text}${delta}` };
-      }
-      continue;
-    }
-    if (event.type === "thinking.completed") {
-      completeActiveThinking();
-      continue;
-    }
-    if (event.type === "message.delta") {
-      completeActiveThinking();
-      const delta = payload?.delta;
-      if (typeof delta !== "string") continue;
-      if (activeAnswer === undefined) {
-        activeAnswer = blocks.length;
-        blocks.push({ id: event.eventId, type: "answer", text: "", status: "streaming" });
-      }
-      const block = blocks[activeAnswer];
-      if (block?.type === "answer")
-        blocks[activeAnswer] = { ...block, text: `${block.text}${delta}` };
-      continue;
-    }
-    if (event.type === "runtime.notice") {
-      completeActiveThinking();
-      activeAnswer = undefined;
-      const message = text(payload?.message);
-      if (message !== undefined) {
-        blocks.push({
-          id: event.eventId,
-          type: "answer",
-          text: message,
-          status: "completed",
-        });
-      }
-      continue;
-    }
-    if (event.type === "message.completed") {
-      const answerIndex = activeAnswer;
-      const answer = answerIndex === undefined ? undefined : blocks[answerIndex];
-      if (answerIndex !== undefined && answer?.type === "answer") {
-        blocks[answerIndex] = { ...answer, status: "completed" };
-      }
-      completeActiveThinking();
-      activeAnswer = undefined;
-      continue;
-    }
-    if (event.type === "finalization.started") {
-      activeAnswer = undefined;
-      completeActiveThinking();
-      const callId = text(payload?.callId);
-      if (callId === undefined) continue;
-      finalizations.set(callId, blocks.length);
-      blocks.push({
-        id: event.eventId,
-        type: "finalization",
-        callId,
-        status: "started",
-      });
-      continue;
-    }
-    if (event.type === "finalization.cancelled" || event.type === "final_answer.committed") {
-      const callId = text(payload?.callId);
-      const index = callId === undefined ? undefined : finalizations.get(callId);
-      const block = index === undefined ? undefined : blocks[index];
-      if (index !== undefined && block?.type === "finalization") {
-        blocks[index] = {
-          ...block,
-          status: event.type === "final_answer.committed" ? "committed" : "cancelled",
-        };
-      }
-      continue;
-    }
-    if (!event.type.startsWith("tool.")) continue;
-    activeAnswer = undefined;
-    completeActiveThinking();
-    const name = text(payload?.name);
-    // 阶段标志由 finalization 事件展示，不能再出现一个误导性的普通工具卡片。
-    if (name === "collapse_process_for_final_answer" || name === "begin_final_answer") {
-      continue;
-    }
-    const callId = text(payload?.callId) ?? `${name ?? "unknown"}:${event.sequence}`;
-    const index = tools.get(callId);
-    const status =
-      event.type === "tool.failed" || payload?.isError === true
-        ? "failed"
-        : event.type === "tool.completed"
-          ? "completed"
-          : "running";
-    if (index === undefined) {
-      const title = toolPresentationTitle(payload);
-      tools.set(callId, blocks.length);
-      blocks.push({
-        id: event.eventId,
-        type: "tool",
-        action: toolPresentationAction(payload) ?? toolAction(name),
-        status,
-        callId,
-        ...(title === undefined ? {} : { title }),
-      });
-    } else {
-      const block = blocks[index];
-      if (block?.type === "tool") {
-        const title = toolPresentationTitle(payload) ?? block.title;
-        blocks[index] = {
-          ...block,
-          status,
-          ...(title === undefined ? {} : { title }),
-        };
-      }
-    }
-  }
 
-  return blocks.filter(
-    (block) => block.type === "tool" || block.type === "finalization" || block.text.length > 0,
-  );
+      return blocks.filter(
+        (block) => block.type === "tool" || block.type === "finalization" || block.text.length > 0,
+      );
+    },
+  };
+}
+
+export function buildConversationBlocks(events: readonly RunEvent[]): readonly ConversationBlock[] {
+  return createConversationProjector().append(events);
 }
 
 /**

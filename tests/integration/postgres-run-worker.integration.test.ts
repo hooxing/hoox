@@ -35,7 +35,13 @@ import {
 import { FakeSandboxGateway } from "@hoox/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  PgRunEventWakeListener,
+  RUN_EVENT_WAKE_CHANNEL,
+  runEventWakeKey,
+} from "../../runtime-ts/packages/persistence/src/pg-run-event-wake.js";
+import { PgRunExperienceReadRepository } from "../../runtime-ts/packages/persistence/src/runtime.js";
 import { PiWorkerSessionFactory } from "../../runtime-ts/apps/agent-worker/src/pi-session-factory.js";
 import { RunWorker } from "../../runtime-ts/apps/agent-worker/src/run-worker.js";
 import {
@@ -4686,6 +4692,70 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
         idempotencyKey: command.idempotencyKey,
       }),
     ).resolves.toMatchObject({ outcome: "applied", attemptVersion: 1 });
+  });
+
+  it("实时事件通知只唤醒已提交事实，事务回滚和幂等重放不重复发布", async () => {
+    const f = await fixture(`event-stream-${suffix}`);
+    const claimed = await persistence.claim({
+      scope: f.scope,
+      workerId: "event-stream-worker",
+      leaseDurationMs: 30_000,
+    });
+    if (claimed.outcome !== "claimed") throw new Error("claim 失败");
+    const listener = new PgRunEventWakeListener(
+      createPostgresPool({ connectionString: runtimeConnectionString, schema, maxConnections: 1 }),
+    );
+    const wake = vi.fn();
+    listener.subscribe(f.scope.tenantId, f.scope.runId, wake);
+    try {
+      await vi.waitFor(() => expect(wake).toHaveBeenCalledOnce());
+      wake.mockClear();
+      const client = await runtime.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query("SELECT pg_notify($1,$2)", [
+          RUN_EVENT_WAKE_CHANNEL,
+          runEventWakeKey(f.scope.tenantId, f.scope.runId),
+        ]);
+        await client.query("ROLLBACK");
+      } finally {
+        client.release();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(wake).not.toHaveBeenCalled();
+      const command = signed({
+        idempotencyKey: `${claimed.snapshot.attempt.attemptId}/event-stream`,
+        fence: claimed.fence,
+        expectedAttemptVersion: 0,
+        events: [0, 1].map((sequence) => ({
+          schemaVersion: 1 as const,
+          kind: "agent_event" as const,
+          sequence,
+          payload: { type: "message.delta", delta: `实时文字${sequence}` },
+        })),
+        outbox: [],
+      });
+      await expect(persistence.mutate(command)).resolves.toMatchObject({ outcome: "applied" });
+      await vi.waitFor(() => expect(wake).toHaveBeenCalledOnce());
+      const read = await new PgRunExperienceReadRepository(runtime).listEvents({
+        scope: { tenantId: f.scope.tenantId, userId: f.user.id },
+        runId: f.scope.runId,
+        after: -1,
+        limit: 32,
+      });
+      expect(read).toMatchObject({
+        outcome: "found",
+        events: [{ sequence: 0 }, { sequence: 1 }],
+        hasMore: false,
+      });
+      await expect(persistence.mutate(command)).resolves.toMatchObject({
+        outcome: "already_applied",
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(wake).toHaveBeenCalledOnce();
+    } finally {
+      await listener.close();
+    }
   });
 
   it("Sandbox acquire UNKNOWN 作为独立恢复事实持久化", async () => {

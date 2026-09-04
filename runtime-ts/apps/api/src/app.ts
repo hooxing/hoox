@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+import { openRunEventStream } from "./run-event-stream.js";
+import { RunEventStreamQuerySchema, type RunEventStreamQuery } from "@hoox/protocol";
 import type { ScheduledTaskManagementPort, ScheduledTaskMutation } from "@hoox/automation";
 import {
   DomainError,
@@ -505,6 +507,12 @@ export function createApiApp(
           },
   });
   const service = new ApiService(normalizedDependencies);
+  const eventStreams = new Set<AbortController>();
+  let eventStreamsClosing = false;
+  app.addHook("preClose", async () => {
+    eventStreamsClosing = true;
+    for (const controller of eventStreams) controller.abort();
+  });
   const authenticate = async (request: FastifyRequest) =>
     service.authenticate(authorization(request), requestId(request), tenantSelector(request));
   const authenticateSelectedTenant = async (request: FastifyRequest, selectedTenantId: string) =>
@@ -2041,6 +2049,66 @@ export function createApiApp(
   }
 
   if (normalizedDependencies.experience !== undefined) {
+    app.get<{ Params: RunPath; Querystring: RunEventStreamQuery }>(
+      "/v1/threads/:threadId/runs/:runId/events/stream",
+      {
+        handlerTimeout: 45_000,
+        schema: { params: RunPathSchema, querystring: RunEventStreamQuerySchema },
+      },
+      async (request, reply) => {
+        const experience = normalizedDependencies.experience;
+        if (experience === undefined) throw new ApiFailure("not_found");
+        const auth = await authenticate(request);
+        await service.getRun(auth, request.params.threadId, request.params.runId);
+        if (eventStreamsClosing) throw new ApiFailure("dependency_unavailable");
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        eventStreams.add(controller);
+        reply.raw.once("close", abort);
+        try {
+          const stream = await openRunEventStream({
+            cursor: request.query,
+            signal: controller.signal,
+            watch: (wake) =>
+              experience.watchEvents?.(
+                { scope: auth.scope, runId: runId(request.params.runId) },
+                wake,
+              ) ?? (() => {}),
+            read: async (after) => {
+              const currentAuth = await authenticate(request);
+              const run = await service.getRun(
+                currentAuth,
+                request.params.threadId,
+                request.params.runId,
+              );
+              const page = await experience.listEvents({
+                scope: currentAuth.scope,
+                runId: runId(run.id),
+                after,
+                limit: 32,
+              });
+              if (page.outcome === "not_found") throw new ApiFailure("not_found");
+              return { run, page };
+            },
+            publicType: publicEventType,
+          });
+          stream.once("close", () => {
+            eventStreams.delete(controller);
+            reply.raw.removeListener("close", abort);
+          });
+          reply.raw.setTimeout(0, abort);
+          return reply
+            .header("Content-Type", "text/event-stream; charset=utf-8")
+            .header("Cache-Control", "no-cache, no-transform")
+            .header("X-Accel-Buffering", "no")
+            .send(stream);
+        } catch (error) {
+          eventStreams.delete(controller);
+          reply.raw.removeListener("close", abort);
+          throw error;
+        }
+      },
+    );
     app.get<{ Params: RunPath; Querystring: RunEventListQuery }>(
       "/v1/threads/:threadId/runs/:runId/events",
       {

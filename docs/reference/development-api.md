@@ -53,6 +53,26 @@ GET /v1/threads/:threadId/runs/:runId/events?after=-1&limit=100
 - Run 不存在、Thread 不匹配、跨 Tenant 或成员关系失效统一返回 404。
 - 数据库异常映射为不泄漏 SQL 和内部错误的 503。
 
+### 实时输出
+
+```http
+GET /v1/threads/:threadId/runs/:runId/events/stream?after=-1&attemptId=attempt_1
+Accept: text/event-stream
+```
+
+该端点沿用分页端点的身份、Tenant、Thread/Run 归属和持久事件语义。浏览器用 fetch 携带现有身份 Header；`attemptId` 可省略，首次读取使用 `after=-1`。服务端发现最新 Attempt 与请求不同，会自动从 `-1` 补读。
+
+- `run-events` 帧的 JSON 为 `{ run, page: { attemptId?, items, hasMore } }`，事件字段与分页端点相同，每页最多 32 条。没有事件时也可以发送空页和当前 Run 状态。
+- `end` 帧的 JSON 为 `{ reason: "settled" | "renew" }`。Run 离开 queued/running 或进入 recovery_required，且事件已排空时发送 settled；约 30 秒后发送 renew，客户端携带已接收的 Attempt/sequence 立即续连。
+- 每次补读重新认证和校验 Membership/Run 归属。首次读取前的错误使用既有 HTTP 错误信封；响应开始后的读取或授权失败中断连接。没有 end 的 EOF 不能视为正常完成。
+- 事务提交通知唤醒 API 补读；通知丢失、监听断线或无通知的状态变化由约 1 秒的补读兜底。通知只含散列路由键，不包含正文，也不能绕过授权。
+- API 每进程共用一条专用 PostgreSQL LISTEN 连接，连接失败时自动重建；响应读取服从背压。浏览器断开或 API 关闭会释放该流订阅。
+- 响应使用 `Cache-Control: no-cache, no-transform` 和 `X-Accel-Buffering: no`。反向代理需要关闭响应缓冲，不能把 SSE 累积为完整响应后才转发。
+
+Web 正文与交付物、上下文读取独立。首批与控制事件立即显示；连续文字合并三个动画帧，定时器兜底目标为 50ms，实际绘制仍受浏览器调度影响。流中断按已接收游标重连；端点 404 时降级到约 1 秒分页轮询。切换任务取消旧连接和待发布文字。辅助信息约 5 秒刷新一次，关键事件和运行状态变化触发提前刷新。
+
+回复按新增事件折叠，Markdown 稳定块和代码行保持 DOM；跨块引用与脚注使用全文解析以保留语义。运行回复进入持久上下文时复用正文组件。用户回看历史时停止自动滚动，跟随底部时只在高度发生变化后调整位置。实现取舍见 [ADR-20260904103315](../decisions/20260904103315-run-event-stream-and-incremental-rendering.md)。
+
 ## Artifact
 
 ### 列出交付物

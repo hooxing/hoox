@@ -27,6 +27,11 @@ export function mergeEvents(
   existing: readonly RunEvent[],
   incoming: readonly RunEvent[],
 ): readonly RunEvent[] {
+  if (incoming.length === 0) return existing;
+  const last = existing.at(-1)?.sequence ?? -1;
+  if (incoming.every((event, index) => event.sequence > (incoming[index - 1]?.sequence ?? last))) {
+    return [...existing, ...incoming];
+  }
   const unique = new Map<number, RunEvent>();
   for (const event of [...existing, ...incoming]) unique.set(event.sequence, event);
   return [...unique.values()].sort((left, right) => left.sequence - right.sequence);
@@ -105,6 +110,12 @@ export function workspaceReducer(
         artifacts: [],
       };
     case "run":
+      if (
+        state.run?.id === action.run.id &&
+        (state.run.updatedAt > action.run.updatedAt ||
+          JSON.stringify(state.run) === JSON.stringify(action.run))
+      )
+        return state;
       return { ...state, run: action.run };
     case "startRun":
       return {
@@ -115,6 +126,8 @@ export function workspaceReducer(
         artifacts: [],
       };
     case "events":
+      if (action.page.attemptId === state.eventAttemptId && action.page.items.length === 0)
+        return state;
       return action.page.attemptId !== state.eventAttemptId
         ? { ...state, eventAttemptId: action.page.attemptId, events: action.page.items }
         : { ...state, events: mergeEvents(state.events, action.page.items) };

@@ -42,6 +42,7 @@ import {
 import { parseWorkspaceManifest } from "@hoox/workspace";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { PersistenceError } from "./errors.js";
+import { RUN_EVENT_WAKE_CHANNEL, runEventWakeKey } from "./pg-run-event-wake.js";
 import { enqueueMemoryIngestion } from "./pg-memory-ingestion.js";
 import {
   DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
@@ -2353,9 +2354,10 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
 
     for (const event of command.events) {
       await client.query(
-        `INSERT INTO run_events(
+        `WITH inserted AS (INSERT INTO run_events(
            tenant_id,attempt_id,sequence,schema_version,kind,payload,occurred_at
-         ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7)`,
+         ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7) RETURNING sequence)
+         SELECT pg_notify($8,$9) FROM inserted`,
         [
           command.fence.scope.tenantId,
           row.attempt_id,
@@ -2364,6 +2366,8 @@ export class PgExecutionPersistence implements ExecutionPersistencePort {
           event.kind,
           JSON.stringify(event.payload),
           databaseNow,
+          RUN_EVENT_WAKE_CHANNEL,
+          runEventWakeKey(command.fence.scope.tenantId, command.fence.scope.runId),
         ],
       );
     }

@@ -2,6 +2,22 @@ import { describe, expect, it } from "vitest";
 import { initialWorkspaceState, mergeEvents, workspaceReducer } from "./state.js";
 
 describe("mergeEvents", () => {
+  it("流已收到完成状态后，迟到的辅助请求不能把 Run 恢复为运行中", () => {
+    const completed = {
+      id: "run_1",
+      threadId: "thread_1",
+      status: "succeeded" as const,
+      createdAt: "2026-09-04T00:00:00Z",
+      updatedAt: "2026-09-04T00:00:02Z",
+    };
+    const current = { ...initialWorkspaceState, run: completed };
+    expect(
+      workspaceReducer(current, {
+        type: "run",
+        run: { ...completed, status: "running", updatedAt: "2026-09-04T00:00:01Z" },
+      }),
+    ).toBe(current);
+  });
   it("按序号去重并保持事件顺序", () => {
     const event = (sequence: number) => ({
       eventId: `evt_${sequence}`,

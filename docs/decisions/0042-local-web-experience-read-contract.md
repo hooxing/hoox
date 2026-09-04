@@ -1,10 +1,10 @@
 # ADR-0042：本地 Web 体验的 Run 事件与 Artifact 读取契约
 
-- 状态：已接受
+- 状态：部分已替代
 - 日期：2026-07-28
 - 决策者：Runtime 团队
 - 关联任务/PR：可体验 Web 纵向契约
-- 替代关系：无
+- 替代关系：实时流后置选择由 [ADR-20260904103315](20260904103315-run-event-stream-and-incremental-rendering.md) 替代；持久分页、Attempt 游标、Tenant 授权和 Artifact 发布下载边界继续有效。
 
 ## 背景
 

@@ -425,6 +425,11 @@ export interface CoreRepositories {
 
 /** 面向已认证用户的 Run 体验读取投影；实现必须在每次读取时重验 Membership。 */
 export interface RunExperienceReadPort {
+  /** 只提示重新读取；通知可重复或丢失，调用方必须保留定时补读与逐次授权。 */
+  watchEvents?(
+    input: { readonly scope: TenantScope; readonly runId: Run["id"] },
+    wake: () => void,
+  ): () => void;
   listEvents(input: {
     readonly scope: TenantScope;
     readonly runId: Run["id"];

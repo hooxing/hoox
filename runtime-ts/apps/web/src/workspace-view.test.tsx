@@ -58,6 +58,42 @@ describe("工作台展示组件", () => {
     expect(html).toContain('aria-hidden="true"');
   });
 
+  it("流式回复进入持久对话后保留正文 DOM", () => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const events = [agentEvent(0, "message.delta", { delta: "持续显示的回复" })];
+    try {
+      act(() =>
+        root.render(
+          <ThreadTranscript messages={[]} currentRun={running} currentRunEvents={events} />,
+        ),
+      );
+      const paragraph = container.querySelector(".assistant-markdown p");
+      expect(paragraph?.textContent).toBe("持续显示的回复");
+      act(() =>
+        root.render(
+          <ThreadTranscript
+            messages={[
+              {
+                role: "assistant",
+                runId: running.id,
+                sequence: 1,
+                text: "持续显示的回复",
+                createdAt: running.createdAt,
+              },
+            ]}
+            currentRun={{ ...running, status: "succeeded" }}
+            currentRunEvents={[...events, agentEvent(1, "message.completed", {})]}
+          />,
+        ),
+      );
+      expect(container.querySelector(".assistant-markdown p")).toBe(paragraph);
+      expect(container.querySelectorAll(".assistant-markdown p")).toHaveLength(1);
+    } finally {
+      act(() => root.unmount());
+    }
+  });
+
   it("会话空状态使用透明横版品牌图", () => {
     const html = renderToStaticMarkup(<EmptyConversation />);
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildConversationBlocks,
+  createConversationProjector,
   buildConversationSections,
   buildRunProgress,
   toolActionLabel,
@@ -16,6 +17,22 @@ const event = (sequence: number, type: string, payload: unknown) => ({
 });
 
 describe("用户运行进度投影", () => {
+  it("增量折叠与完整回放一致，已完成块保持对象身份", () => {
+    const events = [
+      event(0, "message.delta", { delta: "第一段" }),
+      event(1, "message.completed", {}),
+      event(2, "tool.started", { callId: "call", name: "web_search" }),
+      event(3, "tool.completed", { callId: "call", name: "web_search" }),
+      event(4, "message.delta", { delta: "第二段" }),
+    ];
+    const projector = createConversationProjector();
+    const prefix = projector.append(events.slice(0, 2));
+    for (let index = 2; index < events.length; index += 1) {
+      const blocks = projector.append(events.slice(index, index + 1));
+      expect(blocks).toEqual(buildConversationBlocks(events.slice(0, index + 1)));
+      expect(blocks[0]).toBe(prefix[0]);
+    }
+  });
   it("按原始顺序保留多段思考、回答与工具状态", () => {
     const blocks = buildConversationBlocks([
       event(1, "thinking.delta", { delta: "先分析。" }),

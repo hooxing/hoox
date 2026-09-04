@@ -301,6 +301,9 @@ importers:
       '@hoox/ui-theme':
         specifier: workspace:*
         version: link:../../packages/ui-theme
+      '@hoox/vendor-deepseek-markdown':
+        specifier: workspace:*
+        version: link:../../vendor/deepseek-markdown
       lucide-react:
         specifier: 0.544.0
         version: 0.544.0(react@19.1.1)
@@ -316,7 +319,16 @@ importers:
       remark-gfm:
         specifier: 4.0.1
         version: 4.0.1
+      remark-parse:
+        specifier: 11.0.0
+        version: 11.0.0
+      unified:
+        specifier: 11.0.5
+        version: 11.0.5
     devDependencies:
+      '@types/mdast':
+        specifier: 4.0.4
+        version: 4.0.4
       '@types/react':
         specifier: 19.1.13
         version: 19.1.13
@@ -585,6 +597,12 @@ importers:
       vitest:
         specifier: ^2.0.5
         version: 2.1.9(@types/node@20.19.43)(jsdom@26.1.0)(lightningcss@1.33.0)
+
+  runtime-ts/vendor/deepseek-markdown:
+    devDependencies:
+      '@types/mdast':
+        specifier: 4.0.4
+        version: 4.0.4
 
   runtime-ts/vendor/deepseek-trajectory: {}
 

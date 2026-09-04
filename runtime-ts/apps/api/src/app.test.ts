@@ -2188,6 +2188,107 @@ describe("Fastify API 契约", () => {
     expect(state.runs).toHaveLength(1);
   });
 
+  it("实时事件流补读后显式完成，并保留鉴权、游标和租户边界", async () => {
+    const { app } = fixture({ enableExperience: true });
+    openApps.push(app);
+    const errors: Error[] = [];
+    app.addHook("onError", async (_request, _reply, error) => {
+      errors.push(error);
+    });
+    await createModelWireTraceRun(app);
+    await app.inject({
+      method: "DELETE",
+      url: "/v1/threads/thread_1/runs/run_1",
+      headers: { authorization: "Bearer token-a" },
+    });
+    const url = "/v1/threads/thread_1/runs/run_1/events/stream?after=7&attemptId=attempt_1";
+    const response = await app.inject({
+      method: "GET",
+      url,
+      headers: { authorization: "Bearer token-a" },
+    });
+    expect(errors).toEqual([]);
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/event-stream");
+    expect(response.headers["x-accel-buffering"]).toBe("no");
+    expect(response.body).toContain('"sequence":8');
+    expect(response.body).not.toContain('"sequence":7');
+    expect(response.body).toContain('event: end\ndata: {"reason":"settled"}');
+    expect(
+      (await app.inject({ method: "GET", url, headers: { authorization: "Bearer token-b" } }))
+        .statusCode,
+    ).toBe(404);
+    expect((await app.inject({ method: "GET", url })).statusCode).toBe(401);
+    expect(
+      (
+        await app.inject({
+          method: "GET",
+          url: url.replace("after=7", "after=-2"),
+          headers: { authorization: "Bearer token-a" },
+        })
+      ).statusCode,
+    ).toBe(400);
+  });
+
+  it("真实 HTTP 在 Run 结束前交付增量，撤销身份后停止推送并清理订阅", async () => {
+    const base = fixture({ enableExperience: true });
+    openApps.push(base.app);
+    const experience = base.dependencies.experience;
+    if (experience === undefined) throw new Error("缺少事件夹具");
+    let wake: (() => void) | undefined;
+    let lastSequence = 0;
+    const unwatch = vi.fn();
+    const app = createApiApp(
+      {
+        ...base.dependencies,
+        experience: {
+          ...experience,
+          watchEvents: (_input, callback) => {
+            wake = callback;
+            return unwatch;
+          },
+          listEvents: async ({ after }) => ({
+            outcome: "found",
+            attemptId: "attempt_live",
+            hasMore: false,
+            events: Array.from({ length: lastSequence + 1 }, (_, sequence) => ({
+              sequence,
+              kind: "agent_event",
+              payload: { type: "message.delta", delta: `实时文字${sequence}` },
+              occurredAt: baseTime,
+            })).filter((event) => event.sequence > after),
+          }),
+        },
+      },
+      { logger: false },
+    );
+    openApps.push(app);
+    await createModelWireTraceRun(app);
+    const origin = await app.listen({ host: "127.0.0.1", port: 0 });
+    const controller = new AbortController();
+    const response = await fetch(`${origin}/v1/threads/thread_1/runs/run_1/events/stream`, {
+      headers: { authorization: "Bearer token-a" },
+      signal: controller.signal,
+    });
+    const reader = response.body?.getReader();
+    if (reader === undefined) throw new Error("缺少实时响应正文");
+    try {
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain("实时文字0");
+      lastSequence = 1;
+      wake?.();
+      expect(new TextDecoder().decode((await reader.read()).value)).toContain("实时文字1");
+      base.state.principals.delete("Bearer token-a");
+      lastSequence = 2;
+      wake?.();
+      const ending = await reader.read().catch(() => ({ done: true, value: undefined }));
+      expect(ending.done).toBe(true);
+      expect(unwatch).toHaveBeenCalledOnce();
+    } finally {
+      controller.abort();
+      await reader.cancel().catch(() => undefined);
+    }
+  });
+
   it("V2 read 开启时按 Thread 返回跨 Run 对话，关闭时路由不存在", async () => {
     const enabled = fixture({ enableThreadContext: true, enableThreadContinuity: true });
     openApps.push(enabled.app);

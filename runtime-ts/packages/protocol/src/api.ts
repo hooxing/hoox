@@ -47,6 +47,18 @@ export const RunEventListQuerySchema = Type.Object(
 );
 export type RunEventListQuery = Static<typeof RunEventListQuerySchema>;
 
+/** SSE 重连游标必须同时携带 Attempt；缺失或变化时从当前 Attempt 起点重放。 */
+export const RunEventStreamQuerySchema = Type.Object(
+  {
+    after: Type.Optional(
+      Type.Integer({ minimum: -1, maximum: Number.MAX_SAFE_INTEGER, default: -1 }),
+    ),
+    attemptId: Type.Optional(IdSchema),
+  },
+  strict,
+);
+export type RunEventStreamQuery = Static<typeof RunEventStreamQuerySchema>;
+
 export const ThreadContextListQuerySchema = Type.Object(
   {
     after: Type.Optional(

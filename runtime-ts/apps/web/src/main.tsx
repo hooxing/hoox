@@ -45,6 +45,7 @@ import { HOOX_HORIZONTAL_PATH } from "./brand.js";
 import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages, loadAllRunEvents } from "./polling.js";
+import { followRunOutput } from "./run-output.js";
 import { openResolvedUrl, PopupBlockedError } from "./popup.js";
 import { type PersonalizationApi, PersonalizationDialog } from "./personalization.js";
 import { type SkillCenterApi, SkillCenterDialog } from "./skill-center.js";
@@ -67,7 +68,6 @@ import {
   pollingRunStatuses,
   RunRecoveryLoading,
   RunTimeline,
-  RunTranscript,
   ThreadCreate,
   ThreadHeader,
   ThreadNavigation,
@@ -143,6 +143,7 @@ type WorkspaceApi = Pick<
   | "previewArtifact"
   | "uploadResource"
 > & {
+  readonly streamEvents?: RuntimeApi["streamEvents"];
   readonly listThreadContext?: RuntimeApi["listThreadContext"];
   readonly previewHistoryFile?: RuntimeApi["previewHistoryFile"];
   readonly getThread?: RuntimeApi["getThread"];
@@ -370,6 +371,7 @@ function AuthenticatedWorkspace({
   const navigationRef = useRef(new WorkspaceNavigation());
   const mobileNavigationToggleRef = useRef<HTMLButtonElement>(null);
   const runAreaRef = useRef<HTMLElement>(null);
+  const runContentRef = useRef<HTMLDivElement>(null);
   const followLatestRef = useRef(true);
   const followedThreadRef = useRef<string | undefined>(undefined);
   const sendInFlightRef = useRef(false);
@@ -723,19 +725,31 @@ function AuthenticatedWorkspace({
     const pollGeneration = currentRunPollRef.current.activate(threadId, runId);
     let stopped = false;
     let timer: number | undefined;
+    const outputController = new AbortController();
+    let outputSettled = apiClient.streamEvents === undefined;
+    let polling = false;
+    let refreshRequested = false;
     const poll = async (): Promise<void> => {
       if (!currentRunPollRef.current.isCurrent(pollGeneration)) return;
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (polling) {
+        refreshRequested = true;
+        return;
+      }
+      polling = true;
       let recoveryRequired = runExecutionStatusRef.current === "recovery_required";
       try {
         const latest = await apiClient.getRun(threadId, runId);
         recoveryRequired = latest.executionStatus === "recovery_required";
         const [eventPage, artifacts, threadContext, continuityStatus, threadSnapshot] =
           await Promise.all([
-            drainEventPages(
-              (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
-              eventAfterRef.current,
-              eventAttemptRef.current,
-            ),
+            apiClient.streamEvents === undefined
+              ? drainEventPages(
+                  (after, limit) => apiClient.listEvents(threadId, runId, after, limit),
+                  eventAfterRef.current,
+                  eventAttemptRef.current,
+                )
+              : Promise.resolve(undefined),
             apiClient.listArtifacts(threadId, runId),
             apiClient.listThreadContext?.(threadId).catch(() => undefined) ??
               Promise.resolve(undefined),
@@ -744,20 +758,22 @@ function AuthenticatedWorkspace({
             apiClient.getThread?.(threadId).catch(() => undefined) ?? Promise.resolve(undefined),
           ]);
         if (!stopped && currentRunPollRef.current.isCurrent(pollGeneration)) {
-          eventAttemptRef.current = eventPage.attemptId;
-          eventAfterRef.current = eventPage.nextAfter;
+          if (eventPage !== undefined) {
+            eventAttemptRef.current = eventPage.attemptId;
+            eventAfterRef.current = eventPage.nextAfter;
+            dispatch({ type: "events", page: eventPage });
+          }
           dispatch({ type: "run", run: latest });
           if (threadSnapshot !== undefined) {
             dispatch({ type: "threadUpdated", thread: threadSnapshot });
           }
-          dispatch({ type: "events", page: eventPage });
           dispatch({ type: "artifacts", artifacts });
           if (apiClient.listThreadContext !== undefined) {
             dispatch({ type: "threadContext", items: threadContext });
           }
           if (apiClient.getThreadContinuity !== undefined) setContinuity(continuityStatus);
           if (
-            !eventPage.hasMore &&
+            (apiClient.streamEvents === undefined ? !eventPage?.hasMore : outputSettled) &&
             (latest.status === "succeeded" ||
               latest.status === "failed" ||
               latest.status === "cancelled")
@@ -780,13 +796,16 @@ function AuthenticatedWorkspace({
           if (
             !recoveryRequired &&
             shouldContinueRunPolling(
-              eventPage.hasMore,
+              eventPage?.hasMore ?? false,
               latest.status,
               continuityStatus?.sandboxState,
               latest.executionStatus,
             )
           ) {
-            timer = window.setTimeout(() => void poll(), 1200);
+            timer = window.setTimeout(
+              () => void poll(),
+              apiClient.streamEvents === undefined ? 1200 : 5_000,
+            );
           }
         }
       } catch (reason) {
@@ -794,11 +813,62 @@ function AuthenticatedWorkspace({
           setError(reason instanceof ApiError ? reason : new ApiError("轮询运行状态失败", 0, true));
           if (!recoveryRequired) timer = window.setTimeout(() => void poll(), 1200);
         }
+      } finally {
+        polling = false;
+        if (refreshRequested && !stopped) {
+          refreshRequested = false;
+          if (timer !== undefined) window.clearTimeout(timer);
+          timer = window.setTimeout(() => void poll(), 0);
+        }
       }
     };
+    if (apiClient.streamEvents !== undefined) {
+      let observedStatus: string | undefined;
+      void followRunOutput({
+        api: {
+          streamEvents: apiClient.streamEvents.bind(apiClient),
+          listEvents: apiClient.listEvents.bind(apiClient),
+          getRun: apiClient.getRun.bind(apiClient),
+        },
+        threadId,
+        runId,
+        signal: outputController.signal,
+        onPage: (page) => {
+          if (stopped || !currentRunPollRef.current.isCurrent(pollGeneration)) return;
+          if (eventAttemptRef.current !== page.attemptId) eventAfterRef.current = -1;
+          eventAttemptRef.current = page.attemptId;
+          eventAfterRef.current = page.items.at(-1)?.sequence ?? eventAfterRef.current;
+          dispatch({ type: "events", page });
+          if (
+            page.items.some(
+              (event) =>
+                event.type === "message.completed" ||
+                event.type === "tool.completed" ||
+                event.type === "final_answer.committed",
+            )
+          )
+            void poll();
+        },
+        onRun: (run) => {
+          if (stopped || !currentRunPollRef.current.isCurrent(pollGeneration)) return;
+          dispatch({ type: "run", run });
+          const status = `${run.status}:${run.executionStatus ?? ""}`;
+          if (observedStatus !== undefined && observedStatus !== status) void poll();
+          observedStatus = status;
+        },
+        onSettled: () => {
+          outputSettled = true;
+          if (!stopped) void poll();
+        },
+        onError: (error) => {
+          if (!stopped) setError(error);
+        },
+      });
+    }
     void poll();
     return () => {
       stopped = true;
+      outputController.abort();
       currentRunPollRef.current.invalidate(pollGeneration);
       if (timer !== undefined) window.clearTimeout(timer);
     };
@@ -1170,9 +1240,6 @@ function AuthenticatedWorkspace({
       ? recoveryUi
       : undefined;
   const visibleError = currentRecovery?.status === "error" ? currentRecovery.error : error;
-  const currentRunHasAssistantContext =
-    state.run !== undefined &&
-    state.threadContext?.some((item) => item.runId === state.run?.id && item.role === "assistant");
   const persistedUserOccurrences = new Map<string, number>();
   for (const message of state.threadContext ?? []) {
     if (message.role !== "user") continue;
@@ -1200,8 +1267,23 @@ function AuthenticatedWorkspace({
       followedThreadRef.current = state.selectedThreadId;
       followLatestRef.current = true;
     }
-    if (followLatestRef.current) runArea.scrollTop = runArea.scrollHeight;
+    const bottom = Math.max(0, runArea.scrollHeight - runArea.clientHeight);
+    if (followLatestRef.current && Math.abs(runArea.scrollTop - bottom) > 1)
+      runArea.scrollTop = bottom;
   }, [renderedContentVersion, state.selectedThreadId]);
+  useLayoutEffect(() => {
+    if (state.selectedThreadId === undefined) return;
+    const area = runAreaRef.current;
+    const content = runContentRef.current;
+    if (area === null || content === null || typeof ResizeObserver === "undefined") return;
+    // 图片解码、折叠展开也可能改变高度，但不能把正在回看的用户拉回底部。
+    const observer = new ResizeObserver(() => {
+      const bottom = Math.max(0, area.scrollHeight - area.clientHeight);
+      if (followLatestRef.current && Math.abs(area.scrollTop - bottom) > 1) area.scrollTop = bottom;
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [state.selectedThreadId]);
   return (
     <main className={`workspace ${navigationOpen ? "navigation-open" : ""}`}>
       <NavigationSidebar
@@ -1460,37 +1542,34 @@ function AuthenticatedWorkspace({
                 );
               }}
             >
-              <ThreadTranscript
-                messages={state.threadContext ?? []}
-                pendingInputs={visiblePendingInputs}
-                loadRunEvents={(runId) =>
-                  loadAllRunEvents((after, limit) =>
-                    apiClient.listEvents(selected.id, runId, after, limit),
-                  )
-                }
-                {...(attachmentPreviewLoader === undefined
-                  ? {}
-                  : { loadAttachmentUrl: attachmentPreviewLoader })}
-                {...(state.run === undefined
-                  ? {}
-                  : { currentRun: state.run, currentRunEvents: state.events })}
-              />
-              {state.run ? (
-                <>
-                  {!currentRunHasAssistantContext && (
-                    <RunTranscript run={state.run} events={state.events} />
-                  )}
+              <div ref={runContentRef} className="run-content">
+                <ThreadTranscript
+                  messages={state.threadContext ?? []}
+                  pendingInputs={visiblePendingInputs}
+                  loadRunEvents={(runId) =>
+                    loadAllRunEvents((after, limit) =>
+                      apiClient.listEvents(selected.id, runId, after, limit),
+                    )
+                  }
+                  {...(attachmentPreviewLoader === undefined
+                    ? {}
+                    : { loadAttachmentUrl: attachmentPreviewLoader })}
+                  {...(state.run === undefined
+                    ? {}
+                    : { currentRun: state.run, currentRunEvents: state.events })}
+                />
+                {state.run ? (
                   <InlineArtifactDelivery
                     artifacts={state.artifacts}
                     onPreview={(artifactId) => void preview(artifactId)}
                     onDownload={(artifactId) => void download(artifactId)}
                   />
-                </>
-              ) : currentRecovery?.status === "loading" ? (
-                <RunRecoveryLoading />
-              ) : (
-                <EmptyConversation />
-              )}
+                ) : currentRecovery?.status === "loading" ? (
+                  <RunRecoveryLoading />
+                ) : (
+                  <EmptyConversation />
+                )}
+              </div>
             </section>
             {state.run && (
               <div className="run-progress-dock">

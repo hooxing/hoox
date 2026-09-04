@@ -1,10 +1,10 @@
 # ADR-0039：本地 Agent 工作台与公开 API 边界
 
-- 状态：已接受
+- 状态：部分已替代
 - 日期：2026-07-28
 - 决策者：Runtime 团队
 - 关联任务/PR：本地工作台体验
-- 替代关系：无
+- 替代关系：正文短轮询选择由 [ADR-20260904103315](20260904103315-run-event-stream-and-incremental-rendering.md) 替代；同源 API、默认 fetch receiver、事件安全展示、导航代次和 Artifact 边界继续有效。
 
 ## 背景
 

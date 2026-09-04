@@ -15,9 +15,11 @@ MODEL_WIRE_TRACE_MAX_BYTES=1048576
 修改后必须重启 Worker；运行中的进程不会动态开启采集。
 
 - `MODEL_WIRE_TRACE_RETENTION_DAYS` 决定新记录的到期时间。
-- `MODEL_WIRE_TRACE_MAX_BYTES` 是每个 request/response 正文的独立字节上限。
+- `MODEL_WIRE_TRACE_MAX_BYTES` 是每个 request 正文的独立字节上限。
 - 超限只保存精确前缀并标记为 `truncated`。
-- 采集关闭期间的旧 Run 无法事后重建精确请求与 SSE。
+- 原始 response 正文（包括完整 SSE、截断片段和非 2xx 正文）不再复制、旁路读取或保存到 PostgreSQL/MinIO 与本地镜像；思考、回复、Tool Call 和工具结果仍由轨迹事件保留。
+- Fetch 在返回响应前拒绝或中止时仍保存无正文的稳定失败类别，并向调用方原样抛回错误；响应开始后的断流由 Provider/轨迹事件报告，不再另存原始响应片段。
+- 采集关闭期间的旧 Run 无法事后重建精确请求；未保存的原始 response 也无法从轨迹事件还原为逐字节报文。
 - 采集端口不接收 HTTP headers，因此不会保存 Authorization、Cookie 或 Provider 密钥。
 
 ## 本地镜像目录
@@ -32,7 +34,6 @@ model-wire-traces/<runId>/<attemptId>/
 
 ```text
 model-turn-00-transport-0-request-complete.json
-model-turn-00-transport-0-response-truncated.sse
 runtime-event-00000003-agent_event.json
 startup-timings.json
 ```
@@ -45,15 +46,9 @@ startup-timings.json
 
 ## Web 中查看
 
-启动 development API 与 Web 后，在 Thread 的 Run 详情中进入“模型网络报文”区域，可以按以下维度查看：
+普通用户工作台不提供模型报文入口，也不轮询诊断 API。维护者通过下方内部轨迹查看器查看 Attempt、模型轮次 `modelTurn`、同轮 HTTP 重试 `transportAttempt` 及 request 原文。
 
-- Attempt；
-- `modelTurn`：工具循环中的模型轮次；
-- `transportAttempt`：同一模型轮次的 HTTP 传输重试；
-- request/response；
-- HTTP 状态、字节数、SHA-256 和采集状态。
-
-request 是交给 Fetch 的最终 application request body；response 是 HTTP content-decoding 后、SSE 解析前的应用正文，不包含 TCP/chunk framing 或压缩前线路字节。
+request 是交给 Fetch 的最终 application request body，不是由 payload 对象重建的 JSON。模型返回内容从轨迹中的思考、回复、Tool Call 和工具结果查看。
 
 ## 诊断 API
 
@@ -63,6 +58,8 @@ GET /v1/threads/:threadId/runs/:runId/model-wire-traces/:attemptId/:modelTurn/:t
 ```
 
 第一个端点返回元数据并使用 `nextCursor` 分页；第二个端点读取 request 或 response 的 `application/octet-stream` 原始正文。接口沿用认证、Tenant Membership/RLS 和 Thread/Run 归属校验，不返回 S3 URL。
+
+该 API 保留旧 response 记录的读取兼容性和既有到期清理语义，不代表仍在新增采集 response。历史 PostgreSQL/MinIO 数据不做批量删除，也不修改已发布 migration。
 
 ## 内部轨迹查看器
 
@@ -78,7 +75,7 @@ corepack pnpm dev:trajectory
 http://127.0.0.1:4188
 ```
 
-查看器从仓库根目录 `model-wire-traces` 聚合 durable Run 事件，展示近似模型步骤、思考、回复、工具生命周期、Attempt 状态、稳定错误类别和 request/response 原文。
+查看器从仓库根目录 `model-wire-traces` 聚合 durable Run 事件，展示近似模型步骤、思考、回复、工具生命周期、Attempt 状态、稳定错误类别和 request 原文。`Model wire` 只列出 request；所有历史 response 文件均不列出，直接请求查看器文件 API 也返回 404。旧文件保留在原目录，不由查看器删除。
 
 development 管理 Web 的“数据运营”页显示“打开内部轨迹”链接。该链接在新窗口打开回环地址，不把轨迹正文交给 Admin API；仍需维护者单独启动上述命令。
 

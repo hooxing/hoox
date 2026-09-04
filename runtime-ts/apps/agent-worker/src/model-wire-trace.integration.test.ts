@@ -48,9 +48,8 @@ afterEach(async () => {
 });
 
 describe("模型网络报文真实 Pi transport", () => {
-  it("穿过 PiWorkerSessionFactory 的工具循环，逐轮保存精确请求、SSE 与模型可见真实命令结果", async () => {
+  it("真实 Pi 工具循环仅保存精确请求，回复与模型可见命令结果不依赖原始 SSE 存储", async () => {
     const requests: ProviderRequest[] = [];
-    const responses: Buffer[] = [];
     const server = createServer((request, response) => {
       void handleRequest(request, response, async (providerRequest) => {
         requests.push(providerRequest);
@@ -61,7 +60,6 @@ describe("模型网络报文真实 Pi transport", () => {
           : toolCallSse("call-wire-write", "exec_command", {
               cmd: "printf wire-tool-effect > /tmp/wire-trace.txt",
             });
-        responses.push(bytes);
         sendSse(response, bytes);
       });
     });
@@ -88,6 +86,7 @@ describe("模型网络报文真实 Pi transport", () => {
     expect(String(toolResult?.content)).toContain('"exit_code":0');
     expect(String(toolResult?.content)).toContain('"stdout":"wire-tool-effect\\n"');
     expect(sandboxes.handle.files.get("/tmp/wire-trace.txt")).toBe("wire-tool-effect");
+    expect(JSON.stringify(persistence.record(scope).events)).toContain("工具结果已核验");
 
     const requestRecords = recordsFor(traces, "request");
     const responseRecords = recordsFor(traces, "response");
@@ -97,16 +96,10 @@ describe("模型网络报文真实 Pi transport", () => {
       [0, 0],
       [1, 0],
     ]);
-    expect(
-      responseRecords.map(({ modelTurn, transportAttempt }) => [modelTurn, transportAttempt]),
-    ).toEqual([
-      [0, 0],
-      [1, 0],
-    ]);
+    expect(responseRecords).toEqual([]);
     expect(requestRecords.map((record) => Buffer.from(record.body))).toEqual(
       requests.map((request) => request.bodyBytes),
     );
-    expect(responseRecords.map((record) => Buffer.from(record.body))).toEqual(responses);
     expect(traces.failures).toEqual([]);
     expect(JSON.stringify({ records: traces.records, failures: traces.failures })).not.toContain(
       "test-wire-secret",
@@ -147,16 +140,7 @@ describe("模型网络报文真实 Pi transport", () => {
       [0, 0],
       [0, 1],
     ]);
-    expect(
-      recordsFor(traces, "response").map((record) => ({
-        modelTurn: record.modelTurn,
-        transportAttempt: record.transportAttempt,
-        httpStatus: record.httpStatus,
-      })),
-    ).toEqual([
-      { modelTurn: 0, transportAttempt: 0, httpStatus: 429 },
-      { modelTurn: 0, transportAttempt: 1, httpStatus: 200 },
-    ]);
+    expect(recordsFor(traces, "response")).toEqual([]);
   });
 
   it("两个 Worker Attempt 并发时上下文、modelTurn 与 transportAttempt 完全隔离", async () => {
@@ -199,6 +183,7 @@ describe("模型网络报文真实 Pi transport", () => {
 
     const requestRecords = recordsFor(traces, "request");
     expect(requestRecords).toHaveLength(2);
+    expect(recordsFor(traces, "response")).toEqual([]);
     expect(new Set(requestRecords.map((record) => record.context.runId))).toEqual(
       new Set([scopeA.runId, scopeB.runId]),
     );

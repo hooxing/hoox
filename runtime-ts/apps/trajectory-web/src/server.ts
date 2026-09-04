@@ -15,8 +15,8 @@ import type { RunDisplayMetadata, RunMetadataProvider } from "./runtime-metadata
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$/u;
 const runtimeEventPattern = /^runtime-event-(\d{8})-([a-z_]+)\.json$/u;
 const trajectoryEventPattern = /^trajectory-event-(\d{8})\.json$/u;
-const wireFilePattern =
-  /^model-turn-(\d+)-transport-(\d+)-(request|response)-([a-z_]+)\.(json|sse|bin)$/u;
+// 列表与正文读取共用白名单，历史 response 文件也不再由内部查看器暴露。
+const wireFilePattern = /^model-turn-(\d+)-transport-(\d+)-(request)-([a-z_]+)\.(json|bin)$/u;
 const maximumTraceFileBytes = 4 * 1024 * 1024;
 
 export interface TrajectoryServerOptions {
@@ -173,7 +173,7 @@ async function readAttempt(attempt: AttemptDirectory) {
     name: string;
     modelTurn: number;
     transportAttempt: number;
-    part: "request" | "response";
+    part: "request";
     status: string;
     size: number;
     updatedAt: string;
@@ -222,7 +222,7 @@ async function readAttempt(attempt: AttemptDirectory) {
         name: entry.name,
         modelTurn: Number(wireMatch[1]),
         transportAttempt: Number(wireMatch[2]),
-        part: wireMatch[3] as "request" | "response",
+        part: "request",
         status: wireMatch[4] ?? "unknown",
         size: metadata.size,
         updatedAt: metadata.mtime.toISOString(),

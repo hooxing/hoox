@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -29,6 +29,67 @@ describe("轨迹查看器 HTTP 页面", () => {
 });
 
 describe("trajectory diagnostics filesystem", () => {
+  it("只列出请求报文并拒绝读取历史响应，仍保留轨迹中的思考和回复", async () => {
+    const root = await temporaryRoot();
+    const attemptPath = join(root, "run_1", "attempt-1");
+    await mkdir(attemptPath, { recursive: true });
+    const requestFiles = [
+      "model-turn-00-transport-0-request-complete.json",
+      "model-turn-01-transport-0-request-truncated.json",
+    ];
+    const responseFiles = [
+      "model-turn-00-transport-0-response-complete.sse",
+      "model-turn-00-transport-0-response-complete.json",
+      "model-turn-01-transport-0-response-truncated.sse",
+      "model-turn-02-transport-0-response-aborted.bin",
+      "model-turn-03-transport-0-response-failed.sse",
+    ];
+    await Promise.all(
+      [...requestFiles, ...responseFiles].map((name) => writeFile(join(attemptPath, name), "{}")),
+    );
+    await writeFile(
+      join(attemptPath, "trajectory-event-00000001.json"),
+      JSON.stringify({
+        schemaVersion: 1,
+        sequence: 1,
+        occurredAt: "2026-09-04T00:00:00.000Z",
+        monotonicOffsetMs: 0,
+        source: "pi",
+        type: "message_end",
+        event: {
+          type: "message_end",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "先核对工具结果" },
+              { type: "text", text: "工具结果已核验" },
+            ],
+          },
+        },
+      }),
+    );
+
+    const attempt = await internalTesting.readAttempt({
+      attemptId: "attempt-1",
+      path: attemptPath,
+      updatedAt: "2026-09-04T00:00:00.000Z",
+    });
+    expect(attempt.wireFiles.map((file) => file.name)).toEqual(requestFiles);
+    expect(JSON.stringify(attempt.internalTrajectory.records)).toContain("先核对工具结果");
+    expect(JSON.stringify(attempt.internalTrajectory.records)).toContain("工具结果已核验");
+    for (const name of requestFiles) {
+      await expect(internalTesting.safeTraceFile(root, "run_1", "attempt-1", name)).resolves.toBe(
+        join(attemptPath, name),
+      );
+    }
+    for (const name of responseFiles) {
+      await expect(
+        internalTesting.safeTraceFile(root, "run_1", "attempt-1", name),
+      ).resolves.toBeUndefined();
+      await expect(readFile(join(attemptPath, name), "utf8")).resolves.toBe("{}");
+    }
+  });
+
   it("只发现固定根下的普通 Run 和 Attempt 目录", async () => {
     const root = await temporaryRoot();
     const attempt = join(root, "run_1", "attempt-1");

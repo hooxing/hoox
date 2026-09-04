@@ -39,11 +39,11 @@ import {
   type Run,
   type RunEvent,
   type RunStatus,
+  type RuntimeApi,
   type Thread,
   type ThreadContextAttachment,
   type ThreadContextMessage,
   type ThreadContinuityStatus,
-  type RuntimeApi,
 } from "./api.js";
 import { HOOX_HORIZONTAL_PATH } from "./brand.js";
 import {
@@ -601,6 +601,99 @@ function AgentTurn({
 
 type AssistantThreadContextMessage = ThreadContextMessage & { readonly role: "assistant" };
 
+type AssistantTranscriptSegment = {
+  readonly kind: "assistant";
+  readonly runId: string;
+  readonly messages: AssistantThreadContextMessage[];
+  readonly after?: string;
+  before?: string;
+};
+
+type ThreadTranscriptItem =
+  | AssistantTranscriptSegment
+  | { readonly kind: "message"; readonly message: ThreadContextMessage };
+
+function buildThreadTranscriptItems(
+  messages: readonly ThreadContextMessage[],
+): readonly ThreadTranscriptItem[] {
+  const items: ThreadTranscriptItem[] = [];
+  let lastUserAt: string | undefined;
+  let latestAssistantSegment: AssistantTranscriptSegment | undefined;
+  for (const message of messages) {
+    if (message.role === "assistant" && message.runId !== undefined) {
+      const tail = items.at(-1);
+      if (tail?.kind === "assistant" && tail.runId === message.runId) {
+        tail.messages.push(message as AssistantThreadContextMessage);
+        latestAssistantSegment = tail;
+        continue;
+      }
+      const segment: AssistantTranscriptSegment = {
+        kind: "assistant",
+        runId: message.runId,
+        messages: [message as AssistantThreadContextMessage],
+        ...(lastUserAt === undefined ? {} : { after: lastUserAt }),
+      };
+      items.push(segment);
+      latestAssistantSegment = segment;
+      continue;
+    }
+    items.push({ kind: "message", message });
+    if (message.role === "user") {
+      if (latestAssistantSegment !== undefined) latestAssistantSegment.before = message.createdAt;
+      lastUserAt = message.createdAt;
+      latestAssistantSegment = undefined;
+    }
+  }
+  return items;
+}
+
+function segmentedRunIds(
+  items: readonly ThreadTranscriptItem[],
+  messages: readonly ThreadContextMessage[],
+): ReadonlySet<string> {
+  const counts = new Map<string, number>();
+  const segmented = new Set<string>();
+  for (const item of items) {
+    if (item.kind !== "assistant") continue;
+    const count = (counts.get(item.runId) ?? 0) + 1;
+    counts.set(item.runId, count);
+    if (count > 1) segmented.add(item.runId);
+  }
+  const seenAssistantRuns = new Set<string>();
+  for (const message of messages) {
+    if (message.role === "assistant" && message.runId !== undefined) {
+      seenAssistantRuns.add(message.runId);
+    } else if (
+      message.role === "user" &&
+      message.runId !== undefined &&
+      seenAssistantRuns.has(message.runId)
+    ) {
+      segmented.add(message.runId);
+    }
+  }
+  return segmented;
+}
+
+function eventsInTranscriptInterval(
+  events: readonly RunEvent[],
+  after: string | undefined,
+  before: string | undefined,
+): readonly RunEvent[] {
+  // Thread Context 用户消息在 turn 安全点后持久化；时间边界禁止后续 steer 回复越过该消息。
+  if (after === undefined && before === undefined) return events;
+  const afterTime = after === undefined ? undefined : Date.parse(after);
+  const beforeTime = before === undefined ? undefined : Date.parse(before);
+  return events.filter((event) => {
+    const occurredAt = Date.parse(event.occurredAt);
+    if (!Number.isFinite(occurredAt)) return false;
+    if (afterTime !== undefined && Number.isFinite(afterTime) && occurredAt <= afterTime)
+      return false;
+    if (beforeTime !== undefined && Number.isFinite(beforeTime) && occurredAt >= beforeTime)
+      return false;
+    return true;
+  });
+}
+
 function HistoricalAgentTurn({
   runId,
   messages,
@@ -830,62 +923,99 @@ export function ThreadTranscript({
   readonly loadAttachmentUrl?: (attachment: ThreadContextAttachment) => Promise<string>;
 }) {
   if (messages.length === 0 && pendingInputs.length === 0) return null;
-  const currentBlocks = currentRun === undefined ? [] : buildConversationBlocks(currentRunEvents);
-  const renderedAgentTurns = new Set<string>();
+  const transcriptItems = buildThreadTranscriptItems(messages);
+  const segmentedRuns = segmentedRunIds(transcriptItems, messages);
+  const currentRunTail =
+    currentRun === undefined
+      ? undefined
+      : [...messages]
+          .reverse()
+          .find(
+            (message) =>
+              message.runId === currentRun.id &&
+              (message.role === "user" || message.role === "assistant"),
+          );
+  const hasCurrentRunTail =
+    currentRun !== undefined && currentRunTail?.role === "user" && segmentedRuns.has(currentRun.id);
+  const tailEvents = hasCurrentRunTail
+    ? eventsInTranscriptInterval(currentRunEvents, currentRunTail.createdAt, undefined)
+    : [];
+  const projectedTailBlocks = buildConversationBlocks(tailEvents);
+  const tailFallback =
+    currentRun === undefined || !hasCurrentRunTail
+      ? undefined
+      : terminalFallbackAnswer(currentRun, tailEvents, projectedTailBlocks);
+  const tailBlocks =
+    tailFallback === undefined ? projectedTailBlocks : [...projectedTailBlocks, tailFallback];
   return (
     <section className="assistant-transcript" aria-label="Thread 连续对话">
-      {messages.map((message) =>
-        message.role === "user" ? (
+      {transcriptItems.map((item) =>
+        item.kind === "message" && item.message.role === "user" ? (
           <UserRequestMessage
-            text={message.text}
-            {...(message.attachments === undefined ? {} : { attachments: message.attachments })}
+            text={item.message.text}
+            {...(item.message.attachments === undefined
+              ? {}
+              : { attachments: item.message.attachments })}
             {...(loadAttachmentUrl === undefined ? {} : { loadAttachmentUrl })}
-            key={message.sequence}
+            key={item.message.sequence}
           />
-        ) : message.role === "assistant" ? (
+        ) : item.kind === "assistant" ? (
           (() => {
-            const turnKey = message.runId ?? `message-${message.sequence}`;
-            if (renderedAgentTurns.has(turnKey)) return null;
-            renderedAgentTurns.add(turnKey);
-            if (currentRun !== undefined && message.runId === currentRun.id) {
-              const persistedMessages = messages.filter(
-                (candidate): candidate is AssistantThreadContextMessage =>
-                  candidate.role === "assistant" && candidate.runId === message.runId,
-              );
-              const blocks = currentBlocks.some((block) => block.type === "answer")
-                ? currentBlocks
+            const firstMessage = item.messages[0];
+            if (firstMessage === undefined) return null;
+            const segmented = segmentedRuns.has(item.runId);
+            if (currentRun !== undefined && item.runId === currentRun.id) {
+              const segmentEvents = segmented
+                ? eventsInTranscriptInterval(currentRunEvents, item.after, item.before)
+                : currentRunEvents;
+              const projectedBlocks = buildConversationBlocks(segmentEvents);
+              const blocks = projectedBlocks.some((block) => block.type === "answer")
+                ? projectedBlocks
                 : [
-                    ...currentBlocks,
+                    ...projectedBlocks,
                     {
-                      id: `persisted-${message.sequence}`,
+                      id: `persisted-${firstMessage.sequence}`,
                       type: "answer" as const,
-                      text: persistedMessages.map((candidate) => candidate.text).join("\n\n"),
+                      text: item.messages.map((candidate) => candidate.text).join("\n\n"),
                       status: "completed" as const,
                     },
                   ];
-              return <AgentTurn key={message.sequence} run={currentRun} blocks={blocks} />;
+              return <AgentTurn key={firstMessage.sequence} run={currentRun} blocks={blocks} />;
             }
-            if (message.runId === undefined) {
-              return <AssistantMessage key={message.sequence} text={message.text} />;
-            }
-            const historicalMessages = messages.filter(
-              (candidate): candidate is AssistantThreadContextMessage =>
-                candidate.role === "assistant" && candidate.runId === message.runId,
-            );
+            const loadSegmentEvents =
+              loadRunEvents === undefined
+                ? undefined
+                : segmented
+                  ? async (runId: string) =>
+                      eventsInTranscriptInterval(
+                        await loadRunEvents(runId),
+                        item.after,
+                        item.before,
+                      )
+                  : loadRunEvents;
             return (
               <HistoricalAgentTurn
-                key={message.sequence}
-                runId={message.runId}
-                messages={historicalMessages}
-                {...(loadRunEvents === undefined ? {} : { loadRunEvents })}
+                key={firstMessage.sequence}
+                runId={item.runId}
+                messages={item.messages}
+                {...(loadSegmentEvents === undefined ? {} : { loadRunEvents: loadSegmentEvents })}
               />
             );
           })()
-        ) : shouldDisplayRuntimeContextMessage(message.text) ? (
-          <p className="runtime-context-notice" key={message.sequence}>
-            {message.text}
+        ) : item.kind === "message" && item.message.role === "assistant" ? (
+          <AssistantMessage key={item.message.sequence} text={item.message.text} />
+        ) : item.kind === "message" && shouldDisplayRuntimeContextMessage(item.message.text) ? (
+          <p className="runtime-context-notice" key={item.message.sequence}>
+            {item.message.text}
           </p>
         ) : null,
+      )}
+      {currentRun !== undefined && tailBlocks.length > 0 && (
+        <AgentTurn
+          key={`current-run-tail-${currentRun.id}-${currentRunTail?.sequence ?? "unknown"}`}
+          run={currentRun}
+          blocks={tailBlocks}
+        />
       )}
       {pendingInputs.map((input) => (
         <UserRequestMessage

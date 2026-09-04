@@ -113,8 +113,7 @@ export function installModelWireFetchInstrumentation(): void {
       // 捕获面只旁路记录失败事实，调用方仍收到 Provider transport 的原始 rejection reason。
       throw error;
     }
-    // clone() 建立独立消费者；读取从不等待或替换 Provider 实际消费的 Response body。
-    track(current, captureResponse(current, transportAttempt, response));
+    // 回复与工具调用由轨迹事件保留；原始响应不再 clone、旁路消费或持久化。
     return response;
   };
   installed = true;
@@ -212,52 +211,30 @@ async function captureRequest(
   try {
     // Request.clone 读取的是 Fetch 即将发送的 application body bytes，不是 onPayload 的对象重建。
     const captured = await readBounded(outbound.clone().body, trace.maxBytes);
-    await safePersist(trace, transportAttempt, "request", captured);
+    await safePersistRequest(trace, transportAttempt, captured);
   } catch {
     await safeFailure(trace, transportAttempt, "request", "BODY_UNREADABLE");
   }
 }
 
-async function captureResponse(
+async function safePersistRequest(
   trace: ActiveTrace,
   transportAttempt: number,
-  response: Response,
-): Promise<void> {
-  try {
-    const captured = await readBounded(response.clone().body, trace.maxBytes);
-    await safePersist(trace, transportAttempt, "response", captured, response.status);
-  } catch (error) {
-    await safeFailure(
-      trace,
-      transportAttempt,
-      "response",
-      isAbort(error) ? "BODY_UNREADABLE" : "CAPTURE_UNAVAILABLE",
-      response.status,
-    );
-  }
-}
-
-async function safePersist(
-  trace: ActiveTrace,
-  transportAttempt: number,
-  part: ModelWirePart,
   captured: { readonly body: Uint8Array; readonly status: ModelWireCaptureStatus },
-  httpStatus?: number,
 ): Promise<void> {
   try {
     await trace.port.persist({
       context: trace.context,
       modelTurn: trace.modelTurn,
       transportAttempt,
-      part,
+      part: "request",
       body: captured.body,
       sha256: createHash("sha256").update(captured.body).digest("hex"),
       size: captured.body.byteLength,
       status: captured.status,
-      ...(httpStatus === undefined ? {} : { httpStatus }),
     });
   } catch {
-    await safeFailure(trace, transportAttempt, part, "CAPTURE_UNAVAILABLE", httpStatus);
+    await safeFailure(trace, transportAttempt, "request", "CAPTURE_UNAVAILABLE");
   }
 }
 
@@ -266,7 +243,6 @@ async function safeFailure(
   transportAttempt: number,
   part: ModelWirePart,
   code: "CAPTURE_UNAVAILABLE" | "BODY_UNREADABLE",
-  httpStatus?: number,
 ): Promise<void> {
   try {
     await trace.port.captureFailed({
@@ -275,7 +251,6 @@ async function safeFailure(
       transportAttempt,
       part,
       code,
-      ...(httpStatus === undefined ? {} : { httpStatus }),
     });
   } catch {
     // 诊断面不可用不能篡改模型调用的成功/失败语义。

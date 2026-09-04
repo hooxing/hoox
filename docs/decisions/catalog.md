@@ -77,7 +77,7 @@
 | [ADR-0052：Artifact 工具许可与 Attempt 版本的单调边界](0052-artifact-permit-version-monotonicity.md) | 已接受 | 2026-07-30 |
 | [ADR-0053：Workspace Artifact 的受限预览媒体类型](0053-workspace-artifact-preview-media.md) | 已接受 | 2026-07-30 |
 | [ADR-0054：生产传输、进程边界与可复现发布制品](0054-production-transport-and-reproducible-release.md) | 已接受 | 2026-07-30 |
-| [ADR-0055：模型网络报文诊断的受限保存](0055-model-wire-trace-diagnostics.md) | 已接受 | 2026-07-30 |
+| [ADR-0055：模型网络报文诊断的受限保存](0055-model-wire-trace-diagnostics.md) | 部分已替代（原始 response 采集） | 2026-07-30 |
 | [ADR-0056：模型网络报文诊断的安全读取与原始字节呈现](0056-model-wire-trace-safe-reading.md) | 已接受 | 2026-07-30 |
 | [ADR-0057：单一 exec_command 与模型可见真实执行结果](0057-single-exec-command-model-observation.md) | 已接受 | 2026-07-30 |
 | [ADR-0058：面向模型的单一文件交付工具](0058-simple-deliver-file-tool.md) | 部分已替代（旧模型工具源码保留结论） | 2026-07-30 |
@@ -222,7 +222,7 @@
 | [ADR：平台 Harness 显式允许长过程折叠工具](20260816233057-final-answer-harness-guidance.md) | 已接受 | 2026-08-16 |
 | [ADR：同一安全点批量接纳 Durable Steer](20260817151138-safe-point-batched-durable-steer.md) | 已接受 | 2026-08-17 |
 | [ADR-20260817181138：Thread 定时任务与按需 Sandbox 复用](20260817181138-thread-scheduled-tasks.md) | 已接受 | 2026-08-17 |
-| [ADR-20260818001636：收敛模型网络诊断到内部轨迹查看器](20260818001636-converge-model-wire-diagnostics-to-internal-viewer.md) | 已接受 | 2026-08-18 |
+| [ADR-20260818001636：收敛模型网络诊断到内部轨迹查看器](20260818001636-converge-model-wire-diagnostics-to-internal-viewer.md) | 部分已替代（原始 response 采集与展示） | 2026-08-18 |
 | [ADR-20260818090007：定时 Run 在线发现与触发消息边界](20260818090007-scheduled-run-live-refresh-and-prompt-boundary.md) | 已接受 | 2026-08-18 |
 | [ADR-20260818114734：模型可见 Prompt 元数据与工具指引去重](20260818114734-model-visible-prompt-metadata-and-tool-guidance-deduplication.md) | 已接受 | 2026-08-18 |
 | [ADR-20260818140646：对话定时任务默认使用东八区](20260818140646-automation-default-timezone.md) | 已接受 | 2026-08-18 |
@@ -280,5 +280,6 @@
 | [ADR-20260902172021：删除已退役的 Artifact 模型工具链](20260902172021-remove-retired-artifact-tool-chain.md) | 已接受 | 2026-09-02 |
 | [ADR-20260903152652：Demo 默认部署受保护的内部轨迹查看器](20260903152652-demo-trajectory-default-deployment.md) | 部分已替代（轨迹卷生命周期） | 2026-09-03 |
 | [ADR-20260903171600：Demo 轨迹使用跨发布持久卷](20260903171600-demo-trajectory-cross-release-retention.md) | 已接受 | 2026-09-03 |
+| [ADR-20260904085601：停止原始模型响应采集与轨迹展示](20260904085601-stop-raw-model-response-capture.md) | 已接受 | 2026-09-04 |
 
 </details>

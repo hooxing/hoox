@@ -1,7 +1,10 @@
 export * from "./ports.js";
+export type { ControlledRolloutProjection } from "@hoox/pi-adapter";
 export type {
-  ControlledRolloutProjection,
   ThreadActiveHistoryV1,
   ThreadHistoryMessageV1,
-} from "@hoox/pi-adapter";
-export { assertThreadActiveHistory, threadActiveHistoryDigest } from "@hoox/pi-adapter";
+} from "@hoox/pi-adapter/thread-history";
+export {
+  assertThreadActiveHistory,
+  threadActiveHistoryDigest,
+} from "@hoox/pi-adapter/thread-history";

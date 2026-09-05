@@ -16,11 +16,8 @@ import type {
   WorkspaceId,
   WorkspaceRevisionId,
 } from "@hoox/domain";
-import type {
-  ControlledRolloutProjection,
-  RuntimeAgentEvent,
-  ThreadActiveHistoryV1,
-} from "@hoox/pi-adapter";
+import type { ControlledRolloutProjection, RuntimeAgentEvent } from "@hoox/pi-adapter";
+import type { ThreadActiveHistoryV1 } from "@hoox/pi-adapter/thread-history";
 import type { SandboxHandle, SandboxProviderKey, UncertainLifecycleEvent } from "@hoox/sandbox";
 import type { RunSkillSnapshot } from "@hoox/skill";
 import type { WorkspaceManifest } from "@hoox/workspace";

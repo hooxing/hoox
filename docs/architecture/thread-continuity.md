@@ -22,6 +22,8 @@ Run 交接必须在 Context、Workspace、租约和 Session 身份完成持久�
 
 ## 输入与恢复
 
+Web 的未发送文字草稿保存在当前标签页的 sessionStorage，按账号、个人或团队空间以及 Thread 隔离。刷新可恢复文字；附件需要重新选择。新任务创建后草稿迁移至该 Thread，发送成功才清空；发送失败保留，退出账号清除该账号的草稿。浏览器拒绝存储时显示复制提示，内存内容仍可编辑和发送，但不保证刷新恢复。
+
 - steer 作为真实用户输入持久化，在模型安全点按顺序接纳；结束竞态会原子转入 follow-up。
 - follow-up 按 FIFO 逐项创建后续 Run，Worker 崩溃或当前 Run 取消不能丢失它。
 - 旧 Thread 只有在证据式 anchor 完成后才进入 V2 读取路径；无法恢复的历史以明确 gap 表达，不伪造 Assistant 内容。

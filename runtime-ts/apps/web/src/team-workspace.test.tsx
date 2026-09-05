@@ -167,6 +167,7 @@ describe("团队空间切换器", () => {
     await act(async () =>
       root.render(
         <TeamCenterDialog
+          userId="user_team_join"
           teams={teams}
           selectedTeamId="tenant_product"
           loading={false}
@@ -180,6 +181,12 @@ describe("团队空间切换器", () => {
     );
 
     expect(container.textContent).toContain("创建团队");
+    const userId = container.querySelector<HTMLInputElement>('[aria-label="我的用户 ID"]');
+    expect(userId?.value).toBe("user_team_join");
+    expect(userId?.readOnly).toBe(true);
+    userId?.focus();
+    expect(userId?.selectionStart).toBe(0);
+    expect(userId?.selectionEnd).toBe("user_team_join".length);
     expect(container.textContent).toContain("加入团队");
     const input = container.querySelector<HTMLInputElement>('input[placeholder="团队名称"]');
     await act(async () => {

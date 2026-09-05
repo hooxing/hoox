@@ -136,6 +136,7 @@ export function TeamSwitcher({
 }
 
 export function TeamCenterDialog({
+  userId,
   teams,
   selectedTeamId,
   loading,
@@ -145,6 +146,7 @@ export function TeamCenterDialog({
   onManage,
   onClose,
 }: {
+  readonly userId: string;
   readonly teams: readonly TeamSummary[];
   readonly selectedTeamId?: string;
   readonly loading: boolean;
@@ -242,6 +244,15 @@ export function TeamCenterDialog({
             <div className="team-center-join">
               <h3>加入团队</h3>
               <p>请让团队 Owner 或管理员通过你的用户 ID 添加成员。受邀后在这里刷新即可。</p>
+              <label>
+                我的用户 ID
+                <input
+                  aria-label="我的用户 ID"
+                  value={userId}
+                  readOnly
+                  onFocus={(event) => event.currentTarget.select()}
+                />
+              </label>
               <button type="button" disabled={loading} onClick={() => void onRefresh()}>
                 <RefreshCw className={loading ? "spin" : undefined} size={14} /> 刷新加入状态
               </button>

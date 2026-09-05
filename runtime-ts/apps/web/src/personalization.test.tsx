@@ -92,4 +92,47 @@ describe("个人个性化弹窗", () => {
   it("字符计数按 Unicode code point 而不是 UTF-16 单元", () => {
     expect(personalizationSize("✈️")).toEqual({ characters: 2, bytes: 6 });
   });
+
+  it("弹窗有名称、约束键盘焦点，Esc 关闭后恢复原焦点", async () => {
+    const trigger = document.createElement("button");
+    document.body.append(trigger);
+    trigger.focus();
+    const onClose = vi.fn();
+    await act(async () =>
+      root.render(
+        <PersonalizationDialog
+          api={{
+            getPersonalPersonalization: async () => ({
+              content: "",
+              applyToTeamTasks: false,
+              version: 1,
+            }),
+            updatePersonalPersonalization: vi.fn(),
+          }}
+          hasTeams={false}
+          onClose={onClose}
+        />,
+      ),
+    );
+    const dialog = container.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog?.getAttribute("aria-labelledby")).toBe("personalization-title");
+    expect(document.activeElement).toBe(dialog);
+    const buttons = [...container.querySelectorAll("button")];
+    buttons.at(-1)?.focus();
+    await act(async () =>
+      buttons
+        .at(-1)
+        ?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
+        ),
+    );
+    expect(document.activeElement).toBe(buttons[0]);
+    await act(async () =>
+      dialog?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })),
+    );
+    expect(onClose).toHaveBeenCalledOnce();
+    await act(async () => root.render(null));
+    expect(document.activeElement).toBe(trigger);
+    trigger.remove();
+  });
 });

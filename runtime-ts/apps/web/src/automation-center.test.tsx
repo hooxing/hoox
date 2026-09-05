@@ -77,6 +77,30 @@ describe("定时任务中心", () => {
     expect(container.textContent).toContain("已暂停");
   });
 
+  it("同名同时间任务仍可用完整标识区分，选项绑定所选任务", async () => {
+    await act(async () =>
+      root.render(
+        <AutomationCenterDialog
+          api={{
+            listScheduledTasks: async () => [],
+            createScheduledTask: vi.fn(),
+            updateScheduledTask: vi.fn(),
+          }}
+          threads={[thread, { ...thread, id: "thread_2" }]}
+          initialThreadId="thread_2"
+          onClose={vi.fn()}
+        />,
+      ),
+    );
+    const select = container.querySelector<HTMLSelectElement>("select");
+    const options = [...(select?.options ?? [])].slice(1);
+    expect(options.map((option) => option.textContent)).toEqual([
+      expect.stringContaining("thread_1"),
+      expect.stringContaining("thread_2"),
+    ]);
+    expect(select?.value).toBe("thread_2");
+  });
+
   it("创建时把本地时间转换为 ISO 并绑定目标 Thread", async () => {
     const createScheduledTask = vi.fn(async () => task);
     const api: AutomationCenterApi = {

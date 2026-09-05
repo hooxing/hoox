@@ -154,7 +154,7 @@ export function AutomationCenterDialog({
               <option value="">请选择</option>
               {activeThreads.map((thread) => (
                 <option key={thread.id} value={thread.id}>
-                  {thread.title}
+                  {thread.title} · {new Date(thread.createdAt).toLocaleString()} · {thread.id}
                 </option>
               ))}
             </select>

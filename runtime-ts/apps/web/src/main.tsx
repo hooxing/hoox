@@ -43,6 +43,7 @@ import {
 import { type AutomationCenterApi, AutomationCenterDialog } from "./automation-center.js";
 import { HOOX_HORIZONTAL_PATH } from "./brand.js";
 import { type CloudDriveApi, CloudDriveDialog } from "./cloud-drive.js";
+import { clearAccountDrafts, useConversationDraft } from "./conversation-draft.js";
 import { recoverLatestRunForNavigation, WorkspaceNavigation } from "./navigation.js";
 import { CurrentRunPoll, drainEventPages, loadAllRunEvents } from "./polling.js";
 import { followRunOutput } from "./run-output.js";
@@ -335,7 +336,6 @@ function AuthenticatedWorkspace({
 }) {
   const initialCompact = window.matchMedia(compactWorkspaceMedia).matches;
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState);
-  const [input, setInput] = useState("");
   const [uploadFiles, setUploadFiles] = useState<readonly File[]>([]);
   const [historyFiles, setHistoryFiles] = useState<readonly HistoryFile[]>([]);
   const [pendingInputs, setPendingInputs] = useState<readonly PendingConversationInput[]>([]);
@@ -356,6 +356,8 @@ function AuthenticatedWorkspace({
   const [teams, setTeams] = useState<readonly TeamSummary[]>([]);
   const [teamsLoading, setTeamsLoading] = useState(false);
   const [activeTeamId, setActiveTeamId] = useState<string>();
+  const { input, setInput, moveInputTo, clearSentInput, draftPersistenceFailed } =
+    useConversationDraft(accountProfile.id, activeTeamId, state.selectedThreadId);
   const [selectedTeamId, setSelectedTeamId] = useState<string>();
   const [personalThreads, setPersonalThreads] = useState<readonly Thread[]>([]);
   const [teamThreads, setTeamThreads] = useState<readonly Thread[]>([]);
@@ -977,6 +979,7 @@ function AuthenticatedWorkspace({
         const thread = await apiClient.createThread(deriveThreadTitle(request));
         dispatch({ type: "threadCreated", thread });
         if (!navigationRef.current.isCurrent(expectedNavigation)) return;
+        moveInputTo(thread.id);
         navigationRef.current.navigate(thread.id);
         currentRunPollRef.current.invalidate();
         dispatch({ type: "select", threadId: thread.id });
@@ -1015,8 +1018,9 @@ function AuthenticatedWorkspace({
           ...(receipt?.rejectionCode === undefined ? {} : { rejectionCode: receipt.rejectionCode }),
         },
       ]);
+      if (receipt?.disposition === "rejected") return;
       if (run === undefined || state.run?.status === "running") {
-        setInput("");
+        clearSentInput(threadId);
         setUploadFiles([]);
         setHistoryFiles([]);
         setError(undefined);
@@ -1030,7 +1034,7 @@ function AuthenticatedWorkspace({
       eventAfterRef.current = -1;
       eventAttemptRef.current = undefined;
       dispatch({ type: "startRun", run });
-      setInput("");
+      clearSentInput(threadId);
       setUploadFiles([]);
       setHistoryFiles([]);
       setError(undefined);
@@ -1578,6 +1582,9 @@ function AuthenticatedWorkspace({
             )}
           </>
         )}
+        {draftPersistenceFailed && (
+          <p role="alert">浏览器无法保存草稿，请在刷新前复制未发送的文字。</p>
+        )}
         <ConversationComposer
           input={input}
           files={uploadFiles}
@@ -1661,6 +1668,7 @@ function AuthenticatedWorkspace({
       )}
       {teamCenterOpen && teamWorkspaceApi !== undefined && (
         <TeamCenterDialog
+          userId={accountProfile.id}
           teams={teams}
           {...(selectedTeam === undefined ? {} : { selectedTeamId: selectedTeam.id })}
           loading={teamsLoading}
@@ -1794,6 +1802,7 @@ export function App({ apiClient = api }: { readonly apiClient?: TeamAwareWorkspa
       onSignOut={() => {
         const logout = apiClient.logoutAccount?.();
         clearAccountSession(window.localStorage);
+        clearAccountDrafts(accountSession.profile.id);
         apiClient.setAccessToken?.(undefined);
         setAccountSession(undefined);
         void logout?.catch(() => undefined);

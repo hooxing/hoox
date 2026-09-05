@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApiError, type PersonalPersonalization } from "./api.js";
 
 export interface PersonalizationApi {
@@ -35,8 +35,17 @@ export function PersonalizationDialog({
   const [applyToTeamTasks, setApplyToTeamTasks] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string>();
+  const dialogRef = useRef<HTMLElement>(null);
   const size = personalizationSize(content);
   const tooLarge = size.characters > MAX_CHARACTERS || size.bytes > MAX_BYTES;
+
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    dialogRef.current?.focus();
+    return () => {
+      if (previousFocus instanceof HTMLElement && previousFocus.isConnected) previousFocus.focus();
+    };
+  }, []);
 
   useEffect(() => {
     let stopped = false;
@@ -85,10 +94,42 @@ export function PersonalizationDialog({
 
   return (
     <div className="skill-center-backdrop">
-      <section className="personalization-dialog" role="dialog" aria-modal="true">
+      <section
+        ref={dialogRef}
+        tabIndex={-1}
+        className="personalization-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="personalization-title"
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && !event.nativeEvent.isComposing) {
+            event.stopPropagation();
+            onClose();
+          }
+          if (event.key === "Tab") {
+            const controls = [
+              ...event.currentTarget.querySelectorAll<HTMLElement>(
+                "button:not(:disabled), textarea:not(:disabled), input:not(:disabled)",
+              ),
+            ];
+            const first = controls[0];
+            const last = controls.at(-1);
+            if (
+              event.shiftKey &&
+              (document.activeElement === first || document.activeElement === event.currentTarget)
+            ) {
+              event.preventDefault();
+              last?.focus();
+            } else if (!event.shiftKey && document.activeElement === last) {
+              event.preventDefault();
+              first?.focus();
+            }
+          }
+        }}
+      >
         <header className="skill-center-header">
           <div>
-            <h2>个性化</h2>
+            <h2 id="personalization-title">个性化</h2>
             <p>这些长期偏好会自动用于你之后发起的任务，并可被当前任务要求覆盖。</p>
           </div>
           <button type="button" className="icon-button" onClick={onClose} aria-label="关闭个性化">

@@ -116,6 +116,7 @@ async function settleEffects(): Promise<void> {
 beforeEach(() => {
   Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
   window.localStorage.clear();
+  window.sessionStorage.clear();
   persistAccountSession(window.localStorage, developmentSession);
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
@@ -139,6 +140,87 @@ afterEach(() => {
 });
 
 describe("Agent 工作台恢复接入", () => {
+  it("重新挂载工作台恢复当前会话文字草稿，成功发送后不再恢复", async () => {
+    const selected = thread("draft_restore");
+    const apiClient = apiFixture({ listThreads: async () => [selected] });
+    const first = mount(apiClient);
+    await settleEffects();
+    const input = first.container.querySelector("textarea");
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+        input,
+        "刷新保留",
+      );
+      input?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => first.root.render(null));
+    const restored = mount(apiClient);
+    await settleEffects();
+    expect(restored.container.querySelector("textarea")?.value).toBe("刷新保留");
+    await act(async () =>
+      restored.container
+        .querySelector("form")
+        ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+    );
+    await settleEffects();
+    act(() => restored.root.render(null));
+    const sent = mount(apiClient);
+    await settleEffects();
+    expect(sent.container.querySelector("textarea")?.value).toBe("");
+  });
+
+  it.each(["failed", "rejected"] as const)(
+    "新会话已创建但提交 %s 时，刷新仍恢复待重试内容",
+    async (outcome) => {
+      let created = false;
+      const selected = thread("draft_failed");
+      const apiClient = apiFixture({
+        listThreads: async () => (created ? [selected] : []),
+        createThread: async () => {
+          created = true;
+          return selected;
+        },
+        createRun: async () => {
+          throw new ApiError("提交失败", 503, true);
+        },
+        ...(outcome === "rejected"
+          ? {
+              submitThreadInput: async () => ({
+                receiptId: "rejected_draft",
+                inputSequence: 1,
+                requestedMode: "auto" as const,
+                disposition: "rejected" as const,
+                rejectionCode: "RUN_NOT_RUNNING",
+                createdAt: selected.createdAt,
+                updatedAt: selected.updatedAt,
+              }),
+            }
+          : {}),
+      });
+      const first = mount(apiClient);
+      await settleEffects();
+      const input = first.container.querySelector("textarea");
+      act(() => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(
+          input,
+          "失败重试草稿",
+        );
+        input?.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () =>
+        first.container
+          .querySelector("form")
+          ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      await settleEffects();
+      expect(first.container.querySelector("textarea")?.value).toBe("失败重试草稿");
+      act(() => first.root.render(null));
+      const restored = mount(apiClient);
+      await settleEffects();
+      expect(restored.container.querySelector("textarea")?.value).toBe("失败重试草稿");
+    },
+  );
+
   it("内容异步增高时跟随底部，重复通知和用户回看不重写滚动位置", async () => {
     let resized: (() => void) | undefined;
     const disconnect = vi.fn();

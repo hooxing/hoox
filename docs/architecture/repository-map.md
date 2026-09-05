@@ -94,6 +94,7 @@
 - 应用和包不能绕过 `tool-router` 直接执行宿主机命令或读写宿主机工作目录。
 - PostgreSQL、S3、Sandbox 和模型 SDK 都应位于适配器边界，不进入纯领域代码。
 - 跨包依赖使用 pnpm Workspace 声明，不使用越目录相对导入。
+- 只使用 Thread 历史格式与校验时，从 `@hoox/pi-adapter/thread-history` 导入；`run-contracts` 经此窄入口重导出历史校验，避免 API、Scheduler 随契约加载模型会话和 Provider SDK。Pi 根入口继续兼容，包级依赖声明并未因此移除。
 - `vendor` 代码不能成为不受审查的复制区；版本、许可证、来源和修改必须可追踪。
 
 ## 当前复杂度热点

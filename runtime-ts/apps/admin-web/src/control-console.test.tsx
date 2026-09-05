@@ -210,6 +210,72 @@ beforeEach(() => {
 });
 
 describe("统一平台管理导航", () => {
+  it.each(["production", undefined] as const)(
+    "部署类型为 %s 时不豁免身份签名配置",
+    async (runtimeEnvironment) => {
+      const api = fixture();
+      vi.mocked(api.overview).mockResolvedValue({
+        ...overview,
+        ...(runtimeEnvironment === undefined ? {} : { runtimeEnvironment }),
+        deploymentSettings: [
+          {
+            key: "ADMIN_CONTROL_JWT_SIGNING_KEYS",
+            category: "secret",
+            source: "environment",
+            configured: false,
+            mutable: false,
+            description: "管理身份签名",
+          },
+        ],
+      });
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      act(() => root.render(<App controlApi={api} />));
+      await settle();
+      expect(container.textContent).toContain(
+        runtimeEnvironment === "production"
+          ? "服务端部署类型：生产环境"
+          : "未提供，不能由前端构建方式推断",
+      );
+      expect(container.textContent).toContain("已配置 0/1 · 不适用 0");
+      expect(container.textContent).not.toContain("不适用：当前为非生产身份模式");
+      act(() => root.unmount());
+      container.remove();
+    },
+  );
+
+  it("按服务端环境和已启用能力展示配置适用性", async () => {
+    const api = fixture();
+    vi.mocked(api.overview).mockResolvedValue({
+      ...overview,
+      runtimeEnvironment: "development",
+      activeModel: { ...modelRevision("deepseek", "healthy"), status: "active" },
+      deploymentSettings: [
+        ...overview.deploymentSettings,
+        {
+          key: "ADMIN_CONTROL_JWT_SIGNING_KEYS",
+          category: "secret",
+          source: "environment",
+          configured: false,
+          mutable: false,
+          description: "管理身份签名",
+        },
+      ],
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+    expect(container.textContent).toContain("服务端部署类型：开发 / 演示环境");
+    expect(container.textContent).toContain("不适用：长期记忆未启用");
+    expect(container.textContent).toContain("不适用：当前为非生产身份模式");
+    expect(container.textContent).toContain("已配置 1/1 · 不适用 3");
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it("展示工业化后台模块、核心统计和环境配置状态，但不展示秘密值", async () => {
     const api = fixture();
     const container = document.createElement("div");

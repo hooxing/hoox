@@ -269,12 +269,35 @@ function RevisionCard({
   );
 }
 
+function deploymentExclusion(key: string, overview?: AdminControlOverviewDto): string | undefined {
+  if (overview === undefined) return undefined;
+  if (
+    (key === "MEM0_API_KEY" || key === "MEM0_SCOPE_HMAC_KEY") &&
+    overview.activeModel !== undefined &&
+    !overview.activeMemory?.configuration.enabled
+  ) {
+    return "不适用：长期记忆未启用";
+  }
+  if (
+    key === "ADMIN_CONTROL_JWT_SIGNING_KEYS" &&
+    overview.runtimeEnvironment !== undefined &&
+    overview.runtimeEnvironment !== "production"
+  ) {
+    return "不适用：当前为非生产身份模式";
+  }
+  return undefined;
+}
+
 function DeploymentSettings({
   items,
+  overview,
 }: {
   readonly items: AdminControlOverviewDto["deploymentSettings"];
+  readonly overview?: AdminControlOverviewDto;
 }) {
-  const configured = items.filter((item) => item.configured).length;
+  const applicable = items.filter((item) => deploymentExclusion(item.key, overview) === undefined);
+  const configured = applicable.filter((item) => item.configured).length;
+  const environments = { production: "生产环境", development: "开发 / 演示环境", test: "测试环境" };
   const categoryLabels = {
     bootstrap: "启动基础设施",
     secret: "部署秘密",
@@ -287,8 +310,18 @@ function DeploymentSettings({
           <span className="eyebrow">Environment</span>
           <h2>部署配置</h2>
           <p>只读检查部署层前置条件；可版本化参数在对应模块中修改。</p>
+          <p>
+            服务端部署类型：
+            {overview?.runtimeEnvironment === undefined
+              ? "未提供，不能由前端构建方式推断"
+              : environments[overview.runtimeEnvironment]}
+          </p>
         </div>
-        <span className="count">{items.length === 0 ? "—" : `${configured}/${items.length}`}</span>
+        <span className="count">
+          {items.length === 0
+            ? "—"
+            : `已配置 ${configured}/${applicable.length} · 不适用 ${items.length - applicable.length}`}
+        </span>
       </div>
       {items.length === 0 ? (
         <p className="empty-state">
@@ -300,8 +333,18 @@ function DeploymentSettings({
             <div key={setting.key}>
               <code>{setting.key}</code>
               <span>{setting.description}</span>
-              <span className={setting.configured ? "configured" : "missing"}>
-                {setting.configured ? "已配置" : "未配置"} · {categoryLabels[setting.category]}
+              <span
+                className={
+                  deploymentExclusion(setting.key, overview) !== undefined
+                    ? ""
+                    : setting.configured
+                      ? "configured"
+                      : "missing"
+                }
+              >
+                {deploymentExclusion(setting.key, overview) ??
+                  (setting.configured ? "已配置" : "未配置")}{" "}
+                · {categoryLabels[setting.category]}
               </span>
             </div>
           ))}
@@ -383,7 +426,7 @@ const environmentConfigurationGroups = [
       },
       {
         key: "CUBESANDBOX_API_URL / CUBESANDBOX_TEMPLATE_ID",
-        description: "Sandbox 控制面和模板；本项目依赖 uu 端口映射，不在本机启动服务。",
+        description: "Sandbox 控制面和模板；连接方式由当前部署平台提供。",
       },
       {
         key: "SKILL_PUBLISHER_DATABASE_URL / DATABASE_SKILL_PUBLISHER_ROLE / SKILL_PUBLISHER_S3_*",
@@ -416,8 +459,10 @@ const environmentConfigurationGroups = [
 
 function EnvironmentConfigurationGuide({
   items,
+  overview,
 }: {
   readonly items: AdminControlOverviewDto["deploymentSettings"];
+  readonly overview?: AdminControlOverviewDto;
 }) {
   return (
     <section className="control-panel environment-guide">
@@ -469,18 +514,22 @@ function EnvironmentConfigurationGuide({
             <div className="environment-guide-entries">
               {group.entries.map((entry) => {
                 const state = deploymentState(items, entry.key);
+                const exclusion = deploymentExclusion(entry.key, overview);
                 return (
                   <div key={entry.key}>
                     <span>
                       <code>{entry.key}</code>
                       <small>{entry.description}</small>
                     </span>
-                    <span className={`configuration-state ${state}`}>
-                      {state === "configured"
-                        ? "已配置"
-                        : state === "missing"
-                          ? "未配置"
-                          : "按契约确认"}
+                    <span
+                      className={`configuration-state ${exclusion === undefined ? state : "unknown"}`}
+                    >
+                      {exclusion ??
+                        (state === "configured"
+                          ? "已配置"
+                          : state === "missing"
+                            ? "未配置"
+                            : "按契约确认")}
                     </span>
                   </div>
                 );
@@ -578,7 +627,7 @@ function Overview({
           </article>
         ))}
       </section>
-      <DeploymentSettings items={overview.deploymentSettings} />
+      <DeploymentSettings items={overview.deploymentSettings} overview={overview} />
       <AuditTrail items={audits} />
     </>
   );
@@ -1050,7 +1099,7 @@ function ModelEffectiveState({
           <strong>{unavailable ? "无法确认当前实际使用的模型" : "正在读取当前生效配置"}</strong>
           <p>
             {unavailable
-              ? "控制服务不可用，暂时无法读取或保存模型配置。请恢复 uu 端口映射与后台控制服务后重试。"
+              ? "控制服务不可用，暂时无法读取或保存模型配置。请检查部署网络与后台控制服务后重试。"
               : "正在读取当前模型配置。"}
           </p>
         </div>
@@ -1844,7 +1893,7 @@ export function AdminControlConsole({
           ) : (
             <ControlDataUnavailable
               title="真实统计暂不可用"
-              description="统计直接来自 PostgreSQL 受限聚合投影；请恢复 uu 端口映射和后台控制服务后重试。"
+              description="统计直接来自 PostgreSQL 受限聚合投影；请检查部署网络和后台控制服务后重试。"
             />
           )
         ) : (
@@ -1881,7 +1930,10 @@ export function AdminControlConsole({
       ) : (
         <>
           {view === "settings" && (
-            <EnvironmentConfigurationGuide items={overview?.deploymentSettings ?? []} />
+            <EnvironmentConfigurationGuide
+              items={overview?.deploymentSettings ?? []}
+              {...(overview === undefined ? {} : { overview })}
+            />
           )}
           <section className="control-panel">
             {view !== "models" && view !== "memory" && (
@@ -2029,7 +2081,12 @@ export function AdminControlConsole({
               )}
             </section>
           )}
-          {view === "settings" && <DeploymentSettings items={overview?.deploymentSettings ?? []} />}
+          {view === "settings" && (
+            <DeploymentSettings
+              items={overview?.deploymentSettings ?? []}
+              {...(overview === undefined ? {} : { overview })}
+            />
+          )}
         </>
       )}
     </main>

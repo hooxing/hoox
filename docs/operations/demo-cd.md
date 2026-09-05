@@ -15,6 +15,8 @@
 
 ## 首次主机准备
 
+后台配置页以服务端返回的部署类型为准，不能用前端 production 构建判断后端身份模式。Demo 的 development 模式将生产 JWT 签名项标为“不适用”；已启用托管模型且长期记忆未启用时，Mem0 密钥项也不计入当前配置就绪分母。没有托管模型时仍需核对 Worker 的环境回退配置，不能推断记忆已关闭。服务端未提供部署类型时明确显示未知，不推断为 Demo。这里的配置数量只表示适用项是否存在，不等同于生产发布门禁或外部服务探测通过。
+
 目标主机必须预装 Docker Engine、Docker Compose、Nginx 和 Certbot。部署用户必须可直接访问 Docker socket，并可无密码执行 `nginx -t`、安装 Nginx 配置和 reload。
 
 1. 创建 `/opt/hoox-demo/releases` 与 `/opt/hoox-demo/shared`，归部署用户所有；`shared` 权限设为 `0700`。

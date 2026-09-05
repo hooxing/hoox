@@ -152,6 +152,7 @@ export interface DeploymentSettingDescriptor {
 }
 
 export interface AdminControlOverview {
+  readonly runtimeEnvironment?: "development" | "test" | "production";
   readonly generation: number;
   readonly activeModel?: ControlRevision<ModelProviderConfiguration>;
   readonly activeMemory?: ControlRevision<MemoryProviderConfiguration>;
@@ -572,6 +573,7 @@ export class AdminControlService {
     private readonly statistics: AdminControlStatisticsPort,
     private readonly probes: ProviderProbePort,
     private readonly deploymentSettings: readonly DeploymentSettingDescriptor[],
+    private readonly runtimeEnvironment?: AdminControlOverview["runtimeEnvironment"],
   ) {}
 
   async overview(actorUserId: string): Promise<AdminControlOverview> {
@@ -587,6 +589,9 @@ export class AdminControlService {
     const activeMemory = memories.find((revision) => revision.status === "active");
     return Object.freeze({
       generation,
+      ...(this.runtimeEnvironment === undefined
+        ? {}
+        : { runtimeEnvironment: this.runtimeEnvironment }),
       ...(activeModel === undefined ? {} : { activeModel: redactedModelRevision(activeModel) }),
       ...(activeMemory === undefined ? {} : { activeMemory: redactedMemoryRevision(activeMemory) }),
       ...(activeRuntimeSettings === undefined ? {} : { activeRuntimeSettings }),

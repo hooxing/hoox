@@ -5,7 +5,7 @@ import {
   fauxToolCall,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createModels } from "@earendil-works/pi-ai";
 import {
   bindTrustedPiModelContextCapability,
   createSafePiSession,
@@ -55,12 +55,13 @@ try {
       return fauxAssistantMessage("真实纵向链路完成");
     },
   ]);
-  const modelRuntime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
-    modelsPath: null,
-  });
-  modelRuntime.registerNativeProvider(faux.provider);
-  await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+  const credentials = new InMemoryCredentialStore();
+  await credentials.modify(faux.provider.id, async () => ({
+    type: "api_key",
+    key: "test-only-key",
+  }));
+  const modelRuntime = createModels({ credentials });
+  modelRuntime.setProvider(faux.provider);
   const authorizedCalls: Array<{ callId: string; toolName: string; argsDigest: string }> = [];
   const model = faux.getModel();
   controller = await createSafePiSession({

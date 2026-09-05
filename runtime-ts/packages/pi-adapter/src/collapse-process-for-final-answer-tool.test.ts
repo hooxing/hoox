@@ -25,7 +25,7 @@ describe("collapse_process_for_final_answer Pi 工具", () => {
       false,
     );
 
-    const result = await tool.execute("call-final", {}, undefined, () => undefined, {} as never);
+    const result = await tool.execute("call-final", {}, undefined, () => undefined);
 
     expect(record).toHaveBeenCalledWith(
       "call-final",
@@ -47,8 +47,8 @@ describe("collapse_process_for_final_answer Pi 工具", () => {
   it("durable 回执未形成时拒绝进入折叠阶段", async () => {
     const tool = createCollapseProcessForFinalAnswerPiTool(async () => ({ outcome: "conflict" }));
 
-    await expect(
-      tool.execute("call-conflict", {}, undefined, () => undefined, {} as never),
-    ).rejects.toThrow("未能形成 durable 事实");
+    await expect(tool.execute("call-conflict", {}, undefined, () => undefined)).rejects.toThrow(
+      "未能形成 durable 事实",
+    );
   });
 });

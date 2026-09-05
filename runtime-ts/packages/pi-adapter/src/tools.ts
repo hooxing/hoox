@@ -3,7 +3,7 @@ import { posix } from "node:path";
 import type { ControlledToolReceiptSource, ToolObservationResult } from "@hoox/context-policy";
 import { encodeControlledToolReceipt } from "@hoox/context-policy";
 import { type SandboxHandle, SandboxRuntimeError } from "@hoox/sandbox";
-import { defineTool, truncateHead } from "@earendil-works/pi-coding-agent";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type Static, type TSchema, Type } from "typebox";
 import { Value } from "typebox/value";
 
@@ -266,7 +266,7 @@ function createExecCommandTool(
 ) {
   // TODO(codex-alignment): 同步 MVP 暂无 PTY、yield/session、write_stdin、shell/login 参数；
   // 即使允许最长 1 小时，长任务仍未对齐 Codex 返回 session_id 后 wait/write_stdin 的可恢复会话模式。
-  return defineTool({
+  const tool: AgentTool<typeof ExecCommandArgumentsSchema, unknown> = {
     name: "exec_command",
     label: "执行 Sandbox 命令",
     description:
@@ -330,7 +330,8 @@ function createExecCommandTool(
         details: result,
       };
     },
-  });
+  };
+  return tool;
 }
 
 function createReadTool(
@@ -342,7 +343,7 @@ function createReadTool(
     | undefined,
   rejectModelContinuation: RejectModelContinuation,
 ) {
-  return defineTool({
+  const tool: AgentTool<typeof ReadArgumentsSchema, unknown> = {
     name: "read",
     label: "读取 Sandbox 文件",
     description:
@@ -433,7 +434,8 @@ function createReadTool(
       await persistReceipt(callId, "read", "succeeded", capture);
       return result;
     },
-  });
+  };
+  return tool;
 }
 
 function createEditTool(
@@ -445,7 +447,7 @@ function createEditTool(
     | undefined,
   rejectModelContinuation: RejectModelContinuation,
 ) {
-  return defineTool({
+  const tool: AgentTool<typeof EditArgumentsSchema, unknown> = {
     name: "edit",
     label: "精确修改 Sandbox 文件",
     description:
@@ -508,7 +510,8 @@ function createEditTool(
       await persistReceipt(callId, "edit", "succeeded", capture);
       return result;
     },
-  });
+  };
+  return tool;
 }
 
 function createWriteTool(
@@ -520,7 +523,7 @@ function createWriteTool(
     | undefined,
   rejectModelContinuation: RejectModelContinuation,
 ) {
-  return defineTool({
+  const tool: AgentTool<typeof WriteArgumentsSchema, unknown> = {
     name: "write",
     label: "写入 Sandbox 文件",
     description:
@@ -581,7 +584,8 @@ function createWriteTool(
       await persistReceipt(callId, "write", "succeeded", capture);
       return result;
     },
-  });
+  };
+  return tool;
 }
 
 async function persistReceipt(
@@ -775,10 +779,7 @@ function projectTextRead(
       ? allLines.length
       : Math.min(allLines.length, startIndex + input.limit);
   const selected = allLines.slice(startIndex, selectedEnd).join("\n");
-  const truncation = truncateHead(selected, {
-    maxLines: DEFAULT_MAX_READ_LINES,
-    maxBytes: DEFAULT_MAX_READ_BYTES,
-  });
+  const truncation = truncateReadPrefix(selected);
   const endLine = truncation.outputLines === 0 ? startLine : startLine + truncation.outputLines - 1;
   let text: string;
   if (truncation.firstLineExceedsLimit) {
@@ -807,6 +808,47 @@ function projectTextRead(
       truncated: truncation.truncated,
       ...(truncation.truncatedBy === null ? {} : { truncated_by: truncation.truncatedBy }),
     }),
+  };
+}
+
+function truncateReadPrefix(value: string): {
+  readonly content: string;
+  readonly outputLines: number;
+  readonly truncated: boolean;
+  readonly truncatedBy: "lines" | "bytes" | null;
+  readonly firstLineExceedsLimit: boolean;
+} {
+  const lines = value.split("\n");
+  // 末尾换行终结已有行，不额外占一行；完整返回时仍保留原始换行字节。
+  const totalLines = lines.length - (value.endsWith("\n") || value.length === 0 ? 1 : 0);
+  if (totalLines <= DEFAULT_MAX_READ_LINES && Buffer.byteLength(value) <= DEFAULT_MAX_READ_BYTES) {
+    return {
+      content: value,
+      outputLines: totalLines,
+      truncated: false,
+      truncatedBy: null,
+      firstLineExceedsLimit: false,
+    };
+  }
+  let outputLines = 0;
+  let usedBytes = 0;
+  let truncatedBy: "lines" | "bytes" = "lines";
+  while (outputLines < Math.min(totalLines, DEFAULT_MAX_READ_LINES)) {
+    const nextBytes = Buffer.byteLength(lines[outputLines] ?? "") + (outputLines === 0 ? 0 : 1);
+    // 只交付完整 UTF-8 行；单行超限时由调用方提示使用有界字节读取。
+    if (usedBytes + nextBytes > DEFAULT_MAX_READ_BYTES) {
+      truncatedBy = "bytes";
+      break;
+    }
+    usedBytes += nextBytes;
+    outputLines += 1;
+  }
+  return {
+    content: lines.slice(0, outputLines).join("\n"),
+    outputLines,
+    truncated: true,
+    truncatedBy,
+    firstLineExceedsLimit: outputLines === 0 && truncatedBy === "bytes",
   };
 }
 

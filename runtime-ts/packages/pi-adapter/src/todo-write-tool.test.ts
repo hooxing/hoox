@@ -30,7 +30,6 @@ describe("todo_write Pi 工具", () => {
       { todos: [{ id: "first", content: "第一步", status: "in_progress" }] },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(tool.name).toBe("todo_write");
@@ -67,7 +66,7 @@ describe("todo_write Pi 工具", () => {
     const prepared = tool.prepareArguments({ todos: [] });
     expect(Value.Check(tool.parameters, prepared)).toBe(true);
     await expect(
-      tool.execute("call-invalid", prepared, undefined, () => undefined, {} as never),
+      tool.execute("call-invalid", prepared, undefined, () => undefined),
     ).rejects.toThrow("TODO_ARGUMENTS_INVALID");
     expect(writes).toBe(0);
     expect(outcomes).toEqual(["failed"]);
@@ -100,7 +99,6 @@ describe("todo_write Pi 工具", () => {
         { todos: [{ id: "first", content: "第一步", status: "in_progress" }] },
         undefined,
         () => undefined,
-        {} as never,
       ),
     ).rejects.toThrow("TODO_PERSISTENCE_UNAVAILABLE");
     expect(order).toEqual(["receipt:failed"]);

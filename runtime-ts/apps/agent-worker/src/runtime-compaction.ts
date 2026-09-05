@@ -14,7 +14,7 @@ import type {
   ThreadContinuityMetricsPort,
 } from "@hoox/run-contracts";
 import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai/compat";
-import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { Models } from "@earendil-works/pi-ai";
 import { digestCanonical } from "./mutation-protocol.js";
 
 export interface RuntimeCompactionConfiguration {
@@ -49,7 +49,7 @@ export class RuntimeCompactionCoordinator {
   constructor(
     private readonly configuration: RuntimeCompactionConfiguration,
     private readonly model: Model<Api>,
-    private readonly modelRuntime: ModelRuntime,
+    private readonly modelRuntime: Models,
     private readonly modelContext: TrustedPiModelContextCapability,
     private readonly checkpoints: ThreadContextCompactionCommitPort,
     private readonly remote?: RemoteRuntimeCompactorPort,

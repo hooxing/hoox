@@ -63,7 +63,7 @@ import {
   bindTrustedPiModelContextCapability,
   isOfficialDeepSeekV4FlashModel,
   loadTrustedModelTokenizerCapability,
-  officialDeepSeekV4FlashModelProtocol,
+  createOpenAiCompatiblePiProvider,
   type TrustedPiModelContextCapability,
 } from "@hoox/pi-adapter";
 import {
@@ -92,8 +92,7 @@ import {
 } from "@hoox/sandbox";
 import { SkillRuntimeService } from "@hoox/skill";
 import { DeliverFileToolRouterFactory } from "@hoox/tool-router";
-import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import type { Model, Models } from "@earendil-works/pi-ai";
 import { SandboxDeliverFileSource } from "./deliver-file-source.js";
 import { installModelWireFetchInstrumentation, ModelWireTraceSession } from "./model-wire-trace.js";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
@@ -672,8 +671,6 @@ export function parseWorkerProcessEnvironment(
   });
 }
 
-const openAiCompatibleProviderId = "runtime-openai-compatible";
-
 /**
  * 本地 Provider 已由真实探针证明实现 Chat Completions；这里同时固定 Provider 与 Model 的
  * Pi 协议，避免其中一处漂移后静默改走不受支持的 Responses 路由。
@@ -685,7 +682,7 @@ export async function createOpenAiCompatibleModel(
   >,
 ): Promise<
   Readonly<{
-    modelRuntime: ModelRuntime;
+    modelRuntime: Models;
     model: Model<"openai-completions">;
   }>
 > {
@@ -716,50 +713,16 @@ export async function createOpenAiCompatibleProvider(configuration: {
   readonly models: readonly ModelProviderModelConfiguration[];
 }): Promise<
   Readonly<{
-    modelRuntime: ModelRuntime;
+    modelRuntime: Models;
     model: Model<"openai-completions">;
   }>
 > {
-  const enabledModels = configuration.models.filter((model) => model.enabled);
-  if (
-    enabledModels.length < 1 ||
-    !enabledModels.some((model) => model.id === configuration.defaultModelId)
-  ) {
-    throw new Error("模型 Provider 默认模型无效");
-  }
-  const modelRuntime = await ModelRuntime.create({
-    credentials: new InMemoryCredentialStore(),
-    modelsPath: null,
-  });
-  modelRuntime.registerProvider(openAiCompatibleProviderId, {
-    name: configuration.displayName ?? "Runtime OpenAI-compatible Provider",
-    baseUrl: configuration.baseUrl,
-    apiKey: configuration.apiKey,
-    api: "openai-completions",
-    models: enabledModels.map((model) => ({
-      id: model.id,
-      name: model.name,
-      api: "openai-completions",
-      ...(isOfficialDeepSeekV4FlashModel(model.id)
-        ? officialDeepSeekV4FlashModelProtocol()
-        : { reasoning: model.reasoning }),
-      input: [...model.input],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.contextWindow,
-      maxTokens: model.maxTokens,
-    })),
-  });
-  const model = modelRuntime.getModel(openAiCompatibleProviderId, configuration.defaultModelId);
-  if (model?.api !== "openai-completions") throw new Error("模型配置无法解析");
-  return Object.freeze({
-    modelRuntime,
-    model: model as Model<"openai-completions">,
-  });
+  return await createOpenAiCompatiblePiProvider(configuration);
 }
 
 /** 模型计数能力由 Worker 自动解析；未知模型使用本地估算，不能阻断已发布 Provider。 */
 export async function createOpenAiCompatibleModelContextCapability(
-  modelRuntime: ModelRuntime,
+  modelRuntime: Models,
   model: Model<"openai-completions">,
 ): Promise<TrustedPiModelContextCapability> {
   const tokenizer = await loadTrustedModelTokenizerCapability(model.id);

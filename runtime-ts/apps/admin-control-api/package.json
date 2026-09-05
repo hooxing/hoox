@@ -9,7 +9,6 @@
   },
   "types": "./src/app.ts",
   "dependencies": {
-    "@earendil-works/pi-ai": "0.82.1",
     "@hoox/admin-control": "workspace:*",
     "@hoox/api": "workspace:*",
     "@hoox/domain": "workspace:*",

@@ -1,6 +1,6 @@
 // 此文件由 scripts/generate-admin-pi-model-catalog.mjs 从精确锁定的 Pi 版本生成。
 // 请勿手工修改；升级 Pi 后运行 pnpm admin:pi-catalog:generate。
-import type { PiModelCatalogModelDto, PiModelCatalogProviderDto } from "@hoox/protocol";
+import type { PiModelCatalogModelDto, PiModelCatalogProviderDto } from "./admin-control.js";
 export const LOCAL_PI_MODEL_CATALOG_PROVIDERS: readonly PiModelCatalogProviderDto[] = [
   {
     "providerId": "ant-ling",

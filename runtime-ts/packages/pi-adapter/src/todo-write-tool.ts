@@ -1,6 +1,6 @@
 import type { ToolObservationResult } from "@hoox/context-policy";
 import type { TodoSnapshot, TodoWriteCommand } from "@hoox/domain";
-import { defineTool } from "@earendil-works/pi-coding-agent";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { createSchemaInvalidArgumentsBridge } from "./tools.js";
 
@@ -70,7 +70,7 @@ export function createTodoWritePiTool(
     }),
     (value) => value.explanation,
   );
-  return defineTool({
+  const tool: AgentTool<typeof TodoWriteToolArgumentsSchema, unknown> = {
     name: "todo_write",
     label: "更新任务清单",
     description:
@@ -114,5 +114,6 @@ export function createTodoWritePiTool(
         details: {},
       };
     },
-  });
+  };
+  return tool;
 }

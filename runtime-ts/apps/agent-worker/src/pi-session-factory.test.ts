@@ -27,7 +27,7 @@ import {
   fauxToolCall,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createModels } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
   createDurableObservationRecorderFactory,
@@ -66,12 +66,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       api: `faux-worker-initial-compaction-${Date.now()}`,
       provider: `faux-worker-initial-compaction-${Date.now()}`,
     });
-    const modelRuntime = await ModelRuntime.create({
-      credentials: new InMemoryCredentialStore(),
-      modelsPath: null,
-    });
-    modelRuntime.registerNativeProvider(faux.provider);
-    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
     const messages: ThreadActiveHistoryV1["messages"] = [
       { sequence: 1, role: "user", text: "旧目标", timestamp: 1 },
       {
@@ -175,12 +176,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
         return fauxAssistantMessage("已采用两条补充输入");
       },
     ]);
-    const modelRuntime = await ModelRuntime.create({
-      credentials: new InMemoryCredentialStore(),
-      modelsPath: null,
-    });
-    modelRuntime.registerNativeProvider(faux.provider);
-    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
     const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
       recordStarted: async () => "recorded" as const,
       record: async () => ({ outcome: "recorded" as const, observation: "", isTruncated: false }),
@@ -225,12 +227,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       tokensPerSecond: 10_000,
     });
     faux.setResponses([fauxAssistantMessage("模型用量观测完成")]);
-    const modelRuntime = await ModelRuntime.create({
-      credentials: new InMemoryCredentialStore(),
-      modelsPath: null,
-    });
-    modelRuntime.registerNativeProvider(faux.provider);
-    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
     const recordModelUsage = vi.fn(
       async (_input: Parameters<ModelUsageMetricsPort["recordModelUsage"]>[0]) => undefined,
     );
@@ -309,12 +312,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       ),
       fauxAssistantMessage("子任务完成"),
     ]);
-    const modelRuntime = await ModelRuntime.create({
-      credentials: new InMemoryCredentialStore(),
-      modelsPath: null,
-    });
-    modelRuntime.registerNativeProvider(faux.provider);
-    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
 
     const observationOperations: string[] = [];
     const trajectoryRecords: Array<{ event: { type: string; event: unknown } }> = [];
@@ -518,12 +522,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
         return fauxAssistantMessage("已完成检查");
       },
     ]);
-    const modelRuntime = await ModelRuntime.create({
-      credentials: new InMemoryCredentialStore(),
-      modelsPath: null,
-    });
-    modelRuntime.registerNativeProvider(faux.provider);
-    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
     const sessions = new PiWorkerSessionFactory(
       faux.getModel(),
       modelRuntime,
@@ -662,12 +667,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       },
       fauxAssistantMessage("审阅完成"),
     ]);
-    const modelRuntime = await ModelRuntime.create({
-      credentials: new InMemoryCredentialStore(),
-      modelsPath: null,
-    });
-    modelRuntime.registerNativeProvider(faux.provider);
-    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
     const sessions = new PiWorkerSessionFactory(
       faux.getModel(),
       modelRuntime,
@@ -734,12 +740,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
         return fauxAssistantMessage("已查看图片");
       },
     ]);
-    const modelRuntime = await ModelRuntime.create({
-      credentials: new InMemoryCredentialStore(),
-      modelsPath: null,
-    });
-    modelRuntime.registerNativeProvider(faux.provider);
-    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
     const sessions = new PiWorkerSessionFactory(
       faux.getModel(),
       modelRuntime,
@@ -802,12 +809,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     const acquireBarrier = new Promise<void>((resolve) => {
       releaseAcquire = resolve;
     });
-    const modelRuntime = await ModelRuntime.create({
-      credentials: new InMemoryCredentialStore(),
-      modelsPath: null,
-    });
-    modelRuntime.registerNativeProvider(faux.provider);
-    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
     const load = vi.fn();
     const sessions = new PiWorkerSessionFactory(
       faux.getModel(),
@@ -890,182 +898,178 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     );
   });
 
-  it.runIf(process.platform === "linux")(
-    "内部工具循环预算拒绝收敛为 Worker failed/CONTEXT_TOO_LARGE",
-    async () => {
-      const persistence = new FakeExecutionPersistence();
-      const scope = persistence.addSeed(fakeSeed("pi-context-too-large"));
-      const sandboxes = new FakeSandboxRegistry();
-      sandboxes.handle.command = async () => ({
-        stdout: "大".repeat(130_000),
-        stderr: "",
-        exitCode: 0,
-      });
-      const faux = fauxProvider({
-        api: `faux-worker-budget-${Date.now()}`,
-        provider: `faux-worker-budget-${Date.now()}`,
-        models: [{ id: "faux-budget", contextWindow: 120_000, maxTokens: 4_096 }],
-        tokensPerSecond: 10_000,
-      });
-      faux.setResponses([
-        fauxAssistantMessage(
-          fauxToolCall("exec_command", { cmd: "cat /tmp/huge.txt", max_output_tokens: 20_000 }),
-          {
-            stopReason: "toolUse",
-          },
+  it("内部工具循环预算拒绝收敛为 Worker failed/CONTEXT_TOO_LARGE", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-context-too-large"));
+    const sandboxes = new FakeSandboxRegistry();
+    sandboxes.handle.command = async () => ({
+      stdout: "大".repeat(130_000),
+      stderr: "",
+      exitCode: 0,
+    });
+    const faux = fauxProvider({
+      api: `faux-worker-budget-${Date.now()}`,
+      provider: `faux-worker-budget-${Date.now()}`,
+      models: [{ id: "faux-budget", contextWindow: 120_000, maxTokens: 4_096 }],
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall("exec_command", { cmd: "cat /tmp/huge.txt", max_output_tokens: 20_000 }),
+        {
+          stopReason: "toolUse",
+        },
+      ),
+      fauxAssistantMessage("不应触达"),
+    ]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions: new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
+          recordStarted: async () => "recorded" as const,
+          record: async () => ({
+            outcome: "recorded" as const,
+            observation: "大".repeat(130_000),
+            isTruncated: false,
+          }),
+        })),
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: "pi-budget-worker", runTimeoutMs: 60_000 },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "failed" });
+    expect(faux.state.callCount).toBe(1);
+    expect(
+      persistence
+        .record(scope)
+        .events.some(
+          (event) =>
+            event.kind === "agent_event" &&
+            event.payload.type === "error" &&
+            event.payload.code === "CONTEXT_TOO_LARGE",
         ),
-        fauxAssistantMessage("不应触达"),
-      ]);
-      const modelRuntime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsPath: null,
-      });
-      modelRuntime.registerNativeProvider(faux.provider);
-      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-      const worker = new RunWorker(
-        {
-          persistence,
-          revisions: new FakeRevisionVerifier(),
-          sandboxes,
-          orphanSandboxes: sandboxes,
-          sessions: new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
-            recordStarted: async () => "recorded" as const,
-            record: async () => ({
-              outcome: "recorded" as const,
-              observation: "大".repeat(130_000),
-              isTruncated: false,
-            }),
-          })),
-          cancellation: new FakeCancellationPort(),
-          artifacts: new FakeArtifactPublication(),
-          clock: new FakeClock(),
-          metrics: new FakeRecoveryMetrics(),
-        },
-        { workerId: "pi-budget-worker", runTimeoutMs: 60_000 },
-      );
+    ).toBe(true);
+  });
 
-      await expect(worker.execute(scope)).resolves.toEqual({ outcome: "failed" });
-      expect(faux.state.callCount).toBe(1);
-      expect(
-        persistence
-          .record(scope)
-          .events.some(
-            (event) =>
-              event.kind === "agent_event" &&
-              event.payload.type === "error" &&
-              event.payload.code === "CONTEXT_TOO_LARGE",
-          ),
-      ).toBe(true);
-    },
-  );
-
-  it.runIf(process.platform === "linux")(
-    "真实 Pi tool.started 先提交，issue/consume 不被 heartbeat 插入且文件成功写入",
-    async () => {
-      const persistence = new FakeExecutionPersistence();
-      const scope = persistence.addSeed(fakeSeed("pi-lane"));
-      const sandboxes = new FakeSandboxRegistry();
-      sandboxes.handle.command = async () => {
-        sandboxes.handle.files.set("/tmp/lane.txt", "durable-lane-ok");
-        return { stdout: "", stderr: "", exitCode: 0 };
-      };
-      const clock = new FakeClock();
-      const faux = fauxProvider({
-        api: `faux-worker-lane-${Date.now()}`,
-        provider: `faux-worker-lane-${Date.now()}`,
-        tokensPerSecond: 10_000,
-      });
-      faux.setResponses([
-        fauxAssistantMessage(
-          fauxToolCall("exec_command", { cmd: "printf durable-lane-ok > /tmp/lane.txt" }),
-          { stopReason: "toolUse" },
-        ),
-        fauxAssistantMessage("完成"),
-      ]);
-      const modelRuntime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsPath: null,
-      });
-      modelRuntime.registerNativeProvider(faux.provider);
-      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-      const observationOperations: string[] = [];
-      const sessions = new PiWorkerSessionFactory(
-        faux.getModel(),
-        modelRuntime,
-        (_input, outputs) => ({
-          recordStarted: async (call) => {
-            observationOperations.push(`call:${call.toolCallId}:${call.toolName}`);
-            await new Promise((resolve) => setTimeout(resolve, 300));
-            expect(
-              persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
-            ).toHaveLength(0);
-            return "recorded" as const;
-          },
-          record: async (call) => {
-            observationOperations.push(`result:${call.toolCallId}:${call.toolName}`);
-            const observation = await outputs.readControlledReceipt(call);
-            return observation === undefined
-              ? { outcome: "conflict" as const }
-              : { outcome: "recorded" as const, observation, isTruncated: false };
-          },
-        }),
-      );
-      persistence.beforePermitIssueReturn = (input) => {
-        if (input.effect === "tool_execution") {
-          expect(observationOperations[0]).toMatch(/^call:/u);
-        }
-        if (input.effect === "tool_execution") void clock.tickHeartbeat();
-      };
-      const worker = new RunWorker(
-        {
-          persistence,
-          revisions: new FakeRevisionVerifier(),
-          sandboxes,
-          orphanSandboxes: sandboxes,
-          sessions,
-          cancellation: new FakeCancellationPort(),
-          artifacts: new FakeArtifactPublication(),
-          clock,
-          metrics: new FakeRecoveryMetrics(),
+  it("真实 Pi tool.started 先提交，issue/consume 不被 heartbeat 插入且文件成功写入", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-lane"));
+    const sandboxes = new FakeSandboxRegistry();
+    sandboxes.handle.command = async () => {
+      sandboxes.handle.files.set("/tmp/lane.txt", "durable-lane-ok");
+      return { stdout: "", stderr: "", exitCode: 0 };
+    };
+    const clock = new FakeClock();
+    const faux = fauxProvider({
+      api: `faux-worker-lane-${Date.now()}`,
+      provider: `faux-worker-lane-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall("exec_command", { cmd: "printf durable-lane-ok > /tmp/lane.txt" }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("完成"),
+    ]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
+    const observationOperations: string[] = [];
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      (_input, outputs) => ({
+        recordStarted: async (call) => {
+          observationOperations.push(`call:${call.toolCallId}:${call.toolName}`);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          expect(
+            persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
+          ).toHaveLength(0);
+          return "recorded" as const;
         },
-        {
-          workerId: "pi-lane-worker",
-          leaseDurationMs: 30_000,
-          heartbeatMs: 10_000,
-          runTimeoutMs: 60_000,
+        record: async (call) => {
+          observationOperations.push(`result:${call.toolCallId}:${call.toolName}`);
+          const observation = await outputs.readControlledReceipt(call);
+          return observation === undefined
+            ? { outcome: "conflict" as const }
+            : { outcome: "recorded" as const, observation, isTruncated: false };
         },
-      );
-
-      await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
-      expect(sandboxes.handle.files.get("/tmp/lane.txt")).toBe("durable-lane-ok");
-      const record = persistence.record(scope);
-      const started = record.events.find(
-        (event) => event.kind === "agent_event" && event.payload.type === "tool.started",
-      );
-      if (started?.kind !== "agent_event" || started.payload.type !== "tool.started") {
-        throw new Error("测试未观察到 tool.started");
+      }),
+    );
+    persistence.beforePermitIssueReturn = (input) => {
+      if (input.effect === "tool_execution") {
+        expect(observationOperations[0]).toMatch(/^call:/u);
       }
-      const eventIndex = persistence.durableOperations.indexOf(
-        `mutate:attempt-1/event/${started.sequence}`,
-      );
-      const issueIndex = persistence.durableOperations.indexOf(
-        `permit:issue:${started.payload.callId}`,
-      );
-      const consumeIndex = persistence.durableOperations.indexOf(
-        `permit:consume:${started.payload.callId}`,
-      );
-      const inspectAfterIssue = persistence.durableOperations.findIndex(
-        (operation, index) => index > issueIndex && operation === "inspect",
-      );
-      expect(eventIndex).toBeGreaterThanOrEqual(0);
-      expect(eventIndex).toBeLessThan(issueIndex);
-      expect(issueIndex).toBeLessThan(consumeIndex);
-      expect(consumeIndex).toBeLessThan(inspectAfterIssue);
-      expect(observationOperations).toHaveLength(2);
-      expect(observationOperations[0]).toMatch(/^call:/u);
-      expect(observationOperations[1]).toMatch(/^result:/u);
-    },
-  );
+      if (input.effect === "tool_execution") void clock.tickHeartbeat();
+    };
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock,
+        metrics: new FakeRecoveryMetrics(),
+      },
+      {
+        workerId: "pi-lane-worker",
+        leaseDurationMs: 30_000,
+        heartbeatMs: 10_000,
+        runTimeoutMs: 60_000,
+      },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(sandboxes.handle.files.get("/tmp/lane.txt")).toBe("durable-lane-ok");
+    const record = persistence.record(scope);
+    const started = record.events.find(
+      (event) => event.kind === "agent_event" && event.payload.type === "tool.started",
+    );
+    if (started?.kind !== "agent_event" || started.payload.type !== "tool.started") {
+      throw new Error("测试未观察到 tool.started");
+    }
+    const eventIndex = persistence.durableOperations.indexOf(
+      `mutate:attempt-1/event/${started.sequence}`,
+    );
+    const issueIndex = persistence.durableOperations.indexOf(
+      `permit:issue:${started.payload.callId}`,
+    );
+    const consumeIndex = persistence.durableOperations.indexOf(
+      `permit:consume:${started.payload.callId}`,
+    );
+    const inspectAfterIssue = persistence.durableOperations.findIndex(
+      (operation, index) => index > issueIndex && operation === "inspect",
+    );
+    expect(eventIndex).toBeGreaterThanOrEqual(0);
+    expect(eventIndex).toBeLessThan(issueIndex);
+    expect(issueIndex).toBeLessThan(consumeIndex);
+    expect(consumeIndex).toBeLessThan(inspectAfterIssue);
+    expect(observationOperations).toHaveLength(2);
+    expect(observationOperations[0]).toMatch(/^call:/u);
+    expect(observationOperations[1]).toMatch(/^result:/u);
+  });
 
   it("同轮两个 Pi 工具调用按 durable call/result 对串行，不触发 observation conflict", async () => {
     const persistence = new FakeExecutionPersistence();
@@ -1095,12 +1099,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       ),
       fauxAssistantMessage("完成"),
     ]);
-    const modelRuntime = await ModelRuntime.create({
-      credentials: new InMemoryCredentialStore(),
-      modelsPath: null,
-    });
-    modelRuntime.registerNativeProvider(faux.provider);
-    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
     const operations: string[] = [];
     let pendingCallId: string | undefined;
     const sessions = new PiWorkerSessionFactory(
@@ -1159,212 +1164,205 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     expect(faux.state.callCount).toBe(2);
   }, 30_000);
 
-  it.runIf(process.platform === "linux")(
-    "tool_call 前驱 UNKNOWN 时不签发也不消费一次性工具许可",
-    async () => {
-      const persistence = new FakeExecutionPersistence();
-      const scope = persistence.addSeed(fakeSeed("pi-predecessor-unknown"));
-      const sandboxes = new FakeSandboxRegistry();
-      const faux = fauxProvider({
-        api: `faux-worker-predecessor-unknown-${Date.now()}`,
-        provider: `faux-worker-predecessor-unknown-${Date.now()}`,
-        tokensPerSecond: 10_000,
-      });
-      faux.setResponses([
-        fauxAssistantMessage(
-          fauxToolCall("exec_command", { cmd: "printf forbidden > /tmp/must-not-exist.txt" }),
-          { stopReason: "toolUse" },
+  it("tool_call 前驱 UNKNOWN 时不签发也不消费一次性工具许可", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-predecessor-unknown"));
+    const sandboxes = new FakeSandboxRegistry();
+    const faux = fauxProvider({
+      api: `faux-worker-predecessor-unknown-${Date.now()}`,
+      provider: `faux-worker-predecessor-unknown-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall("exec_command", { cmd: "printf forbidden > /tmp/must-not-exist.txt" }),
+        { stopReason: "toolUse" },
+      ),
+    ]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
+    const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
+      recordStarted: async () => "unknown" as const,
+      record: async () => ({ outcome: "unknown" as const }),
+    }));
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: "pi-predecessor-unknown-worker" },
+    );
+
+    await expect(worker.execute(scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "PERSISTENCE_UNAVAILABLE",
+    });
+    expect(
+      persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
+    ).toHaveLength(0);
+    expect(sandboxes.handle.files.has("/tmp/must-not-exist.txt")).toBe(false);
+  });
+
+  it("exec_command schema 错误持久化相邻 call/result 且不消费 effect 许可，模型仍可修正", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-exec-schema-correction"));
+    const sandboxes = new FakeSandboxRegistry();
+    let sandboxCalls = 0;
+    sandboxes.handle.command = async () => {
+      sandboxCalls += 1;
+      return { stdout: "fixed\n", stderr: "", exitCode: 0 };
+    };
+    const faux = fauxProvider({
+      api: `faux-worker-exec-schema-${Date.now()}`,
+      provider: `faux-worker-exec-schema-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("exec_command", {}, { id: "call-exec-missing" }), {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage(
+        fauxToolCall("exec_command", { cmd: 123 }, { id: "call-exec-wrong-type" }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage(
+        fauxToolCall(
+          "exec_command",
+          { cmd: "echo should-not-run", extra: true },
+          { id: "call-exec-extra" },
         ),
-      ]);
-      const modelRuntime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsPath: null,
-      });
-      modelRuntime.registerNativeProvider(faux.provider);
-      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-      const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
-        recordStarted: async () => "unknown" as const,
-        record: async () => ({ outcome: "unknown" as const }),
-      }));
-      const worker = new RunWorker(
-        {
-          persistence,
-          revisions: new FakeRevisionVerifier(),
-          sandboxes,
-          orphanSandboxes: sandboxes,
-          sessions,
-          cancellation: new FakeCancellationPort(),
-          artifacts: new FakeArtifactPublication(),
-          clock: new FakeClock(),
-          metrics: new FakeRecoveryMetrics(),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage(
+        fauxToolCall("exec_command", { cmd: "echo fixed" }, { id: "call-exec-fixed" }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("完成"),
+    ]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
+    const operations: string[] = [];
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      (_input, outputs) => ({
+        recordStarted: async (call) => {
+          operations.push(`call:${call.toolCallId}:${call.toolName}`);
+          return "recorded" as const;
         },
-        { workerId: "pi-predecessor-unknown-worker" },
-      );
-
-      await expect(worker.execute(scope)).resolves.toEqual({
-        outcome: "recovery_required",
-        code: "PERSISTENCE_UNAVAILABLE",
-      });
-      expect(
-        persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
-      ).toHaveLength(0);
-      expect(sandboxes.handle.files.has("/tmp/must-not-exist.txt")).toBe(false);
-    },
-  );
-
-  it.runIf(process.platform === "linux")(
-    "exec_command schema 错误持久化相邻 call/result 且不消费 effect 许可，模型仍可修正",
-    async () => {
-      const persistence = new FakeExecutionPersistence();
-      const scope = persistence.addSeed(fakeSeed("pi-exec-schema-correction"));
-      const sandboxes = new FakeSandboxRegistry();
-      let sandboxCalls = 0;
-      sandboxes.handle.command = async () => {
-        sandboxCalls += 1;
-        return { stdout: "fixed\n", stderr: "", exitCode: 0 };
-      };
-      const faux = fauxProvider({
-        api: `faux-worker-exec-schema-${Date.now()}`,
-        provider: `faux-worker-exec-schema-${Date.now()}`,
-        tokensPerSecond: 10_000,
-      });
-      faux.setResponses([
-        fauxAssistantMessage(fauxToolCall("exec_command", {}, { id: "call-exec-missing" }), {
-          stopReason: "toolUse",
-        }),
-        fauxAssistantMessage(
-          fauxToolCall("exec_command", { cmd: 123 }, { id: "call-exec-wrong-type" }),
-          { stopReason: "toolUse" },
-        ),
-        fauxAssistantMessage(
-          fauxToolCall(
-            "exec_command",
-            { cmd: "echo should-not-run", extra: true },
-            { id: "call-exec-extra" },
-          ),
-          { stopReason: "toolUse" },
-        ),
-        fauxAssistantMessage(
-          fauxToolCall("exec_command", { cmd: "echo fixed" }, { id: "call-exec-fixed" }),
-          { stopReason: "toolUse" },
-        ),
-        fauxAssistantMessage("完成"),
-      ]);
-      const modelRuntime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsPath: null,
-      });
-      modelRuntime.registerNativeProvider(faux.provider);
-      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-      const operations: string[] = [];
-      const sessions = new PiWorkerSessionFactory(
-        faux.getModel(),
-        modelRuntime,
-        (_input, outputs) => ({
-          recordStarted: async (call) => {
-            operations.push(`call:${call.toolCallId}:${call.toolName}`);
-            return "recorded" as const;
-          },
-          record: async (call) => {
-            operations.push(`result:${call.toolCallId}:${call.toolName}`);
-            const observation = await outputs.readControlledReceipt(call);
-            return observation === undefined
-              ? { outcome: "conflict" as const }
-              : { outcome: "recorded" as const, observation, isTruncated: false };
-          },
-        }),
-      );
-      const worker = new RunWorker(
-        {
-          persistence,
-          revisions: new FakeRevisionVerifier(),
-          sandboxes,
-          orphanSandboxes: sandboxes,
-          sessions,
-          cancellation: new FakeCancellationPort(),
-          artifacts: new FakeArtifactPublication(),
-          clock: new FakeClock(),
-          metrics: new FakeRecoveryMetrics(),
+        record: async (call) => {
+          operations.push(`result:${call.toolCallId}:${call.toolName}`);
+          const observation = await outputs.readControlledReceipt(call);
+          return observation === undefined
+            ? { outcome: "conflict" as const }
+            : { outcome: "recorded" as const, observation, isTruncated: false };
         },
-        { workerId: "pi-exec-schema-worker", runTimeoutMs: 60_000 },
-      );
+      }),
+    );
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: "pi-exec-schema-worker", runTimeoutMs: 60_000 },
+    );
 
-      await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
-      expect(sandboxCalls).toBe(1);
-      expect(
-        persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
-      ).toHaveLength(1);
-      expect(operations).toEqual([
-        "call:call-exec-missing:exec_command",
-        "result:call-exec-missing:exec_command",
-        "call:call-exec-wrong-type:exec_command",
-        "result:call-exec-wrong-type:exec_command",
-        "call:call-exec-extra:exec_command",
-        "result:call-exec-extra:exec_command",
-        "call:call-exec-fixed:exec_command",
-        "result:call-exec-fixed:exec_command",
-      ]);
-    },
-    30_000,
-  );
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(sandboxCalls).toBe(1);
+    expect(
+      persistence.permits.filter(({ permit }) => permit.effect === "tool_execution"),
+    ).toHaveLength(1);
+    expect(operations).toEqual([
+      "call:call-exec-missing:exec_command",
+      "result:call-exec-missing:exec_command",
+      "call:call-exec-wrong-type:exec_command",
+      "result:call-exec-wrong-type:exec_command",
+      "call:call-exec-extra:exec_command",
+      "result:call-exec-extra:exec_command",
+      "call:call-exec-fixed:exec_command",
+      "result:call-exec-fixed:exec_command",
+    ]);
+  }, 30_000);
 
-  it.runIf(process.platform === "linux")(
-    "Tool result 持久化持续 UNKNOWN 时中止 Pi，Attempt 只能进入 recovery_required",
-    async () => {
-      const persistence = new FakeExecutionPersistence();
-      const scope = persistence.addSeed(fakeSeed("pi-observation-unknown"));
-      const sandboxes = new FakeSandboxRegistry();
-      const faux = fauxProvider({
-        api: `faux-worker-observation-unknown-${Date.now()}`,
-        provider: `faux-worker-observation-unknown-${Date.now()}`,
-        tokensPerSecond: 10_000,
-      });
-      faux.setResponses([
-        fauxAssistantMessage(
-          fauxToolCall("exec_command", { cmd: "printf side-effect-issued > /tmp/unknown.txt" }),
-          { stopReason: "toolUse" },
-        ),
-        fauxAssistantMessage("不得到达成功终态"),
-      ]);
-      const modelRuntime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsPath: null,
-      });
-      modelRuntime.registerNativeProvider(faux.provider);
-      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-      const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
-        recordStarted: async () => "recorded" as const,
-        record: async () => ({ outcome: "unknown" as const }),
-      }));
-      const worker = new RunWorker(
-        {
-          persistence,
-          revisions: new FakeRevisionVerifier(),
-          sandboxes,
-          orphanSandboxes: sandboxes,
-          sessions,
-          cancellation: new FakeCancellationPort(),
-          artifacts: new FakeArtifactPublication(),
-          clock: new FakeClock(),
-          metrics: new FakeRecoveryMetrics(),
-        },
-        {
-          workerId: "pi-observation-unknown-worker",
-          leaseDurationMs: 30_000,
-          heartbeatMs: 10_000,
-          runTimeoutMs: 60_000,
-        },
-      );
+  it("Tool result 持久化持续 UNKNOWN 时中止 Pi，Attempt 只能进入 recovery_required", async () => {
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-observation-unknown"));
+    const sandboxes = new FakeSandboxRegistry();
+    const faux = fauxProvider({
+      api: `faux-worker-observation-unknown-${Date.now()}`,
+      provider: `faux-worker-observation-unknown-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall("exec_command", { cmd: "printf side-effect-issued > /tmp/unknown.txt" }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("不得到达成功终态"),
+    ]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
+    const sessions = new PiWorkerSessionFactory(faux.getModel(), modelRuntime, () => ({
+      recordStarted: async () => "recorded" as const,
+      record: async () => ({ outcome: "unknown" as const }),
+    }));
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      {
+        workerId: "pi-observation-unknown-worker",
+        leaseDurationMs: 30_000,
+        heartbeatMs: 10_000,
+        runTimeoutMs: 60_000,
+      },
+    );
 
-      await expect(worker.execute(scope)).resolves.toEqual({
-        outcome: "recovery_required",
-        code: "PERSISTENCE_UNAVAILABLE",
-      });
-      expect(persistence.record(scope).run.status).toBe("running");
-      expect(persistence.record(scope).attempt?.status).toBe("recovery_required");
-      expect(faux.state.callCount).toBe(1);
-    },
-  );
+    await expect(worker.execute(scope)).resolves.toEqual({
+      outcome: "recovery_required",
+      code: "PERSISTENCE_UNAVAILABLE",
+    });
+    expect(persistence.record(scope).run.status).toBe("running");
+    expect(persistence.record(scope).attempt?.status).toBe("recovery_required");
+    expect(faux.state.callCount).toBe(1);
+  });
 
   it("exec_command 数据面连续失败时熔断 Sandbox 调用但保留模型自适应与回复", async () => {
     const persistence = new FakeExecutionPersistence();
@@ -1391,12 +1389,13 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
       commandTurn("after-circuit"),
       fauxAssistantMessage("Sandbox 连续调用失败，本次任务无法继续。"),
     ]);
-    const modelRuntime = await ModelRuntime.create({
-      credentials: new InMemoryCredentialStore(),
-      modelsPath: null,
-    });
-    modelRuntime.registerNativeProvider(faux.provider);
-    await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
     const sessions = new PiWorkerSessionFactory(
       faux.getModel(),
       modelRuntime,
@@ -1453,127 +1452,125 @@ describe("PiWorkerSessionFactory 持久操作门控", () => {
     ).toContain("Sandbox 连续调用失败");
   });
 
-  it.runIf(process.platform === "linux")(
-    "deliver_file 业务参数失败也先形成 durable tool_call，并允许模型修正后交付",
-    async () => {
-      const authority = createArtifactExecutionAuthorizationAuthority();
-      let sourceReads = 0;
-      let publications = 0;
-      const deliverFileTools = new DeliverFileToolRouterFactory({
-        source: {
-          read: async () => {
-            sourceReads += 1;
-            return {
-              outcome: "found" as const,
-              relativePath: "reports/final.pdf",
-              body: new Uint8Array([1, 2, 3]),
-            };
-          },
+  it("deliver_file 业务参数失败也先形成 durable tool_call，并允许模型修正后交付", async () => {
+    const authority = createArtifactExecutionAuthorizationAuthority();
+    let sourceReads = 0;
+    let publications = 0;
+    const deliverFileTools = new DeliverFileToolRouterFactory({
+      source: {
+        read: async () => {
+          sourceReads += 1;
+          return {
+            outcome: "found" as const,
+            relativePath: "reports/final.pdf",
+            body: new Uint8Array([1, 2, 3]),
+          };
         },
-        publications: {
-          publish: async (input) => {
-            publications += 1;
-            return {
-              artifactId: artifactId("artifact_pi_deliver_file"),
-              resourceVersionId: resourceVersionId("resource_version_pi_deliver_file"),
-              name: input.name,
-              size: input.body.byteLength,
-              sha256: sha256Digest("a".repeat(64)),
-              mediaType: "application/pdf",
-            };
-          },
+      },
+      publications: {
+        publish: async (input) => {
+          publications += 1;
+          return {
+            artifactId: artifactId("artifact_pi_deliver_file"),
+            resourceVersionId: resourceVersionId("resource_version_pi_deliver_file"),
+            name: input.name,
+            size: input.body.byteLength,
+            sha256: sha256Digest("a".repeat(64)),
+            mediaType: "application/pdf",
+          };
         },
-        authorizationVerifier: authority.verifier,
-      });
-      const persistence = new FakeExecutionPersistence();
-      const scope = persistence.addSeed(fakeSeed("pi-deliver-file-correction"));
-      const sandboxes = new FakeSandboxRegistry();
-      const faux = fauxProvider({
-        api: `faux-worker-deliver-file-${Date.now()}`,
-        provider: `faux-worker-deliver-file-${Date.now()}`,
-        tokensPerSecond: 10_000,
-      });
-      faux.setResponses([
-        fauxAssistantMessage(fauxToolCall("deliver_file", {}, { id: "call-pi-missing-path" }), {
-          stopReason: "toolUse",
-        }),
-        fauxAssistantMessage(
-          fauxToolCall(
-            "deliver_file",
-            { path: "/tmp/reports/final.pdf" },
-            { id: "call-pi-invalid-path" },
-          ),
-          { stopReason: "toolUse" },
+      },
+      authorizationVerifier: authority.verifier,
+    });
+    const persistence = new FakeExecutionPersistence();
+    const scope = persistence.addSeed(fakeSeed("pi-deliver-file-correction"));
+    const sandboxes = new FakeSandboxRegistry();
+    const faux = fauxProvider({
+      api: `faux-worker-deliver-file-${Date.now()}`,
+      provider: `faux-worker-deliver-file-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("deliver_file", {}, { id: "call-pi-missing-path" }), {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage(
+        fauxToolCall(
+          "deliver_file",
+          { path: "/tmp/reports/final.pdf" },
+          { id: "call-pi-invalid-path" },
         ),
-        fauxAssistantMessage(
-          fauxToolCall(
-            "deliver_file",
-            { path: "/workspace/reports/final.pdf" },
-            { id: "call-pi-valid-path" },
-          ),
-          { stopReason: "toolUse" },
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage(
+        fauxToolCall(
+          "deliver_file",
+          { path: "/workspace/reports/final.pdf" },
+          { id: "call-pi-valid-path" },
         ),
-        fauxAssistantMessage("文件已经交付"),
-      ]);
-      const modelRuntime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsPath: null,
-      });
-      modelRuntime.registerNativeProvider(faux.provider);
-      await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-      const operations: string[] = [];
-      const sessions = new PiWorkerSessionFactory(
-        faux.getModel(),
-        modelRuntime,
-        (_input, outputs) => ({
-          recordStarted: async (call) => {
-            operations.push(`call:${call.toolCallId}:${call.toolName}`);
-            return "recorded" as const;
-          },
-          record: async (call) => {
-            operations.push(`result:${call.toolCallId}:${call.toolName}`);
-            const observation = await outputs.readControlledReceipt(call);
-            return observation === undefined
-              ? { outcome: "conflict" as const }
-              : { outcome: "recorded" as const, observation, isTruncated: false };
-          },
-        }),
-        authority.issuer,
-        undefined,
-        undefined,
-        deliverFileTools,
-      );
-      const worker = new RunWorker(
-        {
-          persistence,
-          revisions: new FakeRevisionVerifier(),
-          sandboxes,
-          orphanSandboxes: sandboxes,
-          sessions,
-          cancellation: new FakeCancellationPort(),
-          artifacts: new FakeArtifactPublication(),
-          clock: new FakeClock(),
-          metrics: new FakeRecoveryMetrics(),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("文件已经交付"),
+    ]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const modelRuntime = createModels({ credentials });
+    modelRuntime.setProvider(faux.provider);
+    const operations: string[] = [];
+    const sessions = new PiWorkerSessionFactory(
+      faux.getModel(),
+      modelRuntime,
+      (_input, outputs) => ({
+        recordStarted: async (call) => {
+          operations.push(`call:${call.toolCallId}:${call.toolName}`);
+          return "recorded" as const;
         },
-        { workerId: "pi-deliver-file-worker", runTimeoutMs: 60_000 },
-      );
+        record: async (call) => {
+          operations.push(`result:${call.toolCallId}:${call.toolName}`);
+          const observation = await outputs.readControlledReceipt(call);
+          return observation === undefined
+            ? { outcome: "conflict" as const }
+            : { outcome: "recorded" as const, observation, isTruncated: false };
+        },
+      }),
+      authority.issuer,
+      undefined,
+      undefined,
+      deliverFileTools,
+    );
+    const worker = new RunWorker(
+      {
+        persistence,
+        revisions: new FakeRevisionVerifier(),
+        sandboxes,
+        orphanSandboxes: sandboxes,
+        sessions,
+        cancellation: new FakeCancellationPort(),
+        artifacts: new FakeArtifactPublication(),
+        clock: new FakeClock(),
+        metrics: new FakeRecoveryMetrics(),
+      },
+      { workerId: "pi-deliver-file-worker", runTimeoutMs: 60_000 },
+    );
 
-      await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
-      expect(sourceReads).toBe(1);
-      expect(publications).toBe(1);
-      expect(
-        persistence.permits
-          .filter(({ permit }) => permit.effect === "tool_execution")
-          .map(({ permit }) => permit.callId),
-      ).toEqual(["call-pi-invalid-path", "call-pi-valid-path"]);
-      expect(operations).toEqual([
-        "call:call-pi-missing-path:deliver_file",
-        "result:call-pi-missing-path:deliver_file",
-        "call:call-pi-invalid-path:deliver_file",
-        "result:call-pi-invalid-path:deliver_file",
-        "call:call-pi-valid-path:deliver_file",
-        "result:call-pi-valid-path:deliver_file",
-      ]);
-    },
-  );
+    await expect(worker.execute(scope)).resolves.toEqual({ outcome: "succeeded" });
+    expect(sourceReads).toBe(1);
+    expect(publications).toBe(1);
+    expect(
+      persistence.permits
+        .filter(({ permit }) => permit.effect === "tool_execution")
+        .map(({ permit }) => permit.callId),
+    ).toEqual(["call-pi-invalid-path", "call-pi-valid-path"]);
+    expect(operations).toEqual([
+      "call:call-pi-missing-path:deliver_file",
+      "result:call-pi-missing-path:deliver_file",
+      "call:call-pi-invalid-path:deliver_file",
+      "result:call-pi-invalid-path:deliver_file",
+      "call:call-pi-valid-path:deliver_file",
+      "result:call-pi-valid-path:deliver_file",
+    ]);
+  });
 });

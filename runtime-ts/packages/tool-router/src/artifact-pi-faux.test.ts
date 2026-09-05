@@ -22,7 +22,7 @@ import {
   fauxToolCall,
   InMemoryCredentialStore,
 } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createModels } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { DeliverFileToolRouterFactory } from "./deliver-file.js";
 
@@ -58,147 +58,142 @@ function consumed(call: ExternalEffectCall) {
 }
 
 describe("Pi Faux deliver_file 纵向链路", () => {
-  it.runIf(process.platform === "linux")(
-    "模型看到单一交付工具、修正缺失路径并在下一轮获得真实发布结果",
-    async () => {
-      const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 101 });
-      const sourcePaths: string[] = [];
-      const router = new DeliverFileToolRouterFactory({
-        source: {
-          read: async ({ absolutePath }) => {
-            sourcePaths.push(absolutePath);
-            return absolutePath.endsWith("missing.pdf")
-              ? { outcome: "not_found" as const }
-              : {
-                  outcome: "found" as const,
-                  relativePath: "reports/final.pdf",
-                  body: new Uint8Array([1, 2, 3]),
-                };
-          },
+  it("模型看到单一交付工具、修正缺失路径并在下一轮获得真实发布结果", async () => {
+    const authority = createArtifactExecutionAuthorizationAuthority({ now: () => 101 });
+    const sourcePaths: string[] = [];
+    const router = new DeliverFileToolRouterFactory({
+      source: {
+        read: async ({ absolutePath }) => {
+          sourcePaths.push(absolutePath);
+          return absolutePath.endsWith("missing.pdf")
+            ? { outcome: "not_found" as const }
+            : {
+                outcome: "found" as const,
+                relativePath: "reports/final.pdf",
+                body: new Uint8Array([1, 2, 3]),
+              };
         },
-        publications: {
-          publish: async (input) => ({
-            artifactId: artifactId("artifact_faux_delivered"),
-            resourceVersionId: resourceVersionId("resource_version_faux_delivered"),
-            name: input.name,
-            size: input.body.byteLength,
-            sha256: sha256Digest("a".repeat(64)),
-            mediaType: "application/pdf",
+      },
+      publications: {
+        publish: async (input) => ({
+          artifactId: artifactId("artifact_faux_delivered"),
+          resourceVersionId: resourceVersionId("resource_version_faux_delivered"),
+          name: input.name,
+          size: input.body.byteLength,
+          sha256: sha256Digest("a".repeat(64)),
+          mediaType: "application/pdf",
+        }),
+      },
+      authorizationVerifier: authority.verifier,
+    }).create({
+      binding: {
+        scope,
+        attemptId: "attempt-faux-deliver",
+        sandbox: {
+          registryId: "registry-faux-deliver",
+          providerKey: "cube",
+          providerSandboxId: "sandbox-faux-deliver",
+          mode: "created",
+          sandbox: new FakeSandboxHandle("faux-deliver"),
+        },
+      },
+      authorizer: {
+        authorizeToolEffect: async (call) =>
+          authority.issuer.issue({
+            consumed: consumed(call),
+            attemptId: "attempt-faux-deliver",
           }),
+      },
+    });
+    let initialContext = "";
+    let correctionContext = "";
+    let completionContext = "";
+    const faux = fauxProvider({
+      api: `faux-deliver-${Date.now()}`,
+      provider: `faux-deliver-${Date.now()}`,
+      tokensPerSecond: 10_000,
+    });
+    faux.setResponses([
+      (context) => {
+        initialContext = JSON.stringify(context);
+        return fauxAssistantMessage(
+          fauxToolCall(
+            "deliver_file",
+            { path: "/workspace/reports/missing.pdf" },
+            { id: "call-faux-missing" },
+          ),
+          { stopReason: "toolUse" },
+        );
+      },
+      (context) => {
+        correctionContext = JSON.stringify(context.messages);
+        return fauxAssistantMessage(
+          fauxToolCall(
+            "deliver_file",
+            { path: "/workspace/reports/final.pdf" },
+            { id: "call-faux-final" },
+          ),
+          { stopReason: "toolUse" },
+        );
+      },
+      (context) => {
+        completionContext = JSON.stringify(context.messages);
+        return fauxAssistantMessage("文件已经交付");
+      },
+    ]);
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(faux.provider.id, async () => ({
+      type: "api_key",
+      key: "test-only-key",
+    }));
+    const runtime = createModels({ credentials });
+    runtime.setProvider(faux.provider);
+    const model = faux.getModel();
+    const controller = await createSafePiSession({
+      model,
+      modelContext: bindTrustedPiModelContextCapability(runtime, model),
+      modelRuntime: runtime,
+      sandbox: new FakeSandboxHandle("faux-deliver-session"),
+      deliverFileToolRouter: router,
+      authorizeToolEffect: async () => ({
+        consumedAtMonotonicMs: performance.now(),
+        maxContinuationDelayMs: 250,
+      }),
+      createToolObservationRecorder: (outputs) => ({
+        record: async (call) => {
+          const observation = await outputs.readControlledReceipt(call);
+          return observation === undefined
+            ? { outcome: "conflict" as const }
+            : { outcome: "recorded" as const, observation, isTruncated: false };
         },
-        authorizationVerifier: authority.verifier,
-      }).create({
-        binding: {
-          scope,
-          attemptId: "attempt-faux-deliver",
-          sandbox: {
-            registryId: "registry-faux-deliver",
-            providerKey: "cube",
-            providerSandboxId: "sandbox-faux-deliver",
-            mode: "created",
-            sandbox: new FakeSandboxHandle("faux-deliver"),
-          },
-        },
-        authorizer: {
-          authorizeToolEffect: async (call) =>
-            authority.issuer.issue({
-              consumed: consumed(call),
-              attemptId: "attempt-faux-deliver",
-            }),
-        },
-      });
-      let initialContext = "";
-      let correctionContext = "";
-      let completionContext = "";
-      const faux = fauxProvider({
-        api: `faux-deliver-${Date.now()}`,
-        provider: `faux-deliver-${Date.now()}`,
-        tokensPerSecond: 10_000,
-      });
-      faux.setResponses([
-        (context) => {
-          initialContext = JSON.stringify(context);
-          return fauxAssistantMessage(
-            fauxToolCall(
-              "deliver_file",
-              { path: "/workspace/reports/missing.pdf" },
-              { id: "call-faux-missing" },
-            ),
-            { stopReason: "toolUse" },
-          );
-        },
-        (context) => {
-          correctionContext = JSON.stringify(context.messages);
-          return fauxAssistantMessage(
-            fauxToolCall(
-              "deliver_file",
-              { path: "/workspace/reports/final.pdf" },
-              { id: "call-faux-final" },
-            ),
-            { stopReason: "toolUse" },
-          );
-        },
-        (context) => {
-          completionContext = JSON.stringify(context.messages);
-          return fauxAssistantMessage("文件已经交付");
-        },
+      }),
+    });
+    const events: RuntimeAgentEvent[] = [];
+    controller.subscribe((event) => events.push(event));
+    try {
+      expect(controller.getDiagnostics().activeToolNames).toEqual([
+        "exec_command",
+        "read",
+        "edit",
+        "write",
+        "collapse_process_for_final_answer",
+        "skill",
+        "deliver_file",
       ]);
-      const runtime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsPath: null,
-      });
-      runtime.registerNativeProvider(faux.provider);
-      await runtime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-      const model = faux.getModel();
-      const controller = await createSafePiSession({
-        model,
-        modelContext: bindTrustedPiModelContextCapability(runtime, model),
-        modelRuntime: runtime,
-        sandbox: new FakeSandboxHandle("faux-deliver-session"),
-        deliverFileToolRouter: router,
-        authorizeToolEffect: async () => ({
-          consumedAtMonotonicMs: performance.now(),
-          maxContinuationDelayMs: 250,
-        }),
-        createToolObservationRecorder: (outputs) => ({
-          record: async (call) => {
-            const observation = await outputs.readControlledReceipt(call);
-            return observation === undefined
-              ? { outcome: "conflict" as const }
-              : { outcome: "recorded" as const, observation, isTruncated: false };
-          },
-        }),
-      });
-      const events: RuntimeAgentEvent[] = [];
-      controller.subscribe((event) => events.push(event));
-      try {
-        expect(controller.getDiagnostics().activeToolNames).toEqual([
-          "exec_command",
-          "read",
-          "edit",
-          "write",
-          "collapse_process_for_final_answer",
-          "skill",
-          "deliver_file",
-        ]);
-        await controller.prompt("生成并交付报告");
-      } finally {
-        controller.dispose();
-      }
+      await controller.prompt("生成并交付报告");
+    } finally {
+      controller.dispose();
+    }
 
-      expect(sourcePaths).toEqual([
-        "/workspace/reports/missing.pdf",
-        "/workspace/reports/final.pdf",
-      ]);
-      expect(initialContext).toContain("deliver_file");
-      expect(initialContext).not.toContain("declare_deliverables");
-      expect(initialContext).not.toContain("publish_artifact");
-      expect(correctionContext).toContain("FILE_NOT_FOUND");
-      expect(completionContext).toContain("artifact_faux_delivered");
-      expect(events.filter((event) => event.type === "tool.completed")).toEqual([
-        expect.objectContaining({ name: "deliver_file", isError: true }),
-        expect.objectContaining({ name: "deliver_file", isError: false }),
-      ]);
-    },
-  );
+    expect(sourcePaths).toEqual(["/workspace/reports/missing.pdf", "/workspace/reports/final.pdf"]);
+    expect(initialContext).toContain("deliver_file");
+    expect(initialContext).not.toContain("declare_deliverables");
+    expect(initialContext).not.toContain("publish_artifact");
+    expect(correctionContext).toContain("FILE_NOT_FOUND");
+    expect(completionContext).toContain("artifact_faux_delivered");
+    expect(events.filter((event) => event.type === "tool.completed")).toEqual([
+      expect.objectContaining({ name: "deliver_file", isError: true }),
+      expect.objectContaining({ name: "deliver_file", isError: false }),
+    ]);
+  });
 });

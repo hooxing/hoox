@@ -33,6 +33,21 @@ function tools() {
 }
 
 describe("SubAgent Pi 协作工具", () => {
+  it("wait_agent 将 AgentTool 的第三参数作为取消信号传入控制面", async () => {
+    const tested = tools();
+    const wait = tested.created.find((tool) => tool.name === "wait_agent");
+    if (wait === undefined) throw new Error("测试缺少 wait_agent");
+    const controller = new AbortController();
+
+    await wait.execute("call_wait_signal", { after_sequence: 7 }, controller.signal);
+
+    expect(tested.wait).toHaveBeenCalledWith({
+      afterSequence: 7,
+      timeoutMs: 30_000,
+      signal: controller.signal,
+    });
+  });
+
   it("只向 root 提供六个控制面工具，并由 spawn_agent 显式选择 child 工具", async () => {
     const tested = tools();
     expect(tested.created.map((tool) => tool.name)).toEqual([
@@ -49,13 +64,11 @@ describe("SubAgent Pi 协作工具", () => {
     );
     const spawn = tested.created[0];
     if (spawn?.name !== "spawn_agent") throw new Error("测试缺少 spawn_agent");
-    const result = await spawn.execute(
-      "call_spawn",
-      { task: "分析模块", tools: ["read", "read", "exec_command"], fork_turns: "3" },
-      undefined,
-      () => undefined,
-      {} as never,
-    );
+    const result = await spawn.execute("call_spawn", {
+      task: "分析模块",
+      tools: ["read", "read", "exec_command"],
+      fork_turns: "3",
+    });
 
     expect(tested.spawn).toHaveBeenCalledWith({
       callId: "call_spawn",
@@ -74,13 +87,7 @@ describe("SubAgent Pi 协作工具", () => {
     if (spawn?.name !== "spawn_agent") throw new Error("测试缺少 spawn_agent");
 
     await expect(
-      spawn.execute(
-        "call_spawn_full",
-        { task: "分析模块", tools: ["read"], fork_turns: "none" },
-        undefined,
-        () => undefined,
-        {} as never,
-      ),
+      spawn.execute("call_spawn_full", { task: "分析模块", tools: ["read"], fork_turns: "none" }),
     ).rejects.toThrow("AGENT_CONTROL_FAILED");
     expect(tested.record).toHaveBeenCalledWith("call_spawn_full", "spawn_agent", "failed");
   });
@@ -95,13 +102,7 @@ describe("SubAgent Pi 协作工具", () => {
     expect(Value.Check(spawn.parameters, prepared)).toBe(true);
 
     await expect(
-      spawn.execute(
-        "call_spawn_missing_fork",
-        structuredClone(prepared) as SpawnArgumentsForTest,
-        undefined,
-        () => undefined,
-        {} as never,
-      ),
+      spawn.execute("call_spawn_missing_fork", structuredClone(prepared) as SpawnArgumentsForTest),
     ).rejects.toThrow("AGENT_CONTROL_FAILED");
     expect(tested.spawn).not.toHaveBeenCalled();
   });
@@ -116,13 +117,7 @@ describe("SubAgent Pi 协作工具", () => {
     expect(Value.Check(wait.parameters, prepared)).toBe(true);
 
     await expect(
-      wait.execute(
-        "call_wait_missing_cursor",
-        structuredClone(prepared) as WaitArgumentsForTest,
-        undefined,
-        () => undefined,
-        {} as never,
-      ),
+      wait.execute("call_wait_missing_cursor", structuredClone(prepared) as WaitArgumentsForTest),
     ).rejects.toThrow("AGENT_CONTROL_FAILED");
     expect(tested.record).toHaveBeenCalledWith("call_wait_missing_cursor", "wait_agent", "failed");
   });
@@ -150,30 +145,14 @@ describe("SubAgent Pi 协作工具", () => {
       list.prepareArguments({ unexpected: true }),
     ) as EmptyArgumentsForTest;
 
-    await expect(
-      wait.execute("call_wait_valid_first", validWait, undefined, () => undefined, {} as never),
-    ).resolves.toBeDefined();
-    await expect(
-      wait.execute(
-        "call_wait_invalid_second",
-        invalidWait,
-        undefined,
-        () => undefined,
-        {} as never,
-      ),
-    ).rejects.toThrow("AGENT_CONTROL_FAILED");
-    await expect(
-      list.execute("call_list_valid_first", validList, undefined, () => undefined, {} as never),
-    ).resolves.toBeDefined();
-    await expect(
-      list.execute(
-        "call_list_invalid_second",
-        invalidList,
-        undefined,
-        () => undefined,
-        {} as never,
-      ),
-    ).rejects.toThrow("AGENT_CONTROL_FAILED");
+    await expect(wait.execute("call_wait_valid_first", validWait)).resolves.toBeDefined();
+    await expect(wait.execute("call_wait_invalid_second", invalidWait)).rejects.toThrow(
+      "AGENT_CONTROL_FAILED",
+    );
+    await expect(list.execute("call_list_valid_first", validList)).resolves.toBeDefined();
+    await expect(list.execute("call_list_invalid_second", invalidList)).rejects.toThrow(
+      "AGENT_CONTROL_FAILED",
+    );
 
     expect(tested.wait).toHaveBeenCalledTimes(1);
     expect(tested.list).toHaveBeenCalledTimes(1);
@@ -188,13 +167,7 @@ describe("SubAgent Pi 协作工具", () => {
     expect(Value.Check(spawn.parameters, prepared)).toBe(true);
 
     await expect(
-      spawn.execute(
-        "call_spawn_invalid",
-        structuredClone(prepared) as SpawnArgumentsForTest,
-        undefined,
-        () => undefined,
-        {} as never,
-      ),
+      spawn.execute("call_spawn_invalid", structuredClone(prepared) as SpawnArgumentsForTest),
     ).rejects.toThrow("AGENT_CONTROL_FAILED");
     expect(tested.spawn).not.toHaveBeenCalled();
     expect(tested.record).toHaveBeenCalledWith("call_spawn_invalid", "spawn_agent", "failed");
@@ -203,7 +176,7 @@ describe("SubAgent Pi 协作工具", () => {
 
 type SpawnArgumentsForTest = {
   readonly task: string;
-  readonly tools: readonly ("exec_command" | "read" | "edit" | "write" | "skill")[];
+  readonly tools: ("exec_command" | "read" | "edit" | "write" | "skill")[];
   readonly fork_turns: string;
 };
 

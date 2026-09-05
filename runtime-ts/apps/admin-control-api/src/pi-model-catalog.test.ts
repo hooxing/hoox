@@ -1,56 +1,49 @@
 import { describe, expect, it } from "vitest";
 import { createPiModelCatalog } from "./pi-model-catalog.js";
 
-function model(id: string, name: string, api = "openai-completions") {
-  return {
-    id,
-    name,
-    api,
-    reasoning: id.includes("reasoner"),
-    input: ["text"] as const,
-    contextWindow: 128_000,
-    maxTokens: 8_192,
-    baseUrl: "https://model.example.com/v1",
-  };
-}
+describe("Pi 后台模型目录快照", () => {
+  const catalog = createPiModelCatalog();
 
-describe("Pi 后台模型目录", () => {
-  const catalog = createPiModelCatalog([
-    {
-      id: "deepseek",
-      name: "DeepSeek",
+  it("无需加载 Provider 运行时即可取得管理草稿初始值", () => {
+    expect(catalog.listProviders()).toContainEqual({
+      providerId: "deepseek",
+      displayName: "DeepSeek",
       baseUrl: "https://api.deepseek.com",
-      getModels: () => [
-        model("deepseek-chat", "DeepSeek Chat"),
-        model("deepseek-reasoner", "DeepSeek Reasoner"),
-      ],
-    },
-    {
-      id: "other",
-      name: "Other",
-      getModels: () => [model("deepseek-chat-proxy", "DeepSeek Chat Proxy")],
-    },
-    {
-      id: "responses-only",
-      name: "Responses Only",
-      getModels: () => [model("gpt", "GPT", "openai-responses")],
-    },
-  ]);
-
-  it("只列出当前 Worker 支持且拥有 Base URL 的 Provider", () => {
-    expect(catalog.listProviders()).toEqual([
-      expect.objectContaining({ providerId: "deepseek", modelCount: 2 }),
-      expect.objectContaining({ providerId: "other", modelCount: 1 }),
+      modelCount: 2,
+    });
+    expect(catalog.findModels({ providerId: "deepseek", limit: 100 })).toEqual([
+      expect.objectContaining({
+        id: "deepseek-v4-flash",
+        api: "openai-completions",
+        reasoning: true,
+      }),
+      expect.objectContaining({
+        id: "deepseek-v4-pro",
+        api: "openai-completions",
+        reasoning: true,
+      }),
     ]);
   });
 
-  it("可按 Provider 获取目录，并按模型 ID 或名称跨 Provider 查询", () => {
-    expect(catalog.findModels({ providerId: "deepseek", limit: 10 })).toHaveLength(2);
-    expect(
-      catalog.findModels({ query: "DeepSeek Chat", limit: 10 }).map((item) => item.id),
-    ).toEqual(["deepseek-chat", "deepseek-chat-proxy"]);
-    expect(catalog.findModels({ query: "reasoner", limit: 1 })).toEqual([
-      expect.objectContaining({ id: "deepseek-reasoner", reasoning: true }),
+  it("支持跨 Provider 检索并保留空查询边界", () => {
+    expect(catalog.findModels({ query: "  DEEPSEEK-V4-FLASH  ", limit: 1 })).toEqual([
+      expect.objectContaining({ providerId: "deepseek", id: "deepseek-v4-flash" }),
     ]);
+    expect(catalog.findModels({ limit: 100 })).toEqual([]);
+  });
+
+  it("快照只包含拥有 Base URL 的兼容模型，Provider 模型数与查询结果一致", () => {
+    const providers = catalog.listProviders();
+    expect(providers.length).toBeGreaterThan(20);
+    for (const provider of providers) {
+      expect(provider.baseUrl).not.toBe("");
+      const models = catalog.findModels({
+        providerId: provider.providerId,
+        limit: Number.MAX_SAFE_INTEGER,
+      });
+      expect(models).toHaveLength(provider.modelCount);
+      expect(models.length).toBeGreaterThan(0);
+      expect(models.every((model) => model.api === "openai-completions")).toBe(true);
+    }
   });
 });

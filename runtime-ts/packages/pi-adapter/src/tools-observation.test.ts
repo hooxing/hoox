@@ -9,7 +9,6 @@ type ToolExecute = (
   input: Record<string, unknown>,
   signal: AbortSignal | undefined,
   onUpdate: () => void,
-  context: never,
 ) => Promise<{ content: readonly { readonly type: string; readonly text: string }[] }>;
 
 function fixture(sandbox: SandboxHandle, recorderOutcome: "recorded" | "unknown" = "recorded") {
@@ -93,7 +92,6 @@ describe("exec_command", () => {
       { cmd: "python generate.py" },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(command).toHaveBeenCalledWith(
@@ -123,7 +121,6 @@ describe("exec_command", () => {
       { cmd: "printf '%s' ok", workdir: "/workspace/a'b", timeout_ms: 55 },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(command).toHaveBeenCalledWith(
@@ -147,7 +144,6 @@ describe("exec_command", () => {
           prepared as Record<string, unknown>,
           undefined,
           () => undefined,
-          {} as never,
         ),
       ).rejects.toThrow("EXEC_INVALID_ARGUMENTS");
     }
@@ -167,7 +163,7 @@ describe("exec_command", () => {
     const input = { cmd: "long-running-task", timeout_ms: 3_600_000 };
 
     expect(Value.Check(tested.parameters, input)).toBe(true);
-    await tested.execute("call_exec_max_timeout", input, undefined, () => undefined, {} as never);
+    await tested.execute("call_exec_max_timeout", input, undefined, () => undefined);
 
     expect(command).toHaveBeenCalledWith(
       expect.any(String),
@@ -195,7 +191,6 @@ describe("exec_command", () => {
       { cmd: "python generate.py" },
       undefined,
       () => undefined,
-      {} as never,
     );
 
     expect(JSON.parse(result.content[0]?.text ?? "")).toMatchObject({
@@ -216,7 +211,6 @@ describe("exec_command", () => {
       { cmd: "produce", max_output_tokens: 10 },
       undefined,
       () => undefined,
-      {} as never,
     );
     const parsed = JSON.parse(result.content[0]?.text ?? "");
 
@@ -236,13 +230,7 @@ describe("exec_command", () => {
     } as unknown as SandboxHandle);
 
     await expect(
-      tested.execute(
-        "call_exec_upstream",
-        { cmd: "false" },
-        undefined,
-        () => undefined,
-        {} as never,
-      ),
+      tested.execute("call_exec_upstream", { cmd: "false" }, undefined, () => undefined),
     ).rejects.toThrow(
       JSON.stringify({ code: "EXEC_UNAVAILABLE", message: "CubeSandbox 命令服务暂时不可用" }),
     );
@@ -262,7 +250,6 @@ describe("exec_command", () => {
           { cmd: "echo probe" },
           undefined,
           () => undefined,
-          {} as never,
         ),
       ).rejects.toThrow("EXEC_UNAVAILABLE");
     }
@@ -274,7 +261,6 @@ describe("exec_command", () => {
         { cmd: "echo must-not-run" },
         undefined,
         () => undefined,
-        {} as never,
       ),
     ).rejects.toThrow("EXEC_UNAVAILABLE");
     expect(command).toHaveBeenCalledTimes(3);
@@ -297,18 +283,11 @@ describe("exec_command", () => {
           { cmd: "echo probe" },
           undefined,
           () => undefined,
-          {} as never,
         ),
       ).rejects.toThrow("EXEC_UNAVAILABLE");
     }
     await expect(
-      tested.execute(
-        "call_exec_reset_success",
-        { cmd: "echo ok" },
-        undefined,
-        () => undefined,
-        {} as never,
-      ),
+      tested.execute("call_exec_reset_success", { cmd: "echo ok" }, undefined, () => undefined),
     ).resolves.toBeDefined();
     await expect(
       tested.execute(
@@ -316,7 +295,6 @@ describe("exec_command", () => {
         { cmd: "echo probe" },
         undefined,
         () => undefined,
-        {} as never,
       ),
     ).rejects.toThrow("EXEC_UNAVAILABLE");
 
@@ -336,7 +314,6 @@ describe("exec_command", () => {
         { cmd: "sleep 1", timeout_ms: 25 },
         undefined,
         () => undefined,
-        {} as never,
       ),
     ).rejects.toThrow(JSON.stringify({ code: "EXEC_TIMEOUT", message: "命令执行超过 25 毫秒" }));
   });
@@ -350,13 +327,7 @@ describe("exec_command", () => {
     );
 
     await expect(
-      tested.execute(
-        "call_exec_unknown",
-        { cmd: "echo test" },
-        undefined,
-        () => undefined,
-        {} as never,
-      ),
+      tested.execute("call_exec_unknown", { cmd: "echo test" }, undefined, () => undefined),
     ).rejects.toThrow("未能形成 durable 事实");
     expect(tested.continuationRejected()).toBe(true);
   });
@@ -394,7 +365,6 @@ describe("exec_command", () => {
         { cmd: "echo never" },
         undefined,
         () => undefined,
-        {} as never,
       ),
     ).rejects.toThrow("EXEC_REJECTED");
     expect(sandboxCalls).toBe(0);

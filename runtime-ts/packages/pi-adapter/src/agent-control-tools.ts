@@ -1,5 +1,5 @@
 import type { ToolObservationResult } from "@hoox/context-policy";
-import { defineTool } from "@earendil-works/pi-coding-agent";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { createSchemaInvalidArgumentsBridge } from "./tools.js";
 
@@ -207,8 +207,8 @@ export function createAgentControlPiTools(
     if (invalid) throw new Error("AGENT_CONTROL_INVALID_ARGUMENTS");
   };
   return [
-    defineTool({
-      name: "spawn_agent",
+    {
+      name: "spawn_agent" as const,
       label: "启动子 Agent",
       description:
         "为边界清晰、可独立完成的子任务创建可复用的独立对话并启动当前 turn。子 Agent 与你共享同一 Sandbox；必须显式选择工具，创建后工具清单不可修改。",
@@ -227,9 +227,9 @@ export function createAgentControlPiTools(
             forkTurns: forkTurns(args.fork_turns),
           });
         }),
-    }),
-    defineTool({
-      name: "send_message",
+    } satisfies AgentTool<typeof SpawnArgumentsSchema, unknown>,
+    {
+      name: "send_message" as const,
       label: "发送子 Agent 消息",
       description:
         "向当前正在运行的子 Agent 追加消息，不启动新 turn；目标已闲置或结束时调用会失败，应改用 followup_task。",
@@ -244,9 +244,9 @@ export function createAgentControlPiTools(
           await executor.sendMessage({ callId, target: args.target, message: args.message });
           return { outcome: "delivered" };
         }),
-    }),
-    defineTool({
-      name: "followup_task",
+    } satisfies AgentTool<typeof TargetMessageArgumentsSchema, unknown>,
+    {
+      name: "followup_task" as const,
       label: "追加子 Agent 任务",
       description:
         "复用同一主 Thread 中已保存的闲置子 Agent 对话并启动新的 turn，可跨主 Agent Run 使用；沿用创建时的固定工具清单，正在运行时调用会失败。",
@@ -260,16 +260,16 @@ export function createAgentControlPiTools(
           );
           return executor.followUp({ callId, target: args.target, task: args.task });
         }),
-    }),
-    defineTool({
-      name: "wait_agent",
+    } satisfies AgentTool<typeof FollowUpArgumentsSchema, unknown>,
+    {
+      name: "wait_agent" as const,
       label: "等待子 Agent",
       description:
         "等待当前 Root Run 中子 Agent mailbox 的新消息、完成通知或超时。首次必须传 after_sequence=0，后续必须传上次返回的 nextAfterSequence。sequence 是当前 Attempt 的全局 mailbox 序号；发往子 Agent 的反向消息不会出现在 updates 中，因此序号可以跳跃，空洞不表示丢消息。",
       executionMode: "sequential",
       parameters: WaitArgumentsSchema,
       prepareArguments: waitArguments.prepareArguments,
-      execute: async (callId, args: WaitArguments, signal) =>
+      execute: async (callId, args: WaitArguments, signal?: AbortSignal) =>
         executeObserved(callId, "wait_agent", record, executor, () => {
           assertArguments(
             waitArguments.consume(args) || args.runtime_invalid_arguments_token !== undefined,
@@ -280,9 +280,9 @@ export function createAgentControlPiTools(
             ...(signal === undefined ? {} : { signal }),
           });
         }),
-    }),
-    defineTool({
-      name: "interrupt_agent",
+    } satisfies AgentTool<typeof WaitArgumentsSchema, unknown>,
+    {
+      name: "interrupt_agent" as const,
       label: "中断子 Agent",
       description:
         "中断目标子 Agent 在当前 Root Run 中的 turn；未完成内容不写入可复用历史，对话仍保留以便后续 follow-up。",
@@ -296,9 +296,9 @@ export function createAgentControlPiTools(
           );
           return executor.interrupt({ callId, target: args.target });
         }),
-    }),
-    defineTool({
-      name: "list_agents",
+    } satisfies AgentTool<typeof TargetArgumentsSchema, unknown>,
+    {
+      name: "list_agents" as const,
       label: "列出子 Agent",
       description:
         "列出当前主 Thread 中可复用的子 Agent 对话、当前 Root Run 状态、turn 序号和固定工具能力。",
@@ -312,6 +312,6 @@ export function createAgentControlPiTools(
           );
           return executor.list();
         }),
-    }),
+    } satisfies AgentTool<typeof EmptyArgumentsSchema, unknown>,
   ];
 }

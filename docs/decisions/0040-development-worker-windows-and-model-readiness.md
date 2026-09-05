@@ -1,8 +1,10 @@
 # ADR-0040：开发 Worker 的 Windows 运行与模型就绪边界
 
-- 状态：已接受
+- 状态：部分已替代（Pi 内核装配）
 - 日期：2026-07-28
 - 关联：ADR-0004、ADR-0035、ADR-0038
+
+> 部分替代关系：[20260906001531：Pi 内核收敛与共享模型目录](20260906001531-pi-kernel-and-shared-model-catalog.md)。Windows 开发可运行、逻辑 cwd 不构成宿主能力、受控 Sandbox、显式模型预算及开发/生产探针边界继续有效；EmptyResourceLoader、SessionManager 与 noTools 设置由仅注册受控 AgentTool 的内核装配替代。
 
 ## 背景
 

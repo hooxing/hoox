@@ -1,5 +1,5 @@
 import type { ToolObservationResult } from "@hoox/context-policy";
-import { defineTool } from "@earendil-works/pi-coding-agent";
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { type Static, Type } from "typebox";
 import { createSchemaInvalidArgumentsBridge } from "./tools.js";
 
@@ -50,7 +50,7 @@ export function createSkillPiTool(
     (value) =>
       value.skill.startsWith("invalid-") ? value.skill.slice("invalid-".length) : undefined,
   );
-  return defineTool({
+  const tool: AgentTool<typeof SkillToolArgumentsSchema, unknown> = {
     name: "skill",
     label: "调用 Skill",
     description:
@@ -92,5 +92,6 @@ export function createSkillPiTool(
       if (failure !== undefined) throw new Error(JSON.stringify(failure));
       return { content: [{ type: "text" as const, text: text ?? "" }], details: {} };
     },
-  });
+  };
+  return tool;
 }

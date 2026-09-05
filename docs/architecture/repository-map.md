@@ -46,7 +46,7 @@
 
 | 包 | 职责 |
 | --- | --- |
-| `@hoox/pi-adapter` | 模型会话、Provider、流式事件与 Pi 适配 |
+| `@hoox/pi-adapter` | `pi-ai` Provider/模型绑定、`pi-agent-core` 工具循环、流式事件与 Runtime 恢复适配 |
 | `@hoox/prompt-builder` | 稳定、可审计的系统提示词组装 |
 | `@hoox/context-policy` | 上下文预算、选择、截断和压缩策略 |
 | `@hoox/tool-router` | 工具能力校验、路由、结果归一化和审计边界 |
@@ -95,6 +95,8 @@
 - PostgreSQL、S3、Sandbox 和模型 SDK 都应位于适配器边界，不进入纯领域代码。
 - 跨包依赖使用 pnpm Workspace 声明，不使用越目录相对导入。
 - 只使用 Thread 历史格式与校验时，从 `@hoox/pi-adapter/thread-history` 导入；`run-contracts` 经此窄入口重导出历史校验，避免 API、Scheduler 随契约加载模型会话和 Provider SDK。Pi 根入口继续兼容，包级依赖声明并未因此移除。
+- 管理 Web 和控制 API 从 `@hoox/protocol/pi-model-catalog` 共用公开模型快照与查询；Protocol 根入口不加载快照。修改目录来源时更新 `scripts/generate-admin-pi-model-catalog.mjs`，执行 `pnpm admin:pi-catalog:generate` 与 `pnpm admin:pi-catalog:check`，不手工编辑生成文件。
+- Pi 生产能力限于 `pi-ai` 与 `pi-agent-core`；不经 `pi-coding-agent` 装配 Session、设置或宿主资源发现。工具按 `AgentTool` 注册，业务授权和持久观察仍属于 Runtime；恢复顺序与屏障见 [Thread 连续上下文](thread-continuity.md)。
 - `vendor` 代码不能成为不受审查的复制区；版本、许可证、来源和修改必须可追踪。
 
 ## 当前复杂度热点

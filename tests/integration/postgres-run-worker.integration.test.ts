@@ -34,7 +34,7 @@ import {
 } from "@hoox/run-contracts/mutation-protocol";
 import { FakeSandboxGateway } from "@hoox/sandbox/testing";
 import { fauxAssistantMessage, fauxProvider, InMemoryCredentialStore } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createModels } from "@earendil-works/pi-ai";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   PgRunEventWakeListener,
@@ -3674,287 +3674,285 @@ describe.runIf(enabled)("PostgreSQL Run Worker 状态与并发契约", () => {
     }
   });
 
-  it.runIf(process.platform === "linux")(
-    "开发黑盒 Gate：真实 HTTP、PG 原子创建、投递、Faux Pi 执行与 Sandbox 收敛",
-    async () => {
-      const label = `m4-e2e-${randomUUID()}`;
-      const now = isoTimestamp(new Date().toISOString());
-      const userA = createUser(userId(`m4-user-a-${label}`), now);
-      const tenantA = createPersonalTenant({
-        id: tenantId(`m4-tenant-a-${label}`),
-        ownerMembershipId: membershipId(`m4-member-a-${label}`),
-        owner: userA,
-        createdAt: now,
-      });
-      const userB = createUser(userId(`m4-user-b-${label}`), now);
-      const tenantB = createPersonalTenant({
-        id: tenantId(`m4-tenant-b-${label}`),
-        ownerMembershipId: membershipId(`m4-member-b-${label}`),
-        owner: userB,
-        createdAt: now,
-      });
-      await repositories.tenants.createPersonal({
-        user: userA,
-        tenant: tenantA.tenant,
-        membership: tenantA.ownerMembership,
-      });
-      await repositories.tenants.createPersonal({
-        user: userB,
-        tenant: tenantB.tenant,
-        membership: tenantB.ownerMembership,
-      });
+  it("开发黑盒 Gate：真实 HTTP、PG 原子创建、投递、Faux Pi 执行与 Sandbox 收敛", async () => {
+    const label = `m4-e2e-${randomUUID()}`;
+    const now = isoTimestamp(new Date().toISOString());
+    const userA = createUser(userId(`m4-user-a-${label}`), now);
+    const tenantA = createPersonalTenant({
+      id: tenantId(`m4-tenant-a-${label}`),
+      ownerMembershipId: membershipId(`m4-member-a-${label}`),
+      owner: userA,
+      createdAt: now,
+    });
+    const userB = createUser(userId(`m4-user-b-${label}`), now);
+    const tenantB = createPersonalTenant({
+      id: tenantId(`m4-tenant-b-${label}`),
+      ownerMembershipId: membershipId(`m4-member-b-${label}`),
+      owner: userB,
+      createdAt: now,
+    });
+    await repositories.tenants.createPersonal({
+      user: userA,
+      tenant: tenantA.tenant,
+      membership: tenantA.ownerMembership,
+    });
+    await repositories.tenants.createPersonal({
+      user: userB,
+      tenant: tenantB.tenant,
+      membership: tenantB.ownerMembership,
+    });
 
-      let readinessAvailable = true;
-      const generatedThreadId = threadId(`m4-thread-${label}`);
-      const generatedWorkspaceId = workspaceId(`m4-workspace-${label}`);
-      const generatedRunId = runId(`m4-run-${label}`);
-      const app = createApiApp(
-        {
-          auth: createDevelopmentAuthResolver({
-            runtimeEnvironment: "test",
-            principals: [
-              { tenantId: tenantA.tenant.id, userId: userA.id },
-              { tenantId: tenantB.tenant.id, userId: userB.id },
-            ],
-          }),
-          repositories,
-          createCapability: createApiCreateCapability({
-            threadCreation: new PgThreadCreation(runtime),
-            enqueueOutbox: runDispatchCreation,
-          }),
-          archiveThread: new PgArchiveThreadCommand(runtime),
-          renamePersonalThread: new PgRenamePersonalThreadCommand(runtime),
-          cursorCodec: createThreadCursorCodec({
-            activeKid: "m4-e2e-key",
-            keys: [{ kid: "m4-e2e-key", secret: randomBytes(32).toString("base64url") }],
-            clock: { now: () => isoTimestamp(new Date().toISOString()) },
-            ttlMilliseconds: 60_000,
-            maximumTtlMilliseconds: 60_000,
-          }),
-          readiness: {
-            probe: async () => {
-              if (!readinessAvailable) throw new Error("postgres-private-detail");
-              await runtime.query("SELECT 1");
-            },
-          },
+    let readinessAvailable = true;
+    const generatedThreadId = threadId(`m4-thread-${label}`);
+    const generatedWorkspaceId = workspaceId(`m4-workspace-${label}`);
+    const generatedRunId = runId(`m4-run-${label}`);
+    const app = createApiApp(
+      {
+        auth: createDevelopmentAuthResolver({
+          runtimeEnvironment: "test",
+          principals: [
+            { tenantId: tenantA.tenant.id, userId: userA.id },
+            { tenantId: tenantB.tenant.id, userId: userB.id },
+          ],
+        }),
+        repositories,
+        createCapability: createApiCreateCapability({
+          threadCreation: new PgThreadCreation(runtime),
+          enqueueOutbox: runDispatchCreation,
+        }),
+        archiveThread: new PgArchiveThreadCommand(runtime),
+        renamePersonalThread: new PgRenamePersonalThreadCommand(runtime),
+        cursorCodec: createThreadCursorCodec({
+          activeKid: "m4-e2e-key",
+          keys: [{ kid: "m4-e2e-key", secret: randomBytes(32).toString("base64url") }],
           clock: { now: () => isoTimestamp(new Date().toISOString()) },
-          ids: {
-            thread: () => generatedThreadId,
-            workspace: () => generatedWorkspaceId,
-            run: () => generatedRunId,
+          ttlMilliseconds: 60_000,
+          maximumTtlMilliseconds: 60_000,
+        }),
+        readiness: {
+          probe: async () => {
+            if (!readinessAvailable) throw new Error("postgres-private-detail");
+            await runtime.query("SELECT 1");
           },
         },
-        { logger: false },
-      );
-      const address = await app.listen({ host: "127.0.0.1", port: 0 });
-      const baseUrl = new URL(address).origin;
-      const request = async (path: string, init: RequestInit) => fetch(`${baseUrl}${path}`, init);
-      const responseJson = async (
-        response: Response,
-      ): Promise<{
+        clock: { now: () => isoTimestamp(new Date().toISOString()) },
+        ids: {
+          thread: () => generatedThreadId,
+          workspace: () => generatedWorkspaceId,
+          run: () => generatedRunId,
+        },
+      },
+      { logger: false },
+    );
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const baseUrl = new URL(address).origin;
+    const request = async (path: string, init: RequestInit) => fetch(`${baseUrl}${path}`, init);
+    const responseJson = async (
+      response: Response,
+    ): Promise<{
+      readonly data?: { readonly id?: string; readonly status?: string };
+      readonly error?: { readonly code?: string };
+    }> =>
+      (await response.json()) as {
         readonly data?: { readonly id?: string; readonly status?: string };
         readonly error?: { readonly code?: string };
-      }> =>
-        (await response.json()) as {
-          readonly data?: { readonly id?: string; readonly status?: string };
-          readonly error?: { readonly code?: string };
-        };
-      try {
-        const threadRequest = {
-          method: "POST",
-          headers: {
-            authorization: "Bearer dev-user-a",
-            "content-type": "application/json",
-            "idempotency-key": `m4-thread-key-${label}`,
-          },
-          body: JSON.stringify({ title: "M4 开发黑盒任务" }),
-        } as const;
-        const createdThread = await request("/v1/threads", threadRequest);
-        expect(createdThread.status).toBe(200);
-        const replayedThread = await request("/v1/threads", threadRequest);
-        expect(replayedThread.status).toBe(200);
-        expect((await responseJson(replayedThread)).data?.id).toBe(
-          (await responseJson(createdThread.clone())).data?.id,
-        );
+      };
+    try {
+      const threadRequest = {
+        method: "POST",
+        headers: {
+          authorization: "Bearer dev-user-a",
+          "content-type": "application/json",
+          "idempotency-key": `m4-thread-key-${label}`,
+        },
+        body: JSON.stringify({ title: "M4 开发黑盒任务" }),
+      } as const;
+      const createdThread = await request("/v1/threads", threadRequest);
+      expect(createdThread.status).toBe(200);
+      const replayedThread = await request("/v1/threads", threadRequest);
+      expect(replayedThread.status).toBe(200);
+      expect((await responseJson(replayedThread)).data?.id).toBe(
+        (await responseJson(createdThread.clone())).data?.id,
+      );
 
-        const runRequest = {
-          method: "POST",
-          headers: {
-            authorization: "Bearer dev-user-a",
-            "content-type": "application/json",
-            "idempotency-key": `m4-run-key-${label}`,
-          },
-          body: JSON.stringify({ input: "仅完成这个没有交付物的任务" }),
-        } as const;
-        const createdRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
-        expect(createdRun.status).toBe(200);
-        const replayedRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
-        expect(replayedRun.status).toBe(200);
-        expect((await responseJson(replayedRun)).data?.id).toBe(generatedRunId);
-        const guessedByOtherTenant = await request(`/v1/threads/${generatedThreadId}`, {
-          headers: { authorization: "Bearer dev-user-b" },
-        });
-        expect(guessedByOtherTenant.status).toBe(404);
-        expect((await responseJson(guessedByOtherTenant)).error?.code).toBe("NOT_FOUND");
+      const runRequest = {
+        method: "POST",
+        headers: {
+          authorization: "Bearer dev-user-a",
+          "content-type": "application/json",
+          "idempotency-key": `m4-run-key-${label}`,
+        },
+        body: JSON.stringify({ input: "仅完成这个没有交付物的任务" }),
+      } as const;
+      const createdRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
+      expect(createdRun.status).toBe(200);
+      const replayedRun = await request(`/v1/threads/${generatedThreadId}/runs`, runRequest);
+      expect(replayedRun.status).toBe(200);
+      expect((await responseJson(replayedRun)).data?.id).toBe(generatedRunId);
+      const guessedByOtherTenant = await request(`/v1/threads/${generatedThreadId}`, {
+        headers: { authorization: "Bearer dev-user-b" },
+      });
+      expect(guessedByOtherTenant.status).toBe(404);
+      expect((await responseJson(guessedByOtherTenant)).error?.code).toBe("NOT_FOUND");
 
-        readinessAvailable = false;
-        const unavailable = await request("/ready", { method: "GET" });
-        expect(unavailable.status).toBe(503);
-        expect(JSON.stringify(await responseJson(unavailable))).not.toContain(
-          "postgres-private-detail",
-        );
-        readinessAvailable = true;
+      readinessAvailable = false;
+      const unavailable = await request("/ready", { method: "GET" });
+      expect(unavailable.status).toBe(503);
+      expect(JSON.stringify(await responseJson(unavailable))).not.toContain(
+        "postgres-private-detail",
+      );
+      readinessAvailable = true;
 
-        const gateway = new FakeSandboxGateway();
-        let sandboxSequence = 0;
-        const upstream: SandboxSessionRegistryPort = {
-          acquire: async () => {
-            const sandbox = await gateway.create({
-              templateId: "m4-faux-template",
-              ttlSeconds: 120,
-            });
-            sandboxSequence += 1;
-            return {
-              outcome: "ready",
-              session: {
-                registryId: `m4-registry-${label}-${sandboxSequence}`,
-                providerKey: "cube",
-                providerSandboxId: sandbox.id,
-                mode: "created",
-                sandbox,
-              },
-            };
-          },
-          settle: async ({ session, disposition }) => {
-            if (disposition === "pause") await session.sandbox.pause();
-            else await session.sandbox.kill({ ignoreNotFound: true });
-            return { outcome: "settled" };
-          },
-        };
-        const faux = fauxProvider({
-          api: `m4-faux-pi-${label}`,
-          provider: `m4-faux-pi-${label}`,
-          tokensPerSecond: 10_000,
-        });
-        faux.setResponses([fauxAssistantMessage("M4 Faux Pi 执行完成")]);
-        const modelRuntime = await ModelRuntime.create({
-          credentials: new InMemoryCredentialStore(),
-          modelsPath: null,
-        });
-        modelRuntime.registerNativeProvider(faux.provider);
-        await modelRuntime.setRuntimeApiKey(faux.provider.id, "test-only-key");
-        const sessions = new PiWorkerSessionFactory(
-          faux.getModel(),
-          modelRuntime,
-          (_input, outputs) => ({
-            recordStarted: async () => "recorded" as const,
-            record: async (call) => {
-              const observation = await outputs.readControlledReceipt(call);
-              return observation === undefined
-                ? { outcome: "conflict" as const }
-                : { outcome: "recorded" as const, observation, isTruncated: false };
-            },
-          }),
-        );
-        const registeredSandboxes = new PgBackedSandboxSessionRegistry(runtime, upstream, 120);
-        const worker = new RunWorker(
-          {
-            persistence: new PgExecutionPersistence(runtime),
-            revisions: new FakeRevisionVerifier(),
-            sandboxes: registeredSandboxes,
-            orphanSandboxes: registeredSandboxes,
-            sessions,
-            cancellation: new FakeCancellationPort(),
-            artifacts: new FakeArtifactPublication(),
-            clock: new FakeClock(),
-            metrics: new FakeRecoveryMetrics(),
-          },
-          { workerId: "m4-development-worker", leaseDurationMs: 30_000, heartbeatMs: 10_000 },
-        );
-        const createDispatcher = () =>
-          new RunDispatchScheduler(new PgRunDispatchOutbox(runtime), {
-            execute: async (scope) => {
-              const result = await worker.execute(scope as ExecutionScope);
-              // Gate 注入的 Worker 同步执行到终态；不能把已经 succeeded 的 Run 当作异步已投递。
-              if (result.outcome === "succeeded") return { kind: "terminal" };
-              if (result.outcome === "waiting")
-                return { kind: "waiting", retryAfterMilliseconds: 5_000 };
-              if (result.outcome === "ignored") {
-                return result.reason === "terminal"
-                  ? { kind: "terminal" }
-                  : { kind: "busy", retryAfterMilliseconds: 5_000 };
-              }
-              return { kind: "retryable", retryAfterMilliseconds: 5_000 };
-            },
+      const gateway = new FakeSandboxGateway();
+      let sandboxSequence = 0;
+      const upstream: SandboxSessionRegistryPort = {
+        acquire: async () => {
+          const sandbox = await gateway.create({
+            templateId: "m4-faux-template",
+            ttlSeconds: 120,
           });
-        const firstDispatcher = createDispatcher();
-        expect(
-          await firstDispatcher.tick({
-            tenantId: tenantA.tenant.id,
-            dispatcherId: "m4-development-dispatcher",
-            limit: 1,
-            leaseMilliseconds: 30_000,
-          }),
-        ).toBe(1);
-        // 模拟进程重启：必须重新构造 scheduler 与 outbox 端口，不能只在同一个实例换 ID。
-        const restartedDispatcher = createDispatcher();
-        expect(
-          await restartedDispatcher.tick({
-            tenantId: tenantA.tenant.id,
-            dispatcherId: "m4-development-dispatcher-restart",
-            limit: 1,
-            leaseMilliseconds: 30_000,
-          }),
-        ).toBe(0);
-        expect(faux.state.callCount).toBe(1);
-        const modelPermit = await withTenantTransaction(
-          runtime,
-          { tenantId: tenantA.tenant.id },
-          async (client) =>
-            client.query<{ readonly count: string }>(
-              `SELECT count(*)::text AS count FROM external_effect_permits
+          sandboxSequence += 1;
+          return {
+            outcome: "ready",
+            session: {
+              registryId: `m4-registry-${label}-${sandboxSequence}`,
+              providerKey: "cube",
+              providerSandboxId: sandbox.id,
+              mode: "created",
+              sandbox,
+            },
+          };
+        },
+        settle: async ({ session, disposition }) => {
+          if (disposition === "pause") await session.sandbox.pause();
+          else await session.sandbox.kill({ ignoreNotFound: true });
+          return { outcome: "settled" };
+        },
+      };
+      const faux = fauxProvider({
+        api: `m4-faux-pi-${label}`,
+        provider: `m4-faux-pi-${label}`,
+        tokensPerSecond: 10_000,
+      });
+      faux.setResponses([fauxAssistantMessage("M4 Faux Pi 执行完成")]);
+      const credentials = new InMemoryCredentialStore();
+      await credentials.modify(faux.provider.id, async () => ({
+        type: "api_key",
+        key: "test-only-key",
+      }));
+      const modelRuntime = createModels({ credentials });
+      modelRuntime.setProvider(faux.provider);
+      const sessions = new PiWorkerSessionFactory(
+        faux.getModel(),
+        modelRuntime,
+        (_input, outputs) => ({
+          recordStarted: async () => "recorded" as const,
+          record: async (call) => {
+            const observation = await outputs.readControlledReceipt(call);
+            return observation === undefined
+              ? { outcome: "conflict" as const }
+              : { outcome: "recorded" as const, observation, isTruncated: false };
+          },
+        }),
+      );
+      const registeredSandboxes = new PgBackedSandboxSessionRegistry(runtime, upstream, 120);
+      const worker = new RunWorker(
+        {
+          persistence: new PgExecutionPersistence(runtime),
+          revisions: new FakeRevisionVerifier(),
+          sandboxes: registeredSandboxes,
+          orphanSandboxes: registeredSandboxes,
+          sessions,
+          cancellation: new FakeCancellationPort(),
+          artifacts: new FakeArtifactPublication(),
+          clock: new FakeClock(),
+          metrics: new FakeRecoveryMetrics(),
+        },
+        { workerId: "m4-development-worker", leaseDurationMs: 30_000, heartbeatMs: 10_000 },
+      );
+      const createDispatcher = () =>
+        new RunDispatchScheduler(new PgRunDispatchOutbox(runtime), {
+          execute: async (scope) => {
+            const result = await worker.execute(scope as ExecutionScope);
+            // Gate 注入的 Worker 同步执行到终态；不能把已经 succeeded 的 Run 当作异步已投递。
+            if (result.outcome === "succeeded") return { kind: "terminal" };
+            if (result.outcome === "waiting")
+              return { kind: "waiting", retryAfterMilliseconds: 5_000 };
+            if (result.outcome === "ignored") {
+              return result.reason === "terminal"
+                ? { kind: "terminal" }
+                : { kind: "busy", retryAfterMilliseconds: 5_000 };
+            }
+            return { kind: "retryable", retryAfterMilliseconds: 5_000 };
+          },
+        });
+      const firstDispatcher = createDispatcher();
+      expect(
+        await firstDispatcher.tick({
+          tenantId: tenantA.tenant.id,
+          dispatcherId: "m4-development-dispatcher",
+          limit: 1,
+          leaseMilliseconds: 30_000,
+        }),
+      ).toBe(1);
+      // 模拟进程重启：必须重新构造 scheduler 与 outbox 端口，不能只在同一个实例换 ID。
+      const restartedDispatcher = createDispatcher();
+      expect(
+        await restartedDispatcher.tick({
+          tenantId: tenantA.tenant.id,
+          dispatcherId: "m4-development-dispatcher-restart",
+          limit: 1,
+          leaseMilliseconds: 30_000,
+        }),
+      ).toBe(0);
+      expect(faux.state.callCount).toBe(1);
+      const modelPermit = await withTenantTransaction(
+        runtime,
+        { tenantId: tenantA.tenant.id },
+        async (client) =>
+          client.query<{ readonly count: string }>(
+            `SELECT count(*)::text AS count FROM external_effect_permits
             WHERE tenant_id=$1 AND effect='model_start' AND consumed_at IS NOT NULL`,
+            [tenantA.tenant.id],
+          ),
+      );
+      expect(modelPermit.rows[0]?.count).toBe("1");
+      const releasedFences = await withTenantTransaction(
+        runtime,
+        { tenantId: tenantA.tenant.id },
+        async (client) => {
+          const [claims, leases] = await Promise.all([
+            client.query<{ readonly count: string }>(
+              `SELECT count(*)::text AS count FROM run_claims
+                WHERE tenant_id=$1 AND released_at IS NULL`,
               [tenantA.tenant.id],
             ),
-        );
-        expect(modelPermit.rows[0]?.count).toBe("1");
-        const releasedFences = await withTenantTransaction(
-          runtime,
-          { tenantId: tenantA.tenant.id },
-          async (client) => {
-            const [claims, leases] = await Promise.all([
-              client.query<{ readonly count: string }>(
-                `SELECT count(*)::text AS count FROM run_claims
-                WHERE tenant_id=$1 AND released_at IS NULL`,
-                [tenantA.tenant.id],
-              ),
-              client.query<{ readonly count: string }>(
-                `SELECT count(*)::text AS count FROM workspace_write_leases WHERE tenant_id=$1`,
-                [tenantA.tenant.id],
-              ),
-            ]);
-            return { claims: claims.rows[0]?.count, leases: leases.rows[0]?.count };
-          },
-        );
-        expect(releasedFences).toEqual({ claims: "0", leases: "0" });
-        const cleanup = new SandboxCleanupConsumer(
-          new PgSandboxCleanupConsumerStore(runtime),
-          new CubeSandboxCleanupResolver(gateway),
-          "m4-development-cleanup",
-        );
-        expect(await cleanup.drainTenant(tenantA.tenant.id)).toBe(0);
-        await cleanup.close();
-        expect([...gateway.sandboxes.values()].every((sandbox) => sandbox.killed)).toBe(true);
-        const succeeded = await request(`/v1/threads/${generatedThreadId}/runs/${generatedRunId}`, {
-          headers: { authorization: "Bearer dev-user-a" },
-        });
-        expect(succeeded.status).toBe(200);
-        expect((await responseJson(succeeded)).data?.status).toBe("succeeded");
-      } finally {
-        await app.close();
-      }
-    },
-  );
+            client.query<{ readonly count: string }>(
+              `SELECT count(*)::text AS count FROM workspace_write_leases WHERE tenant_id=$1`,
+              [tenantA.tenant.id],
+            ),
+          ]);
+          return { claims: claims.rows[0]?.count, leases: leases.rows[0]?.count };
+        },
+      );
+      expect(releasedFences).toEqual({ claims: "0", leases: "0" });
+      const cleanup = new SandboxCleanupConsumer(
+        new PgSandboxCleanupConsumerStore(runtime),
+        new CubeSandboxCleanupResolver(gateway),
+        "m4-development-cleanup",
+      );
+      expect(await cleanup.drainTenant(tenantA.tenant.id)).toBe(0);
+      await cleanup.close();
+      expect([...gateway.sandboxes.values()].every((sandbox) => sandbox.killed)).toBe(true);
+      const succeeded = await request(`/v1/threads/${generatedThreadId}/runs/${generatedRunId}`, {
+        headers: { authorization: "Bearer dev-user-a" },
+      });
+      expect(succeeded.status).toBe(200);
+      expect((await responseJson(succeeded)).data?.status).toBe("succeeded");
+    } finally {
+      await app.close();
+    }
+  });
 
   it("workerId 按 UTF-8 字节边界拒绝多字节超限且不泄漏数据库约束", async () => {
     const f = await fixture(`worker-id-${suffix}`);

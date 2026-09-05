@@ -97,7 +97,6 @@ describe("automation_update Pi 工具", () => {
       },
       undefined,
       () => undefined,
-      {} as never,
     );
     expect(order).toEqual(["apply", "automation_update:succeeded"]);
     expect(JSON.stringify(result)).toContain("automation_1");
@@ -147,13 +146,7 @@ describe("automation_update Pi 工具", () => {
     ];
     for (const [index, input] of inputs.entries()) {
       const prepared = tool.prepareArguments(input);
-      await tool.execute(
-        `call_valid_${String(index)}`,
-        prepared,
-        undefined,
-        () => undefined,
-        {} as never,
-      );
+      await tool.execute(`call_valid_${String(index)}`, prepared, undefined, () => undefined);
     }
     expect(writes).toBe(3);
   });
@@ -200,7 +193,7 @@ describe("automation_update Pi 工具", () => {
     const prepared = tool.prepareArguments({ action: "create", name: "" });
     expect(Value.Check(tool.parameters, prepared)).toBe(true);
     const failure = await rejectedFailure(
-      tool.execute("call_bad", prepared, undefined, () => undefined, {} as never),
+      tool.execute("call_bad", prepared, undefined, () => undefined),
     );
     expect(failure).toMatchObject({
       code: "AUTOMATION_ARGUMENTS_INVALID",

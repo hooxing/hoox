@@ -161,6 +161,10 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
 测试或生效。Worker 以 Run 固定 Revision 中的输入模态、上下文窗口和最大输出作为模型能力事实；模型家族 Profile
 只补充请求协议，不使用另一组硬编码能力值覆盖或拒绝已发布配置。
 
+管理 Web 和控制 API 共用 `@hoox/protocol/pi-model-catalog` 的静态快照与查询。生成器从锁定的 `pi-ai` 读取公开目录，只保留已支持的 `openai-completions` 模型；两个运行时消费者不加载 Pi Provider。连接失败或可重试 5xx 可以降级到浏览器快照，401/403 不得静默降级；保存、测试和启用始终由后台完成。目录更新执行 `pnpm admin:pi-catalog:generate`，一致性由 `pnpm admin:pi-catalog:check` 校验。
+
+Worker 通过 `pi-adapter` 直接装配 `pi-ai` 的 `Models`、Provider 和内存凭据，并用 `pi-agent-core` 的 `Agent` 执行受控工具循环。逻辑工作目录固定为 `/workspace`，实际 system prompt 保留固定后缀 `\nCurrent working directory: /workspace`，不使用宿主路径或资源发现。每个内核实例的随机 `sessionId` 跨轮稳定，仅传给 Provider，不进入 prompt。Provider 流默认超时为 300,000ms，重试等待上限为 60,000ms；上层自动重试与自动压缩不启用。内核和目录取舍见 [Pi 内核收敛决策](../decisions/20260906001531-pi-kernel-and-shared-model-catalog.md)，持久恢复与安全点见 [Thread 连续上下文](../architecture/thread-continuity.md)。
+
 启用配置会递增全局 generation；Worker 首次处理 Run 时将模型、记忆与运行参数 revision 固化到
 `run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本及其托管密钥。没有已启用模型时回退部署时
 `MODEL_*` 配置。模型页面必须直接显示当前 Provider 与默认模型或部署回退，并标明只影响新 Run；Provider 密钥只显示配置状态，

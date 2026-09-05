@@ -165,7 +165,7 @@
 | [ADR-0139：团队工作空间、任务分支与跨空间文件快照](0139-team-workspace-and-snapshot-boundary.md) | 已接受（试验版） | 2026-08-09 |
 | [ADR-0140：个人与团队双任务导航及团队中心边界](0140-dual-task-navigation-and-team-center.md) | 已接受（试验版） | 2026-08-09 |
 | [ADR-0141：标签式云盘与跨空间范围搜索](0141-tabbed-cloud-drive-and-cross-scope-search.md) | 已接受（试验版） | 2026-08-09 |
-| [ADR-0142：动态 Worker Tenant 分配与团队任务调度](0142-dynamic-worker-tenant-assignment.md) | 已接受（试验版） | 2026-08-10 |
+| [ADR-0142：动态 Worker Tenant 分配与团队任务调度](0142-dynamic-worker-tenant-assignment.md) | 部分已替代（容量与 assignment 释放时机） | 2026-08-10 |
 | [ADR-0143：上传资源名称规范化与幂等边界](0143-upload-resource-name-canonicalization.md) | 已接受（试验版） | 2026-08-10 |
 | [ADR-0144：固定模板依赖与受管 CSV 转 PDF Skill](0144-managed-csv-to-pdf-skill.md) | 已接受（试验版） | 2026-08-10 |
 | [ADR-0145：Thread Sandbox 复用时 ResourceFS 数据面自检与单次冷恢复](0145-thread-sandbox-resourcefs-data-plane-recovery.md) | 已接受（试验版） | 2026-08-10 |
@@ -266,7 +266,7 @@
 | [ADR-20260828113100：Todo 首次快照允许原子进入执行状态](20260828113100-todo-initial-snapshot-can-start.md) | 已接受 | 2026-08-28 |
 | [ADR-20260828120133：任务输入附件支持粘贴与可视预览](20260828120133-composer-paste-and-file-preview.md) | 已接受 | 2026-08-28 |
 | [ADR-20260828163752：附件触发的 Sandbox 准备与首个模型请求并行](20260828163752-attachment-sandbox-preparation-parallels-first-model-request.md) | 已接受 | 2026-08-28 |
-| [ADR-20260828170014：后台可配置的用户级有界 Run 并发](20260828170014-configurable-user-run-concurrency.md) | 已接受 | 2026-08-28 |
+| [ADR-20260828170014：后台可配置的用户级有界 Run 并发](20260828170014-configurable-user-run-concurrency.md) | 部分已替代（assignment 释放时机） | 2026-08-28 |
 | [ADR-20260828174129：Worker 使用事务通知唤醒并记录首模启动分段耗时](20260828174129-worker-dispatch-notify-and-first-model-startup-timings.md) | 已接受 | 2026-08-28 |
 | [ADR-20260831092112：Vendor Tree 摘要跨平台规范化换行](20260831092112-cross-platform-vendor-tree-digest.md) | 已接受 | 2026-08-31 |
 | [ADR-20260831143740：后台托管 SMTP 邮箱验证码并限制身份插件表面](20260831143740-admin-managed-smtp-email-verification.md) | 已接受 | 2026-08-31 |
@@ -281,9 +281,9 @@
 | [ADR-20260903152652：Demo 默认部署受保护的内部轨迹查看器](20260903152652-demo-trajectory-default-deployment.md) | 部分已替代（轨迹卷生命周期） | 2026-09-03 |
 | [ADR-20260903171600：Demo 轨迹使用跨发布持久卷](20260903171600-demo-trajectory-cross-release-retention.md) | 已接受 | 2026-09-03 |
 | [ADR-20260904085601：停止原始模型响应采集与轨迹展示](20260904085601-stop-raw-model-response-capture.md) | 已接受 | 2026-09-04 |
-
 | [ADR-20260904103315：持久 Run 事件推送与增量正文渲染](20260904103315-run-event-stream-and-incremental-rendering.md) | 已接受 | 2026-09-04 |
-
 | [ADR-20260905180644：后台投影在 FORCE RLS 下的读取策略](20260905180644-admin-projection-forced-rls.md) | 已接受 | 2026-09-05 |
+| [ADR-20260905225608：公开正文增量在持久化前有界合并](20260905225608-runtime-text-delta-coalescing.md) | 已接受 | 2026-09-05 |
+| [ADR-20260905225738：已领取 Run 与有界后台维护并行](20260905225738-worker-background-maintenance.md) | 已接受 | 2026-09-05 |
 
 </details>

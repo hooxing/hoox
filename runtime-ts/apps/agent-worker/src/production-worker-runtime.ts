@@ -785,6 +785,10 @@ export class AgentWorkerPollingLoop {
   private pollActive = false;
   private wakeRequested = false;
   private readonly executions = new Set<Promise<void>>();
+  private readonly maintenances = new Map<
+    string,
+    { assignment: PgClaimedWorkerTenantAssignment; promise: Promise<void> }
+  >();
   private concurrencySettings: WorkerRunConcurrencySettings = Object.freeze({
     workerMaxConcurrentRuns: DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
     userMaxConcurrentRunsPerTenant: DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
@@ -800,7 +804,7 @@ export class AgentWorkerPollingLoop {
       readonly tenantAssignmentLeaseMs: number;
       readonly dispatchLeaseMs: number;
       readonly resolveConcurrencySettings?: () => Promise<WorkerRunConcurrencySettings>;
-      /** 周期性收敛已具 durable anchor 的维护任务；失败不阻塞 dispatch，下一 tick 重试。 */
+      /** 有界后台维护成功后释放 Tenant 租约；失败或容量不足时保留租约，过期后重试。 */
       readonly maintenance?: (tenantId: string) => Promise<unknown>;
     },
   ) {}
@@ -824,7 +828,10 @@ export class AgentWorkerPollingLoop {
 
   async drain(): Promise<void> {
     await this.pollInFlight;
-    await Promise.all([...this.executions]);
+    await Promise.all([
+      ...this.executions,
+      ...[...this.maintenances.values()].map((entry) => entry.promise),
+    ]);
   }
 
   /** PostgreSQL 通知只缩短下一次 claim 等待；重复、迟到或丢失都不改变 durable 语义。 */
@@ -888,7 +895,10 @@ export class AgentWorkerPollingLoop {
 
   private async tick(): Promise<boolean> {
     await this.refreshConcurrencySettings();
-    if (this.executions.size >= this.concurrencySettings.workerMaxConcurrentRuns) return false;
+    if (this.closed) return false;
+    const hasRunCapacity = this.executions.size < this.concurrencySettings.workerMaxConcurrentRuns;
+    if (!hasRunCapacity && (this.options.maintenance === undefined || this.maintenances.size >= 4))
+      return false;
     let assignment: PgClaimedWorkerTenantAssignment | undefined;
     try {
       assignment = await this.tenantAssignments.claim({
@@ -902,11 +912,7 @@ export class AgentWorkerPollingLoop {
     let claims: readonly PgClaimedRunDispatch[] = [];
     try {
       if (this.closed) return false;
-      try {
-        await this.options.maintenance?.(assignment.tenantId);
-      } catch {
-        // 维护任务必须保持幂等 durable anchor；失败不阻塞当前 Tenant 的 dispatch。
-      }
+      if (!hasRunCapacity) return false;
       try {
         claims = await this.queue.claim({
           tenantId: assignment.tenantId,
@@ -919,12 +925,8 @@ export class AgentWorkerPollingLoop {
         return false;
       }
     } finally {
-      try {
-        // Tenant 租约只负责发现和公平分配，不能包住模型执行而串行化不同 Thread。
-        await this.tenantAssignments.settle(assignment);
-      } catch {
-        // 控制面租约会过期；迟到 settle 受 generation/token 栅栏保护。
-      }
+      if (this.options.maintenance === undefined) await this.settleAssignment(assignment);
+      else if (!this.closed) this.launchMaintenance(assignment);
     }
     for (const claim of claims) {
       if (this.closed) {
@@ -938,6 +940,43 @@ export class AgentWorkerPollingLoop {
       this.launchExecution(claim);
     }
     return claims.length > 0;
+  }
+
+  private launchMaintenance(assignment: PgClaimedWorkerTenantAssignment): void {
+    const existing = this.maintenances.get(assignment.tenantId);
+    if (existing !== undefined) {
+      existing.assignment = assignment;
+      return;
+    }
+    // settle 不涵盖 Blob anchor；未开始或失败的维护必须保留 claimed 租约到期重领。
+    if (this.maintenances.size >= 4) return;
+    const entry = { assignment, promise: Promise.resolve() };
+    entry.promise = Promise.resolve()
+      .then(async () => {
+        if (this.closed) return;
+        do {
+          const current = entry.assignment;
+          await this.options.maintenance?.(current.tenantId);
+          // 维护中重领的新 generation 可能带来新事实，不能用旧一轮结果提前 settle。
+          if (current === entry.assignment) await this.settleAssignment(current);
+          if (current === entry.assignment) return;
+        } while (!this.closed);
+      })
+      .catch(() => {
+        // durable 维护失败不释放 Tenant 租约，也不阻塞已领取的 Run 或其他 Tenant。
+      })
+      .finally(() => {
+        this.maintenances.delete(assignment.tenantId);
+      });
+    this.maintenances.set(assignment.tenantId, entry);
+  }
+
+  private async settleAssignment(assignment: PgClaimedWorkerTenantAssignment): Promise<void> {
+    try {
+      await this.tenantAssignments.settle(assignment);
+    } catch {
+      // 控制面租约会过期；迟到 settle 受 generation/token 栅栏保护。
+    }
   }
 
   private launchExecution(claim: PgClaimedRunDispatch): void {

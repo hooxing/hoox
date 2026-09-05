@@ -2798,6 +2798,31 @@ async function rebindRoleScopedPolicies(
   context: MigrationSecurityContext,
 ): Promise<void> {
   const schema = quoteIdentifier(context.schema);
+  const projectionPolicy = await client.query<{ present: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1 AND tablename='threads'
+       AND policyname='threads_admin_projection_read') AS present`,
+    [context.schema],
+  );
+  if (projectionPolicy.rows[0]?.present) {
+    // 导入 Schema 或轮换 Migrator 后，聚合读取策略不能继续绑定旧角色。
+    for (const table of [
+      "runs",
+      "threads",
+      "run_dispatch_outbox",
+      "sandbox_registry",
+      "cleanup_outbox",
+      "memory_ingestion_outbox",
+      "scheduled_tasks",
+      "scheduled_task_occurrences",
+      "tenant_skill_installations",
+      "user_accounts",
+      "thread_continuity_metric_observations",
+      "user_sessions",
+    ]) {
+      await client.query(`ALTER POLICY ${quoteIdentifier(`${table}_admin_projection_read`)}
+        ON ${schema}.${quoteIdentifier(table)} TO ${quoteIdentifier(context.migratorRole)}`);
+    }
+  }
   if (await hasSkillPublicationState(client, context.schema)) {
     for (const [table, policy, target] of skillPublisherPolicyBindings) {
       const role = target === "migrator" ? context.migratorRole : context.skillPublisherRole;

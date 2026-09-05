@@ -284,4 +284,6 @@
 
 | [ADR-20260904103315：持久 Run 事件推送与增量正文渲染](20260904103315-run-event-stream-and-incremental-rendering.md) | 已接受 | 2026-09-04 |
 
+| [ADR-20260905180644：后台投影在 FORCE RLS 下的读取策略](20260905180644-admin-projection-forced-rls.md) | 已接受 | 2026-09-05 |
+
 </details>

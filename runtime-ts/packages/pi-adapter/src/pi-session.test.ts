@@ -358,6 +358,71 @@ describe("Pi 安全适配", () => {
     });
   });
 
+  it("公开正文合并不改变原始轨迹，完整文字在 awaited turn 安全点前交付所有订阅", async () => {
+    const text = "正文分片与工具时序".repeat(30);
+    const raw: string[] = [];
+    const other: RuntimeAgentEvent[] = [];
+    let safePoints = 0;
+    const publicText = (events: readonly RuntimeAgentEvent[]) =>
+      events.flatMap((event) => (event.type === "message.delta" ? [event.delta] : [])).join("");
+    const h = await harness(
+      [fauxAssistantMessage(text)],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () => {
+        safePoints += 1;
+        expect(publicText(h.events)).toBe(text);
+        expect(publicText(other)).toBe(text);
+        expect(raw.join("")).toBe(text);
+        expect(h.events).toContainEqual({ type: "message.completed", stopReason: "stop" });
+        return undefined;
+      },
+    );
+    const stopOther = h.controller.subscribe((event) => other.push(event));
+    const stopRaw = h.controller.subscribeInternal((event) => {
+      if (event.type !== "message_update" || event.assistantMessageEvent.type !== "text_delta")
+        return;
+      raw.push(event.assistantMessageEvent.delta);
+      if (raw.length === 1) {
+        expect(publicText(h.events)).toBe(raw[0]);
+        expect(publicText(other)).toBe(raw[0]);
+      }
+    });
+    await h.controller.prompt("输出长正文");
+    expect(safePoints).toBe(1);
+    expect(raw.length).toBeGreaterThan(10);
+    expect(h.events.filter((event) => event.type === "message.delta").length).toBeLessThan(
+      raw.length,
+    );
+    expect(publicText(h.events)).toBe(publicText(other));
+    stopRaw();
+    stopOther();
+  });
+
+  it("Controller dispose 释放正在等待刷新的公开正文订阅", async () => {
+    const h = await harness([fauxAssistantMessage("待关闭的正文订阅".repeat(30))]);
+    let rawDeltas = 0;
+    let countAtDispose = 0;
+    h.controller.subscribeInternal((event) => {
+      if (event.type !== "message_update" || event.assistantMessageEvent.type !== "text_delta")
+        return;
+      if (++rawDeltas === 2) {
+        countAtDispose = h.events.length;
+        h.controller.dispose();
+      }
+    });
+    await h.controller.prompt("输出期间释放订阅");
+    expect(rawDeltas).toBe(2);
+    await delay(120);
+    expect(h.events).toHaveLength(countAtDispose);
+  });
+
   it("推理内容实时发布并在 turn 安全点完整保留，不阻断工具后的下一次 Provider 请求", async () => {
     let safeEvent: Extract<RuntimeAgentEvent, { type: "turn.completed" }> | undefined;
     const { controller, events, faux } = await harness(

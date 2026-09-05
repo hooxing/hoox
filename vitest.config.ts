@@ -11,6 +11,9 @@ export default defineConfig({
       "@hoox/sandbox": fileURLToPath(
         new URL("./runtime-ts/packages/sandbox/src/index.ts", import.meta.url),
       ),
+      "@hoox/pi-adapter/thread-history": fileURLToPath(
+        new URL("./runtime-ts/packages/pi-adapter/src/thread-history.ts", import.meta.url),
+      ),
       "@hoox/pi-adapter": fileURLToPath(
         new URL("./runtime-ts/packages/pi-adapter/src/index.ts", import.meta.url),
       ),

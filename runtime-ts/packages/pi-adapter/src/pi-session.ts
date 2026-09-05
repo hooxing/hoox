@@ -60,6 +60,7 @@ import {
   type DeliverFilePiToolExecutorPort,
 } from "./deliver-file-tool.js";
 import { EmptyResourceLoader } from "./empty-resource-loader.js";
+import { subscribeBufferedRuntimeEvents } from "./event-buffer.js";
 import { mapPiEvent, type RuntimeAgentEvent } from "./events.js";
 import { createSkillPiTool, type SkillPiToolExecutorPort } from "./skill-tool.js";
 import {
@@ -83,9 +84,6 @@ interface PiSessionPort {
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   dispose(): void;
 }
-
-const THINKING_DELTA_FLUSH_INTERVAL_MS = 100;
-const THINKING_DELTA_FLUSH_BYTES = 1_024;
 
 export interface PiContextBudgetDiagnostics {
   readonly outcome: ContextBudgetDecision["outcome"];
@@ -196,6 +194,7 @@ class DeferredProviderFailure {
 
 class PiSessionControllerImpl implements PiSessionController {
   readonly #session: PiSessionPort;
+  readonly #eventSubscriptions = new Set<() => void>();
   readonly #diagnostics: () => PiSessionDiagnostics;
   readonly #admitInput: (text: string) => void;
   readonly #providerFailure: DeferredProviderFailure;
@@ -308,49 +307,25 @@ class PiSessionControllerImpl implements PiSessionController {
   }
 
   dispose(): void {
+    for (const unsubscribe of this.#eventSubscriptions) unsubscribe();
     this.#session.dispose();
   }
 
   subscribe(listener: (event: RuntimeAgentEvent) => void): () => void {
-    let thinkingBuffer = "";
-    let thinkingFlushTimer: ReturnType<typeof setTimeout> | undefined;
-    let subscribed = true;
-    const flushThinking = () => {
-      if (thinkingFlushTimer !== undefined) {
-        clearTimeout(thinkingFlushTimer);
-        thinkingFlushTimer = undefined;
-      }
-      if (!subscribed || thinkingBuffer.length === 0) return;
-      const delta = thinkingBuffer;
-      thinkingBuffer = "";
-      listener({ type: "thinking.delta", delta });
+    const stop = subscribeBufferedRuntimeEvents(
+      (emit) =>
+        this.#session.subscribe((event) => {
+          const mapped = mapPiEvent(event);
+          if (mapped !== undefined) emit(mapped);
+        }),
+      listener,
+    );
+    const unsubscribe = () => {
+      stop();
+      this.#eventSubscriptions.delete(unsubscribe);
     };
-    const scheduleThinkingFlush = () => {
-      thinkingFlushTimer ??= setTimeout(flushThinking, THINKING_DELTA_FLUSH_INTERVAL_MS);
-    };
-    const unsubscribe = this.#session.subscribe((event) => {
-      const mapped = mapPiEvent(event);
-      if (!mapped) return;
-      if (mapped.type === "thinking.delta") {
-        thinkingBuffer += mapped.delta;
-        if (new TextEncoder().encode(thinkingBuffer).byteLength >= THINKING_DELTA_FLUSH_BYTES) {
-          flushThinking();
-        } else {
-          scheduleThinkingFlush();
-        }
-        return;
-      }
-      // thinking_end、message_end 和 turn_end 都必须先发布残余增量，再发布自己的终态。
-      flushThinking();
-      listener(mapped);
-    });
-    return () => {
-      subscribed = false;
-      if (thinkingFlushTimer !== undefined) clearTimeout(thinkingFlushTimer);
-      thinkingFlushTimer = undefined;
-      thinkingBuffer = "";
-      unsubscribe();
-    };
+    this.#eventSubscriptions.add(unsubscribe);
+    return unsubscribe;
   }
 
   subscribeInternal(listener: (event: AgentSessionEvent) => void): () => void {

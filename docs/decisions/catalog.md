@@ -281,9 +281,8 @@
 | [ADR-20260903152652：Demo 默认部署受保护的内部轨迹查看器](20260903152652-demo-trajectory-default-deployment.md) | 部分已替代（轨迹卷生命周期） | 2026-09-03 |
 | [ADR-20260903171600：Demo 轨迹使用跨发布持久卷](20260903171600-demo-trajectory-cross-release-retention.md) | 已接受 | 2026-09-03 |
 | [ADR-20260904085601：停止原始模型响应采集与轨迹展示](20260904085601-stop-raw-model-response-capture.md) | 已接受 | 2026-09-04 |
-
 | [ADR-20260904103315：持久 Run 事件推送与增量正文渲染](20260904103315-run-event-stream-and-incremental-rendering.md) | 已接受 | 2026-09-04 |
-
 | [ADR-20260905180644：后台投影在 FORCE RLS 下的读取策略](20260905180644-admin-projection-forced-rls.md) | 已接受 | 2026-09-05 |
+| [ADR-20260905225608：公开正文增量在持久化前有界合并](20260905225608-runtime-text-delta-coalescing.md) | 已接受 | 2026-09-05 |
 
 </details>

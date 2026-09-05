@@ -107,6 +107,7 @@ import {
   SandboxSessionRegistryRouter,
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
+import { performWorkerMaintenance } from "./worker-maintenance.js";
 import {
   createDevelopmentProjectInternalTrajectoryMirror,
   createDevelopmentProjectRunEventMirror,
@@ -1352,18 +1353,18 @@ async function assembleWorkerRuntime(
               DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
           };
         },
-        maintenance: async (tenantId) => {
-          const tasks: Promise<unknown>[] = [
-            resourceBlobWriter.recoverPending({
-              tenantId,
-              limit: 16,
-              orphanGraceSeconds: 300,
-            }),
-          ];
-          tasks.push(memoryConsumer.drainTenant(tenantId));
-          tasks.push(scheduledTaskConsumer.drainTenant(tenantId));
-          await Promise.allSettled(tasks);
-        },
+        maintenance: (tenantId) =>
+          performWorkerMaintenance({
+            resourceBlobBatchLimit: 16,
+            recoverResourceBlobs: () =>
+              resourceBlobWriter.recoverPending({
+                tenantId,
+                limit: 16,
+                orphanGraceSeconds: 300,
+              }),
+            drainMemory: () => memoryConsumer.drainTenant(tenantId),
+            drainScheduledTasks: () => scheduledTaskConsumer.drainTenant(tenantId),
+          }),
       },
     );
     const probes = Object.freeze({
@@ -1380,9 +1381,9 @@ async function assembleWorkerRuntime(
     });
     return Object.freeze({
       stopAccepting: async () => {
-        await dispatchWakeListener.close();
         loop.stopAccepting();
         shutdown.request();
+        await dispatchWakeListener.close();
         await loop.drain();
       },
       resources: Object.freeze([

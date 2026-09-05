@@ -96,7 +96,9 @@ Agent Worker 使用有界并发而不是“单任务串行”或无限异步启�
 - 用户和 Thread 槽位由 PostgreSQL 在 Tenant RLS 短事务中统一占用，多 Worker 不依赖各自的内存计数；
 - 调低上限不会取消在途 Run，只会停止领取新 dispatch，直到活跃数自然回落。
 
-Tenant assignment 只负责发现和公平选择，必须在模型执行前释放。数据库中的短时调度锁不包住模型、Sandbox 或工具执行，因此不会把同一 Tenant 的不同 Thread 再次串行化。
+Tenant assignment 负责发现和公平选择。启用维护的 Worker 先领取并启动至多一个 Run，再把 assignment 的收敛交给有界后台维护；没有维护时仍在执行前释放 assignment。单 Worker 进程最多并行维护四个 Tenant，同 Tenant 在单进程内不并发维护。维护失败、Blob 部分收敛或满批，以及维护容量不足时保留 claimed 租约，依靠到期重领；停机先停止新生产者，再等待在途 Run、已启动维护和 settle。
+
+首个已领取 Run 和其他 Tenant 的发现不等待慢维护；同 Tenant 的后续领取仍可能等待维护结束或 assignment 租约到期。维护租约不以 Run 完成为释放条件，数据库中的短时调度锁也不包住模型、Sandbox 或工具执行。该取舍保留了已有恢复机会，尚未引入独立 Blob 定时唤醒机制，见[维护调度边界](../decisions/20260905225738-worker-background-maintenance.md)。
 
 ## 进程职责
 

@@ -39,6 +39,22 @@ vi.mock("@hoox/persistence", () => ({
     resolveRole() {
       return Promise.resolve("admin");
     }
+
+    generation() {
+      return Promise.resolve(0);
+    }
+    listModelProviders() {
+      return Promise.resolve([]);
+    }
+    listMemoryProviders() {
+      return Promise.resolve([]);
+    }
+    getActiveRuntimeSettings() {
+      return Promise.resolve(undefined);
+    }
+    read() {
+      return Promise.resolve({});
+    }
   },
   PgIdentityConfigurationRepository: class {
     constructor(pool: unknown) {
@@ -173,6 +189,9 @@ describe("统一后台 API 固定装配", () => {
         | undefined;
       if (firstCall === undefined) throw new Error("未创建统一后台应用");
       const [dependencies] = firstCall;
+      await expect(dependencies.control.overview("user_admin")).resolves.toMatchObject({
+        runtimeEnvironment: "development",
+      });
       expect(dependencies.skills.publications).toBeDefined();
       await expect(
         dependencies.auth.resolve({
@@ -211,6 +230,9 @@ describe("统一后台 API 固定装配", () => {
         | [AdminControlApiDependencies, { readonly logger?: boolean }]
         | undefined;
       if (firstCall === undefined) throw new Error("未创建生产统一后台应用");
+      await expect(firstCall[0].control.overview("user_admin")).resolves.toMatchObject({
+        runtimeEnvironment: "production",
+      });
       expect(firstCall[1]).toEqual(expect.objectContaining({ logger: true }));
       expect(mocks.app.listen).toHaveBeenCalledTimes(1);
     } finally {

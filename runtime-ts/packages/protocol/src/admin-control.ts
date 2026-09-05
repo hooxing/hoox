@@ -260,6 +260,9 @@ export type DeploymentSettingDescriptorDto = Static<typeof DeploymentSettingDesc
 
 export const AdminControlOverviewDtoSchema = Type.Object(
   {
+    runtimeEnvironment: Type.Optional(
+      Type.Union([Type.Literal("development"), Type.Literal("test"), Type.Literal("production")]),
+    ),
     generation: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }),
     activeModel: Type.Optional(ModelProviderRevisionDtoSchema),
     activeMemory: Type.Optional(MemoryProviderRevisionDtoSchema),

@@ -1023,7 +1023,6 @@ function AdminPlatform({
   const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const metadata = pageMetadata[location.pathname] ?? defaultPageMetadata;
-  const environment = import.meta.env.MODE === "production" ? "生产环境" : "开发环境";
 
   return (
     <Layout className="platform-admin-shell">
@@ -1085,7 +1084,7 @@ function AdminPlatform({
             </div>
           </div>
           <div className="platform-header-actions">
-            <Tag color={environment === "生产环境" ? "red" : "green"}>{environment}</Tag>
+            <Tag>部署类型见服务端检测</Tag>
             <span className="platform-operator">
               <span className="platform-operator-avatar">A</span>
               <span>

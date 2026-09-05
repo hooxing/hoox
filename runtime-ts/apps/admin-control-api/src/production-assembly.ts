@@ -152,6 +152,7 @@ async function assembleRealService(
         repository,
         createProviderProbes(configuration),
         deploymentSettings(configuration),
+        configuration.runtimeEnvironment,
       ),
       modelCatalog: createPiModelCatalog(),
       skills: {

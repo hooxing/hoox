@@ -357,6 +357,185 @@ afterAll(async () => {
 });
 
 describe("PostgreSQL 迁移与强权限边界", () => {
+  it("后台聚合策略支持回滚重建和导入后的角色重绑定", async () => {
+    const target = await createIsolatedMigrationTarget("admin_projection");
+    const policies = () =>
+      target.pool.query<{ tablename: string; policyname: string; roles: string[] }>(
+        "SELECT tablename,policyname,roles::text[] AS roles FROM pg_policies WHERE schemaname=current_schema() AND policyname LIKE '%_admin_projection_read' ORDER BY tablename",
+      );
+    try {
+      await migrateUp(target.pool, target.context);
+      const created = (await policies()).rows;
+      expect(created).toHaveLength(12);
+      for (const policy of created) {
+        await target.pool.query(
+          `ALTER POLICY "${policy.policyname}" ON "${policy.tablename}" TO "${migratorRole}"`,
+        );
+      }
+      await bootstrapRuntimeAccess(target.pool, target.context);
+      expect(
+        (await policies()).rows.every(
+          (policy) => policy.roles.length === 1 && policy.roles[0] === target.context.migratorRole,
+        ),
+      ).toBe(true);
+      await migrateDown(target.pool, {
+        ...target.context,
+        allowDestructive: true,
+        environment: "test",
+        targetVersion: 57,
+      });
+      expect((await policies()).rows).toEqual([]);
+      await migrateUp(target.pool, target.context);
+      expect((await policies()).rows).toEqual(created);
+    } finally {
+      await target.close();
+    }
+  });
+
+  it("后台聚合跨租户统计与用量，但不扩大控制角色或 Runtime 的底表权限", async () => {
+    const first = await createFixture("stats_a");
+    const repository = new PgAdminControlRepository(
+      adminControlPool,
+      new ModelProviderCredentialCipher("integration-statistics-key-at-least-32-bytes"),
+    );
+    await migratorPool.query(
+      "INSERT INTO platform_control_operators(user_id,role,status) VALUES($1,'admin','active')",
+      [first.user.id],
+    );
+    const baseline = await repository.read(first.user.id);
+    const second = await createFixture("stats_b");
+    try {
+      for (const [index, fixture] of [first, second].entries()) {
+        await administrativePool.query(
+          `INSERT INTO "${schema}".user_accounts
+          (user_id,personal_tenant_id,email,normalized_email,display_name,password_algorithm,password_salt,password_hash,created_at,updated_at)
+          VALUES ($1,$2,$3,$3,'统计测试','scrypt-v1',decode(repeat('00',16),'hex'),decode(repeat('00',32),'hex'),clock_timestamp(),clock_timestamp())`,
+          [fixture.user.id, fixture.tenant.id, `stats-${index}@example.invalid`],
+        );
+        await administrativePool.query(
+          `INSERT INTO "${schema}".user_sessions
+          (token_digest,user_id,personal_tenant_id,created_at,expires_at)
+          VALUES ($1,$2,$3,clock_timestamp(),clock_timestamp()+interval '1 day')`,
+          [String(index + 1).repeat(64), fixture.user.id, fixture.tenant.id],
+        );
+        await withTenantTransaction(runtimePool, fixture.scope, async (client) => {
+          for (const [metric, value] of [
+            ["model_input_tokens", 100],
+            ["model_output_tokens", 20],
+            ["model_cache_read_tokens", 50],
+            ["model_generation_duration_ms", 1000],
+          ] as const) {
+            await client.query(
+              `INSERT INTO thread_continuity_metric_observations
+              (tenant_id,observation_id,thread_id,run_id,metric_name,value,unit)
+              VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+              [
+                fixture.tenant.id,
+                `${metric}_stats`,
+                fixture.thread.id,
+                fixture.run.id,
+                metric,
+                value,
+                metric.endsWith("duration_ms") ? "milliseconds" : "tokens",
+              ],
+            );
+          }
+          await client.query(
+            `INSERT INTO thread_continuity_metric_observations
+            (tenant_id,observation_id,thread_id,metric_name,value,unit,observed_at)
+            VALUES ($1,'old_model_input',$2,'model_input_tokens',9999,'tokens',clock_timestamp()-interval '48 hours')`,
+            [fixture.tenant.id, fixture.thread.id],
+          );
+        });
+      }
+      const statistics = await repository.read(first.user.id);
+      expect(statistics.conversations.total).toBe(baseline.conversations.total + 1);
+      expect(statistics.runs.total).toBe(baseline.runs.total + 1);
+      expect(statistics.users.total).toBe(baseline.users.total + 2);
+      expect(statistics.modelUsage24h).toMatchObject({
+        inputTokens: 300,
+        outputTokens: 40,
+        outputTokensPerSecond: 20,
+        cacheHitRate: 1 / 3,
+      });
+      const directory = await repository.listUsers({
+        actorUserId: first.user.id,
+        query: "stats-",
+        limit: 10,
+      });
+      expect(directory.items).toHaveLength(2);
+      for (const user of directory.items)
+        expect(user).toMatchObject({ conversationCount: 1, runCount: 1, activeSessions: 1 });
+      for (const role of ["viewer", "operator"] as const) {
+        await migratorPool.query("UPDATE platform_control_operators SET role=$2 WHERE user_id=$1", [
+          first.user.id,
+          role,
+        ]);
+        expect((await repository.read(first.user.id)).runs.total).toBe(statistics.runs.total);
+        expect(
+          (await repository.listUsers({ actorUserId: first.user.id, limit: 10 })).items,
+        ).toHaveLength(0);
+      }
+      await migratorPool.query(
+        "UPDATE platform_control_operators SET role='admin',status='disabled' WHERE user_id=$1",
+        [first.user.id],
+      );
+      const disabled = await withTenantTransaction(adminControlPool, first.scope, (client) =>
+        client.query("SELECT * FROM admin_runtime_statistics"),
+      );
+      expect(disabled.rows).toHaveLength(0);
+      const unknown = await withTenantTransaction(adminControlPool, second.scope, (client) =>
+        client.query("SELECT * FROM admin_runtime_statistics"),
+      );
+      expect(unknown.rows).toHaveLength(0);
+      expect(
+        (await adminControlPool.query("SELECT * FROM admin_runtime_statistics")).rows,
+      ).toHaveLength(0);
+      await migratorPool.query(
+        "UPDATE platform_control_operators SET status='active' WHERE user_id=$1",
+        [first.user.id],
+      );
+      const ownRuns = await withTenantTransaction(runtimePool, first.scope, (client) =>
+        client.query("SELECT tenant_id FROM runs"),
+      );
+      expect(ownRuns.rows).toEqual([{ tenant_id: first.tenant.id }]);
+      for (const table of [
+        "threads",
+        "runs",
+        "run_dispatch_outbox",
+        "sandbox_registry",
+        "cleanup_outbox",
+        "memory_ingestion_outbox",
+        "scheduled_tasks",
+        "scheduled_task_occurrences",
+        "tenant_skill_installations",
+        "thread_continuity_metric_observations",
+        "user_accounts",
+        "user_sessions",
+      ]) {
+        await expect(adminControlPool.query(`SELECT * FROM ${table}`)).rejects.toMatchObject({
+          code: "42501",
+        });
+      }
+      const role = await migratorPool.query(
+        "SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user",
+      );
+      expect(role.rows).toEqual([{ rolsuper: false, rolbypassrls: false }]);
+    } finally {
+      await administrativePool.query(
+        `DELETE FROM "${schema}".thread_continuity_metric_observations WHERE tenant_id=ANY($1::text[])`,
+        [[first.tenant.id, second.tenant.id]],
+      );
+      await administrativePool.query(
+        `DELETE FROM "${schema}".user_accounts WHERE user_id=ANY($1::text[])`,
+        [[first.user.id, second.user.id]],
+      );
+      await migratorPool.query("DELETE FROM platform_control_operators WHERE user_id=$1", [
+        first.user.id,
+      ]);
+    }
+  });
+
   it("模型保存可直接启用并由新 Run 固化，旧 Run 在切换后保持不变", async () => {
     const firstRun = await createFixture("control_first");
     await migratorPool.query(

@@ -412,7 +412,7 @@ describe("Agent Worker production polling loop", () => {
     ]);
   });
 
-  it("durable maintenance 失败不阻塞 dispatch，并在下一 tick 重试", async () => {
+  it("durable maintenance 失败不阻塞 dispatch，并在后续再次领取时重试", async () => {
     const recovered = deferred<void>();
     let maintenanceCalls = 0;
     let claimCalls = 0;

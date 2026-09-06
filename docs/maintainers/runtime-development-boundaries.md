@@ -22,7 +22,17 @@ corepack pnpm build
 corepack pnpm config:check
 ```
 
-`pnpm check` 按上述顺序执行完整校验。格式修复使用 `pnpm format`。配置校验只读取可提交的 `.env.example`，不会读取真实 `.env`；错误也只能输出变量名，不能输出值。
+独立的 `typecheck` 和 `test` 会先构建所需产物；`pnpm check` 先检查工具链、模型目录、格式和 lint，只执行一次全工作区构建，再复用产物执行补充类型检查、测试和配置校验。`pnpm check:clean-workspace` 先删除工作区 `dist`，验证构建不依赖历史产物。格式修复使用 `pnpm format`。配置校验只读取可提交的 `.env.example`，不会读取真实 `.env`；错误也只能输出变量名，不能输出值。
+
+## CI 合并门禁
+
+CI 并行执行工程构建与测试、Pi Prompt 容器、生产发布静态检查、API/Scheduler/Worker 三个生产容器、Linux/Windows 进程测试与 M4 PostgreSQL 黑盒。工程检查保留完整 clean build；进程专项与 M4 仍各自清理并构建依赖，不从其他 Job 下载工作区产物。Pi 与生产容器的宿主机脚本只依赖 Node.js，安装与编译在镜像内完成。
+
+“工程基线校验”汇总工程与 Pi 两项结果，“Production 静态与容器 Gate”汇总静态与三个生产容器结果。汇总 Job 在依赖结束后始终检查结果，只有所有依赖成功才通过；失败、取消或跳过均不能放行。生产矩阵关闭 fail-fast，以保留三个角色的诊断。PR 新提交取消过期 CI，main CI 不取消。
+
+Pi 和每个生产角色使用独立的 BuildKit GitHub Actions 缓存 scope，缓存由锁文件、Dockerfile 和源码内容决定，不复用宿主机 `dist`。生产容器 Gate 在 CI 中通过 `PRODUCTION_GATE_IMAGE` 接收本次 Buildx 输出的本地镜像 ID，仍执行构建上下文 canary、非 root、只读文件系统、生产入口和失败关闭探针。该变量仅供门禁脚本使用，不属于应用 `.env`。未提供镜像时，本地命令继续自行构建并清理；指定镜像不存在或 ID 非法时直接失败，不拉取或回退构建，也不删除调用方提供的镜像。
+
+仓库管理员应在 main 的 ruleset 或分支保护中要求“工程基线校验”“Production 静态与容器 Gate”“进程骨架（ubuntu-latest）”“进程骨架（windows-latest）”和“M4 开发黑盒（Linux PostgreSQL）”全部成功。工作流文件不会自动启用远端分支保护，不能用其存在代替设置核验。Demo 发布入口见[Demo 持续部署](../operations/demo-cd.md)，并行与缓存的理由见 [CI 门禁决策](../decisions/20260906183557-ci-parallel-gates-and-image-cache.md)。
 
 ## Workspace 边界
 

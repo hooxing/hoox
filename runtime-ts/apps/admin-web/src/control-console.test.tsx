@@ -141,6 +141,7 @@ function fixture(): AdminControlApiContract {
       }),
     ),
     saveMemoryConfiguration: vi.fn(),
+    saveRuntimeSettingsConfiguration: vi.fn(),
     createModelDraft: vi.fn(),
     createMemoryDraft: vi.fn(),
     createRuntimeSettingsDraft: vi.fn(),
@@ -217,6 +218,39 @@ beforeEach(() => {
 });
 
 describe("统一平台管理导航", () => {
+  it("运行设置从默认值直接保存，没有变更原因或发布步骤", async () => {
+    const api = fixture();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+    act(() => navigationItem(container, "运行设置").click());
+    await settle();
+    expect(container.textContent).toContain("保存后无需重启");
+    expect(container.textContent).not.toContain("变更原因");
+    expect(container.querySelector('input[name="workerMaxConcurrentRuns"]')).toHaveProperty(
+      "value",
+      "20",
+    );
+    const form = container.querySelector("form");
+    act(() => form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
+    await settle();
+    expect(api.saveRuntimeSettingsConfiguration).toHaveBeenCalledOnce();
+    expect(vi.mocked(api.saveRuntimeSettingsConfiguration).mock.calls[0]?.[0]).toMatchObject({
+      workerMaxConcurrentRuns: 20,
+      userMaxConcurrentRunsPerTenant: 2,
+      compactionSoftLimitPercent: 80,
+      compactionTargetPercent: 55,
+      compactionRecentUserTokens: 4096,
+      compactionMaxOutputTokens: 4096,
+      compactionTimeoutMs: 60000,
+    });
+    expect(api.createRuntimeSettingsDraft).not.toHaveBeenCalled();
+    expect(api.publish).not.toHaveBeenCalled();
+    act(() => root.unmount());
+    container.remove();
+  });
   it("工作台展示真实指标，隐藏内部配置和版本信息", async () => {
     const api = fixture();
     const container = document.createElement("div");
@@ -421,58 +455,68 @@ describe("统一平台管理导航", () => {
     container.remove();
   });
 
-  it.each([false, true])(
-    "无后台模型时记忆由部署配置管理，忽略托管记录是否存在 %s",
-    async (hasMemory) => {
-      const api = fixture();
-      const activeMemory: MemoryProviderRevisionDto = {
-        revision: 1,
-        versionToken: 2,
-        status: "active",
-        probeStatus: "healthy",
-        createdBy: "user_admin",
-        createdAt: "2026-08-25T00:00:00.000Z",
-        updatedAt: "2026-08-25T00:00:00.000Z",
-        configuration: {
-          providerKey: "mem0",
-          displayName: "Mem0",
-          providerKind: "mem0",
-          enabled: true,
-          baseUrl: "https://memory.example.com/",
-          apiSecretRef: "deployment:memory-api",
-          scopeSecretRef: "deployment:memory-scope",
-          requestTimeoutMs: 10000,
-        },
-      };
-      vi.mocked(api.overview).mockResolvedValue({
-        ...overview,
-        ...(hasMemory ? { activeMemory } : {}),
-      });
-      const container = document.createElement("div");
-      document.body.append(container);
-      const root = createRoot(container);
-      act(() => root.render(<App controlApi={api} />));
-      await settle();
-      expect(container.querySelector(".active-stack")?.textContent).toContain(
-        "记忆：由部署配置管理",
-      );
-      act(() => navigationItem(container, "记忆服务").click());
-      await settle();
-      expect(container.querySelector(".memory-active-state")?.textContent).toBe("由部署配置管理");
-      expect(container.querySelector(".memory-control-form")?.textContent).toContain(
-        "请先在模型服务中接入后台模型",
-      );
-      expect(
-        container.querySelector<HTMLFieldSetElement>(".memory-configuration-fields")?.disabled,
-      ).toBe(true);
-      const save = container.querySelector<HTMLButtonElement>('form button[type="submit"]');
-      expect(save?.disabled).toBe(true);
-      await act(async () => save?.click());
-      expect(api.saveMemoryConfiguration).not.toHaveBeenCalled();
-      act(() => root.unmount());
-      container.remove();
-    },
-  );
+  it.each([false, true])("无后台模型时仍可独立配置记忆，现有配置存在 %s", async (hasMemory) => {
+    const api = fixture();
+    const activeMemory: MemoryProviderRevisionDto = {
+      revision: 1,
+      versionToken: 2,
+      status: "active",
+      probeStatus: "healthy",
+      createdBy: "user_admin",
+      createdAt: "2026-08-25T00:00:00.000Z",
+      updatedAt: "2026-08-25T00:00:00.000Z",
+      configuration: {
+        providerKey: "mem0",
+        displayName: "Mem0",
+        providerKind: "mem0",
+        enabled: true,
+        baseUrl: "https://memory.example.com/",
+        apiSecretRef: "deployment:memory-api",
+        scopeSecretRef: "deployment:memory-scope",
+        requestTimeoutMs: 10000,
+      },
+    };
+    vi.mocked(api.overview).mockResolvedValue({
+      ...overview,
+      ...(hasMemory ? { activeMemory } : {}),
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+    expect(container.querySelector(".active-stack")?.textContent).toContain(
+      hasMemory ? "记忆：Mem0" : "记忆：由部署配置管理",
+    );
+    act(() => navigationItem(container, "记忆服务").click());
+    await settle();
+    expect(container.querySelector(".memory-active-state")?.textContent).toBe(
+      hasMemory ? "已开启" : "已关闭",
+    );
+    expect(container.querySelector(".memory-control-form")?.textContent).not.toContain(
+      "请先在模型服务中接入后台模型",
+    );
+    expect(
+      container.querySelector<HTMLFieldSetElement>(".memory-configuration-fields")?.disabled,
+    ).toBe(false);
+    const save = container.querySelector<HTMLButtonElement>('form button[type="submit"]');
+    expect(save?.disabled).toBe(false);
+    const secret = container.querySelector<HTMLInputElement>('input[name="apiKey"]');
+    if (secret === null) throw new Error("记忆密钥输入缺失");
+    expect(secret.type).toBe("password");
+    expect(secret.value).toBe("");
+    act(() => changeControl(secret, "unit-memory-new-key"));
+    await act(async () => save?.click());
+    expect(api.saveMemoryConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiKey: "unit-memory-new-key",
+        apiSecretRef: "managed:memory-api",
+        scopeSecretRef: "platform:memory-scope",
+      }),
+    );
+    act(() => root.unmount());
+    container.remove();
+  });
 
   it("已接入后台模型但没有记忆配置时显示关闭，并允许首次保存", async () => {
     const api = fixture();
@@ -516,8 +560,8 @@ describe("统一平台管理导航", () => {
         displayName: "企业记忆",
         providerKind: "mem0",
         baseUrl: "https://memory.example.com/",
-        apiSecretRef: "deployment:memory-api",
-        scopeSecretRef: "deployment:memory-scope",
+        apiSecretRef: "managed:memory-api",
+        scopeSecretRef: "platform:memory-scope",
         requestTimeoutMs: 12345,
         enabled,
       },
@@ -569,6 +613,7 @@ describe("统一平台管理导航", () => {
     expect(api.saveMemoryConfiguration).toHaveBeenCalledExactlyOnceWith({
       expectedGeneration: 3,
       ...activeMemory.configuration,
+      reuseCredentialFromRevision: activeMemory.revision,
       enabled: !enabled,
     });
     expect(api.createMemoryDraft).not.toHaveBeenCalled();
@@ -631,8 +676,20 @@ describe("统一平台管理导航", () => {
       container.querySelector<HTMLButtonElement>('form button[type="submit"]')?.click(),
     );
     await settle();
+    expect(api.saveMemoryConfiguration).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("请输入 Mem0 API Key");
+    const key = requiredControl(
+      container.querySelector<HTMLInputElement>('input[name="apiKey"]'),
+      "记忆密钥",
+    );
+    act(() => changeControl(key, "unit-unsaved-memory-key"));
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('form button[type="submit"]')?.click(),
+    );
+    await settle();
     expect(api.overview).toHaveBeenCalledTimes(reads);
     expect(name.value).toBe("待保存的记忆连接");
+    expect(key.value).toBe("unit-unsaved-memory-key");
     expect(url.value).toBe("https://memory.example.com/");
     expect(container.querySelector<HTMLInputElement>('input[name="enabled"]')?.checked).toBe(true);
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("请刷新后重试");

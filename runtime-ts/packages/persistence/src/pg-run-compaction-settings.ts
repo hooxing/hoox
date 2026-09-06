@@ -43,8 +43,19 @@ export class PgRunCompactionSettingsRepository implements RunCompactionSettingsP
             WHERE snapshot.tenant_id=$1 AND snapshot.run_id=$2`,
           [input.tenantId, input.runId],
         );
-        const previous = legacy.rows[0]?.configuration;
-        // 旧 Run 的配置引用优先于部署值；从未保存过的旧部署值只能由当前部署参数承接。
+        let previous = legacy.rows[0]?.configuration;
+        if (previous === undefined) {
+          const active = await client.query<{ readonly configuration: Record<string, number> }>(
+            `SELECT revision.configuration
+               FROM admin_control_active_configs active
+               JOIN admin_control_config_revisions revision
+                 ON revision.object_kind=active.object_kind AND revision.object_key=active.object_key
+                AND revision.revision=active.revision
+              WHERE active.object_kind='runtime_settings' AND active.object_key='global'`,
+          );
+          previous = active.rows[0]?.configuration;
+        }
+        // 已固定的 Run 优先；首次解析采用后台当前设置，未配置时采用部署默认值。
         const selected = normalizeRunCompactionSettings(
           previous === undefined
             ? input.deploymentSettings

@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
-import { PgAdminControlRepository } from "./pg-admin-control.js";
 import { ModelProviderCredentialCipher } from "./model-provider-credential.js";
+import { PgAdminControlRepository } from "./pg-admin-control.js";
 
 const input = {
   actorUserId: "admin",
@@ -56,6 +56,30 @@ function fixture(
 }
 
 describe("配置保存的事务边界", () => {
+  it("运行设置激活失败整笔回滚，不依赖后台模型", async () => {
+    const { repository, statements } = fixture({ activationFailure: true });
+    await expect(
+      repository.saveRuntimeSettingsConfiguration({
+        ...input,
+        command: {
+          expectedGeneration: 4,
+          reason: "保存并使用运行设置",
+          workerMaxConcurrentRuns: 20,
+          userMaxConcurrentRunsPerTenant: 2,
+          compactionSoftLimitPercent: 80,
+          compactionTargetPercent: 55,
+          compactionRecentUserTokens: 4096,
+          compactionMaxOutputTokens: 4096,
+          compactionTimeoutMs: 60000,
+        },
+      }),
+    ).rejects.toThrow();
+    expect(statements.some((sql) => sql.includes("INSERT INTO admin_control_active_configs"))).toBe(
+      true,
+    );
+    expect(statements).toContain("ROLLBACK");
+    expect(statements).not.toContain("COMMIT");
+  });
   it("激活事件写入失败时回滚配置和当前指针，不遗留半完成保存", async () => {
     const { repository, statements, client } = fixture({ activationFailure: true });
     await expect(repository.saveModelConfiguration(input)).rejects.toThrow();

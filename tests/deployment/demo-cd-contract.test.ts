@@ -11,6 +11,11 @@ describe("Demo 持续部署契约", () => {
     expect(workflow).toContain('workflows: ["持续集成"]');
     expect(workflow).toContain("branches: [main]");
     expect(workflow).toContain("github.event.workflow_run.conclusion == 'success'");
+    expect(workflow).toContain("github.event.workflow_run.event == 'push'");
+    expect(workflow).toContain("github.event.workflow_run.head_branch == 'main'");
+    expect(workflow).toContain(
+      "github.event.workflow_run.head_repository.full_name == github.repository",
+    );
     expect(workflow).toContain("github.ref == 'refs/heads/main'");
     expect(workflow).not.toContain("inputs.ref");
     expect(workflow).toContain("HOOX_DEMO_IMAGE='$IMAGE_NAME@$IMAGE_DIGEST'");
@@ -22,6 +27,39 @@ describe("Demo 持续部署契约", () => {
     const actions = [...workflow.matchAll(/^\s*uses:\s*([^\s]+)$/gmu)].map((match) => match[1]);
     expect(actions.length).toBeGreaterThan(0);
     expect(actions.every((action) => /@[0-9a-f]{40}$/u.test(action ?? ""))).toBe(true);
+  });
+
+  it("在构建与远端操作前分别拒绝过期发布，并在失败后清理独立凭据", () => {
+    const workflow = source(".github/workflows/cd-demo.yml");
+    expect(workflow.match(/run: node scripts\/demo-release-gate\.mjs/gu)).toHaveLength(2);
+    expect(workflow).toContain("actions: read");
+    expect(workflow).not.toContain("packages: write");
+    expect(workflow).toContain("persist-credentials: false");
+    for (const name of ["初始化 Buildx", "登录 GHCR", "构建并推送 Demo 镜像"]) {
+      expect(workflow).toContain(
+        `name: ${name}\n        if: steps.revision.outputs.should_deploy == 'true'`,
+      );
+    }
+    for (const name of ["上传部署契约", "发布并验证"]) {
+      expect(workflow).toContain(
+        `name: ${name}\n        if: steps.preflight.outputs.should_deploy == 'true'`,
+      );
+    }
+    expect(workflow).toMatch(
+      /name: 配置 SSH\s+id: ssh\s+if: steps.preflight.outputs.should_deploy == 'true'/u,
+    );
+    expect(workflow).toContain("if: always() && steps.ssh.outcome == 'success'");
+    expect(workflow).toContain("DOCKER_CONFIG='$REMOTE_DOCKER_CONFIG' docker login");
+    expect(workflow).toContain("DOCKER_CONFIG='$REMOTE_DOCKER_CONFIG' HOOX_DEMO_ROOT");
+    expect(workflow).toContain('{"auths":{"ghcr.io":{}}}');
+    expect(workflow).toContain('DOCKER_CONFIG="$config_dir" docker logout ghcr.io');
+    expect(workflow).toContain('rm -f "$config_dir/config.json"');
+    expect(workflow).toContain("trap 'rm -f \"$HOME/.ssh/hoox-demo\"' EXIT");
+    expect(workflow).toContain("ConnectTimeout 15");
+    expect(workflow).toContain("ServerAliveCountMax 3");
+    expect(
+      workflow.match(/--connect-timeout 10 --max-time 20 --retry-max-time 120/gu),
+    ).toHaveLength(3);
   });
 
   it("Demo 镜像构建用户端、后台端及其统一 API", () => {
@@ -55,7 +93,7 @@ describe("Demo 持续部署契约", () => {
 
     const ci = source(".github/workflows/ci.yml");
     expect(ci).toMatch(
-      /verify:\s+name: 工程基线校验\s+runs-on: ubuntu-latest\s+timeout-minutes: 2[0-9]/u,
+      /engineering-checks:\s+name: 工程构建与测试\s+runs-on: ubuntu-latest\s+timeout-minutes: 2[0-9]/u,
     );
     expect(ci.match(/DATABASE_ADMIN_CONTROL_ROLE: m4_ci_admin_control/gu)).toHaveLength(2);
     expect(ci).toContain(

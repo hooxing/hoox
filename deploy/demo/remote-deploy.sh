@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -Eeuo pipefail
+set -euo pipefail
 
 root="${HOOX_DEMO_ROOT:-/opt/hoox-demo}"
 release_id="${RELEASE_ID:?RELEASE_ID is required}"
@@ -86,7 +86,12 @@ wait_http() {
 
 rollback() {
   local status=$?
-  trap - ERR
+  trap - EXIT
+  if (( status == 0 )); then
+    return 0
+  fi
+  # 回滚中的清理失败不能遮蔽原始错误，也不能阻止继续恢复上一版本。
+  set +e
   if [[ "$nginx_configuration_touched" == "true" ]]; then
     if [[ -n "$nginx_previous_configuration" && -f "$nginx_previous_configuration" ]]; then
       sudo install -m 0644 "$nginx_previous_configuration" /etc/nginx/conf.d/hoox-demo.conf
@@ -125,7 +130,8 @@ rollback() {
   echo "Hoox Demo 发布失败，已尝试恢复上一应用版本；数据库迁移不会自动回退" >&2
   exit "$status"
 }
-trap rollback ERR
+# EXIT 覆盖显式 exit，且只在主 shell 回滚，避免命令替换中的失败重复恢复。
+trap rollback EXIT
 
 compose pull api web admin-control admin-web trajectory scheduler worker migrate
 compose up -d --force-recreate postgres minio
@@ -143,7 +149,8 @@ DEV_ADMIN_CONTROL_TOKEN="$(sed -n 's/^DEV_ADMIN_CONTROL_TOKEN=//p' "$shared_dir/
 # shellcheck disable=SC1091
 source "$shared_dir/demo-account.env"
 set +a
-if [[ ! "$DEV_ADMIN_CONTROL_TOKEN" =~ ^[A-Za-z0-9._~-]{32,512}$ ]]; then
+if [[ ! "$DEV_ADMIN_CONTROL_TOKEN" =~ ^[A-Za-z0-9._~-]+$ ]] ||
+  (( ${#DEV_ADMIN_CONTROL_TOKEN} < 32 || ${#DEV_ADMIN_CONTROL_TOKEN} > 512 )); then
   echo "Demo Admin Control Token 格式无效" >&2
   exit 1
 fi
@@ -192,7 +199,7 @@ PY
 cookie_jar="$(mktemp)"
 account_response="$(mktemp)"
 temporary_files+=("$cookie_jar" "$account_response")
-signup_status="$(curl --silent --show-error --output "$account_response" --write-out '%{http_code}' \
+signup_status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output "$account_response" --write-out '%{http_code}' \
   --header 'Content-Type: application/json' \
   --header "Origin: https://$domain" \
   --header "Referer: https://$domain/" \
@@ -223,7 +230,7 @@ print(json.dumps({
 }, ensure_ascii=False))
 PY
 )"
-signin_status="$(curl --silent --show-error --output "$account_response" --write-out '%{http_code}' \
+signin_status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output "$account_response" --write-out '%{http_code}' \
   --header 'Content-Type: application/json' \
   --header "Origin: https://$domain" \
   --header "Referer: https://$domain/" \
@@ -234,7 +241,7 @@ if [[ "$signin_status" != "200" ]]; then
   echo "Demo 账号登录初始化失败" >&2
   exit 1
 fi
-exchange_status="$(curl --silent --show-error --output "$account_response" --write-out '%{http_code}' \
+exchange_status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output "$account_response" --write-out '%{http_code}' \
   --request POST --header "Origin: https://$domain" --cookie "$cookie_jar" \
   "https://$domain/api/v1/auth/exchange")"
 if [[ "$exchange_status" != "200" ]]; then
@@ -293,13 +300,13 @@ wait_http "http://127.0.0.1:3003/ready"
 wait_http "https://$domain/api/ready"
 wait_http "https://$domain/admin/"
 wait_http "https://$domain/trajectory/"
-unauthorized_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+unauthorized_status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output /dev/null --write-out '%{http_code}' \
   "https://$domain/v1/admin/control/overview")"
 if [[ "$unauthorized_status" != "401" ]]; then
   echo "Demo 后台 API 未拒绝无会话请求" >&2
   exit 1
 fi
-trajectory_unauthorized_status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+trajectory_unauthorized_status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output /dev/null --write-out '%{http_code}' \
   "https://$domain/trajectory/api/threads")"
 if [[ "$trajectory_unauthorized_status" != "401" ]]; then
   echo "Demo 轨迹 API 未拒绝无会话请求" >&2
@@ -312,7 +319,7 @@ ln -sfn "$release_dir" "$root/current"
 if (( ${#temporary_files[@]} > 0 )); then
   rm -f -- "${temporary_files[@]}"
 fi
-trap - ERR
+trap - EXIT
 
 find "$root/releases" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
   | sort -nr \

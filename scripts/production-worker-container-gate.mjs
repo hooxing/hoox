@@ -2,9 +2,11 @@ import { spawnSync } from "node:child_process";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
+import { acquireProductionGateImage } from "./production-container-image.mjs";
 
 const baseDigest = "sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d";
 const runtimeSandboxArguments = Object.freeze([
+  "--pull=never",
   "--read-only",
   "--tmpfs",
   "/tmp:rw,nosuid,nodev,noexec,mode=1777",
@@ -35,6 +37,7 @@ function runDocker(arguments_, options = {}) {
 const canaryPath = join(process.cwd(), ".env.production-worker-gate-canary");
 const secretCanary = "production-worker-secret-canary-must-not-appear";
 let imageId;
+let removeImage = false;
 let primaryFailure;
 let cleanupFailure;
 let createdCanary = false;
@@ -51,16 +54,11 @@ try {
   );
   if (contextProbe.status === 0) throw new Error("DOCKER_BUILD_CONTEXT_CONTAINS_PRODUCTION_CANARY");
 
-  const buildOutput = runDocker(
-    ["build", "--quiet", "--file", "Dockerfile.production-worker-gate", "."],
-    {
-      capture: true,
-    },
-  );
-  // Windows Docker daemon 偶发把已关闭 named pipe 的诊断写到 stderr；build 已成功时仍从 stdout 中的
-  // digest 精确取镜像 ID，不能把该宿主诊断误判为镜像构建失败。
-  imageId = /(?:^|\r?\n)(sha256:[a-f0-9]{64})(?:\r?\n|$)/u.exec(buildOutput)?.[1];
-  if (imageId === undefined) throw new Error("DOCKER_IMAGE_ID_INVALID");
+  ({ imageId, removeImage } = acquireProductionGateImage(
+    runDocker,
+    "Dockerfile.production-worker-gate",
+    process.env.PRODUCTION_GATE_IMAGE,
+  ));
   const configuredUser = runDocker(["image", "inspect", "--format", "{{.Config.User}}", imageId], {
     capture: true,
   });
@@ -314,12 +312,16 @@ try {
   primaryFailure = error;
 } finally {
   // 初始即存在的同名文件属于用户；拒绝执行时绝不能顺手删除它。
-  if (createdCanary) rmSync(canaryPath, { force: true });
-  if (imageId !== undefined) {
+  try {
+    if (createdCanary) rmSync(canaryPath, { force: true });
+  } catch (error) {
+    cleanupFailure = error;
+  }
+  if (removeImage && imageId !== undefined) {
     try {
       runDocker(["image", "rm", imageId]);
     } catch (error) {
-      cleanupFailure = error;
+      cleanupFailure ??= error;
     }
   }
 }

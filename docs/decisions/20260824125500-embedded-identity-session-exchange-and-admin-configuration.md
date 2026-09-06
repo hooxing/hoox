@@ -2,7 +2,9 @@
 
 ## 状态
 
-已接受，2026-08-24。完成 [ADR-20260824115000](20260824115000-embedded-better-auth-identity-core.md) 预留的数据库、管理面、账号映射和生产接线；替代 [ADR-20260816165004](20260816165004-development-local-account-authentication.md) 关于用户可见邮箱注册登录入口的结论，固定开发身份仍保留。
+部分已替代，2026-08-24 接受。完成 [ADR-20260824115000](20260824115000-embedded-better-auth-identity-core.md) 预留的数据库、管理面、账号映射和生产接线；替代 [ADR-20260816165004](20260816165004-development-local-account-authentication.md) 关于用户可见邮箱注册登录入口的结论，固定开发身份仍保留。
+
+- 被部分替代：[ADR-20260906195752](20260906195752-admin-task-oriented-configuration-and-publication.md)。第 5 条的人工变更原因要求由服务端自动审计替代，页面不展示版本；内部期望版本、幂等、加密、账号映射、会话交换与动态加载继续有效。
 
 ## 背景
 

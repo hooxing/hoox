@@ -27,6 +27,7 @@ export * from "./pg-run-cancellation.js";
 export type { PgClaimedRunDispatch } from "./pg-run-dispatch.js";
 export { PgRunDispatchCreation, PgRunDispatchOutbox } from "./pg-run-dispatch.js";
 export * from "./pg-run-worker-state.js";
+export * from "./pg-run-compaction-settings.js";
 export * from "./pg-runtime-rollout.js";
 export * from "./pg-agent-control.js";
 export * from "./pg-sandbox-cleanup-consumer.js";

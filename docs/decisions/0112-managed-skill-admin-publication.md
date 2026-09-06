@@ -1,10 +1,12 @@
 # ADR-0112：受管 Skill 管理发布与独立权限面
 
-- 状态：已接受
+- 状态：部分已替代（管理员直接发布流程；剩余有效范围见替代关系）
 - 日期：2026-08-05
 - 决策者：Runtime 维护者
 - 关联任务/PR：管理员发布 Skill 到技能中心
 - 替代关系：补充 ADR-0094、ADR-0095 与 [ADR-0107（公开 Skill 市场）](0107-public-skill-market-virtual-filesystem.md)
+
+- 被部分替代：[ADR-20260906195752](20260906195752-admin-task-oriented-configuration-and-publication.md)。管理员直发、自动版本及原因输入由新决策替代；专用发布权限、包校验、幂等/CAS、内容寻址和历史审核证据继续有效。
 
 ## 背景
 

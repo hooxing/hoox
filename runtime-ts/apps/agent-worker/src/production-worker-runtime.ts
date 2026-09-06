@@ -789,10 +789,7 @@ export class AgentWorkerPollingLoop {
     string,
     { assignment: PgClaimedWorkerTenantAssignment; promise: Promise<void> }
   >();
-  private concurrencySettings: WorkerRunConcurrencySettings = Object.freeze({
-    workerMaxConcurrentRuns: DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
-    userMaxConcurrentRunsPerTenant: DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
-  });
+  private readonly concurrencySettings: WorkerRunConcurrencySettings;
 
   constructor(
     private readonly tenantAssignments: TenantAssignmentQueue,
@@ -803,11 +800,27 @@ export class AgentWorkerPollingLoop {
       readonly pollIntervalMs: number;
       readonly tenantAssignmentLeaseMs: number;
       readonly dispatchLeaseMs: number;
-      readonly resolveConcurrencySettings?: () => Promise<WorkerRunConcurrencySettings>;
+      readonly concurrencySettings?: WorkerRunConcurrencySettings;
       /** 有界后台维护成功后释放 Tenant 租约；失败或容量不足时保留租约，过期后重试。 */
       readonly maintenance?: (tenantId: string) => Promise<unknown>;
     },
-  ) {}
+  ) {
+    const settings = options.concurrencySettings ?? {
+      workerMaxConcurrentRuns: DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
+      userMaxConcurrentRunsPerTenant: DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
+    };
+    if (
+      !Number.isSafeInteger(settings.workerMaxConcurrentRuns) ||
+      settings.workerMaxConcurrentRuns < 1 ||
+      settings.workerMaxConcurrentRuns > 100 ||
+      !Number.isSafeInteger(settings.userMaxConcurrentRunsPerTenant) ||
+      settings.userMaxConcurrentRunsPerTenant < 1 ||
+      settings.userMaxConcurrentRunsPerTenant > 100
+    ) {
+      throw new TypeError("Worker 部署并发配置无效");
+    }
+    this.concurrencySettings = Object.freeze({ ...settings });
+  }
 
   start(): void {
     if (this.closed || this.started) throw new Error("Agent Worker polling loop 状态无效");
@@ -873,28 +886,7 @@ export class AgentWorkerPollingLoop {
     }, delay);
   }
 
-  private async refreshConcurrencySettings(): Promise<void> {
-    if (this.options.resolveConcurrencySettings === undefined) return;
-    try {
-      const settings = await this.options.resolveConcurrencySettings();
-      if (
-        !Number.isSafeInteger(settings.workerMaxConcurrentRuns) ||
-        settings.workerMaxConcurrentRuns < 1 ||
-        settings.workerMaxConcurrentRuns > 100 ||
-        !Number.isSafeInteger(settings.userMaxConcurrentRunsPerTenant) ||
-        settings.userMaxConcurrentRunsPerTenant < 1 ||
-        settings.userMaxConcurrentRunsPerTenant > 100
-      ) {
-        return;
-      }
-      this.concurrencySettings = Object.freeze({ ...settings });
-    } catch {
-      // 控制面短暂不可用时保留最近一次有效值；初始值始终是安全的内置默认值。
-    }
-  }
-
   private async tick(): Promise<boolean> {
-    await this.refreshConcurrencySettings();
     if (this.closed) return false;
     const hasRunCapacity = this.executions.size < this.concurrencySettings.workerMaxConcurrentRuns;
     if (!hasRunCapacity && (this.options.maintenance === undefined || this.maintenances.size >= 4))

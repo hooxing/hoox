@@ -75,6 +75,7 @@ interface FileRow extends QueryResultRow {
 interface SubmissionSnapshot {
   readonly row: SubmissionRow;
   readonly files: readonly FileRow[];
+  readonly currentPublished?: Readonly<{ submissionId: string; versionToken: number }>;
 }
 
 type PublicationOperation = "create" | "submit" | "approve" | "reject" | "publish" | "revoke";
@@ -123,12 +124,18 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
         query.actorUserId,
         async (client) => {
           await requireRole(client, query.actorUserId, ["publisher", "reviewer", "admin"]);
+          // 最新上传必须与完整历史比较后再分页，旧包不能占用页面或因游标截断重新出现。
           const rows = await client.query<SubmissionRow>(
             `SELECT ${submissionProjection}
-               FROM skill_publication_submissions
+               FROM skill_publication_submissions submission
               WHERE ($1::text IS NULL OR submission_id>$1)
+                AND (NOT $3::boolean OR NOT EXISTS (
+                  SELECT 1 FROM skill_publication_submissions newer
+                   WHERE newer.canonical_key=submission.canonical_key
+                     AND (newer.created_at,newer.submission_id)>(submission.created_at,submission.submission_id)
+                ))
               ORDER BY submission_id ASC LIMIT $2`,
-            [query.afterSubmissionId ?? null, query.limit + 1],
+            [query.afterSubmissionId ?? null, query.limit + 1, query.latestOnly],
           );
           return readSnapshots(client, rows.rows);
         },
@@ -283,7 +290,8 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
     return this.transition(command, {
       operation: "publish",
       roles: ["admin"],
-      allowedStatuses: ["approved"],
+      // 管理员发布已通过包校验的内容；兼容历史待审和已批准数据，不制造审核事实。
+      allowedStatuses: ["draft", "submitted", "approved"],
       afterStatus: "published",
       recommended: command.recommended,
     });
@@ -298,7 +306,7 @@ export class PgSkillPublicationRepository implements SkillPublicationPort {
       roles: ["admin"],
       allowedStatuses: ["published"],
       afterStatus: "revoked",
-      revokeReason: command.reason,
+      ...(command.reason === undefined ? {} : { revokeReason: command.reason }),
     });
   }
 
@@ -544,8 +552,7 @@ async function readSnapshot(
   );
   const row = result.rows[0];
   if (row === undefined) return undefined;
-  const files = await readFiles(client, [submissionId]);
-  return Object.freeze({ row, files: Object.freeze(files) });
+  return (await readSnapshots(client, [row]))[0];
 }
 
 async function readSnapshots(
@@ -557,11 +564,44 @@ async function readSnapshots(
     client,
     rows.map((row) => row.submission_id),
   );
-  return rows.map((row) =>
-    Object.freeze({
+  const currentPublications = await readCurrentPublications(
+    client,
+    rows.map((row) => row.canonical_key),
+  );
+  return rows.map((row) => {
+    const currentPublished = currentPublications.get(row.canonical_key);
+    return Object.freeze({
       row,
       files: Object.freeze(files.filter((file) => file.submission_id === row.submission_id)),
-    }),
+      ...(currentPublished === undefined ? {} : { currentPublished }),
+    });
+  });
+}
+
+async function readCurrentPublications(client: PoolClient, canonicalKeys: readonly string[]) {
+  // 只有目录实际推荐且仍可用的包才是下架目标，不能把最近一次上传当成生效事实。
+  const result = await client.query<{
+    canonical_key: string;
+    submission_id: string;
+    version_token: string;
+  }>(
+    `SELECT skill.canonical_key,publication.submission_id,publication.version_token::text
+       FROM skills skill
+       JOIN skill_publication_submissions publication
+         ON publication.published_skill_id=skill.id AND publication.skill_version=skill.recommended_version
+       JOIN skill_versions version ON version.skill_id=skill.id AND version.version=skill.recommended_version
+      WHERE skill.canonical_key=ANY($1::text[]) AND skill.status='active'
+        AND version.status='available' AND publication.status='published'`,
+    [canonicalKeys],
+  );
+  return new Map(
+    result.rows.map((row) => [
+      row.canonical_key,
+      Object.freeze({
+        submissionId: row.submission_id,
+        versionToken: safeInteger(row.version_token, "当前发布包状态无效"),
+      }),
+    ]),
   );
 }
 
@@ -857,6 +897,9 @@ function mapSubmission(
     fileCount: row.file_count,
     totalBytes: safeInteger(row.total_bytes, "Skill 发布总大小无效"),
     versionToken: safeInteger(row.version_token, "Skill 发布版本令牌无效"),
+    ...(snapshot.currentPublished === undefined
+      ? {}
+      : { currentPublished: snapshot.currentPublished }),
     createdBy: userId(row.created_by),
     ...(row.reviewed_by === null ? {} : { reviewedBy: userId(row.reviewed_by) }),
     ...(row.rejection_reason === null ? {} : { rejectionReason: row.rejection_reason }),
@@ -901,13 +944,15 @@ function snapshotListInput(input: Parameters<SkillPublicationPort["list"]>[0]) {
     !Number.isSafeInteger(input.limit) ||
     input.limit < 1 ||
     input.limit > 100 ||
-    (input.afterSubmissionId !== undefined && !identifierPattern.test(input.afterSubmissionId))
+    (input.afterSubmissionId !== undefined && !identifierPattern.test(input.afterSubmissionId)) ||
+    (input.latestOnly !== undefined && typeof input.latestOnly !== "boolean")
   ) {
     throw new TypeError("Skill 发布列表参数无效");
   }
   return Object.freeze({
     actorUserId,
     limit: input.limit,
+    latestOnly: input.latestOnly ?? false,
     ...(input.afterSubmissionId === undefined
       ? {}
       : { afterSubmissionId: input.afterSubmissionId }),
@@ -992,8 +1037,13 @@ function snapshotPublishInput(input: Parameters<SkillPublicationPort["publish"]>
 }
 
 function snapshotRevokeInput(input: Parameters<SkillPublicationPort["revoke"]>[0]) {
-  if (!validReason(input.reason)) throw new TypeError("Skill 发布撤销原因无效");
-  return Object.freeze({ ...snapshotTransitionInput(input), reason: input.reason });
+  if (input.reason !== undefined && !validReason(input.reason)) {
+    throw new TypeError("Skill 发布下架原因无效");
+  }
+  return Object.freeze({
+    ...snapshotTransitionInput(input),
+    ...(input.reason === undefined ? {} : { reason: input.reason }),
+  });
 }
 
 function assertCommandIdentity(submissionId: string, key: string, digest: string): void {

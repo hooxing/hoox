@@ -86,10 +86,10 @@ function fixture(input: {
       pollIntervalMs: 10,
       tenantAssignmentLeaseMs: 100,
       dispatchLeaseMs: 30_000,
-      resolveConcurrencySettings: async () => ({
+      concurrencySettings: {
         workerMaxConcurrentRuns: 1,
         userMaxConcurrentRunsPerTenant: 1,
-      }),
+      },
       maintenance: input.maintenance,
     },
   );

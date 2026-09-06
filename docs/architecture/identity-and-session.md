@@ -25,7 +25,7 @@ Better Auth 与 Hoox API 同进程运行，不需要独立身份服务。它负�
 4. 已有邮箱账号绑定 Better Auth User ID 并保留原 User、个人 Tenant、Membership 和数据；新身份原子创建这些事实。
 5. API 返回 Hoox 不透明会话令牌。后续业务请求继续使用 `Authorization: Bearer <Hoox session>`，并由 Membership 与 RLS 重建 TenantScope。
 
-同一 Hoox 账号不能绑定两个不同 Better Auth User ID。账号被禁用时，两类 Session 都被删除；旧令牌不能继续访问业务数据。
+同一 Hoox 账号不能绑定两个不同 Better Auth User ID。账号被禁用时，两类 Session 都被删除；旧令牌不能继续访问业务数据。管理台停用账号只要求一次会话撤销后果确认，恢复账号直接执行；恢复后用户必须重新登录，旧会话不会恢复。操作不要求人工原因，服务端继续记录审计。
 
 ## 可配置登录方式
 
@@ -48,10 +48,12 @@ Hoox 只开放 Email OTP 插件的邮箱验证发送和校验入口，不开放�
 
 `BETTER_AUTH_SECRET` 是部署级根秘密，API 与 Admin Control 必须使用相同值且至少 32 字节。它同时用于 Better Auth 会话签名和身份配置秘密加密，不能通过管理界面修改、不能进入 Git，也不能跨环境复用。
 
-身份配置使用版本号、期望版本、幂等键和审计原因写入。SMTP 密码、Provider Secret 与短信 Webhook Secret 以 AES-256-GCM 密文持久化；OAuth Token 使用 Better Auth 的加密能力。管理 API 和页面只显示这些秘密是否已配置，留空保存表示保留现值。配置按版本动态加载，保存后不需要重启 API。
+身份配置通过内部期望版本与幂等键防止并发覆盖，操作自动记录操作者与审计说明；页面不展示版本或要求填写变更原因。旧 API 调用方可继续提供原因。SMTP 密码、Provider Secret 与短信 Webhook Secret 以 AES-256-GCM 密文持久化；OAuth Token 使用 Better Auth 的加密能力。管理 API 和页面只显示这些秘密是否已配置，留空保存表示保留现值。配置按版本动态加载，保存后不需要重启 API。
 
 SMTP 投递不可达、认证失败、TLS 失败或收件方拒收时，本次验证码发送失败且不会降级签发 Hoox Session。Better Auth 可能已经在等待 SMTP 期间持久化用户和密码凭据；Web 在注册请求失败后只使用同一邮箱与原密码探测一次待验证状态，确认凭据有效且邮箱未验证时直接进入验证码页面，不再把可恢复的部分成功显示为普通注册失败。管理员修正配置后，用户可在倒计时结束后重新发送。
 
 ## 兼容边界
 
 production Web 使用内嵌身份入口，旧 `/v1/auth/register` 和 `/v1/auth/login` 不对外注册。development 可以显式保留旧本地账号端点和固定开发身份，用于夹具与兼容测试。生产 JWT 验证仍作为非浏览器调用方的后备，但不会绕过 Hoox 的 User、Membership 和 RLS 授权。
+
+管理交互与内部持久事实的分工见[后台任务操作决策](../decisions/20260906195752-admin-task-oriented-configuration-and-publication.md)。

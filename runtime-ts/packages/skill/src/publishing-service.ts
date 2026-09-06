@@ -26,17 +26,24 @@ export class SkillPublicationService {
     readonly userId: UserId;
     readonly limit?: number;
     readonly cursor?: string;
+    readonly latestOnly?: boolean;
   }): Promise<SkillPublicationPage> {
     await this.requireRole(input.userId, ["publisher", "reviewer", "admin"]);
     const limit = input.limit ?? 30;
     assertVersionToken(limit - 1, "发布列表页大小无效");
     skillInvariant(limit >= 1 && limit <= 100, "INVALID_REQUEST", "发布列表页大小无效");
     if (input.cursor !== undefined) assertIdentifier(input.cursor, "发布列表游标无效");
+    skillInvariant(
+      input.latestOnly === undefined || typeof input.latestOnly === "boolean",
+      "INVALID_REQUEST",
+      "Skill 列表模式无效",
+    );
     return callPort(() =>
       this.port.list({
         actorUserId: input.userId,
         limit,
         ...(input.cursor === undefined ? {} : { afterSubmissionId: input.cursor }),
+        ...(input.latestOnly === undefined ? {} : { latestOnly: input.latestOnly }),
       }),
     );
   }
@@ -52,7 +59,7 @@ export class SkillPublicationService {
   async create(input: {
     readonly userId: UserId;
     readonly submissionId: string;
-    readonly metadata: SkillPublicationMetadata;
+    readonly metadata: Omit<SkillPublicationMetadata, "version"> & { readonly version?: string };
     readonly files: readonly SkillPublicationUploadFile[];
     readonly idempotencyKey: string;
   }): Promise<SkillPublicationSubmission> {
@@ -60,7 +67,13 @@ export class SkillPublicationService {
     assertIdentifier(input.submissionId, "发布申请 ID 无效");
     assertIdempotencyKey(input.idempotencyKey);
     const packageInput = validateSkillPublicationPackage({
-      metadata: input.metadata,
+      metadata: {
+        ...input.metadata,
+        // 自动版本绑定请求身份，网络重试和不同接入进程不会生成另一个不可变包。
+        version:
+          input.metadata.version ??
+          `upload-${digest("version", [input.userId, input.idempotencyKey]).slice(0, 32)}`,
+      },
       files: input.files,
     });
     const result = await callPort(() =>
@@ -119,12 +132,15 @@ export class SkillPublicationService {
   }
 
   async revoke(
-    input: TransitionRequest & { readonly reason: string },
+    input: TransitionRequest & { readonly reason?: string },
   ): Promise<SkillPublicationSubmission> {
     await this.requireRole(input.userId, ["admin"]);
-    assertReason(input.reason, "撤销必须填写原因");
-    return this.transition(input, "revoke", [input.reason], (request) =>
-      this.port.revoke({ ...request, reason: input.reason }),
+    if (input.reason !== undefined) assertReason(input.reason, "下架原因无效");
+    return this.transition(input, "revoke", [input.reason ?? null], (request) =>
+      this.port.revoke({
+        ...request,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+      }),
     );
   }
 

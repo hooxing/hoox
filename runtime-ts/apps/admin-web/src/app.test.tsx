@@ -177,61 +177,29 @@ describe("技能发布管理界面", () => {
     );
   });
 
-  it("草稿提交时携带详情中的 expectedVersionToken", async () => {
-    const item = submission("draft");
-    const submitSubmission = vi.fn(async () => ({
-      ...item,
-      status: "submitted" as const,
-      versionToken: 8,
-    }));
-    const api = apiFixture(item, { submitSubmission });
-    const container = mount(api);
-    await settle();
+  it.each(["draft", "submitted", "approved"] as const)(
+    "%s 可直接发布，自动推荐且不要求审核或版本选择",
+    async (status) => {
+      const item = submission(status);
+      const api = apiFixture(item);
+      const container = mount(api);
+      await settle();
+      expect(container.textContent).not.toContain("版本令牌");
+      expect(container.textContent).not.toContain("提交审核");
+      expect(container.textContent).not.toContain("批准申请");
+      expect(container.querySelector('.action-panel input[type="checkbox"]')).toBeNull();
+      await act(async () => button(container, "发布技能").click());
+      expect(api.publishSubmission).toHaveBeenCalledWith(item.submissionId, {
+        expectedVersionToken: 7,
+        recommended: true,
+      });
+      expect(api.submitSubmission).not.toHaveBeenCalled();
+      expect(api.reviewSubmission).not.toHaveBeenCalled();
+      expect(container.textContent).toContain("已发布");
+    },
+  );
 
-    await act(async () => button(container, "提交审核").click());
-    expect(submitSubmission).toHaveBeenCalledWith(item.submissionId, {
-      expectedVersionToken: 7,
-    });
-    expect(container.textContent).toContain("待审核");
-  });
-
-  it("审核、发布和撤销操作提供原因与推荐版本参数", async () => {
-    const submitted = submission("submitted");
-    const reviewSubmission = vi.fn(async () => ({
-      ...submitted,
-      status: "rejected" as const,
-      rejectionReason: "缺少权限说明",
-      versionToken: 8,
-    }));
-    const reviewApi = apiFixture(submitted, { reviewSubmission });
-    const reviewContainer = mount(reviewApi);
-    await settle();
-    const rejection = reviewContainer.querySelector<HTMLTextAreaElement>(
-      '.review-actions textarea[maxlength="2048"]',
-    );
-    if (rejection === null) throw new Error("未找到驳回原因输入框");
-    act(() => changeControl(rejection, "  缺少权限说明  "));
-    await act(async () => button(reviewContainer, "驳回申请").click());
-    expect(reviewSubmission).toHaveBeenCalledWith(submitted.submissionId, {
-      expectedVersionToken: 7,
-      decision: "reject",
-      reason: "缺少权限说明",
-    });
-
-    const approved = submission("approved");
-    const publishSubmission = vi.fn(async () => ({
-      ...approved,
-      status: "published" as const,
-      versionToken: 8,
-    }));
-    const publishContainer = mount(apiFixture(approved, { publishSubmission }));
-    await settle();
-    await act(async () => button(publishContainer, "发布技能").click());
-    expect(publishSubmission).toHaveBeenCalledWith(approved.submissionId, {
-      expectedVersionToken: 7,
-      recommended: true,
-    });
-
+  it("下架只要求一次后果确认，不要求输入原因", async () => {
     const published = submission("published");
     const revokeSubmission = vi.fn(async () => ({
       ...published,
@@ -240,17 +208,120 @@ describe("技能发布管理界面", () => {
     }));
     const revokeContainer = mount(apiFixture(published, { revokeSubmission }));
     await settle();
-    const revokeReason = revokeContainer.querySelector<HTMLTextAreaElement>(
-      '.review-actions textarea[maxlength="2048"]',
+    expect(revokeContainer.querySelector(".review-actions textarea")).toBeNull();
+    await act(async () => button(revokeContainer, "下架技能").click());
+    expect(revokeSubmission).not.toHaveBeenCalled();
+    expect(revokeContainer.querySelector('[aria-label="下架确认"]')?.textContent).toContain(
+      "已安装的此包也无法继续执行",
     );
-    if (revokeReason === null) throw new Error("未找到撤销原因输入框");
-    act(() => changeControl(revokeReason, "上游已撤回"));
-    await act(async () => button(revokeContainer, "撤销发布").click());
+    await act(async () => button(revokeContainer, "取消").click());
+    expect(revokeSubmission).not.toHaveBeenCalled();
+    await act(async () => button(revokeContainer, "下架技能").click());
+    await act(async () => button(revokeContainer, "确认下架").click());
     expect(revokeSubmission).toHaveBeenCalledWith(published.submissionId, {
       expectedVersionToken: 7,
-      reason: "上游已撤回",
     });
   });
+
+  it.each(["draft", "submitted", "revoked"] as const)(
+    "最新上传为%s时仍可下架真正生效包，保持上传状态",
+    async (status) => {
+      const active = submission("published");
+      const upload = {
+        ...submission(status),
+        submissionId: "submission_new_upload",
+        versionToken: 3,
+        currentPublished: { submissionId: active.submissionId, versionToken: active.versionToken },
+      };
+      const revokeSubmission = vi.fn(async () => ({
+        ...active,
+        status: "revoked" as const,
+        versionToken: 8,
+      }));
+      const api = apiFixture(upload, { revokeSubmission });
+      const container = mount(api);
+      await settle();
+      expect(
+        container.querySelector('[aria-label="发布申请列表"]')?.querySelectorAll(".submission"),
+      ).toHaveLength(1);
+      await act(async () => button(container, "下架当前已发布内容").click());
+      expect(revokeSubmission).not.toHaveBeenCalled();
+      await act(async () => button(container, "确认下架").click());
+      expect(revokeSubmission).toHaveBeenCalledExactlyOnceWith(active.submissionId, {
+        expectedVersionToken: 7,
+      });
+      expect(api.publishSubmission).not.toHaveBeenCalled();
+      expect(container.querySelector(".detail-header .status")?.textContent).toBe(
+        status === "revoked" ? "已下架" : "待发布",
+      );
+      expect(container.textContent).not.toContain("下架当前已发布内容");
+      expect(
+        container.querySelector('[aria-label="发布申请列表"]')?.querySelectorAll(".submission"),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.each(["published", "rejected", "revoked"] as const)(
+    "%s 可上传替换包，沿用技能身份且不手填版本",
+    async (status) => {
+      const item = submission(status);
+      const uploaded = {
+        ...item,
+        submissionId: "submission_uploaded_update",
+        status: "draft" as const,
+      };
+      const api = apiFixture(item, {
+        createSubmission: vi.fn(async () => uploaded),
+        getSubmission: vi.fn(async (id) => (id === uploaded.submissionId ? uploaded : item)),
+      });
+      const container = mount(api);
+      await settle();
+      await act(async () => button(container, "上传更新").click());
+      const form = container.querySelector<HTMLFormElement>(".create-form");
+      if (form === null) throw new Error("未找到上传表单");
+      expect(container.querySelector<HTMLDetailsElement>(".create-panel")?.open).toBe(true);
+      const canonicalKey = form.querySelector<HTMLInputElement>(
+        'input[pattern="[a-z0-9][a-z0-9._-]{0,127}"]',
+      );
+      expect(canonicalKey?.value).toBe(item.canonicalKey);
+      expect(canonicalKey?.readOnly).toBe(true);
+      expect(
+        [...form.querySelectorAll("label")].some((label) => label.textContent?.trim() === "版本"),
+      ).toBe(false);
+      const markdown =
+        "---\nname: different-key\npublisher: Someone Else\nversion: 1.2.3\ndescription: 更新后的技能说明\n---\n# Updated";
+      const file = new File([markdown], "SKILL.md", { type: "text/markdown" });
+      Object.defineProperty(file, "arrayBuffer", {
+        value: async () => new TextEncoder().encode(markdown).buffer,
+      });
+      const input = form.querySelector<HTMLInputElement>('input[type="file"]');
+      if (input === null) throw new Error("未找到文件选择器");
+      Object.defineProperty(input, "files", { configurable: true, value: [file] });
+      act(() => input.dispatchEvent(new Event("change", { bubbles: true })));
+      await settle();
+      await act(async () =>
+        form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })),
+      );
+      await settle();
+      expect(api.createSubmission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          canonicalKey: item.canonicalKey,
+          publisher: item.publisher,
+          description: "更新后的技能说明",
+        }),
+      );
+      expect(api.createSubmission).toHaveBeenCalledWith(
+        expect.not.objectContaining({ version: expect.anything() }),
+      );
+      expect(api.publishSubmission).not.toHaveBeenCalled();
+      expect(
+        container.querySelector('[aria-label="发布申请列表"]')?.querySelectorAll(".submission"),
+      ).toHaveLength(1);
+      expect(container.querySelector(".detail-panel")?.textContent).toContain(
+        "当前上传内容尚未发布",
+      );
+    },
+  );
 
   it("选择标准 Skill 目录后从 SKILL.md 自动预填元数据", async () => {
     const listed = submission("draft");
@@ -304,15 +375,11 @@ license: Proprietary. LICENSE.txt has complete terms
     const publisherControl = [...container.querySelectorAll("label")]
       .find((candidate) => candidate.textContent?.includes("发布者"))
       ?.querySelector<HTMLInputElement>("input");
-    const versionControl = [...container.querySelectorAll("label")]
-      .find((candidate) => candidate.textContent?.includes("版本"))
-      ?.querySelector<HTMLInputElement>("input");
-    if (publisherControl == null || versionControl == null) {
-      throw new Error("未找到发布者或版本输入框");
+    if (publisherControl == null) {
+      throw new Error("未找到发布者输入框");
     }
     act(() => {
       changeControl(publisherControl, "Cube");
-      changeControl(versionControl, "1.0.0");
     });
     const form = container.querySelector<HTMLFormElement>(".create-form");
     if (form === null) throw new Error("未找到创建表单");
@@ -323,6 +390,7 @@ license: Proprietary. LICENSE.txt has complete terms
     expect(createSubmission).toHaveBeenCalledWith(
       expect.not.objectContaining({
         compatibility: expect.anything(),
+        version: expect.anything(),
         sourceUrl: expect.anything(),
       }),
     );
@@ -340,7 +408,6 @@ license: Proprietary. LICENSE.txt has complete terms
       规范键: "new-skill",
       显示名称: "新技能",
       发布者: "Cube",
-      版本: "2.0.0",
       描述: "新的技能说明",
       上游仓库地址: "https://example.com/new-skill",
       "上游提交/版本": "v2.0.0",
@@ -388,7 +455,6 @@ license: Proprietary. LICENSE.txt has complete terms
       canonicalKey: "new-skill",
       displayName: "新技能",
       publisher: "Cube",
-      version: "2.0.0",
       description: "新的技能说明",
       sourceUrl: "https://example.com/new-skill",
       sourceRevision: "v2.0.0",

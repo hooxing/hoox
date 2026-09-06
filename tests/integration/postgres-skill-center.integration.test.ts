@@ -1,11 +1,17 @@
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { tenantId, userId } from "@hoox/domain";
+import { SkillPublicationService } from "../../runtime-ts/packages/skill/src/publishing-service.js";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { publishDevelopmentCsvPdfSkill } from "../../runtime-ts/packages/persistence/src/development-csv-pdf-publisher.js";
 import { migrateUp } from "../../runtime-ts/packages/persistence/src/migrations.js";
 import { PgSkillCenterRepository } from "../../runtime-ts/packages/persistence/src/pg-skill-center.js";
 import { PgSkillFilesystemCatalog } from "../../runtime-ts/packages/persistence/src/pg-skill-filesystem.js";
+import {
+  PgSkillPublicationAuthorization,
+  PgSkillPublicationRepository,
+} from "../../runtime-ts/packages/persistence/src/pg-skill-publication.js";
+import { S3StableSkillPublisher } from "../../runtime-ts/packages/persistence/src/skill-publication-object-store.js";
 import {
   createRunSkillSnapshot,
   readRunSkillSnapshot,
@@ -224,10 +230,7 @@ afterAll(async () => {
 
 describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
   it("固定 CSV 转 PDF publisher 将旧品牌目录迁移到 Hoox，并保持新版本幂等", async () => {
-    await migrator.query(
-      `INSERT INTO skills(id,canonical_key,publisher,display_name,recommended_version,status)
-       VALUES ('skill_cube_csv_to_pdf','csv-to-pdf','AISay','CSV 转 PDF',NULL,'active')`,
-    );
+    await migrator.query("UPDATE skills SET publisher='AISay' WHERE id='skill_cube_csv_to_pdf'");
 
     const first = await publishDevelopmentCsvPdfSkill({
       sourceRoot: csvPdfSourceRoot,
@@ -486,5 +489,212 @@ describe("Skill Center PostgreSQL 安装与用户 RLS", () => {
         objectStorage: csvPdfObjectStorage,
       }),
     ).rejects.toThrow("CSV 转 PDF Skill 目录键已被其他发布者占用");
+  });
+
+  it("管理员直接发布和上传更新保留精确安装引用、幂等审计与下架约束", async () => {
+    await admin.query(
+      `INSERT INTO "${schema}".platform_skill_operators(user_id,role,status) VALUES ($1,'admin','active')`,
+      [scopeA.userId],
+    );
+    const publisherUrl = new URL(runtimeDatabaseUrl);
+    publisherUrl.username = skillPublisherRole;
+    publisherUrl.password = skillPublisherPassword;
+    const publisherPool = createPostgresPool({
+      connectionString: publisherUrl.toString(),
+      schema,
+      maxConnections: 2,
+    });
+    const objects = new S3StableSkillPublisher(csvPdfObjectStorage);
+    const publications = new SkillPublicationService(
+      new PgSkillPublicationAuthorization(publisherPool),
+      new PgSkillPublicationRepository(publisherPool, objects),
+    );
+    try {
+      const canonicalKey = `direct-publish-${unique.replaceAll("_", "-")}`;
+      const create = {
+        userId: scopeA.userId,
+        submissionId: `direct_first_${unique}`,
+        metadata: {
+          canonicalKey,
+          displayName: "直接发布技能",
+          publisher: "Hoox",
+          description: "集成测试技能",
+          compatibility: "Agent Skills 标准格式",
+          sourceUrl: "",
+          sourceRevision: "",
+          licenseSpdx: "MIT",
+        },
+        files: [
+          {
+            path: "SKILL.md",
+            mediaType: "text/markdown",
+            contentBase64: Buffer.from("# Direct\n").toString("base64"),
+          },
+        ],
+        idempotencyKey: "skill-direct-first-create-0001",
+      };
+      const draft = await publications.create(create);
+      const replay = await publications.create({
+        ...create,
+        submissionId: `direct_retry_${unique}`,
+      });
+      expect(replay.submissionId).toBe(draft.submissionId);
+      expect(replay.version).toBe(draft.version);
+      const publish = {
+        userId: scopeA.userId,
+        submissionId: draft.submissionId,
+        expectedVersionToken: 0,
+        recommended: true,
+        idempotencyKey: "skill-direct-first-publish-0001",
+      };
+      const first = await publications.publish(publish);
+      expect(first).toMatchObject({ status: "published", versionToken: 1 });
+      expect(first.reviewedBy).toBeUndefined();
+      await expect(publications.publish(publish)).resolves.toMatchObject({ versionToken: 1 });
+      await expect(
+        publications.publish({ ...publish, idempotencyKey: "skill-direct-first-stale-0001" }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+
+      expect(
+        await repository.install({
+          context: scopeA,
+          canonicalKey,
+          versionSelector: first.version,
+          invocationName: "direct-publish",
+          idempotencyKey: "skill-direct-install-0001",
+          requestDigest: "7".repeat(64),
+        }),
+      ).toMatchObject({ outcome: "installed", installation: { skillVersion: first.version } });
+      const update = await publications.create({
+        ...create,
+        submissionId: `direct_second_${unique}`,
+        idempotencyKey: "skill-direct-second-create-0001",
+        files: [
+          {
+            ...create.files[0],
+            path: "SKILL.md",
+            mediaType: "text/markdown",
+            contentBase64: Buffer.from("# Updated\n").toString("base64"),
+          },
+        ],
+      });
+      expect(update.version).not.toBe(first.version);
+      const other = await publications.create({
+        ...create,
+        submissionId: `direct_middle_${unique}`,
+        metadata: { ...create.metadata, canonicalKey: `other-${canonicalKey}` },
+        idempotencyKey: "skill-direct-other-create-0001",
+      });
+      const page = await publications.list({ userId: scopeA.userId, latestOnly: true, limit: 1 });
+      expect(page.items.map((item) => item.submissionId)).toEqual([other.submissionId]);
+      expect(page.nextSubmissionId).toBe(other.submissionId);
+      if (page.nextSubmissionId === undefined) throw new Error("当前技能列表缺少下一页游标");
+      const next = await publications.list({
+        userId: scopeA.userId,
+        latestOnly: true,
+        limit: 1,
+        cursor: page.nextSubmissionId,
+      });
+      expect(next.items.map((item) => item.submissionId)).toEqual([update.submissionId]);
+      expect(next.nextSubmissionId).toBeUndefined();
+      expect(next.items[0]?.status).toBe("draft");
+      expect(next.items[0]?.currentPublished).toEqual({
+        submissionId: first.submissionId,
+        versionToken: 1,
+      });
+      expect((await publications.get(scopeA.userId, update.submissionId)).currentPublished).toEqual(
+        { submissionId: first.submissionId, versionToken: 1 },
+      );
+      expect((await publications.list({ userId: scopeA.userId })).items).toHaveLength(3);
+      const beforePublish = await admin.query(
+        `SELECT recommended_version FROM "${schema}".skills WHERE canonical_key=$1`,
+        [canonicalKey],
+      );
+      expect(beforePublish.rows[0]?.recommended_version).toBe(first.version);
+      await publications.revoke({
+        userId: scopeA.userId,
+        submissionId: first.submissionId,
+        expectedVersionToken: 1,
+        idempotencyKey: "skill-direct-first-revoke-before-update",
+      });
+      const pendingAfterRevoke = (
+        await publications.list({ userId: scopeA.userId, latestOnly: true })
+      ).items.find((item) => item.submissionId === update.submissionId);
+      expect(pendingAfterRevoke).toMatchObject({ status: "draft", versionToken: 0 });
+      expect(pendingAfterRevoke?.currentPublished).toBeUndefined();
+      expect(
+        (await publications.get(scopeA.userId, update.submissionId)).currentPublished,
+      ).toBeUndefined();
+      await expect(
+        withTenantTransaction(runtime, scopeA, (client) =>
+          createRunSkillSnapshot(client, {
+            tenantId: scopeA.tenantId,
+            runId: `revoked-direct-${unique}`,
+            userId: scopeA.userId,
+            explicitInvocation: { invocationName: "direct-publish", args: "检查" },
+          }),
+        ),
+      ).rejects.toThrow("SKILL_NOT_AVAILABLE");
+      await publications.publish({
+        ...publish,
+        submissionId: update.submissionId,
+        idempotencyKey: "skill-direct-second-publish-0001",
+      });
+      const catalog = await admin.query(
+        `SELECT recommended_version FROM "${schema}".skills WHERE canonical_key=$1`,
+        [canonicalKey],
+      );
+      expect(catalog.rows[0]?.recommended_version).toBe(update.version);
+      const installed = await admin.query(
+        `SELECT skill_version FROM "${schema}".tenant_skill_installations WHERE tenant_id=$1 AND invocation_name='direct-publish'`,
+        [scopeA.tenantId],
+      );
+      expect(installed.rows[0]?.skill_version).toBe(first.version);
+      await publications.revoke({
+        userId: scopeA.userId,
+        submissionId: update.submissionId,
+        expectedVersionToken: 1,
+        idempotencyKey: "skill-direct-second-revoke-0001",
+      });
+      await expect(
+        publications.publish({
+          ...publish,
+          submissionId: update.submissionId,
+          expectedVersionToken: 2,
+          idempotencyKey: "skill-direct-no-resurrection-0001",
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+      const audit = await admin.query(
+        `SELECT operation,reason FROM "${schema}".skill_publication_audits WHERE submission_id=$1 ORDER BY version_token`,
+        [update.submissionId],
+      );
+      expect(audit.rows).toEqual([
+        { operation: "create", reason: null },
+        { operation: "publish", reason: null },
+        { operation: "revoke", reason: null },
+      ]);
+      const conflictingPublisher = await publications.create({
+        ...create,
+        submissionId: `direct_z_conflict_${unique}`,
+        metadata: { ...create.metadata, publisher: "Other Publisher" },
+        idempotencyKey: "skill-direct-other-publisher-0001",
+      });
+      const current = await publications.list({ userId: scopeA.userId, latestOnly: true });
+      expect(
+        current.items
+          .filter((item) => item.canonicalKey === canonicalKey)
+          .map((item) => item.submissionId),
+      ).toEqual([conflictingPublisher.submissionId]);
+      await expect(
+        publications.publish({
+          ...publish,
+          submissionId: conflictingPublisher.submissionId,
+          idempotencyKey: "skill-direct-publisher-conflict-0001",
+        }),
+      ).rejects.toMatchObject({ code: "CONFLICT" });
+    } finally {
+      objects.close();
+      await publisherPool.end();
+    }
   });
 });

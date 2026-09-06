@@ -1,7 +1,3 @@
-import type {
-  IdentityAdminConfigurationDto,
-  UpdateIdentityAdminConfigurationRequest,
-} from "@hoox/protocol";
 import {
   CheckCircleFilled,
   KeyOutlined,
@@ -11,7 +7,11 @@ import {
   SafetyCertificateOutlined,
   UserAddOutlined,
 } from "@ant-design/icons";
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import type {
+  IdentityAdminConfigurationDto,
+  UpdateIdentityAdminConfigurationRequest,
+} from "@hoox/protocol";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 const providerMetadata = Object.freeze({
   google: {
@@ -134,7 +134,6 @@ export function IdentityConfigurationPanel({
   const [smsWebhookUrl, setSmsWebhookUrl] = useState("");
   const [smsWebhookSecret, setSmsWebhookSecret] = useState("");
   const [providers, setProviders] = useState<readonly DraftProvider[]>([]);
-  const [reason, setReason] = useState("");
 
   useEffect(() => {
     if (value === undefined) return;
@@ -152,7 +151,6 @@ export function IdentityConfigurationPanel({
     setSmsWebhookUrl(value.smsWebhookUrl ?? "");
     setSmsWebhookSecret("");
     setProviders(providersFrom(value));
-    setReason("");
   }, [value]);
 
   if (value === undefined) {
@@ -193,7 +191,6 @@ export function IdentityConfigurationPanel({
       parsedSmtpPort > 65_535);
   const saveDisabled =
     busy ||
-    reason.trim() === "" ||
     emailDeliveryIncomplete ||
     (phoneEnabled && smsWebhookUrl.trim() === "") ||
     invalidEnabledProvider;
@@ -222,7 +219,6 @@ export function IdentityConfigurationPanel({
         clientId: clientId.trim(),
         ...(clientSecret.trim() === "" ? {} : { clientSecret: clientSecret.trim() }),
       })),
-      reason: reason.trim(),
     });
   };
 
@@ -236,7 +232,7 @@ export function IdentityConfigurationPanel({
           <div>
             <span className="eyebrow">Identity access</span>
             <h2>登录入口控制</h2>
-            <p>集中管理用户如何进入 Hoox。配置发布后立即生效，秘密材料只保存在服务端。</p>
+            <p>集中管理用户如何进入 Hoox。保存后立即生效，密钥只保存在服务端。</p>
           </div>
         </div>
         <fieldset className="identity-hero-status">
@@ -248,10 +244,6 @@ export function IdentityConfigurationPanel({
           <span>
             <strong>{registrationEnabled ? "开放" : "关闭"}</strong>
             <small>新用户注册</small>
-          </span>
-          <span>
-            <strong>v{value.versionToken}</strong>
-            <small>当前版本</small>
           </span>
         </fieldset>
       </section>
@@ -307,12 +299,12 @@ export function IdentityConfigurationPanel({
               <strong>发信邮箱与 SMTP</strong>
               <small>
                 {emailVerificationEnabled
-                  ? "邮箱验证已开启，发布前需要完整填写 SMTP 发信配置。"
+                  ? "开启邮箱验证需要完整的 SMTP 发信配置，保存后生效。"
                   : "可提前保存发信邮箱，开启邮箱验证码后生效。"}
               </small>
             </span>
-            <span className={`identity-state${emailVerificationEnabled ? " active" : ""}`}>
-              {emailVerificationEnabled ? "待发布" : "未启用"}
+            <span className={`identity-state${value.emailVerificationEnabled ? " active" : ""}`}>
+              {value.emailVerificationEnabled ? "已开启" : "已关闭"}
             </span>
           </div>
           <div className="identity-field-grid identity-mail-field-grid">
@@ -395,12 +387,12 @@ export function IdentityConfigurationPanel({
               <strong>短信服务连接</strong>
               <small>
                 {phoneEnabled
-                  ? "手机号登录已开启，发布前需要填写 Webhook。"
+                  ? "开启手机号登录需要填写短信 Webhook，保存后生效。"
                   : "可提前配置，开启手机号登录后生效。"}
               </small>
             </span>
-            <span className={`identity-state${phoneEnabled ? " active" : ""}`}>
-              {phoneEnabled ? "待发布" : "未启用"}
+            <span className={`identity-state${value.phoneEnabled ? " active" : ""}`}>
+              {value.phoneEnabled ? "已开启" : "已关闭"}
             </span>
           </div>
           <div className="identity-field-grid">
@@ -512,22 +504,12 @@ export function IdentityConfigurationPanel({
             <SafetyCertificateOutlined />
           </span>
           <span>
-            <strong id="identity-publish-title">发布身份策略</strong>
-            <small>每次修改都会记录管理员、原因和版本；冲突时需要刷新后重试。</small>
+            <strong id="identity-publish-title">保存登录设置</strong>
+            <small>保存后立即生效，操作记录会自动保存。</small>
           </span>
         </div>
-        <label>
-          <span>变更原因</span>
-          <input
-            required
-            maxLength={500}
-            value={reason}
-            placeholder="例如：为内部测试开放 GitHub 登录"
-            onChange={(event) => setReason(event.target.value)}
-          />
-        </label>
         <button type="submit" className="identity-publish-button" disabled={saveDisabled}>
-          {busy ? "正在发布…" : "保存并立即生效"}
+          {busy ? "正在保存…" : "保存并立即生效"}
         </button>
       </section>
     </form>

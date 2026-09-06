@@ -31,8 +31,10 @@ class FakeAuthorization implements SkillPublicationAuthorizationPort {
 
 class FakePublicationPort implements SkillPublicationPort {
   current: SkillPublicationSubmission | undefined;
+  lastList: Parameters<SkillPublicationPort["list"]>[0] | undefined;
 
-  async list() {
+  async list(input: Parameters<SkillPublicationPort["list"]>[0]) {
+    this.lastList = input;
     return { items: this.current === undefined ? [] : [this.current] };
   }
 
@@ -78,7 +80,7 @@ class FakePublicationPort implements SkillPublicationPort {
   }
 
   async publish(input: Parameters<SkillPublicationPort["publish"]>[0]) {
-    return this.move(input, "approved", "published");
+    return this.move(input, ["draft", "submitted", "approved"], "published");
   }
 
   async revoke(input: Parameters<SkillPublicationPort["revoke"]>[0]) {
@@ -87,7 +89,7 @@ class FakePublicationPort implements SkillPublicationPort {
 
   private async move(
     input: Parameters<SkillPublicationPort["submit"]>[0],
-    from: SkillPublicationStatus,
+    from: SkillPublicationStatus | readonly SkillPublicationStatus[],
     to: SkillPublicationStatus,
     changes: Partial<SkillPublicationSubmission> = {},
   ): Promise<SkillPublicationCommandResult> {
@@ -96,7 +98,9 @@ class FakePublicationPort implements SkillPublicationPort {
     if (current.versionToken !== input.expectedVersionToken) {
       return { outcome: "version_conflict" };
     }
-    if (current.status !== from) return { outcome: "state_conflict" };
+    if (!(Array.isArray(from) ? from.includes(current.status) : current.status === from)) {
+      return { outcome: "state_conflict" };
+    }
     this.current = Object.freeze({
       ...current,
       ...changes,
@@ -164,6 +168,28 @@ const createPayload = {
 };
 
 describe("Skill 管理 API", () => {
+  it("列表显式支持按技能聚合和游标，旧请求保持历史模式", async () => {
+    const { app, port } = fixture();
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/admin/skill-submissions?latestOnly=true&limit=2&cursor=submission_cursor",
+      headers: { authorization: "Bearer admin" },
+    });
+    expect(response.statusCode, response.body).toBe(200);
+    expect(port.lastList).toEqual({
+      actorUserId: administrator,
+      latestOnly: true,
+      limit: 2,
+      afterSubmissionId: "submission_cursor",
+    });
+    await app.inject({
+      method: "GET",
+      url: "/v1/admin/skill-submissions",
+      headers: { authorization: "Bearer admin" },
+    });
+    expect(port.lastList).not.toHaveProperty("latestOnly");
+    await app.close();
+  });
   it("对未认证主体隐藏管理能力", async () => {
     const { app } = fixture();
     const response = await app.inject({ method: "GET", url: "/v1/admin/skill-submissions" });
@@ -198,6 +224,7 @@ describe("Skill 管理 API", () => {
   it("本地上传由系统补充格式兼容性并允许不声明上游来源", async () => {
     const { app } = fixture();
     const {
+      version: _version,
       compatibility: _compatibility,
       sourceUrl: _sourceUrl,
       sourceRevision: _sourceRevision,
@@ -214,6 +241,7 @@ describe("Skill 管理 API", () => {
       payload: localPayload,
     });
     expect(response.statusCode, response.body).toBe(200);
+    expect(response.json().data.version).toMatch(/^upload-[0-9a-f]{32}$/u);
     expect(response.json().data).toMatchObject({
       compatibility: "Agent Skills 标准格式",
       sourceUrl: "",
@@ -222,7 +250,7 @@ describe("Skill 管理 API", () => {
     await app.close();
   });
 
-  it("完成发布者提交、审核者批准、管理员发布和撤销闭环", async () => {
+  it("兼容已有发布者提交、审核者批准、管理员发布闭环", async () => {
     const { app } = fixture();
     const created = await app.inject({
       method: "POST",
@@ -261,6 +289,47 @@ describe("Skill 管理 API", () => {
       headers: { authorization: "Bearer admin" },
     });
     expect(detail.json().data.status).toBe("revoked");
+    await app.close();
+  });
+
+  it("管理员上传后直接发布和无原因下架，普通发布者仍无权发布", async () => {
+    const { app } = fixture();
+    const { version: _version, ...payload } = createPayload;
+    const created = await app.inject({
+      method: "POST",
+      url: "/v1/admin/skill-submissions",
+      headers: { authorization: "Bearer admin", "idempotency-key": "skill-direct-create-0001" },
+      payload,
+    });
+    expect(created.statusCode).toBe(200);
+    expect(created.json().data.version).toMatch(/^upload-[0-9a-f]{32}$/u);
+    const forbidden = await app.inject({
+      method: "POST",
+      url: "/v1/admin/skill-submissions/submission_http_test/publish",
+      headers: {
+        authorization: "Bearer publisher",
+        "idempotency-key": "skill-direct-forbidden-0001",
+      },
+      payload: { expectedVersionToken: 0, recommended: true },
+    });
+    expect(forbidden.statusCode).toBe(404);
+    const published = await app.inject({
+      method: "POST",
+      url: "/v1/admin/skill-submissions/submission_http_test/publish",
+      headers: { authorization: "Bearer admin", "idempotency-key": "skill-direct-publish-0001" },
+      payload: { expectedVersionToken: 0, recommended: true },
+    });
+    expect(published.statusCode, published.body).toBe(200);
+    expect(published.json().data).toMatchObject({ status: "published", versionToken: 1 });
+    expect(published.json().data).not.toHaveProperty("reviewedBy");
+    const revoked = await app.inject({
+      method: "POST",
+      url: "/v1/admin/skill-submissions/submission_http_test/revoke",
+      headers: { authorization: "Bearer admin", "idempotency-key": "skill-direct-revoke-0001" },
+      payload: { expectedVersionToken: 1 },
+    });
+    expect(revoked.statusCode, revoked.body).toBe(200);
+    expect(revoked.json().data.status).toBe("revoked");
     await app.close();
   });
 

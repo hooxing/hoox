@@ -41,16 +41,16 @@ import {
   migrateDown,
   migrateUp,
 } from "../../runtime-ts/packages/persistence/src/migrations.js";
+import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
+import {
+  PgAdminControlRepository,
+  PgRuntimeControlConfigurationRepository,
+} from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
 import {
   PgArchiveThreadCommand,
   PgCoreRepositories,
   PgRenamePersonalThreadCommand,
 } from "../../runtime-ts/packages/persistence/src/pg-core-repositories.js";
-import {
-  PgAdminControlRepository,
-  PgRuntimeControlConfigurationRepository,
-} from "../../runtime-ts/packages/persistence/src/pg-admin-control.js";
-import { ModelProviderCredentialCipher } from "../../runtime-ts/packages/persistence/src/model-provider-credential.js";
 import {
   createPostgresPool,
   type Pool,
@@ -576,11 +576,12 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           objectKey: "memory",
           revision: memoryDraft.revision,
           expectedVersionToken: memoryDraft.versionToken,
-          reason: "未探测时不得启用",
+          reason: "无需探测即可保存",
         }),
-      ).resolves.toEqual({ outcome: "conflict" });
+      ).resolves.toMatchObject({ outcome: "applied", value: { status: "active" } });
       const createModel = async (modelId: string, suffix: string) => {
-        const draft = await service.createModelDraft(context(`create-${suffix}`), {
+        const command = {
+          expectedGeneration: await repository.generation(firstRun.user.id),
           providerKey: "main",
           displayName: "主模型",
           protocol: "openai-compatible",
@@ -607,25 +608,15 @@ describe("PostgreSQL 迁移与强权限边界", () => {
               maxTokens: 4_096,
             },
           ],
-        });
-        const runtimeDraft = await withTenantTransaction(
-          runtimePool,
-          firstRun.scope,
-          async (client) =>
-            await client.query(
-              "SELECT 1 FROM admin_control_config_revisions WHERE configuration->>'defaultModelId'=$1",
-              [modelId],
-            ),
-        );
-        expect(runtimeDraft.rowCount).toBe(0);
-        return await service.publish(context(`publish-${suffix}`), {
-          kind: "model_provider",
-          objectKey: "main",
-          revision: draft.revision,
-          command: { expectedVersionToken: draft.versionToken, reason: `保存并使用 ${modelId}` },
-        });
+        } as const;
+        const saved = await service.saveModelConfiguration(context(`save-${suffix}`), command);
+        expect(saved.status).toBe("active");
+        expect(JSON.stringify(saved)).not.toContain("integration-model-api-key");
+        await expect(
+          service.saveModelConfiguration(context(`save-${suffix}`), command),
+        ).resolves.toEqual(saved);
+        return saved;
       };
-
       await createModel("model-a", "a");
       const runtimeConfigurations = new PgRuntimeControlConfigurationRepository(
         runtimePool,
@@ -655,6 +646,60 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       });
       expect(secondSnapshot?.model.configuration.defaultModelId).toBe("model-b");
       expect(secondSnapshot?.generation).toBeGreaterThan(firstSnapshot?.generation ?? 0);
+      const memoryCommand = {
+        ...memoryDraft.configuration,
+        enabled: false,
+        expectedGeneration: await repository.generation(firstRun.user.id),
+      };
+      const disabledMemory = await service.saveMemoryConfiguration(
+        context("disable-memory"),
+        memoryCommand,
+      );
+      expect(disabledMemory).toMatchObject({
+        status: "active",
+        probeStatus: "untested",
+        configuration: { enabled: false },
+      });
+      await expect(
+        service.saveMemoryConfiguration(context("disable-memory"), memoryCommand),
+      ).resolves.toEqual(disabledMemory);
+      const unchangedGeneration = await repository.generation(firstRun.user.id);
+      await service.saveMemoryConfiguration(context("save-unchanged-memory"), {
+        ...memoryCommand,
+        expectedGeneration: unchangedGeneration,
+      });
+      expect(await repository.generation(firstRun.user.id)).toBe(unchangedGeneration);
+
+      if (secondSnapshot === undefined) throw new Error("第二个运行快照未保存");
+      const { credentialConfigured: _credentialConfigured, ...configuration } =
+        secondSnapshot.model.configuration;
+      const concurrentCommand = {
+        ...configuration,
+        reuseCredentialFromRevision: secondSnapshot.model.revision,
+        expectedGeneration: unchangedGeneration,
+      };
+      const before = await repository.listModelProviders(firstRun.user.id);
+      const outcomes = await Promise.allSettled([
+        service.saveModelConfiguration(context("concurrent-a"), {
+          ...concurrentCommand,
+          displayName: "并发修改甲",
+        }),
+        service.saveModelConfiguration(context("concurrent-b"), {
+          ...concurrentCommand,
+          displayName: "并发修改乙",
+        }),
+      ]);
+      expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+      expect(outcomes.find((result) => result.status === "rejected")).toMatchObject({
+        reason: { code: "CONFLICT" },
+      });
+      expect(await repository.listModelProviders(firstRun.user.id)).toHaveLength(before.length + 1);
+      await expect(
+        runtimeConfigurations.resolveForRun({
+          tenantId: firstRun.scope.tenantId,
+          runId: firstRun.run.id,
+        }),
+      ).resolves.toEqual(firstSnapshot);
     } finally {
       await migratorPool.query(
         `DELETE FROM run_runtime_config_snapshots;
@@ -1474,10 +1519,12 @@ describe("PostgreSQL 迁移与强权限边界", () => {
     const unsafeParentRole = `it_unsafe_parent_${process.pid}`;
     const unsafeChildRole = `it_unsafe_child_${process.pid}`;
     const unsafeTableOwnerRole = `it_unsafe_table_${process.pid}`;
+    const unsafeSchemaOwnerRole = `it_unsafe_schema_${process.pid}`;
     await administrativePool.query(
       `CREATE ROLE "${unsafeParentRole}" NOLOGIN CREATEDB;
        CREATE ROLE "${unsafeChildRole}" NOLOGIN NOINHERIT;
        CREATE ROLE "${unsafeTableOwnerRole}" NOLOGIN;
+       CREATE ROLE "${unsafeSchemaOwnerRole}" NOLOGIN;
        GRANT "${unsafeParentRole}" TO "${unsafeChildRole}"`,
     );
     try {
@@ -1525,11 +1572,15 @@ describe("PostgreSQL 迁移与强权限边界", () => {
       }
 
       const ownerTarget = await createIsolatedMigrationTarget("schema_owner");
+      const ownedSchema = `${ownerTarget.context.schema}_owned`;
       try {
+        await administrativePool.query(
+          `CREATE SCHEMA "${ownedSchema}" AUTHORIZATION "${unsafeSchemaOwnerRole}"`,
+        );
         await expect(
           migrateUp(ownerTarget.pool, {
             ...ownerTarget.context,
-            runtimeRole: ownerTarget.context.migratorRole,
+            runtimeRole: unsafeSchemaOwnerRole,
           }),
         ).rejects.toMatchObject({ code: "CONSTRAINT_VIOLATION" });
         expect(
@@ -1540,14 +1591,19 @@ describe("PostgreSQL 迁移与强权限边界", () => {
           ).rows[0]?.name,
         ).toBeNull();
       } finally {
-        await ownerTarget.close();
+        try {
+          await administrativePool.query(`DROP SCHEMA IF EXISTS "${ownedSchema}"`);
+        } finally {
+          await ownerTarget.close();
+        }
       }
     } finally {
       await administrativePool.query(
         `REVOKE "${unsafeParentRole}" FROM "${unsafeChildRole}";
          DROP ROLE "${unsafeChildRole}";
          DROP ROLE "${unsafeParentRole}";
-         DROP ROLE "${unsafeTableOwnerRole}"`,
+         DROP ROLE "${unsafeTableOwnerRole}";
+         DROP ROLE "${unsafeSchemaOwnerRole}"`,
       );
     }
   });
@@ -2618,5 +2674,145 @@ describe("PostgreSQL Repository 与并发条件", () => {
     expect((await repositories.threads.get(fixture.scope, fixture.thread.id))?.entity.title).toBe(
       fixture.thread.title,
     );
+  });
+});
+
+describe("PostgreSQL Run 压缩参数快照", () => {
+  const deploymentSettings = {
+    softLimitPercent: 80,
+    targetPercent: 55,
+    recentUserTokens: 4096,
+    maxOutputTokens: 4096,
+    timeoutMs: 60_000,
+  };
+
+  it("无后台模型时并发首次解析只固化一个部署版本，跨租户不可见且 Runtime 不可改删", async () => {
+    const { PgRunCompactionSettingsRepository } = await import(
+      "../../runtime-ts/packages/persistence/src/pg-run-compaction-settings.js"
+    );
+    const first = await createFixture("compaction_snapshot_a");
+    const second = await createFixture("compaction_snapshot_b");
+    const input = { tenantId: first.scope.tenantId, runId: first.run.id, deploymentSettings };
+    const otherDeployment = { ...deploymentSettings, targetPercent: 60, maxOutputTokens: 2048 };
+    const results = await Promise.all([
+      new PgRunCompactionSettingsRepository(runtimePool).resolveForRun(input),
+      new PgRunCompactionSettingsRepository(runtimePool).resolveForRun({
+        ...input,
+        deploymentSettings: otherDeployment,
+      }),
+    ]);
+    expect(results[0]).toEqual(results[1]);
+    expect([deploymentSettings, otherDeployment]).toContainEqual(results[0]);
+    await expect(
+      new PgRunCompactionSettingsRepository(runtimePool).resolveForRun({
+        ...input,
+        deploymentSettings: { ...deploymentSettings, maxOutputTokens: 512 },
+      }),
+    ).resolves.toEqual(results[0]);
+    const invisible = await withTenantTransaction(runtimePool, second.scope, (client) =>
+      client.query("SELECT run_id FROM run_compaction_settings_snapshots WHERE run_id=$1", [
+        first.run.id,
+      ]),
+    );
+    expect(invisible.rows).toEqual([]);
+    await expect(
+      withTenantTransaction(runtimePool, second.scope, (client) =>
+        client.query(
+          `INSERT INTO run_compaction_settings_snapshots(
+             tenant_id,run_id,soft_limit_percent,target_percent,recent_user_tokens,max_output_tokens,timeout_ms
+           ) VALUES($1,$2,80,55,4096,4096,60000)`,
+          [first.scope.tenantId, first.run.id],
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "42501" });
+    for (const sql of [
+      "UPDATE run_compaction_settings_snapshots SET target_percent=50 WHERE run_id=$1",
+      "DELETE FROM run_compaction_settings_snapshots WHERE run_id=$1",
+    ]) {
+      await expect(
+        withTenantTransaction(runtimePool, first.scope, (client) =>
+          client.query(sql, [first.run.id]),
+        ),
+      ).rejects.toMatchObject({ code: "42501" });
+    }
+    await expect(
+      adminControlPool.query("SELECT run_id FROM run_compaction_settings_snapshots"),
+    ).rejects.toMatchObject({ code: "42501" });
+  });
+
+  it("升级恢复旧 Run 继承已固定的运行参数引用，新 Run 仍只使用部署值", async () => {
+    const { PgRunCompactionSettingsRepository } = await import(
+      "../../runtime-ts/packages/persistence/src/pg-run-compaction-settings.js"
+    );
+    const legacy = await createFixture("compaction_snapshot_legacy");
+    const fresh = await createFixture("compaction_snapshot_fresh");
+    const legacySettings = {
+      workerMaxConcurrentRuns: 20,
+      userMaxConcurrentRunsPerTenant: 2,
+      compactionSoftLimitPercent: 85,
+      compactionTargetPercent: 60,
+      compactionRecentUserTokens: 16_000,
+      compactionMaxOutputTokens: 2048,
+      compactionTimeoutMs: 30_000,
+    };
+    const legacyModel = {
+      providerKey: "compaction-legacy",
+      displayName: "历史压缩模型",
+      protocol: "openai-compatible",
+      baseUrl: "https://model.example.invalid/v1",
+      secretRef: "deployment:model",
+      defaultModelId: "legacy-model",
+      models: [
+        {
+          id: "legacy-model",
+          name: "历史模型",
+          enabled: true,
+          reasoning: false,
+          input: ["text"],
+          contextWindow: 128_000,
+          maxTokens: 8192,
+        },
+      ],
+    };
+    await migratorPool.query(
+      `INSERT INTO admin_control_config_revisions(object_kind,object_key,revision,configuration,configuration_digest,created_by)
+       VALUES('model_provider','compaction-legacy',100059,$1,$4,$3),
+             ('runtime_settings','global',100059,$2,$5,$3)`,
+      [
+        JSON.stringify(legacyModel),
+        JSON.stringify(legacySettings),
+        legacy.user.id,
+        "a".repeat(64),
+        "b".repeat(64),
+      ],
+    );
+    await migratorPool.query(
+      `INSERT INTO run_runtime_config_snapshots(
+         tenant_id,run_id,generation,model_object_key,model_revision,
+         runtime_settings_object_kind,runtime_settings_object_key,runtime_settings_revision
+       ) VALUES($1,$2,1,'compaction-legacy',100059,'runtime_settings','global',100059)`,
+      [legacy.scope.tenantId, legacy.run.id],
+    );
+    const repository = new PgRunCompactionSettingsRepository(runtimePool);
+    await expect(
+      repository.resolveForRun({
+        tenantId: legacy.scope.tenantId,
+        runId: legacy.run.id,
+        deploymentSettings,
+      }),
+    ).resolves.toEqual({
+      softLimitPercent: 85,
+      targetPercent: 60,
+      recentUserTokens: 16_000,
+      maxOutputTokens: 2048,
+      timeoutMs: 30_000,
+    });
+    await expect(
+      repository.resolveForRun({
+        tenantId: fresh.scope.tenantId,
+        runId: fresh.run.id,
+        deploymentSettings,
+      }),
+    ).resolves.toEqual(deploymentSettings);
   });
 });

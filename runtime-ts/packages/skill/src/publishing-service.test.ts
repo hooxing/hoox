@@ -61,8 +61,10 @@ class FakePort implements SkillPublicationPort {
   current = submission;
   lastCreate: Parameters<SkillPublicationPort["create"]>[0] | undefined;
   lastCommand: Parameters<SkillPublicationPort["submit"]>[0] | undefined;
+  lastList: Parameters<SkillPublicationPort["list"]>[0] | undefined;
 
-  async list() {
+  async list(input: Parameters<SkillPublicationPort["list"]>[0]) {
+    this.lastList = input;
     return { items: [this.current] };
   }
 
@@ -101,6 +103,24 @@ class FakePort implements SkillPublicationPort {
 }
 
 describe("管理员 Skill 发布领域服务", () => {
+  it("当前技能列表把按规范键聚合模式与游标传给持久化，旧调用仍保持完整历史", async () => {
+    const port = new FakePort();
+    const service = new SkillPublicationService(new FakeAuthorization(), port);
+    await service.list({
+      userId: administrator,
+      latestOnly: true,
+      limit: 2,
+      cursor: "submission_cursor",
+    });
+    expect(port.lastList).toEqual({
+      actorUserId: administrator,
+      latestOnly: true,
+      limit: 2,
+      afterSubmissionId: "submission_cursor",
+    });
+    await service.list({ userId: administrator });
+    expect(port.lastList).not.toHaveProperty("latestOnly");
+  });
   it("只有发布者或管理员可以创建，并把规范包摘要绑定到幂等请求", async () => {
     const port = new FakePort();
     const service = new SkillPublicationService(new FakeAuthorization(), port);
@@ -181,7 +201,7 @@ describe("管理员 Skill 发布领域服务", () => {
     ).resolves.toMatchObject({ submissionId: submission.submissionId });
   });
 
-  it("驳回与撤销必须填写原因，发布和撤销仅允许管理员", async () => {
+  it("历史驳回保留原因校验，发布和下架仅允许管理员", async () => {
     const service = new SkillPublicationService(new FakeAuthorization(), new FakePort());
     await expect(
       service.review({
@@ -210,6 +230,53 @@ describe("管理员 Skill 发布领域服务", () => {
         idempotencyKey: "skill-publish-revoke-0001",
       }),
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+  });
+
+  it("自动版本对幂等重试保持稳定，重新上传生成新的内部版本", async () => {
+    const port = new FakePort();
+    const service = new SkillPublicationService(new FakeAuthorization(), port);
+    const { version: _version, ...metadata } = submission;
+    const request = {
+      userId: administrator,
+      submissionId: "submission_auto_first",
+      metadata,
+      files: [
+        {
+          path: "SKILL.md",
+          mediaType: "text/markdown",
+          contentBase64: Buffer.from("# Review\n").toString("base64"),
+        },
+      ],
+      idempotencyKey: "skill-auto-version-0001",
+    };
+    await service.create(request);
+    const first = port.lastCreate;
+    expect(first?.package.metadata.version).toMatch(/^upload-[0-9a-f]{32}$/u);
+    await service.create({ ...request, submissionId: "submission_auto_retry" });
+    expect(port.lastCreate?.package.metadata.version).toBe(first?.package.metadata.version);
+    expect(port.lastCreate?.requestDigest).toBe(first?.requestDigest);
+    await service.create({ ...request, idempotencyKey: "skill-auto-version-0002" });
+    expect(port.lastCreate?.package.metadata.version).not.toBe(first?.package.metadata.version);
+  });
+
+  it("管理员下架不要求原因，仍拒绝发布者和过期乐观锁", async () => {
+    const port = new FakePort();
+    const service = new SkillPublicationService(new FakeAuthorization(), port);
+    const request = {
+      userId: administrator,
+      submissionId: submission.submissionId,
+      expectedVersionToken: 0,
+      idempotencyKey: "skill-revoke-no-reason-0001",
+    };
+    await expect(service.revoke(request)).resolves.toMatchObject({
+      submissionId: submission.submissionId,
+    });
+    expect(port.lastCommand).not.toHaveProperty("reason");
+    await expect(service.revoke({ ...request, userId: publisher })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    port.revoke = async () => ({ outcome: "version_conflict" });
+    await expect(service.revoke(request)).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
   it("动作摘要绑定审核原因和推荐版本选择", async () => {

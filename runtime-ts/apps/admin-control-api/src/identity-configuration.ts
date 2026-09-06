@@ -19,7 +19,7 @@ export interface IdentityAdminService {
   read(actorUserId: string): Promise<IdentityConfiguration>;
   update(
     context: IdentityAdminMutationContext,
-    input: EditableIdentityConfiguration & { readonly reason: string },
+    input: EditableIdentityConfiguration & { readonly reason?: string },
   ): Promise<IdentityConfiguration>;
 }
 
@@ -43,10 +43,10 @@ export function createIdentityAdminService(input: {
     },
     async update(
       context: IdentityAdminMutationContext,
-      command: EditableIdentityConfiguration & { readonly reason: string },
+      command: EditableIdentityConfiguration & { readonly reason?: string },
     ) {
       requireAdmin(await input.roles.resolveRole(context.actorUserId));
-      const reason = command.reason.trim();
+      const reason = (command.reason ?? "管理员保存登录设置").trim();
       if (reason.length === 0 || reason.length > 500)
         throw new TypeError("IDENTITY_REASON_INVALID");
       const current = await readPersisted(context.actorUserId);

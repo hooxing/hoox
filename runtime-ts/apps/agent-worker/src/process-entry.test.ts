@@ -125,6 +125,35 @@ describe("Agent Worker 进程入口", () => {
     ).toMatchObject({ sessionTtlSeconds: 1_800 });
   });
 
+  it("并发上限从部署配置解析并提供稳定默认值", () => {
+    expect(parseWorkerProcessEnvironment(productionEnvironment()).worker).toMatchObject({
+      maxConcurrentRuns: 20,
+      userMaxConcurrentRunsPerTenant: 2,
+    });
+    const source = {
+      ...productionEnvironment(),
+      AGENT_WORKER_MAX_CONCURRENT_RUNS: "12",
+      AGENT_WORKER_USER_MAX_CONCURRENT_RUNS_PER_TENANT: "3",
+    };
+    expect(
+      parseWorkerProcessEnvironment(selectWorkerProcessEnvironment(source)).worker,
+    ).toMatchObject({
+      maxConcurrentRuns: 12,
+      userMaxConcurrentRunsPerTenant: 3,
+    });
+  });
+
+  it.each(["0", "101", "1.5", "NaN"])("拒绝非法部署并发上限 %s", (value) => {
+    for (const key of [
+      "AGENT_WORKER_MAX_CONCURRENT_RUNS",
+      "AGENT_WORKER_USER_MAX_CONCURRENT_RUNS_PER_TENANT",
+    ]) {
+      expect(() =>
+        parseWorkerProcessEnvironment({ ...productionEnvironment(), [key]: value }),
+      ).toThrow(key);
+    }
+  });
+
   it("Thread Context flags 强制 read→shadow→write→serial，默认开启且阈值可配置", () => {
     expect(parseWorkerProcessEnvironment(productionEnvironment()).threadContext).toEqual({
       serialQueueV2Enabled: true,

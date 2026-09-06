@@ -83,17 +83,13 @@ Pi 和每个生产角色使用独立的 BuildKit GitHub Actions 缓存 scope，�
 
 ### 管理员 Skill 上架
 
-一般 Skill 不再通过修改代码或普通 Runtime API 上架。`admin-control-api` 与 `admin-web` 组成独立于普通 Runtime
-的后台管理面；统一 Admin API 同时装配模型、记忆、配置、统计与 Skill 路由，日常发布状态流为：
+一般 Skill 由 `admin-control-api` 与 `admin-web` 组成的后台管理面上架。管理员上传包，经确定性校验后预览，再直接发布。页面通过 `GET /v1/admin/skill-submissions?latestOnly=true` 展示每个 `canonicalKey` 的最新申请；服务端先按 `(created_at,submission_id)` 选出该技能最新上传，再按游标分页，publisher 不参与技能身份分组。省略 `latestOnly` 保留旧全记录列表。
 
-```text
-publisher 创建草稿并上传包 -> publisher 提交 -> reviewer 批准/驳回
--> admin 发布到技能中心 -> admin 必要时硬撤销
-```
+管理员可以直接发布 `draft`、`submitted`、`approved`，publisher/reviewer 不能发布。旧提交和复核接口保持兼容，原自审限制仍约束真实复核操作；直接发布不制造审核动作或审核者，已审核申请的证据保留。`rejected/revoked` 申请不原地恢复，管理员通过“上传更新”创建新申请；新包尚未发布时，原已发布目录和安装继续有效。
 
-发布者不能审核自己的申请；首次公开某个规范键时必须勾选“设为推荐版本”。驳回申请为终态，修订内容需要创建
-新的申请。每次写操作都有独立幂等键，状态推进还使用界面返回的版本令牌，409 表示页面状态已过期，应刷新后再
-决定操作，不能盲目重放成另一请求。
+创建请求可省略 `version`，服务端根据操作者与幂等键生成稳定内部标识；显式版本继续兼容旧调用方。页面不展示版本、令牌或推荐选择，发布自动设为推荐，新安装使用推荐包，已有安装仍固定精确版本。撤销确认说明该内容不能继续执行，当前推荐包撤销后停止新安装；原因可省略，审计仍记录真实操作者与状态变化。
+
+每次写请求继续使用独立幂等键，状态推进携带内部 `expectedVersionToken`。409 表示持久状态已改变，应显式刷新后再操作，不能悄悄更新并发检查值重放。迁移 `0060_skill_direct_publication` 放宽直发记录的审核者约束，仍保留 approved/rejected 的真实证据；存在无审核者的 published/revoked 记录时 down 拒绝回退，不得补造审核者。
 
 开发环境准备顺序如下：
 
@@ -140,7 +136,7 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
 
 ### 平台控制面
 
-模型、记忆、运行参数、聚合统计和 Skill 发布都由同一个 `admin-control-api` 进程提供。进程共用管理身份与监听端口，
+模型、记忆、身份、用户治理、聚合统计和 Skill 发布都由同一个 `admin-control-api` 进程提供。进程共用管理身份与监听端口，
 但内部继续创建 Admin Control 与 Skill Publisher 两个 PostgreSQL pool，后者还单独持有发布用 S3 凭据；合并的是
 进程和 HTTP 边界，不是数据库授权边界。
 
@@ -158,15 +154,13 @@ listener 与管理身份，但必须保留两套数据库连接池，Skill Publi
    继续验证完整配置结构，但必须先允许既有对象键进入受控投影，不能在脱敏前把整次概览读取变成服务端错误。
 3. 执行迁移与开发身份初始化后，由受控数据库运维事务向
    `platform_control_operators(user_id, role, status)` 写入 `viewer`、`operator` 或 `admin`。控制 API 不提供自助提权
-   路由；operator 可保存模型与记忆配置并执行测试，只有 admin 能启用模型配置、启用记忆配置或执行回滚。
-   模型配置可跳过测试直接启用；记忆 Provider 仍必须探测成功后才能启用，该门禁
-   由领域服务执行，不能依赖管理页面按钮。
+   路由。日常模型与记忆的一次保存生效均要求 admin；operator 仍可通过旧兼容接口创建草稿和测试。
+   模型与记忆的新保存接口和旧发布接口均不以连接测试为启用门禁；兼容探测接口仍可诊断连接，服务端授权与并发检查继续有效，不能以导航或按钮替代。
 
 模型配置以 Provider 为聚合根：一个 Provider revision 可以维护多个模型条目，并指定一个默认模型。管理 Web 左侧列出
 持久化 Provider，右侧用同一编辑器处理 Pi 与自定义 Provider；Pi 目录只填入初始模型能力，模型 ID、名称、图片输入、推理、
 上下文窗口和最大输出都可修改，也可手工添加目录外模型。页面只启用管理员选中的默认模型，其他条目保持停用，不暗中参与
-运行或测试。管理员可分别保存、向默认模型发送受限 `chat/completions` 文本测试、设为当前，或点击“保存并使用”；测试不依赖
-`/models`，也不是切换门禁。Worker 不会在运行时重新用 Pi 目录覆盖已保存数据。模型页面不展示 Revision 历史或变更原因；
+运行或测试。编辑器只提供“保存并使用”，由 `PUT /v1/admin/control/model-providers/current` 在同一事务中保存并启用；列表保留“使用”和“测试已保存配置”。测试向已保存的默认模型发送受限 `chat/completions` 文本请求，不依赖 `/models`，也不是切换门禁。能力字段位于高级设置，Worker 不会在运行时重新用 Pi 目录覆盖已保存数据。模型页面不展示 Revision 历史或变更原因；
 这些仍存在的服务端事实只用于持久化、审计与 Run 快照。后台不可用时仍可浏览 Pi 目录和编辑初始值，但这些内容没有保存、
 测试或生效。Worker 以 Run 固定 Revision 中的输入模态、上下文窗口和最大输出作为模型能力事实；模型家族 Profile
 只补充请求协议，不使用另一组硬编码能力值覆盖或拒绝已发布配置。
@@ -177,11 +171,13 @@ Worker 通过 `pi-adapter` 直接装配 `pi-ai` 的 `Models`、Provider 和内�
 
 成功 Run 的终态事务仍可登记记忆 Outbox。消费者按 Run 固定配置解析提供方，关闭时以 `skipped` 结束本地消费并释放 claim，保留已有 Provider 事件与提交时间，不伪造成功或计入失败。`skipped` 不参与后续领取、待处理统计和 Tenant 调度；维护成功后正常释放 Tenant 租约。升级必须先应用 0059 迁移，再启动新 Worker；已有积压等待租约到期后自动重领收尾，无需手工改状态。存在 `skipped` 时数据库 down 拒绝回退，应用回退可以保留扩展 schema。决策及兼容边界见[关闭记忆的消费终态](../decisions/20260906163952-disabled-memory-ingestion-terminal-state.md)。
 
-启用配置会递增全局 generation；Worker 首次处理 Run 时将模型、记忆与运行参数 revision 固化到
-`run_runtime_config_snapshots`，同一 Run 的重试和进程重启继续使用该版本及其托管密钥。没有已启用模型时回退部署时
-`MODEL_*` 配置。模型页面必须直接显示当前 Provider 与默认模型或部署回退，并标明只影响新 Run；Provider 密钥只显示配置状态，
-不显示值。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 只是部署级加密根，不是 Provider 调用密钥。数据库连接、角色、JWT、TLS、S3、Sandbox 和监听地址只在页面展示“已配置/需重新部署”，不存在通用 ENV
-写接口。完整边界见
+模型与记忆一次保存接口要求幂等键和 `expectedGeneration`，由服务端事务执行授权、generation 比较、不可变配置写入、active 切换及审计；失败不遗留待启用配置。页面保存失败保留输入与原并发检查值，冲突后由管理员显式刷新。记忆保存使用 `PUT /v1/admin/control/memory-providers/current`，必须先接入后台当前模型；表单带入当前值并按 `enabled` 显示开启或关闭，密钥仍只来自部署秘密。
+
+启用配置会递增全局 generation；首次建立托管模型/记忆快照的 Run 固定对应 revision 与密钥，重试不反查当前 active。没有已启用后台模型时回退部署 `MODEL_*` 配置，部署模型本身尚未持久快照化；切换托管模式前应排空这类在途 Run。独立压缩快照与旧 Run 继承边界见[Thread 连续上下文](../architecture/thread-continuity.md)。
+
+Worker 并发与五项上下文压缩数值参数由部署配置拥有，后台运行设置的创建/发布路由已撤销，仅保留历史读取。迁移 `0061_run_compaction_settings_snapshots` 以 Tenant/Run 复合键保存实际使用的五项压缩参数，Runtime 只有 SELECT/INSERT，管理角色无权读取；已有快照时拒绝 down。变量默认值、重启与预算裁剪规则见[配置参考](../reference/configuration.md)。
+
+数据库、角色、JWT、TLS、S3、Sandbox 和监听地址由部署文件管理，没有通用 ENV 写接口。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 只是部署级加密根，不是 Provider 调用密钥。完整边界见[后台任务操作决策](../decisions/20260906195752-admin-task-oriented-configuration-and-publication.md)、
 [模型供应商列表、编辑、测试与切换决策](../decisions/20260826115031-model-provider-list-edit-test-switch.md)、
 [模型配置保存即启用决策](../decisions/20260825180549-direct-model-configuration-activation.md)、
 [Provider 标识与启用门禁决策](../decisions/20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md)、
@@ -193,7 +189,7 @@ Worker 通过 `pi-adapter` 直接装配 `pi-ai` 的 `Models`、Provider 和内�
 [Pi 目录初始值决策](../decisions/20260820095113-pi-catalog-seeds-admin-model-metadata.md)。
 
 `admin-web` 保留 React 19 与 Vite，使用 Ant Design 统一控件和视觉，通过 React Router 暴露可复制的模块路径，并由
-TanStack Query 协调控制面读取、去重和失效。页面按工作台、运营、AI 能力和系统分组，操作审计拥有独立只读入口；
+TanStack Query 协调控制面读取、去重和失效。页面按工作台、运营、AI 能力和系统分组，运行配置不在导航中，旧 `/settings` 跳转身份设置。操作审计拥有独立只读入口，展示配置动作与操作者；身份和用户治理审计仍在各自事实表中，尚未汇总到该列表。
 现有类型化 API Client 仍是协议适配边界，浏览器路由、菜单可见性和 Query 缓存都不构成授权或审计事实。完整取舍见
 [后台管理 Web 外壳决策](../decisions/20260824115942-admin-web-routable-ant-design-shell.md)。
 

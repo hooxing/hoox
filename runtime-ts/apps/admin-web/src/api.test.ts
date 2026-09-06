@@ -50,6 +50,73 @@ function envelope(data: unknown): unknown {
 }
 
 describe("技能发布管理 API", () => {
+  it.each([
+    ["未声明可重试标志的503", () => response({}, 503)],
+    ["成功响应缺少数据", () => response({})],
+    ["成功响应不是JSON", () => new Response("invalid json", { status: 200 })],
+  ] as const)("自动版本上传遇到%s仍复用上传身份", async (_label, unknownResponse) => {
+    const item = submission();
+    const input: CreateSkillSubmissionRequest = {
+      canonicalKey: item.canonicalKey,
+      displayName: item.displayName,
+      publisher: item.publisher,
+      description: item.description,
+      licenseSpdx: item.licenseSpdx,
+      files: [{ path: "SKILL.md", mediaType: "text/markdown", contentBase64: "Iw==" }],
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(unknownResponse())
+      .mockResolvedValueOnce(response(envelope(item)))
+      .mockResolvedValueOnce(response(envelope(item)));
+    const createKey = vi
+      .fn()
+      .mockReturnValueOnce("auto-upload-key-1")
+      .mockReturnValueOnce("auto-upload-key-2");
+    const api = new SkillAdminApi(fetcher, "/v1/admin/skill-submissions", createKey);
+    await expect(api.createSubmission(input)).rejects.toMatchObject({ retryable: true });
+    await expect(api.createSubmission(input)).resolves.toEqual(item);
+    await api.createSubmission(input);
+    expect(
+      fetcher.mock.calls.map(([, init]) => new Headers(init?.headers).get("Idempotency-Key")),
+    ).toEqual(["auto-upload-key-1", "auto-upload-key-1", "auto-upload-key-2"]);
+    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).not.toHaveProperty("version");
+  });
+
+  it("上传明确失败后释放幂等键，改包内容使用新键", async () => {
+    const item = submission();
+    const input: CreateSkillSubmissionRequest = {
+      canonicalKey: item.canonicalKey,
+      displayName: item.displayName,
+      publisher: item.publisher,
+      description: item.description,
+      licenseSpdx: item.licenseSpdx,
+      files: [{ path: "SKILL.md", mediaType: "text/markdown", contentBase64: "Iw==" }],
+    };
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(response({ error: { retryable: false } }, 400))
+      .mockRejectedValueOnce(new TypeError("response lost"))
+      .mockResolvedValueOnce(response(envelope(item)));
+    let sequence = 0;
+    const api = new SkillAdminApi(
+      fetcher,
+      "/v1/admin/skill-submissions",
+      () => `upload-key-${++sequence}`,
+    );
+    await expect(api.createSubmission(input)).rejects.toMatchObject({
+      status: 400,
+      retryable: false,
+    });
+    await expect(api.createSubmission(input)).rejects.toMatchObject({ status: 0 });
+    await api.createSubmission({
+      ...input,
+      files: [{ path: "SKILL.md", mediaType: "text/markdown", contentBase64: "IyBTa2lsbA==" }],
+    });
+    expect(
+      fetcher.mock.calls.map(([, init]) => new Headers(init?.headers).get("Idempotency-Key")),
+    ).toEqual(["upload-key-1", "upload-key-2", "upload-key-3"]);
+  });
   it("使用同源默认路径读取列表和详情", async () => {
     const item = submission();
     const fetcher = vi
@@ -61,7 +128,9 @@ describe("技能发布管理 API", () => {
     await expect(api.listSubmissions()).resolves.toEqual({ items: [item] });
     await expect(api.getSubmission("submission/1")).resolves.toEqual(item);
 
-    expect(fetcher.mock.calls[0]?.[0]).toBe("/v1/admin/skill-submissions?limit=100");
+    expect(fetcher.mock.calls[0]?.[0]).toBe(
+      "/v1/admin/skill-submissions?limit=100&latestOnly=true",
+    );
     expect(fetcher.mock.calls[1]?.[0]).toBe("/v1/admin/skill-submissions/submission%2F1");
     const headers = new Headers(fetcher.mock.calls[0]?.[1]?.headers);
     expect(headers.has("Idempotency-Key")).toBe(false);

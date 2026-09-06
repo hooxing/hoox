@@ -304,6 +304,69 @@ async function idempotentMutation<T>(
   return result;
 }
 
+async function activateConfiguration(
+  client: PoolClient,
+  input: {
+    readonly actorUserId: string;
+    readonly kind: ControlObjectKind;
+    readonly objectKey: string;
+    readonly revision: number;
+    readonly reason: string;
+  },
+  currentGeneration: number,
+): Promise<void> {
+  const previous = await client.query<{ readonly object_key: string; readonly revision: string }>(
+    "SELECT object_key,revision::text FROM admin_control_active_configs WHERE object_kind=$1",
+    [input.kind],
+  );
+  const previousActive = previous.rows[0];
+  if (
+    previousActive?.object_key === input.objectKey &&
+    Number(previousActive.revision) === input.revision
+  )
+    return;
+  const generation = currentGeneration + 1;
+  const activatedBefore = await client.query(
+    "SELECT 1 FROM admin_control_activation_events WHERE object_kind=$1 AND object_key=$2 AND revision=$3 LIMIT 1",
+    [input.kind, input.objectKey, input.revision],
+  );
+  await client.query(
+    `INSERT INTO admin_control_active_configs(object_kind,object_key,revision,generation,activated_by,reason)
+     VALUES($1,$2,$3,$4,$5,$6)
+     ON CONFLICT(object_kind) DO UPDATE SET object_key=EXCLUDED.object_key,revision=EXCLUDED.revision,
+       generation=EXCLUDED.generation,activated_by=EXCLUDED.activated_by,
+       reason=EXCLUDED.reason,activated_at=clock_timestamp()`,
+    [input.kind, input.objectKey, input.revision, generation, input.actorUserId, input.reason],
+  );
+  await client.query(
+    `INSERT INTO admin_control_activation_events(generation,object_kind,object_key,revision,replaced_object_key,replaced_revision,actor_user_id,reason)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [
+      generation,
+      input.kind,
+      input.objectKey,
+      input.revision,
+      previousActive?.object_key ?? null,
+      previousActive?.revision ?? null,
+      input.actorUserId,
+      input.reason,
+    ],
+  );
+  await client.query(
+    "UPDATE admin_control_generation SET generation=$1,updated_at=clock_timestamp() WHERE singleton='global'",
+    [generation],
+  );
+  await recordAudit(client, {
+    actorUserId: input.actorUserId,
+    kind: input.kind,
+    key: input.objectKey,
+    revision: input.revision,
+    action: activatedBefore.rowCount === 0 ? "publish" : "rollback",
+    reason: input.reason,
+    outcome: "succeeded",
+  });
+}
+
 export class PgAdminControlRepository
   implements AdminControlRepository, AdminControlStatisticsPort
 {
@@ -358,6 +421,122 @@ export class PgAdminControlRepository
     return (await this.listRuntimeSettings(userId)).find(
       (revision) => revision.status === "active",
     );
+  }
+
+  async saveModelConfiguration(
+    input: Parameters<AdminControlRepository["saveModelConfiguration"]>[0],
+  ) {
+    return await this.saveProviderConfiguration<ModelProviderConfiguration>(
+      input,
+      "model_provider",
+    );
+  }
+
+  async saveMemoryConfiguration(
+    input: Parameters<AdminControlRepository["saveMemoryConfiguration"]>[0],
+  ) {
+    return await this.saveProviderConfiguration<MemoryProviderConfiguration>(
+      input,
+      "memory_provider",
+    );
+  }
+
+  private async saveProviderConfiguration<
+    T extends ModelProviderConfiguration | MemoryProviderConfiguration,
+  >(
+    input:
+      | Parameters<AdminControlRepository["saveModelConfiguration"]>[0]
+      | Parameters<AdminControlRepository["saveMemoryConfiguration"]>[0],
+    kind: "model_provider" | "memory_provider",
+  ): Promise<ControlMutationResult<ControlRevision<T>>> {
+    try {
+      return await withControlTransaction(this.pool, input.actorUserId, async (client) => {
+        const role = await client.query<{ readonly role: string }>(
+          "SELECT role FROM platform_control_operators WHERE user_id=$1 AND status='active'",
+          [input.actorUserId],
+        );
+        if (role.rows[0]?.role !== "admin") return { outcome: "not_authorized" };
+        return await idempotentMutation(client, input, async () => {
+          // 一次保存同时写入不可变配置与当前指针；旧页面的并发保存不能覆盖新决定。
+          const locked = await client.query<{ readonly generation: string }>(
+            "SELECT generation::text FROM admin_control_generation WHERE singleton='global' FOR UPDATE",
+          );
+          const generation = safeInteger(locked.rows[0]?.generation ?? "", "配置更新状态");
+          const { expectedGeneration, reason, ...command } = input.command;
+          if (generation !== expectedGeneration) return { outcome: "conflict" };
+          const key = command.providerKey;
+          await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [`${kind}:${key}`]);
+          let stored: object;
+          let configurationDigest: string;
+          if (kind === "model_provider") {
+            const { apiKey, reuseCredentialFromRevision, ...configuration } = command as Omit<
+              Parameters<AdminControlRepository["saveModelConfiguration"]>[0]["command"],
+              "expectedGeneration" | "reason"
+            >;
+            let credential: EncryptedModelProviderCredential | undefined;
+            if (apiKey !== undefined) {
+              credential = this.credentialCipher.encrypt(key, apiKey);
+            } else if (reuseCredentialFromRevision !== undefined) {
+              const source = await client.query<{ readonly configuration: unknown }>(
+                "SELECT configuration FROM admin_control_config_revisions WHERE object_kind='model_provider' AND object_key=$1 AND revision=$2",
+                [key, reuseCredentialFromRevision],
+              );
+              const raw = source.rows[0]?.configuration;
+              const candidate =
+                typeof raw === "object" && raw !== null
+                  ? (raw as Record<string, unknown>).credential
+                  : undefined;
+              if (isEncryptedModelProviderCredential(candidate)) credential = candidate;
+            }
+            if (credential === undefined) return { outcome: "conflict" };
+            stored = { ...configuration, credential };
+            configurationDigest = digestControlRequest({
+              configuration,
+              credentialFingerprint: credential.ciphertext,
+            });
+          } else {
+            // 当前运行模型是记忆快照的接入前置；不能保存后仍悄悄使用部署回退记忆。
+            if ((await activeConfiguration(client, "model_provider")) === undefined)
+              return { outcome: "conflict" };
+            stored = command;
+            configurationDigest = digestControlRequest(command);
+          }
+          const duplicate = await client.query<{ readonly revision: string }>(
+            "SELECT revision::text FROM admin_control_config_revisions WHERE object_kind=$1 AND object_key=$2 AND configuration_digest=$3",
+            [kind, key, configurationDigest],
+          );
+          let revision = duplicate.rows[0]?.revision;
+          if (revision === undefined) {
+            const next = await client.query<{ readonly revision: string }>(
+              "SELECT (COALESCE(max(revision),0)+1)::text AS revision FROM admin_control_config_revisions WHERE object_kind=$1 AND object_key=$2",
+              [kind, key],
+            );
+            revision = String(safeInteger(next.rows[0]?.revision ?? "", "配置快照", 1));
+            await client.query(
+              `INSERT INTO admin_control_config_revisions(object_kind,object_key,revision,configuration,configuration_digest,created_by)
+               VALUES($1,$2,$3,$4::jsonb,$5,$6)`,
+              [kind, key, revision, JSON.stringify(stored), configurationDigest, input.actorUserId],
+            );
+          }
+          await activateConfiguration(
+            client,
+            {
+              actorUserId: input.actorUserId,
+              kind,
+              objectKey: key,
+              revision: safeInteger(revision, "配置快照", 1),
+              reason,
+            },
+            generation,
+          );
+          const projected = await projectedRevision(client, kind, key, Number(revision));
+          if (projected === undefined) throw new Error("保存后的配置投影缺失");
+          return { outcome: "applied", value: mapRevision<T>(projected) };
+        });
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "保存并使用服务配置");
+    }
   }
 
   async createModelDraft(input: Parameters<AdminControlRepository["createModelDraft"]>[0]) {
@@ -588,82 +767,14 @@ export class PgAdminControlRepository
             if (safeInteger(current.version_token, "版本令牌", 1) !== input.expectedVersionToken) {
               return { outcome: "conflict" };
             }
-            if (input.kind === "memory_provider" && current.probe_status !== "healthy") {
-              // 模型配置保存后直接启用；只有记忆服务继续保留独立连接探测门禁。
-              return { outcome: "conflict" };
-            }
             if (!(await publishPairIsCompatible(client, input.kind, current))) {
               return { outcome: "conflict" };
             }
-            const previous = await client.query<{
-              readonly object_key: string;
-              readonly revision: string;
-            }>(
-              `SELECT object_key,revision::text FROM admin_control_active_configs
-                WHERE object_kind=$1`,
-              [input.kind],
+            await activateConfiguration(
+              client,
+              input,
+              safeInteger(generationResult.rows[0]?.generation ?? "", "控制面 Generation"),
             );
-            const previousActive = previous.rows[0];
-            if (
-              previousActive?.object_key === input.objectKey &&
-              safeInteger(previousActive.revision, "当前 active Revision", 1) === input.revision
-            ) {
-              return { outcome: "conflict" };
-            }
-            const generation =
-              safeInteger(generationResult.rows[0]?.generation ?? "", "控制面 Generation") + 1;
-            const activatedBefore = await client.query(
-              `SELECT 1 FROM admin_control_activation_events
-                WHERE object_kind=$1 AND object_key=$2 AND revision=$3 LIMIT 1`,
-              [input.kind, input.objectKey, input.revision],
-            );
-            await client.query(
-              `INSERT INTO admin_control_active_configs(
-                 object_kind,object_key,revision,generation,activated_by,reason
-               ) VALUES($1,$2,$3,$4,$5,$6)
-               ON CONFLICT(object_kind) DO UPDATE SET
-                 object_key=EXCLUDED.object_key,revision=EXCLUDED.revision,
-                 generation=EXCLUDED.generation,activated_by=EXCLUDED.activated_by,
-                 reason=EXCLUDED.reason,activated_at=clock_timestamp()`,
-              [
-                input.kind,
-                input.objectKey,
-                input.revision,
-                generation,
-                input.actorUserId,
-                input.reason,
-              ],
-            );
-            await client.query(
-              `INSERT INTO admin_control_activation_events(
-                 generation,object_kind,object_key,revision,replaced_object_key,replaced_revision,
-                 actor_user_id,reason
-               ) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
-              [
-                generation,
-                input.kind,
-                input.objectKey,
-                input.revision,
-                previousActive?.object_key ?? null,
-                previousActive?.revision ?? null,
-                input.actorUserId,
-                input.reason,
-              ],
-            );
-            await client.query(
-              `UPDATE admin_control_generation
-                  SET generation=$1,updated_at=clock_timestamp() WHERE singleton='global'`,
-              [generation],
-            );
-            await recordAudit(client, {
-              actorUserId: input.actorUserId,
-              kind: input.kind,
-              key: input.objectKey,
-              revision: input.revision,
-              action: activatedBefore.rowCount === 0 ? "publish" : "rollback",
-              reason: input.reason,
-              outcome: "succeeded",
-            });
             const projected = await projectedRevision(
               client,
               input.kind,
@@ -995,18 +1106,11 @@ async function publishPairIsCompatible(
   kind: ControlObjectKind,
   target: RevisionRow,
 ): Promise<boolean> {
-  const model =
-    kind === "model_provider"
-      ? (mapConfiguration(kind, target.configuration) as ModelProviderConfiguration)
-      : ((await activeConfiguration(client, "model_provider")) as
-          | ModelProviderConfiguration
-          | undefined);
-  const settings =
-    kind === "runtime_settings"
-      ? (mapConfiguration(kind, target.configuration) as RuntimeSettingsConfiguration)
-      : ((await activeConfiguration(client, "runtime_settings")) as
-          | RuntimeSettingsConfiguration
-          | undefined);
+  if (kind !== "runtime_settings") return true;
+  const model = (await activeConfiguration(client, "model_provider")) as
+    | ModelProviderConfiguration
+    | undefined;
+  const settings = mapConfiguration(kind, target.configuration) as RuntimeSettingsConfiguration;
   return (
     model === undefined ||
     settings === undefined ||
@@ -1041,9 +1145,9 @@ const activeConfigurationSql = `
          memory.object_key AS memory_key,memory.revision::text AS memory_revision,
          memory_revision.configuration AS memory_configuration,
          memory_revision.created_by AS memory_created_by,memory_revision.created_at AS memory_created_at,
-         settings.object_key AS settings_key,settings.revision::text AS settings_revision,
-         settings_revision.configuration AS settings_configuration,
-         settings_revision.created_by AS settings_created_by,settings_revision.created_at AS settings_created_at
+         NULL::text AS settings_key,NULL::text AS settings_revision,
+         NULL::jsonb AS settings_configuration,
+         NULL::text AS settings_created_by,NULL::timestamptz AS settings_created_at
     FROM admin_control_generation generation
     JOIN admin_control_active_configs model ON model.object_kind='model_provider'
     JOIN admin_control_config_revisions model_revision
@@ -1053,10 +1157,6 @@ const activeConfigurationSql = `
     LEFT JOIN admin_control_config_revisions memory_revision
       ON memory_revision.object_kind=memory.object_kind AND memory_revision.object_key=memory.object_key
      AND memory_revision.revision=memory.revision
-    LEFT JOIN admin_control_active_configs settings ON settings.object_kind='runtime_settings'
-    LEFT JOIN admin_control_config_revisions settings_revision
-      ON settings_revision.object_kind=settings.object_kind AND settings_revision.object_key=settings.object_key
-     AND settings_revision.revision=settings.revision
    WHERE generation.singleton='global'`;
 
 function snapshotRevision<T extends Configuration>(input: {

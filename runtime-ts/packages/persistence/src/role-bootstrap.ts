@@ -316,6 +316,7 @@ const runtimeTablePolicy = new Map<string, ReadonlySet<string>>([
   ["identity_auth_commands", new Set()],
   ["admin_user_account_audits", new Set()],
   ["run_runtime_config_snapshots", new Set(["SELECT", "INSERT"])],
+  ["run_compaction_settings_snapshots", new Set(["SELECT", "INSERT"])],
   [migrationTable, new Set()],
 ]);
 
@@ -1077,6 +1078,14 @@ async function hasAdminUserOperationsState(client: PoolClient, schema: string): 
   return result.rows[0]?.present === true;
 }
 
+async function hasRunCompactionSettingsState(client: PoolClient, schema: string): Promise<boolean> {
+  const result = await client.query<{ present: boolean }>(
+    "SELECT to_regclass(format('%I.run_compaction_settings_snapshots',$1::text)) IS NOT NULL AS present",
+    [schema],
+  );
+  return result.rows[0]?.present === true;
+}
+
 async function hasRuntimeAgentControlState(client: PoolClient, schema: string): Promise<boolean> {
   const result = await client.query<{ present: boolean }>(
     `SELECT to_regclass(format('%I.runtime_agent_threads', $1::text)) IS NOT NULL
@@ -1220,6 +1229,9 @@ async function activeTablePolicy(
   }
   if (!(await hasAdminControlState(client, schema))) {
     for (const table of adminControlTables) policy.delete(table);
+  }
+  if (!(await hasRunCompactionSettingsState(client, schema))) {
+    policy.delete("run_compaction_settings_snapshots");
   }
   if ((await hasRunWorkerState(client)) && !(await hasCleanupConsumerState(client))) {
     policy.set("cleanup_outbox", new Set(["SELECT", "INSERT"]));
@@ -2798,6 +2810,14 @@ async function rebindRoleScopedPolicies(
   context: MigrationSecurityContext,
 ): Promise<void> {
   const schema = quoteIdentifier(context.schema);
+  if (await hasRunCompactionSettingsState(client, context.schema)) {
+    await client.query(
+      `ALTER POLICY run_compaction_settings_migrator_policy
+         ON ${schema}.run_compaction_settings_snapshots TO ${quoteIdentifier(context.migratorRole)};
+       ALTER POLICY run_compaction_settings_runtime_policy
+         ON ${schema}.run_compaction_settings_snapshots TO ${quoteIdentifier(context.runtimeRole)}`,
+    );
+  }
   const projectionPolicy = await client.query<{ present: boolean }>(
     `SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname=$1 AND tablename='threads'
        AND policyname='threads_admin_projection_read') AS present`,
@@ -3186,6 +3206,11 @@ export async function bootstrapRuntimeAccessOnClient(
          ${schema}.admin_control_active_configs,
          ${schema}.admin_control_generation TO ${role};
        GRANT SELECT,INSERT ON TABLE ${schema}.run_runtime_config_snapshots TO ${role}`,
+    );
+  }
+  if (await hasRunCompactionSettingsState(client, context.schema)) {
+    await client.query(
+      `GRANT SELECT,INSERT ON TABLE ${schema}.run_compaction_settings_snapshots TO ${role}`,
     );
   }
   if (await hasRunWorkspaceResultState(client, context.schema)) {

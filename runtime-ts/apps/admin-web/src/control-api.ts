@@ -16,6 +16,8 @@ import type {
   ProbeControlRevisionRequest,
   PublishControlRevisionRequest,
   RuntimeSettingsRevisionDto,
+  SaveModelProviderConfigurationRequest,
+  SaveMemoryProviderConfigurationRequest,
   UpdatePlatformUserStatusRequest,
 } from "@hoox/protocol";
 import { adminAuthorizationHeader } from "./admin-session.js";
@@ -40,13 +42,15 @@ interface ErrorEnvelope {
 function messageFor(status: number): string {
   if (status === 400) return "配置内容不符合要求，请检查填写的字段。";
   if (status === 401 || status === 403) return "当前账号没有访问控制面的权限。";
-  if (status === 404) return "配置版本不存在，请刷新后重试。";
-  if (status === 409) return "配置版本已发生变化，请刷新后重试。";
-  if (status === 503) return "Provider 探测失败或依赖暂时不可用。";
+  if (status === 404) return "配置不存在，请刷新后重试。";
+  if (status === 409) return "配置已被更新，请刷新后重试。";
+  if (status === 503) return "服务连接测试失败或依赖暂时不可用。";
   return "后台控制服务暂时不可用，请稍后重试。";
 }
 
 export class AdminControlApi {
+  private readonly pendingIdempotencyKeys = new Map<string, string>();
+
   constructor(
     private readonly fetcher: typeof fetch = (input, init) => globalThis.fetch(input, init),
     private readonly baseUrl = "/v1/admin/control",
@@ -59,9 +63,21 @@ export class AdminControlApi {
     headers.set("Accept", "application/json");
     const authorizationHeader = this.authorizationHeader();
     if (authorizationHeader !== undefined) headers.set("Authorization", authorizationHeader);
+    let requestFingerprint: string | undefined;
     if (init.body !== undefined) {
       headers.set("Content-Type", "application/json");
-      headers.set("Idempotency-Key", this.idempotencyKey());
+      requestFingerprint = await fingerprintWriteRequest(init.method ?? "GET", path, init.body);
+      let key = this.pendingIdempotencyKeys.get(requestFingerprint);
+      if (key === undefined) {
+        key = this.idempotencyKey();
+        if (this.pendingIdempotencyKeys.size >= 32) {
+          const oldest = this.pendingIdempotencyKeys.keys().next().value;
+          if (oldest !== undefined) this.pendingIdempotencyKeys.delete(oldest);
+        }
+        this.pendingIdempotencyKeys.set(requestFingerprint, key);
+      }
+      // 提交结果未知时必须以原命令重试；仅缓存请求摘要，避免保留密钥等正文。
+      headers.set("Idempotency-Key", key);
     }
     let response: Response;
     try {
@@ -76,16 +92,23 @@ export class AdminControlApi {
     const body: unknown = await response.json().catch(() => undefined);
     if (!response.ok) {
       const failure = body as ErrorEnvelope | undefined;
+      const retryable = failure?.error?.retryable ?? response.status >= 500;
+      if (requestFingerprint !== undefined && !retryable) {
+        this.pendingIdempotencyKeys.delete(requestFingerprint);
+      }
       throw new AdminApiError(
         response.status === 400 && failure?.error?.message !== undefined
           ? failure.error.message
           : messageFor(response.status),
         response.status,
-        failure?.error?.retryable ?? response.status >= 500,
+        retryable,
       );
     }
     if (typeof body !== "object" || body === null || !("data" in body)) {
       throw new AdminApiError("后台控制服务返回了无法识别的数据。", 502, true);
+    }
+    if (requestFingerprint !== undefined) {
+      this.pendingIdempotencyKeys.delete(requestFingerprint);
     }
     return (body as SuccessEnvelope<T>).data;
   }
@@ -177,6 +200,21 @@ export class AdminControlApi {
     });
   }
 
+  saveModelConfiguration(
+    input: SaveModelProviderConfigurationRequest,
+  ): Promise<ModelProviderRevisionDto> {
+    return this.request("/model-providers/current", { method: "PUT", body: JSON.stringify(input) });
+  }
+
+  saveMemoryConfiguration(
+    input: SaveMemoryProviderConfigurationRequest,
+  ): Promise<MemoryProviderRevisionDto> {
+    return this.request("/memory-providers/current", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    });
+  }
+
   createModelDraft(input: CreateModelProviderDraftRequest): Promise<ModelProviderRevisionDto> {
     return this.request("/model-providers", { method: "POST", body: JSON.stringify(input) });
   }
@@ -216,6 +254,19 @@ export class AdminControlApi {
   }
 }
 
+async function fingerprintWriteRequest(
+  method: string,
+  path: string,
+  body: BodyInit | null,
+): Promise<string> {
+  if (body !== null && typeof body !== "string") {
+    throw new AdminApiError("管理请求正文格式无效。", 400, false);
+  }
+  const bytes = new TextEncoder().encode(`${method}\n${path}\n${body ?? ""}`);
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return Array.from(digest, (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
 function catalogServiceUnavailable(reason: unknown): reason is AdminApiError {
   return (
     reason instanceof AdminApiError &&
@@ -236,6 +287,8 @@ export type AdminControlApiContract = Pick<
   | "listAudits"
   | "listUsers"
   | "updateUserStatus"
+  | "saveModelConfiguration"
+  | "saveMemoryConfiguration"
   | "createModelDraft"
   | "createMemoryDraft"
   | "createRuntimeSettingsDraft"

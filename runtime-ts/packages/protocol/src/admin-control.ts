@@ -298,11 +298,35 @@ export type ModelProviderControlRevisionRequest = Static<
 >;
 
 export const CreateMemoryProviderDraftRequestSchema = Type.Composite(
-  [MemoryProviderConfigurationDtoSchema, Type.Object({ reason: ChangeReasonSchema }, strict)],
+  [
+    MemoryProviderConfigurationDtoSchema,
+    Type.Object({ reason: Type.Optional(ChangeReasonSchema) }, strict),
+  ],
   strict,
 );
 export type CreateMemoryProviderDraftRequest = Static<
   typeof CreateMemoryProviderDraftRequestSchema
+>;
+
+const SaveConfigurationExpectationSchema = Type.Object(
+  { expectedGeneration: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }) },
+  strict,
+);
+
+export const SaveModelProviderConfigurationRequestSchema = Type.Composite(
+  [CreateModelProviderDraftRequestSchema, SaveConfigurationExpectationSchema],
+  strict,
+);
+export type SaveModelProviderConfigurationRequest = Static<
+  typeof SaveModelProviderConfigurationRequestSchema
+>;
+
+export const SaveMemoryProviderConfigurationRequestSchema = Type.Composite(
+  [CreateMemoryProviderDraftRequestSchema, SaveConfigurationExpectationSchema],
+  strict,
+);
+export type SaveMemoryProviderConfigurationRequest = Static<
+  typeof SaveMemoryProviderConfigurationRequestSchema
 >;
 
 export const CreateRuntimeSettingsDraftRequestSchema = Type.Composite(
@@ -314,7 +338,7 @@ export type CreateRuntimeSettingsDraftRequest = Static<
 >;
 
 export const ProbeControlRevisionRequestSchema = Type.Object(
-  { expectedVersionToken: VersionTokenSchema, reason: ChangeReasonSchema },
+  { expectedVersionToken: VersionTokenSchema, reason: Type.Optional(ChangeReasonSchema) },
   strict,
 );
 export type ProbeControlRevisionRequest = Static<typeof ProbeControlRevisionRequestSchema>;
@@ -325,7 +349,7 @@ export type PublishControlRevisionRequest = Static<typeof PublishControlRevision
 export const UpdatePlatformUserStatusRequestSchema = Type.Object(
   {
     status: Type.Union([Type.Literal("active"), Type.Literal("disabled")]),
-    reason: ChangeReasonSchema,
+    reason: Type.Optional(ChangeReasonSchema),
   },
   strict,
 );
@@ -503,7 +527,7 @@ export const UpdateIdentityAdminConfigurationRequestSchema = Type.Object(
       ),
       { minItems: 4, maxItems: 4 },
     ),
-    reason: ChangeReasonSchema,
+    reason: Type.Optional(ChangeReasonSchema),
   },
   strict,
 );

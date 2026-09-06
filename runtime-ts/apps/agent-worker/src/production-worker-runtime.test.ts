@@ -126,7 +126,7 @@ describe("Agent Worker production polling loop", () => {
     expect(assignmentCalls).toBeGreaterThanOrEqual(2);
   });
 
-  it("按后台配置并行执行不同 Tenant 的 Run，并在 Worker 上限处停止继续领取", async () => {
+  it("固定启动时的部署并发配置，在 Worker 上限处停止继续领取", async () => {
     const assignments = [
       tenantAssignment("parallel-a"),
       tenantAssignment("parallel-b"),
@@ -137,6 +137,10 @@ describe("Agent Worker production polling loop", () => {
     let executions = 0;
     let active = 0;
     let maximumActive = 0;
+    const concurrencySettings = {
+      workerMaxConcurrentRuns: 2,
+      userMaxConcurrentRunsPerTenant: 3,
+    };
     const loop = new AgentWorkerPollingLoop(
       {
         claim: async () => assignments.shift(),
@@ -144,7 +148,7 @@ describe("Agent Worker production polling loop", () => {
       },
       {
         claim: async ({ tenantId, userMaxConcurrentRunsPerTenant }) => {
-          expect(userMaxConcurrentRunsPerTenant).toBe(2);
+          expect(userMaxConcurrentRunsPerTenant).toBe(3);
           const suffix = tenantId.replace("tenant-", "");
           return [claim(suffix)];
         },
@@ -167,13 +171,12 @@ describe("Agent Worker production polling loop", () => {
         pollIntervalMs: 10,
         tenantAssignmentLeaseMs: 30_000,
         dispatchLeaseMs: 30_000,
-        resolveConcurrencySettings: async () => ({
-          workerMaxConcurrentRuns: 2,
-          userMaxConcurrentRunsPerTenant: 2,
-        }),
+        concurrencySettings,
       },
     );
 
+    concurrencySettings.workerMaxConcurrentRuns = 5;
+    concurrencySettings.userMaxConcurrentRunsPerTenant = 7;
     loop.start();
     await startedTwo.promise;
     await new Promise((resolve) => setTimeout(resolve, 25));

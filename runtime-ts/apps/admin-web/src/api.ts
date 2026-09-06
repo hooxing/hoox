@@ -105,24 +105,22 @@ export class SkillAdminApi {
     const body: unknown = await response.json().catch(() => undefined);
     if (!response.ok) {
       const error = body as ErrorEnvelope | undefined;
-      if (requestFingerprint !== undefined && error?.error?.retryable !== true) {
+      const retryable = error?.error?.retryable ?? response.status >= 500;
+      if (requestFingerprint !== undefined && !retryable) {
         this.pendingIdempotencyKeys.delete(requestFingerprint);
       }
       // 服务端 message 可能含内部定位信息，管理员界面仅按稳定 HTTP 语义展示安全文案。
-      throw new AdminApiError(
-        safeErrorMessage(response.status),
-        response.status,
-        error?.error?.retryable ?? response.status >= 500,
-      );
+      throw new AdminApiError(safeErrorMessage(response.status), response.status, retryable);
     }
+    const result = unwrap<T>(body);
     if (requestFingerprint !== undefined) {
       this.pendingIdempotencyKeys.delete(requestFingerprint);
     }
-    return unwrap<T>(body);
+    return result;
   }
 
   listSubmissions(cursor?: string): Promise<SkillSubmissionPageDto> {
-    const query = new URLSearchParams({ limit: "100" });
+    const query = new URLSearchParams({ limit: "100", latestOnly: "true" });
     if (cursor !== undefined) query.set("cursor", cursor);
     return this.request(`?${query.toString()}`);
   }

@@ -71,7 +71,8 @@ function fixture() {
     })),
     createModelDraft: vi.fn(async () => modelRevision),
     createMemoryDraft: vi.fn(),
-    createRuntimeSettingsDraft: vi.fn(),
+    saveModelConfiguration: vi.fn(async () => ({ ...modelRevision, status: "active" as const })),
+    saveMemoryConfiguration: vi.fn(),
     probe: vi.fn(async () => ({
       ...modelRevision,
       versionToken: 2,
@@ -308,68 +309,98 @@ describe("后台控制 API", () => {
     await app.close();
   });
 
-  it("运行设置写接口要求并透传 Worker 与用户并发上限", async () => {
-    const { app, control } = fixture();
-    const revision = {
-      revision: 1,
-      versionToken: 1,
-      status: "draft" as const,
-      probeStatus: "untested" as const,
-      createdBy: "user_admin",
-      createdAt: "2026-08-28T00:00:00.000Z",
-      updatedAt: "2026-08-28T00:00:00.000Z",
-      configuration: {
-        workerMaxConcurrentRuns: 20,
-        userMaxConcurrentRunsPerTenant: 2,
-        compactionSoftLimitPercent: 80,
-        compactionTargetPercent: 60,
-        compactionRecentUserTokens: 16_000,
-        compactionMaxOutputTokens: 4_096,
-        compactionTimeoutMs: 60_000,
-      },
-    };
-    control.createRuntimeSettingsDraft.mockResolvedValueOnce(revision);
-    const response = await app.inject({
-      method: "POST",
-      url: "/v1/admin/control/runtime-settings",
-      headers: {
-        authorization: "Bearer admin",
-        "content-type": "application/json",
-        "idempotency-key": "runtime-settings-0001",
-      },
-      payload: { ...revision.configuration, reason: "调整执行容量" },
-    });
-
-    expect(response.statusCode).toBe(200);
-    expect(control.createRuntimeSettingsDraft).toHaveBeenCalledWith(
-      expect.objectContaining({ actorUserId: "user_admin" }),
-      expect.objectContaining({
-        workerMaxConcurrentRuns: 20,
-        userMaxConcurrentRunsPerTenant: 2,
-      }),
-    );
-
-    const invalid = await app.inject({
-      method: "POST",
-      url: "/v1/admin/control/runtime-settings",
-      headers: {
-        authorization: "Bearer admin",
-        "content-type": "application/json",
-        "idempotency-key": "runtime-settings-0002",
-      },
-      payload: {
-        compactionSoftLimitPercent: 80,
-        compactionTargetPercent: 60,
-        compactionRecentUserTokens: 16_000,
-        compactionMaxOutputTokens: 4_096,
-        compactionTimeoutMs: 60_000,
-        reason: "缺少并发字段",
-      },
-    });
-    expect(invalid.statusCode).toBe(400);
+  it("运行参数由部署配置维护，后台不再注册写接口", async () => {
+    const { app } = fixture();
+    for (const url of [
+      "/v1/admin/control/runtime-settings",
+      "/v1/admin/control/runtime-settings/global/revisions/1/publish",
+    ]) {
+      const response = await app.inject({
+        method: "POST",
+        url,
+        headers: {
+          authorization: "Bearer admin",
+          "content-type": "application/json",
+          "idempotency-key": "runtime-settings-0001",
+        },
+        payload: {},
+      });
+      expect(response.statusCode).toBe(404);
+    }
     await app.close();
   });
 
+  it("模型保存一次请求生效，要求内部并发状态且不要求原因", async () => {
+    const { app, control } = fixture();
+    const { credentialConfigured: _credentialConfigured, ...configuration } =
+      modelRevision.configuration;
+    const payload = { ...configuration, apiKey: "unit-provider-key", expectedGeneration: 0 };
+    const response = await app.inject({
+      method: "PUT",
+      url: "/v1/admin/control/model-providers/current",
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "save-model-0001",
+      },
+      payload,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.status).toBe("active");
+    expect(control.saveModelConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({ actorUserId: "user_admin" }),
+      payload,
+    );
+    expect(control.createModelDraft).not.toHaveBeenCalled();
+    expect(control.publish).not.toHaveBeenCalled();
+    const { expectedGeneration: _expectedGeneration, ...invalid } = payload;
+    const rejected = await app.inject({
+      method: "PUT",
+      url: "/v1/admin/control/model-providers/current",
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "save-model-0002",
+      },
+      payload: invalid,
+    });
+    expect(rejected.statusCode).toBe(400);
+    await app.close();
+  });
+
+  it("记忆保存直接返回当前配置且不调用探测", async () => {
+    const { app, control } = fixture();
+    const configuration = {
+      providerKey: "mem0",
+      displayName: "Mem0",
+      providerKind: "mem0",
+      baseUrl: "https://memory.example.invalid/",
+      apiSecretRef: "deployment:memory-api",
+      scopeSecretRef: "deployment:memory-scope",
+      requestTimeoutMs: 10000,
+      enabled: false,
+    };
+    control.saveMemoryConfiguration.mockResolvedValueOnce({
+      ...modelRevision,
+      status: "active",
+      configuration,
+    });
+    const response = await app.inject({
+      method: "PUT",
+      url: "/v1/admin/control/memory-providers/current",
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "save-memory-0001",
+      },
+      payload: { ...configuration, expectedGeneration: 1 },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().data.configuration.enabled).toBe(false);
+    expect(control.probe).not.toHaveBeenCalled();
+    expect(control.createMemoryDraft).not.toHaveBeenCalled();
+    await app.close();
+  });
   it("探测路由只传递已读取 revision，不接受客户端伪造配置", async () => {
     const { app, control } = fixture();
     const response = await app.inject({

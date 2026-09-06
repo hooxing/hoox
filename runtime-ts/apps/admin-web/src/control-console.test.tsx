@@ -1,9 +1,14 @@
 // @vitest-environment jsdom
 
+import type {
+  MemoryProviderRevisionDto,
+  ModelProviderRevisionDto,
+  PiModelCatalogModelDto,
+} from "@hoox/protocol";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { ModelProviderRevisionDto, PiModelCatalogModelDto } from "@hoox/protocol";
+import { AdminApiError } from "./api.js";
 import { App } from "./app.js";
 import type { AdminControlApiContract } from "./control-api.js";
 
@@ -115,11 +120,11 @@ function fixture(): AdminControlApiContract {
       conversationCount: 3,
       runCount: 9,
     })),
-    createModelDraft: vi.fn(
-      async (input: Parameters<AdminControlApiContract["createModelDraft"]>[0]) => ({
+    saveModelConfiguration: vi.fn(
+      async (input: Parameters<AdminControlApiContract["saveModelConfiguration"]>[0]) => ({
         revision: 1,
         versionToken: 2,
-        status: "draft" as const,
+        status: "active" as const,
         probeStatus: "untested" as const,
         createdBy: "user_admin",
         createdAt: "2026-08-25T00:00:00.000Z",
@@ -135,6 +140,8 @@ function fixture(): AdminControlApiContract {
         },
       }),
     ),
+    saveMemoryConfiguration: vi.fn(),
+    createModelDraft: vi.fn(),
     createMemoryDraft: vi.fn(),
     createRuntimeSettingsDraft: vi.fn(),
     probe: vi.fn(),
@@ -210,152 +217,48 @@ beforeEach(() => {
 });
 
 describe("统一平台管理导航", () => {
-  it.each(["production", undefined] as const)(
-    "部署类型为 %s 时不豁免身份签名配置",
-    async (runtimeEnvironment) => {
-      const api = fixture();
-      vi.mocked(api.overview).mockResolvedValue({
-        ...overview,
-        ...(runtimeEnvironment === undefined ? {} : { runtimeEnvironment }),
-        deploymentSettings: [
-          {
-            key: "ADMIN_CONTROL_JWT_SIGNING_KEYS",
-            category: "secret",
-            source: "environment",
-            configured: false,
-            mutable: false,
-            description: "管理身份签名",
-          },
-        ],
-      });
-      const container = document.createElement("div");
-      document.body.append(container);
-      const root = createRoot(container);
-      act(() => root.render(<App controlApi={api} />));
-      await settle();
-      expect(container.textContent).toContain(
-        runtimeEnvironment === "production"
-          ? "服务端部署类型：生产环境"
-          : "未提供，不能由前端构建方式推断",
-      );
-      expect(container.textContent).toContain("已配置 0/1 · 不适用 0");
-      expect(container.textContent).not.toContain("不适用：当前为非生产身份模式");
-      act(() => root.unmount());
-      container.remove();
-    },
-  );
-
-  it("按服务端环境和已启用能力展示配置适用性", async () => {
+  it("工作台展示真实指标，隐藏内部配置和版本信息", async () => {
     const api = fixture();
-    vi.mocked(api.overview).mockResolvedValue({
-      ...overview,
-      runtimeEnvironment: "development",
-      activeModel: { ...modelRevision("deepseek", "healthy"), status: "active" },
-      deploymentSettings: [
-        ...overview.deploymentSettings,
-        {
-          key: "ADMIN_CONTROL_JWT_SIGNING_KEYS",
-          category: "secret",
-          source: "environment",
-          configured: false,
-          mutable: false,
-          description: "管理身份签名",
-        },
-      ],
-    });
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
     act(() => root.render(<App controlApi={api} />));
     await settle();
-    expect(container.textContent).toContain("服务端部署类型：开发 / 演示环境");
-    expect(container.textContent).toContain("不适用：长期记忆未启用");
-    expect(container.textContent).toContain("不适用：当前为非生产身份模式");
-    expect(container.textContent).toContain("已配置 1/1 · 不适用 3");
+    expect(container.textContent).toContain("累计 Run12");
+    expect(container.textContent).not.toContain("Generation");
+    expect(container.textContent).not.toContain("部署配置地图");
+    expect(container.textContent).not.toContain("MODEL_API_KEY");
     act(() => root.unmount());
     container.remove();
   });
 
-  it("展示工业化后台模块、核心统计和环境配置状态，但不展示秘密值", async () => {
+  it("审计显示操作者与操作结果，不展示内部版本", async () => {
     const api = fixture();
+    vi.mocked(api.listAudits).mockResolvedValue([
+      {
+        auditId: "audit_one",
+        actorUserId: "user_operator",
+        objectKind: "model_provider",
+        objectKey: "deepseek",
+        revision: 1234,
+        action: "publish",
+        reason: "使用模型配置",
+        outcome: "succeeded",
+        createdAt: "2026-08-25T00:00:00.000Z",
+      },
+    ]);
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
     act(() => root.render(<App controlApi={api} />));
     await settle();
-
-    const navigation = [...container.querySelectorAll(".ant-menu-item")].map((item) =>
-      item.textContent?.trim(),
-    );
-    expect(navigation).toEqual([
-      "工作台",
-      "数据运营",
-      "用户管理",
-      "模型服务",
-      "记忆服务",
-      "Skills",
-      "身份与登录",
-      "运行配置",
-      "操作审计",
-    ]);
-    expect(container.textContent).toContain("累计 Run12");
-    expect(container.textContent).toContain("MODEL_API_KEY");
-    expect(container.textContent).toContain("已配置 · 部署秘密");
-    expect(container.textContent).not.toContain("production-model-secret");
-
-    act(() => navigationItem(container, "模型服务").click());
-    await settle();
-    expect(api.listModelProviders).toHaveBeenCalledOnce();
-    expect(container.textContent).toContain("当前使用部署配置");
-    expect(container.textContent).toContain("部署默认");
-    expect(container.textContent).toContain("部署 API Key已配置");
-
-    act(() => navigationItem(container, "运行配置").click());
-    await settle();
-    expect(api.listRuntimeSettings).toHaveBeenCalledOnce();
-    expect(container.textContent).toContain("MODEL_API_KEY");
-    expect(container.textContent).toContain("DATABASE_URL / DATABASE_SCHEMA");
-    expect(container.textContent).toContain("CUBESANDBOX_API_URL / CUBESANDBOX_TEMPLATE_ID");
-    expect(container.textContent).toContain("部署平台");
-    expect(container.textContent).toContain("后台 Revision");
-
     act(() => navigationItem(container, "操作审计").click());
     await settle();
     expect(api.listAudits).toHaveBeenCalledWith(100);
-    expect(container.textContent).toContain("控制面操作记录");
-    expect(container.textContent).toContain("不可变审计事实");
-
-    act(() => root.unmount());
-    container.remove();
-  });
-
-  it("后台离线时仍展示配置真源、优先级和部署顺序", async () => {
-    const api: AdminControlApiContract = {
-      ...fixture(),
-      overview: vi.fn(async () => {
-        throw new Error("database unavailable");
-      }),
-    };
-    const container = document.createElement("div");
-    document.body.append(container);
-    const root = createRoot(container);
-    act(() => root.render(<App controlApi={api} />));
-    await settle();
-
-    act(() => navigationItem(container, "运行配置").click());
-    await settle();
-
-    expect(container.textContent).toContain("部署配置地图");
-    expect(container.textContent).toContain("DATABASE_SKILL_PUBLISHER_ROLE");
-    expect(container.textContent).toContain("统一后台内的 Skill 模块");
-    expect(container.textContent).toContain("等待后台检测");
-    expect(container.textContent).toContain("P0");
-    expect(container.textContent).toContain("按契约确认");
-    expect(container.textContent).toContain("deploy/production.env.example");
-    expect(container.textContent).toContain("pnpm db:migrate:up");
-    expect(container.textContent).toContain("platform_control_operators");
-    expect(container.textContent).toContain("数据库与身份 → 模型与 Mem0 秘密");
-
+    expect(container.textContent).toContain("操作者：user_operator");
+    expect(container.textContent).toContain("使用配置");
+    expect(container.textContent).toContain("成功");
+    expect(container.textContent).not.toContain("1234");
     act(() => root.unmount());
     container.remove();
   });
@@ -376,7 +279,7 @@ describe("统一平台管理导航", () => {
     expect(container.textContent).toContain("基础访问策略");
     expect(container.textContent).toContain("第三方身份源");
     expect(container.textContent).toContain("发信邮箱与 SMTP");
-    expect(container.textContent).toContain("秘密材料只保存在服务端");
+    expect(container.textContent).toContain("密钥只保存在服务端");
     expect(container.querySelectorAll(".identity-provider-card")).toHaveLength(4);
 
     const emailVerificationToggle = container.querySelector<HTMLButtonElement>(
@@ -419,21 +322,14 @@ describe("统一平台管理导航", () => {
       changeControl(requiredControl(fields[0], "GitHub Client ID"), "github-client");
       changeControl(requiredControl(fields[1], "GitHub Client Secret"), "github-secret");
       github.querySelector<HTMLButtonElement>('[role="switch"]')?.click();
-      changeControl(
-        requiredControl(
-          container.querySelector<HTMLInputElement>(
-            'input[placeholder="例如：为内部测试开放 GitHub 登录"]',
-          ),
-          "身份策略变更原因",
-        ),
-        "为内部测试开放 GitHub 登录",
-      );
     });
     const publish = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (item) => item.textContent?.trim() === "保存并立即生效",
     );
     if (publish === undefined) throw new Error("身份策略发布按钮缺失");
     expect(publish.disabled).toBe(false);
+    expect(container.textContent).not.toContain("变更原因");
+    expect(container.textContent).not.toContain("当前版本");
     await act(async () => publish.click());
     await settle();
 
@@ -450,7 +346,6 @@ describe("统一平台管理导航", () => {
         smtpPassword: "smtp-secret",
         registrationEnabled: true,
         phoneEnabled: false,
-        reason: "为内部测试开放 GitHub 登录",
         providers: expect.arrayContaining([
           expect.objectContaining({
             key: "github",
@@ -462,30 +357,314 @@ describe("统一平台管理导航", () => {
       }),
     );
 
+    expect(vi.mocked(api.updateIdentityConfiguration).mock.calls[0]?.[0]).not.toHaveProperty(
+      "reason",
+    );
     act(() => root.unmount());
     container.remove();
   });
 
-  it("说明 Mem0 的部署依赖、数据流和发布步骤", async () => {
+  it.each([false, true])("身份通道保存后展示实际开关 %s，不引入发布阶段", async (enabled) => {
     const api = fixture();
+    const base = await api.getIdentityConfiguration();
+    let current = {
+      ...base,
+      emailVerificationEnabled: enabled,
+      phoneEnabled: enabled,
+      emailFromAddress: "no-reply@example.com",
+      smtpHost: "smtp.example.com",
+      smtpUsername: "mailer",
+      smtpPasswordConfigured: true,
+      smsWebhookUrl: "https://sms.example.com/otp",
+    };
+    vi.mocked(api.getIdentityConfiguration).mockResolvedValue(current);
+    vi.mocked(api.updateIdentityConfiguration).mockImplementation(async (input) => {
+      current = {
+        ...current,
+        emailVerificationEnabled: input.emailVerificationEnabled,
+        phoneEnabled: input.phoneEnabled,
+      };
+      vi.mocked(api.getIdentityConfiguration).mockResolvedValue(current);
+      return current;
+    });
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
     act(() => root.render(<App controlApi={api} />));
     await settle();
+    act(() => navigationItem(container, "身份与登录").click());
+    await settle();
+    const status = () =>
+      [
+        ...container.querySelectorAll(
+          ".identity-mail-settings .identity-state, .identity-sms-settings .identity-state",
+        ),
+      ].map((item) => item.textContent);
+    expect(status()).toEqual([enabled ? "已开启" : "已关闭", enabled ? "已开启" : "已关闭"]);
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(`[aria-label="${enabled ? "关闭" : "开启"}邮箱验证码"]`)
+        ?.click();
+      container
+        .querySelector<HTMLButtonElement>(`[aria-label="${enabled ? "关闭" : "开启"}手机验证码"]`)
+        ?.click();
+    });
+    expect(status()).toEqual([enabled ? "已开启" : "已关闭", enabled ? "已开启" : "已关闭"]);
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('form button[type="submit"]')?.click(),
+    );
+    await settle();
+    expect(status()).toEqual([enabled ? "已关闭" : "已开启", enabled ? "已关闭" : "已开启"]);
+    expect(container.textContent).not.toContain("待发布");
+    expect(container.textContent).not.toContain("发布前");
+    act(() => root.unmount());
+    container.remove();
+  });
 
+  it.each([false, true])(
+    "无后台模型时记忆由部署配置管理，忽略托管记录是否存在 %s",
+    async (hasMemory) => {
+      const api = fixture();
+      const activeMemory: MemoryProviderRevisionDto = {
+        revision: 1,
+        versionToken: 2,
+        status: "active",
+        probeStatus: "healthy",
+        createdBy: "user_admin",
+        createdAt: "2026-08-25T00:00:00.000Z",
+        updatedAt: "2026-08-25T00:00:00.000Z",
+        configuration: {
+          providerKey: "mem0",
+          displayName: "Mem0",
+          providerKind: "mem0",
+          enabled: true,
+          baseUrl: "https://memory.example.com/",
+          apiSecretRef: "deployment:memory-api",
+          scopeSecretRef: "deployment:memory-scope",
+          requestTimeoutMs: 10000,
+        },
+      };
+      vi.mocked(api.overview).mockResolvedValue({
+        ...overview,
+        ...(hasMemory ? { activeMemory } : {}),
+      });
+      const container = document.createElement("div");
+      document.body.append(container);
+      const root = createRoot(container);
+      act(() => root.render(<App controlApi={api} />));
+      await settle();
+      expect(container.querySelector(".active-stack")?.textContent).toContain(
+        "记忆：由部署配置管理",
+      );
+      act(() => navigationItem(container, "记忆服务").click());
+      await settle();
+      expect(container.querySelector(".memory-active-state")?.textContent).toBe("由部署配置管理");
+      expect(container.querySelector(".memory-control-form")?.textContent).toContain(
+        "请先在模型服务中接入后台模型",
+      );
+      expect(
+        container.querySelector<HTMLFieldSetElement>(".memory-configuration-fields")?.disabled,
+      ).toBe(true);
+      const save = container.querySelector<HTMLButtonElement>('form button[type="submit"]');
+      expect(save?.disabled).toBe(true);
+      await act(async () => save?.click());
+      expect(api.saveMemoryConfiguration).not.toHaveBeenCalled();
+      act(() => root.unmount());
+      container.remove();
+    },
+  );
+
+  it("已接入后台模型但没有记忆配置时显示关闭，并允许首次保存", async () => {
+    const api = fixture();
+    vi.mocked(api.overview).mockResolvedValue({
+      ...overview,
+      activeModel: { ...modelRevision("deepseek", "healthy"), status: "active" },
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
     act(() => navigationItem(container, "记忆服务").click());
     await settle();
+    expect(container.querySelector(".memory-active-state")?.textContent).toBe("已关闭");
+    const save = container.querySelector<HTMLButtonElement>('form button[type="submit"]');
+    expect(save?.disabled).toBe(false);
+    await act(async () => save?.click());
+    await settle();
+    expect(api.saveMemoryConfiguration).toHaveBeenCalledOnce();
+    expect(vi.mocked(api.saveMemoryConfiguration).mock.calls[0]?.[0]).toMatchObject({
+      expectedGeneration: 3,
+      enabled: false,
+    });
+    act(() => root.unmount());
+    container.remove();
+  });
 
-    expect(container.textContent).toContain("Mem0 Platform");
-    expect(container.textContent).toContain("MEM0_API_KEY");
-    expect(container.textContent).toContain("MEM0_SCOPE_HMAC_KEY");
-    expect(container.textContent).toContain("探测连接");
-    expect(container.textContent).toContain("观察队列");
-    expect(container.querySelector<HTMLInputElement>('input[name="baseUrl"]')?.value).toBe(
-      "https://api.mem0.ai/",
+  it.each([false, true])("记忆表单带入当前配置和启用状态 %s，一次保存直接生效", async (enabled) => {
+    const api = fixture();
+    const activeMemory: MemoryProviderRevisionDto = {
+      revision: 9,
+      versionToken: 3,
+      status: "active",
+      probeStatus: "healthy",
+      createdBy: "user_admin",
+      createdAt: "2026-08-25T00:00:00.000Z",
+      updatedAt: "2026-08-25T00:00:00.000Z",
+      configuration: {
+        providerKey: "memory-main",
+        displayName: "企业记忆",
+        providerKind: "mem0",
+        baseUrl: "https://memory.example.com/",
+        apiSecretRef: "deployment:memory-api",
+        scopeSecretRef: "deployment:memory-scope",
+        requestTimeoutMs: 12345,
+        enabled,
+      },
+    };
+    vi.mocked(api.overview).mockResolvedValue({
+      ...overview,
+      activeMemory,
+      activeModel: { ...modelRevision("deepseek", "healthy"), status: "active" },
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+    act(() => navigationItem(container, "记忆服务").click());
+    await settle();
+    expect(container.querySelector(".memory-active-state")?.textContent).toBe(
+      enabled ? "已开启" : "已关闭",
     );
+    expect(container.querySelector<HTMLInputElement>('input[name="displayName"]')?.value).toBe(
+      "企业记忆",
+    );
+    expect(container.querySelector<HTMLInputElement>('input[name="baseUrl"]')?.value).toBe(
+      "https://memory.example.com/",
+    );
+    expect(container.querySelector<HTMLInputElement>('input[name="requestTimeoutMs"]')?.value).toBe(
+      "12345",
+    );
+    expect(container.querySelector<HTMLInputElement>('input[name="enabled"]')?.checked).toBe(
+      enabled,
+    );
+    expect(container.querySelector('input[name="providerKey"]')).toBeNull();
+    for (const label of [
+      "变更原因",
+      "Revision",
+      "版本记录",
+      "待启用",
+      "Secret Ref",
+      "HMAC",
+      "探测连接",
+    ]) {
+      expect(container.textContent).not.toContain(label);
+    }
+    const save = container.querySelector<HTMLButtonElement>('form button[type="submit"]');
+    if (save === null) throw new Error("记忆保存按钮缺失");
+    act(() => container.querySelector<HTMLInputElement>('input[name="enabled"]')?.click());
+    await act(async () => save.click());
+    await settle();
+    expect(api.saveMemoryConfiguration).toHaveBeenCalledExactlyOnceWith({
+      expectedGeneration: 3,
+      ...activeMemory.configuration,
+      enabled: !enabled,
+    });
+    expect(api.createMemoryDraft).not.toHaveBeenCalled();
+    expect(api.probe).not.toHaveBeenCalled();
+    expect(api.publish).not.toHaveBeenCalled();
+    act(() => root.unmount());
+    container.remove();
+  });
 
+  it("记忆状态未读到时禁止保存，避免用默认值覆盖现有配置", async () => {
+    const api = fixture();
+    vi.mocked(api.overview).mockRejectedValue(new Error("unavailable"));
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+    act(() => navigationItem(container, "记忆服务").click());
+    await settle();
+    expect(container.querySelector(".memory-active-state")?.textContent).toBe("状态未知");
+    expect(container.querySelector<HTMLButtonElement>('form button[type="submit"]')?.disabled).toBe(
+      true,
+    );
+    expect(api.saveMemoryConfiguration).not.toHaveBeenCalled();
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("记忆保存失败保留未保存输入，等待显式刷新", async () => {
+    const api = fixture();
+    vi.mocked(api.overview).mockResolvedValue({
+      ...overview,
+      activeModel: { ...modelRevision("deepseek", "healthy"), status: "active" },
+    });
+    vi.mocked(api.saveMemoryConfiguration).mockRejectedValue(
+      new AdminApiError("配置已被更新，请刷新后重试。", 409, false),
+    );
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+    act(() => navigationItem(container, "记忆服务").click());
+    await settle();
+    const name = requiredControl(
+      container.querySelector<HTMLInputElement>('input[name="displayName"]'),
+      "记忆名称",
+    );
+    const url = requiredControl(
+      container.querySelector<HTMLInputElement>('input[name="baseUrl"]'),
+      "记忆地址",
+    );
+    act(() => {
+      changeControl(name, "待保存的记忆连接");
+      changeControl(url, "https://memory.example.com/");
+      container.querySelector<HTMLInputElement>('input[name="enabled"]')?.click();
+    });
+    const reads = vi.mocked(api.overview).mock.calls.length;
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('form button[type="submit"]')?.click(),
+    );
+    await settle();
+    expect(api.overview).toHaveBeenCalledTimes(reads);
+    expect(name.value).toBe("待保存的记忆连接");
+    expect(url.value).toBe("https://memory.example.com/");
+    expect(container.querySelector<HTMLInputElement>('input[name="enabled"]')?.checked).toBe(true);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("请刷新后重试");
+    expect(vi.mocked(api.saveMemoryConfiguration).mock.calls[0]?.[0].expectedGeneration).toBe(3);
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("身份保存失败不重载配置或清空输入", async () => {
+    const api = fixture();
+    vi.mocked(api.updateIdentityConfiguration).mockRejectedValue(
+      new AdminApiError("配置内容不符合要求。", 400, false),
+    );
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+    act(() => navigationItem(container, "身份与登录").click());
+    await settle();
+    const name = requiredControl(
+      container.querySelector<HTMLInputElement>('input[placeholder="Hoox"]'),
+      "发件人名称",
+    );
+    act(() => changeControl(name, "待保存的发件人"));
+    await act(async () =>
+      container.querySelector<HTMLButtonElement>('form button[type="submit"]')?.click(),
+    );
+    await settle();
+    expect(api.getIdentityConfiguration).toHaveBeenCalledOnce();
+    expect(name.value).toBe("待保存的发件人");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("配置内容不符合要求");
     act(() => root.unmount());
     container.remove();
   });
@@ -524,11 +703,9 @@ describe("统一平台管理导航", () => {
     );
     if (disable === undefined) throw new Error("停用按钮缺失");
     act(() => disable.click());
-    const reason = requiredControl(
-      container.querySelector<HTMLInputElement>(".user-status-confirm input"),
-      "用户状态原因",
-    );
-    act(() => changeControl(reason, "用户主动申请停用账号"));
+    expect(api.updateUserStatus).not.toHaveBeenCalled();
+    expect(container.querySelector(".user-status-confirm input")).toBeNull();
+    expect(container.textContent).toContain("提交后将立即拒绝登录并撤销现有会话");
     const confirm = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
       (item) => item.textContent === "确认停用",
     );
@@ -537,9 +714,58 @@ describe("统一平台管理导航", () => {
     await settle();
     expect(api.updateUserStatus).toHaveBeenCalledWith("user_customer", {
       status: "disabled",
-      reason: "用户主动申请停用账号",
     });
 
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("恢复用户直接执行，停用失败时保留后果确认", async () => {
+    const api = fixture();
+    const userPage = await api.listUsers();
+    const user = userPage.items[0];
+    if (user === undefined) throw new Error("用户夹具缺失");
+    vi.mocked(api.listUsers).mockResolvedValue({
+      ...userPage,
+      items: [{ ...user, status: "disabled" }],
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    act(() => root.render(<App controlApi={api} />));
+    await settle();
+    act(() => navigationItem(container, "用户管理").click());
+    await settle();
+    const restore = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.trim() === "恢复",
+    );
+    if (restore === undefined) throw new Error("恢复按钮缺失");
+    await act(async () => restore.click());
+    await settle();
+    expect(api.updateUserStatus).toHaveBeenCalledExactlyOnceWith("user_customer", {
+      status: "active",
+    });
+    expect(container.querySelector(".user-status-confirm")).toBeNull();
+
+    vi.mocked(api.listUsers).mockResolvedValue(userPage);
+    vi.mocked(api.updateUserStatus).mockRejectedValue(
+      new AdminApiError("账号状态更新失败。", 503, true),
+    );
+    const refresh = container.querySelector<HTMLButtonElement>(".refresh-button");
+    await act(async () => refresh?.click());
+    await settle();
+    const disable = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.textContent?.trim() === "停用",
+    );
+    if (disable === undefined) throw new Error("停用按钮缺失");
+    act(() => disable.click());
+    const confirm = container.querySelector<HTMLButtonElement>(
+      '.user-status-confirm button[type="submit"]',
+    );
+    await act(async () => confirm?.click());
+    await settle();
+    expect(container.querySelector(".user-status-confirm")).not.toBeNull();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("账号状态更新失败");
     act(() => root.unmount());
     container.remove();
   });
@@ -612,10 +838,11 @@ describe("统一平台管理导航", () => {
       (item) => item.textContent?.trim() === "保存并使用",
     );
     if (saveAndUse === undefined) throw new Error("保存并使用按钮缺失");
+    expect(container.querySelectorAll('form button[type="submit"]')).toHaveLength(1);
     await act(async () => saveAndUse.click());
     await settle();
 
-    const request = vi.mocked(api.createModelDraft).mock.calls[0]?.[0];
+    const request = vi.mocked(api.saveModelConfiguration).mock.calls[0]?.[0];
     expect(request).toEqual(
       expect.objectContaining({
         providerKey: expect.stringMatching(/^custom-/u),
@@ -627,9 +854,10 @@ describe("统一平台管理导航", () => {
       }),
     );
     expect(request).not.toHaveProperty("reason");
-    expect(api.publish).toHaveBeenCalledWith("model-providers", request?.providerKey, 1, {
-      expectedVersionToken: 2,
-    });
+    expect(request?.expectedGeneration).toBe(3);
+    expect(api.saveModelConfiguration).toHaveBeenCalledOnce();
+    expect(api.publish).not.toHaveBeenCalled();
+    expect(api.createModelDraft).not.toHaveBeenCalled();
     expect(container.textContent).not.toContain("变更原因");
     expect(container.textContent).not.toContain("探测连接");
 
@@ -637,49 +865,48 @@ describe("统一平台管理导航", () => {
     container.remove();
   });
 
-  it("运行配置表单默认提交 Worker 20 和 Tenant 内单用户 2 个并发", async () => {
+  it("编辑模型复用已有密钥并保留零值并发检查，冲突后不继续使用旧配置", async () => {
     const api = fixture();
+    const activeModel = { ...modelRevision("deepseek", "healthy"), status: "active" as const };
+    vi.mocked(api.overview).mockResolvedValue({ ...overview, generation: 0, activeModel });
+    vi.mocked(api.listModelProviders).mockResolvedValue([activeModel]);
+    vi.mocked(api.saveModelConfiguration).mockRejectedValue(
+      new AdminApiError("配置已被更新，请刷新后重试。", 409, false),
+    );
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
     act(() => root.render(<App controlApi={api} />));
     await settle();
-
-    act(() => navigationItem(container, "运行配置").click());
+    act(() => navigationItem(container, "模型服务").click());
     await settle();
-
-    const workerLimit = container.querySelector<HTMLInputElement>(
-      'input[name="workerMaxConcurrentRuns"]',
-    );
-    const userLimit = container.querySelector<HTMLInputElement>(
-      'input[name="userMaxConcurrentRunsPerTenant"]',
-    );
-    expect(workerLimit?.value).toBe("20");
-    expect(userLimit?.value).toBe("2");
-    act(() => {
-      changeControl(requiredControl(workerLimit, "Worker 并发"), "24");
-      changeControl(requiredControl(userLimit, "用户并发"), "3");
+    act(() =>
       changeControl(
         requiredControl(
-          container.querySelector<HTMLTextAreaElement>('textarea[name="reason"]'),
-          "变更原因",
+          container.querySelector<HTMLInputElement>('input[name="displayName"]'),
+          "显示名称",
         ),
-        "调整运行并发容量",
-      );
+        "修改后的供应商",
+      ),
+    );
+    const save = container.querySelector<HTMLButtonElement>('form button[type="submit"]');
+    if (save === null) throw new Error("模型保存按钮缺失");
+    await act(async () => save.click());
+    await settle();
+    expect(api.saveModelConfiguration).toHaveBeenCalledOnce();
+    expect(api.overview).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(api.saveModelConfiguration).mock.calls[0]?.[0]).toMatchObject({
+      expectedGeneration: 0,
+      displayName: "修改后的供应商",
+      reuseCredentialFromRevision: 1,
     });
-    const submit = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
-      (button) => button.textContent?.trim() === "创建参数草稿",
+    expect(vi.mocked(api.saveModelConfiguration).mock.calls[0]?.[0]).not.toHaveProperty("apiKey");
+    expect(api.publish).not.toHaveBeenCalled();
+    expect(api.createModelDraft).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+      "配置已被更新，请刷新后重试",
     );
-    if (submit === undefined) throw new Error("运行参数提交按钮缺失");
-    await act(async () => submit.click());
-
-    expect(api.createRuntimeSettingsDraft).toHaveBeenCalledWith(
-      expect.objectContaining({
-        workerMaxConcurrentRuns: 24,
-        userMaxConcurrentRunsPerTenant: 3,
-        reason: "调整运行并发容量",
-      }),
-    );
+    expect(container.querySelector('form button[type="submit"]')).not.toBeNull();
     act(() => root.unmount());
     container.remove();
   });
@@ -702,8 +929,8 @@ describe("统一平台管理导航", () => {
     if (effectiveState === null) throw new Error("当前模型生效状态缺失");
     expect(effectiveState.textContent).toContain("当前使用");
     expect(effectiveState.textContent).toContain("DeepSeek / model-a");
-    expect(effectiveState.textContent).toContain("新 Run 使用这份配置");
-    expect(effectiveState.textContent).toContain("已经开始的 Run 保持不变");
+    expect(effectiveState.textContent).toContain("新任务使用这份配置");
+    expect(effectiveState.textContent).toContain("已经开始的任务保持不变");
     expect(effectiveState.textContent).not.toContain("Revision");
     expect(effectiveState.textContent).not.toContain("Generation");
 
@@ -727,6 +954,7 @@ describe("统一平台管理导航", () => {
     await settle();
 
     expect(container.querySelectorAll(".provider-settings-list article")).toHaveLength(2);
+    expect(container.querySelector(".model-editor-pane")?.textContent).not.toContain("测试配置");
     expect(container.textContent).toContain("DeepSeek");
     expect(container.textContent).toContain("OpenRouter");
     expect(container.querySelector(".control-revision")).toBeNull();
@@ -739,10 +967,10 @@ describe("统一平台管理导航", () => {
     const deepseekRow = container.querySelector<HTMLElement>(".provider-settings-list article");
     if (deepseekRow === null) throw new Error("DeepSeek 供应商缺失");
     const test = [...deepseekRow.querySelectorAll<HTMLButtonElement>("button")].find(
-      (item) => item.textContent?.trim() === "测试",
+      (item) => item.textContent?.trim() === "测试已保存配置",
     );
     const activate = [...deepseekRow.querySelectorAll<HTMLButtonElement>("button")].find(
-      (item) => item.textContent?.trim() === "设为当前",
+      (item) => item.textContent?.trim() === "使用",
     );
     if (test === undefined || activate === undefined) throw new Error("供应商快捷操作缺失");
     await act(async () => test.click());
@@ -832,6 +1060,9 @@ describe("统一平台管理导航", () => {
     expect(container.textContent).toContain("最大输出 Token");
     expect(container.textContent).toContain("图片输入");
     expect(container.textContent).toContain("推理模型");
+    expect(container.querySelector<HTMLDetailsElement>(".model-advanced-settings")?.open).toBe(
+      false,
+    );
 
     act(() => root.unmount());
     container.remove();
@@ -878,7 +1109,7 @@ describe("统一平台管理导航", () => {
     );
     if (addProvider === undefined) throw new Error("添加供应商按钮缺失");
     act(() => addProvider.click());
-    expect(container.textContent).toContain("从 Pi 目录添加");
+    expect(container.textContent).toContain("从模型目录添加");
     const deepseek = container.querySelector<HTMLButtonElement>(".provider-catalog-grid button");
     if (deepseek === null) throw new Error("DeepSeek Provider 缺失");
     await act(async () => {
@@ -894,7 +1125,7 @@ describe("统一平台管理导航", () => {
     const rows = [...container.querySelectorAll<HTMLElement>(".model-editor-row")];
     expect(rows).toHaveLength(2);
     expect(container.textContent).toContain("DeepSeek Reasoner");
-    expect(container.textContent).toContain("Pi 目录仅提供初始值，所有字段均可修改");
+    expect(container.textContent).toContain("选择要使用的模型；能力参数可在高级设置中调整");
     expect(container.querySelector<HTMLInputElement>('input[name="providerKey"]')?.type).toBe(
       "hidden",
     );
@@ -918,10 +1149,11 @@ describe("统一平台管理导航", () => {
       (item) => item.textContent?.trim() === "保存并使用",
     );
     if (saveAndUse === undefined) throw new Error("保存并使用按钮缺失");
+    expect(container.querySelectorAll('form button[type="submit"]')).toHaveLength(1);
     await act(async () => saveAndUse.click());
     await settle();
 
-    const request = vi.mocked(api.createModelDraft).mock.calls[0]?.[0];
+    const request = vi.mocked(api.saveModelConfiguration).mock.calls[0]?.[0];
     expect(request).toEqual(
       expect.objectContaining({
         providerKey: "deepseek",
@@ -934,9 +1166,8 @@ describe("统一平台管理导航", () => {
       }),
     );
     expect(request).not.toHaveProperty("reason");
-    expect(api.publish).toHaveBeenCalledWith("model-providers", "deepseek", 1, {
-      expectedVersionToken: 2,
-    });
+    expect(request?.expectedGeneration).toBe(3);
+    expect(api.publish).not.toHaveBeenCalled();
 
     act(() => root.unmount());
     container.remove();
@@ -1011,6 +1242,9 @@ describe("统一平台管理导航", () => {
     act(() => addCustomProvider.click());
 
     expect(container.querySelector(".model-catalog-editor")).not.toBeNull();
+    expect(container.querySelector<HTMLButtonElement>('form button[type="submit"]')?.disabled).toBe(
+      true,
+    );
     expect(container.textContent).toContain("操作未完成");
 
     act(() => root.unmount());

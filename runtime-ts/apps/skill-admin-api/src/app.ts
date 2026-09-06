@@ -38,6 +38,7 @@ const ListQuerySchema = Type.Object(
   {
     cursor: Type.Optional(IdSchema),
     limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 30 })),
+    latestOnly: Type.Optional(Type.Boolean()),
   },
   strict,
 );
@@ -93,6 +94,9 @@ export function registerSkillAdminApiRoutes(
           userId,
           ...(request.query.limit === undefined ? {} : { limit: request.query.limit }),
           ...(request.query.cursor === undefined ? {} : { cursor: request.query.cursor }),
+          ...(request.query.latestOnly === undefined
+            ? {}
+            : { latestOnly: request.query.latestOnly }),
         });
         return success(request, {
           items: page.items,
@@ -205,7 +209,7 @@ export function registerSkillAdminApiRoutes(
           userId,
           submissionId: request.params.submissionId,
           expectedVersionToken: request.body.expectedVersionToken,
-          reason: request.body.reason,
+          ...(request.body.reason === undefined ? {} : { reason: request.body.reason }),
           idempotencyKey: requireIdempotencyKey(request),
         }),
     );

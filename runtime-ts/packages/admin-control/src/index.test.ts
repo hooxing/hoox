@@ -209,6 +209,8 @@ describe("后台控制面领域规则", () => {
       createModelDraft: async () => ({ outcome: "not_found" as const }),
       createMemoryDraft: async () => ({ outcome: "not_found" as const }),
       createRuntimeSettingsDraft: async () => ({ outcome: "not_found" as const }),
+      saveModelConfiguration: async () => ({ outcome: "not_found" as const }),
+      saveMemoryConfiguration: async () => ({ outcome: "not_found" as const }),
       recordProbe: async () => ({ outcome: "not_found" as const }),
       publish: async () => ({ outcome: "not_found" as const }),
       listAudits: async () => [
@@ -256,6 +258,8 @@ describe("后台控制面领域规则", () => {
       createModelDraft: async () => ({ outcome: "not_found" as const }),
       createMemoryDraft: async () => ({ outcome: "not_found" as const }),
       createRuntimeSettingsDraft: async () => ({ outcome: "not_found" as const }),
+      saveModelConfiguration: async () => ({ outcome: "not_found" as const }),
+      saveMemoryConfiguration: async () => ({ outcome: "not_found" as const }),
       recordProbe: async () => ({ outcome: "not_found" as const }),
       publish,
       listAudits: async () => [],
@@ -374,6 +378,8 @@ describe("后台控制面领域规则", () => {
       createModelDraft: async () => ({ outcome: "not_found" as const }),
       createMemoryDraft: async () => ({ outcome: "not_found" as const }),
       createRuntimeSettingsDraft: async () => ({ outcome: "not_found" as const }),
+      saveModelConfiguration: async () => ({ outcome: "not_found" as const }),
+      saveMemoryConfiguration: async () => ({ outcome: "not_found" as const }),
       recordProbe: async () => ({ outcome: "replayed" as const, value: revision }),
       publish: async () => ({ outcome: "not_found" as const }),
       listAudits: async () => [],
@@ -427,6 +433,8 @@ describe("后台控制面领域规则", () => {
         createModelDraft: async () => ({ outcome: "not_found" as const }),
         createMemoryDraft: async () => ({ outcome: "not_found" as const }),
         createRuntimeSettingsDraft: async () => ({ outcome: "not_found" as const }),
+        saveModelConfiguration: async () => ({ outcome: "not_found" as const }),
+        saveMemoryConfiguration: async () => ({ outcome: "not_found" as const }),
         recordProbe: async () => ({ outcome: "not_found" as const }),
         publish,
         listAudits: async () => [],
@@ -455,7 +463,7 @@ describe("后台控制面领域规则", () => {
     },
   );
 
-  it("未探测的记忆 Provider 仍禁止启用", async () => {
+  it("未探测的记忆 Provider 直接交由仓储启用", async () => {
     const repository = {
       resolveRole: async () => "admin" as const,
       resolveModelCredential: async () => "test-model-key",
@@ -467,6 +475,8 @@ describe("后台控制面领域规则", () => {
       createModelDraft: async () => ({ outcome: "not_found" as const }),
       createMemoryDraft: async () => ({ outcome: "not_found" as const }),
       createRuntimeSettingsDraft: async () => ({ outcome: "not_found" as const }),
+      saveModelConfiguration: async () => ({ outcome: "not_found" as const }),
+      saveMemoryConfiguration: async () => ({ outcome: "not_found" as const }),
       recordProbe: async () => ({ outcome: "not_found" as const }),
       publish: async () => ({ outcome: "not_found" as const }),
       listAudits: async () => [],
@@ -520,9 +530,9 @@ describe("后台控制面领域规则", () => {
         },
       ),
     ).rejects.toEqual(
-      expect.objectContaining<Partial<AdminControlServiceError>>({ code: "CONFLICT" }),
+      expect.objectContaining<Partial<AdminControlServiceError>>({ code: "NOT_FOUND" }),
     );
-    expect(memoryPublish).not.toHaveBeenCalled();
+    expect(memoryPublish).toHaveBeenCalled();
   });
 
   it("只有管理员可读取用户目录，并禁止管理员停用自己", async () => {
@@ -548,6 +558,8 @@ describe("后台控制面领域规则", () => {
       createModelDraft: async () => ({ outcome: "not_found" }),
       createMemoryDraft: async () => ({ outcome: "not_found" }),
       createRuntimeSettingsDraft: async () => ({ outcome: "not_found" }),
+      saveModelConfiguration: async () => ({ outcome: "not_found" as const }),
+      saveMemoryConfiguration: async () => ({ outcome: "not_found" as const }),
       recordProbe: async () => ({ outcome: "not_found" }),
       publish: async () => ({ outcome: "not_found" }),
       listAudits: async () => [],

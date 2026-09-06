@@ -14,7 +14,7 @@
 | 模型 Provider 管理 | 早期草稿/探测/发布及只保存不生效页面流程 | [配置参考](../reference/configuration.md) · [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260825180549](20260825180549-direct-model-configuration-activation.md) · [ADR-20260826115031](20260826115031-model-provider-list-edit-test-switch.md) · [ADR-20260906195752](20260906195752-admin-task-oriented-configuration-and-publication.md) |
 | `automation_update` Schema | ADR-20260826164658 的双层定义和 ADR-20260826172009 的单一严格 Schema | [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260828113059](20260828113059-automation-tool-schema-and-error-semantics.md) |
 | Demo 后台身份 | ADR-20260824222258 的 HTTP Basic 入口 | [Demo 持续部署](../operations/demo-cd.md) · [ADR-20260825145416](20260825145416-demo-admin-uses-hoox-session-gate.md) |
-| 后台运行参数与技能发布 | 后台动态并发/压缩参数、管理员先提交复核再发布 | [配置参考](../reference/configuration.md) · [Skill Runtime](../architecture/skill-runtime.md) · [ADR-20260906195752](20260906195752-admin-task-oriented-configuration-and-publication.md) |
+| 后台运行参数与技能发布 | 部署独占日常参数、管理员先提交复核再发布 | [配置参考](../reference/configuration.md) · [Skill Runtime](../architecture/skill-runtime.md) · [ADR-20260906211335](20260906211335-admin-live-configuration-and-memory-credentials.md) · [ADR-20260906195752](20260906195752-admin-task-oriented-configuration-and-publication.md) |
 | Skill 分发 | ADR-0097 的专有 development fixture | [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260827174210](20260827174210-open-source-distribution-license-and-security-gates.md) |
 | 生产 SBOM | clipboard 原生变体规范化特例 | [生产就绪说明](../operations/production-readiness.md) · [ADR-20260906001531](20260906001531-pi-kernel-and-shared-model-catalog.md) |
 | Pi 内核与模型目录 | AgentSession/Session 树装配、前后端分别加载目录 | [Thread 连续上下文](../architecture/thread-continuity.md) · [仓库导览](../architecture/repository-map.md) · [ADR-20260906001531](20260906001531-pi-kernel-and-shared-model-catalog.md) |
@@ -292,6 +292,7 @@
 | [ADR-20260906001531：Pi 内核收敛与共享模型目录](20260906001531-pi-kernel-and-shared-model-catalog.md) | 已接受 | 2026-09-06 |
 | [ADR-20260906163952：关闭记忆时使用独立的消费终态](20260906163952-disabled-memory-ingestion-terminal-state.md) | 已接受 | 2026-09-06 |
 | [ADR-20260906183557：CI 独立容器并行与兼容汇总门禁](20260906183557-ci-parallel-gates-and-image-cache.md) | 已接受 | 2026-09-06 |
-| [ADR-20260906195752：后台按管理任务保存配置与发布技能](20260906195752-admin-task-oriented-configuration-and-publication.md) | 已接受 | 2026-09-06 |
+| [ADR-20260906211335：后台在线配置与记忆密钥托管](20260906211335-admin-live-configuration-and-memory-credentials.md) | 已接受 | 2026-09-06 |
+| [ADR-20260906195752：后台按管理任务保存配置与发布技能](20260906195752-admin-task-oriented-configuration-and-publication.md) | 部分已替代 | 2026-09-06 |
 
 </details>

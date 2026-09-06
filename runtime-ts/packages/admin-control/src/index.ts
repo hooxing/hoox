@@ -39,8 +39,8 @@ export interface MemoryProviderConfiguration {
   readonly displayName: string;
   readonly providerKind: "mem0";
   readonly baseUrl: string;
-  readonly apiSecretRef: "deployment:memory-api";
-  readonly scopeSecretRef: "deployment:memory-scope";
+  readonly apiSecretRef: "deployment:memory-api" | "managed:memory-api";
+  readonly scopeSecretRef: "deployment:memory-scope" | "platform:memory-scope";
   readonly requestTimeoutMs: number;
   readonly enabled: boolean;
 }
@@ -183,10 +183,16 @@ export interface SaveModelProviderConfigurationCommand extends CreateModelProvid
 
 export interface SaveMemoryProviderConfigurationCommand extends CreateMemoryProviderDraftCommand {
   readonly expectedGeneration: number;
+  readonly apiKey?: string;
+  readonly reuseCredentialFromRevision?: number;
 }
 
 export interface CreateRuntimeSettingsDraftCommand extends RuntimeSettingsConfiguration {
   readonly reason: string;
+}
+
+export interface SaveRuntimeSettingsConfigurationCommand extends RuntimeSettingsConfiguration {
+  readonly expectedGeneration: number;
 }
 
 export interface PublishControlRevisionCommand {
@@ -234,6 +240,11 @@ export interface AdminControlRepository {
     providerKey: string,
     revision: number,
   ): Promise<string | undefined>;
+  resolveMemoryCredential?(
+    userId: string,
+    providerKey: string,
+    revision: number,
+  ): Promise<string | undefined>;
   createMemoryDraft(
     input: ControlMutationContext & {
       readonly command: CreateMemoryProviderDraftCommand & { readonly reason: string };
@@ -251,6 +262,11 @@ export interface AdminControlRepository {
   ): Promise<ControlMutationResult<ControlRevision<MemoryProviderConfiguration>>>;
   createRuntimeSettingsDraft(
     input: ControlMutationContext & { readonly command: CreateRuntimeSettingsDraftCommand },
+  ): Promise<ControlMutationResult<ControlRevision<RuntimeSettingsConfiguration>>>;
+  saveRuntimeSettingsConfiguration(
+    input: ControlMutationContext & {
+      readonly command: SaveRuntimeSettingsConfigurationCommand & { readonly reason: string };
+    },
   ): Promise<ControlMutationResult<ControlRevision<RuntimeSettingsConfiguration>>>;
   recordProbe(
     input: ControlMutationContext & {
@@ -302,7 +318,7 @@ export interface AdminControlStatisticsPort {
 
 export interface ProviderProbePort {
   probeModel(configuration: ModelProviderConfiguration, apiKey: string): Promise<void>;
-  probeMemory(configuration: MemoryProviderConfiguration): Promise<void>;
+  probeMemory(configuration: MemoryProviderConfiguration, apiKey?: string): Promise<void>;
 }
 
 export class AdminControlServiceError extends Error {
@@ -492,8 +508,8 @@ function normalizedMemoryProviderConfiguration(
 ): MemoryProviderConfiguration {
   if (input.providerKind !== "mem0") throw new TypeError("记忆 Provider 类型不受支持");
   if (
-    input.apiSecretRef !== "deployment:memory-api" ||
-    input.scopeSecretRef !== "deployment:memory-scope"
+    !["deployment:memory-api", "managed:memory-api"].includes(input.apiSecretRef) ||
+    !["deployment:memory-scope", "platform:memory-scope"].includes(input.scopeSecretRef)
   ) {
     throw new TypeError("记忆 Secret Ref 不受支持");
   }
@@ -502,8 +518,8 @@ function normalizedMemoryProviderConfiguration(
     displayName: normalizedText(input.displayName, "显示名称", 120),
     providerKind: "mem0",
     baseUrl: normalizedHttpsUrl(input.baseUrl),
-    apiSecretRef: "deployment:memory-api",
-    scopeSecretRef: "deployment:memory-scope",
+    apiSecretRef: input.apiSecretRef,
+    scopeSecretRef: input.scopeSecretRef,
     requestTimeoutMs: boundedInteger(input.requestTimeoutMs, "记忆请求超时", 100, 120_000),
     enabled: input.enabled,
   });
@@ -723,16 +739,43 @@ export class AdminControlService {
     command: SaveMemoryProviderConfigurationCommand,
   ) {
     requireRole(await this.repository.resolveRole(context.actorUserId), ["admin"]);
-    const models = await this.repository.listModelProviders(context.actorUserId);
-    if (!models.some((model) => model.status === "active")) {
-      throw new TypeError("请先在模型服务中接入当前模型，再保存长期记忆设置。");
+    const { expectedGeneration, reason, apiKey, reuseCredentialFromRevision, ...configuration } =
+      command;
+    if (
+      apiKey !== undefined &&
+      (apiKey.length < 1 || Buffer.byteLength(apiKey, "utf8") > 8192 || /[\r\n\0]/u.test(apiKey))
+    ) {
+      throw new TypeError("记忆密钥格式无效");
     }
-    const { expectedGeneration, reason, ...configuration } = command;
+    if (apiKey !== undefined && reuseCredentialFromRevision !== undefined)
+      throw new TypeError("记忆密钥不能同时更新和复用");
+    if (
+      configuration.apiSecretRef === "managed:memory-api" &&
+      apiKey === undefined &&
+      reuseCredentialFromRevision === undefined
+    )
+      throw new TypeError("请输入 Mem0 API Key");
+    if (
+      configuration.apiSecretRef === "deployment:memory-api" &&
+      (apiKey !== undefined || reuseCredentialFromRevision !== undefined)
+    )
+      throw new TypeError("托管密钥需要使用后台配置");
     return unwrapMutation(
       await this.repository.saveMemoryConfiguration({
         ...context,
         command: {
           ...normalizeMemoryProviderConfiguration(configuration),
+          ...(apiKey === undefined ? {} : { apiKey }),
+          ...(reuseCredentialFromRevision === undefined
+            ? {}
+            : {
+                reuseCredentialFromRevision: boundedInteger(
+                  reuseCredentialFromRevision,
+                  "复用凭据",
+                  1,
+                  Number.MAX_SAFE_INTEGER,
+                ),
+              }),
           expectedGeneration: boundedInteger(
             expectedGeneration,
             "配置更新状态",
@@ -816,6 +859,28 @@ export class AdminControlService {
     );
   }
 
+  async saveRuntimeSettingsConfiguration(
+    context: ControlMutationContext,
+    command: SaveRuntimeSettingsConfigurationCommand,
+  ) {
+    requireRole(await this.repository.resolveRole(context.actorUserId), ["admin"]);
+    return unwrapMutation(
+      await this.repository.saveRuntimeSettingsConfiguration({
+        ...context,
+        command: {
+          ...normalizeRuntimeSettingsConfiguration(command),
+          expectedGeneration: boundedInteger(
+            command.expectedGeneration,
+            "配置更新状态",
+            0,
+            Number.MAX_SAFE_INTEGER,
+          ),
+          reason: "保存并使用运行设置",
+        },
+      }),
+    );
+  }
+
   async probe(
     context: ControlMutationContext,
     input: {
@@ -852,7 +917,18 @@ export class AdminControlService {
           apiKey,
         );
       } else {
-        await this.probes.probeMemory(input.revision.configuration as MemoryProviderConfiguration);
+        const memory = input.revision.configuration as MemoryProviderConfiguration;
+        const apiKey =
+          memory.apiSecretRef === "managed:memory-api"
+            ? await this.repository.resolveMemoryCredential?.(
+                context.actorUserId,
+                objectKey,
+                input.revision.revision,
+              )
+            : undefined;
+        if (memory.apiSecretRef === "managed:memory-api" && apiKey === undefined)
+          throw new Error("MEMORY_CREDENTIAL_UNAVAILABLE");
+        await this.probes.probeMemory(memory, apiKey);
       }
     } catch {
       status = "failed";
@@ -929,9 +1005,10 @@ export class AdminControlService {
 
 export interface RuntimeControlConfigurationSnapshot {
   readonly generation: number;
-  readonly model: ControlRevision<ModelProviderConfiguration>;
+  readonly model?: ControlRevision<ModelProviderConfiguration>;
   /** 仅存在于 Worker 内存中的解密结果，不属于任何控制面 DTO。 */
-  readonly modelApiKey: string;
+  readonly modelApiKey?: string;
+  readonly memoryApiKey?: string;
   readonly memory?: ControlRevision<MemoryProviderConfiguration>;
   readonly runtimeSettings?: ControlRevision<RuntimeSettingsConfiguration>;
 }

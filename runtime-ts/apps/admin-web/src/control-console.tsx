@@ -149,7 +149,7 @@ function Overview({
           </span>
           <span>
             记忆：
-            {overview.activeModel === undefined
+            {overview.activeMemory === undefined && overview.activeModel === undefined
               ? "由部署配置管理"
               : overview.activeMemory?.configuration.enabled
                 ? overview.activeMemory.configuration.displayName
@@ -909,20 +909,21 @@ function MemoryProviderWorkspace({
   deploymentSettings,
   activeMemory,
   available,
-  managed,
 }: {
   readonly onSave: (form: FormData) => Promise<void>;
   readonly busy: boolean;
   readonly deploymentSettings: AdminControlOverviewDto["deploymentSettings"];
   readonly activeMemory: AdminControlOverviewDto["activeMemory"];
   readonly available: boolean;
-  readonly managed: boolean;
 }) {
+  const [validationError, setValidationError] = useState("");
   const configuration = activeMemory?.configuration;
   const enabled = configuration?.enabled ?? false;
-  const ready = ["MEM0_API_KEY", "MEM0_SCOPE_HMAC_KEY"].every(
-    (key) => deploymentState(deploymentSettings, key) === "configured",
-  );
+  const ready =
+    configuration?.apiSecretRef === "managed:memory-api" ||
+    ["MEM0_API_KEY", "MEM0_SCOPE_HMAC_KEY"].every(
+      (key) => deploymentState(deploymentSettings, key) === "configured",
+    );
   return (
     <div className="memory-provider-workspace">
       <section className="memory-provider-hero">
@@ -933,8 +934,8 @@ function MemoryProviderWorkspace({
           <h2>长期记忆</h2>
           <p>让后续对话记住用户的长期偏好。保存后对新任务生效。</p>
         </div>
-        <span className={`memory-active-state ${managed && enabled ? "active" : "inactive"}`}>
-          {!available ? "状态未知" : !managed ? "由部署配置管理" : enabled ? "已开启" : "已关闭"}
+        <span className={`memory-active-state ${enabled ? "active" : "inactive"}`}>
+          {!available ? "状态未知" : enabled ? "已开启" : "已关闭"}
         </span>
       </section>
       <form
@@ -942,26 +943,46 @@ function MemoryProviderWorkspace({
         className="control-form memory-control-form"
         onSubmit={(event: FormEvent<HTMLFormElement>) => {
           event.preventDefault();
-          if (!available || !managed || busy) return;
-          void onSave(new FormData(event.currentTarget));
+          if (!available || busy) return;
+          const form = new FormData(event.currentTarget);
+          if (form.get("enabled") === "on" && !ready && !value(form, "apiKey")) {
+            setValidationError("请输入 Mem0 API Key 后再开启长期记忆。");
+            return;
+          }
+          setValidationError("");
+          void onSave(form);
         }}
       >
-        {available && !managed && (
-          <p className="wide boundary-note" role="status">
-            当前长期记忆由部署配置管理。请先在模型服务中接入后台模型，再编辑和保存这里的记忆设置。
-          </p>
-        )}
         <fieldset
           className="control-form wide memory-configuration-fields"
-          disabled={busy || !available || !managed}
+          disabled={busy || !available}
         >
           <label className="checkbox wide">
             <input name="enabled" type="checkbox" defaultChecked={enabled} />
             开启长期记忆
           </label>
           <p className="wide boundary-note">
-            {ready ? "服务凭据已配置。" : "服务凭据尚未就绪，请在部署配置中完成连接设置。"}
+            {ready
+              ? "密钥已配置，留空保留现有密钥。"
+              : "填入 Mem0 API Key 后即可开启，无需修改配置文件或重启服务。"}
           </p>
+          <label className="wide">
+            Mem0 API Key
+            <input
+              name="apiKey"
+              type="password"
+              autoComplete="new-password"
+              maxLength={8192}
+              onChange={() => setValidationError("")}
+              placeholder={ready ? "留空保留现有密钥" : "输入 Mem0 API Key"}
+            />
+            <small>密钥加密保存，保存后不再显示。</small>
+          </label>
+          {validationError && (
+            <p role="alert" className="wide">
+              {validationError}
+            </p>
+          )}
           <details className="wide memory-connection-settings">
             <summary>服务连接设置</summary>
             <div className="control-form">
@@ -995,16 +1016,97 @@ function MemoryProviderWorkspace({
               </label>
             </div>
           </details>
-          <button
-            type="submit"
-            className="primary-button"
-            disabled={busy || !available || !managed}
-          >
+          <button type="submit" className="primary-button" disabled={busy || !available}>
             {busy ? "正在保存…" : "保存并生效"}
           </button>
         </fieldset>
       </form>
     </div>
+  );
+}
+
+const runtimeSettingFields = [
+  ["workerMaxConcurrentRuns", "每个 Worker 同时运行的任务数", 1, 100, 20],
+  ["userMaxConcurrentRunsPerTenant", "每位用户同时运行的任务数", 1, 100, 2],
+  ["compactionSoftLimitPercent", "开始压缩的上下文占比（%）", 50, 95, 80],
+  ["compactionTargetPercent", "压缩后的目标占比（%）", 20, 90, 55],
+  ["compactionRecentUserTokens", "保留的近期用户内容（Token）", 1, 1000000, 4096],
+  ["compactionMaxOutputTokens", "压缩摘要最大长度（Token）", 128, 1000000, 4096],
+  ["compactionTimeoutMs", "压缩请求超时（毫秒）", 1000, 600000, 60000],
+] as const;
+
+function RuntimeSettingsWorkspace({
+  overview,
+  busy,
+  onSave,
+}: {
+  readonly overview: AdminControlOverviewDto | undefined;
+  readonly busy: boolean;
+  readonly onSave: (form: FormData) => Promise<void>;
+}) {
+  const configuration = overview?.activeRuntimeSettings?.configuration;
+  return (
+    <section className="control-panel">
+      <h2>运行设置</h2>
+      <p>
+        保存后无需重启。并发上限影响新任务领取，上下文压缩设置对新任务生效，正在执行的任务继续完成。
+      </p>
+      {overview !== undefined && configuration === undefined && (
+        <p>尚未保存后台设置，下面为推荐默认值；保存前继续使用部署默认值。</p>
+      )}
+      <form
+        key={overview?.activeRuntimeSettings?.revision ?? "defaults"}
+        className="control-form runtime-settings-form"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void onSave(new FormData(event.currentTarget));
+        }}
+      >
+        <input type="hidden" name="expectedGeneration" value={overview?.generation ?? 0} />
+        <fieldset disabled={busy || overview === undefined}>
+          <div className="form-grid">
+            {runtimeSettingFields.slice(0, 2).map(([name, label, min, max, fallback]) => (
+              <label key={name}>
+                {label}
+                <input
+                  name={name}
+                  type="number"
+                  min={min}
+                  max={max}
+                  required
+                  defaultValue={configuration?.[name] ?? fallback}
+                />
+              </label>
+            ))}
+          </div>
+          <details>
+            <summary>上下文压缩设置</summary>
+            <div className="form-grid">
+              {runtimeSettingFields.slice(2).map(([name, label, min, max, fallback]) => (
+                <label key={name}>
+                  {label}
+                  <input
+                    name={name}
+                    type="number"
+                    min={min}
+                    max={max}
+                    required
+                    defaultValue={configuration?.[name] ?? fallback}
+                  />
+                </label>
+              ))}
+            </div>
+          </details>
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={busy || overview === undefined}
+          >
+            {busy ? "正在保存…" : "保存并生效"}
+          </button>
+        </fieldset>
+      </form>
+    </section>
   );
 }
 
@@ -1035,7 +1137,7 @@ export function AdminControlConsole({
     try {
       const [nextOverview, nextItems, nextAudits, nextCatalogProviders, nextUsers, nextIdentity] =
         await Promise.all([
-          view === "identity" || view === "settings"
+          view === "identity"
             ? Promise.resolve(undefined)
             : queryClient.fetchQuery({
                 queryKey: ["admin-control", "overview", view],
@@ -1212,10 +1314,24 @@ export function AdminControlConsole({
           <AuditTrail items={audits} />
         </div>
       ) : view === "settings" ? (
-        <section className="control-panel">
-          <h2>运行参数由配置文件管理</h2>
-          <p>并发、上下文压缩和部署连接由维护者在配置文件中设置。</p>
-        </section>
+        <RuntimeSettingsWorkspace
+          overview={overview}
+          busy={busy}
+          onSave={(form) =>
+            operation(() =>
+              api.saveRuntimeSettingsConfiguration({
+                workerMaxConcurrentRuns: number(form, "workerMaxConcurrentRuns"),
+                userMaxConcurrentRunsPerTenant: number(form, "userMaxConcurrentRunsPerTenant"),
+                compactionSoftLimitPercent: number(form, "compactionSoftLimitPercent"),
+                compactionTargetPercent: number(form, "compactionTargetPercent"),
+                compactionRecentUserTokens: number(form, "compactionRecentUserTokens"),
+                compactionMaxOutputTokens: number(form, "compactionMaxOutputTokens"),
+                compactionTimeoutMs: number(form, "compactionTimeoutMs"),
+                expectedGeneration: number(form, "expectedGeneration"),
+              }),
+            )
+          }
+        />
       ) : view === "models" ? (
         <section className="control-panel">
           <ModelProviderWorkspace
@@ -1270,7 +1386,6 @@ export function AdminControlConsole({
             deploymentSettings={overview?.deploymentSettings ?? []}
             activeMemory={overview?.activeMemory}
             available={overview !== undefined}
-            managed={overview?.activeModel !== undefined}
             onSave={(form) =>
               operation(() =>
                 api.saveMemoryConfiguration({
@@ -1279,8 +1394,21 @@ export function AdminControlConsole({
                   displayName: value(form, "displayName"),
                   providerKind: "mem0",
                   baseUrl: value(form, "baseUrl"),
-                  apiSecretRef: "deployment:memory-api",
-                  scopeSecretRef: "deployment:memory-scope",
+                  apiSecretRef:
+                    value(form, "apiKey") ||
+                    overview?.activeMemory?.configuration.apiSecretRef === "managed:memory-api"
+                      ? "managed:memory-api"
+                      : "deployment:memory-api",
+                  scopeSecretRef:
+                    value(form, "apiKey") ||
+                    overview?.activeMemory?.configuration.apiSecretRef === "managed:memory-api"
+                      ? "platform:memory-scope"
+                      : "deployment:memory-scope",
+                  ...(value(form, "apiKey")
+                    ? { apiKey: value(form, "apiKey") }
+                    : overview?.activeMemory?.configuration.apiSecretRef === "managed:memory-api"
+                      ? { reuseCredentialFromRevision: overview.activeMemory.revision }
+                      : {}),
                   requestTimeoutMs: number(form, "requestTimeoutMs"),
                   enabled: form.get("enabled") === "on",
                 }),

@@ -26,6 +26,7 @@ function fixture(
   options: {
     readonly existing?: RunCompactionSettings;
     readonly legacy?: Record<string, unknown>;
+    readonly active?: Record<string, unknown>;
     readonly concurrentWinner?: RunCompactionSettings;
   } = {},
 ) {
@@ -36,6 +37,9 @@ function fixture(
     }
     if (sql.includes("FROM run_runtime_config_snapshots")) {
       return { rows: options.legacy === undefined ? [] : [{ configuration: options.legacy }] };
+    }
+    if (sql.includes("FROM admin_control_active_configs")) {
+      return { rows: options.active === undefined ? [] : [{ configuration: options.active }] };
     }
     if (sql.includes("INSERT INTO run_compaction_settings_snapshots")) {
       if (options.concurrentWinner !== undefined) {
@@ -59,6 +63,26 @@ function fixture(
 }
 
 describe("Run 压缩参数持久快照", () => {
+  it("无后台模型时也采用在线设置，并在后续修改后保持 Run 首次选择", async () => {
+    const active = {
+      compactionSoftLimitPercent: 90,
+      compactionTargetPercent: 65,
+      compactionRecentUserTokens: 1234,
+      compactionMaxOutputTokens: 2048,
+      compactionTimeoutMs: 30000,
+    };
+    const { repository } = fixture({ active });
+    const initial = await repository.resolveForRun(input);
+    expect(initial).toEqual({
+      softLimitPercent: 90,
+      targetPercent: 65,
+      recentUserTokens: 1234,
+      maxOutputTokens: 2048,
+      timeoutMs: 30000,
+    });
+    active.compactionTargetPercent = 70;
+    await expect(repository.resolveForRun(input)).resolves.toEqual(initial);
+  });
   it("无后台模型或旧引用也固定部署值，重建仓储后保持原值", async () => {
     const { pool, query, repository } = fixture();
     await expect(repository.resolveForRun(input)).resolves.toEqual(deploymentSettings);
@@ -74,7 +98,7 @@ describe("Run 压缩参数持久快照", () => {
       "",
     ]);
     expect(query.mock.calls.some(([sql]) => sql.includes("admin_control_active_configs"))).toBe(
-      false,
+      true,
     );
   });
 

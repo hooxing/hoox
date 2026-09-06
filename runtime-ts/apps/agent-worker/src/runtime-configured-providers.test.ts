@@ -236,4 +236,70 @@ describe("Run 固定运行配置", () => {
     expect(active).toBeDefined();
     await expect(provider.resolve(source)).resolves.toBe(active);
   });
+
+  it.each([false, true])(
+    "无托管模型和部署 API Key 时使用后台记忆密钥，沿用历史隔离密钥=%s",
+    async (legacyScope) => {
+      const memory = memorySnapshot(true).memory;
+      if (memory === undefined) throw new Error("测试记忆缺失");
+      const current = {
+        generation: 1,
+        memoryApiKey: "unit-managed-memory-key",
+        memory: {
+          ...memory,
+          configuration: {
+            ...memory.configuration,
+            apiSecretRef: "managed:memory-api" as const,
+            scopeSecretRef: "platform:memory-scope" as const,
+          },
+        },
+      };
+      const fetcher = vi.fn(
+        async (_url: unknown, _init?: RequestInit) =>
+          new Response(JSON.stringify({ results: [] }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      );
+      vi.stubGlobal("fetch", fetcher);
+      try {
+        const provider = new RuntimeConfiguredMemoryProvider(
+          { resolveForRun: async () => current },
+          legacyScope
+            ? {
+                apiKey: "unused-deployment-key",
+                scopeHmacKey: "legacy-scope-key-at-least-32-bytes",
+              }
+            : undefined,
+          undefined,
+          "platform-scope-key-at-least-32-bytes",
+        );
+        const source = {
+          tenantId: "tenant-a",
+          tenantKind: "personal" as const,
+          userId: "user-a",
+          threadId: "thread-a",
+          runId: "run-a",
+          query: "长期偏好",
+        };
+        await expect(provider.retrieve(source)).resolves.toEqual([]);
+        expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("authorization")).toBe(
+          "Token unit-managed-memory-key",
+        );
+        const firstBody = fetcher.mock.calls[0]?.[1]?.body;
+        const comparison = new RuntimeConfiguredMemoryProvider(
+          { resolveForRun: async () => ({ ...current, memoryApiKey: "rotated-memory-key" }) },
+          undefined,
+          undefined,
+          legacyScope
+            ? "legacy-scope-key-at-least-32-bytes"
+            : "platform-scope-key-at-least-32-bytes",
+        );
+        await comparison.retrieve(source);
+        expect(fetcher.mock.calls[1]?.[1]?.body).toBe(firstBody);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 });

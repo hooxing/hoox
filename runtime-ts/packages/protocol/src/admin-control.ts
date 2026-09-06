@@ -97,8 +97,14 @@ export const MemoryProviderConfigurationDtoSchema = Type.Object(
     displayName: Type.String({ minLength: 1, maxLength: 120 }),
     providerKind: Type.Literal("mem0"),
     baseUrl: ProviderUrlSchema,
-    apiSecretRef: Type.Literal("deployment:memory-api"),
-    scopeSecretRef: Type.Literal("deployment:memory-scope"),
+    apiSecretRef: Type.Union([
+      Type.Literal("deployment:memory-api"),
+      Type.Literal("managed:memory-api"),
+    ]),
+    scopeSecretRef: Type.Union([
+      Type.Literal("deployment:memory-scope"),
+      Type.Literal("platform:memory-scope"),
+    ]),
     requestTimeoutMs: Type.Integer({ minimum: 100, maximum: 120_000 }),
     enabled: Type.Boolean(),
   },
@@ -119,6 +125,17 @@ export const RuntimeSettingsConfigurationDtoSchema = Type.Object(
   strict,
 );
 export type RuntimeSettingsConfigurationDto = Static<typeof RuntimeSettingsConfigurationDtoSchema>;
+
+export const SaveRuntimeSettingsConfigurationRequestSchema = Type.Composite(
+  [
+    RuntimeSettingsConfigurationDtoSchema,
+    Type.Object({ expectedGeneration: Type.Integer({ minimum: 0 }) }, strict),
+  ],
+  strict,
+);
+export type SaveRuntimeSettingsConfigurationRequest = Static<
+  typeof SaveRuntimeSettingsConfigurationRequestSchema
+>;
 
 function revisionSchema<T extends ReturnType<typeof Type.Object>>(configuration: T) {
   return Type.Object(
@@ -322,7 +339,19 @@ export type SaveModelProviderConfigurationRequest = Static<
 >;
 
 export const SaveMemoryProviderConfigurationRequestSchema = Type.Composite(
-  [CreateMemoryProviderDraftRequestSchema, SaveConfigurationExpectationSchema],
+  [
+    CreateMemoryProviderDraftRequestSchema,
+    SaveConfigurationExpectationSchema,
+    Type.Object(
+      {
+        apiKey: Type.Optional(Type.String({ minLength: 1, maxLength: 8192 })),
+        reuseCredentialFromRevision: Type.Optional(
+          Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+        ),
+      },
+      strict,
+    ),
+  ],
   strict,
 );
 export type SaveMemoryProviderConfigurationRequest = Static<

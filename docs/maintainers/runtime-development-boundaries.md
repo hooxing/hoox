@@ -171,13 +171,13 @@ Worker 通过 `pi-adapter` 直接装配 `pi-ai` 的 `Models`、Provider 和内�
 
 成功 Run 的终态事务仍可登记记忆 Outbox。消费者按 Run 固定配置解析提供方，关闭时以 `skipped` 结束本地消费并释放 claim，保留已有 Provider 事件与提交时间，不伪造成功或计入失败。`skipped` 不参与后续领取、待处理统计和 Tenant 调度；维护成功后正常释放 Tenant 租约。升级必须先应用 0059 迁移，再启动新 Worker；已有积压等待租约到期后自动重领收尾，无需手工改状态。存在 `skipped` 时数据库 down 拒绝回退，应用回退可以保留扩展 schema。决策及兼容边界见[关闭记忆的消费终态](../decisions/20260906163952-disabled-memory-ingestion-terminal-state.md)。
 
-模型与记忆一次保存接口要求幂等键和 `expectedGeneration`，由服务端事务执行授权、generation 比较、不可变配置写入、active 切换及审计；失败不遗留待启用配置。页面保存失败保留输入与原并发检查值，冲突后由管理员显式刷新。记忆保存使用 `PUT /v1/admin/control/memory-providers/current`，必须先接入后台当前模型；表单带入当前值并按 `enabled` 显示开启或关闭，密钥仍只来自部署秘密。
+模型与记忆一次保存接口要求幂等键和 `expectedGeneration`，由服务端事务执行授权、generation 比较、不可变配置写入、active 切换及审计；失败不遗留待启用配置。页面保存失败保留输入与原并发检查值，冲突后由管理员显式刷新。记忆保存使用 `PUT /v1/admin/control/memory-providers/current`，独立于后台模型；表单带入当前值并按 `enabled` 显示开启或关闭，Mem0 API Key 支持加密托管与同供应商凭据复用。投影、幂等结果与审计不返回密钥明文或密文。
 
-启用配置会递增全局 generation；首次建立托管模型/记忆快照的 Run 固定对应 revision 与密钥，重试不反查当前 active。没有已启用后台模型时回退部署 `MODEL_*` 配置，部署模型本身尚未持久快照化；切换托管模式前应排空这类在途 Run。独立压缩快照与旧 Run 继承边界见[Thread 连续上下文](../architecture/thread-continuity.md)。
+启用配置会递增全局 generation；首次建立托管模型/记忆快照的 Run 固定对应 revision 与密钥，重试不反查当前 active。0062 允许模型为空及 generation 为零，首次快照也固定未配置的选择；已有空模型快照继续使用部署 `MODEL_*`，不会中途绑定新托管模型。部署回退模型的具体参数仍未持久化，修改其环境变量前应排空在途 Run。独立压缩快照与旧 Run 继承边界见[Thread 连续上下文](../architecture/thread-continuity.md)。
 
-Worker 并发与五项上下文压缩数值参数由部署配置拥有，后台运行设置的创建/发布路由已撤销，仅保留历史读取。迁移 `0061_run_compaction_settings_snapshots` 以 Tenant/Run 复合键保存实际使用的五项压缩参数，Runtime 只有 SELECT/INSERT，管理角色无权读取；已有快照时拒绝 down。变量默认值、重启与预算裁剪规则见[配置参考](../reference/configuration.md)。
+Worker 并发与五项上下文压缩数值参数由后台运行设置优先提供，未保存时采用部署默认；直接保存入口为 `PUT /v1/admin/control/runtime-settings/current`，旧草稿/发布路由不恢复。并发在调度时热读取，失败保留最后有效值。迁移 `0061_run_compaction_settings_snapshots` 以 Tenant/Run 复合键保存实际使用的五项压缩参数，Runtime 只有 SELECT/INSERT，管理角色无权读取；已有快照时拒绝 down。变量默认值、生效时机与预算裁剪规则见[配置参考](../reference/configuration.md)。
 
-数据库、角色、JWT、TLS、S3、Sandbox 和监听地址由部署文件管理，没有通用 ENV 写接口。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 只是部署级加密根，不是 Provider 调用密钥。完整边界见[后台任务操作决策](../decisions/20260906195752-admin-task-oriented-configuration-and-publication.md)、
+数据库、角色、JWT、TLS、S3、Sandbox 和监听地址由部署文件管理，没有通用 ENV 写接口。`MODEL_CREDENTIAL_ENCRYPTION_KEY` 只是部署级加密根，不是 Provider 调用密钥。在线配置与密钥边界见[后台在线配置决策](../decisions/20260906211335-admin-live-configuration-and-memory-credentials.md)，操作边界见[后台任务操作决策](../decisions/20260906195752-admin-task-oriented-configuration-and-publication.md)、
 [模型供应商列表、编辑、测试与切换决策](../decisions/20260826115031-model-provider-list-edit-test-switch.md)、
 [模型配置保存即启用决策](../decisions/20260825180549-direct-model-configuration-activation.md)、
 [Provider 标识与启用门禁决策](../decisions/20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md)、

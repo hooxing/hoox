@@ -1,3 +1,9 @@
+import type { Model, Models } from "@earendil-works/pi-ai";
+import {
+  DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
+  DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
+  type ModelProviderModelConfiguration,
+} from "@hoox/admin-control";
 import {
   ArtifactCompletionGateAdapter,
   ArtifactDeliveryService,
@@ -6,11 +12,6 @@ import {
   PgSimpleDeliveredFileRepository,
   SimpleArtifactDeliveryService,
 } from "@hoox/artifact";
-import {
-  DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
-  DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
-  type ModelProviderModelConfiguration,
-} from "@hoox/admin-control";
 import { tenantId } from "@hoox/domain";
 import {
   type Mem0DevelopmentConfiguration,
@@ -24,10 +25,10 @@ import {
   createS3BlobStore,
   createS3StableBlobGarbageCollector,
   DEFAULT_HISTORY_DIRECTORY_TIME_ZONE,
-  ModelProviderCredentialCipher,
   DurableResourceBlobWriter,
   DurableTraceBlobPersistenceAdapter,
   DurableWorkspaceCandidateBlobWriter,
+  ModelProviderCredentialCipher,
   PgAgentControlRepository,
   PgBackedSandboxSessionRegistry,
   PgBlobLifecycleRepository,
@@ -38,8 +39,8 @@ import {
   PgRecoveryMetrics,
   PgResourceFilesystemCatalog,
   PgRunCancellationReader,
-  PgRunDispatchOutbox,
   PgRunCompactionSettingsRepository,
+  PgRunDispatchOutbox,
   PgRuntimeControlConfigurationRepository,
   PgRuntimeRolloutRepository,
   PgScheduledTaskDueConsumer,
@@ -62,9 +63,9 @@ import {
 } from "@hoox/persistence";
 import {
   bindTrustedPiModelContextCapability,
+  createOpenAiCompatiblePiProvider,
   isOfficialDeepSeekV4FlashModel,
   loadTrustedModelTokenizerCapability,
-  createOpenAiCompatiblePiProvider,
   type TrustedPiModelContextCapability,
 } from "@hoox/pi-adapter";
 import {
@@ -93,7 +94,6 @@ import {
 } from "@hoox/sandbox";
 import { SkillRuntimeService } from "@hoox/skill";
 import { DeliverFileToolRouterFactory } from "@hoox/tool-router";
-import type { Model, Models } from "@earendil-works/pi-ai";
 import { SandboxDeliverFileSource } from "./deliver-file-source.js";
 import { installModelWireFetchInstrumentation, ModelWireTraceSession } from "./model-wire-trace.js";
 import { createPgDurableObservationSession } from "./pg-observation-assembly.js";
@@ -107,7 +107,6 @@ import {
   SandboxSessionRegistryRouter,
   SystemWorkerClock,
 } from "./production-worker-runtime.js";
-import { performWorkerMaintenance } from "./worker-maintenance.js";
 import {
   createDevelopmentProjectInternalTrajectoryMirror,
   createDevelopmentProjectRunEventMirror,
@@ -116,12 +115,13 @@ import {
 } from "./project-model-wire-trace.js";
 import { BlobPromptImageLoader } from "./prompt-image-loader.js";
 import { RunWorker } from "./run-worker.js";
+import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
 import {
   RuntimeConfiguredMemoryProvider,
   RuntimeConfiguredSessionFactory,
 } from "./runtime-configured-providers.js";
-import { RuntimeCompactionCoordinator } from "./runtime-compaction.js";
 import { ManagedResourceFilesystemSnapshotMaterializer } from "./sandbox-resource-filesystem-materializer.js";
+import { performWorkerMaintenance } from "./worker-maintenance.js";
 import { ManifestWorkspaceRuntime } from "./workspace-runtime.js";
 
 /** Artifact 服务请求的 TTL 必须不超过同一 Worker BlobStore 的预签名策略上限。 */
@@ -1187,9 +1187,9 @@ async function assembleWorkerRuntime(
       configuration.threadContext.compaction,
       configuration.model.maxOutputTokens,
       async (snapshot, compactionSettings) => {
-        const configuredProvider = snapshot?.model.configuration;
+        const configuredProvider = snapshot?.model?.configuration;
         const dynamicModel =
-          snapshot === undefined
+          snapshot?.model === undefined || snapshot.modelApiKey === undefined
             ? { model, modelRuntime }
             : await createOpenAiCompatibleProvider({
                 displayName: snapshot.model.configuration.displayName,
@@ -1199,7 +1199,7 @@ async function assembleWorkerRuntime(
                 models: snapshot.model.configuration.models,
               });
         const dynamicModelContext =
-          snapshot === undefined
+          snapshot?.model === undefined
             ? modelContext
             : await createOpenAiCompatibleModelContextCapability(
                 dynamicModel.modelRuntime,
@@ -1254,6 +1254,9 @@ async function assembleWorkerRuntime(
       runtimeConfigurations,
       configuration.memoryDeploymentSecrets,
       deploymentMemoryProvider,
+      new ModelProviderCredentialCipher(
+        configuration.model.credentialEncryptionKey,
+      ).memoryScopeHmacKey(),
     );
     const memoryConsumer = new MemoryIngestionConsumer(
       new PgMemoryIngestionStore(pool, blobs),
@@ -1335,6 +1338,7 @@ async function assembleWorkerRuntime(
           workerMaxConcurrentRuns: configuration.worker.maxConcurrentRuns,
           userMaxConcurrentRunsPerTenant: configuration.worker.userMaxConcurrentRunsPerTenant,
         },
+        resolveConcurrencySettings: () => runtimeConfigurations.resolveActiveRuntimeSettings(),
         maintenance: (tenantId) =>
           performWorkerMaintenance({
             resourceBlobBatchLimit: 16,

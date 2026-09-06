@@ -12,22 +12,22 @@ import {
   digestControlRequest,
   type MemoryProviderConfiguration,
   type ModelProviderConfiguration,
+  normalizeRuntimeSettingsConfiguration,
   normalizeStoredMemoryProviderConfiguration,
   normalizeStoredModelProviderConfiguration,
-  normalizeRuntimeSettingsConfiguration,
+  type PlatformUserPage,
+  type PlatformUserStatus,
+  type PlatformUserSummary,
   type RuntimeControlConfigurationPort,
   type RuntimeControlConfigurationSnapshot,
   type RuntimeSettingsConfiguration,
   type RuntimeStatistics,
-  type PlatformUserPage,
-  type PlatformUserStatus,
-  type PlatformUserSummary,
 } from "@hoox/admin-control";
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { mapPersistenceError } from "./errors.js";
 import {
-  isEncryptedModelProviderCredential,
   type EncryptedModelProviderCredential,
+  isEncryptedModelProviderCredential,
   type ModelProviderCredentialCipher,
 } from "./model-provider-credential.js";
 import { withTenantTransaction, withTransaction } from "./postgres.js";
@@ -495,11 +495,27 @@ export class PgAdminControlRepository
               credentialFingerprint: credential.ciphertext,
             });
           } else {
-            // 当前运行模型是记忆快照的接入前置；不能保存后仍悄悄使用部署回退记忆。
-            if ((await activeConfiguration(client, "model_provider")) === undefined)
+            const { apiKey, reuseCredentialFromRevision, ...configuration } = command as Omit<
+              Parameters<AdminControlRepository["saveMemoryConfiguration"]>[0]["command"],
+              "expectedGeneration" | "reason"
+            >;
+            let credential: EncryptedModelProviderCredential | undefined;
+            if (apiKey !== undefined)
+              credential = this.credentialCipher.encrypt(`memory:${key}`, apiKey);
+            else if (reuseCredentialFromRevision !== undefined) {
+              const source = await client.query<{
+                readonly configuration: Record<string, unknown>;
+              }>(
+                "SELECT configuration FROM admin_control_config_revisions WHERE object_kind='memory_provider' AND object_key=$1 AND revision=$2",
+                [key, reuseCredentialFromRevision],
+              );
+              const candidate = source.rows[0]?.configuration.credential;
+              if (isEncryptedModelProviderCredential(candidate)) credential = candidate;
+            }
+            if (configuration.apiSecretRef === "managed:memory-api" && credential === undefined)
               return { outcome: "conflict" };
-            stored = command;
-            configurationDigest = digestControlRequest(command);
+            stored = { ...configuration, ...(credential === undefined ? {} : { credential }) };
+            configurationDigest = digestControlRequest(stored);
           }
           const duplicate = await client.query<{ readonly revision: string }>(
             "SELECT revision::text FROM admin_control_config_revisions WHERE object_kind=$1 AND object_key=$2 AND configuration_digest=$3",
@@ -652,6 +668,19 @@ export class PgAdminControlRepository
     );
   }
 
+  async resolveMemoryCredential(userId: string, providerKey: string, revision: number) {
+    return await this.readAs(userId, async (client) => {
+      const result = await client.query<{ readonly configuration: Record<string, unknown> }>(
+        "SELECT configuration FROM admin_control_config_revisions WHERE object_kind='memory_provider' AND object_key=$1 AND revision=$2",
+        [providerKey, revision],
+      );
+      const credential = result.rows[0]?.configuration.credential;
+      return isEncryptedModelProviderCredential(credential)
+        ? this.credentialCipher.decrypt(`memory:${providerKey}`, credential)
+        : undefined;
+    });
+  }
+
   async createRuntimeSettingsDraft(
     input: Parameters<AdminControlRepository["createRuntimeSettingsDraft"]>[0],
   ) {
@@ -663,6 +692,81 @@ export class PgAdminControlRepository
       reason,
       "global",
     );
+  }
+
+  async saveRuntimeSettingsConfiguration(
+    input: Parameters<AdminControlRepository["saveRuntimeSettingsConfiguration"]>[0],
+  ): Promise<ControlMutationResult<ControlRevision<RuntimeSettingsConfiguration>>> {
+    try {
+      return await withControlTransaction(this.pool, input.actorUserId, async (client) => {
+        const role = await client.query<{ readonly role: string }>(
+          "SELECT role FROM platform_control_operators WHERE user_id=$1 AND status='active'",
+          [input.actorUserId],
+        );
+        if (role.rows[0]?.role !== "admin") return { outcome: "not_authorized" };
+        return await idempotentMutation(client, input, async () => {
+          const locked = await client.query<{ readonly generation: string }>(
+            "SELECT generation::text FROM admin_control_generation WHERE singleton='global' FOR UPDATE",
+          );
+          const generation = safeInteger(locked.rows[0]?.generation ?? "", "配置更新状态");
+          const { expectedGeneration, reason, ...configuration } = input.command;
+          if (generation !== expectedGeneration) return { outcome: "conflict" };
+          await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+            "runtime_settings:global",
+          ]);
+          const digest = digestControlRequest(configuration);
+          const duplicate = await client.query<{ readonly revision: string }>(
+            "SELECT revision::text FROM admin_control_config_revisions WHERE object_kind=$1 AND object_key=$2 AND configuration_digest=$3",
+            ["runtime_settings", "global", digest],
+          );
+          let revision = duplicate.rows[0]?.revision;
+          if (revision === undefined) {
+            const next = await client.query<{ readonly revision: string }>(
+              "SELECT (COALESCE(max(revision),0)+1)::text AS revision FROM admin_control_config_revisions WHERE object_kind=$1 AND object_key=$2",
+              ["runtime_settings", "global"],
+            );
+            revision = String(safeInteger(next.rows[0]?.revision ?? "", "配置快照", 1));
+            await client.query(
+              `INSERT INTO admin_control_config_revisions(object_kind,object_key,revision,configuration,configuration_digest,created_by)
+               VALUES($1,$2,$3,$4::jsonb,$5,$6)`,
+              [
+                "runtime_settings",
+                "global",
+                revision,
+                JSON.stringify(configuration),
+                digest,
+                input.actorUserId,
+              ],
+            );
+          }
+          // 保存与启用处于同一事务，设置不依赖管理员预先接入模型。
+          await activateConfiguration(
+            client,
+            {
+              actorUserId: input.actorUserId,
+              kind: "runtime_settings",
+              objectKey: "global",
+              revision: Number(revision),
+              reason,
+            },
+            generation,
+          );
+          const projected = await projectedRevision(
+            client,
+            "runtime_settings",
+            "global",
+            Number(revision),
+          );
+          if (projected === undefined) throw new Error("保存后的运行设置投影缺失");
+          return {
+            outcome: "applied",
+            value: mapRevision<RuntimeSettingsConfiguration>(projected),
+          };
+        });
+      });
+    } catch (error) {
+      throw mapPersistenceError(error, "保存并使用运行设置");
+    }
   }
 
   async recordProbe(
@@ -1120,11 +1224,11 @@ async function publishPairIsCompatible(
 
 interface ActiveConfigurationRow extends QueryResultRow {
   readonly generation: string;
-  readonly model_key: string;
-  readonly model_revision: string;
+  readonly model_key: string | null;
+  readonly model_revision: string | null;
   readonly model_configuration: unknown;
-  readonly model_created_by: string;
-  readonly model_created_at: Date | string;
+  readonly model_created_by: string | null;
+  readonly model_created_at: Date | string | null;
   readonly memory_key: string | null;
   readonly memory_revision: string | null;
   readonly memory_configuration: unknown | null;
@@ -1149,8 +1253,8 @@ const activeConfigurationSql = `
          NULL::jsonb AS settings_configuration,
          NULL::text AS settings_created_by,NULL::timestamptz AS settings_created_at
     FROM admin_control_generation generation
-    JOIN admin_control_active_configs model ON model.object_kind='model_provider'
-    JOIN admin_control_config_revisions model_revision
+    LEFT JOIN admin_control_active_configs model ON model.object_kind='model_provider'
+    LEFT JOIN admin_control_config_revisions model_revision
       ON model_revision.object_kind=model.object_kind AND model_revision.object_key=model.object_key
      AND model_revision.revision=model.revision
     LEFT JOIN admin_control_active_configs memory ON memory.object_kind='memory_provider'
@@ -1183,7 +1287,10 @@ function mapRuntimeSnapshot(
   credentialCipher: ModelProviderCredentialCipher,
   legacyModelApiKey?: string,
 ): RuntimeControlConfigurationSnapshot {
-  const modelConfiguration = mapConfiguration("model_provider", row.model_configuration);
+  const modelConfiguration =
+    row.model_configuration === null
+      ? undefined
+      : mapConfiguration("model_provider", row.model_configuration);
   const memoryConfiguration =
     row.memory_configuration === null
       ? undefined
@@ -1192,21 +1299,38 @@ function mapRuntimeSnapshot(
     row.settings_configuration === null
       ? undefined
       : mapConfiguration("runtime_settings", row.settings_configuration);
-  const rawModel = row.model_configuration as Record<string, unknown>;
-  const encryptedCredential = rawModel.credential;
+  const rawModel = row.model_configuration as Record<string, unknown> | null;
+  const encryptedCredential = rawModel?.credential;
   const modelApiKey = isEncryptedModelProviderCredential(encryptedCredential)
-    ? credentialCipher.decrypt(row.model_key, encryptedCredential)
+    ? credentialCipher.decrypt(row.model_key as string, encryptedCredential)
     : legacyModelApiKey;
-  if (modelApiKey === undefined) throw new Error("MODEL_CREDENTIAL_UNAVAILABLE");
+  if (modelConfiguration !== undefined && modelApiKey === undefined)
+    throw new Error("MODEL_CREDENTIAL_UNAVAILABLE");
+  const rawMemory = row.memory_configuration as Record<string, unknown> | null;
+  const memoryCredential = rawMemory?.credential;
+  const memoryApiKey = isEncryptedModelProviderCredential(memoryCredential)
+    ? credentialCipher.decrypt(`memory:${row.memory_key}`, memoryCredential)
+    : undefined;
+  if (
+    (memoryConfiguration as MemoryProviderConfiguration | undefined)?.apiSecretRef ===
+      "managed:memory-api" &&
+    memoryApiKey === undefined
+  )
+    throw new Error("MEMORY_CREDENTIAL_UNAVAILABLE");
   return Object.freeze({
-    generation: safeInteger(row.generation, "运行配置 Generation", 1),
-    modelApiKey,
-    model: snapshotRevision({
-      configuration: modelConfiguration as ModelProviderConfiguration,
-      revision: safeInteger(row.model_revision, "模型 Revision", 1),
-      createdBy: row.model_created_by,
-      createdAt: row.model_created_at,
-    }),
+    generation: safeInteger(row.generation, "运行配置 Generation", 0),
+    ...(memoryApiKey === undefined ? {} : { memoryApiKey }),
+    ...(modelConfiguration === undefined
+      ? {}
+      : {
+          modelApiKey: modelApiKey as string,
+          model: snapshotRevision({
+            configuration: modelConfiguration as ModelProviderConfiguration,
+            revision: safeInteger(row.model_revision as string, "模型 Revision", 1),
+            createdBy: row.model_created_by as string,
+            createdAt: row.model_created_at as Date | string,
+          }),
+        }),
     ...(memoryConfiguration === undefined ||
     row.memory_revision === null ||
     row.memory_created_by === null ||
@@ -1320,7 +1444,7 @@ export class PgRuntimeControlConfigurationRepository implements RuntimeControlCo
               settings.configuration AS settings_configuration,settings.created_by AS settings_created_by,
               settings.created_at AS settings_created_at
          FROM run_runtime_config_snapshots snapshot
-         JOIN admin_control_config_revisions model
+         LEFT JOIN admin_control_config_revisions model
            ON model.object_kind='model_provider' AND model.object_key=snapshot.model_object_key
           AND model.revision=snapshot.model_revision
          LEFT JOIN admin_control_config_revisions memory

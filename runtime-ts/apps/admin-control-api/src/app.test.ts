@@ -73,6 +73,7 @@ function fixture() {
     createMemoryDraft: vi.fn(),
     saveModelConfiguration: vi.fn(async () => ({ ...modelRevision, status: "active" as const })),
     saveMemoryConfiguration: vi.fn(),
+    saveRuntimeSettingsConfiguration: vi.fn(),
     probe: vi.fn(async () => ({
       ...modelRevision,
       versionToken: 2,
@@ -309,7 +310,7 @@ describe("后台控制 API", () => {
     await app.close();
   });
 
-  it("运行参数由部署配置维护，后台不再注册写接口", async () => {
+  it("运行参数不再暴露草稿及审批发布接口", async () => {
     const { app } = fixture();
     for (const url of [
       "/v1/admin/control/runtime-settings",
@@ -327,6 +328,41 @@ describe("后台控制 API", () => {
       });
       expect(response.statusCode).toBe(404);
     }
+    await app.close();
+  });
+
+  it("运行设置 PUT 一次保存并激活，要求幂等键且无需原因", async () => {
+    const { app, control } = fixture();
+    const configuration = {
+      workerMaxConcurrentRuns: 20,
+      userMaxConcurrentRunsPerTenant: 2,
+      compactionSoftLimitPercent: 80,
+      compactionTargetPercent: 55,
+      compactionRecentUserTokens: 4096,
+      compactionMaxOutputTokens: 4096,
+      compactionTimeoutMs: 60000,
+    };
+    control.saveRuntimeSettingsConfiguration.mockResolvedValue({
+      ...modelRevision,
+      status: "active",
+      configuration,
+    });
+    const response = await app.inject({
+      method: "PUT",
+      url: "/v1/admin/control/runtime-settings/current",
+      headers: {
+        authorization: "Bearer admin",
+        "content-type": "application/json",
+        "idempotency-key": "settings-save-0001",
+      },
+      payload: { ...configuration, expectedGeneration: 0 },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(control.saveRuntimeSettingsConfiguration).toHaveBeenCalledWith(
+      expect.objectContaining({ actorUserId: "user_admin", idempotencyKey: "settings-save-0001" }),
+      { ...configuration, expectedGeneration: 0 },
+    );
+    expect(response.json().data.status).toBe("active");
     await app.close();
   });
 
@@ -368,15 +404,15 @@ describe("后台控制 API", () => {
     await app.close();
   });
 
-  it("记忆保存直接返回当前配置且不调用探测", async () => {
+  it.each([false, true])("记忆保存直接返回当前配置且不调用探测，托管凭据=%s", async (managed) => {
     const { app, control } = fixture();
     const configuration = {
       providerKey: "mem0",
       displayName: "Mem0",
       providerKind: "mem0",
       baseUrl: "https://memory.example.invalid/",
-      apiSecretRef: "deployment:memory-api",
-      scopeSecretRef: "deployment:memory-scope",
+      apiSecretRef: managed ? "managed:memory-api" : "deployment:memory-api",
+      scopeSecretRef: managed ? "platform:memory-scope" : "deployment:memory-scope",
       requestTimeoutMs: 10000,
       enabled: false,
     };
@@ -393,10 +429,22 @@ describe("后台控制 API", () => {
         "content-type": "application/json",
         "idempotency-key": "save-memory-0001",
       },
-      payload: { ...configuration, expectedGeneration: 1 },
+      payload: {
+        ...configuration,
+        expectedGeneration: 1,
+        ...(managed ? { apiKey: "unit-write-only-memory-key" } : {}),
+      },
     });
     expect(response.statusCode).toBe(200);
     expect(response.json().data.configuration.enabled).toBe(false);
+    expect(response.body).not.toContain("unit-write-only-memory-key");
+    expect(control.saveMemoryConfiguration).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        ...configuration,
+        ...(managed ? { apiKey: "unit-write-only-memory-key" } : {}),
+      }),
+    );
     expect(control.probe).not.toHaveBeenCalled();
     expect(control.createMemoryDraft).not.toHaveBeenCalled();
     await app.close();

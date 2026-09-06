@@ -105,6 +105,14 @@ Remove-Item Env:REAL_PI_CUBE_SMOKE
 
 该 Gate 使用真实 Sandbox，但模型侧使用 Faux Provider，不需要外部模型凭据。
 
+### Pi 与 E2B 纵向链路
+
+```powershell
+corepack pnpm test:pi-e2b:real
+```
+
+该命令构建受影响工作区并读取 `.env` 或进程环境中的 E2B 配置。独立夹具按 Worker 的 E2B 基线建立普通用户拥有的 `/workspace`，再与 Pi+Cube 共用纵向断言，验证两次真实工具执行、逐调用授权、回执返回模型、文件结果和 `agent.settled`，最后销毁 Sandbox。模型侧使用 Faux Provider，不需要外部模型凭据；该 Gate 不经过 PostgreSQL 调度、S3 或本机 Docker。
+
 ### PostgreSQL M4 黑盒
 
 ```powershell

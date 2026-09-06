@@ -4,7 +4,7 @@
 
 ## 当前拓扑
 
-- GitHub Actions 只在 `main` 的“持续集成”成功后自动构建 `linux/arm64` 镜像，也允许维护者手工选择 ref。
+- GitHub Actions 只接受本仓库 `main` push 的成功“持续集成”自动触发，也允许维护者在 `main` 手工重试。两种入口都要求发布 SHA 仍是 `main` 当前提交，且该 SHA 最新的 `ci.yml` push 运行已经成功；手工入口不能绕过 CI。
 - 镜像推送到 GHCR，并以不可变 digest 交给目标主机；目标主机不从 Git 仓库现场构建。
 - 单机 Docker Compose 运行 PostgreSQL、MinIO、API、Web、Admin Control、Admin Web、Trajectory、Scheduler 和 Worker。PostgreSQL 与 MinIO 端口只绑定宿主机回环地址。
 - API、Web、Admin Control、Admin Web 与 Trajectory 使用 host network，并分别只监听 `127.0.0.1:3001`、`127.0.0.1:4173`、`127.0.0.1:3003`、`127.0.0.1:4174` 和 `127.0.0.1:4188`。
@@ -37,13 +37,17 @@
 
 `.github/workflows/cd-demo.yml` 执行以下步骤：
 
-1. 检出通过 CI 的实际提交，在 GitHub 托管 ARM64 Runner 上使用固定 commit 的 Action 构建镜像并推送 GHCR。
+1. 检出触发事件对应的实际提交，通过 GitHub API 核对 `main` 当前 SHA 和同提交最新 CI，再在 GitHub 托管 ARM64 Runner 上使用固定 commit 的 Action 构建镜像并推送 GHCR。构建后、配置 SSH 前再次核对；排队、重跑或构建期间已过期的发布会跳过后续远端操作，GitHub API 不可用或最新 CI 未通过时失败关闭。
 2. 上传 `deploy/demo` 中的 Compose、初始化、Nginx 和远程发布契约到新的 release 目录。
 3. 目标主机拉取 digest，启动 PostgreSQL 与 MinIO，幂等创建对象桶，再执行只向前的数据库迁移。
 4. 以现有管理员用户 ID 或安全占位值启动 API、用户 Web 与只读 Trajectory，验证本机探针后生成 root-only Admin Control Bearer Token 配置，再原子安装不含 HTTP Basic 的 Nginx 配置。
 5. 通过公开 HTTPS Better Auth 路径注册 Demo 账号。该账号是部署脚本托管的固定演示管理员，脚本在受限数据库连接中将其邮箱状态幂等标记为已验证，再使用同一账号登录并交换 Hoox Session；普通用户仍必须通过 SMTP 验证码完成邮箱验证。随后查询其用户与个人 Tenant，将用户幂等提升为有效平台控制管理员和 Skill 发布管理员。发布脚本只在 `0600` 临时 curl 配置中保存本次验收使用的 Hoox access token。
 6. 将实际管理员用户同时注入 API 与 Admin Control，将个人 Tenant 注入 Scheduler 与 Worker，并强制重建这些应用容器及 Trajectory。API 以该用户 ID 作为 Demo 后台与轨迹会话闸门；Worker 默认把诊断镜像写入跨发布共享轨迹卷。
 7. 检查七个应用服务持续运行、用户端 readiness、后台 readiness、后台与轨迹页面外壳、无会话后台及轨迹 API 的 `401`，以及带管理员 Hoox 会话的后台概览和轨迹列表 API，再切换 `/opt/hoox-demo/current`。只保留最近五个 release 目录；轨迹卷不随 release 目录清理。
+
+发布工作流串行执行，不会为新提交取消正在迁移或恢复的发布。提交新鲜度以发布前最后一次 GitHub API 核验为准；核验后到发布完成期间仍可能出现新提交，新提交通过 CI 后再发布。首次引入门禁前的旧 SHA 不包含门禁脚本，重跑对应旧工作流可能直接失败，应等待当前 `main` CI 或从 `main` 手工重试。
+
+目标主机拉取镜像的凭据只保存于按 workflow run 和 attempt 隔离的 `0700` Docker 配置目录。登录前预置无秘密的 GHCR auth 条目，禁止自动使用宿主机凭据 helper；无论发布成功或失败，工作流都会尝试 logout 并删除该目录中的凭据，同时删除 Runner 上的 SSH 私钥。SSH 使用严格主机校验、连接超时与断连探测，HTTP 探针和账号初始化请求都有单次超时；无响应的外部服务不会无限占用发布步骤。
 
 ## 验证
 
@@ -67,7 +71,7 @@ docker compose --project-name hoox-demo \
 
 ## 失败与回滚
 
-- 任一步失败时，远程脚本停止候选应用容器，并在存在上一 release 时恢复上一镜像和应用进程，并继续挂载同一稳定轨迹卷。上一 release 不含后台或 Trajectory 服务时，只恢复其实际声明的服务。
+- 发布开始前缺失契约或共享配置时直接退出，不改变运行中的应用。远程脚本进入发布阶段后，命令失败和显式验收失败都会由主 shell 执行一次恢复：停止候选应用容器，并在存在上一 release 时恢复上一镜像和应用进程，继续挂载同一稳定轨迹卷。上一 release 不含后台或 Trajectory 服务时，只恢复其实际声明的服务；恢复中的清理失败不会阻止其余恢复动作，也不会覆盖原始失败退出码。
 - Nginx 候选配置失败时恢复上一站点配置；Admin Control Token 文件继续留在 root-only 路径并由后续成功发布覆盖。旧版 htpasswd 可能为回滚到仍使用 HTTP Basic 的上一 release 而暂时保留，但现行配置不会引用它。
 - 数据库迁移只向前执行，脚本绝不自动运行 down；若新迁移与旧镜像不兼容，必须停服并按该迁移的 ADR 和备份方案处理。
 - PostgreSQL、MinIO 和轨迹数据卷都不随应用回滚或旧 release 目录清理删除。轨迹卷固定为 `hoox-demo-trajectory-data-20260903`；未来只能通过显式数据 epoch 切换执行受控轮换，自动发布不得删除。
@@ -76,3 +80,4 @@ docker compose --project-name hoox-demo \
   才可按确切卷名清理旧卷。发布脚本在候选和回滚时都必须显式强制重建 PostgreSQL 与 MinIO，不能依赖 Compose 自动
   识别顶层卷名变化；自动发布不得无条件执行 `down --volumes`。
 - 首次发布没有上一版本可恢复；失败后数据库和对象存储可保留用于诊断，但公开应用进程必须保持停止，修正配置后重新发布。
+- 主机断连、Runner 被强制终止或主机进程被强制杀死时，自动恢复和凭据清理无法保证完成。应先检查 Actions 的失败步骤及目标主机状态；凭据清理失败时，检查对应 `/opt/hoox-demo/shared/.docker-<run_id>-<run_attempt>` 目录并清理该次发布的凭据，不要删除其他发布或运维账号的 Docker 配置。

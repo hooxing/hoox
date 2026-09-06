@@ -8,7 +8,6 @@ import {
   MenuUnfoldOutlined,
   RobotOutlined,
   SafetyCertificateOutlined,
-  SettingOutlined,
   TeamOutlined,
 } from "@ant-design/icons";
 import type {
@@ -54,21 +53,20 @@ export function browserRouterBasename(baseUrl: string): string | undefined {
 }
 
 const statusLabels: Readonly<Record<SkillPublicationStatus, string>> = {
-  draft: "草稿",
-  submitted: "待审核",
-  approved: "已批准",
+  draft: "待发布",
+  submitted: "待发布",
+  approved: "待发布",
   rejected: "已驳回",
   published: "已发布",
-  revoked: "已撤销",
+  revoked: "已下架",
 };
 
-type CreateFormState = Omit<CreateSkillSubmissionRequest, "files">;
+type CreateFormState = Omit<CreateSkillSubmissionRequest, "files" | "version">;
 
 const emptyCreateForm: CreateFormState = {
   canonicalKey: "",
   displayName: "",
   publisher: "",
-  version: "",
   description: "",
   sourceUrl: "",
   sourceRevision: "",
@@ -166,15 +164,15 @@ function SubmissionList({
     <aside className="submission-list" aria-label="发布申请列表">
       <div className="panel-heading">
         <div>
-          <span className="eyebrow">队列</span>
-          <h2>发布申请</h2>
+          <span className="eyebrow">技能</span>
+          <h2>技能列表</h2>
         </div>
         <span className="count">{items.length}</span>
       </div>
       {loading && items.length === 0 ? (
-        <p className="empty-state">正在加载申请…</p>
+        <p className="empty-state">正在加载技能…</p>
       ) : items.length === 0 ? (
-        <p className="empty-state">当前没有发布申请。</p>
+        <p className="empty-state">尚未上传技能。</p>
       ) : (
         <div className="submission-items">
           {items.map((submission) => (
@@ -187,9 +185,7 @@ function SubmissionList({
               onClick={() => onSelect(submission.submissionId)}
             >
               <span className="submission-title">{submission.displayName}</span>
-              <span className="submission-key">
-                {submission.canonicalKey} · {submission.version}
-              </span>
+              <span className="submission-key">{submission.canonicalKey}</span>
               <span className={`status status-${submission.status}`}>
                 {statusLabels[submission.status]}
               </span>
@@ -209,14 +205,31 @@ function SubmissionList({
 
 function CreateSubmissionForm({
   api,
+  replacing,
+  onCancelReplacement,
   onCreated,
   onError,
 }: {
   readonly api: SkillAdminApiContract;
+  readonly replacing?: SkillSubmissionDto | undefined;
+  readonly onCancelReplacement: () => void;
   readonly onCreated: (submission: SkillSubmissionDto) => void;
   readonly onError: (error: AdminApiError) => void;
 }) {
-  const [form, setForm] = useState<CreateFormState>(emptyCreateForm);
+  const [form, setForm] = useState<CreateFormState>(() =>
+    replacing === undefined
+      ? emptyCreateForm
+      : {
+          canonicalKey: replacing.canonicalKey,
+          displayName: replacing.displayName,
+          publisher: replacing.publisher,
+          description: replacing.description,
+          compatibility: replacing.compatibility,
+          sourceUrl: replacing.sourceUrl,
+          sourceRevision: replacing.sourceRevision,
+          licenseSpdx: replacing.licenseSpdx,
+        },
+  );
   const [files, setFiles] = useState<readonly File[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [metadataFeedback, setMetadataFeedback] = useState<
@@ -241,7 +254,13 @@ function CreateSubmissionForm({
           });
           return;
         }
-        setForm((current) => ({ ...current, ...prefill.values }));
+        setForm((current) => ({
+          ...current,
+          ...prefill.values,
+          ...(replacing === undefined
+            ? {}
+            : { canonicalKey: replacing.canonicalKey, publisher: replacing.publisher }),
+        }));
         setMetadataFeedback({
           kind: "success",
           message: `已从 SKILL.md 自动填写：${prefill.recognizedLabels.join("、")}。请核对后提交。${
@@ -262,7 +281,7 @@ function CreateSubmissionForm({
     return () => {
       active = false;
     };
-  }, [files]);
+  }, [files, replacing]);
 
   const update = (field: keyof CreateFormState, value: string) => {
     setForm((current) => ({ ...current, [field]: value }));
@@ -299,11 +318,13 @@ function CreateSubmissionForm({
   };
 
   return (
-    <details className="create-panel">
+    <details className="create-panel" open={replacing === undefined ? undefined : true}>
       <summary>
         <span>
-          <span className="eyebrow">新申请</span>
-          <strong>上传技能包</strong>
+          <span className="eyebrow">{replacing === undefined ? "添加技能" : "更新技能"}</span>
+          <strong>
+            {replacing === undefined ? "上传技能包" : `上传更新：${replacing.displayName}`}
+          </strong>
         </span>
         <span aria-hidden="true">＋</span>
       </summary>
@@ -313,6 +334,7 @@ function CreateSubmissionForm({
             规范键
             <input
               required
+              readOnly={replacing !== undefined}
               maxLength={128}
               pattern="[a-z0-9][a-z0-9._-]{0,127}"
               placeholder="code-review"
@@ -335,16 +357,8 @@ function CreateSubmissionForm({
               required
               maxLength={200}
               value={form.publisher}
+              readOnly={replacing !== undefined}
               onChange={(event) => update("publisher", event.target.value)}
-            />
-          </label>
-          <label>
-            版本
-            <input
-              required
-              maxLength={64}
-              value={form.version}
-              onChange={(event) => update("version", event.target.value)}
             />
           </label>
           <label className="wide-field">
@@ -444,8 +458,18 @@ function CreateSubmissionForm({
         </fieldset>
         <div className="form-actions">
           <button type="submit" className="primary-button" disabled={submitting}>
-            {submitting ? "正在编码并创建…" : "创建草稿申请"}
+            {submitting ? "正在上传并校验…" : "上传并预览"}
           </button>
+          {replacing !== undefined && (
+            <button
+              type="button"
+              className="quiet-button"
+              onClick={onCancelReplacement}
+              disabled={submitting}
+            >
+              取消更新
+            </button>
+          )}
         </div>
       </form>
     </details>
@@ -455,107 +479,87 @@ function CreateSubmissionForm({
 function StatusActions({
   submission,
   busy,
-  onSubmit,
-  onReview,
   onPublish,
   onRevoke,
+  onReplace,
 }: {
   readonly submission: SkillSubmissionDto;
   readonly busy: boolean;
-  readonly onSubmit: () => void;
-  readonly onReview: (decision: "approve" | "reject", reason?: string) => void;
-  readonly onPublish: (recommended: boolean) => void;
-  readonly onRevoke: (reason: string) => void;
+  readonly onPublish: () => void;
+  readonly onRevoke: (publication: NonNullable<SkillSubmissionDto["currentPublished"]>) => void;
+  readonly onReplace: () => void;
 }) {
-  const [rejectionReason, setRejectionReason] = useState("");
-  const [revokeReason, setRevokeReason] = useState("");
-  const [recommended, setRecommended] = useState(true);
+  const [confirmingRevoke, setConfirmingRevoke] = useState(false);
+  const published =
+    submission.currentPublished ??
+    (submission.status === "published"
+      ? { submissionId: submission.submissionId, versionToken: submission.versionToken }
+      : undefined);
+  const revokingCurrentUpload = published?.submissionId === submission.submissionId;
 
   return (
     <section className="action-panel" aria-label="状态操作">
       <div>
-        <span className="eyebrow">状态流转</span>
+        <span className="eyebrow">发布</span>
         <h3>可执行操作</h3>
       </div>
-      {submission.status === "draft" && (
-        <button type="button" className="primary-button" disabled={busy} onClick={onSubmit}>
-          提交审核
-        </button>
-      )}
-      {submission.status === "submitted" && (
-        <div className="review-actions">
-          <button
-            type="button"
-            className="primary-button"
-            disabled={busy}
-            onClick={() => onReview("approve")}
-          >
-            批准申请
-          </button>
-          <label>
-            驳回原因
-            <textarea
-              maxLength={2048}
-              rows={3}
-              value={rejectionReason}
-              onChange={(event) => setRejectionReason(event.target.value)}
-            />
-          </label>
-          <button
-            type="button"
-            className="danger-button"
-            disabled={busy || rejectionReason.trim().length === 0}
-            onClick={() => onReview("reject", rejectionReason.trim())}
-          >
-            驳回申请
-          </button>
-        </div>
-      )}
-      {submission.status === "approved" && (
+      {["draft", "submitted", "approved"].includes(submission.status) && (
         <div className="publish-actions">
-          <label className="checkbox-label">
-            <input
-              type="checkbox"
-              checked={recommended}
-              onChange={(event) => setRecommended(event.target.checked)}
-            />
-            同时设为推荐版本
-          </label>
-          <button
-            type="button"
-            className="primary-button"
-            disabled={busy}
-            onClick={() => onPublish(recommended)}
-          >
+          <p>
+            当前上传内容尚未发布，文件校验已通过。
+            {submission.currentPublished === undefined
+              ? "发布后，用户可以安装此包。"
+              : "已发布内容和已有安装继续有效；发布后，新安装使用此包。"}
+          </p>
+          <button type="button" className="primary-button" disabled={busy} onClick={onPublish}>
             发布技能
           </button>
         </div>
       )}
-      {submission.status === "published" && (
+      {published !== undefined && (
         <div className="review-actions">
-          <label>
-            撤销原因
-            <textarea
-              maxLength={2048}
-              rows={3}
-              value={revokeReason}
-              onChange={(event) => setRevokeReason(event.target.value)}
-            />
-          </label>
-          <button
-            type="button"
-            className="danger-button"
-            disabled={busy || revokeReason.trim().length === 0}
-            onClick={() => onRevoke(revokeReason.trim())}
-          >
-            撤销发布
-          </button>
+          {confirmingRevoke ? (
+            <div role="alert" aria-label="下架确认">
+              <p>
+                下架后将停止新安装，已安装的此包也无法继续执行。
+                {revokingCurrentUpload ? "" : "当前上传内容保持未发布。"}确定下架？
+              </p>
+              <button
+                type="button"
+                className="danger-button"
+                disabled={busy}
+                onClick={() => onRevoke(published)}
+              >
+                确认下架
+              </button>
+              <button
+                type="button"
+                className="quiet-button"
+                disabled={busy}
+                onClick={() => setConfirmingRevoke(false)}
+              >
+                取消
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="danger-button"
+              disabled={busy}
+              onClick={() => setConfirmingRevoke(true)}
+            >
+              {revokingCurrentUpload ? "下架技能" : "下架当前已发布内容"}
+            </button>
+          )}
         </div>
       )}
       {(submission.status === "rejected" || submission.status === "revoked") && (
-        <p className="terminal-note">此申请已进入终态，没有可执行的状态操作。</p>
+        <p className="terminal-note">此包已停止发布。需要重新发布时，请上传更新。</p>
       )}
-      {busy && <span className="working-note">正在提交状态变更…</span>}
+      <button type="button" className="quiet-button" disabled={busy} onClick={onReplace}>
+        上传更新
+      </button>
+      {busy && <span className="working-note">正在保存…</span>}
     </section>
   );
 }
@@ -563,17 +567,15 @@ function StatusActions({
 function SubmissionDetail({
   submission,
   busy,
-  onSubmit,
-  onReview,
   onPublish,
   onRevoke,
+  onReplace,
 }: {
   readonly submission: SkillSubmissionDto;
   readonly busy: boolean;
-  readonly onSubmit: () => void;
-  readonly onReview: (decision: "approve" | "reject", reason?: string) => void;
-  readonly onPublish: (recommended: boolean) => void;
-  readonly onRevoke: (reason: string) => void;
+  readonly onPublish: () => void;
+  readonly onRevoke: (publication: NonNullable<SkillSubmissionDto["currentPublished"]>) => void;
+  readonly onReplace: () => void;
 }) {
   const sourceUrl = safeSourceUrl(submission.sourceUrl);
   return (
@@ -582,9 +584,7 @@ function SubmissionDetail({
         <div>
           <span className="eyebrow">{submission.canonicalKey}</span>
           <h2>{submission.displayName}</h2>
-          <p>
-            {submission.publisher} · {submission.version}
-          </p>
+          <p>{submission.publisher}</p>
         </div>
         <span className={`status large status-${submission.status}`}>
           {statusLabels[submission.status]}
@@ -608,10 +608,6 @@ function SubmissionDetail({
           <div>
             <dt>安全状态</dt>
             <dd>受限</dd>
-          </div>
-          <div>
-            <dt>版本令牌</dt>
-            <dd>{submission.versionToken}</dd>
           </div>
         </dl>
       </section>
@@ -721,10 +717,9 @@ function SubmissionDetail({
       <StatusActions
         submission={submission}
         busy={busy}
-        onSubmit={onSubmit}
-        onReview={onReview}
         onPublish={onPublish}
         onRevoke={onRevoke}
+        onReplace={onReplace}
       />
     </article>
   );
@@ -743,6 +738,7 @@ export function SkillConsole({
   const [detailLoading, setDetailLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<AdminApiError>();
+  const [replacing, setReplacing] = useState<SkillSubmissionDto>();
 
   const loadFirstPage = useCallback(async () => {
     setLoading(true);
@@ -799,12 +795,10 @@ export function SkillConsole({
 
   const updateSubmission = useCallback((submission: SkillSubmissionDto) => {
     setSelected(submission);
-    setSubmissions((current) => {
-      const exists = current.some((item) => item.submissionId === submission.submissionId);
-      return exists
-        ? current.map((item) => (item.submissionId === submission.submissionId ? submission : item))
-        : [submission, ...current];
-    });
+    setSubmissions((current) => [
+      submission,
+      ...current.filter((item) => item.canonicalKey !== submission.canonicalKey),
+    ]);
   }, []);
 
   const runTransition = async (operation: () => Promise<SkillSubmissionDto>) => {
@@ -837,17 +831,21 @@ export function SkillConsole({
           className="quiet-button refresh-button"
           onClick={() => void loadFirstPage()}
         >
-          刷新队列
+          刷新列表
         </button>
       </header>
 
       {error !== undefined && <ErrorBanner error={error} onDismiss={() => setError(undefined)} />}
 
       <CreateSubmissionForm
+        key={replacing?.submissionId ?? "new-skill"}
         api={apiClient}
+        replacing={replacing}
+        onCancelReplacement={() => setReplacing(undefined)}
         onCreated={(submission) => {
           updateSubmission(submission);
           setSelectedId(submission.submissionId);
+          setReplacing(undefined);
         }}
         onError={setError}
       />
@@ -866,8 +864,8 @@ export function SkillConsole({
               .listSubmissions(nextCursor)
               .then((page) => {
                 setSubmissions((current) => {
-                  const byId = new Map(current.map((item) => [item.submissionId, item]));
-                  for (const item of page.items) byId.set(item.submissionId, item);
+                  const byId = new Map(current.map((item) => [item.canonicalKey, item]));
+                  for (const item of page.items) byId.set(item.canonicalKey, item);
                   return [...byId.values()];
                 });
                 setNextCursor(page.nextCursor);
@@ -882,46 +880,38 @@ export function SkillConsole({
           ) : current === undefined ? (
             <div className="empty-detail">
               <span aria-hidden="true">◇</span>
-              <h2>选择一项发布申请</h2>
-              <p>审核技能入口、文件摘要与来源信息，然后执行状态流转。</p>
+              <h2>选择一个技能</h2>
+              <p>上传技能包，检查预览后即可发布。</p>
             </div>
           ) : (
             <SubmissionDetail
               key={current.submissionId}
               submission={current}
               busy={actionLoading}
-              onSubmit={() =>
-                void runTransition(() =>
-                  apiClient.submitSubmission(current.submissionId, {
-                    expectedVersionToken: current.versionToken,
-                  }),
-                )
-              }
-              onReview={(decision, reason) =>
-                void runTransition(() =>
-                  apiClient.reviewSubmission(current.submissionId, {
-                    expectedVersionToken: current.versionToken,
-                    decision,
-                    ...(reason === undefined ? {} : { reason }),
-                  }),
-                )
-              }
-              onPublish={(recommended) =>
+              onPublish={() =>
                 void runTransition(() =>
                   apiClient.publishSubmission(current.submissionId, {
                     expectedVersionToken: current.versionToken,
-                    recommended,
+                    recommended: true,
                   }),
                 )
               }
-              onRevoke={(reason) =>
-                void runTransition(() =>
-                  apiClient.revokeSubmission(current.submissionId, {
-                    expectedVersionToken: current.versionToken,
-                    reason,
-                  }),
-                )
+              onRevoke={(publication) =>
+                void runTransition(async () => {
+                  const revoked = await apiClient.revokeSubmission(publication.submissionId, {
+                    expectedVersionToken: publication.versionToken,
+                  });
+                  if (publication.submissionId === current.submissionId) return revoked;
+                  const { currentPublished: _previous, ...upload } = current;
+                  return {
+                    ...upload,
+                    ...(revoked.currentPublished === undefined
+                      ? {}
+                      : { currentPublished: revoked.currentPublished }),
+                  };
+                })
               }
+              onReplace={() => setReplacing(current)}
             />
           )}
         </section>
@@ -960,7 +950,6 @@ const navigation: NonNullable<MenuProps["items"]> = [
     label: "系统",
     children: [
       { key: "/identity", icon: <SafetyCertificateOutlined />, label: "身份与登录" },
-      { key: "/settings", icon: <SettingOutlined />, label: "运行配置" },
       { key: "/audits", icon: <AuditOutlined />, label: "操作审计" },
     ],
   },
@@ -995,11 +984,7 @@ const pageMetadata: Readonly<
   },
   "/skills": {
     title: "Skills",
-    description: "技能提交、审核、发布与撤销",
-  },
-  "/settings": {
-    title: "运行配置",
-    description: "部署依赖、运行策略与版本发布",
+    description: "上传、发布更新与下架技能",
   },
   "/audits": {
     title: "操作审计",
@@ -1151,15 +1136,7 @@ function AdminPlatform({
               }
             />
             <Route path="/skills" element={<SkillConsole apiClient={apiClient} />} />
-            <Route
-              path="/settings"
-              element={
-                <AdminControlConsole
-                  view="settings"
-                  {...(controlApi === undefined ? {} : { api: controlApi })}
-                />
-              }
-            />
+            <Route path="/settings" element={<Navigate to="/identity" replace />} />
             <Route
               path="/audits"
               element={

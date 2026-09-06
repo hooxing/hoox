@@ -65,6 +65,7 @@ export interface SkillPublicationSubmission extends SkillPublicationMetadata {
   readonly fileCount: number;
   readonly totalBytes: number;
   readonly versionToken: number;
+  readonly currentPublished?: Readonly<{ submissionId: string; versionToken: number }>;
   readonly createdBy: UserId;
   readonly reviewedBy?: UserId;
   readonly rejectionReason?: string;
@@ -101,6 +102,7 @@ export interface SkillPublicationPort {
     readonly actorUserId: UserId;
     readonly limit: number;
     readonly afterSubmissionId?: string;
+    readonly latestOnly?: boolean;
   }): Promise<SkillPublicationPage>;
 
   get(input: {
@@ -130,7 +132,7 @@ export interface SkillPublicationPort {
   ): Promise<SkillPublicationCommandResult>;
 
   revoke(
-    input: SkillPublicationTransitionInput & { readonly reason: string },
+    input: SkillPublicationTransitionInput & { readonly reason?: string },
   ): Promise<SkillPublicationCommandResult>;
 }
 

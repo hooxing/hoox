@@ -1,6 +1,9 @@
-import type {
-  RuntimeControlConfigurationPort,
-  RuntimeControlConfigurationSnapshot,
+import {
+  defaultModelConfiguration,
+  type RunCompactionSettings,
+  type RunCompactionSettingsPort,
+  type RuntimeControlConfigurationPort,
+  type RuntimeControlConfigurationSnapshot,
 } from "@hoox/admin-control";
 import {
   Mem0PlatformMemoryProvider,
@@ -15,16 +18,19 @@ import type { AgentSessionFactoryPort, WorkerAgentSessionPort } from "@hoox/run-
 
 type SessionCreateInput = Parameters<AgentSessionFactoryPort["create"]>[0];
 
-/** Run 首次解析会落不可变快照；同一 Run 的重试不能因 active 切换而更换 Provider。 */
+/** 已托管模型的 Run 按不可变快照恢复；部署回退模型仍由启动配置决定。 */
 export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort {
   readonly toolRejectionReceiptBarrier = "durable" as const;
   private readonly factories = new Map<string, Promise<AgentSessionFactoryPort>>();
 
   constructor(
-    private readonly fallback: AgentSessionFactoryPort,
     private readonly configurations: RuntimeControlConfigurationPort,
+    private readonly compactionSettings: RunCompactionSettingsPort,
+    private readonly deploymentCompactionSettings: RunCompactionSettings,
+    private readonly deploymentModelMaxOutputTokens: number,
     private readonly build: (
-      snapshot: RuntimeControlConfigurationSnapshot,
+      snapshot: RuntimeControlConfigurationSnapshot | undefined,
+      compactionSettings: RunCompactionSettings,
     ) => Promise<AgentSessionFactoryPort>,
   ) {}
 
@@ -33,15 +39,39 @@ export class RuntimeConfiguredSessionFactory implements AgentSessionFactoryPort 
       tenantId: input.scope.tenantId,
       runId: input.scope.runId,
     });
-    if (snapshot === undefined) return await this.fallback.create(input);
+    const modelMaxOutputTokens =
+      snapshot === undefined
+        ? this.deploymentModelMaxOutputTokens
+        : defaultModelConfiguration(snapshot.model.configuration).maxTokens;
+    const savedCompactionSettings = await this.compactionSettings.resolveForRun({
+      tenantId: input.scope.tenantId,
+      runId: input.scope.runId,
+      // 新快照记录本 Run 固定模型可接受的实际预算；仓储仍优先恢复历史快照。
+      deploymentSettings: {
+        ...this.deploymentCompactionSettings,
+        maxOutputTokens: Math.min(
+          this.deploymentCompactionSettings.maxOutputTokens,
+          modelMaxOutputTokens,
+        ),
+      },
+    });
+    // 旧部署回退 Run 尚无模型快照，重启后的模型可能变小；保留持久值，仅约束执行预算。
+    const compactionSettings = {
+      ...savedCompactionSettings,
+      maxOutputTokens: Math.min(savedCompactionSettings.maxOutputTokens, modelMaxOutputTokens),
+    };
     const key = [
-      snapshot.model.configuration.providerKey,
-      snapshot.model.revision,
-      snapshot.runtimeSettings?.revision ?? 0,
+      snapshot?.model.configuration.providerKey ?? "deployment",
+      snapshot?.model.revision ?? 0,
+      compactionSettings.softLimitPercent,
+      compactionSettings.targetPercent,
+      compactionSettings.recentUserTokens,
+      compactionSettings.maxOutputTokens,
+      compactionSettings.timeoutMs,
     ].join(":");
     let factory = this.factories.get(key);
     if (factory === undefined) {
-      factory = this.build(snapshot);
+      factory = this.build(snapshot, compactionSettings);
       this.factories.set(key, factory);
       factory.catch(() => this.factories.delete(key));
       if (this.factories.size > 16)

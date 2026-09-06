@@ -1,11 +1,13 @@
 # ADR-20260828170014：后台可配置的用户级有界 Run 并发
 
-- 状态：部分已替代（assignment 释放时机）
+- 状态：部分已替代（assignment 释放时机与配置真源；剩余有效范围见替代关系）
 - 日期：2026-08-28
 - 决策者：Runtime 维护者
 - 关联：ADR-0011、ADR-0016、ADR-0142、ADR-20260821115221
 - 替代关系：部分替代 ADR-0142 中“单 Worker loop 不能提供任务并行、只能依赖增加 Worker 实例”的容量结论；保留动态 Tenant 发现、RLS、assignment 短租约和公平选择边界
-- 被部分替代：[后台维护调度](20260905225738-worker-background-maintenance.md) 替代决策第 4 条的 assignment 释放时机；Worker/User/Thread 槽、数据库短事务占槽和配置变更语义继续有效。
+- 被部分替代：[后台维护调度](20260905225738-worker-background-maintenance.md) 替代决策第 4 条的 assignment 释放时机；Worker/User/Thread 槽、数据库短事务占槽和已有 Run 快照语义继续有效。
+
+- 被部分替代：[ADR-20260906195752](20260906195752-admin-task-oriented-configuration-and-publication.md)。第 1、2、9 条的后台参数与动态读取改为启动时部署配置，更新需重启；Worker/User/Thread 槽、短事务占槽、RLS、公平发现和在途 Run 不取消继续有效。
 
 ## 背景
 

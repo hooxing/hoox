@@ -83,7 +83,7 @@ describe("后台运营协议", () => {
     expect(Value.Check(RuntimeStatisticsDtoSchema.properties.modelUsage24h, emptyUsage)).toBe(true);
   });
 
-  it("用户目录不接受凭据材料且状态变更必须包含原因", () => {
+  it("用户目录不接受凭据材料且状态变更允许省略原因", () => {
     const page = {
       total: 1,
       items: [
@@ -115,5 +115,6 @@ describe("后台运营协议", () => {
     expect(
       Value.Check(UpdatePlatformUserStatusRequestSchema, { status: "disabled", reason: "" }),
     ).toBe(false);
+    expect(Value.Check(UpdatePlatformUserStatusRequestSchema, { status: "disabled" })).toBe(true);
   });
 });

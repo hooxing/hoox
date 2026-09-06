@@ -18,7 +18,6 @@ import {
   ControlRevisionPathSchema,
   CreateMemoryProviderDraftRequestSchema,
   CreateModelProviderDraftRequestSchema,
-  CreateRuntimeSettingsDraftRequestSchema,
   createErrorEnvelope,
   ErrorEnvelopeSchema,
   IdentityAdminConfigurationSuccessEnvelopeSchema,
@@ -36,14 +35,16 @@ import {
   ProbeControlRevisionRequestSchema,
   PublishControlRevisionRequestSchema,
   RuntimeSettingsRevisionListSuccessEnvelopeSchema,
-  RuntimeSettingsRevisionSuccessEnvelopeSchema,
+  SaveModelProviderConfigurationRequestSchema,
+  SaveMemoryProviderConfigurationRequestSchema,
+  type SaveModelProviderConfigurationRequest,
+  type SaveMemoryProviderConfigurationRequest,
   UpdateIdentityAdminConfigurationRequestSchema,
   type UpdateIdentityAdminConfigurationRequest,
   UpdatePlatformUserStatusRequestSchema,
   type ControlRevisionPath,
   type CreateMemoryProviderDraftRequest,
   type CreateModelProviderDraftRequest,
-  type CreateRuntimeSettingsDraftRequest,
   type ModelProviderControlRevisionRequest,
   type ProbeControlRevisionRequest,
   type PublishControlRevisionRequest,
@@ -82,7 +83,8 @@ type ControlServiceContract = Pick<
   | "updateUserStatus"
   | "createModelDraft"
   | "createMemoryDraft"
-  | "createRuntimeSettingsDraft"
+  | "saveModelConfiguration"
+  | "saveMemoryConfiguration"
   | "probe"
   | "publish"
 >;
@@ -304,6 +306,46 @@ export function createAdminControlApiApp(
       ),
   );
 
+  app.put<{ Body: SaveModelProviderConfigurationRequest }>(
+    "/v1/admin/control/model-providers/current",
+    {
+      schema: {
+        body: SaveModelProviderConfigurationRequestSchema,
+        response: responseSchemas(ModelProviderRevisionSuccessEnvelopeSchema),
+      },
+    },
+    async (request) => {
+      requireJson(request);
+      const userId = await actor(request);
+      return success(
+        request,
+        await dependencies.control.saveModelConfiguration(
+          mutationContext(request, userId),
+          request.body,
+        ),
+      );
+    },
+  );
+  app.put<{ Body: SaveMemoryProviderConfigurationRequest }>(
+    "/v1/admin/control/memory-providers/current",
+    {
+      schema: {
+        body: SaveMemoryProviderConfigurationRequestSchema,
+        response: responseSchemas(MemoryProviderRevisionSuccessEnvelopeSchema),
+      },
+    },
+    async (request) => {
+      requireJson(request);
+      const userId = await actor(request);
+      return success(
+        request,
+        await dependencies.control.saveMemoryConfiguration(
+          mutationContext(request, userId),
+          request.body,
+        ),
+      );
+    },
+  );
   app.post<{ Body: CreateModelProviderDraftRequest }>(
     "/v1/admin/control/model-providers",
     {
@@ -338,7 +380,7 @@ export function createAdminControlApiApp(
         await dependencies.control.updateUserStatus(mutationContext(request, userId), {
           targetUserId: request.params.userId,
           status: request.body.status,
-          reason: request.body.reason,
+          ...(request.body.reason === undefined ? {} : { reason: request.body.reason }),
         }),
       );
     },
@@ -363,53 +405,8 @@ export function createAdminControlApiApp(
       );
     },
   );
-  app.post<{ Body: CreateRuntimeSettingsDraftRequest }>(
-    "/v1/admin/control/runtime-settings",
-    {
-      schema: {
-        body: CreateRuntimeSettingsDraftRequestSchema,
-        response: responseSchemas(RuntimeSettingsRevisionSuccessEnvelopeSchema),
-      },
-    },
-    async (request) => {
-      requireJson(request);
-      const userId = await actor(request);
-      return success(
-        request,
-        await dependencies.control.createRuntimeSettingsDraft(
-          mutationContext(request, userId),
-          request.body,
-        ),
-      );
-    },
-  );
-
   registerProviderActions(app, dependencies, "model_provider", "model-providers");
   registerProviderActions(app, dependencies, "memory_provider", "memory-providers");
-  app.post<{ Params: ControlRevisionPath; Body: PublishControlRevisionRequest }>(
-    "/v1/admin/control/runtime-settings/:providerKey/revisions/:revision/publish",
-    {
-      schema: {
-        params: ControlRevisionPathSchema,
-        body: PublishControlRevisionRequestSchema,
-        response: responseSchemas(RuntimeSettingsRevisionSuccessEnvelopeSchema),
-      },
-    },
-    async (request) => {
-      requireJson(request);
-      const userId = await actor(request);
-      return success(
-        request,
-        await dependencies.control.publish(mutationContext(request, userId), {
-          kind: "runtime_settings",
-          objectKey: request.params.providerKey,
-          revision: request.params.revision,
-          command: request.body,
-        }),
-      );
-    },
-  );
-
   registerSkillAdminApiRoutes(app, { auth: dependencies.auth, ...dependencies.skills });
 
   async function actor(request: FastifyRequest): Promise<string> {
@@ -476,7 +473,9 @@ function registerProviderActions(
           expectedVersionToken: request.body.expectedVersionToken,
           ...(kind === "model_provider"
             ? {}
-            : { reason: (request.body as ProbeControlRevisionRequest).reason }),
+            : (request.body as ProbeControlRevisionRequest).reason === undefined
+              ? {}
+              : { reason: (request.body as ProbeControlRevisionRequest).reason as string }),
         }),
       );
     },

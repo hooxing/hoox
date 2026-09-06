@@ -100,6 +100,7 @@ describe("管理员 Skill 发布协议", () => {
     ).toBe(false);
     const {
       compatibility: _compatibility,
+      version: _version,
       sourceUrl: _sourceUrl,
       sourceRevision: _sourceRevision,
       ...minimalRequest
@@ -172,6 +173,21 @@ describe("管理员 Skill 发布协议", () => {
     );
   });
 
+  it("最新上传可携带当前生效包的操作引用，不要求公开版本号", () => {
+    expect(
+      Value.Check(SkillSubmissionDtoSchema, {
+        ...submission,
+        currentPublished: { submissionId: "submission_active", versionToken: 1 },
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(SkillSubmissionDtoSchema, {
+        ...submission,
+        currentPublished: { submissionId: "submission_active", versionToken: -1 },
+      }),
+    ).toBe(false);
+  });
+
   it("列表页和成功信封保持严格 v1 结构", () => {
     const page = { items: [submission], nextCursor: "cursor-1" };
     expect(Value.Check(SkillSubmissionPageDtoSchema, page)).toBe(true);
@@ -190,6 +206,7 @@ describe("管理员 Skill 发布协议", () => {
   });
 
   it("状态动作携带乐观锁，审核 reason 的条件要求留给领域层", () => {
+    expect(Value.Check(RevokeSkillSubmissionRequestSchema, { expectedVersionToken: 3 })).toBe(true);
     expect(Value.Check(SkillSubmissionStatusActionRequestSchema, { expectedVersionToken: 0 })).toBe(
       true,
     );

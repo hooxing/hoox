@@ -39,6 +39,7 @@ import {
   PgResourceFilesystemCatalog,
   PgRunCancellationReader,
   PgRunDispatchOutbox,
+  PgRunCompactionSettingsRepository,
   PgRuntimeControlConfigurationRepository,
   PgRuntimeRolloutRepository,
   PgScheduledTaskDueConsumer,
@@ -201,6 +202,16 @@ const workerEnvironmentSchema = Object.freeze({
   }),
   AGENT_WORKER_TENANT_ID: stringEnvironmentField({ maxLength: 200 }),
   AGENT_WORKER_ID: stringEnvironmentField({ maxLength: 200 }),
+  AGENT_WORKER_MAX_CONCURRENT_RUNS: integerEnvironmentField({
+    minimum: 1,
+    maximum: 100,
+    requiredIn: [],
+  }),
+  AGENT_WORKER_USER_MAX_CONCURRENT_RUNS_PER_TENANT: integerEnvironmentField({
+    minimum: 1,
+    maximum: 100,
+    requiredIn: [],
+  }),
   AGENT_WORKER_POLL_INTERVAL_MS: integerEnvironmentField({ minimum: 10, maximum: 60_000 }),
   AGENT_WORKER_DISPATCH_LEASE_MS: integerEnvironmentField({ minimum: 1_000, maximum: 300_000 }),
   AGENT_WORKER_RUN_LEASE_MS: integerEnvironmentField({ minimum: 9_000, maximum: 300_000 }),
@@ -325,6 +336,8 @@ export interface WorkerProcessConfiguration {
   readonly worker: Readonly<{
     tenantId: string;
     workerId: string;
+    maxConcurrentRuns: number;
+    userMaxConcurrentRunsPerTenant: number;
     pollIntervalMs: number;
     dispatchLeaseMs: number;
     runLeaseMs: number;
@@ -616,6 +629,11 @@ export function parseWorkerProcessEnvironment(
     worker: Object.freeze({
       tenantId: configuredTenantId,
       workerId: configuredWorkerId,
+      maxConcurrentRuns:
+        parsed.values.AGENT_WORKER_MAX_CONCURRENT_RUNS ?? DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
+      userMaxConcurrentRunsPerTenant:
+        parsed.values.AGENT_WORKER_USER_MAX_CONCURRENT_RUNS_PER_TENANT ??
+        DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
       pollIntervalMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_POLL_INTERVAL_MS"),
       dispatchLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_DISPATCH_LEASE_MS"),
       runLeaseMs: readRequiredEnvironmentValue(parsed, "AGENT_WORKER_RUN_LEASE_MS"),
@@ -908,7 +926,13 @@ async function assembleWorkerRuntime(
     const modelContext = await createOpenAiCompatibleModelContextCapability(modelRuntime, model);
     const threadContinuityMetrics = new PgThreadContinuityMetrics(pool);
     const runtimeCompaction = new RuntimeCompactionCoordinator(
-      configuration.threadContext.compaction,
+      {
+        ...configuration.threadContext.compaction,
+        maxOutputTokens: Math.min(
+          configuration.threadContext.compaction.maxOutputTokens,
+          model.maxTokens,
+        ),
+      },
       model,
       modelRuntime,
       modelContext,
@@ -1158,34 +1182,33 @@ async function assembleWorkerRuntime(
       configuration.model.apiKey,
     );
     const sessions = new RuntimeConfiguredSessionFactory(
-      deploymentSessions,
       runtimeConfigurations,
-      async (snapshot) => {
-        const configuredProvider = snapshot.model.configuration;
-        const dynamicModel = await createOpenAiCompatibleProvider({
-          displayName: configuredProvider.displayName,
-          baseUrl: configuredProvider.baseUrl,
-          apiKey: snapshot.modelApiKey,
-          defaultModelId: configuredProvider.defaultModelId,
-          models: configuredProvider.models,
-        });
-        const dynamicModelContext = await createOpenAiCompatibleModelContextCapability(
-          dynamicModel.modelRuntime,
-          dynamicModel.model,
-        );
-        const dynamicSettings = snapshot.runtimeSettings?.configuration;
+      new PgRunCompactionSettingsRepository(pool),
+      configuration.threadContext.compaction,
+      configuration.model.maxOutputTokens,
+      async (snapshot, compactionSettings) => {
+        const configuredProvider = snapshot?.model.configuration;
+        const dynamicModel =
+          snapshot === undefined
+            ? { model, modelRuntime }
+            : await createOpenAiCompatibleProvider({
+                displayName: snapshot.model.configuration.displayName,
+                baseUrl: snapshot.model.configuration.baseUrl,
+                apiKey: snapshot.modelApiKey,
+                defaultModelId: snapshot.model.configuration.defaultModelId,
+                models: snapshot.model.configuration.models,
+              });
+        const dynamicModelContext =
+          snapshot === undefined
+            ? modelContext
+            : await createOpenAiCompatibleModelContextCapability(
+                dynamicModel.modelRuntime,
+                dynamicModel.model,
+              );
         const dynamicCompaction = new RuntimeCompactionCoordinator(
           {
             ...configuration.threadContext.compaction,
-            ...(dynamicSettings === undefined
-              ? {}
-              : {
-                  softLimitPercent: dynamicSettings.compactionSoftLimitPercent,
-                  targetPercent: dynamicSettings.compactionTargetPercent,
-                  recentUserTokens: dynamicSettings.compactionRecentUserTokens,
-                  maxOutputTokens: dynamicSettings.compactionMaxOutputTokens,
-                  timeoutMs: dynamicSettings.compactionTimeoutMs,
-                }),
+            ...compactionSettings,
           },
           dynamicModel.model,
           dynamicModel.modelRuntime,
@@ -1199,7 +1222,9 @@ async function assembleWorkerRuntime(
           modelRuntime: dynamicModel.modelRuntime,
           modelContext: dynamicModelContext,
           modelWireTraces: configuration.model.wireTraceEnabled
-            ? createModelWireTraceSession(configuredProvider.baseUrl)
+            ? createModelWireTraceSession(
+                configuredProvider?.baseUrl ?? configuration.model.baseUrl,
+              )
             : undefined,
           prepareRuntimeCompaction: configuration.threadContext.compaction.enabled
             ? async (
@@ -1306,15 +1331,9 @@ async function assembleWorkerRuntime(
         pollIntervalMs: configuration.worker.pollIntervalMs,
         tenantAssignmentLeaseMs: configuration.worker.dispatchLeaseMs,
         dispatchLeaseMs: configuration.worker.dispatchLeaseMs,
-        resolveConcurrencySettings: async () => {
-          const settings = await runtimeConfigurations.resolveActiveRuntimeSettings();
-          return {
-            workerMaxConcurrentRuns:
-              settings?.workerMaxConcurrentRuns ?? DEFAULT_WORKER_MAX_CONCURRENT_RUNS,
-            userMaxConcurrentRunsPerTenant:
-              settings?.userMaxConcurrentRunsPerTenant ??
-              DEFAULT_USER_MAX_CONCURRENT_RUNS_PER_TENANT,
-          };
+        concurrencySettings: {
+          workerMaxConcurrentRuns: configuration.worker.maxConcurrentRuns,
+          userMaxConcurrentRunsPerTenant: configuration.worker.userMaxConcurrentRunsPerTenant,
         },
         maintenance: (tenantId) =>
           performWorkerMaintenance({

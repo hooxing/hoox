@@ -2,7 +2,6 @@ import { resolvePackagePaths } from "./api.js";
 
 const maxEntrypointBytes = 64 * 1024;
 const canonicalKeyPattern = /^[a-z0-9][a-z0-9._-]{0,127}$/u;
-const versionPattern = /^[0-9A-Za-z][0-9A-Za-z.+_-]{0,63}$/u;
 const spdxIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9.+-]{0,99}$/u;
 
 export interface SkillMetadataPrefill {
@@ -10,7 +9,6 @@ export interface SkillMetadataPrefill {
     canonicalKey?: string;
     displayName?: string;
     publisher?: string;
-    version?: string;
     description?: string;
     sourceUrl?: string;
     sourceRevision?: string;
@@ -60,11 +58,6 @@ export function prefillFromSkillMarkdown(markdown: string): SkillMetadataPrefill
   const canonicalKey = name === undefined ? undefined : toCanonicalKey(name);
   const description = bounded(metadata.description, 2_048);
   const publisher = bounded(metadata.publisher, 200);
-  const versionCandidate = bounded(metadata.version, 64);
-  const version =
-    versionCandidate !== undefined && versionPattern.test(versionCandidate)
-      ? versionCandidate
-      : undefined;
   const sourceUrl = safeSourceUrl(metadata.source_url ?? metadata.source);
   const sourceRevision = bounded(metadata.source_revision ?? metadata.revision, 200);
   const license = bounded(metadata.license, 2_048);
@@ -74,7 +67,6 @@ export function prefillFromSkillMarkdown(markdown: string): SkillMetadataPrefill
     ...(canonicalKey === undefined ? {} : { canonicalKey }),
     ...(displayName === undefined ? {} : { displayName }),
     ...(publisher === undefined ? {} : { publisher }),
-    ...(version === undefined ? {} : { version }),
     ...(description === undefined ? {} : { description }),
     ...(sourceUrl === undefined ? {} : { sourceUrl }),
     ...(sourceRevision === undefined ? {} : { sourceRevision }),
@@ -85,7 +77,6 @@ export function prefillFromSkillMarkdown(markdown: string): SkillMetadataPrefill
       [canonicalKey, "规范键"],
       [displayName, "显示名称"],
       [publisher, "发布者"],
-      [version, "版本"],
       [description, "描述"],
       [sourceUrl, "上游仓库地址"],
       [sourceRevision, "上游提交/版本"],

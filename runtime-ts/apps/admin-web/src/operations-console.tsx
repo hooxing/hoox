@@ -291,9 +291,8 @@ function UserRow({
   readonly busy: boolean;
   readonly selected: boolean;
   readonly onSelect: () => void;
-  readonly onSubmit: (reason: string) => Promise<void>;
+  readonly onSubmit: () => Promise<void>;
 }) {
-  const [reason, setReason] = useState("");
   const nextStatus = user.status === "active" ? "disabled" : "active";
   return (
     <article className={`user-row ${user.status}`}>
@@ -319,15 +318,23 @@ function UserRow({
       <span className={`user-status ${user.status}`}>
         {user.status === "active" ? "正常" : "已停用"}
       </span>
-      <button type="button" className="text-button" disabled={busy} onClick={onSelect}>
+      <button
+        type="button"
+        className="text-button"
+        disabled={busy}
+        onClick={() => {
+          if (user.status === "active") onSelect();
+          else void onSubmit();
+        }}
+      >
         {selected ? "取消" : user.status === "active" ? "停用" : "恢复"}
       </button>
-      {selected && (
+      {selected && user.status === "active" && (
         <form
           className="user-status-confirm"
           onSubmit={(event) => {
             event.preventDefault();
-            void onSubmit(reason).then(() => setReason(""));
+            void onSubmit();
           }}
         >
           <span>
@@ -338,17 +345,10 @@ function UserRow({
                 : "提交后允许用户重新登录；旧会话不会恢复。"}
             </small>
           </span>
-          <input
-            required
-            maxLength={500}
-            value={reason}
-            placeholder="填写操作原因（必填，将进入审计）"
-            onChange={(event) => setReason(event.target.value)}
-          />
           <button
             type="submit"
             className={nextStatus === "disabled" ? "danger-button" : "primary-button"}
-            disabled={busy || reason.trim().length === 0}
+            disabled={busy}
           >
             确认{nextStatus === "disabled" ? "停用" : "恢复"}
           </button>
@@ -369,11 +369,7 @@ export function UserManagementWorkspace({
   readonly query: string;
   readonly busy: boolean;
   readonly onSearch: (query: string) => void;
-  readonly onStatusChange: (
-    userId: string,
-    status: "active" | "disabled",
-    reason: string,
-  ) => Promise<void>;
+  readonly onStatusChange: (userId: string, status: "active" | "disabled") => Promise<boolean>;
 }) {
   const [draftQuery, setDraftQuery] = useState(query);
   const [selectedUserId, setSelectedUserId] = useState<string>();
@@ -387,7 +383,7 @@ export function UserManagementWorkspace({
         <div>
           <span className="eyebrow">Identity operations</span>
           <h2>用户管理</h2>
-          <p>查询产品账号、使用情况和会话状态；敏感状态变更必须填写原因并进入审计。</p>
+          <p>查询产品账号、使用情况和会话状态；操作会自动记录。</p>
         </div>
         <span className="count">{value?.total ?? 0}</span>
       </div>
@@ -434,13 +430,12 @@ export function UserManagementWorkspace({
               onSelect={() =>
                 setSelectedUserId((current) => (current === user.userId ? undefined : user.userId))
               }
-              onSubmit={async (reason) => {
-                await onStatusChange(
+              onSubmit={async () => {
+                const saved = await onStatusChange(
                   user.userId,
                   user.status === "active" ? "disabled" : "active",
-                  reason,
                 );
-                setSelectedUserId(undefined);
+                if (saved) setSelectedUserId(undefined);
               }}
             />
           ))}

@@ -11,9 +11,10 @@
 | 生产 Worker 装配 | ADR-0049 的包内 capability 安全声明和固定 Tenant 分片 | [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-0054](0054-production-transport-and-reproducible-release.md) · [ADR-0142](0142-dynamic-worker-tenant-assignment.md) |
 | 项目身份 | AISay Runtime 技术身份、Hoox/AISay 双重命名 | [项目 README](../../README.md) · [ADR-20260818144124](20260818144124-unify-project-identity-as-hoox.md) |
 | Windows 开发启动 | 只面向本机服务的旧一键启动假设 | [开发环境准备](../development.md) · [ADR-20260816152234](20260816152234-multi-machine-external-service-preflight-and-optional-skill-startup.md) |
-| 模型 Provider 管理 | 早期草稿/探测/发布页面流程 | [配置参考](../reference/configuration.md) · [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260825180549](20260825180549-direct-model-configuration-activation.md) · [ADR-20260826115031](20260826115031-model-provider-list-edit-test-switch.md) |
+| 模型 Provider 管理 | 早期草稿/探测/发布及只保存不生效页面流程 | [配置参考](../reference/configuration.md) · [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260825180549](20260825180549-direct-model-configuration-activation.md) · [ADR-20260826115031](20260826115031-model-provider-list-edit-test-switch.md) · [ADR-20260906195752](20260906195752-admin-task-oriented-configuration-and-publication.md) |
 | `automation_update` Schema | ADR-20260826164658 的双层定义和 ADR-20260826172009 的单一严格 Schema | [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260828113059](20260828113059-automation-tool-schema-and-error-semantics.md) |
 | Demo 后台身份 | ADR-20260824222258 的 HTTP Basic 入口 | [Demo 持续部署](../operations/demo-cd.md) · [ADR-20260825145416](20260825145416-demo-admin-uses-hoox-session-gate.md) |
+| 后台运行参数与技能发布 | 后台动态并发/压缩参数、管理员先提交复核再发布 | [配置参考](../reference/configuration.md) · [Skill Runtime](../architecture/skill-runtime.md) · [ADR-20260906195752](20260906195752-admin-task-oriented-configuration-and-publication.md) |
 | Skill 分发 | ADR-0097 的专有 development fixture | [维护者开发边界](../maintainers/runtime-development-boundaries.md) · [ADR-20260827174210](20260827174210-open-source-distribution-license-and-security-gates.md) |
 | 生产 SBOM | clipboard 原生变体规范化特例 | [生产就绪说明](../operations/production-readiness.md) · [ADR-20260906001531](20260906001531-pi-kernel-and-shared-model-catalog.md) |
 | Pi 内核与模型目录 | AgentSession/Session 树装配、前后端分别加载目录 | [Thread 连续上下文](../architecture/thread-continuity.md) · [仓库导览](../architecture/repository-map.md) · [ADR-20260906001531](20260906001531-pi-kernel-and-shared-model-catalog.md) |
@@ -137,7 +138,7 @@
 | [ADR-0109：Agent 回合采用有序内容块投影](0109-agent-turn-ordered-blocks.md) | 已接受 | 2026-08-04 |
 | [ADR-0110：Run 心跳同步续租 Thread Sandbox](0110-thread-sandbox-lease-heartbeat.md) | 已接受 | 2026-08-05 |
 | [ADR-0111：Agent 默认使用中文回答](0111-default-chinese-agent-response.md) | 已接受 | 2026-08-05 |
-| [ADR-0112：受管 Skill 管理发布与独立权限面](0112-managed-skill-admin-publication.md) | 已接受 | 2026-08-05 |
+| [ADR-0112：受管 Skill 管理发布与独立权限面](0112-managed-skill-admin-publication.md) | 部分已替代（管理员直接发布流程） | 2026-08-05 |
 | [ADR-0113：Agent Todo Writer 与运行进度清单](0113-agent-todo-writer-and-run-progress.md) | 部分已替代（首次快照状态） | 2026-08-05 |
 | [ADR-0114：Skill Front Matter 元数据预填](0114-skill-frontmatter-metadata-prefill.md) | 已接受 | 2026-08-05 |
 | [ADR-0115：系统兼容性、可选上游来源与 Skills CLI 导入边界](0115-system-compatibility-optional-provenance-and-skills-cli.md) | 已接受 | 2026-08-05 |
@@ -231,13 +232,13 @@
 | [ADR-20260818144124：统一项目身份为 Hoox](20260818144124-unify-project-identity-as-hoox.md) | 已接受 | 2026-08-18 |
 | [ADR-20260819115118：思考生命周期在正文与工具边界收敛](20260819115118-thinking-lifecycle-boundary-convergence.md) | 已接受 | 2026-08-19 |
 | [ADR-20260819142015：用户工作台隐藏 Workspace 未变化审计通知](20260819142015-hide-workspace-unchanged-runtime-notice.md) | 已接受 | 2026-08-19 |
-| [ADR-20260819165254：独立后台控制面与版本化运行配置](20260819165254-independent-admin-control-plane.md) | 部分已替代（进程边界与模型配置流程） | 2026-08-19 |
+| [ADR-20260819165254：独立后台控制面与版本化运行配置](20260819165254-independent-admin-control-plane.md) | 部分已替代（日常配置流程与运行参数真源） | 2026-08-19 |
 | [ADR-20260820090402：Provider 拥有可启用的模型目录](20260820090402-provider-owned-model-catalog.md) | 部分已替代（管理页面多启用语义） | 2026-08-20 |
 | [无团队成员关系时隐藏团队操作](20260820092801-hide-team-controls-without-membership.md) | 已接受 | 2026-08-20 |
 | [ADR-20260820095113：Pi 模型目录为后台配置提供可覆盖的初始值](20260820095113-pi-catalog-seeds-admin-model-metadata.md) | 部分已替代（模型配置流程与目录加载位置） | 2026-08-20 |
 | [ADR-20260820101805：浏览器内置 Pi 目录与后台配置服务独立降级](20260820101805-browser-bundled-pi-catalog-degrades-independently.md) | 部分已替代（模型配置流程与目录加载位置） | 2026-08-20 |
 | [ADR-20260820153000：项目采用 Apache License 2.0 并建立公开文档分层](20260820153000-open-source-license-and-documentation-boundary.md) | 已接受 | 2026-08-20 |
-| [ADR-20260821004057：工业化后台的信息架构、运营统计与用户治理边界](20260821004057-industrial-admin-operations-and-user-governance.md) | 部分已替代（探针域名白名单展示） | 2026-08-21 |
+| [ADR-20260821004057：工业化后台的信息架构、运营统计与用户治理边界](20260821004057-industrial-admin-operations-and-user-governance.md) | 部分已替代（后台配置工作流与用户交互） | 2026-08-21 |
 | [ADR-20260821115221：统一后台 API 进程并保留发布资源隔离](20260821115221-unified-admin-api-process.md) | 已接受 | 2026-08-21 |
 | [后台管理 Web 采用可路由的 Ant Design 应用外壳](20260824115942-admin-web-routable-ant-design-shell.md) | 部分已替代（模型页面工作流） | 2026-08-24 |
 | [后台模型用量指标与开发轨迹入口边界](20260824150132-admin-model-usage-metrics-and-development-trajectory-link.md) | 部分已替代（Demo 轨迹入口） | 2026-08-24 |
@@ -246,16 +247,16 @@
 | [决策：领域聚合的一致性与修正语义](domain-aggregate-consistency.md) | 已接受 | 2026-07-26 |
 | [决策：协议运行时 Schema 使用 TypeBox](domain-schema-library.md) | 已接受 | 2026-07-26 |
 | [ADR-20260824115000：在 Hoox 进程内嵌 Better Auth 身份核心](20260824115000-embedded-better-auth-identity-core.md) | 已接受 | 2026-08-24 |
-| [ADR-20260824125500：内嵌身份会话交换与后台配置边界](20260824125500-embedded-identity-session-exchange-and-admin-configuration.md) | 已接受 | 2026-08-24 |
+| [ADR-20260824125500：内嵌身份会话交换与后台配置边界](20260824125500-embedded-identity-session-exchange-and-admin-configuration.md) | 部分已替代（身份配置交互） | 2026-08-24 |
 | [ADR-20260824163556：单机 Demo 使用受控 development 装配持续部署](20260824163556-single-node-demo-continuous-deployment.md) | 已接受 | 2026-08-24 |
 | [ADR-20260825093437：Thread 消息附件使用结构化展示投影](20260825093437-thread-message-attachment-projection.md) | 已接受 | 2026-08-25 |
 | [ADR-20260825135525：Thread 图片预览按不可变附件身份保持稳定](20260825135525-stable-thread-attachment-preview.md) | 已接受 | 2026-08-25 |
-| [ADR-20260825164722：Provider 内部标识防密钥误填与探测后启用门禁](20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md) | 部分已替代（模型启用门禁、页面流程与探针域名白名单） | 2026-08-25 |
+| [ADR-20260825164722：Provider 内部标识防密钥误填与探测后启用门禁](20260825164722-provider-identifier-secret-guard-and-probe-activation-gate.md) | 部分已替代（记忆配置启用门禁） | 2026-08-25 |
 | [ADR-20260825173500：模型 Provider 凭据按 Revision 加密托管](20260825173500-managed-model-provider-credentials.md) | 部分已替代（模型配置流程） | 2026-08-25 |
-| [ADR-20260825180549：模型配置保存即启用并隐藏内部版本流程](20260825180549-direct-model-configuration-activation.md) | 部分已替代（单一页面流程） | 2026-08-25 |
+| [ADR-20260825180549：模型配置保存即启用并隐藏内部版本流程](20260825180549-direct-model-configuration-activation.md) | 部分已替代（配置原子保存与管理范围） | 2026-08-25 |
 | [模型页面只启用所选模型，已发布能力驱动运行](20260826000935-published-model-capabilities-are-runtime-facts.md) | 已接受 | 2026-08-26 |
 | [Demo 数据 epoch 与 Provider 持久化读取边界](20260826091622-demo-data-epoch-and-stored-provider-read-boundary.md) | 已接受 | 2026-08-26 |
-| [ADR-20260826115031：模型供应商采用列表、统一编辑器、真实测试与显式切换](20260826115031-model-provider-list-edit-test-switch.md) | 已接受 | 2026-08-26 |
+| [ADR-20260826115031：模型供应商采用列表、统一编辑器、真实测试与显式切换](20260826115031-model-provider-list-edit-test-switch.md) | 部分已替代（保存与生效的事务边界） | 2026-08-26 |
 | [ADR-20260826155935：自定义 Provider 探测直接使用已保存地址](20260826155935-custom-provider-probes-use-saved-url.md) | 已接受 | 2026-08-26 |
 | [ADR-20260826164658：Provider 工具参数使用顶层 object Schema](../archive/decisions/20260826164658-provider-object-tool-schema.md) | 已替代 | 2026-08-26 |
 | [ADR-20260826172009：Provider 工具 Schema 使用单一严格真源](20260826172009-single-source-provider-object-tool-schema.md) | 部分已替代（Provider/Runtime 分层） | 2026-08-26 |
@@ -268,7 +269,7 @@
 | [ADR-20260828113100：Todo 首次快照允许原子进入执行状态](20260828113100-todo-initial-snapshot-can-start.md) | 已接受 | 2026-08-28 |
 | [ADR-20260828120133：任务输入附件支持粘贴与可视预览](20260828120133-composer-paste-and-file-preview.md) | 已接受 | 2026-08-28 |
 | [ADR-20260828163752：附件触发的 Sandbox 准备与首个模型请求并行](20260828163752-attachment-sandbox-preparation-parallels-first-model-request.md) | 已接受 | 2026-08-28 |
-| [ADR-20260828170014：后台可配置的用户级有界 Run 并发](20260828170014-configurable-user-run-concurrency.md) | 部分已替代（assignment 释放时机） | 2026-08-28 |
+| [ADR-20260828170014：后台可配置的用户级有界 Run 并发](20260828170014-configurable-user-run-concurrency.md) | 部分已替代（assignment 释放时机与配置真源） | 2026-08-28 |
 | [ADR-20260828174129：Worker 使用事务通知唤醒并记录首模启动分段耗时](20260828174129-worker-dispatch-notify-and-first-model-startup-timings.md) | 已接受 | 2026-08-28 |
 | [ADR-20260831092112：Vendor Tree 摘要跨平台规范化换行](20260831092112-cross-platform-vendor-tree-digest.md) | 已接受 | 2026-08-31 |
 | [ADR-20260831143740：后台托管 SMTP 邮箱验证码并限制身份插件表面](20260831143740-admin-managed-smtp-email-verification.md) | 已接受 | 2026-08-31 |
@@ -291,5 +292,6 @@
 | [ADR-20260906001531：Pi 内核收敛与共享模型目录](20260906001531-pi-kernel-and-shared-model-catalog.md) | 已接受 | 2026-09-06 |
 | [ADR-20260906163952：关闭记忆时使用独立的消费终态](20260906163952-disabled-memory-ingestion-terminal-state.md) | 已接受 | 2026-09-06 |
 | [ADR-20260906183557：CI 独立容器并行与兼容汇总门禁](20260906183557-ci-parallel-gates-and-image-cache.md) | 已接受 | 2026-09-06 |
+| [ADR-20260906195752：后台按管理任务保存配置与发布技能](20260906195752-admin-task-oriented-configuration-and-publication.md) | 已接受 | 2026-09-06 |
 
 </details>

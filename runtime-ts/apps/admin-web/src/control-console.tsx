@@ -2,25 +2,23 @@ import type {
   AdminControlOverviewDto,
   ControlAuditEventDto,
   IdentityAdminConfigurationDto,
-  MemoryProviderRevisionDto,
   ModelProviderModelConfigurationDto,
   ModelProviderRevisionDto,
   PiModelCatalogModelDto,
   PiModelCatalogProviderDto,
   PlatformUserPageDto,
-  RuntimeSettingsRevisionDto,
 } from "@hoox/protocol";
 import { useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AdminApiError } from "./api.js";
 import { AdminControlApi, type AdminControlApiContract } from "./control-api.js";
 import { IdentityConfigurationPanel } from "./identity-configuration-panel.js";
-import { listLocalPiModelCatalogProviders } from "./pi-model-catalog.js";
 import {
   ControlDataUnavailable,
   OperationsDashboard,
   UserManagementWorkspace,
 } from "./operations-console.js";
+import { listLocalPiModelCatalogProviders } from "./pi-model-catalog.js";
 
 export type ControlView =
   | "overview"
@@ -70,481 +68,12 @@ function providerHostname(value: string): string {
   }
 }
 
-const revisionStatusLabels = {
-  draft: "待启用",
-  active: "当前生效",
-  retired: "已停用",
+const auditActionLabels = {
+  create_draft: "保存配置",
+  probe: "测试连接",
+  publish: "使用配置",
+  rollback: "恢复配置",
 } as const;
-
-const probeStatusLabels = {
-  untested: "尚未探测",
-  healthy: "连接正常",
-  failed: "探测失败",
-} as const;
-
-function configurationDisplayValue(key: string, field: unknown): string {
-  if (key === "providerKey" && typeof field === "string") return displayedProviderKey(field);
-  if (key === "secretRef" || key === "apiSecretRef" || key === "scopeSecretRef") {
-    return "部署环境（值不可见）";
-  }
-  return typeof field === "boolean" ? (field ? "是" : "否") : String(field);
-}
-
-function RevisionActions({
-  kind,
-  providerKey,
-  revision,
-  versionToken,
-  probeStatus,
-  probe,
-  sensitiveIdentifier,
-  busy,
-  onAction,
-}: {
-  readonly kind: "model-providers" | "memory-providers" | "runtime-settings";
-  readonly providerKey: string;
-  readonly revision: number;
-  readonly versionToken: number;
-  readonly probeStatus: ModelProviderRevisionDto["probeStatus"];
-  readonly probe: boolean;
-  readonly sensitiveIdentifier: boolean;
-  readonly busy: boolean;
-  readonly onAction: (
-    action: "probe" | "publish",
-    input: { readonly expectedVersionToken: number; readonly reason: string },
-  ) => Promise<void>;
-}) {
-  const [reason, setReason] = useState("");
-  const activationBlocked = probe && probeStatus !== "healthy";
-  return (
-    <div className="revision-actions">
-      <input
-        aria-label={`${displayedProviderKey(providerKey)} 变更原因`}
-        value={reason}
-        maxLength={500}
-        placeholder="填写探测或启用原因"
-        onChange={(event) => setReason(event.target.value)}
-      />
-      {probe && (
-        <button
-          type="button"
-          className="quiet-button"
-          disabled={busy || sensitiveIdentifier || reason.trim().length === 0}
-          onClick={() => void onAction("probe", { expectedVersionToken: versionToken, reason })}
-        >
-          探测连接
-        </button>
-      )}
-      <button
-        type="button"
-        className="primary-button"
-        disabled={busy || sensitiveIdentifier || activationBlocked || reason.trim().length === 0}
-        onClick={() => void onAction("publish", { expectedVersionToken: versionToken, reason })}
-      >
-        启用此配置
-      </button>
-      {(sensitiveIdentifier || activationBlocked) && (
-        <small className="revision-action-note" role="status">
-          {sensitiveIdentifier
-            ? "Provider 标识疑似包含密钥，已隔离；请轮换密钥并新建配置。"
-            : probeStatus === "failed"
-              ? "上次探测失败；重新探测成功后才能启用。"
-              : "请先完成连接探测，再启用此配置。"}
-        </small>
-      )}
-      <span className="visually-hidden">
-        {kind} revision {revision}
-      </span>
-    </div>
-  );
-}
-
-const configurationFieldLabels: Readonly<Record<string, string>> = {
-  providerKey: "Provider 内部标识",
-  displayName: "显示名称",
-  protocol: "调用协议",
-  baseUrl: "服务地址",
-  secretRef: "凭据来源",
-  defaultModelId: "默认模型",
-  providerKind: "记忆服务",
-  apiSecretRef: "Mem0 API 密钥引用",
-  scopeSecretRef: "记忆作用域密钥引用",
-  requestTimeoutMs: "请求超时（ms）",
-  enabled: "已启用",
-  workerMaxConcurrentRuns: "单 Worker 并行 Run 上限",
-  userMaxConcurrentRunsPerTenant: "单用户在 Tenant 内并行 Run 上限",
-  compactionSoftLimitPercent: "上下文压缩触发阈值（%）",
-  compactionTargetPercent: "压缩后目标占用（%）",
-  compactionRecentUserTokens: "优先保留用户 Token",
-  compactionMaxOutputTokens: "压缩输出预算",
-  compactionTimeoutMs: "压缩超时（ms）",
-};
-
-function RevisionCard({
-  kind,
-  item,
-  busy,
-  onAction,
-}: {
-  readonly kind: "model-providers" | "memory-providers" | "runtime-settings";
-  readonly item: ModelProviderRevisionDto | MemoryProviderRevisionDto | RuntimeSettingsRevisionDto;
-  readonly busy: boolean;
-  readonly onAction: (
-    action: "probe" | "publish",
-    input: { readonly expectedVersionToken: number; readonly reason: string },
-  ) => Promise<void>;
-}) {
-  const configuration = item.configuration;
-  const providerKey = "providerKey" in configuration ? configuration.providerKey : "global";
-  const title = "displayName" in configuration ? configuration.displayName : "运行参数";
-  const modelConfiguration = "models" in configuration ? configuration : undefined;
-  const modelCatalog = modelConfiguration?.models;
-  const defaultModelId = modelConfiguration?.defaultModelId;
-  const sensitiveIdentifier = isSecretLikeProviderKey(providerKey);
-  return (
-    <article className={`control-revision ${item.status === "active" ? "active" : ""}`}>
-      <div className="control-revision-heading">
-        <div>
-          <span className="eyebrow">
-            {displayedProviderKey(providerKey)} · Revision {item.revision}
-          </span>
-          <h3>{title}</h3>
-        </div>
-        <span className={`status status-${item.status}`}>{revisionStatusLabels[item.status]}</span>
-      </div>
-      <dl className="configuration-summary">
-        {Object.entries(configuration)
-          .filter(([key]) => key !== "models")
-          .map(([key, field]) => (
-            <div key={key}>
-              <dt>{configurationFieldLabels[key] ?? key}</dt>
-              <dd>{configurationDisplayValue(key, field)}</dd>
-            </div>
-          ))}
-      </dl>
-      {modelCatalog !== undefined && (
-        <fieldset className="revision-model-catalog">
-          <legend className="visually-hidden">{displayedProviderKey(providerKey)} 模型目录</legend>
-          {modelCatalog.map((model) => (
-            <div key={model.id} className={model.enabled ? "enabled" : "disabled"}>
-              <span>
-                <strong>{model.name}</strong>
-                <code>{model.id}</code>
-              </span>
-              <span>
-                {model.enabled ? "已启用" : "已停用"}
-                {model.id === defaultModelId ? " · 默认" : ""}
-                {model.reasoning ? " · 推理" : ""}
-              </span>
-              <span>
-                {model.input.join(" + ")} · {model.contextWindow.toLocaleString()} /{" "}
-                {model.maxTokens.toLocaleString()}
-              </span>
-            </div>
-          ))}
-        </fieldset>
-      )}
-      <p className="revision-meta">
-        探测：{probeStatusLabels[item.probeStatus]} · 版本令牌 {item.versionToken}
-      </p>
-      {sensitiveIdentifier && (
-        <p className="sensitive-identifier-warning" role="alert">
-          此历史版本的 Provider 标识疑似包含密钥，页面已隐藏并禁止继续操作。
-        </p>
-      )}
-      {item.status !== "active" && (
-        <RevisionActions
-          kind={kind}
-          providerKey={providerKey}
-          revision={item.revision}
-          versionToken={item.versionToken}
-          probeStatus={item.probeStatus}
-          probe={kind !== "runtime-settings"}
-          sensitiveIdentifier={sensitiveIdentifier}
-          busy={busy}
-          onAction={onAction}
-        />
-      )}
-    </article>
-  );
-}
-
-function deploymentExclusion(key: string, overview?: AdminControlOverviewDto): string | undefined {
-  if (overview === undefined) return undefined;
-  if (
-    (key === "MEM0_API_KEY" || key === "MEM0_SCOPE_HMAC_KEY") &&
-    overview.activeModel !== undefined &&
-    !overview.activeMemory?.configuration.enabled
-  ) {
-    return "不适用：长期记忆未启用";
-  }
-  if (
-    key === "ADMIN_CONTROL_JWT_SIGNING_KEYS" &&
-    overview.runtimeEnvironment !== undefined &&
-    overview.runtimeEnvironment !== "production"
-  ) {
-    return "不适用：当前为非生产身份模式";
-  }
-  return undefined;
-}
-
-function DeploymentSettings({
-  items,
-  overview,
-}: {
-  readonly items: AdminControlOverviewDto["deploymentSettings"];
-  readonly overview?: AdminControlOverviewDto;
-}) {
-  const applicable = items.filter((item) => deploymentExclusion(item.key, overview) === undefined);
-  const configured = applicable.filter((item) => item.configured).length;
-  const environments = { production: "生产环境", development: "开发 / 演示环境", test: "测试环境" };
-  const categoryLabels = {
-    bootstrap: "启动基础设施",
-    secret: "部署秘密",
-    restart_required: "需重启生效",
-  } as const;
-  return (
-    <section className="control-panel">
-      <div className="panel-heading">
-        <div>
-          <span className="eyebrow">Environment</span>
-          <h2>部署配置</h2>
-          <p>只读检查部署层前置条件；可版本化参数在对应模块中修改。</p>
-          <p>
-            服务端部署类型：
-            {overview?.runtimeEnvironment === undefined
-              ? "未提供，不能由前端构建方式推断"
-              : environments[overview.runtimeEnvironment]}
-          </p>
-        </div>
-        <span className="count">
-          {items.length === 0
-            ? "—"
-            : `已配置 ${configured}/${applicable.length} · 不适用 ${items.length - applicable.length}`}
-        </span>
-      </div>
-      {items.length === 0 ? (
-        <p className="empty-state">
-          后台控制服务连接后显示当前部署检测结果；上方配置地图仍可作为离线配置入口。
-        </p>
-      ) : (
-        <div className="deployment-list">
-          {items.map((setting) => (
-            <div key={setting.key}>
-              <code>{setting.key}</code>
-              <span>{setting.description}</span>
-              <span
-                className={
-                  deploymentExclusion(setting.key, overview) !== undefined
-                    ? ""
-                    : setting.configured
-                      ? "configured"
-                      : "missing"
-                }
-              >
-                {deploymentExclusion(setting.key, overview) ??
-                  (setting.configured ? "已配置" : "未配置")}{" "}
-                · {categoryLabels[setting.category]}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
-      <p className="boundary-note">
-        Secret、数据库角色和监听地址只展示状态，不在网页中读取或修改真实值。
-      </p>
-    </section>
-  );
-}
-
-const environmentConfigurationGroups = [
-  {
-    priority: "P0",
-    title: "后台控制服务",
-    owner: "admin-control-api",
-    description: "先建立独立数据库身份、认证和监听边界，后台才可以读取真实状态。",
-    entries: [
-      {
-        key: "ADMIN_CONTROL_DATABASE_URL",
-        description: "独立最小权限数据库连接，不得复用 Runtime 或 Migrator 登录。",
-      },
-      {
-        key: "DATABASE_ADMIN_CONTROL_ROLE",
-        description: "用于启动时校验实际 PostgreSQL Role，生产环境必需。",
-      },
-      {
-        key: "pnpm db:migrate:up",
-        description: "应用数据库迁移并重建最小权限 ACL；必须先于控制服务启动。",
-      },
-      {
-        key: "platform_control_operators",
-        description: "由受控数据库运维事务写入首位 admin；控制 API 不提供自助提权。",
-      },
-      {
-        key: "ADMIN_CONTROL_LISTEN_HOST / ADMIN_CONTROL_LISTEN_PORT",
-        description: "管理 API 监听地址；开发默认 127.0.0.1:3003。",
-      },
-      {
-        key: "DEV_ADMIN_CONTROL_TOKEN / ADMIN_CONTROL_JWT_*",
-        description: "开发使用固定 Token；生产必须改用独立 issuer、audience 与签名密钥。",
-      },
-    ],
-  },
-  {
-    priority: "P0",
-    title: "模型与长期记忆",
-    owner: "admin-control-api + agent-worker",
-    description: "秘密由部署平台注入；地址、模型目录和超时等可审计参数由对应页面发布。",
-    entries: [
-      {
-        key: "MODEL_API_KEY",
-        description: "当前部署的模型凭据；模型地址、默认模型和能力从“模型”页发布。",
-      },
-      {
-        key: "MEM0_API_KEY",
-        description: "Mem0 Project API Key，必须与作用域密钥同时配置。",
-      },
-      {
-        key: "MEM0_SCOPE_HMAC_KEY",
-        description: "至少 32 字节，用于匿名化租户与用户作用域，不得复用 API Key。",
-      },
-    ],
-  },
-  {
-    priority: "P0",
-    title: "运行基础设施",
-    owner: "api + worker + scheduler",
-    description: "这些连接属于进程启动契约，后台只提供配置地图，不读取或回显真实凭据。",
-    entries: [
-      {
-        key: "DATABASE_URL / DATABASE_SCHEMA",
-        description: "Runtime 业务数据库与 Schema；迁移连接必须使用独立 MIGRATION_DATABASE_URL。",
-      },
-      {
-        key: "S3_ENDPOINT / S3_BUCKET / S3_*",
-        description: "工作区、附件和历史产物的对象存储；生产凭据由密钥系统注入。",
-      },
-      {
-        key: "CUBESANDBOX_API_URL / CUBESANDBOX_TEMPLATE_ID",
-        description: "Sandbox 控制面和模板；连接方式由当前部署平台提供。",
-      },
-      {
-        key: "SKILL_PUBLISHER_DATABASE_URL / DATABASE_SKILL_PUBLISHER_ROLE / SKILL_PUBLISHER_S3_*",
-        description:
-          "统一后台内的 Skill 模块使用独立数据库角色与对象存储身份，不能复用 Runtime 凭据。",
-      },
-    ],
-  },
-  {
-    priority: "P1",
-    title: "运行策略与时区",
-    owner: "agent-worker + scheduler",
-    description: "开关和执行路径需要重新部署；百分比与 Token 预算在本页形成 Revision。",
-    entries: [
-      {
-        key: "THREAD_CONTEXT_COMPACTION_ENABLED",
-        description: "上下文压缩总开关；关闭时，本页发布的百分比参数不会执行。",
-      },
-      {
-        key: "THREAD_CONTEXT_COMPACTION_PATH",
-        description: "压缩执行路径；与启用模型和 Worker 部署能力保持一致。",
-      },
-      {
-        key: "HISTORY_DIRECTORY_TIME_ZONE",
-        description: "历史目录与定时任务的业务时区，变更后需要重启相关进程。",
-      },
-    ],
-  },
-] as const;
-
-function EnvironmentConfigurationGuide({
-  items,
-  overview,
-}: {
-  readonly items: AdminControlOverviewDto["deploymentSettings"];
-  readonly overview?: AdminControlOverviewDto;
-}) {
-  return (
-    <section className="control-panel environment-guide">
-      <div className="environment-guide-heading">
-        <div>
-          <span className="eyebrow">Configuration map</span>
-          <h2>部署配置地图</h2>
-          <p>
-            从 P0 开始配置。开发环境以 `.env.example` 为契约，生产环境以
-            `deploy/production.env.example` 为契约。
-          </p>
-        </div>
-        <span className="environment-contract-state">
-          {items.length === 0 ? "等待后台检测" : `已检测 ${items.length} 项`}
-        </span>
-      </div>
-
-      <div className="configuration-source-grid">
-        <article>
-          <span>部署平台</span>
-          <strong>Secret 与基础设施连接</strong>
-          <small>只在环境变量或密钥系统中修改，网页永不读取真实值。</small>
-        </article>
-        <article>
-          <span>后台 Revision</span>
-          <strong>模型、Mem0 与运行参数</strong>
-          <small>创建草稿、探测、发布；新 Run 固定发布时的配置快照。</small>
-        </article>
-        <article>
-          <span>运行时检测</span>
-          <strong>只展示是否就绪</strong>
-          <small>“按契约确认”表示当前控制服务无法安全判断该进程的配置状态。</small>
-        </article>
-      </div>
-
-      <div className="environment-guide-groups">
-        {environmentConfigurationGroups.map((group) => (
-          <article key={group.title} className="environment-guide-group">
-            <header>
-              <span className={`configuration-priority ${group.priority.toLowerCase()}`}>
-                {group.priority}
-              </span>
-              <span>
-                <strong>{group.title}</strong>
-                <small>{group.owner}</small>
-              </span>
-            </header>
-            <p>{group.description}</p>
-            <div className="environment-guide-entries">
-              {group.entries.map((entry) => {
-                const state = deploymentState(items, entry.key);
-                const exclusion = deploymentExclusion(entry.key, overview);
-                return (
-                  <div key={entry.key}>
-                    <span>
-                      <code>{entry.key}</code>
-                      <small>{entry.description}</small>
-                    </span>
-                    <span
-                      className={`configuration-state ${exclusion === undefined ? state : "unknown"}`}
-                    >
-                      {exclusion ??
-                        (state === "configured"
-                          ? "已配置"
-                          : state === "missing"
-                            ? "未配置"
-                            : "按契约确认")}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-          </article>
-        ))}
-      </div>
-      <p className="environment-guide-footer">
-        推荐顺序：数据库与身份 → 模型与 Mem0 秘密 → Sandbox / S3 → 本页运行策略 → Provider
-        探测与发布。
-      </p>
-    </section>
-  );
-}
 
 function AuditTrail({ items }: { readonly items: readonly ControlAuditEventDto[] }) {
   return (
@@ -564,11 +93,14 @@ function AuditTrail({ items }: { readonly items: readonly ControlAuditEventDto[]
             <article key={item.auditId}>
               <div>
                 <strong>
-                  {item.action} · {displayedProviderKey(item.objectKey)} #{item.revision}
+                  {auditActionLabels[item.action]} · {displayedProviderKey(item.objectKey)}
                 </strong>
+                <span>操作者：{item.actorUserId}</span>
                 <span>{item.reason}</span>
               </div>
-              <span className={`audit-outcome ${item.outcome}`}>{item.outcome}</span>
+              <span className={`audit-outcome ${item.outcome}`}>
+                {item.outcome === "succeeded" ? "成功" : "失败"}
+              </span>
               <time>{new Date(item.createdAt).toLocaleString("zh-CN", { hour12: false })}</time>
             </article>
           ))}
@@ -604,18 +136,25 @@ function Overview({
     <>
       <section className="control-hero">
         <div>
-          <span className="eyebrow">Generation {overview.generation}</span>
+          <span className="eyebrow">平台概况</span>
           <h2>平台运营驾驶舱</h2>
-          <p>配置、用户、对话与运行健康集中呈现；所有发布操作形成不可变版本并写入审计。</p>
+          <p>查看用户使用情况、运行状态和近期操作。</p>
         </div>
         <div className="active-stack">
           <span>
             模型：
             {overview.activeModel === undefined
-              ? "尚未发布"
+              ? "由部署配置管理"
               : `${overview.activeModel.configuration.displayName} / ${overview.activeModel.configuration.defaultModelId}`}
           </span>
-          <span>记忆：{overview.activeMemory?.configuration.displayName ?? "未启用"}</span>
+          <span>
+            记忆：
+            {overview.activeModel === undefined
+              ? "由部署配置管理"
+              : overview.activeMemory?.configuration.enabled
+                ? overview.activeMemory.configuration.displayName
+                : "未启用"}
+          </span>
         </div>
       </section>
       <section className="statistics-grid" aria-label="运行统计">
@@ -627,7 +166,6 @@ function Overview({
           </article>
         ))}
       </section>
-      <DeploymentSettings items={overview.deploymentSettings} overview={overview} />
       <AuditTrail items={audits} />
     </>
   );
@@ -662,29 +200,26 @@ function newModelRow(
 
 function ModelDraftForm({
   onCreate,
-  onTest,
   busy,
   api,
   initialConfiguration,
   reuseCredentialFromRevision,
-  probeStatus,
   catalogProvider,
   onCancel,
+  expectedGeneration,
 }: {
   readonly onCreate: (
     form: FormData,
     models: ModelProviderModelConfigurationDto[],
     defaultModelId: string,
-    activate: boolean,
   ) => Promise<boolean>;
-  readonly onTest?: () => Promise<boolean>;
   readonly busy: boolean;
   readonly api: AdminControlApiContract;
   readonly initialConfiguration?: ModelProviderRevisionDto["configuration"];
   readonly reuseCredentialFromRevision?: number;
-  readonly probeStatus?: ModelProviderRevisionDto["probeStatus"];
   readonly catalogProvider?: PiModelCatalogProviderDto;
   readonly onCancel: () => void;
+  readonly expectedGeneration: number;
 }) {
   const [providerKey] = useState(
     () =>
@@ -805,15 +340,9 @@ function ModelDraftForm({
         const defaultModelId =
           catalog.models.find((model) => model.clientId === catalog.defaultClientId)?.id.trim() ??
           "";
-        const submitter = (event.nativeEvent as SubmitEvent).submitter as
-          | HTMLButtonElement
-          | undefined;
-        const activate = submitter?.value === "activate";
-        void onCreate(new FormData(event.currentTarget), models, defaultModelId, activate).then(
-          (saved) => {
-            if (saved) onCancel();
-          },
-        );
+        void onCreate(new FormData(event.currentTarget), models, defaultModelId).then((saved) => {
+          if (saved) onCancel();
+        });
       }}
     >
       <div className="model-editor-intro wide">
@@ -831,9 +360,7 @@ function ModelDraftForm({
                 : `编辑 ${initialConfiguration.displayName}`}
             </strong>
             <small>
-              {catalogProvider === undefined
-                ? "自定义 endpoint；模型仍可按名称复用 Pi 元数据"
-                : `Pi Provider · ${catalogProvider.providerId}`}
+              {catalogProvider === undefined ? "填写服务地址与密钥" : "模型目录已提供推荐能力参数"}
             </small>
           </span>
         </div>
@@ -842,6 +369,7 @@ function ModelDraftForm({
         </button>
       </div>
       <input type="hidden" name="providerKey" value={providerKey} />
+      <input type="hidden" name="expectedGeneration" value={expectedGeneration} />
       <label>
         显示名称
         <input
@@ -894,7 +422,7 @@ function ModelDraftForm({
         <div className="model-catalog-toolbar">
           <span>
             <strong>模型能力</strong>
-            <small>Pi 目录仅提供初始值，所有字段均可修改。</small>
+            <small>选择要使用的模型；能力参数可在高级设置中调整。</small>
           </span>
           <span className="provider-settings-actions">
             <button
@@ -905,7 +433,7 @@ function ModelDraftForm({
               }
               onClick={() => void addPiModels()}
             >
-              {catalogBusy ? "正在读取…" : "从 Pi 目录添加"}
+              {catalogBusy ? "正在读取…" : "从模型目录添加"}
             </button>
             <button
               type="button"
@@ -946,7 +474,7 @@ function ModelDraftForm({
                 删除
               </button>
             </div>
-            <div className="model-advanced-fields">
+            <div className="model-identity-fields">
               <label>
                 模型 ID
                 <input
@@ -968,88 +496,65 @@ function ModelDraftForm({
                   onChange={(event) => updateModel(model.clientId, { name: event.target.value })}
                 />
               </label>
-              <label>
-                上下文窗口
-                <input
-                  required
-                  type="number"
-                  min={1}
-                  max={10_000_000}
-                  value={model.contextWindow}
-                  onChange={(event) =>
-                    updateModel(model.clientId, { contextWindow: event.target.value })
-                  }
-                />
-              </label>
-              <label>
-                最大输出 Token
-                <input
-                  required
-                  type="number"
-                  min={1}
-                  max={10_000_000}
-                  value={model.maxTokens}
-                  onChange={(event) =>
-                    updateModel(model.clientId, { maxTokens: event.target.value })
-                  }
-                />
-              </label>
-              <label className="checkbox compact">
-                <input
-                  type="checkbox"
-                  checked={model.supportsImages}
-                  onChange={(event) =>
-                    updateModel(model.clientId, { supportsImages: event.target.checked })
-                  }
-                />
-                图片输入
-              </label>
-              <label className="checkbox compact">
-                <input
-                  type="checkbox"
-                  checked={model.reasoning}
-                  onChange={(event) =>
-                    updateModel(model.clientId, { reasoning: event.target.checked })
-                  }
-                />
-                推理模型
-              </label>
             </div>
+            <details className="model-advanced-settings">
+              <summary>高级能力设置</summary>
+              <div className="model-advanced-fields">
+                <label>
+                  上下文窗口
+                  <input
+                    required
+                    type="number"
+                    min={1}
+                    max={10_000_000}
+                    value={model.contextWindow}
+                    onChange={(event) =>
+                      updateModel(model.clientId, { contextWindow: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  最大输出 Token
+                  <input
+                    required
+                    type="number"
+                    min={1}
+                    max={10_000_000}
+                    value={model.maxTokens}
+                    onChange={(event) =>
+                      updateModel(model.clientId, { maxTokens: event.target.value })
+                    }
+                  />
+                </label>
+                <label className="checkbox compact">
+                  <input
+                    type="checkbox"
+                    checked={model.supportsImages}
+                    onChange={(event) =>
+                      updateModel(model.clientId, { supportsImages: event.target.checked })
+                    }
+                  />
+                  图片输入
+                </label>
+                <label className="checkbox compact">
+                  <input
+                    type="checkbox"
+                    checked={model.reasoning}
+                    onChange={(event) =>
+                      updateModel(model.clientId, { reasoning: event.target.checked })
+                    }
+                  />
+                  推理模型
+                </label>
+              </div>
+            </details>
           </article>
         ))}
       </fieldset>
       <div className="model-editor-footer wide">
-        <span className="model-test-actions">
-          <button
-            type="button"
-            className="quiet-button"
-            disabled={busy || onTest === undefined}
-            onClick={() => void onTest?.()}
-          >
-            测试配置
-          </button>
-          <small className={`model-test-state ${probeStatus ?? "untested"}`}>
-            {probeStatus === "healthy"
-              ? "文本请求测试成功"
-              : probeStatus === "failed"
-                ? "文本请求测试失败"
-                : "尚未测试保存的配置"}
-          </small>
-        </span>
         <span className="provider-settings-actions">
           <button
             type="submit"
-            name="intent"
-            value="save"
-            className="quiet-button"
-            disabled={busy || catalogBusy || catalog.defaultClientId === ""}
-          >
-            {busy ? "正在保存…" : "保存"}
-          </button>
-          <button
-            type="submit"
-            name="intent"
-            value="activate"
             className="primary-button"
             disabled={busy || catalogBusy || catalog.defaultClientId === ""}
           >
@@ -1130,8 +635,8 @@ function ModelEffectiveState({
         </strong>
         <p>
           {active === undefined
-            ? "添加并保存 Provider 后，新 Run 会直接使用保存的模型。"
-            : `Provider ${displayedProviderKey(active.configuration.providerKey)}。新 Run 使用这份配置，已经开始的 Run 保持不变。`}
+            ? "添加并保存供应商后，新任务会使用所选模型。"
+            : "新任务使用这份配置，已经开始的任务保持不变。"}
         </p>
       </div>
       <span className={`model-credential-state ${credentialState}`}>
@@ -1169,7 +674,6 @@ function ModelProviderWorkspace({
     form: FormData,
     models: ModelProviderModelConfigurationDto[],
     defaultModelId: string,
-    activate: boolean,
   ) => Promise<boolean>;
   readonly onTest: (revision: ModelProviderRevisionDto) => Promise<boolean>;
   readonly onActivate: (revision: ModelProviderRevisionDto) => Promise<boolean>;
@@ -1227,7 +731,7 @@ function ModelProviderWorkspace({
           <div className="provider-settings-heading">
             <span>
               <h2>供应商</h2>
-              <p>配置会保存在这里，后续可直接测试或切换。</p>
+              <p>已配置的供应商可直接测试或使用。</p>
             </span>
             <button
               type="button"
@@ -1241,7 +745,7 @@ function ModelProviderWorkspace({
             <div className="provider-catalog-picker compact">
               <div>
                 <span className="provider-catalog-title">
-                  <strong>从 Pi 目录添加</strong>
+                  <strong>从模型目录添加</strong>
                   <small>{catalogProviders.length} 个</small>
                 </span>
                 <button
@@ -1274,7 +778,7 @@ function ModelProviderWorkspace({
                       <span className="provider-avatar">{provider.displayName.slice(0, 1)}</span>
                       <span>
                         <strong>{provider.displayName}</strong>
-                        <small>{provider.modelCount} 个 Pi 模型</small>
+                        <small>{provider.modelCount} 个模型</small>
                       </span>
                     </button>
                   ))}
@@ -1288,7 +792,7 @@ function ModelProviderWorkspace({
                 <span className="provider-avatar">P</span>
                 <span>
                   <strong>尚未配置供应商</strong>
-                  <small>可从 Pi 目录开始，也可填写任意 OpenAI-compatible 服务。</small>
+                  <small>可选择内置供应商，也可接入兼容服务。</small>
                 </span>
               </div>
             ) : (
@@ -1342,7 +846,7 @@ function ModelProviderWorkspace({
                         disabled={busy || sensitiveIdentifier}
                         onClick={() => void onTest(revision)}
                       >
-                        测试
+                        测试已保存配置
                       </button>
                       <button
                         type="button"
@@ -1350,7 +854,7 @@ function ModelProviderWorkspace({
                         disabled={busy || active || sensitiveIdentifier}
                         onClick={() => void onActivate(revision)}
                       >
-                        {active ? "使用中" : "设为当前"}
+                        {active ? "使用中" : "使用"}
                       </button>
                     </span>
                   </article>
@@ -1364,20 +868,19 @@ function ModelProviderWorkspace({
             <div className="model-editor-empty">
               <span className="provider-avatar">+</span>
               <strong>选择或添加一个供应商</strong>
-              <p>保存后会出现在左侧列表，新 Run 可立即切换使用。</p>
+              <p>保存后即可使用所选模型。</p>
             </div>
           ) : (
             <ModelDraftForm
-              key={editor.key}
+              key={`${editor.key}:${overview?.generation ?? "unavailable"}`}
               api={api}
-              busy={busy}
+              busy={busy || overview === undefined}
+              expectedGeneration={overview?.generation ?? 0}
               {...(selectedRevision === undefined
                 ? {}
                 : {
                     initialConfiguration: selectedRevision.configuration,
                     reuseCredentialFromRevision: selectedRevision.revision,
-                    probeStatus: selectedRevision.probeStatus,
-                    onTest: () => onTest(selectedRevision),
                   })}
               {...(editor.catalogProvider === undefined
                 ? {}
@@ -1400,44 +903,26 @@ function deploymentState(
   return setting === undefined ? "unknown" : setting.configured ? "configured" : "missing";
 }
 
-function DeploymentCheck({
-  label,
-  settingKey,
-  state,
-}: {
-  readonly label: string;
-  readonly settingKey: string;
-  readonly state: "configured" | "missing" | "unknown";
-}) {
-  return (
-    <div className={`memory-deployment-check ${state}`}>
-      <span aria-hidden="true">
-        {state === "configured" ? "✓" : state === "missing" ? "!" : "·"}
-      </span>
-      <span>
-        <strong>{label}</strong>
-        <code>{settingKey}</code>
-      </span>
-      <small>
-        {state === "configured" ? "已配置" : state === "missing" ? "未配置" : "待连接后台确认"}
-      </small>
-    </div>
-  );
-}
-
 function MemoryProviderWorkspace({
-  onCreate,
+  onSave,
   busy,
   deploymentSettings,
   activeMemory,
+  available,
+  managed,
 }: {
-  readonly onCreate: (form: FormData) => Promise<void>;
+  readonly onSave: (form: FormData) => Promise<void>;
   readonly busy: boolean;
   readonly deploymentSettings: AdminControlOverviewDto["deploymentSettings"];
   readonly activeMemory: AdminControlOverviewDto["activeMemory"];
+  readonly available: boolean;
+  readonly managed: boolean;
 }) {
-  const [providerKey, setProviderKey] = useState("mem0");
-  const [providerKeyRejected, setProviderKeyRejected] = useState(false);
+  const configuration = activeMemory?.configuration;
+  const enabled = configuration?.enabled ?? false;
+  const ready = ["MEM0_API_KEY", "MEM0_SCOPE_HMAC_KEY"].every(
+    (key) => deploymentState(deploymentSettings, key) === "configured",
+  );
   return (
     <div className="memory-provider-workspace">
       <section className="memory-provider-hero">
@@ -1445,259 +930,79 @@ function MemoryProviderWorkspace({
           M
         </span>
         <div>
-          <span className="eyebrow">Managed memory provider</span>
-          <h2>Mem0 Platform</h2>
-          <p>
-            Hoox 使用 Mem0 承载跨对话长期记忆。Run
-            完成后通过可靠队列异步写入；下一轮按租户与用户作用域检索， 不把原始 userId
-            直接发送给外部服务。
-          </p>
+          <h2>长期记忆</h2>
+          <p>让后续对话记住用户的长期偏好。保存后对新任务生效。</p>
         </div>
-        <span
-          className={`memory-active-state ${activeMemory === undefined ? "inactive" : "active"}`}
-        >
-          {activeMemory === undefined ? "尚未启用" : `已启用 · Revision ${activeMemory.revision}`}
+        <span className={`memory-active-state ${managed && enabled ? "active" : "inactive"}`}>
+          {!available ? "状态未知" : !managed ? "由部署配置管理" : enabled ? "已开启" : "已关闭"}
         </span>
       </section>
-
-      <section className="memory-setup-section">
-        <div className="memory-section-heading">
-          <span>
-            <span className="step-number">1</span>
-            <strong>准备部署秘密</strong>
-          </span>
-          <p>密钥只在部署环境中设置，后台页面只显示状态，不读取或回显真实值。</p>
-        </div>
-        <div className="memory-deployment-grid">
-          <DeploymentCheck
-            label="Mem0 Project API Key"
-            settingKey="MEM0_API_KEY"
-            state={deploymentState(deploymentSettings, "MEM0_API_KEY")}
-          />
-          <DeploymentCheck
-            label="作用域 HMAC Key"
-            settingKey="MEM0_SCOPE_HMAC_KEY"
-            state={deploymentState(deploymentSettings, "MEM0_SCOPE_HMAC_KEY")}
-          />
-        </div>
-        <p className="memory-security-note">
-          <strong>安全要求：</strong>HMAC Key 至少 32 字节，必须与 Mem0 API Key 独立生成。
-        </p>
-      </section>
-
-      <section className="memory-setup-section">
-        <div className="memory-section-heading">
-          <span>
-            <span className="step-number">2</span>
-            <strong>创建 Mem0 待启用配置</strong>
-          </span>
-          <p>待启用配置不会立即影响 Run。保存后先执行连接探测，再由管理员启用。</p>
-        </div>
-        <form
-          className="control-form memory-control-form"
-          onSubmit={(event: FormEvent<HTMLFormElement>) => {
-            event.preventDefault();
-            void onCreate(new FormData(event.currentTarget));
-          }}
+      <form
+        key={activeMemory?.revision ?? "initial"}
+        className="control-form memory-control-form"
+        onSubmit={(event: FormEvent<HTMLFormElement>) => {
+          event.preventDefault();
+          if (!available || !managed || busy) return;
+          void onSave(new FormData(event.currentTarget));
+        }}
+      >
+        {available && !managed && (
+          <p className="wide boundary-note" role="status">
+            当前长期记忆由部署配置管理。请先在模型服务中接入后台模型，再编辑和保存这里的记忆设置。
+          </p>
+        )}
+        <fieldset
+          className="control-form wide memory-configuration-fields"
+          disabled={busy || !available || !managed}
         >
-          <label>
-            Provider 内部标识（不是 API Key）
-            <input
-              name="providerKey"
-              required
-              pattern="[a-z0-9][a-z0-9._-]{0,63}"
-              autoComplete="off"
-              value={providerKey}
-              aria-invalid={providerKeyRejected}
-              onChange={(event) => {
-                const next = event.target.value;
-                if (isSecretLikeProviderKey(next)) {
-                  setProviderKey("");
-                  setProviderKeyRejected(true);
-                  return;
-                }
-                setProviderKey(next);
-                setProviderKeyRejected(false);
-              }}
-            />
-            <small className={providerKeyRejected ? "field-error" : undefined}>
-              {providerKeyRejected
-                ? "检测到疑似 API Key，内容已清空；请立即轮换该密钥。"
-                : "平台内稳定标识，启用后用于 Run 配置快照；不得填写任何密钥。"}
-            </small>
+          <label className="checkbox wide">
+            <input name="enabled" type="checkbox" defaultChecked={enabled} />
+            开启长期记忆
           </label>
-          <label>
-            显示名称
-            <input name="displayName" required defaultValue="Mem0 Platform" />
-            <small>管理员和审计记录中显示的名称。</small>
-          </label>
-          <label className="wide">
-            Mem0 HTTPS API 地址
-            <input name="baseUrl" required type="url" defaultValue="https://api.mem0.ai/" />
-            <small>可改为兼容的企业网关，但必须加入探针白名单。</small>
-          </label>
-          <label>
-            请求超时（ms）
-            <input
-              name="requestTimeoutMs"
-              type="number"
-              min="100"
-              max="120000"
-              defaultValue="10000"
-              required
-            />
-            <small>仅控制单次外部请求；队列重试由 Runtime 负责。</small>
-          </label>
-          <label className="checkbox memory-enabled-checkbox">
-            <input name="enabled" type="checkbox" defaultChecked />
-            启用后允许写入和检索长期记忆
-          </label>
-          <div className="memory-secret-refs wide">
-            <span>
-              <small>API Secret Ref</small>
-              <code>deployment:memory-api</code>
-            </span>
-            <span>
-              <small>Scope Secret Ref</small>
-              <code>deployment:memory-scope</code>
-            </span>
-          </div>
-          <label className="wide">
-            变更原因
-            <textarea
-              name="reason"
-              required
-              maxLength={500}
-              placeholder="例如：接入生产 Mem0 Project，完成密钥与域名白名单配置"
-            />
-            <small>原因会进入不可变审计记录。</small>
-          </label>
+          <p className="wide boundary-note">
+            {ready ? "服务凭据已配置。" : "服务凭据尚未就绪，请在部署配置中完成连接设置。"}
+          </p>
+          <details className="wide memory-connection-settings">
+            <summary>服务连接设置</summary>
+            <div className="control-form">
+              <label>
+                显示名称
+                <input
+                  name="displayName"
+                  required
+                  defaultValue={configuration?.displayName ?? "Mem0 Platform"}
+                />
+              </label>
+              <label className="wide">
+                服务地址
+                <input
+                  name="baseUrl"
+                  required
+                  type="url"
+                  defaultValue={configuration?.baseUrl ?? "https://api.mem0.ai/"}
+                />
+              </label>
+              <label>
+                请求超时（毫秒）
+                <input
+                  name="requestTimeoutMs"
+                  type="number"
+                  min="100"
+                  max="120000"
+                  required
+                  defaultValue={configuration?.requestTimeoutMs ?? 10000}
+                />
+              </label>
+            </div>
+          </details>
           <button
             type="submit"
             className="primary-button"
-            disabled={busy || providerKeyRejected || providerKey.trim() === ""}
+            disabled={busy || !available || !managed}
           >
-            保存 Mem0 待启用配置
+            {busy ? "正在保存…" : "保存并生效"}
           </button>
-        </form>
-      </section>
-
-      <section className="memory-flow" aria-label="Mem0 启用流程">
-        <div>
-          <span>3</span>
-          <strong>探测连接</strong>
-          <small>验证域名白名单、密钥和服务可达性。</small>
-        </div>
-        <i aria-hidden="true">→</i>
-        <div>
-          <span>4</span>
-          <strong>启用配置</strong>
-          <small>新 Run 固化该 Revision，进行中的 Run 不切换。</small>
-        </div>
-        <i aria-hidden="true">→</i>
-        <div>
-          <span>5</span>
-          <strong>观察队列</strong>
-          <small>在数据运营页关注记忆积压和失败数。</small>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function SettingsDraftForm({
-  onCreate,
-  busy,
-}: {
-  readonly onCreate: (form: FormData) => Promise<void>;
-  readonly busy: boolean;
-}) {
-  return (
-    <div className="runtime-settings-workspace">
-      <section className="runtime-settings-guide">
-        <div>
-          <span className="eyebrow">Runtime policy</span>
-          <h2>运行并发与上下文压缩策略</h2>
-          <p>控制 Worker 总执行容量、用户在单个 Tenant 内的并发，以及 Thread 上下文压缩边界。</p>
-        </div>
-        <div className="runtime-setting-principles">
-          <span>
-            <strong>触发</strong>
-            <small>软上限越高，单轮上下文越完整，但越接近模型硬上限。</small>
-          </span>
-          <span>
-            <strong>目标</strong>
-            <small>目标必须低于软上限，二者差值决定压缩后的余量。</small>
-          </span>
-          <span>
-            <strong>预算</strong>
-            <small>Token 与超时共同限制压缩成本；发布前需与启用模型上限核对。</small>
-          </span>
-        </div>
-      </section>
-      <form
-        className="control-form"
-        onSubmit={(event: FormEvent<HTMLFormElement>) => {
-          event.preventDefault();
-          void onCreate(new FormData(event.currentTarget));
-        }}
-      >
-        <label>
-          单 Worker 并行 Run 上限
-          <input
-            name="workerMaxConcurrentRuns"
-            type="number"
-            defaultValue="20"
-            min="1"
-            max="100"
-            required
-          />
-          <small>默认 20；降低后不会取消在途 Run，只暂停领取新任务。</small>
-        </label>
-        <label>
-          单用户在 Tenant 内并行 Run 上限
-          <input
-            name="userMaxConcurrentRunsPerTenant"
-            type="number"
-            defaultValue="2"
-            min="1"
-            max="100"
-            required
-          />
-          <small>默认 2；同一 Thread 仍固定串行，不受该值放宽。</small>
-        </label>
-        <label>
-          压缩软上限 %
-          <input name="compactionSoftLimitPercent" type="number" defaultValue="80" required />
-          <small>推荐 75–85；达到该占用比例后进入压缩。</small>
-        </label>
-        <label>
-          压缩目标 %
-          <input name="compactionTargetPercent" type="number" defaultValue="60" required />
-          <small>推荐 55–65，必须低于软上限。</small>
-        </label>
-        <label>
-          保留用户 Token
-          <input name="compactionRecentUserTokens" type="number" defaultValue="16000" required />
-          <small>优先保留近期用户输入，避免压缩丢失当前任务。</small>
-        </label>
-        <label>
-          压缩输出 Token
-          <input name="compactionMaxOutputTokens" type="number" defaultValue="4096" required />
-          <small>不得超过当前启用模型的最大输出。</small>
-        </label>
-        <label>
-          压缩超时（ms）
-          <input name="compactionTimeoutMs" type="number" defaultValue="60000" required />
-          <small>超时后 Run 失败关闭，不静默丢弃上下文。</small>
-        </label>
-        <label className="wide">
-          变更原因
-          <textarea name="reason" required maxLength={500} />
-        </label>
-        <button type="submit" className="primary-button" disabled={busy}>
-          创建参数草稿
-        </button>
+        </fieldset>
       </form>
     </div>
   );
@@ -1712,9 +1017,7 @@ export function AdminControlConsole({
 }) {
   const queryClient = useQueryClient();
   const [overview, setOverview] = useState<AdminControlOverviewDto>();
-  const [items, setItems] = useState<
-    readonly (ModelProviderRevisionDto | MemoryProviderRevisionDto | RuntimeSettingsRevisionDto)[]
-  >([]);
+  const [items, setItems] = useState<readonly ModelProviderRevisionDto[]>([]);
   const [audits, setAudits] = useState<readonly ControlAuditEventDto[]>([]);
   const [catalogProviders, setCatalogProviders] = useState<readonly PiModelCatalogProviderDto[]>(
     listLocalPiModelCatalogProviders,
@@ -1732,7 +1035,7 @@ export function AdminControlConsole({
     try {
       const [nextOverview, nextItems, nextAudits, nextCatalogProviders, nextUsers, nextIdentity] =
         await Promise.all([
-          view === "identity"
+          view === "identity" || view === "settings"
             ? Promise.resolve(undefined)
             : queryClient.fetchQuery({
                 queryKey: ["admin-control", "overview", view],
@@ -1745,19 +1048,7 @@ export function AdminControlConsole({
                 queryFn: () => api.listModelProviders(),
                 staleTime: 0,
               })
-            : view === "memory"
-              ? queryClient.fetchQuery({
-                  queryKey: ["admin-control", "memory-providers"],
-                  queryFn: () => api.listMemoryProviders(),
-                  staleTime: 0,
-                })
-              : view === "settings"
-                ? queryClient.fetchQuery({
-                    queryKey: ["admin-control", "runtime-settings"],
-                    queryFn: () => api.listRuntimeSettings(),
-                    staleTime: 0,
-                  })
-                : Promise.resolve([]),
+            : Promise.resolve([]),
           view === "overview" || view === "audits"
             ? queryClient.fetchQuery({
                 queryKey: ["admin-control", "audits", view === "overview" ? 50 : 100],
@@ -1812,9 +1103,8 @@ export function AdminControlConsole({
       await refresh();
       return true;
     } catch (reason) {
-      const message = errorMessage(reason);
-      await refresh();
-      setError(message);
+      // 失败时保留输入与原并发检查值；用户显式刷新后才能基于新配置继续编辑。
+      setError(errorMessage(reason));
       return false;
     } finally {
       setBusy(false);
@@ -1824,12 +1114,6 @@ export function AdminControlConsole({
     await performOperation(work);
   };
 
-  const kind =
-    view === "models"
-      ? "model-providers"
-      : view === "memory"
-        ? "memory-providers"
-        : "runtime-settings";
   return (
     <main className="admin-shell control-shell">
       <header className="topbar control-topbar">
@@ -1905,8 +1189,8 @@ export function AdminControlConsole({
           query={userQuery}
           busy={busy}
           onSearch={setUserQuery}
-          onStatusChange={(userId, status, reason) =>
-            operation(() => api.updateUserStatus(userId, { status, reason }))
+          onStatusChange={(userId, status) =>
+            performOperation(() => api.updateUserStatus(userId, { status }))
           }
         />
       ) : view === "identity" ? (
@@ -1927,167 +1211,83 @@ export function AdminControlConsole({
           </section>
           <AuditTrail items={audits} />
         </div>
+      ) : view === "settings" ? (
+        <section className="control-panel">
+          <h2>运行参数由配置文件管理</h2>
+          <p>并发、上下文压缩和部署连接由维护者在配置文件中设置。</p>
+        </section>
+      ) : view === "models" ? (
+        <section className="control-panel">
+          <ModelProviderWorkspace
+            api={api}
+            busy={busy}
+            catalogProviders={catalogProviders}
+            {...(overview === undefined ? {} : { overview })}
+            controlUnavailable={overview === undefined && error !== undefined}
+            revisions={items}
+            onCreate={(form, models, defaultModelId) =>
+              performOperation(() =>
+                api.saveModelConfiguration({
+                  expectedGeneration: number(form, "expectedGeneration"),
+                  providerKey: value(form, "providerKey"),
+                  displayName: value(form, "displayName"),
+                  protocol: "openai-compatible",
+                  baseUrl: value(form, "baseUrl"),
+                  defaultModelId,
+                  models,
+                  ...(secretValue(form, "apiKey") === ""
+                    ? { reuseCredentialFromRevision: number(form, "reuseCredentialFromRevision") }
+                    : { apiKey: secretValue(form, "apiKey") }),
+                }),
+              )
+            }
+            onTest={(revision) =>
+              performOperation(() =>
+                api.probe(
+                  "model-providers",
+                  revision.configuration.providerKey,
+                  revision.revision,
+                  { expectedVersionToken: revision.versionToken },
+                ),
+              )
+            }
+            onActivate={(revision) =>
+              performOperation(() =>
+                api.publish(
+                  "model-providers",
+                  revision.configuration.providerKey,
+                  revision.revision,
+                  { expectedVersionToken: revision.versionToken },
+                ),
+              )
+            }
+          />
+        </section>
       ) : (
-        <>
-          {view === "settings" && (
-            <EnvironmentConfigurationGuide
-              items={overview?.deploymentSettings ?? []}
-              {...(overview === undefined ? {} : { overview })}
-            />
-          )}
-          <section className="control-panel">
-            {view !== "models" && view !== "memory" && (
-              <div className="panel-heading">
-                <div>
-                  <span className="eyebrow">New revision</span>
-                  <h2>创建配置草稿</h2>
-                </div>
-              </div>
-            )}
-            {view === "models" ? (
-              <ModelProviderWorkspace
-                api={api}
-                busy={busy}
-                catalogProviders={catalogProviders}
-                {...(overview === undefined ? {} : { overview })}
-                controlUnavailable={overview === undefined && error !== undefined}
-                revisions={items.filter(
-                  (item): item is ModelProviderRevisionDto => "models" in item.configuration,
-                )}
-                onCreate={(form, models, defaultModelId, activate) =>
-                  performOperation(async () => {
-                    const draft = await api.createModelDraft({
-                      providerKey: value(form, "providerKey"),
-                      displayName: value(form, "displayName"),
-                      protocol: "openai-compatible",
-                      baseUrl: value(form, "baseUrl"),
-                      defaultModelId,
-                      models,
-                      ...(secretValue(form, "apiKey") === ""
-                        ? {
-                            reuseCredentialFromRevision: number(
-                              form,
-                              "reuseCredentialFromRevision",
-                            ),
-                          }
-                        : { apiKey: secretValue(form, "apiKey") }),
-                    });
-                    if (activate) {
-                      await api.publish(
-                        "model-providers",
-                        draft.configuration.providerKey,
-                        draft.revision,
-                        { expectedVersionToken: draft.versionToken },
-                      );
-                    }
-                  })
-                }
-                onTest={(revision) =>
-                  performOperation(() =>
-                    api.probe(
-                      "model-providers",
-                      revision.configuration.providerKey,
-                      revision.revision,
-                      { expectedVersionToken: revision.versionToken },
-                    ),
-                  )
-                }
-                onActivate={(revision) =>
-                  performOperation(() =>
-                    api.publish(
-                      "model-providers",
-                      revision.configuration.providerKey,
-                      revision.revision,
-                      { expectedVersionToken: revision.versionToken },
-                    ),
-                  )
-                }
-              />
-            ) : view === "memory" ? (
-              <MemoryProviderWorkspace
-                busy={busy}
-                deploymentSettings={overview?.deploymentSettings ?? []}
-                activeMemory={overview?.activeMemory}
-                onCreate={(form) =>
-                  operation(() =>
-                    api.createMemoryDraft({
-                      providerKey: value(form, "providerKey"),
-                      displayName: value(form, "displayName"),
-                      providerKind: "mem0",
-                      baseUrl: value(form, "baseUrl"),
-                      apiSecretRef: "deployment:memory-api",
-                      scopeSecretRef: "deployment:memory-scope",
-                      requestTimeoutMs: number(form, "requestTimeoutMs"),
-                      enabled: form.get("enabled") === "on",
-                      reason: value(form, "reason"),
-                    }),
-                  )
-                }
-              />
-            ) : (
-              <SettingsDraftForm
-                busy={busy}
-                onCreate={(form) =>
-                  operation(() =>
-                    api.createRuntimeSettingsDraft({
-                      workerMaxConcurrentRuns: number(form, "workerMaxConcurrentRuns"),
-                      userMaxConcurrentRunsPerTenant: number(
-                        form,
-                        "userMaxConcurrentRunsPerTenant",
-                      ),
-                      compactionSoftLimitPercent: number(form, "compactionSoftLimitPercent"),
-                      compactionTargetPercent: number(form, "compactionTargetPercent"),
-                      compactionRecentUserTokens: number(form, "compactionRecentUserTokens"),
-                      compactionMaxOutputTokens: number(form, "compactionMaxOutputTokens"),
-                      compactionTimeoutMs: number(form, "compactionTimeoutMs"),
-                      reason: value(form, "reason"),
-                    }),
-                  )
-                }
-              />
-            )}
-          </section>
-          {view !== "models" && (
-            <section className="control-panel revision-list">
-              <div className="panel-heading">
-                <div>
-                  <span className="eyebrow">History</span>
-                  <h2>版本记录</h2>
-                </div>
-                <span className="count">{items.length}</span>
-              </div>
-              {items.length === 0 ? (
-                <p className="empty-state">尚未创建配置版本。</p>
-              ) : (
-                items.map((item) => {
-                  const providerKey =
-                    "providerKey" in item.configuration ? item.configuration.providerKey : "global";
-                  return (
-                    <RevisionCard
-                      key={`${providerKey}:${item.revision}`}
-                      kind={kind}
-                      item={item}
-                      busy={busy}
-                      onAction={(action, input) =>
-                        operation(() =>
-                          action === "probe" && kind !== "runtime-settings"
-                            ? api.probe(kind, providerKey, item.revision, input)
-                            : api.publish(kind, providerKey, item.revision, input),
-                        )
-                      }
-                    />
-                  );
-                })
-              )}
-            </section>
-          )}
-          {view === "settings" && (
-            <DeploymentSettings
-              items={overview?.deploymentSettings ?? []}
-              {...(overview === undefined ? {} : { overview })}
-            />
-          )}
-        </>
+        <section className="control-panel">
+          <MemoryProviderWorkspace
+            busy={busy}
+            deploymentSettings={overview?.deploymentSettings ?? []}
+            activeMemory={overview?.activeMemory}
+            available={overview !== undefined}
+            managed={overview?.activeModel !== undefined}
+            onSave={(form) =>
+              operation(() =>
+                api.saveMemoryConfiguration({
+                  expectedGeneration: overview?.generation ?? 0,
+                  providerKey: overview?.activeMemory?.configuration.providerKey ?? "mem0",
+                  displayName: value(form, "displayName"),
+                  providerKind: "mem0",
+                  baseUrl: value(form, "baseUrl"),
+                  apiSecretRef: "deployment:memory-api",
+                  scopeSecretRef: "deployment:memory-scope",
+                  requestTimeoutMs: number(form, "requestTimeoutMs"),
+                  enabled: form.get("enabled") === "on",
+                }),
+              )
+            }
+          />
+        </section>
       )}
     </main>
   );

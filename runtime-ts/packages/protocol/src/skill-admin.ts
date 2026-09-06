@@ -67,7 +67,7 @@ export const CreateSkillSubmissionRequestSchema = Type.Object(
     canonicalKey: CanonicalSkillKeySchema,
     displayName: SkillDisplayNameSchema,
     publisher: SkillPublisherSchema,
-    version: SkillVersionSchema,
+    version: Type.Optional(SkillVersionSchema),
     description: SkillDescriptionSchema,
     compatibility: Type.Optional(SkillCompatibilitySchema),
     sourceUrl: Type.Optional(SkillSourceUrlSchema),
@@ -112,6 +112,9 @@ export const SkillSubmissionDtoSchema = Type.Object(
     fileCount: Type.Integer({ minimum: 1, maximum: MAX_SKILL_SUBMISSION_FILES }),
     totalBytes: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
     versionToken: VersionTokenSchema,
+    currentPublished: Type.Optional(
+      Type.Object({ submissionId: IdSchema, versionToken: VersionTokenSchema }, strict),
+    ),
     createdBy: IdSchema,
     reviewedBy: Type.Optional(IdSchema),
     rejectionReason: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048 })),
@@ -170,7 +173,7 @@ export type PublishSkillSubmissionRequest = Static<typeof PublishSkillSubmission
 export const RevokeSkillSubmissionRequestSchema = Type.Object(
   {
     expectedVersionToken: VersionTokenSchema,
-    reason: Type.String({ minLength: 1, maxLength: 2_048 }),
+    reason: Type.Optional(Type.String({ minLength: 1, maxLength: 2_048 })),
   },
   strict,
 );

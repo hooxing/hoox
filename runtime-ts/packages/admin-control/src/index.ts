@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+export * from "./run-compaction-settings.js";
+
 export type ControlOperatorRole = "viewer" | "operator" | "admin";
 export type ControlRevisionStatus = "draft" | "active" | "retired";
 export type ProviderProbeStatus = "untested" | "healthy" | "failed";
@@ -172,7 +174,15 @@ export interface CreateModelProviderDraftCommand
 }
 
 export interface CreateMemoryProviderDraftCommand extends MemoryProviderConfiguration {
-  readonly reason: string;
+  readonly reason?: string;
+}
+
+export interface SaveModelProviderConfigurationCommand extends CreateModelProviderDraftCommand {
+  readonly expectedGeneration: number;
+}
+
+export interface SaveMemoryProviderConfigurationCommand extends CreateMemoryProviderDraftCommand {
+  readonly expectedGeneration: number;
 }
 
 export interface CreateRuntimeSettingsDraftCommand extends RuntimeSettingsConfiguration {
@@ -181,7 +191,7 @@ export interface CreateRuntimeSettingsDraftCommand extends RuntimeSettingsConfig
 
 export interface PublishControlRevisionCommand {
   readonly expectedVersionToken: number;
-  readonly reason: string;
+  readonly reason?: string;
 }
 
 export interface ProbeControlRevisionCommand {
@@ -225,7 +235,19 @@ export interface AdminControlRepository {
     revision: number,
   ): Promise<string | undefined>;
   createMemoryDraft(
-    input: ControlMutationContext & { readonly command: CreateMemoryProviderDraftCommand },
+    input: ControlMutationContext & {
+      readonly command: CreateMemoryProviderDraftCommand & { readonly reason: string };
+    },
+  ): Promise<ControlMutationResult<ControlRevision<MemoryProviderConfiguration>>>;
+  saveModelConfiguration(
+    input: ControlMutationContext & {
+      readonly command: SaveModelProviderConfigurationCommand & { readonly reason: string };
+    },
+  ): Promise<ControlMutationResult<ControlRevision<ModelProviderConfiguration>>>;
+  saveMemoryConfiguration(
+    input: ControlMutationContext & {
+      readonly command: SaveMemoryProviderConfigurationCommand & { readonly reason: string };
+    },
   ): Promise<ControlMutationResult<ControlRevision<MemoryProviderConfiguration>>>;
   createRuntimeSettingsDraft(
     input: ControlMutationContext & { readonly command: CreateRuntimeSettingsDraftCommand },
@@ -637,7 +659,7 @@ export class AdminControlService {
     input: {
       readonly targetUserId: string;
       readonly status: PlatformUserStatus;
-      readonly reason: string;
+      readonly reason?: string;
     },
   ): Promise<PlatformUserSummary> {
     requireRole(await this.repository.resolveRole(context.actorUserId), ["admin"]);
@@ -653,7 +675,9 @@ export class AdminControlService {
         ...context,
         targetUserId,
         status: input.status,
-        reason: normalizeChangeReason(input.reason),
+        reason: normalizeChangeReason(
+          input.reason ?? (input.status === "disabled" ? "管理员停用用户" : "管理员恢复用户"),
+        ),
       }),
     );
   }
@@ -663,6 +687,67 @@ export class AdminControlService {
     command: CreateModelProviderDraftCommand,
   ) {
     requireRole(await this.repository.resolveRole(context.actorUserId), ["operator", "admin"]);
+    return unwrapMutation(
+      await this.repository.createModelDraft({
+        ...context,
+        command: { ...this.normalizeModelCommand(command), reason: "保存模型供应商配置" },
+      }),
+    );
+  }
+
+  async saveModelConfiguration(
+    context: ControlMutationContext,
+    command: SaveModelProviderConfigurationCommand,
+  ) {
+    requireRole(await this.repository.resolveRole(context.actorUserId), ["admin"]);
+    const { expectedGeneration, ...configuration } = command;
+    return unwrapMutation(
+      await this.repository.saveModelConfiguration({
+        ...context,
+        command: {
+          ...this.normalizeModelCommand(configuration),
+          expectedGeneration: boundedInteger(
+            expectedGeneration,
+            "配置更新状态",
+            0,
+            Number.MAX_SAFE_INTEGER,
+          ),
+          reason: "保存并使用模型配置",
+        },
+      }),
+    );
+  }
+
+  async saveMemoryConfiguration(
+    context: ControlMutationContext,
+    command: SaveMemoryProviderConfigurationCommand,
+  ) {
+    requireRole(await this.repository.resolveRole(context.actorUserId), ["admin"]);
+    const models = await this.repository.listModelProviders(context.actorUserId);
+    if (!models.some((model) => model.status === "active")) {
+      throw new TypeError("请先在模型服务中接入当前模型，再保存长期记忆设置。");
+    }
+    const { expectedGeneration, reason, ...configuration } = command;
+    return unwrapMutation(
+      await this.repository.saveMemoryConfiguration({
+        ...context,
+        command: {
+          ...normalizeMemoryProviderConfiguration(configuration),
+          expectedGeneration: boundedInteger(
+            expectedGeneration,
+            "配置更新状态",
+            0,
+            Number.MAX_SAFE_INTEGER,
+          ),
+          reason: normalizeChangeReason(reason ?? "保存长期记忆设置"),
+        },
+      }),
+    );
+  }
+
+  private normalizeModelCommand(
+    command: CreateModelProviderDraftCommand,
+  ): CreateModelProviderDraftCommand {
     const { apiKey, reuseCredentialFromRevision, ...configuration } = command;
     const hasApiKey = apiKey !== undefined;
     const hasReuse = reuseCredentialFromRevision !== undefined;
@@ -690,19 +775,11 @@ export class AdminControlService {
       credentialConfigured: true,
     });
     const { credentialConfigured: _credentialConfigured, ...persistedConfiguration } = normalized;
-    return unwrapMutation(
-      await this.repository.createModelDraft({
-        ...context,
-        command: {
-          ...persistedConfiguration,
-          ...(apiKey === undefined ? {} : { apiKey }),
-          ...(normalizedReuse === undefined
-            ? {}
-            : { reuseCredentialFromRevision: normalizedReuse }),
-          reason: "保存模型供应商配置",
-        },
-      }),
-    );
+    return {
+      ...persistedConfiguration,
+      ...(apiKey === undefined ? {} : { apiKey }),
+      ...(normalizedReuse === undefined ? {} : { reuseCredentialFromRevision: normalizedReuse }),
+    };
   }
 
   async createMemoryDraft(
@@ -716,7 +793,7 @@ export class AdminControlService {
         ...context,
         command: {
           ...normalizeMemoryProviderConfiguration(configuration),
-          reason: normalizeChangeReason(reason),
+          reason: normalizeChangeReason(reason ?? "保存长期记忆设置"),
         },
       }),
     );
@@ -792,7 +869,7 @@ export class AdminControlService {
             ? status === "healthy"
               ? "模型文本请求测试成功"
               : "模型文本请求测试失败"
-            : normalizeChangeReason(input.reason ?? ""),
+            : normalizeChangeReason(input.reason ?? "测试长期记忆连接"),
         status,
       }),
     );
@@ -813,41 +890,13 @@ export class AdminControlService {
     requireRole(await this.repository.resolveRole(context.actorUserId), ["admin"]);
     const objectKey = normalizedProviderKey(input.objectKey);
     const revision = boundedInteger(input.revision, "Revision", 1, Number.MAX_SAFE_INTEGER);
-    const [models, memories, settings] = await Promise.all([
-      input.kind === "model_provider" || input.kind === "runtime_settings"
-        ? this.repository.listModelProviders(context.actorUserId)
-        : Promise.resolve([]),
-      input.kind === "memory_provider"
-        ? this.repository.listMemoryProviders(context.actorUserId)
-        : Promise.resolve([]),
-      input.kind === "model_provider" || input.kind === "runtime_settings"
-        ? this.repository.listRuntimeSettings(context.actorUserId)
-        : Promise.resolve([]),
-    ]);
-    const memoryRevision =
-      input.kind === "memory_provider"
-        ? memories.find(
-            (candidate) =>
-              candidate.configuration.providerKey === objectKey && candidate.revision === revision,
-          )
-        : undefined;
-    if (memoryRevision !== undefined && memoryRevision.probeStatus !== "healthy") {
-      // 记忆服务仍依赖独立探测确认其读写语义；模型配置则允许保存后直接启用。
-      throw new AdminControlServiceError("CONFLICT");
-    }
-    if (input.kind === "model_provider" || input.kind === "runtime_settings") {
-      const model =
-        input.kind === "model_provider"
-          ? models.find(
-              (candidate) =>
-                candidate.configuration.providerKey === objectKey &&
-                candidate.revision === revision,
-            )
-          : models.find((candidate) => candidate.status === "active");
-      const runtimeSettings =
-        input.kind === "runtime_settings"
-          ? settings.find((candidate) => candidate.revision === revision)
-          : settings.find((candidate) => candidate.status === "active");
+    if (input.kind === "runtime_settings") {
+      const [models, settings] = await Promise.all([
+        this.repository.listModelProviders(context.actorUserId),
+        this.repository.listRuntimeSettings(context.actorUserId),
+      ]);
+      const model = models.find((candidate) => candidate.status === "active");
+      const runtimeSettings = settings.find((candidate) => candidate.revision === revision);
       if (
         model !== undefined &&
         runtimeSettings !== undefined &&
@@ -872,7 +921,7 @@ export class AdminControlService {
         reason:
           input.kind === "model_provider"
             ? "切换当前模型配置"
-            : normalizeChangeReason(input.command.reason ?? ""),
+            : normalizeChangeReason(input.command.reason ?? "保存长期记忆设置"),
       }),
     );
   }
